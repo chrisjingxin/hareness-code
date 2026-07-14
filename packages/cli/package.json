@@ -3,15 +3,22 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "bin": { "za38": "./src/index.ts" },
+  "bin": { "za38": "./dist/index.js" },
   "scripts": {
     "dev": "bun run src/index.ts",
-    "build": "bun build src/index.ts --outdir dist --target node",
+    "build": "bun build src/index.ts --outdir dist --target bun --external @opentui/core --external @opentui/react --external react",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "bun test"
   },
   "dependencies": {
     "@opentui/core": "^0.4.3",
-    "@za38/opentui-react": "workspace:*",
-    "@za38/protocol": "workspace:*"
+    "@opentui/react": "^0.4.3",
+    "@za38/protocol": "workspace:*",
+    "react": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.13",
+    "@types/react": "^19.2.0",
+    "typescript": "^5.9.3"
   }
 }

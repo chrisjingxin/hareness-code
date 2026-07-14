@@ -4,6 +4,7 @@ __pycache__/
 *.egg-info/
 .venv/
 .pytest_cache/
+.za38/config.toml
 
 # Node/Bun
 node_modules/

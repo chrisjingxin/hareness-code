@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://za38.internal/protocol/v1.json",
+  "title": "za38 JSON-RPC protocol v1",
+  "type": "object",
+  "required": ["jsonrpc"],
+  "properties": {
+    "jsonrpc": { "const": "2.0" },
+    "id": { "type": ["integer", "string", "null"] },
+    "method": { "type": "string" },
+    "params": { "type": "object" },
+    "result": {},
+    "error": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "integer" },
+        "message": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    { "required": ["method", "id"] },
+    { "required": ["method"] },
+    { "required": ["id", "result"] },
+    { "required": ["id", "error"] }
+  ]
+}

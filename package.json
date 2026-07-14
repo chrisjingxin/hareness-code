@@ -3,8 +3,11 @@
   "private": true,
   "workspaces": ["packages/*"],
   "scripts": {
-    "build": "bun run --filter '*' build",
+    "build": "bun run --filter '@za38/cli' build",
     "dev": "bun run --filter '@za38/cli' dev",
-    "test": "bun run --filter '*' test"
+    "test": "bun run test:ts && bun run test:py",
+    "typecheck": "bun run --filter '@za38/cli' typecheck",
+    "test:ts": "cd packages/cli && bun test",
+    "test:py": "cd packages/agent && .venv/bin/python -m pytest -q"
   }
 }

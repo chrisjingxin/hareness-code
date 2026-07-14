@@ -1,0 +1,17 @@
+# 复制为 .za38/config.toml 后，填入企业 OpenAI 兼容网关信息。
+# API Key 只通过环境变量提供，禁止写入此文件。
+[model]
+provider = "openai-compatible"
+name = "your-enterprise-coding-model"
+base_url = "https://gateway.example.internal/v1"
+api_key_env = "ZA38_API_KEY"
+timeout_seconds = 120
+max_retries = 2
+
+# 如企业网关要求固定请求头，可在此声明非秘密值。
+[model.headers]
+X-Client-Name = "za38-cli"
+
+# 租户等敏感或环境相关请求头从环境变量读取。
+[model.headers_env]
+X-Enterprise-Tenant = "ZA38_TENANT"

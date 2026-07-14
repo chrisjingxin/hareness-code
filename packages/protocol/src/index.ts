@@ -1,4 +1,6 @@
-/** JSON-RPC 2.0 message types shared between Node and Python. */
+/** Version 1 JSON-RPC contract for the Bun presentation layer and Python sidecar. */
+
+export const PROTOCOL_VERSION = 1 as const
 
 export interface JsonRpcRequest {
   jsonrpc: "2.0"
@@ -11,7 +13,7 @@ export interface JsonRpcResponse {
   jsonrpc: "2.0"
   result?: unknown
   error?: { code: number; message: string }
-  id: number
+  id: number | string | null
 }
 
 export interface JsonRpcNotification {
@@ -22,70 +24,92 @@ export interface JsonRpcNotification {
 
 export type JsonRpcMessage = JsonRpcRequest | JsonRpcResponse | JsonRpcNotification
 
-/** Node → Python request methods */
 export const Method = {
   INITIALIZE: "initialize",
   QUERY: "query",
   CANCEL: "cancel",
   RESPOND: "respond",
+  CONFIG_SHOW: "config.show",
+  CONFIG_PATH: "config.path",
   SHUTDOWN: "shutdown",
 } as const
 
-/** Python → Node notification methods */
 export const Notification = {
-  STREAM_TEXT: "stream/text",
-  STREAM_TOOL_START: "stream/tool_start",
-  STREAM_TOOL_CHUNK: "stream/tool_chunk",
-  STREAM_TOOL_RESULT: "stream/tool_result",
-  STREAM_PLAN: "stream/plan",
-  STREAM_DONE: "stream/done",
-  STREAM_ERROR: "stream/error",
-  STREAM_INTERRUPT: "stream/interrupt",
+  RUN_STARTED: "run/started",
+  MESSAGE_DELTA: "message/delta",
+  TOOL_STARTED: "tool/started",
+  TOOL_UPDATED: "tool/updated",
+  TOOL_COMPLETED: "tool/completed",
+  PLAN_UPDATED: "plan/updated",
+  APPROVAL_REQUESTED: "approval/requested",
+  QUESTION_REQUESTED: "question/requested",
+  HEARTBEAT: "heartbeat",
+  RUN_COMPLETED: "run/completed",
+  RUN_CANCELLED: "run/cancelled",
+  RUN_FAILED: "run/failed",
   LOG: "log",
 } as const
 
 export interface InitializeParams {
   client_info: { name: string; version: string }
+  cwd?: string
+  config_path?: string
 }
 
 export interface InitializeResult {
   server_info: { name: string; version: string }
-  capabilities: { streaming: boolean; hitl: boolean }
+  protocol_version: number
+  capabilities: Record<string, boolean>
+  config: Record<string, unknown> | null
+  startup_error: string | null
 }
 
 export interface QueryParams {
   message: string
   thread_id?: string
+  run_id?: string
 }
 
 export interface QueryResult {
   thread_id: string
+  run_id: string
   accepted: boolean
 }
 
-export interface StreamTextParams {
+export interface RunEventBase {
+  thread_id: string
+  run_id: string
+  sequence: number
+}
+
+export interface MessageDeltaParams extends RunEventBase {
   text: string
-  thread_id: string
 }
 
-export interface StreamToolStartParams {
-  tool_name: string
-  tool_id: string
-  args: Record<string, unknown>
-}
-
-export interface StreamToolResultParams {
-  tool_id: string
-  result: string
-  error?: string
-}
-
-export interface StreamDoneParams {
-  thread_id: string
+export interface RunCompletedParams extends RunEventBase {
   usage: { input_tokens: number; output_tokens: number }
+  duration_ms: number
 }
 
-export interface StreamErrorParams {
-  message: string
+export interface RunFailedParams extends RunEventBase {
   code: string
+  message: string
+}
+
+export interface ApprovalRequestedParams extends RunEventBase {
+  interrupt_id: string
+  description: string
+  requests: unknown
+}
+
+export interface QuestionOption {
+  label: string
+  value: string
+}
+
+export interface QuestionRequestedParams extends RunEventBase {
+  interrupt_id: string
+  question: string
+  options: QuestionOption[]
+  questions?: unknown
 }

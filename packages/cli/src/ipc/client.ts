@@ -1,96 +1,117 @@
 import { EventEmitter } from "node:events"
 import type { Readable, Writable } from "node:stream"
-import type { JsonRpcMessage } from "@za38/protocol"
+import type { JsonRpcMessage, JsonRpcResponse, QueryResult } from "@za38/protocol"
 
-/**
- * JSON-RPC 2.0 客户端，通过 stdin/stdout 通信（换行分隔）。
- * 向 Python 进程的 stdin 写请求，从 stdout 读响应/通知。
- */
+type PendingRequest = {
+  resolve: (value: unknown) => void
+  reject: (error: Error) => void
+  timeout: ReturnType<typeof setTimeout> | undefined
+}
+
+/** 连接 Python Agent sidecar 的 JSONL JSON-RPC 客户端。 */
 export class IpcClient extends EventEmitter {
   private nextId = 1
-  private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
+  private readonly pending = new Map<number, PendingRequest>()
   private buffer = ""
+  private closed = false
 
   constructor(
-    private stdin: Writable,
-    private stdout: Readable,
+    private readonly stdin: Writable,
+    private readonly stdout: Readable,
   ) {
     super()
-    this.stdout.on("data", (chunk: Buffer) => this.onData(chunk))
-    this.stdout.on("end", () => this.emit("close"))
-    this.stdout.on("error", (err) => this.emit("error", err))
+    this.stdout.on("data", (chunk: Buffer | Uint8Array | string) => this.onData(chunk))
+    this.stdout.on("end", () => this.close(new Error("Agent stdout closed")))
+    this.stdout.on("error", error => this.close(error))
+    this.stdin.on("error", error => this.close(error))
   }
 
-  private onData(chunk: Buffer): void {
-    this.buffer += chunk.toString("utf-8")
+  call(method: string, params: Record<string, unknown> = {}, timeoutMs = 30_000): Promise<unknown> {
+    if (this.closed) return Promise.reject(new Error("Agent connection is closed"))
+    const id = this.nextId++
+    return new Promise((resolve, reject) => {
+      const timeout = timeoutMs > 0
+        ? setTimeout(() => {
+            this.pending.delete(id)
+            reject(new Error(`Timed out waiting for ${method}`))
+          }, timeoutMs)
+        : undefined
+      this.pending.set(id, { resolve, reject, timeout })
+      this.send({ jsonrpc: "2.0", method, params, id })
+    })
+  }
+
+  query(message: string, threadId?: string, runId?: string): Promise<QueryResult> {
+    return this.call("query", { message, thread_id: threadId, run_id: runId }) as Promise<QueryResult>
+  }
+
+  cancel(threadId: string, runId: string): Promise<{ cancelled: boolean; run_id: string }> {
+    return this.call("cancel", { thread_id: threadId, run_id: runId }) as Promise<{ cancelled: boolean; run_id: string }>
+  }
+
+  respond(threadId: string, runId: string, interruptId: string, decisions: unknown): Promise<{ accepted: boolean }> {
+    return this.call("respond", {
+      thread_id: threadId,
+      run_id: runId,
+      interrupt_id: interruptId,
+      decisions,
+    }) as Promise<{ accepted: boolean }>
+  }
+
+  async shutdown(): Promise<void> {
+    if (!this.closed) await this.call("shutdown", {}, 2_000)
+  }
+
+  destroy(): void {
+    this.close(new Error("Agent connection closed"))
+    this.removeAllListeners()
+  }
+
+  private onData(chunk: Buffer | Uint8Array | string): void {
+    this.buffer += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf-8")
     const lines = this.buffer.split("\n")
     this.buffer = lines.pop() ?? ""
     for (const line of lines) {
       if (!line.trim()) continue
       try {
-        const msg = JSON.parse(line) as JsonRpcMessage
-        this.handleMessage(msg)
-      } catch (err) {
-        this.emit("error", new Error(`JSON-RPC 消息解析失败: ${line}`))
+        this.handleMessage(JSON.parse(line) as JsonRpcMessage)
+      } catch {
+        this.emit("protocolError", new Error(`Invalid JSON-RPC frame: ${line.slice(0, 200)}`))
       }
     }
   }
 
-  private handleMessage(msg: JsonRpcMessage): void {
-    if ("method" in msg && msg.method) {
-      // 通知（无 id）—— Python 只发通知给我们
-      this.emit(msg.method, msg.params)
-    } else if ("id" in msg && msg.id !== undefined) {
-      // 响应
-      const pending = this.pending.get(msg.id)
-      if (pending) {
-        this.pending.delete(msg.id)
-        if ("error" in msg && msg.error) {
-          pending.reject(new Error(msg.error.message))
-        } else {
-          pending.resolve(msg.result)
-        }
-      }
+  private handleMessage(message: JsonRpcMessage): void {
+    if ("method" in message && typeof message.method === "string") {
+      this.emit(message.method, message.params ?? {})
+      return
+    }
+    if (!("id" in message) || typeof message.id !== "number") return
+    const pending = this.pending.get(message.id)
+    if (!pending) return
+    this.pending.delete(message.id)
+    if (pending.timeout) clearTimeout(pending.timeout)
+    const response = message as JsonRpcResponse
+    if (response.error) pending.reject(new Error(response.error.message))
+    else pending.resolve(response.result)
+  }
+
+  private send(message: Record<string, unknown>): void {
+    try {
+      this.stdin.write(JSON.stringify(message) + "\n")
+    } catch (error) {
+      this.close(error instanceof Error ? error : new Error(String(error)))
     }
   }
 
-  /**
-   * 发送 JSON-RPC 请求并等待响应。
-   */
-  async call(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
-    const id = this.nextId++
-    return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject })
-      this.send({ jsonrpc: "2.0", method, params, id })
-    })
-  }
-
-  /**
-   * 向 agent 内核发送 query。
-   */
-  async query(message: string, threadId?: string): Promise<{ thread_id: string; accepted: boolean }> {
-    return this.call("query", { message, thread_id: threadId }) as Promise<{ thread_id: string; accepted: boolean }>
-  }
-
-  /**
-   * 发送通知（不需要响应）。
-   */
-  notify(method: string, params: Record<string, unknown> = {}): void {
-    this.send({ jsonrpc: "2.0", method, params })
-  }
-
-  private send(msg: Record<string, unknown>): void {
-    this.stdin.write(JSON.stringify(msg) + "\n")
-  }
-
-  /**
-   * 关闭时清理待处理请求。
-   */
-  destroy(): void {
-    for (const [, { reject }] of this.pending) {
-      reject(new Error("Connection closed"))
+  private close(error: Error): void {
+    if (this.closed) return
+    this.closed = true
+    for (const [id, pending] of this.pending) {
+      this.pending.delete(id)
+      if (pending.timeout) clearTimeout(pending.timeout)
+      pending.reject(error)
     }
-    this.pending.clear()
-    this.removeAllListeners()
+    this.emit("close", error)
   }
 }

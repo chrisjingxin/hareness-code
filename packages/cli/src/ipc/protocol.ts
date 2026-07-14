@@ -1,2 +1,16 @@
-export type { JsonRpcMessage, JsonRpcRequest, JsonRpcResponse, JsonRpcNotification } from "@za38/protocol"
-export { Method, Notification } from "@za38/protocol"
+export type {
+  InitializeParams,
+  InitializeResult,
+  ApprovalRequestedParams,
+  JsonRpcMessage,
+  JsonRpcNotification,
+  JsonRpcRequest,
+  JsonRpcResponse,
+  MessageDeltaParams,
+  QueryParams,
+  QueryResult,
+  RunCompletedParams,
+  RunFailedParams,
+  QuestionRequestedParams,
+} from "@za38/protocol"
+export { Method, Notification, PROTOCOL_VERSION } from "@za38/protocol"
