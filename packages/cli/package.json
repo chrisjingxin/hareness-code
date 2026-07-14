@@ -1,0 +1,17 @@
+{
+  "name": "@za38/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "za38": "./src/index.ts" },
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "build": "bun build src/index.ts --outdir dist --target node",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@opentui/core": "^0.4.3",
+    "@za38/opentui-react": "workspace:*",
+    "@za38/protocol": "workspace:*"
+  }
+}

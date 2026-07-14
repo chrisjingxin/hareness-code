@@ -1,0 +1,10 @@
+{
+  "name": "za38-cli",
+  "private": true,
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "build": "bun run --filter '*' build",
+    "dev": "bun run --filter '@za38/cli' dev",
+    "test": "bun run --filter '*' test"
+  }
+}
