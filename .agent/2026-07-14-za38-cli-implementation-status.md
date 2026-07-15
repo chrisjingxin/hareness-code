@@ -1,7 +1,7 @@
 # za38-cli 实现状态与开发交接
 
 > 更新时间：2026-07-15
-> 当前结论：已交付“OpenTUI → Bun CLI → Python sidecar → OpenAI 兼容网关”的可运行纵向切片，包含真实 AskUser/HITL 恢复；**完整 v0.1 尚未完成**。本文用于后续领取任务，所有未完成项均以本文为准。
+> 当前结论：已交付“OpenTUI → Bun CLI → Python sidecar → OpenAI 兼容网关”的可运行纵向切片，包含真实 AskUser/HITL 恢复；**完整 v0.1 尚未完成**。本文用于后续领取任务，所有未完成项均以本文为准。TUI 复用取舍见 `.agent/2026-07-15-tui-reuse-audit.md`。
 
 ## 已实现
 
@@ -28,10 +28,11 @@
 - 已实现 `za38 config show|path`。交互模式基于 `@opentui/react` 重设计为 MiMo-Code 截图风格：使用暖黑画布与 za38 蓝色强调，空会话显示沉浸式首页，首次发送后切换为全宽会话流。
 - 首页品牌为 MiMo-Code MIT 字符栅格渲染算法移植的 `HARNESS CODE` 像素字标：保留 shimmer/sweep 动效，使用 za38 蓝色而不复用 MiMo 品牌。`powered by za38` 绝对定位在完整字标右下角。宽终端显示星点、闪烁和 Braille 流星；终端小于 88×28 或 `TERM=dumb` 时自动关闭装饰以保证可读性。
 - composer 支持 `/` 或 `Ctrl+P` 命令弹窗，包含真实可用的 `/help`、`/quit`、`/clear`、`/force-clear`、`/version`；支持筛选、方向键、Tab/Enter、Esc 与鼠标选择。宽终端首页与会话菜单均从输入框上方展开；首页会预留菜单行高，避免遮挡 Logo。
-- composer 使用 `textarea`，`Enter` 发送、`Shift+Enter` 换行，最多 6 行。`Ctrl+C` 会按优先级清空输入、取消运行或退出；`Esc` 取消运行/关闭菜单，`Ctrl+O` 展开全部工具详情。会话内会保存最近 100 条实际发送的提示词，空输入时以 `↑`/`↓` 回填；手动编辑文本时方向键仍用于移动光标，`PgUp`/`PgDn` 浏览会话。
+- composer 使用 `textarea`，`Enter` 发送、`Shift+Enter` 换行，最多 6 行。`Ctrl+C` 会按优先级清空输入、取消运行或退出；`Esc` 取消运行/关闭菜单，`Ctrl+O` 展开全部工具详情。提示词历史持久化在 `~/.za38/prompt-history.jsonl`：跳过损坏行、连续去重、最多 50 条；`/clear` 只清空当前会话，不清除历史。`↑`/`↓` 仅在真实光标位于 composer 首/尾时回填；空 composer 没有可用历史时才滚动会话，手动编辑不会被全局快捷键抢键。
 - 会话流不再使用顶栏和默认侧栏；用户消息、工具、审批和提问均以紧凑的左轨层级呈现。composer 左轨由同一容器绘制并在下沿结束，不再产生越界尾线；无文本流期间和底栏运行态均显示动态 Thinking/spinner。空 composer 时 `↑`/`↓` 浏览时间线、`PageUp`/`PageDown` 翻半页；有文本时保留 textarea 光标移动。
 - Markdown 和代码块使用统一语义色。首版离线内置 Python、JavaScript/TypeScript、Java、Go、C/C++、Bash、HTML/CSS、JSON、YAML、Markdown 与 Zig；HTML 标签/属性以及 HTML 内的 CSS/JavaScript 注入均有语义高亮。其中 WASM parser 和 query 约 6.6 MB，发布时由 Bun 自动复制到 `dist`，运行时不访问 GitHub。资源来源、SHA-256 与许可证见 `packages/cli/src/tui/assets/syntax/manifest.json` 和 `THIRD_PARTY_NOTICES.md`。
-- 流 reducer 会拒绝旧 run、重复帧和乱序帧，并保留工具所属 run、审批请求详情和最终 usage/duration 供界面渲染。
+- 流 reducer 会拒绝旧 run、重复帧和乱序帧，并按 JSON-RPC event sequence 把用户消息、回答文本、工具和系统通知写入统一 timeline，保留工具所属 run、审批请求详情和最终 usage/duration 供界面渲染。
+- OpenTUI 测试渲染器已覆盖 80×24 紧凑首页品牌/底栏与 130×40 会话工具/输入框；通用工具输出采用 OpenCode MIT 的纯函数折叠逻辑，来源 commit 已记录在 `THIRD_PARTY_NOTICES.md`。
 - 已实现 `/help`、`/quit`（`/q`）、`/clear`、`/force-clear`、`/version`。未接入的 Slash Command 不再作为本地功能入口展示或伪造结果，而是交由 Agent 正常处理。
 - 新增协议、参数、配置、并发取消、真实 interrupt 恢复、Python stdio、Bun→Python echo 和 Bun→Python→OpenAI mock gateway 测试。
 - 根命令 `bun run typecheck`、`bun run test`、`bun run build` 分别检查类型、运行常规回归和构建 CLI。
@@ -65,6 +66,7 @@ ZA38_RUN_LOOPBACK_E2E=1 bun test tests/gateway.integration.test.ts
 | `packages/cli/src/tui/app.tsx` | OpenTUI 根界面、输入、流式事件、审批和提问交互 |
 | `packages/cli/src/tui/state.ts` | 防乱序的流事件 reducer 与渲染状态 |
 | `packages/cli/src/tui/components.tsx` | 首页、星点背景、Logo、全宽会话流、工具左轨、composer、审批/提问 dock 和状态栏 |
+| `packages/cli/src/tui/upstream/` | 经许可证审计后适配的 OpenCode/MiMo 通用 UI 纯逻辑；文件内记录精确上游来源 |
 | `packages/cli/src/tui/model.ts` | 握手配置摘要、Git 分支、终端降级规则和运行指标格式化 |
 | `packages/cli/src/tui/theme.ts` | za38 蓝色强调的暖黑主题与 Markdown/代码块语法样式 |
 | `packages/cli/src/tui/harness-logo.tsx` | MiMo 风格字符栅格 Logo、蓝色 shimmer/sweep 与 powered by 定位 |
@@ -81,6 +83,7 @@ ZA38_RUN_LOOPBACK_E2E=1 bun test tests/gateway.integration.test.ts
 1. **OpenTUI 完整体验**
    - 当前已接入官方 `@opentui/react`，并完成 Harness Code 品牌首页、窄终端降级、动态星空/流星、全宽消息流、离线 Markdown/代码块渲染、工具左轨、Thinking 动效、运行状态栏、审批菜单、单题 ask_user、`/help`、`/clear`、`/force-clear`、`/quit`、`/version`。
    - 待补多题 ask_user 表单、线程/Agent 选择器、复制快捷键，以及基于未来会话/MCP/技能 RPC 的动态状态信息。
+   - 已加入根级 ErrorBoundary，其降级页支持 `Ctrl+C`、`Ctrl+D`、`Esc` 安全退出。待将 Slash 菜单切换为真实 composer anchor 定位，补滚动加速/可靠 sticky-scroll、bracketed paste/IME 末字符提交保护；星空与 Logo 动画仍应改为 renderable 命令式更新以降低高频 React 重渲染。
    - `/threads`、`/compact`、`/mcp`、`/tools`、`/reload`、`/remember`、`/skill:<name>`、`/agents` 尚无后端 RPC；当前不会在本地命令或快捷键中伪造这些功能。
 
 2. **安全边界**

@@ -8,8 +8,6 @@ export type ShortcutContext = {
   commandOptionCount: number
   activeRun: boolean
   hasDraft: boolean
-  canScrollConversation: boolean
-  canNavigatePromptHistory: boolean
 }
 
 export type ShortcutAction =
@@ -24,12 +22,6 @@ export type ShortcutAction =
   | "cancel-run"
   | "exit"
   | "toggle-tool-details"
-  | "history-previous"
-  | "history-next"
-  | "scroll-conversation-up"
-  | "scroll-conversation-down"
-  | "scroll-conversation-page-up"
-  | "scroll-conversation-page-down"
 
 /** 快捷键先处理临时菜单，再处理运行态，避免输入控件吞掉 Ctrl+C 与 Esc。 */
 export function resolveShortcut(key: KeyLike, context: ShortcutContext): ShortcutAction {
@@ -43,17 +35,7 @@ export function resolveShortcut(key: KeyLike, context: ShortcutContext): Shortcu
   }
 
   if (key.ctrl && key.name === "p") return "command-open"
-  if (context.canNavigatePromptHistory) {
-    if (key.name === "up") return "history-previous"
-    if (key.name === "down") return "history-next"
-  }
-  // 无可回填历史时，空输入才把方向键借给会话时间线；手动编辑仍由 textarea 处理。
-  if (context.canScrollConversation && !context.hasDraft) {
-    if (key.name === "up") return "scroll-conversation-up"
-    if (key.name === "down") return "scroll-conversation-down"
-    if (key.name === "pageup") return "scroll-conversation-page-up"
-    if (key.name === "pagedown") return "scroll-conversation-page-down"
-  }
+  // 方向键必须留给 textarea：它需要依据真实光标边界决定回填历史还是滚动会话。
   if (key.ctrl && key.name === "c") {
     if (context.hasDraft) return "clear-draft"
     return context.activeRun ? "cancel-run" : "exit"

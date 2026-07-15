@@ -3,10 +3,12 @@
 ## MiMo-Code and OpenCode
 
 The terminal star-field algorithm and the character-raster Logo shimmer/sweep
-presentation are adapted from MiMo-Code. The bundled syntax-parser configuration
-is derived from OpenCode. Both projects are licensed under MIT:
+presentation are adapted from MiMo-Code. The bundled syntax-parser configuration,
+prompt-history persistence approach, and generic tool-output collapse helper are
+derived from OpenCode (commit `05c3e40a4e641732b991499000ca479e5dad4b02`). Both
+projects are licensed under MIT:
 
-Copyright (c) 2026 MiMo Code, Xiaomi Corporation  
+Copyright (c) 2026 MiMo Code, Xiaomi Corporation<br>
 Copyright (c) 2025 opencode
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of

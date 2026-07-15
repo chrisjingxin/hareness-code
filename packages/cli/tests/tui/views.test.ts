@@ -1,0 +1,88 @@
+import { expect, test } from "bun:test"
+import type { ScrollBoxRenderable, TextareaRenderable } from "@opentui/core"
+import { testRender } from "@opentui/react/test-utils"
+import { act, createElement, createRef } from "react"
+
+import { HomeView, SessionView } from "../../src/tui/components"
+import type { TuiRuntime } from "../../src/tui/model"
+import { createInitialState, startRun, type TuiState } from "../../src/tui/state"
+
+const runtime: TuiRuntime = {
+  workspace: "/workspace/harness-code",
+  gitBranch: "main",
+  cliVersion: "0.1.0",
+  modelName: "enterprise-model",
+  modelConfigured: true,
+}
+
+test("紧凑首页保留品牌、输入框和真实底栏信息", async () => {
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(
+      createElement(HomeView, viewProps(createInitialState(), 80, 24)),
+      { width: 80, height: 24 },
+    )
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("HARNESS CODE")
+    expect(frame).toContain("powered by za38")
+    expect(frame).toContain("harness-code")
+    expect(frame).toContain("v0.1.0")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("会话渲染显示工具卡片和底部 composer", async () => {
+  const run = { threadId: "thread-1", runId: "run-1" }
+  let state = startRun(createInitialState(), run, "读取文件")
+  state = {
+    ...state,
+    timeline: [
+      state.timeline[0]!,
+      { type: "tool", tool: { id: "tool-1", runId: run.runId, name: "read_file", detail: "src/app.ts", status: "completed" } },
+    ],
+    activeRun: undefined,
+    status: "已完成",
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(
+      createElement(SessionView, viewProps(state, 130, 40)),
+      { width: 130, height: 40 },
+    )
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("read_file")
+    expect(frame).toContain("Harness Code")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+function viewProps(state: TuiState, terminalWidth: number, terminalHeight: number) {
+  return {
+    runtime,
+    state,
+    terminalWidth,
+    terminalHeight,
+    inputRef: createRef<TextareaRenderable>(),
+    conversationScrollRef: createRef<ScrollBoxRenderable>(),
+    value: "",
+    onInput: () => undefined,
+    onComposerKeyDown: () => undefined,
+    onSubmit: () => undefined,
+    commandMenu: { visible: false, selectedIndex: 0 },
+    onSelectCommand: () => undefined,
+    onHoverCommand: () => undefined,
+    showToolDetails: false,
+    expandedTools: new Set<string>(),
+    onToggleTool: () => undefined,
+    onApproval: () => undefined,
+    onQuestion: () => undefined,
+  }
+}

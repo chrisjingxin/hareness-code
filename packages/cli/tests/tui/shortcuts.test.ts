@@ -7,8 +7,6 @@ const idle = {
   commandOptionCount: 0,
   activeRun: false,
   hasDraft: false,
-  canScrollConversation: false,
-  canNavigatePromptHistory: false,
 }
 
 test("Ctrl+C 按输入与运行状态分层处理", () => {
@@ -33,18 +31,8 @@ test("Esc、Ctrl+P、Ctrl+O 和 Ctrl+D 保留真实 TUI 行为", () => {
   expect(resolveShortcut({ name: "d", ctrl: true }, idle)).toBe("exit")
 })
 
-test("空 composer 的上下键和分页键浏览会话，不抢占编辑中的光标", () => {
-  const session = { ...idle, canScrollConversation: true }
-  expect(resolveShortcut({ name: "up", ctrl: false }, session)).toBe("scroll-conversation-up")
-  expect(resolveShortcut({ name: "down", ctrl: false }, session)).toBe("scroll-conversation-down")
-  expect(resolveShortcut({ name: "pageup", ctrl: false }, session)).toBe("scroll-conversation-page-up")
-  expect(resolveShortcut({ name: "pagedown", ctrl: false }, session)).toBe("scroll-conversation-page-down")
-  expect(resolveShortcut({ name: "up", ctrl: false }, { ...session, hasDraft: true })).toBe("none")
-})
-
-test("已有提示词历史时优先回填历史，分页仍用于浏览会话", () => {
-  const session = { ...idle, canScrollConversation: true, canNavigatePromptHistory: true }
-  expect(resolveShortcut({ name: "up", ctrl: false }, session)).toBe("history-previous")
-  expect(resolveShortcut({ name: "down", ctrl: false }, { ...session, hasDraft: true })).toBe("history-next")
-  expect(resolveShortcut({ name: "pageup", ctrl: false }, session)).toBe("scroll-conversation-page-up")
+test("方向键不再被全局快捷键抢占，交由 textarea 根据真实光标位置处理", () => {
+  expect(resolveShortcut({ name: "up", ctrl: false }, idle)).toBe("none")
+  expect(resolveShortcut({ name: "down", ctrl: false }, { ...idle, hasDraft: true })).toBe("none")
+  expect(resolveShortcut({ name: "pageup", ctrl: false }, idle)).toBe("none")
 })

@@ -18,6 +18,14 @@ export type ToolCard = {
   status: "running" | "completed" | "failed"
 }
 
+/**
+ * JSON-RPC 的 sequence 是唯一可靠的时间顺序。保留统一时间线可避免工具调用
+ * 被单独收集后统一渲染到回答末尾，破坏用户理解 Agent 执行过程的因果关系。
+ */
+export type TimelineItem =
+  | { type: "message"; message: ConversationMessage }
+  | { type: "tool"; tool: ToolCard }
+
 export type ActiveRun = {
   threadId: string
   runId: string
@@ -38,8 +46,7 @@ export type PendingQuestion = {
 export type TuiState = {
   threadId?: string
   activeRun?: ActiveRun
-  messages: ConversationMessage[]
-  tools: ToolCard[]
+  timeline: TimelineItem[]
   status: string
   pendingApproval?: PendingApproval
   pendingQuestion?: PendingQuestion
@@ -64,8 +71,7 @@ type RunEvent = {
 export function createInitialState(threadId?: string): TuiState {
   return {
     threadId,
-    messages: [],
-    tools: [],
+    timeline: [],
     status: "就绪",
     sequences: {},
   }
@@ -76,8 +82,7 @@ export function isHomeState(state: TuiState): boolean {
   return !state.activeRun
     && !state.pendingApproval
     && !state.pendingQuestion
-    && state.messages.length === 0
-    && state.tools.length === 0
+    && state.timeline.length === 0
 }
 
 /** 在发送 query 前先登记 run，避免首个流事件与 JSON-RPC 响应同批到达时丢失。 */
@@ -88,11 +93,12 @@ export function startRun(state: TuiState, run: ActiveRun, prompt: string): TuiSt
     activeRun: run,
     pendingApproval: undefined,
     pendingQuestion: undefined,
+    lastRun: undefined,
     status: "正在思考",
-    messages: [
-      ...state.messages,
-      { id: `user-${run.runId}`, role: "user", content: prompt, runId: run.runId },
-      { id: `assistant-${run.runId}`, role: "assistant", content: "", runId: run.runId, streaming: true },
+    timeline: [
+      ...state.timeline,
+      { type: "message", message: { id: `user-${run.runId}`, role: "user", content: prompt, runId: run.runId } },
+      { type: "message", message: { id: `assistant-${run.runId}`, role: "assistant", content: "", runId: run.runId, streaming: true } },
     ],
   }
 }
@@ -100,7 +106,7 @@ export function startRun(state: TuiState, run: ActiveRun, prompt: string): TuiSt
 export function appendNotice(state: TuiState, message: string): TuiState {
   return {
     ...state,
-    messages: [...state.messages, { id: `system-${crypto.randomUUID()}`, role: "system", content: message }],
+    timeline: [...state.timeline, { type: "message", message: { id: `system-${crypto.randomUUID()}`, role: "system", content: message } }],
   }
 }
 
@@ -125,7 +131,7 @@ export function markRunFailed(state: TuiState, runId: string, message: string): 
     pendingQuestion: undefined,
     status: "执行失败",
     lastRun: { runId, outcome: "failed" },
-    messages: finishAssistant(state.messages, runId, `\n错误：${message}`),
+    timeline: finishAssistant(state.timeline, runId, `\n错误：${message}`),
   }
 }
 
@@ -148,13 +154,13 @@ export function applyAgentEvent(state: TuiState, method: string, payload: RunEve
       return { ...next, status: payload.resumed ? "已恢复执行" : "正在思考" }
     case "message/delta":
       return typeof payload.text === "string"
-        ? { ...next, messages: appendAssistantDelta(next.messages, runId, payload.text), status: "正在生成" }
+        ? { ...next, timeline: appendAssistantDelta(next.timeline, runId, payload.text), status: "正在生成" }
         : next
     case "tool/started":
       return {
         ...next,
         status: "正在调用工具",
-        tools: updateTool(next.tools, {
+        timeline: updateTool(next.timeline, {
           id: stringValue(payload.tool_id, `tool-${runId}`),
           runId,
           name: stringValue(payload.tool_name, "tool"),
@@ -165,15 +171,15 @@ export function applyAgentEvent(state: TuiState, method: string, payload: RunEve
     case "tool/updated":
       return {
         ...next,
-        tools: updateToolDetail(next.tools, stringValue(payload.tool_id, `tool-${runId}`), stringValue(payload.chunk, "")),
+        timeline: updateToolDetail(next.timeline, stringValue(payload.tool_id, `tool-${runId}`), stringValue(payload.chunk, "")),
       }
     case "tool/completed":
       return {
         ...next,
-        tools: updateTool(next.tools, {
+        timeline: updateTool(next.timeline, {
           id: stringValue(payload.tool_id, `tool-${runId}`),
           runId,
-          name: toolName(next.tools, stringValue(payload.tool_id, `tool-${runId}`)),
+          name: toolName(next.timeline, stringValue(payload.tool_id, `tool-${runId}`)),
           detail: stringValue(payload.result, ""),
           status: payload.error === true ? "failed" : "completed",
         }),
@@ -210,7 +216,7 @@ export function applyAgentEvent(state: TuiState, method: string, payload: RunEve
           durationMs: numberValue(payload.duration_ms),
           usage: usageValue(payload.usage),
         },
-        messages: finishAssistant(next.messages, runId),
+        timeline: finishAssistant(next.timeline, runId),
       }
     case "run/cancelled":
       return {
@@ -220,7 +226,7 @@ export function applyAgentEvent(state: TuiState, method: string, payload: RunEve
         pendingQuestion: undefined,
         status: "已取消",
         lastRun: { runId, outcome: "cancelled" },
-        messages: finishAssistant(next.messages, runId, `\n已取消：${stringValue(payload.reason, "用户取消")}`),
+        timeline: finishAssistant(next.timeline, runId, `\n已取消：${stringValue(payload.reason, "用户取消")}`),
       }
     case "run/failed":
       return markRunFailed(next, runId, stringValue(payload.message, "Agent 运行失败"))
@@ -229,38 +235,71 @@ export function applyAgentEvent(state: TuiState, method: string, payload: RunEve
   }
 }
 
-function appendAssistantDelta(messages: ConversationMessage[], runId: string, text: string): ConversationMessage[] {
-  const index = messages.findLastIndex(message => message.role === "assistant" && message.runId === runId)
+function appendAssistantDelta(timeline: TimelineItem[], runId: string, text: string): TimelineItem[] {
+  const index = timeline.findLastIndex(item => item.type === "message" && item.message.role === "assistant" && item.message.runId === runId)
   if (index < 0) {
-    return [...messages, { id: `assistant-${runId}`, role: "assistant", content: text, runId, streaming: true }]
+    return [...timeline, { type: "message", message: { id: `assistant-${runId}-${crypto.randomUUID()}`, role: "assistant", content: text, runId, streaming: true } }]
   }
-  return messages.map((message, messageIndex) => (
-    messageIndex === index ? { ...message, content: message.content + text } : message
+  const item = timeline[index]
+  if (item?.type === "message" && index === timeline.length - 1) {
+    return timeline.map((entry, itemIndex) => (
+      itemIndex === index && entry.type === "message"
+        ? { ...entry, message: { ...entry.message, content: entry.message.content + text } }
+        : entry
+    ))
+  }
+  return [...timeline, { type: "message", message: { id: `assistant-${runId}-${crypto.randomUUID()}`, role: "assistant", content: text, runId, streaming: true } }]
+}
+
+function finishAssistant(timeline: TimelineItem[], runId: string, suffix = ""): TimelineItem[] {
+  const settled = timeline.map(entry => {
+    if (entry.type !== "message" || entry.message.role !== "assistant" || entry.message.runId !== runId) return entry
+    return {
+      ...entry,
+      message: {
+        ...entry.message,
+        streaming: false,
+      },
+    }
+  })
+  if (!suffix) return settled
+  // 终态错误必须排在最后一个工具之后，不能回写到已完成的回答片段中。
+  return [
+    ...settled,
+    {
+      type: "message",
+      message: {
+        id: `assistant-${runId}-terminal-${crypto.randomUUID()}`,
+        role: "assistant",
+        content: suffix.trimStart(),
+        runId,
+        streaming: false,
+      },
+    },
+  ]
+}
+
+function updateTool(timeline: TimelineItem[], tool: ToolCard): TimelineItem[] {
+  const index = timeline.findIndex(item => item.type === "tool" && item.tool.id === tool.id)
+  if (index < 0) return [...timeline, { type: "tool", tool }]
+  return timeline.map((item, itemIndex) => (
+    itemIndex === index && item.type === "tool" ? { ...item, tool: { ...item.tool, ...tool } } : item
   ))
 }
 
-function finishAssistant(messages: ConversationMessage[], runId: string, suffix = ""): ConversationMessage[] {
-  return messages.map(message => (
-    message.role === "assistant" && message.runId === runId
-      ? { ...message, content: message.content + suffix, streaming: false }
-      : message
+function updateToolDetail(timeline: TimelineItem[], toolId: string, chunk: string): TimelineItem[] {
+  const index = timeline.findIndex(item => item.type === "tool" && item.tool.id === toolId)
+  if (index < 0) return [...timeline, { type: "tool", tool: { id: toolId, runId: "", name: "tool", detail: chunk, status: "running" } }]
+  return timeline.map((item, itemIndex) => (
+    itemIndex === index && item.type === "tool" ? { ...item, tool: { ...item.tool, detail: item.tool.detail + chunk } } : item
   ))
 }
 
-function updateTool(tools: ToolCard[], tool: ToolCard): ToolCard[] {
-  const index = tools.findIndex(item => item.id === tool.id)
-  if (index < 0) return [...tools, tool]
-  return tools.map((item, itemIndex) => itemIndex === index ? { ...item, ...tool } : item)
-}
-
-function updateToolDetail(tools: ToolCard[], toolId: string, chunk: string): ToolCard[] {
-  const index = tools.findIndex(item => item.id === toolId)
-  if (index < 0) return [...tools, { id: toolId, runId: "", name: "tool", detail: chunk, status: "running" }]
-  return tools.map((item, itemIndex) => itemIndex === index ? { ...item, detail: item.detail + chunk } : item)
-}
-
-function toolName(tools: ToolCard[], toolId: string): string {
-  return tools.find(item => item.id === toolId)?.name ?? "tool"
+function toolName(timeline: TimelineItem[], toolId: string): string {
+  const item = timeline.find((entry): entry is Extract<TimelineItem, { type: "tool" }> => (
+    entry.type === "tool" && entry.tool.id === toolId
+  ))
+  return item?.tool.name ?? "tool"
 }
 
 function stringValue(value: unknown, fallback: string): string {

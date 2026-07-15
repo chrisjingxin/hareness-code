@@ -1,4 +1,4 @@
-import type { ScrollBoxRenderable, TextareaRenderable } from "@opentui/core"
+import type { KeyEvent, ScrollBoxRenderable, TextareaRenderable } from "@opentui/core"
 import { useEffect, useState, type RefObject } from "react"
 
 import { findSlashCommands, type SlashCommandDefinition } from "./commands"
@@ -10,10 +10,11 @@ import {
   type TuiRuntime,
   workspaceLabel,
 } from "./model"
-import type { ConversationMessage, PendingApproval, PendingQuestion, ToolCard, TuiState } from "./state"
+import type { ConversationMessage, PendingApproval, PendingQuestion, TimelineItem, ToolCard, TuiState } from "./state"
 import { HarnessCodeLogo } from "./harness-logo"
 import { StarryBackground } from "./starry-background"
 import { markdownSyntax, tuiTheme } from "./theme"
+import { collapseToolOutput } from "./upstream/collapse-tool-output"
 
 export type CommandMenuState = {
   visible: boolean
@@ -29,6 +30,7 @@ type SharedViewProps = {
   conversationScrollRef: RefObject<ScrollBoxRenderable | null>
   value: string
   onInput: (value: string) => void
+  onComposerKeyDown: (event: KeyEvent) => void
   onSubmit: () => void
   commandMenu: CommandMenuState
   onSelectCommand: (command: SlashCommandDefinition) => void
@@ -125,18 +127,41 @@ export function ConversationTimeline(props: {
   return (
     <scrollbox ref={props.scrollRef} stickyScroll stickyStart="bottom" flexGrow={1} minHeight={0} viewportOptions={{ paddingRight: 1 }}>
       <box height={1} />
-      {props.state.messages.map(message => <MessageBlock key={message.id} message={message} state={props.state} />)}
-      {props.state.tools.map(tool => (
-        <ToolRow
-          key={tool.id}
-          tool={tool}
-          expanded={props.showToolDetails || props.expandedTools.has(tool.id) || tool.status !== "completed"}
-          onToggle={() => props.onToggleTool(tool.id)}
+      {props.state.timeline.map(item => (
+        <TimelineRow
+          key={item.type === "message" ? item.message.id : item.tool.id}
+          item={item}
+          state={props.state}
+          showToolDetails={props.showToolDetails}
+          expandedTools={props.expandedTools}
+          onToggleTool={props.onToggleTool}
         />
       ))}
       <RunSummary state={props.state} />
       <box height={1} />
     </scrollbox>
+  )
+}
+
+/**
+ * 消息与工具共用同一时间线，必须在这里逐项渲染，不能再次按类型拆成两个列表；
+ * 否则工具卡片会被错误地堆到所有回答文本之后。
+ */
+function TimelineRow(props: {
+  item: TimelineItem
+  state: TuiState
+  showToolDetails: boolean
+  expandedTools: ReadonlySet<string>
+  onToggleTool: (toolId: string) => void
+}) {
+  if (props.item.type === "message") return <MessageBlock message={props.item.message} state={props.state} />
+  const tool = props.item.tool
+  return (
+    <ToolRow
+      tool={tool}
+      expanded={props.showToolDetails || props.expandedTools.has(tool.id) || tool.status !== "completed"}
+      onToggle={() => props.onToggleTool(tool.id)}
+    />
   )
 }
 
@@ -153,6 +178,8 @@ function MessageBlock(props: { message: ConversationMessage; state: TuiState }) 
 
   if (props.message.role === "assistant") {
     if (props.message.streaming && !props.message.content) return <ThinkingIndicator state={props.state} />
+    // 工具先于文本返回时会留下一个空占位；结束后不应渲染无意义的省略号。
+    if (!props.message.content) return null
     return (
       <box flexDirection="column" marginTop={1} paddingLeft={3} paddingRight={3}>
         <markdown
@@ -182,7 +209,8 @@ function ToolRow(props: { tool: ToolCard; expanded: boolean; onToggle: () => voi
   const tone = props.tool.status === "failed" ? tuiTheme.danger : props.tool.status === "completed" ? tuiTheme.success : tuiTheme.primary
   const marker = props.tool.status === "failed" ? "×" : props.tool.status === "completed" ? "✓" : "◌"
   const label = props.tool.status === "failed" ? "失败" : props.tool.status === "completed" ? "完成" : "执行中"
-  const detail = props.expanded ? props.tool.detail : shorten(props.tool.detail, 92)
+  const collapsed = collapseToolOutput(props.tool.detail, 4, 360)
+  const detail = props.expanded ? props.tool.detail : collapsed.output
 
   return (
     <box marginTop={1} marginLeft={3} marginRight={3} border={["left"]} borderColor={tone} customBorderChars={PROMPT_BORDER}>
@@ -193,7 +221,7 @@ function ToolRow(props: { tool: ToolCard; expanded: boolean; onToggle: () => voi
             <text fg={tuiTheme.text}>{props.tool.name}</text>
             <text fg={tuiTheme.muted}>{label}</text>
           </box>
-          <text fg={tuiTheme.subtle}>{props.expanded ? "收起" : "展开"}</text>
+          {collapsed.overflow ? <text fg={tuiTheme.subtle}>{props.expanded ? "收起" : "展开"}</text> : null}
         </box>
         {detail ? <text content={detail} fg={tuiTheme.muted} /> : null}
       </box>
@@ -296,7 +324,7 @@ function SessionRuntimeLine(props: { runtime: TuiRuntime; state: TuiState }) {
   )
 }
 
-export function Composer(props: Pick<SharedViewProps, "runtime" | "state" | "inputRef" | "value" | "onInput" | "onSubmit" | "commandMenu" | "onSelectCommand" | "onHoverCommand"> & {
+export function Composer(props: Pick<SharedViewProps, "runtime" | "state" | "inputRef" | "value" | "onInput" | "onComposerKeyDown" | "onSubmit" | "commandMenu" | "onSelectCommand" | "onHoverCommand"> & {
   variant: "home" | "session"
   commandMenuPlacement: "above" | "inline-below"
 }) {
@@ -342,6 +370,7 @@ export function Composer(props: Pick<SharedViewProps, "runtime" | "state" | "inp
             keyBindings={COMPOSER_KEY_BINDINGS}
             focused={!active || awaitingQuestion}
             onContentChange={() => props.onInput(props.inputRef.current?.plainText ?? "")}
+            onKeyDown={props.onComposerKeyDown}
             onSubmit={props.onSubmit}
           />
           <RuntimeMeta runtime={props.runtime} variant={props.variant} />

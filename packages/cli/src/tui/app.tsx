@@ -1,4 +1,4 @@
-import { createCliRenderer, type ScrollBoxRenderable, type TextareaRenderable } from "@opentui/core"
+import { createCliRenderer, type KeyEvent, type ScrollBoxRenderable, type TextareaRenderable } from "@opentui/core"
 import { createRoot, useKeyboard, useTerminalDimensions } from "@opentui/react"
 import { randomUUID } from "node:crypto"
 import { useCallback, useEffect, useRef, useState } from "react"
@@ -6,8 +6,15 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { IpcClient } from "../ipc/client"
 import { findSlashCommands, parseSlashCommand, slashCommandHelp, type SlashCommand, type SlashCommandDefinition } from "./commands"
 import { HomeView, SessionView, type CommandMenuState } from "./components"
+import { TuiErrorBoundary } from "./error-boundary"
 import type { TuiRuntime } from "./model"
-import { canNavigatePromptHistory, rememberPrompt, selectPromptHistory } from "./prompt-history"
+import {
+  loadPromptHistory,
+  movePromptHistory,
+  persistPromptHistory,
+  rememberPrompt,
+  type PromptHistoryCursor,
+} from "./prompt-history"
 import { resolveShortcut } from "./shortcuts"
 import { registerCommonSyntaxParsers } from "./syntax-parsers"
 import {
@@ -27,11 +34,13 @@ type TuiOptions = {
   client: IpcClient
   runtime: TuiRuntime
   threadId?: string
+  /** 仅供测试隔离本地历史；正式入口始终使用 ~/.za38/prompt-history.jsonl。 */
+  promptHistoryFile?: string
   onRequestExit: () => void
 }
 
 /** 正式 OpenTUI 根组件：所有 Agent 输出必须经状态归约后才进入终端。 */
-export function Za38Tui({ client, runtime, threadId, onRequestExit }: TuiOptions) {
+export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onRequestExit }: TuiOptions) {
   const [state, setState] = useState(() => createInitialState(threadId))
   const stateRef = useRef(state)
   const [draft, setDraft] = useState("")
@@ -42,6 +51,8 @@ export function Za38Tui({ client, runtime, threadId, onRequestExit }: TuiOptions
   const [showToolDetails, setShowToolDetails] = useState(false)
   const [expandedTools, setExpandedTools] = useState<ReadonlySet<string>>(() => new Set())
   const promptHistoryRef = useRef<string[]>([])
+  const promptHistoryCursorRef = useRef<PromptHistoryCursor | undefined>(undefined)
+  const historyApplyValueRef = useRef<string | undefined>(undefined)
   const terminal = useTerminalDimensions()
 
   // 回调可能来自长生命周期的 IPC 监听器，使用 ref 使其始终读取到最新会话状态。
@@ -80,6 +91,14 @@ export function Za38Tui({ client, runtime, threadId, onRequestExit }: TuiOptions
     }
   }, [client, commit])
 
+  useEffect(() => {
+    let disposed = false
+    void loadPromptHistory(promptHistoryFile).then(history => {
+      if (!disposed) promptHistoryRef.current = history
+    })
+    return () => { disposed = true }
+  }, [promptHistoryFile])
+
   const cancelActiveRun = useCallback(async () => {
     const active = stateRef.current.activeRun
     if (!active) return false
@@ -95,10 +114,6 @@ export function Za38Tui({ client, runtime, threadId, onRequestExit }: TuiOptions
     }
     return true
   }, [client, commit, onRequestExit])
-
-  const clearPromptHistory = useCallback(() => {
-    promptHistoryRef.current = []
-  }, [])
 
   const sendAgentMessage = useCallback(async (message: string) => {
     const current = stateRef.current
@@ -163,21 +178,22 @@ export function Za38Tui({ client, runtime, threadId, onRequestExit }: TuiOptions
           commit(current => appendNotice(current, "请先等待当前执行结束，或使用 /force-clear。"))
         } else {
           commit(clearThread)
-          clearPromptHistory()
         }
         return
       case "force-clear":
         await cancelActiveRun()
         commit(clearThread)
-        clearPromptHistory()
         return
       case "version":
         commit(current => appendNotice(current, `za38-cli ${runtime.cliVersion} · JSON-RPC v1`))
         return
     }
-  }, [cancelActiveRun, clearPromptHistory, commit, onRequestExit, runtime.cliVersion])
+  }, [cancelActiveRun, commit, onRequestExit, runtime.cliVersion])
 
   const updateDraft = useCallback((value: string) => {
+    // 回填历史会触发 textarea 的内容事件；仅它保留历史游标，用户编辑则立即退出历史浏览。
+    if (historyApplyValueRef.current === value) historyApplyValueRef.current = undefined
+    else promptHistoryCursorRef.current = undefined
     setDraft(value)
     const slashQuery = value.trimStart()
     const shouldShowMenu = slashQuery.startsWith("/") && !slashQuery.slice(1).match(/\s/)
@@ -192,22 +208,30 @@ export function Za38Tui({ client, runtime, threadId, onRequestExit }: TuiOptions
   const clearDraft = useCallback(() => {
     inputRef.current?.clear()
     commandMenuDismissedValue.current = undefined
+    promptHistoryCursorRef.current = undefined
+    historyApplyValueRef.current = undefined
     setDraft("")
     setCommandMenu({ visible: false, selectedIndex: 0 })
   }, [])
 
-  const replaceDraft = useCallback((value: string) => {
+  const replaceDraft = useCallback((value: string, cursor: "start" | "end" = "end", historyCursor?: PromptHistoryCursor) => {
     // setText 会同步 textarea 内部缓冲区，不能只更新 React state，否则 Enter 会发送旧内容。
+    promptHistoryCursorRef.current = historyCursor
+    historyApplyValueRef.current = value
     inputRef.current?.setText(value)
-    inputRef.current?.gotoBufferEnd()
+    if (cursor === "start") inputRef.current?.gotoBufferHome()
+    else inputRef.current?.gotoBufferEnd()
     commandMenuDismissedValue.current = undefined
     setDraft(value)
     setCommandMenu({ visible: false, selectedIndex: 0 })
   }, [])
 
-  const navigatePromptHistory = useCallback((direction: "previous" | "next") => {
-    const value = selectPromptHistory(promptHistoryRef.current, draft, direction)
-    if (value !== undefined) replaceDraft(value)
+  const navigatePromptHistory = useCallback((direction: "previous" | "next"): boolean => {
+    const input = inputRef.current
+    const move = movePromptHistory(promptHistoryRef.current, input?.plainText ?? draft, promptHistoryCursorRef.current, direction)
+    if (!move) return false
+    replaceDraft(move.value, direction === "previous" ? "start" : "end", move.cursor)
+    return true
   }, [draft, replaceDraft])
 
   const selectSlashCommand = useCallback((command: SlashCommandDefinition) => {
@@ -244,9 +268,55 @@ export function Za38Tui({ client, runtime, threadId, onRequestExit }: TuiOptions
       void executeSlashCommand(command)
       return
     }
-    promptHistoryRef.current = rememberPrompt(promptHistoryRef.current, input)
+    const previousHistory = promptHistoryRef.current
+    const nextHistory = rememberPrompt(previousHistory, input)
+    promptHistoryRef.current = nextHistory
+    promptHistoryCursorRef.current = undefined
+    void persistPromptHistory(previousHistory, nextHistory, promptHistoryFile)
     void sendAgentMessage(input)
   }, [clearDraft, draft, executeSlashCommand, respondQuestion, sendAgentMessage])
+
+  const scrollConversationBy = useCallback((amount: "line-up" | "line-down" | "page-up" | "page-down") => {
+    const scroll = conversationScrollRef.current
+    if (!scroll || scroll.isDestroyed) return false
+    const delta = amount === "line-up"
+      ? -1
+      : amount === "line-down"
+        ? 1
+        : amount === "page-up"
+          ? -Math.max(1, Math.floor(scroll.height / 2))
+          : Math.max(1, Math.floor(scroll.height / 2))
+    scroll.scrollBy(delta)
+    return true
+  }, [])
+
+  const handleComposerKeyDown = useCallback((key: KeyEvent) => {
+    // Slash 菜单由全局快捷键优先处理，不能在 textarea 内重复消费方向键。
+    if (commandMenu.visible) return
+    const input = inputRef.current
+    if (!input) return
+
+    const atStart = input.cursorOffset === 0
+    const atEnd = input.cursorOffset === input.plainText.length
+    if (key.name === "up" && atStart && navigatePromptHistory("previous")) {
+      key.preventDefault()
+      return
+    }
+    if (key.name === "down" && atEnd && navigatePromptHistory("next")) {
+      key.preventDefault()
+      return
+    }
+
+    // 只有空 composer 才借出方向键给会话；编辑任何文本时完全保持 textarea 原生语义。
+    if (!input.plainText && !isHomeState(stateRef.current)) {
+      const scrollAction = key.name === "up" ? "line-up"
+        : key.name === "down" ? "line-down"
+          : key.name === "pageup" ? "page-up"
+            : key.name === "pagedown" ? "page-down"
+              : undefined
+      if (scrollAction && scrollConversationBy(scrollAction)) key.preventDefault()
+    }
+  }, [commandMenu.visible, navigatePromptHistory, scrollConversationBy])
 
   useKeyboard(key => {
     const commandOptions = findSlashCommands(draft)
@@ -255,8 +325,6 @@ export function Za38Tui({ client, runtime, threadId, onRequestExit }: TuiOptions
       commandOptionCount: commandOptions.length,
       activeRun: Boolean(stateRef.current.activeRun),
       hasDraft: Boolean(draft),
-      canScrollConversation: !isHomeState(stateRef.current),
-      canNavigatePromptHistory: canNavigatePromptHistory(promptHistoryRef.current, draft),
     })
     if (action === "none") return
     key.preventDefault()
@@ -296,23 +364,6 @@ export function Za38Tui({ client, runtime, threadId, onRequestExit }: TuiOptions
       setShowToolDetails(current => !current)
       return
     }
-    if (action === "history-previous" || action === "history-next") {
-      navigatePromptHistory(action === "history-previous" ? "previous" : "next")
-      return
-    }
-    if (action === "scroll-conversation-up" || action === "scroll-conversation-down" || action === "scroll-conversation-page-up" || action === "scroll-conversation-page-down") {
-      const scroll = conversationScrollRef.current
-      if (!scroll || scroll.isDestroyed) return
-      const delta = action === "scroll-conversation-up"
-        ? -1
-        : action === "scroll-conversation-down"
-          ? 1
-          : action === "scroll-conversation-page-up"
-            ? -Math.max(1, Math.floor(scroll.height / 2))
-            : Math.max(1, Math.floor(scroll.height / 2))
-      scroll.scrollBy(delta)
-      return
-    }
     if (action === "exit") onRequestExit()
   })
 
@@ -334,6 +385,7 @@ export function Za38Tui({ client, runtime, threadId, onRequestExit }: TuiOptions
     conversationScrollRef,
     value: draft,
     onInput: updateDraft,
+    onComposerKeyDown: handleComposerKeyDown,
     onSubmit: handleSubmit,
     commandMenu,
     onSelectCommand: selectSlashCommand,
@@ -362,7 +414,11 @@ export async function runTui(options: TuiOptions): Promise<void> {
       renderer.destroy()
       resolve()
     }
-    root.render(<Za38Tui {...options} onRequestExit={close} />)
+    root.render(
+      <TuiErrorBoundary onRequestExit={close}>
+        <Za38Tui {...options} onRequestExit={close} />
+      </TuiErrorBoundary>,
+    )
   })
 }
 
