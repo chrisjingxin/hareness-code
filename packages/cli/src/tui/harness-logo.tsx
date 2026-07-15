@@ -1,0 +1,134 @@
+import { fonts, RGBA, TextAttributes } from "@opentui/core"
+import { useEffect, useMemo, useState } from "react"
+
+import { tuiTheme } from "./theme"
+import { blendRgba } from "./colors"
+
+type ShadeFont = {
+  lines: number
+  letterspace: string[]
+  chars: Record<string, string[]>
+}
+
+type LogoShape = {
+  left: string[]
+  right: string[]
+  full: string[]
+}
+
+const FRAME_INTERVAL_MS = 50
+const SHIMMER_PERIOD_MS = 4_600
+const SWEEP_INTERVAL_MS = 10_000
+const SWEEP_DURATION_MS = 1_900
+const GAP = 1
+
+const shadeFont = fonts.shade as ShadeFont
+const fullShape = createShape("HARNESS", "CODE")
+
+/** MiMo 的 Logo 是字符栅格而非图片；沿用这一表达方式以保证各终端一致。 */
+export function HarnessCodeLogo(props: { compact: boolean }) {
+  if (props.compact) {
+    return (
+      <box width={22} height={2} position="relative" flexShrink={0}>
+        <text fg={tuiTheme.primary} selectable={false}>HARNESS CODE</text>
+        <box position="absolute" right={0} bottom={0}>
+          <PoweredBy />
+        </box>
+      </box>
+    )
+  }
+
+  return <AnimatedWordmark shape={fullShape} />
+}
+
+/** 供首页布局和伪终端回归使用，避免字标宽度与 powered by 的锚点漂移。 */
+export const HARNESS_WORDMARK_DIMENSIONS = {
+  width: fullShape.full[0]?.length ?? 0,
+  height: fullShape.full.length + 2,
+}
+
+function AnimatedWordmark(props: { shape: LogoShape }) {
+  const [now, setNow] = useState(() => performance.now())
+  useEffect(() => {
+    const timer = setInterval(() => setNow(performance.now()), FRAME_INTERVAL_MS)
+    return () => clearInterval(timer)
+  }, [])
+
+  const lines = useMemo(() => props.shape.full.map((line, y) => renderLine(line, y, now)), [now, props.shape.full])
+  return (
+    <box width={HARNESS_WORDMARK_DIMENSIONS.width} height={HARNESS_WORDMARK_DIMENSIONS.height} position="relative" flexDirection="column" flexShrink={0}>
+      {lines.map((line, index) => <box key={index} flexDirection="row" height={1}>{line}</box>)}
+      <box position="absolute" right={0} bottom={0}>
+        <PoweredBy />
+      </box>
+    </box>
+  )
+}
+
+function PoweredBy() {
+  return (
+    <text fg={tuiTheme.muted} selectable={false}>
+      powered by <span fg={tuiTheme.primary}>za38</span>
+    </text>
+  )
+}
+
+/**
+ * 移植 MiMo Logo 的低频呼吸和从左到右扫光。以 shade 栅格作为 Harness Code 字形，
+ * 不携带 MiMo 文字、配色、声音或鼠标彩蛋。
+ */
+function renderLine(line: string, y: number, now: number) {
+  const primary = RGBA.fromHex(tuiTheme.primary)
+  const shadow = RGBA.fromHex(tuiTheme.primarySoft)
+  const peak = RGBA.fromInts(229, 241, 255)
+  return Array.from(line).map((char, x) => {
+    if (char === " ") return <text key={x} selectable={false}> </text>
+    const shimmer = shimmerStrength(x, y, line.length, now)
+    const foreground = blendRgba(primary, peak, shimmer)
+    const background = char === "█" ? blendRgba(shadow, primary, Math.min(0.72, 0.18 + shimmer * 0.5)) : undefined
+    const muted = char === "░" || char === "▒" || char === "▓"
+    return (
+      <text
+        key={x}
+        fg={muted ? blendRgba(shadow, primary, shimmer * 0.26) : foreground}
+        bg={background}
+        attributes={TextAttributes.BOLD}
+        selectable={false}
+      >
+        {char === "█" ? "▀" : char}
+      </text>
+    )
+  })
+}
+
+function shimmerStrength(x: number, y: number, width: number, now: number): number {
+  const phase = (now % SHIMMER_PERIOD_MS) / SHIMMER_PERIOD_MS
+  const ambient = 0.07 + Math.max(0, Math.sin(phase * Math.PI * 2 + x * 0.31 + y * 0.72)) * 0.14
+  const sweepAge = now % SWEEP_INTERVAL_MS
+  if (sweepAge > SWEEP_DURATION_MS) return ambient
+  const center = (sweepAge / SWEEP_DURATION_MS) * (width + 10) - 5
+  const distance = Math.abs(x - center)
+  const sweep = Math.max(0, 1 - distance / 5)
+  return Math.min(1, ambient + sweep * sweep * 0.82)
+}
+
+function createShape(left: string, right: string): LogoShape {
+  const leftRows = rasterize(left)
+  const rightRows = rasterize(right)
+  return {
+    left: leftRows,
+    right: rightRows,
+    full: leftRows.map((line, index) => `${line}${" ".repeat(GAP)}${rightRows[index] ?? ""}`),
+  }
+}
+
+function rasterize(text: string): string[] {
+  return Array.from({ length: shadeFont.lines }, (_, row) => text
+    .split("")
+    .map(char => stripColorTags(shadeFont.chars[char]?.[row] ?? ""))
+    .join(stripColorTags(shadeFont.letterspace[row] ?? " ")))
+}
+
+function stripColorTags(value: string): string {
+  return value.replace(/<\/?c\d+>/g, "")
+}

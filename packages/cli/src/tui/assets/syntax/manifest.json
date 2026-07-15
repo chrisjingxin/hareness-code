@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "parsers": [
+    {
+      "filetype": "python",
+      "wasm": { "path": "python/tree-sitter-python.wasm", "sha256": "8c93692fb368e288a5824cee55773c9b3602804f513bda48c97661e52e9c2da2", "source": "https://github.com/tree-sitter/tree-sitter-python/releases/download/v0.23.6/tree-sitter-python.wasm" },
+      "highlights": { "path": "python/highlights.scm", "sha256": "a6708f209381618e2b398972c8f1ccd892f0c064eab35a2a3f911c3e22e79a7e", "sources": ["https://github.com/tree-sitter/tree-sitter-python/raw/refs/heads/master/queries/highlights.scm"] }
+    },
+    {
+      "filetype": "go",
+      "wasm": { "path": "go/tree-sitter-go.wasm", "sha256": "9504573f352b20be7f2f1911754d710622aedc15afff16d5ed8fb5645681aee7", "source": "https://github.com/tree-sitter/tree-sitter-go/releases/download/v0.25.0/tree-sitter-go.wasm" },
+      "highlights": { "path": "go/highlights.scm", "sha256": "c58a7336d4834ebfbb038002c6ab033f792cd1b8d3e7e1682bdaa982bee7f6b1", "sources": ["https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter/refs/heads/master/queries/go/highlights.scm"] }
+    },
+    {
+      "filetype": "cpp",
+      "wasm": { "path": "cpp/tree-sitter-cpp.wasm", "sha256": "174eb0deb75b2ec7881bcacda9f995648d8e683956e5c2267e69ab6dc503fcbf", "source": "https://github.com/tree-sitter/tree-sitter-cpp/releases/download/v0.23.4/tree-sitter-cpp.wasm" },
+      "highlights": { "path": "cpp/highlights.scm", "sha256": "c384bc5218d5e2e76fa7cbfe3c7cc2d5604cec5776f6d5b37e3f624da916f64a", "sources": ["https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter/refs/heads/master/queries/cpp/highlights.scm"] }
+    },
+    {
+      "filetype": "bash",
+      "wasm": { "path": "bash/tree-sitter-bash.wasm", "sha256": "364f0a2cd385c792239423026ef442dbd073d34c396b7bc9e5932426b8e4aa5d", "source": "https://github.com/tree-sitter/tree-sitter-bash/releases/download/v0.25.0/tree-sitter-bash.wasm" },
+      "highlights": { "path": "bash/highlights.scm", "sha256": "910b4a0a1cc191a9c436bc20df7a41ddb1e1768182be957ff110f5a950e727a8", "sources": ["https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter/refs/heads/master/queries/bash/highlights.scm"] }
+    },
+    {
+      "filetype": "c",
+      "wasm": { "path": "c/tree-sitter-c.wasm", "sha256": "c852c2a85ebf2beb636aa3b0ef7f7e70458684d74f6741b20dcb296885bed9f9", "source": "https://github.com/tree-sitter/tree-sitter-c/releases/download/v0.24.1/tree-sitter-c.wasm" },
+      "highlights": { "path": "c/highlights.scm", "sha256": "78d797a5a0f7b700bab7131e2554ec3f67ead6776cd7d74fa0c7aee68dc33d69", "sources": ["https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter/refs/heads/master/queries/c/highlights.scm"] }
+    },
+    {
+      "filetype": "java",
+      "wasm": { "path": "java/tree-sitter-java.wasm", "sha256": "4fdeac4ca6ca089f06c6f7e562abcac1733cd465728cc7031ebb73c2019122c4", "source": "https://github.com/tree-sitter/tree-sitter-java/releases/download/v0.23.5/tree-sitter-java.wasm" },
+      "highlights": { "path": "java/highlights.scm", "sha256": "5fe13374a109cae1dc98ec11fc1cec5d38d395b1f2ffbedf92fd17fa9e961876", "sources": ["https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter/refs/heads/master/queries/java/highlights.scm"] }
+    },
+    {
+      "filetype": "html",
+      "wasm": { "path": "html/tree-sitter-html.wasm", "sha256": "c48fcd82c7ea8bf943180088ba7f28c48b2bb5287874179168bf9d31e394cf85", "source": "https://github.com/tree-sitter/tree-sitter-html/releases/download/v0.23.2/tree-sitter-html.wasm" },
+      "highlights": { "path": "html/highlights.scm", "sha256": "7ddfb3cccb6db3cebfe7d7739a131e7471ae95103d3193e7f9dc8a003ec73834", "sources": ["https://github.com/tree-sitter/tree-sitter-html/raw/refs/heads/master/queries/highlights.scm"] },
+      "injections": { "path": "html/injections.scm", "sha256": "56595b369aaacdfc3ad783e527056965dd4e4adf626b7006fbc7be4f09c53593", "sources": ["./syntax-queries/html-injections.scm"] }
+    },
+    {
+      "filetype": "json",
+      "wasm": { "path": "json/tree-sitter-json.wasm", "sha256": "d2119fb98d5912719b13f9458574f8608d2d29dfbe45f6be1f860ea1fe2a2405", "source": "https://github.com/tree-sitter/tree-sitter-json/releases/download/v0.24.8/tree-sitter-json.wasm" },
+      "highlights": { "path": "json/highlights.scm", "sha256": "80745e989654f372f1f426b70b61267b5a9f00b6aa9d9db17bc666913ab5c1e5", "sources": ["https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter/refs/heads/master/queries/json/highlights.scm"] }
+    },
+    {
+      "filetype": "yaml",
+      "wasm": { "path": "yaml/tree-sitter-yaml.wasm", "sha256": "0a0e5ebcfeb0b2bf272d071396eeed107b2c4b2617b69d5959b13f78b357a4d6", "source": "https://github.com/tree-sitter-grammars/tree-sitter-yaml/releases/download/v0.7.2/tree-sitter-yaml.wasm" },
+      "highlights": { "path": "yaml/highlights.scm", "sha256": "e9dfd220a8abccfed57ca5b64bdf4b344750e6b3beb89f2746262af34a8b8aba", "sources": ["https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter/refs/heads/master/queries/yaml/highlights.scm"] }
+    },
+    {
+      "filetype": "css",
+      "wasm": { "path": "css/tree-sitter-css.wasm", "sha256": "8a23977fe271357cce6f254ef88c9bebf3854602d8046605aef6a45c02135c59", "source": "https://github.com/tree-sitter/tree-sitter-css/releases/download/v0.25.0/tree-sitter-css.wasm" },
+      "highlights": { "path": "css/highlights.scm", "sha256": "884a2a6526197cac34194443a39cd1f5dd332dd4dfa6f25979d799c4fd0cc7c3", "sources": ["https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter/refs/heads/master/queries/css/highlights.scm"] }
+    }
+  ]
+}

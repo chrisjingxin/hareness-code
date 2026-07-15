@@ -1,14 +1,17 @@
 #!/usr/bin/env bun
-import { spawn } from "node:child_process"
+import { execFileSync, spawn } from "node:child_process"
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
+import type { InitializeResult } from "@za38/protocol"
 
 import { parseArgs, type Command } from "./args"
 import { IpcClient } from "./ipc/client"
 import { runTui } from "./tui/app"
+import { CLI_VERSION, createTuiRuntime, type TuiRuntime } from "./tui/model"
 
 type RunningAgent = {
   client: IpcClient
+  runtime: TuiRuntime
   stop: () => Promise<void>
 }
 
@@ -31,13 +34,17 @@ async function startAgent(command: Command): Promise<RunningAgent> {
   child.on("exit", code => {
     if (code && code !== 0) client.emit("agentExit", new Error(stderr || `Agent exited with code ${code}`))
   })
-  await client.call("initialize", {
-    client_info: { name: "za38-cli", version: "0.1.0" },
+  const initialized = await client.call("initialize", {
+    client_info: { name: "za38-cli", version: CLI_VERSION },
     cwd: command.cwd,
     config_path: command.configPath,
-  })
+  }) as InitializeResult
   return {
     client,
+    runtime: createTuiRuntime(initialized, command.cwd, {
+      gitBranch: readGitBranch(command.cwd),
+      cliVersion: CLI_VERSION,
+    }),
     stop: async () => {
       try {
         await client.shutdown()
@@ -46,6 +53,20 @@ async function startAgent(command: Command): Promise<RunningAgent> {
       }
       child.kill()
     },
+  }
+}
+
+/** Git 信息仅用于底部状态栏；失败时不影响 Agent 启动或非 Git 工作区。 */
+export function readGitBranch(cwd: string): string | undefined {
+  try {
+    const branch = execFileSync("git", ["-C", cwd, "branch", "--show-current"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 500,
+    }).trim()
+    return branch || undefined
+  } catch {
+    return undefined
   }
 }
 
@@ -82,6 +103,7 @@ async function execute(command: Command): Promise<void> {
 
     await runTui({
       client: agent.client,
+      runtime: agent.runtime,
       threadId: command.threadId,
       onRequestExit: () => undefined,
     })
@@ -96,7 +118,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     return
   }
   if (argv.includes("--version") || argv.includes("-v")) {
-    console.log("za38-cli 0.1.0")
+    console.log(`za38-cli ${CLI_VERSION}`)
     return
   }
   await execute(parseArgs(argv))

@@ -5,14 +5,6 @@ export type SlashCommandName =
   | "quit"
   | "clear"
   | "force-clear"
-  | "threads"
-  | "compact"
-  | "mcp"
-  | "tools"
-  | "reload"
-  | "remember"
-  | "skill"
-  | "agents"
   | "version"
 
 export type SlashCommand = {
@@ -20,17 +12,37 @@ export type SlashCommand = {
   argument?: string
 }
 
-export const slashCommandHelp: ReadonlyArray<{ command: string; description: string }> = [
-  { command: "/help", description: "显示可用命令" },
-  { command: "/quit, /q", description: "退出 za38" },
-  { command: "/clear", description: "开启新会话" },
-  { command: "/force-clear", description: "取消当前执行并开启新会话" },
-  { command: "/threads", description: "浏览和恢复会话（待接入持久化）" },
-  { command: "/compact", description: "压缩当前会话（待接入）" },
-  { command: "/mcp, /tools, /reload", description: "查看或重载 Agent 能力（待接入）" },
-  { command: "/remember, /skill:<name>, /agents", description: "使用 za38 原生记忆、技能和子 Agent（待接入）" },
-  { command: "/version", description: "显示版本" },
+export type SlashCommandDefinition = {
+  name: SlashCommandName
+  aliases?: readonly string[]
+  description: string
+}
+
+/** 命令帮助、解析器和自动完成共用同一注册表，避免界面显示不存在的能力。 */
+export const slashCommandDefinitions: readonly SlashCommandDefinition[] = [
+  { name: "help", description: "显示可用命令" },
+  { name: "quit", aliases: ["q"], description: "退出 za38" },
+  { name: "clear", description: "开启新会话" },
+  { name: "force-clear", description: "取消当前执行并开启新会话" },
+  { name: "version", description: "显示版本" },
 ]
+
+export const slashCommandHelp: ReadonlyArray<{ command: string; description: string }> = slashCommandDefinitions.map(definition => ({
+  command: `/${definition.name}${definition.aliases?.length ? `, /${definition.aliases.join(", /")}` : ""}`,
+  description: definition.description,
+}))
+
+/** 只在输入以 / 开头且尚未进入参数区时，为 Prompt 提供可选命令。 */
+export function findSlashCommands(value: string): readonly SlashCommandDefinition[] {
+  const query = value.trimStart()
+  if (!query.startsWith("/")) return []
+  const name = query.slice(1).split(/\s/, 1)[0]?.toLowerCase() ?? ""
+  if (query.slice(1).match(/\s/)) return []
+  return slashCommandDefinitions.filter(definition => {
+    const candidates = [definition.name, ...(definition.aliases ?? [])]
+    return candidates.some(candidate => candidate.startsWith(name))
+  })
+}
 
 /** 只把完整的 Slash Command 视为本地控制命令，普通文本仍交给 Agent。 */
 export function parseSlashCommand(input: string): SlashCommand | null {
@@ -39,27 +51,6 @@ export function parseSlashCommand(input: string): SlashCommand | null {
 
   const [rawName, ...rest] = value.slice(1).split(/\s+/)
   const argument = rest.join(" ").trim() || undefined
-  switch (rawName) {
-    case "help":
-    case "clear":
-    case "force-clear":
-    case "threads":
-    case "compact":
-    case "mcp":
-    case "tools":
-    case "reload":
-    case "remember":
-    case "agents":
-    case "version":
-      return { name: rawName, argument }
-    case "quit":
-    case "q":
-      return { name: "quit", argument }
-    default:
-      if (rawName.startsWith("skill:")) {
-        const skillName = rawName.slice("skill:".length).trim()
-        return skillName ? { name: "skill", argument: skillName } : null
-      }
-      return null
-  }
+  const definition = slashCommandDefinitions.find(item => item.name === rawName || item.aliases?.includes(rawName))
+  return definition ? { name: definition.name, argument } : null
 }

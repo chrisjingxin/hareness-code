@@ -1,16 +1,22 @@
-import { createCliRenderer, type InputRenderable } from "@opentui/core"
-import { createRoot, useKeyboard } from "@opentui/react"
+import { createCliRenderer, type ScrollBoxRenderable, type TextareaRenderable } from "@opentui/core"
+import { createRoot, useKeyboard, useTerminalDimensions } from "@opentui/react"
 import { randomUUID } from "node:crypto"
 import { useCallback, useEffect, useRef, useState } from "react"
 
 import { IpcClient } from "../ipc/client"
-import { parseSlashCommand, slashCommandHelp, type SlashCommand } from "./commands"
+import { findSlashCommands, parseSlashCommand, slashCommandHelp, type SlashCommand, type SlashCommandDefinition } from "./commands"
+import { HomeView, SessionView, type CommandMenuState } from "./components"
+import type { TuiRuntime } from "./model"
+import { canNavigatePromptHistory, rememberPrompt, selectPromptHistory } from "./prompt-history"
+import { resolveShortcut } from "./shortcuts"
+import { registerCommonSyntaxParsers } from "./syntax-parsers"
 import {
   appendNotice,
   applyAgentEvent,
   clearPendingInteraction,
   clearThread,
   createInitialState,
+  isHomeState,
   markCancelling,
   markRunFailed,
   startRun,
@@ -19,28 +25,24 @@ import {
 
 type TuiOptions = {
   client: IpcClient
+  runtime: TuiRuntime
   threadId?: string
   onRequestExit: () => void
 }
 
-const colors = {
-  background: "#10131a",
-  panel: "#181d27",
-  border: "#39465f",
-  muted: "#96a0b5",
-  text: "#e7edf8",
-  accent: "#70a5ff",
-  success: "#89c995",
-  warning: "#e5b567",
-  danger: "#ef7f7f",
-} as const
-
 /** 正式 OpenTUI 根组件：所有 Agent 输出必须经状态归约后才进入终端。 */
-export function Za38Tui({ client, threadId, onRequestExit }: TuiOptions) {
+export function Za38Tui({ client, runtime, threadId, onRequestExit }: TuiOptions) {
   const [state, setState] = useState(() => createInitialState(threadId))
   const stateRef = useRef(state)
   const [draft, setDraft] = useState("")
-  const inputRef = useRef<InputRenderable | null>(null)
+  const inputRef = useRef<TextareaRenderable | null>(null)
+  const conversationScrollRef = useRef<ScrollBoxRenderable | null>(null)
+  const [commandMenu, setCommandMenu] = useState<CommandMenuState>({ visible: false, selectedIndex: 0 })
+  const commandMenuDismissedValue = useRef<string | undefined>(undefined)
+  const [showToolDetails, setShowToolDetails] = useState(false)
+  const [expandedTools, setExpandedTools] = useState<ReadonlySet<string>>(() => new Set())
+  const promptHistoryRef = useRef<string[]>([])
+  const terminal = useTerminalDimensions()
 
   // 回调可能来自长生命周期的 IPC 监听器，使用 ref 使其始终读取到最新会话状态。
   const commit = useCallback((transition: (current: TuiState) => TuiState) => {
@@ -93,6 +95,10 @@ export function Za38Tui({ client, threadId, onRequestExit }: TuiOptions) {
     }
     return true
   }, [client, commit, onRequestExit])
+
+  const clearPromptHistory = useCallback(() => {
+    promptHistoryRef.current = []
+  }, [])
 
   const sendAgentMessage = useCallback(async (message: string) => {
     const current = stateRef.current
@@ -157,29 +163,78 @@ export function Za38Tui({ client, threadId, onRequestExit }: TuiOptions) {
           commit(current => appendNotice(current, "请先等待当前执行结束，或使用 /force-clear。"))
         } else {
           commit(clearThread)
+          clearPromptHistory()
         }
         return
       case "force-clear":
         await cancelActiveRun()
         commit(clearThread)
+        clearPromptHistory()
         return
       case "version":
-        commit(current => appendNotice(current, "za38-cli 0.1.0 · JSON-RPC v1"))
+        commit(current => appendNotice(current, `za38-cli ${runtime.cliVersion} · JSON-RPC v1`))
         return
-      case "skill":
-        commit(current => appendNotice(current, `技能 /skill:${command.argument} 将在 za38 原生技能发现接入后可用。`))
-        return
-      default:
-        commit(current => appendNotice(current, `/${command.name} 已保留在命令面，但对应内核能力尚未接入。`))
     }
-  }, [cancelActiveRun, commit, onRequestExit])
+  }, [cancelActiveRun, clearPromptHistory, commit, onRequestExit, runtime.cliVersion])
 
-  const handleSubmit = useCallback((value: string) => {
-    const input = value.trim()
+  const updateDraft = useCallback((value: string) => {
+    setDraft(value)
+    const slashQuery = value.trimStart()
+    const shouldShowMenu = slashQuery.startsWith("/") && !slashQuery.slice(1).match(/\s/)
+    if (shouldShowMenu && commandMenuDismissedValue.current !== value) {
+      setCommandMenu({ visible: true, selectedIndex: 0 })
+      return
+    }
+    if (!shouldShowMenu) commandMenuDismissedValue.current = undefined
+    setCommandMenu(current => current.visible ? { ...current, visible: false } : current)
+  }, [])
+
+  const clearDraft = useCallback(() => {
+    inputRef.current?.clear()
+    commandMenuDismissedValue.current = undefined
+    setDraft("")
+    setCommandMenu({ visible: false, selectedIndex: 0 })
+  }, [])
+
+  const replaceDraft = useCallback((value: string) => {
+    // setText 会同步 textarea 内部缓冲区，不能只更新 React state，否则 Enter 会发送旧内容。
+    inputRef.current?.setText(value)
+    inputRef.current?.gotoBufferEnd()
+    commandMenuDismissedValue.current = undefined
+    setDraft(value)
+    setCommandMenu({ visible: false, selectedIndex: 0 })
+  }, [])
+
+  const navigatePromptHistory = useCallback((direction: "previous" | "next") => {
+    const value = selectPromptHistory(promptHistoryRef.current, draft, direction)
+    if (value !== undefined) replaceDraft(value)
+  }, [draft, replaceDraft])
+
+  const selectSlashCommand = useCallback((command: SlashCommandDefinition) => {
+    const value = `/${command.name}`
+    commandMenuDismissedValue.current = value
+    inputRef.current?.setText(value)
+    inputRef.current?.gotoBufferEnd()
+    setDraft(value)
+    setCommandMenu({ visible: false, selectedIndex: 0 })
+  }, [])
+
+  const openCommandMenu = useCallback(() => {
+    const value = draft.trimStart()
+    if (!value.startsWith("/") || value.slice(1).match(/\s/)) {
+      inputRef.current?.setText("/")
+      inputRef.current?.gotoBufferEnd()
+      setDraft("/")
+    }
+    commandMenuDismissedValue.current = undefined
+    setCommandMenu({ visible: true, selectedIndex: 0 })
+  }, [draft])
+
+  const handleSubmit = useCallback(() => {
+    const input = (inputRef.current?.plainText ?? draft).trim()
     if (!input) return
     // OpenTUI Input 会保留内部编辑缓冲区，提交后需主动清空，不能只依赖 React state。
-    if (inputRef.current) inputRef.current.value = ""
-    setDraft("")
+    clearDraft()
     if (stateRef.current.pendingQuestion) {
       void respondQuestion(input)
       return
@@ -189,93 +244,113 @@ export function Za38Tui({ client, threadId, onRequestExit }: TuiOptions) {
       void executeSlashCommand(command)
       return
     }
+    promptHistoryRef.current = rememberPrompt(promptHistoryRef.current, input)
     void sendAgentMessage(input)
-  }, [executeSlashCommand, respondQuestion, sendAgentMessage])
+  }, [clearDraft, draft, executeSlashCommand, respondQuestion, sendAgentMessage])
 
   useKeyboard(key => {
-    if (key.ctrl && key.name === "c") {
+    const commandOptions = findSlashCommands(draft)
+    const action = resolveShortcut(key, {
+      commandMenuVisible: commandMenu.visible,
+      commandOptionCount: commandOptions.length,
+      activeRun: Boolean(stateRef.current.activeRun),
+      hasDraft: Boolean(draft),
+      canScrollConversation: !isHomeState(stateRef.current),
+      canNavigatePromptHistory: canNavigatePromptHistory(promptHistoryRef.current, draft),
+    })
+    if (action === "none") return
+    key.preventDefault()
+
+    if (action === "close-command-menu") {
+      commandMenuDismissedValue.current = draft
+      setCommandMenu(current => ({ ...current, visible: false }))
+      return
+    }
+    if (action === "command-previous" || action === "command-next") {
+      const direction = action === "command-previous" ? -1 : 1
+      setCommandMenu(current => ({
+        ...current,
+        selectedIndex: commandOptions.length ? (current.selectedIndex + direction + commandOptions.length) % commandOptions.length : 0,
+      }))
+      return
+    }
+    if (action === "command-select") {
+      const selected = commandOptions[commandMenu.selectedIndex]
+      if (selected) selectSlashCommand(selected)
+      return
+    }
+    if (action === "command-block") return
+    if (action === "command-open") {
+      openCommandMenu()
+      return
+    }
+    if (action === "clear-draft") {
+      clearDraft()
+      return
+    }
+    if (action === "cancel-run") {
       void cancelActiveRun()
       return
     }
-    if (key.ctrl && key.name === "d" && !stateRef.current.activeRun) onRequestExit()
+    if (action === "toggle-tool-details") {
+      setShowToolDetails(current => !current)
+      return
+    }
+    if (action === "history-previous" || action === "history-next") {
+      navigatePromptHistory(action === "history-previous" ? "previous" : "next")
+      return
+    }
+    if (action === "scroll-conversation-up" || action === "scroll-conversation-down" || action === "scroll-conversation-page-up" || action === "scroll-conversation-page-down") {
+      const scroll = conversationScrollRef.current
+      if (!scroll || scroll.isDestroyed) return
+      const delta = action === "scroll-conversation-up"
+        ? -1
+        : action === "scroll-conversation-down"
+          ? 1
+          : action === "scroll-conversation-page-up"
+            ? -Math.max(1, Math.floor(scroll.height / 2))
+            : Math.max(1, Math.floor(scroll.height / 2))
+      scroll.scrollBy(delta)
+      return
+    }
+    if (action === "exit") onRequestExit()
   })
 
-  const interaction = state.pendingApproval
-    ? (
-      <box title="需要审批" border borderColor={colors.warning} style={{ marginBottom: 1, padding: 1 }}>
-        <text content={state.pendingApproval.description} fg={colors.warning} />
-        <select
-          focused
-          options={[
-            { name: "允许", description: "继续执行该工具操作", value: "approve" },
-            { name: "拒绝", description: "拒绝该工具操作", value: "reject" },
-          ]}
-          onSelect={(_, option) => { if (option?.value === "approve" || option?.value === "reject") void respondApproval(option.value) }}
-        />
-      </box>
-    )
-    : state.pendingQuestion?.options.length
-      ? (
-        <box title="Agent 需要你的回答" border borderColor={colors.warning} style={{ marginBottom: 1, padding: 1 }}>
-          <text content={state.pendingQuestion.question} fg={colors.warning} />
-          <select
-            focused
-            options={state.pendingQuestion.options.map(option => ({ ...option, description: option.name }))}
-            onSelect={(_, option) => { if (typeof option?.value === "string") void respondQuestion(option.value) }}
-          />
-        </box>
-      )
-      : null
+  const toggleTool = useCallback((toolId: string) => {
+    setExpandedTools(current => {
+      const next = new Set(current)
+      if (next.has(toolId)) next.delete(toolId)
+      else next.add(toolId)
+      return next
+    })
+  }, [])
 
-  const inputPlaceholder = state.pendingQuestion
-    ? "输入你的回答后按 Enter"
-    : state.activeRun
-      ? "正在执行；Ctrl+C 取消"
-      : "描述你想完成的编码任务…"
+  const viewProps = {
+    runtime,
+    state,
+    terminalWidth: terminal.width,
+    terminalHeight: terminal.height,
+    inputRef,
+    conversationScrollRef,
+    value: draft,
+    onInput: updateDraft,
+    onSubmit: handleSubmit,
+    commandMenu,
+    onSelectCommand: selectSlashCommand,
+    onHoverCommand: (selectedIndex: number) => setCommandMenu(current => ({ ...current, selectedIndex })),
+    showToolDetails,
+    expandedTools,
+    onToggleTool: toggleTool,
+    onApproval: (decision: "approve" | "reject") => { void respondApproval(decision) },
+    onQuestion: (answer: string) => { void respondQuestion(answer) },
+  }
 
-  return (
-    <box style={{ flexDirection: "column", flexGrow: 1, backgroundColor: colors.background, padding: 1 }}>
-      <box style={{ justifyContent: "space-between", marginBottom: 1 }}>
-        <text content="za38" fg={colors.accent} />
-        <text content={state.threadId ? `会话 ${state.threadId.slice(0, 8)} · ${state.status}` : state.status} fg={colors.muted} />
-      </box>
-
-      <scrollbox
-        stickyScroll
-        stickyStart="bottom"
-        style={{ flexGrow: 1, border: true, borderColor: colors.border, padding: 1, marginBottom: 1 }}
-      >
-        {state.messages.map(message => (
-          <box key={message.id} style={{ flexDirection: "column", marginBottom: 1 }}>
-            <text
-              content={message.role === "user" ? "你" : message.role === "assistant" ? "za38" : "系统"}
-              fg={message.role === "user" ? colors.accent : message.role === "assistant" ? colors.success : colors.muted}
-            />
-            <text content={message.content || (message.streaming ? "…" : "")} fg={colors.text} />
-          </box>
-        ))}
-        {state.tools.map(tool => (
-          <box key={tool.id} title={`工具 · ${tool.name}`} border borderColor={tool.status === "failed" ? colors.danger : colors.border} style={{ flexDirection: "column", marginBottom: 1, padding: 1 }}>
-            <text content={tool.status === "running" ? "执行中" : tool.status === "failed" ? "失败" : "完成"} fg={tool.status === "failed" ? colors.danger : colors.muted} />
-            {tool.detail ? <text content={tool.detail} fg={colors.text} /> : null}
-          </box>
-        ))}
-      </scrollbox>
-
-      {interaction}
-      {!state.pendingApproval && !(state.pendingQuestion?.options.length) ? (
-        <box title="输入" border borderColor={colors.border} style={{ paddingLeft: 1, paddingRight: 1 }}>
-          {/* OpenTUI 0.4.3 的声明同时继承了 textarea/input 的 onSubmit；运行时实际传入 string。 */}
-          <input ref={inputRef} value={draft} placeholder={inputPlaceholder} focused={!state.activeRun || Boolean(state.pendingQuestion)} onInput={setDraft} onSubmit={handleSubmit as never} />
-        </box>
-      ) : null}
-      <text content="Enter 发送 · Ctrl+C 取消/退出 · /help 命令" fg={colors.muted} />
-    </box>
-  )
+  return isHomeState(state) ? <HomeView {...viewProps} /> : <SessionView {...viewProps} />
 }
 
 /** 负责 OpenTUI 生命周期；退出后将控制权交回 CLI 以关闭 Python sidecar。 */
 export async function runTui(options: TuiOptions): Promise<void> {
+  registerCommonSyntaxParsers()
   const renderer = await createCliRenderer({ exitOnCtrlC: false, clearOnShutdown: true })
   const root = createRoot(renderer)
   await new Promise<void>(resolve => {

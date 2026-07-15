@@ -12,6 +12,7 @@ export type ConversationMessage = {
 
 export type ToolCard = {
   id: string
+  runId: string
   name: string
   detail: string
   status: "running" | "completed" | "failed"
@@ -25,6 +26,7 @@ export type ActiveRun = {
 export type PendingApproval = {
   interruptId: string
   description: string
+  requests?: unknown
 }
 
 export type PendingQuestion = {
@@ -41,7 +43,15 @@ export type TuiState = {
   status: string
   pendingApproval?: PendingApproval
   pendingQuestion?: PendingQuestion
+  lastRun?: RunSummary
   sequences: Record<string, number>
+}
+
+export type RunSummary = {
+  runId: string
+  outcome: "completed" | "cancelled" | "failed"
+  durationMs?: number
+  usage?: { inputTokens: number; outputTokens: number }
 }
 
 type RunEvent = {
@@ -54,11 +64,20 @@ type RunEvent = {
 export function createInitialState(threadId?: string): TuiState {
   return {
     threadId,
-    messages: [{ id: "welcome", role: "system", content: "za38 已就绪。输入 /help 查看命令。" }],
+    messages: [],
     tools: [],
     status: "就绪",
     sequences: {},
   }
+}
+
+/** 空状态不应被欢迎文本污染，/clear 后才能可靠地回到沉浸式首页。 */
+export function isHomeState(state: TuiState): boolean {
+  return !state.activeRun
+    && !state.pendingApproval
+    && !state.pendingQuestion
+    && state.messages.length === 0
+    && state.tools.length === 0
 }
 
 /** 在发送 query 前先登记 run，避免首个流事件与 JSON-RPC 响应同批到达时丢失。 */
@@ -105,6 +124,7 @@ export function markRunFailed(state: TuiState, runId: string, message: string): 
     pendingApproval: undefined,
     pendingQuestion: undefined,
     status: "执行失败",
+    lastRun: { runId, outcome: "failed" },
     messages: finishAssistant(state.messages, runId, `\n错误：${message}`),
   }
 }
@@ -136,6 +156,7 @@ export function applyAgentEvent(state: TuiState, method: string, payload: RunEve
         status: "正在调用工具",
         tools: updateTool(next.tools, {
           id: stringValue(payload.tool_id, `tool-${runId}`),
+          runId,
           name: stringValue(payload.tool_name, "tool"),
           detail: "",
           status: "running",
@@ -151,6 +172,7 @@ export function applyAgentEvent(state: TuiState, method: string, payload: RunEve
         ...next,
         tools: updateTool(next.tools, {
           id: stringValue(payload.tool_id, `tool-${runId}`),
+          runId,
           name: toolName(next.tools, stringValue(payload.tool_id, `tool-${runId}`)),
           detail: stringValue(payload.result, ""),
           status: payload.error === true ? "failed" : "completed",
@@ -163,6 +185,7 @@ export function applyAgentEvent(state: TuiState, method: string, payload: RunEve
         pendingApproval: {
           interruptId: stringValue(payload.interrupt_id, ""),
           description: stringValue(payload.description, "有操作需要你的审批"),
+          requests: payload.requests,
         },
       }
     case "question/requested":
@@ -181,6 +204,12 @@ export function applyAgentEvent(state: TuiState, method: string, payload: RunEve
         pendingApproval: undefined,
         pendingQuestion: undefined,
         status: "已完成",
+        lastRun: {
+          runId,
+          outcome: "completed",
+          durationMs: numberValue(payload.duration_ms),
+          usage: usageValue(payload.usage),
+        },
         messages: finishAssistant(next.messages, runId),
       }
     case "run/cancelled":
@@ -190,6 +219,7 @@ export function applyAgentEvent(state: TuiState, method: string, payload: RunEve
         pendingApproval: undefined,
         pendingQuestion: undefined,
         status: "已取消",
+        lastRun: { runId, outcome: "cancelled" },
         messages: finishAssistant(next.messages, runId, `\n已取消：${stringValue(payload.reason, "用户取消")}`),
       }
     case "run/failed":
@@ -225,7 +255,7 @@ function updateTool(tools: ToolCard[], tool: ToolCard): ToolCard[] {
 
 function updateToolDetail(tools: ToolCard[], toolId: string, chunk: string): ToolCard[] {
   const index = tools.findIndex(item => item.id === toolId)
-  if (index < 0) return [...tools, { id: toolId, name: "tool", detail: chunk, status: "running" }]
+  if (index < 0) return [...tools, { id: toolId, runId: "", name: "tool", detail: chunk, status: "running" }]
   return tools.map((item, itemIndex) => itemIndex === index ? { ...item, detail: item.detail + chunk } : item)
 }
 
@@ -235,6 +265,19 @@ function toolName(tools: ToolCard[], toolId: string): string {
 
 function stringValue(value: unknown, fallback: string): string {
   return typeof value === "string" ? value : fallback
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined
+}
+
+function usageValue(value: unknown): { inputTokens: number; outputTokens: number } | undefined {
+  if (!value || typeof value !== "object") return undefined
+  const usage = value as Record<string, unknown>
+  const inputTokens = numberValue(usage.input_tokens)
+  const outputTokens = numberValue(usage.output_tokens)
+  if (inputTokens === undefined || outputTokens === undefined) return undefined
+  return { inputTokens, outputTokens }
 }
 
 function questionOptions(value: unknown): Array<{ name: string; value: string }> {
