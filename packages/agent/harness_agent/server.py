@@ -95,7 +95,7 @@ class JsonRpcServer:
         self.agent = agent
         self._agent_factory = agent_factory or self._create_default_agent
         self._allow_echo = (
-            os.environ.get("ZA38_ECHO_MODE") == "1" if allow_echo is None else allow_echo
+            os.environ.get("HARNESS_ECHO_MODE") == "1" if allow_echo is None else allow_echo
         )
         self._running = True
         self._initialized = False
@@ -401,7 +401,10 @@ class JsonRpcServer:
         return create_harness_agent(
             create_openai_compatible_model(config.require_model()),
             cwd=str(workspace),
-            interactive=True,
+            # 无头客户端不协商 question 能力时不注册 ask_user；审批仍由
+            # `_request_interaction` 在缺少 approval 能力时 fail closed。
+            interactive="interactive.question" in self._enabled_capabilities,
+            approval_mode=config.execution.approval_mode,
             execution_context=execution_context,
         )
 

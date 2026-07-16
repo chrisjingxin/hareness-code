@@ -126,6 +126,14 @@ class WorkspaceBoundaryMiddleware(AgentMiddleware[dict[str, Any], ContextT, Resp
             return self._rejection(tool_name, tool_call.get("id"), str(exc))
         return None
 
+    def allows_approval(self, request: ToolCallRequest) -> bool:
+        """供 HITL 的 ``when`` 预检复用路径规则，避免越界调用先请求审批。
+
+        此方法不替代 ``wrap_tool_call``：模型输出到实际执行之间仍可能被修改，
+        因此后者必须继续作为最终的工具执行边界。
+        """
+        return self._validate_tool_call(request) is None
+
     def _rejection(self, tool_name: str, tool_call_id: object, reason: str) -> ToolMessage:
         """将策略失败转成模型可纠正的错误结果，而不是抛出图执行异常。"""
         return ToolMessage(

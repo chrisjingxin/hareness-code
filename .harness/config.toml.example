@@ -4,7 +4,7 @@
 provider = "openai-compatible"
 name = "your-enterprise-coding-model"
 base_url = "https://gateway.example.internal/v1"
-api_key_env = "ZA38_API_KEY"
+api_key_env = "HARNESS_API_KEY"
 timeout_seconds = 120
 max_retries = 2
 
@@ -14,12 +14,12 @@ X-Client-Name = "za38-cli"
 
 # 租户等敏感或环境相关请求头从环境变量读取。
 [model.headers_env]
-X-Enterprise-Tenant = "ZA38_TENANT"
+X-Enterprise-Tenant = "HARNESS_TENANT"
 
 # 默认在本机执行。工作目录只是默认位置，不构成系统级隔离。
 [tools]
 sandbox = false
-approval_mode = "ask"
+approval_mode = "default"
 
 # 企业已提供远端 sandbox 插件时，可将 sandbox 改为 true 或 "remote"。
 # 这两个字段只能放在 ~/.harness/config.toml，或由用户用 --config 明确传入；

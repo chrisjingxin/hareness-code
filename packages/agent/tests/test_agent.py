@@ -50,9 +50,11 @@ def test_execution_context_prompt_marks_local_and_remote_boundaries():
     """提示词必须如实说明本机默认模式与远端逻辑工作目录。"""
     from harness_agent.agent import _with_execution_context
 
-    local = _with_execution_context("base", workspace="/tmp/work", sandboxed=False, provider=None)
+    local = _with_execution_context(
+        "base", workspace="/tmp/work", sandboxed=False, provider=None, approval_mode="default"
+    )
     remote = _with_execution_context(
-        "base", workspace="/workspace", sandboxed=True, provider="corp"
+        "base", workspace="/workspace", sandboxed=True, provider="corp", approval_mode="yolo"
     )
 
     assert "本机工作目录是：`/tmp/work`" in local
@@ -64,12 +66,21 @@ def test_execution_context_prompt_marks_local_and_remote_boundaries():
 
 def test_default_local_subagent_has_its_own_workspace_guard(tmp_path):
     """默认子 Agent 不得因独立 middleware 栈绕过本机文件边界。"""
-    from harness_agent.agent import _create_local_subagents
+    from harness_agent.agent import _create_default_subagents
     from harness_agent.workspace_boundary import WorkspaceBoundaryMiddleware
 
-    subagents = _create_local_subagents(tmp_path)
+    subagents = _create_default_subagents(workspace=tmp_path, approval_mode="default")
     assert subagents[0]["name"] == "general-purpose"
     assert isinstance(subagents[0]["middleware"][0], WorkspaceBoundaryMiddleware)
+
+
+def test_plan_subagent_has_its_own_plan_guard(tmp_path):
+    """子 Agent 的独立栈必须重复计划模式守卫，不能借 task 绕过。"""
+    from harness_agent.agent import _create_default_subagents
+    from harness_agent.approval_policy import PlanModeMiddleware
+
+    subagents = _create_default_subagents(workspace=tmp_path, approval_mode="plan")
+    assert isinstance(subagents[0]["middleware"][0], PlanModeMiddleware)
 
 
 async def test_agent_streams_events():

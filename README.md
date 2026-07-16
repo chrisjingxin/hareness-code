@@ -10,7 +10,7 @@ Harness Code 是面向企业研发场景的 Coding Agent CLI。终端交互由 B
 
 ```bash
 cp .harness/config.toml.example .harness/config.toml
-export ZA38_API_KEY='你的企业网关密钥'
+export HARNESS_API_KEY='你的企业网关密钥'
 bun run dev -- --config .harness/config.toml
 ```
 

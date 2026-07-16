@@ -5,10 +5,9 @@ import { useEffect, useState, type RefObject } from "react"
 
 import { findSlashCommands, type SlashCommandDefinition } from "./commands"
 import {
+  approvalModeLabel,
   formatDuration,
   formatUsage,
-  executionStatusLabel,
-  runtimeStatusLabel,
   supportsHomeDecoration,
   type TuiRuntime,
   workspaceLabel,
@@ -341,14 +340,13 @@ function SessionRuntimeLine(props: { runtime: TuiRuntime; state: TuiState }) {
       <text fg={tuiTheme.primary}>Harness Code</text>
       <text fg={tuiTheme.muted}>·</text>
       <text fg={props.runtime.modelConfigured ? tuiTheme.text : tuiTheme.warning}>{modelLabel(props.runtime)}</text>
-      <text fg={props.runtime.executionMode === "remote-sandbox" ? tuiTheme.success : tuiTheme.warning}>· {executionStatusLabel(props.runtime)}</text>
       <text fg={tuiTheme.muted}>· {props.state.status}</text>
     </box>
   )
 }
 
 /** 渲染统一左轨 composer、命令菜单和运行时元信息。 */
-export function Composer(props: Pick<SharedViewProps, "runtime" | "state" | "inputRef" | "value" | "onInput" | "onComposerKeyDown" | "onSubmit" | "commandMenu" | "onSelectCommand" | "onHoverCommand"> & {
+export function Composer(props: Pick<SharedViewProps, "runtime" | "state" | "terminalWidth" | "inputRef" | "value" | "onInput" | "onComposerKeyDown" | "onSubmit" | "commandMenu" | "onSelectCommand" | "onHoverCommand"> & {
   variant: "home" | "session"
   commandMenuPlacement: "above" | "inline-below"
 }) {
@@ -397,7 +395,7 @@ export function Composer(props: Pick<SharedViewProps, "runtime" | "state" | "inp
             onKeyDown={props.onComposerKeyDown}
             onSubmit={props.onSubmit}
           />
-          <RuntimeMeta runtime={props.runtime} variant={props.variant} />
+          <RuntimeMeta runtime={props.runtime} variant={props.variant} terminalWidth={props.terminalWidth} />
         </box>
       </box>
       {commandMenu && props.commandMenuPlacement === "inline-below" ? commandMenu : null}
@@ -449,16 +447,29 @@ function CommandMenu(props: {
   )
 }
 
-/** 渲染输入框下方的品牌、模型和连接状态元信息。 */
-function RuntimeMeta(props: { runtime: TuiRuntime; variant: "home" | "session" }) {
-  const showConnectionStatus = props.runtime.modelConfigured || Boolean(props.runtime.startupError)
+/** 渲染输入框下方的配置摘要：模型靠左、审批模式靠右，避免重复品牌和拥挤折行。 */
+function RuntimeMeta(props: { runtime: TuiRuntime; variant: "home" | "session"; terminalWidth: number }) {
+  // 首页 composer 最大宽度固定为 75 列；会话则以可用终端宽度估算。模型字段
+  // 是唯一可能来自企业配置的长文本，因此只截断它，审批模式始终保持可见。
+  const contentWidth = props.variant === "home"
+    ? Math.min(68, Math.max(28, props.terminalWidth - 8))
+    : Math.max(28, props.terminalWidth - 10)
+  const model = shorten(modelLabel(props.runtime), Math.max(14, contentWidth - 14))
+  const warning = props.runtime.approvalModeWarning
+    ? shorten(props.runtime.approvalModeWarning, contentWidth)
+    : undefined
+  const startupError = props.runtime.startupError
+    ? shorten(`配置需要处理：${props.runtime.startupError}`, contentWidth)
+    : undefined
+
   return (
-    <box flexDirection="row" gap={1} paddingTop={1} paddingBottom={1}>
-      <text fg={tuiTheme.primary}>Harness Code</text>
-      <text fg={tuiTheme.muted}>·</text>
-      <text fg={props.runtime.modelConfigured ? tuiTheme.text : tuiTheme.warning}>{modelLabel(props.runtime)}</text>
-      <text fg={props.runtime.executionMode === "remote-sandbox" ? tuiTheme.success : tuiTheme.warning}>· {executionStatusLabel(props.runtime)}</text>
-      {props.variant === "home" && showConnectionStatus ? <text fg={tuiTheme.muted}>· {runtimeStatusLabel(props.runtime)}</text> : null}
+    <box flexDirection="column" paddingTop={1} paddingBottom={1}>
+      <box width="100%" flexDirection="row" justifyContent="space-between" gap={2}>
+        <text fg={props.runtime.modelConfigured ? tuiTheme.text : tuiTheme.warning}>{model}</text>
+        <text fg={props.runtime.approvalMode === "yolo" ? tuiTheme.warning : tuiTheme.muted}>{approvalModeLabel(props.runtime)}</text>
+      </box>
+      {warning ? <text fg={tuiTheme.warning}>{warning}</text> : null}
+      {startupError ? <text fg={tuiTheme.warning}>{startupError}</text> : null}
     </box>
   )
 }
@@ -474,7 +485,6 @@ function FooterRail(props: { runtime: TuiRuntime; state: TuiState; terminalWidth
       <box flexDirection="row" gap={1} flexShrink={1}>
         <text fg={tuiTheme.muted}>{workspace}</text>
         {showBranch ? <text fg={tuiTheme.subtle}>:{props.runtime.gitBranch}</text> : null}
-        {props.terminalWidth >= 96 ? <text fg={props.runtime.executionMode === "remote-sandbox" ? tuiTheme.success : tuiTheme.warning}>· {props.runtime.executionMode === "remote-sandbox" ? "Sandbox" : "Local"}</text> : null}
       </box>
       {props.state.activeRun ? <BusyRunHint /> : props.session ? <text fg={tuiTheme.muted}>↑↓ 历史提示词 · PgUp/PgDn 浏览 · Ctrl+O 工具详情</text> : null}
       <text fg={tuiTheme.subtle}>v{props.runtime.cliVersion}</text>

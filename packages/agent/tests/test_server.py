@@ -193,16 +193,239 @@ async def test_real_hitl_rejection_prevents_file_write():
             return self
 
     with TemporaryDirectory() as workspace:
-        model = ToolModel(responses=[AIMessage(content="", tool_calls=[{"name": "write_file", "args": {"file_path": "blocked.txt", "content": "x"}, "id": "call-1"}]), AIMessage(content="已拒绝")])
+        destination = Path(workspace) / "blocked.txt"
+        model = ToolModel(responses=[AIMessage(content="", tool_calls=[{"name": "write_file", "args": {"file_path": str(destination), "content": "x"}, "id": "call-1"}]), AIMessage(content="已拒绝")])
         model.profile = {"max_input_tokens": 200_000}
-        agent = create_harness_agent(model, cwd=workspace, enable_interpreter=False, enable_skills=False, enable_memory=False, enable_ask_user=False, auto_approve=False)
+        agent = create_harness_agent(model, cwd=workspace, enable_interpreter=False, enable_skills=False, enable_memory=False, enable_ask_user=False, approval_mode="default")
         server = JsonRpcServer(agent=agent)
         frames = await _capture_server(server)
         await server.dispatch(_request("run.start", {"message": "写入", "thread_id": "t", "run_id": "r"}, "start"))
         interaction = await _wait_for(frames, lambda frame: frame.get("method") == "request")
         await server.dispatch({"jsonrpc": "2.0", "id": interaction["id"], "result": {"type": "approval", "request_id": interaction["id"], "decision": "reject"}})
         await _wait_for(frames, lambda frame: frame.get("params", {}).get("type") == "run.completed")
-        assert not (Path(workspace) / "blocked.txt").exists()
+        assert not destination.exists()
+
+
+async def test_workspace_rejection_precedes_default_approval_request():
+    """越界文件调用在 HITL 前被拒绝，避免用户看到无法改变边界的审批框。"""
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+    from langchain_core.runnables import Runnable
+    from harness_agent.agent import create_harness_agent
+    from harness_agent.server import JsonRpcServer
+
+    class ToolModel(FakeMessagesListChatModel):
+        def bind_tools(self, *_args: Any, **_kwargs: Any) -> Runnable:
+            return self
+
+    with TemporaryDirectory() as workspace, TemporaryDirectory() as outside:
+        destination = Path(outside) / "must-not-write.md"
+        model = ToolModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "write_file",
+                            "args": {"file_path": str(destination), "content": "blocked"},
+                            "id": "call-outside",
+                        }
+                    ],
+                ),
+                AIMessage(content="越界已拒绝"),
+            ]
+        )
+        model.profile = {"max_input_tokens": 200_000}
+        agent = create_harness_agent(
+            model,
+            cwd=workspace,
+            approval_mode="default",
+            enable_interpreter=False,
+            enable_skills=False,
+            enable_memory=False,
+            enable_ask_user=False,
+        )
+        server = JsonRpcServer(agent=agent)
+        frames = await _capture_server(server)
+        await server.dispatch(
+            _request("run.start", {"message": "越界写入", "thread_id": "outside", "run_id": "outside-run"}, "outside-start")
+        )
+        await _wait_for(frames, lambda frame: frame.get("params", {}).get("type") == "run.completed")
+
+        assert not destination.exists()
+        assert not any(frame.get("method") == "request" for frame in frames)
+
+
+async def test_auto_edit_writes_without_interruption_but_shell_still_requires_approval():
+    """自动编辑模式只跳过 write_file；execute 仍必须由客户端明确拒绝或批准。"""
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+    from langchain_core.runnables import Runnable
+    from harness_agent.agent import create_harness_agent
+    from harness_agent.server import JsonRpcServer
+
+    class ToolModel(FakeMessagesListChatModel):
+        def bind_tools(self, *_args: Any, **_kwargs: Any) -> Runnable:
+            return self
+
+    with TemporaryDirectory() as workspace:
+        write_model = ToolModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "write_file",
+                            "args": {
+                                "file_path": str(Path(workspace) / "auto.txt"),
+                                "content": "written",
+                            },
+                            "id": "call-write",
+                        }
+                    ],
+                ),
+                AIMessage(content="写入完成"),
+            ]
+        )
+        write_model.profile = {"max_input_tokens": 200_000}
+        write_agent = create_harness_agent(
+            write_model,
+            cwd=workspace,
+            approval_mode="auto-edit",
+            enable_interpreter=False,
+            enable_skills=False,
+            enable_memory=False,
+            enable_ask_user=False,
+        )
+        write_server = JsonRpcServer(agent=write_agent)
+        write_frames = await _capture_server(write_server)
+        await write_server.dispatch(
+            _request("run.start", {"message": "写入", "thread_id": "write", "run_id": "write-run"}, "write-start")
+        )
+        await _wait_for(write_frames, lambda frame: frame.get("params", {}).get("type") == "run.completed")
+        assert (Path(workspace) / "auto.txt").read_text(encoding="utf-8") == "written"
+        assert not any(frame.get("method") == "request" for frame in write_frames)
+
+        shell_model = ToolModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": "execute", "args": {"command": "pwd"}, "id": "call-shell"}
+                    ],
+                ),
+                AIMessage(content="命令被拒绝"),
+            ]
+        )
+        shell_model.profile = {"max_input_tokens": 200_000}
+        shell_agent = create_harness_agent(
+            shell_model,
+            cwd=workspace,
+            approval_mode="auto-edit",
+            enable_interpreter=False,
+            enable_skills=False,
+            enable_memory=False,
+            enable_ask_user=False,
+        )
+        shell_server = JsonRpcServer(agent=shell_agent)
+        shell_frames = await _capture_server(shell_server)
+        await shell_server.dispatch(
+            _request("run.start", {"message": "执行", "thread_id": "shell", "run_id": "shell-run"}, "shell-start")
+        )
+        interaction = await _wait_for(shell_frames, lambda frame: frame.get("method") == "request")
+        assert interaction["params"]["type"] == "approval"
+        await shell_server.dispatch(
+            {
+                "jsonrpc": "2.0",
+                "id": interaction["id"],
+                "result": {"type": "approval", "request_id": interaction["id"], "decision": "reject"},
+            }
+        )
+        await _wait_for(shell_frames, lambda frame: frame.get("params", {}).get("type") == "run.completed")
+
+
+async def test_plan_mode_returns_tool_message_without_writing_or_requesting_approval():
+    """计划模式写工具调用必须由内核硬拒绝，不能先交给 TUI 或落盘。"""
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+    from langchain_core.runnables import Runnable
+    from harness_agent.agent import create_harness_agent
+    from harness_agent.server import JsonRpcServer
+
+    class ToolModel(FakeMessagesListChatModel):
+        def bind_tools(self, *_args: Any, **_kwargs: Any) -> Runnable:
+            return self
+
+    with TemporaryDirectory() as workspace:
+        model = ToolModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "write_file",
+                            "args": {
+                                "file_path": str(Path(workspace) / "plan.txt"),
+                                "content": "must not write",
+                            },
+                            "id": "call-plan-write",
+                        }
+                    ],
+                ),
+                AIMessage(content="已提供计划"),
+            ]
+        )
+        model.profile = {"max_input_tokens": 200_000}
+        agent = create_harness_agent(
+            model,
+            cwd=workspace,
+            approval_mode="plan",
+            enable_interpreter=False,
+            enable_skills=False,
+            enable_memory=False,
+            enable_ask_user=False,
+        )
+        server = JsonRpcServer(agent=agent)
+        frames = await _capture_server(server)
+        await server.dispatch(
+            _request("run.start", {"message": "写入", "thread_id": "plan", "run_id": "plan-run"}, "plan-start")
+        )
+        await _wait_for(frames, lambda frame: frame.get("params", {}).get("type") == "run.completed")
+
+        assert not (Path(workspace) / "plan.txt").exists()
+        assert not any(frame.get("method") == "request" for frame in frames)
+
+
+async def test_missing_interaction_capability_fails_closed_without_reverse_request():
+    """无头客户端不声明交互能力时，服务端直接返回拒绝而不发送 request。"""
+    from harness_agent.server import ActiveRun, InteractionSpec, JsonRpcServer
+
+    server = JsonRpcServer(allow_echo=True)
+    frames: list[dict[str, Any]] = []
+
+    async def capture(message: dict[str, Any]) -> None:
+        frames.append(message)
+
+    server.send = capture
+    await server.dispatch(
+        _request(
+            "initialize",
+            _initialize_params(capabilities=["run.cancel", "run.multithread", "config.read"]),
+            "init-headless",
+        )
+    )
+    result = await server._request_interaction(
+        ActiveRun(thread_id="headless", run_id="headless-run", message="test"),
+        InteractionSpec(
+            request_id="approval-headless",
+            type="approval",
+            payload={},
+            interrupt_id="approval-headless",
+        ),
+    )
+
+    assert result == {"type": "approval", "request_id": "approval-headless", "decision": "reject"}
+    assert not any(frame.get("method") == "request" for frame in frames)
 
 
 def test_tool_output_is_utf8_safely_truncated():
@@ -220,7 +443,7 @@ def test_tool_output_is_utf8_safely_truncated():
 async def test_stdio_subprocess_end_to_end_echo_mode():
     """真实 sidecar 完成 v2 initialize、run.start、event 与 shutdown。"""
     package_root = Path(__file__).resolve().parents[1]
-    env = {**os.environ, "PYTHONPATH": str(package_root), "ZA38_ECHO_MODE": "1"}
+    env = {**os.environ, "PYTHONPATH": str(package_root), "HARNESS_ECHO_MODE": "1"}
     process = await asyncio.create_subprocess_exec(sys.executable, "-m", "harness_agent", stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env)
     assert process.stdin and process.stdout
     process.stdin.write((json.dumps(_request("initialize", _initialize_params(), "init")) + "\n" + json.dumps(_request("run.start", {"message": "hello", "thread_id": "t", "run_id": "r"}, "start")) + "\n").encode())

@@ -17,7 +17,7 @@
 
 ### 模型配置与 Agent
 
-- 新增 OpenAI 兼容模型配置：用户 TOML < 工作区 TOML < `ZA38_*` 环境变量 < `--config`。
+- 新增 OpenAI 兼容模型配置：用户 TOML < 工作区 TOML < `HARNESS_*` 环境变量 < `--config`。
 - 支持模型名、Base URL、API Key 环境变量名、超时、重试、静态 headers 和环境变量 headers；CLI/RPC 展示会脱敏。
 - 接入 `langchain-openai` 的 `ChatOpenAI`，已验证标准 OpenAI SSE 流式响应。
 - Agent 保留现有 deepagents 文件工具、todo、task、HITL、ask_user、压缩与 QuickJS 组装逻辑；交互模式的写/编辑/删除等高风险工具明确只允许“批准/拒绝”，不会再意外自动批准。
@@ -26,7 +26,7 @@
 ### 可选远端执行（ZC-008 进行中）
 
 - 执行方式调整为 Qwen Code 风格：默认 `tools.sandbox = false`，继续使用本机 backend，并在 TUI 显示“本机执行 · 未隔离”；`cwd` 只表示默认目录，不宣称为安全边界。
-- 新增 `--sandbox`、`ZA38_SANDBOX=true`、`[tools].sandbox` 和 `approval_mode`。只有显式开启时才导入企业远端 `sandbox.factory`；provider 不存在、认证失败或启动失败都会终止该 run，绝不降级为本机 shell。
+- 新增 `--sandbox`、`HARNESS_SANDBOX=true`、`[tools].sandbox` 和 `approval_mode`。只有显式开启时才导入企业远端 `sandbox.factory`；provider 不存在、认证失败或启动失败都会终止该 run，绝不降级为本机 shell。
 - `RemoteSandboxSettings` 支持 provider、factory、逻辑工作目录与不含秘密的 `sandbox.params`。工厂必须返回 deepagents `SandboxBackendProtocol` 并负责工作区同步、网络白名单、认证和生命周期。
 - 远端模式动态提示逻辑工作目录，禁用会在 Python sidecar 执行的 memory、skills 与 `js_eval`；本机工具环境显式不继承模型 API Key 等父进程环境变量。
 - 未交付企业 provider 的具体 API、Docker、Podman、容器镜像、远端同步/回写和企业审计出口；这些依赖企业平台资料，`ZC-008` 保持进行中。
@@ -56,11 +56,11 @@ bun run build
 
 # Python Agent 的 OpenAI SSE loopback 端到端测试
 cd packages/agent
-ZA38_RUN_LOOPBACK_E2E=1 .venv/bin/python -m pytest tests/test_gateway_e2e.py -q
+HARNESS_RUN_LOOPBACK_E2E=1 .venv/bin/python -m pytest tests/test_gateway_e2e.py -q
 
 # Bun CLI → Python sidecar → OpenAI SSE mock 的端到端测试
 cd packages/cli
-ZA38_RUN_LOOPBACK_E2E=1 bun test tests/gateway.integration.test.ts
+HARNESS_RUN_LOOPBACK_E2E=1 bun test tests/gateway.integration.test.ts
 ```
 
 最后两项会绑定 `127.0.0.1` 临时端口，因此在受限沙箱环境中需要允许 loopback，且不访问外网。2026-07-16 工具流与审批 TUI 修复后已验证：Bun 常规回归 56 通过/1 跳过、Python 17 通过/1 跳过，类型检查、协议生成一致性、构建和项目一致性检查通过。两条 loopback E2E 本轮因沙箱禁止绑定本机端口且提权请求被执行环境拒绝而未复跑；此前 v1 阶段曾验证通过，不能替代 v2 的待验收项。离线 Tree-sitter worker 已实际高亮全部 10 个外置首版语言、HTML 内 CSS/JavaScript 注入，并校验全部资源 SHA-256。

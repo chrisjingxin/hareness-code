@@ -14,7 +14,7 @@ from harness_agent.execution import create_execution_context
 from harness_agent.providers.harness_gateway import create_openai_compatible_model
 
 
-def _write_config(path: Path, *, name: str, base_url: str, api_key_env: str = "ZA38_API_KEY") -> None:
+def _write_config(path: Path, *, name: str, base_url: str, api_key_env: str = "HARNESS_API_KEY") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         f'''[model]
@@ -27,7 +27,7 @@ api_key_env = "{api_key_env}"
 X-Client = "za38"
 
 [model.headers_env]
-X-Tenant = "ZA38_TENANT"
+X-Tenant = "HARNESS_TENANT"
 ''',
         encoding="utf-8",
     )
@@ -45,13 +45,13 @@ def test_config_precedence_and_redaction(tmp_path: Path):
         workspace=workspace,
         home=home,
         config_path=explicit,
-        environ={"ZA38_MODEL": "environment", "ZA38_BASE_URL": "https://env.example/v1", "EXPLICIT_KEY": "secret", "ZA38_TENANT": "team-a"},
+        environ={"HARNESS_MODEL": "environment", "HARNESS_BASE_URL": "https://env.example/v1", "EXPLICIT_KEY": "secret", "HARNESS_TENANT": "team-a"},
     )
 
     model = config.require_model()
     assert model.name == "explicit"
     assert model.base_url == "https://explicit.example/v1"
-    assert model.resolve_headers({"ZA38_TENANT": "team-a"})["X-Tenant"] == "team-a"
+    assert model.resolve_headers({"HARNESS_TENANT": "team-a"})["X-Tenant"] == "team-a"
     view = config.redacted({"EXPLICIT_KEY": "secret"})
     assert view["model"]["api_key_configured"] is True
     assert "secret" not in str(view)
@@ -67,12 +67,12 @@ def test_config_requires_complete_model_table(tmp_path: Path):
 
 
 def test_openai_compatible_adapter_is_constructed_without_network(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("ZA38_TEST_KEY", "test-key")
+    monkeypatch.setenv("HARNESS_TEST_KEY", "test-key")
     model = create_openai_compatible_model(
         ModelSettings(
             name="enterprise-model",
             base_url="https://gateway.example.internal/v1",
-            api_key_env="ZA38_TEST_KEY",
+            api_key_env="HARNESS_TEST_KEY",
         )
     )
     assert model.model_name == "enterprise-model"
@@ -83,14 +83,57 @@ def test_execution_defaults_to_local_and_redacts_security_summary(tmp_path: Path
     config = load_config(workspace=tmp_path, home=tmp_path / "home", environ={})
 
     assert config.execution.sandbox_enabled is False
-    assert config.execution.approval_mode == "ask"
+    assert config.execution.approval_mode == "default"
     assert config.redacted()["security"] == {
         "mode": "local",
         "sandbox_enabled": False,
-        "approval_mode": "ask",
+        "approval_mode": "default",
         "provider": None,
         "working_directory": None,
     }
+
+
+@pytest.mark.parametrize("value", ["plan", "default", "auto-edit", "yolo"])
+def test_execution_accepts_all_canonical_approval_modes(tmp_path: Path, value: str):
+    """四个公开模式都应原样进入最终执行设置。"""
+    path = tmp_path / "approval.toml"
+    path.write_text(f"[tools]\napproval_mode = '{value}'\n", encoding="utf-8")
+
+    config = load_config(workspace=tmp_path, home=tmp_path / "home", config_path=path)
+
+    assert config.execution.approval_mode == value
+    assert config.execution.approval_mode_warning is None
+
+
+def test_execution_normalizes_legacy_ask_and_invalid_values(tmp_path: Path):
+    """旧 ask 兼容为 default，未知值必须安全降级并暴露可展示提示。"""
+    legacy = tmp_path / "legacy.toml"
+    legacy.write_text("[tools]\napproval_mode = 'ask'\n", encoding="utf-8")
+    invalid = tmp_path / "invalid.toml"
+    invalid.write_text("[tools]\napproval_mode = 'unsafe'\n", encoding="utf-8")
+
+    legacy_config = load_config(workspace=tmp_path, home=tmp_path / "home", config_path=legacy)
+    invalid_config = load_config(workspace=tmp_path, home=tmp_path / "home", config_path=invalid)
+
+    assert legacy_config.execution.approval_mode == "default"
+    assert "ask 已按默认确认模式执行" in str(legacy_config.execution.approval_mode_warning)
+    assert invalid_config.execution.approval_mode == "default"
+    assert "安全降级" in str(invalid_config.redacted()["security"]["approval_mode_warning"])
+
+
+def test_approval_mode_environment_overrides_toml(tmp_path: Path):
+    """审批模式遵循执行配置的环境变量优先级。"""
+    path = tmp_path / "approval.toml"
+    path.write_text("[tools]\napproval_mode = 'plan'\n", encoding="utf-8")
+
+    config = load_config(
+        workspace=tmp_path,
+        home=tmp_path / "home",
+        config_path=path,
+        environ={"HARNESS_APPROVAL_MODE": "yolo"},
+    )
+
+    assert config.execution.approval_mode == "yolo"
 
 
 def test_remote_sandbox_requires_trusted_provider_configuration(tmp_path: Path):
@@ -116,7 +159,7 @@ def test_project_config_cannot_silently_enable_remote_sandbox(tmp_path: Path):
 
 
 def test_sandbox_environment_overrides_explicit_config(tmp_path: Path):
-    """ZA38_SANDBOX 按 Qwen 风格优先于显式 TOML 配置。"""
+    """HARNESS_SANDBOX 按 Qwen 风格优先于显式 TOML 配置。"""
     config_path = tmp_path / "remote.toml"
     config_path.write_text(
         "[tools]\nsandbox = true\napproval_mode = 'auto-edit'\n\n[sandbox]\nprovider = 'corp'\nfactory = 'corp_sandbox:create_backend'\n",
@@ -127,7 +170,7 @@ def test_sandbox_environment_overrides_explicit_config(tmp_path: Path):
         workspace=tmp_path,
         home=tmp_path / "home",
         config_path=config_path,
-        environ={"ZA38_SANDBOX": "false"},
+        environ={"HARNESS_SANDBOX": "false"},
     )
     assert config.execution.sandbox_enabled is False
     assert config.execution.approval_mode == "auto-edit"
@@ -137,11 +180,11 @@ def test_local_execution_backend_does_not_inherit_model_secret(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """本机兼容模式的 shell 环境不应继承模型网关 Key。"""
-    monkeypatch.setenv("ZA38_API_KEY", "do-not-leak")
+    monkeypatch.setenv("HARNESS_API_KEY", "do-not-leak")
     context = create_execution_context(ExecutionSettings(), tmp_path)
 
     assert context.sandboxed is False
-    assert "ZA38_API_KEY" not in context.backend._env
+    assert "HARNESS_API_KEY" not in context.backend._env
 
 
 def test_remote_backend_failure_never_falls_back_to_local(tmp_path: Path):

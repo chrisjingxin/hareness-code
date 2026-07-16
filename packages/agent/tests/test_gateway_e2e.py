@@ -52,24 +52,24 @@ class _OpenAIStreamingHandler(BaseHTTPRequestHandler):
 
 @pytest.mark.e2e
 async def test_openai_compatible_agent_streams_against_mock_gateway(monkeypatch: pytest.MonkeyPatch):
-    if os.environ.get("ZA38_RUN_LOOPBACK_E2E") != "1":
-        pytest.skip("Set ZA38_RUN_LOOPBACK_E2E=1 to run loopback gateway coverage")
+    if os.environ.get("HARNESS_RUN_LOOPBACK_E2E") != "1":
+        pytest.skip("Set HARNESS_RUN_LOOPBACK_E2E=1 to run loopback gateway coverage")
     _OpenAIStreamingHandler.requests = []
     server = ThreadingHTTPServer(("127.0.0.1", 0), _OpenAIStreamingHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    monkeypatch.setenv("ZA38_TEST_KEY", "test-key")
+    monkeypatch.setenv("HARNESS_TEST_KEY", "test-key")
     try:
         model = create_openai_compatible_model(
             ModelSettings(
                 name="mock",
                 base_url=f"http://127.0.0.1:{server.server_port}/v1",
-                api_key_env="ZA38_TEST_KEY",
+                api_key_env="HARNESS_TEST_KEY",
             )
         )
         agent = create_harness_agent(
             model,
-            auto_approve=True,
+            approval_mode="yolo",
             enable_ask_user=False,
             enable_interpreter=False,
             enable_memory=False,

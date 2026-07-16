@@ -5,6 +5,7 @@ export type SlashCommandName =
   | "quit"
   | "clear"
   | "force-clear"
+  | "status"
   | "version"
 
 export type SlashCommand = {
@@ -24,6 +25,7 @@ export const slashCommandDefinitions: readonly SlashCommandDefinition[] = [
   { name: "quit", aliases: ["q"], description: "退出 za38" },
   { name: "clear", description: "开启新会话" },
   { name: "force-clear", description: "取消当前执行并开启新会话" },
+  { name: "status", description: "显示运行状态" },
   { name: "version", description: "显示版本" },
 ]
 

@@ -4,7 +4,8 @@ import { mkdtemp, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { resolve } from "node:path"
 
-import { validateInteractiveTerminal, validateWorkspace } from "../src/index"
+import { clientCapabilities, validateInteractiveTerminal, validateWorkspace } from "../src/index"
+import { parseArgs } from "../src/args"
 
 test("不存在的工作区会给出明确错误", () => {
   const missing = resolve(tmpdir(), `za38-missing-${crypto.randomUUID()}`)
@@ -22,4 +23,14 @@ test("交互界面拒绝经过管道或任务复用器启动", () => {
   expect(() => validateInteractiveTerminal(undefined, true)).toThrow("requires a real terminal")
   expect(() => validateInteractiveTerminal(true, false)).toThrow("requires a real terminal")
   expect(() => validateInteractiveTerminal(true, true)).not.toThrow()
+})
+
+test("无头 CLI 不协商审批或问答能力", () => {
+  expect(clientCapabilities(parseArgs(["-n", "读取 README"]))).toEqual([
+    "run.cancel",
+    "run.multithread",
+    "config.read",
+  ])
+  expect(clientCapabilities(parseArgs([]))).toContain("interactive.approval")
+  expect(clientCapabilities(parseArgs([]))).toContain("interactive.question")
 })

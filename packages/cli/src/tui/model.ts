@@ -13,7 +13,8 @@ export type TuiRuntime = {
   startupError?: string
   executionMode: "local" | "remote-sandbox"
   sandboxProvider?: string
-  approvalMode: "plan" | "ask" | "auto-edit"
+  approvalMode: "plan" | "default" | "auto-edit" | "yolo"
+  approvalModeWarning?: string
 }
 
 /** 将握手结果收敛为界面可安全显示的运行摘要，避免把配置原样暴露给组件。 */
@@ -35,6 +36,7 @@ export function createTuiRuntime(
     executionMode: security?.mode === "remote-sandbox" ? "remote-sandbox" : "local",
     sandboxProvider: optionalString(security?.provider),
     approvalMode: approvalMode(security?.approval_mode),
+    approvalModeWarning: optionalString(security?.approval_mode_warning),
   }
 }
 
@@ -50,19 +52,30 @@ export function supportsHomeDecoration(width: number, height: number): boolean {
   return width >= 88 && height >= 28
 }
 
-/** 根据启动错误和模型配置生成不泄露凭据的连接状态文案。 */
-export function runtimeStatusLabel(runtime: TuiRuntime): string {
-  if (runtime.startupError) return "配置需要处理"
-  if (!runtime.modelConfigured) return "模型未配置"
-  return "Agent 已连接"
-}
-
 /** 返回执行安全状态，明确本机默认模式不是隔离环境。 */
 export function executionStatusLabel(runtime: TuiRuntime): string {
   if (runtime.executionMode === "remote-sandbox") {
     return runtime.sandboxProvider ? `远端沙箱 · ${runtime.sandboxProvider}` : "远端沙箱"
   }
   return "本机执行 · 未隔离"
+}
+
+/** 返回与配置和协议一致的英文审批模式名，便于终端快速扫描。 */
+export function approvalModeLabel(runtime: TuiRuntime): string {
+  return runtime.approvalMode
+}
+
+/** 生成 /status 使用的本地只读运行摘要，不依赖额外 Agent 或 RPC 调用。 */
+export function runtimeStatusSummary(runtime: TuiRuntime): string {
+  const lines = [
+    `工作区  ${runtime.workspace}`,
+    `模型    ${modelLabel(runtime)}`,
+    `执行    ${executionStatusLabel(runtime)}`,
+    `审批    ${approvalModeLabel(runtime)}`,
+  ]
+  if (runtime.approvalModeWarning) lines.push(`提示    ${runtime.approvalModeWarning}`)
+  if (runtime.startupError) lines.push(`错误    ${runtime.startupError}`)
+  return lines.join("\n")
 }
 
 /** 将毫秒耗时格式化为紧凑的毫秒或秒显示。 */
@@ -84,6 +97,11 @@ function compactNumber(value: number): string {
   return `${(value / 1000).toFixed(value >= 10_000 ? 0 : 1)}k`
 }
 
+/** 将运行时模型配置转换为状态摘要使用的简短文案。 */
+function modelLabel(runtime: TuiRuntime): string {
+  return runtime.modelConfigured ? (runtime.modelName ?? "已配置模型") : "模型未配置"
+}
+
 /** 判断握手字段是否为普通对象，拒绝 null 和数组。 */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null
@@ -99,8 +117,8 @@ function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined
 }
 
-/** 对来自协议的审批模式做白名单解析，未知值回退到保守的 ask。 */
-function approvalMode(value: unknown): "plan" | "ask" | "auto-edit" {
-  if (value === "plan" || value === "auto-edit" || value === "ask") return value
-  return "ask"
+/** 对来自协议的审批模式做白名单解析，未知值回退到保守的默认确认。 */
+function approvalMode(value: unknown): "plan" | "default" | "auto-edit" | "yolo" {
+  if (value === "plan" || value === "default" || value === "auto-edit" || value === "yolo") return value
+  return "default"
 }

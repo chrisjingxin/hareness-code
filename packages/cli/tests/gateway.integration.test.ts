@@ -4,7 +4,7 @@ import { createServer } from "node:http"
 import { tmpdir } from "node:os"
 import { resolve } from "node:path"
 
-const loopbackTest = process.env.ZA38_RUN_LOOPBACK_E2E === "1" ? test : test.skip
+const loopbackTest = process.env.HARNESS_RUN_LOOPBACK_E2E === "1" ? test : test.skip
 
 loopbackTest("CLI, Python sidecar, and OpenAI-compatible streaming gateway work end to end", async () => {
   const server = createServer(async (request, response) => {
@@ -48,7 +48,7 @@ loopbackTest("CLI, Python sidecar, and OpenAI-compatible streaming gateway work 
 provider = "openai-compatible"
 name = "mock"
 base_url = "http://127.0.0.1:${address.port}/v1"
-api_key_env = "ZA38_TEST_KEY"
+api_key_env = "HARNESS_TEST_KEY"
 `,
   )
   const packageDir = resolve(import.meta.dir, "..")
@@ -59,9 +59,9 @@ api_key_env = "ZA38_TEST_KEY"
       cwd: packageDir,
       env: {
         ...process.env,
-        ZA38_AGENT_PYTHON: resolve(agentDir, ".venv/bin/python"),
+        HARNESS_AGENT_PYTHON: resolve(agentDir, ".venv/bin/python"),
         PYTHONPATH: agentDir,
-        ZA38_TEST_KEY: "test-key",
+        HARNESS_TEST_KEY: "test-key",
       },
       stdout: "pipe",
       stderr: "pipe",

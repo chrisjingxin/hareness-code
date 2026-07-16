@@ -9,8 +9,8 @@ test("CLI starts the Python sidecar and returns a completed JSON run", async () 
     cwd: packageDir,
     env: {
       ...process.env,
-      ZA38_ECHO_MODE: "1",
-      ZA38_AGENT_PYTHON: resolve(agentDir, ".venv/bin/python"),
+      HARNESS_ECHO_MODE: "1",
+      HARNESS_AGENT_PYTHON: resolve(agentDir, ".venv/bin/python"),
       PYTHONPATH: agentDir,
     },
     stdout: "pipe",

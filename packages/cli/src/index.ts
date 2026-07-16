@@ -16,14 +16,23 @@ type RunningAgent = {
   stop: () => Promise<void>
 }
 
+/** 根据命令实际是否存在反向交互处理器，声明最小协议能力集合。 */
+export function clientCapabilities(command: Command): string[] {
+  const capabilities = ["run.cancel", "run.multithread", "config.read"]
+  if (command.kind === "run" && !command.nonInteractive) {
+    capabilities.push("interactive.approval", "interactive.question")
+  }
+  return capabilities
+}
+
 /** 启动 Python sidecar、完成 initialize 握手，并返回可关闭的运行句柄。 */
 async function startAgent(command: Command): Promise<RunningAgent> {
   validateWorkspace(command.cwd)
   const sourcePython = resolve(import.meta.dir, "../../agent/.venv/bin/python")
-  const python = process.env.ZA38_AGENT_PYTHON ?? (existsSync(sourcePython) ? sourcePython : "python3")
+  const python = process.env.HARNESS_AGENT_PYTHON ?? (existsSync(sourcePython) ? sourcePython : "python3")
   const sourceAgent = resolve(import.meta.dir, "../../agent")
   const sandboxEnvironment = command.kind === "run" && command.sandbox !== undefined
-    ? { ZA38_SANDBOX: command.sandbox ? "remote" : "false" }
+    ? { HARNESS_SANDBOX: command.sandbox ? "remote" : "false" }
     : {}
   const child = spawn(python, ["-m", "harness_agent"], {
     cwd: command.cwd,
@@ -44,7 +53,7 @@ async function startAgent(command: Command): Promise<RunningAgent> {
   const initialized = await client.call("initialize", {
     protocol: { major: PROTOCOL_VERSION.major, min_minor: 0, max_minor: PROTOCOL_VERSION.minor },
     client: { name: "za38-cli", version: CLI_VERSION },
-    capabilities: ["run.cancel", "run.multithread", "interactive.approval", "interactive.question", "config.read"],
+    capabilities: clientCapabilities(command),
     cwd: command.cwd,
     config_path: command.configPath,
   }) as InitializeResult

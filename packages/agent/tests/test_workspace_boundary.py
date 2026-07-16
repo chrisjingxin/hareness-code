@@ -111,6 +111,20 @@ def test_middleware_rejection_does_not_call_handler(
     assert "工作区边界拒绝" in str(result.content)
 
 
+def test_middleware_preflight_matches_the_execution_boundary(tmp_path: Path):
+    """HITL 预检必须复用最终执行边界，防止越界调用出现可误导的审批框。"""
+    middleware = WorkspaceBoundaryMiddleware(tmp_path)
+    outside = SimpleNamespace(
+        tool_call={"name": "write_file", "id": "outside", "args": {"file_path": "/tmp/outside.md"}}
+    )
+    inside = SimpleNamespace(
+        tool_call={"name": "write_file", "id": "inside", "args": {"file_path": str(tmp_path / "inside.md")}}
+    )
+
+    assert middleware.allows_approval(outside) is False
+    assert middleware.allows_approval(inside) is True
+
+
 async def test_async_middleware_rejection_does_not_call_handler(tmp_path: Path):
     """异步工具链同样必须在进入底层后端前拒绝越界路径。"""
     middleware = WorkspaceBoundaryMiddleware(tmp_path)
@@ -156,7 +170,7 @@ async def test_real_agent_workflow_cannot_write_outside_workspace(tmp_path: Path
         agent = create_harness_agent(
             model,
             cwd=str(tmp_path),
-            auto_approve=True,
+            approval_mode="yolo",
             enable_ask_user=False,
             enable_interpreter=False,
             enable_memory=False,
@@ -206,7 +220,7 @@ async def test_execution_context_workspace_is_used_when_cwd_is_omitted(tmp_path:
     agent = create_harness_agent(
         model,
         execution_context=context,
-        auto_approve=True,
+        approval_mode="yolo",
         enable_ask_user=False,
         enable_interpreter=False,
         enable_memory=False,

@@ -10,7 +10,7 @@ import { IpcClient } from "../ipc/client"
 import { findSlashCommands, parseSlashCommand, slashCommandHelp, type SlashCommand, type SlashCommandDefinition } from "./commands"
 import { HomeView, SessionView, type CommandMenuState } from "./components"
 import { TuiErrorBoundary } from "./error-boundary"
-import type { TuiRuntime } from "./model"
+import { runtimeStatusSummary, type TuiRuntime } from "./model"
 import {
   loadPromptHistory,
   movePromptHistory,
@@ -190,7 +190,7 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
   }, [commit])
 
   /** 执行已接入的本地 Slash Command，不伪造未接入后端能力。 */
-  const executeSlashCommand = useCallback(async (command: SlashCommand) => {
+  const executeSlashCommand = useCallback((command: SlashCommand) => {
     switch (command.name) {
       case "help":
         commit(current => appendNotice(current, slashCommandHelp.map(item => `${item.command}  ${item.description}`).join("\n")))
@@ -206,14 +206,16 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
         }
         return
       case "force-clear":
-        await cancelActiveRun()
-        commit(clearThread)
+        void cancelActiveRun().then(() => commit(clearThread))
+        return
+      case "status":
+        commit(current => appendNotice(current, runtimeStatusSummary(runtime)))
         return
       case "version":
         commit(current => appendNotice(current, `za38-cli ${runtime.cliVersion} · JSON-RPC v2`))
         return
     }
-  }, [cancelActiveRun, commit, onRequestExit, runtime.cliVersion])
+  }, [cancelActiveRun, commit, onRequestExit, runtime])
 
   /** 同步 textarea 草稿、命令菜单过滤状态和历史游标。 */
   const updateDraft = useCallback((value: string) => {
@@ -222,7 +224,12 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
     else promptHistoryCursorRef.current = undefined
     setDraft(value)
     const slashQuery = value.trimStart()
-    const shouldShowMenu = slashQuery.startsWith("/") && !slashQuery.slice(1).match(/\s/)
+    // 输入完整的本地命令后收起菜单，让 Enter 直接执行；未完成前缀继续保留
+    // 筛选菜单，以支持 `/st` + Enter 的补全工作流。
+    const exactLocalCommand = parseSlashCommand(slashQuery)
+    const shouldShowMenu = slashQuery.startsWith("/")
+      && !slashQuery.slice(1).match(/\s/)
+      && !exactLocalCommand
     if (shouldShowMenu && commandMenuDismissedValue.current !== value) {
       setCommandMenu({ visible: true, selectedIndex: 0 })
       return
@@ -377,6 +384,14 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
       return
     }
     if (action === "command-select") {
+      // 手输完整本地命令时，Enter 应与普通提交一致地直接执行；只有 `/st`
+      // 这类未完成前缀才由菜单补全，避免每个命令都需要按两次 Enter。
+      const directCommand = parseSlashCommand(inputRef.current?.plainText ?? draft)
+      if (directCommand && !directCommand.argument) {
+        clearDraft()
+        void executeSlashCommand(directCommand)
+        return
+      }
       const selected = commandOptions[commandMenu.selectedIndex]
       if (selected) selectSlashCommand(selected)
       return

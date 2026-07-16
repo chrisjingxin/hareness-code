@@ -8,6 +8,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Mapping
 
+from harness_agent.approval_mode import (
+    DEFAULT_APPROVAL_MODE,
+    ApprovalMode,
+    parse_approval_mode,
+)
+
 
 class ConfigError(ValueError):
     """最终生效的 za38 配置不合法时抛出，用于向 CLI 返回可操作错误。"""
@@ -19,7 +25,7 @@ class ModelSettings:
 
     name: str
     base_url: str
-    api_key_env: str = "ZA38_API_KEY"
+    api_key_env: str = "HARNESS_API_KEY"
     timeout_seconds: float = 120.0
     max_retries: int = 2
     headers: dict[str, str] = field(default_factory=dict)
@@ -84,7 +90,8 @@ class ExecutionSettings:
     """
 
     sandbox_enabled: bool = False
-    approval_mode: Literal["plan", "ask", "auto-edit"] = "ask"
+    approval_mode: ApprovalMode = DEFAULT_APPROVAL_MODE
+    approval_mode_warning: str | None = None
     remote: RemoteSandboxSettings | None = None
 
     @property
@@ -94,13 +101,16 @@ class ExecutionSettings:
 
     def redacted(self) -> dict[str, object]:
         """返回不含认证材料的执行状态摘要。"""
-        return {
+        result: dict[str, object] = {
             "mode": self.mode,
             "sandbox_enabled": self.sandbox_enabled,
             "approval_mode": self.approval_mode,
             "provider": self.remote.provider if self.remote else None,
             "working_directory": self.remote.working_directory if self.remote else None,
         }
+        if self.approval_mode_warning:
+            result["approval_mode_warning"] = self.approval_mode_warning
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,7 +150,7 @@ def load_config(
 ) -> Za38Config:
     """加载用户级、工作区、环境变量和显式 za38 配置。
 
-    优先级为用户 TOML < 工作区 TOML < ZA38_* 环境变量 < 显式 TOML。
+    优先级为用户 TOML < 工作区 TOML < HARNESS_* 环境变量 < 显式 TOML。
     TOML 只能声明保存秘密的环境变量名，不能包含秘密本身。
     """
     environment = environ or os.environ
@@ -231,14 +241,14 @@ def _merge_flat_values(base: dict[str, object], override: dict[str, object]) -> 
 
 
 def _apply_environment(values: dict[str, object], environ: Mapping[str, str]) -> dict[str, object]:
-    """将允许的 ``ZA38_*`` 环境变量覆盖到非秘密模型字段。"""
+    """将允许的 ``HARNESS_*`` 环境变量覆盖到非秘密模型字段。"""
     result = dict(values)
     mapping = {
-        "ZA38_MODEL": "name",
-        "ZA38_BASE_URL": "base_url",
-        "ZA38_API_KEY_ENV": "api_key_env",
-        "ZA38_TIMEOUT_SECONDS": "timeout_seconds",
-        "ZA38_MAX_RETRIES": "max_retries",
+        "HARNESS_MODEL": "name",
+        "HARNESS_BASE_URL": "base_url",
+        "HARNESS_API_KEY_ENV": "api_key_env",
+        "HARNESS_TIMEOUT_SECONDS": "timeout_seconds",
+        "HARNESS_MAX_RETRIES": "max_retries",
     }
     for env_name, key in mapping.items():
         value = environ.get(env_name)
@@ -250,12 +260,12 @@ def _apply_environment(values: dict[str, object], environ: Mapping[str, str]) ->
 def _apply_execution_environment(
     values: dict[str, object], environ: Mapping[str, str]
 ) -> dict[str, object]:
-    """以 Qwen 风格让 ``ZA38_SANDBOX`` 和审批环境变量覆盖 TOML。"""
+    """以 Qwen 风格让 ``HARNESS_SANDBOX`` 和审批环境变量覆盖 TOML。"""
     result = dict(values)
-    if "ZA38_SANDBOX" in environ:
-        result["sandbox"] = environ["ZA38_SANDBOX"]
-    if "ZA38_APPROVAL_MODE" in environ:
-        result["approval_mode"] = environ["ZA38_APPROVAL_MODE"]
+    if "HARNESS_SANDBOX" in environ:
+        result["sandbox"] = environ["HARNESS_SANDBOX"]
+    if "HARNESS_APPROVAL_MODE" in environ:
+        result["approval_mode"] = environ["HARNESS_APPROVAL_MODE"]
     return result
 
 
@@ -265,9 +275,9 @@ def _parse_execution(
     """校验本机默认和显式远端 sandbox 的有限配置集合。"""
     sandbox_value = tools.get("sandbox", False)
     sandbox_enabled = _sandbox_enabled(sandbox_value)
-    approval_mode = str(tools.get("approval_mode", "ask")).strip()
-    if approval_mode not in {"plan", "ask", "auto-edit"}:
-        raise ConfigError("tools.approval_mode must be one of: plan, ask, auto-edit")
+    approval_mode, approval_mode_warning = parse_approval_mode(
+        tools.get("approval_mode")
+    )
     remote_settings: RemoteSandboxSettings | None = None
     if sandbox_enabled:
         provider = _required_sandbox_string(remote, "provider")
@@ -288,7 +298,8 @@ def _parse_execution(
         )
     return ExecutionSettings(
         sandbox_enabled=sandbox_enabled,
-        approval_mode=approval_mode,  # type: ignore[arg-type]
+        approval_mode=approval_mode,
+        approval_mode_warning=approval_mode_warning,
         remote=remote_settings,
     )
 
@@ -321,7 +332,7 @@ def _parse_model(values: Mapping[str, object]) -> ModelSettings:
 
     name = _required_string(values, "name")
     base_url = _required_string(values, "base_url").rstrip("/")
-    api_key_env = str(values.get("api_key_env", "ZA38_API_KEY")).strip()
+    api_key_env = str(values.get("api_key_env", "HARNESS_API_KEY")).strip()
     if not api_key_env:
         raise ConfigError("model.api_key_env must be a non-empty environment variable name")
 
