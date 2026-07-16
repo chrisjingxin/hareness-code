@@ -56,9 +56,20 @@ def test_execution_context_prompt_marks_local_and_remote_boundaries():
     )
 
     assert "本机工作目录是：`/tmp/work`" in local
-    assert "不是操作系统安全边界" in local
+    assert "文件工具只允许访问" in local
+    assert "不能通过审批绕过" in local
     assert "corp` 远端沙箱" in remote
     assert "`/workspace`" in remote
+
+
+def test_default_local_subagent_has_its_own_workspace_guard(tmp_path):
+    """默认子 Agent 不得因独立 middleware 栈绕过本机文件边界。"""
+    from harness_agent.agent import _create_local_subagents
+    from harness_agent.workspace_boundary import WorkspaceBoundaryMiddleware
+
+    subagents = _create_local_subagents(tmp_path)
+    assert subagents[0]["name"] == "general-purpose"
+    assert isinstance(subagents[0]["middleware"][0], WorkspaceBoundaryMiddleware)
 
 
 async def test_agent_streams_events():

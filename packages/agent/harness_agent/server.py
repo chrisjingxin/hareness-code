@@ -377,9 +377,13 @@ class JsonRpcServer:
             self._runs.pop(run.thread_id, None)
 
     async def _ensure_agent(self) -> Any | None:
-        """按需构建并缓存 Agent。"""
+        """按需构建并缓存 Agent；Echo 测试模式不读取或初始化真实模型。"""
+        # Echo 只用于协议测试。即使当前目录恰好存在模型配置，也必须保持
+        # 无网络、无凭据依赖的确定性行为，避免测试机器环境改变结果。
         if self.agent is not None:
             return self.agent
+        if self._allow_echo:
+            return None
         self._load_config()
         if self._config is None or self._config.model is None:
             return None
