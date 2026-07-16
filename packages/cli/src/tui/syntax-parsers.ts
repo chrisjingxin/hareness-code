@@ -1,3 +1,5 @@
+/** 离线 Tree-sitter parser 注册与企业常用语言别名映射。 */
+
 import { addDefaultParsers, type FiletypeParserOptions } from "@opentui/core"
 
 import { bundledSyntaxParsers } from "./generated-syntax-parsers"
@@ -14,6 +16,7 @@ export function registerCommonSyntaxParsers(): void {
   addDefaultParsers([...bundledSyntaxParsers])
 }
 
+/** 对外暴露已内置的语法语言清单，供诊断与测试复用。 */
 export const SUPPORTED_SYNTAX_LANGUAGES = [
   "markdown",
   "javascript",

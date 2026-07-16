@@ -44,7 +44,7 @@ export function findSlashCommands(value: string): readonly SlashCommandDefinitio
   })
 }
 
-/** 只把完整的 Slash Command 视为本地控制命令，普通文本仍交给 Agent。 */
+/** 将完整输入解析为本地控制命令；未知命令返回 null 并交给 Agent 处理。 */
 export function parseSlashCommand(input: string): SlashCommand | null {
   const value = input.trim()
   if (!value.startsWith("/")) return null

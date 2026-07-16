@@ -64,12 +64,14 @@ async function sendAndFinish(
   const run = requests.at(-1)
   expect(run?.message).toBe(message)
   await act(async () => {
-    client.emit("run/completed", {
+    client.emit("event", {
+      event_id: crypto.randomUUID(),
+      type: "run.completed",
       thread_id: run?.threadId,
       run_id: run?.runId,
       sequence: 1,
-      duration_ms: 1,
-      usage: { input_tokens: 0, output_tokens: 0 },
+      timestamp_ms: Date.now(),
+      payload: { duration_ms: 1, usage: { input_tokens: 0, output_tokens: 0 } },
     })
     await setup.flush()
   })
@@ -83,8 +85,8 @@ function createMockClient() {
   stdin.on("data", data => {
     for (const line of data.toString("utf8").split("\n")) {
       if (!line.trim()) continue
-      const request = JSON.parse(line) as { id?: number; method?: string; params?: Record<string, unknown> }
-      if (request.method !== "query" || typeof request.id !== "number") continue
+      const request = JSON.parse(line) as { id?: string; method?: string; params?: Record<string, unknown> }
+      if (request.method !== "run.start" || typeof request.id !== "string") continue
       const message = typeof request.params?.message === "string" ? request.params.message : ""
       const threadId = typeof request.params?.thread_id === "string" ? request.params.thread_id : "thread-1"
       const runId = typeof request.params?.run_id === "string" ? request.params.run_id : "run-1"

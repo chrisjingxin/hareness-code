@@ -1,3 +1,5 @@
+/** Harness Code 终端主题：暖黑画布、单一蓝色品牌强调和离线语法 scope。 */
+
 import { SyntaxStyle } from "@opentui/core"
 
 /** 暖黑画布与 za38 蓝色强调；代码语义色仅用于帮助阅读模型输出。 */

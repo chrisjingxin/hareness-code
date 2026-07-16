@@ -1,3 +1,5 @@
+/** 全局快捷键解析器；方向键留给 textarea 依据光标位置处理。 */
+
 type KeyLike = {
   name: string
   ctrl: boolean

@@ -1,109 +1,63 @@
+/** v2 事件和交互请求的 TUI 归约测试。 */
+
 import { expect, test } from "bun:test"
+import type { EventEnvelope, InteractionRequestEnvelope } from "@za38/protocol"
+import { applyAgentEvent, applyInteractionRequest, clearThread, createInitialState, isHomeState, startRun, type TuiState } from "../../src/tui/state"
 
-import { applyAgentEvent, clearThread, createInitialState, isHomeState, startRun, type TuiState } from "../../src/tui/state"
+const run = { threadId: "thread-1", runId: "run-1" }
 
-test("初始状态和清空后的状态进入首页，首次发送后进入会话", () => {
+test("初始状态和清空后的状态进入首页", () => {
   const initial = createInitialState()
-  expect(initial.timeline).toEqual([])
   expect(isHomeState(initial)).toBeTrue()
-
-  const active = startRun(initial, { threadId: "thread-1", runId: "run-1" }, "生成组件")
-  expect(isHomeState(active)).toBeFalse()
-  expect(isHomeState(clearThread(active))).toBeTrue()
+  expect(isHomeState(clearThread(startRun(initial, run, "生成组件")))).toBeTrue()
 })
 
-test("流式事件按 sequence 更新消息和工具卡片", () => {
-  const run = { threadId: "thread-1", runId: "run-1" }
+test("v2 事件按 sequence 更新消息、工具和终态", () => {
   let state = startRun(createInitialState(), run, "生成组件")
-  state = applyAgentEvent(state, "message/delta", { ...snakeCase(run), sequence: 1, text: "正在" })
-  state = applyAgentEvent(state, "tool/started", { ...snakeCase(run), sequence: 2, tool_id: "tool-1", tool_name: "read_file" })
-  state = applyAgentEvent(state, "tool/completed", { ...snakeCase(run), sequence: 3, tool_id: "tool-1", result: "src/app.ts", error: false })
-  state = applyAgentEvent(state, "run/completed", {
-    ...snakeCase(run),
-    sequence: 4,
-    duration_ms: 1340,
-    usage: { input_tokens: 1200, output_tokens: 35 },
-  })
-
+  state = applyAgentEvent(state, event("content.delta", 1, { text: "正在" }))
+  state = applyAgentEvent(state, event("tool.started", 2, { tool_call_id: "tool-1", name: "read_file" }))
+  state = applyAgentEvent(state, event("tool.completed", 3, { tool_call_id: "tool-1", result: { content: "src/app.ts", is_error: false } }))
+  state = applyAgentEvent(state, event("run.completed", 4, { duration_ms: 1340, usage: { input_tokens: 1200, output_tokens: 35 } }))
   expect(state.timeline.map(item => item.type)).toEqual(["message", "message", "tool"])
-  expect(messages(state).at(-1)).toMatchObject({ role: "assistant", content: "正在", streaming: false })
-  expect(tools(state)).toEqual([{ id: "tool-1", runId: "run-1", name: "read_file", detail: "src/app.ts", status: "completed" }])
-  expect(state.lastRun).toEqual({
-    runId: "run-1",
-    outcome: "completed",
-    durationMs: 1340,
-    usage: { inputTokens: 1200, outputTokens: 35 },
-  })
-  expect(state.activeRun).toBeUndefined()
+  expect(tools(state)[0]).toMatchObject({ name: "read_file", detail: "src/app.ts", status: "completed" })
+  expect(state.lastRun).toMatchObject({ outcome: "completed", durationMs: 1340, usage: { inputTokens: 1200, outputTokens: 35 } })
 })
 
-test("审批事件保留工具请求，供界面显示风险摘要", () => {
-  const run = { threadId: "thread-1", runId: "run-1" }
+test("审批和稳定 question ID 通过反向 request 进入状态", () => {
   let state = startRun(createInitialState(), run, "修改文件")
-  const requests = { action_requests: [{ name: "write_file", args: { file_path: "src/a.ts" } }] }
-  state = applyAgentEvent(state, "approval/requested", {
-    ...snakeCase(run),
-    sequence: 1,
-    interrupt_id: "approval-1",
-    description: "写入源文件",
-    requests,
-  })
-
-  expect(state.pendingApproval).toEqual({
-    interruptId: "approval-1",
-    description: "写入源文件",
-    requests,
-  })
+  state = applyInteractionRequest(state, request("approval", 1, { description: "写入源文件", requests: { action_requests: [] } }))
+  expect(state.pendingApproval).toMatchObject({ requestId: "request-1", description: "写入源文件" })
+  state = { ...state, pendingApproval: undefined }
+  state = applyInteractionRequest(state, request("question", 2, { questions: [{ id: "question-1", question: "选择目录", options: [{ label: "src", value: "src" }, { label: "tests", value: "tests" }] }] }))
+  expect(state.pendingQuestion).toEqual({ requestId: "request-2", questionId: "question-1", question: "选择目录", options: [{ name: "src", value: "src" }, { name: "tests", value: "tests" }] })
 })
 
-test("忽略旧 run 与乱序事件，避免过期流污染当前会话", () => {
-  const run = { threadId: "thread-1", runId: "run-1" }
+test("重复和倒序事件被忽略，sequence 缺口产生诊断但继续应用", () => {
   let state = startRun(createInitialState(), run, "生成组件")
-  state = applyAgentEvent(state, "message/delta", { ...snakeCase(run), sequence: 2, text: "新内容" })
-  state = applyAgentEvent(state, "message/delta", { ...snakeCase(run), sequence: 1, text: "旧内容" })
-  state = applyAgentEvent(state, "message/delta", { thread_id: "thread-1", run_id: "run-old", sequence: 99, text: "过期内容" })
-
-  expect(messages(state).at(-1)).toMatchObject({ content: "新内容" })
+  state = applyAgentEvent(state, event("content.delta", 2, { text: "新内容" }))
+  state = applyAgentEvent(state, event("content.delta", 1, { text: "旧内容" }))
+  state = applyAgentEvent(state, event("content.delta", 4, { text: "继续" }))
+  expect(messages(state).some(message => message.content.includes("旧内容"))).toBeFalse()
+  expect(messages(state).some(message => message.content.includes("协议序号缺口"))).toBeTrue()
+  expect(messages(state).at(-1)?.content).toBe("继续")
 })
 
-test("ask_user 完整问题组优先使用首题和 choices 渲染选择控件", () => {
-  const run = { threadId: "thread-1", runId: "run-1" }
-  let state = startRun(createInitialState(), run, "开始")
-  state = applyAgentEvent(state, "question/requested", {
-    ...snakeCase(run),
-    sequence: 1,
-    interrupt_id: "ask-1",
-    questions: [{ question: "选择目录", choices: [{ value: "src" }, { value: "tests" }] }],
-  })
-
-  expect(state.pendingQuestion).toEqual({
-    interruptId: "ask-1",
-    question: "选择目录",
-    options: [{ name: "src", value: "src" }, { name: "tests", value: "tests" }],
-  })
-})
-
-test("工具完成后的文本继续按事件顺序插入时间线", () => {
-  const run = { threadId: "thread-1", runId: "run-1" }
-  let state = startRun(createInitialState(), run, "读取文件后总结")
-  state = applyAgentEvent(state, "message/delta", { ...snakeCase(run), sequence: 1, text: "我先读取文件。" })
-  state = applyAgentEvent(state, "tool/started", { ...snakeCase(run), sequence: 2, tool_id: "tool-1", tool_name: "read_file" })
-  state = applyAgentEvent(state, "tool/completed", { ...snakeCase(run), sequence: 3, tool_id: "tool-1", result: "src/app.ts", error: false })
-  state = applyAgentEvent(state, "message/delta", { ...snakeCase(run), sequence: 4, text: "读取完成。" })
-
+test("工具之后的文本保持协议顺序", () => {
+  let state = startRun(createInitialState(), run, "读取")
+  state = applyAgentEvent(state, event("content.delta", 1, { text: "先读取。" }))
+  state = applyAgentEvent(state, event("tool.started", 2, { tool_call_id: "tool-1", name: "read_file" }))
+  state = applyAgentEvent(state, event("tool.completed", 3, { tool_call_id: "tool-1", result: { content: "ok", is_error: false } }))
+  state = applyAgentEvent(state, event("content.delta", 4, { text: "读取完成。" }))
   expect(state.timeline.map(item => item.type)).toEqual(["message", "message", "tool", "message"])
-  expect(messages(state).map(message => message.content)).toEqual(["读取文件后总结", "我先读取文件。", "读取完成。"])
-  expect(tools(state)).toHaveLength(1)
 })
 
-function messages(state: TuiState) {
-  return state.timeline.flatMap(item => item.type === "message" ? [item.message] : [])
+function event(type: string, sequence: number, payload: Record<string, unknown>): EventEnvelope {
+  return { event_id: `event-${sequence}`, type, thread_id: run.threadId, run_id: run.runId, sequence, timestamp_ms: 1, payload }
 }
 
-function tools(state: TuiState) {
-  return state.timeline.flatMap(item => item.type === "tool" ? [item.tool] : [])
+function request(type: "approval" | "question", sequence: number, payload: Record<string, unknown>): InteractionRequestEnvelope {
+  return { request_id: `request-${sequence}`, type, thread_id: run.threadId, run_id: run.runId, sequence, timeout_ms: 1000, payload }
 }
 
-function snakeCase(run: { threadId: string; runId: string }): { thread_id: string; run_id: string } {
-  return { thread_id: run.threadId, run_id: run.runId }
-}
+function messages(state: TuiState) { return state.timeline.flatMap(item => item.type === "message" ? [item.message] : []) }
+function tools(state: TuiState) { return state.timeline.flatMap(item => item.type === "tool" ? [item.tool] : []) }

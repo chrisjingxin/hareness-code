@@ -1,3 +1,5 @@
+/** Harness Code 品牌字标：使用 OpenTUI shade 栅格实现可降级的像素 Logo。 */
+
 import { fonts, RGBA, TextAttributes } from "@opentui/core"
 import { useEffect, useMemo, useState } from "react"
 
@@ -47,6 +49,7 @@ export const HARNESS_WORDMARK_DIMENSIONS = {
   height: fullShape.full.length + 2,
 }
 
+/** 以定时器驱动 shimmer，并将 powered by 锚定在完整字标右下角。 */
 function AnimatedWordmark(props: { shape: LogoShape }) {
   const [now, setNow] = useState(() => performance.now())
   useEffect(() => {
@@ -65,6 +68,7 @@ function AnimatedWordmark(props: { shape: LogoShape }) {
   )
 }
 
+/** 渲染技术品牌小字，避免参与主 Logo 的 flow 布局。 */
 function PoweredBy() {
   return (
     <text fg={tuiTheme.muted} selectable={false}>
@@ -73,10 +77,7 @@ function PoweredBy() {
   )
 }
 
-/**
- * 移植 MiMo Logo 的低频呼吸和从左到右扫光。以 shade 栅格作为 Harness Code 字形，
- * 不携带 MiMo 文字、配色、声音或鼠标彩蛋。
- */
+/** 将单行字形栅格映射到冷白与 za38 蓝色层，并应用 MiMo 风格的呼吸与扫光算法。 */
 function renderLine(line: string, y: number, now: number) {
   const primary = RGBA.fromHex(tuiTheme.primary)
   const shadow = RGBA.fromHex(tuiTheme.primarySoft)
@@ -101,6 +102,7 @@ function renderLine(line: string, y: number, now: number) {
   })
 }
 
+/** 计算低频呼吸与横向 sweep 的合成亮度。 */
 function shimmerStrength(x: number, y: number, width: number, now: number): number {
   const phase = (now % SHIMMER_PERIOD_MS) / SHIMMER_PERIOD_MS
   const ambient = 0.07 + Math.max(0, Math.sin(phase * Math.PI * 2 + x * 0.31 + y * 0.72)) * 0.14
@@ -112,6 +114,7 @@ function shimmerStrength(x: number, y: number, width: number, now: number): numb
   return Math.min(1, ambient + sweep * sweep * 0.82)
 }
 
+/** 拼接 HARNESS 与 CODE 两个 shade 字形区域。 */
 function createShape(left: string, right: string): LogoShape {
   const leftRows = rasterize(left)
   const rightRows = rasterize(right)
@@ -122,6 +125,7 @@ function createShape(left: string, right: string): LogoShape {
   }
 }
 
+/** 将字体行数据转换为不含 OpenTUI 颜色标签的纯栅格。 */
 function rasterize(text: string): string[] {
   return Array.from({ length: shadeFont.lines }, (_, row) => text
     .split("")
@@ -129,6 +133,7 @@ function rasterize(text: string): string[] {
     .join(stripColorTags(shadeFont.letterspace[row] ?? " ")))
 }
 
+/** 删除字体资源中的颜色标签，颜色由 Harness 主题统一控制。 */
 function stripColorTags(value: string): string {
   return value.replace(/<\/?c\d+>/g, "")
 }

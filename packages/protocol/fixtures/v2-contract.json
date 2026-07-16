@@ -1,0 +1,75 @@
+{
+  "valid": [
+    {
+      "kind": "initialize",
+      "value": {
+        "protocol": { "major": 2, "min_minor": 0, "max_minor": 0 },
+        "client": { "name": "fixture", "version": "1.0.0" },
+        "capabilities": ["interactive.question"]
+      }
+    },
+    {
+      "kind": "event",
+      "value": {
+        "event_id": "event-1",
+        "type": "content.delta",
+        "thread_id": "thread-1",
+        "run_id": "run-1",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": { "text": "hello" }
+      }
+    },
+    {
+      "kind": "request",
+      "value": {
+        "request_id": "approval-1",
+        "type": "approval",
+        "thread_id": "thread-1",
+        "run_id": "run-1",
+        "sequence": 2,
+        "timeout_ms": 1000,
+        "payload": {
+          "interrupt_id": "approval-1",
+          "description": "write file",
+          "requests": {},
+          "decisions": ["approve_once", "reject"]
+        }
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "kind": "initialize",
+      "value": {
+        "protocol": { "major": 2, "min_minor": 1, "max_minor": 0 },
+        "client": { "name": "fixture", "version": "1.0.0" },
+        "capabilities": []
+      }
+    },
+    {
+      "kind": "event",
+      "value": {
+        "event_id": "event-2",
+        "type": "content.delta",
+        "thread_id": "thread-1",
+        "run_id": "run-1",
+        "sequence": 2,
+        "timestamp_ms": 2,
+        "payload": { "text": "hello", "typo": true }
+      }
+    },
+    {
+      "kind": "request",
+      "value": {
+        "request_id": "approval-2",
+        "type": "approval",
+        "thread_id": "thread-1",
+        "run_id": "run-1",
+        "sequence": 3,
+        "timeout_ms": 1000,
+        "payload": { "description": "missing interrupt", "decisions": [] }
+      }
+    }
+  ]
+}

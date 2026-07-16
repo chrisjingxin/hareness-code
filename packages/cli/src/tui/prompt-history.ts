@@ -1,3 +1,5 @@
+/** 提示词历史纯逻辑与 JSONL 持久化：不依赖 React，便于 CLI 与测试复用。 */
+
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
@@ -25,9 +27,9 @@ export function rememberPrompt(history: readonly string[], prompt: string): stri
   return [...history, normalized].slice(-PROMPT_HISTORY_LIMIT)
 }
 
-/** 允许测试或嵌入式运行时注入根目录，正常 CLI 固定使用 ~/.za38。 */
+/** 允许测试或嵌入式运行时注入根目录，正常 CLI 固定使用 ~/.harness。 */
 export function promptHistoryPath(home = homedir()): string {
-  return join(home, ".za38", "prompt-history.jsonl")
+  return join(home, ".harness", "prompt-history.jsonl")
 }
 
 /**
@@ -45,6 +47,7 @@ export function parsePromptHistory(text: string): string[] {
   return history.slice(-PROMPT_HISTORY_LIMIT)
 }
 
+/** 加载并自愈本地 JSONL 历史；不可读时安全降级为空历史。 */
 export async function loadPromptHistory(path = promptHistoryPath()): Promise<string[]> {
   let text: string
   try {
@@ -135,6 +138,7 @@ export function movePromptHistory(
   }
 }
 
+/** 兼容字符串和对象两种历史行格式，并忽略损坏 JSON。 */
 function parsePromptHistoryLine(line: string): string | undefined {
   try {
     const parsed: unknown = JSON.parse(line)
@@ -150,10 +154,12 @@ function parsePromptHistoryLine(line: string): string | undefined {
   }
 }
 
+/** 将历史集合编码为每行一个对象的规范 JSONL 文本。 */
 function serializePromptHistory(history: readonly string[]): string {
   return history.length ? `${history.map(input => JSON.stringify({ input })).join("\n")}\n` : ""
 }
 
+/** 比较两个历史集合是否完全相同，避免重复磁盘写入。 */
 function sameHistory(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index])
 }

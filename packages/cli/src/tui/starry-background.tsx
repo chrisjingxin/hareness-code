@@ -1,3 +1,5 @@
+/** 首页星空与流星背景：可固定随机源测试，并在窄终端自动停用。 */
+
 import { RGBA, StyledText, type TextChunk } from "@opentui/core"
 import { useEffect, useMemo, useState } from "react"
 
@@ -85,6 +87,7 @@ export function twinkleStarField(field: StarField, random: RandomSource = Math.r
   return next
 }
 
+/** 生成从屏幕右上方进入的流星初始位置和限速，确保不同终端高度下时长稳定。 */
 export function createMeteor(width: number, height: number, now: number, random: RandomSource = Math.random): Meteor {
   const startY = Math.floor(random() * 2)
   const speed = Math.max(0.011, Math.min(0.038, (height - startY) / (Math.sin(METEOR_ANGLE) * METEOR_DURATION_MS)))
@@ -147,6 +150,7 @@ export function createMeteorCells(field: StarField, meteor: Meteor | undefined, 
   return cells
 }
 
+/** 将星点亮度和 Braille 流星轨迹合成为 OpenTUI StyledText。 */
 export function renderStarField(field: StarField, meteor: Meteor | undefined, now: number): StyledText {
   const meteorCells = createMeteorCells(field, meteor, now)
   const elapsed = meteor ? now - meteor.at : 0
@@ -187,6 +191,7 @@ export function renderStarField(field: StarField, meteor: Meteor | undefined, no
   return new StyledText(chunks)
 }
 
+/** React/OpenTUI 背景组件：负责尺寸变化、星点闪烁和流星定时器生命周期。 */
 export function StarryBackground(props: { width: number; height: number }) {
   const [field, setField] = useState(() => createStarField(props.width, props.height))
   const [meteor, setMeteor] = useState<Meteor>()
@@ -232,6 +237,7 @@ export function StarryBackground(props: { width: number; height: number }) {
   )
 }
 
+/** 合并相邻同色文本块，减少终端绘制对象数量。 */
 function appendChunk(chunks: TextChunk[], text: string, fg: RGBA) {
   const previous = chunks.at(-1)
   if (previous?.fg instanceof RGBA && previous.fg.equals(fg) && previous.bg === undefined && previous.attributes === 0) {

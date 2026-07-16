@@ -1,18 +1,19 @@
 # za38-cli 实现状态与开发交接
 
-> 更新时间：2026-07-15
-> 当前结论：已交付“OpenTUI → Bun CLI → Python sidecar → OpenAI 兼容网关”的可运行纵向切片，包含真实 AskUser/HITL 恢复；**完整 v0.1 尚未完成**。本文用于后续领取任务，所有未完成项均以本文为准。TUI 复用取舍见 `.agent/2026-07-15-tui-reuse-audit.md`。
+> 更新时间：2026-07-16
+> 当前结论：已交付“OpenTUI → Bun CLI → Python sidecar → OpenAI 兼容网关”的可运行纵向切片，包含真实 AskUser/HITL 恢复；**完整 v0.1 尚未完成**。本文只记录已交付能力与实施交接；未完成任务的唯一来源为 `docs/developer/tasks/`，生成看板见 `docs/developer/任务看板.md`。TUI 复用取舍见 `.agent/2026-07-15-tui-reuse-audit.md`。
 
 ## 已实现
 
 ### 通讯与运行控制
 
-- Python `JsonRpcServer` 已从同步阻塞模式改为并发 run 控制面。
-- `query` 会先返回 `thread_id/run_id/accepted`，再在后台 task 中流式执行；同一 thread 的并发 query 会被拒绝。
-- 已实现 `initialize`、`query`、`cancel`、`respond`、`config.show`、`config.path`、`shutdown`。
-- 已实现 `run/started`、`message/delta`、工具事件、`approval/requested`、`question/requested`、`run/completed`、`run/cancelled`、`run/failed` 等 v1 事件；每个 run 带递增 sequence，并保证终态。
-- `respond` 使用 LangGraph 原生 interrupt id 映射恢复；真实 `AskUserMiddleware` 与 `write_file` 拒绝路径均有 deepagents 回归覆盖。
-- Python stdout 仅写 JSONL；Bun 客户端兼容 Node Buffer 与 Bun `Uint8Array` 子进程输出。
+- 协议已直接升级到 JSON-RPC v2：`initialize` 协商 major/minor 与 capability，版本不兼容会在执行业务方法前拒绝。
+- `run.start` 先返回 `thread_id/run_id/accepted` 再创建后台执行；不同 thread 可并发，同一 thread 的第二个活动 run 会被拒绝。
+- Agent 流统一为 `event` notification，包含稳定 `event_id/type/thread_id/run_id/sequence/timestamp_ms/payload`；审批和问答改为 Agent→Client 双向 `request`。
+- Node `JsonRpcPeer` 保留远端错误 code/data，处理半帧、多帧、跨 chunk UTF-8、写入背压、反向请求和连接关闭清理。
+- JSON Schema v2 生成 TypeScript 与 Python Pydantic 模型；共享 fixture 在两端执行，已知 payload 严格拒绝额外字段。
+- stdio 帧限制为 8 MiB，工具参数、结果与审批详情限制为 1 MiB并携带截断元数据；Python stdout 仅写 JSONL。
+- LangGraph interrupt 仍按原生 interrupt id 恢复；真实 AskUser 与 `write_file` 拒绝路径均有 deepagents 回归覆盖。
 
 ### 模型配置与 Agent
 
@@ -22,14 +23,22 @@
 - Agent 保留现有 deepagents 文件工具、todo、task、HITL、ask_user、压缩与 QuickJS 组装逻辑；交互模式的写/编辑/删除等高风险工具明确只允许“批准/拒绝”，不会再意外自动批准。
 - 修正 Memory/Skills middleware：仅对真实存在的 za38 原生路径启用，避免空环境启动失败。
 
+### 可选远端执行（ZC-008 进行中）
+
+- 执行方式调整为 Qwen Code 风格：默认 `tools.sandbox = false`，继续使用本机 backend，并在 TUI 显示“本机执行 · 未隔离”；`cwd` 只表示默认目录，不宣称为安全边界。
+- 新增 `--sandbox`、`ZA38_SANDBOX=true`、`[tools].sandbox` 和 `approval_mode`。只有显式开启时才导入企业远端 `sandbox.factory`；provider 不存在、认证失败或启动失败都会终止该 run，绝不降级为本机 shell。
+- `RemoteSandboxSettings` 支持 provider、factory、逻辑工作目录与不含秘密的 `sandbox.params`。工厂必须返回 deepagents `SandboxBackendProtocol` 并负责工作区同步、网络白名单、认证和生命周期。
+- 远端模式动态提示逻辑工作目录，禁用会在 Python sidecar 执行的 memory、skills 与 `js_eval`；本机工具环境显式不继承模型 API Key 等父进程环境变量。
+- 未交付企业 provider 的具体 API、Docker、Podman、容器镜像、远端同步/回写和企业审计出口；这些依赖企业平台资料，`ZC-008` 保持进行中。
+
 ### CLI 与测试
 
 - 新增 `za38` 入口、`--non-interactive`、`--message`、`--json`、`--config`、`--cwd`、`--resume`、帮助与版本输出。
 - 已实现 `za38 config show|path`。交互模式基于 `@opentui/react` 重设计为 MiMo-Code 截图风格：使用暖黑画布与 za38 蓝色强调，空会话显示沉浸式首页，首次发送后切换为全宽会话流。
 - 首页品牌为 MiMo-Code MIT 字符栅格渲染算法移植的 `HARNESS CODE` 像素字标：保留 shimmer/sweep 动效，使用 za38 蓝色而不复用 MiMo 品牌。`powered by za38` 绝对定位在完整字标右下角。宽终端显示星点、闪烁和 Braille 流星；终端小于 88×28 或 `TERM=dumb` 时自动关闭装饰以保证可读性。
 - composer 支持 `/` 或 `Ctrl+P` 命令弹窗，包含真实可用的 `/help`、`/quit`、`/clear`、`/force-clear`、`/version`；支持筛选、方向键、Tab/Enter、Esc 与鼠标选择。宽终端首页与会话菜单均从输入框上方展开；首页会预留菜单行高，避免遮挡 Logo。
-- composer 使用 `textarea`，`Enter` 发送、`Shift+Enter` 换行，最多 6 行。`Ctrl+C` 会按优先级清空输入、取消运行或退出；`Esc` 取消运行/关闭菜单，`Ctrl+O` 展开全部工具详情。提示词历史持久化在 `~/.za38/prompt-history.jsonl`：跳过损坏行、连续去重、最多 50 条；`/clear` 只清空当前会话，不清除历史。`↑`/`↓` 仅在真实光标位于 composer 首/尾时回填；空 composer 没有可用历史时才滚动会话，手动编辑不会被全局快捷键抢键。
-- 会话流不再使用顶栏和默认侧栏；用户消息、工具、审批和提问均以紧凑的左轨层级呈现。composer 左轨由同一容器绘制并在下沿结束，不再产生越界尾线；无文本流期间和底栏运行态均显示动态 Thinking/spinner。空 composer 时 `↑`/`↓` 浏览时间线、`PageUp`/`PageDown` 翻半页；有文本时保留 textarea 光标移动。
+- composer 使用 `textarea`，`Enter` 发送、`Shift+Enter` 换行，最多 6 行。`Ctrl+C` 会按优先级清空输入、取消运行或退出；`Esc` 取消运行/关闭菜单，`Ctrl+O` 展开全部工具详情。提示词历史持久化在 `~/.harness/prompt-history.jsonl`：跳过损坏行、连续去重、最多 50 条；`/clear` 只清空当前会话，不清除历史。`↑`/`↓` 仅在真实光标位于 composer 首/尾时回填；空 composer 没有可用历史时才滚动会话，手动编辑不会被全局快捷键抢键。
+- 会话流不再使用顶栏和默认侧栏；用户消息、工具、审批和提问均以紧凑的左轨层级呈现。工具流按 provider `index` 关联缺少 `id/name` 的后续参数分片，避免同一次调用拆成 `execute` 与兜底 `tool` 两张卡片；审批 dock 固定保留选项高度，展示动作预览、“允许一次”和“拒绝”，工具或交互阶段不再重复显示 Thinking。composer 左轨由同一容器绘制并在下沿结束，不再产生越界尾线。空 composer 时 `↑`/`↓` 浏览时间线、`PageUp`/`PageDown` 翻半页；有文本时保留 textarea 光标移动。
 - Markdown 和代码块使用统一语义色。首版离线内置 Python、JavaScript/TypeScript、Java、Go、C/C++、Bash、HTML/CSS、JSON、YAML、Markdown 与 Zig；HTML 标签/属性以及 HTML 内的 CSS/JavaScript 注入均有语义高亮。其中 WASM parser 和 query 约 6.6 MB，发布时由 Bun 自动复制到 `dist`，运行时不访问 GitHub。资源来源、SHA-256 与许可证见 `packages/cli/src/tui/assets/syntax/manifest.json` 和 `THIRD_PARTY_NOTICES.md`。
 - 流 reducer 会拒绝旧 run、重复帧和乱序帧，并按 JSON-RPC event sequence 把用户消息、回答文本、工具和系统通知写入统一 timeline，保留工具所属 run、审批请求详情和最终 usage/duration 供界面渲染。
 - OpenTUI 测试渲染器已覆盖 80×24 紧凑首页品牌/底栏与 130×40 会话工具/输入框；通用工具输出采用 OpenCode MIT 的纯函数折叠逻辑，来源 commit 已记录在 `THIRD_PARTY_NOTICES.md`。
@@ -54,15 +63,16 @@ cd packages/cli
 ZA38_RUN_LOOPBACK_E2E=1 bun test tests/gateway.integration.test.ts
 ```
 
-最后两项会绑定 `127.0.0.1` 临时端口，因此在受限沙箱环境中需要允许 loopback。它们不访问外网。本次已验证：Bun 常规回归 35 通过/1 跳过、Python 13 通过/1 跳过；Python Agent 与 Bun CLI 两条 loopback E2E 均通过。离线 Tree-sitter worker 已实际高亮全部 10 个外置首版语言、HTML 内 CSS/JavaScript 注入，并校验全部资源 SHA-256。另以 80×24 与 130×40、`TERM=xterm-256color` 伪终端完成首页星空/闪烁、上方 `/` 菜单、Enter 发送、`/clear` 回首页、空输入的上下/分页浏览、Ctrl+C 语义和 Harness Code 品牌烟测。另新增 RGBA 归一化插值回归，防止 Logo 或星空动画再次退化为近黑色；以本地 echo Agent 验证发送两条提示词后 `↑` 回填最新、`↓` 清空的真实终端行为。
+最后两项会绑定 `127.0.0.1` 临时端口，因此在受限沙箱环境中需要允许 loopback，且不访问外网。2026-07-16 工具流与审批 TUI 修复后已验证：Bun 常规回归 56 通过/1 跳过、Python 17 通过/1 跳过，类型检查、协议生成一致性、构建和项目一致性检查通过。两条 loopback E2E 本轮因沙箱禁止绑定本机端口且提权请求被执行环境拒绝而未复跑；此前 v1 阶段曾验证通过，不能替代 v2 的待验收项。离线 Tree-sitter worker 已实际高亮全部 10 个外置首版语言、HTML 内 CSS/JavaScript 注入，并校验全部资源 SHA-256。
 
 ## 关键文件
 
 | 路径 | 责任 |
 |---|---|
-| `packages/agent/za38_agent/server.py` | 并发 run、JSON-RPC、AskUser/HITL 事件翻译与恢复、配置 RPC |
-| `packages/agent/za38_agent/config.py` | TOML/环境变量合并、脱敏与模型配置校验 |
-| `packages/agent/za38_agent/providers/za38_gateway.py` | OpenAI 兼容 ChatOpenAI adapter |
+| `packages/agent/harness_agent/server.py` | 并发 run、JSON-RPC、AskUser/HITL 事件翻译与恢复、配置 RPC |
+| `packages/agent/harness_agent/config.py` | TOML/环境变量合并、脱敏与模型配置校验 |
+| `packages/agent/harness_agent/execution.py` | 本机默认与企业远端 `SandboxBackendProtocol` 工厂选择、fail-closed 边界 |
+| `packages/agent/harness_agent/providers/harness_gateway.py` | OpenAI 兼容 ChatOpenAI adapter |
 | `packages/cli/src/tui/app.tsx` | OpenTUI 根界面、输入、流式事件、审批和提问交互 |
 | `packages/cli/src/tui/state.ts` | 防乱序的流事件 reducer 与渲染状态 |
 | `packages/cli/src/tui/components.tsx` | 首页、星点背景、Logo、全宽会话流、工具左轨、composer、审批/提问 dock 和状态栏 |
@@ -73,58 +83,19 @@ ZA38_RUN_LOOPBACK_E2E=1 bun test tests/gateway.integration.test.ts
 | `packages/cli/src/tui/syntax-parsers.ts` | 离线 Tree-sitter parser 注册、首版语言清单与诊断入口 |
 | `packages/cli/src/tui/assets/syntax/manifest.json` | 随 CLI 分发的 parser/query 来源与 SHA-256 校验清单 |
 | `packages/cli/src/index.ts` | sidecar 生命周期、无头执行与 OpenTUI 入口 |
-| `packages/cli/src/ipc/client.ts` | JSONL 客户端、请求超时与帧解析 |
-| `packages/protocol/schema/v1.json` | 协议 Schema 来源；当前尚未接入运行时验证 |
+| `packages/cli/src/ipc/client.ts` | v2 双向 JsonRpcPeer、请求超时、反向 request、背压与帧限制 |
+| `packages/protocol/schema/v2.json` | 协议唯一 Schema 来源与生成元数据 |
+| `packages/protocol/fixtures/v2-contract.json` | TypeScript/Python 共用的有效与无效契约 fixture |
 
-## 待领取任务
+## 待领取任务迁移
 
-### P0：完整可用性
+此前 P0/P1/P2 待办已迁移为 `ZC-001` 至 `ZC-009` 的独立任务文件，避免本交接文档与任务系统维护两份状态。领取、阻塞、验收与完成状态请查看 [开发任务看板](../docs/developer/任务看板.md)，并按 [开发工作流](../docs/developer/开发工作流.md) 执行。
 
-1. **OpenTUI 完整体验**
-   - 当前已接入官方 `@opentui/react`，并完成 Harness Code 品牌首页、窄终端降级、动态星空/流星、全宽消息流、离线 Markdown/代码块渲染、工具左轨、Thinking 动效、运行状态栏、审批菜单、单题 ask_user、`/help`、`/clear`、`/force-clear`、`/quit`、`/version`。
-   - 待补多题 ask_user 表单、线程/Agent 选择器、复制快捷键，以及基于未来会话/MCP/技能 RPC 的动态状态信息。
-   - 已加入根级 ErrorBoundary，其降级页支持 `Ctrl+C`、`Ctrl+D`、`Esc` 安全退出。待将 Slash 菜单切换为真实 composer anchor 定位，补滚动加速/可靠 sticky-scroll、bracketed paste/IME 末字符提交保护；星空与 Logo 动画仍应改为 renderable 命令式更新以降低高频 React 重渲染。
-   - `/threads`、`/compact`、`/mcp`、`/tools`、`/reload`、`/remember`、`/skill:<name>`、`/agents` 尚无后端 RPC；当前不会在本地命令或快捷键中伪造这些功能。
-
-2. **安全边界**
-   - 已以真实 deepagents fixture 验证 AskUser 和 `write_file` HITL 的 `Command(resume={interrupt_id: ...})` 恢复格式，并确认拒绝写入不落盘。
-   - 对文件工具增加真实路径与 symlink 工作区边界检查；shell allowlist 目前不是 OS 级隔离，需加入危险语法/路径策略和回归测试。
-   - 将现有 Unicode 安全模块接入工具审批和 TUI 展示。
-
-3. **会话与上下文**
-   - 集成 `AsyncSqliteSaver`、线程 metadata、恢复和 `za38 threads list`；当前 Agent 默认使用内存 checkpointer。
-   - 集成 LocalContext、稳定 usage 累计和 compact 状态。
-
-### P1：保留能力的完整实现
-
-4. **原生子 Agent、记忆与技能**
-   - 实现 `~/.za38` 与 `<workspace>/.za38` 的 agents/skills/AGENTS.md 发现、优先级、frontmatter 校验与 list RPC。
-   - 实现 `/remember`、`/skill:<name>`、`za38 agents list`、`za38 skills list`。
-
-5. **MCP**
-   - 迁移 stdio/SSE/HTTP 配置发现、环境变量插值、工具过滤、session manager。
-   - 实现项目 MCP 指纹信任、OAuth 流程、`/mcp` 与 `za38 mcp list`。
-
-6. **协议加固**
-   - 将 `packages/protocol/schema/v1.json` 接入两端运行时校验并补充共享 fixture。
-   - 增加 heartbeat、工具参数/结果截断、事件持久化与 child exit 诊断。
-
-### P2：发行与企业扩展
-
-7. **跨平台打包和安装器**
-   - 构建携带 Bun、OpenTUI native 库和 Python sidecar 的 darwin/linux/windows 平台包。
-   - 实现 shell、PowerShell、CMD 安装器、签名 manifest、SHA-256、原子升级与 CI 平台冒烟测试。
-   - 当前 `langchain-openai`、QuickJS、MCP adapter 已写入 `pyproject.toml`，开发虚拟环境已安装；尚无锁文件、wheelhouse 或 frozen sidecar。首版 Tree-sitter parser 已随 CLI 源码离线分发并校验 hash；跨平台发行时仍需确认 npm 平台包会携带 `dist` 下的 WASM/query 资源，并完成安装后离线烟测。
-
-8. **企业沙箱 adapter**
-   - 按 `ExecutionBackend` 抽象接入企业 sandbox，接管 shell、文件同步和 diff 回写。
-   - 在此之前，文档必须持续声明本地 shell 仅为尽力限制。
-
-9. **后续明确延期功能**
-   - goal/rubric、审计/hooks、自动更新/doctor、主题/通知/剪贴板/编辑器/媒体、web search/fetch、ACP、za38 垂域代码生成。
+当前能力的用户说明位于 `docs/user/`，架构与协作说明位于 `docs/developer/`；`.agent/` 继续只服务于实施计划和上下文交接。
 
 ## 开发约束
 
+- 已补齐维护中生产源码的中文文件说明、类说明、公开方法说明，以及状态转换、并发、终端兼容和安全边界的关键步骤注释；自动生成资源、第三方离线资产和行为命名测试仅保留来源或用途说明，避免注释噪音。
 - 所有必要代码注释和 docstring 使用中文，解释设计意图与安全约束，不能重复代码字面含义。
 - 不要向 Python stdout 打印日志；所有 stdout 内容必须是 JSON-RPC JSONL。
 - 任何协议修改必须同时修改 TypeScript 类型、Python 行为与至少一条跨进程测试。

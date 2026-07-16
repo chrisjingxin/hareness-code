@@ -11,7 +11,14 @@ test("parses a non-interactive JSON run", () => {
     cwd: "/work",
     configPath: "/tmp/za38.toml",
     threadId: undefined,
+    sandbox: undefined,
   })
+})
+
+test("sandbox 开关只接受企业远端模式或显式关闭", () => {
+  expect(parseArgs(["--sandbox"], "/work").sandbox).toBe("remote")
+  expect(parseArgs(["--sandbox=false"], "/work").sandbox).toBeFalse()
+  expect(() => parseArgs(["--sandbox=docker"], "/work")).toThrow("only supports remote")
 })
 
 test("parses the read-only config management commands", () => {

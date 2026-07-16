@@ -1,7 +1,10 @@
+/** OpenTUI 应用根：协调 IPC 事件、输入状态、快捷键、历史和界面生命周期。 */
+
 import { createCliRenderer, type KeyEvent, type ScrollBoxRenderable, type TextareaRenderable } from "@opentui/core"
 import { createRoot, useKeyboard, useTerminalDimensions } from "@opentui/react"
 import { randomUUID } from "node:crypto"
 import { useCallback, useEffect, useRef, useState } from "react"
+import type { InteractionRequestEnvelope, InteractionResponse } from "@za38/protocol"
 
 import { IpcClient } from "../ipc/client"
 import { findSlashCommands, parseSlashCommand, slashCommandHelp, type SlashCommand, type SlashCommandDefinition } from "./commands"
@@ -20,6 +23,7 @@ import { registerCommonSyntaxParsers } from "./syntax-parsers"
 import {
   appendNotice,
   applyAgentEvent,
+  applyInteractionRequest,
   clearPendingInteraction,
   clearThread,
   createInitialState,
@@ -34,7 +38,7 @@ type TuiOptions = {
   client: IpcClient
   runtime: TuiRuntime
   threadId?: string
-  /** 仅供测试隔离本地历史；正式入口始终使用 ~/.za38/prompt-history.jsonl。 */
+  /** 仅供测试隔离本地历史；正式入口始终使用 ~/.harness/prompt-history.jsonl。 */
   promptHistoryFile?: string
   onRequestExit: () => void
 }
@@ -52,10 +56,14 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
   const [expandedTools, setExpandedTools] = useState<ReadonlySet<string>>(() => new Set())
   const promptHistoryRef = useRef<string[]>([])
   const promptHistoryCursorRef = useRef<PromptHistoryCursor | undefined>(undefined)
+  const interactionResolversRef = useRef(new Map<string, {
+    request: InteractionRequestEnvelope
+    resolve: (response: InteractionResponse) => void
+  }>())
   const historyApplyValueRef = useRef<string | undefined>(undefined)
   const terminal = useTerminalDimensions()
 
-  // 回调可能来自长生命周期的 IPC 监听器，使用 ref 使其始终读取到最新会话状态。
+  /** 提交不可变状态转换；长生命周期 IPC 回调通过 ref 读取最新状态。 */
   const commit = useCallback((transition: (current: TuiState) => TuiState) => {
     const next = transition(stateRef.current)
     stateRef.current = next
@@ -63,29 +71,42 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
   }, [])
 
   useEffect(() => {
-    const listeners = [
-      "run/started",
-      "message/delta",
-      "tool/started",
-      "tool/updated",
-      "tool/completed",
-      "approval/requested",
-      "question/requested",
-      "run/completed",
-      "run/cancelled",
-      "run/failed",
-    ].map(method => {
-      const listener = (payload: Record<string, unknown>) => commit(current => applyAgentEvent(current, method, payload))
-      client.on(method, listener)
-      return { method, listener }
-    })
+    const settleAbandoned = (requestId: string | undefined) => {
+      if (!requestId) return
+      const pending = interactionResolversRef.current.get(requestId)
+      if (!pending) return
+      client.abandonInteraction(requestId)
+      interactionResolversRef.current.delete(requestId)
+      pending.resolve(pending.request.type === "approval"
+        ? { type: "approval", request_id: requestId, decision: "reject" }
+        : { type: "question", request_id: requestId, answers: {} })
+    }
+    const eventListener = (event: import("@za38/protocol").EventEnvelope) => {
+      if (["interaction.resolved", "run.completed", "run.cancelled", "run.failed"].includes(event.type)) {
+        settleAbandoned(stateRef.current.pendingApproval?.requestId ?? stateRef.current.pendingQuestion?.requestId)
+      }
+      commit(current => applyAgentEvent(current, event))
+    }
+    client.on("event", eventListener)
+    const clearRequestHandler = client.setRequestHandler(request => new Promise(resolve => {
+      interactionResolversRef.current.set(request.request_id, { request, resolve })
+      commit(current => applyInteractionRequest(current, request))
+    }))
     const protocolError = (error: Error) => commit(current => appendNotice(current, `协议错误：${error.message}`))
     const closed = (error: Error) => commit(current => appendNotice(current, `Agent 连接已关闭：${error.message}`))
     client.on("protocolError", protocolError)
     client.on("close", closed)
 
     return () => {
-      for (const { method, listener } of listeners) client.off(method, listener)
+      client.off("event", eventListener)
+      clearRequestHandler()
+      for (const [requestId, pending] of interactionResolversRef.current) {
+        client.abandonInteraction(requestId)
+        pending.resolve(pending.request.type === "approval"
+          ? { type: "approval", request_id: requestId, decision: "reject" }
+          : { type: "question", request_id: requestId, answers: {} })
+      }
+      interactionResolversRef.current.clear()
       client.off("protocolError", protocolError)
       client.off("close", closed)
     }
@@ -99,6 +120,7 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
     return () => { disposed = true }
   }, [promptHistoryFile])
 
+  /** 取消当前运行；重复按取消键时把退出意图交给根生命周期。 */
   const cancelActiveRun = useCallback(async () => {
     const active = stateRef.current.activeRun
     if (!active) return false
@@ -115,6 +137,7 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
     return true
   }, [client, commit, onRequestExit])
 
+  /** 登记用户消息、发起 run.start，并校验 sidecar 返回的 run 标识。 */
   const sendAgentMessage = useCallback(async (message: string) => {
     const current = stateRef.current
     if (current.activeRun) {
@@ -136,35 +159,37 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
     }
   }, [client, commit])
 
+  /** 解析 Agent 发起的审批 request，由 JsonRpcPeer 自动回写标准 response。 */
   const respondApproval = useCallback(async (decision: "approve" | "reject") => {
-    const { activeRun, pendingApproval } = stateRef.current
-    if (!activeRun || !pendingApproval?.interruptId) return
+    const { pendingApproval } = stateRef.current
+    if (!pendingApproval?.requestId) return
+    const pending = interactionResolversRef.current.get(pendingApproval.requestId)
+    if (!pending) return
+    interactionResolversRef.current.delete(pendingApproval.requestId)
     commit(clearPendingInteraction)
-    try {
-      // HumanInTheLoopMiddleware 的 resume 契约需要 decisions 包装对象。
-      await client.respond(activeRun.threadId, activeRun.runId, pendingApproval.interruptId, {
-        decisions: [{ type: decision }],
-      })
-    } catch (error) {
-      commit(state => markRunFailed(state, activeRun.runId, errorMessage(error)))
-    }
-  }, [client, commit])
+    pending.resolve({
+      type: "approval",
+      request_id: pendingApproval.requestId,
+      decision: decision === "approve" ? "approve_once" : "reject",
+    })
+  }, [commit])
 
+  /** 将当前首题回答映射到稳定 question ID；多题表单将在后续 TUI 任务扩展。 */
   const respondQuestion = useCallback(async (answer: string) => {
-    const { activeRun, pendingQuestion } = stateRef.current
-    if (!activeRun || !pendingQuestion?.interruptId) return
+    const { pendingQuestion } = stateRef.current
+    if (!pendingQuestion?.requestId) return
+    const pending = interactionResolversRef.current.get(pendingQuestion.requestId)
+    if (!pending) return
+    interactionResolversRef.current.delete(pendingQuestion.requestId)
     commit(clearPendingInteraction)
-    try {
-      // AskUserMiddleware 只接受明确的 answered/answers 结构，避免把自由文本误判为取消。
-      await client.respond(activeRun.threadId, activeRun.runId, pendingQuestion.interruptId, {
-        status: "answered",
-        answers: [answer],
-      })
-    } catch (error) {
-      commit(state => markRunFailed(state, activeRun.runId, errorMessage(error)))
-    }
-  }, [client, commit])
+    pending.resolve({
+      type: "question",
+      request_id: pendingQuestion.requestId,
+      answers: { [pendingQuestion.questionId]: [answer] },
+    })
+  }, [commit])
 
+  /** 执行已接入的本地 Slash Command，不伪造未接入后端能力。 */
   const executeSlashCommand = useCallback(async (command: SlashCommand) => {
     switch (command.name) {
       case "help":
@@ -185,11 +210,12 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
         commit(clearThread)
         return
       case "version":
-        commit(current => appendNotice(current, `za38-cli ${runtime.cliVersion} · JSON-RPC v1`))
+        commit(current => appendNotice(current, `za38-cli ${runtime.cliVersion} · JSON-RPC v2`))
         return
     }
   }, [cancelActiveRun, commit, onRequestExit, runtime.cliVersion])
 
+  /** 同步 textarea 草稿、命令菜单过滤状态和历史游标。 */
   const updateDraft = useCallback((value: string) => {
     // 回填历史会触发 textarea 的内容事件；仅它保留历史游标，用户编辑则立即退出历史浏览。
     if (historyApplyValueRef.current === value) historyApplyValueRef.current = undefined
@@ -205,6 +231,7 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
     setCommandMenu(current => current.visible ? { ...current, visible: false } : current)
   }, [])
 
+  /** 清空 textarea 内部缓冲区和 React 草稿状态。 */
   const clearDraft = useCallback(() => {
     inputRef.current?.clear()
     commandMenuDismissedValue.current = undefined
@@ -214,6 +241,7 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
     setCommandMenu({ visible: false, selectedIndex: 0 })
   }, [])
 
+  /** 用历史项或命令项替换草稿，并把光标放到指定端点。 */
   const replaceDraft = useCallback((value: string, cursor: "start" | "end" = "end", historyCursor?: PromptHistoryCursor) => {
     // setText 会同步 textarea 内部缓冲区，不能只更新 React state，否则 Enter 会发送旧内容。
     promptHistoryCursorRef.current = historyCursor
@@ -226,6 +254,7 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
     setCommandMenu({ visible: false, selectedIndex: 0 })
   }, [])
 
+  /** 在真实编辑缓冲区上移动提示词历史游标。 */
   const navigatePromptHistory = useCallback((direction: "previous" | "next"): boolean => {
     const input = inputRef.current
     const move = movePromptHistory(promptHistoryRef.current, input?.plainText ?? draft, promptHistoryCursorRef.current, direction)
@@ -234,6 +263,7 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
     return true
   }, [draft, replaceDraft])
 
+  /** 把命令菜单选项写回输入框并关闭菜单。 */
   const selectSlashCommand = useCallback((command: SlashCommandDefinition) => {
     const value = `/${command.name}`
     commandMenuDismissedValue.current = value
@@ -243,6 +273,7 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
     setCommandMenu({ visible: false, selectedIndex: 0 })
   }, [])
 
+  /** 通过 `/` 或 Ctrl+P 打开命令菜单并补齐命令前缀。 */
   const openCommandMenu = useCallback(() => {
     const value = draft.trimStart()
     if (!value.startsWith("/") || value.slice(1).match(/\s/)) {
@@ -254,6 +285,7 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
     setCommandMenu({ visible: true, selectedIndex: 0 })
   }, [draft])
 
+  /** 处理 Enter 提交：问答、Slash Command 和普通 Agent 消息走不同路径。 */
   const handleSubmit = useCallback(() => {
     const input = (inputRef.current?.plainText ?? draft).trim()
     if (!input) return
@@ -276,6 +308,7 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
     void sendAgentMessage(input)
   }, [clearDraft, draft, executeSlashCommand, respondQuestion, sendAgentMessage])
 
+  /** 按行或半页滚动当前会话，供空 composer 的方向键使用。 */
   const scrollConversationBy = useCallback((amount: "line-up" | "line-down" | "page-up" | "page-down") => {
     const scroll = conversationScrollRef.current
     if (!scroll || scroll.isDestroyed) return false
@@ -290,6 +323,7 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
     return true
   }, [])
 
+  /** 在 textarea 层处理历史与会话滚动，避免全局 key handler 抢走方向键。 */
   const handleComposerKeyDown = useCallback((key: KeyEvent) => {
     // Slash 菜单由全局快捷键优先处理，不能在 textarea 内重复消费方向键。
     if (commandMenu.visible) return
@@ -367,6 +401,7 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
     if (action === "exit") onRequestExit()
   })
 
+  /** 切换单个工具卡片的展开状态。 */
   const toggleTool = useCallback((toolId: string) => {
     setExpandedTools(current => {
       const next = new Set(current)
@@ -400,10 +435,22 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
   return isHomeState(state) ? <HomeView {...viewProps} /> : <SessionView {...viewProps} />
 }
 
-/** 负责 OpenTUI 生命周期；退出后将控制权交回 CLI 以关闭 Python sidecar。 */
+/** 创建 OpenTUI renderer、挂载错误边界；退出时将控制权交回 CLI 关闭 Python sidecar。 */
 export async function runTui(options: TuiOptions): Promise<void> {
   registerCommonSyntaxParsers()
-  const renderer = await createCliRenderer({ exitOnCtrlC: false, clearOnShutdown: true })
+  // 与 OpenCode 保持一致：renderer 直接占用终端，避免外层控制台捕获 Warp 的能力响应。
+  const renderer = await createCliRenderer({
+    externalOutputMode: "passthrough",
+    targetFps: 60,
+    maxFps: 60,
+    gatherStats: false,
+    exitOnCtrlC: false,
+    clearOnShutdown: true,
+    useKittyKeyboard: {},
+    autoFocus: false,
+    openConsoleOnError: false,
+    useMouse: true,
+  })
   const root = createRoot(renderer)
   await new Promise<void>(resolve => {
     let closed = false
@@ -422,6 +469,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
   })
 }
 
+/** 将未知异常转换为可安全展示的字符串。 */
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }

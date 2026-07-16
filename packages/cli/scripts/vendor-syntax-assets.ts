@@ -1,3 +1,5 @@
+/** 离线语法资源维护脚本：下载、校验并生成可随 CLI 发布的 parser 清单。 */
+
 import { createHash } from "node:crypto"
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { basename, dirname, relative, resolve } from "node:path"
@@ -66,6 +68,7 @@ async function download(source: string, destination: string): Promise<void> {
   if (exitCode !== 0) throw new Error(`下载失败（${exitCode}）：${source}`)
 }
 
+/** 合并本地与远程 query 来源，产出单个可离线分发的 scm 文件。 */
 async function materializeQueries(sources: readonly string[], directory: string, filename: string): Promise<{ path: string }> {
   const queries: string[] = []
   for (const [index, source] of sources.entries()) {
@@ -83,10 +86,12 @@ async function materializeQueries(sources: readonly string[], directory: string,
   return { path }
 }
 
+/** 计算资源内容的 SHA-256，写入 manifest 供离线完整性测试比对。 */
 async function sha256(path: string): Promise<string> {
   return createHash("sha256").update(await readFile(path)).digest("hex")
 }
 
+/** 根据配置生成 TypeScript import 表，避免运行时动态网络解析 parser。 */
 function renderGeneratedParsers(parsers: readonly ParserConfig[]): string {
   const imports = parsers.flatMap(parser => {
     const id = parser.filetype.replaceAll(/[^a-zA-Z0-9]/g, "_")

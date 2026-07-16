@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import sys
+import types
 from pathlib import Path
 
 import pytest
 
-from za38_agent.config import ConfigError, load_config
-from za38_agent.config import ModelSettings
-from za38_agent.providers.za38_gateway import create_openai_compatible_model
+from harness_agent.config import ConfigError, RemoteSandboxSettings, load_config
+from harness_agent.config import ExecutionSettings, ModelSettings
+from harness_agent.execution import create_execution_context
+from harness_agent.providers.harness_gateway import create_openai_compatible_model
 
 
 def _write_config(path: Path, *, name: str, base_url: str, api_key_env: str = "ZA38_API_KEY") -> None:
@@ -34,8 +37,8 @@ def test_config_precedence_and_redaction(tmp_path: Path):
     home = tmp_path / "home"
     workspace = tmp_path / "workspace"
     explicit = tmp_path / "explicit.toml"
-    _write_config(home / ".za38" / "config.toml", name="user", base_url="https://user.example/v1")
-    _write_config(workspace / ".za38" / "config.toml", name="project", base_url="https://project.example/v1")
+    _write_config(home / ".harness" / "config.toml", name="user", base_url="https://user.example/v1")
+    _write_config(workspace / ".harness" / "config.toml", name="project", base_url="https://project.example/v1")
     _write_config(explicit, name="explicit", base_url="https://explicit.example/v1", api_key_env="EXPLICIT_KEY")
 
     config = load_config(
@@ -55,7 +58,7 @@ def test_config_precedence_and_redaction(tmp_path: Path):
 
 
 def test_config_requires_complete_model_table(tmp_path: Path):
-    path = tmp_path / ".za38" / "config.toml"
+    path = tmp_path / ".harness" / "config.toml"
     path.parent.mkdir(parents=True)
     path.write_text("[model]\nname = 'missing-url'\n", encoding="utf-8")
 
@@ -73,3 +76,125 @@ def test_openai_compatible_adapter_is_constructed_without_network(monkeypatch: p
         )
     )
     assert model.model_name == "enterprise-model"
+
+
+def test_execution_defaults_to_local_and_redacts_security_summary(tmp_path: Path):
+    """未配置 sandbox 时保持本机执行，并向 TUI 明确暴露未隔离状态。"""
+    config = load_config(workspace=tmp_path, home=tmp_path / "home", environ={})
+
+    assert config.execution.sandbox_enabled is False
+    assert config.execution.approval_mode == "ask"
+    assert config.redacted()["security"] == {
+        "mode": "local",
+        "sandbox_enabled": False,
+        "approval_mode": "ask",
+        "provider": None,
+        "working_directory": None,
+    }
+
+
+def test_remote_sandbox_requires_trusted_provider_configuration(tmp_path: Path):
+    """显式开启远端 sandbox 时缺少 provider 必须在配置阶段失败。"""
+    config_path = tmp_path / "remote.toml"
+    config_path.write_text("[tools]\nsandbox = true\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="sandbox.provider"):
+        load_config(workspace=tmp_path, home=tmp_path / "home", config_path=config_path)
+
+
+def test_project_config_cannot_silently_enable_remote_sandbox(tmp_path: Path):
+    """项目目录的 tools/sandbox 表不具备导入企业 provider 的授权。"""
+    project_config = tmp_path / ".harness" / "config.toml"
+    project_config.parent.mkdir(parents=True)
+    project_config.write_text(
+        "[tools]\nsandbox = true\n\n[sandbox]\nprovider = 'hostile'\nfactory = 'hostile.module:create'\n",
+        encoding="utf-8",
+    )
+
+    config = load_config(workspace=tmp_path, home=tmp_path / "home", environ={})
+    assert config.execution.sandbox_enabled is False
+
+
+def test_sandbox_environment_overrides_explicit_config(tmp_path: Path):
+    """ZA38_SANDBOX 按 Qwen 风格优先于显式 TOML 配置。"""
+    config_path = tmp_path / "remote.toml"
+    config_path.write_text(
+        "[tools]\nsandbox = true\napproval_mode = 'auto-edit'\n\n[sandbox]\nprovider = 'corp'\nfactory = 'corp_sandbox:create_backend'\n",
+        encoding="utf-8",
+    )
+
+    config = load_config(
+        workspace=tmp_path,
+        home=tmp_path / "home",
+        config_path=config_path,
+        environ={"ZA38_SANDBOX": "false"},
+    )
+    assert config.execution.sandbox_enabled is False
+    assert config.execution.approval_mode == "auto-edit"
+
+
+def test_local_execution_backend_does_not_inherit_model_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """本机兼容模式的 shell 环境不应继承模型网关 Key。"""
+    monkeypatch.setenv("ZA38_API_KEY", "do-not-leak")
+    context = create_execution_context(ExecutionSettings(), tmp_path)
+
+    assert context.sandboxed is False
+    assert "ZA38_API_KEY" not in context.backend._env
+
+
+def test_remote_backend_failure_never_falls_back_to_local(tmp_path: Path):
+    """远端 provider 缺失时必须终止启动，不能返回宿主机 backend。"""
+    settings = ExecutionSettings(
+        sandbox_enabled=True,
+        remote=RemoteSandboxSettings(
+            provider="corp",
+            factory="missing_corp_provider:create_backend",
+        ),
+    )
+
+    with pytest.raises(ConfigError, match="Remote sandbox provider 'corp' is unavailable"):
+        create_execution_context(settings, tmp_path)
+
+
+def test_remote_backend_factory_receives_workspace_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """企业插件获得宿主工作区和逻辑远端目录，并产出真正的 sandbox backend。"""
+    from deepagents.backends.protocol import ExecuteResponse, SandboxBackendProtocol
+
+    received: dict[str, object] = {}
+
+    class FakeSandbox(SandboxBackendProtocol):
+        @property
+        def id(self) -> str:
+            return "corp-test"
+
+        def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+            return ExecuteResponse(output=command, exit_code=0)
+
+    module = types.ModuleType("test_corp_sandbox")
+
+    def create_backend(**kwargs: object) -> SandboxBackendProtocol:
+        received.update(kwargs)
+        return FakeSandbox()
+
+    module.create_backend = create_backend  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "test_corp_sandbox", module)
+    settings = ExecutionSettings(
+        sandbox_enabled=True,
+        remote=RemoteSandboxSettings(
+            provider="corp",
+            factory="test_corp_sandbox:create_backend",
+            working_directory="/workspace",
+            params={"project": "payments"},
+        ),
+    )
+
+    context = create_execution_context(settings, tmp_path)
+    assert context.sandboxed is True
+    assert context.workspace_path == "/workspace"
+    assert received["workspace"] == tmp_path
+    assert received["provider"] == "corp"
+    assert received["params"] == {"project": "payments"}

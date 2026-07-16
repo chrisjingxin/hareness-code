@@ -1,77 +1,71 @@
-import { test, expect } from "bun:test"
+/** v2 双向 Peer 的 JSONL、错误、反向请求与资源边界测试。 */
+
+import { expect, test } from "bun:test"
 import { PassThrough } from "node:stream"
-import { IpcClient } from "../../src/ipc/client"
+import { IpcClient, JsonRpcRemoteError } from "../../src/ipc/client"
 
-test("IpcClient 发送 initialize 并收到响应", async () => {
-  const mockStdout = new PassThrough()
-  const mockStdin = new PassThrough()
-
-  const client = new IpcClient(mockStdin, mockStdout)
-
-  // 模拟 Python 在 stdout 上响应
-  mockStdin.on("data", (data) => {
-    const lines = data.toString().split("\n").filter(l => l.trim())
-    for (const line of lines) {
-      const msg = JSON.parse(line)
-      if (msg.method === "initialize") {
-        mockStdout.write(JSON.stringify({
-          jsonrpc: "2.0",
-          result: {
-            server_info: { name: "za38-agent", version: "0.1.0" },
-            capabilities: { streaming: true, hitl: true },
-          },
-          id: msg.id,
-        }) + "\n")
-      }
-    }
+test("Peer 使用字符串 ID 发送请求并保留远端错误", async () => {
+  const { client, stdin, stdout } = peer()
+  stdin.on("data", data => {
+    const message = JSON.parse(data.toString())
+    stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, error: { code: -32010, message: "配置错误", data: { field: "model" } } }) + "\n")
   })
-
-  const result = await client.call("initialize", { client_info: { name: "test", version: "0.1.0" } }) as any
-  expect(result.server_info.name).toBe("za38-agent")
-  expect(result.capabilities.streaming).toBe(true)
+  const error = await client.call("config.show").catch(value => value)
+  expect(error).toBeInstanceOf(JsonRpcRemoteError)
+  expect(error).toMatchObject({ code: -32010, data: { field: "model" } })
 })
 
-test("IpcClient 接收通知", async () => {
-  const mockStdout = new PassThrough()
-  const mockStdin = new PassThrough()
-  const client = new IpcClient(mockStdin, mockStdout)
+test("Peer 处理半帧、多帧和统一 event", async () => {
+  const { client, stdout } = peer()
+  const events: any[] = []
+  client.on("event", event => events.push(event))
+  const first = JSON.stringify({ jsonrpc: "2.0", method: "event", params: envelope("content.delta", 1, { text: "你好" }) })
+  const second = JSON.stringify({ jsonrpc: "2.0", method: "event", params: envelope("run.completed", 2, {}) })
+  const bytes = Buffer.from(`${first}\n${second}\n`)
+  stdout.write(bytes.subarray(0, 23))
+  stdout.write(bytes.subarray(23))
+  await Bun.sleep(10)
+  expect(events.map(item => item.type)).toEqual(["content.delta", "run.completed"])
+})
 
-  const notifications: any[] = []
-  client.on("stream/text", (params) => notifications.push(params))
-
-  mockStdout.write(JSON.stringify({
-    jsonrpc: "2.0",
-    method: "stream/text",
-    params: { text: "hello", thread_id: "t1" },
+test("Peer 响应 Agent 发起的审批 request", async () => {
+  const { client, stdin, stdout } = peer()
+  client.setRequestHandler(async request => ({ type: "approval", request_id: request.request_id, decision: "reject" }))
+  const responses: any[] = []
+  stdin.on("data", data => responses.push(...data.toString().trim().split("\n").map(JSON.parse)))
+  stdout.write(JSON.stringify({
+    jsonrpc: "2.0", method: "request", id: "approval-1",
+    params: { request_id: "approval-1", type: "approval", thread_id: "t", run_id: "r", sequence: 1, timeout_ms: 1000, payload: { interrupt_id: "approval-1", description: "写文件", requests: {}, decisions: ["approve_once", "reject"] } },
   }) + "\n")
-
-  await new Promise(r => setTimeout(r, 50))
-
-  expect(notifications).toHaveLength(1)
-  expect(notifications[0].text).toBe("hello")
+  await Bun.sleep(10)
+  expect(responses[0]).toMatchObject({ id: "approval-1", result: { decision: "reject" } })
 })
 
-test("IpcClient query 发送 query 方法", async () => {
-  const mockStdout = new PassThrough()
-  const mockStdin = new PassThrough()
-  const client = new IpcClient(mockStdin, mockStdout)
-
-  let sentMessage: any
-  mockStdin.on("data", (data) => {
-    const lines = data.toString().split("\n").filter(l => l.trim())
-    for (const line of lines) {
-      sentMessage = JSON.parse(line)
-      if (sentMessage.method === "query") {
-        mockStdout.write(JSON.stringify({
-          jsonrpc: "2.0",
-          result: { thread_id: "t1", accepted: true },
-          id: sentMessage.id,
-        }) + "\n")
-      }
-    }
-  })
-
-  await client.query("hello world")
-  expect(sentMessage.method).toBe("query")
-  expect(sentMessage.params.message).toBe("hello world")
+test("Peer 对畸形反向 request 返回结构化错误", async () => {
+  const { stdin, stdout } = peer()
+  const responses: any[] = []
+  stdin.on("data", data => responses.push(JSON.parse(data.toString())))
+  stdout.write(JSON.stringify({ jsonrpc: "2.0", method: "request", id: "bad-1", params: { type: "approval" } }) + "\n")
+  await Bun.sleep(10)
+  expect(responses[0]).toMatchObject({ id: "bad-1", error: { code: -32602 } })
 })
+
+test("Peer 拒绝超过限制的无换行帧并关闭 pending 请求", async () => {
+  const { client, stdout } = peer(64)
+  const errors: Error[] = []
+  client.on("protocolError", error => errors.push(error))
+  const pending = client.call("config.show", {}, 0).catch(error => error)
+  stdout.write("x".repeat(65))
+  expect(await pending).toBeInstanceOf(Error)
+  expect(errors[0]?.message).toContain("exceeds")
+})
+
+function peer(limit?: number) {
+  const stdout = new PassThrough()
+  const stdin = new PassThrough()
+  return { client: new IpcClient(stdin, stdout, limit), stdin, stdout }
+}
+
+function envelope(type: string, sequence: number, payload: Record<string, unknown>) {
+  return { event_id: `e-${sequence}`, type, thread_id: "t", run_id: "r", sequence, timestamp_ms: 1, payload }
+}

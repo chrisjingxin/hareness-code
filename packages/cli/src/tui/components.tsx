@@ -1,3 +1,5 @@
+/** Harness Code 的 OpenTUI 视图组件：首页、会话时间线、交互面板与 composer。 */
+
 import type { KeyEvent, ScrollBoxRenderable, TextareaRenderable } from "@opentui/core"
 import { useEffect, useState, type RefObject } from "react"
 
@@ -5,6 +7,7 @@ import { findSlashCommands, type SlashCommandDefinition } from "./commands"
 import {
   formatDuration,
   formatUsage,
+  executionStatusLabel,
   runtimeStatusLabel,
   supportsHomeDecoration,
   type TuiRuntime,
@@ -100,6 +103,7 @@ export function SessionView(props: SharedViewProps) {
   )
 }
 
+/** 首页快捷键提示，在命令菜单展开时由上层隐藏。 */
 function HomeSupplemental(props: { terminalWidth: number }) {
   return (
     <>
@@ -117,6 +121,7 @@ function HomeSupplemental(props: { terminalWidth: number }) {
   )
 }
 
+/** 使用 ScrollBox 渲染统一 timeline，并保留 sticky-scroll 行为。 */
 export function ConversationTimeline(props: {
   state: TuiState
   scrollRef: RefObject<ScrollBoxRenderable | null>
@@ -147,6 +152,7 @@ export function ConversationTimeline(props: {
  * 消息与工具共用同一时间线，必须在这里逐项渲染，不能再次按类型拆成两个列表；
  * 否则工具卡片会被错误地堆到所有回答文本之后。
  */
+/** 根据统一 timeline item 类型选择消息或工具渲染器。 */
 function TimelineRow(props: {
   item: TimelineItem
   state: TuiState
@@ -165,6 +171,7 @@ function TimelineRow(props: {
   )
 }
 
+/** 渲染用户、Agent 和系统消息，并为 Agent Markdown 接入离线语法主题。 */
 function MessageBlock(props: { message: ConversationMessage; state: TuiState }) {
   if (props.message.role === "user") {
     return (
@@ -177,7 +184,11 @@ function MessageBlock(props: { message: ConversationMessage; state: TuiState }) 
   }
 
   if (props.message.role === "assistant") {
-    if (props.message.streaming && !props.message.content) return <ThinkingIndicator state={props.state} />
+    if (props.message.streaming && !props.message.content) {
+      // 工具卡片和交互 dock 已经表达运行状态，避免同时保留一个误导性的 Thinking 行。
+      if (props.state.pendingApproval || props.state.pendingQuestion || props.state.status === "正在调用工具") return null
+      return <ThinkingIndicator state={props.state} />
+    }
     // 工具先于文本返回时会留下一个空占位；结束后不应渲染无意义的省略号。
     if (!props.message.content) return null
     return (
@@ -205,6 +216,7 @@ function MessageBlock(props: { message: ConversationMessage; state: TuiState }) 
   )
 }
 
+/** 渲染工具状态、折叠预览和可展开原始输出。 */
 function ToolRow(props: { tool: ToolCard; expanded: boolean; onToggle: () => void }) {
   const tone = props.tool.status === "failed" ? tuiTheme.danger : props.tool.status === "completed" ? tuiTheme.success : tuiTheme.primary
   const marker = props.tool.status === "failed" ? "×" : props.tool.status === "completed" ? "✓" : "◌"
@@ -229,6 +241,7 @@ function ToolRow(props: { tool: ToolCard; expanded: boolean; onToggle: () => voi
   )
 }
 
+/** 在流式回答尚未产生文本时显示轻量 Thinking 动效。 */
 function ThinkingIndicator(props: { state: TuiState }) {
   const frame = useSpinner(Boolean(props.state.activeRun), 80)
   const label = props.state.status === "正在调用工具" ? "正在调用工具" : props.state.status === "正在继续执行" ? "继续执行" : "Thinking"
@@ -240,6 +253,7 @@ function ThinkingIndicator(props: { state: TuiState }) {
   )
 }
 
+/** 显示运行终态、耗时和 token 用量摘要。 */
 function RunSummary(props: { state: TuiState }) {
   const summary = props.state.lastRun
   if (!summary) return null
@@ -257,6 +271,7 @@ function RunSummary(props: { state: TuiState }) {
   )
 }
 
+/** 渲染审批或问答交互，并保持选择控件焦点。 */
 export function InteractionDock(props: {
   approval?: PendingApproval
   question?: PendingQuestion
@@ -265,7 +280,7 @@ export function InteractionDock(props: {
 }) {
   if (props.approval) {
     return (
-      <box marginLeft={2} marginRight={2} marginBottom={1} border={["left"]} borderColor={tuiTheme.warning} customBorderChars={PROMPT_BORDER}>
+      <box flexShrink={0} marginLeft={2} marginRight={2} marginBottom={1} border={["left"]} borderColor={tuiTheme.warning} customBorderChars={PROMPT_BORDER}>
         <box backgroundColor={tuiTheme.toolSurface} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
           <box flexDirection="row" gap={1}>
             <text fg={tuiTheme.warning}>△</text>
@@ -275,6 +290,9 @@ export function InteractionDock(props: {
           <ApprovalRequestPreview requests={props.approval.requests} />
           <select
             focused
+            height={4}
+            showDescription
+            wrapSelection
             options={[
               { name: "允许一次", description: "继续执行当前操作", value: "approve" },
               { name: "拒绝", description: "停止此操作并告知 Agent", value: "reject" },
@@ -291,7 +309,7 @@ export function InteractionDock(props: {
 
   if (props.question?.options.length) {
     return (
-      <box marginLeft={2} marginRight={2} marginBottom={1} border={["left"]} borderColor={tuiTheme.primary} customBorderChars={PROMPT_BORDER}>
+      <box flexShrink={0} marginLeft={2} marginRight={2} marginBottom={1} border={["left"]} borderColor={tuiTheme.primary} customBorderChars={PROMPT_BORDER}>
         <box backgroundColor={tuiTheme.toolSurface} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
           <box flexDirection="row" gap={1}>
             <text fg={tuiTheme.primary}>?</text>
@@ -300,6 +318,9 @@ export function InteractionDock(props: {
           <text content={props.question.question} fg={tuiTheme.text} />
           <select
             focused
+            height={Math.max(2, Math.min(6, props.question.options.length * 2))}
+            showDescription
+            wrapSelection
             options={props.question.options.map(option => ({ ...option, description: option.name }))}
             onSelect={(_, option) => { if (typeof option?.value === "string") props.onQuestion(option.value) }}
           />
@@ -312,6 +333,7 @@ export function InteractionDock(props: {
   return null
 }
 
+/** 会话 composer 上方的实时模型和运行状态行。 */
 function SessionRuntimeLine(props: { runtime: TuiRuntime; state: TuiState }) {
   return (
     <box flexDirection="row" gap={1} paddingBottom={1}>
@@ -319,11 +341,13 @@ function SessionRuntimeLine(props: { runtime: TuiRuntime; state: TuiState }) {
       <text fg={tuiTheme.primary}>Harness Code</text>
       <text fg={tuiTheme.muted}>·</text>
       <text fg={props.runtime.modelConfigured ? tuiTheme.text : tuiTheme.warning}>{modelLabel(props.runtime)}</text>
+      <text fg={props.runtime.executionMode === "remote-sandbox" ? tuiTheme.success : tuiTheme.warning}>· {executionStatusLabel(props.runtime)}</text>
       <text fg={tuiTheme.muted}>· {props.state.status}</text>
     </box>
   )
 }
 
+/** 渲染统一左轨 composer、命令菜单和运行时元信息。 */
 export function Composer(props: Pick<SharedViewProps, "runtime" | "state" | "inputRef" | "value" | "onInput" | "onComposerKeyDown" | "onSubmit" | "commandMenu" | "onSelectCommand" | "onHoverCommand"> & {
   variant: "home" | "session"
   commandMenuPlacement: "above" | "inline-below"
@@ -381,6 +405,7 @@ export function Composer(props: Pick<SharedViewProps, "runtime" | "state" | "inp
   )
 }
 
+/** 渲染可筛选的 Slash 命令候选列表，并共享键盘与鼠标选择回调。 */
 function CommandMenu(props: {
   options: readonly SlashCommandDefinition[]
   selectedIndex: number
@@ -424,6 +449,7 @@ function CommandMenu(props: {
   )
 }
 
+/** 渲染输入框下方的品牌、模型和连接状态元信息。 */
 function RuntimeMeta(props: { runtime: TuiRuntime; variant: "home" | "session" }) {
   const showConnectionStatus = props.runtime.modelConfigured || Boolean(props.runtime.startupError)
   return (
@@ -431,11 +457,13 @@ function RuntimeMeta(props: { runtime: TuiRuntime; variant: "home" | "session" }
       <text fg={tuiTheme.primary}>Harness Code</text>
       <text fg={tuiTheme.muted}>·</text>
       <text fg={props.runtime.modelConfigured ? tuiTheme.text : tuiTheme.warning}>{modelLabel(props.runtime)}</text>
+      <text fg={props.runtime.executionMode === "remote-sandbox" ? tuiTheme.success : tuiTheme.warning}>· {executionStatusLabel(props.runtime)}</text>
       {props.variant === "home" && showConnectionStatus ? <text fg={tuiTheme.muted}>· {runtimeStatusLabel(props.runtime)}</text> : null}
     </box>
   )
 }
 
+/** 渲染工作区、Git 分支、运行快捷键和 CLI 版本底栏。 */
 function FooterRail(props: { runtime: TuiRuntime; state: TuiState; terminalWidth: number; session?: boolean }) {
   const showFullPath = props.terminalWidth >= 108
   const showBranch = props.terminalWidth >= 84 && props.runtime.gitBranch
@@ -446,6 +474,7 @@ function FooterRail(props: { runtime: TuiRuntime; state: TuiState; terminalWidth
       <box flexDirection="row" gap={1} flexShrink={1}>
         <text fg={tuiTheme.muted}>{workspace}</text>
         {showBranch ? <text fg={tuiTheme.subtle}>:{props.runtime.gitBranch}</text> : null}
+        {props.terminalWidth >= 96 ? <text fg={props.runtime.executionMode === "remote-sandbox" ? tuiTheme.success : tuiTheme.warning}>· {props.runtime.executionMode === "remote-sandbox" ? "Sandbox" : "Local"}</text> : null}
       </box>
       {props.state.activeRun ? <BusyRunHint /> : props.session ? <text fg={tuiTheme.muted}>↑↓ 历史提示词 · PgUp/PgDn 浏览 · Ctrl+O 工具详情</text> : null}
       <text fg={tuiTheme.subtle}>v{props.runtime.cliVersion}</text>
@@ -453,6 +482,7 @@ function FooterRail(props: { runtime: TuiRuntime; state: TuiState; terminalWidth
   )
 }
 
+/** 运行中底栏提示，使用同一 spinner 视觉语言。 */
 function BusyRunHint() {
   const frame = useSpinner(true, 80)
   return (
@@ -463,11 +493,13 @@ function BusyRunHint() {
   )
 }
 
+/** 将审批请求中的动作摘要交给工具面板显示。 */
 function ApprovalRequestPreview(props: { requests: unknown }) {
   const preview = approvalPreview(props.requests)
   return preview ? <text content={preview} fg={tuiTheme.muted} /> : null
 }
 
+/** 从不可信审批 payload 中提取有限长度的安全预览。 */
 function approvalPreview(requests: unknown): string | undefined {
   if (!requests || typeof requests !== "object") return undefined
   const actions = (requests as Record<string, unknown>).action_requests
@@ -481,6 +513,7 @@ function approvalPreview(requests: unknown): string | undefined {
   }).join("\n")
 }
 
+/** 管理 spinner 定时器，并在组件卸载时清理。 */
 function useSpinner(active: boolean, interval: number): string {
   const [frame, setFrame] = useState(0)
   useEffect(() => {
@@ -494,15 +527,18 @@ function useSpinner(active: boolean, interval: number): string {
   return SPINNER_FRAMES[frame % SPINNER_FRAMES.length] ?? "·"
 }
 
+/** 将运行时模型配置转换为简短状态文案。 */
 function modelLabel(runtime: TuiRuntime): string {
   return runtime.modelConfigured ? (runtime.modelName ?? "已配置模型") : "模型未配置"
 }
 
+/** 按字符数截断普通预览文本。 */
 function shorten(value: string, limit: number): string {
   if (value.length <= limit) return value
   return `${value.slice(0, Math.max(0, limit - 1))}…`
 }
 
+/** 安全序列化工具参数，避免循环引用破坏整个 TUI。 */
 function safePreview(value: unknown): string | undefined {
   if (value === undefined) return undefined
   try {
@@ -512,6 +548,7 @@ function safePreview(value: unknown): string | undefined {
   }
 }
 
+/** 将运行状态映射到统一语义色。 */
 function statusColor(status: string): string {
   if (status === "已完成") return tuiTheme.success
   if (status === "已取消") return tuiTheme.muted

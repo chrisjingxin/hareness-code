@@ -1,8 +1,9 @@
 #!/usr/bin/env bun
+/** za38 CLI 启动层：管理 Python sidecar 生命周期并选择 TUI 或无头执行模式。 */
 import { execFileSync, spawn } from "node:child_process"
-import { existsSync } from "node:fs"
+import { existsSync, statSync } from "node:fs"
 import { resolve } from "node:path"
-import type { InitializeResult } from "@za38/protocol"
+import { PROTOCOL_VERSION, type EventEnvelope, type InitializeResult } from "@za38/protocol"
 
 import { parseArgs, type Command } from "./args"
 import { IpcClient } from "./ipc/client"
@@ -15,14 +16,20 @@ type RunningAgent = {
   stop: () => Promise<void>
 }
 
+/** 启动 Python sidecar、完成 initialize 握手，并返回可关闭的运行句柄。 */
 async function startAgent(command: Command): Promise<RunningAgent> {
+  validateWorkspace(command.cwd)
   const sourcePython = resolve(import.meta.dir, "../../agent/.venv/bin/python")
   const python = process.env.ZA38_AGENT_PYTHON ?? (existsSync(sourcePython) ? sourcePython : "python3")
   const sourceAgent = resolve(import.meta.dir, "../../agent")
-  const child = spawn(python, ["-m", "za38_agent"], {
+  const sandboxEnvironment = command.kind === "run" && command.sandbox !== undefined
+    ? { ZA38_SANDBOX: command.sandbox ? "remote" : "false" }
+    : {}
+  const child = spawn(python, ["-m", "harness_agent"], {
     cwd: command.cwd,
     env: {
       ...process.env,
+      ...sandboxEnvironment,
       PYTHONPATH: process.env.PYTHONPATH ? `${sourceAgent}:${process.env.PYTHONPATH}` : sourceAgent,
     },
     stdio: ["pipe", "pipe", "pipe"],
@@ -35,7 +42,9 @@ async function startAgent(command: Command): Promise<RunningAgent> {
     if (code && code !== 0) client.emit("agentExit", new Error(stderr || `Agent exited with code ${code}`))
   })
   const initialized = await client.call("initialize", {
-    client_info: { name: "za38-cli", version: CLI_VERSION },
+    protocol: { major: PROTOCOL_VERSION.major, min_minor: 0, max_minor: PROTOCOL_VERSION.minor },
+    client: { name: "za38-cli", version: CLI_VERSION },
+    capabilities: ["run.cancel", "run.multithread", "interactive.approval", "interactive.question", "config.read"],
     cwd: command.cwd,
     config_path: command.configPath,
   }) as InitializeResult
@@ -56,6 +65,23 @@ async function startAgent(command: Command): Promise<RunningAgent> {
   }
 }
 
+/** 在启动子进程前校验工作区，避免把无效 cwd 误报为 Python 可执行文件不存在。 */
+export function validateWorkspace(cwd: string): void {
+  if (!existsSync(cwd)) {
+    throw new Error(`Workspace does not exist: ${cwd}. Create it first or pass an existing directory with --cwd.`)
+  }
+  if (!statSync(cwd).isDirectory()) {
+    throw new Error(`Workspace is not a directory: ${cwd}`)
+  }
+}
+
+/** OpenTUI 必须独占真实终端；管道或任务复用器会让控制序列进入普通文本流。 */
+export function validateInteractiveTerminal(stdinIsTty: boolean | undefined, stdoutIsTty: boolean | undefined): void {
+  if (!stdinIsTty || !stdoutIsTty) {
+    throw new Error("Interactive TUI requires a real terminal. Run the root command directly, or use -n for non-interactive mode.")
+  }
+}
+
 /** Git 信息仅用于底部状态栏；失败时不影响 Agent 启动或非 Git 工作区。 */
 export function readGitBranch(cwd: string): string | undefined {
   try {
@@ -70,23 +96,32 @@ export function readGitBranch(cwd: string): string | undefined {
   }
 }
 
+/** 无头模式下收集单次流式输出，并等待对应运行的终态事件。 */
 async function runTurn(client: IpcClient, message: string, threadId?: string): Promise<{ text: string; threadId: string; runId: string; usage: unknown }> {
   let text = ""
   let active: { thread_id: string; run_id: string } | undefined
   const terminal = new Promise<{ usage: unknown }>((resolveTerminal, rejectTerminal) => {
-    client.on("message/delta", (event: { text?: string }) => { text += event.text ?? "" })
-    client.once("run/completed", (event: { thread_id: string; run_id: string; usage: unknown }) => {
-      if (!active || (event.thread_id === active.thread_id && event.run_id === active.run_id)) resolveTerminal({ usage: event.usage })
+    client.on("event", (event: EventEnvelope) => {
+      if (active && (event.thread_id !== active.thread_id || event.run_id !== active.run_id)) return
+      if (event.type === "content.delta" && typeof event.payload.text === "string") text += event.payload.text
+      if (event.type === "run.completed") resolveTerminal({ usage: event.payload.usage })
+      if (event.type === "run.cancelled") rejectTerminal(new Error(typeof event.payload.reason === "string" ? event.payload.reason : "Run cancelled"))
+      if (event.type === "run.failed") {
+        const error = event.payload.error as Record<string, unknown> | undefined
+        rejectTerminal(new Error(`${error?.code ?? "AgentError"}: ${error?.message ?? "Run failed"}`))
+      }
     })
-    client.once("run/cancelled", (event: { reason?: string }) => rejectTerminal(new Error(event.reason ?? "Run cancelled")))
-    client.once("run/failed", (event: { code?: string; message?: string }) => rejectTerminal(new Error(`${event.code ?? "AgentError"}: ${event.message ?? "Run failed"}`)))
   })
   active = await client.query(message, threadId)
   const result = await terminal
   return { text, threadId: active.thread_id, runId: active.run_id, usage: result.usage }
 }
 
+/** 根据解析后的命令选择配置查询、无头执行或交互式 TUI。 */
 async function execute(command: Command): Promise<void> {
+  if (command.kind === "run" && !command.nonInteractive) {
+    validateInteractiveTerminal(process.stdin.isTTY, process.stdout.isTTY)
+  }
   const agent = await startAgent(command)
   try {
     if (command.kind !== "run") {
@@ -112,9 +147,10 @@ async function execute(command: Command): Promise<void> {
   }
 }
 
+/** CLI 主入口：处理帮助/版本短路逻辑后执行用户命令。 */
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   if (argv.includes("--help") || argv.includes("-h")) {
-    console.log("Usage: za38 [-n TEXT] [--json] [--config PATH] [--cwd PATH] [--resume THREAD_ID]")
+    console.log("Usage: za38 [-n TEXT] [--json] [--config PATH] [--cwd PATH] [--resume THREAD_ID] [--sandbox[=remote|false]]")
     return
   }
   if (argv.includes("--version") || argv.includes("-v")) {

@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://za38.internal/protocol/v2.json",
+  "title": "za38 protocol v2",
+  "x-protocol": {
+    "major": 2,
+    "minor": 0,
+    "max_frame_bytes": 8388608,
+    "max_tool_payload_bytes": 1048576,
+    "client_methods": ["initialize", "run.start", "run.cancel", "config.show", "config.path", "shutdown"],
+    "server_methods": ["event", "request"],
+    "server_capabilities": ["run.cancel", "run.multithread", "interactive.approval", "interactive.question", "config.read"],
+    "event_types": ["run.started", "content.delta", "thinking.delta", "tool.started", "tool.delta", "tool.completed", "interaction.resolved", "run.completed", "run.cancelled", "run.failed"]
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/jsonRpcRequest" },
+    { "$ref": "#/$defs/jsonRpcNotification" },
+    { "$ref": "#/$defs/jsonRpcSuccess" },
+    { "$ref": "#/$defs/jsonRpcError" }
+  ],
+  "$defs": {
+    "jsonRpcRequest": {
+      "type": "object",
+      "required": ["jsonrpc", "method", "id"],
+      "properties": { "jsonrpc": { "const": "2.0" }, "method": { "type": "string" }, "id": { "type": "string" }, "params": { "type": "object" } },
+      "additionalProperties": false
+    },
+    "jsonRpcNotification": {
+      "type": "object",
+      "required": ["jsonrpc", "method"],
+      "properties": { "jsonrpc": { "const": "2.0" }, "method": { "type": "string" }, "params": { "type": "object" } },
+      "additionalProperties": false
+    },
+    "jsonRpcSuccess": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "properties": { "jsonrpc": { "const": "2.0" }, "id": { "type": "string" }, "result": {} },
+      "additionalProperties": false
+    },
+    "jsonRpcErrorObject": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": { "code": { "type": "integer" }, "message": { "type": "string" }, "data": {} },
+      "additionalProperties": false
+    },
+    "jsonRpcError": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "error"],
+      "properties": { "jsonrpc": { "const": "2.0" }, "id": { "type": ["string", "null"] }, "error": { "$ref": "#/$defs/jsonRpcErrorObject" } },
+      "additionalProperties": false
+    },
+    "initializeParams": {
+      "type": "object",
+      "required": ["protocol", "client", "capabilities"],
+      "properties": {
+        "protocol": { "type": "object", "required": ["major", "min_minor", "max_minor"], "properties": { "major": { "const": 2 }, "min_minor": { "type": "integer", "minimum": 0 }, "max_minor": { "type": "integer", "minimum": 0 } }, "additionalProperties": false },
+        "client": { "type": "object", "required": ["name", "version"], "properties": { "name": { "type": "string", "minLength": 1 }, "version": { "type": "string", "minLength": 1 } }, "additionalProperties": false },
+        "capabilities": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "cwd": { "type": "string" }, "config_path": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "eventEnvelope": {
+      "type": "object",
+      "required": ["event_id", "type", "thread_id", "run_id", "sequence", "timestamp_ms", "payload"],
+      "properties": {
+        "event_id": { "type": "string", "minLength": 1 }, "type": { "type": "string", "minLength": 1 },
+        "thread_id": { "type": "string", "minLength": 1 }, "run_id": { "type": "string", "minLength": 1 },
+        "sequence": { "type": "integer", "minimum": 1 }, "timestamp_ms": { "type": "integer", "minimum": 0 },
+        "source": { "type": "object", "required": ["kind"], "properties": { "kind": { "enum": ["root", "subagent", "background"] }, "id": { "type": "string" }, "parent_tool_call_id": { "type": "string" } }, "additionalProperties": false },
+        "payload": { "type": "object" }, "extensions": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "interactionRequest": {
+      "type": "object",
+      "required": ["request_id", "type", "thread_id", "run_id", "sequence", "timeout_ms", "payload"],
+      "properties": {
+        "request_id": { "type": "string", "minLength": 1 }, "type": { "enum": ["approval", "question"] },
+        "thread_id": { "type": "string", "minLength": 1 }, "run_id": { "type": "string", "minLength": 1 },
+        "sequence": { "type": "integer", "minimum": 1 }, "timeout_ms": { "type": "integer", "minimum": 1 },
+        "payload": { "type": "object" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

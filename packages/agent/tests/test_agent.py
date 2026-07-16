@@ -29,9 +29,9 @@ def _make_fake_model() -> ToolCallingFakeChatModel:
 
 
 def _create_agent():
-    from za38_agent.agent import create_za38_agent
+    from harness_agent.agent import create_harness_agent
 
-    return create_za38_agent(
+    return create_harness_agent(
         model=_make_fake_model(),
         enable_interpreter=False,
         enable_skills=False,
@@ -40,10 +40,25 @@ def _create_agent():
     )
 
 
-def test_create_za38_agent_returns_compiled_graph():
+def test_create_harness_agent_returns_compiled_graph():
     agent = _create_agent()
     assert hasattr(agent, "astream")
     assert hasattr(agent, "ainvoke")
+
+
+def test_execution_context_prompt_marks_local_and_remote_boundaries():
+    """提示词必须如实说明本机默认模式与远端逻辑工作目录。"""
+    from harness_agent.agent import _with_execution_context
+
+    local = _with_execution_context("base", workspace="/tmp/work", sandboxed=False, provider=None)
+    remote = _with_execution_context(
+        "base", workspace="/workspace", sandboxed=True, provider="corp"
+    )
+
+    assert "本机工作目录是：`/tmp/work`" in local
+    assert "不是操作系统安全边界" in local
+    assert "corp` 远端沙箱" in remote
+    assert "`/workspace`" in remote
 
 
 async def test_agent_streams_events():

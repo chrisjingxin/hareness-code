@@ -11,9 +11,9 @@ from typing import Any
 import pytest
 from langchain_core.messages import HumanMessage
 
-from za38_agent.agent import create_za38_agent
-from za38_agent.config import ModelSettings
-from za38_agent.providers.za38_gateway import create_openai_compatible_model
+from harness_agent.agent import create_harness_agent
+from harness_agent.config import ModelSettings
+from harness_agent.providers.harness_gateway import create_openai_compatible_model
 
 
 class _OpenAIStreamingHandler(BaseHTTPRequestHandler):
@@ -67,7 +67,7 @@ async def test_openai_compatible_agent_streams_against_mock_gateway(monkeypatch:
                 api_key_env="ZA38_TEST_KEY",
             )
         )
-        agent = create_za38_agent(
+        agent = create_harness_agent(
             model,
             auto_approve=True,
             enable_ask_user=False,

@@ -33,8 +33,8 @@ test("历史 JSONL 跳过损坏行并自愈为受限的规范格式", async () =
   const home = await mkdtemp(join(tmpdir(), "za38-history-"))
   const path = promptHistoryPath(home)
   try {
-    await mkdir(join(home, ".za38"), { recursive: true })
-    await writeFile(join(home, ".za38", "prompt-history.jsonl"), "{bad}\n{\"input\":\"第一条\"}\n\"第二条\"\n{\"input\":\"第二条\"}\n", "utf8")
+    await mkdir(join(home, ".harness"), { recursive: true })
+    await writeFile(join(home, ".harness", "prompt-history.jsonl"), "{bad}\n{\"input\":\"第一条\"}\n\"第二条\"\n{\"input\":\"第二条\"}\n", "utf8")
     const history = await loadPromptHistory(path)
     expect(history).toEqual(["第一条", "第二条"])
     expect(await readFile(path, "utf8")).toBe("{\"input\":\"第一条\"}\n{\"input\":\"第二条\"}\n")

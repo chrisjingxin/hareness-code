@@ -13,6 +13,8 @@ const runtime: TuiRuntime = {
   cliVersion: "0.1.0",
   modelName: "enterprise-model",
   modelConfigured: true,
+  executionMode: "local",
+  approvalMode: "ask",
 }
 
 test("紧凑首页保留品牌、输入框和真实底栏信息", async () => {
@@ -30,6 +32,7 @@ test("紧凑首页保留品牌、输入框和真实底栏信息", async () => {
     expect(frame).toContain("powered by za38")
     expect(frame).toContain("harness-code")
     expect(frame).toContain("v0.1.0")
+    expect(frame).toContain("本机执行")
   } finally {
     await act(async () => { setup.renderer.destroy() })
   }
@@ -59,6 +62,34 @@ test("会话渲染显示工具卡片和底部 composer", async () => {
     const frame = setup.captureCharFrame()
     expect(frame).toContain("read_file")
     expect(frame).toContain("Harness Code")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("审批 dock 保留选项高度并隐藏重复 Thinking", async () => {
+  const run = { threadId: "thread-1", runId: "run-1" }
+  const started = startRun(createInitialState(), run, "写入文件")
+  const state: TuiState = {
+    ...started,
+    status: "等待工具审批",
+    pendingApproval: {
+      requestId: "approval-1",
+      description: "执行 shell 命令",
+      requests: { action_requests: [{ name: "execute", args: { command: "pwd" } }] },
+    },
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(SessionView, viewProps(state, 100, 28)), { width: 100, height: 28 })
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("需要审批")
+    expect(frame).toContain("允许一次")
+    expect(frame).toContain("拒绝")
+    expect(frame).not.toContain("Thinking")
   } finally {
     await act(async () => { setup.renderer.destroy() })
   }
