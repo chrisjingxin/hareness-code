@@ -1,4 +1,4 @@
-"""Tests for the OpenAI-compatible configuration contract."""
+"""Harness TOML v1 的配置来源、安全边界与运行时转换测试。"""
 
 from __future__ import annotations
 
@@ -8,78 +8,177 @@ from pathlib import Path
 
 import pytest
 
-from harness_agent.config import ConfigError, RemoteSandboxSettings, load_config
-from harness_agent.config import ExecutionSettings, ModelSettings
+from harness_agent.config import ConfigError, ExecutionSettings, ModelSettings, RemoteSandboxSettings, load_config
+from harness_agent.config_manifest import ConfigManifest
 from harness_agent.execution import create_execution_context
 from harness_agent.providers.harness_gateway import create_openai_compatible_model
 
 
-def _write_config(path: Path, *, name: str, base_url: str, api_key_env: str = "HARNESS_API_KEY") -> None:
+def _write_config(
+    path: Path,
+    *,
+    model: str = "enterprise-model",
+    base_url: str = "https://gateway.example.internal/v1",
+    api_key_env: str = "HARNESS_API_KEY",
+    approval_mode: str | None = None,
+    backend: str = "local",
+    remote: bool = False,
+) -> None:
+    """生成最小可信 v1 TOML，避免测试散落旧配置结构。"""
+    approval = f"\n[approval]\nmode = \"{approval_mode}\"\n" if approval_mode else ""
+    remote_table = (
+        "\n[execution.remote]\nprovider = \"corp\"\nfactory = \"corp_sandbox:create_backend\"\n"
+        if remote
+        else ""
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        f'''[model]
+        f'''[config]
+version = 1
+
+[models]
+default_profile = "enterprise"
+
+[models.profiles.enterprise]
 provider = "openai-compatible"
-name = "{name}"
+model = "{model}"
 base_url = "{base_url}"
 api_key_env = "{api_key_env}"
 
-[model.headers]
-X-Client = "za38"
+[models.profiles.enterprise.headers]
+X-Client = "harness"
 
-[model.headers_env]
+[models.profiles.enterprise.headers_env]
 X-Tenant = "HARNESS_TENANT"
-''',
+{approval}
+[execution]
+backend = "{backend}"
+{remote_table}''',
         encoding="utf-8",
     )
 
 
 def test_config_precedence_and_redaction(tmp_path: Path):
+    """用户、显式和环境变量按 v1 优先级覆盖，并保持摘要脱敏。"""
     home = tmp_path / "home"
     workspace = tmp_path / "workspace"
     explicit = tmp_path / "explicit.toml"
-    _write_config(home / ".harness" / "config.toml", name="user", base_url="https://user.example/v1")
-    _write_config(workspace / ".harness" / "config.toml", name="project", base_url="https://project.example/v1")
-    _write_config(explicit, name="explicit", base_url="https://explicit.example/v1", api_key_env="EXPLICIT_KEY")
+    _write_config(home / ".harness" / "config.toml", model="user", base_url="https://user.example/v1")
+    _write_config(explicit, model="explicit", base_url="https://explicit.example/v1", api_key_env="EXPLICIT_KEY")
 
     config = load_config(
         workspace=workspace,
         home=home,
         config_path=explicit,
-        environ={"HARNESS_MODEL": "environment", "HARNESS_BASE_URL": "https://env.example/v1", "EXPLICIT_KEY": "secret", "HARNESS_TENANT": "team-a"},
+        environ={
+            "HARNESS_MODEL": "environment",
+            "HARNESS_BASE_URL": "https://env.example/v1",
+            "EXPLICIT_KEY": "secret",
+            "HARNESS_TENANT": "team-a",
+        },
     )
 
     model = config.require_model()
-    assert model.name == "explicit"
-    assert model.base_url == "https://explicit.example/v1"
+    assert model.name == "environment"
+    assert model.base_url == "https://env.example/v1"
     assert model.resolve_headers({"HARNESS_TENANT": "team-a"})["X-Tenant"] == "team-a"
-    view = config.redacted({"EXPLICIT_KEY": "secret"})
-    assert view["model"]["api_key_configured"] is True
-    assert "secret" not in str(view)
+    assert config.model_profile == "enterprise"
+    assert config.redacted({"EXPLICIT_KEY": "secret"})["sources"]["models"] == "environment"
+    assert "secret" not in str(config.redacted({"EXPLICIT_KEY": "secret"}))
 
 
-def test_config_requires_complete_model_table(tmp_path: Path):
-    path = tmp_path / ".harness" / "config.toml"
-    path.parent.mkdir(parents=True)
-    path.write_text("[model]\nname = 'missing-url'\n", encoding="utf-8")
+def test_config_requires_v1_version_and_new_model_structure(tmp_path: Path):
+    """旧字段和缺失版本必须被拒绝，而非悄然按旧语义执行。"""
+    legacy = tmp_path / "legacy.toml"
+    legacy.write_text("[model]\nname = 'old'\n", encoding="utf-8")
+    missing_version = tmp_path / "missing-version.toml"
+    missing_version.write_text("[models]\ndefault_profile = 'enterprise'\n", encoding="utf-8")
 
-    with pytest.raises(ConfigError, match="base_url"):
-        load_config(workspace=tmp_path, home=tmp_path / "home")
+    with pytest.raises(ConfigError, match=r"Unknown configuration section \[model\]"):
+        load_config(workspace=tmp_path, home=tmp_path / "home", config_path=legacy)
+    with pytest.raises(ConfigError, match=r"\[config\] is required"):
+        load_config(workspace=tmp_path, home=tmp_path / "home", config_path=missing_version)
 
 
-def test_openai_compatible_adapter_is_constructed_without_network(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("HARNESS_TEST_KEY", "test-key")
-    model = create_openai_compatible_model(
-        ModelSettings(
-            name="enterprise-model",
-            base_url="https://gateway.example.internal/v1",
-            api_key_env="HARNESS_TEST_KEY",
-        )
+def test_project_configuration_is_rejected_before_model_resolution(tmp_path: Path):
+    """仓库配置不能改变 endpoint；用户主动 --config 时才视为可信。"""
+    workspace = tmp_path / "workspace"
+    project_config = workspace / ".harness" / "config.toml"
+    _write_config(project_config, base_url="https://untrusted.example/v1")
+
+    with pytest.raises(ConfigError, match="Project configuration is not supported yet"):
+        load_config(workspace=workspace, home=tmp_path / "home")
+
+    config = load_config(workspace=workspace, home=tmp_path / "home", config_path=project_config)
+    assert config.require_model().base_url == "https://untrusted.example/v1"
+
+
+def test_project_local_configuration_is_rejected(tmp_path: Path):
+    """未实现可信机制前，本地项目配置同样不能自动加载。"""
+    workspace = tmp_path / "workspace"
+    project_config = workspace / ".harness" / "config.local.toml"
+    _write_config(project_config)
+
+    with pytest.raises(ConfigError, match="config.local.toml"):
+        load_config(workspace=workspace, home=tmp_path / "home")
+
+
+def test_manifest_rejects_planned_unknown_and_secret_literal_configuration(tmp_path: Path):
+    """计划中区段、未知字段和字面量秘密必须在启动前失败。"""
+    cases = {
+        "planned.toml": "[config]\nversion = 1\n\n[hooks]\n",
+        "unknown.toml": "[config]\nversion = 1\n\n[unknown]\n",
+        "invalid-version.toml": "[config]\nversion = true\n",
+        "secret.toml": "[config]\nversion = 1\n\n[models]\ndefault_profile = 'enterprise'\n\n[models.profiles.enterprise]\nmodel = 'm'\nbase_url = 'https://gateway.example/v1'\napi_key = 'secret'\n",
+        "nested-secret.toml": "[config]\nversion = 1\n\n[execution]\nbackend = 'remote'\n\n[execution.remote]\nprovider = 'corp'\nfactory = 'corp:create'\n\n[execution.remote.params]\nclient_secret = 'secret'\n",
+        "interpolation.toml": "[config]\nversion = 1\n\n[models]\ndefault_profile = 'enterprise'\n\n[models.profiles.enterprise]\nmodel = '$MODEL'\nbase_url = 'https://gateway.example/v1'\n",
+    }
+    for name, content in cases.items():
+        path = tmp_path / name
+        path.write_text(content, encoding="utf-8")
+        with pytest.raises(ConfigError):
+            load_config(workspace=tmp_path, home=tmp_path / "home", config_path=path)
+
+
+def test_manifest_rejects_literal_authentication_headers(tmp_path: Path):
+    """认证 Header 不能伪装为普通固定 Header，必须使用 headers_env。"""
+    path = tmp_path / "headers.toml"
+    _write_config(path)
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            'X-Client = "harness"', 'X-Authorization-Token = "secret"'
+        ),
+        encoding="utf-8",
     )
-    assert model.model_name == "enterprise-model"
+
+    with pytest.raises(ConfigError, match="environment variable"):
+        load_config(workspace=tmp_path, home=tmp_path / "home", config_path=path)
+
+
+def test_manifest_exposes_all_planned_configuration_sections():
+    """模板中的所有计划中区段都必须由唯一 Manifest 指向后续任务。"""
+    for name in ("ui", "skills", "agents", "mcp", "telemetry", "updates", "hooks", "extensions", "plugins", "policy"):
+        section = ConfigManifest.SECTIONS[name]
+        assert section.status == "planned"
+        assert section.task_id is not None
+
+
+def test_multiple_profiles_are_deferred_to_zc_019(tmp_path: Path):
+    """当前仅执行默认 Profile，避免未完成的线程级选择产生伪支持。"""
+    path = tmp_path / "profiles.toml"
+    _write_config(path)
+    path.write_text(
+        path.read_text(encoding="utf-8")
+        + "\n[models.profiles.second]\nprovider = 'openai-compatible'\nmodel = 'second'\nbase_url = 'https://second.example/v1'\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="ZC-019"):
+        load_config(workspace=tmp_path, home=tmp_path / "home", config_path=path)
 
 
 def test_execution_defaults_to_local_and_redacts_security_summary(tmp_path: Path):
-    """未配置 sandbox 时保持本机执行，并向 TUI 明确暴露未隔离状态。"""
+    """没有 TOML 时保持可诊断的本机默认与 v1 来源摘要。"""
     config = load_config(workspace=tmp_path, home=tmp_path / "home", environ={})
 
     assert config.execution.sandbox_enabled is False
@@ -91,13 +190,19 @@ def test_execution_defaults_to_local_and_redacts_security_summary(tmp_path: Path
         "provider": None,
         "working_directory": None,
     }
+    assert config.redacted()["config_version"] == 1
+    assert config.redacted()["sources"] == {
+        "models": "default",
+        "approval": "default",
+        "execution": "default",
+    }
 
 
 @pytest.mark.parametrize("value", ["plan", "default", "auto-edit", "yolo"])
 def test_execution_accepts_all_canonical_approval_modes(tmp_path: Path, value: str):
-    """四个公开模式都应原样进入最终执行设置。"""
+    """四个公开模式都应从 v1 [approval] 原样进入最终执行设置。"""
     path = tmp_path / "approval.toml"
-    path.write_text(f"[tools]\napproval_mode = '{value}'\n", encoding="utf-8")
+    _write_config(path, approval_mode=value)
 
     config = load_config(workspace=tmp_path, home=tmp_path / "home", config_path=path)
 
@@ -105,75 +210,64 @@ def test_execution_accepts_all_canonical_approval_modes(tmp_path: Path, value: s
     assert config.execution.approval_mode_warning is None
 
 
-def test_execution_normalizes_legacy_ask_and_invalid_values(tmp_path: Path):
-    """旧 ask 兼容为 default，未知值必须安全降级并暴露可展示提示。"""
-    legacy = tmp_path / "legacy.toml"
-    legacy.write_text("[tools]\napproval_mode = 'ask'\n", encoding="utf-8")
+def test_execution_normalizes_ask_and_invalid_values_safely(tmp_path: Path):
+    """非法审批值仍安全回落 default，并保留 TUI 可展示的诊断。"""
+    ask = tmp_path / "ask.toml"
     invalid = tmp_path / "invalid.toml"
-    invalid.write_text("[tools]\napproval_mode = 'unsafe'\n", encoding="utf-8")
+    _write_config(ask, approval_mode="ask")
+    _write_config(invalid, approval_mode="unsafe")
 
-    legacy_config = load_config(workspace=tmp_path, home=tmp_path / "home", config_path=legacy)
+    assert load_config(workspace=tmp_path, home=tmp_path / "home", config_path=ask).execution.approval_mode == "default"
     invalid_config = load_config(workspace=tmp_path, home=tmp_path / "home", config_path=invalid)
-
-    assert legacy_config.execution.approval_mode == "default"
-    assert "ask 已按默认确认模式执行" in str(legacy_config.execution.approval_mode_warning)
     assert invalid_config.execution.approval_mode == "default"
     assert "安全降级" in str(invalid_config.redacted()["security"]["approval_mode_warning"])
 
 
-def test_approval_mode_environment_overrides_toml(tmp_path: Path):
-    """审批模式遵循执行配置的环境变量优先级。"""
-    path = tmp_path / "approval.toml"
-    path.write_text("[tools]\napproval_mode = 'plan'\n", encoding="utf-8")
+def test_environment_and_cli_override_execution_in_order(tmp_path: Path):
+    """CLI --sandbox 通过内部覆盖层高于 HARNESS_SANDBOX，环境高于 TOML。"""
+    path = tmp_path / "execution.toml"
+    _write_config(path, backend="remote", remote=True, approval_mode="plan")
 
-    config = load_config(
+    environment_config = load_config(
         workspace=tmp_path,
         home=tmp_path / "home",
         config_path=path,
-        environ={"HARNESS_APPROVAL_MODE": "yolo"},
+        environ={"HARNESS_SANDBOX": "false", "HARNESS_APPROVAL_MODE": "yolo"},
     )
-
-    assert config.execution.approval_mode == "yolo"
-
-
-def test_remote_sandbox_requires_trusted_provider_configuration(tmp_path: Path):
-    """显式开启远端 sandbox 时缺少 provider 必须在配置阶段失败。"""
-    config_path = tmp_path / "remote.toml"
-    config_path.write_text("[tools]\nsandbox = true\n", encoding="utf-8")
-
-    with pytest.raises(ConfigError, match="sandbox.provider"):
-        load_config(workspace=tmp_path, home=tmp_path / "home", config_path=config_path)
-
-
-def test_project_config_cannot_silently_enable_remote_sandbox(tmp_path: Path):
-    """项目目录的 tools/sandbox 表不具备导入企业 provider 的授权。"""
-    project_config = tmp_path / ".harness" / "config.toml"
-    project_config.parent.mkdir(parents=True)
-    project_config.write_text(
-        "[tools]\nsandbox = true\n\n[sandbox]\nprovider = 'hostile'\nfactory = 'hostile.module:create'\n",
-        encoding="utf-8",
-    )
-
-    config = load_config(workspace=tmp_path, home=tmp_path / "home", environ={})
-    assert config.execution.sandbox_enabled is False
-
-
-def test_sandbox_environment_overrides_explicit_config(tmp_path: Path):
-    """HARNESS_SANDBOX 按 Qwen 风格优先于显式 TOML 配置。"""
-    config_path = tmp_path / "remote.toml"
-    config_path.write_text(
-        "[tools]\nsandbox = true\napproval_mode = 'auto-edit'\n\n[sandbox]\nprovider = 'corp'\nfactory = 'corp_sandbox:create_backend'\n",
-        encoding="utf-8",
-    )
-
-    config = load_config(
+    cli_config = load_config(
         workspace=tmp_path,
         home=tmp_path / "home",
-        config_path=config_path,
-        environ={"HARNESS_SANDBOX": "false"},
+        config_path=path,
+        environ={"HARNESS_SANDBOX": "remote", "HARNESS_CLI_SANDBOX": "false"},
     )
-    assert config.execution.sandbox_enabled is False
-    assert config.execution.approval_mode == "auto-edit"
+
+    assert environment_config.execution.sandbox_enabled is False
+    assert environment_config.execution.approval_mode == "yolo"
+    assert environment_config.redacted()["sources"]["execution"] == "environment"
+    assert cli_config.execution.sandbox_enabled is False
+    assert cli_config.redacted()["sources"]["execution"] == "cli"
+
+
+def test_remote_sandbox_requires_complete_trusted_configuration(tmp_path: Path):
+    """显式开启远端 backend 时缺少 provider 仍必须在配置阶段失败。"""
+    path = tmp_path / "remote.toml"
+    _write_config(path, backend="remote")
+
+    with pytest.raises(ConfigError, match="execution.remote"):
+        load_config(workspace=tmp_path, home=tmp_path / "home", config_path=path)
+
+
+def test_openai_compatible_adapter_is_constructed_without_network(monkeypatch: pytest.MonkeyPatch):
+    """模型 adapter 继续只接受从环境变量命名读取的凭据。"""
+    monkeypatch.setenv("HARNESS_TEST_KEY", "test-key")
+    model = create_openai_compatible_model(
+        ModelSettings(
+            name="enterprise-model",
+            base_url="https://gateway.example.internal/v1",
+            api_key_env="HARNESS_TEST_KEY",
+        )
+    )
+    assert model.model_name == "enterprise-model"
 
 
 def test_local_execution_backend_does_not_inherit_model_secret(

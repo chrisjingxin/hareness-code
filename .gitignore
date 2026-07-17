@@ -5,6 +5,7 @@ __pycache__/
 .venv/
 .pytest_cache/
 .harness/config.toml
+.harness/config.local.toml
 
 # Node/Bun
 node_modules/
@@ -18,6 +19,9 @@ dist/
 # OS
 .DS_Store
 Thumbs.db
+
+# 临时交接记录与本地排障产物
+tmp/
 
 # Mimocode
 .mimocode/.cron-lock

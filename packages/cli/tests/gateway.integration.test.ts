@@ -44,9 +44,15 @@ loopbackTest("CLI, Python sidecar, and OpenAI-compatible streaming gateway work 
   const configPath = resolve(configDirectory, "config.toml")
   await writeFile(
     configPath,
-    `[model]
+    `[config]
+version = 1
+
+[models]
+default_profile = "mock"
+
+[models.profiles.mock]
 provider = "openai-compatible"
-name = "mock"
+model = "mock"
 base_url = "http://127.0.0.1:${address.port}/v1"
 api_key_env = "HARNESS_TEST_KEY"
 `,
@@ -59,6 +65,8 @@ api_key_env = "HARNESS_TEST_KEY"
       cwd: packageDir,
       env: {
         ...process.env,
+        // E2E 只验证传入的 v1 配置，不能受开发机用户级配置污染。
+        HOME: resolve(configDirectory, "home"),
         HARNESS_AGENT_PYTHON: resolve(agentDir, ".venv/bin/python"),
         PYTHONPATH: agentDir,
         HARNESS_TEST_KEY: "test-key",

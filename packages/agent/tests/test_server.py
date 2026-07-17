@@ -48,11 +48,11 @@ def _event_types(frames: list[dict[str, Any]]) -> list[str]:
     return [frame["params"]["type"] for frame in frames if frame.get("method") == "event"]
 
 
-async def test_initialize_negotiates_v2_and_capabilities():
+async def test_initialize_negotiates_v2_and_capabilities(tmp_path: Path):
     """握手返回选定 minor、能力交集、限制和脱敏配置摘要。"""
     from harness_agent.server import JsonRpcServer
 
-    server = JsonRpcServer(allow_echo=True)
+    server = JsonRpcServer(allow_echo=True, config_home=tmp_path / "home")
     frames = await _capture_server(server)
     result = frames[0]["result"]
     assert result["protocol"] == {"major": 2, "minor": 0}
@@ -71,6 +71,40 @@ async def test_initialize_rejects_incompatible_major_and_pre_initialize_calls():
     await server.dispatch(_request("run.start", {"message": "x"}, "run-early"))
     await server.dispatch(_request("initialize", _initialize_params(protocol={"major": 9, "min_minor": 0, "max_minor": 0}), "init-bad"))
     assert [frame["error"]["code"] for frame in frames] == [-32000, -32003]
+
+
+async def test_project_configuration_failure_prevents_agent_factory_invocation(tmp_path: Path):
+    """未可信项目配置必须在创建模型或 Agent 之前以启动错误终止。"""
+    from harness_agent.server import JsonRpcServer
+
+    workspace = tmp_path / "workspace"
+    project_config = workspace / ".harness" / "config.toml"
+    project_config.parent.mkdir(parents=True)
+    project_config.write_text("[config]\nversion = 1\n", encoding="utf-8")
+    invoked = False
+
+    def factory(*_: Any) -> object:
+        nonlocal invoked
+        invoked = True
+        return object()
+
+    server = JsonRpcServer(agent_factory=factory, config_home=tmp_path / "home")
+    frames: list[dict[str, Any]] = []
+
+    async def capture(message: dict[str, Any]) -> None:
+        frames.append(message)
+
+    server.send = capture
+    await server.dispatch(_request("initialize", _initialize_params(cwd=str(workspace)), "init-project"))
+    result = frames[0]["result"]
+    assert result["config_summary"] is None
+    assert result["startup_error"]["code"] == "CONFIGURATION_ERROR"
+
+    await server.dispatch(
+        _request("run.start", {"message": "should not start", "thread_id": "project", "run_id": "blocked"}, "run-project")
+    )
+    await _wait_for(frames, lambda frame: frame.get("params", {}).get("type") == "run.failed")
+    assert invoked is False
 
 
 async def test_echo_run_response_precedes_ordered_terminal_events():

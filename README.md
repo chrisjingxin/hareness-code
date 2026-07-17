@@ -6,12 +6,13 @@ Harness Code 是面向企业研发场景的 Coding Agent CLI。终端交互由 B
 
 ## 开始使用
 
-本地开发需要 Bun、Python 3.11+ 及 `packages/agent/.venv` 中的 Agent 依赖。复制示例配置后，将 API Key 放入指定环境变量：
+本地开发需要 Bun、Python 3.11+ 及 `packages/agent/.venv` 中的 Agent 依赖。复制用户级示例配置后，将 API Key 放入指定环境变量：
 
 ```bash
-cp .harness/config.toml.example .harness/config.toml
+mkdir -p ~/.harness
+cp docs/user/examples/config.toml ~/.harness/config.toml
 export HARNESS_API_KEY='你的企业网关密钥'
-bun run dev -- --config .harness/config.toml
+bun run dev
 ```
 
 可使用 `bun run dev -- --help` 查看当前 CLI 参数；无头运行示例：

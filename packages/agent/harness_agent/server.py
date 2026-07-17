@@ -90,8 +90,13 @@ class JsonRpcServer:
         agent: Any | None = None,
         agent_factory: AgentFactory | None = None,
         allow_echo: bool | None = None,
+        config_home: Path | None = None,
     ) -> None:
-        """初始化运行表、反向请求表、发送锁和方法分发表。"""
+        """初始化运行表、反向请求表、发送锁和方法分发表。
+
+        ``config_home`` 仅供嵌入式测试隔离用户目录；正式 CLI 始终使用
+        操作系统解析出的真实 home，不能由 JSON-RPC 客户端传入。
+        """
         self.agent = agent
         self._agent_factory = agent_factory or self._create_default_agent
         self._allow_echo = (
@@ -104,6 +109,7 @@ class JsonRpcServer:
         self._pending_requests: dict[str, asyncio.Future[object]] = {}
         self._workspace = Path.cwd().resolve()
         self._config_path: str | None = None
+        self._config_home = config_home
         self._config: Za38Config | None = None
         self._startup_error: str | None = None
         self._enabled_capabilities: set[str] = set()
@@ -325,7 +331,11 @@ class JsonRpcServer:
     def _load_config(self) -> None:
         """刷新配置缓存，并保存用户可修复的错误。"""
         try:
-            self._config = load_config(workspace=self._workspace, config_path=self._config_path)
+            self._config = load_config(
+                workspace=self._workspace,
+                config_path=self._config_path,
+                home=self._config_home,
+            )
             self._startup_error = None
         except ConfigError as exc:
             self._config = None

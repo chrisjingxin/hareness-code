@@ -1,0 +1,72 @@
+# Harness Code 用户级 TOML v1 模板。
+# 将此文件复制到 ~/.harness/config.toml；不要提交 API Key、Token 或认证 Header。
+
+[config]
+version = 1
+
+# 当前内核只执行 default_profile 指向的一个 Profile。
+# 多 Profile 选择将在 ZC-019 中提供。
+[models]
+default_profile = "enterprise"
+
+[models.profiles.enterprise]
+provider = "openai-compatible"
+model = "your-enterprise-coding-model"
+base_url = "https://gateway.example.internal/v1"
+api_key_env = "HARNESS_API_KEY"
+timeout_seconds = 120
+max_retries = 2
+
+# 固定 Header 只能包含非秘密值；Authorization、Cookie 和 API Key 必须放入 headers_env。
+[models.profiles.enterprise.headers]
+X-Client-Name = "harness-code"
+
+[models.profiles.enterprise.headers_env]
+X-Enterprise-Tenant = "HARNESS_TENANT"
+
+[approval]
+mode = "default"
+
+[execution]
+backend = "local"
+
+# 计划中（ZC-008）：企业远端 Sandbox Provider。
+# 将 backend 改为 "remote" 前，必须先完成对应任务并由企业提供 factory。
+# [execution.remote]
+# provider = "corp"
+# factory = "harness_corp_sandbox:create_backend"
+# working_directory = "/workspace"
+#
+# [execution.remote.params]
+# project = "your-enterprise-project"
+
+# 计划中（ZC-042）：TUI 主题、编辑器与终端偏好。
+# [ui]
+# theme = "harness-dark"
+
+# 计划中（ZC-014）：Skills 目录和启用策略。
+# [skills]
+
+# 计划中（ZC-015）：同步子 Agent 声明与范围。
+# [agents]
+
+# 计划中（ZC-005）：可信 MCP Server 配置。
+# [mcp]
+
+# 计划中（ZC-021）：企业审计与遥测配置。
+# [telemetry]
+
+# 计划中（ZC-025）：更新通道和版本策略。
+# [updates]
+
+# 计划中（ZC-039）：生命周期 Hook；不得在项目配置中自动执行。
+# [hooks]
+
+# 计划中（ZC-040）：本地 Extension 加载；需要来源隔离和工件信任。
+# [extensions]
+
+# 计划中（ZC-041）：Plugin 与企业插件源；不得自动下载或执行。
+# [plugins]
+
+# 计划中（ZC-038）：仅企业 managed TOML 可定义不可覆盖策略。
+# [policy]

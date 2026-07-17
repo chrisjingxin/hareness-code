@@ -32,7 +32,9 @@ async function startAgent(command: Command): Promise<RunningAgent> {
   const python = process.env.HARNESS_AGENT_PYTHON ?? (existsSync(sourcePython) ? sourcePython : "python3")
   const sourceAgent = resolve(import.meta.dir, "../../agent")
   const sandboxEnvironment = command.kind === "run" && command.sandbox !== undefined
-    ? { HARNESS_SANDBOX: command.sandbox ? "remote" : "false" }
+    // CLI 显式参数必须高于用户环境变量；sidecar 仅把这个内部字段当作
+    // 最后一层覆盖，不对外暴露为可长期配置的环境变量。
+    ? { HARNESS_CLI_SANDBOX: command.sandbox ? "remote" : "false" }
     : {}
   const child = spawn(python, ["-m", "harness_agent"], {
     cwd: command.cwd,
