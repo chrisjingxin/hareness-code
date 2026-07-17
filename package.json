@@ -1,15 +1,16 @@
 {
   "name": "za38-cli",
   "private": true,
+  "packageManager": "bun@1.2.19",
   "workspaces": ["packages/*"],
   "scripts": {
     "build": "bun run --filter '@za38/cli' build",
-    "dev": "bun run packages/cli/src/index.ts",
+    "dev": "bun packages/cli/src/index.ts",
     "test": "bun run test:ts && bun run test:py",
     "typecheck": "bun run --filter '@za38/cli' typecheck",
     "protocol:generate": "bun run --filter '@za38/protocol' generate",
     "protocol:check": "bun run --filter '@za38/protocol' check",
-    "test:ts": "cd packages/cli && bun test",
+    "test:ts": "bun run --filter '@za38/cli' test",
     "test:py": "cd packages/agent && .venv/bin/python -m pytest -q",
     "docs:check": "bun run scripts/project-management.ts docs:check",
     "tasks:sync": "bun run scripts/project-management.ts tasks:sync",

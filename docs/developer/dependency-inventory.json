@@ -1,0 +1,70 @@
+{
+  "schema_version": 2,
+  "generated_at": "2026-07-17",
+  "purpose": "企业依赖迁移后的全部直接依赖、OpenTUI 0.4.3 传递契约和排除项。完整传递闭包以企业环境生成的 bun.lock 与 packages/agent/uv.lock 为唯一来源。",
+  "runtime": {
+    "bun": "1.2.19",
+    "python": ">=3.11,<4.0"
+  },
+  "javascript": {
+    "runtime": {
+      "@za38/protocol": { "version": "0.1.0", "source": "local workspace", "path": "packages/protocol" },
+      "@opentui/core": { "version": "0.4.3", "source": "enterprise registry" },
+      "@opentui/react": { "version": "0.4.3", "source": "enterprise registry" },
+      "react": { "version": "19.2.6", "source": "enterprise registry" },
+      "react-reconciler": { "version": "0.33.0", "source": "enterprise registry" },
+      "web-tree-sitter": { "version": "0.25.10", "source": "enterprise registry" }
+    },
+    "opentui_core_transitive": {
+      "bun-ffi-structs": "0.2.4",
+      "diff": "9.0.0",
+      "marked": "17.0.1",
+      "string-width": "7.2.0",
+      "strip-ansi": "7.1.2",
+      "native_optional_packages": [
+        "@opentui/core-darwin-arm64@0.4.3",
+        "@opentui/core-darwin-x64@0.4.3",
+        "@opentui/core-linux-arm64@0.4.3",
+        "@opentui/core-linux-arm64-musl@0.4.3",
+        "@opentui/core-linux-x64@0.4.3",
+        "@opentui/core-linux-x64-musl@0.4.3",
+        "@opentui/core-win32-arm64@0.4.3",
+        "@opentui/core-win32-x64@0.4.3"
+      ]
+    },
+    "opentui_react_peer_resolution": {
+      "react": ">=19.2.0 (directly fixed to 19.2.6)",
+      "react-reconciler": "^0.33.0 (directly fixed to 0.33.0)",
+      "react-devtools-core": "^7.0.1",
+      "ws": "^8.18.0"
+    },
+    "development": {
+      "@types/bun": "1.3.5",
+      "@types/react": "19.2.14",
+      "@types/react-reconciler": "0.32.0",
+      "typescript": "6.0.3"
+    },
+    "lockfile_note": "bun-ffi-structs@0.2.4 declares peer typescript:^5; 企业 bun install 会为该 peer 解析隔离的 TypeScript 5.x，直接项目 TypeScript 仍为 6.0.3。@types/react-reconciler 0.32.0 仅用于编译期声明，运行时 reconciler 由 OpenTUI React 0.4.3 固定为 0.33.0。",
+    "removed": ["@opentui/solid", "solid-js", "local OpenTUI 0.1.74 snapshot", "local native artifact workspaces"]
+  },
+  "python": {
+    "runtime": {
+      "deepagents": "0.6.8",
+      "langchain": "1.3.11",
+      "langchain-core": "1.4.8",
+      "langgraph-checkpoint-sqlite": "3.0.3",
+      "langchain-openai": "1.3.3",
+      "langchain-mcp-adapters": "0.2.1",
+      "Jinja2": "3.1.6",
+      "httpx": "0.28.1",
+      "pydantic": "2.12.5"
+    },
+    "test": {
+      "pytest": "9.0.3",
+      "pytest-asyncio": "1.4.0"
+    },
+    "build": { "hatchling": "1.27.0" },
+    "lockfile": "packages/agent/uv.lock",
+    "removed": ["langchain-quickjs", "langchain-tests", "js_eval"]
+  }
+}

@@ -1,6 +1,6 @@
 /** CLI 启动层测试：验证工作区错误能在启动 Python 前得到清晰诊断。 */
 import { expect, test } from "bun:test"
-import { mkdtemp, writeFile } from "node:fs/promises"
+import { mkdtemp, readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { resolve } from "node:path"
 
@@ -23,6 +23,13 @@ test("交互界面拒绝经过管道或任务复用器启动", () => {
   expect(() => validateInteractiveTerminal(undefined, true)).toThrow("requires a real terminal")
   expect(() => validateInteractiveTerminal(true, false)).toThrow("requires a real terminal")
   expect(() => validateInteractiveTerminal(true, true)).not.toThrow()
+})
+
+test("根 dev 命令直接启动 CLI，避免 workspace 转发丢失 TTY", async () => {
+  const rootPackage = JSON.parse(await readFile(resolve(import.meta.dir, "../../../package.json"), "utf8")) as {
+    scripts: Record<string, string>
+  }
+  expect(rootPackage.scripts.dev).toBe("bun packages/cli/src/index.ts")
 })
 
 test("无头 CLI 不协商审批或问答能力", () => {

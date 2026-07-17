@@ -172,7 +172,6 @@ async def test_real_agent_workflow_cannot_write_outside_workspace(tmp_path: Path
             cwd=str(tmp_path),
             approval_mode="yolo",
             enable_ask_user=False,
-            enable_interpreter=False,
             enable_memory=False,
             enable_skills=False,
         )
@@ -222,7 +221,6 @@ async def test_execution_context_workspace_is_used_when_cwd_is_omitted(tmp_path:
         execution_context=context,
         approval_mode="yolo",
         enable_ask_user=False,
-        enable_interpreter=False,
         enable_memory=False,
         enable_skills=False,
     )

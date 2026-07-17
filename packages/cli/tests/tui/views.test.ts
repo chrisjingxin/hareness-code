@@ -5,6 +5,7 @@ import { act, createElement, createRef } from "react"
 
 import { HomeView, SessionView } from "../../src/tui/components"
 import type { TuiRuntime } from "../../src/tui/model"
+import { registerCommonSyntaxParsers } from "../../src/tui/syntax-parsers"
 import { createInitialState, startRun, type TuiState } from "../../src/tui/state"
 
 const runtime: TuiRuntime = {
@@ -88,6 +89,47 @@ test("会话渲染显示工具卡片和底部 composer", async () => {
     const frame = setup.captureCharFrame()
     expect(frame).toContain("read_file")
     expect(frame).toContain("Harness Code")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("会话通过原生 Markdown renderer 隐藏标题和代码围栏标记", async () => {
+  registerCommonSyntaxParsers()
+  const run = { threadId: "thread-markdown", runId: "run-markdown" }
+  const started = startRun(createInitialState(), run, "展示 Markdown")
+  const state: TuiState = {
+    ...started,
+    activeRun: undefined,
+    status: "已完成",
+    timeline: [
+      started.timeline[0]!,
+      {
+        type: "message",
+        message: {
+          id: "assistant-markdown",
+          role: "assistant",
+          content: "## 示例标题\n\n- **重点内容**\n\n```java\npublic class Demo {}\n```",
+          runId: run.runId,
+        },
+      },
+    ],
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(SessionView, viewProps(state, 100, 28)), { width: 100, height: 28 })
+  })
+  try {
+    // Markdown 的 Tree-sitter 高亮在异步 worker 返回后提交一帧；不能只检查初始占位帧。
+    await act(async () => {
+      await Bun.sleep(150)
+      await setup.flush()
+    })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("示例标题")
+    expect(frame).toContain("重点内容")
+    expect(frame).toContain("public class Demo {}")
+    expect(frame).not.toContain("## 示例标题")
   } finally {
     await act(async () => { setup.renderer.destroy() })
   }

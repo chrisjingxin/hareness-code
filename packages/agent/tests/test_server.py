@@ -230,7 +230,7 @@ async def test_real_hitl_rejection_prevents_file_write():
         destination = Path(workspace) / "blocked.txt"
         model = ToolModel(responses=[AIMessage(content="", tool_calls=[{"name": "write_file", "args": {"file_path": str(destination), "content": "x"}, "id": "call-1"}]), AIMessage(content="已拒绝")])
         model.profile = {"max_input_tokens": 200_000}
-        agent = create_harness_agent(model, cwd=workspace, enable_interpreter=False, enable_skills=False, enable_memory=False, enable_ask_user=False, approval_mode="default")
+        agent = create_harness_agent(model, cwd=workspace, enable_skills=False, enable_memory=False, enable_ask_user=False, approval_mode="default")
         server = JsonRpcServer(agent=agent)
         frames = await _capture_server(server)
         await server.dispatch(_request("run.start", {"message": "写入", "thread_id": "t", "run_id": "r"}, "start"))
@@ -274,7 +274,6 @@ async def test_workspace_rejection_precedes_default_approval_request():
             model,
             cwd=workspace,
             approval_mode="default",
-            enable_interpreter=False,
             enable_skills=False,
             enable_memory=False,
             enable_ask_user=False,
@@ -326,7 +325,6 @@ async def test_auto_edit_writes_without_interruption_but_shell_still_requires_ap
             write_model,
             cwd=workspace,
             approval_mode="auto-edit",
-            enable_interpreter=False,
             enable_skills=False,
             enable_memory=False,
             enable_ask_user=False,
@@ -356,7 +354,6 @@ async def test_auto_edit_writes_without_interruption_but_shell_still_requires_ap
             shell_model,
             cwd=workspace,
             approval_mode="auto-edit",
-            enable_interpreter=False,
             enable_skills=False,
             enable_memory=False,
             enable_ask_user=False,
@@ -414,7 +411,6 @@ async def test_plan_mode_returns_tool_message_without_writing_or_requesting_appr
             model,
             cwd=workspace,
             approval_mode="plan",
-            enable_interpreter=False,
             enable_skills=False,
             enable_memory=False,
             enable_ask_user=False,

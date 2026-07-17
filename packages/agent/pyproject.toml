@@ -4,28 +4,29 @@ version = "0.1.0"
 description = "za38 agent kernel — deepagents + LangChain + LangGraph"
 requires-python = ">=3.11,<4.0"
 dependencies = [
-    "deepagents>=0.6.12",
-    "langchain>=1.3.12,<2.0.0",
-    "langchain-core>=1.4.9,<2.0.0",
-    "langgraph-checkpoint-sqlite>=2.0.0",
-    "langchain-openai>=1.3.5,<2.0.0",
-    "langchain-quickjs>=0.3.2,<0.4.0",
-    "langchain-mcp-adapters>=0.3.0,<1.0.0",
-    "jinja2>=3.1.0",
-    "httpx>=0.27.0",
-    "pydantic>=2.10,<3.0",
+    "deepagents==0.6.8",
+    "langchain==1.3.11",
+    "langchain-core==1.4.8",
+    "langgraph-checkpoint-sqlite==3.0.3",
+    "langchain-openai==1.3.3",
+    "langchain-mcp-adapters==0.2.1",
+    "jinja2==3.1.6",
+    "httpx==0.28.1",
+    "pydantic==2.12.5",
 ]
 
 [project.optional-dependencies]
 test = [
-    "pytest>=8.0.0",
-    "pytest-asyncio>=0.24.0",
-    "langchain-tests>=1.1.9",
+    "pytest==9.0.3",
+    "pytest-asyncio==1.4.0",
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.27.0"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["harness_agent"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

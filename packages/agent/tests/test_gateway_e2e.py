@@ -71,7 +71,6 @@ async def test_openai_compatible_agent_streams_against_mock_gateway(monkeypatch:
             model,
             approval_mode="yolo",
             enable_ask_user=False,
-            enable_interpreter=False,
             enable_memory=False,
             enable_skills=False,
         )

@@ -50,10 +50,10 @@ def test_plan_mode_allows_only_explicit_read_and_session_tools(tool_name: str):
 
 @pytest.mark.parametrize(
     "tool_name",
-    ["write_file", "edit_file", "execute", "delete", "task", "js_eval", "mcp_future_tool"],
+    ["write_file", "edit_file", "execute", "delete", "task", "mcp_future_tool"],
 )
 async def test_plan_mode_rejects_mutation_and_unknown_future_tools(tool_name: str):
-    """计划模式必须在执行前短路写入、shell、子 Agent、解释器和未来 MCP。"""
+    """计划模式必须在执行前短路写入、shell、子 Agent 和未来 MCP。"""
     middleware = PlanModeMiddleware()
     request = SimpleNamespace(tool_call={"name": tool_name, "id": f"call-{tool_name}", "args": {}})
     called = False

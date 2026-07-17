@@ -132,7 +132,6 @@ def create_harness_agent(
     enable_ask_user: bool = True,
     enable_memory: bool = True,
     enable_skills: bool = True,
-    enable_interpreter: bool = True,
     checkpointer: Any = None,
     mcp_server_info: list | None = None,
     cwd: str | None = None,
@@ -153,7 +152,6 @@ def create_harness_agent(
         enable_ask_user: 启用 ask_user 工具。
         enable_memory: 启用 AGENTS.md 记忆。
         enable_skills: 启用技能系统。
-        enable_interpreter: 启用 JS 解释器（js_eval）。
         checkpointer: checkpoint saver。None 时用 MemorySaver。
         mcp_server_info: MCP 服务器信息列表。
         cwd: 工作目录。
@@ -241,30 +239,7 @@ def create_harness_agent(
     elif enable_skills:
         logger.info("Skills middleware is disabled in remote sandbox mode")
 
-    # 4. CodeInterpreterMiddleware（JS 解释器）
-    if enable_interpreter and not sandboxed:
-        try:
-            from langchain_core._api import suppress_langchain_beta_warning
-            from langchain_quickjs import CodeInterpreterMiddleware
-
-            with suppress_langchain_beta_warning():
-                agent_middleware.append(
-                    CodeInterpreterMiddleware(
-                        tool_name="js_eval",
-                        timeout=30,
-                        memory_limit=128 * 1024 * 1024,
-                        max_ptc_calls=50,
-                        max_result_chars=50000,
-                        ptc=None,  # safe 模式
-                    )
-                )
-        except ImportError:
-            logger.warning("langchain-quickjs not installed, js_eval disabled")
-    elif enable_interpreter:
-        # QuickJS 运行在 Python sidecar 而不是远端 sandbox，不能让它绕开企业执行边界。
-        logger.info("js_eval is disabled in remote sandbox mode")
-
-    # 5. ShellAllowListMiddleware（shell 白名单）
+    # 4. ShellAllowListMiddleware（shell 白名单）
     if shell_allow_list:
         from harness_agent.shell_allow_list import ShellAllowListMiddleware
         agent_middleware.append(ShellAllowListMiddleware(shell_allow_list))
@@ -285,14 +260,14 @@ def create_harness_agent(
             workspace=None, approval_mode=approval_mode
         )
 
-    # 6. HITL（interrupt_on）。计划模式和 YOLO 不创建 HITL；前者由白名单
+    # 5. HITL（interrupt_on）。计划模式和 YOLO 不创建 HITL；前者由白名单
     # 中间件硬拒绝，后者仅关闭 Harness 人工确认而不影响其他硬性策略。
     interrupt_on = interrupt_on_for_approval_mode(
         approval_mode,
         preflight=workspace_guard.allows_approval if workspace_guard is not None else None,
     )
 
-    # 7. SummarizationToolMiddleware（compact_conversation 工具）
+    # 6. SummarizationToolMiddleware（compact_conversation 工具）
     from deepagents.middleware.summarization import create_summarization_tool_middleware
     agent_middleware.append(create_summarization_tool_middleware(resolved_model, backend))
 

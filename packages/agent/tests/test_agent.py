@@ -33,7 +33,6 @@ def _create_agent():
 
     return create_harness_agent(
         model=_make_fake_model(),
-        enable_interpreter=False,
         enable_skills=False,
         enable_memory=False,
         enable_ask_user=False,
