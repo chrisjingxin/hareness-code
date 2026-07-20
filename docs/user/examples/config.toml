@@ -16,6 +16,8 @@ base_url = "https://gateway.example.internal/v1"
 api_key_env = "HARNESS_API_KEY"
 timeout_seconds = 120
 max_retries = 2
+# 模型输入窗口；未填写时使用 128000。显式值不得低于 16384。
+context_window_tokens = 128000
 
 # 固定 Header 只能包含非秘密值；Authorization、Cookie 和 API Key 必须放入 headers_env。
 [models.profiles.enterprise.headers]

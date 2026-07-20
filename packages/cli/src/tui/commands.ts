@@ -5,6 +5,7 @@ export type SlashCommandName =
   | "quit"
   | "clear"
   | "force-clear"
+  | "compact"
   | "status"
   | "version"
   | "resume"
@@ -42,6 +43,7 @@ export const slashCommandDefinitions: readonly SlashCommandDefinition[] = [
   { name: "quit", aliases: ["q"], description: "退出 za38" },
   { name: "clear", description: "开启新的 thread" },
   { name: "force-clear", description: "取消当前执行并开启新的 thread" },
+  { name: "compact", description: "压缩当前 thread 上下文" },
   { name: "status", description: "显示运行状态" },
   { name: "version", description: "显示版本" },
   { name: "resume", description: "打开 thread 恢复选择器" },

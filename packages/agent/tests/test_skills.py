@@ -142,4 +142,4 @@ async def test_explicit_skill_run_emits_loaded_event_before_content(tmp_path: Pa
     events = [frame["params"] for frame in frames if frame.get("method") == "event"]
     assert [event["type"] for event in events] == ["run.started", "skill.loaded", "content.delta", "run.completed"]
     assert events[1]["payload"]["skill_id"] == "project/review"
-    assert "先检查代码。" in events[2]["payload"]["text"]
+    assert "/.harness/skills/project/review/SKILL.md" in events[2]["payload"]["text"]

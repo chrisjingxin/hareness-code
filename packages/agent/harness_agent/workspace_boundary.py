@@ -26,6 +26,7 @@ _DIRECT_PATH_ARGUMENTS = {
     "delete_file": "file_path",
 }
 _SEARCH_TOOLS = frozenset({"glob", "grep"})
+_VIRTUAL_ROOT = "/.harness"
 _WINDOWS_ABSOLUTE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
 
 
@@ -108,7 +109,13 @@ class WorkspaceBoundaryMiddleware(AgentMiddleware[dict[str, Any], ContextT, Resp
         try:
             if tool_name in _DIRECT_PATH_ARGUMENTS:
                 field = _DIRECT_PATH_ARGUMENTS[tool_name]
-                self.policy.validate_direct_path(args.get(field), tool_name=tool_name)
+                value = args.get(field)
+                if _is_virtual_path(value):
+                    if tool_name != "read_file":
+                        raise ValueError("/.harness 仅允许通过 read_file 只读分页访问")
+                    _validate_virtual_read_path(value)
+                else:
+                    self.policy.validate_direct_path(value, tool_name=tool_name)
             elif tool_name in _SEARCH_TOOLS:
                 # 未传 path 时由 LocalShellBackend 以 root_dir 搜索；这是工作区内
                 # 的安全默认值。显式 path 必须仍通过 canonical containment。
@@ -122,6 +129,10 @@ class WorkspaceBoundaryMiddleware(AgentMiddleware[dict[str, Any], ContextT, Resp
                     self.policy.validate_search_pattern(
                         args["glob"], tool_name=tool_name, field="glob"
                     )
+            elif tool_name == "execute" and any(
+                isinstance(value, str) and _VIRTUAL_ROOT in value for value in args.values()
+            ):
+                raise ValueError("execute 不能访问 /.harness 虚拟命名空间")
         except ValueError as exc:
             return self._rejection(tool_name, tool_call.get("id"), str(exc))
         return None
@@ -166,3 +177,17 @@ class WorkspaceBoundaryMiddleware(AgentMiddleware[dict[str, Any], ContextT, Resp
         if (rejection := self._validate_tool_call(request)) is not None:
             return rejection
         return await handler(request)
+
+
+def _is_virtual_path(value: object) -> bool:
+    """判断路径是否指向逻辑虚拟根，不能将它交给宿主 Path.resolve。"""
+    return isinstance(value, str) and (value == _VIRTUAL_ROOT or value.startswith(f"{_VIRTUAL_ROOT}/"))
+
+
+def _validate_virtual_read_path(value: object) -> None:
+    """只在守卫层做路径语法校验，存在性和 thread 归属由虚拟后端二次校验。"""
+    if not isinstance(value, str) or not value.startswith(f"{_VIRTUAL_ROOT}/"):
+        raise ValueError("/.harness 路径必须使用绝对逻辑路径")
+    normalized = value.replace("\\", "/")
+    if ".." in PurePosixPath(normalized).parts:
+        raise ValueError("/.harness 路径不能包含 '..' 段")

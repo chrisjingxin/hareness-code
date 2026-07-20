@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from harness_agent.protocol_generated import (
     EventEnvelope,
+    ContextCompactParams,
     InitializeParams,
     InteractionRequestEnvelope,
     ThreadsListParams,
@@ -32,6 +33,13 @@ def test_python_rejects_all_shared_invalid_fixtures() -> None:
     for fixture in fixtures["invalid"]:
         with pytest.raises(ValidationError):
             _validate(fixture)
+
+
+def test_python_validates_v2_4_manual_compaction_params() -> None:
+    """手动上下文压缩只接受服务端已知的内部 thread ID 字段。"""
+    assert ContextCompactParams.model_validate({"thread_id": "thread-1"}).thread_id == "thread-1"
+    with pytest.raises(ValidationError):
+        ContextCompactParams.model_validate({"thread_id": "", "unknown": True})
 
 
 def _validate(fixture: dict[str, Any]) -> None:

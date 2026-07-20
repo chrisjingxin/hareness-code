@@ -49,6 +49,25 @@ test("skill.loaded 事件加入可追踪的系统时间线项", () => {
   expect(messages(state).at(-1)).toMatchObject({ role: "system", content: "已加载 Skill：project/review" })
 })
 
+test("context.updated 显示紧凑状态并将完成摘要写入 lastRun", () => {
+  let state = startRun(createInitialState(), run, "长任务")
+  state = applyAgentEvent(state, event("context.updated", 1, {
+    action: "soft_dehydration",
+    estimated_tokens: 8200,
+    input_cap_tokens: 12288,
+    context_window_tokens: 16384,
+    dynamic_tokens: 8200,
+    cache_status: "unknown",
+    artifact_ids: ["tool-abc"],
+  }))
+  expect(state.status).toBe("正在归档工具结果")
+  expect(messages(state).at(-1)?.content).toContain("soft_dehydration")
+  state = applyAgentEvent(state, event("run.completed", 2, {
+    context: { action: "soft_dehydration", estimated_tokens: 8200, input_cap_tokens: 12288 },
+  }))
+  expect(state.lastRun?.context).toEqual({ action: "soft_dehydration", estimatedTokens: 8200, inputCapTokens: 12288 })
+})
+
 test("审批和稳定 question ID 通过时间线 request 进入状态", () => {
   let state = startRun(createInitialState(), run, "修改文件")
   state = applyInteractionRequest(state, request("approval", 1, { description: "写入源文件", requests: { action_requests: [] } }))

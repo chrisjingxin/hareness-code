@@ -31,7 +31,7 @@ def test_hitl_mapping_keeps_compaction_outside_all_approval_modes():
 
 @pytest.mark.parametrize(
     "tool_name",
-    ["ls", "read_file", "glob", "grep", "ask_user", "write_todos", "compact_conversation"],
+    ["ls", "read_file", "glob", "grep", "ask_user", "write_todos"],
 )
 def test_plan_mode_allows_only_explicit_read_and_thread_tools(tool_name: str):
     """计划模式对白名单内工具放行，避免妨碍调查和上下文维护。"""

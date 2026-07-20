@@ -58,6 +58,8 @@ export interface RunStartParams { message: string; thread_id?: string; run_id?: 
 export interface RunStartResult { thread_id: string; run_id: string; accepted: boolean }
 export interface RunCancelParams { thread_id: string; run_id: string }
 export interface RunCancelResult { cancelled: boolean; run_id: string }
+export interface ContextCompactParams { thread_id: string }
+export interface ContextCompactResult { compacted: boolean; context: JsonObject }
 export interface ThreadSummary { thread_id: string; created_at_ms: number; updated_at_ms: number; first_message: string; latest_message: string; message_count: number }
 export interface ThreadMessage { kind: "user" | "assistant" | "tool"; content: string; tool_name?: string }
 export interface ThreadsListParams { limit?: number }
@@ -129,6 +131,9 @@ class RunCancelParams(StrictModel):
     thread_id: str = Field(min_length=1)
     run_id: str = Field(min_length=1)
 
+class ContextCompactParams(StrictModel):
+    thread_id: str = Field(min_length=1)
+
 class ThreadSummary(StrictModel):
     thread_id: str = Field(min_length=1)
     created_at_ms: int = Field(ge=0)
@@ -166,8 +171,9 @@ class EventEnvelope(StrictModel):
             "tool.started": {"tool_call_id", "name"},
             "tool.delta": {"tool_call_id", "arguments_delta", "output_delta", "truncated", "original_bytes"},
             "tool.completed": {"tool_call_id", "result"},
+            "context.updated": {"action", "estimated_tokens", "input_cap_tokens", "context_window_tokens", "dynamic_tokens", "cache_status", "cached_tokens", "miss_reason", "artifact_ids"},
             "interaction.resolved": {"request_id", "type"},
-            "run.completed": {"usage", "duration_ms", "finish_reason"},
+            "run.completed": {"usage", "duration_ms", "finish_reason", "context"},
             "run.cancelled": {"reason"}, "run.failed": {"error"},
         }
         allowed = fields.get(self.type)

@@ -72,6 +72,11 @@ type ThreadPickerState = {
   error?: string
 }
 
+type ContextCompactResult = {
+  compacted?: unknown
+  context?: unknown
+}
+
 /** 正式 OpenTUI 根组件：所有 Agent 输出必须经状态归约后才进入终端。 */
 export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestExit }: TuiOptions) {
   const [state, setState] = useState(() => createInitialState())
@@ -313,6 +318,28 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
       case "force-clear":
         void cancelActiveRun().then(() => commit(clearThread))
         return
+      case "compact": {
+        const current = stateRef.current
+        if (command.argument) {
+          commit(state => appendNotice(state, "/compact 不接受参数。"))
+          return
+        }
+        if (!current.threadId) {
+          commit(state => appendNotice(state, "当前没有可压缩的 thread。"))
+          return
+        }
+        if (current.activeRun || current.pendingApproval || current.pendingQuestion) {
+          commit(state => appendNotice(state, "当前 thread 正在执行或等待交互，暂不能压缩。"))
+          return
+        }
+        try {
+          const result = await client.compactContext(current.threadId) as ContextCompactResult
+          commit(state => appendNotice(state, contextCompactNotice(result)))
+        } catch (error) {
+          commit(state => appendNotice(state, `上下文压缩失败：${errorMessage(error)}`))
+        }
+        return
+      }
       case "status":
         commit(current => appendNotice(current, runtimeStatusSummary(runtime)))
         return
@@ -721,6 +748,25 @@ export async function runTui(options: TuiOptions): Promise<void> {
 /** 将未知异常转换为可安全展示的字符串。 */
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/** 将手动压缩响应收敛为不泄漏归档原文的紧凑时间线通知。 */
+function contextCompactNotice(value: ContextCompactResult): string {
+  const context = value.context && typeof value.context === "object"
+    ? value.context as Record<string, unknown>
+    : {}
+  const action = typeof context.action === "string" ? context.action : "unknown"
+  const estimated = typeof context.estimated_tokens === "number" ? context.estimated_tokens : undefined
+  const cap = typeof context.input_cap_tokens === "number" ? context.input_cap_tokens : undefined
+  const artifacts = Array.isArray(context.artifact_ids) ? context.artifact_ids.length : 0
+  if (value.compacted === true) {
+    const budget = estimated !== undefined && cap !== undefined ? ` ${estimated}/${cap}` : ""
+    return `上下文已压缩${budget}${artifacts ? `，归档 ${artifacts} 项` : ""}。`
+  }
+  const reason = typeof context.miss_reason === "string" ? `：${context.miss_reason}` : ""
+  return action === "manual_compaction_skipped"
+    ? `上下文无需压缩${reason}。`
+    : `上下文压缩未完成${reason}。`
 }
 
 /** 将不可信 RPC 摘要收敛为 TUI 需要的字段，避免字段缺失破坏 Slash 菜单。 */

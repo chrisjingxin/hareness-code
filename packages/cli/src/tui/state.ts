@@ -75,6 +75,7 @@ export type RunSummary = {
   outcome: "completed" | "cancelled" | "failed"
   durationMs?: number
   usage?: { inputTokens: number; outputTokens: number }
+  context?: { action: string; estimatedTokens?: number; inputCapTokens?: number }
 }
 
 /** 供恢复 RPC 交给表现层的稳定 thread message，禁止把 checkpoint 原始对象带入 TUI。 */
@@ -314,6 +315,12 @@ export function applyAgentEvent(state: TuiState, event: EventEnvelope): TuiState
           }),
         }
       }
+    case "context.updated":
+      return {
+        ...next,
+        status: contextStatus(payload),
+        timeline: appendNotice(next, contextNotice(payload)).timeline,
+      }
     case "interaction.resolved":
       return {
         ...next,
@@ -334,6 +341,7 @@ export function applyAgentEvent(state: TuiState, event: EventEnvelope): TuiState
           outcome: "completed",
           durationMs: numberValue(payload.duration_ms),
           usage: usageValue(payload.usage),
+          context: contextValue(payload.context),
         },
         timeline: finishAssistant(settlePendingInteractions(next.timeline, runId), runId),
       }
@@ -533,6 +541,31 @@ function usageValue(value: unknown): { inputTokens: number; outputTokens: number
   const outputTokens = numberValue(usage.output_tokens)
   if (inputTokens === undefined || outputTokens === undefined) return undefined
   return { inputTokens, outputTokens }
+}
+
+/** 读取压缩状态中可安全渲染的少量字段，未知 payload 不应影响主对话。 */
+function contextValue(value: unknown): { action: string; estimatedTokens?: number; inputCapTokens?: number } | undefined {
+  const context = objectRecord(value)
+  const action = stringValue(context.action, "")
+  return action
+    ? { action, estimatedTokens: numberValue(context.estimated_tokens), inputCapTokens: numberValue(context.input_cap_tokens) }
+    : undefined
+}
+
+/** 将可观测策略映射为紧凑活动状态，避免把 token 诊断混入模型回答。 */
+function contextStatus(payload: Record<string, unknown>): string {
+  const action = stringValue(payload.action, "")
+  if (action.includes("summary")) return "正在整理上下文"
+  if (action.includes("dehydration")) return "正在归档工具结果"
+  return action === "report" ? "上下文接近预算" : "正在思考"
+}
+
+/** 为时间线生成简短上下文通知，便于恢复后理解为何历史被收敛。 */
+function contextNotice(payload: Record<string, unknown>): string {
+  const action = stringValue(payload.action, "context")
+  const estimated = numberValue(payload.estimated_tokens)
+  const cap = numberValue(payload.input_cap_tokens)
+  return cap && estimated ? `上下文：${action} · ${estimated}/${cap} tokens` : `上下文：${action}`
 }
 
 /** 兼容字符串和对象两种提问选项格式。 */

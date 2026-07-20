@@ -121,6 +121,104 @@ async def test_echo_run_response_precedes_ordered_terminal_events():
     assert [frame["params"]["sequence"] for frame in run_frames if frame.get("method") == "event"] == [1, 2, 3]
 
 
+async def test_context_compact_rewrites_idle_thread_and_returns_context_summary():
+    """手动压缩只允许空闲 thread，成功后写回 checkpoint 并同步摘要状态。"""
+    from langchain_core.messages import HumanMessage
+
+    from harness_agent.context_window import ContextUpdate
+    from harness_agent.server import JsonRpcServer
+
+    class Store:
+        def __init__(self) -> None:
+            self.refreshed: list[str] = []
+
+        async def load_context_messages(self, _thread_id: str) -> list[HumanMessage]:
+            return [HumanMessage(content="旧上下文")]
+
+        async def refresh_thread(self, thread_id: str) -> None:
+            self.refreshed.append(thread_id)
+
+        @staticmethod
+        def graph_config(thread_id: str) -> dict[str, dict[str, str]]:
+            return {"configurable": {"thread_id": thread_id}}
+
+    class Agent:
+        def __init__(self) -> None:
+            self.updates: list[tuple[dict[str, object], dict[str, object]]] = []
+
+        async def aupdate_state(self, config: dict[str, object], update: dict[str, object], *, as_node: str) -> None:
+            assert as_node == "model"
+            self.updates.append((config, update))
+
+    class Middleware:
+        async def compact_now(self, thread_id: str, messages: list[HumanMessage]):
+            update = ContextUpdate(
+                thread_id=thread_id,
+                action="manual_summary",
+                estimated_tokens=20,
+                input_cap_tokens=100,
+                context_window_tokens=128,
+                dynamic_tokens=10,
+                artifact_ids=("history-123456789",),
+            )
+            return [HumanMessage(content="<harness_context_summary>摘要</harness_context_summary>")], update, True
+
+        @staticmethod
+        def consume_updates(_thread_id: str) -> tuple[()]:
+            return ()
+
+    store = Store()
+    agent = Agent()
+    server = JsonRpcServer()
+    server._initialized = True
+    server._enabled_capabilities = {"context.manage"}
+    server._thread_store = store  # type: ignore[assignment]
+    server._context_middlewares["thread"] = Middleware()
+
+    async def ensure_agent(_thread_id: str) -> Agent:
+        return agent
+
+    server._ensure_agent = ensure_agent  # type: ignore[method-assign]
+    frames: list[dict[str, Any]] = []
+    server.send = lambda message: _append(frames, message)  # type: ignore[method-assign]
+
+    await server.dispatch(_request("context.compact", {"thread_id": "thread"}, "compact-1"))
+
+    assert frames[0]["result"] == {
+        "compacted": True,
+        "context": {
+            "action": "manual_summary",
+            "estimated_tokens": 20,
+            "input_cap_tokens": 100,
+            "context_window_tokens": 128,
+            "dynamic_tokens": 10,
+            "cache_status": "unknown",
+            "cached_tokens": None,
+            "miss_reason": None,
+            "artifact_ids": ["history-123456789"],
+        },
+    }
+    assert store.refreshed == ["thread"]
+    assert agent.updates[0][0] == {"configurable": {"thread_id": "thread"}}
+    assert len(agent.updates[0][1]["messages"]) == 2
+
+
+async def test_context_compact_rejects_active_run():
+    """运行中 checkpoint 会变动，手动压缩必须等待当前 run 结束。"""
+    from harness_agent.server import ActiveRun, JsonRpcServer
+
+    server = JsonRpcServer()
+    server._initialized = True
+    server._enabled_capabilities = {"context.manage"}
+    server._runs["thread"] = ActiveRun(thread_id="thread", run_id="run", message="运行中")
+    frames: list[dict[str, Any]] = []
+    server.send = lambda message: _append(frames, message)  # type: ignore[method-assign]
+
+    await server.dispatch(_request("context.compact", {"thread_id": "thread"}, "compact-active"))
+
+    assert frames[0]["error"]["message"] == "CONTEXT_COMPACTION_RUN_ACTIVE"
+
+
 def test_stream_translation_prefers_normalized_content_blocks():
     """首轮仅提供 content_blocks 时仍必须产生正文事件。"""
     from types import SimpleNamespace

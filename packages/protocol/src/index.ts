@@ -8,6 +8,7 @@ import {
   PROTOCOL_MAJOR,
   PROTOCOL_MINOR,
   type EventEnvelope,
+  type ContextCompactParams,
   type InitializeParams,
   type InteractionRequestEnvelope,
   type JsonRpcMessage,
@@ -19,6 +20,7 @@ export const Method = {
   INITIALIZE: "initialize",
   RUN_START: "run.start",
   RUN_CANCEL: "run.cancel",
+  CONTEXT_COMPACT: "context.compact",
   CONFIG_SHOW: "config.show",
   CONFIG_PATH: "config.path",
   THREADS_LIST: "threads.list",
@@ -67,6 +69,13 @@ export function assertThreadsOpenParams(value: unknown): asserts value is Thread
   const params = objectValue(value, "threads.open params")
   if (typeof params.thread_id !== "string" || !params.thread_id) throw new Error("threads.open.thread_id 无效")
   rejectExtra(params, ["thread_id"], "threads.open params")
+}
+
+/** 校验只接受 TUI 当前 thread 内部 ID 的手动上下文压缩请求。 */
+export function assertContextCompactParams(value: unknown): asserts value is ContextCompactParams {
+  const params = objectValue(value, "context.compact params")
+  if (typeof params.thread_id !== "string" || !params.thread_id) throw new Error("context.compact.thread_id 无效")
+  rejectExtra(params, ["thread_id"], "context.compact params")
 }
 
 /** 校验 Agent 推送的统一事件信封，并允许未来新增未知事件类型。 */
@@ -143,8 +152,9 @@ function validateKnownEventPayload(type: string, payload: Record<string, unknown
     "tool.started": ["tool_call_id", "name"],
     "tool.delta": ["tool_call_id", "arguments_delta", "output_delta", "truncated", "original_bytes"],
     "tool.completed": ["tool_call_id", "result"],
+    "context.updated": ["action", "estimated_tokens", "input_cap_tokens", "context_window_tokens", "dynamic_tokens", "cache_status", "cached_tokens", "miss_reason", "artifact_ids"],
     "interaction.resolved": ["request_id", "type"],
-    "run.completed": ["usage", "duration_ms", "finish_reason"],
+    "run.completed": ["usage", "duration_ms", "finish_reason", "context"],
     "run.cancelled": ["reason"],
     "run.failed": ["error"],
   }

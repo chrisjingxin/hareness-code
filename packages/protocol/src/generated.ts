@@ -1,13 +1,13 @@
 /** 此文件由 packages/protocol/scripts/generate.ts 生成，请勿手工修改。 */
 
 export const PROTOCOL_MAJOR = 2 as const
-export const PROTOCOL_MINOR = 2 as const
+export const PROTOCOL_MINOR = 4 as const
 export const MAX_FRAME_BYTES = 8388608 as const
 export const MAX_TOOL_PAYLOAD_BYTES = 1048576 as const
-export const CLIENT_METHODS = ["initialize","run.start","run.cancel","config.show","config.path","threads.list","threads.open","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","shutdown"] as const
+export const CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","threads.list","threads.open","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","shutdown"] as const
 export const SERVER_METHODS = ["event","request"] as const
-export const SERVER_CAPABILITIES = ["run.cancel","run.multithread","interactive.approval","interactive.question","config.read","threads.read","skills.read","skills.manage"] as const
-export const EVENT_TYPES = ["run.started","skill.loaded","content.delta","thinking.delta","tool.started","tool.delta","tool.completed","interaction.resolved","run.completed","run.cancelled","run.failed"] as const
+export const SERVER_CAPABILITIES = ["run.cancel","run.multithread","interactive.approval","interactive.question","config.read","threads.read","context.manage","skills.read","skills.manage"] as const
+export const EVENT_TYPES = ["run.started","skill.loaded","content.delta","thinking.delta","tool.started","tool.delta","tool.completed","context.updated","interaction.resolved","run.completed","run.cancelled","run.failed"] as const
 
 export type JsonObject = Record<string, unknown>
 export type JsonRpcErrorObject = { code: number; message: string; data?: unknown }
@@ -23,6 +23,8 @@ export interface RunStartParams { message: string; thread_id?: string; run_id?: 
 export interface RunStartResult { thread_id: string; run_id: string; accepted: boolean }
 export interface RunCancelParams { thread_id: string; run_id: string }
 export interface RunCancelResult { cancelled: boolean; run_id: string }
+export interface ContextCompactParams { thread_id: string }
+export interface ContextCompactResult { compacted: boolean; context: JsonObject }
 export interface ThreadSummary { thread_id: string; created_at_ms: number; updated_at_ms: number; first_message: string; latest_message: string; message_count: number }
 export interface ThreadMessage { kind: "user" | "assistant" | "tool"; content: string; tool_name?: string }
 export interface ThreadsListParams { limit?: number }

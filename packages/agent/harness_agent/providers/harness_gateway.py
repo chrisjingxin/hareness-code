@@ -17,7 +17,7 @@ def create_openai_compatible_model(settings: ModelSettings) -> BaseChatModel:
             "Install the za38-agent runtime with its declared dependencies."
         ) from exc
 
-    return ChatOpenAI(
+    model = ChatOpenAI(
         model=settings.name,
         base_url=settings.base_url,
         api_key=settings.resolve_api_key(),
@@ -25,6 +25,10 @@ def create_openai_compatible_model(settings: ModelSettings) -> BaseChatModel:
         max_retries=settings.max_retries,
         default_headers=settings.resolve_headers(),
     )
+    # LangChain/DeepAgents 的预算中间件读取 profile；企业网关不会可靠地返回
+    # 模型窗口，因此使用经配置校验后的保守显式值。
+    model.profile = {"max_input_tokens": settings.context_window_tokens}
+    return model
 
 
 def resolve_model(model: BaseChatModel) -> BaseChatModel:

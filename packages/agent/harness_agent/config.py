@@ -33,6 +33,8 @@ class ModelSettings:
     api_key_env: str = "HARNESS_API_KEY"
     timeout_seconds: float = 120.0
     max_retries: int = 2
+    context_window_tokens: int = 128_000
+    context_window_source: Literal["default", "config"] = "default"
     headers: dict[str, str] = field(default_factory=dict)
     headers_env: dict[str, str] = field(default_factory=dict)
 
@@ -66,6 +68,8 @@ class ModelSettings:
             "api_key_configured": bool(environment.get(self.api_key_env)),
             "timeout_seconds": self.timeout_seconds,
             "max_retries": self.max_retries,
+            "context_window_tokens": self.context_window_tokens,
+            "context_window_source": self.context_window_source,
             "headers": dict(self.headers),
             "headers_env": dict(self.headers_env),
         }
@@ -274,7 +278,17 @@ def _merge_models(target: dict[str, object], value: object) -> None:
 
 def _merge_profile_values(base: dict[str, object], override: dict[str, object]) -> dict[str, object]:
     """按层合并同名 Profile，Header 映射采用逐项覆盖。"""
-    allowed = {"provider", "model", "base_url", "api_key_env", "timeout_seconds", "max_retries", "headers", "headers_env"}
+    allowed = {
+        "provider",
+        "model",
+        "base_url",
+        "api_key_env",
+        "timeout_seconds",
+        "max_retries",
+        "context_window_tokens",
+        "headers",
+        "headers_env",
+    }
     unknown = set(override) - allowed
     if unknown:
         raise ConfigError(
@@ -396,6 +410,12 @@ def _parse_default_model(models: Mapping[str, object]) -> tuple[str | None, Mode
         api_key_env=api_key_env,
         timeout_seconds=_number(values.get("timeout_seconds", 120.0), "models.profiles.<name>.timeout_seconds", minimum=0.1),
         max_retries=_integer(values.get("max_retries", 2), "models.profiles.<name>.max_retries", minimum=0),
+        context_window_tokens=_integer(
+            values.get("context_window_tokens", 128_000),
+            "models.profiles.<name>.context_window_tokens",
+            minimum=16_384,
+        ),
+        context_window_source="config" if "context_window_tokens" in values else "default",
         headers=headers,
         headers_env=headers_env,
     )

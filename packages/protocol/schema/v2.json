@@ -4,13 +4,13 @@
   "title": "za38 protocol v2",
   "x-protocol": {
     "major": 2,
-    "minor": 2,
+    "minor": 4,
     "max_frame_bytes": 8388608,
     "max_tool_payload_bytes": 1048576,
-    "client_methods": ["initialize", "run.start", "run.cancel", "config.show", "config.path", "threads.list", "threads.open", "skills.list", "skills.inspect", "skills.set_enabled", "skills.install", "skills.update", "skills.remove", "skills.market.list", "shutdown"],
+    "client_methods": ["initialize", "run.start", "run.cancel", "context.compact", "config.show", "config.path", "threads.list", "threads.open", "skills.list", "skills.inspect", "skills.set_enabled", "skills.install", "skills.update", "skills.remove", "skills.market.list", "shutdown"],
     "server_methods": ["event", "request"],
-    "server_capabilities": ["run.cancel", "run.multithread", "interactive.approval", "interactive.question", "config.read", "threads.read", "skills.read", "skills.manage"],
-    "event_types": ["run.started", "skill.loaded", "content.delta", "thinking.delta", "tool.started", "tool.delta", "tool.completed", "interaction.resolved", "run.completed", "run.cancelled", "run.failed"]
+    "server_capabilities": ["run.cancel", "run.multithread", "interactive.approval", "interactive.question", "config.read", "threads.read", "context.manage", "skills.read", "skills.manage"],
+    "event_types": ["run.started", "skill.loaded", "content.delta", "thinking.delta", "tool.started", "tool.delta", "tool.completed", "context.updated", "interaction.resolved", "run.completed", "run.cancelled", "run.failed"]
   },
   "oneOf": [
     { "$ref": "#/$defs/jsonRpcRequest" },
@@ -107,6 +107,18 @@
         "thread": { "$ref": "#/$defs/threadSummary" },
         "messages": { "type": "array", "items": { "$ref": "#/$defs/threadMessage" } }
       },
+      "additionalProperties": false
+    },
+    "contextCompactParams": {
+      "type": "object",
+      "required": ["thread_id"],
+      "properties": { "thread_id": { "type": "string", "minLength": 1 } },
+      "additionalProperties": false
+    },
+    "contextCompactResult": {
+      "type": "object",
+      "required": ["compacted", "context"],
+      "properties": { "compacted": { "type": "boolean" }, "context": { "type": "object" } },
       "additionalProperties": false
     },
     "eventEnvelope": {

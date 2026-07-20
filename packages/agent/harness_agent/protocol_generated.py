@@ -7,13 +7,13 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 PROTOCOL_MAJOR = 2
-PROTOCOL_MINOR = 2
+PROTOCOL_MINOR = 4
 MAX_FRAME_BYTES = 8388608
 MAX_TOOL_PAYLOAD_BYTES = 1048576
-CLIENT_METHODS = ["initialize","run.start","run.cancel","config.show","config.path","threads.list","threads.open","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","shutdown"]
+CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","threads.list","threads.open","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","shutdown"]
 SERVER_METHODS = ["event","request"]
-SERVER_CAPABILITIES = ["run.cancel","run.multithread","interactive.approval","interactive.question","config.read","threads.read","skills.read","skills.manage"]
-EVENT_TYPES = ["run.started","skill.loaded","content.delta","thinking.delta","tool.started","tool.delta","tool.completed","interaction.resolved","run.completed","run.cancelled","run.failed"]
+SERVER_CAPABILITIES = ["run.cancel","run.multithread","interactive.approval","interactive.question","config.read","threads.read","context.manage","skills.read","skills.manage"]
+EVENT_TYPES = ["run.started","skill.loaded","content.delta","thinking.delta","tool.started","tool.delta","tool.completed","context.updated","interaction.resolved","run.completed","run.cancelled","run.failed"]
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -54,6 +54,9 @@ class RunCancelParams(StrictModel):
     thread_id: str = Field(min_length=1)
     run_id: str = Field(min_length=1)
 
+class ContextCompactParams(StrictModel):
+    thread_id: str = Field(min_length=1)
+
 class ThreadSummary(StrictModel):
     thread_id: str = Field(min_length=1)
     created_at_ms: int = Field(ge=0)
@@ -91,8 +94,9 @@ class EventEnvelope(StrictModel):
             "tool.started": {"tool_call_id", "name"},
             "tool.delta": {"tool_call_id", "arguments_delta", "output_delta", "truncated", "original_bytes"},
             "tool.completed": {"tool_call_id", "result"},
+            "context.updated": {"action", "estimated_tokens", "input_cap_tokens", "context_window_tokens", "dynamic_tokens", "cache_status", "cached_tokens", "miss_reason", "artifact_ids"},
             "interaction.resolved": {"request_id", "type"},
-            "run.completed": {"usage", "duration_ms", "finish_reason"},
+            "run.completed": {"usage", "duration_ms", "finish_reason", "context"},
             "run.cancelled": {"reason"}, "run.failed": {"error"},
         }
         allowed = fields.get(self.type)

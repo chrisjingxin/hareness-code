@@ -87,6 +87,32 @@ def test_config_precedence_and_redaction(tmp_path: Path):
     assert "secret" not in str(config.redacted({"EXPLICIT_KEY": "secret"}))
 
 
+def test_context_window_defaults_to_128k_and_rejects_small_explicit_value(tmp_path: Path):
+    """窗口未配置时必须可诊断地使用 128K；显式值不能低于安全最小窗口。"""
+    path = tmp_path / "window.toml"
+    _write_config(path)
+
+    default = load_config(workspace=tmp_path, home=tmp_path / "home", config_path=path)
+    assert default.require_model().context_window_tokens == 128_000
+    assert default.require_model().context_window_source == "default"
+    assert default.redacted()["model"]["context_window_source"] == "default"  # type: ignore[index]
+
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            'api_key_env = "HARNESS_API_KEY"',
+            'api_key_env = "HARNESS_API_KEY"\ncontext_window_tokens = 65536',
+        ),
+        encoding="utf-8",
+    )
+    explicit = load_config(workspace=tmp_path, home=tmp_path / "home", config_path=path)
+    assert explicit.require_model().context_window_tokens == 65_536
+    assert explicit.require_model().context_window_source == "config"
+
+    path.write_text(path.read_text(encoding="utf-8").replace("65536", "8000"), encoding="utf-8")
+    with pytest.raises(ConfigError, match="context_window_tokens"):
+        load_config(workspace=tmp_path, home=tmp_path / "home", config_path=path)
+
+
 def test_config_requires_v1_version_and_new_model_structure(tmp_path: Path):
     """旧字段和缺失版本必须被拒绝，而非悄然按旧语义执行。"""
     legacy = tmp_path / "legacy.toml"

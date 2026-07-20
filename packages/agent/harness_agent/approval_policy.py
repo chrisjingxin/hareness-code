@@ -23,8 +23,6 @@ _PLAN_ALLOWED_TOOLS = frozenset(
         "grep",
         "ask_user",
         "write_todos",
-        # 压缩只维护 LangGraph thread 上下文，不触碰文件、命令或外部资源。
-        "compact_conversation",
     }
 )
 

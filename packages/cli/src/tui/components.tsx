@@ -307,9 +307,12 @@ function RunSummary(props: { state: TuiState }) {
   if (!summary) return null
   const duration = formatDuration(summary.durationMs)
   const usage = formatUsage(summary.usage)
+  const context = summary.context?.estimatedTokens && summary.context.inputCapTokens
+    ? `ctx ${summary.context.estimatedTokens}/${summary.context.inputCapTokens}`
+    : undefined
   const outcome = summary.outcome === "completed" ? "已完成" : summary.outcome === "cancelled" ? "已取消" : "失败"
   const color = summary.outcome === "completed" ? tuiTheme.success : summary.outcome === "cancelled" ? tuiTheme.muted : tuiTheme.danger
-  const parts = [outcome, duration, usage].filter((part): part is string => Boolean(part))
+  const parts = [outcome, duration, usage, context].filter((part): part is string => Boolean(part))
 
   return (
     <box marginTop={1} paddingLeft={3} flexDirection="row" gap={1}>

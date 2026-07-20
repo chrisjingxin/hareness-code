@@ -47,6 +47,7 @@ class ConfigManifest:
     _ENVIRONMENT_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
     _ENV_INTERPOLATION = re.compile(r"\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)")
     _SECRET_KEY_PARTS = frozenset({"api_key", "token", "secret", "password", "credential"})
+    _NON_SECRET_TOKEN_FIELDS = frozenset({"context_window_tokens"})
     _SENSITIVE_HEADER_NAMES = frozenset({"authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key"})
 
     SECTIONS = {
@@ -152,6 +153,7 @@ class ConfigManifest:
                 if (
                     any(part in normalized_key for part in cls._SECRET_KEY_PARTS)
                     and not normalized_key.endswith("_env")
+                    and normalized_key not in cls._NON_SECRET_TOKEN_FIELDS
                 ):
                     raise ConfigManifestError(
                         f"{'.'.join(nested_path)} must reference an environment variable instead of a literal secret"

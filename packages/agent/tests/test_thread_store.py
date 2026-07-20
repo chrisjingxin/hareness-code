@@ -150,6 +150,43 @@ async def test_thread_store_keeps_projects_isolated_without_raw_paths(tmp_path: 
     assert fingerprints and str(project_a) not in fingerprints
 
 
+async def test_thread_store_persists_immutable_prompt_epoch_without_rescan(tmp_path: Path) -> None:
+    """恢复 epoch 应逐字返回已保存前缀，并拒绝同一 thread 的后续形状变化。"""
+    from harness_agent.prompting import PromptComposer
+
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    epoch = PromptComposer("core").create_epoch(
+        thread_id="thread-epoch",
+        execution_boundary="execution",
+        environment={"workspace": "logical-workspace"},
+        readonly_memory="memory",
+        skill_index="<skills />",
+        tool_fingerprint="schema",
+        now_ms=1,
+    )
+    first = await ThreadStore.open(project=project, home=home)
+    await first.save_prompt_epoch(epoch)
+    assert (await first.get_prompt_epoch("thread-epoch")) == epoch
+    changed = PromptComposer("different core").create_epoch(
+        thread_id="thread-epoch",
+        execution_boundary="execution",
+        environment={"workspace": "logical-workspace"},
+        readonly_memory="memory",
+        skill_index="<skills />",
+        tool_fingerprint="schema",
+        now_ms=1,
+    )
+    with pytest.raises(ThreadStoreError, match="PROMPT_EPOCH_IMMUTABLE"):
+        await first.save_prompt_epoch(changed)
+    await first.close()
+
+    second = await ThreadStore.open(project=project, home=home)
+    assert (await second.get_prompt_epoch("thread-epoch")) == epoch
+    await second.close()
+
+
 async def test_thread_store_reports_future_schema_and_closed_store(tmp_path: Path) -> None:
     """未来 schema 不能被旧版静默写回，关闭连接后也不得继续读写。"""
     home = tmp_path / "home"

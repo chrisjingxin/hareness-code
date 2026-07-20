@@ -85,6 +85,35 @@ test("/status 只展示本地运行摘要，不创建 Agent run", async () => {
   }
 })
 
+test("/compact 请求当前空闲 thread 的上下文压缩并展示结果", async () => {
+  const { client, requests, compactThreadIds } = createMockClient()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        client,
+        runtime,
+        onRequestExit: () => undefined,
+      }), { width: 100, height: 30 })
+      await setup.flush()
+    })
+    await sendAndFinish(setup, client, requests, "建立可压缩会话")
+    await act(async () => {
+      await setup.mockInput.typeText("/compact")
+      setup.mockInput.pressEnter()
+      await Bun.sleep(0)
+      await setup.flush()
+    })
+
+    expect(compactThreadIds).toEqual([requests.at(-1)?.threadId])
+    const frame = await setup.waitForFrame(value => value.includes("上下文已压缩"))
+    expect(frame).toContain("归档 1 项")
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+  }
+})
+
 test("/skills 打开可搜索选择器，并把选中的 Skill 附到下一次运行", async () => {
   const { client, requests } = createMockClient()
   let setup: Awaited<ReturnType<typeof testRender>>
@@ -317,6 +346,7 @@ function createMockClient() {
   const stdin = new PassThrough()
   const client = new IpcClient(stdin, stdout)
   const requests: Array<{ message: string; threadId: string; runId: string; requestedSkill?: { id: string; args?: string } }> = []
+  const compactThreadIds: string[] = []
   stdin.on("data", data => {
     for (const line of data.toString("utf8").split("\n")) {
       if (!line.trim()) continue
@@ -392,6 +422,27 @@ function createMockClient() {
         })}\n`)
         continue
       }
+      if (request.method === "context.compact" && typeof request.id === "string") {
+        const threadId = typeof request.params?.thread_id === "string" ? request.params.thread_id : ""
+        compactThreadIds.push(threadId)
+        stdout.write(`${JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: {
+            compacted: true,
+            context: {
+              action: "manual_summary",
+              estimated_tokens: 120,
+              input_cap_tokens: 1_000,
+              context_window_tokens: 2_000,
+              dynamic_tokens: 120,
+              cache_status: "unknown",
+              artifact_ids: ["history-123456789"],
+            },
+          },
+        })}\n`)
+        continue
+      }
       if (request.method !== "run.start" || typeof request.id !== "string") continue
       const message = typeof request.params?.message === "string" ? request.params.message : ""
       const threadId = typeof request.params?.thread_id === "string" ? request.params.thread_id : "thread-1"
@@ -408,5 +459,5 @@ function createMockClient() {
       stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { accepted: true, thread_id: threadId, run_id: runId } })}\n`)
     }
   })
-  return { client, requests }
+  return { client, requests, compactThreadIds }
 }
