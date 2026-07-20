@@ -2,7 +2,7 @@
 
 import { expect, test } from "bun:test"
 import type { EventEnvelope, InteractionRequestEnvelope } from "@za38/protocol"
-import { applyAgentEvent, applyInteractionRequest, clearPendingInteraction, clearThread, createInitialState, isHomeState, startRun, type TuiState } from "../../src/tui/state"
+import { applyAgentEvent, applyInteractionRequest, clearPendingInteraction, clearThread, createInitialState, isHomeState, restoreThread, startRun, type TuiState } from "../../src/tui/state"
 
 const run = { threadId: "thread-1", runId: "run-1" }
 
@@ -10,6 +10,21 @@ test("初始状态和清空后的状态进入首页", () => {
   const initial = createInitialState()
   expect(isHomeState(initial)).toBeTrue()
   expect(isHomeState(clearThread(startRun(initial, run, "生成组件")))).toBeTrue()
+})
+
+test("恢复 thread 会原子替换时间线并清空旧运行状态", () => {
+  const active = startRun(createInitialState(), run, "旧 thread 消息")
+  const restored = restoreThread("restored-thread", [
+    { kind: "user", content: "此前请求" },
+    { kind: "assistant", content: "此前回答" },
+    { kind: "tool", content: "此前工具结果", toolName: "execute" },
+  ])
+  expect(active.activeRun).toBeDefined()
+  expect(restored.threadId).toBe("restored-thread")
+  expect(restored.activeRun).toBeUndefined()
+  expect(restored.pendingApproval).toBeUndefined()
+  expect(restored.sequences).toEqual({})
+  expect(restored.timeline.map(item => item.type)).toEqual(["message", "message", "tool"])
 })
 
 test("v2 事件按 sequence 更新消息、工具和终态", () => {

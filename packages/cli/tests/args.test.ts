@@ -10,9 +10,17 @@ test("parses a non-interactive JSON run", () => {
     json: true,
     cwd: "/work",
     configPath: "/tmp/za38.toml",
-    threadId: undefined,
+    resume: false,
     sandbox: undefined,
   })
+})
+
+test("--resume 只打开交互式 thread 选择器，不接受 thread_id", () => {
+  expect(parseArgs(["--resume"], "/work")).toMatchObject({ kind: "run", resume: true, nonInteractive: false })
+  expect(() => parseArgs(["--resume", "thread-secret"], "/work")).toThrow("does not accept a thread id")
+  expect(() => parseArgs(["--resume=thread-secret"], "/work")).toThrow("does not accept a thread id")
+  expect(() => parseArgs(["--resume", "-n", "继续"], "/work")).toThrow("requires the interactive TUI")
+  expect(() => parseArgs(["--continue"], "/work")).toThrow("not supported")
 })
 
 test("sandbox 开关只接受企业远端模式或显式关闭", () => {

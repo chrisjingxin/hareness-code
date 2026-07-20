@@ -97,7 +97,7 @@ test("/skills 打开可搜索选择器，并把选中的 Skill 附到下一次�
       }), { width: 100, height: 30 })
       await setup.flush()
     })
-    await sendAndFinish(setup, client, requests, "保留会话上下文")
+    await sendAndFinish(setup, client, requests, "保留 thread 上下文")
     await act(async () => {
       await setup.mockInput.typeText("/skills")
       setup.mockInput.pressEnter()
@@ -107,7 +107,7 @@ test("/skills 打开可搜索选择器，并把选中的 Skill 附到下一次�
     let frame = await setup.waitForFrame(value => value.includes("repo-review-demo"))
     expect(frame).toContain("Skills")
     expect(frame).toContain("搜索 Skills")
-    expect(frame).toContain("保留会话")
+    expect(frame).toContain("保留 thread")
     expect(frame).toContain("harness-code")
     expect(frame).toContain("一条用于验证浮层描述单行")
     expect(frame).not.toContain("显示的长说明")
@@ -136,6 +136,79 @@ test("/skills 打开可搜索选择器，并把选中的 Skill 附到下一次�
       message: "审查当前改动",
       requestedSkill: { id: "user/repo-review-demo", args: "审查当前改动" },
     })
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+  }
+})
+
+test("/resume 在浮层中搜索并恢复 thread，内部 ID 不会渲染或要求用户输入", async () => {
+  const { client, requests } = createMockClient()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        client,
+        runtime,
+        onRequestExit: () => undefined,
+      }), { width: 100, height: 30 })
+      await setup.flush()
+    })
+    await act(async () => {
+      await setup.mockInput.typeText("/resume")
+      setup.mockInput.pressEnter()
+      await Bun.sleep(0)
+      await setup.flush()
+    })
+    let frame = await setup.waitForFrame(value => value.includes("Threads") && value.includes("修复索引结果"))
+    expect(frame).toContain("修复索引结果")
+    expect(frame).not.toContain("opaque-thread-2")
+
+    await act(async () => {
+      await setup.mockInput.typeText("索引")
+      await setup.flush()
+    })
+    frame = await setup.waitForFrame(value => value.includes("修复索引结果") && !value.includes("此前的需求"))
+    expect(frame).toContain("修复索引结果")
+    expect(frame).not.toContain("此前的需求")
+
+    await act(async () => {
+      setup.mockInput.pressEnter()
+      await Bun.sleep(0)
+      await setup.flush()
+    })
+    frame = await setup.waitForFrame(value => !value.includes("Threads") && value.includes("恢复前的请求"))
+    expect(frame).toContain("恢复前的请求")
+    expect(frame).toContain("execute")
+
+    await act(async () => {
+      await setup.mockInput.typeText("继续处理")
+      setup.mockInput.pressEnter()
+      await setup.flush()
+    })
+    expect(requests.at(-1)).toMatchObject({ message: "继续处理", threadId: "opaque-thread-2" })
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+  }
+})
+
+test("启动 --resume 等价于打开同一 thread 选择器", async () => {
+  const { client } = createMockClient()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        client,
+        runtime,
+        resume: true,
+        onRequestExit: () => undefined,
+      }), { width: 100, height: 30 })
+      await Bun.sleep(0)
+      await setup.flush()
+    })
+    const frame = await setup.waitForFrame(value => value.includes("Threads") && value.includes("修复索引结果"))
+    expect(frame).toContain("修复索引结果")
   } finally {
     if (setup!) await act(async () => { setup.renderer.destroy() })
     client.destroy()
@@ -176,34 +249,6 @@ test("Slash 菜单显示 skill:<id> 并可直接选择", async () => {
     expect(requests.at(-1)).toMatchObject({
       message: "检查这个变更",
       requestedSkill: { id: "user/repo-review-demo", args: "检查这个变更" },
-    })
-  } finally {
-    if (setup!) await act(async () => { setup.renderer.destroy() })
-    client.destroy()
-  }
-})
-
-test("/skill <id> [args] 不经选择器直接发起运行", async () => {
-  const { client, requests } = createMockClient()
-  let setup: Awaited<ReturnType<typeof testRender>>
-  try {
-    await act(async () => {
-      setup = await testRender(createElement(Za38Tui, {
-        client,
-        runtime,
-        onRequestExit: () => undefined,
-      }), { width: 100, height: 30 })
-      await setup.flush()
-    })
-    await act(async () => {
-      await setup.mockInput.typeText("/skill user/repo-review-demo 检查当前改动")
-      setup.mockInput.pressEnter()
-      await setup.flush()
-    })
-
-    expect(requests.at(-1)).toMatchObject({
-      message: "检查当前改动",
-      requestedSkill: { id: "user/repo-review-demo", args: "检查当前改动" },
     })
   } finally {
     if (setup!) await act(async () => { setup.renderer.destroy() })
@@ -297,6 +342,52 @@ function createMockClient() {
               enabled: true,
               user_invocable: true,
             }],
+          },
+        })}\n`)
+        continue
+      }
+      if (request.method === "threads.list" && typeof request.id === "string") {
+        stdout.write(`${JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: {
+            threads: [{
+              thread_id: "opaque-thread-1",
+              created_at_ms: 1,
+              updated_at_ms: 2,
+              first_message: "此前的需求",
+              latest_message: "此前的回答",
+              message_count: 2,
+            }, {
+              thread_id: "opaque-thread-2",
+              created_at_ms: 3,
+              updated_at_ms: 4,
+              first_message: "修复索引结果",
+              latest_message: "需要继续处理索引",
+              message_count: 4,
+            }],
+          },
+        })}\n`)
+        continue
+      }
+      if (request.method === "threads.open" && typeof request.id === "string") {
+        const threadId = request.params?.thread_id
+        stdout.write(`${JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: {
+            thread: {
+              thread_id: threadId,
+              created_at_ms: 3,
+              updated_at_ms: 4,
+              first_message: "修复索引结果",
+              latest_message: "需要继续处理索引",
+              message_count: 2,
+            },
+            messages: [
+              { kind: "user", content: "恢复前的请求" },
+              { kind: "tool", tool_name: "execute", content: "已恢复的工具结果" },
+            ],
           },
         })}\n`)
         continue

@@ -1,7 +1,7 @@
 /** 命令行参数解析模块：把用户输入转换成稳定的内部命令描述。 */
 
 export type Command =
-  | { kind: "run"; message?: string; nonInteractive: boolean; json: boolean; cwd: string; configPath?: string; threadId?: string; sandbox?: "remote" | false }
+  | { kind: "run"; message?: string; nonInteractive: boolean; json: boolean; cwd: string; configPath?: string; resume: boolean; sandbox?: "remote" | false }
   | { kind: "config.show" | "config.path"; cwd: string; configPath?: string; params?: Record<string, unknown> }
   | { kind: SkillCommandKind; cwd: string; configPath?: string; params: Record<string, unknown> }
 
@@ -31,10 +31,13 @@ export function parseArgs(argv: string[], cwd = process.cwd()): Command {
   const nonInteractive = hasOption(args, "-n") || hasOption(args, "--non-interactive")
   const message = optionValue(args, "-n") ?? optionValue(args, "--non-interactive") ?? optionValue(args, "-m") ?? optionValue(args, "--message")
   const json = hasOption(args, "--json")
-  const threadId = optionValue(args, "--resume")
+  const resume = hasOption(args, "--resume")
+  rejectRetiredContinueOption(args)
+  rejectResumeArgument(args)
   const sandbox = sandboxOption(args)
   if (nonInteractive && !message) throw new Error("--non-interactive requires a message")
-  return { kind: "run", message, nonInteractive, json, cwd: cwdValue ?? cwd, configPath, threadId, sandbox }
+  if (resume && nonInteractive) throw new Error("--resume requires the interactive TUI")
+  return { kind: "run", message, nonInteractive, json, cwd: cwdValue ?? cwd, configPath, resume, sandbox }
 }
 
 /** 解析 Skill 管理命令；管理操作只通过 JSON-RPC 交给已启动的 sidecar。 */
@@ -106,6 +109,24 @@ function positionalValue(args: string[], message: string): string {
 /** 判断参数列表是否包含指定的无值开关。 */
 function hasOption(args: string[], name: string): boolean {
   return args.includes(name)
+}
+
+/** `--resume` 只打开交互式 thread 选择器，禁止用户输入或暴露内部 thread_id。 */
+function rejectResumeArgument(args: string[]): void {
+  if (args.some(argument => argument.startsWith("--resume="))) {
+    throw new Error("--resume does not accept a thread id; choose a thread in the TUI")
+  }
+  const index = args.indexOf("--resume")
+  if (index < 0) return
+  const next = args[index + 1]
+  if (next && !next.startsWith("-")) throw new Error("--resume does not accept a thread id; choose a thread in the TUI")
+}
+
+/** 恢复入口只保留 `--resume`，避免旧别名被静默当作普通参数忽略。 */
+function rejectRetiredContinueOption(args: string[]): void {
+  if (args.includes("--continue") || args.includes("-c")) {
+    throw new Error("--continue is not supported; use --resume to choose a thread in the TUI")
+  }
 }
 
 /** 读取带值选项，并统一处理缺少值或误把下一个开关当值的情况。 */

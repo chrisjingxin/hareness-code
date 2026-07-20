@@ -1,6 +1,6 @@
-/** Harness Code 的 OpenTUI 视图组件：首页、会话时间线、交互面板与 composer。 */
+/** Harness Code 的 OpenTUI 视图组件：首页、thread 时间线、交互面板与 composer。 */
 
-import type { KeyEvent, ScrollBoxRenderable, TextareaRenderable } from "@opentui/core"
+import { RGBA, type KeyEvent, type OptimizedBuffer, type ScrollBoxRenderable, type TextareaRenderable } from "@opentui/core"
 import { useEffect, useState, type RefObject } from "react"
 
 import {
@@ -31,6 +31,26 @@ export type CommandMenuState = {
 /** 用户从选择器或 Slash 菜单选中的一次性 Skill 上下文。 */
 export type SelectedSkill = SkillMenuItem
 
+/** 恢复选择器使用的 thread 摘要；内部 thread_id 绝不直接渲染。 */
+export type ThreadPickerItem = {
+  threadId: string
+  createdAtMs: number
+  updatedAtMs: number
+  firstMessage: string
+  latestMessage: string
+  messageCount: number
+}
+
+// 遮罩只压暗背景 thread，面板作为同级图层保持完整对比度与输入可读性。
+const PICKER_BACKDROP_OPACITY = 0.72
+const [pickerBackdropRed, pickerBackdropGreen, pickerBackdropBlue] = RGBA.fromHex(tuiTheme.overlay).toInts()
+const PICKER_BACKDROP_DIM_MATRIX = new Float32Array([
+  1 - PICKER_BACKDROP_OPACITY, 0, 0, pickerBackdropRed / 255 * PICKER_BACKDROP_OPACITY,
+  0, 1 - PICKER_BACKDROP_OPACITY, 0, pickerBackdropGreen / 255 * PICKER_BACKDROP_OPACITY,
+  0, 0, 1 - PICKER_BACKDROP_OPACITY, pickerBackdropBlue / 255 * PICKER_BACKDROP_OPACITY,
+  0, 0, 0, 1,
+])
+
 type SharedViewProps = {
   runtime: TuiRuntime
   state: TuiState
@@ -47,7 +67,7 @@ type SharedViewProps = {
   onSelectCommand: (command: CommandMenuItem) => void
   onHoverCommand: (index: number) => void
   selectedSkill?: SelectedSkill
-  skillPickerVisible: boolean
+  pickerVisible: boolean
   onClearSelectedSkill: () => void
   showToolDetails: boolean
   expandedTools: ReadonlySet<string>
@@ -56,7 +76,7 @@ type SharedViewProps = {
   onQuestion: (answer: string) => void
 }
 
-/** 未开始对话时使用独立的沉浸式首页，避免用空消息列表伪装会话。 */
+/** 未开始对话时使用独立的沉浸式首页，避免用空消息列表伪装 thread。 */
 export function HomeView(props: SharedViewProps) {
   const decorate = supportsHomeDecoration(props.terminalWidth, props.terminalHeight) && process.env.TERM !== "dumb"
   const compact = !decorate || props.terminalWidth < 76
@@ -84,8 +104,8 @@ export function HomeView(props: SharedViewProps) {
   )
 }
 
-/** 会话流全宽渲染，工具和审批事件以左轨形成明确的操作时间线。 */
-export function SessionView(props: SharedViewProps) {
+/** thread 流全宽渲染，工具和审批事件以左轨形成明确的操作时间线。 */
+export function ThreadView(props: SharedViewProps) {
   const blockingInteraction = Boolean(props.state.pendingApproval || props.state.pendingQuestion?.options.length)
 
   return (
@@ -101,11 +121,11 @@ export function SessionView(props: SharedViewProps) {
       />
       {!blockingInteraction ? (
         <box flexShrink={0} paddingLeft={2} paddingRight={2}>
-          <SessionRuntimeLine runtime={props.runtime} state={props.state} />
-          <Composer {...props} variant="session" commandMenuPlacement="above" />
+          <ThreadRuntimeLine runtime={props.runtime} state={props.state} />
+          <Composer {...props} variant="thread" commandMenuPlacement="above" />
         </box>
       ) : null}
-      <FooterRail runtime={props.runtime} state={props.state} terminalWidth={props.terminalWidth} session />
+      <FooterRail runtime={props.runtime} state={props.state} terminalWidth={props.terminalWidth} thread />
     </box>
   )
 }
@@ -264,10 +284,14 @@ function ToolRow(props: { tool: ToolCard; expanded: boolean; onToggle: () => voi
 /** 当前运行只在时间线末尾显示临时活动状态，绝不插回已有事件之间。 */
 function TimelineActivity(props: { state: TuiState }) {
   const tail = props.state.timeline.at(-1)
-  if (!props.state.activeRun || props.state.pendingApproval || props.state.pendingQuestion) return null
-  if (props.state.status === "正在调用工具") return null
-  if (tail?.type === "message" && tail.message.role === "assistant" && tail.message.streaming) return null
-  const frame = useSpinner(Boolean(props.state.activeRun), 80)
+  const visible = Boolean(props.state.activeRun)
+    && !props.state.pendingApproval
+    && !props.state.pendingQuestion
+    && props.state.status !== "正在调用工具"
+    && !(tail?.type === "message" && tail.message.role === "assistant" && tail.message.streaming)
+  // Hooks 不能因运行状态不同而跳过；否则 thread 恢复后再次执行会破坏 React hook 顺序。
+  const frame = useSpinner(visible, 80)
+  if (!visible) return null
   const label = props.state.status === "正在继续执行" ? "继续执行" : props.state.status
   return (
     <box marginTop={1} paddingLeft={3} flexDirection="row" gap={1}>
@@ -382,8 +406,8 @@ function interactionStatusColor(status: InteractionCard["status"]): string {
   return tuiTheme.success
 }
 
-/** 会话 composer 上方的实时模型和运行状态行。 */
-function SessionRuntimeLine(props: { runtime: TuiRuntime; state: TuiState }) {
+/** thread composer 上方的实时模型和运行状态行。 */
+function ThreadRuntimeLine(props: { runtime: TuiRuntime; state: TuiState }) {
   return (
     <box flexDirection="row" gap={1} paddingBottom={1}>
       <text fg={statusColor(props.state.status)}>□</text>
@@ -396,8 +420,8 @@ function SessionRuntimeLine(props: { runtime: TuiRuntime; state: TuiState }) {
 }
 
 /** 渲染统一左轨 composer、命令菜单和运行时元信息。 */
-export function Composer(props: Pick<SharedViewProps, "runtime" | "state" | "terminalWidth" | "inputRef" | "value" | "onInput" | "onComposerKeyDown" | "onSubmit" | "commandMenu" | "commandOptions" | "onSelectCommand" | "onHoverCommand" | "selectedSkill" | "skillPickerVisible" | "onClearSelectedSkill"> & {
-  variant: "home" | "session"
+export function Composer(props: Pick<SharedViewProps, "runtime" | "state" | "terminalWidth" | "inputRef" | "value" | "onInput" | "onComposerKeyDown" | "onSubmit" | "commandMenu" | "commandOptions" | "onSelectCommand" | "onHoverCommand" | "selectedSkill" | "pickerVisible" | "onClearSelectedSkill"> & {
+  variant: "home" | "thread"
   commandMenuPlacement: "above" | "inline-below"
 }) {
   const active = Boolean(props.state.activeRun)
@@ -440,7 +464,7 @@ export function Composer(props: Pick<SharedViewProps, "runtime" | "state" | "ter
             minHeight={1}
             maxHeight={6}
             keyBindings={COMPOSER_KEY_BINDINGS}
-            focused={(!active || awaitingQuestion) && !props.skillPickerVisible}
+            focused={(!active || awaitingQuestion) && !props.pickerVisible}
             onContentChange={() => props.onInput(props.inputRef.current?.plainText ?? "")}
             onKeyDown={props.onComposerKeyDown}
             onSubmit={props.onSubmit}
@@ -505,7 +529,7 @@ function CommandMenu(props: {
   )
 }
 
-/** 叠在会话之上的 Skill 浮层调色板；正文仍由用户的下一条消息按需触发。 */
+/** 叠在 thread 之上的 Skill 浮层调色板；正文仍由用户的下一条消息按需触发。 */
 export function SkillPicker(props: {
   visible: boolean
   loading: boolean
@@ -560,6 +584,7 @@ export function SkillPicker(props: {
 
   return (
     <box position="absolute" top={0} left={0} width="100%" height="100%" zIndex={100} alignItems="center" justifyContent="flex-start" paddingTop={compact ? 1 : Math.max(2, Math.floor(props.terminalHeight / 4))} paddingLeft={2} paddingRight={2}>
+      <PickerBackdrop />
       <box width={width} maxWidth="100%" backgroundColor={tuiTheme.menu} flexDirection="column" zIndex={1}>
         <box paddingLeft={4} paddingRight={4} paddingTop={2} paddingBottom={1} flexDirection="column">
           <box flexDirection="row" justifyContent="space-between">
@@ -614,9 +639,143 @@ export function SkillPicker(props: {
   )
 }
 
+/** 沿用 SkillPicker 的紧凑布局渲染恢复选择器，只展示用户可识别的 thread 摘要。 */
+export function ThreadPicker(props: {
+  visible: boolean
+  loading: boolean
+  error?: string
+  threads: readonly ThreadPickerItem[]
+  query: string
+  selectedIndex: number
+  terminalWidth: number
+  terminalHeight: number
+  searchRef: RefObject<TextareaRenderable | null>
+  onSearch: (query: string) => void
+  onSelect: (thread: ThreadPickerItem) => void
+  onHover: (index: number) => void
+}) {
+  useEffect(() => {
+    if (props.visible) props.searchRef.current?.focus()
+  }, [props.searchRef, props.visible])
+  if (!props.visible) return null
+  const compact = props.terminalWidth < 64 || props.terminalHeight < 19
+  const width = compact
+    ? Math.max(36, props.terminalWidth - 4)
+    : Math.max(60, Math.min(108, Math.floor(props.terminalWidth * 0.76)))
+  const maxRows = compact
+    ? Math.max(3, Math.min(6, props.terminalHeight - 10))
+    : Math.max(5, Math.min(12, props.terminalHeight - 14))
+  const rows = props.loading || props.error
+    ? 1
+    : Math.max(1, Math.min(maxRows, props.threads.length))
+  const summaryWidth = compact
+    ? Math.max(18, width - 6)
+    : Math.max(24, Math.min(34, Math.floor(width * 0.34)))
+  const selectedIndex = Math.min(props.selectedIndex, Math.max(0, props.threads.length - 1))
+
+  const threadRows = props.threads.map((thread, index) => {
+    const selected = index === selectedIndex
+    const meta = `${threadUpdatedLabel(thread.updatedAtMs)} · ${thread.messageCount} 条消息`
+    return (
+      <box
+        key={thread.threadId}
+        backgroundColor={selected ? tuiTheme.pickerActive : tuiTheme.menu}
+        height={1}
+        paddingLeft={3}
+        paddingRight={3}
+        flexDirection="row"
+        gap={2}
+        onMouseOver={() => props.onHover(index)}
+        onMouseUp={() => props.onSelect(thread)}
+      >
+        <text width={summaryWidth} fg={selected ? tuiTheme.background : tuiTheme.primary} wrapMode="none" overflow="hidden">{shorten(thread.firstMessage, summaryWidth)}</text>
+        {!compact ? <text flexGrow={1} fg={selected ? tuiTheme.background : tuiTheme.muted} wrapMode="none" overflow="hidden">{shorten(meta, Math.max(18, width - summaryWidth - 10))}</text> : null}
+      </box>
+    )
+  })
+
+  return (
+    <box position="absolute" top={0} left={0} width="100%" height="100%" zIndex={100} alignItems="center" justifyContent="flex-start" paddingTop={compact ? 1 : Math.max(2, Math.floor(props.terminalHeight / 4))} paddingLeft={2} paddingRight={2}>
+      <PickerBackdrop />
+      <box width={width} maxWidth="100%" backgroundColor={tuiTheme.menu} flexDirection="column" zIndex={1}>
+        <box paddingLeft={4} paddingRight={4} paddingTop={2} paddingBottom={1} flexDirection="column">
+          <box flexDirection="row" justifyContent="space-between">
+            <text fg={tuiTheme.text}><strong>Threads</strong></text>
+            <text fg={tuiTheme.muted}>esc</text>
+          </box>
+          <box marginTop={1}>
+            <textarea
+              id="thread-search"
+              ref={props.searchRef}
+              placeholder="搜索 Threads..."
+              placeholderColor={tuiTheme.muted}
+              textColor={tuiTheme.text}
+              focusedTextColor={tuiTheme.text}
+              backgroundColor={tuiTheme.menu}
+              focusedBackgroundColor={tuiTheme.menu}
+              cursorColor={tuiTheme.primary}
+              minHeight={1}
+              maxHeight={1}
+              keyBindings={SKILL_SEARCH_KEY_BINDINGS}
+              focused
+              onContentChange={() => props.onSearch(props.searchRef.current?.plainText ?? "")}
+              onSubmit={() => {
+                const selected = props.threads[selectedIndex]
+                if (selected) props.onSelect(selected)
+              }}
+            />
+          </box>
+        </box>
+        <box paddingLeft={4} paddingRight={4} paddingTop={1} paddingBottom={1}>
+          <text fg={tuiTheme.primary}><strong>Threads</strong></text>
+        </box>
+        {props.loading ? (
+          <box height={rows} paddingLeft={4} paddingRight={4} paddingBottom={2}>
+            <text fg={tuiTheme.muted}>正在读取 Threads…</text>
+          </box>
+        ) : props.error ? (
+          <box height={rows} paddingLeft={4} paddingRight={4} paddingBottom={2}>
+            <text fg={tuiTheme.danger}>{shorten(props.error, width - 8)}</text>
+          </box>
+        ) : props.threads.length ? (
+          props.threads.length > maxRows ? (
+            <scrollbox height={rows} paddingLeft={1} paddingRight={1} paddingBottom={2} viewportOptions={{ paddingRight: 1 }}>{threadRows}</scrollbox>
+          ) : <box flexDirection="column" paddingLeft={1} paddingRight={1} paddingBottom={2}>{threadRows}</box>
+        ) : (
+          <box paddingLeft={4} paddingRight={4} paddingBottom={2}>
+            <text fg={tuiTheme.muted}>没有可恢复的 thread</text>
+          </box>
+        )}
+      </box>
+    </box>
+  )
+}
+
+/** 选择器背景层：保持 thread 可辨识，同时明确当前焦点已转入弹窗。 */
+function PickerBackdrop() {
+  return (
+    <box
+      position="absolute"
+      top={0}
+      left={0}
+      width="100%"
+      height="100%"
+      renderAfter={dimPickerBackdrop}
+    />
+  )
+}
+
+/**
+ * OpenTUI 的半透明 Box 会覆盖中文宽字符，故仅变暗已渲染缓冲区的颜色，不写入字符单元格。
+ * 此节点的同级面板 zIndex 更高，会在矩阵处理后以原始亮度渲染。
+ */
+function dimPickerBackdrop(buffer: OptimizedBuffer): void {
+  buffer.colorMatrixUniform(PICKER_BACKDROP_DIM_MATRIX)
+}
+
 /** 渲染输入框下方的配置摘要：模型靠左、审批模式靠右，避免重复品牌和拥挤折行。 */
-function RuntimeMeta(props: { runtime: TuiRuntime; variant: "home" | "session"; terminalWidth: number }) {
-  // 首页 composer 最大宽度固定为 75 列；会话则以可用终端宽度估算。模型字段
+function RuntimeMeta(props: { runtime: TuiRuntime; variant: "home" | "thread"; terminalWidth: number }) {
+  // 首页 composer 最大宽度固定为 75 列；thread 则以可用终端宽度估算。模型字段
   // 是唯一可能来自企业配置的长文本，因此只截断它，审批模式始终保持可见。
   const contentWidth = props.variant === "home"
     ? Math.min(68, Math.max(28, props.terminalWidth - 8))
@@ -642,7 +801,7 @@ function RuntimeMeta(props: { runtime: TuiRuntime; variant: "home" | "session"; 
 }
 
 /** 渲染工作区、Git 分支、运行快捷键和 CLI 版本底栏。 */
-function FooterRail(props: { runtime: TuiRuntime; state: TuiState; terminalWidth: number; session?: boolean }) {
+function FooterRail(props: { runtime: TuiRuntime; state: TuiState; terminalWidth: number; thread?: boolean }) {
   const showFullPath = props.terminalWidth >= 108
   const showBranch = props.terminalWidth >= 84 && props.runtime.gitBranch
   const workspace = showFullPath ? props.runtime.workspace : workspaceLabel(props.runtime.workspace)
@@ -653,7 +812,7 @@ function FooterRail(props: { runtime: TuiRuntime; state: TuiState; terminalWidth
         <text fg={tuiTheme.muted}>{workspace}</text>
         {showBranch ? <text fg={tuiTheme.subtle}>:{props.runtime.gitBranch}</text> : null}
       </box>
-      {props.state.activeRun ? <BusyRunHint /> : props.session ? <text fg={tuiTheme.muted}>↑↓ 历史提示词 · PgUp/PgDn 浏览 · Ctrl+O 工具详情</text> : null}
+      {props.state.activeRun ? <BusyRunHint /> : props.thread ? <text fg={tuiTheme.muted}>↑↓ 历史提示词 · PgUp/PgDn 浏览 · Ctrl+O 工具详情</text> : null}
       <text fg={tuiTheme.subtle}>v{props.runtime.cliVersion}</text>
     </box>
   )
@@ -713,6 +872,16 @@ function modelLabel(runtime: TuiRuntime): string {
 function shorten(value: string, limit: number): string {
   if (value.length <= limit) return value
   return `${value.slice(0, Math.max(0, limit - 1))}…`
+}
+
+/** 将更新时间收敛为短标签，避免 picker 因本地化长日期改变固定行高。 */
+function threadUpdatedLabel(updatedAtMs: number): string {
+  const elapsedMinutes = Math.max(0, Math.floor((Date.now() - updatedAtMs) / 60_000))
+  if (elapsedMinutes < 1) return "刚刚"
+  if (elapsedMinutes < 60) return `${elapsedMinutes} 分钟前`
+  const elapsedHours = Math.floor(elapsedMinutes / 60)
+  if (elapsedHours < 24) return `${elapsedHours} 小时前`
+  return `${Math.floor(elapsedHours / 24)} 天前`
 }
 
 /** 安全序列化工具参数，避免循环引用破坏整个 TUI。 */

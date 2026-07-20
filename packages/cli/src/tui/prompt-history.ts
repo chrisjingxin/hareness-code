@@ -62,7 +62,7 @@ export async function loadPromptHistory(path = promptHistoryPath()): Promise<str
       await mkdir(dirname(path), { recursive: true })
       await writeFile(path, normalized, "utf8")
     } catch {
-      // 历史记录是便利能力；只读家目录或磁盘失败不能阻塞 Agent 会话。
+      // 历史记录是便利能力；只读家目录或磁盘失败不能阻塞 Agent thread。
     }
   }
   return history
@@ -70,7 +70,7 @@ export async function loadPromptHistory(path = promptHistoryPath()): Promise<str
 
 /**
  * 未触发裁剪时只追加最后一行，达到上限后再整体重写，减少普通交互的磁盘写入。
- * 调用方先更新内存状态，持久化异常可以安全忽略，不会影响本次会话。
+ * 调用方先更新内存状态，持久化异常可以安全忽略，不会影响本次 thread。
  */
 export async function persistPromptHistory(
   previous: readonly string[],
@@ -117,7 +117,7 @@ export function selectPromptHistory(
 
 /**
  * 为实际 textarea 维护独立游标。不能只由 draft 反推位置：当用户从最新提示词
- * 向下回到空草稿后，仍需知道下一次 ↓ 已经越界，才能把按键交还会话滚动。
+ * 向下回到空草稿后，仍需知道下一次 ↓ 已经越界，才能把按键交还 thread 滚动。
  */
 export function movePromptHistory(
   history: readonly string[],

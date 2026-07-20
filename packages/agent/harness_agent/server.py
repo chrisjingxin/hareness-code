@@ -30,8 +30,11 @@ from harness_agent.protocol_generated import (
     QuestionResponse,
     RunCancelParams,
     RunStartParams,
+    ThreadsListParams,
+    ThreadsOpenParams,
 )
 from harness_agent.skills import SkillError, SkillRegistry
+from harness_agent.thread_store import ThreadStore, ThreadStoreError
 
 logger = logging.getLogger(__name__)
 INTERACTION_TIMEOUT_MS = 300_000
@@ -115,6 +118,7 @@ class JsonRpcServer:
         self._config: Za38Config | None = None
         self._startup_error: str | None = None
         self._skill_registry: SkillRegistry | None = None
+        self._thread_store: ThreadStore | None = None
         self._protocol_minor = PROTOCOL_MINOR
         self._enabled_capabilities: set[str] = set()
         self._handlers = {
@@ -123,6 +127,8 @@ class JsonRpcServer:
             "run.cancel": self._handle_run_cancel,
             "config.show": self._handle_config_show,
             "config.path": self._handle_config_path,
+            "threads.list": self._handle_threads_list,
+            "threads.open": self._handle_threads_open,
             "skills.list": self._handle_skills_list,
             "skills.inspect": self._handle_skills_inspect,
             "skills.set_enabled": self._handle_skills_set_enabled,
@@ -162,6 +168,7 @@ class JsonRpcServer:
         finally:
             await self._cancel_all_runs()
             self._fail_pending_requests(RpcError(-32004, "Peer connection closed"))
+            await self._close_thread_store()
 
     async def dispatch(self, message: dict[str, Any]) -> None:
         """校验并发消息；response 负责恢复反向请求，request 则进入业务分发。"""
@@ -202,6 +209,13 @@ class JsonRpcServer:
             await self.send_error(request_id, -32602, "Invalid params", exc.errors(include_url=False))
         except SkillError as exc:
             await self.send_error(request_id, -32602, str(exc))
+        except ThreadStoreError as exc:
+            await self.send_error(
+                request_id,
+                -32020,
+                "THREAD_STORE_UNAVAILABLE",
+                {"code": str(exc)},
+            )
         except RpcError as exc:
             await self.send_error(request_id, exc.code, exc.message, exc.data)
         except Exception as exc:  # pragma: no cover - 最后的协议隔离层。
@@ -313,6 +327,9 @@ class JsonRpcServer:
             message=message,
             requested_skill=requested_skill,
         )
+        if self._threads_enabled():
+            store = await self._ensure_thread_store()
+            await store.record_message(thread_id, message)
         self._runs[thread_id] = run
         await self.send_response(
             request_id, {"thread_id": thread_id, "run_id": run_id, "accepted": True}
@@ -356,6 +373,28 @@ class JsonRpcServer:
             "explicit_path": self._config_path,
         }
 
+    async def _handle_threads_list(self, params: dict[str, Any], _id: str) -> dict[str, object]:
+        """返回当前 project 内最近活跃的 thread；thread_id 仅供客户端内部打开。"""
+        self._require_threads_capability()
+        parsed = ThreadsListParams.model_validate(params)
+        threads = await (await self._ensure_thread_store()).list_threads(parsed.limit)
+        return {"threads": [_thread_summary_payload(thread) for thread in threads]}
+
+    async def _handle_threads_open(self, params: dict[str, Any], _id: str) -> dict[str, object]:
+        """读取当前 project 的一个 thread 历史，拒绝跨 project 或无 checkpoint 记录。"""
+        self._require_threads_capability()
+        parsed = ThreadsOpenParams.model_validate(params)
+        try:
+            opened = await (await self._ensure_thread_store()).open_thread(parsed.thread_id)
+        except ThreadStoreError as exc:
+            if str(exc) in {"THREAD_NOT_FOUND", "THREAD_NOT_RECOVERABLE"}:
+                raise RpcError(-32004, str(exc)) from exc
+            raise
+        return {
+            "thread": _thread_summary_payload(opened.summary),
+            "messages": [_thread_message_payload(message) for message in opened.messages],
+        }
+
     def _require_skills(self) -> SkillRegistry:
         """返回初始化时建立的 Skill registry。"""
         if self._skill_registry is None:
@@ -391,7 +430,7 @@ class JsonRpcServer:
         return self._require_skills().inspect(skill_id)
 
     async def _handle_skills_set_enabled(self, params: dict[str, Any], _id: str) -> dict[str, Any]:
-        """保存下一次会话生效的 Skill 启停偏好。"""
+        """保存下一次 thread 生效的 Skill 启停偏好。"""
         self._reject_params(params, {"id", "enabled"}, "skills.set_enabled")
         skill_id = params.get("id")
         enabled = params.get("enabled")
@@ -433,6 +472,7 @@ class JsonRpcServer:
             raise RpcError(-32602, "shutdown does not accept params")
         self._running = False
         await self._cancel_all_runs()
+        await self._close_thread_store()
         return {}
 
     def _load_config(self) -> None:
@@ -484,6 +524,8 @@ class JsonRpcServer:
                     resume = await self._stream_agent(agent, run, resume=resume)
                     if resume is None:
                         break
+            if self._thread_store is not None:
+                await self._thread_store.refresh_thread(run.thread_id)
             run.status = "completed"
             await self._emit(
                 run,
@@ -512,6 +554,11 @@ class JsonRpcServer:
                 },
             )
         finally:
+            if self._thread_store is not None and run.status != "completed":
+                try:
+                    await self._thread_store.refresh_thread(run.thread_id)
+                except ThreadStoreError:
+                    logger.exception("Unable to refresh checkpoint index for thread %s", run.thread_id)
             self._runs.pop(run.thread_id, None)
 
     async def _ensure_agent(self) -> Any | None:
@@ -536,6 +583,9 @@ class JsonRpcServer:
         from harness_agent.providers.harness_gateway import create_openai_compatible_model
 
         execution_context = create_execution_context(config.execution, workspace)
+        checkpointer = None
+        if self._threads_enabled():
+            checkpointer = (await self._ensure_thread_store()).checkpointer
         return create_harness_agent(
             create_openai_compatible_model(config.require_model()),
             cwd=str(workspace),
@@ -545,6 +595,7 @@ class JsonRpcServer:
             approval_mode=config.execution.approval_mode,
             execution_context=execution_context,
             skill_registry=self._skill_registry,
+            checkpointer=checkpointer,
         )
 
     async def _stream_agent(self, agent: Any, run: ActiveRun, *, resume: Any | None) -> Any | None:
@@ -559,7 +610,7 @@ class JsonRpcServer:
         )
         async for event in agent.astream(
             stream_input,
-            config={"configurable": {"thread_id": run.thread_id}},
+            config=(self._thread_store.graph_config(run.thread_id) if self._thread_store is not None else {"configurable": {"thread_id": run.thread_id}}),
             stream_mode=["messages", "updates"],
             subgraphs=True,
         ):
@@ -807,7 +858,7 @@ class JsonRpcServer:
         assert isinstance(response, dict)
         if spec.type == "approval":
             decision = response.get("decision")
-            langgraph_decision = "approve" if decision in {"approve_once", "approve_session"} else "reject"
+            langgraph_decision = "approve" if decision in {"approve_once", "approve_thread"} else "reject"
             return {spec.interrupt_id: {"decisions": [{"type": langgraph_decision}]}}
         answers_by_id = response.get("answers", {})
         answers: list[str] = []
@@ -862,6 +913,34 @@ class JsonRpcServer:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._runs.clear()
 
+    def _threads_enabled(self) -> bool:
+        """只有协商了读取能力的交互客户端才启用可恢复 thread 存储。"""
+        return "threads.read" in self._enabled_capabilities and not self._allow_echo
+
+    def _require_threads_capability(self) -> None:
+        """阻止未协商读取能力的客户端意外读取本地 thread 数据。"""
+        if "threads.read" not in self._enabled_capabilities:
+            raise RpcError(-32002, "THREADS_CAPABILITY_REQUIRED")
+        if self._allow_echo:
+            raise RpcError(-32002, "THREADS_UNAVAILABLE_IN_ECHO_MODE")
+
+    async def _ensure_thread_store(self) -> ThreadStore:
+        """延迟打开用户级数据库；配置读取不应因为存储创建而被阻塞。"""
+        if self._thread_store is None:
+            if not self._threads_enabled():
+                raise ThreadStoreError("THREADS_CAPABILITY_REQUIRED")
+            self._thread_store = await ThreadStore.open(
+                project=self._workspace,
+                home=self._config_home,
+            )
+        return self._thread_store
+
+    async def _close_thread_store(self) -> None:
+        """在 sidecar 生命周期末尾关闭 SQLite 连接和 WAL 句柄。"""
+        store, self._thread_store = self._thread_store, None
+        if store is not None:
+            await store.close()
+
     def _fail_pending_requests(self, error: Exception) -> None:
         """连接退出时解除所有交互等待，避免后台任务泄漏。"""
         for future in self._pending_requests.values():
@@ -913,6 +992,26 @@ def _json_safe(value: object) -> object:
     except TypeError:
         return str(value)
     return value
+
+
+def _thread_summary_payload(summary: Any) -> dict[str, object]:
+    """把存储层摘要转换为 JSON-RPC 的 thread 字段，禁止携带原始 project 路径。"""
+    return {
+        "thread_id": summary.thread_id,
+        "created_at_ms": summary.created_at_ms,
+        "updated_at_ms": summary.updated_at_ms,
+        "first_message": summary.first_message,
+        "latest_message": summary.latest_message,
+        "message_count": summary.message_count,
+    }
+
+
+def _thread_message_payload(message: Any) -> dict[str, object]:
+    """把 checkpoint 归一化消息限制为 TUI 可回放的 project/thread/message 数据。"""
+    payload: dict[str, object] = {"kind": message.kind, "content": message.content}
+    if message.tool_name is not None:
+        payload["tool_name"] = message.tool_name
+    return payload
 
 
 def _bounded_json(value: object) -> object:

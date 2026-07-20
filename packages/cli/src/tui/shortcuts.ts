@@ -8,6 +8,8 @@ type KeyLike = {
 export type ShortcutContext = {
   skillPickerVisible?: boolean
   skillOptionCount?: number
+  threadPickerVisible?: boolean
+  threadOptionCount?: number
   commandMenuVisible: boolean
   commandOptionCount: number
   activeRun: boolean
@@ -26,6 +28,11 @@ export type ShortcutAction =
   | "skill-next"
   | "skill-select"
   | "skill-block"
+  | "close-thread-picker"
+  | "thread-previous"
+  | "thread-next"
+  | "thread-select"
+  | "thread-block"
   | "command-open"
   | "clear-draft"
   | "cancel-run"
@@ -35,6 +42,14 @@ export type ShortcutAction =
 
 /** 快捷键先处理临时菜单，再处理运行态，避免输入控件吞掉 Ctrl+C 与 Esc。 */
 export function resolveShortcut(key: KeyLike, context: ShortcutContext): ShortcutAction {
+  if (context.threadPickerVisible) {
+    if (key.name === "escape") return "close-thread-picker"
+    if (key.name === "up" || (key.ctrl && key.name === "p")) return "thread-previous"
+    if (key.name === "down" || (key.ctrl && key.name === "n")) return "thread-next"
+    if (key.name === "return" || key.name === "kpenter" || key.name === "tab") {
+      return (context.threadOptionCount ?? 0) > 0 ? "thread-select" : "thread-block"
+    }
+  }
   if (context.skillPickerVisible) {
     if (key.name === "escape") return "close-skill-picker"
     if (key.name === "up" || (key.ctrl && key.name === "p")) return "skill-previous"
@@ -53,7 +68,7 @@ export function resolveShortcut(key: KeyLike, context: ShortcutContext): Shortcu
   }
 
   if (key.ctrl && key.name === "p") return "command-open"
-  // 方向键必须留给 textarea：它需要依据真实光标边界决定回填历史还是滚动会话。
+  // 方向键必须留给 textarea：它需要依据真实光标边界决定回填历史还是滚动 thread。
   if (key.ctrl && key.name === "c") {
     if (context.hasDraft) return "clear-draft"
     return context.activeRun ? "cancel-run" : "exit"

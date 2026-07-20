@@ -1,12 +1,12 @@
 /** 此文件由 packages/protocol/scripts/generate.ts 生成，请勿手工修改。 */
 
 export const PROTOCOL_MAJOR = 2 as const
-export const PROTOCOL_MINOR = 1 as const
+export const PROTOCOL_MINOR = 2 as const
 export const MAX_FRAME_BYTES = 8388608 as const
 export const MAX_TOOL_PAYLOAD_BYTES = 1048576 as const
-export const CLIENT_METHODS = ["initialize","run.start","run.cancel","config.show","config.path","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","shutdown"] as const
+export const CLIENT_METHODS = ["initialize","run.start","run.cancel","config.show","config.path","threads.list","threads.open","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","shutdown"] as const
 export const SERVER_METHODS = ["event","request"] as const
-export const SERVER_CAPABILITIES = ["run.cancel","run.multithread","interactive.approval","interactive.question","config.read","skills.read","skills.manage"] as const
+export const SERVER_CAPABILITIES = ["run.cancel","run.multithread","interactive.approval","interactive.question","config.read","threads.read","skills.read","skills.manage"] as const
 export const EVENT_TYPES = ["run.started","skill.loaded","content.delta","thinking.delta","tool.started","tool.delta","tool.completed","interaction.resolved","run.completed","run.cancelled","run.failed"] as const
 
 export type JsonObject = Record<string, unknown>
@@ -23,8 +23,14 @@ export interface RunStartParams { message: string; thread_id?: string; run_id?: 
 export interface RunStartResult { thread_id: string; run_id: string; accepted: boolean }
 export interface RunCancelParams { thread_id: string; run_id: string }
 export interface RunCancelResult { cancelled: boolean; run_id: string }
+export interface ThreadSummary { thread_id: string; created_at_ms: number; updated_at_ms: number; first_message: string; latest_message: string; message_count: number }
+export interface ThreadMessage { kind: "user" | "assistant" | "tool"; content: string; tool_name?: string }
+export interface ThreadsListParams { limit?: number }
+export interface ThreadsListResult { threads: ThreadSummary[] }
+export interface ThreadsOpenParams { thread_id: string }
+export interface ThreadsOpenResult { thread: ThreadSummary; messages: ThreadMessage[] }
 export interface EventEnvelope { event_id: string; type: string; thread_id: string; run_id: string; sequence: number; timestamp_ms: number; source?: { kind: "root" | "subagent" | "background"; id?: string; parent_tool_call_id?: string }; payload: JsonObject; extensions?: JsonObject }
 export interface InteractionRequestEnvelope { request_id: string; type: "approval" | "question"; thread_id: string; run_id: string; sequence: number; timeout_ms: number; payload: JsonObject }
-export interface ApprovalResponse { type: "approval"; request_id: string; decision: "approve_once" | "approve_session" | "reject"; feedback?: string }
+export interface ApprovalResponse { type: "approval"; request_id: string; decision: "approve_once" | "approve_thread" | "reject"; feedback?: string }
 export interface QuestionResponse { type: "question"; request_id: string; answers: Record<string, string[]> }
 export type InteractionResponse = ApprovalResponse | QuestionResponse

@@ -40,4 +40,5 @@ test("无头 CLI 不协商审批或问答能力", () => {
   ])
   expect(clientCapabilities(parseArgs([]))).toContain("interactive.approval")
   expect(clientCapabilities(parseArgs([]))).toContain("interactive.question")
+  expect(clientCapabilities(parseArgs([]))).toContain("threads.read")
 })

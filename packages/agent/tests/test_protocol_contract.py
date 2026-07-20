@@ -9,7 +9,13 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from harness_agent.protocol_generated import EventEnvelope, InitializeParams, InteractionRequestEnvelope
+from harness_agent.protocol_generated import (
+    EventEnvelope,
+    InitializeParams,
+    InteractionRequestEnvelope,
+    ThreadsListParams,
+    ThreadsOpenParams,
+)
 
 
 FIXTURE_PATH = Path(__file__).resolve().parents[2] / "protocol" / "fixtures" / "v2-contract.json"
@@ -33,5 +39,7 @@ def _validate(fixture: dict[str, Any]) -> None:
         "initialize": InitializeParams,
         "event": EventEnvelope,
         "request": InteractionRequestEnvelope,
+        "threads.list": ThreadsListParams,
+        "threads.open": ThreadsOpenParams,
     }[fixture["kind"]]
     model.model_validate(fixture["value"])

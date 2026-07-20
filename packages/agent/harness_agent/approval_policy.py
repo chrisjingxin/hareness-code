@@ -23,7 +23,7 @@ _PLAN_ALLOWED_TOOLS = frozenset(
         "grep",
         "ask_user",
         "write_todos",
-        # 压缩只维护 LangGraph 会话上下文，不触碰文件、命令或外部资源。
+        # 压缩只维护 LangGraph thread 上下文，不触碰文件、命令或外部资源。
         "compact_conversation",
     }
 )
@@ -114,7 +114,7 @@ class PlanModeMiddleware(AgentMiddleware[dict[str, Any], ContextT, ResponseT]):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Any],
     ) -> Any:
-        """同步调用只放行明确声明为只读或会话维护的工具。"""
+        """同步调用只放行明确声明为只读或 thread 维护的工具。"""
         if request.tool_call.get("name") not in _PLAN_ALLOWED_TOOLS:
             return self._rejection(request)
         return handler(request)

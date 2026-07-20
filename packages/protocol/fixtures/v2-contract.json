@@ -9,6 +9,14 @@
       }
     },
     {
+      "kind": "threads.list",
+      "value": { "limit": 20 }
+    },
+    {
+      "kind": "threads.open",
+      "value": { "thread_id": "thread-1" }
+    },
+    {
       "kind": "event",
       "value": {
         "event_id": "event-1",
@@ -58,6 +66,14 @@
         "client": { "name": "fixture", "version": "1.0.0" },
         "capabilities": []
       }
+    },
+    {
+      "kind": "threads.list",
+      "value": { "limit": 0 }
+    },
+    {
+      "kind": "threads.open",
+      "value": { "thread_id": "", "unknown": true }
     },
     {
       "kind": "event",

@@ -4,12 +4,12 @@
   "title": "za38 protocol v2",
   "x-protocol": {
     "major": 2,
-    "minor": 1,
+    "minor": 2,
     "max_frame_bytes": 8388608,
     "max_tool_payload_bytes": 1048576,
-    "client_methods": ["initialize", "run.start", "run.cancel", "config.show", "config.path", "skills.list", "skills.inspect", "skills.set_enabled", "skills.install", "skills.update", "skills.remove", "skills.market.list", "shutdown"],
+    "client_methods": ["initialize", "run.start", "run.cancel", "config.show", "config.path", "threads.list", "threads.open", "skills.list", "skills.inspect", "skills.set_enabled", "skills.install", "skills.update", "skills.remove", "skills.market.list", "shutdown"],
     "server_methods": ["event", "request"],
-    "server_capabilities": ["run.cancel", "run.multithread", "interactive.approval", "interactive.question", "config.read", "skills.read", "skills.manage"],
+    "server_capabilities": ["run.cancel", "run.multithread", "interactive.approval", "interactive.question", "config.read", "threads.read", "skills.read", "skills.manage"],
     "event_types": ["run.started", "skill.loaded", "content.delta", "thinking.delta", "tool.started", "tool.delta", "tool.completed", "interaction.resolved", "run.completed", "run.cancelled", "run.failed"]
   },
   "oneOf": [
@@ -57,6 +57,55 @@
         "client": { "type": "object", "required": ["name", "version"], "properties": { "name": { "type": "string", "minLength": 1 }, "version": { "type": "string", "minLength": 1 } }, "additionalProperties": false },
         "capabilities": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
         "cwd": { "type": "string" }, "config_path": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "threadSummary": {
+      "type": "object",
+      "required": ["thread_id", "created_at_ms", "updated_at_ms", "first_message", "latest_message", "message_count"],
+      "properties": {
+        "thread_id": { "type": "string", "minLength": 1 },
+        "created_at_ms": { "type": "integer", "minimum": 0 },
+        "updated_at_ms": { "type": "integer", "minimum": 0 },
+        "first_message": { "type": "string" },
+        "latest_message": { "type": "string" },
+        "message_count": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "threadMessage": {
+      "type": "object",
+      "required": ["kind", "content"],
+      "properties": {
+        "kind": { "enum": ["user", "assistant", "tool"] },
+        "content": { "type": "string" },
+        "tool_name": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "threadsListParams": {
+      "type": "object",
+      "properties": { "limit": { "type": "integer", "minimum": 1, "maximum": 200 } },
+      "additionalProperties": false
+    },
+    "threadsListResult": {
+      "type": "object",
+      "required": ["threads"],
+      "properties": { "threads": { "type": "array", "items": { "$ref": "#/$defs/threadSummary" } } },
+      "additionalProperties": false
+    },
+    "threadsOpenParams": {
+      "type": "object",
+      "required": ["thread_id"],
+      "properties": { "thread_id": { "type": "string", "minLength": 1 } },
+      "additionalProperties": false
+    },
+    "threadsOpenResult": {
+      "type": "object",
+      "required": ["thread", "messages"],
+      "properties": {
+        "thread": { "$ref": "#/$defs/threadSummary" },
+        "messages": { "type": "array", "items": { "$ref": "#/$defs/threadMessage" } }
       },
       "additionalProperties": false
     },

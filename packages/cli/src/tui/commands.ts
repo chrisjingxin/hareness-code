@@ -7,13 +7,12 @@ export type SlashCommandName =
   | "force-clear"
   | "status"
   | "version"
+  | "resume"
   | "skills"
-  | "skill"
 
-export type SlashCommand = {
-  name: SlashCommandName
-  argument?: string
-}
+export type SlashCommand =
+  | { name: SlashCommandName; argument?: string }
+  | { name: "continue"; argument?: string }
 
 export type SlashCommandDefinition = {
   name: SlashCommandName
@@ -41,12 +40,12 @@ export type CommandMenuItem =
 export const slashCommandDefinitions: readonly SlashCommandDefinition[] = [
   { name: "help", description: "显示可用命令" },
   { name: "quit", aliases: ["q"], description: "退出 za38" },
-  { name: "clear", description: "开启新会话" },
-  { name: "force-clear", description: "取消当前执行并开启新会话" },
+  { name: "clear", description: "开启新的 thread" },
+  { name: "force-clear", description: "取消当前执行并开启新的 thread" },
   { name: "status", description: "显示运行状态" },
   { name: "version", description: "显示版本" },
+  { name: "resume", description: "打开 thread 恢复选择器" },
   { name: "skills", description: "打开 Skill 选择器" },
-  { name: "skill", description: "直接运行指定 Skill" },
 ]
 
 export const slashCommandHelp: ReadonlyArray<{ command: string; description: string }> = slashCommandDefinitions.map(definition => ({
@@ -103,6 +102,7 @@ export function parseSlashCommand(input: string): SlashCommand | null {
 
   const [rawName, ...rest] = value.slice(1).split(/\s+/)
   const argument = rest.join(" ").trim() || undefined
+  if (rawName === "continue") return { name: "continue", argument }
   const definition = slashCommandDefinitions.find(item => item.name === rawName || item.aliases?.includes(rawName))
   return definition ? { name: definition.name, argument } : null
 }

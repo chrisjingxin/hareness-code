@@ -4,7 +4,7 @@ import { createCliRenderer, type KeyEvent, type ScrollBoxRenderable, type Textar
 import { createRoot, useKeyboard, useTerminalDimensions } from "@opentui/react"
 import { randomUUID } from "node:crypto"
 import { useCallback, useEffect, useRef, useState } from "react"
-import type { InteractionRequestEnvelope, InteractionResponse, RequestedSkill } from "@za38/protocol"
+import type { InteractionRequestEnvelope, InteractionResponse, RequestedSkill, ThreadMessage } from "@za38/protocol"
 
 import { IpcClient } from "../ipc/client"
 import {
@@ -15,7 +15,7 @@ import {
   type SkillMenuItem,
   type SlashCommand,
 } from "./commands"
-import { HomeView, SessionView, SkillPicker, type CommandMenuState, type SelectedSkill } from "./components"
+import { HomeView, SkillPicker, ThreadPicker, ThreadView, type CommandMenuState, type SelectedSkill, type ThreadPickerItem } from "./components"
 import { TuiErrorBoundary } from "./error-boundary"
 import { runtimeStatusSummary, type TuiRuntime } from "./model"
 import {
@@ -37,6 +37,7 @@ import {
   isHomeState,
   markCancelling,
   markRunFailed,
+  restoreThread,
   startRun,
   type TuiState,
 } from "./state"
@@ -44,7 +45,8 @@ import {
 type TuiOptions = {
   client: IpcClient
   runtime: TuiRuntime
-  threadId?: string
+  /** 启动后立即打开恢复选择器；选择器而非参数负责持有内部 thread_id。 */
+  resume?: boolean
   /** 仅供测试隔离本地历史；正式入口始终使用 ~/.harness/prompt-history.jsonl。 */
   promptHistoryFile?: string
   onRequestExit: () => void
@@ -62,9 +64,17 @@ type SkillsListResult = {
   skills?: unknown[]
 }
 
+type ThreadPickerState = {
+  visible: boolean
+  loading: boolean
+  query: string
+  selectedIndex: number
+  error?: string
+}
+
 /** 正式 OpenTUI 根组件：所有 Agent 输出必须经状态归约后才进入终端。 */
-export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onRequestExit }: TuiOptions) {
-  const [state, setState] = useState(() => createInitialState(threadId))
+export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestExit }: TuiOptions) {
+  const [state, setState] = useState(() => createInitialState())
   const stateRef = useRef(state)
   const [draft, setDraft] = useState("")
   const inputRef = useRef<TextareaRenderable | null>(null)
@@ -72,6 +82,8 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
   const [commandMenu, setCommandMenu] = useState<CommandMenuState>({ visible: false, selectedIndex: 0 })
   const [skills, setSkills] = useState<readonly SkillMenuItem[]>([])
   const [skillPicker, setSkillPicker] = useState<SkillPickerState>({ visible: false, loading: false, query: "", selectedIndex: 0 })
+  const [threadPicker, setThreadPicker] = useState<ThreadPickerState>({ visible: false, loading: false, query: "", selectedIndex: 0 })
+  const [threads, setThreads] = useState<readonly ThreadPickerItem[]>([])
   const [selectedSkill, setSelectedSkill] = useState<SelectedSkill | undefined>(undefined)
   const commandMenuDismissedValue = useRef<string | undefined>(undefined)
   const [showToolDetails, setShowToolDetails] = useState(false)
@@ -84,6 +96,9 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
   }>())
   const historyApplyValueRef = useRef<string | undefined>(undefined)
   const skillSearchRef = useRef<TextareaRenderable | null>(null)
+  const threadSearchRef = useRef<TextareaRenderable | null>(null)
+  const initialResumeRef = useRef(resume === true)
+  const openingThreadRef = useRef(false)
   const terminal = useTerminalDimensions()
 
   /** 提交不可变状态转换；长生命周期 IPC 回调通过 ref 读取最新状态。 */
@@ -100,6 +115,14 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
       ? result.skills.map(skillMenuItem).filter((item): item is SkillMenuItem => item !== undefined)
       : []
     setSkills(next)
+    return next
+  }, [client])
+
+  /** 读取当前 project 的 thread 摘要；renderer 后续只使用摘要，不显示内部 ID。 */
+  const refreshThreads = useCallback(async (): Promise<readonly ThreadPickerItem[]> => {
+    const result = await client.listThreads()
+    const next = result.threads.map(threadPickerItem).filter((item): item is ThreadPickerItem => item !== undefined)
+    setThreads(next)
     return next
   }, [client])
 
@@ -180,7 +203,7 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
   const sendAgentMessage = useCallback(async (message: string, requestedSkill?: RequestedSkill) => {
     const current = stateRef.current
     if (current.activeRun) {
-      commit(state => appendNotice(state, "当前会话仍在执行；请等待、审批或按 Ctrl+C 取消。"))
+      commit(state => appendNotice(state, "当前 thread 仍在执行；请等待、审批或按 Ctrl+C 取消。"))
       return
     }
     const run = {
@@ -244,8 +267,32 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
     })
   }, [refreshSkills])
 
+  /** 打开与 `harness --resume` 共用的选择器；活动 run 或交互期间禁止替换当前 thread。 */
+  const openThreadPicker = useCallback(() => {
+    const current = stateRef.current
+    if (current.activeRun || current.pendingApproval || current.pendingQuestion) {
+      commit(state => appendNotice(state, "当前 thread 仍在执行或等待交互，不能恢复其他 thread。"))
+      return
+    }
+    setThreadPicker({ visible: true, loading: true, query: "", selectedIndex: 0 })
+    void refreshThreads().then(() => {
+      setThreadPicker(current => current.visible ? { ...current, loading: false } : current)
+    }).catch(error => {
+      setThreadPicker(current => current.visible
+        ? { ...current, loading: false, error: `Thread 列表读取失败：${errorMessage(error)}` }
+        : current)
+    })
+  }, [commit, refreshThreads])
+
+  useEffect(() => {
+    if (!initialResumeRef.current) return
+    initialResumeRef.current = false
+    openThreadPicker()
+  }, [openThreadPicker])
+
   /** 筛选保持在纯视图层，避免每次搜索重新请求 sidecar 或改变 snapshot。 */
   const visibleSkills = filterSkills(skills, skillPicker.query)
+  const visibleThreads = filterThreads(threads, threadPicker.query)
 
   /** 执行本地控制命令和 Skill 入口；目录读取失败只显示可恢复通知。 */
   const executeSlashCommand = useCallback(async (command: SlashCommand) => {
@@ -272,21 +319,21 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
       case "version":
         commit(current => appendNotice(current, `za38-cli ${runtime.cliVersion} · JSON-RPC v2`))
         return
+      case "resume":
+        if (command.argument) {
+          commit(current => appendNotice(current, "/resume 不接受 thread_id；请在选择器中选择要恢复的 thread。"))
+          return
+        }
+        openThreadPicker()
+        return
+      case "continue":
+        commit(current => appendNotice(current, "/continue 不可用；请使用 /resume 在选择器中恢复 thread。"))
+        return
       case "skills":
         openSkillPicker()
         return
-      case "skill": {
-        const [skillId, ...argParts] = (command.argument ?? "").split(/\s+/).filter(Boolean)
-        if (!skillId) {
-          commit(current => appendNotice(current, "用法：/skill <id> [args] 会直接运行；输入 /skills 打开选择器"))
-          return
-        }
-        const args = argParts.join(" ")
-        await sendAgentMessage(args || "请按照该 Skill 的说明处理当前任务。", { id: skillId, args })
-        return
-      }
     }
-  }, [cancelActiveRun, commit, onRequestExit, openSkillPicker, runtime, sendAgentMessage])
+  }, [cancelActiveRun, commit, onRequestExit, openSkillPicker, openThreadPicker, runtime, sendAgentMessage])
 
   /** 同步 textarea 草稿、命令菜单过滤状态和历史游标。 */
   const updateDraft = useCallback((value: string) => {
@@ -325,6 +372,31 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
     setSelectedSkill(skill)
     setSkillPicker({ visible: false, loading: false, query: "", selectedIndex: 0 })
   }, [clearDraft])
+
+  /** 读取选中的 thread 后一次性替换状态，旧 thread 的 sequence 与草稿都不能残留。 */
+  const selectThread = useCallback(async (thread: ThreadPickerItem) => {
+    if (openingThreadRef.current) return
+    if (stateRef.current.activeRun || stateRef.current.pendingApproval || stateRef.current.pendingQuestion) {
+      setThreadPicker(current => ({ ...current, visible: false, loading: false }))
+      commit(current => appendNotice(current, "当前 thread 状态已变化，未恢复其他 thread。"))
+      return
+    }
+    openingThreadRef.current = true
+    setThreadPicker(current => ({ ...current, loading: true, error: undefined }))
+    try {
+      const opened = threadOpenResult(await client.openThread(thread.threadId))
+      clearDraft()
+      setSelectedSkill(undefined)
+      setExpandedTools(new Set())
+      setShowToolDetails(false)
+      commit(() => restoreThread(opened.threadId, opened.messages))
+      setThreadPicker({ visible: false, loading: false, query: "", selectedIndex: 0 })
+    } catch (error) {
+      setThreadPicker(current => ({ ...current, loading: false, error: `Thread 恢复失败：${errorMessage(error)}` }))
+    } finally {
+      openingThreadRef.current = false
+    }
+  }, [clearDraft, client, commit])
 
   /** 用历史项或命令项替换草稿，并把光标放到指定端点。 */
   const replaceDraft = useCallback((value: string, cursor: "start" | "end" = "end", historyCursor?: PromptHistoryCursor) => {
@@ -397,7 +469,7 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
     void sendAgentMessage(input)
   }, [clearDraft, draft, executeSlashCommand, respondQuestion, sendAgentMessage])
 
-  /** 按行或半页滚动当前会话，供空 composer 的方向键使用。 */
+  /** 按行或半页滚动当前 thread，供空 composer 的方向键使用。 */
   const scrollConversationBy = useCallback((amount: "line-up" | "line-down" | "page-up" | "page-down") => {
     const scroll = conversationScrollRef.current
     if (!scroll || scroll.isDestroyed) return false
@@ -412,10 +484,10 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
     return true
   }, [])
 
-  /** 在 textarea 层处理历史与会话滚动，避免全局 key handler 抢走方向键。 */
+  /** 在 textarea 层处理历史与 thread 滚动，避免全局 key handler 抢走方向键。 */
   const handleComposerKeyDown = useCallback((key: KeyEvent) => {
     // Slash 菜单由全局快捷键优先处理，不能在 textarea 内重复消费方向键。
-    if (commandMenu.visible || skillPicker.visible) return
+    if (commandMenu.visible || skillPicker.visible || threadPicker.visible) return
     const input = inputRef.current
     if (!input) return
 
@@ -430,7 +502,7 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
       return
     }
 
-    // 只有空 composer 才借出方向键给会话；编辑任何文本时完全保持 textarea 原生语义。
+    // 只有空 composer 才借出方向键给 thread；编辑任何文本时完全保持 textarea 原生语义。
     if (!input.plainText && !isHomeState(stateRef.current)) {
       const scrollAction = key.name === "up" ? "line-up"
         : key.name === "down" ? "line-down"
@@ -439,13 +511,15 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
               : undefined
       if (scrollAction && scrollConversationBy(scrollAction)) key.preventDefault()
     }
-  }, [commandMenu.visible, navigatePromptHistory, scrollConversationBy, skillPicker.visible])
+  }, [commandMenu.visible, navigatePromptHistory, scrollConversationBy, skillPicker.visible, threadPicker.visible])
 
   useKeyboard(key => {
     const commandOptions = findCommandMenuItems(draft, skills)
     const action = resolveShortcut(key, {
       skillPickerVisible: skillPicker.visible,
       skillOptionCount: visibleSkills.length,
+      threadPickerVisible: threadPicker.visible,
+      threadOptionCount: visibleThreads.length,
       commandMenuVisible: commandMenu.visible,
       commandOptionCount: commandOptions.length,
       activeRun: Boolean(stateRef.current.activeRun),
@@ -458,6 +532,24 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
       setSkillPicker(current => ({ ...current, visible: false, loading: false, error: undefined }))
       return
     }
+    if (action === "close-thread-picker") {
+      setThreadPicker(current => ({ ...current, visible: false, loading: false, error: undefined }))
+      return
+    }
+    if (action === "thread-previous" || action === "thread-next") {
+      const direction = action === "thread-previous" ? -1 : 1
+      setThreadPicker(current => ({
+        ...current,
+        selectedIndex: visibleThreads.length ? (current.selectedIndex + direction + visibleThreads.length) % visibleThreads.length : 0,
+      }))
+      return
+    }
+    if (action === "thread-select") {
+      const selected = visibleThreads[threadPicker.selectedIndex]
+      if (selected) void selectThread(selected)
+      return
+    }
+    if (action === "thread-block") return
     if (action === "skill-previous" || action === "skill-next") {
       const direction = action === "skill-previous" ? -1 : 1
       setSkillPicker(current => ({
@@ -548,7 +640,7 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
     onSelectCommand: selectCommandMenuItem,
     onHoverCommand: (selectedIndex: number) => setCommandMenu(current => ({ ...current, selectedIndex })),
     selectedSkill,
-    skillPickerVisible: skillPicker.visible,
+    pickerVisible: skillPicker.visible || threadPicker.visible,
     onClearSelectedSkill: () => setSelectedSkill(undefined),
     showToolDetails,
     expandedTools,
@@ -559,7 +651,7 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
 
   return (
     <box position="relative" flexGrow={1}>
-      {isHomeState(state) ? <HomeView {...viewProps} /> : <SessionView {...viewProps} />}
+      {isHomeState(state) ? <HomeView {...viewProps} /> : <ThreadView {...viewProps} />}
       <SkillPicker
         visible={skillPicker.visible}
         loading={skillPicker.loading}
@@ -573,6 +665,20 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
         onSearch={query => setSkillPicker(current => ({ ...current, query, selectedIndex: 0 }))}
         onSelect={selectSkill}
         onHover={selectedIndex => setSkillPicker(current => ({ ...current, selectedIndex }))}
+      />
+      <ThreadPicker
+        visible={threadPicker.visible}
+        loading={threadPicker.loading}
+        error={threadPicker.error}
+        threads={visibleThreads}
+        query={threadPicker.query}
+        selectedIndex={threadPicker.selectedIndex}
+        terminalWidth={terminal.width}
+        terminalHeight={terminal.height}
+        searchRef={threadSearchRef}
+        onSearch={query => setThreadPicker(current => ({ ...current, query, selectedIndex: 0 }))}
+        onSelect={thread => { void selectThread(thread) }}
+        onHover={selectedIndex => setThreadPicker(current => ({ ...current, selectedIndex }))}
       />
     </box>
   )
@@ -638,5 +744,68 @@ function filterSkills(skills: readonly SkillMenuItem[], query: string): readonly
   const needle = query.trim().toLowerCase()
   if (!needle) return skills
   return skills.filter(skill => [skill.id, skill.name, skill.source, skill.description]
+    .some(value => value.toLowerCase().includes(needle)))
+}
+
+/** 校验 thread 摘要的最小字段，并将 wire snake_case 限制在 IPC 边界。 */
+function threadPickerItem(value: unknown): ThreadPickerItem | undefined {
+  if (!value || typeof value !== "object") return undefined
+  const record = value as Record<string, unknown>
+  if (
+    typeof record.thread_id !== "string" || !record.thread_id
+    || typeof record.created_at_ms !== "number" || !Number.isInteger(record.created_at_ms) || record.created_at_ms < 0
+    || typeof record.updated_at_ms !== "number" || !Number.isInteger(record.updated_at_ms) || record.updated_at_ms < 0
+    || typeof record.first_message !== "string" || typeof record.latest_message !== "string"
+    || typeof record.message_count !== "number" || !Number.isInteger(record.message_count) || record.message_count < 0
+  ) return undefined
+  return {
+    threadId: record.thread_id,
+    createdAtMs: record.created_at_ms,
+    updatedAtMs: record.updated_at_ms,
+    firstMessage: record.first_message,
+    latestMessage: record.latest_message,
+    messageCount: record.message_count,
+  }
+}
+
+/** 检查恢复结果，确保无效 sidecar 数据不会以半条历史覆盖当前 thread。 */
+function threadOpenResult(value: unknown): { threadId: string; messages: Array<{ kind: "user" | "assistant" | "tool"; content: string; toolName?: string }> } {
+  if (!value || typeof value !== "object") throw new Error("Agent 返回的 thread 恢复结果无效")
+  const record = value as Record<string, unknown>
+  const thread = threadPickerItem(record.thread)
+  if (!thread || !Array.isArray(record.messages)) throw new Error("Agent 返回的 thread 恢复结果无效")
+  const messages = record.messages.map(threadMessage).filter((message): message is ThreadMessage => message !== undefined)
+  if (messages.length !== record.messages.length) throw new Error("Agent 返回了无效的 thread message")
+  return {
+    threadId: thread.threadId,
+    messages: messages.map(message => ({
+      kind: message.kind,
+      content: message.content,
+      toolName: message.tool_name,
+    })),
+  }
+}
+
+/** 把协议 message 校验为三种恢复历史项；工具名称缺失时由视图使用安全默认值。 */
+function threadMessage(value: unknown): ThreadMessage | undefined {
+  if (!value || typeof value !== "object") return undefined
+  const record = value as Record<string, unknown>
+  if (
+    (record.kind !== "user" && record.kind !== "assistant" && record.kind !== "tool")
+    || typeof record.content !== "string"
+    || (record.tool_name !== undefined && typeof record.tool_name !== "string")
+  ) return undefined
+  return {
+    kind: record.kind,
+    content: record.content,
+    tool_name: typeof record.tool_name === "string" ? record.tool_name : undefined,
+  }
+}
+
+/** 用首条和最新消息过滤 thread，不把不透明 thread_id 作为用户可搜索数据。 */
+function filterThreads(threads: readonly ThreadPickerItem[], query: string): readonly ThreadPickerItem[] {
+  const needle = query.trim().toLowerCase()
+  if (!needle) return threads
+  return threads.filter(thread => [thread.firstMessage, thread.latestMessage]
     .some(value => value.toLowerCase().includes(needle)))
 }

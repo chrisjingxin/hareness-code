@@ -19,6 +19,7 @@ type RunningAgent = {
 /** 根据命令实际是否存在反向交互处理器，声明最小协议能力集合。 */
 export function clientCapabilities(command: Command): string[] {
   const capabilities = ["run.cancel", "run.multithread", "config.read"]
+  if (command.kind === "run" && !command.nonInteractive) capabilities.push("threads.read")
   if (command.kind.startsWith("skills.") || (command.kind === "run" && !command.nonInteractive)) capabilities.push("skills.read")
   if (command.kind === "skills.set_enabled" || command.kind === "skills.install" || command.kind === "skills.update" || command.kind === "skills.remove") {
     capabilities.push("skills.manage")
@@ -145,7 +146,7 @@ async function execute(command: Command): Promise<void> {
       return
     }
     if (command.nonInteractive) {
-      const result = await runTurn(agent.client, command.message!, command.threadId)
+      const result = await runTurn(agent.client, command.message!)
       if (command.json) console.log(JSON.stringify(result))
       else process.stdout.write(`${result.text}\n`)
       return
@@ -154,7 +155,7 @@ async function execute(command: Command): Promise<void> {
     await runTui({
       client: agent.client,
       runtime: agent.runtime,
-      threadId: command.threadId,
+      resume: command.resume,
       onRequestExit: () => undefined,
     })
   } finally {
@@ -165,7 +166,7 @@ async function execute(command: Command): Promise<void> {
 /** CLI 主入口：处理帮助/版本短路逻辑后执行用户命令。 */
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   if (argv.includes("--help") || argv.includes("-h")) {
-    console.log("Usage: harness [-n TEXT] [--json] [--config PATH] [--cwd PATH] [--resume THREAD_ID] [--sandbox[=remote|false]] | harness skills <list|inspect|enable|disable|trust|install|update|remove|market>")
+    console.log("Usage: harness [--resume] [-n TEXT] [--json] [--config PATH] [--cwd PATH] [--sandbox[=remote|false]] | harness skills <list|inspect|enable|disable|trust|install|update|remove|market>")
     return
   }
   if (argv.includes("--version") || argv.includes("-v")) {

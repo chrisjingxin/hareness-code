@@ -58,9 +58,15 @@ export interface RunStartParams { message: string; thread_id?: string; run_id?: 
 export interface RunStartResult { thread_id: string; run_id: string; accepted: boolean }
 export interface RunCancelParams { thread_id: string; run_id: string }
 export interface RunCancelResult { cancelled: boolean; run_id: string }
+export interface ThreadSummary { thread_id: string; created_at_ms: number; updated_at_ms: number; first_message: string; latest_message: string; message_count: number }
+export interface ThreadMessage { kind: "user" | "assistant" | "tool"; content: string; tool_name?: string }
+export interface ThreadsListParams { limit?: number }
+export interface ThreadsListResult { threads: ThreadSummary[] }
+export interface ThreadsOpenParams { thread_id: string }
+export interface ThreadsOpenResult { thread: ThreadSummary; messages: ThreadMessage[] }
 export interface EventEnvelope { event_id: string; type: string; thread_id: string; run_id: string; sequence: number; timestamp_ms: number; source?: { kind: "root" | "subagent" | "background"; id?: string; parent_tool_call_id?: string }; payload: JsonObject; extensions?: JsonObject }
 export interface InteractionRequestEnvelope { request_id: string; type: "approval" | "question"; thread_id: string; run_id: string; sequence: number; timeout_ms: number; payload: JsonObject }
-export interface ApprovalResponse { type: "approval"; request_id: string; decision: "approve_once" | "approve_session" | "reject"; feedback?: string }
+export interface ApprovalResponse { type: "approval"; request_id: string; decision: "approve_once" | "approve_thread" | "reject"; feedback?: string }
 export interface QuestionResponse { type: "question"; request_id: string; answers: Record<string, string[]> }
 export type InteractionResponse = ApprovalResponse | QuestionResponse
 `
@@ -123,6 +129,25 @@ class RunCancelParams(StrictModel):
     thread_id: str = Field(min_length=1)
     run_id: str = Field(min_length=1)
 
+class ThreadSummary(StrictModel):
+    thread_id: str = Field(min_length=1)
+    created_at_ms: int = Field(ge=0)
+    updated_at_ms: int = Field(ge=0)
+    first_message: str
+    latest_message: str
+    message_count: int = Field(ge=0)
+
+class ThreadMessage(StrictModel):
+    kind: Literal["user", "assistant", "tool"]
+    content: str
+    tool_name: str | None = None
+
+class ThreadsListParams(StrictModel):
+    limit: int = Field(default=80, ge=1, le=200)
+
+class ThreadsOpenParams(StrictModel):
+    thread_id: str = Field(min_length=1)
+
 class EventEnvelope(StrictModel):
     event_id: str = Field(min_length=1)
     type: str = Field(min_length=1)
@@ -176,7 +201,7 @@ class InteractionRequestEnvelope(StrictModel):
 class ApprovalResponse(StrictModel):
     type: Literal["approval"]
     request_id: str
-    decision: Literal["approve_once", "approve_session", "reject"]
+    decision: Literal["approve_once", "approve_thread", "reject"]
     feedback: str = ""
 
 class QuestionResponse(StrictModel):

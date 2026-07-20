@@ -7,12 +7,12 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 PROTOCOL_MAJOR = 2
-PROTOCOL_MINOR = 1
+PROTOCOL_MINOR = 2
 MAX_FRAME_BYTES = 8388608
 MAX_TOOL_PAYLOAD_BYTES = 1048576
-CLIENT_METHODS = ["initialize","run.start","run.cancel","config.show","config.path","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","shutdown"]
+CLIENT_METHODS = ["initialize","run.start","run.cancel","config.show","config.path","threads.list","threads.open","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","shutdown"]
 SERVER_METHODS = ["event","request"]
-SERVER_CAPABILITIES = ["run.cancel","run.multithread","interactive.approval","interactive.question","config.read","skills.read","skills.manage"]
+SERVER_CAPABILITIES = ["run.cancel","run.multithread","interactive.approval","interactive.question","config.read","threads.read","skills.read","skills.manage"]
 EVENT_TYPES = ["run.started","skill.loaded","content.delta","thinking.delta","tool.started","tool.delta","tool.completed","interaction.resolved","run.completed","run.cancelled","run.failed"]
 
 class StrictModel(BaseModel):
@@ -53,6 +53,25 @@ class RunStartParams(StrictModel):
 class RunCancelParams(StrictModel):
     thread_id: str = Field(min_length=1)
     run_id: str = Field(min_length=1)
+
+class ThreadSummary(StrictModel):
+    thread_id: str = Field(min_length=1)
+    created_at_ms: int = Field(ge=0)
+    updated_at_ms: int = Field(ge=0)
+    first_message: str
+    latest_message: str
+    message_count: int = Field(ge=0)
+
+class ThreadMessage(StrictModel):
+    kind: Literal["user", "assistant", "tool"]
+    content: str
+    tool_name: str | None = None
+
+class ThreadsListParams(StrictModel):
+    limit: int = Field(default=80, ge=1, le=200)
+
+class ThreadsOpenParams(StrictModel):
+    thread_id: str = Field(min_length=1)
 
 class EventEnvelope(StrictModel):
     event_id: str = Field(min_length=1)
@@ -107,7 +126,7 @@ class InteractionRequestEnvelope(StrictModel):
 class ApprovalResponse(StrictModel):
     type: Literal["approval"]
     request_id: str
-    decision: Literal["approve_once", "approve_session", "reject"]
+    decision: Literal["approve_once", "approve_thread", "reject"]
     feedback: str = ""
 
 class QuestionResponse(StrictModel):

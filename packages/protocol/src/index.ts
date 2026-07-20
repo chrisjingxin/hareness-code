@@ -11,6 +11,8 @@ import {
   type InitializeParams,
   type InteractionRequestEnvelope,
   type JsonRpcMessage,
+  type ThreadsListParams,
+  type ThreadsOpenParams,
 } from "./generated"
 
 export const Method = {
@@ -19,6 +21,8 @@ export const Method = {
   RUN_CANCEL: "run.cancel",
   CONFIG_SHOW: "config.show",
   CONFIG_PATH: "config.path",
+  THREADS_LIST: "threads.list",
+  THREADS_OPEN: "threads.open",
   SKILLS_LIST: "skills.list",
   SKILLS_INSPECT: "skills.inspect",
   SKILLS_SET_ENABLED: "skills.set_enabled",
@@ -47,6 +51,22 @@ export function assertInitializeParams(value: unknown): asserts value is Initial
     throw new Error("initialize capabilities 无效")
   }
   rejectExtra(params, ["protocol", "client", "capabilities", "cwd", "config_path"], "initialize params")
+}
+
+/** 校验恢复选择器读取 thread 摘要时的分页参数。 */
+export function assertThreadsListParams(value: unknown): asserts value is ThreadsListParams {
+  const params = objectValue(value, "threads.list params")
+  if (params.limit !== undefined && (!integer(params.limit) || (params.limit as number) < 1 || (params.limit as number) > 200)) {
+    throw new Error("threads.list.limit 无效")
+  }
+  rejectExtra(params, ["limit"], "threads.list params")
+}
+
+/** 校验仅供 TUI 内部使用的 thread_id，用户界面不接受该字段作为文本输入。 */
+export function assertThreadsOpenParams(value: unknown): asserts value is ThreadsOpenParams {
+  const params = objectValue(value, "threads.open params")
+  if (typeof params.thread_id !== "string" || !params.thread_id) throw new Error("threads.open.thread_id 无效")
+  rejectExtra(params, ["thread_id"], "threads.open params")
 }
 
 /** 校验 Agent 推送的统一事件信封，并允许未来新增未知事件类型。 */

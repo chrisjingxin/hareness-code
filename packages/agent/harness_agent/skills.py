@@ -217,7 +217,7 @@ class SkillRegistry:
         return _read_limited_text(candidate, MAX_RESOURCE_BYTES)
 
     def set_enabled(self, skill_id: str, enabled: bool) -> dict[str, object]:
-        """保存下一次会话生效的启停偏好。"""
+        """保存下一次 thread 生效的启停偏好。"""
         record = self.resolve(skill_id, include_disabled=True)
         disabled = set(self._state.get("disabled", []))
         if enabled:
@@ -226,7 +226,7 @@ class SkillRegistry:
             disabled.add(record.skill_id)
         self._state["disabled"] = sorted(disabled)
         self._write_state(self._state)
-        return {"id": record.skill_id, "enabled": enabled, "effective_on": "next_session"}
+        return {"id": record.skill_id, "enabled": enabled, "effective_on": "next_thread"}
 
     async def marketplace_catalog(self, market: str | None = None) -> list[dict[str, object]]:
         """调用已安装企业 Provider；未安装时返回明确诊断。"""
@@ -255,7 +255,7 @@ class SkillRegistry:
             raise SkillError("Marketplace artifact has an invalid Skill identity")
         destination = self.home / ".harness" / "skills" / "market" / market / name / artifact.version
         _extract_archive(artifact.archive, destination)
-        return {"id": f"{market}/{name}", "version": artifact.version, "effective_on": "next_session"}
+        return {"id": f"{market}/{name}", "version": artifact.version, "effective_on": "next_thread"}
 
     def remove(self, skill_id: str) -> dict[str, object]:
         """移除本地市场包；内置、用户和项目 Skill 不能由该命令删除。"""
@@ -263,7 +263,7 @@ class SkillRegistry:
         if not record.source.startswith("market:"):
             raise SkillError("Only installed marketplace Skills can be removed")
         shutil.rmtree(record.root)
-        return {"id": record.skill_id, "removed": True, "effective_on": "next_session"}
+        return {"id": record.skill_id, "removed": True, "effective_on": "next_thread"}
 
     def _scan(self) -> tuple[dict[str, SkillRecord], list[str]]:
         records: dict[str, SkillRecord] = {}

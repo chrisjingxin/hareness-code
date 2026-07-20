@@ -17,6 +17,8 @@ import {
   type RunCancelResult,
   type RequestedSkill,
   type RunStartResult,
+  type ThreadsListResult,
+  type ThreadsOpenResult,
 } from "@za38/protocol"
 
 type PendingRequest = {
@@ -112,6 +114,16 @@ export class JsonRpcPeer extends EventEmitter {
   /** 请求取消指定运行。 */
   cancel(threadId: string, runId: string): Promise<RunCancelResult> {
     return this.call(Method.RUN_CANCEL, { thread_id: threadId, run_id: runId }) as Promise<RunCancelResult>
+  }
+
+  /** 读取当前 project 的可恢复 thread 摘要；thread_id 只在 TUI 内部用于后续打开。 */
+  listThreads(limit = 80): Promise<ThreadsListResult> {
+    return this.call(Method.THREADS_LIST, { limit }) as Promise<ThreadsListResult>
+  }
+
+  /** 打开当前 project 的既有 thread，并返回可以重新构造时间线的消息。 */
+  openThread(threadId: string): Promise<ThreadsOpenResult> {
+    return this.call(Method.THREADS_OPEN, { thread_id: threadId }) as Promise<ThreadsOpenResult>
   }
 
   /** 请求 sidecar 优雅关闭，并给关闭响应设置较短超时。 */

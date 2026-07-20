@@ -77,7 +77,14 @@ export type RunSummary = {
   usage?: { inputTokens: number; outputTokens: number }
 }
 
-/** 创建无会话内容的初始状态，可选保留待恢复的线程标识。 */
+/** 供恢复 RPC 交给表现层的稳定 thread message，禁止把 checkpoint 原始对象带入 TUI。 */
+export type RestoredThreadMessage = {
+  kind: "user" | "assistant" | "tool"
+  content: string
+  toolName?: string
+}
+
+/** 创建无 thread 内容的初始状态，可选保留内部 thread 标识。 */
 export function createInitialState(threadId?: string): TuiState {
   return {
     threadId,
@@ -120,9 +127,45 @@ export function appendNotice(state: TuiState, message: string): TuiState {
   }
 }
 
-/** 清空当前线程并返回沉浸式首页初始状态。 */
+/** 清空当前 thread 并返回沉浸式首页初始状态。 */
 export function clearThread(state: TuiState): TuiState {
   return createInitialState()
+}
+
+/** 原子替换当前 thread 的历史，清除旧运行、交互和 sequence，避免跨 thread 串帧。 */
+export function restoreThread(threadId: string, messages: readonly RestoredThreadMessage[]): TuiState {
+  const restoredRunId = `restored-${threadId}`
+  const timeline: TimelineItem[] = messages.map((message, index) => {
+    const id = `restored-${index + 1}`
+    if (message.kind === "tool") {
+      return {
+        type: "tool",
+        tool: {
+          id,
+          runId: restoredRunId,
+          name: message.toolName || "tool",
+          arguments: "",
+          output: message.content,
+          status: "completed",
+        },
+      }
+    }
+    return {
+      type: "message",
+      message: {
+        id,
+        role: message.kind,
+        content: message.content,
+        streaming: false,
+      },
+    }
+  })
+  return {
+    threadId,
+    timeline,
+    status: "已恢复",
+    sequences: {},
+  }
 }
 
 /** 将运行状态切换为取消中，等待 sidecar 返回终态事件。 */
@@ -438,7 +481,7 @@ function toolArguments(timeline: TimelineItem[], runId: string, toolId: string):
   return item?.tool.arguments ?? ""
 }
 
-/** 将用户处理过的审批或问题保留在其原始位置，不再把它从会话历史中移除。 */
+/** 将用户处理过的审批或问题保留在其原始位置，不再把它从 thread 历史中移除。 */
 function updateInteraction(
   timeline: TimelineItem[],
   runId: string,
