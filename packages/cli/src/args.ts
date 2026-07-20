@@ -2,7 +2,17 @@
 
 export type Command =
   | { kind: "run"; message?: string; nonInteractive: boolean; json: boolean; cwd: string; configPath?: string; threadId?: string; sandbox?: "remote" | false }
-  | { kind: "config.show" | "config.path"; cwd: string; configPath?: string }
+  | { kind: "config.show" | "config.path"; cwd: string; configPath?: string; params?: Record<string, unknown> }
+  | { kind: SkillCommandKind; cwd: string; configPath?: string; params: Record<string, unknown> }
+
+export type SkillCommandKind =
+  | "skills.list"
+  | "skills.inspect"
+  | "skills.set_enabled"
+  | "skills.install"
+  | "skills.update"
+  | "skills.remove"
+  | "skills.market.list"
 
 /** 解析交互、无头执行和配置管理命令，并保留工作区与配置路径。 */
 export function parseArgs(argv: string[], cwd = process.cwd()): Command {
@@ -14,9 +24,7 @@ export function parseArgs(argv: string[], cwd = process.cwd()): Command {
     const configPath = optionValue(args.slice(2), "--config")
     return { kind: `config.${action}`, cwd, configPath }
   }
-  if (["threads", "agents", "skills", "mcp"].includes(command ?? "")) {
-    throw new Error(`'za38 ${command}' is planned but not implemented in this vertical slice`)
-  }
+  if (command === "skills") return parseSkillsCommand(args.slice(1), cwd)
 
   const configPath = optionValue(args, "--config")
   const cwdValue = optionValue(args, "--cwd")
@@ -27,6 +35,72 @@ export function parseArgs(argv: string[], cwd = process.cwd()): Command {
   const sandbox = sandboxOption(args)
   if (nonInteractive && !message) throw new Error("--non-interactive requires a message")
   return { kind: "run", message, nonInteractive, json, cwd: cwdValue ?? cwd, configPath, threadId, sandbox }
+}
+
+/** 解析 Skill 管理命令；管理操作只通过 JSON-RPC 交给已启动的 sidecar。 */
+function parseSkillsCommand(args: string[], cwd: string): Command {
+  const action = args[0] ?? "list"
+  const workspace = optionValue(args, "--workspace") ?? optionValue(args, "--cwd") ?? cwd
+  const configPath = optionValue(args, "--config")
+  if (action === "list") {
+    return {
+      kind: "skills.list",
+      cwd: workspace,
+      configPath,
+      params: { include_disabled: !hasOption(args, "--enabled-only") },
+    }
+  }
+  if (action === "inspect") {
+    return skillIdCommand(args, workspace, configPath, "skills.inspect")
+  }
+  if (action === "enable" || action === "disable" || action === "trust") {
+    return {
+      kind: "skills.set_enabled",
+      cwd: workspace,
+      configPath,
+      params: { id: positionalValue(args, `harness skills ${action} requires a Skill id`), enabled: action !== "disable" },
+    }
+  }
+  if (action === "remove") return skillIdCommand(args, workspace, configPath, "skills.remove")
+  if (action === "install" || action === "update") {
+    const market = optionValue(args, "--market")
+    const name = positionalValue(args, `harness skills ${action} requires a Skill name`)
+    if (!market) throw new Error(`harness skills ${action} requires --market MARKET`)
+    return {
+      kind: action === "install" ? "skills.install" : "skills.update",
+      cwd: workspace,
+      configPath,
+      params: { market, name, version: optionValue(args, "--version") },
+    }
+  }
+  if (action === "market" || action === "market-list") {
+    return {
+      kind: "skills.market.list",
+      cwd: workspace,
+      configPath,
+      params: { market: optionValue(args, "--market") },
+    }
+  }
+  throw new Error("Usage: harness skills <list|inspect|enable|disable|trust|install|update|remove|market>")
+}
+
+/** 解析需要一个 canonical Skill id 的管理命令。 */
+function skillIdCommand(args: string[], cwd: string, configPath: string | undefined, kind: "skills.inspect" | "skills.remove" | "skills.set_enabled"): Command {
+  return { kind, cwd, configPath, params: { id: positionalValue(args, `${kind} requires a Skill id`) } }
+}
+
+/** 读取指定位置的非开关参数，避免把选项值误当成 Skill 名称。 */
+function positionalValue(args: string[], message: string): string {
+  const valueOptions = new Set(["--workspace", "--cwd", "--config", "--market", "--version"])
+  for (let index = 1; index < args.length; index += 1) {
+    const value = args[index]
+    if (valueOptions.has(value)) {
+      index += 1
+      continue
+    }
+    if (value && !value.startsWith("-")) return value
+  }
+  throw new Error(message)
 }
 
 /** 判断参数列表是否包含指定的无值开关。 */

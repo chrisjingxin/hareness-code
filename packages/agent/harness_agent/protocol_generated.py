@@ -7,13 +7,13 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 PROTOCOL_MAJOR = 2
-PROTOCOL_MINOR = 0
+PROTOCOL_MINOR = 1
 MAX_FRAME_BYTES = 8388608
 MAX_TOOL_PAYLOAD_BYTES = 1048576
-CLIENT_METHODS = ["initialize","run.start","run.cancel","config.show","config.path","shutdown"]
+CLIENT_METHODS = ["initialize","run.start","run.cancel","config.show","config.path","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","shutdown"]
 SERVER_METHODS = ["event","request"]
-SERVER_CAPABILITIES = ["run.cancel","run.multithread","interactive.approval","interactive.question","config.read"]
-EVENT_TYPES = ["run.started","content.delta","thinking.delta","tool.started","tool.delta","tool.completed","interaction.resolved","run.completed","run.cancelled","run.failed"]
+SERVER_CAPABILITIES = ["run.cancel","run.multithread","interactive.approval","interactive.question","config.read","skills.read","skills.manage"]
+EVENT_TYPES = ["run.started","skill.loaded","content.delta","thinking.delta","tool.started","tool.delta","tool.completed","interaction.resolved","run.completed","run.cancelled","run.failed"]
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -40,10 +40,15 @@ class InitializeParams(StrictModel):
     cwd: str | None = None
     config_path: str | None = None
 
+class RequestedSkill(StrictModel):
+    id: str = Field(min_length=1)
+    args: str = ""
+
 class RunStartParams(StrictModel):
     message: str = Field(min_length=1)
     thread_id: str | None = None
     run_id: str | None = None
+    requested_skill: RequestedSkill | None = None
 
 class RunCancelParams(StrictModel):
     thread_id: str = Field(min_length=1)
@@ -63,7 +68,7 @@ class EventEnvelope(StrictModel):
     @model_validator(mode="after")
     def validate_known_payload(self) -> "EventEnvelope":
         fields = {
-            "run.started": {"resumed"}, "content.delta": {"text"}, "thinking.delta": {"text"},
+            "run.started": {"resumed", "skills_snapshot_id"}, "skill.loaded": {"skill_id", "source", "version", "snapshot_id"}, "content.delta": {"text"}, "thinking.delta": {"text"},
             "tool.started": {"tool_call_id", "name"},
             "tool.delta": {"tool_call_id", "arguments_delta", "output_delta", "truncated", "original_bytes"},
             "tool.completed": {"tool_call_id", "result"},
@@ -74,6 +79,12 @@ class EventEnvelope(StrictModel):
         allowed = fields.get(self.type)
         if allowed is not None and set(self.payload) - allowed:
             raise ValueError(f"unexpected payload fields for {self.type}")
+        if self.type == "skill.loaded" and (
+            not isinstance(self.payload.get("skill_id"), str)
+            or not isinstance(self.payload.get("source"), str)
+            or not isinstance(self.payload.get("snapshot_id"), str)
+        ):
+            raise ValueError("invalid skill.loaded payload")
         return self
 
 class InteractionRequestEnvelope(StrictModel):

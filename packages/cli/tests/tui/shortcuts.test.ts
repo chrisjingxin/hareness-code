@@ -24,6 +24,13 @@ test("命令菜单优先消费导航、选择与关闭快捷键", () => {
   expect(resolveShortcut({ name: "return", ctrl: false }, { ...menu, commandOptionCount: 0 })).toBe("command-block")
 })
 
+test("Skill 选择器优先消费搜索框导航、选择与关闭键", () => {
+  const picker = { ...idle, skillPickerVisible: true, skillOptionCount: 2, commandMenuVisible: true }
+  expect(resolveShortcut({ name: "down", ctrl: false }, picker)).toBe("skill-next")
+  expect(resolveShortcut({ name: "return", ctrl: false }, picker)).toBe("skill-select")
+  expect(resolveShortcut({ name: "escape", ctrl: false }, picker)).toBe("close-skill-picker")
+})
+
 test("Esc、Ctrl+P、Ctrl+O 和 Ctrl+D 保留真实 TUI 行为", () => {
   expect(resolveShortcut({ name: "escape", ctrl: false }, { ...idle, activeRun: true })).toBe("cancel-run")
   expect(resolveShortcut({ name: "p", ctrl: true }, idle)).toBe("command-open")

@@ -29,6 +29,28 @@ test("parses the read-only config management commands", () => {
   })
 })
 
+test("parses Skill catalog and management commands", () => {
+  expect(parseArgs(["skills", "list"], "/work")).toEqual({
+    kind: "skills.list",
+    cwd: "/work",
+    configPath: undefined,
+    params: { include_disabled: true },
+  })
+  expect(parseArgs(["skills", "inspect", "project/review"], "/work")).toMatchObject({
+    kind: "skills.inspect",
+    params: { id: "project/review" },
+  })
+  expect(parseArgs(["skills", "trust", "--workspace", "/work", "project/review"], "/other")).toMatchObject({
+    kind: "skills.set_enabled",
+    cwd: "/work",
+    params: { id: "project/review", enabled: true },
+  })
+  expect(parseArgs(["skills", "install", "review", "--market", "enterprise", "--version", "1.2.0"], "/work")).toMatchObject({
+    kind: "skills.install",
+    params: { market: "enterprise", name: "review", version: "1.2.0" },
+  })
+})
+
 test("requires a prompt for non-interactive mode", () => {
   expect(() => parseArgs(["--non-interactive"])).toThrow("requires a value")
 })

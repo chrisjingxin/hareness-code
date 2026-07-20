@@ -15,6 +15,7 @@ import {
   type JsonRpcMessage,
   type JsonRpcResponse,
   type RunCancelResult,
+  type RequestedSkill,
   type RunStartResult,
 } from "@za38/protocol"
 
@@ -94,13 +95,18 @@ export class JsonRpcPeer extends EventEmitter {
   }
 
   /** 启动一次 Agent 运行，保留可选线程和运行标识。 */
-  startRun(message: string, threadId?: string, runId?: string): Promise<RunStartResult> {
-    return this.call(Method.RUN_START, { message, thread_id: threadId, run_id: runId }) as Promise<RunStartResult>
+  startRun(message: string, threadId?: string, runId?: string, requestedSkill?: RequestedSkill): Promise<RunStartResult> {
+    return this.call(Method.RUN_START, {
+      message,
+      thread_id: threadId,
+      run_id: runId,
+      requested_skill: requestedSkill,
+    }) as Promise<RunStartResult>
   }
 
   /** 兼容现有调用点的语义别名；wire 上已使用 run.start。 */
-  query(message: string, threadId?: string, runId?: string): Promise<RunStartResult> {
-    return this.startRun(message, threadId, runId)
+  query(message: string, threadId?: string, runId?: string, requestedSkill?: RequestedSkill): Promise<RunStartResult> {
+    return this.startRun(message, threadId, runId, requestedSkill)
   }
 
   /** 请求取消指定运行。 */

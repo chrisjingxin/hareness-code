@@ -19,6 +19,13 @@ export const Method = {
   RUN_CANCEL: "run.cancel",
   CONFIG_SHOW: "config.show",
   CONFIG_PATH: "config.path",
+  SKILLS_LIST: "skills.list",
+  SKILLS_INSPECT: "skills.inspect",
+  SKILLS_SET_ENABLED: "skills.set_enabled",
+  SKILLS_INSTALL: "skills.install",
+  SKILLS_UPDATE: "skills.update",
+  SKILLS_REMOVE: "skills.remove",
+  SKILLS_MARKET_LIST: "skills.market.list",
   SHUTDOWN: "shutdown",
   EVENT: "event",
   REQUEST: "request",
@@ -109,7 +116,8 @@ function rejectExtra(value: Record<string, unknown>, allowed: readonly string[],
 
 function validateKnownEventPayload(type: string, payload: Record<string, unknown>): void {
   const fields: Record<string, readonly string[]> = {
-    "run.started": ["resumed"],
+    "run.started": ["resumed", "skills_snapshot_id"],
+    "skill.loaded": ["skill_id", "source", "version", "snapshot_id"],
     "content.delta": ["text"],
     "thinking.delta": ["text"],
     "tool.started": ["tool_call_id", "name"],
@@ -124,6 +132,7 @@ function validateKnownEventPayload(type: string, payload: Record<string, unknown
   if (!allowed) return
   rejectExtra(payload, allowed, `${type} payload`)
   if (["content.delta", "thinking.delta"].includes(type) && typeof payload.text !== "string") throw new Error(`${type}.text 无效`)
+  if (type === "skill.loaded" && (typeof payload.skill_id !== "string" || typeof payload.source !== "string" || typeof payload.snapshot_id !== "string")) throw new Error("skill.loaded payload 无效")
   if (type.startsWith("tool.") && typeof payload.tool_call_id !== "string") throw new Error(`${type}.tool_call_id 无效`)
   if (type === "tool.started" && typeof payload.name !== "string") throw new Error("tool.started.name 无效")
   if (type === "tool.completed") objectValue(payload.result, "tool.completed.result")

@@ -4,11 +4,18 @@ import { createCliRenderer, type KeyEvent, type ScrollBoxRenderable, type Textar
 import { createRoot, useKeyboard, useTerminalDimensions } from "@opentui/react"
 import { randomUUID } from "node:crypto"
 import { useCallback, useEffect, useRef, useState } from "react"
-import type { InteractionRequestEnvelope, InteractionResponse } from "@za38/protocol"
+import type { InteractionRequestEnvelope, InteractionResponse, RequestedSkill } from "@za38/protocol"
 
 import { IpcClient } from "../ipc/client"
-import { findSlashCommands, parseSlashCommand, slashCommandHelp, type SlashCommand, type SlashCommandDefinition } from "./commands"
-import { HomeView, SessionView, type CommandMenuState } from "./components"
+import {
+  findCommandMenuItems,
+  parseSlashCommand,
+  slashCommandHelp,
+  type CommandMenuItem,
+  type SkillMenuItem,
+  type SlashCommand,
+} from "./commands"
+import { HomeView, SessionView, SkillPicker, type CommandMenuState, type SelectedSkill } from "./components"
 import { TuiErrorBoundary } from "./error-boundary"
 import { runtimeStatusSummary, type TuiRuntime } from "./model"
 import {
@@ -43,6 +50,18 @@ type TuiOptions = {
   onRequestExit: () => void
 }
 
+type SkillPickerState = {
+  visible: boolean
+  loading: boolean
+  query: string
+  selectedIndex: number
+  error?: string
+}
+
+type SkillsListResult = {
+  skills?: unknown[]
+}
+
 /** 正式 OpenTUI 根组件：所有 Agent 输出必须经状态归约后才进入终端。 */
 export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onRequestExit }: TuiOptions) {
   const [state, setState] = useState(() => createInitialState(threadId))
@@ -51,6 +70,9 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
   const inputRef = useRef<TextareaRenderable | null>(null)
   const conversationScrollRef = useRef<ScrollBoxRenderable | null>(null)
   const [commandMenu, setCommandMenu] = useState<CommandMenuState>({ visible: false, selectedIndex: 0 })
+  const [skills, setSkills] = useState<readonly SkillMenuItem[]>([])
+  const [skillPicker, setSkillPicker] = useState<SkillPickerState>({ visible: false, loading: false, query: "", selectedIndex: 0 })
+  const [selectedSkill, setSelectedSkill] = useState<SelectedSkill | undefined>(undefined)
   const commandMenuDismissedValue = useRef<string | undefined>(undefined)
   const [showToolDetails, setShowToolDetails] = useState(false)
   const [expandedTools, setExpandedTools] = useState<ReadonlySet<string>>(() => new Set())
@@ -61,6 +83,7 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
     resolve: (response: InteractionResponse) => void
   }>())
   const historyApplyValueRef = useRef<string | undefined>(undefined)
+  const skillSearchRef = useRef<TextareaRenderable | null>(null)
   const terminal = useTerminalDimensions()
 
   /** 提交不可变状态转换；长生命周期 IPC 回调通过 ref 读取最新状态。 */
@@ -69,6 +92,16 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
     stateRef.current = next
     setState(next)
   }, [])
+
+  /** 读取启动快照中的 Skill 摘要；正文仍只在选中后由 sidecar 按需加载。 */
+  const refreshSkills = useCallback(async (): Promise<readonly SkillMenuItem[]> => {
+    const result = await client.call("skills.list", { include_disabled: false }) as SkillsListResult
+    const next = Array.isArray(result.skills)
+      ? result.skills.map(skillMenuItem).filter((item): item is SkillMenuItem => item !== undefined)
+      : []
+    setSkills(next)
+    return next
+  }, [client])
 
   useEffect(() => {
     const settleAbandoned = (requestId: string | undefined) => {
@@ -113,6 +146,12 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
   }, [client, commit])
 
   useEffect(() => {
+    void refreshSkills().catch(() => {
+      // 目录读取失败不阻断正常对话；用户打开 /skills 时会得到明确错误。
+    })
+  }, [refreshSkills])
+
+  useEffect(() => {
     let disposed = false
     void loadPromptHistory(promptHistoryFile).then(history => {
       if (!disposed) promptHistoryRef.current = history
@@ -138,7 +177,7 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
   }, [client, commit, onRequestExit])
 
   /** 登记用户消息、发起 run.start，并校验 sidecar 返回的 run 标识。 */
-  const sendAgentMessage = useCallback(async (message: string) => {
+  const sendAgentMessage = useCallback(async (message: string, requestedSkill?: RequestedSkill) => {
     const current = stateRef.current
     if (current.activeRun) {
       commit(state => appendNotice(state, "当前会话仍在执行；请等待、审批或按 Ctrl+C 取消。"))
@@ -148,16 +187,20 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
       threadId: current.threadId ?? randomUUID(),
       runId: randomUUID(),
     }
+    const armedSkill = requestedSkill ?? (selectedSkill
+      ? { id: selectedSkill.id, args: message }
+      : undefined)
+    if (armedSkill && !requestedSkill) setSelectedSkill(undefined)
     commit(state => startRun(state, run, message))
     try {
-      const accepted = await client.query(message, run.threadId, run.runId)
+      const accepted = await client.query(message, run.threadId, run.runId, armedSkill)
       if (!accepted.accepted || accepted.thread_id !== run.threadId || accepted.run_id !== run.runId) {
         throw new Error("Agent 返回的 run 标识与请求不一致")
       }
     } catch (error) {
       commit(state => markRunFailed(state, run.runId, errorMessage(error)))
     }
-  }, [client, commit])
+  }, [client, commit, selectedSkill])
 
   /** 解析 Agent 发起的审批 request，由 JsonRpcPeer 自动回写标准 response。 */
   const respondApproval = useCallback(async (decision: "approve" | "reject") => {
@@ -166,7 +209,7 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
     const pending = interactionResolversRef.current.get(pendingApproval.requestId)
     if (!pending) return
     interactionResolversRef.current.delete(pendingApproval.requestId)
-    commit(clearPendingInteraction)
+    commit(state => clearPendingInteraction(state, decision === "approve" ? "approved" : "rejected"))
     pending.resolve({
       type: "approval",
       request_id: pendingApproval.requestId,
@@ -181,7 +224,7 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
     const pending = interactionResolversRef.current.get(pendingQuestion.requestId)
     if (!pending) return
     interactionResolversRef.current.delete(pendingQuestion.requestId)
-    commit(clearPendingInteraction)
+    commit(state => clearPendingInteraction(state, "answered"))
     pending.resolve({
       type: "question",
       request_id: pendingQuestion.requestId,
@@ -189,8 +232,23 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
     })
   }, [commit])
 
-  /** 执行已接入的本地 Slash Command，不伪造未接入后端能力。 */
-  const executeSlashCommand = useCallback((command: SlashCommand) => {
+  /** 打开搜索选择器并刷新当前 sidecar 固定快照中的 Skill 摘要。 */
+  const openSkillPicker = useCallback(() => {
+    setSkillPicker({ visible: true, loading: true, query: "", selectedIndex: 0 })
+    void refreshSkills().then(() => {
+      setSkillPicker(current => current.visible ? { ...current, loading: false } : current)
+    }).catch(error => {
+      setSkillPicker(current => current.visible
+        ? { ...current, loading: false, error: `Skill catalog 读取失败：${errorMessage(error)}` }
+        : current)
+    })
+  }, [refreshSkills])
+
+  /** 筛选保持在纯视图层，避免每次搜索重新请求 sidecar 或改变 snapshot。 */
+  const visibleSkills = filterSkills(skills, skillPicker.query)
+
+  /** 执行本地控制命令和 Skill 入口；目录读取失败只显示可恢复通知。 */
+  const executeSlashCommand = useCallback(async (command: SlashCommand) => {
     switch (command.name) {
       case "help":
         commit(current => appendNotice(current, slashCommandHelp.map(item => `${item.command}  ${item.description}`).join("\n")))
@@ -214,8 +272,21 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
       case "version":
         commit(current => appendNotice(current, `za38-cli ${runtime.cliVersion} · JSON-RPC v2`))
         return
+      case "skills":
+        openSkillPicker()
+        return
+      case "skill": {
+        const [skillId, ...argParts] = (command.argument ?? "").split(/\s+/).filter(Boolean)
+        if (!skillId) {
+          commit(current => appendNotice(current, "用法：/skill <id> [args] 会直接运行；输入 /skills 打开选择器"))
+          return
+        }
+        const args = argParts.join(" ")
+        await sendAgentMessage(args || "请按照该 Skill 的说明处理当前任务。", { id: skillId, args })
+        return
+      }
     }
-  }, [cancelActiveRun, commit, onRequestExit, runtime])
+  }, [cancelActiveRun, commit, onRequestExit, openSkillPicker, runtime, sendAgentMessage])
 
   /** 同步 textarea 草稿、命令菜单过滤状态和历史游标。 */
   const updateDraft = useCallback((value: string) => {
@@ -248,6 +319,13 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
     setCommandMenu({ visible: false, selectedIndex: 0 })
   }, [])
 
+  /** 选择 Skill 会清掉用于筛选的 Slash 草稿，随后回到 composer 等待真实任务。 */
+  const selectSkill = useCallback((skill: SkillMenuItem) => {
+    clearDraft()
+    setSelectedSkill(skill)
+    setSkillPicker({ visible: false, loading: false, query: "", selectedIndex: 0 })
+  }, [clearDraft])
+
   /** 用历史项或命令项替换草稿，并把光标放到指定端点。 */
   const replaceDraft = useCallback((value: string, cursor: "start" | "end" = "end", historyCursor?: PromptHistoryCursor) => {
     // setText 会同步 textarea 内部缓冲区，不能只更新 React state，否则 Enter 会发送旧内容。
@@ -270,15 +348,19 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
     return true
   }, [draft, replaceDraft])
 
-  /** 把命令菜单选项写回输入框并关闭菜单。 */
-  const selectSlashCommand = useCallback((command: SlashCommandDefinition) => {
-    const value = `/${command.name}`
+  /** 选择静态命令时补全输入；选择 Skill 时进入下一条消息的一次性上下文。 */
+  const selectCommandMenuItem = useCallback((item: CommandMenuItem) => {
+    if (item.kind === "skill") {
+      selectSkill(item.skill)
+      return
+    }
+    const value = `/${item.command.name}`
     commandMenuDismissedValue.current = value
     inputRef.current?.setText(value)
     inputRef.current?.gotoBufferEnd()
     setDraft(value)
     setCommandMenu({ visible: false, selectedIndex: 0 })
-  }, [])
+  }, [selectSkill])
 
   /** 通过 `/` 或 Ctrl+P 打开命令菜单并补齐命令前缀。 */
   const openCommandMenu = useCallback(() => {
@@ -333,7 +415,7 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
   /** 在 textarea 层处理历史与会话滚动，避免全局 key handler 抢走方向键。 */
   const handleComposerKeyDown = useCallback((key: KeyEvent) => {
     // Slash 菜单由全局快捷键优先处理，不能在 textarea 内重复消费方向键。
-    if (commandMenu.visible) return
+    if (commandMenu.visible || skillPicker.visible) return
     const input = inputRef.current
     if (!input) return
 
@@ -357,11 +439,13 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
               : undefined
       if (scrollAction && scrollConversationBy(scrollAction)) key.preventDefault()
     }
-  }, [commandMenu.visible, navigatePromptHistory, scrollConversationBy])
+  }, [commandMenu.visible, navigatePromptHistory, scrollConversationBy, skillPicker.visible])
 
   useKeyboard(key => {
-    const commandOptions = findSlashCommands(draft)
+    const commandOptions = findCommandMenuItems(draft, skills)
     const action = resolveShortcut(key, {
+      skillPickerVisible: skillPicker.visible,
+      skillOptionCount: visibleSkills.length,
       commandMenuVisible: commandMenu.visible,
       commandOptionCount: commandOptions.length,
       activeRun: Boolean(stateRef.current.activeRun),
@@ -370,6 +454,24 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
     if (action === "none") return
     key.preventDefault()
 
+    if (action === "close-skill-picker") {
+      setSkillPicker(current => ({ ...current, visible: false, loading: false, error: undefined }))
+      return
+    }
+    if (action === "skill-previous" || action === "skill-next") {
+      const direction = action === "skill-previous" ? -1 : 1
+      setSkillPicker(current => ({
+        ...current,
+        selectedIndex: visibleSkills.length ? (current.selectedIndex + direction + visibleSkills.length) % visibleSkills.length : 0,
+      }))
+      return
+    }
+    if (action === "skill-select") {
+      const selected = visibleSkills[skillPicker.selectedIndex]
+      if (selected) selectSkill(selected)
+      return
+    }
+    if (action === "skill-block") return
     if (action === "close-command-menu") {
       commandMenuDismissedValue.current = draft
       setCommandMenu(current => ({ ...current, visible: false }))
@@ -393,7 +495,7 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
         return
       }
       const selected = commandOptions[commandMenu.selectedIndex]
-      if (selected) selectSlashCommand(selected)
+      if (selected) selectCommandMenuItem(selected)
       return
     }
     if (action === "command-block") return
@@ -411,6 +513,10 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
     }
     if (action === "toggle-tool-details") {
       setShowToolDetails(current => !current)
+      return
+    }
+    if (action === "clear-selected-skill") {
+      setSelectedSkill(undefined)
       return
     }
     if (action === "exit") onRequestExit()
@@ -438,8 +544,12 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
     onComposerKeyDown: handleComposerKeyDown,
     onSubmit: handleSubmit,
     commandMenu,
-    onSelectCommand: selectSlashCommand,
+    commandOptions: findCommandMenuItems(draft, skills),
+    onSelectCommand: selectCommandMenuItem,
     onHoverCommand: (selectedIndex: number) => setCommandMenu(current => ({ ...current, selectedIndex })),
+    selectedSkill,
+    skillPickerVisible: skillPicker.visible,
+    onClearSelectedSkill: () => setSelectedSkill(undefined),
     showToolDetails,
     expandedTools,
     onToggleTool: toggleTool,
@@ -447,7 +557,25 @@ export function Za38Tui({ client, runtime, threadId, promptHistoryFile, onReques
     onQuestion: (answer: string) => { void respondQuestion(answer) },
   }
 
-  return isHomeState(state) ? <HomeView {...viewProps} /> : <SessionView {...viewProps} />
+  return (
+    <box position="relative" flexGrow={1}>
+      {isHomeState(state) ? <HomeView {...viewProps} /> : <SessionView {...viewProps} />}
+      <SkillPicker
+        visible={skillPicker.visible}
+        loading={skillPicker.loading}
+        error={skillPicker.error}
+        skills={visibleSkills}
+        query={skillPicker.query}
+        selectedIndex={skillPicker.selectedIndex}
+        terminalWidth={terminal.width}
+        terminalHeight={terminal.height}
+        searchRef={skillSearchRef}
+        onSearch={query => setSkillPicker(current => ({ ...current, query, selectedIndex: 0 }))}
+        onSelect={selectSkill}
+        onHover={selectedIndex => setSkillPicker(current => ({ ...current, selectedIndex }))}
+      />
+    </box>
+  )
 }
 
 /** 创建 OpenTUI renderer、挂载错误边界；退出时将控制权交回 CLI 关闭 Python sidecar。 */
@@ -487,4 +615,28 @@ export async function runTui(options: TuiOptions): Promise<void> {
 /** 将未知异常转换为可安全展示的字符串。 */
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/** 将不可信 RPC 摘要收敛为 TUI 需要的字段，避免字段缺失破坏 Slash 菜单。 */
+function skillMenuItem(value: unknown): SkillMenuItem | undefined {
+  if (!value || typeof value !== "object") return undefined
+  const record = value as Record<string, unknown>
+  if (typeof record.id !== "string" || !record.id || typeof record.name !== "string" || !record.name || typeof record.description !== "string") return undefined
+  return {
+    id: record.id,
+    name: record.name,
+    description: record.description,
+    source: typeof record.source === "string" ? record.source : "unknown",
+    enabled: record.enabled !== false,
+    userInvocable: record.user_invocable !== false,
+    argumentHint: typeof record.argument_hint === "string" ? record.argument_hint : undefined,
+  }
+}
+
+/** 用名称、canonical ID、来源和描述过滤可用目录，匹配逻辑保持大小写无关。 */
+function filterSkills(skills: readonly SkillMenuItem[], query: string): readonly SkillMenuItem[] {
+  const needle = query.trim().toLowerCase()
+  if (!needle) return skills
+  return skills.filter(skill => [skill.id, skill.name, skill.source, skill.description]
+    .some(value => value.toLowerCase().includes(needle)))
 }

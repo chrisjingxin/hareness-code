@@ -44,8 +44,8 @@ backend = "local"
 # [ui]
 # theme = "harness-dark"
 
-# 计划中（ZC-014）：Skills 目录和启用策略。
-# [skills]
+# Skill 使用目录约定，不需要配置区段：项目 `.harness/skills/` 默认启用，
+# 用户可通过 `harness skills disable <canonical-id>` 记录下一次会话的停用偏好。
 
 # 计划中（ZC-015）：同步子 Agent 声明与范围。
 # [agents]

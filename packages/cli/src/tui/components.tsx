@@ -3,7 +3,12 @@
 import type { KeyEvent, ScrollBoxRenderable, TextareaRenderable } from "@opentui/core"
 import { useEffect, useState, type RefObject } from "react"
 
-import { findSlashCommands, type SlashCommandDefinition } from "./commands"
+import {
+  commandMenuItemDescription,
+  commandMenuItemLabel,
+  type CommandMenuItem,
+  type SkillMenuItem,
+} from "./commands"
 import {
   approvalModeLabel,
   formatDuration,
@@ -12,7 +17,7 @@ import {
   type TuiRuntime,
   workspaceLabel,
 } from "./model"
-import type { ConversationMessage, PendingApproval, PendingQuestion, TimelineItem, ToolCard, TuiState } from "./state"
+import type { ConversationMessage, InteractionCard, TimelineItem, ToolCard, TuiState } from "./state"
 import { HarnessCodeLogo } from "./harness-logo"
 import { StarryBackground } from "./starry-background"
 import { markdownSyntax, tuiTheme } from "./theme"
@@ -22,6 +27,9 @@ export type CommandMenuState = {
   visible: boolean
   selectedIndex: number
 }
+
+/** 用户从选择器或 Slash 菜单选中的一次性 Skill 上下文。 */
+export type SelectedSkill = SkillMenuItem
 
 type SharedViewProps = {
   runtime: TuiRuntime
@@ -35,8 +43,12 @@ type SharedViewProps = {
   onComposerKeyDown: (event: KeyEvent) => void
   onSubmit: () => void
   commandMenu: CommandMenuState
-  onSelectCommand: (command: SlashCommandDefinition) => void
+  commandOptions: readonly CommandMenuItem[]
+  onSelectCommand: (command: CommandMenuItem) => void
   onHoverCommand: (index: number) => void
+  selectedSkill?: SelectedSkill
+  skillPickerVisible: boolean
+  onClearSelectedSkill: () => void
   showToolDetails: boolean
   expandedTools: ReadonlySet<string>
   onToggleTool: (toolId: string) => void
@@ -50,7 +62,7 @@ export function HomeView(props: SharedViewProps) {
   const compact = !decorate || props.terminalWidth < 76
   const showSupplemental = !props.commandMenu.visible || compact
   const commandRows = props.commandMenu.visible && !compact
-    ? Math.min(5, Math.max(1, findSlashCommands(props.value).length)) + 2
+    ? Math.min(5, Math.max(1, props.commandOptions.length)) + 2
     : 0
 
   return (
@@ -84,10 +96,6 @@ export function SessionView(props: SharedViewProps) {
         showToolDetails={props.showToolDetails}
         expandedTools={props.expandedTools}
         onToggleTool={props.onToggleTool}
-      />
-      <InteractionDock
-        approval={props.state.pendingApproval}
-        question={props.state.pendingQuestion?.options.length ? props.state.pendingQuestion : undefined}
         onApproval={props.onApproval}
         onQuestion={props.onQuestion}
       />
@@ -127,20 +135,25 @@ export function ConversationTimeline(props: {
   showToolDetails: boolean
   expandedTools: ReadonlySet<string>
   onToggleTool: (toolId: string) => void
+  onApproval: (decision: "approve" | "reject") => void
+  onQuestion: (answer: string) => void
 }) {
   return (
     <scrollbox ref={props.scrollRef} stickyScroll stickyStart="bottom" flexGrow={1} minHeight={0} viewportOptions={{ paddingRight: 1 }}>
       <box height={1} />
       {props.state.timeline.map(item => (
         <TimelineRow
-          key={item.type === "message" ? item.message.id : item.tool.id}
+          key={timelineItemKey(item)}
           item={item}
           state={props.state}
           showToolDetails={props.showToolDetails}
           expandedTools={props.expandedTools}
           onToggleTool={props.onToggleTool}
+          onApproval={props.onApproval}
+          onQuestion={props.onQuestion}
         />
       ))}
+      <TimelineActivity state={props.state} />
       <RunSummary state={props.state} />
       <box height={1} />
     </scrollbox>
@@ -158,20 +171,26 @@ function TimelineRow(props: {
   showToolDetails: boolean
   expandedTools: ReadonlySet<string>
   onToggleTool: (toolId: string) => void
+  onApproval: (decision: "approve" | "reject") => void
+  onQuestion: (answer: string) => void
 }) {
-  if (props.item.type === "message") return <MessageBlock message={props.item.message} state={props.state} />
+  if (props.item.type === "message") return <MessageBlock message={props.item.message} />
+  if (props.item.type === "interaction") {
+    return <InteractionRow interaction={props.item.interaction} onApproval={props.onApproval} onQuestion={props.onQuestion} />
+  }
   const tool = props.item.tool
+  const toolKey = toolTimelineKey(tool)
   return (
     <ToolRow
       tool={tool}
-      expanded={props.showToolDetails || props.expandedTools.has(tool.id) || tool.status !== "completed"}
-      onToggle={() => props.onToggleTool(tool.id)}
+      expanded={props.showToolDetails || props.expandedTools.has(toolKey) || tool.status !== "completed"}
+      onToggle={() => props.onToggleTool(toolKey)}
     />
   )
 }
 
 /** 渲染用户、Agent 和系统消息，并为 Agent Markdown 接入离线语法主题。 */
-function MessageBlock(props: { message: ConversationMessage; state: TuiState }) {
+function MessageBlock(props: { message: ConversationMessage }) {
   if (props.message.role === "user") {
     return (
       <box marginTop={1} marginLeft={2} marginRight={2} border={["left"]} borderColor={tuiTheme.primary} customBorderChars={PROMPT_BORDER}>
@@ -183,12 +202,7 @@ function MessageBlock(props: { message: ConversationMessage; state: TuiState }) 
   }
 
   if (props.message.role === "assistant") {
-    if (props.message.streaming && !props.message.content) {
-      // 工具卡片和交互 dock 已经表达运行状态，避免同时保留一个误导性的 Thinking 行。
-      if (props.state.pendingApproval || props.state.pendingQuestion || props.state.status === "正在调用工具") return null
-      return <ThinkingIndicator state={props.state} />
-    }
-    // 工具先于文本返回时会留下一个空占位；结束后不应渲染无意义的省略号。
+    // 流式文本按首次真正到达的 sequence 插入；没有内容就不伪造历史消息。
     if (!props.message.content) return null
     return (
       <box flexDirection="column" marginTop={1} paddingLeft={3} paddingRight={3}>
@@ -219,9 +233,10 @@ function MessageBlock(props: { message: ConversationMessage; state: TuiState }) 
 function ToolRow(props: { tool: ToolCard; expanded: boolean; onToggle: () => void }) {
   const tone = props.tool.status === "failed" ? tuiTheme.danger : props.tool.status === "completed" ? tuiTheme.success : tuiTheme.primary
   const marker = props.tool.status === "failed" ? "×" : props.tool.status === "completed" ? "✓" : "◌"
-  const label = props.tool.status === "failed" ? "失败" : props.tool.status === "completed" ? "完成" : "执行中"
-  const collapsed = collapseToolOutput(props.tool.detail, 4, 360)
-  const detail = props.expanded ? props.tool.detail : collapsed.output
+  const label = props.tool.status === "failed" ? "失败" : props.tool.status === "completed" ? "已完成" : "执行中"
+  const collapsed = collapseToolOutput(props.tool.output, 4, 360)
+  const output = props.expanded ? props.tool.output : collapsed.output
+  const argumentsPreview = collapseToolOutput(props.tool.arguments, 1, 240).output
 
   return (
     <box marginTop={1} marginLeft={3} marginRight={3} border={["left"]} borderColor={tone} customBorderChars={PROMPT_BORDER}>
@@ -232,18 +247,28 @@ function ToolRow(props: { tool: ToolCard; expanded: boolean; onToggle: () => voi
             <text fg={tuiTheme.text}>{props.tool.name}</text>
             <text fg={tuiTheme.muted}>{label}</text>
           </box>
-          {collapsed.overflow ? <text fg={tuiTheme.subtle}>{props.expanded ? "收起" : "展开"}</text> : null}
+          {collapsed.overflow ? <text fg={tuiTheme.subtle}>{props.expanded ? "收起结果" : "展开结果"}</text> : null}
         </box>
-        {detail ? <text content={detail} fg={tuiTheme.muted} /> : null}
+        {argumentsPreview ? (
+          <box paddingTop={1} flexDirection="row" gap={1}>
+            <text fg={tuiTheme.subtle}>›</text>
+            <text content={argumentsPreview} fg={tuiTheme.subtle} />
+          </box>
+        ) : null}
+        {output ? <text content={output} fg={tuiTheme.muted} /> : null}
       </box>
     </box>
   )
 }
 
-/** 在流式回答尚未产生文本时显示轻量 Thinking 动效。 */
-function ThinkingIndicator(props: { state: TuiState }) {
+/** 当前运行只在时间线末尾显示临时活动状态，绝不插回已有事件之间。 */
+function TimelineActivity(props: { state: TuiState }) {
+  const tail = props.state.timeline.at(-1)
+  if (!props.state.activeRun || props.state.pendingApproval || props.state.pendingQuestion) return null
+  if (props.state.status === "正在调用工具") return null
+  if (tail?.type === "message" && tail.message.role === "assistant" && tail.message.streaming) return null
   const frame = useSpinner(Boolean(props.state.activeRun), 80)
-  const label = props.state.status === "正在调用工具" ? "正在调用工具" : props.state.status === "正在继续执行" ? "继续执行" : "Thinking"
+  const label = props.state.status === "正在继续执行" ? "继续执行" : props.state.status
   return (
     <box marginTop={1} paddingLeft={3} flexDirection="row" gap={1}>
       <text fg={tuiTheme.warning}>{frame}</text>
@@ -270,66 +295,91 @@ function RunSummary(props: { state: TuiState }) {
   )
 }
 
-/** 渲染审批或问答交互，并保持选择控件焦点。 */
-export function InteractionDock(props: {
-  approval?: PendingApproval
-  question?: PendingQuestion
+/** 审批和问答是不可脱离时间线的阻塞事件，完成后保留用户处理结果。 */
+function InteractionRow(props: {
+  interaction: InteractionCard
   onApproval: (decision: "approve" | "reject") => void
   onQuestion: (answer: string) => void
 }) {
-  if (props.approval) {
-    return (
-      <box flexShrink={0} marginLeft={2} marginRight={2} marginBottom={1} border={["left"]} borderColor={tuiTheme.warning} customBorderChars={PROMPT_BORDER}>
-        <box backgroundColor={tuiTheme.toolSurface} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
-          <box flexDirection="row" gap={1}>
-            <text fg={tuiTheme.warning}>△</text>
-            <text fg={tuiTheme.text}><strong>需要审批</strong></text>
-          </box>
-          <text content={props.approval.description} fg={tuiTheme.text} />
-          <ApprovalRequestPreview requests={props.approval.requests} />
-          <select
-            focused
-            height={4}
-            showDescription
-            wrapSelection
-            options={[
-              { name: "允许一次", description: "继续执行当前操作", value: "approve" },
-              { name: "拒绝", description: "停止此操作并告知 Agent", value: "reject" },
-            ]}
-            onSelect={(_, option) => {
-              if (option?.value === "approve" || option?.value === "reject") props.onApproval(option.value)
-            }}
-          />
-          <text fg={tuiTheme.muted}>↑↓ 选择 · Enter 确认</text>
-        </box>
-      </box>
-    )
-  }
+  const { interaction } = props
+  const pending = interaction.status === "pending"
+  const approval = interaction.type === "approval"
+  const tone = approval ? tuiTheme.warning : tuiTheme.primary
 
-  if (props.question?.options.length) {
-    return (
-      <box flexShrink={0} marginLeft={2} marginRight={2} marginBottom={1} border={["left"]} borderColor={tuiTheme.primary} customBorderChars={PROMPT_BORDER}>
-        <box backgroundColor={tuiTheme.toolSurface} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
-          <box flexDirection="row" gap={1}>
-            <text fg={tuiTheme.primary}>?</text>
-            <text fg={tuiTheme.text}><strong>Agent 需要你的回答</strong></text>
-          </box>
-          <text content={props.question.question} fg={tuiTheme.text} />
-          <select
-            focused
-            height={Math.max(2, Math.min(6, props.question.options.length * 2))}
-            showDescription
-            wrapSelection
-            options={props.question.options.map(option => ({ ...option, description: option.name }))}
-            onSelect={(_, option) => { if (typeof option?.value === "string") props.onQuestion(option.value) }}
-          />
-          <text fg={tuiTheme.muted}>↑↓ 选择 · Enter 确认</text>
+  return (
+    <box marginTop={1} marginLeft={2} marginRight={2} border={["left"]} borderColor={tone} customBorderChars={PROMPT_BORDER}>
+      <box backgroundColor={tuiTheme.toolSurface} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
+        <box flexDirection="row" gap={1}>
+          <text fg={tone}>{approval ? "△" : "?"}</text>
+          <text fg={tuiTheme.text}><strong>{approval ? "需要审批" : "Agent 需要你的回答"}</strong></text>
         </box>
+        {approval ? <>
+          {interaction.description ? <text content={interaction.description} fg={tuiTheme.text} /> : null}
+          <ApprovalRequestPreview requests={interaction.requests} />
+        </> : interaction.question ? <text content={interaction.question} fg={tuiTheme.text} /> : null}
+        {pending && approval ? (
+          <>
+            <select
+              focused
+              height={4}
+              showDescription
+              wrapSelection
+              options={[
+                { name: "允许一次", description: "继续执行当前操作", value: "approve" },
+                { name: "拒绝", description: "停止此操作并告知 Agent", value: "reject" },
+              ]}
+              onSelect={(_, option) => {
+                if (option?.value === "approve" || option?.value === "reject") props.onApproval(option.value)
+              }}
+            />
+            <text fg={tuiTheme.muted}>↑↓ 选择 · Enter 确认</text>
+          </>
+        ) : null}
+        {pending && !approval && interaction.options?.length ? (
+          <>
+            <select
+              focused
+              height={Math.max(2, Math.min(6, interaction.options.length * 2))}
+              showDescription
+              wrapSelection
+              options={interaction.options.map(option => ({ ...option, description: option.name }))}
+              onSelect={(_, option) => { if (typeof option?.value === "string") props.onQuestion(option.value) }}
+            />
+            <text fg={tuiTheme.muted}>↑↓ 选择 · Enter 确认</text>
+          </>
+        ) : null}
+        {pending && !approval && !interaction.options?.length ? <text fg={tuiTheme.muted}>等待回答</text> : null}
+        {!pending ? <text fg={interactionStatusColor(interaction.status)}>{interactionStatusLabel(interaction.status)}</text> : null}
       </box>
-    )
-  }
+    </box>
+  )
+}
 
-  return null
+/** 为同一 run 重复出现的 provider tool ID 生成稳定的渲染和展开键。 */
+function toolTimelineKey(tool: ToolCard): string {
+  return ["tool", tool.runId, tool.id].join(":")
+}
+
+/** 为三类时间线事件提供不会跨 run 冲突的 React key。 */
+function timelineItemKey(item: TimelineItem): string {
+  if (item.type === "message") return ["message", item.message.id].join(":")
+  if (item.type === "tool") return toolTimelineKey(item.tool)
+  return ["interaction", item.interaction.runId, item.interaction.id].join(":")
+}
+
+/** 将已落定的交互状态压缩为简短、可扫描的历史标签。 */
+function interactionStatusLabel(status: InteractionCard["status"]): string {
+  if (status === "approved") return "已允许"
+  if (status === "rejected") return "已拒绝"
+  if (status === "answered") return "已回答"
+  if (status === "cancelled") return "未完成"
+  return "已恢复执行"
+}
+
+/** 拒绝和取消保留警示色，其余处理结果按成功状态展示。 */
+function interactionStatusColor(status: InteractionCard["status"]): string {
+  if (status === "rejected" || status === "cancelled") return tuiTheme.warning
+  return tuiTheme.success
 }
 
 /** 会话 composer 上方的实时模型和运行状态行。 */
@@ -346,13 +396,13 @@ function SessionRuntimeLine(props: { runtime: TuiRuntime; state: TuiState }) {
 }
 
 /** 渲染统一左轨 composer、命令菜单和运行时元信息。 */
-export function Composer(props: Pick<SharedViewProps, "runtime" | "state" | "terminalWidth" | "inputRef" | "value" | "onInput" | "onComposerKeyDown" | "onSubmit" | "commandMenu" | "onSelectCommand" | "onHoverCommand"> & {
+export function Composer(props: Pick<SharedViewProps, "runtime" | "state" | "terminalWidth" | "inputRef" | "value" | "onInput" | "onComposerKeyDown" | "onSubmit" | "commandMenu" | "commandOptions" | "onSelectCommand" | "onHoverCommand" | "selectedSkill" | "skillPickerVisible" | "onClearSelectedSkill"> & {
   variant: "home" | "session"
   commandMenuPlacement: "above" | "inline-below"
 }) {
   const active = Boolean(props.state.activeRun)
   const awaitingQuestion = Boolean(props.state.pendingQuestion)
-  const options = findSlashCommands(props.value)
+  const options = props.commandOptions
   const placeholder = awaitingQuestion
     ? "输入你的回答后按 Enter"
     : active
@@ -390,11 +440,19 @@ export function Composer(props: Pick<SharedViewProps, "runtime" | "state" | "ter
             minHeight={1}
             maxHeight={6}
             keyBindings={COMPOSER_KEY_BINDINGS}
-            focused={!active || awaitingQuestion}
+            focused={(!active || awaitingQuestion) && !props.skillPickerVisible}
             onContentChange={() => props.onInput(props.inputRef.current?.plainText ?? "")}
             onKeyDown={props.onComposerKeyDown}
             onSubmit={props.onSubmit}
           />
+          {props.selectedSkill ? (
+            <box paddingTop={1} flexDirection="row" gap={1}>
+              <text fg={tuiTheme.primary}>Skill</text>
+              <text fg={tuiTheme.text}>{props.selectedSkill.id}</text>
+              <text fg={tuiTheme.muted}>{props.selectedSkill.argumentHint ?? "下一条消息使用"}</text>
+              <text fg={tuiTheme.muted} onMouseUp={props.onClearSelectedSkill}>×</text>
+            </box>
+          ) : null}
           <RuntimeMeta runtime={props.runtime} variant={props.variant} terminalWidth={props.terminalWidth} />
         </box>
       </box>
@@ -405,9 +463,9 @@ export function Composer(props: Pick<SharedViewProps, "runtime" | "state" | "ter
 
 /** 渲染可筛选的 Slash 命令候选列表，并共享键盘与鼠标选择回调。 */
 function CommandMenu(props: {
-  options: readonly SlashCommandDefinition[]
+  options: readonly CommandMenuItem[]
   selectedIndex: number
-  onSelect: (command: SlashCommandDefinition) => void
+  onSelect: (command: CommandMenuItem) => void
   onHover: (index: number) => void
   placement: "above" | "inline-below"
 }) {
@@ -420,26 +478,135 @@ function CommandMenu(props: {
       customBorderChars={PROMPT_BORDER}
     >
       <box backgroundColor={tuiTheme.menu} paddingTop={1} paddingBottom={1}>
-        {props.options.length ? props.options.map((command, index) => {
+        {props.options.length ? props.options.map((item, index) => {
           const selected = index === props.selectedIndex
           return (
             <box
-              key={command.name}
+              key={item.kind === "command" ? item.command.name : item.skill.id}
               backgroundColor={selected ? tuiTheme.primarySoft : tuiTheme.menu}
               paddingLeft={2}
               paddingRight={2}
               flexDirection="row"
               justifyContent="space-between"
               onMouseOver={() => props.onHover(index)}
-              onMouseUp={() => props.onSelect(command)}
+              onMouseUp={() => props.onSelect(item)}
             >
-              <text fg={selected ? tuiTheme.text : tuiTheme.primary}>/{command.name}</text>
-              <text fg={selected ? tuiTheme.text : tuiTheme.muted}>{command.description}</text>
+              <text fg={selected ? tuiTheme.text : tuiTheme.primary}>{commandMenuItemLabel(item)}</text>
+              <text fg={selected ? tuiTheme.text : tuiTheme.muted}>{shorten(commandMenuItemDescription(item), 54)}</text>
             </box>
           )
         }) : (
           <box paddingLeft={2} paddingRight={2}>
             <text fg={tuiTheme.muted}>没有匹配的命令</text>
+          </box>
+        )}
+      </box>
+    </box>
+  )
+}
+
+/** 叠在会话之上的 Skill 浮层调色板；正文仍由用户的下一条消息按需触发。 */
+export function SkillPicker(props: {
+  visible: boolean
+  loading: boolean
+  error?: string
+  skills: readonly SkillMenuItem[]
+  query: string
+  selectedIndex: number
+  terminalWidth: number
+  terminalHeight: number
+  searchRef: RefObject<TextareaRenderable | null>
+  onSearch: (query: string) => void
+  onSelect: (skill: SkillMenuItem) => void
+  onHover: (index: number) => void
+}) {
+  useEffect(() => {
+    if (props.visible) props.searchRef.current?.focus()
+  }, [props.searchRef, props.visible])
+  if (!props.visible) return null
+  const compact = props.terminalWidth < 64 || props.terminalHeight < 19
+  const width = compact
+    ? Math.max(36, props.terminalWidth - 4)
+    : Math.max(60, Math.min(108, Math.floor(props.terminalWidth * 0.76)))
+  const maxRows = compact
+    ? Math.max(3, Math.min(6, props.terminalHeight - 10))
+    : Math.max(5, Math.min(12, props.terminalHeight - 14))
+  const rows = props.loading || props.error
+    ? 1
+    : Math.max(1, Math.min(maxRows, props.skills.length))
+  const idWidth = compact
+    ? Math.max(18, width - 6)
+    : Math.max(24, Math.min(34, Math.floor(width * 0.34)))
+  const selectedIndex = Math.min(props.selectedIndex, Math.max(0, props.skills.length - 1))
+  const skillRows = props.skills.map((skill, index) => {
+    const selected = index === selectedIndex
+    return (
+      <box
+        key={skill.id}
+        backgroundColor={selected ? tuiTheme.pickerActive : tuiTheme.menu}
+        height={1}
+        paddingLeft={3}
+        paddingRight={3}
+        flexDirection="row"
+        gap={2}
+        onMouseOver={() => props.onHover(index)}
+        onMouseUp={() => props.onSelect(skill)}
+      >
+        <text width={idWidth} fg={selected ? tuiTheme.background : tuiTheme.primary} wrapMode="none" overflow="hidden">{shorten(skill.id, idWidth)}</text>
+        {!compact ? <text flexGrow={1} fg={selected ? tuiTheme.background : tuiTheme.muted} wrapMode="none" overflow="hidden">{shorten(skill.description, Math.max(18, width - idWidth - 10))}</text> : null}
+      </box>
+    )
+  })
+
+  return (
+    <box position="absolute" top={0} left={0} width="100%" height="100%" zIndex={100} alignItems="center" justifyContent="flex-start" paddingTop={compact ? 1 : Math.max(2, Math.floor(props.terminalHeight / 4))} paddingLeft={2} paddingRight={2}>
+      <box width={width} maxWidth="100%" backgroundColor={tuiTheme.menu} flexDirection="column" zIndex={1}>
+        <box paddingLeft={4} paddingRight={4} paddingTop={2} paddingBottom={1} flexDirection="column">
+          <box flexDirection="row" justifyContent="space-between">
+            <text fg={tuiTheme.text}><strong>Skills</strong></text>
+            <text fg={tuiTheme.muted}>esc</text>
+          </box>
+          <box marginTop={1}>
+            <textarea
+              id="skill-search"
+              ref={props.searchRef}
+              placeholder="搜索 Skills..."
+              placeholderColor={tuiTheme.muted}
+              textColor={tuiTheme.text}
+              focusedTextColor={tuiTheme.text}
+              backgroundColor={tuiTheme.menu}
+              focusedBackgroundColor={tuiTheme.menu}
+              cursorColor={tuiTheme.primary}
+              minHeight={1}
+              maxHeight={1}
+              keyBindings={SKILL_SEARCH_KEY_BINDINGS}
+              focused
+              onContentChange={() => props.onSearch(props.searchRef.current?.plainText ?? "")}
+              onSubmit={() => {
+                const selected = props.skills[selectedIndex]
+                if (selected) props.onSelect(selected)
+              }}
+            />
+          </box>
+        </box>
+        <box paddingLeft={4} paddingRight={4} paddingTop={1} paddingBottom={1}>
+          <text fg={tuiTheme.primary}><strong>Skills</strong></text>
+        </box>
+        {props.loading ? (
+          <box height={rows} paddingLeft={4} paddingRight={4} paddingBottom={2}>
+            <text fg={tuiTheme.muted}>正在读取 Skill catalog…</text>
+          </box>
+        ) : props.error ? (
+          <box height={rows} paddingLeft={4} paddingRight={4} paddingBottom={2}>
+            <text fg={tuiTheme.danger}>{shorten(props.error, width - 8)}</text>
+          </box>
+        ) : props.skills.length ? (
+          props.skills.length > maxRows ? (
+            <scrollbox height={rows} paddingLeft={1} paddingRight={1} paddingBottom={2} viewportOptions={{ paddingRight: 1 }}>{skillRows}</scrollbox>
+          ) : <box flexDirection="column" paddingLeft={1} paddingRight={1} paddingBottom={2}>{skillRows}</box>
+        ) : (
+          <box paddingLeft={4} paddingRight={4} paddingBottom={2}>
+            <text fg={tuiTheme.muted}>没有匹配的 Skill</text>
           </box>
         )}
       </box>
@@ -593,4 +760,11 @@ const COMPOSER_KEY_BINDINGS: Array<{ name: string; shift?: boolean; action: "sub
   { name: "linefeed", action: "submit" },
   { name: "return", shift: true, action: "newline" },
   { name: "kpenter", shift: true, action: "newline" },
+]
+
+/** Skill 搜索是单行选择控件；Enter 选中当前项，不能继承 textarea 的默认换行。 */
+const SKILL_SEARCH_KEY_BINDINGS: Array<{ name: string; action: "submit" }> = [
+  { name: "return", action: "submit" },
+  { name: "kpenter", action: "submit" },
+  { name: "linefeed", action: "submit" },
 ]

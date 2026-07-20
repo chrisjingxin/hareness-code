@@ -6,6 +6,8 @@ type KeyLike = {
 }
 
 export type ShortcutContext = {
+  skillPickerVisible?: boolean
+  skillOptionCount?: number
   commandMenuVisible: boolean
   commandOptionCount: number
   activeRun: boolean
@@ -19,14 +21,28 @@ export type ShortcutAction =
   | "command-next"
   | "command-select"
   | "command-block"
+  | "close-skill-picker"
+  | "skill-previous"
+  | "skill-next"
+  | "skill-select"
+  | "skill-block"
   | "command-open"
   | "clear-draft"
   | "cancel-run"
   | "exit"
+  | "clear-selected-skill"
   | "toggle-tool-details"
 
 /** 快捷键先处理临时菜单，再处理运行态，避免输入控件吞掉 Ctrl+C 与 Esc。 */
 export function resolveShortcut(key: KeyLike, context: ShortcutContext): ShortcutAction {
+  if (context.skillPickerVisible) {
+    if (key.name === "escape") return "close-skill-picker"
+    if (key.name === "up" || (key.ctrl && key.name === "p")) return "skill-previous"
+    if (key.name === "down" || (key.ctrl && key.name === "n")) return "skill-next"
+    if (key.name === "return" || key.name === "kpenter" || key.name === "tab") {
+      return (context.skillOptionCount ?? 0) > 0 ? "skill-select" : "skill-block"
+    }
+  }
   if (context.commandMenuVisible) {
     if (key.name === "escape") return "close-command-menu"
     if (key.name === "up" || (key.ctrl && key.name === "p")) return "command-previous"
@@ -43,6 +59,7 @@ export function resolveShortcut(key: KeyLike, context: ShortcutContext): Shortcu
     return context.activeRun ? "cancel-run" : "exit"
   }
   if (key.name === "escape" && context.activeRun) return "cancel-run"
+  if (key.name === "escape" && !context.hasDraft) return "clear-selected-skill"
   if (key.ctrl && key.name === "o") return "toggle-tool-details"
   if (key.ctrl && key.name === "d" && !context.activeRun && !context.hasDraft) return "exit"
   return "none"

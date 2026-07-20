@@ -2110,6 +2110,7 @@ dependencies = [
     { name = "langchain-openai" },
     { name = "langgraph-checkpoint-sqlite" },
     { name = "pydantic" },
+    { name = "pyyaml" },
 ]
 
 [package.optional-dependencies]
@@ -2131,6 +2132,7 @@ requires-dist = [
     { name = "pydantic", specifier = "==2.12.5" },
     { name = "pytest", marker = "extra == 'test'", specifier = "==9.0.3" },
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = "==1.4.0" },
+    { name = "pyyaml", specifier = "==6.0.3" },
 ]
 provides-extras = ["test"]
 

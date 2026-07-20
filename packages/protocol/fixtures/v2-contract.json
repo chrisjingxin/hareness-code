@@ -21,6 +21,18 @@
       }
     },
     {
+      "kind": "event",
+      "value": {
+        "event_id": "event-skill",
+        "type": "skill.loaded",
+        "thread_id": "thread-1",
+        "run_id": "run-1",
+        "sequence": 2,
+        "timestamp_ms": 2,
+        "payload": { "skill_id": "project/review", "source": "project", "version": null, "snapshot_id": "snapshot-1" }
+      }
+    },
+    {
       "kind": "request",
       "value": {
         "request_id": "approval-1",

@@ -15,6 +15,18 @@ test("Peer 使用字符串 ID 发送请求并保留远端错误", async () => {
   expect(error).toMatchObject({ code: -32010, data: { field: "model" } })
 })
 
+test("Peer 在 run.start 中携带显式 requested_skill", async () => {
+  const { client, stdin, stdout } = peer()
+  const requests: any[] = []
+  stdin.on("data", data => {
+    const message = JSON.parse(data.toString())
+    requests.push(message)
+    stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { thread_id: "t", run_id: "r", accepted: true } }) + "\n")
+  })
+  await client.startRun("检查", "t", "r", { id: "project/review", args: "快速" })
+  expect(requests[0].params).toEqual({ message: "检查", thread_id: "t", run_id: "r", requested_skill: { id: "project/review", args: "快速" } })
+})
+
 test("Peer 处理半帧、多帧和统一 event", async () => {
   const { client, stdout } = peer()
   const events: any[] = []

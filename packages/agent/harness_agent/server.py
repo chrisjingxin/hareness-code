@@ -31,6 +31,7 @@ from harness_agent.protocol_generated import (
     RunCancelParams,
     RunStartParams,
 )
+from harness_agent.skills import SkillError, SkillRegistry
 
 logger = logging.getLogger(__name__)
 INTERACTION_TIMEOUT_MS = 300_000
@@ -54,6 +55,7 @@ class ActiveRun:
     thread_id: str
     run_id: str
     message: str
+    requested_skill: dict[str, str] | None = None
     task: asyncio.Task[None] | None = None
     sequence: int = 0
     status: str = "running"
@@ -112,6 +114,8 @@ class JsonRpcServer:
         self._config_home = config_home
         self._config: Za38Config | None = None
         self._startup_error: str | None = None
+        self._skill_registry: SkillRegistry | None = None
+        self._protocol_minor = PROTOCOL_MINOR
         self._enabled_capabilities: set[str] = set()
         self._handlers = {
             "initialize": self._handle_initialize,
@@ -119,6 +123,13 @@ class JsonRpcServer:
             "run.cancel": self._handle_run_cancel,
             "config.show": self._handle_config_show,
             "config.path": self._handle_config_path,
+            "skills.list": self._handle_skills_list,
+            "skills.inspect": self._handle_skills_inspect,
+            "skills.set_enabled": self._handle_skills_set_enabled,
+            "skills.install": self._handle_skills_install,
+            "skills.update": self._handle_skills_update,
+            "skills.remove": self._handle_skills_remove,
+            "skills.market.list": self._handle_skills_market_list,
             "shutdown": self._handle_shutdown,
         }
 
@@ -189,6 +200,8 @@ class JsonRpcServer:
             result = await handler(params, request_id)
         except ValidationError as exc:
             await self.send_error(request_id, -32602, "Invalid params", exc.errors(include_url=False))
+        except SkillError as exc:
+            await self.send_error(request_id, -32602, str(exc))
         except RpcError as exc:
             await self.send_error(request_id, exc.code, exc.message, exc.data)
         except Exception as exc:  # pragma: no cover - 最后的协议隔离层。
@@ -231,7 +244,13 @@ class JsonRpcServer:
             raise RpcError(-32003, "PROTOCOL_MISMATCH", {"supported_major": PROTOCOL_MAJOR})
         min_minor = protocol.get("min_minor")
         max_minor = protocol.get("max_minor")
-        if not isinstance(min_minor, int) or not isinstance(max_minor, int) or not (min_minor <= PROTOCOL_MINOR <= max_minor):
+        if (
+            not isinstance(min_minor, int)
+            or not isinstance(max_minor, int)
+            or max_minor < 0
+            or min_minor > max_minor
+            or min_minor > PROTOCOL_MINOR
+        ):
             raise RpcError(
                 -32003,
                 "PROTOCOL_MISMATCH",
@@ -242,17 +261,21 @@ class JsonRpcServer:
             raise RpcError(-32000, "Peer is already initialized")
         if parsed.cwd is not None:
             self._workspace = Path(parsed.cwd).expanduser().resolve()
+        self._protocol_minor = min(PROTOCOL_MINOR, max_minor)
+        self._skill_registry = SkillRegistry(self._workspace, home=self._config_home)
         self._config_path = parsed.config_path
         self._load_config()
         requested = set(parsed.capabilities)
         self._enabled_capabilities = requested.intersection(SERVER_CAPABILITIES)
         self._initialized = True
         return {
-            "protocol": {"major": PROTOCOL_MAJOR, "minor": PROTOCOL_MINOR},
+            "protocol": {"major": PROTOCOL_MAJOR, "minor": self._protocol_minor},
             "server": {"name": "za38-agent", "version": __version__},
             "server_capabilities": list(SERVER_CAPABILITIES),
             "enabled_capabilities": sorted(self._enabled_capabilities),
             "agent_commands": [],
+            "skills_snapshot": self._skill_registry.snapshot(),
+            "skill_diagnostics": self._skill_registry.diagnostics[:20],
             "limits": {
                 "max_frame_bytes": MAX_FRAME_BYTES,
                 "max_tool_payload_bytes": MAX_TOOL_PAYLOAD_BYTES,
@@ -276,7 +299,20 @@ class JsonRpcServer:
         existing = self._runs.get(thread_id)
         if existing and existing.status in {"running", "interrupted"}:
             raise RpcError(-32000, f"Thread {thread_id} already has an active run")
-        run = ActiveRun(thread_id=thread_id, run_id=run_id, message=message)
+        requested_skill = None
+        if parsed.requested_skill is not None:
+            if self._skill_registry is None:
+                self._skill_registry = SkillRegistry(self._workspace, home=self._config_home)
+            skill = self._skill_registry.resolve(parsed.requested_skill.id)
+            if not skill.user_invocable:
+                raise SkillError(f'Skill "{skill.skill_id}" is not user-invocable')
+            requested_skill = {"id": skill.skill_id, "args": parsed.requested_skill.args or ""}
+        run = ActiveRun(
+            thread_id=thread_id,
+            run_id=run_id,
+            message=message,
+            requested_skill=requested_skill,
+        )
         self._runs[thread_id] = run
         await self.send_response(
             request_id, {"thread_id": thread_id, "run_id": run_id, "accepted": True}
@@ -320,6 +356,77 @@ class JsonRpcServer:
             "explicit_path": self._config_path,
         }
 
+    def _require_skills(self) -> SkillRegistry:
+        """返回初始化时建立的 Skill registry。"""
+        if self._skill_registry is None:
+            self._skill_registry = SkillRegistry(self._workspace, home=self._config_home)
+        return self._skill_registry
+
+    @staticmethod
+    def _reject_params(params: Mapping[str, Any], allowed: set[str], method: str) -> None:
+        """拒绝管理接口的未知字段，避免 CLI 拼写错误被静默忽略。"""
+        unknown = set(params) - allowed
+        if unknown:
+            raise RpcError(-32602, f"{method} contains unsupported fields: {', '.join(sorted(unknown))}")
+
+    async def _handle_skills_list(self, params: dict[str, Any], _id: str) -> dict[str, Any]:
+        """返回当前 catalog 的摘要、快照 ID 和诊断。"""
+        self._reject_params(params, {"include_disabled"}, "skills.list")
+        include_disabled = params.get("include_disabled", True)
+        if not isinstance(include_disabled, bool):
+            raise RpcError(-32602, "include_disabled must be boolean")
+        registry = self._require_skills()
+        return {
+            "snapshot": registry.snapshot(),
+            "skills": registry.list(include_disabled=include_disabled),
+            "diagnostics": registry.diagnostics[:20],
+        }
+
+    async def _handle_skills_inspect(self, params: dict[str, Any], _id: str) -> dict[str, Any]:
+        """返回一个 Skill 的安全元数据。"""
+        self._reject_params(params, {"id"}, "skills.inspect")
+        skill_id = params.get("id")
+        if not isinstance(skill_id, str) or not skill_id.strip():
+            raise RpcError(-32602, "id must be a non-empty string")
+        return self._require_skills().inspect(skill_id)
+
+    async def _handle_skills_set_enabled(self, params: dict[str, Any], _id: str) -> dict[str, Any]:
+        """保存下一次会话生效的 Skill 启停偏好。"""
+        self._reject_params(params, {"id", "enabled"}, "skills.set_enabled")
+        skill_id = params.get("id")
+        enabled = params.get("enabled")
+        if not isinstance(skill_id, str) or not skill_id.strip() or not isinstance(enabled, bool):
+            raise RpcError(-32602, "id and enabled are required")
+        return self._require_skills().set_enabled(skill_id, enabled)
+
+    async def _handle_skills_market_list(self, params: dict[str, Any], _id: str) -> list[dict[str, object]]:
+        """列出已安装的企业市场 Provider 或其 catalog。"""
+        self._reject_params(params, {"market"}, "skills.market.list")
+        market = params.get("market")
+        if market is not None and not isinstance(market, str):
+            raise RpcError(-32602, "market must be a string")
+        return await self._require_skills().marketplace_catalog(market)
+
+    async def _handle_skills_install(self, params: dict[str, Any], _id: str) -> dict[str, object]:
+        """通过企业 Provider 安装 Skill；Provider 不存在时返回明确错误。"""
+        self._reject_params(params, {"market", "name", "version"}, "skills.install")
+        market, name, version = params.get("market"), params.get("name"), params.get("version")
+        if not isinstance(market, str) or not isinstance(name, str) or (version is not None and not isinstance(version, str)):
+            raise RpcError(-32602, "market and name are required strings")
+        return await self._require_skills().install(market, name, version)
+
+    async def _handle_skills_update(self, params: dict[str, Any], _id: str) -> dict[str, object]:
+        """通过企业 Provider 更新市场 Skill。"""
+        return await self._handle_skills_install(params, _id)
+
+    async def _handle_skills_remove(self, params: dict[str, Any], _id: str) -> dict[str, object]:
+        """移除一个已安装市场 Skill。"""
+        self._reject_params(params, {"id"}, "skills.remove")
+        skill_id = params.get("id")
+        if not isinstance(skill_id, str) or not skill_id.strip():
+            raise RpcError(-32602, "id must be a non-empty string")
+        return self._require_skills().remove(skill_id)
+
     async def _handle_shutdown(self, _params: dict[str, Any], _id: str) -> dict[str, Any]:
         """停止读取循环并取消全部运行。"""
         if _params:
@@ -343,9 +450,30 @@ class JsonRpcServer:
 
     async def _execute_run(self, run: ActiveRun) -> None:
         """执行并自动恢复中断，保证每个 run 只产生一个终态。"""
-        await self._emit(run, "run.started", {"resumed": False})
+        await self._emit(
+            run,
+            "run.started",
+            {
+                "resumed": False,
+                "skills_snapshot_id": self._skill_registry.snapshot_id if self._skill_registry else None,
+            },
+        )
         resume: Any | None = None
         try:
+            if run.requested_skill is not None:
+                registry = self._require_skills()
+                loaded = registry.load(run.requested_skill["id"], run.requested_skill.get("args", ""))
+                await self._emit(
+                    run,
+                    "skill.loaded",
+                    {
+                        "skill_id": loaded.record.skill_id,
+                        "source": loaded.record.source,
+                        "version": loaded.record.version,
+                        "snapshot_id": registry.snapshot_id,
+                    },
+                )
+                run.message = f"{loaded.body}\n\nUser request:\n{run.message}".strip()
             agent = await self._ensure_agent()
             if agent is None:
                 if not self._allow_echo:
@@ -416,6 +544,7 @@ class JsonRpcServer:
             interactive="interactive.question" in self._enabled_capabilities,
             approval_mode=config.execution.approval_mode,
             execution_context=execution_context,
+            skill_registry=self._skill_registry,
         )
 
     async def _stream_agent(self, agent: Any, run: ActiveRun, *, resume: Any | None) -> Any | None:
@@ -510,16 +639,23 @@ class JsonRpcServer:
         return events
 
     def _resolve_tool_stream_id(self, run: ActiveRun, chunk: Mapping[str, Any]) -> str:
-        """用流式 index 关联缺少 id/name 的工具参数分片。"""
+        """用真实调用 ID 优先关联工具分片，并为缺失 ID 的续片保留 index 映射。"""
         index = chunk.get("index")
         raw_id = str(chunk.get("id") or "")
-        key = f"index:{index}" if index is not None else f"id:{raw_id}" if raw_id else "current"
-        tool_id = run.tool_stream_ids.get(key)
-        if tool_id is None:
-            tool_id = raw_id or f"tool-{run.run_id}-{len(run.tool_stream_ids)}"
-            run.tool_stream_ids[key] = tool_id
         if raw_id:
+            # LangChain 每轮模型响应都会从 index=0 重新编号。真实 id 到达时必须
+            # 覆盖该临时映射，否则第二轮工具会回写第一轮的卡片和执行结果。
+            tool_id = run.tool_result_ids.get(raw_id, raw_id)
             run.tool_result_ids[raw_id] = tool_id
+            run.tool_stream_ids[f"id:{raw_id}"] = tool_id
+            if index is not None:
+                run.tool_stream_ids[f"index:{index}"] = tool_id
+        else:
+            key = f"index:{index}" if index is not None else "current"
+            tool_id = run.tool_stream_ids.get(key)
+            if tool_id is None:
+                tool_id = f"tool-{run.run_id}-{len(run.tool_stream_ids)}"
+                run.tool_stream_ids[key] = tool_id
         run.last_tool_id = tool_id
         return tool_id
 

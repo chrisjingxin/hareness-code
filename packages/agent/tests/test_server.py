@@ -162,6 +162,36 @@ def test_tool_fragments_with_missing_ids_are_merged_by_index():
     assert [event_type for event_type, _ in events] == ["tool.started", "tool.delta", "tool.completed"]
 
 
+def test_tool_stream_reuses_index_for_later_calls_without_overwriting_history():
+    """每轮工具流重置 index 时，新的真实调用 ID 仍必须产生独立事件。"""
+    from types import SimpleNamespace
+
+    from harness_agent.server import ActiveRun, JsonRpcServer
+
+    server = JsonRpcServer(allow_echo=True)
+    run = ActiveRun(thread_id="thread", run_id="run", message="连续执行两次")
+    first = SimpleNamespace(content="", usage_metadata=None, tool_call_chunks=[{"index": 0, "id": "call-1", "name": "execute", "args": ""}])
+    first_result = type("ToolMessage", (), {"content": "first result", "tool_call_id": "call-1", "status": "success", "tool_call_chunks": [], "usage_metadata": None})()
+    second = SimpleNamespace(content="", usage_metadata=None, tool_call_chunks=[{"index": 0, "id": "call-2", "name": "execute", "args": ""}])
+    second_result = type("ToolMessage", (), {"content": "second result", "tool_call_id": "call-2", "status": "success", "tool_call_chunks": [], "usage_metadata": None})()
+
+    events = [
+        *server._translate_stream_event(((), "messages", (first, {})), run),
+        *server._translate_stream_event(((), "messages", (first_result, {})), run),
+        *server._translate_stream_event(((), "messages", (second, {})), run),
+        *server._translate_stream_event(((), "messages", (second_result, {})), run),
+    ]
+
+    assert [(event_type, payload["tool_call_id"]) for event_type, payload in events] == [
+        ("tool.started", "call-1"),
+        ("tool.completed", "call-1"),
+        ("tool.started", "call-2"),
+        ("tool.completed", "call-2"),
+    ]
+    assert events[1][1]["result"]["content"] == "first result"
+    assert events[3][1]["result"]["content"] == "second result"
+
+
 async def test_multiple_threads_run_concurrently_but_same_thread_is_rejected():
     """不同 thread 可并发，同一 thread 的第二个活动 run 被拒绝。"""
     from harness_agent.server import JsonRpcServer

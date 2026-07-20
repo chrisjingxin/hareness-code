@@ -72,7 +72,7 @@ test("会话渲染显示工具卡片和底部 composer", async () => {
     ...state,
     timeline: [
       state.timeline[0]!,
-      { type: "tool", tool: { id: "tool-1", runId: run.runId, name: "read_file", detail: "src/app.ts", status: "completed" } },
+      { type: "tool", tool: { id: "tool-1", runId: run.runId, name: "read_file", arguments: "{\"file_path\":\"src/app.ts\"}", output: "src/app.ts", status: "completed" } },
     ],
     activeRun: undefined,
     status: "已完成",
@@ -135,12 +135,27 @@ test("会话通过原生 Markdown renderer 隐藏标题和代码围栏标记", a
   }
 })
 
-test("审批 dock 保留选项高度并隐藏重复 Thinking", async () => {
+test("审批作为内联时间线事件保留选项高度", async () => {
   const run = { threadId: "thread-1", runId: "run-1" }
   const started = startRun(createInitialState(), run, "写入文件")
   const state: TuiState = {
     ...started,
     status: "等待工具审批",
+    timeline: [
+      started.timeline[0]!,
+      { type: "tool", tool: { id: "tool-1", runId: run.runId, name: "execute", arguments: "{\"command\":\"pwd\"}", output: "/workspace", status: "completed" } },
+      {
+        type: "interaction",
+        interaction: {
+          id: "approval-1",
+          runId: run.runId,
+          type: "approval",
+          status: "pending",
+          description: "执行 shell 命令",
+          requests: { action_requests: [{ name: "execute", args: { command: "pwd" } }] },
+        },
+      },
+    ],
     pendingApproval: {
       requestId: "approval-1",
       description: "执行 shell 命令",
@@ -157,7 +172,34 @@ test("审批 dock 保留选项高度并隐藏重复 Thinking", async () => {
     expect(frame).toContain("需要审批")
     expect(frame).toContain("允许一次")
     expect(frame).toContain("拒绝")
-    expect(frame).not.toContain("Thinking")
+    expect(frame.indexOf("execute")).toBeLessThan(frame.indexOf("需要审批"))
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("继续执行只作为历史事件之后的底部活动行", async () => {
+  const run = { threadId: "thread-2", runId: "run-2" }
+  const started = startRun(createInitialState(), run, "继续任务")
+  const state: TuiState = {
+    ...started,
+    status: "正在继续执行",
+    timeline: [
+      started.timeline[0]!,
+      { type: "tool", tool: { id: "tool-1", runId: run.runId, name: "read_file", arguments: "{\"file_path\":\"src/app.ts\"}", output: "export const value = 1", status: "completed" } },
+      { type: "interaction", interaction: { id: "approval-1", runId: run.runId, type: "approval", status: "approved", description: "读取文件" } },
+    ],
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(SessionView, viewProps(state, 100, 28)), { width: 100, height: 28 })
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("已允许")
+    expect(frame).toContain("继续执行")
+    expect(frame.indexOf("read_file")).toBeLessThan(frame.indexOf("继续执行"))
   } finally {
     await act(async () => { setup.renderer.destroy() })
   }

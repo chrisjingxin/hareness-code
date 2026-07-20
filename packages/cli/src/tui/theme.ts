@@ -1,10 +1,11 @@
-/** Harness Code 终端主题：暖黑画布、单一蓝色品牌强调和离线语法 scope。 */
+/** Harness Code 终端主题：暖黑画布、蓝色品牌强调、暖橙选择态和离线语法 scope。 */
 
 import { SyntaxStyle } from "@opentui/core"
 
 /** 暖黑画布与 za38 蓝色强调；代码语义色仅用于帮助阅读模型输出。 */
 export const tuiTheme = {
   background: "#090a0c",
+  overlay: "#0b0c0f",
   panel: "#121316",
   composer: "#1b1c20",
   toolSurface: "#141518",
@@ -17,6 +18,7 @@ export const tuiTheme = {
   subtle: "#575d68",
   primary: "#70a4ff",
   primarySoft: "#456da8",
+  pickerActive: "#e97817",
   star: "#46516a",
   trail: "#7fb1ff",
   success: "#73b99a",

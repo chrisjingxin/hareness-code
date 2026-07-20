@@ -52,8 +52,9 @@ export type JsonRpcResponse = { jsonrpc: "2.0"; result?: unknown; error?: JsonRp
 export type JsonRpcMessage = JsonRpcRequest | JsonRpcNotification | JsonRpcResponse
 
 export interface InitializeParams { protocol: { major: ${meta.major}; min_minor: number; max_minor: number }; client: { name: string; version: string }; capabilities: string[]; cwd?: string; config_path?: string }
-export interface InitializeResult { protocol: { major: ${meta.major}; minor: number }; server: { name: string; version: string }; server_capabilities: string[]; enabled_capabilities: string[]; agent_commands: Array<{ name: string; description: string; aliases: string[] }>; limits: { max_frame_bytes: number; max_tool_payload_bytes: number }; config_summary: JsonObject | null; startup_error: { code: string; message: string } | null }
-export interface RunStartParams { message: string; thread_id?: string; run_id?: string }
+export interface InitializeResult { protocol: { major: ${meta.major}; minor: number }; server: { name: string; version: string }; server_capabilities: string[]; enabled_capabilities: string[]; agent_commands: Array<{ name: string; description: string; aliases: string[] }>; skills_snapshot: { id: string; count: number }; skill_diagnostics: string[]; limits: { max_frame_bytes: number; max_tool_payload_bytes: number }; config_summary: JsonObject | null; startup_error: { code: string; message: string } | null }
+export interface RequestedSkill { id: string; args?: string }
+export interface RunStartParams { message: string; thread_id?: string; run_id?: string; requested_skill?: RequestedSkill }
 export interface RunStartResult { thread_id: string; run_id: string; accepted: boolean }
 export interface RunCancelParams { thread_id: string; run_id: string }
 export interface RunCancelResult { cancelled: boolean; run_id: string }
@@ -108,10 +109,15 @@ class InitializeParams(StrictModel):
     cwd: str | None = None
     config_path: str | None = None
 
+class RequestedSkill(StrictModel):
+    id: str = Field(min_length=1)
+    args: str = ""
+
 class RunStartParams(StrictModel):
     message: str = Field(min_length=1)
     thread_id: str | None = None
     run_id: str | None = None
+    requested_skill: RequestedSkill | None = None
 
 class RunCancelParams(StrictModel):
     thread_id: str = Field(min_length=1)
@@ -131,7 +137,7 @@ class EventEnvelope(StrictModel):
     @model_validator(mode="after")
     def validate_known_payload(self) -> "EventEnvelope":
         fields = {
-            "run.started": {"resumed"}, "content.delta": {"text"}, "thinking.delta": {"text"},
+            "run.started": {"resumed", "skills_snapshot_id"}, "skill.loaded": {"skill_id", "source", "version", "snapshot_id"}, "content.delta": {"text"}, "thinking.delta": {"text"},
             "tool.started": {"tool_call_id", "name"},
             "tool.delta": {"tool_call_id", "arguments_delta", "output_delta", "truncated", "original_bytes"},
             "tool.completed": {"tool_call_id", "result"},
@@ -142,6 +148,12 @@ class EventEnvelope(StrictModel):
         allowed = fields.get(self.type)
         if allowed is not None and set(self.payload) - allowed:
             raise ValueError(f"unexpected payload fields for {self.type}")
+        if self.type == "skill.loaded" and (
+            not isinstance(self.payload.get("skill_id"), str)
+            or not isinstance(self.payload.get("source"), str)
+            or not isinstance(self.payload.get("snapshot_id"), str)
+        ):
+            raise ValueError("invalid skill.loaded payload")
         return self
 
 class InteractionRequestEnvelope(StrictModel):

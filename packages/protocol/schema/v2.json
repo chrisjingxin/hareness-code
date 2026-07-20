@@ -4,13 +4,13 @@
   "title": "za38 protocol v2",
   "x-protocol": {
     "major": 2,
-    "minor": 0,
+    "minor": 1,
     "max_frame_bytes": 8388608,
     "max_tool_payload_bytes": 1048576,
-    "client_methods": ["initialize", "run.start", "run.cancel", "config.show", "config.path", "shutdown"],
+    "client_methods": ["initialize", "run.start", "run.cancel", "config.show", "config.path", "skills.list", "skills.inspect", "skills.set_enabled", "skills.install", "skills.update", "skills.remove", "skills.market.list", "shutdown"],
     "server_methods": ["event", "request"],
-    "server_capabilities": ["run.cancel", "run.multithread", "interactive.approval", "interactive.question", "config.read"],
-    "event_types": ["run.started", "content.delta", "thinking.delta", "tool.started", "tool.delta", "tool.completed", "interaction.resolved", "run.completed", "run.cancelled", "run.failed"]
+    "server_capabilities": ["run.cancel", "run.multithread", "interactive.approval", "interactive.question", "config.read", "skills.read", "skills.manage"],
+    "event_types": ["run.started", "skill.loaded", "content.delta", "thinking.delta", "tool.started", "tool.delta", "tool.completed", "interaction.resolved", "run.completed", "run.cancelled", "run.failed"]
   },
   "oneOf": [
     { "$ref": "#/$defs/jsonRpcRequest" },

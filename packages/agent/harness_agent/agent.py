@@ -1,8 +1,4 @@
-"""za38 agent 内核 —— 参照 dcode create_cli_agent 裁剪版。
-
-启用 deepagents 内置编码工具 + JS 解释器 + ask_user + memory + skills + HITL。
-裁剪：沙箱、目标/评分、远程异步子 agent、web_search、fetch_url。
-"""
+"""za38 agent 内核：组装 DeepAgents 工具、中间件、Skill 和审批策略。"""
 from __future__ import annotations
 
 import logging
@@ -137,6 +133,7 @@ def create_harness_agent(
     cwd: str | None = None,
     workdir: str | None = None,
     execution_context: Any | None = None,
+    skill_registry: Any | None = None,
 ) -> Any:
     """创建 za38 编码 agent。
 
@@ -157,6 +154,7 @@ def create_harness_agent(
         cwd: 工作目录。
         workdir: 工作目录别名（优先于 cwd）。
         execution_context: 服务端已创建的本机或远端工具执行上下文。
+        skill_registry: 服务端建立的固定 Skill catalog；未传入时由本机调用方创建。
 
     Returns:
         编译后的 LangGraph agent（CompiledStateGraph）。
@@ -183,6 +181,13 @@ def create_harness_agent(
     # 服务端会同时传 cwd 与 ExecutionContext；库调用方可能只传后者。守卫必须
     # 始终以本机 backend 实际绑定的工作区为准，不能退化为当前进程目录。
     local_workspace = prompt_workspace if not sandboxed else root
+    prompt = _with_execution_context(
+        system_prompt or _load_system_prompt(),
+        workspace=prompt_workspace,
+        sandboxed=sandboxed,
+        provider=sandbox_provider,
+        approval_mode=approval_mode,
+    )
 
     agent_middleware: list[Any] = []
     if approval_mode == "plan":
@@ -219,23 +224,14 @@ def create_harness_agent(
         # 预置受信任资源后再单独接入，避免错误地把本机路径暴露给 Agent。
         logger.info("Memory middleware is disabled in remote sandbox mode")
 
-    # 3. 技能目录同样只传入已存在路径，避免空安装环境阻断主 Agent 启动。
+    # 3. Skill 目录在服务端启动时只扫描一次，完整正文通过工具按需读取。
+    skill_tools: list[Any] = []
     if enable_skills and not sandboxed:
-        from deepagents.middleware.skills import SkillsMiddleware
+        from harness_agent.skills import SkillRegistry, make_skill_tools
 
-        skill_sources = [
-            path
-            for path in (
-                Path(__file__).parent / "built_in_skills",
-                Path.home() / ".harness" / "skills",
-                Path(root).resolve() / ".harness" / "skills",
-            )
-            if path.is_dir()
-        ]
-        if skill_sources:
-            agent_middleware.append(
-                SkillsMiddleware(backend=backend, sources=[str(path) for path in skill_sources])
-            )
+        registry = skill_registry or SkillRegistry(local_workspace)
+        skill_tools = make_skill_tools(registry)
+        prompt = f"{prompt}\n\n{registry.system_prompt_fragment()}"
     elif enable_skills:
         logger.info("Skills middleware is disabled in remote sandbox mode")
 
@@ -271,14 +267,7 @@ def create_harness_agent(
     from deepagents.middleware.summarization import create_summarization_tool_middleware
     agent_middleware.append(create_summarization_tool_middleware(resolved_model, backend))
 
-    prompt = _with_execution_context(
-        system_prompt or _load_system_prompt(),
-        workspace=prompt_workspace,
-        sandboxed=sandboxed,
-        provider=sandbox_provider,
-        approval_mode=approval_mode,
-    )
-    all_tools = list(tools) if tools else []
+    all_tools = [*(list(tools) if tools else []), *skill_tools]
 
     return create_deep_agent(
         model=resolved_model,

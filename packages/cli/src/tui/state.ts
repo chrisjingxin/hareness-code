@@ -16,8 +16,20 @@ export type ToolCard = {
   id: string
   runId: string
   name: string
-  detail: string
+  arguments: string
+  output: string
   status: "running" | "completed" | "failed"
+}
+
+export type InteractionCard = {
+  id: string
+  runId: string
+  type: "approval" | "question"
+  status: "pending" | "approved" | "rejected" | "answered" | "resolved" | "cancelled"
+  description?: string
+  requests?: unknown
+  question?: string
+  options?: Array<{ name: string; value: string }>
 }
 
 /**
@@ -27,6 +39,7 @@ export type ToolCard = {
 export type TimelineItem =
   | { type: "message"; message: ConversationMessage }
   | { type: "tool"; tool: ToolCard }
+  | { type: "interaction"; interaction: InteractionCard }
 
 export type ActiveRun = {
   threadId: string
@@ -95,7 +108,6 @@ export function startRun(state: TuiState, run: ActiveRun, prompt: string): TuiSt
     timeline: [
       ...state.timeline,
       { type: "message", message: { id: `user-${run.runId}`, role: "user", content: prompt, runId: run.runId } },
-      { type: "message", message: { id: `assistant-${run.runId}`, role: "assistant", content: "", runId: run.runId, streaming: true } },
     ],
   }
 }
@@ -118,9 +130,17 @@ export function markCancelling(state: TuiState): TuiState {
   return { ...state, status: "正在取消" }
 }
 
-/** 清除审批/提问中断并把运行标记为继续执行。 */
-export function clearPendingInteraction(state: TuiState): TuiState {
-  return { ...state, pendingApproval: undefined, pendingQuestion: undefined, status: "正在继续执行" }
+/** 记录用户对内联交互的选择，并让尾部活动行在恢复前接管当前状态。 */
+export function clearPendingInteraction(state: TuiState, outcome: "approved" | "rejected" | "answered"): TuiState {
+  const requestId = state.pendingApproval?.requestId ?? state.pendingQuestion?.requestId
+  const runId = state.activeRun?.runId
+  return {
+    ...state,
+    pendingApproval: undefined,
+    pendingQuestion: undefined,
+    status: "正在继续执行",
+    timeline: requestId && runId ? updateInteraction(state.timeline, runId, requestId, outcome) : state.timeline,
+  }
 }
 
 /** 用失败终态结束指定运行，并把错误文本追加到时间线末尾。 */
@@ -133,7 +153,7 @@ export function markRunFailed(state: TuiState, runId: string, message: string): 
     pendingQuestion: undefined,
     status: "执行失败",
     lastRun: { runId, outcome: "failed" },
-    timeline: finishAssistant(state.timeline, runId, `\n错误：${message}`),
+    timeline: finishAssistant(settlePendingInteractions(state.timeline, runId), runId, `\n错误：${message}`),
   }
 }
 
@@ -144,20 +164,44 @@ export function applyInteractionRequest(state: TuiState, request: InteractionReq
   const next = acceptSequence(state, request.thread_id, request.run_id, request.sequence)
   if (!next) return state
   if (request.type === "approval") {
+    const approval: PendingApproval = {
+      requestId: request.request_id,
+      description: stringValue(request.payload.description, "有操作需要你的审批"),
+      requests: request.payload.requests,
+    }
     return {
       ...next,
       status: "等待工具审批",
-      pendingApproval: {
-        requestId: request.request_id,
-        description: stringValue(request.payload.description, "有操作需要你的审批"),
-        requests: request.payload.requests,
-      },
+      pendingApproval: approval,
+      timeline: [...next.timeline, {
+        type: "interaction",
+        interaction: {
+          id: approval.requestId,
+          runId: request.run_id,
+          type: "approval",
+          status: "pending",
+          description: approval.description,
+          requests: approval.requests,
+        },
+      }],
     }
   }
+  const question = questionRequest(request)
   return {
     ...next,
     status: "等待你的回答",
-    pendingQuestion: questionRequest(request),
+    pendingQuestion: question,
+    timeline: [...next.timeline, {
+      type: "interaction",
+      interaction: {
+        id: question.requestId,
+        runId: request.run_id,
+        type: "question",
+        status: "pending",
+        question: question.question,
+        options: question.options,
+      },
+    }],
   }
 }
 
@@ -173,6 +217,23 @@ export function applyAgentEvent(state: TuiState, event: EventEnvelope): TuiState
   switch (event.type) {
     case "run.started":
       return { ...next, status: payload.resumed ? "已恢复执行" : "正在思考" }
+    case "skill.loaded":
+      return {
+        ...next,
+        status: "正在思考",
+        timeline: [
+          ...next.timeline,
+          {
+            type: "message",
+            message: {
+              id: `skill-${runId}-${event.sequence}`,
+              role: "system",
+              content: `已加载 Skill：${stringValue(payload.skill_id, "unknown")}`,
+              runId,
+            },
+          },
+        ],
+      }
     case "content.delta":
       return typeof payload.text === "string"
         ? { ...next, timeline: appendAssistantDelta(next.timeline, runId, payload.text), status: "正在生成" }
@@ -187,15 +248,13 @@ export function applyAgentEvent(state: TuiState, event: EventEnvelope): TuiState
           id: stringValue(payload.tool_call_id, `tool-${runId}`),
           runId,
           name: stringValue(payload.name, "tool"),
-          detail: "",
+          arguments: "",
+          output: "",
           status: "running",
         }),
       }
     case "tool.delta":
-      return {
-        ...next,
-        timeline: updateToolDetail(next.timeline, stringValue(payload.tool_call_id, `tool-${runId}`), stringValue(payload.arguments_delta ?? payload.output_delta, "")),
-      }
+      return applyToolDelta(next, runId, payload)
     case "tool.completed":
       {
         const result = objectRecord(payload.result)
@@ -205,8 +264,9 @@ export function applyAgentEvent(state: TuiState, event: EventEnvelope): TuiState
           timeline: updateTool(next.timeline, {
             id: toolId,
             runId,
-            name: toolName(next.timeline, toolId),
-            detail: stringValue(result.content, ""),
+            name: toolName(next.timeline, runId, toolId),
+            arguments: toolArguments(next.timeline, runId, toolId),
+            output: stringValue(result.content, ""),
             status: result.is_error === true ? "failed" : "completed",
           }),
         }
@@ -217,6 +277,7 @@ export function applyAgentEvent(state: TuiState, event: EventEnvelope): TuiState
         pendingApproval: undefined,
         pendingQuestion: undefined,
         status: "正在继续执行",
+        timeline: resolveInteraction(next.timeline, runId, stringValue(payload.request_id, "")),
       }
     case "run.completed":
       return {
@@ -231,7 +292,7 @@ export function applyAgentEvent(state: TuiState, event: EventEnvelope): TuiState
           durationMs: numberValue(payload.duration_ms),
           usage: usageValue(payload.usage),
         },
-        timeline: finishAssistant(next.timeline, runId),
+        timeline: finishAssistant(settlePendingInteractions(next.timeline, runId), runId),
       }
     case "run.cancelled":
       return {
@@ -241,7 +302,7 @@ export function applyAgentEvent(state: TuiState, event: EventEnvelope): TuiState
         pendingQuestion: undefined,
         status: "已取消",
         lastRun: { runId, outcome: "cancelled" },
-        timeline: finishAssistant(next.timeline, runId, `\n已取消：${stringValue(payload.reason, "用户取消")}`),
+        timeline: finishAssistant(settlePendingInteractions(next.timeline, runId), runId, `\n已取消：${stringValue(payload.reason, "用户取消")}`),
       }
     case "run.failed":
       return markRunFailed(next, runId, stringValue(objectRecord(payload.error).message, "Agent 运行失败"))
@@ -309,28 +370,106 @@ function finishAssistant(timeline: TimelineItem[], runId: string, suffix = ""): 
 
 /** 插入或合并工具卡片，保持其第一次出现时的时间线位置。 */
 function updateTool(timeline: TimelineItem[], tool: ToolCard): TimelineItem[] {
-  const index = timeline.findIndex(item => item.type === "tool" && item.tool.id === tool.id)
+  const index = findToolIndex(timeline, tool.runId, tool.id)
   if (index < 0) return [...timeline, { type: "tool", tool }]
   return timeline.map((item, itemIndex) => (
     itemIndex === index && item.type === "tool" ? { ...item, tool: { ...item.tool, ...tool } } : item
   ))
 }
 
-/** 将工具输出 chunk 追加到对应工具；缺失 started 事件时创建兜底卡片。 */
-function updateToolDetail(timeline: TimelineItem[], toolId: string, chunk: string): TimelineItem[] {
-  const index = timeline.findIndex(item => item.type === "tool" && item.tool.id === toolId)
-  if (index < 0) return [...timeline, { type: "tool", tool: { id: toolId, runId: "", name: "tool", detail: chunk, status: "running" } }]
+/** 把协议中的参数和输出分片分别附加到对应调用，禁止在同一预览中混写。 */
+function applyToolDelta(state: TuiState, runId: string, payload: Record<string, unknown>): TuiState {
+  const toolId = stringValue(payload.tool_call_id, `tool-${runId}`)
+  let timeline = state.timeline
+  if (typeof payload.arguments_delta === "string") {
+    timeline = updateToolStream(timeline, runId, toolId, "arguments", payload.arguments_delta)
+  }
+  if (typeof payload.output_delta === "string") {
+    timeline = updateToolStream(timeline, runId, toolId, "output", payload.output_delta)
+  }
+  return timeline === state.timeline ? state : { ...state, timeline }
+}
+
+/** 将单类工具流内容追加到对应调用；缺失 started 事件时创建兜底项。 */
+function updateToolStream(
+  timeline: TimelineItem[],
+  runId: string,
+  toolId: string,
+  field: "arguments" | "output",
+  chunk: string,
+): TimelineItem[] {
+  const index = findToolIndex(timeline, runId, toolId)
+  if (index < 0) {
+    return [...timeline, {
+      type: "tool",
+      tool: {
+        id: toolId,
+        runId,
+        name: "tool",
+        arguments: field === "arguments" ? chunk : "",
+        output: field === "output" ? chunk : "",
+        status: "running",
+      },
+    }]
+  }
   return timeline.map((item, itemIndex) => (
-    itemIndex === index && item.type === "tool" ? { ...item, tool: { ...item.tool, detail: item.tool.detail + chunk } } : item
+    itemIndex === index && item.type === "tool" ? { ...item, tool: { ...item.tool, [field]: item.tool[field] + chunk } } : item
   ))
 }
 
-/** 从时间线读取工具名称，完成事件缺少名称时使用安全回退。 */
-function toolName(timeline: TimelineItem[], toolId: string): string {
-  const item = timeline.find((entry): entry is Extract<TimelineItem, { type: "tool" }> => (
-    entry.type === "tool" && entry.tool.id === toolId
+/** 返回当前 run 内的调用索引，避免不同运行的相同 provider ID 互相覆盖。 */
+function findToolIndex(timeline: TimelineItem[], runId: string, toolId: string): number {
+  return timeline.findLastIndex(item => item.type === "tool" && item.tool.runId === runId && item.tool.id === toolId)
+}
+
+/** 从当前运行时间线读取工具名称，完成事件缺少名称时使用安全回退。 */
+function toolName(timeline: TimelineItem[], runId: string, toolId: string): string {
+  const item = timeline.findLast((entry): entry is Extract<TimelineItem, { type: "tool" }> => (
+    entry.type === "tool" && entry.tool.runId === runId && entry.tool.id === toolId
   ))
   return item?.tool.name ?? "tool"
+}
+
+/** 从当前运行时间线读取已流入的参数，完成事件只更新结果而不能抹去调用内容。 */
+function toolArguments(timeline: TimelineItem[], runId: string, toolId: string): string {
+  const item = timeline.findLast((entry): entry is Extract<TimelineItem, { type: "tool" }> => (
+    entry.type === "tool" && entry.tool.runId === runId && entry.tool.id === toolId
+  ))
+  return item?.tool.arguments ?? ""
+}
+
+/** 将用户处理过的审批或问题保留在其原始位置，不再把它从会话历史中移除。 */
+function updateInteraction(
+  timeline: TimelineItem[],
+  runId: string,
+  requestId: string,
+  status: Extract<InteractionCard["status"], "approved" | "rejected" | "answered">,
+): TimelineItem[] {
+  const index = timeline.findLastIndex(item => item.type === "interaction" && item.interaction.runId === runId && item.interaction.id === requestId)
+  if (index < 0) return timeline
+  return timeline.map((item, itemIndex) => (
+    itemIndex === index && item.type === "interaction" ? { ...item, interaction: { ...item.interaction, status } } : item
+  ))
+}
+
+/** 服务器确认恢复时，保留用户已作出的决定；无本地决定时以已解决状态收束。 */
+function resolveInteraction(timeline: TimelineItem[], runId: string, requestId: string): TimelineItem[] {
+  const index = timeline.findLastIndex(item => item.type === "interaction" && item.interaction.runId === runId && item.interaction.id === requestId)
+  if (index < 0) return timeline
+  return timeline.map((item, itemIndex) => (
+    itemIndex === index && item.type === "interaction" && item.interaction.status === "pending"
+      ? { ...item, interaction: { ...item.interaction, status: "resolved" } }
+      : item
+  ))
+}
+
+/** 取消或失败时收束尚未完成的内联交互，防止历史看起来仍在等待输入。 */
+function settlePendingInteractions(timeline: TimelineItem[], runId: string): TimelineItem[] {
+  return timeline.map(item => (
+    item.type === "interaction" && item.interaction.runId === runId && item.interaction.status === "pending"
+      ? { ...item, interaction: { ...item.interaction, status: "cancelled" } }
+      : item
+  ))
 }
 
 /** 从不可信事件 payload 读取字符串字段。 */
