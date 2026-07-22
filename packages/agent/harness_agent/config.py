@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import os
+import stat
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Mapping
 
@@ -26,11 +27,13 @@ class ConfigError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class ModelSettings:
-    """由 v1 TOML 和环境变量解析出的非秘密 OpenAI 兼容模型配置。"""
+    """由 v1 TOML 和环境变量解析出的 OpenAI 兼容模型配置。"""
 
     name: str
     base_url: str
     api_key_env: str = "HARNESS_API_KEY"
+    api_key: InitVar[str | None] = None
+    _api_key: str | None = field(default=None, init=False, repr=False, compare=False)
     timeout_seconds: float = 120.0
     max_retries: int = 2
     context_window_tokens: int = 128_000
@@ -38,18 +41,36 @@ class ModelSettings:
     headers: dict[str, str] = field(default_factory=dict)
     headers_env: dict[str, str] = field(default_factory=dict)
 
+    def __post_init__(self, api_key: str | None) -> None:
+        """将已校验的 TOML 降级密钥保存到不参与 repr 的私有字段。"""
+        object.__setattr__(self, "_api_key", api_key)
+
     def resolve_api_key(self, environ: Mapping[str, str] | None = None) -> str:
-        """从明确命名的环境变量读取 API Key，绝不写回配置。"""
-        value = (environ or os.environ).get(self.api_key_env, "").strip()
-        if not value:
-            raise ConfigError(
-                f"Model API key is missing. Set the {self.api_key_env} environment variable."
-            )
-        return value
+        """优先从环境变量读取 API Key，缺失时使用用户 TOML 降级值。"""
+        environment = os.environ if environ is None else environ
+        value = environment.get(self.api_key_env, "").strip()
+        if value:
+            return value
+        if self._api_key:
+            return self._api_key
+        raise ConfigError(
+            f"Model API key is missing. Set the {self.api_key_env} environment variable "
+            "or add api_key to ~/.harness/config.toml."
+        )
+
+    def api_key_source(
+        self, environ: Mapping[str, str] | None = None
+    ) -> Literal["environment", "toml", "missing"]:
+        """返回可安全展示的密钥来源，不触及密钥内容。"""
+        environment = os.environ if environ is None else environ
+        value = environment.get(self.api_key_env, "").strip()
+        if value:
+            return "environment"
+        return "toml" if self._api_key else "missing"
 
     def resolve_headers(self, environ: Mapping[str, str] | None = None) -> dict[str, str]:
         """合并非秘密固定 Header 和由环境变量提供的 Header。"""
-        environment = environ or os.environ
+        environment = os.environ if environ is None else environ
         resolved = dict(self.headers)
         for header, env_name in self.headers_env.items():
             value = environment.get(env_name)
@@ -59,13 +80,14 @@ class ModelSettings:
 
     def redacted(self, environ: Mapping[str, str] | None = None) -> dict[str, object]:
         """返回可用于诊断展示的模型摘要，不包含 API Key 或动态 Header 值。"""
-        environment = environ or os.environ
+        api_key_source = self.api_key_source(environ)
         return {
             "provider": "openai-compatible",
             "name": self.name,
             "base_url": self.base_url,
             "api_key_env": self.api_key_env,
-            "api_key_configured": bool(environment.get(self.api_key_env)),
+            "api_key_configured": api_key_source != "missing",
+            "api_key_source": api_key_source,
             "timeout_seconds": self.timeout_seconds,
             "max_retries": self.max_retries,
             "context_window_tokens": self.context_window_tokens,
@@ -163,7 +185,7 @@ def load_config(
     存在也不会被读取：在模型初始化前报错，阻止仓库把 endpoint 与凭据引用
     组合成外泄路径。长期来源优先级记录在配置架构文档中。
     """
-    environment = environ or os.environ
+    environment = os.environ if environ is None else environ
     resolved_workspace = Path(workspace).expanduser().resolve()
     resolved_home = (home or Path.home()).expanduser().resolve()
     explicit_path = Path(config_path).expanduser().resolve() if config_path else None
@@ -222,7 +244,45 @@ def _read_document(path: Path, source: ConfigSource) -> dict[str, Any]:
         ConfigManifest.validate_document(data, source=source)
     except ConfigManifestError as exc:
         raise ConfigError(f"Invalid configuration in {path}: {exc}") from exc
+    _validate_literal_api_key_permissions(path, data, source)
     return data
+
+
+def _validate_literal_api_key_permissions(
+    path: Path, document: Mapping[str, object], source: ConfigSource
+) -> None:
+    """限制用户 TOML 明文密钥的 Unix 文件权限。"""
+    if (
+        source is not ConfigSource.USER
+        or not _supports_posix_permissions()
+        or not _contains_literal_api_key(document)
+    ):
+        return
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except OSError as exc:
+        raise ConfigError(f"Unable to inspect configuration file permissions: {path}") from exc
+    if mode & 0o077:
+        raise ConfigError(
+            f"Configuration file containing models.profiles.<name>.api_key must not be accessible "
+            f"by group or others: {path}. Run: chmod 600 {path}"
+        )
+
+
+def _contains_literal_api_key(document: Mapping[str, object]) -> bool:
+    """判断文档是否在模型 Profile 中声明了字面量密钥。"""
+    models = document.get("models")
+    if not isinstance(models, dict):
+        return False
+    profiles = models.get("profiles")
+    if not isinstance(profiles, dict):
+        return False
+    return any(isinstance(profile, dict) and "api_key" in profile for profile in profiles.values())
+
+
+def _supports_posix_permissions() -> bool:
+    """返回当前平台是否能依赖 POSIX 文件权限位。"""
+    return os.name != "nt"
 
 
 def _merge_documents(
@@ -283,6 +343,7 @@ def _merge_profile_values(base: dict[str, object], override: dict[str, object]) 
         "model",
         "base_url",
         "api_key_env",
+        "api_key",
         "timeout_seconds",
         "max_retries",
         "context_window_tokens",
@@ -404,10 +465,16 @@ def _parse_default_model(models: Mapping[str, object]) -> tuple[str | None, Mode
         )
     except ConfigManifestError as exc:
         raise ConfigError(str(exc)) from exc
+    literal_api_key = values.get("api_key")
+    if literal_api_key is not None and (
+        not isinstance(literal_api_key, str) or not literal_api_key.strip()
+    ):
+        raise ConfigError("models.profiles.<name>.api_key must be a non-empty string")
     return profile_name, ModelSettings(
         name=name,
         base_url=base_url,
         api_key_env=api_key_env,
+        api_key=literal_api_key.strip() if isinstance(literal_api_key, str) else None,
         timeout_seconds=_number(values.get("timeout_seconds", 120.0), "models.profiles.<name>.timeout_seconds", minimum=0.1),
         max_retries=_integer(values.get("max_retries", 2), "models.profiles.<name>.max_retries", minimum=0),
         context_window_tokens=_integer(

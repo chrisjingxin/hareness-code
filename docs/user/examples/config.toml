@@ -14,6 +14,9 @@ provider = "openai-compatible"
 model = "your-enterprise-coding-model"
 base_url = "https://gateway.example.internal/v1"
 api_key_env = "HARNESS_API_KEY"
+# 仅当上述环境变量缺失或空白时使用。推荐保留环境变量方式。
+# 启用后必须执行 `chmod 600 ~/.harness/config.toml`，且不得把该文件提交到仓库。
+# api_key = "your-enterprise-gateway-key"
 timeout_seconds = 120
 max_retries = 2
 # 模型输入窗口；未填写时使用 128000。显式值不得低于 16384。

@@ -16,6 +16,8 @@ export HARNESS_API_KEY='你的企业网关密钥'
 bun run dev
 ```
 
+推荐通过 `api_key_env` 引用环境变量。若本机开发环境无法预先设置环境变量，可在权限为 `0600` 的 `~/.harness/config.toml` 模型 Profile 中设置 `api_key` 作为降级值；环境变量非空时始终优先。
+
 可使用 `bun run dev -- --help` 查看当前 CLI 参数；无头运行示例：
 
 ```bash

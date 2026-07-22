@@ -95,7 +95,7 @@ class ConfigManifest:
         if not isinstance(version, int) or isinstance(version, bool) or version != cls.VERSION:
             raise ConfigManifestError(f"config.version must be {cls.VERSION}")
 
-        cls._validate_scalars(document, path=())
+        cls._validate_scalars(document, path=(), source=source)
 
     @classmethod
     def validate_environment_name(cls, value: object, *, path: str) -> str:
@@ -142,7 +142,9 @@ class ConfigManifest:
         return result
 
     @classmethod
-    def _validate_scalars(cls, value: object, *, path: tuple[str, ...]) -> None:
+    def _validate_scalars(
+        cls, value: object, *, path: tuple[str, ...], source: ConfigSource
+    ) -> None:
         """拒绝通用环境变量插值和明显的秘密字面量字段。"""
         if isinstance(value, dict):
             for key, nested in value.items():
@@ -150,19 +152,31 @@ class ConfigManifest:
                     raise ConfigManifestError("Configuration keys must be strings")
                 nested_path = (*path, key)
                 normalized_key = key.lower()
+                user_model_api_key = (
+                    source is ConfigSource.USER
+                    and len(nested_path) == 4
+                    and nested_path[:2] == ("models", "profiles")
+                    and nested_path[-1] == "api_key"
+                )
+                if user_model_api_key:
+                    if not isinstance(nested, str) or not nested.strip():
+                        raise ConfigManifestError(
+                            f"{'.'.join(nested_path)} must be a non-empty string"
+                        )
                 if (
                     any(part in normalized_key for part in cls._SECRET_KEY_PARTS)
                     and not normalized_key.endswith("_env")
                     and normalized_key not in cls._NON_SECRET_TOKEN_FIELDS
+                    and not user_model_api_key
                 ):
                     raise ConfigManifestError(
                         f"{'.'.join(nested_path)} must reference an environment variable instead of a literal secret"
                     )
-                cls._validate_scalars(nested, path=nested_path)
+                cls._validate_scalars(nested, path=nested_path, source=source)
             return
         if isinstance(value, list):
             for item in value:
-                cls._validate_scalars(item, path=path)
+                cls._validate_scalars(item, path=path, source=source)
             return
         if isinstance(value, str) and cls._ENV_INTERPOLATION.search(value):
             label = ".".join(path) or "configuration"

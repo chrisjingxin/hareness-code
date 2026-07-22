@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import harness_agent.config as config_module
 from harness_agent.config import ConfigError, ExecutionSettings, ModelSettings, RemoteSandboxSettings, load_config
 from harness_agent.config_manifest import ConfigManifest
 from harness_agent.execution import create_execution_context
@@ -20,11 +21,13 @@ def _write_config(
     model: str = "enterprise-model",
     base_url: str = "https://gateway.example.internal/v1",
     api_key_env: str = "HARNESS_API_KEY",
+    api_key: str | None = None,
     approval_mode: str | None = None,
     backend: str = "local",
     remote: bool = False,
 ) -> None:
     """生成最小可信 v1 TOML，避免测试散落旧配置结构。"""
+    literal_api_key = f'api_key = "{api_key}"\n' if api_key is not None else ""
     approval = f"\n[approval]\nmode = \"{approval_mode}\"\n" if approval_mode else ""
     remote_table = (
         "\n[execution.remote]\nprovider = \"corp\"\nfactory = \"corp_sandbox:create_backend\"\n"
@@ -44,6 +47,7 @@ provider = "openai-compatible"
 model = "{model}"
 base_url = "{base_url}"
 api_key_env = "{api_key_env}"
+{literal_api_key}
 
 [models.profiles.enterprise.headers]
 X-Client = "harness"
@@ -56,6 +60,8 @@ backend = "{backend}"
 {remote_table}''',
         encoding="utf-8",
     )
+    if api_key is not None:
+        path.chmod(0o600)
 
 
 def test_config_precedence_and_redaction(tmp_path: Path):
@@ -85,6 +91,103 @@ def test_config_precedence_and_redaction(tmp_path: Path):
     assert config.model_profile == "enterprise"
     assert config.redacted({"EXPLICIT_KEY": "secret"})["sources"]["models"] == "environment"
     assert "secret" not in str(config.redacted({"EXPLICIT_KEY": "secret"}))
+
+
+def test_user_toml_api_key_fallback_environment_precedence_and_redaction(tmp_path: Path):
+    """非空环境变量始终优先，否则使用不可见的用户 TOML 降级值。"""
+    home = tmp_path / "home"
+    path = home / ".harness" / "config.toml"
+    _write_config(path, api_key="toml-secret")
+
+    config = load_config(
+        workspace=tmp_path / "workspace",
+        home=home,
+        environ={"HARNESS_API_KEY": "   "},
+    )
+    model = config.require_model()
+    assert model.resolve_api_key({"HARNESS_API_KEY": "   "}) == "toml-secret"
+    assert model.api_key_source({"HARNESS_API_KEY": "   "}) == "toml"
+    assert model.resolve_api_key({"HARNESS_API_KEY": "environment-secret"}) == "environment-secret"
+    assert model.api_key_source({"HARNESS_API_KEY": "environment-secret"}) == "environment"
+
+    summary = config.redacted({"HARNESS_API_KEY": "   "})
+    assert summary["model"]["api_key_configured"] is True  # type: ignore[index]
+    assert summary["model"]["api_key_source"] == "toml"  # type: ignore[index]
+    assert "toml-secret" not in repr(model)
+    assert "toml-secret" not in str(summary)
+
+
+def test_api_key_missing_and_blank_literal_fail_without_leaking_values(tmp_path: Path):
+    """两种密钥来源均不可用时给出稳定诊断，空白 TOML 值不视为降级密钥。"""
+    settings = ModelSettings(name="model", base_url="https://gateway.example/v1")
+    with pytest.raises(ConfigError, match="HARNESS_API_KEY"):
+        settings.resolve_api_key({})
+    assert settings.api_key_source({}) == "missing"
+    assert settings.redacted({})["api_key_configured"] is False
+
+    home = tmp_path / "home"
+    path = home / ".harness" / "config.toml"
+    _write_config(path, api_key="   ")
+    with pytest.raises(ConfigError, match="api_key must be a non-empty string"):
+        load_config(workspace=tmp_path / "workspace", home=home, environ={})
+
+
+def test_literal_api_key_is_rejected_outside_user_configuration(tmp_path: Path):
+    """显式和项目 TOML 即使由用户选中，也不能携带字面量密钥。"""
+    explicit = tmp_path / "explicit.toml"
+    project = tmp_path / "workspace" / ".harness" / "config.toml"
+    _write_config(explicit, api_key="explicit-secret")
+    with pytest.raises(ConfigError, match="must reference an environment variable") as error:
+        load_config(
+            workspace=tmp_path / "workspace",
+            home=tmp_path / "home",
+            config_path=explicit,
+            environ={},
+        )
+    assert "explicit-secret" not in str(error.value)
+
+    _write_config(project, api_key="project-secret")
+    with pytest.raises(ConfigError, match="must reference an environment variable") as error:
+        load_config(
+            workspace=tmp_path / "workspace",
+            home=tmp_path / "home",
+            config_path=project,
+            environ={},
+        )
+    assert "project-secret" not in str(error.value)
+
+
+@pytest.mark.skipif(config_module.os.name == "nt", reason="Windows does not expose POSIX mode bits")
+def test_user_toml_api_key_requires_private_posix_permissions(tmp_path: Path):
+    """用户 TOML 只要包含明文密钥，即使环境会覆盖也必须拒绝宽权限。"""
+    home = tmp_path / "home"
+    path = home / ".harness" / "config.toml"
+    _write_config(path, api_key="toml-secret")
+    path.chmod(0o644)
+
+    with pytest.raises(ConfigError, match="chmod 600"):
+        load_config(
+            workspace=tmp_path / "workspace",
+            home=home,
+            environ={"HARNESS_API_KEY": "environment-secret"},
+        )
+
+    path.chmod(0o600)
+    assert load_config(workspace=tmp_path / "workspace", home=home, environ={}).require_model()
+
+
+def test_literal_api_key_permission_check_is_skipped_without_posix_modes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Windows 语义不尝试用 POSIX mode 误判 ACL 权限。"""
+    home = tmp_path / "home"
+    path = home / ".harness" / "config.toml"
+    _write_config(path, api_key="toml-secret")
+    path.chmod(0o644)
+    monkeypatch.setattr(config_module, "_supports_posix_permissions", lambda: False)
+
+    model = load_config(workspace=tmp_path / "workspace", home=home, environ={}).require_model()
+    assert model.resolve_api_key({}) == "toml-secret"
 
 
 def test_context_window_defaults_to_128k_and_rejects_small_explicit_value(tmp_path: Path):
@@ -284,16 +387,19 @@ def test_remote_sandbox_requires_complete_trusted_configuration(tmp_path: Path):
 
 
 def test_openai_compatible_adapter_is_constructed_without_network(monkeypatch: pytest.MonkeyPatch):
-    """模型 adapter 继续只接受从环境变量命名读取的凭据。"""
-    monkeypatch.setenv("HARNESS_TEST_KEY", "test-key")
+    """模型 adapter 使用最终解析的 TOML 降级密钥，且不发起网络请求。"""
+    monkeypatch.delenv("HARNESS_TEST_KEY", raising=False)
     model = create_openai_compatible_model(
         ModelSettings(
             name="enterprise-model",
             base_url="https://gateway.example.internal/v1",
             api_key_env="HARNESS_TEST_KEY",
+            api_key="toml-key",
         )
     )
     assert model.model_name == "enterprise-model"
+    assert model.openai_api_key is not None
+    assert model.openai_api_key.get_secret_value() == "toml-key"
 
 
 def test_local_execution_backend_does_not_inherit_model_secret(
