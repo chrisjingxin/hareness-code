@@ -1,7 +1,4 @@
-"""Shell 白名单中间件：在不触发 HITL 的前提下拦截未授权命令。
-
-照搬自 dcode agent.py:275-386，提取为独立模块。
-"""
+"""Shell 白名单中间件：仅放行可可靠判定的单一命令。"""
 from __future__ import annotations
 
 import logging
@@ -30,20 +27,48 @@ _RECOMMENDED_SHELL_ALLOW_LIST = [
     "dirname", "realpath", "mkdir", "touch", "cp", "mv", "ln",
 ]
 
+_SHELL_OPERATOR_CHARS = frozenset("();<>|&")
+_COMMAND_SUBSTITUTION_MARKERS = ("$(", "`")
 
-def is_shell_command_allowed(command: str, allow_list: list[str]) -> bool:
-    """检查 shell 首命令是否位于白名单，并兼容绝对路径形式。"""
+
+def _tokenize_single_command(command: object) -> list[str] | None:
+    """解析单一 POSIX shell 命令；任何复合语法或歧义均安全拒绝。"""
+    if not isinstance(command, str) or not command.strip():
+        return None
+    if any(character in command for character in ("\r", "\n", "\x00")):
+        return None
+    if any(marker in command for marker in _COMMAND_SUBSTITUTION_MARKERS):
+        return None
+
     try:
-        tokens = shlex.split(command)
-    except ValueError:
-        tokens = command.split()
+        lexer = shlex.shlex(
+            command,
+            posix=True,
+            punctuation_chars="".join(sorted(_SHELL_OPERATOR_CHARS)),
+        )
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
+    except (TypeError, ValueError):
+        return None
+
     if not tokens:
-        return False
-    first_cmd = tokens[0]
-    # Handle path prefixes (e.g. /usr/bin/python → python)
-    if "/" in first_cmd:
-        first_cmd = first_cmd.rsplit("/", 1)[-1]
-    return first_cmd in allow_list
+        return None
+    if any(token and all(character in _SHELL_OPERATOR_CHARS for character in token) for token in tokens):
+        return None
+    return tokens
+
+
+def is_shell_command_allowed(command: object, allow_list: list[str]) -> bool:
+    """仅当输入是白名单中可执行文件启动的单一命令时返回真。
+
+    绝对路径不会按 basename 降级匹配：调用方若要允许 ``/usr/bin/git``，
+    必须把该完整路径显式加入白名单，避免工作区或临时目录中的同名程序冒充。
+    参数作为同一命令的参数保留，但不能包含 shell 控制运算符、重定向、
+    命令替换、换行或无法闭合的引号。
+    """
+    tokens = _tokenize_single_command(command)
+    return bool(tokens and tokens[0] in allow_list)
 
 
 class ShellAllowListMiddleware(AgentMiddleware):
