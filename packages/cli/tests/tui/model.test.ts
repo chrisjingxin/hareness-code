@@ -37,6 +37,7 @@ test("从脱敏初始化结果提取可展示的运行上下文", () => {
     executionMode: "remote-sandbox",
     sandboxProvider: "corp",
     approvalMode: "default",
+    capabilities: [],
   })
   expect(workspaceLabel(runtime.workspace)).toBe("za38-cli")
   expect(executionStatusLabel(runtime)).toBe("远端沙箱 · corp")
@@ -52,6 +53,7 @@ test("首页装饰在窄终端降级，并保留执行安全摘要", () => {
     modelConfigured: true,
     executionMode: "local",
     approvalMode: "default",
+    capabilities: [],
   })).toBe("本机执行 · 未隔离")
 })
 

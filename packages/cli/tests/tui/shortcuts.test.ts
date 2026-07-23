@@ -24,6 +24,13 @@ test("命令菜单优先消费导航、选择与关闭快捷键", () => {
   expect(resolveShortcut({ name: "return", ctrl: false }, { ...menu, commandOptionCount: 0 })).toBe("command-block")
 })
 
+test("命令确认框优先消费确认和取消快捷键", () => {
+  const dialog = { ...idle, commandDialogVisible: true, commandMenuVisible: true, commandOptionCount: 2 }
+  expect(resolveShortcut({ name: "return", ctrl: false }, dialog)).toBe("confirm-command-dialog")
+  expect(resolveShortcut({ name: "escape", ctrl: false }, dialog)).toBe("cancel-command-dialog")
+  expect(resolveShortcut({ name: "down", ctrl: false }, dialog)).toBe("none")
+})
+
 test("Skill 选择器优先消费搜索框导航、选择与关闭键", () => {
   const picker = { ...idle, skillPickerVisible: true, skillOptionCount: 2, commandMenuVisible: true }
   expect(resolveShortcut({ name: "down", ctrl: false }, picker)).toBe("skill-next")

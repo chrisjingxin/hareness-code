@@ -8,16 +8,20 @@ import type { InteractionRequestEnvelope, InteractionResponse, RequestedSkill, T
 
 import { IpcClient } from "../ipc/client"
 import {
+  defaultCommandContext,
   findCommandMenuItems,
   parseSlashCommand,
-  slashCommandHelp,
+  resolveSlashCommand,
+  unknownCommandNotice,
   type CommandMenuItem,
   type SkillMenuItem,
   type SlashCommand,
 } from "./commands"
+import { dispatchSlashCommand, type CommandDialog, type CommandResult } from "./command-dispatcher"
 import { HomeView, SkillPicker, ThreadPicker, ThreadView, type CommandMenuState, type SelectedSkill, type ThreadPickerItem } from "./components"
 import { TuiErrorBoundary } from "./error-boundary"
 import { runtimeStatusSummary, type TuiRuntime } from "./model"
+import { DialogShell } from "./overlays"
 import {
   loadPromptHistory,
   movePromptHistory,
@@ -72,11 +76,6 @@ type ThreadPickerState = {
   error?: string
 }
 
-type ContextCompactResult = {
-  compacted?: unknown
-  context?: unknown
-}
-
 /** 正式 OpenTUI 根组件：所有 Agent 输出必须经状态归约后才进入终端。 */
 export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestExit }: TuiOptions) {
   const [state, setState] = useState(() => createInitialState())
@@ -88,6 +87,7 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
   const [skills, setSkills] = useState<readonly SkillMenuItem[]>([])
   const [skillPicker, setSkillPicker] = useState<SkillPickerState>({ visible: false, loading: false, query: "", selectedIndex: 0 })
   const [threadPicker, setThreadPicker] = useState<ThreadPickerState>({ visible: false, loading: false, query: "", selectedIndex: 0 })
+  const [commandDialog, setCommandDialog] = useState<CommandDialog | undefined>(undefined)
   const [threads, setThreads] = useState<readonly ThreadPickerItem[]>([])
   const [selectedSkill, setSelectedSkill] = useState<SelectedSkill | undefined>(undefined)
   const commandMenuDismissedValue = useRef<string | undefined>(undefined)
@@ -187,21 +187,23 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     return () => { disposed = true }
   }, [promptHistoryFile])
 
-  /** 取消当前运行；重复按取消键时把退出意图交给根生命周期。 */
-  const cancelActiveRun = useCallback(async () => {
+  /** 取消当前运行；交互式确认流程不会把重复取消误解为退出应用。 */
+  const cancelActiveRun = useCallback(async ({ exitOnRepeatedCancellation = true }: { exitOnRepeatedCancellation?: boolean } = {}) => {
     const active = stateRef.current.activeRun
     if (!active) return false
     if (stateRef.current.status === "正在取消") {
-      onRequestExit()
-      return true
+      if (exitOnRepeatedCancellation) onRequestExit()
+      return false
     }
     commit(markCancelling)
     try {
-      await client.cancel(active.threadId, active.runId)
+      const result = await client.cancel(active.threadId, active.runId)
+      if (!result.cancelled || result.run_id !== active.runId) throw new Error("Agent 未确认取消当前运行")
+      return true
     } catch (error) {
       commit(current => markRunFailed(current, active.runId, errorMessage(error)))
+      return false
     }
-    return true
   }, [client, commit, onRequestExit])
 
   /** 登记用户消息、发起 run.start，并校验 sidecar 返回的 run 标识。 */
@@ -289,6 +291,16 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     })
   }, [commit, refreshThreads])
 
+  /** 关闭搜索浮层时保留草稿和原 thread；Composer 会因 pickerVisible 复位而重新获取焦点。 */
+  const closeSkillPicker = useCallback(() => {
+    setSkillPicker(current => ({ ...current, visible: false, loading: false, error: undefined }))
+  }, [])
+
+  /** Thread Picker 与 Skill Picker 共享相同关闭语义，不能在关闭时恢复或修改 thread。 */
+  const closeThreadPicker = useCallback(() => {
+    setThreadPicker(current => ({ ...current, visible: false, loading: false, error: undefined }))
+  }, [])
+
   useEffect(() => {
     if (!initialResumeRef.current) return
     initialResumeRef.current = false
@@ -299,68 +311,63 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
   const visibleSkills = filterSkills(skills, skillPicker.query)
   const visibleThreads = filterThreads(threads, threadPicker.query)
 
-  /** 执行本地控制命令和 Skill 入口；目录读取失败只显示可恢复通知。 */
-  const executeSlashCommand = useCallback(async (command: SlashCommand) => {
-    switch (command.name) {
-      case "help":
-        commit(current => appendNotice(current, slashCommandHelp.map(item => `${item.command}  ${item.description}`).join("\n")))
+  /** 把 Dispatcher 的结构化结果映射为 TUI 状态、JSON-RPC 或退出动作。 */
+  const applyCommandResult = useCallback(async (result: CommandResult): Promise<void> => {
+    switch (result.type) {
+      case "notice":
+        commit(current => appendNotice(current, result.message))
         return
-      case "quit":
+      case "exit":
         onRequestExit()
         return
-      case "clear":
-        if (stateRef.current.activeRun) {
-          commit(current => appendNotice(current, "请先等待当前执行结束，或使用 /force-clear。"))
-        } else {
+      case "local-action":
+        if (result.action === "clear-thread") {
           commit(clearThread)
+          return
+        }
+        if (await cancelActiveRun({ exitOnRepeatedCancellation: false })) {
+          commit(clearThread)
+        } else {
+          commit(current => appendNotice(current, "未能取消当前任务，已保留当前 thread。请等待任务结束后重试。"))
         }
         return
-      case "force-clear":
-        void cancelActiveRun().then(() => commit(clearThread))
+      case "open-picker":
+        if (result.picker === "skills") openSkillPicker()
+        else openThreadPicker()
         return
-      case "compact": {
-        const current = stateRef.current
-        if (command.argument) {
-          commit(state => appendNotice(state, "/compact 不接受参数。"))
-          return
-        }
-        if (!current.threadId) {
-          commit(state => appendNotice(state, "当前没有可压缩的 thread。"))
-          return
-        }
-        if (current.activeRun || current.pendingApproval || current.pendingQuestion) {
-          commit(state => appendNotice(state, "当前 thread 正在执行或等待交互，暂不能压缩。"))
-          return
-        }
+      case "open-dialog":
+        setCommandDialog(result.dialog)
+        return
+      case "rpc":
         try {
-          const result = await client.compactContext(current.threadId) as ContextCompactResult
-          commit(state => appendNotice(state, contextCompactNotice(result)))
+          const value = await client.call(result.method, result.params)
+          await applyCommandResult(result.onSuccess(value))
         } catch (error) {
-          commit(state => appendNotice(state, `上下文压缩失败：${errorMessage(error)}`))
+          await applyCommandResult(result.onError(error))
         }
         return
-      }
-      case "status":
-        commit(current => appendNotice(current, runtimeStatusSummary(runtime)))
-        return
-      case "version":
-        commit(current => appendNotice(current, `za38-cli ${runtime.cliVersion} · JSON-RPC v2`))
-        return
-      case "resume":
-        if (command.argument) {
-          commit(current => appendNotice(current, "/resume 不接受 thread_id；请在选择器中选择要恢复的 thread。"))
-          return
-        }
-        openThreadPicker()
-        return
-      case "continue":
-        commit(current => appendNotice(current, "/continue 不可用；请使用 /resume 在选择器中恢复 thread。"))
-        return
-      case "skills":
-        openSkillPicker()
-        return
+      case "submit-prompt":
+        await sendAgentMessage(result.prompt, result.requestedSkill)
     }
-  }, [cancelActiveRun, commit, onRequestExit, openSkillPicker, openThreadPicker, runtime, sendAgentMessage])
+  }, [cancelActiveRun, client, commit, onRequestExit, openSkillPicker, openThreadPicker, sendAgentMessage])
+
+  /** 由 Dispatcher 解析稳定 ID 和运行态，根组件不再解释每个命令的业务分支。 */
+  const executeSlashCommand = useCallback((command: SlashCommand) => {
+    const current = stateRef.current
+    void applyCommandResult(dispatchSlashCommand(command, {
+      commandContext: tuiCommandContext(runtime, current),
+      threadId: current.threadId,
+      runtimeStatus: runtimeStatusSummary(runtime),
+      versionSummary: `za38-cli ${runtime.cliVersion} · JSON-RPC v2`,
+    }))
+  }, [applyCommandResult, runtime])
+
+  /** 确认框仅保存 Dispatcher 返回的后续动作，取消时不改变当前 thread。 */
+  const resolveCommandDialog = useCallback((confirmed: boolean) => {
+    const dialog = commandDialog
+    setCommandDialog(undefined)
+    if (confirmed && dialog) void applyCommandResult(dialog.confirm)
+  }, [applyCommandResult, commandDialog])
 
   /** 同步 textarea 草稿、命令菜单过滤状态和历史游标。 */
   const updateDraft = useCallback((value: string) => {
@@ -371,10 +378,11 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     const slashQuery = value.trimStart()
     // 输入完整的本地命令后收起菜单，让 Enter 直接执行；未完成前缀继续保留
     // 筛选菜单，以支持 `/st` + Enter 的补全工作流。
-    const exactLocalCommand = parseSlashCommand(slashQuery)
+    const resolution = resolveSlashCommand(slashQuery)
     const shouldShowMenu = slashQuery.startsWith("/")
+      && !slashQuery.startsWith("//")
       && !slashQuery.slice(1).match(/\s/)
-      && !exactLocalCommand
+      && resolution.kind !== "command"
     if (shouldShowMenu && commandMenuDismissedValue.current !== value) {
       setCommandMenu({ visible: true, selectedIndex: 0 })
       return
@@ -453,13 +461,26 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
       selectSkill(item.skill)
       return
     }
+    if (item.availability.state === "disabled") {
+      const reason = item.availability.reason
+      commit(current => appendNotice(current, `/${item.command.name} 暂不可用：${reason}。`))
+      return
+    }
+    // 活动 run 期间 composer 不接收普通 Prompt；从命令菜单选择可执行项时直接交给
+    // Dispatcher，确保 /new 的确认流程和 /quit 等控制命令仍然可达。
+    if (stateRef.current.activeRun) {
+      const command = parseSlashCommand(`/${item.command.name}`)
+      clearDraft()
+      if (command) executeSlashCommand(command)
+      return
+    }
     const value = `/${item.command.name}`
     commandMenuDismissedValue.current = value
     inputRef.current?.setText(value)
     inputRef.current?.gotoBufferEnd()
     setDraft(value)
     setCommandMenu({ visible: false, selectedIndex: 0 })
-  }, [selectSkill])
+  }, [clearDraft, commit, executeSlashCommand, selectSkill])
 
   /** 通过 `/` 或 Ctrl+P 打开命令菜单并补齐命令前缀。 */
   const openCommandMenu = useCallback(() => {
@@ -475,7 +496,8 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
 
   /** 处理 Enter 提交：问答、Slash Command 和普通 Agent 消息走不同路径。 */
   const handleSubmit = useCallback(() => {
-    const input = (inputRef.current?.plainText ?? draft).trim()
+    const rawInput = inputRef.current?.plainText ?? draft
+    const input = rawInput.trim()
     if (!input) return
     // OpenTUI Input 会保留内部编辑缓冲区，提交后需主动清空，不能只依赖 React state。
     clearDraft()
@@ -483,18 +505,23 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
       void respondQuestion(input)
       return
     }
-    const command = parseSlashCommand(input)
-    if (command) {
-      void executeSlashCommand(command)
+    const resolution = resolveSlashCommand(rawInput)
+    if (resolution.kind === "command") {
+      void executeSlashCommand(resolution.command)
       return
     }
+    if (resolution.kind === "unknown") {
+      commit(current => appendNotice(current, unknownCommandNotice(resolution)))
+      return
+    }
+    const message = resolution.kind === "escaped" ? resolution.message : input
     const previousHistory = promptHistoryRef.current
-    const nextHistory = rememberPrompt(previousHistory, input)
+    const nextHistory = rememberPrompt(previousHistory, message)
     promptHistoryRef.current = nextHistory
     promptHistoryCursorRef.current = undefined
     void persistPromptHistory(previousHistory, nextHistory, promptHistoryFile)
-    void sendAgentMessage(input)
-  }, [clearDraft, draft, executeSlashCommand, respondQuestion, sendAgentMessage])
+    void sendAgentMessage(message)
+  }, [clearDraft, commit, draft, executeSlashCommand, respondQuestion, sendAgentMessage])
 
   /** 按行或半页滚动当前 thread，供空 composer 的方向键使用。 */
   const scrollConversationBy = useCallback((amount: "line-up" | "line-down" | "page-up" | "page-down") => {
@@ -514,7 +541,7 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
   /** 在 textarea 层处理历史与 thread 滚动，避免全局 key handler 抢走方向键。 */
   const handleComposerKeyDown = useCallback((key: KeyEvent) => {
     // Slash 菜单由全局快捷键优先处理，不能在 textarea 内重复消费方向键。
-    if (commandMenu.visible || skillPicker.visible || threadPicker.visible) return
+    if (commandMenu.visible || commandDialog || skillPicker.visible || threadPicker.visible) return
     const input = inputRef.current
     if (!input) return
 
@@ -538,11 +565,12 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
               : undefined
       if (scrollAction && scrollConversationBy(scrollAction)) key.preventDefault()
     }
-  }, [commandMenu.visible, navigatePromptHistory, scrollConversationBy, skillPicker.visible, threadPicker.visible])
+  }, [commandDialog, commandMenu.visible, navigatePromptHistory, scrollConversationBy, skillPicker.visible, threadPicker.visible])
 
   useKeyboard(key => {
-    const commandOptions = findCommandMenuItems(draft, skills)
+    const commandOptions = findCommandMenuItems(draft, skills, tuiCommandContext(runtime, stateRef.current))
     const action = resolveShortcut(key, {
+      commandDialogVisible: Boolean(commandDialog),
       skillPickerVisible: skillPicker.visible,
       skillOptionCount: visibleSkills.length,
       threadPickerVisible: threadPicker.visible,
@@ -555,12 +583,20 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     if (action === "none") return
     key.preventDefault()
 
+    if (action === "confirm-command-dialog") {
+      resolveCommandDialog(true)
+      return
+    }
+    if (action === "cancel-command-dialog") {
+      resolveCommandDialog(false)
+      return
+    }
     if (action === "close-skill-picker") {
-      setSkillPicker(current => ({ ...current, visible: false, loading: false, error: undefined }))
+      closeSkillPicker()
       return
     }
     if (action === "close-thread-picker") {
-      setThreadPicker(current => ({ ...current, visible: false, loading: false, error: undefined }))
+      closeThreadPicker()
       return
     }
     if (action === "thread-previous" || action === "thread-next") {
@@ -617,7 +653,14 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
       if (selected) selectCommandMenuItem(selected)
       return
     }
-    if (action === "command-block") return
+    if (action === "command-block") {
+      const resolution = resolveSlashCommand(inputRef.current?.plainText ?? draft)
+      if (resolution.kind === "unknown") {
+        clearDraft()
+        commit(current => appendNotice(current, unknownCommandNotice(resolution)))
+      }
+      return
+    }
     if (action === "command-open") {
       openCommandMenu()
       return
@@ -663,11 +706,11 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     onComposerKeyDown: handleComposerKeyDown,
     onSubmit: handleSubmit,
     commandMenu,
-    commandOptions: findCommandMenuItems(draft, skills),
+    commandOptions: findCommandMenuItems(draft, skills, tuiCommandContext(runtime, state)),
     onSelectCommand: selectCommandMenuItem,
     onHoverCommand: (selectedIndex: number) => setCommandMenu(current => ({ ...current, selectedIndex })),
     selectedSkill,
-    pickerVisible: skillPicker.visible || threadPicker.visible,
+    pickerVisible: Boolean(commandDialog) || skillPicker.visible || threadPicker.visible,
     onClearSelectedSkill: () => setSelectedSkill(undefined),
     showToolDetails,
     expandedTools,
@@ -689,9 +732,12 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
         terminalWidth={terminal.width}
         terminalHeight={terminal.height}
         searchRef={skillSearchRef}
+        restoreFocusRef={inputRef}
+        shouldRestoreFocus={!state.activeRun}
         onSearch={query => setSkillPicker(current => ({ ...current, query, selectedIndex: 0 }))}
         onSelect={selectSkill}
         onHover={selectedIndex => setSkillPicker(current => ({ ...current, selectedIndex }))}
+        onClose={closeSkillPicker}
       />
       <ThreadPicker
         visible={threadPicker.visible}
@@ -703,9 +749,23 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
         terminalWidth={terminal.width}
         terminalHeight={terminal.height}
         searchRef={threadSearchRef}
+        restoreFocusRef={inputRef}
+        shouldRestoreFocus={!state.activeRun}
         onSearch={query => setThreadPicker(current => ({ ...current, query, selectedIndex: 0 }))}
         onSelect={thread => { void selectThread(thread) }}
         onHover={selectedIndex => setThreadPicker(current => ({ ...current, selectedIndex }))}
+        onClose={closeThreadPicker}
+      />
+      <DialogShell
+        visible={commandDialog?.kind === "confirm-new-thread"}
+        title={commandDialog?.title ?? ""}
+        message={commandDialog?.message ?? ""}
+        terminalWidth={terminal.width}
+        terminalHeight={terminal.height}
+        restoreFocusRef={inputRef}
+        shouldRestoreFocus={!state.activeRun}
+        onConfirm={() => resolveCommandDialog(true)}
+        onCancel={() => resolveCommandDialog(false)}
       />
     </box>
   )
@@ -750,23 +810,14 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-/** 将手动压缩响应收敛为不泄漏归档原文的紧凑时间线通知。 */
-function contextCompactNotice(value: ContextCompactResult): string {
-  const context = value.context && typeof value.context === "object"
-    ? value.context as Record<string, unknown>
-    : {}
-  const action = typeof context.action === "string" ? context.action : "unknown"
-  const estimated = typeof context.estimated_tokens === "number" ? context.estimated_tokens : undefined
-  const cap = typeof context.input_cap_tokens === "number" ? context.input_cap_tokens : undefined
-  const artifacts = Array.isArray(context.artifact_ids) ? context.artifact_ids.length : 0
-  if (value.compacted === true) {
-    const budget = estimated !== undefined && cap !== undefined ? ` ${estimated}/${cap}` : ""
-    return `上下文已压缩${budget}${artifacts ? `，归档 ${artifacts} 项` : ""}。`
-  }
-  const reason = typeof context.miss_reason === "string" ? `：${context.miss_reason}` : ""
-  return action === "manual_compaction_skipped"
-    ? `上下文无需压缩${reason}。`
-    : `上下文压缩未完成${reason}。`
+/** 将握手 capability 和即时 thread 状态收敛为 Registry 可重复使用的可用性上下文。 */
+function tuiCommandContext(runtime: TuiRuntime, state: ReturnType<typeof createInitialState>) {
+  return defaultCommandContext({
+    capabilities: runtime.capabilities,
+    hasThread: Boolean(state.threadId),
+    activeRun: Boolean(state.activeRun),
+    hasPendingInteraction: Boolean(state.pendingApproval || state.pendingQuestion),
+  })
 }
 
 /** 将不可信 RPC 摘要收敛为 TUI 需要的字段，避免字段缺失破坏 Slash 菜单。 */

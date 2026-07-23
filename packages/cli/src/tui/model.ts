@@ -15,6 +15,8 @@ export type TuiRuntime = {
   sandboxProvider?: string
   approvalMode: "plan" | "default" | "auto-edit" | "yolo"
   approvalModeWarning?: string
+  /** initialize 协商后的能力；缺省仅用于兼容未更新的测试运行时。 */
+  capabilities?: readonly string[]
 }
 
 /** 将握手结果收敛为界面可安全显示的运行摘要，避免把配置原样暴露给组件。 */
@@ -37,6 +39,7 @@ export function createTuiRuntime(
     sandboxProvider: optionalString(security?.provider),
     approvalMode: approvalMode(security?.approval_mode),
     approvalModeWarning: optionalString(security?.approval_mode_warning),
+    capabilities: [...new Set(result.enabled_capabilities)],
   }
 }
 

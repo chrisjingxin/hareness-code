@@ -6,6 +6,7 @@ type KeyLike = {
 }
 
 export type ShortcutContext = {
+  commandDialogVisible?: boolean
   skillPickerVisible?: boolean
   skillOptionCount?: number
   threadPickerVisible?: boolean
@@ -18,6 +19,8 @@ export type ShortcutContext = {
 
 export type ShortcutAction =
   | "none"
+  | "confirm-command-dialog"
+  | "cancel-command-dialog"
   | "close-command-menu"
   | "command-previous"
   | "command-next"
@@ -42,6 +45,11 @@ export type ShortcutAction =
 
 /** 快捷键先处理临时菜单，再处理运行态，避免输入控件吞掉 Ctrl+C 与 Esc。 */
 export function resolveShortcut(key: KeyLike, context: ShortcutContext): ShortcutAction {
+  if (context.commandDialogVisible) {
+    if (key.name === "escape") return "cancel-command-dialog"
+    if (key.name === "return" || key.name === "kpenter") return "confirm-command-dialog"
+    return "none"
+  }
   if (context.threadPickerVisible) {
     if (key.name === "escape") return "close-thread-picker"
     if (key.name === "up" || (key.ctrl && key.name === "p")) return "thread-previous"

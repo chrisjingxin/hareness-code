@@ -1,7 +1,7 @@
 /** Harness Code 的 OpenTUI 视图组件：首页、thread 时间线、交互面板与 composer。 */
 
-import { RGBA, type KeyEvent, type OptimizedBuffer, type ScrollBoxRenderable, type TextareaRenderable } from "@opentui/core"
-import { useEffect, useState, type RefObject } from "react"
+import { type KeyEvent, type ScrollBoxRenderable, type TextareaRenderable } from "@opentui/core"
+import { useEffect, useState, type ReactNode, type RefObject } from "react"
 
 import {
   commandMenuItemDescription,
@@ -21,6 +21,7 @@ import type { ConversationMessage, InteractionCard, TimelineItem, ToolCard, TuiS
 import { HarnessCodeLogo } from "./harness-logo"
 import { StarryBackground } from "./starry-background"
 import { markdownSyntax, tuiTheme } from "./theme"
+import { SearchPicker, type SearchPickerRenderContext } from "./overlays"
 import { collapseToolOutput } from "./upstream/collapse-tool-output"
 
 export type CommandMenuState = {
@@ -40,16 +41,6 @@ export type ThreadPickerItem = {
   latestMessage: string
   messageCount: number
 }
-
-// 遮罩只压暗背景 thread，面板作为同级图层保持完整对比度与输入可读性。
-const PICKER_BACKDROP_OPACITY = 0.72
-const [pickerBackdropRed, pickerBackdropGreen, pickerBackdropBlue] = RGBA.fromHex(tuiTheme.overlay).toInts()
-const PICKER_BACKDROP_DIM_MATRIX = new Float32Array([
-  1 - PICKER_BACKDROP_OPACITY, 0, 0, pickerBackdropRed / 255 * PICKER_BACKDROP_OPACITY,
-  0, 1 - PICKER_BACKDROP_OPACITY, 0, pickerBackdropGreen / 255 * PICKER_BACKDROP_OPACITY,
-  0, 0, 1 - PICKER_BACKDROP_OPACITY, pickerBackdropBlue / 255 * PICKER_BACKDROP_OPACITY,
-  0, 0, 0, 1,
-])
 
 type SharedViewProps = {
   runtime: TuiRuntime
@@ -507,10 +498,11 @@ function CommandMenu(props: {
       <box backgroundColor={tuiTheme.menu} paddingTop={1} paddingBottom={1}>
         {props.options.length ? props.options.map((item, index) => {
           const selected = index === props.selectedIndex
+          const disabled = item.kind === "command" && item.availability.state === "disabled"
           return (
             <box
               key={item.kind === "command" ? item.command.name : item.skill.id}
-              backgroundColor={selected ? tuiTheme.primarySoft : tuiTheme.menu}
+              backgroundColor={selected && !disabled ? tuiTheme.primarySoft : tuiTheme.menu}
               paddingLeft={2}
               paddingRight={2}
               flexDirection="row"
@@ -518,8 +510,8 @@ function CommandMenu(props: {
               onMouseOver={() => props.onHover(index)}
               onMouseUp={() => props.onSelect(item)}
             >
-              <text fg={selected ? tuiTheme.text : tuiTheme.primary}>{commandMenuItemLabel(item)}</text>
-              <text fg={selected ? tuiTheme.text : tuiTheme.muted}>{shorten(commandMenuItemDescription(item), 54)}</text>
+              <text fg={disabled ? tuiTheme.muted : selected ? tuiTheme.text : tuiTheme.primary}>{commandMenuItemLabel(item)}</text>
+              <text fg={disabled ? tuiTheme.subtle : selected ? tuiTheme.text : tuiTheme.muted}>{shorten(commandMenuItemDescription(item), 54)}</text>
             </box>
           )
         }) : (
@@ -532,7 +524,7 @@ function CommandMenu(props: {
   )
 }
 
-/** 叠在 thread 之上的 Skill 浮层调色板；正文仍由用户的下一条消息按需触发。 */
+/** Skill 领域仅提供行内容；搜索、遮罩、焦点、滚动和状态统一交给 SearchPicker。 */
 export function SkillPicker(props: {
   visible: boolean
   loading: boolean
@@ -543,106 +535,42 @@ export function SkillPicker(props: {
   terminalWidth: number
   terminalHeight: number
   searchRef: RefObject<TextareaRenderable | null>
+  restoreFocusRef?: RefObject<TextareaRenderable | null>
+  shouldRestoreFocus?: boolean
   onSearch: (query: string) => void
   onSelect: (skill: SkillMenuItem) => void
   onHover: (index: number) => void
+  onClose: () => void
 }) {
-  useEffect(() => {
-    if (props.visible) props.searchRef.current?.focus()
-  }, [props.searchRef, props.visible])
-  if (!props.visible) return null
-  const compact = props.terminalWidth < 64 || props.terminalHeight < 19
-  const width = compact
-    ? Math.max(36, props.terminalWidth - 4)
-    : Math.max(60, Math.min(108, Math.floor(props.terminalWidth * 0.76)))
-  const maxRows = compact
-    ? Math.max(3, Math.min(6, props.terminalHeight - 10))
-    : Math.max(5, Math.min(12, props.terminalHeight - 14))
-  const rows = props.loading || props.error
-    ? 1
-    : Math.max(1, Math.min(maxRows, props.skills.length))
-  const idWidth = compact
-    ? Math.max(18, width - 6)
-    : Math.max(24, Math.min(34, Math.floor(width * 0.34)))
-  const selectedIndex = Math.min(props.selectedIndex, Math.max(0, props.skills.length - 1))
-  const skillRows = props.skills.map((skill, index) => {
-    const selected = index === selectedIndex
-    return (
-      <box
-        key={skill.id}
-        backgroundColor={selected ? tuiTheme.pickerActive : tuiTheme.menu}
-        height={1}
-        paddingLeft={3}
-        paddingRight={3}
-        flexDirection="row"
-        gap={2}
-        onMouseOver={() => props.onHover(index)}
-        onMouseUp={() => props.onSelect(skill)}
-      >
-        <text width={idWidth} fg={selected ? tuiTheme.background : tuiTheme.primary} wrapMode="none" overflow="hidden">{shorten(skill.id, idWidth)}</text>
-        {!compact ? <text flexGrow={1} fg={selected ? tuiTheme.background : tuiTheme.muted} wrapMode="none" overflow="hidden">{shorten(skill.description, Math.max(18, width - idWidth - 10))}</text> : null}
-      </box>
-    )
-  })
-
   return (
-    <box position="absolute" top={0} left={0} width="100%" height="100%" zIndex={100} alignItems="center" justifyContent="flex-start" paddingTop={compact ? 1 : Math.max(2, Math.floor(props.terminalHeight / 4))} paddingLeft={2} paddingRight={2}>
-      <PickerBackdrop />
-      <box width={width} maxWidth="100%" backgroundColor={tuiTheme.menu} flexDirection="column" zIndex={1}>
-        <box paddingLeft={4} paddingRight={4} paddingTop={2} paddingBottom={1} flexDirection="column">
-          <box flexDirection="row" justifyContent="space-between">
-            <text fg={tuiTheme.text}><strong>Skills</strong></text>
-            <text fg={tuiTheme.muted}>esc</text>
-          </box>
-          <box marginTop={1}>
-            <textarea
-              id="skill-search"
-              ref={props.searchRef}
-              placeholder="搜索 Skills..."
-              placeholderColor={tuiTheme.muted}
-              textColor={tuiTheme.text}
-              focusedTextColor={tuiTheme.text}
-              backgroundColor={tuiTheme.menu}
-              focusedBackgroundColor={tuiTheme.menu}
-              cursorColor={tuiTheme.primary}
-              minHeight={1}
-              maxHeight={1}
-              keyBindings={SKILL_SEARCH_KEY_BINDINGS}
-              focused
-              onContentChange={() => props.onSearch(props.searchRef.current?.plainText ?? "")}
-              onSubmit={() => {
-                const selected = props.skills[selectedIndex]
-                if (selected) props.onSelect(selected)
-              }}
-            />
-          </box>
-        </box>
-        <box paddingLeft={4} paddingRight={4} paddingTop={1} paddingBottom={1}>
-          <text fg={tuiTheme.primary}><strong>Skills</strong></text>
-        </box>
-        {props.loading ? (
-          <box height={rows} paddingLeft={4} paddingRight={4} paddingBottom={2}>
-            <text fg={tuiTheme.muted}>正在读取 Skill catalog…</text>
-          </box>
-        ) : props.error ? (
-          <box height={rows} paddingLeft={4} paddingRight={4} paddingBottom={2}>
-            <text fg={tuiTheme.danger}>{shorten(props.error, width - 8)}</text>
-          </box>
-        ) : props.skills.length ? (
-          props.skills.length > maxRows ? (
-            <scrollbox height={rows} paddingLeft={1} paddingRight={1} paddingBottom={2} viewportOptions={{ paddingRight: 1 }}>{skillRows}</scrollbox>
-          ) : <box flexDirection="column" paddingLeft={1} paddingRight={1} paddingBottom={2}>{skillRows}</box>
-        ) : (
-          <box paddingLeft={4} paddingRight={4} paddingBottom={2}>
-            <text fg={tuiTheme.muted}>没有匹配的 Skill</text>
-          </box>
-        )}
-      </box>
-    </box>
+    <SearchPicker
+      visible={props.visible}
+      loading={props.loading}
+      error={props.error}
+      items={props.skills}
+      query={props.query}
+      selectedIndex={props.selectedIndex}
+      terminalWidth={props.terminalWidth}
+      terminalHeight={props.terminalHeight}
+      searchRef={props.searchRef}
+      restoreFocusRef={props.restoreFocusRef}
+      shouldRestoreFocus={props.shouldRestoreFocus}
+      searchId="skill-search"
+      title="Skills"
+      searchPlaceholder="搜索 Skills..."
+      emptyMessage="没有匹配的 Skill"
+      loadingMessage="正在读取 Skill catalog…"
+      itemKey={skill => skill.id}
+      renderItem={(skill, context) => skillPickerRow(skill, context)}
+      onSearch={props.onSearch}
+      onSelect={props.onSelect}
+      onHover={props.onHover}
+      onClose={props.onClose}
+    />
   )
 }
 
-/** 沿用 SkillPicker 的紧凑布局渲染恢复选择器，只展示用户可识别的 thread 摘要。 */
+/** Thread 领域保留用户可识别的摘要行；内部 ID 始终只作为稳定 React key。 */
 export function ThreadPicker(props: {
   visible: boolean
   loading: boolean
@@ -653,127 +581,66 @@ export function ThreadPicker(props: {
   terminalWidth: number
   terminalHeight: number
   searchRef: RefObject<TextareaRenderable | null>
+  restoreFocusRef?: RefObject<TextareaRenderable | null>
+  shouldRestoreFocus?: boolean
   onSearch: (query: string) => void
   onSelect: (thread: ThreadPickerItem) => void
   onHover: (index: number) => void
+  onClose: () => void
 }) {
-  useEffect(() => {
-    if (props.visible) props.searchRef.current?.focus()
-  }, [props.searchRef, props.visible])
-  if (!props.visible) return null
-  const compact = props.terminalWidth < 64 || props.terminalHeight < 19
-  const width = compact
-    ? Math.max(36, props.terminalWidth - 4)
-    : Math.max(60, Math.min(108, Math.floor(props.terminalWidth * 0.76)))
-  const maxRows = compact
-    ? Math.max(3, Math.min(6, props.terminalHeight - 10))
-    : Math.max(5, Math.min(12, props.terminalHeight - 14))
-  const rows = props.loading || props.error
-    ? 1
-    : Math.max(1, Math.min(maxRows, props.threads.length))
-  const summaryWidth = compact
-    ? Math.max(18, width - 6)
-    : Math.max(24, Math.min(34, Math.floor(width * 0.34)))
-  const selectedIndex = Math.min(props.selectedIndex, Math.max(0, props.threads.length - 1))
-
-  const threadRows = props.threads.map((thread, index) => {
-    const selected = index === selectedIndex
-    const meta = `${threadUpdatedLabel(thread.updatedAtMs)} · ${thread.messageCount} 条消息`
-    return (
-      <box
-        key={thread.threadId}
-        backgroundColor={selected ? tuiTheme.pickerActive : tuiTheme.menu}
-        height={1}
-        paddingLeft={3}
-        paddingRight={3}
-        flexDirection="row"
-        gap={2}
-        onMouseOver={() => props.onHover(index)}
-        onMouseUp={() => props.onSelect(thread)}
-      >
-        <text width={summaryWidth} fg={selected ? tuiTheme.background : tuiTheme.primary} wrapMode="none" overflow="hidden">{shorten(thread.firstMessage, summaryWidth)}</text>
-        {!compact ? <text flexGrow={1} fg={selected ? tuiTheme.background : tuiTheme.muted} wrapMode="none" overflow="hidden">{shorten(meta, Math.max(18, width - summaryWidth - 10))}</text> : null}
-      </box>
-    )
-  })
-
   return (
-    <box position="absolute" top={0} left={0} width="100%" height="100%" zIndex={100} alignItems="center" justifyContent="flex-start" paddingTop={compact ? 1 : Math.max(2, Math.floor(props.terminalHeight / 4))} paddingLeft={2} paddingRight={2}>
-      <PickerBackdrop />
-      <box width={width} maxWidth="100%" backgroundColor={tuiTheme.menu} flexDirection="column" zIndex={1}>
-        <box paddingLeft={4} paddingRight={4} paddingTop={2} paddingBottom={1} flexDirection="column">
-          <box flexDirection="row" justifyContent="space-between">
-            <text fg={tuiTheme.text}><strong>Threads</strong></text>
-            <text fg={tuiTheme.muted}>esc</text>
-          </box>
-          <box marginTop={1}>
-            <textarea
-              id="thread-search"
-              ref={props.searchRef}
-              placeholder="搜索 Threads..."
-              placeholderColor={tuiTheme.muted}
-              textColor={tuiTheme.text}
-              focusedTextColor={tuiTheme.text}
-              backgroundColor={tuiTheme.menu}
-              focusedBackgroundColor={tuiTheme.menu}
-              cursorColor={tuiTheme.primary}
-              minHeight={1}
-              maxHeight={1}
-              keyBindings={SKILL_SEARCH_KEY_BINDINGS}
-              focused
-              onContentChange={() => props.onSearch(props.searchRef.current?.plainText ?? "")}
-              onSubmit={() => {
-                const selected = props.threads[selectedIndex]
-                if (selected) props.onSelect(selected)
-              }}
-            />
-          </box>
-        </box>
-        <box paddingLeft={4} paddingRight={4} paddingTop={1} paddingBottom={1}>
-          <text fg={tuiTheme.primary}><strong>Threads</strong></text>
-        </box>
-        {props.loading ? (
-          <box height={rows} paddingLeft={4} paddingRight={4} paddingBottom={2}>
-            <text fg={tuiTheme.muted}>正在读取 Threads…</text>
-          </box>
-        ) : props.error ? (
-          <box height={rows} paddingLeft={4} paddingRight={4} paddingBottom={2}>
-            <text fg={tuiTheme.danger}>{shorten(props.error, width - 8)}</text>
-          </box>
-        ) : props.threads.length ? (
-          props.threads.length > maxRows ? (
-            <scrollbox height={rows} paddingLeft={1} paddingRight={1} paddingBottom={2} viewportOptions={{ paddingRight: 1 }}>{threadRows}</scrollbox>
-          ) : <box flexDirection="column" paddingLeft={1} paddingRight={1} paddingBottom={2}>{threadRows}</box>
-        ) : (
-          <box paddingLeft={4} paddingRight={4} paddingBottom={2}>
-            <text fg={tuiTheme.muted}>没有可恢复的 thread</text>
-          </box>
-        )}
-      </box>
-    </box>
-  )
-}
-
-/** 选择器背景层：保持 thread 可辨识，同时明确当前焦点已转入弹窗。 */
-function PickerBackdrop() {
-  return (
-    <box
-      position="absolute"
-      top={0}
-      left={0}
-      width="100%"
-      height="100%"
-      renderAfter={dimPickerBackdrop}
+    <SearchPicker
+      visible={props.visible}
+      loading={props.loading}
+      error={props.error}
+      items={props.threads}
+      query={props.query}
+      selectedIndex={props.selectedIndex}
+      terminalWidth={props.terminalWidth}
+      terminalHeight={props.terminalHeight}
+      searchRef={props.searchRef}
+      restoreFocusRef={props.restoreFocusRef}
+      shouldRestoreFocus={props.shouldRestoreFocus}
+      searchId="thread-search"
+      title="Threads"
+      searchPlaceholder="搜索 Threads..."
+      emptyMessage="没有可恢复的 thread"
+      loadingMessage="正在读取 Threads…"
+      itemKey={thread => thread.threadId}
+      renderItem={(thread, context) => threadPickerRow(thread, context)}
+      onSearch={props.onSearch}
+      onSelect={props.onSelect}
+      onHover={props.onHover}
+      onClose={props.onClose}
     />
   )
 }
 
-/**
- * OpenTUI 的半透明 Box 会覆盖中文宽字符，故仅变暗已渲染缓冲区的颜色，不写入字符单元格。
- * 此节点的同级面板 zIndex 更高，会在矩阵处理后以原始亮度渲染。
- */
-function dimPickerBackdrop(buffer: OptimizedBuffer): void {
-  buffer.colorMatrixUniform(PICKER_BACKDROP_DIM_MATRIX)
+/** 将 Skill 行的窄终端降级限定在领域内容，不泄漏到通用 Picker 布局。 */
+function skillPickerRow(skill: SkillMenuItem, context: SearchPickerRenderContext): ReactNode {
+  const idWidth = context.compact
+    ? Math.max(18, context.width - 6)
+    : Math.max(24, Math.min(34, Math.floor(context.width * 0.34)))
+  return (
+    <>
+      <text width={idWidth} fg={context.selected ? tuiTheme.background : tuiTheme.primary} wrapMode="none" overflow="hidden">{shorten(skill.id, idWidth)}</text>
+      {!context.compact ? <text flexGrow={1} fg={context.selected ? tuiTheme.background : tuiTheme.muted} wrapMode="none" overflow="hidden">{shorten(skill.description, Math.max(18, context.width - idWidth - 10))}</text> : null}
+    </>
+  )
+}
+
+/** Thread 行只渲染用户可识别摘要与元数据，窄终端下保持单列。 */
+function threadPickerRow(thread: ThreadPickerItem, context: SearchPickerRenderContext): ReactNode {
+  const summaryWidth = context.compact
+    ? Math.max(18, context.width - 6)
+    : Math.max(24, Math.min(34, Math.floor(context.width * 0.34)))
+  const meta = `${threadUpdatedLabel(thread.updatedAtMs)} · ${thread.messageCount} 条消息`
+  return (
+    <>
+      <text width={summaryWidth} fg={context.selected ? tuiTheme.background : tuiTheme.primary} wrapMode="none" overflow="hidden">{shorten(thread.firstMessage, summaryWidth)}</text>
+      {!context.compact ? <text flexGrow={1} fg={context.selected ? tuiTheme.background : tuiTheme.muted} wrapMode="none" overflow="hidden">{shorten(meta, Math.max(18, context.width - summaryWidth - 10))}</text> : null}
+    </>
+  )
 }
 
 /** 渲染输入框下方的配置摘要：模型靠左、审批模式靠右，避免重复品牌和拥挤折行。 */
@@ -932,11 +799,4 @@ const COMPOSER_KEY_BINDINGS: Array<{ name: string; shift?: boolean; action: "sub
   { name: "linefeed", action: "submit" },
   { name: "return", shift: true, action: "newline" },
   { name: "kpenter", shift: true, action: "newline" },
-]
-
-/** Skill 搜索是单行选择控件；Enter 选中当前项，不能继承 textarea 的默认换行。 */
-const SKILL_SEARCH_KEY_BINDINGS: Array<{ name: string; action: "submit" }> = [
-  { name: "return", action: "submit" },
-  { name: "kpenter", action: "submit" },
-  { name: "linefeed", action: "submit" },
 ]

@@ -222,6 +222,7 @@ test("Skills 与 Threads 选择器压暗底层 thread，但不压暗自身面板
         onSearch: () => undefined,
         onSelect: () => undefined,
         onHover: () => undefined,
+        onClose: () => undefined,
       }),
     },
     {
@@ -245,6 +246,7 @@ test("Skills 与 Threads 选择器压暗底层 thread，但不压暗自身面板
         onSearch: () => undefined,
         onSelect: () => undefined,
         onHover: () => undefined,
+        onClose: () => undefined,
       }),
     },
   ]
