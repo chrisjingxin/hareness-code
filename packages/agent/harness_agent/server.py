@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping
@@ -149,8 +150,30 @@ class JsonRpcServer:
     async def run(self) -> None:
         """持续读取受限大小的 JSONL 帧，直到 EOF 或正常关闭。"""
         reader = asyncio.StreamReader(limit=MAX_FRAME_BYTES + 1)
-        protocol = asyncio.StreamReaderProtocol(reader)
-        await asyncio.get_running_loop().connect_read_pipe(lambda: protocol, sys.stdin)
+        loop = asyncio.get_running_loop()
+        if sys.platform == "win32":
+            # Windows ProactorEventLoop 对重定向 stdin 句柄注册 IOCP 会抛 WinError 6，
+            # 改用后台线程阻塞读取并喂入 StreamReader，保持分帧逻辑不变。
+            def _feed_stdin() -> None:
+                stdin = getattr(sys.stdin, "buffer", sys.stdin)
+                try:
+                    while True:
+                        chunk = stdin.readline()
+                        if not chunk:
+                            break
+                        loop.call_soon_threadsafe(reader.feed_data, chunk)
+                except Exception:
+                    pass
+                try:
+                    loop.call_soon_threadsafe(reader.feed_eof)
+                except RuntimeError:
+                    # 事件循环已关闭；stdin 线程退出即可。
+                    pass
+
+            threading.Thread(target=_feed_stdin, name="za38-stdin", daemon=True).start()
+        else:
+            protocol = asyncio.StreamReaderProtocol(reader)
+            await loop.connect_read_pipe(lambda: protocol, sys.stdin)
         try:
             while self._running:
                 try:

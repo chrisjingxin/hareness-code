@@ -34,7 +34,10 @@ export function clientCapabilities(command: Command): string[] {
 async function startAgent(command: Command): Promise<RunningAgent> {
   validateWorkspace(command.cwd)
   const sourcePython = resolve(import.meta.dir, "../../agent/.venv/bin/python")
-  const python = process.env.HARNESS_AGENT_PYTHON ?? (existsSync(sourcePython) ? sourcePython : "python3")
+  const sourcePythonWin = resolve(import.meta.dir, "../../agent/.venv/Scripts/python.exe")
+  // Windows 上 .venv 布局是 Scripts/python.exe，Unix 是 bin/python；两者都探测后再降级到 PATH。
+  const python = process.env.HARNESS_AGENT_PYTHON
+    ?? (existsSync(sourcePython) ? sourcePython : existsSync(sourcePythonWin) ? sourcePythonWin : "python3")
   const sourceAgent = resolve(import.meta.dir, "../../agent")
   const sandboxEnvironment = command.kind === "run" && command.sandbox !== undefined
     // CLI 显式参数必须高于用户环境变量；sidecar 仅把这个内部字段当作
