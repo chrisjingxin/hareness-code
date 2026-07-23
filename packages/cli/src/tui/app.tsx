@@ -29,7 +29,7 @@ import {
   rememberPrompt,
   type PromptHistoryCursor,
 } from "./prompt-history"
-import { resolveShortcut } from "./shortcuts"
+import { resolveShortcut, type ScrollIntent } from "./shortcuts"
 import { registerCommonSyntaxParsers } from "./syntax-parsers"
 import {
   appendNotice,
@@ -523,17 +523,23 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     void sendAgentMessage(message)
   }, [clearDraft, commit, draft, executeSlashCommand, respondQuestion, sendAgentMessage])
 
-  /** 按行或半页滚动当前 thread，供空 composer 的方向键使用。 */
-  const scrollConversationBy = useCallback((amount: "line-up" | "line-down" | "page-up" | "page-down") => {
+  /** 按行、半页或跳转首尾滚动当前 thread；全局快捷键与空 composer 方向键共用。 */
+  const scrollConversation = useCallback((intent: ScrollIntent) => {
     const scroll = conversationScrollRef.current
     if (!scroll || scroll.isDestroyed) return false
-    const delta = amount === "line-up"
-      ? -1
-      : amount === "line-down"
-        ? 1
-        : amount === "page-up"
-          ? -Math.max(1, Math.floor(scroll.height / 2))
-          : Math.max(1, Math.floor(scroll.height / 2))
+    if (intent === "top") {
+      scroll.scrollTo(0)
+      return true
+    }
+    if (intent === "bottom") {
+      scroll.scrollTo(scroll.scrollHeight)
+      return true
+    }
+    const half = Math.max(1, Math.floor(scroll.height / 2))
+    const delta = intent === "line-up" ? -1
+      : intent === "line-down" ? 1
+        : intent === "page-up" ? -half
+          : half
     scroll.scrollBy(delta)
     return true
   }, [])
@@ -556,16 +562,15 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
       return
     }
 
-    // 只有空 composer 才借出方向键给 thread；编辑任何文本时完全保持 textarea 原生语义。
+    // 只有空 composer 才借出方向键给 thread 行滚动；编辑任何文本时完全保持 textarea 原生语义。
+    // PageUp/PageDown 已由全局快捷键处理，这里不再重复消费。
     if (!input.plainText && !isHomeState(stateRef.current)) {
       const scrollAction = key.name === "up" ? "line-up"
         : key.name === "down" ? "line-down"
-          : key.name === "pageup" ? "page-up"
-            : key.name === "pagedown" ? "page-down"
-              : undefined
-      if (scrollAction && scrollConversationBy(scrollAction)) key.preventDefault()
+          : undefined
+      if (scrollAction && scrollConversation(scrollAction)) key.preventDefault()
     }
-  }, [commandDialog, commandMenu.visible, navigatePromptHistory, scrollConversationBy, skillPicker.visible, threadPicker.visible])
+  }, [commandDialog, commandMenu.visible, navigatePromptHistory, scrollConversation, skillPicker.visible, threadPicker.visible])
 
   useKeyboard(key => {
     const commandOptions = findCommandMenuItems(draft, skills, tuiCommandContext(runtime, stateRef.current))
@@ -589,6 +594,20 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     }
     if (action === "cancel-command-dialog") {
       resolveCommandDialog(false)
+      return
+    }
+
+    // 滚动键全局生效，可在输入或运行中随时回看历史；与 opencode 的 session.global 对齐。
+    const scrollIntent: ScrollIntent | undefined =
+      action === "scroll-line-up" ? "line-up"
+      : action === "scroll-line-down" ? "line-down"
+      : action === "scroll-page-up" ? "page-up"
+      : action === "scroll-page-down" ? "page-down"
+      : action === "scroll-top" ? "top"
+      : action === "scroll-bottom" ? "bottom"
+      : undefined
+    if (scrollIntent) {
+      scrollConversation(scrollIntent)
       return
     }
     if (action === "close-skill-picker") {

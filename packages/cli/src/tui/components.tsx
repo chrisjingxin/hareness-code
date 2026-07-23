@@ -682,7 +682,7 @@ function FooterRail(props: { runtime: TuiRuntime; state: TuiState; terminalWidth
         <text fg={tuiTheme.muted}>{workspace}</text>
         {showBranch ? <text fg={tuiTheme.subtle}>:{props.runtime.gitBranch}</text> : null}
       </box>
-      {props.state.activeRun ? <BusyRunHint /> : props.thread ? <text fg={tuiTheme.muted}>↑↓ 历史提示词 · PgUp/PgDn 浏览 · Ctrl+O 工具详情</text> : null}
+      {props.state.activeRun ? <BusyRunHint /> : props.thread ? <text fg={tuiTheme.muted}>↑↓ 历史 · PgUp/PgDn 滚动 · Ctrl+O 工具</text> : null}
       <text fg={tuiTheme.subtle}>v{props.runtime.cliVersion}</text>
     </box>
   )
@@ -694,7 +694,7 @@ function BusyRunHint() {
   return (
     <box flexDirection="row" gap={1}>
       <text fg={tuiTheme.primary}>{frame}</text>
-      <text fg={tuiTheme.muted}>Esc 中断</text>
+      <text fg={tuiTheme.muted}>PgUp/PgDn 滚动 · Esc 中断</text>
     </box>
   )
 }

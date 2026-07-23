@@ -1,5 +1,8 @@
 /** 全局快捷键解析器；方向键留给 textarea 依据光标位置处理。 */
 
+/** 滚动意图：行/半页/跳转首尾，由全局快捷键与空 composer 方向键共用。 */
+export type ScrollIntent = "line-up" | "line-down" | "page-up" | "page-down" | "top" | "bottom"
+
 type KeyLike = {
   name: string
   ctrl: boolean
@@ -42,6 +45,29 @@ export type ShortcutAction =
   | "exit"
   | "clear-selected-skill"
   | "toggle-tool-details"
+  | "scroll-line-up"
+  | "scroll-line-down"
+  | "scroll-page-up"
+  | "scroll-page-down"
+  | "scroll-top"
+  | "scroll-bottom"
+
+/** 滚动专用快捷键：Ctrl 组合键与 PageUp/PageDown，避免抢占方向键与 Home/End 的文本编辑语义。 */
+function resolveScrollShortcut(key: KeyLike): ShortcutAction {
+  if (key.ctrl) {
+    switch (key.name) {
+      case "up": return "scroll-line-up"
+      case "down": return "scroll-line-down"
+      case "home": return "scroll-top"
+      case "end": return "scroll-bottom"
+    }
+  }
+  switch (key.name) {
+    case "pageup": return "scroll-page-up"
+    case "pagedown": return "scroll-page-down"
+  }
+  return "none"
+}
 
 /** 快捷键先处理临时菜单，再处理运行态，避免输入控件吞掉 Ctrl+C 与 Esc。 */
 export function resolveShortcut(key: KeyLike, context: ShortcutContext): ShortcutAction {
@@ -73,6 +99,13 @@ export function resolveShortcut(key: KeyLike, context: ShortcutContext): Shortcu
     if (key.name === "return" || key.name === "kpenter" || key.name === "tab") {
       return context.commandOptionCount > 0 ? "command-select" : "command-block"
     }
+  }
+
+  // 滚动键全局生效（含正在输入或运行中），与 opencode 的 session.global 对齐；
+  // 浮层打开时让位给选择器，避免在背后滚动历史。
+  if (!context.commandMenuVisible && !context.skillPickerVisible && !context.threadPickerVisible) {
+    const scrollAction = resolveScrollShortcut(key)
+    if (scrollAction !== "none") return scrollAction
   }
 
   if (key.ctrl && key.name === "p") return "command-open"
