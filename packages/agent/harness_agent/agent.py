@@ -20,6 +20,7 @@ from harness_agent.approval_policy import (
     interrupt_on_for_approval_mode,
 )
 from harness_agent.prompting import PromptComposer, PromptEpoch, read_only_memory_snapshot, tool_schema_fingerprint
+from harness_agent.run_context import PromptEpochMiddleware, RunContext
 
 if TYPE_CHECKING:
     from harness_agent.workspace_boundary import WorkspaceBoundaryMiddleware
@@ -108,6 +109,18 @@ def _without_deepagents_summarization(model: BaseChatModel):
 def _load_system_prompt() -> str:
     """从打包的 markdown 文件加载系统提示词。"""
     return _PROMPT_PATH.read_text(encoding="utf-8")
+
+
+def default_tool_catalog_fingerprint() -> str:
+    """返回当前内置工具实际暴露形状的稳定指纹，供 Runtime Profile 使用。"""
+    return tool_schema_fingerprint(_BUILTIN_TOOL_SHAPES)
+
+
+def default_prompt_template_fingerprint() -> str:
+    """返回基础 system prompt 模板内容的稳定指纹，配置变化时触发新 Runtime。"""
+    from harness_agent.prompting import sha256_text
+
+    return sha256_text(_load_system_prompt())
 
 
 def _create_default_subagents(
@@ -235,8 +248,9 @@ def create_harness_agent(
     prompt_epoch: PromptEpoch | None = None,
     thread_store: Any | None = None,
     context_updates: dict[str, list[Any]] | None = None,
-    context_middlewares: dict[str, Any] | None = None,
+    context_middleware: Any | None = None,
     context_window_tokens: int | None = None,
+    shared_runtime: bool = False,
 ) -> Any:
     """创建 za38 编码 agent。
 
@@ -258,11 +272,12 @@ def create_harness_agent(
         workdir: 工作目录别名（优先于 cwd）。
         execution_context: 服务端已创建的本机或远端工具执行上下文。
         skill_registry: 服务端建立的固定 Skill catalog；未传入时由本机调用方创建。
-        prompt_epoch: 当前 thread 持久化的稳定 system 前缀；未传入时仅供库调用创建临时 epoch。
+        prompt_epoch: 非共享库调用的稳定 system 前缀；共享运行时必须在 RunContext 中传入。
         thread_store: 当前 project 的本机归档/epoch 存储。
         context_updates: server 持有的上下文事件缓冲，避免中间件直接写协议。
-        context_middlewares: server 按 thread 保存的压缩器，用于用户手动触发压缩。
+        context_middleware: 可由 server 显式持有的共享压缩器，用于用户手动触发压缩。
         context_window_tokens: 已校验的窗口大小；None 时优先读取模型 profile。
+        shared_runtime: True 时编译可服务多个 thread 的图，所有 thread 状态从 RunContext 读取。
 
     Returns:
         编译后的 LangGraph agent（CompiledStateGraph）。
@@ -289,7 +304,9 @@ def create_harness_agent(
     # 服务端会同时传 cwd 与 ExecutionContext；库调用方可能只传后者。守卫必须
     # 始终以本机 backend 实际绑定的工作区为准，不能退化为当前进程目录。
     local_workspace = prompt_workspace if not sandboxed else root
-    if prompt_epoch is None:
+    if shared_runtime and prompt_epoch is not None:
+        raise ValueError("SHARED_RUNTIME_PROMPT_EPOCH_MUST_USE_RUN_CONTEXT")
+    if prompt_epoch is None and not shared_runtime:
         # 库调用没有 ThreadStore 时仍使用相同的确定性顺序，但不会声称可恢复。
         if enable_skills and not sandboxed and skill_registry is None:
             from harness_agent.skills import SkillRegistry
@@ -307,7 +324,7 @@ def create_harness_agent(
             enable_skills=enable_skills,
             extra_tools=tools,
         )
-    prompt = prompt_epoch.system_prompt
+    prompt = prompt_epoch.system_prompt if prompt_epoch is not None else None
 
     agent_middleware: list[Any] = []
     if approval_mode == "plan":
@@ -327,15 +344,28 @@ def create_harness_agent(
     # load_skill/read_skill_resource/retrieve_context_artifact 等专用工具。
     if enable_skills and not sandboxed:
         from harness_agent.skills import SkillRegistry
-        from harness_agent.virtual_files import mount_harness_virtual_files
+        from harness_agent.virtual_files import (
+            mount_harness_virtual_files,
+            run_scoped_virtual_backend_factory,
+        )
 
         registry = skill_registry or SkillRegistry(local_workspace)
-        backend = mount_harness_virtual_files(
-            backend,
-            registry=registry,
-            thread_id=prompt_epoch.thread_id,
-            thread_store=thread_store,
-        )
+        if shared_runtime:
+            # ``backend`` 的固定部分只包含工作区资源；虚拟历史必须在每次工具
+            # 调用时按 RunContext 的 thread 重新挂载，不能被编译图闭包捕获。
+            backend = run_scoped_virtual_backend_factory(
+                backend,
+                registry=registry,
+                thread_store=thread_store,
+            )
+        else:
+            assert prompt_epoch is not None
+            backend = mount_harness_virtual_files(
+                backend,
+                registry=registry,
+                thread_id=prompt_epoch.thread_id,
+                thread_store=thread_store,
+            )
     elif enable_skills:
         logger.info("Skills middleware is disabled in remote sandbox mode")
 
@@ -373,12 +403,16 @@ def create_harness_agent(
     profile = getattr(resolved_model, "profile", None)
     profile_window = profile.get("max_input_tokens") if isinstance(profile, dict) else None
     window = context_window_tokens or (profile_window if isinstance(profile_window, int) else 128_000)
-    context_middleware = ContextWindowMiddleware(
-        resolved_model,
-        context_window_tokens=window,
-        thread_store=thread_store,
-        updates=context_updates,
-    )
+    if context_middleware is None:
+        context_middleware = ContextWindowMiddleware(
+            resolved_model,
+            context_window_tokens=window,
+            thread_store=thread_store,
+            updates=context_updates,
+        )
+    if shared_runtime:
+        # 该中间件仅读取本轮 context，不保存 thread 私有 PromptEpoch。
+        agent_middleware.append(PromptEpochMiddleware())
     agent_middleware.append(context_middleware)
 
     all_tools = list(tools) if tools else []
@@ -395,7 +429,6 @@ def create_harness_agent(
             interrupt_on=interrupt_on,
             checkpointer=checkpointer or MemorySaver(),
             subagents=subagents,
+            context_schema=RunContext if shared_runtime else None,
         )
-    if context_middlewares is not None:
-        context_middlewares[prompt_epoch.thread_id] = context_middleware
     return compiled

@@ -66,8 +66,9 @@ async def test_thread_store_recovers_messages_after_reopen(tmp_path: Path) -> No
 
 
 async def test_thread_store_reuses_langgraph_state_across_graph_restart(tmp_path: Path) -> None:
-    """两个独立 Agent 图通过同一 thread_id 和 project namespace 累积 message 状态。"""
-    from harness_agent.agent import create_harness_agent
+    """共享图重建后通过持久化 RunContext 恢复同一 thread 的消息和 PromptEpoch。"""
+    from harness_agent.agent import create_harness_agent, create_prompt_epoch
+    from harness_agent.run_context import RunContext
 
     home = tmp_path / "home"
     project = tmp_path / "project"
@@ -75,6 +76,18 @@ async def test_thread_store_reuses_langgraph_state_across_graph_restart(tmp_path
     first = await ThreadStore.open(project=project, home=home)
     first_model = ToolCallingFakeChatModel(messages=iter([AIMessage(content="第一轮回答")]))
     first_model.profile = {"max_input_tokens": 200000}
+    epoch = create_prompt_epoch(
+        thread_id="thread-1",
+        system_prompt="持久化前缀",
+        workspace=str(project),
+        sandboxed=False,
+        provider=None,
+        approval_mode="yolo",
+        skill_registry=None,
+        enable_memory=False,
+        enable_skills=False,
+    )
+    await first.save_prompt_epoch(epoch)
     first_agent = create_harness_agent(
         first_model,
         cwd=str(project),
@@ -82,6 +95,8 @@ async def test_thread_store_reuses_langgraph_state_across_graph_restart(tmp_path
         enable_skills=False,
         enable_memory=False,
         enable_ask_user=False,
+        approval_mode="yolo",
+        shared_runtime=True,
     )
     await first.record_message("thread-1", "第一轮请求")
     _ = [
@@ -89,6 +104,12 @@ async def test_thread_store_reuses_langgraph_state_across_graph_restart(tmp_path
         async for event in first_agent.astream(
             {"messages": [HumanMessage(content="第一轮请求")]},
             config=first.graph_config("thread-1"),
+            context=RunContext(
+                thread_id="thread-1",
+                run_id="run-1",
+                prompt_epoch=epoch,
+                approval_mode="yolo",
+            ),
             stream_mode=["messages", "updates"],
         )
     ]
@@ -98,6 +119,8 @@ async def test_thread_store_reuses_langgraph_state_across_graph_restart(tmp_path
     second = await ThreadStore.open(project=project, home=home)
     second_model = ToolCallingFakeChatModel(messages=iter([AIMessage(content="第二轮回答")]))
     second_model.profile = {"max_input_tokens": 200000}
+    restored_epoch = await second.get_prompt_epoch("thread-1")
+    assert restored_epoch == epoch
     second_agent = create_harness_agent(
         second_model,
         cwd=str(project),
@@ -105,6 +128,8 @@ async def test_thread_store_reuses_langgraph_state_across_graph_restart(tmp_path
         enable_skills=False,
         enable_memory=False,
         enable_ask_user=False,
+        approval_mode="yolo",
+        shared_runtime=True,
     )
     await second.record_message("thread-1", "第二轮请求")
     _ = [
@@ -112,6 +137,12 @@ async def test_thread_store_reuses_langgraph_state_across_graph_restart(tmp_path
         async for event in second_agent.astream(
             {"messages": [HumanMessage(content="第二轮请求")]},
             config=second.graph_config("thread-1"),
+            context=RunContext(
+                thread_id="thread-1",
+                run_id="run-2",
+                prompt_epoch=restored_epoch,
+                approval_mode="yolo",
+            ),
             stream_mode=["messages", "updates"],
         )
     ]

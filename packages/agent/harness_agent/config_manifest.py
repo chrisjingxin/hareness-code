@@ -55,6 +55,7 @@ class ConfigManifest:
         "models": ConfigSection("models", "implemented", "ZC-019", ACTIVE_TOML_SOURCES),
         "approval": ConfigSection("approval", "implemented", None, ACTIVE_TOML_SOURCES),
         "execution": ConfigSection("execution", "implemented", "ZC-008", ACTIVE_TOML_SOURCES),
+        "runtime_pool": ConfigSection("runtime_pool", "implemented", "ZC-057", ACTIVE_TOML_SOURCES),
         "ui": ConfigSection("ui", "planned", "ZC-042", frozenset()),
         "skills": ConfigSection("skills", "planned", "ZC-014", frozenset()),
         "agents": ConfigSection("agents", "planned", "ZC-015", frozenset()),

@@ -140,12 +140,32 @@ class ExecutionSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimePoolSettings:
+    """共享 AgentRuntime Pool 的容量、空闲淘汰和关闭等待配置。"""
+
+    max_profiles: int = 8
+    idle_ttl_seconds: int = 1_800
+    close_timeout_seconds: int = 15
+    pin_default_profile: bool = False
+
+    def redacted(self) -> dict[str, object]:
+        """返回不含路径、凭据或运行时状态的 Pool 配置摘要。"""
+        return {
+            "max_profiles": self.max_profiles,
+            "idle_ttl_seconds": self.idle_ttl_seconds,
+            "close_timeout_seconds": self.close_timeout_seconds,
+            "pin_default_profile": self.pin_default_profile,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class Za38Config:
     """最终生效的 Harness v1 配置、来源路径和运行时摘要。"""
 
     model: ModelSettings | None
     model_profile: str | None
     execution: ExecutionSettings
+    runtime_pool: RuntimePoolSettings
     paths: tuple[Path, ...]
     workspace: Path
     sources: Mapping[str, str]
@@ -169,6 +189,7 @@ class Za38Config:
             "model_profile": self.model_profile,
             "model": self.model.redacted(environ) if self.model else None,
             "security": self.execution.redacted(),
+            "runtime_pool": self.runtime_pool.redacted(),
         }
 
 
@@ -200,7 +221,7 @@ def load_config(
             (explicit_path, ConfigSource.EXPLICIT, _read_document(explicit_path, ConfigSource.EXPLICIT))
         )
 
-    models, approval_values, execution_values, sources = _merge_documents(documents)
+    models, approval_values, execution_values, runtime_pool_values, sources = _merge_documents(documents)
     _apply_environment_overrides(models, approval_values, execution_values, environment, sources)
     _apply_cli_overrides(execution_values, environment, sources)
     model_profile, model = _parse_default_model(models)
@@ -209,6 +230,7 @@ def load_config(
         model=model,
         model_profile=model_profile,
         execution=_parse_execution(approval_values, execution_values),
+        runtime_pool=_parse_runtime_pool(runtime_pool_values),
         paths=tuple(path for path, _, _ in documents),
         workspace=resolved_workspace,
         sources=sources,
@@ -287,12 +309,24 @@ def _supports_posix_permissions() -> bool:
 
 def _merge_documents(
     documents: list[tuple[Path, ConfigSource, dict[str, Any]]],
-) -> tuple[dict[str, object], dict[str, object], dict[str, object], dict[str, str]]:
+) -> tuple[
+    dict[str, object],
+    dict[str, object],
+    dict[str, object],
+    dict[str, object],
+    dict[str, str],
+]:
     """按用户到显式配置的顺序合并已验证字段，并记录最后贡献来源。"""
     models: dict[str, object] = {"profiles": {}}
     approval_values: dict[str, object] = {}
     execution_values: dict[str, object] = {}
-    sources = {"models": "default", "approval": "default", "execution": "default"}
+    runtime_pool_values: dict[str, object] = {}
+    sources = {
+        "models": "default",
+        "approval": "default",
+        "execution": "default",
+        "runtime_pool": "default",
+    }
     for _, source, document in documents:
         if "models" in document:
             _merge_models(models, document["models"])
@@ -303,7 +337,10 @@ def _merge_documents(
         if "execution" in document:
             execution_values = _merge_execution_values(execution_values, document["execution"])
             sources["execution"] = source.value
-    return models, approval_values, execution_values, sources
+        if "runtime_pool" in document:
+            runtime_pool_values = _merge_flat_values(runtime_pool_values, document["runtime_pool"])
+            sources["runtime_pool"] = source.value
+    return models, approval_values, execution_values, runtime_pool_values, sources
 
 
 def _merge_models(target: dict[str, object], value: object) -> None:
@@ -540,6 +577,45 @@ def _parse_execution(
     )
 
 
+def _parse_runtime_pool(values: Mapping[str, object]) -> RuntimePoolSettings:
+    """解析共享 Runtime Pool 的有界缓存与确定性关闭配置。"""
+    allowed = {
+        "max_profiles",
+        "idle_ttl_seconds",
+        "close_timeout_seconds",
+        "pin_default_profile",
+    }
+    unknown = set(values) - allowed
+    if unknown:
+        raise ConfigError(
+            f"[runtime_pool] contains unsupported fields: {', '.join(sorted(unknown))}"
+        )
+    pin_default_profile = values.get("pin_default_profile", False)
+    if not isinstance(pin_default_profile, bool):
+        raise ConfigError("runtime_pool.pin_default_profile must be a boolean")
+    return RuntimePoolSettings(
+        max_profiles=_integer(
+            values.get("max_profiles", 8),
+            "runtime_pool.max_profiles",
+            minimum=1,
+            maximum=64,
+        ),
+        idle_ttl_seconds=_integer(
+            values.get("idle_ttl_seconds", 1_800),
+            "runtime_pool.idle_ttl_seconds",
+            minimum=60,
+            maximum=86_400,
+        ),
+        close_timeout_seconds=_integer(
+            values.get("close_timeout_seconds", 15),
+            "runtime_pool.close_timeout_seconds",
+            minimum=1,
+            maximum=120,
+        ),
+        pin_default_profile=pin_default_profile,
+    )
+
+
 def _sandbox_backend(value: object) -> str:
     """将公开 sandbox 环境变量转换为 v1 的 ``execution.backend`` 值。"""
     normalized = str(value).strip().lower()
@@ -571,7 +647,7 @@ def _number(value: object, path: str, *, minimum: float) -> float:
     return number
 
 
-def _integer(value: object, path: str, *, minimum: int) -> int:
+def _integer(value: object, path: str, *, minimum: int, maximum: int | None = None) -> int:
     """将配置值解析为满足下限的整数。"""
     if isinstance(value, bool):
         raise ConfigError(f"{path} must be an integer")
@@ -581,4 +657,6 @@ def _integer(value: object, path: str, *, minimum: int) -> int:
         raise ConfigError(f"{path} must be an integer") from exc
     if number < minimum:
         raise ConfigError(f"{path} must be >= {minimum}")
+    if maximum is not None and number > maximum:
+        raise ConfigError(f"{path} must be <= {maximum}")
     return number

@@ -19,6 +19,15 @@ from typing import Any
 from pydantic import ValidationError
 
 from harness_agent import __version__
+from harness_agent.agent_runtime import (
+    AgentRuntime,
+    AgentRuntimeLease,
+    AgentRuntimeRunLease,
+    RuntimeCloseAdapter,
+    RuntimePool,
+    RuntimePoolCapacityError,
+    RuntimeResourceBundle,
+)
 from harness_agent.config import ConfigError, Za38Config, load_config
 from harness_agent.protocol_generated import (
     MAX_FRAME_BYTES,
@@ -36,6 +45,12 @@ from harness_agent.protocol_generated import (
     ThreadsOpenParams,
 )
 from harness_agent.skills import SkillError, SkillRegistry
+from harness_agent.run_context import RunCancellationToken, RunContext
+from harness_agent.runtime_profile import (
+    RuntimeProfile,
+    component_fingerprint,
+    default_runtime_profile,
+)
 from harness_agent.thread_store import ThreadStore, ThreadStoreError
 
 logger = logging.getLogger(__name__)
@@ -73,6 +88,28 @@ class ActiveRun:
     last_tool_id: str | None = None
     started_at: float = field(default_factory=time.monotonic)
     context_summary: dict[str, object] = field(default_factory=dict)
+    cancellation_token: RunCancellationToken = field(default_factory=RunCancellationToken)
+    run_context: RunContext | None = None
+    runtime_lease: AgentRuntimeLease | None = None
+    runtime_run_lease: AgentRuntimeRunLease | None = None
+    runtime_profile_key: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _RuntimeBuildSpec:
+    """构建一个共享 Runtime 所需的稳定输入，不含 thread/run 私有状态。"""
+
+    config: Za38Config
+    workspace: Path
+    skill_registry: SkillRegistry
+
+
+@dataclass(slots=True)
+class _RuntimeArtifacts:
+    """Runtime 图之外的共享 middleware 与执行上下文，由同一 Runtime 负责释放。"""
+
+    execution_context: Any
+    context_compactor: Any
 
 
 @dataclass(slots=True)
@@ -106,17 +143,16 @@ class JsonRpcServer:
         操作系统解析出的真实 home，不能由 JSON-RPC 客户端传入。
         """
         self.agent = agent
-        self._agent_factory = agent_factory or self._create_default_agent
+        self._agent_factory = agent_factory
         self._uses_default_agent_factory = agent_factory is None and agent is None
-        self._thread_agents: dict[str, Any] = {}
         self._context_updates: dict[str, list[Any]] = {}
-        self._context_middlewares: dict[str, Any] = {}
         self._allow_echo = (
             os.environ.get("HARNESS_ECHO_MODE") == "1" if allow_echo is None else allow_echo
         )
         self._running = True
         self._initialized = False
         self._send_lock = asyncio.Lock()
+        self._agent_build_lock = asyncio.Lock()
         self._runs: dict[str, ActiveRun] = {}
         self._pending_requests: dict[str, asyncio.Future[object]] = {}
         self._workspace = Path.cwd().resolve()
@@ -126,6 +162,10 @@ class JsonRpcServer:
         self._startup_error: str | None = None
         self._skill_registry: SkillRegistry | None = None
         self._thread_store: ThreadStore | None = None
+        self._runtime_pool: RuntimePool | None = None
+        self._runtime_build_specs: dict[str, _RuntimeBuildSpec] = {}
+        self._runtime_artifacts: dict[str, _RuntimeArtifacts] = {}
+        self._default_profile_key: str | None = None
         self._protocol_minor = PROTOCOL_MINOR
         self._enabled_capabilities: set[str] = set()
         self._handlers = {
@@ -198,6 +238,7 @@ class JsonRpcServer:
         finally:
             await self._cancel_all_runs()
             self._fail_pending_requests(RpcError(-32004, "Peer connection closed"))
+            await self._close_runtime_pool()
             await self._close_thread_store()
 
     async def dispatch(self, message: dict[str, Any]) -> None:
@@ -244,6 +285,13 @@ class JsonRpcServer:
                 request_id,
                 -32020,
                 "THREAD_STORE_UNAVAILABLE",
+                {"code": str(exc)},
+            )
+        except RuntimePoolCapacityError as exc:
+            await self.send_error(
+                request_id,
+                -32030,
+                "RUNTIME_POOL_CAPACITY_EXHAUSTED",
                 {"code": str(exc)},
             )
         except RpcError as exc:
@@ -372,6 +420,7 @@ class JsonRpcServer:
         parsed = RunCancelParams.model_validate(params)
         run = self._require_run(parsed.thread_id, parsed.run_id)
         if run.task and not run.task.done():
+            run.cancellation_token.cancel()
             run.task.cancel()
             # create_task 尚未获得首个时间片时，协程内部的 CancelledError 分支不会执行；
             # 这里补发唯一终态，保证“刚接受就取消”也不会让客户端永久等待。
@@ -395,37 +444,46 @@ class JsonRpcServer:
         messages = await store.load_context_messages(parsed.thread_id)
         if messages is None:
             raise RpcError(-32004, "THREAD_NOT_RECOVERABLE")
-        agent = await self._ensure_agent(parsed.thread_id)
-        middleware = self._context_middlewares.get(parsed.thread_id)
-        if agent is None or middleware is None:
-            raise RpcError(-32010, "CONTEXT_COMPACTION_UNAVAILABLE")
-
-        compacted, update, rewritten = await middleware.compact_now(parsed.thread_id, messages)
-        # `compact_now` 复用运行期状态缓冲；当前请求直接返回结果，因此必须消费，
-        # 防止下一次 Agent run 重复发出过期的 context.updated 事件。
-        middleware.consume_updates(parsed.thread_id)
-        if rewritten:
-            from langchain_core.messages import RemoveMessage
-            from langgraph.graph.message import REMOVE_ALL_MESSAGES
-
-            await agent.aupdate_state(
-                # CompiledStateGraph 将非空 checkpoint_ns 解释为子图路径；项目隔离
-                # 由 ProjectScopedAsyncSqliteSaver 在根图空 namespace 上自动补齐。
-                {"configurable": {"thread_id": parsed.thread_id}},
-                {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *compacted]},
-                as_node="model",
+        if not self._uses_default_agent_factory:
+            agent = await self._ensure_agent()
+            middleware = getattr(self, "_context_compactor", None)
+            if agent is None or middleware is None:
+                raise RpcError(-32010, "CONTEXT_COMPACTION_UNAVAILABLE")
+            return await self._compact_with_runtime(
+                agent=agent,
+                middleware=middleware,
+                thread_id=parsed.thread_id,
+                messages=messages,
+                store=store,
             )
-            await store.refresh_thread(parsed.thread_id)
-        return {"compacted": rewritten, "context": update.payload()}
+
+        lease, runtime = await self._acquire_default_runtime(parsed.thread_id)
+        try:
+            if lease is None or runtime is None:
+                raise RpcError(-32010, "CONTEXT_COMPACTION_UNAVAILABLE")
+            artifacts = self._runtime_artifacts.get(runtime.profile_key)
+            if artifacts is None or runtime.graph is None:
+                raise RpcError(-32010, "CONTEXT_COMPACTION_UNAVAILABLE")
+            return await self._compact_with_runtime(
+                agent=runtime.graph,
+                middleware=artifacts.context_compactor,
+                thread_id=parsed.thread_id,
+                messages=messages,
+                store=store,
+            )
+        finally:
+            await self._release_runtime_lease(lease)
 
     async def _handle_config_show(self, _params: dict[str, Any], _id: str) -> dict[str, Any]:
-        """返回当前脱敏配置。"""
+        """返回当前脱敏配置与可重建 RuntimePool 的本地诊断摘要。"""
         if _params:
             raise RpcError(-32602, "config.show does not accept params")
         self._load_config()
         if self._config is None:
             raise RpcError(-32010, self._startup_error or "Configuration is unavailable")
-        return self._config.redacted()
+        summary = self._config.redacted()
+        summary["runtime_pool_diagnostics"] = await self._runtime_pool_diagnostics()
+        return summary
 
     async def _handle_config_path(self, _params: dict[str, Any], _id: str) -> dict[str, Any]:
         """返回配置合并路径。"""
@@ -537,6 +595,7 @@ class JsonRpcServer:
             raise RpcError(-32602, "shutdown does not accept params")
         self._running = False
         await self._cancel_all_runs()
+        await self._close_runtime_pool()
         await self._close_thread_store()
         return {}
 
@@ -583,7 +642,10 @@ class JsonRpcServer:
                     f"Read `/.harness/skills/{loaded.record.skill_id}/SKILL.md` with read_file before using it.\n\n"
                     f"User request:\n{run.message}"
                 )
-            agent = await self._ensure_agent(run.thread_id)
+            if self._uses_default_agent_factory:
+                agent = await self._acquire_default_runtime_for_run(run)
+            else:
+                agent = await self._ensure_agent()
             if agent is None:
                 if not self._allow_echo:
                     raise ConfigError(self._startup_error or "Agent is not configured")
@@ -610,6 +672,19 @@ class JsonRpcServer:
         except asyncio.CancelledError:
             run.status = "cancelled"
             await self._emit(run, "run.cancelled", {"reason": "Cancelled by client"})
+        except RuntimePoolCapacityError as exc:
+            run.status = "failed"
+            await self._emit(
+                run,
+                "run.failed",
+                {
+                    "error": {
+                        "code": "RUNTIME_POOL_CAPACITY_EXHAUSTED",
+                        "message": str(exc),
+                        "retryable": True,
+                    }
+                },
+            )
         except Exception as exc:
             run.status = "failed"
             logger.exception("Agent run failed: %s", run.run_id)
@@ -625,6 +700,7 @@ class JsonRpcServer:
                 },
             )
         finally:
+            await self._release_run_runtime(run)
             if self._thread_store is not None and run.status != "completed":
                 try:
                     await self._thread_store.refresh_thread(run.thread_id)
@@ -632,8 +708,8 @@ class JsonRpcServer:
                     logger.exception("Unable to refresh checkpoint index for thread %s", run.thread_id)
             self._runs.pop(run.thread_id, None)
 
-    async def _ensure_agent(self, thread_id: str) -> Any | None:
-        """按需构建 Agent；默认图按 thread 固定 epoch，外部注入图保持原有单实例契约。"""
+    async def _ensure_agent(self) -> Any | None:
+        """按需构建外部注入的 Agent；默认图必须经 RuntimePool 取得。"""
         # Echo 只用于协议测试。即使当前目录恰好存在模型配置，也必须保持
         # 无网络、无凭据依赖的确定性行为，避免测试机器环境改变结果。
         if self.agent is not None:
@@ -644,55 +720,213 @@ class JsonRpcServer:
         if self._config is None or self._config.model is None:
             return None
         if self._uses_default_agent_factory:
-            cached = self._thread_agents.get(thread_id)
-            if cached is not None:
-                return cached
-            created = self._create_default_agent(self._config, self._workspace, thread_id)
-            agent = await created if inspect.isawaitable(created) else created
-            self._thread_agents[thread_id] = agent
-            return agent
-        created = self._agent_factory(self._config, self._workspace)
-        self.agent = await created if inspect.isawaitable(created) else created
-        return self.agent
+            raise RuntimeError("DEFAULT_AGENT_REQUIRES_RUNTIME_POOL")
+        if self._agent_factory is None:  # pragma: no cover - 构造函数不变量。
+            raise RuntimeError("AGENT_FACTORY_REQUIRED")
+        # 外部注入工厂保持既有单图测试/嵌入契约；生产默认路径由 RuntimePool
+        # 提供 per-Profile single-flight，不应再写入 ``self.agent``。
+        async with self._agent_build_lock:
+            if self.agent is not None:
+                return self.agent
+            created = self._agent_factory(self._config, self._workspace)
+            self.agent = await created if inspect.isawaitable(created) else created
+            return self.agent
 
-    async def _create_default_agent(self, config: Za38Config, workspace: Path, thread_id: str) -> Any:
-        """使用 OpenAI 模型与显式选择的本机或远端后端创建 deepagents 图。"""
-        from harness_agent.agent import create_harness_agent, create_prompt_epoch
+    async def _acquire_default_runtime_for_run(self, run: ActiveRun) -> Any | None:
+        """为一个生产 run 获取共享 Runtime，并将 thread 私有状态写入 RunContext。"""
+        lease, runtime = await self._acquire_default_runtime(run.thread_id)
+        if runtime is None:
+            return None
+        try:
+            artifacts = self._runtime_artifacts.get(runtime.profile_key)
+            spec = self._runtime_build_specs.get(runtime.profile_key)
+            if artifacts is None or spec is None or runtime.graph is None:
+                raise RuntimeError("RUNTIME_ARTIFACTS_UNAVAILABLE")
+            run.run_context = await self._create_run_context(
+                run,
+                profile=runtime.profile,
+                config=spec.config,
+                execution_context=artifacts.execution_context,
+            )
+            run.runtime_run_lease = await lease.run()
+            run.runtime_lease = lease
+            run.runtime_profile_key = runtime.profile_key
+            return runtime.graph
+        except Exception:
+            await self._release_runtime_lease(lease)
+            raise
+
+    async def _acquire_default_runtime(
+        self, thread_id: str
+    ) -> tuple[AgentRuntimeLease | None, AgentRuntime | None]:
+        """为 run 或手动压缩取得当前 Profile 的 Runtime，按 thread 持久化绑定。"""
+        if self._allow_echo:
+            return None, None
+        self._load_config()
+        config = self._config
+        if config is None or config.model is None:
+            return None, None
+        profile = await self._resolve_runtime_profile(thread_id, config)
+        pool = self._ensure_runtime_pool(config)
+        lease = await pool.acquire(profile)
+        return lease, lease.runtime
+
+    async def _resolve_runtime_profile(
+        self, thread_id: str, config: Za38Config
+    ) -> RuntimeProfile:
+        """计算当前配置的 Profile，拒绝让已绑定 thread 静默切换执行环境。"""
+        from harness_agent.agent import (
+            default_prompt_template_fingerprint,
+            default_tool_catalog_fingerprint,
+        )
+
+        store = await self._ensure_thread_store()
+        registry = self._require_skills()
+        profile = default_runtime_profile(
+            project_fingerprint=store.project_fingerprint,
+            model_profile=config.model_profile,
+            model=config.require_model(),
+            tool_catalog_fingerprint=default_tool_catalog_fingerprint(),
+            skill_catalog_fingerprint=component_fingerprint(
+                {"skill_snapshot_id": registry.snapshot_id}
+            ),
+            execution=config.execution,
+            middleware_fingerprint=component_fingerprint(
+                {
+                    "prompt_epoch": 1,
+                    "context_window": 1,
+                    "workspace_boundary": 1,
+                    "interactive_question": "interactive.question" in self._enabled_capabilities,
+                }
+            ),
+            prompt_template_fingerprint=default_prompt_template_fingerprint(),
+        )
+        bound = await store.get_runtime_profile(thread_id)
+        if bound is None:
+            await store.save_runtime_profile(thread_id, profile)
+        elif bound.profile_key != profile.profile_key:
+            raise ThreadStoreError("THREAD_RUNTIME_PROFILE_MISMATCH")
+
+        self._runtime_build_specs[profile.profile_key] = _RuntimeBuildSpec(
+            config=config,
+            workspace=self._workspace,
+            skill_registry=registry,
+        )
+        if self._runtime_pool is not None and self._default_profile_key not in {
+            None,
+            profile.profile_key,
+        }:
+            # 配置变更不打断旧 run：旧 Runtime 仅进入 DRAINING，待其 lease/run
+            # 全部释放后关闭；新请求只会构建/租用新的 Profile。
+            await self._runtime_pool.evict(
+                self._default_profile_key,
+                reason="profile_invalidated",
+                force=True,
+            )
+        self._default_profile_key = profile.profile_key
+        return profile
+
+    def _ensure_runtime_pool(self, config: Za38Config) -> RuntimePool:
+        """延迟创建进程内唯一 Pool；容量策略在 Sidecar 生命周期内保持稳定。"""
+        if self._runtime_pool is None:
+            settings = config.runtime_pool
+            self._runtime_pool = RuntimePool(
+                self._build_default_runtime,
+                max_profiles=settings.max_profiles,
+                idle_ttl_seconds=settings.idle_ttl_seconds,
+                close_timeout_seconds=settings.close_timeout_seconds,
+            )
+        return self._runtime_pool
+
+    async def _build_default_runtime(self, profile: RuntimeProfile) -> AgentRuntime:
+        """按 Profile 构建一张 deepagents 图及其共享 middleware，供多个 thread 复用。"""
+        spec = self._runtime_build_specs.get(profile.profile_key)
+        if spec is None:
+            raise RuntimeError("RUNTIME_BUILD_SPEC_MISSING")
+        config, workspace = spec.config, spec.workspace
+        from harness_agent.agent import create_harness_agent
+        from harness_agent.context_window import ContextWindowMiddleware
         from harness_agent.execution import create_execution_context
         from harness_agent.providers.harness_gateway import create_openai_compatible_model
 
         execution_context = create_execution_context(config.execution, workspace)
         store = await self._ensure_thread_store()
         checkpointer = store.checkpointer
-        epoch = await store.get_prompt_epoch(thread_id)
-        if epoch is None:
-            epoch = create_prompt_epoch(
-                thread_id=thread_id,
-                system_prompt=None,
-                workspace=str(getattr(execution_context, "workspace_path", workspace)),
-                sandboxed=bool(getattr(execution_context, "sandboxed", False)),
-                provider=getattr(execution_context, "provider", None),
-                approval_mode=config.execution.approval_mode,
-                skill_registry=self._skill_registry,
-                enable_memory=True,
-                enable_skills=True,
-            )
-            await store.save_prompt_epoch(epoch)
-        return create_harness_agent(
-            create_openai_compatible_model(config.require_model()),
+        model = create_openai_compatible_model(config.require_model())
+        context_compactor = ContextWindowMiddleware(
+            model,
+            context_window_tokens=config.require_model().context_window_tokens,
+            thread_store=store,
+            updates=self._context_updates,
+        )
+        graph = create_harness_agent(
+            model,
             cwd=str(workspace),
             # 无头客户端不协商 question 能力时不注册 ask_user；审批仍由
             # `_request_interaction` 在缺少 approval 能力时 fail closed。
             interactive="interactive.question" in self._enabled_capabilities,
             approval_mode=config.execution.approval_mode,
             execution_context=execution_context,
-            skill_registry=self._skill_registry,
+            skill_registry=spec.skill_registry,
             checkpointer=checkpointer,
-            prompt_epoch=epoch,
             thread_store=store,
             context_updates=self._context_updates,
-            context_middlewares=self._context_middlewares,
+            context_middleware=context_compactor,
             context_window_tokens=config.require_model().context_window_tokens,
+            shared_runtime=True,
+        )
+        self._runtime_artifacts[profile.profile_key] = _RuntimeArtifacts(
+            execution_context=execution_context,
+            context_compactor=context_compactor,
+        )
+        resources = RuntimeResourceBundle.from_sequences(
+            flushers=(
+                RuntimeCloseAdapter(
+                    "server-runtime-artifacts",
+                    lambda: self._drop_runtime_artifacts(profile.profile_key),
+                ),
+            )
+        )
+        return AgentRuntime(
+            profile=profile,
+            graph=graph,
+            resources=resources,
+            pinned=config.runtime_pool.pin_default_profile,
+        )
+
+    async def _create_run_context(
+        self,
+        run: ActiveRun,
+        *,
+        profile: RuntimeProfile,
+        config: Za38Config,
+        execution_context: Any,
+    ) -> RunContext:
+        """从持久化状态恢复本轮 PromptEpoch，禁止把 thread 数据保存在共享图中。"""
+        from harness_agent.agent import create_prompt_epoch
+
+        store = await self._ensure_thread_store()
+        epoch = await store.get_prompt_epoch(run.thread_id)
+        if epoch is None:
+            epoch = create_prompt_epoch(
+                thread_id=run.thread_id,
+                system_prompt=None,
+                workspace=str(getattr(execution_context, "workspace_path", self._workspace)),
+                sandboxed=bool(getattr(execution_context, "sandboxed", False)),
+                provider=getattr(execution_context, "provider", None),
+                approval_mode=config.execution.approval_mode,
+                skill_registry=self._require_skills(),
+                enable_memory=True,
+                enable_skills=True,
+            )
+            await store.save_prompt_epoch(epoch)
+        return RunContext(
+            thread_id=run.thread_id,
+            run_id=run.run_id,
+            prompt_epoch=epoch,
+            approval_mode=config.execution.approval_mode,
+            profile_key=profile.profile_key,
+            cancellation_token=run.cancellation_token,
         )
 
     async def _stream_agent(self, agent: Any, run: ActiveRun, *, resume: Any | None) -> Any | None:
@@ -705,12 +939,18 @@ class JsonRpcServer:
             if resume is not None
             else {"messages": [HumanMessage(content=run.message)]}
         )
-        async for event in agent.astream(
-            stream_input,
-            config=(self._thread_store.graph_config(run.thread_id) if self._thread_store is not None else {"configurable": {"thread_id": run.thread_id}}),
-            stream_mode=["messages", "updates"],
-            subgraphs=True,
-        ):
+        stream_kwargs: dict[str, Any] = {
+            "config": (
+                self._thread_store.graph_config(run.thread_id)
+                if self._thread_store is not None
+                else {"configurable": {"thread_id": run.thread_id}}
+            ),
+            "stream_mode": ["messages", "updates"],
+            "subgraphs": True,
+        }
+        if run.run_context is not None:
+            stream_kwargs["context"] = run.run_context
+        async for event in agent.astream(stream_input, **stream_kwargs):
             await self._drain_context_updates(run)
             interaction = self._extract_interaction(event)
             if interaction is not None:
@@ -1019,6 +1259,89 @@ class JsonRpcServer:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._runs.clear()
 
+    async def _compact_with_runtime(
+        self,
+        *,
+        agent: Any,
+        middleware: Any,
+        thread_id: str,
+        messages: list[Any],
+        store: ThreadStore,
+    ) -> dict[str, object]:
+        """使用已租用 Runtime 的共享 compactor 改写一个空闲 thread 的 checkpoint。"""
+        compacted, update, rewritten = await middleware.compact_now(thread_id, messages)
+        # `compact_now` 复用运行期状态缓冲；当前请求直接返回结果，因此必须消费，
+        # 防止下一次 Agent run 重复发出过期的 context.updated 事件。
+        middleware.consume_updates(thread_id)
+        if rewritten:
+            from langchain_core.messages import RemoveMessage
+            from langgraph.graph.message import REMOVE_ALL_MESSAGES
+
+            await agent.aupdate_state(
+                # CompiledStateGraph 将非空 checkpoint_ns 解释为子图路径；项目隔离
+                # 由 ProjectScopedAsyncSqliteSaver 在根图空 namespace 上自动补齐。
+                store.graph_config(thread_id),
+                {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *compacted]},
+                as_node="model",
+            )
+            await store.refresh_thread(thread_id)
+        return {"compacted": rewritten, "context": update.payload()}
+
+    async def _release_run_runtime(self, run: ActiveRun) -> None:
+        """在 run 的所有终态释放 Runtime lease，并触发排空与空闲 TTL 检查。"""
+        run_lease, run.runtime_run_lease = run.runtime_run_lease, None
+        lease, run.runtime_lease = run.runtime_lease, None
+        profile_key, run.runtime_profile_key = run.runtime_profile_key, None
+        if run_lease is not None:
+            await run_lease.release()
+        if lease is None:
+            return
+        await self._release_runtime_lease(lease, profile_key=profile_key)
+
+    async def _release_runtime_lease(
+        self,
+        lease: AgentRuntimeLease | None,
+        *,
+        profile_key: str | None = None,
+    ) -> None:
+        """释放非 run 或 run lease；DRAINING Runtime 会在最后一个引用退出后关闭。"""
+        if lease is None:
+            return
+        key = profile_key or lease.runtime.profile_key
+        await lease.release()
+        pool = self._runtime_pool
+        if pool is not None:
+            await pool.finalize_draining(key)
+            await pool.sweep()
+
+    async def _drop_runtime_artifacts(self, profile_key: str) -> None:
+        """清除已关闭 Runtime 的 middleware/执行上下文引用，避免 Sidecar 持有旧资源。"""
+        self._runtime_artifacts.pop(profile_key, None)
+        self._runtime_build_specs.pop(profile_key, None)
+
+    async def _close_runtime_pool(self) -> None:
+        """在关闭 SQLite 前停止 RuntimePool，保证 middleware 不再访问已关闭的 Store。"""
+        pool, self._runtime_pool = self._runtime_pool, None
+        if pool is not None:
+            reports = await pool.aclose()
+            failures = [failure for report in reports for failure in report.failures]
+            if failures:
+                logger.warning("RuntimePool closed with %s resource failures", len(failures))
+        self._runtime_artifacts.clear()
+        self._runtime_build_specs.clear()
+        self._default_profile_key = None
+
+    async def _runtime_pool_diagnostics(self) -> dict[str, object]:
+        """返回 config.show 的运行池摘要；未初始化/已关闭时不保留旧 Runtime 引用。"""
+        pool = self._runtime_pool
+        if pool is None:
+            return {
+                "available": False,
+                "state": "not_initialized",
+                "memory": {"estimated_bytes": None, "rss_bytes": None, "status": "not_collected"},
+            }
+        return (await pool.diagnostics()).payload()
+
     def _threads_enabled(self) -> bool:
         """只有协商了读取能力的交互客户端才启用可恢复 thread 存储。"""
         return "threads.read" in self._enabled_capabilities and not self._allow_echo
@@ -1055,8 +1378,6 @@ class JsonRpcServer:
     async def _close_thread_store(self) -> None:
         """在 sidecar 生命周期末尾关闭 SQLite 连接和 WAL 句柄。"""
         store, self._thread_store = self._thread_store, None
-        self._thread_agents.clear()
-        self._context_middlewares.clear()
         if store is not None:
             await store.close()
 

@@ -324,7 +324,49 @@ def test_execution_defaults_to_local_and_redacts_security_summary(tmp_path: Path
         "models": "default",
         "approval": "default",
         "execution": "default",
+        "runtime_pool": "default",
     }
+
+
+def test_runtime_pool_configuration_is_parsed_and_rejects_invalid_values(tmp_path: Path):
+    """RuntimePool 的容量、TTL、关闭等待和固定默认 Profile 必须有显式安全边界。"""
+    path = tmp_path / "runtime-pool.toml"
+    _write_config(path)
+    path.write_text(
+        path.read_text(encoding="utf-8")
+        + """
+
+[runtime_pool]
+max_profiles = 3
+idle_ttl_seconds = 600
+close_timeout_seconds = 8
+pin_default_profile = true
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(workspace=tmp_path, home=tmp_path / "home", config_path=path)
+    assert config.runtime_pool.redacted() == {
+        "max_profiles": 3,
+        "idle_ttl_seconds": 600,
+        "close_timeout_seconds": 8,
+        "pin_default_profile": True,
+    }
+    assert config.redacted()["sources"]["runtime_pool"] == "explicit"  # type: ignore[index]
+
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("max_profiles = 3", "max_profiles = 0"),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="runtime_pool.max_profiles"):
+        load_config(workspace=tmp_path, home=tmp_path / "home", config_path=path)
+
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("max_profiles = 0", "max_profiles = 65"),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="must be <= 64"):
+        load_config(workspace=tmp_path, home=tmp_path / "home", config_path=path)
 
 
 @pytest.mark.parametrize("value", ["plan", "default", "auto-edit", "yolo"])

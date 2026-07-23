@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 from pathlib import PurePosixPath
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable
 
 from deepagents.backends import CompositeBackend
 from deepagents.backends.protocol import (
@@ -22,6 +22,7 @@ from deepagents.backends.protocol import (
 )
 
 from harness_agent.skills import SkillError, SkillRegistry
+from harness_agent.run_context import require_run_context
 
 if TYPE_CHECKING:
     from deepagents.backends.protocol import BackendProtocol
@@ -182,3 +183,29 @@ def mount_harness_virtual_files(
         default=default_backend,
         routes={f"{VIRTUAL_ROOT}/": HarnessVirtualBackend(registry=registry, thread_id=thread_id, thread_store=thread_store)},
     )
+
+
+def run_scoped_virtual_backend_factory(
+    default_backend: "BackendProtocol",
+    *,
+    registry: SkillRegistry,
+    thread_store: "ThreadStore | None" = None,
+) -> Callable[[Any], CompositeBackend]:
+    """返回按当前 RunContext 解析虚拟历史的 backend factory。
+
+    编译图可以安全共享 ``default_backend``，但 ``/.harness/history`` 必须以
+    当前工具调用的 thread 为边界。RunContext 缺失时 ``require_run_context`` 会
+    直接拒绝调用，避免把某个 thread 的归档静默暴露给另一个 thread。
+    """
+
+    def backend_for_run(runtime: Any) -> CompositeBackend:
+        """在工具执行边界创建仅绑定当前 thread 的虚拟挂载。"""
+        context = require_run_context(runtime)
+        return mount_harness_virtual_files(
+            default_backend,
+            registry=registry,
+            thread_id=context.thread_id,
+            thread_store=thread_store,
+        )
+
+    return backend_for_run

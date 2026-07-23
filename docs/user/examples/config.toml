@@ -35,6 +35,18 @@ mode = "default"
 [execution]
 backend = "local"
 
+# Sidecar 内共享 AgentRuntime 的有界缓存。相同稳定配置的多个 thread 复用一张图；
+# 淘汰只会释放内存中的图和连接，不会删除 SQLite 中的消息、PromptEpoch 或 checkpoint。
+[runtime_pool]
+# 同时缓存的 Runtime Profile 数，范围 1-64。
+max_profiles = 8
+# 空闲 Runtime 的淘汰等待时间，范围 60-86400 秒。
+idle_ttl_seconds = 1800
+# sidecar 退出时单个 Runtime 等待资源关闭的时间，范围 1-120 秒。
+close_timeout_seconds = 15
+# true 时默认 Profile 不参与 LRU/TTL 淘汰；只建议固定的单项目交互环境使用。
+pin_default_profile = false
+
 # 计划中（ZC-008）：企业远端 Sandbox Provider。
 # 将 backend 改为 "remote" 前，必须先完成对应任务并由企业提供 factory。
 # [execution.remote]

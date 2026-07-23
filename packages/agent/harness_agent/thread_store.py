@@ -15,9 +15,14 @@ import aiosqlite
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from harness_agent.prompting import PromptEpoch, canonical_json
+from harness_agent.runtime_profile import (
+    RUNTIME_PROFILE_VERSION,
+    RuntimeProfile,
+    RuntimeProfileError,
+)
 
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 _MAX_PREVIEW_CHARS = 160
 
 
@@ -397,6 +402,97 @@ class ThreadStore:
         except aiosqlite.Error as exc:
             raise ThreadStoreError(f"PROMPT_EPOCH_WRITE_FAILED: {exc}") from exc
 
+    async def get_runtime_profile(self, thread_id: str) -> RuntimeProfile | None:
+        """读取 thread 已绑定的 Runtime Profile；旧 thread 未绑定时返回 None。"""
+        self._ensure_open()
+        try:
+            async with self._lock:
+                cursor = await self._connection.execute(
+                    """
+                    SELECT runtime.profile_record
+                    FROM harness_thread_runtime_profiles AS binding
+                    JOIN harness_runtime_profiles AS runtime
+                      ON runtime.project_fingerprint = binding.project_fingerprint
+                     AND runtime.profile_key = binding.profile_key
+                    WHERE binding.project_fingerprint = ? AND binding.thread_id = ?
+                    """,
+                    (self._project_fingerprint, thread_id),
+                )
+                row = await cursor.fetchone()
+                await cursor.close()
+            if row is None:
+                return None
+            raw_record = json.loads(str(row["profile_record"]))
+            if not isinstance(raw_record, Mapping):
+                raise RuntimeProfileError("RUNTIME_PROFILE_RECORD_INVALID")
+            profile = RuntimeProfile.from_record(raw_record)
+            if profile.project_fingerprint != self._project_fingerprint:
+                raise RuntimeProfileError("RUNTIME_PROFILE_PROJECT_MISMATCH")
+            return profile
+        except (aiosqlite.Error, TypeError, ValueError, RuntimeProfileError, json.JSONDecodeError) as exc:
+            raise ThreadStoreError(f"RUNTIME_PROFILE_READ_FAILED: {exc}") from exc
+
+    async def save_runtime_profile(self, thread_id: str, profile: RuntimeProfile) -> None:
+        """首次绑定 thread 的不可变 Profile；变化必须由后续迁移显式处理。"""
+        self._ensure_open()
+        if profile.project_fingerprint != self._project_fingerprint:
+            raise ThreadStoreError("RUNTIME_PROFILE_PROJECT_MISMATCH")
+        record = profile.record()
+        encoded_record = canonical_json(record)
+        try:
+            async with self._lock:
+                cursor = await self._connection.execute(
+                    """
+                    SELECT profile_key
+                    FROM harness_thread_runtime_profiles
+                    WHERE project_fingerprint = ? AND thread_id = ?
+                    """,
+                    (self._project_fingerprint, thread_id),
+                )
+                existing = await cursor.fetchone()
+                await cursor.close()
+                if existing is not None:
+                    if str(existing["profile_key"]) != profile.profile_key:
+                        raise ThreadStoreError("RUNTIME_PROFILE_IMMUTABLE")
+                    return
+                await self._connection.execute(
+                    """
+                    INSERT INTO harness_runtime_profiles (
+                        project_fingerprint, profile_key, profile_version,
+                        topology_id, topology_version, profile_record, created_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(project_fingerprint, profile_key) DO NOTHING
+                    """,
+                    (
+                        self._project_fingerprint,
+                        profile.profile_key,
+                        RUNTIME_PROFILE_VERSION,
+                        profile.topology_id,
+                        profile.topology_version,
+                        encoded_record,
+                        _now_ms(),
+                    ),
+                )
+                await self._connection.execute(
+                    """
+                    INSERT INTO harness_thread_runtime_profiles (
+                        project_fingerprint, thread_id, profile_key, profile_version, bound_at_ms
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        self._project_fingerprint,
+                        thread_id,
+                        profile.profile_key,
+                        RUNTIME_PROFILE_VERSION,
+                        _now_ms(),
+                    ),
+                )
+                await self._connection.commit()
+        except ThreadStoreError:
+            raise
+        except aiosqlite.Error as exc:
+            raise ThreadStoreError(f"RUNTIME_PROFILE_WRITE_FAILED: {exc}") from exc
+
     async def archive_context(
         self,
         thread_id: str,
@@ -755,6 +851,40 @@ class ThreadStore:
                     """
                 )
                 version = 3
+            if version < 4:
+                await self._connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS harness_runtime_profiles (
+                        project_fingerprint TEXT NOT NULL,
+                        profile_key TEXT NOT NULL,
+                        profile_version INTEGER NOT NULL,
+                        topology_id TEXT NOT NULL,
+                        topology_version INTEGER NOT NULL,
+                        profile_record TEXT NOT NULL,
+                        created_at_ms INTEGER NOT NULL,
+                        PRIMARY KEY (project_fingerprint, profile_key)
+                    )
+                    """
+                )
+                await self._connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS harness_thread_runtime_profiles (
+                        project_fingerprint TEXT NOT NULL,
+                        thread_id TEXT NOT NULL,
+                        profile_key TEXT NOT NULL,
+                        profile_version INTEGER NOT NULL,
+                        bound_at_ms INTEGER NOT NULL,
+                        PRIMARY KEY (project_fingerprint, thread_id)
+                    )
+                    """
+                )
+                await self._connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS harness_thread_runtime_profiles_project_profile
+                    ON harness_thread_runtime_profiles(project_fingerprint, profile_key)
+                    """
+                )
+                version = 4
             await self._connection.execute(f"PRAGMA user_version={version}")
             await self._connection.commit()
         except ThreadStoreError:

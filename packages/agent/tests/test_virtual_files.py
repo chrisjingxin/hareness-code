@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 
 def _write_skill(root: Path) -> None:
@@ -42,6 +43,53 @@ async def test_virtual_files_read_skills_and_thread_scoped_history(tmp_path: Pat
 
     other = HarnessVirtualBackend(registry=registry, thread_id="thread-b", thread_store=store)
     assert (await other.aread(f"/.harness/history/{artifact.artifact_id}.md")).error
+    await store.close()
+
+
+async def test_run_scoped_virtual_backend_isolates_shared_graph_history(tmp_path: Path):
+    """共享图每次工具调用都必须按 RunContext 重新绑定历史归档。"""
+    from deepagents.backends import LocalShellBackend
+
+    from harness_agent.agent import create_prompt_epoch
+    from harness_agent.run_context import RunContext
+    from harness_agent.skills import SkillRegistry
+    from harness_agent.thread_store import ThreadStore
+    from harness_agent.virtual_files import run_scoped_virtual_backend_factory
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = SkillRegistry(workspace, home=tmp_path / "home")
+    store = await ThreadStore.open(project=workspace, home=tmp_path / "home")
+    artifact = await store.archive_context("thread-a", kind="history", content="only thread a")
+
+    def context_for(thread_id: str) -> RunContext:
+        return RunContext(
+            thread_id=thread_id,
+            run_id=f"run-{thread_id}",
+            prompt_epoch=create_prompt_epoch(
+                thread_id=thread_id,
+                system_prompt="test prompt",
+                workspace=str(workspace),
+                sandboxed=False,
+                provider=None,
+                approval_mode="yolo",
+                skill_registry=registry,
+                enable_memory=False,
+                enable_skills=False,
+            ),
+            approval_mode="yolo",
+        )
+
+    factory = run_scoped_virtual_backend_factory(
+        LocalShellBackend(root_dir=workspace, virtual_mode=False),
+        registry=registry,
+        thread_store=store,
+    )
+    first = factory(SimpleNamespace(context=context_for("thread-a")))
+    second = factory(SimpleNamespace(context=context_for("thread-b")))
+
+    assert (await first.aread(f"/.harness/history/{artifact.artifact_id}.md")).file_data["content"] == "only thread a"
+    assert (await second.aread(f"/.harness/history/{artifact.artifact_id}.md")).error
     await store.close()
 
 

@@ -22,6 +22,7 @@ from harness_agent.prompting import (
     input_cap_tokens,
     normalized_tool_schemas,
 )
+from harness_agent.run_context import thread_id_for_runtime
 from harness_agent.thread_store import ContextState, ThreadStore
 
 if TYPE_CHECKING:
@@ -399,7 +400,10 @@ class ContextWindowMiddleware(AgentMiddleware):
 
 
 def _thread_id(request: ModelRequest) -> str:
-    """从 LangGraph 运行配置提取 thread ID，缺失时使用只影响当前调用的匿名标识。"""
+    """优先从 RunContext 获取 thread ID，并拒绝与图配置不一致的调用。"""
+    context_thread_id = thread_id_for_runtime(request.runtime)
+    if context_thread_id is not None:
+        return context_thread_id
     config = getattr(request.runtime, "config", {})
     configurable = config.get("configurable", {}) if isinstance(config, Mapping) else {}
     return str(configurable.get("thread_id") or "ephemeral") if isinstance(configurable, Mapping) else "ephemeral"

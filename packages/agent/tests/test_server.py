@@ -73,6 +73,50 @@ async def test_initialize_rejects_incompatible_major_and_pre_initialize_calls():
     assert [frame["error"]["code"] for frame in frames] == [-32000, -32003]
 
 
+async def test_config_show_exposes_redacted_runtime_pool_diagnostics(tmp_path: Path):
+    """已有 config.show 提供 Pool 本地诊断，且不能泄露完整 Profile Key。"""
+    from harness_agent.agent_runtime import AgentRuntime, RuntimePool
+    from harness_agent.runtime_profile import ModelRoleBinding, RuntimeProfile, component_fingerprint
+    from harness_agent.server import JsonRpcServer
+
+    def fingerprint(component: str) -> str:
+        return component_fingerprint({"server-diagnostics": component})
+
+    profile = RuntimeProfile(
+        project_fingerprint=fingerprint("project"),
+        topology_id="single-agent",
+        topology_version=1,
+        model_roles=(ModelRoleBinding(role="primary", model_config_fingerprint=fingerprint("model")),),
+        tool_catalog_fingerprint=fingerprint("tools"),
+        skill_catalog_fingerprint=fingerprint("skills"),
+        mcp_config_fingerprint=fingerprint("mcp"),
+        sandbox_config_fingerprint=fingerprint("sandbox"),
+        policy_fingerprint=fingerprint("policy"),
+        middleware_fingerprint=fingerprint("middleware"),
+        prompt_template_fingerprint=fingerprint("prompt"),
+    )
+    server = JsonRpcServer(allow_echo=True, config_home=tmp_path / "home")
+    frames = await _capture_server(server)
+    pool = RuntimePool(lambda requested: AgentRuntime(profile=requested, graph=object()))
+    server._runtime_pool = pool
+    lease = await pool.acquire(profile)
+    await lease.release()
+
+    await server.dispatch(_request("config.show", {}, "config-runtime"))
+
+    result = frames[-1]["result"]
+    diagnostics = result["runtime_pool_diagnostics"]
+    assert diagnostics["available"] is True
+    assert diagnostics["pool_size"] == 1
+    assert diagnostics["runtimes"][0]["profile_id"] == profile.profile_key[:12]
+    assert profile.profile_key not in str(diagnostics)
+    assert diagnostics["memory"]["status"] == "not_collected"
+
+    await server._close_runtime_pool()
+    await server.dispatch(_request("config.show", {}, "config-runtime-closed"))
+    assert frames[-1]["result"]["runtime_pool_diagnostics"]["state"] == "not_initialized"
+
+
 async def test_project_configuration_failure_prevents_agent_factory_invocation(tmp_path: Path):
     """未可信项目配置必须在创建模型或 Agent 之前以启动错误终止。"""
     from harness_agent.server import JsonRpcServer
@@ -169,16 +213,12 @@ async def test_context_compact_rewrites_idle_thread_and_returns_context_summary(
 
     store = Store()
     agent = Agent()
-    server = JsonRpcServer()
+    server = JsonRpcServer(agent=agent)
     server._initialized = True
     server._enabled_capabilities = {"context.manage"}
     server._thread_store = store  # type: ignore[assignment]
-    server._context_middlewares["thread"] = Middleware()
-
-    async def ensure_agent(_thread_id: str) -> Agent:
-        return agent
-
-    server._ensure_agent = ensure_agent  # type: ignore[method-assign]
+    server._context_compactor = Middleware()
+    server._thread_persistence_enabled = lambda: True  # type: ignore[method-assign]
     frames: list[dict[str, Any]] = []
     server.send = lambda message: _append(frames, message)  # type: ignore[method-assign]
 
@@ -217,6 +257,215 @@ async def test_context_compact_rejects_active_run():
     await server.dispatch(_request("context.compact", {"thread_id": "thread"}, "compact-active"))
 
     assert frames[0]["error"]["message"] == "CONTEXT_COMPACTION_RUN_ACTIVE"
+
+
+async def test_default_sidecar_shares_runtime_by_profile_and_drains_invalidated_config(
+    tmp_path: Path,
+):
+    """默认 Sidecar 以 Profile 而非 thread 缓存图；配置切换只排空旧图。"""
+    from harness_agent.agent_runtime import AgentRuntime
+    from harness_agent.config import (
+        ExecutionSettings,
+        ModelSettings,
+        RuntimePoolSettings,
+        Za38Config,
+    )
+    from harness_agent.runtime_profile import component_fingerprint
+    from harness_agent.server import JsonRpcServer
+
+    class Store:
+        project_fingerprint = component_fingerprint({"project": "server-runtime"})
+
+        def __init__(self) -> None:
+            self.profiles: dict[str, object] = {}
+
+        async def get_runtime_profile(self, thread_id: str) -> object | None:
+            return self.profiles.get(thread_id)
+
+        async def save_runtime_profile(self, thread_id: str, profile: object) -> None:
+            self.profiles[thread_id] = profile
+
+    def config(model_name: str, *, pin_default_profile: bool = False) -> Za38Config:
+        return Za38Config(
+            model=ModelSettings(name=model_name, base_url="https://gateway.example/v1"),
+            model_profile="default",
+            execution=ExecutionSettings(),
+            runtime_pool=RuntimePoolSettings(
+                max_profiles=2,
+                idle_ttl_seconds=600,
+                pin_default_profile=pin_default_profile,
+            ),
+            paths=(),
+            workspace=tmp_path,
+            sources={},
+        )
+
+    server = JsonRpcServer(config_home=tmp_path / "home")
+    server._config = config("fast-v1", pin_default_profile=True)
+    server._load_config = lambda: None  # type: ignore[method-assign]
+    store = Store()
+    server._thread_store = store  # type: ignore[assignment]
+    builds = 0
+
+    async def build(profile: object) -> AgentRuntime:
+        nonlocal builds
+        builds += 1
+        return AgentRuntime(profile=profile, graph=object())  # type: ignore[arg-type]
+
+    server._build_default_runtime = build  # type: ignore[method-assign]
+    first_lease, first_runtime = await server._acquire_default_runtime("thread-a")
+    second_lease, second_runtime = await server._acquire_default_runtime("thread-b")
+
+    assert first_lease is not None and second_lease is not None
+    assert first_runtime is second_runtime
+    assert builds == 1
+    assert set(store.profiles) == {"thread-a", "thread-b"}
+
+    await server._release_runtime_lease(first_lease)
+    await server._release_runtime_lease(second_lease)
+    old_runtime = first_runtime
+
+    server._config = config("fast-v2", pin_default_profile=True)
+    third_lease, third_runtime = await server._acquire_default_runtime("thread-c")
+
+    assert third_lease is not None
+    assert third_runtime is not old_runtime
+    assert builds == 2
+    assert old_runtime is not None and old_runtime.graph is None
+
+    await server._release_runtime_lease(third_lease)
+    await server._close_runtime_pool()
+
+
+async def test_default_context_compact_acquires_and_releases_profile_runtime(tmp_path: Path):
+    """默认 compact 也必须经 RuntimePool 租用图，完成后不残留 thread 专属引用。"""
+    from langchain_core.messages import HumanMessage
+
+    from harness_agent.agent_runtime import AgentRuntime, AgentRuntimeState
+    from harness_agent.config import (
+        ExecutionSettings,
+        ModelSettings,
+        RuntimePoolSettings,
+        Za38Config,
+    )
+    from harness_agent.context_window import ContextUpdate
+    from harness_agent.runtime_profile import component_fingerprint
+    from harness_agent.server import JsonRpcServer, _RuntimeArtifacts
+
+    class Store:
+        project_fingerprint = component_fingerprint({"project": "compact-runtime"})
+
+        def __init__(self) -> None:
+            self.profiles: dict[str, object] = {}
+            self.refreshed: list[str] = []
+
+        async def get_runtime_profile(self, thread_id: str) -> object | None:
+            return self.profiles.get(thread_id)
+
+        async def save_runtime_profile(self, thread_id: str, profile: object) -> None:
+            self.profiles[thread_id] = profile
+
+        async def load_context_messages(self, _thread_id: str) -> list[HumanMessage]:
+            return [HumanMessage(content="历史")]
+
+        async def refresh_thread(self, thread_id: str) -> None:
+            self.refreshed.append(thread_id)
+
+        @staticmethod
+        def graph_config(thread_id: str) -> dict[str, dict[str, str]]:
+            return {"configurable": {"thread_id": thread_id}}
+
+    class Middleware:
+        async def compact_now(self, thread_id: str, _messages: list[HumanMessage]):
+            return (
+                [HumanMessage(content="摘要")],
+                ContextUpdate(
+                    thread_id=thread_id,
+                    action="manual_summary",
+                    estimated_tokens=8,
+                    input_cap_tokens=100,
+                    context_window_tokens=128,
+                    dynamic_tokens=4,
+                ),
+                True,
+            )
+
+        @staticmethod
+        def consume_updates(_thread_id: str) -> tuple[()]:
+            return ()
+
+    class Graph:
+        def __init__(self) -> None:
+            self.updates: list[dict[str, object]] = []
+
+        async def aupdate_state(
+            self, _config: dict[str, object], update: dict[str, object], *, as_node: str
+        ) -> None:
+            assert as_node == "model"
+            self.updates.append(update)
+
+    server = JsonRpcServer(config_home=tmp_path / "home")
+    server._initialized = True
+    server._enabled_capabilities = {"context.manage"}
+    server._config = Za38Config(
+        model=ModelSettings(name="fast", base_url="https://gateway.example/v1"),
+        model_profile="default",
+        execution=ExecutionSettings(),
+        runtime_pool=RuntimePoolSettings(),
+        paths=(),
+        workspace=tmp_path,
+        sources={},
+    )
+    server._load_config = lambda: None  # type: ignore[method-assign]
+    store = Store()
+    server._thread_store = store  # type: ignore[assignment]
+    graph = Graph()
+
+    async def build(profile: object) -> AgentRuntime:
+        server._runtime_artifacts[profile.profile_key] = _RuntimeArtifacts(  # type: ignore[attr-defined]
+            execution_context=object(),
+            context_compactor=Middleware(),
+        )
+        return AgentRuntime(profile=profile, graph=graph)  # type: ignore[arg-type]
+
+    server._build_default_runtime = build  # type: ignore[method-assign]
+    frames: list[dict[str, Any]] = []
+    server.send = lambda message: _append(frames, message)  # type: ignore[method-assign]
+
+    await server.dispatch(_request("context.compact", {"thread_id": "thread"}, "compact-default"))
+
+    assert frames[0]["result"]["compacted"] is True
+    assert store.refreshed == ["thread"]
+    assert len(graph.updates) == 1
+    pool = server._runtime_pool
+    assert pool is not None
+    runtime = await pool.runtime_for(next(iter(store.profiles.values())).profile_key)  # type: ignore[union-attr]
+    assert runtime is not None and runtime.state == AgentRuntimeState.IDLE
+    await server._close_runtime_pool()
+
+
+async def test_runtime_pool_capacity_is_reported_as_stable_rpc_error():
+    """无安全淘汰候选时控制面返回稳定资源繁忙码，而不是内部异常类型。"""
+    from harness_agent.agent_runtime import RuntimePoolCapacityError
+    from harness_agent.server import JsonRpcServer
+
+    server = JsonRpcServer(allow_echo=True)
+    server._initialized = True
+
+    async def busy(_params: dict[str, Any], _request_id: str) -> None:
+        raise RuntimePoolCapacityError("RUNTIME_POOL_CAPACITY_EXHAUSTED")
+
+    server._handlers["runtime.busy"] = busy
+    frames: list[dict[str, Any]] = []
+    server.send = lambda message: _append(frames, message)  # type: ignore[method-assign]
+
+    await server.dispatch(_request("runtime.busy", {}, "busy"))
+
+    assert frames[0]["error"] == {
+        "code": -32030,
+        "message": "RUNTIME_POOL_CAPACITY_EXHAUSTED",
+        "data": {"code": "RUNTIME_POOL_CAPACITY_EXHAUSTED"},
+    }
 
 
 def test_stream_translation_prefers_normalized_content_blocks():
@@ -308,9 +557,13 @@ async def test_multiple_threads_run_concurrently_but_same_thread_is_rejected():
     await server.dispatch(_request("run.start", {"message": "b", "thread_id": "t2", "run_id": "r2"}, "start-2"))
     await server.dispatch(_request("run.start", {"message": "c", "thread_id": "t1", "run_id": "r3"}, "start-3"))
     assert any(frame.get("id") == "start-3" and frame.get("error", {}).get("code") == -32000 for frame in frames)
+    first_run = server._runs["t1"]
+    second_run = server._runs["t2"]
     await server.dispatch(_request("run.cancel", {"thread_id": "t1", "run_id": "r1"}, "cancel-1"))
     await server.dispatch(_request("run.cancel", {"thread_id": "t2", "run_id": "r2"}, "cancel-2"))
     await _wait_for(frames, lambda frame: _event_count(frames, "run.cancelled") == 2)
+    assert first_run.cancellation_token.cancelled is True
+    assert second_run.cancellation_token.cancelled is True
 
 
 async def test_question_request_uses_standard_response_and_stable_question_id():

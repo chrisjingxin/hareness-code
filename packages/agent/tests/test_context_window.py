@@ -163,15 +163,21 @@ async def test_manual_compaction_can_replace_persisted_delta_channel_history(tmp
     await store.checkpointer.aput(store.graph_config("manual-checkpoint"), checkpoint, {}, {})
     await store.record_message("manual-checkpoint", "第一轮")
 
-    middlewares: dict[str, Any] = {}
     model = ToolModel(responses=[AIMessage(content="## 目标\n压缩\n## 已确认事实\n已完成\n## 决策\n保留两轮\n## 改动\n无\n## 测试\n无\n## 未决项\n无\n## 归档\n无")])
     model.profile = {"max_input_tokens": 16_384}
+    from harness_agent.context_window import ContextWindowMiddleware
+
+    middleware = ContextWindowMiddleware(
+        model,
+        context_window_tokens=16_384,
+        thread_store=store,
+    )
     agent = create_harness_agent(
         model,
         cwd=str(tmp_path / "project"),
         checkpointer=store.checkpointer,
         thread_store=store,
-        context_middlewares=middlewares,
+        context_middleware=middleware,
         context_window_tokens=16_384,
         enable_skills=False,
         enable_memory=False,
@@ -179,7 +185,7 @@ async def test_manual_compaction_can_replace_persisted_delta_channel_history(tmp
         approval_mode="yolo",
     )
 
-    compacted, _update, rewritten = await middlewares["ephemeral"].compact_now("manual-checkpoint", messages)
+    compacted, _update, rewritten = await middleware.compact_now("manual-checkpoint", messages)
     assert rewritten is True
     from langchain_core.messages import RemoveMessage
 
