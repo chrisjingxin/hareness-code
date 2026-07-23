@@ -48,5 +48,24 @@ test("Esc、Ctrl+P、Ctrl+O 和 Ctrl+D 保留真实 TUI 行为", () => {
 test("方向键不再被全局快捷键抢占，交由 textarea 根据真实光标位置处理", () => {
   expect(resolveShortcut({ name: "up", ctrl: false }, idle)).toBe("none")
   expect(resolveShortcut({ name: "down", ctrl: false }, { ...idle, hasDraft: true })).toBe("none")
-  expect(resolveShortcut({ name: "pageup", ctrl: false }, idle)).toBe("none")
+})
+
+test("滚动快捷键在输入与运行态下全局生效，便于随时回看历史", () => {
+  const typing = { ...idle, hasDraft: true }
+  const running = { ...idle, activeRun: true }
+  expect(resolveShortcut({ name: "pageup", ctrl: false }, typing)).toBe("scroll-page-up")
+  expect(resolveShortcut({ name: "pagedown", ctrl: false }, typing)).toBe("scroll-page-down")
+  expect(resolveShortcut({ name: "up", ctrl: true }, running)).toBe("scroll-line-up")
+  expect(resolveShortcut({ name: "down", ctrl: true }, running)).toBe("scroll-line-down")
+  expect(resolveShortcut({ name: "home", ctrl: true }, typing)).toBe("scroll-top")
+  expect(resolveShortcut({ name: "end", ctrl: true }, typing)).toBe("scroll-bottom")
+})
+
+test("浮层打开时滚动键让位给选择器，不在背后滚动历史", () => {
+  const menu = { ...idle, commandMenuVisible: true, commandOptionCount: 1, hasDraft: true }
+  expect(resolveShortcut({ name: "pageup", ctrl: false }, menu)).toBe("none")
+  const picker = { ...idle, skillPickerVisible: true, skillOptionCount: 1 }
+  expect(resolveShortcut({ name: "pagedown", ctrl: false }, picker)).toBe("none")
+  const threads = { ...idle, threadPickerVisible: true, threadOptionCount: 1 }
+  expect(resolveShortcut({ name: "pageup", ctrl: false }, threads)).toBe("none")
 })
