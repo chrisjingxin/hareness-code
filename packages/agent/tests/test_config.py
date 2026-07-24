@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import stat
 import types
 from pathlib import Path
 
@@ -158,22 +159,38 @@ def test_literal_api_key_is_rejected_outside_user_configuration(tmp_path: Path):
 
 
 @pytest.mark.skipif(config_module.os.name == "nt", reason="Windows does not expose POSIX mode bits")
-def test_user_toml_api_key_requires_private_posix_permissions(tmp_path: Path):
-    """用户 TOML 只要包含明文密钥，即使环境会覆盖也必须拒绝宽权限。"""
+def test_user_toml_api_key_automatically_hardens_posix_permissions(tmp_path: Path):
+    """用户 TOML 的明文密钥在加载时自动收紧为仅所有者可读写。"""
     home = tmp_path / "home"
     path = home / ".harness" / "config.toml"
     _write_config(path, api_key="toml-secret")
     path.chmod(0o644)
 
-    with pytest.raises(ConfigError, match="chmod 600"):
-        load_config(
-            workspace=tmp_path / "workspace",
-            home=home,
-            environ={"HARNESS_API_KEY": "environment-secret"},
-        )
+    assert load_config(
+        workspace=tmp_path / "workspace",
+        home=home,
+        environ={"HARNESS_API_KEY": "environment-secret"},
+    ).require_model()
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
-    path.chmod(0o600)
-    assert load_config(workspace=tmp_path / "workspace", home=home, environ={}).require_model()
+
+@pytest.mark.skipif(config_module.os.name == "nt", reason="Windows does not expose POSIX mode bits")
+def test_user_toml_api_key_reports_when_permissions_cannot_be_hardened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """无法收紧用户配置权限时拒绝加载，避免在宽权限文件中继续使用密钥。"""
+    home = tmp_path / "home"
+    path = home / ".harness" / "config.toml"
+    _write_config(path, api_key="toml-secret")
+    path.chmod(0o644)
+
+    def reject_chmod(self: Path, mode: int) -> None:
+        """模拟文件系统拒绝修改权限。"""
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(Path, "chmod", reject_chmod)
+    with pytest.raises(ConfigError, match="Unable to secure configuration file"):
+        load_config(workspace=tmp_path / "workspace", home=home, environ={})
 
 
 def test_literal_api_key_permission_check_is_skipped_without_posix_modes(
@@ -292,17 +309,82 @@ def test_manifest_exposes_all_planned_configuration_sections():
         assert section.task_id is not None
 
 
-def test_multiple_profiles_are_deferred_to_zc_019(tmp_path: Path):
-    """当前仅执行默认 Profile，避免未完成的线程级选择产生伪支持。"""
+def test_multiple_profiles_build_catalog_with_roles_and_safe_picker_summary(tmp_path: Path):
+    """多 Profile 保留配置隔离，角色回退到默认项且 Picker 摘要不含 endpoint。"""
     path = tmp_path / "profiles.toml"
     _write_config(path)
     path.write_text(
         path.read_text(encoding="utf-8")
-        + "\n[models.profiles.second]\nprovider = 'openai-compatible'\nmodel = 'second'\nbase_url = 'https://second.example/v1'\n",
+        + """
+
+[models.profiles.pro]
+provider = "openai-compatible"
+provider_label = "Enterprise Pro"
+model = "pro-model"
+base_url = "https://pro.example/v1"
+api_key_env = "PRO_KEY"
+capabilities = ["tool-calling", "streaming", "vision"]
+
+[models.roles]
+planner = "pro"
+executor = "enterprise"
+""",
         encoding="utf-8",
     )
 
-    with pytest.raises(ConfigError, match="ZC-019"):
+    config = load_config(
+        workspace=tmp_path,
+        home=tmp_path / "home",
+        config_path=path,
+        environ={"HARNESS_API_KEY": "default-key", "PRO_KEY": "pro-key"},
+    )
+
+    assert config.model_catalog is not None
+    assert config.model_catalog.default_profile == "enterprise"
+    assert config.model_catalog.profile_for_role("planner").profile_id == "pro"
+    assert config.model_catalog.profile_for_role("reviewer").profile_id == "enterprise"
+    assert config.require_model("pro").name == "pro-model"
+    summary = config.require_model_profile("pro").picker_summary({"PRO_KEY": "pro-key"})
+    assert summary["provider_label"] == "Enterprise Pro"
+    assert summary["available"] is True
+    assert summary["is_default"] is False
+    assert summary["source"] == "explicit"
+    assert "base_url" not in summary
+    assert "PRO_KEY" not in str(summary)
+
+
+@pytest.mark.parametrize(
+    ("extra", "match"),
+    [
+        ("[models.roles]\nplanner = \"missing\"\n", "must reference an existing profile"),
+        ("[models.roles]\narchitect = \"enterprise\"\n", "not a supported model role"),
+    ],
+)
+def test_model_catalog_rejects_unknown_role_profile_and_capability(
+    tmp_path: Path, extra: str, match: str
+):
+    """Profile 目录的错误引用和未知能力必须在配置加载阶段 fail closed。"""
+    path = tmp_path / "invalid-profile.toml"
+    _write_config(path)
+    path.write_text(path.read_text(encoding="utf-8") + "\n" + extra, encoding="utf-8")
+
+    with pytest.raises(ConfigError, match=match):
+        load_config(workspace=tmp_path, home=tmp_path / "home", config_path=path)
+
+
+def test_model_catalog_rejects_unknown_capability(tmp_path: Path):
+    """Profile 声明未知能力时不能以默认能力静默回退。"""
+    path = tmp_path / "invalid-capability.toml"
+    _write_config(path)
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            'api_key_env = "HARNESS_API_KEY"',
+            'api_key_env = "HARNESS_API_KEY"\ncapabilities = ["unknown"]',
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="capabilities contains unsupported"):
         load_config(workspace=tmp_path, home=tmp_path / "home", config_path=path)
 
 

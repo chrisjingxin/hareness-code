@@ -18,6 +18,7 @@ import {
   type RunCancelResult,
   type RequestedSkill,
   type RunStartResult,
+  type ModelsListResult,
   type ThreadsListResult,
   type ThreadsOpenResult,
 } from "@za38/protocol"
@@ -98,18 +99,19 @@ export class JsonRpcPeer extends EventEmitter {
   }
 
   /** 启动一次 Agent 运行，保留可选线程和运行标识。 */
-  startRun(message: string, threadId?: string, runId?: string, requestedSkill?: RequestedSkill): Promise<RunStartResult> {
+  startRun(message: string, threadId?: string, runId?: string, requestedSkill?: RequestedSkill, modelProfile?: string): Promise<RunStartResult> {
     return this.call(Method.RUN_START, {
       message,
       thread_id: threadId,
       run_id: runId,
       requested_skill: requestedSkill,
+      model_profile: modelProfile,
     }) as Promise<RunStartResult>
   }
 
   /** 兼容现有调用点的语义别名；wire 上已使用 run.start。 */
-  query(message: string, threadId?: string, runId?: string, requestedSkill?: RequestedSkill): Promise<RunStartResult> {
-    return this.startRun(message, threadId, runId, requestedSkill)
+  query(message: string, threadId?: string, runId?: string, requestedSkill?: RequestedSkill, modelProfile?: string): Promise<RunStartResult> {
+    return this.startRun(message, threadId, runId, requestedSkill, modelProfile)
   }
 
   /** 请求取消指定运行。 */
@@ -130,6 +132,11 @@ export class JsonRpcPeer extends EventEmitter {
   /** 打开当前 project 的既有 thread，并返回可以重新构造时间线的消息。 */
   openThread(threadId: string): Promise<ThreadsOpenResult> {
     return this.call(Method.THREADS_OPEN, { thread_id: threadId }) as Promise<ThreadsOpenResult>
+  }
+
+  /** 读取 `/model` Picker 所需的脱敏 Profile 目录与可选 Thread 绑定。 */
+  listModels(threadId?: string): Promise<ModelsListResult> {
+    return this.call(Method.MODELS_LIST, { thread_id: threadId }) as Promise<ModelsListResult>
   }
 
   /** 请求 sidecar 优雅关闭，并给关闭响应设置较短超时。 */

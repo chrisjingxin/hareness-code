@@ -4,30 +4,48 @@
 [config]
 version = 1
 
-# 当前内核只执行 default_profile 指向的一个 Profile。
-# 多 Profile 选择将在 ZC-019 中提供。
+# 可声明多个命名 OpenAI-compatible Profile；default_profile 是未选择模型时的回退项。
 [models]
-default_profile = "enterprise"
+default_profile = "fast"
 
-[models.profiles.enterprise]
+[models.profiles.fast]
 provider = "openai-compatible"
+provider_label = "Enterprise Fast"
 model = "your-enterprise-coding-model"
 base_url = "https://gateway.example.internal/v1"
 api_key_env = "HARNESS_API_KEY"
 # 仅当上述环境变量缺失或空白时使用。推荐保留环境变量方式。
-# 启用后必须执行 `chmod 600 ~/.harness/config.toml`，且不得把该文件提交到仓库。
+# Harness 首次加载时会自动收紧用户级文件权限为 600，且不得把该文件提交到仓库。
 # api_key = "your-enterprise-gateway-key"
 timeout_seconds = 120
 max_retries = 2
 # 模型输入窗口；未填写时使用 128000。显式值不得低于 16384。
 context_window_tokens = 128000
+# 未声明时兼容 tool-calling、streaming；可选 vision。
+capabilities = ["tool-calling", "streaming"]
 
 # 固定 Header 只能包含非秘密值；Authorization、Cookie 和 API Key 必须放入 headers_env。
-[models.profiles.enterprise.headers]
+[models.profiles.fast.headers]
 X-Client-Name = "harness-code"
 
-[models.profiles.enterprise.headers_env]
+[models.profiles.fast.headers_env]
 X-Enterprise-Tenant = "HARNESS_TENANT"
+
+# 可选的更强 Profile。/model pro 会在下一新 Thread 首次运行时选择它，
+# 不会修改 TOML，也不能热切换已绑定 Thread。
+# [models.profiles.pro]
+# provider = "openai-compatible"
+# provider_label = "Enterprise Pro"
+# model = "your-enterprise-pro-model"
+# base_url = "https://gateway.example.internal/v1"
+# api_key_env = "HARNESS_PRO_API_KEY"
+# context_window_tokens = 256000
+# capabilities = ["tool-calling", "streaming", "vision"]
+#
+# 当前 Single Agent 实际使用 executor；其余角色会随 Thread 冻结，供未来 topology 使用。
+# [models.roles]
+# planner = "pro"
+# executor = "fast"
 
 [approval]
 mode = "default"

@@ -54,7 +54,7 @@ export type JsonRpcMessage = JsonRpcRequest | JsonRpcNotification | JsonRpcRespo
 export interface InitializeParams { protocol: { major: ${meta.major}; min_minor: number; max_minor: number }; client: { name: string; version: string }; capabilities: string[]; cwd?: string; config_path?: string }
 export interface InitializeResult { protocol: { major: ${meta.major}; minor: number }; server: { name: string; version: string }; server_capabilities: string[]; enabled_capabilities: string[]; agent_commands: Array<{ name: string; description: string; aliases: string[] }>; skills_snapshot: { id: string; count: number }; skill_diagnostics: string[]; limits: { max_frame_bytes: number; max_tool_payload_bytes: number }; config_summary: JsonObject | null; startup_error: { code: string; message: string } | null }
 export interface RequestedSkill { id: string; args?: string }
-export interface RunStartParams { message: string; thread_id?: string; run_id?: string; requested_skill?: RequestedSkill }
+export interface RunStartParams { message: string; thread_id?: string; run_id?: string; requested_skill?: RequestedSkill; model_profile?: string }
 export interface RunStartResult { thread_id: string; run_id: string; accepted: boolean }
 export interface RunCancelParams { thread_id: string; run_id: string }
 export interface RunCancelResult { cancelled: boolean; run_id: string }
@@ -66,6 +66,10 @@ export interface ThreadsListParams { limit?: number }
 export interface ThreadsListResult { threads: ThreadSummary[] }
 export interface ThreadsOpenParams { thread_id: string }
 export interface ThreadsOpenResult { thread: ThreadSummary; messages: ThreadMessage[] }
+export interface ModelProfile { id: string; model: string; provider_label: string; context_window_tokens: number; capabilities: string[]; is_default: boolean; available: boolean; unavailable_reason?: string | null; source: string }
+export interface ThreadModelBinding { state: "bound" | "legacy" | "unbound"; roles: Record<string, ModelProfile> }
+export interface ModelsListParams { thread_id?: string }
+export interface ModelsListResult { profiles: ModelProfile[]; thread_binding?: ThreadModelBinding }
 export interface EventEnvelope { event_id: string; type: string; thread_id: string; run_id: string; sequence: number; timestamp_ms: number; source?: { kind: "root" | "subagent" | "background"; id?: string; parent_tool_call_id?: string }; payload: JsonObject; extensions?: JsonObject }
 export interface InteractionRequestEnvelope { request_id: string; type: "approval" | "question"; thread_id: string; run_id: string; sequence: number; timeout_ms: number; payload: JsonObject }
 export interface ApprovalResponse { type: "approval"; request_id: string; decision: "approve_once" | "approve_thread" | "reject"; feedback?: string }
@@ -126,6 +130,7 @@ class RunStartParams(StrictModel):
     thread_id: str | None = None
     run_id: str | None = None
     requested_skill: RequestedSkill | None = None
+    model_profile: str | None = Field(default=None, min_length=1)
 
 class RunCancelParams(StrictModel):
     thread_id: str = Field(min_length=1)
@@ -152,6 +157,24 @@ class ThreadsListParams(StrictModel):
 
 class ThreadsOpenParams(StrictModel):
     thread_id: str = Field(min_length=1)
+
+class ModelProfile(StrictModel):
+    id: str = Field(min_length=1)
+    model: str = Field(min_length=1)
+    provider_label: str = Field(min_length=1)
+    context_window_tokens: int = Field(ge=16384)
+    capabilities: list[str]
+    is_default: bool
+    available: bool
+    unavailable_reason: str | None = None
+    source: str = Field(min_length=1)
+
+class ThreadModelBinding(StrictModel):
+    state: Literal["bound", "legacy", "unbound"]
+    roles: dict[str, ModelProfile]
+
+class ModelsListParams(StrictModel):
+    thread_id: str | None = None
 
 class EventEnvelope(StrictModel):
     event_id: str = Field(min_length=1)

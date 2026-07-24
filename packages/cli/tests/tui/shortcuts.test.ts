@@ -45,6 +45,15 @@ test("thread 恢复选择器优先消费导航、选择与关闭键", () => {
   expect(resolveShortcut({ name: "escape", ctrl: false }, picker)).toBe("close-thread-picker")
 })
 
+test("模型选择器复用 Picker 导航，并优先于其他浮层和滚动", () => {
+  const picker = { ...idle, modelPickerVisible: true, modelOptionCount: 2, skillPickerVisible: true }
+  expect(resolveShortcut({ name: "down", ctrl: false }, picker)).toBe("model-next")
+  expect(resolveShortcut({ name: "return", ctrl: false }, picker)).toBe("model-select")
+  expect(resolveShortcut({ name: "escape", ctrl: false }, picker)).toBe("close-model-picker")
+  expect(resolveShortcut({ name: "pageup", ctrl: false }, picker)).toBe("none")
+  expect(resolveShortcut({ name: "return", ctrl: false }, { ...picker, modelOptionCount: 0 })).toBe("model-block")
+})
+
 test("Esc、Ctrl+P、Ctrl+O 和 Ctrl+D 保留真实 TUI 行为", () => {
   expect(resolveShortcut({ name: "escape", ctrl: false }, { ...idle, activeRun: true })).toBe("cancel-run")
   expect(resolveShortcut({ name: "p", ctrl: true }, idle)).toBe("command-open")

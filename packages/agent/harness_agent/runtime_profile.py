@@ -169,6 +169,7 @@ def model_settings_fingerprint(
             "timeout_seconds": float(model.timeout_seconds),
             "max_retries": int(model.max_retries),
             "context_window_tokens": int(model.context_window_tokens),
+            "capabilities": sorted(str(capability) for capability in model.capabilities),
             "headers": dict(model.headers),
             "headers_env": dict(model.headers_env),
         }

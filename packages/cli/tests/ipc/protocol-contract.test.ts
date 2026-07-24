@@ -3,7 +3,7 @@
 import { expect, test } from "bun:test"
 import { readFile } from "node:fs/promises"
 import { resolve } from "node:path"
-import { assertContextCompactParams, assertEventEnvelope, assertInitializeParams, assertInteractionRequest, assertThreadsListParams, assertThreadsOpenParams } from "@za38/protocol"
+import { assertContextCompactParams, assertEventEnvelope, assertInitializeParams, assertInteractionRequest, assertModelsListParams, assertThreadsListParams, assertThreadsOpenParams } from "@za38/protocol"
 
 type Fixture = { kind: "initialize" | "event" | "request" | "threads.list" | "threads.open"; value: unknown }
 const fixtures = JSON.parse(await readFile(resolve(import.meta.dir, "../../../protocol/fixtures/v2-contract.json"), "utf8")) as { valid: Fixture[]; invalid: Fixture[] }
@@ -36,6 +36,12 @@ test("TypeScript 接受 v2.4 context.updated 和手动压缩参数", () => {
   })).not.toThrow()
   expect(() => assertContextCompactParams({ thread_id: "thread-1" })).not.toThrow()
   expect(() => assertContextCompactParams({ thread_id: "", ignored: true })).toThrow()
+})
+
+test("TypeScript 校验 v2.5 的 models.list 线程绑定参数", () => {
+  expect(() => assertModelsListParams({})).not.toThrow()
+  expect(() => assertModelsListParams({ thread_id: "thread-1" })).not.toThrow()
+  expect(() => assertModelsListParams({ thread_id: "", ignored: true })).toThrow()
 })
 
 function validate(fixture: Fixture): void {

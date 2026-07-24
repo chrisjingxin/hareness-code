@@ -3,8 +3,8 @@
 import { createCliRenderer, type KeyEvent, type ScrollBoxRenderable, type TextareaRenderable } from "@opentui/core"
 import { createRoot, useKeyboard, useTerminalDimensions } from "@opentui/react"
 import { randomUUID } from "node:crypto"
-import { useCallback, useEffect, useRef, useState } from "react"
-import type { InteractionRequestEnvelope, InteractionResponse, RequestedSkill, ThreadMessage } from "@za38/protocol"
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
+import type { InteractionRequestEnvelope, InteractionResponse, ModelProfile, RequestedSkill, ThreadMessage } from "@za38/protocol"
 
 import { IpcClient } from "../ipc/client"
 import {
@@ -21,7 +21,7 @@ import { dispatchSlashCommand, type CommandDialog, type CommandResult } from "./
 import { HomeView, SkillPicker, ThreadPicker, ThreadView, type CommandMenuState, type SelectedSkill, type ThreadPickerItem } from "./components"
 import { TuiErrorBoundary } from "./error-boundary"
 import { runtimeStatusSummary, type TuiRuntime } from "./model"
-import { DialogShell } from "./overlays"
+import { DialogShell, SearchPicker, type SearchPickerRenderContext } from "./overlays"
 import {
   loadPromptHistory,
   movePromptHistory,
@@ -31,6 +31,7 @@ import {
 } from "./prompt-history"
 import { resolveShortcut, type ScrollIntent } from "./shortcuts"
 import { registerCommonSyntaxParsers } from "./syntax-parsers"
+import { tuiTheme } from "./theme"
 import {
   appendNotice,
   applyAgentEvent,
@@ -76,6 +77,19 @@ type ThreadPickerState = {
   error?: string
 }
 
+type ModelPickerState = {
+  visible: boolean
+  loading: boolean
+  query: string
+  selectedIndex: number
+  error?: string
+}
+
+type ModelBindingDialog = {
+  title: string
+  message: string
+}
+
 /** 正式 OpenTUI 根组件：所有 Agent 输出必须经状态归约后才进入终端。 */
 export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestExit }: TuiOptions) {
   const [state, setState] = useState(() => createInitialState())
@@ -87,6 +101,10 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
   const [skills, setSkills] = useState<readonly SkillMenuItem[]>([])
   const [skillPicker, setSkillPicker] = useState<SkillPickerState>({ visible: false, loading: false, query: "", selectedIndex: 0 })
   const [threadPicker, setThreadPicker] = useState<ThreadPickerState>({ visible: false, loading: false, query: "", selectedIndex: 0 })
+  const [modelPicker, setModelPicker] = useState<ModelPickerState>({ visible: false, loading: false, query: "", selectedIndex: 0 })
+  const [models, setModels] = useState<readonly ModelProfile[]>([])
+  const [pendingModelProfile, setPendingModelProfile] = useState<string | undefined>(undefined)
+  const [modelBindingDialog, setModelBindingDialog] = useState<ModelBindingDialog | undefined>(undefined)
   const [commandDialog, setCommandDialog] = useState<CommandDialog | undefined>(undefined)
   const [threads, setThreads] = useState<readonly ThreadPickerItem[]>([])
   const [selectedSkill, setSelectedSkill] = useState<SelectedSkill | undefined>(undefined)
@@ -102,6 +120,7 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
   const historyApplyValueRef = useRef<string | undefined>(undefined)
   const skillSearchRef = useRef<TextareaRenderable | null>(null)
   const threadSearchRef = useRef<TextareaRenderable | null>(null)
+  const modelSearchRef = useRef<TextareaRenderable | null>(null)
   const initialResumeRef = useRef(resume === true)
   const openingThreadRef = useRef(false)
   const terminal = useTerminalDimensions()
@@ -220,17 +239,20 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     const armedSkill = requestedSkill ?? (selectedSkill
       ? { id: selectedSkill.id, args: message }
       : undefined)
+    // 仅无 Thread 的首次 run 携带待选 Profile；服务端在创建 Thread 时原子绑定它。
+    const requestedModelProfile = current.threadId ? undefined : pendingModelProfile
     if (armedSkill && !requestedSkill) setSelectedSkill(undefined)
     commit(state => startRun(state, run, message))
     try {
-      const accepted = await client.query(message, run.threadId, run.runId, armedSkill)
+      const accepted = await client.query(message, run.threadId, run.runId, armedSkill, requestedModelProfile)
       if (!accepted.accepted || accepted.thread_id !== run.threadId || accepted.run_id !== run.runId) {
         throw new Error("Agent 返回的 run 标识与请求不一致")
       }
+      if (requestedModelProfile) setPendingModelProfile(undefined)
     } catch (error) {
       commit(state => markRunFailed(state, run.runId, errorMessage(error)))
     }
-  }, [client, commit, selectedSkill])
+  }, [client, commit, pendingModelProfile, selectedSkill])
 
   /** 解析 Agent 发起的审批 request，由 JsonRpcPeer 自动回写标准 response。 */
   const respondApproval = useCallback(async (decision: "approve" | "reject") => {
@@ -301,6 +323,44 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     setThreadPicker(current => ({ ...current, visible: false, loading: false, error: undefined }))
   }, [])
 
+  /** `/model` 只为尚未绑定的下一条新 Thread 选择 Profile；既有 Thread 保持不可变。 */
+  const openModelPicker = useCallback((initialQuery = "") => {
+    const current = stateRef.current
+    if (current.threadId) {
+      void client.listModels(current.threadId).then(result => {
+        const binding = result.thread_binding
+        const executor = binding?.roles.executor ?? binding?.roles.primary
+        setModelBindingDialog({
+          title: "当前 Thread 的模型不可变",
+          message: executor
+            ? `当前 Thread 已绑定 ${executor.provider_label} · ${executor.model}（${executor.id}）。请新建 Thread 后使用 /model 选择模型。`
+            : "当前 Thread 使用 legacy immutable binding，不能热切换模型。请新建 Thread 后使用 /model 选择模型。",
+        })
+      }).catch(error => {
+        setModelBindingDialog({
+          title: "模型绑定不可读取",
+          message: `无法读取当前 Thread 的模型绑定：${errorMessage(error)}。请新建 Thread 后再选择模型。`,
+        })
+      })
+      return
+    }
+    setModelPicker({ visible: true, loading: true, query: initialQuery, selectedIndex: 0 })
+    void client.listModels().then(result => {
+      setModels(result.profiles)
+      setModelPicker(value => value.visible ? { ...value, loading: false } : value)
+    }).catch(error => {
+      setModelPicker(value => value.visible
+        ? { ...value, loading: false, error: `模型目录读取失败：${errorMessage(error)}` }
+        : value)
+    })
+  }, [client])
+
+  /** 取消模型选择会回到配置默认值，避免旧的待绑定选择在后续输入中意外生效。 */
+  const closeModelPicker = useCallback(() => {
+    setPendingModelProfile(undefined)
+    setModelPicker(current => ({ ...current, visible: false, loading: false, error: undefined }))
+  }, [])
+
   useEffect(() => {
     if (!initialResumeRef.current) return
     initialResumeRef.current = false
@@ -310,6 +370,7 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
   /** 筛选保持在纯视图层，避免每次搜索重新请求 sidecar 或改变 snapshot。 */
   const visibleSkills = filterSkills(skills, skillPicker.query)
   const visibleThreads = filterThreads(threads, threadPicker.query)
+  const visibleModels = filterModels(models, modelPicker.query)
 
   /** 把 Dispatcher 的结构化结果映射为 TUI 状态、JSON-RPC 或退出动作。 */
   const applyCommandResult = useCallback(async (result: CommandResult): Promise<void> => {
@@ -322,10 +383,12 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
         return
       case "local-action":
         if (result.action === "clear-thread") {
+          setPendingModelProfile(undefined)
           commit(clearThread)
           return
         }
         if (await cancelActiveRun({ exitOnRepeatedCancellation: false })) {
+          setPendingModelProfile(undefined)
           commit(clearThread)
         } else {
           commit(current => appendNotice(current, "未能取消当前任务，已保留当前 thread。请等待任务结束后重试。"))
@@ -333,7 +396,8 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
         return
       case "open-picker":
         if (result.picker === "skills") openSkillPicker()
-        else openThreadPicker()
+        else if (result.picker === "threads") openThreadPicker()
+        else openModelPicker(result.initialQuery)
         return
       case "open-dialog":
         setCommandDialog(result.dialog)
@@ -349,7 +413,7 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
       case "submit-prompt":
         await sendAgentMessage(result.prompt, result.requestedSkill)
     }
-  }, [cancelActiveRun, client, commit, onRequestExit, openSkillPicker, openThreadPicker, sendAgentMessage])
+  }, [cancelActiveRun, client, commit, onRequestExit, openModelPicker, openSkillPicker, openThreadPicker, sendAgentMessage])
 
   /** 由 Dispatcher 解析稳定 ID 和运行态，根组件不再解释每个命令的业务分支。 */
   const executeSlashCommand = useCallback((command: SlashCommand) => {
@@ -432,6 +496,29 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
       openingThreadRef.current = false
     }
   }, [clearDraft, client, commit])
+
+  /** 将可用 Profile 写入 Composer 的一次性待绑定状态；Enter 显式确认后才会生效。 */
+  const selectModel = useCallback((model: ModelProfile) => {
+    if (!model.available) {
+      setModelPicker(current => ({
+        ...current,
+        error: `${model.provider_label} · ${model.model} 不可用：${model.unavailable_reason ?? "配置不可用"}`,
+      }))
+      return
+    }
+    setPendingModelProfile(model.id)
+    // 选择与取消不同：确认后保留 pending 状态，直到下一新 Thread 成功启动或 /new 清理它。
+    setModelPicker(current => ({ ...current, visible: false, loading: false, error: undefined }))
+    commit(current => appendNotice(current, `已选择 ${model.provider_label} · ${model.model}；将在下一条新 Thread 中生效。`))
+  }, [commit])
+
+  /** 已绑定 Thread 的说明框只允许回到空白 Composer；不修改既有绑定。 */
+  const resolveModelBindingDialog = useCallback((createNewThread: boolean) => {
+    setModelBindingDialog(undefined)
+    if (!createNewThread) return
+    setPendingModelProfile(undefined)
+    commit(clearThread)
+  }, [commit])
 
   /** 用历史项或命令项替换草稿，并把光标放到指定端点。 */
   const replaceDraft = useCallback((value: string, cursor: "start" | "end" = "end", historyCursor?: PromptHistoryCursor) => {
@@ -547,7 +634,7 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
   /** 在 textarea 层处理历史与 thread 滚动，避免全局 key handler 抢走方向键。 */
   const handleComposerKeyDown = useCallback((key: KeyEvent) => {
     // Slash 菜单由全局快捷键优先处理，不能在 textarea 内重复消费方向键。
-    if (commandMenu.visible || commandDialog || skillPicker.visible || threadPicker.visible) return
+    if (commandMenu.visible || commandDialog || modelBindingDialog || skillPicker.visible || threadPicker.visible || modelPicker.visible) return
     const input = inputRef.current
     if (!input) return
 
@@ -570,16 +657,18 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
           : undefined
       if (scrollAction && scrollConversation(scrollAction)) key.preventDefault()
     }
-  }, [commandDialog, commandMenu.visible, navigatePromptHistory, scrollConversation, skillPicker.visible, threadPicker.visible])
+  }, [commandDialog, commandMenu.visible, modelBindingDialog, modelPicker.visible, navigatePromptHistory, scrollConversation, skillPicker.visible, threadPicker.visible])
 
   useKeyboard(key => {
     const commandOptions = findCommandMenuItems(draft, skills, tuiCommandContext(runtime, stateRef.current))
     const action = resolveShortcut(key, {
-      commandDialogVisible: Boolean(commandDialog),
+      commandDialogVisible: Boolean(commandDialog || modelBindingDialog),
       skillPickerVisible: skillPicker.visible,
       skillOptionCount: visibleSkills.length,
       threadPickerVisible: threadPicker.visible,
       threadOptionCount: visibleThreads.length,
+      modelPickerVisible: modelPicker.visible,
+      modelOptionCount: visibleModels.length,
       commandMenuVisible: commandMenu.visible,
       commandOptionCount: commandOptions.length,
       activeRun: Boolean(stateRef.current.activeRun),
@@ -589,11 +678,13 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     key.preventDefault()
 
     if (action === "confirm-command-dialog") {
-      resolveCommandDialog(true)
+      if (modelBindingDialog) resolveModelBindingDialog(true)
+      else resolveCommandDialog(true)
       return
     }
     if (action === "cancel-command-dialog") {
-      resolveCommandDialog(false)
+      if (modelBindingDialog) resolveModelBindingDialog(false)
+      else resolveCommandDialog(false)
       return
     }
 
@@ -618,6 +709,10 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
       closeThreadPicker()
       return
     }
+    if (action === "close-model-picker") {
+      closeModelPicker()
+      return
+    }
     if (action === "thread-previous" || action === "thread-next") {
       const direction = action === "thread-previous" ? -1 : 1
       setThreadPicker(current => ({
@@ -632,6 +727,20 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
       return
     }
     if (action === "thread-block") return
+    if (action === "model-previous" || action === "model-next") {
+      const direction = action === "model-previous" ? -1 : 1
+      setModelPicker(current => ({
+        ...current,
+        selectedIndex: visibleModels.length ? (current.selectedIndex + direction + visibleModels.length) % visibleModels.length : 0,
+      }))
+      return
+    }
+    if (action === "model-select") {
+      const selected = visibleModels[modelPicker.selectedIndex]
+      if (selected) selectModel(selected)
+      return
+    }
+    if (action === "model-block") return
     if (action === "skill-previous" || action === "skill-next") {
       const direction = action === "skill-previous" ? -1 : 1
       setSkillPicker(current => ({
@@ -729,7 +838,7 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     onSelectCommand: selectCommandMenuItem,
     onHoverCommand: (selectedIndex: number) => setCommandMenu(current => ({ ...current, selectedIndex })),
     selectedSkill,
-    pickerVisible: Boolean(commandDialog) || skillPicker.visible || threadPicker.visible,
+    pickerVisible: Boolean(commandDialog || modelBindingDialog) || skillPicker.visible || threadPicker.visible || modelPicker.visible,
     onClearSelectedSkill: () => setSelectedSkill(undefined),
     showToolDetails,
     expandedTools,
@@ -775,6 +884,29 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
         onHover={selectedIndex => setThreadPicker(current => ({ ...current, selectedIndex }))}
         onClose={closeThreadPicker}
       />
+      <SearchPicker<ModelProfile>
+        visible={modelPicker.visible}
+        loading={modelPicker.loading}
+        error={modelPicker.error}
+        items={visibleModels}
+        query={modelPicker.query}
+        selectedIndex={modelPicker.selectedIndex}
+        terminalWidth={terminal.width}
+        terminalHeight={terminal.height}
+        searchRef={modelSearchRef}
+        restoreFocusRef={inputRef}
+        shouldRestoreFocus={!state.activeRun}
+        searchId="model-search"
+        title="选择下一新 Thread 的模型"
+        searchPlaceholder="按 Profile、模型或 Provider 搜索"
+        emptyMessage="没有匹配的模型 Profile"
+        itemKey={model => model.id}
+        renderItem={(model, context) => modelPickerRow(model, context)}
+        onSearch={query => setModelPicker(current => ({ ...current, query, selectedIndex: 0 }))}
+        onSelect={selectModel}
+        onHover={selectedIndex => setModelPicker(current => ({ ...current, selectedIndex }))}
+        onClose={closeModelPicker}
+      />
       <DialogShell
         visible={commandDialog?.kind === "confirm-new-thread"}
         title={commandDialog?.title ?? ""}
@@ -785,6 +917,19 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
         shouldRestoreFocus={!state.activeRun}
         onConfirm={() => resolveCommandDialog(true)}
         onCancel={() => resolveCommandDialog(false)}
+      />
+      <DialogShell
+        visible={Boolean(modelBindingDialog)}
+        title={modelBindingDialog?.title ?? ""}
+        message={modelBindingDialog?.message ?? ""}
+        terminalWidth={terminal.width}
+        terminalHeight={terminal.height}
+        restoreFocusRef={inputRef}
+        shouldRestoreFocus={!state.activeRun}
+        confirmLabel="新建 Thread"
+        cancelLabel="保留当前 Thread"
+        onConfirm={() => resolveModelBindingDialog(true)}
+        onCancel={() => resolveModelBindingDialog(false)}
       />
     </box>
   )
@@ -924,4 +1069,33 @@ function filterThreads(threads: readonly ThreadPickerItem[], query: string): rea
   if (!needle) return threads
   return threads.filter(thread => [thread.firstMessage, thread.latestMessage]
     .some(value => value.toLowerCase().includes(needle)))
+}
+
+/** Profile 搜索同时覆盖稳定 ID、模型名和可展示的 Provider 标签。 */
+function filterModels(models: readonly ModelProfile[], query: string): readonly ModelProfile[] {
+  const needle = query.trim().toLowerCase()
+  if (!needle) return models
+  return models.filter(model => [model.id, model.model, model.provider_label]
+    .some(value => value.toLowerCase().includes(needle)))
+}
+
+/** Model Picker 行避免展示 endpoint 或凭据，只展示已脱敏的 Profile DTO。 */
+function modelPickerRow(model: ModelProfile, context: SearchPickerRenderContext): ReactNode {
+  const idWidth = context.compact
+    ? Math.max(16, context.width - 6)
+    : Math.max(16, Math.min(26, Math.floor(context.width * 0.28)))
+  const contextWindow = model.context_window_tokens >= 1_000
+    ? `${Math.round(model.context_window_tokens / 1_000)}k`
+    : String(model.context_window_tokens)
+  const detail = model.available
+    ? `${model.is_default ? "默认 · " : ""}${model.provider_label} · ${model.model} · ${contextWindow} · ${model.capabilities.join(",")}`
+    : `${model.is_default ? "默认 · " : ""}${model.provider_label} · 不可用：${model.unavailable_reason ?? "配置不可用"}`
+  const foreground = context.selected ? tuiTheme.background : model.available ? tuiTheme.primary : tuiTheme.muted
+  const detailForeground = context.selected ? tuiTheme.background : model.available ? tuiTheme.muted : tuiTheme.danger
+  return (
+    <>
+      <text width={idWidth} fg={foreground} wrapMode="none" overflow="hidden">{model.id}</text>
+      {!context.compact ? <text flexGrow={1} fg={detailForeground} wrapMode="none" overflow="hidden">{detail}</text> : null}
+    </>
+  )
 }

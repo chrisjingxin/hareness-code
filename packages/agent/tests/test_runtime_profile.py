@@ -143,7 +143,7 @@ async def test_thread_store_persists_immutable_runtime_profile_without_raw_value
 
 
 async def test_thread_store_upgrades_v3_runtime_profile_schema_without_losing_epoch(tmp_path: Path) -> None:
-    """v3 数据库升级到 v4 时，旧 thread 继续读取且保持未绑定兼容状态。"""
+    """v3 数据库升级到 v5 时，旧 thread 继续读取且保持未绑定兼容状态。"""
     from harness_agent.prompting import PromptComposer
 
     home = tmp_path / "home"
@@ -172,6 +172,7 @@ async def test_thread_store_upgrades_v3_runtime_profile_schema_without_losing_ep
 
     connection = sqlite3.connect(database)
     try:
+        connection.execute("DROP TABLE harness_thread_model_bindings")
         connection.execute("DROP TABLE harness_thread_runtime_profiles")
         connection.execute("DROP TABLE harness_runtime_profiles")
         connection.execute("PRAGMA user_version=3")
@@ -193,9 +194,12 @@ async def test_thread_store_upgrades_v3_runtime_profile_schema_without_losing_ep
 
     connection = sqlite3.connect(database)
     try:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
         assert connection.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'harness_runtime_profiles'"
+        ).fetchone()
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'harness_thread_model_bindings'"
         ).fetchone()
     finally:
         connection.close()

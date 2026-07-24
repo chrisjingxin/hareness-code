@@ -218,6 +218,51 @@ async def test_thread_store_persists_immutable_prompt_epoch_without_rescan(tmp_p
     await second.close()
 
 
+async def test_thread_store_migrates_and_preserves_immutable_model_bindings(tmp_path: Path) -> None:
+    """v4 数据库升级后首次 Profile 绑定与 thread 摘要同事务保存，且不可改写。"""
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    initial = await ThreadStore.open(project=project, home=home)
+    database = initial.database_path
+    await initial.close()
+
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("DROP TABLE harness_thread_model_bindings")
+        connection.execute("PRAGMA user_version=4")
+        connection.commit()
+    finally:
+        connection.close()
+
+    store = await ThreadStore.open(project=project, home=home)
+    binding = {
+        "roles": {
+            "executor": {
+                "id": "fast",
+                "model": "fast-model",
+                "provider_label": "Gateway",
+                "context_window_tokens": 128000,
+                "capabilities": ["tool-calling", "streaming"],
+                "is_default": True,
+                "available": True,
+                "unavailable_reason": None,
+                "source": "user",
+            }
+        }
+    }
+    await store.record_message("thread-model", "使用 fast", model_bindings=binding)
+    assert await store.get_model_bindings("thread-model") == binding
+    assert (await store.list_threads())[0].first_message == "使用 fast"
+    with pytest.raises(ThreadStoreError, match="THREAD_MODEL_BINDING_IMMUTABLE"):
+        await store.record_message(
+            "thread-model",
+            "尝试改写",
+            model_bindings={"roles": {"executor": {"id": "pro"}}},
+        )
+    await store.close()
+
+
 async def test_thread_store_reports_future_schema_and_closed_store(tmp_path: Path) -> None:
     """未来 schema 不能被旧版静默写回，关闭连接后也不得继续读写。"""
     home = tmp_path / "home"

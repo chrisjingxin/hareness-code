@@ -15,7 +15,7 @@ import {
 export type CommandLocalAction = "clear-thread" | "cancel-active-run-and-clear-thread"
 
 /** 现有命令能够打开的选择器；后续 Manager/Viewer 会按相同模式扩展。 */
-export type CommandPicker = "skills" | "threads"
+export type CommandPicker = "skills" | "threads" | "models"
 
 /** 当前只实现新建 thread 的确认框，Dialog Shell 将由 ZC-065 继续抽象。 */
 export type CommandDialog = {
@@ -39,7 +39,7 @@ export type CommandResult =
   | { type: "notice"; message: string }
   | { type: "exit" }
   | { type: "local-action"; action: CommandLocalAction }
-  | { type: "open-picker"; picker: CommandPicker }
+  | { type: "open-picker"; picker: CommandPicker; initialQuery?: string }
   | { type: "open-dialog"; dialog: CommandDialog }
   | CommandRpcResult
   | { type: "submit-prompt"; prompt: string; requestedSkill?: RequestedSkill }
@@ -112,6 +112,7 @@ const builtinHandlers: Readonly<Record<string, CommandHandler>> = {
   "thread.resume": context => context.command.argument
     ? notice("/resume 不接受 thread_id；请在选择器中选择要恢复的 thread。")
     : { type: "open-picker", picker: "threads" },
+  "model.select": context => ({ type: "open-picker", picker: "models", initialQuery: context.command.argument }),
   "skills.open": () => ({ type: "open-picker", picker: "skills" }),
 }
 

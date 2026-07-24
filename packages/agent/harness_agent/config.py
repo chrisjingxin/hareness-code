@@ -5,8 +5,9 @@ from __future__ import annotations
 import os
 import stat
 import tomllib
-from dataclasses import InitVar, dataclass, field
+from dataclasses import InitVar, dataclass, field, replace
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Literal, Mapping
 
 from harness_agent.approval_mode import (
@@ -25,6 +26,16 @@ class ConfigError(ValueError):
     """最终生效的 Harness 配置不合法时抛出，用于返回可操作的启动错误。"""
 
 
+MODEL_ROLES = ("planner", "executor", "reviewer", "tester", "summarizer")
+"""模型路由允许的稳定角色；Topology 只能从这组名称中选择。"""
+
+DEFAULT_MODEL_CAPABILITIES = frozenset({"tool-calling", "streaming"})
+"""旧 OpenAI-compatible 配置未声明能力时采用的兼容能力集合。"""
+
+SUPPORTED_MODEL_CAPABILITIES = frozenset({"tool-calling", "streaming", "vision"})
+"""v1 可安全声明并供 Picker 展示的模型能力。"""
+
+
 @dataclass(frozen=True, slots=True)
 class ModelSettings:
     """由 v1 TOML 和环境变量解析出的 OpenAI 兼容模型配置。"""
@@ -38,6 +49,8 @@ class ModelSettings:
     max_retries: int = 2
     context_window_tokens: int = 128_000
     context_window_source: Literal["default", "config"] = "default"
+    provider_label: str = "OpenAI-compatible"
+    capabilities: frozenset[str] = DEFAULT_MODEL_CAPABILITIES
     headers: dict[str, str] = field(default_factory=dict)
     headers_env: dict[str, str] = field(default_factory=dict)
 
@@ -83,6 +96,7 @@ class ModelSettings:
         api_key_source = self.api_key_source(environ)
         return {
             "provider": "openai-compatible",
+            "provider_label": self.provider_label,
             "name": self.name,
             "base_url": self.base_url,
             "api_key_env": self.api_key_env,
@@ -92,9 +106,75 @@ class ModelSettings:
             "max_retries": self.max_retries,
             "context_window_tokens": self.context_window_tokens,
             "context_window_source": self.context_window_source,
+            "capabilities": sorted(self.capabilities),
             "headers": dict(self.headers),
             "headers_env": dict(self.headers_env),
         }
+
+
+@dataclass(frozen=True, slots=True)
+class ModelProfile:
+    """一个具名的 OpenAI-compatible 模型 Profile 与安全展示摘要。"""
+
+    profile_id: str
+    settings: ModelSettings
+    source: str
+    is_default: bool = False
+
+    def picker_summary(self, environ: Mapping[str, str] | None = None) -> dict[str, object]:
+        """返回 `/model` 可显示的脱敏字段，绝不暴露 endpoint、Header 或凭据来源名称。"""
+        api_key_source = self.settings.api_key_source(environ)
+        return {
+            "id": self.profile_id,
+            "model": self.settings.name,
+            "provider_label": self.settings.provider_label,
+            "context_window_tokens": self.settings.context_window_tokens,
+            "capabilities": sorted(self.settings.capabilities),
+            "is_default": self.is_default,
+            "available": api_key_source != "missing",
+            "unavailable_reason": None if api_key_source != "missing" else "API_KEY_MISSING",
+            "source": self.source,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ModelCatalog:
+    """不可变模型目录：配置默认值、具名 Profile 与角色到 Profile 的映射。"""
+
+    default_profile: str
+    profiles: Mapping[str, ModelProfile]
+    role_profiles: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        """冻结映射并验证默认项和角色绑定不引用缺失 Profile。"""
+        profiles = MappingProxyType({
+            profile_id: replace(profile, is_default=profile_id == self.default_profile)
+            for profile_id, profile in self.profiles.items()
+        })
+        roles = MappingProxyType(dict(self.role_profiles))
+        if self.default_profile not in profiles:
+            raise ConfigError("models.default_profile must reference an existing profile")
+        for role, profile_id in roles.items():
+            if role not in MODEL_ROLES:
+                raise ConfigError(f"models.roles.{role} is not a supported model role")
+            if profile_id not in profiles:
+                raise ConfigError(f"models.roles.{role} must reference an existing profile")
+        object.__setattr__(self, "profiles", profiles)
+        object.__setattr__(self, "role_profiles", roles)
+
+    def require_profile(self, profile_id: str | None = None) -> ModelProfile:
+        """读取指定或默认 Profile，未知名称始终以稳定配置错误失败。"""
+        selected = profile_id or self.default_profile
+        profile = self.profiles.get(selected)
+        if profile is None:
+            raise ConfigError(f"MODEL_PROFILE_NOT_FOUND: {selected}")
+        return profile
+
+    def profile_for_role(self, role: str) -> ModelProfile:
+        """解析 canonical 角色；未显式配置时继承默认 Profile。"""
+        if role not in MODEL_ROLES:
+            raise ConfigError(f"MODEL_ROLE_NOT_SUPPORTED: {role}")
+        return self.require_profile(self.role_profiles.get(role, self.default_profile))
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,15 +249,26 @@ class Za38Config:
     paths: tuple[Path, ...]
     workspace: Path
     sources: Mapping[str, str]
+    model_catalog: ModelCatalog | None = None
 
-    def require_model(self) -> ModelSettings:
-        """返回默认模型；缺失时给出当前可信配置来源的修复方式。"""
+    def require_model(self, profile_id: str | None = None) -> ModelSettings:
+        """返回指定或默认模型；保留单 Profile 调用方的兼容入口。"""
+        if self.model_catalog is not None:
+            return self.model_catalog.require_profile(profile_id).settings
+        if profile_id is not None and profile_id != self.model_profile:
+            raise ConfigError(f"MODEL_PROFILE_NOT_FOUND: {profile_id}")
         if self.model is None:
             raise ConfigError(
                 "No model configuration found. Add [models] to ~/.harness/config.toml "
                 "or pass a trusted file with --config PATH."
             )
         return self.model
+
+    def require_model_profile(self, profile_id: str | None = None) -> ModelProfile:
+        """返回指定或默认命名 Profile；旧嵌入式配置没有目录时保持明确失败。"""
+        if self.model_catalog is None:
+            raise ConfigError("MODEL_CATALOG_UNAVAILABLE")
+        return self.model_catalog.require_profile(profile_id)
 
     def redacted(self, environ: Mapping[str, str] | None = None) -> dict[str, object]:
         """返回适合 CLI 与 JSON-RPC 摘要的脱敏配置。"""
@@ -188,6 +279,11 @@ class Za38Config:
             "sources": dict(self.sources),
             "model_profile": self.model_profile,
             "model": self.model.redacted(environ) if self.model else None,
+            "model_profiles": [
+                profile.picker_summary(environ)
+                for _, profile in sorted(self.model_catalog.profiles.items())
+            ] if self.model_catalog else [],
+            "model_roles": dict(self.model_catalog.role_profiles) if self.model_catalog else {},
             "security": self.execution.redacted(),
             "runtime_pool": self.runtime_pool.redacted(),
         }
@@ -224,7 +320,9 @@ def load_config(
     models, approval_values, execution_values, runtime_pool_values, sources = _merge_documents(documents)
     _apply_environment_overrides(models, approval_values, execution_values, environment, sources)
     _apply_cli_overrides(execution_values, environment, sources)
-    model_profile, model = _parse_default_model(models)
+    model_catalog = _parse_model_catalog(models, sources["models"])
+    model_profile = model_catalog.default_profile if model_catalog else None
+    model = model_catalog.require_profile().settings if model_catalog else None
 
     return Za38Config(
         model=model,
@@ -234,6 +332,7 @@ def load_config(
         paths=tuple(path for path, _, _ in documents),
         workspace=resolved_workspace,
         sources=sources,
+        model_catalog=model_catalog,
     )
 
 
@@ -266,14 +365,14 @@ def _read_document(path: Path, source: ConfigSource) -> dict[str, Any]:
         ConfigManifest.validate_document(data, source=source)
     except ConfigManifestError as exc:
         raise ConfigError(f"Invalid configuration in {path}: {exc}") from exc
-    _validate_literal_api_key_permissions(path, data, source)
+    _secure_literal_api_key_permissions(path, data, source)
     return data
 
 
-def _validate_literal_api_key_permissions(
+def _secure_literal_api_key_permissions(
     path: Path, document: Mapping[str, object], source: ConfigSource
 ) -> None:
-    """限制用户 TOML 明文密钥的 Unix 文件权限。"""
+    """自动收紧用户 TOML 明文密钥的 Unix 文件权限。"""
     if (
         source is not ConfigSource.USER
         or not _supports_posix_permissions()
@@ -285,10 +384,15 @@ def _validate_literal_api_key_permissions(
     except OSError as exc:
         raise ConfigError(f"Unable to inspect configuration file permissions: {path}") from exc
     if mode & 0o077:
-        raise ConfigError(
-            f"Configuration file containing models.profiles.<name>.api_key must not be accessible "
-            f"by group or others: {path}. Run: chmod 600 {path}"
-        )
+        try:
+            # 用户明确选择明文降级时由 Harness 在加载点收紧权限，避免每次编辑后要求手工 chmod。
+            path.chmod(0o600)
+        except OSError as exc:
+            raise ConfigError(
+                "Unable to secure configuration file containing "
+                f"models.profiles.<name>.api_key: {path}. "
+                "Grant the current user permission to set mode 600, or use api_key_env instead."
+            ) from exc
 
 
 def _contains_literal_api_key(document: Mapping[str, object]) -> bool:
@@ -317,7 +421,7 @@ def _merge_documents(
     dict[str, str],
 ]:
     """按用户到显式配置的顺序合并已验证字段，并记录最后贡献来源。"""
-    models: dict[str, object] = {"profiles": {}}
+    models: dict[str, object] = {"profiles": {}, "roles": {}, "_profile_sources": {}}
     approval_values: dict[str, object] = {}
     execution_values: dict[str, object] = {}
     runtime_pool_values: dict[str, object] = {}
@@ -329,7 +433,7 @@ def _merge_documents(
     }
     for _, source, document in documents:
         if "models" in document:
-            _merge_models(models, document["models"])
+            _merge_models(models, document["models"], source.value)
             sources["models"] = source.value
         if "approval" in document:
             approval_values = _merge_flat_values(approval_values, document["approval"])
@@ -343,34 +447,50 @@ def _merge_documents(
     return models, approval_values, execution_values, runtime_pool_values, sources
 
 
-def _merge_models(target: dict[str, object], value: object) -> None:
-    """合并模型 Profile 表，同时禁止把多个可执行 Profile 提前交给当前内核。"""
+def _merge_models(target: dict[str, object], value: object, source: str) -> None:
+    """合并命名 Profile 与角色绑定；同名 Profile 的字段仍按来源逐项覆盖。"""
     if not isinstance(value, dict):
         raise ConfigError("[models] must be a TOML table")
-    unknown = set(value) - {"default_profile", "profiles"}
+    unknown = set(value) - {"default_profile", "profiles", "roles"}
     if unknown:
         raise ConfigError(f"[models] contains unsupported fields: {', '.join(sorted(unknown))}")
     if "default_profile" in value:
         if not isinstance(value["default_profile"], str) or not value["default_profile"].strip():
             raise ConfigError("models.default_profile must be a non-empty string")
         target["default_profile"] = value["default_profile"].strip()
-    if "profiles" not in value:
-        return
-    profiles = value["profiles"]
-    if not isinstance(profiles, dict):
-        raise ConfigError("[models.profiles] must be a TOML table")
-    target_profiles = target["profiles"]
-    if not isinstance(target_profiles, dict):  # pragma: no cover - 内部不变量。
-        raise ConfigError("Internal configuration state is invalid")
-    for profile_name, profile_values in profiles.items():
-        if not isinstance(profile_name, str) or not profile_name:
-            raise ConfigError("models.profiles keys must be non-empty strings")
-        if not isinstance(profile_values, dict):
-            raise ConfigError(f"models.profiles.{profile_name} must be a TOML table")
-        existing = target_profiles.get(profile_name, {})
-        if not isinstance(existing, dict):  # pragma: no cover - 内部不变量。
+    if "profiles" in value:
+        profiles = value["profiles"]
+        if not isinstance(profiles, dict):
+            raise ConfigError("[models.profiles] must be a TOML table")
+        target_profiles = target["profiles"]
+        profile_sources = target["_profile_sources"]
+        if not isinstance(target_profiles, dict):  # pragma: no cover - 内部不变量。
             raise ConfigError("Internal configuration state is invalid")
-        target_profiles[profile_name] = _merge_profile_values(existing, profile_values)
+        if not isinstance(profile_sources, dict):  # pragma: no cover - 内部不变量。
+            raise ConfigError("Internal configuration state is invalid")
+        for profile_name, profile_values in profiles.items():
+            if not isinstance(profile_name, str) or not profile_name:
+                raise ConfigError("models.profiles keys must be non-empty strings")
+            if not isinstance(profile_values, dict):
+                raise ConfigError(f"models.profiles.{profile_name} must be a TOML table")
+            existing = target_profiles.get(profile_name, {})
+            if not isinstance(existing, dict):  # pragma: no cover - 内部不变量。
+                raise ConfigError("Internal configuration state is invalid")
+            target_profiles[profile_name] = _merge_profile_values(existing, profile_values)
+            profile_sources[profile_name] = source
+    if "roles" in value:
+        roles = value["roles"]
+        if not isinstance(roles, dict):
+            raise ConfigError("[models.roles] must be a TOML table")
+        target_roles = target["roles"]
+        if not isinstance(target_roles, dict):  # pragma: no cover - 内部不变量。
+            raise ConfigError("Internal configuration state is invalid")
+        for role, profile_name in roles.items():
+            if role not in MODEL_ROLES:
+                raise ConfigError(f"models.roles.{role} is not a supported model role")
+            if not isinstance(profile_name, str) or not profile_name.strip():
+                raise ConfigError(f"models.roles.{role} must be a non-empty profile name")
+            target_roles[role] = profile_name.strip()
 
 
 def _merge_profile_values(base: dict[str, object], override: dict[str, object]) -> dict[str, object]:
@@ -384,6 +504,8 @@ def _merge_profile_values(base: dict[str, object], override: dict[str, object]) 
         "timeout_seconds",
         "max_retries",
         "context_window_tokens",
+        "provider_label",
+        "capabilities",
         "headers",
         "headers_env",
     }
@@ -450,6 +572,10 @@ def _apply_environment_overrides(
         profiles[profile_name] = _merge_profile_values(
             existing if isinstance(existing, dict) else {}, overrides
         )
+        profile_sources = models["_profile_sources"]
+        if not isinstance(profile_sources, dict):  # pragma: no cover - 内部不变量。
+            raise ConfigError("Internal configuration state is invalid")
+        profile_sources[profile_name] = ConfigSource.ENVIRONMENT.value
         sources["models"] = ConfigSource.ENVIRONMENT.value
     if "HARNESS_APPROVAL_MODE" in environ:
         approval_values["mode"] = environ["HARNESS_APPROVAL_MODE"]
@@ -469,21 +595,48 @@ def _apply_cli_overrides(
     sources["execution"] = ConfigSource.CLI.value
 
 
-def _parse_default_model(models: Mapping[str, object]) -> tuple[str | None, ModelSettings | None]:
-    """解析当前内核唯一可执行的默认 Profile，多 Profile 选择留给 ZC-019。"""
+def _parse_model_catalog(models: Mapping[str, object], source: str) -> ModelCatalog | None:
+    """解析所有命名 Profile 与角色绑定，并保持旧单 Profile 配置可直接运行。"""
     profiles = models.get("profiles", {})
     if not isinstance(profiles, dict) or not profiles:
-        return None, None
+        return None
     profile_name = models.get("default_profile")
     if not isinstance(profile_name, str) or not profile_name:
         raise ConfigError("models.default_profile is required when models.profiles is configured")
     if profile_name not in profiles:
         raise ConfigError("models.default_profile must reference an existing profile")
-    if len(profiles) > 1:
-        raise ConfigError("Multiple model profiles require ZC-019 and are not supported yet")
-    values = profiles[profile_name]
-    if not isinstance(values, dict):  # pragma: no cover - 已在合并阶段验证。
-        raise ConfigError("models.default_profile must reference a TOML table")
+    profile_sources = models.get("_profile_sources", {})
+    if not isinstance(profile_sources, Mapping):  # pragma: no cover - 合并阶段不变量。
+        raise ConfigError("Internal configuration state is invalid")
+    parsed_profiles: dict[str, ModelProfile] = {}
+    for configured_id, values in profiles.items():
+        if not isinstance(configured_id, str) or not isinstance(values, dict):  # pragma: no cover - 已在合并阶段验证。
+            raise ConfigError("models.profiles must contain TOML tables")
+        parsed_profiles[configured_id] = ModelProfile(
+            profile_id=configured_id,
+            settings=_parse_model_settings(values),
+            source=str(profile_sources.get(configured_id, source)),
+        )
+    roles = models.get("roles", {})
+    if not isinstance(roles, dict):
+        raise ConfigError("[models.roles] must be a TOML table")
+    return ModelCatalog(
+        default_profile=profile_name,
+        profiles=parsed_profiles,
+        role_profiles={str(role): str(value) for role, value in roles.items()},
+    )
+
+
+def _parse_default_model(models: Mapping[str, object]) -> tuple[str | None, ModelSettings | None]:
+    """保留旧测试/嵌入调用的默认模型解析入口。"""
+    catalog = _parse_model_catalog(models, "default")
+    if catalog is None:
+        return None, None
+    return catalog.default_profile, catalog.require_profile().settings
+
+
+def _parse_model_settings(values: Mapping[str, object]) -> ModelSettings:
+    """解析单一 OpenAI-compatible Profile，并校验展示标签与能力声明。"""
     provider = str(values.get("provider", "openai-compatible"))
     if provider != "openai-compatible":
         raise ConfigError("Only models.profiles.<name>.provider = 'openai-compatible' is supported")
@@ -507,7 +660,19 @@ def _parse_default_model(models: Mapping[str, object]) -> tuple[str | None, Mode
         not isinstance(literal_api_key, str) or not literal_api_key.strip()
     ):
         raise ConfigError("models.profiles.<name>.api_key must be a non-empty string")
-    return profile_name, ModelSettings(
+    provider_label = values.get("provider_label", "OpenAI-compatible")
+    if not isinstance(provider_label, str) or not provider_label.strip() or len(provider_label.strip()) > 80:
+        raise ConfigError("models.profiles.<name>.provider_label must be a non-empty string up to 80 characters")
+    raw_capabilities = values.get("capabilities")
+    if raw_capabilities is None:
+        capabilities = DEFAULT_MODEL_CAPABILITIES
+    elif not isinstance(raw_capabilities, list) or not all(isinstance(item, str) for item in raw_capabilities):
+        raise ConfigError("models.profiles.<name>.capabilities must be an array of strings")
+    else:
+        capabilities = frozenset(item.strip() for item in raw_capabilities)
+        if not capabilities or not capabilities.issubset(SUPPORTED_MODEL_CAPABILITIES):
+            raise ConfigError("models.profiles.<name>.capabilities contains unsupported values")
+    return ModelSettings(
         name=name,
         base_url=base_url,
         api_key_env=api_key_env,
@@ -520,6 +685,8 @@ def _parse_default_model(models: Mapping[str, object]) -> tuple[str | None, Mode
             minimum=16_384,
         ),
         context_window_source="config" if "context_window_tokens" in values else "default",
+        provider_label=provider_label.strip(),
+        capabilities=capabilities,
         headers=headers,
         headers_env=headers_env,
     )

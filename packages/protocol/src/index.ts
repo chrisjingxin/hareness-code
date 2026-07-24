@@ -14,6 +14,7 @@ import {
   type JsonRpcMessage,
   type ThreadsListParams,
   type ThreadsOpenParams,
+  type ModelsListParams,
 } from "./generated"
 
 export const Method = {
@@ -23,6 +24,7 @@ export const Method = {
   CONTEXT_COMPACT: "context.compact",
   CONFIG_SHOW: "config.show",
   CONFIG_PATH: "config.path",
+  MODELS_LIST: "models.list",
   THREADS_LIST: "threads.list",
   THREADS_OPEN: "threads.open",
   SKILLS_LIST: "skills.list",
@@ -69,6 +71,15 @@ export function assertThreadsOpenParams(value: unknown): asserts value is Thread
   const params = objectValue(value, "threads.open params")
   if (typeof params.thread_id !== "string" || !params.thread_id) throw new Error("threads.open.thread_id 无效")
   rejectExtra(params, ["thread_id"], "threads.open params")
+}
+
+/** 校验 `/model` 读取目录时可选传入的当前 thread 内部标识。 */
+export function assertModelsListParams(value: unknown): asserts value is ModelsListParams {
+  const params = objectValue(value, "models.list params")
+  if (params.thread_id !== undefined && (typeof params.thread_id !== "string" || !params.thread_id)) {
+    throw new Error("models.list.thread_id 无效")
+  }
+  rejectExtra(params, ["thread_id"], "models.list params")
 }
 
 /** 校验只接受 TUI 当前 thread 内部 ID 的手动上下文压缩请求。 */

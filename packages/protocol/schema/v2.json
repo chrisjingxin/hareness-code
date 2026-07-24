@@ -4,12 +4,12 @@
   "title": "za38 protocol v2",
   "x-protocol": {
     "major": 2,
-    "minor": 4,
+    "minor": 5,
     "max_frame_bytes": 8388608,
     "max_tool_payload_bytes": 1048576,
-    "client_methods": ["initialize", "run.start", "run.cancel", "context.compact", "config.show", "config.path", "threads.list", "threads.open", "skills.list", "skills.inspect", "skills.set_enabled", "skills.install", "skills.update", "skills.remove", "skills.market.list", "shutdown"],
+    "client_methods": ["initialize", "run.start", "run.cancel", "context.compact", "config.show", "config.path", "models.list", "threads.list", "threads.open", "skills.list", "skills.inspect", "skills.set_enabled", "skills.install", "skills.update", "skills.remove", "skills.market.list", "shutdown"],
     "server_methods": ["event", "request"],
-    "server_capabilities": ["run.cancel", "run.multithread", "interactive.approval", "interactive.question", "config.read", "threads.read", "context.manage", "skills.read", "skills.manage"],
+    "server_capabilities": ["run.cancel", "run.multithread", "interactive.approval", "interactive.question", "config.read", "models.read", "threads.read", "context.manage", "skills.read", "skills.manage"],
     "event_types": ["run.started", "skill.loaded", "content.delta", "thinking.delta", "tool.started", "tool.delta", "tool.completed", "context.updated", "interaction.resolved", "run.completed", "run.cancelled", "run.failed"]
   },
   "oneOf": [
@@ -86,6 +86,45 @@
     "threadsListParams": {
       "type": "object",
       "properties": { "limit": { "type": "integer", "minimum": 1, "maximum": 200 } },
+      "additionalProperties": false
+    },
+    "modelProfile": {
+      "type": "object",
+      "required": ["id", "model", "provider_label", "context_window_tokens", "capabilities", "is_default", "available", "source"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "model": { "type": "string", "minLength": 1 },
+        "provider_label": { "type": "string", "minLength": 1 },
+        "context_window_tokens": { "type": "integer", "minimum": 16384 },
+        "capabilities": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "is_default": { "type": "boolean" },
+        "available": { "type": "boolean" },
+        "unavailable_reason": { "type": ["string", "null"] },
+        "source": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "threadModelBinding": {
+      "type": "object",
+      "required": ["state", "roles"],
+      "properties": {
+        "state": { "enum": ["bound", "legacy", "unbound"] },
+        "roles": { "type": "object", "additionalProperties": { "$ref": "#/$defs/modelProfile" } }
+      },
+      "additionalProperties": false
+    },
+    "modelsListParams": {
+      "type": "object",
+      "properties": { "thread_id": { "type": "string", "minLength": 1 } },
+      "additionalProperties": false
+    },
+    "modelsListResult": {
+      "type": "object",
+      "required": ["profiles"],
+      "properties": {
+        "profiles": { "type": "array", "items": { "$ref": "#/$defs/modelProfile" } },
+        "thread_binding": { "$ref": "#/$defs/threadModelBinding" }
+      },
       "additionalProperties": false
     },
     "threadsListResult": {

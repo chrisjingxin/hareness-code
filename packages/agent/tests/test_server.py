@@ -259,6 +259,100 @@ async def test_context_compact_rejects_active_run():
     assert frames[0]["error"]["message"] == "CONTEXT_COMPACTION_RUN_ACTIVE"
 
 
+async def test_models_list_and_run_start_freeze_selected_profile(tmp_path: Path, monkeypatch) -> None:
+    """models.list 只返回脱敏目录，run.start 首次选择 executor 后 Thread 不能热切换。"""
+    from harness_agent.server import JsonRpcServer
+
+    home = tmp_path / "home"
+    config = home / ".harness" / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        """[config]
+version = 1
+
+[models]
+default_profile = "fast"
+
+[models.profiles.fast]
+provider = "openai-compatible"
+provider_label = "Fast Gateway"
+model = "fast-model"
+base_url = "https://fast.example/v1"
+api_key_env = "FAST_KEY"
+
+[models.profiles.pro]
+provider = "openai-compatible"
+provider_label = "Pro Gateway"
+model = "pro-model"
+base_url = "https://pro.example/v1"
+api_key_env = "PRO_KEY"
+capabilities = ["tool-calling", "streaming", "vision"]
+
+[models.roles]
+planner = "pro"
+executor = "fast"
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FAST_KEY", "fast-secret")
+    monkeypatch.setenv("PRO_KEY", "pro-secret")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    server = JsonRpcServer(config_home=home)
+    frames: list[dict[str, Any]] = []
+    server.send = lambda message: _append(frames, message)  # type: ignore[method-assign]
+    await server.dispatch(_request(
+        "initialize",
+        _initialize_params(
+            protocol={"major": 2, "min_minor": 0, "max_minor": 5},
+            capabilities=["models.read"],
+            cwd=str(workspace),
+        ),
+        "init-models",
+    ))
+
+    await server.dispatch(_request("models.list", {}, "models"))
+    catalog = frames[-1]["result"]
+    assert [profile["id"] for profile in catalog["profiles"]] == ["fast", "pro"]
+    assert catalog["profiles"][0]["is_default"] is True
+    assert catalog["profiles"][1]["is_default"] is False
+    assert "https://fast.example" not in str(catalog)
+    assert "fast-secret" not in str(catalog)
+
+    async def finish_without_build(run: Any) -> None:
+        run.status = "completed"
+        server._runs.pop(run.thread_id, None)
+
+    server._execute_run = finish_without_build  # type: ignore[method-assign]
+    await server.dispatch(_request(
+        "run.start",
+        {"message": "使用 pro", "thread_id": "thread-model", "run_id": "first", "model_profile": "pro"},
+        "start-model",
+    ))
+    assert frames[-1]["result"]["accepted"] is True
+    await asyncio.sleep(0)
+    assert server._thread_store is not None
+    bindings = await server._thread_store.get_model_bindings("thread-model")
+    assert bindings is not None
+    assert bindings["roles"]["executor"]["id"] == "pro"  # type: ignore[index]
+    assert server._config is not None
+    runtime_profile = await server._resolve_runtime_profile("thread-model", server._config)
+    assert server._runtime_build_specs[runtime_profile.profile_key].model_settings.name == "pro-model"
+
+    await server.dispatch(_request(
+        "run.start",
+        {"message": "尝试切换", "thread_id": "thread-model", "run_id": "second", "model_profile": "fast"},
+        "start-model-again",
+    ))
+    assert frames[-1]["error"]["message"] == "THREAD_MODEL_PROFILE_IMMUTABLE"
+
+    await server.dispatch(_request("models.list", {"thread_id": "thread-model"}, "models-bound"))
+    binding = frames[-1]["result"]["thread_binding"]
+    assert binding["state"] == "bound"
+    assert binding["roles"]["executor"]["model"] == "pro-model"
+    await server._close_thread_store()
+
+
 async def test_default_sidecar_shares_runtime_by_profile_and_drains_invalidated_config(
     tmp_path: Path,
 ):

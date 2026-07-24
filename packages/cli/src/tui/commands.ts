@@ -86,7 +86,7 @@ export type CommandMenuItem =
   | { kind: "skill"; skill: SkillMenuItem }
 
 /** 内置命令所需 capability 的全集，供旧的测试运行时提供兼容默认值。 */
-export const builtinCommandCapabilities = ["threads.read", "context.manage", "skills.read"] as const
+export const builtinCommandCapabilities = ["threads.read", "context.manage", "models.read", "skills.read"] as const
 
 /** 所有动态来源必须通过同一不可变 Registry 构造，避免覆盖内置命令或产生不确定别名。 */
 export class CommandRegistry {
@@ -170,6 +170,7 @@ export const commandRegistry = new CommandRegistry([
   { id: "system.status", name: "status", description: "显示运行状态", source: { type: "builtin" }, presentation: "viewer", suggested: true },
   { id: "system.version", name: "version", description: "显示版本", source: { type: "builtin" }, presentation: "viewer" },
   { id: "thread.resume", name: "resume", aliases: ["continue", "threads"], description: "打开 thread 恢复选择器", source: { type: "builtin" }, presentation: "picker", suggested: true, requirements: { capabilities: ["threads.read"], requiresIdle: true } },
+  { id: "model.select", name: "model", aliases: ["models"], description: "选择下一新 thread 的模型 Profile", source: { type: "builtin" }, presentation: "picker", suggested: true, argumentHint: "[query]", requirements: { capabilities: ["models.read"], requiresIdle: true } },
   { id: "skills.open", name: "skills", description: "打开 Skill 选择器", source: { type: "builtin" }, presentation: "picker", suggested: true, requirements: { capabilities: ["skills.read"] } },
 ])
 

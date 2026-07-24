@@ -1,12 +1,12 @@
 /** 此文件由 packages/protocol/scripts/generate.ts 生成，请勿手工修改。 */
 
 export const PROTOCOL_MAJOR = 2 as const
-export const PROTOCOL_MINOR = 4 as const
+export const PROTOCOL_MINOR = 5 as const
 export const MAX_FRAME_BYTES = 8388608 as const
 export const MAX_TOOL_PAYLOAD_BYTES = 1048576 as const
-export const CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","threads.list","threads.open","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","shutdown"] as const
+export const CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","models.list","threads.list","threads.open","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","shutdown"] as const
 export const SERVER_METHODS = ["event","request"] as const
-export const SERVER_CAPABILITIES = ["run.cancel","run.multithread","interactive.approval","interactive.question","config.read","threads.read","context.manage","skills.read","skills.manage"] as const
+export const SERVER_CAPABILITIES = ["run.cancel","run.multithread","interactive.approval","interactive.question","config.read","models.read","threads.read","context.manage","skills.read","skills.manage"] as const
 export const EVENT_TYPES = ["run.started","skill.loaded","content.delta","thinking.delta","tool.started","tool.delta","tool.completed","context.updated","interaction.resolved","run.completed","run.cancelled","run.failed"] as const
 
 export type JsonObject = Record<string, unknown>
@@ -19,7 +19,7 @@ export type JsonRpcMessage = JsonRpcRequest | JsonRpcNotification | JsonRpcRespo
 export interface InitializeParams { protocol: { major: 2; min_minor: number; max_minor: number }; client: { name: string; version: string }; capabilities: string[]; cwd?: string; config_path?: string }
 export interface InitializeResult { protocol: { major: 2; minor: number }; server: { name: string; version: string }; server_capabilities: string[]; enabled_capabilities: string[]; agent_commands: Array<{ name: string; description: string; aliases: string[] }>; skills_snapshot: { id: string; count: number }; skill_diagnostics: string[]; limits: { max_frame_bytes: number; max_tool_payload_bytes: number }; config_summary: JsonObject | null; startup_error: { code: string; message: string } | null }
 export interface RequestedSkill { id: string; args?: string }
-export interface RunStartParams { message: string; thread_id?: string; run_id?: string; requested_skill?: RequestedSkill }
+export interface RunStartParams { message: string; thread_id?: string; run_id?: string; requested_skill?: RequestedSkill; model_profile?: string }
 export interface RunStartResult { thread_id: string; run_id: string; accepted: boolean }
 export interface RunCancelParams { thread_id: string; run_id: string }
 export interface RunCancelResult { cancelled: boolean; run_id: string }
@@ -31,6 +31,10 @@ export interface ThreadsListParams { limit?: number }
 export interface ThreadsListResult { threads: ThreadSummary[] }
 export interface ThreadsOpenParams { thread_id: string }
 export interface ThreadsOpenResult { thread: ThreadSummary; messages: ThreadMessage[] }
+export interface ModelProfile { id: string; model: string; provider_label: string; context_window_tokens: number; capabilities: string[]; is_default: boolean; available: boolean; unavailable_reason?: string | null; source: string }
+export interface ThreadModelBinding { state: "bound" | "legacy" | "unbound"; roles: Record<string, ModelProfile> }
+export interface ModelsListParams { thread_id?: string }
+export interface ModelsListResult { profiles: ModelProfile[]; thread_binding?: ThreadModelBinding }
 export interface EventEnvelope { event_id: string; type: string; thread_id: string; run_id: string; sequence: number; timestamp_ms: number; source?: { kind: "root" | "subagent" | "background"; id?: string; parent_tool_call_id?: string }; payload: JsonObject; extensions?: JsonObject }
 export interface InteractionRequestEnvelope { request_id: string; type: "approval" | "question"; thread_id: string; run_id: string; sequence: number; timeout_ms: number; payload: JsonObject }
 export interface ApprovalResponse { type: "approval"; request_id: string; decision: "approve_once" | "approve_thread" | "reject"; feedback?: string }

@@ -19,7 +19,7 @@ type RunningAgent = {
 /** 根据命令实际是否存在反向交互处理器，声明最小协议能力集合。 */
 export function clientCapabilities(command: Command): string[] {
   const capabilities = ["run.cancel", "run.multithread", "config.read"]
-  if (command.kind === "run" && !command.nonInteractive) capabilities.push("threads.read", "context.manage")
+  if (command.kind === "run" && !command.nonInteractive) capabilities.push("threads.read", "context.manage", "models.read")
   if (command.kind.startsWith("skills.") || (command.kind === "run" && !command.nonInteractive)) capabilities.push("skills.read")
   if (command.kind === "skills.set_enabled" || command.kind === "skills.install" || command.kind === "skills.update" || command.kind === "skills.remove") {
     capabilities.push("skills.manage")

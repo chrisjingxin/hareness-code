@@ -7,12 +7,12 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 PROTOCOL_MAJOR = 2
-PROTOCOL_MINOR = 4
+PROTOCOL_MINOR = 5
 MAX_FRAME_BYTES = 8388608
 MAX_TOOL_PAYLOAD_BYTES = 1048576
-CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","threads.list","threads.open","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","shutdown"]
+CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","models.list","threads.list","threads.open","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","shutdown"]
 SERVER_METHODS = ["event","request"]
-SERVER_CAPABILITIES = ["run.cancel","run.multithread","interactive.approval","interactive.question","config.read","threads.read","context.manage","skills.read","skills.manage"]
+SERVER_CAPABILITIES = ["run.cancel","run.multithread","interactive.approval","interactive.question","config.read","models.read","threads.read","context.manage","skills.read","skills.manage"]
 EVENT_TYPES = ["run.started","skill.loaded","content.delta","thinking.delta","tool.started","tool.delta","tool.completed","context.updated","interaction.resolved","run.completed","run.cancelled","run.failed"]
 
 class StrictModel(BaseModel):
@@ -49,6 +49,7 @@ class RunStartParams(StrictModel):
     thread_id: str | None = None
     run_id: str | None = None
     requested_skill: RequestedSkill | None = None
+    model_profile: str | None = Field(default=None, min_length=1)
 
 class RunCancelParams(StrictModel):
     thread_id: str = Field(min_length=1)
@@ -75,6 +76,24 @@ class ThreadsListParams(StrictModel):
 
 class ThreadsOpenParams(StrictModel):
     thread_id: str = Field(min_length=1)
+
+class ModelProfile(StrictModel):
+    id: str = Field(min_length=1)
+    model: str = Field(min_length=1)
+    provider_label: str = Field(min_length=1)
+    context_window_tokens: int = Field(ge=16384)
+    capabilities: list[str]
+    is_default: bool
+    available: bool
+    unavailable_reason: str | None = None
+    source: str = Field(min_length=1)
+
+class ThreadModelBinding(StrictModel):
+    state: Literal["bound", "legacy", "unbound"]
+    roles: dict[str, ModelProfile]
+
+class ModelsListParams(StrictModel):
+    thread_id: str | None = None
 
 class EventEnvelope(StrictModel):
     event_id: str = Field(min_length=1)
