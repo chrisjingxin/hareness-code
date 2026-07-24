@@ -286,10 +286,12 @@ def test_manifest_rejects_literal_authentication_headers(tmp_path: Path):
 
 def test_manifest_exposes_all_planned_configuration_sections():
     """模板中的所有计划中区段都必须由唯一 Manifest 指向后续任务。"""
-    for name in ("ui", "skills", "agents", "mcp", "telemetry", "updates", "hooks", "extensions", "plugins", "policy"):
+    for name in ("ui", "skills", "agents", "telemetry", "updates", "hooks", "extensions", "plugins", "policy"):
         section = ConfigManifest.SECTIONS[name]
         assert section.status == "planned"
         assert section.task_id is not None
+    # mcp 已激活为 implemented
+    assert ConfigManifest.SECTIONS["mcp"].status == "implemented"
 
 
 def test_multiple_profiles_are_deferred_to_zc_019(tmp_path: Path):
@@ -325,6 +327,7 @@ def test_execution_defaults_to_local_and_redacts_security_summary(tmp_path: Path
         "approval": "default",
         "execution": "default",
         "runtime_pool": "default",
+        "mcp": "default",
     }
 
 

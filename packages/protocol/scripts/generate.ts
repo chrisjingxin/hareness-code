@@ -54,7 +54,8 @@ export type JsonRpcMessage = JsonRpcRequest | JsonRpcNotification | JsonRpcRespo
 export interface InitializeParams { protocol: { major: ${meta.major}; min_minor: number; max_minor: number }; client: { name: string; version: string }; capabilities: string[]; cwd?: string; config_path?: string }
 export interface InitializeResult { protocol: { major: ${meta.major}; minor: number }; server: { name: string; version: string }; server_capabilities: string[]; enabled_capabilities: string[]; agent_commands: Array<{ name: string; description: string; aliases: string[] }>; skills_snapshot: { id: string; count: number }; skill_diagnostics: string[]; limits: { max_frame_bytes: number; max_tool_payload_bytes: number }; config_summary: JsonObject | null; startup_error: { code: string; message: string } | null }
 export interface RequestedSkill { id: string; args?: string }
-export interface RunStartParams { message: string; thread_id?: string; run_id?: string; requested_skill?: RequestedSkill }
+export interface ModelProfile { id: string; provider_label: string; model: string; available: boolean; unavailable_reason?: string; context_window_tokens: number; is_default: boolean; capabilities: string[] }
+export interface RunStartParams { message: string; thread_id?: string; run_id?: string; requested_skill?: RequestedSkill; requested_model_profile?: string }
 export interface RunStartResult { thread_id: string; run_id: string; accepted: boolean }
 export interface RunCancelParams { thread_id: string; run_id: string }
 export interface RunCancelResult { cancelled: boolean; run_id: string }
@@ -66,6 +67,16 @@ export interface ThreadsListParams { limit?: number }
 export interface ThreadsListResult { threads: ThreadSummary[] }
 export interface ThreadsOpenParams { thread_id: string }
 export interface ThreadsOpenResult { thread: ThreadSummary; messages: ThreadMessage[] }
+export interface McpServerStatus { name: string; transport: "stdio" | "http" | "sse"; status: "connected" | "failed" | "skipped"; error?: string; tool_names: string[] }
+export interface McpStatusParams { }
+export interface McpStatusResult { servers: McpServerStatus[]; total_tools: number }
+export interface McpAddParams { name: string; transport: "stdio" | "http" | "sse"; command?: string; args?: string[]; url?: string; env?: Record<string, string>; headers?: Record<string, string> }
+export interface McpAddResult { added: boolean; connected: boolean; tool_names: string[]; error?: string }
+export interface McpRemoveParams { name: string }
+export interface McpRemoveResult { removed: boolean }
+export interface ThreadModelBinding { roles: { executor?: ModelProfile; primary?: ModelProfile } }
+export interface ModelsListParams { thread_id?: string }
+export interface ModelsListResult { profiles: ModelProfile[]; thread_binding?: ThreadModelBinding }
 export interface EventEnvelope { event_id: string; type: string; thread_id: string; run_id: string; sequence: number; timestamp_ms: number; source?: { kind: "root" | "subagent" | "background"; id?: string; parent_tool_call_id?: string }; payload: JsonObject; extensions?: JsonObject }
 export interface InteractionRequestEnvelope { request_id: string; type: "approval" | "question"; thread_id: string; run_id: string; sequence: number; timeout_ms: number; payload: JsonObject }
 export interface ApprovalResponse { type: "approval"; request_id: string; decision: "approve_once" | "approve_thread" | "reject"; feedback?: string }
@@ -79,7 +90,7 @@ function renderPython(meta: Metadata): string {
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -121,11 +132,22 @@ class RequestedSkill(StrictModel):
     id: str = Field(min_length=1)
     args: str = ""
 
+class ModelProfile(StrictModel):
+    id: str = Field(min_length=1)
+    provider_label: str
+    model: str
+    available: bool
+    unavailable_reason: str | None = None
+    context_window_tokens: int = Field(ge=0)
+    is_default: bool
+    capabilities: list[str]
+
 class RunStartParams(StrictModel):
     message: str = Field(min_length=1)
     thread_id: str | None = None
     run_id: str | None = None
     requested_skill: RequestedSkill | None = None
+    requested_model_profile: str | None = None
 
 class RunCancelParams(StrictModel):
     thread_id: str = Field(min_length=1)
@@ -152,6 +174,36 @@ class ThreadsListParams(StrictModel):
 
 class ThreadsOpenParams(StrictModel):
     thread_id: str = Field(min_length=1)
+
+class McpStatusParams(StrictModel):
+    pass
+
+class McpAddParams(StrictModel):
+    name: str
+    transport: str
+    command: Optional[str] = None
+    args: Optional[List[str]] = None
+    url: Optional[str] = None
+    env: Optional[Dict[str, str]] = None
+    headers: Optional[Dict[str, str]] = None
+
+
+class McpRemoveParams(StrictModel):
+    name: str
+
+class ThreadModelBindingRoles(StrictModel):
+    executor: ModelProfile | None = None
+    primary: ModelProfile | None = None
+
+class ThreadModelBinding(StrictModel):
+    roles: ThreadModelBindingRoles
+
+class ModelsListParams(StrictModel):
+    thread_id: str | None = None
+
+class ModelsListResult(StrictModel):
+    profiles: list[ModelProfile]
+    thread_binding: ThreadModelBinding | None = None
 
 class EventEnvelope(StrictModel):
     event_id: str = Field(min_length=1)

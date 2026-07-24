@@ -1,0 +1,25 @@
+# Checklist
+
+- [x] `harness_agent/mcp.py` 模块存在，包含 `McpServerConfig`、`parse_mcp_config()`、`McpConnectionManager`、`mcp_config_fingerprint()`
+- [x] `config_manifest.py` 中 `mcp` 区段状态为 `"implemented"`，`allowed_sources` 为 `ACTIVE_TOML_SOURCES`（user + explicit）
+- [x] `config.py` 的 `load_config()` 能解析 `[mcp]` TOML 区段并返回 `McpServerConfig` 列表
+- [x] 配置校验：stdio 缺 command 时记录警告并跳过，不抛异常不阻止启动
+- [x] 环境变量 `${VAR}` 在连接时展开，缺失时警告并跳过该服务器
+- [x] `McpConnectionManager.connect_all()` 使用 `langchain-mcp-adapters` 的 `MultiServerMCPClient` 建立连接
+- [x] 支持 stdio、http（Streamable HTTP）、sse 三种传输类型
+- [x] 连接超时默认 30 秒，失败时 stderr 警告并跳过
+- [x] `McpConnectionManager.get_tools()` 返回 `list[BaseTool]`，工具名带服务器前缀
+- [x] `McpConnectionManager.close_all()` 关闭所有连接，释放资源
+- [x] `server.py` 在 initialize 后建立 MCP 连接，run() finally 中关闭
+- [x] MCP 工具通过 `create_harness_agent(tools=[...])` 注入 Agent
+- [x] `runtime_profile.py` 的 `mcp_config_fingerprint` 根据实际配置计算（无配置时保持 "disabled"）
+- [x] 指纹脱敏：不含命令路径、URL、凭据，仅含 name+transport
+- [x] default 审批模式下 MCP 工具调用触发 HITL 审批
+- [x] plan 模式下 MCP 工具被 PlanModeMiddleware 拒绝
+- [x] yolo 模式下 MCP 工具自动执行
+- [x] MCP 工具执行错误由 langchain-mcp-adapters 处理（ToolException → Agent 可纠错）
+- [x] MCP 工具输出超过 1MB 时由 server.py `_truncate_text` 统一截断
+- [x] `tests/test_mcp.py` 覆盖：配置解析、连接管理、环境变量展开、指纹计算（30 个测试）
+- [ ] 端到端验证：连接真实 MCP Server 并成功调用工具获取响应（需用户配置后手动验证）
+- [x] 所有现有测试通过（195 passed，5 failed 为 Windows 预存问题，与 MCP 无关）
+- [x] Python stdout 仍只输出 JSON-RPC，MCP 诊断信息写入 stderr（通过 logging 模块）

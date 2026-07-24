@@ -12,6 +12,9 @@ import {
   type InitializeParams,
   type InteractionRequestEnvelope,
   type JsonRpcMessage,
+  type McpAddParams,
+  type McpRemoveParams,
+  type McpStatusParams,
   type ThreadsListParams,
   type ThreadsOpenParams,
 } from "./generated"
@@ -32,6 +35,10 @@ export const Method = {
   SKILLS_UPDATE: "skills.update",
   SKILLS_REMOVE: "skills.remove",
   SKILLS_MARKET_LIST: "skills.market.list",
+  MCP_STATUS: "mcp.status",
+  MCP_ADD: "mcp.add",
+  MCP_REMOVE: "mcp.remove",
+  MODELS_LIST: "models.list",
   SHUTDOWN: "shutdown",
   EVENT: "event",
   REQUEST: "request",
@@ -76,6 +83,29 @@ export function assertContextCompactParams(value: unknown): asserts value is Con
   const params = objectValue(value, "context.compact params")
   if (typeof params.thread_id !== "string" || !params.thread_id) throw new Error("context.compact.thread_id 无效")
   rejectExtra(params, ["thread_id"], "context.compact params")
+}
+
+/** 校验 MCP 状态查询参数（当前为空对象）。 */
+export function assertMcpStatusParams(value: unknown): asserts value is McpStatusParams {
+  const params = objectValue(value, "mcp.status params")
+  rejectExtra(params, [], "mcp.status params")
+}
+
+/** 校验 MCP 服务器添加参数。 */
+export function assertMcpAddParams(value: unknown): asserts value is McpAddParams {
+  const params = objectValue(value, "mcp.add params")
+  requireString(params, "name", "mcp.add params")
+  requireString(params, "transport", "mcp.add params")
+  if (params.command !== undefined) requireString(params, "command", "mcp.add params")
+  if (params.url !== undefined) requireString(params, "url", "mcp.add params")
+  rejectExtra(params, ["name", "transport", "command", "args", "url", "env", "headers"], "mcp.add params")
+}
+
+/** 校验 MCP 服务器删除参数。 */
+export function assertMcpRemoveParams(value: unknown): asserts value is McpRemoveParams {
+  const params = objectValue(value, "mcp.remove params")
+  requireString(params, "name", "mcp.remove params")
+  rejectExtra(params, ["name"], "mcp.remove params")
 }
 
 /** 校验 Agent 推送的统一事件信封，并允许未来新增未知事件类型。 */
@@ -136,6 +166,10 @@ function objectValue(value: unknown, label: string): Record<string, unknown> {
 
 function integer(value: unknown): boolean {
   return typeof value === "number" && Number.isInteger(value)
+}
+
+function requireString(value: Record<string, unknown>, key: string, label: string): void {
+  if (typeof value[key] !== "string" || !(value[key] as string)) throw new Error(`${label}.${key} 无效`)
 }
 
 function rejectExtra(value: Record<string, unknown>, allowed: readonly string[], label: string): void {

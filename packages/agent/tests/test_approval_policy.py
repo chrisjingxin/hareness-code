@@ -70,6 +70,30 @@ async def test_plan_mode_rejects_mutation_and_unknown_future_tools(tool_name: st
     assert f"计划模式拒绝 {tool_name}" in str(result.content)
 
 
+def test_extra_interrupt_tools_merged_in_default_and_auto_edit():
+    """MCP 等外部工具在 default 和 auto-edit 下纳入审批，plan/yolo 忽略。"""
+    mcp_tools = frozenset({"mcp_github__create_issue", "mcp_gitee__search"})
+
+    default = interrupt_on_for_approval_mode("default", extra_interrupt_tools=mcp_tools)
+    assert default is not None
+    assert set(default) == {"execute", "write_file", "edit_file", "delete", "task"} | mcp_tools
+
+    auto_edit = interrupt_on_for_approval_mode("auto-edit", extra_interrupt_tools=mcp_tools)
+    assert auto_edit is not None
+    assert set(auto_edit) == {"execute", "delete", "task"} | mcp_tools
+
+    # plan 和 yolo 即使传入额外工具也不产生拦截配置
+    assert interrupt_on_for_approval_mode("plan", extra_interrupt_tools=mcp_tools) is None
+    assert interrupt_on_for_approval_mode("yolo", extra_interrupt_tools=mcp_tools) is None
+
+
+def test_extra_interrupt_tools_none_keeps_original_set():
+    """不传 extra_interrupt_tools 时行为与原有完全一致。"""
+    default = interrupt_on_for_approval_mode("default", extra_interrupt_tools=None)
+    assert default is not None
+    assert set(default) == {"execute", "write_file", "edit_file", "delete", "task"}
+
+
 def test_approval_mode_prompts_state_the_actual_enforced_policy():
     """提示词只解释已由中间件执行的事实，不能成为唯一安全机制。"""
     assert "严格计划模式" in approval_mode_prompt("plan")

@@ -5,8 +5,9 @@ from __future__ import annotations
 import os
 import stat
 import tomllib
-from dataclasses import InitVar, dataclass, field
+from dataclasses import InitVar, dataclass, field, replace
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Literal, Mapping
 
 from harness_agent.approval_mode import (
@@ -19,10 +20,16 @@ from harness_agent.config_manifest import (
     ConfigManifestError,
     ConfigSource,
 )
+from harness_agent.mcp import McpServerConfig, parse_mcp_config
 
 
 class ConfigError(ValueError):
     """最终生效的 Harness 配置不合法时抛出，用于返回可操作的启动错误。"""
+
+
+MODEL_ROLES = ("planner", "executor", "reviewer", "tester", "summarizer")
+DEFAULT_MODEL_CAPABILITIES = frozenset({"tool-calling", "streaming"})
+SUPPORTED_MODEL_CAPABILITIES = frozenset({"tool-calling", "streaming", "vision", "json-mode"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +45,8 @@ class ModelSettings:
     max_retries: int = 2
     context_window_tokens: int = 128_000
     context_window_source: Literal["default", "config"] = "default"
+    provider_label: str = "OpenAI-compatible"
+    capabilities: frozenset[str] = DEFAULT_MODEL_CAPABILITIES
     headers: dict[str, str] = field(default_factory=dict)
     headers_env: dict[str, str] = field(default_factory=dict)
 
@@ -95,6 +104,66 @@ class ModelSettings:
             "headers": dict(self.headers),
             "headers_env": dict(self.headers_env),
         }
+
+
+@dataclass(frozen=True, slots=True)
+class ModelProfile:
+    """一个命名模型 Profile 的不可变快照，包含设置、来源和角色元数据。"""
+
+    profile_id: str
+    settings: ModelSettings
+    source: str = "default"
+    is_default: bool = False
+
+    def picker_summary(self, environ: Mapping[str, str] | None = None) -> dict[str, object]:
+        """返回 `/model` 选择器可安全展示的 Profile 摘要。"""
+        summary = self.settings.redacted(environ)
+        summary["id"] = self.profile_id
+        summary["source"] = self.source
+        summary["is_default"] = self.is_default
+        summary["provider_label"] = self.settings.provider_label
+        summary["capabilities"] = sorted(self.settings.capabilities)
+        return summary
+
+
+@dataclass(frozen=True, slots=True)
+class ModelCatalog:
+    """所有命名 Profile 与角色到 Profile 的映射。"""
+
+    default_profile: str
+    profiles: Mapping[str, ModelProfile]
+    role_profiles: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        """冻结映射并验证默认项和角色绑定不引用缺失 Profile。"""
+        profiles = MappingProxyType({
+            profile_id: replace(profile, is_default=profile_id == self.default_profile)
+            for profile_id, profile in self.profiles.items()
+        })
+        roles = MappingProxyType(dict(self.role_profiles))
+        if self.default_profile not in profiles:
+            raise ConfigError("models.default_profile must reference an existing profile")
+        for role, profile_id in roles.items():
+            if role not in MODEL_ROLES:
+                raise ConfigError(f"models.roles.{role} is not a supported model role")
+            if profile_id not in profiles:
+                raise ConfigError(f"models.roles.{role} must reference an existing profile")
+        object.__setattr__(self, "profiles", profiles)
+        object.__setattr__(self, "role_profiles", roles)
+
+    def require_profile(self, profile_id: str | None = None) -> ModelProfile:
+        """读取指定或默认 Profile，未知名称始终以稳定配置错误失败。"""
+        selected = profile_id or self.default_profile
+        profile = self.profiles.get(selected)
+        if profile is None:
+            raise ConfigError(f"MODEL_PROFILE_NOT_FOUND: {selected}")
+        return profile
+
+    def profile_for_role(self, role: str) -> ModelProfile:
+        """解析 canonical 角色；未显式配置时继承默认 Profile。"""
+        if role not in MODEL_ROLES:
+            raise ConfigError(f"MODEL_ROLE_NOT_SUPPORTED: {role}")
+        return self.require_profile(self.role_profiles.get(role, self.default_profile))
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,15 +238,27 @@ class Za38Config:
     paths: tuple[Path, ...]
     workspace: Path
     sources: Mapping[str, str]
+    mcp_servers: tuple[McpServerConfig, ...] = ()
+    model_catalog: ModelCatalog | None = None
 
-    def require_model(self) -> ModelSettings:
-        """返回默认模型；缺失时给出当前可信配置来源的修复方式。"""
+    def require_model(self, profile_id: str | None = None) -> ModelSettings:
+        """返回指定或默认模型；保留单 Profile 调用方的兼容入口。"""
+        if self.model_catalog is not None:
+            return self.model_catalog.require_profile(profile_id).settings
+        if profile_id is not None and profile_id != self.model_profile:
+            raise ConfigError(f"MODEL_PROFILE_NOT_FOUND: {profile_id}")
         if self.model is None:
             raise ConfigError(
                 "No model configuration found. Add [models] to ~/.harness/config.toml "
                 "or pass a trusted file with --config PATH."
             )
         return self.model
+
+    def require_model_profile(self, profile_id: str | None = None) -> ModelProfile:
+        """返回指定或默认命名 Profile；旧嵌入式配置没有目录时保持明确失败。"""
+        if self.model_catalog is None:
+            raise ConfigError("MODEL_CATALOG_UNAVAILABLE")
+        return self.model_catalog.require_profile(profile_id)
 
     def redacted(self, environ: Mapping[str, str] | None = None) -> dict[str, object]:
         """返回适合 CLI 与 JSON-RPC 摘要的脱敏配置。"""
@@ -190,6 +271,9 @@ class Za38Config:
             "model": self.model.redacted(environ) if self.model else None,
             "security": self.execution.redacted(),
             "runtime_pool": self.runtime_pool.redacted(),
+            "mcp_servers": [
+                {"name": s.name, "transport": s.transport} for s in self.mcp_servers
+            ],
         }
 
 
@@ -221,16 +305,18 @@ def load_config(
             (explicit_path, ConfigSource.EXPLICIT, _read_document(explicit_path, ConfigSource.EXPLICIT))
         )
 
-    models, approval_values, execution_values, runtime_pool_values, sources = _merge_documents(documents)
+    models, approval_values, execution_values, runtime_pool_values, mcp_values, sources = _merge_documents(documents)
     _apply_environment_overrides(models, approval_values, execution_values, environment, sources)
     _apply_cli_overrides(execution_values, environment, sources)
     model_profile, model = _parse_default_model(models)
+    mcp_servers = tuple(parse_mcp_config(mcp_values))  # type: ignore[arg-type]
 
     return Za38Config(
         model=model,
         model_profile=model_profile,
         execution=_parse_execution(approval_values, execution_values),
         runtime_pool=_parse_runtime_pool(runtime_pool_values),
+        mcp_servers=mcp_servers,
         paths=tuple(path for path, _, _ in documents),
         workspace=resolved_workspace,
         sources=sources,
@@ -314,6 +400,7 @@ def _merge_documents(
     dict[str, object],
     dict[str, object],
     dict[str, object],
+    dict[str, object],
     dict[str, str],
 ]:
     """按用户到显式配置的顺序合并已验证字段，并记录最后贡献来源。"""
@@ -321,11 +408,13 @@ def _merge_documents(
     approval_values: dict[str, object] = {}
     execution_values: dict[str, object] = {}
     runtime_pool_values: dict[str, object] = {}
+    mcp_values: dict[str, object] = {}
     sources = {
         "models": "default",
         "approval": "default",
         "execution": "default",
         "runtime_pool": "default",
+        "mcp": "default",
     }
     for _, source, document in documents:
         if "models" in document:
@@ -340,7 +429,10 @@ def _merge_documents(
         if "runtime_pool" in document:
             runtime_pool_values = _merge_flat_values(runtime_pool_values, document["runtime_pool"])
             sources["runtime_pool"] = source.value
-    return models, approval_values, execution_values, runtime_pool_values, sources
+        if "mcp" in document:
+            mcp_values = document["mcp"]  # type: ignore[assignment]
+            sources["mcp"] = source.value
+    return models, approval_values, execution_values, runtime_pool_values, mcp_values, sources
 
 
 def _merge_models(target: dict[str, object], value: object) -> None:

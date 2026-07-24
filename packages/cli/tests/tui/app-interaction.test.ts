@@ -85,6 +85,118 @@ test("/status 只展示本地运行摘要，不创建 Agent run", async () => {
   }
 })
 
+test("/mcp 查询 sidecar 并展示 MCP 服务器状态面板", async () => {
+  const { client, requests } = createMockClient()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        client,
+        runtime,
+        onRequestExit: () => undefined,
+      }), { width: 100, height: 28 })
+    })
+    await act(async () => {
+      await setup.mockInput.typeText("/mcp")
+      setup.mockInput.pressEnter()
+      await Bun.sleep(50)
+      await setup.flush()
+    })
+
+    const frame = await setup.waitForFrame(value => value.includes("MCP 服务器状态"))
+    expect(requests).toHaveLength(0)
+    expect(frame).toContain("filesystem")
+    expect(frame).toContain("connected")
+    expect(frame).toContain("github")
+    expect(frame).toContain("failed")
+    expect(frame).toContain("connection refused")
+    expect(frame).toContain("2 个服务器")
+    expect(frame).toContain("2 个工具")
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+  }
+})
+
+test("/mcp add 添加 stdio 服务器并显示结果", async () => {
+  const { client, requests } = createMockClient()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        client,
+        runtime,
+        onRequestExit: () => undefined,
+      }), { width: 100, height: 28 })
+    })
+    await act(async () => {
+      await setup.mockInput.typeText("/mcp add testfs npx -y @modelcontextprotocol/server-filesystem")
+      setup.mockInput.pressEnter()
+      await Bun.sleep(50)
+      await setup.flush()
+    })
+
+    const frame = await setup.waitForFrame(value => value.includes("已添加 MCP 服务器"))
+    expect(frame).toContain("testfs")
+    expect(frame).toContain("连接成功")
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+  }
+})
+
+test("/mcp remove 删除服务器并显示结果", async () => {
+  const { client, requests } = createMockClient()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        client,
+        runtime,
+        onRequestExit: () => undefined,
+      }), { width: 100, height: 28 })
+    })
+    await act(async () => {
+      await setup.mockInput.typeText("/mcp remove testfs")
+      setup.mockInput.pressEnter()
+      await Bun.sleep(50)
+      await setup.flush()
+    })
+
+    const frame = await setup.waitForFrame(value => value.includes("已删除 MCP 服务器"))
+    expect(frame).toContain("testfs")
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+  }
+})
+
+test("/mcp add 参数不足时显示用法提示", async () => {
+  const { client } = createMockClient()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        client,
+        runtime,
+        onRequestExit: () => undefined,
+      }), { width: 100, height: 28 })
+    })
+    await act(async () => {
+      await setup.mockInput.typeText("/mcp add")
+      setup.mockInput.pressEnter()
+      await Bun.sleep(0)
+      await setup.flush()
+    })
+
+    const frame = await setup.waitForFrame(value => value.includes("用法"))
+    expect(frame).toContain("/mcp add")
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+  }
+})
+
 test("/compact 请求当前空闲 thread 的上下文压缩并展示结果", async () => {
   const { client, requests, compactThreadIds } = createMockClient()
   let setup: Awaited<ReturnType<typeof testRender>>
@@ -108,6 +220,214 @@ test("/compact 请求当前空闲 thread 的上下文压缩并展示结果", asy
     expect(compactThreadIds).toEqual([requests.at(-1)?.threadId])
     const frame = await setup.waitForFrame(value => value.includes("上下文已压缩"))
     expect(frame).toContain("归档 1 项")
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+  }
+})
+
+test("/compact 的 RPC 失败会保留当前 thread 并显示可恢复通知", async () => {
+  const { client, requests, compactThreadIds } = createMockClient({ compactError: "sidecar unavailable" })
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        client,
+        runtime,
+        onRequestExit: () => undefined,
+      }), { width: 100, height: 30 })
+      await setup.flush()
+    })
+    await sendAndFinish(setup, client, requests, "保留在失败后的 thread")
+    await act(async () => {
+      await setup.mockInput.typeText("/compact")
+      setup.mockInput.pressEnter()
+      await Bun.sleep(0)
+      await setup.flush()
+    })
+    const frame = await setup.waitForFrame(value => value.includes("上下文压缩失败：sidecar unavailable"))
+    expect(frame).toContain("保留在失败后的 thread")
+    expect(compactThreadIds).toEqual([requests.at(-1)?.threadId])
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+  }
+})
+
+test("/new 与 /clear 创建新 thread，/force-clear 仅显示迁移提示", async () => {
+  const { client, requests, cancelThreadIds } = createMockClient()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        client,
+        runtime,
+        onRequestExit: () => undefined,
+      }), { width: 100, height: 30 })
+      await setup.flush()
+    })
+    await sendAndFinish(setup, client, requests, "会被清空的 thread")
+
+    await act(async () => {
+      await setup.mockInput.typeText("/clear")
+      setup.mockInput.pressEnter()
+      await Bun.sleep(0)
+      await setup.flush()
+    })
+    let frame = await setup.waitForFrame(value => !value.includes("会被清空的 thread"))
+    expect(frame).not.toContain("会被清空的 thread")
+
+    await act(async () => {
+      await setup.mockInput.typeText("/force-clear")
+      setup.mockInput.pressEnter()
+      await setup.flush()
+    })
+    frame = await setup.waitForFrame(value => value.includes("/force-clear 已废弃"))
+    expect(frame).toContain("请使用 /new")
+    expect(cancelThreadIds).toEqual([])
+
+    await act(async () => {
+      await setup.mockInput.typeText("新的 thread")
+      setup.mockInput.pressEnter()
+      await setup.flush()
+    })
+    expect(requests.at(-1)?.message).toBe("新的 thread")
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+  }
+})
+
+test("活动任务下 /new 先确认；取消失败时保留当前 thread 并显示可恢复提示", async () => {
+  const { client, requests, cancelThreadIds } = createMockClient({ cancelled: false })
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        client,
+        runtime,
+        onRequestExit: () => undefined,
+      }), { width: 100, height: 30 })
+      await setup.flush()
+    })
+    await act(async () => {
+      await setup.mockInput.typeText("仍在执行的任务")
+      setup.mockInput.pressEnter()
+      await setup.flush()
+    })
+    const activeRun = requests.at(-1)
+    expect(activeRun?.message).toBe("仍在执行的任务")
+
+    await act(async () => {
+      setup.mockInput.pressKey("p", { ctrl: true })
+      await setup.flush()
+    })
+    await act(async () => {
+      setup.mockInput.pressArrow("down")
+      await setup.flush()
+    })
+    await act(async () => {
+      setup.mockInput.pressArrow("down")
+      await setup.flush()
+    })
+    await act(async () => {
+      setup.mockInput.pressEnter()
+      await Bun.sleep(0)
+      await setup.flush()
+    })
+    let frame = ""
+    await act(async () => {
+      frame = await setup.waitForFrame(value => value.includes("开始新的 Thread？"))
+    })
+    expect(frame).toContain("确认后将先取消任务")
+
+    await act(async () => {
+      setup.mockInput.pressEnter()
+      await Bun.sleep(0)
+      await setup.flush()
+    })
+    await act(async () => {
+      frame = await setup.waitForFrame(value => value.includes("未能取消当前任务"))
+    })
+    expect(frame).toContain("仍在执行的任务")
+    expect(cancelThreadIds).toEqual([activeRun?.threadId])
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+  }
+})
+
+test("未知 Slash Command 只显示本地建议，不会创建 Agent run", async () => {
+  const { client, requests } = createMockClient()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        client,
+        runtime,
+        onRequestExit: () => undefined,
+      }), { width: 100, height: 30 })
+      await setup.flush()
+    })
+    await act(async () => {
+      await setup.mockInput.typeText("/contnue")
+      setup.mockInput.pressEnter()
+      await setup.flush()
+    })
+    const frame = await setup.waitForFrame(value => value.includes("未知命令"))
+    expect(frame).toContain("/resume")
+    expect(requests).toHaveLength(0)
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+  }
+})
+
+test("双斜杠转义会原样向 Agent 提交单个前导斜杠", async () => {
+  const { client, requests } = createMockClient()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        client,
+        runtime,
+        onRequestExit: () => undefined,
+      }), { width: 100, height: 30 })
+      await setup.flush()
+    })
+    await act(async () => {
+      await setup.mockInput.typeText("//api/users 的路由在哪里")
+      setup.mockInput.pressEnter()
+      await setup.flush()
+    })
+    expect(requests.at(-1)?.message).toBe("/api/users 的路由在哪里")
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+  }
+})
+
+test("缺少 context.manage 时 /compact 不显示也不能直接执行", async () => {
+  const { client, requests, compactThreadIds } = createMockClient()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        client,
+        runtime: { ...runtime, capabilities: ["threads.read", "skills.read"] },
+        onRequestExit: () => undefined,
+      }), { width: 100, height: 30 })
+      await setup.flush()
+    })
+    await act(async () => {
+      await setup.mockInput.typeText("/compact")
+      setup.mockInput.pressEnter()
+      await setup.flush()
+    })
+    const frame = await setup.waitForFrame(value => value.includes("/compact 当前不可用"))
+    expect(frame).toContain("/compact 当前不可用")
+    expect(compactThreadIds).toEqual([])
+    expect(requests).toHaveLength(0)
   } finally {
     if (setup!) await act(async () => { setup.renderer.destroy() })
     client.destroy()
@@ -151,6 +471,7 @@ test("/skills 打开可搜索选择器，并把选中的 Skill 附到下一次�
 
     await act(async () => {
       setup.mockInput.pressEnter()
+      await Bun.sleep(0)
       await setup.flush()
     })
     frame = await setup.waitForFrame(value => !value.includes("Skills") && value.includes("Skill") && value.includes("user/repo-review-demo"))
@@ -165,6 +486,195 @@ test("/skills 打开可搜索选择器，并把选中的 Skill 附到下一次�
       message: "审查当前改动",
       requestedSkill: { id: "user/repo-review-demo", args: "审查当前改动" },
     })
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+  }
+})
+
+test("/model [query] 预筛选 Picker，并将确认的 Profile 仅带到下一新 Thread", async () => {
+  const { client, requests } = createMockClient()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        client,
+        runtime,
+        onRequestExit: () => undefined,
+      }), { width: 100, height: 30 })
+      await setup.flush()
+    })
+    await act(async () => {
+      await setup.mockInput.typeText("/model pro")
+      setup.mockInput.pressEnter()
+      await Bun.sleep(0)
+      await setup.flush()
+    })
+    let frame = await setup.waitForFrame(value => value.includes("选择下一新 Thread 的模型") && value.includes("pro-model"))
+    expect(frame).toContain("Pro Gateway")
+    expect(frame).not.toContain("fast-model")
+
+    await act(async () => {
+      setup.mockInput.pressEnter()
+      await Bun.sleep(0)
+      await setup.flush()
+    })
+    frame = await setup.waitForFrame(value => value.includes("将在下一条新 Thread 中生效"))
+    expect(frame).toContain("pro-model")
+
+    await act(async () => {
+      await setup.mockInput.typeText("使用选定模型")
+      setup.mockInput.pressEnter()
+      await setup.flush()
+    })
+    expect(requests.at(-1)).toMatchObject({ message: "使用选定模型", modelProfile: "pro" })
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+  }
+})
+
+test("/model 对已绑定 Thread 显示不可变说明，并通过新建动作清理待选状态", async () => {
+  const { client, requests } = createMockClient()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        client,
+        runtime,
+        onRequestExit: () => undefined,
+      }), { width: 100, height: 30 })
+      await setup.flush()
+    })
+    await sendAndFinish(setup, client, requests, "已有绑定的任务")
+    await act(async () => {
+      await setup.mockInput.typeText("/model")
+      setup.mockInput.pressEnter()
+      await Bun.sleep(0)
+      await setup.flush()
+    })
+    let frame = await setup.waitForFrame(value => value.includes("当前 Thread 的模型不可变"))
+    expect(frame).toContain("fast-model")
+    expect(frame).toContain("新建 Thread")
+
+    await act(async () => {
+      setup.mockInput.pressEnter()
+      await Bun.sleep(0)
+      await setup.flush()
+    })
+    frame = await setup.waitForFrame(value => !value.includes("已有绑定的任务"))
+    expect(frame).not.toContain("已有绑定的任务")
+    await act(async () => {
+      await setup.mockInput.typeText("重新开始")
+      setup.mockInput.pressEnter()
+      await setup.flush()
+    })
+    expect(requests.at(-1)).toMatchObject({ message: "重新开始", modelProfile: undefined })
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+  }
+})
+
+test("/model 的未知查询保留在 Picker 内且不会创建 run", async () => {
+  const { client, requests } = createMockClient()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        client,
+        runtime,
+        onRequestExit: () => undefined,
+      }), { width: 58, height: 18 })
+      await setup.flush()
+    })
+    await act(async () => {
+      await setup.mockInput.typeText("/model missing")
+      setup.mockInput.pressEnter()
+      await Bun.sleep(0)
+      await setup.flush()
+    })
+    let frame = await setup.waitForFrame(value => value.includes("没有匹配的模型 Profile"))
+    expect(frame).toContain("选择下一新 Thread 的模型")
+    expect(requests).toHaveLength(0)
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+  }
+})
+
+test("/model 不允许确认不可用 Profile", async () => {
+  const { client, requests } = createMockClient()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        client,
+        runtime,
+        onRequestExit: () => undefined,
+      }), { width: 100, height: 28 })
+      await setup.flush()
+    })
+    await act(async () => {
+      await setup.mockInput.typeText("/model offline")
+      setup.mockInput.pressEnter()
+      await Bun.sleep(0)
+      await setup.flush()
+    })
+    await setup.waitForFrame(value => value.includes("offline") && value.includes("API_KEY_MISSING"))
+    await act(async () => {
+      setup.mockInput.pressEnter()
+      await Bun.sleep(0)
+      await setup.flush()
+    })
+    const frame = await setup.waitForFrame(value => value.includes("API_KEY_MISSING"))
+    expect(frame).toContain("不可用")
+    expect(requests).toHaveLength(0)
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+  }
+})
+
+test("SearchPicker 的 Esc 关闭浮层后会恢复 composer，且不把搜索文字带入下一次输入", async () => {
+  const { client, requests } = createMockClient()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        client,
+        runtime,
+        onRequestExit: () => undefined,
+      }), { width: 100, height: 30 })
+      await setup.flush()
+    })
+    await act(async () => {
+      await setup.mockInput.typeText("/skills")
+      setup.mockInput.pressEnter()
+      await Bun.sleep(0)
+      await setup.flush()
+    })
+    await setup.waitForFrame(value => value.includes("搜索 Skills"))
+
+    await act(async () => {
+      await setup.mockInput.typeText("review")
+      setup.mockInput.pressEscape()
+      await setup.flush()
+      await Bun.sleep(0)
+      await setup.flush()
+    })
+    await setup.waitForFrame(value => !value.includes("搜索 Skills"))
+    await act(async () => {
+      await Bun.sleep(5)
+      await setup.flush()
+    })
+
+    await act(async () => {
+      await setup.mockInput.typeText("关闭后继续执行")
+      setup.mockInput.pressEnter()
+      await setup.flush()
+    })
+    expect(requests.at(-1)?.message).toBe("关闭后继续执行")
   } finally {
     if (setup!) await act(async () => { setup.renderer.destroy() })
     client.destroy()
@@ -317,7 +827,7 @@ test("窄终端中的 /skills 使用单列浮层且保持可操作", async () =>
 async function sendAndFinish(
   setup: Awaited<ReturnType<typeof testRender>>,
   client: IpcClient,
-  requests: Array<{ message: string; threadId: string; runId: string; requestedSkill?: { id: string; args?: string } }>,
+  requests: Array<{ message: string; threadId: string; runId: string; requestedSkill?: { id: string; args?: string }; modelProfile?: string }>,
   message: string,
 ) {
   await act(async () => {
@@ -341,12 +851,13 @@ async function sendAndFinish(
   })
 }
 
-function createMockClient() {
+function createMockClient(options: { cancelled?: boolean; compactError?: string; modelsError?: string } = {}) {
   const stdout = new PassThrough()
   const stdin = new PassThrough()
   const client = new IpcClient(stdin, stdout)
-  const requests: Array<{ message: string; threadId: string; runId: string; requestedSkill?: { id: string; args?: string } }> = []
+  const requests: Array<{ message: string; threadId: string; runId: string; requestedSkill?: { id: string; args?: string }; modelProfile?: string }> = []
   const compactThreadIds: string[] = []
+  const cancelThreadIds: string[] = []
   stdin.on("data", data => {
     for (const line of data.toString("utf8").split("\n")) {
       if (!line.trim()) continue
@@ -372,6 +883,66 @@ function createMockClient() {
               enabled: true,
               user_invocable: true,
             }],
+          },
+        })}\n`)
+        continue
+      }
+      if (request.method === "models.list" && typeof request.id === "string") {
+        if (options.modelsError) {
+          stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32010, message: options.modelsError } })}\n`)
+          continue
+        }
+        const threadId = typeof request.params?.thread_id === "string" ? request.params.thread_id : undefined
+        stdout.write(`${JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: {
+            profiles: [{
+              id: "fast",
+              model: "fast-model",
+              provider_label: "Fast Gateway",
+              context_window_tokens: 128000,
+              capabilities: ["tool-calling", "streaming"],
+              is_default: true,
+              available: true,
+              source: "user",
+            }, {
+              id: "pro",
+              model: "pro-model",
+              provider_label: "Pro Gateway",
+              context_window_tokens: 256000,
+              capabilities: ["tool-calling", "streaming", "vision"],
+              is_default: false,
+              available: true,
+              source: "user",
+            }, {
+              id: "offline",
+              model: "offline-model",
+              provider_label: "Offline Gateway",
+              context_window_tokens: 128000,
+              capabilities: ["tool-calling", "streaming"],
+              is_default: false,
+              available: false,
+              unavailable_reason: "API_KEY_MISSING",
+              source: "user",
+            }],
+            ...(threadId ? {
+              thread_binding: {
+                state: "bound",
+                roles: {
+                  executor: {
+                    id: "fast",
+                    model: "fast-model",
+                    provider_label: "Fast Gateway",
+                    context_window_tokens: 128000,
+                    capabilities: ["tool-calling", "streaming"],
+                    is_default: true,
+                    available: true,
+                    source: "user",
+                  },
+                },
+              },
+            } : {}),
           },
         })}\n`)
         continue
@@ -425,6 +996,10 @@ function createMockClient() {
       if (request.method === "context.compact" && typeof request.id === "string") {
         const threadId = typeof request.params?.thread_id === "string" ? request.params.thread_id : ""
         compactThreadIds.push(threadId)
+        if (options.compactError) {
+          stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32001, message: options.compactError } })}\n`)
+          continue
+        }
         stdout.write(`${JSON.stringify({
           jsonrpc: "2.0",
           id: request.id,
@@ -443,11 +1018,49 @@ function createMockClient() {
         })}\n`)
         continue
       }
+      if (request.method === "mcp.status" && typeof request.id === "string") {
+        stdout.write(`${JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: {
+            servers: [
+              { name: "filesystem", transport: "stdio", status: "connected", tool_names: ["filesystem_read", "filesystem_write"] },
+              { name: "github", transport: "http", status: "failed", error: "connection refused", tool_names: [] },
+            ],
+            total_tools: 2,
+          },
+        })}\n`)
+        continue
+      }
+      if (request.method === "mcp.add" && typeof request.id === "string") {
+        stdout.write(`${JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: { added: true, connected: true, tool_names: ["new_tool"] },
+        })}\n`)
+        continue
+      }
+      if (request.method === "mcp.remove" && typeof request.id === "string") {
+        stdout.write(`${JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: { removed: true },
+        })}\n`)
+        continue
+      }
+      if (request.method === "run.cancel" && typeof request.id === "string") {
+        const threadId = typeof request.params?.thread_id === "string" ? request.params.thread_id : ""
+        const runId = typeof request.params?.run_id === "string" ? request.params.run_id : ""
+        cancelThreadIds.push(threadId)
+        stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { cancelled: options.cancelled ?? true, run_id: runId } })}\n`)
+        continue
+      }
       if (request.method !== "run.start" || typeof request.id !== "string") continue
       const message = typeof request.params?.message === "string" ? request.params.message : ""
       const threadId = typeof request.params?.thread_id === "string" ? request.params.thread_id : "thread-1"
       const runId = typeof request.params?.run_id === "string" ? request.params.run_id : "run-1"
       const requestedSkill = request.params?.requested_skill
+      const modelProfile = typeof request.params?.requested_model_profile === "string" ? request.params.requested_model_profile : undefined
       requests.push({
         message,
         threadId,
@@ -455,9 +1068,10 @@ function createMockClient() {
         requestedSkill: requestedSkill && typeof requestedSkill === "object"
           ? requestedSkill as { id: string; args?: string }
           : undefined,
+        modelProfile,
       })
       stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { accepted: true, thread_id: threadId, run_id: runId } })}\n`)
     }
   })
-  return { client, requests, compactThreadIds }
+  return { client, requests, compactThreadIds, cancelThreadIds }
 }

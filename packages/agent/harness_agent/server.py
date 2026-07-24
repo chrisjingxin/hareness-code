@@ -29,6 +29,7 @@ from harness_agent.agent_runtime import (
     RuntimeResourceBundle,
 )
 from harness_agent.config import ConfigError, Za38Config, load_config
+from harness_agent.model_router import ModelRouter, ThreadModelBindings
 from harness_agent.protocol_generated import (
     MAX_FRAME_BYTES,
     MAX_TOOL_PAYLOAD_BYTES,
@@ -38,6 +39,9 @@ from harness_agent.protocol_generated import (
     ApprovalResponse,
     ContextCompactParams,
     InitializeParams,
+    McpAddParams,
+    McpRemoveParams,
+    ModelsListParams,
     QuestionResponse,
     RunCancelParams,
     RunStartParams,
@@ -45,6 +49,7 @@ from harness_agent.protocol_generated import (
     ThreadsOpenParams,
 )
 from harness_agent.skills import SkillError, SkillRegistry
+from harness_agent.mcp import McpConnectionManager, mcp_config_fingerprint
 from harness_agent.run_context import RunCancellationToken, RunContext
 from harness_agent.runtime_profile import (
     RuntimeProfile,
@@ -93,6 +98,7 @@ class ActiveRun:
     runtime_lease: AgentRuntimeLease | None = None
     runtime_run_lease: AgentRuntimeRunLease | None = None
     runtime_profile_key: str | None = None
+    model_bindings: ThreadModelBindings | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +108,7 @@ class _RuntimeBuildSpec:
     config: Za38Config
     workspace: Path
     skill_registry: SkillRegistry
+    model_settings: Any
 
 
 @dataclass(slots=True)
@@ -121,6 +128,9 @@ class InteractionSpec:
     payload: dict[str, Any]
     interrupt_id: str
     questions: list[Mapping[str, Any]] = field(default_factory=list)
+    # 单次审批 interrupt 中挂起的工具调用数量；HITL 中间件要求 resume 的
+    # decisions 列表长度必须与之相等，否则会抛出 decisions 不匹配错误。
+    action_count: int = 1
 
 
 AgentFactory = Callable[[Za38Config, Path], Any | Awaitable[Any]]
@@ -163,6 +173,7 @@ class JsonRpcServer:
         self._skill_registry: SkillRegistry | None = None
         self._thread_store: ThreadStore | None = None
         self._runtime_pool: RuntimePool | None = None
+        self._mcp_manager: McpConnectionManager | None = None
         self._runtime_build_specs: dict[str, _RuntimeBuildSpec] = {}
         self._runtime_artifacts: dict[str, _RuntimeArtifacts] = {}
         self._default_profile_key: str | None = None
@@ -175,6 +186,7 @@ class JsonRpcServer:
             "context.compact": self._handle_context_compact,
             "config.show": self._handle_config_show,
             "config.path": self._handle_config_path,
+            "models.list": self._handle_models_list,
             "threads.list": self._handle_threads_list,
             "threads.open": self._handle_threads_open,
             "skills.list": self._handle_skills_list,
@@ -184,6 +196,9 @@ class JsonRpcServer:
             "skills.update": self._handle_skills_update,
             "skills.remove": self._handle_skills_remove,
             "skills.market.list": self._handle_skills_market_list,
+            "mcp.status": self._handle_mcp_status,
+            "mcp.add": self._handle_mcp_add,
+            "mcp.remove": self._handle_mcp_remove,
             "shutdown": self._handle_shutdown,
         }
 
@@ -238,6 +253,8 @@ class JsonRpcServer:
         finally:
             await self._cancel_all_runs()
             self._fail_pending_requests(RpcError(-32004, "Peer connection closed"))
+            if self._mcp_manager is not None:
+                await self._mcp_manager.close_all()
             await self._close_runtime_pool()
             await self._close_thread_store()
 
@@ -357,6 +374,7 @@ class JsonRpcServer:
         self._skill_registry = SkillRegistry(self._workspace, home=self._config_home)
         self._config_path = parsed.config_path
         self._load_config()
+        await self._connect_mcp_servers()
         requested = set(parsed.capabilities)
         self._enabled_capabilities = requested.intersection(SERVER_CAPABILITIES)
         self._initialized = True
@@ -380,6 +398,13 @@ class JsonRpcServer:
             ),
         }
 
+    async def _connect_mcp_servers(self) -> None:
+        """根据配置建立 MCP 服务器连接；失败不阻止启动。"""
+        if self._config is None or not self._config.mcp_servers:
+            return
+        self._mcp_manager = McpConnectionManager(list(self._config.mcp_servers))
+        await self._mcp_manager.connect_all()
+
     async def _handle_run_start(self, params: dict[str, Any], request_id: str) -> None:
         """先确认 run 标识再创建后台任务，保证响应严格早于首事件。"""
         parsed = RunStartParams.model_validate(params)
@@ -399,15 +424,34 @@ class JsonRpcServer:
             if not skill.user_invocable:
                 raise SkillError(f'Skill "{skill.skill_id}" is not user-invocable')
             requested_skill = {"id": skill.skill_id, "args": parsed.requested_skill.args or ""}
+        model_bindings = None
+        if self._thread_persistence_enabled():
+            self._load_config()
+            if self._config is None:
+                raise RpcError(-32010, self._startup_error or "MODEL_CONFIGURATION_REQUIRED")
+            try:
+                model_bindings = await self._resolve_thread_model_bindings(
+                    thread_id,
+                    self._config,
+                    requested_executor_profile=parsed.model_profile,
+                    persist=False,
+                )
+            except (ConfigError, ThreadStoreError) as exc:
+                raise RpcError(-32004, str(exc)) from exc
         run = ActiveRun(
             thread_id=thread_id,
             run_id=run_id,
             message=message,
             requested_skill=requested_skill,
+            model_bindings=model_bindings,
         )
         if self._thread_persistence_enabled():
             store = await self._ensure_thread_store()
-            await store.record_message(thread_id, message)
+            await store.record_message(
+                thread_id,
+                message,
+                model_bindings=model_bindings.record() if model_bindings is not None else None,
+            )
         self._runs[thread_id] = run
         await self.send_response(
             request_id, {"thread_id": thread_id, "run_id": run_id, "accepted": True}
@@ -485,6 +529,103 @@ class JsonRpcServer:
         summary["runtime_pool_diagnostics"] = await self._runtime_pool_diagnostics()
         return summary
 
+    async def _handle_mcp_status(self, _params: dict[str, Any], _id: str) -> dict[str, Any]:
+        """返回所有已配置 MCP 服务器的运行时连接状态和工具列表。"""
+        if _params:
+            raise RpcError(-32602, "mcp.status does not accept params")
+        if self._mcp_manager is None:
+            return {"servers": [], "total_tools": 0}
+        statuses = self._mcp_manager.get_server_statuses()
+        total_tools = sum(len(s.get("tool_names", [])) for s in statuses)
+        return {"servers": statuses, "total_tools": total_tools}
+
+    async def _handle_mcp_add(self, params: dict[str, Any], _id: str) -> dict[str, Any]:
+        """添加 MCP 服务器到用户配置并尝试热连接。"""
+        import re
+
+        from harness_agent.mcp import McpServerConfig
+        from harness_agent.mcp_config_writer import add_server_to_config, list_servers_in_config
+
+        parsed = McpAddParams.model_validate(params)
+        name = parsed.name
+
+        # 名称合法性
+        if not re.fullmatch(r"[a-zA-Z0-9_-]+", name):
+            raise RpcError(-32602, f"Invalid server name '{name}': only [a-zA-Z0-9_-] allowed")
+
+        # 必填字段校验
+        if parsed.transport == "stdio" and not parsed.command:
+            raise RpcError(-32602, "stdio transport requires 'command'")
+        if parsed.transport in ("http", "sse") and not parsed.url:
+            raise RpcError(-32602, f"{parsed.transport} transport requires 'url'")
+
+        # 重复检查
+        config_path = self._user_config_path()
+        existing = list_servers_in_config(config_path=config_path)
+        if any(s.get("name") == name for s in existing):
+            raise RpcError(-32602, f"MCP server '{name}' already exists")
+
+        # 构建 TOML 条目
+        server_dict: dict[str, Any] = {"name": name, "transport": parsed.transport}
+        if parsed.command:
+            server_dict["command"] = parsed.command
+        if parsed.args:
+            server_dict["args"] = list(parsed.args)
+        if parsed.url:
+            server_dict["url"] = parsed.url
+        if parsed.env:
+            server_dict["env"] = dict(parsed.env)
+        if parsed.headers:
+            server_dict["headers"] = dict(parsed.headers)
+
+        # 持久化配置
+        add_server_to_config(server_dict, config_path=config_path)
+
+        # 热连接
+        mcp_config = McpServerConfig(
+            name=name,
+            transport=parsed.transport,
+            command=parsed.command,
+            args=tuple(parsed.args) if parsed.args else (),
+            env=dict(parsed.env) if parsed.env else {},
+            url=parsed.url,
+            headers=dict(parsed.headers) if parsed.headers else {},
+        )
+        if self._mcp_manager is None:
+            self._mcp_manager = McpConnectionManager([])
+        status = await self._mcp_manager.add_server(mcp_config)
+
+        return {
+            "added": True,
+            "connected": status.get("status") == "connected",
+            "tool_names": status.get("tool_names", []),
+            "error": status.get("error"),
+        }
+
+    async def _handle_mcp_remove(self, params: dict[str, Any], _id: str) -> dict[str, Any]:
+        """从用户配置中删除 MCP 服务器并热断开。"""
+        from harness_agent.mcp_config_writer import remove_server_from_config
+
+        parsed = McpRemoveParams.model_validate(params)
+        name = parsed.name
+
+        # 从配置文件删除（不存在时抛 ValueError）
+        config_path = self._user_config_path()
+        try:
+            remove_server_from_config(name, config_path=config_path)
+        except ValueError as exc:
+            raise RpcError(-32602, str(exc)) from exc
+
+        # 热断开
+        if self._mcp_manager is not None:
+            self._mcp_manager.remove_server(name)
+
+        return {"removed": True}
+
+    def _user_config_path(self) -> Path:
+        """返回用户级配置文件路径。"""
+        return Path.home() / ".harness" / "config.toml"
+
     async def _handle_config_path(self, _params: dict[str, Any], _id: str) -> dict[str, Any]:
         """返回配置合并路径。"""
         if _params:
@@ -495,6 +636,24 @@ class JsonRpcServer:
             "paths": [str(path) for path in self._config.paths] if self._config else [],
             "explicit_path": self._config_path,
         }
+
+    async def _handle_models_list(self, params: dict[str, Any], _id: str) -> dict[str, object]:
+        """返回 `/model` 可安全展示的 Profile 目录与可选 Thread 绑定摘要。"""
+        self._require_models_capability()
+        parsed = ModelsListParams.model_validate(params)
+        self._load_config()
+        config = self._config
+        if config is None or config.model_catalog is None:
+            raise RpcError(-32010, self._startup_error or "MODEL_CONFIGURATION_REQUIRED")
+        result: dict[str, object] = {
+            "profiles": [
+                profile.picker_summary()
+                for _, profile in sorted(config.model_catalog.profiles.items())
+            ]
+        }
+        if parsed.thread_id is not None:
+            result["thread_binding"] = await self._thread_model_binding_summary(parsed.thread_id, config)
+        return result
 
     async def _handle_threads_list(self, params: dict[str, Any], _id: str) -> dict[str, object]:
         """返回当前 project 内最近活跃的 thread；thread_id 仅供客户端内部打开。"""
@@ -734,7 +893,7 @@ class JsonRpcServer:
 
     async def _acquire_default_runtime_for_run(self, run: ActiveRun) -> Any | None:
         """为一个生产 run 获取共享 Runtime，并将 thread 私有状态写入 RunContext。"""
-        lease, runtime = await self._acquire_default_runtime(run.thread_id)
+        lease, runtime = await self._acquire_default_runtime(run.thread_id, run.model_bindings)
         if runtime is None:
             return None
         try:
@@ -757,7 +916,7 @@ class JsonRpcServer:
             raise
 
     async def _acquire_default_runtime(
-        self, thread_id: str
+        self, thread_id: str, model_bindings: ThreadModelBindings | None = None
     ) -> tuple[AgentRuntimeLease | None, AgentRuntime | None]:
         """为 run 或手动压缩取得当前 Profile 的 Runtime，按 thread 持久化绑定。"""
         if self._allow_echo:
@@ -766,13 +925,16 @@ class JsonRpcServer:
         config = self._config
         if config is None or config.model is None:
             return None, None
-        profile = await self._resolve_runtime_profile(thread_id, config)
+        profile = await self._resolve_runtime_profile(thread_id, config, model_bindings)
         pool = self._ensure_runtime_pool(config)
         lease = await pool.acquire(profile)
         return lease, lease.runtime
 
     async def _resolve_runtime_profile(
-        self, thread_id: str, config: Za38Config
+        self,
+        thread_id: str,
+        config: Za38Config,
+        model_bindings: ThreadModelBindings | None = None,
     ) -> RuntimeProfile:
         """计算当前配置的 Profile，拒绝让已绑定 thread 静默切换执行环境。"""
         from harness_agent.agent import (
@@ -782,15 +944,28 @@ class JsonRpcServer:
 
         store = await self._ensure_thread_store()
         registry = self._require_skills()
+        bindings = model_bindings or await self._resolve_thread_model_bindings(thread_id, config)
+        if bindings is not None:
+            selected_profile_id = bindings.runtime_primary().profile_id
+            selected_model = bindings.runtime_primary().settings
+        else:
+            selected_profile_id = config.model_profile
+            selected_model = config.require_model()
+        mcp_fp = (
+            mcp_config_fingerprint(list(config.mcp_servers))
+            if config.mcp_servers
+            else component_fingerprint({"transport": "disabled"})
+        )
         profile = default_runtime_profile(
             project_fingerprint=store.project_fingerprint,
-            model_profile=config.model_profile,
-            model=config.require_model(),
+            model_profile=selected_profile_id,
+            model=selected_model,
             tool_catalog_fingerprint=default_tool_catalog_fingerprint(),
             skill_catalog_fingerprint=component_fingerprint(
                 {"skill_snapshot_id": registry.snapshot_id}
             ),
             execution=config.execution,
+            mcp_fingerprint=mcp_fp,
             middleware_fingerprint=component_fingerprint(
                 {
                     "prompt_epoch": 1,
@@ -811,6 +986,7 @@ class JsonRpcServer:
             config=config,
             workspace=self._workspace,
             skill_registry=registry,
+            model_settings=selected_model,
         )
         if self._runtime_pool is not None and self._default_profile_key not in {
             None,
@@ -825,6 +1001,55 @@ class JsonRpcServer:
             )
         self._default_profile_key = profile.profile_key
         return profile
+
+    async def _resolve_thread_model_bindings(
+        self,
+        thread_id: str,
+        config: Za38Config,
+        *,
+        requested_executor_profile: str | None = None,
+        persist: bool = True,
+    ) -> ThreadModelBindings | None:
+        """读取或首次冻结 Thread 模型角色；legacy Runtime 绝不被推测性迁移。"""
+        if config.model_catalog is None:
+            if requested_executor_profile is not None:
+                raise ConfigError("MODEL_CATALOG_UNAVAILABLE")
+            return None
+        store = await self._ensure_thread_store()
+        router = ModelRouter(config.model_catalog)
+        record = await store.get_model_bindings(thread_id)
+        if record is not None:
+            bindings = router.from_record(record)
+            if (
+                requested_executor_profile is not None
+                and bindings.runtime_primary().profile_id != requested_executor_profile
+            ):
+                raise ThreadStoreError("THREAD_MODEL_PROFILE_IMMUTABLE")
+            return bindings
+        if await store.get_runtime_profile(thread_id) is not None:
+            if requested_executor_profile is not None:
+                raise ThreadStoreError("THREAD_MODEL_PROFILE_IMMUTABLE")
+            return None
+        bindings = router.bind_thread(requested_executor_profile)
+        if persist:
+            await store.save_model_bindings(thread_id, bindings.record())
+        return bindings
+
+    async def _thread_model_binding_summary(
+        self, thread_id: str, config: Za38Config
+    ) -> dict[str, object]:
+        """返回可显示的绑定快照；不存在或 legacy 时不尝试改写 Thread。"""
+        store = await self._ensure_thread_store()
+        record = await store.get_model_bindings(thread_id)
+        if record is not None:
+            roles = record.get("roles")
+            if isinstance(roles, dict):
+                return {"state": "bound", "roles": roles}
+        bound = await store.get_runtime_profile(thread_id)
+        if bound is None:
+            return {"state": "unbound", "roles": {}}
+        # v4 及以前的 Runtime 只保存不可逆指纹，不能可靠恢复 Profile 名称。
+        return {"state": "legacy", "roles": {}}
 
     def _ensure_runtime_pool(self, config: Za38Config) -> RuntimePool:
         """延迟创建进程内唯一 Pool；容量策略在 Sidecar 生命周期内保持稳定。"""
@@ -859,8 +1084,11 @@ class JsonRpcServer:
             thread_store=store,
             updates=self._context_updates,
         )
+        mcp_tools = self._mcp_manager.get_tools() if self._mcp_manager else []
         graph = create_harness_agent(
             model,
+            tools=mcp_tools or None,
+            mcp_server_info=True if mcp_tools else None,
             cwd=str(workspace),
             # 无头客户端不协商 question 能力时不注册 ask_user；审批仍由
             # `_request_interaction` 在缺少 approval 能力时 fail closed。
@@ -1101,10 +1329,13 @@ class JsonRpcServer:
                 questions=questions,
             )
         description = "A tool execution requires approval"
+        action_count = 1
         if isinstance(value, Mapping):
+            action_requests = value.get("action_requests", [])
+            action_count = len(action_requests) if isinstance(action_requests, list) else 1
             descriptions = [
                 str(request.get("description"))
-                for request in value.get("action_requests", [])
+                for request in action_requests
                 if isinstance(request, Mapping) and request.get("description")
             ]
             if descriptions:
@@ -1119,6 +1350,7 @@ class JsonRpcServer:
                 "decisions": ["approve_once", "reject"],
             },
             interrupt_id=interrupt_id,
+            action_count=action_count,
         )
 
     async def _request_interaction(self, run: ActiveRun, spec: InteractionSpec) -> object:
@@ -1205,7 +1437,14 @@ class JsonRpcServer:
         if spec.type == "approval":
             decision = response.get("decision")
             langgraph_decision = "approve" if decision in {"approve_once", "approve_thread"} else "reject"
-            return {spec.interrupt_id: {"decisions": [{"type": langgraph_decision}]}}
+            # 模型可能在一轮中并行发出多个需审批的工具调用，HITL 中间件会把
+            # 它们打包为单个 interrupt；用户的一个审批决定需复制到每个挂起
+            # 的 tool call，使 decisions 列表长度与 action_count 相等。
+            return {
+                spec.interrupt_id: {
+                    "decisions": [{"type": langgraph_decision}] * spec.action_count
+                }
+            }
         answers_by_id = response.get("answers", {})
         answers: list[str] = []
         if isinstance(answers_by_id, Mapping):
@@ -1356,6 +1595,13 @@ class JsonRpcServer:
             raise RpcError(-32002, "THREADS_CAPABILITY_REQUIRED")
         if self._allow_echo:
             raise RpcError(-32002, "THREADS_UNAVAILABLE_IN_ECHO_MODE")
+
+    def _require_models_capability(self) -> None:
+        """模型目录包含配置摘要，只向显式协商的交互客户端公开。"""
+        if "models.read" not in self._enabled_capabilities:
+            raise RpcError(-32002, "MODELS_CAPABILITY_REQUIRED")
+        if self._allow_echo:
+            raise RpcError(-32002, "MODELS_UNAVAILABLE_IN_ECHO_MODE")
 
     def _require_context_capability(self) -> None:
         """手动压缩会改写本机 checkpoint，必须由显式协商能力的交互客户端发起。"""

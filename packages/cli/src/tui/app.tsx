@@ -3,21 +3,25 @@
 import { createCliRenderer, type KeyEvent, type ScrollBoxRenderable, type TextareaRenderable } from "@opentui/core"
 import { createRoot, useKeyboard, useTerminalDimensions } from "@opentui/react"
 import { randomUUID } from "node:crypto"
-import { useCallback, useEffect, useRef, useState } from "react"
-import type { InteractionRequestEnvelope, InteractionResponse, RequestedSkill, ThreadMessage } from "@za38/protocol"
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
+import type { InteractionRequestEnvelope, InteractionResponse, McpAddResult, McpStatusResult, ModelProfile, RequestedSkill, ThreadMessage } from "@za38/protocol"
 
 import { IpcClient } from "../ipc/client"
 import {
+  defaultCommandContext,
   findCommandMenuItems,
   parseSlashCommand,
-  slashCommandHelp,
+  resolveSlashCommand,
+  unknownCommandNotice,
   type CommandMenuItem,
   type SkillMenuItem,
   type SlashCommand,
 } from "./commands"
+import { dispatchSlashCommand, type CommandDialog, type CommandResult } from "./command-dispatcher"
 import { HomeView, SkillPicker, ThreadPicker, ThreadView, type CommandMenuState, type SelectedSkill, type ThreadPickerItem } from "./components"
 import { TuiErrorBoundary } from "./error-boundary"
 import { runtimeStatusSummary, type TuiRuntime } from "./model"
+import { DialogShell, SearchPicker, type SearchPickerRenderContext } from "./overlays"
 import {
   loadPromptHistory,
   movePromptHistory,
@@ -27,6 +31,7 @@ import {
 } from "./prompt-history"
 import { resolveShortcut, type ScrollIntent } from "./shortcuts"
 import { registerCommonSyntaxParsers } from "./syntax-parsers"
+import { tuiTheme } from "./theme"
 import {
   appendNotice,
   applyAgentEvent,
@@ -72,9 +77,17 @@ type ThreadPickerState = {
   error?: string
 }
 
-type ContextCompactResult = {
-  compacted?: unknown
-  context?: unknown
+type ModelPickerState = {
+  visible: boolean
+  loading: boolean
+  query: string
+  selectedIndex: number
+  error?: string
+}
+
+type ModelBindingDialog = {
+  title: string
+  message: string
 }
 
 /** 正式 OpenTUI 根组件：所有 Agent 输出必须经状态归约后才进入终端。 */
@@ -88,6 +101,11 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
   const [skills, setSkills] = useState<readonly SkillMenuItem[]>([])
   const [skillPicker, setSkillPicker] = useState<SkillPickerState>({ visible: false, loading: false, query: "", selectedIndex: 0 })
   const [threadPicker, setThreadPicker] = useState<ThreadPickerState>({ visible: false, loading: false, query: "", selectedIndex: 0 })
+  const [modelPicker, setModelPicker] = useState<ModelPickerState>({ visible: false, loading: false, query: "", selectedIndex: 0 })
+  const [models, setModels] = useState<readonly ModelProfile[]>([])
+  const [pendingModelProfile, setPendingModelProfile] = useState<string | undefined>(undefined)
+  const [modelBindingDialog, setModelBindingDialog] = useState<ModelBindingDialog | undefined>(undefined)
+  const [commandDialog, setCommandDialog] = useState<CommandDialog | undefined>(undefined)
   const [threads, setThreads] = useState<readonly ThreadPickerItem[]>([])
   const [selectedSkill, setSelectedSkill] = useState<SelectedSkill | undefined>(undefined)
   const commandMenuDismissedValue = useRef<string | undefined>(undefined)
@@ -102,6 +120,7 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
   const historyApplyValueRef = useRef<string | undefined>(undefined)
   const skillSearchRef = useRef<TextareaRenderable | null>(null)
   const threadSearchRef = useRef<TextareaRenderable | null>(null)
+  const modelSearchRef = useRef<TextareaRenderable | null>(null)
   const initialResumeRef = useRef(resume === true)
   const openingThreadRef = useRef(false)
   const terminal = useTerminalDimensions()
@@ -187,21 +206,23 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     return () => { disposed = true }
   }, [promptHistoryFile])
 
-  /** 取消当前运行；重复按取消键时把退出意图交给根生命周期。 */
-  const cancelActiveRun = useCallback(async () => {
+  /** 取消当前运行；交互式确认流程不会把重复取消误解为退出应用。 */
+  const cancelActiveRun = useCallback(async ({ exitOnRepeatedCancellation = true }: { exitOnRepeatedCancellation?: boolean } = {}) => {
     const active = stateRef.current.activeRun
     if (!active) return false
     if (stateRef.current.status === "正在取消") {
-      onRequestExit()
-      return true
+      if (exitOnRepeatedCancellation) onRequestExit()
+      return false
     }
     commit(markCancelling)
     try {
-      await client.cancel(active.threadId, active.runId)
+      const result = await client.cancel(active.threadId, active.runId)
+      if (!result.cancelled || result.run_id !== active.runId) throw new Error("Agent 未确认取消当前运行")
+      return true
     } catch (error) {
       commit(current => markRunFailed(current, active.runId, errorMessage(error)))
+      return false
     }
-    return true
   }, [client, commit, onRequestExit])
 
   /** 登记用户消息、发起 run.start，并校验 sidecar 返回的 run 标识。 */
@@ -218,17 +239,20 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     const armedSkill = requestedSkill ?? (selectedSkill
       ? { id: selectedSkill.id, args: message }
       : undefined)
+    // 仅无 Thread 的首次 run 携带待选 Profile；服务端在创建 Thread 时原子绑定它。
+    const requestedModelProfile = current.threadId ? undefined : pendingModelProfile
     if (armedSkill && !requestedSkill) setSelectedSkill(undefined)
     commit(state => startRun(state, run, message))
     try {
-      const accepted = await client.query(message, run.threadId, run.runId, armedSkill)
+      const accepted = await client.query(message, run.threadId, run.runId, armedSkill, requestedModelProfile)
       if (!accepted.accepted || accepted.thread_id !== run.threadId || accepted.run_id !== run.runId) {
         throw new Error("Agent 返回的 run 标识与请求不一致")
       }
+      if (requestedModelProfile) setPendingModelProfile(undefined)
     } catch (error) {
       commit(state => markRunFailed(state, run.runId, errorMessage(error)))
     }
-  }, [client, commit, selectedSkill])
+  }, [client, commit, pendingModelProfile, selectedSkill])
 
   /** 解析 Agent 发起的审批 request，由 JsonRpcPeer 自动回写标准 response。 */
   const respondApproval = useCallback(async (decision: "approve" | "reject") => {
@@ -289,6 +313,54 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     })
   }, [commit, refreshThreads])
 
+  /** 关闭搜索浮层时保留草稿和原 thread；Composer 会因 pickerVisible 复位而重新获取焦点。 */
+  const closeSkillPicker = useCallback(() => {
+    setSkillPicker(current => ({ ...current, visible: false, loading: false, error: undefined }))
+  }, [])
+
+  /** Thread Picker 与 Skill Picker 共享相同关闭语义，不能在关闭时恢复或修改 thread。 */
+  const closeThreadPicker = useCallback(() => {
+    setThreadPicker(current => ({ ...current, visible: false, loading: false, error: undefined }))
+  }, [])
+
+  /** `/model` 只为尚未绑定的下一条新 Thread 选择 Profile；既有 Thread 保持不可变。 */
+  const openModelPicker = useCallback((initialQuery = "") => {
+    const current = stateRef.current
+    if (current.threadId) {
+      void client.listModels(current.threadId).then(result => {
+        const binding = result.thread_binding
+        const executor = binding?.roles.executor ?? binding?.roles.primary
+        setModelBindingDialog({
+          title: "当前 Thread 的模型不可变",
+          message: executor
+            ? `当前 Thread 已绑定 ${executor.provider_label} · ${executor.model}（${executor.id}）。请新建 Thread 后使用 /model 选择模型。`
+            : "当前 Thread 使用 legacy immutable binding，不能热切换模型。请新建 Thread 后使用 /model 选择模型。",
+        })
+      }).catch(error => {
+        setModelBindingDialog({
+          title: "模型绑定不可读取",
+          message: `无法读取当前 Thread 的模型绑定：${errorMessage(error)}。请新建 Thread 后再选择模型。`,
+        })
+      })
+      return
+    }
+    setModelPicker({ visible: true, loading: true, query: initialQuery, selectedIndex: 0 })
+    void client.listModels().then(result => {
+      setModels(result.profiles)
+      setModelPicker(value => value.visible ? { ...value, loading: false } : value)
+    }).catch(error => {
+      setModelPicker(value => value.visible
+        ? { ...value, loading: false, error: `模型目录读取失败：${errorMessage(error)}` }
+        : value)
+    })
+  }, [client])
+
+  /** 取消模型选择会回到配置默认值，避免旧的待绑定选择在后续输入中意外生效。 */
+  const closeModelPicker = useCallback(() => {
+    setPendingModelProfile(undefined)
+    setModelPicker(current => ({ ...current, visible: false, loading: false, error: undefined }))
+  }, [])
+
   useEffect(() => {
     if (!initialResumeRef.current) return
     initialResumeRef.current = false
@@ -298,69 +370,144 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
   /** 筛选保持在纯视图层，避免每次搜索重新请求 sidecar 或改变 snapshot。 */
   const visibleSkills = filterSkills(skills, skillPicker.query)
   const visibleThreads = filterThreads(threads, threadPicker.query)
+  const visibleModels = filterModels(models, modelPicker.query)
 
-  /** 执行本地控制命令和 Skill 入口；目录读取失败只显示可恢复通知。 */
-  const executeSlashCommand = useCallback(async (command: SlashCommand) => {
-    switch (command.name) {
-      case "help":
-        commit(current => appendNotice(current, slashCommandHelp.map(item => `${item.command}  ${item.description}`).join("\n")))
+  /** 把 Dispatcher 的结构化结果映射为 TUI 状态、JSON-RPC 或退出动作。 */
+  const applyCommandResult = useCallback(async (result: CommandResult): Promise<void> => {
+    switch (result.type) {
+      case "notice":
+        commit(current => appendNotice(current, result.message))
         return
-      case "quit":
+      case "exit":
         onRequestExit()
         return
-      case "clear":
-        if (stateRef.current.activeRun) {
-          commit(current => appendNotice(current, "请先等待当前执行结束，或使用 /force-clear。"))
-        } else {
+      case "local-action":
+        if (result.action === "clear-thread") {
+          setPendingModelProfile(undefined)
           commit(clearThread)
+          return
+        }
+        if (await cancelActiveRun({ exitOnRepeatedCancellation: false })) {
+          setPendingModelProfile(undefined)
+          commit(clearThread)
+        } else {
+          commit(current => appendNotice(current, "未能取消当前任务，已保留当前 thread。请等待任务结束后重试。"))
         }
         return
-      case "force-clear":
-        void cancelActiveRun().then(() => commit(clearThread))
+      case "open-picker":
+        if (result.picker === "skills") openSkillPicker()
+        else if (result.picker === "threads") openThreadPicker()
+        else openModelPicker(result.initialQuery)
         return
-      case "compact": {
-        const current = stateRef.current
-        if (command.argument) {
-          commit(state => appendNotice(state, "/compact 不接受参数。"))
-          return
-        }
-        if (!current.threadId) {
-          commit(state => appendNotice(state, "当前没有可压缩的 thread。"))
-          return
-        }
-        if (current.activeRun || current.pendingApproval || current.pendingQuestion) {
-          commit(state => appendNotice(state, "当前 thread 正在执行或等待交互，暂不能压缩。"))
-          return
-        }
+      case "open-dialog":
+        setCommandDialog(result.dialog)
+        return
+      case "rpc":
         try {
-          const result = await client.compactContext(current.threadId) as ContextCompactResult
-          commit(state => appendNotice(state, contextCompactNotice(result)))
+          const value = await client.call(result.method, result.params)
+          await applyCommandResult(result.onSuccess(value))
         } catch (error) {
-          commit(state => appendNotice(state, `上下文压缩失败：${errorMessage(error)}`))
+          await applyCommandResult(result.onError(error))
         }
+        return
+      case "mcp": {
+        const subArgs = result.argument?.trim()
+        if (!subArgs) {
+          try {
+            const mcpResult = await client.mcpStatus()
+            commit(current => appendNotice(current, formatMcpStatus(mcpResult)))
+          } catch (error) {
+            commit(state => appendNotice(state, `MCP 状态查询失败：${errorMessage(error)}`))
+          }
+          return
+        }
+
+        const [sub, ...rest] = subArgs.split(/\s+/)
+        if (sub === "add") {
+          const usage = "用法：/mcp add <name> <command> [args...]  或  /mcp add <name> --url <url> [--sse]"
+          if (rest.length < 2) {
+            commit(state => appendNotice(state, usage))
+            return
+          }
+          const name = rest[0]
+          const remaining = rest.slice(1)
+
+          const urlIdx = remaining.indexOf("--url")
+          const hasSse = remaining.includes("--sse")
+          if (urlIdx !== -1) {
+            const url = remaining[urlIdx + 1]
+            if (!url || url.startsWith("--")) {
+              commit(state => appendNotice(state, "错误：--url 后需要提供 URL\n" + usage))
+              return
+            }
+            try {
+              const addResult = await client.mcpAdd({
+                name,
+                transport: hasSse ? "sse" : "http",
+                url,
+              })
+              commit(state => appendNotice(state, formatMcpAddResult(name, addResult)))
+            } catch (error) {
+              commit(state => appendNotice(state, `添加 MCP 服务器失败：${errorMessage(error)}`))
+            }
+          } else {
+            const command_ = remaining[0]
+            const args = remaining.slice(1)
+            try {
+              const addResult = await client.mcpAdd({
+                name,
+                transport: "stdio",
+                command: command_,
+                args: args.length > 0 ? args : undefined,
+              })
+              commit(state => appendNotice(state, formatMcpAddResult(name, addResult)))
+            } catch (error) {
+              commit(state => appendNotice(state, `添加 MCP 服务器失败：${errorMessage(error)}`))
+            }
+          }
+          return
+        }
+
+        if (sub === "remove") {
+          if (rest.length < 1) {
+            commit(state => appendNotice(state, "用法：/mcp remove <name>"))
+            return
+          }
+          const name = rest[0]
+          try {
+            await client.mcpRemove(name)
+            commit(state => appendNotice(state, `已删除 MCP 服务器 "${name}"`))
+          } catch (error) {
+            commit(state => appendNotice(state, `删除 MCP 服务器失败：${errorMessage(error)}`))
+          }
+          return
+        }
+
+        commit(state => appendNotice(state, `未知子命令 "${sub}"\n用法：/mcp [add|remove] ...`))
         return
       }
-      case "status":
-        commit(current => appendNotice(current, runtimeStatusSummary(runtime)))
-        return
-      case "version":
-        commit(current => appendNotice(current, `za38-cli ${runtime.cliVersion} · JSON-RPC v2`))
-        return
-      case "resume":
-        if (command.argument) {
-          commit(current => appendNotice(current, "/resume 不接受 thread_id；请在选择器中选择要恢复的 thread。"))
-          return
-        }
-        openThreadPicker()
-        return
-      case "continue":
-        commit(current => appendNotice(current, "/continue 不可用；请使用 /resume 在选择器中恢复 thread。"))
-        return
-      case "skills":
-        openSkillPicker()
-        return
+      case "submit-prompt":
+        await sendAgentMessage(result.prompt, result.requestedSkill)
     }
-  }, [cancelActiveRun, commit, onRequestExit, openSkillPicker, openThreadPicker, runtime, sendAgentMessage])
+  }, [cancelActiveRun, client, commit, onRequestExit, openModelPicker, openSkillPicker, openThreadPicker, sendAgentMessage])
+
+  /** 由 Dispatcher 解析稳定 ID 和运行态，根组件不再解释每个命令的业务分支。 */
+  const executeSlashCommand = useCallback((command: SlashCommand) => {
+    const current = stateRef.current
+    void applyCommandResult(dispatchSlashCommand(command, {
+      commandContext: tuiCommandContext(runtime, current),
+      threadId: current.threadId,
+      runtimeStatus: runtimeStatusSummary(runtime),
+      versionSummary: `za38-cli ${runtime.cliVersion} · JSON-RPC v2`,
+    }))
+  }, [applyCommandResult, runtime])
+
+  /** 确认框仅保存 Dispatcher 返回的后续动作，取消时不改变当前 thread。 */
+  const resolveCommandDialog = useCallback((confirmed: boolean) => {
+    const dialog = commandDialog
+    setCommandDialog(undefined)
+    if (confirmed && dialog) void applyCommandResult(dialog.confirm)
+  }, [applyCommandResult, commandDialog])
 
   /** 同步 textarea 草稿、命令菜单过滤状态和历史游标。 */
   const updateDraft = useCallback((value: string) => {
@@ -371,10 +518,11 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     const slashQuery = value.trimStart()
     // 输入完整的本地命令后收起菜单，让 Enter 直接执行；未完成前缀继续保留
     // 筛选菜单，以支持 `/st` + Enter 的补全工作流。
-    const exactLocalCommand = parseSlashCommand(slashQuery)
+    const resolution = resolveSlashCommand(slashQuery)
     const shouldShowMenu = slashQuery.startsWith("/")
+      && !slashQuery.startsWith("//")
       && !slashQuery.slice(1).match(/\s/)
-      && !exactLocalCommand
+      && resolution.kind !== "command"
     if (shouldShowMenu && commandMenuDismissedValue.current !== value) {
       setCommandMenu({ visible: true, selectedIndex: 0 })
       return
@@ -425,6 +573,29 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     }
   }, [clearDraft, client, commit])
 
+  /** 将可用 Profile 写入 Composer 的一次性待绑定状态；Enter 显式确认后才会生效。 */
+  const selectModel = useCallback((model: ModelProfile) => {
+    if (!model.available) {
+      setModelPicker(current => ({
+        ...current,
+        error: `${model.provider_label} · ${model.model} 不可用：${model.unavailable_reason ?? "配置不可用"}`,
+      }))
+      return
+    }
+    setPendingModelProfile(model.id)
+    // 选择与取消不同：确认后保留 pending 状态，直到下一新 Thread 成功启动或 /new 清理它。
+    setModelPicker(current => ({ ...current, visible: false, loading: false, error: undefined }))
+    commit(current => appendNotice(current, `已选择 ${model.provider_label} · ${model.model}；将在下一条新 Thread 中生效。`))
+  }, [commit])
+
+  /** 已绑定 Thread 的说明框只允许回到空白 Composer；不修改既有绑定。 */
+  const resolveModelBindingDialog = useCallback((createNewThread: boolean) => {
+    setModelBindingDialog(undefined)
+    if (!createNewThread) return
+    setPendingModelProfile(undefined)
+    commit(clearThread)
+  }, [commit])
+
   /** 用历史项或命令项替换草稿，并把光标放到指定端点。 */
   const replaceDraft = useCallback((value: string, cursor: "start" | "end" = "end", historyCursor?: PromptHistoryCursor) => {
     // setText 会同步 textarea 内部缓冲区，不能只更新 React state，否则 Enter 会发送旧内容。
@@ -453,13 +624,26 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
       selectSkill(item.skill)
       return
     }
+    if (item.availability.state === "disabled") {
+      const reason = item.availability.reason
+      commit(current => appendNotice(current, `/${item.command.name} 暂不可用：${reason}。`))
+      return
+    }
+    // 活动 run 期间 composer 不接收普通 Prompt；从命令菜单选择可执行项时直接交给
+    // Dispatcher，确保 /new 的确认流程和 /quit 等控制命令仍然可达。
+    if (stateRef.current.activeRun) {
+      const command = parseSlashCommand(`/${item.command.name}`)
+      clearDraft()
+      if (command) executeSlashCommand(command)
+      return
+    }
     const value = `/${item.command.name}`
     commandMenuDismissedValue.current = value
     inputRef.current?.setText(value)
     inputRef.current?.gotoBufferEnd()
     setDraft(value)
     setCommandMenu({ visible: false, selectedIndex: 0 })
-  }, [selectSkill])
+  }, [clearDraft, commit, executeSlashCommand, selectSkill])
 
   /** 通过 `/` 或 Ctrl+P 打开命令菜单并补齐命令前缀。 */
   const openCommandMenu = useCallback(() => {
@@ -475,7 +659,8 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
 
   /** 处理 Enter 提交：问答、Slash Command 和普通 Agent 消息走不同路径。 */
   const handleSubmit = useCallback(() => {
-    const input = (inputRef.current?.plainText ?? draft).trim()
+    const rawInput = inputRef.current?.plainText ?? draft
+    const input = rawInput.trim()
     if (!input) return
     // OpenTUI Input 会保留内部编辑缓冲区，提交后需主动清空，不能只依赖 React state。
     clearDraft()
@@ -483,18 +668,23 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
       void respondQuestion(input)
       return
     }
-    const command = parseSlashCommand(input)
-    if (command) {
-      void executeSlashCommand(command)
+    const resolution = resolveSlashCommand(rawInput)
+    if (resolution.kind === "command") {
+      void executeSlashCommand(resolution.command)
       return
     }
+    if (resolution.kind === "unknown") {
+      commit(current => appendNotice(current, unknownCommandNotice(resolution)))
+      return
+    }
+    const message = resolution.kind === "escaped" ? resolution.message : input
     const previousHistory = promptHistoryRef.current
-    const nextHistory = rememberPrompt(previousHistory, input)
+    const nextHistory = rememberPrompt(previousHistory, message)
     promptHistoryRef.current = nextHistory
     promptHistoryCursorRef.current = undefined
     void persistPromptHistory(previousHistory, nextHistory, promptHistoryFile)
-    void sendAgentMessage(input)
-  }, [clearDraft, draft, executeSlashCommand, respondQuestion, sendAgentMessage])
+    void sendAgentMessage(message)
+  }, [clearDraft, commit, draft, executeSlashCommand, respondQuestion, sendAgentMessage])
 
   /** 按行、半页或跳转首尾滚动当前 thread；全局快捷键与空 composer 方向键共用。 */
   const scrollConversation = useCallback((intent: ScrollIntent) => {
@@ -520,7 +710,7 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
   /** 在 textarea 层处理历史与 thread 滚动，避免全局 key handler 抢走方向键。 */
   const handleComposerKeyDown = useCallback((key: KeyEvent) => {
     // Slash 菜单由全局快捷键优先处理，不能在 textarea 内重复消费方向键。
-    if (commandMenu.visible || skillPicker.visible || threadPicker.visible) return
+    if (commandMenu.visible || commandDialog || modelBindingDialog || skillPicker.visible || threadPicker.visible || modelPicker.visible) return
     const input = inputRef.current
     if (!input) return
 
@@ -543,15 +733,18 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
           : undefined
       if (scrollAction && scrollConversation(scrollAction)) key.preventDefault()
     }
-  }, [commandMenu.visible, navigatePromptHistory, scrollConversation, skillPicker.visible, threadPicker.visible])
+  }, [commandDialog, commandMenu.visible, modelBindingDialog, modelPicker.visible, navigatePromptHistory, scrollConversation, skillPicker.visible, threadPicker.visible])
 
   useKeyboard(key => {
-    const commandOptions = findCommandMenuItems(draft, skills)
+    const commandOptions = findCommandMenuItems(draft, skills, tuiCommandContext(runtime, stateRef.current))
     const action = resolveShortcut(key, {
+      commandDialogVisible: Boolean(commandDialog || modelBindingDialog),
       skillPickerVisible: skillPicker.visible,
       skillOptionCount: visibleSkills.length,
       threadPickerVisible: threadPicker.visible,
       threadOptionCount: visibleThreads.length,
+      modelPickerVisible: modelPicker.visible,
+      modelOptionCount: visibleModels.length,
       commandMenuVisible: commandMenu.visible,
       commandOptionCount: commandOptions.length,
       activeRun: Boolean(stateRef.current.activeRun),
@@ -559,6 +752,17 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     })
     if (action === "none") return
     key.preventDefault()
+
+    if (action === "confirm-command-dialog") {
+      if (modelBindingDialog) resolveModelBindingDialog(true)
+      else resolveCommandDialog(true)
+      return
+    }
+    if (action === "cancel-command-dialog") {
+      if (modelBindingDialog) resolveModelBindingDialog(false)
+      else resolveCommandDialog(false)
+      return
+    }
 
     // 滚动键全局生效，可在输入或运行中随时回看历史；与 opencode 的 session.global 对齐。
     const scrollIntent: ScrollIntent | undefined =
@@ -573,13 +777,16 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
       scrollConversation(scrollIntent)
       return
     }
-
     if (action === "close-skill-picker") {
-      setSkillPicker(current => ({ ...current, visible: false, loading: false, error: undefined }))
+      closeSkillPicker()
       return
     }
     if (action === "close-thread-picker") {
-      setThreadPicker(current => ({ ...current, visible: false, loading: false, error: undefined }))
+      closeThreadPicker()
+      return
+    }
+    if (action === "close-model-picker") {
+      closeModelPicker()
       return
     }
     if (action === "thread-previous" || action === "thread-next") {
@@ -596,6 +803,20 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
       return
     }
     if (action === "thread-block") return
+    if (action === "model-previous" || action === "model-next") {
+      const direction = action === "model-previous" ? -1 : 1
+      setModelPicker(current => ({
+        ...current,
+        selectedIndex: visibleModels.length ? (current.selectedIndex + direction + visibleModels.length) % visibleModels.length : 0,
+      }))
+      return
+    }
+    if (action === "model-select") {
+      const selected = visibleModels[modelPicker.selectedIndex]
+      if (selected) selectModel(selected)
+      return
+    }
+    if (action === "model-block") return
     if (action === "skill-previous" || action === "skill-next") {
       const direction = action === "skill-previous" ? -1 : 1
       setSkillPicker(current => ({
@@ -636,7 +857,14 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
       if (selected) selectCommandMenuItem(selected)
       return
     }
-    if (action === "command-block") return
+    if (action === "command-block") {
+      const resolution = resolveSlashCommand(inputRef.current?.plainText ?? draft)
+      if (resolution.kind === "unknown") {
+        clearDraft()
+        commit(current => appendNotice(current, unknownCommandNotice(resolution)))
+      }
+      return
+    }
     if (action === "command-open") {
       openCommandMenu()
       return
@@ -682,11 +910,11 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     onComposerKeyDown: handleComposerKeyDown,
     onSubmit: handleSubmit,
     commandMenu,
-    commandOptions: findCommandMenuItems(draft, skills),
+    commandOptions: findCommandMenuItems(draft, skills, tuiCommandContext(runtime, state)),
     onSelectCommand: selectCommandMenuItem,
     onHoverCommand: (selectedIndex: number) => setCommandMenu(current => ({ ...current, selectedIndex })),
     selectedSkill,
-    pickerVisible: skillPicker.visible || threadPicker.visible,
+    pickerVisible: Boolean(commandDialog || modelBindingDialog) || skillPicker.visible || threadPicker.visible || modelPicker.visible,
     onClearSelectedSkill: () => setSelectedSkill(undefined),
     showToolDetails,
     expandedTools,
@@ -708,9 +936,12 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
         terminalWidth={terminal.width}
         terminalHeight={terminal.height}
         searchRef={skillSearchRef}
+        restoreFocusRef={inputRef}
+        shouldRestoreFocus={!state.activeRun}
         onSearch={query => setSkillPicker(current => ({ ...current, query, selectedIndex: 0 }))}
         onSelect={selectSkill}
         onHover={selectedIndex => setSkillPicker(current => ({ ...current, selectedIndex }))}
+        onClose={closeSkillPicker}
       />
       <ThreadPicker
         visible={threadPicker.visible}
@@ -722,9 +953,59 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
         terminalWidth={terminal.width}
         terminalHeight={terminal.height}
         searchRef={threadSearchRef}
+        restoreFocusRef={inputRef}
+        shouldRestoreFocus={!state.activeRun}
         onSearch={query => setThreadPicker(current => ({ ...current, query, selectedIndex: 0 }))}
         onSelect={thread => { void selectThread(thread) }}
         onHover={selectedIndex => setThreadPicker(current => ({ ...current, selectedIndex }))}
+        onClose={closeThreadPicker}
+      />
+      <SearchPicker<ModelProfile>
+        visible={modelPicker.visible}
+        loading={modelPicker.loading}
+        error={modelPicker.error}
+        items={visibleModels}
+        query={modelPicker.query}
+        selectedIndex={modelPicker.selectedIndex}
+        terminalWidth={terminal.width}
+        terminalHeight={terminal.height}
+        searchRef={modelSearchRef}
+        restoreFocusRef={inputRef}
+        shouldRestoreFocus={!state.activeRun}
+        searchId="model-search"
+        title="选择下一新 Thread 的模型"
+        searchPlaceholder="按 Profile、模型或 Provider 搜索"
+        emptyMessage="没有匹配的模型 Profile"
+        itemKey={model => model.id}
+        renderItem={(model, context) => modelPickerRow(model, context)}
+        onSearch={query => setModelPicker(current => ({ ...current, query, selectedIndex: 0 }))}
+        onSelect={selectModel}
+        onHover={selectedIndex => setModelPicker(current => ({ ...current, selectedIndex }))}
+        onClose={closeModelPicker}
+      />
+      <DialogShell
+        visible={commandDialog?.kind === "confirm-new-thread"}
+        title={commandDialog?.title ?? ""}
+        message={commandDialog?.message ?? ""}
+        terminalWidth={terminal.width}
+        terminalHeight={terminal.height}
+        restoreFocusRef={inputRef}
+        shouldRestoreFocus={!state.activeRun}
+        onConfirm={() => resolveCommandDialog(true)}
+        onCancel={() => resolveCommandDialog(false)}
+      />
+      <DialogShell
+        visible={Boolean(modelBindingDialog)}
+        title={modelBindingDialog?.title ?? ""}
+        message={modelBindingDialog?.message ?? ""}
+        terminalWidth={terminal.width}
+        terminalHeight={terminal.height}
+        restoreFocusRef={inputRef}
+        shouldRestoreFocus={!state.activeRun}
+        confirmLabel="新建 Thread"
+        cancelLabel="保留当前 Thread"
+        onConfirm={() => resolveModelBindingDialog(true)}
+        onCancel={() => resolveModelBindingDialog(false)}
       />
     </box>
   )
@@ -769,23 +1050,14 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-/** 将手动压缩响应收敛为不泄漏归档原文的紧凑时间线通知。 */
-function contextCompactNotice(value: ContextCompactResult): string {
-  const context = value.context && typeof value.context === "object"
-    ? value.context as Record<string, unknown>
-    : {}
-  const action = typeof context.action === "string" ? context.action : "unknown"
-  const estimated = typeof context.estimated_tokens === "number" ? context.estimated_tokens : undefined
-  const cap = typeof context.input_cap_tokens === "number" ? context.input_cap_tokens : undefined
-  const artifacts = Array.isArray(context.artifact_ids) ? context.artifact_ids.length : 0
-  if (value.compacted === true) {
-    const budget = estimated !== undefined && cap !== undefined ? ` ${estimated}/${cap}` : ""
-    return `上下文已压缩${budget}${artifacts ? `，归档 ${artifacts} 项` : ""}。`
-  }
-  const reason = typeof context.miss_reason === "string" ? `：${context.miss_reason}` : ""
-  return action === "manual_compaction_skipped"
-    ? `上下文无需压缩${reason}。`
-    : `上下文压缩未完成${reason}。`
+/** 将握手 capability 和即时 thread 状态收敛为 Registry 可重复使用的可用性上下文。 */
+function tuiCommandContext(runtime: TuiRuntime, state: ReturnType<typeof createInitialState>) {
+  return defaultCommandContext({
+    capabilities: runtime.capabilities,
+    hasThread: Boolean(state.threadId),
+    activeRun: Boolean(state.activeRun),
+    hasPendingInteraction: Boolean(state.pendingApproval || state.pendingQuestion),
+  })
 }
 
 /** 将不可信 RPC 摘要收敛为 TUI 需要的字段，避免字段缺失破坏 Slash 菜单。 */
@@ -873,4 +1145,64 @@ function filterThreads(threads: readonly ThreadPickerItem[], query: string): rea
   if (!needle) return threads
   return threads.filter(thread => [thread.firstMessage, thread.latestMessage]
     .some(value => value.toLowerCase().includes(needle)))
+}
+
+/** Profile 搜索同时覆盖稳定 ID、模型名和可展示的 Provider 标签。 */
+function filterModels(models: readonly ModelProfile[], query: string): readonly ModelProfile[] {
+  const needle = query.trim().toLowerCase()
+  if (!needle) return models
+  return models.filter(model => [model.id, model.model, model.provider_label]
+    .some(value => value.toLowerCase().includes(needle)))
+}
+
+/** Model Picker 行避免展示 endpoint 或凭据，只展示已脱敏的 Profile DTO。 */
+function modelPickerRow(model: ModelProfile, context: SearchPickerRenderContext): ReactNode {
+  const idWidth = context.compact
+    ? Math.max(16, context.width - 6)
+    : Math.max(16, Math.min(26, Math.floor(context.width * 0.28)))
+  const contextWindow = model.context_window_tokens >= 1_000
+    ? `${Math.round(model.context_window_tokens / 1_000)}k`
+    : String(model.context_window_tokens)
+  const detail = model.available
+    ? `${model.is_default ? "默认 · " : ""}${model.provider_label} · ${model.model} · ${contextWindow} · ${model.capabilities.join(",")}`
+    : `${model.is_default ? "默认 · " : ""}${model.provider_label} · 不可用：${model.unavailable_reason ?? "配置不可用"}`
+  const foreground = context.selected ? tuiTheme.background : model.available ? tuiTheme.primary : tuiTheme.muted
+  const detailForeground = context.selected ? tuiTheme.background : model.available ? tuiTheme.muted : tuiTheme.danger
+  return (
+    <>
+      <text width={idWidth} fg={foreground} wrapMode="none" overflow="hidden">{model.id}</text>
+      {!context.compact ? <text flexGrow={1} fg={detailForeground} wrapMode="none" overflow="hidden">{detail}</text> : null}
+    </>
+  )
+}
+
+/** 将 MCP 添加结果格式化为时间线通知文本。 */
+function formatMcpAddResult(name: string, result: McpAddResult): string {
+  const lines = [`已添加 MCP 服务器 "${name}"`]
+  if (result.connected) {
+    lines.push(`连接成功，加载 ${result.tool_names.length} 个工具`)
+    if (result.tool_names.length > 0) {
+      lines.push(`工具：${result.tool_names.join(", ")}`)
+    }
+  } else {
+    lines.push("连接失败，配置已保存，重启后自动重试")
+    if (result.error) lines.push(`错误：${result.error}`)
+  }
+  return lines.join("\n")
+}
+
+/** 将 MCP 状态查询结果格式化为时间线通知文本。 */
+function formatMcpStatus(result: McpStatusResult): string {
+  if (!result.servers.length) {
+    return "未配置 MCP 服务器\n在 ~/.harness/config.toml 的 [[mcp.servers]] 中添加配置。"
+  }
+  const lines: string[] = ["MCP 服务器状态", ""]
+  for (const server of result.servers) {
+    const icon = server.status === "connected" ? "●" : server.status === "failed" ? "✗" : "○"
+    lines.push(`${icon} ${server.name}  [${server.transport}]  ${server.status}`)
+    if (server.error) lines.push(`  错误：${server.error}`)
+    if (server.tool_names.length) lines.push(`  工具：${server.tool_names.join(", ")}`)
+  }
+  lines.push("", `共 ${result.servers.length} 个服务器，${result.total_tools} 个工具`)
+  return lines.join("\n")
 }

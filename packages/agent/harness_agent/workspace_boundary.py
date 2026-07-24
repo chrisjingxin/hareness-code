@@ -66,12 +66,18 @@ class WorkspacePathPolicy:
             raise ValueError(f"{field} 不能包含 '..' 路径段")
 
     def _require_path_string(self, value: object, *, tool_name: str, field: str) -> Path:
-        """规范化输入类型，并在进入 Path 前拒绝 Windows/UNC 路径歧义。"""
+        """规范化输入类型，拒绝目录穿越和 UNC 设备路径。
+
+        Windows 盘符绝对路径（如 ``D:\\code``）在 Windows 宿主上是合法工作区
+        路径，containment 由 ``_resolve_inside_workspace`` 的 canonical 比较负责；
+        此处只拒绝 UNC 路径，避免 ``\\\\server\\share`` 和 ``\\?\\`` 设备命名空间
+        绕过 ``resolve`` 的 containment 检查。
+        """
         if not isinstance(value, str) or not value:
             raise ValueError(f"{field} 必须是非空字符串")
         normalized = value.replace("\\", "/")
-        if _WINDOWS_ABSOLUTE_PATH.match(value) or value.startswith("\\"):
-            raise ValueError("不支持 Windows 或 UNC 文件路径")
+        if value.startswith("\\") or normalized.startswith("//"):
+            raise ValueError("不支持 UNC 文件路径")
         if ".." in PurePosixPath(normalized).parts:
             raise ValueError("文件路径不能包含 '..' 路径段")
         return Path(value)

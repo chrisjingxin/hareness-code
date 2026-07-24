@@ -45,6 +45,25 @@ def test_path_policy_rejects_relative_and_parent_paths(tmp_path: Path, candidate
         WorkspacePathPolicy(tmp_path).validate_direct_path(candidate, tool_name="write_file")
 
 
+def test_path_policy_allows_windows_drive_path_format(tmp_path: Path):
+    """Windows 盘符绝对路径格式不应在字符串校验阶段被拒绝。"""
+    policy = WorkspacePathPolicy(tmp_path)
+    # 只验证字符串校验层不因 Windows 盘符格式拒绝；containment 由 resolve 保证。
+    path = policy._require_path_string(
+        "D:\\code\\file.py", tool_name="read_file", field="path"
+    )
+    assert isinstance(path, Path)
+
+
+@pytest.mark.parametrize("candidate", ["\\\\server\\share\\file", "//server/share/file"])
+def test_path_policy_rejects_unc_paths(tmp_path: Path, candidate: str):
+    """UNC 路径和网络设备命名空间必须在字符串校验阶段被拒绝。"""
+    with pytest.raises(ValueError, match="UNC"):
+        WorkspacePathPolicy(tmp_path)._require_path_string(
+            candidate, tool_name="read_file", field="path"
+        )
+
+
 def test_path_policy_rejects_external_and_symlink_escape(tmp_path: Path):
     """canonical 路径在工作区外或经符号链接逃逸时必须被拒绝。"""
     policy = WorkspacePathPolicy(tmp_path)

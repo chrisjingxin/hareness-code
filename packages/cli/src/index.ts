@@ -2,7 +2,7 @@
 /** za38 CLI 启动层：管理 Python sidecar 生命周期并选择 TUI 或无头执行模式。 */
 import { execFileSync, spawn } from "node:child_process"
 import { existsSync, statSync } from "node:fs"
-import { resolve } from "node:path"
+import { delimiter, resolve } from "node:path"
 import { PROTOCOL_VERSION, type EventEnvelope, type InitializeResult } from "@za38/protocol"
 
 import { parseArgs, type Command } from "./args"
@@ -49,7 +49,7 @@ async function startAgent(command: Command): Promise<RunningAgent> {
     env: {
       ...process.env,
       ...sandboxEnvironment,
-      PYTHONPATH: process.env.PYTHONPATH ? `${sourceAgent}:${process.env.PYTHONPATH}` : sourceAgent,
+      PYTHONPATH: process.env.PYTHONPATH ? `${sourceAgent}${delimiter}${process.env.PYTHONPATH}` : sourceAgent,
     },
     stdio: ["pipe", "pipe", "pipe"],
   })

@@ -37,6 +37,8 @@ test("从脱敏初始化结果提取可展示的运行上下文", () => {
     executionMode: "remote-sandbox",
     sandboxProvider: "corp",
     approvalMode: "default",
+    approvalModeWarning: undefined,
+    capabilities: [],
   })
   expect(workspaceLabel(runtime.workspace)).toBe("za38-cli")
   expect(executionStatusLabel(runtime)).toBe("远端沙箱 · corp")
@@ -100,5 +102,6 @@ test("/status 汇总真实的本机后端和英文审批模式", () => {
     "模型    deepseek-v4-flash",
     "执行    本机执行 · 未隔离",
     "审批    default",
+    "MCP     未配置",
   ].join("\n"))
 })
