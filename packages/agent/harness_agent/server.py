@@ -1130,7 +1130,7 @@ class JsonRpcServer:
         requested_primary_profile: str | None = None,
         legacy_model_profile: str | None = None,
     ) -> tuple[ThreadModelBindings | None, dict[str, object], dict[str, object]]:
-        """按请求、最近 Run、legacy 绑定和配置默认顺序解析一次 Run 的主模型。"""
+        """按请求、最近 Run、legacy 绑定和全新 Thread 默认值顺序解析一次 Run 的主模型。"""
         if (
             requested_primary_profile is not None
             and legacy_model_profile is not None
@@ -1178,7 +1178,9 @@ class JsonRpcServer:
                 bindings = router.from_record(record)
                 source = "legacy-binding"
             else:
-                bindings = router.resolve_run()
+                # 全新 Thread 必须使用 models.default_profile；roles.executor 仅保留给
+                # legacy/多角色兼容映射，不能覆盖用户刚通过 /model 写入的未来默认值。
+                bindings = router.resolve_run(config.model_catalog.default_profile)
                 source = "config-default"
         primary = bindings.runtime_primary()
         return (

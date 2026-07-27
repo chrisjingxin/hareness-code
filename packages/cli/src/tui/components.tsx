@@ -412,7 +412,7 @@ function ThreadRuntimeLine(props: { runtime: TuiRuntime; state: TuiState }) {
       <text fg={statusColor(props.state.status)}>□</text>
       <text fg={tuiTheme.primary}>Harness Code</text>
       <text fg={tuiTheme.muted}>·</text>
-      <text fg={props.runtime.modelConfigured ? tuiTheme.text : tuiTheme.warning}>{modelLabel(props.runtime)}</text>
+      <text fg={props.runtime.modelConfigured ? tuiTheme.text : tuiTheme.warning}>模型 {modelLabel(props.runtime)}</text>
       <text fg={tuiTheme.muted}>· {props.state.status}</text>
     </box>
   )
@@ -648,7 +648,7 @@ function threadPickerRow(thread: ThreadPickerItem, context: SearchPickerRenderCo
   )
 }
 
-/** 渲染输入框下方的配置摘要：模型靠左、审批模式靠右，避免重复品牌和拥挤折行。 */
+/** 渲染输入框下方的配置摘要，只展示当前 Thread 的模型选择。 */
 function RuntimeMeta(props: { runtime: TuiRuntime; variant: "home" | "thread"; terminalWidth: number }) {
   // 首页 composer 最大宽度固定为 75 列；thread 则以可用终端宽度估算。模型字段
   // 是唯一可能来自企业配置的长文本，因此只截断它，审批模式始终保持可见。
@@ -666,7 +666,7 @@ function RuntimeMeta(props: { runtime: TuiRuntime; variant: "home" | "thread"; t
   return (
     <box flexDirection="column" paddingTop={1} paddingBottom={1}>
       <box width="100%" flexDirection="row" justifyContent="space-between" gap={2}>
-        <text fg={props.runtime.modelConfigured ? tuiTheme.text : tuiTheme.warning}>{model}</text>
+        <text fg={props.runtime.modelConfigured ? tuiTheme.text : tuiTheme.warning}>模型：{model}</text>
         <text fg={props.runtime.approvalMode === "yolo" ? tuiTheme.warning : tuiTheme.muted}>{approvalModeLabel(props.runtime)}</text>
       </box>
       {warning ? <text fg={tuiTheme.warning}>{warning}</text> : null}
@@ -741,9 +741,13 @@ function useSpinner(active: boolean, interval: number): string {
 /** 将运行时模型配置转换为简短状态文案。 */
 function modelLabel(runtime: TuiRuntime): string {
   if (!runtime.modelConfigured) return "模型未配置"
-  const name = runtime.modelName ?? "已配置模型"
-  const profile = runtime.modelProfileId ? `${runtime.modelProfileId} · ` : ""
-  return `${profile}${name}${runtime.modelSelectionPending ? "（下一次运行）" : ""}`
+  return modelReference(runtime.modelProfileId, runtime.modelName) ?? "已配置模型"
+}
+
+/** 用同一格式输出脱敏 Profile ID 与模型名。 */
+function modelReference(profileId: string | undefined, modelName: string | undefined): string | undefined {
+  if (!profileId && !modelName) return undefined
+  return `${profileId ? `${profileId} · ` : ""}${modelName ?? "已配置模型"}`
 }
 
 /** 按字符数截断普通预览文本。 */

@@ -31,6 +31,8 @@ export type SearchPickerProps<T> = {
   searchPlaceholder: string
   emptyMessage: string
   loadingMessage?: string
+  /** 领域 Picker 可选的底部说明；用于表达选择后的持久化语义。 */
+  footer?: ReactNode
   itemKey: (item: T) => string
   renderItem: (item: T, context: SearchPickerRenderContext) => ReactNode
   onSearch: (query: string) => void
@@ -128,7 +130,7 @@ export function SearchPicker<T>(props: SearchPickerProps<T>) {
                   onContentChange={() => props.onSearch(props.searchRef.current?.plainText ?? "")}
                   onSubmit={() => {
                     const selected = props.items[selectedIndex]
-                    if (selected) props.onSelect(selected)
+                    if (!props.loading && selected) props.onSelect(selected)
                   }}
                 />
               </box>
@@ -153,6 +155,11 @@ export function SearchPicker<T>(props: SearchPickerProps<T>) {
                 <text fg={tuiTheme.muted}>{props.emptyMessage}</text>
               </box>
             )}
+            {props.footer ? (
+              <box paddingLeft={4} paddingRight={4} paddingBottom={2}>
+                <text fg={tuiTheme.muted} wrapMode="none" overflow="hidden">{props.footer}</text>
+              </box>
+            ) : null}
           </box>
         )
       }}

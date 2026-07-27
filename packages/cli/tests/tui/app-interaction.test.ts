@@ -492,7 +492,7 @@ test("/skills 打开可搜索选择器，并把选中的 Skill 附到下一次�
   }
 })
 
-test("旧协议 /model [query] 预筛选 Picker，并将确认的 Profile 带到下一新 Thread", async () => {
+test("未协商 config.write 时 /model 保留当前选择并提示未来默认未同步", async () => {
   const { client, requests } = createMockClient()
   let setup: Awaited<ReturnType<typeof testRender>>
   try {
@@ -519,9 +519,9 @@ test("旧协议 /model [query] 预筛选 Picker，并将确认的 Profile 带到
       await Bun.sleep(0)
       await setup.flush()
     })
-    frame = await setup.waitForFrame(value => value.includes("将在下一次新 Thread 运行生效"))
+    frame = await setup.waitForFrame(value => value.includes("未来新 Thread 默认未更新") && value.includes("config.write"))
     expect(frame).toContain("pro-model")
-    expect(frame).toContain("pro · pro-model（下一次运行）")
+    expect(frame).toContain("模型：pro · pro-model")
 
     await act(async () => {
       await setup.mockInput.typeText("使用选定模型")
@@ -579,10 +579,10 @@ test("旧协议 /model 对已绑定 Thread 显示不可变说明，并通过新�
   }
 })
 
-test("models.select 在当前 Thread 选择模型，并在下一次 run.start 携带选择", async () => {
-  const { client, requests } = createMockClient()
+test("models.select 自动同步未来默认模型，并在下一次 run.start 携带当前 Thread 选择", async () => {
+  const { client, requests, configCalls } = createMockClient()
   let setup: Awaited<ReturnType<typeof testRender>>
-  const selectableRuntime: TuiRuntime = { ...runtime, capabilities: ["models.read", "models.select"] }
+  const selectableRuntime: TuiRuntime = { ...runtime, capabilities: ["models.read", "models.select", "config.write"] }
   try {
     await act(async () => {
       setup = await testRender(createElement(Za38Tui, {
@@ -607,8 +607,9 @@ test("models.select 在当前 Thread 选择模型，并在下一次 run.start �
       await Bun.sleep(0)
       await setup.flush()
     })
-    let frame = await setup.waitForFrame(value => value.includes("当前 Thread 的下一次运行生效"))
-    expect(frame).toContain("pro · pro-model（下一次运行）")
+    let frame = await setup.waitForFrame(value => value.includes("后续新 Thread 默认模型已同步"))
+    expect(frame).toContain("模型：pro · pro-model")
+    expect(configCalls).toEqual(["config.details", "config.preview", "config.commit"])
 
     await act(async () => {
       await setup.mockInput.typeText("使用 pro 继续")
@@ -663,6 +664,124 @@ test("models.select 在当前 Thread 选择模型，并在下一次 run.start �
     })
     frame = await setup.waitForFrame(value => value.includes("pro · pro-model") && !value.includes("（下一次运行）"))
     expect(frame).toContain("pro · pro-model")
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+  }
+})
+
+test("/model 选择已是默认的 Profile 时不写配置文件", async () => {
+  const { client, configCalls } = createMockClient()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  const selectableRuntime: TuiRuntime = { ...runtime, capabilities: ["models.read", "models.select", "config.write"] }
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        client,
+        runtime: selectableRuntime,
+        onRequestExit: () => undefined,
+      }), { width: 100, height: 30 })
+      await setup.flush()
+    })
+    await act(async () => {
+      await setup.mockInput.typeText("/model fast")
+      setup.mockInput.pressEnter()
+      await Bun.sleep(0)
+      await setup.flush()
+    })
+    await setup.waitForFrame(value => value.includes("选择下一次新 Thread 运行的模型") && value.includes("fast-model"))
+    await act(async () => {
+      setup.mockInput.pressEnter()
+      await Bun.sleep(0)
+      await setup.flush()
+    })
+    await setup.waitForFrame(value => value.includes("后续新 Thread 默认模型已同步"))
+    expect(configCalls).toEqual(["config.details"])
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+  }
+})
+
+test("/model 保存中阻止重复选择，完成后恢复 Composer", async () => {
+  const { client, requests, configCalls, releaseConfigDetails } = createMockClient({ holdConfigDetails: true })
+  let setup: Awaited<ReturnType<typeof testRender>>
+  const selectableRuntime: TuiRuntime = { ...runtime, capabilities: ["models.read", "models.select", "config.write"] }
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        client,
+        runtime: selectableRuntime,
+        onRequestExit: () => undefined,
+      }), { width: 100, height: 30 })
+      await setup.flush()
+    })
+    await act(async () => {
+      await setup.mockInput.typeText("/model pro")
+      setup.mockInput.pressEnter()
+      await Bun.sleep(0)
+      await setup.flush()
+    })
+    await setup.waitForFrame(value => value.includes("选择下一次新 Thread 运行的模型") && value.includes("pro-model"))
+    await act(async () => {
+      setup.mockInput.pressEnter()
+      await setup.flush()
+    })
+    const saving = await setup.waitForFrame(value => value.includes("正在同步后续新 Thread 默认模型"))
+    expect(saving).toContain("选择后同时更新后续新 Thread 默认模型")
+    expect(configCalls).toEqual(["config.details"])
+
+    await act(async () => {
+      releaseConfigDetails()
+      await Bun.sleep(0)
+      await setup.flush()
+    })
+    await setup.waitForFrame(value => value.includes("后续新 Thread 默认模型已同步"))
+    await act(async () => {
+      await setup.mockInput.typeText("保存后继续")
+      setup.mockInput.pressEnter()
+      await setup.flush()
+    })
+    expect(requests.at(-1)).toMatchObject({ message: "保存后继续", modelSelection: { primary_profile: "pro" } })
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+  }
+})
+
+test("配置写入被锁时 /model 保留当前 Thread 选择并报告安全错误", async () => {
+  const { client, requests } = createMockClient({ configErrorCode: "MANAGED_POLICY_LOCKED" })
+  let setup: Awaited<ReturnType<typeof testRender>>
+  const selectableRuntime: TuiRuntime = { ...runtime, capabilities: ["models.read", "models.select", "config.write"] }
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        client,
+        runtime: selectableRuntime,
+        onRequestExit: () => undefined,
+      }), { width: 100, height: 30 })
+      await setup.flush()
+    })
+    await act(async () => {
+      await setup.mockInput.typeText("/model pro")
+      setup.mockInput.pressEnter()
+      await Bun.sleep(0)
+      await setup.flush()
+    })
+    await setup.waitForFrame(value => value.includes("选择下一次新 Thread 运行的模型") && value.includes("pro-model"))
+    await act(async () => {
+      setup.mockInput.pressEnter()
+      await Bun.sleep(0)
+      await setup.flush()
+    })
+    const frame = await setup.waitForFrame(value => value.includes("未来新 Thread 默认未更新") && value.includes("默认模型字段受受管策略锁定"))
+    expect(frame).toContain("模型：pro · pro-model")
+    await act(async () => {
+      await setup.mockInput.typeText("锁定后继续")
+      setup.mockInput.pressEnter()
+      await setup.flush()
+    })
+    expect(requests.at(-1)).toMatchObject({ message: "锁定后继续", modelSelection: { primary_profile: "pro" } })
   } finally {
     if (setup!) await act(async () => { setup.renderer.destroy() })
     client.destroy()
@@ -944,13 +1063,25 @@ async function sendAndFinish(
   })
 }
 
-function createMockClient(options: { cancelled?: boolean; compactError?: string; modelsError?: string } = {}) {
+function createMockClient(options: {
+  cancelled?: boolean
+  compactError?: string
+  modelsError?: string
+  configErrorCode?: string
+  holdConfigDetails?: boolean
+} = {}) {
   const stdout = new PassThrough()
   const stdin = new PassThrough()
   const client = new IpcClient(stdin, stdout)
   const requests: Array<{ message: string; threadId: string; runId: string; requestedSkill?: { id: string; args?: string }; modelProfile?: string; modelSelection?: { primary_profile: string } }> = []
   const compactThreadIds: string[] = []
   const cancelThreadIds: string[] = []
+  const configCalls: string[] = []
+  let defaultModelProfile = "fast"
+  let releaseConfigDetails = () => undefined
+  const configDetailsGate = options.holdConfigDetails
+    ? new Promise<void>(resolve => { releaseConfigDetails = resolve })
+    : undefined
   stdin.on("data", data => {
     for (const line of data.toString("utf8").split("\n")) {
       if (!line.trim()) continue
@@ -996,7 +1127,7 @@ function createMockClient(options: { cancelled?: boolean; compactError?: string;
               provider_label: "Fast Gateway",
               context_window_tokens: 128000,
               capabilities: ["tool-calling", "streaming"],
-              is_default: true,
+              is_default: defaultModelProfile === "fast",
               available: true,
               source: "user",
             }, {
@@ -1005,7 +1136,7 @@ function createMockClient(options: { cancelled?: boolean; compactError?: string;
               provider_label: "Pro Gateway",
               context_window_tokens: 256000,
               capabilities: ["tool-calling", "streaming", "vision"],
-              is_default: false,
+              is_default: defaultModelProfile === "pro",
               available: true,
               source: "user",
             }, {
@@ -1014,7 +1145,7 @@ function createMockClient(options: { cancelled?: boolean; compactError?: string;
               provider_label: "Offline Gateway",
               context_window_tokens: 128000,
               capabilities: ["tool-calling", "streaming"],
-              is_default: false,
+              is_default: defaultModelProfile === "offline",
               available: false,
               unavailable_reason: "API_KEY_MISSING",
               source: "user",
@@ -1036,6 +1167,73 @@ function createMockClient(options: { cancelled?: boolean; compactError?: string;
                 },
               },
             } : {}),
+          },
+        })}\n`)
+        continue
+      }
+      if (request.method === "config.details" && typeof request.id === "string") {
+        configCalls.push(request.method)
+        const respond = () => {
+          if (options.configErrorCode) {
+            stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32012, message: options.configErrorCode, data: { code: options.configErrorCode } } })}\n`)
+            return
+          }
+          stdout.write(`${JSON.stringify({
+            jsonrpc: "2.0",
+            id: request.id,
+            result: {
+              revision: "config-r1",
+              fields: [{
+                path: "models.default_profile",
+                value: defaultModelProfile,
+                source: "user",
+                editable: true,
+                unavailable_reason: null,
+                applies_to: "new-thread",
+              }],
+              immutable_fields: [],
+            },
+          })}\n`)
+        }
+        if (configDetailsGate) void configDetailsGate.then(respond)
+        else respond()
+        continue
+      }
+      if (request.method === "config.preview" && typeof request.id === "string") {
+        configCalls.push(request.method)
+        const changes = Array.isArray(request.params?.changes) ? request.params.changes : []
+        const change = changes[0] as Record<string, unknown> | undefined
+        if (options.configErrorCode) {
+          stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32012, message: options.configErrorCode, data: { code: options.configErrorCode } } })}\n`)
+          continue
+        }
+        stdout.write(`${JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: {
+            revision: "config-r1",
+            changes: [{ path: "models.default_profile", before: defaultModelProfile, after: change?.value }],
+            applies_to: ["new-thread"],
+          },
+        })}\n`)
+        continue
+      }
+      if (request.method === "config.commit" && typeof request.id === "string") {
+        configCalls.push(request.method)
+        const changes = Array.isArray(request.params?.changes) ? request.params.changes : []
+        const change = changes[0] as Record<string, unknown> | undefined
+        if (options.configErrorCode) {
+          stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32012, message: options.configErrorCode, data: { code: options.configErrorCode } } })}\n`)
+          continue
+        }
+        if (typeof change?.value === "string") defaultModelProfile = change.value
+        stdout.write(`${JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: {
+            revision: "config-r2",
+            changes: [{ path: "models.default_profile", before: "fast", after: defaultModelProfile }],
+            applies_to: ["new-thread"],
           },
         })}\n`)
         continue
@@ -1170,5 +1368,5 @@ function createMockClient(options: { cancelled?: boolean; compactError?: string;
       stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { accepted: true, thread_id: threadId, run_id: runId } })}\n`)
     }
   })
-  return { client, requests, compactThreadIds, cancelThreadIds }
+  return { client, requests, compactThreadIds, cancelThreadIds, configCalls, releaseConfigDetails }
 }

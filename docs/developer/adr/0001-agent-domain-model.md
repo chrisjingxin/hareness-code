@@ -146,6 +146,9 @@ interface ThreadExecutionSelection {
 
 - `/model` 的 MVP 只写 `rootModelProfileId`，仅影响根 Agent 的下一次 Run。
 - Picker 确认可先更新本地 UI；在 `run.start` 被服务端成功受理后，选择作为请求快照持久化。
+- ZC-079 的 `/model` 确认还会独立调用受控 Config Writer 更新用户级
+  `models.default_profile`，供未来新 Thread 使用；该写入失败不得回滚 ThreadSelection，
+  也不能改写 AgentDefinition、历史 Run 或 legacy 角色绑定。
 - 当前 Run、已启动的子 Agent 和历史 Run 均不被热切换。
 - 未显式选择的新 Thread 从配置默认/根 Agent默认值获得初始选择；配置默认不是 Thread
   的历史事实，也不会覆盖已恢复 Thread 的选择。
