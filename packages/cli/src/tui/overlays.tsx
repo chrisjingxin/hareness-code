@@ -4,6 +4,7 @@ import { RGBA, type OptimizedBuffer, type TextareaRenderable } from "@opentui/co
 import { useEffect, useRef, type ReactNode, type RefObject } from "react"
 
 import { tuiTheme } from "./theme"
+import { createScrollAcceleration } from "./scroll.js"
 
 /** SearchPicker 行渲染器可使用的稳定布局数据，未来 Model Picker 不需要重写终端尺寸逻辑。 */
 export type SearchPickerRenderContext = {
@@ -145,7 +146,7 @@ export function SearchPicker<T>(props: SearchPickerProps<T>) {
               </box>
             ) : props.items.length ? (
               props.items.length > maxRows ? (
-                <scrollbox height={rows} paddingLeft={1} paddingRight={1} paddingBottom={2} viewportOptions={{ paddingRight: 1 }}>{itemRows}</scrollbox>
+                <scrollbox height={rows} paddingLeft={1} paddingRight={1} paddingBottom={2} scrollAcceleration={createScrollAcceleration()} viewportOptions={{ paddingRight: 1 }}>{itemRows}</scrollbox>
               ) : <box flexDirection="column" paddingLeft={1} paddingRight={1} paddingBottom={2}>{itemRows}</box>
             ) : (
               <box paddingLeft={4} paddingRight={4} paddingBottom={2}>

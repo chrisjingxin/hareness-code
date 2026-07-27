@@ -31,6 +31,7 @@ import {
 } from "./prompt-history"
 import { resolveShortcut, type ScrollIntent } from "./shortcuts"
 import { registerCommonSyntaxParsers, shutdownCommonSyntaxClient } from "./syntax-parsers"
+import { win32InstallVtInputGuard } from "./terminal-win32"
 import { tuiTheme } from "./theme"
 import {
   appendNotice,
@@ -127,6 +128,7 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
   const terminal = useTerminalDimensions()
   const selectedModelProfile = models.find(model => model.id === threadModelSelection)
   const displayedModelProfile = selectedModelProfile ?? actualModelProfile
+  const displayedModelName = actualModelProfile?.model ?? threadModelSelection
   const supportsThreadModelSelection = runtime.capabilities?.includes("models.select") === true
   const displayedRuntime: TuiRuntime = displayedModelProfile
     ? {
@@ -586,6 +588,15 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     setSkillPicker({ visible: false, loading: false, query: "", selectedIndex: 0 })
   }, [clearDraft])
 
+  /** 提交消息或切换 thread 后主动滚到底部，确保用户看到最新内容。 */
+  const scrollToBottom = useCallback(() => {
+    setTimeout(() => {
+      const scroll = conversationScrollRef.current
+      if (!scroll || scroll.isDestroyed) return
+      scroll.scrollTo(scroll.scrollHeight)
+    }, 50)
+  }, [])
+
   /** 读取选中的 thread 后一次性替换状态，旧 thread 的 sequence 与草稿都不能残留。 */
   const selectThread = useCallback(async (thread: ThreadPickerItem) => {
     if (openingThreadRef.current) return
@@ -616,13 +627,14 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
       setThreadModelSelection(recoveredSelection)
       setActualModelProfile(actualModel)
       commit(() => restoreThread(opened.threadId, opened.messages))
+      scrollToBottom()
       setThreadPicker({ visible: false, loading: false, query: "", selectedIndex: 0 })
     } catch (error) {
       setThreadPicker(current => ({ ...current, loading: false, error: `Thread 恢复失败：${errorMessage(error)}` }))
     } finally {
       openingThreadRef.current = false
     }
-  }, [clearDraft, client, commit])
+  }, [clearDraft, client, commit, scrollToBottom])
 
   /** 将可用 Profile 写入当前 Thread 的下一次 Run 选择；不修改静态配置。 */
   const selectModel = useCallback((model: ModelProfile) => {
@@ -735,8 +747,9 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     promptHistoryRef.current = nextHistory
     promptHistoryCursorRef.current = undefined
     void persistPromptHistory(previousHistory, nextHistory, promptHistoryFile)
+    scrollToBottom()
     void sendAgentMessage(message)
-  }, [clearDraft, commit, draft, executeSlashCommand, respondQuestion, sendAgentMessage])
+  }, [clearDraft, commit, draft, executeSlashCommand, respondQuestion, scrollToBottom, sendAgentMessage])
 
   /** 按行、半页或跳转首尾滚动当前 thread；全局快捷键与空 composer 方向键共用。 */
   const scrollConversation = useCallback((intent: ScrollIntent) => {
@@ -977,7 +990,7 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
 
   return (
     <box position="relative" flexGrow={1}>
-      {isHomeState(state) ? <HomeView {...viewProps} /> : <ThreadView {...viewProps} />}
+      {isHomeState(state) ? <HomeView {...viewProps} /> : <ThreadView {...viewProps} modelName={displayedModelName} />}
       <SkillPicker
         visible={skillPicker.visible}
         loading={skillPicker.loading}
@@ -1079,12 +1092,16 @@ export async function runTui(options: TuiOptions): Promise<void> {
     openConsoleOnError: false,
     useMouse: true,
   })
+  // setupTerminal 内部 setRawMode(true) 会重置 console mode；
+  // 在 renderer 就绪后安装守护，持续保持 conhost 的 VT 输入标志以支持鼠标滚轮。
+  const uninstallVtGuard = win32InstallVtInputGuard()
   const root = createRoot(renderer)
   await new Promise<void>(resolve => {
     let closed = false
     const close = () => {
       if (closed) return
       closed = true
+      uninstallVtGuard?.()
       root.unmount()
       void shutdownCommonSyntaxClient().finally(() => {
         renderer.destroy()
