@@ -89,19 +89,27 @@ class HarnessVirtualBackend:
         return self.ls(path)
 
     def glob(self, _pattern: str, _path: str | None = None) -> GlobResult:
-        """拒绝虚拟命名空间搜索。"""
-        return GlobResult(error="/.harness cannot be searched")
+        """虚拟命名空间不支持 glob 搜索，返回空结果。
+
+        返回空 matches 而非 error，避免 CompositeBackend 在聚合多后端
+        搜索结果时将 error 传播为整体失败。
+        """
+        return GlobResult(matches=[])
 
     async def aglob(self, pattern: str, path: str | None = None) -> GlobResult:
-        """异步搜索入口保持与同步拒绝一致。"""
+        """异步搜索入口保持与同步行为一致。"""
         return self.glob(pattern, path)
 
     def grep(self, _pattern: str, _path: str | None = None, _glob: str | None = None) -> GrepResult:
-        """拒绝虚拟命名空间全文检索。"""
-        return GrepResult(error="/.harness cannot be searched")
+        """虚拟命名空间不支持全文检索，返回空结果。
+
+        返回空 matches 而非 error，避免 CompositeBackend 在聚合多后端
+        搜索结果时将 error 传播为整体失败。
+        """
+        return GrepResult(matches=[])
 
     async def agrep(self, pattern: str, path: str | None = None, glob: str | None = None) -> GrepResult:
-        """异步全文检索入口保持与同步拒绝一致。"""
+        """异步全文检索入口保持与同步行为一致。"""
         return self.grep(pattern, path, glob)
 
     def write(self, _file_path: str, _content: str) -> WriteResult:

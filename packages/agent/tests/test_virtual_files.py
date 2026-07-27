@@ -39,7 +39,10 @@ async def test_virtual_files_read_skills_and_thread_scoped_history(tmp_path: Pat
     assert history.file_data and history.file_data["content"] == "二\n"
     assert (await backend.aread("/.harness/history/not-real.md")).error
     assert backend.write("/.harness/history/x.md", "no").error
-    assert backend.glob("**/*").error
+    # glob/grep 返回空结果而非 error，避免 CompositeBackend 聚合时传播错误。
+    glob_result = backend.glob("**/*")
+    assert not glob_result.error
+    assert glob_result.matches == []
 
     other = HarnessVirtualBackend(registry=registry, thread_id="thread-b", thread_store=store)
     assert (await other.aread(f"/.harness/history/{artifact.artifact_id}.md")).error
@@ -81,7 +84,7 @@ async def test_run_scoped_virtual_backend_isolates_shared_graph_history(tmp_path
         )
 
     factory = run_scoped_virtual_backend_factory(
-        LocalShellBackend(root_dir=workspace, virtual_mode=False),
+        LocalShellBackend(root_dir=workspace, virtual_mode=True),
         registry=registry,
         thread_store=store,
     )
