@@ -104,6 +104,7 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
   const [modelPicker, setModelPicker] = useState<ModelPickerState>({ visible: false, loading: false, query: "", selectedIndex: 0 })
   const [models, setModels] = useState<readonly ModelProfile[]>([])
   const [pendingModelProfile, setPendingModelProfile] = useState<string | undefined>(undefined)
+  const [displayedModelProfile, setDisplayedModelProfile] = useState<ModelProfile | undefined>(undefined)
   const [modelBindingDialog, setModelBindingDialog] = useState<ModelBindingDialog | undefined>(undefined)
   const [commandDialog, setCommandDialog] = useState<CommandDialog | undefined>(undefined)
   const [threads, setThreads] = useState<readonly ThreadPickerItem[]>([])
@@ -124,6 +125,15 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
   const initialResumeRef = useRef(resume === true)
   const openingThreadRef = useRef(false)
   const terminal = useTerminalDimensions()
+  const displayedRuntime: TuiRuntime = displayedModelProfile
+    ? {
+      ...runtime,
+      modelName: displayedModelProfile.model,
+      modelProfileId: displayedModelProfile.id,
+      modelSelectionPending: pendingModelProfile === displayedModelProfile.id,
+      modelConfigured: true,
+    }
+    : runtime
 
   /** 提交不可变状态转换；长生命周期 IPC 回调通过 ref 读取最新状态。 */
   const commit = useCallback((transition: (current: TuiState) => TuiState) => {
@@ -358,6 +368,7 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
   /** 取消模型选择会回到配置默认值，避免旧的待绑定选择在后续输入中意外生效。 */
   const closeModelPicker = useCallback(() => {
     setPendingModelProfile(undefined)
+    setDisplayedModelProfile(undefined)
     setModelPicker(current => ({ ...current, visible: false, loading: false, error: undefined }))
   }, [])
 
@@ -384,11 +395,13 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
       case "local-action":
         if (result.action === "clear-thread") {
           setPendingModelProfile(undefined)
+          setDisplayedModelProfile(undefined)
           commit(clearThread)
           return
         }
         if (await cancelActiveRun({ exitOnRepeatedCancellation: false })) {
           setPendingModelProfile(undefined)
+          setDisplayedModelProfile(undefined)
           commit(clearThread)
         } else {
           commit(current => appendNotice(current, "未能取消当前任务，已保留当前 thread。请等待任务结束后重试。"))
@@ -495,12 +508,12 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
   const executeSlashCommand = useCallback((command: SlashCommand) => {
     const current = stateRef.current
     void applyCommandResult(dispatchSlashCommand(command, {
-      commandContext: tuiCommandContext(runtime, current),
+      commandContext: tuiCommandContext(displayedRuntime, current),
       threadId: current.threadId,
-      runtimeStatus: runtimeStatusSummary(runtime),
-      versionSummary: `za38-cli ${runtime.cliVersion} · JSON-RPC v2`,
+      runtimeStatus: runtimeStatusSummary(displayedRuntime),
+      versionSummary: `za38-cli ${displayedRuntime.cliVersion} · JSON-RPC v2`,
     }))
-  }, [applyCommandResult, runtime])
+  }, [applyCommandResult, displayedRuntime])
 
   /** 确认框仅保存 Dispatcher 返回的后续动作，取消时不改变当前 thread。 */
   const resolveCommandDialog = useCallback((confirmed: boolean) => {
@@ -560,10 +573,19 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     setThreadPicker(current => ({ ...current, loading: true, error: undefined }))
     try {
       const opened = threadOpenResult(await client.openThread(thread.threadId))
+      let boundModel: ModelProfile | undefined
+      try {
+        const result = await client.listModels(opened.threadId)
+        boundModel = result.thread_binding?.roles.executor ?? result.thread_binding?.roles.primary
+      } catch {
+        // 模型绑定读取失败不阻断历史恢复；此时回退到初始化摘要，避免误报实际模型。
+      }
       clearDraft()
       setSelectedSkill(undefined)
       setExpandedTools(new Set())
       setShowToolDetails(false)
+      setPendingModelProfile(undefined)
+      setDisplayedModelProfile(boundModel)
       commit(() => restoreThread(opened.threadId, opened.messages))
       setThreadPicker({ visible: false, loading: false, query: "", selectedIndex: 0 })
     } catch (error) {
@@ -583,6 +605,7 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
       return
     }
     setPendingModelProfile(model.id)
+    setDisplayedModelProfile(model)
     // 选择与取消不同：确认后保留 pending 状态，直到下一新 Thread 成功启动或 /new 清理它。
     setModelPicker(current => ({ ...current, visible: false, loading: false, error: undefined }))
     commit(current => appendNotice(current, `已选择 ${model.provider_label} · ${model.model}；将在下一条新 Thread 中生效。`))
@@ -593,6 +616,7 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     setModelBindingDialog(undefined)
     if (!createNewThread) return
     setPendingModelProfile(undefined)
+    setDisplayedModelProfile(undefined)
     commit(clearThread)
   }, [commit])
 
@@ -736,7 +760,7 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
   }, [commandDialog, commandMenu.visible, modelBindingDialog, modelPicker.visible, navigatePromptHistory, scrollConversation, skillPicker.visible, threadPicker.visible])
 
   useKeyboard(key => {
-    const commandOptions = findCommandMenuItems(draft, skills, tuiCommandContext(runtime, stateRef.current))
+    const commandOptions = findCommandMenuItems(draft, skills, tuiCommandContext(displayedRuntime, stateRef.current))
     const action = resolveShortcut(key, {
       commandDialogVisible: Boolean(commandDialog || modelBindingDialog),
       skillPickerVisible: skillPicker.visible,
@@ -899,7 +923,7 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
   }, [])
 
   const viewProps = {
-    runtime,
+    runtime: displayedRuntime,
     state,
     terminalWidth: terminal.width,
     terminalHeight: terminal.height,
@@ -910,7 +934,7 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     onComposerKeyDown: handleComposerKeyDown,
     onSubmit: handleSubmit,
     commandMenu,
-    commandOptions: findCommandMenuItems(draft, skills, tuiCommandContext(runtime, state)),
+    commandOptions: findCommandMenuItems(draft, skills, tuiCommandContext(displayedRuntime, state)),
     onSelectCommand: selectCommandMenuItem,
     onHoverCommand: (selectedIndex: number) => setCommandMenu(current => ({ ...current, selectedIndex })),
     selectedSkill,

@@ -737,7 +737,10 @@ function useSpinner(active: boolean, interval: number): string {
 
 /** 将运行时模型配置转换为简短状态文案。 */
 function modelLabel(runtime: TuiRuntime): string {
-  return runtime.modelConfigured ? (runtime.modelName ?? "已配置模型") : "模型未配置"
+  if (!runtime.modelConfigured) return "模型未配置"
+  const name = runtime.modelName ?? "已配置模型"
+  const profile = runtime.modelProfileId ? `${runtime.modelProfileId} · ` : ""
+  return `${profile}${name}${runtime.modelSelectionPending ? "（待新 Thread）" : ""}`
 }
 
 /** 按字符数截断普通预览文本。 */

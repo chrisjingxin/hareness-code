@@ -521,6 +521,7 @@ test("/model [query] 预筛选 Picker，并将确认的 Profile 仅带到下一�
     })
     frame = await setup.waitForFrame(value => value.includes("将在下一条新 Thread 中生效"))
     expect(frame).toContain("pro-model")
+    expect(frame).toContain("pro · pro-model（待新 Thread）")
 
     await act(async () => {
       await setup.mockInput.typeText("使用选定模型")
@@ -528,6 +529,8 @@ test("/model [query] 预筛选 Picker，并将确认的 Profile 仅带到下一�
       await setup.flush()
     })
     expect(requests.at(-1)).toMatchObject({ message: "使用选定模型", modelProfile: "pro" })
+    frame = await setup.waitForFrame(value => value.includes("pro · pro-model") && !value.includes("（待新 Thread）"))
+    expect(frame).toContain("pro · pro-model")
   } finally {
     if (setup!) await act(async () => { setup.renderer.destroy() })
     client.destroy()
