@@ -228,7 +228,7 @@ class McpConnectionManager:
         try:
             from langchain_mcp_adapters.client import MultiServerMCPClient
 
-            client = MultiServerMCPClient({config.name: connection})
+            client = MultiServerMCPClient({config.name: connection}, tool_name_prefix=True)
             new_tools = await asyncio.wait_for(
                 client.get_tools(),
                 timeout=config.timeout_seconds,
@@ -298,7 +298,7 @@ class McpConnectionManager:
             return
 
         try:
-            self._client = MultiServerMCPClient(connections)
+            self._client = MultiServerMCPClient(connections, tool_name_prefix=True)
             self._tools = await asyncio.wait_for(
                 self._client.get_tools(),
                 timeout=max(c.timeout_seconds for c in self._configs),
