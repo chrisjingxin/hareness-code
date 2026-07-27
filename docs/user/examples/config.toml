@@ -31,8 +31,8 @@ X-Client-Name = "harness-code"
 [models.profiles.fast.headers_env]
 X-Enterprise-Tenant = "HARNESS_TENANT"
 
-# 可选的更强 Profile。/model pro 会在下一新 Thread 首次运行时选择它，
-# 不会修改 TOML，也不能热切换已绑定 Thread。
+# 可选的更强 Profile。空闲 Thread 中 /model pro 会让下一次 Run 使用它；
+# 不会修改 TOML，也不会热切换已经开始的 Run。
 # [models.profiles.pro]
 # provider = "openai-compatible"
 # provider_label = "Enterprise Pro"

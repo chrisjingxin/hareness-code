@@ -39,6 +39,23 @@ test("Peer 在首次 run.start 中携带待绑定 model_profile", async () => {
   expect(requests[0].params).toEqual({ message: "使用 pro", thread_id: "t", run_id: "r", model_profile: "pro" })
 })
 
+test("Peer 在每次 run.start 中携带 Thread 模型选择", async () => {
+  const { client, stdin, stdout } = peer()
+  const requests: any[] = []
+  stdin.on("data", data => {
+    const message = JSON.parse(data.toString())
+    requests.push(message)
+    stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { thread_id: "t", run_id: "r", accepted: true } }) + "\n")
+  })
+  await client.startRun("继续使用 pro", "t", "r", undefined, undefined, { primary_profile: "pro" })
+  expect(requests[0].params).toEqual({
+    message: "继续使用 pro",
+    thread_id: "t",
+    run_id: "r",
+    model_selection: { primary_profile: "pro" },
+  })
+})
+
 test("Peer 处理半帧、多帧和统一 event", async () => {
   const { client, stdout } = peer()
   const events: any[] = []

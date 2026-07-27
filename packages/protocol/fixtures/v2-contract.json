@@ -31,6 +31,35 @@
     {
       "kind": "event",
       "value": {
+        "event_id": "event-model-started",
+        "type": "run.started",
+        "thread_id": "thread-1",
+        "run_id": "run-1",
+        "sequence": 2,
+        "timestamp_ms": 2,
+        "payload": {
+          "resumed": false,
+          "runtime_profile_id": "123456789abc",
+          "primary_model": {
+            "profile": {
+              "id": "pro",
+              "model": "pro-model",
+              "provider_label": "Pro Gateway",
+              "context_window_tokens": 256000,
+              "capabilities": ["tool-calling", "streaming"],
+              "is_default": false,
+              "available": true,
+              "source": "user"
+            },
+            "source": "thread-primary",
+            "runtime_profile_id": "123456789abc"
+          }
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "value": {
         "event_id": "event-skill",
         "type": "skill.loaded",
         "thread_id": "thread-1",

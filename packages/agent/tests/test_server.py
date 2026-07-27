@@ -165,6 +165,44 @@ async def test_echo_run_response_precedes_ordered_terminal_events():
     assert [frame["params"]["sequence"] for frame in run_frames if frame.get("method") == "event"] == [1, 2, 3]
 
 
+async def test_run_started_emits_authoritative_primary_model_binding():
+    """run.started 必须携带本次 Run 的脱敏实际模型，而非 TUI 的本地选择。"""
+    from harness_agent.server import ActiveRun, JsonRpcServer
+
+    server = JsonRpcServer(allow_echo=True)
+    frames = await _capture_server(server)
+    run = ActiveRun(
+        thread_id="thread-model",
+        run_id="run-model",
+        message="使用 pro",
+        primary_model_binding={
+            "profile": {
+                "id": "pro",
+                "model": "pro-model",
+                "provider_label": "Pro Gateway",
+                "context_window_tokens": 256000,
+                "capabilities": ["streaming", "tool-calling"],
+                "is_default": False,
+                "available": True,
+                "unavailable_reason": None,
+                "source": "user",
+            },
+            "source": "thread-primary",
+        },
+        runtime_profile_id="123456789abc",
+    )
+    server._runs[run.thread_id] = run
+
+    await server._execute_run(run)
+
+    started = next(frame["params"] for frame in frames if frame.get("params", {}).get("type") == "run.started")
+    assert started["payload"]["runtime_profile_id"] == "123456789abc"
+    assert started["payload"]["primary_model"] == {
+        **run.primary_model_binding,
+        "runtime_profile_id": "123456789abc",
+    }
+
+
 async def test_context_compact_rewrites_idle_thread_and_returns_context_summary():
     """手动压缩只允许空闲 thread，成功后写回 checkpoint 并同步摘要状态。"""
     from langchain_core.messages import HumanMessage
@@ -259,8 +297,8 @@ async def test_context_compact_rejects_active_run():
     assert frames[0]["error"]["message"] == "CONTEXT_COMPACTION_RUN_ACTIVE"
 
 
-async def test_models_list_and_run_start_freeze_selected_profile(tmp_path: Path, monkeypatch) -> None:
-    """models.list 只返回脱敏目录，run.start 首次选择 executor 后 Thread 不能热切换。"""
+async def test_models_list_and_run_start_resolve_current_thread_selection(tmp_path: Path, monkeypatch) -> None:
+    """models.select 让同一 Thread 的后续 Run 立即采用新主模型，并保留历史事实。"""
     from harness_agent.server import JsonRpcServer
 
     home = tmp_path / "home"
@@ -304,8 +342,8 @@ executor = "fast"
     await server.dispatch(_request(
         "initialize",
         _initialize_params(
-            protocol={"major": 2, "min_minor": 0, "max_minor": 5},
-            capabilities=["models.read"],
+            protocol={"major": 2, "min_minor": 0, "max_minor": 7},
+            capabilities=["models.read", "models.select"],
             cwd=str(workspace),
         ),
         "init-models",
@@ -326,37 +364,53 @@ executor = "fast"
     server._execute_run = finish_without_build  # type: ignore[method-assign]
     await server.dispatch(_request(
         "run.start",
-        {"message": "使用 pro", "thread_id": "thread-model", "run_id": "first", "model_profile": "pro"},
+        {
+            "message": "使用 pro",
+            "thread_id": "thread-model",
+            "run_id": "first",
+            "model_selection": {"primary_profile": "pro"},
+        },
         "start-model",
     ))
     assert frames[-1]["result"]["accepted"] is True
     await asyncio.sleep(0)
     assert server._thread_store is not None
-    bindings = await server._thread_store.get_model_bindings("thread-model")
-    assert bindings is not None
-    assert bindings["roles"]["executor"]["id"] == "pro"  # type: ignore[index]
+    assert await server._thread_store.get_model_bindings("thread-model") is None
+    first = await server._thread_store.get_latest_run_execution_binding("thread-model")
+    assert first is not None
+    assert first.requested_selection == {"primary_profile": "pro"}
+    assert first.actual_primary_binding["profile"]["id"] == "pro"  # type: ignore[index]
     assert server._config is not None
     runtime_profile = await server._resolve_runtime_profile("thread-model", server._config)
     assert server._runtime_build_specs[runtime_profile.profile_key].model_settings.name == "pro-model"
 
     await server.dispatch(_request(
         "run.start",
-        {"message": "尝试切换", "thread_id": "thread-model", "run_id": "second", "model_profile": "fast"},
+        {
+            "message": "切换 fast",
+            "thread_id": "thread-model",
+            "run_id": "second",
+            "model_selection": {"primary_profile": "fast"},
+        },
         "start-model-again",
     ))
-    assert frames[-1]["error"]["message"] == "THREAD_MODEL_PROFILE_IMMUTABLE"
+    assert frames[-1]["result"]["accepted"] is True
+    second = await server._thread_store.get_latest_run_execution_binding("thread-model")
+    assert second is not None
+    assert second.requested_selection == {"primary_profile": "fast"}
+    assert second.actual_primary_binding["profile"]["id"] == "fast"  # type: ignore[index]
 
     await server.dispatch(_request("models.list", {"thread_id": "thread-model"}, "models-bound"))
-    binding = frames[-1]["result"]["thread_binding"]
-    assert binding["state"] == "bound"
-    assert binding["roles"]["executor"]["model"] == "pro-model"
+    model_state = frames[-1]["result"]
+    assert model_state["thread_selection"] == {"primary_profile": "fast"}
+    assert model_state["last_run_binding"]["profile"]["model"] == "fast-model"
     await server._close_thread_store()
 
 
-async def test_default_sidecar_shares_runtime_by_profile_and_drains_invalidated_config(
+async def test_default_sidecar_shares_runtime_by_profile_without_draining_other_models(
     tmp_path: Path,
 ):
-    """默认 Sidecar 以 Profile 而非 thread 缓存图；配置切换只排空旧图。"""
+    """默认 Sidecar 以 Profile 而非 thread 缓存图；新模型不应排空旧 Runtime。"""
     from harness_agent.agent_runtime import AgentRuntime
     from harness_agent.config import (
         ExecutionSettings,
@@ -376,7 +430,7 @@ async def test_default_sidecar_shares_runtime_by_profile_and_drains_invalidated_
         async def get_runtime_profile(self, thread_id: str) -> object | None:
             return self.profiles.get(thread_id)
 
-        async def save_runtime_profile(self, thread_id: str, profile: object) -> None:
+        async def save_runtime_profile(self, thread_id: str, profile: object, *, bind_thread: bool = True) -> None:
             self.profiles[thread_id] = profile
 
     def config(model_name: str, *, pin_default_profile: bool = False) -> Za38Config:
@@ -425,7 +479,7 @@ async def test_default_sidecar_shares_runtime_by_profile_and_drains_invalidated_
     assert third_lease is not None
     assert third_runtime is not old_runtime
     assert builds == 2
-    assert old_runtime is not None and old_runtime.graph is None
+    assert old_runtime is not None and old_runtime.graph is not None
 
     await server._release_runtime_lease(third_lease)
     await server._close_runtime_pool()
@@ -456,7 +510,7 @@ async def test_default_context_compact_acquires_and_releases_profile_runtime(tmp
         async def get_runtime_profile(self, thread_id: str) -> object | None:
             return self.profiles.get(thread_id)
 
-        async def save_runtime_profile(self, thread_id: str, profile: object) -> None:
+        async def save_runtime_profile(self, thread_id: str, profile: object, *, bind_thread: bool = True) -> None:
             self.profiles[thread_id] = profile
 
         async def load_context_messages(self, _thread_id: str) -> list[HumanMessage]:

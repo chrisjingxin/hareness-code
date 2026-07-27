@@ -4,12 +4,12 @@
   "title": "za38 protocol v2",
   "x-protocol": {
     "major": 2,
-    "minor": 6,
+    "minor": 7,
     "max_frame_bytes": 8388608,
     "max_tool_payload_bytes": 1048576,
     "client_methods": ["initialize", "run.start", "run.cancel", "context.compact", "config.show", "config.path", "threads.list", "threads.open", "skills.list", "skills.inspect", "skills.set_enabled", "skills.install", "skills.update", "skills.remove", "skills.market.list", "mcp.status", "mcp.add", "mcp.remove", "models.list", "shutdown"],
     "server_methods": ["event", "request"],
-    "server_capabilities": ["run.cancel", "run.multithread", "interactive.approval", "interactive.question", "config.read", "threads.read", "context.manage", "skills.read", "skills.manage", "mcp.read", "models.read"],
+    "server_capabilities": ["run.cancel", "run.multithread", "interactive.approval", "interactive.question", "config.read", "threads.read", "context.manage", "skills.read", "skills.manage", "mcp.read", "models.read", "models.select"],
     "event_types": ["run.started", "skill.loaded", "content.delta", "thinking.delta", "tool.started", "tool.delta", "tool.completed", "context.updated", "interaction.resolved", "run.completed", "run.cancelled", "run.failed"]
   },
   "oneOf": [
@@ -113,6 +113,24 @@
       },
       "additionalProperties": false
     },
+    "threadModelSelection": {
+      "type": "object",
+      "required": ["primary_profile"],
+      "properties": {
+        "primary_profile": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "runPrimaryModelBinding": {
+      "type": "object",
+      "required": ["profile", "source", "runtime_profile_id"],
+      "properties": {
+        "profile": { "$ref": "#/$defs/modelProfile" },
+        "source": { "type": "string", "minLength": 1 },
+        "runtime_profile_id": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
     "modelsListParams": {
       "type": "object",
       "properties": { "thread_id": { "type": "string", "minLength": 1 } },
@@ -123,7 +141,9 @@
       "required": ["profiles"],
       "properties": {
         "profiles": { "type": "array", "items": { "$ref": "#/$defs/modelProfile" } },
-        "thread_binding": { "$ref": "#/$defs/threadModelBinding" }
+        "thread_binding": { "$ref": "#/$defs/threadModelBinding" },
+        "thread_selection": { "$ref": "#/$defs/threadModelSelection" },
+        "last_run_binding": { "$ref": "#/$defs/runPrimaryModelBinding" }
       },
       "additionalProperties": false
     },

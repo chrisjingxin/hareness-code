@@ -55,7 +55,9 @@ export interface InitializeParams { protocol: { major: ${meta.major}; min_minor:
 export interface InitializeResult { protocol: { major: ${meta.major}; minor: number }; server: { name: string; version: string }; server_capabilities: string[]; enabled_capabilities: string[]; agent_commands: Array<{ name: string; description: string; aliases: string[] }>; skills_snapshot: { id: string; count: number }; skill_diagnostics: string[]; limits: { max_frame_bytes: number; max_tool_payload_bytes: number }; config_summary: JsonObject | null; startup_error: { code: string; message: string } | null }
 export interface RequestedSkill { id: string; args?: string }
 export interface ModelProfile { id: string; model: string; provider_label: string; context_window_tokens: number; capabilities: string[]; is_default: boolean; available: boolean; unavailable_reason?: string | null; source: string }
-export interface RunStartParams { message: string; thread_id?: string; run_id?: string; requested_skill?: RequestedSkill; model_profile?: string }
+export interface ThreadModelSelection { primary_profile: string }
+export interface RunPrimaryModelBinding { profile: ModelProfile; source: string; runtime_profile_id: string }
+export interface RunStartParams { message: string; thread_id?: string; run_id?: string; requested_skill?: RequestedSkill; model_profile?: string; model_selection?: ThreadModelSelection }
 export interface RunStartResult { thread_id: string; run_id: string; accepted: boolean }
 export interface RunCancelParams { thread_id: string; run_id: string }
 export interface RunCancelResult { cancelled: boolean; run_id: string }
@@ -69,7 +71,7 @@ export interface ThreadsOpenParams { thread_id: string }
 export interface ThreadsOpenResult { thread: ThreadSummary; messages: ThreadMessage[] }
 export interface ThreadModelBinding { state: "bound" | "legacy" | "unbound"; roles: Record<string, ModelProfile> }
 export interface ModelsListParams { thread_id?: string }
-export interface ModelsListResult { profiles: ModelProfile[]; thread_binding?: ThreadModelBinding }
+export interface ModelsListResult { profiles: ModelProfile[]; thread_binding?: ThreadModelBinding; thread_selection?: ThreadModelSelection; last_run_binding?: RunPrimaryModelBinding }
 export interface McpServerStatus { name: string; transport: "stdio" | "http" | "sse"; status: "connected" | "failed" | "skipped"; error?: string; tool_names: string[] }
 export interface McpStatusParams { }
 export interface McpStatusResult { servers: McpServerStatus[]; total_tools: number }
@@ -143,12 +145,21 @@ class ModelProfile(StrictModel):
     unavailable_reason: str | None = None
     source: str = Field(min_length=1)
 
+class ThreadModelSelection(StrictModel):
+    primary_profile: str = Field(min_length=1)
+
+class RunPrimaryModelBinding(StrictModel):
+    profile: ModelProfile
+    source: str = Field(min_length=1)
+    runtime_profile_id: str = Field(min_length=1)
+
 class RunStartParams(StrictModel):
     message: str = Field(min_length=1)
     thread_id: str | None = None
     run_id: str | None = None
     requested_skill: RequestedSkill | None = None
     model_profile: str | None = Field(default=None, min_length=1)
+    model_selection: ThreadModelSelection | None = None
 
 class RunCancelParams(StrictModel):
     thread_id: str = Field(min_length=1)
@@ -202,6 +213,8 @@ class McpRemoveParams(StrictModel):
 class ModelsListResult(StrictModel):
     profiles: list[ModelProfile]
     thread_binding: ThreadModelBinding | None = None
+    thread_selection: ThreadModelSelection | None = None
+    last_run_binding: RunPrimaryModelBinding | None = None
 class EventEnvelope(StrictModel):
     event_id: str = Field(min_length=1)
     type: str = Field(min_length=1)
@@ -216,7 +229,7 @@ class EventEnvelope(StrictModel):
     @model_validator(mode="after")
     def validate_known_payload(self) -> "EventEnvelope":
         fields = {
-            "run.started": {"resumed", "skills_snapshot_id"}, "skill.loaded": {"skill_id", "source", "version", "snapshot_id"}, "content.delta": {"text"}, "thinking.delta": {"text"},
+            "run.started": {"resumed", "skills_snapshot_id", "primary_model", "runtime_profile_id"}, "skill.loaded": {"skill_id", "source", "version", "snapshot_id"}, "content.delta": {"text"}, "thinking.delta": {"text"},
             "tool.started": {"tool_call_id", "name"},
             "tool.delta": {"tool_call_id", "arguments_delta", "output_delta", "truncated", "original_bytes"},
             "tool.completed": {"tool_call_id", "result"},

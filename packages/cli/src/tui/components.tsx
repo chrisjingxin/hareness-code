@@ -740,7 +740,7 @@ function modelLabel(runtime: TuiRuntime): string {
   if (!runtime.modelConfigured) return "模型未配置"
   const name = runtime.modelName ?? "已配置模型"
   const profile = runtime.modelProfileId ? `${runtime.modelProfileId} · ` : ""
-  return `${profile}${name}${runtime.modelSelectionPending ? "（待新 Thread）" : ""}`
+  return `${profile}${name}${runtime.modelSelectionPending ? "（下一次运行）" : ""}`
 }
 
 /** 按字符数截断普通预览文本。 */

@@ -492,7 +492,7 @@ test("/skills 打开可搜索选择器，并把选中的 Skill 附到下一次�
   }
 })
 
-test("/model [query] 预筛选 Picker，并将确认的 Profile 仅带到下一新 Thread", async () => {
+test("旧协议 /model [query] 预筛选 Picker，并将确认的 Profile 带到下一新 Thread", async () => {
   const { client, requests } = createMockClient()
   let setup: Awaited<ReturnType<typeof testRender>>
   try {
@@ -510,7 +510,7 @@ test("/model [query] 预筛选 Picker，并将确认的 Profile 仅带到下一�
       await Bun.sleep(0)
       await setup.flush()
     })
-    let frame = await setup.waitForFrame(value => value.includes("选择下一新 Thread 的模型") && value.includes("pro-model"))
+    let frame = await setup.waitForFrame(value => value.includes("选择下一次新 Thread 运行的模型") && value.includes("pro-model"))
     expect(frame).toContain("Pro Gateway")
     expect(frame).not.toContain("fast-model")
 
@@ -519,9 +519,9 @@ test("/model [query] 预筛选 Picker，并将确认的 Profile 仅带到下一�
       await Bun.sleep(0)
       await setup.flush()
     })
-    frame = await setup.waitForFrame(value => value.includes("将在下一条新 Thread 中生效"))
+    frame = await setup.waitForFrame(value => value.includes("将在下一次新 Thread 运行生效"))
     expect(frame).toContain("pro-model")
-    expect(frame).toContain("pro · pro-model（待新 Thread）")
+    expect(frame).toContain("pro · pro-model（下一次运行）")
 
     await act(async () => {
       await setup.mockInput.typeText("使用选定模型")
@@ -529,7 +529,7 @@ test("/model [query] 预筛选 Picker，并将确认的 Profile 仅带到下一�
       await setup.flush()
     })
     expect(requests.at(-1)).toMatchObject({ message: "使用选定模型", modelProfile: "pro" })
-    frame = await setup.waitForFrame(value => value.includes("pro · pro-model") && !value.includes("（待新 Thread）"))
+    frame = await setup.waitForFrame(value => value.includes("pro · pro-model") && !value.includes("（下一次运行）"))
     expect(frame).toContain("pro · pro-model")
   } finally {
     if (setup!) await act(async () => { setup.renderer.destroy() })
@@ -537,7 +537,7 @@ test("/model [query] 预筛选 Picker，并将确认的 Profile 仅带到下一�
   }
 })
 
-test("/model 对已绑定 Thread 显示不可变说明，并通过新建动作清理待选状态", async () => {
+test("旧协议 /model 对已绑定 Thread 显示不可变说明，并通过新建动作清理待选状态", async () => {
   const { client, requests } = createMockClient()
   let setup: Awaited<ReturnType<typeof testRender>>
   try {
@@ -579,6 +579,96 @@ test("/model 对已绑定 Thread 显示不可变说明，并通过新建动作�
   }
 })
 
+test("models.select 在当前 Thread 选择模型，并在下一次 run.start 携带选择", async () => {
+  const { client, requests } = createMockClient()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  const selectableRuntime: TuiRuntime = { ...runtime, capabilities: ["models.read", "models.select"] }
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        client,
+        runtime: selectableRuntime,
+        onRequestExit: () => undefined,
+      }), { width: 100, height: 30 })
+      await setup.flush()
+    })
+    await sendAndFinish(setup, client, requests, "先使用默认模型")
+    const originalThreadId = requests.at(-1)?.threadId
+
+    await act(async () => {
+      await setup.mockInput.typeText("/model pro")
+      setup.mockInput.pressEnter()
+      await Bun.sleep(0)
+      await setup.flush()
+    })
+    await setup.waitForFrame(value => value.includes("选择当前 Thread 下一次运行的模型") && value.includes("pro-model"))
+    await act(async () => {
+      setup.mockInput.pressEnter()
+      await Bun.sleep(0)
+      await setup.flush()
+    })
+    let frame = await setup.waitForFrame(value => value.includes("当前 Thread 的下一次运行生效"))
+    expect(frame).toContain("pro · pro-model（下一次运行）")
+
+    await act(async () => {
+      await setup.mockInput.typeText("使用 pro 继续")
+      setup.mockInput.pressEnter()
+      await setup.flush()
+    })
+    const selected = requests.at(-1)
+    expect(selected).toMatchObject({
+      message: "使用 pro 继续",
+      threadId: originalThreadId,
+      modelProfile: undefined,
+      modelSelection: { primary_profile: "pro" },
+    })
+    await act(async () => {
+      client.emit("event", {
+        event_id: crypto.randomUUID(),
+        type: "run.started",
+        thread_id: selected!.threadId,
+        run_id: selected!.runId,
+        sequence: 1,
+        timestamp_ms: Date.now(),
+        payload: {
+          resumed: false,
+          skills_snapshot_id: "skills",
+          runtime_profile_id: "123456789abc",
+          primary_model: {
+            profile: {
+              id: "pro",
+              model: "pro-model",
+              provider_label: "Pro Gateway",
+              context_window_tokens: 256000,
+              capabilities: ["tool-calling", "streaming", "vision"],
+              is_default: false,
+              available: true,
+              source: "user",
+            },
+            source: "thread-primary",
+            runtime_profile_id: "123456789abc",
+          },
+        },
+      })
+      client.emit("event", {
+        event_id: crypto.randomUUID(),
+        type: "run.completed",
+        thread_id: selected!.threadId,
+        run_id: selected!.runId,
+        sequence: 2,
+        timestamp_ms: Date.now(),
+        payload: { duration_ms: 1, usage: { input_tokens: 0, output_tokens: 0 } },
+      })
+      await setup.flush()
+    })
+    frame = await setup.waitForFrame(value => value.includes("pro · pro-model") && !value.includes("（下一次运行）"))
+    expect(frame).toContain("pro · pro-model")
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+  }
+})
+
 test("/model 的未知查询保留在 Picker 内且不会创建 run", async () => {
   const { client, requests } = createMockClient()
   let setup: Awaited<ReturnType<typeof testRender>>
@@ -598,7 +688,7 @@ test("/model 的未知查询保留在 Picker 内且不会创建 run", async () =
       await setup.flush()
     })
     let frame = await setup.waitForFrame(value => value.includes("没有匹配的模型 Profile"))
-    expect(frame).toContain("选择下一新 Thread 的模型")
+    expect(frame).toContain("选择下一次新 Thread 运行的模型")
     expect(requests).toHaveLength(0)
   } finally {
     if (setup!) await act(async () => { setup.renderer.destroy() })
@@ -830,7 +920,7 @@ test("窄终端中的 /skills 使用单列浮层且保持可操作", async () =>
 async function sendAndFinish(
   setup: Awaited<ReturnType<typeof testRender>>,
   client: IpcClient,
-  requests: Array<{ message: string; threadId: string; runId: string; requestedSkill?: { id: string; args?: string }; modelProfile?: string }>,
+  requests: Array<{ message: string; threadId: string; runId: string; requestedSkill?: { id: string; args?: string }; modelProfile?: string; modelSelection?: { primary_profile: string } }>,
   message: string,
 ) {
   await act(async () => {
@@ -858,7 +948,7 @@ function createMockClient(options: { cancelled?: boolean; compactError?: string;
   const stdout = new PassThrough()
   const stdin = new PassThrough()
   const client = new IpcClient(stdin, stdout)
-  const requests: Array<{ message: string; threadId: string; runId: string; requestedSkill?: { id: string; args?: string }; modelProfile?: string }> = []
+  const requests: Array<{ message: string; threadId: string; runId: string; requestedSkill?: { id: string; args?: string }; modelProfile?: string; modelSelection?: { primary_profile: string } }> = []
   const compactThreadIds: string[] = []
   const cancelThreadIds: string[] = []
   stdin.on("data", data => {
@@ -1064,6 +1154,7 @@ function createMockClient(options: { cancelled?: boolean; compactError?: string;
       const runId = typeof request.params?.run_id === "string" ? request.params.run_id : "run-1"
       const requestedSkill = request.params?.requested_skill
       const modelProfile = typeof request.params?.model_profile === "string" ? request.params.model_profile : undefined
+      const modelSelection = request.params?.model_selection
       requests.push({
         message,
         threadId,
@@ -1072,6 +1163,9 @@ function createMockClient(options: { cancelled?: boolean; compactError?: string;
           ? requestedSkill as { id: string; args?: string }
           : undefined,
         modelProfile,
+        modelSelection: modelSelection && typeof modelSelection === "object" && typeof (modelSelection as Record<string, unknown>).primary_profile === "string"
+          ? { primary_profile: (modelSelection as Record<string, string>).primary_profile }
+          : undefined,
       })
       stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { accepted: true, thread_id: threadId, run_id: runId } })}\n`)
     }

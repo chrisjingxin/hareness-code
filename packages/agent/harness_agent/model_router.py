@@ -1,7 +1,7 @@
-"""模型角色解析与 Thread 绑定快照。
+"""模型角色解析与单次 Run 的脱敏快照。
 
 本模块不创建 Agent 或网络客户端，只把可信配置目录转换为不可变的角色
-Profile 选择。这样 ZC-060 可以在不改变 Thread 持久化契约的前提下复用它。
+Profile 选择。Thread 可变选择不保存在本模块；这样 ZC-060 可以复用它。
 """
 
 from __future__ import annotations
@@ -20,12 +20,12 @@ from harness_agent.config import (
 
 @dataclass(frozen=True, slots=True)
 class ThreadModelBindings:
-    """新 Thread 首次运行时冻结的 canonical 角色到 Profile 映射。"""
+    """一次 Run 的 canonical 角色到 Profile 映射；名称保留以兼容 legacy 记录。"""
 
     profiles: Mapping[str, ModelProfile]
 
     def for_role(self, role: str) -> ModelProfile:
-        """读取已冻结角色的 Profile，缺失映射必须 fail closed。"""
+        """读取已解析角色的 Profile，缺失映射必须 fail closed。"""
         profile = self.profiles.get(role)
         if profile is None:
             raise ConfigError(f"THREAD_MODEL_ROLE_MISSING: {role}")
@@ -46,16 +46,16 @@ class ThreadModelBindings:
 
 
 class ModelRouter:
-    """按配置选择模型 Profile，并冻结下一新 Thread 的角色映射。"""
+    """按配置为单次 Run 解析模型 Profile，不持有 Thread 可变状态。"""
 
     def __init__(self, catalog: ModelCatalog) -> None:
         """保存已验证且不可变的 ModelCatalog。"""
         self._catalog = catalog
 
-    def bind_thread(self, executor_profile_id: str | None = None) -> ThreadModelBindings:
-        """生成新 Thread 的完整角色快照；显式选择仅覆盖 executor。"""
-        if executor_profile_id is not None:
-            selected = self._catalog.require_profile(executor_profile_id)
+    def resolve_run(self, primary_profile_id: str | None = None) -> ThreadModelBindings:
+        """生成本次 Run 的完整角色快照；显式选择仅覆盖物理 primary/executor。"""
+        if primary_profile_id is not None:
+            selected = self._catalog.require_profile(primary_profile_id)
             if selected.settings.api_key_source() == "missing":
                 raise ConfigError("MODEL_PROFILE_UNAVAILABLE: API_KEY_MISSING")
         else:
@@ -70,8 +70,12 @@ class ModelRouter:
         profiles["executor"] = selected
         return ThreadModelBindings(profiles=profiles)
 
+    def bind_thread(self, executor_profile_id: str | None = None) -> ThreadModelBindings:
+        """兼容旧调用方；新代码必须使用 ``resolve_run``，不再写入 Thread 绑定。"""
+        return self.resolve_run(executor_profile_id)
+
     def from_record(self, record: Mapping[str, object]) -> ThreadModelBindings:
-        """按持久化 Profile ID 重建执行映射；配置漂移由 RuntimeProfile 再次拒绝。"""
+        """按 legacy 持久化 Profile ID 重建执行映射；缺失 Profile 必须 fail closed。"""
         raw_roles = record.get("roles")
         if not isinstance(raw_roles, Mapping):
             raise ConfigError("THREAD_MODEL_BINDING_INVALID")

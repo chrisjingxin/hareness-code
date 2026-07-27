@@ -14,6 +14,7 @@ from harness_agent.protocol_generated import (
     ContextCompactParams,
     InitializeParams,
     InteractionRequestEnvelope,
+    RunStartParams,
     ThreadsListParams,
     ThreadsOpenParams,
 )
@@ -40,6 +41,24 @@ def test_python_validates_v2_4_manual_compaction_params() -> None:
     assert ContextCompactParams.model_validate({"thread_id": "thread-1"}).thread_id == "thread-1"
     with pytest.raises(ValidationError):
         ContextCompactParams.model_validate({"thread_id": "", "unknown": True})
+
+
+def test_python_validates_v2_7_thread_model_selection() -> None:
+    """新 minor 的每次 Run 选择必须只携带非空 primary Profile。"""
+    parsed = RunStartParams.model_validate(
+        {
+            "message": "使用 pro",
+            "thread_id": "thread-1",
+            "run_id": "run-1",
+            "model_selection": {"primary_profile": "pro"},
+        }
+    )
+    assert parsed.model_selection is not None
+    assert parsed.model_selection.primary_profile == "pro"
+    with pytest.raises(ValidationError):
+        RunStartParams.model_validate(
+            {"message": "x", "model_selection": {"primary_profile": "", "unknown": True}}
+        )
 
 
 def _validate(fixture: dict[str, Any]) -> None:

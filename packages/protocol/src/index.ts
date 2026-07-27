@@ -189,7 +189,7 @@ function rejectExtra(value: Record<string, unknown>, allowed: readonly string[],
 
 function validateKnownEventPayload(type: string, payload: Record<string, unknown>): void {
   const fields: Record<string, readonly string[]> = {
-    "run.started": ["resumed", "skills_snapshot_id"],
+    "run.started": ["resumed", "skills_snapshot_id", "primary_model", "runtime_profile_id"],
     "skill.loaded": ["skill_id", "source", "version", "snapshot_id"],
     "content.delta": ["text"],
     "thinking.delta": ["text"],

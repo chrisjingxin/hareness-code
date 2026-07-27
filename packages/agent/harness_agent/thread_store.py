@@ -22,7 +22,7 @@ from harness_agent.runtime_profile import (
 )
 
 
-_SCHEMA_VERSION = 5
+_SCHEMA_VERSION = 6
 _MAX_PREVIEW_CHARS = 160
 
 
@@ -49,6 +49,18 @@ class ThreadMessage:
     kind: Literal["user", "assistant", "tool"]
     content: str
     tool_name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RunExecutionBinding:
+    """一次已受理 Run 的脱敏执行事实，用于恢复当前选择和展示历史模型。"""
+
+    thread_id: str
+    run_id: str
+    requested_selection: dict[str, object]
+    actual_primary_binding: dict[str, object]
+    runtime_profile_id: str
+    created_at_ms: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -338,6 +350,139 @@ class ThreadStore:
                 pass
             raise ThreadStoreError(f"CHECKPOINT_INDEX_WRITE_FAILED: {exc}") from exc
 
+    async def record_run_start(
+        self,
+        thread_id: str,
+        run_id: str,
+        message: str,
+        *,
+        requested_selection: Mapping[str, object],
+        actual_primary_binding: Mapping[str, object],
+        runtime_profile_id: str,
+    ) -> bool:
+        """原子登记 Thread 索引与 Run 绑定；同一 Run ID 重试不得重复执行。"""
+        self._ensure_open()
+        _validate_run_selection(requested_selection)
+        _validate_actual_primary_binding(actual_primary_binding)
+        if not isinstance(run_id, str) or not run_id:
+            raise ThreadStoreError("RUN_EXECUTION_BINDING_INVALID")
+        if not isinstance(runtime_profile_id, str) or not runtime_profile_id:
+            raise ThreadStoreError("RUN_EXECUTION_BINDING_INVALID")
+        now = _now_ms()
+        preview = _preview(message)
+        encoded_selection = canonical_json(requested_selection)
+        encoded_primary = canonical_json(actual_primary_binding)
+        message_digest = hashlib.sha256(message.encode("utf-8")).hexdigest()
+        try:
+            async with self._lock:
+                cursor = await self._connection.execute(
+                    """
+                    SELECT requested_selection, actual_primary_binding, runtime_profile_id, message_digest
+                    FROM harness_run_execution_bindings
+                    WHERE project_fingerprint = ? AND thread_id = ? AND run_id = ?
+                    """,
+                    (self._project_fingerprint, thread_id, run_id),
+                )
+                existing = await cursor.fetchone()
+                await cursor.close()
+                if existing is not None:
+                    if (
+                        str(existing["requested_selection"]) == encoded_selection
+                        and str(existing["actual_primary_binding"]) == encoded_primary
+                        and str(existing["runtime_profile_id"]) == runtime_profile_id
+                        and str(existing["message_digest"]) == message_digest
+                    ):
+                        return False
+                    raise ThreadStoreError("RUN_EXECUTION_BINDING_CONFLICT")
+                await self._connection.execute(
+                    """
+                    INSERT INTO harness_threads (
+                        project_fingerprint, thread_id, created_at_ms, updated_at_ms,
+                        first_message, latest_message, message_count
+                    ) VALUES (?, ?, ?, ?, ?, ?, 0)
+                    ON CONFLICT(project_fingerprint, thread_id) DO UPDATE SET
+                        updated_at_ms = excluded.updated_at_ms,
+                        latest_message = excluded.latest_message
+                    """,
+                    (
+                        self._project_fingerprint,
+                        thread_id,
+                        now,
+                        now,
+                        preview,
+                        preview,
+                    ),
+                )
+                await self._connection.execute(
+                    """
+                    INSERT INTO harness_run_execution_bindings (
+                        project_fingerprint, thread_id, run_id, requested_selection,
+                        actual_primary_binding, runtime_profile_id, message_digest, created_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        self._project_fingerprint,
+                        thread_id,
+                        run_id,
+                        encoded_selection,
+                        encoded_primary,
+                        runtime_profile_id,
+                        message_digest,
+                        now,
+                    ),
+                )
+                await self._connection.commit()
+                return True
+        except ThreadStoreError:
+            raise
+        except aiosqlite.Error as exc:
+            try:
+                await self._connection.rollback()
+            except aiosqlite.Error:
+                pass
+            raise ThreadStoreError(f"RUN_EXECUTION_BINDING_WRITE_FAILED: {exc}") from exc
+
+    async def get_latest_run_execution_binding(
+        self, thread_id: str
+    ) -> RunExecutionBinding | None:
+        """读取最后一个已受理 Run 的模型选择与实际模型，不推测或修复损坏记录。"""
+        self._ensure_open()
+        try:
+            async with self._lock:
+                cursor = await self._connection.execute(
+                    """
+                    SELECT thread_id, run_id, requested_selection, actual_primary_binding,
+                           runtime_profile_id, created_at_ms
+                    FROM harness_run_execution_bindings
+                    WHERE project_fingerprint = ? AND thread_id = ?
+                    ORDER BY created_at_ms DESC, rowid DESC
+                    LIMIT 1
+                    """,
+                    (self._project_fingerprint, thread_id),
+                )
+                row = await cursor.fetchone()
+                await cursor.close()
+            if row is None:
+                return None
+            selection = json.loads(str(row["requested_selection"]))
+            primary = json.loads(str(row["actual_primary_binding"]))
+            if not isinstance(selection, dict) or not isinstance(primary, dict):
+                raise ThreadStoreError("RUN_EXECUTION_BINDING_INVALID")
+            _validate_run_selection(selection)
+            _validate_actual_primary_binding(primary)
+            return RunExecutionBinding(
+                thread_id=str(row["thread_id"]),
+                run_id=str(row["run_id"]),
+                requested_selection=selection,
+                actual_primary_binding=primary,
+                runtime_profile_id=str(row["runtime_profile_id"]),
+                created_at_ms=int(row["created_at_ms"]),
+            )
+        except ThreadStoreError:
+            raise
+        except (aiosqlite.Error, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ThreadStoreError(f"RUN_EXECUTION_BINDING_READ_FAILED: {exc}") from exc
+
     async def refresh_thread(self, thread_id: str) -> None:
         """在 run 结束后用 checkpoint 消息数更新可恢复线程摘要。"""
         self._ensure_open()
@@ -362,7 +507,7 @@ class ThreadStore:
             raise ThreadStoreError(f"CHECKPOINT_INDEX_REFRESH_FAILED: {exc}") from exc
 
     async def get_model_bindings(self, thread_id: str) -> dict[str, object] | None:
-        """读取 Thread 首次运行时冻结的脱敏角色模型快照；无绑定 Thread 返回 None。"""
+        """读取 v5 legacy Thread 脱敏角色快照；无旧绑定 Thread 返回 None。"""
         self._ensure_open()
         try:
             async with self._lock:
@@ -387,7 +532,7 @@ class ThreadStore:
             raise ThreadStoreError(f"THREAD_MODEL_BINDING_READ_FAILED: {exc}") from exc
 
     async def save_model_bindings(self, thread_id: str, record: Mapping[str, object]) -> None:
-        """首次写入角色 Profile 安全快照；后续调用必须保持相同绑定。"""
+        """仅为 legacy 调用写入首次角色 Profile 安全快照；新 Run 不应调用。"""
         self._ensure_open()
         if not isinstance(record.get("roles"), Mapping):
             raise ThreadStoreError("THREAD_MODEL_BINDING_INVALID")
@@ -530,8 +675,10 @@ class ThreadStore:
         except (aiosqlite.Error, TypeError, ValueError, RuntimeProfileError, json.JSONDecodeError) as exc:
             raise ThreadStoreError(f"RUNTIME_PROFILE_READ_FAILED: {exc}") from exc
 
-    async def save_runtime_profile(self, thread_id: str, profile: RuntimeProfile) -> None:
-        """首次绑定 thread 的不可变 Profile；变化必须由后续迁移显式处理。"""
+    async def save_runtime_profile(
+        self, thread_id: str, profile: RuntimeProfile, *, bind_thread: bool = True
+    ) -> None:
+        """保存可去重 Runtime Profile；仅 legacy 调用保留不可变 Thread 绑定。"""
         self._ensure_open()
         if profile.project_fingerprint != self._project_fingerprint:
             raise ThreadStoreError("RUNTIME_PROFILE_PROJECT_MISMATCH")
@@ -539,20 +686,21 @@ class ThreadStore:
         encoded_record = canonical_json(record)
         try:
             async with self._lock:
-                cursor = await self._connection.execute(
-                    """
-                    SELECT profile_key
-                    FROM harness_thread_runtime_profiles
-                    WHERE project_fingerprint = ? AND thread_id = ?
-                    """,
-                    (self._project_fingerprint, thread_id),
-                )
-                existing = await cursor.fetchone()
-                await cursor.close()
-                if existing is not None:
-                    if str(existing["profile_key"]) != profile.profile_key:
-                        raise ThreadStoreError("RUNTIME_PROFILE_IMMUTABLE")
-                    return
+                if bind_thread:
+                    cursor = await self._connection.execute(
+                        """
+                        SELECT profile_key
+                        FROM harness_thread_runtime_profiles
+                        WHERE project_fingerprint = ? AND thread_id = ?
+                        """,
+                        (self._project_fingerprint, thread_id),
+                    )
+                    existing = await cursor.fetchone()
+                    await cursor.close()
+                    if existing is not None:
+                        if str(existing["profile_key"]) != profile.profile_key:
+                            raise ThreadStoreError("RUNTIME_PROFILE_IMMUTABLE")
+                        return
                 await self._connection.execute(
                     """
                     INSERT INTO harness_runtime_profiles (
@@ -571,20 +719,21 @@ class ThreadStore:
                         _now_ms(),
                     ),
                 )
-                await self._connection.execute(
-                    """
-                    INSERT INTO harness_thread_runtime_profiles (
-                        project_fingerprint, thread_id, profile_key, profile_version, bound_at_ms
-                    ) VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (
-                        self._project_fingerprint,
-                        thread_id,
-                        profile.profile_key,
-                        RUNTIME_PROFILE_VERSION,
-                        _now_ms(),
-                    ),
-                )
+                if bind_thread:
+                    await self._connection.execute(
+                        """
+                        INSERT INTO harness_thread_runtime_profiles (
+                            project_fingerprint, thread_id, profile_key, profile_version, bound_at_ms
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            self._project_fingerprint,
+                            thread_id,
+                            profile.profile_key,
+                            RUNTIME_PROFILE_VERSION,
+                            _now_ms(),
+                        ),
+                    )
                 await self._connection.commit()
         except ThreadStoreError:
             raise
@@ -592,7 +741,7 @@ class ThreadStore:
             raise ThreadStoreError(f"RUNTIME_PROFILE_WRITE_FAILED: {exc}") from exc
 
     async def get_model_bindings(self, thread_id: str) -> dict[str, object] | None:
-        """读取 Thread 首次运行时冻结的脱敏角色模型快照；旧 Thread 返回 None。"""
+        """读取 v5 legacy Thread 脱敏角色快照；无旧绑定 Thread 返回 None。"""
         self._ensure_open()
         try:
             async with self._lock:
@@ -617,7 +766,7 @@ class ThreadStore:
             raise ThreadStoreError(f"THREAD_MODEL_BINDING_READ_FAILED: {exc}") from exc
 
     async def save_model_bindings(self, thread_id: str, record: Mapping[str, object]) -> None:
-        """首次写入角色 Profile 安全快照；后续调用必须保持相同绑定。"""
+        """仅为 legacy 调用写入首次角色 Profile 安全快照；新 Run 不应调用。"""
         self._ensure_open()
         if not isinstance(record.get("roles"), Mapping):
             raise ThreadStoreError("THREAD_MODEL_BINDING_INVALID")
@@ -1056,6 +1205,29 @@ class ThreadStore:
                     """
                 )
                 version = 5
+            if version < 6:
+                await self._connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS harness_run_execution_bindings (
+                        project_fingerprint TEXT NOT NULL,
+                        thread_id TEXT NOT NULL,
+                        run_id TEXT NOT NULL,
+                        requested_selection TEXT NOT NULL,
+                        actual_primary_binding TEXT NOT NULL,
+                        runtime_profile_id TEXT NOT NULL,
+                        message_digest TEXT NOT NULL,
+                        created_at_ms INTEGER NOT NULL,
+                        PRIMARY KEY (project_fingerprint, thread_id, run_id)
+                    )
+                    """
+                )
+                await self._connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS harness_run_execution_bindings_thread_created
+                    ON harness_run_execution_bindings(project_fingerprint, thread_id, created_at_ms DESC)
+                    """
+                )
+                version = 6
             await self._connection.execute(f"PRAGMA user_version={version}")
             await self._connection.commit()
         except ThreadStoreError:
@@ -1099,6 +1271,49 @@ def _preview(value: str) -> str:
     """将用户消息压缩为单行有限摘要，避免选择器被超长或换行文本破坏。"""
     compact = " ".join(value.split())
     return compact[:_MAX_PREVIEW_CHARS] or "(空消息)"
+
+
+def _validate_run_selection(value: Mapping[str, object]) -> None:
+    """Run 选择只允许主模型 ID，避免把未审计的执行参数写入历史表。"""
+    if set(value) != {"primary_profile"}:
+        raise ThreadStoreError("RUN_EXECUTION_BINDING_INVALID")
+    profile_id = value.get("primary_profile")
+    if not isinstance(profile_id, str) or not profile_id:
+        raise ThreadStoreError("RUN_EXECUTION_BINDING_INVALID")
+
+
+def _validate_actual_primary_binding(value: Mapping[str, object]) -> None:
+    """只接受模型 Picker 脱敏摘要和来源，拒绝 endpoint、Header 与凭据意外入库。"""
+    if set(value) != {"profile", "source"}:
+        raise ThreadStoreError("RUN_EXECUTION_BINDING_INVALID")
+    profile = value.get("profile")
+    source = value.get("source")
+    if not isinstance(profile, Mapping) or not isinstance(source, str) or not source:
+        raise ThreadStoreError("RUN_EXECUTION_BINDING_INVALID")
+    allowed = {
+        "id",
+        "model",
+        "provider_label",
+        "context_window_tokens",
+        "capabilities",
+        "is_default",
+        "available",
+        "unavailable_reason",
+        "source",
+    }
+    if set(profile) - allowed:
+        raise ThreadStoreError("RUN_EXECUTION_BINDING_INVALID")
+    for key in ("id", "model", "provider_label", "source"):
+        if not isinstance(profile.get(key), str) or not profile.get(key):
+            raise ThreadStoreError("RUN_EXECUTION_BINDING_INVALID")
+    if not isinstance(profile.get("context_window_tokens"), int):
+        raise ThreadStoreError("RUN_EXECUTION_BINDING_INVALID")
+    if not isinstance(profile.get("capabilities"), list) or not all(
+        isinstance(item, str) for item in profile["capabilities"]
+    ):
+        raise ThreadStoreError("RUN_EXECUTION_BINDING_INVALID")
+    if not isinstance(profile.get("is_default"), bool) or not isinstance(profile.get("available"), bool):
+        raise ThreadStoreError("RUN_EXECUTION_BINDING_INVALID")
 
 
 def _summary(row: Mapping[str, Any]) -> ThreadSummary:

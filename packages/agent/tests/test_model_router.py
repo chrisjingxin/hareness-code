@@ -23,15 +23,15 @@ def _profile(profile_id: str, *, capabilities: frozenset[str] | None = None) -> 
     )
 
 
-def test_model_router_resolves_roles_and_overrides_only_executor() -> None:
-    """单 Agent 只将 executor 映射到 primary，其余角色仍冻结给未来 topology。"""
+def test_model_router_resolves_run_roles_and_overrides_only_executor() -> None:
+    """每次 Run 只将显式 primary 映射到 executor，其余角色保持配置解析。"""
     catalog = ModelCatalog(
         default_profile="fast",
         profiles={"fast": _profile("fast"), "pro": _profile("pro")},
         role_profiles={"planner": "pro", "executor": "fast"},
     )
 
-    bindings = ModelRouter(catalog).bind_thread("pro")
+    bindings = ModelRouter(catalog).resolve_run("pro")
 
     assert bindings.for_role("planner").profile_id == "pro"
     assert bindings.for_role("executor").profile_id == "pro"
@@ -52,7 +52,7 @@ def test_model_router_rejects_executor_without_required_capabilities() -> None:
     )
 
     with pytest.raises(ConfigError, match="MODEL_PROFILE_CAPABILITY_MISSING: tool-calling"):
-        ModelRouter(catalog).bind_thread()
+        ModelRouter(catalog).resolve_run()
 
 
 async def test_provider_client_pool_reuses_uncredentialed_transport() -> None:

@@ -100,6 +100,10 @@ class ActiveRun:
     runtime_run_lease: AgentRuntimeRunLease | None = None
     runtime_profile_key: str | None = None
     model_bindings: ThreadModelBindings | None = None
+    requested_model_selection: dict[str, object] | None = None
+    primary_model_binding: dict[str, object] | None = None
+    runtime_profile_id: str | None = None
+    resolved_runtime_profile: RuntimeProfile | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,7 +182,6 @@ class JsonRpcServer:
         self._runtime_build_specs: dict[str, _RuntimeBuildSpec] = {}
         self._runtime_artifacts: dict[str, _RuntimeArtifacts] = {}
         self._provider_client_pool = ProviderClientPool()
-        self._default_profile_key: str | None = None
         self._protocol_minor = PROTOCOL_MINOR
         self._enabled_capabilities: set[str] = set()
         self._handlers = {
@@ -379,6 +382,8 @@ class JsonRpcServer:
         await self._connect_mcp_servers()
         requested = set(parsed.capabilities)
         self._enabled_capabilities = requested.intersection(SERVER_CAPABILITIES)
+        if self._protocol_minor < 7:
+            self._enabled_capabilities.discard("models.select")
         self._initialized = True
         return {
             "protocol": {"major": PROTOCOL_MAJOR, "minor": self._protocol_minor},
@@ -427,16 +432,32 @@ class JsonRpcServer:
                 raise SkillError(f'Skill "{skill.skill_id}" is not user-invocable')
             requested_skill = {"id": skill.skill_id, "args": parsed.requested_skill.args or ""}
         model_bindings = None
+        requested_model_selection: dict[str, object] | None = None
+        primary_model_binding: dict[str, object] | None = None
+        runtime_profile: RuntimeProfile | None = None
         if self._thread_persistence_enabled():
             self._load_config()
             if self._config is None:
                 raise RpcError(-32010, self._startup_error or "MODEL_CONFIGURATION_REQUIRED")
+            if parsed.model_selection is not None and "models.select" not in self._enabled_capabilities:
+                raise RpcError(-32002, "MODELS_SELECT_CAPABILITY_REQUIRED")
             try:
-                model_bindings = await self._resolve_thread_model_bindings(
+                (
+                    model_bindings,
+                    requested_model_selection,
+                    primary_model_binding,
+                ) = await self._resolve_run_model_bindings(
                     thread_id,
                     self._config,
-                    requested_executor_profile=parsed.model_profile,
-                    persist=False,
+                    requested_primary_profile=(
+                        parsed.model_selection.primary_profile
+                        if parsed.model_selection is not None
+                        else None
+                    ),
+                    legacy_model_profile=parsed.model_profile,
+                )
+                runtime_profile = await self._resolve_runtime_profile(
+                    thread_id, self._config, model_bindings
                 )
             except (ConfigError, ThreadStoreError) as exc:
                 raise RpcError(-32004, str(exc)) from exc
@@ -446,14 +467,32 @@ class JsonRpcServer:
             message=message,
             requested_skill=requested_skill,
             model_bindings=model_bindings,
+            requested_model_selection=requested_model_selection,
+            primary_model_binding=primary_model_binding,
+            runtime_profile_id=(runtime_profile.profile_key[:12] if runtime_profile else None),
+            resolved_runtime_profile=runtime_profile,
         )
         if self._thread_persistence_enabled():
             store = await self._ensure_thread_store()
-            await store.record_message(
-                thread_id,
-                message,
-                model_bindings=model_bindings.record() if model_bindings is not None else None,
-            )
+            if (
+                requested_model_selection is None
+                or primary_model_binding is None
+                or run.runtime_profile_id is None
+            ):
+                raise RpcError(-32010, "RUN_MODEL_BINDING_UNAVAILABLE")
+            try:
+                created = await store.record_run_start(
+                    thread_id,
+                    run_id,
+                    message,
+                    requested_selection=requested_model_selection,
+                    actual_primary_binding=primary_model_binding,
+                    runtime_profile_id=run.runtime_profile_id,
+                )
+            except ThreadStoreError as exc:
+                raise RpcError(-32004, str(exc)) from exc
+            if not created:
+                raise RpcError(-32000, "RUN_ALREADY_ACCEPTED")
         self._runs[thread_id] = run
         await self.send_response(
             request_id, {"thread_id": thread_id, "run_id": run_id, "accepted": True}
@@ -654,6 +693,17 @@ class JsonRpcServer:
             ]
         }
         if parsed.thread_id is not None:
+            if "models.select" in self._enabled_capabilities:
+                latest = await (await self._ensure_thread_store()).get_latest_run_execution_binding(
+                    parsed.thread_id
+                )
+                if latest is not None:
+                    result["thread_selection"] = latest.requested_selection
+                    result["last_run_binding"] = {
+                        **latest.actual_primary_binding,
+                        "runtime_profile_id": latest.runtime_profile_id,
+                    }
+            # 旧 minor 仍只读取 v5 的不可变绑定，避免向未协商客户端泄露新字段。
             result["thread_binding"] = await self._thread_model_binding_summary(parsed.thread_id, config)
         return result
 
@@ -775,14 +825,17 @@ class JsonRpcServer:
 
     async def _execute_run(self, run: ActiveRun) -> None:
         """执行并自动恢复中断，保证每个 run 只产生一个终态。"""
-        await self._emit(
-            run,
-            "run.started",
-            {
-                "resumed": False,
-                "skills_snapshot_id": self._skill_registry.snapshot_id if self._skill_registry else None,
-            },
-        )
+        started_payload: dict[str, object] = {
+            "resumed": False,
+            "skills_snapshot_id": self._skill_registry.snapshot_id if self._skill_registry else None,
+        }
+        if run.primary_model_binding is not None:
+            started_payload["primary_model"] = {
+                **run.primary_model_binding,
+                "runtime_profile_id": run.runtime_profile_id,
+            }
+            started_payload["runtime_profile_id"] = run.runtime_profile_id
+        await self._emit(run, "run.started", started_payload)
         resume: Any | None = None
         try:
             if run.requested_skill is not None:
@@ -895,7 +948,11 @@ class JsonRpcServer:
 
     async def _acquire_default_runtime_for_run(self, run: ActiveRun) -> Any | None:
         """为一个生产 run 获取共享 Runtime，并将 thread 私有状态写入 RunContext。"""
-        lease, runtime = await self._acquire_default_runtime(run.thread_id, run.model_bindings)
+        lease, runtime = await self._acquire_default_runtime(
+            run.thread_id,
+            run.model_bindings,
+            profile=run.resolved_runtime_profile,
+        )
         if runtime is None:
             return None
         try:
@@ -918,16 +975,20 @@ class JsonRpcServer:
             raise
 
     async def _acquire_default_runtime(
-        self, thread_id: str, model_bindings: ThreadModelBindings | None = None
+        self,
+        thread_id: str,
+        model_bindings: ThreadModelBindings | None = None,
+        *,
+        profile: RuntimeProfile | None = None,
     ) -> tuple[AgentRuntimeLease | None, AgentRuntime | None]:
-        """为 run 或手动压缩取得当前 Profile 的 Runtime，按 thread 持久化绑定。"""
+        """为 Run 或手动压缩取得按实际模型计算的共享 Runtime。"""
         if self._allow_echo:
             return None, None
         self._load_config()
         config = self._config
         if config is None or config.model is None:
             return None, None
-        profile = await self._resolve_runtime_profile(thread_id, config, model_bindings)
+        profile = profile or await self._resolve_runtime_profile(thread_id, config, model_bindings)
         pool = self._ensure_runtime_pool(config)
         lease = await pool.acquire(profile)
         return lease, lease.runtime
@@ -938,7 +999,7 @@ class JsonRpcServer:
         config: Za38Config,
         model_bindings: ThreadModelBindings | None = None,
     ) -> RuntimeProfile:
-        """计算当前配置的 Profile，拒绝让已绑定 thread 静默切换执行环境。"""
+        """按本次实际模型计算可共享 Profile，不把它永久绑定到 Thread。"""
         from harness_agent.agent import (
             default_prompt_template_fingerprint,
             default_tool_catalog_fingerprint,
@@ -946,7 +1007,9 @@ class JsonRpcServer:
 
         store = await self._ensure_thread_store()
         registry = self._require_skills()
-        bindings = model_bindings or await self._resolve_thread_model_bindings(thread_id, config)
+        bindings = model_bindings
+        if bindings is None:
+            bindings, _, _ = await self._resolve_run_model_bindings(thread_id, config)
         if bindings is not None:
             selected_profile_id = bindings.runtime_primary().profile_id
             selected_model = bindings.runtime_primary().settings
@@ -978,11 +1041,8 @@ class JsonRpcServer:
             ),
             prompt_template_fingerprint=default_prompt_template_fingerprint(),
         )
-        bound = await store.get_runtime_profile(thread_id)
-        if bound is None:
-            await store.save_runtime_profile(thread_id, profile)
-        elif bound.profile_key != profile.profile_key:
-            raise ThreadStoreError("THREAD_RUNTIME_PROFILE_MISMATCH")
+        # Runtime Profile 只按配置去重保存；thread 级绑定仅用于读取 v4/v5 legacy。
+        await store.save_runtime_profile(thread_id, profile, bind_thread=False)
 
         self._runtime_build_specs[profile.profile_key] = _RuntimeBuildSpec(
             config=config,
@@ -990,57 +1050,77 @@ class JsonRpcServer:
             skill_registry=registry,
             model_settings=selected_model,
         )
-        if self._runtime_pool is not None and self._default_profile_key not in {
-            None,
-            profile.profile_key,
-        }:
-            # 配置变更不打断旧 run：旧 Runtime 仅进入 DRAINING，待其 lease/run
-            # 全部释放后关闭；新请求只会构建/租用新的 Profile。
-            await self._runtime_pool.evict(
-                self._default_profile_key,
-                reason="profile_invalidated",
-                force=True,
-            )
-        self._default_profile_key = profile.profile_key
         return profile
 
-    async def _resolve_thread_model_bindings(
+    async def _resolve_run_model_bindings(
         self,
         thread_id: str,
         config: Za38Config,
         *,
-        requested_executor_profile: str | None = None,
-        persist: bool = True,
-    ) -> ThreadModelBindings | None:
-        """读取或首次冻结 Thread 模型角色；legacy Runtime 绝不被推测性迁移。"""
+        requested_primary_profile: str | None = None,
+        legacy_model_profile: str | None = None,
+    ) -> tuple[ThreadModelBindings | None, dict[str, object], dict[str, object]]:
+        """按请求、最近 Run、legacy 绑定和配置默认顺序解析一次 Run 的主模型。"""
+        if (
+            requested_primary_profile is not None
+            and legacy_model_profile is not None
+            and requested_primary_profile != legacy_model_profile
+        ):
+            raise ConfigError("MODEL_SELECTION_CONFLICT")
         if config.model_catalog is None:
-            if requested_executor_profile is not None:
+            if requested_primary_profile is not None or legacy_model_profile is not None:
                 raise ConfigError("MODEL_CATALOG_UNAVAILABLE")
-            return None
+            if config.model is None or config.model_profile is None:
+                raise ConfigError("MODEL_CONFIGURATION_REQUIRED")
+            profile_id = config.model_profile
+            return (
+                None,
+                {"primary_profile": profile_id},
+                {
+                    "profile": {
+                        "id": profile_id,
+                        "model": config.model.name,
+                        "provider_label": config.model.provider_label,
+                        "context_window_tokens": config.model.context_window_tokens,
+                        "capabilities": sorted(config.model.capabilities),
+                        "is_default": True,
+                        "available": config.model.api_key_source() != "missing",
+                        "unavailable_reason": None,
+                        "source": "compatibility",
+                    },
+                    "source": "config-default",
+                },
+            )
         store = await self._ensure_thread_store()
         router = ModelRouter(config.model_catalog)
-        record = await store.get_model_bindings(thread_id)
-        if record is not None:
-            bindings = router.from_record(record)
-            if (
-                requested_executor_profile is not None
-                and bindings.runtime_primary().profile_id != requested_executor_profile
-            ):
-                raise ThreadStoreError("THREAD_MODEL_PROFILE_IMMUTABLE")
-            return bindings
-        if await store.get_runtime_profile(thread_id) is not None:
-            if requested_executor_profile is not None:
-                raise ThreadStoreError("THREAD_MODEL_PROFILE_IMMUTABLE")
-            return None
-        bindings = router.bind_thread(requested_executor_profile)
-        if persist:
-            await store.save_model_bindings(thread_id, bindings.record())
-        return bindings
+        profile_id = requested_primary_profile or legacy_model_profile
+        source = "thread-primary" if requested_primary_profile is not None else "legacy-model-profile"
+        if profile_id is None:
+            latest = await store.get_latest_run_execution_binding(thread_id)
+            if latest is not None:
+                profile_id = latest.requested_selection["primary_profile"]
+                source = "thread-recovered"
+        if profile_id is not None:
+            bindings = router.resolve_run(str(profile_id))
+        else:
+            record = await store.get_model_bindings(thread_id)
+            if record is not None:
+                bindings = router.from_record(record)
+                source = "legacy-binding"
+            else:
+                bindings = router.resolve_run()
+                source = "config-default"
+        primary = bindings.runtime_primary()
+        return (
+            bindings,
+            {"primary_profile": primary.profile_id},
+            {"profile": primary.picker_summary(), "source": source},
+        )
 
     async def _thread_model_binding_summary(
         self, thread_id: str, config: Za38Config
     ) -> dict[str, object]:
-        """返回可显示的绑定快照；不存在或 legacy 时不尝试改写 Thread。"""
+        """返回 v5 兼容绑定摘要；新 Run 选择和事实由单独的表返回。"""
         store = await self._ensure_thread_store()
         record = await store.get_model_bindings(thread_id)
         if record is not None:
@@ -1574,7 +1654,6 @@ class JsonRpcServer:
                 logger.warning("RuntimePool closed with %s resource failures", len(failures))
         self._runtime_artifacts.clear()
         self._runtime_build_specs.clear()
-        self._default_profile_key = None
         await self._provider_client_pool.aclose()
 
     async def _runtime_pool_diagnostics(self) -> dict[str, object]:

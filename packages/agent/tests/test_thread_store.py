@@ -263,6 +263,61 @@ async def test_thread_store_migrates_and_preserves_immutable_model_bindings(tmp_
     await store.close()
 
 
+async def test_thread_store_records_run_binding_and_recovers_latest_selection(tmp_path: Path) -> None:
+    """Run 选择和实际模型须与首条 Thread 索引同事务写入，并可按时间恢复。"""
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    store = await ThreadStore.open(project=project, home=home)
+    primary = {
+        "profile": {
+            "id": "fast",
+            "model": "fast-model",
+            "provider_label": "Gateway",
+            "context_window_tokens": 128000,
+            "capabilities": ["streaming", "tool-calling"],
+            "is_default": True,
+            "available": True,
+            "unavailable_reason": None,
+            "source": "user",
+        },
+        "source": "thread-primary",
+    }
+    assert await store.record_run_start(
+        "thread-run",
+        "run-1",
+        "使用 fast",
+        requested_selection={"primary_profile": "fast"},
+        actual_primary_binding=primary,
+        runtime_profile_id="123456789abc",
+    )
+    # 同一请求重试不重复索引或绑定；不同内容则 fail closed。
+    assert not await store.record_run_start(
+        "thread-run",
+        "run-1",
+        "使用 fast",
+        requested_selection={"primary_profile": "fast"},
+        actual_primary_binding=primary,
+        runtime_profile_id="123456789abc",
+    )
+    with pytest.raises(ThreadStoreError, match="RUN_EXECUTION_BINDING_CONFLICT"):
+        await store.record_run_start(
+            "thread-run",
+            "run-1",
+            "使用 pro",
+            requested_selection={"primary_profile": "pro"},
+            actual_primary_binding=primary,
+            runtime_profile_id="123456789abc",
+        )
+    latest = await store.get_latest_run_execution_binding("thread-run")
+    assert latest is not None
+    assert latest.requested_selection == {"primary_profile": "fast"}
+    assert latest.actual_primary_binding == primary
+    assert latest.runtime_profile_id == "123456789abc"
+    assert (await store.list_threads())[0].first_message == "使用 fast"
+    await store.close()
+
+
 async def test_thread_store_reports_future_schema_and_closed_store(tmp_path: Path) -> None:
     """未来 schema 不能被旧版静默写回，关闭连接后也不得继续读写。"""
     home = tmp_path / "home"

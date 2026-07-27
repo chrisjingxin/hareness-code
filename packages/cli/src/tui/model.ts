@@ -11,7 +11,7 @@ export type TuiRuntime = {
   modelName?: string
   /** 当前实际使用或待绑定的脱敏模型 Profile ID。 */
   modelProfileId?: string
-  /** 模型选择尚未绑定到新 Thread 时显示待生效状态。 */
+  /** 模型选择将在当前或下一 Thread 的后续 Run 生效时显示待生效状态。 */
   modelSelectionPending?: boolean
   modelConfigured: boolean
   startupError?: string
@@ -114,7 +114,7 @@ function modelLabel(runtime: TuiRuntime): string {
   if (!runtime.modelConfigured) return "模型未配置"
   const name = runtime.modelName ?? "已配置模型"
   const profile = runtime.modelProfileId ? `${runtime.modelProfileId} · ` : ""
-  return `${profile}${name}${runtime.modelSelectionPending ? "（待新 Thread）" : ""}`
+  return `${profile}${name}${runtime.modelSelectionPending ? "（下一次运行）" : ""}`
 }
 
 /** 判断握手字段是否为普通对象，拒绝 null 和数组。 */

@@ -103,8 +103,8 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
   const [threadPicker, setThreadPicker] = useState<ThreadPickerState>({ visible: false, loading: false, query: "", selectedIndex: 0 })
   const [modelPicker, setModelPicker] = useState<ModelPickerState>({ visible: false, loading: false, query: "", selectedIndex: 0 })
   const [models, setModels] = useState<readonly ModelProfile[]>([])
-  const [pendingModelProfile, setPendingModelProfile] = useState<string | undefined>(undefined)
-  const [displayedModelProfile, setDisplayedModelProfile] = useState<ModelProfile | undefined>(undefined)
+  const [threadModelSelection, setThreadModelSelection] = useState<string | undefined>(undefined)
+  const [actualModelProfile, setActualModelProfile] = useState<ModelProfile | undefined>(undefined)
   const [modelBindingDialog, setModelBindingDialog] = useState<ModelBindingDialog | undefined>(undefined)
   const [commandDialog, setCommandDialog] = useState<CommandDialog | undefined>(undefined)
   const [threads, setThreads] = useState<readonly ThreadPickerItem[]>([])
@@ -125,12 +125,15 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
   const initialResumeRef = useRef(resume === true)
   const openingThreadRef = useRef(false)
   const terminal = useTerminalDimensions()
+  const selectedModelProfile = models.find(model => model.id === threadModelSelection)
+  const displayedModelProfile = selectedModelProfile ?? actualModelProfile
+  const supportsThreadModelSelection = runtime.capabilities?.includes("models.select") === true
   const displayedRuntime: TuiRuntime = displayedModelProfile
     ? {
       ...runtime,
       modelName: displayedModelProfile.model,
       modelProfileId: displayedModelProfile.id,
-      modelSelectionPending: pendingModelProfile === displayedModelProfile.id,
+      modelSelectionPending: threadModelSelection !== undefined && threadModelSelection !== actualModelProfile?.id,
       modelConfigured: true,
     }
     : runtime
@@ -172,6 +175,10 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
         : { type: "question", request_id: requestId, answers: {} })
     }
     const eventListener = (event: import("@za38/protocol").EventEnvelope) => {
+      if (event.type === "run.started" && event.thread_id === stateRef.current.threadId) {
+        const actual = modelProfileFromRunStarted(event.payload)
+        if (actual) setActualModelProfile(actual)
+      }
       if (["interaction.resolved", "run.completed", "run.cancelled", "run.failed"].includes(event.type)) {
         settleAbandoned(stateRef.current.pendingApproval?.requestId ?? stateRef.current.pendingQuestion?.requestId)
       }
@@ -249,20 +256,35 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     const armedSkill = requestedSkill ?? (selectedSkill
       ? { id: selectedSkill.id, args: message }
       : undefined)
-    // 仅无 Thread 的首次 run 携带待选 Profile；服务端在创建 Thread 时原子绑定它。
-    const requestedModelProfile = current.threadId ? undefined : pendingModelProfile
+    // 新 minor 每次携带当前 Thread 的下一次选择；旧端仅保留首次新 Thread 的兼容字段。
+    const modelSelection = supportsThreadModelSelection && threadModelSelection
+      ? { primary_profile: threadModelSelection }
+      : undefined
+    const requestedModelProfile = !supportsThreadModelSelection && !current.threadId
+      ? threadModelSelection
+      : undefined
     if (armedSkill && !requestedSkill) setSelectedSkill(undefined)
     commit(state => startRun(state, run, message))
     try {
-      const accepted = await client.query(message, run.threadId, run.runId, armedSkill, requestedModelProfile)
+      const accepted = await client.query(
+        message,
+        run.threadId,
+        run.runId,
+        armedSkill,
+        requestedModelProfile,
+        modelSelection,
+      )
       if (!accepted.accepted || accepted.thread_id !== run.threadId || accepted.run_id !== run.runId) {
         throw new Error("Agent 返回的 run 标识与请求不一致")
       }
-      if (requestedModelProfile) setPendingModelProfile(undefined)
+      if (!supportsThreadModelSelection && requestedModelProfile) {
+        setActualModelProfile(models.find(model => model.id === requestedModelProfile))
+        setThreadModelSelection(undefined)
+      }
     } catch (error) {
       commit(state => markRunFailed(state, run.runId, errorMessage(error)))
     }
-  }, [client, commit, pendingModelProfile, selectedSkill])
+  }, [client, commit, models, selectedSkill, supportsThreadModelSelection, threadModelSelection])
 
   /** 解析 Agent 发起的审批 request，由 JsonRpcPeer 自动回写标准 response。 */
   const respondApproval = useCallback(async (decision: "approve" | "reject") => {
@@ -333,10 +355,10 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     setThreadPicker(current => ({ ...current, visible: false, loading: false, error: undefined }))
   }, [])
 
-  /** `/model` 只为尚未绑定的下一条新 Thread 选择 Profile；既有 Thread 保持不可变。 */
+  /** `/model` 在新协议中更新当前 Thread 的下一次 Run；旧协议保留首次绑定兼容。 */
   const openModelPicker = useCallback((initialQuery = "") => {
     const current = stateRef.current
-    if (current.threadId) {
+    if (current.threadId && !supportsThreadModelSelection) {
       void client.listModels(current.threadId).then(result => {
         const binding = result.thread_binding
         const executor = binding?.roles.executor ?? binding?.roles.primary
@@ -355,20 +377,23 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
       return
     }
     setModelPicker({ visible: true, loading: true, query: initialQuery, selectedIndex: 0 })
-    void client.listModels().then(result => {
+    void client.listModels(current.threadId).then(result => {
       setModels(result.profiles)
+      if (result.thread_selection?.primary_profile) {
+        setThreadModelSelection(result.thread_selection.primary_profile)
+      }
+      const actual = result.last_run_binding?.profile
+      if (actual) setActualModelProfile(actual)
       setModelPicker(value => value.visible ? { ...value, loading: false } : value)
     }).catch(error => {
       setModelPicker(value => value.visible
         ? { ...value, loading: false, error: `模型目录读取失败：${errorMessage(error)}` }
         : value)
     })
-  }, [client])
+  }, [client, supportsThreadModelSelection])
 
-  /** 取消模型选择会回到配置默认值，避免旧的待绑定选择在后续输入中意外生效。 */
+  /** 关闭选择器不修改已确认的 Thread 选择，避免取消搜索意外撤销模型切换。 */
   const closeModelPicker = useCallback(() => {
-    setPendingModelProfile(undefined)
-    setDisplayedModelProfile(undefined)
     setModelPicker(current => ({ ...current, visible: false, loading: false, error: undefined }))
   }, [])
 
@@ -394,14 +419,14 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
         return
       case "local-action":
         if (result.action === "clear-thread") {
-          setPendingModelProfile(undefined)
-          setDisplayedModelProfile(undefined)
+          setThreadModelSelection(undefined)
+          setActualModelProfile(undefined)
           commit(clearThread)
           return
         }
         if (await cancelActiveRun({ exitOnRepeatedCancellation: false })) {
-          setPendingModelProfile(undefined)
-          setDisplayedModelProfile(undefined)
+          setThreadModelSelection(undefined)
+          setActualModelProfile(undefined)
           commit(clearThread)
         } else {
           commit(current => appendNotice(current, "未能取消当前任务，已保留当前 thread。请等待任务结束后重试。"))
@@ -573,10 +598,14 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     setThreadPicker(current => ({ ...current, loading: true, error: undefined }))
     try {
       const opened = threadOpenResult(await client.openThread(thread.threadId))
-      let boundModel: ModelProfile | undefined
+      let recoveredSelection: string | undefined
+      let actualModel: ModelProfile | undefined
       try {
         const result = await client.listModels(opened.threadId)
-        boundModel = result.thread_binding?.roles.executor ?? result.thread_binding?.roles.primary
+        recoveredSelection = result.thread_selection?.primary_profile
+        actualModel = result.last_run_binding?.profile
+          ?? result.thread_binding?.roles.executor
+          ?? result.thread_binding?.roles.primary
       } catch {
         // 模型绑定读取失败不阻断历史恢复；此时回退到初始化摘要，避免误报实际模型。
       }
@@ -584,8 +613,8 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
       setSelectedSkill(undefined)
       setExpandedTools(new Set())
       setShowToolDetails(false)
-      setPendingModelProfile(undefined)
-      setDisplayedModelProfile(boundModel)
+      setThreadModelSelection(recoveredSelection)
+      setActualModelProfile(actualModel)
       commit(() => restoreThread(opened.threadId, opened.messages))
       setThreadPicker({ visible: false, loading: false, query: "", selectedIndex: 0 })
     } catch (error) {
@@ -595,7 +624,7 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     }
   }, [clearDraft, client, commit])
 
-  /** 将可用 Profile 写入 Composer 的一次性待绑定状态；Enter 显式确认后才会生效。 */
+  /** 将可用 Profile 写入当前 Thread 的下一次 Run 选择；不修改静态配置。 */
   const selectModel = useCallback((model: ModelProfile) => {
     if (!model.available) {
       setModelPicker(current => ({
@@ -604,19 +633,18 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
       }))
       return
     }
-    setPendingModelProfile(model.id)
-    setDisplayedModelProfile(model)
-    // 选择与取消不同：确认后保留 pending 状态，直到下一新 Thread 成功启动或 /new 清理它。
+    setThreadModelSelection(model.id)
     setModelPicker(current => ({ ...current, visible: false, loading: false, error: undefined }))
-    commit(current => appendNotice(current, `已选择 ${model.provider_label} · ${model.model}；将在下一条新 Thread 中生效。`))
+    const target = stateRef.current.threadId ? "当前 Thread 的下一次运行" : "下一次新 Thread 运行"
+    commit(current => appendNotice(current, `已选择 ${model.provider_label} · ${model.model}；将在${target}生效。`))
   }, [commit])
 
   /** 已绑定 Thread 的说明框只允许回到空白 Composer；不修改既有绑定。 */
   const resolveModelBindingDialog = useCallback((createNewThread: boolean) => {
     setModelBindingDialog(undefined)
     if (!createNewThread) return
-    setPendingModelProfile(undefined)
-    setDisplayedModelProfile(undefined)
+    setThreadModelSelection(undefined)
+    setActualModelProfile(undefined)
     commit(clearThread)
   }, [commit])
 
@@ -997,7 +1025,7 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
         restoreFocusRef={inputRef}
         shouldRestoreFocus={!state.activeRun}
         searchId="model-search"
-        title="选择下一新 Thread 的模型"
+        title={state.threadId ? "选择当前 Thread 下一次运行的模型" : "选择下一次新 Thread 运行的模型"}
         searchPlaceholder="按 Profile、模型或 Provider 搜索"
         emptyMessage="没有匹配的模型 Profile"
         itemKey={model => model.id}
@@ -1099,6 +1127,35 @@ function skillMenuItem(value: unknown): SkillMenuItem | undefined {
     enabled: record.enabled !== false,
     userInvocable: record.user_invocable !== false,
     argumentHint: typeof record.argument_hint === "string" ? record.argument_hint : undefined,
+  }
+}
+
+/** 从 run.started 的权威脱敏绑定提取实际模型，畸形事件不得改写本地选择。 */
+function modelProfileFromRunStarted(payload: Record<string, unknown>): ModelProfile | undefined {
+  const primary = payload.primary_model
+  if (!primary || typeof primary !== "object") return undefined
+  const profile = (primary as Record<string, unknown>).profile
+  if (!profile || typeof profile !== "object") return undefined
+  const value = profile as Record<string, unknown>
+  if (
+    typeof value.id !== "string" || !value.id
+    || typeof value.model !== "string" || !value.model
+    || typeof value.provider_label !== "string" || !value.provider_label
+    || typeof value.context_window_tokens !== "number" || !Number.isInteger(value.context_window_tokens)
+    || !Array.isArray(value.capabilities) || !value.capabilities.every(item => typeof item === "string")
+    || typeof value.is_default !== "boolean" || typeof value.available !== "boolean"
+    || typeof value.source !== "string" || !value.source
+  ) return undefined
+  return {
+    id: value.id,
+    model: value.model,
+    provider_label: value.provider_label,
+    context_window_tokens: value.context_window_tokens,
+    capabilities: value.capabilities,
+    is_default: value.is_default,
+    available: value.available,
+    unavailable_reason: typeof value.unavailable_reason === "string" ? value.unavailable_reason : null,
+    source: value.source,
   }
 }
 

@@ -7,12 +7,12 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 PROTOCOL_MAJOR = 2
-PROTOCOL_MINOR = 6
+PROTOCOL_MINOR = 7
 MAX_FRAME_BYTES = 8388608
 MAX_TOOL_PAYLOAD_BYTES = 1048576
 CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","threads.list","threads.open","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","mcp.status","mcp.add","mcp.remove","models.list","shutdown"]
 SERVER_METHODS = ["event","request"]
-SERVER_CAPABILITIES = ["run.cancel","run.multithread","interactive.approval","interactive.question","config.read","threads.read","context.manage","skills.read","skills.manage","mcp.read","models.read"]
+SERVER_CAPABILITIES = ["run.cancel","run.multithread","interactive.approval","interactive.question","config.read","threads.read","context.manage","skills.read","skills.manage","mcp.read","models.read","models.select"]
 EVENT_TYPES = ["run.started","skill.loaded","content.delta","thinking.delta","tool.started","tool.delta","tool.completed","context.updated","interaction.resolved","run.completed","run.cancelled","run.failed"]
 
 class StrictModel(BaseModel):
@@ -55,12 +55,21 @@ class ModelProfile(StrictModel):
     unavailable_reason: str | None = None
     source: str = Field(min_length=1)
 
+class ThreadModelSelection(StrictModel):
+    primary_profile: str = Field(min_length=1)
+
+class RunPrimaryModelBinding(StrictModel):
+    profile: ModelProfile
+    source: str = Field(min_length=1)
+    runtime_profile_id: str = Field(min_length=1)
+
 class RunStartParams(StrictModel):
     message: str = Field(min_length=1)
     thread_id: str | None = None
     run_id: str | None = None
     requested_skill: RequestedSkill | None = None
     model_profile: str | None = Field(default=None, min_length=1)
+    model_selection: ThreadModelSelection | None = None
 
 class RunCancelParams(StrictModel):
     thread_id: str = Field(min_length=1)
@@ -114,6 +123,8 @@ class McpRemoveParams(StrictModel):
 class ModelsListResult(StrictModel):
     profiles: list[ModelProfile]
     thread_binding: ThreadModelBinding | None = None
+    thread_selection: ThreadModelSelection | None = None
+    last_run_binding: RunPrimaryModelBinding | None = None
 class EventEnvelope(StrictModel):
     event_id: str = Field(min_length=1)
     type: str = Field(min_length=1)
@@ -128,7 +139,7 @@ class EventEnvelope(StrictModel):
     @model_validator(mode="after")
     def validate_known_payload(self) -> "EventEnvelope":
         fields = {
-            "run.started": {"resumed", "skills_snapshot_id"}, "skill.loaded": {"skill_id", "source", "version", "snapshot_id"}, "content.delta": {"text"}, "thinking.delta": {"text"},
+            "run.started": {"resumed", "skills_snapshot_id", "primary_model", "runtime_profile_id"}, "skill.loaded": {"skill_id", "source", "version", "snapshot_id"}, "content.delta": {"text"}, "thinking.delta": {"text"},
             "tool.started": {"tool_call_id", "name"},
             "tool.delta": {"tool_call_id", "arguments_delta", "output_delta", "truncated", "original_bytes"},
             "tool.completed": {"tool_call_id", "result"},
