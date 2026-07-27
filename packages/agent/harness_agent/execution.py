@@ -59,7 +59,7 @@ def create_execution_context(
         # 显式关闭继承环境，避免模型凭据、云认证等无意暴露给本机 shell。
         backend = LocalShellBackend(
             root_dir=workspace,
-            virtual_mode=False,
+            virtual_mode=True,
             inherit_env=False,
             env=_local_tool_environment(),
         )

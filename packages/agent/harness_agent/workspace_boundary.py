@@ -3,6 +3,14 @@
 本模块只限制 deepagents 内置文件工具，避免本机模式的 ``LocalShellBackend``
 因绝对路径、``..`` 或符号链接而访问 ``--cwd`` 以外的文件。它不是 shell
 沙箱，``execute``、MCP 与企业远端 sandbox 由各自的安全机制负责。
+
+路径格式约定
+------------
+deepagents 的 ``FilesystemMiddleware`` 在每个工具执行前调用
+``validate_path()``，该函数**拒绝 Windows 盘符路径**（如 ``D:\\code``），
+只接受以 ``/`` 开头的虚拟路径。因此本中间件在验证前将 Windows 盘符路径
+转换为虚拟路径（如 ``/packages/cli``），使后端（``virtual_mode=True``）
+能正确解析。
 """
 
 from __future__ import annotations
@@ -37,23 +45,49 @@ class WorkspacePathPolicy:
         """解析工作区根目录，作为后续所有 containment 比较的唯一基准。"""
         self.workspace = Path(workspace).resolve(strict=False)
 
-    def validate_direct_path(self, value: object, *, tool_name: str) -> Path:
-        """验证直接文件工具的绝对路径并返回 canonical 路径。
+    def to_virtual_path(self, value: str) -> str:
+        """将任意路径格式转换为 ``/`` 开头的虚拟路径。
 
-        ``Path.resolve(strict=False)`` 会解析已存在的父级符号链接，因此即使
-        目标文件尚未创建，也能在写入前发现通过工作区内链接逃逸的路径。
+        deepagents 的 ``validate_path()`` 拒绝 Windows 盘符路径，只接受
+        以 ``/`` 开头的虚拟路径。本方法负责在中间件层完成格式转换：
+
+        - 已是 ``/`` 开头的虚拟路径 → 原样返回
+        - Windows 盘符路径（如 ``D:\\code\\project\\src``）→ 去掉工作区
+          前缀后加 ``/``（如 ``/src``）；若不在工作区内则原样返回（后续
+          验证会拒绝）
+        - 其他格式 → 原样返回
         """
-        path = self._require_path_string(value, tool_name=tool_name, field="path")
-        if not path.is_absolute():
-            raise ValueError("文件路径必须是绝对路径")
-        return self._resolve_inside_workspace(path, tool_name=tool_name)
+        if not isinstance(value, str) or not value:
+            return value
+        # 已是虚拟路径。
+        if value.startswith("/"):
+            return value
+        # Windows 盘符路径 → 尝试转为虚拟路径。
+        if _WINDOWS_ABSOLUTE_PATH.match(value):
+            try:
+                resolved = Path(value).resolve(strict=False)
+                rel = resolved.relative_to(self.workspace)
+                return "/" + rel.as_posix()
+            except (ValueError, OSError, RuntimeError):
+                # 不在工作区内或解析失败，原样返回，由后续验证拒绝。
+                return value
+        return value
+
+    def validate_direct_path(self, value: object, *, tool_name: str) -> Path:
+        """验证直接文件工具的路径并返回 canonical 路径。
+
+        接受 ``/`` 开头的虚拟路径和 OS 绝对路径。虚拟路径先拼接到工作区
+        根目录再解析，确保 containment 检查正确。
+        """
+        path_str = self._require_path_string(value, tool_name=tool_name, field="path")
+        resolved = self._resolve_path_string(path_str, tool_name=tool_name)
+        return resolved
 
     def validate_search_path(self, value: object, *, tool_name: str) -> Path:
         """验证 glob/grep 显式指定的搜索根目录。"""
-        path = self._require_path_string(value, tool_name=tool_name, field="path")
-        if not path.is_absolute():
-            raise ValueError("搜索根目录必须是绝对路径")
-        return self._resolve_inside_workspace(path, tool_name=tool_name)
+        path_str = self._require_path_string(value, tool_name=tool_name, field="path")
+        resolved = self._resolve_path_string(path_str, tool_name=tool_name)
+        return resolved
 
     def validate_search_pattern(self, value: object, *, tool_name: str, field: str) -> None:
         """拒绝可把 glob 搜索根移出工作区的绝对或父级路径模式。"""
@@ -65,13 +99,10 @@ class WorkspacePathPolicy:
         if ".." in PurePosixPath(normalized).parts:
             raise ValueError(f"{field} 不能包含 '..' 路径段")
 
-    def _require_path_string(self, value: object, *, tool_name: str, field: str) -> Path:
+    def _require_path_string(self, value: object, *, tool_name: str, field: str) -> str:
         """规范化输入类型，拒绝目录穿越和 UNC 设备路径。
 
-        Windows 盘符绝对路径（如 ``D:\\code``）在 Windows 宿主上是合法工作区
-        路径，containment 由 ``_resolve_inside_workspace`` 的 canonical 比较负责；
-        此处只拒绝 UNC 路径，避免 ``\\\\server\\share`` 和 ``\\?\\`` 设备命名空间
-        绕过 ``resolve`` 的 containment 检查。
+        返回原始字符串（不做 Path 转换），由调用方决定如何解析。
         """
         if not isinstance(value, str) or not value:
             raise ValueError(f"{field} 必须是非空字符串")
@@ -80,20 +111,26 @@ class WorkspacePathPolicy:
             raise ValueError("不支持 UNC 文件路径")
         if ".." in PurePosixPath(normalized).parts:
             raise ValueError("文件路径不能包含 '..' 路径段")
-        return Path(value)
+        return value
 
-    def _resolve_inside_workspace(self, path: Path, *, tool_name: str) -> Path:
-        """解析符号链接并验证 canonical 路径仍是工作区后代。"""
+    def _resolve_path_string(self, raw: str, *, tool_name: str) -> Path:
+        """将路径字符串解析为真实 OS 路径并验证 containment。
+
+        ``/`` 开头的虚拟路径拼接到工作区根目录后解析；OS 绝对路径直接
+        解析。两种方式最终都通过 ``relative_to`` 检查 containment。
+        """
+        if raw.startswith("/"):
+            # 虚拟路径：拼接到工作区根目录。
+            real = (self.workspace / raw.lstrip("/")).resolve(strict=False)
+        else:
+            real = Path(raw).resolve(strict=False)
         try:
-            resolved = path.resolve(strict=False)
-            resolved.relative_to(self.workspace)
-        except (OSError, RuntimeError, ValueError) as exc:
-            # ``relative_to`` 的 ValueError 与解析中的 symlink loop 都统一转为
-            # 工具可理解的拒绝，避免路径解析异常泄漏到 Agent 主循环。
+            real.relative_to(self.workspace)
+        except (ValueError, OSError, RuntimeError) as exc:
             raise ValueError(
                 f"{tool_name} 只能访问工作目录 `{self.workspace}` 内的文件"
             ) from exc
-        return resolved
+        return real
 
 
 class WorkspaceBoundaryMiddleware(AgentMiddleware[dict[str, Any], ContextT, ResponseT]):
@@ -105,12 +142,30 @@ class WorkspaceBoundaryMiddleware(AgentMiddleware[dict[str, Any], ContextT, Resp
         self.policy = WorkspacePathPolicy(workspace)
 
     def _validate_tool_call(self, request: ToolCallRequest) -> ToolMessage | None:
-        """检查受管工具参数；拒绝时构造错误 ToolMessage，成功则返回 None。"""
+        """检查受管工具参数；拒绝时构造错误 ToolMessage，成功则返回 None。
+
+        在验证前将 Windows 盘符路径转换为虚拟路径并写回 args，使
+        deepagents 的 ``validate_path()`` 和 ``virtual_mode=True`` 后端
+        都能正确处理。
+        """
         tool_call = request.tool_call
         tool_name = str(tool_call.get("name", ""))
         args = tool_call.get("args") or {}
         if not isinstance(args, dict):
             return self._rejection(tool_name, tool_call.get("id"), "工具参数必须是对象")
+
+        # ── 路径归一化：Windows 盘符路径 → 虚拟路径 ──
+        # 直接修改 args dict，使 handler 和后端收到 validate_path 可接受的格式。
+        # 注意：/.harness 虚拟路径不能归一化，必须先由 _is_virtual_path 拦截。
+        if tool_name in _DIRECT_PATH_ARGUMENTS:
+            field = _DIRECT_PATH_ARGUMENTS[tool_name]
+            raw = args.get(field)
+            if isinstance(raw, str) and raw and not _is_virtual_path(raw):
+                args[field] = self.policy.to_virtual_path(raw)
+        elif tool_name in _SEARCH_TOOLS and args.get("path") is not None:
+            raw = args["path"]
+            if isinstance(raw, str) and raw and not _is_virtual_path(raw):
+                args["path"] = self.policy.to_virtual_path(raw)
 
         try:
             if tool_name in _DIRECT_PATH_ARGUMENTS:
@@ -156,8 +211,8 @@ class WorkspaceBoundaryMiddleware(AgentMiddleware[dict[str, Any], ContextT, Resp
         return ToolMessage(
             content=(
                 f"工作区边界拒绝 {tool_name}：{reason}。"
-                "请使用当前工作目录内的绝对路径；glob/grep 可省略 path，"
-                "此时会从当前工作目录搜索。"
+                "请使用当前工作目录内的绝对路径；"
+                "glob/grep 可省略 path 参数，此时默认从工作区根目录搜索。"
             ),
             name=tool_name or "filesystem",
             tool_call_id=str(tool_call_id or "workspace-boundary"),

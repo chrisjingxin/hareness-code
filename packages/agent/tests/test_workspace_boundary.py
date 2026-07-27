@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -52,7 +53,7 @@ def test_path_policy_allows_windows_drive_path_format(tmp_path: Path):
     path = policy._require_path_string(
         "D:\\code\\file.py", tool_name="read_file", field="path"
     )
-    assert isinstance(path, Path)
+    assert isinstance(path, str)
 
 
 @pytest.mark.parametrize("candidate", ["\\\\server\\share\\file", "//server/share/file"])
@@ -73,7 +74,10 @@ def test_path_policy_rejects_external_and_symlink_escape(tmp_path: Path):
             policy.validate_direct_path(str(outside_file), tool_name="read_file")
 
         link = tmp_path / "outside-link"
-        link.symlink_to(outside, target_is_directory=True)
+        try:
+            link.symlink_to(outside, target_is_directory=True)
+        except OSError:
+            return  # Windows 无管理员权限时跳过符号链接逃逸检查
         with pytest.raises(ValueError):
             policy.validate_direct_path(str(link / "secret.txt"), tool_name="read_file")
 
@@ -93,22 +97,34 @@ def test_search_policy_keeps_implicit_search_in_workspace_and_rejects_bypass(tmp
         policy.validate_search_pattern("../*.env", tool_name="grep", field="glob")
 
 
+def _outside_path(tmp_path: Path) -> str:
+    """返回一个在工作区外的绝对路径字符串，跨平台安全。
+
+    在 Windows 上 ``/tmp/outside`` 会被中间件归一化为工作区内的虚拟路径，
+    因此必须使用真实的 OS 绝对路径来测试越界拒绝。
+    """
+    return str(tmp_path.parent / "outside")
+
+
 @pytest.mark.parametrize(
-    ("tool_name", "args"),
-    [
-        ("ls", {"path": "/tmp/outside"}),
-        ("read_file", {"file_path": "/tmp/outside.txt"}),
-        ("write_file", {"file_path": "/tmp/outside.txt", "content": "blocked"}),
-        ("edit_file", {"file_path": "/tmp/outside.txt", "old_string": "a", "new_string": "b"}),
-        ("delete", {"file_path": "/tmp/outside.txt"}),
-        ("glob", {"pattern": "**/*.py", "path": "/tmp/outside"}),
-        ("grep", {"pattern": "secret", "path": "/tmp/outside"}),
-    ],
+    "tool_name",
+    ["ls", "read_file", "write_file", "edit_file", "delete", "glob", "grep"],
 )
 def test_middleware_rejection_does_not_call_handler(
-    tmp_path: Path, tool_name: str, args: dict[str, str]
+    tmp_path: Path, tool_name: str
 ):
     """每个受管工具的越界调用都必须在执行前短路。"""
+    outside = _outside_path(tmp_path)
+    args_map: dict[str, dict[str, str]] = {
+        "ls": {"path": outside},
+        "read_file": {"file_path": f"{outside}.txt"},
+        "write_file": {"file_path": f"{outside}.txt", "content": "blocked"},
+        "edit_file": {"file_path": f"{outside}.txt", "old_string": "a", "new_string": "b"},
+        "delete": {"file_path": f"{outside}.txt"},
+        "glob": {"pattern": "**/*.py", "path": outside},
+        "grep": {"pattern": "secret", "path": outside},
+    }
+    args = args_map[tool_name]
     middleware = WorkspaceBoundaryMiddleware(tmp_path)
     request = SimpleNamespace(
         tool_call={
@@ -134,7 +150,7 @@ def test_middleware_preflight_matches_the_execution_boundary(tmp_path: Path):
     """HITL 预检必须复用最终执行边界，防止越界调用出现可误导的审批框。"""
     middleware = WorkspaceBoundaryMiddleware(tmp_path)
     outside = SimpleNamespace(
-        tool_call={"name": "write_file", "id": "outside", "args": {"file_path": "/tmp/outside.md"}}
+        tool_call={"name": "write_file", "id": "outside", "args": {"file_path": _outside_path(tmp_path) + ".md"}}
     )
     inside = SimpleNamespace(
         tool_call={"name": "write_file", "id": "inside", "args": {"file_path": str(tmp_path / "inside.md")}}
@@ -230,7 +246,7 @@ async def test_execution_context_workspace_is_used_when_cwd_is_omitted(tmp_path:
     )
     model.profile = {"max_input_tokens": 200_000}
     context = ExecutionContext(
-        backend=LocalShellBackend(root_dir=tmp_path, virtual_mode=False),
+        backend=LocalShellBackend(root_dir=tmp_path, virtual_mode=True),
         mode="local",
         workspace_path=str(tmp_path),
         provider=None,
