@@ -172,6 +172,7 @@ export const commandRegistry = new CommandRegistry([
   { id: "thread.resume", name: "resume", aliases: ["continue", "threads"], description: "打开 thread 恢复选择器", source: { type: "builtin" }, presentation: "picker", suggested: true, requirements: { capabilities: ["threads.read"], requiresIdle: true } },
   { id: "model.select", name: "model", aliases: ["models"], description: "选择下一新 thread 的模型 Profile", source: { type: "builtin" }, presentation: "picker", suggested: true, argumentHint: "[query]", requirements: { capabilities: ["models.read"], requiresIdle: true } },
   { id: "skills.open", name: "skills", description: "打开 Skill 选择器", source: { type: "builtin" }, presentation: "picker", suggested: true, requirements: { capabilities: ["skills.read"] } },
+  { id: "mcp.manage", name: "mcp", description: "查看 MCP 服务器状态", source: { type: "builtin" }, presentation: "viewer", suggested: true },
 ])
 
 /** 兼容既有帮助渲染器；内容仍完全由 Registry 生成。 */

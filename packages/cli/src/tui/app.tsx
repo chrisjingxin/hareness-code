@@ -4,7 +4,7 @@ import { createCliRenderer, type KeyEvent, type ScrollBoxRenderable, type Textar
 import { createRoot, useKeyboard, useTerminalDimensions } from "@opentui/react"
 import { randomUUID } from "node:crypto"
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
-import type { InteractionRequestEnvelope, InteractionResponse, ModelProfile, RequestedSkill, ThreadMessage } from "@za38/protocol"
+import type { InteractionRequestEnvelope, InteractionResponse, McpAddResult, McpStatusResult, ModelProfile, RequestedSkill, ThreadMessage } from "@za38/protocol"
 
 import { IpcClient } from "../ipc/client"
 import {
@@ -30,7 +30,7 @@ import {
   type PromptHistoryCursor,
 } from "./prompt-history"
 import { resolveShortcut, type ScrollIntent } from "./shortcuts"
-import { registerCommonSyntaxParsers } from "./syntax-parsers"
+import { registerCommonSyntaxParsers, shutdownCommonSyntaxClient } from "./syntax-parsers"
 import { tuiTheme } from "./theme"
 import {
   appendNotice,
@@ -410,6 +410,82 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
           await applyCommandResult(result.onError(error))
         }
         return
+      case "mcp": {
+        const subArgs = result.argument?.trim()
+        if (!subArgs) {
+          try {
+            const mcpResult = await client.mcpStatus()
+            commit(current => appendNotice(current, formatMcpStatus(mcpResult)))
+          } catch (error) {
+            commit(state => appendNotice(state, `MCP 状态查询失败：${errorMessage(error)}`))
+          }
+          return
+        }
+
+        const [sub, ...rest] = subArgs.split(/\s+/)
+        if (sub === "add") {
+          const usage = "用法：/mcp add <name> <command> [args...]  或  /mcp add <name> --url <url> [--sse]"
+          if (rest.length < 2) {
+            commit(state => appendNotice(state, usage))
+            return
+          }
+          const name = rest[0]
+          const remaining = rest.slice(1)
+
+          const urlIdx = remaining.indexOf("--url")
+          const hasSse = remaining.includes("--sse")
+          if (urlIdx !== -1) {
+            const url = remaining[urlIdx + 1]
+            if (!url || url.startsWith("--")) {
+              commit(state => appendNotice(state, "错误：--url 后需要提供 URL\n" + usage))
+              return
+            }
+            try {
+              const addResult = await client.mcpAdd({
+                name,
+                transport: hasSse ? "sse" : "http",
+                url,
+              })
+              commit(state => appendNotice(state, formatMcpAddResult(name, addResult)))
+            } catch (error) {
+              commit(state => appendNotice(state, `添加 MCP 服务器失败：${errorMessage(error)}`))
+            }
+          } else {
+            const command_ = remaining[0]
+            const args = remaining.slice(1)
+            try {
+              const addResult = await client.mcpAdd({
+                name,
+                transport: "stdio",
+                command: command_,
+                args: args.length > 0 ? args : undefined,
+              })
+              commit(state => appendNotice(state, formatMcpAddResult(name, addResult)))
+            } catch (error) {
+              commit(state => appendNotice(state, `添加 MCP 服务器失败：${errorMessage(error)}`))
+            }
+          }
+          return
+        }
+
+        if (sub === "remove") {
+          if (rest.length < 1) {
+            commit(state => appendNotice(state, "用法：/mcp remove <name>"))
+            return
+          }
+          const name = rest[0]
+          try {
+            await client.mcpRemove(name)
+            commit(state => appendNotice(state, `已删除 MCP 服务器 "${name}"`))
+          } catch (error) {
+            commit(state => appendNotice(state, `删除 MCP 服务器失败：${errorMessage(error)}`))
+          }
+          return
+        }
+
+        commit(state => appendNotice(state, `未知子命令 "${sub}"\n用法：/mcp [add|remove] ...`))
+        return
+      }
       case "submit-prompt":
         await sendAgentMessage(result.prompt, result.requestedSkill)
     }
@@ -958,8 +1034,10 @@ export async function runTui(options: TuiOptions): Promise<void> {
       if (closed) return
       closed = true
       root.unmount()
-      renderer.destroy()
-      resolve()
+      void shutdownCommonSyntaxClient().finally(() => {
+        renderer.destroy()
+        resolve()
+      })
     }
     root.render(
       <TuiErrorBoundary onRequestExit={close}>
@@ -1070,7 +1148,6 @@ function filterThreads(threads: readonly ThreadPickerItem[], query: string): rea
   return threads.filter(thread => [thread.firstMessage, thread.latestMessage]
     .some(value => value.toLowerCase().includes(needle)))
 }
-
 /** Profile 搜索同时覆盖稳定 ID、模型名和可展示的 Provider 标签。 */
 function filterModels(models: readonly ModelProfile[], query: string): readonly ModelProfile[] {
   const needle = query.trim().toLowerCase()
@@ -1098,4 +1175,34 @@ function modelPickerRow(model: ModelProfile, context: SearchPickerRenderContext)
       {!context.compact ? <text flexGrow={1} fg={detailForeground} wrapMode="none" overflow="hidden">{detail}</text> : null}
     </>
   )
+}
+/** 将 MCP 添加结果格式化为时间线通知文本。 */
+function formatMcpAddResult(name: string, result: McpAddResult): string {
+  const lines = [`已添加 MCP 服务器 "${name}"`]
+  if (result.connected) {
+    lines.push(`连接成功，加载 ${result.tool_names.length} 个工具`)
+    if (result.tool_names.length > 0) {
+      lines.push(`工具：${result.tool_names.join(", ")}`)
+    }
+  } else {
+    lines.push("连接失败，配置已保存，重启后自动重试")
+    if (result.error) lines.push(`错误：${result.error}`)
+  }
+  return lines.join("\n")
+}
+
+/** 将 MCP 状态查询结果格式化为时间线通知文本。 */
+function formatMcpStatus(result: McpStatusResult): string {
+  if (!result.servers.length) {
+    return "未配置 MCP 服务器\n在 ~/.harness/config.toml 的 [[mcp.servers]] 中添加配置。"
+  }
+  const lines: string[] = ["MCP 服务器状态", ""]
+  for (const server of result.servers) {
+    const icon = server.status === "connected" ? "●" : server.status === "failed" ? "✗" : "○"
+    lines.push(`${icon} ${server.name}  [${server.transport}]  ${server.status}`)
+    if (server.error) lines.push(`  错误：${server.error}`)
+    if (server.tool_names.length) lines.push(`  工具：${server.tool_names.join(", ")}`)
+  }
+  lines.push("", `共 ${result.servers.length} 个服务器，${result.total_tools} 个工具`)
+  return lines.join("\n")
 }

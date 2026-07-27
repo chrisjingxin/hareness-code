@@ -85,6 +85,118 @@ test("/status 只展示本地运行摘要，不创建 Agent run", async () => {
   }
 })
 
+test("/mcp 查询 sidecar 并展示 MCP 服务器状态面板", async () => {
+  const { client, requests } = createMockClient()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        client,
+        runtime,
+        onRequestExit: () => undefined,
+      }), { width: 100, height: 28 })
+    })
+    await act(async () => {
+      await setup.mockInput.typeText("/mcp")
+      setup.mockInput.pressEnter()
+      await Bun.sleep(50)
+      await setup.flush()
+    })
+
+    const frame = await setup.waitForFrame(value => value.includes("MCP 服务器状态"))
+    expect(requests).toHaveLength(0)
+    expect(frame).toContain("filesystem")
+    expect(frame).toContain("connected")
+    expect(frame).toContain("github")
+    expect(frame).toContain("failed")
+    expect(frame).toContain("connection refused")
+    expect(frame).toContain("2 个服务器")
+    expect(frame).toContain("2 个工具")
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+  }
+})
+
+test("/mcp add 添加 stdio 服务器并显示结果", async () => {
+  const { client, requests } = createMockClient()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        client,
+        runtime,
+        onRequestExit: () => undefined,
+      }), { width: 100, height: 28 })
+    })
+    await act(async () => {
+      await setup.mockInput.typeText("/mcp add testfs npx -y @modelcontextprotocol/server-filesystem")
+      setup.mockInput.pressEnter()
+      await Bun.sleep(50)
+      await setup.flush()
+    })
+
+    const frame = await setup.waitForFrame(value => value.includes("已添加 MCP 服务器"))
+    expect(frame).toContain("testfs")
+    expect(frame).toContain("连接成功")
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+  }
+})
+
+test("/mcp remove 删除服务器并显示结果", async () => {
+  const { client, requests } = createMockClient()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        client,
+        runtime,
+        onRequestExit: () => undefined,
+      }), { width: 100, height: 28 })
+    })
+    await act(async () => {
+      await setup.mockInput.typeText("/mcp remove testfs")
+      setup.mockInput.pressEnter()
+      await Bun.sleep(50)
+      await setup.flush()
+    })
+
+    const frame = await setup.waitForFrame(value => value.includes("已删除 MCP 服务器"))
+    expect(frame).toContain("testfs")
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+  }
+})
+
+test("/mcp add 参数不足时显示用法提示", async () => {
+  const { client } = createMockClient()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        client,
+        runtime,
+        onRequestExit: () => undefined,
+      }), { width: 100, height: 28 })
+    })
+    await act(async () => {
+      await setup.mockInput.typeText("/mcp add")
+      setup.mockInput.pressEnter()
+      await Bun.sleep(0)
+      await setup.flush()
+    })
+
+    const frame = await setup.waitForFrame(value => value.includes("用法"))
+    expect(frame).toContain("/mcp add")
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+  }
+})
+
 test("/compact 请求当前空闲 thread 的上下文压缩并展示结果", async () => {
   const { client, requests, compactThreadIds } = createMockClient()
   let setup: Awaited<ReturnType<typeof testRender>>
@@ -903,6 +1015,36 @@ function createMockClient(options: { cancelled?: boolean; compactError?: string;
               artifact_ids: ["history-123456789"],
             },
           },
+        })}\n`)
+        continue
+      }
+      if (request.method === "mcp.status" && typeof request.id === "string") {
+        stdout.write(`${JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: {
+            servers: [
+              { name: "filesystem", transport: "stdio", status: "connected", tool_names: ["filesystem_read", "filesystem_write"] },
+              { name: "github", transport: "http", status: "failed", error: "connection refused", tool_names: [] },
+            ],
+            total_tools: 2,
+          },
+        })}\n`)
+        continue
+      }
+      if (request.method === "mcp.add" && typeof request.id === "string") {
+        stdout.write(`${JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: { added: true, connected: true, tool_names: ["new_tool"] },
+        })}\n`)
+        continue
+      }
+      if (request.method === "mcp.remove" && typeof request.id === "string") {
+        stdout.write(`${JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: { removed: true },
         })}\n`)
         continue
       }

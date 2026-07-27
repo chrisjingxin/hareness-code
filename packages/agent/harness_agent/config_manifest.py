@@ -59,7 +59,7 @@ class ConfigManifest:
         "ui": ConfigSection("ui", "planned", "ZC-042", frozenset()),
         "skills": ConfigSection("skills", "planned", "ZC-014", frozenset()),
         "agents": ConfigSection("agents", "planned", "ZC-015", frozenset()),
-        "mcp": ConfigSection("mcp", "planned", "ZC-005", frozenset()),
+        "mcp": ConfigSection("mcp", "implemented", "ZC-005", ACTIVE_TOML_SOURCES),
         "telemetry": ConfigSection("telemetry", "planned", "ZC-021", frozenset()),
         "updates": ConfigSection("updates", "planned", "ZC-025", frozenset()),
         "hooks": ConfigSection("hooks", "planned", "ZC-039", frozenset()),
@@ -153,6 +153,11 @@ class ConfigManifest:
                     raise ConfigManifestError("Configuration keys must be strings")
                 nested_path = (*path, key)
                 normalized_key = key.lower()
+                # mcp.servers[].env 的键是子进程环境变量名，值允许 ${VAR} 延迟展开
+                in_mcp_env = (
+                    len(nested_path) >= 3
+                    and nested_path[:3] == ("mcp", "servers", "env")
+                )
                 user_model_api_key = (
                     source is ConfigSource.USER
                     and len(nested_path) == 4
@@ -169,6 +174,7 @@ class ConfigManifest:
                     and not normalized_key.endswith("_env")
                     and normalized_key not in cls._NON_SECRET_TOKEN_FIELDS
                     and not user_model_api_key
+                    and not in_mcp_env
                 ):
                     raise ConfigManifestError(
                         f"{'.'.join(nested_path)} must reference an environment variable instead of a literal secret"
@@ -179,7 +185,11 @@ class ConfigManifest:
             for item in value:
                 cls._validate_scalars(item, path=path, source=source)
             return
-        if isinstance(value, str) and cls._ENV_INTERPOLATION.search(value):
+        # mcp.servers[].env 值允许 ${VAR} 语法，由 mcp.py 在连接时展开
+        in_mcp_env_value = (
+            len(path) >= 3 and path[:3] == ("mcp", "servers", "env")
+        )
+        if isinstance(value, str) and cls._ENV_INTERPOLATION.search(value) and not in_mcp_env_value:
             label = ".".join(path) or "configuration"
             raise ConfigManifestError(
                 f"{label} does not support $VAR interpolation; use an explicit *_env field"

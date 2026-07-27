@@ -392,9 +392,15 @@ def create_harness_agent(
 
     # 5. HITL（interrupt_on）。计划模式和 YOLO 不创建 HITL；前者由白名单
     # 中间件硬拒绝，后者仅关闭 Harness 人工确认而不影响其他硬性策略。
+    # MCP 等外部工具与 execute 同等对待，在 default/auto-edit 下需要审批。
     interrupt_on = interrupt_on_for_approval_mode(
         approval_mode,
         preflight=workspace_guard.allows_approval if workspace_guard is not None else None,
+        extra_interrupt_tools=(
+            frozenset(t.name for t in tools if hasattr(t, "name"))
+            if tools and mcp_server_info
+            else None
+        ),
     )
 
     # 6. 预算中间件在模型调用前管理工具结果和摘要；不暴露模型可调用压缩工具。

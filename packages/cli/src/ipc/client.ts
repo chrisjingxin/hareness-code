@@ -15,10 +15,14 @@ import {
   type InteractionResponse,
   type JsonRpcMessage,
   type JsonRpcResponse,
+  type McpAddParams,
+  type McpAddResult,
+  type McpRemoveResult,
+  type McpStatusResult,
+  type ModelsListResult,
   type RunCancelResult,
   type RequestedSkill,
   type RunStartResult,
-  type ModelsListResult,
   type ThreadsListResult,
   type ThreadsOpenResult,
 } from "@za38/protocol"
@@ -134,11 +138,25 @@ export class JsonRpcPeer extends EventEmitter {
     return this.call(Method.THREADS_OPEN, { thread_id: threadId }) as Promise<ThreadsOpenResult>
   }
 
+  /** 查询所有已配置 MCP 服务器的运行时连接状态和工具列表。 */
+  mcpStatus(): Promise<McpStatusResult> {
+    return this.call(Method.MCP_STATUS, {}) as Promise<McpStatusResult>
+  }
+
+  /** 添加 MCP 服务器到用户配置并尝试热连接。 */
+  mcpAdd(params: McpAddParams): Promise<McpAddResult> {
+    return this.call(Method.MCP_ADD, { ...params }) as Promise<McpAddResult>
+  }
+
+  /** 从用户配置中删除 MCP 服务器。 */
+  mcpRemove(name: string): Promise<McpRemoveResult> {
+    return this.call(Method.MCP_REMOVE, { name }) as Promise<McpRemoveResult>
+  }
+
   /** 读取 `/model` Picker 所需的脱敏 Profile 目录与可选 Thread 绑定。 */
   listModels(threadId?: string): Promise<ModelsListResult> {
     return this.call(Method.MODELS_LIST, { thread_id: threadId }) as Promise<ModelsListResult>
   }
-
   /** 请求 sidecar 优雅关闭，并给关闭响应设置较短超时。 */
   async shutdown(): Promise<void> {
     if (!this.closed) await this.call(Method.SHUTDOWN, {}, 2_000)

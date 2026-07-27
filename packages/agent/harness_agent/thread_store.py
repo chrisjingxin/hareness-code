@@ -328,6 +328,8 @@ class ThreadStore:
                     ),
                 )
                 await self._connection.commit()
+        except ThreadStoreError:
+            raise
         except aiosqlite.Error as exc:
             # 首条消息和模型绑定必须同成同败；写入中断时不能留下孤立绑定。
             try:
@@ -358,6 +360,66 @@ class ThreadStore:
                 await self._connection.commit()
         except aiosqlite.Error as exc:
             raise ThreadStoreError(f"CHECKPOINT_INDEX_REFRESH_FAILED: {exc}") from exc
+
+    async def get_model_bindings(self, thread_id: str) -> dict[str, object] | None:
+        """读取 Thread 首次运行时冻结的脱敏角色模型快照；无绑定 Thread 返回 None。"""
+        self._ensure_open()
+        try:
+            async with self._lock:
+                cursor = await self._connection.execute(
+                    """
+                    SELECT binding_record FROM harness_thread_model_bindings
+                    WHERE project_fingerprint = ? AND thread_id = ?
+                    """,
+                    (self._project_fingerprint, thread_id),
+                )
+                row = await cursor.fetchone()
+                await cursor.close()
+            if row is None:
+                return None
+            record = json.loads(str(row["binding_record"]))
+            if not isinstance(record, dict) or not isinstance(record.get("roles"), dict):
+                raise ThreadStoreError("THREAD_MODEL_BINDING_INVALID")
+            return record
+        except ThreadStoreError:
+            raise
+        except (aiosqlite.Error, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ThreadStoreError(f"THREAD_MODEL_BINDING_READ_FAILED: {exc}") from exc
+
+    async def save_model_bindings(self, thread_id: str, record: Mapping[str, object]) -> None:
+        """首次写入角色 Profile 安全快照；后续调用必须保持相同绑定。"""
+        self._ensure_open()
+        if not isinstance(record.get("roles"), Mapping):
+            raise ThreadStoreError("THREAD_MODEL_BINDING_INVALID")
+        encoded = canonical_json(record)
+        try:
+            async with self._lock:
+                cursor = await self._connection.execute(
+                    """
+                    SELECT binding_record FROM harness_thread_model_bindings
+                    WHERE project_fingerprint = ? AND thread_id = ?
+                    """,
+                    (self._project_fingerprint, thread_id),
+                )
+                existing = await cursor.fetchone()
+                await cursor.close()
+                if existing is not None:
+                    if str(existing["binding_record"]) != encoded:
+                        raise ThreadStoreError("THREAD_MODEL_BINDING_IMMUTABLE")
+                    return
+                await self._connection.execute(
+                    """
+                    INSERT INTO harness_thread_model_bindings (
+                        project_fingerprint, thread_id, binding_record, bound_at_ms
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (self._project_fingerprint, thread_id, encoded, _now_ms()),
+                )
+                await self._connection.commit()
+        except ThreadStoreError:
+            raise
+        except aiosqlite.Error as exc:
+            raise ThreadStoreError(f"THREAD_MODEL_BINDING_WRITE_FAILED: {exc}") from exc
 
     async def load_context_messages(self, thread_id: str) -> list[Any] | None:
         """读取当前 project/thread 的完整模型消息，供本机上下文压缩安全改写。"""

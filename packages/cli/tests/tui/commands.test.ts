@@ -26,6 +26,7 @@ test("Registry 以 canonical ID 解析核心 Slash Command 与别名", () => {
   expect(parseSlashCommand("/threads")).toEqual({ id: "thread.resume", name: "resume", argument: undefined })
   expect(parseSlashCommand("/skills")).toEqual({ id: "skills.open", name: "skills", argument: undefined })
   expect(parseSlashCommand("/models")).toEqual({ id: "model.select", name: "model", argument: undefined })
+  expect(parseSlashCommand("/mcp")).toEqual({ id: "mcp.manage", name: "mcp", argument: undefined })
 })
 
 test("Dispatcher 仅按稳定 ID 返回结构化结果，并统一处理兼容命令", () => {
@@ -103,6 +104,12 @@ test("未知命令不被解析为普通文本，且提供 canonical 建议", () 
   expect(resolution.suggestions.map(command => command.name)).toContain("resume")
   expect(unknownCommandNotice(resolution)).toContain("/resume")
   expect(parseSlashCommand("/skill project/review 检查变更")).toBeNull()
+})
+
+test("斜杠输入只展示已接入命令并按前缀过滤", () => {
+  expect(findSlashCommands("/mcp").map(item => item.name)).toEqual(["mcp"])
+  expect(findSlashCommands("/cl").map(item => item.name)).toEqual(["new"])
+  expect(findSlashCommands("/clear now")).toEqual([])
 })
 
 test("双斜杠转义会将以 / 开头的文本交给 Agent", () => {

@@ -23,6 +23,7 @@ import { StarryBackground } from "./starry-background"
 import { markdownSyntax, tuiTheme } from "./theme"
 import { SearchPicker, type SearchPickerRenderContext } from "./overlays"
 import { collapseToolOutput } from "./upstream/collapse-tool-output"
+import { getCommonSyntaxClient } from "./syntax-parsers"
 
 export type CommandMenuState = {
   visible: boolean
@@ -220,6 +221,7 @@ function MessageBlock(props: { message: ConversationMessage }) {
         <markdown
           content={props.message.content || "…"}
           syntaxStyle={markdownSyntax}
+          treeSitterClient={getCommonSyntaxClient()}
           streaming={props.message.streaming ?? false}
           fg={tuiTheme.text}
           bg={tuiTheme.background}

@@ -184,6 +184,7 @@ def default_runtime_profile(
     tool_catalog_fingerprint: str,
     skill_catalog_fingerprint: str,
     execution: Any,
+    mcp_fingerprint: str | None = None,
     middleware_fingerprint: str,
     prompt_template_fingerprint: str,
 ) -> RuntimeProfile:
@@ -203,7 +204,7 @@ def default_runtime_profile(
         ),
         tool_catalog_fingerprint=tool_catalog_fingerprint,
         skill_catalog_fingerprint=skill_catalog_fingerprint,
-        mcp_config_fingerprint=component_fingerprint({"transport": "disabled"}),
+        mcp_config_fingerprint=mcp_fingerprint or component_fingerprint({"transport": "disabled"}),
         sandbox_config_fingerprint=component_fingerprint(
             {
                 "mode": str(execution.mode),

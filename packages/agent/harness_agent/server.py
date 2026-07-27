@@ -40,6 +40,8 @@ from harness_agent.protocol_generated import (
     ContextCompactParams,
     InitializeParams,
     ModelsListParams,
+    McpAddParams,
+    McpRemoveParams,
     QuestionResponse,
     RunCancelParams,
     RunStartParams,
@@ -47,6 +49,7 @@ from harness_agent.protocol_generated import (
     ThreadsOpenParams,
 )
 from harness_agent.skills import SkillError, SkillRegistry
+from harness_agent.mcp import McpConnectionManager, mcp_config_fingerprint
 from harness_agent.run_context import RunCancellationToken, RunContext
 from harness_agent.runtime_profile import (
     RuntimeProfile,
@@ -126,6 +129,9 @@ class InteractionSpec:
     payload: dict[str, Any]
     interrupt_id: str
     questions: list[Mapping[str, Any]] = field(default_factory=list)
+    # 单次审批 interrupt 中挂起的工具调用数量；HITL 中间件要求 resume 的
+    # decisions 列表长度必须与之相等，否则会抛出 decisions 不匹配错误。
+    action_count: int = 1
 
 
 AgentFactory = Callable[[Za38Config, Path], Any | Awaitable[Any]]
@@ -168,6 +174,7 @@ class JsonRpcServer:
         self._skill_registry: SkillRegistry | None = None
         self._thread_store: ThreadStore | None = None
         self._runtime_pool: RuntimePool | None = None
+        self._mcp_manager: McpConnectionManager | None = None
         self._runtime_build_specs: dict[str, _RuntimeBuildSpec] = {}
         self._runtime_artifacts: dict[str, _RuntimeArtifacts] = {}
         self._provider_client_pool = ProviderClientPool()
@@ -191,6 +198,9 @@ class JsonRpcServer:
             "skills.update": self._handle_skills_update,
             "skills.remove": self._handle_skills_remove,
             "skills.market.list": self._handle_skills_market_list,
+            "mcp.status": self._handle_mcp_status,
+            "mcp.add": self._handle_mcp_add,
+            "mcp.remove": self._handle_mcp_remove,
             "shutdown": self._handle_shutdown,
         }
 
@@ -245,6 +255,8 @@ class JsonRpcServer:
         finally:
             await self._cancel_all_runs()
             self._fail_pending_requests(RpcError(-32004, "Peer connection closed"))
+            if self._mcp_manager is not None:
+                await self._mcp_manager.close_all()
             await self._close_runtime_pool()
             await self._close_thread_store()
 
@@ -364,6 +376,7 @@ class JsonRpcServer:
         self._skill_registry = SkillRegistry(self._workspace, home=self._config_home)
         self._config_path = parsed.config_path
         self._load_config()
+        await self._connect_mcp_servers()
         requested = set(parsed.capabilities)
         self._enabled_capabilities = requested.intersection(SERVER_CAPABILITIES)
         self._initialized = True
@@ -386,6 +399,13 @@ class JsonRpcServer:
                 else None
             ),
         }
+
+    async def _connect_mcp_servers(self) -> None:
+        """根据配置建立 MCP 服务器连接；失败不阻止启动。"""
+        if self._config is None or not self._config.mcp_servers:
+            return
+        self._mcp_manager = McpConnectionManager(list(self._config.mcp_servers))
+        await self._mcp_manager.connect_all()
 
     async def _handle_run_start(self, params: dict[str, Any], request_id: str) -> None:
         """先确认 run 标识再创建后台任务，保证响应严格早于首事件。"""
@@ -510,6 +530,103 @@ class JsonRpcServer:
         summary = self._config.redacted()
         summary["runtime_pool_diagnostics"] = await self._runtime_pool_diagnostics()
         return summary
+
+    async def _handle_mcp_status(self, _params: dict[str, Any], _id: str) -> dict[str, Any]:
+        """返回所有已配置 MCP 服务器的运行时连接状态和工具列表。"""
+        if _params:
+            raise RpcError(-32602, "mcp.status does not accept params")
+        if self._mcp_manager is None:
+            return {"servers": [], "total_tools": 0}
+        statuses = self._mcp_manager.get_server_statuses()
+        total_tools = sum(len(s.get("tool_names", [])) for s in statuses)
+        return {"servers": statuses, "total_tools": total_tools}
+
+    async def _handle_mcp_add(self, params: dict[str, Any], _id: str) -> dict[str, Any]:
+        """添加 MCP 服务器到用户配置并尝试热连接。"""
+        import re
+
+        from harness_agent.mcp import McpServerConfig
+        from harness_agent.mcp_config_writer import add_server_to_config, list_servers_in_config
+
+        parsed = McpAddParams.model_validate(params)
+        name = parsed.name
+
+        # 名称合法性
+        if not re.fullmatch(r"[a-zA-Z0-9_-]+", name):
+            raise RpcError(-32602, f"Invalid server name '{name}': only [a-zA-Z0-9_-] allowed")
+
+        # 必填字段校验
+        if parsed.transport == "stdio" and not parsed.command:
+            raise RpcError(-32602, "stdio transport requires 'command'")
+        if parsed.transport in ("http", "sse") and not parsed.url:
+            raise RpcError(-32602, f"{parsed.transport} transport requires 'url'")
+
+        # 重复检查
+        config_path = self._user_config_path()
+        existing = list_servers_in_config(config_path=config_path)
+        if any(s.get("name") == name for s in existing):
+            raise RpcError(-32602, f"MCP server '{name}' already exists")
+
+        # 构建 TOML 条目
+        server_dict: dict[str, Any] = {"name": name, "transport": parsed.transport}
+        if parsed.command:
+            server_dict["command"] = parsed.command
+        if parsed.args:
+            server_dict["args"] = list(parsed.args)
+        if parsed.url:
+            server_dict["url"] = parsed.url
+        if parsed.env:
+            server_dict["env"] = dict(parsed.env)
+        if parsed.headers:
+            server_dict["headers"] = dict(parsed.headers)
+
+        # 持久化配置
+        add_server_to_config(server_dict, config_path=config_path)
+
+        # 热连接
+        mcp_config = McpServerConfig(
+            name=name,
+            transport=parsed.transport,
+            command=parsed.command,
+            args=tuple(parsed.args) if parsed.args else (),
+            env=dict(parsed.env) if parsed.env else {},
+            url=parsed.url,
+            headers=dict(parsed.headers) if parsed.headers else {},
+        )
+        if self._mcp_manager is None:
+            self._mcp_manager = McpConnectionManager([])
+        status = await self._mcp_manager.add_server(mcp_config)
+
+        return {
+            "added": True,
+            "connected": status.get("status") == "connected",
+            "tool_names": status.get("tool_names", []),
+            "error": status.get("error"),
+        }
+
+    async def _handle_mcp_remove(self, params: dict[str, Any], _id: str) -> dict[str, Any]:
+        """从用户配置中删除 MCP 服务器并热断开。"""
+        from harness_agent.mcp_config_writer import remove_server_from_config
+
+        parsed = McpRemoveParams.model_validate(params)
+        name = parsed.name
+
+        # 从配置文件删除（不存在时抛 ValueError）
+        config_path = self._user_config_path()
+        try:
+            remove_server_from_config(name, config_path=config_path)
+        except ValueError as exc:
+            raise RpcError(-32602, str(exc)) from exc
+
+        # 热断开
+        if self._mcp_manager is not None:
+            self._mcp_manager.remove_server(name)
+
+        return {"removed": True}
+
+    def _user_config_path(self) -> Path:
+        """返回用户级配置文件路径。"""
+        return Path.home() / ".harness" / "config.toml"
 
     async def _handle_config_path(self, _params: dict[str, Any], _id: str) -> dict[str, Any]:
         """返回配置合并路径。"""
@@ -836,6 +953,11 @@ class JsonRpcServer:
         else:
             selected_profile_id = config.model_profile
             selected_model = config.require_model()
+        mcp_fp = (
+            mcp_config_fingerprint(list(config.mcp_servers))
+            if config.mcp_servers
+            else component_fingerprint({"transport": "disabled"})
+        )
         profile = default_runtime_profile(
             project_fingerprint=store.project_fingerprint,
             model_profile=selected_profile_id,
@@ -845,6 +967,7 @@ class JsonRpcServer:
                 {"skill_snapshot_id": registry.snapshot_id}
             ),
             execution=config.execution,
+            mcp_fingerprint=mcp_fp,
             middleware_fingerprint=component_fingerprint(
                 {
                     "prompt_epoch": 1,
@@ -967,8 +1090,11 @@ class JsonRpcServer:
             thread_store=store,
             updates=self._context_updates,
         )
+        mcp_tools = self._mcp_manager.get_tools() if self._mcp_manager else []
         graph = create_harness_agent(
             model,
+            tools=mcp_tools or None,
+            mcp_server_info=True if mcp_tools else None,
             cwd=str(workspace),
             # 无头客户端不协商 question 能力时不注册 ask_user；审批仍由
             # `_request_interaction` 在缺少 approval 能力时 fail closed。
@@ -1209,10 +1335,13 @@ class JsonRpcServer:
                 questions=questions,
             )
         description = "A tool execution requires approval"
+        action_count = 1
         if isinstance(value, Mapping):
+            action_requests = value.get("action_requests", [])
+            action_count = len(action_requests) if isinstance(action_requests, list) else 1
             descriptions = [
                 str(request.get("description"))
-                for request in value.get("action_requests", [])
+                for request in action_requests
                 if isinstance(request, Mapping) and request.get("description")
             ]
             if descriptions:
@@ -1227,6 +1356,7 @@ class JsonRpcServer:
                 "decisions": ["approve_once", "reject"],
             },
             interrupt_id=interrupt_id,
+            action_count=action_count,
         )
 
     async def _request_interaction(self, run: ActiveRun, spec: InteractionSpec) -> object:
@@ -1313,7 +1443,14 @@ class JsonRpcServer:
         if spec.type == "approval":
             decision = response.get("decision")
             langgraph_decision = "approve" if decision in {"approve_once", "approve_thread"} else "reject"
-            return {spec.interrupt_id: {"decisions": [{"type": langgraph_decision}]}}
+            # 模型可能在一轮中并行发出多个需审批的工具调用，HITL 中间件会把
+            # 它们打包为单个 interrupt；用户的一个审批决定需复制到每个挂起
+            # 的 tool call，使 decisions 列表长度与 action_count 相等。
+            return {
+                spec.interrupt_id: {
+                    "decisions": [{"type": langgraph_decision}] * spec.action_count
+                }
+            }
         answers_by_id = response.get("answers", {})
         answers: list[str] = []
         if isinstance(answers_by_id, Mapping):

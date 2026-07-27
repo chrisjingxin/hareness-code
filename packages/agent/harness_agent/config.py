@@ -20,6 +20,7 @@ from harness_agent.config_manifest import (
     ConfigManifestError,
     ConfigSource,
 )
+from harness_agent.mcp import McpServerConfig, parse_mcp_config
 
 
 class ConfigError(ValueError):
@@ -32,7 +33,7 @@ MODEL_ROLES = ("planner", "executor", "reviewer", "tester", "summarizer")
 DEFAULT_MODEL_CAPABILITIES = frozenset({"tool-calling", "streaming"})
 """旧 OpenAI-compatible 配置未声明能力时采用的兼容能力集合。"""
 
-SUPPORTED_MODEL_CAPABILITIES = frozenset({"tool-calling", "streaming", "vision"})
+SUPPORTED_MODEL_CAPABILITIES = frozenset({"tool-calling", "streaming", "vision", "json-mode"})
 """v1 可安全声明并供 Picker 展示的模型能力。"""
 
 
@@ -249,6 +250,7 @@ class Za38Config:
     paths: tuple[Path, ...]
     workspace: Path
     sources: Mapping[str, str]
+    mcp_servers: tuple[McpServerConfig, ...] = ()
     model_catalog: ModelCatalog | None = None
 
     def require_model(self, profile_id: str | None = None) -> ModelSettings:
@@ -286,6 +288,9 @@ class Za38Config:
             "model_roles": dict(self.model_catalog.role_profiles) if self.model_catalog else {},
             "security": self.execution.redacted(),
             "runtime_pool": self.runtime_pool.redacted(),
+            "mcp_servers": [
+                {"name": s.name, "transport": s.transport} for s in self.mcp_servers
+            ],
         }
 
 
@@ -317,18 +322,20 @@ def load_config(
             (explicit_path, ConfigSource.EXPLICIT, _read_document(explicit_path, ConfigSource.EXPLICIT))
         )
 
-    models, approval_values, execution_values, runtime_pool_values, sources = _merge_documents(documents)
+    models, approval_values, execution_values, runtime_pool_values, mcp_values, sources = _merge_documents(documents)
     _apply_environment_overrides(models, approval_values, execution_values, environment, sources)
     _apply_cli_overrides(execution_values, environment, sources)
     model_catalog = _parse_model_catalog(models, sources["models"])
     model_profile = model_catalog.default_profile if model_catalog else None
     model = model_catalog.require_profile().settings if model_catalog else None
+    mcp_servers = tuple(parse_mcp_config(mcp_values))  # type: ignore[arg-type]
 
     return Za38Config(
         model=model,
         model_profile=model_profile,
         execution=_parse_execution(approval_values, execution_values),
         runtime_pool=_parse_runtime_pool(runtime_pool_values),
+        mcp_servers=mcp_servers,
         paths=tuple(path for path, _, _ in documents),
         workspace=resolved_workspace,
         sources=sources,
@@ -418,6 +425,7 @@ def _merge_documents(
     dict[str, object],
     dict[str, object],
     dict[str, object],
+    dict[str, object],
     dict[str, str],
 ]:
     """按用户到显式配置的顺序合并已验证字段，并记录最后贡献来源。"""
@@ -425,11 +433,13 @@ def _merge_documents(
     approval_values: dict[str, object] = {}
     execution_values: dict[str, object] = {}
     runtime_pool_values: dict[str, object] = {}
+    mcp_values: dict[str, object] = {}
     sources = {
         "models": "default",
         "approval": "default",
         "execution": "default",
         "runtime_pool": "default",
+        "mcp": "default",
     }
     for _, source, document in documents:
         if "models" in document:
@@ -444,7 +454,10 @@ def _merge_documents(
         if "runtime_pool" in document:
             runtime_pool_values = _merge_flat_values(runtime_pool_values, document["runtime_pool"])
             sources["runtime_pool"] = source.value
-    return models, approval_values, execution_values, runtime_pool_values, sources
+        if "mcp" in document:
+            mcp_values = document["mcp"]  # type: ignore[assignment]
+            sources["mcp"] = source.value
+    return models, approval_values, execution_values, runtime_pool_values, mcp_values, sources
 
 
 def _merge_models(target: dict[str, object], value: object, source: str) -> None:

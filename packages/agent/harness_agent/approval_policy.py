@@ -31,11 +31,16 @@ def interrupt_on_for_approval_mode(
     approval_mode: ApprovalMode,
     *,
     preflight: Callable[[ToolCallRequest], bool] | None = None,
+    extra_interrupt_tools: frozenset[str] | None = None,
 ) -> dict[str, Any] | None:
     """返回应由 HumanInTheLoopMiddleware 拦截的工具集合。
 
     计划模式的拒绝由 ``PlanModeMiddleware`` 完成，YOLO 则只关闭 Harness
     的人工确认；工作区、Shell 和远端 provider 等硬策略不在这里放宽。
+
+    Args:
+        extra_interrupt_tools: 需要一并纳入审批的额外工具名（如 MCP 工具）。
+            仅在 default 和 auto-edit 模式下生效；plan 和 yolo 忽略。
     """
     if approval_mode in {"plan", "yolo"}:
         return None
@@ -44,6 +49,8 @@ def interrupt_on_for_approval_mode(
         if approval_mode == "default"
         else _AUTO_EDIT_HITL_TOOLS
     )
+    if extra_interrupt_tools:
+        tool_names = tool_names | extra_interrupt_tools
     from langchain.agents.middleware.human_in_the_loop import InterruptOnConfig
 
     approval = InterruptOnConfig(allowed_decisions=["approve", "reject"])

@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 PROTOCOL_MAJOR = 2
-PROTOCOL_MINOR = 5
+PROTOCOL_MINOR = 6
 MAX_FRAME_BYTES = 8388608
 MAX_TOOL_PAYLOAD_BYTES = 1048576
-CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","models.list","threads.list","threads.open","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","shutdown"]
+CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","threads.list","threads.open","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","mcp.status","mcp.add","mcp.remove","models.list","shutdown"]
 SERVER_METHODS = ["event","request"]
-SERVER_CAPABILITIES = ["run.cancel","run.multithread","interactive.approval","interactive.question","config.read","models.read","threads.read","context.manage","skills.read","skills.manage"]
+SERVER_CAPABILITIES = ["run.cancel","run.multithread","interactive.approval","interactive.question","config.read","threads.read","context.manage","skills.read","skills.manage","mcp.read","models.read"]
 EVENT_TYPES = ["run.started","skill.loaded","content.delta","thinking.delta","tool.started","tool.delta","tool.completed","context.updated","interaction.resolved","run.completed","run.cancelled","run.failed"]
 
 class StrictModel(BaseModel):
@@ -43,6 +43,17 @@ class InitializeParams(StrictModel):
 class RequestedSkill(StrictModel):
     id: str = Field(min_length=1)
     args: str = ""
+
+class ModelProfile(StrictModel):
+    id: str = Field(min_length=1)
+    model: str = Field(min_length=1)
+    provider_label: str = Field(min_length=1)
+    context_window_tokens: int = Field(ge=16384)
+    capabilities: list[str]
+    is_default: bool
+    available: bool
+    unavailable_reason: str | None = None
+    source: str = Field(min_length=1)
 
 class RunStartParams(StrictModel):
     message: str = Field(min_length=1)
@@ -77,17 +88,6 @@ class ThreadsListParams(StrictModel):
 class ThreadsOpenParams(StrictModel):
     thread_id: str = Field(min_length=1)
 
-class ModelProfile(StrictModel):
-    id: str = Field(min_length=1)
-    model: str = Field(min_length=1)
-    provider_label: str = Field(min_length=1)
-    context_window_tokens: int = Field(ge=16384)
-    capabilities: list[str]
-    is_default: bool
-    available: bool
-    unavailable_reason: str | None = None
-    source: str = Field(min_length=1)
-
 class ThreadModelBinding(StrictModel):
     state: Literal["bound", "legacy", "unbound"]
     roles: dict[str, ModelProfile]
@@ -95,6 +95,25 @@ class ThreadModelBinding(StrictModel):
 class ModelsListParams(StrictModel):
     thread_id: str | None = None
 
+class McpStatusParams(StrictModel):
+    pass
+
+class McpAddParams(StrictModel):
+    name: str
+    transport: Literal["stdio", "http", "sse"]
+    command: Optional[str] = None
+    args: Optional[List[str]] = None
+    url: Optional[str] = None
+    env: Optional[Dict[str, str]] = None
+    headers: Optional[Dict[str, str]] = None
+
+
+class McpRemoveParams(StrictModel):
+    name: str
+
+class ModelsListResult(StrictModel):
+    profiles: list[ModelProfile]
+    thread_binding: ThreadModelBinding | None = None
 class EventEnvelope(StrictModel):
     event_id: str = Field(min_length=1)
     type: str = Field(min_length=1)

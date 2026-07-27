@@ -43,6 +43,7 @@ export type CommandResult =
   | { type: "open-dialog"; dialog: CommandDialog }
   | CommandRpcResult
   | { type: "submit-prompt"; prompt: string; requestedSkill?: RequestedSkill }
+  | { type: "mcp"; argument?: string }
 
 /** Dispatcher 所需的最小状态快照；展示文案由调用方在进入 Handler 前生成。 */
 export type CommandDispatchContext = {
@@ -114,6 +115,7 @@ const builtinHandlers: Readonly<Record<string, CommandHandler>> = {
     : { type: "open-picker", picker: "threads" },
   "model.select": context => ({ type: "open-picker", picker: "models", initialQuery: context.command.argument }),
   "skills.open": () => ({ type: "open-picker", picker: "skills" }),
+  "mcp.manage": context => ({ type: "mcp", argument: context.command.argument }),
 }
 
 /** 生成统一 notice，减少 Handler 中重复的结构字面量。 */

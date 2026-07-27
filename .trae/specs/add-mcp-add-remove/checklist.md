@@ -1,0 +1,27 @@
+# Checklist
+
+- [x] `packages/protocol/schema/v2.json` 中 `minor` 为 6，`client_methods` 包含 `"mcp.add"` 和 `"mcp.remove"`
+- [x] `packages/protocol/src/generated.ts` 包含 `McpAddParams`、`McpAddResult`、`McpRemoveParams`、`McpRemoveResult` 类型
+- [x] `packages/protocol/src/index.ts` 导出 `Method.MCP_ADD`、`Method.MCP_REMOVE` 和对应断言函数
+- [x] `packages/agent/harness_agent/protocol_generated.py` 包含对应 Pydantic 模型
+- [x] `packages/agent/pyproject.toml` 包含 `tomli-w` 依赖
+- [x] `mcp_config_writer.py` 实现 `add_server_to_config` 和 `remove_server_from_config`，使用原子写入
+- [x] 配置文件不存在时自动创建（含父目录）
+- [x] 配置文件已存在时保留原有配置，仅修改 `[[mcp.servers]]`
+- [x] `McpConnectionManager.add_server()` 热连接单个服务器并合并工具
+- [x] `McpConnectionManager.remove_server()` 按前缀移除工具并更新状态
+- [x] `server.py` 注册 `mcp.add` 和 `mcp.remove` 处理器
+- [x] `_handle_mcp_add` 校验名称合法性（`[a-zA-Z0-9_-]`）、必填字段、重复检查
+- [x] `_handle_mcp_add` 写入配置后尝试热连接，连接失败不影响配置持久化
+- [x] `_handle_mcp_remove` 校验服务器存在，删除配置并热断开
+- [x] `/mcp add <name> <command> [args...]` 正确解析为 stdio 配置
+- [x] `/mcp add <name> --url <url>` 正确解析为 http 配置
+- [x] `/mcp add <name> --url <url> --sse` 正确解析为 sse 配置
+- [x] `/mcp remove <name>` 正确调用删除并显示结果
+- [x] 参数不足时显示用法提示
+- [x] `IpcClient` 新增 `mcpAdd()` 和 `mcpRemove()` 方法
+- [x] 集成测试覆盖 add 和 remove 流程
+- [x] `docs/user/交互使用.md` 包含 `/mcp add` 和 `/mcp remove` 说明
+- [x] `bun run typecheck` 通过
+- [x] `bun test`（CLI）通过
+- [x] pytest（Python）通过

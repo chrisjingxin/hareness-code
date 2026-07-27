@@ -850,6 +850,59 @@ async def test_auto_edit_writes_without_interruption_but_shell_still_requires_ap
         await _wait_for(shell_frames, lambda frame: frame.get("params", {}).get("type") == "run.completed")
 
 
+async def test_batch_tool_call_approval_restores_one_decision_per_hanging_call():
+    """模型一轮发出多个需审批工具调用时，单个审批决定应复制到每个挂起调用。"""
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+    from langchain_core.runnables import Runnable
+    from harness_agent.agent import create_harness_agent
+    from harness_agent.server import JsonRpcServer
+
+    class ToolModel(FakeMessagesListChatModel):
+        def bind_tools(self, *_args: Any, **_kwargs: Any) -> Runnable:
+            return self
+
+    with TemporaryDirectory() as workspace:
+        model = ToolModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": "execute", "args": {"command": "echo a"}, "id": "call-1"},
+                        {"name": "execute", "args": {"command": "echo b"}, "id": "call-2"},
+                        {"name": "execute", "args": {"command": "echo c"}, "id": "call-3"},
+                    ],
+                ),
+                AIMessage(content="已完成"),
+            ]
+        )
+        model.profile = {"max_input_tokens": 200_000}
+        agent = create_harness_agent(
+            model,
+            cwd=workspace,
+            approval_mode="default",
+            enable_skills=False,
+            enable_memory=False,
+            enable_ask_user=False,
+        )
+        server = JsonRpcServer(agent=agent)
+        frames = await _capture_server(server)
+        await server.dispatch(
+            _request("run.start", {"message": "批量执行", "thread_id": "batch", "run_id": "batch-run"}, "batch-start")
+        )
+        interaction = await _wait_for(frames, lambda frame: frame.get("method") == "request")
+        assert interaction["params"]["type"] == "approval"
+        await server.dispatch(
+            {
+                "jsonrpc": "2.0",
+                "id": interaction["id"],
+                "result": {"type": "approval", "request_id": interaction["id"], "decision": "approve_once"},
+            }
+        )
+        completed = await _wait_for(frames, lambda frame: frame.get("params", {}).get("type") == "run.completed")
+        assert completed["params"]["payload"]["finish_reason"] == "completed"
+
+
 async def test_plan_mode_returns_tool_message_without_writing_or_requesting_approval():
     """计划模式写工具调用必须由内核硬拒绝，不能先交给 TUI 或落盘。"""
     from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
@@ -960,6 +1013,143 @@ async def test_stdio_subprocess_end_to_end_echo_mode():
     await process.stdin.drain()
     await asyncio.wait_for(process.wait(), timeout=2)
     assert "content.delta" in _event_types(frames)
+
+
+async def test_mcp_status_no_config(tmp_path: Path):
+    """未配置 MCP 服务器时 mcp.status 返回空列表和零工具数。"""
+    from harness_agent.server import JsonRpcServer
+
+    server = JsonRpcServer(allow_echo=True, config_home=tmp_path / "home")
+    frames = await _capture_server(server)
+    await server.dispatch(_request("mcp.status", {}, "mcp-status"))
+    assert frames[-1]["result"] == {"servers": [], "total_tools": 0}
+
+
+async def test_mcp_status_not_initialized():
+    """握手前调用 mcp.status 必须被结构化拒绝。"""
+    from harness_agent.server import JsonRpcServer
+
+    server = JsonRpcServer(allow_echo=True)
+    frames: list[dict[str, Any]] = []
+    server.send = lambda message: _append(frames, message)  # type: ignore[method-assign]
+    await server.dispatch(_request("mcp.status", {}, "mcp-early"))
+    assert frames[0]["error"]["code"] == -32000
+
+
+async def test_mcp_add_stdio(tmp_path: Path):
+    """添加 stdio MCP 服务器后配置持久化且返回连接状态。"""
+    from unittest.mock import AsyncMock, patch
+
+    from harness_agent.server import JsonRpcServer
+
+    config_file = tmp_path / "config.toml"
+    server = JsonRpcServer(allow_echo=True, config_home=tmp_path / "home")
+    frames = await _capture_server(server)
+    server._user_config_path = lambda: config_file  # type: ignore[method-assign]
+
+    fake_status = {"name": "my-server", "transport": "stdio", "status": "connected", "tool_names": ["my-server_tool1"]}
+    with (
+        patch("harness_agent.server.McpConnectionManager") as MockManager,
+    ):
+        mock_instance = MockManager.return_value
+        mock_instance.add_server = AsyncMock(return_value=fake_status)
+        await server.dispatch(
+            _request(
+                "mcp.add",
+                {"name": "my-server", "transport": "stdio", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem"]},
+                "mcp-add-1",
+            )
+        )
+
+    result = frames[-1]["result"]
+    assert result["added"] is True
+    assert result["connected"] is True
+    assert result["tool_names"] == ["my-server_tool1"]
+    assert result["error"] is None
+    # 验证配置已写入文件
+    assert config_file.exists()
+    content = config_file.read_text(encoding="utf-8")
+    assert "my-server" in content
+
+
+async def test_mcp_add_duplicate(tmp_path: Path):
+    """添加同名 MCP 服务器必须返回错误。"""
+    from harness_agent.server import JsonRpcServer
+
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        '[[mcp.servers]]\nname = "existing"\ntransport = "stdio"\ncommand = "echo"\n',
+        encoding="utf-8",
+    )
+    server = JsonRpcServer(allow_echo=True, config_home=tmp_path / "home")
+    frames = await _capture_server(server)
+    server._user_config_path = lambda: config_file  # type: ignore[method-assign]
+
+    await server.dispatch(
+        _request("mcp.add", {"name": "existing", "transport": "stdio", "command": "echo"}, "mcp-add-dup")
+    )
+
+    assert frames[-1]["error"]["code"] == -32602
+    assert "already exists" in frames[-1]["error"]["message"]
+
+
+async def test_mcp_add_invalid_name(tmp_path: Path):
+    """非法服务器名称必须被拒绝。"""
+    from harness_agent.server import JsonRpcServer
+
+    config_file = tmp_path / "config.toml"
+    server = JsonRpcServer(allow_echo=True, config_home=tmp_path / "home")
+    frames = await _capture_server(server)
+    server._user_config_path = lambda: config_file  # type: ignore[method-assign]
+
+    await server.dispatch(
+        _request("mcp.add", {"name": "bad name!", "transport": "stdio", "command": "echo"}, "mcp-add-bad")
+    )
+
+    assert frames[-1]["error"]["code"] == -32602
+    assert "Invalid server name" in frames[-1]["error"]["message"]
+
+
+async def test_mcp_remove_existing(tmp_path: Path):
+    """删除已存在的 MCP 服务器后配置更新且返回成功。"""
+    from harness_agent.server import JsonRpcServer
+
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        '[[mcp.servers]]\nname = "to-remove"\ntransport = "stdio"\ncommand = "echo"\n',
+        encoding="utf-8",
+    )
+    server = JsonRpcServer(allow_echo=True, config_home=tmp_path / "home")
+    frames = await _capture_server(server)
+    server._user_config_path = lambda: config_file  # type: ignore[method-assign]
+
+    await server.dispatch(
+        _request("mcp.remove", {"name": "to-remove"}, "mcp-remove-1")
+    )
+
+    result = frames[-1]["result"]
+    assert result["removed"] is True
+    # 验证配置文件中已无该服务器
+    content = config_file.read_text(encoding="utf-8")
+    assert "to-remove" not in content
+
+
+async def test_mcp_remove_nonexistent(tmp_path: Path):
+    """删除不存在的 MCP 服务器必须返回错误。"""
+    from harness_agent.server import JsonRpcServer
+
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("", encoding="utf-8")
+    server = JsonRpcServer(allow_echo=True, config_home=tmp_path / "home")
+    frames = await _capture_server(server)
+    server._user_config_path = lambda: config_file  # type: ignore[method-assign]
+
+    await server.dispatch(
+        _request("mcp.remove", {"name": "ghost"}, "mcp-remove-ghost")
+    )
+
+    assert frames[-1]["error"]["code"] == -32602
+    assert "not found" in frames[-1]["error"]["message"]
 
 
 async def _append(frames: list[dict[str, Any]], message: dict[str, Any]) -> None:
