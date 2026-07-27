@@ -56,11 +56,23 @@ pin_default_profile = false
     )
 
 
-def _service(tmp_path: Path, **kwargs: object) -> ConfigChangeService:
+def _service(
+    tmp_path: Path,
+    *,
+    environ: dict[str, str] | None = None,
+    **kwargs: object,
+) -> ConfigChangeService:
     """构造使用隔离 home 的服务，并保证目标用户文件存在。"""
     home = tmp_path / "home"
     _write_user_config(home / ".harness" / "config.toml")
-    return ConfigChangeService(workspace=tmp_path / "workspace", home=home, environ={}, **kwargs)
+    return ConfigChangeService(
+        workspace=tmp_path / "workspace",
+        home=home,
+        environ={"HARNESS_FAST_KEY": "fast-test", "HARNESS_PRO_KEY": "pro-test"}
+        if environ is None
+        else environ,
+        **kwargs,
+    )
 
 
 def test_preview_and_commit_allowed_default_model_change(tmp_path: Path) -> None:
@@ -94,16 +106,16 @@ def test_preview_and_commit_allowed_default_model_change(tmp_path: Path) -> None
     assert service.audits[-1].outcome == "OK"
 
 
-def test_commit_rejects_concurrent_revision_without_overwriting_new_content(tmp_path: Path) -> None:
+def test_default_model_commit_rejects_concurrent_revision_without_overwriting_new_content(tmp_path: Path) -> None:
     """CAS 冲突必须保留其他进程已经写入的文件内容。"""
     service = _service(tmp_path)
-    preview = service.preview([ConfigChange("approval.mode", "plan")])
+    preview = service.preview([ConfigChange("models.default_profile", "pro")])
     path = tmp_path / "home" / ".harness" / "config.toml"
-    externally_changed = path.read_text(encoding="utf-8").replace('mode = "default"', 'mode = "yolo"')
+    externally_changed = path.read_text(encoding="utf-8").replace('default_profile = "fast"', 'default_profile = "pro"')
     path.write_text(externally_changed, encoding="utf-8")
 
     with pytest.raises(ConfigChangeError, match="已被其他操作修改") as error:
-        service.commit(expected_revision=preview.revision, changes=[ConfigChange("approval.mode", "plan")])
+        service.commit(expected_revision=preview.revision, changes=[ConfigChange("models.default_profile", "pro")])
 
     assert error.value.code == "CONFIG_REVISION_CONFLICT"
     assert path.read_text(encoding="utf-8") == externally_changed
@@ -136,10 +148,10 @@ def test_invalid_user_toml_fails_closed_and_is_not_rewritten(tmp_path: Path) -> 
     assert path.read_text(encoding="utf-8") == broken
 
 
-def test_disk_write_failure_preserves_loadable_original(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_default_model_disk_write_failure_preserves_loadable_original(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """临时文件或 rename 失败时，原配置仍必须可被正常加载。"""
     service = _service(tmp_path)
-    preview = service.preview([ConfigChange("approval.mode", "plan")])
+    preview = service.preview([ConfigChange("models.default_profile", "pro")])
     path = tmp_path / "home" / ".harness" / "config.toml"
     original = path.read_text(encoding="utf-8")
 
@@ -149,11 +161,40 @@ def test_disk_write_failure_preserves_loadable_original(tmp_path: Path, monkeypa
 
     monkeypatch.setattr(service, "_write_atomic", fail_write)
     with pytest.raises(ConfigChangeError) as error:
-        service.commit(expected_revision=preview.revision, changes=[ConfigChange("approval.mode", "plan")])
+        service.commit(expected_revision=preview.revision, changes=[ConfigChange("models.default_profile", "pro")])
 
     assert error.value.code == "CONFIG_WRITE_FAILED"
     assert path.read_text(encoding="utf-8") == original
-    assert load_config(workspace=tmp_path / "workspace", home=tmp_path / "home", environ={}).execution.approval_mode == "default"
+    assert load_config(workspace=tmp_path / "workspace", home=tmp_path / "home", environ={}).model_profile == "fast"
+
+
+def test_default_model_preview_rejects_missing_unavailable_or_incapable_profile(tmp_path: Path) -> None:
+    """未来新 Thread 默认值必须在写前完成 Profile、凭据和能力校验。"""
+    missing = _service(tmp_path / "missing")
+    with pytest.raises(ConfigChangeError) as missing_error:
+        missing.preview([ConfigChange("models.default_profile", "unknown")])
+    assert missing_error.value.code == "MODEL_PROFILE_NOT_FOUND"
+
+    unavailable = _service(tmp_path / "unavailable", environ={"HARNESS_FAST_KEY": "fast-test"})
+    with pytest.raises(ConfigChangeError) as unavailable_error:
+        unavailable.preview([ConfigChange("models.default_profile", "pro")])
+    assert unavailable_error.value.code == "MODEL_PROFILE_UNAVAILABLE"
+    assert "pro-test" not in str(unavailable_error.value)
+
+    incapable_root = tmp_path / "incapable"
+    incapable = _service(incapable_root)
+    path = incapable_root / "home" / ".harness" / "config.toml"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            'api_key_env = "HARNESS_PRO_KEY"',
+            'api_key_env = "HARNESS_PRO_KEY"\ncapabilities = ["streaming"]',
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigChangeError) as capability_error:
+        incapable.preview([ConfigChange("models.default_profile", "pro")])
+    assert capability_error.value.code == "MODEL_PROFILE_CAPABILITY_MISSING"
+    assert "HARNESS_PRO_KEY" not in str(capability_error.value)
 
 
 def test_permission_failure_closes_before_changing_user_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -182,14 +223,14 @@ def test_managed_lock_and_untrusted_project_configuration_are_never_editable(tmp
     """受管字段与当前工作区内显式项目配置均必须拒绝交互式写入。"""
     managed = _service(
         tmp_path,
-        managed_policy=ManagedConfigPolicy({"approval.mode": "enterprise policy"}),
+        managed_policy=ManagedConfigPolicy({"models.default_profile": "enterprise policy"}),
     )
     details = managed.details()
-    approval = next(field for field in details["fields"] if field["path"] == "approval.mode")
-    assert approval["editable"] is False
-    assert approval["unavailable_reason"] == "MANAGED_POLICY_LOCKED"
+    default_model = next(field for field in details["fields"] if field["path"] == "models.default_profile")
+    assert default_model["editable"] is False
+    assert default_model["unavailable_reason"] == "MANAGED_POLICY_LOCKED"
     with pytest.raises(ConfigChangeError) as error:
-        managed.preview([ConfigChange("approval.mode", "plan")])
+        managed.preview([ConfigChange("models.default_profile", "pro")])
     assert error.value.code == "MANAGED_POLICY_LOCKED"
 
     home = tmp_path / "project-home"
@@ -204,7 +245,7 @@ def test_managed_lock_and_untrusted_project_configuration_are_never_editable(tmp
         environ={},
     )
     with pytest.raises(ConfigChangeError) as project_error:
-        project_service.preview([ConfigChange("approval.mode", "plan")])
+        project_service.preview([ConfigChange("models.default_profile", "pro")])
     assert project_error.value.code == "UNTRUSTED_PROJECT_CONFIGURATION"
 
 

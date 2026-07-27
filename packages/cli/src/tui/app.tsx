@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto"
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import type { InteractionRequestEnvelope, InteractionResponse, McpAddResult, McpStatusResult, ModelProfile, RequestedSkill, ThreadMessage } from "@za38/protocol"
 
-import { IpcClient } from "../ipc/client"
+import { IpcClient, JsonRpcRemoteError } from "../ipc/client"
 import {
   defaultCommandContext,
   findCommandMenuItems,
@@ -80,6 +80,8 @@ type ThreadPickerState = {
 type ModelPickerState = {
   visible: boolean
   loading: boolean
+  /** 保存未来新 Thread 默认模型期间禁止重复选择或关闭。 */
+  syncingDefault?: boolean
   query: string
   selectedIndex: number
   error?: string
@@ -128,15 +130,16 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
   const selectedModelProfile = models.find(model => model.id === threadModelSelection)
   const displayedModelProfile = selectedModelProfile ?? actualModelProfile
   const supportsThreadModelSelection = runtime.capabilities?.includes("models.select") === true
-  const displayedRuntime: TuiRuntime = displayedModelProfile
-    ? {
-      ...runtime,
-      modelName: displayedModelProfile.model,
-      modelProfileId: displayedModelProfile.id,
-      modelSelectionPending: threadModelSelection !== undefined && threadModelSelection !== actualModelProfile?.id,
-      modelConfigured: true,
-    }
-    : runtime
+  const displayedRuntime: TuiRuntime = {
+    ...runtime,
+    ...(displayedModelProfile
+      ? {
+        modelName: displayedModelProfile.model,
+        modelProfileId: displayedModelProfile.id,
+        modelConfigured: true,
+      }
+      : {}),
+  }
 
   /** 提交不可变状态转换；长生命周期 IPC 回调通过 ref 读取最新状态。 */
   const commit = useCallback((transition: (current: TuiState) => TuiState) => {
@@ -394,7 +397,9 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
 
   /** 关闭选择器不修改已确认的 Thread 选择，避免取消搜索意外撤销模型切换。 */
   const closeModelPicker = useCallback(() => {
-    setModelPicker(current => ({ ...current, visible: false, loading: false, error: undefined }))
+    setModelPicker(current => current.syncingDefault
+      ? current
+      : { ...current, visible: false, loading: false, error: undefined })
   }, [])
 
   useEffect(() => {
@@ -602,6 +607,7 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
       let actualModel: ModelProfile | undefined
       try {
         const result = await client.listModels(opened.threadId)
+        setModels(result.profiles)
         recoveredSelection = result.thread_selection?.primary_profile
         actualModel = result.last_run_binding?.profile
           ?? result.thread_binding?.roles.executor
@@ -624,8 +630,8 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     }
   }, [clearDraft, client, commit])
 
-  /** 将可用 Profile 写入当前 Thread 的下一次 Run 选择；不修改静态配置。 */
-  const selectModel = useCallback((model: ModelProfile) => {
+  /** 选择先更新当前 Thread，再以受控配置服务同步未来新 Thread 默认值。 */
+  const selectModel = useCallback(async (model: ModelProfile) => {
     if (!model.available) {
       setModelPicker(current => ({
         ...current,
@@ -633,11 +639,40 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
       }))
       return
     }
+    if (modelPicker.loading) return
     setThreadModelSelection(model.id)
-    setModelPicker(current => ({ ...current, visible: false, loading: false, error: undefined }))
-    const target = stateRef.current.threadId ? "当前 Thread 的下一次运行" : "下一次新 Thread 运行"
-    commit(current => appendNotice(current, `已选择 ${model.provider_label} · ${model.model}；将在${target}生效。`))
-  }, [commit])
+    setModelPicker(current => ({ ...current, loading: true, syncingDefault: true, error: undefined }))
+    const label = `${model.provider_label} · ${model.model}`
+    try {
+      if (!runtime.capabilities?.includes("config.write")) {
+        throw new ModelDefaultSyncError("CONFIG_WRITE_CAPABILITY_REQUIRED")
+      }
+      const details = await client.configDetails()
+      const field = details.fields.find(value => value.path === "models.default_profile")
+      if (!field) throw new ModelDefaultSyncError("CONFIG_FIELD_NOT_ALLOWED")
+      if (!field.editable) throw new ModelDefaultSyncError(field.unavailable_reason ?? "CONFIG_FIELD_NOT_WRITABLE")
+      if (field.value !== model.id) {
+        const changes = [{ path: "models.default_profile", value: model.id }]
+        const preview = await client.previewConfig(changes)
+        await client.commitConfig(preview.revision, changes)
+      }
+      try {
+        const refreshed = await client.listModels(stateRef.current.threadId)
+        setModels(refreshed.profiles)
+      } catch {
+        // commit 已成功时仍保留当前选择；本地目录只补齐默认标记，下一次打开 Picker 会重试刷新。
+        setModels(current => current.map(value => ({ ...value, is_default: value.id === model.id })))
+      }
+      setModelPicker(current => ({ ...current, visible: false, loading: false, syncingDefault: false, error: undefined }))
+      commit(current => appendNotice(current, `当前 Thread 已切换到 ${label}；后续新 Thread 默认模型已同步。`))
+    } catch (error) {
+      setModelPicker(current => ({ ...current, visible: false, loading: false, syncingDefault: false, error: undefined }))
+      commit(current => appendNotice(
+        current,
+        `当前 Thread 已切换到 ${label}；未来新 Thread 默认未更新：${safeModelDefaultSyncError(error)}`,
+      ))
+    }
+  }, [client, commit, modelPicker.loading, runtime.capabilities])
 
   /** 已绑定 Thread 的说明框只允许回到空白 Composer；不修改既有绑定。 */
   const resolveModelBindingDialog = useCallback((createNewThread: boolean) => {
@@ -856,6 +891,7 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     }
     if (action === "thread-block") return
     if (action === "model-previous" || action === "model-next") {
+      if (modelPicker.loading) return
       const direction = action === "model-previous" ? -1 : 1
       setModelPicker(current => ({
         ...current,
@@ -865,7 +901,7 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     }
     if (action === "model-select") {
       const selected = visibleModels[modelPicker.selectedIndex]
-      if (selected) selectModel(selected)
+      if (!modelPicker.loading && selected) void selectModel(selected)
       return
     }
     if (action === "model-block") return
@@ -1028,6 +1064,8 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
         title={state.threadId ? "选择当前 Thread 下一次运行的模型" : "选择下一次新 Thread 运行的模型"}
         searchPlaceholder="按 Profile、模型或 Provider 搜索"
         emptyMessage="没有匹配的模型 Profile"
+        loadingMessage={modelPicker.syncingDefault ? "正在同步后续新 Thread 默认模型…" : undefined}
+        footer="选择后同时更新后续新 Thread 默认模型"
         itemKey={model => model.id}
         renderItem={(model, context) => modelPickerRow(model, context)}
         onSearch={query => setModelPicker(current => ({ ...current, query, selectedIndex: 0 }))}
@@ -1097,6 +1135,48 @@ export async function runTui(options: TuiOptions): Promise<void> {
       </TuiErrorBoundary>,
     )
   })
+}
+
+/** 配置同步失败只向用户展示稳定原因，避免回显远端路径、TOML 或异常详情。 */
+class ModelDefaultSyncError extends Error {
+  constructor(readonly reason: string) {
+    super(reason)
+    this.name = "ModelDefaultSyncError"
+  }
+}
+
+/** 将配置写服务的稳定错误码翻译为 /model 可操作且不含敏感信息的提示。 */
+function safeModelDefaultSyncError(error: unknown): string {
+  const reason = error instanceof ModelDefaultSyncError
+    ? error.reason
+    : error instanceof JsonRpcRemoteError
+      ? remoteConfigReason(error)
+      : "配置服务暂时不可用"
+  const messages: Record<string, string> = {
+    CONFIG_WRITE_CAPABILITY_REQUIRED: "当前客户端未协商 config.write",
+    CONFIG_FIELD_NOT_ALLOWED: "默认模型字段不可写",
+    CONFIG_FIELD_NOT_WRITABLE: "默认模型字段当前不可写",
+    CONFIG_USER_FILE_MISSING: "用户配置文件不存在",
+    MANAGED_POLICY_LOCKED: "默认模型字段受受管策略锁定",
+    SOURCE_OVERRIDE_ACTIVE: "默认模型由更高优先级来源覆盖",
+    UNTRUSTED_PROJECT_CONFIGURATION: "项目配置不允许写入用户默认值",
+    EXPLICIT_CONFIGURATION_ACTIVE: "当前显式配置来源不可写",
+    CONFIG_REVISION_CONFLICT: "配置已被其他操作修改，请重试",
+    CONFIG_WRITE_FAILED: "用户配置写入失败",
+    MODEL_PROFILE_NOT_FOUND: "所选模型 Profile 不存在",
+    MODEL_PROFILE_UNAVAILABLE: "所选模型不可用",
+    MODEL_PROFILE_CAPABILITY_MISSING: "所选模型缺少 Single Agent 所需能力",
+  }
+  return messages[reason] ?? "配置服务拒绝本次更新"
+}
+
+/** JSON-RPC 错误优先读取服务端 redacted data.code，不信任可变错误文案。 */
+function remoteConfigReason(error: JsonRpcRemoteError): string {
+  if (error.data && typeof error.data === "object") {
+    const code = (error.data as Record<string, unknown>).code
+    if (typeof code === "string") return code
+  }
+  return error.message
 }
 
 /** 将未知异常转换为可安全展示的字符串。 */

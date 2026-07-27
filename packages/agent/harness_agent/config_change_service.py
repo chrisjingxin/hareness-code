@@ -22,7 +22,7 @@ from typing import Any, Literal
 
 import tomli_w
 
-from harness_agent.config import ConfigError, Za38Config, load_config
+from harness_agent.config import DEFAULT_MODEL_CAPABILITIES, ConfigError, Za38Config, load_config
 
 logger = logging.getLogger(__name__)
 
@@ -218,7 +218,7 @@ class ConfigChangeService:
             normalized = self._normalize_changes(changes, config)
             document = self._read_user_document()
             candidate = self._serialize_candidate(document, normalized)
-            self._validate_candidate(candidate)
+            self._validate_candidate(candidate, normalized)
             preview = self._build_preview(document, normalized, revision)
         except ConfigChangeError as exc:
             self._audit("rejected", tuple(change.path for change in changes), exc.code, None)
@@ -239,7 +239,7 @@ class ConfigChangeService:
                 normalized = self._normalize_changes(changes, config)
                 document = self._read_user_document()
                 candidate = self._serialize_candidate(document, normalized)
-                self._validate_candidate(candidate)
+                self._validate_candidate(candidate, normalized)
                 preview = self._build_preview(document, normalized, current_revision)
                 self._write_atomic(candidate)
                 revision = self._revision_for_path(self._target_path)
@@ -361,8 +361,8 @@ class ConfigChangeService:
         except (TypeError, ValueError) as exc:
             raise ConfigChangeError("CONFIG_VALIDATION_FAILED", "配置无法序列化") from exc
 
-    def _validate_candidate(self, content: str) -> None:
-        """在隔离临时 home 中执行完整 ``load_config``，绝不先覆盖原文件。"""
+    def _validate_candidate(self, content: str, changes: Sequence[ConfigChange]) -> None:
+        """在隔离临时 home 中校验完整配置与默认模型可运行性，绝不先覆盖原文件。"""
         try:
             with tempfile.TemporaryDirectory(prefix="harness-config-validate-") as temporary:
                 temporary_home = Path(temporary)
@@ -370,9 +370,54 @@ class ConfigChangeService:
                 path.parent.mkdir(mode=0o700)
                 path.write_text(content, encoding="utf-8")
                 path.chmod(0o600)
-                load_config(workspace=self._workspace, home=temporary_home, environ=self._environ)
-        except (ConfigError, OSError) as exc:
+                candidate = load_config(
+                    workspace=self._workspace,
+                    home=temporary_home,
+                    environ=self._environ,
+                )
+                if any(change.path == "models.default_profile" for change in changes):
+                    self._validate_default_model_profile(candidate)
+        except ConfigChangeError:
+            raise
+        except ConfigError as exc:
+            if "models.default_profile must reference an existing profile" in str(exc):
+                raise ConfigChangeError(
+                    "MODEL_PROFILE_NOT_FOUND",
+                    "默认模型 Profile 不存在",
+                    field="models.default_profile",
+                ) from exc
             raise ConfigChangeError("CONFIG_VALIDATION_FAILED", "修改后的完整配置校验失败") from exc
+        except OSError as exc:
+            raise ConfigChangeError("CONFIG_VALIDATION_FAILED", "修改后的完整配置校验失败") from exc
+
+    def _validate_default_model_profile(self, config: Za38Config) -> None:
+        """确认待写入的全新 Thread 默认 Profile 可由 Single Agent 安全执行。"""
+        if config.model_catalog is None:
+            raise ConfigChangeError(
+                "MODEL_CATALOG_UNAVAILABLE",
+                "默认模型目录不可用，无法更新未来新 Thread 默认值",
+                field="models.default_profile",
+            )
+        try:
+            profile = config.model_catalog.require_profile(config.model_catalog.default_profile)
+        except ConfigError as exc:  # pragma: no cover - load_config 已验证默认 Profile 引用。
+            raise ConfigChangeError(
+                "MODEL_PROFILE_NOT_FOUND",
+                "默认模型 Profile 不存在",
+                field="models.default_profile",
+            ) from exc
+        if profile.settings.api_key_source(self._environ) == "missing":
+            raise ConfigChangeError(
+                "MODEL_PROFILE_UNAVAILABLE",
+                "默认模型不可用",
+                field="models.default_profile",
+            )
+        if DEFAULT_MODEL_CAPABILITIES - profile.settings.capabilities:
+            raise ConfigChangeError(
+                "MODEL_PROFILE_CAPABILITY_MISSING",
+                "默认模型缺少 Single Agent 所需能力",
+                field="models.default_profile",
+            )
 
     def _build_preview(
         self,

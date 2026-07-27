@@ -113,7 +113,9 @@ async def test_config_show_exposes_redacted_runtime_pool_diagnostics(tmp_path: P
     assert diagnostics["memory"]["status"] == "not_collected"
 
 
-async def test_config_write_rpc_previews_and_commits_user_default_model(tmp_path: Path) -> None:
+async def test_config_write_rpc_previews_and_commits_user_default_model(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
     """v2.8 配置写接口必须协商 capability、返回 CAS revision 并只修改用户白名单字段。"""
     from harness_agent.server import JsonRpcServer
 
@@ -136,10 +138,15 @@ api_key_env = "HARNESS_FAST_KEY"
 model = "pro-model"
 base_url = "https://gateway.example/v1"
 api_key_env = "HARNESS_PRO_KEY"
+
+[models.roles]
+executor = "fast"
 ''',
         encoding="utf-8",
     )
-    server = JsonRpcServer(allow_echo=True, config_home=home)
+    monkeypatch.setenv("HARNESS_FAST_KEY", "fast-test")
+    monkeypatch.setenv("HARNESS_PRO_KEY", "pro-test")
+    server = JsonRpcServer(config_home=home)
     frames: list[dict[str, Any]] = []
     server.send = lambda message: _append(frames, message)  # type: ignore[method-assign]
     await server.dispatch(
@@ -147,7 +154,7 @@ api_key_env = "HARNESS_PRO_KEY"
             "initialize",
             _initialize_params(
                 protocol={"major": 2, "min_minor": 8, "max_minor": 8},
-                capabilities=["config.write"],
+                capabilities=["config.write", "run.multithread"],
             ),
             "init-config-write",
         )
@@ -180,6 +187,27 @@ api_key_env = "HARNESS_PRO_KEY"
     assert "default_profile = \"pro\"" in config_path.read_text(encoding="utf-8")
     assert server._config is not None
     assert server._config.model_profile == "pro"
+
+    async def finish_without_build(run: Any) -> None:
+        """避免真实模型调用，仅保留新 Thread 解析的持久化事实。"""
+        run.status = "completed"
+        server._runs.pop(run.thread_id, None)
+
+    server._execute_run = finish_without_build  # type: ignore[method-assign]
+    await server.dispatch(
+        _request(
+            "run.start",
+            {"message": "全新 Thread 必须使用 pro", "thread_id": "fresh-thread", "run_id": "fresh-run"},
+            "fresh-start",
+        )
+    )
+    assert frames[-1].get("result", {}).get("accepted") is True, frames[-1]
+    await asyncio.sleep(0)
+    assert server._thread_store is not None
+    binding = await server._thread_store.get_latest_run_execution_binding("fresh-thread")
+    assert binding is not None
+    assert binding.actual_primary_binding["profile"]["id"] == "pro"  # type: ignore[index]
+    await server._close_thread_store()
 
 
 async def test_config_write_requires_v2_8_capability(tmp_path: Path) -> None:

@@ -11,8 +11,6 @@ export type TuiRuntime = {
   modelName?: string
   /** 当前实际使用或待绑定的脱敏模型 Profile ID。 */
   modelProfileId?: string
-  /** 模型选择将在当前或下一 Thread 的后续 Run 生效时显示待生效状态。 */
-  modelSelectionPending?: boolean
   modelConfigured: boolean
   startupError?: string
   executionMode: "local" | "remote-sandbox"
@@ -112,9 +110,13 @@ function compactNumber(value: number): string {
 /** 将运行时模型配置转换为状态摘要使用的简短文案。 */
 function modelLabel(runtime: TuiRuntime): string {
   if (!runtime.modelConfigured) return "模型未配置"
-  const name = runtime.modelName ?? "已配置模型"
-  const profile = runtime.modelProfileId ? `${runtime.modelProfileId} · ` : ""
-  return `${profile}${name}${runtime.modelSelectionPending ? "（下一次运行）" : ""}`
+  return modelReference(runtime.modelProfileId, runtime.modelName) ?? "已配置模型"
+}
+
+/** 统一格式化脱敏 Profile ID 与模型名，供 TUI 展示当前模型。 */
+function modelReference(profileId: string | undefined, modelName: string | undefined): string | undefined {
+  if (!profileId && !modelName) return undefined
+  return `${profileId ? `${profileId} · ` : ""}${modelName ?? "已配置模型"}`
 }
 
 /** 判断握手字段是否为普通对象，拒绝 null 和数组。 */

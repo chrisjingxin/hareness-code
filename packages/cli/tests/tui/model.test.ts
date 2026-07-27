@@ -105,3 +105,19 @@ test("/status 汇总真实的本机后端和英文审批模式", () => {
     "MCP     未配置",
   ].join("\n"))
 })
+
+test("/status 仅显示当前 Thread 的模型选择", () => {
+  const summary = runtimeStatusSummary({
+    workspace: "/work/za38-cli",
+    cliVersion: "0.1.0",
+    modelName: "pro-model",
+    modelProfileId: "pro",
+    modelConfigured: true,
+    executionMode: "local",
+    approvalMode: "default",
+  })
+
+  expect(summary).toContain("模型    pro · pro-model")
+  expect(summary).not.toContain("当前 Thread")
+  expect(summary).not.toContain("后续新 Thread")
+})
