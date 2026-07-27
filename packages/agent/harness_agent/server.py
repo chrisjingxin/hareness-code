@@ -29,6 +29,12 @@ from harness_agent.agent_runtime import (
     RuntimeResourceBundle,
 )
 from harness_agent.config import ConfigError, Za38Config, load_config
+from harness_agent.config_change_service import (
+    ConfigChange,
+    ConfigChangeError,
+    ConfigChangeService,
+    ManagedConfigPolicy,
+)
 from harness_agent.model_router import ModelRouter, ThreadModelBindings
 from harness_agent.protocol_generated import (
     MAX_FRAME_BYTES,
@@ -38,6 +44,9 @@ from harness_agent.protocol_generated import (
     SERVER_CAPABILITIES,
     ApprovalResponse,
     ContextCompactParams,
+    ConfigCommitParams,
+    ConfigDetailsParams,
+    ConfigPreviewParams,
     InitializeParams,
     ModelsListParams,
     McpAddParams,
@@ -151,6 +160,7 @@ class JsonRpcServer:
         agent_factory: AgentFactory | None = None,
         allow_echo: bool | None = None,
         config_home: Path | None = None,
+        config_change_policy: ManagedConfigPolicy | None = None,
     ) -> None:
         """初始化运行表、反向请求表、发送锁和方法分发表。
 
@@ -174,6 +184,8 @@ class JsonRpcServer:
         self._config_path: str | None = None
         self._config_home = config_home
         self._config: Za38Config | None = None
+        self._config_change_policy = config_change_policy or ManagedConfigPolicy()
+        self._config_change_service: ConfigChangeService | None = None
         self._startup_error: str | None = None
         self._skill_registry: SkillRegistry | None = None
         self._thread_store: ThreadStore | None = None
@@ -191,6 +203,9 @@ class JsonRpcServer:
             "context.compact": self._handle_context_compact,
             "config.show": self._handle_config_show,
             "config.path": self._handle_config_path,
+            "config.details": self._handle_config_details,
+            "config.preview": self._handle_config_preview,
+            "config.commit": self._handle_config_commit,
             "models.list": self._handle_models_list,
             "threads.list": self._handle_threads_list,
             "threads.open": self._handle_threads_open,
@@ -384,6 +399,8 @@ class JsonRpcServer:
         self._enabled_capabilities = requested.intersection(SERVER_CAPABILITIES)
         if self._protocol_minor < 7:
             self._enabled_capabilities.discard("models.select")
+        if self._protocol_minor < 8:
+            self._enabled_capabilities.discard("config.write")
         self._initialized = True
         return {
             "protocol": {"major": PROTOCOL_MAJOR, "minor": self._protocol_minor},
@@ -569,6 +586,43 @@ class JsonRpcServer:
         summary = self._config.redacted()
         summary["runtime_pool_diagnostics"] = await self._runtime_pool_diagnostics()
         return summary
+
+    async def _handle_config_details(self, params: dict[str, Any], _id: str) -> dict[str, object]:
+        """返回 Settings/Permissions Manager 可展示的脱敏字段和可修改边界。"""
+        self._require_config_write_capability()
+        ConfigDetailsParams.model_validate(params)
+        try:
+            return self._config_changes().details()
+        except ConfigChangeError as exc:
+            raise self._config_change_rpc_error(exc) from exc
+
+    async def _handle_config_preview(self, params: dict[str, Any], _id: str) -> dict[str, object]:
+        """在不落盘的前提下验证配置更新并返回 CAS revision 与脱敏差异。"""
+        self._require_config_write_capability()
+        parsed = ConfigPreviewParams.model_validate(params)
+        try:
+            return self._config_changes().preview(
+                [ConfigChange(change.path, change.value) for change in parsed.changes]
+            ).to_dict()
+        except ConfigChangeError as exc:
+            raise self._config_change_rpc_error(exc) from exc
+
+    async def _handle_config_commit(self, params: dict[str, Any], _id: str) -> dict[str, object]:
+        """按 preview revision 原子提交白名单字段，不允许绕过来源和策略校验。"""
+        self._require_config_write_capability()
+        parsed = ConfigCommitParams.model_validate(params)
+        try:
+            result = self._config_changes().commit(
+                expected_revision=parsed.expected_revision,
+                changes=[ConfigChange(change.path, change.value) for change in parsed.changes],
+            )
+        except ConfigChangeError as exc:
+            raise self._config_change_rpc_error(exc) from exc
+        # 当前仅默认模型可安全影响之后创建的 Thread：已经启动的 Run 和既有
+        # Runtime 保持原快照；其他 Settings 仍明确要求重启 sidecar。
+        if result["applies_to"] == ["new-thread"]:
+            self._load_config()
+        return result
 
     async def _handle_mcp_status(self, _params: dict[str, Any], _id: str) -> dict[str, Any]:
         """返回所有已配置 MCP 服务器的运行时连接状态和工具列表。"""
@@ -822,6 +876,22 @@ class JsonRpcServer:
         except ConfigError as exc:
             self._config = None
             self._startup_error = str(exc)
+
+    def _config_changes(self) -> ConfigChangeService:
+        """延迟创建受控写服务，使其始终绑定握手后确定的 workspace 与来源。"""
+        if self._config_change_service is None:
+            self._config_change_service = ConfigChangeService(
+                workspace=self._workspace,
+                home=self._config_home,
+                config_path=self._config_path,
+                managed_policy=self._config_change_policy,
+            )
+        return self._config_change_service
+
+    @staticmethod
+    def _config_change_rpc_error(error: ConfigChangeError) -> RpcError:
+        """将领域错误映射为不含 TOML 或秘密值的稳定 RPC 响应。"""
+        return RpcError(-32012, error.code, error.redacted_data())
 
     async def _execute_run(self, run: ActiveRun) -> None:
         """执行并自动恢复中断，保证每个 run 只产生一个终态。"""
@@ -1688,6 +1758,11 @@ class JsonRpcServer:
             raise RpcError(-32002, "MODELS_CAPABILITY_REQUIRED")
         if self._allow_echo:
             raise RpcError(-32002, "MODELS_UNAVAILABLE_IN_ECHO_MODE")
+
+    def _require_config_write_capability(self) -> None:
+        """配置写服务只能由显式协商的 Settings/正式 CLI 客户端调用。"""
+        if "config.write" not in self._enabled_capabilities:
+            raise RpcError(-32002, "CONFIG_WRITE_CAPABILITY_REQUIRED")
 
     def _require_context_capability(self) -> None:
         """手动压缩会改写本机 checkpoint，必须由显式协商能力的交互客户端发起。"""

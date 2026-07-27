@@ -11,6 +11,10 @@ import {
   assertJsonRpcMessage,
   type EventEnvelope,
   type ContextCompactResult,
+  type ConfigChange,
+  type ConfigCommitResult,
+  type ConfigDetailsResult,
+  type ConfigPreviewResult,
   type InteractionRequestEnvelope,
   type InteractionResponse,
   type JsonRpcMessage,
@@ -142,6 +146,21 @@ export class JsonRpcPeer extends EventEmitter {
   /** 在当前 thread 空闲时请求 sidecar 强制生成一次结构化上下文摘要。 */
   compactContext(threadId: string): Promise<ContextCompactResult> {
     return this.call(Method.CONTEXT_COMPACT, { thread_id: threadId }) as Promise<ContextCompactResult>
+  }
+
+  /** 读取受控配置字段、来源锁和可修改范围；不返回 TOML 原文或秘密。 */
+  configDetails(): Promise<ConfigDetailsResult> {
+    return this.call(Method.CONFIG_DETAILS, {}) as Promise<ConfigDetailsResult>
+  }
+
+  /** 预览白名单配置变更，并返回提交所需的 CAS revision。 */
+  previewConfig(changes: ConfigChange[]): Promise<ConfigPreviewResult> {
+    return this.call(Method.CONFIG_PREVIEW, { changes }) as Promise<ConfigPreviewResult>
+  }
+
+  /** 使用预览 revision 原子提交白名单配置变更。 */
+  commitConfig(expectedRevision: string, changes: ConfigChange[]): Promise<ConfigCommitResult> {
+    return this.call(Method.CONFIG_COMMIT, { expected_revision: expectedRevision, changes }) as Promise<ConfigCommitResult>
   }
 
   /** 读取当前 project 的可恢复 thread 摘要；thread_id 只在 TUI 内部用于后续打开。 */

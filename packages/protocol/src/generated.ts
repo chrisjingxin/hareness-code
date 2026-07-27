@@ -1,12 +1,12 @@
 /** 此文件由 packages/protocol/scripts/generate.ts 生成，请勿手工修改。 */
 
 export const PROTOCOL_MAJOR = 2 as const
-export const PROTOCOL_MINOR = 7 as const
+export const PROTOCOL_MINOR = 8 as const
 export const MAX_FRAME_BYTES = 8388608 as const
 export const MAX_TOOL_PAYLOAD_BYTES = 1048576 as const
-export const CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","threads.list","threads.open","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","mcp.status","mcp.add","mcp.remove","models.list","shutdown"] as const
+export const CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","mcp.status","mcp.add","mcp.remove","models.list","shutdown"] as const
 export const SERVER_METHODS = ["event","request"] as const
-export const SERVER_CAPABILITIES = ["run.cancel","run.multithread","interactive.approval","interactive.question","config.read","threads.read","context.manage","skills.read","skills.manage","mcp.read","models.read","models.select"] as const
+export const SERVER_CAPABILITIES = ["run.cancel","run.multithread","interactive.approval","interactive.question","config.read","config.write","threads.read","context.manage","skills.read","skills.manage","mcp.read","models.read","models.select"] as const
 export const EVENT_TYPES = ["run.started","skill.loaded","content.delta","thinking.delta","tool.started","tool.delta","tool.completed","context.updated","interaction.resolved","run.completed","run.cancelled","run.failed"] as const
 
 export type JsonObject = Record<string, unknown>
@@ -28,6 +28,15 @@ export interface RunCancelParams { thread_id: string; run_id: string }
 export interface RunCancelResult { cancelled: boolean; run_id: string }
 export interface ContextCompactParams { thread_id: string }
 export interface ContextCompactResult { compacted: boolean; context: JsonObject }
+export interface ConfigChange { path: string; value: unknown }
+export interface ConfigDetailsParams { }
+export interface ConfigFieldDetail { path: string; value: unknown; source: string; editable: boolean; unavailable_reason: string | null; applies_to: "new-thread" | "restart" }
+export interface ConfigImmutableField { path: string; reason: string }
+export interface ConfigDetailsResult { revision: string; fields: ConfigFieldDetail[]; immutable_fields: ConfigImmutableField[] }
+export interface ConfigPreviewParams { changes: ConfigChange[] }
+export interface ConfigPreviewResult { revision: string; changes: Array<{ path: string; before: unknown; after: unknown }>; applies_to: Array<"new-thread" | "restart"> }
+export interface ConfigCommitParams { expected_revision: string; changes: ConfigChange[] }
+export interface ConfigCommitResult { revision: string; changes: Array<{ path: string; before: unknown; after: unknown }>; applies_to: Array<"new-thread" | "restart"> }
 export interface ThreadSummary { thread_id: string; created_at_ms: number; updated_at_ms: number; first_message: string; latest_message: string; message_count: number }
 export interface ThreadMessage { kind: "user" | "assistant" | "tool"; content: string; tool_name?: string }
 export interface ThreadsListParams { limit?: number }

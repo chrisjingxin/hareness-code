@@ -7,12 +7,12 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 PROTOCOL_MAJOR = 2
-PROTOCOL_MINOR = 7
+PROTOCOL_MINOR = 8
 MAX_FRAME_BYTES = 8388608
 MAX_TOOL_PAYLOAD_BYTES = 1048576
-CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","threads.list","threads.open","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","mcp.status","mcp.add","mcp.remove","models.list","shutdown"]
+CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","mcp.status","mcp.add","mcp.remove","models.list","shutdown"]
 SERVER_METHODS = ["event","request"]
-SERVER_CAPABILITIES = ["run.cancel","run.multithread","interactive.approval","interactive.question","config.read","threads.read","context.manage","skills.read","skills.manage","mcp.read","models.read","models.select"]
+SERVER_CAPABILITIES = ["run.cancel","run.multithread","interactive.approval","interactive.question","config.read","config.write","threads.read","context.manage","skills.read","skills.manage","mcp.read","models.read","models.select"]
 EVENT_TYPES = ["run.started","skill.loaded","content.delta","thinking.delta","tool.started","tool.delta","tool.completed","context.updated","interaction.resolved","run.completed","run.cancelled","run.failed"]
 
 class StrictModel(BaseModel):
@@ -77,6 +77,20 @@ class RunCancelParams(StrictModel):
 
 class ContextCompactParams(StrictModel):
     thread_id: str = Field(min_length=1)
+
+class ConfigChange(StrictModel):
+    path: str = Field(min_length=1)
+    value: Any
+
+class ConfigDetailsParams(StrictModel):
+    pass
+
+class ConfigPreviewParams(StrictModel):
+    changes: list[ConfigChange] = Field(min_length=1)
+
+class ConfigCommitParams(StrictModel):
+    expected_revision: str = Field(min_length=1)
+    changes: list[ConfigChange] = Field(min_length=1)
 
 class ThreadSummary(StrictModel):
     thread_id: str = Field(min_length=1)

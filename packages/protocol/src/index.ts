@@ -9,6 +9,9 @@ import {
   PROTOCOL_MINOR,
   type EventEnvelope,
   type ContextCompactParams,
+  type ConfigCommitParams,
+  type ConfigDetailsParams,
+  type ConfigPreviewParams,
   type InitializeParams,
   type InteractionRequestEnvelope,
   type JsonRpcMessage,
@@ -27,6 +30,9 @@ export const Method = {
   CONTEXT_COMPACT: "context.compact",
   CONFIG_SHOW: "config.show",
   CONFIG_PATH: "config.path",
+  CONFIG_DETAILS: "config.details",
+  CONFIG_PREVIEW: "config.preview",
+  CONFIG_COMMIT: "config.commit",
   MODELS_LIST: "models.list",
   THREADS_LIST: "threads.list",
   THREADS_OPEN: "threads.open",
@@ -93,6 +99,27 @@ export function assertContextCompactParams(value: unknown): asserts value is Con
   const params = objectValue(value, "context.compact params")
   if (typeof params.thread_id !== "string" || !params.thread_id) throw new Error("context.compact.thread_id 无效")
   rejectExtra(params, ["thread_id"], "context.compact params")
+}
+
+/** 校验受控配置详情读取请求；此接口不接受由调用方指定的文件路径。 */
+export function assertConfigDetailsParams(value: unknown): asserts value is ConfigDetailsParams {
+  const params = objectValue(value, "config.details params")
+  rejectExtra(params, [], "config.details params")
+}
+
+/** 校验配置预览只提交显式白名单候选，字段合法性仍由服务端领域服务决定。 */
+export function assertConfigPreviewParams(value: unknown): asserts value is ConfigPreviewParams {
+  const params = objectValue(value, "config.preview params")
+  validateConfigChanges(params, "config.preview params")
+  rejectExtra(params, ["changes"], "config.preview params")
+}
+
+/** 校验配置提交携带预览返回的 CAS revision，防止覆盖并发更新。 */
+export function assertConfigCommitParams(value: unknown): asserts value is ConfigCommitParams {
+  const params = objectValue(value, "config.commit params")
+  requireString(params, "expected_revision", "config.commit params")
+  validateConfigChanges(params, "config.commit params")
+  rejectExtra(params, ["expected_revision", "changes"], "config.commit params")
 }
 
 /** 校验 MCP 状态查询参数（当前为空对象）。 */
@@ -180,6 +207,16 @@ function integer(value: unknown): boolean {
 
 function requireString(value: Record<string, unknown>, key: string, label: string): void {
   if (typeof value[key] !== "string" || !(value[key] as string)) throw new Error(`${label}.${key} 无效`)
+}
+
+function validateConfigChanges(value: Record<string, unknown>, label: string): void {
+  if (!Array.isArray(value.changes) || value.changes.length === 0) throw new Error(`${label}.changes 无效`)
+  for (const change of value.changes) {
+    const parsed = objectValue(change, `${label}.changes[]`)
+    requireString(parsed, "path", `${label}.changes[]`)
+    if (!("value" in parsed)) throw new Error(`${label}.changes[].value 缺失`)
+    rejectExtra(parsed, ["path", "value"], `${label}.changes[]`)
+  }
 }
 
 function rejectExtra(value: Record<string, unknown>, allowed: readonly string[], label: string): void {

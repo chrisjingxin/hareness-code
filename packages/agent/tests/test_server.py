@@ -112,6 +112,97 @@ async def test_config_show_exposes_redacted_runtime_pool_diagnostics(tmp_path: P
     assert profile.profile_key not in str(diagnostics)
     assert diagnostics["memory"]["status"] == "not_collected"
 
+
+async def test_config_write_rpc_previews_and_commits_user_default_model(tmp_path: Path) -> None:
+    """v2.8 配置写接口必须协商 capability、返回 CAS revision 并只修改用户白名单字段。"""
+    from harness_agent.server import JsonRpcServer
+
+    home = tmp_path / "home"
+    config_path = home / ".harness" / "config.toml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        '''[config]
+version = 1
+
+[models]
+default_profile = "fast"
+
+[models.profiles.fast]
+model = "fast-model"
+base_url = "https://gateway.example/v1"
+api_key_env = "HARNESS_FAST_KEY"
+
+[models.profiles.pro]
+model = "pro-model"
+base_url = "https://gateway.example/v1"
+api_key_env = "HARNESS_PRO_KEY"
+''',
+        encoding="utf-8",
+    )
+    server = JsonRpcServer(allow_echo=True, config_home=home)
+    frames: list[dict[str, Any]] = []
+    server.send = lambda message: _append(frames, message)  # type: ignore[method-assign]
+    await server.dispatch(
+        _request(
+            "initialize",
+            _initialize_params(
+                protocol={"major": 2, "min_minor": 8, "max_minor": 8},
+                capabilities=["config.write"],
+            ),
+            "init-config-write",
+        )
+    )
+    assert "config.write" in frames[-1]["result"]["enabled_capabilities"]
+
+    await server.dispatch(_request("config.details", {}, "config-details"))
+    details = frames[-1]["result"]
+    assert next(field for field in details["fields"] if field["path"] == "models.default_profile")["editable"] is True
+
+    await server.dispatch(
+        _request(
+            "config.preview",
+            {"changes": [{"path": "models.default_profile", "value": "pro"}]},
+            "config-preview",
+        )
+    )
+    preview = frames[-1]["result"]
+    await server.dispatch(
+        _request(
+            "config.commit",
+            {
+                "expected_revision": preview["revision"],
+                "changes": [{"path": "models.default_profile", "value": "pro"}],
+            },
+            "config-commit",
+        )
+    )
+    assert frames[-1]["result"]["applies_to"] == ["new-thread"]
+    assert "default_profile = \"pro\"" in config_path.read_text(encoding="utf-8")
+    assert server._config is not None
+    assert server._config.model_profile == "pro"
+
+
+async def test_config_write_requires_v2_8_capability(tmp_path: Path) -> None:
+    """旧 minor 或未显式协商 config.write 的客户端不能调用配置写接口。"""
+    from harness_agent.server import JsonRpcServer
+
+    server = JsonRpcServer(allow_echo=True, config_home=tmp_path / "home")
+    frames: list[dict[str, Any]] = []
+    server.send = lambda message: _append(frames, message)  # type: ignore[method-assign]
+    await server.dispatch(
+        _request(
+            "initialize",
+            _initialize_params(
+                protocol={"major": 2, "min_minor": 0, "max_minor": 7},
+                capabilities=["config.write"],
+            ),
+            "init-config-write-old",
+        )
+    )
+    assert "config.write" not in frames[-1]["result"]["enabled_capabilities"]
+    await server.dispatch(_request("config.details", {}, "config-details-old"))
+    assert frames[-1]["error"]["message"] == "CONFIG_WRITE_CAPABILITY_REQUIRED"
+
     await server._close_runtime_pool()
     await server.dispatch(_request("config.show", {}, "config-runtime-closed"))
     assert frames[-1]["result"]["runtime_pool_diagnostics"]["state"] == "not_initialized"

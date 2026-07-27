@@ -63,6 +63,15 @@ export interface RunCancelParams { thread_id: string; run_id: string }
 export interface RunCancelResult { cancelled: boolean; run_id: string }
 export interface ContextCompactParams { thread_id: string }
 export interface ContextCompactResult { compacted: boolean; context: JsonObject }
+export interface ConfigChange { path: string; value: unknown }
+export interface ConfigDetailsParams { }
+export interface ConfigFieldDetail { path: string; value: unknown; source: string; editable: boolean; unavailable_reason: string | null; applies_to: "new-thread" | "restart" }
+export interface ConfigImmutableField { path: string; reason: string }
+export interface ConfigDetailsResult { revision: string; fields: ConfigFieldDetail[]; immutable_fields: ConfigImmutableField[] }
+export interface ConfigPreviewParams { changes: ConfigChange[] }
+export interface ConfigPreviewResult { revision: string; changes: Array<{ path: string; before: unknown; after: unknown }>; applies_to: Array<"new-thread" | "restart"> }
+export interface ConfigCommitParams { expected_revision: string; changes: ConfigChange[] }
+export interface ConfigCommitResult { revision: string; changes: Array<{ path: string; before: unknown; after: unknown }>; applies_to: Array<"new-thread" | "restart"> }
 export interface ThreadSummary { thread_id: string; created_at_ms: number; updated_at_ms: number; first_message: string; latest_message: string; message_count: number }
 export interface ThreadMessage { kind: "user" | "assistant" | "tool"; content: string; tool_name?: string }
 export interface ThreadsListParams { limit?: number }
@@ -167,6 +176,20 @@ class RunCancelParams(StrictModel):
 
 class ContextCompactParams(StrictModel):
     thread_id: str = Field(min_length=1)
+
+class ConfigChange(StrictModel):
+    path: str = Field(min_length=1)
+    value: Any
+
+class ConfigDetailsParams(StrictModel):
+    pass
+
+class ConfigPreviewParams(StrictModel):
+    changes: list[ConfigChange] = Field(min_length=1)
+
+class ConfigCommitParams(StrictModel):
+    expected_revision: str = Field(min_length=1)
+    changes: list[ConfigChange] = Field(min_length=1)
 
 class ThreadSummary(StrictModel):
     thread_id: str = Field(min_length=1)

@@ -4,12 +4,12 @@
   "title": "za38 protocol v2",
   "x-protocol": {
     "major": 2,
-    "minor": 7,
+    "minor": 8,
     "max_frame_bytes": 8388608,
     "max_tool_payload_bytes": 1048576,
-    "client_methods": ["initialize", "run.start", "run.cancel", "context.compact", "config.show", "config.path", "threads.list", "threads.open", "skills.list", "skills.inspect", "skills.set_enabled", "skills.install", "skills.update", "skills.remove", "skills.market.list", "mcp.status", "mcp.add", "mcp.remove", "models.list", "shutdown"],
+    "client_methods": ["initialize", "run.start", "run.cancel", "context.compact", "config.show", "config.path", "config.details", "config.preview", "config.commit", "threads.list", "threads.open", "skills.list", "skills.inspect", "skills.set_enabled", "skills.install", "skills.update", "skills.remove", "skills.market.list", "mcp.status", "mcp.add", "mcp.remove", "models.list", "shutdown"],
     "server_methods": ["event", "request"],
-    "server_capabilities": ["run.cancel", "run.multithread", "interactive.approval", "interactive.question", "config.read", "threads.read", "context.manage", "skills.read", "skills.manage", "mcp.read", "models.read", "models.select"],
+    "server_capabilities": ["run.cancel", "run.multithread", "interactive.approval", "interactive.question", "config.read", "config.write", "threads.read", "context.manage", "skills.read", "skills.manage", "mcp.read", "models.read", "models.select"],
     "event_types": ["run.started", "skill.loaded", "content.delta", "thinking.delta", "tool.started", "tool.delta", "tool.completed", "context.updated", "interaction.resolved", "run.completed", "run.cancelled", "run.failed"]
   },
   "oneOf": [
@@ -178,6 +178,36 @@
       "type": "object",
       "required": ["compacted", "context"],
       "properties": { "compacted": { "type": "boolean" }, "context": { "type": "object" } },
+      "additionalProperties": false
+    },
+    "configChange": {
+      "type": "object",
+      "required": ["path", "value"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "value": {}
+      },
+      "additionalProperties": false
+    },
+    "configDetailsParams": {
+      "type": "object",
+      "additionalProperties": false
+    },
+    "configPreviewParams": {
+      "type": "object",
+      "required": ["changes"],
+      "properties": {
+        "changes": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/configChange" } }
+      },
+      "additionalProperties": false
+    },
+    "configCommitParams": {
+      "type": "object",
+      "required": ["expected_revision", "changes"],
+      "properties": {
+        "expected_revision": { "type": "string", "minLength": 1 },
+        "changes": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/configChange" } }
+      },
       "additionalProperties": false
     },
     "eventEnvelope": {

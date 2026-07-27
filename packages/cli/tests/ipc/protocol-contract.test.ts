@@ -3,9 +3,9 @@
 import { expect, test } from "bun:test"
 import { readFile } from "node:fs/promises"
 import { resolve } from "node:path"
-import { assertContextCompactParams, assertEventEnvelope, assertInitializeParams, assertInteractionRequest, assertModelsListParams, assertThreadsListParams, assertThreadsOpenParams } from "@za38/protocol"
+import { assertConfigCommitParams, assertConfigDetailsParams, assertConfigPreviewParams, assertContextCompactParams, assertEventEnvelope, assertInitializeParams, assertInteractionRequest, assertModelsListParams, assertThreadsListParams, assertThreadsOpenParams } from "@za38/protocol"
 
-type Fixture = { kind: "initialize" | "event" | "request" | "threads.list" | "threads.open"; value: unknown }
+type Fixture = { kind: "initialize" | "event" | "request" | "threads.list" | "threads.open" | "config.details" | "config.preview" | "config.commit"; value: unknown }
 const fixtures = JSON.parse(await readFile(resolve(import.meta.dir, "../../../protocol/fixtures/v2-contract.json"), "utf8")) as { valid: Fixture[]; invalid: Fixture[] }
 
 test("TypeScript 接受全部共享有效 fixture", () => {
@@ -44,10 +44,20 @@ test("TypeScript 校验 v2.5 的 models.list 线程绑定参数", () => {
   expect(() => assertModelsListParams({ thread_id: "", ignored: true })).toThrow()
 })
 
+test("TypeScript 校验 v2.8 受控配置变更参数", () => {
+  expect(() => assertConfigDetailsParams({})).not.toThrow()
+  expect(() => assertConfigPreviewParams({ changes: [{ path: "models.default_profile", value: "pro" }] })).not.toThrow()
+  expect(() => assertConfigCommitParams({ expected_revision: "revision", changes: [{ path: "approval.mode", value: "plan" }] })).not.toThrow()
+  expect(() => assertConfigCommitParams({ expected_revision: "", changes: [] })).toThrow()
+})
+
 function validate(fixture: Fixture): void {
   if (fixture.kind === "initialize") assertInitializeParams(fixture.value)
   else if (fixture.kind === "event") assertEventEnvelope(fixture.value)
   else if (fixture.kind === "request") assertInteractionRequest(fixture.value)
   else if (fixture.kind === "threads.list") assertThreadsListParams(fixture.value)
-  else assertThreadsOpenParams(fixture.value)
+  else if (fixture.kind === "threads.open") assertThreadsOpenParams(fixture.value)
+  else if (fixture.kind === "config.details") assertConfigDetailsParams(fixture.value)
+  else if (fixture.kind === "config.preview") assertConfigPreviewParams(fixture.value)
+  else assertConfigCommitParams(fixture.value)
 }

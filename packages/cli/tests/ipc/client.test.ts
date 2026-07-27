@@ -56,6 +56,29 @@ test("Peer 在每次 run.start 中携带 Thread 模型选择", async () => {
   })
 })
 
+test("Peer 通过受控配置接口传递详情、预览和 CAS 提交参数", async () => {
+  const { client, stdin, stdout } = peer()
+  const requests: any[] = []
+  stdin.on("data", data => {
+    const message = JSON.parse(data.toString())
+    requests.push(message)
+    const result = message.method === "config.details"
+      ? { revision: "r1", fields: [], immutable_fields: [] }
+      : { revision: "r2", changes: [], applies_to: ["restart"] }
+    stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }) + "\n")
+  })
+
+  await client.configDetails()
+  const preview = await client.previewConfig([{ path: "approval.mode", value: "plan" }])
+  await client.commitConfig(preview.revision, [{ path: "approval.mode", value: "plan" }])
+
+  expect(requests.map(request => request.params)).toEqual([
+    {},
+    { changes: [{ path: "approval.mode", value: "plan" }] },
+    { expected_revision: "r2", changes: [{ path: "approval.mode", value: "plan" }] },
+  ])
+})
+
 test("Peer 处理半帧、多帧和统一 event", async () => {
   const { client, stdout } = peer()
   const events: any[] = []

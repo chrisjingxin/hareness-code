@@ -12,6 +12,9 @@ from pydantic import ValidationError
 from harness_agent.protocol_generated import (
     EventEnvelope,
     ContextCompactParams,
+    ConfigCommitParams,
+    ConfigDetailsParams,
+    ConfigPreviewParams,
     InitializeParams,
     InteractionRequestEnvelope,
     RunStartParams,
@@ -61,6 +64,23 @@ def test_python_validates_v2_7_thread_model_selection() -> None:
         )
 
 
+def test_python_validates_v2_8_controlled_config_change_params() -> None:
+    """配置写协议只接受带值的更新，并要求提交携带非空 CAS revision。"""
+    assert ConfigDetailsParams.model_validate({}) == ConfigDetailsParams()
+    preview = ConfigPreviewParams.model_validate(
+        {"changes": [{"path": "models.default_profile", "value": "pro"}]}
+    )
+    assert preview.changes[0].path == "models.default_profile"
+    assert ConfigCommitParams.model_validate(
+        {
+            "expected_revision": "revision",
+            "changes": [{"path": "approval.mode", "value": "plan"}],
+        }
+    ).expected_revision == "revision"
+    with pytest.raises(ValidationError):
+        ConfigPreviewParams.model_validate({"changes": []})
+
+
 def _validate(fixture: dict[str, Any]) -> None:
     model = {
         "initialize": InitializeParams,
@@ -68,5 +88,8 @@ def _validate(fixture: dict[str, Any]) -> None:
         "request": InteractionRequestEnvelope,
         "threads.list": ThreadsListParams,
         "threads.open": ThreadsOpenParams,
+        "config.details": ConfigDetailsParams,
+        "config.preview": ConfigPreviewParams,
+        "config.commit": ConfigCommitParams,
     }[fixture["kind"]]
     model.model_validate(fixture["value"])

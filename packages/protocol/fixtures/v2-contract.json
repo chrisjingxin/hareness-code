@@ -17,6 +17,21 @@
       "value": { "thread_id": "thread-1" }
     },
     {
+      "kind": "config.details",
+      "value": {}
+    },
+    {
+      "kind": "config.preview",
+      "value": { "changes": [{ "path": "models.default_profile", "value": "pro" }] }
+    },
+    {
+      "kind": "config.commit",
+      "value": {
+        "expected_revision": "sha256-token",
+        "changes": [{ "path": "runtime_pool.max_profiles", "value": 12 }]
+      }
+    },
+    {
       "kind": "event",
       "value": {
         "event_id": "event-1",
@@ -103,6 +118,18 @@
     {
       "kind": "threads.open",
       "value": { "thread_id": "", "unknown": true }
+    },
+    {
+      "kind": "config.details",
+      "value": { "path": "must-not-be-client-controlled" }
+    },
+    {
+      "kind": "config.preview",
+      "value": { "changes": [] }
+    },
+    {
+      "kind": "config.commit",
+      "value": { "expected_revision": "", "changes": [{ "path": "approval.mode" }] }
     },
     {
       "kind": "event",
