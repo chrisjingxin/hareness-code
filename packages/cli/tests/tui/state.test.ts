@@ -1,4 +1,4 @@
-/** v2 事件和交互请求的 TUI 归约测试。 */
+/** v3 事件和交互请求的 TUI 归约测试。 */
 
 import { expect, test } from "bun:test"
 import type { EventEnvelope, InteractionRequestEnvelope } from "@za38/protocol"
@@ -27,7 +27,7 @@ test("恢复 thread 会原子替换时间线并清空旧运行状态", () => {
   expect(restored.timeline.map(item => item.type)).toEqual(["message", "message", "tool"])
 })
 
-test("v2 事件按 sequence 更新消息、工具和终态", () => {
+test("v3 事件按 sequence 更新消息、工具和终态", () => {
   let state = startRun(createInitialState(), run, "生成组件")
   state = applyAgentEvent(state, event("content.delta", 1, { text: "正在" }))
   state = applyAgentEvent(state, event("tool.started", 2, { tool_call_id: "tool-1", name: "read_file" }))
@@ -150,7 +150,7 @@ function event(type: string, sequence: number, payload: Record<string, unknown>)
 }
 
 function request(type: "approval" | "question", sequence: number, payload: Record<string, unknown>): InteractionRequestEnvelope {
-  return { request_id: `request-${sequence}`, type, thread_id: run.threadId, run_id: run.runId, sequence, timeout_ms: 1000, payload }
+  return { request_id: `request-${sequence}`, type, thread_id: run.threadId, run_id: run.runId, timeout_ms: 1000, payload } as InteractionRequestEnvelope
 }
 
 function messages(state: TuiState) { return state.timeline.flatMap(item => item.type === "message" ? [item.message] : []) }

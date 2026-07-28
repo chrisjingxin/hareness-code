@@ -43,7 +43,7 @@ export function createTuiRuntime(
     sandboxProvider: optionalString(security?.provider),
     approvalMode: approvalMode(security?.approval_mode),
     approvalModeWarning: optionalString(security?.approval_mode_warning),
-    capabilities: [...new Set(result.enabled_capabilities)],
+    capabilities: [...new Set(result.capabilities.enabled)],
     mcpSummary: mcpServers && mcpServers.length > 0 ? `${mcpServers.length} 个服务器` : undefined,
   }
 }

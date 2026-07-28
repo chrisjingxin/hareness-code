@@ -16,6 +16,7 @@ deepagents 的 ``FilesystemMiddleware`` 在每个工具执行前调用
 from __future__ import annotations
 
 import re
+import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -119,8 +120,9 @@ class WorkspacePathPolicy:
         ``/`` 开头的虚拟路径拼接到工作区根目录后解析；OS 绝对路径直接
         解析。两种方式最终都通过 ``relative_to`` 检查 containment。
         """
-        if raw.startswith("/"):
-            # 虚拟路径：拼接到工作区根目录。
+        if raw.startswith("/") and sys.platform == "win32":
+            # Windows virtual_mode 使用 `/relative`；POSIX 的 `/...` 必须按
+            # 真实绝对路径校验，否则 `/var/outside` 会被错误拼回工作区。
             real = (self.workspace / raw.lstrip("/")).resolve(strict=False)
         else:
             real = Path(raw).resolve(strict=False)
@@ -176,12 +178,14 @@ class WorkspaceBoundaryMiddleware(AgentMiddleware[dict[str, Any], ContextT, Resp
                         raise ValueError("/.harness 仅允许通过 read_file 只读分页访问")
                     _validate_virtual_read_path(value)
                 else:
-                    self.policy.validate_direct_path(value, tool_name=tool_name)
+                    resolved = self.policy.validate_direct_path(value, tool_name=tool_name)
+                    args[field] = self._backend_path(resolved)
             elif tool_name in _SEARCH_TOOLS:
                 # 未传 path 时由 LocalShellBackend 以 root_dir 搜索；这是工作区内
                 # 的安全默认值。显式 path 必须仍通过 canonical containment。
                 if args.get("path") is not None:
-                    self.policy.validate_search_path(args["path"], tool_name=tool_name)
+                    resolved = self.policy.validate_search_path(args["path"], tool_name=tool_name)
+                    args["path"] = self._backend_path(resolved)
                 if tool_name == "glob":
                     self.policy.validate_search_pattern(
                         args.get("pattern"), tool_name=tool_name, field="pattern"
@@ -197,6 +201,11 @@ class WorkspaceBoundaryMiddleware(AgentMiddleware[dict[str, Any], ContextT, Resp
         except ValueError as exc:
             return self._rejection(tool_name, tool_call.get("id"), str(exc))
         return None
+
+    def _backend_path(self, resolved: Path) -> str:
+        """把已验证的宿主绝对路径转换为 LocalShellBackend 的虚拟路径。"""
+        relative = resolved.relative_to(self.policy.workspace)
+        return "/" if not relative.parts else f"/{relative.as_posix()}"
 
     def allows_approval(self, request: ToolCallRequest) -> bool:
         """供 HITL 的 ``when`` 预检复用路径规则，避免越界调用先请求审批。

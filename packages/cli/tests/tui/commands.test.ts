@@ -27,6 +27,7 @@ test("Registry 以 canonical ID 解析核心 Slash Command 与别名", () => {
   expect(parseSlashCommand("/skills")).toEqual({ id: "skills.open", name: "skills", argument: undefined })
   expect(parseSlashCommand("/models")).toEqual({ id: "model.select", name: "model", argument: undefined })
   expect(parseSlashCommand("/mcp")).toEqual({ id: "mcp.manage", name: "mcp", argument: undefined })
+  expect(parseSlashCommand("/web")).toEqual({ id: "host.web", name: "web", argument: undefined })
 })
 
 test("Dispatcher 仅按稳定 ID 返回结构化结果，并统一处理兼容命令", () => {
@@ -34,7 +35,7 @@ test("Dispatcher 仅按稳定 ID 返回结构化结果，并统一处理兼容�
     commandContext: defaultCommandContext({ capabilities: ["threads.read", "context.manage", "skills.read"], hasThread: true }),
     threadId: "thread-1",
     runtimeStatus: "运行摘要",
-    versionSummary: "za38-cli 0.1.0 · JSON-RPC v2",
+    versionSummary: "za38-cli 0.1.0 · JSON-RPC v3",
   }
   const clear = parseSlashCommand("/clear")
   const help = parseSlashCommand("/help")
@@ -86,6 +87,36 @@ test("活动任务下 /new 返回确认 Dialog，而不是旧的强制清理分�
       message: "当前任务仍在执行。确认后将先取消任务，再清空当前 Thread。",
       confirm: { type: "local-action", action: "cancel-active-run-and-clear-thread" },
     },
+  })
+})
+
+test("/web 仅在已协商 host.attach 且当前 Thread 空闲时可用", () => {
+  const command = parseSlashCommand("/web")
+  if (!command) throw new Error("expected web command")
+  const base = {
+    threadId: "thread-1",
+    runtimeStatus: "运行摘要",
+    versionSummary: "version",
+  }
+
+  expect(dispatchSlashCommand(command, {
+    ...base,
+    commandContext: defaultCommandContext({
+      capabilities: ["host.attach"],
+      hasThread: true,
+    }),
+  })).toEqual({ type: "web", threadId: "thread-1" })
+
+  expect(dispatchSlashCommand(command, {
+    ...base,
+    commandContext: defaultCommandContext({
+      capabilities: ["host.attach"],
+      hasThread: true,
+      activeRun: true,
+    }),
+  })).toEqual({
+    type: "notice",
+    message: "/web 暂不可用：当前任务结束或交互完成后可用。",
   })
 })
 

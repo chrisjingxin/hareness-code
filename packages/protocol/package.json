@@ -7,6 +7,9 @@
   "exports": {
     ".": "./src/index.ts"
   },
+  "dependencies": {
+    "ajv": "8.17.1"
+  },
   "scripts": {
     "generate": "bun run scripts/generate.ts",
     "check": "bun run scripts/generate.ts --check"

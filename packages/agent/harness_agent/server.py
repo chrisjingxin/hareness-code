@@ -1,4 +1,4 @@
-"""za38 v2 stdio JSON-RPC Peer：承载多运行控制面、统一事件和双向交互请求。"""
+"""Harness v3 Agent Host：承载项目级运行资源与协议连接。"""
 
 from __future__ import annotations
 
@@ -7,16 +7,18 @@ import inspect
 import json
 import logging
 import os
+import secrets
 import sys
 import threading
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from pydantic import ValidationError
+from jsonschema.exceptions import ValidationError
 
 from harness_agent import __version__
 from harness_agent.agent_runtime import (
@@ -41,12 +43,17 @@ from harness_agent.protocol_generated import (
     MAX_TOOL_PAYLOAD_BYTES,
     PROTOCOL_MAJOR,
     PROTOCOL_MINOR,
+    CAPABILITY,
+    EVENT_TYPE,
+    METHOD,
+    OPERATION_CAPABILITIES,
     SERVER_CAPABILITIES,
     ApprovalResponse,
     ContextCompactParams,
     ConfigCommitParams,
     ConfigDetailsParams,
     ConfigPreviewParams,
+    HostAttachmentCreateParams,
     InitializeParams,
     ModelsListParams,
     McpAddParams,
@@ -56,6 +63,12 @@ from harness_agent.protocol_generated import (
     RunStartParams,
     ThreadsListParams,
     ThreadsOpenParams,
+)
+from harness_agent.protocol_runtime import (
+    validate_interaction_result,
+    validate_operation_params,
+    validate_operation_result,
+    validate_protocol_error_data,
 )
 from harness_agent.skills import SkillError, SkillRegistry
 from harness_agent.mcp import McpConnectionManager, mcp_config_fingerprint
@@ -70,6 +83,20 @@ from harness_agent.providers.harness_gateway import ProviderClientPool
 
 logger = logging.getLogger(__name__)
 INTERACTION_TIMEOUT_MS = 300_000
+STABLE_ERROR_CODES = {
+    "PROTOCOL_VERSION_UNSUPPORTED",
+    "CAPABILITY_REQUIRED",
+    "THREAD_NOT_FOUND",
+    "THREAD_BUSY",
+    "RUN_NOT_FOUND",
+    "RUN_NOT_OWNER",
+    "RUN_ID_CONFLICT",
+    "INTERACTION_EXPIRED",
+    "CONFIG_REVISION_CONFLICT",
+    "HOST_OWNER_REQUIRED",
+    "ATTACHMENT_EXPIRED",
+    "INTERNAL_ERROR",
+}
 
 
 class RpcError(Exception):
@@ -85,11 +112,12 @@ class RpcError(Exception):
 
 @dataclass(slots=True)
 class ActiveRun:
-    """一次执行的隔离状态；sequence 同时覆盖事件与反向请求。"""
+    """一次执行的隔离状态；sequence 只覆盖可广播事件。"""
 
     thread_id: str
     run_id: str
     message: str
+    owner_connection_id: str = ""
     requested_skill: dict[str, str] | None = None
     task: asyncio.Task[None] | None = None
     sequence: int = 0
@@ -147,11 +175,40 @@ class InteractionSpec:
     action_count: int = 1
 
 
+@dataclass(slots=True)
+class ProtocolConnection:
+    """一个前端连接的协议状态，不拥有任何 Agent 运行资源。"""
+
+    connection_id: str
+    role: str
+    sender: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+    capability_ceiling: frozenset[str] = field(
+        default_factory=lambda: frozenset(SERVER_CAPABILITIES)
+    )
+    initialized: bool = False
+    protocol_minor: int = PROTOCOL_MINOR
+    enabled_capabilities: set[str] = field(default_factory=set)
+    interaction_handles: set[str] = field(default_factory=set)
+    watched_threads: set[str] = field(default_factory=set)
+    pending_requests: dict[str, asyncio.Future[object]] = field(default_factory=dict)
+    interaction_specs: dict[str, InteractionSpec] = field(default_factory=dict)
+    closed: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _AttachmentGrant:
+    """尚未消费的本机 Web attachment 凭证。"""
+
+    origin: str
+    expires_at_ms: int
+    capability_ceiling: frozenset[str]
+
+
 AgentFactory = Callable[[Za38Config, Path], Any | Awaitable[Any]]
 
 
-class JsonRpcServer:
-    """管理 Python Agent 生命周期与 v2 双向 JSON-RPC stdio 控制面。"""
+class AgentHost:
+    """管理 Project-scoped Agent 生命周期与 v3 协议控制面。"""
 
     def __init__(
         self,
@@ -161,6 +218,10 @@ class JsonRpcServer:
         allow_echo: bool | None = None,
         config_home: Path | None = None,
         config_change_policy: ManagedConfigPolicy | None = None,
+        workspace: Path | None = None,
+        config_path: str | None = None,
+        connection_id: str | None = None,
+        connection_role: str = "owner",
     ) -> None:
         """初始化运行表、反向请求表、发送锁和方法分发表。
 
@@ -175,13 +236,12 @@ class JsonRpcServer:
             os.environ.get("HARNESS_ECHO_MODE") == "1" if allow_echo is None else allow_echo
         )
         self._running = True
-        self._initialized = False
         self._send_lock = asyncio.Lock()
         self._agent_build_lock = asyncio.Lock()
         self._runs: dict[str, ActiveRun] = {}
-        self._pending_requests: dict[str, asyncio.Future[object]] = {}
-        self._workspace = Path.cwd().resolve()
-        self._config_path: str | None = None
+        self._workspace = (workspace or Path.cwd()).resolve()
+        self._config_path = config_path or os.environ.get("HARNESS_AGENT_CONFIG_PATH")
+        self._connection_role = connection_role
         self._config_home = config_home
         self._config: Za38Config | None = None
         self._config_change_policy = config_change_policy or ManagedConfigPolicy()
@@ -194,33 +254,51 @@ class JsonRpcServer:
         self._runtime_build_specs: dict[str, _RuntimeBuildSpec] = {}
         self._runtime_artifacts: dict[str, _RuntimeArtifacts] = {}
         self._provider_client_pool = ProviderClientPool()
-        self._protocol_minor = PROTOCOL_MINOR
-        self._enabled_capabilities: set[str] = set()
-        self._handlers = {
-            "initialize": self._handle_initialize,
-            "run.start": self._handle_run_start,
-            "run.cancel": self._handle_run_cancel,
-            "context.compact": self._handle_context_compact,
-            "config.show": self._handle_config_show,
-            "config.path": self._handle_config_path,
-            "config.details": self._handle_config_details,
-            "config.preview": self._handle_config_preview,
-            "config.commit": self._handle_config_commit,
-            "models.list": self._handle_models_list,
-            "threads.list": self._handle_threads_list,
-            "threads.open": self._handle_threads_open,
-            "skills.list": self._handle_skills_list,
-            "skills.inspect": self._handle_skills_inspect,
-            "skills.set_enabled": self._handle_skills_set_enabled,
-            "skills.install": self._handle_skills_install,
-            "skills.update": self._handle_skills_update,
-            "skills.remove": self._handle_skills_remove,
-            "skills.market.list": self._handle_skills_market_list,
-            "mcp.status": self._handle_mcp_status,
-            "mcp.add": self._handle_mcp_add,
-            "mcp.remove": self._handle_mcp_remove,
-            "shutdown": self._handle_shutdown,
+        self._owner_connection = ProtocolConnection(
+            connection_id=connection_id or str(uuid.uuid4()),
+            role=self._connection_role,
+        )
+        self._connections = {
+            self._owner_connection.connection_id: self._owner_connection
         }
+        self._connection_context: ContextVar[ProtocolConnection | None] = ContextVar(
+            "harness_protocol_connection",
+            default=None,
+        )
+        self._resource_init_lock = asyncio.Lock()
+        self._resources_ready = False
+        self._registry_lock = asyncio.Lock()
+        self._starting_threads: set[str] = set()
+        self._handlers = {
+            METHOD["INITIALIZE"]: self._handle_initialize,
+            METHOD["RUN_START"]: self._handle_run_start,
+            METHOD["RUN_CANCEL"]: self._handle_run_cancel,
+            METHOD["CONTEXT_COMPACT"]: self._handle_context_compact,
+            METHOD["CONFIG_SHOW"]: self._handle_config_show,
+            METHOD["CONFIG_PATH"]: self._handle_config_path,
+            METHOD["CONFIG_DETAILS"]: self._handle_config_details,
+            METHOD["CONFIG_PREVIEW"]: self._handle_config_preview,
+            METHOD["CONFIG_COMMIT"]: self._handle_config_commit,
+            METHOD["MODELS_LIST"]: self._handle_models_list,
+            METHOD["THREADS_LIST"]: self._handle_threads_list,
+            METHOD["THREADS_OPEN"]: self._handle_threads_open,
+            METHOD["THREADS_WATCH"]: self._handle_threads_watch,
+            METHOD["THREADS_UNWATCH"]: self._handle_threads_unwatch,
+            METHOD["SKILLS_LIST"]: self._handle_skills_list,
+            METHOD["SKILLS_INSPECT"]: self._handle_skills_inspect,
+            METHOD["SKILLS_SET_ENABLED"]: self._handle_skills_set_enabled,
+            METHOD["SKILLS_INSTALL"]: self._handle_skills_install,
+            METHOD["SKILLS_UPDATE"]: self._handle_skills_update,
+            METHOD["SKILLS_REMOVE"]: self._handle_skills_remove,
+            METHOD["SKILLS_MARKET_LIST"]: self._handle_skills_market_list,
+            METHOD["MCP_STATUS"]: self._handle_mcp_status,
+            METHOD["MCP_ADD"]: self._handle_mcp_add,
+            METHOD["MCP_REMOVE"]: self._handle_mcp_remove,
+            METHOD["HOST_ATTACHMENT_CREATE"]: self._handle_host_attachment_create,
+        }
+        self._attachment_grants: dict[str, _AttachmentGrant] = {}
+        self._attachment_lock = asyncio.Lock()
+        self._websocket_server: Any | None = None
 
     async def run(self) -> None:
         """持续读取受限大小的 JSONL 帧，直到 EOF 或正常关闭。"""
@@ -271,15 +349,91 @@ class JsonRpcServer:
                     continue
                 await self.dispatch(message)
         finally:
-            await self._cancel_all_runs()
-            self._fail_pending_requests(RpcError(-32004, "Peer connection closed"))
-            if self._mcp_manager is not None:
-                await self._mcp_manager.close_all()
-            await self._close_runtime_pool()
-            await self._close_thread_store()
+            await self.close()
+
+    async def close(self) -> None:
+        """关闭 Host 及其持有的运行时资源；可重复调用。"""
+        self._running = False
+        await self._cancel_all_runs()
+        for connection in list(self._connections.values()):
+            connection.closed = True
+            self._fail_connection_requests(
+                connection,
+                RpcError(-32004, "Peer connection closed"),
+            )
+        if self._websocket_server is not None:
+            self._websocket_server.close()
+            await self._websocket_server.wait_closed()
+            self._websocket_server = None
+        self._attachment_grants.clear()
+        if self._mcp_manager is not None:
+            await self._mcp_manager.close_all()
+            self._mcp_manager = None
+        await self._close_runtime_pool()
+        await self._close_thread_store()
+
+    async def close_connection(self, connection: ProtocolConnection) -> None:
+        """释放 attached Connection，并取消仅由它拥有的 active Runs。"""
+        if connection.closed:
+            return
+        connection.closed = True
+        connection.watched_threads.clear()
+        self._fail_connection_requests(connection, RpcError(-32004, "Peer connection closed"))
+        owned = [
+            run
+            for run in self._runs.values()
+            if run.owner_connection_id == connection.connection_id
+            and run.status in {"running", "interrupted"}
+        ]
+        tasks: list[asyncio.Task[None]] = []
+        for run in owned:
+            run.cancellation_token.cancel()
+            if run.task and not run.task.done():
+                run.task.cancel()
+                if run.task is not asyncio.current_task():
+                    tasks.append(run.task)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._connections.pop(connection.connection_id, None)
+
+    def create_connection(
+        self,
+        sender: Callable[[dict[str, Any]], Awaitable[None]],
+        *,
+        role: str = "attached",
+        capability_ceiling: Iterable[str] = SERVER_CAPABILITIES,
+    ) -> ProtocolConnection:
+        """建立轻量协议连接；Project 资源仍由当前 Host 唯一持有。"""
+        connection = ProtocolConnection(
+            connection_id=str(uuid.uuid4()),
+            role=role,
+            sender=sender,
+            capability_ceiling=frozenset(capability_ceiling),
+        )
+        self._connections[connection.connection_id] = connection
+        return connection
 
     async def dispatch(self, message: dict[str, Any]) -> None:
+        """从 owner stdio Connection 分派一帧。"""
+        await self.dispatch_connection(self._owner_connection, message)
+
+    async def dispatch_connection(
+        self,
+        connection: ProtocolConnection,
+        message: dict[str, Any],
+    ) -> None:
+        """在指定 Connection 上分派一帧，隔离协商与请求关联状态。"""
+        if connection.closed:
+            return
+        token = self._connection_context.set(connection)
+        try:
+            await self._dispatch_current(message)
+        finally:
+            self._connection_context.reset(token)
+
+    async def _dispatch_current(self, message: dict[str, Any]) -> None:
         """校验并发消息；response 负责恢复反向请求，request 则进入业务分发。"""
+        connection = self._current_connection()
         if message.get("jsonrpc") != "2.0":
             await self.send_error(message.get("id"), -32600, "Invalid Request: jsonrpc must be '2.0'")
             return
@@ -304,7 +458,7 @@ class JsonRpcServer:
         if set(message) - {"jsonrpc", "method", "params", "id"}:
             await self.send_error(request_id, -32600, "Request contains unknown fields")
             return
-        if method != "initialize" and not self._initialized:
+        if method != METHOD["INITIALIZE"] and not self._connection_initialized(connection):
             await self.send_error(request_id, -32000, "initialize must be the first request")
             return
         handler = self._handlers.get(method)
@@ -312,9 +466,41 @@ class JsonRpcServer:
             await self.send_error(request_id, -32601, f"Method not found: {method}")
             return
         try:
+            if method == METHOD["INITIALIZE"]:
+                protocol = params.get("protocol")
+                if not isinstance(protocol, dict) or protocol.get("major") != PROTOCOL_MAJOR:
+                    raise RpcError(
+                        -32003,
+                        "PROTOCOL_VERSION_UNSUPPORTED",
+                        {
+                            "code": "PROTOCOL_VERSION_UNSUPPORTED",
+                            "retryable": False,
+                            "details": {"supported_major": PROTOCOL_MAJOR},
+                        },
+                    )
+            validate_operation_params(method, params)
+            required_capability = OPERATION_CAPABILITIES.get(method)
+            if required_capability and required_capability not in self._connection_capabilities(connection):
+                raise RpcError(
+                    -32002,
+                    "CAPABILITY_REQUIRED",
+                    {"code": "CAPABILITY_REQUIRED", "retryable": False, "capability": required_capability},
+                )
             result = await handler(params, request_id)
         except ValidationError as exc:
-            await self.send_error(request_id, -32602, "Invalid params", exc.errors(include_url=False))
+            await self.send_error(
+                request_id,
+                -32602,
+                "Invalid params",
+                {
+                    "code": "INVALID_PARAMS",
+                    "retryable": False,
+                    "details": {
+                        "path": list(exc.absolute_path),
+                        "message": exc.message,
+                    },
+                },
+            )
         except SkillError as exc:
             await self.send_error(request_id, -32602, str(exc))
         except ThreadStoreError as exc:
@@ -338,10 +524,17 @@ class JsonRpcServer:
             await self.send_error(request_id, -32603, f"{type(exc).__name__}: {exc}")
         else:
             if result is not None:
+                validate_operation_result(method, result)
                 await self.send_response(request_id, result)
+        finally:
+            if method == METHOD["RUN_START"]:
+                thread_id = params.get("thread_id")
+                if isinstance(thread_id, str):
+                    async with self._registry_lock:
+                        self._starting_threads.discard(thread_id)
 
     async def send(self, message: dict[str, Any]) -> None:
-        """串行写出单帧 JSON-RPC，并拒绝超限输出。"""
+        """向 owner stdio 写出单帧；测试也通过替换此 seam 捕获输出。"""
         data = (json.dumps(message, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
         if len(data) > MAX_FRAME_BYTES:
             raise RpcError(-32603, "Outbound JSON-RPC frame exceeds size limit")
@@ -349,25 +542,68 @@ class JsonRpcServer:
             sys.stdout.buffer.write(data)
             sys.stdout.buffer.flush()
 
+    def _current_connection(self) -> ProtocolConnection:
+        return self._connection_context.get() or self._owner_connection
+
+    def _connection_initialized(self, connection: ProtocolConnection) -> bool:
+        return connection.initialized
+
+    def _connection_capabilities(self, connection: ProtocolConnection | None = None) -> set[str]:
+        return (connection or self._current_connection()).enabled_capabilities
+
+    def _connection_handles(self, connection: ProtocolConnection | None = None) -> set[str]:
+        return (connection or self._current_connection()).interaction_handles
+
+    def _connection_watches(self, connection: ProtocolConnection | None = None) -> set[str]:
+        return (connection or self._current_connection()).watched_threads
+
+    async def _send_to(
+        self,
+        connection: ProtocolConnection,
+        message: dict[str, Any],
+    ) -> None:
+        if connection.closed:
+            raise RpcError(-32004, "Connection closed")
+        if connection is self._owner_connection:
+            await self.send(message)
+            return
+        if connection.sender is None:
+            raise RpcError(-32603, "Connection has no transport")
+        await connection.sender(message)
+
     async def send_response(self, request_id: str, result: Any) -> None:
         """发送 JSON-RPC 成功响应。"""
-        await self.send({"jsonrpc": "2.0", "result": result, "id": request_id})
+        await self._send_to(
+            self._current_connection(),
+            {"jsonrpc": "2.0", "result": result, "id": request_id},
+        )
 
     async def send_error(
         self, request_id: str | None, code: int, message: str, data: object | None = None
     ) -> None:
         """发送保留 code/message/data 的 JSON-RPC 错误响应。"""
         error: dict[str, object] = {"code": code, "message": message}
-        if data is not None:
+        if -32099 <= code <= -32000:
+            normalized = _protocol_error_data(message, data)
+            validate_protocol_error_data(normalized)
+            error["data"] = normalized
+        elif data is not None:
             error["data"] = data
-        await self.send({"jsonrpc": "2.0", "error": error, "id": request_id})
+        await self._send_to(
+            self._current_connection(),
+            {"jsonrpc": "2.0", "error": error, "id": request_id},
+        )
 
     async def send_notification(self, method: str, params: dict[str, Any]) -> None:
-        """发送无需响应的通知；v2 业务流只使用 event。"""
-        await self.send({"jsonrpc": "2.0", "method": method, "params": params})
+        """发送无需响应的通知；v3 业务流只使用 event。"""
+        await self._send_to(
+            self._current_connection(),
+            {"jsonrpc": "2.0", "method": method, "params": params},
+        )
 
     async def _handle_initialize(self, params: dict[str, Any], _id: str) -> dict[str, Any]:
-        """协商 v2 minor 和能力，并返回脱敏启动摘要。"""
+        """协商 v3 minor、请求能力和可处理 Interaction。"""
+        connection = self._current_connection()
         protocol = params.get("protocol")
         if not isinstance(protocol, dict) or protocol.get("major") != PROTOCOL_MAJOR:
             raise RpcError(-32003, "PROTOCOL_MISMATCH", {"supported_major": PROTOCOL_MAJOR})
@@ -386,27 +622,40 @@ class JsonRpcServer:
                 {"supported": {"major": PROTOCOL_MAJOR, "minor": PROTOCOL_MINOR}},
             )
         parsed = InitializeParams.model_validate(params)
-        if self._initialized:
+        if self._connection_initialized(connection):
             raise RpcError(-32000, "Peer is already initialized")
-        if parsed.cwd is not None:
-            self._workspace = Path(parsed.cwd).expanduser().resolve()
-        self._protocol_minor = min(PROTOCOL_MINOR, max_minor)
-        self._skill_registry = SkillRegistry(self._workspace, home=self._config_home)
-        self._config_path = parsed.config_path
-        self._load_config()
-        await self._connect_mcp_servers()
-        requested = set(parsed.capabilities)
-        self._enabled_capabilities = requested.intersection(SERVER_CAPABILITIES)
-        if self._protocol_minor < 7:
-            self._enabled_capabilities.discard("models.select")
-        if self._protocol_minor < 8:
-            self._enabled_capabilities.discard("config.write")
-        self._initialized = True
+        negotiated_minor = min(PROTOCOL_MINOR, max_minor)
+        async with self._resource_init_lock:
+            if not self._resources_ready:
+                self._skill_registry = SkillRegistry(self._workspace, home=self._config_home)
+                self._load_config()
+                await self._connect_mcp_servers()
+                self._resources_ready = True
+        requested = set(parsed.capabilities.requests)
+        enabled = requested.intersection(connection.capability_ceiling)
+        if connection.role != "owner":
+            enabled.discard(CAPABILITY["HOST_ATTACH"])
+        handles = set(parsed.capabilities.handles)
+        connection.protocol_minor = negotiated_minor
+        connection.interaction_handles = handles
+        connection.enabled_capabilities = enabled
+        connection.initialized = True
         return {
-            "protocol": {"major": PROTOCOL_MAJOR, "minor": self._protocol_minor},
+            "protocol": {"major": PROTOCOL_MAJOR, "minor": negotiated_minor},
             "server": {"name": "za38-agent", "version": __version__},
-            "server_capabilities": list(SERVER_CAPABILITIES),
-            "enabled_capabilities": sorted(self._enabled_capabilities),
+            "connection": {
+                "id": connection.connection_id,
+                "role": connection.role,
+                "project": {
+                    "id": (await self._ensure_thread_store()).project_fingerprint if self._thread_persistence_enabled() else "echo",
+                    "label": self._workspace.name,
+                },
+            },
+            "capabilities": {
+                "available": list(SERVER_CAPABILITIES),
+                "enabled": sorted(enabled),
+                "handles": sorted(handles),
+            },
             "agent_commands": [],
             "skills_snapshot": self._skill_registry.snapshot(),
             "skill_diagnostics": self._skill_registry.diagnostics[:20],
@@ -435,11 +684,35 @@ class JsonRpcServer:
         message = parsed.message.strip()
         if not message:
             raise RpcError(-32602, "message must be non-empty")
-        thread_id = parsed.thread_id or str(uuid.uuid4())
-        run_id = parsed.run_id or str(uuid.uuid4())
-        existing = self._runs.get(thread_id)
-        if existing and existing.status in {"running", "interrupted"}:
-            raise RpcError(-32000, f"Thread {thread_id} already has an active run")
+        thread_id = parsed.thread_id
+        run_id = parsed.run_id
+        async with self._registry_lock:
+            existing = self._runs.get(thread_id)
+            if existing and existing.status in {"running", "interrupted"}:
+                if existing.run_id == run_id and existing.message == message:
+                    await self.send_response(
+                        request_id,
+                        {"thread_id": thread_id, "run_id": run_id, "accepted": True},
+                    )
+                    return None
+                if existing.run_id == run_id:
+                    raise RpcError(
+                        -32006,
+                        "RUN_ID_CONFLICT",
+                        {"code": "RUN_ID_CONFLICT", "retryable": False},
+                    )
+                raise RpcError(
+                    -32000,
+                    "THREAD_BUSY",
+                    {"code": "THREAD_BUSY", "retryable": True},
+                )
+            if thread_id in self._starting_threads:
+                raise RpcError(
+                    -32000,
+                    "THREAD_BUSY",
+                    {"code": "THREAD_BUSY", "retryable": True},
+                )
+            self._starting_threads.add(thread_id)
         requested_skill = None
         if parsed.requested_skill is not None:
             if self._skill_registry is None:
@@ -456,7 +729,7 @@ class JsonRpcServer:
             self._load_config()
             if self._config is None:
                 raise RpcError(-32010, self._startup_error or "MODEL_CONFIGURATION_REQUIRED")
-            if parsed.model_selection is not None and "models.select" not in self._enabled_capabilities:
+            if parsed.model_selection is not None and CAPABILITY["MODELS_SELECT"] not in self._connection_capabilities():
                 raise RpcError(-32002, "MODELS_SELECT_CAPABILITY_REQUIRED")
             try:
                 (
@@ -471,7 +744,6 @@ class JsonRpcServer:
                         if parsed.model_selection is not None
                         else None
                     ),
-                    legacy_model_profile=parsed.model_profile,
                 )
                 runtime_profile = await self._resolve_runtime_profile(
                     thread_id, self._config, model_bindings
@@ -482,6 +754,7 @@ class JsonRpcServer:
             thread_id=thread_id,
             run_id=run_id,
             message=message,
+            owner_connection_id=self._current_connection().connection_id,
             requested_skill=requested_skill,
             model_bindings=model_bindings,
             requested_model_selection=requested_model_selection,
@@ -507,9 +780,18 @@ class JsonRpcServer:
                     runtime_profile_id=run.runtime_profile_id,
                 )
             except ThreadStoreError as exc:
+                if str(exc) == "RUN_EXECUTION_BINDING_CONFLICT":
+                    raise RpcError(
+                        -32006,
+                        "RUN_ID_CONFLICT",
+                        {"code": "RUN_ID_CONFLICT", "retryable": False},
+                    ) from exc
                 raise RpcError(-32004, str(exc)) from exc
             if not created:
-                raise RpcError(-32000, "RUN_ALREADY_ACCEPTED")
+                await self.send_response(
+                    request_id, {"thread_id": thread_id, "run_id": run_id, "accepted": True}
+                )
+                return None
         self._runs[thread_id] = run
         await self.send_response(
             request_id, {"thread_id": thread_id, "run_id": run_id, "accepted": True}
@@ -521,6 +803,12 @@ class JsonRpcServer:
         """取消运行，包括正在等待客户端交互的任务。"""
         parsed = RunCancelParams.model_validate(params)
         run = self._require_run(parsed.thread_id, parsed.run_id)
+        if run.owner_connection_id != self._current_connection().connection_id:
+            raise RpcError(
+                -32005,
+                "RUN_NOT_OWNER",
+                {"code": "RUN_NOT_OWNER", "retryable": False},
+            )
         if run.task and not run.task.done():
             run.cancellation_token.cancel()
             run.task.cancel()
@@ -529,7 +817,7 @@ class JsonRpcServer:
             await asyncio.sleep(0)
             if run.status not in {"cancelled", "completed", "failed"} and run.task.cancelled():
                 run.status = "cancelled"
-                await self._emit(run, "run.cancelled", {"reason": "Cancelled by client"})
+                await self._emit(run, EVENT_TYPE["RUN_CANCELLED"], {"reason": "Cancelled by client"})
                 self._runs.pop(run.thread_id, None)
             return {"cancelled": True, "run_id": run.run_id}
         return {"cancelled": False, "run_id": run.run_id}
@@ -717,6 +1005,140 @@ class JsonRpcServer:
 
         return {"removed": True}
 
+    async def _handle_host_attachment_create(
+        self,
+        params: dict[str, Any],
+        _id: str,
+    ) -> dict[str, object]:
+        """由 Host owner 签发一次性本机 WebSocket attachment。"""
+        connection = self._current_connection()
+        if connection.role != "owner":
+            raise RpcError(
+                -32007,
+                "HOST_OWNER_REQUIRED",
+                {"code": "HOST_OWNER_REQUIRED", "retryable": False},
+            )
+        parsed = HostAttachmentCreateParams.model_validate(params)
+        origin = parsed.origin
+        if not (
+            origin.startswith("http://127.0.0.1:")
+            or origin.startswith("http://localhost:")
+        ):
+            raise RpcError(-32602, "Attachment origin must be a loopback HTTP origin")
+        await self._ensure_websocket_listener()
+        token = secrets.token_urlsafe(32)
+        expires_at_ms = int(time.time() * 1000) + 60_000
+        ceiling = frozenset(
+            capability
+            for capability in self._connection_capabilities(connection)
+            if capability != CAPABILITY["HOST_ATTACH"]
+        )
+        async with self._attachment_lock:
+            now_ms = int(time.time() * 1000)
+            self._attachment_grants = {
+                key: grant
+                for key, grant in self._attachment_grants.items()
+                if grant.expires_at_ms > now_ms
+            }
+            self._attachment_grants[token] = _AttachmentGrant(
+                origin=origin,
+                expires_at_ms=expires_at_ms,
+                capability_ceiling=ceiling,
+            )
+        socket = self._websocket_server.sockets[0]
+        port = socket.getsockname()[1]
+        return {
+            "endpoint": f"ws://127.0.0.1:{port}",
+            "token": token,
+            "expires_at_ms": expires_at_ms,
+        }
+
+    async def _ensure_websocket_listener(self) -> None:
+        """惰性启动只绑定 loopback 的无框架 WebSocket adapter。"""
+        if self._websocket_server is not None:
+            return
+        from websockets.asyncio.server import serve
+
+        self._websocket_server = await serve(
+            self._handle_websocket,
+            "127.0.0.1",
+            0,
+            max_size=MAX_FRAME_BYTES,
+            max_queue=16,
+            compression=None,
+        )
+
+    async def _handle_websocket(self, websocket: Any) -> None:
+        """认证 attachment 后，将 WebSocket frame 交给同一 protocol dispatcher。"""
+        connection: ProtocolConnection | None = None
+        writer: asyncio.Task[None] | None = None
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=64)
+
+        async def send_attached(message: dict[str, Any]) -> None:
+            encoded = json.dumps(message, ensure_ascii=False, separators=(",", ":"))
+            if len(encoded.encode("utf-8")) > MAX_FRAME_BYTES:
+                raise RpcError(-32603, "Outbound JSON-RPC frame exceeds size limit")
+            try:
+                queue.put_nowait(encoded)
+            except asyncio.QueueFull as exc:
+                raise RpcError(-32004, "Attached connection is too slow") from exc
+
+        async def write_frames() -> None:
+            while True:
+                await websocket.send(await queue.get())
+
+        try:
+            raw_auth = await asyncio.wait_for(websocket.recv(), timeout=5)
+            if not isinstance(raw_auth, str):
+                await websocket.close(code=1008, reason="Attachment rejected")
+                return
+            auth = json.loads(raw_auth)
+            if set(auth) != {"type", "token"} or auth.get("type") != "auth":
+                await websocket.close(code=1008, reason="Attachment rejected")
+                return
+            token = auth.get("token")
+            origin = websocket.request.headers.get("Origin")
+            async with self._attachment_lock:
+                grant = self._attachment_grants.get(token) if isinstance(token, str) else None
+                if (
+                    grant is None
+                    or grant.expires_at_ms <= int(time.time() * 1000)
+                    or origin != grant.origin
+                ):
+                    grant = None
+                else:
+                    self._attachment_grants.pop(token, None)
+            if grant is None:
+                await websocket.close(code=1008, reason="Attachment rejected")
+                return
+            connection = self.create_connection(
+                send_attached,
+                capability_ceiling=grant.capability_ceiling,
+            )
+            writer = asyncio.create_task(write_frames(), name="harness-websocket-writer")
+            await websocket.send(json.dumps({"type": "ready"}, separators=(",", ":")))
+            async for raw in websocket:
+                if not isinstance(raw, str):
+                    await websocket.close(code=1003, reason="Text frames required")
+                    break
+                try:
+                    message = json.loads(raw)
+                except json.JSONDecodeError:
+                    await websocket.close(code=1007, reason="Invalid JSON")
+                    break
+                if not isinstance(message, dict):
+                    await websocket.close(code=1007, reason="Invalid JSON-RPC")
+                    break
+                await self.dispatch_connection(connection, message)
+        except (TimeoutError, json.JSONDecodeError):
+            await websocket.close(code=1008, reason="Attachment rejected")
+        finally:
+            if connection is not None:
+                await self.close_connection(connection)
+            if writer is not None:
+                writer.cancel()
+                await asyncio.gather(writer, return_exceptions=True)
+
     def _user_config_path(self) -> Path:
         """返回用户级配置文件路径。"""
         return Path.home() / ".harness" / "config.toml"
@@ -747,7 +1169,7 @@ class JsonRpcServer:
             ]
         }
         if parsed.thread_id is not None:
-            if "models.select" in self._enabled_capabilities:
+            if CAPABILITY["MODELS_SELECT"] in self._connection_capabilities():
                 latest = await (await self._ensure_thread_store()).get_latest_run_execution_binding(
                     parsed.thread_id
                 )
@@ -757,7 +1179,7 @@ class JsonRpcServer:
                         **latest.actual_primary_binding,
                         "runtime_profile_id": latest.runtime_profile_id,
                     }
-            # 旧 minor 仍只读取 v5 的不可变绑定，避免向未协商客户端泄露新字段。
+            # 未协商 models.select 时只返回不可变绑定摘要。
             result["thread_binding"] = await self._thread_model_binding_summary(parsed.thread_id, config)
         return result
 
@@ -782,6 +1204,33 @@ class JsonRpcServer:
             "thread": _thread_summary_payload(opened.summary),
             "messages": [_thread_message_payload(message) for message in opened.messages],
         }
+
+    async def _handle_threads_watch(self, params: dict[str, Any], _id: str) -> dict[str, object]:
+        """仅在 Thread 空闲时原子读取历史并登记当前 Connection 的观察关系。"""
+        parsed = ThreadsOpenParams.model_validate(params)
+        async with self._registry_lock:
+            active = self._runs.get(parsed.thread_id)
+            if (
+                parsed.thread_id in self._starting_threads
+                or active is not None
+                and active.status in {"running", "interrupted"}
+            ):
+                raise RpcError(
+                    -32000,
+                    "THREAD_BUSY",
+                    {"code": "THREAD_BUSY", "retryable": True},
+                )
+            result = await self._handle_threads_open(params, _id)
+            self._connection_watches().add(parsed.thread_id)
+            return result
+
+    async def _handle_threads_unwatch(self, params: dict[str, Any], _id: str) -> dict[str, object]:
+        """移除当前 Connection 的 Thread 观察关系。"""
+        parsed = ThreadsOpenParams.model_validate(params)
+        watches = self._connection_watches()
+        removed = parsed.thread_id in watches
+        watches.discard(parsed.thread_id)
+        return {"removed": removed}
 
     def _require_skills(self) -> SkillRegistry:
         """返回初始化时建立的 Skill registry。"""
@@ -854,16 +1303,6 @@ class JsonRpcServer:
             raise RpcError(-32602, "id must be a non-empty string")
         return self._require_skills().remove(skill_id)
 
-    async def _handle_shutdown(self, _params: dict[str, Any], _id: str) -> dict[str, Any]:
-        """停止读取循环并取消全部运行。"""
-        if _params:
-            raise RpcError(-32602, "shutdown does not accept params")
-        self._running = False
-        await self._cancel_all_runs()
-        await self._close_runtime_pool()
-        await self._close_thread_store()
-        return {}
-
     def _load_config(self) -> None:
         """刷新配置缓存，并保存用户可修复的错误。"""
         try:
@@ -905,7 +1344,7 @@ class JsonRpcServer:
                 "runtime_profile_id": run.runtime_profile_id,
             }
             started_payload["runtime_profile_id"] = run.runtime_profile_id
-        await self._emit(run, "run.started", started_payload)
+        await self._emit(run, EVENT_TYPE["RUN_STARTED"], started_payload)
         resume: Any | None = None
         try:
             if run.requested_skill is not None:
@@ -913,7 +1352,7 @@ class JsonRpcServer:
                 loaded = registry.load(run.requested_skill["id"], run.requested_skill.get("args", ""))
                 await self._emit(
                     run,
-                    "skill.loaded",
+                    EVENT_TYPE["SKILL_LOADED"],
                     {
                         "skill_id": loaded.record.skill_id,
                         "source": loaded.record.source,
@@ -933,7 +1372,7 @@ class JsonRpcServer:
             if agent is None:
                 if not self._allow_echo:
                     raise ConfigError(self._startup_error or "Agent is not configured")
-                await self._emit(run, "content.delta", {"text": run.message})
+                await self._emit(run, EVENT_TYPE["CONTENT_DELTA"], {"text": run.message})
             else:
                 while True:
                     resume = await self._stream_agent(agent, run, resume=resume)
@@ -945,7 +1384,7 @@ class JsonRpcServer:
             run.status = "completed"
             await self._emit(
                 run,
-                "run.completed",
+                EVENT_TYPE["RUN_COMPLETED"],
                 {
                     "usage": run.usage,
                     "duration_ms": round((time.monotonic() - run.started_at) * 1000),
@@ -955,12 +1394,12 @@ class JsonRpcServer:
             )
         except asyncio.CancelledError:
             run.status = "cancelled"
-            await self._emit(run, "run.cancelled", {"reason": "Cancelled by client"})
+            await self._emit(run, EVENT_TYPE["RUN_CANCELLED"], {"reason": "Cancelled by client"})
         except RuntimePoolCapacityError as exc:
             run.status = "failed"
             await self._emit(
                 run,
-                "run.failed",
+                EVENT_TYPE["RUN_FAILED"],
                 {
                     "error": {
                         "code": "RUNTIME_POOL_CAPACITY_EXHAUSTED",
@@ -974,7 +1413,7 @@ class JsonRpcServer:
             logger.exception("Agent run failed: %s", run.run_id)
             await self._emit(
                 run,
-                "run.failed",
+                EVENT_TYPE["RUN_FAILED"],
                 {
                     "error": {
                         "code": type(exc).__name__,
@@ -1106,7 +1545,7 @@ class JsonRpcServer:
                     "prompt_epoch": 1,
                     "context_window": 1,
                     "workspace_boundary": 1,
-                    "interactive_question": "interactive.question" in self._enabled_capabilities,
+                    "interactive_question": "question" in self._connection_handles(),
                 }
             ),
             prompt_template_fingerprint=default_prompt_template_fingerprint(),
@@ -1250,7 +1689,7 @@ class JsonRpcServer:
             cwd=str(workspace),
             # 无头客户端不协商 question 能力时不注册 ask_user；审批仍由
             # `_request_interaction` 在缺少 approval 能力时 fail closed。
-            interactive="interactive.question" in self._enabled_capabilities,
+            interactive="question" in self._connection_handles(),
             approval_mode=config.execution.approval_mode,
             execution_context=execution_context,
             skill_registry=spec.skill_registry,
@@ -1345,7 +1784,7 @@ class JsonRpcServer:
                 run.status = "running"
                 await self._emit(
                     run,
-                    "interaction.resolved",
+                    EVENT_TYPE["INTERACTION_RESOLVED"],
                     {"request_id": interaction.request_id, "type": interaction.type},
                 )
                 return self._resume_value(interaction, response)
@@ -1359,7 +1798,7 @@ class JsonRpcServer:
         for update in updates:
             payload = update.payload() if hasattr(update, "payload") else dict(update)
             run.context_summary = payload
-            await self._emit(run, "context.updated", payload)
+            await self._emit(run, EVENT_TYPE["CONTEXT_UPDATED"], payload)
 
     def _translate_stream_event(
         self, event: tuple[Any, ...], run: ActiveRun
@@ -1380,19 +1819,19 @@ class JsonRpcServer:
         # 会在流式首轮只填充该属性，直接读取 content 会产生“有 token、无正文”。
         content = _message_text(chunk)
         if content and type(chunk).__name__ != "ToolMessage":
-            events.append(("content.delta", {"text": content}))
+            events.append((EVENT_TYPE["CONTENT_DELTA"], {"text": content}))
         for tool_chunk in getattr(chunk, "tool_call_chunks", None) or []:
             tool_id = self._resolve_tool_stream_id(run, tool_chunk)
             if tool_chunk.get("name") and tool_id not in run.started_tool_ids:
                 run.started_tool_ids.add(tool_id)
                 events.append(
-                    ("tool.started", {"tool_call_id": tool_id, "name": str(tool_chunk["name"])})
+                    (EVENT_TYPE["TOOL_STARTED"], {"tool_call_id": tool_id, "name": str(tool_chunk["name"])})
                 )
             if tool_chunk.get("args"):
                 arguments = _truncate_text(str(tool_chunk["args"]))
                 events.append(
                     (
-                        "tool.delta",
+                        EVENT_TYPE["TOOL_DELTA"],
                         {
                             "tool_call_id": tool_id,
                             "arguments_delta": arguments[0],
@@ -1407,7 +1846,7 @@ class JsonRpcServer:
             tool_id = run.tool_result_ids.get(result_id, result_id) or run.last_tool_id or f"tool-{run.run_id}"
             events.append(
                 (
-                    "tool.completed",
+                    EVENT_TYPE["TOOL_COMPLETED"],
                     {
                         "tool_call_id": tool_id,
                         "result": {
@@ -1512,29 +1951,34 @@ class JsonRpcServer:
         )
 
     async def _request_interaction(self, run: ActiveRun, spec: InteractionSpec) -> object:
-        """发送反向 JSON-RPC request；异常时审批拒绝、问答取消。"""
-        required_capability = f"interactive.{spec.type}"
-        if required_capability not in self._enabled_capabilities:
+        """只向 Run owner 发送 v3 Interaction；异常时审批拒绝、问答取消。"""
+        owner = self._connections.get(
+            run.owner_connection_id or self._owner_connection.connection_id
+        )
+        if owner is None or owner.closed or spec.type not in self._connection_handles(owner):
             logger.info("Interaction %s disabled by capability negotiation", spec.type)
             return (
-                {"type": "approval", "request_id": spec.request_id, "decision": "reject"}
+                {"decision": "reject"}
                 if spec.type == "approval"
-                else {"type": "question", "request_id": spec.request_id, "answers": {}}
+                else {"answers": {}}
             )
-        run.sequence += 1
         future: asyncio.Future[object] = asyncio.get_running_loop().create_future()
-        self._pending_requests[spec.request_id] = future
-        await self.send(
+        owner.pending_requests[spec.request_id] = future
+        owner.interaction_specs[spec.request_id] = spec
+        method = (
+            METHOD["INTERACTION_APPROVAL"]
+            if spec.type == "approval"
+            else METHOD["INTERACTION_QUESTION"]
+        )
+        await self._send_to(
+            owner,
             {
                 "jsonrpc": "2.0",
-                "method": "request",
+                "method": method,
                 "id": spec.request_id,
                 "params": {
-                    "request_id": spec.request_id,
-                    "type": spec.type,
                     "thread_id": run.thread_id,
                     "run_id": run.run_id,
-                    "sequence": run.sequence,
                     "timeout_ms": INTERACTION_TIMEOUT_MS,
                     "payload": spec.payload,
                 },
@@ -1545,20 +1989,22 @@ class JsonRpcServer:
         except (TimeoutError, RpcError, ValidationError) as exc:
             logger.warning("Interaction %s failed closed: %s", spec.request_id, exc)
             return (
-                {"type": "approval", "request_id": spec.request_id, "decision": "reject"}
+                {"decision": "reject"}
                 if spec.type == "approval"
-                else {"type": "question", "request_id": spec.request_id, "answers": {}}
+                else {"answers": {}}
             )
         finally:
-            self._pending_requests.pop(spec.request_id, None)
+            owner.pending_requests.pop(spec.request_id, None)
+            owner.interaction_specs.pop(spec.request_id, None)
 
     async def _handle_peer_response(self, message: dict[str, Any]) -> None:
         """用客户端 response 解析并恢复对应交互 Future。"""
+        connection = self._current_connection()
         request_id = message.get("id")
         if not isinstance(request_id, str):
             await self.send_error(None, -32600, "Response id must be a string")
             return
-        future = self._pending_requests.get(request_id)
+        future = connection.pending_requests.get(request_id)
         if future is None or future.done():
             await self.send_error(request_id, -32004, "REQUEST_EXPIRED")
             return
@@ -1575,17 +2021,18 @@ class JsonRpcServer:
             return
         result = message.get("result")
         try:
-            if isinstance(result, dict) and result.get("type") == "approval":
-                parsed: object = ApprovalResponse.model_validate(result).model_dump()
-            elif isinstance(result, dict) and result.get("type") == "question":
-                parsed = QuestionResponse.model_validate(result).model_dump()
-            else:
-                raise ValueError("Unknown interaction response type")
+            spec = connection.interaction_specs.get(request_id)
+            if spec is None:
+                raise ValueError("Unknown interaction request")
+            method = (
+                METHOD["INTERACTION_APPROVAL"]
+                if spec.type == "approval"
+                else METHOD["INTERACTION_QUESTION"]
+            )
+            validate_interaction_result(method, result)
+            parsed = dict(result) if isinstance(result, dict) else result
         except (ValidationError, ValueError) as exc:
             future.set_exception(RpcError(-32602, f"Invalid interaction response: {exc}"))
-            return
-        if parsed["request_id"] != request_id:  # type: ignore[index]
-            future.set_exception(RpcError(-32602, "Response request_id mismatch"))
             return
         future.set_result(parsed)
 
@@ -1613,21 +2060,35 @@ class JsonRpcServer:
         return {spec.interrupt_id: {"status": status, "answers": answers}}
 
     async def _emit(self, run: ActiveRun, event_type: str, payload: dict[str, Any]) -> None:
-        """生成统一事件信封，并为同一运行单调递增 sequence。"""
+        """生成单调事件并广播给 Run owner 与 Thread observers。"""
         run.sequence += 1
-        await self.send_notification(
-            "event",
-            {
-                "event_id": str(uuid.uuid4()),
-                "type": event_type,
-                "thread_id": run.thread_id,
-                "run_id": run.run_id,
-                "sequence": run.sequence,
-                "timestamp_ms": int(time.time() * 1000),
-                "source": {"kind": "root"},
-                "payload": payload,
-            },
+        event = {
+            "event_id": str(uuid.uuid4()),
+            "type": event_type,
+            "thread_id": run.thread_id,
+            "run_id": run.run_id,
+            "sequence": run.sequence,
+            "timestamp_ms": int(time.time() * 1000),
+            "payload": payload,
+        }
+        message = {"jsonrpc": "2.0", "method": METHOD["EVENT"], "params": event}
+        targets = [
+            connection
+            for connection in self._connections.values()
+            if not connection.closed
+            and (
+                connection.connection_id
+                == (run.owner_connection_id or self._owner_connection.connection_id)
+                or run.thread_id in self._connection_watches(connection)
+            )
+        ]
+        results = await asyncio.gather(
+            *(self._send_to(connection, message) for connection in targets),
+            return_exceptions=True,
         )
+        for connection, result in zip(targets, results, strict=True):
+            if isinstance(result, Exception) and connection is not self._owner_connection:
+                asyncio.create_task(self.close_connection(connection))
 
     def _require_run(self, thread_id: str, run_id: str) -> ActiveRun:
         """拒绝过期或跨线程控制请求。"""
@@ -1741,7 +2202,7 @@ class JsonRpcServer:
 
     def _threads_enabled(self) -> bool:
         """只有协商了读取能力的交互客户端才启用可恢复 thread 存储。"""
-        return "threads.read" in self._enabled_capabilities and not self._allow_echo
+        return CAPABILITY["THREADS_READ"] in self._connection_capabilities() and not self._allow_echo
 
     def _thread_persistence_enabled(self) -> bool:
         """默认生产图始终持久化 thread；外部注入图保持测试/嵌入调用的无存储契约。"""
@@ -1749,26 +2210,26 @@ class JsonRpcServer:
 
     def _require_threads_capability(self) -> None:
         """阻止未协商读取能力的客户端意外读取本地 thread 数据。"""
-        if "threads.read" not in self._enabled_capabilities:
+        if CAPABILITY["THREADS_READ"] not in self._connection_capabilities():
             raise RpcError(-32002, "THREADS_CAPABILITY_REQUIRED")
         if self._allow_echo:
             raise RpcError(-32002, "THREADS_UNAVAILABLE_IN_ECHO_MODE")
 
     def _require_models_capability(self) -> None:
         """模型目录包含配置摘要，只向显式协商的交互客户端公开。"""
-        if "models.read" not in self._enabled_capabilities:
+        if CAPABILITY["MODELS_READ"] not in self._connection_capabilities():
             raise RpcError(-32002, "MODELS_CAPABILITY_REQUIRED")
         if self._allow_echo:
             raise RpcError(-32002, "MODELS_UNAVAILABLE_IN_ECHO_MODE")
 
     def _require_config_write_capability(self) -> None:
         """配置写服务只能由显式协商的 Settings/正式 CLI 客户端调用。"""
-        if "config.write" not in self._enabled_capabilities:
+        if CAPABILITY["CONFIG_WRITE"] not in self._connection_capabilities():
             raise RpcError(-32002, "CONFIG_WRITE_CAPABILITY_REQUIRED")
 
     def _require_context_capability(self) -> None:
         """手动压缩会改写本机 checkpoint，必须由显式协商能力的交互客户端发起。"""
-        if "context.manage" not in self._enabled_capabilities:
+        if CAPABILITY["CONTEXT_MANAGE"] not in self._connection_capabilities():
             raise RpcError(-32002, "CONTEXT_CAPABILITY_REQUIRED")
         if not self._thread_persistence_enabled():
             raise RpcError(-32002, "CONTEXT_COMPACTION_UNAVAILABLE")
@@ -1790,12 +2251,52 @@ class JsonRpcServer:
         if store is not None:
             await store.close()
 
-    def _fail_pending_requests(self, error: Exception) -> None:
-        """连接退出时解除所有交互等待，避免后台任务泄漏。"""
-        for future in self._pending_requests.values():
+    def _fail_connection_requests(
+        self,
+        connection: ProtocolConnection,
+        error: Exception,
+    ) -> None:
+        """连接退出时解除其 Interaction 等待，避免后台任务泄漏。"""
+        for future in connection.pending_requests.values():
             if not future.done():
                 future.set_exception(error)
-        self._pending_requests.clear()
+        connection.pending_requests.clear()
+        connection.interaction_specs.clear()
+
+# 测试仍沿用旧构造名；两者是同一个 Project-scoped Host，不存在第二套协议实现。
+JsonRpcServer = AgentHost
+
+
+def _protocol_error_data(message: str, data: object | None) -> dict[str, object]:
+    """把既有领域异常收敛为 v3 稳定错误枚举。"""
+    raw = data if isinstance(data, Mapping) else {}
+    raw_code = raw.get("code")
+    if isinstance(raw_code, str) and raw_code in STABLE_ERROR_CODES:
+        stable_code = raw_code
+    else:
+        stable_code = {
+            "PROTOCOL_MISMATCH": "PROTOCOL_VERSION_UNSUPPORTED",
+            "PROTOCOL_VERSION_UNSUPPORTED": "PROTOCOL_VERSION_UNSUPPORTED",
+            "THREAD_NOT_FOUND": "THREAD_NOT_FOUND",
+            "THREAD_NOT_RECOVERABLE": "THREAD_NOT_FOUND",
+            "THREAD_BUSY": "THREAD_BUSY",
+            "RUN_NOT_FOUND": "RUN_NOT_FOUND",
+            "RUN_NOT_OWNER": "RUN_NOT_OWNER",
+            "RUN_ID_CONFLICT": "RUN_ID_CONFLICT",
+            "REQUEST_EXPIRED": "INTERACTION_EXPIRED",
+            "HOST_OWNER_REQUIRED": "HOST_OWNER_REQUIRED",
+        }.get(message, "INTERNAL_ERROR")
+    result: dict[str, object] = {
+        "code": stable_code,
+        "retryable": bool(raw.get("retryable", stable_code == "THREAD_BUSY")),
+    }
+    capability = raw.get("capability")
+    if isinstance(capability, str):
+        result["capability"] = capability
+    details = raw.get("details") if "details" in raw else data
+    if details is not None:
+        result["details"] = _bounded_json(details)
+    return result
 
 
 def _truncate_text(value: str) -> tuple[str, bool, int]:

@@ -13,11 +13,13 @@ import {
 
 test("从脱敏初始化结果提取可展示的运行上下文", () => {
   const runtime = createTuiRuntime({
-    protocol: { major: 2, minor: 0 },
+    protocol: { major: 3, minor: 0 },
     server: { name: "za38-agent", version: "0.1.0" },
-    server_capabilities: [],
-    enabled_capabilities: [],
+    connection: { id: "test", role: "owner", project: { id: "project", label: "za38-cli" } },
+    capabilities: { available: [], enabled: [], handles: [] },
     agent_commands: [],
+    skills_snapshot: { id: "snapshot", count: 0 },
+    skill_diagnostics: [],
     limits: { max_frame_bytes: 8388608, max_tool_payload_bytes: 1048576 },
     config_summary: {
       workspace: "/work/za38-cli",
@@ -59,11 +61,13 @@ test("首页装饰在窄终端降级，并保留执行安全摘要", () => {
 
 test("审批模式与配置降级提示使用稳定英文展示", () => {
   const runtime = createTuiRuntime({
-    protocol: { major: 2, minor: 0 },
+    protocol: { major: 3, minor: 0 },
     server: { name: "za38-agent", version: "0.1.0" },
-    server_capabilities: [],
-    enabled_capabilities: [],
+    connection: { id: "test", role: "owner", project: { id: "project", label: "fallback" } },
+    capabilities: { available: [], enabled: [], handles: [] },
     agent_commands: [],
+    skills_snapshot: { id: "snapshot", count: 0 },
+    skill_diagnostics: [],
     limits: { max_frame_bytes: 8388608, max_tool_payload_bytes: 1048576 },
     config_summary: {
       security: {

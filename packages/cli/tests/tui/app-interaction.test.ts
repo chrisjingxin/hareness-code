@@ -6,7 +6,8 @@ import { PassThrough } from "node:stream"
 import { testRender } from "@opentui/react/test-utils"
 import { act, createElement } from "react"
 
-import { IpcClient } from "../../src/ipc/client"
+import { AgentClient } from "../../src/ipc/client"
+import { StdioRpcTransport } from "../../src/ipc/stdio-transport"
 import { Za38Tui } from "../../src/tui/app"
 import type { TuiRuntime } from "../../src/tui/model"
 
@@ -528,7 +529,10 @@ test("未协商 config.write 时 /model 保留当前选择并提示未来默认�
       setup.mockInput.pressEnter()
       await setup.flush()
     })
-    expect(requests.at(-1)).toMatchObject({ message: "使用选定模型", modelProfile: "pro" })
+    expect(requests.at(-1)).toMatchObject({
+      message: "使用选定模型",
+      modelSelection: { primary_profile: "pro" },
+    })
     frame = await setup.waitForFrame(value => value.includes("pro · pro-model") && !value.includes("（下一次运行）"))
     expect(frame).toContain("pro · pro-model")
   } finally {
@@ -537,7 +541,7 @@ test("未协商 config.write 时 /model 保留当前选择并提示未来默认�
   }
 })
 
-test("旧协议 /model 对已绑定 Thread 显示不可变说明，并通过新建动作清理待选状态", async () => {
+test("未协商 models.select 时 /model 对已绑定 Thread 显示不可变说明", async () => {
   const { client, requests } = createMockClient()
   let setup: Awaited<ReturnType<typeof testRender>>
   try {
@@ -774,7 +778,7 @@ test("配置写入被锁时 /model 保留当前 Thread 选择并报告安全错�
       await Bun.sleep(0)
       await setup.flush()
     })
-    const frame = await setup.waitForFrame(value => value.includes("未来新 Thread 默认未更新") && value.includes("默认模型字段受受管策略锁定"))
+    const frame = await setup.waitForFrame(value => value.includes("未来新 Thread 默认未更新") && value.includes("配置服务拒绝本次更新"))
     expect(frame).toContain("模型：pro · pro-model")
     await act(async () => {
       await setup.mockInput.typeText("锁定后继续")
@@ -1038,7 +1042,7 @@ test("窄终端中的 /skills 使用单列浮层且保持可操作", async () =>
 
 async function sendAndFinish(
   setup: Awaited<ReturnType<typeof testRender>>,
-  client: IpcClient,
+  client: AgentClient,
   requests: Array<{ message: string; threadId: string; runId: string; requestedSkill?: { id: string; args?: string }; modelProfile?: string; modelSelection?: { primary_profile: string } }>,
   message: string,
 ) {
@@ -1072,7 +1076,7 @@ function createMockClient(options: {
 } = {}) {
   const stdout = new PassThrough()
   const stdin = new PassThrough()
-  const client = new IpcClient(stdin, stdout)
+  const client = new AgentClient(new StdioRpcTransport(stdin, stdout))
   const requests: Array<{ message: string; threadId: string; runId: string; requestedSkill?: { id: string; args?: string }; modelProfile?: string; modelSelection?: { primary_profile: string } }> = []
   const compactThreadIds: string[] = []
   const cancelThreadIds: string[] = []
@@ -1091,6 +1095,7 @@ function createMockClient(options: {
           jsonrpc: "2.0",
           id: request.id,
           result: {
+            snapshot: { id: "snapshot", count: 2 },
             skills: [{
               id: "user/repo-review-demo",
               name: "repo-review-demo",
@@ -1107,13 +1112,14 @@ function createMockClient(options: {
               enabled: true,
               user_invocable: true,
             }],
+            diagnostics: [],
           },
         })}\n`)
         continue
       }
       if (request.method === "models.list" && typeof request.id === "string") {
         if (options.modelsError) {
-          stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32010, message: options.modelsError } })}\n`)
+          stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32010, message: options.modelsError, data: { code: "INTERNAL_ERROR", retryable: false } } })}\n`)
           continue
         }
         const threadId = typeof request.params?.thread_id === "string" ? request.params.thread_id : undefined
@@ -1175,7 +1181,7 @@ function createMockClient(options: {
         configCalls.push(request.method)
         const respond = () => {
           if (options.configErrorCode) {
-            stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32012, message: options.configErrorCode, data: { code: options.configErrorCode } } })}\n`)
+            stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32012, message: options.configErrorCode, data: { code: "INTERNAL_ERROR", retryable: false, details: { reason: options.configErrorCode } } } })}\n`)
             return
           }
           stdout.write(`${JSON.stringify({
@@ -1204,7 +1210,7 @@ function createMockClient(options: {
         const changes = Array.isArray(request.params?.changes) ? request.params.changes : []
         const change = changes[0] as Record<string, unknown> | undefined
         if (options.configErrorCode) {
-          stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32012, message: options.configErrorCode, data: { code: options.configErrorCode } } })}\n`)
+          stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32012, message: options.configErrorCode, data: { code: "INTERNAL_ERROR", retryable: false, details: { reason: options.configErrorCode } } } })}\n`)
           continue
         }
         stdout.write(`${JSON.stringify({
@@ -1223,7 +1229,7 @@ function createMockClient(options: {
         const changes = Array.isArray(request.params?.changes) ? request.params.changes : []
         const change = changes[0] as Record<string, unknown> | undefined
         if (options.configErrorCode) {
-          stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32012, message: options.configErrorCode, data: { code: options.configErrorCode } } })}\n`)
+          stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32012, message: options.configErrorCode, data: { code: "INTERNAL_ERROR", retryable: false, details: { reason: options.configErrorCode } } } })}\n`)
           continue
         }
         if (typeof change?.value === "string") defaultModelProfile = change.value
@@ -1288,7 +1294,7 @@ function createMockClient(options: {
         const threadId = typeof request.params?.thread_id === "string" ? request.params.thread_id : ""
         compactThreadIds.push(threadId)
         if (options.compactError) {
-          stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32001, message: options.compactError } })}\n`)
+          stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32001, message: options.compactError, data: { code: "INTERNAL_ERROR", retryable: false } } })}\n`)
           continue
         }
         stdout.write(`${JSON.stringify({

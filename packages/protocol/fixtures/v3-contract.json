@@ -1,0 +1,2396 @@
+{
+  "valid": [
+    {
+      "kind": "operation.params",
+      "name": "initialize",
+      "case": "valid",
+      "value": {
+        "protocol": {
+          "major": 3,
+          "min_minor": 1,
+          "max_minor": 1
+        },
+        "client": {
+          "name": "x",
+          "version": "x",
+          "kind": "x"
+        },
+        "capabilities": {
+          "requests": [],
+          "handles": []
+        }
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "initialize",
+      "case": "valid",
+      "value": {
+        "protocol": {
+          "major": 3,
+          "minor": 1
+        },
+        "server": {
+          "name": "x",
+          "version": "x"
+        },
+        "connection": {
+          "id": "x",
+          "role": "owner",
+          "project": {
+            "id": "x",
+            "label": "x"
+          }
+        },
+        "capabilities": {
+          "available": [],
+          "enabled": [],
+          "handles": []
+        },
+        "agent_commands": [],
+        "skills_snapshot": {
+          "id": "x",
+          "count": 1
+        },
+        "skill_diagnostics": [],
+        "limits": {
+          "max_frame_bytes": 1,
+          "max_tool_payload_bytes": 1
+        },
+        "config_summary": {},
+        "startup_error": {
+          "code": "x",
+          "message": "x"
+        }
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "run.start",
+      "case": "valid",
+      "value": {
+        "message": "x",
+        "thread_id": "x",
+        "run_id": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "run.start",
+      "case": "valid",
+      "value": {
+        "thread_id": "x",
+        "run_id": "x",
+        "accepted": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "run.cancel",
+      "case": "valid",
+      "value": {
+        "thread_id": "x",
+        "run_id": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "run.cancel",
+      "case": "valid",
+      "value": {
+        "cancelled": false,
+        "run_id": "x"
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "context.compact",
+      "case": "valid",
+      "value": {
+        "thread_id": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "context.compact",
+      "case": "valid",
+      "value": {
+        "compacted": false,
+        "context": {}
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "config.show",
+      "case": "valid",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "config.show",
+      "case": "valid",
+      "value": {}
+    },
+    {
+      "kind": "operation.params",
+      "name": "config.path",
+      "case": "valid",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "config.path",
+      "case": "valid",
+      "value": {
+        "workspace": "x",
+        "paths": [],
+        "explicit_path": "x"
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "config.details",
+      "case": "valid",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "config.details",
+      "case": "valid",
+      "value": {
+        "revision": "x",
+        "fields": [],
+        "immutable_fields": []
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "config.preview",
+      "case": "valid",
+      "value": {
+        "changes": [
+          {
+            "path": "x",
+            "value": null
+          }
+        ]
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "config.preview",
+      "case": "valid",
+      "value": {
+        "revision": "x",
+        "changes": [],
+        "applies_to": []
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "config.commit",
+      "case": "valid",
+      "value": {
+        "expected_revision": "x",
+        "changes": [
+          {
+            "path": "x",
+            "value": null
+          }
+        ]
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "config.commit",
+      "case": "valid",
+      "value": {
+        "revision": "x",
+        "changes": [],
+        "applies_to": []
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.list",
+      "case": "valid",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.list",
+      "case": "valid",
+      "value": {
+        "threads": []
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.open",
+      "case": "valid",
+      "value": {
+        "thread_id": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.open",
+      "case": "valid",
+      "value": {
+        "thread": {
+          "thread_id": "x",
+          "created_at_ms": 1,
+          "updated_at_ms": 1,
+          "first_message": "x",
+          "latest_message": "x",
+          "message_count": 1
+        },
+        "messages": []
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.watch",
+      "case": "valid",
+      "value": {
+        "thread_id": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.watch",
+      "case": "valid",
+      "value": {
+        "thread": {
+          "thread_id": "x",
+          "created_at_ms": 1,
+          "updated_at_ms": 1,
+          "first_message": "x",
+          "latest_message": "x",
+          "message_count": 1
+        },
+        "messages": []
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.unwatch",
+      "case": "valid",
+      "value": {
+        "thread_id": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.unwatch",
+      "case": "valid",
+      "value": {
+        "removed": false
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "models.list",
+      "case": "valid",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "models.list",
+      "case": "valid",
+      "value": {
+        "profiles": []
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "skills.list",
+      "case": "valid",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "skills.list",
+      "case": "valid",
+      "value": {
+        "snapshot": {},
+        "skills": [],
+        "diagnostics": []
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "skills.inspect",
+      "case": "valid",
+      "value": {
+        "id": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "skills.inspect",
+      "case": "valid",
+      "value": {}
+    },
+    {
+      "kind": "operation.params",
+      "name": "skills.set_enabled",
+      "case": "valid",
+      "value": {
+        "id": "x",
+        "enabled": false
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "skills.set_enabled",
+      "case": "valid",
+      "value": {}
+    },
+    {
+      "kind": "operation.params",
+      "name": "skills.install",
+      "case": "valid",
+      "value": {
+        "market": "x",
+        "name": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "skills.install",
+      "case": "valid",
+      "value": {}
+    },
+    {
+      "kind": "operation.params",
+      "name": "skills.update",
+      "case": "valid",
+      "value": {
+        "market": "x",
+        "name": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "skills.update",
+      "case": "valid",
+      "value": {}
+    },
+    {
+      "kind": "operation.params",
+      "name": "skills.remove",
+      "case": "valid",
+      "value": {
+        "id": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "skills.remove",
+      "case": "valid",
+      "value": {}
+    },
+    {
+      "kind": "operation.params",
+      "name": "skills.market.list",
+      "case": "valid",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "skills.market.list",
+      "case": "valid",
+      "value": []
+    },
+    {
+      "kind": "operation.params",
+      "name": "mcp.status",
+      "case": "valid",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "mcp.status",
+      "case": "valid",
+      "value": {
+        "servers": [],
+        "total_tools": 1
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "mcp.add",
+      "case": "valid",
+      "value": {
+        "name": "x",
+        "transport": "stdio",
+        "command": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "mcp.add",
+      "case": "valid",
+      "value": {
+        "added": false,
+        "connected": false,
+        "tool_names": []
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "mcp.remove",
+      "case": "valid",
+      "value": {
+        "name": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "mcp.remove",
+      "case": "valid",
+      "value": {
+        "removed": false
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "host.attachment.create",
+      "case": "valid",
+      "value": {
+        "origin": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "host.attachment.create",
+      "case": "valid",
+      "value": {
+        "endpoint": "x",
+        "token": "x",
+        "expires_at_ms": 1
+      }
+    },
+    {
+      "kind": "event",
+      "name": "run.started",
+      "case": "valid",
+      "value": {
+        "event_id": "x",
+        "type": "run.started",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "resumed": false
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "skill.loaded",
+      "case": "valid",
+      "value": {
+        "event_id": "x",
+        "type": "skill.loaded",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "skill_id": "x",
+          "source": "x",
+          "version": "x",
+          "snapshot_id": "x"
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "content.delta",
+      "case": "valid",
+      "value": {
+        "event_id": "x",
+        "type": "content.delta",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "text": "x"
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "tool.started",
+      "case": "valid",
+      "value": {
+        "event_id": "x",
+        "type": "tool.started",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "tool_call_id": "x",
+          "name": "x"
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "tool.delta",
+      "case": "valid",
+      "value": {
+        "event_id": "x",
+        "type": "tool.delta",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "tool_call_id": "x"
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "tool.completed",
+      "case": "valid",
+      "value": {
+        "event_id": "x",
+        "type": "tool.completed",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "tool_call_id": "x",
+          "result": {
+            "content": "x",
+            "is_error": false,
+            "truncated": false,
+            "original_bytes": 1
+          }
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "context.updated",
+      "case": "valid",
+      "value": {
+        "event_id": "x",
+        "type": "context.updated",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "action": "x",
+          "artifact_ids": []
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "interaction.resolved",
+      "case": "valid",
+      "value": {
+        "event_id": "x",
+        "type": "interaction.resolved",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "request_id": "x",
+          "type": "approval"
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "run.completed",
+      "case": "valid",
+      "value": {
+        "event_id": "x",
+        "type": "run.completed",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "usage": {
+            "input_tokens": 1,
+            "output_tokens": 1
+          },
+          "duration_ms": 1,
+          "finish_reason": "x",
+          "context": {}
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "run.cancelled",
+      "case": "valid",
+      "value": {
+        "event_id": "x",
+        "type": "run.cancelled",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "reason": "x"
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "run.failed",
+      "case": "valid",
+      "value": {
+        "event_id": "x",
+        "type": "run.failed",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "error": {
+            "code": "x",
+            "message": "x",
+            "retryable": false
+          }
+        }
+      }
+    },
+    {
+      "kind": "interaction.params",
+      "name": "interaction.approval",
+      "case": "valid",
+      "value": {
+        "thread_id": "x",
+        "run_id": "x",
+        "timeout_ms": 1,
+        "payload": {
+          "interrupt_id": "x",
+          "description": "x",
+          "requests": null,
+          "decisions": []
+        }
+      }
+    },
+    {
+      "kind": "interaction.result",
+      "name": "interaction.approval",
+      "case": "valid",
+      "value": {
+        "decision": "approve_once"
+      }
+    },
+    {
+      "kind": "interaction.params",
+      "name": "interaction.question",
+      "case": "valid",
+      "value": {
+        "thread_id": "x",
+        "run_id": "x",
+        "timeout_ms": 1,
+        "payload": {
+          "interrupt_id": "x",
+          "questions": []
+        }
+      }
+    },
+    {
+      "kind": "interaction.result",
+      "name": "interaction.question",
+      "case": "valid",
+      "value": {
+        "answers": {}
+      }
+    },
+    {
+      "kind": "error",
+      "name": "ProtocolErrorData",
+      "case": "valid",
+      "value": {
+        "code": "x",
+        "retryable": false
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "kind": "operation.params",
+      "name": "initialize",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "initialize",
+      "case": "extra_field",
+      "value": {
+        "protocol": {
+          "major": 3,
+          "min_minor": 1,
+          "max_minor": 1
+        },
+        "client": {
+          "name": "x",
+          "version": "x",
+          "kind": "x"
+        },
+        "capabilities": {
+          "requests": [],
+          "handles": []
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "initialize",
+      "case": "missing_field",
+      "value": {
+        "client": {
+          "name": "x",
+          "version": "x",
+          "kind": "x"
+        },
+        "capabilities": {
+          "requests": [],
+          "handles": []
+        }
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "initialize",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "initialize",
+      "case": "extra_field",
+      "value": {
+        "protocol": {
+          "major": 3,
+          "minor": 1
+        },
+        "server": {
+          "name": "x",
+          "version": "x"
+        },
+        "connection": {
+          "id": "x",
+          "role": "owner",
+          "project": {
+            "id": "x",
+            "label": "x"
+          }
+        },
+        "capabilities": {
+          "available": [],
+          "enabled": [],
+          "handles": []
+        },
+        "agent_commands": [],
+        "skills_snapshot": {
+          "id": "x",
+          "count": 1
+        },
+        "skill_diagnostics": [],
+        "limits": {
+          "max_frame_bytes": 1,
+          "max_tool_payload_bytes": 1
+        },
+        "config_summary": {},
+        "startup_error": {
+          "code": "x",
+          "message": "x"
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "initialize",
+      "case": "missing_field",
+      "value": {
+        "server": {
+          "name": "x",
+          "version": "x"
+        },
+        "connection": {
+          "id": "x",
+          "role": "owner",
+          "project": {
+            "id": "x",
+            "label": "x"
+          }
+        },
+        "capabilities": {
+          "available": [],
+          "enabled": [],
+          "handles": []
+        },
+        "agent_commands": [],
+        "skills_snapshot": {
+          "id": "x",
+          "count": 1
+        },
+        "skill_diagnostics": [],
+        "limits": {
+          "max_frame_bytes": 1,
+          "max_tool_payload_bytes": 1
+        },
+        "config_summary": {},
+        "startup_error": {
+          "code": "x",
+          "message": "x"
+        }
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "run.start",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "run.start",
+      "case": "extra_field",
+      "value": {
+        "message": "x",
+        "thread_id": "x",
+        "run_id": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "run.start",
+      "case": "missing_field",
+      "value": {
+        "thread_id": "x",
+        "run_id": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "run.start",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "run.start",
+      "case": "extra_field",
+      "value": {
+        "thread_id": "x",
+        "run_id": "x",
+        "accepted": true,
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "run.start",
+      "case": "missing_field",
+      "value": {
+        "run_id": "x",
+        "accepted": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "run.cancel",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "run.cancel",
+      "case": "extra_field",
+      "value": {
+        "thread_id": "x",
+        "run_id": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "run.cancel",
+      "case": "missing_field",
+      "value": {
+        "run_id": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "run.cancel",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "run.cancel",
+      "case": "extra_field",
+      "value": {
+        "cancelled": false,
+        "run_id": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "run.cancel",
+      "case": "missing_field",
+      "value": {
+        "run_id": "x"
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "context.compact",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "context.compact",
+      "case": "extra_field",
+      "value": {
+        "thread_id": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "context.compact",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "context.compact",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "context.compact",
+      "case": "extra_field",
+      "value": {
+        "compacted": false,
+        "context": {},
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "context.compact",
+      "case": "missing_field",
+      "value": {
+        "context": {}
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "config.show",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "config.show",
+      "case": "extra_field",
+      "value": {
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "config.show",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "config.path",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "config.path",
+      "case": "extra_field",
+      "value": {
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "config.path",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "config.path",
+      "case": "extra_field",
+      "value": {
+        "workspace": "x",
+        "paths": [],
+        "explicit_path": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "config.path",
+      "case": "missing_field",
+      "value": {
+        "paths": [],
+        "explicit_path": "x"
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "config.details",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "config.details",
+      "case": "extra_field",
+      "value": {
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "config.details",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "config.details",
+      "case": "extra_field",
+      "value": {
+        "revision": "x",
+        "fields": [],
+        "immutable_fields": [],
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "config.details",
+      "case": "missing_field",
+      "value": {
+        "fields": [],
+        "immutable_fields": []
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "config.preview",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "config.preview",
+      "case": "extra_field",
+      "value": {
+        "changes": [
+          {
+            "path": "x",
+            "value": null
+          }
+        ],
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "config.preview",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "config.preview",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "config.preview",
+      "case": "extra_field",
+      "value": {
+        "revision": "x",
+        "changes": [],
+        "applies_to": [],
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "config.preview",
+      "case": "missing_field",
+      "value": {
+        "changes": [],
+        "applies_to": []
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "config.commit",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "config.commit",
+      "case": "extra_field",
+      "value": {
+        "expected_revision": "x",
+        "changes": [
+          {
+            "path": "x",
+            "value": null
+          }
+        ],
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "config.commit",
+      "case": "missing_field",
+      "value": {
+        "changes": [
+          {
+            "path": "x",
+            "value": null
+          }
+        ]
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "config.commit",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.list",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.list",
+      "case": "extra_field",
+      "value": {
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.list",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.list",
+      "case": "extra_field",
+      "value": {
+        "threads": [],
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.list",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.open",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.open",
+      "case": "extra_field",
+      "value": {
+        "thread_id": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.open",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.open",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.open",
+      "case": "extra_field",
+      "value": {
+        "thread": {
+          "thread_id": "x",
+          "created_at_ms": 1,
+          "updated_at_ms": 1,
+          "first_message": "x",
+          "latest_message": "x",
+          "message_count": 1
+        },
+        "messages": [],
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.open",
+      "case": "missing_field",
+      "value": {
+        "messages": []
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.watch",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.watch",
+      "case": "extra_field",
+      "value": {
+        "thread_id": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.watch",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.watch",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.watch",
+      "case": "extra_field",
+      "value": {
+        "thread": {
+          "thread_id": "x",
+          "created_at_ms": 1,
+          "updated_at_ms": 1,
+          "first_message": "x",
+          "latest_message": "x",
+          "message_count": 1
+        },
+        "messages": [],
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.watch",
+      "case": "missing_field",
+      "value": {
+        "messages": []
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.unwatch",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.unwatch",
+      "case": "extra_field",
+      "value": {
+        "thread_id": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.unwatch",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.unwatch",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.unwatch",
+      "case": "extra_field",
+      "value": {
+        "removed": false,
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.unwatch",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
+      "kind": "operation.params",
+      "name": "models.list",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "models.list",
+      "case": "extra_field",
+      "value": {
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "models.list",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "models.list",
+      "case": "extra_field",
+      "value": {
+        "profiles": [],
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "models.list",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
+      "kind": "operation.params",
+      "name": "skills.list",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "skills.list",
+      "case": "extra_field",
+      "value": {
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "skills.list",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "skills.list",
+      "case": "extra_field",
+      "value": {
+        "snapshot": {},
+        "skills": [],
+        "diagnostics": [],
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "skills.list",
+      "case": "missing_field",
+      "value": {
+        "skills": [],
+        "diagnostics": []
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "skills.inspect",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "skills.inspect",
+      "case": "extra_field",
+      "value": {
+        "id": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "skills.inspect",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "skills.inspect",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "skills.set_enabled",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "skills.set_enabled",
+      "case": "extra_field",
+      "value": {
+        "id": "x",
+        "enabled": false,
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "skills.set_enabled",
+      "case": "missing_field",
+      "value": {
+        "enabled": false
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "skills.set_enabled",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "skills.install",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "skills.install",
+      "case": "extra_field",
+      "value": {
+        "market": "x",
+        "name": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "skills.install",
+      "case": "missing_field",
+      "value": {
+        "name": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "skills.install",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "skills.update",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "skills.update",
+      "case": "extra_field",
+      "value": {
+        "market": "x",
+        "name": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "skills.update",
+      "case": "missing_field",
+      "value": {
+        "name": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "skills.update",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "skills.remove",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "skills.remove",
+      "case": "extra_field",
+      "value": {
+        "id": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "skills.remove",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "skills.remove",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "skills.market.list",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "skills.market.list",
+      "case": "extra_field",
+      "value": {
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "skills.market.list",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "mcp.status",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "mcp.status",
+      "case": "extra_field",
+      "value": {
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "mcp.status",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "mcp.status",
+      "case": "extra_field",
+      "value": {
+        "servers": [],
+        "total_tools": 1,
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "mcp.status",
+      "case": "missing_field",
+      "value": {
+        "total_tools": 1
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "mcp.add",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "mcp.add",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "mcp.add",
+      "case": "extra_field",
+      "value": {
+        "added": false,
+        "connected": false,
+        "tool_names": [],
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "mcp.add",
+      "case": "missing_field",
+      "value": {
+        "connected": false,
+        "tool_names": []
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "mcp.remove",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "mcp.remove",
+      "case": "extra_field",
+      "value": {
+        "name": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "mcp.remove",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "mcp.remove",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "mcp.remove",
+      "case": "extra_field",
+      "value": {
+        "removed": false,
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "mcp.remove",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
+      "kind": "operation.params",
+      "name": "host.attachment.create",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "host.attachment.create",
+      "case": "extra_field",
+      "value": {
+        "origin": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "host.attachment.create",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "host.attachment.create",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "host.attachment.create",
+      "case": "extra_field",
+      "value": {
+        "endpoint": "x",
+        "token": "x",
+        "expires_at_ms": 1,
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "host.attachment.create",
+      "case": "missing_field",
+      "value": {
+        "token": "x",
+        "expires_at_ms": 1
+      }
+    },
+    {
+      "kind": "event",
+      "name": "run.started",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "event",
+      "name": "run.started",
+      "case": "extra_field",
+      "value": {
+        "event_id": "x",
+        "type": "run.started",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "resumed": false
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "event",
+      "name": "run.started",
+      "case": "missing_field",
+      "value": {
+        "type": "run.started",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "resumed": false
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "skill.loaded",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "event",
+      "name": "skill.loaded",
+      "case": "extra_field",
+      "value": {
+        "event_id": "x",
+        "type": "skill.loaded",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "skill_id": "x",
+          "source": "x",
+          "version": "x",
+          "snapshot_id": "x"
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "event",
+      "name": "skill.loaded",
+      "case": "missing_field",
+      "value": {
+        "type": "skill.loaded",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "skill_id": "x",
+          "source": "x",
+          "version": "x",
+          "snapshot_id": "x"
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "content.delta",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "event",
+      "name": "content.delta",
+      "case": "extra_field",
+      "value": {
+        "event_id": "x",
+        "type": "content.delta",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "text": "x"
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "event",
+      "name": "content.delta",
+      "case": "missing_field",
+      "value": {
+        "type": "content.delta",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "text": "x"
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "tool.started",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "event",
+      "name": "tool.started",
+      "case": "extra_field",
+      "value": {
+        "event_id": "x",
+        "type": "tool.started",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "tool_call_id": "x",
+          "name": "x"
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "event",
+      "name": "tool.started",
+      "case": "missing_field",
+      "value": {
+        "type": "tool.started",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "tool_call_id": "x",
+          "name": "x"
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "tool.delta",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "event",
+      "name": "tool.delta",
+      "case": "extra_field",
+      "value": {
+        "event_id": "x",
+        "type": "tool.delta",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "tool_call_id": "x"
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "event",
+      "name": "tool.delta",
+      "case": "missing_field",
+      "value": {
+        "type": "tool.delta",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "tool_call_id": "x"
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "tool.completed",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "event",
+      "name": "tool.completed",
+      "case": "extra_field",
+      "value": {
+        "event_id": "x",
+        "type": "tool.completed",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "tool_call_id": "x",
+          "result": {
+            "content": "x",
+            "is_error": false,
+            "truncated": false,
+            "original_bytes": 1
+          }
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "event",
+      "name": "tool.completed",
+      "case": "missing_field",
+      "value": {
+        "type": "tool.completed",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "tool_call_id": "x",
+          "result": {
+            "content": "x",
+            "is_error": false,
+            "truncated": false,
+            "original_bytes": 1
+          }
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "context.updated",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "event",
+      "name": "context.updated",
+      "case": "extra_field",
+      "value": {
+        "event_id": "x",
+        "type": "context.updated",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "action": "x",
+          "artifact_ids": []
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "event",
+      "name": "context.updated",
+      "case": "missing_field",
+      "value": {
+        "type": "context.updated",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "action": "x",
+          "artifact_ids": []
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "interaction.resolved",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "event",
+      "name": "interaction.resolved",
+      "case": "extra_field",
+      "value": {
+        "event_id": "x",
+        "type": "interaction.resolved",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "request_id": "x",
+          "type": "approval"
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "event",
+      "name": "interaction.resolved",
+      "case": "missing_field",
+      "value": {
+        "type": "interaction.resolved",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "request_id": "x",
+          "type": "approval"
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "run.completed",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "event",
+      "name": "run.completed",
+      "case": "extra_field",
+      "value": {
+        "event_id": "x",
+        "type": "run.completed",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "usage": {
+            "input_tokens": 1,
+            "output_tokens": 1
+          },
+          "duration_ms": 1,
+          "finish_reason": "x",
+          "context": {}
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "event",
+      "name": "run.completed",
+      "case": "missing_field",
+      "value": {
+        "type": "run.completed",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "usage": {
+            "input_tokens": 1,
+            "output_tokens": 1
+          },
+          "duration_ms": 1,
+          "finish_reason": "x",
+          "context": {}
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "run.cancelled",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "event",
+      "name": "run.cancelled",
+      "case": "extra_field",
+      "value": {
+        "event_id": "x",
+        "type": "run.cancelled",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "reason": "x"
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "event",
+      "name": "run.cancelled",
+      "case": "missing_field",
+      "value": {
+        "type": "run.cancelled",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "reason": "x"
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "run.failed",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "event",
+      "name": "run.failed",
+      "case": "extra_field",
+      "value": {
+        "event_id": "x",
+        "type": "run.failed",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "error": {
+            "code": "x",
+            "message": "x",
+            "retryable": false
+          }
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "event",
+      "name": "run.failed",
+      "case": "missing_field",
+      "value": {
+        "type": "run.failed",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "error": {
+            "code": "x",
+            "message": "x",
+            "retryable": false
+          }
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "event.unknown",
+      "case": "unknown_event",
+      "value": {
+        "event_id": "x",
+        "type": "event.unknown",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "resumed": false
+        }
+      }
+    },
+    {
+      "kind": "interaction.params",
+      "name": "interaction.approval",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "interaction.params",
+      "name": "interaction.approval",
+      "case": "extra_field",
+      "value": {
+        "thread_id": "x",
+        "run_id": "x",
+        "timeout_ms": 1,
+        "payload": {
+          "interrupt_id": "x",
+          "description": "x",
+          "requests": null,
+          "decisions": []
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "interaction.params",
+      "name": "interaction.approval",
+      "case": "missing_field",
+      "value": {
+        "run_id": "x",
+        "timeout_ms": 1,
+        "payload": {
+          "interrupt_id": "x",
+          "description": "x",
+          "requests": null,
+          "decisions": []
+        }
+      }
+    },
+    {
+      "kind": "interaction.result",
+      "name": "interaction.approval",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "interaction.result",
+      "name": "interaction.approval",
+      "case": "extra_field",
+      "value": {
+        "decision": "approve_once",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "interaction.result",
+      "name": "interaction.approval",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
+      "kind": "interaction.params",
+      "name": "interaction.question",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "interaction.params",
+      "name": "interaction.question",
+      "case": "extra_field",
+      "value": {
+        "thread_id": "x",
+        "run_id": "x",
+        "timeout_ms": 1,
+        "payload": {
+          "interrupt_id": "x",
+          "questions": []
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "interaction.params",
+      "name": "interaction.question",
+      "case": "missing_field",
+      "value": {
+        "run_id": "x",
+        "timeout_ms": 1,
+        "payload": {
+          "interrupt_id": "x",
+          "questions": []
+        }
+      }
+    },
+    {
+      "kind": "interaction.result",
+      "name": "interaction.question",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "interaction.result",
+      "name": "interaction.question",
+      "case": "extra_field",
+      "value": {
+        "answers": {},
+        "__extra": true
+      }
+    },
+    {
+      "kind": "interaction.result",
+      "name": "interaction.question",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
+      "kind": "error",
+      "name": "ProtocolErrorData",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "ProtocolErrorData",
+      "case": "extra_field",
+      "value": {
+        "code": "x",
+        "retryable": false,
+        "__extra": true
+      }
+    },
+    {
+      "kind": "error",
+      "name": "ProtocolErrorData",
+      "case": "missing_field",
+      "value": {
+        "retryable": false
+      }
+    }
+  ]
+}

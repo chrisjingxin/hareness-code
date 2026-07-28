@@ -2,11 +2,10 @@
 
 import { createCliRenderer, type KeyEvent, type ScrollBoxRenderable, type TextareaRenderable } from "@opentui/core"
 import { createRoot, useKeyboard, useTerminalDimensions } from "@opentui/react"
-import { randomUUID } from "node:crypto"
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
-import type { InteractionRequestEnvelope, InteractionResponse, McpAddResult, McpStatusResult, ModelProfile, RequestedSkill, ThreadMessage } from "@za38/protocol"
+import { Capability, EventType, isClientMethod, type InteractionRequestEnvelope, type InteractionResponse, type McpAddResult, type McpStatusResult, type ModelProfile, type RequestedSkill, type ThreadMessage } from "@za38/protocol"
 
-import { IpcClient, JsonRpcRemoteError } from "../ipc/client"
+import { AgentClient, JsonRpcRemoteError } from "../ipc/client"
 import {
   defaultCommandContext,
   findCommandMenuItems,
@@ -49,13 +48,14 @@ import {
 } from "./state"
 
 type TuiOptions = {
-  client: IpcClient
+  client: AgentClient
   runtime: TuiRuntime
   /** 启动后立即打开恢复选择器；选择器而非参数负责持有内部 thread_id。 */
   resume?: boolean
   /** 仅供测试隔离本地历史；正式入口始终使用 ~/.harness/prompt-history.jsonl。 */
   promptHistoryFile?: string
   onRequestExit: () => void
+  openWeb?: (threadId: string) => Promise<string>
 }
 
 type SkillPickerState = {
@@ -94,7 +94,7 @@ type ModelBindingDialog = {
 }
 
 /** 正式 OpenTUI 根组件：所有 Agent 输出必须经状态归约后才进入终端。 */
-export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestExit }: TuiOptions) {
+export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestExit, openWeb }: TuiOptions) {
   const [state, setState] = useState(() => createInitialState())
   const stateRef = useRef(state)
   const [draft, setDraft] = useState("")
@@ -131,7 +131,7 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
   const selectedModelProfile = models.find(model => model.id === threadModelSelection)
   const displayedModelProfile = selectedModelProfile ?? actualModelProfile
   const displayedModelName = actualModelProfile?.model ?? threadModelSelection
-  const supportsThreadModelSelection = runtime.capabilities?.includes("models.select") === true
+  const supportsThreadModelSelection = runtime.capabilities?.includes(Capability.MODELS_SELECT) === true
   const displayedRuntime: TuiRuntime = {
     ...runtime,
     ...(displayedModelProfile
@@ -152,7 +152,7 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
 
   /** 读取启动快照中的 Skill 摘要；正文仍只在选中后由 sidecar 按需加载。 */
   const refreshSkills = useCallback(async (): Promise<readonly SkillMenuItem[]> => {
-    const result = await client.call("skills.list", { include_disabled: false }) as SkillsListResult
+    const result = await client.request("skills.list", { include_disabled: false }) as SkillsListResult
     const next = Array.isArray(result.skills)
       ? result.skills.map(skillMenuItem).filter((item): item is SkillMenuItem => item !== undefined)
       : []
@@ -180,11 +180,11 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
         : { type: "question", request_id: requestId, answers: {} })
     }
     const eventListener = (event: import("@za38/protocol").EventEnvelope) => {
-      if (event.type === "run.started" && event.thread_id === stateRef.current.threadId) {
+      if (event.type === EventType.RUN_STARTED && event.thread_id === stateRef.current.threadId) {
         const actual = modelProfileFromRunStarted(event.payload)
         if (actual) setActualModelProfile(actual)
       }
-      if (["interaction.resolved", "run.completed", "run.cancelled", "run.failed"].includes(event.type)) {
+      if (new Set<string>([EventType.INTERACTION_RESOLVED, EventType.RUN_COMPLETED, EventType.RUN_CANCELLED, EventType.RUN_FAILED]).has(event.type)) {
         settleAbandoned(stateRef.current.pendingApproval?.requestId ?? stateRef.current.pendingQuestion?.requestId)
       }
       commit(current => applyAgentEvent(current, event))
@@ -254,44 +254,31 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
       commit(state => appendNotice(state, "当前 thread 仍在执行；请等待、审批或按 Ctrl+C 取消。"))
       return
     }
-    const run = {
-      threadId: current.threadId ?? randomUUID(),
-      runId: randomUUID(),
-    }
     const armedSkill = requestedSkill ?? (selectedSkill
       ? { id: selectedSkill.id, args: message }
       : undefined)
-    // 新 minor 每次携带当前 Thread 的下一次选择；旧端仅保留首次新 Thread 的兼容字段。
-    const modelSelection = supportsThreadModelSelection && threadModelSelection
+    const modelSelection = threadModelSelection
       ? { primary_profile: threadModelSelection }
       : undefined
-    const requestedModelProfile = !supportsThreadModelSelection && !current.threadId
-      ? threadModelSelection
-      : undefined
     if (armedSkill && !requestedSkill) setSelectedSkill(undefined)
+    const agentRun = client.startRun({
+      message,
+      threadId: current.threadId,
+      requestedSkill: armedSkill,
+      modelSelection,
+    })
+    const run = agentRun.ref
     commit(state => startRun(state, run, message))
+    void drainEvents(agentRun.events)
+    void agentRun.completion.catch(() => undefined)
     try {
-      const accepted = await client.query(
-        message,
-        run.threadId,
-        run.runId,
-        armedSkill,
-        requestedModelProfile,
-        modelSelection,
-      )
-      if (!accepted.accepted || accepted.thread_id !== run.threadId || accepted.run_id !== run.runId) {
-        throw new Error("Agent 返回的 run 标识与请求不一致")
-      }
-      if (!supportsThreadModelSelection && requestedModelProfile) {
-        setActualModelProfile(models.find(model => model.id === requestedModelProfile))
-        setThreadModelSelection(undefined)
-      }
+      await agentRun.accepted
     } catch (error) {
       commit(state => markRunFailed(state, run.runId, errorMessage(error)))
     }
-  }, [client, commit, models, selectedSkill, supportsThreadModelSelection, threadModelSelection])
+  }, [client, commit, selectedSkill, supportsThreadModelSelection, threadModelSelection])
 
-  /** 解析 Agent 发起的审批 request，由 JsonRpcPeer 自动回写标准 response。 */
+  /** 解析 Agent 发起的审批 request，由 AgentClient 自动回写标准 response。 */
   const respondApproval = useCallback(async (decision: "approve" | "reject") => {
     const { pendingApproval } = stateRef.current
     if (!pendingApproval?.requestId) return
@@ -360,7 +347,7 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     setThreadPicker(current => ({ ...current, visible: false, loading: false, error: undefined }))
   }, [])
 
-  /** `/model` 在新协议中更新当前 Thread 的下一次 Run；旧协议保留首次绑定兼容。 */
+  /** `/model` 更新当前 Thread 的下一次 Run；缺少 models.select 时仅展示不可变绑定。 */
   const openModelPicker = useCallback((initialQuery = "") => {
     const current = stateRef.current
     if (current.threadId && !supportsThreadModelSelection) {
@@ -449,7 +436,8 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
         return
       case "rpc":
         try {
-          const value = await client.call(result.method, result.params)
+          if (!isClientMethod(result.method)) throw new Error(`Unsupported operation: ${result.method}`)
+          const value = await client.request(result.method, result.params as never)
           await applyCommandResult(result.onSuccess(value))
         } catch (error) {
           await applyCommandResult(result.onError(error))
@@ -531,10 +519,22 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
         commit(state => appendNotice(state, `未知子命令 "${sub}"\n用法：/mcp [add|remove] ...`))
         return
       }
+      case "web":
+        if (!openWeb) {
+          commit(current => appendNotice(current, "当前启动方式未提供 Web launcher。"))
+          return
+        }
+        try {
+          const url = await openWeb(result.threadId)
+          commit(current => appendNotice(current, `Web 已附着当前 thread：${url}`))
+        } catch (error) {
+          commit(current => appendNotice(current, `Web 启动失败：${errorMessage(error)}`))
+        }
+        return
       case "submit-prompt":
         await sendAgentMessage(result.prompt, result.requestedSkill)
     }
-  }, [cancelActiveRun, client, commit, onRequestExit, openModelPicker, openSkillPicker, openThreadPicker, sendAgentMessage])
+  }, [cancelActiveRun, client, commit, onRequestExit, openModelPicker, openSkillPicker, openThreadPicker, openWeb, sendAgentMessage])
 
   /** 由 Dispatcher 解析稳定 ID 和运行态，根组件不再解释每个命令的业务分支。 */
   const executeSlashCommand = useCallback((command: SlashCommand) => {
@@ -543,7 +543,7 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
       commandContext: tuiCommandContext(displayedRuntime, current),
       threadId: current.threadId,
       runtimeStatus: runtimeStatusSummary(displayedRuntime),
-      versionSummary: `za38-cli ${displayedRuntime.cliVersion} · JSON-RPC v2`,
+      versionSummary: `za38-cli ${displayedRuntime.cliVersion} · JSON-RPC v3`,
     }))
   }, [applyCommandResult, displayedRuntime])
 
@@ -656,7 +656,7 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     setModelPicker(current => ({ ...current, loading: true, syncingDefault: true, error: undefined }))
     const label = `${model.provider_label} · ${model.model}`
     try {
-      if (!runtime.capabilities?.includes("config.write")) {
+      if (!runtime.capabilities?.includes(Capability.CONFIG_WRITE)) {
         throw new ModelDefaultSyncError("CONFIG_WRITE_CAPABILITY_REQUIRED")
       }
       const details = await client.configDetails()
@@ -1199,6 +1199,17 @@ function remoteConfigReason(error: JsonRpcRemoteError): string {
 /** 将未知异常转换为可安全展示的字符串。 */
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/** TUI 通过全局 event reducer 渲染；消费 AgentRun 队列只为及时释放已处理事件。 */
+async function drainEvents(events: AsyncIterable<unknown>): Promise<void> {
+  try {
+    for await (const _event of events) {
+      // 事件已由 useEffect 中的 AgentClient listener 处理。
+    }
+  } catch {
+    // accepted/completion 的错误路径负责更新 TUI 状态。
+  }
 }
 
 /** 将握手 capability 和即时 thread 状态收敛为 Registry 可重复使用的可用性上下文。 */

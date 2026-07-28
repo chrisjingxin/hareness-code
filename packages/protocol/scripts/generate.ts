@@ -1,26 +1,35 @@
-/** 从 v2 Schema 的协议元数据生成两端共享常量和模型骨架。 */
+/** 从唯一 v3 JSON Schema 生成双端类型、常量和 Python Schema 副本。 */
 
 import { readFile, writeFile } from "node:fs/promises"
+import { createHash } from "node:crypto"
 import { resolve } from "node:path"
 
+type Schema = Record<string, any>
+type ContractEntry = { params?: string; result?: string; payload?: string; capability?: string; handle?: string }
 type Metadata = {
   major: number
   minor: number
   max_frame_bytes: number
   max_tool_payload_bytes: number
-  client_methods: string[]
-  server_methods: string[]
-  server_capabilities: string[]
-  event_types: string[]
+  operations: Record<string, ContractEntry>
+  events: Record<string, ContractEntry>
+  interactions: Record<string, ContractEntry>
+  capabilities: string[]
 }
 
 const protocolRoot = resolve(import.meta.dir, "..")
 const repositoryRoot = resolve(protocolRoot, "../..")
-const schema = JSON.parse(await readFile(resolve(protocolRoot, "schema/v2.json"), "utf8")) as { "x-protocol": Metadata }
-const metadata = schema["x-protocol"]
+const schemaPath = resolve(protocolRoot, "schema/v3.json")
+const schemaText = await readFile(schemaPath, "utf8")
+const schemaDigest = createHash("sha256").update(schemaText).digest("hex")
+const schema = JSON.parse(schemaText) as Schema
+const metadata = schema["x-harness"] as Metadata
 const targets = [
-  [resolve(protocolRoot, "src/generated.ts"), renderTypeScript(metadata)],
-  [resolve(repositoryRoot, "packages/agent/harness_agent/protocol_generated.py"), renderPython(metadata)],
+  [resolve(protocolRoot, "src/generated.ts"), renderTypeScript(schema, metadata, schemaDigest)],
+  [resolve(protocolRoot, "fixtures/v3-contract.json"), renderContractFixtures(schema, metadata)],
+  [resolve(repositoryRoot, "packages/agent/harness_agent/protocol_generated.py"), renderPython(schema, metadata, schemaDigest)],
+  [resolve(repositoryRoot, "packages/agent/harness_agent/protocol_v3.json"), schemaText],
+  [resolve(repositoryRoot, "packages/agent/harness_agent/protocol_v3.sha256"), `${schemaDigest}\n`],
 ] as const
 
 if (process.argv.includes("--check")) {
@@ -32,272 +41,358 @@ if (process.argv.includes("--check")) {
   for (const [path, content] of targets) await writeFile(path, content, "utf8")
 }
 
-function renderTypeScript(meta: Metadata): string {
-  return `/** 此文件由 packages/protocol/scripts/generate.ts 生成，请勿手工修改。 */
+function renderTypeScript(root: Schema, meta: Metadata, digest: string): string {
+  const definitions = Object.entries(root.$defs as Record<string, Schema>)
+    .map(([name, definition]) => name === "jsonValue"
+      ? "export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }"
+      : `export type ${pascal(name)} = ${renderType(definition)}`)
+    .join("\n")
+  const operationAliases = Object.entries(meta.operations).flatMap(([method, entry]) => {
+    const base = pascal(method)
+    const params = typeFromRef(entry.params!)
+    const result = typeFromRef(entry.result!)
+    return [
+      params === `${base}Params` ? "" : `export type ${base}Params = ${params}`,
+      result === `${base}Result` ? "" : `export type ${base}Result = ${result}`,
+    ].filter(Boolean)
+  }).join("\n")
+  const operationMap = Object.entries(meta.operations)
+    .map(([method]) => `  ${JSON.stringify(method)}: { params: ${pascal(method)}Params; result: ${pascal(method)}Result }`)
+    .join("\n")
+  const eventUnion = Object.entries(meta.events)
+    .map(([type, entry]) => `  | AgentEventOf<${JSON.stringify(type)}, ${typeFromRef(entry.payload!)}>`)
+    .join("\n")
+  const interactionMap = Object.entries(meta.interactions)
+    .map(([method, entry]) => `  ${JSON.stringify(method)}: { params: ${typeFromRef(entry.params!)}; result: ${typeFromRef(entry.result!)} }`)
+    .join("\n")
+  const methodEntries = [...Object.keys(meta.operations), "event", ...Object.keys(meta.interactions)]
+    .map(method => `  ${constant(method)}: ${JSON.stringify(method)},`)
+    .join("\n")
+
+  return `/** 此文件由 packages/protocol/schema/v3.json 生成，请勿手工修改。 */
 
 export const PROTOCOL_MAJOR = ${meta.major} as const
 export const PROTOCOL_MINOR = ${meta.minor} as const
+export const PROTOCOL_SCHEMA_SHA256 = ${JSON.stringify(digest)} as const
 export const MAX_FRAME_BYTES = ${meta.max_frame_bytes} as const
 export const MAX_TOOL_PAYLOAD_BYTES = ${meta.max_tool_payload_bytes} as const
-export const CLIENT_METHODS = ${JSON.stringify(meta.client_methods)} as const
-export const SERVER_METHODS = ${JSON.stringify(meta.server_methods)} as const
-export const SERVER_CAPABILITIES = ${JSON.stringify(meta.server_capabilities)} as const
-export const EVENT_TYPES = ${JSON.stringify(meta.event_types)} as const
+export const CLIENT_METHODS = ${JSON.stringify(Object.keys(meta.operations))} as const
+export const EVENT_TYPES = ${JSON.stringify(Object.keys(meta.events))} as const
+export const INTERACTION_METHODS = ${JSON.stringify(Object.keys(meta.interactions))} as const
+export const SERVER_CAPABILITIES = ${JSON.stringify(meta.capabilities)} as const
+export const OPERATION_CAPABILITIES = ${JSON.stringify(Object.fromEntries(Object.entries(meta.operations).map(([name, entry]) => [name, entry.capability ?? null])))} as const
+export const INTERACTION_HANDLES = ${JSON.stringify(Object.fromEntries(Object.entries(meta.interactions).map(([name, entry]) => [name, entry.handle])))} as const
+export const Capability = ${JSON.stringify(Object.fromEntries(meta.capabilities.map(value => [constant(value), value])))} as const
+export const EventType = ${JSON.stringify(Object.fromEntries(Object.keys(meta.events).map(value => [constant(value), value])))} as const
 
-export type JsonObject = Record<string, unknown>
+export const Method = {
+${methodEntries}
+} as const
+
+export const PROTOCOL_VERSION = { major: PROTOCOL_MAJOR, minor: PROTOCOL_MINOR } as const
+
 export type JsonRpcErrorObject = { code: number; message: string; data?: unknown }
 export type JsonRpcRequest = { jsonrpc: "2.0"; method: string; params?: JsonObject; id: string }
 export type JsonRpcNotification = { jsonrpc: "2.0"; method: string; params?: JsonObject }
 export type JsonRpcResponse = { jsonrpc: "2.0"; result?: unknown; error?: JsonRpcErrorObject; id: string | null }
 export type JsonRpcMessage = JsonRpcRequest | JsonRpcNotification | JsonRpcResponse
 
-export interface InitializeParams { protocol: { major: ${meta.major}; min_minor: number; max_minor: number }; client: { name: string; version: string }; capabilities: string[]; cwd?: string; config_path?: string }
-export interface InitializeResult { protocol: { major: ${meta.major}; minor: number }; server: { name: string; version: string }; server_capabilities: string[]; enabled_capabilities: string[]; agent_commands: Array<{ name: string; description: string; aliases: string[] }>; skills_snapshot: { id: string; count: number }; skill_diagnostics: string[]; limits: { max_frame_bytes: number; max_tool_payload_bytes: number }; config_summary: JsonObject | null; startup_error: { code: string; message: string } | null }
-export interface RequestedSkill { id: string; args?: string }
-export interface ModelProfile { id: string; model: string; provider_label: string; context_window_tokens: number; capabilities: string[]; is_default: boolean; available: boolean; unavailable_reason?: string | null; source: string }
-export interface ThreadModelSelection { primary_profile: string }
-export interface RunPrimaryModelBinding { profile: ModelProfile; source: string; runtime_profile_id: string }
-export interface RunStartParams { message: string; thread_id?: string; run_id?: string; requested_skill?: RequestedSkill; model_profile?: string; model_selection?: ThreadModelSelection }
-export interface RunStartResult { thread_id: string; run_id: string; accepted: boolean }
-export interface RunCancelParams { thread_id: string; run_id: string }
-export interface RunCancelResult { cancelled: boolean; run_id: string }
-export interface ContextCompactParams { thread_id: string }
-export interface ContextCompactResult { compacted: boolean; context: JsonObject }
-export interface ConfigChange { path: string; value: unknown }
-export interface ConfigDetailsParams { }
-export interface ConfigFieldDetail { path: string; value: unknown; source: string; editable: boolean; unavailable_reason: string | null; applies_to: "new-thread" | "restart" }
-export interface ConfigImmutableField { path: string; reason: string }
-export interface ConfigDetailsResult { revision: string; fields: ConfigFieldDetail[]; immutable_fields: ConfigImmutableField[] }
-export interface ConfigPreviewParams { changes: ConfigChange[] }
-export interface ConfigPreviewResult { revision: string; changes: Array<{ path: string; before: unknown; after: unknown }>; applies_to: Array<"new-thread" | "restart"> }
-export interface ConfigCommitParams { expected_revision: string; changes: ConfigChange[] }
-export interface ConfigCommitResult { revision: string; changes: Array<{ path: string; before: unknown; after: unknown }>; applies_to: Array<"new-thread" | "restart"> }
-export interface ThreadSummary { thread_id: string; created_at_ms: number; updated_at_ms: number; first_message: string; latest_message: string; message_count: number }
-export interface ThreadMessage { kind: "user" | "assistant" | "tool"; content: string; tool_name?: string }
-export interface ThreadsListParams { limit?: number }
-export interface ThreadsListResult { threads: ThreadSummary[] }
-export interface ThreadsOpenParams { thread_id: string }
-export interface ThreadsOpenResult { thread: ThreadSummary; messages: ThreadMessage[] }
-export interface ThreadModelBinding { state: "bound" | "legacy" | "unbound"; roles: Record<string, ModelProfile> }
-export interface ModelsListParams { thread_id?: string }
-export interface ModelsListResult { profiles: ModelProfile[]; thread_binding?: ThreadModelBinding; thread_selection?: ThreadModelSelection; last_run_binding?: RunPrimaryModelBinding }
-export interface McpServerStatus { name: string; transport: "stdio" | "http" | "sse"; status: "connected" | "failed" | "skipped"; error?: string; tool_names: string[] }
-export interface McpStatusParams { }
-export interface McpStatusResult { servers: McpServerStatus[]; total_tools: number }
-export interface McpAddParams { name: string; transport: "stdio" | "http" | "sse"; command?: string; args?: string[]; url?: string; env?: Record<string, string>; headers?: Record<string, string> }
-export interface McpAddResult { added: boolean; connected: boolean; tool_names: string[]; error?: string }
-export interface McpRemoveParams { name: string }
-export interface McpRemoveResult { removed: boolean }
-export interface EventEnvelope { event_id: string; type: string; thread_id: string; run_id: string; sequence: number; timestamp_ms: number; source?: { kind: "root" | "subagent" | "background"; id?: string; parent_tool_call_id?: string }; payload: JsonObject; extensions?: JsonObject }
-export interface InteractionRequestEnvelope { request_id: string; type: "approval" | "question"; thread_id: string; run_id: string; sequence: number; timeout_ms: number; payload: JsonObject }
-export interface ApprovalResponse { type: "approval"; request_id: string; decision: "approve_once" | "approve_thread" | "reject"; feedback?: string }
-export interface QuestionResponse { type: "question"; request_id: string; answers: Record<string, string[]> }
-export type InteractionResponse = ApprovalResponse | QuestionResponse
+${definitions}
+
+${operationAliases}
+
+export interface OperationMap {
+${operationMap}
+}
+export type OperationName = keyof OperationMap
+
+export type AgentEventOf<T extends string, P> = {
+  event_id: string
+  type: T
+  thread_id: string
+  run_id: string
+  sequence: number
+  timestamp_ms: number
+  payload: P
+}
+export type AgentEvent =
+${eventUnion}
+export type EventEnvelope = AgentEvent
+
+export interface InteractionMap {
+${interactionMap}
+}
+export type InteractionMethod = keyof InteractionMap
+export type InteractionRequest = {
+  [M in InteractionMethod]: { method: M; id: string; params: InteractionMap[M]["params"] }
+}[InteractionMethod]
 `
 }
 
-function renderPython(meta: Metadata): string {
-  return `\"\"\"由 packages/protocol/scripts/generate.ts 生成的 v2 协议模型，请勿手工修改。\"\"\"
+function renderContractFixtures(root: Schema, meta: Metadata): string {
+  const valid: Array<Record<string, unknown>> = []
+  const invalid: Array<Record<string, unknown>> = []
+  for (const [name, entry] of Object.entries(meta.operations)) {
+    addFixtureGroup(root, valid, invalid, "operation.params", name, entry.params!)
+    addFixtureGroup(root, valid, invalid, "operation.result", name, entry.result!)
+  }
+  for (const [name, entry] of Object.entries(meta.events)) {
+    const envelope = sample(root, { $ref: "#/$defs/eventBase" }) as Record<string, unknown>
+    envelope.type = name
+    envelope.payload = sample(root, { $ref: entry.payload! })
+    addValueFixtures(valid, invalid, "event", name, envelope, root.$defs.eventBase)
+  }
+  const firstEvent = Object.entries(meta.events)[0]
+  if (firstEvent) {
+    const [_, entry] = firstEvent
+    const unknown = sample(root, { $ref: "#/$defs/eventBase" }) as Record<string, unknown>
+    unknown.type = "event.unknown"
+    unknown.payload = sample(root, { $ref: entry.payload! })
+    invalid.push({ kind: "event", name: "event.unknown", case: "unknown_event", value: unknown })
+  }
+  for (const [name, entry] of Object.entries(meta.interactions)) {
+    addFixtureGroup(root, valid, invalid, "interaction.params", name, entry.params!)
+    addFixtureGroup(root, valid, invalid, "interaction.result", name, entry.result!)
+  }
+  addFixtureGroup(root, valid, invalid, "error", "ProtocolErrorData", "#/$defs/protocolErrorData")
+  return `${JSON.stringify({ valid, invalid }, null, 2)}\n`
+}
+
+function addFixtureGroup(
+  root: Schema,
+  valid: Array<Record<string, unknown>>,
+  invalid: Array<Record<string, unknown>>,
+  kind: string,
+  name: string,
+  ref: string,
+): void {
+  const definition = resolveRef(root, ref)
+  addValueFixtures(valid, invalid, kind, name, sample(root, definition), definition)
+}
+
+function addValueFixtures(
+  valid: Array<Record<string, unknown>>,
+  invalid: Array<Record<string, unknown>>,
+  kind: string,
+  name: string,
+  value: unknown,
+  definition: Schema,
+): void {
+  valid.push({ kind, name, case: "valid", value })
+  invalid.push({ kind, name, case: "wrong_type", value: null })
+  if (isRecord(value)) {
+    if (definition.additionalProperties === false) {
+      invalid.push({ kind, name, case: "extra_field", value: { ...value, __extra: true } })
+    }
+    const required = resolvedRequired(definition)
+    if (required.length) {
+      const missing = { ...value }
+      delete missing[required[0]]
+      invalid.push({ kind, name, case: "missing_field", value: missing })
+    }
+  }
+}
+
+function sample(root: Schema, input: Schema): unknown {
+  const definition = input.$ref ? resolveRef(root, input.$ref) : input
+  if (definition.const !== undefined) return definition.const
+  if (definition.enum) return definition.enum[0]
+  if (definition.default !== undefined) return definition.default
+  if (definition.oneOf) return sample(root, definition.oneOf[0])
+  if (definition.anyOf) return sample(root, definition.anyOf[0])
+  const type = Array.isArray(definition.type)
+    ? definition.type.find((value: string) => value !== "null") ?? "null"
+    : definition.type
+  if (type === "null") return null
+  if (type === "boolean") return false
+  if (type === "integer" || type === "number") return Math.max(definition.minimum ?? 0, 1)
+  if (type === "string") return "x".repeat(Math.max(definition.minLength ?? 1, 1))
+  if (type === "array") {
+    return Array.from(
+      { length: definition.minItems ?? 0 },
+      () => sample(root, definition.items ?? {}),
+    )
+  }
+  if (type === "object") {
+    const result: Record<string, unknown> = {}
+    for (const field of definition.required ?? []) {
+      result[field] = sample(root, definition.properties[field])
+    }
+    return result
+  }
+  return null
+}
+
+function resolveRef(root: Schema, ref: string): Schema {
+  const prefix = "#/$defs/"
+  if (!ref.startsWith(prefix)) throw new Error(`不支持的 Schema ref: ${ref}`)
+  return root.$defs[ref.slice(prefix.length)]
+}
+
+function resolvedRequired(definition: Schema): string[] {
+  return Array.isArray(definition.required) ? definition.required : []
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+}
+
+function renderPython(root: Schema, meta: Metadata, digest: string): string {
+  const operations = Object.entries(meta.operations)
+  const wireTypes = renderPythonWireTypes(root)
+  const wireAliases = operations.flatMap(([method, entry]) => {
+    const base = pascal(method)
+    const params = pythonTypeFromRef(entry.params!)
+    const result = pythonTypeFromRef(entry.result!)
+    return [
+      params === `${base}ParamsWire` ? "" : `${base}ParamsWire = ${params}`,
+      result === `${base}ResultWire` ? "" : `${base}ResultWire = ${result}`,
+    ].filter(Boolean)
+  }).join("\n")
+  const aliases = operations.flatMap(([method, entry]) => {
+    const base = pascal(method)
+    return [
+      `${base}Params = schema_model(${JSON.stringify(entry.params)}, name="${base}Params")`,
+      `${base}Result = schema_model(${JSON.stringify(entry.result)}, name="${base}Result")`,
+    ]
+  }).join("\n")
+  return `"""由 packages/protocol/schema/v3.json 生成的协议入口，请勿手工修改。"""
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal, Optional
-
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from typing import Any, Literal, NotRequired, TypeAlias, TypedDict
+from harness_agent.protocol_runtime import event_model, schema_model
 
 PROTOCOL_MAJOR = ${meta.major}
 PROTOCOL_MINOR = ${meta.minor}
+PROTOCOL_SCHEMA_SHA256 = ${JSON.stringify(digest)}
 MAX_FRAME_BYTES = ${meta.max_frame_bytes}
 MAX_TOOL_PAYLOAD_BYTES = ${meta.max_tool_payload_bytes}
-CLIENT_METHODS = ${JSON.stringify(meta.client_methods).replaceAll("null", "None")}
-SERVER_METHODS = ${JSON.stringify(meta.server_methods).replaceAll("null", "None")}
-SERVER_CAPABILITIES = ${JSON.stringify(meta.server_capabilities).replaceAll("null", "None")}
-EVENT_TYPES = ${JSON.stringify(meta.event_types).replaceAll("null", "None")}
+CLIENT_METHODS = ${pythonLiteral(Object.keys(meta.operations))}
+EVENT_TYPES = ${pythonLiteral(Object.keys(meta.events))}
+INTERACTION_METHODS = ${pythonLiteral(Object.keys(meta.interactions))}
+SERVER_CAPABILITIES = ${pythonLiteral(meta.capabilities)}
+OPERATION_CAPABILITIES = ${pythonLiteral(Object.fromEntries(operations.map(([name, entry]) => [name, entry.capability ?? null])))}
+INTERACTION_HANDLES = ${pythonLiteral(Object.fromEntries(Object.entries(meta.interactions).map(([name, entry]) => [name, entry.handle])))}
+METHOD = ${pythonLiteral(Object.fromEntries([...Object.keys(meta.operations), "event", ...Object.keys(meta.interactions)].map(value => [constant(value), value])))}
+CAPABILITY = ${pythonLiteral(Object.fromEntries(meta.capabilities.map(value => [constant(value), value])))}
+EVENT_TYPE = ${pythonLiteral(Object.fromEntries(Object.keys(meta.events).map(value => [constant(value), value])))}
 
-class StrictModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+${wireTypes}
 
-class ProtocolRange(StrictModel):
-    major: Literal[${meta.major}]
-    min_minor: int = Field(ge=0)
-    max_minor: int = Field(ge=0)
+${wireAliases}
 
-    @model_validator(mode="after")
-    def validate_range(self) -> "ProtocolRange":
-        if self.min_minor > self.max_minor:
-            raise ValueError("min_minor must be <= max_minor")
-        return self
+${aliases}
 
-class ClientInfo(StrictModel):
-    name: str = Field(min_length=1)
-    version: str = Field(min_length=1)
-
-class InitializeParams(StrictModel):
-    protocol: ProtocolRange
-    client: ClientInfo
-    capabilities: list[str]
-    cwd: str | None = None
-    config_path: str | None = None
-
-class RequestedSkill(StrictModel):
-    id: str = Field(min_length=1)
-    args: str = ""
-
-class ModelProfile(StrictModel):
-    id: str = Field(min_length=1)
-    model: str = Field(min_length=1)
-    provider_label: str = Field(min_length=1)
-    context_window_tokens: int = Field(ge=16384)
-    capabilities: list[str]
-    is_default: bool
-    available: bool
-    unavailable_reason: str | None = None
-    source: str = Field(min_length=1)
-
-class ThreadModelSelection(StrictModel):
-    primary_profile: str = Field(min_length=1)
-
-class RunPrimaryModelBinding(StrictModel):
-    profile: ModelProfile
-    source: str = Field(min_length=1)
-    runtime_profile_id: str = Field(min_length=1)
-
-class RunStartParams(StrictModel):
-    message: str = Field(min_length=1)
-    thread_id: str | None = None
-    run_id: str | None = None
-    requested_skill: RequestedSkill | None = None
-    model_profile: str | None = Field(default=None, min_length=1)
-    model_selection: ThreadModelSelection | None = None
-
-class RunCancelParams(StrictModel):
-    thread_id: str = Field(min_length=1)
-    run_id: str = Field(min_length=1)
-
-class ContextCompactParams(StrictModel):
-    thread_id: str = Field(min_length=1)
-
-class ConfigChange(StrictModel):
-    path: str = Field(min_length=1)
-    value: Any
-
-class ConfigDetailsParams(StrictModel):
-    pass
-
-class ConfigPreviewParams(StrictModel):
-    changes: list[ConfigChange] = Field(min_length=1)
-
-class ConfigCommitParams(StrictModel):
-    expected_revision: str = Field(min_length=1)
-    changes: list[ConfigChange] = Field(min_length=1)
-
-class ThreadSummary(StrictModel):
-    thread_id: str = Field(min_length=1)
-    created_at_ms: int = Field(ge=0)
-    updated_at_ms: int = Field(ge=0)
-    first_message: str
-    latest_message: str
-    message_count: int = Field(ge=0)
-
-class ThreadMessage(StrictModel):
-    kind: Literal["user", "assistant", "tool"]
-    content: str
-    tool_name: str | None = None
-
-class ThreadsListParams(StrictModel):
-    limit: int = Field(default=80, ge=1, le=200)
-
-class ThreadsOpenParams(StrictModel):
-    thread_id: str = Field(min_length=1)
-
-class ThreadModelBinding(StrictModel):
-    state: Literal["bound", "legacy", "unbound"]
-    roles: dict[str, ModelProfile]
-
-class ModelsListParams(StrictModel):
-    thread_id: str | None = None
-
-class McpStatusParams(StrictModel):
-    pass
-
-class McpAddParams(StrictModel):
-    name: str
-    transport: Literal["stdio", "http", "sse"]
-    command: Optional[str] = None
-    args: Optional[List[str]] = None
-    url: Optional[str] = None
-    env: Optional[Dict[str, str]] = None
-    headers: Optional[Dict[str, str]] = None
-
-
-class McpRemoveParams(StrictModel):
-    name: str
-
-class ModelsListResult(StrictModel):
-    profiles: list[ModelProfile]
-    thread_binding: ThreadModelBinding | None = None
-    thread_selection: ThreadModelSelection | None = None
-    last_run_binding: RunPrimaryModelBinding | None = None
-class EventEnvelope(StrictModel):
-    event_id: str = Field(min_length=1)
-    type: str = Field(min_length=1)
-    thread_id: str = Field(min_length=1)
-    run_id: str = Field(min_length=1)
-    sequence: int = Field(ge=1)
-    timestamp_ms: int = Field(ge=0)
-    source: dict[str, Any] | None = None
-    payload: dict[str, Any]
-    extensions: dict[str, Any] | None = None
-
-    @model_validator(mode="after")
-    def validate_known_payload(self) -> "EventEnvelope":
-        fields = {
-            "run.started": {"resumed", "skills_snapshot_id", "primary_model", "runtime_profile_id"}, "skill.loaded": {"skill_id", "source", "version", "snapshot_id"}, "content.delta": {"text"}, "thinking.delta": {"text"},
-            "tool.started": {"tool_call_id", "name"},
-            "tool.delta": {"tool_call_id", "arguments_delta", "output_delta", "truncated", "original_bytes"},
-            "tool.completed": {"tool_call_id", "result"},
-            "context.updated": {"action", "estimated_tokens", "input_cap_tokens", "context_window_tokens", "dynamic_tokens", "cache_status", "cached_tokens", "miss_reason", "artifact_ids"},
-            "interaction.resolved": {"request_id", "type"},
-            "run.completed": {"usage", "duration_ms", "finish_reason", "context"},
-            "run.cancelled": {"reason"}, "run.failed": {"error"},
-        }
-        allowed = fields.get(self.type)
-        if allowed is not None and set(self.payload) - allowed:
-            raise ValueError(f"unexpected payload fields for {self.type}")
-        if self.type == "skill.loaded" and (
-            not isinstance(self.payload.get("skill_id"), str)
-            or not isinstance(self.payload.get("source"), str)
-            or not isinstance(self.payload.get("snapshot_id"), str)
-        ):
-            raise ValueError("invalid skill.loaded payload")
-        return self
-
-class InteractionRequestEnvelope(StrictModel):
-    request_id: str = Field(min_length=1)
-    type: Literal["approval", "question"]
-    thread_id: str = Field(min_length=1)
-    run_id: str = Field(min_length=1)
-    sequence: int = Field(ge=1)
-    timeout_ms: int = Field(ge=1)
-    payload: dict[str, Any]
-
-    @model_validator(mode="after")
-    def validate_payload(self) -> "InteractionRequestEnvelope":
-        allowed = ({"interrupt_id", "description", "requests", "decisions"}
-                   if self.type == "approval" else {"interrupt_id", "questions"})
-        if set(self.payload) - allowed or "interrupt_id" not in self.payload:
-            raise ValueError(f"invalid {self.type} payload")
-        return self
-
-class ApprovalResponse(StrictModel):
-    type: Literal["approval"]
-    request_id: str
-    decision: Literal["approve_once", "approve_thread", "reject"]
-    feedback: str = ""
-
-class QuestionResponse(StrictModel):
-    type: Literal["question"]
-    request_id: str
-    answers: dict[str, list[str]]
+EventEnvelope = event_model()
+ApprovalResponse = schema_model("#/$defs/approvalResponse", name="ApprovalResponse")
+QuestionResponse = schema_model("#/$defs/questionResponse", name="QuestionResponse")
 `
+}
+
+function renderPythonWireTypes(root: Schema): string {
+  return Object.entries(root.$defs as Record<string, Schema>)
+    .map(([name, definition]) => {
+      const typeName = `${pascal(name)}Wire`
+      if (name === "jsonValue") {
+        return `${typeName}: TypeAlias = None | bool | int | float | str | list["${typeName}"] | dict[str, "${typeName}"]`
+      }
+      if (definition.$ref) return `${typeName}: TypeAlias = ${pythonTypeFromRef(definition.$ref)}`
+      if (definition.type !== "object") return `${typeName}: TypeAlias = ${renderPythonType(definition)}`
+      const properties = Object.entries(definition.properties ?? {})
+      if (properties.length === 0 && definition.additionalProperties && typeof definition.additionalProperties === "object") {
+        return `${typeName}: TypeAlias = dict[str, ${renderPythonType(definition.additionalProperties)}]`
+      }
+      const required = new Set<string>(definition.required ?? [])
+      const fields = properties.map(([field, child]) => {
+        const annotation = renderPythonType(child as Schema)
+        return `    ${field}: ${required.has(field) ? annotation : `NotRequired[${annotation}]`}`
+      })
+      return `class ${typeName}(TypedDict):\n${fields.length ? fields.join("\n") : "    pass"}`
+    })
+    .join("\n\n")
+}
+
+function renderPythonType(schema: Schema): string {
+  if (schema.$ref) return pythonTypeFromRef(schema.$ref)
+  if (schema.const !== undefined) return `Literal[${pythonScalar(schema.const)}]`
+  if (schema.enum) return `Literal[${schema.enum.map(pythonScalar).join(", ")}]`
+  if (schema.oneOf) return schema.oneOf.map((item: Schema) => renderPythonType(item)).join(" | ")
+  if (Array.isArray(schema.type)) {
+    return schema.type.map((type: string) => renderPythonType({ ...schema, type })).join(" | ")
+  }
+  switch (schema.type) {
+    case "null": return "None"
+    case "boolean": return "bool"
+    case "number": return "float"
+    case "integer": return "int"
+    case "string": return "str"
+    case "array": return `list[${renderPythonType(schema.items ?? {})}]`
+    case "object":
+      if (schema.additionalProperties && typeof schema.additionalProperties === "object") {
+        return `dict[str, ${renderPythonType(schema.additionalProperties)}]`
+      }
+      return "dict[str, Any]"
+    default: return "Any"
+  }
+}
+
+function pythonTypeFromRef(ref: string): string {
+  const name = ref.split("/").at(-1)
+  if (!name) throw new Error(`无效 Schema ref: ${ref}`)
+  return `${pascal(name)}Wire`
+}
+
+function pythonScalar(value: unknown): string {
+  if (value === null) return "None"
+  if (value === true) return "True"
+  if (value === false) return "False"
+  return JSON.stringify(value)
+}
+
+function renderType(schema: Schema): string {
+  if (schema.$ref) return typeFromRef(schema.$ref)
+  if (schema.const !== undefined) return JSON.stringify(schema.const)
+  if (schema.enum) return schema.enum.map((value: unknown) => JSON.stringify(value)).join(" | ")
+  if (schema.oneOf) return schema.oneOf.map((item: Schema) => `(${renderType(item)})`).join(" | ")
+  if (Array.isArray(schema.type)) return schema.type.map((type: string) => renderType({ ...schema, type })).join(" | ")
+  switch (schema.type) {
+    case "null": return "null"
+    case "boolean": return "boolean"
+    case "number":
+    case "integer": return "number"
+    case "string": return "string"
+    case "array": return `Array<${renderType(schema.items ?? {})}>`
+    case "object": {
+      const required = new Set<string>(schema.required ?? [])
+      const properties = Object.entries(schema.properties ?? {})
+        .map(([name, value]) => `${JSON.stringify(name)}${required.has(name) ? "" : "?"}: ${renderType(value as Schema)}`)
+      if (schema.additionalProperties && typeof schema.additionalProperties === "object") {
+        if (properties.length === 0) return `Record<string, ${renderType(schema.additionalProperties)}>`
+        properties.push(`[key: string]: ${renderType(schema.additionalProperties)} | unknown`)
+      }
+      return `{ ${properties.join("; ")} }`
+    }
+    default: return "unknown"
+  }
+}
+
+function typeFromRef(ref: string): string {
+  const name = ref.split("/").at(-1)
+  if (!name) throw new Error(`无效 Schema ref: ${ref}`)
+  return pascal(name)
+}
+
+function pascal(value: string): string {
+  return value.split(/[^a-zA-Z0-9]+/).filter(Boolean)
+    .map(part => part[0]!.toUpperCase() + part.slice(1))
+    .join("")
+}
+
+function constant(value: string): string {
+  return value.replace(/[^a-zA-Z0-9]+/g, "_").toUpperCase()
+}
+
+function pythonLiteral(value: unknown): string {
+  return JSON.stringify(value).replaceAll("null", "None").replaceAll("true", "True").replaceAll("false", "False")
 }

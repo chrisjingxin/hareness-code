@@ -1,14 +1,16 @@
-/** Node 侧双向 JSON-RPC Peer：管理 stdio 分帧、请求关联、服务端反向请求与连接背压。 */
+/** transport-neutral AgentClient：隐藏请求关联、校验、事件与 Interaction 生命周期。 */
 
-import { EventEmitter, once } from "node:events"
-import { StringDecoder } from "node:string_decoder"
-import type { Readable, Writable } from "node:stream"
 import {
-  MAX_FRAME_BYTES,
+  EventType,
   Method,
   assertEventEnvelope,
-  assertInteractionRequest,
   assertJsonRpcMessage,
+  isInteractionMethod,
+  validateInteractionParams,
+  validateInteractionResult,
+  validateOperationParams,
+  validateOperationResult,
+  validateProtocolErrorData,
   type EventEnvelope,
   type ContextCompactResult,
   type ConfigChange,
@@ -17,6 +19,7 @@ import {
   type ConfigPreviewResult,
   type InteractionRequestEnvelope,
   type InteractionResponse,
+  type InteractionMethod,
   type JsonRpcMessage,
   type JsonRpcResponse,
   type McpAddParams,
@@ -24,21 +27,55 @@ import {
   type McpRemoveResult,
   type McpStatusResult,
   type ModelsListResult,
+  type OperationMap,
+  type OperationName,
+  type InitializeParams,
+  type InitializeResult,
   type RunCancelResult,
   type RequestedSkill,
-  type RunStartResult,
   type ThreadModelSelection,
   type ThreadsListResult,
   type ThreadsOpenResult,
 } from "@za38/protocol"
+import { AsyncQueue, type RpcTransport } from "./transport"
+
+export type { RpcTransport } from "./transport"
 
 type PendingRequest = {
+  method: OperationName
   resolve: (value: unknown) => void
   reject: (error: Error) => void
   timeout: ReturnType<typeof setTimeout> | undefined
 }
 
 export type PeerRequestHandler = (params: InteractionRequestEnvelope) => Promise<InteractionResponse> | InteractionResponse
+export type InteractionHandler = PeerRequestHandler
+
+export type StartRunInput = {
+  message: string
+  threadId?: string
+  requestedSkill?: RequestedSkill
+  modelSelection?: ThreadModelSelection
+}
+
+export type RunCompletion =
+  | { outcome: "completed"; event: Extract<EventEnvelope, { type: typeof EventType.RUN_COMPLETED }> }
+  | { outcome: "cancelled"; event: Extract<EventEnvelope, { type: typeof EventType.RUN_CANCELLED }> }
+  | { outcome: "failed"; event: Extract<EventEnvelope, { type: typeof EventType.RUN_FAILED }> }
+
+export interface AgentRun {
+  readonly ref: { threadId: string; runId: string }
+  readonly accepted: Promise<void>
+  readonly events: AsyncIterable<EventEnvelope>
+  readonly completion: Promise<RunCompletion>
+  cancel(): Promise<boolean>
+}
+
+export interface ThreadWatch {
+  readonly snapshot: ThreadsOpenResult
+  readonly events: AsyncIterable<EventEnvelope>
+  close(): Promise<void>
+}
 
 /** 保留远端错误码和 data，调用方可据此区分协议、配置和 Agent 故障。 */
 export class JsonRpcRemoteError extends Error {
@@ -53,25 +90,37 @@ export class JsonRpcRemoteError extends Error {
 }
 
 /** 连接 Python Agent sidecar 的双向 JSON-RPC Peer。 */
-export class JsonRpcPeer extends EventEmitter {
+export class AgentClient {
   private nextId = 1
   private readonly pending = new Map<string, PendingRequest>()
-  private readonly decoder = new StringDecoder("utf8")
   private readonly inboundRequests = new Set<string>()
-  private buffer = ""
+  private readonly listeners = new Map<string, Set<(...args: any[]) => void>>()
   private closed = false
   private requestHandler: PeerRequestHandler | undefined
+  private initializedInfo: InitializeResult | undefined
 
-  constructor(
-    private readonly stdin: Writable,
-    private readonly stdout: Readable,
-    private readonly maxFrameBytes = MAX_FRAME_BYTES,
-  ) {
-    super()
-    this.stdout.on("data", (chunk: Buffer | Uint8Array | string) => this.onData(chunk))
-    this.stdout.on("end", () => this.close(new Error("Agent stdout closed")))
-    this.stdout.on("error", error => this.close(error))
-    this.stdin.on("error", error => this.close(error))
+  constructor(private readonly transport: RpcTransport) {
+    void this.consumeMessages()
+  }
+
+  /** 轻量事件订阅，避免把 Node EventEmitter 带进浏览器 adapter。 */
+  on(event: string, listener: (...args: any[]) => void): this {
+    const listeners = this.listeners.get(event) ?? new Set()
+    listeners.add(listener)
+    this.listeners.set(event, listeners)
+    return this
+  }
+
+  off(event: string, listener: (...args: any[]) => void): this {
+    this.listeners.get(event)?.delete(listener)
+    return this
+  }
+
+  emit(event: string, ...args: any[]): boolean {
+    const listeners = this.listeners.get(event)
+    if (!listeners?.size) return false
+    for (const listener of [...listeners]) listener(...args)
+    return true
   }
 
   /** 注册 Agent 反向发起的审批或问答处理器；返回函数用于组件卸载时清理。 */
@@ -82,14 +131,126 @@ export class JsonRpcPeer extends EventEmitter {
     }
   }
 
+  /** 返回握手后的稳定 Host/Connection 摘要。 */
+  get info(): InitializeResult {
+    if (!this.initializedInfo) throw new Error("AgentClient has not been initialized")
+    return this.initializedInfo
+  }
+
+  /** 以 v3 握手初始化 Connection。 */
+  async initialize(params: InitializeParams): Promise<InitializeResult> {
+    const result = await this.request(Method.INITIALIZE, params)
+    this.initializedInfo = result
+    return result
+  }
+
+  /** `handleInteractions` 是表现层使用的语义名称。 */
+  handleInteractions(handler: InteractionHandler): () => void {
+    return this.setRequestHandler(handler)
+  }
+
+  /** 在发送请求前建立事件路由，返回拥有取消和唯一终态的 Run handle。 */
+  startRun(input: StartRunInput): AgentRun {
+    const threadId = input.threadId ?? crypto.randomUUID()
+    const runId = crypto.randomUUID()
+    const events = new AsyncQueue<EventEnvelope>()
+    let resolveCompletion!: (value: RunCompletion) => void
+    let rejectCompletion!: (error: Error) => void
+    const completion = new Promise<RunCompletion>((resolve, reject) => {
+      resolveCompletion = resolve
+      rejectCompletion = reject
+    })
+    const listener = (event: EventEnvelope) => {
+      if (event.thread_id !== threadId || event.run_id !== runId) return
+      events.push(event)
+      if (event.type === EventType.RUN_COMPLETED) finish({ outcome: "completed", event })
+      if (event.type === EventType.RUN_CANCELLED) finish({ outcome: "cancelled", event })
+      if (event.type === EventType.RUN_FAILED) finish({ outcome: "failed", event })
+    }
+    const finish = (value: RunCompletion) => {
+      this.off("event", listener)
+      this.off("close", closeListener)
+      events.end()
+      resolveCompletion(value)
+    }
+    const fail = (error: Error) => {
+      this.off("event", listener)
+      this.off("close", closeListener)
+      events.fail(error)
+      rejectCompletion(error)
+    }
+    const closeListener = (error: Error) => fail(error)
+    this.on("event", listener)
+    this.on("close", closeListener)
+    const accepted = this.request(Method.RUN_START, {
+      message: input.message,
+      thread_id: threadId,
+      run_id: runId,
+      requested_skill: input.requestedSkill,
+      model_selection: input.modelSelection,
+    }).then(result => {
+      if (result.thread_id !== threadId || result.run_id !== runId || !result.accepted) {
+        throw new Error("run.start returned a mismatched identity")
+      }
+    }).catch(error => {
+      fail(error instanceof Error ? error : new Error(String(error)))
+      throw error
+    })
+    return {
+      ref: { threadId, runId },
+      accepted,
+      events,
+      completion,
+      cancel: async () => (await this.cancel(threadId, runId)).cancelled,
+    }
+  }
+
+  /** 原子读取空闲 Thread 并订阅之后的事件。 */
+  async watchThread(threadId: string): Promise<ThreadWatch> {
+    const events = new AsyncQueue<EventEnvelope>()
+    const listener = (event: EventEnvelope) => {
+      if (event.thread_id === threadId) events.push(event)
+    }
+    const closeListener = (error: Error) => events.fail(error)
+    this.on("event", listener)
+    this.on("close", closeListener)
+    let snapshot: ThreadsOpenResult
+    try {
+      snapshot = await this.request(Method.THREADS_WATCH, { thread_id: threadId })
+    } catch (error) {
+      this.off("event", listener)
+      this.off("close", closeListener)
+      events.fail(error instanceof Error ? error : new Error(String(error)))
+      throw error
+    }
+    let closed = false
+    return {
+      snapshot,
+      events,
+      close: async () => {
+        if (closed) return
+        closed = true
+        this.off("event", listener)
+        this.off("close", closeListener)
+        events.end()
+        await this.request(Method.THREADS_UNWATCH, { thread_id: threadId })
+      },
+    }
+  }
+
   /** 运行取消或服务端超时后停止回写已经失效的交互响应。 */
   abandonInteraction(requestId: string): void {
     this.inboundRequests.delete(requestId)
   }
 
   /** 发送带超时保护的请求，并返回对应 JSON-RPC result。 */
-  call(method: string, params: Record<string, unknown> = {}, timeoutMs = 30_000): Promise<unknown> {
+  request<M extends OperationName>(
+    method: M,
+    params: OperationMap[M]["params"],
+    timeoutMs = 30_000,
+  ): Promise<OperationMap[M]["result"]> {
     if (this.closed) return Promise.reject(new Error("Agent connection is closed"))
+    validateOperationParams(method, params)
     const id = `req-${this.nextId++}`
     return new Promise((resolve, reject) => {
       const timeout = timeoutMs > 0
@@ -98,135 +259,99 @@ export class JsonRpcPeer extends EventEmitter {
             reject(new Error(`Timed out waiting for ${method}`))
           }, timeoutMs)
         : undefined
-      this.pending.set(id, { resolve, reject, timeout })
+      this.pending.set(id, { method, resolve: value => resolve(value as OperationMap[M]["result"]), reject, timeout })
       void this.send({ jsonrpc: "2.0", method, params, id }).catch(error => {
         this.pending.delete(id)
         if (timeout) clearTimeout(timeout)
         reject(error)
       })
-    })
-  }
-
-  /** 启动一次 Agent 运行，保留可选线程和运行标识。 */
-  startRun(
-    message: string,
-    threadId?: string,
-    runId?: string,
-    requestedSkill?: RequestedSkill,
-    modelProfile?: string,
-    modelSelection?: ThreadModelSelection,
-  ): Promise<RunStartResult> {
-    return this.call(Method.RUN_START, {
-      message,
-      thread_id: threadId,
-      run_id: runId,
-      requested_skill: requestedSkill,
-      model_profile: modelProfile,
-      model_selection: modelSelection,
-    }) as Promise<RunStartResult>
-  }
-
-  /** 兼容现有调用点的语义别名；wire 上已使用 run.start。 */
-  query(
-    message: string,
-    threadId?: string,
-    runId?: string,
-    requestedSkill?: RequestedSkill,
-    modelProfile?: string,
-    modelSelection?: ThreadModelSelection,
-  ): Promise<RunStartResult> {
-    return this.startRun(message, threadId, runId, requestedSkill, modelProfile, modelSelection)
+    }) as Promise<OperationMap[M]["result"]>
   }
 
   /** 请求取消指定运行。 */
   cancel(threadId: string, runId: string): Promise<RunCancelResult> {
-    return this.call(Method.RUN_CANCEL, { thread_id: threadId, run_id: runId }) as Promise<RunCancelResult>
+    return this.request(Method.RUN_CANCEL, { thread_id: threadId, run_id: runId })
   }
 
   /** 在当前 thread 空闲时请求 sidecar 强制生成一次结构化上下文摘要。 */
   compactContext(threadId: string): Promise<ContextCompactResult> {
-    return this.call(Method.CONTEXT_COMPACT, { thread_id: threadId }) as Promise<ContextCompactResult>
+    return this.request(Method.CONTEXT_COMPACT, { thread_id: threadId })
   }
 
   /** 读取受控配置字段、来源锁和可修改范围；不返回 TOML 原文或秘密。 */
   configDetails(): Promise<ConfigDetailsResult> {
-    return this.call(Method.CONFIG_DETAILS, {}) as Promise<ConfigDetailsResult>
+    return this.request(Method.CONFIG_DETAILS, {})
   }
 
   /** 预览白名单配置变更，并返回提交所需的 CAS revision。 */
   previewConfig(changes: ConfigChange[]): Promise<ConfigPreviewResult> {
-    return this.call(Method.CONFIG_PREVIEW, { changes }) as Promise<ConfigPreviewResult>
+    return this.request(Method.CONFIG_PREVIEW, { changes })
   }
 
   /** 使用预览 revision 原子提交白名单配置变更。 */
   commitConfig(expectedRevision: string, changes: ConfigChange[]): Promise<ConfigCommitResult> {
-    return this.call(Method.CONFIG_COMMIT, { expected_revision: expectedRevision, changes }) as Promise<ConfigCommitResult>
+    return this.request(Method.CONFIG_COMMIT, { expected_revision: expectedRevision, changes })
   }
 
   /** 读取当前 project 的可恢复 thread 摘要；thread_id 只在 TUI 内部用于后续打开。 */
   listThreads(limit = 80): Promise<ThreadsListResult> {
-    return this.call(Method.THREADS_LIST, { limit }) as Promise<ThreadsListResult>
+    return this.request(Method.THREADS_LIST, { limit })
   }
 
   /** 打开当前 project 的既有 thread，并返回可以重新构造时间线的消息。 */
   openThread(threadId: string): Promise<ThreadsOpenResult> {
-    return this.call(Method.THREADS_OPEN, { thread_id: threadId }) as Promise<ThreadsOpenResult>
+    return this.request(Method.THREADS_OPEN, { thread_id: threadId })
   }
 
   /** 查询所有已配置 MCP 服务器的运行时连接状态和工具列表。 */
   mcpStatus(): Promise<McpStatusResult> {
-    return this.call(Method.MCP_STATUS, {}) as Promise<McpStatusResult>
+    return this.request(Method.MCP_STATUS, {})
   }
 
   /** 添加 MCP 服务器到用户配置并尝试热连接。 */
   mcpAdd(params: McpAddParams): Promise<McpAddResult> {
-    return this.call(Method.MCP_ADD, { ...params }) as Promise<McpAddResult>
+    return this.request(Method.MCP_ADD, { ...params })
   }
 
   /** 从用户配置中删除 MCP 服务器。 */
   mcpRemove(name: string): Promise<McpRemoveResult> {
-    return this.call(Method.MCP_REMOVE, { name }) as Promise<McpRemoveResult>
+    return this.request(Method.MCP_REMOVE, { name })
   }
 
   /** 读取 `/model` Picker 所需的脱敏 Profile 目录与可选 Thread 绑定。 */
   listModels(threadId?: string): Promise<ModelsListResult> {
-    return this.call(Method.MODELS_LIST, { thread_id: threadId }) as Promise<ModelsListResult>
-  }
-  /** 请求 sidecar 优雅关闭，并给关闭响应设置较短超时。 */
-  async shutdown(): Promise<void> {
-    if (!this.closed) await this.call(Method.SHUTDOWN, {}, 2_000)
+    return this.request(Method.MODELS_LIST, { thread_id: threadId })
   }
 
   /** 主动释放连接并拒绝所有尚未完成的请求。 */
   destroy(): void {
-    this.close(new Error("Agent connection closed"))
-    this.removeAllListeners()
+    this.closeTransport(new Error("Agent connection closed"))
+    void this.transport.close()
   }
 
-  /** 使用 StringDecoder 保留跨 chunk UTF-8 字符，并限制无换行缓冲区大小。 */
-  private onData(chunk: Buffer | Uint8Array | string): void {
-    this.buffer += typeof chunk === "string" ? chunk : this.decoder.write(Buffer.from(chunk))
-    if (Buffer.byteLength(this.buffer, "utf8") > this.maxFrameBytes && !this.buffer.includes("\n")) {
-      const error = new Error(`JSON-RPC frame exceeds ${this.maxFrameBytes} bytes`)
-      this.emit("protocolError", error)
-      this.close(error)
-      return
-    }
-    const lines = this.buffer.split("\n")
-    this.buffer = lines.pop() ?? ""
-    for (const line of lines) {
-      if (!line.trim()) continue
-      if (Buffer.byteLength(line, "utf8") > this.maxFrameBytes) {
-        this.emit("protocolError", new Error(`JSON-RPC frame exceeds ${this.maxFrameBytes} bytes`))
-        continue
+  /** 关闭当前 Connection；Host 生命周期由 launcher 管理。 */
+  async close(): Promise<void> {
+    this.closeTransport(new Error("Agent connection closed"))
+    await this.transport.close()
+  }
+
+  /** 消费 transport 消息，并把 framing 之外的错误统一截断在协议 seam。 */
+  private async consumeMessages(): Promise<void> {
+    try {
+      for await (const message of this.transport.messages) {
+        if (this.closed) return
+        try {
+          assertJsonRpcMessage(message)
+          this.handleMessage(message)
+        } catch (error) {
+          this.emit("protocolError", new Error(`Invalid JSON-RPC frame: ${errorMessage(error)}`))
+        }
       }
-      try {
-        const message: unknown = JSON.parse(line)
-        assertJsonRpcMessage(message)
-        this.handleMessage(message)
-      } catch (error) {
-        this.emit("protocolError", new Error(`Invalid JSON-RPC frame: ${errorMessage(error)}`))
-      }
+      this.closeTransport(new Error("Agent transport closed"))
+    } catch (error) {
+      const normalized = error instanceof Error ? error : new Error(String(error))
+      this.emit("protocolError", normalized)
+      this.closeTransport(normalized)
     }
   }
 
@@ -256,26 +381,45 @@ export class JsonRpcPeer extends EventEmitter {
     this.pending.delete(message.id)
     if (pending.timeout) clearTimeout(pending.timeout)
     const response = message as JsonRpcResponse
-    if (response.error) pending.reject(new JsonRpcRemoteError(response.error.code, response.error.message, response.error.data))
-    else pending.resolve(response.result)
+    if (response.error) {
+      if (response.error.code <= -32000 && response.error.code >= -32099) {
+        validateProtocolErrorData(response.error.data)
+      }
+      pending.reject(new JsonRpcRemoteError(response.error.code, response.error.message, response.error.data))
+    }
+    else {
+      try {
+        pending.resolve(validateOperationResult(pending.method, response.result))
+      } catch (error) {
+        pending.reject(error instanceof Error ? error : new Error(String(error)))
+      }
+    }
   }
 
   /** 处理 Agent 发起的 request；无处理器或非法结果都返回标准错误响应。 */
   private async handleInboundRequest(method: string, id: string, params: Record<string, unknown>): Promise<void> {
-    if (method !== Method.REQUEST) {
+    if (!isInteractionMethod(method)) {
       await this.sendError(id, -32601, `Unsupported server request: ${method}`)
       return
     }
     this.inboundRequests.add(id)
     try {
-      assertInteractionRequest(params)
-      if (params.request_id !== id) throw new Error("JSON-RPC id 与 request_id 不一致")
+      const validated = validateInteractionParams(method, params)
+      const request = {
+        ...validated,
+        request_id: id,
+        type: method === Method.INTERACTION_APPROVAL ? "approval" as const : "question" as const,
+      } as InteractionRequestEnvelope
       if (!this.requestHandler) throw new Error("Client has no interaction request handler")
-      const result = await this.requestHandler(params)
+      const result = await this.requestHandler(request)
       if (!this.inboundRequests.has(id)) return
-      if (result.request_id !== id || result.type !== params.type) throw new Error("Interaction response does not match request")
+      if (result.request_id !== id || result.type !== request.type) throw new Error("Interaction response does not match request")
+      const wireResult = result.type === "approval"
+        ? { decision: result.decision, feedback: result.feedback }
+        : { answers: result.answers }
+      validateInteractionResult(method as InteractionMethod, wireResult)
       this.inboundRequests.delete(id)
-      await this.send({ jsonrpc: "2.0", id, result })
+      await this.send({ jsonrpc: "2.0", id, result: wireResult })
     } catch (error) {
       if (!this.inboundRequests.has(id)) return
       this.inboundRequests.delete(id)
@@ -283,12 +427,10 @@ export class JsonRpcPeer extends EventEmitter {
     }
   }
 
-  /** 串行交给 Node Writable 并在高水位触发时等待 drain。 */
-  private async send(message: Record<string, unknown>): Promise<void> {
+  /** 通过当前 adapter 发送已关联的 JSON-RPC 消息。 */
+  private async send(message: JsonRpcMessage): Promise<void> {
     if (this.closed) throw new Error("Agent connection is closed")
-    const line = JSON.stringify(message) + "\n"
-    if (Buffer.byteLength(line, "utf8") > this.maxFrameBytes) throw new Error(`JSON-RPC frame exceeds ${this.maxFrameBytes} bytes`)
-    if (!this.stdin.write(line)) await once(this.stdin, "drain")
+    await this.transport.send(message)
   }
 
   private async sendError(id: string, code: number, message: string): Promise<void> {
@@ -296,7 +438,7 @@ export class JsonRpcPeer extends EventEmitter {
   }
 
   /** 只执行一次关闭流程，清理定时器并结束全部等待请求。 */
-  private close(error: Error): void {
+  private closeTransport(error: Error): void {
     if (this.closed) return
     this.closed = true
     this.inboundRequests.clear()
@@ -306,11 +448,9 @@ export class JsonRpcPeer extends EventEmitter {
       pending.reject(error)
     }
     this.emit("close", error)
+    this.listeners.clear()
   }
 }
-
-/** 兼容旧导入名称；实现已经是 v2 双向 Peer。 */
-export { JsonRpcPeer as IpcClient }
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)

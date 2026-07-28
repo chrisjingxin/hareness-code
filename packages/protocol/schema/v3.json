@@ -1,0 +1,647 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness.internal/protocol/v3.json",
+  "title": "Harness Agent Protocol v3",
+  "x-harness": {
+    "major": 3,
+    "minor": 0,
+    "max_frame_bytes": 8388608,
+    "max_tool_payload_bytes": 1048576,
+    "operations": {
+      "initialize": { "params": "#/$defs/initializeParams", "result": "#/$defs/initializeResult" },
+      "run.start": { "params": "#/$defs/runStartParams", "result": "#/$defs/runStartResult" },
+      "run.cancel": { "params": "#/$defs/runCancelParams", "result": "#/$defs/runCancelResult", "capability": "run.cancel" },
+      "context.compact": { "params": "#/$defs/contextCompactParams", "result": "#/$defs/contextCompactResult", "capability": "context.manage" },
+      "config.show": { "params": "#/$defs/emptyParams", "result": "#/$defs/jsonObject", "capability": "config.read" },
+      "config.path": { "params": "#/$defs/emptyParams", "result": "#/$defs/configPathResult", "capability": "config.read" },
+      "config.details": { "params": "#/$defs/emptyParams", "result": "#/$defs/configDetailsResult", "capability": "config.write" },
+      "config.preview": { "params": "#/$defs/configPreviewParams", "result": "#/$defs/configPreviewResult", "capability": "config.write" },
+      "config.commit": { "params": "#/$defs/configCommitParams", "result": "#/$defs/configCommitResult", "capability": "config.write" },
+      "threads.list": { "params": "#/$defs/threadsListParams", "result": "#/$defs/threadsListResult", "capability": "threads.read" },
+      "threads.open": { "params": "#/$defs/threadsOpenParams", "result": "#/$defs/threadsOpenResult", "capability": "threads.read" },
+      "threads.watch": { "params": "#/$defs/threadsOpenParams", "result": "#/$defs/threadsOpenResult", "capability": "threads.read" },
+      "threads.unwatch": { "params": "#/$defs/threadsOpenParams", "result": "#/$defs/threadsUnwatchResult", "capability": "threads.read" },
+      "models.list": { "params": "#/$defs/modelsListParams", "result": "#/$defs/modelsListResult", "capability": "models.read" },
+      "skills.list": { "params": "#/$defs/skillsListParams", "result": "#/$defs/skillsListResult", "capability": "skills.read" },
+      "skills.inspect": { "params": "#/$defs/skillsInspectParams", "result": "#/$defs/jsonObject", "capability": "skills.read" },
+      "skills.set_enabled": { "params": "#/$defs/skillsSetEnabledParams", "result": "#/$defs/jsonObject", "capability": "skills.manage" },
+      "skills.install": { "params": "#/$defs/skillsInstallParams", "result": "#/$defs/jsonObject", "capability": "skills.manage" },
+      "skills.update": { "params": "#/$defs/skillsInstallParams", "result": "#/$defs/jsonObject", "capability": "skills.manage" },
+      "skills.remove": { "params": "#/$defs/skillsInspectParams", "result": "#/$defs/jsonObject", "capability": "skills.manage" },
+      "skills.market.list": { "params": "#/$defs/skillsMarketListParams", "result": "#/$defs/jsonObjectArray", "capability": "skills.read" },
+      "mcp.status": { "params": "#/$defs/emptyParams", "result": "#/$defs/mcpStatusResult", "capability": "mcp.read" },
+      "mcp.add": { "params": "#/$defs/mcpAddParams", "result": "#/$defs/mcpAddResult", "capability": "mcp.manage" },
+      "mcp.remove": { "params": "#/$defs/mcpRemoveParams", "result": "#/$defs/mcpRemoveResult", "capability": "mcp.manage" },
+      "host.attachment.create": { "params": "#/$defs/hostAttachmentCreateParams", "result": "#/$defs/hostAttachmentCreateResult", "capability": "host.attach" }
+    },
+    "events": {
+      "run.started": { "payload": "#/$defs/runStartedPayload" },
+      "skill.loaded": { "payload": "#/$defs/skillLoadedPayload" },
+      "content.delta": { "payload": "#/$defs/contentDeltaPayload" },
+      "tool.started": { "payload": "#/$defs/toolStartedPayload" },
+      "tool.delta": { "payload": "#/$defs/toolDeltaPayload" },
+      "tool.completed": { "payload": "#/$defs/toolCompletedPayload" },
+      "context.updated": { "payload": "#/$defs/contextPayload" },
+      "interaction.resolved": { "payload": "#/$defs/interactionResolvedPayload" },
+      "run.completed": { "payload": "#/$defs/runCompletedPayload" },
+      "run.cancelled": { "payload": "#/$defs/runCancelledPayload" },
+      "run.failed": { "payload": "#/$defs/runFailedPayload" }
+    },
+    "interactions": {
+      "interaction.approval": { "params": "#/$defs/approvalRequest", "result": "#/$defs/approvalResponse", "handle": "approval" },
+      "interaction.question": { "params": "#/$defs/questionRequest", "result": "#/$defs/questionResponse", "handle": "question" }
+    },
+    "capabilities": [
+      "run.cancel", "run.multithread", "config.read", "config.write", "threads.read",
+      "context.manage", "skills.read", "skills.manage", "mcp.read", "mcp.manage",
+      "models.read", "models.select", "host.attach"
+    ]
+  },
+  "$defs": {
+    "jsonValue": {
+      "oneOf": [
+        { "type": "null" }, { "type": "boolean" }, { "type": "number" }, { "type": "string" },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
+      ]
+    },
+    "jsonObject": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } },
+    "jsonObjectArray": { "type": "array", "items": { "$ref": "#/$defs/jsonObject" } },
+    "emptyParams": { "type": "object", "additionalProperties": false },
+    "protocolRange": {
+      "type": "object",
+      "required": ["major", "min_minor", "max_minor"],
+      "properties": {
+        "major": { "const": 3 },
+        "min_minor": { "type": "integer", "minimum": 0 },
+        "max_minor": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "clientInfo": {
+      "type": "object",
+      "required": ["name", "version", "kind"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "clientCapabilities": {
+      "type": "object",
+      "required": ["requests", "handles"],
+      "properties": {
+        "requests": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "handles": { "type": "array", "items": { "enum": ["approval", "question"] }, "uniqueItems": true }
+      },
+      "additionalProperties": false
+    },
+    "initializeParams": {
+      "type": "object",
+      "required": ["protocol", "client", "capabilities"],
+      "properties": {
+        "protocol": { "$ref": "#/$defs/protocolRange" },
+        "client": { "$ref": "#/$defs/clientInfo" },
+        "capabilities": { "$ref": "#/$defs/clientCapabilities" }
+      },
+      "additionalProperties": false
+    },
+    "initializeResult": {
+      "type": "object",
+      "required": ["protocol", "server", "connection", "capabilities", "agent_commands", "skills_snapshot", "skill_diagnostics", "limits", "config_summary", "startup_error"],
+      "properties": {
+        "protocol": {
+          "type": "object", "required": ["major", "minor"],
+          "properties": { "major": { "const": 3 }, "minor": { "type": "integer", "minimum": 0 } },
+          "additionalProperties": false
+        },
+        "server": {
+          "type": "object", "required": ["name", "version"],
+          "properties": { "name": { "type": "string" }, "version": { "type": "string" } },
+          "additionalProperties": false
+        },
+        "connection": {
+          "type": "object", "required": ["id", "role", "project"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1 },
+            "role": { "enum": ["owner", "attached"] },
+            "project": {
+              "type": "object", "required": ["id", "label"],
+              "properties": { "id": { "type": "string" }, "label": { "type": "string" } },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "capabilities": {
+          "type": "object", "required": ["available", "enabled", "handles"],
+          "properties": {
+            "available": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+            "enabled": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+            "handles": { "type": "array", "items": { "enum": ["approval", "question"] }, "uniqueItems": true }
+          },
+          "additionalProperties": false
+        },
+        "agent_commands": { "type": "array", "items": { "$ref": "#/$defs/jsonObject" } },
+        "skills_snapshot": {
+          "type": "object", "required": ["id", "count"],
+          "properties": { "id": { "type": "string" }, "count": { "type": "integer", "minimum": 0 } },
+          "additionalProperties": false
+        },
+        "skill_diagnostics": { "type": "array", "items": { "type": "string" } },
+        "limits": {
+          "type": "object", "required": ["max_frame_bytes", "max_tool_payload_bytes"],
+          "properties": {
+            "max_frame_bytes": { "type": "integer", "minimum": 1 },
+            "max_tool_payload_bytes": { "type": "integer", "minimum": 1 }
+          },
+          "additionalProperties": false
+        },
+        "config_summary": { "oneOf": [{ "$ref": "#/$defs/jsonObject" }, { "type": "null" }] },
+        "startup_error": {
+          "oneOf": [
+            {
+              "type": "object", "required": ["code", "message"],
+              "properties": { "code": { "type": "string" }, "message": { "type": "string" } },
+              "additionalProperties": false
+            },
+            { "type": "null" }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "requestedSkill": {
+      "type": "object", "required": ["id"],
+      "properties": { "id": { "type": "string", "minLength": 1 }, "args": { "type": "string", "default": "" } },
+      "additionalProperties": false
+    },
+    "threadModelSelection": {
+      "type": "object", "required": ["primary_profile"],
+      "properties": { "primary_profile": { "type": "string", "minLength": 1 } },
+      "additionalProperties": false
+    },
+    "modelProfile": {
+      "type": "object",
+      "required": ["id", "model", "provider_label", "context_window_tokens", "capabilities", "is_default", "available", "source"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "model": { "type": "string", "minLength": 1 },
+        "provider_label": { "type": "string", "minLength": 1 },
+        "context_window_tokens": { "type": "integer", "minimum": 1 },
+        "capabilities": { "type": "array", "items": { "type": "string" } },
+        "is_default": { "type": "boolean" },
+        "available": { "type": "boolean" },
+        "unavailable_reason": { "type": ["string", "null"] },
+        "source": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "runPrimaryModelBinding": {
+      "type": "object", "required": ["profile", "source", "runtime_profile_id"],
+      "properties": {
+        "profile": { "$ref": "#/$defs/modelProfile" },
+        "source": { "type": "string" },
+        "runtime_profile_id": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "runStartParams": {
+      "type": "object",
+      "required": ["message", "thread_id", "run_id"],
+      "properties": {
+        "message": { "type": "string", "minLength": 1 },
+        "thread_id": { "type": "string", "minLength": 1 },
+        "run_id": { "type": "string", "minLength": 1 },
+        "requested_skill": { "$ref": "#/$defs/requestedSkill" },
+        "model_selection": { "$ref": "#/$defs/threadModelSelection" }
+      },
+      "additionalProperties": false
+    },
+    "runStartResult": {
+      "type": "object", "required": ["thread_id", "run_id", "accepted"],
+      "properties": {
+        "thread_id": { "type": "string" }, "run_id": { "type": "string" }, "accepted": { "const": true }
+      },
+      "additionalProperties": false
+    },
+    "runCancelParams": {
+      "type": "object", "required": ["thread_id", "run_id"],
+      "properties": { "thread_id": { "type": "string", "minLength": 1 }, "run_id": { "type": "string", "minLength": 1 } },
+      "additionalProperties": false
+    },
+    "runCancelResult": {
+      "type": "object", "required": ["cancelled", "run_id"],
+      "properties": { "cancelled": { "type": "boolean" }, "run_id": { "type": "string" } },
+      "additionalProperties": false
+    },
+    "contextCompactParams": {
+      "type": "object", "required": ["thread_id"],
+      "properties": { "thread_id": { "type": "string", "minLength": 1 } },
+      "additionalProperties": false
+    },
+    "contextCompactResult": {
+      "type": "object", "required": ["compacted", "context"],
+      "properties": { "compacted": { "type": "boolean" }, "context": { "$ref": "#/$defs/jsonObject" } },
+      "additionalProperties": false
+    },
+    "configChange": {
+      "type": "object", "required": ["path", "value"],
+      "properties": { "path": { "type": "string", "minLength": 1 }, "value": { "$ref": "#/$defs/jsonValue" } },
+      "additionalProperties": false
+    },
+    "configPreviewParams": {
+      "type": "object", "required": ["changes"],
+      "properties": { "changes": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/configChange" } } },
+      "additionalProperties": false
+    },
+    "configCommitParams": {
+      "type": "object", "required": ["expected_revision", "changes"],
+      "properties": {
+        "expected_revision": { "type": "string", "minLength": 1 },
+        "changes": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/configChange" } }
+      },
+      "additionalProperties": false
+    },
+    "configFieldDetail": {
+      "type": "object", "required": ["path", "value", "source", "editable", "unavailable_reason", "applies_to"],
+      "properties": {
+        "path": { "type": "string" }, "value": { "$ref": "#/$defs/jsonValue" }, "source": { "type": "string" },
+        "editable": { "type": "boolean" }, "unavailable_reason": { "type": ["string", "null"] },
+        "applies_to": { "enum": ["new-thread", "restart"] }
+      },
+      "additionalProperties": false
+    },
+    "configChangeResult": {
+      "type": "object", "required": ["path", "before", "after"],
+      "properties": {
+        "path": { "type": "string" }, "before": { "$ref": "#/$defs/jsonValue" }, "after": { "$ref": "#/$defs/jsonValue" }
+      },
+      "additionalProperties": false
+    },
+    "configDetailsResult": {
+      "type": "object", "required": ["revision", "fields", "immutable_fields"],
+      "properties": {
+        "revision": { "type": "string" },
+        "fields": { "type": "array", "items": { "$ref": "#/$defs/configFieldDetail" } },
+        "immutable_fields": {
+          "type": "array", "items": {
+            "type": "object", "required": ["path", "reason"],
+            "properties": { "path": { "type": "string" }, "reason": { "type": "string" } },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "configPreviewResult": {
+      "type": "object", "required": ["revision", "changes", "applies_to"],
+      "properties": {
+        "revision": { "type": "string" },
+        "changes": { "type": "array", "items": { "$ref": "#/$defs/configChangeResult" } },
+        "applies_to": { "type": "array", "items": { "enum": ["new-thread", "restart"] } }
+      },
+      "additionalProperties": false
+    },
+    "configCommitResult": { "$ref": "#/$defs/configPreviewResult" },
+    "configPathResult": {
+      "type": "object", "required": ["workspace", "paths", "explicit_path"],
+      "properties": {
+        "workspace": { "type": "string" }, "paths": { "type": "array", "items": { "type": "string" } },
+        "explicit_path": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "threadSummary": {
+      "type": "object", "required": ["thread_id", "created_at_ms", "updated_at_ms", "first_message", "latest_message", "message_count"],
+      "properties": {
+        "thread_id": { "type": "string" }, "created_at_ms": { "type": "integer", "minimum": 0 },
+        "updated_at_ms": { "type": "integer", "minimum": 0 }, "first_message": { "type": "string" },
+        "latest_message": { "type": "string" }, "message_count": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "threadMessage": {
+      "type": "object", "required": ["kind", "content"],
+      "properties": {
+        "kind": { "enum": ["user", "assistant", "tool"] }, "content": { "type": "string" }, "tool_name": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "threadsListParams": {
+      "type": "object",
+      "properties": { "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 80 } },
+      "additionalProperties": false
+    },
+    "threadsListResult": {
+      "type": "object", "required": ["threads"],
+      "properties": { "threads": { "type": "array", "items": { "$ref": "#/$defs/threadSummary" } } },
+      "additionalProperties": false
+    },
+    "threadsOpenParams": {
+      "type": "object", "required": ["thread_id"],
+      "properties": { "thread_id": { "type": "string", "minLength": 1 } },
+      "additionalProperties": false
+    },
+    "threadsOpenResult": {
+      "type": "object", "required": ["thread", "messages"],
+      "properties": {
+        "thread": { "$ref": "#/$defs/threadSummary" },
+        "messages": { "type": "array", "items": { "$ref": "#/$defs/threadMessage" } }
+      },
+      "additionalProperties": false
+    },
+    "threadsUnwatchResult": {
+      "type": "object", "required": ["removed"],
+      "properties": { "removed": { "type": "boolean" } },
+      "additionalProperties": false
+    },
+    "threadModelBinding": {
+      "type": "object", "required": ["state", "roles"],
+      "properties": {
+        "state": { "enum": ["bound", "legacy", "unbound"] },
+        "roles": { "type": "object", "additionalProperties": { "$ref": "#/$defs/modelProfile" } }
+      },
+      "additionalProperties": false
+    },
+    "modelsListParams": {
+      "type": "object", "properties": { "thread_id": { "type": "string", "minLength": 1 } }, "additionalProperties": false
+    },
+    "modelsListResult": {
+      "type": "object", "required": ["profiles"],
+      "properties": {
+        "profiles": { "type": "array", "items": { "$ref": "#/$defs/modelProfile" } },
+        "thread_binding": { "$ref": "#/$defs/threadModelBinding" },
+        "thread_selection": { "$ref": "#/$defs/threadModelSelection" },
+        "last_run_binding": { "$ref": "#/$defs/runPrimaryModelBinding" }
+      },
+      "additionalProperties": false
+    },
+    "skillsListParams": {
+      "type": "object", "properties": { "include_disabled": { "type": "boolean", "default": true } }, "additionalProperties": false
+    },
+    "skillsInspectParams": {
+      "type": "object", "required": ["id"], "properties": { "id": { "type": "string", "minLength": 1 } }, "additionalProperties": false
+    },
+    "skillsSetEnabledParams": {
+      "type": "object", "required": ["id", "enabled"],
+      "properties": { "id": { "type": "string", "minLength": 1 }, "enabled": { "type": "boolean" } },
+      "additionalProperties": false
+    },
+    "skillsInstallParams": {
+      "type": "object", "required": ["market", "name"],
+      "properties": {
+        "market": { "type": "string", "minLength": 1 }, "name": { "type": "string", "minLength": 1 }, "version": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "skillsMarketListParams": {
+      "type": "object", "properties": { "market": { "type": "string" } }, "additionalProperties": false
+    },
+    "skillsListResult": {
+      "type": "object", "required": ["snapshot", "skills", "diagnostics"],
+      "properties": {
+        "snapshot": { "$ref": "#/$defs/jsonObject" },
+        "skills": { "$ref": "#/$defs/jsonObjectArray" },
+        "diagnostics": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+    "mcpServerStatus": {
+      "type": "object", "required": ["name", "transport", "status", "tool_names"],
+      "properties": {
+        "name": { "type": "string" }, "transport": { "enum": ["stdio", "http", "sse"] },
+        "status": { "enum": ["connected", "failed", "skipped"] }, "error": { "type": "string" },
+        "tool_names": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+    "mcpStatusResult": {
+      "type": "object", "required": ["servers", "total_tools"],
+      "properties": {
+        "servers": { "type": "array", "items": { "$ref": "#/$defs/mcpServerStatus" } },
+        "total_tools": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "mcpAddParams": {
+      "oneOf": [
+        {
+          "type": "object", "required": ["name", "transport", "command"],
+          "properties": {
+            "name": { "type": "string", "minLength": 1 }, "transport": { "const": "stdio" },
+            "command": { "type": "string", "minLength": 1 }, "args": { "type": "array", "items": { "type": "string" } },
+            "env": { "type": "object", "additionalProperties": { "type": "string" } }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object", "required": ["name", "transport", "url"],
+          "properties": {
+            "name": { "type": "string", "minLength": 1 }, "transport": { "enum": ["http", "sse"] },
+            "url": { "type": "string", "minLength": 1 },
+            "headers": { "type": "object", "additionalProperties": { "type": "string" } }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "mcpAddResult": {
+      "type": "object", "required": ["added", "connected", "tool_names"],
+      "properties": {
+        "added": { "type": "boolean" }, "connected": { "type": "boolean" },
+        "tool_names": { "type": "array", "items": { "type": "string" } }, "error": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "mcpRemoveParams": {
+      "type": "object", "required": ["name"], "properties": { "name": { "type": "string", "minLength": 1 } }, "additionalProperties": false
+    },
+    "mcpRemoveResult": {
+      "type": "object", "required": ["removed"], "properties": { "removed": { "type": "boolean" } }, "additionalProperties": false
+    },
+    "hostAttachmentCreateParams": {
+      "type": "object", "required": ["origin"],
+      "properties": { "origin": { "type": "string", "minLength": 1 } },
+      "additionalProperties": false
+    },
+    "hostAttachmentCreateResult": {
+      "type": "object", "required": ["endpoint", "token", "expires_at_ms"],
+      "properties": {
+        "endpoint": { "type": "string" }, "token": { "type": "string" }, "expires_at_ms": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "eventBase": {
+      "type": "object",
+      "required": ["event_id", "type", "thread_id", "run_id", "sequence", "timestamp_ms", "payload"],
+      "properties": {
+        "event_id": { "type": "string", "minLength": 1 }, "type": { "type": "string", "minLength": 1 },
+        "thread_id": { "type": "string", "minLength": 1 }, "run_id": { "type": "string", "minLength": 1 },
+        "sequence": { "type": "integer", "minimum": 1 }, "timestamp_ms": { "type": "integer", "minimum": 0 },
+        "payload": { "$ref": "#/$defs/jsonObject" }
+      },
+      "additionalProperties": false
+    },
+    "runStartedPayload": {
+      "type": "object", "required": ["resumed"],
+      "properties": {
+        "resumed": { "type": "boolean" }, "skills_snapshot_id": { "type": ["string", "null"] },
+        "primary_model": { "$ref": "#/$defs/runPrimaryModelBinding" }, "runtime_profile_id": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "skillLoadedPayload": {
+      "type": "object", "required": ["skill_id", "source", "version", "snapshot_id"],
+      "properties": {
+        "skill_id": { "type": "string" }, "source": { "type": "string" }, "version": { "type": ["string", "null"] }, "snapshot_id": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "contentDeltaPayload": {
+      "type": "object", "required": ["text"], "properties": { "text": { "type": "string" } }, "additionalProperties": false
+    },
+    "toolStartedPayload": {
+      "type": "object", "required": ["tool_call_id", "name"],
+      "properties": { "tool_call_id": { "type": "string" }, "name": { "type": "string" } }, "additionalProperties": false
+    },
+    "toolDeltaPayload": {
+      "type": "object", "required": ["tool_call_id"],
+      "properties": {
+        "tool_call_id": { "type": "string" }, "arguments_delta": { "type": "string" },
+        "output_delta": { "type": "string" }, "truncated": { "type": "boolean" },
+        "original_bytes": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "toolResult": {
+      "type": "object", "required": ["content", "is_error", "truncated", "original_bytes"],
+      "properties": {
+        "content": { "type": "string" }, "is_error": { "type": "boolean" },
+        "truncated": { "type": "boolean" }, "original_bytes": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "toolCompletedPayload": {
+      "type": "object", "required": ["tool_call_id", "result"],
+      "properties": { "tool_call_id": { "type": "string" }, "result": { "$ref": "#/$defs/toolResult" } },
+      "additionalProperties": false
+    },
+    "contextPayload": {
+      "type": "object", "required": ["action", "artifact_ids"],
+      "properties": {
+        "action": { "type": "string" }, "estimated_tokens": { "type": ["integer", "null"] },
+        "input_cap_tokens": { "type": ["integer", "null"] }, "context_window_tokens": { "type": ["integer", "null"] },
+        "dynamic_tokens": { "type": ["integer", "null"] }, "cache_status": { "type": ["string", "null"] },
+        "cached_tokens": { "type": ["integer", "null"] }, "miss_reason": { "type": ["string", "null"] },
+        "artifact_ids": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+    "interactionResolvedPayload": {
+      "type": "object", "required": ["request_id", "type"],
+      "properties": { "request_id": { "type": "string" }, "type": { "enum": ["approval", "question"] } },
+      "additionalProperties": false
+    },
+    "usage": {
+      "type": "object", "required": ["input_tokens", "output_tokens"],
+      "properties": { "input_tokens": { "type": "integer", "minimum": 0 }, "output_tokens": { "type": "integer", "minimum": 0 } },
+      "additionalProperties": false
+    },
+    "runCompletedPayload": {
+      "type": "object", "required": ["usage", "duration_ms", "finish_reason", "context"],
+      "properties": {
+        "usage": { "$ref": "#/$defs/usage" }, "duration_ms": { "type": "integer", "minimum": 0 },
+        "finish_reason": { "type": "string" }, "context": { "$ref": "#/$defs/jsonObject" }
+      },
+      "additionalProperties": false
+    },
+    "runCancelledPayload": {
+      "type": "object", "required": ["reason"], "properties": { "reason": { "type": "string" } }, "additionalProperties": false
+    },
+    "runFailure": {
+      "type": "object", "required": ["code", "message", "retryable"],
+      "properties": { "code": { "type": "string" }, "message": { "type": "string" }, "retryable": { "type": "boolean" } },
+      "additionalProperties": false
+    },
+    "runFailedPayload": {
+      "type": "object", "required": ["error"], "properties": { "error": { "$ref": "#/$defs/runFailure" } }, "additionalProperties": false
+    },
+    "interactionBase": {
+      "type": "object", "required": ["thread_id", "run_id", "timeout_ms", "payload"],
+      "properties": {
+        "thread_id": { "type": "string" }, "run_id": { "type": "string" },
+        "timeout_ms": { "type": "integer", "minimum": 1 }, "payload": { "$ref": "#/$defs/jsonObject" }
+      },
+      "additionalProperties": false
+    },
+    "approvalRequest": {
+      "type": "object", "required": ["thread_id", "run_id", "timeout_ms", "payload"],
+      "properties": {
+        "thread_id": { "type": "string" }, "run_id": { "type": "string" }, "timeout_ms": { "type": "integer", "minimum": 1 },
+        "payload": {
+          "type": "object", "required": ["interrupt_id", "description", "requests", "decisions"],
+          "properties": {
+            "interrupt_id": { "type": "string" }, "description": { "type": "string" },
+            "requests": { "$ref": "#/$defs/jsonValue" },
+            "decisions": { "type": "array", "items": { "enum": ["approve_once", "approve_thread", "reject"] } }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "approvalResponse": {
+      "type": "object", "required": ["decision"],
+      "properties": {
+        "decision": { "enum": ["approve_once", "approve_thread", "reject"] }, "feedback": { "type": "string", "default": "" }
+      },
+      "additionalProperties": false
+    },
+    "question": {
+      "type": "object", "required": ["id", "question", "header", "body", "options", "multi_select", "allow_other"],
+      "properties": {
+        "id": { "type": "string" }, "question": { "type": "string" }, "header": { "type": "string" }, "body": { "type": "string" },
+        "options": {
+          "type": "array", "items": {
+            "type": "object", "required": ["label", "value", "description"],
+            "properties": { "label": { "type": "string" }, "value": { "type": "string" }, "description": { "type": "string" } },
+            "additionalProperties": false
+          }
+        },
+        "multi_select": { "type": "boolean" }, "allow_other": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "questionRequest": {
+      "type": "object", "required": ["thread_id", "run_id", "timeout_ms", "payload"],
+      "properties": {
+        "thread_id": { "type": "string" }, "run_id": { "type": "string" }, "timeout_ms": { "type": "integer", "minimum": 1 },
+        "payload": {
+          "type": "object", "required": ["interrupt_id", "questions"],
+          "properties": {
+            "interrupt_id": { "type": "string" }, "questions": { "type": "array", "items": { "$ref": "#/$defs/question" } }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "questionResponse": {
+      "type": "object", "required": ["answers"],
+      "properties": {
+        "answers": { "type": "object", "additionalProperties": { "type": "array", "items": { "type": "string" } } }
+      },
+      "additionalProperties": false
+    },
+    "protocolErrorData": {
+      "type": "object", "required": ["code", "retryable"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1 }, "retryable": { "type": "boolean" },
+        "capability": { "type": "string" }, "details": { "$ref": "#/$defs/jsonValue" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

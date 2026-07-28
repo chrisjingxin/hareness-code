@@ -102,7 +102,11 @@ async def test_explicit_skill_run_emits_loaded_event_before_content(tmp_path: Pa
 
     workspace = tmp_path / "workspace"
     _write_skill(workspace / ".harness" / "skills", "review", "先检查代码。")
-    server = JsonRpcServer(allow_echo=True, config_home=tmp_path / "home")
+    server = JsonRpcServer(
+        allow_echo=True,
+        config_home=tmp_path / "home",
+        workspace=workspace,
+    )
     frames: list[dict[str, Any]] = []
 
     async def capture(message: dict[str, Any]) -> None:
@@ -114,10 +118,9 @@ async def test_explicit_skill_run_emits_loaded_event_before_content(tmp_path: Pa
             "jsonrpc": "2.0",
             "method": "initialize",
             "params": {
-                "protocol": {"major": 2, "min_minor": 1, "max_minor": 1},
-                "client": {"name": "test", "version": "0.1.0"},
-                "capabilities": ["skills.read"],
-                "cwd": str(workspace),
+                "protocol": {"major": 3, "min_minor": 0, "max_minor": 0},
+                "client": {"name": "test", "version": "0.1.0", "kind": "test"},
+                "capabilities": {"requests": ["skills.read"], "handles": []},
             },
             "id": "init",
         }

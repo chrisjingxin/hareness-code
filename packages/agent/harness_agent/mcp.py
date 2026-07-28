@@ -2,7 +2,7 @@
 
 基于 langchain-mcp-adapters 将外部 MCP Server 的工具转换为 LangChain
 BaseTool，通过 create_harness_agent(tools=[...]) 注入 Agent 图。
-连接生命周期由 JsonRpcServer 管理：initialize 后建立，shutdown 时释放。
+连接生命周期由 AgentHost 管理：initialize 后建立，Host 关闭时释放。
 """
 
 from __future__ import annotations

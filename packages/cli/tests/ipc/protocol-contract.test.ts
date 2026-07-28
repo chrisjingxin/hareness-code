@@ -1,12 +1,28 @@
-/** TypeScript 使用协议包断言消费跨语言共享 fixture。 */
+/** TypeScript 与 Python 消费同一份 v3 contract fixture。 */
 
 import { expect, test } from "bun:test"
 import { readFile } from "node:fs/promises"
 import { resolve } from "node:path"
-import { assertConfigCommitParams, assertConfigDetailsParams, assertConfigPreviewParams, assertContextCompactParams, assertEventEnvelope, assertInitializeParams, assertInteractionRequest, assertModelsListParams, assertThreadsListParams, assertThreadsOpenParams } from "@za38/protocol"
+import {
+  assertEventEnvelope,
+  validateInteractionParams,
+  validateInteractionResult,
+  validateOperationParams,
+  validateOperationResult,
+  validateProtocolErrorData,
+  type InteractionMethod,
+  type OperationName,
+} from "@za38/protocol"
 
-type Fixture = { kind: "initialize" | "event" | "request" | "threads.list" | "threads.open" | "config.details" | "config.preview" | "config.commit"; value: unknown }
-const fixtures = JSON.parse(await readFile(resolve(import.meta.dir, "../../../protocol/fixtures/v2-contract.json"), "utf8")) as { valid: Fixture[]; invalid: Fixture[] }
+type Fixture = {
+  kind: "operation.params" | "operation.result" | "event" | "interaction.params" | "interaction.result" | "error"
+  name: string
+  value: unknown
+}
+
+const fixtures = JSON.parse(
+  await readFile(resolve(import.meta.dir, "../../../protocol/fixtures/v3-contract.json"), "utf8"),
+) as { valid: Fixture[]; invalid: Fixture[] }
 
 test("TypeScript 接受全部共享有效 fixture", () => {
   for (const fixture of fixtures.valid) expect(() => validate(fixture)).not.toThrow()
@@ -16,48 +32,18 @@ test("TypeScript 拒绝全部共享无效 fixture", () => {
   for (const fixture of fixtures.invalid) expect(() => validate(fixture)).toThrow()
 })
 
-test("TypeScript 接受 v2.4 context.updated 和手动压缩参数", () => {
-  expect(() => assertEventEnvelope({
-    event_id: "context-1",
-    type: "context.updated",
-    thread_id: "thread-1",
-    run_id: "run-1",
-    sequence: 1,
-    timestamp_ms: 1,
-    payload: {
-      action: "summary",
-      estimated_tokens: 10,
-      input_cap_tokens: 100,
-      context_window_tokens: 128,
-      dynamic_tokens: 10,
-      cache_status: "unknown",
-      artifact_ids: [],
-    },
-  })).not.toThrow()
-  expect(() => assertContextCompactParams({ thread_id: "thread-1" })).not.toThrow()
-  expect(() => assertContextCompactParams({ thread_id: "", ignored: true })).toThrow()
-})
-
-test("TypeScript 校验 v2.5 的 models.list 线程绑定参数", () => {
-  expect(() => assertModelsListParams({})).not.toThrow()
-  expect(() => assertModelsListParams({ thread_id: "thread-1" })).not.toThrow()
-  expect(() => assertModelsListParams({ thread_id: "", ignored: true })).toThrow()
-})
-
-test("TypeScript 校验 v2.8 受控配置变更参数", () => {
-  expect(() => assertConfigDetailsParams({})).not.toThrow()
-  expect(() => assertConfigPreviewParams({ changes: [{ path: "models.default_profile", value: "pro" }] })).not.toThrow()
-  expect(() => assertConfigCommitParams({ expected_revision: "revision", changes: [{ path: "approval.mode", value: "plan" }] })).not.toThrow()
-  expect(() => assertConfigCommitParams({ expected_revision: "", changes: [] })).toThrow()
-})
-
 function validate(fixture: Fixture): void {
-  if (fixture.kind === "initialize") assertInitializeParams(fixture.value)
-  else if (fixture.kind === "event") assertEventEnvelope(fixture.value)
-  else if (fixture.kind === "request") assertInteractionRequest(fixture.value)
-  else if (fixture.kind === "threads.list") assertThreadsListParams(fixture.value)
-  else if (fixture.kind === "threads.open") assertThreadsOpenParams(fixture.value)
-  else if (fixture.kind === "config.details") assertConfigDetailsParams(fixture.value)
-  else if (fixture.kind === "config.preview") assertConfigPreviewParams(fixture.value)
-  else assertConfigCommitParams(fixture.value)
+  if (fixture.kind === "operation.params") {
+    validateOperationParams(fixture.name as OperationName, fixture.value)
+  } else if (fixture.kind === "operation.result") {
+    validateOperationResult(fixture.name as OperationName, fixture.value)
+  } else if (fixture.kind === "event") {
+    assertEventEnvelope(fixture.value)
+  } else if (fixture.kind === "interaction.params") {
+    validateInteractionParams(fixture.name as InteractionMethod, fixture.value)
+  } else if (fixture.kind === "interaction.result") {
+    validateInteractionResult(fixture.name as InteractionMethod, fixture.value)
+  } else {
+    validateProtocolErrorData(fixture.value)
+  }
 }

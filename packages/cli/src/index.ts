@@ -3,31 +3,44 @@
 import { execFileSync, spawn } from "node:child_process"
 import { existsSync, statSync } from "node:fs"
 import { delimiter, resolve } from "node:path"
-import { PROTOCOL_VERSION, type EventEnvelope, type InitializeResult } from "@za38/protocol"
+import { Capability, EventType, PROTOCOL_VERSION, isClientMethod } from "@za38/protocol"
 
 import { parseArgs, type Command } from "./args"
-import { IpcClient } from "./ipc/client"
+import { AgentClient } from "./ipc/client"
+import { StdioRpcTransport } from "./ipc/stdio-transport"
 import { runTui } from "./tui/app"
 import { CLI_VERSION, createTuiRuntime, type TuiRuntime } from "./tui/model"
+import { WebLauncher } from "./web-launcher"
 
 type RunningAgent = {
-  client: IpcClient
+  client: AgentClient
   runtime: TuiRuntime
   stop: () => Promise<void>
 }
 
 /** 根据命令实际是否存在反向交互处理器，声明最小协议能力集合。 */
 export function clientCapabilities(command: Command): string[] {
-  const capabilities = ["run.cancel", "run.multithread", "config.read"]
-  if (command.kind === "run" && !command.nonInteractive) capabilities.push("config.write", "threads.read", "context.manage", "models.read", "models.select")
-  if (command.kind.startsWith("skills.") || (command.kind === "run" && !command.nonInteractive)) capabilities.push("skills.read")
+  const capabilities: string[] = [Capability.RUN_CANCEL, Capability.RUN_MULTITHREAD, Capability.CONFIG_READ]
+  if (command.kind === "run" && !command.nonInteractive) capabilities.push(
+    Capability.CONFIG_WRITE,
+    Capability.THREADS_READ,
+    Capability.CONTEXT_MANAGE,
+    Capability.MODELS_READ,
+    Capability.MODELS_SELECT,
+    Capability.MCP_READ,
+    Capability.MCP_MANAGE,
+  )
+  if (command.kind === "run" && !command.nonInteractive) capabilities.push(Capability.HOST_ATTACH)
+  if (command.kind.startsWith("skills.") || (command.kind === "run" && !command.nonInteractive)) capabilities.push(Capability.SKILLS_READ)
   if (command.kind === "skills.set_enabled" || command.kind === "skills.install" || command.kind === "skills.update" || command.kind === "skills.remove") {
-    capabilities.push("skills.manage")
-  }
-  if (command.kind === "run" && !command.nonInteractive) {
-    capabilities.push("interactive.approval", "interactive.question")
+    capabilities.push(Capability.SKILLS_MANAGE)
   }
   return capabilities
+}
+
+/** 声明当前表现层能够处理的反向 Interaction。 */
+export function clientInteractionHandles(command: Command): Array<"approval" | "question"> {
+  return command.kind === "run" && !command.nonInteractive ? ["approval", "question"] : []
 }
 
 /** 启动 Python sidecar、完成 initialize 握手，并返回可关闭的运行句柄。 */
@@ -49,6 +62,7 @@ async function startAgent(command: Command): Promise<RunningAgent> {
     env: {
       ...process.env,
       ...sandboxEnvironment,
+      ...(command.configPath ? { HARNESS_AGENT_CONFIG_PATH: command.configPath } : {}),
       PYTHONPATH: process.env.PYTHONPATH ? `${sourceAgent}${delimiter}${process.env.PYTHONPATH}` : sourceAgent,
     },
     stdio: ["pipe", "pipe", "pipe"],
@@ -56,17 +70,19 @@ async function startAgent(command: Command): Promise<RunningAgent> {
   if (!child.stdin || !child.stdout || !child.stderr) throw new Error("Unable to create agent stdio pipes")
   let stderr = ""
   child.stderr.on("data", chunk => { stderr += chunk.toString("utf-8") })
-  const client = new IpcClient(child.stdin, child.stdout)
+  const client = new AgentClient(new StdioRpcTransport(child.stdin, child.stdout))
   child.on("exit", code => {
     if (code && code !== 0) client.emit("agentExit", new Error(stderr || `Agent exited with code ${code}`))
   })
-  const initialized = await client.call("initialize", {
+  const requested = clientCapabilities(command)
+  const initialized = await client.initialize({
     protocol: { major: PROTOCOL_VERSION.major, min_minor: 0, max_minor: PROTOCOL_VERSION.minor },
-    client: { name: "za38-cli", version: CLI_VERSION },
-    capabilities: clientCapabilities(command),
-    cwd: command.cwd,
-    config_path: command.configPath,
-  }) as InitializeResult
+    client: { name: "harness-cli", version: CLI_VERSION, kind: command.kind === "run" && !command.nonInteractive ? "tui" : "cli" },
+    capabilities: {
+      requests: requested,
+      handles: clientInteractionHandles(command),
+    },
+  })
   return {
     client,
     runtime: createTuiRuntime(initialized, command.cwd, {
@@ -74,11 +90,7 @@ async function startAgent(command: Command): Promise<RunningAgent> {
       cliVersion: CLI_VERSION,
     }),
     stop: async () => {
-      try {
-        await client.shutdown()
-      } catch {
-        // 进程可能已在退出，关闭阶段无需覆盖原始错误。
-      }
+      client.destroy()
       child.kill()
     },
   }
@@ -116,24 +128,25 @@ export function readGitBranch(cwd: string): string | undefined {
 }
 
 /** 无头模式下收集单次流式输出，并等待对应运行的终态事件。 */
-async function runTurn(client: IpcClient, message: string, threadId?: string): Promise<{ text: string; threadId: string; runId: string; usage: unknown }> {
+async function runTurn(client: AgentClient, message: string, threadId?: string): Promise<{ text: string; threadId: string; runId: string; usage: unknown }> {
   let text = ""
-  let active: { thread_id: string; run_id: string } | undefined
-  const terminal = new Promise<{ usage: unknown }>((resolveTerminal, rejectTerminal) => {
-    client.on("event", (event: EventEnvelope) => {
-      if (active && (event.thread_id !== active.thread_id || event.run_id !== active.run_id)) return
-      if (event.type === "content.delta" && typeof event.payload.text === "string") text += event.payload.text
-      if (event.type === "run.completed") resolveTerminal({ usage: event.payload.usage })
-      if (event.type === "run.cancelled") rejectTerminal(new Error(typeof event.payload.reason === "string" ? event.payload.reason : "Run cancelled"))
-      if (event.type === "run.failed") {
-        const error = event.payload.error as Record<string, unknown> | undefined
-        rejectTerminal(new Error(`${error?.code ?? "AgentError"}: ${error?.message ?? "Run failed"}`))
-      }
-    })
-  })
-  active = await client.query(message, threadId)
-  const result = await terminal
-  return { text, threadId: active.thread_id, runId: active.run_id, usage: result.usage }
+  const run = client.startRun({ message, threadId })
+  await run.accepted
+  for await (const event of run.events) {
+    if (event.type === EventType.CONTENT_DELTA) text += event.payload.text
+  }
+  const completion = await run.completion
+  if (completion.outcome === "cancelled") throw new Error(completion.event.payload.reason)
+  if (completion.outcome === "failed") {
+    const error = completion.event.payload.error
+    throw new Error(`${error.code}: ${error.message}`)
+  }
+  return {
+    text,
+    threadId: run.ref.threadId,
+    runId: run.ref.runId,
+    usage: completion.event.payload.usage,
+  }
 }
 
 /** 根据解析后的命令选择配置查询、无头执行或交互式 TUI。 */
@@ -144,7 +157,8 @@ async function execute(command: Command): Promise<void> {
   const agent = await startAgent(command)
   try {
     if (command.kind !== "run") {
-      const result = await agent.client.call(command.kind, command.params ?? {})
+      if (!isClientMethod(command.kind)) throw new Error(`Unsupported command operation: ${command.kind}`)
+      const result = await agent.client.request(command.kind, command.params ?? {})
       console.log(JSON.stringify(result, null, 2))
       return
     }
@@ -155,12 +169,18 @@ async function execute(command: Command): Promise<void> {
       return
     }
 
-    await runTui({
-      client: agent.client,
-      runtime: agent.runtime,
-      resume: command.resume,
-      onRequestExit: () => undefined,
-    })
+    const webLauncher = new WebLauncher(agent.client)
+    try {
+      await runTui({
+        client: agent.client,
+        runtime: agent.runtime,
+        resume: command.resume,
+        onRequestExit: () => undefined,
+        openWeb: threadId => webLauncher.open(threadId),
+      })
+    } finally {
+      await webLauncher.close()
+    }
   } finally {
     await agent.stop()
   }
