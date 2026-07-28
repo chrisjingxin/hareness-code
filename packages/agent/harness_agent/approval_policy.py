@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, Literal
 
 from langchain.agents.middleware.types import AgentMiddleware, ContextT, ResponseT
 from langchain.tools.tool_node import ToolCallRequest
 from langchain_core.messages import ToolMessage
 
 from harness_agent.approval_mode import ApprovalMode
+from harness_agent.tool_risk import ToolKind, get_tool_kind, get_mode_permission, is_read_only
+from harness_agent.permission_rules import PermissionRule, evaluate_rules
+from harness_agent.sensitive_paths import requires_safety_check
 
 _DEFAULT_HITL_TOOLS = frozenset(
-    {"execute", "write_file", "edit_file", "delete", "task"}
+    {"execute", "write_file", "edit_file", "delete", "delete_file", "task", "web_fetch", "apply_patch", "monitor", "task_stop"}
 )
-_AUTO_EDIT_HITL_TOOLS = frozenset({"execute", "delete", "task"})
+_AUTO_EDIT_HITL_TOOLS = frozenset({"execute", "delete", "delete_file", "task", "web_fetch", "monitor", "task_stop"})
 _PLAN_ALLOWED_TOOLS = frozenset(
     {
         "ls",
@@ -23,6 +26,12 @@ _PLAN_ALLOWED_TOOLS = frozenset(
         "grep",
         "ask_user",
         "write_todos",
+        "web_search",
+        "lsp",
+        "tool_search",
+        "memory_search",
+        "enter_plan_mode",
+        "exit_plan_mode",
     }
 )
 
@@ -133,3 +142,75 @@ class PlanModeMiddleware(AgentMiddleware[dict[str, Any], ContextT, ResponseT]):
         if request.tool_call.get("name") not in _PLAN_ALLOWED_TOOLS:
             return self._rejection(request)
         return await handler(request)
+
+
+# ---------------------------------------------------------------------------
+# 多级审批流水线
+# ---------------------------------------------------------------------------
+
+PermissionDecision = Literal["allow", "ask", "deny"]
+"""审批流水线最终决策：allow 直接执行，ask 需要用户审批，deny 硬拒绝。"""
+
+
+def evaluate_permission(
+    tool_name: str,
+    tool_args: dict[str, Any],
+    approval_mode: ApprovalMode,
+    rules: list[PermissionRule] | None = None,
+) -> PermissionDecision:
+    """多级审批流水线：L2 deny 硬拦截 → L3 只读放行 → L4 规则评估 → L5 模式覆盖。
+
+    Args:
+        tool_name: 工具名称。
+        tool_args: 工具参数字典。
+        approval_mode: 当前审批模式。
+        rules: 已合并的权限规则列表（session + project + user），按优先级排列。
+
+    Returns:
+        "allow" 直接执行，"ask" 需要用户审批，"deny" 硬拒绝。
+    """
+    # L2: deny 规则硬拦截（任何模式不可覆盖）
+    if rules:
+        resource = _extract_resource(tool_name, tool_args)
+        effect = evaluate_rules(tool_name, resource, rules)
+        if effect == "deny":
+            return "deny"
+
+    # L3: 只读工具放行（READ/INTERACT/PLAN 类别）
+    if is_read_only(tool_name):
+        return "allow"
+
+    # 敏感路径 safetyCheck（yolo 免疫）
+    if requires_safety_check(tool_name, tool_args):
+        return "ask"
+
+    # L4: 规则评估（allow/ask 规则）
+    if rules:
+        resource = _extract_resource(tool_name, tool_args)
+        effect = evaluate_rules(tool_name, resource, rules)
+        if effect == "allow":
+            return "allow"
+        if effect == "ask":
+            return "ask"
+
+    # L5: 审批模式覆盖（按 ToolKind 查表）
+    kind = get_tool_kind(tool_name)
+    mode_perm = get_mode_permission(kind, approval_mode)
+    return mode_perm  # type: ignore[return-value]
+
+
+def _extract_resource(tool_name: str, tool_args: dict[str, Any]) -> str:
+    """从工具参数中提取资源标识，用于规则匹配。
+
+    - execute/monitor: 使用 command 参数
+    - write_file/edit_file/delete_file: 使用 file_path 参数
+    - web_fetch: 使用 url 参数
+    - 其他: 使用 "*" 通配
+    """
+    if tool_name in ("execute", "monitor"):
+        return str(tool_args.get("command", "*"))
+    if tool_name in ("write_file", "edit_file", "delete_file", "apply_patch"):
+        return str(tool_args.get("file_path", "*"))
+    if tool_name == "web_fetch":
+        return str(tool_args.get("url", "*"))
+    return "*"

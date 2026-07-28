@@ -56,6 +56,20 @@ _BUILTIN_TOOL_SHAPES = (
     {"name": "execute", "parameters": {"command": "string", "timeout": "integer"}},
     {"name": "write_todos", "parameters": {"todos": "array"}},
     {"name": "task", "parameters": {"description": "string", "subagent_type": "string"}},
+    # --- 新增工具 ---
+    {"name": "web_search", "parameters": {"query": "string", "num_results": "integer"}},
+    {"name": "web_fetch", "parameters": {"url": "string", "format": "string"}},
+    {"name": "delete_file", "parameters": {"file_path": "string"}},
+    {"name": "apply_patch", "parameters": {"patch": "string"}},
+    {"name": "lsp", "parameters": {"action": "string", "file_path": "string", "line": "integer", "column": "integer"}},
+    {"name": "tool_search", "parameters": {"query": "string"}},
+    {"name": "enter_plan_mode", "parameters": {}},
+    {"name": "exit_plan_mode", "parameters": {}},
+    {"name": "task_output", "parameters": {"task_id": "string"}},
+    {"name": "task_stop", "parameters": {"task_id": "string"}},
+    {"name": "monitor", "parameters": {"command": "string", "interval": "integer"}},
+    {"name": "memory_search", "parameters": {"query": "string"}},
+    {"name": "memory_save", "parameters": {"key": "string", "content": "string"}},
 )
 """DeepAgents 内置工具的静态契约，用于创建 epoch 前计算确定性 schema 指纹。"""
 
@@ -431,6 +445,10 @@ def create_harness_agent(
     agent_middleware.append(context_middleware)
 
     all_tools = list(tools) if tools else []
+
+    # 注入 Harness 扩展工具（web_search/web_fetch/delete_file 等）
+    from harness_agent.harness_tools import create_harness_tools
+    all_tools.extend(create_harness_tools(root))
 
     # DeepAgents 的内建压缩会抢先改写历史，且与本机归档语义不兼容。构图时
     # 临时排除它，确保 ContextWindowMiddleware 是唯一的历史重写入口。

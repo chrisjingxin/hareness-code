@@ -193,7 +193,7 @@ class InteractionRequestEnvelope(StrictModel):
 class ApprovalResponse(StrictModel):
     type: Literal["approval"]
     request_id: str
-    decision: Literal["approve_once", "approve_thread", "reject"]
+    decision: Literal["approve_once", "approve_thread", "approve_always", "reject", "reject_with_feedback"]
     feedback: str = ""
 
 class QuestionResponse(StrictModel):

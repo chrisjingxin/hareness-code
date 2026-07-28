@@ -172,7 +172,10 @@ test("审批作为内联时间线事件保留选项高度", async () => {
     const frame = setup.captureCharFrame()
     expect(frame).toContain("需要审批")
     expect(frame).toContain("允许一次")
+    expect(frame).toContain("本线程允许")
+    expect(frame).toContain("永久允许")
     expect(frame).toContain("拒绝")
+    expect(frame).toContain("拒绝并反馈")
     expect(frame.indexOf("execute")).toBeLessThan(frame.indexOf("需要审批"))
   } finally {
     await act(async () => { setup.renderer.destroy() })

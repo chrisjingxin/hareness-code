@@ -90,7 +90,7 @@ export interface McpRemoveParams { name: string }
 export interface McpRemoveResult { removed: boolean }
 export interface EventEnvelope { event_id: string; type: string; thread_id: string; run_id: string; sequence: number; timestamp_ms: number; source?: { kind: "root" | "subagent" | "background"; id?: string; parent_tool_call_id?: string }; payload: JsonObject; extensions?: JsonObject }
 export interface InteractionRequestEnvelope { request_id: string; type: "approval" | "question"; thread_id: string; run_id: string; sequence: number; timeout_ms: number; payload: JsonObject }
-export interface ApprovalResponse { type: "approval"; request_id: string; decision: "approve_once" | "approve_thread" | "reject"; feedback?: string }
+export interface ApprovalResponse { type: "approval"; request_id: string; decision: "approve_once" | "approve_thread" | "approve_always" | "reject" | "reject_with_feedback"; feedback?: string }
 export interface QuestionResponse { type: "question"; request_id: string; answers: Record<string, string[]> }
 export type InteractionResponse = ApprovalResponse | QuestionResponse
 `
@@ -292,7 +292,7 @@ class InteractionRequestEnvelope(StrictModel):
 class ApprovalResponse(StrictModel):
     type: Literal["approval"]
     request_id: str
-    decision: Literal["approve_once", "approve_thread", "reject"]
+    decision: Literal["approve_once", "approve_thread", "approve_always", "reject", "reject_with_feedback"]
     feedback: str = ""
 
 class QuestionResponse(StrictModel):

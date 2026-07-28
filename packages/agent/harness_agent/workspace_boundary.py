@@ -29,9 +29,9 @@ _DIRECT_PATH_ARGUMENTS = {
     "read_file": "file_path",
     "write_file": "file_path",
     "edit_file": "file_path",
-    # deepagents 当前未暴露 delete；预先约束常见参数名，新增工具时不会漏管。
     "delete": "file_path",
     "delete_file": "file_path",
+    "lsp": "file_path",
 }
 _SEARCH_TOOLS = frozenset({"glob", "grep"})
 _VIRTUAL_ROOT = "/.harness"

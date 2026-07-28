@@ -1594,7 +1594,7 @@ class JsonRpcServer:
         assert isinstance(response, dict)
         if spec.type == "approval":
             decision = response.get("decision")
-            langgraph_decision = "approve" if decision in {"approve_once", "approve_thread"} else "reject"
+            langgraph_decision = "approve" if decision in {"approve_once", "approve_thread", "approve_always"} else "reject"
             # 模型可能在一轮中并行发出多个需审批的工具调用，HITL 中间件会把
             # 它们打包为单个 interrupt；用户的一个审批决定需复制到每个挂起
             # 的 tool call，使 decisions 列表长度与 action_count 相等。

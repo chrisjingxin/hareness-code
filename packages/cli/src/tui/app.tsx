@@ -18,7 +18,7 @@ import {
   type SlashCommand,
 } from "./commands"
 import { dispatchSlashCommand, type CommandDialog, type CommandResult } from "./command-dispatcher"
-import { HomeView, SkillPicker, ThreadPicker, ThreadView, type CommandMenuState, type SelectedSkill, type ThreadPickerItem } from "./components"
+import { HomeView, SkillPicker, ThreadPicker, ThreadView, type ApprovalDecision, type CommandMenuState, type SelectedSkill, type ThreadPickerItem } from "./components"
 import { TuiErrorBoundary } from "./error-boundary"
 import { runtimeStatusSummary, type TuiRuntime } from "./model"
 import { DialogShell, SearchPicker, type SearchPickerRenderContext } from "./overlays"
@@ -292,17 +292,20 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
   }, [client, commit, models, selectedSkill, supportsThreadModelSelection, threadModelSelection])
 
   /** 解析 Agent 发起的审批 request，由 JsonRpcPeer 自动回写标准 response。 */
-  const respondApproval = useCallback(async (decision: "approve" | "reject") => {
+  const respondApproval = useCallback(async (decision: ApprovalDecision) => {
     const { pendingApproval } = stateRef.current
     if (!pendingApproval?.requestId) return
     const pending = interactionResolversRef.current.get(pendingApproval.requestId)
     if (!pending) return
     interactionResolversRef.current.delete(pendingApproval.requestId)
-    commit(state => clearPendingInteraction(state, decision === "approve" ? "approved" : "rejected"))
+    const outcome = decision === "reject" || decision === "reject_with_feedback" ? "rejected" : "approved"
+    commit(state => clearPendingInteraction(state, outcome))
     pending.resolve({
       type: "approval",
       request_id: pendingApproval.requestId,
-      decision: decision === "approve" ? "approve_once" : "reject",
+      decision,
+      // 当前 TUI 框架不方便在 select 内嵌入文本输入，feedback 暂传空字符串。
+      ...(decision === "reject_with_feedback" ? { feedback: "" } : {}),
     })
   }, [commit])
 
@@ -1020,7 +1023,7 @@ export function Za38Tui({ client, runtime, resume, promptHistoryFile, onRequestE
     showToolDetails,
     expandedTools,
     onToggleTool: toggleTool,
-    onApproval: (decision: "approve" | "reject") => { void respondApproval(decision) },
+    onApproval: (decision: ApprovalDecision) => { void respondApproval(decision) },
     onQuestion: (answer: string) => { void respondQuestion(answer) },
   }
 

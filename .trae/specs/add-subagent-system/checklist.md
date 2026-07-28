@@ -1,0 +1,26 @@
+# Checklist
+
+- [ ] AgentDefinition dataclass 包含 name/description/tools/disallowed_tools/model/color/max_turns/background/system_prompt/source/file_path 字段
+- [ ] parse_agent_markdown 正确解析 YAML frontmatter + Markdown 正文
+- [ ] serialize_agent_markdown 输出可被 parse_agent_markdown 往返解析
+- [ ] discover_agents 按 project > user > builtin 优先级扫描，同名覆盖
+- [ ] AgentRegistry 支持 load/get/list/register/unregister 操作
+- [ ] 内置 explore agent 仅允许只读工具（read_file/grep/glob/ls）
+- [ ] 内置 plan agent 仅允许只读工具 + write_todos
+- [ ] filter_tools_for_agent 正确实现白名单/黑名单/全量三种模式
+- [ ] SubagentDepthGuard 阻止子代理调用 task 工具
+- [ ] _build_subagents 从 registry 构建完整 subagent dict 列表传入 create_deep_agent
+- [ ] task 工具描述动态包含所有可用 agent 类型及描述
+- [ ] agents.list RPC 返回完整 agent 信息
+- [ ] agents.create RPC 创建文件并热加载
+- [ ] agents.update RPC 修改文件并热加载
+- [ ] agents.remove RPC 删除文件（builtin 拒绝）
+- [ ] protocol 包包含 agents 相关 TypeScript 类型
+- [ ] subagent 事件携带 source.kind="subagent" 和 agent_type/agent_name
+- [ ] CLI /agents 命令可列出、创建、查看、删除 agent
+- [ ] TUI 中 subagent 运行时有颜色标记和状态指示
+- [ ] docs/user/ 包含 subagent 使用说明
+- [ ] docs/developer/架构总览.md 包含 subagent 模块说明
+- [ ] 全量测试通过（bun run test + pytest）
+- [ ] typecheck 通过（bun run typecheck）
+- [ ] project:check 通过（bun run project:check）

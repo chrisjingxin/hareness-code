@@ -17,7 +17,11 @@ import {
   type TuiRuntime,
   workspaceLabel,
 } from "./model"
+import type { ApprovalResponse } from "@za38/protocol"
 import type { ConversationMessage, InteractionCard, TimelineItem, ToolCard, TuiState } from "./state"
+
+/** 审批决定类型，与协议 ApprovalResponse.decision 保持一致。 */
+export type ApprovalDecision = ApprovalResponse["decision"]
 import { HarnessCodeLogo } from "./harness-logo"
 import { StarryBackground } from "./starry-background"
 import { markdownSyntax, tuiTheme } from "./theme"
@@ -65,7 +69,7 @@ type SharedViewProps = {
   showToolDetails: boolean
   expandedTools: ReadonlySet<string>
   onToggleTool: (toolId: string) => void
-  onApproval: (decision: "approve" | "reject") => void
+  onApproval: (decision: ApprovalDecision) => void
   onQuestion: (answer: string) => void
 }
 
@@ -149,7 +153,7 @@ export function ConversationTimeline(props: {
   showToolDetails: boolean
   expandedTools: ReadonlySet<string>
   onToggleTool: (toolId: string) => void
-  onApproval: (decision: "approve" | "reject") => void
+  onApproval: (decision: ApprovalDecision) => void
   onQuestion: (answer: string) => void
   modelName?: string
 }) {
@@ -186,7 +190,7 @@ function TimelineRow(props: {
   showToolDetails: boolean
   expandedTools: ReadonlySet<string>
   onToggleTool: (toolId: string) => void
-  onApproval: (decision: "approve" | "reject") => void
+  onApproval: (decision: ApprovalDecision) => void
   onQuestion: (answer: string) => void
 }) {
   if (props.item.type === "message") return <MessageBlock message={props.item.message} />
@@ -321,7 +325,7 @@ function RunSummary(props: { state: TuiState; modelName?: string }) {
 /** 审批和问答是不可脱离时间线的阻塞事件，完成后保留用户处理结果。 */
 function InteractionRow(props: {
   interaction: InteractionCard
-  onApproval: (decision: "approve" | "reject") => void
+  onApproval: (decision: ApprovalDecision) => void
   onQuestion: (answer: string) => void
 }) {
   const { interaction } = props
@@ -344,15 +348,21 @@ function InteractionRow(props: {
           <>
             <select
               focused
-              height={4}
+              height={10}
               showDescription
               wrapSelection
               options={[
-                { name: "允许一次", description: "继续执行当前操作", value: "approve" },
+                { name: "允许一次", description: "继续执行当前操作", value: "approve_once" },
+                { name: "本线程允许", description: "当前会话内不再询问", value: "approve_thread" },
+                { name: "永久允许", description: "此后同类操作自动放行", value: "approve_always" },
                 { name: "拒绝", description: "停止此操作并告知 Agent", value: "reject" },
+                { name: "拒绝并反馈", description: "拒绝并附带修改建议", value: "reject_with_feedback" },
               ]}
               onSelect={(_, option) => {
-                if (option?.value === "approve" || option?.value === "reject") props.onApproval(option.value)
+                const value = option?.value
+                if (value === "approve_once" || value === "approve_thread" || value === "approve_always" || value === "reject" || value === "reject_with_feedback") {
+                  props.onApproval(value)
+                }
               }}
             />
             <text fg={tuiTheme.muted}>↑↓ 选择 · Enter 确认</text>
