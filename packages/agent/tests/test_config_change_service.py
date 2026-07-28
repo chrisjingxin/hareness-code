@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import stat
 import tomllib
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -277,3 +278,136 @@ def test_successful_interactive_write_hardens_user_config_permissions(tmp_path: 
 
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert tomllib.loads(path.read_text(encoding="utf-8"))["runtime_pool"]["max_profiles"] == 9
+
+
+class TestMcpServerOperations:
+    """ConfigChangeService MCP 领域操作测试。"""
+
+    @pytest.fixture(autouse=True)
+    def _patch_platform(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """在 Windows 上 mock fcntl 锁和 fchmod，使测试跨平台可运行。"""
+        import contextlib
+
+        from harness_agent.config_change_service import ConfigChangeService
+
+        @contextlib.contextmanager
+        def _noop_lock(self: ConfigChangeService) -> Iterator[None]:
+            yield
+
+        def _simple_write(self: ConfigChangeService, content: str) -> None:
+            self._target_path.parent.mkdir(parents=True, exist_ok=True)
+            self._target_path.write_text(content, encoding="utf-8")
+
+        monkeypatch.setattr(ConfigChangeService, "_exclusive_lock", _noop_lock)
+        monkeypatch.setattr(ConfigChangeService, "_write_atomic", _simple_write)
+
+    def _make_service(self, tmp_path: Path, *, managed_policy: object = None) -> ConfigChangeService:
+        """构建带有效用户配置的 ConfigChangeService。"""
+        home = tmp_path / "home"
+        harness_dir = home / ".harness"
+        harness_dir.mkdir(parents=True)
+        config_file = harness_dir / "config.toml"
+        config_file.write_text(
+            '[config]\nversion = 1\n\n[models]\ndefault_profile = "default"\n\n'
+            '[models.profiles.default]\nprovider = "openai-compatible"\nmodel = "gpt-4o"\n'
+            'base_url = "https://gateway.example/v1"\napi_key_env = "KEY"\n',
+            encoding="utf-8",
+        )
+        return ConfigChangeService(
+            workspace=tmp_path / "ws",
+            home=home,
+            environ={"KEY": "test-key"},
+            managed_policy=managed_policy,
+        )
+
+    def test_add_mcp_server_success(self, tmp_path: Path) -> None:
+        service = self._make_service(tmp_path)
+        snapshot = service.add_mcp_server(
+            {"name": "my-server", "transport": "stdio", "command": "npx", "args": ["-y", "mcp"]}
+        )
+        assert snapshot.revision != "missing"
+        assert len(snapshot.servers) == 1
+        assert snapshot.servers[0].name == "my-server"
+        # 验证文件已写入
+        config_content = (tmp_path / "home" / ".harness" / "config.toml").read_text(encoding="utf-8")
+        assert "my-server" in config_content
+
+    def test_add_mcp_server_duplicate_rejected(self, tmp_path: Path) -> None:
+        service = self._make_service(tmp_path)
+        service.add_mcp_server({"name": "srv", "transport": "stdio", "command": "cmd"})
+        with pytest.raises(ConfigChangeError, match="已存在"):
+            service.add_mcp_server({"name": "srv", "transport": "http", "url": "http://x"})
+
+    def test_add_mcp_server_invalid_name_rejected(self, tmp_path: Path) -> None:
+        service = self._make_service(tmp_path)
+        with pytest.raises(ConfigChangeError) as exc_info:
+            service.add_mcp_server({"name": "", "transport": "stdio", "command": "cmd"})
+        assert exc_info.value.code == "MCP_SERVER_NAME_INVALID"
+
+    def test_add_mcp_server_cas_conflict(self, tmp_path: Path) -> None:
+        service = self._make_service(tmp_path)
+        with pytest.raises(ConfigChangeError) as exc_info:
+            service.add_mcp_server(
+                {"name": "srv", "transport": "stdio", "command": "cmd"},
+                expected_revision="stale-revision",
+            )
+        assert exc_info.value.code == "CONFIG_REVISION_CONFLICT"
+
+    def test_add_mcp_server_managed_policy_locked(self, tmp_path: Path) -> None:
+        policy = ManagedConfigPolicy(locked_fields={"mcp.servers": "MANAGED_POLICY_LOCKED"})
+        service = self._make_service(tmp_path, managed_policy=policy)
+        with pytest.raises(ConfigChangeError) as exc_info:
+            service.add_mcp_server({"name": "srv", "transport": "stdio", "command": "cmd"})
+        assert exc_info.value.code == "MANAGED_POLICY_LOCKED"
+
+    def test_remove_mcp_server_success(self, tmp_path: Path) -> None:
+        service = self._make_service(tmp_path)
+        service.add_mcp_server({"name": "srv", "transport": "stdio", "command": "cmd"})
+        snapshot = service.remove_mcp_server("srv")
+        assert len(snapshot.servers) == 0
+        config_content = (tmp_path / "home" / ".harness" / "config.toml").read_text(encoding="utf-8")
+        assert "srv" not in config_content or "servers" in config_content
+
+    def test_remove_mcp_server_not_found(self, tmp_path: Path) -> None:
+        service = self._make_service(tmp_path)
+        with pytest.raises(ConfigChangeError) as exc_info:
+            service.remove_mcp_server("nonexistent")
+        assert exc_info.value.code == "MCP_SERVER_NOT_FOUND"
+
+    def test_remove_mcp_server_cas_conflict(self, tmp_path: Path) -> None:
+        service = self._make_service(tmp_path)
+        service.add_mcp_server({"name": "srv", "transport": "stdio", "command": "cmd"})
+        with pytest.raises(ConfigChangeError) as exc_info:
+            service.remove_mcp_server("srv", expected_revision="stale")
+        assert exc_info.value.code == "CONFIG_REVISION_CONFLICT"
+
+    def test_add_mcp_server_preserves_other_sections(self, tmp_path: Path) -> None:
+        service = self._make_service(tmp_path)
+        service.add_mcp_server({"name": "srv", "transport": "stdio", "command": "cmd"})
+        config_content = (tmp_path / "home" / ".harness" / "config.toml").read_text(encoding="utf-8")
+        assert "default_profile" in config_content
+        assert "gpt-4o" in config_content
+
+    def test_add_mcp_server_audit_recorded(self, tmp_path: Path) -> None:
+        service = self._make_service(tmp_path)
+        service.add_mcp_server({"name": "srv", "transport": "stdio", "command": "cmd"})
+        audits = service.audits
+        assert len(audits) >= 1
+        assert audits[-1].action == "commit"
+        assert "mcp.servers" in audits[-1].fields
+
+    def test_add_mcp_server_write_failure_preserves_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        service = self._make_service(tmp_path)
+        original_content = (tmp_path / "home" / ".harness" / "config.toml").read_text(encoding="utf-8")
+
+        # 模拟写盘失败
+        def _fail_write(self_inner: object, content: str) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(type(service), "_write_atomic", _fail_write)
+        with pytest.raises(ConfigChangeError) as exc_info:
+            service.add_mcp_server({"name": "srv", "transport": "stdio", "command": "cmd"})
+        assert exc_info.value.code == "CONFIG_WRITE_FAILED"
+
+        # 文件内容不变
+        assert (tmp_path / "home" / ".harness" / "config.toml").read_text(encoding="utf-8") == original_content

@@ -147,15 +147,76 @@ def expand_env_vars(value: str) -> str | None:
 def mcp_config_fingerprint(configs: list[McpServerConfig]) -> str:
     """计算 MCP 配置的脱敏 SHA-256 指纹。
 
-    仅包含服务器名称和传输类型，不包含命令路径、URL、凭据。
+    包含所有影响运行行为的非秘密字段：name、transport、command（stdio）、
+    url（http/sse）、args、env 变量名列表（仅 key）、header 引用名列表（仅 key）、
+    timeout_seconds。不包含 env 变量值、header 值或任何 token/秘密。
     无配置时返回与 {"transport": "disabled"} 一致的固定值。
     """
     from harness_agent.runtime_profile import component_fingerprint
 
     if not configs:
         return component_fingerprint({"transport": "disabled"})
-    entries = [{"name": c.name, "transport": c.transport} for c in sorted(configs, key=lambda c: c.name)]
+    entries = []
+    for c in sorted(configs, key=lambda c: c.name):
+        entry: dict[str, object] = {
+            "name": c.name,
+            "transport": c.transport,
+            "args": list(c.args),
+            "env_keys": sorted(c.env.keys()),
+            "header_keys": sorted(c.headers.keys()),
+            "timeout_seconds": c.timeout_seconds,
+        }
+        if c.transport == "stdio":
+            entry["command"] = c.command
+        if c.transport in ("http", "sse"):
+            entry["url"] = c.url
+        entries.append(entry)
     return component_fingerprint({"servers": entries})
+
+
+@dataclass(frozen=True, slots=True)
+class McpConfigSnapshot:
+    """Host 认可的不可变 MCP 配置快照。
+
+    作为 McpConnectionManager 和 RuntimeProfile 的唯一配置真相来源，
+    消除持久化文件、连接管理器和 Runtime 身份之间的多副本不一致。
+    """
+
+    servers: tuple[McpServerConfig, ...]
+    digest: str
+    revision: str
+    runtime_identity: dict[str, object] = field(default_factory=dict)
+
+
+def build_mcp_snapshot(servers: list[McpServerConfig] | tuple[McpServerConfig, ...], revision: str) -> McpConfigSnapshot:
+    """从已校验配置列表构建不可变 MCP 快照。
+
+    servers 按 name 排序后冻结；digest 使用扩充后的 fingerprint；
+    runtime_identity 包含脱敏的运行相关字段摘要。
+    """
+    from harness_agent.runtime_profile import component_fingerprint
+
+    ordered = tuple(sorted(servers, key=lambda c: c.name))
+    fingerprint = mcp_config_fingerprint(list(ordered))
+    identity: dict[str, object] = {
+        "server_count": len(ordered),
+        "fingerprint": fingerprint,
+        "servers": [
+            {
+                "name": c.name,
+                "transport": c.transport,
+                "env_keys": sorted(c.env.keys()),
+                "header_keys": sorted(c.headers.keys()),
+            }
+            for c in ordered
+        ],
+    }
+    return McpConfigSnapshot(
+        servers=ordered,
+        digest=fingerprint,
+        revision=revision,
+        runtime_identity=identity,
+    )
 
 
 class McpConnectionManager:

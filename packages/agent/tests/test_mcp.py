@@ -180,11 +180,11 @@ class TestMcpConfigFingerprint:
         c2 = [McpServerConfig(name="b", transport="http", url="http://b")]
         assert mcp_config_fingerprint(c1) != mcp_config_fingerprint(c2)
 
-    def test_fingerprint_ignores_command_and_url(self):
-        """脱敏：不同命令/URL 但相同名称和传输类型产生相同指纹。"""
+    def test_fingerprint_sensitive_to_command(self):
+        """扩充后：不同命令产生不同指纹（command 影响运行行为）。"""
         c1 = [McpServerConfig(name="srv", transport="stdio", command="cmd-a")]
         c2 = [McpServerConfig(name="srv", transport="stdio", command="cmd-b")]
-        assert mcp_config_fingerprint(c1) == mcp_config_fingerprint(c2)
+        assert mcp_config_fingerprint(c1) != mcp_config_fingerprint(c2)
 
     def test_fingerprint_is_64_hex(self):
         configs = [McpServerConfig(name="x", transport="stdio", command="y")]
@@ -468,3 +468,132 @@ class TestMcpHotConnectDisconnect:
     def test_remove_nonexistent_server(self) -> None:
         manager = McpConnectionManager([])
         assert manager.remove_server("nonexistent") is False
+
+
+class TestMcpConfigSnapshot:
+    """McpConfigSnapshot 构建和不可变性测试。"""
+
+    def test_build_snapshot_sorts_by_name(self):
+        from harness_agent.mcp import McpServerConfig, build_mcp_snapshot
+
+        servers = [
+            McpServerConfig(name="zeta", transport="stdio", command="z"),
+            McpServerConfig(name="alpha", transport="http", url="http://a"),
+        ]
+        snapshot = build_mcp_snapshot(servers, revision="rev1")
+        assert snapshot.servers[0].name == "alpha"
+        assert snapshot.servers[1].name == "zeta"
+
+    def test_build_snapshot_digest_stable(self):
+        from harness_agent.mcp import McpServerConfig, build_mcp_snapshot
+
+        servers = [McpServerConfig(name="a", transport="stdio", command="cmd")]
+        s1 = build_mcp_snapshot(servers, revision="r1")
+        s2 = build_mcp_snapshot(servers, revision="r1")
+        assert s1.digest == s2.digest
+
+    def test_build_snapshot_revision_preserved(self):
+        from harness_agent.mcp import McpServerConfig, build_mcp_snapshot
+
+        servers = [McpServerConfig(name="a", transport="stdio", command="cmd")]
+        snapshot = build_mcp_snapshot(servers, revision="abc123")
+        assert snapshot.revision == "abc123"
+
+    def test_build_snapshot_empty_servers(self):
+        from harness_agent.mcp import build_mcp_snapshot
+
+        snapshot = build_mcp_snapshot([], revision="rev")
+        assert snapshot.servers == ()
+        assert snapshot.runtime_identity["server_count"] == 0
+
+    def test_snapshot_runtime_identity_no_secrets(self):
+        from harness_agent.mcp import McpServerConfig, build_mcp_snapshot
+
+        servers = [
+            McpServerConfig(
+                name="s",
+                transport="stdio",
+                command="cmd",
+                env={"SECRET_TOKEN": "super-secret-value"},
+                headers={"Authorization": "Bearer xyz"},
+            )
+        ]
+        snapshot = build_mcp_snapshot(servers, revision="r")
+        identity_str = str(snapshot.runtime_identity)
+        assert "super-secret-value" not in identity_str
+        assert "Bearer xyz" not in identity_str
+        assert "SECRET_TOKEN" in identity_str  # key name is included
+        assert "Authorization" in identity_str  # key name is included
+
+
+class TestMcpConfigFingerprintExpanded:
+    """扩充后的 mcp_config_fingerprint 敏感性和脱敏测试。"""
+
+    def test_fingerprint_sensitive_to_command(self):
+        from harness_agent.mcp import McpServerConfig, mcp_config_fingerprint
+
+        c1 = [McpServerConfig(name="s", transport="stdio", command="cmd-a")]
+        c2 = [McpServerConfig(name="s", transport="stdio", command="cmd-b")]
+        assert mcp_config_fingerprint(c1) != mcp_config_fingerprint(c2)
+
+    def test_fingerprint_sensitive_to_url(self):
+        from harness_agent.mcp import McpServerConfig, mcp_config_fingerprint
+
+        c1 = [McpServerConfig(name="s", transport="http", url="http://a")]
+        c2 = [McpServerConfig(name="s", transport="http", url="http://b")]
+        assert mcp_config_fingerprint(c1) != mcp_config_fingerprint(c2)
+
+    def test_fingerprint_sensitive_to_args(self):
+        from harness_agent.mcp import McpServerConfig, mcp_config_fingerprint
+
+        c1 = [McpServerConfig(name="s", transport="stdio", command="cmd", args=("--x",))]
+        c2 = [McpServerConfig(name="s", transport="stdio", command="cmd", args=("--y",))]
+        assert mcp_config_fingerprint(c1) != mcp_config_fingerprint(c2)
+
+    def test_fingerprint_sensitive_to_env_key_names(self):
+        from harness_agent.mcp import McpServerConfig, mcp_config_fingerprint
+
+        c1 = [McpServerConfig(name="s", transport="stdio", command="cmd", env={"VAR_A": "val"})]
+        c2 = [McpServerConfig(name="s", transport="stdio", command="cmd", env={"VAR_B": "val"})]
+        assert mcp_config_fingerprint(c1) != mcp_config_fingerprint(c2)
+
+    def test_fingerprint_insensitive_to_env_values(self):
+        from harness_agent.mcp import McpServerConfig, mcp_config_fingerprint
+
+        c1 = [McpServerConfig(name="s", transport="stdio", command="cmd", env={"TOKEN": "secret-1"})]
+        c2 = [McpServerConfig(name="s", transport="stdio", command="cmd", env={"TOKEN": "secret-2"})]
+        assert mcp_config_fingerprint(c1) == mcp_config_fingerprint(c2)
+
+    def test_fingerprint_sensitive_to_header_key_names(self):
+        from harness_agent.mcp import McpServerConfig, mcp_config_fingerprint
+
+        c1 = [McpServerConfig(name="s", transport="http", url="http://x", headers={"X-Key": "v"})]
+        c2 = [McpServerConfig(name="s", transport="http", url="http://x", headers={"Y-Key": "v"})]
+        assert mcp_config_fingerprint(c1) != mcp_config_fingerprint(c2)
+
+    def test_fingerprint_insensitive_to_header_values(self):
+        from harness_agent.mcp import McpServerConfig, mcp_config_fingerprint
+
+        c1 = [McpServerConfig(name="s", transport="http", url="http://x", headers={"Auth": "token-a"})]
+        c2 = [McpServerConfig(name="s", transport="http", url="http://x", headers={"Auth": "token-b"})]
+        assert mcp_config_fingerprint(c1) == mcp_config_fingerprint(c2)
+
+    def test_fingerprint_sensitive_to_timeout(self):
+        from harness_agent.mcp import McpServerConfig, mcp_config_fingerprint
+
+        c1 = [McpServerConfig(name="s", transport="stdio", command="cmd", timeout_seconds=10)]
+        c2 = [McpServerConfig(name="s", transport="stdio", command="cmd", timeout_seconds=60)]
+        assert mcp_config_fingerprint(c1) != mcp_config_fingerprint(c2)
+
+    def test_fingerprint_order_independent(self):
+        from harness_agent.mcp import McpServerConfig, mcp_config_fingerprint
+
+        c1 = [
+            McpServerConfig(name="a", transport="stdio", command="x"),
+            McpServerConfig(name="b", transport="http", url="http://b"),
+        ]
+        c2 = [
+            McpServerConfig(name="b", transport="http", url="http://b"),
+            McpServerConfig(name="a", transport="stdio", command="x"),
+        ]
+        assert mcp_config_fingerprint(c1) == mcp_config_fingerprint(c2)
