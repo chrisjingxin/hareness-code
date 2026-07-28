@@ -4,7 +4,7 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { resolve } from "node:path"
 
-import { clientCapabilities, validateInteractiveTerminal, validateWorkspace } from "../src/index"
+import { clientCapabilities, clientInteractionHandles, validateInteractiveTerminal, validateWorkspace } from "../src/index"
 import { parseArgs } from "../src/args"
 
 test("不存在的工作区会给出明确错误", () => {
@@ -32,14 +32,19 @@ test("根 dev 命令直接启动 CLI，避免 workspace 转发丢失 TTY", async
   expect(rootPackage.scripts.dev).toBe("bun packages/cli/src/index.ts")
 })
 
-test("无头 CLI 不协商审批或问答能力", () => {
-  expect(clientCapabilities(parseArgs(["-n", "读取 README"]))).toEqual([
+test("无头 CLI 不声明 Interaction handler", () => {
+  const headless = parseArgs(["-n", "读取 README"])
+  const interactive = parseArgs([])
+  expect(clientCapabilities(headless)).toEqual([
     "run.cancel",
     "run.multithread",
     "config.read",
   ])
-  expect(clientCapabilities(parseArgs([]))).toContain("interactive.approval")
-  expect(clientCapabilities(parseArgs([]))).toContain("interactive.question")
-  expect(clientCapabilities(parseArgs([]))).toContain("threads.read")
-  expect(clientCapabilities(parseArgs([]))).toContain("context.manage")
+  expect(clientInteractionHandles(headless)).toEqual([])
+  expect(clientInteractionHandles(interactive)).toEqual(["approval", "question"])
+  expect(clientCapabilities(interactive)).toContain("threads.read")
+  expect(clientCapabilities(interactive)).toContain("context.manage")
+  expect(clientCapabilities(interactive)).toContain("host.attach")
+  expect(clientCapabilities(interactive)).toContain("mcp.read")
+  expect(clientCapabilities(interactive)).toContain("mcp.manage")
 })

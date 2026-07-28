@@ -9,7 +9,7 @@
   },
   "scripts": {
     "dev": "bun run src/index.ts",
-    "build": "bun build src/index.ts --outdir dist --target bun --external @opentui/core --external @opentui/react --external react --external react-reconciler",
+    "build": "bun build src/web/app.ts --outfile dist/web.js --target browser --minify && bun build src/index.ts --outdir dist --target bun --external @opentui/core --external @opentui/react --external react --external react-reconciler",
     "syntax:assets": "bun run scripts/vendor-syntax-assets.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "bun test"

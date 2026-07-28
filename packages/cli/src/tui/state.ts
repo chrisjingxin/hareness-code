@@ -1,6 +1,6 @@
 /** 把 sidecar 流事件折叠为可被 OpenTUI 渲染的确定性状态。 */
 
-import type { EventEnvelope, InteractionRequestEnvelope } from "@za38/protocol"
+import { EventType, type EventEnvelope, type InteractionRequestEnvelope } from "@za38/protocol"
 
 export type MessageRole = "user" | "assistant" | "system"
 
@@ -201,12 +201,11 @@ export function markRunFailed(state: TuiState, runId: string, message: string): 
   }
 }
 
-/** 接收 Agent 的反向交互请求，并让它与流事件共享同一 sequence。 */
+/** 接收 Agent 的反向交互请求；Interaction 不占用公开事件 sequence。 */
 export function applyInteractionRequest(state: TuiState, request: InteractionRequestEnvelope): TuiState {
   const active = state.activeRun
   if (!active || active.threadId !== request.thread_id || active.runId !== request.run_id) return state
-  const next = acceptSequence(state, request.thread_id, request.run_id, request.sequence)
-  if (!next) return state
+  const next = state
   if (request.type === "approval") {
     const approval: PendingApproval = {
       requestId: request.request_id,
@@ -255,13 +254,15 @@ export function applyAgentEvent(state: TuiState, event: EventEnvelope): TuiState
   if (!active || active.threadId !== event.thread_id || active.runId !== event.run_id) return state
   const next = acceptSequence(state, event.thread_id, event.run_id, event.sequence)
   if (!next) return state
-  const payload = event.payload
   const runId = event.run_id
 
   switch (event.type) {
-    case "run.started":
+    case EventType.RUN_STARTED: {
+      const payload = event.payload
       return { ...next, status: payload.resumed ? "已恢复执行" : "正在思考" }
-    case "skill.loaded":
+    }
+    case EventType.SKILL_LOADED: {
+      const payload = event.payload
       return {
         ...next,
         status: "正在思考",
@@ -278,13 +279,15 @@ export function applyAgentEvent(state: TuiState, event: EventEnvelope): TuiState
           },
         ],
       }
-    case "content.delta":
+    }
+    case EventType.CONTENT_DELTA: {
+      const payload = event.payload
       return typeof payload.text === "string"
         ? { ...next, timeline: appendAssistantDelta(next.timeline, runId, payload.text), status: "正在生成" }
         : next
-    case "thinking.delta":
-      return { ...next, status: "正在思考" }
-    case "tool.started":
+    }
+    case EventType.TOOL_STARTED: {
+      const payload = event.payload
       return {
         ...next,
         status: "正在调用工具",
@@ -297,10 +300,12 @@ export function applyAgentEvent(state: TuiState, event: EventEnvelope): TuiState
           status: "running",
         }),
       }
-    case "tool.delta":
-      return applyToolDelta(next, runId, payload)
-    case "tool.completed":
+    }
+    case EventType.TOOL_DELTA:
+      return applyToolDelta(next, runId, event.payload)
+    case EventType.TOOL_COMPLETED:
       {
+        const payload = event.payload
         const result = objectRecord(payload.result)
         const toolId = stringValue(payload.tool_call_id, `tool-${runId}`)
         return {
@@ -315,13 +320,16 @@ export function applyAgentEvent(state: TuiState, event: EventEnvelope): TuiState
           }),
         }
       }
-    case "context.updated":
+    case EventType.CONTEXT_UPDATED: {
+      const payload = event.payload
       return {
         ...next,
         status: contextStatus(payload),
         timeline: appendNotice(next, contextNotice(payload)).timeline,
       }
-    case "interaction.resolved":
+    }
+    case EventType.INTERACTION_RESOLVED: {
+      const payload = event.payload
       return {
         ...next,
         pendingApproval: undefined,
@@ -329,7 +337,9 @@ export function applyAgentEvent(state: TuiState, event: EventEnvelope): TuiState
         status: "正在继续执行",
         timeline: resolveInteraction(next.timeline, runId, stringValue(payload.request_id, "")),
       }
-    case "run.completed":
+    }
+    case EventType.RUN_COMPLETED: {
+      const payload = event.payload
       return {
         ...next,
         activeRun: undefined,
@@ -345,7 +355,9 @@ export function applyAgentEvent(state: TuiState, event: EventEnvelope): TuiState
         },
         timeline: finishAssistant(settlePendingInteractions(next.timeline, runId), runId),
       }
-    case "run.cancelled":
+    }
+    case EventType.RUN_CANCELLED: {
+      const payload = event.payload
       return {
         ...next,
         activeRun: undefined,
@@ -355,8 +367,9 @@ export function applyAgentEvent(state: TuiState, event: EventEnvelope): TuiState
         lastRun: { runId, outcome: "cancelled" },
         timeline: finishAssistant(settlePendingInteractions(next.timeline, runId), runId, `\n已取消：${stringValue(payload.reason, "用户取消")}`),
       }
-    case "run.failed":
-      return markRunFailed(next, runId, stringValue(objectRecord(payload.error).message, "Agent 运行失败"))
+    }
+    case EventType.RUN_FAILED:
+      return markRunFailed(next, runId, stringValue(event.payload.error.message, "Agent 运行失败"))
     default:
       return next
   }
@@ -583,7 +596,7 @@ function questionOptions(value: unknown): Array<{ name: string; value: string }>
 }
 
 /** 从完整问题组提取当前 UI 能渲染的首题和选项。 */
-function questionRequest(request: InteractionRequestEnvelope): PendingQuestion {
+function questionRequest(request: Extract<InteractionRequestEnvelope, { type: "question" }>): PendingQuestion {
   const questions = request.payload.questions
   const firstQuestion = Array.isArray(questions) && questions[0] && typeof questions[0] === "object"
     ? questions[0] as Record<string, unknown>

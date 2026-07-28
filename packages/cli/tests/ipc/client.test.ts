@@ -1,18 +1,30 @@
-/** v2 双向 Peer 的 JSONL、错误、反向请求与资源边界测试。 */
+/** v3 AgentClient 的 JSONL、错误、Interaction 与资源边界测试。 */
 
 import { expect, test } from "bun:test"
 import { PassThrough } from "node:stream"
-import { IpcClient, JsonRpcRemoteError } from "../../src/ipc/client"
+import { AgentClient, JsonRpcRemoteError } from "../../src/ipc/client"
+import { StdioRpcTransport } from "../../src/ipc/stdio-transport"
 
 test("Peer 使用字符串 ID 发送请求并保留远端错误", async () => {
   const { client, stdin, stdout } = peer()
   stdin.on("data", data => {
     const message = JSON.parse(data.toString())
-    stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, error: { code: -32010, message: "配置错误", data: { field: "model" } } }) + "\n")
+    stdout.write(JSON.stringify({
+      jsonrpc: "2.0",
+      id: message.id,
+      error: {
+        code: -32010,
+        message: "配置错误",
+        data: { code: "INTERNAL_ERROR", retryable: false, details: { field: "model" } },
+      },
+    }) + "\n")
   })
-  const error = await client.call("config.show").catch(value => value)
+  const error = await client.request("config.show", {}).catch(value => value)
   expect(error).toBeInstanceOf(JsonRpcRemoteError)
-  expect(error).toMatchObject({ code: -32010, data: { field: "model" } })
+  expect(error).toMatchObject({
+    code: -32010,
+    data: { code: "INTERNAL_ERROR", retryable: false, details: { field: "model" } },
+  })
 })
 
 test("Peer 在 run.start 中携带显式 requested_skill", async () => {
@@ -21,37 +33,49 @@ test("Peer 在 run.start 中携带显式 requested_skill", async () => {
   stdin.on("data", data => {
     const message = JSON.parse(data.toString())
     requests.push(message)
-    stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { thread_id: "t", run_id: "r", accepted: true } }) + "\n")
+    stdout.write(JSON.stringify({
+      jsonrpc: "2.0",
+      id: message.id,
+      result: { thread_id: message.params.thread_id, run_id: message.params.run_id, accepted: true },
+    }) + "\n")
   })
-  await client.startRun("检查", "t", "r", { id: "project/review", args: "快速" })
-  expect(requests[0].params).toEqual({ message: "检查", thread_id: "t", run_id: "r", requested_skill: { id: "project/review", args: "快速" } })
-})
-
-test("Peer 在首次 run.start 中携带待绑定 model_profile", async () => {
-  const { client, stdin, stdout } = peer()
-  const requests: any[] = []
-  stdin.on("data", data => {
-    const message = JSON.parse(data.toString())
-    requests.push(message)
-    stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { thread_id: "t", run_id: "r", accepted: true } }) + "\n")
+  const run = client.startRun({
+    message: "检查",
+    threadId: "t",
+    requestedSkill: { id: "project/review", args: "快速" },
   })
-  await client.startRun("使用 pro", "t", "r", undefined, "pro")
-  expect(requests[0].params).toEqual({ message: "使用 pro", thread_id: "t", run_id: "r", model_profile: "pro" })
-})
-
-test("Peer 在每次 run.start 中携带 Thread 模型选择", async () => {
-  const { client, stdin, stdout } = peer()
-  const requests: any[] = []
-  stdin.on("data", data => {
-    const message = JSON.parse(data.toString())
-    requests.push(message)
-    stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { thread_id: "t", run_id: "r", accepted: true } }) + "\n")
-  })
-  await client.startRun("继续使用 pro", "t", "r", undefined, undefined, { primary_profile: "pro" })
+  await run.accepted
   expect(requests[0].params).toEqual({
-    message: "继续使用 pro",
+    message: "检查",
     thread_id: "t",
-    run_id: "r",
+    run_id: run.ref.runId,
+    requested_skill: { id: "project/review", args: "快速" },
+  })
+})
+
+test("AgentRun 使用原生 UUID 并携带 Thread 模型选择", async () => {
+  const { client, stdin, stdout } = peer()
+  const requests: any[] = []
+  stdin.on("data", data => {
+    const message = JSON.parse(data.toString())
+    requests.push(message)
+    stdout.write(JSON.stringify({
+      jsonrpc: "2.0",
+      id: message.id,
+      result: { thread_id: message.params.thread_id, run_id: message.params.run_id, accepted: true },
+    }) + "\n")
+  })
+  const run = client.startRun({
+    message: "使用 pro",
+    threadId: "t",
+    modelSelection: { primary_profile: "pro" },
+  })
+  await run.accepted
+  expect(run.ref.runId).toMatch(/^[0-9a-f-]{36}$/)
+  expect(requests[0].params).toEqual({
+    message: "使用 pro",
+    thread_id: "t",
+    run_id: run.ref.runId,
     model_selection: { primary_profile: "pro" },
   })
 })
@@ -84,7 +108,16 @@ test("Peer 处理半帧、多帧和统一 event", async () => {
   const events: any[] = []
   client.on("event", event => events.push(event))
   const first = JSON.stringify({ jsonrpc: "2.0", method: "event", params: envelope("content.delta", 1, { text: "你好" }) })
-  const second = JSON.stringify({ jsonrpc: "2.0", method: "event", params: envelope("run.completed", 2, {}) })
+  const second = JSON.stringify({
+    jsonrpc: "2.0",
+    method: "event",
+    params: envelope("run.completed", 2, {
+      usage: { input_tokens: 1, output_tokens: 1 },
+      duration_ms: 1,
+      finish_reason: "stop",
+      context: {},
+    }),
+  })
   const bytes = Buffer.from(`${first}\n${second}\n`)
   stdout.write(bytes.subarray(0, 23))
   stdout.write(bytes.subarray(23))
@@ -98,8 +131,8 @@ test("Peer 响应 Agent 发起的审批 request", async () => {
   const responses: any[] = []
   stdin.on("data", data => responses.push(...data.toString().trim().split("\n").map(JSON.parse)))
   stdout.write(JSON.stringify({
-    jsonrpc: "2.0", method: "request", id: "approval-1",
-    params: { request_id: "approval-1", type: "approval", thread_id: "t", run_id: "r", sequence: 1, timeout_ms: 1000, payload: { interrupt_id: "approval-1", description: "写文件", requests: {}, decisions: ["approve_once", "reject"] } },
+    jsonrpc: "2.0", method: "interaction.approval", id: "approval-1",
+    params: { thread_id: "t", run_id: "r", timeout_ms: 1000, payload: { interrupt_id: "approval-1", description: "写文件", requests: {}, decisions: ["approve_once", "reject"] } },
   }) + "\n")
   await Bun.sleep(10)
   expect(responses[0]).toMatchObject({ id: "approval-1", result: { decision: "reject" } })
@@ -109,7 +142,7 @@ test("Peer 对畸形反向 request 返回结构化错误", async () => {
   const { stdin, stdout } = peer()
   const responses: any[] = []
   stdin.on("data", data => responses.push(JSON.parse(data.toString())))
-  stdout.write(JSON.stringify({ jsonrpc: "2.0", method: "request", id: "bad-1", params: { type: "approval" } }) + "\n")
+  stdout.write(JSON.stringify({ jsonrpc: "2.0", method: "interaction.approval", id: "bad-1", params: {} }) + "\n")
   await Bun.sleep(10)
   expect(responses[0]).toMatchObject({ id: "bad-1", error: { code: -32602 } })
 })
@@ -118,7 +151,7 @@ test("Peer 拒绝超过限制的无换行帧并关闭 pending 请求", async () 
   const { client, stdout } = peer(64)
   const errors: Error[] = []
   client.on("protocolError", error => errors.push(error))
-  const pending = client.call("config.show", {}, 0).catch(error => error)
+  const pending = client.request("config.show", {}, 0).catch(error => error)
   stdout.write("x".repeat(65))
   expect(await pending).toBeInstanceOf(Error)
   expect(errors[0]?.message).toContain("exceeds")
@@ -127,7 +160,7 @@ test("Peer 拒绝超过限制的无换行帧并关闭 pending 请求", async () 
 function peer(limit?: number) {
   const stdout = new PassThrough()
   const stdin = new PassThrough()
-  return { client: new IpcClient(stdin, stdout, limit), stdin, stdout }
+  return { client: new AgentClient(new StdioRpcTransport(stdin, stdout, limit)), stdin, stdout }
 }
 
 function envelope(type: string, sequence: number, payload: Record<string, unknown>) {

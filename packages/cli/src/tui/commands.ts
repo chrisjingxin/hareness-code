@@ -1,5 +1,7 @@
 /** TUI Slash Command 的 Registry、解析与可用性策略。 */
 
+import { Capability } from "@za38/protocol"
+
 /** 命令打开的交互入口类型；由 ZC-064 的 Result Adapter 映射为 TUI 副作用。 */
 export type CommandPresentation = "action" | "picker" | "viewer" | "dialog"
 
@@ -86,7 +88,7 @@ export type CommandMenuItem =
   | { kind: "skill"; skill: SkillMenuItem }
 
 /** 内置命令所需 capability 的全集，供旧的测试运行时提供兼容默认值。 */
-export const builtinCommandCapabilities = ["threads.read", "context.manage", "models.read", "models.select", "skills.read"] as const
+export const builtinCommandCapabilities = [Capability.THREADS_READ, Capability.CONTEXT_MANAGE, Capability.MODELS_READ, Capability.MODELS_SELECT, Capability.SKILLS_READ, Capability.HOST_ATTACH] as const
 
 /** 所有动态来源必须通过同一不可变 Registry 构造，避免覆盖内置命令或产生不确定别名。 */
 export class CommandRegistry {
@@ -166,13 +168,14 @@ export const commandRegistry = new CommandRegistry([
   { id: "system.quit", name: "quit", aliases: ["q"], description: "退出 za38", source: { type: "builtin" }, presentation: "action", suggested: true },
   { id: "thread.new", name: "new", aliases: ["clear"], description: "开启新的 thread", source: { type: "builtin" }, presentation: "dialog", suggested: true, safety: { confirmation: "when-running" } },
   { id: "thread.force-clear", name: "force-clear", description: "已废弃；请使用 /new", source: { type: "builtin" }, presentation: "action", deprecated: { replacement: "/new" } },
-  { id: "context.compact", name: "compact", description: "压缩当前 thread 上下文", source: { type: "builtin" }, presentation: "dialog", suggested: true, requirements: { capabilities: ["context.manage"], requiresThread: true, requiresIdle: true } },
+  { id: "context.compact", name: "compact", description: "压缩当前 thread 上下文", source: { type: "builtin" }, presentation: "dialog", suggested: true, requirements: { capabilities: [Capability.CONTEXT_MANAGE], requiresThread: true, requiresIdle: true } },
   { id: "system.status", name: "status", description: "显示运行状态", source: { type: "builtin" }, presentation: "viewer", suggested: true },
   { id: "system.version", name: "version", description: "显示版本", source: { type: "builtin" }, presentation: "viewer" },
-  { id: "thread.resume", name: "resume", aliases: ["continue", "threads"], description: "打开 thread 恢复选择器", source: { type: "builtin" }, presentation: "picker", suggested: true, requirements: { capabilities: ["threads.read"], requiresIdle: true } },
-  { id: "model.select", name: "model", aliases: ["models"], description: "选择当前 thread 下一次运行的模型 Profile", source: { type: "builtin" }, presentation: "picker", suggested: true, argumentHint: "[query]", requirements: { capabilities: ["models.read"], requiresIdle: true } },
-  { id: "skills.open", name: "skills", description: "打开 Skill 选择器", source: { type: "builtin" }, presentation: "picker", suggested: true, requirements: { capabilities: ["skills.read"] } },
+  { id: "thread.resume", name: "resume", aliases: ["continue", "threads"], description: "打开 thread 恢复选择器", source: { type: "builtin" }, presentation: "picker", suggested: true, requirements: { capabilities: [Capability.THREADS_READ], requiresIdle: true } },
+  { id: "model.select", name: "model", aliases: ["models"], description: "选择当前 thread 下一次运行的模型 Profile", source: { type: "builtin" }, presentation: "picker", suggested: true, argumentHint: "[query]", requirements: { capabilities: [Capability.MODELS_READ], requiresIdle: true } },
+  { id: "skills.open", name: "skills", description: "打开 Skill 选择器", source: { type: "builtin" }, presentation: "picker", suggested: true, requirements: { capabilities: [Capability.SKILLS_READ] } },
   { id: "mcp.manage", name: "mcp", description: "查看 MCP 服务器状态", source: { type: "builtin" }, presentation: "viewer", suggested: true },
+  { id: "host.web", name: "web", description: "在浏览器中附着当前 thread", source: { type: "builtin" }, presentation: "action", suggested: true, requirements: { capabilities: [Capability.HOST_ATTACH], requiresThread: true, requiresIdle: true } },
 ])
 
 /** 兼容既有帮助渲染器；内容仍完全由 Registry 生成。 */

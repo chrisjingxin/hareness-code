@@ -22,16 +22,19 @@ async def test_thread_rpc_requires_capability_and_only_lists_current_project(tmp
     async def capture(message: dict[str, Any]) -> None:
         frames.append(message)
 
-    server = JsonRpcServer(allow_echo=False, config_home=tmp_path / "home")
+    server = JsonRpcServer(
+        allow_echo=False,
+        config_home=tmp_path / "home",
+        workspace=project,
+    )
     server.send = capture
     await server.dispatch(
         _request(
             "initialize",
             {
-                "protocol": {"major": 2, "min_minor": 0, "max_minor": 2},
-                "client": {"name": "test", "version": "0.1.0"},
-                "capabilities": ["threads.read"],
-                "cwd": str(project),
+                "protocol": {"major": 3, "min_minor": 0, "max_minor": 0},
+                "client": {"name": "test", "version": "0.1.0", "kind": "test"},
+                "capabilities": {"requests": ["threads.read"], "handles": []},
             },
             "initialize",
         )
@@ -53,7 +56,7 @@ async def test_thread_rpc_requires_capability_and_only_lists_current_project(tmp
     await server.dispatch(_request("threads.open", {"thread_id": "thread-1"}, "open"))
     assert frames[-1]["error"]["code"] == -32004
     assert frames[-1]["error"]["message"] == "THREAD_NOT_RECOVERABLE"
-    await server.dispatch(_request("shutdown", {}, "shutdown"))
+    await server.close()
 
 
 async def test_thread_rpc_rejects_unnegotiated_reads(tmp_path: Path) -> None:
@@ -65,19 +68,22 @@ async def test_thread_rpc_rejects_unnegotiated_reads(tmp_path: Path) -> None:
     async def capture(message: dict[str, Any]) -> None:
         frames.append(message)
 
-    server = JsonRpcServer(allow_echo=False, config_home=tmp_path / "home")
+    server = JsonRpcServer(
+        allow_echo=False,
+        config_home=tmp_path / "home",
+        workspace=tmp_path,
+    )
     server.send = capture
     await server.dispatch(
         _request(
             "initialize",
             {
-                "protocol": {"major": 2, "min_minor": 0, "max_minor": 2},
-                "client": {"name": "test", "version": "0.1.0"},
-                "capabilities": [],
-                "cwd": str(tmp_path),
+                "protocol": {"major": 3, "min_minor": 0, "max_minor": 0},
+                "client": {"name": "test", "version": "0.1.0", "kind": "test"},
+                "capabilities": {"requests": [], "handles": []},
             },
             "initialize",
         )
     )
     await server.dispatch(_request("threads.list", {}, "list"))
-    assert frames[-1]["error"] == {"code": -32002, "message": "THREADS_CAPABILITY_REQUIRED"}
+    assert frames[-1]["error"]["data"]["code"] == "CAPABILITY_REQUIRED"

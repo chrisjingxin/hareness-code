@@ -44,6 +44,7 @@ export type CommandResult =
   | CommandRpcResult
   | { type: "submit-prompt"; prompt: string; requestedSkill?: RequestedSkill }
   | { type: "mcp"; argument?: string }
+  | { type: "web"; threadId: string }
 
 /** Dispatcher 所需的最小状态快照；展示文案由调用方在进入 Handler 前生成。 */
 export type CommandDispatchContext = {
@@ -116,6 +117,9 @@ const builtinHandlers: Readonly<Record<string, CommandHandler>> = {
   "model.select": context => ({ type: "open-picker", picker: "models", initialQuery: context.command.argument }),
   "skills.open": () => ({ type: "open-picker", picker: "skills" }),
   "mcp.manage": context => ({ type: "mcp", argument: context.command.argument }),
+  "host.web": context => context.command.argument
+    ? notice("/web 不接受参数。")
+    : { type: "web", threadId: context.threadId! },
 }
 
 /** 生成统一 notice，减少 Handler 中重复的结构字面量。 */

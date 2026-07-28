@@ -1,4 +1,4 @@
-"""v2 JSON-RPC 握手、并发运行、双向交互和真实 stdio 回归测试。"""
+"""v3 JSON-RPC 握手、并发运行、双向交互和真实 stdio 回归测试。"""
 
 from __future__ import annotations
 
@@ -15,10 +15,42 @@ def _request(method: str, params: dict[str, Any], request_id: str) -> dict[str, 
 
 
 def _initialize_params(**overrides: Any) -> dict[str, Any]:
+    requested = overrides.pop(
+        "capabilities",
+        [
+            "run.cancel",
+            "run.multithread",
+            "config.read",
+            "threads.read",
+            "context.manage",
+            "skills.read",
+            "models.read",
+            "models.select",
+            "mcp.read",
+            "mcp.manage",
+            "config.write",
+            "skills.manage",
+            "interactive.approval",
+            "interactive.question",
+        ],
+    )
+    if isinstance(requested, list):
+        handles = [
+            capability.removeprefix("interactive.")
+            for capability in requested
+            if capability.startswith("interactive.")
+        ]
+        requested = [
+            capability
+            for capability in requested
+            if not capability.startswith("interactive.")
+        ]
+    else:
+        handles = []
     params: dict[str, Any] = {
-        "protocol": {"major": 2, "min_minor": 0, "max_minor": 0},
-        "client": {"name": "test", "version": "0.1.0"},
-        "capabilities": ["run.cancel", "run.multithread", "interactive.approval", "interactive.question"],
+        "protocol": {"major": 3, "min_minor": 0, "max_minor": 0},
+        "client": {"name": "test", "version": "0.1.0", "kind": "test"},
+        "capabilities": {"requests": requested, "handles": handles},
     }
     params.update(overrides)
     return params
@@ -48,15 +80,15 @@ def _event_types(frames: list[dict[str, Any]]) -> list[str]:
     return [frame["params"]["type"] for frame in frames if frame.get("method") == "event"]
 
 
-async def test_initialize_negotiates_v2_and_capabilities(tmp_path: Path):
+async def test_initialize_negotiates_v3_and_capabilities(tmp_path: Path):
     """握手返回选定 minor、能力交集、限制和脱敏配置摘要。"""
     from harness_agent.server import JsonRpcServer
 
     server = JsonRpcServer(allow_echo=True, config_home=tmp_path / "home")
     frames = await _capture_server(server)
     result = frames[0]["result"]
-    assert result["protocol"] == {"major": 2, "minor": 0}
-    assert "run.multithread" in result["enabled_capabilities"]
+    assert result["protocol"] == {"major": 3, "minor": 0}
+    assert "run.multithread" in result["capabilities"]["enabled"]
     assert result["limits"]["max_frame_bytes"] == 8 * 1024 * 1024
     assert result["config_summary"]["security"]["mode"] == "local"
 
@@ -116,7 +148,7 @@ async def test_config_show_exposes_redacted_runtime_pool_diagnostics(tmp_path: P
 async def test_config_write_rpc_previews_and_commits_user_default_model(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
-    """v2.8 配置写接口必须协商 capability、返回 CAS revision 并只修改用户白名单字段。"""
+    """v3 配置写接口必须协商 capability、返回 CAS revision 并只修改用户白名单字段。"""
     from harness_agent.server import JsonRpcServer
 
     home = tmp_path / "home"
@@ -153,13 +185,12 @@ executor = "fast"
         _request(
             "initialize",
             _initialize_params(
-                protocol={"major": 2, "min_minor": 8, "max_minor": 8},
                 capabilities=["config.write", "run.multithread"],
             ),
             "init-config-write",
         )
     )
-    assert "config.write" in frames[-1]["result"]["enabled_capabilities"]
+    assert "config.write" in frames[-1]["result"]["capabilities"]["enabled"]
 
     await server.dispatch(_request("config.details", {}, "config-details"))
     details = frames[-1]["result"]
@@ -210,8 +241,8 @@ executor = "fast"
     await server._close_thread_store()
 
 
-async def test_config_write_requires_v2_8_capability(tmp_path: Path) -> None:
-    """旧 minor 或未显式协商 config.write 的客户端不能调用配置写接口。"""
+async def test_config_write_requires_capability(tmp_path: Path) -> None:
+    """未显式协商 config.write 的客户端不能调用配置写接口。"""
     from harness_agent.server import JsonRpcServer
 
     server = JsonRpcServer(allow_echo=True, config_home=tmp_path / "home")
@@ -221,15 +252,14 @@ async def test_config_write_requires_v2_8_capability(tmp_path: Path) -> None:
         _request(
             "initialize",
             _initialize_params(
-                protocol={"major": 2, "min_minor": 0, "max_minor": 7},
-                capabilities=["config.write"],
+                capabilities=["config.read"],
             ),
             "init-config-write-old",
         )
     )
-    assert "config.write" not in frames[-1]["result"]["enabled_capabilities"]
+    assert "config.write" not in frames[-1]["result"]["capabilities"]["enabled"]
     await server.dispatch(_request("config.details", {}, "config-details-old"))
-    assert frames[-1]["error"]["message"] == "CONFIG_WRITE_CAPABILITY_REQUIRED"
+    assert frames[-1]["error"]["data"]["code"] == "CAPABILITY_REQUIRED"
 
     await server._close_runtime_pool()
     await server.dispatch(_request("config.show", {}, "config-runtime-closed"))
@@ -251,14 +281,18 @@ async def test_project_configuration_failure_prevents_agent_factory_invocation(t
         invoked = True
         return object()
 
-    server = JsonRpcServer(agent_factory=factory, config_home=tmp_path / "home")
+    server = JsonRpcServer(
+        agent_factory=factory,
+        config_home=tmp_path / "home",
+        workspace=workspace,
+    )
     frames: list[dict[str, Any]] = []
 
     async def capture(message: dict[str, Any]) -> None:
         frames.append(message)
 
     server.send = capture
-    await server.dispatch(_request("initialize", _initialize_params(cwd=str(workspace)), "init-project"))
+    await server.dispatch(_request("initialize", _initialize_params(), "init-project"))
     result = frames[0]["result"]
     assert result["config_summary"] is None
     assert result["startup_error"]["code"] == "CONFIGURATION_ERROR"
@@ -371,8 +405,8 @@ async def test_context_compact_rewrites_idle_thread_and_returns_context_summary(
     store = Store()
     agent = Agent()
     server = JsonRpcServer(agent=agent)
-    server._initialized = True
-    server._enabled_capabilities = {"context.manage"}
+    server._owner_connection.initialized = True
+    server._owner_connection.enabled_capabilities = {"context.manage"}
     server._thread_store = store  # type: ignore[assignment]
     server._context_compactor = Middleware()
     server._thread_persistence_enabled = lambda: True  # type: ignore[method-assign]
@@ -405,8 +439,8 @@ async def test_context_compact_rejects_active_run():
     from harness_agent.server import ActiveRun, JsonRpcServer
 
     server = JsonRpcServer()
-    server._initialized = True
-    server._enabled_capabilities = {"context.manage"}
+    server._owner_connection.initialized = True
+    server._owner_connection.enabled_capabilities = {"context.manage"}
     server._runs["thread"] = ActiveRun(thread_id="thread", run_id="run", message="运行中")
     frames: list[dict[str, Any]] = []
     server.send = lambda message: _append(frames, message)  # type: ignore[method-assign]
@@ -455,15 +489,13 @@ executor = "fast"
     monkeypatch.setenv("PRO_KEY", "pro-secret")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    server = JsonRpcServer(config_home=home)
+    server = JsonRpcServer(config_home=home, workspace=workspace)
     frames: list[dict[str, Any]] = []
     server.send = lambda message: _append(frames, message)  # type: ignore[method-assign]
     await server.dispatch(_request(
         "initialize",
         _initialize_params(
-            protocol={"major": 2, "min_minor": 0, "max_minor": 7},
             capabilities=["models.read", "models.select"],
-            cwd=str(workspace),
         ),
         "init-models",
     ))
@@ -672,8 +704,8 @@ async def test_default_context_compact_acquires_and_releases_profile_runtime(tmp
             self.updates.append(update)
 
     server = JsonRpcServer(config_home=tmp_path / "home")
-    server._initialized = True
-    server._enabled_capabilities = {"context.manage"}
+    server._owner_connection.initialized = True
+    server._owner_connection.enabled_capabilities = {"context.manage"}
     server._config = Za38Config(
         model=ModelSettings(name="fast", base_url="https://gateway.example/v1"),
         model_profile="default",
@@ -717,21 +749,26 @@ async def test_runtime_pool_capacity_is_reported_as_stable_rpc_error():
     from harness_agent.server import JsonRpcServer
 
     server = JsonRpcServer(allow_echo=True)
-    server._initialized = True
+    server._owner_connection.initialized = True
+    server._owner_connection.enabled_capabilities = {"config.read"}
 
     async def busy(_params: dict[str, Any], _request_id: str) -> None:
         raise RuntimePoolCapacityError("RUNTIME_POOL_CAPACITY_EXHAUSTED")
 
-    server._handlers["runtime.busy"] = busy
+    server._handlers["config.show"] = busy
     frames: list[dict[str, Any]] = []
     server.send = lambda message: _append(frames, message)  # type: ignore[method-assign]
 
-    await server.dispatch(_request("runtime.busy", {}, "busy"))
+    await server.dispatch(_request("config.show", {}, "busy"))
 
     assert frames[0]["error"] == {
         "code": -32030,
         "message": "RUNTIME_POOL_CAPACITY_EXHAUSTED",
-        "data": {"code": "RUNTIME_POOL_CAPACITY_EXHAUSTED"},
+        "data": {
+            "code": "INTERNAL_ERROR",
+            "retryable": False,
+            "details": {"code": "RUNTIME_POOL_CAPACITY_EXHAUSTED"},
+        },
     }
 
 
@@ -854,10 +891,10 @@ async def test_question_request_uses_standard_response_and_stable_question_id():
     server = JsonRpcServer(agent=AskAgent())
     frames = await _capture_server(server)
     await server.dispatch(_request("run.start", {"message": "开始", "thread_id": "t", "run_id": "r"}, "start"))
-    interaction = await _wait_for(frames, lambda frame: frame.get("method") == "request")
-    assert interaction["id"] == interaction["params"]["request_id"] == "ask-1"
+    interaction = await _wait_for(frames, lambda frame: frame.get("method") == "interaction.question")
+    assert interaction["id"] == "ask-1"
     assert interaction["params"]["payload"]["questions"][0]["id"] == "question-1"
-    await server.dispatch({"jsonrpc": "2.0", "id": "ask-1", "result": {"type": "question", "request_id": "ask-1", "answers": {"question-1": ["src"]}}})
+    await server.dispatch({"jsonrpc": "2.0", "id": "ask-1", "result": {"answers": {"question-1": ["src"]}}})
     await _wait_for(frames, lambda frame: frame.get("params", {}).get("type") == "run.completed")
     assert "interaction.resolved" in _event_types(frames)
 
@@ -882,8 +919,8 @@ async def test_real_hitl_rejection_prevents_file_write():
         server = JsonRpcServer(agent=agent)
         frames = await _capture_server(server)
         await server.dispatch(_request("run.start", {"message": "写入", "thread_id": "t", "run_id": "r"}, "start"))
-        interaction = await _wait_for(frames, lambda frame: frame.get("method") == "request")
-        await server.dispatch({"jsonrpc": "2.0", "id": interaction["id"], "result": {"type": "approval", "request_id": interaction["id"], "decision": "reject"}})
+        interaction = await _wait_for(frames, lambda frame: frame.get("method") == "interaction.approval")
+        await server.dispatch({"jsonrpc": "2.0", "id": interaction["id"], "result": {"decision": "reject"}})
         await _wait_for(frames, lambda frame: frame.get("params", {}).get("type") == "run.completed")
         assert not destination.exists()
 
@@ -934,7 +971,7 @@ async def test_workspace_rejection_precedes_default_approval_request():
         await _wait_for(frames, lambda frame: frame.get("params", {}).get("type") == "run.completed")
 
         assert not destination.exists()
-        assert not any(frame.get("method") == "request" for frame in frames)
+        assert not any(str(frame.get("method", "")).startswith("interaction.") for frame in frames)
 
 
 async def test_auto_edit_writes_without_interruption_but_shell_still_requires_approval():
@@ -984,7 +1021,7 @@ async def test_auto_edit_writes_without_interruption_but_shell_still_requires_ap
         )
         await _wait_for(write_frames, lambda frame: frame.get("params", {}).get("type") == "run.completed")
         assert (Path(workspace) / "auto.txt").read_text(encoding="utf-8") == "written"
-        assert not any(frame.get("method") == "request" for frame in write_frames)
+        assert not any(str(frame.get("method", "")).startswith("interaction.") for frame in write_frames)
 
         shell_model = ToolModel(
             responses=[
@@ -1011,13 +1048,13 @@ async def test_auto_edit_writes_without_interruption_but_shell_still_requires_ap
         await shell_server.dispatch(
             _request("run.start", {"message": "执行", "thread_id": "shell", "run_id": "shell-run"}, "shell-start")
         )
-        interaction = await _wait_for(shell_frames, lambda frame: frame.get("method") == "request")
-        assert interaction["params"]["type"] == "approval"
+        interaction = await _wait_for(shell_frames, lambda frame: frame.get("method") == "interaction.approval")
+        assert interaction["method"] == "interaction.approval"
         await shell_server.dispatch(
             {
                 "jsonrpc": "2.0",
                 "id": interaction["id"],
-                "result": {"type": "approval", "request_id": interaction["id"], "decision": "reject"},
+                "result": {"decision": "reject"},
             }
         )
         await _wait_for(shell_frames, lambda frame: frame.get("params", {}).get("type") == "run.completed")
@@ -1063,13 +1100,13 @@ async def test_batch_tool_call_approval_restores_one_decision_per_hanging_call()
         await server.dispatch(
             _request("run.start", {"message": "批量执行", "thread_id": "batch", "run_id": "batch-run"}, "batch-start")
         )
-        interaction = await _wait_for(frames, lambda frame: frame.get("method") == "request")
-        assert interaction["params"]["type"] == "approval"
+        interaction = await _wait_for(frames, lambda frame: frame.get("method") == "interaction.approval")
+        assert interaction["method"] == "interaction.approval"
         await server.dispatch(
             {
                 "jsonrpc": "2.0",
                 "id": interaction["id"],
-                "result": {"type": "approval", "request_id": interaction["id"], "decision": "approve_once"},
+                "result": {"decision": "approve_once"},
             }
         )
         completed = await _wait_for(frames, lambda frame: frame.get("params", {}).get("type") == "run.completed")
@@ -1124,7 +1161,7 @@ async def test_plan_mode_returns_tool_message_without_writing_or_requesting_appr
         await _wait_for(frames, lambda frame: frame.get("params", {}).get("type") == "run.completed")
 
         assert not (Path(workspace) / "plan.txt").exists()
-        assert not any(frame.get("method") == "request" for frame in frames)
+        assert not any(str(frame.get("method", "")).startswith("interaction.") for frame in frames)
 
 
 async def test_missing_interaction_capability_fails_closed_without_reverse_request():
@@ -1155,8 +1192,8 @@ async def test_missing_interaction_capability_fails_closed_without_reverse_reque
         ),
     )
 
-    assert result == {"type": "approval", "request_id": "approval-headless", "decision": "reject"}
-    assert not any(frame.get("method") == "request" for frame in frames)
+    assert result == {"decision": "reject"}
+    assert not any(str(frame.get("method", "")).startswith("interaction.") for frame in frames)
 
 
 def test_tool_output_is_utf8_safely_truncated():
@@ -1172,20 +1209,25 @@ def test_tool_output_is_utf8_safely_truncated():
 
 
 async def test_stdio_subprocess_end_to_end_echo_mode():
-    """真实 sidecar 完成 v2 initialize、run.start、event 与 shutdown。"""
+    """真实 sidecar 完成 v3 initialize、run.start、event，并由 owner EOF 关闭。"""
     package_root = Path(__file__).resolve().parents[1]
-    env = {**os.environ, "PYTHONPATH": str(package_root), "HARNESS_ECHO_MODE": "1"}
-    process = await asyncio.create_subprocess_exec(sys.executable, "-m", "harness_agent", stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env)
-    assert process.stdin and process.stdout
-    process.stdin.write((json.dumps(_request("initialize", _initialize_params(), "init")) + "\n" + json.dumps(_request("run.start", {"message": "hello", "thread_id": "t", "run_id": "r"}, "start")) + "\n").encode())
-    await process.stdin.drain()
-    frames: list[dict[str, Any]] = []
-    while not any(frame.get("params", {}).get("type") == "run.completed" for frame in frames):
-        frames.append(json.loads(await asyncio.wait_for(process.stdout.readline(), timeout=2)))
-    process.stdin.write((json.dumps(_request("shutdown", {}, "stop")) + "\n").encode())
-    await process.stdin.drain()
-    await asyncio.wait_for(process.wait(), timeout=2)
-    assert "content.delta" in _event_types(frames)
+    with TemporaryDirectory() as home:
+        env = {
+            **os.environ,
+            "HOME": home,
+            "PYTHONPATH": str(package_root),
+            "HARNESS_ECHO_MODE": "1",
+        }
+        process = await asyncio.create_subprocess_exec(sys.executable, "-m", "harness_agent", stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env)
+        assert process.stdin and process.stdout
+        process.stdin.write((json.dumps(_request("initialize", _initialize_params(), "init")) + "\n" + json.dumps(_request("run.start", {"message": "hello", "thread_id": "t", "run_id": "r"}, "start")) + "\n").encode())
+        await process.stdin.drain()
+        frames: list[dict[str, Any]] = []
+        while not any(frame.get("params", {}).get("type") == "run.completed" for frame in frames):
+            frames.append(json.loads(await asyncio.wait_for(process.stdout.readline(), timeout=2)))
+        process.stdin.close()
+        await asyncio.wait_for(process.wait(), timeout=2)
+        assert "content.delta" in _event_types(frames)
 
 
 async def test_mcp_status_no_config(tmp_path: Path):

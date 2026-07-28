@@ -1,194 +1,122 @@
-/** za38 v2 跨进程协议公开入口：生成类型、稳定常量与轻量运行时断言。 */
+/** Harness v3 协议入口：canonical Schema、生成类型与双向运行时校验。 */
 
 export * from "./generated"
 
+import Ajv2020, { type ValidateFunction } from "ajv/dist/2020"
+import schema from "../schema/v3.json" with { type: "json" }
 import {
   CLIENT_METHODS,
   EVENT_TYPES,
-  PROTOCOL_MAJOR,
-  PROTOCOL_MINOR,
-  type EventEnvelope,
-  type ContextCompactParams,
-  type ConfigCommitParams,
-  type ConfigDetailsParams,
-  type ConfigPreviewParams,
+  INTERACTION_METHODS,
+  type AgentEvent,
+  type ApprovalRequest,
+  type ApprovalResponse,
   type InitializeParams,
-  type InteractionRequestEnvelope,
+  type InteractionMap,
+  type InteractionMethod,
   type JsonRpcMessage,
-  type McpAddParams,
-  type McpRemoveParams,
-  type McpStatusParams,
-  type ThreadsListParams,
-  type ThreadsOpenParams,
-  type ModelsListParams,
+  type OperationMap,
+  type OperationName,
+  type QuestionRequest,
+  type QuestionResponse,
 } from "./generated"
 
-export const Method = {
-  INITIALIZE: "initialize",
-  RUN_START: "run.start",
-  RUN_CANCEL: "run.cancel",
-  CONTEXT_COMPACT: "context.compact",
-  CONFIG_SHOW: "config.show",
-  CONFIG_PATH: "config.path",
-  CONFIG_DETAILS: "config.details",
-  CONFIG_PREVIEW: "config.preview",
-  CONFIG_COMMIT: "config.commit",
-  MODELS_LIST: "models.list",
-  THREADS_LIST: "threads.list",
-  THREADS_OPEN: "threads.open",
-  SKILLS_LIST: "skills.list",
-  SKILLS_INSPECT: "skills.inspect",
-  SKILLS_SET_ENABLED: "skills.set_enabled",
-  SKILLS_INSTALL: "skills.install",
-  SKILLS_UPDATE: "skills.update",
-  SKILLS_REMOVE: "skills.remove",
-  SKILLS_MARKET_LIST: "skills.market.list",
-  MCP_STATUS: "mcp.status",
-  MCP_ADD: "mcp.add",
-  MCP_REMOVE: "mcp.remove",
-  SHUTDOWN: "shutdown",
-  EVENT: "event",
-  REQUEST: "request",
-} as const
+export type InteractionRequestEnvelope =
+  | ({ request_id: string; type: "approval" } & ApprovalRequest)
+  | ({ request_id: string; type: "question" } & QuestionRequest)
 
-export const PROTOCOL_VERSION = { major: PROTOCOL_MAJOR, minor: PROTOCOL_MINOR } as const
+export type InteractionResponse =
+  | ({ request_id: string; type: "approval" } & ApprovalResponse)
+  | ({ request_id: string; type: "question" } & QuestionResponse)
 
-/** 校验初始化请求中决定兼容性的核心字段。完整契约由共享 fixture 在两端验证。 */
-export function assertInitializeParams(value: unknown): asserts value is InitializeParams {
-  const params = objectValue(value, "initialize params")
-  const protocol = objectValue(params.protocol, "initialize protocol")
-  if (protocol.major !== PROTOCOL_MAJOR || !integer(protocol.min_minor) || !integer(protocol.max_minor)) {
-    throw new Error("initialize protocol 版本范围无效")
-  }
-  if ((protocol.min_minor as number) > (protocol.max_minor as number)) throw new Error("initialize minor 范围无效")
-  const client = objectValue(params.client, "initialize client")
-  if (typeof client.name !== "string" || typeof client.version !== "string") throw new Error("initialize client 无效")
-  if (!Array.isArray(params.capabilities) || !params.capabilities.every(item => typeof item === "string")) {
-    throw new Error("initialize capabilities 无效")
-  }
-  rejectExtra(params, ["protocol", "client", "capabilities", "cwd", "config_path"], "initialize params")
+type ContractEntry = { params?: string; result?: string; payload?: string }
+type ContractMetadata = {
+  operations: Record<string, ContractEntry>
+  events: Record<string, ContractEntry>
+  interactions: Record<string, ContractEntry>
 }
 
-/** 校验恢复选择器读取 thread 摘要时的分页参数。 */
-export function assertThreadsListParams(value: unknown): asserts value is ThreadsListParams {
-  const params = objectValue(value, "threads.list params")
-  if (params.limit !== undefined && (!integer(params.limit) || (params.limit as number) < 1 || (params.limit as number) > 200)) {
-    throw new Error("threads.list.limit 无效")
-  }
-  rejectExtra(params, ["limit"], "threads.list params")
+const metadata = (schema as unknown as { "x-harness": ContractMetadata })["x-harness"]
+const ajv = new Ajv2020({ allErrors: true, strict: true, useDefaults: true })
+const validators = new Map<string, ValidateFunction>()
+
+/** 校验并返回 operation params；默认值由 Schema 注入。 */
+export function validateOperationParams<M extends OperationName>(
+  method: M,
+  value: unknown,
+): OperationMap[M]["params"] {
+  validateRef(entry(metadata.operations, method).params!, value, `${method} params`)
+  return value as OperationMap[M]["params"]
 }
 
-/** 校验仅供 TUI 内部使用的 thread_id，用户界面不接受该字段作为文本输入。 */
-export function assertThreadsOpenParams(value: unknown): asserts value is ThreadsOpenParams {
-  const params = objectValue(value, "threads.open params")
-  if (typeof params.thread_id !== "string" || !params.thread_id) throw new Error("threads.open.thread_id 无效")
-  rejectExtra(params, ["thread_id"], "threads.open params")
+/** 校验并返回 operation result，杜绝跨进程 `as Result`。 */
+export function validateOperationResult<M extends OperationName>(
+  method: M,
+  value: unknown,
+): OperationMap[M]["result"] {
+  validateRef(entry(metadata.operations, method).result!, value, `${method} result`)
+  return value as OperationMap[M]["result"]
 }
 
-/** 校验 `/model` 读取目录时可选传入的当前 thread 内部标识。 */
-export function assertModelsListParams(value: unknown): asserts value is ModelsListParams {
-  const params = objectValue(value, "models.list params")
-  if (params.thread_id !== undefined && (typeof params.thread_id !== "string" || !params.thread_id)) {
-    throw new Error("models.list.thread_id 无效")
-  }
-  rejectExtra(params, ["thread_id"], "models.list params")
+/** 校验 Agent 事件信封及 type/payload 的对应关系。 */
+export function assertEventEnvelope(value: unknown): asserts value is AgentEvent {
+  validateRef("#/$defs/eventBase", value, "event")
+  const event = value as { type: string; payload: unknown }
+  const contract = metadata.events[event.type]
+  if (!contract?.payload) throw new Error(`未知 event type：${event.type}`)
+  validateRef(contract.payload, event.payload, `${event.type} payload`)
 }
 
-/** 校验只接受 TUI 当前 thread 内部 ID 的手动上下文压缩请求。 */
-export function assertContextCompactParams(value: unknown): asserts value is ContextCompactParams {
-  const params = objectValue(value, "context.compact params")
-  if (typeof params.thread_id !== "string" || !params.thread_id) throw new Error("context.compact.thread_id 无效")
-  rejectExtra(params, ["thread_id"], "context.compact params")
+/** 校验反向 Interaction 参数。 */
+export function validateInteractionParams<M extends InteractionMethod>(
+  method: M,
+  value: unknown,
+): InteractionMap[M]["params"] {
+  validateRef(entry(metadata.interactions, method).params!, value, `${method} params`)
+  return value as InteractionMap[M]["params"]
 }
 
-/** 校验受控配置详情读取请求；此接口不接受由调用方指定的文件路径。 */
-export function assertConfigDetailsParams(value: unknown): asserts value is ConfigDetailsParams {
-  const params = objectValue(value, "config.details params")
-  rejectExtra(params, [], "config.details params")
+/** 校验反向 Interaction 响应。 */
+export function validateInteractionResult<M extends InteractionMethod>(
+  method: M,
+  value: unknown,
+): InteractionMap[M]["result"] {
+  validateRef(entry(metadata.interactions, method).result!, value, `${method} result`)
+  return value as InteractionMap[M]["result"]
 }
 
-/** 校验配置预览只提交显式白名单候选，字段合法性仍由服务端领域服务决定。 */
-export function assertConfigPreviewParams(value: unknown): asserts value is ConfigPreviewParams {
-  const params = objectValue(value, "config.preview params")
-  validateConfigChanges(params, "config.preview params")
-  rejectExtra(params, ["changes"], "config.preview params")
-}
-
-/** 校验配置提交携带预览返回的 CAS revision，防止覆盖并发更新。 */
-export function assertConfigCommitParams(value: unknown): asserts value is ConfigCommitParams {
-  const params = objectValue(value, "config.commit params")
-  requireString(params, "expected_revision", "config.commit params")
-  validateConfigChanges(params, "config.commit params")
-  rejectExtra(params, ["expected_revision", "changes"], "config.commit params")
-}
-
-/** 校验 MCP 状态查询参数（当前为空对象）。 */
-export function assertMcpStatusParams(value: unknown): asserts value is McpStatusParams {
-  const params = objectValue(value, "mcp.status params")
-  rejectExtra(params, [], "mcp.status params")
-}
-
-/** 校验 MCP 服务器添加参数。 */
-export function assertMcpAddParams(value: unknown): asserts value is McpAddParams {
-  const params = objectValue(value, "mcp.add params")
-  requireString(params, "name", "mcp.add params")
-  requireString(params, "transport", "mcp.add params")
-  if (params.command !== undefined) requireString(params, "command", "mcp.add params")
-  if (params.url !== undefined) requireString(params, "url", "mcp.add params")
-  rejectExtra(params, ["name", "transport", "command", "args", "url", "env", "headers"], "mcp.add params")
-}
-
-/** 校验 MCP 服务器删除参数。 */
-export function assertMcpRemoveParams(value: unknown): asserts value is McpRemoveParams {
-  const params = objectValue(value, "mcp.remove params")
-  requireString(params, "name", "mcp.remove params")
-  rejectExtra(params, ["name"], "mcp.remove params")
-}
-
-/** 校验 Agent 推送的统一事件信封，并允许未来新增未知事件类型。 */
-export function assertEventEnvelope(value: unknown): asserts value is EventEnvelope {
-  const event = objectValue(value, "event params")
-  for (const field of ["event_id", "type", "thread_id", "run_id"] as const) {
-    if (typeof event[field] !== "string" || !event[field]) throw new Error(`event.${field} 无效`)
-  }
-  if (!integer(event.sequence) || (event.sequence as number) < 1) throw new Error("event.sequence 无效")
-  if (!integer(event.timestamp_ms) || (event.timestamp_ms as number) < 0) throw new Error("event.timestamp_ms 无效")
-  objectValue(event.payload, "event.payload")
-  if (event.source !== undefined) objectValue(event.source, "event.source")
-  if (event.extensions !== undefined) objectValue(event.extensions, "event.extensions")
-  rejectExtra(event, ["event_id", "type", "thread_id", "run_id", "sequence", "timestamp_ms", "source", "payload", "extensions"], "event")
-  validateKnownEventPayload(event.type as string, event.payload as Record<string, unknown>)
-}
-
-/** 校验需要客户端响应的审批或问答信封。 */
-export function assertInteractionRequest(value: unknown): asserts value is InteractionRequestEnvelope {
-  const request = objectValue(value, "request params")
-  for (const field of ["request_id", "thread_id", "run_id"] as const) {
-    if (typeof request[field] !== "string" || !request[field]) throw new Error(`request.${field} 无效`)
-  }
-  if (request.type !== "approval" && request.type !== "question") throw new Error("request.type 无效")
-  if (!integer(request.sequence) || (request.sequence as number) < 1) throw new Error("request.sequence 无效")
-  if (!integer(request.timeout_ms) || (request.timeout_ms as number) < 1) throw new Error("request.timeout_ms 无效")
-  objectValue(request.payload, "request.payload")
-  rejectExtra(request, ["request_id", "type", "thread_id", "run_id", "sequence", "timeout_ms", "payload"], "request")
-  validateInteractionPayload(request.type, request.payload as Record<string, unknown>)
+/** 校验业务错误中供表现层分支的稳定 data。 */
+export function validateProtocolErrorData(value: unknown): void {
+  validateRef("#/$defs/protocolErrorData", value, "protocol error data")
 }
 
 /** 对 JSON-RPC 信封做方向无关的基础校验。 */
 export function assertJsonRpcMessage(value: unknown): asserts value is JsonRpcMessage {
-  const message = objectValue(value, "JSON-RPC message")
-  if (message.jsonrpc !== "2.0") throw new Error("jsonrpc 必须为 2.0")
-  const hasMethod = typeof message.method === "string"
-  const hasResult = "result" in message
-  const hasError = "error" in message
+  if (!object(value) || value.jsonrpc !== "2.0") throw new Error("jsonrpc 必须为 2.0")
+  const hasMethod = typeof value.method === "string"
+  const hasResult = "result" in value
+  const hasError = "error" in value
   if (hasMethod) {
-    if (message.id !== undefined && typeof message.id !== "string") throw new Error("JSON-RPC id 必须为字符串")
+    if (value.id !== undefined && typeof value.id !== "string") throw new Error("JSON-RPC id 必须为字符串")
+    if (value.params !== undefined && !object(value.params)) throw new Error("JSON-RPC params 必须为对象")
+    if (Object.keys(value).some(key => !["jsonrpc", "method", "params", "id"].includes(key))) {
+      throw new Error("JSON-RPC request 包含未知字段")
+    }
     return
   }
-  if ((message.id !== null && typeof message.id !== "string") || Number(hasResult) + Number(hasError) !== 1) throw new Error("JSON-RPC response 无效")
+  if ((value.id !== null && typeof value.id !== "string") || Number(hasResult) + Number(hasError) !== 1) {
+    throw new Error("JSON-RPC response 无效")
+  }
+  if (Object.keys(value).some(key => !["jsonrpc", "id", "result", "error"].includes(key))) {
+    throw new Error("JSON-RPC response 包含未知字段")
+  }
 }
 
-export function isClientMethod(value: string): boolean {
+export function assertInitializeParams(value: unknown): asserts value is InitializeParams {
+  validateOperationParams("initialize", value)
+}
+
+export function isClientMethod(value: string): value is OperationName {
   return (CLIENT_METHODS as readonly string[]).includes(value)
 }
 
@@ -196,66 +124,28 @@ export function isKnownEventType(value: string): boolean {
   return (EVENT_TYPES as readonly string[]).includes(value)
 }
 
-function objectValue(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error(`${label} 必须为对象`)
-  return value as Record<string, unknown>
+export function isInteractionMethod(value: string): value is InteractionMethod {
+  return (INTERACTION_METHODS as readonly string[]).includes(value)
 }
 
-function integer(value: unknown): boolean {
-  return typeof value === "number" && Number.isInteger(value)
-}
-
-function requireString(value: Record<string, unknown>, key: string, label: string): void {
-  if (typeof value[key] !== "string" || !(value[key] as string)) throw new Error(`${label}.${key} 无效`)
-}
-
-function validateConfigChanges(value: Record<string, unknown>, label: string): void {
-  if (!Array.isArray(value.changes) || value.changes.length === 0) throw new Error(`${label}.changes 无效`)
-  for (const change of value.changes) {
-    const parsed = objectValue(change, `${label}.changes[]`)
-    requireString(parsed, "path", `${label}.changes[]`)
-    if (!("value" in parsed)) throw new Error(`${label}.changes[].value 缺失`)
-    rejectExtra(parsed, ["path", "value"], `${label}.changes[]`)
+function validateRef(ref: string, value: unknown, label: string): void {
+  let validator = validators.get(ref)
+  if (!validator) {
+    validator = ajv.compile({ $ref: ref, $defs: (schema as any).$defs })
+    validators.set(ref, validator)
+  }
+  if (!validator(value)) {
+    const detail = ajv.errorsText(validator.errors, { separator: "; " })
+    throw new Error(`${label} 不符合 v3 contract：${detail}`)
   }
 }
 
-function rejectExtra(value: Record<string, unknown>, allowed: readonly string[], label: string): void {
-  const extra = Object.keys(value).find(key => !allowed.includes(key))
-  if (extra) throw new Error(`${label} 包含未知字段：${extra}`)
+function entry(group: Record<string, ContractEntry>, name: string): ContractEntry {
+  const value = group[name]
+  if (!value) throw new Error(`未知 protocol contract：${name}`)
+  return value
 }
 
-function validateKnownEventPayload(type: string, payload: Record<string, unknown>): void {
-  const fields: Record<string, readonly string[]> = {
-    "run.started": ["resumed", "skills_snapshot_id", "primary_model", "runtime_profile_id"],
-    "skill.loaded": ["skill_id", "source", "version", "snapshot_id"],
-    "content.delta": ["text"],
-    "thinking.delta": ["text"],
-    "tool.started": ["tool_call_id", "name"],
-    "tool.delta": ["tool_call_id", "arguments_delta", "output_delta", "truncated", "original_bytes"],
-    "tool.completed": ["tool_call_id", "result"],
-    "context.updated": ["action", "estimated_tokens", "input_cap_tokens", "context_window_tokens", "dynamic_tokens", "cache_status", "cached_tokens", "miss_reason", "artifact_ids"],
-    "interaction.resolved": ["request_id", "type"],
-    "run.completed": ["usage", "duration_ms", "finish_reason", "context"],
-    "run.cancelled": ["reason"],
-    "run.failed": ["error"],
-  }
-  const allowed = fields[type]
-  if (!allowed) return
-  rejectExtra(payload, allowed, `${type} payload`)
-  if (["content.delta", "thinking.delta"].includes(type) && typeof payload.text !== "string") throw new Error(`${type}.text 无效`)
-  if (type === "skill.loaded" && (typeof payload.skill_id !== "string" || typeof payload.source !== "string" || typeof payload.snapshot_id !== "string")) throw new Error("skill.loaded payload 无效")
-  if (type.startsWith("tool.") && typeof payload.tool_call_id !== "string") throw new Error(`${type}.tool_call_id 无效`)
-  if (type === "tool.started" && typeof payload.name !== "string") throw new Error("tool.started.name 无效")
-  if (type === "tool.completed") objectValue(payload.result, "tool.completed.result")
-  if (type === "run.failed") objectValue(payload.error, "run.failed.error")
-}
-
-function validateInteractionPayload(type: unknown, payload: Record<string, unknown>): void {
-  if (type === "approval") {
-    rejectExtra(payload, ["interrupt_id", "description", "requests", "decisions"], "approval payload")
-    if (typeof payload.interrupt_id !== "string" || typeof payload.description !== "string" || !Array.isArray(payload.decisions)) throw new Error("approval payload 无效")
-    return
-  }
-  rejectExtra(payload, ["interrupt_id", "questions"], "question payload")
-  if (typeof payload.interrupt_id !== "string" || !Array.isArray(payload.questions)) throw new Error("question payload 无效")
+function object(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
 }
