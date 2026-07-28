@@ -3,7 +3,7 @@
 日期：2026-07-27  
 状态：已接受
 
-关联任务：[ZC-081](../tasks/ZC-081.md)、[ZC-078](../tasks/ZC-078.md)、[ZC-080](../tasks/ZC-080.md)、[ZC-015](../tasks/ZC-015.md)
+关联任务：[ZC-081](../tasks/ZC-081.md)、[ZC-078](../tasks/ZC-078.md)、[ZC-080](../tasks/ZC-080.md)、[ZC-082](../tasks/ZC-082.md)、[ZC-015](../tasks/ZC-015.md)、[ZC-083](../tasks/ZC-083.md)、[ZC-084](../tasks/ZC-084.md)
 
 ## 背景
 
@@ -26,7 +26,7 @@ Run 的不可变事实：
 ```text
 ProviderDefinition ──1:N──> ModelProfile
                                   │
-ExecutionPolicyDefinition ──N:1──┤
+ExecutionPolicyDefinition ──N:1──┤ Plugin 提供的可派发 Agent
                                   ▼
                            AgentDefinition
                                   │
@@ -111,7 +111,7 @@ Shell、网络、隔离、审批或 delegation 权限。
 
 #### AgentDefinition
 
-`AgentDefinition` 是一个可实例化 Agent 的完整静态声明，负责“谁来做、做什么、怎么做”。
+`AgentDefinition` 是一个由已验证 Plugin 提供、可被内置主 Agent 动态派发的完整静态声明，负责“谁来做、做什么、怎么做”。主 Agent `main` 是 Python 内置实现，不是 AgentDefinition，不读取、也不允许被 JSON/Plugin 配置覆盖。
 
 ```ts
 interface AgentDefinition {
@@ -130,7 +130,7 @@ interface AgentDefinition {
 
 任务职责、工作方法和表达要求都是同一 Agent 指令的章节；它们不拆分为 Role 或 Persona。
 输入/输出 contract 与 instruction fragment 是被 Agent 引用的资产，不是可独立选择的核心
-对象。AgentDefinition 不内联 Provider、模型参数、权限明细、父子关系或 Thread 状态。
+对象。AgentDefinition 不内联 Provider、模型参数、权限明细、父子关系或 Thread 状态。Catalog 不扫描用户或项目目录；未来 ZC-041 完成 Plugin 信任校验后，才将显式的 Plugin 资产根目录交给 ZC-080 解析。
 
 #### ThreadExecutionSelection
 
@@ -138,7 +138,6 @@ interface AgentDefinition {
 
 ```ts
 interface ThreadExecutionSelection {
-  rootAgentId?: string
   rootModelProfileId?: string
   agentModelOverrides?: Record<string, string> // 预留，MVP 不开放
 }
@@ -150,7 +149,7 @@ interface ThreadExecutionSelection {
   `models.default_profile`，供未来新 Thread 使用；该写入失败不得回滚 ThreadSelection，
   也不能改写 AgentDefinition、历史 Run 或 legacy 角色绑定。
 - 当前 Run、已启动的子 Agent 和历史 Run 均不被热切换。
-- 未显式选择的新 Thread 从配置默认/根 Agent默认值获得初始选择；配置默认不是 Thread
+- 未显式选择的新 Thread 从当前 TOML/ModelRouter 默认获得初始选择；配置默认不是 Thread
   的历史事实，也不会覆盖已恢复 Thread 的选择。
 
 #### RunExecutionBinding
@@ -177,7 +176,7 @@ interface AgentExecutionBinding {
     profileId: string
     profileFingerprint: string
     display: { providerLabel: string; model: string }
-    source: "spawn-override" | "thread-agent" | "thread-root" | "agent-default" | "legacy"
+    source: "spawn-override" | "thread-agent" | "thread-root" | "plugin-default" | "config-default" | "legacy"
   }
   executionPolicy: { id: string; fingerprint: string }
   depth: number
@@ -199,8 +198,7 @@ interface AgentExecutionBinding {
 ```text
 根 Agent 模型
 run.start 中的 ThreadExecutionSelection.rootModelProfileId
-    > AgentDefinition.modelProfileId
-    > 兼容层的配置默认
+    > 当前 ModelRouter/TOML 默认与 legacy 回退
 
 动态子 Agent 模型
 合法 spawn model override
@@ -219,13 +217,14 @@ Reviewer 或 Tester 的成本与能力。Policy 不存在“低优先级覆盖�
 
 | 对象 | 生命周期 | 可变性 | RuntimeProfile 处理 |
 | --- | --- | --- | --- |
-| Provider / Model / Policy / Agent | 配置 catalog snapshot | snapshot 内不可变 | 有效内容以脱敏指纹参与 |
+| Provider / Model | TOML 配置 snapshot | snapshot 内不可变 | 当前 root 模型的有效内容以脱敏指纹参与 |
+| Plugin Policy / Plugin Agent | 已验证 Plugin catalog snapshot | snapshot 内不可变 | 仅在该 Plugin Agent 被派发时以脱敏指纹参与 |
 | ThreadExecutionSelection | Thread 交互期间 | 仅影响未来 Run | 不直接参与；解析出的实际模型参与 |
 | RunExecutionBinding | 从 run.start 受理到历史保留 | execution 启动后模型/策略不可变；终态 sealed | 不参与 |
 | ResolvedAgentSpec | 单次构建/调用 | 临时对象 | 由其静态指纹构成 Profile，不持久化 |
 
-`ResolvedAgentSpec` 只是将 Agent、Model、Policy、Thread 选择和当前任务上下文解析后的
-内部 DTO；它不是配置对象、数据库表或 JSON-RPC DTO。`RuntimeProfile` 继续只表达可共享图的
+`ResolvedAgentSpec` 只是将一个 Plugin Agent、Model、Policy、Thread 选择和当前任务上下文解析后的
+内部 DTO；它不是配置对象、数据库表或 JSON-RPC DTO。内置主 Agent 沿用现有 Python 构建路径。`RuntimeProfile` 继续只表达可共享图的
 稳定身份：有效 Agent/Model/Policy/Prompt/工具/Skill/MCP/Sandbox/middleware 指纹可以参与；
 `thread_id`、消息、选择正文、run ID、审批状态、取消令牌、执行树和凭据绝不参与。
 
@@ -249,6 +248,7 @@ Reviewer 或 Tester 的成本与能力。Policy 不存在“低优先级覆盖�
 | `harness_thread_runtime_profiles` | v4/v5 legacy Thread→Runtime 绑定 | 不再用于阻止模型切换；`harness_runtime_profiles` 仍可保存去重后的 RuntimeProfile record |
 | `ActiveRun`、`RunContext` | 单次调用控制状态 | 继续保存取消、审批、PromptEpoch 路由等易失状态；不取代持久 RunExecutionBinding |
 | TUI `threadModelSelection` / `actualModelProfile` | ThreadExecutionSelection 的当前临时投影 | 已区分未来选择与本 Run 实际绑定，并以 `run.started` 校准 |
+| `create_harness_agent()` | Python 内置主 Agent | 继续作为固定 root；不得改为读取 AgentDefinition |
 
 当前 TOML Profile 之所以可以同时投影 Provider 和 Model，是因为 v1 仅支持 OpenAI-compatible
 连接，且每个 Profile 自带 `base_url`、凭据和模型名。该投影可能临时为每个 Profile 生成一个
@@ -259,12 +259,34 @@ canonical model 和凭据脱敏边界。
 
 - [ZC-078](../tasks/ZC-078.md) 只能修改 ThreadExecutionSelection、RunExecutionBinding、
   ModelRouter 的每 Run 解析和 RuntimePool 的 Profile 选择；不得创建 Agent/Policy catalog。
-- [ZC-080](../tasks/ZC-080.md) 落地 AgentDefinition 与 ExecutionPolicyDefinition catalog，
-  并保持现有 TOML ModelProfile 为输入 adapter。
-- [ZC-015](../tasks/ZC-015.md) 只能在已解析 catalog 上做受控动态 delegation，并向
+- [ZC-080](../tasks/ZC-080.md) 落地 Plugin AgentDefinition 与 ExecutionPolicyDefinition parser/catalog，
+  并保持现有 TOML ModelProfile 为输入 adapter；不得将 `main` 放入 catalog。
+- [ZC-082](../tasks/ZC-082.md) 保持内置根 Agent 构建路径，将 v6 的 primary 记录迁移为 canonical
+  RunExecutionBinding 的 root execution。
+- [ZC-015](../tasks/ZC-015.md) 只能让内置主 Agent 对已验证、已解析的 Plugin catalog 做受控动态 delegation，并向
   RunExecutionBinding 追加子 execution；不得引入 Team/Mailbox 作为基础设施。
+- [ZC-083](../tasks/ZC-083.md) 才开放 Agent 定向 Thread 模型覆盖与 execution 模型展示；根模型
+  覆盖不得意外影响 Subagent。
+- [ZC-084](../tasks/ZC-084.md) 在第二 Provider adapter 前建立 Canonical Message 历史层；在此之前
+  不得把 Provider 专有历史直接传给另一 Provider。
 - [ZC-079](../tasks/ZC-079.md) 仅修改未来新 Thread 的配置默认，不能修改既有
   ThreadExecutionSelection 或历史 RunBinding。
+
+当前实施顺序固定为：
+
+```text
+ZC-078 → ZC-082（内置 root 的 canonical root binding）
+
+ZC-041（Plugin 信任与安装） + ZC-080（Plugin Agent / Policy catalog） + ZC-038（managed 边界）
+  → ZC-015（内置主 Agent 的受控动态 Subagent + execution tree）
+  → ZC-083（Agent 定向模型选择与展示）
+
+ZC-084（跨 Provider 历史适配）
+  → 任一新增非 OpenAI-compatible Provider 的独立需求
+```
+
+`ZC-060` 的固定 Workflow 仅是这条链完成后的可选模式；`ZC-061`/`ZC-062` 的 Team/Mailbox
+模式已显式延后，不能成为上述任务的依赖。
 
 ## 备选方案
 
