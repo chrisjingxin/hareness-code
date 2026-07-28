@@ -100,7 +100,7 @@ class ManagedConfigPolicy:
     """由未来受管配置层注入的不可修改字段锁。
 
     当前 v1 尚未加载 managed TOML；该对象让写服务从第一天起就按同一
-    fail-closed 边界工作，后续 ZC-038 只需提供锁集合而无需复制写逻辑。
+    fail-closed 边界工作，未来 managed 配置只需提供锁集合而无需复制写逻辑。
     """
 
     locked_fields: Mapping[str, str] = field(default_factory=dict)

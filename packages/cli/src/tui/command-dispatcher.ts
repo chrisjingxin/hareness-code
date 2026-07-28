@@ -17,7 +17,7 @@ export type CommandLocalAction = "clear-thread" | "cancel-active-run-and-clear-t
 /** 现有命令能够打开的选择器；后续 Manager/Viewer 会按相同模式扩展。 */
 export type CommandPicker = "skills" | "threads" | "models"
 
-/** 当前只实现新建 thread 的确认框，Dialog Shell 将由 ZC-065 继续抽象。 */
+/** 当前只实现新建 thread 的确认框，并复用现有 Dialog Shell。 */
 export type CommandDialog = {
   kind: "confirm-new-thread"
   title: string

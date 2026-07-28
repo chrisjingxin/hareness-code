@@ -302,11 +302,10 @@ def test_manifest_rejects_literal_authentication_headers(tmp_path: Path):
 
 
 def test_manifest_exposes_all_planned_configuration_sections():
-    """模板中的所有计划中区段都必须由唯一 Manifest 指向后续任务。"""
+    """模板中的所有计划中区段都必须由唯一 Manifest 明确拒绝。"""
     for name in ("ui", "skills", "agents", "telemetry", "updates", "hooks", "extensions", "plugins", "policy"):
         section = ConfigManifest.SECTIONS[name]
         assert section.status == "planned"
-        assert section.task_id is not None
     # mcp 已激活为 implemented
     assert ConfigManifest.SECTIONS["mcp"].status == "implemented"
 

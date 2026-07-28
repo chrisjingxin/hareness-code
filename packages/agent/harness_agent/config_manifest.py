@@ -30,7 +30,6 @@ class ConfigSection:
 
     name: str
     status: str
-    task_id: str | None
     allowed_sources: frozenset[ConfigSource]
 
 
@@ -51,21 +50,21 @@ class ConfigManifest:
     _SENSITIVE_HEADER_NAMES = frozenset({"authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key"})
 
     SECTIONS = {
-        "config": ConfigSection("config", "implemented", None, ACTIVE_TOML_SOURCES),
-        "models": ConfigSection("models", "implemented", "ZC-019", ACTIVE_TOML_SOURCES),
-        "approval": ConfigSection("approval", "implemented", None, ACTIVE_TOML_SOURCES),
-        "execution": ConfigSection("execution", "implemented", "ZC-008", ACTIVE_TOML_SOURCES),
-        "runtime_pool": ConfigSection("runtime_pool", "implemented", "ZC-057", ACTIVE_TOML_SOURCES),
-        "ui": ConfigSection("ui", "planned", "ZC-042", frozenset()),
-        "skills": ConfigSection("skills", "planned", "ZC-014", frozenset()),
-        "agents": ConfigSection("agents", "planned", "ZC-015", frozenset()),
-        "mcp": ConfigSection("mcp", "implemented", "ZC-005", ACTIVE_TOML_SOURCES),
-        "telemetry": ConfigSection("telemetry", "planned", "ZC-021", frozenset()),
-        "updates": ConfigSection("updates", "planned", "ZC-025", frozenset()),
-        "hooks": ConfigSection("hooks", "planned", "ZC-039", frozenset()),
-        "extensions": ConfigSection("extensions", "planned", "ZC-040", frozenset()),
-        "plugins": ConfigSection("plugins", "planned", "ZC-041", frozenset()),
-        "policy": ConfigSection("policy", "planned", "ZC-038", frozenset({ConfigSource.MANAGED})),
+        "config": ConfigSection("config", "implemented", ACTIVE_TOML_SOURCES),
+        "models": ConfigSection("models", "implemented", ACTIVE_TOML_SOURCES),
+        "approval": ConfigSection("approval", "implemented", ACTIVE_TOML_SOURCES),
+        "execution": ConfigSection("execution", "implemented", ACTIVE_TOML_SOURCES),
+        "runtime_pool": ConfigSection("runtime_pool", "implemented", ACTIVE_TOML_SOURCES),
+        "ui": ConfigSection("ui", "planned", frozenset()),
+        "skills": ConfigSection("skills", "planned", frozenset()),
+        "agents": ConfigSection("agents", "planned", frozenset()),
+        "mcp": ConfigSection("mcp", "implemented", ACTIVE_TOML_SOURCES),
+        "telemetry": ConfigSection("telemetry", "planned", frozenset()),
+        "updates": ConfigSection("updates", "planned", frozenset()),
+        "hooks": ConfigSection("hooks", "planned", frozenset()),
+        "extensions": ConfigSection("extensions", "planned", frozenset()),
+        "plugins": ConfigSection("plugins", "planned", frozenset()),
+        "policy": ConfigSection("policy", "planned", frozenset({ConfigSource.MANAGED})),
     }
 
     @classmethod
@@ -76,9 +75,8 @@ class ConfigManifest:
             if section is None:
                 raise ConfigManifestError(f"Unknown configuration section [{section_name}]")
             if section.status != "implemented":
-                task = f" ({section.task_id})" if section.task_id else ""
                 raise ConfigManifestError(
-                    f"Configuration section [{section_name}] is planned{task} and is not supported yet"
+                    f"Configuration section [{section_name}] is planned and is not supported yet"
                 )
             if source not in section.allowed_sources:
                 raise ConfigManifestError(
