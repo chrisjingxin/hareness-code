@@ -2,7 +2,7 @@
 
 import { Capability } from "@za38/protocol"
 
-/** 命令打开的交互入口类型；由 ZC-064 的 Result Adapter 映射为 TUI 副作用。 */
+/** 命令打开的交互入口类型；由 Result Adapter 映射为 TUI 副作用。 */
 export type CommandPresentation = "action" | "picker" | "viewer" | "dialog"
 
 /** Command 来源预留给后续 Skill、MCP 与 Plugin Loader；当前只注册内置命令。 */

@@ -3,7 +3,7 @@
 日期：2026-07-27  
 状态：已接受
 
-关联任务：[ZC-081](../tasks/ZC-081.md)、[ZC-078](../tasks/ZC-078.md)、[ZC-080](../tasks/ZC-080.md)、[ZC-082](../tasks/ZC-082.md)、[ZC-015](../tasks/ZC-015.md)、[ZC-083](../tasks/ZC-083.md)、[ZC-084](../tasks/ZC-084.md)
+当前架构任务：[ZC-086](../tasks/ZC-086.md)
 
 ## 背景
 
@@ -13,8 +13,8 @@ Profile 同时持有连接与模型参数；v5 的 `ThreadModelBindings` 曾将�
 RuntimePool 则正确要求 Runtime 身份不含 Thread/Run 状态。若直接在这些实现上叠加
 Thread 内 `/model`、自定义 Agent 或动态 delegation，会产生重复的模型、权限和历史来源。
 
-本决策固定长期领域边界，并给出现有 TOML、SQLite 和运行时对象的兼容映射。ZC-078 已据此
-完成 Thread 根模型选择的最小迁移；后续任务不得偏离本文定义的对象归属。
+本决策固定长期领域边界，并给出现有 TOML、SQLite 和运行时对象的兼容映射。当前实现已据此
+完成 Thread 根模型选择的最小迁移；后续实现不得偏离本文定义的对象归属。
 
 ## 决策
 
@@ -130,7 +130,7 @@ interface AgentDefinition {
 
 任务职责、工作方法和表达要求都是同一 Agent 指令的章节；它们不拆分为 Role 或 Persona。
 输入/输出 contract 与 instruction fragment 是被 Agent 引用的资产，不是可独立选择的核心
-对象。AgentDefinition 不内联 Provider、模型参数、权限明细、父子关系或 Thread 状态。Catalog 不扫描用户或项目目录；未来 ZC-041 完成 Plugin 信任校验后，才将显式的 Plugin 资产根目录交给 ZC-080 解析。
+对象。AgentDefinition 不内联 Provider、模型参数、权限明细、父子关系或 Thread 状态。当前生产路径不加载 Agent catalog，也不扫描用户或项目目录；Plugin 方向重新立项前不得接入运行路径。
 
 #### ThreadExecutionSelection
 
@@ -145,7 +145,7 @@ interface ThreadExecutionSelection {
 
 - `/model` 的 MVP 只写 `rootModelProfileId`，仅影响根 Agent 的下一次 Run。
 - Picker 确认可先更新本地 UI；在 `run.start` 被服务端成功受理后，选择作为请求快照持久化。
-- ZC-079 的 `/model` 确认还会独立调用受控 Config Writer 更新用户级
+- `/model` 确认还会独立调用受控 Config Writer 更新用户级
   `models.default_profile`，供未来新 Thread 使用；该写入失败不得回滚 ThreadSelection，
   也不能改写 AgentDefinition、历史 Run 或 legacy 角色绑定。
 - 当前 Run、已启动的子 Agent 和历史 Run 均不被热切换。
@@ -242,7 +242,7 @@ Reviewer 或 Tester 的成本与能力。Policy 不存在“低优先级覆盖�
 | 当前实现 | canonical 映射 | 迁移要求 |
 | --- | --- | --- |
 | `Za38Config`、`ModelCatalog`、`ModelSettings`、`ModelProfile` | TOML 输入 adapter；每个当前 Profile 暂可投影为一个 ProviderDefinition + 一个 ModelProfile | 不改 TOML v1、endpoint、`api_key`、`headers_env` 或来源优先级 |
-| `[models.roles]`、`MODEL_ROLES` | 当前 Runtime 编译兼容层；`executor` 是当前 Single Agent root 的物理模型 | 不成为新的 RoleDefinition 领域对象；ZC-078 只改变 root selection |
+| `[models.roles]`、`MODEL_ROLES` | 当前 Runtime 编译兼容层；`executor` 是当前 Single Agent root 的物理模型 | 不成为新的 RoleDefinition 领域对象；`/model` 只改变 root selection |
 | `ModelRouter.bind_thread()`、`ThreadModelBindings` | v5 legacy Thread 模型快照 | 已改为每 Run `resolve_run()`；旧记录只读兼容，不反向重写 |
 | `harness_thread_model_bindings` | v5 legacy 选择来源 | 新 Run 已写入 RunExecutionBinding；不可把当前配置回填为历史 |
 | `harness_thread_runtime_profiles` | v4/v5 legacy Thread→Runtime 绑定 | 不再用于阻止模型切换；`harness_runtime_profiles` 仍可保存去重后的 RuntimeProfile record |
@@ -257,36 +257,11 @@ canonical model 和凭据脱敏边界。
 
 ## 后果
 
-- [ZC-078](../tasks/ZC-078.md) 只能修改 ThreadExecutionSelection、RunExecutionBinding、
-  ModelRouter 的每 Run 解析和 RuntimePool 的 Profile 选择；不得创建 Agent/Policy catalog。
-- [ZC-080](../tasks/ZC-080.md) 落地 Plugin AgentDefinition 与 ExecutionPolicyDefinition parser/catalog，
-  并保持现有 TOML ModelProfile 为输入 adapter；不得将 `main` 放入 catalog。
-- [ZC-082](../tasks/ZC-082.md) 保持内置根 Agent 构建路径，将 v6 的 primary 记录迁移为 canonical
-  RunExecutionBinding 的 root execution。
-- [ZC-015](../tasks/ZC-015.md) 只能让内置主 Agent 对已验证、已解析的 Plugin catalog 做受控动态 delegation，并向
-  RunExecutionBinding 追加子 execution；不得引入 Team/Mailbox 作为基础设施。
-- [ZC-083](../tasks/ZC-083.md) 才开放 Agent 定向 Thread 模型覆盖与 execution 模型展示；根模型
-  覆盖不得意外影响 Subagent。
-- [ZC-084](../tasks/ZC-084.md) 在第二 Provider adapter 前建立 Canonical Message 历史层；在此之前
-  不得把 Provider 专有历史直接传给另一 Provider。
-- [ZC-079](../tasks/ZC-079.md) 仅修改未来新 Thread 的配置默认，不能修改既有
-  ThreadExecutionSelection 或历史 RunBinding。
-
-当前实施顺序固定为：
-
-```text
-ZC-078 → ZC-082（内置 root 的 canonical root binding）
-
-ZC-041（Plugin 信任与安装） + ZC-080（Plugin Agent / Policy catalog） + ZC-038（managed 边界）
-  → ZC-015（内置主 Agent 的受控动态 Subagent + execution tree）
-  → ZC-083（Agent 定向模型选择与展示）
-
-ZC-084（跨 Provider 历史适配）
-  → 任一新增非 OpenAI-compatible Provider 的独立需求
-```
-
-`ZC-060` 的固定 Workflow 仅是这条链完成后的可选模式；`ZC-061`/`ZC-062` 的 Team/Mailbox
-模式已显式延后，不能成为上述任务的依赖。
+- ThreadExecutionSelection、每 Run 模型解析、RunExecutionBinding 和 Runtime Profile 选择必须由同一领域 module 协调，不得在 Server、TUI 和存储 adapter 中各自推断。
+- 内置主 Agent 继续由 Python 固定构建，不放入 Agent catalog。
+- Agent catalog、动态 Subagent、Agent 定向模型、固定 Workflow、Team/Mailbox 和第二 Provider 都是未启用的产品方向，统一记录在 [新功能候选](../新功能候选.md)。
+- 在第二 Provider adapter 出现前不建立 Canonical Message port；出现真实的第二 adapter 时，必须先阻止 Provider 私有历史跨 adapter 泄漏。
+- `/model` 更新未来新 Thread 的配置默认时，不能修改既有 ThreadExecutionSelection 或历史 RunBinding。
 
 ## 备选方案
 

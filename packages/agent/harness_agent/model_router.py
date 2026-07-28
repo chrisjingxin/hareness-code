@@ -1,7 +1,7 @@
 """模型角色解析与单次 Run 的脱敏快照。
 
 本模块不创建 Agent 或网络客户端，只把可信配置目录转换为不可变的角色
-Profile 选择。Thread 可变选择不保存在本模块；这样 ZC-060 可以复用它。
+Profile 选择。Thread 可变选择不保存在本模块，保持 Runtime 编译与 Thread 状态解耦。
 """
 
 from __future__ import annotations
