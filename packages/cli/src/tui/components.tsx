@@ -22,6 +22,7 @@ import { HarnessCodeLogo } from "./harness-logo"
 import { StarryBackground } from "./starry-background"
 import { markdownSyntax, tuiTheme } from "./theme"
 import { SearchPicker, type SearchPickerRenderContext } from "./overlays"
+import { createScrollAcceleration } from "./scroll.js"
 import { collapseToolOutput } from "./upstream/collapse-tool-output"
 import { getCommonSyntaxClient } from "./syntax-parsers"
 
@@ -97,7 +98,7 @@ export function HomeView(props: SharedViewProps) {
 }
 
 /** thread 流全宽渲染，工具和审批事件以左轨形成明确的操作时间线。 */
-export function ThreadView(props: SharedViewProps) {
+export function ThreadView(props: SharedViewProps & { modelName?: string }) {
   const blockingInteraction = Boolean(props.state.pendingApproval || props.state.pendingQuestion?.options.length)
 
   return (
@@ -110,6 +111,7 @@ export function ThreadView(props: SharedViewProps) {
         onToggleTool={props.onToggleTool}
         onApproval={props.onApproval}
         onQuestion={props.onQuestion}
+        modelName={props.modelName}
       />
       {!blockingInteraction ? (
         <box flexShrink={0} paddingLeft={2} paddingRight={2}>
@@ -149,9 +151,10 @@ export function ConversationTimeline(props: {
   onToggleTool: (toolId: string) => void
   onApproval: (decision: "approve" | "reject") => void
   onQuestion: (answer: string) => void
+  modelName?: string
 }) {
   return (
-    <scrollbox ref={props.scrollRef} stickyScroll stickyStart="bottom" flexGrow={1} minHeight={0} viewportOptions={{ paddingRight: 1 }}>
+    <scrollbox ref={props.scrollRef} stickyScroll stickyStart="bottom" flexGrow={1} minHeight={0} scrollAcceleration={createScrollAcceleration()} viewportOptions={{ paddingRight: 1 }}>
       <box height={1} />
       {props.state.timeline.map(item => (
         <TimelineRow
@@ -166,7 +169,7 @@ export function ConversationTimeline(props: {
         />
       ))}
       <TimelineActivity state={props.state} />
-      <RunSummary state={props.state} />
+      <RunSummary state={props.state} modelName={props.modelName} />
       <box height={1} />
     </scrollbox>
   )
@@ -295,7 +298,7 @@ function TimelineActivity(props: { state: TuiState }) {
 }
 
 /** 显示运行终态、耗时和 token 用量摘要。 */
-function RunSummary(props: { state: TuiState }) {
+function RunSummary(props: { state: TuiState; modelName?: string }) {
   const summary = props.state.lastRun
   if (!summary) return null
   const duration = formatDuration(summary.durationMs)
@@ -305,7 +308,7 @@ function RunSummary(props: { state: TuiState }) {
     : undefined
   const outcome = summary.outcome === "completed" ? "已完成" : summary.outcome === "cancelled" ? "已取消" : "失败"
   const color = summary.outcome === "completed" ? tuiTheme.success : summary.outcome === "cancelled" ? tuiTheme.muted : tuiTheme.danger
-  const parts = [outcome, duration, usage, context].filter((part): part is string => Boolean(part))
+  const parts = [outcome, props.modelName, duration, usage, context].filter((part): part is string => Boolean(part))
 
   return (
     <box marginTop={1} paddingLeft={3} flexDirection="row" gap={1}>
