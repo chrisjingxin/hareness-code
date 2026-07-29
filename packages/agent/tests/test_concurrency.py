@@ -1,4 +1,4 @@
-"""并发安全分区、异步读写锁与并发守卫中间件回归测试。"""
+"""工具并发安全分类、异步读写锁与并发守卫中间件回归测试。"""
 from __future__ import annotations
 
 import asyncio
@@ -9,12 +9,8 @@ import pytest
 
 from harness_agent.concurrency import (
     AsyncRWLock,
-    ToolBatch,
-    execute_batches,
-    get_max_concurrency,
     is_concurrency_safe,
     is_shell_command_read_only,
-    partition_tool_calls,
 )
 from harness_agent.concurrency_guard import ConcurrencyGuardMiddleware
 
@@ -142,170 +138,6 @@ def test_pipe_shell_commands(command: str, expected: bool):
 def test_edge_case_shell_commands_fail_closed(command: str):
     """空字符串、未知命令和畸形引号保守返回 False。"""
     assert is_shell_command_read_only(command) is False
-
-
-# ---------------------------------------------------------------------------
-# partition_tool_calls
-# ---------------------------------------------------------------------------
-
-
-def _call(name: str, args: dict | None = None) -> dict:
-    """构造工具调用字典辅助函数。"""
-    return {"name": name, "args": args or {}}
-
-
-def test_partition_all_read_only_into_single_parallel_batch():
-    """全部只读工具合并为单个并行批次。"""
-    calls = [_call("read_file"), _call("read_file"), _call("grep")]
-    batches = partition_tool_calls(calls)
-
-    assert len(batches) == 1
-    assert batches[0].concurrent is True
-    assert batches[0].calls == calls
-
-
-def test_partition_mixed_read_write_read():
-    """读写混合产生三个批次：并行(读)、串行(写)、串行(读)。"""
-    read1 = _call("read_file")
-    write = _call("write_file")
-    read2 = _call("grep")
-    batches = partition_tool_calls([read1, write, read2])
-
-    assert len(batches) == 3
-    assert batches[0].concurrent is False  # 单个读降级为串行
-    assert batches[0].calls == [read1]
-    assert batches[1].concurrent is False
-    assert batches[1].calls == [write]
-    assert batches[2].concurrent is False
-    assert batches[2].calls == [read2]
-
-
-def test_partition_all_write_tools():
-    """全部写工具各自独立为串行批次。"""
-    write = _call("write_file")
-    edit = _call("edit_file")
-    batches = partition_tool_calls([write, edit])
-
-    assert len(batches) == 2
-    assert all(not b.concurrent for b in batches)
-    assert batches[0].calls == [write]
-    assert batches[1].calls == [edit]
-
-
-def test_partition_single_tool_degrades_to_sequential():
-    """仅含单个调用的批次降级为串行（无并行收益）。"""
-    read = _call("read_file")
-    batches = partition_tool_calls([read])
-
-    assert len(batches) == 1
-    assert batches[0].concurrent is False
-    assert batches[0].calls == [read]
-
-
-def test_partition_subagents_into_single_parallel_batch():
-    """多个子代理工具合并为单个并行批次。"""
-    calls = [_call("task"), _call("task"), _call("task")]
-    batches = partition_tool_calls(calls)
-
-    assert len(batches) == 1
-    assert batches[0].concurrent is True
-    assert batches[0].calls == calls
-
-
-def test_partition_mixed_with_execute():
-    """只读工具与只读 execute 合并为并行批次，写工具独立串行。"""
-    read = _call("read_file")
-    execute = _call("execute", {"command": "git status"})
-    write = _call("write_file")
-    batches = partition_tool_calls([read, execute, write])
-
-    assert len(batches) == 2
-    assert batches[0].concurrent is True
-    assert batches[0].calls == [read, execute]
-    assert batches[1].concurrent is False
-    assert batches[1].calls == [write]
-
-
-# ---------------------------------------------------------------------------
-# execute_batches
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_execute_parallel_batch_preserves_order():
-    """并行批次执行所有调用并保持原始顺序。"""
-    calls = [_call("read_file", {"path": f"f{i}"}) for i in range(5)]
-    batch = ToolBatch(concurrent=True, calls=calls)
-
-    async def executor(call: dict) -> str:
-        await asyncio.sleep(0.01)
-        return call["args"]["path"]
-
-    results = await execute_batches([batch], executor)
-    assert results == ["f0", "f1", "f2", "f3", "f4"]
-
-
-@pytest.mark.asyncio
-async def test_execute_sequential_batch_in_order():
-    """串行批次按顺序逐一执行。"""
-    calls = [_call("write_file", {"path": f"w{i}"}) for i in range(3)]
-    batch = ToolBatch(concurrent=False, calls=calls)
-    execution_order: list[str] = []
-
-    async def executor(call: dict) -> str:
-        execution_order.append(call["args"]["path"])
-        return call["args"]["path"]
-
-    results = await execute_batches([batch], executor)
-    assert results == ["w0", "w1", "w2"]
-    assert execution_order == ["w0", "w1", "w2"]
-
-
-@pytest.mark.asyncio
-async def test_execute_mixed_batches_preserve_overall_order():
-    """混合批次整体保持原始调用顺序。"""
-    read1 = _call("read_file", {"id": "r1"})
-    read2 = _call("grep", {"id": "r2"})
-    write = _call("write_file", {"id": "w1"})
-    read3 = _call("ls", {"id": "r3"})
-
-    batches = [
-        ToolBatch(concurrent=True, calls=[read1, read2]),
-        ToolBatch(concurrent=False, calls=[write]),
-        ToolBatch(concurrent=False, calls=[read3]),
-    ]
-
-    async def executor(call: dict) -> str:
-        await asyncio.sleep(0.005)
-        return call["args"]["id"]
-
-    results = await execute_batches(batches, executor)
-    assert results == ["r1", "r2", "w1", "r3"]
-
-
-@pytest.mark.asyncio
-async def test_execute_respects_max_concurrency():
-    """并行批次内并发数不超过 max_concurrency 限制。"""
-    max_concurrent = 0
-    current = 0
-    lock = asyncio.Lock()
-
-    calls = [_call("read_file", {"id": str(i)}) for i in range(6)]
-    batch = ToolBatch(concurrent=True, calls=calls)
-
-    async def executor(call: dict) -> str:
-        nonlocal max_concurrent, current
-        async with lock:
-            current += 1
-            if current > max_concurrent:
-                max_concurrent = current
-        await asyncio.sleep(0.02)
-        async with lock:
-            current -= 1
-        return call["args"]["id"]
-
-    await execute_batches([batch], executor, max_concurrency=2)
-    assert max_concurrent <= 2
 
 
 # ---------------------------------------------------------------------------

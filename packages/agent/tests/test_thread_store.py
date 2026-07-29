@@ -13,6 +13,13 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import Runnable
 from langgraph.checkpoint.base import empty_checkpoint
 
+from harness_agent.execution_binding import (
+    RunExecutionBinding,
+    SafeModelProfile,
+    SelectionOrigin,
+    ThreadExecutionSelection,
+)
+from harness_agent.prompting import canonical_json
 from harness_agent.thread_store import ThreadStore, ThreadStoreError
 
 
@@ -218,24 +225,16 @@ async def test_thread_store_persists_immutable_prompt_epoch_without_rescan(tmp_p
     await second.close()
 
 
-async def test_thread_store_migrates_and_preserves_immutable_model_bindings(tmp_path: Path) -> None:
-    """v4 数据库升级后首次 Profile 绑定与 thread 摘要同事务保存，且不可改写。"""
+async def test_thread_store_migrates_and_reads_legacy_model_bindings(tmp_path: Path) -> None:
+    """v5 模型快照升级后保持只读可见，并转换为类型化状态。"""
     home = tmp_path / "home"
     project = tmp_path / "project"
     project.mkdir()
     initial = await ThreadStore.open(project=project, home=home)
     database = initial.database_path
+    project_fingerprint = initial.project_fingerprint
     await initial.close()
 
-    connection = sqlite3.connect(database)
-    try:
-        connection.execute("DROP TABLE harness_thread_model_bindings")
-        connection.execute("PRAGMA user_version=4")
-        connection.commit()
-    finally:
-        connection.close()
-
-    store = await ThreadStore.open(project=project, home=home)
     binding = {
         "roles": {
             "executor": {
@@ -251,15 +250,27 @@ async def test_thread_store_migrates_and_preserves_immutable_model_bindings(tmp_
             }
         }
     }
-    await store.record_message("thread-model", "使用 fast", model_bindings=binding)
-    assert await store.get_model_bindings("thread-model") == binding
-    assert (await store.list_threads())[0].first_message == "使用 fast"
-    with pytest.raises(ThreadStoreError, match="THREAD_MODEL_BINDING_IMMUTABLE"):
-        await store.record_message(
-            "thread-model",
-            "尝试改写",
-            model_bindings={"roles": {"executor": {"id": "pro"}}},
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("DROP TABLE harness_run_execution_bindings")
+        connection.execute(
+            """
+            INSERT INTO harness_thread_model_bindings (
+                project_fingerprint, thread_id, binding_record, bound_at_ms
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (project_fingerprint, "thread-model", canonical_json(binding), 1),
         )
+        connection.execute("PRAGMA user_version=5")
+        connection.commit()
+    finally:
+        connection.close()
+
+    store = await ThreadStore.open(project=project, home=home)
+    state = await store.load_execution_binding_state("thread-model")
+    assert state.legacy_models is not None
+    assert state.legacy_models.executor_profile_id() == "fast"
+    assert state.legacy_models.protocol_roles()["executor"]["model"] == "fast-model"  # type: ignore[index]
     await store.close()
 
 
@@ -283,36 +294,33 @@ async def test_thread_store_records_run_binding_and_recovers_latest_selection(tm
         },
         "source": "thread-primary",
     }
-    assert await store.record_run_start(
-        "thread-run",
-        "run-1",
-        "使用 fast",
-        requested_selection={"primary_profile": "fast"},
-        actual_primary_binding=primary,
+    run_binding = RunExecutionBinding(
+        thread_id="thread-run",
+        run_id="run-1",
+        requested_selection=ThreadExecutionSelection("fast"),
+        actual_primary=SafeModelProfile.from_record(primary["profile"]),
+        selection_origin=SelectionOrigin.REQUEST,
         runtime_profile_id="123456789abc",
+        created_at_ms=1,
+    )
+    assert await store.record_run_start(
+        "使用 fast",
+        run_binding,
     )
     # 同一请求重试不重复索引或绑定；不同内容则 fail closed。
     assert not await store.record_run_start(
-        "thread-run",
-        "run-1",
         "使用 fast",
-        requested_selection={"primary_profile": "fast"},
-        actual_primary_binding=primary,
-        runtime_profile_id="123456789abc",
+        run_binding,
     )
     with pytest.raises(ThreadStoreError, match="RUN_EXECUTION_BINDING_CONFLICT"):
         await store.record_run_start(
-            "thread-run",
-            "run-1",
             "使用 pro",
-            requested_selection={"primary_profile": "pro"},
-            actual_primary_binding=primary,
-            runtime_profile_id="123456789abc",
+            run_binding,
         )
     latest = await store.get_latest_run_execution_binding("thread-run")
     assert latest is not None
-    assert latest.requested_selection == {"primary_profile": "fast"}
-    assert latest.actual_primary_binding == primary
+    assert latest.requested_selection.to_record() == {"primary_profile": "fast"}
+    assert latest.actual_primary_record() == primary
     assert latest.runtime_profile_id == "123456789abc"
     assert (await store.list_threads())[0].first_message == "使用 fast"
     await store.close()

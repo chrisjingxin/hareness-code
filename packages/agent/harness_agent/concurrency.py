@@ -1,21 +1,15 @@
-"""并发安全分区：将工具调用拆分为可并行批次与必须串行的批次。
+"""工具并发安全分类与异步读写锁。
 
 ToolNode 的 _afunc 使用 asyncio.gather 无差别地并行执行所有 tool_calls，
-本模块在 gather 之前提供预分区层，确保写操作不会与其他操作并发执行，
-从而避免文件竞争和状态不一致。
+生产路径通过 ConcurrencyGuardMiddleware 使用本模块的安全分类和读写锁，
+在每次工具调用实际执行前协调读写操作。
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 import re
 import shlex
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
 
 # ---------------------------------------------------------------------------
 # 工具分类常量
@@ -215,134 +209,6 @@ def is_concurrency_safe(tool_name: str, args: dict) -> bool:
 
     # 未知工具一律视为不安全
     return False
-
-
-# ---------------------------------------------------------------------------
-# 分区算法
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class ToolBatch:
-    """工具执行批次：标记该批次是否可并行以及包含的工具调用。"""
-
-    concurrent: bool
-    """该批次内的调用是否可以并行执行。"""
-
-    calls: list[dict] = field(default_factory=list)
-    """本批次包含的工具调用字典列表。"""
-
-
-def partition_tool_calls(tool_calls: list[dict]) -> list[ToolBatch]:
-    """将工具调用列表分区为可并行批次和必须串行的批次。
-
-    算法：连续的并发安全工具合并为一个并行批次；每个不安全工具
-    独立形成一个串行批次。仅包含单个调用的批次标记为串行（无并行收益）。
-    保持原始顺序不变。
-
-    示例：[read, read, edit, read] →
-      [ToolBatch(concurrent=True, calls=[read, read]),
-       ToolBatch(concurrent=False, calls=[edit]),
-       ToolBatch(concurrent=False, calls=[read])]
-    """
-    batches: list[ToolBatch] = []
-
-    for call in tool_calls:
-        name = call.get("name", "")
-        args = call.get("args") or {}
-        safe = is_concurrency_safe(name, args)
-
-        if safe:
-            # 尝试合并到上一个并行批次
-            if batches and batches[-1].concurrent:
-                batches[-1].calls.append(call)
-            else:
-                batches.append(ToolBatch(concurrent=True, calls=[call]))
-        else:
-            # 每个不安全调用独立成批
-            batches.append(ToolBatch(concurrent=False, calls=[call]))
-
-    # 单个调用的并行批次无并行收益，降级为串行
-    for batch in batches:
-        if batch.concurrent and len(batch.calls) <= 1:
-            batch.concurrent = False
-
-    return batches
-
-
-# ---------------------------------------------------------------------------
-# 批次执行协调器
-# ---------------------------------------------------------------------------
-
-_DEFAULT_MAX_CONCURRENCY = 10
-_ENV_MAX_CONCURRENCY = "HARNESS_MAX_TOOL_CONCURRENCY"
-
-
-def get_max_concurrency() -> int:
-    """读取最大并发数配置。
-
-    从环境变量 HARNESS_MAX_TOOL_CONCURRENCY 解析正整数，
-    无效值（非数字、零、负数）回退到默认值 10。
-    """
-    raw = os.environ.get(_ENV_MAX_CONCURRENCY, "")
-    if not raw.strip():
-        return _DEFAULT_MAX_CONCURRENCY
-    try:
-        value = int(raw.strip())
-    except (ValueError, TypeError):
-        return _DEFAULT_MAX_CONCURRENCY
-    if value <= 0:
-        return _DEFAULT_MAX_CONCURRENCY
-    return value
-
-
-async def execute_batches(
-    batches: list[ToolBatch],
-    executor: Callable[[dict], Any],
-    max_concurrency: int | None = None,
-) -> list:
-    """按批次顺序执行工具调用，并行批次内部使用信号量限流。
-
-    参数：
-        batches: partition_tool_calls 产出的批次列表。
-        executor: 异步可调用对象，接收单个 tool_call 字典并返回结果。
-        max_concurrency: 并行批次内的最大并发数；为 None 时从环境变量读取。
-
-    返回：
-        按原始 tool_call 顺序排列的结果列表。
-    """
-    if max_concurrency is None:
-        max_concurrency = get_max_concurrency()
-
-    semaphore = asyncio.Semaphore(max_concurrency)
-    results: list[Any] = []
-
-    for batch in batches:
-        if batch.concurrent and len(batch.calls) > 1:
-            # 并行批次：信号量限流 + gather 保持顺序
-            batch_results = await _execute_parallel(batch.calls, executor, semaphore)
-            results.extend(batch_results)
-        else:
-            # 串行批次（或仅含单个调用的批次）：逐一执行
-            for call in batch.calls:
-                result = await executor(call)
-                results.append(result)
-
-    return results
-
-
-async def _execute_parallel(
-    calls: list[dict],
-    executor: Callable[[dict], Any],
-    semaphore: asyncio.Semaphore,
-) -> list[Any]:
-    """在信号量保护下并行执行一组工具调用，gather 保证结果顺序。"""
-
-    async def _limited(call: dict) -> Any:
-        async with semaphore:
-            return await executor(call)
-
-    return list(await asyncio.gather(*(_limited(call) for call in calls)))
 
 
 # ---------------------------------------------------------------------------

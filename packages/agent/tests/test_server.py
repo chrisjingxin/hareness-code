@@ -237,7 +237,7 @@ executor = "fast"
     assert server._thread_store is not None
     binding = await server._thread_store.get_latest_run_execution_binding("fresh-thread")
     assert binding is not None
-    assert binding.actual_primary_binding["profile"]["id"] == "pro"  # type: ignore[index]
+    assert binding.actual_primary.profile_id == "pro"
     await server._close_thread_store()
 
 
@@ -320,29 +320,40 @@ async def test_echo_run_response_precedes_ordered_terminal_events():
 
 async def test_run_started_emits_authoritative_primary_model_binding():
     """run.started 必须携带本次 Run 的脱敏实际模型，而非 TUI 的本地选择。"""
+    from harness_agent.execution_binding import (
+        RunExecutionBinding,
+        SafeModelProfile,
+        SelectionOrigin,
+        ThreadExecutionSelection,
+    )
     from harness_agent.server import ActiveRun, JsonRpcServer
 
     server = JsonRpcServer(allow_echo=True)
     frames = await _capture_server(server)
+    binding = RunExecutionBinding(
+        thread_id="thread-model",
+        run_id="run-model",
+        requested_selection=ThreadExecutionSelection("pro"),
+        actual_primary=SafeModelProfile.from_record({
+            "id": "pro",
+            "model": "pro-model",
+            "provider_label": "Pro Gateway",
+            "context_window_tokens": 256000,
+            "capabilities": ["streaming", "tool-calling"],
+            "is_default": False,
+            "available": True,
+            "unavailable_reason": None,
+            "source": "user",
+        }),
+        selection_origin=SelectionOrigin.REQUEST,
+        runtime_profile_id="123456789abc",
+        created_at_ms=1,
+    )
     run = ActiveRun(
         thread_id="thread-model",
         run_id="run-model",
         message="使用 pro",
-        primary_model_binding={
-            "profile": {
-                "id": "pro",
-                "model": "pro-model",
-                "provider_label": "Pro Gateway",
-                "context_window_tokens": 256000,
-                "capabilities": ["streaming", "tool-calling"],
-                "is_default": False,
-                "available": True,
-                "unavailable_reason": None,
-                "source": "user",
-            },
-            "source": "thread-primary",
-        },
-        runtime_profile_id="123456789abc",
+        execution_binding=binding,
     )
     server._runs[run.thread_id] = run
 
@@ -350,10 +361,7 @@ async def test_run_started_emits_authoritative_primary_model_binding():
 
     started = next(frame["params"] for frame in frames if frame.get("params", {}).get("type") == "run.started")
     assert started["payload"]["runtime_profile_id"] == "123456789abc"
-    assert started["payload"]["primary_model"] == {
-        **run.primary_model_binding,
-        "runtime_profile_id": "123456789abc",
-    }
+    assert started["payload"]["primary_model"] == binding.protocol_primary_model()
 
 
 async def test_context_compact_rewrites_idle_thread_and_returns_context_summary():
@@ -526,13 +534,20 @@ executor = "fast"
     assert frames[-1]["result"]["accepted"] is True
     await asyncio.sleep(0)
     assert server._thread_store is not None
-    assert await server._thread_store.get_model_bindings("thread-model") is None
+    assert (
+        await server._thread_store.load_execution_binding_state("thread-model")
+    ).legacy_models is None
     first = await server._thread_store.get_latest_run_execution_binding("thread-model")
     assert first is not None
-    assert first.requested_selection == {"primary_profile": "pro"}
-    assert first.actual_primary_binding["profile"]["id"] == "pro"  # type: ignore[index]
+    assert first.requested_selection.to_record() == {"primary_profile": "pro"}
+    assert first.actual_primary.profile_id == "pro"
     assert server._config is not None
-    runtime_profile = await server._resolve_runtime_profile("thread-model", server._config)
+    resolved = await server._resolve_execution_binding("thread-model", server._config)
+    runtime_profile = await server._resolve_runtime_profile(
+        "thread-model",
+        server._config,
+        resolved,
+    )
     assert server._runtime_build_specs[runtime_profile.profile_key].model_settings.name == "pro-model"
 
     await server.dispatch(_request(
@@ -548,8 +563,8 @@ executor = "fast"
     assert frames[-1]["result"]["accepted"] is True
     second = await server._thread_store.get_latest_run_execution_binding("thread-model")
     assert second is not None
-    assert second.requested_selection == {"primary_profile": "fast"}
-    assert second.actual_primary_binding["profile"]["id"] == "fast"  # type: ignore[index]
+    assert second.requested_selection.to_record() == {"primary_profile": "fast"}
+    assert second.actual_primary.profile_id == "fast"
 
     await server.dispatch(_request("models.list", {"thread_id": "thread-model"}, "models-bound"))
     model_state = frames[-1]["result"]
@@ -584,9 +599,18 @@ async def test_default_sidecar_shares_runtime_by_profile_without_draining_other_
         async def save_runtime_profile(self, thread_id: str, profile: object, *, bind_thread: bool = True) -> None:
             self.profiles[thread_id] = profile
 
+        async def load_execution_binding_state(self, _thread_id: str) -> object:
+            from harness_agent.execution_binding import PersistedBindingState
+
+            return PersistedBindingState()
+
     def config(model_name: str, *, pin_default_profile: bool = False) -> Za38Config:
         return Za38Config(
-            model=ModelSettings(name=model_name, base_url="https://gateway.example/v1"),
+            model=ModelSettings(
+                name=model_name,
+                base_url="https://gateway.example/v1",
+                api_key="test-key",
+            ),
             model_profile="default",
             execution=ExecutionSettings(),
             runtime_pool=RuntimePoolSettings(
@@ -664,6 +688,11 @@ async def test_default_context_compact_acquires_and_releases_profile_runtime(tmp
         async def save_runtime_profile(self, thread_id: str, profile: object, *, bind_thread: bool = True) -> None:
             self.profiles[thread_id] = profile
 
+        async def load_execution_binding_state(self, _thread_id: str) -> object:
+            from harness_agent.execution_binding import PersistedBindingState
+
+            return PersistedBindingState()
+
         async def load_context_messages(self, _thread_id: str) -> list[HumanMessage]:
             return [HumanMessage(content="历史")]
 
@@ -707,7 +736,11 @@ async def test_default_context_compact_acquires_and_releases_profile_runtime(tmp
     server._owner_connection.initialized = True
     server._owner_connection.enabled_capabilities = {"context.manage"}
     server._config = Za38Config(
-        model=ModelSettings(name="fast", base_url="https://gateway.example/v1"),
+        model=ModelSettings(
+            name="fast",
+            base_url="https://gateway.example/v1",
+            api_key="test-key",
+        ),
         model_profile="default",
         execution=ExecutionSettings(),
         runtime_pool=RuntimePoolSettings(),

@@ -149,7 +149,7 @@ interface ThreadExecutionSelection {
   `models.default_profile`，供未来新 Thread 使用；该写入失败不得回滚 ThreadSelection，
   也不能改写 AgentDefinition、历史 Run 或 legacy 角色绑定。
 - 当前 Run、已启动的子 Agent 和历史 Run 均不被热切换。
-- 未显式选择的新 Thread 从当前 TOML/ModelRouter 默认获得初始选择；配置默认不是 Thread
+- 未显式选择的新 Thread 从当前 TOML 默认获得初始选择；配置默认不是 Thread
   的历史事实，也不会覆盖已恢复 Thread 的选择。
 
 #### RunExecutionBinding
@@ -198,7 +198,7 @@ interface AgentExecutionBinding {
 ```text
 根 Agent 模型
 run.start 中的 ThreadExecutionSelection.rootModelProfileId
-    > 当前 ModelRouter/TOML 默认与 legacy 回退
+    > execution_binding 中的最近 Run、legacy 与 TOML 默认回退
 
 动态子 Agent 模型
 合法 spawn model override
@@ -243,7 +243,7 @@ Reviewer 或 Tester 的成本与能力。Policy 不存在“低优先级覆盖�
 | --- | --- | --- |
 | `Za38Config`、`ModelCatalog`、`ModelSettings`、`ModelProfile` | TOML 输入 adapter；每个当前 Profile 暂可投影为一个 ProviderDefinition + 一个 ModelProfile | 不改 TOML v1、endpoint、`api_key`、`headers_env` 或来源优先级 |
 | `[models.roles]`、`MODEL_ROLES` | 当前 Runtime 编译兼容层；`executor` 是当前 Single Agent root 的物理模型 | 不成为新的 RoleDefinition 领域对象；`/model` 只改变 root selection |
-| `ModelRouter.bind_thread()`、`ThreadModelBindings` | v5 legacy Thread 模型快照 | 已改为每 Run `resolve_run()`；旧记录只读兼容，不反向重写 |
+| `execution_binding.py` | Thread 根模型选择与 RunExecutionBinding 构造 | 一个纯函数集中请求、最近 Run、v5 legacy 和配置默认优先级；Runtime、持久化与 Protocol 消费同一解析结果 |
 | `harness_thread_model_bindings` | v5 legacy 选择来源 | 新 Run 已写入 RunExecutionBinding；不可把当前配置回填为历史 |
 | `harness_thread_runtime_profiles` | v4/v5 legacy Thread→Runtime 绑定 | 不再用于阻止模型切换；`harness_runtime_profiles` 仍可保存去重后的 RuntimeProfile record |
 | `ActiveRun`、`RunContext` | 单次调用控制状态 | 继续保存取消、审批、PromptEpoch 路由等易失状态；不取代持久 RunExecutionBinding |

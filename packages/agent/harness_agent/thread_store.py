@@ -14,6 +14,12 @@ from typing import Any, AsyncIterator, Literal, Mapping
 import aiosqlite
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
+from harness_agent.execution_binding import (
+    ExecutionBindingError,
+    LegacyModelBindings,
+    PersistedBindingState,
+    RunExecutionBinding,
+)
 from harness_agent.prompting import PromptEpoch, canonical_json
 from harness_agent.runtime_profile import (
     RUNTIME_PROFILE_VERSION,
@@ -49,18 +55,6 @@ class ThreadMessage:
     kind: Literal["user", "assistant", "tool"]
     content: str
     tool_name: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class RunExecutionBinding:
-    """一次已受理 Run 的脱敏执行事实，用于恢复当前选择和展示历史模型。"""
-
-    thread_id: str
-    run_id: str
-    requested_selection: dict[str, object]
-    actual_primary_binding: dict[str, object]
-    runtime_profile_id: str
-    created_at_ms: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,40 +280,13 @@ class ThreadStore:
         self,
         thread_id: str,
         message: str,
-        *,
-        model_bindings: Mapping[str, object] | None = None,
     ) -> None:
-        """在 run 受理时原子登记 thread 与首次模型绑定，供恢复选择器发现它。"""
+        """登记 Thread 摘要；旧模型绑定已进入只读兼容阶段。"""
         self._ensure_open()
         now = _now_ms()
         preview = _preview(message)
-        encoded_bindings = canonical_json(model_bindings) if model_bindings is not None else None
-        if model_bindings is not None and not isinstance(model_bindings.get("roles"), Mapping):
-            raise ThreadStoreError("THREAD_MODEL_BINDING_INVALID")
         try:
             async with self._lock:
-                if encoded_bindings is not None:
-                    cursor = await self._connection.execute(
-                        """
-                        SELECT binding_record FROM harness_thread_model_bindings
-                        WHERE project_fingerprint = ? AND thread_id = ?
-                        """,
-                        (self._project_fingerprint, thread_id),
-                    )
-                    existing = await cursor.fetchone()
-                    await cursor.close()
-                    if existing is not None:
-                        if str(existing["binding_record"]) != encoded_bindings:
-                            raise ThreadStoreError("THREAD_MODEL_BINDING_IMMUTABLE")
-                    else:
-                        await self._connection.execute(
-                            """
-                            INSERT INTO harness_thread_model_bindings (
-                                project_fingerprint, thread_id, binding_record, bound_at_ms
-                            ) VALUES (?, ?, ?, ?)
-                            """,
-                            (self._project_fingerprint, thread_id, encoded_bindings, now),
-                        )
                 await self._connection.execute(
                     """
                     INSERT INTO harness_threads (
@@ -343,7 +310,6 @@ class ThreadStore:
         except ThreadStoreError:
             raise
         except aiosqlite.Error as exc:
-            # 首条消息和模型绑定必须同成同败；写入中断时不能留下孤立绑定。
             try:
                 await self._connection.rollback()
             except aiosqlite.Error:
@@ -352,26 +318,17 @@ class ThreadStore:
 
     async def record_run_start(
         self,
-        thread_id: str,
-        run_id: str,
         message: str,
-        *,
-        requested_selection: Mapping[str, object],
-        actual_primary_binding: Mapping[str, object],
-        runtime_profile_id: str,
+        binding: RunExecutionBinding,
     ) -> bool:
         """原子登记 Thread 索引与 Run 绑定；同一 Run ID 重试不得重复执行。"""
         self._ensure_open()
-        _validate_run_selection(requested_selection)
-        _validate_actual_primary_binding(actual_primary_binding)
-        if not isinstance(run_id, str) or not run_id:
-            raise ThreadStoreError("RUN_EXECUTION_BINDING_INVALID")
-        if not isinstance(runtime_profile_id, str) or not runtime_profile_id:
-            raise ThreadStoreError("RUN_EXECUTION_BINDING_INVALID")
-        now = _now_ms()
+        thread_id = binding.thread_id
+        run_id = binding.run_id
+        now = binding.created_at_ms
         preview = _preview(message)
-        encoded_selection = canonical_json(requested_selection)
-        encoded_primary = canonical_json(actual_primary_binding)
+        encoded_selection = canonical_json(binding.requested_selection_record())
+        encoded_primary = canonical_json(binding.actual_primary_record())
         message_digest = hashlib.sha256(message.encode("utf-8")).hexdigest()
         try:
             async with self._lock:
@@ -389,7 +346,7 @@ class ThreadStore:
                     if (
                         str(existing["requested_selection"]) == encoded_selection
                         and str(existing["actual_primary_binding"]) == encoded_primary
-                        and str(existing["runtime_profile_id"]) == runtime_profile_id
+                        and str(existing["runtime_profile_id"]) == binding.runtime_profile_id
                         and str(existing["message_digest"]) == message_digest
                     ):
                         return False
@@ -426,7 +383,7 @@ class ThreadStore:
                         run_id,
                         encoded_selection,
                         encoded_primary,
-                        runtime_profile_id,
+                        binding.runtime_profile_id,
                         message_digest,
                         now,
                     ),
@@ -468,9 +425,7 @@ class ThreadStore:
             primary = json.loads(str(row["actual_primary_binding"]))
             if not isinstance(selection, dict) or not isinstance(primary, dict):
                 raise ThreadStoreError("RUN_EXECUTION_BINDING_INVALID")
-            _validate_run_selection(selection)
-            _validate_actual_primary_binding(primary)
-            return RunExecutionBinding(
+            return RunExecutionBinding.from_records(
                 thread_id=str(row["thread_id"]),
                 run_id=str(row["run_id"]),
                 requested_selection=selection,
@@ -480,8 +435,22 @@ class ThreadStore:
             )
         except ThreadStoreError:
             raise
-        except (aiosqlite.Error, TypeError, ValueError, json.JSONDecodeError) as exc:
+        except (
+            aiosqlite.Error,
+            ExecutionBindingError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as exc:
             raise ThreadStoreError(f"RUN_EXECUTION_BINDING_READ_FAILED: {exc}") from exc
+
+    async def load_execution_binding_state(self, thread_id: str) -> PersistedBindingState:
+        """读取当前选择和只读 legacy 候选，不向调用方暴露表结构。"""
+        return PersistedBindingState(
+            latest_run=await self.get_latest_run_execution_binding(thread_id),
+            legacy_models=await self._get_legacy_model_bindings(thread_id),
+            has_legacy_runtime=await self._has_legacy_runtime_binding(thread_id),
+        )
 
     async def refresh_thread(self, thread_id: str) -> None:
         """在 run 结束后用 checkpoint 消息数更新可恢复线程摘要。"""
@@ -505,66 +474,6 @@ class ThreadStore:
                 await self._connection.commit()
         except aiosqlite.Error as exc:
             raise ThreadStoreError(f"CHECKPOINT_INDEX_REFRESH_FAILED: {exc}") from exc
-
-    async def get_model_bindings(self, thread_id: str) -> dict[str, object] | None:
-        """读取 v5 legacy Thread 脱敏角色快照；无旧绑定 Thread 返回 None。"""
-        self._ensure_open()
-        try:
-            async with self._lock:
-                cursor = await self._connection.execute(
-                    """
-                    SELECT binding_record FROM harness_thread_model_bindings
-                    WHERE project_fingerprint = ? AND thread_id = ?
-                    """,
-                    (self._project_fingerprint, thread_id),
-                )
-                row = await cursor.fetchone()
-                await cursor.close()
-            if row is None:
-                return None
-            record = json.loads(str(row["binding_record"]))
-            if not isinstance(record, dict) or not isinstance(record.get("roles"), dict):
-                raise ThreadStoreError("THREAD_MODEL_BINDING_INVALID")
-            return record
-        except ThreadStoreError:
-            raise
-        except (aiosqlite.Error, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise ThreadStoreError(f"THREAD_MODEL_BINDING_READ_FAILED: {exc}") from exc
-
-    async def save_model_bindings(self, thread_id: str, record: Mapping[str, object]) -> None:
-        """仅为 legacy 调用写入首次角色 Profile 安全快照；新 Run 不应调用。"""
-        self._ensure_open()
-        if not isinstance(record.get("roles"), Mapping):
-            raise ThreadStoreError("THREAD_MODEL_BINDING_INVALID")
-        encoded = canonical_json(record)
-        try:
-            async with self._lock:
-                cursor = await self._connection.execute(
-                    """
-                    SELECT binding_record FROM harness_thread_model_bindings
-                    WHERE project_fingerprint = ? AND thread_id = ?
-                    """,
-                    (self._project_fingerprint, thread_id),
-                )
-                existing = await cursor.fetchone()
-                await cursor.close()
-                if existing is not None:
-                    if str(existing["binding_record"]) != encoded:
-                        raise ThreadStoreError("THREAD_MODEL_BINDING_IMMUTABLE")
-                    return
-                await self._connection.execute(
-                    """
-                    INSERT INTO harness_thread_model_bindings (
-                        project_fingerprint, thread_id, binding_record, bound_at_ms
-                    ) VALUES (?, ?, ?, ?)
-                    """,
-                    (self._project_fingerprint, thread_id, encoded, _now_ms()),
-                )
-                await self._connection.commit()
-        except ThreadStoreError:
-            raise
-        except aiosqlite.Error as exc:
-            raise ThreadStoreError(f"THREAD_MODEL_BINDING_WRITE_FAILED: {exc}") from exc
 
     async def load_context_messages(self, thread_id: str) -> list[Any] | None:
         """读取当前 project/thread 的完整模型消息，供本机上下文压缩安全改写。"""
@@ -740,8 +649,10 @@ class ThreadStore:
         except aiosqlite.Error as exc:
             raise ThreadStoreError(f"RUNTIME_PROFILE_WRITE_FAILED: {exc}") from exc
 
-    async def get_model_bindings(self, thread_id: str) -> dict[str, object] | None:
-        """读取 v5 legacy Thread 脱敏角色快照；无旧绑定 Thread 返回 None。"""
+    async def _get_legacy_model_bindings(
+        self, thread_id: str
+    ) -> LegacyModelBindings | None:
+        """读取并校验 v5 legacy Thread 模型快照。"""
         self._ensure_open()
         try:
             async with self._lock:
@@ -757,48 +668,37 @@ class ThreadStore:
             if row is None:
                 return None
             record = json.loads(str(row["binding_record"]))
-            if not isinstance(record, dict) or not isinstance(record.get("roles"), dict):
+            if not isinstance(record, Mapping):
                 raise ThreadStoreError("THREAD_MODEL_BINDING_INVALID")
-            return record
+            return LegacyModelBindings.from_record(record)
         except ThreadStoreError:
             raise
-        except (aiosqlite.Error, TypeError, ValueError, json.JSONDecodeError) as exc:
+        except (
+            aiosqlite.Error,
+            ExecutionBindingError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as exc:
             raise ThreadStoreError(f"THREAD_MODEL_BINDING_READ_FAILED: {exc}") from exc
 
-    async def save_model_bindings(self, thread_id: str, record: Mapping[str, object]) -> None:
-        """仅为 legacy 调用写入首次角色 Profile 安全快照；新 Run 不应调用。"""
+    async def _has_legacy_runtime_binding(self, thread_id: str) -> bool:
+        """判断 v4/v5 Thread 是否只有不可逆 Runtime 指纹。"""
         self._ensure_open()
-        if not isinstance(record.get("roles"), Mapping):
-            raise ThreadStoreError("THREAD_MODEL_BINDING_INVALID")
-        encoded = canonical_json(record)
         try:
             async with self._lock:
                 cursor = await self._connection.execute(
                     """
-                    SELECT binding_record FROM harness_thread_model_bindings
+                    SELECT 1 FROM harness_thread_runtime_profiles
                     WHERE project_fingerprint = ? AND thread_id = ?
                     """,
                     (self._project_fingerprint, thread_id),
                 )
-                existing = await cursor.fetchone()
+                row = await cursor.fetchone()
                 await cursor.close()
-                if existing is not None:
-                    if str(existing["binding_record"]) != encoded:
-                        raise ThreadStoreError("THREAD_MODEL_BINDING_IMMUTABLE")
-                    return
-                await self._connection.execute(
-                    """
-                    INSERT INTO harness_thread_model_bindings (
-                        project_fingerprint, thread_id, binding_record, bound_at_ms
-                    ) VALUES (?, ?, ?, ?)
-                    """,
-                    (self._project_fingerprint, thread_id, encoded, _now_ms()),
-                )
-                await self._connection.commit()
-        except ThreadStoreError:
-            raise
+            return row is not None
         except aiosqlite.Error as exc:
-            raise ThreadStoreError(f"THREAD_MODEL_BINDING_WRITE_FAILED: {exc}") from exc
+            raise ThreadStoreError(f"RUNTIME_PROFILE_READ_FAILED: {exc}") from exc
 
     async def archive_context(
         self,
@@ -1271,49 +1171,6 @@ def _preview(value: str) -> str:
     """将用户消息压缩为单行有限摘要，避免选择器被超长或换行文本破坏。"""
     compact = " ".join(value.split())
     return compact[:_MAX_PREVIEW_CHARS] or "(空消息)"
-
-
-def _validate_run_selection(value: Mapping[str, object]) -> None:
-    """Run 选择只允许主模型 ID，避免把未审计的执行参数写入历史表。"""
-    if set(value) != {"primary_profile"}:
-        raise ThreadStoreError("RUN_EXECUTION_BINDING_INVALID")
-    profile_id = value.get("primary_profile")
-    if not isinstance(profile_id, str) or not profile_id:
-        raise ThreadStoreError("RUN_EXECUTION_BINDING_INVALID")
-
-
-def _validate_actual_primary_binding(value: Mapping[str, object]) -> None:
-    """只接受模型 Picker 脱敏摘要和来源，拒绝 endpoint、Header 与凭据意外入库。"""
-    if set(value) != {"profile", "source"}:
-        raise ThreadStoreError("RUN_EXECUTION_BINDING_INVALID")
-    profile = value.get("profile")
-    source = value.get("source")
-    if not isinstance(profile, Mapping) or not isinstance(source, str) or not source:
-        raise ThreadStoreError("RUN_EXECUTION_BINDING_INVALID")
-    allowed = {
-        "id",
-        "model",
-        "provider_label",
-        "context_window_tokens",
-        "capabilities",
-        "is_default",
-        "available",
-        "unavailable_reason",
-        "source",
-    }
-    if set(profile) - allowed:
-        raise ThreadStoreError("RUN_EXECUTION_BINDING_INVALID")
-    for key in ("id", "model", "provider_label", "source"):
-        if not isinstance(profile.get(key), str) or not profile.get(key):
-            raise ThreadStoreError("RUN_EXECUTION_BINDING_INVALID")
-    if not isinstance(profile.get("context_window_tokens"), int):
-        raise ThreadStoreError("RUN_EXECUTION_BINDING_INVALID")
-    if not isinstance(profile.get("capabilities"), list) or not all(
-        isinstance(item, str) for item in profile["capabilities"]
-    ):
-        raise ThreadStoreError("RUN_EXECUTION_BINDING_INVALID")
-    if not isinstance(profile.get("is_default"), bool) or not isinstance(profile.get("available"), bool):
-        raise ThreadStoreError("RUN_EXECUTION_BINDING_INVALID")
 
 
 def _summary(row: Mapping[str, Any]) -> ThreadSummary:
