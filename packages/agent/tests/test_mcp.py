@@ -163,7 +163,7 @@ class TestMcpConfigFingerprint:
     """mcp_config_fingerprint 的指纹计算行为。"""
 
     def test_empty_configs_returns_disabled_fingerprint(self):
-        from harness_agent.runtime_profile import component_fingerprint
+        from harness_agent.agent_engine_profile import component_fingerprint
 
         fp = mcp_config_fingerprint([])
         assert fp == component_fingerprint({"transport": "disabled"})
@@ -518,9 +518,9 @@ class TestMcpConfigSnapshot:
 
         snapshot = build_mcp_snapshot([], revision="rev")
         assert snapshot.servers == ()
-        assert snapshot.runtime_identity["server_count"] == 0
+        assert snapshot.engine_identity["server_count"] == 0
 
-    def test_snapshot_runtime_identity_no_secrets(self):
+    def test_snapshot_engine_identity_no_secrets(self):
         from harness_agent.mcp import McpServerConfig, build_mcp_snapshot
 
         servers = [
@@ -533,7 +533,7 @@ class TestMcpConfigSnapshot:
             )
         ]
         snapshot = build_mcp_snapshot(servers, revision="r")
-        identity_str = str(snapshot.runtime_identity)
+        identity_str = str(snapshot.engine_identity)
         assert "super-secret-value" not in identity_str
         assert "Bearer xyz" not in identity_str
         assert "SECRET_TOKEN" in identity_str  # key name is included
@@ -553,9 +553,9 @@ class TestMcpConfigSnapshot:
         with pytest.raises(TypeError):
             server.env["TOKEN"] = "changed"  # type: ignore[index]
         with pytest.raises(TypeError):
-            snapshot.runtime_identity["server_count"] = 99  # type: ignore[index]
+            snapshot.engine_identity["server_count"] = 99  # type: ignore[index]
 
-    def test_runtime_identity_includes_all_non_secret_connection_fields(self):
+    def test_engine_identity_includes_all_non_secret_connection_fields(self):
         from harness_agent.mcp import McpServerConfig, build_mcp_snapshot
 
         snapshot = build_mcp_snapshot(
@@ -572,7 +572,7 @@ class TestMcpConfigSnapshot:
             ],
             revision="r",
         )
-        server_identity = snapshot.runtime_identity["servers"][0]  # type: ignore[index]
+        server_identity = snapshot.engine_identity["servers"][0]  # type: ignore[index]
         assert server_identity["command"] == "cmd"
         assert server_identity["args"] == ("--flag",)
         assert server_identity["timeout_seconds"] == 12.0
@@ -637,7 +637,7 @@ class TestMcpConfigFingerprintExpanded:
         first = McpServerConfig(name="s", transport="http", url="https://example.test/mcp?token=secret-a")
         second = McpServerConfig(name="s", transport="http", url="https://example.test/mcp?token=secret-b")
         assert mcp_config_fingerprint([first]) == mcp_config_fingerprint([second])
-        assert "secret-a" not in str(build_mcp_snapshot([first], "r").runtime_identity)
+        assert "secret-a" not in str(build_mcp_snapshot([first], "r").engine_identity)
 
     def test_fingerprint_keeps_non_secret_url_query_shape(self):
         from harness_agent.mcp import McpServerConfig, mcp_config_fingerprint

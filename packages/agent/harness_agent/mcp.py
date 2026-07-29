@@ -230,17 +230,17 @@ def mcp_config_fingerprint(configs: list[McpServerConfig]) -> str:
     timeout_seconds。不包含 env 变量值、header 值或任何 token/秘密。
     无配置时返回与 {"transport": "disabled"} 一致的固定值。
     """
-    from harness_agent.runtime_profile import component_fingerprint
+    from harness_agent.agent_engine_profile import component_fingerprint
 
     if not configs:
         return component_fingerprint({"transport": "disabled"})
     entries = []
     for c in sorted(configs, key=lambda c: c.name):
-        entries.append(_runtime_identity_for_server(c))
+        entries.append(_engine_identity_for_server(c))
     return component_fingerprint({"servers": entries})
 
 
-def _runtime_identity_for_server(config: McpServerConfig) -> dict[str, object]:
+def _engine_identity_for_server(config: McpServerConfig) -> dict[str, object]:
     """返回包含运行字段但不包含凭据值的服务器身份。"""
     identity: dict[str, object] = {
         "name": config.name,
@@ -302,41 +302,41 @@ def _freeze(value: object) -> object:
 class McpConfigSnapshot:
     """Host 认可的不可变 MCP 配置快照。
 
-    作为 McpConnectionManager 和 RuntimeProfile 的唯一配置真相来源，
-    消除持久化文件、连接管理器和 Runtime 身份之间的多副本不一致。
+    作为 McpConnectionManager 和 AgentEngineProfile 的唯一配置真相来源，
+    消除持久化文件、连接管理器和 AgentEngine 身份之间的多副本不一致。
     """
 
     servers: tuple[McpServerConfig, ...]
     digest: str
     revision: str
-    runtime_identity: Mapping[str, object] = field(default_factory=dict)
+    engine_identity: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """冻结传入的服务器序列和身份摘要，防止绕过 builder 修改快照。"""
         object.__setattr__(self, "servers", tuple(self.servers))
-        object.__setattr__(self, "runtime_identity", _freeze(self.runtime_identity))
+        object.__setattr__(self, "engine_identity", _freeze(self.engine_identity))
 
 
 def build_mcp_snapshot(servers: Sequence[McpServerConfig], revision: str) -> McpConfigSnapshot:
     """从已校验配置列表构建不可变 MCP 快照。
 
     servers 按 name 排序后冻结；digest 使用扩充后的 fingerprint；
-    runtime_identity 包含脱敏的运行相关字段摘要。
+    engine_identity 包含脱敏的运行相关字段摘要。
     """
-    from harness_agent.runtime_profile import component_fingerprint
+    from harness_agent.agent_engine_profile import component_fingerprint
 
     ordered = tuple(sorted(servers, key=lambda c: c.name))
     fingerprint = mcp_config_fingerprint(list(ordered))
     identity: dict[str, object] = {
         "server_count": len(ordered),
         "fingerprint": fingerprint,
-        "servers": [_runtime_identity_for_server(c) for c in ordered],
+        "servers": [_engine_identity_for_server(c) for c in ordered],
     }
     return McpConfigSnapshot(
         servers=ordered,
         digest=fingerprint,
         revision=revision,
-        runtime_identity=_freeze(identity),  # type: ignore[arg-type]
+        engine_identity=_freeze(identity),  # type: ignore[arg-type]
     )
 
 
@@ -475,7 +475,7 @@ class McpConnectionManager:
         return False
 
     async def apply_snapshot(self, snapshot: McpConfigSnapshot) -> list[dict[str, object]]:
-        """替换配置快照并重建连接；失败只影响新快照，不回写旧 Runtime。"""
+        """替换配置快照并重建连接；失败只影响新快照，不回写旧 AgentEngine。"""
         await self.close_all()
         self._snapshot = snapshot
         self._configs = list(snapshot.servers)

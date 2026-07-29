@@ -129,12 +129,12 @@ def _load_system_prompt() -> str:
 
 
 def default_tool_catalog_fingerprint() -> str:
-    """返回当前内置工具实际暴露形状的稳定指纹，供 Runtime Profile 使用。"""
+    """返回当前内置工具实际暴露形状的稳定指纹，供 AgentEngine Profile 使用。"""
     return tool_schema_fingerprint(_BUILTIN_TOOL_SHAPES)
 
 
 def default_prompt_template_fingerprint() -> str:
-    """返回基础 system prompt 模板内容的稳定指纹，配置变化时触发新 Runtime。"""
+    """返回基础 system prompt 模板内容的稳定指纹，配置变化时触发新 AgentEngine。"""
     from harness_agent.prompting import sha256_text
 
     return sha256_text(_load_system_prompt())
@@ -268,7 +268,7 @@ def create_harness_agent(
     context_updates: dict[str, list[Any]] | None = None,
     context_middleware: Any | None = None,
     context_window_tokens: int | None = None,
-    shared_runtime: bool = False,
+    shared_engine: bool = False,
 ) -> Any:
     """创建 za38 编码 agent。
 
@@ -295,7 +295,7 @@ def create_harness_agent(
         context_updates: server 持有的上下文事件缓冲，避免中间件直接写协议。
         context_middleware: 可由 server 显式持有的共享压缩器，用于用户手动触发压缩。
         context_window_tokens: 已校验的窗口大小；None 时优先读取模型 profile。
-        shared_runtime: True 时编译可服务多个 thread 的图，所有 thread 状态从 RunContext 读取。
+        shared_engine: True 时编译可服务多个 thread 的图，所有 thread 状态从 RunContext 读取。
 
     Returns:
         编译后的 LangGraph agent（CompiledStateGraph）。
@@ -322,9 +322,9 @@ def create_harness_agent(
     # 服务端会同时传 cwd 与 ExecutionContext；库调用方可能只传后者。守卫必须
     # 始终以本机 backend 实际绑定的工作区为准，不能退化为当前进程目录。
     local_workspace = prompt_workspace if not sandboxed else root
-    if shared_runtime and prompt_epoch is not None:
+    if shared_engine and prompt_epoch is not None:
         raise ValueError("SHARED_RUNTIME_PROMPT_EPOCH_MUST_USE_RUN_CONTEXT")
-    if prompt_epoch is None and not shared_runtime:
+    if prompt_epoch is None and not shared_engine:
         # 库调用没有 ThreadPersistence 时仍使用相同的确定性顺序，但不会声称可恢复。
         if enable_skills and not sandboxed and skill_registry is None:
             from harness_agent.skills import SkillRegistry
@@ -368,7 +368,7 @@ def create_harness_agent(
         )
 
         registry = skill_registry or SkillRegistry(local_workspace)
-        if shared_runtime:
+        if shared_engine:
             # ``backend`` 的固定部分只包含工作区资源；虚拟历史必须在每次工具
             # 调用时按 RunContext 的 thread 重新挂载，不能被编译图闭包捕获。
             backend = run_scoped_virtual_backend_factory(
@@ -440,7 +440,7 @@ def create_harness_agent(
             thread_persistence=thread_persistence,
             updates=context_updates,
         )
-    if shared_runtime:
+    if shared_engine:
         # 该中间件仅读取本轮 context，不保存 thread 私有 PromptEpoch。
         agent_middleware.append(PromptEpochMiddleware())
     agent_middleware.append(context_middleware)
@@ -463,6 +463,6 @@ def create_harness_agent(
             interrupt_on=interrupt_on,
             checkpointer=checkpointer or MemorySaver(),
             subagents=subagents,
-            context_schema=RunContext if shared_runtime else None,
+            context_schema=RunContext if shared_engine else None,
         )
     return compiled

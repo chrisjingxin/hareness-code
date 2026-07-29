@@ -1,4 +1,4 @@
-"""Runtime Profile 身份、脱敏和 ThreadPersistence 迁移回归测试。"""
+"""AgentEngine Profile 身份、脱敏和 ThreadPersistence 迁移回归测试。"""
 
 from __future__ import annotations
 
@@ -12,11 +12,11 @@ from langgraph.checkpoint.base import empty_checkpoint
 
 from harness_agent.approval_mode import DEFAULT_APPROVAL_MODE
 from harness_agent.config import ExecutionSettings, ModelSettings
-from harness_agent.runtime_profile import (
+from harness_agent.agent_engine_profile import (
     ModelRoleBinding,
-    RuntimeProfile,
+    AgentEngineProfile,
     component_fingerprint,
-    default_runtime_profile,
+    default_agent_engine_profile,
 )
 from harness_agent.thread_persistence import (
     CommitContextRewrite,
@@ -28,9 +28,9 @@ from harness_agent.thread_persistence import (
 from thread_fixtures import accept_thread
 
 
-def _profile(project_fingerprint: str) -> RuntimeProfile:
+def _profile(project_fingerprint: str) -> AgentEngineProfile:
     """构造一份不含真实配置的固定 Profile，供身份和存储测试复用。"""
-    return RuntimeProfile(
+    return AgentEngineProfile(
         project_fingerprint=project_fingerprint,
         topology_id="single-agent",
         topology_version=1,
@@ -48,11 +48,11 @@ def _profile(project_fingerprint: str) -> RuntimeProfile:
     )
 
 
-def test_runtime_profile_key_is_stable_and_excludes_thread_run_state() -> None:
+def test_agent_engine_profile_key_is_stable_and_excludes_thread_run_state() -> None:
     """相同图结构必须共享 Key，动态消息和 run 状态不能成为 Profile 字段。"""
     project_fingerprint = component_fingerprint({"project": "a"})
     first = _profile(project_fingerprint)
-    second = RuntimeProfile(
+    second = AgentEngineProfile(
         project_fingerprint=project_fingerprint,
         topology_id="single-agent",
         topology_version=1,
@@ -87,12 +87,12 @@ def test_runtime_profile_key_is_stable_and_excludes_thread_run_state() -> None:
         first,
         model_roles=(ModelRoleBinding("primary", component_fingerprint({"model": "changed"})),),
     ).profile_key != first.profile_key
-    assert RuntimeProfile.from_record(first.record()) == first
+    assert AgentEngineProfile.from_record(first.record()) == first
 
 
-def test_default_runtime_profile_hashes_model_and_execution_without_leaking_secrets() -> None:
+def test_default_agent_engine_profile_hashes_model_and_execution_without_leaking_secrets() -> None:
     """模型 endpoint、固定 Header 与 API Key 只能参与哈希，不能进入 Profile 记录。"""
-    profile = default_runtime_profile(
+    profile = default_agent_engine_profile(
         project_fingerprint=component_fingerprint({"project": "a"}),
         model_profile="enterprise",
         model=ModelSettings(
@@ -115,21 +115,21 @@ def test_default_runtime_profile_hashes_model_and_execution_without_leaking_secr
     assert "gateway.example" not in encoded
 
 
-async def test_thread_persistence_persists_runtime_profile_without_raw_values(tmp_path: Path) -> None:
-    """Runtime Profile 按 project/profile key 去重保存，且不写入 Thread 绑定。"""
+async def test_thread_persistence_persists_agent_engine_profile_without_raw_values(tmp_path: Path) -> None:
+    """AgentEngine Profile 按 project/profile key 去重保存，且不写入 Thread 绑定。"""
     home = tmp_path / "home"
     project = tmp_path / "project"
     project.mkdir()
     store = await ThreadPersistence.open(project=project, home=home)
     await accept_thread(store, "thread-1", "开始实现")
     profile = _profile(store.project_fingerprint)
-    await store.persist_runtime_profile(profile)
-    await store.persist_runtime_profile(profile)
-    await store.persist_runtime_profile(
+    await store.persist_agent_engine_profile(profile)
+    await store.persist_agent_engine_profile(profile)
+    await store.persist_agent_engine_profile(
         replace(profile, policy_fingerprint=component_fingerprint({"approval": "plan"}))
     )
     with pytest.raises(ThreadPersistenceError, match="RUNTIME_PROFILE_PROJECT_MISMATCH"):
-        await store.persist_runtime_profile(_profile(component_fingerprint({"project": "other"})))
+        await store.persist_agent_engine_profile(_profile(component_fingerprint({"project": "other"})))
     database = store.database_path
     await store.close()
 

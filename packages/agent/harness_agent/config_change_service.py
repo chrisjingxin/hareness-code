@@ -647,13 +647,13 @@ class ConfigChangeService:
         if path == "execution.backend":
             return "remote" if config.execution.sandbox_enabled else "local"
         if path == "runtime_pool.max_profiles":
-            return config.runtime_pool.max_profiles
+            return config.agent_engine_pool.max_profiles
         if path == "runtime_pool.idle_ttl_seconds":
-            return config.runtime_pool.idle_ttl_seconds
+            return config.agent_engine_pool.idle_ttl_seconds
         if path == "runtime_pool.close_timeout_seconds":
-            return config.runtime_pool.close_timeout_seconds
+            return config.agent_engine_pool.close_timeout_seconds
         if path == "runtime_pool.pin_default_profile":
-            return config.runtime_pool.pin_default_profile
+            return config.agent_engine_pool.pin_default_profile
         raise AssertionError(f"未知的配置字段：{path}")  # pragma: no cover - 静态白名单不变量。
 
     @contextmanager

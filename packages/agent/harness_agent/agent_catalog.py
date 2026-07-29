@@ -1,6 +1,6 @@
 """Agent 与 ExecutionPolicy 的受限静态目录。
 
-本模块只建立由 Plugin loader 显式传入的启动期只读快照，不构建 Runtime、不注册子 Agent，
+本模块只建立由 Plugin loader 显式传入的启动期只读快照，不构建 AgentEngine、不注册子 Agent，
 也不读取用户或项目目录。Python 内置主 Agent 不使用本目录；未来动态 delegation 只能从
 已校验的 catalog 取 Plugin 定义，不能将仓库文件、Prompt 或权限配置直接传入执行层。
 """
@@ -293,7 +293,7 @@ class AgentCatalog:
         return tuple(self._policies.values())
 
     def snapshot(self) -> dict[str, object]:
-        """返回可记录在 Runtime Profile 的脱敏 catalog 快照摘要。"""
+        """返回可记录在 AgentEngine Profile 的脱敏 catalog 快照摘要。"""
         return {"id": self.snapshot_id, "agents": len(self.agents), "policies": len(self.policies)}
 
     def list_agents(self) -> list[dict[str, object]]:
@@ -829,7 +829,7 @@ def _reject_unknown(value: Mapping[str, object], allowed: set[str], field: str) 
 
 
 def _fingerprint(value: object) -> str:
-    """生成完整 SHA-256，以便后续 Runtime/Run 使用而不保存资产正文。"""
+    """生成完整 SHA-256，以便后续 AgentEngine/Run 使用而不保存资产正文。"""
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 

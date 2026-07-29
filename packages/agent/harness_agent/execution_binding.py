@@ -275,7 +275,7 @@ class PersistedBindingState:
 
 @dataclass(frozen=True, slots=True)
 class ResolvedExecutionBinding:
-    """一次根模型解析的唯一结果，供 Runtime 与 Run 历史共同消费。"""
+    """一次根模型解析的唯一结果，供 AgentEngine 与 Run 历史共同消费。"""
 
     selection: ThreadExecutionSelection
     primary_profile: ModelProfile
@@ -350,7 +350,7 @@ def resolve_execution_binding(
             profile_id = config.model_catalog.default_profile
             origin = SelectionOrigin.CONFIG_DEFAULT
         profile = config.model_catalog.require_profile(profile_id)
-    _validate_runtime_profile(profile)
+    _validate_model_profile(profile)
     selection = ThreadExecutionSelection(root_model_profile_id=profile.profile_id)
     return ResolvedExecutionBinding(
         selection=selection,
@@ -369,7 +369,7 @@ def describe_thread_binding(persisted: PersistedBindingState) -> ThreadBindingVi
     return ThreadBindingView(state="unbound")
 
 
-def _validate_runtime_profile(profile: ModelProfile) -> None:
+def _validate_model_profile(profile: ModelProfile) -> None:
     """验证当前根 Agent 启动模型的凭据与必要能力。"""
     if profile.settings.api_key_source() == "missing":
         raise ConfigError("MODEL_PROFILE_UNAVAILABLE: API_KEY_MISSING")

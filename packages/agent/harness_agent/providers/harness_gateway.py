@@ -15,7 +15,7 @@ from harness_agent.config import ModelSettings
 class ProviderClientPool:
     """Sidecar 级 OpenAI-compatible 无认证 HTTP transport 池。
 
-    transport 不携带 API Key、Header 或模型名；认证仍由每个 Runtime 的
+    transport 不携带 API Key、Header 或模型名；认证仍由每个 AgentEngine 的
     ChatOpenAI 适配器持有，避免不同 Profile 在共享连接上串用凭据。
     """
 

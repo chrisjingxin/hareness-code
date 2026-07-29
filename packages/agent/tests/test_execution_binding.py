@@ -13,7 +13,7 @@ from harness_agent.config import (
     ModelCatalog,
     ModelProfile,
     ModelSettings,
-    RuntimePoolSettings,
+    AgentEnginePoolSettings,
     Za38Config,
 )
 from harness_agent.execution_binding import (
@@ -60,7 +60,7 @@ def _config() -> Za38Config:
         model=catalog.require_profile().settings,
         model_profile=catalog.default_profile,
         execution=ExecutionSettings(),
-        runtime_pool=RuntimePoolSettings(),
+        agent_engine_pool=AgentEnginePoolSettings(),
         paths=(),
         workspace=Path("/workspace"),
         sources={},
@@ -133,7 +133,7 @@ def test_resolve_execution_binding_uses_one_precedence_chain(
 
 
 def test_resolved_binding_builds_safe_immutable_run_fact() -> None:
-    """Runtime 输入与持久化事实必须来自同一个解析结果且保持脱敏。"""
+    """AgentEngine 输入与持久化事实必须来自同一个解析结果且保持脱敏。"""
     resolved = resolve_execution_binding(
         _config(),
         ThreadExecutionSelection("pro"),
@@ -163,7 +163,7 @@ def test_compatibility_config_rejects_explicit_profile() -> None:
         model=profile.settings,
         model_profile="default",
         execution=ExecutionSettings(),
-        runtime_pool=RuntimePoolSettings(),
+        agent_engine_pool=AgentEnginePoolSettings(),
         paths=(),
         workspace=Path("/workspace"),
         sources={},
@@ -246,7 +246,7 @@ def test_run_binding_decoder_rejects_unknown_source() -> None:
 
 
 def test_describe_thread_binding_preserves_legacy_unknown() -> None:
-    """只有旧 Runtime 指纹时不能伪造当前默认模型。"""
+    """只有旧 AgentEngine 指纹时不能伪造当前默认模型。"""
     view = describe_thread_binding(PersistedBindingState(has_legacy_runtime=True))
 
     assert view.to_record() == {"state": "legacy", "roles": {}}

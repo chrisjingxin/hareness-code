@@ -7,10 +7,10 @@
 
 ## 背景
 
-Harness 已有命名模型 Profile、角色路由、可共享 `RuntimeProfile`、Thread 持久化和
+Harness 已有命名模型 Profile、角色路由、可共享 `AgentEngineProfile`、Thread 持久化和
 DeepAgents 默认 `general-purpose` 子 Agent，但这些能力来自不同阶段的实现：当前 TOML
 Profile 同时持有连接与模型参数；v5 的 `ThreadModelBindings` 曾将首次模型选择冻结在 Thread；
-RuntimePool 则正确要求 Runtime 身份不含 Thread/Run 状态。若直接在这些实现上叠加
+AgentEnginePool 则正确要求 AgentEngine 身份不含 Thread/Run 状态。若直接在这些实现上叠加
 Thread 内 `/model`、自定义 Agent 或动态 delegation，会产生重复的模型、权限和历史来源。
 
 本决策固定长期领域边界，并给出现有 TOML、SQLite 和运行时对象的兼容映射。当前实现已据此
@@ -52,7 +52,7 @@ interface ProviderDefinition {
 ```
 
 - `endpoint`、凭据引用和 Header 引用只能存在于可信静态配置及其内存解析结果中。
-- Run 记录、协议 DTO、日志、Runtime Profile record 和 TUI 不得保存或展示 endpoint、
+- Run 记录、协议 DTO、日志、AgentEngineProfile record 和 TUI 不得保存或展示 endpoint、
   凭据值、认证 Header 值或环境变量名。
 
 #### ModelProfile
@@ -210,12 +210,12 @@ run.start 中的 ThreadExecutionSelection.rootModelProfileId
 Reviewer 或 Tester 的成本与能力。Policy 不存在“低优先级覆盖”：所有 Policy 始终取交集。
 
 无效 ID、模型不可用、能力不足、Policy 提权、循环引用、未可信项目来源和无法恢复的 legacy
-记录都必须 fail closed。v5 可读的 Thread 模型快照可以以 `legacy` 来源解析；只有旧 Runtime
+记录都必须 fail closed。v5 可读的 Thread 模型快照可以以 `legacy` 来源解析；只有旧 AgentEngine
 指纹而无法恢复 Profile ID 时，UI 必须标记“历史模型未知”，不得将当前默认模型伪装为历史事实。
 
-### 生命周期与 Runtime 边界
+### 生命周期与 AgentEngine 边界
 
-| 对象 | 生命周期 | 可变性 | RuntimeProfile 处理 |
+| 对象 | 生命周期 | 可变性 | AgentEngineProfile 处理 |
 | --- | --- | --- | --- |
 | Provider / Model | TOML 配置 snapshot | snapshot 内不可变 | 当前 root 模型的有效内容以脱敏指纹参与 |
 | Plugin Policy / Plugin Agent | 已验证 Plugin catalog snapshot | snapshot 内不可变 | 仅在该 Plugin Agent 被派发时以脱敏指纹参与 |
@@ -224,7 +224,7 @@ Reviewer 或 Tester 的成本与能力。Policy 不存在“低优先级覆盖�
 | ResolvedAgentSpec | 单次构建/调用 | 临时对象 | 由其静态指纹构成 Profile，不持久化 |
 
 `ResolvedAgentSpec` 只是将一个 Plugin Agent、Model、Policy、Thread 选择和当前任务上下文解析后的
-内部 DTO；它不是配置对象、数据库表或 JSON-RPC DTO。内置主 Agent 沿用现有 Python 构建路径。`RuntimeProfile` 继续只表达可共享图的
+内部 DTO；它不是配置对象、数据库表或 JSON-RPC DTO。内置主 Agent 沿用现有 Python 构建路径。`AgentEngineProfile` 继续只表达可共享图的
 稳定身份：有效 Agent/Model/Policy/Prompt/工具/Skill/MCP/Sandbox/middleware 指纹可以参与；
 `thread_id`、消息、选择正文、run ID、审批状态、取消令牌、执行树和凭据绝不参与。
 
@@ -242,10 +242,10 @@ Reviewer 或 Tester 的成本与能力。Policy 不存在“低优先级覆盖�
 | 当前实现 | canonical 映射 | 迁移要求 |
 | --- | --- | --- |
 | `Za38Config`、`ModelCatalog`、`ModelSettings`、`ModelProfile` | TOML 输入 adapter；每个当前 Profile 暂可投影为一个 ProviderDefinition + 一个 ModelProfile | 不改 TOML v1、endpoint、`api_key`、`headers_env` 或来源优先级 |
-| `[models.roles]`、`MODEL_ROLES` | 当前 Runtime 编译兼容层；`executor` 是当前 Single Agent root 的物理模型 | 不成为新的 RoleDefinition 领域对象；`/model` 只改变 root selection |
-| `execution_binding.py` | Thread 根模型选择与 RunExecutionBinding 构造 | 一个纯函数集中请求、最近 Run、v5 legacy 和配置默认优先级；Runtime、持久化与 Protocol 消费同一解析结果 |
+| `[models.roles]`、`MODEL_ROLES` | 当前 AgentEngine 编译兼容层；`executor` 是当前 Single Agent root 的物理模型 | 不成为新的 RoleDefinition 领域对象；`/model` 只改变 root selection |
+| `execution_binding.py` | Thread 根模型选择与 RunExecutionBinding 构造 | 一个纯函数集中请求、最近 Run、v5 legacy 和配置默认优先级；AgentEngine、持久化与 Protocol 消费同一解析结果 |
 | `harness_thread_model_bindings` | v5 legacy 选择来源 | 新 Run 已写入 RunExecutionBinding；不可把当前配置回填为历史 |
-| `harness_thread_runtime_profiles` | v4/v5 legacy Thread→Runtime 绑定 | 不再用于阻止模型切换；`harness_runtime_profiles` 仍可保存去重后的 RuntimeProfile record |
+| `harness_thread_runtime_profiles` | v4/v5 legacy Thread→AgentEngine 绑定 | 不再用于阻止模型切换；`harness_runtime_profiles` 仍可保存去重后的 AgentEngineProfile record |
 | `ActiveRun`、`RunContext` | 单次调用控制状态 | 继续保存取消、审批、PromptEpoch 路由等易失状态；不取代持久 RunExecutionBinding |
 | TUI `threadModelSelection` / `actualModelProfile` | ThreadExecutionSelection 的当前临时投影 | 已区分未来选择与本 Run 实际绑定，并以 `run.started` 校准 |
 | `create_harness_agent()` | Python 内置主 Agent | 继续作为固定 root；不得改为读取 AgentDefinition |
@@ -257,7 +257,7 @@ canonical model 和凭据脱敏边界。
 
 ## 后果
 
-- ThreadExecutionSelection、每 Run 模型解析、RunExecutionBinding 和 Runtime Profile 选择必须由同一领域 module 协调，不得在 Server、TUI 和存储 adapter 中各自推断。
+- ThreadExecutionSelection、每 Run 模型解析、RunExecutionBinding 和 AgentEngineProfile 选择必须由同一领域 module 协调，不得在 Server、TUI 和存储 adapter 中各自推断。
 - 内置主 Agent 继续由 Python 固定构建，不放入 Agent catalog。
 - Agent catalog、动态 Subagent、Agent 定向模型、固定 Workflow、Team/Mailbox 和第二 Provider 都是未启用的产品方向，统一记录在 [新功能候选](../新功能候选.md)。
 - 在第二 Provider adapter 出现前不建立 Canonical Message port；出现真实的第二 adapter 时，必须先阻止 Provider 私有历史跨 adapter 泄漏。
@@ -283,4 +283,4 @@ canonical model 和凭据脱敏边界。
 ### 将 Provider、模型、权限、Prompt 全部内联到 AgentProfile
 
 拒绝。连接、模型、Policy 在多个 Agent 间有独立复用、敏感数据边界和缓存身份；内联会使
-配置覆盖、权限审计和 RuntimeProfile 指纹重复且难以验证。
+配置覆盖、权限审计和 AgentEngineProfile 指纹重复且难以验证。

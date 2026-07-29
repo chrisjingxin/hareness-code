@@ -221,8 +221,8 @@ class ExecutionSettings:
 
 
 @dataclass(frozen=True, slots=True)
-class RuntimePoolSettings:
-    """共享 AgentRuntime Pool 的容量、空闲淘汰和关闭等待配置。"""
+class AgentEnginePoolSettings:
+    """共享 AgentEngine Pool 的容量、空闲淘汰和关闭等待配置。"""
 
     max_profiles: int = 8
     idle_ttl_seconds: int = 1_800
@@ -246,7 +246,7 @@ class Za38Config:
     model: ModelSettings | None
     model_profile: str | None
     execution: ExecutionSettings
-    runtime_pool: RuntimePoolSettings
+    agent_engine_pool: AgentEnginePoolSettings
     paths: tuple[Path, ...]
     workspace: Path
     sources: Mapping[str, str]
@@ -287,7 +287,7 @@ class Za38Config:
             ] if self.model_catalog else [],
             "model_roles": dict(self.model_catalog.role_profiles) if self.model_catalog else {},
             "security": self.execution.redacted(),
-            "runtime_pool": self.runtime_pool.redacted(),
+            "runtime_pool": self.agent_engine_pool.redacted(),
             "mcp_servers": [
                 {"name": s.name, "transport": s.transport} for s in self.mcp_servers
             ],
@@ -322,7 +322,7 @@ def load_config(
             (explicit_path, ConfigSource.EXPLICIT, _read_document(explicit_path, ConfigSource.EXPLICIT))
         )
 
-    models, approval_values, execution_values, runtime_pool_values, mcp_values, sources = _merge_documents(documents)
+    models, approval_values, execution_values, agent_engine_pool_values, mcp_values, sources = _merge_documents(documents)
     _apply_environment_overrides(models, approval_values, execution_values, environment, sources)
     _apply_cli_overrides(execution_values, environment, sources)
     model_catalog = _parse_model_catalog(models, sources["models"])
@@ -334,7 +334,7 @@ def load_config(
         model=model,
         model_profile=model_profile,
         execution=_parse_execution(approval_values, execution_values),
-        runtime_pool=_parse_runtime_pool(runtime_pool_values),
+        agent_engine_pool=_parse_agent_engine_pool(agent_engine_pool_values),
         mcp_servers=mcp_servers,
         paths=tuple(path for path, _, _ in documents),
         workspace=resolved_workspace,
@@ -432,7 +432,7 @@ def _merge_documents(
     models: dict[str, object] = {"profiles": {}, "roles": {}, "_profile_sources": {}}
     approval_values: dict[str, object] = {}
     execution_values: dict[str, object] = {}
-    runtime_pool_values: dict[str, object] = {}
+    agent_engine_pool_values: dict[str, object] = {}
     mcp_values: dict[str, object] = {}
     sources = {
         "models": "default",
@@ -452,12 +452,12 @@ def _merge_documents(
             execution_values = _merge_execution_values(execution_values, document["execution"])
             sources["execution"] = source.value
         if "runtime_pool" in document:
-            runtime_pool_values = _merge_flat_values(runtime_pool_values, document["runtime_pool"])
+            agent_engine_pool_values = _merge_flat_values(agent_engine_pool_values, document["runtime_pool"])
             sources["runtime_pool"] = source.value
         if "mcp" in document:
             mcp_values = document["mcp"]  # type: ignore[assignment]
             sources["mcp"] = source.value
-    return models, approval_values, execution_values, runtime_pool_values, mcp_values, sources
+    return models, approval_values, execution_values, agent_engine_pool_values, mcp_values, sources
 
 
 def _merge_models(target: dict[str, object], value: object, source: str) -> None:
@@ -757,8 +757,8 @@ def _parse_execution(
     )
 
 
-def _parse_runtime_pool(values: Mapping[str, object]) -> RuntimePoolSettings:
-    """解析共享 Runtime Pool 的有界缓存与确定性关闭配置。"""
+def _parse_agent_engine_pool(values: Mapping[str, object]) -> AgentEnginePoolSettings:
+    """解析共享 AgentEngine Pool 的有界缓存与确定性关闭配置。"""
     allowed = {
         "max_profiles",
         "idle_ttl_seconds",
@@ -773,7 +773,7 @@ def _parse_runtime_pool(values: Mapping[str, object]) -> RuntimePoolSettings:
     pin_default_profile = values.get("pin_default_profile", False)
     if not isinstance(pin_default_profile, bool):
         raise ConfigError("runtime_pool.pin_default_profile must be a boolean")
-    return RuntimePoolSettings(
+    return AgentEnginePoolSettings(
         max_profiles=_integer(
             values.get("max_profiles", 8),
             "runtime_pool.max_profiles",

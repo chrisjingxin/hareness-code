@@ -21,14 +21,13 @@ from typing import Any
 from jsonschema.exceptions import ValidationError
 
 from harness_agent import __version__
-from harness_agent.agent_runtime import (
-    AgentRuntime,
-    AgentRuntimeLease,
-    AgentRuntimeRunLease,
-    RuntimeCloseAdapter,
-    RuntimePool,
-    RuntimePoolCapacityError,
-    RuntimeResourceBundle,
+from harness_agent.agent_engine import (
+    AgentEngine,
+    AgentEngineLease,
+    AgentEngineCloseAdapter,
+    AgentEnginePool,
+    AgentEnginePoolCapacityError,
+    AgentEngineResourceBundle,
 )
 from harness_agent.config import ConfigError, Za38Config, load_config
 from harness_agent.config_change_service import (
@@ -85,17 +84,33 @@ from harness_agent.mcp import (
     McpServerConfig,
     build_mcp_snapshot,
 )
-from harness_agent.run_context import RunCancellationToken, RunContext
-from harness_agent.runtime_profile import (
-    RuntimeProfile,
+from harness_agent.run_context import RunContext
+from harness_agent.agent_engine_profile import (
+    AgentEngineProfile,
     component_fingerprint,
-    default_runtime_profile,
+    default_agent_engine_profile,
 )
-from harness_agent.thread_persistence import AcceptRun, ThreadPersistence, ThreadPersistenceError
+from harness_agent.thread_persistence import ThreadPersistence, ThreadPersistenceError
 from harness_agent.providers.harness_gateway import ProviderClientPool
+from harness_agent.run_coordinator import (
+    AgentEvent,
+    ConnectionRef,
+    InteractionRequest,
+    InteractionResult,
+    RunCoordinator,
+    RunError,
+    RunExecution,
+    RunPreparation,
+    RunRuntime,
+    RunState,
+    RunRef,
+    RequestedSkill,
+    StartRun,
+    INTERACTION_TIMEOUT_MS,
+    _bounded_json,
+)
 
 logger = logging.getLogger(__name__)
-INTERACTION_TIMEOUT_MS = 300_000
 STABLE_ERROR_CODES = {
     "PROTOCOL_VERSION_UNSUPPORTED",
     "CAPABILITY_REQUIRED",
@@ -123,40 +138,9 @@ class RpcError(Exception):
         self.data = data
 
 
-@dataclass(slots=True)
-class ActiveRun:
-    """一次执行的隔离状态；sequence 只覆盖可广播事件。"""
-
-    thread_id: str
-    run_id: str
-    message: str
-    owner_connection_id: str = ""
-    requested_skill: dict[str, str] | None = None
-    task: asyncio.Task[None] | None = None
-    sequence: int = 0
-    status: str = "running"
-    usage: dict[str, int] = field(
-        default_factory=lambda: {"input_tokens": 0, "output_tokens": 0}
-    )
-    tool_stream_ids: dict[str, str] = field(default_factory=dict)
-    tool_result_ids: dict[str, str] = field(default_factory=dict)
-    started_tool_ids: set[str] = field(default_factory=set)
-    last_tool_id: str | None = None
-    started_at: float = field(default_factory=time.monotonic)
-    context_summary: dict[str, object] = field(default_factory=dict)
-    cancellation_token: RunCancellationToken = field(default_factory=RunCancellationToken)
-    run_context: RunContext | None = None
-    runtime_lease: AgentRuntimeLease | None = None
-    runtime_run_lease: AgentRuntimeRunLease | None = None
-    runtime_profile_key: str | None = None
-    resolved_execution_binding: ResolvedExecutionBinding | None = None
-    execution_binding: RunExecutionBinding | None = None
-    resolved_runtime_profile: RuntimeProfile | None = None
-
-
 @dataclass(frozen=True, slots=True)
-class _RuntimeBuildSpec:
-    """构建一个共享 Runtime 所需的稳定输入，不含 thread/run 私有状态。"""
+class _AgentEngineBuildSpec:
+    """构建一个共享 AgentEngine 所需的稳定输入，不含 thread/run 私有状态。"""
 
     config: Za38Config
     workspace: Path
@@ -167,25 +151,11 @@ class _RuntimeBuildSpec:
 
 
 @dataclass(slots=True)
-class _RuntimeArtifacts:
-    """Runtime 图之外的共享 middleware 与执行上下文，由同一 Runtime 负责释放。"""
+class _AgentEngineArtifacts:
+    """AgentEngine 图之外的共享 middleware 与执行上下文，由同一 AgentEngine 负责释放。"""
 
     execution_context: Any
     context_compactor: Any
-
-
-@dataclass(slots=True)
-class InteractionSpec:
-    """从 LangGraph interrupt 规范化出的协议请求及恢复所需原始信息。"""
-
-    request_id: str
-    type: str
-    payload: dict[str, Any]
-    interrupt_id: str
-    questions: list[Mapping[str, Any]] = field(default_factory=list)
-    # 单次审批 interrupt 中挂起的工具调用数量；HITL 中间件要求 resume 的
-    # decisions 列表长度必须与之相等，否则会抛出 decisions 不匹配错误。
-    action_count: int = 1
 
 
 @dataclass(slots=True)
@@ -204,8 +174,70 @@ class ProtocolConnection:
     interaction_handles: set[str] = field(default_factory=set)
     watched_threads: set[str] = field(default_factory=set)
     pending_requests: dict[str, asyncio.Future[object]] = field(default_factory=dict)
-    interaction_specs: dict[str, InteractionSpec] = field(default_factory=dict)
+    interaction_specs: dict[str, InteractionRequest] = field(default_factory=dict)
     closed: bool = False
+
+
+class _ProtocolInteractionAdapter:
+    """把类型化 Interaction 映射为 owner Connection 上的 JSON-RPC reverse request。"""
+
+    def __init__(self, host: "AgentHost") -> None:
+        """保存 Host 引用；RunCoordinator 不会看到该 transport 对象。"""
+        self._host = host
+
+    async def request(
+        self,
+        owner: ConnectionRef,
+        run: RunRef,
+        interaction: InteractionRequest,
+    ) -> InteractionResult:
+        """向 owner 请求审批/问答，超时、断开和缺少 capability 均安全降级。"""
+        connection = self._host._connections.get(owner.connection_id)
+        if (
+            connection is None
+            or connection.closed
+            or interaction.type not in self._host._connection_handles(connection)
+        ):
+            logger.info("Interaction %s disabled by capability negotiation", interaction.request_id)
+            return InteractionResult(self._default_value(interaction), expired=True)
+
+        future: asyncio.Future[object] = asyncio.get_running_loop().create_future()
+        connection.pending_requests[interaction.request_id] = future
+        connection.interaction_specs[interaction.request_id] = interaction
+        method = (
+            METHOD["INTERACTION_APPROVAL"]
+            if interaction.type == "approval"
+            else METHOD["INTERACTION_QUESTION"]
+        )
+        try:
+            await self._host._send_to(
+                connection,
+                {
+                    "jsonrpc": "2.0",
+                    "method": method,
+                    "id": interaction.request_id,
+                    "params": {
+                        "thread_id": run.thread_id,
+                        "run_id": run.run_id,
+                        "timeout_ms": INTERACTION_TIMEOUT_MS,
+                        "payload": dict(interaction.payload),
+                    },
+                },
+            )
+            return InteractionResult(
+                await asyncio.wait_for(future, timeout=INTERACTION_TIMEOUT_MS / 1000)
+            )
+        except (TimeoutError, RpcError, ValidationError) as exc:
+            logger.warning("Interaction %s failed closed: %s", interaction.request_id, exc)
+            return InteractionResult(self._default_value(interaction), expired=True)
+        finally:
+            connection.pending_requests.pop(interaction.request_id, None)
+            connection.interaction_specs.pop(interaction.request_id, None)
+
+    @staticmethod
+    def _default_value(interaction: InteractionRequest) -> dict[str, object]:
+        """返回 LangGraph 可接受的安全默认交互结果。"""
+        return {"decision": "reject"} if interaction.type == "approval" else {"answers": {}}
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,7 +283,7 @@ class AgentHost:
         self._running = True
         self._send_lock = asyncio.Lock()
         self._agent_build_lock = asyncio.Lock()
-        self._runs: dict[str, ActiveRun] = {}
+        self._run_event_tasks: set[asyncio.Task[None]] = set()
         self._workspace = (workspace or Path.cwd()).resolve()
         self._config_path = config_path or os.environ.get("HARNESS_AGENT_CONFIG_PATH")
         self._connection_role = connection_role
@@ -262,13 +294,13 @@ class AgentHost:
         self._startup_error: str | None = None
         self._skill_registry: SkillRegistry | None = None
         self._thread_persistence: ThreadPersistence | None = None
-        self._runtime_pool: RuntimePool | None = None
+        self._agent_engine_pool: AgentEnginePool | None = None
         self._mcp_manager: McpConnectionManager | None = None
         self._mcp_snapshot: McpConfigSnapshot | None = None
         self._mcp_connect_task: asyncio.Task[None] | None = None
         self._mcp_state_lock = asyncio.Lock()
-        self._runtime_build_specs: dict[str, _RuntimeBuildSpec] = {}
-        self._runtime_artifacts: dict[str, _RuntimeArtifacts] = {}
+        self._agent_engine_build_specs: dict[str, _AgentEngineBuildSpec] = {}
+        self._agent_engine_artifacts: dict[str, _AgentEngineArtifacts] = {}
         self._provider_client_pool = ProviderClientPool()
         self._owner_connection = ProtocolConnection(
             connection_id=connection_id or str(uuid.uuid4()),
@@ -283,8 +315,14 @@ class AgentHost:
         )
         self._resource_init_lock = asyncio.Lock()
         self._resources_ready = False
-        self._registry_lock = asyncio.Lock()
-        self._starting_threads: set[str] = set()
+        self._run_coordinator = RunCoordinator(
+            persistence_provider=self._run_persistence_provider,
+            preparation_provider=self._prepare_run,
+            runtime_provider=self._acquire_run_runtime,
+            interaction_port=_ProtocolInteractionAdapter(self),
+            skill_registry_provider=self._require_skills,
+            context_updates_provider=self._take_context_updates,
+        )
         self._handlers = {
             METHOD["INITIALIZE"]: self._handle_initialize,
             METHOD["RUN_START"]: self._handle_run_start,
@@ -370,7 +408,9 @@ class AgentHost:
     async def close(self) -> None:
         """关闭 Host 及其持有的运行时资源；可重复调用。"""
         self._running = False
-        await self._cancel_all_runs()
+        await self._run_coordinator.close()
+        if self._run_event_tasks:
+            await asyncio.gather(*tuple(self._run_event_tasks), return_exceptions=True)
         for connection in list(self._connections.values()):
             connection.closed = True
             self._fail_connection_requests(
@@ -385,7 +425,7 @@ class AgentHost:
         if self._mcp_manager is not None:
             await self._mcp_manager.close_all()
             self._mcp_manager = None
-        await self._close_runtime_pool()
+        await self._close_agent_engine_pool()
         await self._close_thread_persistence()
 
     async def close_connection(self, connection: ProtocolConnection) -> None:
@@ -395,21 +435,9 @@ class AgentHost:
         connection.closed = True
         connection.watched_threads.clear()
         self._fail_connection_requests(connection, RpcError(-32004, "Peer connection closed"))
-        owned = [
-            run
-            for run in self._runs.values()
-            if run.owner_connection_id == connection.connection_id
-            and run.status in {"running", "interrupted"}
-        ]
-        tasks: list[asyncio.Task[None]] = []
-        for run in owned:
-            run.cancellation_token.cancel()
-            if run.task and not run.task.done():
-                run.task.cancel()
-                if run.task is not asyncio.current_task():
-                    tasks.append(run.task)
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        await self._run_coordinator.owner_disconnected(
+            ConnectionRef(connection.connection_id)
+        )
         self._connections.pop(connection.connection_id, None)
 
     def create_connection(
@@ -526,13 +554,16 @@ class AgentHost:
                 "THREAD_STORE_UNAVAILABLE",
                 {"code": str(exc)},
             )
-        except RuntimePoolCapacityError as exc:
+        except AgentEnginePoolCapacityError as exc:
             await self.send_error(
                 request_id,
                 -32030,
                 "RUNTIME_POOL_CAPACITY_EXHAUSTED",
                 {"code": str(exc)},
             )
+        except RunError as exc:
+            rpc_error = self._run_rpc_error(exc)
+            await self.send_error(request_id, rpc_error.code, rpc_error.message, rpc_error.data)
         except RpcError as exc:
             await self.send_error(request_id, exc.code, exc.message, exc.data)
         except Exception as exc:  # pragma: no cover - 最后的协议隔离层。
@@ -542,12 +573,6 @@ class AgentHost:
             if result is not None:
                 validate_operation_result(method, result)
                 await self.send_response(request_id, result)
-        finally:
-            if method == METHOD["RUN_START"]:
-                thread_id = params.get("thread_id")
-                if isinstance(thread_id, str):
-                    async with self._registry_lock:
-                        self._starting_threads.discard(thread_id)
 
     async def send(self, message: dict[str, Any]) -> None:
         """向 owner stdio 写出单帧；测试也通过替换此 seam 捕获输出。"""
@@ -707,153 +732,180 @@ class AgentHost:
             await task
 
     async def _handle_run_start(self, params: dict[str, Any], request_id: str) -> None:
-        """先确认 run 标识再创建后台任务，保证响应严格早于首事件。"""
+        """把协议输入转换成 StartRun，并让 Coordinator 先完成受理再启动事件流。"""
         parsed = RunStartParams.model_validate(params)
         message = parsed.message.strip()
         if not message:
             raise RpcError(-32602, "message must be non-empty")
-        thread_id = parsed.thread_id
-        run_id = parsed.run_id
-        async with self._registry_lock:
-            existing = self._runs.get(thread_id)
-            if existing and existing.status in {"running", "interrupted"}:
-                if existing.run_id == run_id and existing.message == message:
-                    await self.send_response(
-                        request_id,
-                        {"thread_id": thread_id, "run_id": run_id, "accepted": True},
-                    )
-                    return None
-                if existing.run_id == run_id:
-                    raise RpcError(
-                        -32006,
-                        "RUN_ID_CONFLICT",
-                        {"code": "RUN_ID_CONFLICT", "retryable": False},
-                    )
-                raise RpcError(
-                    -32000,
-                    "THREAD_BUSY",
-                    {"code": "THREAD_BUSY", "retryable": True},
-                )
-            if thread_id in self._starting_threads:
-                raise RpcError(
-                    -32000,
-                    "THREAD_BUSY",
-                    {"code": "THREAD_BUSY", "retryable": True},
-                )
-            self._starting_threads.add(thread_id)
-        requested_skill = None
-        if parsed.requested_skill is not None:
-            if self._skill_registry is None:
-                self._skill_registry = SkillRegistry(self._workspace, home=self._config_home)
-            skill = self._skill_registry.resolve(parsed.requested_skill.id)
-            if not skill.user_invocable:
-                raise SkillError(f'Skill "{skill.skill_id}" is not user-invocable')
-            requested_skill = {"id": skill.skill_id, "args": parsed.requested_skill.args or ""}
-        resolved_binding: ResolvedExecutionBinding | None = None
-        execution_binding: RunExecutionBinding | None = None
-        runtime_profile: RuntimeProfile | None = None
-        if self._thread_persistence_enabled():
-            self._load_config()
-            if self._config is None:
-                raise RpcError(-32010, self._startup_error or "MODEL_CONFIGURATION_REQUIRED")
-            if parsed.model_selection is not None and CAPABILITY["MODELS_SELECT"] not in self._connection_capabilities():
-                raise RpcError(-32002, "MODELS_SELECT_CAPABILITY_REQUIRED")
-            try:
-                resolved_binding = await self._resolve_execution_binding(
-                    thread_id,
-                    self._config,
-                    requested_primary_profile=(
-                        parsed.model_selection.primary_profile
-                        if parsed.model_selection is not None
-                        else None
-                    ),
-                )
-                runtime_profile = await self._resolve_runtime_profile(
-                    thread_id,
-                    self._config,
-                    resolved_binding,
-                )
-                execution_binding = resolved_binding.bind_run(
-                    thread_id=thread_id,
-                    run_id=run_id,
-                    runtime_profile_id=runtime_profile.profile_key[:12],
-                    created_at_ms=int(time.time() * 1000),
-                )
-            except (ConfigError, ExecutionBindingError, ThreadPersistenceError) as exc:
-                raise RpcError(-32004, str(exc)) from exc
-        run = ActiveRun(
-            thread_id=thread_id,
-            run_id=run_id,
+        if (
+            parsed.model_selection is not None
+            and CAPABILITY["MODELS_SELECT"] not in self._connection_capabilities()
+        ):
+            raise RpcError(-32002, "MODELS_SELECT_CAPABILITY_REQUIRED")
+
+        requested_skill = (
+            RequestedSkill(parsed.requested_skill.id, parsed.requested_skill.args or "")
+            if parsed.requested_skill is not None
+            else None
+        )
+        command = StartRun(
+            thread_id=parsed.thread_id,
+            run_id=parsed.run_id,
             message=message,
-            owner_connection_id=self._current_connection().connection_id,
             requested_skill=requested_skill,
-            resolved_execution_binding=resolved_binding,
-            execution_binding=execution_binding,
-            resolved_runtime_profile=runtime_profile,
+            requested_primary_profile=(
+                parsed.model_selection.primary_profile
+                if parsed.model_selection is not None
+                else None
+            ),
         )
-        if self._thread_persistence_enabled():
-            persistence = await self._ensure_thread_persistence()
-            if execution_binding is None:
-                raise RpcError(-32010, "RUN_MODEL_BINDING_UNAVAILABLE")
-            try:
-                created = (
-                    await persistence.accept_run(
-                        AcceptRun(message=message, binding=execution_binding)
-                    )
-                ).created
-            except ThreadPersistenceError as exc:
-                if str(exc) == "RUN_EXECUTION_BINDING_CONFLICT":
-                    raise RpcError(
-                        -32006,
-                        "RUN_ID_CONFLICT",
-                        {"code": "RUN_ID_CONFLICT", "retryable": False},
-                    ) from exc
-                raise RpcError(-32004, str(exc)) from exc
-            if not created:
-                await self.send_response(
-                    request_id, {"thread_id": thread_id, "run_id": run_id, "accepted": True}
-                )
-                return None
-        self._runs[thread_id] = run
+        try:
+            execution = await self._run_coordinator.start(
+                command,
+                ConnectionRef(self._current_connection().connection_id),
+            )
+        except (ConfigError, ExecutionBindingError, ThreadPersistenceError) as exc:
+            raise RpcError(-32004, str(exc)) from exc
+
         await self.send_response(
-            request_id, {"thread_id": thread_id, "run_id": run_id, "accepted": True}
+            request_id,
+            {
+                "thread_id": execution.ref.thread_id,
+                "run_id": execution.ref.run_id,
+                "accepted": execution.accepted,
+            },
         )
-        run.task = asyncio.create_task(self._execute_run(run), name=f"za38-run-{run_id}")
-        return None
+        task = asyncio.create_task(
+            self._fanout_run_execution(execution),
+            name=f"harness-run-events-{execution.ref.run_id}",
+        )
+        self._run_event_tasks.add(task)
+        task.add_done_callback(self._run_event_tasks.discard)
 
     async def _handle_run_cancel(self, params: dict[str, Any], _id: str) -> dict[str, Any]:
-        """取消运行，包括正在等待客户端交互的任务。"""
+        """通过 Coordinator 取消 Run，统一处理 owner 校验和刚受理即取消。"""
         parsed = RunCancelParams.model_validate(params)
-        run = self._require_run(parsed.thread_id, parsed.run_id)
-        if run.owner_connection_id != self._current_connection().connection_id:
-            raise RpcError(
-                -32005,
-                "RUN_NOT_OWNER",
-                {"code": "RUN_NOT_OWNER", "retryable": False},
+        result = await self._run_coordinator.cancel(
+            RunRef(parsed.thread_id, parsed.run_id),
+            ConnectionRef(self._current_connection().connection_id),
+        )
+        return {"cancelled": result.cancelled, "run_id": result.run_id}
+
+    async def _run_persistence_provider(self) -> ThreadPersistence | None:
+        """只为默认生产 Run 打开 Thread 持久化；echo/注入 Agent 保持轻量路径。"""
+        if not self._thread_persistence_enabled():
+            return None
+        return await self._ensure_thread_persistence()
+
+    async def _prepare_run(
+        self,
+        command: StartRun,
+        persistence: ThreadPersistence | None,
+    ) -> RunPreparation:
+        """在登记 Run 前解析一次模型绑定、Profile 和 Skill 快照。"""
+        if persistence is None:
+            return RunPreparation(skill_snapshot_id=self._require_skills().snapshot_id)
+        self._load_config()
+        if self._config is None:
+            raise ConfigError(self._startup_error or "MODEL_CONFIGURATION_REQUIRED")
+        resolved = await self._resolve_execution_binding(
+            command.thread_id,
+            self._config,
+            requested_primary_profile=command.requested_primary_profile,
+        )
+        profile = await self._resolve_agent_engine_profile(
+            command.thread_id,
+            self._config,
+            resolved,
+        )
+        binding = resolved.bind_run(
+            thread_id=command.thread_id,
+            run_id=command.run_id,
+            runtime_profile_id=profile.profile_key[:12],
+            created_at_ms=int(time.time() * 1000),
+        )
+        registry = self._require_skills()
+        return RunPreparation(
+            resolved_execution_binding=resolved,
+            execution_binding=binding,
+            agent_engine_profile=profile,
+            skill_snapshot_id=registry.snapshot_id,
+        )
+
+    async def _acquire_run_runtime(self, run: RunState) -> RunRuntime:
+        """把 AgentEngine/注入 Agent 的差异收敛成 Coordinator 可消费的 Runtime。"""
+        if self._uses_default_agent_factory:
+            agent = await self._acquire_default_agent_engine_for_run(run)
+        else:
+            agent = await self._ensure_agent()
+
+        async def release() -> None:
+            await self._release_run_agent_engine(run)
+
+        if agent is None and not self._allow_echo:
+            raise ConfigError(self._startup_error or "Agent is not configured")
+        persistence = run.persistence
+        graph_config = (
+            persistence.graph_config
+            if persistence is not None
+            else lambda thread_id: {"configurable": {"thread_id": thread_id}}
+        )
+        return RunRuntime(
+            agent=agent,
+            run_context=run.run_context,
+            graph_config=graph_config,
+            release=release,
+        )
+
+    def _take_context_updates(self, thread_id: str) -> list[Any]:
+        """消费指定 Thread 的中间件更新，避免跨 Run 重复广播。"""
+        return self._context_updates.pop(thread_id, [])
+
+    async def _fanout_run_execution(self, execution: RunExecution) -> None:
+        """把领域事件广播给 owner 和已 watch 该 Thread 的连接。"""
+        async for event in execution.events:
+            await self._fanout_agent_event(execution.owner, event)
+
+    async def _fanout_agent_event(self, owner: ConnectionRef, event: AgentEvent) -> None:
+        """将不携带 transport 的 AgentEvent 映射成现有 event notification。"""
+        message = {
+            "jsonrpc": "2.0",
+            "method": METHOD["EVENT"],
+            "params": event.record(),
+        }
+        targets = [
+            connection
+            for connection in self._connections.values()
+            if not connection.closed
+            and (
+                connection.connection_id == owner.connection_id
+                or event.thread_id in self._connection_watches(connection)
             )
-        if run.task and not run.task.done():
-            run.cancellation_token.cancel()
-            run.task.cancel()
-            # create_task 尚未获得首个时间片时，协程内部的 CancelledError 分支不会执行；
-            # 这里补发唯一终态，保证“刚接受就取消”也不会让客户端永久等待。
-            await asyncio.sleep(0)
-            if run.status not in {"cancelled", "completed", "failed"} and run.task.cancelled():
-                run.status = "cancelled"
-                await self._emit(run, EVENT_TYPE["RUN_CANCELLED"], {"reason": "Cancelled by client"})
-                self._runs.pop(run.thread_id, None)
-            return {"cancelled": True, "run_id": run.run_id}
-        return {"cancelled": False, "run_id": run.run_id}
+        ]
+        results = await asyncio.gather(
+            *(self._send_to(connection, message) for connection in targets),
+            return_exceptions=True,
+        )
+        for connection, result in zip(targets, results, strict=True):
+            if isinstance(result, Exception) and connection is not self._owner_connection:
+                asyncio.create_task(self.close_connection(connection))
 
     async def _handle_context_compact(self, params: dict[str, Any], _id: str) -> dict[str, object]:
         """在空闲 thread 上按用户命令强制生成结构化摘要，不把能力暴露给模型。"""
         self._require_context_capability()
         parsed = ContextCompactParams.model_validate(params)
-        active = self._runs.get(parsed.thread_id)
-        if active is not None and active.status in {"running", "interrupted"}:
-            raise RpcError(-32000, "CONTEXT_COMPACTION_RUN_ACTIVE")
+        try:
+            async with self._run_coordinator.idle_thread(parsed.thread_id):
+                return await self._compact_idle_thread(parsed.thread_id)
+        except RunError as exc:
+            if exc.code == "THREAD_BUSY":
+                raise RpcError(-32000, "CONTEXT_COMPACTION_RUN_ACTIVE") from exc
+            raise
 
+    async def _compact_idle_thread(self, thread_id: str) -> dict[str, object]:
+        """在 Coordinator 已锁定为空闲的窗口内完成压缩。"""
         persistence = await self._ensure_thread_persistence()
-        context = await persistence.load_context(parsed.thread_id)
+        context = await persistence.load_context(thread_id)
         if not context.recoverable:
             raise RpcError(-32004, "THREAD_NOT_RECOVERABLE")
         messages = list(context.messages)
@@ -862,40 +914,40 @@ class AgentHost:
             middleware = getattr(self, "_context_compactor", None)
             if agent is None or middleware is None:
                 raise RpcError(-32010, "CONTEXT_COMPACTION_UNAVAILABLE")
-            return await self._compact_with_runtime(
+            return await self._compact_with_agent_engine(
                 agent=agent,
                 middleware=middleware,
-                thread_id=parsed.thread_id,
+                thread_id=thread_id,
                 messages=messages,
                 persistence=persistence,
             )
 
-        lease, runtime = await self._acquire_default_runtime(parsed.thread_id)
+        lease, engine = await self._acquire_default_agent_engine(thread_id)
         try:
-            if lease is None or runtime is None:
+            if lease is None or engine is None:
                 raise RpcError(-32010, "CONTEXT_COMPACTION_UNAVAILABLE")
-            artifacts = self._runtime_artifacts.get(runtime.profile_key)
-            if artifacts is None or runtime.graph is None:
+            artifacts = self._agent_engine_artifacts.get(engine.profile_key)
+            if artifacts is None or engine.graph is None:
                 raise RpcError(-32010, "CONTEXT_COMPACTION_UNAVAILABLE")
-            return await self._compact_with_runtime(
-                agent=runtime.graph,
+            return await self._compact_with_agent_engine(
+                agent=engine.graph,
                 middleware=artifacts.context_compactor,
-                thread_id=parsed.thread_id,
+                thread_id=thread_id,
                 messages=messages,
                 persistence=persistence,
             )
         finally:
-            await self._release_runtime_lease(lease)
+            await self._release_agent_engine_lease(lease)
 
     async def _handle_config_show(self, _params: dict[str, Any], _id: str) -> dict[str, Any]:
-        """返回当前脱敏配置与可重建 RuntimePool 的本地诊断摘要。"""
+        """返回当前脱敏配置与可重建 AgentEnginePool 的本地诊断摘要。"""
         if _params:
             raise RpcError(-32602, "config.show does not accept params")
         self._load_config()
         if self._config is None:
             raise RpcError(-32010, self._startup_error or "Configuration is unavailable")
         summary = self._config.redacted()
-        summary["runtime_pool_diagnostics"] = await self._runtime_pool_diagnostics()
+        summary["runtime_pool_diagnostics"] = await self._agent_engine_pool_diagnostics()
         return summary
 
     async def _handle_config_details(self, params: dict[str, Any], _id: str) -> dict[str, object]:
@@ -930,7 +982,7 @@ class AgentHost:
         except ConfigChangeError as exc:
             raise self._config_change_rpc_error(exc) from exc
         # 当前仅默认模型可安全影响之后创建的 Thread：已经启动的 Run 和既有
-        # Runtime 保持原快照；其他 Settings 仍明确要求重启 sidecar。
+        # AgentEngine 保持原快照；其他 Settings 仍明确要求重启 sidecar。
         if result["applies_to"] == ["new-thread"]:
             self._load_config()
         return result
@@ -1202,18 +1254,7 @@ class AgentHost:
     async def _handle_threads_watch(self, params: dict[str, Any], _id: str) -> dict[str, object]:
         """仅在 Thread 空闲时原子读取历史并登记当前 Connection 的观察关系。"""
         parsed = ThreadsOpenParams.model_validate(params)
-        async with self._registry_lock:
-            active = self._runs.get(parsed.thread_id)
-            if (
-                parsed.thread_id in self._starting_threads
-                or active is not None
-                and active.status in {"running", "interrupted"}
-            ):
-                raise RpcError(
-                    -32000,
-                    "THREAD_BUSY",
-                    {"code": "THREAD_BUSY", "retryable": True},
-                )
+        async with self._run_coordinator.idle_thread(parsed.thread_id):
             result = await self._handle_threads_open(params, _id)
             self._connection_watches().add(parsed.thread_id)
             return result
@@ -1326,104 +1367,28 @@ class AgentHost:
         """将领域错误映射为不含 TOML 或秘密值的稳定 RPC 响应。"""
         return RpcError(-32012, error.code, error.redacted_data())
 
-    async def _execute_run(self, run: ActiveRun) -> None:
-        """执行并自动恢复中断，保证每个 run 只产生一个终态。"""
-        started_payload: dict[str, object] = {
-            "resumed": False,
-            "skills_snapshot_id": self._skill_registry.snapshot_id if self._skill_registry else None,
+    @staticmethod
+    def _run_rpc_error(error: RunError) -> RpcError:
+        """把 Run module 的稳定错误码适配成现有 JSON-RPC 错误。"""
+        rpc_codes = {
+            "THREAD_BUSY": -32000,
+            "RUN_NOT_FOUND": -32001,
+            "RUN_NOT_OWNER": -32005,
+            "RUN_ID_CONFLICT": -32006,
+            "HOST_CLOSED": -32004,
+            "MODEL_CONFIGURATION_REQUIRED": -32010,
+            "RUN_MODEL_BINDING_UNAVAILABLE": -32010,
         }
-        if run.execution_binding is not None:
-            started_payload["primary_model"] = run.execution_binding.protocol_primary_model()
-            started_payload["runtime_profile_id"] = run.execution_binding.runtime_profile_id
-        await self._emit(run, EVENT_TYPE["RUN_STARTED"], started_payload)
-        resume: Any | None = None
-        try:
-            if run.requested_skill is not None:
-                registry = self._require_skills()
-                loaded = registry.load(run.requested_skill["id"], run.requested_skill.get("args", ""))
-                await self._emit(
-                    run,
-                    EVENT_TYPE["SKILL_LOADED"],
-                    {
-                        "skill_id": loaded.record.skill_id,
-                        "source": loaded.record.source,
-                        "version": loaded.record.version,
-                        "snapshot_id": registry.snapshot_id,
-                    },
-                )
-                run.message = (
-                    f"The user explicitly selected Skill `{loaded.record.skill_id}`. "
-                    f"Read `/.harness/skills/{loaded.record.skill_id}/SKILL.md` with read_file before using it.\n\n"
-                    f"User request:\n{run.message}"
-                )
-            if self._uses_default_agent_factory:
-                agent = await self._acquire_default_runtime_for_run(run)
-            else:
-                agent = await self._ensure_agent()
-            if agent is None:
-                if not self._allow_echo:
-                    raise ConfigError(self._startup_error or "Agent is not configured")
-                await self._emit(run, EVENT_TYPE["CONTENT_DELTA"], {"text": run.message})
-            else:
-                while True:
-                    resume = await self._stream_agent(agent, run, resume=resume)
-                    if resume is None:
-                        break
-            if self._thread_persistence is not None:
-                await self._thread_persistence.complete_run(run.thread_id)
-            await self._drain_context_updates(run)
-            run.status = "completed"
-            await self._emit(
-                run,
-                EVENT_TYPE["RUN_COMPLETED"],
-                {
-                    "usage": run.usage,
-                    "duration_ms": round((time.monotonic() - run.started_at) * 1000),
-                    "finish_reason": "completed",
-                    "context": run.context_summary,
-                },
-            )
-        except asyncio.CancelledError:
-            run.status = "cancelled"
-            await self._emit(run, EVENT_TYPE["RUN_CANCELLED"], {"reason": "Cancelled by client"})
-        except RuntimePoolCapacityError as exc:
-            run.status = "failed"
-            await self._emit(
-                run,
-                EVENT_TYPE["RUN_FAILED"],
-                {
-                    "error": {
-                        "code": "RUNTIME_POOL_CAPACITY_EXHAUSTED",
-                        "message": str(exc),
-                        "retryable": True,
-                    }
-                },
-            )
-        except Exception as exc:
-            run.status = "failed"
-            logger.exception("Agent run failed: %s", run.run_id)
-            await self._emit(
-                run,
-                EVENT_TYPE["RUN_FAILED"],
-                {
-                    "error": {
-                        "code": type(exc).__name__,
-                        "message": str(exc),
-                        "retryable": False,
-                    }
-                },
-            )
-        finally:
-            await self._release_run_runtime(run)
-            if self._thread_persistence is not None and run.status != "completed":
-                try:
-                    await self._thread_persistence.complete_run(run.thread_id)
-                except ThreadPersistenceError:
-                    logger.exception("Unable to refresh checkpoint index for thread %s", run.thread_id)
-            self._runs.pop(run.thread_id, None)
+        data: dict[str, object] = {
+            "code": error.code,
+            "retryable": error.retryable,
+        }
+        if error.details is not None:
+            data["details"] = error.details
+        return RpcError(rpc_codes.get(error.code, -32004), error.code, data)
 
     async def _ensure_agent(self) -> Any | None:
-        """按需构建外部注入的 Agent；默认图必须经 RuntimePool 取得。"""
+        """按需构建外部注入的 Agent；默认图必须经 AgentEnginePool 取得。"""
         # Echo 只用于协议测试。即使当前目录恰好存在模型配置，也必须保持
         # 无网络、无凭据依赖的确定性行为，避免测试机器环境改变结果。
         if self.agent is not None:
@@ -1437,7 +1402,7 @@ class AgentHost:
             raise RuntimeError("DEFAULT_AGENT_REQUIRES_RUNTIME_POOL")
         if self._agent_factory is None:  # pragma: no cover - 构造函数不变量。
             raise RuntimeError("AGENT_FACTORY_REQUIRED")
-        # 外部注入工厂保持既有单图测试/嵌入契约；生产默认路径由 RuntimePool
+        # 外部注入工厂保持既有单图测试/嵌入契约；生产默认路径由 AgentEnginePool
         # 提供 per-Profile single-flight，不应再写入 ``self.agent``。
         async with self._agent_build_lock:
             if self.agent is not None:
@@ -1446,42 +1411,42 @@ class AgentHost:
             self.agent = await created if inspect.isawaitable(created) else created
             return self.agent
 
-    async def _acquire_default_runtime_for_run(self, run: ActiveRun) -> Any | None:
-        """为一个生产 run 获取共享 Runtime，并将 thread 私有状态写入 RunContext。"""
-        lease, runtime = await self._acquire_default_runtime(
+    async def _acquire_default_agent_engine_for_run(self, run: RunState) -> Any | None:
+        """为一个生产 run 获取共享 AgentEngine，并将 thread 私有状态写入 RunContext。"""
+        lease, engine = await self._acquire_default_agent_engine(
             run.thread_id,
             run.resolved_execution_binding,
-            profile=run.resolved_runtime_profile,
+            profile=run.resolved_agent_engine_profile,
         )
-        if runtime is None:
+        if engine is None:
             return None
         try:
-            artifacts = self._runtime_artifacts.get(runtime.profile_key)
-            spec = self._runtime_build_specs.get(runtime.profile_key)
-            if artifacts is None or spec is None or runtime.graph is None:
+            artifacts = self._agent_engine_artifacts.get(engine.profile_key)
+            spec = self._agent_engine_build_specs.get(engine.profile_key)
+            if artifacts is None or spec is None or engine.graph is None:
                 raise RuntimeError("RUNTIME_ARTIFACTS_UNAVAILABLE")
             run.run_context = await self._create_run_context(
                 run,
-                profile=runtime.profile,
+                profile=engine.profile,
                 config=spec.config,
                 execution_context=artifacts.execution_context,
             )
-            run.runtime_run_lease = await lease.run()
-            run.runtime_lease = lease
-            run.runtime_profile_key = runtime.profile_key
-            return runtime.graph
+            run.agent_engine_run_lease = await lease.run()
+            run.agent_engine_lease = lease
+            run.agent_engine_profile_key = engine.profile_key
+            return engine.graph
         except Exception:
-            await self._release_runtime_lease(lease)
+            await self._release_agent_engine_lease(lease)
             raise
 
-    async def _acquire_default_runtime(
+    async def _acquire_default_agent_engine(
         self,
         thread_id: str,
         resolved_binding: ResolvedExecutionBinding | None = None,
         *,
-        profile: RuntimeProfile | None = None,
-    ) -> tuple[AgentRuntimeLease | None, AgentRuntime | None]:
-        """为 Run 或手动压缩取得按实际模型计算的共享 Runtime。"""
+        profile: AgentEngineProfile | None = None,
+    ) -> tuple[AgentEngineLease | None, AgentEngine | None]:
+        """为 Run 或手动压缩取得按实际模型计算的共享 AgentEngine。"""
         if self._allow_echo:
             return None, None
         self._load_config()
@@ -1493,21 +1458,21 @@ class AgentHost:
                 thread_id,
                 config,
             )
-            profile = await self._resolve_runtime_profile(
+            profile = await self._resolve_agent_engine_profile(
                 thread_id,
                 config,
                 resolved_binding,
             )
-        pool = self._ensure_runtime_pool(config)
+        pool = self._ensure_agent_engine_pool(config)
         lease = await pool.acquire(profile)
-        return lease, lease.runtime
+        return lease, lease.engine
 
-    async def _resolve_runtime_profile(
+    async def _resolve_agent_engine_profile(
         self,
         thread_id: str,
         config: Za38Config,
         resolved_binding: ResolvedExecutionBinding,
-    ) -> RuntimeProfile:
+    ) -> AgentEngineProfile:
         """按本次实际模型计算可共享 Profile，不把它永久绑定到 Thread。"""
         from harness_agent.agent import (
             default_prompt_template_fingerprint,
@@ -1522,9 +1487,9 @@ class AgentHost:
         async with self._mcp_state_lock:
             mcp_snapshot = self._mcp_snapshot or build_mcp_snapshot([], "missing")
             mcp_tools = tuple(self._mcp_manager.get_tools()) if self._mcp_manager else ()
-        # Profile 身份和图输入从同一个快照截取，后续热变更不会改写旧 Runtime。
+        # Profile 身份和图输入从同一个快照截取，后续热变更不会改写旧 AgentEngine。
         mcp_fp = mcp_snapshot.digest
-        profile = default_runtime_profile(
+        profile = default_agent_engine_profile(
             project_fingerprint=persistence.project_fingerprint,
             model_profile=selected_profile_id,
             model=selected_model,
@@ -1544,9 +1509,9 @@ class AgentHost:
             ),
             prompt_template_fingerprint=default_prompt_template_fingerprint(),
         )
-        await persistence.persist_runtime_profile(profile)
+        await persistence.persist_agent_engine_profile(profile)
 
-        self._runtime_build_specs[profile.profile_key] = _RuntimeBuildSpec(
+        self._agent_engine_build_specs[profile.profile_key] = _AgentEngineBuildSpec(
             config=config,
             workspace=self._workspace,
             skill_registry=registry,
@@ -1573,21 +1538,21 @@ class AgentHost:
         persisted = await persistence.load_run_state(thread_id)
         return resolve_execution_binding(config, requested, persisted)
 
-    def _ensure_runtime_pool(self, config: Za38Config) -> RuntimePool:
+    def _ensure_agent_engine_pool(self, config: Za38Config) -> AgentEnginePool:
         """延迟创建进程内唯一 Pool；容量策略在 Sidecar 生命周期内保持稳定。"""
-        if self._runtime_pool is None:
-            settings = config.runtime_pool
-            self._runtime_pool = RuntimePool(
-                self._build_default_runtime,
+        if self._agent_engine_pool is None:
+            settings = config.agent_engine_pool
+            self._agent_engine_pool = AgentEnginePool(
+                self._build_default_agent_engine,
                 max_profiles=settings.max_profiles,
                 idle_ttl_seconds=settings.idle_ttl_seconds,
                 close_timeout_seconds=settings.close_timeout_seconds,
             )
-        return self._runtime_pool
+        return self._agent_engine_pool
 
-    async def _build_default_runtime(self, profile: RuntimeProfile) -> AgentRuntime:
+    async def _build_default_agent_engine(self, profile: AgentEngineProfile) -> AgentEngine:
         """按 Profile 构建一张 deepagents 图及其共享 middleware，供多个 thread 复用。"""
-        spec = self._runtime_build_specs.get(profile.profile_key)
+        spec = self._agent_engine_build_specs.get(profile.profile_key)
         if spec is None:
             raise RuntimeError("RUNTIME_BUILD_SPEC_MISSING")
         if profile.mcp_config_fingerprint != spec.mcp_snapshot.digest:
@@ -1619,7 +1584,7 @@ class AgentHost:
             mcp_server_info=True if mcp_tools else None,
             cwd=str(workspace),
             # 无头客户端不协商 question 能力时不注册 ask_user；审批仍由
-            # `_request_interaction` 在缺少 approval 能力时 fail closed。
+            # `_ProtocolInteractionAdapter` 在缺少 approval 能力时 fail closed。
             interactive="question" in self._connection_handles(),
             approval_mode=config.execution.approval_mode,
             execution_context=execution_context,
@@ -1629,32 +1594,32 @@ class AgentHost:
             context_updates=self._context_updates,
             context_middleware=context_compactor,
             context_window_tokens=model_settings.context_window_tokens,
-            shared_runtime=True,
+            shared_engine=True,
         )
-        self._runtime_artifacts[profile.profile_key] = _RuntimeArtifacts(
+        self._agent_engine_artifacts[profile.profile_key] = _AgentEngineArtifacts(
             execution_context=execution_context,
             context_compactor=context_compactor,
         )
-        resources = RuntimeResourceBundle.from_sequences(
+        resources = AgentEngineResourceBundle.from_sequences(
             flushers=(
-                RuntimeCloseAdapter(
+                AgentEngineCloseAdapter(
                     "server-runtime-artifacts",
-                    lambda: self._drop_runtime_artifacts(profile.profile_key),
+                    lambda: self._drop_agent_engine_artifacts(profile.profile_key),
                 ),
             )
         )
-        return AgentRuntime(
+        return AgentEngine(
             profile=profile,
             graph=graph,
             resources=resources,
-            pinned=config.runtime_pool.pin_default_profile,
+            pinned=config.agent_engine_pool.pin_default_profile,
         )
 
     async def _create_run_context(
         self,
-        run: ActiveRun,
+        run: RunState,
         *,
-        profile: RuntimeProfile,
+        profile: AgentEngineProfile,
         config: Za38Config,
         execution_context: Any,
     ) -> RunContext:
@@ -1684,249 +1649,6 @@ class AgentHost:
             profile_key=profile.profile_key,
             cancellation_token=run.cancellation_token,
         )
-
-    async def _stream_agent(self, agent: Any, run: ActiveRun, *, resume: Any | None) -> Any | None:
-        """把 LangGraph 双流转换为领域事件；遇到 interrupt 时等待客户端并返回恢复值。"""
-        from langchain_core.messages import HumanMessage
-        from langgraph.types import Command
-
-        stream_input: Any = (
-            Command(resume=resume)
-            if resume is not None
-            else {"messages": [HumanMessage(content=run.message)]}
-        )
-        stream_kwargs: dict[str, Any] = {
-            "config": (
-                self._thread_persistence.graph_config(run.thread_id)
-                if self._thread_persistence is not None
-                else {"configurable": {"thread_id": run.thread_id}}
-            ),
-            "stream_mode": ["messages", "updates"],
-            "subgraphs": True,
-        }
-        if run.run_context is not None:
-            stream_kwargs["context"] = run.run_context
-        async for event in agent.astream(stream_input, **stream_kwargs):
-            await self._drain_context_updates(run)
-            interaction = self._extract_interaction(event)
-            if interaction is not None:
-                run.status = "interrupted"
-                response = await self._request_interaction(run, interaction)
-                run.status = "running"
-                await self._emit(
-                    run,
-                    EVENT_TYPE["INTERACTION_RESOLVED"],
-                    {"request_id": interaction.request_id, "type": interaction.type},
-                )
-                return self._resume_value(interaction, response)
-            for event_type, payload in self._translate_stream_event(event, run):
-                await self._emit(run, event_type, payload)
-        return None
-
-    async def _drain_context_updates(self, run: ActiveRun) -> None:
-        """把中间件的预算状态转成顺序化事件；网关未返回缓存 usage 时保持 unknown。"""
-        updates = self._context_updates.pop(run.thread_id, [])
-        for update in updates:
-            payload = update.payload() if hasattr(update, "payload") else dict(update)
-            run.context_summary = payload
-            await self._emit(run, EVENT_TYPE["CONTEXT_UPDATED"], payload)
-
-    def _translate_stream_event(
-        self, event: tuple[Any, ...], run: ActiveRun
-    ) -> Iterable[tuple[str, dict[str, Any]]]:
-        """翻译文本和工具分片，不让 LangChain 对象跨越协议边界。"""
-        if len(event) == 3:
-            _namespace, stream_mode, data = event
-        elif len(event) == 2:
-            stream_mode, data = event
-        else:
-            return []
-        if stream_mode != "messages" or not isinstance(data, tuple) or not data:
-            return []
-        chunk = data[0]
-        self._update_usage(run, getattr(chunk, "usage_metadata", None))
-        events: list[tuple[str, dict[str, Any]]] = []
-        # dcode 以 LangChain 规范化后的 content_blocks 为准；部分 OpenAI 兼容网关
-        # 会在流式首轮只填充该属性，直接读取 content 会产生“有 token、无正文”。
-        content = _message_text(chunk)
-        if content and type(chunk).__name__ != "ToolMessage":
-            events.append((EVENT_TYPE["CONTENT_DELTA"], {"text": content}))
-        for tool_chunk in getattr(chunk, "tool_call_chunks", None) or []:
-            tool_id = self._resolve_tool_stream_id(run, tool_chunk)
-            if tool_chunk.get("name") and tool_id not in run.started_tool_ids:
-                run.started_tool_ids.add(tool_id)
-                events.append(
-                    (EVENT_TYPE["TOOL_STARTED"], {"tool_call_id": tool_id, "name": str(tool_chunk["name"])})
-                )
-            if tool_chunk.get("args"):
-                arguments = _truncate_text(str(tool_chunk["args"]))
-                events.append(
-                    (
-                        EVENT_TYPE["TOOL_DELTA"],
-                        {
-                            "tool_call_id": tool_id,
-                            "arguments_delta": arguments[0],
-                            "truncated": arguments[1],
-                            "original_bytes": arguments[2],
-                        },
-                    )
-                )
-        if type(chunk).__name__ == "ToolMessage":
-            result = _truncate_text(_content_text(getattr(chunk, "content", None)))
-            result_id = str(getattr(chunk, "tool_call_id", "") or "")
-            tool_id = run.tool_result_ids.get(result_id, result_id) or run.last_tool_id or f"tool-{run.run_id}"
-            events.append(
-                (
-                    EVENT_TYPE["TOOL_COMPLETED"],
-                    {
-                        "tool_call_id": tool_id,
-                        "result": {
-                            "content": result[0],
-                            "is_error": getattr(chunk, "status", None) == "error",
-                            "truncated": result[1],
-                            "original_bytes": result[2],
-                        },
-                    },
-                )
-            )
-        return events
-
-    def _resolve_tool_stream_id(self, run: ActiveRun, chunk: Mapping[str, Any]) -> str:
-        """用真实调用 ID 优先关联工具分片，并为缺失 ID 的续片保留 index 映射。"""
-        index = chunk.get("index")
-        raw_id = str(chunk.get("id") or "")
-        if raw_id:
-            # LangChain 每轮模型响应都会从 index=0 重新编号。真实 id 到达时必须
-            # 覆盖该临时映射，否则第二轮工具会回写第一轮的卡片和执行结果。
-            tool_id = run.tool_result_ids.get(raw_id, raw_id)
-            run.tool_result_ids[raw_id] = tool_id
-            run.tool_stream_ids[f"id:{raw_id}"] = tool_id
-            if index is not None:
-                run.tool_stream_ids[f"index:{index}"] = tool_id
-        else:
-            key = f"index:{index}" if index is not None else "current"
-            tool_id = run.tool_stream_ids.get(key)
-            if tool_id is None:
-                tool_id = f"tool-{run.run_id}-{len(run.tool_stream_ids)}"
-                run.tool_stream_ids[key] = tool_id
-        run.last_tool_id = tool_id
-        return tool_id
-
-    def _extract_interaction(self, event: tuple[Any, ...]) -> InteractionSpec | None:
-        """从 updates 流提取首个 AskUser 或 HITL interrupt。"""
-        if len(event) == 3:
-            _namespace, stream_mode, data = event
-        elif len(event) == 2:
-            stream_mode, data = event
-        else:
-            return None
-        if stream_mode != "updates" or not isinstance(data, Mapping):
-            return None
-        interrupts = data.get("__interrupt__")
-        if not interrupts:
-            return None
-        interrupt = (interrupts if isinstance(interrupts, (list, tuple)) else [interrupts])[0]
-        value = getattr(interrupt, "value", interrupt)
-        interrupt_id = str(getattr(interrupt, "id", uuid.uuid4()))
-        if isinstance(value, Mapping) and value.get("type") == "ask_user":
-            raw_questions = value.get("questions")
-            questions = [q for q in raw_questions or [] if isinstance(q, Mapping)]
-            normalized = []
-            for index, question in enumerate(questions):
-                options = [
-                    {"label": str(choice.get("value", "")), "value": str(choice.get("value", "")), "description": ""}
-                    for choice in question.get("choices", [])
-                    if isinstance(choice, Mapping) and choice.get("value")
-                ]
-                normalized.append(
-                    {
-                        "id": f"question-{index + 1}",
-                        "question": str(question.get("question", "Agent needs input")),
-                        "header": "",
-                        "body": "",
-                        "options": options,
-                        "multi_select": False,
-                        "allow_other": True,
-                    }
-                )
-            return InteractionSpec(
-                request_id=interrupt_id,
-                type="question",
-                payload={"interrupt_id": interrupt_id, "questions": normalized},
-                interrupt_id=interrupt_id,
-                questions=questions,
-            )
-        description = "A tool execution requires approval"
-        action_count = 1
-        if isinstance(value, Mapping):
-            action_requests = value.get("action_requests", [])
-            action_count = len(action_requests) if isinstance(action_requests, list) else 1
-            descriptions = [
-                str(request.get("description"))
-                for request in action_requests
-                if isinstance(request, Mapping) and request.get("description")
-            ]
-            if descriptions:
-                description = "\n\n".join(descriptions)
-        return InteractionSpec(
-            request_id=interrupt_id,
-            type="approval",
-            payload={
-                "interrupt_id": interrupt_id,
-                "description": description,
-                "requests": _bounded_json(value),
-                "decisions": ["approve_once", "reject"],
-            },
-            interrupt_id=interrupt_id,
-            action_count=action_count,
-        )
-
-    async def _request_interaction(self, run: ActiveRun, spec: InteractionSpec) -> object:
-        """只向 Run owner 发送 v3 Interaction；异常时审批拒绝、问答取消。"""
-        owner = self._connections.get(
-            run.owner_connection_id or self._owner_connection.connection_id
-        )
-        if owner is None or owner.closed or spec.type not in self._connection_handles(owner):
-            logger.info("Interaction %s disabled by capability negotiation", spec.type)
-            return (
-                {"decision": "reject"}
-                if spec.type == "approval"
-                else {"answers": {}}
-            )
-        future: asyncio.Future[object] = asyncio.get_running_loop().create_future()
-        owner.pending_requests[spec.request_id] = future
-        owner.interaction_specs[spec.request_id] = spec
-        method = (
-            METHOD["INTERACTION_APPROVAL"]
-            if spec.type == "approval"
-            else METHOD["INTERACTION_QUESTION"]
-        )
-        await self._send_to(
-            owner,
-            {
-                "jsonrpc": "2.0",
-                "method": method,
-                "id": spec.request_id,
-                "params": {
-                    "thread_id": run.thread_id,
-                    "run_id": run.run_id,
-                    "timeout_ms": INTERACTION_TIMEOUT_MS,
-                    "payload": spec.payload,
-                },
-            }
-        )
-        try:
-            return await asyncio.wait_for(future, timeout=INTERACTION_TIMEOUT_MS / 1000)
-        except (TimeoutError, RpcError, ValidationError) as exc:
-            logger.warning("Interaction %s failed closed: %s", spec.request_id, exc)
-            return (
-                {"decision": "reject"}
-                if spec.type == "approval"
-                else {"answers": {}}
-            )
-        finally:
-            owner.pending_requests.pop(spec.request_id, None)
-            owner.interaction_specs.pop(spec.request_id, None)
 
     async def _handle_peer_response(self, message: dict[str, Any]) -> None:
         """用客户端 response 解析并恢复对应交互 Future。"""
@@ -1967,88 +1689,7 @@ class AgentHost:
             return
         future.set_result(parsed)
 
-    def _resume_value(self, spec: InteractionSpec, response: object) -> dict[str, object]:
-        """将语言无关交互结果映射回 LangGraph interrupt resume 契约。"""
-        assert isinstance(response, dict)
-        if spec.type == "approval":
-            decision = response.get("decision")
-            langgraph_decision = "approve" if decision in {"approve_once", "approve_thread", "approve_always"} else "reject"
-            # 模型可能在一轮中并行发出多个需审批的工具调用，HITL 中间件会把
-            # 它们打包为单个 interrupt；用户的一个审批决定需复制到每个挂起
-            # 的 tool call，使 decisions 列表长度与 action_count 相等。
-            return {
-                spec.interrupt_id: {
-                    "decisions": [{"type": langgraph_decision}] * spec.action_count
-                }
-            }
-        answers_by_id = response.get("answers", {})
-        answers: list[str] = []
-        if isinstance(answers_by_id, Mapping):
-            for index, _question in enumerate(spec.questions):
-                values = answers_by_id.get(f"question-{index + 1}", [])
-                answers.append(str(values[0]) if isinstance(values, list) and values else "")
-        status = "answered" if any(answers) else "cancelled"
-        return {spec.interrupt_id: {"status": status, "answers": answers}}
-
-    async def _emit(self, run: ActiveRun, event_type: str, payload: dict[str, Any]) -> None:
-        """生成单调事件并广播给 Run owner 与 Thread observers。"""
-        run.sequence += 1
-        event = {
-            "event_id": str(uuid.uuid4()),
-            "type": event_type,
-            "thread_id": run.thread_id,
-            "run_id": run.run_id,
-            "sequence": run.sequence,
-            "timestamp_ms": int(time.time() * 1000),
-            "payload": payload,
-        }
-        message = {"jsonrpc": "2.0", "method": METHOD["EVENT"], "params": event}
-        targets = [
-            connection
-            for connection in self._connections.values()
-            if not connection.closed
-            and (
-                connection.connection_id
-                == (run.owner_connection_id or self._owner_connection.connection_id)
-                or run.thread_id in self._connection_watches(connection)
-            )
-        ]
-        results = await asyncio.gather(
-            *(self._send_to(connection, message) for connection in targets),
-            return_exceptions=True,
-        )
-        for connection, result in zip(targets, results, strict=True):
-            if isinstance(result, Exception) and connection is not self._owner_connection:
-                asyncio.create_task(self.close_connection(connection))
-
-    def _require_run(self, thread_id: str, run_id: str) -> ActiveRun:
-        """拒绝过期或跨线程控制请求。"""
-        run = self._runs.get(thread_id)
-        if run is None or run.run_id != run_id:
-            raise RpcError(-32001, "RUN_NOT_FOUND")
-        return run
-
-    def _update_usage(self, run: ActiveRun, usage: Any) -> None:
-        """合并分片 usage，避免流式计数回退。"""
-        if not isinstance(usage, Mapping):
-            return
-        run.usage["input_tokens"] = max(
-            run.usage["input_tokens"], int(usage.get("input_tokens", 0) or 0)
-        )
-        run.usage["output_tokens"] = max(
-            run.usage["output_tokens"], int(usage.get("output_tokens", 0) or 0)
-        )
-
-    async def _cancel_all_runs(self) -> None:
-        """取消全部运行并等待 finally 清理。"""
-        tasks = [run.task for run in self._runs.values() if run.task and not run.task.done()]
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        self._runs.clear()
-
-    async def _compact_with_runtime(
+    async def _compact_with_agent_engine(
         self,
         *,
         agent: Any,
@@ -2057,7 +1698,7 @@ class AgentHost:
         messages: list[Any],
         persistence: ThreadPersistence,
     ) -> dict[str, object]:
-        """使用已租用 Runtime 的共享 compactor 改写一个空闲 thread 的 checkpoint。"""
+        """使用已租用 AgentEngine 的共享 compactor 改写一个空闲 thread 的 checkpoint。"""
         compacted, update, rewritten = await middleware.compact_now(thread_id, messages)
         # `compact_now` 复用运行期状态缓冲；当前请求直接返回结果，因此必须消费，
         # 防止下一次 Agent run 重复发出过期的 context.updated 事件。
@@ -2076,53 +1717,53 @@ class AgentHost:
             await persistence.complete_run(thread_id)
         return {"compacted": rewritten, "context": update.payload()}
 
-    async def _release_run_runtime(self, run: ActiveRun) -> None:
-        """在 run 的所有终态释放 Runtime lease，并触发排空与空闲 TTL 检查。"""
-        run_lease, run.runtime_run_lease = run.runtime_run_lease, None
-        lease, run.runtime_lease = run.runtime_lease, None
-        profile_key, run.runtime_profile_key = run.runtime_profile_key, None
+    async def _release_run_agent_engine(self, run: RunState) -> None:
+        """在 run 的所有终态释放 AgentEngine lease，并触发排空与空闲 TTL 检查。"""
+        run_lease, run.agent_engine_run_lease = run.agent_engine_run_lease, None
+        lease, run.agent_engine_lease = run.agent_engine_lease, None
+        profile_key, run.agent_engine_profile_key = run.agent_engine_profile_key, None
         if run_lease is not None:
             await run_lease.release()
         if lease is None:
             return
-        await self._release_runtime_lease(lease, profile_key=profile_key)
+        await self._release_agent_engine_lease(lease, profile_key=profile_key)
 
-    async def _release_runtime_lease(
+    async def _release_agent_engine_lease(
         self,
-        lease: AgentRuntimeLease | None,
+        lease: AgentEngineLease | None,
         *,
         profile_key: str | None = None,
     ) -> None:
-        """释放非 run 或 run lease；DRAINING Runtime 会在最后一个引用退出后关闭。"""
+        """释放非 run 或 run lease；DRAINING AgentEngine 会在最后一个引用退出后关闭。"""
         if lease is None:
             return
-        key = profile_key or lease.runtime.profile_key
+        key = profile_key or lease.engine.profile_key
         await lease.release()
-        pool = self._runtime_pool
+        pool = self._agent_engine_pool
         if pool is not None:
             await pool.finalize_draining(key)
             await pool.sweep()
 
-    async def _drop_runtime_artifacts(self, profile_key: str) -> None:
-        """清除已关闭 Runtime 的 middleware/执行上下文引用，避免 Sidecar 持有旧资源。"""
-        self._runtime_artifacts.pop(profile_key, None)
-        self._runtime_build_specs.pop(profile_key, None)
+    async def _drop_agent_engine_artifacts(self, profile_key: str) -> None:
+        """清除已关闭 AgentEngine 的 middleware/执行上下文引用，避免 Sidecar 持有旧资源。"""
+        self._agent_engine_artifacts.pop(profile_key, None)
+        self._agent_engine_build_specs.pop(profile_key, None)
 
-    async def _close_runtime_pool(self) -> None:
-        """在关闭 SQLite 前停止 RuntimePool，保证 middleware 不再访问已关闭的 Persistence。"""
-        pool, self._runtime_pool = self._runtime_pool, None
+    async def _close_agent_engine_pool(self) -> None:
+        """在关闭 SQLite 前停止 AgentEnginePool，保证 middleware 不再访问已关闭的 Persistence。"""
+        pool, self._agent_engine_pool = self._agent_engine_pool, None
         if pool is not None:
             reports = await pool.aclose()
             failures = [failure for report in reports for failure in report.failures]
             if failures:
-                logger.warning("RuntimePool closed with %s resource failures", len(failures))
-        self._runtime_artifacts.clear()
-        self._runtime_build_specs.clear()
+                logger.warning("AgentEnginePool closed with %s resource failures", len(failures))
+        self._agent_engine_artifacts.clear()
+        self._agent_engine_build_specs.clear()
         await self._provider_client_pool.aclose()
 
-    async def _runtime_pool_diagnostics(self) -> dict[str, object]:
-        """返回 config.show 的运行池摘要；未初始化/已关闭时不保留旧 Runtime 引用。"""
-        pool = self._runtime_pool
+    async def _agent_engine_pool_diagnostics(self) -> dict[str, object]:
+        """返回 config.show 的运行池摘要；未初始化/已关闭时不保留旧 AgentEngine 引用。"""
+        pool = self._agent_engine_pool
         if pool is None:
             return {
                 "available": False,
@@ -2226,51 +1867,6 @@ def _protocol_error_data(message: str, data: object | None) -> dict[str, object]
     return result
 
 
-def _truncate_text(value: str) -> tuple[str, bool, int]:
-    """按 UTF-8 字节安全截断工具输出，并保留原始大小。"""
-    encoded = value.encode("utf-8")
-    if len(encoded) <= MAX_TOOL_PAYLOAD_BYTES:
-        return value, False, len(encoded)
-    clipped = encoded[:MAX_TOOL_PAYLOAD_BYTES].decode("utf-8", errors="ignore")
-    return clipped, True, len(encoded)
-
-
-def _content_text(content: object) -> str:
-    """提取 LangChain 内容字段中的文本。"""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "".join(
-            item if isinstance(item, str) else str(item.get("text", ""))
-            for item in content
-            if isinstance(item, (str, Mapping))
-        )
-    return "" if content is None else str(content)
-
-
-def _message_text(message: object) -> str:
-    """优先从 LangChain 标准内容块提取正文，并兼容旧式 content 字段。"""
-    blocks = getattr(message, "content_blocks", None)
-    if isinstance(blocks, list):
-        text = "".join(
-            str(block.get("text", ""))
-            for block in blocks
-            if isinstance(block, Mapping) and block.get("type") == "text"
-        )
-        if text:
-            return text
-    return _content_text(getattr(message, "content", None))
-
-
-def _json_safe(value: object) -> object:
-    """确保中断详情可 JSON 编码，复杂对象降级为字符串。"""
-    try:
-        json.dumps(value)
-    except TypeError:
-        return str(value)
-    return value
-
-
 def _thread_summary_payload(summary: Any) -> dict[str, object]:
     """把存储层摘要转换为 JSON-RPC 的 thread 字段，禁止携带原始 project 路径。"""
     return {
@@ -2289,13 +1885,3 @@ def _thread_message_payload(message: Any) -> dict[str, object]:
     if message.tool_name is not None:
         payload["tool_name"] = message.tool_name
     return payload
-
-
-def _bounded_json(value: object) -> object:
-    """限制交互详情的 JSON 字节数，避免审批参数撑爆 stdio 与 TUI。"""
-    safe = _json_safe(value)
-    encoded = json.dumps(safe, ensure_ascii=False).encode("utf-8")
-    if len(encoded) <= MAX_TOOL_PAYLOAD_BYTES:
-        return safe
-    preview = encoded[:MAX_TOOL_PAYLOAD_BYTES].decode("utf-8", errors="ignore")
-    return {"truncated": True, "original_bytes": len(encoded), "preview": preview}

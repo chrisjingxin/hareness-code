@@ -1,4 +1,4 @@
-"""按 Runtime Profile 共享的 AgentRuntime 生命周期原语。
+"""按 AgentEngine Profile 共享的 AgentEngine 生命周期原语。
 
 本模块不接入 JSON-RPC；它定义共享编译图的资源所有权、租约、容量/空闲淘汰、
 状态机与脱敏诊断，使 Sidecar 能安全复用、观测或关闭运行时。
@@ -15,13 +15,13 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
-from harness_agent.runtime_profile import RuntimeProfile
+from harness_agent.agent_engine_profile import AgentEngineProfile
 
 logger = logging.getLogger(__name__)
 
 
-class AgentRuntimeState(StrEnum):
-    """一个 Profile Runtime 的生命周期状态。"""
+class AgentEngineState(StrEnum):
+    """一个 Profile AgentEngine 的生命周期状态。"""
 
     MISSING = "missing"
     BUILDING = "building"
@@ -32,41 +32,41 @@ class AgentRuntimeState(StrEnum):
     CLOSED = "closed"
 
 
-class AgentRuntimeError(RuntimeError):
-    """Runtime 构建、租用或关闭中的可预期错误。"""
+class AgentEngineError(RuntimeError):
+    """AgentEngine 构建、租用或关闭中的可预期错误。"""
 
 
-class RuntimeUnavailableError(AgentRuntimeError):
-    """Runtime 已进入 DRAINING/CLOSED，不能接受新的租约时抛出。"""
+class AgentEngineUnavailableError(AgentEngineError):
+    """AgentEngine 已进入 DRAINING/CLOSED，不能接受新的租约时抛出。"""
 
 
-class RuntimeBusyError(AgentRuntimeError):
-    """Runtime 仍有租约或活动 run，不能安全关闭时抛出。"""
+class AgentEngineBusyError(AgentEngineError):
+    """AgentEngine 仍有租约或活动 run，不能安全关闭时抛出。"""
 
 
-class RuntimePoolClosedError(AgentRuntimeError):
+class AgentEnginePoolClosedError(AgentEngineError):
     """Pool 已关闭，不能继续 acquire 时抛出。"""
 
 
-class RuntimePoolCapacityError(AgentRuntimeError):
-    """Pool 没有可安全淘汰的空闲 Runtime，不能继续扩容时抛出。"""
+class AgentEnginePoolCapacityError(AgentEngineError):
+    """Pool 没有可安全淘汰的空闲 AgentEngine，不能继续扩容时抛出。"""
 
 
 @dataclass(frozen=True, slots=True)
-class RuntimeStateTransition:
+class AgentEngineStateTransition:
     """一次可观测的状态转换，不记录 Prompt、路径或凭据。"""
 
-    state: AgentRuntimeState
+    state: AgentEngineState
     reason: str
     occurred_at: float
 
 
 @dataclass(frozen=True, slots=True)
-class RuntimeSnapshot:
-    """Runtime 的脱敏生命周期快照，供池策略和诊断读取。"""
+class AgentEngineSnapshot:
+    """AgentEngine 的脱敏生命周期快照，供池策略和诊断读取。"""
 
     profile_key: str
-    state: AgentRuntimeState
+    state: AgentEngineState
     active_leases: int
     active_runs: int
     queued_runs: int
@@ -76,7 +76,7 @@ class RuntimeSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
-class RuntimeCloseFailure:
+class AgentEngineCloseFailure:
     """单个关闭步骤的失败记录；后续资源仍必须继续释放。"""
 
     resource_name: str
@@ -85,11 +85,11 @@ class RuntimeCloseFailure:
 
 
 @dataclass(frozen=True, slots=True)
-class RuntimeCloseReport:
+class AgentEngineCloseReport:
     """幂等关闭的结果，只包含资源名称和错误分类。"""
 
     profile_key: str
-    failures: tuple[RuntimeCloseFailure, ...] = ()
+    failures: tuple[AgentEngineCloseFailure, ...] = ()
     duration_ms: float | None = None
 
     @property
@@ -99,7 +99,7 @@ class RuntimeCloseReport:
 
 
 @dataclass(frozen=True, slots=True)
-class RuntimePoolEvent:
+class AgentEnginePoolEvent:
     """Pool 的脱敏生命周期事件；仅保留短 Profile ID 与可诊断元数据。"""
 
     event: str
@@ -124,11 +124,11 @@ class RuntimePoolEvent:
 
 
 @dataclass(frozen=True, slots=True)
-class RuntimePoolRuntimeDiagnostic:
-    """单个 Runtime 的脱敏诊断；不含完整 Profile Key 或原始配置。"""
+class AgentEngineDiagnostic:
+    """单个 AgentEngine 的脱敏诊断；不含完整 Profile Key 或原始配置。"""
 
     profile_id: str
-    state: AgentRuntimeState
+    state: AgentEngineState
     active_leases: int
     active_runs: int
     queued_runs: int
@@ -147,8 +147,8 @@ class RuntimePoolRuntimeDiagnostic:
 
 
 @dataclass(frozen=True, slots=True)
-class RuntimePoolDiagnosticSnapshot:
-    """RuntimePool 的脱敏可观测性快照，不包含 Prompt、路径、模型或凭据。"""
+class AgentEnginePoolDiagnosticSnapshot:
+    """AgentEnginePool 的脱敏可观测性快照，不包含 Prompt、路径、模型或凭据。"""
 
     pool_size: int
     max_profiles: int
@@ -169,8 +169,8 @@ class RuntimePoolDiagnosticSnapshot:
     close_reports: int
     close_failures: int
     close_duration_ms_total: float
-    runtimes: tuple[RuntimePoolRuntimeDiagnostic, ...]
-    recent_events: tuple[RuntimePoolEvent, ...]
+    engines: tuple[AgentEngineDiagnostic, ...]
+    recent_events: tuple[AgentEnginePoolEvent, ...]
 
     def payload(self) -> dict[str, object]:
         """返回已有 JSON-RPC 配置查询可直接携带的安全诊断摘要。"""
@@ -201,9 +201,9 @@ class RuntimePoolDiagnosticSnapshot:
                 "close_failures": self.close_failures,
                 "close_duration_ms_total": round(self.close_duration_ms_total, 3),
             },
-            # 真实 RSS 需跨平台基线和校准；先保留稳定接口，CI 以 Runtime 数验证上界。
+            # 真实 RSS 需跨平台基线和校准；先保留稳定接口，CI 以 AgentEngine 数验证上界。
             "memory": {"estimated_bytes": None, "rss_bytes": None, "status": "not_collected"},
-            "runtimes": [runtime.payload() for runtime in self.runtimes],
+            "runtimes": [engine.payload() for engine in self.engines],
             "recent_events": [event.payload() for event in self.recent_events],
         }
 
@@ -213,7 +213,7 @@ CloseCallback = Callable[[], Awaitable[None] | None]
 
 
 @dataclass(frozen=True, slots=True)
-class RuntimeCloseAdapter:
+class AgentEngineCloseAdapter:
     """把 MCP、Sandbox、工具或模型客户端适配为稳定关闭步骤。"""
 
     name: str
@@ -232,29 +232,29 @@ class RuntimeCloseAdapter:
 
 
 @dataclass(frozen=True, slots=True)
-class RuntimeResourceBundle:
-    """Runtime 独占资源及其确定性关闭顺序。
+class AgentEngineResourceBundle:
+    """AgentEngine 独占资源及其确定性关闭顺序。
 
     进程级 Provider HTTP client 不属于该 Bundle；它未来应由 ProviderClientPool
     持有。当前本地运行时可以使用空 Bundle，不需要伪造 MCP 或 Sandbox 资源。
     """
 
-    flushers: tuple[RuntimeCloseAdapter, ...] = ()
-    tool_resources: tuple[RuntimeCloseAdapter, ...] = ()
-    mcp_resources: tuple[RuntimeCloseAdapter, ...] = ()
-    sandbox_resources: tuple[RuntimeCloseAdapter, ...] = ()
-    model_resources: tuple[RuntimeCloseAdapter, ...] = ()
+    flushers: tuple[AgentEngineCloseAdapter, ...] = ()
+    tool_resources: tuple[AgentEngineCloseAdapter, ...] = ()
+    mcp_resources: tuple[AgentEngineCloseAdapter, ...] = ()
+    sandbox_resources: tuple[AgentEngineCloseAdapter, ...] = ()
+    model_resources: tuple[AgentEngineCloseAdapter, ...] = ()
 
     @classmethod
     def from_sequences(
         cls,
         *,
-        flushers: Sequence[RuntimeCloseAdapter] = (),
-        tool_resources: Sequence[RuntimeCloseAdapter] = (),
-        mcp_resources: Sequence[RuntimeCloseAdapter] = (),
-        sandbox_resources: Sequence[RuntimeCloseAdapter] = (),
-        model_resources: Sequence[RuntimeCloseAdapter] = (),
-    ) -> "RuntimeResourceBundle":
+        flushers: Sequence[AgentEngineCloseAdapter] = (),
+        tool_resources: Sequence[AgentEngineCloseAdapter] = (),
+        mcp_resources: Sequence[AgentEngineCloseAdapter] = (),
+        sandbox_resources: Sequence[AgentEngineCloseAdapter] = (),
+        model_resources: Sequence[AgentEngineCloseAdapter] = (),
+    ) -> "AgentEngineResourceBundle":
         """把可变输入规范化为不可变 Bundle，防止构建后被调用方篡改。"""
         return cls(
             flushers=tuple(flushers),
@@ -265,23 +265,23 @@ class RuntimeResourceBundle:
         )
 
 
-class AgentRuntime:
-    """一个 Runtime Profile 拥有的共享编译图及其资源生命周期。"""
+class AgentEngine:
+    """一个 AgentEngine Profile 拥有的共享编译图及其资源生命周期。"""
 
     def __init__(
         self,
         *,
-        profile: RuntimeProfile,
+        profile: AgentEngineProfile,
         graph: Any,
-        resources: RuntimeResourceBundle | None = None,
+        resources: AgentEngineResourceBundle | None = None,
         pinned: bool = False,
     ) -> None:
-        """创建已构建但尚未被租用的 Runtime。"""
+        """创建已构建但尚未被租用的 AgentEngine。"""
         now = time.monotonic()
         self.profile = profile
         self.graph: Any | None = graph
-        self.resources = resources or RuntimeResourceBundle()
-        self._state = AgentRuntimeState.READY
+        self.resources = resources or AgentEngineResourceBundle()
+        self._state = AgentEngineState.READY
         self._pinned = pinned
         self._active_leases = 0
         self._active_runs = 0
@@ -289,37 +289,37 @@ class AgentRuntime:
         self._created_at = now
         self._last_used_at = now
         self._lock = asyncio.Lock()
-        self._close_task: asyncio.Task[RuntimeCloseReport] | None = None
-        self._close_report: RuntimeCloseReport | None = None
+        self._close_task: asyncio.Task[AgentEngineCloseReport] | None = None
+        self._close_report: AgentEngineCloseReport | None = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
-        self._transitions: list[RuntimeStateTransition] = [
-            RuntimeStateTransition(AgentRuntimeState.READY, "built", now)
+        self._transitions: list[AgentEngineStateTransition] = [
+            AgentEngineStateTransition(AgentEngineState.READY, "built", now)
         ]
 
     @property
     def profile_key(self) -> str:
-        """返回该 Runtime 绑定的稳定 Profile Key。"""
+        """返回该 AgentEngine 绑定的稳定 Profile Key。"""
         return self.profile.profile_key
 
     @property
-    def state(self) -> AgentRuntimeState:
+    def state(self) -> AgentEngineState:
         """返回最近状态；需要一致计数时使用 ``snapshot``。"""
         return self._state
 
     @property
-    def transitions(self) -> tuple[RuntimeStateTransition, ...]:
+    def transitions(self) -> tuple[AgentEngineStateTransition, ...]:
         """返回状态转换的只读副本。"""
         return tuple(self._transitions)
 
     @property
-    def close_report(self) -> RuntimeCloseReport | None:
+    def close_report(self) -> AgentEngineCloseReport | None:
         """返回已完成关闭的报告；未关闭时为 ``None``。"""
         return self._close_report
 
-    async def snapshot(self) -> RuntimeSnapshot:
+    async def snapshot(self) -> AgentEngineSnapshot:
         """原子读取资源租用计数和最后使用时间。"""
         async with self._lock:
-            return RuntimeSnapshot(
+            return AgentEngineSnapshot(
                 profile_key=self.profile_key,
                 state=self._state,
                 active_leases=self._active_leases,
@@ -331,27 +331,27 @@ class AgentRuntime:
             )
 
     async def set_pinned(self, pinned: bool) -> None:
-        """设置是否允许未来的池策略主动淘汰该 Runtime。"""
+        """设置是否允许未来的池策略主动淘汰该 AgentEngine。"""
         async with self._lock:
-            if self._state == AgentRuntimeState.CLOSED:
-                raise RuntimeUnavailableError("RUNTIME_CLOSED")
+            if self._state == AgentEngineState.CLOSED:
+                raise AgentEngineUnavailableError("RUNTIME_CLOSED")
             self._pinned = pinned
 
-    async def acquire_lease(self) -> "AgentRuntimeLease":
-        """获取一个 Runtime 租约，并阻止 DRAINING/CLOSED Runtime 接受新调用。"""
+    async def acquire_lease(self) -> "AgentEngineLease":
+        """获取一个 AgentEngine 租约，并阻止 DRAINING/CLOSED AgentEngine 接受新调用。"""
         async with self._lock:
             self._require_accepting_locked()
             self._active_leases += 1
             self._last_used_at = time.monotonic()
-            self._set_state_locked(AgentRuntimeState.ACTIVE, "lease_acquired")
-        return AgentRuntimeLease(self)
+            self._set_state_locked(AgentEngineState.ACTIVE, "lease_acquired")
+        return AgentEngineLease(self)
 
     async def begin_draining(self, *, reason: str = "draining") -> None:
         """停止接受新租约，但允许已有 lease 按其取消/完成策略收尾。"""
         async with self._lock:
-            if self._state == AgentRuntimeState.CLOSED:
+            if self._state == AgentEngineState.CLOSED:
                 return
-            self._set_state_locked(AgentRuntimeState.DRAINING, reason)
+            self._set_state_locked(AgentEngineState.DRAINING, reason)
 
     async def is_closeable(self) -> bool:
         """返回是否不存在 lease、排队 run 或活动 run，适合无强制关闭。"""
@@ -359,33 +359,33 @@ class AgentRuntime:
             return self._is_closeable_locked()
 
     async def register_background_task(self, task: asyncio.Task[Any]) -> None:
-        """登记 Runtime 自己创建的后台任务，关闭时会取消并等待它们。"""
+        """登记 AgentEngine 自己创建的后台任务，关闭时会取消并等待它们。"""
         async with self._lock:
-            if self._state in {AgentRuntimeState.DRAINING, AgentRuntimeState.CLOSED}:
+            if self._state in {AgentEngineState.DRAINING, AgentEngineState.CLOSED}:
                 task.cancel()
                 return
             self._background_tasks.add(task)
             task.add_done_callback(self._background_tasks.discard)
 
-    async def aclose(self, *, force: bool = False) -> RuntimeCloseReport:
-        """幂等释放 Runtime 独占资源；单项失败不会阻断后续关闭。
+    async def aclose(self, *, force: bool = False) -> AgentEngineCloseReport:
+        """幂等释放 AgentEngine 独占资源；单项失败不会阻断后续关闭。
 
-        非强制关闭只接受无 lease/run 的 Runtime。Pool shutdown 可传 ``force``，
+        非强制关闭只接受无 lease/run 的 AgentEngine。Pool shutdown 可传 ``force``，
         此时已登记的后台任务会被取消；外部调用方仍应先释放其 lease。
         """
-        close_task: asyncio.Task[RuntimeCloseReport]
+        close_task: asyncio.Task[AgentEngineCloseReport]
         async with self._lock:
-            if self._state == AgentRuntimeState.CLOSED:
-                return self._close_report or RuntimeCloseReport(self.profile_key)
+            if self._state == AgentEngineState.CLOSED:
+                return self._close_report or AgentEngineCloseReport(self.profile_key)
             if self._close_task is not None:
                 close_task = self._close_task
             else:
                 if not force and not self._is_closeable_locked():
-                    raise RuntimeBusyError("RUNTIME_HAS_ACTIVE_LEASE_OR_RUN")
-                self._set_state_locked(AgentRuntimeState.DRAINING, "closing")
+                    raise AgentEngineBusyError("RUNTIME_HAS_ACTIVE_LEASE_OR_RUN")
+                self._set_state_locked(AgentEngineState.DRAINING, "closing")
                 close_task = asyncio.create_task(
                     self._close_owned_resources(),
-                    name=f"harness-runtime-close-{self.profile_key[:12]}",
+                    name=f"harness-engine-close-{self.profile_key[:12]}",
                 )
                 self._close_task = close_task
         return await asyncio.shield(close_task)
@@ -393,25 +393,25 @@ class AgentRuntime:
     async def _queue_run(self) -> None:
         """让已持有 lease 的调用方登记一个待启动 run。"""
         async with self._lock:
-            if self._state == AgentRuntimeState.CLOSED:
-                raise RuntimeUnavailableError("RUNTIME_CLOSED")
+            if self._state == AgentEngineState.CLOSED:
+                raise AgentEngineUnavailableError("RUNTIME_CLOSED")
             self._queued_runs += 1
             self._last_used_at = time.monotonic()
-            if self._state != AgentRuntimeState.DRAINING:
-                self._set_state_locked(AgentRuntimeState.ACTIVE, "run_queued")
+            if self._state != AgentEngineState.DRAINING:
+                self._set_state_locked(AgentEngineState.ACTIVE, "run_queued")
 
     async def _start_queued_run(self) -> None:
         """将一个已登记的 run 从队列转为活动状态。"""
         async with self._lock:
             if self._queued_runs < 1:
-                raise AgentRuntimeError("RUNTIME_RUN_NOT_QUEUED")
-            if self._state == AgentRuntimeState.CLOSED:
-                raise RuntimeUnavailableError("RUNTIME_CLOSED")
+                raise AgentEngineError("RUNTIME_RUN_NOT_QUEUED")
+            if self._state == AgentEngineState.CLOSED:
+                raise AgentEngineUnavailableError("RUNTIME_CLOSED")
             self._queued_runs -= 1
             self._active_runs += 1
             self._last_used_at = time.monotonic()
-            if self._state != AgentRuntimeState.DRAINING:
-                self._set_state_locked(AgentRuntimeState.ACTIVE, "run_started")
+            if self._state != AgentEngineState.DRAINING:
+                self._set_state_locked(AgentEngineState.ACTIVE, "run_started")
 
     async def _release_queued_run(self) -> None:
         """取消尚未启动的 queued run，并恢复可用状态。"""
@@ -440,10 +440,10 @@ class AgentRuntime:
             self._last_used_at = time.monotonic()
             self._update_activity_state_locked("lease_released")
 
-    async def _close_owned_resources(self) -> RuntimeCloseReport:
+    async def _close_owned_resources(self) -> AgentEngineCloseReport:
         """按固定顺序取消后台任务、刷新状态、关闭资源并清除图引用。"""
         started_at = time.monotonic()
-        failures: list[RuntimeCloseFailure] = []
+        failures: list[AgentEngineCloseFailure] = []
         try:
             async with self._lock:
                 tasks = tuple(task for task in self._background_tasks if not task.done())
@@ -454,7 +454,7 @@ class AgentRuntime:
                 for result in results:
                     if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
                         failures.append(
-                            RuntimeCloseFailure("background_task", type(result).__name__, str(result))
+                            AgentEngineCloseFailure("background_task", type(result).__name__, str(result))
                         )
             await self._run_adapters("flush", self.resources.flushers, failures)
             await self._run_adapters("tool", self.resources.tool_resources, failures)
@@ -464,45 +464,45 @@ class AgentRuntime:
         finally:
             async with self._lock:
                 self.graph = None
-                report = RuntimeCloseReport(
+                report = AgentEngineCloseReport(
                     self.profile_key,
                     tuple(failures),
                     duration_ms=(time.monotonic() - started_at) * 1000,
                 )
                 self._close_report = report
-                self._set_state_locked(AgentRuntimeState.CLOSED, "resources_released")
+                self._set_state_locked(AgentEngineState.CLOSED, "resources_released")
             return report
 
     async def _run_adapters(
         self,
         category: str,
-        adapters: Sequence[RuntimeCloseAdapter],
-        failures: list[RuntimeCloseFailure],
+        adapters: Sequence[AgentEngineCloseAdapter],
+        failures: list[AgentEngineCloseFailure],
     ) -> None:
         """执行一个资源类别；失败只记录，不跳过同类或后续资源。"""
         for adapter in adapters:
             try:
                 await adapter.invoke()
             except Exception as exc:
-                failure = RuntimeCloseFailure(
+                failure = AgentEngineCloseFailure(
                     resource_name=f"{category}:{adapter.name}",
                     error_type=type(exc).__name__,
                     message=str(exc),
                 )
                 failures.append(failure)
                 logger.warning(
-                    "Runtime resource close failed profile=%s resource=%s error=%s",
+                    "AgentEngine resource close failed profile=%s resource=%s error=%s",
                     self.profile_key[:12],
                     failure.resource_name,
                     failure.error_type,
                 )
 
     def _require_accepting_locked(self) -> None:
-        """在锁内拒绝 DRAINING/CLOSED Runtime 的新租约。"""
-        if self._state == AgentRuntimeState.DRAINING:
-            raise RuntimeUnavailableError("RUNTIME_DRAINING")
-        if self._state == AgentRuntimeState.CLOSED or self.graph is None:
-            raise RuntimeUnavailableError("RUNTIME_CLOSED")
+        """在锁内拒绝 DRAINING/CLOSED AgentEngine 的新租约。"""
+        if self._state == AgentEngineState.DRAINING:
+            raise AgentEngineUnavailableError("RUNTIME_DRAINING")
+        if self._state == AgentEngineState.CLOSED or self.graph is None:
+            raise AgentEngineUnavailableError("RUNTIME_CLOSED")
 
     def _is_closeable_locked(self) -> bool:
         """判断当前是否没有任何会继续使用图或资源的活动项。"""
@@ -510,28 +510,28 @@ class AgentRuntime:
 
     def _update_activity_state_locked(self, reason: str) -> None:
         """根据租约和 run 计数切换 ACTIVE/IDLE，不覆盖 DRAINING/CLOSED。"""
-        if self._state in {AgentRuntimeState.DRAINING, AgentRuntimeState.CLOSED}:
+        if self._state in {AgentEngineState.DRAINING, AgentEngineState.CLOSED}:
             return
-        target = AgentRuntimeState.IDLE if self._is_closeable_locked() else AgentRuntimeState.ACTIVE
+        target = AgentEngineState.IDLE if self._is_closeable_locked() else AgentEngineState.ACTIVE
         self._set_state_locked(target, reason)
 
-    def _set_state_locked(self, state: AgentRuntimeState, reason: str) -> None:
+    def _set_state_locked(self, state: AgentEngineState, reason: str) -> None:
         """记录真正发生的状态转换，避免重复状态污染诊断历史。"""
         if self._state == state:
             return
         self._state = state
-        self._transitions.append(RuntimeStateTransition(state, reason, time.monotonic()))
+        self._transitions.append(AgentEngineStateTransition(state, reason, time.monotonic()))
 
 
-class AgentRuntimeLease:
-    """对一个 AgentRuntime 的租约；释放前它阻止无强制淘汰。"""
+class AgentEngineLease:
+    """对一个 AgentEngine 的租约；释放前它阻止无强制淘汰。"""
 
-    def __init__(self, runtime: AgentRuntime) -> None:
-        """由 ``AgentRuntime.acquire_lease`` 创建，外部不能伪造活动计数。"""
-        self.runtime = runtime
+    def __init__(self, engine: AgentEngine) -> None:
+        """由 ``AgentEngine.acquire_lease`` 创建，外部不能伪造活动计数。"""
+        self.engine = engine
         self._released = False
 
-    async def __aenter__(self) -> "AgentRuntimeLease":
+    async def __aenter__(self) -> "AgentEngineLease":
         """异步上下文进入时返回租约自身。"""
         return self
 
@@ -539,14 +539,14 @@ class AgentRuntimeLease:
         """退出上下文时总是释放租约。"""
         await self.release()
 
-    async def reserve_run(self) -> "AgentRuntimeRunLease":
+    async def reserve_run(self) -> "AgentEngineRunLease":
         """登记一个 run；调用方可稍后 ``start``，用于显式观察 queued 状态。"""
         if self._released:
-            raise RuntimeUnavailableError("RUNTIME_LEASE_RELEASED")
-        await self.runtime._queue_run()
-        return AgentRuntimeRunLease(self.runtime)
+            raise AgentEngineUnavailableError("RUNTIME_LEASE_RELEASED")
+        await self.engine._queue_run()
+        return AgentEngineRunLease(self.engine)
 
-    async def run(self) -> "AgentRuntimeRunLease":
+    async def run(self) -> "AgentEngineRunLease":
         """登记并立即启动一个 run，适合 ``async with await lease.run()``。"""
         run_lease = await self.reserve_run()
         await run_lease.start()
@@ -557,22 +557,22 @@ class AgentRuntimeLease:
         if self._released:
             return
         self._released = True
-        await self.runtime._release_lease()
+        await self.engine._release_lease()
 
 
-class AgentRuntimeRunLease:
+class AgentEngineRunLease:
     """一个已登记或正在执行的 run 对图资源的活动引用。"""
 
-    def __init__(self, runtime: AgentRuntime) -> None:
-        """由活动 RuntimeLease 预留；初始状态为 queued。"""
-        self.runtime = runtime
+    def __init__(self, engine: AgentEngine) -> None:
+        """由活动 AgentEngineLease 预留；初始状态为 queued。"""
+        self.engine = engine
         self._started = False
         self._released = False
 
-    async def __aenter__(self) -> AgentRuntime:
-        """进入上下文时确保 run 已启动并暴露 Runtime 图。"""
+    async def __aenter__(self) -> AgentEngine:
+        """进入上下文时确保 run 已启动并暴露 AgentEngine 图。"""
         await self.start()
-        return self.runtime
+        return self.engine
 
     async def __aexit__(self, _type: object, _value: object, _traceback: object) -> None:
         """退出上下文时结束该 run 的活动引用。"""
@@ -581,10 +581,10 @@ class AgentRuntimeRunLease:
     async def start(self) -> None:
         """将 queued run 转成 active；重复调用不会重复增加计数。"""
         if self._released:
-            raise RuntimeUnavailableError("RUNTIME_RUN_LEASE_RELEASED")
+            raise AgentEngineUnavailableError("RUNTIME_RUN_LEASE_RELEASED")
         if self._started:
             return
-        await self.runtime._start_queued_run()
+        await self.engine._start_queued_run()
         self._started = True
 
     async def release(self) -> None:
@@ -593,39 +593,39 @@ class AgentRuntimeRunLease:
             return
         self._released = True
         if self._started:
-            await self.runtime._release_active_run()
+            await self.engine._release_active_run()
         else:
-            await self.runtime._release_queued_run()
+            await self.engine._release_queued_run()
 
 
-RuntimeBuilder = Callable[[RuntimeProfile], Awaitable[AgentRuntime] | AgentRuntime]
-"""由 Profile 构建完整 Runtime 的工厂；图及资源关闭责任一并返回。"""
+AgentEngineBuilder = Callable[[AgentEngineProfile], Awaitable[AgentEngine] | AgentEngine]
+"""由 Profile 构建完整 AgentEngine 的工厂；图及资源关闭责任一并返回。"""
 
 
 @dataclass(slots=True)
-class _RuntimeEntry:
-    """Pool 内部条目；BUILDING 时只有 Future，READY 后才持有 Runtime。"""
+class _AgentEngineEntry:
+    """Pool 内部条目；BUILDING 时只有 Future，READY 后才持有 AgentEngine。"""
 
-    profile: RuntimeProfile
-    state: AgentRuntimeState
-    build_task: asyncio.Task[AgentRuntime] | None = None
-    runtime: AgentRuntime | None = None
+    profile: AgentEngineProfile
+    state: AgentEngineState
+    build_task: asyncio.Task[AgentEngine] | None = None
+    engine: AgentEngine | None = None
     build_started_at: float = field(default_factory=time.monotonic)
     drain_reason: str | None = None
 
 
-class RuntimePool:
-    """按 RuntimeProfileKey 管理共享 Runtime 的构建、有界缓存和显式排空。"""
+class AgentEnginePool:
+    """按 AgentEngineProfileKey 管理共享 AgentEngine 的构建、有界缓存和显式排空。"""
 
     def __init__(
         self,
-        builder: RuntimeBuilder,
+        builder: AgentEngineBuilder,
         *,
         max_profiles: int = 8,
         idle_ttl_seconds: float = 1_800,
         close_timeout_seconds: float = 15,
     ) -> None:
-        """保存工厂与 Pool 策略；只淘汰无租约、无 run 的未固定 Runtime。"""
+        """保存工厂与 Pool 策略；只淘汰无租约、无 run 的未固定 AgentEngine。"""
         if not callable(builder):
             raise ValueError("RUNTIME_BUILDER_INVALID")
         if not isinstance(max_profiles, int) or isinstance(max_profiles, bool) or max_profiles < 1:
@@ -646,10 +646,10 @@ class RuntimePool:
         self._max_profiles = max_profiles
         self._idle_ttl_seconds = idle_ttl_seconds
         self._close_timeout_seconds = close_timeout_seconds
-        self._entries: dict[str, _RuntimeEntry] = {}
+        self._entries: dict[str, _AgentEngineEntry] = {}
         self._lock = asyncio.Lock()
         self._closed = False
-        self._close_task: asyncio.Task[tuple[RuntimeCloseReport, ...]] | None = None
+        self._close_task: asyncio.Task[tuple[AgentEngineCloseReport, ...]] | None = None
         self._hits = 0
         self._misses = 0
         self._build_successes = 0
@@ -660,19 +660,19 @@ class RuntimePool:
         self._close_reports = 0
         self._close_failures = 0
         self._close_duration_ms_total = 0.0
-        self._recent_events: list[RuntimePoolEvent] = []
+        self._recent_events: list[AgentEnginePoolEvent] = []
 
-    async def acquire(self, profile: RuntimeProfile) -> AgentRuntimeLease:
-        """按 Profile 获取共享 Runtime 租约，并对同 Key 首建执行 single-flight。"""
+    async def acquire(self, profile: AgentEngineProfile) -> AgentEngineLease:
+        """按 Profile 获取共享 AgentEngine 租约，并对同 Key 首建执行 single-flight。"""
         key = profile.profile_key
         accounted = False
         while True:
-            runtime: AgentRuntime | None = None
-            build_task: asyncio.Task[AgentRuntime] | None = None
+            engine: AgentEngine | None = None
+            build_task: asyncio.Task[AgentEngine] | None = None
             requires_eviction = False
             async with self._lock:
                 if self._closed:
-                    raise RuntimePoolClosedError("RUNTIME_POOL_CLOSED")
+                    raise AgentEnginePoolClosedError("RUNTIME_POOL_CLOSED")
                 entry = self._entries.get(key)
                 if entry is None:
                     if not accounted:
@@ -680,14 +680,14 @@ class RuntimePool:
                         accounted = True
                     requires_eviction = len(self._entries) >= self._max_profiles
                     if not requires_eviction:
-                        entry = _RuntimeEntry(profile=profile, state=AgentRuntimeState.BUILDING)
+                        entry = _AgentEngineEntry(profile=profile, state=AgentEngineState.BUILDING)
                         build_task = asyncio.create_task(
                             self._build_entry(key, entry),
-                            name=f"harness-runtime-build-{key[:12]}",
+                            name=f"harness-engine-build-{key[:12]}",
                         )
                         entry.build_task = build_task
                         self._entries[key] = entry
-                elif entry.state == AgentRuntimeState.BUILDING:
+                elif entry.state == AgentEngineState.BUILDING:
                     if not accounted:
                         self._hits += 1
                         accounted = True
@@ -696,8 +696,8 @@ class RuntimePool:
                     if not accounted:
                         self._hits += 1
                         accounted = True
-                    runtime = entry.runtime
-                    if runtime is None:
+                    engine = entry.engine
+                    if engine is None:
                         # 不允许损坏条目变成永久缓存；删除后让当前 acquire 重新构建。
                         self._entries.pop(key, None)
                         continue
@@ -709,21 +709,21 @@ class RuntimePool:
                         profile_key=key,
                         reason="no_idle_runtime",
                     )
-                    raise RuntimePoolCapacityError("RUNTIME_POOL_CAPACITY_EXHAUSTED")
+                    raise AgentEnginePoolCapacityError("RUNTIME_POOL_CAPACITY_EXHAUSTED")
                 continue
             if build_task is not None:
                 await asyncio.shield(build_task)
                 continue
-            if runtime is None:
+            if engine is None:
                 continue
-            return await runtime.acquire_lease()
+            return await engine.acquire_lease()
 
     async def size(self) -> int:
         """返回包括 BUILDING/DRAINING 在内的 Pool 条目数，供诊断与测试使用。"""
         async with self._lock:
             return len(self._entries)
 
-    async def diagnostics(self) -> RuntimePoolDiagnosticSnapshot:
+    async def diagnostics(self) -> AgentEnginePoolDiagnosticSnapshot:
         """读取 Pool 的脱敏快照；不会暴露完整 Key、Prompt、路径或模型配置。"""
         async with self._lock:
             entries = tuple(self._entries.values())
@@ -741,13 +741,13 @@ class RuntimePool:
                 "close_duration_ms_total": self._close_duration_ms_total,
                 "recent_events": tuple(self._recent_events),
             }
-        diagnostics: list[RuntimePoolRuntimeDiagnostic] = []
+        diagnostics: list[AgentEngineDiagnostic] = []
         for entry in entries:
-            if entry.state == AgentRuntimeState.BUILDING or entry.runtime is None:
+            if entry.state == AgentEngineState.BUILDING or entry.engine is None:
                 diagnostics.append(
-                    RuntimePoolRuntimeDiagnostic(
+                    AgentEngineDiagnostic(
                         profile_id=_profile_id(entry.profile.profile_key),
-                        state=AgentRuntimeState.BUILDING,
+                        state=AgentEngineState.BUILDING,
                         active_leases=0,
                         active_runs=0,
                         queued_runs=0,
@@ -755,9 +755,9 @@ class RuntimePool:
                     )
                 )
                 continue
-            snapshot = await entry.runtime.snapshot()
+            snapshot = await entry.engine.snapshot()
             diagnostics.append(
-                RuntimePoolRuntimeDiagnostic(
+                AgentEngineDiagnostic(
                     profile_id=_profile_id(snapshot.profile_key),
                     state=snapshot.state,
                     active_leases=snapshot.active_leases,
@@ -767,19 +767,19 @@ class RuntimePool:
                 )
             )
         diagnostics.sort(key=lambda item: (item.state.value, item.profile_id))
-        state_counts = {state.value: 0 for state in AgentRuntimeState}
-        for runtime in diagnostics:
-            state_counts[runtime.state.value] += 1
-        return RuntimePoolDiagnosticSnapshot(
+        state_counts = {state.value: 0 for state in AgentEngineState}
+        for engine in diagnostics:
+            state_counts[engine.state.value] += 1
+        return AgentEnginePoolDiagnosticSnapshot(
             pool_size=len(diagnostics),
             max_profiles=self._max_profiles,
             idle_ttl_seconds=self._idle_ttl_seconds,
             close_timeout_seconds=self._close_timeout_seconds,
             closed=closed,
             state_counts={name: count for name, count in state_counts.items() if count},
-            active_leases=sum(runtime.active_leases for runtime in diagnostics),
-            active_runs=sum(runtime.active_runs for runtime in diagnostics),
-            queued_runs=sum(runtime.queued_runs for runtime in diagnostics),
+            active_leases=sum(engine.active_leases for engine in diagnostics),
+            active_runs=sum(engine.active_runs for engine in diagnostics),
+            queued_runs=sum(engine.queued_runs for engine in diagnostics),
             hits=int(counters["hits"]),
             misses=int(counters["misses"]),
             build_successes=int(counters["build_successes"]),
@@ -790,17 +790,17 @@ class RuntimePool:
             close_reports=int(counters["close_reports"]),
             close_failures=int(counters["close_failures"]),
             close_duration_ms_total=float(counters["close_duration_ms_total"]),
-            runtimes=tuple(diagnostics),
+            engines=tuple(diagnostics),
             recent_events=tuple(counters["recent_events"]),
         )
 
     async def sweep(self, *, now: float | None = None) -> tuple[str, ...]:
         """按空闲 TTL 淘汰安全候选，并返回实际进入排空的 Profile Key。"""
         current = time.monotonic() if now is None else now
-        runtimes = await self._idle_runtimes()
+        engines = await self._idle_engines()
         expired: list[tuple[float, str]] = []
-        for runtime in runtimes:
-            snapshot = await runtime.snapshot()
+        for engine in engines:
+            snapshot = await engine.snapshot()
             if current - snapshot.last_used_at >= self._idle_ttl_seconds:
                 expired.append((snapshot.last_used_at, snapshot.profile_key))
         evicted: list[str] = []
@@ -809,22 +809,22 @@ class RuntimePool:
                 evicted.append(profile_key)
         return tuple(evicted)
 
-    async def state_for(self, profile_key: str) -> AgentRuntimeState:
+    async def state_for(self, profile_key: str) -> AgentEngineState:
         """返回 Pool 观察到的状态；不存在或构建失败后统一为 MISSING。"""
         async with self._lock:
             entry = self._entries.get(profile_key)
             if entry is None:
-                return AgentRuntimeState.MISSING
-            if entry.state == AgentRuntimeState.BUILDING:
-                return AgentRuntimeState.BUILDING
-            runtime = entry.runtime
-        return runtime.state if runtime is not None else AgentRuntimeState.MISSING
+                return AgentEngineState.MISSING
+            if entry.state == AgentEngineState.BUILDING:
+                return AgentEngineState.BUILDING
+            engine = entry.engine
+        return engine.state if engine is not None else AgentEngineState.MISSING
 
-    async def runtime_for(self, profile_key: str) -> AgentRuntime | None:
-        """返回已构建 Runtime 的只读引用，仅供生命周期协调和测试。"""
+    async def engine_for(self, profile_key: str) -> AgentEngine | None:
+        """返回已构建 AgentEngine 的只读引用，仅供生命周期协调和测试。"""
         async with self._lock:
             entry = self._entries.get(profile_key)
-            return entry.runtime if entry is not None else None
+            return entry.engine if entry is not None else None
 
     async def evict(
         self,
@@ -833,36 +833,36 @@ class RuntimePool:
         reason: str = "evicted",
         force: bool = False,
     ) -> bool:
-        """开始排空 Runtime；force 仅供配置失效/关闭绕过 pin，不中断已有 run。"""
-        runtime = await self.runtime_for(profile_key)
-        if runtime is None:
+        """开始排空 AgentEngine；force 仅供配置失效/关闭绕过 pin，不中断已有 run。"""
+        engine = await self.engine_for(profile_key)
+        if engine is None:
             return False
-        snapshot = await runtime.snapshot()
+        snapshot = await engine.snapshot()
         if snapshot.pinned and not force:
             return False
-        if snapshot.state == AgentRuntimeState.CLOSED:
+        if snapshot.state == AgentEngineState.CLOSED:
             return False
-        await runtime.begin_draining(reason=reason)
-        if snapshot.state != AgentRuntimeState.DRAINING:
+        await engine.begin_draining(reason=reason)
+        if snapshot.state != AgentEngineState.DRAINING:
             async with self._lock:
                 entry = self._entries.get(profile_key)
-                if entry is not None and entry.runtime is runtime and entry.drain_reason is None:
+                if entry is not None and entry.engine is engine and entry.drain_reason is None:
                     entry.drain_reason = reason
                     self._eviction_reasons[reason] = self._eviction_reasons.get(reason, 0) + 1
                     self._record_event("eviction_started", profile_key=profile_key, reason=reason)
         return await self.finalize_draining(profile_key)
 
     async def finalize_draining(self, profile_key: str) -> bool:
-        """在最后一个 lease/run 释放后关闭 DRAINING Runtime 并移出 Pool。"""
-        runtime = await self.runtime_for(profile_key)
-        if runtime is None or runtime.state != AgentRuntimeState.DRAINING:
+        """在最后一个 lease/run 释放后关闭 DRAINING AgentEngine 并移出 Pool。"""
+        engine = await self.engine_for(profile_key)
+        if engine is None or engine.state != AgentEngineState.DRAINING:
             return False
-        if not await runtime.is_closeable():
+        if not await engine.is_closeable():
             return False
-        report = await runtime.aclose()
+        report = await engine.aclose()
         async with self._lock:
             entry = self._entries.get(profile_key)
-            if entry is not None and entry.runtime is runtime:
+            if entry is not None and entry.engine is engine:
                 self._record_close_report(
                     profile_key,
                     report,
@@ -871,38 +871,38 @@ class RuntimePool:
                 self._entries.pop(profile_key, None)
         return True
 
-    async def aclose(self) -> tuple[RuntimeCloseReport, ...]:
-        """关闭 Pool；等待首建结束后强制关闭其创建的全部 Runtime。"""
-        close_task: asyncio.Task[tuple[RuntimeCloseReport, ...]]
+    async def aclose(self) -> tuple[AgentEngineCloseReport, ...]:
+        """关闭 Pool；等待首建结束后强制关闭其创建的全部 AgentEngine。"""
+        close_task: asyncio.Task[tuple[AgentEngineCloseReport, ...]]
         async with self._lock:
             if self._close_task is not None:
                 close_task = self._close_task
             else:
                 self._closed = True
-                close_task = asyncio.create_task(self._close_all(), name="harness-runtime-pool-close")
+                close_task = asyncio.create_task(self._close_all(), name="harness-engine-pool-close")
                 self._close_task = close_task
         return await asyncio.shield(close_task)
 
-    async def _build_entry(self, key: str, entry: _RuntimeEntry) -> AgentRuntime:
-        """执行工厂并只在成功时发布 READY Runtime；失败后删除条目以允许重试。"""
+    async def _build_entry(self, key: str, entry: _AgentEngineEntry) -> AgentEngine:
+        """执行工厂并只在成功时发布 READY AgentEngine；失败后删除条目以允许重试。"""
         try:
             created = self._builder(entry.profile)
-            runtime = await created if inspect.isawaitable(created) else created
-            if not isinstance(runtime, AgentRuntime):
-                raise AgentRuntimeError("RUNTIME_BUILDER_RESULT_INVALID")
-            if runtime.profile.profile_key != key:
-                raise AgentRuntimeError("RUNTIME_PROFILE_KEY_MISMATCH")
+            engine = await created if inspect.isawaitable(created) else created
+            if not isinstance(engine, AgentEngine):
+                raise AgentEngineError("RUNTIME_BUILDER_RESULT_INVALID")
+            if engine.profile.profile_key != key:
+                raise AgentEngineError("RUNTIME_PROFILE_KEY_MISMATCH")
             async with self._lock:
                 current = self._entries.get(key)
                 if current is entry:
-                    entry.runtime = runtime
-                    entry.state = AgentRuntimeState.READY
+                    entry.engine = engine
+                    entry.state = AgentEngineState.READY
                     entry.build_task = None
                     duration_ms = (time.monotonic() - entry.build_started_at) * 1000
                     self._build_successes += 1
                     self._build_duration_ms_total += duration_ms
                     self._record_event("build_completed", profile_key=key, duration_ms=duration_ms)
-            return runtime
+            return engine
         except Exception:
             async with self._lock:
                 if self._entries.get(key) is entry:
@@ -913,8 +913,8 @@ class RuntimePool:
                     self._record_event("build_failed", profile_key=key, duration_ms=duration_ms)
             raise
 
-    async def _close_all(self) -> tuple[RuntimeCloseReport, ...]:
-        """等待 BUILDING 条目收敛，再继续关闭每个已发布 Runtime。"""
+    async def _close_all(self) -> tuple[AgentEngineCloseReport, ...]:
+        """等待 BUILDING 条目收敛，再继续关闭每个已发布 AgentEngine。"""
         async with self._lock:
             build_tasks = tuple(
                 entry.build_task
@@ -927,63 +927,63 @@ class RuntimePool:
             await asyncio.gather(*build_tasks, return_exceptions=True)
         async with self._lock:
             closing_entries = tuple(
-                (entry.runtime, entry.drain_reason or "pool_shutdown")
+                (entry.engine, entry.drain_reason or "pool_shutdown")
                 for entry in self._entries.values()
-                if entry.runtime is not None
+                if entry.engine is not None
             )
-        reports = tuple([await self._close_with_timeout(runtime) for runtime, _ in closing_entries])
+        reports = tuple([await self._close_with_timeout(engine) for engine, _ in closing_entries])
         async with self._lock:
-            for (runtime, reason), report in zip(closing_entries, reports, strict=True):
-                self._record_close_report(runtime.profile_key, report, reason=reason)
+            for (engine, reason), report in zip(closing_entries, reports, strict=True):
+                self._record_close_report(engine.profile_key, report, reason=reason)
             self._entries.clear()
         return reports
 
     async def _evict_lru_idle(self) -> bool:
         """淘汰最久未使用的安全候选；并发重新租用时重试下一候选。"""
-        candidates = await self._idle_runtimes()
-        snapshots = [(await runtime.snapshot(), runtime) for runtime in candidates]
+        candidates = await self._idle_engines()
+        snapshots = [(await engine.snapshot(), engine) for engine in candidates]
         for snapshot, _ in sorted(snapshots, key=lambda item: item[0].last_used_at):
             if await self.evict(snapshot.profile_key, reason="lru_capacity"):
                 return True
         return False
 
-    async def _idle_runtimes(self) -> tuple[AgentRuntime, ...]:
-        """快照当前可供策略检查的 Runtime；不在 Pool 锁内等待 Runtime 锁。"""
+    async def _idle_engines(self) -> tuple[AgentEngine, ...]:
+        """快照当前可供策略检查的 AgentEngine；不在 Pool 锁内等待 AgentEngine 锁。"""
         async with self._lock:
-            runtimes = tuple(
-                entry.runtime
+            engines = tuple(
+                entry.engine
                 for entry in self._entries.values()
-                if entry.runtime is not None
+                if entry.engine is not None
             )
-        result: list[AgentRuntime] = []
-        for runtime in runtimes:
-            snapshot = await runtime.snapshot()
+        result: list[AgentEngine] = []
+        for engine in engines:
+            snapshot = await engine.snapshot()
             if (
-                snapshot.state == AgentRuntimeState.IDLE
+                snapshot.state == AgentEngineState.IDLE
                 and snapshot.active_leases == 0
                 and snapshot.active_runs == 0
                 and snapshot.queued_runs == 0
                 and not snapshot.pinned
             ):
-                result.append(runtime)
+                result.append(engine)
         return tuple(result)
 
-    async def _close_with_timeout(self, runtime: AgentRuntime) -> RuntimeCloseReport:
+    async def _close_with_timeout(self, engine: AgentEngine) -> AgentEngineCloseReport:
         """限制 Pool shutdown 等待时间；超时后记录失败并让关闭任务自行收尾。"""
         try:
             return await asyncio.wait_for(
-                runtime.aclose(force=True), timeout=self._close_timeout_seconds
+                engine.aclose(force=True), timeout=self._close_timeout_seconds
             )
         except TimeoutError:
             logger.warning(
-                "Runtime close timed out profile=%s timeout_seconds=%s",
-                runtime.profile_key[:12],
+                "AgentEngine close timed out profile=%s timeout_seconds=%s",
+                engine.profile_key[:12],
                 self._close_timeout_seconds,
             )
-            return RuntimeCloseReport(
-                runtime.profile_key,
+            return AgentEngineCloseReport(
+                engine.profile_key,
                 (
-                    RuntimeCloseFailure(
+                    AgentEngineCloseFailure(
                         "runtime_close_timeout",
                         "TimeoutError",
                         f"close exceeded {self._close_timeout_seconds} seconds",
@@ -995,7 +995,7 @@ class RuntimePool:
     def _record_close_report(
         self,
         profile_key: str,
-        report: RuntimeCloseReport,
+        report: AgentEngineCloseReport,
         *,
         reason: str,
     ) -> None:
@@ -1024,7 +1024,7 @@ class RuntimePool:
         level: int = logging.INFO,
     ) -> None:
         """写入最多 64 条脱敏事件；日志字段不携带完整 Profile Key 或用户输入。"""
-        item = RuntimePoolEvent(
+        item = AgentEnginePoolEvent(
             event=event,
             profile_id=_profile_id(profile_key),
             reason=reason,
@@ -1037,7 +1037,7 @@ class RuntimePool:
             del self._recent_events[:-64]
         logger.log(
             level,
-            "RuntimePool event=%s profile=%s reason=%s duration_ms=%s close_failures=%s",
+            "AgentEnginePool event=%s profile=%s reason=%s duration_ms=%s close_failures=%s",
             item.event,
             item.profile_id,
             item.reason or "-",

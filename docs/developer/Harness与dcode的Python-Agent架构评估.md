@@ -11,13 +11,13 @@
 - **Harness Code 更像“企业 Agent Host”**：先确定本次运行使用的模型、工具、Skill、执行环境和安全策略，再复用匹配的 Agent 图；同时把运行事实、上下文压缩产物和线程状态持久化。它更重视隔离、可追溯和长生命周期运行。
 - **dcode 更像“功能完整的个人 Coding Agent”**：一个进程复用一张 Agent 图，通过 middleware 在每次调用时切换模型和行为，并集成大量现成功能。它更重视开箱即用、模型与沙箱生态、可扩展 Agent、MCP、记忆和可观测性。
 
-两者都没有重新实现 ReAct 循环。最终都是由 `create_deep_agent()` 组织 middleware，再委托 LangChain/LangGraph 执行。真正的区别在于：Harness 在图外增加了更完整的 Host、Runtime 和持久化领域；dcode 则在图内外装配了更多产品 middleware 和生态适配。
+两者都没有重新实现 ReAct 循环。最终都是由 `create_deep_agent()` 组织 middleware，再委托 LangChain/LangGraph 执行。真正的区别在于：Harness 在图外增加了更完整的 Host、AgentEngine 和持久化领域；dcode 则在图内外装配了更多产品 middleware 和生态适配。
 
 站在第三方视角，没有脱离场景的绝对赢家：
 
 | 判断维度 | 更占优势的一方 | 核心原因 |
 | --- | --- | --- |
-| 企业运行隔离、审计和资源治理 | Harness Code | 有 RuntimeProfile、RuntimePool、不可变 Run binding、项目隔离的持久化 |
+| 企业运行隔离、审计和资源治理 | Harness Code | 有 AgentEngineProfile、AgentEnginePool、不可变 Run binding、项目隔离的持久化 |
 | 功能完整度和生态覆盖 | dcode | 多模型、多沙箱、自定义 Agent、成熟 MCP、hooks、tracing 已进入实际运行链 |
 | 长会话上下文的持久可靠性 | Harness Code | 原文、摘要和压缩状态进入 ThreadPersistence，不依赖进程临时目录 |
 | 动态能力和用户可定制性 | dcode | 文件化自定义 Agent、异步 Agent、可写记忆、Goal/Rubric、解释器 |
@@ -55,10 +55,10 @@
   ↓
 解析这次实际使用的模型
   ↓
-计算 RuntimeProfile
+计算 AgentEngineProfile
 （项目 + 模型 + 工具 + Skill + MCP + 沙箱 + middleware + prompt 模板）
   ↓
-RuntimePool 查找或构建对应 Agent 图
+AgentEnginePool 查找或构建对应 Agent 图
   ↓
 从 ThreadPersistence 恢复该线程的 PromptEpoch 和 checkpoint
   ↓
@@ -69,14 +69,14 @@ RuntimePool 查找或构建对应 Agent 图
 记录运行事实、上下文产物和终态
 ```
 
-这里最关键的不是“用了 RuntimePool”，而是 **Agent 图只保存可共享的执行能力，线程数据和本次运行数据不放在图对象里**。一张图可以服务多个 Thread；每次调用通过 `RunContext` 注入 `thread_id`、`run_id`、PromptEpoch、审批模式和取消令牌。[H-Server] [H-Runtime] [H-RunContext]
+这里最关键的不是“用了 AgentEnginePool”，而是 **Agent 图只保存可共享的执行能力，线程数据和本次运行数据不放在图对象里**。一张图可以服务多个 Thread；每次调用通过 `RunContext` 注入 `thread_id`、`run_id`、PromptEpoch、审批模式和取消令牌。[H-Server] [H-AgentEngine] [H-RunContext]
 
 这个设计解决的是企业 Host 常见问题：
 
 - 同一个进程同时服务多个线程时，不能串上下文；
 - 用户切换模型后，要知道本次实际用了什么；
 - 不同工具、Skill、MCP 或沙箱配置不能误复用同一张图；
-- Runtime 不能无限增长，需要容量、空闲回收和关闭顺序。
+- AgentEngine 不能无限增长，需要容量、空闲回收和关闭顺序。
 
 ### 2.2 dcode：一张功能丰富的图，通过运行上下文动态切换
 
@@ -107,9 +107,9 @@ dcode 的 `make_graph()` 在进程内通过锁只构建一次。之后的模型�
 
 | 架构问题 | Harness Code | dcode | 第三方判断 |
 | --- | --- | --- | --- |
-| Agent 图复用 | 按 RuntimeProfile 复用多张图，有容量和 TTL | 每个进程缓存一张图 | Harness 更适合多租户式 Host；dcode 更简单 |
+| Agent 图复用 | 按 AgentEngineProfile 复用多张图，有容量和 TTL | 每个进程缓存一张图 | Harness 更适合多租户式 Host；dcode 更简单 |
 | 运行时动态状态 | `RunContext` 明确承载，不进入共享图 | `CLIContextSchema` + checkpoint 私有 channel | 两者都避免重编译；Harness 的运行身份更完整 |
-| 模型切换 | 先解析并固化本次 Run binding，再选 Runtime | middleware 在模型调用前动态替换 | Harness 更可审计；dcode 更灵活 |
+| 模型切换 | 先解析并固化本次 Run binding，再选 AgentEngine | middleware 在模型调用前动态替换 | Harness 更可审计；dcode 更灵活 |
 | provider | 当前主要是 OpenAI-compatible | Anthropic、OpenAI、Google、Bedrock 等大量 provider | dcode 明显领先 |
 | Thread 持久化 | 项目指纹隔离的 SQLite + LangGraph checkpoint | 全局 SQLite，通过 metadata 中的 cwd 查询 | Harness 隔离更强；dcode 查询和迁移经验更成熟 |
 | 系统提示词 | 首次创建 PromptEpoch，线程内稳定 | 启动时生成，部分字段在 middleware 中动态改写 | Harness 更利于复现和 prompt cache |
@@ -122,27 +122,27 @@ dcode 的 `make_graph()` 在进程内通过锁只构建一次。之后的模型�
 | Shell | 本地 shell 不是 OS 沙箱；最小环境、审批/白名单 | 本地 shell 也不是沙箱；环境更完整、审批/白名单 | Harness 暴露更少；dcode 兼容性更好 |
 | 远程沙箱 | 明确 provider factory，创建失败不回退本地 | 多个现成 provider 和生命周期集成 | dcode 生态更强；两边都能 fail closed |
 | 并发工具调用 | 有读写锁，但需审批的写工具绕过锁 | 主要沿用 ToolNode 并行和 HITL | Harness 有意治理，但当前仍有缺口 |
-| 可观测性 | RuntimePool 诊断和结构化状态为主 | LangSmith tracing、秘密脱敏、hooks | dcode 明显领先 |
+| 可观测性 | AgentEnginePool 诊断和结构化状态为主 | LangSmith tracing、秘密脱敏、hooks | dcode 明显领先 |
 | 上游耦合 | 为替换 summarization 操作 Deep Agents 内部 profile | 多处兼容补丁、内部符号和 alpha 版本绑定 | 两者都有风险，dcode 接触面更大 |
 
 ## 4. 详细架构比较
 
-### 4.1 图、Runtime 和生命周期
+### 4.1 图、AgentEngine 和生命周期
 
-Harness 把“可以共用的 Agent 能力”定义为 Runtime。`RuntimeProfile` 包含项目、实际模型、工具目录、Skill 快照、MCP、沙箱、审批策略、middleware 和 prompt 模板的指纹；`RuntimePool` 按这个 key 做 single-flight 构建、容量限制、空闲回收、draining 和关闭。[H-Profile] [H-Runtime]
+Harness 把“可以共用的 Agent 能力”定义为 AgentEngine。`AgentEngineProfile` 包含项目、实际模型、工具目录、Skill 快照、MCP、沙箱、审批策略、middleware 和 prompt 模板的指纹；`AgentEnginePool` 按这个 key 做 single-flight 构建、容量限制、空闲回收、draining 和关闭。[H-Profile] [H-AgentEngine]
 
 优势：
 
 - 配置不同的 Run 不会无意共享错误的图；
-- Runtime 的资源可以被统一关闭；
+- AgentEngine 的资源可以被统一关闭；
 - 可观察 MISSING、BUILDING、ACTIVE、IDLE、DRAINING 等状态；
 - 同一配置下多个 Thread 仍能共享昂贵的图和模型客户端。
 
 代价：
 
-- “什么变化必须生成新 Runtime”变成关键正确性问题；
+- “什么变化必须生成新 AgentEngine”变成关键正确性问题；
 - Profile 指纹漏字段时，旧能力会被错误复用；
-- AgentHost 需要同时协调配置、模型绑定、Runtime、ThreadPersistence 和运行生命周期，当前 `server.py` 因而过重。
+- AgentHost 需要同时协调配置、模型绑定、AgentEngine、ThreadPersistence 和运行生命周期，当前 `server.py` 因而过重。
 
 dcode 选择每进程一张图。它用一个 `asyncio.Lock` 防止重复构建，并让动态模型 middleware 在调用时替换模型。[D-ServerGraph] [D-Model]
 
@@ -155,14 +155,14 @@ dcode 选择每进程一张图。它用一个 `asyncio.Lock` 防止重复构建�
 代价：
 
 - 配置变化通常需要重建进程或专门增加动态更新通道；
-- 缺少 Runtime 级容量、驱逐和诊断；
+- 缺少 AgentEngine 级容量、驱逐和诊断；
 - 越来越多的动态差异会进入 middleware 条件分支。
 
 **判断：** 对单用户、单项目 CLI，dcode 的方案更省代码；对多连接、长驻、需要审计的企业 Host，Harness 的 Profile + Pool 更合适。但 Harness 必须把 Profile 完整性当成安全和正确性边界，而不只是缓存优化。
 
 ### 4.2 模型选择与运行事实
 
-Harness 在 Run 开始前解析模型，优先级为：本次请求、最近一次 Run、旧绑定、配置默认。解析后把“用户请求了什么”和“实际执行用了什么”原子写入 ThreadPersistence；RuntimeProfile 也使用实际模型生成。[H-Server] [H-Persistence]
+Harness 在 Run 开始前解析模型，优先级为：本次请求、最近一次 Run、旧绑定、配置默认。解析后把“用户请求了什么”和“实际执行用了什么”原子写入 ThreadPersistence；AgentEngineProfile 也使用实际模型生成。[H-Server] [H-Persistence]
 
 这带来三个好处：
 
@@ -172,7 +172,7 @@ Harness 在 Run 开始前解析模型，优先级为：本次请求、最近一�
 
 ZC-086 已将这套优先级、legacy 转换、脱敏和 Run binding 构造收进
 `execution_binding.py` 的纯函数 interface。Server 只编排输入与输出，ThreadPersistence 只处理
-SQLite/JSON adapter，Runtime 和历史事实消费同一解析结果。[H-Task-086]
+SQLite/JSON adapter，AgentEngine 和历史事实消费同一解析结果。[H-Task-086]
 
 dcode 支持 `provider:model` 和大量 provider。`ConfigurableModelMiddleware` 在每次模型调用前读取 runtime context；模型不同就创建对应实例，并把实际 model spec 和参数写入 checkpoint，恢复时继续使用。[D-Model] [D-Resume] [D-Config]
 
@@ -271,7 +271,7 @@ Harness 的 ThreadPersistence 使用用户级 SQLite，但给 LangGraph checkpoi
 - Thread 索引；
 - checkpoint；
 - PromptEpoch；
-- RuntimeProfile；
+- AgentEngineProfile；
 - 每次 Run 的请求选择和实际执行绑定；
 - 上下文原文、摘要和压缩状态。
 
@@ -330,10 +330,10 @@ Harness 已有 MCP 连接管理、状态、添加和移除能力，工具在构�
 
 但源码显示两个需要优先处理的问题：
 
-1. `mcp_config_fingerprint()` 只包含服务器名称和 transport，测试还明确要求忽略 command 和 URL。同名同 transport 的服务器即使端点改变，也会得到相同 RuntimeProfile。
-2. 添加或移除服务器会更新 McpConnectionManager 的工具列表，但已经构建的 Agent 图拿到的是原工具快照；处理函数没有让 RuntimePool 失效，也没有重建已有图。
+1. `mcp_config_fingerprint()` 只包含服务器名称和 transport，测试还明确要求忽略 command 和 URL。同名同 transport 的服务器即使端点改变，也会得到相同 AgentEngineProfile。
+2. 添加或移除服务器会更新 McpConnectionManager 的工具列表，但已经构建的 Agent 图拿到的是原工具快照；处理函数没有让 AgentEnginePool 失效，也没有重建已有图。
 
-因此可推断：MCP 状态可能已经显示“添加/移除成功”，但已缓存 Runtime 仍使用旧工具集合。第二点是**调用链推断**，目前测试覆盖了配置写入和 manager 行为，没有看到“热更新后新 Run 的图工具发生变化”的端到端测试。
+因此可推断：MCP 状态可能已经显示“添加/移除成功”，但已缓存 AgentEngine 仍使用旧工具集合。第二点是**调用链推断**，目前测试覆盖了配置写入和 manager 行为，没有看到“热更新后新 Run 的图工具发生变化”的端到端测试。
 
 dcode 的 MCP 实现更完整：
 
@@ -347,7 +347,7 @@ dcode 的 MCP 实现更完整：
 
 [D-MCP] [D-ServerGraph]
 
-**判断：** dcode 明显领先。Harness 首先要修的是 Profile 指纹和 Runtime 失效闭环，再考虑增加 OAuth 或自动发现。
+**判断：** dcode 明显领先。Harness 首先要修的是 Profile 指纹和 AgentEngine 失效闭环，再考虑增加 OAuth 或自动发现。
 
 ### 4.10 Goal、Rubric、解释器、hooks 和 tracing
 
@@ -369,7 +369,7 @@ dcode 还具备 Harness 当前没有的能力：
 - hooks 能启动外部进程，是新的执行边界；
 - tracing 必须持续维护脱敏规则。
 
-Harness 已有 RuntimePool diagnostics 和结构化运行状态，但 hooks、统一 tracing 和秘密脱敏仍主要是规划项。[H-Architecture] [H-Refactor]
+Harness 已有 AgentEnginePool diagnostics 和结构化运行状态，但 hooks、统一 tracing 和秘密脱敏仍主要是规划项。[H-Architecture] [H-Refactor]
 
 **判断：** tracing 的价值高且边界清晰，应优先借鉴；Goal、Rubric 和解释器只有在明确产品需求出现时再引入。
 
@@ -392,7 +392,7 @@ Harness 的耦合点较少，但其中一个涉及进程全局状态，故障影
 
 | 维度 | Harness | dcode | 说明 |
 | --- | ---: | ---: | --- |
-| Runtime 隔离与生命周期 | 5 | 3 | Harness 有明确 Profile、Pool、租约和关闭状态 |
+| AgentEngine 隔离与生命周期 | 5 | 3 | Harness 有明确 Profile、Pool、租约和关闭状态 |
 | 运行审计与可复现性 | 5 | 3 | Harness 固化 Run binding 和 PromptEpoch |
 | 模型/provider 覆盖 | 2 | 5 | dcode 的 provider 生态远超 Harness |
 | 子 Agent 扩展 | 2 | 5 | Harness 生产链目前只有固定 Agent |
@@ -400,7 +400,7 @@ Harness 的耦合点较少，但其中一个涉及进程全局状态，故障影
 | 长上下文持久可靠性 | 5 | 3 | dcode 本地外置内容使用临时目录 |
 | 自适应 Memory | 2 | 5 | dcode 可主动写回，Harness 有意只读 |
 | Memory 可预测性 | 5 | 3 | 只读 epoch 更容易复核 |
-| MCP 完整度 | 2 | 5 | Harness 还有 Runtime 更新闭环问题 |
+| MCP 完整度 | 2 | 5 | Harness 还有 AgentEngine 更新闭环问题 |
 | 默认本地文件边界 | 4 | 2 | 两边 shell 都不是沙箱；Harness 文件工具更严 |
 | 远程沙箱生态 | 3 | 5 | dcode 有多个现成 provider |
 | 可观测性与外部集成 | 2 | 5 | dcode 有 tracing、脱敏和 hooks |
@@ -433,9 +433,9 @@ Harness 的耦合点较少，但其中一个涉及进程全局状态，故障影
 
 ### P0：修已有运行链的正确性
 
-1. **补齐 MCP → Runtime 的失效闭环**
+1. **补齐 MCP → AgentEngine 的失效闭环**
    - 指纹应覆盖所有会改变工具行为的非秘密配置；秘密值可以先规范化再哈希，不应直接省略。
-   - MCP 添加、删除或修改后，应明确关闭或淘汰受影响 Runtime。
+   - MCP 添加、删除或修改后，应明确关闭或淘汰受影响 AgentEngine。
    - 增加端到端测试：更新前后的新 Run 必须看到新工具集，删除的工具不能继续调用。
 
 2. **修复审批写工具的并发缺口**
@@ -445,7 +445,7 @@ Harness 的耦合点较少，但其中一个涉及进程全局状态，故障影
 
 3. **完成 ZC-085 的死代码清理**
    - 删除没有生产调用方的 Unicode security 和未接入 ToolBatch；
-   - Agent catalog 由 ZC-091/ZC-092 在真实角色 Runtime 与 Policy seam 上裁剪，避免先删除再重建同类领域类型。
+   - Agent catalog 由 ZC-091/ZC-092 在真实角色 AgentEngine 与 Policy seam 上裁剪，避免先删除再重建同类领域类型。
 
 4. **按 ZC-086、ZC-089 收口模型和 Run 生命周期**
    - `server.py` 只做入口编排；
@@ -469,7 +469,7 @@ Harness 的耦合点较少，但其中一个涉及进程全局状态，故障影
    - hooks 等真正出现外部集成需求时再增加。
 
 4. **扩展 provider adapter**
-   - 保持 Run binding 和 RuntimeProfile 不变；
+   - 保持 Run binding 和 AgentEngineProfile 不变；
    - 按真实用户需求逐个加入 provider，而不是复制 dcode 的完整 extras 列表。
 
 ### 暂时不建议复制
@@ -485,7 +485,7 @@ Harness 的耦合点较少，但其中一个涉及进程全局状态，故障影
 
 ### 已由源码直接确认
 
-- Harness 生产链为 `AgentHost → RuntimePool → create_harness_agent() → Deep Agents graph`；
+- Harness 生产链为 `AgentHost → AgentEnginePool → create_harness_agent() → Deep Agents graph`；
 - Harness 动态 Agent catalog 当前未接入；
 - Harness 的 PromptEpoch、Run binding、上下文产物进入 ThreadPersistence；
 - Harness 的审批工具绕过并发读写锁；
@@ -497,7 +497,7 @@ Harness 的耦合点较少，但其中一个涉及进程全局状态，故障影
 
 ### 从调用链推断，建议补端到端测试
 
-- Harness MCP 热添加/移除后，已缓存 Runtime 仍持有旧工具快照；
+- Harness MCP 热添加/移除后，已缓存 AgentEngine 仍持有旧工具快照；
 - dcode 进程退出或临时目录被清理后，压缩外置原文无法完整恢复；
 - dcode 非基础模型在频繁调用时可能反复执行模型解析或实例创建，具体开销取决于 provider 内部缓存。
 
@@ -532,8 +532,8 @@ Harness 当前的主要问题不是方向错误，而是**骨架已经较重，�
 - [H-Package]：[`packages/agent/pyproject.toml`](../../packages/agent/pyproject.toml)
 - [H-Agent]：[`harness_agent/agent.py`](../../packages/agent/harness_agent/agent.py)
 - [H-Server]：[`harness_agent/server.py`](../../packages/agent/harness_agent/server.py)
-- [H-Profile]：[`harness_agent/runtime_profile.py`](../../packages/agent/harness_agent/runtime_profile.py)
-- [H-Runtime]：[`harness_agent/agent_runtime.py`](../../packages/agent/harness_agent/agent_runtime.py)
+- [H-Profile]：[`harness_agent/agent_engine_profile.py`](../../packages/agent/harness_agent/agent_engine_profile.py)
+- [H-AgentEngine]：[`harness_agent/agent_engine.py`](../../packages/agent/harness_agent/agent_engine.py)
 - [H-RunContext]：[`harness_agent/run_context.py`](../../packages/agent/harness_agent/run_context.py)
 - [H-Prompt]：[`harness_agent/prompting.py`](../../packages/agent/harness_agent/prompting.py)
 - [H-Context]：[`harness_agent/context_window.py`](../../packages/agent/harness_agent/context_window.py)
@@ -572,8 +572,8 @@ Harness 当前的主要问题不是方向错误，而是**骨架已经较重，�
 [H-Package]: ../../packages/agent/pyproject.toml
 [H-Agent]: ../../packages/agent/harness_agent/agent.py
 [H-Server]: ../../packages/agent/harness_agent/server.py
-[H-Profile]: ../../packages/agent/harness_agent/runtime_profile.py
-[H-Runtime]: ../../packages/agent/harness_agent/agent_runtime.py
+[H-Profile]: ../../packages/agent/harness_agent/agent_engine_profile.py
+[H-AgentEngine]: ../../packages/agent/harness_agent/agent_engine.py
 [H-RunContext]: ../../packages/agent/harness_agent/run_context.py
 [H-Prompt]: ../../packages/agent/harness_agent/prompting.py
 [H-Context]: ../../packages/agent/harness_agent/context_window.py

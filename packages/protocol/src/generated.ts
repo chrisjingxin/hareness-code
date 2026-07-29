@@ -2,7 +2,7 @@
 
 export const PROTOCOL_MAJOR = 3 as const
 export const PROTOCOL_MINOR = 0 as const
-export const PROTOCOL_SCHEMA_SHA256 = "d55de07aae261473376114b36183c5919f53dee6bf7ad19276b05ac95cdde7cb" as const
+export const PROTOCOL_SCHEMA_SHA256 = "9e7a828d2d32767619a2800bcb497c72bb37f4bf16c57f73caf25eb3241a71a9" as const
 export const MAX_FRAME_BYTES = 8388608 as const
 export const MAX_TOOL_PAYLOAD_BYTES = 1048576 as const
 export const CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","mcp.status","mcp.add","mcp.remove","host.attachment.create"] as const

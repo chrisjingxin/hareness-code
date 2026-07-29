@@ -128,7 +128,7 @@ async def test_shared_agent_injects_prompt_epoch_per_run_without_thread_state_le
         enable_memory=False,
         enable_ask_user=False,
         approval_mode="yolo",
-        shared_runtime=True,
+        shared_engine=True,
     )
 
     def run_context(thread_id: str, marker: str) -> RunContext:

@@ -69,8 +69,8 @@ def test_thread_persistence_exposes_lifecycle_interface_only() -> None:
         "refresh_thread",
         "get_prompt_epoch",
         "save_prompt_epoch",
-        "get_runtime_profile",
-        "save_runtime_profile",
+        "get_agent_engine_profile",
+        "save_agent_engine_profile",
         "read_context_artifact",
         "load_context_state",
     ):
@@ -143,7 +143,7 @@ async def test_thread_persistence_reuses_langgraph_state_across_graph_restart(tm
         enable_memory=False,
         enable_ask_user=False,
         approval_mode="yolo",
-        shared_runtime=True,
+        shared_engine=True,
     )
     await accept_thread(first, "thread-1", "第一轮请求")
     _ = [
@@ -176,7 +176,7 @@ async def test_thread_persistence_reuses_langgraph_state_across_graph_restart(tm
         enable_memory=False,
         enable_ask_user=False,
         approval_mode="yolo",
-        shared_runtime=True,
+        shared_engine=True,
     )
     await accept_thread(second, "thread-1", "第二轮请求")
     _ = [

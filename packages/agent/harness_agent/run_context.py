@@ -45,7 +45,7 @@ class RunCancellationToken:
 
 @dataclass(frozen=True, slots=True)
 class RunContext:
-    """传给单次图调用的 thread 私有状态，不属于共享 AgentRuntime。"""
+    """传给单次图调用的 thread 私有状态，不属于共享 AgentEngine。"""
 
     thread_id: str
     run_id: str

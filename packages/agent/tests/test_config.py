@@ -412,8 +412,8 @@ def test_execution_defaults_to_local_and_redacts_security_summary(tmp_path: Path
     }
 
 
-def test_runtime_pool_configuration_is_parsed_and_rejects_invalid_values(tmp_path: Path):
-    """RuntimePool 的容量、TTL、关闭等待和固定默认 Profile 必须有显式安全边界。"""
+def test_agent_engine_pool_configuration_is_parsed_and_rejects_invalid_values(tmp_path: Path):
+    """AgentEnginePool 的容量、TTL、关闭等待和固定默认 Profile 必须有显式安全边界。"""
     path = tmp_path / "runtime-pool.toml"
     _write_config(path)
     path.write_text(
@@ -430,7 +430,7 @@ pin_default_profile = true
     )
 
     config = load_config(workspace=tmp_path, home=tmp_path / "home", config_path=path)
-    assert config.runtime_pool.redacted() == {
+    assert config.agent_engine_pool.redacted() == {
         "max_profiles": 3,
         "idle_ttl_seconds": 600,
         "close_timeout_seconds": 8,

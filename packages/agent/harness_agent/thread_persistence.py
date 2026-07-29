@@ -21,7 +21,7 @@ from harness_agent.execution_binding import (
     RunExecutionBinding,
 )
 from harness_agent.prompting import PromptEpoch, canonical_json
-from harness_agent.runtime_profile import RUNTIME_PROFILE_VERSION, RuntimeProfile
+from harness_agent.agent_engine_profile import AGENT_ENGINE_PROFILE_VERSION, AgentEngineProfile
 
 
 _SCHEMA_VERSION = 6
@@ -587,8 +587,8 @@ class ThreadPersistence:
         except aiosqlite.Error as exc:
             raise ThreadPersistenceError(f"PROMPT_EPOCH_WRITE_FAILED: {exc}") from exc
 
-    async def persist_runtime_profile(self, profile: RuntimeProfile) -> None:
-        """保存按 project/profile key 去重的 Runtime Profile，不绑定 Thread。"""
+    async def persist_agent_engine_profile(self, profile: AgentEngineProfile) -> None:
+        """保存按 project/profile key 去重的 AgentEngine Profile，不绑定 Thread。"""
         self._ensure_open()
         if profile.project_fingerprint != self._project_fingerprint:
             raise ThreadPersistenceError("RUNTIME_PROFILE_PROJECT_MISMATCH")
@@ -607,7 +607,7 @@ class ThreadPersistence:
                     (
                         self._project_fingerprint,
                         profile.profile_key,
-                        RUNTIME_PROFILE_VERSION,
+                        AGENT_ENGINE_PROFILE_VERSION,
                         profile.topology_id,
                         profile.topology_version,
                         encoded_record,
@@ -654,7 +654,7 @@ class ThreadPersistence:
             raise ThreadPersistenceError(f"THREAD_MODEL_BINDING_READ_FAILED: {exc}") from exc
 
     async def _has_legacy_runtime_binding(self, thread_id: str) -> bool:
-        """判断 v4/v5 Thread 是否只有不可逆 Runtime 指纹。"""
+        """判断 v4/v5 Thread 是否只有不可逆 AgentEngine 指纹。"""
         self._ensure_open()
         try:
             async with self._lock:

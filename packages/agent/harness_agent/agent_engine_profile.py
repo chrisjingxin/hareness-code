@@ -1,8 +1,8 @@
-"""Agent Runtime Profile 的稳定身份、脱敏摘要和配置转换。
+"""AgentEngine Profile 的稳定身份、脱敏摘要和配置转换。
 
-Runtime Profile 描述可共享 Agent 图必须保持不变的配置。它刻意不保存
+AgentEngine Profile 描述可共享 Agent 图必须保持不变的配置。它刻意不保存
 thread 消息、PromptEpoch 正文、审批交互或任何凭据；这些内容属于持久
-Thread State 或一次 Run Context，不能影响共享 Runtime 的身份。
+Thread State 或一次 Run Context，不能影响共享 AgentEngine 的身份。
 """
 
 from __future__ import annotations
@@ -14,15 +14,15 @@ from typing import Any, Mapping, Sequence
 from harness_agent.prompting import canonical_json, sha256_text
 
 
-RUNTIME_PROFILE_VERSION = 1
-"""Runtime Profile 持久化记录的当前版本。"""
+AGENT_ENGINE_PROFILE_VERSION = 1
+"""AgentEngine Profile 持久化记录的当前版本。"""
 
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 
 
-class RuntimeProfileError(ValueError):
-    """Runtime Profile 字段、记录或身份校验失败时抛出。"""
+class AgentEngineProfileError(ValueError):
+    """AgentEngine Profile 字段、记录或身份校验失败时抛出。"""
 
 
 def component_fingerprint(value: object) -> str:
@@ -40,7 +40,7 @@ class ModelRoleBinding:
     def __post_init__(self) -> None:
         """拒绝未规范化角色与不完整指纹，保持 Profile Key 可验证。"""
         if not _IDENTIFIER_RE.fullmatch(self.role):
-            raise RuntimeProfileError("RUNTIME_PROFILE_ROLE_INVALID")
+            raise AgentEngineProfileError("RUNTIME_PROFILE_ROLE_INVALID")
         _require_fingerprint("model_config_fingerprint", self.model_config_fingerprint)
 
     def record(self) -> dict[str, str]:
@@ -49,8 +49,8 @@ class ModelRoleBinding:
 
 
 @dataclass(frozen=True, slots=True)
-class RuntimeProfile:
-    """决定一个 Agent Runtime 能否被多个 thread 共享的不可变配置。"""
+class AgentEngineProfile:
+    """决定一个 AgentEngine 能否被多个 thread 共享的不可变配置。"""
 
     project_fingerprint: str
     topology_id: str
@@ -68,12 +68,12 @@ class RuntimeProfile:
         """规范化角色顺序并校验所有会改变共享图的稳定字段。"""
         _require_fingerprint("project_fingerprint", self.project_fingerprint)
         if not _IDENTIFIER_RE.fullmatch(self.topology_id):
-            raise RuntimeProfileError("RUNTIME_PROFILE_TOPOLOGY_INVALID")
+            raise AgentEngineProfileError("RUNTIME_PROFILE_TOPOLOGY_INVALID")
         if self.topology_version < 1:
-            raise RuntimeProfileError("RUNTIME_PROFILE_TOPOLOGY_VERSION_INVALID")
+            raise AgentEngineProfileError("RUNTIME_PROFILE_TOPOLOGY_VERSION_INVALID")
         ordered_roles = tuple(sorted(self.model_roles, key=lambda binding: binding.role))
         if not ordered_roles or len({binding.role for binding in ordered_roles}) != len(ordered_roles):
-            raise RuntimeProfileError("RUNTIME_PROFILE_ROLES_INVALID")
+            raise AgentEngineProfileError("RUNTIME_PROFILE_ROLES_INVALID")
         object.__setattr__(self, "model_roles", ordered_roles)
         for field_name, value in (
             ("tool_catalog_fingerprint", self.tool_catalog_fingerprint),
@@ -88,13 +88,13 @@ class RuntimeProfile:
 
     @property
     def profile_key(self) -> str:
-        """返回由全部稳定配置组成的可复算 Runtime Profile Key。"""
+        """返回由全部稳定配置组成的可复算 AgentEngine Profile Key。"""
         return component_fingerprint(self.identity())
 
     def identity(self) -> dict[str, object]:
         """返回参与 Key 的完整脱敏身份，禁止加入 thread/run 动态状态。"""
         return {
-            "version": RUNTIME_PROFILE_VERSION,
+            "version": AGENT_ENGINE_PROFILE_VERSION,
             "project_fingerprint": self.project_fingerprint,
             "topology": {"id": self.topology_id, "version": self.topology_version},
             "model_roles": [binding.record() for binding in self.model_roles],
@@ -112,14 +112,14 @@ class RuntimeProfile:
         return {**self.identity(), "profile_key": self.profile_key}
 
     @classmethod
-    def from_record(cls, record: Mapping[str, object]) -> "RuntimeProfile":
+    def from_record(cls, record: Mapping[str, object]) -> "AgentEngineProfile":
         """从持久化记录恢复 Profile，并重新计算 Key 防止静默篡改。"""
         try:
             version = int(record["version"])
             topology = record["topology"]
             roles = record["model_roles"]
-            if version != RUNTIME_PROFILE_VERSION or not isinstance(topology, Mapping) or not isinstance(roles, Sequence):
-                raise RuntimeProfileError("RUNTIME_PROFILE_RECORD_INVALID")
+            if version != AGENT_ENGINE_PROFILE_VERSION or not isinstance(topology, Mapping) or not isinstance(roles, Sequence):
+                raise AgentEngineProfileError("RUNTIME_PROFILE_RECORD_INVALID")
             bindings = tuple(
                 ModelRoleBinding(
                     role=str(value["role"]),
@@ -129,7 +129,7 @@ class RuntimeProfile:
                 if isinstance(value, Mapping)
             )
             if len(bindings) != len(roles):
-                raise RuntimeProfileError("RUNTIME_PROFILE_RECORD_INVALID")
+                raise AgentEngineProfileError("RUNTIME_PROFILE_RECORD_INVALID")
             profile = cls(
                 project_fingerprint=str(record["project_fingerprint"]),
                 topology_id=str(topology["id"]),
@@ -145,11 +145,11 @@ class RuntimeProfile:
             )
             expected_key = str(record["profile_key"])
         except (KeyError, TypeError, ValueError) as exc:
-            if isinstance(exc, RuntimeProfileError):
+            if isinstance(exc, AgentEngineProfileError):
                 raise
-            raise RuntimeProfileError("RUNTIME_PROFILE_RECORD_INVALID") from exc
+            raise AgentEngineProfileError("RUNTIME_PROFILE_RECORD_INVALID") from exc
         if profile.profile_key != expected_key:
-            raise RuntimeProfileError("RUNTIME_PROFILE_KEY_MISMATCH")
+            raise AgentEngineProfileError("RUNTIME_PROFILE_KEY_MISMATCH")
         return profile
 
 
@@ -176,7 +176,7 @@ def model_settings_fingerprint(
     )
 
 
-def default_runtime_profile(
+def default_agent_engine_profile(
     *,
     project_fingerprint: str,
     model_profile: str | None,
@@ -187,9 +187,9 @@ def default_runtime_profile(
     mcp_fingerprint: str | None = None,
     middleware_fingerprint: str,
     prompt_template_fingerprint: str,
-) -> RuntimeProfile:
-    """按当前单 Agent / 单模型配置创建未来 RuntimePool 可直接使用的 Profile。"""
-    return RuntimeProfile(
+) -> AgentEngineProfile:
+    """按当前单 Agent / 单模型配置创建未来 AgentEnginePool 可直接使用的 Profile。"""
+    return AgentEngineProfile(
         project_fingerprint=project_fingerprint,
         topology_id="single-agent",
         topology_version=1,
@@ -222,4 +222,4 @@ def default_runtime_profile(
 def _require_fingerprint(field_name: str, value: str) -> None:
     """限制持久化身份字段为小写 SHA-256，避免把原始配置写入数据库。"""
     if not _HASH_RE.fullmatch(value):
-        raise RuntimeProfileError(f"RUNTIME_PROFILE_{field_name.upper()}_INVALID")
+        raise AgentEngineProfileError(f"RUNTIME_PROFILE_{field_name.upper()}_INVALID")

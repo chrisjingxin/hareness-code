@@ -105,16 +105,16 @@ async def test_initialize_rejects_incompatible_major_and_pre_initialize_calls():
     assert [frame["error"]["code"] for frame in frames] == [-32000, -32003]
 
 
-async def test_config_show_exposes_redacted_runtime_pool_diagnostics(tmp_path: Path):
+async def test_config_show_exposes_redacted_agent_engine_pool_diagnostics(tmp_path: Path):
     """已有 config.show 提供 Pool 本地诊断，且不能泄露完整 Profile Key。"""
-    from harness_agent.agent_runtime import AgentRuntime, RuntimePool
-    from harness_agent.runtime_profile import ModelRoleBinding, RuntimeProfile, component_fingerprint
+    from harness_agent.agent_engine import AgentEngine, AgentEnginePool
+    from harness_agent.agent_engine_profile import ModelRoleBinding, AgentEngineProfile, component_fingerprint
     from harness_agent.server import AgentHost
 
     def fingerprint(component: str) -> str:
         return component_fingerprint({"server-diagnostics": component})
 
-    profile = RuntimeProfile(
+    profile = AgentEngineProfile(
         project_fingerprint=fingerprint("project"),
         topology_id="single-agent",
         topology_version=1,
@@ -129,8 +129,8 @@ async def test_config_show_exposes_redacted_runtime_pool_diagnostics(tmp_path: P
     )
     server = AgentHost(allow_echo=True, config_home=tmp_path / "home")
     frames = await _capture_server(server)
-    pool = RuntimePool(lambda requested: AgentRuntime(profile=requested, graph=object()))
-    server._runtime_pool = pool
+    pool = AgentEnginePool(lambda requested: AgentEngine(profile=requested, graph=object()))
+    server._agent_engine_pool = pool
     lease = await pool.acquire(profile)
     await lease.release()
 
@@ -219,12 +219,22 @@ executor = "fast"
     assert server._config is not None
     assert server._config.model_profile == "pro"
 
-    async def finish_without_build(run: Any) -> None:
-        """避免真实模型调用，仅保留新 Thread 解析的持久化事实。"""
-        run.status = "completed"
-        server._runs.pop(run.thread_id, None)
+    from harness_agent.run_coordinator import RunRuntime
 
-    server._execute_run = finish_without_build  # type: ignore[method-assign]
+    async def no_runtime(_run: Any) -> RunRuntime:
+        """避免真实模型调用，仅保留新 Thread 解析的持久化事实。"""
+
+        async def release() -> None:
+            return None
+
+        return RunRuntime(
+            agent=None,
+            run_context=None,
+            graph_config=lambda thread_id: {"configurable": {"thread_id": thread_id}},
+            release=release,
+        )
+
+    server._run_coordinator._runtime_provider = no_runtime
     await server.dispatch(
         _request(
             "run.start",
@@ -261,7 +271,7 @@ async def test_config_write_requires_capability(tmp_path: Path) -> None:
     await server.dispatch(_request("config.details", {}, "config-details-old"))
     assert frames[-1]["error"]["data"]["code"] == "CAPABILITY_REQUIRED"
 
-    await server._close_runtime_pool()
+    await server._close_agent_engine_pool()
     await server.dispatch(_request("config.show", {}, "config-runtime-closed"))
     assert frames[-1]["result"]["runtime_pool_diagnostics"]["state"] == "not_initialized"
 
@@ -326,10 +336,14 @@ async def test_run_started_emits_authoritative_primary_model_binding():
         SelectionOrigin,
         ThreadExecutionSelection,
     )
-    from harness_agent.server import ActiveRun, AgentHost
+    from harness_agent.run_coordinator import (
+        ConnectionRef,
+        RunCoordinator,
+        RunPreparation,
+        RunRuntime,
+        StartRun,
+    )
 
-    server = AgentHost(allow_echo=True)
-    frames = await _capture_server(server)
     binding = RunExecutionBinding(
         thread_id="thread-model",
         run_id="run-model",
@@ -349,19 +363,38 @@ async def test_run_started_emits_authoritative_primary_model_binding():
         runtime_profile_id="123456789abc",
         created_at_ms=1,
     )
-    run = ActiveRun(
-        thread_id="thread-model",
-        run_id="run-model",
-        message="使用 pro",
-        execution_binding=binding,
+    async def preparation(_command: StartRun, _persistence: object) -> RunPreparation:
+        return RunPreparation(execution_binding=binding)
+
+    async def runtime(_run: object) -> RunRuntime:
+        async def release() -> None:
+            return None
+
+        return RunRuntime(
+            agent=None,
+            run_context=None,
+            graph_config=lambda thread_id: {"configurable": {"thread_id": thread_id}},
+            release=release,
+        )
+
+    async def no_persistence() -> None:
+        return None
+
+    coordinator = RunCoordinator(
+        persistence_provider=no_persistence,
+        preparation_provider=preparation,
+        runtime_provider=runtime,
+        interaction_port=object(),  # type: ignore[arg-type]
+        skill_registry_provider=lambda: None,  # type: ignore[return-value]
     )
-    server._runs[run.thread_id] = run
-
-    await server._execute_run(run)
-
-    started = next(frame["params"] for frame in frames if frame.get("params", {}).get("type") == "run.started")
-    assert started["payload"]["runtime_profile_id"] == "123456789abc"
-    assert started["payload"]["primary_model"] == binding.protocol_primary_model()
+    execution = await coordinator.start(
+        StartRun(thread_id="thread-model", run_id="run-model", message="使用 pro"),
+        ConnectionRef("owner"),
+    )
+    events = [event async for event in execution.events]
+    started = next(event for event in events if event.type == "run.started")
+    assert started.payload["runtime_profile_id"] == "123456789abc"
+    assert started.payload["primary_model"] == binding.protocol_primary_model()
 
 
 async def test_context_compact_rewrites_idle_thread_and_returns_context_summary():
@@ -449,12 +482,18 @@ async def test_context_compact_rewrites_idle_thread_and_returns_context_summary(
 
 async def test_context_compact_rejects_active_run():
     """运行中 checkpoint 会变动，手动压缩必须等待当前 run 结束。"""
-    from harness_agent.server import ActiveRun, AgentHost
+    from harness_agent.run_coordinator import ConnectionRef, RunPreparation, RunState, StartRun
+    from harness_agent.server import AgentHost
 
     server = AgentHost()
     server._owner_connection.initialized = True
     server._owner_connection.enabled_capabilities = {"context.manage"}
-    server._runs["thread"] = ActiveRun(thread_id="thread", run_id="run", message="运行中")
+    server._run_coordinator._runs["thread"] = RunState(
+        start=StartRun(thread_id="thread", run_id="run", message="运行中"),
+        owner=ConnectionRef(server._owner_connection.connection_id),
+        persistence=None,
+        preparation=RunPreparation(),
+    )
     frames: list[dict[str, Any]] = []
     server.send = lambda message: _append(frames, message)  # type: ignore[method-assign]
 
@@ -521,11 +560,20 @@ executor = "fast"
     assert "https://fast.example" not in str(catalog)
     assert "fast-secret" not in str(catalog)
 
-    async def finish_without_build(run: Any) -> None:
-        run.status = "completed"
-        server._runs.pop(run.thread_id, None)
+    from harness_agent.run_coordinator import RunRuntime
 
-    server._execute_run = finish_without_build  # type: ignore[method-assign]
+    async def no_runtime(_run: Any) -> RunRuntime:
+        async def release() -> None:
+            return None
+
+        return RunRuntime(
+            agent=None,
+            run_context=None,
+            graph_config=lambda thread_id: {"configurable": {"thread_id": thread_id}},
+            release=release,
+        )
+
+    server._run_coordinator._runtime_provider = no_runtime
     await server.dispatch(_request(
         "run.start",
         {
@@ -548,12 +596,12 @@ executor = "fast"
     assert first.actual_primary.profile_id == "pro"
     assert server._config is not None
     resolved = await server._resolve_execution_binding("thread-model", server._config)
-    runtime_profile = await server._resolve_runtime_profile(
+    agent_engine_profile = await server._resolve_agent_engine_profile(
         "thread-model",
         server._config,
         resolved,
     )
-    assert server._runtime_build_specs[runtime_profile.profile_key].model_settings.name == "pro-model"
+    assert server._agent_engine_build_specs[agent_engine_profile.profile_key].model_settings.name == "pro-model"
 
     await server.dispatch(_request(
         "run.start",
@@ -578,18 +626,18 @@ executor = "fast"
     await server._close_thread_persistence()
 
 
-async def test_default_sidecar_shares_runtime_by_profile_without_draining_other_models(
+async def test_default_sidecar_shares_engine_by_profile_without_draining_other_models(
     tmp_path: Path,
 ):
-    """默认 Sidecar 以 Profile 而非 thread 缓存图；新模型不应排空旧 Runtime。"""
-    from harness_agent.agent_runtime import AgentRuntime
+    """默认 Sidecar 以 Profile 而非 thread 缓存图；新模型不应排空旧 AgentEngine。"""
+    from harness_agent.agent_engine import AgentEngine
     from harness_agent.config import (
         ExecutionSettings,
         ModelSettings,
-        RuntimePoolSettings,
+        AgentEnginePoolSettings,
         Za38Config,
     )
-    from harness_agent.runtime_profile import component_fingerprint
+    from harness_agent.agent_engine_profile import component_fingerprint
     from harness_agent.server import AgentHost
 
     class Store:
@@ -598,7 +646,7 @@ async def test_default_sidecar_shares_runtime_by_profile_without_draining_other_
         def __init__(self) -> None:
             self.profiles: dict[str, object] = {}
 
-        async def persist_runtime_profile(self, profile: object) -> None:
+        async def persist_agent_engine_profile(self, profile: object) -> None:
             self.profiles[str(getattr(profile, "profile_key"))] = profile
 
         async def load_run_state(self, _thread_id: str) -> object:
@@ -615,7 +663,7 @@ async def test_default_sidecar_shares_runtime_by_profile_without_draining_other_
             ),
             model_profile="default",
             execution=ExecutionSettings(),
-            runtime_pool=RuntimePoolSettings(
+            agent_engine_pool=AgentEnginePoolSettings(
                 max_profiles=2,
                 idle_ttl_seconds=600,
                 pin_default_profile=pin_default_profile,
@@ -632,51 +680,51 @@ async def test_default_sidecar_shares_runtime_by_profile_without_draining_other_
     server._thread_persistence = store  # type: ignore[assignment]
     builds = 0
 
-    async def build(profile: object) -> AgentRuntime:
+    async def build(profile: object) -> AgentEngine:
         nonlocal builds
         builds += 1
-        return AgentRuntime(profile=profile, graph=object())  # type: ignore[arg-type]
+        return AgentEngine(profile=profile, graph=object())  # type: ignore[arg-type]
 
-    server._build_default_runtime = build  # type: ignore[method-assign]
-    first_lease, first_runtime = await server._acquire_default_runtime("thread-a")
-    second_lease, second_runtime = await server._acquire_default_runtime("thread-b")
+    server._build_default_agent_engine = build  # type: ignore[method-assign]
+    first_lease, first_engine = await server._acquire_default_agent_engine("thread-a")
+    second_lease, second_engine = await server._acquire_default_agent_engine("thread-b")
 
     assert first_lease is not None and second_lease is not None
-    assert first_runtime is second_runtime
+    assert first_engine is second_engine
     assert builds == 1
     assert len(store.profiles) == 1
 
-    await server._release_runtime_lease(first_lease)
-    await server._release_runtime_lease(second_lease)
-    old_runtime = first_runtime
+    await server._release_agent_engine_lease(first_lease)
+    await server._release_agent_engine_lease(second_lease)
+    old_engine = first_engine
 
     server._config = config("fast-v2", pin_default_profile=True)
-    third_lease, third_runtime = await server._acquire_default_runtime("thread-c")
+    third_lease, third_engine = await server._acquire_default_agent_engine("thread-c")
 
     assert third_lease is not None
-    assert third_runtime is not old_runtime
+    assert third_engine is not old_engine
     assert builds == 2
     assert len(store.profiles) == 2
-    assert old_runtime is not None and old_runtime.graph is not None
+    assert old_engine is not None and old_engine.graph is not None
 
-    await server._release_runtime_lease(third_lease)
-    await server._close_runtime_pool()
+    await server._release_agent_engine_lease(third_lease)
+    await server._close_agent_engine_pool()
 
 
-async def test_default_context_compact_acquires_and_releases_profile_runtime(tmp_path: Path):
-    """默认 compact 也必须经 RuntimePool 租用图，完成后不残留 thread 专属引用。"""
+async def test_default_context_compact_acquires_and_releases_profile_engine(tmp_path: Path):
+    """默认 compact 也必须经 AgentEnginePool 租用图，完成后不残留 thread 专属引用。"""
     from langchain_core.messages import HumanMessage
 
-    from harness_agent.agent_runtime import AgentRuntime, AgentRuntimeState
+    from harness_agent.agent_engine import AgentEngine, AgentEngineState
     from harness_agent.config import (
         ExecutionSettings,
         ModelSettings,
-        RuntimePoolSettings,
+        AgentEnginePoolSettings,
         Za38Config,
     )
     from harness_agent.context_window import ContextUpdate
-    from harness_agent.runtime_profile import component_fingerprint
-    from harness_agent.server import AgentHost, _RuntimeArtifacts
+    from harness_agent.agent_engine_profile import component_fingerprint
+    from harness_agent.server import AgentHost, _AgentEngineArtifacts
 
     class Store:
         project_fingerprint = component_fingerprint({"project": "compact-runtime"})
@@ -685,7 +733,7 @@ async def test_default_context_compact_acquires_and_releases_profile_runtime(tmp
             self.profiles: dict[str, object] = {}
             self.refreshed: list[str] = []
 
-        async def persist_runtime_profile(self, profile: object) -> None:
+        async def persist_agent_engine_profile(self, profile: object) -> None:
             self.profiles[str(getattr(profile, "profile_key"))] = profile
 
         async def load_run_state(self, _thread_id: str) -> object:
@@ -749,7 +797,7 @@ async def test_default_context_compact_acquires_and_releases_profile_runtime(tmp
         ),
         model_profile="default",
         execution=ExecutionSettings(),
-        runtime_pool=RuntimePoolSettings(),
+        agent_engine_pool=AgentEnginePoolSettings(),
         paths=(),
         workspace=tmp_path,
         sources={},
@@ -759,14 +807,14 @@ async def test_default_context_compact_acquires_and_releases_profile_runtime(tmp
     server._thread_persistence = store  # type: ignore[assignment]
     graph = Graph()
 
-    async def build(profile: object) -> AgentRuntime:
-        server._runtime_artifacts[profile.profile_key] = _RuntimeArtifacts(  # type: ignore[attr-defined]
+    async def build(profile: object) -> AgentEngine:
+        server._agent_engine_artifacts[profile.profile_key] = _AgentEngineArtifacts(  # type: ignore[attr-defined]
             execution_context=object(),
             context_compactor=Middleware(),
         )
-        return AgentRuntime(profile=profile, graph=graph)  # type: ignore[arg-type]
+        return AgentEngine(profile=profile, graph=graph)  # type: ignore[arg-type]
 
-    server._build_default_runtime = build  # type: ignore[method-assign]
+    server._build_default_agent_engine = build  # type: ignore[method-assign]
     frames: list[dict[str, Any]] = []
     server.send = lambda message: _append(frames, message)  # type: ignore[method-assign]
 
@@ -775,16 +823,16 @@ async def test_default_context_compact_acquires_and_releases_profile_runtime(tmp
     assert frames[0]["result"]["compacted"] is True
     assert store.refreshed == ["thread"]
     assert len(graph.updates) == 1
-    pool = server._runtime_pool
+    pool = server._agent_engine_pool
     assert pool is not None
-    runtime = await pool.runtime_for(next(iter(store.profiles.values())).profile_key)  # type: ignore[union-attr]
-    assert runtime is not None and runtime.state == AgentRuntimeState.IDLE
-    await server._close_runtime_pool()
+    engine = await pool.engine_for(next(iter(store.profiles.values())).profile_key)  # type: ignore[union-attr]
+    assert engine is not None and engine.state == AgentEngineState.IDLE
+    await server._close_agent_engine_pool()
 
 
-async def test_runtime_pool_capacity_is_reported_as_stable_rpc_error():
+async def test_agent_engine_pool_capacity_is_reported_as_stable_rpc_error():
     """无安全淘汰候选时控制面返回稳定资源繁忙码，而不是内部异常类型。"""
-    from harness_agent.agent_runtime import RuntimePoolCapacityError
+    from harness_agent.agent_engine import AgentEnginePoolCapacityError
     from harness_agent.server import AgentHost
 
     server = AgentHost(allow_echo=True)
@@ -792,7 +840,7 @@ async def test_runtime_pool_capacity_is_reported_as_stable_rpc_error():
     server._owner_connection.enabled_capabilities = {"config.read"}
 
     async def busy(_params: dict[str, Any], _request_id: str) -> None:
-        raise RuntimePoolCapacityError("RUNTIME_POOL_CAPACITY_EXHAUSTED")
+        raise AgentEnginePoolCapacityError("RUNTIME_POOL_CAPACITY_EXHAUSTED")
 
     server._handlers["config.show"] = busy
     frames: list[dict[str, Any]] = []
@@ -815,7 +863,13 @@ def test_stream_translation_prefers_normalized_content_blocks():
     """首轮仅提供 content_blocks 时仍必须产生正文事件。"""
     from types import SimpleNamespace
 
-    from harness_agent.server import ActiveRun, AgentHost
+    from harness_agent.run_coordinator import (
+        ConnectionRef,
+        RunPreparation,
+        RunState,
+        StartRun,
+        _translate_stream_event,
+    )
 
     chunk = SimpleNamespace(
         content="",
@@ -823,8 +877,13 @@ def test_stream_translation_prefers_normalized_content_blocks():
         usage_metadata={"input_tokens": 10, "output_tokens": 4},
         tool_call_chunks=[],
     )
-    run = ActiveRun(thread_id="thread", run_id="run", message="你好")
-    events = list(AgentHost(allow_echo=True)._translate_stream_event(((), "messages", (chunk, {})), run))
+    run = RunState(
+        start=StartRun(thread_id="thread", run_id="run", message="你好"),
+        owner=ConnectionRef("owner"),
+        persistence=None,
+        preparation=RunPreparation(),
+    )
+    events = list(_translate_stream_event(((), "messages", (chunk, {})), run))
 
     assert events == [("content.delta", {"text": "首轮回复"})]
     assert run.usage == {"input_tokens": 10, "output_tokens": 4}
@@ -834,18 +893,28 @@ def test_tool_fragments_with_missing_ids_are_merged_by_index():
     """工具名和参数分片缺少重复 id 时仍应归并为同一协议工具。"""
     from types import SimpleNamespace
 
-    from harness_agent.server import ActiveRun, AgentHost
+    from harness_agent.run_coordinator import (
+        ConnectionRef,
+        RunPreparation,
+        RunState,
+        StartRun,
+        _translate_stream_event,
+    )
 
-    server = AgentHost(allow_echo=True)
-    run = ActiveRun(thread_id="thread", run_id="run", message="执行 pwd")
+    run = RunState(
+        start=StartRun(thread_id="thread", run_id="run", message="执行 pwd"),
+        owner=ConnectionRef("owner"),
+        persistence=None,
+        preparation=RunPreparation(),
+    )
     first = SimpleNamespace(content="", usage_metadata=None, tool_call_chunks=[{"index": 0, "id": "call-1", "name": "execute", "args": ""}])
     second = SimpleNamespace(content="", usage_metadata=None, tool_call_chunks=[{"index": 0, "id": None, "name": None, "args": '{"command":"pwd"}'}])
     result = type("ToolMessage", (), {"content": "/workspace", "tool_call_id": "call-1", "status": "success", "tool_call_chunks": [], "usage_metadata": None})()
 
     events = [
-        *server._translate_stream_event(((), "messages", (first, {})), run),
-        *server._translate_stream_event(((), "messages", (second, {})), run),
-        *server._translate_stream_event(((), "messages", (result, {})), run),
+        *_translate_stream_event(((), "messages", (first, {})), run),
+        *_translate_stream_event(((), "messages", (second, {})), run),
+        *_translate_stream_event(((), "messages", (result, {})), run),
     ]
 
     assert [payload["tool_call_id"] for _, payload in events] == ["call-1", "call-1", "call-1"]
@@ -856,20 +925,30 @@ def test_tool_stream_reuses_index_for_later_calls_without_overwriting_history():
     """每轮工具流重置 index 时，新的真实调用 ID 仍必须产生独立事件。"""
     from types import SimpleNamespace
 
-    from harness_agent.server import ActiveRun, AgentHost
+    from harness_agent.run_coordinator import (
+        ConnectionRef,
+        RunPreparation,
+        RunState,
+        StartRun,
+        _translate_stream_event,
+    )
 
-    server = AgentHost(allow_echo=True)
-    run = ActiveRun(thread_id="thread", run_id="run", message="连续执行两次")
+    run = RunState(
+        start=StartRun(thread_id="thread", run_id="run", message="连续执行两次"),
+        owner=ConnectionRef("owner"),
+        persistence=None,
+        preparation=RunPreparation(),
+    )
     first = SimpleNamespace(content="", usage_metadata=None, tool_call_chunks=[{"index": 0, "id": "call-1", "name": "execute", "args": ""}])
     first_result = type("ToolMessage", (), {"content": "first result", "tool_call_id": "call-1", "status": "success", "tool_call_chunks": [], "usage_metadata": None})()
     second = SimpleNamespace(content="", usage_metadata=None, tool_call_chunks=[{"index": 0, "id": "call-2", "name": "execute", "args": ""}])
     second_result = type("ToolMessage", (), {"content": "second result", "tool_call_id": "call-2", "status": "success", "tool_call_chunks": [], "usage_metadata": None})()
 
     events = [
-        *server._translate_stream_event(((), "messages", (first, {})), run),
-        *server._translate_stream_event(((), "messages", (first_result, {})), run),
-        *server._translate_stream_event(((), "messages", (second, {})), run),
-        *server._translate_stream_event(((), "messages", (second_result, {})), run),
+        *_translate_stream_event(((), "messages", (first, {})), run),
+        *_translate_stream_event(((), "messages", (first_result, {})), run),
+        *_translate_stream_event(((), "messages", (second, {})), run),
+        *_translate_stream_event(((), "messages", (second_result, {})), run),
     ]
 
     assert [(event_type, payload["tool_call_id"]) for event_type, payload in events] == [
@@ -900,13 +979,9 @@ async def test_multiple_threads_run_concurrently_but_same_thread_is_rejected():
     await server.dispatch(_request("run.start", {"message": "b", "thread_id": "t2", "run_id": "r2"}, "start-2"))
     await server.dispatch(_request("run.start", {"message": "c", "thread_id": "t1", "run_id": "r3"}, "start-3"))
     assert any(frame.get("id") == "start-3" and frame.get("error", {}).get("code") == -32000 for frame in frames)
-    first_run = server._runs["t1"]
-    second_run = server._runs["t2"]
     await server.dispatch(_request("run.cancel", {"thread_id": "t1", "run_id": "r1"}, "cancel-1"))
     await server.dispatch(_request("run.cancel", {"thread_id": "t2", "run_id": "r2"}, "cancel-2"))
     await _wait_for(frames, lambda frame: _event_count(frames, "run.cancelled") == 2)
-    assert first_run.cancellation_token.cancelled is True
-    assert second_run.cancellation_token.cancelled is True
 
 
 async def test_question_request_uses_standard_response_and_stable_question_id():
@@ -1205,7 +1280,8 @@ async def test_plan_mode_returns_tool_message_without_writing_or_requesting_appr
 
 async def test_missing_interaction_capability_fails_closed_without_reverse_request():
     """无头客户端不声明交互能力时，服务端直接返回拒绝而不发送 request。"""
-    from harness_agent.server import ActiveRun, InteractionSpec, AgentHost
+    from harness_agent.run_coordinator import ConnectionRef, InteractionRequest, RunRef
+    from harness_agent.server import AgentHost
 
     server = AgentHost(allow_echo=True)
     frames: list[dict[str, Any]] = []
@@ -1221,9 +1297,10 @@ async def test_missing_interaction_capability_fails_closed_without_reverse_reque
             "init-headless",
         )
     )
-    result = await server._request_interaction(
-        ActiveRun(thread_id="headless", run_id="headless-run", message="test"),
-        InteractionSpec(
+    result = await server._run_coordinator._interaction_port.request(
+        ConnectionRef(server._owner_connection.connection_id),
+        RunRef(thread_id="headless", run_id="headless-run"),
+        InteractionRequest(
             request_id="approval-headless",
             type="approval",
             payload={},
@@ -1231,14 +1308,14 @@ async def test_missing_interaction_capability_fails_closed_without_reverse_reque
         ),
     )
 
-    assert result == {"decision": "reject"}
+    assert result.value == {"decision": "reject"}
     assert not any(str(frame.get("method", "")).startswith("interaction.") for frame in frames)
 
 
 def test_tool_output_is_utf8_safely_truncated():
     """超限工具输出携带截断标记和原始字节数。"""
     from harness_agent.protocol_generated import MAX_TOOL_PAYLOAD_BYTES
-    from harness_agent.server import _truncate_text
+    from harness_agent.run_coordinator import _truncate_text
 
     original = "界" * (MAX_TOOL_PAYLOAD_BYTES // 2)
     clipped, truncated, original_bytes = _truncate_text(original)

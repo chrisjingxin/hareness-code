@@ -11,7 +11,20 @@ import pytest
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
-from harness_agent.server import ActiveRun, AgentHost
+from harness_agent.server import AgentHost
+
+
+class _BlockingAgent:
+    """让协议测试通过 public run.start 保持一个可观察的 active Run。"""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+
+    async def astream(self, *_args: Any, **_kwargs: Any):
+        self.started.set()
+        await asyncio.Event().wait()
+        if False:
+            yield None
 
 
 def _request(method: str, params: dict[str, Any], request_id: str) -> dict[str, Any]:
@@ -65,7 +78,8 @@ async def test_run_owner_and_observer_receive_identical_events(tmp_path: Path) -
 async def test_only_run_owner_can_cancel(tmp_path: Path) -> None:
     owner_frames: list[dict[str, Any]] = []
     attached_frames: list[dict[str, Any]] = []
-    host = AgentHost(allow_echo=True, config_home=tmp_path / "home", workspace=tmp_path)
+    agent = _BlockingAgent()
+    host = AgentHost(agent=agent, config_home=tmp_path / "home", workspace=tmp_path)
     host.send = lambda message: _append(owner_frames, message)  # type: ignore[method-assign]
     await host.dispatch(_request("initialize", _initialize("run.cancel"), "owner-init"))
 
@@ -77,14 +91,20 @@ async def test_only_run_owner_can_cancel(tmp_path: Path) -> None:
         attached,
         _request("initialize", _initialize("run.cancel"), "web-init"),
     )
-    run = ActiveRun("thread-1", "run-1", "slow", owner_connection_id=attached.connection_id)
-    run.task = asyncio.create_task(asyncio.sleep(60))  # type: ignore[assignment]
-    host._runs[run.thread_id] = run
+    await host.dispatch_connection(
+        attached,
+        _request(
+            "run.start",
+            {"message": "slow", "thread_id": "thread-1", "run_id": "run-1"},
+            "start",
+        ),
+    )
+    await asyncio.wait_for(agent.started.wait(), timeout=1)
 
     await host.dispatch(
         _request(
             "run.cancel",
-            {"thread_id": run.thread_id, "run_id": run.run_id},
+            {"thread_id": "thread-1", "run_id": "run-1"},
             "cancel",
         )
     )
@@ -97,17 +117,18 @@ async def test_run_id_retry_is_idempotent_and_conflicting_content_is_rejected(
 ) -> None:
     """活动 Run 的相同请求可重试，复用 ID 的不同内容稳定冲突。"""
     owner_frames: list[dict[str, Any]] = []
-    host = AgentHost(allow_echo=True, config_home=tmp_path / "home", workspace=tmp_path)
+    agent = _BlockingAgent()
+    host = AgentHost(agent=agent, config_home=tmp_path / "home", workspace=tmp_path)
     host.send = lambda message: _append(owner_frames, message)  # type: ignore[method-assign]
     await host.dispatch(_request("initialize", _initialize(), "owner-init"))
-    run = ActiveRun(
-        "thread-1",
-        "run-1",
-        "same",
-        owner_connection_id=host._owner_connection.connection_id,
+    await host.dispatch(
+        _request(
+            "run.start",
+            {"message": "same", "thread_id": "thread-1", "run_id": "run-1"},
+            "retry",
+        )
     )
-    host._runs[run.thread_id] = run
-
+    await asyncio.wait_for(agent.started.wait(), timeout=1)
     await host.dispatch(
         _request(
             "run.start",
@@ -138,7 +159,8 @@ async def test_watch_rejects_active_thread_and_attached_disconnect_cancels_only_
     """active Thread 不允许新增 watch，attached EOF 只取消自己的 Run。"""
     owner_frames: list[dict[str, Any]] = []
     attached_frames: list[dict[str, Any]] = []
-    host = AgentHost(allow_echo=True, config_home=tmp_path / "home", workspace=tmp_path)
+    agent = _BlockingAgent()
+    host = AgentHost(agent=agent, config_home=tmp_path / "home", workspace=tmp_path)
     host.send = lambda message: _append(owner_frames, message)  # type: ignore[method-assign]
     await host.dispatch(
         _request("initialize", _initialize("threads.read"), "owner-init")
@@ -152,9 +174,15 @@ async def test_watch_rejects_active_thread_and_attached_disconnect_cancels_only_
         attached,
         _request("initialize", _initialize("threads.read"), "web-init"),
     )
-    run = ActiveRun("thread-1", "run-1", "slow", owner_connection_id=attached.connection_id)
-    run.task = asyncio.create_task(asyncio.sleep(60))  # type: ignore[assignment]
-    host._runs[run.thread_id] = run
+    await host.dispatch_connection(
+        attached,
+        _request(
+            "run.start",
+            {"message": "slow", "thread_id": "thread-1", "run_id": "run-1"},
+            "start",
+        ),
+    )
+    await asyncio.wait_for(agent.started.wait(), timeout=1)
 
     await host.dispatch(
         _request("threads.watch", {"thread_id": "thread-1"}, "watch")
@@ -162,8 +190,15 @@ async def test_watch_rejects_active_thread_and_attached_disconnect_cancels_only_
     assert owner_frames[-1]["error"]["data"]["code"] == "THREAD_BUSY"
 
     await host.close_connection(attached)
-    assert run.cancellation_token.cancelled is True
     assert host._owner_connection.closed is False
+    await host.dispatch(
+        _request(
+            "run.start",
+            {"message": "again", "thread_id": "thread-1", "run_id": "run-2"},
+            "owner-start",
+        )
+    )
+    assert owner_frames[-1]["result"]["accepted"] is True
     await host.close()
 
 

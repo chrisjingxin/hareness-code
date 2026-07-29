@@ -5,11 +5,11 @@
 
 ## 背景
 
-Python Agent 将作为 TUI、无头 CLI、Web 和未来桌面端共享的后端核心。若每个表现层分别持有 Runtime、配置或 ThreadPersistence，会产生重复状态、并发 Run 竞争和不同协议实现。若 Web 经 TypeScript 转发，又会让 CLI 变成第二个业务服务端。
+Python Agent 将作为 TUI、无头 CLI、Web 和未来桌面端共享的后端核心。若每个表现层分别持有 AgentEngine、配置或 ThreadPersistence，会产生重复状态、并发 Run 竞争和不同协议实现。若 Web 经 TypeScript 转发，又会让 CLI 变成第二个业务服务端。
 
 ## 决策
 
-一个 CLI 进程启动一个绑定 Project 的 Python `AgentHost`。Host 唯一持有 Agent Core、ThreadPersistence、RuntimePool、配置、Skill/MCP catalog 和 active Run registry；stdio 与 loopback WebSocket 都只是 `ProtocolConnection` transport。
+一个 CLI 进程启动一个绑定 Project 的 Python `AgentHost`。Host 唯一持有 Agent Core、ThreadPersistence、AgentEnginePool、配置和 Skill/MCP catalog，并持有一个 Host-scoped `RunCoordinator`；Run registry、owner、执行、Interaction、终态和 lease 由 Coordinator 统一拥有。stdio 与 loopback WebSocket 都只是 `ProtocolConnection` transport。
 
 ```text
 TUI / CLI ── stdio JSONL ──┐
@@ -26,12 +26,12 @@ Web ─────── WebSocket ─────┘
 
 ## 后果
 
-Host 资源与表现层解耦，新增前端只需实现 `RpcTransport` 和复用 v3 Client 语义。Event sequence 对所有观察者一致，Interaction 不占用 sequence。CLI 必须负责 Host 和本机静态 Web server 的关闭。
+Host 资源与表现层解耦，新增前端只需实现 `RpcTransport` 和复用 v3 Client 语义。`run.start` 的协议 handler 只负责 wire 转换、先发送 accepted response，再消费 `RunExecution.events` 做 fanout；Event sequence 对所有观察者一致，Interaction 不占用 sequence。CLI 必须负责 Host 和本机静态 Web server 的关闭。
 
 当前明确不提供 active Run replay、浏览器刷新恢复、owner takeover、CLI 退出后继续运行、daemon discovery、远程认证、多租户、Desktop transport 或 REST/SSE 第二套协议。
 
 ## 备选方案
 
 - Web 经 TypeScript RPC 代理：拒绝，因为会复制 dispatcher、校验和生命周期状态。
-- 每个前端独立启动 Python：拒绝，因为不能共享同一 Project 的 active Run 与 RuntimePool。
+- 每个前端独立启动 Python：拒绝，因为不能共享同一 Project 的 active Run 与 AgentEnginePool。
 - daemon 常驻 Host：暂不采用；当前产品不需要 discovery、认证和脱离 CLI 的生命周期。
