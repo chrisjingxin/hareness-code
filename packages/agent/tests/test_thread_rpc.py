@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from thread_fixtures import accept_thread
+
 
 def _request(method: str, params: dict[str, Any], request_id: str) -> dict[str, Any]:
     """构造最小 JSON-RPC request，保持测试帧与 stdio wire 一致。"""
@@ -13,7 +15,7 @@ def _request(method: str, params: dict[str, Any], request_id: str) -> dict[str, 
 
 async def test_thread_rpc_requires_capability_and_only_lists_current_project(tmp_path: Path) -> None:
     """未协商时拒绝读取；协商后只返回当前 project 的 thread 索引。"""
-    from harness_agent.server import JsonRpcServer
+    from harness_agent.server import AgentHost
 
     project = tmp_path / "project"
     project.mkdir()
@@ -22,7 +24,7 @@ async def test_thread_rpc_requires_capability_and_only_lists_current_project(tmp
     async def capture(message: dict[str, Any]) -> None:
         frames.append(message)
 
-    server = JsonRpcServer(
+    server = AgentHost(
         allow_echo=False,
         config_home=tmp_path / "home",
         workspace=project,
@@ -39,8 +41,8 @@ async def test_thread_rpc_requires_capability_and_only_lists_current_project(tmp
             "initialize",
         )
     )
-    store = await server._ensure_thread_store()
-    await store.record_message("thread-1", "恢复这个 thread")
+    store = await server._ensure_thread_persistence()
+    await accept_thread(store, "thread-1", "恢复这个 thread")
 
     await server.dispatch(_request("threads.list", {}, "list"))
     listed = frames[-1]["result"]["threads"]
@@ -61,14 +63,14 @@ async def test_thread_rpc_requires_capability_and_only_lists_current_project(tmp
 
 async def test_thread_rpc_rejects_unnegotiated_reads(tmp_path: Path) -> None:
     """没有 `threads.read` 的客户端不能把普通 JSON-RPC 当作本地 thread 浏览器。"""
-    from harness_agent.server import JsonRpcServer
+    from harness_agent.server import AgentHost
 
     frames: list[dict[str, Any]] = []
 
     async def capture(message: dict[str, Any]) -> None:
         frames.append(message)
 
-    server = JsonRpcServer(
+    server = AgentHost(
         allow_echo=False,
         config_home=tmp_path / "home",
         workspace=tmp_path,

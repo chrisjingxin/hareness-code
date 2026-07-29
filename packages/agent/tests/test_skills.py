@@ -98,11 +98,11 @@ def test_manifest_accepts_claude_style_hyphenated_optional_fields(tmp_path: Path
 @pytest.mark.asyncio
 async def test_explicit_skill_run_emits_loaded_event_before_content(tmp_path: Path):
     """显式 requested_skill 在正文输出前发出独立 skill.loaded 事件。"""
-    from harness_agent.server import JsonRpcServer
+    from harness_agent.server import AgentHost
 
     workspace = tmp_path / "workspace"
     _write_skill(workspace / ".harness" / "skills", "review", "先检查代码。")
-    server = JsonRpcServer(
+    server = AgentHost(
         allow_echo=True,
         config_home=tmp_path / "home",
         workspace=workspace,

@@ -26,7 +26,7 @@ from harness_agent.run_context import require_run_context
 
 if TYPE_CHECKING:
     from deepagents.backends.protocol import BackendProtocol
-    from harness_agent.thread_store import ThreadStore
+    from harness_agent.thread_persistence import ThreadPersistence
 
 VIRTUAL_ROOT = "/.harness"
 MAX_VIRTUAL_READ_LINES = 2_000
@@ -41,12 +41,12 @@ class HarnessVirtualBackend:
         *,
         registry: SkillRegistry,
         thread_id: str,
-        thread_store: "ThreadStore | None" = None,
+        thread_persistence: "ThreadPersistence | None" = None,
     ) -> None:
         """绑定启动时固定的 Skill catalog 和当前 project/thread 的归档读取器。"""
         self._registry = registry
         self._thread_id = thread_id
-        self._thread_store = thread_store
+        self._thread_persistence = thread_persistence
         self._history_cache: dict[str, str] = {}
 
     def read(self, file_path: str, offset: int = 0, limit: int = 2_000) -> ReadResult:
@@ -69,8 +69,8 @@ class HarnessVirtualBackend:
             else:
                 artifact_id = path.stem
                 content = self._history_cache.get(artifact_id)
-                if content is None and self._thread_store is not None:
-                    artifact = await self._thread_store.read_context_artifact(self._thread_id, artifact_id)
+                if content is None and self._thread_persistence is not None:
+                    artifact = await self._thread_persistence.load_context_artifact(self._thread_id, artifact_id)
                     content = artifact.content if artifact is not None else None
                     if content is not None:
                         self._history_cache[artifact_id] = content
@@ -184,12 +184,12 @@ def mount_harness_virtual_files(
     *,
     registry: SkillRegistry,
     thread_id: str,
-    thread_store: "ThreadStore | None" = None,
+    thread_persistence: "ThreadPersistence | None" = None,
 ) -> CompositeBackend:
     """把虚拟只读后端挂在真实 backend 之前，文件工具仍使用统一 ``read_file``。"""
     return CompositeBackend(
         default=default_backend,
-        routes={f"{VIRTUAL_ROOT}/": HarnessVirtualBackend(registry=registry, thread_id=thread_id, thread_store=thread_store)},
+        routes={f"{VIRTUAL_ROOT}/": HarnessVirtualBackend(registry=registry, thread_id=thread_id, thread_persistence=thread_persistence)},
     )
 
 
@@ -197,7 +197,7 @@ def run_scoped_virtual_backend_factory(
     default_backend: "BackendProtocol",
     *,
     registry: SkillRegistry,
-    thread_store: "ThreadStore | None" = None,
+    thread_persistence: "ThreadPersistence | None" = None,
 ) -> Callable[[Any], CompositeBackend]:
     """返回按当前 RunContext 解析虚拟历史的 backend factory。
 
@@ -213,7 +213,7 @@ def run_scoped_virtual_backend_factory(
             default_backend,
             registry=registry,
             thread_id=context.thread_id,
-            thread_store=thread_store,
+            thread_persistence=thread_persistence,
         )
 
     return backend_for_run

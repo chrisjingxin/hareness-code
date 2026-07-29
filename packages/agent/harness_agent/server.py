@@ -43,7 +43,7 @@ from harness_agent.execution_binding import (
     RunExecutionBinding,
     ThreadExecutionSelection,
     describe_thread_binding,
-    resolve_execution_binding as resolve_model_execution_binding,
+    resolve_execution_binding,
 )
 from harness_agent.protocol_generated import (
     MAX_FRAME_BYTES,
@@ -91,7 +91,7 @@ from harness_agent.runtime_profile import (
     component_fingerprint,
     default_runtime_profile,
 )
-from harness_agent.thread_store import ThreadStore, ThreadStoreError
+from harness_agent.thread_persistence import AcceptRun, ThreadPersistence, ThreadPersistenceError
 from harness_agent.providers.harness_gateway import ProviderClientPool
 
 logger = logging.getLogger(__name__)
@@ -261,7 +261,7 @@ class AgentHost:
         self._config_change_service: ConfigChangeService | None = None
         self._startup_error: str | None = None
         self._skill_registry: SkillRegistry | None = None
-        self._thread_store: ThreadStore | None = None
+        self._thread_persistence: ThreadPersistence | None = None
         self._runtime_pool: RuntimePool | None = None
         self._mcp_manager: McpConnectionManager | None = None
         self._mcp_snapshot: McpConfigSnapshot | None = None
@@ -386,7 +386,7 @@ class AgentHost:
             await self._mcp_manager.close_all()
             self._mcp_manager = None
         await self._close_runtime_pool()
-        await self._close_thread_store()
+        await self._close_thread_persistence()
 
     async def close_connection(self, connection: ProtocolConnection) -> None:
         """释放 attached Connection，并取消仅由它拥有的 active Runs。"""
@@ -519,7 +519,7 @@ class AgentHost:
             )
         except SkillError as exc:
             await self.send_error(request_id, -32602, str(exc))
-        except ThreadStoreError as exc:
+        except ThreadPersistenceError as exc:
             await self.send_error(
                 request_id,
                 -32020,
@@ -664,7 +664,7 @@ class AgentHost:
                 "id": connection.connection_id,
                 "role": connection.role,
                 "project": {
-                    "id": (await self._ensure_thread_store()).project_fingerprint if self._thread_persistence_enabled() else "echo",
+                    "id": (await self._ensure_thread_persistence()).project_fingerprint if self._thread_persistence_enabled() else "echo",
                     "label": self._workspace.name,
                 },
             },
@@ -779,7 +779,7 @@ class AgentHost:
                     runtime_profile_id=runtime_profile.profile_key[:12],
                     created_at_ms=int(time.time() * 1000),
                 )
-            except (ConfigError, ExecutionBindingError, ThreadStoreError) as exc:
+            except (ConfigError, ExecutionBindingError, ThreadPersistenceError) as exc:
                 raise RpcError(-32004, str(exc)) from exc
         run = ActiveRun(
             thread_id=thread_id,
@@ -792,15 +792,16 @@ class AgentHost:
             resolved_runtime_profile=runtime_profile,
         )
         if self._thread_persistence_enabled():
-            store = await self._ensure_thread_store()
+            persistence = await self._ensure_thread_persistence()
             if execution_binding is None:
                 raise RpcError(-32010, "RUN_MODEL_BINDING_UNAVAILABLE")
             try:
-                created = await store.record_run_start(
-                    message,
-                    execution_binding,
-                )
-            except ThreadStoreError as exc:
+                created = (
+                    await persistence.accept_run(
+                        AcceptRun(message=message, binding=execution_binding)
+                    )
+                ).created
+            except ThreadPersistenceError as exc:
                 if str(exc) == "RUN_EXECUTION_BINDING_CONFLICT":
                     raise RpcError(
                         -32006,
@@ -851,10 +852,11 @@ class AgentHost:
         if active is not None and active.status in {"running", "interrupted"}:
             raise RpcError(-32000, "CONTEXT_COMPACTION_RUN_ACTIVE")
 
-        store = await self._ensure_thread_store()
-        messages = await store.load_context_messages(parsed.thread_id)
-        if messages is None:
+        persistence = await self._ensure_thread_persistence()
+        context = await persistence.load_context(parsed.thread_id)
+        if not context.recoverable:
             raise RpcError(-32004, "THREAD_NOT_RECOVERABLE")
+        messages = list(context.messages)
         if not self._uses_default_agent_factory:
             agent = await self._ensure_agent()
             middleware = getattr(self, "_context_compactor", None)
@@ -865,7 +867,7 @@ class AgentHost:
                 middleware=middleware,
                 thread_id=parsed.thread_id,
                 messages=messages,
-                store=store,
+                persistence=persistence,
             )
 
         lease, runtime = await self._acquire_default_runtime(parsed.thread_id)
@@ -880,7 +882,7 @@ class AgentHost:
                 middleware=artifacts.context_compactor,
                 thread_id=parsed.thread_id,
                 messages=messages,
-                store=store,
+                persistence=persistence,
             )
         finally:
             await self._release_runtime_lease(lease)
@@ -1163,7 +1165,7 @@ class AgentHost:
             ]
         }
         if parsed.thread_id is not None:
-            persisted = await (await self._ensure_thread_store()).load_execution_binding_state(
+            persisted = await (await self._ensure_thread_persistence()).load_run_state(
                 parsed.thread_id
             )
             if CAPABILITY["MODELS_SELECT"] in self._connection_capabilities():
@@ -1179,7 +1181,7 @@ class AgentHost:
         """返回当前 project 内最近活跃的 thread；thread_id 仅供客户端内部打开。"""
         self._require_threads_capability()
         parsed = ThreadsListParams.model_validate(params)
-        threads = await (await self._ensure_thread_store()).list_threads(parsed.limit)
+        threads = await (await self._ensure_thread_persistence()).list_threads(parsed.limit)
         return {"threads": [_thread_summary_payload(thread) for thread in threads]}
 
     async def _handle_threads_open(self, params: dict[str, Any], _id: str) -> dict[str, object]:
@@ -1187,8 +1189,8 @@ class AgentHost:
         self._require_threads_capability()
         parsed = ThreadsOpenParams.model_validate(params)
         try:
-            opened = await (await self._ensure_thread_store()).open_thread(parsed.thread_id)
-        except ThreadStoreError as exc:
+            opened = await (await self._ensure_thread_persistence()).open_thread(parsed.thread_id)
+        except ThreadPersistenceError as exc:
             if str(exc) in {"THREAD_NOT_FOUND", "THREAD_NOT_RECOVERABLE"}:
                 raise RpcError(-32004, str(exc)) from exc
             raise
@@ -1367,8 +1369,8 @@ class AgentHost:
                     resume = await self._stream_agent(agent, run, resume=resume)
                     if resume is None:
                         break
-            if self._thread_store is not None:
-                await self._thread_store.refresh_thread(run.thread_id)
+            if self._thread_persistence is not None:
+                await self._thread_persistence.complete_run(run.thread_id)
             await self._drain_context_updates(run)
             run.status = "completed"
             await self._emit(
@@ -1413,10 +1415,10 @@ class AgentHost:
             )
         finally:
             await self._release_run_runtime(run)
-            if self._thread_store is not None and run.status != "completed":
+            if self._thread_persistence is not None and run.status != "completed":
                 try:
-                    await self._thread_store.refresh_thread(run.thread_id)
-                except ThreadStoreError:
+                    await self._thread_persistence.complete_run(run.thread_id)
+                except ThreadPersistenceError:
                     logger.exception("Unable to refresh checkpoint index for thread %s", run.thread_id)
             self._runs.pop(run.thread_id, None)
 
@@ -1512,7 +1514,7 @@ class AgentHost:
             default_tool_catalog_fingerprint,
         )
 
-        store = await self._ensure_thread_store()
+        persistence = await self._ensure_thread_persistence()
         registry = self._require_skills()
         selected_profile_id = resolved_binding.primary_profile.profile_id
         selected_model = resolved_binding.primary_profile.settings
@@ -1523,7 +1525,7 @@ class AgentHost:
         # Profile 身份和图输入从同一个快照截取，后续热变更不会改写旧 Runtime。
         mcp_fp = mcp_snapshot.digest
         profile = default_runtime_profile(
-            project_fingerprint=store.project_fingerprint,
+            project_fingerprint=persistence.project_fingerprint,
             model_profile=selected_profile_id,
             model=selected_model,
             tool_catalog_fingerprint=default_tool_catalog_fingerprint(),
@@ -1542,8 +1544,7 @@ class AgentHost:
             ),
             prompt_template_fingerprint=default_prompt_template_fingerprint(),
         )
-        # Runtime Profile 只按配置去重保存；thread 级绑定仅用于读取 v4/v5 legacy。
-        await store.save_runtime_profile(thread_id, profile, bind_thread=False)
+        await persistence.persist_runtime_profile(profile)
 
         self._runtime_build_specs[profile.profile_key] = _RuntimeBuildSpec(
             config=config,
@@ -1563,14 +1564,14 @@ class AgentHost:
         requested_primary_profile: str | None = None,
     ) -> ResolvedExecutionBinding:
         """读取 Thread 状态并通过 execution_binding module 解析根模型。"""
-        store = await self._ensure_thread_store()
+        persistence = await self._ensure_thread_persistence()
         requested = (
             ThreadExecutionSelection(requested_primary_profile)
             if requested_primary_profile is not None
             else None
         )
-        persisted = await store.load_execution_binding_state(thread_id)
-        return resolve_model_execution_binding(config, requested, persisted)
+        persisted = await persistence.load_run_state(thread_id)
+        return resolve_execution_binding(config, requested, persisted)
 
     def _ensure_runtime_pool(self, config: Za38Config) -> RuntimePool:
         """延迟创建进程内唯一 Pool；容量策略在 Sidecar 生命周期内保持稳定。"""
@@ -1598,8 +1599,8 @@ class AgentHost:
         from harness_agent.providers.harness_gateway import create_openai_compatible_model
 
         execution_context = create_execution_context(config.execution, workspace)
-        store = await self._ensure_thread_store()
-        checkpointer = store.checkpointer
+        persistence = await self._ensure_thread_persistence()
+        checkpointer = persistence.checkpointer
         model_settings = spec.model_settings
         model = create_openai_compatible_model(
             model_settings,
@@ -1608,7 +1609,7 @@ class AgentHost:
         context_compactor = ContextWindowMiddleware(
             model,
             context_window_tokens=model_settings.context_window_tokens,
-            thread_store=store,
+            thread_persistence=persistence,
             updates=self._context_updates,
         )
         mcp_tools = list(spec.mcp_tools)
@@ -1624,7 +1625,7 @@ class AgentHost:
             execution_context=execution_context,
             skill_registry=spec.skill_registry,
             checkpointer=checkpointer,
-            thread_store=store,
+            thread_persistence=persistence,
             context_updates=self._context_updates,
             context_middleware=context_compactor,
             context_window_tokens=model_settings.context_window_tokens,
@@ -1660,8 +1661,8 @@ class AgentHost:
         """从持久化状态恢复本轮 PromptEpoch，禁止把 thread 数据保存在共享图中。"""
         from harness_agent.agent import create_prompt_epoch
 
-        store = await self._ensure_thread_store()
-        epoch = await store.get_prompt_epoch(run.thread_id)
+        persistence = await self._ensure_thread_persistence()
+        epoch = await persistence.load_prompt_epoch(run.thread_id)
         if epoch is None:
             epoch = create_prompt_epoch(
                 thread_id=run.thread_id,
@@ -1674,7 +1675,7 @@ class AgentHost:
                 enable_memory=True,
                 enable_skills=True,
             )
-            await store.save_prompt_epoch(epoch)
+            await persistence.persist_prompt_epoch(epoch)
         return RunContext(
             thread_id=run.thread_id,
             run_id=run.run_id,
@@ -1696,8 +1697,8 @@ class AgentHost:
         )
         stream_kwargs: dict[str, Any] = {
             "config": (
-                self._thread_store.graph_config(run.thread_id)
-                if self._thread_store is not None
+                self._thread_persistence.graph_config(run.thread_id)
+                if self._thread_persistence is not None
                 else {"configurable": {"thread_id": run.thread_id}}
             ),
             "stream_mode": ["messages", "updates"],
@@ -2054,7 +2055,7 @@ class AgentHost:
         middleware: Any,
         thread_id: str,
         messages: list[Any],
-        store: ThreadStore,
+        persistence: ThreadPersistence,
     ) -> dict[str, object]:
         """使用已租用 Runtime 的共享 compactor 改写一个空闲 thread 的 checkpoint。"""
         compacted, update, rewritten = await middleware.compact_now(thread_id, messages)
@@ -2068,11 +2069,11 @@ class AgentHost:
             await agent.aupdate_state(
                 # CompiledStateGraph 将非空 checkpoint_ns 解释为子图路径；项目隔离
                 # 由 ProjectScopedAsyncSqliteSaver 在根图空 namespace 上自动补齐。
-                store.graph_config(thread_id),
+                persistence.graph_config(thread_id),
                 {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *compacted]},
                 as_node="model",
             )
-            await store.refresh_thread(thread_id)
+            await persistence.complete_run(thread_id)
         return {"compacted": rewritten, "context": update.payload()}
 
     async def _release_run_runtime(self, run: ActiveRun) -> None:
@@ -2108,7 +2109,7 @@ class AgentHost:
         self._runtime_build_specs.pop(profile_key, None)
 
     async def _close_runtime_pool(self) -> None:
-        """在关闭 SQLite 前停止 RuntimePool，保证 middleware 不再访问已关闭的 Store。"""
+        """在关闭 SQLite 前停止 RuntimePool，保证 middleware 不再访问已关闭的 Persistence。"""
         pool, self._runtime_pool = self._runtime_pool, None
         if pool is not None:
             reports = await pool.aclose()
@@ -2164,22 +2165,22 @@ class AgentHost:
         if not self._thread_persistence_enabled():
             raise RpcError(-32002, "CONTEXT_COMPACTION_UNAVAILABLE")
 
-    async def _ensure_thread_store(self) -> ThreadStore:
+    async def _ensure_thread_persistence(self) -> ThreadPersistence:
         """延迟打开用户级数据库；配置读取不应因为存储创建而被阻塞。"""
-        if self._thread_store is None:
+        if self._thread_persistence is None:
             if not self._thread_persistence_enabled():
-                raise ThreadStoreError("THREADS_UNAVAILABLE_IN_ECHO_MODE")
-            self._thread_store = await ThreadStore.open(
+                raise ThreadPersistenceError("THREADS_UNAVAILABLE_IN_ECHO_MODE")
+            self._thread_persistence = await ThreadPersistence.open(
                 project=self._workspace,
                 home=self._config_home,
             )
-        return self._thread_store
+        return self._thread_persistence
 
-    async def _close_thread_store(self) -> None:
+    async def _close_thread_persistence(self) -> None:
         """在 sidecar 生命周期末尾关闭 SQLite 连接和 WAL 句柄。"""
-        store, self._thread_store = self._thread_store, None
-        if store is not None:
-            await store.close()
+        persistence, self._thread_persistence = self._thread_persistence, None
+        if persistence is not None:
+            await persistence.close()
 
     def _fail_connection_requests(
         self,
@@ -2192,10 +2193,6 @@ class AgentHost:
                 future.set_exception(error)
         connection.pending_requests.clear()
         connection.interaction_specs.clear()
-
-# 测试仍沿用旧构造名；两者是同一个 Project-scoped Host，不存在第二套协议实现。
-JsonRpcServer = AgentHost
-
 
 def _protocol_error_data(message: str, data: object | None) -> dict[str, object]:
     """把既有领域异常收敛为 v3 稳定错误枚举。"""

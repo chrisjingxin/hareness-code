@@ -6,6 +6,10 @@ Harness Code（命令名 `harness` / `za38`）是一个面向企业研发场景�
 
 当前仓库处于源码开发阶段，不应将跨平台安装包或生产发布流程视为已交付能力。产品与开发入口分别是 `README.md`、`docs/user/` 和 `docs/developer/`。
 
+## 发布阶段与兼容性原则
+
+当前尚未正式发版，Python、TypeScript、Protocol、SQLite 以及内部模块之间没有外部兼容承诺。所有改造以消除技术债和保持单一 canonical 路径为第一优先级：不要为了旧内部 API、旧类名、旧参数、旧测试入口或旧数据形状保留 alias、wrapper、fallback、双写或死分支；应直接迁移调用方和测试并删除旧实现。只有用户或当前任务明确要求，或安全/数据不可逆风险确实需要时，才引入兼容或迁移逻辑，并在任务文档中说明原因和退出条件。
+
 ## Agent 开工顺序
 
 1. 先读取 `README.md`、`docs/developer/架构总览.md` 与任务对应的 `docs/developer/tasks/<ID>.md`。

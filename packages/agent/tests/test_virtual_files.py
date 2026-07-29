@@ -20,15 +20,22 @@ def _write_skill(root: Path) -> None:
 async def test_virtual_files_read_skills_and_thread_scoped_history(tmp_path: Path):
     """正文/资源按 read_file 分页返回，历史只允许当前 project 和 thread 读取。"""
     from harness_agent.skills import SkillRegistry
-    from harness_agent.thread_store import ThreadStore
+    from harness_agent.thread_persistence import CommitContextRewrite, ContextArtifactDraft, ThreadPersistence
     from harness_agent.virtual_files import HarnessVirtualBackend
 
     workspace = tmp_path / "workspace"
     _write_skill(workspace / ".harness" / "skills")
     registry = SkillRegistry(workspace, home=tmp_path / "home")
-    store = await ThreadStore.open(project=workspace, home=tmp_path / "home")
-    artifact = await store.archive_context("thread-a", kind="history", content="一\n二\n三\n")
-    backend = HarnessVirtualBackend(registry=registry, thread_id="thread-a", thread_store=store)
+    store = await ThreadPersistence.open(project=workspace, home=tmp_path / "home")
+    artifact = (
+        await store.commit_context(
+            CommitContextRewrite(
+                thread_id="thread-a",
+                artifacts=(ContextArtifactDraft(kind="history", content="一\n二\n三\n"),),
+            )
+        )
+    ).artifacts[0]
+    backend = HarnessVirtualBackend(registry=registry, thread_id="thread-a", thread_persistence=store)
 
     skill = await backend.aread("/.harness/skills/project/review/SKILL.md", offset=1, limit=1)
     resource = await backend.aread("/.harness/skills/project/review/reference.txt", offset=0, limit=1)
@@ -44,7 +51,7 @@ async def test_virtual_files_read_skills_and_thread_scoped_history(tmp_path: Pat
     assert not glob_result.error
     assert glob_result.matches == []
 
-    other = HarnessVirtualBackend(registry=registry, thread_id="thread-b", thread_store=store)
+    other = HarnessVirtualBackend(registry=registry, thread_id="thread-b", thread_persistence=store)
     assert (await other.aread(f"/.harness/history/{artifact.artifact_id}.md")).error
     await store.close()
 
@@ -56,14 +63,21 @@ async def test_run_scoped_virtual_backend_isolates_shared_graph_history(tmp_path
     from harness_agent.agent import create_prompt_epoch
     from harness_agent.run_context import RunContext
     from harness_agent.skills import SkillRegistry
-    from harness_agent.thread_store import ThreadStore
+    from harness_agent.thread_persistence import CommitContextRewrite, ContextArtifactDraft, ThreadPersistence
     from harness_agent.virtual_files import run_scoped_virtual_backend_factory
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     registry = SkillRegistry(workspace, home=tmp_path / "home")
-    store = await ThreadStore.open(project=workspace, home=tmp_path / "home")
-    artifact = await store.archive_context("thread-a", kind="history", content="only thread a")
+    store = await ThreadPersistence.open(project=workspace, home=tmp_path / "home")
+    artifact = (
+        await store.commit_context(
+            CommitContextRewrite(
+                thread_id="thread-a",
+                artifacts=(ContextArtifactDraft(kind="history", content="only thread a"),),
+            )
+        )
+    ).artifacts[0]
 
     def context_for(thread_id: str) -> RunContext:
         return RunContext(
@@ -86,7 +100,7 @@ async def test_run_scoped_virtual_backend_isolates_shared_graph_history(tmp_path
     factory = run_scoped_virtual_backend_factory(
         LocalShellBackend(root_dir=workspace, virtual_mode=True),
         registry=registry,
-        thread_store=store,
+        thread_persistence=store,
     )
     first = factory(SimpleNamespace(context=context_for("thread-a")))
     second = factory(SimpleNamespace(context=context_for("thread-b")))

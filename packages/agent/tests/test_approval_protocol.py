@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from harness_agent.protocol_generated import ApprovalResponse
-from harness_agent.server import InteractionSpec, JsonRpcServer
+from harness_agent.server import InteractionSpec, AgentHost
 
 
 def test_approval_response_accepts_approve_always() -> None:
@@ -43,7 +43,7 @@ def test_approval_response_rejects_invalid_decision() -> None:
 
 def test_resume_value_approve_always_maps_to_approve() -> None:
     """验证 _resume_value 中 approve_always 映射为 approve。"""
-    server = object.__new__(JsonRpcServer)
+    server = object.__new__(AgentHost)
     spec = InteractionSpec(
         request_id="req-4",
         type="approval",

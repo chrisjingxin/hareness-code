@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import sqlite3
 import stat
+import uuid
 from pathlib import Path
 from typing import Any, Sequence
 
 import pytest
+import aiosqlite
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import Runnable
@@ -20,7 +22,16 @@ from harness_agent.execution_binding import (
     ThreadExecutionSelection,
 )
 from harness_agent.prompting import canonical_json
-from harness_agent.thread_store import ThreadStore, ThreadStoreError
+from harness_agent.thread_persistence import (
+    AcceptRun,
+    CommitContextRewrite,
+    ContextArtifactDraft,
+    ContextState,
+    ContextSummaryDraft,
+    ThreadPersistence,
+    ThreadPersistenceError,
+)
+from thread_fixtures import accept_thread
 
 
 class ToolCallingFakeChatModel(GenericFakeChatModel):
@@ -37,13 +48,42 @@ class ToolCallingFakeChatModel(GenericFakeChatModel):
         return self
 
 
-async def test_thread_store_recovers_messages_after_reopen(tmp_path: Path) -> None:
+def test_thread_persistence_exposes_lifecycle_interface_only() -> None:
+    """表级读写不再成为业务调用方可见的 ThreadPersistence 方法。"""
+    assert hasattr(ThreadPersistence, "accept_run")
+    assert hasattr(ThreadPersistence, "load_run_state")
+    assert hasattr(ThreadPersistence, "commit_context")
+    assert hasattr(ThreadPersistence, "complete_run")
+    assert hasattr(ThreadPersistence, "load_context")
+    for method in (
+        "record_message",
+        "record_run_start",
+        "get_latest_run_execution_binding",
+        "load_execution_binding_state",
+        "load_context_messages",
+        "archive_context",
+        "save_context_summary",
+        "context_state",
+        "set_context_state",
+        "ensure_thread",
+        "refresh_thread",
+        "get_prompt_epoch",
+        "save_prompt_epoch",
+        "get_runtime_profile",
+        "save_runtime_profile",
+        "read_context_artifact",
+        "load_context_state",
+    ):
+        assert not hasattr(ThreadPersistence, method)
+
+
+async def test_thread_persistence_recovers_messages_after_reopen(tmp_path: Path) -> None:
     """相同 project 和 thread_id 重开数据库后必须读取此前 checkpoint 消息。"""
     home = tmp_path / "home"
     project = tmp_path / "project"
     project.mkdir()
-    first = await ThreadStore.open(project=project, home=home)
-    await first.record_message("thread-1", "请检查当前改动")
+    first = await ThreadPersistence.open(project=project, home=home)
+    await accept_thread(first, "thread-1", "请检查当前改动")
     checkpoint = empty_checkpoint()
     checkpoint["channel_values"] = {
         "messages": [
@@ -52,12 +92,12 @@ async def test_thread_store_recovers_messages_after_reopen(tmp_path: Path) -> No
         ]
     }
     await first.checkpointer.aput(first.graph_config("thread-1"), checkpoint, {}, {})
-    await first.refresh_thread("thread-1")
+    await first.complete_run("thread-1")
     first_fingerprint = first.project_fingerprint
     database_path = first.database_path
     await first.close()
 
-    second = await ThreadStore.open(project=project, home=home)
+    second = await ThreadPersistence.open(project=project, home=home)
     opened = await second.open_thread("thread-1")
     assert second.project_fingerprint == first_fingerprint
     assert [(message.kind, message.content) for message in opened.messages] == [
@@ -72,7 +112,7 @@ async def test_thread_store_recovers_messages_after_reopen(tmp_path: Path) -> No
     await second.close()
 
 
-async def test_thread_store_reuses_langgraph_state_across_graph_restart(tmp_path: Path) -> None:
+async def test_thread_persistence_reuses_langgraph_state_across_graph_restart(tmp_path: Path) -> None:
     """共享图重建后通过持久化 RunContext 恢复同一 thread 的消息和 PromptEpoch。"""
     from harness_agent.agent import create_harness_agent, create_prompt_epoch
     from harness_agent.run_context import RunContext
@@ -80,7 +120,7 @@ async def test_thread_store_reuses_langgraph_state_across_graph_restart(tmp_path
     home = tmp_path / "home"
     project = tmp_path / "project"
     project.mkdir()
-    first = await ThreadStore.open(project=project, home=home)
+    first = await ThreadPersistence.open(project=project, home=home)
     first_model = ToolCallingFakeChatModel(messages=iter([AIMessage(content="第一轮回答")]))
     first_model.profile = {"max_input_tokens": 200000}
     epoch = create_prompt_epoch(
@@ -94,7 +134,7 @@ async def test_thread_store_reuses_langgraph_state_across_graph_restart(tmp_path
         enable_memory=False,
         enable_skills=False,
     )
-    await first.save_prompt_epoch(epoch)
+    await first.persist_prompt_epoch(epoch)
     first_agent = create_harness_agent(
         first_model,
         cwd=str(project),
@@ -105,7 +145,7 @@ async def test_thread_store_reuses_langgraph_state_across_graph_restart(tmp_path
         approval_mode="yolo",
         shared_runtime=True,
     )
-    await first.record_message("thread-1", "第一轮请求")
+    await accept_thread(first, "thread-1", "第一轮请求")
     _ = [
         event
         async for event in first_agent.astream(
@@ -120,13 +160,13 @@ async def test_thread_store_reuses_langgraph_state_across_graph_restart(tmp_path
             stream_mode=["messages", "updates"],
         )
     ]
-    await first.refresh_thread("thread-1")
+    await first.complete_run("thread-1")
     await first.close()
 
-    second = await ThreadStore.open(project=project, home=home)
+    second = await ThreadPersistence.open(project=project, home=home)
     second_model = ToolCallingFakeChatModel(messages=iter([AIMessage(content="第二轮回答")]))
     second_model.profile = {"max_input_tokens": 200000}
-    restored_epoch = await second.get_prompt_epoch("thread-1")
+    restored_epoch = await second.load_prompt_epoch("thread-1")
     assert restored_epoch == epoch
     second_agent = create_harness_agent(
         second_model,
@@ -138,7 +178,7 @@ async def test_thread_store_reuses_langgraph_state_across_graph_restart(tmp_path
         approval_mode="yolo",
         shared_runtime=True,
     )
-    await second.record_message("thread-1", "第二轮请求")
+    await accept_thread(second, "thread-1", "第二轮请求")
     _ = [
         event
         async for event in second_agent.astream(
@@ -153,7 +193,7 @@ async def test_thread_store_reuses_langgraph_state_across_graph_restart(tmp_path
             stream_mode=["messages", "updates"],
         )
     ]
-    await second.refresh_thread("thread-1")
+    await second.complete_run("thread-1")
     opened = await second.open_thread("thread-1")
     assert [message.content for message in opened.messages if message.kind == "user"] == [
         "第一轮请求",
@@ -162,21 +202,21 @@ async def test_thread_store_reuses_langgraph_state_across_graph_restart(tmp_path
     await second.close()
 
 
-async def test_thread_store_keeps_projects_isolated_without_raw_paths(tmp_path: Path) -> None:
+async def test_thread_persistence_keeps_projects_isolated_without_raw_paths(tmp_path: Path) -> None:
     """同一全局数据库中不同 project 不能列出或打开彼此的 thread。"""
     home = tmp_path / "home"
     project_a = tmp_path / "project-a"
     project_b = tmp_path / "project-b"
     project_a.mkdir()
     project_b.mkdir()
-    first = await ThreadStore.open(project=project_a, home=home)
-    await first.record_message("same-thread", "仅属于 project A")
+    first = await ThreadPersistence.open(project=project_a, home=home)
+    await accept_thread(first, "same-thread", "仅属于 project A")
     database = first.database_path
     await first.close()
 
-    second = await ThreadStore.open(project=project_b, home=home)
+    second = await ThreadPersistence.open(project=project_b, home=home)
     assert await second.list_threads() == ()
-    with pytest.raises(ThreadStoreError, match="THREAD_NOT_FOUND"):
+    with pytest.raises(ThreadPersistenceError, match="THREAD_NOT_FOUND"):
         await second.open_thread("same-thread")
     await second.close()
 
@@ -188,7 +228,7 @@ async def test_thread_store_keeps_projects_isolated_without_raw_paths(tmp_path: 
     assert fingerprints and str(project_a) not in fingerprints
 
 
-async def test_thread_store_persists_immutable_prompt_epoch_without_rescan(tmp_path: Path) -> None:
+async def test_thread_persistence_persists_immutable_prompt_epoch_without_rescan(tmp_path: Path) -> None:
     """恢复 epoch 应逐字返回已保存前缀，并拒绝同一 thread 的后续形状变化。"""
     from harness_agent.prompting import PromptComposer
 
@@ -204,9 +244,9 @@ async def test_thread_store_persists_immutable_prompt_epoch_without_rescan(tmp_p
         tool_fingerprint="schema",
         now_ms=1,
     )
-    first = await ThreadStore.open(project=project, home=home)
-    await first.save_prompt_epoch(epoch)
-    assert (await first.get_prompt_epoch("thread-epoch")) == epoch
+    first = await ThreadPersistence.open(project=project, home=home)
+    await first.persist_prompt_epoch(epoch)
+    assert (await first.load_prompt_epoch("thread-epoch")) == epoch
     changed = PromptComposer("different core").create_epoch(
         thread_id="thread-epoch",
         execution_boundary="execution",
@@ -216,21 +256,21 @@ async def test_thread_store_persists_immutable_prompt_epoch_without_rescan(tmp_p
         tool_fingerprint="schema",
         now_ms=1,
     )
-    with pytest.raises(ThreadStoreError, match="PROMPT_EPOCH_IMMUTABLE"):
-        await first.save_prompt_epoch(changed)
+    with pytest.raises(ThreadPersistenceError, match="PROMPT_EPOCH_IMMUTABLE"):
+        await first.persist_prompt_epoch(changed)
     await first.close()
 
-    second = await ThreadStore.open(project=project, home=home)
-    assert (await second.get_prompt_epoch("thread-epoch")) == epoch
+    second = await ThreadPersistence.open(project=project, home=home)
+    assert (await second.load_prompt_epoch("thread-epoch")) == epoch
     await second.close()
 
 
-async def test_thread_store_migrates_and_reads_legacy_model_bindings(tmp_path: Path) -> None:
+async def test_thread_persistence_migrates_and_reads_legacy_model_bindings(tmp_path: Path) -> None:
     """v5 模型快照升级后保持只读可见，并转换为类型化状态。"""
     home = tmp_path / "home"
     project = tmp_path / "project"
     project.mkdir()
-    initial = await ThreadStore.open(project=project, home=home)
+    initial = await ThreadPersistence.open(project=project, home=home)
     database = initial.database_path
     project_fingerprint = initial.project_fingerprint
     await initial.close()
@@ -266,20 +306,20 @@ async def test_thread_store_migrates_and_reads_legacy_model_bindings(tmp_path: P
     finally:
         connection.close()
 
-    store = await ThreadStore.open(project=project, home=home)
-    state = await store.load_execution_binding_state("thread-model")
+    store = await ThreadPersistence.open(project=project, home=home)
+    state = await store.load_run_state("thread-model")
     assert state.legacy_models is not None
     assert state.legacy_models.executor_profile_id() == "fast"
     assert state.legacy_models.protocol_roles()["executor"]["model"] == "fast-model"  # type: ignore[index]
     await store.close()
 
 
-async def test_thread_store_records_run_binding_and_recovers_latest_selection(tmp_path: Path) -> None:
+async def test_thread_persistence_records_run_binding_and_recovers_latest_selection(tmp_path: Path) -> None:
     """Run 选择和实际模型须与首条 Thread 索引同事务写入，并可按时间恢复。"""
     home = tmp_path / "home"
     project = tmp_path / "project"
     project.mkdir()
-    store = await ThreadStore.open(project=project, home=home)
+    store = await ThreadPersistence.open(project=project, home=home)
     primary = {
         "profile": {
             "id": "fast",
@@ -303,21 +343,16 @@ async def test_thread_store_records_run_binding_and_recovers_latest_selection(tm
         runtime_profile_id="123456789abc",
         created_at_ms=1,
     )
-    assert await store.record_run_start(
-        "使用 fast",
-        run_binding,
-    )
+    assert (
+        await store.accept_run(AcceptRun(message="使用 fast", binding=run_binding))
+    ).created
     # 同一请求重试不重复索引或绑定；不同内容则 fail closed。
-    assert not await store.record_run_start(
-        "使用 fast",
-        run_binding,
-    )
-    with pytest.raises(ThreadStoreError, match="RUN_EXECUTION_BINDING_CONFLICT"):
-        await store.record_run_start(
-            "使用 pro",
-            run_binding,
-        )
-    latest = await store.get_latest_run_execution_binding("thread-run")
+    assert not (
+        await store.accept_run(AcceptRun(message="使用 fast", binding=run_binding))
+    ).created
+    with pytest.raises(ThreadPersistenceError, match="RUN_EXECUTION_BINDING_CONFLICT"):
+        await store.accept_run(AcceptRun(message="使用 pro", binding=run_binding))
+    latest = (await store.load_run_state("thread-run")).latest_run
     assert latest is not None
     assert latest.requested_selection.to_record() == {"primary_profile": "fast"}
     assert latest.actual_primary_record() == primary
@@ -326,15 +361,101 @@ async def test_thread_store_records_run_binding_and_recovers_latest_selection(tm
     await store.close()
 
 
-async def test_thread_store_reports_future_schema_and_closed_store(tmp_path: Path) -> None:
+async def test_thread_persistence_commits_context_rewrite_as_one_typed_operation(tmp_path: Path) -> None:
+    """Context 的 artifact、summary 和熔断状态通过一个生命周期操作提交。"""
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    store = await ThreadPersistence.open(project=project, home=home)
+
+    committed = await store.commit_context(
+        CommitContextRewrite(
+            thread_id="thread-context",
+            artifacts=(
+                ContextArtifactDraft(
+                    kind="history",
+                    content="旧消息",
+                    source_start=0,
+                    source_end=1,
+                ),
+            ),
+            summary=ContextSummaryDraft(
+                rewrite_version="v1",
+                content="摘要",
+                source_start=0,
+                source_end=1,
+                artifact_indexes=(0,),
+            ),
+            state=ContextState(failures=1, last_action="summary"),
+        )
+    )
+
+    artifact = committed.artifacts[0]
+    assert committed.summary is not None
+    assert committed.summary.artifact_ids == (artifact.artifact_id,)
+    assert await store.load_context_artifact("thread-context", artifact.artifact_id) == artifact
+    assert (await store.load_context("thread-context")).state == ContextState(
+        failures=1,
+        circuit_open=False,
+        last_action="summary",
+    )
+    await store.close()
+
+
+async def test_context_rewrite_rolls_back_all_rows_when_summary_write_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """摘要写入失败时 artifact 和状态也必须保持未提交。"""
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    store = await ThreadPersistence.open(project=project, home=home)
+
+    monkeypatch.setattr(
+        "harness_agent.thread_persistence.uuid.uuid4",
+        lambda: uuid.UUID(int=1),
+    )
+    original_execute = store._connection.execute
+
+    def fail_summary(sql: str, *args: object, **kwargs: object):
+        if "harness_context_summaries" in sql:
+            raise aiosqlite.OperationalError("injected summary failure")
+        return original_execute(sql, *args, **kwargs)
+
+    monkeypatch.setattr(store._connection, "execute", fail_summary)
+    with pytest.raises(ThreadPersistenceError, match="CONTEXT_REWRITE_WRITE_FAILED"):
+        await store.commit_context(
+            CommitContextRewrite(
+                thread_id="rollback",
+                artifacts=(ContextArtifactDraft(kind="history", content="未提交"),),
+                summary=ContextSummaryDraft(
+                    rewrite_version="v1",
+                    content="摘要",
+                    source_start=0,
+                    source_end=0,
+                    artifact_indexes=(0,),
+                ),
+                state=ContextState(failures=1, last_action="summary"),
+            )
+        )
+
+    artifact_id = "history-" + ("0" * 32)
+    snapshot = await store.load_context("rollback")
+    assert snapshot.state == ContextState()
+    assert await store.load_context_artifact("rollback", artifact_id) is None
+    await store.close()
+
+
+async def test_thread_persistence_reports_future_schema_and_closed_persistence(tmp_path: Path) -> None:
     """未来 schema 不能被旧版静默写回，关闭连接后也不得继续读写。"""
     home = tmp_path / "home"
     project = tmp_path / "project"
     project.mkdir()
-    store = await ThreadStore.open(project=project, home=home)
+    store = await ThreadPersistence.open(project=project, home=home)
     database = store.database_path
     await store.close()
-    with pytest.raises(ThreadStoreError, match="CHECKPOINT_STORE_CLOSED"):
+    with pytest.raises(ThreadPersistenceError, match="CHECKPOINT_STORE_CLOSED"):
         await store.list_threads()
 
     connection = sqlite3.connect(database)
@@ -343,15 +464,15 @@ async def test_thread_store_reports_future_schema_and_closed_store(tmp_path: Pat
         connection.commit()
     finally:
         connection.close()
-    with pytest.raises(ThreadStoreError, match="CHECKPOINT_SCHEMA_TOO_NEW"):
-        await ThreadStore.open(project=project, home=home)
+    with pytest.raises(ThreadPersistenceError, match="CHECKPOINT_SCHEMA_TOO_NEW"):
+        await ThreadPersistence.open(project=project, home=home)
 
 
-async def test_thread_store_reports_corrupt_database(tmp_path: Path) -> None:
+async def test_thread_persistence_reports_corrupt_database(tmp_path: Path) -> None:
     """损坏的 SQLite 文件需要返回明确的 checkpoint 损坏诊断。"""
     home = tmp_path / "home"
     database = home / ".harness" / "threads.sqlite3"
     database.parent.mkdir(parents=True)
     database.write_bytes(b"not a sqlite database")
-    with pytest.raises(ThreadStoreError, match="CHECKPOINT_DATABASE_CORRUPT"):
-        await ThreadStore.open(project=tmp_path, home=home)
+    with pytest.raises(ThreadPersistenceError, match="CHECKPOINT_DATABASE_CORRUPT"):
+        await ThreadPersistence.open(project=tmp_path, home=home)

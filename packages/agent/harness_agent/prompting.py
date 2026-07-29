@@ -104,7 +104,7 @@ class EnvironmentSnapshotCache:
     """按输入指纹缓存 24 小时的环境渲染结果，过期才允许重新生成。"""
 
     def __init__(self) -> None:
-        """创建进程内缓存；长期恢复使用 ThreadStore 中保存的 epoch。"""
+        """创建进程内缓存；长期恢复使用 ThreadPersistence 中保存的 epoch。"""
         self._entries: dict[str, EnvironmentSnapshot] = {}
 
     def get_or_create(self, values: Mapping[str, object], *, now_ms: int | None = None) -> EnvironmentSnapshot:

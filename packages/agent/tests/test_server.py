@@ -82,9 +82,9 @@ def _event_types(frames: list[dict[str, Any]]) -> list[str]:
 
 async def test_initialize_negotiates_v3_and_capabilities(tmp_path: Path):
     """握手返回选定 minor、能力交集、限制和脱敏配置摘要。"""
-    from harness_agent.server import JsonRpcServer
+    from harness_agent.server import AgentHost
 
-    server = JsonRpcServer(allow_echo=True, config_home=tmp_path / "home")
+    server = AgentHost(allow_echo=True, config_home=tmp_path / "home")
     frames = await _capture_server(server)
     result = frames[0]["result"]
     assert result["protocol"] == {"major": 3, "minor": 0}
@@ -95,9 +95,9 @@ async def test_initialize_negotiates_v3_and_capabilities(tmp_path: Path):
 
 async def test_initialize_rejects_incompatible_major_and_pre_initialize_calls():
     """不兼容 Major 和握手前业务调用必须被结构化拒绝。"""
-    from harness_agent.server import JsonRpcServer
+    from harness_agent.server import AgentHost
 
-    server = JsonRpcServer(allow_echo=True)
+    server = AgentHost(allow_echo=True)
     frames: list[dict[str, Any]] = []
     server.send = lambda message: _append(frames, message)  # type: ignore[method-assign]
     await server.dispatch(_request("run.start", {"message": "x"}, "run-early"))
@@ -109,7 +109,7 @@ async def test_config_show_exposes_redacted_runtime_pool_diagnostics(tmp_path: P
     """已有 config.show 提供 Pool 本地诊断，且不能泄露完整 Profile Key。"""
     from harness_agent.agent_runtime import AgentRuntime, RuntimePool
     from harness_agent.runtime_profile import ModelRoleBinding, RuntimeProfile, component_fingerprint
-    from harness_agent.server import JsonRpcServer
+    from harness_agent.server import AgentHost
 
     def fingerprint(component: str) -> str:
         return component_fingerprint({"server-diagnostics": component})
@@ -127,7 +127,7 @@ async def test_config_show_exposes_redacted_runtime_pool_diagnostics(tmp_path: P
         middleware_fingerprint=fingerprint("middleware"),
         prompt_template_fingerprint=fingerprint("prompt"),
     )
-    server = JsonRpcServer(allow_echo=True, config_home=tmp_path / "home")
+    server = AgentHost(allow_echo=True, config_home=tmp_path / "home")
     frames = await _capture_server(server)
     pool = RuntimePool(lambda requested: AgentRuntime(profile=requested, graph=object()))
     server._runtime_pool = pool
@@ -149,7 +149,7 @@ async def test_config_write_rpc_previews_and_commits_user_default_model(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     """v3 配置写接口必须协商 capability、返回 CAS revision 并只修改用户白名单字段。"""
-    from harness_agent.server import JsonRpcServer
+    from harness_agent.server import AgentHost
 
     home = tmp_path / "home"
     config_path = home / ".harness" / "config.toml"
@@ -178,7 +178,7 @@ executor = "fast"
     )
     monkeypatch.setenv("HARNESS_FAST_KEY", "fast-test")
     monkeypatch.setenv("HARNESS_PRO_KEY", "pro-test")
-    server = JsonRpcServer(config_home=home)
+    server = AgentHost(config_home=home)
     frames: list[dict[str, Any]] = []
     server.send = lambda message: _append(frames, message)  # type: ignore[method-assign]
     await server.dispatch(
@@ -234,18 +234,18 @@ executor = "fast"
     )
     assert frames[-1].get("result", {}).get("accepted") is True, frames[-1]
     await asyncio.sleep(0)
-    assert server._thread_store is not None
-    binding = await server._thread_store.get_latest_run_execution_binding("fresh-thread")
+    assert server._thread_persistence is not None
+    binding = (await server._thread_persistence.load_run_state("fresh-thread")).latest_run
     assert binding is not None
     assert binding.actual_primary.profile_id == "pro"
-    await server._close_thread_store()
+    await server._close_thread_persistence()
 
 
 async def test_config_write_requires_capability(tmp_path: Path) -> None:
     """未显式协商 config.write 的客户端不能调用配置写接口。"""
-    from harness_agent.server import JsonRpcServer
+    from harness_agent.server import AgentHost
 
-    server = JsonRpcServer(allow_echo=True, config_home=tmp_path / "home")
+    server = AgentHost(allow_echo=True, config_home=tmp_path / "home")
     frames: list[dict[str, Any]] = []
     server.send = lambda message: _append(frames, message)  # type: ignore[method-assign]
     await server.dispatch(
@@ -268,7 +268,7 @@ async def test_config_write_requires_capability(tmp_path: Path) -> None:
 
 async def test_project_configuration_failure_prevents_agent_factory_invocation(tmp_path: Path):
     """未可信项目配置必须在创建模型或 Agent 之前以启动错误终止。"""
-    from harness_agent.server import JsonRpcServer
+    from harness_agent.server import AgentHost
 
     workspace = tmp_path / "workspace"
     project_config = workspace / ".harness" / "config.toml"
@@ -281,7 +281,7 @@ async def test_project_configuration_failure_prevents_agent_factory_invocation(t
         invoked = True
         return object()
 
-    server = JsonRpcServer(
+    server = AgentHost(
         agent_factory=factory,
         config_home=tmp_path / "home",
         workspace=workspace,
@@ -306,9 +306,9 @@ async def test_project_configuration_failure_prevents_agent_factory_invocation(t
 
 async def test_echo_run_response_precedes_ordered_terminal_events():
     """run.start 响应必须早于 sequence 连续的统一事件。"""
-    from harness_agent.server import JsonRpcServer
+    from harness_agent.server import AgentHost
 
-    server = JsonRpcServer(allow_echo=True)
+    server = AgentHost(allow_echo=True)
     frames = await _capture_server(server)
     await server.dispatch(_request("run.start", {"message": "hello", "thread_id": "t", "run_id": "r"}, "run-1"))
     await _wait_for(frames, lambda frame: frame.get("params", {}).get("type") == "run.completed")
@@ -326,9 +326,9 @@ async def test_run_started_emits_authoritative_primary_model_binding():
         SelectionOrigin,
         ThreadExecutionSelection,
     )
-    from harness_agent.server import ActiveRun, JsonRpcServer
+    from harness_agent.server import ActiveRun, AgentHost
 
-    server = JsonRpcServer(allow_echo=True)
+    server = AgentHost(allow_echo=True)
     frames = await _capture_server(server)
     binding = RunExecutionBinding(
         thread_id="thread-model",
@@ -369,16 +369,21 @@ async def test_context_compact_rewrites_idle_thread_and_returns_context_summary(
     from langchain_core.messages import HumanMessage
 
     from harness_agent.context_window import ContextUpdate
-    from harness_agent.server import JsonRpcServer
+    from harness_agent.server import AgentHost
+    from harness_agent.thread_persistence import ContextSnapshot, ContextState
 
     class Store:
         def __init__(self) -> None:
             self.refreshed: list[str] = []
 
-        async def load_context_messages(self, _thread_id: str) -> list[HumanMessage]:
-            return [HumanMessage(content="旧上下文")]
+        async def load_context(self, _thread_id: str) -> ContextSnapshot:
+            return ContextSnapshot(
+                messages=(HumanMessage(content="旧上下文"),),
+                state=ContextState(),
+                recoverable=True,
+            )
 
-        async def refresh_thread(self, thread_id: str) -> None:
+        async def complete_run(self, thread_id: str) -> None:
             self.refreshed.append(thread_id)
 
         @staticmethod
@@ -412,10 +417,10 @@ async def test_context_compact_rewrites_idle_thread_and_returns_context_summary(
 
     store = Store()
     agent = Agent()
-    server = JsonRpcServer(agent=agent)
+    server = AgentHost(agent=agent)
     server._owner_connection.initialized = True
     server._owner_connection.enabled_capabilities = {"context.manage"}
-    server._thread_store = store  # type: ignore[assignment]
+    server._thread_persistence = store  # type: ignore[assignment]
     server._context_compactor = Middleware()
     server._thread_persistence_enabled = lambda: True  # type: ignore[method-assign]
     frames: list[dict[str, Any]] = []
@@ -444,9 +449,9 @@ async def test_context_compact_rewrites_idle_thread_and_returns_context_summary(
 
 async def test_context_compact_rejects_active_run():
     """运行中 checkpoint 会变动，手动压缩必须等待当前 run 结束。"""
-    from harness_agent.server import ActiveRun, JsonRpcServer
+    from harness_agent.server import ActiveRun, AgentHost
 
-    server = JsonRpcServer()
+    server = AgentHost()
     server._owner_connection.initialized = True
     server._owner_connection.enabled_capabilities = {"context.manage"}
     server._runs["thread"] = ActiveRun(thread_id="thread", run_id="run", message="运行中")
@@ -460,7 +465,7 @@ async def test_context_compact_rejects_active_run():
 
 async def test_models_list_and_run_start_resolve_current_thread_selection(tmp_path: Path, monkeypatch) -> None:
     """models.select 让同一 Thread 的后续 Run 立即采用新主模型，并保留历史事实。"""
-    from harness_agent.server import JsonRpcServer
+    from harness_agent.server import AgentHost
 
     home = tmp_path / "home"
     config = home / ".harness" / "config.toml"
@@ -497,7 +502,7 @@ executor = "fast"
     monkeypatch.setenv("PRO_KEY", "pro-secret")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    server = JsonRpcServer(config_home=home, workspace=workspace)
+    server = AgentHost(config_home=home, workspace=workspace)
     frames: list[dict[str, Any]] = []
     server.send = lambda message: _append(frames, message)  # type: ignore[method-assign]
     await server.dispatch(_request(
@@ -533,11 +538,11 @@ executor = "fast"
     ))
     assert frames[-1]["result"]["accepted"] is True
     await asyncio.sleep(0)
-    assert server._thread_store is not None
+    assert server._thread_persistence is not None
     assert (
-        await server._thread_store.load_execution_binding_state("thread-model")
+        await server._thread_persistence.load_run_state("thread-model")
     ).legacy_models is None
-    first = await server._thread_store.get_latest_run_execution_binding("thread-model")
+    first = (await server._thread_persistence.load_run_state("thread-model")).latest_run
     assert first is not None
     assert first.requested_selection.to_record() == {"primary_profile": "pro"}
     assert first.actual_primary.profile_id == "pro"
@@ -561,7 +566,7 @@ executor = "fast"
         "start-model-again",
     ))
     assert frames[-1]["result"]["accepted"] is True
-    second = await server._thread_store.get_latest_run_execution_binding("thread-model")
+    second = (await server._thread_persistence.load_run_state("thread-model")).latest_run
     assert second is not None
     assert second.requested_selection.to_record() == {"primary_profile": "fast"}
     assert second.actual_primary.profile_id == "fast"
@@ -570,7 +575,7 @@ executor = "fast"
     model_state = frames[-1]["result"]
     assert model_state["thread_selection"] == {"primary_profile": "fast"}
     assert model_state["last_run_binding"]["profile"]["model"] == "fast-model"
-    await server._close_thread_store()
+    await server._close_thread_persistence()
 
 
 async def test_default_sidecar_shares_runtime_by_profile_without_draining_other_models(
@@ -585,7 +590,7 @@ async def test_default_sidecar_shares_runtime_by_profile_without_draining_other_
         Za38Config,
     )
     from harness_agent.runtime_profile import component_fingerprint
-    from harness_agent.server import JsonRpcServer
+    from harness_agent.server import AgentHost
 
     class Store:
         project_fingerprint = component_fingerprint({"project": "server-runtime"})
@@ -593,13 +598,10 @@ async def test_default_sidecar_shares_runtime_by_profile_without_draining_other_
         def __init__(self) -> None:
             self.profiles: dict[str, object] = {}
 
-        async def get_runtime_profile(self, thread_id: str) -> object | None:
-            return self.profiles.get(thread_id)
+        async def persist_runtime_profile(self, profile: object) -> None:
+            self.profiles[str(getattr(profile, "profile_key"))] = profile
 
-        async def save_runtime_profile(self, thread_id: str, profile: object, *, bind_thread: bool = True) -> None:
-            self.profiles[thread_id] = profile
-
-        async def load_execution_binding_state(self, _thread_id: str) -> object:
+        async def load_run_state(self, _thread_id: str) -> object:
             from harness_agent.execution_binding import PersistedBindingState
 
             return PersistedBindingState()
@@ -623,11 +625,11 @@ async def test_default_sidecar_shares_runtime_by_profile_without_draining_other_
             sources={},
         )
 
-    server = JsonRpcServer(config_home=tmp_path / "home")
+    server = AgentHost(config_home=tmp_path / "home")
     server._config = config("fast-v1", pin_default_profile=True)
     server._load_config = lambda: None  # type: ignore[method-assign]
     store = Store()
-    server._thread_store = store  # type: ignore[assignment]
+    server._thread_persistence = store  # type: ignore[assignment]
     builds = 0
 
     async def build(profile: object) -> AgentRuntime:
@@ -642,7 +644,7 @@ async def test_default_sidecar_shares_runtime_by_profile_without_draining_other_
     assert first_lease is not None and second_lease is not None
     assert first_runtime is second_runtime
     assert builds == 1
-    assert set(store.profiles) == {"thread-a", "thread-b"}
+    assert len(store.profiles) == 1
 
     await server._release_runtime_lease(first_lease)
     await server._release_runtime_lease(second_lease)
@@ -654,6 +656,7 @@ async def test_default_sidecar_shares_runtime_by_profile_without_draining_other_
     assert third_lease is not None
     assert third_runtime is not old_runtime
     assert builds == 2
+    assert len(store.profiles) == 2
     assert old_runtime is not None and old_runtime.graph is not None
 
     await server._release_runtime_lease(third_lease)
@@ -673,7 +676,7 @@ async def test_default_context_compact_acquires_and_releases_profile_runtime(tmp
     )
     from harness_agent.context_window import ContextUpdate
     from harness_agent.runtime_profile import component_fingerprint
-    from harness_agent.server import JsonRpcServer, _RuntimeArtifacts
+    from harness_agent.server import AgentHost, _RuntimeArtifacts
 
     class Store:
         project_fingerprint = component_fingerprint({"project": "compact-runtime"})
@@ -682,21 +685,24 @@ async def test_default_context_compact_acquires_and_releases_profile_runtime(tmp
             self.profiles: dict[str, object] = {}
             self.refreshed: list[str] = []
 
-        async def get_runtime_profile(self, thread_id: str) -> object | None:
-            return self.profiles.get(thread_id)
+        async def persist_runtime_profile(self, profile: object) -> None:
+            self.profiles[str(getattr(profile, "profile_key"))] = profile
 
-        async def save_runtime_profile(self, thread_id: str, profile: object, *, bind_thread: bool = True) -> None:
-            self.profiles[thread_id] = profile
-
-        async def load_execution_binding_state(self, _thread_id: str) -> object:
+        async def load_run_state(self, _thread_id: str) -> object:
             from harness_agent.execution_binding import PersistedBindingState
 
             return PersistedBindingState()
 
-        async def load_context_messages(self, _thread_id: str) -> list[HumanMessage]:
-            return [HumanMessage(content="历史")]
+        async def load_context(self, _thread_id: str) -> object:
+            from harness_agent.thread_persistence import ContextSnapshot, ContextState
 
-        async def refresh_thread(self, thread_id: str) -> None:
+            return ContextSnapshot(
+                messages=(HumanMessage(content="历史"),),
+                state=ContextState(),
+                recoverable=True,
+            )
+
+        async def complete_run(self, thread_id: str) -> None:
             self.refreshed.append(thread_id)
 
         @staticmethod
@@ -732,7 +738,7 @@ async def test_default_context_compact_acquires_and_releases_profile_runtime(tmp
             assert as_node == "model"
             self.updates.append(update)
 
-    server = JsonRpcServer(config_home=tmp_path / "home")
+    server = AgentHost(config_home=tmp_path / "home")
     server._owner_connection.initialized = True
     server._owner_connection.enabled_capabilities = {"context.manage"}
     server._config = Za38Config(
@@ -750,7 +756,7 @@ async def test_default_context_compact_acquires_and_releases_profile_runtime(tmp
     )
     server._load_config = lambda: None  # type: ignore[method-assign]
     store = Store()
-    server._thread_store = store  # type: ignore[assignment]
+    server._thread_persistence = store  # type: ignore[assignment]
     graph = Graph()
 
     async def build(profile: object) -> AgentRuntime:
@@ -779,9 +785,9 @@ async def test_default_context_compact_acquires_and_releases_profile_runtime(tmp
 async def test_runtime_pool_capacity_is_reported_as_stable_rpc_error():
     """无安全淘汰候选时控制面返回稳定资源繁忙码，而不是内部异常类型。"""
     from harness_agent.agent_runtime import RuntimePoolCapacityError
-    from harness_agent.server import JsonRpcServer
+    from harness_agent.server import AgentHost
 
-    server = JsonRpcServer(allow_echo=True)
+    server = AgentHost(allow_echo=True)
     server._owner_connection.initialized = True
     server._owner_connection.enabled_capabilities = {"config.read"}
 
@@ -809,7 +815,7 @@ def test_stream_translation_prefers_normalized_content_blocks():
     """首轮仅提供 content_blocks 时仍必须产生正文事件。"""
     from types import SimpleNamespace
 
-    from harness_agent.server import ActiveRun, JsonRpcServer
+    from harness_agent.server import ActiveRun, AgentHost
 
     chunk = SimpleNamespace(
         content="",
@@ -818,7 +824,7 @@ def test_stream_translation_prefers_normalized_content_blocks():
         tool_call_chunks=[],
     )
     run = ActiveRun(thread_id="thread", run_id="run", message="你好")
-    events = list(JsonRpcServer(allow_echo=True)._translate_stream_event(((), "messages", (chunk, {})), run))
+    events = list(AgentHost(allow_echo=True)._translate_stream_event(((), "messages", (chunk, {})), run))
 
     assert events == [("content.delta", {"text": "首轮回复"})]
     assert run.usage == {"input_tokens": 10, "output_tokens": 4}
@@ -828,9 +834,9 @@ def test_tool_fragments_with_missing_ids_are_merged_by_index():
     """工具名和参数分片缺少重复 id 时仍应归并为同一协议工具。"""
     from types import SimpleNamespace
 
-    from harness_agent.server import ActiveRun, JsonRpcServer
+    from harness_agent.server import ActiveRun, AgentHost
 
-    server = JsonRpcServer(allow_echo=True)
+    server = AgentHost(allow_echo=True)
     run = ActiveRun(thread_id="thread", run_id="run", message="执行 pwd")
     first = SimpleNamespace(content="", usage_metadata=None, tool_call_chunks=[{"index": 0, "id": "call-1", "name": "execute", "args": ""}])
     second = SimpleNamespace(content="", usage_metadata=None, tool_call_chunks=[{"index": 0, "id": None, "name": None, "args": '{"command":"pwd"}'}])
@@ -850,9 +856,9 @@ def test_tool_stream_reuses_index_for_later_calls_without_overwriting_history():
     """每轮工具流重置 index 时，新的真实调用 ID 仍必须产生独立事件。"""
     from types import SimpleNamespace
 
-    from harness_agent.server import ActiveRun, JsonRpcServer
+    from harness_agent.server import ActiveRun, AgentHost
 
-    server = JsonRpcServer(allow_echo=True)
+    server = AgentHost(allow_echo=True)
     run = ActiveRun(thread_id="thread", run_id="run", message="连续执行两次")
     first = SimpleNamespace(content="", usage_metadata=None, tool_call_chunks=[{"index": 0, "id": "call-1", "name": "execute", "args": ""}])
     first_result = type("ToolMessage", (), {"content": "first result", "tool_call_id": "call-1", "status": "success", "tool_call_chunks": [], "usage_metadata": None})()
@@ -878,7 +884,7 @@ def test_tool_stream_reuses_index_for_later_calls_without_overwriting_history():
 
 async def test_multiple_threads_run_concurrently_but_same_thread_is_rejected():
     """不同 thread 可并发，同一 thread 的第二个活动 run 被拒绝。"""
-    from harness_agent.server import JsonRpcServer
+    from harness_agent.server import AgentHost
 
     releases = {"t1": asyncio.Event(), "t2": asyncio.Event()}
 
@@ -888,7 +894,7 @@ async def test_multiple_threads_run_concurrently_but_same_thread_is_rejected():
             yield ("messages", (type("Chunk", (), {"content": thread_id, "usage_metadata": None, "tool_call_chunks": []})(), {}))
             await releases[thread_id].wait()
 
-    server = JsonRpcServer(agent=BlockingAgent())
+    server = AgentHost(agent=BlockingAgent())
     frames = await _capture_server(server)
     await server.dispatch(_request("run.start", {"message": "a", "thread_id": "t1", "run_id": "r1"}, "start-1"))
     await server.dispatch(_request("run.start", {"message": "b", "thread_id": "t2", "run_id": "r2"}, "start-2"))
@@ -906,7 +912,7 @@ async def test_multiple_threads_run_concurrently_but_same_thread_is_rejected():
 async def test_question_request_uses_standard_response_and_stable_question_id():
     """AskUser interrupt 通过 Agent→Client request 恢复，不再调用 respond 方法。"""
     from langgraph.types import Command, Interrupt
-    from harness_agent.server import JsonRpcServer
+    from harness_agent.server import AgentHost
 
     class AskAgent:
         def __init__(self) -> None:
@@ -921,7 +927,7 @@ async def test_question_request_uses_standard_response_and_stable_question_id():
             assert stream_input.resume == {"ask-1": {"status": "answered", "answers": ["src"]}}
             yield ("messages", (type("Chunk", (), {"content": "完成", "usage_metadata": None, "tool_call_chunks": []})(), {}))
 
-    server = JsonRpcServer(agent=AskAgent())
+    server = AgentHost(agent=AskAgent())
     frames = await _capture_server(server)
     await server.dispatch(_request("run.start", {"message": "开始", "thread_id": "t", "run_id": "r"}, "start"))
     interaction = await _wait_for(frames, lambda frame: frame.get("method") == "interaction.question")
@@ -938,7 +944,7 @@ async def test_real_hitl_rejection_prevents_file_write():
     from langchain_core.messages import AIMessage
     from langchain_core.runnables import Runnable
     from harness_agent.agent import create_harness_agent
-    from harness_agent.server import JsonRpcServer
+    from harness_agent.server import AgentHost
 
     class ToolModel(FakeMessagesListChatModel):
         def bind_tools(self, *_args: Any, **_kwargs: Any) -> Runnable:
@@ -949,7 +955,7 @@ async def test_real_hitl_rejection_prevents_file_write():
         model = ToolModel(responses=[AIMessage(content="", tool_calls=[{"name": "write_file", "args": {"file_path": str(destination), "content": "x"}, "id": "call-1"}]), AIMessage(content="已拒绝")])
         model.profile = {"max_input_tokens": 200_000}
         agent = create_harness_agent(model, cwd=workspace, enable_skills=False, enable_memory=False, enable_ask_user=False, approval_mode="default")
-        server = JsonRpcServer(agent=agent)
+        server = AgentHost(agent=agent)
         frames = await _capture_server(server)
         await server.dispatch(_request("run.start", {"message": "写入", "thread_id": "t", "run_id": "r"}, "start"))
         interaction = await _wait_for(frames, lambda frame: frame.get("method") == "interaction.approval")
@@ -964,7 +970,7 @@ async def test_workspace_rejection_precedes_default_approval_request():
     from langchain_core.messages import AIMessage
     from langchain_core.runnables import Runnable
     from harness_agent.agent import create_harness_agent
-    from harness_agent.server import JsonRpcServer
+    from harness_agent.server import AgentHost
 
     class ToolModel(FakeMessagesListChatModel):
         def bind_tools(self, *_args: Any, **_kwargs: Any) -> Runnable:
@@ -996,7 +1002,7 @@ async def test_workspace_rejection_precedes_default_approval_request():
             enable_memory=False,
             enable_ask_user=False,
         )
-        server = JsonRpcServer(agent=agent)
+        server = AgentHost(agent=agent)
         frames = await _capture_server(server)
         await server.dispatch(
             _request("run.start", {"message": "越界写入", "thread_id": "outside", "run_id": "outside-run"}, "outside-start")
@@ -1013,7 +1019,7 @@ async def test_auto_edit_writes_without_interruption_but_shell_still_requires_ap
     from langchain_core.messages import AIMessage
     from langchain_core.runnables import Runnable
     from harness_agent.agent import create_harness_agent
-    from harness_agent.server import JsonRpcServer
+    from harness_agent.server import AgentHost
 
     class ToolModel(FakeMessagesListChatModel):
         def bind_tools(self, *_args: Any, **_kwargs: Any) -> Runnable:
@@ -1047,7 +1053,7 @@ async def test_auto_edit_writes_without_interruption_but_shell_still_requires_ap
             enable_memory=False,
             enable_ask_user=False,
         )
-        write_server = JsonRpcServer(agent=write_agent)
+        write_server = AgentHost(agent=write_agent)
         write_frames = await _capture_server(write_server)
         await write_server.dispatch(
             _request("run.start", {"message": "写入", "thread_id": "write", "run_id": "write-run"}, "write-start")
@@ -1076,7 +1082,7 @@ async def test_auto_edit_writes_without_interruption_but_shell_still_requires_ap
             enable_memory=False,
             enable_ask_user=False,
         )
-        shell_server = JsonRpcServer(agent=shell_agent)
+        shell_server = AgentHost(agent=shell_agent)
         shell_frames = await _capture_server(shell_server)
         await shell_server.dispatch(
             _request("run.start", {"message": "执行", "thread_id": "shell", "run_id": "shell-run"}, "shell-start")
@@ -1099,7 +1105,7 @@ async def test_batch_tool_call_approval_restores_one_decision_per_hanging_call()
     from langchain_core.messages import AIMessage
     from langchain_core.runnables import Runnable
     from harness_agent.agent import create_harness_agent
-    from harness_agent.server import JsonRpcServer
+    from harness_agent.server import AgentHost
 
     class ToolModel(FakeMessagesListChatModel):
         def bind_tools(self, *_args: Any, **_kwargs: Any) -> Runnable:
@@ -1128,7 +1134,7 @@ async def test_batch_tool_call_approval_restores_one_decision_per_hanging_call()
             enable_memory=False,
             enable_ask_user=False,
         )
-        server = JsonRpcServer(agent=agent)
+        server = AgentHost(agent=agent)
         frames = await _capture_server(server)
         await server.dispatch(
             _request("run.start", {"message": "批量执行", "thread_id": "batch", "run_id": "batch-run"}, "batch-start")
@@ -1152,7 +1158,7 @@ async def test_plan_mode_returns_tool_message_without_writing_or_requesting_appr
     from langchain_core.messages import AIMessage
     from langchain_core.runnables import Runnable
     from harness_agent.agent import create_harness_agent
-    from harness_agent.server import JsonRpcServer
+    from harness_agent.server import AgentHost
 
     class ToolModel(FakeMessagesListChatModel):
         def bind_tools(self, *_args: Any, **_kwargs: Any) -> Runnable:
@@ -1186,7 +1192,7 @@ async def test_plan_mode_returns_tool_message_without_writing_or_requesting_appr
             enable_memory=False,
             enable_ask_user=False,
         )
-        server = JsonRpcServer(agent=agent)
+        server = AgentHost(agent=agent)
         frames = await _capture_server(server)
         await server.dispatch(
             _request("run.start", {"message": "写入", "thread_id": "plan", "run_id": "plan-run"}, "plan-start")
@@ -1199,9 +1205,9 @@ async def test_plan_mode_returns_tool_message_without_writing_or_requesting_appr
 
 async def test_missing_interaction_capability_fails_closed_without_reverse_request():
     """无头客户端不声明交互能力时，服务端直接返回拒绝而不发送 request。"""
-    from harness_agent.server import ActiveRun, InteractionSpec, JsonRpcServer
+    from harness_agent.server import ActiveRun, InteractionSpec, AgentHost
 
-    server = JsonRpcServer(allow_echo=True)
+    server = AgentHost(allow_echo=True)
     frames: list[dict[str, Any]] = []
 
     async def capture(message: dict[str, Any]) -> None:
@@ -1265,9 +1271,9 @@ async def test_stdio_subprocess_end_to_end_echo_mode():
 
 async def test_mcp_status_no_config(tmp_path: Path):
     """未配置 MCP 服务器时 mcp.status 返回空列表和零工具数。"""
-    from harness_agent.server import JsonRpcServer
+    from harness_agent.server import AgentHost
 
-    server = JsonRpcServer(allow_echo=True, config_home=tmp_path / "home")
+    server = AgentHost(allow_echo=True, config_home=tmp_path / "home")
     frames = await _capture_server(server)
     await server.dispatch(_request("mcp.status", {}, "mcp-status"))
     assert frames[-1]["result"] == {"servers": [], "total_tools": 0}
@@ -1275,9 +1281,9 @@ async def test_mcp_status_no_config(tmp_path: Path):
 
 async def test_mcp_status_not_initialized():
     """握手前调用 mcp.status 必须被结构化拒绝。"""
-    from harness_agent.server import JsonRpcServer
+    from harness_agent.server import AgentHost
 
-    server = JsonRpcServer(allow_echo=True)
+    server = AgentHost(allow_echo=True)
     frames: list[dict[str, Any]] = []
     server.send = lambda message: _append(frames, message)  # type: ignore[method-assign]
     await server.dispatch(_request("mcp.status", {}, "mcp-early"))
@@ -1288,7 +1294,7 @@ async def test_mcp_add_stdio(tmp_path: Path):
     """添加 stdio MCP 服务器后配置持久化且返回连接状态。"""
     from unittest.mock import AsyncMock, patch
 
-    from harness_agent.server import JsonRpcServer
+    from harness_agent.server import AgentHost
 
     config_home = tmp_path / "home"
     config_file = config_home / ".harness" / "config.toml"
@@ -1302,7 +1308,7 @@ async def test_mcp_add_stdio(tmp_path: Path):
         mock_instance = MockManager.return_value
         mock_instance.connect_all = AsyncMock()
         mock_instance.apply_snapshot = AsyncMock(return_value=[fake_status])
-        server = JsonRpcServer(allow_echo=True, config_home=config_home)
+        server = AgentHost(allow_echo=True, config_home=config_home)
         frames = await _capture_server(server)
         await server.dispatch(
             _request(
@@ -1325,7 +1331,7 @@ async def test_mcp_add_stdio(tmp_path: Path):
 
 async def test_mcp_add_duplicate(tmp_path: Path):
     """添加同名 MCP 服务器必须返回错误。"""
-    from harness_agent.server import JsonRpcServer
+    from harness_agent.server import AgentHost
 
     config_home = tmp_path / "home"
     config_file = config_home / ".harness" / "config.toml"
@@ -1334,7 +1340,7 @@ async def test_mcp_add_duplicate(tmp_path: Path):
         '[config]\nversion = 1\n\n[[mcp.servers]]\nname = "existing"\ntransport = "stdio"\ncommand = "echo"\n',
         encoding="utf-8",
     )
-    server = JsonRpcServer(allow_echo=True, config_home=config_home)
+    server = AgentHost(allow_echo=True, config_home=config_home)
     frames = await _capture_server(server)
 
     await server.dispatch(
@@ -1347,13 +1353,13 @@ async def test_mcp_add_duplicate(tmp_path: Path):
 
 async def test_mcp_add_invalid_name(tmp_path: Path):
     """非法服务器名称必须被拒绝。"""
-    from harness_agent.server import JsonRpcServer
+    from harness_agent.server import AgentHost
 
     config_home = tmp_path / "home"
     config_file = config_home / ".harness" / "config.toml"
     config_file.parent.mkdir(parents=True)
     config_file.write_text("[config]\nversion = 1\n", encoding="utf-8")
-    server = JsonRpcServer(allow_echo=True, config_home=config_home)
+    server = AgentHost(allow_echo=True, config_home=config_home)
     frames = await _capture_server(server)
 
     await server.dispatch(
@@ -1366,7 +1372,7 @@ async def test_mcp_add_invalid_name(tmp_path: Path):
 
 async def test_mcp_remove_existing(tmp_path: Path):
     """删除已存在的 MCP 服务器后配置更新且返回成功。"""
-    from harness_agent.server import JsonRpcServer
+    from harness_agent.server import AgentHost
 
     config_home = tmp_path / "home"
     config_file = config_home / ".harness" / "config.toml"
@@ -1375,7 +1381,7 @@ async def test_mcp_remove_existing(tmp_path: Path):
         '[config]\nversion = 1\n\n[[mcp.servers]]\nname = "to-remove"\ntransport = "stdio"\ncommand = "echo"\n',
         encoding="utf-8",
     )
-    server = JsonRpcServer(allow_echo=True, config_home=config_home)
+    server = AgentHost(allow_echo=True, config_home=config_home)
     frames = await _capture_server(server)
 
     await server.dispatch(
@@ -1391,13 +1397,13 @@ async def test_mcp_remove_existing(tmp_path: Path):
 
 async def test_mcp_remove_nonexistent(tmp_path: Path):
     """删除不存在的 MCP 服务器必须返回错误。"""
-    from harness_agent.server import JsonRpcServer
+    from harness_agent.server import AgentHost
 
     config_home = tmp_path / "home"
     config_file = config_home / ".harness" / "config.toml"
     config_file.parent.mkdir(parents=True)
     config_file.write_text("[config]\nversion = 1\n", encoding="utf-8")
-    server = JsonRpcServer(allow_echo=True, config_home=config_home)
+    server = AgentHost(allow_echo=True, config_home=config_home)
     frames = await _capture_server(server)
 
     await server.dispatch(

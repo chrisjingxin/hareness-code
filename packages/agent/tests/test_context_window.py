@@ -5,14 +5,16 @@ from __future__ import annotations
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from thread_fixtures import accept_thread
+
 
 async def _store(tmp_path):
     """创建隔离 project 的真实 SQLite，验证归档不写进工作区。"""
-    from harness_agent.thread_store import ThreadStore
+    from harness_agent.thread_persistence import ThreadPersistence
 
     project = tmp_path / "project"
     project.mkdir()
-    return await ThreadStore.open(project=project, home=tmp_path / "home")
+    return await ThreadPersistence.open(project=project, home=tmp_path / "home")
 
 
 async def test_context_window_reports_and_soft_dehydrates_old_tool_results(tmp_path):
@@ -21,7 +23,7 @@ async def test_context_window_reports_and_soft_dehydrates_old_tool_results(tmp_p
 
     store = await _store(tmp_path)
     model = FakeMessagesListChatModel(responses=[AIMessage(content="unused")])
-    middleware = ContextWindowMiddleware(model, context_window_tokens=16_384, thread_store=store)
+    middleware = ContextWindowMiddleware(model, context_window_tokens=16_384, thread_persistence=store)
     messages = [
         HumanMessage(content="第一轮"),
         ToolMessage(content="x" * 33_000, tool_call_id="tool-old"),
@@ -36,7 +38,7 @@ async def test_context_window_reports_and_soft_dehydrates_old_tool_results(tmp_p
     assert dehydrated[1] == "soft_dehydration" and dehydrated[3] is True
     assert dehydrated[2]
     assert "/.harness/history/" in str(dehydrated[0][1].content)
-    artifact = await store.read_context_artifact("thread", dehydrated[2][0])
+    artifact = await store.load_context_artifact("thread", dehydrated[2][0])
     assert artifact and "x" * 100 in artifact.content
     await store.close()
 
@@ -55,7 +57,7 @@ async def test_context_window_summarizes_at_80_and_opens_circuit_after_failures(
     good = ContextWindowMiddleware(
         FakeMessagesListChatModel(responses=[AIMessage(content="## 目标\n完成\n## 已确认事实\n有证据\n## 决策\n无\n## 改动\n无\n## 测试\n无\n## 未决项\n无\n## 归档\n无")]),
         context_window_tokens=16_384,
-        thread_store=store,
+        thread_persistence=store,
     )
     summarized = await good._prepare("thread", messages, 10_000)
     assert summarized[1] == "summary" and summarized[3] is True
@@ -64,7 +66,7 @@ async def test_context_window_summarizes_at_80_and_opens_circuit_after_failures(
     forced = ContextWindowMiddleware(
         FakeMessagesListChatModel(responses=[AIMessage(content="## 目标\n完成\n## 已确认事实\n有证据\n## 决策\n无\n## 改动\n无\n## 测试\n无\n## 未决项\n无\n## 归档\n无")]),
         context_window_tokens=16_384,
-        thread_store=store,
+        thread_persistence=store,
     )
     forced_result = await forced._prepare("forced", messages, 11_500)
     assert forced_result[1] == "forced_summary" and forced_result[3] is True
@@ -73,14 +75,14 @@ async def test_context_window_summarizes_at_80_and_opens_circuit_after_failures(
     bad = ContextWindowMiddleware(
         FakeMessagesListChatModel(responses=[AIMessage(content="")]),
         context_window_tokens=16_384,
-        thread_store=store,
+        thread_persistence=store,
     )
     for _ in range(3):
         result = await bad._prepare("broken", messages, 10_000)
         assert result[3] is False
     final = await bad._prepare("broken", messages, 10_000)
     assert final[1] == "circuit_open"
-    assert (await store.context_state("broken")).circuit_open is True
+    assert (await store.load_context("broken")).state.circuit_open is True
     await store.close()
 
 
@@ -92,7 +94,7 @@ async def test_context_window_overflow_recovery_archives_before_single_retry(tmp
     middleware = ContextWindowMiddleware(
         FakeMessagesListChatModel(responses=[AIMessage(content="unused")]),
         context_window_tokens=16_384,
-        thread_store=store,
+        thread_persistence=store,
     )
     messages = [
         HumanMessage(content="旧请求"),
@@ -103,7 +105,7 @@ async def test_context_window_overflow_recovery_archives_before_single_retry(tmp
 
     assert changed is True and artifacts
     assert "/.harness/history/" in str(recovered[1].content)
-    assert (await store.read_context_artifact("overflow", artifacts[0])) is not None
+    assert (await store.load_context_artifact("overflow", artifacts[0])) is not None
     await store.close()
 
 
@@ -115,7 +117,7 @@ async def test_context_window_manual_compaction_bypasses_threshold_but_keeps_sav
     middleware = ContextWindowMiddleware(
         FakeMessagesListChatModel(responses=[AIMessage(content="## 目标\n压缩\n## 已确认事实\n已完成\n## 决策\n保留两轮\n## 改动\n无\n## 测试\n无\n## 未决项\n无\n## 归档\n无")]),
         context_window_tokens=16_384,
-        thread_store=store,
+        thread_persistence=store,
     )
     messages = [
         HumanMessage(content="第一轮 " + "a" * 9_000),
@@ -130,7 +132,7 @@ async def test_context_window_manual_compaction_bypasses_threshold_but_keeps_sav
     assert update.action == "manual_summary"
     assert "harness_context_summary" in str(compacted[0].content)
     assert [message.content for message in compacted if isinstance(message, HumanMessage)][-1] == "第三轮"
-    assert (await store.context_state("manual")).last_action == "manual_summary"
+    assert (await store.load_context("manual")).state.last_action == "manual_summary"
     assert middleware.consume_updates("manual") == (update,)
     await store.close()
 
@@ -161,7 +163,7 @@ async def test_manual_compaction_can_replace_persisted_delta_channel_history(tmp
     checkpoint = empty_checkpoint()
     checkpoint["channel_values"] = {"messages": messages}
     await store.checkpointer.aput(store.graph_config("manual-checkpoint"), checkpoint, {}, {})
-    await store.record_message("manual-checkpoint", "第一轮")
+    await accept_thread(store, "manual-checkpoint", "第一轮")
 
     model = ToolModel(responses=[AIMessage(content="## 目标\n压缩\n## 已确认事实\n已完成\n## 决策\n保留两轮\n## 改动\n无\n## 测试\n无\n## 未决项\n无\n## 归档\n无")])
     model.profile = {"max_input_tokens": 16_384}
@@ -170,13 +172,13 @@ async def test_manual_compaction_can_replace_persisted_delta_channel_history(tmp
     middleware = ContextWindowMiddleware(
         model,
         context_window_tokens=16_384,
-        thread_store=store,
+        thread_persistence=store,
     )
     agent = create_harness_agent(
         model,
         cwd=str(tmp_path / "project"),
         checkpointer=store.checkpointer,
-        thread_store=store,
+        thread_persistence=store,
         context_middleware=middleware,
         context_window_tokens=16_384,
         enable_skills=False,
@@ -194,7 +196,7 @@ async def test_manual_compaction_can_replace_persisted_delta_channel_history(tmp
         {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *compacted]},
         as_node="model",
     )
-    await store.refresh_thread("manual-checkpoint")
+    await store.complete_run("manual-checkpoint")
     opened = await store.open_thread("manual-checkpoint")
 
     contents = [message.content for message in opened.messages]
@@ -229,7 +231,7 @@ async def test_context_rewrite_keeps_current_model_response_in_checkpoint(tmp_pa
         model,
         cwd=str(tmp_path / "project"),
         checkpointer=store.checkpointer,
-        thread_store=store,
+        thread_persistence=store,
         context_window_tokens=16_384,
         enable_skills=False,
         enable_memory=False,
@@ -242,13 +244,13 @@ async def test_context_rewrite_keeps_current_model_response_in_checkpoint(tmp_pa
         HumanMessage(content="第二轮"),
         HumanMessage(content="第三轮"),
     ]
-    await store.record_message("rewrite", "第一轮")
+    await accept_thread(store, "rewrite", "第一轮")
     async for _ in agent.astream({"messages": messages}, config=store.graph_config("rewrite"), stream_mode=["messages", "updates"]):
         pass
 
     # DeepAgents 使用 DeltaChannel，最新 checkpoint 只记录增量版本；必须经
-    # ThreadStore 的确定性 reducer 回放后再断言完整历史。
-    await store.refresh_thread("rewrite")
+    # ThreadPersistence 的确定性 reducer 回放后再断言完整历史。
+    await store.complete_run("rewrite")
     checkpoint = await store.open_thread("rewrite")
     contents = [message.content for message in checkpoint.messages]
     assert "最终回答" in contents

@@ -1,4 +1,4 @@
-"""Runtime Profile 身份、脱敏和 ThreadStore 迁移回归测试。"""
+"""Runtime Profile 身份、脱敏和 ThreadPersistence 迁移回归测试。"""
 
 from __future__ import annotations
 
@@ -18,7 +18,14 @@ from harness_agent.runtime_profile import (
     component_fingerprint,
     default_runtime_profile,
 )
-from harness_agent.thread_store import ContextState, ThreadStore, ThreadStoreError
+from harness_agent.thread_persistence import (
+    CommitContextRewrite,
+    ContextArtifactDraft,
+    ContextState,
+    ThreadPersistence,
+    ThreadPersistenceError,
+)
+from thread_fixtures import accept_thread
 
 
 def _profile(project_fingerprint: str) -> RuntimeProfile:
@@ -108,55 +115,59 @@ def test_default_runtime_profile_hashes_model_and_execution_without_leaking_secr
     assert "gateway.example" not in encoded
 
 
-async def test_thread_store_persists_immutable_runtime_profile_without_raw_values(tmp_path: Path) -> None:
-    """Thread 绑定 Profile 后可重开读取，变更绑定或跨项目写入必须拒绝。"""
+async def test_thread_persistence_persists_runtime_profile_without_raw_values(tmp_path: Path) -> None:
+    """Runtime Profile 按 project/profile key 去重保存，且不写入 Thread 绑定。"""
     home = tmp_path / "home"
     project = tmp_path / "project"
     project.mkdir()
-    store = await ThreadStore.open(project=project, home=home)
-    await store.record_message("thread-1", "开始实现")
+    store = await ThreadPersistence.open(project=project, home=home)
+    await accept_thread(store, "thread-1", "开始实现")
     profile = _profile(store.project_fingerprint)
-    await store.save_runtime_profile("thread-1", profile)
-    await store.save_runtime_profile("thread-1", profile)
-    assert await store.get_runtime_profile("thread-1") == profile
-    with pytest.raises(ThreadStoreError, match="RUNTIME_PROFILE_IMMUTABLE"):
-        await store.save_runtime_profile(
-            "thread-1",
-            replace(profile, policy_fingerprint=component_fingerprint({"approval": "plan"})),
-        )
-    with pytest.raises(ThreadStoreError, match="RUNTIME_PROFILE_PROJECT_MISMATCH"):
-        await store.save_runtime_profile("thread-2", _profile(component_fingerprint({"project": "other"})))
+    await store.persist_runtime_profile(profile)
+    await store.persist_runtime_profile(profile)
+    await store.persist_runtime_profile(
+        replace(profile, policy_fingerprint=component_fingerprint({"approval": "plan"}))
+    )
+    with pytest.raises(ThreadPersistenceError, match="RUNTIME_PROFILE_PROJECT_MISMATCH"):
+        await store.persist_runtime_profile(_profile(component_fingerprint({"project": "other"})))
     database = store.database_path
     await store.close()
 
     connection = sqlite3.connect(database)
     try:
-        stored = connection.execute("SELECT profile_record FROM harness_runtime_profiles").fetchone()[0]
+        records = connection.execute("SELECT profile_record FROM harness_runtime_profiles").fetchall()
     finally:
         connection.close()
-    assert str(project) not in stored
-    assert "toml-secret" not in stored
+    assert len(records) == 2
+    assert all(str(project) not in str(record[0]) for record in records)
+    assert all("toml-secret" not in str(record[0]) for record in records)
 
-    reopened = await ThreadStore.open(project=project, home=home)
-    assert await reopened.get_runtime_profile("thread-1") == profile
+    reopened = await ThreadPersistence.open(project=project, home=home)
     await reopened.close()
 
 
-async def test_thread_store_upgrades_v3_runtime_profile_schema_without_losing_epoch(tmp_path: Path) -> None:
+async def test_thread_persistence_upgrades_v3_runtime_profile_schema_without_losing_epoch(tmp_path: Path) -> None:
     """v3 数据库升级到 v6 时，旧 thread 继续读取且保持未绑定兼容状态。"""
     from harness_agent.prompting import PromptComposer
 
     home = tmp_path / "home"
     project = tmp_path / "project"
     project.mkdir()
-    store = await ThreadStore.open(project=project, home=home)
-    await store.record_message("legacy-thread", "旧请求")
+    store = await ThreadPersistence.open(project=project, home=home)
+    await accept_thread(store, "legacy-thread", "旧请求")
     checkpoint = empty_checkpoint()
     checkpoint["channel_values"] = {"messages": [HumanMessage(content="旧请求")]}
     await store.checkpointer.aput(store.graph_config("legacy-thread"), checkpoint, {}, {})
-    await store.refresh_thread("legacy-thread")
-    artifact = await store.archive_context("legacy-thread", kind="tool-result", content="旧工具原文")
-    await store.set_context_state("legacy-thread", ContextState(failures=2, circuit_open=False, last_action="archive"))
+    await store.complete_run("legacy-thread")
+    artifact = (
+        await store.commit_context(
+            CommitContextRewrite(
+                thread_id="legacy-thread",
+                artifacts=(ContextArtifactDraft(kind="tool-result", content="旧工具原文"),),
+                state=ContextState(failures=2, circuit_open=False, last_action="archive"),
+            )
+        )
+    ).artifacts[0]
     epoch = PromptComposer("core").create_epoch(
         thread_id="legacy-thread",
         execution_boundary="execution",
@@ -166,7 +177,7 @@ async def test_thread_store_upgrades_v3_runtime_profile_schema_without_losing_ep
         tool_fingerprint="schema",
         now_ms=1,
     )
-    await store.save_prompt_epoch(epoch)
+    await store.persist_prompt_epoch(epoch)
     database = store.database_path
     await store.close()
 
@@ -180,12 +191,11 @@ async def test_thread_store_upgrades_v3_runtime_profile_schema_without_losing_ep
     finally:
         connection.close()
 
-    upgraded = await ThreadStore.open(project=project, home=home)
-    assert await upgraded.get_runtime_profile("legacy-thread") is None
-    assert await upgraded.get_prompt_epoch("legacy-thread") == epoch
+    upgraded = await ThreadPersistence.open(project=project, home=home)
+    assert await upgraded.load_prompt_epoch("legacy-thread") == epoch
     assert (await upgraded.open_thread("legacy-thread")).summary.first_message == "旧请求"
-    assert await upgraded.read_context_artifact("legacy-thread", artifact.artifact_id) == artifact
-    assert await upgraded.context_state("legacy-thread") == ContextState(
+    assert await upgraded.load_context_artifact("legacy-thread", artifact.artifact_id) == artifact
+    assert (await upgraded.load_context("legacy-thread")).state == ContextState(
         failures=2,
         circuit_open=False,
         last_action="archive",

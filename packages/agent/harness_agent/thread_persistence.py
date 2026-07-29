@@ -21,18 +21,14 @@ from harness_agent.execution_binding import (
     RunExecutionBinding,
 )
 from harness_agent.prompting import PromptEpoch, canonical_json
-from harness_agent.runtime_profile import (
-    RUNTIME_PROFILE_VERSION,
-    RuntimeProfile,
-    RuntimeProfileError,
-)
+from harness_agent.runtime_profile import RUNTIME_PROFILE_VERSION, RuntimeProfile
 
 
 _SCHEMA_VERSION = 6
 _MAX_PREVIEW_CHARS = 160
 
 
-class ThreadStoreError(RuntimeError):
+class ThreadPersistenceError(RuntimeError):
     """线程存储不可用、损坏或版本不兼容时返回的可诊断错误。"""
 
 
@@ -63,6 +59,15 @@ class OpenThread:
 
     summary: ThreadSummary
     messages: tuple[ThreadMessage, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ContextSnapshot:
+    """当前 Thread 的 checkpoint 消息与 Context 熔断状态。"""
+
+    messages: tuple[Any, ...]
+    state: ContextState
+    recoverable: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +103,62 @@ class ContextState:
     last_action: str = "none"
 
 
+@dataclass(frozen=True, slots=True)
+class AcceptRun:
+    """受理 Run 所需的完整领域输入；SQLite 不再接收散落字段。"""
+
+    message: str
+    binding: RunExecutionBinding
+
+
+@dataclass(frozen=True, slots=True)
+class RunAcceptance:
+    """Run 受理结果；``created=False`` 表示同一请求的幂等重试。"""
+
+    created: bool
+    binding: RunExecutionBinding
+
+
+@dataclass(frozen=True, slots=True)
+class ContextArtifactDraft:
+    """待写入 Context 归档的领域值，不包含存储生成的 artifact ID。"""
+
+    kind: str
+    content: str
+    source_start: int = 0
+    source_end: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ContextSummaryDraft:
+    """待写入摘要；``artifact_indexes`` 引用同一事务中的归档草稿。"""
+
+    rewrite_version: str
+    content: str
+    source_start: int
+    source_end: int
+    artifact_indexes: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class CommitContextRewrite:
+    """一次 Context 状态转换，归档、摘要和熔断状态同成同败。"""
+
+    thread_id: str
+    artifacts: tuple[ContextArtifactDraft, ...] = ()
+    summary: ContextSummaryDraft | None = None
+    state: ContextState | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ContextCommit:
+    """Context 状态转换提交后的 typed 结果。"""
+
+    artifacts: tuple[ContextArtifact, ...] = ()
+    summary: ContextSummary | None = None
+    state: ContextState | None = None
+
+
 class ProjectScopedAsyncSqliteSaver(AsyncSqliteSaver):
     """将 LangGraph 自动归一的 checkpoint namespace 固定映射到当前 project。"""
 
@@ -120,7 +181,7 @@ class ProjectScopedAsyncSqliteSaver(AsyncSqliteSaver):
     ) -> AsyncIterator[Any]:
         """列举时要求 thread 范围，禁止通过底层 saver 跨 project 扫描。"""
         if config is None:
-            raise ThreadStoreError("CHECKPOINT_LIST_REQUIRES_THREAD")
+            raise ThreadPersistenceError("CHECKPOINT_LIST_REQUIRES_THREAD")
         scoped_before = self._scoped_config(before) if before is not None else None
         async for checkpoint in super().alist(
             self._scoped_config(config),
@@ -175,7 +236,7 @@ class ProjectScopedAsyncSqliteSaver(AsyncSqliteSaver):
         """合成 namespace：根图为指纹，子图为指纹加 LangGraph 原始后缀。"""
         configurable = config.get("configurable")
         if not isinstance(configurable, Mapping):
-            raise ThreadStoreError("CHECKPOINT_CONFIG_INVALID")
+            raise ThreadPersistenceError("CHECKPOINT_CONFIG_INVALID")
         raw_namespace = configurable.get("checkpoint_ns")
         namespace = str(raw_namespace) if raw_namespace is not None else ""
         if namespace in {"", self._project_fingerprint}:
@@ -190,8 +251,8 @@ class ProjectScopedAsyncSqliteSaver(AsyncSqliteSaver):
         }
 
 
-class ThreadStore:
-    """封装 checkpoint、project namespace 与线程索引，避免调用方理解 SQLite 细节。"""
+class ThreadPersistence:
+    """按 Thread、Run 和 Context 生命周期封装 SQLite 与 checkpoint 细节。"""
 
     def __init__(
         self,
@@ -215,7 +276,7 @@ class ThreadStore:
         *,
         project: Path,
         home: Path | None = None,
-    ) -> "ThreadStore":
+    ) -> "ThreadPersistence":
         """打开用户级数据库、检查完整性并应用 Harness 自有索引迁移。"""
         base_home = (home or Path.home()).expanduser().resolve()
         data_dir = base_home / ".harness"
@@ -229,15 +290,15 @@ class ThreadStore:
             connection.row_factory = aiosqlite.Row
             project_fingerprint = _project_fingerprint(project)
             checkpointer = ProjectScopedAsyncSqliteSaver(connection, project_fingerprint)
-            store = cls(
+            persistence = cls(
                 connection=connection,
                 checkpointer=checkpointer,
                 path=path,
                 project_fingerprint=project_fingerprint,
             )
-            await store._prepare()
-            return store
-        except ThreadStoreError:
+            await persistence._prepare()
+            return persistence
+        except ThreadPersistenceError:
             if connection is not None:
                 try:
                     await connection.close()
@@ -250,7 +311,7 @@ class ThreadStore:
                     await connection.close()
                 except aiosqlite.Error:
                     pass
-            raise ThreadStoreError(f"CHECKPOINT_OPEN_FAILED: {exc}") from exc
+            raise ThreadPersistenceError(f"CHECKPOINT_OPEN_FAILED: {exc}") from exc
 
     @property
     def checkpointer(self) -> ProjectScopedAsyncSqliteSaver:
@@ -276,47 +337,14 @@ class ThreadStore:
             }
         }
 
-    async def record_message(
-        self,
-        thread_id: str,
-        message: str,
-    ) -> None:
-        """登记 Thread 摘要；旧模型绑定已进入只读兼容阶段。"""
-        self._ensure_open()
-        now = _now_ms()
-        preview = _preview(message)
-        try:
-            async with self._lock:
-                await self._connection.execute(
-                    """
-                    INSERT INTO harness_threads (
-                        project_fingerprint, thread_id, created_at_ms, updated_at_ms,
-                        first_message, latest_message, message_count
-                    ) VALUES (?, ?, ?, ?, ?, ?, 0)
-                    ON CONFLICT(project_fingerprint, thread_id) DO UPDATE SET
-                        updated_at_ms = excluded.updated_at_ms,
-                        latest_message = excluded.latest_message
-                    """,
-                    (
-                        self._project_fingerprint,
-                        thread_id,
-                        now,
-                        now,
-                        preview,
-                        preview,
-                    ),
-                )
-                await self._connection.commit()
-        except ThreadStoreError:
-            raise
-        except aiosqlite.Error as exc:
-            try:
-                await self._connection.rollback()
-            except aiosqlite.Error:
-                pass
-            raise ThreadStoreError(f"CHECKPOINT_INDEX_WRITE_FAILED: {exc}") from exc
+    async def accept_run(self, command: AcceptRun) -> RunAcceptance:
+        """原子受理一个 Run，并把 Thread 首条消息索引与绑定一起提交。"""
+        return RunAcceptance(
+            created=await self._record_run_start(command.message, command.binding),
+            binding=command.binding,
+        )
 
-    async def record_run_start(
+    async def _record_run_start(
         self,
         message: str,
         binding: RunExecutionBinding,
@@ -350,7 +378,7 @@ class ThreadStore:
                         and str(existing["message_digest"]) == message_digest
                     ):
                         return False
-                    raise ThreadStoreError("RUN_EXECUTION_BINDING_CONFLICT")
+                    raise ThreadPersistenceError("RUN_EXECUTION_BINDING_CONFLICT")
                 await self._connection.execute(
                     """
                     INSERT INTO harness_threads (
@@ -390,16 +418,16 @@ class ThreadStore:
                 )
                 await self._connection.commit()
                 return True
-        except ThreadStoreError:
+        except ThreadPersistenceError:
             raise
         except aiosqlite.Error as exc:
             try:
                 await self._connection.rollback()
             except aiosqlite.Error:
                 pass
-            raise ThreadStoreError(f"RUN_EXECUTION_BINDING_WRITE_FAILED: {exc}") from exc
+            raise ThreadPersistenceError(f"RUN_EXECUTION_BINDING_WRITE_FAILED: {exc}") from exc
 
-    async def get_latest_run_execution_binding(
+    async def _get_latest_run_execution_binding(
         self, thread_id: str
     ) -> RunExecutionBinding | None:
         """读取最后一个已受理 Run 的模型选择与实际模型，不推测或修复损坏记录。"""
@@ -424,7 +452,7 @@ class ThreadStore:
             selection = json.loads(str(row["requested_selection"]))
             primary = json.loads(str(row["actual_primary_binding"]))
             if not isinstance(selection, dict) or not isinstance(primary, dict):
-                raise ThreadStoreError("RUN_EXECUTION_BINDING_INVALID")
+                raise ThreadPersistenceError("RUN_EXECUTION_BINDING_INVALID")
             return RunExecutionBinding.from_records(
                 thread_id=str(row["thread_id"]),
                 run_id=str(row["run_id"]),
@@ -433,7 +461,7 @@ class ThreadStore:
                 runtime_profile_id=str(row["runtime_profile_id"]),
                 created_at_ms=int(row["created_at_ms"]),
             )
-        except ThreadStoreError:
+        except ThreadPersistenceError:
             raise
         except (
             aiosqlite.Error,
@@ -442,18 +470,18 @@ class ThreadStore:
             ValueError,
             json.JSONDecodeError,
         ) as exc:
-            raise ThreadStoreError(f"RUN_EXECUTION_BINDING_READ_FAILED: {exc}") from exc
+            raise ThreadPersistenceError(f"RUN_EXECUTION_BINDING_READ_FAILED: {exc}") from exc
 
-    async def load_execution_binding_state(self, thread_id: str) -> PersistedBindingState:
-        """读取当前选择和只读 legacy 候选，不向调用方暴露表结构。"""
+    async def load_run_state(self, thread_id: str) -> PersistedBindingState:
+        """读取 Run 恢复所需的 typed 状态，不向调用方暴露表结构。"""
         return PersistedBindingState(
-            latest_run=await self.get_latest_run_execution_binding(thread_id),
+            latest_run=await self._get_latest_run_execution_binding(thread_id),
             legacy_models=await self._get_legacy_model_bindings(thread_id),
             has_legacy_runtime=await self._has_legacy_runtime_binding(thread_id),
         )
 
-    async def refresh_thread(self, thread_id: str) -> None:
-        """在 run 结束后用 checkpoint 消息数更新可恢复线程摘要。"""
+    async def complete_run(self, thread_id: str) -> None:
+        """在 Run 终态用 checkpoint 消息数更新可恢复 Thread 摘要。"""
         self._ensure_open()
         try:
             messages = await self._messages_for_thread(thread_id)
@@ -473,17 +501,22 @@ class ThreadStore:
                 )
                 await self._connection.commit()
         except aiosqlite.Error as exc:
-            raise ThreadStoreError(f"CHECKPOINT_INDEX_REFRESH_FAILED: {exc}") from exc
+            raise ThreadPersistenceError(f"CHECKPOINT_INDEX_REFRESH_FAILED: {exc}") from exc
 
-    async def load_context_messages(self, thread_id: str) -> list[Any] | None:
-        """读取当前 project/thread 的完整模型消息，供本机上下文压缩安全改写。"""
+    async def load_context(self, thread_id: str) -> ContextSnapshot:
+        """读取当前 Thread 的消息和 Context 状态，供 Context module 完成一次重写。"""
         self._ensure_open()
         try:
-            return await self._messages_for_thread(thread_id)
+            messages = await self._messages_for_thread(thread_id)
+            return ContextSnapshot(
+                messages=tuple(messages or ()),
+                state=await self._load_context_state(thread_id),
+                recoverable=messages is not None,
+            )
         except aiosqlite.Error as exc:
-            raise ThreadStoreError(f"CONTEXT_MESSAGES_READ_FAILED: {exc}") from exc
+            raise ThreadPersistenceError(f"CONTEXT_MESSAGES_READ_FAILED: {exc}") from exc
 
-    async def get_prompt_epoch(self, thread_id: str) -> PromptEpoch | None:
+    async def load_prompt_epoch(self, thread_id: str) -> PromptEpoch | None:
         """返回既有 thread 的不可变提示词 epoch，恢复时绝不重新扫描环境或 Skill。"""
         self._ensure_open()
         try:
@@ -503,9 +536,9 @@ class ThreadStore:
                 await cursor.close()
             return PromptEpoch.from_record(dict(row)) if row is not None else None
         except (aiosqlite.Error, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise ThreadStoreError(f"PROMPT_EPOCH_READ_FAILED: {exc}") from exc
+            raise ThreadPersistenceError(f"PROMPT_EPOCH_READ_FAILED: {exc}") from exc
 
-    async def save_prompt_epoch(self, epoch: PromptEpoch) -> None:
+    async def persist_prompt_epoch(self, epoch: PromptEpoch) -> None:
         """首次创建 thread 时保存完整前缀；同一 thread 的不同 epoch 一律拒绝覆盖。"""
         self._ensure_open()
         record = epoch.record()
@@ -522,7 +555,7 @@ class ThreadStore:
                 await cursor.close()
                 if existing is not None:
                     if str(existing[0]) != epoch.system_fingerprint:
-                        raise ThreadStoreError("PROMPT_EPOCH_IMMUTABLE")
+                        raise ThreadPersistenceError("PROMPT_EPOCH_IMMUTABLE")
                     return
                 await self._connection.execute(
                     """
@@ -549,67 +582,20 @@ class ThreadStore:
                     ),
                 )
                 await self._connection.commit()
-        except ThreadStoreError:
+        except ThreadPersistenceError:
             raise
         except aiosqlite.Error as exc:
-            raise ThreadStoreError(f"PROMPT_EPOCH_WRITE_FAILED: {exc}") from exc
+            raise ThreadPersistenceError(f"PROMPT_EPOCH_WRITE_FAILED: {exc}") from exc
 
-    async def get_runtime_profile(self, thread_id: str) -> RuntimeProfile | None:
-        """读取 thread 已绑定的 Runtime Profile；旧 thread 未绑定时返回 None。"""
-        self._ensure_open()
-        try:
-            async with self._lock:
-                cursor = await self._connection.execute(
-                    """
-                    SELECT runtime.profile_record
-                    FROM harness_thread_runtime_profiles AS binding
-                    JOIN harness_runtime_profiles AS runtime
-                      ON runtime.project_fingerprint = binding.project_fingerprint
-                     AND runtime.profile_key = binding.profile_key
-                    WHERE binding.project_fingerprint = ? AND binding.thread_id = ?
-                    """,
-                    (self._project_fingerprint, thread_id),
-                )
-                row = await cursor.fetchone()
-                await cursor.close()
-            if row is None:
-                return None
-            raw_record = json.loads(str(row["profile_record"]))
-            if not isinstance(raw_record, Mapping):
-                raise RuntimeProfileError("RUNTIME_PROFILE_RECORD_INVALID")
-            profile = RuntimeProfile.from_record(raw_record)
-            if profile.project_fingerprint != self._project_fingerprint:
-                raise RuntimeProfileError("RUNTIME_PROFILE_PROJECT_MISMATCH")
-            return profile
-        except (aiosqlite.Error, TypeError, ValueError, RuntimeProfileError, json.JSONDecodeError) as exc:
-            raise ThreadStoreError(f"RUNTIME_PROFILE_READ_FAILED: {exc}") from exc
-
-    async def save_runtime_profile(
-        self, thread_id: str, profile: RuntimeProfile, *, bind_thread: bool = True
-    ) -> None:
-        """保存可去重 Runtime Profile；仅 legacy 调用保留不可变 Thread 绑定。"""
+    async def persist_runtime_profile(self, profile: RuntimeProfile) -> None:
+        """保存按 project/profile key 去重的 Runtime Profile，不绑定 Thread。"""
         self._ensure_open()
         if profile.project_fingerprint != self._project_fingerprint:
-            raise ThreadStoreError("RUNTIME_PROFILE_PROJECT_MISMATCH")
+            raise ThreadPersistenceError("RUNTIME_PROFILE_PROJECT_MISMATCH")
         record = profile.record()
         encoded_record = canonical_json(record)
         try:
             async with self._lock:
-                if bind_thread:
-                    cursor = await self._connection.execute(
-                        """
-                        SELECT profile_key
-                        FROM harness_thread_runtime_profiles
-                        WHERE project_fingerprint = ? AND thread_id = ?
-                        """,
-                        (self._project_fingerprint, thread_id),
-                    )
-                    existing = await cursor.fetchone()
-                    await cursor.close()
-                    if existing is not None:
-                        if str(existing["profile_key"]) != profile.profile_key:
-                            raise ThreadStoreError("RUNTIME_PROFILE_IMMUTABLE")
-                        return
                 await self._connection.execute(
                     """
                     INSERT INTO harness_runtime_profiles (
@@ -628,26 +614,11 @@ class ThreadStore:
                         _now_ms(),
                     ),
                 )
-                if bind_thread:
-                    await self._connection.execute(
-                        """
-                        INSERT INTO harness_thread_runtime_profiles (
-                            project_fingerprint, thread_id, profile_key, profile_version, bound_at_ms
-                        ) VALUES (?, ?, ?, ?, ?)
-                        """,
-                        (
-                            self._project_fingerprint,
-                            thread_id,
-                            profile.profile_key,
-                            RUNTIME_PROFILE_VERSION,
-                            _now_ms(),
-                        ),
-                    )
                 await self._connection.commit()
-        except ThreadStoreError:
+        except ThreadPersistenceError:
             raise
         except aiosqlite.Error as exc:
-            raise ThreadStoreError(f"RUNTIME_PROFILE_WRITE_FAILED: {exc}") from exc
+            raise ThreadPersistenceError(f"RUNTIME_PROFILE_WRITE_FAILED: {exc}") from exc
 
     async def _get_legacy_model_bindings(
         self, thread_id: str
@@ -669,9 +640,9 @@ class ThreadStore:
                 return None
             record = json.loads(str(row["binding_record"]))
             if not isinstance(record, Mapping):
-                raise ThreadStoreError("THREAD_MODEL_BINDING_INVALID")
+                raise ThreadPersistenceError("THREAD_MODEL_BINDING_INVALID")
             return LegacyModelBindings.from_record(record)
-        except ThreadStoreError:
+        except ThreadPersistenceError:
             raise
         except (
             aiosqlite.Error,
@@ -680,7 +651,7 @@ class ThreadStore:
             ValueError,
             json.JSONDecodeError,
         ) as exc:
-            raise ThreadStoreError(f"THREAD_MODEL_BINDING_READ_FAILED: {exc}") from exc
+            raise ThreadPersistenceError(f"THREAD_MODEL_BINDING_READ_FAILED: {exc}") from exc
 
     async def _has_legacy_runtime_binding(self, thread_id: str) -> bool:
         """判断 v4/v5 Thread 是否只有不可逆 Runtime 指纹。"""
@@ -698,57 +669,125 @@ class ThreadStore:
                 await cursor.close()
             return row is not None
         except aiosqlite.Error as exc:
-            raise ThreadStoreError(f"RUNTIME_PROFILE_READ_FAILED: {exc}") from exc
+            raise ThreadPersistenceError(f"RUNTIME_PROFILE_READ_FAILED: {exc}") from exc
 
-    async def archive_context(
-        self,
-        thread_id: str,
-        *,
-        kind: str,
-        content: str,
-        source_start: int = 0,
-        source_end: int = 0,
-    ) -> ContextArtifact:
-        """持久化不可变原始文本并返回虚拟文件使用的随机 artifact ID。"""
+    async def commit_context(self, command: CommitContextRewrite) -> ContextCommit:
+        """原子提交 Context 的归档、摘要和状态，隐藏 SQLite 多表事务。"""
         self._ensure_open()
-        if not content:
-            raise ThreadStoreError("CONTEXT_ARTIFACT_EMPTY")
-        if not kind or any(char not in "abcdefghijklmnopqrstuvwxyz0123456789-_" for char in kind):
-            raise ThreadStoreError("CONTEXT_ARTIFACT_KIND_INVALID")
-        artifact = ContextArtifact(
-            artifact_id=f"{kind}-{uuid.uuid4().hex}",
-            kind=kind,
-            content=content,
-            source_start=max(0, source_start),
-            source_end=max(source_start, source_end),
-            created_at_ms=_now_ms(),
-        )
+        artifacts: list[ContextArtifact] = []
+        for draft in command.artifacts:
+            if not draft.content:
+                raise ThreadPersistenceError("CONTEXT_ARTIFACT_EMPTY")
+            if not draft.kind or any(
+                char not in "abcdefghijklmnopqrstuvwxyz0123456789-_" for char in draft.kind
+            ):
+                raise ThreadPersistenceError("CONTEXT_ARTIFACT_KIND_INVALID")
+            source_start = max(0, draft.source_start)
+            artifacts.append(
+                ContextArtifact(
+                    artifact_id=f"{draft.kind}-{uuid.uuid4().hex}",
+                    kind=draft.kind,
+                    content=draft.content,
+                    source_start=source_start,
+                    source_end=max(source_start, draft.source_end),
+                    created_at_ms=_now_ms(),
+                )
+            )
+
+        summary: ContextSummary | None = None
+        if command.summary is not None:
+            draft = command.summary
+            if any(index < 0 or index >= len(artifacts) for index in draft.artifact_indexes):
+                raise ThreadPersistenceError("CONTEXT_SUMMARY_ARTIFACT_INDEX_INVALID")
+            artifact_ids = tuple(artifacts[index].artifact_id for index in draft.artifact_indexes)
+            source_start = max(0, draft.source_start)
+            summary = ContextSummary(
+                rewrite_version=draft.rewrite_version,
+                content=draft.content,
+                source_start=source_start,
+                source_end=max(source_start, draft.source_end),
+                artifact_ids=artifact_ids,
+                created_at_ms=_now_ms(),
+            )
+
         try:
             async with self._lock:
-                await self._connection.execute(
-                    """
-                    INSERT INTO harness_context_artifacts (
-                        project_fingerprint, thread_id, artifact_id, kind, content,
-                        source_start, source_end, created_at_ms
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        self._project_fingerprint,
-                        thread_id,
-                        artifact.artifact_id,
-                        artifact.kind,
-                        artifact.content,
-                        artifact.source_start,
-                        artifact.source_end,
-                        artifact.created_at_ms,
-                    ),
-                )
+                for artifact in artifacts:
+                    await self._connection.execute(
+                        """
+                        INSERT INTO harness_context_artifacts (
+                            project_fingerprint, thread_id, artifact_id, kind, content,
+                            source_start, source_end, created_at_ms
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            self._project_fingerprint,
+                            command.thread_id,
+                            artifact.artifact_id,
+                            artifact.kind,
+                            artifact.content,
+                            artifact.source_start,
+                            artifact.source_end,
+                            artifact.created_at_ms,
+                        ),
+                    )
+                if summary is not None:
+                    await self._connection.execute(
+                        """
+                        INSERT INTO harness_context_summaries (
+                            project_fingerprint, thread_id, rewrite_version, content,
+                            source_start, source_end, artifact_ids, created_at_ms
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            self._project_fingerprint,
+                            command.thread_id,
+                            summary.rewrite_version,
+                            summary.content,
+                            summary.source_start,
+                            summary.source_end,
+                            canonical_json(summary.artifact_ids),
+                            summary.created_at_ms,
+                        ),
+                    )
+                if command.state is not None:
+                    await self._connection.execute(
+                        """
+                        INSERT INTO harness_context_state (
+                            project_fingerprint, thread_id, failures, circuit_open,
+                            last_action, updated_at_ms
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(project_fingerprint, thread_id) DO UPDATE SET
+                            failures = excluded.failures,
+                            circuit_open = excluded.circuit_open,
+                            last_action = excluded.last_action,
+                            updated_at_ms = excluded.updated_at_ms
+                        """,
+                        (
+                            self._project_fingerprint,
+                            command.thread_id,
+                            command.state.failures,
+                            int(command.state.circuit_open),
+                            command.state.last_action,
+                            _now_ms(),
+                        ),
+                    )
                 await self._connection.commit()
-            return artifact
+        except ThreadPersistenceError:
+            try:
+                await self._connection.rollback()
+            except aiosqlite.Error:
+                pass
+            raise
         except aiosqlite.Error as exc:
-            raise ThreadStoreError(f"CONTEXT_ARTIFACT_WRITE_FAILED: {exc}") from exc
+            try:
+                await self._connection.rollback()
+            except aiosqlite.Error:
+                pass
+            raise ThreadPersistenceError(f"CONTEXT_REWRITE_WRITE_FAILED: {exc}") from exc
+        return ContextCommit(tuple(artifacts), summary, command.state)
 
-    async def read_context_artifact(self, thread_id: str, artifact_id: str) -> ContextArtifact | None:
+    async def load_context_artifact(self, thread_id: str, artifact_id: str) -> ContextArtifact | None:
         """读取仅归属当前 project/thread 的归档，调用方不得从数据库路径推断真实位置。"""
         self._ensure_open()
         try:
@@ -774,54 +813,9 @@ class ThreadStore:
                 created_at_ms=int(row["created_at_ms"]),
             )
         except aiosqlite.Error as exc:
-            raise ThreadStoreError(f"CONTEXT_ARTIFACT_READ_FAILED: {exc}") from exc
+            raise ThreadPersistenceError(f"CONTEXT_ARTIFACT_READ_FAILED: {exc}") from exc
 
-    async def save_context_summary(
-        self,
-        thread_id: str,
-        *,
-        rewrite_version: str,
-        content: str,
-        source_start: int,
-        source_end: int,
-        artifact_ids: tuple[str, ...],
-    ) -> ContextSummary:
-        """保存结构化摘要和归档引用，供恢复诊断与后续历史重写追溯。"""
-        self._ensure_open()
-        summary = ContextSummary(
-            rewrite_version=rewrite_version,
-            content=content,
-            source_start=max(0, source_start),
-            source_end=max(source_start, source_end),
-            artifact_ids=artifact_ids,
-            created_at_ms=_now_ms(),
-        )
-        try:
-            async with self._lock:
-                await self._connection.execute(
-                    """
-                    INSERT INTO harness_context_summaries (
-                        project_fingerprint, thread_id, rewrite_version, content,
-                        source_start, source_end, artifact_ids, created_at_ms
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        self._project_fingerprint,
-                        thread_id,
-                        summary.rewrite_version,
-                        summary.content,
-                        summary.source_start,
-                        summary.source_end,
-                        canonical_json(summary.artifact_ids),
-                        summary.created_at_ms,
-                    ),
-                )
-                await self._connection.commit()
-            return summary
-        except aiosqlite.Error as exc:
-            raise ThreadStoreError(f"CONTEXT_SUMMARY_WRITE_FAILED: {exc}") from exc
-
-    async def context_state(self, thread_id: str) -> ContextState:
+    async def _load_context_state(self, thread_id: str) -> ContextState:
         """返回压缩失败熔断状态；缺失记录按未失败初始化。"""
         self._ensure_open()
         try:
@@ -839,42 +833,13 @@ class ThreadStore:
                 return ContextState()
             return ContextState(int(row["failures"]), bool(row["circuit_open"]), str(row["last_action"]))
         except aiosqlite.Error as exc:
-            raise ThreadStoreError(f"CONTEXT_STATE_READ_FAILED: {exc}") from exc
-
-    async def set_context_state(self, thread_id: str, state: ContextState) -> None:
-        """原子写入压缩状态，连续三次失败后由调用方设定熔断。"""
-        self._ensure_open()
-        try:
-            async with self._lock:
-                await self._connection.execute(
-                    """
-                    INSERT INTO harness_context_state (
-                        project_fingerprint, thread_id, failures, circuit_open, last_action, updated_at_ms
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(project_fingerprint, thread_id) DO UPDATE SET
-                        failures = excluded.failures,
-                        circuit_open = excluded.circuit_open,
-                        last_action = excluded.last_action,
-                        updated_at_ms = excluded.updated_at_ms
-                    """,
-                    (
-                        self._project_fingerprint,
-                        thread_id,
-                        state.failures,
-                        int(state.circuit_open),
-                        state.last_action,
-                        _now_ms(),
-                    ),
-                )
-                await self._connection.commit()
-        except aiosqlite.Error as exc:
-            raise ThreadStoreError(f"CONTEXT_STATE_WRITE_FAILED: {exc}") from exc
+            raise ThreadPersistenceError(f"CONTEXT_STATE_READ_FAILED: {exc}") from exc
 
     async def list_threads(self, limit: int = 80) -> tuple[ThreadSummary, ...]:
         """按最后活动时间返回当前 project 的有限线程摘要。"""
         self._ensure_open()
         if limit < 1 or limit > 200:
-            raise ThreadStoreError("CHECKPOINT_LIST_INVALID_LIMIT")
+            raise ThreadPersistenceError("CHECKPOINT_LIST_INVALID_LIMIT")
         try:
             async with self._lock:
                 cursor = await self._connection.execute(
@@ -892,7 +857,7 @@ class ThreadStore:
                 await cursor.close()
             return tuple(_summary(row) for row in rows)
         except aiosqlite.Error as exc:
-            raise ThreadStoreError(f"CHECKPOINT_LIST_FAILED: {exc}") from exc
+            raise ThreadPersistenceError(f"CHECKPOINT_LIST_FAILED: {exc}") from exc
 
     async def open_thread(self, thread_id: str) -> OpenThread:
         """读取一个归属当前 project 的可恢复 thread；索引和 checkpoint 均缺失即拒绝。"""
@@ -911,19 +876,19 @@ class ThreadStore:
                 row = await cursor.fetchone()
                 await cursor.close()
             if row is None:
-                raise ThreadStoreError("THREAD_NOT_FOUND")
+                raise ThreadPersistenceError("THREAD_NOT_FOUND")
             messages = await self._messages_for_thread(thread_id)
             if messages is None:
-                raise ThreadStoreError("THREAD_NOT_RECOVERABLE")
+                raise ThreadPersistenceError("THREAD_NOT_RECOVERABLE")
             normalized = tuple(_normalize_message(message) for message in messages)
             return OpenThread(
                 summary=_summary(row),
                 messages=tuple(message for message in normalized if message is not None),
             )
-        except ThreadStoreError:
+        except ThreadPersistenceError:
             raise
         except aiosqlite.Error as exc:
-            raise ThreadStoreError(f"CHECKPOINT_READ_FAILED: {exc}") from exc
+            raise ThreadPersistenceError(f"CHECKPOINT_READ_FAILED: {exc}") from exc
 
     async def close(self) -> None:
         """提交并关闭连接，确保 CLI 退出后用户可安全删除数据库及 WAL 文件。"""
@@ -934,7 +899,7 @@ class ThreadStore:
             await self._connection.commit()
             await self._connection.close()
         except aiosqlite.Error as exc:
-            raise ThreadStoreError(f"CHECKPOINT_CLOSE_FAILED: {exc}") from exc
+            raise ThreadPersistenceError(f"CHECKPOINT_CLOSE_FAILED: {exc}") from exc
 
     async def _prepare(self) -> None:
         """验证 SQLite 可读性、初始化 LangGraph 表并升级 Harness 线程索引。"""
@@ -944,16 +909,16 @@ class ThreadStore:
                 row = await cursor.fetchone()
                 await cursor.close()
             except aiosqlite.Error as exc:
-                raise ThreadStoreError(f"CHECKPOINT_DATABASE_CORRUPT: {exc}") from exc
+                raise ThreadPersistenceError(f"CHECKPOINT_DATABASE_CORRUPT: {exc}") from exc
             if not row or row[0] != "ok":
                 detail = row[0] if row else "no result"
-                raise ThreadStoreError(f"CHECKPOINT_DATABASE_CORRUPT: {detail}")
+                raise ThreadPersistenceError(f"CHECKPOINT_DATABASE_CORRUPT: {detail}")
             cursor = await self._connection.execute("PRAGMA user_version")
             row = await cursor.fetchone()
             await cursor.close()
             version = int(row[0]) if row else 0
             if version > _SCHEMA_VERSION:
-                raise ThreadStoreError(
+                raise ThreadPersistenceError(
                     f"CHECKPOINT_SCHEMA_TOO_NEW: found {version}, supports {_SCHEMA_VERSION}"
                 )
             await self._connection.execute("PRAGMA journal_mode=WAL")
@@ -1130,15 +1095,15 @@ class ThreadStore:
                 version = 6
             await self._connection.execute(f"PRAGMA user_version={version}")
             await self._connection.commit()
-        except ThreadStoreError:
+        except ThreadPersistenceError:
             raise
         except aiosqlite.Error as exc:
-            raise ThreadStoreError(f"CHECKPOINT_MIGRATION_FAILED: {exc}") from exc
+            raise ThreadPersistenceError(f"CHECKPOINT_MIGRATION_FAILED: {exc}") from exc
 
     def _ensure_open(self) -> None:
         """阻止关闭后的 handler 继续使用失效连接。"""
         if self._closed:
-            raise ThreadStoreError("CHECKPOINT_STORE_CLOSED")
+            raise ThreadPersistenceError("CHECKPOINT_STORE_CLOSED")
 
     async def _messages_for_thread(self, thread_id: str) -> list[Any] | None:
         """读取普通或 DeltaChannel checkpoint 的完整消息，兼容 DeepAgents 的增量存储。"""

@@ -405,7 +405,7 @@ async def test_runtime_pool_pressure_reuses_one_graph_for_1000_threads_without_s
 
     async def run_thread(index: int) -> None:
         thread_id = f"thread-{index:04d}"
-        # 这些字段模拟 ThreadStore/Checkpointer 的持久状态，而不是 Runtime 图的成员。
+        # 这些字段模拟 ThreadPersistence/Checkpointer 的持久状态，而不是 Runtime 图的成员。
         persisted[thread_id] = {
             "message": f"message:{thread_id}",
             "prompt_epoch": f"epoch:{thread_id}",

@@ -1,6 +1,6 @@
 """上下文预算、工具结果归档和低频结构化压缩中间件。
 
-上下文重写通过一个深模块完成：调用方只提供窗口、模型和 ThreadStore；该模块
+上下文重写通过一个深模块完成：调用方只提供窗口、模型和 ThreadPersistence；该模块
 负责预算、完整 turn 原子组、归档、摘要、失败熔断和可观测状态。
 """
 
@@ -23,7 +23,13 @@ from harness_agent.prompting import (
     normalized_tool_schemas,
 )
 from harness_agent.run_context import thread_id_for_runtime
-from harness_agent.thread_store import ContextState, ThreadStore
+from harness_agent.thread_persistence import (
+    CommitContextRewrite,
+    ContextArtifactDraft,
+    ContextState,
+    ContextSummaryDraft,
+    ThreadPersistence,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
@@ -83,15 +89,15 @@ class ContextWindowMiddleware(AgentMiddleware):
         model: "BaseChatModel",
         *,
         context_window_tokens: int,
-        thread_store: ThreadStore | None = None,
+        thread_persistence: ThreadPersistence | None = None,
         updates: dict[str, list[ContextUpdate]] | None = None,
     ) -> None:
-        """绑定模型窗口与可选本机持久化；没有 ThreadStore 时不丢弃任何历史。"""
+        """绑定模型窗口与可选本机持久化；没有 ThreadPersistence 时不丢弃任何历史。"""
         super().__init__()
         self._model = model
         self._window = context_window_tokens
         self._input_cap = input_cap_tokens(context_window_tokens)
-        self._thread_store = thread_store
+        self._thread_persistence = thread_persistence
         self._updates = updates if updates is not None else {}
 
     def consume_updates(self, thread_id: str) -> tuple[ContextUpdate, ...]:
@@ -109,16 +115,19 @@ class ContextWindowMiddleware(AgentMiddleware):
         很短的会话中把原文替换成更长的摘要。调用方负责在成功后写入 checkpoint。
         """
         estimated = _messages_tokens(messages)
-        if self._thread_store is None:
+        if self._thread_persistence is None:
             return messages, self._publish(
                 thread_id,
                 "manual_compaction_unavailable",
                 estimated,
-                miss_reason="thread store is unavailable",
+                miss_reason="thread persistence is unavailable",
             ), False
         try:
             compacted, artifacts, changed = await self._summarize(
-                thread_id, messages, keep_turns=2
+                thread_id,
+                messages,
+                keep_turns=2,
+                state=ContextState(last_action="manual_summary"),
             )
         except Exception as exc:
             return messages, self._publish(
@@ -142,7 +151,6 @@ class ContextWindowMiddleware(AgentMiddleware):
                 estimated,
                 miss_reason="estimated savings below 20%",
             ), False
-        await self._set_state(thread_id, ContextState(last_action="manual_summary"))
         return compacted, self._publish(
             thread_id, "manual_summary", after, artifacts
         ), True
@@ -217,22 +225,33 @@ class ContextWindowMiddleware(AgentMiddleware):
 
         try:
             if ratio < 0.80:
-                dehydrated, artifacts, changed = await self._dehydrate(thread_id, messages, keep_turns=2)
+                dehydrated, artifacts, changed = await self._dehydrate(
+                    thread_id,
+                    messages,
+                    keep_turns=2,
+                    state=ContextState(last_action="soft_dehydration"),
+                    estimated_tokens=estimated,
+                )
                 if changed:
                     after = _messages_tokens(dehydrated)
                     if _saves_enough(estimated, after):
-                        await self._set_state(thread_id, ContextState(last_action="soft_dehydration"))
                         self._publish(thread_id, "soft_dehydration", after, artifacts)
                         return dehydrated, "soft_dehydration", artifacts, True
                 self._publish(thread_id, "soft_dehydration_skipped", estimated)
                 return messages, "soft_dehydration_skipped", (), False
 
             keep_turns = 1 if ratio >= 0.90 else 2
-            summarized, artifacts, changed = await self._summarize(thread_id, messages, keep_turns=keep_turns)
+            summarized, artifacts, changed = await self._summarize(
+                thread_id,
+                messages,
+                keep_turns=keep_turns,
+                state=ContextState(
+                    last_action="forced_summary" if keep_turns == 1 else "summary"
+                ),
+            )
             if changed:
                 after = _messages_tokens(summarized)
                 if _saves_enough(estimated, after):
-                    await self._set_state(thread_id, ContextState(last_action="forced_summary" if keep_turns == 1 else "summary"))
                     action = "forced_summary" if keep_turns == 1 else "summary"
                     self._publish(thread_id, action, after, artifacts)
                     return summarized, action, artifacts, True
@@ -244,45 +263,78 @@ class ContextWindowMiddleware(AgentMiddleware):
             return messages, "compression_failed", (), False
 
     async def _dehydrate(
-        self, thread_id: str, messages: list[BaseMessage], *, keep_turns: int
+        self,
+        thread_id: str,
+        messages: list[BaseMessage],
+        *,
+        keep_turns: int,
+        state: ContextState | None = None,
+        estimated_tokens: int | None = None,
     ) -> tuple[list[BaseMessage], tuple[str, ...], bool]:
         """将旧的大工具结果归档并替换为首尾预览，完整 user turn 保持原子边界。"""
-        if self._thread_store is None:
+        if self._thread_persistence is None:
             return messages, (), False
         cutoff = _cutoff_for_recent_turns(messages, keep_turns)
         if cutoff <= 0:
             return messages, (), False
         replacements = list(messages)
-        artifact_ids: list[str] = []
-        changed = False
+        artifact_indexes: list[int] = []
+        drafts: list[ContextArtifactDraft] = []
+        pending_artifact_id = "tool-" + "0" * 32
         for index, message in enumerate(messages[:cutoff]):
             if not isinstance(message, ToolMessage):
                 continue
             content = _message_content(message)
             if estimate_tokens(content) <= TOOL_RESULT_DEHYDRATE_TOKENS:
                 continue
-            preview = _tool_preview(content, "pending")
+            preview = _tool_preview(content, pending_artifact_id)
             if not _saves_enough(estimate_tokens(content), estimate_tokens(preview)):
                 continue
-            artifact = await self._thread_store.archive_context(
-                thread_id,
-                kind="tool",
-                content=_render_message(message),
-                source_start=index,
-                source_end=index,
-            )
+            artifact_indexes.append(index)
             replacements[index] = message.model_copy(
-                update={"content": _tool_preview(content, artifact.artifact_id)}
+                update={"content": preview}
             )
-            artifact_ids.append(artifact.artifact_id)
-            changed = True
-        return replacements, tuple(artifact_ids), changed
+            drafts.append(
+                ContextArtifactDraft(
+                    kind="tool",
+                    content=_render_message(message),
+                    source_start=index,
+                    source_end=index,
+                )
+            )
+        before_tokens = estimated_tokens if estimated_tokens is not None else _messages_tokens(messages)
+        if not drafts or not _saves_enough(
+            before_tokens, _messages_tokens(replacements)
+        ):
+            return messages, (), False
+        committed = await self._thread_persistence.commit_context(
+            CommitContextRewrite(
+                thread_id=thread_id,
+                artifacts=tuple(drafts),
+                state=state,
+            )
+        )
+        artifact_ids = tuple(artifact.artifact_id for artifact in committed.artifacts)
+        for index, artifact in zip(artifact_indexes, committed.artifacts):
+            replacements[index] = messages[index].model_copy(
+                update={
+                    "content": _tool_preview(
+                        _message_content(messages[index]), artifact.artifact_id
+                    )
+                }
+            )
+        return replacements, artifact_ids, True
 
     async def _summarize(
-        self, thread_id: str, messages: list[BaseMessage], *, keep_turns: int
+        self,
+        thread_id: str,
+        messages: list[BaseMessage],
+        *,
+        keep_turns: int,
+        state: ContextState | None = None,
     ) -> tuple[list[BaseMessage], tuple[str, ...], bool]:
         """把完整旧 turn 组生成最多 6% 窗口的结构化摘要，并在成功后归档原文。"""
-        if self._thread_store is None:
+        if self._thread_persistence is None:
             return messages, (), False
         cutoff = _cutoff_for_recent_turns(messages, keep_turns)
         if cutoff <= 0:
@@ -313,21 +365,28 @@ class ContextWindowMiddleware(AgentMiddleware):
         if not _saves_enough(_messages_tokens(messages), _messages_tokens(prospective)):
             return messages, (), False
         # 归档必须在摘要、长度和节省率校验后发生，失败时历史完全不变。
-        artifact = await self._thread_store.archive_context(
-            thread_id,
-            kind="history",
-            content=_render_messages(old),
-            source_start=0,
-            source_end=cutoff - 1,
+        committed = await self._thread_persistence.commit_context(
+            CommitContextRewrite(
+                thread_id=thread_id,
+                artifacts=(
+                    ContextArtifactDraft(
+                        kind="history",
+                        content=_render_messages(old),
+                        source_start=0,
+                        source_end=cutoff - 1,
+                    ),
+                ),
+                summary=ContextSummaryDraft(
+                    rewrite_version=SUMMARY_REWRITE_VERSION,
+                    content=summary,
+                    source_start=0,
+                    source_end=cutoff - 1,
+                    artifact_indexes=(0,),
+                ),
+                state=state,
+            )
         )
-        await self._thread_store.save_context_summary(
-            thread_id,
-            rewrite_version=SUMMARY_REWRITE_VERSION,
-            content=summary,
-            source_start=0,
-            source_end=cutoff - 1,
-            artifact_ids=(artifact.artifact_id,),
-        )
+        artifact = committed.artifacts[0]
         summary_message = HumanMessage(
             content=(
                 "<harness_context_summary>\n"
@@ -342,11 +401,21 @@ class ContextWindowMiddleware(AgentMiddleware):
         self, thread_id: str, messages: list[BaseMessage]
     ) -> tuple[list[BaseMessage], tuple[str, ...], bool]:
         """处理一次网关溢出：先工具脱水，仍不足时才强制保留最近一轮摘要。"""
-        dehydrated, artifact_ids, changed = await self._dehydrate(thread_id, messages, keep_turns=1)
+        dehydrated, artifact_ids, changed = await self._dehydrate(
+            thread_id,
+            messages,
+            keep_turns=1,
+            state=ContextState(last_action="overflow_tool_dehydration"),
+        )
         if changed:
             self._publish(thread_id, "overflow_tool_dehydration", _messages_tokens(dehydrated), artifact_ids)
             return dehydrated, artifact_ids, True
-        summarized, artifact_ids, changed = await self._summarize(thread_id, messages, keep_turns=1)
+        summarized, artifact_ids, changed = await self._summarize(
+            thread_id,
+            messages,
+            keep_turns=1,
+            state=ContextState(last_action="overflow_summary"),
+        )
         if changed:
             self._publish(thread_id, "overflow_summary", _messages_tokens(summarized), artifact_ids)
         return summarized, artifact_ids, changed
@@ -356,23 +425,26 @@ class ContextWindowMiddleware(AgentMiddleware):
         return max(2_048, min(12_000, int((self._window * 0.06) + 0.999)))
 
     async def _state(self, thread_id: str) -> ContextState:
-        """读取可选持久化状态；无 store 的库调用保持无副作用。"""
-        return await self._thread_store.context_state(thread_id) if self._thread_store else ContextState()
-
-    async def _set_state(self, thread_id: str, state: ContextState) -> None:
-        """写入成功后的状态并自动清空此前失败次数。"""
-        if self._thread_store:
-            await self._thread_store.set_context_state(thread_id, state)
+        """读取可选持久化状态；无 persistence 的库调用保持无副作用。"""
+        if self._thread_persistence is None:
+            return ContextState()
+        return (await self._thread_persistence.load_context(thread_id)).state
 
     async def _record_failure(self, thread_id: str, action: str) -> None:
         """累计摘要失败，第三次打开熔断器且不再自动重写历史。"""
-        if self._thread_store is None:
+        if self._thread_persistence is None:
             return
-        previous = await self._thread_store.context_state(thread_id)
+        previous = (await self._thread_persistence.load_context(thread_id)).state
         failures = previous.failures + 1
-        await self._thread_store.set_context_state(
-            thread_id,
-            ContextState(failures=failures, circuit_open=failures >= 3, last_action=action),
+        await self._thread_persistence.commit_context(
+            CommitContextRewrite(
+                thread_id=thread_id,
+                state=ContextState(
+                    failures=failures,
+                    circuit_open=failures >= 3,
+                    last_action=action,
+                ),
+            )
         )
 
     def _publish(

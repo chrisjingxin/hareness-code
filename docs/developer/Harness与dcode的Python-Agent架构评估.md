@@ -19,7 +19,7 @@
 | --- | --- | --- |
 | 企业运行隔离、审计和资源治理 | Harness Code | 有 RuntimeProfile、RuntimePool、不可变 Run binding、项目隔离的持久化 |
 | 功能完整度和生态覆盖 | dcode | 多模型、多沙箱、自定义 Agent、成熟 MCP、hooks、tracing 已进入实际运行链 |
-| 长会话上下文的持久可靠性 | Harness Code | 原文、摘要和压缩状态进入 ThreadStore，不依赖进程临时目录 |
+| 长会话上下文的持久可靠性 | Harness Code | 原文、摘要和压缩状态进入 ThreadPersistence，不依赖进程临时目录 |
 | 动态能力和用户可定制性 | dcode | 文件化自定义 Agent、异步 Agent、可写记忆、Goal/Rubric、解释器 |
 | 默认文件访问边界 | Harness Code | 文件工具限制在工作区；dcode 本地模式明确允许绝对路径和 `..` 越界 |
 | 当前产品成熟度 | dcode | 已交付能力明显更多，边界场景和集成测试也更丰富 |
@@ -60,7 +60,7 @@
   ↓
 RuntimePool 查找或构建对应 Agent 图
   ↓
-从 ThreadStore 恢复该线程的 PromptEpoch 和 checkpoint
+从 ThreadPersistence 恢复该线程的 PromptEpoch 和 checkpoint
   ↓
 创建只属于本次 Run 的 RunContext
   ↓
@@ -142,7 +142,7 @@ Harness 把“可以共用的 Agent 能力”定义为 Runtime。`RuntimeProfile
 
 - “什么变化必须生成新 Runtime”变成关键正确性问题；
 - Profile 指纹漏字段时，旧能力会被错误复用；
-- AgentHost 需要同时协调配置、模型绑定、Runtime、ThreadStore 和运行生命周期，当前 `server.py` 因而过重。
+- AgentHost 需要同时协调配置、模型绑定、Runtime、ThreadPersistence 和运行生命周期，当前 `server.py` 因而过重。
 
 dcode 选择每进程一张图。它用一个 `asyncio.Lock` 防止重复构建，并让动态模型 middleware 在调用时替换模型。[D-ServerGraph] [D-Model]
 
@@ -162,7 +162,7 @@ dcode 选择每进程一张图。它用一个 `asyncio.Lock` 防止重复构建�
 
 ### 4.2 模型选择与运行事实
 
-Harness 在 Run 开始前解析模型，优先级为：本次请求、最近一次 Run、旧绑定、配置默认。解析后把“用户请求了什么”和“实际执行用了什么”原子写入 ThreadStore；RuntimeProfile 也使用实际模型生成。[H-Server] [H-Store]
+Harness 在 Run 开始前解析模型，优先级为：本次请求、最近一次 Run、旧绑定、配置默认。解析后把“用户请求了什么”和“实际执行用了什么”原子写入 ThreadPersistence；RuntimeProfile 也使用实际模型生成。[H-Server] [H-Persistence]
 
 这带来三个好处：
 
@@ -171,7 +171,7 @@ Harness 在 Run 开始前解析模型，优先级为：本次请求、最近一�
 3. 模型不可用或选择冲突时倾向明确失败，而不是悄悄改变行为。
 
 ZC-086 已将这套优先级、legacy 转换、脱敏和 Run binding 构造收进
-`execution_binding.py` 的纯函数 interface。Server 只编排输入与输出，ThreadStore 只处理
+`execution_binding.py` 的纯函数 interface。Server 只编排输入与输出，ThreadPersistence 只处理
 SQLite/JSON adapter，Runtime 和历史事实消费同一解析结果。[H-Task-086]
 
 dcode 支持 `provider:model` 和大量 provider。`ConfigurableModelMiddleware` 在每次模型调用前读取 runtime context；模型不同就创建对应实例，并把实际 model spec 和参数写入 checkpoint，恢复时继续使用。[D-Model] [D-Resume] [D-Config]
@@ -245,7 +245,7 @@ Harness 不使用 Deep Agents 默认 summarization，而是自建 `ContextWindow
 高于 90%   → 更激进，只保留一个近期回合
 ```
 
-原始工具结果、摘要、指针和压缩状态写入 ThreadStore；压缩收益不足 20% 时不盲目替换；还有溢出后单次恢复和连续失败熔断。[H-Context] [H-Store]
+原始工具结果、摘要、指针和压缩状态写入 ThreadPersistence；压缩收益不足 20% 时不盲目替换；还有溢出后单次恢复和连续失败熔断。[H-Context] [H-Persistence]
 
 优势：
 
@@ -266,7 +266,7 @@ dcode 使用 Deep Agents 提供的 summarization tool middleware。它在本地�
 
 ### 4.6 Thread、checkpoint 和项目隔离
 
-Harness 的 ThreadStore 使用用户级 SQLite，但给 LangGraph checkpointer 强制加入项目指纹 namespace。它同时保存：
+Harness 的 ThreadPersistence 使用用户级 SQLite，但给 LangGraph checkpointer 强制加入项目指纹 namespace。它同时保存：
 
 - Thread 索引；
 - checkpoint；
@@ -275,7 +275,7 @@ Harness 的 ThreadStore 使用用户级 SQLite，但给 LangGraph checkpointer �
 - 每次 Run 的请求选择和实际执行绑定；
 - 上下文原文、摘要和压缩状态。
 
-数据库文件和数据目录还设置了受限权限。[H-Store]
+数据库文件和数据目录还设置了受限权限。[H-Persistence]
 
 dcode 也使用全局 SQLite checkpointer。Thread metadata 保存 cwd，并通过 cwd 精确过滤会话；源码为大型数据库增加了专门索引，注释中记录了约 12GB 数据库的现实性能问题，体现出较强的生产经验。[D-Sessions]
 
@@ -487,7 +487,7 @@ Harness 的耦合点较少，但其中一个涉及进程全局状态，故障影
 
 - Harness 生产链为 `AgentHost → RuntimePool → create_harness_agent() → Deep Agents graph`；
 - Harness 动态 Agent catalog 当前未接入；
-- Harness 的 PromptEpoch、Run binding、上下文产物进入 ThreadStore；
+- Harness 的 PromptEpoch、Run binding、上下文产物进入 ThreadPersistence；
 - Harness 的审批工具绕过并发读写锁；
 - Harness MCP 指纹忽略 command 和 URL；
 - dcode 每进程缓存一张图；
@@ -537,7 +537,7 @@ Harness 当前的主要问题不是方向错误，而是**骨架已经较重，�
 - [H-RunContext]：[`harness_agent/run_context.py`](../../packages/agent/harness_agent/run_context.py)
 - [H-Prompt]：[`harness_agent/prompting.py`](../../packages/agent/harness_agent/prompting.py)
 - [H-Context]：[`harness_agent/context_window.py`](../../packages/agent/harness_agent/context_window.py)
-- [H-Store]：[`harness_agent/thread_store.py`](../../packages/agent/harness_agent/thread_store.py)
+- [H-Persistence]：[`harness_agent/thread_persistence.py`](../../packages/agent/harness_agent/thread_persistence.py)
 - [H-Skills]：[`harness_agent/skills.py`](../../packages/agent/harness_agent/skills.py)
 - [H-Execution]：[`harness_agent/execution.py`](../../packages/agent/harness_agent/execution.py)
 - [H-Workspace]：[`harness_agent/workspace_boundary.py`](../../packages/agent/harness_agent/workspace_boundary.py)
@@ -577,7 +577,7 @@ Harness 当前的主要问题不是方向错误，而是**骨架已经较重，�
 [H-RunContext]: ../../packages/agent/harness_agent/run_context.py
 [H-Prompt]: ../../packages/agent/harness_agent/prompting.py
 [H-Context]: ../../packages/agent/harness_agent/context_window.py
-[H-Store]: ../../packages/agent/harness_agent/thread_store.py
+[H-Persistence]: ../../packages/agent/harness_agent/thread_persistence.py
 [H-Skills]: ../../packages/agent/harness_agent/skills.py
 [H-Execution]: ../../packages/agent/harness_agent/execution.py
 [H-Workspace]: ../../packages/agent/harness_agent/workspace_boundary.py

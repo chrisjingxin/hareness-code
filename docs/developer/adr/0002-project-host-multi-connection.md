@@ -5,11 +5,11 @@
 
 ## 背景
 
-Python Agent 将作为 TUI、无头 CLI、Web 和未来桌面端共享的后端核心。若每个表现层分别持有 Runtime、配置或 ThreadStore，会产生重复状态、并发 Run 竞争和不同协议实现。若 Web 经 TypeScript 转发，又会让 CLI 变成第二个业务服务端。
+Python Agent 将作为 TUI、无头 CLI、Web 和未来桌面端共享的后端核心。若每个表现层分别持有 Runtime、配置或 ThreadPersistence，会产生重复状态、并发 Run 竞争和不同协议实现。若 Web 经 TypeScript 转发，又会让 CLI 变成第二个业务服务端。
 
 ## 决策
 
-一个 CLI 进程启动一个绑定 Project 的 Python `AgentHost`。Host 唯一持有 Agent Core、ThreadStore、RuntimePool、配置、Skill/MCP catalog 和 active Run registry；stdio 与 loopback WebSocket 都只是 `ProtocolConnection` transport。
+一个 CLI 进程启动一个绑定 Project 的 Python `AgentHost`。Host 唯一持有 Agent Core、ThreadPersistence、RuntimePool、配置、Skill/MCP catalog 和 active Run registry；stdio 与 loopback WebSocket 都只是 `ProtocolConnection` transport。
 
 ```text
 TUI / CLI ── stdio JSONL ──┐

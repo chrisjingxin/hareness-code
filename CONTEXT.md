@@ -5,7 +5,7 @@
 | 术语 | 定义 | 不包含 |
 | --- | --- | --- |
 | Agent Core | 执行 Agent 行为的 Python 领域与运行模块。 | transport、连接、UI。 |
-| Agent Host | 一个 Project 范围内承载 Core、ThreadStore、RuntimePool、配置、Skill、MCP 与 RunRegistry 的 Python 进程。 | 多 Project、daemon discovery。 |
+| Agent Host | 一个 Project 范围内承载 Core、ThreadPersistence、RuntimePool、配置、Skill、MCP 与 RunRegistry 的 Python 进程。 | 多 Project、daemon discovery。 |
 | Connection | 一个前端与 Host 的临时协议连接，保存协商、capability、watch 和待处理 Interaction。 | Runtime、数据库、独立配置副本。 |
 | Host owner | 启动 Host 并决定其生命周期的 CLI Connection。 | Run 的天然所有权；Run owner 由发起连接决定。 |
 | Project | CLI 启动 Host 时绑定的规范化 workspace 与配置边界。 | 客户端 `initialize` 传入的 cwd。 |

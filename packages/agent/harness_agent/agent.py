@@ -23,6 +23,7 @@ from harness_agent.prompting import PromptComposer, PromptEpoch, read_only_memor
 from harness_agent.run_context import PromptEpochMiddleware, RunContext
 
 if TYPE_CHECKING:
+    from harness_agent.thread_persistence import ThreadPersistence
     from harness_agent.workspace_boundary import WorkspaceBoundaryMiddleware
 
 logger = logging.getLogger(__name__)
@@ -216,7 +217,7 @@ def create_prompt_epoch(
     enable_skills: bool,
     extra_tools: Sequence[BaseTool | Any] | None = None,
 ) -> PromptEpoch:
-    """为新 thread 创建稳定前缀；恢复 thread 必须直接从 ThreadStore 读取旧 epoch。"""
+    """为新 thread 创建稳定前缀；恢复 thread 必须直接从 ThreadPersistence 读取旧 epoch。"""
     core = system_prompt or _load_system_prompt()
     execution = _with_execution_context(
         "",
@@ -263,7 +264,7 @@ def create_harness_agent(
     execution_context: Any | None = None,
     skill_registry: Any | None = None,
     prompt_epoch: PromptEpoch | None = None,
-    thread_store: Any | None = None,
+    thread_persistence: ThreadPersistence | None = None,
     context_updates: dict[str, list[Any]] | None = None,
     context_middleware: Any | None = None,
     context_window_tokens: int | None = None,
@@ -290,7 +291,7 @@ def create_harness_agent(
         execution_context: 服务端已创建的本机或远端工具执行上下文。
         skill_registry: 服务端建立的固定 Skill catalog；未传入时由本机调用方创建。
         prompt_epoch: 非共享库调用的稳定 system 前缀；共享运行时必须在 RunContext 中传入。
-        thread_store: 当前 project 的本机归档/epoch 存储。
+        thread_persistence: 当前 project 的本机归档/epoch 存储。
         context_updates: server 持有的上下文事件缓冲，避免中间件直接写协议。
         context_middleware: 可由 server 显式持有的共享压缩器，用于用户手动触发压缩。
         context_window_tokens: 已校验的窗口大小；None 时优先读取模型 profile。
@@ -324,7 +325,7 @@ def create_harness_agent(
     if shared_runtime and prompt_epoch is not None:
         raise ValueError("SHARED_RUNTIME_PROMPT_EPOCH_MUST_USE_RUN_CONTEXT")
     if prompt_epoch is None and not shared_runtime:
-        # 库调用没有 ThreadStore 时仍使用相同的确定性顺序，但不会声称可恢复。
+        # 库调用没有 ThreadPersistence 时仍使用相同的确定性顺序，但不会声称可恢复。
         if enable_skills and not sandboxed and skill_registry is None:
             from harness_agent.skills import SkillRegistry
 
@@ -373,7 +374,7 @@ def create_harness_agent(
             backend = run_scoped_virtual_backend_factory(
                 backend,
                 registry=registry,
-                thread_store=thread_store,
+                thread_persistence=thread_persistence,
             )
         else:
             assert prompt_epoch is not None
@@ -381,7 +382,7 @@ def create_harness_agent(
                 backend,
                 registry=registry,
                 thread_id=prompt_epoch.thread_id,
-                thread_store=thread_store,
+                thread_persistence=thread_persistence,
             )
     elif enable_skills:
         logger.info("Skills middleware is disabled in remote sandbox mode")
@@ -436,7 +437,7 @@ def create_harness_agent(
         context_middleware = ContextWindowMiddleware(
             resolved_model,
             context_window_tokens=window,
-            thread_store=thread_store,
+            thread_persistence=thread_persistence,
             updates=context_updates,
         )
     if shared_runtime:
