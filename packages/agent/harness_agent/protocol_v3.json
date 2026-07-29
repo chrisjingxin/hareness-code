@@ -585,7 +585,7 @@
           "properties": {
             "interrupt_id": { "type": "string" }, "description": { "type": "string" },
             "requests": { "$ref": "#/$defs/jsonValue" },
-            "decisions": { "type": "array", "items": { "enum": ["approve_once", "approve_thread", "reject"] } }
+            "decisions": { "type": "array", "items": { "enum": ["approve_once", "approve_thread", "approve_always", "reject", "reject_with_feedback"] } }
           },
           "additionalProperties": false
         }
@@ -595,7 +595,7 @@
     "approvalResponse": {
       "type": "object", "required": ["decision"],
       "properties": {
-        "decision": { "enum": ["approve_once", "approve_thread", "reject"] }, "feedback": { "type": "string", "default": "" }
+        "decision": { "enum": ["approve_once", "approve_thread", "approve_always", "reject", "reject_with_feedback"] }, "feedback": { "type": "string", "default": "" }
       },
       "additionalProperties": false
     },

@@ -18,11 +18,14 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import tomli_w
 
 from harness_agent.config import DEFAULT_MODEL_CAPABILITIES, ConfigError, Za38Config, load_config
+
+if TYPE_CHECKING:
+    from harness_agent.mcp import McpConfigSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -256,6 +259,124 @@ class ConfigChangeService:
             "applies_to": list(preview.applies_to),
         }
 
+    def add_mcp_server(self, server: dict[str, Any], *, expected_revision: str | None = None) -> "McpConfigSnapshot":
+        """在文件锁内添加 MCP 服务器配置，复用 CAS、校验、原子写入和审计。
+
+        不走白名单 _normalize_changes 路径（MCP 是结构化数组操作），
+        但复用锁、revision、完整 load_config() 校验和审计基础设施。
+        """
+        from harness_agent.mcp import McpServerConfig, build_mcp_snapshot, parse_mcp_config
+
+        name = server.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ConfigChangeError("MCP_SERVER_NAME_INVALID", "MCP 服务器名称无效", field="mcp.servers.name")
+
+        # 受管策略检查
+        lock_reason = self._managed_policy.lock_reason("mcp.servers")
+        if lock_reason is not None:
+            raise ConfigChangeError(lock_reason, "MCP 配置当前不可修改", field="mcp.servers")
+
+        try:
+            with self._exclusive_lock():
+                current_revision = self._revision_for_path(self._target_path)
+                if expected_revision is not None and current_revision != expected_revision:
+                    raise ConfigChangeError("CONFIG_REVISION_CONFLICT", "配置已被其他操作修改")
+
+                document = self._read_user_document()
+                mcp_section = document.setdefault("mcp", {})
+                servers_list = mcp_section.setdefault("servers", [])
+                if not isinstance(servers_list, list):
+                    raise ConfigChangeError("CONFIG_VALIDATION_FAILED", "mcp.servers 区段类型无效", field="mcp.servers")
+
+                # 重复检查
+                if any(isinstance(s, dict) and s.get("name") == name for s in servers_list):
+                    raise ConfigChangeError("MCP_SERVER_DUPLICATE", f"MCP 服务器 '{name}' 已存在", field="mcp.servers.name")
+
+                servers_list.append(server)
+
+                try:
+                    candidate = tomli_w.dumps(document)
+                except (TypeError, ValueError) as exc:
+                    raise ConfigChangeError("CONFIG_VALIDATION_FAILED", "配置无法序列化") from exc
+
+                # 完整配置校验
+                self._validate_mcp_candidate(candidate)
+
+                self._write_atomic(candidate)
+                revision = self._revision_for_path(self._target_path)
+
+                # 从写入后的配置构建 snapshot
+                parsed = parse_mcp_config(document.get("mcp"))
+                snapshot = build_mcp_snapshot(parsed, revision)
+
+        except ConfigChangeError as exc:
+            self._audit("rejected", ("mcp.servers",), exc.code, None)
+            raise
+        except OSError as exc:
+            self._audit("rejected", ("mcp.servers",), "CONFIG_WRITE_FAILED", None)
+            raise ConfigChangeError("CONFIG_WRITE_FAILED", "无法原子写入用户配置") from exc
+
+        self._audit("commit", ("mcp.servers",), "OK", revision)
+        return snapshot
+
+    def remove_mcp_server(self, name: str, *, expected_revision: str | None = None) -> "McpConfigSnapshot":
+        """在文件锁内删除 MCP 服务器配置，复用 CAS、校验、原子写入和审计。"""
+        from harness_agent.mcp import build_mcp_snapshot, parse_mcp_config
+
+        if not isinstance(name, str) or not name.strip():
+            raise ConfigChangeError("MCP_SERVER_NAME_INVALID", "MCP 服务器名称无效", field="mcp.servers.name")
+
+        # 受管策略检查
+        lock_reason = self._managed_policy.lock_reason("mcp.servers")
+        if lock_reason is not None:
+            raise ConfigChangeError(lock_reason, "MCP 配置当前不可修改", field="mcp.servers")
+
+        try:
+            with self._exclusive_lock():
+                current_revision = self._revision_for_path(self._target_path)
+                if expected_revision is not None and current_revision != expected_revision:
+                    raise ConfigChangeError("CONFIG_REVISION_CONFLICT", "配置已被其他操作修改")
+
+                document = self._read_user_document()
+                mcp_section = document.get("mcp", {})
+                servers_list = mcp_section.get("servers", [])
+                if not isinstance(servers_list, list):
+                    raise ConfigChangeError("CONFIG_VALIDATION_FAILED", "mcp.servers 区段类型无效", field="mcp.servers")
+
+                # 存在性检查
+                original_len = len(servers_list)
+                new_servers = [s for s in servers_list if not (isinstance(s, dict) and s.get("name") == name)]
+                if len(new_servers) == original_len:
+                    raise ConfigChangeError("MCP_SERVER_NOT_FOUND", f"MCP 服务器 '{name}' 不存在", field="mcp.servers.name")
+
+                mcp_section["servers"] = new_servers
+                document["mcp"] = mcp_section
+
+                try:
+                    candidate = tomli_w.dumps(document)
+                except (TypeError, ValueError) as exc:
+                    raise ConfigChangeError("CONFIG_VALIDATION_FAILED", "配置无法序列化") from exc
+
+                # 完整配置校验
+                self._validate_mcp_candidate(candidate)
+
+                self._write_atomic(candidate)
+                revision = self._revision_for_path(self._target_path)
+
+                # 从写入后的配置构建 snapshot
+                parsed = parse_mcp_config(document.get("mcp"))
+                snapshot = build_mcp_snapshot(parsed, revision)
+
+        except ConfigChangeError as exc:
+            self._audit("rejected", ("mcp.servers",), exc.code, None)
+            raise
+        except OSError as exc:
+            self._audit("rejected", ("mcp.servers",), "CONFIG_WRITE_FAILED", None)
+            raise ConfigChangeError("CONFIG_WRITE_FAILED", "无法原子写入用户配置") from exc
+
+        self._audit("commit", ("mcp.servers",), "OK", revision)
+        return snapshot
+
     def _load_effective_config(self) -> Za38Config:
         """按当前来源优先级加载配置；任何不可加载状态都拒绝交互式编辑。"""
         try:
@@ -386,6 +507,27 @@ class ConfigChangeService:
                     "默认模型 Profile 不存在",
                     field="models.default_profile",
                 ) from exc
+            raise ConfigChangeError("CONFIG_VALIDATION_FAILED", "修改后的完整配置校验失败") from exc
+        except OSError as exc:
+            raise ConfigChangeError("CONFIG_VALIDATION_FAILED", "修改后的完整配置校验失败") from exc
+
+    def _validate_mcp_candidate(self, content: str) -> None:
+        """在隔离临时 home 中校验含 MCP 变更的完整配置。"""
+        try:
+            with tempfile.TemporaryDirectory(prefix="harness-config-validate-") as temporary:
+                temporary_home = Path(temporary)
+                path = temporary_home / ".harness" / "config.toml"
+                path.parent.mkdir(mode=0o700)
+                path.write_text(content, encoding="utf-8")
+                path.chmod(0o600)
+                load_config(
+                    workspace=self._workspace,
+                    home=temporary_home,
+                    environ=self._environ,
+                )
+        except ConfigChangeError:
+            raise
+        except ConfigError as exc:
             raise ConfigChangeError("CONFIG_VALIDATION_FAILED", "修改后的完整配置校验失败") from exc
         except OSError as exc:
             raise ConfigChangeError("CONFIG_VALIDATION_FAILED", "修改后的完整配置校验失败") from exc

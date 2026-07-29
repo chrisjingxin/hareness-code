@@ -20,9 +20,9 @@ def test_hitl_mapping_keeps_compaction_outside_all_approval_modes():
     auto_edit = interrupt_on_for_approval_mode("auto-edit")
 
     assert default is not None
-    assert set(default) == {"execute", "write_file", "edit_file", "delete", "task"}
+    assert set(default) == {"execute", "write_file", "edit_file", "delete", "delete_file", "task", "web_fetch", "apply_patch", "monitor", "task_stop"}
     assert auto_edit is not None
-    assert set(auto_edit) == {"execute", "delete", "task"}
+    assert set(auto_edit) == {"execute", "delete", "delete_file", "task", "web_fetch", "monitor", "task_stop"}
     assert interrupt_on_for_approval_mode("plan") is None
     assert interrupt_on_for_approval_mode("yolo") is None
     assert "compact_conversation" not in default
@@ -76,11 +76,11 @@ def test_extra_interrupt_tools_merged_in_default_and_auto_edit():
 
     default = interrupt_on_for_approval_mode("default", extra_interrupt_tools=mcp_tools)
     assert default is not None
-    assert set(default) == {"execute", "write_file", "edit_file", "delete", "task"} | mcp_tools
+    assert set(default) == {"execute", "write_file", "edit_file", "delete", "delete_file", "task", "web_fetch", "apply_patch", "monitor", "task_stop"} | mcp_tools
 
     auto_edit = interrupt_on_for_approval_mode("auto-edit", extra_interrupt_tools=mcp_tools)
     assert auto_edit is not None
-    assert set(auto_edit) == {"execute", "delete", "task"} | mcp_tools
+    assert set(auto_edit) == {"execute", "delete", "delete_file", "task", "web_fetch", "monitor", "task_stop"} | mcp_tools
 
     # plan 和 yolo 即使传入额外工具也不产生拦截配置
     assert interrupt_on_for_approval_mode("plan", extra_interrupt_tools=mcp_tools) is None
@@ -91,7 +91,7 @@ def test_extra_interrupt_tools_none_keeps_original_set():
     """不传 extra_interrupt_tools 时行为与原有完全一致。"""
     default = interrupt_on_for_approval_mode("default", extra_interrupt_tools=None)
     assert default is not None
-    assert set(default) == {"execute", "write_file", "edit_file", "delete", "task"}
+    assert set(default) == {"execute", "write_file", "edit_file", "delete", "delete_file", "task", "web_fetch", "apply_patch", "monitor", "task_stop"}
 
 
 def test_approval_mode_prompts_state_the_actual_enforced_policy():

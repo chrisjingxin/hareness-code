@@ -15,10 +15,13 @@ import shlex
 # 工具分类常量
 # ---------------------------------------------------------------------------
 
-_READ_ONLY_TOOLS = frozenset({"ls", "read_file", "glob", "grep"})
+_READ_ONLY_TOOLS = frozenset({
+    "ls", "read_file", "glob", "grep",
+    "web_search", "lsp", "tool_search", "memory_search", "task_output",
+})
 """始终可并行的只读工具。"""
 
-_WRITE_TOOLS = frozenset({"write_file", "edit_file"})
+_WRITE_TOOLS = frozenset({"write_file", "edit_file", "delete_file", "apply_patch"})
 """始终不可并行的写工具。"""
 
 _SUBAGENT_TOOLS = frozenset({"task"})

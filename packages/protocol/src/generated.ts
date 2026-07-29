@@ -2,7 +2,7 @@
 
 export const PROTOCOL_MAJOR = 3 as const
 export const PROTOCOL_MINOR = 0 as const
-export const PROTOCOL_SCHEMA_SHA256 = "b05d7ef1188f6e52654ebcc36d4b1f9d993a7a4bbf0eecd4f3257935639e8118" as const
+export const PROTOCOL_SCHEMA_SHA256 = "d55de07aae261473376114b36183c5919f53dee6bf7ad19276b05ac95cdde7cb" as const
 export const MAX_FRAME_BYTES = 8388608 as const
 export const MAX_TOOL_PAYLOAD_BYTES = 1048576 as const
 export const CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","mcp.status","mcp.add","mcp.remove","host.attachment.create"] as const
@@ -121,8 +121,8 @@ export type RunCancelledPayload = { "reason": string }
 export type RunFailure = { "code": string; "message": string; "retryable": boolean }
 export type RunFailedPayload = { "error": RunFailure }
 export type InteractionBase = { "thread_id": string; "run_id": string; "timeout_ms": number; "payload": JsonObject }
-export type ApprovalRequest = { "thread_id": string; "run_id": string; "timeout_ms": number; "payload": { "interrupt_id": string; "description": string; "requests": JsonValue; "decisions": Array<"approve_once" | "approve_thread" | "reject"> } }
-export type ApprovalResponse = { "decision": "approve_once" | "approve_thread" | "reject"; "feedback"?: string }
+export type ApprovalRequest = { "thread_id": string; "run_id": string; "timeout_ms": number; "payload": { "interrupt_id": string; "description": string; "requests": JsonValue; "decisions": Array<"approve_once" | "approve_thread" | "approve_always" | "reject" | "reject_with_feedback"> } }
+export type ApprovalResponse = { "decision": "approve_once" | "approve_thread" | "approve_always" | "reject" | "reject_with_feedback"; "feedback"?: string }
 export type Question = { "id": string; "question": string; "header": string; "body": string; "options": Array<{ "label": string; "value": string; "description": string }>; "multi_select": boolean; "allow_other": boolean }
 export type QuestionRequest = { "thread_id": string; "run_id": string; "timeout_ms": number; "payload": { "interrupt_id": string; "questions": Array<Question> } }
 export type QuestionResponse = { "answers": Record<string, Array<string>> }
