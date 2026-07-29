@@ -9,10 +9,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Literal
+from urllib.parse import parse_qsl, urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +33,16 @@ TransportType = Literal["stdio", "http", "sse"]
 """支持的 MCP 传输类型。"""
 
 
+class McpConfigError(ValueError):
+    """MCP 配置在可信边界校验失败时抛出的安全错误。"""
+
+    def __init__(self, code: str, message: str, *, field: str | None = None) -> None:
+        """保存稳定错误码与字段路径，不回显配置秘密。"""
+        super().__init__(message)
+        self.code = code
+        self.field = field
+
+
 @dataclass(frozen=True, slots=True)
 class McpServerConfig:
     """一个 MCP 服务器的已校验配置。"""
@@ -37,10 +51,112 @@ class McpServerConfig:
     transport: TransportType
     command: str | None = None
     args: tuple[str, ...] = ()
-    env: dict[str, str] = field(default_factory=dict)
+    env: Mapping[str, str] = field(default_factory=dict)
     url: str | None = None
-    headers: dict[str, str] = field(default_factory=dict)
+    headers: Mapping[str, str] = field(default_factory=dict)
     timeout_seconds: float = DEFAULT_CONNECT_TIMEOUT_SECONDS
+
+    def __post_init__(self) -> None:
+        """冻结嵌套映射，避免快照建立后仍被调用方修改。"""
+        object.__setattr__(self, "args", tuple(self.args))
+        object.__setattr__(self, "env", MappingProxyType(dict(self.env)))
+        object.__setattr__(self, "headers", MappingProxyType(dict(self.headers)))
+        object.__setattr__(self, "timeout_seconds", float(self.timeout_seconds))
+
+    @classmethod
+    def from_mapping(cls, entry: Mapping[str, object]) -> "McpServerConfig":
+        """把协议或 TOML 映射规范化为唯一的 MCP 配置值对象。"""
+        name = entry.get("name")
+        if not isinstance(name, str) or not re.fullmatch(r"[a-zA-Z0-9_-]+", name.strip()):
+            raise McpConfigError(
+                "MCP_SERVER_NAME_INVALID",
+                f"Invalid server name {name!r}: only [a-zA-Z0-9_-] allowed",
+                field="mcp.servers.name",
+            )
+        name = name.strip()
+        transport = entry.get("transport", "stdio")
+        if transport not in ("stdio", "http", "sse"):
+            raise McpConfigError(
+                "MCP_TRANSPORT_INVALID",
+                f"Unsupported MCP transport {transport!r}",
+                field="mcp.servers.transport",
+            )
+        timeout = entry.get("timeout", DEFAULT_CONNECT_TIMEOUT_SECONDS)
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(float(timeout))
+            or timeout <= 0
+        ):
+            raise McpConfigError("MCP_TIMEOUT_INVALID", "MCP 连接超时无效", field="mcp.servers.timeout")
+
+        if transport == "stdio":
+            command = entry.get("command")
+            if not isinstance(command, str) or not command.strip():
+                raise McpConfigError(
+                    "MCP_COMMAND_REQUIRED",
+                    "stdio transport requires 'command'",
+                    field="mcp.servers.command",
+                )
+            args = _string_sequence(entry.get("args", ()), "mcp.servers.args")
+            env = _string_mapping(entry.get("env", {}), "mcp.servers.env")
+            return cls(
+                name=name,
+                transport="stdio",
+                command=command.strip(),
+                args=args,
+                env=env,
+                timeout_seconds=float(timeout),
+            )
+
+        url = entry.get("url")
+        if not isinstance(url, str) or not url.strip():
+            raise McpConfigError(
+                "MCP_URL_REQUIRED",
+                f"{transport} transport requires 'url'",
+                field="mcp.servers.url",
+            )
+        headers = _string_mapping(entry.get("headers", {}), "mcp.servers.headers")
+        return cls(
+            name=name,
+            transport=transport,  # type: ignore[arg-type]
+            url=url.strip(),
+            headers=headers,
+            timeout_seconds=float(timeout),
+        )
+
+    def to_document(self) -> dict[str, object]:
+        """转换为不含额外运行时状态的 TOML MCP 条目。"""
+        result: dict[str, object] = {"name": self.name, "transport": self.transport}
+        if self.transport == "stdio":
+            result["command"] = self.command
+            if self.args:
+                result["args"] = list(self.args)
+            if self.env:
+                result["env"] = dict(self.env)
+        else:
+            result["url"] = self.url
+            if self.headers:
+                result["headers"] = dict(self.headers)
+        if self.timeout_seconds != DEFAULT_CONNECT_TIMEOUT_SECONDS:
+            result["timeout"] = self.timeout_seconds
+        return result
+
+
+def _string_sequence(value: object, field_name: str) -> tuple[str, ...]:
+    """校验字符串数组，禁止写服务隐式转换任意对象。"""
+    if not isinstance(value, (list, tuple)) or not all(isinstance(item, str) for item in value):
+        raise McpConfigError("MCP_FIELD_INVALID", "MCP 字段类型无效", field=field_name)
+    return tuple(value)
+
+
+def _string_mapping(value: object, field_name: str) -> dict[str, str]:
+    """校验字符串映射，返回与输入隔离的副本。"""
+    if not isinstance(value, Mapping) or not all(
+        isinstance(key, str) and isinstance(item, str) for key, item in value.items()
+    ):
+        raise McpConfigError("MCP_FIELD_INVALID", "MCP 字段类型无效", field=field_name)
+    return dict(value)
 
 
 def parse_mcp_config(mcp_section: dict[str, Any] | None) -> list[McpServerConfig]:
@@ -70,57 +186,19 @@ def parse_mcp_config(mcp_section: dict[str, Any] | None) -> list[McpServerConfig
 
 def _parse_single_server(entry: dict[str, Any], idx: int) -> McpServerConfig | None:
     """校验并解析单个 MCP 服务器配置条目。"""
-    name = entry.get("name")
-    if not isinstance(name, str) or not name.strip():
-        logger.warning("mcp.servers[%d] missing or empty 'name'; skipping", idx)
+    try:
+        return McpServerConfig.from_mapping(entry)
+    except McpConfigError as exc:
+        if exc.code == "MCP_TIMEOUT_INVALID":
+            # 启动时保持历史兼容：损坏的超时回退默认值；交互式写入仍严格拒绝。
+            normalized = dict(entry)
+            normalized["timeout"] = DEFAULT_CONNECT_TIMEOUT_SECONDS
+            try:
+                return McpServerConfig.from_mapping(normalized)
+            except McpConfigError:
+                pass
+        logger.warning("mcp.servers[%d] rejected: %s", idx, exc)
         return None
-    name = name.strip()
-
-    transport = entry.get("transport", "stdio")
-    if transport not in ("stdio", "http", "sse"):
-        logger.warning(
-            "mcp.servers[%d] (%s): unsupported transport %r; skipping", idx, name, transport
-        )
-        return None
-
-    timeout = entry.get("timeout", DEFAULT_CONNECT_TIMEOUT_SECONDS)
-    if not isinstance(timeout, (int, float)) or timeout <= 0:
-        timeout = DEFAULT_CONNECT_TIMEOUT_SECONDS
-
-    if transport == "stdio":
-        command = entry.get("command")
-        if not isinstance(command, str) or not command.strip():
-            logger.warning(
-                "mcp.servers[%d] (%s): stdio transport requires 'command'; skipping", idx, name
-            )
-            return None
-        args_raw = entry.get("args", [])
-        if not isinstance(args_raw, list):
-            logger.warning(
-                "mcp.servers[%d] (%s): 'args' must be an array; skipping", idx, name
-            )
-            return None
-        args = tuple(str(a) for a in args_raw)
-        env_raw = entry.get("env", {})
-        env = {str(k): str(v) for k, v in env_raw.items()} if isinstance(env_raw, dict) else {}
-        return McpServerConfig(
-            name=name, transport="stdio", command=command.strip(),
-            args=args, env=env, timeout_seconds=float(timeout),
-        )
-
-    # http / sse
-    url = entry.get("url")
-    if not isinstance(url, str) or not url.strip():
-        logger.warning(
-            "mcp.servers[%d] (%s): %s transport requires 'url'; skipping", idx, name, transport
-        )
-        return None
-    headers_raw = entry.get("headers", {})
-    headers = {str(k): str(v) for k, v in headers_raw.items()} if isinstance(headers_raw, dict) else {}
-    return McpServerConfig(
-        name=name, transport=transport,  # type: ignore[arg-type]
-        url=url.strip(), headers=headers, timeout_seconds=float(timeout),
-    )
 
 
 def expand_env_vars(value: str) -> str | None:
@@ -158,20 +236,66 @@ def mcp_config_fingerprint(configs: list[McpServerConfig]) -> str:
         return component_fingerprint({"transport": "disabled"})
     entries = []
     for c in sorted(configs, key=lambda c: c.name):
-        entry: dict[str, object] = {
-            "name": c.name,
-            "transport": c.transport,
-            "args": list(c.args),
-            "env_keys": sorted(c.env.keys()),
-            "header_keys": sorted(c.headers.keys()),
-            "timeout_seconds": c.timeout_seconds,
-        }
-        if c.transport == "stdio":
-            entry["command"] = c.command
-        if c.transport in ("http", "sse"):
-            entry["url"] = c.url
-        entries.append(entry)
+        entries.append(_runtime_identity_for_server(c))
     return component_fingerprint({"servers": entries})
+
+
+def _runtime_identity_for_server(config: McpServerConfig) -> dict[str, object]:
+    """返回包含运行字段但不包含凭据值的服务器身份。"""
+    identity: dict[str, object] = {
+        "name": config.name,
+        "transport": config.transport,
+        "args": tuple(config.args),
+        "env_keys": tuple(sorted(config.env)),
+        "header_keys": tuple(sorted(config.headers)),
+        "timeout_seconds": config.timeout_seconds,
+    }
+    if config.transport == "stdio":
+        identity["command"] = config.command
+    else:
+        identity["url"] = _safe_url_identity(config.url or "")
+    return identity
+
+
+def _safe_url_identity(url: str) -> Mapping[str, object]:
+    """提取 URL 的连接形状，避免认证 query 值和用户信息进入身份。"""
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return MappingProxyType({"invalid": True})
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    query: list[tuple[str, str]] = []
+    for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+        lowered = key.lower()
+        safe_value = "<redacted>" if any(
+            marker in lowered for marker in ("token", "auth", "key", "secret", "password", "credential")
+        ) else value
+        query.append((key, safe_value))
+    return MappingProxyType(
+        {
+            "scheme": parsed.scheme,
+            "hostname": parsed.hostname or "",
+            "port": port,
+            "path": parsed.path,
+            "query": tuple(sorted(query)),
+        }
+    )
+
+
+def _freeze(value: object) -> object:
+    """递归冻结快照身份中的映射、列表和集合。"""
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze(item) for item in value)
+    if isinstance(value, tuple):
+        return tuple(_freeze(item) for item in value)
+    if isinstance(value, set):
+        return frozenset(_freeze(item) for item in value)
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,10 +309,15 @@ class McpConfigSnapshot:
     servers: tuple[McpServerConfig, ...]
     digest: str
     revision: str
-    runtime_identity: dict[str, object] = field(default_factory=dict)
+    runtime_identity: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """冻结传入的服务器序列和身份摘要，防止绕过 builder 修改快照。"""
+        object.__setattr__(self, "servers", tuple(self.servers))
+        object.__setattr__(self, "runtime_identity", _freeze(self.runtime_identity))
 
 
-def build_mcp_snapshot(servers: list[McpServerConfig] | tuple[McpServerConfig, ...], revision: str) -> McpConfigSnapshot:
+def build_mcp_snapshot(servers: Sequence[McpServerConfig], revision: str) -> McpConfigSnapshot:
     """从已校验配置列表构建不可变 MCP 快照。
 
     servers 按 name 排序后冻结；digest 使用扩充后的 fingerprint；
@@ -201,21 +330,13 @@ def build_mcp_snapshot(servers: list[McpServerConfig] | tuple[McpServerConfig, .
     identity: dict[str, object] = {
         "server_count": len(ordered),
         "fingerprint": fingerprint,
-        "servers": [
-            {
-                "name": c.name,
-                "transport": c.transport,
-                "env_keys": sorted(c.env.keys()),
-                "header_keys": sorted(c.headers.keys()),
-            }
-            for c in ordered
-        ],
+        "servers": [_runtime_identity_for_server(c) for c in ordered],
     }
     return McpConfigSnapshot(
         servers=ordered,
         digest=fingerprint,
         revision=revision,
-        runtime_identity=identity,
+        runtime_identity=_freeze(identity),  # type: ignore[arg-type]
     )
 
 
@@ -226,13 +347,23 @@ class McpConnectionManager:
     将 MCP 工具转换为 LangChain BaseTool 供 Agent 使用。
     """
 
-    def __init__(self, configs: list[McpServerConfig]) -> None:
-        """保存已校验配置；实际连接在 connect_all() 中建立。"""
-        self._configs = configs
+    def __init__(self, configs: McpConfigSnapshot | Sequence[McpServerConfig]) -> None:
+        """保存快照；序列输入仅为旧测试与嵌入调用保留兼容。"""
+        if isinstance(configs, McpConfigSnapshot):
+            self._snapshot = configs
+            self._configs = list(configs.servers)
+        else:
+            self._configs = list(configs)
+            self._snapshot = build_mcp_snapshot(self._configs, revision="legacy")
         self._tools: list[Any] = []
         self._client: Any | None = None
         self._connected = False
         self._server_statuses: dict[str, dict[str, object]] = {}
+
+    @property
+    def snapshot(self) -> McpConfigSnapshot:
+        """返回当前连接管理器认可的配置快照。"""
+        return self._snapshot
 
     @property
     def connected(self) -> bool:
@@ -275,6 +406,7 @@ class McpConnectionManager:
         连接失败不影响已有工具，仅记录状态。
         """
         self._configs.append(config)
+        self._snapshot = build_mcp_snapshot(self._configs, revision=self._snapshot.revision)
         connection = self._build_single_connection(config)
         if connection is None:
             # 环境变量缺失导致跳过，记录 skipped 状态
@@ -321,6 +453,7 @@ class McpConnectionManager:
         """
         # 从配置列表中移除
         self._configs = [c for c in self._configs if c.name != name]
+        self._snapshot = build_mcp_snapshot(self._configs, revision=self._snapshot.revision)
 
         # 按前缀移除工具
         prefix = f"{name}_"
@@ -340,6 +473,16 @@ class McpConnectionManager:
             return True
 
         return False
+
+    async def apply_snapshot(self, snapshot: McpConfigSnapshot) -> list[dict[str, object]]:
+        """替换配置快照并重建连接；失败只影响新快照，不回写旧 Runtime。"""
+        await self.close_all()
+        self._snapshot = snapshot
+        self._configs = list(snapshot.servers)
+        self._server_statuses = {}
+        self._connected = False
+        await self.connect_all()
+        return self.get_server_statuses()
 
     async def connect_all(self) -> None:
         """建立所有已配置 MCP 服务器的连接并加载工具。
@@ -402,6 +545,8 @@ class McpConnectionManager:
     async def close_all(self) -> None:
         """关闭所有 MCP 连接，释放子进程和网络资源。"""
         if self._client is None:
+            self._tools = []
+            self._connected = False
             return
         try:
             # MultiServerMCPClient 在 0.2.x 没有显式 close 方法；
@@ -409,6 +554,7 @@ class McpConnectionManager:
             # 清理引用即可让 GC 回收底层传输。
             self._client = None
             self._tools = []
+            self._connected = False
             logger.info("MCP connections closed")
         except Exception as exc:
             logger.warning("Error closing MCP connections: %s", exc)

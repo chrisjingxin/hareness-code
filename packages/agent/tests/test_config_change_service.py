@@ -322,8 +322,10 @@ class TestMcpServerOperations:
 
     def test_add_mcp_server_success(self, tmp_path: Path) -> None:
         service = self._make_service(tmp_path)
+        current = service.read_mcp_snapshot()
         snapshot = service.add_mcp_server(
-            {"name": "my-server", "transport": "stdio", "command": "npx", "args": ["-y", "mcp"]}
+            {"name": "my-server", "transport": "stdio", "command": "npx", "args": ["-y", "mcp"]},
+            expected_revision=current.revision,
         )
         assert snapshot.revision != "missing"
         assert len(snapshot.servers) == 1
@@ -334,14 +336,23 @@ class TestMcpServerOperations:
 
     def test_add_mcp_server_duplicate_rejected(self, tmp_path: Path) -> None:
         service = self._make_service(tmp_path)
-        service.add_mcp_server({"name": "srv", "transport": "stdio", "command": "cmd"})
+        service.add_mcp_server(
+            {"name": "srv", "transport": "stdio", "command": "cmd"},
+            expected_revision=service.read_mcp_snapshot().revision,
+        )
         with pytest.raises(ConfigChangeError, match="已存在"):
-            service.add_mcp_server({"name": "srv", "transport": "http", "url": "http://x"})
+            service.add_mcp_server(
+                {"name": "srv", "transport": "http", "url": "http://x"},
+                expected_revision=service.read_mcp_snapshot().revision,
+            )
 
     def test_add_mcp_server_invalid_name_rejected(self, tmp_path: Path) -> None:
         service = self._make_service(tmp_path)
         with pytest.raises(ConfigChangeError) as exc_info:
-            service.add_mcp_server({"name": "", "transport": "stdio", "command": "cmd"})
+            service.add_mcp_server(
+                {"name": "", "transport": "stdio", "command": "cmd"},
+                expected_revision=service.read_mcp_snapshot().revision,
+            )
         assert exc_info.value.code == "MCP_SERVER_NAME_INVALID"
 
     def test_add_mcp_server_cas_conflict(self, tmp_path: Path) -> None:
@@ -357,13 +368,19 @@ class TestMcpServerOperations:
         policy = ManagedConfigPolicy(locked_fields={"mcp.servers": "MANAGED_POLICY_LOCKED"})
         service = self._make_service(tmp_path, managed_policy=policy)
         with pytest.raises(ConfigChangeError) as exc_info:
-            service.add_mcp_server({"name": "srv", "transport": "stdio", "command": "cmd"})
+            service.add_mcp_server(
+                {"name": "srv", "transport": "stdio", "command": "cmd"},
+                expected_revision=service.read_mcp_snapshot().revision,
+            )
         assert exc_info.value.code == "MANAGED_POLICY_LOCKED"
 
     def test_remove_mcp_server_success(self, tmp_path: Path) -> None:
         service = self._make_service(tmp_path)
-        service.add_mcp_server({"name": "srv", "transport": "stdio", "command": "cmd"})
-        snapshot = service.remove_mcp_server("srv")
+        service.add_mcp_server(
+            {"name": "srv", "transport": "stdio", "command": "cmd"},
+            expected_revision=service.read_mcp_snapshot().revision,
+        )
+        snapshot = service.remove_mcp_server("srv", expected_revision=service.read_mcp_snapshot().revision)
         assert len(snapshot.servers) == 0
         config_content = (tmp_path / "home" / ".harness" / "config.toml").read_text(encoding="utf-8")
         assert "srv" not in config_content or "servers" in config_content
@@ -371,26 +388,35 @@ class TestMcpServerOperations:
     def test_remove_mcp_server_not_found(self, tmp_path: Path) -> None:
         service = self._make_service(tmp_path)
         with pytest.raises(ConfigChangeError) as exc_info:
-            service.remove_mcp_server("nonexistent")
+            service.remove_mcp_server("nonexistent", expected_revision=service.read_mcp_snapshot().revision)
         assert exc_info.value.code == "MCP_SERVER_NOT_FOUND"
 
     def test_remove_mcp_server_cas_conflict(self, tmp_path: Path) -> None:
         service = self._make_service(tmp_path)
-        service.add_mcp_server({"name": "srv", "transport": "stdio", "command": "cmd"})
+        service.add_mcp_server(
+            {"name": "srv", "transport": "stdio", "command": "cmd"},
+            expected_revision=service.read_mcp_snapshot().revision,
+        )
         with pytest.raises(ConfigChangeError) as exc_info:
             service.remove_mcp_server("srv", expected_revision="stale")
         assert exc_info.value.code == "CONFIG_REVISION_CONFLICT"
 
     def test_add_mcp_server_preserves_other_sections(self, tmp_path: Path) -> None:
         service = self._make_service(tmp_path)
-        service.add_mcp_server({"name": "srv", "transport": "stdio", "command": "cmd"})
+        service.add_mcp_server(
+            {"name": "srv", "transport": "stdio", "command": "cmd"},
+            expected_revision=service.read_mcp_snapshot().revision,
+        )
         config_content = (tmp_path / "home" / ".harness" / "config.toml").read_text(encoding="utf-8")
         assert "default_profile" in config_content
         assert "gpt-4o" in config_content
 
     def test_add_mcp_server_audit_recorded(self, tmp_path: Path) -> None:
         service = self._make_service(tmp_path)
-        service.add_mcp_server({"name": "srv", "transport": "stdio", "command": "cmd"})
+        service.add_mcp_server(
+            {"name": "srv", "transport": "stdio", "command": "cmd"},
+            expected_revision=service.read_mcp_snapshot().revision,
+        )
         audits = service.audits
         assert len(audits) >= 1
         assert audits[-1].action == "commit"
@@ -406,8 +432,57 @@ class TestMcpServerOperations:
 
         monkeypatch.setattr(type(service), "_write_atomic", _fail_write)
         with pytest.raises(ConfigChangeError) as exc_info:
-            service.add_mcp_server({"name": "srv", "transport": "stdio", "command": "cmd"})
+            service.add_mcp_server(
+                {"name": "srv", "transport": "stdio", "command": "cmd"},
+                expected_revision=service.read_mcp_snapshot().revision,
+            )
         assert exc_info.value.code == "CONFIG_WRITE_FAILED"
 
         # 文件内容不变
         assert (tmp_path / "home" / ".harness" / "config.toml").read_text(encoding="utf-8") == original_content
+
+    def test_mcp_write_requires_current_revision_and_uses_snapshot_revision(self, tmp_path: Path) -> None:
+        """MCP 写入必须显式携带当前快照版本，并在成功后返回新版本。"""
+        service = self._make_service(tmp_path)
+        current = service.read_mcp_snapshot()
+        with pytest.raises(ConfigChangeError) as missing:
+            service.add_mcp_server({"name": "srv", "transport": "stdio", "command": "cmd"})
+        assert missing.value.code == "CONFIG_REVISION_REQUIRED"
+
+        changed = service.add_mcp_server(
+            {"name": "srv", "transport": "stdio", "command": "cmd"},
+            expected_revision=current.revision,
+        )
+        assert changed.revision != current.revision
+        assert service.read_mcp_snapshot().revision == changed.revision
+
+        with pytest.raises(ConfigChangeError) as conflict:
+            service.remove_mcp_server("srv", expected_revision=current.revision)
+        assert conflict.value.code == "CONFIG_REVISION_CONFLICT"
+
+    def test_mcp_write_rejects_explicit_configuration_source(self, tmp_path: Path) -> None:
+        """显式配置生效时不能把 MCP 变更写回用户文件。"""
+        home = tmp_path / "home"
+        harness_dir = home / ".harness"
+        harness_dir.mkdir(parents=True)
+        user = harness_dir / "config.toml"
+        user.write_text(
+            '[config]\nversion = 1\n\n[models]\ndefault_profile = "default"\n\n'
+            '[models.profiles.default]\nprovider = "openai-compatible"\nmodel = "gpt-4o"\n'
+            'base_url = "https://gateway.example/v1"\napi_key_env = "KEY"\n',
+            encoding="utf-8",
+        )
+        explicit = tmp_path / "explicit.toml"
+        explicit.write_text(user.read_text(encoding="utf-8"), encoding="utf-8")
+        service = ConfigChangeService(
+            workspace=tmp_path / "ws",
+            home=home,
+            config_path=explicit,
+            environ={"KEY": "test-key"},
+        )
+        with pytest.raises(ConfigChangeError) as error:
+            service.add_mcp_server(
+                {"name": "srv", "transport": "stdio", "command": "cmd"},
+                expected_revision=service.read_mcp_snapshot().revision,
+            )
+        assert error.value.code == "EXPLICIT_CONFIGURATION_ACTIVE"

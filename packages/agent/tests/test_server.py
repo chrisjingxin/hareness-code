@@ -1290,17 +1290,20 @@ async def test_mcp_add_stdio(tmp_path: Path):
 
     from harness_agent.server import JsonRpcServer
 
-    config_file = tmp_path / "config.toml"
-    server = JsonRpcServer(allow_echo=True, config_home=tmp_path / "home")
-    frames = await _capture_server(server)
-    server._user_config_path = lambda: config_file  # type: ignore[method-assign]
+    config_home = tmp_path / "home"
+    config_file = config_home / ".harness" / "config.toml"
+    config_file.parent.mkdir(parents=True)
+    config_file.write_text("[config]\nversion = 1\n", encoding="utf-8")
 
     fake_status = {"name": "my-server", "transport": "stdio", "status": "connected", "tool_names": ["my-server_tool1"]}
     with (
         patch("harness_agent.server.McpConnectionManager") as MockManager,
     ):
         mock_instance = MockManager.return_value
-        mock_instance.add_server = AsyncMock(return_value=fake_status)
+        mock_instance.connect_all = AsyncMock()
+        mock_instance.apply_snapshot = AsyncMock(return_value=[fake_status])
+        server = JsonRpcServer(allow_echo=True, config_home=config_home)
+        frames = await _capture_server(server)
         await server.dispatch(
             _request(
                 "mcp.add",
@@ -1324,52 +1327,56 @@ async def test_mcp_add_duplicate(tmp_path: Path):
     """添加同名 MCP 服务器必须返回错误。"""
     from harness_agent.server import JsonRpcServer
 
-    config_file = tmp_path / "config.toml"
+    config_home = tmp_path / "home"
+    config_file = config_home / ".harness" / "config.toml"
+    config_file.parent.mkdir(parents=True)
     config_file.write_text(
-        '[[mcp.servers]]\nname = "existing"\ntransport = "stdio"\ncommand = "echo"\n',
+        '[config]\nversion = 1\n\n[[mcp.servers]]\nname = "existing"\ntransport = "stdio"\ncommand = "echo"\n',
         encoding="utf-8",
     )
-    server = JsonRpcServer(allow_echo=True, config_home=tmp_path / "home")
+    server = JsonRpcServer(allow_echo=True, config_home=config_home)
     frames = await _capture_server(server)
-    server._user_config_path = lambda: config_file  # type: ignore[method-assign]
 
     await server.dispatch(
         _request("mcp.add", {"name": "existing", "transport": "stdio", "command": "echo"}, "mcp-add-dup")
     )
 
     assert frames[-1]["error"]["code"] == -32602
-    assert "already exists" in frames[-1]["error"]["message"]
+    assert frames[-1]["error"]["data"]["code"] == "MCP_SERVER_DUPLICATE"
 
 
 async def test_mcp_add_invalid_name(tmp_path: Path):
     """非法服务器名称必须被拒绝。"""
     from harness_agent.server import JsonRpcServer
 
-    config_file = tmp_path / "config.toml"
-    server = JsonRpcServer(allow_echo=True, config_home=tmp_path / "home")
+    config_home = tmp_path / "home"
+    config_file = config_home / ".harness" / "config.toml"
+    config_file.parent.mkdir(parents=True)
+    config_file.write_text("[config]\nversion = 1\n", encoding="utf-8")
+    server = JsonRpcServer(allow_echo=True, config_home=config_home)
     frames = await _capture_server(server)
-    server._user_config_path = lambda: config_file  # type: ignore[method-assign]
 
     await server.dispatch(
         _request("mcp.add", {"name": "bad name!", "transport": "stdio", "command": "echo"}, "mcp-add-bad")
     )
 
     assert frames[-1]["error"]["code"] == -32602
-    assert "Invalid server name" in frames[-1]["error"]["message"]
+    assert frames[-1]["error"]["data"]["code"] == "MCP_SERVER_NAME_INVALID"
 
 
 async def test_mcp_remove_existing(tmp_path: Path):
     """删除已存在的 MCP 服务器后配置更新且返回成功。"""
     from harness_agent.server import JsonRpcServer
 
-    config_file = tmp_path / "config.toml"
+    config_home = tmp_path / "home"
+    config_file = config_home / ".harness" / "config.toml"
+    config_file.parent.mkdir(parents=True)
     config_file.write_text(
-        '[[mcp.servers]]\nname = "to-remove"\ntransport = "stdio"\ncommand = "echo"\n',
+        '[config]\nversion = 1\n\n[[mcp.servers]]\nname = "to-remove"\ntransport = "stdio"\ncommand = "echo"\n',
         encoding="utf-8",
     )
-    server = JsonRpcServer(allow_echo=True, config_home=tmp_path / "home")
+    server = JsonRpcServer(allow_echo=True, config_home=config_home)
     frames = await _capture_server(server)
-    server._user_config_path = lambda: config_file  # type: ignore[method-assign]
 
     await server.dispatch(
         _request("mcp.remove", {"name": "to-remove"}, "mcp-remove-1")
@@ -1386,18 +1393,19 @@ async def test_mcp_remove_nonexistent(tmp_path: Path):
     """删除不存在的 MCP 服务器必须返回错误。"""
     from harness_agent.server import JsonRpcServer
 
-    config_file = tmp_path / "config.toml"
-    config_file.write_text("", encoding="utf-8")
-    server = JsonRpcServer(allow_echo=True, config_home=tmp_path / "home")
+    config_home = tmp_path / "home"
+    config_file = config_home / ".harness" / "config.toml"
+    config_file.parent.mkdir(parents=True)
+    config_file.write_text("[config]\nversion = 1\n", encoding="utf-8")
+    server = JsonRpcServer(allow_echo=True, config_home=config_home)
     frames = await _capture_server(server)
-    server._user_config_path = lambda: config_file  # type: ignore[method-assign]
 
     await server.dispatch(
         _request("mcp.remove", {"name": "ghost"}, "mcp-remove-ghost")
     )
 
     assert frames[-1]["error"]["code"] == -32602
-    assert "not found" in frames[-1]["error"]["message"]
+    assert frames[-1]["error"]["data"]["code"] == "MCP_SERVER_NOT_FOUND"
 
 
 async def _append(frames: list[dict[str, Any]], message: dict[str, Any]) -> None:

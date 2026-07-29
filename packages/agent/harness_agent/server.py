@@ -78,7 +78,13 @@ from harness_agent.protocol_runtime import (
     validate_protocol_error_data,
 )
 from harness_agent.skills import SkillError, SkillRegistry
-from harness_agent.mcp import McpConfigSnapshot, McpConnectionManager, build_mcp_snapshot
+from harness_agent.mcp import (
+    McpConfigError,
+    McpConfigSnapshot,
+    McpConnectionManager,
+    McpServerConfig,
+    build_mcp_snapshot,
+)
 from harness_agent.run_context import RunCancellationToken, RunContext
 from harness_agent.runtime_profile import (
     RuntimeProfile,
@@ -156,6 +162,8 @@ class _RuntimeBuildSpec:
     workspace: Path
     skill_registry: SkillRegistry
     model_settings: Any
+    mcp_snapshot: McpConfigSnapshot
+    mcp_tools: tuple[Any, ...]
 
 
 @dataclass(slots=True)
@@ -258,6 +266,7 @@ class AgentHost:
         self._mcp_manager: McpConnectionManager | None = None
         self._mcp_snapshot: McpConfigSnapshot | None = None
         self._mcp_connect_task: asyncio.Task[None] | None = None
+        self._mcp_state_lock = asyncio.Lock()
         self._runtime_build_specs: dict[str, _RuntimeBuildSpec] = {}
         self._runtime_artifacts: dict[str, _RuntimeArtifacts] = {}
         self._provider_client_pool = ProviderClientPool()
@@ -681,13 +690,15 @@ class AgentHost:
 
     async def _connect_mcp_servers(self) -> None:
         """根据配置建立 MCP 服务器连接并构建初始 snapshot；失败不阻止启动。"""
-        if self._config is None or not self._config.mcp_servers:
-            self._mcp_snapshot = build_mcp_snapshot([], "initial")
-            return
-        servers = list(self._config.mcp_servers)
-        self._mcp_snapshot = build_mcp_snapshot(servers, "initial")
-        self._mcp_manager = McpConnectionManager(servers)
-        await self._mcp_manager.connect_all()
+        async with self._mcp_state_lock:
+            try:
+                snapshot = self._config_changes().read_mcp_snapshot()
+            except ConfigChangeError:
+                # 配置在 initialize 阶段已失败时仍以空快照启动，不阻塞协议握手。
+                snapshot = build_mcp_snapshot([], "missing")
+            self._mcp_snapshot = snapshot
+            self._mcp_manager = McpConnectionManager(snapshot)
+            await self._mcp_manager.connect_all()
 
     async def _ensure_mcp_connected(self) -> None:
         """等待后台 MCP 连接任务完成（若仍在运行）。"""
@@ -928,66 +939,39 @@ class AgentHost:
             raise RpcError(-32602, "mcp.status does not accept params")
         # 后台连接任务可能尚未完成，先等待它
         await self._ensure_mcp_connected()
-        if self._mcp_manager is None:
-            return {"servers": [], "total_tools": 0}
-        statuses = self._mcp_manager.get_server_statuses()
+        async with self._mcp_state_lock:
+            manager = self._mcp_manager
+            if manager is None:
+                return {"servers": [], "total_tools": 0}
+            statuses = manager.get_server_statuses()
         total_tools = sum(len(s.get("tool_names", [])) for s in statuses)
         return {"servers": statuses, "total_tools": total_tools}
 
     async def _handle_mcp_add(self, params: dict[str, Any], _id: str) -> dict[str, Any]:
         """通过 ConfigChangeService 添加 MCP 服务器并尝试热连接。"""
-        import re
-
-        from harness_agent.mcp import McpServerConfig
-
         parsed = McpAddParams.model_validate(params)
-        name = parsed.name
-
-        # 名称合法性
-        if not re.fullmatch(r"[a-zA-Z0-9_-]+", name):
-            raise RpcError(-32602, f"Invalid server name '{name}': only [a-zA-Z0-9_-] allowed")
-
-        # 必填字段校验
-        if parsed.transport == "stdio" and not parsed.command:
-            raise RpcError(-32602, "stdio transport requires 'command'")
-        if parsed.transport in ("http", "sse") and not parsed.url:
-            raise RpcError(-32602, f"{parsed.transport} transport requires 'url'")
-
-        # 构建 TOML 条目
-        server_dict: dict[str, Any] = {"name": name, "transport": parsed.transport}
-        if parsed.command:
-            server_dict["command"] = parsed.command
-        if parsed.args:
-            server_dict["args"] = list(parsed.args)
-        if parsed.url:
-            server_dict["url"] = parsed.url
-        if parsed.env:
-            server_dict["env"] = dict(parsed.env)
-        if parsed.headers:
-            server_dict["headers"] = dict(parsed.headers)
-
-        # 通过统一配置变更 seam 持久化（含锁、CAS、校验、审计）
         try:
-            snapshot = self._config_changes().add_mcp_server(server_dict)
+            mcp_config = McpServerConfig.from_mapping(parsed.model_dump())
+        except McpConfigError as exc:
+            raise RpcError(-32602, str(exc), {"code": exc.code, "field": exc.field}) from exc
+
+        await self._ensure_mcp_connected()
+        async with self._mcp_state_lock:
+            current = self._mcp_snapshot or self._config_changes().read_mcp_snapshot()
+        try:
+            snapshot = self._config_changes().add_mcp_server(
+                mcp_config,
+                expected_revision=current.revision,
+            )
         except ConfigChangeError as exc:
             raise RpcError(-32602, str(exc), exc.redacted_data()) from exc
 
-        # 更新 Host 持有的当前 snapshot
-        self._mcp_snapshot = snapshot
-
-        # 热连接（写入成功后连接失败不回滚配置）
-        mcp_config = McpServerConfig(
-            name=name,
-            transport=parsed.transport,
-            command=parsed.command,
-            args=tuple(parsed.args) if parsed.args else (),
-            env=dict(parsed.env) if parsed.env else {},
-            url=parsed.url,
-            headers=dict(parsed.headers) if parsed.headers else {},
-        )
-        if self._mcp_manager is None:
-            self._mcp_manager = McpConnectionManager([])
-        status = await self._mcp_manager.add_server(mcp_config)
+        async with self._mcp_state_lock:
+            self._mcp_snapshot = snapshot
+            if self._mcp_manager is None:
+                self._mcp_manager = McpConnectionManager(snapshot)
+            statuses = await self._mcp_manager.apply_snapshot(snapshot)
+            status = next((item for item in statuses if item.get("name") == mcp_config.name), {})
 
         return {
             "added": True,
@@ -1001,18 +985,21 @@ class AgentHost:
         parsed = McpRemoveParams.model_validate(params)
         name = parsed.name
 
-        # 通过统一配置变更 seam 删除（含锁、CAS、校验、审计）
+        await self._ensure_mcp_connected()
+        async with self._mcp_state_lock:
+            current = self._mcp_snapshot or self._config_changes().read_mcp_snapshot()
         try:
-            snapshot = self._config_changes().remove_mcp_server(name)
+            snapshot = self._config_changes().remove_mcp_server(
+                name,
+                expected_revision=current.revision,
+            )
         except ConfigChangeError as exc:
             raise RpcError(-32602, str(exc), exc.redacted_data()) from exc
 
-        # 更新 Host 持有的当前 snapshot
-        self._mcp_snapshot = snapshot
-
-        # 热断开（配置已删除，即使断开失败也不恢复）
-        if self._mcp_manager is not None:
-            self._mcp_manager.remove_server(name)
+        async with self._mcp_state_lock:
+            self._mcp_snapshot = snapshot
+            if self._mcp_manager is not None:
+                await self._mcp_manager.apply_snapshot(snapshot)
 
         return {"removed": True}
 
@@ -1149,10 +1136,6 @@ class AgentHost:
             if writer is not None:
                 writer.cancel()
                 await asyncio.gather(writer, return_exceptions=True)
-
-    def _user_config_path(self) -> Path:
-        """返回用户级配置文件路径。"""
-        return Path.home() / ".harness" / "config.toml"
 
     async def _handle_config_path(self, _params: dict[str, Any], _id: str) -> dict[str, Any]:
         """返回配置合并路径。"""
@@ -1533,12 +1516,12 @@ class AgentHost:
         registry = self._require_skills()
         selected_profile_id = resolved_binding.primary_profile.profile_id
         selected_model = resolved_binding.primary_profile.settings
-        # 从 Host 持有的不可变 snapshot 取指纹，而非重新从 config 计算
-        mcp_fp = (
-            self._mcp_snapshot.digest
-            if self._mcp_snapshot is not None
-            else component_fingerprint({"transport": "disabled"})
-        )
+        await self._ensure_mcp_connected()
+        async with self._mcp_state_lock:
+            mcp_snapshot = self._mcp_snapshot or build_mcp_snapshot([], "missing")
+            mcp_tools = tuple(self._mcp_manager.get_tools()) if self._mcp_manager else ()
+        # Profile 身份和图输入从同一个快照截取，后续热变更不会改写旧 Runtime。
+        mcp_fp = mcp_snapshot.digest
         profile = default_runtime_profile(
             project_fingerprint=store.project_fingerprint,
             model_profile=selected_profile_id,
@@ -1567,6 +1550,8 @@ class AgentHost:
             workspace=self._workspace,
             skill_registry=registry,
             model_settings=selected_model,
+            mcp_snapshot=mcp_snapshot,
+            mcp_tools=mcp_tools,
         )
         return profile
 
@@ -1604,6 +1589,8 @@ class AgentHost:
         spec = self._runtime_build_specs.get(profile.profile_key)
         if spec is None:
             raise RuntimeError("RUNTIME_BUILD_SPEC_MISSING")
+        if profile.mcp_config_fingerprint != spec.mcp_snapshot.digest:
+            raise RuntimeError("RUNTIME_MCP_SNAPSHOT_MISMATCH")
         config, workspace = spec.config, spec.workspace
         from harness_agent.agent import create_harness_agent
         from harness_agent.context_window import ContextWindowMiddleware
@@ -1624,9 +1611,7 @@ class AgentHost:
             thread_store=store,
             updates=self._context_updates,
         )
-        # 确保后台 MCP 连接已完成，工具已加载
-        await self._ensure_mcp_connected()
-        mcp_tools = self._mcp_manager.get_tools() if self._mcp_manager else []
+        mcp_tools = list(spec.mcp_tools)
         graph = create_harness_agent(
             model,
             tools=mcp_tools or None,

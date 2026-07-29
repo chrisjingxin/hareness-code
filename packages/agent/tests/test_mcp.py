@@ -469,6 +469,20 @@ class TestMcpHotConnectDisconnect:
         manager = McpConnectionManager([])
         assert manager.remove_server("nonexistent") is False
 
+    @pytest.mark.asyncio
+    async def test_apply_snapshot_replaces_runtime_input(self) -> None:
+        from harness_agent.mcp import build_mcp_snapshot
+
+        manager = McpConnectionManager([])
+        snapshot = build_mcp_snapshot(
+            [McpServerConfig(name="new", transport="stdio", command="missing-command")],
+            revision="rev-2",
+        )
+        await manager.apply_snapshot(snapshot)
+        assert manager.snapshot is snapshot
+        assert [item["name"] for item in manager.get_server_statuses()] == ["new"]
+        assert manager.get_server_statuses()[0]["status"] == "failed"
+
 
 class TestMcpConfigSnapshot:
     """McpConfigSnapshot 构建和不可变性测试。"""
@@ -525,6 +539,45 @@ class TestMcpConfigSnapshot:
         assert "SECRET_TOKEN" in identity_str  # key name is included
         assert "Authorization" in identity_str  # key name is included
 
+    def test_snapshot_and_server_config_are_deeply_immutable(self):
+        from harness_agent.mcp import McpServerConfig, build_mcp_snapshot
+
+        server = McpServerConfig(
+            name="s",
+            transport="stdio",
+            command="cmd",
+            env={"TOKEN": "value"},
+            headers={"X-Key": "value"},
+        )
+        snapshot = build_mcp_snapshot([server], revision="r")
+        with pytest.raises(TypeError):
+            server.env["TOKEN"] = "changed"  # type: ignore[index]
+        with pytest.raises(TypeError):
+            snapshot.runtime_identity["server_count"] = 99  # type: ignore[index]
+
+    def test_runtime_identity_includes_all_non_secret_connection_fields(self):
+        from harness_agent.mcp import McpServerConfig, build_mcp_snapshot
+
+        snapshot = build_mcp_snapshot(
+            [
+                McpServerConfig(
+                    name="s",
+                    transport="stdio",
+                    command="cmd",
+                    args=("--flag",),
+                    timeout_seconds=12,
+                    env={"TOKEN": "secret"},
+                    headers={"Authorization": "Bearer secret"},
+                )
+            ],
+            revision="r",
+        )
+        server_identity = snapshot.runtime_identity["servers"][0]  # type: ignore[index]
+        assert server_identity["command"] == "cmd"
+        assert server_identity["args"] == ("--flag",)
+        assert server_identity["timeout_seconds"] == 12.0
+        assert "secret" not in str(server_identity)
+
 
 class TestMcpConfigFingerprintExpanded:
     """扩充后的 mcp_config_fingerprint 敏感性和脱敏测试。"""
@@ -577,6 +630,21 @@ class TestMcpConfigFingerprintExpanded:
         c1 = [McpServerConfig(name="s", transport="http", url="http://x", headers={"Auth": "token-a"})]
         c2 = [McpServerConfig(name="s", transport="http", url="http://x", headers={"Auth": "token-b"})]
         assert mcp_config_fingerprint(c1) == mcp_config_fingerprint(c2)
+
+    def test_fingerprint_redacts_url_query_values(self):
+        from harness_agent.mcp import McpServerConfig, build_mcp_snapshot, mcp_config_fingerprint
+
+        first = McpServerConfig(name="s", transport="http", url="https://example.test/mcp?token=secret-a")
+        second = McpServerConfig(name="s", transport="http", url="https://example.test/mcp?token=secret-b")
+        assert mcp_config_fingerprint([first]) == mcp_config_fingerprint([second])
+        assert "secret-a" not in str(build_mcp_snapshot([first], "r").runtime_identity)
+
+    def test_fingerprint_keeps_non_secret_url_query_shape(self):
+        from harness_agent.mcp import McpServerConfig, mcp_config_fingerprint
+
+        first = McpServerConfig(name="s", transport="http", url="https://example.test/mcp?mode=read")
+        second = McpServerConfig(name="s", transport="http", url="https://example.test/mcp?mode=write")
+        assert mcp_config_fingerprint([first]) != mcp_config_fingerprint([second])
 
     def test_fingerprint_sensitive_to_timeout(self):
         from harness_agent.mcp import McpServerConfig, mcp_config_fingerprint
