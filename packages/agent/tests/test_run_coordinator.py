@@ -13,6 +13,7 @@ from harness_agent.run_coordinator import (
     RunRuntime,
     StartRun,
 )
+from harness_agent.execution_binding import ExecutionRef
 
 
 class _NoopInteraction:
@@ -79,6 +80,10 @@ async def test_run_coordinator_enforces_owner_busy_and_single_terminal_event() -
     assert cancelled.cancelled is True
     events = await _events(execution)
     assert [event.type for event in events] == ["run.cancelled"]
+    assert events[0].execution_id == "root-run-1"
+    assert await coordinator.execution_registry.list(
+        ExecutionRef.root("thread", "run-1")
+    ) == ()
 
 
 @pytest.mark.asyncio
@@ -97,5 +102,11 @@ async def test_run_coordinator_releases_runtime_and_completes_once() -> None:
         "content.delta",
         "run.completed",
     ]
+    assert {event.execution_id for event in events} == {"root-run-1"}
+    assert {event.agent_id for event in events} == {"main"}
+    assert events[0].record()["execution_id"] == "root-run-1"
     assert releases == ["run-1"]
     assert await coordinator.is_active("thread") is False
+    assert await coordinator.execution_registry.list(
+        ExecutionRef.root("thread", "run-1")
+    ) == ()

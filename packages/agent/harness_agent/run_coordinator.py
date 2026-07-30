@@ -12,9 +12,14 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from harness_agent.agent_execution import AgentExecutionRegistry, ExecutionRegistryError
 from harness_agent.agent_engine import AgentEnginePoolCapacityError
 from harness_agent.agent_engine_profile import AgentEngineProfile
 from harness_agent.execution_binding import (
+    AgentExecutionBinding,
+    ExecutionMode,
+    ExecutionRef,
+    ExecutionStatus,
     ResolvedExecutionBinding,
     RunExecutionBinding,
 )
@@ -152,18 +157,26 @@ class AgentEvent:
     sequence: int
     timestamp_ms: int
     payload: Mapping[str, object]
+    execution_id: str
+    agent_id: str
+    parent_execution_id: str | None = None
 
     def record(self) -> dict[str, object]:
         """转换成现有 v3 event notification 使用的字段。"""
-        return {
+        record = {
             "event_id": self.event_id,
             "type": self.type,
             "thread_id": self.thread_id,
             "run_id": self.run_id,
             "sequence": self.sequence,
             "timestamp_ms": self.timestamp_ms,
+            "execution_id": self.execution_id,
+            "agent_id": self.agent_id,
             "payload": dict(self.payload),
         }
+        if self.parent_execution_id is not None:
+            record["parent_execution_id"] = self.parent_execution_id
+        return record
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,6 +247,7 @@ class RunState:
     owner: ConnectionRef
     persistence: Any | None
     preparation: RunPreparation
+    root_execution: AgentExecutionBinding | None = None
     skill_record: Any | None = None
     message: str = ""
     status: str = "accepted"
@@ -294,6 +308,13 @@ class RunState:
         """返回受理阶段计算出的共享 AgentEngine Profile。"""
         return self.preparation.agent_engine_profile
 
+    @property
+    def root_execution_ref(self) -> ExecutionRef:
+        """返回根 AgentExecution 的稳定身份。"""
+        if self.root_execution is not None:
+            return self.root_execution.ref
+        return ExecutionRef.root(self.thread_id, self.run_id)
+
 
 PersistenceProvider = Callable[[], Awaitable[Any | None]]
 PreparationProvider = Callable[[StartRun, Any | None], Awaitable[RunPreparation]]
@@ -314,6 +335,7 @@ class RunCoordinator:
         interaction_port: InteractionPort,
         skill_registry_provider: SkillRegistryProvider,
         context_updates_provider: ContextUpdatesProvider | None = None,
+        execution_registry: AgentExecutionRegistry | None = None,
     ) -> None:
         """注入 Project 资源 adapter，保持外部 Run interface 与 Protocol 解耦。"""
         self._persistence_provider = persistence_provider
@@ -322,10 +344,16 @@ class RunCoordinator:
         self._interaction_port = interaction_port
         self._skill_registry_provider = skill_registry_provider
         self._context_updates_provider = context_updates_provider or (lambda _thread_id: [])
+        self._execution_registry = execution_registry or AgentExecutionRegistry()
         self._runs: dict[str, RunState] = {}
         self._starting_threads: set[str] = set()
         self._lock = asyncio.Lock()
         self._closed = False
+
+    @property
+    def execution_registry(self) -> AgentExecutionRegistry:
+        """返回供未来 DelegationDispatcher 复用的执行树 seam。"""
+        return self._execution_registry
 
     async def start(self, command: StartRun, owner: ConnectionRef) -> RunExecution:
         """受理一次 Run，并在受理成功后创建唯一执行任务。"""
@@ -372,13 +400,16 @@ class RunCoordinator:
                 if not acceptance.created:
                     return self._accepted_without_events(command.ref, owner)
 
+            root_execution = self._root_execution_binding(command, preparation)
             run = RunState(
                 start=command,
                 owner=owner,
                 persistence=persistence,
                 preparation=preparation,
+                root_execution=root_execution,
                 skill_record=skill_record,
             )
+            await self._execution_registry.accept(root_execution)
             async with self._lock:
                 self._runs[command.thread_id] = run
             run.task = asyncio.create_task(
@@ -400,6 +431,7 @@ class RunCoordinator:
 
         active.cancel_requested = True
         active.cancellation_token.cancel()
+        await self._execution_registry.cancel_run(active.root_execution_ref)
         task = active.task
         if task is not None and not task.done() and active.status != "accepted":
             task.cancel()
@@ -421,6 +453,7 @@ class RunCoordinator:
         for run in runs:
             run.cancel_requested = True
             run.cancellation_token.cancel()
+            await self._execution_registry.cancel_run(run.root_execution_ref)
             if run.task is not None and not run.task.done():
                 run.task.cancel()
         tasks = [run.task for run in runs if run.task is not None]
@@ -466,7 +499,7 @@ class RunCoordinator:
 
     async def _empty_events(self) -> AsyncIterator[AgentEvent]:
         if False:
-            yield AgentEvent("", "", "", "", 0, 0, {})
+            yield AgentEvent("", "", "", "", 0, 0, {}, "root-empty", "main")
 
     async def _read_events(self, run: RunState) -> AsyncIterator[AgentEvent]:
         while True:
@@ -492,6 +525,7 @@ class RunCoordinator:
         for run in runs:
             run.cancel_requested = True
             run.cancellation_token.cancel()
+            await self._execution_registry.cancel_run(run.root_execution_ref)
             if run.task is not None and not run.task.done():
                 run.task.cancel()
         tasks = [run.task for run in runs if run.task is not None]
@@ -505,6 +539,7 @@ class RunCoordinator:
         """补偿任务尚未取得首个时间片时的取消，避免 Run 永久悬挂。"""
         if run.completion is None:
             self._finish(run, "cancelled", {"reason": "Cancelled by client"})
+        await self._settle_root_execution(run)
         if run.runtime is not None:
             await self._release_runtime(run)
         async with self._lock:
@@ -517,6 +552,14 @@ class RunCoordinator:
             if run.cancel_requested or run.cancellation_token.cancelled:
                 self._finish(run, "cancelled", {"reason": "Cancelled by client"})
                 return
+
+            try:
+                await self._execution_registry.start(run.root_execution_ref)
+            except ExecutionRegistryError:
+                if run.cancel_requested or run.cancellation_token.cancelled:
+                    self._finish(run, "cancelled", {"reason": "Cancelled by client"})
+                    return
+                raise
 
             started_payload: dict[str, object] = {
                 "resumed": False,
@@ -611,6 +654,7 @@ class RunCoordinator:
                         "Unable to refresh checkpoint index for thread %s",
                         run.ref.thread_id,
                     )
+            await self._settle_root_execution(run)
             await self._release_runtime(run)
             async with self._lock:
                 if self._runs.get(run.ref.thread_id) is run:
@@ -685,8 +729,66 @@ class RunCoordinator:
                 sequence=run.sequence,
                 timestamp_ms=int(time.time() * 1000),
                 payload=dict(payload),
+                execution_id=run.root_execution_ref.execution_id,
+                agent_id=(
+                    run.root_execution.agent_id
+                    if run.root_execution is not None
+                    else "main"
+                ),
+                parent_execution_id=run.root_execution_ref.parent_execution_id,
             )
         )
+
+    @staticmethod
+    def _root_execution_binding(
+        command: StartRun,
+        preparation: RunPreparation,
+    ) -> AgentExecutionBinding:
+        """从同一 RunPreparation 创建根 execution 的轻量历史事实。"""
+        profile = preparation.agent_engine_profile
+        model_binding = preparation.execution_binding
+        return AgentExecutionBinding(
+            ref=ExecutionRef.root(command.thread_id, command.run_id),
+            agent_id=profile.agent_id if profile is not None else "main",
+            mode=ExecutionMode.MANAGED,
+            depth=0,
+            model=model_binding.actual_primary if model_binding is not None else None,
+            policy_fingerprint=profile.policy_fingerprint if profile is not None else None,
+            engine_profile_key=profile.profile_key if profile is not None else None,
+            definition_fingerprint=(
+                profile.definition_fingerprint if profile is not None else None
+            ),
+        )
+
+    async def _settle_root_execution(self, run: RunState) -> None:
+        """把 Run 终态映射到 root execution，并尝试封口当前执行树。"""
+        if run.root_execution is None:
+            return
+        current = await self._execution_registry.get(run.root_execution.ref)
+        try:
+            if current is not None and not current.status.terminal:
+                desired = {
+                    "completed": ExecutionStatus.COMPLETED,
+                    "failed": ExecutionStatus.FAILED,
+                    "cancelled": ExecutionStatus.CANCELLED,
+                }.get(
+                    run.completion.status if run.completion is not None else "cancelled",
+                    ExecutionStatus.CANCELLED,
+                )
+                if (
+                    current.status is ExecutionStatus.PENDING
+                    and desired is not ExecutionStatus.CANCELLED
+                ):
+                    await self._execution_registry.start(current.ref)
+                await self._execution_registry.finalize(
+                    current.ref,
+                    status=desired,
+                    usage=run.usage,
+                )
+            await self._execution_registry.seal_run(run.root_execution.ref)
+            await self._execution_registry.discard_run(run.root_execution.ref)
+        except ExecutionRegistryError:
+            logger.exception("Unable to settle execution tree for run %s", run.run_id)
 
     async def _stream_agent(self, run: RunState, resume: object | None) -> object | None:
         from langchain_core.messages import HumanMessage

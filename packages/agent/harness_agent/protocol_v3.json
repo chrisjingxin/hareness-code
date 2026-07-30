@@ -480,6 +480,9 @@
         "event_id": { "type": "string", "minLength": 1 }, "type": { "type": "string", "minLength": 1 },
         "thread_id": { "type": "string", "minLength": 1 }, "run_id": { "type": "string", "minLength": 1 },
         "sequence": { "type": "integer", "minimum": 1 }, "timestamp_ms": { "type": "integer", "minimum": 0 },
+        "execution_id": { "type": "string", "minLength": 1 },
+        "parent_execution_id": { "type": ["string", "null"], "minLength": 1 },
+        "agent_id": { "type": "string", "minLength": 1 },
         "payload": { "$ref": "#/$defs/jsonObject" }
       },
       "additionalProperties": false

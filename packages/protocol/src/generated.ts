@@ -2,7 +2,7 @@
 
 export const PROTOCOL_MAJOR = 3 as const
 export const PROTOCOL_MINOR = 0 as const
-export const PROTOCOL_SCHEMA_SHA256 = "9e7a828d2d32767619a2800bcb497c72bb37f4bf16c57f73caf25eb3241a71a9" as const
+export const PROTOCOL_SCHEMA_SHA256 = "f4adaa242e1b825c6fd52ee285d7f4135da8cddcf505393b53d8607b2da038db" as const
 export const MAX_FRAME_BYTES = 8388608 as const
 export const MAX_TOOL_PAYLOAD_BYTES = 1048576 as const
 export const CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","mcp.status","mcp.add","mcp.remove","host.attachment.create"] as const
@@ -105,7 +105,7 @@ export type McpRemoveParams = { "name": string }
 export type McpRemoveResult = { "removed": boolean }
 export type HostAttachmentCreateParams = { "origin": string }
 export type HostAttachmentCreateResult = { "endpoint": string; "token": string; "expires_at_ms": number }
-export type EventBase = { "event_id": string; "type": string; "thread_id": string; "run_id": string; "sequence": number; "timestamp_ms": number; "payload": JsonObject }
+export type EventBase = { "event_id": string; "type": string; "thread_id": string; "run_id": string; "sequence": number; "timestamp_ms": number; "execution_id"?: string; "parent_execution_id"?: string | null; "agent_id"?: string; "payload": JsonObject }
 export type RunStartedPayload = { "resumed": boolean; "skills_snapshot_id"?: string | null; "primary_model"?: RunPrimaryModelBinding; "runtime_profile_id"?: string | null }
 export type SkillLoadedPayload = { "skill_id": string; "source": string; "version": string | null; "snapshot_id": string }
 export type ContentDeltaPayload = { "text": string }
@@ -181,6 +181,9 @@ export type AgentEventOf<T extends string, P> = {
   run_id: string
   sequence: number
   timestamp_ms: number
+  execution_id?: string
+  parent_execution_id?: string | null
+  agent_id?: string
   payload: P
 }
 export type AgentEvent =

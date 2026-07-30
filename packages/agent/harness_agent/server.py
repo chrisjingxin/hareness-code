@@ -38,6 +38,7 @@ from harness_agent.config_change_service import (
 )
 from harness_agent.execution_binding import (
     ExecutionBindingError,
+    ExecutionMode,
     ResolvedExecutionBinding,
     RunExecutionBinding,
     ThreadExecutionSelection,
@@ -1626,6 +1627,10 @@ class AgentHost:
             prompt_epoch=epoch,
             approval_mode=spec.effective_policy.approval_mode or spec.execution.approval_mode,
             profile_key=profile.profile_key,
+            execution_id=run.root_execution_ref.execution_id,
+            parent_execution_id=run.root_execution_ref.parent_execution_id,
+            agent_id=spec.agent_id,
+            execution_mode=ExecutionMode.MANAGED,
             cancellation_token=run.cancellation_token,
         )
 

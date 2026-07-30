@@ -113,6 +113,9 @@ export type AgentEventOf<T extends string, P> = {
   run_id: string
   sequence: number
   timestamp_ms: number
+  execution_id?: string
+  parent_execution_id?: string | null
+  agent_id?: string
   payload: P
 }
 export type AgentEvent =

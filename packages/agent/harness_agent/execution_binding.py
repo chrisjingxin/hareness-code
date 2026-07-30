@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from enum import Enum
+from types import MappingProxyType
 from typing import Literal, Mapping
 
 from harness_agent.config import (
@@ -262,6 +263,140 @@ class RunExecutionBinding:
             **self.actual_primary_record(),
             "runtime_profile_id": self.runtime_profile_id,
         }
+
+
+class ExecutionMode(str, Enum):
+    """一次 AgentExecution 采用的执行策略。"""
+
+    INLINE = "inline"
+    MANAGED = "managed"
+
+
+class ExecutionStatus(str, Enum):
+    """AgentExecution 的生命周期状态。"""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+    @property
+    def terminal(self) -> bool:
+        """返回状态是否已经封口。"""
+        return self in {
+            ExecutionStatus.COMPLETED,
+            ExecutionStatus.FAILED,
+            ExecutionStatus.CANCELLED,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionRef:
+    """一次 AgentExecution 的稳定身份和父子关系。"""
+
+    thread_id: str
+    run_id: str
+    execution_id: str
+    parent_execution_id: str | None = None
+
+    def __post_init__(self) -> None:
+        """拒绝缺失身份，避免状态路由退化为字符串拼接。"""
+        if not all(
+            isinstance(value, str) and value
+            for value in (self.thread_id, self.run_id, self.execution_id)
+        ):
+            raise ExecutionBindingError("AGENT_EXECUTION_REFERENCE_INVALID")
+        if self.parent_execution_id is not None and not self.parent_execution_id:
+            raise ExecutionBindingError("AGENT_EXECUTION_PARENT_REFERENCE_INVALID")
+
+    @classmethod
+    def root(cls, thread_id: str, run_id: str) -> "ExecutionRef":
+        """为一次 Run 生成稳定的根 execution ID。"""
+        return cls(thread_id, run_id, f"root-{run_id}")
+
+    def checkpoint_namespace(self, project_fingerprint: str) -> str:
+        """生成 Managed execution 使用的类型化 namespace。"""
+        if not isinstance(project_fingerprint, str) or not project_fingerprint:
+            raise ExecutionBindingError("AGENT_EXECUTION_PROJECT_INVALID")
+        return ":".join(
+            (project_fingerprint, self.thread_id, self.run_id, self.execution_id)
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AgentExecutionBinding:
+    """一次 AgentExecution 的不可变身份和可收敛终态。"""
+
+    ref: ExecutionRef
+    agent_id: str
+    mode: ExecutionMode
+    depth: int
+    model: SafeModelProfile | None = None
+    policy_fingerprint: str | None = None
+    engine_profile_key: str | None = None
+    definition_fingerprint: str | None = None
+    status: ExecutionStatus = ExecutionStatus.PENDING
+    started_at_ms: int | None = None
+    finished_at_ms: int | None = None
+    usage: Mapping[str, int] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """校验父子深度并复制 usage，防止调用方修改执行事实。"""
+        if not self.agent_id or self.depth < 0:
+            raise ExecutionBindingError("AGENT_EXECUTION_BINDING_INVALID")
+        if self.depth == 0 and self.ref.parent_execution_id is not None:
+            raise ExecutionBindingError("AGENT_EXECUTION_ROOT_PARENT_INVALID")
+        if self.depth > 0 and self.ref.parent_execution_id is None:
+            raise ExecutionBindingError("AGENT_EXECUTION_PARENT_REQUIRED")
+        if not isinstance(self.mode, ExecutionMode) or not isinstance(
+            self.status, ExecutionStatus
+        ):
+            raise ExecutionBindingError("AGENT_EXECUTION_BINDING_INVALID")
+        if any(
+            not isinstance(value, int) or value < 0
+            for value in self.usage.values()
+        ):
+            raise ExecutionBindingError("AGENT_EXECUTION_USAGE_INVALID")
+        object.__setattr__(self, "usage", MappingProxyType(dict(self.usage)))
+
+    def transition(
+        self,
+        status: ExecutionStatus,
+        *,
+        now_ms: int,
+        usage: Mapping[str, int] | None = None,
+    ) -> "AgentExecutionBinding":
+        """只更新生命周期字段，身份字段始终保持不变。"""
+        if self.status.terminal:
+            raise ExecutionBindingError("EXECUTION_ALREADY_TERMINAL")
+        if status is ExecutionStatus.RUNNING and self.status is not ExecutionStatus.PENDING:
+            raise ExecutionBindingError("EXECUTION_STATE_TRANSITION_INVALID")
+        if status is ExecutionStatus.PENDING:
+            raise ExecutionBindingError("EXECUTION_STATE_TRANSITION_INVALID")
+        if status is not ExecutionStatus.RUNNING and not status.terminal:
+            raise ExecutionBindingError("EXECUTION_STATE_TRANSITION_INVALID")
+        if (
+            self.status is ExecutionStatus.PENDING
+            and status.terminal
+            and status is not ExecutionStatus.CANCELLED
+        ):
+            raise ExecutionBindingError("EXECUTION_STATE_TRANSITION_INVALID")
+        if now_ms < 0:
+            raise ExecutionBindingError("AGENT_EXECUTION_TIMESTAMP_INVALID")
+        next_usage = self.usage if usage is None else MappingProxyType(dict(usage))
+        if any(
+            not isinstance(value, int) or value < 0
+            for value in next_usage.values()
+        ):
+            raise ExecutionBindingError("AGENT_EXECUTION_USAGE_INVALID")
+        return replace(
+            self,
+            status=status,
+            started_at_ms=now_ms if status is ExecutionStatus.RUNNING else self.started_at_ms,
+            finished_at_ms=now_ms if status.terminal else self.finished_at_ms,
+            usage=next_usage,
+        )
 
 
 @dataclass(frozen=True, slots=True)

@@ -16,6 +16,7 @@ from langchain.agents.middleware.types import AgentMiddleware, ExtendedModelResp
 from langchain_core.messages import SystemMessage
 
 from harness_agent.approval_mode import ApprovalMode
+from harness_agent.execution_binding import ExecutionMode
 from harness_agent.prompting import PromptEpoch
 
 
@@ -52,7 +53,10 @@ class RunContext:
     prompt_epoch: PromptEpoch
     approval_mode: ApprovalMode
     profile_key: str | None = None
-    agent_role: str = "primary"
+    execution_id: str = "root"
+    parent_execution_id: str | None = None
+    agent_id: str = "main"
+    execution_mode: ExecutionMode = ExecutionMode.MANAGED
     cancellation_token: RunCancellationToken = field(default_factory=RunCancellationToken)
 
     def __post_init__(self) -> None:
@@ -61,8 +65,10 @@ class RunContext:
             raise RunContextError("RUN_CONTEXT_ID_INVALID")
         if self.prompt_epoch.thread_id != self.thread_id:
             raise RunContextError("RUN_CONTEXT_PROMPT_EPOCH_THREAD_MISMATCH")
-        if not self.agent_role:
-            raise RunContextError("RUN_CONTEXT_AGENT_ROLE_INVALID")
+        if not self.execution_id or not self.agent_id:
+            raise RunContextError("RUN_CONTEXT_EXECUTION_ID_INVALID")
+        if self.parent_execution_id == self.execution_id:
+            raise RunContextError("RUN_CONTEXT_PARENT_SELF_REFERENCE")
 
 
 def require_run_context(runtime: object) -> RunContext:

@@ -64,6 +64,23 @@ def test_python_validates_thread_model_selection() -> None:
         )
 
 
+def test_python_accepts_execution_identity_on_event_envelope() -> None:
+    """事件可以携带 AgentExecution 归属，旧字段仍保持不变。"""
+    EventEnvelope.model_validate(
+        {
+            "event_id": "event-1",
+            "type": "content.delta",
+            "thread_id": "thread-1",
+            "run_id": "run-1",
+            "execution_id": "root-run-1",
+            "agent_id": "main",
+            "sequence": 1,
+            "timestamp_ms": 1,
+            "payload": {"text": "ok"},
+        }
+    )
+
+
 def _validate(fixture: dict[str, Any]) -> None:
     kind = fixture["kind"]
     if kind == "operation.params":
