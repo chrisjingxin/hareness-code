@@ -590,6 +590,8 @@ class ThreadPersistence:
     async def persist_agent_engine_profile(self, profile: AgentEngineProfile) -> None:
         """保存按 project/profile key 去重的 AgentEngine Profile，不绑定 Thread。"""
         self._ensure_open()
+        if profile.is_legacy:
+            raise ThreadPersistenceError("RUNTIME_PROFILE_LEGACY_READ_ONLY")
         if profile.project_fingerprint != self._project_fingerprint:
             raise ThreadPersistenceError("RUNTIME_PROFILE_PROJECT_MISMATCH")
         record = profile.record()

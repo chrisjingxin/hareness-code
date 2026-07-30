@@ -128,6 +128,11 @@ def _load_system_prompt() -> str:
     return _PROMPT_PATH.read_text(encoding="utf-8")
 
 
+def default_system_prompt() -> str:
+    """返回内置 main 使用的稳定系统提示词正文。"""
+    return _load_system_prompt()
+
+
 def default_tool_catalog_fingerprint() -> str:
     """返回当前内置工具实际暴露形状的稳定指纹，供 AgentEngine Profile 使用。"""
     return tool_schema_fingerprint(_BUILTIN_TOOL_SHAPES)

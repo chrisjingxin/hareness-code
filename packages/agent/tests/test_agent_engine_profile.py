@@ -10,13 +10,12 @@ import pytest
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.base import empty_checkpoint
 
-from harness_agent.approval_mode import DEFAULT_APPROVAL_MODE
-from harness_agent.config import ExecutionSettings, ModelSettings
+from harness_agent.config import ModelSettings
 from harness_agent.agent_engine_profile import (
     ModelRoleBinding,
     AgentEngineProfile,
     component_fingerprint,
-    default_agent_engine_profile,
+    model_settings_fingerprint,
 )
 from harness_agent.thread_persistence import (
     CommitContextRewrite,
@@ -90,22 +89,25 @@ def test_agent_engine_profile_key_is_stable_and_excludes_thread_run_state() -> N
     assert AgentEngineProfile.from_record(first.record()) == first
 
 
-def test_default_agent_engine_profile_hashes_model_and_execution_without_leaking_secrets() -> None:
+def test_model_settings_fingerprint_does_not_leak_secrets() -> None:
     """模型 endpoint、固定 Header 与 API Key 只能参与哈希，不能进入 Profile 记录。"""
-    profile = default_agent_engine_profile(
-        project_fingerprint=component_fingerprint({"project": "a"}),
-        model_profile="enterprise",
-        model=ModelSettings(
-            name="fast-model",
-            base_url="https://gateway.example/v1",
-            api_key="toml-secret",
-            headers={"X-Trace": "trace-secret"},
+    model = ModelSettings(
+        name="fast-model",
+        base_url="https://gateway.example/v1",
+        api_key="toml-secret",
+        headers={"X-Trace": "trace-secret"},
+    )
+    profile = replace(
+        _profile(component_fingerprint({"project": "a"})),
+        model_roles=(
+            ModelRoleBinding(
+                role="primary",
+                model_config_fingerprint=model_settings_fingerprint(
+                    profile_name="enterprise",
+                    model=model,
+                ),
+            ),
         ),
-        tool_catalog_fingerprint=component_fingerprint({"tools": ["read"]}),
-        skill_catalog_fingerprint=component_fingerprint({"skills": "snapshot"}),
-        execution=ExecutionSettings(approval_mode=DEFAULT_APPROVAL_MODE),
-        middleware_fingerprint=component_fingerprint({"middleware": "v1"}),
-        prompt_template_fingerprint=component_fingerprint({"prompt": "v2"}),
     )
 
     encoded = str(profile.record())

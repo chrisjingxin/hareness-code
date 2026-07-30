@@ -601,7 +601,7 @@ executor = "fast"
         server._config,
         resolved,
     )
-    assert server._agent_engine_build_specs[agent_engine_profile.profile_key].model_settings.name == "pro-model"
+    assert server._resolved_agent_specs[agent_engine_profile.profile_key].model_settings.name == "pro-model"
 
     await server.dispatch(_request(
         "run.start",

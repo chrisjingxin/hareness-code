@@ -664,6 +664,8 @@ class AgentEnginePool:
 
     async def acquire(self, profile: AgentEngineProfile) -> AgentEngineLease:
         """按 Profile 获取共享 AgentEngine 租约，并对同 Key 首建执行 single-flight。"""
+        if profile.is_legacy:
+            raise AgentEngineError("RUNTIME_LEGACY_PROFILE_UNSUPPORTED")
         key = profile.profile_key
         accounted = False
         while True:

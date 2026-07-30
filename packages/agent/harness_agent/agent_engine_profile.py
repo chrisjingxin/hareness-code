@@ -14,11 +14,16 @@ from typing import Any, Mapping, Sequence
 from harness_agent.prompting import canonical_json, sha256_text
 
 
-AGENT_ENGINE_PROFILE_VERSION = 1
+AGENT_ENGINE_PROFILE_VERSION = 2
 """AgentEngine Profile 持久化记录的当前版本。"""
+
+LEGACY_AGENT_ENGINE_PROFILE_VERSION = 1
+"""仍可读取但不能重新构建 AgentEngine 的旧 Profile 版本。"""
 
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+_DEFAULT_AGENT_ID = "main"
+_DEFAULT_DEFINITION_FINGERPRINT = sha256_text("builtin-agent:main:v1")
 
 
 class AgentEngineProfileError(ValueError):
@@ -63,9 +68,17 @@ class AgentEngineProfile:
     policy_fingerprint: str
     middleware_fingerprint: str
     prompt_template_fingerprint: str
+    agent_id: str = _DEFAULT_AGENT_ID
+    definition_fingerprint: str = _DEFAULT_DEFINITION_FINGERPRINT
+    profile_version: int = AGENT_ENGINE_PROFILE_VERSION
 
     def __post_init__(self) -> None:
         """规范化角色顺序并校验所有会改变共享图的稳定字段。"""
+        if self.profile_version not in {
+            LEGACY_AGENT_ENGINE_PROFILE_VERSION,
+            AGENT_ENGINE_PROFILE_VERSION,
+        }:
+            raise AgentEngineProfileError("RUNTIME_PROFILE_VERSION_INVALID")
         _require_fingerprint("project_fingerprint", self.project_fingerprint)
         if not _IDENTIFIER_RE.fullmatch(self.topology_id):
             raise AgentEngineProfileError("RUNTIME_PROFILE_TOPOLOGY_INVALID")
@@ -75,6 +88,10 @@ class AgentEngineProfile:
         if not ordered_roles or len({binding.role for binding in ordered_roles}) != len(ordered_roles):
             raise AgentEngineProfileError("RUNTIME_PROFILE_ROLES_INVALID")
         object.__setattr__(self, "model_roles", ordered_roles)
+        if self.profile_version >= AGENT_ENGINE_PROFILE_VERSION:
+            if not _IDENTIFIER_RE.fullmatch(self.agent_id):
+                raise AgentEngineProfileError("RUNTIME_PROFILE_AGENT_INVALID")
+            _require_fingerprint("definition_fingerprint", self.definition_fingerprint)
         for field_name, value in (
             ("tool_catalog_fingerprint", self.tool_catalog_fingerprint),
             ("skill_catalog_fingerprint", self.skill_catalog_fingerprint),
@@ -91,10 +108,15 @@ class AgentEngineProfile:
         """返回由全部稳定配置组成的可复算 AgentEngine Profile Key。"""
         return component_fingerprint(self.identity())
 
+    @property
+    def is_legacy(self) -> bool:
+        """旧版本只用于读取和诊断，不能伪装成当前角色身份。"""
+        return self.profile_version < AGENT_ENGINE_PROFILE_VERSION
+
     def identity(self) -> dict[str, object]:
         """返回参与 Key 的完整脱敏身份，禁止加入 thread/run 动态状态。"""
-        return {
-            "version": AGENT_ENGINE_PROFILE_VERSION,
+        identity: dict[str, object] = {
+            "version": self.profile_version,
             "project_fingerprint": self.project_fingerprint,
             "topology": {"id": self.topology_id, "version": self.topology_version},
             "model_roles": [binding.record() for binding in self.model_roles],
@@ -106,6 +128,12 @@ class AgentEngineProfile:
             "middleware_fingerprint": self.middleware_fingerprint,
             "prompt_template_fingerprint": self.prompt_template_fingerprint,
         }
+        if self.profile_version >= AGENT_ENGINE_PROFILE_VERSION:
+            identity["agent"] = {
+                "id": self.agent_id,
+                "definition_fingerprint": self.definition_fingerprint,
+            }
+        return identity
 
     def record(self) -> dict[str, object]:
         """返回 SQLite 可保存记录；所有原始路径、提示词和秘密均已排除。"""
@@ -118,7 +146,10 @@ class AgentEngineProfile:
             version = int(record["version"])
             topology = record["topology"]
             roles = record["model_roles"]
-            if version != AGENT_ENGINE_PROFILE_VERSION or not isinstance(topology, Mapping) or not isinstance(roles, Sequence):
+            if version not in {
+                LEGACY_AGENT_ENGINE_PROFILE_VERSION,
+                AGENT_ENGINE_PROFILE_VERSION,
+            } or not isinstance(topology, Mapping) or not isinstance(roles, Sequence):
                 raise AgentEngineProfileError("RUNTIME_PROFILE_RECORD_INVALID")
             bindings = tuple(
                 ModelRoleBinding(
@@ -129,6 +160,12 @@ class AgentEngineProfile:
                 if isinstance(value, Mapping)
             )
             if len(bindings) != len(roles):
+                raise AgentEngineProfileError("RUNTIME_PROFILE_RECORD_INVALID")
+            raw_agent = record.get("agent")
+            if version == AGENT_ENGINE_PROFILE_VERSION and (
+                not isinstance(raw_agent, Mapping)
+                or set(raw_agent) != {"id", "definition_fingerprint"}
+            ):
                 raise AgentEngineProfileError("RUNTIME_PROFILE_RECORD_INVALID")
             profile = cls(
                 project_fingerprint=str(record["project_fingerprint"]),
@@ -142,6 +179,13 @@ class AgentEngineProfile:
                 policy_fingerprint=str(record["policy_fingerprint"]),
                 middleware_fingerprint=str(record["middleware_fingerprint"]),
                 prompt_template_fingerprint=str(record["prompt_template_fingerprint"]),
+                agent_id=str(raw_agent["id"]) if isinstance(raw_agent, Mapping) else _DEFAULT_AGENT_ID,
+                definition_fingerprint=(
+                    str(raw_agent["definition_fingerprint"])
+                    if isinstance(raw_agent, Mapping)
+                    else _DEFAULT_DEFINITION_FINGERPRINT
+                ),
+                profile_version=version,
             )
             expected_key = str(record["profile_key"])
         except (KeyError, TypeError, ValueError) as exc:
@@ -173,49 +217,6 @@ def model_settings_fingerprint(
             "headers": dict(model.headers),
             "headers_env": dict(model.headers_env),
         }
-    )
-
-
-def default_agent_engine_profile(
-    *,
-    project_fingerprint: str,
-    model_profile: str | None,
-    model: Any,
-    tool_catalog_fingerprint: str,
-    skill_catalog_fingerprint: str,
-    execution: Any,
-    mcp_fingerprint: str | None = None,
-    middleware_fingerprint: str,
-    prompt_template_fingerprint: str,
-) -> AgentEngineProfile:
-    """按当前单 Agent / 单模型配置创建未来 AgentEnginePool 可直接使用的 Profile。"""
-    return AgentEngineProfile(
-        project_fingerprint=project_fingerprint,
-        topology_id="single-agent",
-        topology_version=1,
-        model_roles=(
-            ModelRoleBinding(
-                role="primary",
-                model_config_fingerprint=model_settings_fingerprint(
-                    profile_name=model_profile,
-                    model=model,
-                ),
-            ),
-        ),
-        tool_catalog_fingerprint=tool_catalog_fingerprint,
-        skill_catalog_fingerprint=skill_catalog_fingerprint,
-        mcp_config_fingerprint=mcp_fingerprint or component_fingerprint({"transport": "disabled"}),
-        sandbox_config_fingerprint=component_fingerprint(
-            {
-                "mode": str(execution.mode),
-                "provider": execution.remote.provider if execution.remote else None,
-                "working_directory": execution.remote.working_directory if execution.remote else None,
-                "params": dict(execution.remote.params) if execution.remote else {},
-            }
-        ),
-        policy_fingerprint=component_fingerprint({"approval_mode": str(execution.approval_mode)}),
-        middleware_fingerprint=middleware_fingerprint,
-        prompt_template_fingerprint=prompt_template_fingerprint,
     )
 
 

@@ -221,12 +221,14 @@ Reviewer 或 Tester 的成本与能力。Policy 不存在“低优先级覆盖�
 | Plugin Policy / Plugin Agent | 已验证 Plugin catalog snapshot | snapshot 内不可变 | 仅在该 Plugin Agent 被派发时以脱敏指纹参与 |
 | ThreadExecutionSelection | Thread 交互期间 | 仅影响未来 Run | 不直接参与；解析出的实际模型参与 |
 | RunExecutionBinding | 从 run.start 受理到历史保留 | execution 启动后模型/策略不可变；终态 sealed | 不参与 |
-| ResolvedAgentSpec | 单次构建/调用 | 临时对象 | 由其静态指纹构成 Profile，不持久化 |
+| ResolvedAgentSpec | 单次角色解析到 AgentEngine 构建/调用 | 不可变快照 | 由其静态指纹构成 Profile，不持久化 |
 
-`ResolvedAgentSpec` 只是将一个 Plugin Agent、Model、Policy、Thread 选择和当前任务上下文解析后的
-内部 DTO；它不是配置对象、数据库表或 JSON-RPC DTO。内置主 Agent 沿用现有 Python 构建路径。`AgentEngineProfile` 继续只表达可共享图的
-稳定身份：有效 Agent/Model/Policy/Prompt/工具/Skill/MCP/Sandbox/middleware 指纹可以参与；
-`thread_id`、消息、选择正文、run ID、审批状态、取消令牌、执行树和凭据绝不参与。
+`ResolvedAgentSpec` 是将一个内置 Agent 或未来受信 `AgentDefinition`、Model、EffectiveExecutionPolicy、
+能力 snapshot、Prompt 和执行后端描述解析后的内部 DTO；它不是配置对象、数据库表或 JSON-RPC DTO。
+当前生产实现只解析内置 `main`，不读取 Plugin Agent，也不把 Thread、Run、Team 组合或任务正文放入
+spec。AgentEngineProfile 只能由该 spec 的静态视图生成，AgentEngine builder 再按 Profile key 取回
+同一个 spec，不能重新解释配置。有效 Agent/Model/Policy/Prompt/工具/Skill/MCP/Sandbox/middleware
+指纹可以参与；`thread_id`、消息、run ID、审批状态、取消令牌、执行树和凭据绝不参与。
 
 ### 不作为当前核心对象的概念
 

@@ -77,6 +77,7 @@ from harness_agent.protocol_runtime import (
     validate_protocol_error_data,
 )
 from harness_agent.skills import SkillError, SkillRegistry
+from harness_agent.agent_spec import ResolvedAgentSpec, resolve_builtin_main_agent_spec
 from harness_agent.mcp import (
     McpConfigError,
     McpConfigSnapshot,
@@ -87,8 +88,6 @@ from harness_agent.mcp import (
 from harness_agent.run_context import RunContext
 from harness_agent.agent_engine_profile import (
     AgentEngineProfile,
-    component_fingerprint,
-    default_agent_engine_profile,
 )
 from harness_agent.thread_persistence import ThreadPersistence, ThreadPersistenceError
 from harness_agent.providers.harness_gateway import ProviderClientPool
@@ -136,18 +135,6 @@ class RpcError(Exception):
         self.code = code
         self.message = message
         self.data = data
-
-
-@dataclass(frozen=True, slots=True)
-class _AgentEngineBuildSpec:
-    """构建一个共享 AgentEngine 所需的稳定输入，不含 thread/run 私有状态。"""
-
-    config: Za38Config
-    workspace: Path
-    skill_registry: SkillRegistry
-    model_settings: Any
-    mcp_snapshot: McpConfigSnapshot
-    mcp_tools: tuple[Any, ...]
 
 
 @dataclass(slots=True)
@@ -299,7 +286,8 @@ class AgentHost:
         self._mcp_snapshot: McpConfigSnapshot | None = None
         self._mcp_connect_task: asyncio.Task[None] | None = None
         self._mcp_state_lock = asyncio.Lock()
-        self._agent_engine_build_specs: dict[str, _AgentEngineBuildSpec] = {}
+        # Profile key 只索引构建时解析出的同一个 spec，避免再次解释配置。
+        self._resolved_agent_specs: dict[str, ResolvedAgentSpec] = {}
         self._agent_engine_artifacts: dict[str, _AgentEngineArtifacts] = {}
         self._provider_client_pool = ProviderClientPool()
         self._owner_connection = ProtocolConnection(
@@ -813,11 +801,12 @@ class AgentHost:
             self._config,
             requested_primary_profile=command.requested_primary_profile,
         )
-        profile = await self._resolve_agent_engine_profile(
+        spec = await self._resolve_agent_engine_spec(
             command.thread_id,
             self._config,
             resolved,
         )
+        profile = spec.runtime_profile
         binding = resolved.bind_run(
             thread_id=command.thread_id,
             run_id=command.run_id,
@@ -1422,13 +1411,13 @@ class AgentHost:
             return None
         try:
             artifacts = self._agent_engine_artifacts.get(engine.profile_key)
-            spec = self._agent_engine_build_specs.get(engine.profile_key)
+            spec = self._resolved_agent_specs.get(engine.profile_key)
             if artifacts is None or spec is None or engine.graph is None:
                 raise RuntimeError("RUNTIME_ARTIFACTS_UNAVAILABLE")
             run.run_context = await self._create_run_context(
                 run,
                 profile=engine.profile,
-                config=spec.config,
+                spec=spec,
                 execution_context=artifacts.execution_context,
             )
             run.agent_engine_run_lease = await lease.run()
@@ -1467,59 +1456,44 @@ class AgentHost:
         lease = await pool.acquire(profile)
         return lease, lease.engine
 
+    async def _resolve_agent_engine_spec(
+        self,
+        thread_id: str,
+        config: Za38Config,
+        resolved_binding: ResolvedExecutionBinding,
+    ) -> ResolvedAgentSpec:
+        """截取一次角色解析快照，Profile 和 builder 都从它派生。"""
+        persistence = await self._ensure_thread_persistence()
+        registry = self._require_skills()
+        await self._ensure_mcp_connected()
+        async with self._mcp_state_lock:
+            mcp_snapshot = self._mcp_snapshot or build_mcp_snapshot([], "missing")
+            mcp_tools = tuple(self._mcp_manager.get_tools()) if self._mcp_manager else ()
+        spec = resolve_builtin_main_agent_spec(
+            project_fingerprint=persistence.project_fingerprint,
+            workspace=self._workspace,
+            binding=resolved_binding,
+            execution=config.execution,
+            skill_registry=registry,
+            mcp_snapshot=mcp_snapshot,
+            mcp_tools=mcp_tools,
+            interactive="question" in self._connection_handles(),
+            pinned=config.agent_engine_pool.pin_default_profile,
+        )
+        profile = spec.runtime_profile
+        await persistence.persist_agent_engine_profile(profile)
+        # 同一 Key 保留第一次解析出的对象，保证 Pool builder 与 RunContext
+        # 取回的是同一个快照，而不是后续请求重新拼出的近似对象。
+        return self._resolved_agent_specs.setdefault(profile.profile_key, spec)
+
     async def _resolve_agent_engine_profile(
         self,
         thread_id: str,
         config: Za38Config,
         resolved_binding: ResolvedExecutionBinding,
     ) -> AgentEngineProfile:
-        """按本次实际模型计算可共享 Profile，不把它永久绑定到 Thread。"""
-        from harness_agent.agent import (
-            default_prompt_template_fingerprint,
-            default_tool_catalog_fingerprint,
-        )
-
-        persistence = await self._ensure_thread_persistence()
-        registry = self._require_skills()
-        selected_profile_id = resolved_binding.primary_profile.profile_id
-        selected_model = resolved_binding.primary_profile.settings
-        await self._ensure_mcp_connected()
-        async with self._mcp_state_lock:
-            mcp_snapshot = self._mcp_snapshot or build_mcp_snapshot([], "missing")
-            mcp_tools = tuple(self._mcp_manager.get_tools()) if self._mcp_manager else ()
-        # Profile 身份和图输入从同一个快照截取，后续热变更不会改写旧 AgentEngine。
-        mcp_fp = mcp_snapshot.digest
-        profile = default_agent_engine_profile(
-            project_fingerprint=persistence.project_fingerprint,
-            model_profile=selected_profile_id,
-            model=selected_model,
-            tool_catalog_fingerprint=default_tool_catalog_fingerprint(),
-            skill_catalog_fingerprint=component_fingerprint(
-                {"skill_snapshot_id": registry.snapshot_id}
-            ),
-            execution=config.execution,
-            mcp_fingerprint=mcp_fp,
-            middleware_fingerprint=component_fingerprint(
-                {
-                    "prompt_epoch": 1,
-                    "context_window": 1,
-                    "workspace_boundary": 1,
-                    "interactive_question": "question" in self._connection_handles(),
-                }
-            ),
-            prompt_template_fingerprint=default_prompt_template_fingerprint(),
-        )
-        await persistence.persist_agent_engine_profile(profile)
-
-        self._agent_engine_build_specs[profile.profile_key] = _AgentEngineBuildSpec(
-            config=config,
-            workspace=self._workspace,
-            skill_registry=registry,
-            model_settings=selected_model,
-            mcp_snapshot=mcp_snapshot,
-            mcp_tools=mcp_tools,
-        )
-        return profile
+        """兼容现有调用方，只返回由 ResolvedAgentSpec 生成的 Profile。"""
+        return (await self._resolve_agent_engine_spec(thread_id, config, resolved_binding)).runtime_profile
 
     async def _resolve_execution_binding(
         self,
@@ -1551,19 +1525,20 @@ class AgentHost:
         return self._agent_engine_pool
 
     async def _build_default_agent_engine(self, profile: AgentEngineProfile) -> AgentEngine:
-        """按 Profile 构建一张 deepagents 图及其共享 middleware，供多个 thread 复用。"""
-        spec = self._agent_engine_build_specs.get(profile.profile_key)
+        """按 Profile key 取回同一 ResolvedAgentSpec，再构建共享图。"""
+        spec = self._resolved_agent_specs.get(profile.profile_key)
         if spec is None:
-            raise RuntimeError("RUNTIME_BUILD_SPEC_MISSING")
+            raise RuntimeError("RUNTIME_RESOLVED_AGENT_SPEC_MISSING")
+        if profile.profile_key != spec.runtime_profile.profile_key:
+            raise RuntimeError("RUNTIME_PROFILE_SPEC_MISMATCH")
         if profile.mcp_config_fingerprint != spec.mcp_snapshot.digest:
             raise RuntimeError("RUNTIME_MCP_SNAPSHOT_MISMATCH")
-        config, workspace = spec.config, spec.workspace
         from harness_agent.agent import create_harness_agent
         from harness_agent.context_window import ContextWindowMiddleware
         from harness_agent.execution import create_execution_context
         from harness_agent.providers.harness_gateway import create_openai_compatible_model
 
-        execution_context = create_execution_context(config.execution, workspace)
+        execution_context = create_execution_context(spec.execution, spec.workspace)
         persistence = await self._ensure_thread_persistence()
         checkpointer = persistence.checkpointer
         model_settings = spec.model_settings
@@ -1577,16 +1552,19 @@ class AgentHost:
             thread_persistence=persistence,
             updates=self._context_updates,
         )
-        mcp_tools = list(spec.mcp_tools)
+        mcp_tools = list(spec.tools)
         graph = create_harness_agent(
             model,
             tools=mcp_tools or None,
             mcp_server_info=True if mcp_tools else None,
-            cwd=str(workspace),
+            cwd=str(spec.workspace),
             # 无头客户端不协商 question 能力时不注册 ask_user；审批仍由
             # `_ProtocolInteractionAdapter` 在缺少 approval 能力时 fail closed。
-            interactive="question" in self._connection_handles(),
-            approval_mode=config.execution.approval_mode,
+            interactive=spec.interactive,
+            enable_ask_user=spec.enable_ask_user,
+            enable_memory=spec.enable_memory,
+            enable_skills=spec.enable_skills,
+            approval_mode=spec.effective_policy.approval_mode or spec.execution.approval_mode,
             execution_context=execution_context,
             skill_registry=spec.skill_registry,
             checkpointer=checkpointer,
@@ -1612,7 +1590,7 @@ class AgentHost:
             profile=profile,
             graph=graph,
             resources=resources,
-            pinned=config.agent_engine_pool.pin_default_profile,
+            pinned=spec.pinned,
         )
 
     async def _create_run_context(
@@ -1620,7 +1598,7 @@ class AgentHost:
         run: RunState,
         *,
         profile: AgentEngineProfile,
-        config: Za38Config,
+        spec: ResolvedAgentSpec,
         execution_context: Any,
     ) -> RunContext:
         """从持久化状态恢复本轮 PromptEpoch，禁止把 thread 数据保存在共享图中。"""
@@ -1631,21 +1609,22 @@ class AgentHost:
         if epoch is None:
             epoch = create_prompt_epoch(
                 thread_id=run.thread_id,
-                system_prompt=None,
+                system_prompt=spec.prompt,
                 workspace=str(getattr(execution_context, "workspace_path", self._workspace)),
                 sandboxed=bool(getattr(execution_context, "sandboxed", False)),
                 provider=getattr(execution_context, "provider", None),
-                approval_mode=config.execution.approval_mode,
-                skill_registry=self._require_skills(),
-                enable_memory=True,
-                enable_skills=True,
+                approval_mode=spec.effective_policy.approval_mode or spec.execution.approval_mode,
+                skill_registry=spec.skill_registry,
+                enable_memory=spec.enable_memory,
+                enable_skills=spec.enable_skills,
+                extra_tools=spec.tools,
             )
             await persistence.persist_prompt_epoch(epoch)
         return RunContext(
             thread_id=run.thread_id,
             run_id=run.run_id,
             prompt_epoch=epoch,
-            approval_mode=config.execution.approval_mode,
+            approval_mode=spec.effective_policy.approval_mode or spec.execution.approval_mode,
             profile_key=profile.profile_key,
             cancellation_token=run.cancellation_token,
         )
@@ -1747,7 +1726,7 @@ class AgentHost:
     async def _drop_agent_engine_artifacts(self, profile_key: str) -> None:
         """清除已关闭 AgentEngine 的 middleware/执行上下文引用，避免 Sidecar 持有旧资源。"""
         self._agent_engine_artifacts.pop(profile_key, None)
-        self._agent_engine_build_specs.pop(profile_key, None)
+        self._resolved_agent_specs.pop(profile_key, None)
 
     async def _close_agent_engine_pool(self) -> None:
         """在关闭 SQLite 前停止 AgentEnginePool，保证 middleware 不再访问已关闭的 Persistence。"""
@@ -1758,7 +1737,7 @@ class AgentHost:
             if failures:
                 logger.warning("AgentEnginePool closed with %s resource failures", len(failures))
         self._agent_engine_artifacts.clear()
-        self._agent_engine_build_specs.clear()
+        self._resolved_agent_specs.clear()
         await self._provider_client_pool.aclose()
 
     async def _agent_engine_pool_diagnostics(self) -> dict[str, object]:

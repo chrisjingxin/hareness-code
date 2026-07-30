@@ -129,7 +129,7 @@ dcode 的 `make_graph()` 在进程内通过锁只构建一次。之后的模型�
 
 ### 4.1 图、AgentEngine 和生命周期
 
-Harness 把“可以共用的 Agent 能力”定义为 AgentEngine。`AgentEngineProfile` 包含项目、实际模型、工具目录、Skill 快照、MCP、沙箱、审批策略、middleware 和 prompt 模板的指纹；`AgentEnginePool` 按这个 key 做 single-flight 构建、容量限制、空闲回收、draining 和关闭。[H-Profile] [H-AgentEngine]
+Harness 把“可以共用的 Agent 能力”定义为 AgentEngine。当前实现先把内置 `main` 解析成不可变 `ResolvedAgentSpec`，再由同一 spec 生成 `AgentEngineProfile` 并驱动 builder；Profile 包含项目、角色、实际模型、工具能力视图、Skill 快照、MCP、沙箱、审批策略、middleware 和 prompt 模板的指纹。`AgentEnginePool` 按这个 key 做 single-flight 构建、容量限制、空闲回收、draining 和关闭。[H-Profile] [H-AgentEngine]
 
 优势：
 
@@ -142,7 +142,7 @@ Harness 把“可以共用的 Agent 能力”定义为 AgentEngine。`AgentEngin
 
 - “什么变化必须生成新 AgentEngine”变成关键正确性问题；
 - Profile 指纹漏字段时，旧能力会被错误复用；
-- AgentHost 需要同时协调配置、模型绑定、AgentEngine、ThreadPersistence 和运行生命周期，当前 `server.py` 因而过重。
+- AgentHost 仍需要协调配置、模型绑定、AgentEngine、ThreadPersistence 和运行生命周期；ZC-091 已把角色解析与构图输入收敛到 `ResolvedAgentSpec`，后续仍可继续拆出更深的领域 module。
 
 dcode 选择每进程一张图。它用一个 `asyncio.Lock` 防止重复构建，并让动态模型 middleware 在调用时替换模型。[D-ServerGraph] [D-Model]
 
