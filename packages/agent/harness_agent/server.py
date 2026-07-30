@@ -30,6 +30,7 @@ from harness_agent.agent_engine import (
     AgentEngineResourceBundle,
 )
 from harness_agent.config import ConfigError, Za38Config, load_config
+from harness_agent.concurrency import AsyncRWLock
 from harness_agent.config_change_service import (
     ConfigChange,
     ConfigChangeError,
@@ -273,6 +274,9 @@ class AgentHost:
         self._agent_build_lock = asyncio.Lock()
         self._run_event_tasks: set[asyncio.Task[None]] = set()
         self._workspace = (workspace or Path.cwd()).resolve()
+        # ponytail: Host 固定绑定一个 workspace，先用一把锁覆盖跨 Profile 图；
+        # worktree/sandbox 有稳定资源身份或吞吐证明不足时再按资源拆分。
+        self._tool_concurrency_lock = AsyncRWLock()
         self._config_path = config_path or os.environ.get("HARNESS_AGENT_CONFIG_PATH")
         self._connection_role = connection_role
         self._config_home = config_home
@@ -1574,6 +1578,7 @@ class AgentHost:
             context_middleware=context_compactor,
             context_window_tokens=model_settings.context_window_tokens,
             shared_engine=True,
+            concurrency_lock=self._tool_concurrency_lock,
         )
         self._agent_engine_artifacts[profile.profile_key] = _AgentEngineArtifacts(
             execution_context=execution_context,

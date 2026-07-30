@@ -23,19 +23,14 @@ if TYPE_CHECKING:
 class ConcurrencyGuardMiddleware(AgentMiddleware):
     """并发安全守卫：利用读写锁串行化写操作、并行化只读操作。
 
-    需要 HITL 审批的工具（interrupt_on 集合中的工具）跳过锁获取，
-    避免写锁阻塞 HITL 中间件的 action 打包，导致审批后死锁。
+    锁由 AgentHost 注入时，同一 Host 下的所有 AgentEngine 会协调工具调用；
+    独立库调用可自行创建并传入局部锁。
     """
 
-    def __init__(self, interrupt_on: frozenset[str] | None = None) -> None:
-        """初始化内部读写锁实例。
-
-        参数：
-            interrupt_on: 需要 HITL 审批的工具名称集合；这些工具不获取锁。
-        """
+    def __init__(self, rwlock: AsyncRWLock) -> None:
+        """保存调用方提供的读写锁，禁止每张生产图自行创建锁。"""
         super().__init__()
-        self._rwlock = AsyncRWLock()
-        self._interrupt_on: frozenset[str] = interrupt_on or frozenset()
+        self._rwlock = rwlock
 
     def wrap_tool_call(
         self,
@@ -50,19 +45,10 @@ class ConcurrencyGuardMiddleware(AgentMiddleware):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[Any]],
     ) -> Any:
-        """异步路径：按工具并发安全性获取对应锁后执行。
-
-        需要 HITL 审批的工具跳过锁获取——写锁会阻塞其他协程到达
-        HITL 中间件，破坏 action 打包机制，导致审批恢复后死锁。
-        """
+        """异步路径：按工具并发安全性获取对应锁后执行。"""
         tool_call = request.tool_call
         tool_name = str(tool_call.get("name", ""))
         args = tool_call.get("args") or {}
-
-        # 需要 HITL 审批的工具：不获取锁，让 HITL 正常打包多个 action。
-        # 审批通过后工具由 ToolNode gather 并行执行；安全性由人工审批保证。
-        if tool_name in self._interrupt_on:
-            return await handler(request)
 
         if is_concurrency_safe(tool_name, args):
             # 只读工具：共享读锁，多个读者可并行

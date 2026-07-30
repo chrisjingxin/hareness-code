@@ -711,6 +711,86 @@ async def test_default_sidecar_shares_engine_by_profile_without_draining_other_m
     await server._close_agent_engine_pool()
 
 
+async def test_default_engine_builder_passes_one_host_lock_to_each_profile(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """不同 Profile 的默认图必须共享所属 AgentHost 的工具读写锁。"""
+    from types import SimpleNamespace
+
+    import harness_agent.agent as agent_module
+    import harness_agent.context_window as context_window_module
+    import harness_agent.execution as execution_module
+    import harness_agent.providers.harness_gateway as gateway_module
+    from harness_agent.server import AgentHost
+
+    captured_locks: list[object] = []
+    monkeypatch.setattr(
+        agent_module,
+        "create_harness_agent",
+        lambda *_args, **kwargs: captured_locks.append(kwargs["concurrency_lock"]) or object(),
+    )
+    monkeypatch.setattr(
+        context_window_module,
+        "ContextWindowMiddleware",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        execution_module,
+        "create_execution_context",
+        lambda *_args, **_kwargs: SimpleNamespace(backend=object()),
+    )
+    monkeypatch.setattr(
+        gateway_module,
+        "create_openai_compatible_model",
+        lambda *_args, **_kwargs: object(),
+    )
+
+    class ProviderClients:
+        async def get_async_client(self, _settings: object) -> object:
+            return object()
+
+    async def persistence() -> object:
+        return SimpleNamespace(checkpointer=object())
+
+    def profile(profile_key: str) -> SimpleNamespace:
+        return SimpleNamespace(profile_key=profile_key, mcp_config_fingerprint="mcp")
+
+    def spec(runtime_profile: SimpleNamespace) -> SimpleNamespace:
+        return SimpleNamespace(
+            runtime_profile=runtime_profile,
+            mcp_snapshot=SimpleNamespace(digest="mcp"),
+            execution=SimpleNamespace(approval_mode="yolo"),
+            workspace=tmp_path,
+            model_settings=SimpleNamespace(context_window_tokens=128_000),
+            tools=(),
+            interactive=False,
+            enable_ask_user=False,
+            enable_memory=False,
+            enable_skills=False,
+            effective_policy=SimpleNamespace(approval_mode=None),
+            skill_registry=object(),
+            pinned=False,
+        )
+
+    server = AgentHost(allow_echo=True, workspace=tmp_path)
+    server._provider_client_pool = ProviderClients()  # type: ignore[assignment]
+    server._ensure_thread_persistence = persistence  # type: ignore[method-assign]
+    first_profile = profile("profile-first")
+    second_profile = profile("profile-second")
+    server._resolved_agent_specs = {
+        first_profile.profile_key: spec(first_profile),
+        second_profile.profile_key: spec(second_profile),
+    }
+
+    first = await server._build_default_agent_engine(first_profile)  # type: ignore[arg-type]
+    second = await server._build_default_agent_engine(second_profile)  # type: ignore[arg-type]
+
+    assert captured_locks == [server._tool_concurrency_lock, server._tool_concurrency_lock]
+    assert captured_locks[0] is captured_locks[1]
+    await first.aclose()
+    await second.aclose()
+
+
 async def test_default_context_compact_acquires_and_releases_profile_engine(tmp_path: Path):
     """默认 compact 也必须经 AgentEnginePool 租用图，完成后不残留 thread 专属引用。"""
     from langchain_core.messages import HumanMessage

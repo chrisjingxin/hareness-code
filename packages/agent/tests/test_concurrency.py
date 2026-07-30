@@ -38,9 +38,9 @@ def test_write_tools_are_not_concurrency_safe(tool_name: str):
     assert is_concurrency_safe(tool_name, {}) is False
 
 
-def test_subagent_tool_is_concurrency_safe():
-    """子代理工具拥有隔离上下文，可安全并行。"""
-    assert is_concurrency_safe("task", {"prompt": "do something"}) is True
+def test_subagent_tool_is_not_concurrency_safe():
+    """默认子 Agent 可能写同一工作区，task 必须独占。"""
+    assert is_concurrency_safe("task", {"prompt": "do something"}) is False
 
 
 def test_execute_with_read_only_command_is_safe():
@@ -237,7 +237,7 @@ def _make_request(tool_name: str, args: dict | None = None) -> SimpleNamespace:
 @pytest.mark.asyncio
 async def test_middleware_read_tool_handler_called():
     """只读工具通过读锁执行 handler 并返回结果。"""
-    middleware = ConcurrencyGuardMiddleware()
+    middleware = ConcurrencyGuardMiddleware(AsyncRWLock())
     request = _make_request("read_file", {"path": "a.txt"})
 
     async def handler(req: Any) -> str:
@@ -250,7 +250,7 @@ async def test_middleware_read_tool_handler_called():
 @pytest.mark.asyncio
 async def test_middleware_write_tool_handler_called():
     """写工具通过写锁执行 handler 并返回结果。"""
-    middleware = ConcurrencyGuardMiddleware()
+    middleware = ConcurrencyGuardMiddleware(AsyncRWLock())
     request = _make_request("write_file", {"path": "b.txt", "content": "x"})
 
     async def handler(req: Any) -> str:
@@ -263,7 +263,7 @@ async def test_middleware_write_tool_handler_called():
 @pytest.mark.asyncio
 async def test_middleware_multiple_reads_concurrent():
     """多个只读工具可并发执行（读锁共享）。"""
-    middleware = ConcurrencyGuardMiddleware()
+    middleware = ConcurrencyGuardMiddleware(AsyncRWLock())
     active = 0
     max_active = 0
     lock = asyncio.Lock()
@@ -289,7 +289,7 @@ async def test_middleware_multiple_reads_concurrent():
 @pytest.mark.asyncio
 async def test_middleware_write_blocks_concurrent_reads():
     """写工具持有写锁期间阻塞只读工具。"""
-    middleware = ConcurrencyGuardMiddleware()
+    middleware = ConcurrencyGuardMiddleware(AsyncRWLock())
     events: list[str] = []
 
     async def write_handler(req: Any) -> str:
@@ -317,3 +317,97 @@ async def test_middleware_write_blocks_concurrent_reads():
 
     # 读操作必须在写操作结束之后才能开始
     assert events.index("read_start") > events.index("write_end")
+
+
+@pytest.mark.asyncio
+async def test_shared_middleware_lock_allows_cross_graph_reads():
+    """两张图注入同一把锁时，只读工具仍可并行执行。"""
+    shared_lock = AsyncRWLock()
+    first = ConcurrencyGuardMiddleware(shared_lock)
+    second = ConcurrencyGuardMiddleware(shared_lock)
+    active = 0
+    max_active = 0
+    counter_lock = asyncio.Lock()
+
+    async def handler(req: Any) -> str:
+        nonlocal active, max_active
+        async with counter_lock:
+            active += 1
+            max_active = max(max_active, active)
+        await asyncio.sleep(0.02)
+        async with counter_lock:
+            active -= 1
+        return "read"
+
+    await asyncio.gather(
+        first.awrap_tool_call(_make_request("read_file"), handler),  # type: ignore[arg-type]
+        second.awrap_tool_call(_make_request("read_file"), handler),  # type: ignore[arg-type]
+    )
+
+    assert max_active == 2
+
+
+@pytest.mark.asyncio
+async def test_shared_middleware_lock_blocks_cross_graph_read_after_write():
+    """一张图写入时，另一张图的读取必须等待同一 Host 锁释放。"""
+    shared_lock = AsyncRWLock()
+    writer = ConcurrencyGuardMiddleware(shared_lock)
+    reader = ConcurrencyGuardMiddleware(shared_lock)
+    write_started = asyncio.Event()
+    release_write = asyncio.Event()
+    read_started = asyncio.Event()
+
+    async def write_handler(req: Any) -> str:
+        write_started.set()
+        await release_write.wait()
+        return "written"
+
+    async def read_handler(req: Any) -> str:
+        read_started.set()
+        return "read"
+
+    write_task = asyncio.create_task(
+        writer.awrap_tool_call(_make_request("write_file"), write_handler)  # type: ignore[arg-type]
+    )
+    await write_started.wait()
+    read_task = asyncio.create_task(
+        reader.awrap_tool_call(_make_request("read_file"), read_handler)  # type: ignore[arg-type]
+    )
+    await asyncio.sleep(0)
+    assert read_started.is_set() is False
+
+    release_write.set()
+    await asyncio.gather(write_task, read_task)
+    assert read_started.is_set() is True
+
+
+@pytest.mark.asyncio
+async def test_middleware_releases_lock_after_cancelled_write():
+    """取消写工具后必须释放锁，后续读取不能永久阻塞。"""
+    middleware = ConcurrencyGuardMiddleware(AsyncRWLock())
+    write_started = asyncio.Event()
+    never_finish = asyncio.Event()
+
+    async def write_handler(req: Any) -> str:
+        write_started.set()
+        await never_finish.wait()
+        return "unreachable"
+
+    write_task = asyncio.create_task(
+        middleware.awrap_tool_call(_make_request("write_file"), write_handler)  # type: ignore[arg-type]
+    )
+    await write_started.wait()
+    write_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await write_task
+
+    result = await middleware.awrap_tool_call(
+        _make_request("read_file"),
+        lambda req: _return("read"),
+    )
+    assert result == "read"
+
+
+async def _return(value: str) -> str:
+    """为取消回归测试提供无副作用的异步 handler。"""
+    return value

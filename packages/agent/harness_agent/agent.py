@@ -23,6 +23,7 @@ from harness_agent.prompting import PromptComposer, PromptEpoch, read_only_memor
 from harness_agent.run_context import PromptEpochMiddleware, RunContext
 
 if TYPE_CHECKING:
+    from harness_agent.concurrency import AsyncRWLock
     from harness_agent.thread_persistence import ThreadPersistence
     from harness_agent.workspace_boundary import WorkspaceBoundaryMiddleware
 
@@ -161,6 +162,8 @@ def _create_default_subagents(
 
     # deepagents 的 general-purpose 子 Agent 有独立 middleware 栈；计划模式和
     # 本机工作区边界都必须在此重新注册，不能只依赖主 Agent 的配置。
+    # 并发锁不在此注入：父 task 已持有 Host 写锁直到子图返回，复用同一把非重入锁
+    # 会死锁；细粒度 delegation 由 ZC-096 接管后再单独设计。
     return [
         {
             **GENERAL_PURPOSE_SUBAGENT,
@@ -274,6 +277,7 @@ def create_harness_agent(
     context_middleware: Any | None = None,
     context_window_tokens: int | None = None,
     shared_engine: bool = False,
+    concurrency_lock: AsyncRWLock | None = None,
 ) -> Any:
     """创建 za38 编码 agent。
 
@@ -301,6 +305,7 @@ def create_harness_agent(
         context_middleware: 可由 server 显式持有的共享压缩器，用于用户手动触发压缩。
         context_window_tokens: 已校验的窗口大小；None 时优先读取模型 profile。
         shared_engine: True 时编译可服务多个 thread 的图，所有 thread 状态从 RunContext 读取。
+        concurrency_lock: Host 注入的跨图工具读写锁；None 时仅为本图创建局部锁。
 
     Returns:
         编译后的 LangGraph agent（CompiledStateGraph）。
@@ -426,11 +431,11 @@ def create_harness_agent(
         ),
     )
 
-    # 5b. ConcurrencyGuardMiddleware（并发读写锁守卫）
-    # 注册在 interrupt_on 计算之后，传入 interrupt_on 集合：
-    # 需要 HITL 审批的工具跳过锁获取，避免写锁阻塞 HITL 打包导致死锁。
+    # 5b. ConcurrencyGuardMiddleware（并发读写锁守卫）。HITL 在 ToolNode 执行
+    # 前暂停，审批恢复后才会经过这里，因此锁不会跨用户等待持有。
+    from harness_agent.concurrency import AsyncRWLock
     from harness_agent.concurrency_guard import ConcurrencyGuardMiddleware
-    agent_middleware.append(ConcurrencyGuardMiddleware(interrupt_on=interrupt_on))
+    agent_middleware.append(ConcurrencyGuardMiddleware(concurrency_lock or AsyncRWLock()))
 
     # 6. 预算中间件在模型调用前管理工具结果和摘要；不暴露模型可调用压缩工具。
     from harness_agent.context_window import ContextWindowMiddleware

@@ -24,9 +24,6 @@ _READ_ONLY_TOOLS = frozenset({
 _WRITE_TOOLS = frozenset({"write_file", "edit_file", "delete_file", "apply_patch"})
 """始终不可并行的写工具。"""
 
-_SUBAGENT_TOOLS = frozenset({"task"})
-"""子代理工具：拥有隔离上下文，不共享可变状态，可并行。"""
-
 # ---------------------------------------------------------------------------
 # Shell 只读判定
 # ---------------------------------------------------------------------------
@@ -192,7 +189,7 @@ def is_concurrency_safe(tool_name: str, args: dict) -> bool:
     - 只读工具（ls、read_file、glob、grep）：始终安全
     - 写工具（write_file、edit_file）：始终不安全
     - Shell 工具（execute）：动态判定，仅当命令只读时安全
-    - 子代理工具（task）：隔离上下文，始终安全
+    - 子代理工具（task）：当前子图可能写同一工作区，必须独占
     - 未知工具：保守返回 False（fail-closed）
     """
     if tool_name in _READ_ONLY_TOOLS:
@@ -201,8 +198,10 @@ def is_concurrency_safe(tool_name: str, args: dict) -> bool:
     if tool_name in _WRITE_TOOLS:
         return False
 
-    if tool_name in _SUBAGENT_TOOLS:
-        return True
+    if tool_name == "task":
+        # 默认 general-purpose 子图不继承主图的并发 guard，且可使用写工具；
+        # 父 task 持有独占锁直到该同步子调用返回。
+        return False
 
     if tool_name == "execute":
         command = args.get("command", "")
