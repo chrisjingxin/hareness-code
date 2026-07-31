@@ -6,19 +6,20 @@
   "scripts": {
     "build": "bun run --filter '@za38/cli' build",
     "dev": "bun packages/cli/src/index.ts",
-    "test": "bun run test:ts && bun run test:py",
+    "test": "bun run test:project && bun run test:ts && bun run test:py",
+    "test:project": "bun test scripts/project",
     "typecheck": "bun run --filter '@za38/cli' typecheck",
     "protocol:generate": "bun run --filter '@za38/protocol' generate",
     "protocol:check": "bun run --filter '@za38/protocol' check",
     "test:ts": "bun run --filter '@za38/cli' test",
     "test:py": "cd packages/agent && .venv/bin/python -m pytest -q",
-    "docs:check": "bun run scripts/project-management.ts docs:check",
-    "tasks:sync": "bun run scripts/project-management.ts tasks:sync",
-    "tasks:check": "bun run scripts/project-management.ts tasks:check",
-    "task:claim": "bun run scripts/project-management.ts task:claim",
-    "task:complete": "bun run scripts/project-management.ts task:complete",
-    "version:set": "bun run scripts/project-management.ts version:set",
-    "release:check": "bun run scripts/project-management.ts release:check",
-    "project:check": "bun run protocol:check && bun run scripts/project-management.ts project:check"
+    "docs:check": "bun run scripts/project/index.ts docs:check",
+    "tasks:sync": "bun run scripts/project/index.ts tasks:sync",
+    "tasks:check": "bun run scripts/project/index.ts tasks:check",
+    "task:claim": "bun run scripts/project/index.ts task:claim",
+    "task:complete": "bun run scripts/project/index.ts task:complete",
+    "version:set": "bun run scripts/project/index.ts version:set",
+    "release:check": "bun run scripts/project/index.ts release:check",
+    "project:check": "bun run protocol:check && bun run scripts/project/index.ts project:check"
   }
 }

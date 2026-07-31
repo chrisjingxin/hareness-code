@@ -24,5 +24,3 @@ Thumbs.db
 # 临时交接记录与本地排障产物
 tmp/
 
-# Mimocode
-.mimocode/.cron-lock

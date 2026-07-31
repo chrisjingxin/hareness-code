@@ -27,9 +27,9 @@ const metadata = schema["x-harness"] as Metadata
 const targets = [
   [resolve(protocolRoot, "src/generated.ts"), renderTypeScript(schema, metadata, schemaDigest)],
   [resolve(protocolRoot, "fixtures/v3-contract.json"), renderContractFixtures(schema, metadata)],
-  [resolve(repositoryRoot, "packages/agent/harness_agent/protocol_generated.py"), renderPython(schema, metadata, schemaDigest)],
-  [resolve(repositoryRoot, "packages/agent/harness_agent/protocol_v3.json"), schemaText],
-  [resolve(repositoryRoot, "packages/agent/harness_agent/protocol_v3.sha256"), `${schemaDigest}\n`],
+  [resolve(repositoryRoot, "packages/agent/harness_agent/protocol/generated.py"), renderPython(schema, metadata, schemaDigest)],
+  [resolve(repositoryRoot, "packages/agent/harness_agent/protocol/protocol_v3.json"), schemaText],
+  [resolve(repositoryRoot, "packages/agent/harness_agent/protocol/protocol_v3.sha256"), `${schemaDigest}\n`],
 ] as const
 
 if (process.argv.includes("--check")) {
@@ -264,7 +264,7 @@ function renderPython(root: Schema, meta: Metadata, digest: string): string {
 from __future__ import annotations
 
 from typing import Any, Literal, NotRequired, TypeAlias, TypedDict
-from harness_agent.protocol_runtime import event_model, schema_model
+from harness_agent.protocol.runtime import event_model, schema_model
 
 PROTOCOL_MAJOR = ${meta.major}
 PROTOCOL_MINOR = ${meta.minor}

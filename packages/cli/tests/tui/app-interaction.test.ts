@@ -9,7 +9,7 @@ import { act, createElement } from "react"
 import { AgentClient } from "../../src/ipc/client"
 import { StdioRpcTransport } from "../../src/ipc/stdio-transport"
 import { Za38Tui } from "../../src/tui/app"
-import type { TuiRuntime } from "../../src/tui/model"
+import type { TuiRuntime } from "../../src/tui/application/model"
 
 const runtime: TuiRuntime = {
   workspace: "/workspace/harness-code",

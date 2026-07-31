@@ -3,7 +3,7 @@ import asyncio
 import os
 from pathlib import Path
 
-from harness_agent.server import AgentHost
+from harness_agent.host.agent_host import AgentHost
 
 
 def main() -> None:

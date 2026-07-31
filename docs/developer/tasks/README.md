@@ -1,12 +1,12 @@
 # 任务源
 
-当前任务源只保留基于现有代码的 P0 架构重构。已完成任务不在此归档，尚未排期的产品方向统一记录在 [新功能候选](../新功能候选.md)。
+当前活动任务源只保留基于现有代码的 P0 架构重构。已完成任务移入 `archive/` 作为审计记录，不进入任务看板；尚未排期的产品方向统一记录在 [新功能候选](../project/新功能候选.md)。
 
-一个文件只描述一个可独立认领的架构任务，文件名使用 `<ID>.md`。不要编辑生成的 [任务看板](../任务看板.md)。
+活动目录中的一个文件只描述一个可独立认领的架构任务，文件名使用 `<ID>.md`。不要编辑生成的 [任务看板](任务看板.md)。
 
 ```md
 ---
-id: <任务 ID，例如 ZC-085>
+id: <任务 ID>
 title: 简短标题
 priority: P0
 status: 待认领
@@ -48,4 +48,29 @@ completed_at: -
 ## 验收清单
 ```
 
-字段、状态转换和命令见 [任务看板说明](../任务看板说明.md)。架构任务不得只写“重构某文件”，必须让认领者能从背景、当前问题和目标 interface 判断该改什么、不该改什么。
+架构任务不得只写“重构某文件”，必须让认领者能从背景、当前问题和目标 interface 判断该改什么、不该改什么。
+
+## 状态与认领
+
+状态仅可为：`待认领`、`进行中`、`阻塞`、`待验收`、`已完成`。认领时必须写入负责人和分支：
+
+```bash
+bun run task:claim -- <ID> --owner <名称> --branch <分支>
+```
+
+`进行中` 必须有负责人和分支；`已完成` 必须同时有测试证据、完成日期和用户/开发者文档影响记录。完成示例：
+
+```bash
+bun run task:complete -- <ID> --evidence "bun run test" --references "abc123"
+```
+
+## 元数据与校验
+
+每个任务的 front matter 固定包含：`id`、`title`、`priority`、`status`、`owner`、`branch`、`scope`、`acceptance`、`user_docs`、`developer_docs`、`test_evidence`、`references`、`completed_at`。优先级为 `P0`、`P1` 或 `P2`。
+
+```bash
+bun run tasks:sync
+bun run tasks:check
+```
+
+任务正文应描述范围、非范围和可验证验收条件。活动文档若引用任务 ID，`bun run docs:check` 会确认该 ID 存在；`docs/developer/research/archive/` 的历史快照允许保留当时的旧编号，但其中的本地链接仍会被校验。

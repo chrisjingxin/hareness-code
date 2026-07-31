@@ -5,16 +5,23 @@ import { createRoot, useKeyboard, useTerminalDimensions } from "@opentui/react"
 import { useCallback, useEffect, useRef, useSyncExternalStore, type ReactNode } from "react"
 import type { ModelProfile } from "@za38/protocol"
 
-import { createTuiController, type TuiController, type TuiControllerOptions } from "./controller"
-import type { CommandMenuItem } from "./commands"
-import { HomeView, SkillPicker, ThreadPicker, ThreadView, type ApprovalDecision } from "./components"
-import { DialogShell, SearchPicker, type SearchPickerRenderContext } from "./overlays"
-import { resolveShortcut, type ScrollIntent } from "./shortcuts"
-import { registerCommonSyntaxParsers, shutdownCommonSyntaxClient } from "./syntax-parsers"
-import { win32InstallVtInputGuard } from "./terminal-win32"
-import { tuiTheme } from "./theme"
-import { isHomeState } from "./state"
-import { TuiErrorBoundary } from "./error-boundary"
+import {
+  createTuiController,
+  type ApprovalDecision,
+  type TuiController,
+  type TuiControllerOptions,
+} from "./application/controller"
+import type { CommandMenuItem } from "./application/commands"
+import { isHomeState } from "./application/state"
+import { resolveShortcut, type ScrollIntent } from "./application/shortcuts"
+import { TuiErrorBoundary } from "./presentation/error-boundary"
+import { HomeView } from "./presentation/home"
+import { DialogShell, SearchPicker, type SearchPickerRenderContext } from "./presentation/overlays"
+import { SkillPicker, ThreadPicker } from "./presentation/pickers"
+import { tuiTheme } from "./presentation/theme"
+import { ThreadView } from "./presentation/thread"
+import { registerCommonSyntaxParsers, shutdownCommonSyntaxClient } from "./platform/syntax-parsers"
+import { win32InstallVtInputGuard } from "./platform/terminal-win32"
 
 /** 正式 TUI 的启动参数；Controller 和 OpenTUI 共用同一组生命周期选项。 */
 export type TuiOptions = TuiControllerOptions

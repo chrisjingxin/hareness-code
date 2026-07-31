@@ -9,8 +9,8 @@ import { parseArgs, type Command } from "./args"
 import { AgentClient } from "./ipc/client"
 import { StdioRpcTransport } from "./ipc/stdio-transport"
 import { runTui } from "./tui/app"
-import { CLI_VERSION, createTuiRuntime, type TuiRuntime } from "./tui/model"
-import { WebLauncher } from "./web-launcher"
+import { CLI_VERSION, createTuiRuntime, type TuiRuntime } from "./tui/application/model"
+import { WebLauncher } from "./web/launcher"
 
 type RunningAgent = {
   client: AgentClient

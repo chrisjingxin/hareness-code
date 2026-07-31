@@ -11,7 +11,6 @@ dependencies = [
     "langchain-openai==1.3.3",
     "langchain-mcp-adapters==0.2.1",
     "PyYAML==6.0.3",
-    "jinja2==3.1.6",
     "httpx==0.28.1",
     "jsonschema==4.26.0",
     "pydantic==2.12.5",
@@ -33,8 +32,8 @@ build-backend = "hatchling.build"
 packages = ["harness_agent"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"harness_agent/protocol_v3.json" = "harness_agent/protocol_v3.json"
-"harness_agent/protocol_v3.sha256" = "harness_agent/protocol_v3.sha256"
+"harness_agent/protocol/protocol_v3.json" = "harness_agent/protocol/protocol_v3.json"
+"harness_agent/protocol/protocol_v3.sha256" = "harness_agent/protocol/protocol_v3.sha256"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

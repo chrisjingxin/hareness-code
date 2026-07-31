@@ -21,9 +21,9 @@ type ManifestEntry = {
   injections?: { path: string; sha256: string; sources: string[] }
 }
 
-const tuiRoot = resolve(import.meta.dir, "../src/tui")
-const assetsRoot = resolve(tuiRoot, "assets/syntax")
-const outputPath = resolve(tuiRoot, "generated-syntax-parsers.ts")
+const platformRoot = resolve(import.meta.dir, "../src/tui/platform")
+const assetsRoot = resolve(platformRoot, "assets/syntax")
+const outputPath = resolve(platformRoot, "generated-syntax-parsers.ts")
 const manifestPath = resolve(assetsRoot, "manifest.json")
 
 /**

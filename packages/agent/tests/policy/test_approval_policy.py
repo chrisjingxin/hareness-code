@@ -1,0 +1,102 @@
+"""审批模式策略矩阵：确保配置语义不会分散在 Agent、TUI 或测试中。"""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from harness_agent.policy.approval_policy import (
+    PlanModeMiddleware,
+    approval_mode_prompt,
+    interrupt_on_for_approval_mode,
+)
+
+
+def test_hitl_mapping_keeps_compaction_outside_all_approval_modes():
+    """默认和自动编辑只拦截真实外部副作用，压缩始终由内核自动维护。"""
+    default = interrupt_on_for_approval_mode("default")
+    auto_edit = interrupt_on_for_approval_mode("auto-edit")
+
+    assert default is not None
+    assert set(default) == {"execute", "write_file", "edit_file", "delete", "delete_file", "task", "web_fetch", "apply_patch", "monitor", "task_stop"}
+    assert auto_edit is not None
+    assert set(auto_edit) == {"execute", "delete", "delete_file", "task", "web_fetch", "monitor", "task_stop"}
+    assert interrupt_on_for_approval_mode("plan") is None
+    assert interrupt_on_for_approval_mode("yolo") is None
+    assert "compact_conversation" not in default
+    assert "compact_conversation" not in auto_edit
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    ["ls", "read_file", "glob", "grep", "ask_user", "write_todos"],
+)
+def test_plan_mode_allows_only_explicit_read_and_thread_tools(tool_name: str):
+    """计划模式对白名单内工具放行，避免妨碍调查和上下文维护。"""
+    middleware = PlanModeMiddleware()
+    request = SimpleNamespace(tool_call={"name": tool_name, "id": f"call-{tool_name}", "args": {}})
+    called = False
+
+    def handler(_request: object) -> object:
+        nonlocal called
+        called = True
+        return object()
+
+    assert middleware.wrap_tool_call(request, handler) is not None
+    assert called is True
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    ["write_file", "edit_file", "execute", "delete", "task", "mcp_future_tool"],
+)
+async def test_plan_mode_rejects_mutation_and_unknown_future_tools(tool_name: str):
+    """计划模式必须在执行前短路写入、shell、子 Agent 和未来 MCP。"""
+    middleware = PlanModeMiddleware()
+    request = SimpleNamespace(tool_call={"name": tool_name, "id": f"call-{tool_name}", "args": {}})
+    called = False
+
+    async def handler(_request: object) -> object:
+        nonlocal called
+        called = True
+        return object()
+
+    result = await middleware.awrap_tool_call(request, handler)
+
+    assert called is False
+    assert result.status == "error"
+    assert f"计划模式拒绝 {tool_name}" in str(result.content)
+
+
+def test_extra_interrupt_tools_merged_in_default_and_auto_edit():
+    """MCP 等外部工具在 default 和 auto-edit 下纳入审批，plan/yolo 忽略。"""
+    mcp_tools = frozenset({"mcp_github__create_issue", "mcp_gitee__search"})
+
+    default = interrupt_on_for_approval_mode("default", extra_interrupt_tools=mcp_tools)
+    assert default is not None
+    assert set(default) == {"execute", "write_file", "edit_file", "delete", "delete_file", "task", "web_fetch", "apply_patch", "monitor", "task_stop"} | mcp_tools
+
+    auto_edit = interrupt_on_for_approval_mode("auto-edit", extra_interrupt_tools=mcp_tools)
+    assert auto_edit is not None
+    assert set(auto_edit) == {"execute", "delete", "delete_file", "task", "web_fetch", "monitor", "task_stop"} | mcp_tools
+
+    # plan 和 yolo 即使传入额外工具也不产生拦截配置
+    assert interrupt_on_for_approval_mode("plan", extra_interrupt_tools=mcp_tools) is None
+    assert interrupt_on_for_approval_mode("yolo", extra_interrupt_tools=mcp_tools) is None
+
+
+def test_extra_interrupt_tools_none_keeps_original_set():
+    """不传 extra_interrupt_tools 时行为与原有完全一致。"""
+    default = interrupt_on_for_approval_mode("default", extra_interrupt_tools=None)
+    assert default is not None
+    assert set(default) == {"execute", "write_file", "edit_file", "delete", "delete_file", "task", "web_fetch", "apply_patch", "monitor", "task_stop"}
+
+
+def test_approval_mode_prompts_state_the_actual_enforced_policy():
+    """提示词只解释已由中间件执行的事实，不能成为唯一安全机制。"""
+    assert "严格计划模式" in approval_mode_prompt("plan")
+    assert "自动执行" in approval_mode_prompt("auto-edit")
+    assert "不会为工具调用请求人工审批" in approval_mode_prompt("yolo")
+    assert "需要用户确认" in approval_mode_prompt("default")
