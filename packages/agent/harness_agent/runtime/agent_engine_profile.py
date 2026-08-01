@@ -1,7 +1,7 @@
 """AgentEngine Profile 的稳定身份、脱敏摘要和配置转换。
 
 AgentEngine Profile 描述可共享 Agent 图必须保持不变的配置。它刻意不保存
-thread 消息、PromptEpoch 正文、审批交互或任何凭据；这些内容属于持久
+thread 消息、RunContextSnapshot 正文、审批交互或任何凭据；这些内容属于持久
 Thread State 或一次 Run Context，不能影响共享 AgentEngine 的身份。
 """
 

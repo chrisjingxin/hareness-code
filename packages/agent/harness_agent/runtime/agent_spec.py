@@ -20,6 +20,9 @@ _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 BUILTIN_MAIN_DEFINITION_FINGERPRINT = sha256_text("builtin-agent:main:v1")
 """内置 main 的实现身份；它不是可由 Plugin 覆盖的 AgentDefinition。"""
 
+RUN_CONTEXT_SNAPSHOT_MIDDLEWARE_VERSION = "run-context-snapshot-v1"
+"""当前生产 RunContextSnapshot middleware 的 Profile 身份版本。"""
+
 
 @dataclass(frozen=True, slots=True)
 class ResolvedAgentSpec:
@@ -204,7 +207,7 @@ def resolve_builtin_main_agent_spec(
         middleware_fingerprint=sha256_text(
             str(
                 (
-                    "prompt-epoch-v1",
+                    RUN_CONTEXT_SNAPSHOT_MIDDLEWARE_VERSION,
                     "context-window-v1",
                     "workspace-boundary-v1",
                     "interactive-question" if interactive else "headless",

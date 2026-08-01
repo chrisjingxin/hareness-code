@@ -10,8 +10,9 @@ import pytest
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.base import empty_checkpoint
 
-from harness_agent.config.config import ModelSettings
-from harness_agent.runtime.agent_engine_profile import (
+import harness_agent.thread_persistence as thread_persistence_module
+from harness_agent.config import ModelSettings
+from harness_agent.agent_engine_profile import (
     ModelRoleBinding,
     AgentEngineProfile,
     component_fingerprint,
@@ -149,8 +150,8 @@ async def test_thread_persistence_persists_agent_engine_profile_without_raw_valu
 
 
 async def test_thread_persistence_upgrades_v3_runtime_profile_schema_without_losing_epoch(tmp_path: Path) -> None:
-    """v3 数据库升级到 v6 时，旧 thread 继续读取且保持未绑定兼容状态。"""
-    from harness_agent.threads.prompting import PromptComposer
+    """v3 数据库升级到当前 successor schema 时，旧 thread 继续读取。"""
+    from harness_agent.prompting import PromptComposer
 
     home = tmp_path / "home"
     project = tmp_path / "project"
@@ -206,7 +207,7 @@ async def test_thread_persistence_upgrades_v3_runtime_profile_schema_without_los
 
     connection = sqlite3.connect(database)
     try:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 7
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == thread_persistence_module._SCHEMA_VERSION
         assert connection.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'harness_runtime_profiles'"
         ).fetchone()

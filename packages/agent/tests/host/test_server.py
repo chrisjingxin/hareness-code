@@ -592,6 +592,7 @@ executor = "fast"
     ).legacy_models is None
     first = (await server._thread_persistence.load_run_state("thread-model")).latest_run
     assert first is not None
+    assert first.context_snapshot_id is not None
     assert first.requested_selection.to_record() == {"primary_profile": "pro"}
     assert first.actual_primary.profile_id == "pro"
     assert server._config is not None
@@ -601,7 +602,21 @@ executor = "fast"
         server._config,
         resolved,
     )
-    assert server._resolved_agent_specs[agent_engine_profile.profile_key].model_settings.name == "pro-model"
+    spec = server._resolved_agent_specs[agent_engine_profile.profile_key]
+    assert spec.model_settings.name == "pro-model"
+    snapshot = await server._thread_persistence.load_context_snapshot(
+        first.context_snapshot_id,
+        thread_id="thread-model",
+    )
+    capability = next(block for block in snapshot.blocks if block.key == "capability.envelope")
+    assert spec.effective_policy.fingerprint in capability.content
+    assert '"name":"read_file"' in capability.content
+    assert '"name":"execute"' in capability.content
+
+    async def forbidden_legacy_write(_epoch: Any) -> None:
+        raise AssertionError("production run path must not write PromptEpoch")
+
+    server._thread_persistence.persist_prompt_epoch = forbidden_legacy_write  # type: ignore[method-assign]
 
     await server.dispatch(_request(
         "run.start",

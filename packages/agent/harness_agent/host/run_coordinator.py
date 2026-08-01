@@ -13,12 +13,11 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
-from harness_agent.policy.approval_mode import ApprovalMode
-from harness_agent.policy.permission_rules import PermissionRule, save_rule
-from harness_agent.runtime.agent_execution import AgentExecutionRegistry, ExecutionRegistryError
-from harness_agent.runtime.agent_engine import AgentEnginePoolCapacityError
-from harness_agent.runtime.agent_engine_profile import AgentEngineProfile
-from harness_agent.runtime.execution_binding import (
+from harness_agent.agent_execution import AgentExecutionRegistry, ExecutionRegistryError
+from harness_agent.agent_engine import AgentEnginePoolCapacityError
+from harness_agent.agent_engine_profile import AgentEngineProfile
+from harness_agent.context_lifecycle import RunContextSnapshot
+from harness_agent.execution_binding import (
     AgentExecutionBinding,
     ExecutionMode,
     ExecutionRef,
@@ -135,12 +134,13 @@ class StartRun:
 
 @dataclass(frozen=True, slots=True)
 class RunPreparation:
-    """模型选择、实际绑定和 AgentEngine Profile 的一次解析结果。"""
+    """模型、Profile、Skill 和 RunContextSnapshot 的一次解析结果。"""
 
     resolved_execution_binding: ResolvedExecutionBinding | None = None
     execution_binding: RunExecutionBinding | None = None
     agent_engine_profile: AgentEngineProfile | None = None
     skill_snapshot_id: str | None = None
+    context_snapshot: RunContextSnapshot | None = None
     # Default AgentHost may hold this reservation from spec resolution until the
     # corresponding AgentEngine lease is acquired.  It is intentionally opaque
     # here so the coordinator does not own the runtime snapshot protocol.
@@ -430,7 +430,11 @@ class RunCoordinator:
                     raise RunError("RUN_MODEL_BINDING_UNAVAILABLE")
                 try:
                     acceptance = await persistence.accept_run(
-                        AcceptRun(message=command.message, binding=binding)
+                        AcceptRun(
+                            message=command.message,
+                            binding=binding,
+                            context_snapshot=preparation.context_snapshot,
+                        )
                     )
                 except ThreadPersistenceError as exc:
                     if str(exc) == "RUN_EXECUTION_BINDING_CONFLICT":

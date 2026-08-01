@@ -21,11 +21,12 @@ from harness_agent.runtime.execution_binding import (
     PersistedBindingState,
     RunExecutionBinding,
 )
-from harness_agent.threads.prompting import PromptEpoch, canonical_json
-from harness_agent.runtime.agent_engine_profile import AGENT_ENGINE_PROFILE_VERSION, AgentEngineProfile
+from harness_agent.context_lifecycle import RunContextSnapshot, snapshot_from_legacy_prompt_epoch
+from harness_agent.prompting import PromptEpoch, canonical_json
+from harness_agent.agent_engine_profile import AGENT_ENGINE_PROFILE_VERSION, AgentEngineProfile
 
 
-_SCHEMA_VERSION = 7
+_SCHEMA_VERSION = 8
 _MAX_PREVIEW_CHARS = 160
 _MAX_INLINE_TOOL_BYTES = 64 * 1024
 _TRANSCRIPT_KINDS = ("user", "assistant", "tool", "context")
@@ -115,6 +116,7 @@ class AcceptRun:
 
     message: str
     binding: RunExecutionBinding
+    context_snapshot: RunContextSnapshot | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -406,9 +408,11 @@ class ThreadPersistence:
         }
 
     async def accept_run(self, command: AcceptRun) -> RunAcceptance:
-        """原子受理一个 Run，并把 Thread 首条消息索引与绑定一起提交。"""
+        """原子受理一个 Run，并提交或复用 Context snapshot、索引和绑定。"""
         return RunAcceptance(
-            created=await self._record_run_start(command.message, command.binding),
+            created=await self._record_run_start(
+                command.message, command.binding, command.context_snapshot
+            ),
             binding=command.binding,
         )
 
@@ -416,12 +420,17 @@ class ThreadPersistence:
         self,
         message: str,
         binding: RunExecutionBinding,
+        context_snapshot: RunContextSnapshot | None = None,
     ) -> bool:
-        """原子登记 binding、Thread 索引和用户记录；同一 Run ID 不重复追加。"""
+        """原子登记 snapshot、binding、Thread 索引和用户记录。"""
         self._ensure_open()
         thread_id = binding.thread_id
         run_id = binding.run_id
         now = binding.created_at_ms
+        if context_snapshot is not None:
+            self._validate_context_snapshot(context_snapshot, binding)
+        elif binding.context_snapshot_id is not None:
+            raise ThreadPersistenceError("RUN_CONTEXT_SNAPSHOT_MISSING")
         preview = _preview(message)
         encoded_selection = canonical_json(binding.requested_selection_record())
         encoded_primary = canonical_json(binding.actual_primary_record())
@@ -431,7 +440,8 @@ class ThreadPersistence:
                 await self._connection.execute("BEGIN IMMEDIATE")
                 cursor = await self._connection.execute(
                     """
-                    SELECT requested_selection, actual_primary_binding, runtime_profile_id, message_digest
+                    SELECT requested_selection, actual_primary_binding, runtime_profile_id,
+                           message_digest, context_snapshot_id
                     FROM harness_run_execution_bindings
                     WHERE project_fingerprint = ? AND thread_id = ? AND run_id = ?
                     """,
@@ -445,7 +455,15 @@ class ThreadPersistence:
                         and str(existing["actual_primary_binding"]) == encoded_primary
                         and str(existing["runtime_profile_id"]) == binding.runtime_profile_id
                         and str(existing["message_digest"]) == message_digest
+                        and (
+                            str(existing["context_snapshot_id"])
+                            if existing["context_snapshot_id"] is not None
+                            else None
+                        )
+                        == binding.context_snapshot_id
                     ):
+                        if context_snapshot is not None:
+                            await self._insert_context_snapshot_in_transaction(context_snapshot)
                         user_command = TranscriptAppend(
                             thread_id=thread_id,
                             record_id=_user_record_id(run_id),
@@ -462,6 +480,8 @@ class ThreadPersistence:
                         await self._connection.commit()
                         return False
                     raise ThreadPersistenceError("RUN_EXECUTION_BINDING_CONFLICT")
+                if context_snapshot is not None:
+                    await self._insert_context_snapshot_in_transaction(context_snapshot)
                 await self._connection.execute(
                     """
                     INSERT INTO harness_threads (
@@ -495,8 +515,9 @@ class ThreadPersistence:
                     """
                     INSERT INTO harness_run_execution_bindings (
                         project_fingerprint, thread_id, run_id, requested_selection,
-                        actual_primary_binding, runtime_profile_id, message_digest, created_at_ms
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        actual_primary_binding, runtime_profile_id, message_digest,
+                        created_at_ms, context_snapshot_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         self._project_fingerprint,
@@ -507,6 +528,7 @@ class ThreadPersistence:
                         binding.runtime_profile_id,
                         message_digest,
                         now,
+                        binding.context_snapshot_id,
                     ),
                 )
                 await self._refresh_thread_index_in_transaction(thread_id, now)
@@ -526,6 +548,104 @@ class ThreadPersistence:
                         f"RUN_EXECUTION_BINDING_WRITE_FAILED: {exc}"
                     ) from exc
                 raise
+
+    def _validate_context_snapshot(
+        self,
+        snapshot: RunContextSnapshot,
+        binding: RunExecutionBinding,
+    ) -> None:
+        """验证 snapshot 与当前 project、Thread 和 binding 是同一准备结果。"""
+        if snapshot.project_fingerprint != self._project_fingerprint:
+            raise ThreadPersistenceError("RUN_CONTEXT_SNAPSHOT_PROJECT_MISMATCH")
+        if snapshot.thread_id != binding.thread_id:
+            raise ThreadPersistenceError("RUN_CONTEXT_SNAPSHOT_THREAD_MISMATCH")
+        if binding.context_snapshot_id != snapshot.snapshot_id:
+            raise ThreadPersistenceError("RUN_CONTEXT_SNAPSHOT_BINDING_MISMATCH")
+
+    async def load_context_snapshot(
+        self, snapshot_id: str, *, thread_id: str | None = None
+    ) -> RunContextSnapshot:
+        """按当前 project 和可选 Thread 读取可审计的 Context snapshot。"""
+        self._ensure_open()
+        try:
+            async with self._lock:
+                query = """
+                    SELECT snapshot_record
+                    FROM harness_run_context_snapshots
+                    WHERE project_fingerprint = ? AND snapshot_id = ?
+                """
+                parameters: tuple[object, ...] = (
+                    self._project_fingerprint,
+                    snapshot_id,
+                )
+                if thread_id is not None:
+                    query += " AND thread_id = ?"
+                    parameters += (thread_id,)
+                cursor = await self._connection.execute(query, parameters)
+                row = await cursor.fetchone()
+                await cursor.close()
+            if row is None:
+                raise ThreadPersistenceError("RUN_CONTEXT_SNAPSHOT_NOT_FOUND")
+            snapshot = RunContextSnapshot.from_record(json.loads(str(row["snapshot_record"])))
+            if snapshot.project_fingerprint != self._project_fingerprint:
+                raise ThreadPersistenceError("RUN_CONTEXT_SNAPSHOT_PROJECT_MISMATCH")
+            if thread_id is not None and snapshot.thread_id != thread_id:
+                raise ThreadPersistenceError("RUN_CONTEXT_SNAPSHOT_THREAD_MISMATCH")
+            return snapshot
+        except ThreadPersistenceError:
+            raise
+        except (aiosqlite.Error, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ThreadPersistenceError(f"RUN_CONTEXT_SNAPSHOT_READ_FAILED: {exc}") from exc
+
+    async def _insert_context_snapshot_in_transaction(
+        self, snapshot: RunContextSnapshot
+    ) -> None:
+        """在 accept_run 的 IMMEDIATE 事务中幂等保存 snapshot。"""
+        encoded = canonical_json(snapshot.record())
+        cursor = await self._connection.execute(
+            """
+            SELECT thread_id, snapshot_record, system_fingerprint, legacy
+            FROM harness_run_context_snapshots
+            WHERE project_fingerprint = ? AND snapshot_id = ?
+            """,
+            (self._project_fingerprint, snapshot.snapshot_id),
+        )
+        existing = await cursor.fetchone()
+        await cursor.close()
+        if existing is not None:
+            try:
+                existing_record = json.loads(str(existing["snapshot_record"]))
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise ThreadPersistenceError("RUN_CONTEXT_SNAPSHOT_CONFLICT") from exc
+            incoming_record = snapshot.record()
+            # ``created_at_ms`` describes the first durable materialization, not
+            # the identity of equivalent content prepared by a later Run.
+            existing_record["created_at_ms"] = incoming_record["created_at_ms"]
+            if (
+                str(existing["thread_id"]) != snapshot.thread_id
+                or canonical_json(existing_record) != canonical_json(incoming_record)
+                or str(existing["system_fingerprint"]) != snapshot.system_fingerprint
+                or bool(existing["legacy"]) != snapshot.legacy
+            ):
+                raise ThreadPersistenceError("RUN_CONTEXT_SNAPSHOT_CONFLICT")
+            return
+        await self._connection.execute(
+            """
+            INSERT INTO harness_run_context_snapshots (
+                project_fingerprint, snapshot_id, thread_id, snapshot_record,
+                system_fingerprint, created_at_ms, legacy
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                self._project_fingerprint,
+                snapshot.snapshot_id,
+                snapshot.thread_id,
+                encoded,
+                snapshot.system_fingerprint,
+                snapshot.created_at_ms,
+                1 if snapshot.legacy else 0,
+            ),
+        )
 
     async def _has_legacy_user_record_in_transaction(
         self, thread_id: str, run_id: str, message: str
@@ -618,7 +738,7 @@ class ThreadPersistence:
                 cursor = await self._connection.execute(
                     """
                     SELECT thread_id, run_id, requested_selection, actual_primary_binding,
-                           runtime_profile_id, created_at_ms
+                           runtime_profile_id, created_at_ms, context_snapshot_id
                     FROM harness_run_execution_bindings
                     WHERE project_fingerprint = ? AND thread_id = ?
                     ORDER BY created_at_ms DESC, rowid DESC
@@ -641,6 +761,11 @@ class ThreadPersistence:
                 actual_primary_binding=primary,
                 runtime_profile_id=str(row["runtime_profile_id"]),
                 created_at_ms=int(row["created_at_ms"]),
+                context_snapshot_id=(
+                    str(row["context_snapshot_id"])
+                    if row["context_snapshot_id"] is not None
+                    else None
+                ),
             )
         except ThreadPersistenceError:
             raise
@@ -972,7 +1097,7 @@ class ThreadPersistence:
             raise ThreadPersistenceError(f"CONTEXT_MESSAGES_READ_FAILED: {exc}") from exc
 
     async def load_prompt_epoch(self, thread_id: str) -> PromptEpoch | None:
-        """返回既有 thread 的不可变提示词 epoch，恢复时绝不重新扫描环境或 Skill。"""
+        """读取旧库 PromptEpoch；生产 Run 不再以它作为上下文来源。"""
         self._ensure_open()
         try:
             async with self._lock:
@@ -994,7 +1119,7 @@ class ThreadPersistence:
             raise ThreadPersistenceError(f"PROMPT_EPOCH_READ_FAILED: {exc}") from exc
 
     async def persist_prompt_epoch(self, epoch: PromptEpoch) -> None:
-        """首次创建 thread 时保存完整前缀；同一 thread 的不同 epoch 一律拒绝覆盖。"""
+        """保留旧嵌入式调用的兼容写入口；AgentHost 生产路径不会调用它。"""
         self._ensure_open()
         record = epoch.record()
         try:
@@ -1448,7 +1573,7 @@ class ThreadPersistence:
             # migration write transaction because SQLite backup on a connection
             # holding BEGIN IMMEDIATE can block.  The second lock/version read
             # below is authoritative and prevents a stale migrator from doing
-            # any work after another opener has committed v7.
+            # any work after another opener has committed the successor schema.
             await self._create_migration_backup(candidate_version)
             await self._connection.execute("BEGIN IMMEDIATE")
             cursor = await self._connection.execute("PRAGMA user_version")
@@ -1677,6 +1802,30 @@ class ThreadPersistence:
                 )
                 await self._bootstrap_legacy_transcripts(source_version)
                 version = 7
+            if version < 8:
+                await self._add_context_snapshot_column()
+                await self._connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS harness_run_context_snapshots (
+                        project_fingerprint TEXT NOT NULL,
+                        snapshot_id TEXT NOT NULL,
+                        thread_id TEXT NOT NULL,
+                        snapshot_record TEXT NOT NULL,
+                        system_fingerprint TEXT NOT NULL,
+                        created_at_ms INTEGER NOT NULL,
+                        legacy INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY (project_fingerprint, snapshot_id)
+                    )
+                    """
+                )
+                await self._connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS harness_run_context_snapshots_thread_created
+                    ON harness_run_context_snapshots(project_fingerprint, thread_id, created_at_ms)
+                    """
+                )
+                await self._migrate_legacy_prompt_epochs_to_snapshots()
+                version = 8
             await self._connection.execute(f"PRAGMA user_version={version}")
             await self._connection.commit()
             self._checkpointer.is_setup = True
@@ -1706,6 +1855,54 @@ class ThreadPersistence:
             except aiosqlite.Error:
                 pass
             raise
+
+    async def _migrate_legacy_prompt_epochs_to_snapshots(self) -> None:
+        """把旧 PromptEpoch 单向转换为 legacy snapshot，并回填旧 Run 引用。"""
+        cursor = await self._connection.execute(
+            """
+            SELECT project_fingerprint, thread_id, system_prompt, created_at_ms
+            FROM harness_prompt_epochs
+            ORDER BY project_fingerprint, thread_id
+            """
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        for row in rows:
+            project = str(row["project_fingerprint"])
+            thread_id = str(row["thread_id"])
+            snapshot = snapshot_from_legacy_prompt_epoch(
+                project_fingerprint=project,
+                thread_id=thread_id,
+                system_prompt=str(row["system_prompt"]),
+                created_at_ms=int(row["created_at_ms"]),
+            )
+            encoded = canonical_json(snapshot.record())
+            await self._connection.execute(
+                """
+                INSERT INTO harness_run_context_snapshots (
+                    project_fingerprint, snapshot_id, thread_id, snapshot_record,
+                    system_fingerprint, created_at_ms, legacy
+                ) VALUES (?, ?, ?, ?, ?, ?, 1)
+                ON CONFLICT(project_fingerprint, snapshot_id) DO NOTHING
+                """,
+                (
+                    project,
+                    snapshot.snapshot_id,
+                    thread_id,
+                    encoded,
+                    snapshot.system_fingerprint,
+                    snapshot.created_at_ms,
+                ),
+            )
+            await self._connection.execute(
+                """
+                UPDATE harness_run_execution_bindings
+                SET context_snapshot_id = ?
+                WHERE project_fingerprint = ? AND thread_id = ?
+                  AND context_snapshot_id IS NULL
+                """,
+                (snapshot.snapshot_id, project, thread_id),
+            )
 
     async def _create_checkpointer_tables_in_transaction(self) -> None:
         """在 Harness migration 事务内建立 LangGraph 的基础表，避免 setup 自行 commit。"""
@@ -1784,6 +1981,20 @@ class ThreadPersistence:
                 """
             )
 
+    async def _add_context_snapshot_column(self) -> None:
+        """为旧 Run binding 增加可为空的 snapshot 引用，兼容降级库。"""
+        cursor = await self._connection.execute(
+            "PRAGMA table_info(harness_run_execution_bindings)"
+        )
+        columns = {str(row[1]) for row in await cursor.fetchall()}
+        await cursor.close()
+        if "context_snapshot_id" not in columns:
+            await self._connection.execute(
+                """
+                ALTER TABLE harness_run_execution_bindings
+                ADD COLUMN context_snapshot_id TEXT
+                """
+            )
     async def _bootstrap_legacy_transcripts(self, source_version: int) -> None:
         """从所有 project 的现存 checkpoint 建立明确不完整的 legacy 起点。"""
         cursor = await self._connection.execute(

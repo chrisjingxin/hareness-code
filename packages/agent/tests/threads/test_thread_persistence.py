@@ -1031,7 +1031,7 @@ def test_legacy_tool_argument_encoding_rejects_nonfinite_values() -> None:
 async def test_concurrent_v6_openers_serialize_migration_without_downgrade(
     tmp_path: Path,
 ) -> None:
-    """两个 project Host 同时打开共享 v6 库时最终只提交一次 v7。"""
+    """两个 project Host 同时打开共享 v6 库时最终只提交一次后继 schema。"""
     home = tmp_path / "home"
     project_a = tmp_path / "project-a"
     project_b = tmp_path / "project-b"
@@ -1086,7 +1086,7 @@ async def test_concurrent_v6_openers_serialize_migration_without_downgrade(
         ).fetchall()
     finally:
         connection.close()
-    assert version == 7
+    assert version == thread_persistence_module._SCHEMA_VERSION
     assert len(rows) == 4
     assert len({row[0] for row in rows}) == 2
     assert all(row[3] is None and row[4] is None for row in rows)
@@ -1224,8 +1224,8 @@ async def test_migration_backup_uses_distinct_temporary_paths(tmp_path: Path, mo
         original_replace(source, destination)
 
     monkeypatch.setattr(thread_persistence_module.os, "replace", capture_replace)
-    await store._create_migration_backup(7)
-    await store._create_migration_backup(7)
+    await store._create_migration_backup(thread_persistence_module._SCHEMA_VERSION)
+    await store._create_migration_backup(thread_persistence_module._SCHEMA_VERSION)
     assert len(temporary_paths) == 2
     assert len(set(temporary_paths)) == 2
     assert all(path.name.endswith(".tmp") for path in temporary_paths)

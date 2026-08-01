@@ -23,12 +23,8 @@ from harness_agent.policy.approval_policy import (
     approval_mode_prompt,
     interrupt_on_for_approval_mode,
 )
-from harness_agent.policy.auto_mode import evaluate_auto_mode
-from harness_agent.policy.permission_rules import PermissionRule, evaluate_rules
-from harness_agent.policy.sensitive_paths import requires_safety_check
-from harness_agent.policy.tool_risk import ToolKind, get_tool_kind
-from harness_agent.threads.prompting import PromptComposer, PromptEpoch, read_only_memory_snapshot, tool_schema_fingerprint
-from harness_agent.runtime.run_context import PromptEpochMiddleware, RunContext
+from harness_agent.prompting import PromptComposer, PromptEpoch, read_only_memory_snapshot, tool_schema_fingerprint
+from harness_agent.run_context import RunContext, RunContextSnapshotMiddleware
 
 if TYPE_CHECKING:
     from harness_agent.policy.concurrency import AsyncRWLock
@@ -147,6 +143,19 @@ def default_tool_catalog_fingerprint() -> str:
     return tool_schema_fingerprint(_BUILTIN_TOOL_SHAPES)
 
 
+def default_tool_schemas(*, include_ask_user: bool = False) -> tuple[dict[str, object], ...]:
+    """返回与默认 Agent 绑定的工具 schema，供 Context 能力说明复用。"""
+    from harness_agent.prompting import normalized_tool_schemas
+
+    schema_inputs: list[Any] = list(_BUILTIN_TOOL_SHAPES)
+    if include_ask_user:
+        # 直接复用中间件注册的工具对象，避免能力块与实际参数 schema 漂移。
+        from harness_agent.ask_user import AskUserMiddleware
+
+        schema_inputs.extend(AskUserMiddleware().tools)
+    return normalized_tool_schemas(schema_inputs)
+
+
 def default_prompt_template_fingerprint() -> str:
     """返回基础 system prompt 模板内容的稳定指纹，配置变化时触发新 AgentEngine。"""
     from harness_agent.threads.prompting import sha256_text
@@ -234,7 +243,7 @@ def create_prompt_epoch(
     enable_skills: bool,
     extra_tools: Sequence[BaseTool | Any] | None = None,
 ) -> PromptEpoch:
-    """为新 thread 创建稳定前缀；恢复 thread 必须直接从 ThreadPersistence 读取旧 epoch。"""
+    """为非共享兼容调用创建旧 PromptEpoch；生产 Host 使用 Run snapshot。"""
     core = system_prompt or _load_system_prompt()
     execution = _with_execution_context(
         "",
@@ -455,7 +464,8 @@ def create_harness_agent(
         from harness_agent.tools.ask_user import AskUserMiddleware
         agent_middleware.append(AskUserMiddleware())
 
-    # 2. AGENTS.md 已在 epoch 创建时一次性读入，不使用每图动态 MemoryMiddleware。
+    # 2. AGENTS.md 由 Host 在每个顶层 Run 的 ContextLifecycle 中刷新；共享图
+    # 不使用会缓存 Thread 私有内容的动态 MemoryMiddleware。
     if enable_memory and sandboxed:
         logger.info("Memory snapshot is disabled in remote sandbox mode")
 
@@ -550,7 +560,7 @@ def create_harness_agent(
         )
     if shared_engine:
         # 该中间件仅读取本轮 context，不保存 thread 私有 PromptEpoch。
-        agent_middleware.append(PromptEpochMiddleware())
+        agent_middleware.append(RunContextSnapshotMiddleware())
     agent_middleware.append(context_middleware)
 
     all_tools = list(tools) if tools else []

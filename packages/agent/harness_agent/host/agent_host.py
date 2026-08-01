@@ -98,9 +98,10 @@ from harness_agent.runtime.run_context import RunContext
 from harness_agent.runtime.agent_engine_profile import (
     AgentEngineProfile,
 )
-from harness_agent.threads.thread_persistence import ThreadPersistence, ThreadPersistenceError
-from harness_agent.extensions.providers.harness_gateway import ProviderClientPool
-from harness_agent.host.run_coordinator import (
+from harness_agent.context_lifecycle import ContextLifecycle, ContextRefreshError
+from harness_agent.thread_persistence import ThreadPersistence, ThreadPersistenceError
+from harness_agent.providers.harness_gateway import ProviderClientPool
+from harness_agent.run_coordinator import (
     AgentEvent,
     ConnectionRef,
     RunCoordinator,
@@ -779,7 +780,12 @@ class AgentHost:
                 command,
                 ConnectionRef(self._current_connection().connection_id),
             )
-        except (ConfigError, ExecutionBindingError, ThreadPersistenceError) as exc:
+        except (
+            ConfigError,
+            ContextRefreshError,
+            ExecutionBindingError,
+            ThreadPersistenceError,
+        ) as exc:
             raise RpcError(-32004, str(exc)) from exc
 
         await self.send_response(
@@ -817,7 +823,7 @@ class AgentHost:
         command: StartRun,
         persistence: ThreadPersistence | None,
     ) -> RunPreparation:
-        """在登记 Run 前解析一次模型绑定、Profile 和 Skill 快照。"""
+        """在登记 Run 前解析模型、Profile、Skill 和 Context 快照。"""
         if persistence is None:
             return RunPreparation(skill_snapshot_id=self._require_skills().snapshot_id)
         reservation = await self._reserve_agent_engine_snapshot()
@@ -836,11 +842,19 @@ class AgentHost:
                 resolved,
             )
             profile = spec.runtime_profile
+            context_snapshot = ContextLifecycle(
+                self._workspace,
+                home=self._config_home,
+            ).prepare(
+                thread_id=command.thread_id,
+                spec=spec,
+            )
             binding = resolved.bind_run(
                 thread_id=command.thread_id,
                 run_id=command.run_id,
                 runtime_profile_id=profile.profile_key[:12],
                 created_at_ms=int(time.time() * 1000),
+                context_snapshot_id=context_snapshot.snapshot_id,
             )
             registry = self._require_skills()
             return RunPreparation(
@@ -848,6 +862,7 @@ class AgentHost:
                 execution_binding=binding,
                 agent_engine_profile=profile,
                 skill_snapshot_id=registry.snapshot_id,
+                context_snapshot=context_snapshot,
                 snapshot_reservation=reservation,
             )
         except BaseException:
@@ -1625,29 +1640,14 @@ class AgentHost:
         spec: ResolvedAgentSpec,
         execution_context: Any,
     ) -> RunContext:
-        """从持久化状态恢复本轮 PromptEpoch，禁止把 thread 数据保存在共享图中。"""
-        from harness_agent.runtime.agent import create_prompt_epoch
-
-        persistence = await self._ensure_thread_persistence()
-        epoch = await persistence.load_prompt_epoch(run.thread_id)
-        if epoch is None:
-            epoch = create_prompt_epoch(
-                thread_id=run.thread_id,
-                system_prompt=spec.prompt,
-                workspace=str(getattr(execution_context, "workspace_path", self._workspace)),
-                sandboxed=bool(getattr(execution_context, "sandboxed", False)),
-                provider=getattr(execution_context, "provider", None),
-                approval_mode=spec.effective_policy.approval_mode or spec.execution.approval_mode,
-                skill_registry=spec.skill_registry,
-                enable_memory=spec.enable_memory,
-                enable_skills=spec.enable_skills,
-                extra_tools=spec.tools,
-            )
-            await persistence.persist_prompt_epoch(epoch)
+        """把准备阶段已生成的 snapshot 注入共享图，Run 内不重新读取来源。"""
+        snapshot = run.preparation.context_snapshot
+        if snapshot is None:
+            raise RuntimeError("RUN_CONTEXT_SNAPSHOT_UNAVAILABLE")
         return RunContext(
             thread_id=run.thread_id,
             run_id=run.run_id,
-            prompt_epoch=epoch,
+            context_snapshot=snapshot,
             approval_mode=spec.effective_policy.approval_mode or spec.execution.approval_mode,
             profile_key=profile.profile_key,
             execution_id=run.root_execution_ref.execution_id,

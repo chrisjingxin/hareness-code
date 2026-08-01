@@ -190,7 +190,7 @@ class LegacyModelBindings:
 
 @dataclass(frozen=True, slots=True)
 class RunExecutionBinding:
-    """一次已受理 Run 的不可变根模型事实。"""
+    """一次已受理 Run 的不可变根模型和 Context snapshot 事实。"""
 
     thread_id: str
     run_id: str
@@ -199,6 +199,7 @@ class RunExecutionBinding:
     selection_origin: SelectionOrigin
     runtime_profile_id: str
     created_at_ms: int
+    context_snapshot_id: str | None = None
 
     def __post_init__(self) -> None:
         """验证身份和时间字段，阻止半成品进入持久化。"""
@@ -213,6 +214,8 @@ class RunExecutionBinding:
             or self.created_at_ms < 0
         ):
             raise ExecutionBindingError("RUN_EXECUTION_BINDING_INVALID")
+        if self.context_snapshot_id is not None and not self.context_snapshot_id:
+            raise ExecutionBindingError("RUN_EXECUTION_BINDING_INVALID")
 
     @classmethod
     def from_records(
@@ -224,6 +227,7 @@ class RunExecutionBinding:
         actual_primary_binding: Mapping[str, object],
         runtime_profile_id: str,
         created_at_ms: int,
+        context_snapshot_id: str | None = None,
     ) -> "RunExecutionBinding":
         """从 SQLite v6 的两段 JSON 恢复不可变绑定。"""
         if set(actual_primary_binding) != {"profile", "source"}:
@@ -244,6 +248,7 @@ class RunExecutionBinding:
             selection_origin=origin,
             runtime_profile_id=runtime_profile_id,
             created_at_ms=created_at_ms,
+            context_snapshot_id=context_snapshot_id,
         )
 
     def requested_selection_record(self) -> dict[str, object]:
@@ -424,6 +429,7 @@ class ResolvedExecutionBinding:
         run_id: str,
         runtime_profile_id: str,
         created_at_ms: int,
+        context_snapshot_id: str | None = None,
     ) -> RunExecutionBinding:
         """使用同一解析结果固化一次 Run 的执行事实。"""
         return RunExecutionBinding(
@@ -434,6 +440,7 @@ class ResolvedExecutionBinding:
             selection_origin=self.selection_origin,
             runtime_profile_id=runtime_profile_id,
             created_at_ms=created_at_ms,
+            context_snapshot_id=context_snapshot_id,
         )
 
 

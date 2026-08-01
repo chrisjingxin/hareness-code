@@ -1,7 +1,8 @@
 """稳定提示词 epoch、环境快照和工具 schema 规范化。
 
-本模块是提示词装配的唯一入口：调用方只需保存 ``PromptEpoch``，其余的
-环境读取、排序、截断和指纹细节均留在这里，避免每轮请求改变缓存前缀。
+本模块保留 Prompt 的确定性序列化、工具 schema 和旧 PromptEpoch 兼容类型。
+新的生产 Run 由 ``context_lifecycle.ContextLifecycle`` 读取来源并生成
+``RunContextSnapshot``；PromptEpoch 只作为旧库迁移和非共享嵌入式调用的兼容形状。
 """
 
 from __future__ import annotations
