@@ -882,6 +882,24 @@ class AgentHost:
         if agent is None and not self._allow_echo:
             raise ConfigError(self._startup_error or "Agent is not configured")
         persistence = run.persistence
+        if (
+            persistence is not None
+            and agent is not None
+            and callable(getattr(agent, "aupdate_state", None))
+        ):
+            from harness_agent.context_projection import ContextProjector
+
+            try:
+                await ContextProjector(persistence).sync_cache(
+                    agent,
+                    run.thread_id,
+                    exclude_record_id=f"run:{run.run_id}:user",
+                )
+            except BaseException:
+                # Runtime 尚未返回 Coordinator，失败路径必须在此释放
+                # 已取得的 AgentEngine/run lease，避免投影损坏变成资源泄漏。
+                await self._release_run_agent_engine(run)
+                raise
         graph_config = (
             persistence.graph_config
             if persistence is not None
@@ -941,11 +959,11 @@ class AgentHost:
 
     async def _compact_idle_thread(self, thread_id: str) -> dict[str, object]:
         """在 Coordinator 已锁定为空闲的窗口内完成压缩。"""
+        from harness_agent.context_projection import ContextProjector
+
         persistence = await self._ensure_thread_persistence()
-        context = await persistence.load_context(thread_id)
-        if not context.recoverable:
-            raise RpcError(-32004, "THREAD_NOT_RECOVERABLE")
-        messages = list(context.messages)
+        projection = await ContextProjector(persistence).project(thread_id)
+        messages = list(projection.messages)
         if not self._uses_default_agent_factory:
             agent = await self._ensure_agent()
             middleware = getattr(self, "_context_compactor", None)
@@ -1705,22 +1723,19 @@ class AgentHost:
         messages: list[Any],
         persistence: ThreadPersistence,
     ) -> dict[str, object]:
-        """使用已租用 AgentEngine 的共享 compactor 改写一个空闲 thread 的 checkpoint。"""
+        """使用已租用 AgentEngine 的 compactor 提交投影并刷新缓存。"""
         compacted, update, rewritten = await middleware.compact_now(thread_id, messages)
         # `compact_now` 复用运行期状态缓冲；当前请求直接返回结果，因此必须消费，
         # 防止下一次 Agent run 重复发出过期的 context.updated 事件。
         middleware.consume_updates(thread_id)
         if rewritten:
-            from langchain_core.messages import RemoveMessage
-            from langgraph.graph.message import REMOVE_ALL_MESSAGES
+            from harness_agent.context_projection import ContextProjector
 
-            await agent.aupdate_state(
-                # CompiledStateGraph 将非空 checkpoint_ns 解释为子图路径；项目隔离
-                # 由 ProjectScopedAsyncSqliteSaver 在根图空 namespace 上自动补齐。
-                persistence.graph_config(thread_id),
-                {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *compacted]},
-                as_node="model",
+            projected = await ContextProjector(persistence).sync_cache(
+                agent, thread_id
             )
+            if tuple(compacted) != projected.messages:
+                raise RuntimeError("COMPRESSION_PROJECTION_COMMIT_MISMATCH")
             await persistence.complete_run(thread_id)
         return {"compacted": rewritten, "context": update.payload()}
 

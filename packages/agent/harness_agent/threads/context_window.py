@@ -6,13 +6,13 @@
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Mapping
 
 from langchain.agents.middleware.types import AgentMiddleware, ExtendedModelResponse, ModelRequest, ModelResponse
 from langchain_core.exceptions import ContextOverflowError
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
-from langgraph.graph.message import REMOVE_ALL_MESSAGES
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.types import Command
 
 from harness_agent.threads.prompting import (
@@ -22,8 +22,13 @@ from harness_agent.threads.prompting import (
     input_cap_tokens,
     normalized_tool_schemas,
 )
-from harness_agent.runtime.run_context import thread_id_for_runtime
-from harness_agent.threads.thread_persistence import (
+from harness_agent.run_context import thread_id_for_runtime
+from harness_agent.context_projection import (
+    CompressionCheckpointDraft,
+    ContextProjector,
+    artifact_references,
+)
+from harness_agent.thread_persistence import (
     CommitContextRewrite,
     ContextArtifactDraft,
     ContextState,
@@ -192,9 +197,7 @@ class ContextWindowMiddleware(AgentMiddleware):
                 command=Command(
                     update={
                         "messages": [
-                            # 使用 RemoveMessage 维护 LangGraph reducer，不留下半个 tool-call 组。
-                            RemoveMessage(id=REMOVE_ALL_MESSAGES),
-                            *prepared,
+                            *ContextProjector.cache_rewrite(prepared),
                             # wrap_model_call 的附加 Command 在模型结果之后应用；必须把
                             # 本轮响应重新加入，否则 RemoveMessage 会丢失回答或 tool-call。
                             *result.result,
@@ -278,19 +281,17 @@ class ContextWindowMiddleware(AgentMiddleware):
         if cutoff <= 0:
             return messages, (), False
         replacements = list(messages)
-        artifact_indexes: list[int] = []
         drafts: list[ContextArtifactDraft] = []
-        pending_artifact_id = "tool-" + "0" * 32
         for index, message in enumerate(messages[:cutoff]):
             if not isinstance(message, ToolMessage):
                 continue
             content = _message_content(message)
             if estimate_tokens(content) <= TOOL_RESULT_DEHYDRATE_TOKENS:
                 continue
-            preview = _tool_preview(content, pending_artifact_id)
+            artifact_id = f"tool-{uuid.uuid4().hex}"
+            preview = _tool_preview(content, artifact_id)
             if not _saves_enough(estimate_tokens(content), estimate_tokens(preview)):
                 continue
-            artifact_indexes.append(index)
             replacements[index] = message.model_copy(
                 update={"content": preview}
             )
@@ -300,6 +301,7 @@ class ContextWindowMiddleware(AgentMiddleware):
                     content=_render_message(message),
                     source_start=index,
                     source_end=index,
+                    artifact_id=artifact_id,
                 )
             )
         before_tokens = estimated_tokens if estimated_tokens is not None else _messages_tokens(messages)
@@ -312,17 +314,21 @@ class ContextWindowMiddleware(AgentMiddleware):
                 thread_id=thread_id,
                 artifacts=tuple(drafts),
                 state=state,
+                checkpoint=CompressionCheckpointDraft(
+                    checkpoint_id=f"projection-{uuid.uuid4().hex}",
+                    mode="full",
+                    rewrite_version=SUMMARY_REWRITE_VERSION,
+                    projected_messages=tuple(replacements),
+                    artifact_ids=artifact_references(replacements),
+                    trigger=state.last_action if state is not None else "automatic",
+                    pressure_before={"estimated_tokens": before_tokens},
+                    pressure_after={
+                        "estimated_tokens": _messages_tokens(replacements)
+                    },
+                ),
             )
         )
         artifact_ids = tuple(artifact.artifact_id for artifact in committed.artifacts)
-        for index, artifact in zip(artifact_indexes, committed.artifacts):
-            replacements[index] = messages[index].model_copy(
-                update={
-                    "content": _tool_preview(
-                        _message_content(messages[index]), artifact.artifact_id
-                    )
-                }
-            )
         return replacements, artifact_ids, True
 
     async def _summarize(
@@ -350,13 +356,13 @@ class ContextWindowMiddleware(AgentMiddleware):
             return messages, (), False
         # 归档必须在摘要和节省率都通过校验后发生。先用等长 ID 占位评估，避免
         # 节省不足时留下无引用的归档或摘要记录。
-        pending_artifact_id = "history-" + "0" * 32
+        artifact_id = f"history-{uuid.uuid4().hex}"
         prospective = [
             HumanMessage(
                 content=(
                     "<harness_context_summary>\n"
                     f"{summary}\n\n"
-                    f"Archived original: /.harness/history/{pending_artifact_id}.md\n"
+                    f"Archived original: /.harness/history/{artifact_id}.md\n"
                     "</harness_context_summary>"
                 )
             ),
@@ -374,6 +380,7 @@ class ContextWindowMiddleware(AgentMiddleware):
                         content=_render_messages(old),
                         source_start=0,
                         source_end=cutoff - 1,
+                        artifact_id=artifact_id,
                     ),
                 ),
                 summary=ContextSummaryDraft(
@@ -384,18 +391,24 @@ class ContextWindowMiddleware(AgentMiddleware):
                     artifact_indexes=(0,),
                 ),
                 state=state,
+                checkpoint=CompressionCheckpointDraft(
+                    checkpoint_id=f"projection-{uuid.uuid4().hex}",
+                    mode="full",
+                    rewrite_version=SUMMARY_REWRITE_VERSION,
+                    projected_messages=tuple(prospective),
+                    artifact_ids=artifact_references(prospective),
+                    trigger=state.last_action if state is not None else "automatic",
+                    pressure_before={
+                        "estimated_tokens": _messages_tokens(messages)
+                    },
+                    pressure_after={
+                        "estimated_tokens": _messages_tokens(prospective)
+                    },
+                ),
             )
         )
         artifact = committed.artifacts[0]
-        summary_message = HumanMessage(
-            content=(
-                "<harness_context_summary>\n"
-                f"{summary}\n\n"
-                f"Archived original: /.harness/history/{artifact.artifact_id}.md\n"
-                "</harness_context_summary>"
-            )
-        )
-        return [summary_message, *recent], (artifact.artifact_id,), True
+        return prospective, (artifact.artifact_id,), True
 
     async def _overflow_recovery(
         self, thread_id: str, messages: list[BaseMessage]
@@ -428,13 +441,13 @@ class ContextWindowMiddleware(AgentMiddleware):
         """读取可选持久化状态；无 persistence 的库调用保持无副作用。"""
         if self._thread_persistence is None:
             return ContextState()
-        return (await self._thread_persistence.load_context(thread_id)).state
+        return await self._thread_persistence.load_context_state(thread_id)
 
     async def _record_failure(self, thread_id: str, action: str) -> None:
         """累计摘要失败，第三次打开熔断器且不再自动重写历史。"""
         if self._thread_persistence is None:
             return
-        previous = (await self._thread_persistence.load_context(thread_id)).state
+        previous = await self._thread_persistence.load_context_state(thread_id)
         failures = previous.failures + 1
         await self._thread_persistence.commit_context(
             CommitContextRewrite(

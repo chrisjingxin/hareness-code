@@ -401,19 +401,24 @@ async def test_context_compact_rewrites_idle_thread_and_returns_context_summary(
     """手动压缩只允许空闲 thread，成功后写回 checkpoint 并同步摘要状态。"""
     from langchain_core.messages import HumanMessage
 
-    from harness_agent.threads.context_window import ContextUpdate
-    from harness_agent.host.agent_host import AgentHost
-    from harness_agent.threads.thread_persistence import ContextSnapshot, ContextState
+    from harness_agent.context_window import ContextUpdate
+    from harness_agent.server import AgentHost
+    from types import SimpleNamespace
 
     class Store:
         def __init__(self) -> None:
             self.refreshed: list[str] = []
+            self.messages = (HumanMessage(content="旧上下文"),)
 
-        async def load_context(self, _thread_id: str) -> ContextSnapshot:
-            return ContextSnapshot(
-                messages=(HumanMessage(content="旧上下文"),),
-                state=ContextState(),
-                recoverable=True,
+        async def load_transcript(self, _thread_id: str) -> tuple[()]:
+            return ()
+
+        async def load_latest_valid_compression_checkpoint(
+            self, _thread_id: str, *, max_source_sequence: int
+        ) -> object:
+            return SimpleNamespace(
+                projected_messages=self.messages,
+                source_record_sequence=0,
             )
 
         async def complete_run(self, thread_id: str) -> None:
@@ -432,6 +437,9 @@ async def test_context_compact_rewrites_idle_thread_and_returns_context_summary(
             self.updates.append((config, update))
 
     class Middleware:
+        def __init__(self, store: Store) -> None:
+            self.store = store
+
         async def compact_now(self, thread_id: str, messages: list[HumanMessage]):
             update = ContextUpdate(
                 thread_id=thread_id,
@@ -442,7 +450,9 @@ async def test_context_compact_rewrites_idle_thread_and_returns_context_summary(
                 dynamic_tokens=10,
                 artifact_ids=("history-123456789",),
             )
-            return [HumanMessage(content="<harness_context_summary>摘要</harness_context_summary>")], update, True
+            compacted = [HumanMessage(content="<harness_context_summary>摘要</harness_context_summary>")]
+            self.store.messages = tuple(compacted)
+            return compacted, update, True
 
         @staticmethod
         def consume_updates(_thread_id: str) -> tuple[()]:
@@ -454,7 +464,7 @@ async def test_context_compact_rewrites_idle_thread_and_returns_context_summary(
     server._owner_connection.initialized = True
     server._owner_connection.enabled_capabilities = {"context.manage"}
     server._thread_persistence = store  # type: ignore[assignment]
-    server._context_compactor = Middleware()
+    server._context_compactor = Middleware(store)
     server._thread_persistence_enabled = lambda: True  # type: ignore[method-assign]
     frames: list[dict[str, Any]] = []
     server.send = lambda message: _append(frames, message)  # type: ignore[method-assign]
@@ -938,9 +948,10 @@ async def test_default_context_compact_acquires_and_releases_profile_engine(tmp_
         AgentEnginePoolSettings,
         Za38Config,
     )
-    from harness_agent.threads.context_window import ContextUpdate
-    from harness_agent.runtime.agent_engine_profile import component_fingerprint
-    from harness_agent.host.agent_host import AgentHost, _AgentEngineArtifacts
+    from harness_agent.context_window import ContextUpdate
+    from harness_agent.agent_engine_profile import component_fingerprint
+    from harness_agent.server import AgentHost, _AgentEngineArtifacts
+    from types import SimpleNamespace
 
     class Store:
         project_fingerprint = component_fingerprint({"project": "compact-runtime"})
@@ -948,6 +959,7 @@ async def test_default_context_compact_acquires_and_releases_profile_engine(tmp_
         def __init__(self) -> None:
             self.profiles: dict[str, object] = {}
             self.refreshed: list[str] = []
+            self.messages = (HumanMessage(content="历史"),)
 
         async def persist_agent_engine_profile(self, profile: object) -> None:
             self.profiles[str(getattr(profile, "profile_key"))] = profile
@@ -957,13 +969,15 @@ async def test_default_context_compact_acquires_and_releases_profile_engine(tmp_
 
             return PersistedBindingState()
 
-        async def load_context(self, _thread_id: str) -> object:
-            from harness_agent.threads.thread_persistence import ContextSnapshot, ContextState
+        async def load_transcript(self, _thread_id: str) -> tuple[()]:
+            return ()
 
-            return ContextSnapshot(
-                messages=(HumanMessage(content="历史"),),
-                state=ContextState(),
-                recoverable=True,
+        async def load_latest_valid_compression_checkpoint(
+            self, _thread_id: str, *, max_source_sequence: int
+        ) -> object:
+            return SimpleNamespace(
+                projected_messages=self.messages,
+                source_record_sequence=0,
             )
 
         async def complete_run(self, thread_id: str) -> None:
@@ -974,9 +988,14 @@ async def test_default_context_compact_acquires_and_releases_profile_engine(tmp_
             return {"configurable": {"thread_id": thread_id}}
 
     class Middleware:
+        def __init__(self, store: Store) -> None:
+            self.store = store
+
         async def compact_now(self, thread_id: str, _messages: list[HumanMessage]):
+            compacted = [HumanMessage(content="摘要")]
+            self.store.messages = tuple(compacted)
             return (
-                [HumanMessage(content="摘要")],
+                compacted,
                 ContextUpdate(
                     thread_id=thread_id,
                     action="manual_summary",
@@ -1026,7 +1045,7 @@ async def test_default_context_compact_acquires_and_releases_profile_engine(tmp_
     async def build(profile: object) -> AgentEngine:
         server._agent_engine_artifacts[profile.profile_key] = _AgentEngineArtifacts(  # type: ignore[attr-defined]
             execution_context=object(),
-            context_compactor=Middleware(),
+            context_compactor=Middleware(store),
         )
         return AgentEngine(profile=profile, graph=graph)  # type: ignore[arg-type]
 

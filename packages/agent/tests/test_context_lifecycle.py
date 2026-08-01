@@ -13,6 +13,7 @@ from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
 import harness_agent.context_lifecycle as context_lifecycle_module
+import harness_agent.thread_persistence as thread_persistence_module
 from harness_agent.agent_catalog import EffectiveExecutionPolicy
 from harness_agent.config import ExecutionSettings, RemoteSandboxSettings
 from harness_agent.context_lifecycle import (
@@ -527,7 +528,10 @@ async def test_legacy_prompt_epoch_migrates_once_to_readable_snapshot(tmp_path: 
         assert connection.execute(
             "SELECT COUNT(*) FROM harness_run_context_snapshots"
         ).fetchone()[0] == 1
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert (
+            connection.execute("PRAGMA user_version").fetchone()[0]
+            == thread_persistence_module._SCHEMA_VERSION
+        )
     finally:
         connection.close()
 

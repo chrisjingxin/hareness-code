@@ -22,11 +22,22 @@ from harness_agent.runtime.execution_binding import (
     RunExecutionBinding,
 )
 from harness_agent.context_lifecycle import RunContextSnapshot, snapshot_from_legacy_prompt_epoch
-from harness_agent.prompting import PromptEpoch, canonical_json
+from harness_agent.prompting import HISTORY_REWRITE_VERSION, PromptEpoch, canonical_json
 from harness_agent.agent_engine_profile import AGENT_ENGINE_PROFILE_VERSION, AgentEngineProfile
+from harness_agent.context_projection import (
+    CompressionCheckpoint,
+    CompressionCheckpointDraft,
+    ContextProjectionError,
+    SUPPORTED_REWRITE_VERSIONS,
+    artifact_references,
+    decode_projected_messages,
+    encode_projected_messages,
+    source_digest,
+    strict_json_loads,
+)
 
 
-_SCHEMA_VERSION = 8
+_SCHEMA_VERSION = 10
 _MAX_PREVIEW_CHARS = 160
 _MAX_INLINE_TOOL_BYTES = 64 * 1024
 _TRANSCRIPT_KINDS = ("user", "assistant", "tool", "context")
@@ -133,6 +144,7 @@ class TranscriptAppend:
     tool_name: str | None = None
     tool_status: str | None = None
     tool_call_id_status: str | None = None
+    legacy_invalid_fields: tuple[str, ...] = ()
     tool_calls: tuple[Mapping[str, object], ...] = ()
 
 
@@ -169,6 +181,7 @@ class ContextArtifactDraft:
     content: str
     source_start: int = 0
     source_end: int = 0
+    artifact_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,6 +203,7 @@ class CommitContextRewrite:
     artifacts: tuple[ContextArtifactDraft, ...] = ()
     summary: ContextSummaryDraft | None = None
     state: ContextState | None = None
+    checkpoint: CompressionCheckpointDraft | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +213,7 @@ class ContextCommit:
     artifacts: tuple[ContextArtifact, ...] = ()
     summary: ContextSummary | None = None
     state: ContextState | None = None
+    checkpoint: CompressionCheckpoint | None = None
 
 
 class ProjectScopedAsyncSqliteSaver(AsyncSqliteSaver):
@@ -586,7 +601,7 @@ class ThreadPersistence:
                 await cursor.close()
             if row is None:
                 raise ThreadPersistenceError("RUN_CONTEXT_SNAPSHOT_NOT_FOUND")
-            snapshot = RunContextSnapshot.from_record(json.loads(str(row["snapshot_record"])))
+            snapshot = RunContextSnapshot.from_record(strict_json_loads(str(row["snapshot_record"])))
             if snapshot.project_fingerprint != self._project_fingerprint:
                 raise ThreadPersistenceError("RUN_CONTEXT_SNAPSHOT_PROJECT_MISMATCH")
             if thread_id is not None and snapshot.thread_id != thread_id:
@@ -614,7 +629,7 @@ class ThreadPersistence:
         await cursor.close()
         if existing is not None:
             try:
-                existing_record = json.loads(str(existing["snapshot_record"]))
+                existing_record = strict_json_loads(str(existing["snapshot_record"]))
             except (TypeError, ValueError, json.JSONDecodeError) as exc:
                 raise ThreadPersistenceError("RUN_CONTEXT_SNAPSHOT_CONFLICT") from exc
             incoming_record = snapshot.record()
@@ -684,6 +699,8 @@ class ThreadPersistence:
             raise ThreadPersistenceError("TRANSCRIPT_KIND_INVALID")
         if any(command.tool_calls and command.kind != "assistant" for command in commands):
             raise ThreadPersistenceError("TRANSCRIPT_TOOL_CALL_KIND_INVALID")
+        if any(command.legacy_invalid_fields for command in commands):
+            raise ThreadPersistenceError("TRANSCRIPT_LEGACY_MARKER_FORBIDDEN")
         async with self._lock:
             try:
                 await self._connection.execute("BEGIN IMMEDIATE")
@@ -750,8 +767,8 @@ class ThreadPersistence:
                 await cursor.close()
             if row is None:
                 return None
-            selection = json.loads(str(row["requested_selection"]))
-            primary = json.loads(str(row["actual_primary_binding"]))
+            selection = strict_json_loads(str(row["requested_selection"]))
+            primary = strict_json_loads(str(row["actual_primary_binding"]))
             if not isinstance(selection, dict) or not isinstance(primary, dict):
                 raise ThreadPersistenceError("RUN_EXECUTION_BINDING_INVALID")
             return RunExecutionBinding.from_records(
@@ -783,6 +800,7 @@ class ThreadPersistence:
         command: TranscriptAppend,
         *,
         project_fingerprint: str | None = None,
+        allow_legacy_invalid: bool = False,
     ) -> TranscriptRecord:
         """在调用方已持有 IMMEDIATE 事务时追加或校验一条记录。"""
         project = project_fingerprint or self._project_fingerprint
@@ -804,7 +822,10 @@ class ThreadPersistence:
         if existing is not None:
             record = _transcript_record(existing)
             if _transcript_matches(
-                record, command, project_fingerprint=project
+                record,
+                command,
+                project_fingerprint=project,
+                allow_legacy_invalid=allow_legacy_invalid,
             ):
                 artifact_id = record.artifact_id
                 if artifact_id is not None:
@@ -853,19 +874,21 @@ class ThreadPersistence:
             "original_bytes": len(content_bytes),
         }
         if command.kind == "assistant":
-            normalized_tool_calls = _normalize_transcript_tool_calls(command.tool_calls)
+            normalized_tool_calls = _normalize_transcript_tool_calls(
+                command.tool_calls, allow_legacy_invalid=allow_legacy_invalid
+            )
             if normalized_tool_calls:
                 payload["tool_calls"] = normalized_tool_calls
         if command.kind == "tool":
-            payload.update(
-                {
-                    "tool_call_id": command.tool_call_id or command.record_id,
-                    "name": command.tool_name or "tool",
-                    "status": command.tool_status or "success",
-                }
-            )
+            payload["tool_call_id"] = command.tool_call_id or command.record_id
+            if "name" not in command.legacy_invalid_fields:
+                payload["name"] = command.tool_name or "tool"
+            if "status" not in command.legacy_invalid_fields:
+                payload["status"] = command.tool_status or "success"
             if command.tool_call_id_status is not None:
                 payload["tool_call_id_status"] = command.tool_call_id_status
+            if command.legacy_invalid_fields:
+                payload["legacy_invalid_fields"] = list(command.legacy_invalid_fields)
         if artifact_id is not None:
             payload["artifact_id"] = artifact_id
 
@@ -1084,7 +1107,7 @@ class ThreadPersistence:
             raise ThreadPersistenceError(f"CHECKPOINT_INDEX_REFRESH_FAILED: {exc}") from exc
 
     async def load_context(self, thread_id: str) -> ContextSnapshot:
-        """读取当前 Thread 的消息和 Context 状态，供 Context module 完成一次重写。"""
+        """读取 LangGraph 缓存和 Context 状态，仅供诊断与兼容测试。"""
         self._ensure_open()
         try:
             messages = await self._messages_for_thread(thread_id)
@@ -1095,6 +1118,10 @@ class ThreadPersistence:
             )
         except aiosqlite.Error as exc:
             raise ThreadPersistenceError(f"CONTEXT_MESSAGES_READ_FAILED: {exc}") from exc
+
+    async def load_context_state(self, thread_id: str) -> ContextState:
+        """读取压缩策略状态，不触及 LangGraph messages 缓存。"""
+        return await self._load_context_state(thread_id)
 
     async def load_prompt_epoch(self, thread_id: str) -> PromptEpoch | None:
         """读取旧库 PromptEpoch；生产 Run 不再以它作为上下文来源。"""
@@ -1220,7 +1247,7 @@ class ThreadPersistence:
                 await cursor.close()
             if row is None:
                 return None
-            record = json.loads(str(row["binding_record"]))
+            record = strict_json_loads(str(row["binding_record"]))
             if not isinstance(record, Mapping):
                 raise ThreadPersistenceError("THREAD_MODEL_BINDING_INVALID")
             return LegacyModelBindings.from_record(record)
@@ -1253,11 +1280,147 @@ class ThreadPersistence:
         except aiosqlite.Error as exc:
             raise ThreadPersistenceError(f"RUNTIME_PROFILE_READ_FAILED: {exc}") from exc
 
-    async def commit_context(self, command: CommitContextRewrite) -> ContextCommit:
-        """原子提交 Context 的归档、摘要和状态，隐藏 SQLite 多表事务。"""
+    async def load_latest_valid_compression_checkpoint(
+        self,
+        thread_id: str,
+        *,
+        max_source_sequence: int | None = None,
+        include_legacy_incomplete: bool = False,
+    ) -> CompressionCheckpoint | None:
+        """按来源边界和创建顺序选择 latest-valid 检查点。
+
+        损坏 JSON、未知版本、错误 digest、非原子工具组或越界/缺失
+        Artifact 只会使当前候选失效；较早的有效版本仍可恢复。
+        """
         self._ensure_open()
+        records = await self.load_transcript(thread_id)
+        upper_bound = (
+            max_source_sequence
+            if max_source_sequence is not None
+            else (records[-1].sequence if records else 0)
+        )
+        try:
+            async with self._lock:
+                cursor = await self._connection.execute(
+                    """
+                    SELECT checkpoint_id, thread_id, source_record_sequence,
+                           source_digest, mode, rewrite_version, projected_messages,
+                           artifact_ids, trigger, pressure_before, pressure_after,
+                           created_at_ms, legacy_incomplete
+                    FROM harness_compression_checkpoints
+                    WHERE project_fingerprint = ? AND thread_id = ?
+                      AND source_record_sequence <= ?
+                    ORDER BY source_record_sequence DESC, created_at_ms DESC,
+                             checkpoint_id DESC
+                    """,
+                    (self._project_fingerprint, thread_id, upper_bound),
+                )
+                rows = await cursor.fetchall()
+                await cursor.close()
+                for row in rows:
+                    try:
+                        checkpoint = await self._checkpoint_from_row_in_transaction(
+                            row, records
+                        )
+                    except (
+                        ContextProjectionError,
+                        ThreadPersistenceError,
+                        TypeError,
+                        ValueError,
+                        json.JSONDecodeError,
+                    ):
+                        continue
+                    if checkpoint.legacy_incomplete and not include_legacy_incomplete:
+                        continue
+                    return checkpoint
+            return None
+        except aiosqlite.Error as exc:
+            raise ThreadPersistenceError(
+                f"COMPRESSION_CHECKPOINT_READ_FAILED: {exc}"
+            ) from exc
+
+    async def _checkpoint_from_row_in_transaction(
+        self,
+        row: Mapping[str, Any],
+        records: tuple[TranscriptRecord, ...],
+    ) -> CompressionCheckpoint:
+        """在同一 project 连接上校验一个候选检查点。"""
+        sequence = int(row["source_record_sequence"])
+        if str(row["source_digest"]) != source_digest(records, sequence):
+            raise ContextProjectionError("PROJECTION_SOURCE_DIGEST_MISMATCH")
+        rewrite_version = str(row["rewrite_version"])
+        legacy_incomplete = bool(row["legacy_incomplete"])
+        if rewrite_version != HISTORY_REWRITE_VERSION and not (
+            legacy_incomplete and rewrite_version in SUPPORTED_REWRITE_VERSIONS
+        ):
+            raise ContextProjectionError("PROJECTION_REWRITE_VERSION_UNSUPPORTED")
+        mode = str(row["mode"])
+        if mode not in {"micro", "full"}:
+            raise ContextProjectionError("PROJECTION_MODE_INVALID")
+        messages = decode_projected_messages(str(row["projected_messages"]))
+        artifact_ids_value = strict_json_loads(str(row["artifact_ids"]))
+        before = strict_json_loads(str(row["pressure_before"]))
+        after = strict_json_loads(str(row["pressure_after"]))
+        if (
+            not isinstance(artifact_ids_value, list)
+            or not all(isinstance(value, str) and value for value in artifact_ids_value)
+            or len(set(artifact_ids_value)) != len(artifact_ids_value)
+            or not isinstance(before, Mapping)
+            or not isinstance(after, Mapping)
+        ):
+            raise ContextProjectionError("PROJECTION_CHECKPOINT_JSON_INVALID")
+        try:
+            _strict_json(artifact_ids_value)
+            _strict_json(dict(before))
+            _strict_json(dict(after))
+        except (TypeError, ValueError) as exc:
+            raise ContextProjectionError(
+                "PROJECTION_CHECKPOINT_JSON_INVALID"
+            ) from exc
+        artifact_ids = tuple(artifact_ids_value)
+        if not set(artifact_references(messages)).issubset(set(artifact_ids)):
+            raise ContextProjectionError("PROJECTION_CHECKPOINT_ARTIFACT_UNDECLARED")
+        for artifact_id in artifact_ids:
+            cursor = await self._connection.execute(
+                """
+                SELECT content, content_sha256, byte_length
+                FROM harness_context_artifacts
+                WHERE project_fingerprint = ? AND thread_id = ? AND artifact_id = ?
+                """,
+                (self._project_fingerprint, str(row["thread_id"]), artifact_id),
+            )
+            artifact = await cursor.fetchone()
+            await cursor.close()
+            if artifact is None:
+                raise ContextProjectionError("PROJECTION_CHECKPOINT_ARTIFACT_MISSING")
+            content = str(artifact["content"])
+            if (
+                str(artifact["content_sha256"]) != _content_sha256(content)
+                or int(artifact["byte_length"]) != len(content.encode("utf-8"))
+            ):
+                raise ContextProjectionError("PROJECTION_CHECKPOINT_ARTIFACT_INVALID")
+        return CompressionCheckpoint(
+            checkpoint_id=str(row["checkpoint_id"]),
+            thread_id=str(row["thread_id"]),
+            source_record_sequence=sequence,
+            source_digest=str(row["source_digest"]),
+            mode=mode,  # type: ignore[arg-type]
+            rewrite_version=rewrite_version,
+            projected_messages=messages,
+            artifact_ids=artifact_ids,
+            trigger=str(row["trigger"]),
+            pressure_before=dict(before),
+            pressure_after=dict(after),
+            created_at_ms=int(row["created_at_ms"]),
+            legacy_incomplete=legacy_incomplete,
+        )
+
+    async def commit_context(self, command: CommitContextRewrite) -> ContextCommit:
+        """原子提交 Artifact、摘要、状态和模型投影检查点。"""
+        self._ensure_open()
+        checkpoint_draft = command.checkpoint
         artifacts: list[ContextArtifact] = []
-        for draft in command.artifacts:
+        for index, draft in enumerate(command.artifacts):
             if not draft.content:
                 raise ThreadPersistenceError("CONTEXT_ARTIFACT_EMPTY")
             if not draft.kind or any(
@@ -1265,9 +1428,25 @@ class ThreadPersistence:
             ):
                 raise ThreadPersistenceError("CONTEXT_ARTIFACT_KIND_INVALID")
             source_start = max(0, draft.source_start)
+            artifact_id = draft.artifact_id or (
+                _rewrite_artifact_id(
+                    self._project_fingerprint,
+                    command.thread_id,
+                    checkpoint_draft.checkpoint_id,
+                    index,
+                    draft,
+                )
+                if checkpoint_draft is not None
+                else f"{draft.kind}-{uuid.uuid4().hex}"
+            )
+            if not artifact_id or any(
+                char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+                for char in artifact_id
+            ):
+                raise ThreadPersistenceError("CONTEXT_ARTIFACT_ID_INVALID")
             artifacts.append(
                 ContextArtifact(
-                    artifact_id=f"{draft.kind}-{uuid.uuid4().hex}",
+                    artifact_id=artifact_id,
                     kind=draft.kind,
                     content=draft.content,
                     source_start=source_start,
@@ -1277,6 +1456,41 @@ class ThreadPersistence:
                     byte_length=len(draft.content.encode("utf-8")),
                 )
             )
+
+        checkpoint_messages = (
+            encode_projected_messages(checkpoint_draft.projected_messages)
+            if checkpoint_draft is not None
+            else None
+        )
+        if checkpoint_draft is not None:
+            if (
+                not checkpoint_draft.checkpoint_id
+                or len(checkpoint_draft.checkpoint_id) > 160
+                or any(
+                    char
+                    not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+                    for char in checkpoint_draft.checkpoint_id
+                )
+                or checkpoint_draft.mode not in {"micro", "full"}
+                or (
+                    checkpoint_draft.rewrite_version != HISTORY_REWRITE_VERSION
+                    and not (
+                        checkpoint_draft.legacy_incomplete
+                        and checkpoint_draft.rewrite_version
+                        in SUPPORTED_REWRITE_VERSIONS
+                    )
+                )
+            ):
+                raise ThreadPersistenceError("COMPRESSION_CHECKPOINT_INVALID")
+            # 诊断只允许严格 JSON，禁止 NaN/Infinity 和隐式字符串化。
+            _strict_json(dict(checkpoint_draft.pressure_before))
+            _strict_json(dict(checkpoint_draft.pressure_after))
+            if not set(
+                artifact_references(checkpoint_draft.projected_messages)
+            ).issubset(set(checkpoint_draft.artifact_ids)):
+                raise ThreadPersistenceError(
+                    "COMPRESSION_CHECKPOINT_ARTIFACT_UNDECLARED"
+                )
 
         summary: ContextSummary | None = None
         if command.summary is not None:
@@ -1294,9 +1508,123 @@ class ThreadPersistence:
                 created_at_ms=_now_ms(),
             )
 
+        checkpoint: CompressionCheckpoint | None = None
         try:
             async with self._lock:
+                await self._connection.execute("BEGIN IMMEDIATE")
+                existing_checkpoint: aiosqlite.Row | None = None
+                if checkpoint_draft is not None:
+                    cursor = await self._connection.execute(
+                        """
+                        SELECT 1 FROM harness_threads
+                        WHERE project_fingerprint = ? AND thread_id = ?
+                        """,
+                        (self._project_fingerprint, command.thread_id),
+                    )
+                    thread_exists = await cursor.fetchone()
+                    await cursor.close()
+                    if thread_exists is None:
+                        raise ThreadPersistenceError("THREAD_NOT_FOUND")
+                    cursor = await self._connection.execute(
+                        """
+                        SELECT checkpoint_id, thread_id, source_record_sequence,
+                               source_digest, mode, rewrite_version, projected_messages,
+                               artifact_ids, trigger, pressure_before, pressure_after,
+                               created_at_ms, legacy_incomplete, commit_payload
+                        FROM harness_compression_checkpoints
+                        WHERE project_fingerprint = ? AND thread_id = ? AND checkpoint_id = ?
+                        """,
+                        (
+                            self._project_fingerprint,
+                            command.thread_id,
+                            checkpoint_draft.checkpoint_id,
+                        ),
+                    )
+                    existing_checkpoint = await cursor.fetchone()
+                    await cursor.close()
+                if existing_checkpoint is not None:
+                    records = await self._load_transcript_in_transaction(command.thread_id)
+                    latest_sequence = records[-1].sequence if records else 0
+                    requested_sequence = (
+                        latest_sequence
+                        if checkpoint_draft.source_record_sequence is None
+                        else checkpoint_draft.source_record_sequence
+                    )
+                    if requested_sequence < 0 or requested_sequence > latest_sequence:
+                        raise ThreadPersistenceError(
+                            "COMPRESSION_CHECKPOINT_SOURCE_INVALID"
+                        )
+                    requested_digest = source_digest(records, requested_sequence)
+                    requested_commit_payload = _context_commit_payload(
+                        command.thread_id,
+                        artifacts,
+                        summary,
+                        command.state,
+                        checkpoint_draft,
+                        checkpoint_messages or "",
+                        requested_sequence,
+                        requested_digest,
+                    )
+                    existing = await self._checkpoint_from_row_in_transaction(
+                        existing_checkpoint, records
+                    )
+                    if (
+                        existing_checkpoint["commit_payload"] is None
+                        or str(existing_checkpoint["commit_payload"])
+                        != requested_commit_payload
+                        or existing.source_record_sequence != requested_sequence
+                        or existing.source_digest != requested_digest
+                        or existing.mode != checkpoint_draft.mode
+                        or existing.rewrite_version != checkpoint_draft.rewrite_version
+                        or encode_projected_messages(existing.projected_messages)
+                        != checkpoint_messages
+                        or existing.artifact_ids != checkpoint_draft.artifact_ids
+                        or existing.trigger != checkpoint_draft.trigger
+                        or dict(existing.pressure_before)
+                        != dict(checkpoint_draft.pressure_before)
+                        or dict(existing.pressure_after)
+                        != dict(checkpoint_draft.pressure_after)
+                        or existing.legacy_incomplete
+                        != checkpoint_draft.legacy_incomplete
+                    ):
+                        raise ThreadPersistenceError(
+                            "COMPRESSION_CHECKPOINT_CONFLICT"
+                        )
+                    original = await self._context_commit_result_in_transaction(
+                        command.thread_id, artifacts, summary, command.state, existing
+                    )
+                    await self._connection.rollback()
+                    return original
                 for artifact in artifacts:
+                    cursor = await self._connection.execute(
+                        """
+                        SELECT kind, content, source_start, source_end,
+                               content_sha256, byte_length
+                        FROM harness_context_artifacts
+                        WHERE project_fingerprint = ? AND thread_id = ? AND artifact_id = ?
+                        """,
+                        (
+                            self._project_fingerprint,
+                            command.thread_id,
+                            artifact.artifact_id,
+                        ),
+                    )
+                    existing_artifact = await cursor.fetchone()
+                    await cursor.close()
+                    if existing_artifact is not None:
+                        if (
+                            str(existing_artifact["kind"]) != artifact.kind
+                            or str(existing_artifact["content"]) != artifact.content
+                            or int(existing_artifact["source_start"])
+                            != artifact.source_start
+                            or int(existing_artifact["source_end"]) != artifact.source_end
+                            or str(existing_artifact["content_sha256"])
+                            != artifact.content_sha256
+                            or int(existing_artifact["byte_length"])
+                            != artifact.byte_length
+                        ):
+                            raise ThreadPersistenceError("CONTEXT_ARTIFACT_CONFLICT")
+                        continue
                     await self._connection.execute(
                         """
                         INSERT INTO harness_context_artifacts (
@@ -1358,20 +1686,203 @@ class ThreadPersistence:
                             _now_ms(),
                         ),
                     )
+                if checkpoint_draft is not None:
+                    records = await self._load_transcript_in_transaction(command.thread_id)
+                    latest_sequence = records[-1].sequence if records else 0
+                    sequence = (
+                        latest_sequence
+                        if checkpoint_draft.source_record_sequence is None
+                        else checkpoint_draft.source_record_sequence
+                    )
+                    if sequence < 0 or sequence > latest_sequence:
+                        raise ThreadPersistenceError(
+                            "COMPRESSION_CHECKPOINT_SOURCE_INVALID"
+                        )
+                    linked_artifacts = set(checkpoint_draft.artifact_ids)
+                    existing_artifact_ids = await self._artifact_ids_in_transaction(
+                        command.thread_id
+                    )
+                    if not linked_artifacts.issubset(existing_artifact_ids):
+                        raise ThreadPersistenceError(
+                            "COMPRESSION_CHECKPOINT_ARTIFACT_MISSING"
+                        )
+                    created_at_ms = _now_ms()
+                    digest = source_digest(records, sequence)
+                    commit_payload = _context_commit_payload(
+                        command.thread_id,
+                        artifacts,
+                        summary,
+                        command.state,
+                        checkpoint_draft,
+                        checkpoint_messages or "",
+                        sequence,
+                        digest,
+                    )
+                    await self._connection.execute(
+                        """
+                        INSERT INTO harness_compression_checkpoints (
+                            project_fingerprint, thread_id, checkpoint_id,
+                            source_record_sequence, source_digest, mode,
+                            rewrite_version, projected_messages, artifact_ids,
+                            trigger, pressure_before, pressure_after, created_at_ms,
+                            legacy_incomplete, commit_payload
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            self._project_fingerprint,
+                            command.thread_id,
+                            checkpoint_draft.checkpoint_id,
+                            sequence,
+                            digest,
+                            checkpoint_draft.mode,
+                            checkpoint_draft.rewrite_version,
+                            checkpoint_messages,
+                            _strict_json(checkpoint_draft.artifact_ids),
+                            checkpoint_draft.trigger,
+                            _strict_json(dict(checkpoint_draft.pressure_before)),
+                            _strict_json(dict(checkpoint_draft.pressure_after)),
+                            created_at_ms,
+                            int(checkpoint_draft.legacy_incomplete),
+                            commit_payload,
+                        ),
+                    )
+                    checkpoint = CompressionCheckpoint(
+                        checkpoint_id=checkpoint_draft.checkpoint_id,
+                        thread_id=command.thread_id,
+                        source_record_sequence=sequence,
+                        source_digest=digest,
+                        mode=checkpoint_draft.mode,
+                        rewrite_version=checkpoint_draft.rewrite_version,
+                        projected_messages=checkpoint_draft.projected_messages,
+                        artifact_ids=checkpoint_draft.artifact_ids,
+                        trigger=checkpoint_draft.trigger,
+                        pressure_before=dict(checkpoint_draft.pressure_before),
+                        pressure_after=dict(checkpoint_draft.pressure_after),
+                        created_at_ms=created_at_ms,
+                        legacy_incomplete=checkpoint_draft.legacy_incomplete,
+                    )
                 await self._connection.commit()
-        except ThreadPersistenceError:
+        except BaseException as exc:
             try:
                 await self._connection.rollback()
             except aiosqlite.Error:
                 pass
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            if isinstance(exc, ThreadPersistenceError):
+                raise
+            if isinstance(exc, ContextProjectionError):
+                raise ThreadPersistenceError(
+                    f"COMPRESSION_CHECKPOINT_INVALID: {exc}"
+                ) from exc
+            if isinstance(exc, aiosqlite.Error):
+                raise ThreadPersistenceError(
+                    f"CONTEXT_REWRITE_WRITE_FAILED: {exc}"
+                ) from exc
             raise
-        except aiosqlite.Error as exc:
-            try:
-                await self._connection.rollback()
-            except aiosqlite.Error:
-                pass
-            raise ThreadPersistenceError(f"CONTEXT_REWRITE_WRITE_FAILED: {exc}") from exc
-        return ContextCommit(tuple(artifacts), summary, command.state)
+        return ContextCommit(tuple(artifacts), summary, command.state, checkpoint)
+
+    async def _context_commit_result_in_transaction(
+        self,
+        thread_id: str,
+        artifacts: list[ContextArtifact],
+        summary: ContextSummary | None,
+        state: ContextState | None,
+        checkpoint: CompressionCheckpoint,
+    ) -> ContextCommit:
+        """按已验证的稳定命令恢复首次提交结果，而不是返回空的快速成功。"""
+        original_artifacts: list[ContextArtifact] = []
+        for artifact in artifacts:
+            cursor = await self._connection.execute(
+                """
+                SELECT artifact_id, kind, content, source_start, source_end,
+                       created_at_ms, content_sha256, byte_length
+                FROM harness_context_artifacts
+                WHERE project_fingerprint = ? AND thread_id = ? AND artifact_id = ?
+                """,
+                (self._project_fingerprint, thread_id, artifact.artifact_id),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            if row is None:
+                raise ThreadPersistenceError("COMPRESSION_CHECKPOINT_CONFLICT")
+            original_artifacts.append(_context_artifact_from_row(row))
+
+        original_summary: ContextSummary | None = None
+        if summary is not None:
+            cursor = await self._connection.execute(
+                """
+                SELECT rewrite_version, content, source_start, source_end,
+                       artifact_ids, created_at_ms
+                FROM harness_context_summaries
+                WHERE project_fingerprint = ? AND thread_id = ?
+                  AND rewrite_version = ? AND content = ?
+                  AND source_start = ? AND source_end = ? AND artifact_ids = ?
+                ORDER BY summary_id ASC
+                LIMIT 1
+                """,
+                (
+                    self._project_fingerprint,
+                    thread_id,
+                    summary.rewrite_version,
+                    summary.content,
+                    summary.source_start,
+                    summary.source_end,
+                    _strict_json(summary.artifact_ids),
+                ),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            if row is None:
+                raise ThreadPersistenceError("COMPRESSION_CHECKPOINT_CONFLICT")
+            artifact_ids = strict_json_loads(str(row["artifact_ids"]))
+            if not isinstance(artifact_ids, list) or not all(
+                isinstance(value, str) for value in artifact_ids
+            ):
+                raise ThreadPersistenceError("COMPRESSION_CHECKPOINT_CONFLICT")
+            original_summary = ContextSummary(
+                rewrite_version=str(row["rewrite_version"]),
+                content=str(row["content"]),
+                source_start=int(row["source_start"]),
+                source_end=int(row["source_end"]),
+                artifact_ids=tuple(artifact_ids),
+                created_at_ms=int(row["created_at_ms"]),
+            )
+        return ContextCommit(
+            tuple(original_artifacts), original_summary, state, checkpoint
+        )
+
+    async def _load_transcript_in_transaction(
+        self, thread_id: str
+    ) -> tuple[TranscriptRecord, ...]:
+        """在调用方已持有锁和事务时读取 Transcript 前缀。"""
+        cursor = await self._connection.execute(
+            """
+            SELECT record_id, thread_id, run_id, execution_id, sequence,
+                   kind, payload, content_sha256, byte_length, artifact_id,
+                   created_at_ms
+            FROM harness_thread_transcript
+            WHERE project_fingerprint = ? AND thread_id = ?
+            ORDER BY sequence ASC
+            """,
+            (self._project_fingerprint, thread_id),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return tuple(_transcript_record(row) for row in rows)
+
+    async def _artifact_ids_in_transaction(self, thread_id: str) -> set[str]:
+        """返回当前 project/thread 已存在的 Artifact ID。"""
+        cursor = await self._connection.execute(
+            """
+            SELECT artifact_id FROM harness_context_artifacts
+            WHERE project_fingerprint = ? AND thread_id = ?
+            """,
+            (self._project_fingerprint, thread_id),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return {str(row["artifact_id"]) for row in rows}
 
     async def load_context_artifact(self, thread_id: str, artifact_id: str) -> ContextArtifact | None:
         """读取仅归属当前 project/thread 的归档，调用方不得从数据库路径推断真实位置。"""
@@ -1826,6 +2337,45 @@ class ThreadPersistence:
                 )
                 await self._migrate_legacy_prompt_epochs_to_snapshots()
                 version = 8
+            if version < 9:
+                await self._backfill_artifact_metadata()
+                await self._connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS harness_compression_checkpoints (
+                        project_fingerprint TEXT NOT NULL,
+                        thread_id TEXT NOT NULL,
+                        checkpoint_id TEXT NOT NULL,
+                        source_record_sequence INTEGER NOT NULL,
+                        source_digest TEXT NOT NULL,
+                        mode TEXT NOT NULL CHECK(mode IN ('micro', 'full')),
+                        rewrite_version TEXT NOT NULL,
+                        projected_messages TEXT NOT NULL,
+                        artifact_ids TEXT NOT NULL,
+                        trigger TEXT NOT NULL,
+                        pressure_before TEXT NOT NULL,
+                        pressure_after TEXT NOT NULL,
+                        created_at_ms INTEGER NOT NULL,
+                        legacy_incomplete INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY (
+                            project_fingerprint, thread_id, checkpoint_id
+                        )
+                    )
+                    """
+                )
+                await self._connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS harness_compression_checkpoints_latest
+                    ON harness_compression_checkpoints(
+                        project_fingerprint, thread_id,
+                        source_record_sequence DESC, created_at_ms DESC
+                    )
+                    """
+                )
+                await self._bootstrap_legacy_compression_checkpoints()
+                version = 9
+            if version < 10:
+                await self._add_compression_commit_payload_column()
+                version = 10
             await self._connection.execute(f"PRAGMA user_version={version}")
             await self._connection.commit()
             self._checkpointer.is_setup = True
@@ -1981,6 +2531,128 @@ class ThreadPersistence:
                 """
             )
 
+    async def _backfill_artifact_metadata(self) -> None:
+        """为 v7 以前归档补齐可验证元数据，不改动原文。"""
+        cursor = await self._connection.execute(
+            """
+            SELECT project_fingerprint, thread_id, artifact_id, content
+            FROM harness_context_artifacts
+            WHERE content_sha256 = '' OR byte_length = 0
+            """
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        for row in rows:
+            content = str(row["content"])
+            await self._connection.execute(
+                """
+                UPDATE harness_context_artifacts
+                SET content_sha256 = ?, byte_length = ?
+                WHERE project_fingerprint = ? AND thread_id = ? AND artifact_id = ?
+                """,
+                (
+                    _content_sha256(content),
+                    len(content.encode("utf-8")),
+                    str(row["project_fingerprint"]),
+                    str(row["thread_id"]),
+                    str(row["artifact_id"]),
+                ),
+            )
+
+    async def _bootstrap_legacy_compression_checkpoints(self) -> None:
+        """将旧 LangGraph 工作视图诚实记为 legacy/incomplete 起点。"""
+        cursor = await self._connection.execute(
+            """
+            SELECT project_fingerprint, thread_id
+            FROM harness_threads
+            ORDER BY project_fingerprint, thread_id
+            """
+        )
+        threads = await cursor.fetchall()
+        await cursor.close()
+        for row in threads:
+            project = str(row["project_fingerprint"])
+            thread_id = str(row["thread_id"])
+            messages = await self._legacy_messages_for_project(project, thread_id)
+            if not messages:
+                continue
+            try:
+                encoded_messages = encode_projected_messages(messages)
+            except ContextProjectionError:
+                # 旧视图若已有孤儿/残缺工具组，禁止把它升格为有效投影。
+                continue
+            referenced_artifacts = artifact_references(messages)
+            if referenced_artifacts:
+                placeholders = ",".join("?" for _ in referenced_artifacts)
+                cursor = await self._connection.execute(
+                    f"""
+                    SELECT artifact_id FROM harness_context_artifacts
+                    WHERE project_fingerprint = ? AND thread_id = ?
+                      AND artifact_id IN ({placeholders})
+                    """,
+                    (project, thread_id, *referenced_artifacts),
+                )
+                found_artifacts = {
+                    str(item["artifact_id"]) for item in await cursor.fetchall()
+                }
+                await cursor.close()
+                if found_artifacts != set(referenced_artifacts):
+                    continue
+            cursor = await self._connection.execute(
+                """
+                SELECT record_id, thread_id, run_id, execution_id, sequence,
+                       kind, payload, content_sha256, byte_length, artifact_id,
+                       created_at_ms
+                FROM harness_thread_transcript
+                WHERE project_fingerprint = ? AND thread_id = ?
+                ORDER BY sequence ASC
+                """,
+                (project, thread_id),
+            )
+            records = tuple(_transcript_record(item) for item in await cursor.fetchall())
+            await cursor.close()
+            sequence = records[-1].sequence if records else 0
+            checkpoint_id = "legacy-" + hashlib.sha256(
+                f"{project}:{thread_id}:{sequence}".encode("utf-8")
+            ).hexdigest()[:32]
+            await self._connection.execute(
+                """
+                INSERT INTO harness_compression_checkpoints (
+                    project_fingerprint, thread_id, checkpoint_id,
+                    source_record_sequence, source_digest, mode,
+                    rewrite_version, projected_messages, artifact_ids,
+                    trigger, pressure_before, pressure_after, created_at_ms,
+                    legacy_incomplete
+                ) VALUES (?, ?, ?, ?, ?, 'full', 'legacy-incomplete-v1', ?,
+                          ?, 'legacy-migration', '{}', '{}', ?, 1)
+                ON CONFLICT(project_fingerprint, thread_id, checkpoint_id) DO NOTHING
+                """,
+                (
+                    project,
+                    thread_id,
+                    checkpoint_id,
+                    sequence,
+                    source_digest(records, sequence),
+                    encoded_messages,
+                    _strict_json(referenced_artifacts),
+                    _now_ms(),
+                ),
+            )
+    async def _add_compression_commit_payload_column(self) -> None:
+        """v10 为整条 rewrite 幂等语义增加列，并兼容降版本测试库。"""
+        cursor = await self._connection.execute(
+            "PRAGMA table_info(harness_compression_checkpoints)"
+        )
+        columns = {str(row[1]) for row in await cursor.fetchall()}
+        await cursor.close()
+        if "commit_payload" not in columns:
+            await self._connection.execute(
+                """
+                ALTER TABLE harness_compression_checkpoints
+                ADD COLUMN commit_payload TEXT
+                """
+            )
+
     async def _add_context_snapshot_column(self) -> None:
         """为旧 Run binding 增加可为空的 snapshot 引用，兼容降级库。"""
         cursor = await self._connection.execute(
@@ -2040,29 +2712,54 @@ class ThreadPersistence:
                 )
                 if legacy_tool_calls:
                     pending_tool_call_ids.extend(
-                        str(call["id"])
+                        call["id"]
                         for call in legacy_tool_calls
-                        if call.get("id")
+                        if not call.get("legacy_invalid_fields")
+                        and call.get("arguments_status") == "valid"
+                        and isinstance(call.get("id"), str)
+                        and call["id"]
                     )
                 legacy_tool_call_id: str | None = None
                 legacy_tool_call_id_status: str | None = None
+                legacy_invalid_fields: list[str] = []
+                legacy_tool_name: str | None = None
+                legacy_tool_status: str | None = None
                 if kind == "tool":
-                    raw_tool_call_id = str(
-                        getattr(message, "tool_call_id", "") or ""
-                    )
-                    if raw_tool_call_id:
+                    raw_tool_call_id = getattr(message, "tool_call_id", None)
+                    raw_tool_name = getattr(message, "name", None)
+                    raw_tool_status = getattr(message, "status", None)
+                    if isinstance(raw_tool_name, str) and raw_tool_name:
+                        legacy_tool_name = raw_tool_name
+                    else:
+                        legacy_invalid_fields.append("name")
+                    if isinstance(raw_tool_status, str) and raw_tool_status in {
+                        "success",
+                        "error",
+                    }:
+                        legacy_tool_status = raw_tool_status
+                    else:
+                        legacy_invalid_fields.append("status")
+                    if isinstance(raw_tool_call_id, str) and raw_tool_call_id:
                         legacy_tool_call_id = raw_tool_call_id
-                        if raw_tool_call_id in pending_tool_call_ids:
+                        if (
+                            not legacy_invalid_fields
+                            and raw_tool_call_id in pending_tool_call_ids
+                        ):
                             pending_tool_call_ids.remove(raw_tool_call_id)
                         else:
                             legacy_tool_call_id_status = "unmatched"
-                    elif len(pending_tool_call_ids) == 1:
+                    elif (raw_tool_call_id is None or raw_tool_call_id == "") and (
+                        not legacy_invalid_fields
+                        and len(pending_tool_call_ids) == 1
+                    ):
                         # A single unresolved assistant declaration is the
                         # only safe legacy no-ID result binding.  This also
                         # preserves the synthetic ID generated for an
                         # assistant call that had no provider ID.
                         legacy_tool_call_id = pending_tool_call_ids.pop()
                     else:
+                        if raw_tool_call_id is not None and raw_tool_call_id != "":
+                            legacy_invalid_fields.append("tool_call_id")
                         # Keep the result, but make the missing association
                         # explicit instead of assigning a record ID and
                         # pretending it matched an assistant call.
@@ -2073,17 +2770,16 @@ class ThreadPersistence:
                     kind=kind,
                     content=normalized.content,
                     tool_call_id=legacy_tool_call_id,
-                    tool_name=normalized.tool_name,
-                    tool_status=(
-                        str(getattr(message, "status", "success"))
-                        if kind == "tool"
-                        else None
-                    ),
+                    tool_name=legacy_tool_name,
+                    tool_status=legacy_tool_status,
                     tool_call_id_status=legacy_tool_call_id_status,
+                    legacy_invalid_fields=tuple(legacy_invalid_fields),
                     tool_calls=legacy_tool_calls,
                 )
                 await self._append_transcript_in_transaction(
-                    command, project_fingerprint=project_fingerprint
+                    command,
+                    project_fingerprint=project_fingerprint,
+                    allow_legacy_invalid=True,
                 )
             await self._connection.execute(
                 """
@@ -2201,6 +2897,117 @@ def _content_sha256(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+def _strict_json(value: object) -> str:
+    """以严格确定 JSON 保存投影元数据，拒绝 NaN 和隐式转字符串。"""
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def _rewrite_artifact_id(
+    project_fingerprint: str,
+    thread_id: str,
+    checkpoint_id: str,
+    index: int,
+    draft: ContextArtifactDraft,
+) -> str:
+    """为带 checkpoint 的无 ID Artifact 生成可跨进程重试的稳定 ID。"""
+    material = _strict_json(
+        {
+            "project_fingerprint": project_fingerprint,
+            "thread_id": thread_id,
+            "checkpoint_id": checkpoint_id,
+            "index": index,
+            "kind": draft.kind,
+            "content": draft.content,
+            "source_start": max(0, draft.source_start),
+            "source_end": max(max(0, draft.source_start), draft.source_end),
+        }
+    )
+    return f"{draft.kind}-{hashlib.sha256(material.encode('utf-8')).hexdigest()[:32]}"
+
+
+def _context_commit_payload(
+    thread_id: str,
+    artifacts: list[ContextArtifact],
+    summary: ContextSummary | None,
+    state: ContextState | None,
+    checkpoint: CompressionCheckpointDraft,
+    projected_messages: str,
+    source_record_sequence: int,
+    source_digest_value: str,
+) -> str:
+    """编码整个 CommitContextRewrite 的稳定语义，排除生成时间。"""
+    return _strict_json(
+        {
+            "version": 1,
+            "thread_id": thread_id,
+            "artifacts": [
+                {
+                    "artifact_id": artifact.artifact_id,
+                    "kind": artifact.kind,
+                    "content": artifact.content,
+                    "source_start": artifact.source_start,
+                    "source_end": artifact.source_end,
+                    "content_sha256": artifact.content_sha256,
+                    "byte_length": artifact.byte_length,
+                }
+                for artifact in artifacts
+            ],
+            "summary": (
+                None
+                if summary is None
+                else {
+                    "rewrite_version": summary.rewrite_version,
+                    "content": summary.content,
+                    "source_start": summary.source_start,
+                    "source_end": summary.source_end,
+                    "artifact_ids": summary.artifact_ids,
+                }
+            ),
+            "state": (
+                None
+                if state is None
+                else {
+                    "failures": state.failures,
+                    "circuit_open": state.circuit_open,
+                    "last_action": state.last_action,
+                }
+            ),
+            "checkpoint": {
+                "checkpoint_id": checkpoint.checkpoint_id,
+                "source_record_sequence": source_record_sequence,
+                "source_digest": source_digest_value,
+                "mode": checkpoint.mode,
+                "rewrite_version": checkpoint.rewrite_version,
+                "projected_messages": projected_messages,
+                "artifact_ids": checkpoint.artifact_ids,
+                "trigger": checkpoint.trigger,
+                "pressure_before": dict(checkpoint.pressure_before),
+                "pressure_after": dict(checkpoint.pressure_after),
+                "legacy_incomplete": checkpoint.legacy_incomplete,
+            },
+        }
+    )
+
+
+def _context_artifact_from_row(row: Mapping[str, Any]) -> ContextArtifact:
+    return ContextArtifact(
+        artifact_id=str(row["artifact_id"]),
+        kind=str(row["kind"]),
+        content=str(row["content"]),
+        source_start=int(row["source_start"]),
+        source_end=int(row["source_end"]),
+        created_at_ms=int(row["created_at_ms"]),
+        content_sha256=str(row["content_sha256"] or ""),
+        byte_length=int(row["byte_length"] or 0),
+    )
+
+
 def _user_record_id(run_id: str) -> str:
     """为新 Run 生成稳定用户记录身份。"""
     return f"run:{run_id}:user"
@@ -2230,8 +3037,8 @@ def _payload_content(payload: str | Mapping[str, object]) -> str:
     value: object
     if isinstance(payload, str):
         try:
-            decoded = json.loads(payload)
-        except json.JSONDecodeError:
+            decoded = strict_json_loads(payload)
+        except (ValueError, json.JSONDecodeError):
             return payload
         value = decoded
     else:
@@ -2244,6 +3051,8 @@ def _payload_content(payload: str | Mapping[str, object]) -> str:
 
 def _normalize_transcript_tool_calls(
     tool_calls: tuple[Mapping[str, object], ...],
+    *,
+    allow_legacy_invalid: bool = False,
 ) -> list[dict[str, object]]:
     """规范化 assistant tool calls，使幂等比较不依赖调用方字典顺序。"""
     normalized: list[dict[str, object]] = []
@@ -2251,15 +3060,47 @@ def _normalize_transcript_tool_calls(
     for call in tool_calls:
         if not isinstance(call, Mapping):
             raise ThreadPersistenceError("TRANSCRIPT_TOOL_CALL_INVALID")
-        call_id = str(call.get("id") or "")
-        if not call_id:
+        legacy_invalid_fields = call.get("legacy_invalid_fields")
+        if legacy_invalid_fields is not None:
+            if not allow_legacy_invalid:
+                raise ThreadPersistenceError("TRANSCRIPT_TOOL_CALL_INVALID")
+            if (
+                not isinstance(legacy_invalid_fields, (list, tuple))
+                or not legacy_invalid_fields
+                or not all(
+                    isinstance(field, str) and field
+                    for field in legacy_invalid_fields
+                )
+            ):
+                raise ThreadPersistenceError("TRANSCRIPT_TOOL_CALL_INVALID")
+            try:
+                canonical_invalid = strict_json_loads(
+                    json.dumps(
+                        dict(call),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    )
+                )
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise ThreadPersistenceError("TRANSCRIPT_TOOL_CALL_INVALID") from exc
+            if not isinstance(canonical_invalid, dict):
+                raise ThreadPersistenceError("TRANSCRIPT_TOOL_CALL_INVALID")
+            canonical_invalid["arguments_status"] = "invalid"
+            normalized.append(canonical_invalid)
+            continue
+        call_id = call.get("id")
+        if not isinstance(call_id, str) or not call_id:
             raise ThreadPersistenceError("TRANSCRIPT_TOOL_CALL_ID_INVALID")
         if call_id in seen_ids:
             raise ThreadPersistenceError("TRANSCRIPT_TOOL_CALL_ID_DUPLICATE")
         seen_ids.add(call_id)
-        name = str(call.get("name") or "tool")
+        name = call.get("name", "tool")
+        if not isinstance(name, str) or not name:
+            raise ThreadPersistenceError("TRANSCRIPT_TOOL_CALL_NAME_INVALID")
         try:
-            canonical = json.loads(
+            canonical = strict_json_loads(
                 json.dumps(
                     dict(call),
                     ensure_ascii=False,
@@ -2276,15 +3117,27 @@ def _normalize_transcript_tool_calls(
         canonical["name"] = name
         if "arguments_status" not in canonical:
             canonical["arguments_status"] = (
-                "valid" if "arguments" in canonical else "unavailable"
+                "valid"
+                if "arguments" in canonical or "args" in canonical
+                else "unavailable"
             )
+        if canonical["arguments_status"] == "valid" and not (
+            "arguments" in canonical or "args" in canonical
+        ):
+            raise ThreadPersistenceError("TRANSCRIPT_TOOL_CALL_ARGUMENTS_MISSING")
+        if canonical["arguments_status"] == "valid":
+            arguments = (
+                canonical["args"] if "args" in canonical else canonical["arguments"]
+            )
+            if not isinstance(arguments, Mapping):
+                raise ThreadPersistenceError("TRANSCRIPT_TOOL_CALL_ARGUMENTS_INVALID")
         normalized.append(canonical)
     return normalized
 
 
 def _transcript_record(row: Mapping[str, Any]) -> TranscriptRecord:
     """将 SQLite 行解析为不暴露表名的 typed Transcript。"""
-    payload = json.loads(str(row["payload"]))
+    payload = strict_json_loads(str(row["payload"]))
     if not isinstance(payload, Mapping):
         raise ThreadPersistenceError("TRANSCRIPT_PAYLOAD_INVALID")
     kind = str(row["kind"])
@@ -2312,6 +3165,7 @@ def _transcript_matches(
     command: TranscriptAppend,
     *,
     project_fingerprint: str,
+    allow_legacy_invalid: bool = False,
 ) -> bool:
     """判断重复追加是否是同一语义，而不是吞掉 Run ID 冲突。"""
     content_bytes = command.content.encode("utf-8")
@@ -2344,15 +3198,25 @@ def _transcript_matches(
         if record.artifact_id is not None:
             return False
         try:
-            expected_tool_calls = _normalize_transcript_tool_calls(command.tool_calls)
+            expected_tool_calls = _normalize_transcript_tool_calls(
+                command.tool_calls, allow_legacy_invalid=allow_legacy_invalid
+            )
         except ThreadPersistenceError:
             return False
         return payload.get("tool_calls", []) == expected_tool_calls
     return (
         payload.get("tool_call_id") == (command.tool_call_id or command.record_id)
-        and payload.get("name") == (command.tool_name or "tool")
-        and payload.get("status") == (command.tool_status or "success")
+        and (
+            ("name" not in payload and "name" in command.legacy_invalid_fields)
+            or payload.get("name") == (command.tool_name or "tool")
+        )
+        and (
+            ("status" not in payload and "status" in command.legacy_invalid_fields)
+            or payload.get("status") == (command.tool_status or "success")
+        )
         and payload.get("tool_call_id_status") == command.tool_call_id_status
+        and payload.get("legacy_invalid_fields", [])
+        == list(command.legacy_invalid_fields)
         and record.artifact_id == expected_artifact_id
     )
 
@@ -2364,8 +3228,13 @@ def _thread_message_from_transcript(record: TranscriptRecord) -> ThreadMessage |
     content = record.payload.get("content")
     if not isinstance(content, str):
         content = ""
+    raw_tool_name = record.payload.get("name")
     tool_name = (
-        str(record.payload.get("name") or "tool") if record.kind == "tool" else None
+        raw_tool_name
+        if record.kind == "tool"
+        and isinstance(raw_tool_name, str)
+        and raw_tool_name
+        else None
     )
     return ThreadMessage(kind=record.kind, content=content, tool_name=tool_name)  # type: ignore[arg-type]
 
@@ -2407,10 +3276,15 @@ def _normalize_message(value: Any) -> ThreadMessage | None:
     if name == "AIMessage":
         return ThreadMessage(kind="assistant", content=content)
     if name == "ToolMessage":
+        raw_tool_name = getattr(value, "name", None)
         return ThreadMessage(
             kind="tool",
             content=content,
-            tool_name=str(getattr(value, "name", None) or "tool"),
+            tool_name=(
+                raw_tool_name
+                if isinstance(raw_tool_name, str) and raw_tool_name
+                else None
+            ),
         )
     return None
 
@@ -2440,21 +3314,56 @@ def _legacy_tool_calls(
     )
     normalized: list[Mapping[str, object]] = []
     for index, call in enumerate(raw_calls):
-        call_id = str(call.get("id") or "")
-        if not call_id:
+        invalid_fields: list[str] = []
+        raw_call_id = call.get("id")
+        if isinstance(raw_call_id, str) and raw_call_id:
+            call_id: str | None = raw_call_id
+        elif raw_call_id is None or raw_call_id == "":
             call_id = _legacy_tool_call_id(
                 project_fingerprint, thread_id, sequence, index
             )
-        normalized_call: dict[str, object] = {
-            "id": call_id,
-            "name": str(call.get("name") or "tool"),
-        }
-        if call.get("type") is not None:
-            normalized_call["type"] = str(call["type"])
+        else:
+            call_id = None
+            invalid_fields.append("id")
+        raw_name = call.get("name")
+        normalized_call: dict[str, object] = {}
+        if call_id is not None:
+            normalized_call["id"] = call_id
+        if isinstance(raw_name, str) and raw_name:
+            normalized_call["name"] = raw_name
+        else:
+            invalid_fields.append("name")
+        raw_type = call.get("type")
+        if raw_type is not None:
+            if isinstance(raw_type, str):
+                normalized_call["type"] = raw_type
+            else:
+                invalid_fields.append("type")
         arguments = call.get("args", call.get("arguments"))
         _set_legacy_tool_call_arguments(normalized_call, arguments)
-        if call.get("error"):
-            normalized_call["arguments_error"] = str(call["error"])
+        raw_arguments_status = call.get("arguments_status")
+        if raw_arguments_status is not None and raw_arguments_status != "valid":
+            if isinstance(raw_arguments_status, str) and raw_arguments_status in {
+                "invalid",
+                "unavailable",
+            }:
+                normalized_call["arguments_status"] = raw_arguments_status
+            else:
+                normalized_call["arguments_status"] = "invalid"
+                invalid_fields.append("arguments_status")
+        if "error" in call:
+            raw_error = call["error"]
+            if isinstance(raw_error, str):
+                # 保持旧语义：空字符串等同没有错误，非空字符串是可证明的错误事实。
+                if raw_error:
+                    normalized_call["arguments_error"] = raw_error
+                    normalized_call["arguments_status"] = "invalid"
+            elif raw_error is not None:
+                normalized_call["arguments_error_type"] = type(raw_error).__name__
+                invalid_fields.append("error")
+                normalized_call["arguments_status"] = "invalid"
+        if invalid_fields:
+            normalized_call["legacy_invalid_fields"] = invalid_fields
             normalized_call["arguments_status"] = "invalid"
         normalized.append(normalized_call)
     return tuple(normalized)
@@ -2473,7 +3382,7 @@ def _set_legacy_tool_call_arguments(
             call["arguments_status"] = "unavailable"
             return
         try:
-            parsed = json.loads(value)
+            parsed = strict_json_loads(value)
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             call["arguments_status"] = "invalid"
             call["arguments_error"] = type(exc).__name__
@@ -2488,7 +3397,7 @@ def _set_legacy_tool_call_arguments(
             separators=(",", ":"),
             allow_nan=False,
         )
-        normalized = json.loads(encoded)
+        normalized = strict_json_loads(encoded)
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         call["arguments_raw"] = repr(value)
         call["arguments_status"] = "invalid"

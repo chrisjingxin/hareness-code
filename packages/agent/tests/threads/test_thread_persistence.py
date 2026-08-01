@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import math
 import sqlite3
 import stat
@@ -18,6 +19,7 @@ from langchain_core.runnables import Runnable
 from langgraph.checkpoint.base import empty_checkpoint
 
 import harness_agent.thread_persistence as thread_persistence_module
+from harness_agent.context_projection import ContextProjectionError, ContextProjector
 from harness_agent.execution_binding import (
     RunExecutionBinding,
     SafeModelProfile,
@@ -78,6 +80,8 @@ def test_thread_persistence_exposes_lifecycle_interface_only() -> None:
     assert hasattr(ThreadPersistence, "commit_context")
     assert hasattr(ThreadPersistence, "complete_run")
     assert hasattr(ThreadPersistence, "load_context")
+    assert hasattr(ThreadPersistence, "load_context_state")
+    assert hasattr(ThreadPersistence, "load_latest_valid_compression_checkpoint")
     for method in (
         "record_message",
         "record_run_start",
@@ -95,7 +99,6 @@ def test_thread_persistence_exposes_lifecycle_interface_only() -> None:
         "get_agent_engine_profile",
         "save_agent_engine_profile",
         "read_context_artifact",
-        "load_context_state",
     ):
         assert not hasattr(ThreadPersistence, method)
 
@@ -982,6 +985,299 @@ async def test_v6_bootstrap_binds_single_idless_tool_result_and_marks_ambiguous(
         await migrated.close()
 
 
+async def test_v6_bootstrap_keeps_malformed_tool_identity_invalid_and_unmatched(
+    tmp_path: Path,
+) -> None:
+    """非字符串 legacy 工具身份只保留 invalid 事实，不能被洗成有效关联。"""
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    initial = await ThreadPersistence.open(project=project, home=home)
+    await accept_thread(initial, "legacy-malformed-tool", "执行畸形工具")
+    malformed_call = AIMessage.model_construct(
+        content="",
+        tool_calls=[
+            {
+                "id": 123,
+                "name": ["execute"],
+                "type": 7,
+                "args": {},
+                "error": {"reason": "bad"},
+            }
+        ],
+        invalid_tool_calls=[],
+    )
+    malformed_result = ToolMessage.model_construct(
+        content="result",
+        tool_call_id=456,
+        name={"tool": "execute"},
+        status=["success"],
+    )
+    checkpoint = empty_checkpoint()
+    checkpoint["channel_values"] = {
+        "messages": [
+            HumanMessage(content="执行畸形工具"),
+            malformed_call,
+            malformed_result,
+        ]
+    }
+    with pytest.warns(UserWarning, match="Pydantic serializer warnings"):
+        await initial.checkpointer.aput(
+            initial.graph_config("legacy-malformed-tool"), checkpoint, {}, {}
+        )
+    database = initial.database_path
+    await initial.close()
+    _downgrade_to_v6(database, drop_artifact_metadata=True)
+
+    migrated = await ThreadPersistence.open(project=project, home=home)
+    try:
+        records = await migrated.load_transcript("legacy-malformed-tool")
+        assert [record.kind for record in records] == ["user", "assistant", "tool"]
+        call = records[1].payload["tool_calls"][0]
+        assert "id" not in call and "name" not in call and "type" not in call
+        assert call["legacy_invalid_fields"] == ["id", "name", "type", "error"]
+        assert call["arguments_status"] == "invalid"
+        assert call["arguments_error_type"] == "dict"
+
+        result = records[2].payload
+        assert result["tool_call_id_status"] == "unmatched"
+        assert result["legacy_invalid_fields"] == [
+            "name",
+            "status",
+            "tool_call_id",
+        ]
+        assert "name" not in result and "status" not in result
+        assert result["tool_call_id"] == records[2].record_id
+
+        opened = await migrated.open_thread("legacy-malformed-tool")
+        assert opened.legacy_incomplete_history is True
+        assert opened.messages[-1].kind == "tool"
+        assert opened.messages[-1].tool_name is None
+        with pytest.raises(
+            ContextProjectionError, match="PROJECTION_TOOL_CALL_IDENTITY_INVALID"
+        ):
+            await ContextProjector(migrated).project("legacy-malformed-tool")
+    finally:
+        await migrated.close()
+
+
+async def test_v6_invalid_arguments_never_enter_pending_tool_correlation(
+    tmp_path: Path,
+) -> None:
+    """合法 ID/name 不能掩盖 error 或非 valid 参数事实，结果必须 unmatched。"""
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    initial = await ThreadPersistence.open(project=project, home=home)
+    await accept_thread(initial, "legacy-invalid-arguments", "执行")
+    calls = AIMessage.model_construct(
+        content="",
+        tool_calls=[
+            {
+                "id": "call-error",
+                "name": "execute",
+                "args": {},
+                "error": {"reason": "bad"},
+            },
+            {
+                "id": "call-unavailable",
+                "name": "execute",
+                "args": {},
+                "arguments_status": "unavailable",
+            },
+        ],
+        invalid_tool_calls=[],
+    )
+    checkpoint = empty_checkpoint()
+    checkpoint["channel_values"] = {
+        "messages": [
+            HumanMessage(content="执行"),
+            calls,
+            ToolMessage(
+                content="error-result",
+                tool_call_id="call-error",
+                name="execute",
+            ),
+            ToolMessage(
+                content="unavailable-result",
+                tool_call_id="call-unavailable",
+                name="execute",
+            ),
+        ]
+    }
+    await initial.checkpointer.aput(
+        initial.graph_config("legacy-invalid-arguments"), checkpoint, {}, {}
+    )
+    database = initial.database_path
+    await initial.close()
+    _downgrade_to_v6(database, drop_artifact_metadata=True)
+
+    migrated = await ThreadPersistence.open(project=project, home=home)
+    try:
+        records = await migrated.load_transcript("legacy-invalid-arguments")
+        imported_calls = records[1].payload["tool_calls"]
+        assert imported_calls[0]["id"] == "call-error"
+        assert imported_calls[0]["arguments_status"] == "invalid"
+        assert imported_calls[0]["legacy_invalid_fields"] == ["error"]
+        assert imported_calls[0]["arguments_error_type"] == "dict"
+        assert imported_calls[1]["id"] == "call-unavailable"
+        assert imported_calls[1]["arguments_status"] == "unavailable"
+        assert "legacy_invalid_fields" not in imported_calls[1]
+        assert records[2].payload["tool_call_id"] == "call-error"
+        assert records[2].payload["tool_call_id_status"] == "unmatched"
+        assert records[3].payload["tool_call_id"] == "call-unavailable"
+        assert records[3].payload["tool_call_id_status"] == "unmatched"
+    finally:
+        await migrated.close()
+
+
+@pytest.mark.parametrize(
+    "raw_error",
+    ({}, [], 0, False),
+    ids=("empty-dict", "empty-list", "zero", "false"),
+)
+async def test_v6_falsey_non_string_error_never_matches_result(
+    tmp_path: Path, raw_error: object
+) -> None:
+    """字段存在的 falsey 非字符串 error 仍是 invalid，不能被 truthiness 漏掉。"""
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    initial = await ThreadPersistence.open(project=project, home=home)
+    await accept_thread(initial, "legacy-falsey-error", "执行")
+    call = AIMessage.model_construct(
+        content="",
+        tool_calls=[
+            {
+                "id": "call",
+                "name": "execute",
+                "args": {},
+                "error": raw_error,
+            }
+        ],
+        invalid_tool_calls=[],
+    )
+    checkpoint = empty_checkpoint()
+    checkpoint["channel_values"] = {
+        "messages": [
+            HumanMessage(content="执行"),
+            call,
+            ToolMessage(content="result", tool_call_id="call", name="execute"),
+        ]
+    }
+    await initial.checkpointer.aput(
+        initial.graph_config("legacy-falsey-error"), checkpoint, {}, {}
+    )
+    database = initial.database_path
+    await initial.close()
+    _downgrade_to_v6(database, drop_artifact_metadata=True)
+
+    migrated = await ThreadPersistence.open(project=project, home=home)
+    try:
+        records = await migrated.load_transcript("legacy-falsey-error")
+        imported_call = records[1].payload["tool_calls"][0]
+        assert imported_call["arguments_status"] == "invalid"
+        assert imported_call["legacy_invalid_fields"] == ["error"]
+        assert imported_call["arguments_error_type"] == type(raw_error).__name__
+        assert records[2].payload["tool_call_id"] == "call"
+        assert records[2].payload["tool_call_id_status"] == "unmatched"
+    finally:
+        await migrated.close()
+
+
+def test_legacy_error_missing_none_and_strings_keep_existing_semantics() -> None:
+    """缺失/None/空字符串等同无错误；非空字符串保留为可证明错误。"""
+    base = {"id": "call", "name": "execute", "args": {}}
+    for extra in ({}, {"error": None}, {"error": ""}):
+        message = AIMessage.model_construct(
+            content="",
+            tool_calls=[{**base, **extra}],
+            invalid_tool_calls=[],
+        )
+        imported = thread_persistence_module._legacy_tool_calls(
+            message,
+            project_fingerprint="project",
+            thread_id="thread",
+            sequence=1,
+        )[0]
+        assert imported["arguments_status"] == "valid"
+        assert "legacy_invalid_fields" not in imported
+        assert "arguments_error" not in imported
+
+    string_error = AIMessage.model_construct(
+        content="",
+        tool_calls=[{**base, "error": "provider error"}],
+        invalid_tool_calls=[],
+    )
+    imported_error = thread_persistence_module._legacy_tool_calls(
+        string_error,
+        project_fingerprint="project",
+        thread_id="thread",
+        sequence=1,
+    )[0]
+    assert imported_error["arguments_error"] == "provider error"
+    assert imported_error["arguments_status"] == "invalid"
+    assert "legacy_invalid_fields" not in imported_error
+
+
+async def test_public_transcript_append_cannot_enable_legacy_leniency(
+    tmp_path: Path,
+) -> None:
+    """普通写入不能伪造迁移能力或注入 legacy invalid marker。"""
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    store = await ThreadPersistence.open(project=project, home=home)
+    await accept_thread(store, "thread", "u")
+    with pytest.raises(TypeError):
+        TranscriptAppend(
+            thread_id="thread",
+            record_id="legacy-flag",
+            kind="assistant",
+            content="",
+            legacy_import=True,  # type: ignore[call-arg]
+        )
+    with pytest.raises(ThreadPersistenceError, match="TRANSCRIPT_TOOL_CALL_INVALID"):
+        await store.append_transcript(
+            TranscriptAppend(
+                thread_id="thread",
+                record_id="nested-marker",
+                kind="assistant",
+                content="",
+                tool_calls=(
+                    {
+                        "legacy_invalid_fields": ["id"],
+                        "arguments_status": "invalid",
+                    },
+                ),
+            )
+        )
+    with pytest.raises(
+        ThreadPersistenceError, match="TRANSCRIPT_LEGACY_MARKER_FORBIDDEN"
+    ):
+        await store.append_transcript_batch(
+            (
+                TranscriptAppend(
+                    thread_id="thread",
+                    record_id="would-be-partial",
+                    kind="user",
+                    content="later",
+                ),
+                TranscriptAppend(
+                    thread_id="thread",
+                    record_id="result-marker",
+                    kind="tool",
+                    content="result",
+                    legacy_invalid_fields=("name",),
+                ),
+            )
+        )
+    assert [record.kind for record in await store.load_transcript("thread")] == [
+        "user"
+    ]
+    await store.close()
+
+
 async def test_transcript_rejects_non_json_and_nonfinite_tool_arguments(
     tmp_path: Path,
 ) -> None:
@@ -1092,8 +1388,8 @@ async def test_concurrent_v6_openers_serialize_migration_without_downgrade(
     assert all(row[3] is None and row[4] is None for row in rows)
 
 
-async def test_v6_legacy_artifact_reads_explicit_default_metadata(tmp_path: Path) -> None:
-    """真正缺少 v7 两列的旧 Artifact 迁移后读回空摘要和零字节默认值。"""
+async def test_v6_legacy_artifact_backfills_verifiable_metadata(tmp_path: Path) -> None:
+    """缺少 v7 两列的旧 Artifact 迁移后补齐真实摘要和字节数。"""
     home = tmp_path / "home"
     project = tmp_path / "project"
     project.mkdir()
@@ -1114,8 +1410,8 @@ async def test_v6_legacy_artifact_reads_explicit_default_metadata(tmp_path: Path
     artifact = await migrated.load_context_artifact("legacy-artifact", artifact_id)
     assert artifact is not None
     assert artifact.content == "旧原文"
-    assert artifact.content_sha256 == ""
-    assert artifact.byte_length == 0
+    assert artifact.content_sha256 == hashlib.sha256("旧原文".encode()).hexdigest()
+    assert artifact.byte_length == len("旧原文".encode())
     await migrated.close()
 
 

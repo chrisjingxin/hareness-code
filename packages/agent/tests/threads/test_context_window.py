@@ -22,10 +22,15 @@ async def test_context_window_reports_and_soft_dehydrates_old_tool_results(tmp_p
     from harness_agent.threads.context_window import ContextWindowMiddleware
 
     store = await _store(tmp_path)
+    await accept_thread(store, "thread", "第一轮")
     model = FakeMessagesListChatModel(responses=[AIMessage(content="unused")])
     middleware = ContextWindowMiddleware(model, context_window_tokens=16_384, thread_persistence=store)
     messages = [
         HumanMessage(content="第一轮"),
+        AIMessage(
+            content="",
+            tool_calls=[{"id": "tool-old", "name": "read", "args": {}}],
+        ),
         ToolMessage(content="x" * 33_000, tool_call_id="tool-old"),
         HumanMessage(content="第二轮"),
         HumanMessage(content="第三轮"),
@@ -37,10 +42,114 @@ async def test_context_window_reports_and_soft_dehydrates_old_tool_results(tmp_p
     assert reported[1] == "report" and reported[3] is False
     assert dehydrated[1] == "soft_dehydration" and dehydrated[3] is True
     assert dehydrated[2]
-    assert "/.harness/history/" in str(dehydrated[0][1].content)
+    assert "/.harness/history/" in str(dehydrated[0][2].content)
     artifact = await store.load_context_artifact("thread", dehydrated[2][0])
     assert artifact and "x" * 100 in artifact.content
     await store.close()
+
+
+async def test_consecutive_rewrites_declare_all_artifacts_and_restart_from_latest(tmp_path):
+    """连续脱水、摘要、再脱水必须继承旧指针，重启后 latest checkpoint 仍有效。"""
+    from harness_agent.context_projection import ContextProjector, artifact_references
+    from harness_agent.context_window import ContextWindowMiddleware
+    from harness_agent.thread_persistence import ThreadPersistence, TranscriptAppend
+
+    store = await _store(tmp_path)
+    await accept_thread(store, "thread", "第一轮")
+    first_middleware = ContextWindowMiddleware(
+        FakeMessagesListChatModel(responses=[AIMessage(content="unused")]),
+        context_window_tokens=16_384,
+        thread_persistence=store,
+    )
+    original = [
+        HumanMessage(content="第一轮"),
+        AIMessage(
+            content="",
+            tool_calls=[{"id": "tool-first", "name": "read", "args": {}}],
+        ),
+        ToolMessage(content="a" * 33_000, tool_call_id="tool-first"),
+        AIMessage(content="旧结论 " + "b" * 33_000),
+        HumanMessage(content="第二轮"),
+    ]
+    first_messages, first_new_ids, first_changed = await first_middleware._dehydrate(
+        "thread", original, keep_turns=1
+    )
+    assert first_changed is True and len(first_new_ids) == 1
+    first_artifact_id = first_new_ids[0]
+
+    await store.append_transcript(
+        TranscriptAppend(
+            thread_id="thread",
+            record_id="summary-boundary",
+            kind="user",
+            content="开始摘要",
+        )
+    )
+    summary_text = (
+        "## 目标\n压缩\n## 已确认事实\n已归档工具输出\n## 决策\n保留指针"
+        "\n## 改动\n无\n## 测试\n无\n## 未决项\n无\n## 归档\n"
+        f"/.harness/history/{first_artifact_id}.md"
+    )
+    summary_middleware = ContextWindowMiddleware(
+        FakeMessagesListChatModel(responses=[AIMessage(content=summary_text)]),
+        context_window_tokens=16_384,
+        thread_persistence=store,
+    )
+    second_messages, second_new_ids, second_changed = await summary_middleware._summarize(
+        "thread", first_messages, keep_turns=1
+    )
+    assert second_changed is True and len(second_new_ids) == 1
+    second_checkpoint = await store.load_latest_valid_compression_checkpoint("thread")
+    assert second_checkpoint is not None
+    assert second_checkpoint.artifact_ids == artifact_references(second_messages)
+    assert set(second_checkpoint.artifact_ids) == {
+        first_artifact_id,
+        second_new_ids[0],
+    }
+
+    await store.append_transcript(
+        TranscriptAppend(
+            thread_id="thread",
+            record_id="dehydrate-boundary",
+            kind="user",
+            content="继续脱水",
+        )
+    )
+    third_input = [
+        *second_messages,
+        AIMessage(
+            content="",
+            tool_calls=[{"id": "tool-third", "name": "read", "args": {}}],
+        ),
+        ToolMessage(content="c" * 33_000, tool_call_id="tool-third"),
+        HumanMessage(content="第三轮"),
+    ]
+    third_messages, third_new_ids, third_changed = await first_middleware._dehydrate(
+        "thread", third_input, keep_turns=1
+    )
+    assert third_changed is True and len(third_new_ids) == 1
+    latest = await store.load_latest_valid_compression_checkpoint("thread")
+    assert latest is not None
+    assert latest.artifact_ids == artifact_references(third_messages)
+    assert set(latest.artifact_ids) == {
+        first_artifact_id,
+        second_new_ids[0],
+        third_new_ids[0],
+    }
+    assert set(third_new_ids).isdisjoint(first_new_ids + second_new_ids)
+
+    await store.close()
+    reopened = await ThreadPersistence.open(
+        project=tmp_path / "project", home=tmp_path / "home"
+    )
+    recovered = await ContextProjector(reopened).project("thread")
+    assert recovered.checkpoint is not None
+    assert recovered.checkpoint.checkpoint_id == latest.checkpoint_id
+    assert recovered.checkpoint.artifact_ids == latest.artifact_ids
+    assert [message.content for message in recovered.messages] == [
+        message.content for message in third_messages
+    ]
+    await reopened.close()
 
 
 async def test_context_window_summarizes_at_80_and_opens_circuit_after_failures(tmp_path):
@@ -48,6 +157,9 @@ async def test_context_window_summarizes_at_80_and_opens_circuit_after_failures(
     from harness_agent.threads.context_window import ContextWindowMiddleware
 
     store = await _store(tmp_path)
+    await accept_thread(store, "thread", "目标")
+    await accept_thread(store, "forced", "目标")
+    await accept_thread(store, "broken", "目标")
     messages = [
         HumanMessage(content="目标"),
         AIMessage(content="已检查 " + "x" * 33_000),
@@ -91,6 +203,7 @@ async def test_context_window_overflow_recovery_archives_before_single_retry(tmp
     from harness_agent.threads.context_window import ContextWindowMiddleware
 
     store = await _store(tmp_path)
+    await accept_thread(store, "overflow", "旧请求")
     middleware = ContextWindowMiddleware(
         FakeMessagesListChatModel(responses=[AIMessage(content="unused")]),
         context_window_tokens=16_384,
@@ -98,13 +211,17 @@ async def test_context_window_overflow_recovery_archives_before_single_retry(tmp
     )
     messages = [
         HumanMessage(content="旧请求"),
+        AIMessage(
+            content="",
+            tool_calls=[{"id": "tool-overflow", "name": "read", "args": {}}],
+        ),
         ToolMessage(content="z" * 33_000, tool_call_id="tool-overflow"),
         HumanMessage(content="保留请求"),
     ]
     recovered, artifacts, changed = await middleware._overflow_recovery("overflow", messages)
 
     assert changed is True and artifacts
-    assert "/.harness/history/" in str(recovered[1].content)
+    assert "/.harness/history/" in str(recovered[2].content)
     assert (await store.load_context_artifact("overflow", artifacts[0])) is not None
     await store.close()
 
@@ -114,6 +231,7 @@ async def test_context_window_manual_compaction_bypasses_threshold_but_keeps_sav
     from harness_agent.threads.context_window import ContextWindowMiddleware
 
     store = await _store(tmp_path)
+    await accept_thread(store, "manual", "第一轮")
     middleware = ContextWindowMiddleware(
         FakeMessagesListChatModel(responses=[AIMessage(content="## 目标\n压缩\n## 已确认事实\n已完成\n## 决策\n保留两轮\n## 改动\n无\n## 测试\n无\n## 未决项\n无\n## 归档\n无")]),
         context_window_tokens=16_384,
@@ -227,11 +345,19 @@ async def test_context_rewrite_keeps_current_model_response_in_checkpoint(tmp_pa
         ]
     )
     model.profile = {"max_input_tokens": 16_384}
+    from harness_agent.context_window import ContextWindowMiddleware
+
+    middleware = ContextWindowMiddleware(
+        model,
+        context_window_tokens=16_384,
+        thread_persistence=store,
+    )
     agent = create_harness_agent(
         model,
         cwd=str(tmp_path / "project"),
         checkpointer=store.checkpointer,
         thread_persistence=store,
+        context_middleware=middleware,
         context_window_tokens=16_384,
         enable_skills=False,
         enable_memory=False,
@@ -245,6 +371,9 @@ async def test_context_rewrite_keeps_current_model_response_in_checkpoint(tmp_pa
         HumanMessage(content="第三轮"),
     ]
     await accept_thread(store, "rewrite", "第一轮")
+    # 非 shared-engine 的库级图没有 RunContext，中间件使用显式
+    # ephemeral 领域；生产 Host 总是由 RunContext 提供真实 thread ID。
+    await accept_thread(store, "ephemeral", "第一轮")
     async for _ in agent.astream({"messages": messages}, config=store.graph_config("rewrite"), stream_mode=["messages", "updates"]):
         pass
 
@@ -253,6 +382,7 @@ async def test_context_rewrite_keeps_current_model_response_in_checkpoint(tmp_pa
     await store.complete_run("rewrite")
     context = await store.load_context("rewrite")
     contents = [message.content for message in context.messages]
+    updates = middleware.consume_updates("ephemeral")
     assert "最终回答" in contents
-    assert any("harness_context_summary" in content for content in contents)
+    assert any("harness_context_summary" in content for content in contents), updates
     await store.close()
