@@ -629,9 +629,9 @@ executor = "fast"
 async def test_default_sidecar_shares_engine_by_profile_without_draining_other_models(
     tmp_path: Path,
 ):
-    """默认 Sidecar 以 Profile 而非 thread 缓存图；新模型不应排空旧 AgentEngine。"""
-    from harness_agent.runtime.agent_engine import AgentEngine
-    from harness_agent.config.config import (
+    """默认 Sidecar 以 Profile 而非 thread 缓存图；模型快照变化只排空旧 Profile。"""
+    from harness_agent.agent_engine import AgentEngine
+    from harness_agent.config import (
         ExecutionSettings,
         ModelSettings,
         AgentEnginePoolSettings,
@@ -705,9 +705,116 @@ async def test_default_sidecar_shares_engine_by_profile_without_draining_other_m
     assert third_engine is not old_engine
     assert builds == 2
     assert len(store.profiles) == 2
+    # Ordinary resolution of a different model must not infer a global
+    # invalidation; both stable Profiles remain available until an explicit
+    # snapshot-change event targets one of them.
     assert old_engine is not None and old_engine.graph is not None
 
     await server._release_agent_engine_lease(third_lease)
+    await server._close_agent_engine_pool()
+
+
+async def test_host_snapshot_boundary_serializes_update_with_single_flight_acquire() -> None:
+    """更新等待旧 Run 的首建完成，新 Profile 才能在失效边界后取得图。"""
+    from types import SimpleNamespace
+
+    from harness_agent.agent_engine import AgentEngine, AgentEnginePool, AgentEngineState
+    from harness_agent.agent_engine_profile import (
+        AgentEngineProfile,
+        ModelRoleBinding,
+        component_fingerprint,
+    )
+    from harness_agent.mcp import McpServerConfig, build_mcp_snapshot
+    from harness_agent.server import AgentHost
+
+    def profile(mcp_fingerprint: str) -> AgentEngineProfile:
+        def fingerprint(component: str) -> str:
+            return component_fingerprint({"snapshot-boundary": component})
+
+        return AgentEngineProfile(
+            project_fingerprint=fingerprint("project"),
+            topology_id="single-agent",
+            topology_version=1,
+            model_roles=(
+                ModelRoleBinding(
+                    role="primary",
+                    model_config_fingerprint=fingerprint("model"),
+                ),
+            ),
+            tool_catalog_fingerprint=fingerprint("tools"),
+            skill_catalog_fingerprint=fingerprint("skills"),
+            mcp_config_fingerprint=mcp_fingerprint,
+            sandbox_config_fingerprint=fingerprint("sandbox"),
+            policy_fingerprint=fingerprint("policy"),
+            middleware_fingerprint=fingerprint("middleware"),
+            prompt_template_fingerprint=fingerprint("prompt"),
+        )
+
+    old_snapshot = build_mcp_snapshot([], revision="old-boundary")
+    new_snapshot = build_mcp_snapshot(
+        [McpServerConfig(name="updated", transport="stdio", command="updated")],
+        revision="new-boundary",
+    )
+    old_profile = profile(old_snapshot.digest)
+    new_profile = profile(new_snapshot.digest)
+    builder_started = asyncio.Event()
+    release_builder = asyncio.Event()
+    order: list[str] = []
+
+    async def build(requested: AgentEngineProfile) -> AgentEngine:
+        builder_started.set()
+        await release_builder.wait()
+        order.append("build_finished")
+        return AgentEngine(profile=requested, graph=object())
+
+    class Manager:
+        reaps = 0
+
+        async def reap(self) -> None:
+            self.reaps += 1
+
+    server = AgentHost(allow_echo=False)
+    server._config = SimpleNamespace(model=object())
+    server._load_config = lambda: None  # type: ignore[method-assign]
+    server._agent_engine_pool = AgentEnginePool(build)
+    manager = Manager()
+    server._mcp_manager = manager  # type: ignore[assignment]
+
+    acquire_task = asyncio.create_task(
+        server._acquire_default_agent_engine("old-thread", profile=old_profile)
+    )
+    await builder_started.wait()
+
+    async def update() -> None:
+        async with server._agent_engine_snapshot_lock:
+            await server._invalidate_profiles_for_snapshot(
+                new_snapshot,
+                reason="mcp_snapshot_changed",
+            )
+            order.append("invalidated")
+
+    update_task = asyncio.create_task(update())
+    await asyncio.sleep(0)
+    assert not update_task.done()
+
+    release_builder.set()
+    old_lease, old_engine = await acquire_task
+    await update_task
+    assert order.index("build_finished") < order.index("invalidated")
+    assert old_engine is not None
+    assert await server._agent_engine_pool.state_for(old_profile.profile_key) == AgentEngineState.DRAINING
+    assert old_engine.graph is not None
+    assert manager.reaps == 1
+
+    await server._release_agent_engine_lease(old_lease)
+    assert old_engine.graph is None
+
+    new_lease, new_engine = await server._acquire_default_agent_engine(
+        "new-thread",
+        profile=new_profile,
+    )
+    assert new_engine is not old_engine
+    await server._release_agent_engine_lease(new_lease)
     await server._close_agent_engine_pool()
 
 
@@ -717,11 +824,12 @@ async def test_default_engine_builder_passes_one_host_lock_to_each_profile(
     """不同 Profile 的默认图必须共享所属 AgentHost 的工具读写锁。"""
     from types import SimpleNamespace
 
-    import harness_agent.runtime.agent as agent_module
-    import harness_agent.threads.context_window as context_window_module
-    import harness_agent.runtime.execution as execution_module
-    import harness_agent.extensions.providers.harness_gateway as gateway_module
-    from harness_agent.host.agent_host import AgentHost
+    import harness_agent.agent as agent_module
+    import harness_agent.context_window as context_window_module
+    import harness_agent.execution as execution_module
+    import harness_agent.providers.harness_gateway as gateway_module
+    from harness_agent.mcp import McpConnectionManager, build_mcp_snapshot
+    from harness_agent.server import AgentHost
 
     captured_locks: list[object] = []
     monkeypatch.setattr(
@@ -737,7 +845,7 @@ async def test_default_engine_builder_passes_one_host_lock_to_each_profile(
     monkeypatch.setattr(
         execution_module,
         "create_execution_context",
-        lambda *_args, **_kwargs: SimpleNamespace(backend=object()),
+        lambda *_args, **_kwargs: SimpleNamespace(backend=object(), aclose=lambda: None),
     )
     monkeypatch.setattr(
         gateway_module,
@@ -745,20 +853,32 @@ async def test_default_engine_builder_passes_one_host_lock_to_each_profile(
         lambda *_args, **_kwargs: object(),
     )
 
+    class ProviderLease:
+        value = object()
+
+        async def release(self) -> None:
+            return None
+
     class ProviderClients:
-        async def get_async_client(self, _settings: object) -> object:
-            return object()
+        async def acquire(self, _settings: object) -> ProviderLease:
+            return ProviderLease()
 
     async def persistence() -> object:
         return SimpleNamespace(checkpointer=object())
 
+    mcp_snapshot = build_mcp_snapshot([], revision="test")
+
     def profile(profile_key: str) -> SimpleNamespace:
-        return SimpleNamespace(profile_key=profile_key, mcp_config_fingerprint="mcp")
+        return SimpleNamespace(
+            profile_key=profile_key,
+            mcp_config_fingerprint=mcp_snapshot.digest,
+            sandbox_config_fingerprint="sandbox",
+        )
 
     def spec(runtime_profile: SimpleNamespace) -> SimpleNamespace:
         return SimpleNamespace(
             runtime_profile=runtime_profile,
-            mcp_snapshot=SimpleNamespace(digest="mcp"),
+            mcp_snapshot=mcp_snapshot,
             execution=SimpleNamespace(approval_mode="yolo"),
             workspace=tmp_path,
             model_settings=SimpleNamespace(context_window_tokens=128_000),
@@ -773,6 +893,7 @@ async def test_default_engine_builder_passes_one_host_lock_to_each_profile(
         )
 
     server = AgentHost(allow_echo=True, workspace=tmp_path)
+    server._mcp_manager = McpConnectionManager(mcp_snapshot)
     server._provider_client_pool = ProviderClients()  # type: ignore[assignment]
     server._ensure_thread_persistence = persistence  # type: ignore[method-assign]
     first_profile = profile("profile-first")
@@ -1608,6 +1729,45 @@ async def test_stdio_subprocess_end_to_end_echo_mode():
         process.stdin.close()
         await asyncio.wait_for(process.wait(), timeout=2)
         assert "content.delta" in _event_types(frames)
+
+
+async def test_agent_host_closes_engines_before_shared_resource_owners(tmp_path: Path) -> None:
+    """Host 先释放 AgentEngine lease，再按 owner 顺序关闭共享资源。"""
+    from types import SimpleNamespace
+
+    from harness_agent.server import AgentHost
+
+    order: list[str] = []
+    server = AgentHost(allow_echo=True, config_home=tmp_path / "home", workspace=tmp_path)
+
+    async def close_run_coordinator() -> None:
+        order.append("run")
+
+    async def close_engines() -> None:
+        order.append("engine")
+
+    async def close_mcp() -> None:
+        order.append("mcp")
+
+    async def close_workspace() -> None:
+        order.append("workspace")
+
+    async def close_provider() -> None:
+        order.append("provider")
+
+    async def close_persistence() -> None:
+        order.append("persistence")
+
+    server._run_coordinator.close = close_run_coordinator  # type: ignore[method-assign]
+    server._close_agent_engine_pool = close_engines  # type: ignore[method-assign]
+    server._mcp_manager = SimpleNamespace(close_all=close_mcp)
+    server._workspace_execution_resources = SimpleNamespace(aclose=close_workspace)
+    server._provider_client_pool = SimpleNamespace(aclose=close_provider)
+    server._close_thread_persistence = close_persistence  # type: ignore[method-assign]
+
+    await server.close()
+
+    assert order == ["run", "engine", "mcp", "workspace", "provider", "persistence"]
 
 
 async def test_mcp_status_no_config(tmp_path: Path):

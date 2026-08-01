@@ -197,9 +197,9 @@ async def test_manual_compaction_can_replace_persisted_delta_channel_history(tmp
         as_node="model",
     )
     await store.complete_run("manual-checkpoint")
-    opened = await store.open_thread("manual-checkpoint")
+    context = await store.load_context("manual-checkpoint")
 
-    contents = [message.content for message in opened.messages]
+    contents = [message.content for message in context.messages]
     assert any("harness_context_summary" in content for content in contents)
     assert contents[-1] == "第三轮"
     await store.close()
@@ -251,8 +251,8 @@ async def test_context_rewrite_keeps_current_model_response_in_checkpoint(tmp_pa
     # DeepAgents 使用 DeltaChannel，最新 checkpoint 只记录增量版本；必须经
     # ThreadPersistence 的确定性 reducer 回放后再断言完整历史。
     await store.complete_run("rewrite")
-    checkpoint = await store.open_thread("rewrite")
-    contents = [message.content for message in checkpoint.messages]
+    context = await store.load_context("rewrite")
+    contents = [message.content for message in context.messages]
     assert "最终回答" in contents
     assert any("harness_context_summary" in content for content in contents)
     await store.close()

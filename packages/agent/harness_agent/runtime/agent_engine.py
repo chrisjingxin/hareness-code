@@ -15,7 +15,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
-from harness_agent.runtime.agent_engine_profile import AgentEngineProfile
+from harness_agent.agent_engine_profile import AgentEngineProfile
+from harness_agent.resource_lifecycle import ResourceScope, SharedResourceLease
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,7 @@ class AgentEngineSnapshot:
     pinned: bool
     created_at: float
     last_used_at: float
+    resource_scopes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +135,10 @@ class AgentEngineDiagnostic:
     active_runs: int
     queued_runs: int
     pinned: bool
+    agent_id: str
+    resource_scopes: tuple[str, ...]
+    drain_reason: str | None
+    build_duration_ms: float | None
 
     def payload(self) -> dict[str, object]:
         """转换为稳定 JSON 形状，供 config.show 和未来指标适配器复用。"""
@@ -143,6 +149,14 @@ class AgentEngineDiagnostic:
             "active_runs": self.active_runs,
             "queued_runs": self.queued_runs,
             "pinned": self.pinned,
+            "agent_id": self.agent_id,
+            "resource_scopes": list(self.resource_scopes),
+            "drain_reason": self.drain_reason,
+            "build_duration_ms": (
+                round(self.build_duration_ms, 3)
+                if self.build_duration_ms is not None
+                else None
+            ),
         }
 
 
@@ -169,6 +183,7 @@ class AgentEnginePoolDiagnosticSnapshot:
     close_reports: int
     close_failures: int
     close_duration_ms_total: float
+    resource_scope_counts: dict[str, int]
     engines: tuple[AgentEngineDiagnostic, ...]
     recent_events: tuple[AgentEnginePoolEvent, ...]
 
@@ -200,6 +215,7 @@ class AgentEnginePoolDiagnosticSnapshot:
                 "close_reports": self.close_reports,
                 "close_failures": self.close_failures,
                 "close_duration_ms_total": round(self.close_duration_ms_total, 3),
+                "resource_scope_counts": dict(self.resource_scope_counts),
             },
             # 真实 RSS 需跨平台基线和校准；先保留稳定接口，CI 以 AgentEngine 数验证上界。
             "memory": {"estimated_bytes": None, "rss_bytes": None, "status": "not_collected"},
@@ -218,10 +234,11 @@ class AgentEngineCloseAdapter:
 
     name: str
     close: CloseCallback
+    scope: ResourceScope = ResourceScope.ENGINE
 
     def __post_init__(self) -> None:
         """拒绝无法在诊断中定位的空名称或不可调用关闭器。"""
-        if not self.name or not callable(self.close):
+        if not self.name or not callable(self.close) or self.scope is not ResourceScope.ENGINE:
             raise ValueError("RUNTIME_CLOSE_ADAPTER_INVALID")
 
     async def invoke(self) -> None:
@@ -235,8 +252,9 @@ class AgentEngineCloseAdapter:
 class AgentEngineResourceBundle:
     """AgentEngine 独占资源及其确定性关闭顺序。
 
-    进程级 Provider HTTP client 不属于该 Bundle；它未来应由 ProviderClientPool
-    持有。当前本地运行时可以使用空 Bundle，不需要伪造 MCP 或 Sandbox 资源。
+    Provider HTTP client、MCP connection 和 workspace/sandbox 属于 Host 或
+    workspace owner；AgentEngine 这里只保存它们的借用租约。Bundle 内的
+    close adapter 必须明确是 engine-owned resource，不能把共享 manager 塞进来。
     """
 
     flushers: tuple[AgentEngineCloseAdapter, ...] = ()
@@ -244,6 +262,7 @@ class AgentEngineResourceBundle:
     mcp_resources: tuple[AgentEngineCloseAdapter, ...] = ()
     sandbox_resources: tuple[AgentEngineCloseAdapter, ...] = ()
     model_resources: tuple[AgentEngineCloseAdapter, ...] = ()
+    shared_leases: tuple[SharedResourceLease[Any], ...] = ()
 
     @classmethod
     def from_sequences(
@@ -254,6 +273,7 @@ class AgentEngineResourceBundle:
         mcp_resources: Sequence[AgentEngineCloseAdapter] = (),
         sandbox_resources: Sequence[AgentEngineCloseAdapter] = (),
         model_resources: Sequence[AgentEngineCloseAdapter] = (),
+        shared_leases: Sequence[SharedResourceLease[Any]] = (),
     ) -> "AgentEngineResourceBundle":
         """把可变输入规范化为不可变 Bundle，防止构建后被调用方篡改。"""
         return cls(
@@ -262,7 +282,15 @@ class AgentEngineResourceBundle:
             mcp_resources=tuple(mcp_resources),
             sandbox_resources=tuple(sandbox_resources),
             model_resources=tuple(model_resources),
+            shared_leases=tuple(shared_leases),
         )
+
+    @property
+    def resource_scopes(self) -> tuple[str, ...]:
+        """返回当前图关联的 owner scope，供 Pool 脱敏诊断使用。"""
+        scopes = {ResourceScope.ENGINE.value}
+        scopes.update(lease.scope.value for lease in self.shared_leases)
+        return tuple(sorted(scopes))
 
 
 class AgentEngine:
@@ -328,6 +356,7 @@ class AgentEngine:
                 pinned=self._pinned,
                 created_at=self._created_at,
                 last_used_at=self._last_used_at,
+                resource_scopes=self.resources.resource_scopes,
             )
 
     async def set_pinned(self, pinned: bool) -> None:
@@ -461,6 +490,7 @@ class AgentEngine:
             await self._run_adapters("mcp", self.resources.mcp_resources, failures)
             await self._run_adapters("sandbox", self.resources.sandbox_resources, failures)
             await self._run_adapters("model", self.resources.model_resources, failures)
+            await self._release_shared_resources(self.resources.shared_leases, failures)
         finally:
             async with self._lock:
                 self.graph = None
@@ -495,6 +525,30 @@ class AgentEngine:
                     self.profile_key[:12],
                     failure.resource_name,
                     failure.error_type,
+                )
+
+    async def _release_shared_resources(
+        self,
+        leases: Sequence[SharedResourceLease[Any]],
+        failures: list[AgentEngineCloseFailure],
+    ) -> None:
+        """释放共享资源借用，不调用共享资源 owner 的关闭回调。"""
+        for lease in leases:
+            try:
+                await lease.release()
+            except Exception as exc:
+                failures.append(
+                    AgentEngineCloseFailure(
+                        resource_name=f"shared:{lease.name}",
+                        error_type=type(exc).__name__,
+                        message=str(exc),
+                    )
+                )
+                logger.warning(
+                    "AgentEngine shared lease release failed profile=%s resource=%s error=%s",
+                    self.profile_key[:12],
+                    lease.name,
+                    type(exc).__name__,
                 )
 
     def _require_accepting_locked(self) -> None:
@@ -611,6 +665,7 @@ class _AgentEngineEntry:
     build_task: asyncio.Task[AgentEngine] | None = None
     engine: AgentEngine | None = None
     build_started_at: float = field(default_factory=time.monotonic)
+    build_duration_ms: float | None = None
     drain_reason: str | None = None
 
 
@@ -694,6 +749,17 @@ class AgentEnginePool:
                         self._hits += 1
                         accounted = True
                     build_task = entry.build_task
+                elif entry.state == AgentEngineState.DRAINING and entry.engine is None:
+                    # An invalidation may have reserved this key while its
+                    # single-flight builder is still producing resources. Do
+                    # not replace that entry with a second build from the old
+                    # snapshot; wait for the stale build to discard itself.
+                    if entry.build_task is None:
+                        raise AgentEngineUnavailableError("RUNTIME_BUILD_INVALIDATED")
+                    if not accounted:
+                        self._hits += 1
+                        accounted = True
+                    build_task = entry.build_task
                 else:
                     if not accounted:
                         self._hits += 1
@@ -745,15 +811,19 @@ class AgentEnginePool:
             }
         diagnostics: list[AgentEngineDiagnostic] = []
         for entry in entries:
-            if entry.state == AgentEngineState.BUILDING or entry.engine is None:
+            if entry.engine is None:
                 diagnostics.append(
                     AgentEngineDiagnostic(
                         profile_id=_profile_id(entry.profile.profile_key),
-                        state=AgentEngineState.BUILDING,
+                        state=entry.state,
                         active_leases=0,
                         active_runs=0,
                         queued_runs=0,
                         pinned=False,
+                        agent_id=entry.profile.agent_id,
+                        resource_scopes=(),
+                        drain_reason=entry.drain_reason,
+                        build_duration_ms=entry.build_duration_ms,
                     )
                 )
                 continue
@@ -766,12 +836,19 @@ class AgentEnginePool:
                     active_runs=snapshot.active_runs,
                     queued_runs=snapshot.queued_runs,
                     pinned=snapshot.pinned,
+                    agent_id=entry.profile.agent_id,
+                    resource_scopes=snapshot.resource_scopes,
+                    drain_reason=entry.drain_reason,
+                    build_duration_ms=entry.build_duration_ms,
                 )
             )
         diagnostics.sort(key=lambda item: (item.state.value, item.profile_id))
         state_counts = {state.value: 0 for state in AgentEngineState}
+        resource_scope_counts: dict[str, int] = {}
         for engine in diagnostics:
             state_counts[engine.state.value] += 1
+            for scope in engine.resource_scopes:
+                resource_scope_counts[scope] = resource_scope_counts.get(scope, 0) + 1
         return AgentEnginePoolDiagnosticSnapshot(
             pool_size=len(diagnostics),
             max_profiles=self._max_profiles,
@@ -792,9 +869,43 @@ class AgentEnginePool:
             close_reports=int(counters["close_reports"]),
             close_failures=int(counters["close_failures"]),
             close_duration_ms_total=float(counters["close_duration_ms_total"]),
+            resource_scope_counts=resource_scope_counts,
             engines=tuple(diagnostics),
             recent_events=tuple(counters["recent_events"]),
         )
+
+    async def invalidate(
+        self,
+        predicate: Callable[[AgentEngineProfile], bool],
+        *,
+        reason: str,
+    ) -> tuple[str, ...]:
+        """按 Profile 快照定向排空受影响 AgentEngine，不触碰其他角色。"""
+        if not callable(predicate) or not reason:
+            raise ValueError("RUNTIME_INVALIDATION_ARGUMENT_INVALID")
+        async with self._lock:
+            building_targets: list[str] = []
+            engine_targets: list[str] = []
+            for key, entry in self._entries.items():
+                if not predicate(entry.profile):
+                    continue
+                if entry.state is AgentEngineState.BUILDING and entry.engine is None:
+                    # Reserve the in-flight generation.  Its builder will
+                    # close any resources it creates and fail rather than
+                    # publishing an engine from the invalidated snapshot.
+                    entry.state = AgentEngineState.DRAINING
+                    entry.drain_reason = reason
+                    building_targets.append(key)
+                    self._eviction_reasons[reason] = self._eviction_reasons.get(reason, 0) + 1
+                    self._record_event("eviction_started", profile_key=key, reason=reason)
+                elif entry.engine is not None:
+                    engine_targets.append(key)
+            targets = tuple(engine_targets)
+        drained = list(building_targets)
+        for key in targets:
+            if await self.evict(key, reason=reason, force=True):
+                drained.append(key)
+        return tuple(drained)
 
     async def sweep(self, *, now: float | None = None) -> tuple[str, ...]:
         """按空闲 TTL 淘汰安全候选，并返回实际进入排空的 Profile Key。"""
@@ -817,8 +928,8 @@ class AgentEnginePool:
             entry = self._entries.get(profile_key)
             if entry is None:
                 return AgentEngineState.MISSING
-            if entry.state == AgentEngineState.BUILDING:
-                return AgentEngineState.BUILDING
+            if entry.engine is None:
+                return entry.state
             engine = entry.engine
         return engine.state if engine is not None else AgentEngineState.MISSING
 
@@ -894,16 +1005,37 @@ class AgentEnginePool:
                 raise AgentEngineError("RUNTIME_BUILDER_RESULT_INVALID")
             if engine.profile.profile_key != key:
                 raise AgentEngineError("RUNTIME_PROFILE_KEY_MISMATCH")
+            discarded = False
             async with self._lock:
                 current = self._entries.get(key)
-                if current is entry:
+                if current is entry and entry.state is not AgentEngineState.DRAINING and not self._closed:
                     entry.engine = engine
                     entry.state = AgentEngineState.READY
                     entry.build_task = None
                     duration_ms = (time.monotonic() - entry.build_started_at) * 1000
+                    entry.build_duration_ms = duration_ms
                     self._build_successes += 1
                     self._build_duration_ms_total += duration_ms
                     self._record_event("build_completed", profile_key=key, duration_ms=duration_ms)
+                else:
+                    discarded = True
+                    if current is entry:
+                        self._entries.pop(key, None)
+                    self._record_event(
+                        "build_discarded",
+                        profile_key=key,
+                        reason=entry.drain_reason or "snapshot_invalidated",
+                    )
+            if discarded:
+                try:
+                    await engine.aclose(force=True)
+                except Exception as exc:
+                    logger.warning(
+                        "Invalidated AgentEngine build cleanup failed profile=%s error=%s",
+                        key[:12],
+                        type(exc).__name__,
+                    )
+                raise AgentEngineUnavailableError("RUNTIME_BUILD_INVALIDATED")
             return engine
         except Exception:
             async with self._lock:

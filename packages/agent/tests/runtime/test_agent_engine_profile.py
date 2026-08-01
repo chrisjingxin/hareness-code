@@ -206,7 +206,7 @@ async def test_thread_persistence_upgrades_v3_runtime_profile_schema_without_los
 
     connection = sqlite3.connect(database)
     try:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 7
         assert connection.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'harness_runtime_profiles'"
         ).fetchone()

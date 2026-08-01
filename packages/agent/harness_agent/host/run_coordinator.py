@@ -26,9 +26,13 @@ from harness_agent.runtime.execution_binding import (
     ResolvedExecutionBinding,
     RunExecutionBinding,
 )
-from harness_agent.runtime.run_context import RunCancellationToken, RunContext
-from harness_agent.extensions.skills import SkillError, SkillRegistry
-from harness_agent.threads.thread_persistence import AcceptRun, ThreadPersistenceError
+from harness_agent.run_context import RunCancellationToken, RunContext
+from harness_agent.skills import SkillError, SkillRegistry
+from harness_agent.thread_persistence import (
+    AcceptRun,
+    ThreadPersistenceError,
+    TranscriptAppend,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +141,10 @@ class RunPreparation:
     execution_binding: RunExecutionBinding | None = None
     agent_engine_profile: AgentEngineProfile | None = None
     skill_snapshot_id: str | None = None
+    # Default AgentHost may hold this reservation from spec resolution until the
+    # corresponding AgentEngine lease is acquired.  It is intentionally opaque
+    # here so the coordinator does not own the runtime snapshot protocol.
+    snapshot_reservation: Any | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,8 +270,22 @@ class RunState:
     )
     tool_stream_ids: dict[str, str] = field(default_factory=dict)
     tool_result_ids: dict[str, str] = field(default_factory=dict)
+    tool_names: dict[str, str] = field(default_factory=dict)
     started_tool_ids: set[str] = field(default_factory=set)
+    completed_tool_ids: set[str] = field(default_factory=set)
+    seen_tool_provider_ids: set[str] = field(default_factory=set)
+    allocated_tool_ids: set[str] = field(default_factory=set)
+    tool_call_ordinal: int = 0
     last_tool_id: str | None = None
+    last_tool_result_id: str | None = None
+    last_tool_result_chunk: object | None = None
+    last_captured_message: object | None = None
+    model_round_active: bool = False
+    model_round_has_tool_results: bool = False
+    assistant_tool_calls: dict[str, dict[str, object]] = field(default_factory=dict)
+    assistant_buffer: list[str] = field(default_factory=list)
+    assistant_turn_count: int = 0
+    pending_transcript: list[TranscriptAppend] = field(default_factory=list)
     started_at: float = field(default_factory=time.monotonic)
     context_summary: dict[str, object] = field(default_factory=dict)
     cancellation_token: RunCancellationToken = field(default_factory=RunCancellationToken)
@@ -395,6 +417,8 @@ class RunCoordinator:
                 raise RunError("THREAD_BUSY", retryable=True)
             self._starting_threads.add(command.thread_id)
 
+        preparation: RunPreparation | None = None
+        reservation_transferred = False
         try:
             persistence = await self._persistence_provider()
             skill_record = self._resolve_requested_skill(command.requested_skill)
@@ -413,6 +437,8 @@ class RunCoordinator:
                         raise RunError("RUN_ID_CONFLICT") from exc
                     raise
                 if not acceptance.created:
+                    await self._release_snapshot_reservation(preparation)
+                    reservation_transferred = True
                     return self._accepted_without_events(command.ref, owner)
 
             root_execution = self._root_execution_binding(command, preparation)
@@ -431,8 +457,11 @@ class RunCoordinator:
                 self._execute(run),
                 name=f"harness-run-{command.run_id}",
             )
+            reservation_transferred = True
             return RunExecution(command.ref, owner, True, self._read_events(run))
         finally:
+            if preparation is not None and not reservation_transferred:
+                await self._release_snapshot_reservation(preparation)
             async with self._lock:
                 self._starting_threads.discard(command.thread_id)
 
@@ -555,8 +584,7 @@ class RunCoordinator:
         if run.completion is None:
             self._finish(run, "cancelled", {"reason": "Cancelled by client"})
         await self._settle_root_execution(run)
-        if run.runtime is not None:
-            await self._release_runtime(run)
+        await self._release_runtime(run)
         async with self._lock:
             if self._runs.get(run.ref.thread_id) is run:
                 self._runs.pop(run.ref.thread_id, None)
@@ -613,6 +641,7 @@ class RunCoordinator:
                 raise asyncio.CancelledError
             if run.runtime.agent is None:
                 self._emit(run, CONTENT_DELTA, {"text": run.message})
+                _queue_assistant_transcript(run, run.message)
             else:
                 resume: object | None = None
                 while True:
@@ -621,6 +650,8 @@ class RunCoordinator:
                         break
 
             if run.persistence is not None:
+                _flush_assistant_transcript(run)
+                await self._flush_transcript(run)
                 await run.persistence.complete_run(run.ref.thread_id)
             self._drain_context_updates(run)
             self._finish(
@@ -661,6 +692,16 @@ class RunCoordinator:
                 },
             )
         finally:
+            # 已收到终态的 ToolMessage 或已经结束的助手消息属于规范事实；
+            # 取消/失败只丢弃仍停留在 assistant_buffer 中的半条流。
+            if run.persistence is not None and run.status != "completed":
+                try:
+                    await self._flush_transcript(run)
+                except Exception:
+                    logger.exception(
+                        "Unable to persist completed transcript records for thread %s",
+                        run.ref.thread_id,
+                    )
             if run.persistence is not None and run.status != "completed":
                 try:
                     await run.persistence.complete_run(run.ref.thread_id)
@@ -678,12 +719,33 @@ class RunCoordinator:
 
     async def _release_runtime(self, run: RunState) -> None:
         runtime, run.runtime = run.runtime, None
-        if runtime is None:
-            return
         try:
-            await runtime.release()
+            if runtime is not None:
+                await runtime.release()
         except Exception:
             logger.exception("Unable to release runtime for run %s", run.ref.run_id)
+        finally:
+            await self._release_snapshot_reservation(run.preparation)
+
+    async def _flush_transcript(self, run: RunState) -> None:
+        """原子追加当前已完成的助手和工具语义边界。"""
+        if run.persistence is None or not run.pending_transcript:
+            return
+        append = getattr(run.persistence, "append_transcript_batch", None)
+        if not callable(append):
+            raise RunError("TRANSCRIPT_LIFECYCLE_UNAVAILABLE")
+        await append(tuple(run.pending_transcript))
+        run.pending_transcript.clear()
+
+    @staticmethod
+    async def _release_snapshot_reservation(preparation: RunPreparation) -> None:
+        """Release a Host-owned snapshot reservation on every startup path."""
+        reservation = preparation.snapshot_reservation
+        if reservation is None:
+            return
+        release = getattr(reservation, "release", None)
+        if callable(release):
+            await release()
 
     def _finish(self, run: RunState, status: str, payload: dict[str, object]) -> None:
         if run.completion is not None:
@@ -842,8 +904,19 @@ class RunCoordinator:
                 )
                 self._record_approval_rules(interaction, result.value)
                 return _resume_value(interaction, result.value)
+            chunk = _message_stream_chunk(event)
+            if chunk is not None:
+                complete_tool = _capture_transcript_message(run, chunk)
+                if complete_tool:
+                    # ToolMessage 到达时，前置 assistant 与完整 tool 结果已经
+                    # 越过内存 pending 边界；后续模型阶段即使阻塞也不应延迟
+                    # 这一个幂等 typed lifecycle 批次的提交。
+                    await self._flush_transcript(run)
             for event_type, payload in _translate_stream_event(event, run):
                 self._emit(run, event_type, payload)
+        _flush_assistant_transcript(run)
+        await self._flush_transcript(run)
+        _finish_model_round(run)
         return None
 
     def _drain_context_updates(self, run: RunState) -> None:
@@ -893,7 +966,13 @@ class RunCoordinator:
 def _extract_interaction(event: tuple[Any, ...]) -> InteractionRequest | None:
     """从 DeepAgents updates 流提取首个 AskUser 或 HITL interrupt。"""
     if len(event) == 3:
-        _namespace, stream_mode, data = event
+        namespace, stream_mode, data = event
+        # Protocol v3 has no execution/provenance field for child graph
+        # updates.  A non-empty namespace is therefore never a root
+        # interaction request; treating it as one would surface a child
+        # interrupt as a root approval/question.
+        if namespace:
+            return None
     elif len(event) == 2:
         stream_mode, data = event
     else:
@@ -1001,26 +1080,267 @@ def _resume_value(spec: InteractionRequest, response: object) -> dict[str, objec
     return {spec.interrupt_id: {"status": status, "answers": answers}}
 
 
-def _generate_permission_rule(
-    tool_name: str, tool_args: Mapping[str, object]
-) -> PermissionRule:
-    """从被批准的工具调用上下文生成 allow 权限规则。
-
-    资源模式按工具类别收敛：
-    - execute/monitor：取命令首词作为前缀模式（如 ``git commit -m 'x'`` → ``git *``）；
-    - 文件写/删类工具（write_file/edit_file/delete_file/apply_patch）：
-      使用 ``*`` 项目级通配。用户明确批准后，项目路径内的修改与删除不再
-      反复弹窗；工作区边界由边界预检短路，敏感路径（.git/.harness 等）由
-      L3.5 安全检查继续强制弹窗，因此通配不会放宽硬性保护；
-    - 其他工具：资源使用 ``*``。
-    """
-    if tool_name in {"execute", "monitor"}:
-        command = str(tool_args.get("command") or "").strip()
-        prefix = command.split()[0] if command else ""
-        resource = f"{prefix} *" if prefix else "*"
+def _message_stream_chunk(event: tuple[Any, ...]) -> object | None:
+    """从 messages stream 取出原始消息块，供 wire 截断前的语义捕获使用。"""
+    if len(event) == 3:
+        namespace, stream_mode, data = event
+        # ``subgraphs=True`` uses a non-empty namespace for child graph
+        # messages.  ZC-098 only owns the linear root Transcript; those
+        # messages are explicitly suppressed at the v3 adapter boundary until
+        # a later execution/provenance projection can represent them safely.
+        if namespace:
+            return None
+    elif len(event) == 2:
+        stream_mode, data = event
     else:
-        resource = "*"
-    return PermissionRule(tool=tool_name, resource=resource, effect="allow")
+        return None
+    if stream_mode != "messages" or not isinstance(data, tuple) or not data:
+        return None
+    return data[0]
+
+
+def _capture_transcript_message(run: RunState, chunk: object) -> bool:
+    """在 1 MiB wire 截断前收集完整助手/工具语义，不收集 delta 事件。"""
+    chunk_type = type(chunk).__name__
+    if chunk_type in {"AIMessage", "AIMessageChunk"}:
+        _ensure_model_round_for_assistant(run)
+        full_tool_calls = getattr(chunk, "tool_calls", None)
+        if chunk_type == "AIMessage" and isinstance(full_tool_calls, list) and full_tool_calls:
+            for index, tool_call in enumerate(full_tool_calls):
+                if not isinstance(tool_call, Mapping):
+                    continue
+                _capture_full_tool_call(run, tool_call, index=index, source_message=chunk)
+        else:
+            for tool_chunk in getattr(chunk, "tool_call_chunks", None) or []:
+                if not isinstance(tool_chunk, Mapping):
+                    continue
+                tool_id = _resolve_tool_stream_id(
+                    run, tool_chunk, source_message=chunk
+                )
+                name = tool_chunk.get("name")
+                if name:
+                    run.tool_names[tool_id] = str(name)
+                _merge_assistant_tool_call(
+                    run,
+                    tool_id,
+                    name=name,
+                    arguments=tool_chunk.get("args"),
+                    is_full=False,
+                    call_type=tool_chunk.get("type"),
+                )
+        text = _message_text(chunk)
+        if not text and not run.assistant_tool_calls:
+            return False
+        # Provider chunk IDs are optional and may change between deltas.  The
+        # stream/tool boundary, not an ID, defines one complete assistant turn.
+        if text:
+            run.assistant_buffer.append(text)
+        run.last_captured_message = chunk
+        return False
+    if chunk_type != "ToolMessage":
+        return False
+    _flush_assistant_transcript(run)
+    tool_id = _resolve_tool_result_id(run, chunk)
+    run.pending_transcript.append(
+        TranscriptAppend(
+            thread_id=run.ref.thread_id,
+            record_id=f"run:{run.ref.run_id}:tool:{tool_id}",
+            kind="tool",
+            content=_content_text(getattr(chunk, "content", None)),
+            run_id=run.ref.run_id,
+            execution_id=run.root_execution_ref.execution_id,
+            tool_call_id=tool_id,
+            tool_name=run.tool_names.get(
+                tool_id, str(getattr(chunk, "name", None) or "tool")
+            ),
+            tool_status=(
+                "error" if getattr(chunk, "status", None) == "error" else "success"
+            ),
+        )
+    )
+    return True
+
+
+def _queue_assistant_transcript(
+    run: RunState,
+    content: str,
+    tool_calls: tuple[Mapping[str, object], ...] = (),
+) -> None:
+    """将一个完整助手回答排入当前 Run 的原子提交批次。"""
+    if not content and not tool_calls:
+        return
+    run.assistant_turn_count += 1
+    run.pending_transcript.append(
+        TranscriptAppend(
+            thread_id=run.ref.thread_id,
+            record_id=f"run:{run.ref.run_id}:assistant:{run.assistant_turn_count}",
+            kind="assistant",
+            content=content,
+            run_id=run.ref.run_id,
+            execution_id=run.root_execution_ref.execution_id,
+            tool_calls=tool_calls,
+        )
+    )
+
+
+def _flush_assistant_transcript(run: RunState) -> None:
+    """结束一个模型消息边界；只把非空完整文本转成助手记录。"""
+    content = "".join(run.assistant_buffer)
+    tool_calls = _finalize_assistant_tool_calls(run)
+    if content or tool_calls:
+        _queue_assistant_transcript(run, content, tool_calls)
+    run.assistant_buffer.clear()
+
+
+def _capture_full_tool_call(
+    run: RunState,
+    tool_call: Mapping[str, object],
+    *,
+    index: int,
+    source_message: object | None = None,
+) -> None:
+    """捕获完整 AIMessage.tool_calls，不从 ToolMessage 反推参数。"""
+    raw_id = tool_call.get("id")
+    tool_id = _resolve_tool_stream_id(
+        run,
+        {
+            "index": tool_call.get("index", index),
+            "id": raw_id,
+            "name": tool_call.get("name"),
+            "args": tool_call.get("args", tool_call.get("arguments")),
+        },
+        source_message=source_message,
+    )
+    name = tool_call.get("name")
+    if name:
+        run.tool_names[tool_id] = str(name)
+    _merge_assistant_tool_call(
+        run,
+        tool_id,
+        name=name,
+        arguments=tool_call.get("args", tool_call.get("arguments")),
+        is_full=True,
+        call_type=tool_call.get("type"),
+    )
+
+
+def _merge_assistant_tool_call(
+    run: RunState,
+    tool_id: str,
+    *,
+    name: object,
+    arguments: object,
+    is_full: bool,
+    call_type: object,
+) -> None:
+    """在当前模型回合内按稳定调用 ID 合并参数分片。"""
+    entry = run.assistant_tool_calls.setdefault(
+        tool_id,
+        {
+            "id": tool_id,
+            "name": str(name or run.tool_names.get(tool_id) or "tool"),
+            "_argument_fragments": [],
+            "_argument_invalid": False,
+            "_full_arguments_present": False,
+        },
+    )
+    if name:
+        entry["name"] = str(name)
+    if call_type:
+        entry["type"] = str(call_type)
+    if is_full:
+        entry["_full_arguments_present"] = True
+        entry["_full_arguments"] = arguments
+        entry["_argument_fragments"] = []
+        return
+    if entry.get("_full_arguments_present") or arguments in (None, ""):
+        return
+    fragments = entry.setdefault("_argument_fragments", [])
+    if isinstance(arguments, str):
+        fragments.append(arguments)
+    else:
+        try:
+            fragments.append(_canonical_tool_argument(arguments))
+        except (TypeError, ValueError):
+            # Preserve an explicit invalid marker instead of coercing a
+            # provider object to a string that could be mistaken for JSON.
+            fragments.append(repr(arguments))
+            entry["_argument_invalid"] = True
+
+
+def _finalize_assistant_tool_calls(
+    run: RunState,
+) -> tuple[Mapping[str, object], ...]:
+    """将当前 assistant 的完整/分片参数定型为可恢复的 typed payload。"""
+    calls: list[Mapping[str, object]] = []
+    for entry in run.assistant_tool_calls.values():
+        call: dict[str, object] = {
+            "id": str(entry.get("id") or ""),
+            "name": str(entry.get("name") or "tool"),
+        }
+        if entry.get("type") is not None:
+            call["type"] = str(entry["type"])
+        if entry.get("_full_arguments_present"):
+            _set_tool_call_arguments(call, entry.get("_full_arguments"), partial=False)
+        else:
+            fragments = entry.get("_argument_fragments")
+            raw = "".join(str(fragment) for fragment in fragments or ())
+            _set_tool_call_arguments(
+                call,
+                raw if raw else None,
+                partial=not bool(entry.get("_argument_invalid")),
+            )
+        calls.append(call)
+    run.assistant_tool_calls.clear()
+    return tuple(calls)
+
+
+def _set_tool_call_arguments(
+    call: dict[str, object],
+    value: object,
+    *,
+    partial: bool,
+) -> None:
+    """保留参数对象、原文和显式校验状态，供后续恢复层 fail closed。"""
+    if value is None:
+        call["arguments_status"] = "unavailable"
+        return
+    if isinstance(value, str):
+        call["arguments_raw"] = value
+        if not value:
+            call["arguments_status"] = "unavailable"
+            return
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            call["arguments_status"] = "partial" if partial else "invalid"
+            call["arguments_error"] = type(exc).__name__
+            return
+    else:
+        parsed = value
+    try:
+        encoded = _canonical_tool_argument(parsed)
+        normalized = json.loads(encoded)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        if not isinstance(value, str):
+            call["arguments_raw"] = repr(value)
+        call["arguments_status"] = "invalid"
+        call["arguments_error"] = type(exc).__name__
+        return
+    call["arguments"] = normalized
+    call["arguments_json"] = encoded
+    call["arguments_status"] = "valid" if isinstance(normalized, Mapping) else "invalid"
+
+
+def _canonical_tool_argument(value: object) -> str:
+    """以稳定 JSON 编码工具参数，避免把 provider 对象直接写入 Transcript。"""
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
 
 
 def _translate_stream_event(
@@ -1028,7 +1348,13 @@ def _translate_stream_event(
 ) -> Iterable[tuple[str, dict[str, object]]]:
     """把 LangChain message stream 转换为统一领域事件。"""
     if len(event) == 3:
-        _namespace, stream_mode, data = event
+        namespace, stream_mode, data = event
+        if namespace:
+            # ZC-098 keeps root canonical/tool-correlation state separate from
+            # child graph state.  Child messages may still be observed by a
+            # future execution/provenance projection, but dropping them here
+            # is safer than mutating root IDs while preserving a v3 wire shape.
+            return []
     elif len(event) == 2:
         stream_mode, data = event
     else:
@@ -1036,13 +1362,15 @@ def _translate_stream_event(
     if stream_mode != "messages" or not isinstance(data, tuple) or not data:
         return []
     chunk = data[0]
+    if type(chunk).__name__ in {"AIMessage", "AIMessageChunk"}:
+        _ensure_model_round_for_assistant(run)
     _update_usage(run, getattr(chunk, "usage_metadata", None))
     events: list[tuple[str, dict[str, object]]] = []
     content = _message_text(chunk)
     if content and type(chunk).__name__ != "ToolMessage":
         events.append((CONTENT_DELTA, {"text": content}))
     for tool_chunk in getattr(chunk, "tool_call_chunks", None) or []:
-        tool_id = _resolve_tool_stream_id(run, tool_chunk)
+        tool_id = _resolve_tool_stream_id(run, tool_chunk, source_message=chunk)
         if tool_chunk.get("name") and tool_id not in run.started_tool_ids:
             run.started_tool_ids.add(tool_id)
             events.append((TOOL_STARTED, {"tool_call_id": tool_id, "name": str(tool_chunk["name"])}))
@@ -1061,8 +1389,10 @@ def _translate_stream_event(
             )
     if type(chunk).__name__ == "ToolMessage":
         result = _truncate_text(_content_text(getattr(chunk, "content", None)))
-        result_id = str(getattr(chunk, "tool_call_id", "") or "")
-        tool_id = run.tool_result_ids.get(result_id, result_id) or run.last_tool_id or f"tool-{run.ref.run_id}"
+        if run.last_tool_result_chunk is chunk and run.last_tool_result_id:
+            tool_id = run.last_tool_result_id
+        else:
+            tool_id = _resolve_tool_result_id(run, chunk)
         events.append(
             (
                 TOOL_COMPLETED,
@@ -1080,12 +1410,24 @@ def _translate_stream_event(
     return events
 
 
-def _resolve_tool_stream_id(run: RunState, chunk: Mapping[str, Any]) -> str:
-    """为缺失调用 ID 的续片建立稳定的工具事件 ID。"""
+def _resolve_tool_stream_id(
+    run: RunState,
+    chunk: Mapping[str, Any],
+    *,
+    source_message: object | None = None,
+) -> str:
+    """为当前模型回合的工具续片建立稳定且不会跨回合复用的 ID。"""
+    _ensure_model_round_for_assistant(run)
     index = chunk.get("index")
     raw_id = str(chunk.get("id") or "")
     if raw_id:
-        tool_id = run.tool_result_ids.get(raw_id, raw_id)
+        tool_id = run.tool_stream_ids.get(f"id:{raw_id}")
+        if tool_id is None and index is not None:
+            # 某些 provider 先发无 ID 分片、后发带 ID 分片；同一 index
+            # 仍属于同一调用，不能因 ID 后出现而拆成两条记录。
+            tool_id = run.tool_stream_ids.get(f"index:{index}")
+        if tool_id is None:
+            tool_id = _allocate_tool_id(run, raw_id)
         run.tool_result_ids[raw_id] = tool_id
         run.tool_stream_ids[f"id:{raw_id}"] = tool_id
         if index is not None:
@@ -1093,11 +1435,147 @@ def _resolve_tool_stream_id(run: RunState, chunk: Mapping[str, Any]) -> str:
     else:
         key = f"index:{index}" if index is not None else "current"
         tool_id = run.tool_stream_ids.get(key)
+        if (
+            tool_id is not None
+            and index is None
+            and not raw_id
+            and chunk.get("name")
+            and run.tool_names.get(tool_id)
+            and source_message is not run.last_captured_message
+        ):
+            raise RunError(
+                "TOOL_CALL_ID_UNAVAILABLE",
+                "Multiple ID-less tool calls without index cannot be associated safely",
+            )
         if tool_id is None:
-            tool_id = f"tool-{run.ref.run_id}-{len(run.tool_stream_ids)}"
+            tool_id = _allocate_tool_id(run)
             run.tool_stream_ids[key] = tool_id
     run.last_tool_id = tool_id
     return tool_id
+
+
+def _resolve_tool_result_id(run: RunState, chunk: object) -> str:
+    """把 ToolMessage 归属到当前回合，无法可靠关联时明确失败。"""
+    if not run.model_round_active:
+        _start_model_round(run)
+    result_id = str(getattr(chunk, "tool_call_id", "") or "")
+    if result_id:
+        tool_id = run.tool_result_ids.get(result_id)
+        if tool_id is None:
+            tool_id = run.tool_stream_ids.get(f"id:{result_id}")
+        if tool_id is None:
+            candidates = _current_tool_candidates(run)
+            if len(candidates) == 1:
+                candidate = next(iter(candidates))
+                if _candidate_has_provider_id(run, candidate):
+                    raise RunError(
+                        "TOOL_CALL_ID_UNAVAILABLE",
+                        "Tool result ID does not match the known provider call ID",
+                    )
+                # The only safe late-binding case is an assistant chunk whose
+                # call had no provider ID at all. Bind the result ID to that
+                # existing internal call, without inventing a call when no
+                # assistant declaration was observed.
+                tool_id = candidate
+            elif len(candidates) > 1:
+                raise RunError(
+                    "TOOL_CALL_ID_UNAVAILABLE",
+                    "Tool result cannot be associated with parallel calls without stable IDs",
+                )
+            else:
+                raise RunError(
+                    "TOOL_CALL_ID_UNAVAILABLE",
+                    "Tool result has no preceding assistant tool call",
+                )
+            run.tool_result_ids[result_id] = tool_id
+            run.tool_stream_ids[f"id:{result_id}"] = tool_id
+        run.seen_tool_provider_ids.add(result_id)
+    else:
+        candidates = _current_tool_candidates(run)
+        if len(candidates) != 1:
+            raise RunError(
+                "TOOL_CALL_ID_UNAVAILABLE",
+                "Tool result has no stable ID and cannot be associated safely",
+            )
+        tool_id = next(iter(candidates))
+        if tool_id in run.completed_tool_ids:
+            raise RunError(
+                "TOOL_CALL_ID_UNAVAILABLE",
+                "Multiple ID-less tool results cannot be associated safely",
+            )
+    run.completed_tool_ids.add(tool_id)
+    run.model_round_has_tool_results = True
+    run.last_tool_id = tool_id
+    run.last_tool_result_id = tool_id
+    run.last_tool_result_chunk = chunk
+    return tool_id
+
+
+def _current_tool_candidates(run: RunState) -> set[str]:
+    """返回当前模型回合去重后的工具调用候选。"""
+    return set(run.tool_stream_ids.values())
+
+
+def _candidate_has_provider_id(run: RunState, tool_id: str) -> bool:
+    """判断候选是否已经由 assistant 明确声明过 provider tool-call ID。"""
+    return any(
+        key.startswith("id:") and candidate == tool_id
+        for key, candidate in run.tool_stream_ids.items()
+    )
+
+
+def _allocate_tool_id(run: RunState, preferred: str | None = None) -> str:
+    """分配 Run 内单调唯一 ID，稳定 provider ID 只在首次出现时直接复用。"""
+    run.tool_call_ordinal += 1
+    if preferred and preferred not in run.seen_tool_provider_ids:
+        candidate = preferred
+    else:
+        candidate = f"tool-{run.ref.run_id}-{run.tool_call_ordinal}"
+    while candidate in run.allocated_tool_ids:
+        run.tool_call_ordinal += 1
+        candidate = f"tool-{run.ref.run_id}-{run.tool_call_ordinal}"
+    run.allocated_tool_ids.add(candidate)
+    if preferred:
+        run.seen_tool_provider_ids.add(preferred)
+    return candidate
+
+
+def _start_model_round(run: RunState) -> None:
+    """清理只属于当前模型/工具回合的临时映射。"""
+    run.model_round_active = True
+    run.model_round_has_tool_results = False
+    run.tool_stream_ids.clear()
+    run.tool_result_ids.clear()
+    run.tool_names.clear()
+    run.started_tool_ids.clear()
+    run.completed_tool_ids.clear()
+    run.assistant_tool_calls.clear()
+    run.last_tool_id = None
+    run.last_tool_result_id = None
+    run.last_tool_result_chunk = None
+    run.last_captured_message = None
+
+
+def _ensure_model_round_for_assistant(run: RunState) -> None:
+    """模型在收到上一回合工具结果后开始新回合并重置临时索引。"""
+    if not run.model_round_active or run.model_round_has_tool_results:
+        _start_model_round(run)
+
+
+def _finish_model_round(run: RunState) -> None:
+    """流正常结束后丢弃回合映射，但保留 Run 级 ordinal 和去重事实。"""
+    run.model_round_active = False
+    run.model_round_has_tool_results = False
+    run.tool_stream_ids.clear()
+    run.tool_result_ids.clear()
+    run.tool_names.clear()
+    run.started_tool_ids.clear()
+    run.completed_tool_ids.clear()
+    run.assistant_tool_calls.clear()
+    run.last_tool_id = None
+    run.last_tool_result_id = None
+    run.last_tool_result_chunk = None
+    run.last_captured_message = None
 
 
 def _update_usage(run: RunState, usage: Any) -> None:

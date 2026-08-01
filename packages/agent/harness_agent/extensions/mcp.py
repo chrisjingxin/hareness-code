@@ -18,6 +18,14 @@ from types import MappingProxyType
 from typing import Any, Literal
 from urllib.parse import parse_qsl, urlsplit
 
+from harness_agent.resource_lifecycle import (
+    ResourceScope,
+    ResourceState,
+    SharedResourceHandle,
+    SharedResourceLease,
+    SharedResourceUnavailableError,
+)
+
 logger = logging.getLogger(__name__)
 
 _ENV_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -340,6 +348,17 @@ def build_mcp_snapshot(servers: Sequence[McpServerConfig], revision: str) -> Mcp
     )
 
 
+@dataclass(slots=True)
+class _McpRuntime:
+    """一个 immutable MCP snapshot 对应的 Host 级连接和工具集合。"""
+
+    snapshot: McpConfigSnapshot
+    tools: list[Any] = field(default_factory=list)
+    client: Any | None = None
+    connected: bool = False
+    server_statuses: dict[str, dict[str, object]] = field(default_factory=dict)
+
+
 class McpConnectionManager:
     """管理所有 MCP 服务器的连接生命周期和工具加载。
 
@@ -347,45 +366,58 @@ class McpConnectionManager:
     将 MCP 工具转换为 LangChain BaseTool 供 Agent 使用。
     """
 
-    def __init__(self, configs: McpConfigSnapshot | Sequence[McpServerConfig]) -> None:
-        """保存快照；序列输入仅为旧测试与嵌入调用保留兼容。"""
-        if isinstance(configs, McpConfigSnapshot):
-            self._snapshot = configs
-            self._configs = list(configs.servers)
-        else:
-            self._configs = list(configs)
-            self._snapshot = build_mcp_snapshot(self._configs, revision="legacy")
-        self._tools: list[Any] = []
-        self._client: Any | None = None
-        self._connected = False
-        self._server_statuses: dict[str, dict[str, object]] = {}
+    def __init__(self, snapshot: McpConfigSnapshot) -> None:
+        """保存初始快照，并把每个连接快照置于 Host owner 之下。"""
+        self._resources: dict[str, list[SharedResourceHandle[_McpRuntime]]] = {}
+        self._current_resource = self._create_resource(snapshot)
+        self._resources[snapshot.digest] = [self._current_resource]
 
     @property
     def snapshot(self) -> McpConfigSnapshot:
         """返回当前连接管理器认可的配置快照。"""
-        return self._snapshot
+        return self._current_resource.value.snapshot
 
     @property
     def connected(self) -> bool:
         """是否已成功建立至少一次连接。"""
-        return self._connected
+        return self._current_resource.value.connected
 
     def get_tools(self) -> list[Any]:
-        """返回已加载的 MCP 工具列表（LangChain BaseTool）。"""
-        return list(self._tools)
+        """返回当前 snapshot 的工具副本（LangChain BaseTool）。"""
+        return list(self._current_resource.value.tools)
 
     def get_tool_names(self) -> list[str]:
         """返回所有 MCP 工具的名称，用于审批注册。"""
-        return [tool.name for tool in self._tools]
+        return [tool.name for tool in self._current_resource.value.tools]
+
+    async def acquire(
+        self,
+        snapshot_or_digest: McpConfigSnapshot | str,
+    ) -> SharedResourceLease[_McpRuntime]:
+        """借用指定 MCP snapshot；AgentEngine 关闭时只释放租约。"""
+        digest = (
+            snapshot_or_digest.digest
+            if isinstance(snapshot_or_digest, McpConfigSnapshot)
+            else snapshot_or_digest
+        )
+        for resource in reversed(self._resources.get(digest, ())):
+            if resource.state is not ResourceState.READY:
+                continue
+            try:
+                return await resource.acquire()
+            except SharedResourceUnavailableError:
+                continue
+        raise RuntimeError("MCP_RESOURCE_SNAPSHOT_UNAVAILABLE")
 
     def get_server_statuses(self) -> list[dict[str, object]]:
         """返回每个 MCP 服务器的连接状态和工具列表。
 
         工具名通过 ``{server_name}_`` 前缀从已加载工具中匹配归属。
         """
+        runtime = self._current_resource.value
         result: list[dict[str, object]] = []
-        for config in self._configs:
-            entry = dict(self._server_statuses.get(config.name, {
+        for config in runtime.snapshot.servers:
+            entry = dict(runtime.server_statuses.get(config.name, {
                 "name": config.name,
                 "transport": config.transport,
                 "status": "failed",
@@ -394,56 +426,95 @@ class McpConnectionManager:
             # 按服务器名称前缀匹配归属工具
             prefix = f"{config.name}_"
             entry["tool_names"] = [
-                t.name for t in self._tools
+                t.name for t in runtime.tools
                 if hasattr(t, "name") and t.name.startswith(prefix)
             ]
             result.append(entry)
         return result
 
+    def _create_resource(
+        self,
+        snapshot: McpConfigSnapshot,
+    ) -> SharedResourceHandle[_McpRuntime]:
+        """创建一个由 Host owner 持有的 MCP snapshot resource。"""
+        runtime = _McpRuntime(snapshot=snapshot)
+        return SharedResourceHandle(
+            name=f"mcp-snapshot:{snapshot.digest[:12]}",
+            scope=ResourceScope.HOST,
+            value=runtime,
+            close=lambda: self._close_runtime(runtime),
+        )
+
+    async def _close_runtime(self, runtime: _McpRuntime) -> None:
+        """关闭单个 snapshot 的 transport；不会影响其他 snapshot。"""
+        client = runtime.client
+        close = getattr(client, "aclose", None) if client is not None else None
+        if close is None and client is not None:
+            close = getattr(client, "close", None)
+        if callable(close):
+            result = close()
+            if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
+                await result
+        runtime.client = None
+        runtime.tools = []
+        runtime.connected = False
+
+    def _set_current_snapshot(self, snapshot: McpConfigSnapshot) -> _McpRuntime:
+        """切换当前快照，但保留旧 snapshot resource 供旧引擎继续借用。"""
+        resources = self._resources.setdefault(snapshot.digest, [])
+        resource = next(
+            (candidate for candidate in reversed(resources) if candidate.state is ResourceState.READY),
+            None,
+        )
+        if resource is None:
+            resource = self._create_resource(snapshot)
+            resources.append(resource)
+        self._current_resource = resource
+        return resource.value
+
+    async def _reap_closed_resources(self) -> None:
+        """回收已排空且没有 AgentEngine 借用的旧 snapshot resource。"""
+        for digest, resources in tuple(self._resources.items()):
+            remaining: list[SharedResourceHandle[_McpRuntime]] = []
+            for resource in resources:
+                if resource is self._current_resource:
+                    remaining.append(resource)
+                    continue
+                snapshot = await resource.snapshot()
+                if snapshot.state is ResourceState.DRAINING and not snapshot.borrowers:
+                    await resource.close()
+                    continue
+                remaining.append(resource)
+            if remaining:
+                self._resources[digest] = remaining
+            else:
+                self._resources.pop(digest, None)
+
+    async def reap(self) -> None:
+        """在旧 AgentEngine 释放租约后回收已排空的 MCP snapshot。"""
+        await self._reap_closed_resources()
+
     async def add_server(self, config: McpServerConfig) -> dict[str, object]:
-        """运行时添加并连接单个 MCP 服务器，合并其工具到已有列表。
-
-        连接失败不影响已有工具，仅记录状态。
-        """
-        self._configs.append(config)
-        self._snapshot = build_mcp_snapshot(self._configs, revision=self._snapshot.revision)
-        connection = self._build_single_connection(config)
-        if connection is None:
-            # 环境变量缺失导致跳过，记录 skipped 状态
-            self._server_statuses[config.name] = {
-                "name": config.name,
-                "transport": config.transport,
-                "status": "skipped",
-                "error": "environment variable(s) not set",
-            }
-            return dict(self._server_statuses[config.name])
-
-        try:
-            from langchain_mcp_adapters.client import MultiServerMCPClient
-
-            client = MultiServerMCPClient({config.name: connection}, tool_name_prefix=True)
-            new_tools = await asyncio.wait_for(
-                client.get_tools(),
-                timeout=config.timeout_seconds,
-            )
-            self._tools.extend(new_tools)
-            self._server_statuses[config.name] = {
-                "name": config.name,
-                "transport": config.transport,
-                "status": "connected",
-                "tool_names": [t.name for t in new_tools if hasattr(t, "name")],
-            }
-            logger.info("MCP server '%s' hot-connected: %d tool(s)", config.name, len(new_tools))
-        except Exception as exc:
-            logger.warning("MCP server '%s' hot-connect failed: %s", config.name, exc)
-            self._server_statuses[config.name] = {
+        """为新配置创建独立 Host snapshot；旧图继续使用旧工具对象。"""
+        current = self._current_resource.value
+        snapshot = build_mcp_snapshot(
+            [*current.snapshot.servers, config],
+            revision=current.snapshot.revision,
+        )
+        await self.apply_snapshot(snapshot)
+        return next(
+            (
+                item
+                for item in self.get_server_statuses()
+                if item.get("name") == config.name
+            ),
+            {
                 "name": config.name,
                 "transport": config.transport,
                 "status": "failed",
-                "error": str(exc),
-            }
-
-        return dict(self._server_statuses[config.name])
+                "error": "not connected",
+            },
+        )
 
     def remove_server(self, name: str) -> bool:
         """运行时移除指定 MCP 服务器的工具并更新状态。
@@ -451,36 +522,46 @@ class McpConnectionManager:
         Returns:
             是否找到并移除了该服务器。
         """
-        # 从配置列表中移除
-        self._configs = [c for c in self._configs if c.name != name]
-        self._snapshot = build_mcp_snapshot(self._configs, revision=self._snapshot.revision)
+        old_runtime = self._current_resource.value
+        found = any(config.name == name for config in old_runtime.snapshot.servers) or name in old_runtime.server_statuses
+        new_configs = [c for c in old_runtime.snapshot.servers if c.name != name]
+        snapshot = build_mcp_snapshot(new_configs, revision=old_runtime.snapshot.revision)
+        runtime = self._set_current_snapshot(snapshot)
 
-        # 按前缀移除工具
+        # 复制未删除服务器的工具到新 snapshot；旧 runtime 列表保持不变。
         prefix = f"{name}_"
-        before = len(self._tools)
-        self._tools = [t for t in self._tools if not (hasattr(t, "name") and t.name.startswith(prefix))]
-        removed_count = before - len(self._tools)
-
-        # 更新状态
-        if name in self._server_statuses:
-            self._server_statuses[name] = {
+        runtime.tools = [
+            tool for tool in old_runtime.tools
+            if not (hasattr(tool, "name") and tool.name.startswith(prefix))
+        ]
+        runtime.server_statuses = {
+            server_name: dict(status)
+            for server_name, status in old_runtime.server_statuses.items()
+            if server_name != name
+        }
+        runtime.connected = old_runtime.connected
+        if found:
+            runtime.server_statuses[name] = {
                 "name": name,
-                "transport": self._server_statuses[name].get("transport", "stdio"),
+                "transport": old_runtime.server_statuses.get(name, {}).get("transport", "stdio"),
                 "status": "removed",
                 "tool_names": [],
             }
-            logger.info("MCP server '%s' removed: %d tool(s) unloaded", name, removed_count)
-            return True
-
-        return False
+        logger.info("MCP server '%s' removed", name)
+        return found
 
     async def apply_snapshot(self, snapshot: McpConfigSnapshot) -> list[dict[str, object]]:
-        """替换配置快照并重建连接；失败只影响新快照，不回写旧 AgentEngine。"""
-        await self.close_all()
-        self._snapshot = snapshot
-        self._configs = list(snapshot.servers)
-        self._server_statuses = {}
-        self._connected = False
+        """切换当前快照；旧 connection resource 由 Host owner 保留至关闭。"""
+        old_resource = self._current_resource
+        runtime = self._set_current_snapshot(snapshot)
+        if old_resource is not self._current_resource:
+            await old_resource.begin_draining(reason="mcp_snapshot_changed")
+        if runtime.connected:
+            return self.get_server_statuses()
+        runtime.server_statuses.clear()
+        runtime.tools = []
+        runtime.client = None
+        runtime.connected = False
         await self.connect_all()
         return self.get_server_statuses()
 
@@ -489,8 +570,12 @@ class McpConnectionManager:
 
         连接失败的服务器记录警告并跳过，不阻止 Agent 启动。
         """
-        if not self._configs:
-            self._connected = True
+        runtime = self._current_resource.value
+        if runtime.connected:
+            return
+        configs = runtime.snapshot.servers
+        if not configs:
+            runtime.connected = True
             return
 
         from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -498,80 +583,80 @@ class McpConnectionManager:
         connections = self._build_connections()
         if not connections:
             logger.warning("No valid MCP connections after environment expansion")
-            self._connected = True
+            runtime.connected = True
             return
 
         try:
-            self._client = MultiServerMCPClient(connections, tool_name_prefix=True)
-            self._tools = await asyncio.wait_for(
-                self._client.get_tools(),
-                timeout=max(c.timeout_seconds for c in self._configs),
+            runtime.client = MultiServerMCPClient(connections, tool_name_prefix=True)
+            runtime.tools = await asyncio.wait_for(
+                runtime.client.get_tools(),
+                timeout=max(c.timeout_seconds for c in configs),
             )
-            self._connected = True
+            runtime.connected = True
             # 标记所有成功连接的服务器
             for name in connections:
-                self._server_statuses[name] = {
+                runtime.server_statuses[name] = {
                     "name": name,
-                    "transport": next(c.transport for c in self._configs if c.name == name),
+                    "transport": next(c.transport for c in configs if c.name == name),
                     "status": "connected",
                 }
             logger.info(
                 "MCP connected: %d server(s), %d tool(s) loaded",
-                len(connections), len(self._tools),
+                len(connections), len(runtime.tools),
             )
         except asyncio.TimeoutError:
             logger.warning("MCP connection timed out; continuing without MCP tools")
-            self._tools = []
-            self._connected = True
+            runtime.tools = []
+            runtime.connected = True
             for name in connections:
-                self._server_statuses[name] = {
+                runtime.server_statuses[name] = {
                     "name": name,
-                    "transport": next(c.transport for c in self._configs if c.name == name),
+                    "transport": next(c.transport for c in configs if c.name == name),
                     "status": "failed",
                     "error": "connection timed out",
                 }
         except Exception as exc:
             logger.warning("MCP connection failed: %s; continuing without MCP tools", exc)
-            self._tools = []
-            self._connected = True
+            runtime.tools = []
+            runtime.connected = True
             for name in connections:
-                self._server_statuses[name] = {
+                runtime.server_statuses[name] = {
                     "name": name,
-                    "transport": next(c.transport for c in self._configs if c.name == name),
+                    "transport": next(c.transport for c in configs if c.name == name),
                     "status": "failed",
                     "error": str(exc),
                 }
 
     async def close_all(self) -> None:
-        """关闭所有 MCP 连接，释放子进程和网络资源。"""
-        if self._client is None:
-            self._tools = []
-            self._connected = False
-            return
-        try:
-            # MultiServerMCPClient 在 0.2.x 没有显式 close 方法；
-            # 工具持有的 session 在无状态模式下每次调用后自动关闭。
-            # 清理引用即可让 GC 回收底层传输。
-            self._client = None
-            self._tools = []
-            self._connected = False
-            logger.info("MCP connections closed")
-        except Exception as exc:
-            logger.warning("Error closing MCP connections: %s", exc)
+        """由 Host owner 关闭所有 snapshot connection，不被单个引擎调用。"""
+        resources = [
+            resource
+            for candidates in self._resources.values()
+            for resource in candidates
+        ]
+        self._resources = {}
+        for resource in resources:
+            await resource.begin_draining(reason="host_shutdown")
+            try:
+                await resource.close()
+            except Exception:
+                await resource.close(force=True)
+        logger.info("MCP connections closed")
 
     def _build_connections(self) -> dict[str, Any]:
         """将 McpServerConfig 列表转换为 MultiServerMCPClient 的 connections 字典。
 
         环境变量在此时展开；缺失变量的服务器被跳过。
         """
+        runtime = self._current_resource.value
         connections: dict[str, Any] = {}
-        for config in self._configs:
+        for config in runtime.snapshot.servers:
             conn = self._build_single_connection(config)
             if conn is not None:
                 connections[config.name] = conn
             else:
                 # 环境变量缺失导致跳过，记录 skipped 状态
-                self._server_statuses[config.name] = {
+                runtime.server_statuses[config.name] = {
                     "name": config.name,
                     "transport": config.transport,
                     "status": "skipped",
