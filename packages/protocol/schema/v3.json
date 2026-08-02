@@ -4,19 +4,19 @@
   "title": "Harness Agent Protocol v3",
   "x-harness": {
     "major": 3,
-    "minor": 0,
+    "minor": 1,
     "max_frame_bytes": 8388608,
     "max_tool_payload_bytes": 1048576,
     "operations": {
       "initialize": { "params": "#/$defs/initializeParams", "result": "#/$defs/initializeResult" },
-      "run.start": { "params": "#/$defs/runStartParams", "result": "#/$defs/runStartResult" },
-      "run.cancel": { "params": "#/$defs/runCancelParams", "result": "#/$defs/runCancelResult", "capability": "run.cancel" },
-      "context.compact": { "params": "#/$defs/contextCompactParams", "result": "#/$defs/contextCompactResult", "capability": "context.manage" },
+      "run.start": { "params": "#/$defs/runStartParams", "result": "#/$defs/runStartResult", "controlled": true },
+      "run.cancel": { "params": "#/$defs/runCancelParams", "result": "#/$defs/runCancelResult", "capability": "run.cancel", "controlled": true },
+      "context.compact": { "params": "#/$defs/contextCompactParams", "result": "#/$defs/contextCompactResult", "capability": "context.manage", "controlled": true },
       "config.show": { "params": "#/$defs/emptyParams", "result": "#/$defs/jsonObject", "capability": "config.read" },
       "config.path": { "params": "#/$defs/emptyParams", "result": "#/$defs/configPathResult", "capability": "config.read" },
       "config.details": { "params": "#/$defs/emptyParams", "result": "#/$defs/configDetailsResult", "capability": "config.write" },
-      "config.preview": { "params": "#/$defs/configPreviewParams", "result": "#/$defs/configPreviewResult", "capability": "config.write" },
-      "config.commit": { "params": "#/$defs/configCommitParams", "result": "#/$defs/configCommitResult", "capability": "config.write" },
+      "config.preview": { "params": "#/$defs/configPreviewParams", "result": "#/$defs/configPreviewResult", "capability": "config.write", "controlled": true },
+      "config.commit": { "params": "#/$defs/configCommitParams", "result": "#/$defs/configCommitResult", "capability": "config.write", "controlled": true },
       "threads.list": { "params": "#/$defs/threadsListParams", "result": "#/$defs/threadsListResult", "capability": "threads.read" },
       "threads.open": { "params": "#/$defs/threadsOpenParams", "result": "#/$defs/threadsOpenResult", "capability": "threads.read" },
       "threads.watch": { "params": "#/$defs/threadsOpenParams", "result": "#/$defs/threadsOpenResult", "capability": "threads.read" },
@@ -24,15 +24,19 @@
       "models.list": { "params": "#/$defs/modelsListParams", "result": "#/$defs/modelsListResult", "capability": "models.read" },
       "skills.list": { "params": "#/$defs/skillsListParams", "result": "#/$defs/skillsListResult", "capability": "skills.read" },
       "skills.inspect": { "params": "#/$defs/skillsInspectParams", "result": "#/$defs/jsonObject", "capability": "skills.read" },
-      "skills.set_enabled": { "params": "#/$defs/skillsSetEnabledParams", "result": "#/$defs/jsonObject", "capability": "skills.manage" },
-      "skills.install": { "params": "#/$defs/skillsInstallParams", "result": "#/$defs/jsonObject", "capability": "skills.manage" },
-      "skills.update": { "params": "#/$defs/skillsInstallParams", "result": "#/$defs/jsonObject", "capability": "skills.manage" },
-      "skills.remove": { "params": "#/$defs/skillsInspectParams", "result": "#/$defs/jsonObject", "capability": "skills.manage" },
+      "skills.set_enabled": { "params": "#/$defs/skillsSetEnabledParams", "result": "#/$defs/jsonObject", "capability": "skills.manage", "controlled": true },
+      "skills.install": { "params": "#/$defs/skillsInstallParams", "result": "#/$defs/jsonObject", "capability": "skills.manage", "controlled": true },
+      "skills.update": { "params": "#/$defs/skillsInstallParams", "result": "#/$defs/jsonObject", "capability": "skills.manage", "controlled": true },
+      "skills.remove": { "params": "#/$defs/skillsInspectParams", "result": "#/$defs/jsonObject", "capability": "skills.manage", "controlled": true },
       "skills.market.list": { "params": "#/$defs/skillsMarketListParams", "result": "#/$defs/jsonObjectArray", "capability": "skills.read" },
       "mcp.status": { "params": "#/$defs/emptyParams", "result": "#/$defs/mcpStatusResult", "capability": "mcp.read" },
-      "mcp.add": { "params": "#/$defs/mcpAddParams", "result": "#/$defs/mcpAddResult", "capability": "mcp.manage" },
-      "mcp.remove": { "params": "#/$defs/mcpRemoveParams", "result": "#/$defs/mcpRemoveResult", "capability": "mcp.manage" },
-      "host.attachment.create": { "params": "#/$defs/hostAttachmentCreateParams", "result": "#/$defs/hostAttachmentCreateResult", "capability": "host.attach" }
+      "mcp.add": { "params": "#/$defs/mcpAddParams", "result": "#/$defs/mcpAddResult", "capability": "mcp.manage", "controlled": true },
+      "mcp.remove": { "params": "#/$defs/mcpRemoveParams", "result": "#/$defs/mcpRemoveResult", "capability": "mcp.manage", "controlled": true },
+      "host.attachment.create": { "params": "#/$defs/hostAttachmentCreateParams", "result": "#/$defs/hostAttachmentCreateResult", "capability": "host.attach" },
+      "host.attachment.revoke": { "params": "#/$defs/hostAttachmentRevokeParams", "result": "#/$defs/hostAttachmentRevokeResult", "capability": "host.attach" },
+      "host.control.acquire": { "params": "#/$defs/emptyParams", "result": "#/$defs/controlStatus", "capability": "host.control" },
+      "host.control.release": { "params": "#/$defs/emptyParams", "result": "#/$defs/controlStatus", "capability": "host.control" },
+      "host.control.status": { "params": "#/$defs/emptyParams", "result": "#/$defs/controlStatus", "capability": "host.control" }
     },
     "events": {
       "run.started": { "payload": "#/$defs/runStartedPayload" },
@@ -52,10 +56,18 @@
       "interaction.question": { "params": "#/$defs/questionRequest", "result": "#/$defs/questionResponse", "handle": "question" }
     },
     "capabilities": [
-      "run.cancel", "run.multithread", "config.read", "config.write", "threads.read",
+      "run.cancel", "run.multithread", "host.control", "config.read", "config.write", "threads.read",
       "context.manage", "skills.read", "skills.manage", "mcp.read", "mcp.manage",
       "models.read", "models.select", "host.attach"
-    ]
+    ],
+    "error_codes": {
+      "CONTROL_NOT_HOLDER": { "jsonrpc_code": -32008, "retryable": true },
+      "CONTROL_BUSY": { "jsonrpc_code": -32008, "retryable": true },
+      "CONTROL_RELEASE_BLOCKED": { "jsonrpc_code": -32008, "retryable": true },
+      "ATTACHMENT_NOT_FOUND": { "jsonrpc_code": -32009, "retryable": false },
+      "ATTACHMENT_NOT_ACTIVE": { "jsonrpc_code": -32009, "retryable": false },
+      "CONNECTION_RUN_BUSY": { "jsonrpc_code": -32000, "retryable": true }
+    }
   },
   "$defs": {
     "jsonValue": {
@@ -472,9 +484,41 @@
       "additionalProperties": false
     },
     "hostAttachmentCreateResult": {
-      "type": "object", "required": ["endpoint", "token", "expires_at_ms"],
+      "type": "object", "required": ["attachment_id", "endpoint", "token", "expires_at_ms"],
       "properties": {
+        "attachment_id": { "type": "string", "minLength": 1 },
         "endpoint": { "type": "string" }, "token": { "type": "string" }, "expires_at_ms": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "hostAttachmentRevokeParams": {
+      "type": "object", "required": ["attachment_id"],
+      "properties": { "attachment_id": { "type": "string", "minLength": 1 } },
+      "additionalProperties": false
+    },
+    "hostAttachmentRevokeResult": {
+      "type": "object", "required": ["attachment_id", "revoked", "control"],
+      "properties": {
+        "attachment_id": { "type": "string", "minLength": 1 },
+        "revoked": { "const": true },
+        "control": { "$ref": "#/$defs/controlStatus" }
+      },
+      "additionalProperties": false
+    },
+    "controlHolder": {
+      "type": "object", "required": ["connection_id", "role"],
+      "properties": {
+        "connection_id": { "type": "string", "minLength": 1 },
+        "role": { "enum": ["owner", "attached"] },
+        "attachment_id": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "controlStatus": {
+      "type": "object", "required": ["state", "holder"],
+      "properties": {
+        "state": { "enum": ["owner", "attached", "revoking"] },
+        "holder": { "$ref": "#/$defs/controlHolder" }
       },
       "additionalProperties": false
     },

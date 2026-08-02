@@ -356,7 +356,7 @@ class RunCoordinator:
         # approve_thread 的会话级规则只保存在内存，不落盘
         self._session_rules: list[PermissionRule] = []
         self._runs: dict[str, RunState] = {}
-        self._starting_threads: set[str] = set()
+        self._starting_runs: dict[str, ConnectionRef] = {}
         self._lock = asyncio.Lock()
         self._closed = False
 
@@ -365,6 +365,7 @@ class RunCoordinator:
         """返回供未来 DelegationDispatcher 复用的执行树 seam。"""
         return self._execution_registry
 
+<<<<<<< HEAD
     @property
     def session_rules(self) -> list[PermissionRule]:
         """返回本会话内审批产生的内存权限规则。"""
@@ -372,6 +373,19 @@ class RunCoordinator:
 
     async def start(self, command: StartRun, owner: ConnectionRef) -> RunExecution:
         """受理一次 Run，并在受理成功后创建唯一执行任务。"""
+||||||| parent of baf0a1c (feat: 完成ZC-101 Host控制租约与可撤销Web Attachment实现)
+    async def start(self, command: StartRun, owner: ConnectionRef) -> RunExecution:
+        """受理一次 Run，并在受理成功后创建唯一执行任务。"""
+=======
+    async def start(
+        self,
+        command: StartRun,
+        owner: ConnectionRef,
+        *,
+        allow_multithread: bool = False,
+    ) -> RunExecution:
+        """受理一次 Run，并在同一锁内判定 Thread 与 Connection 并发限制。"""
+>>>>>>> baf0a1c (feat: 完成ZC-101 Host控制租约与可撤销Web Attachment实现)
         if not command.message.strip():
             raise RunError("INVALID_MESSAGE")
         async with self._lock:
@@ -391,9 +405,15 @@ class RunCoordinator:
                         retryable=False,
                     )
                 raise RunError("THREAD_BUSY", retryable=True)
-            if command.thread_id in self._starting_threads:
+            if command.thread_id in self._starting_runs:
                 raise RunError("THREAD_BUSY", retryable=True)
-            self._starting_threads.add(command.thread_id)
+            if not allow_multithread and self._connection_has_active_run(
+                owner.connection_id,
+                self._runs,
+                self._starting_runs,
+            ):
+                raise RunError("CONNECTION_RUN_BUSY", retryable=True)
+            self._starting_runs[command.thread_id] = owner
 
         try:
             persistence = await self._persistence_provider()
@@ -434,7 +454,8 @@ class RunCoordinator:
             return RunExecution(command.ref, owner, True, self._read_events(run))
         finally:
             async with self._lock:
-                self._starting_threads.discard(command.thread_id)
+                if self._starting_runs.get(command.thread_id) == owner:
+                    self._starting_runs.pop(command.thread_id, None)
 
     async def cancel(self, run: RunRef, requester: ConnectionRef) -> CancelResult:
         """只允许 owner 取消 Run，并让执行路径产生唯一取消终态。"""
@@ -481,8 +502,17 @@ class RunCoordinator:
     async def is_active(self, thread_id: str) -> bool:
         """返回 Thread 是否正在受理或执行 Run。"""
         async with self._lock:
-            return thread_id in self._starting_threads or self._is_active(
+            return thread_id in self._starting_runs or self._is_active(
                 self._runs.get(thread_id)
+            )
+
+    async def connection_active(self, connection_id: str) -> bool:
+        """返回 Connection 是否持有 starting/active Run，供控制租约读取。"""
+        async with self._lock:
+            return self._connection_has_active_run(
+                connection_id,
+                self._runs,
+                self._starting_runs,
             )
 
     @asynccontextmanager
@@ -492,11 +522,21 @@ class RunCoordinator:
         try:
             if self._closed:
                 raise RunError("HOST_CLOSED", "Host is closed")
-            if thread_id in self._starting_threads or self._is_active(self._runs.get(thread_id)):
+            if thread_id in self._starting_runs or self._is_active(self._runs.get(thread_id)):
                 raise RunError("THREAD_BUSY", retryable=True)
             yield
         finally:
             self._lock.release()
+
+    @staticmethod
+    def _connection_has_active_run(connection_id: str, runs: Mapping[str, RunState], starting: Mapping[str, ConnectionRef]) -> bool:
+        """判断同一 Connection 是否已有 starting/active Run。"""
+        if any(ref.connection_id == connection_id for ref in starting.values()):
+            return True
+        return any(
+            run.owner.connection_id == connection_id and run.completion is None
+            for run in runs.values()
+        )
 
     async def _lookup(self, ref: RunRef) -> RunState:
         async with self._lock:

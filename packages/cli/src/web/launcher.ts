@@ -83,11 +83,12 @@ async function drain(events: AsyncIterable<unknown>): Promise<void> {
   }
 }
 
-async function browserBundle(): Promise<string> {
+/** 加载构建产物，源码开发模式下则即时构建浏览器脚本。 */
+export async function browserBundle(): Promise<string> {
   const built = resolve(import.meta.dir, "web.js")
   if (existsSync(built)) return readFile(built, "utf8")
   const result = await Bun.build({
-    entrypoints: [resolve(import.meta.dir, "web/app.ts")],
+    entrypoints: [resolve(import.meta.dir, "app.ts")],
     target: "browser",
     minify: true,
   })

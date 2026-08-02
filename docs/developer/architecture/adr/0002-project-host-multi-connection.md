@@ -19,16 +19,20 @@ Web ─────── WebSocket ─────┘
 
 - CLI Connection 是 Host owner；其 EOF/退出关闭整个 Host。attached Connection 断开只取消自己拥有的 Run。
 - 同一 Thread 最多一个 active Run；发起 Run 的 Connection 是唯一 Run owner。
+- Host 级控制权由 `ControlLease` 唯一持有：启动后 holder 是 owner；只有 owner 签发、已认证且未撤销的 attached Connection 可以 acquire，任一时刻最多一个 holder。`run.start`、`run.cancel`、`context.compact`、config preview/commit 与 Skill/MCP 写操作统一受控，只读查询不受 holder 限制。
+- 控制权转换与受控操作受理在同一把 `ControlLease` 锁内线性化；acquire 与 owner 的受控操作竞争时恰好一方被受理，不存在“先检查 holder 再受理”的 TOCTOU 窗口。
 - 只有 Run owner 可以响应 Interaction 或取消；其他 Connection 通过 `ThreadWatch` 观察完全相同的 Event。
 - `ThreadWatch` 仅能在 Thread 空闲时原子建立，返回持久化快照并登记未来 Event。
-- Web 使用 owner 签发的 60 秒、单次、Origin 绑定 token，经 `127.0.0.1` WebSocket 直连 Python；capability ceiling 不能被 `initialize` 提升。
+- Web 使用 owner 签发的 60 秒、单次、Origin 绑定 token，经 `127.0.0.1` WebSocket 直连 Python；capability ceiling 是显式 allowlist（不含 `host.attach` 与 `run.multithread`）与 owner 已协商能力的交集，不能被 `initialize` 提升。
+- owner 可按稳定 `attachment_id` 撤销未消费 token、认证中 socket 或已连接 Connection；撤销与自然断线共用同一收敛路径：先拒绝新 permit，再 fail closed Interaction、取消并等待 Run，最后恢复 owner holder。
+- 缺少 `run.multithread` 的 Connection 同时只能有一个 starting/active Run；同一 Connection 的第二个 Run 返回 `CONNECTION_RUN_BUSY`，同 Thread 并发仍返回 `THREAD_BUSY`。
 - v3 Schema 是跨语言 wire contract 的唯一事实来源；transport 和 UI 不定义第二套 DTO。
 
 ## 后果
 
-Host 资源与表现层解耦，新增前端只需实现 `RpcTransport` 和复用 v3 Client 语义。`run.start` 的协议 handler 只负责 wire 转换、先发送 accepted response，再消费 `RunExecution.events` 做 fanout；Event sequence 对所有观察者一致，Interaction 不占用 sequence。CLI 必须负责 Host 和本机静态 Web server 的关闭。
+Host 资源与表现层解耦，新增前端只需实现 `RpcTransport` 和复用 v3 Client 语义。`run.start` 的协议 handler 只负责 wire 转换、先发送 accepted response，再消费 `RunExecution.events` 做 fanout；Event sequence 对所有观察者一致，Interaction 不占用 sequence。CLI 必须负责 Host 和本机静态 Web server 的关闭。当前 Web 在接入 `host.control.acquire`（ZC-102）前只能读取，受控操作会被 Host 拒绝。
 
-当前明确不提供 active Run replay、浏览器刷新恢复、owner takeover、CLI 退出后继续运行、daemon discovery、远程认证、多租户、Desktop transport 或 REST/SSE 第二套协议。
+当前明确不提供 active Run replay、浏览器刷新恢复、owner takeover、CLI 退出后继续运行、daemon discovery、远程认证、多租户、Desktop transport 或 REST/SSE 第二套协议。`host.control.status` 只提供轮询快照，不提供控制权变更 event。
 
 ## 备选方案
 

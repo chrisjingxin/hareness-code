@@ -21,6 +21,11 @@ from jsonschema.exceptions import ValidationError
 
 from harness_agent import __version__
 from harness_agent.host.attachments import AttachmentManager
+from harness_agent.host.control_lease import (
+    ActivityFacts,
+    ControlLease,
+    ControlLeaseError,
+)
 from harness_agent.host.connection import (
     ProtocolConnection,
     ProtocolInteractionAdapter,
@@ -59,6 +64,8 @@ from harness_agent.protocol.generated import (
     PROTOCOL_MAJOR,
     PROTOCOL_MINOR,
     CAPABILITY,
+    CONTROLLED_OPERATIONS,
+    ERROR_CODES,
     EVENT_TYPE,
     METHOD,
     OPERATION_CAPABILITIES,
@@ -68,6 +75,7 @@ from harness_agent.protocol.generated import (
     ConfigCommitParams,
     ConfigDetailsParams,
     ConfigPreviewParams,
+    HostAttachmentRevokeParams,
     HostAttachmentCreateParams,
     InitializeParams,
     ModelsListParams,
@@ -129,7 +137,27 @@ STABLE_ERROR_CODES = {
     "HOST_OWNER_REQUIRED",
     "ATTACHMENT_EXPIRED",
     "INTERNAL_ERROR",
+    *ERROR_CODES,
 }
+CONTROL_RPC_CODES = {
+    name: entry["jsonrpc_code"] for name, entry in ERROR_CODES.items()
+}
+ATTACHMENT_CAPABILITY_ALLOWLIST = frozenset(
+    {
+        CAPABILITY["HOST_CONTROL"],
+        CAPABILITY["RUN_CANCEL"],
+        CAPABILITY["CONFIG_READ"],
+        CAPABILITY["CONFIG_WRITE"],
+        CAPABILITY["THREADS_READ"],
+        CAPABILITY["CONTEXT_MANAGE"],
+        CAPABILITY["SKILLS_READ"],
+        CAPABILITY["SKILLS_MANAGE"],
+        CAPABILITY["MCP_READ"],
+        CAPABILITY["MCP_MANAGE"],
+        CAPABILITY["MODELS_READ"],
+        CAPABILITY["MODELS_SELECT"],
+    }
+)
 
 
 @dataclass(slots=True)
@@ -204,6 +232,7 @@ class AgentHost:
         self._connections = {
             self._owner_connection.connection_id: self._owner_connection
         }
+        self._control_lease = ControlLease(self._owner_connection.connection_id)
         self._connection_context: ContextVar[ProtocolConnection | None] = ContextVar(
             "harness_protocol_connection",
             default=None,
@@ -245,11 +274,16 @@ class AgentHost:
             METHOD["MCP_ADD"]: self._handle_mcp_add,
             METHOD["MCP_REMOVE"]: self._handle_mcp_remove,
             METHOD["HOST_ATTACHMENT_CREATE"]: self._handle_host_attachment_create,
+            METHOD["HOST_ATTACHMENT_REVOKE"]: self._handle_host_attachment_revoke,
+            METHOD["HOST_CONTROL_ACQUIRE"]: self._handle_host_control_acquire,
+            METHOD["HOST_CONTROL_RELEASE"]: self._handle_host_control_release,
+            METHOD["HOST_CONTROL_STATUS"]: self._handle_host_control_status,
         }
         self._attachments = AttachmentManager(
             create_connection=self.create_connection,
             dispatch_connection=self.dispatch_connection,
             close_connection=self.close_connection,
+            register_attachment=self._control_lease.register_attachment,
         )
 
     async def run(self) -> None:
@@ -326,6 +360,12 @@ class AgentHost:
         """释放 attached Connection，并取消仅由它拥有的 active Runs。"""
         if connection.closed:
             return
+        attachment_id: str | None = None
+        if connection.role == "attached":
+            # 先标记 attachment 撤销并拒绝新 permit，再收敛 Interaction 与 Run。
+            attachment_id = await self._control_lease.connection_disconnected(
+                connection.connection_id
+            )
         connection.closed = True
         connection.watched_threads.clear()
         self._fail_connection_requests(connection, RpcError(-32004, "Peer connection closed"))
@@ -333,6 +373,8 @@ class AgentHost:
             ConnectionRef(connection.connection_id)
         )
         self._connections.pop(connection.connection_id, None)
+        if attachment_id is not None:
+            await self._control_lease.complete_revoke(attachment_id)
 
     def create_connection(
         self,
@@ -340,6 +382,7 @@ class AgentHost:
         *,
         role: str = "attached",
         capability_ceiling: Iterable[str] = SERVER_CAPABILITIES,
+        attachment_id: str | None = None,
     ) -> ProtocolConnection:
         """建立轻量协议连接；Project 资源仍由当前 Host 唯一持有。"""
         connection = ProtocolConnection(
@@ -349,6 +392,13 @@ class AgentHost:
             capability_ceiling=frozenset(capability_ceiling),
         )
         self._connections[connection.connection_id] = connection
+        if attachment_id is not None:
+            # 显式 attachment 登记只用于测试/嵌入路径；生产路径由
+            # AttachmentManager 在 WebSocket 认证完成后登记。
+            self._control_lease.register_attachment_sync(
+                attachment_id,
+                connection.connection_id,
+            )
         return connection
 
     async def dispatch(self, message: dict[str, Any]) -> None:
@@ -424,7 +474,11 @@ class AgentHost:
                     "CAPABILITY_REQUIRED",
                     {"code": "CAPABILITY_REQUIRED", "retryable": False, "capability": required_capability},
                 )
-            result = await handler(params, request_id)
+            if method in CONTROLLED_OPERATIONS:
+                async with self._control_lease.permit(connection.connection_id):
+                    result = await handler(params, request_id)
+            else:
+                result = await handler(params, request_id)
         except ValidationError as exc:
             await self.send_error(
                 request_id,
@@ -458,6 +512,13 @@ class AgentHost:
         except RunError as exc:
             rpc_error = self._run_rpc_error(exc)
             await self.send_error(request_id, rpc_error.code, rpc_error.message, rpc_error.data)
+        except ControlLeaseError as exc:
+            await self.send_error(
+                request_id,
+                CONTROL_RPC_CODES.get(exc.code, -32008),
+                exc.code,
+                {"code": exc.code, "retryable": exc.retryable},
+            )
         except RpcError as exc:
             await self.send_error(request_id, exc.code, exc.message, exc.data)
         except Exception as exc:  # pragma: no cover - 最后的协议隔离层。
@@ -588,7 +649,11 @@ class AgentHost:
                 },
             },
             "capabilities": {
-                "available": list(SERVER_CAPABILITIES),
+                "available": (
+                    list(connection.capability_ceiling)
+                    if connection.role != "owner"
+                    else list(SERVER_CAPABILITIES)
+                ),
                 "enabled": sorted(enabled),
                 "handles": sorted(handles),
             },
@@ -658,6 +723,9 @@ class AgentHost:
             execution = await self._run_coordinator.start(
                 command,
                 ConnectionRef(self._current_connection().connection_id),
+                allow_multithread=(
+                    CAPABILITY["RUN_MULTITHREAD"] in self._connection_capabilities()
+                ),
             )
         except (ConfigError, ExecutionBindingError, ThreadPersistenceError) as exc:
             raise RpcError(-32004, str(exc)) from exc
@@ -971,9 +1039,89 @@ class AgentHost:
         ceiling = frozenset(
             capability
             for capability in self._connection_capabilities(connection)
-            if capability != CAPABILITY["HOST_ATTACH"]
+            if capability in ATTACHMENT_CAPABILITY_ALLOWLIST
         )
         return await self._attachments.create(parsed.origin, ceiling)
+
+    async def _handle_host_attachment_revoke(
+        self,
+        params: dict[str, Any],
+        _id: str,
+    ) -> dict[str, object]:
+        """由 owner 按 attachment_id 撤销未消费、认证中或已连接的 attachment。"""
+        connection = self._current_connection()
+        if connection.role != "owner":
+            raise RpcError(
+                -32007,
+                "HOST_OWNER_REQUIRED",
+                {"code": "HOST_OWNER_REQUIRED", "retryable": False},
+            )
+        parsed = HostAttachmentRevokeParams.model_validate(params)
+        # 先阻止新 permit，再使 token 失效并关闭 socket，最后等待 Run 收敛。
+        await self._control_lease.begin_revoke(parsed.attachment_id)
+        attached_connection = await self._attachments.revoke(parsed.attachment_id)
+        if attached_connection is not None:
+            await self.close_connection(attached_connection)
+        status = await self._control_lease.complete_revoke(parsed.attachment_id)
+        return {
+            "attachment_id": parsed.attachment_id,
+            "revoked": True,
+            "control": status.to_record(),
+        }
+
+    async def _handle_host_control_acquire(
+        self,
+        _params: dict[str, Any],
+        _id: str,
+    ) -> dict[str, object]:
+        """由已认证 attached Connection 原子接管 holder。"""
+        connection = self._current_connection()
+        attachment_id = self._control_lease.attachment_id_for(
+            connection.connection_id
+        )
+        if attachment_id is None:
+            raise ControlLeaseError("ATTACHMENT_NOT_ACTIVE")
+        status = await self._control_lease.acquire(
+            connection.connection_id,
+            attachment_id,
+            await self._control_activity(self._owner_connection.connection_id),
+        )
+        return status.to_record()
+
+    async def _handle_host_control_release(
+        self,
+        _params: dict[str, Any],
+        _id: str,
+    ) -> dict[str, object]:
+        """由当前 attached holder 在无未收敛工作时把控制权归还 owner。"""
+        connection = self._current_connection()
+        status = await self._control_lease.release(
+            connection.connection_id,
+            await self._control_activity(connection.connection_id),
+        )
+        return status.to_record()
+
+    async def _handle_host_control_status(
+        self,
+        _params: dict[str, Any],
+        _id: str,
+    ) -> dict[str, object]:
+        """返回当前 holder 事实；只读，不改变任何状态。"""
+        return self._control_lease.status().to_record()
+
+    async def _control_activity(self, connection_id: str) -> ActivityFacts:
+        """汇总指定 Connection 的 Run 与未收敛 Interaction 事实。"""
+        connection = self._connections.get(connection_id)
+        return ActivityFacts(
+            starting_or_active_runs=(
+                1
+                if await self._run_coordinator.connection_active(connection_id)
+                else 0
+            ),
+            pending_interactions=(
+                len(connection.pending_requests) if connection is not None else 0
+            ),
+        )
 
     async def _handle_config_path(self, _params: dict[str, Any], _id: str) -> dict[str, Any]:
         """返回配置合并路径。"""
@@ -1156,6 +1304,7 @@ class AgentHost:
         """把 Run module 的稳定错误码适配成现有 JSON-RPC 错误。"""
         rpc_codes = {
             "THREAD_BUSY": -32000,
+            "CONNECTION_RUN_BUSY": -32000,
             "RUN_NOT_FOUND": -32001,
             "RUN_NOT_OWNER": -32005,
             "RUN_ID_CONFLICT": -32006,

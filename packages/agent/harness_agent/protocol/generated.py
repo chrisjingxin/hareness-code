@@ -6,18 +6,20 @@ from typing import Any, Literal, NotRequired, TypeAlias, TypedDict
 from harness_agent.protocol.runtime import event_model, schema_model
 
 PROTOCOL_MAJOR = 3
-PROTOCOL_MINOR = 0
-PROTOCOL_SCHEMA_SHA256 = "9c8b6bcc16139877bddf8a353a14be7335e0897cc7cd8c4fa239a20a274d77f5"
+PROTOCOL_MINOR = 1
+PROTOCOL_SCHEMA_SHA256 = "654f3a4ec425fdb8d1d7b02e0290750715fa5fa25d67422d03b9a54ad12ddab7"
 MAX_FRAME_BYTES = 8388608
 MAX_TOOL_PAYLOAD_BYTES = 1048576
-CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","mcp.status","mcp.add","mcp.remove","host.attachment.create"]
+CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","mcp.status","mcp.add","mcp.remove","host.attachment.create","host.attachment.revoke","host.control.acquire","host.control.release","host.control.status"]
 EVENT_TYPES = ["run.started","skill.loaded","content.delta","tool.started","tool.delta","tool.completed","context.updated","interaction.resolved","run.completed","run.cancelled","run.failed"]
 INTERACTION_METHODS = ["interaction.approval","interaction.question"]
-SERVER_CAPABILITIES = ["run.cancel","run.multithread","config.read","config.write","threads.read","context.manage","skills.read","skills.manage","mcp.read","mcp.manage","models.read","models.select","host.attach"]
-OPERATION_CAPABILITIES = {"initialize":None,"run.start":None,"run.cancel":"run.cancel","context.compact":"context.manage","config.show":"config.read","config.path":"config.read","config.details":"config.write","config.preview":"config.write","config.commit":"config.write","threads.list":"threads.read","threads.open":"threads.read","threads.watch":"threads.read","threads.unwatch":"threads.read","models.list":"models.read","skills.list":"skills.read","skills.inspect":"skills.read","skills.set_enabled":"skills.manage","skills.install":"skills.manage","skills.update":"skills.manage","skills.remove":"skills.manage","skills.market.list":"skills.read","mcp.status":"mcp.read","mcp.add":"mcp.manage","mcp.remove":"mcp.manage","host.attachment.create":"host.attach"}
+SERVER_CAPABILITIES = ["run.cancel","run.multithread","host.control","config.read","config.write","threads.read","context.manage","skills.read","skills.manage","mcp.read","mcp.manage","models.read","models.select","host.attach"]
+OPERATION_CAPABILITIES = {"initialize":None,"run.start":None,"run.cancel":"run.cancel","context.compact":"context.manage","config.show":"config.read","config.path":"config.read","config.details":"config.write","config.preview":"config.write","config.commit":"config.write","threads.list":"threads.read","threads.open":"threads.read","threads.watch":"threads.read","threads.unwatch":"threads.read","models.list":"models.read","skills.list":"skills.read","skills.inspect":"skills.read","skills.set_enabled":"skills.manage","skills.install":"skills.manage","skills.update":"skills.manage","skills.remove":"skills.manage","skills.market.list":"skills.read","mcp.status":"mcp.read","mcp.add":"mcp.manage","mcp.remove":"mcp.manage","host.attachment.create":"host.attach","host.attachment.revoke":"host.attach","host.control.acquire":"host.control","host.control.release":"host.control","host.control.status":"host.control"}
+CONTROLLED_OPERATIONS = ["run.start","run.cancel","context.compact","config.preview","config.commit","skills.set_enabled","skills.install","skills.update","skills.remove","mcp.add","mcp.remove"]
 INTERACTION_HANDLES = {"interaction.approval":"approval","interaction.question":"question"}
-METHOD = {"INITIALIZE":"initialize","RUN_START":"run.start","RUN_CANCEL":"run.cancel","CONTEXT_COMPACT":"context.compact","CONFIG_SHOW":"config.show","CONFIG_PATH":"config.path","CONFIG_DETAILS":"config.details","CONFIG_PREVIEW":"config.preview","CONFIG_COMMIT":"config.commit","THREADS_LIST":"threads.list","THREADS_OPEN":"threads.open","THREADS_WATCH":"threads.watch","THREADS_UNWATCH":"threads.unwatch","MODELS_LIST":"models.list","SKILLS_LIST":"skills.list","SKILLS_INSPECT":"skills.inspect","SKILLS_SET_ENABLED":"skills.set_enabled","SKILLS_INSTALL":"skills.install","SKILLS_UPDATE":"skills.update","SKILLS_REMOVE":"skills.remove","SKILLS_MARKET_LIST":"skills.market.list","MCP_STATUS":"mcp.status","MCP_ADD":"mcp.add","MCP_REMOVE":"mcp.remove","HOST_ATTACHMENT_CREATE":"host.attachment.create","EVENT":"event","INTERACTION_APPROVAL":"interaction.approval","INTERACTION_QUESTION":"interaction.question"}
-CAPABILITY = {"RUN_CANCEL":"run.cancel","RUN_MULTITHREAD":"run.multithread","CONFIG_READ":"config.read","CONFIG_WRITE":"config.write","THREADS_READ":"threads.read","CONTEXT_MANAGE":"context.manage","SKILLS_READ":"skills.read","SKILLS_MANAGE":"skills.manage","MCP_READ":"mcp.read","MCP_MANAGE":"mcp.manage","MODELS_READ":"models.read","MODELS_SELECT":"models.select","HOST_ATTACH":"host.attach"}
+ERROR_CODES = {"CONTROL_NOT_HOLDER":{"jsonrpc_code":-32008,"retryable":True},"CONTROL_BUSY":{"jsonrpc_code":-32008,"retryable":True},"CONTROL_RELEASE_BLOCKED":{"jsonrpc_code":-32008,"retryable":True},"ATTACHMENT_NOT_FOUND":{"jsonrpc_code":-32009,"retryable":False},"ATTACHMENT_NOT_ACTIVE":{"jsonrpc_code":-32009,"retryable":False},"CONNECTION_RUN_BUSY":{"jsonrpc_code":-32000,"retryable":True}}
+METHOD = {"INITIALIZE":"initialize","RUN_START":"run.start","RUN_CANCEL":"run.cancel","CONTEXT_COMPACT":"context.compact","CONFIG_SHOW":"config.show","CONFIG_PATH":"config.path","CONFIG_DETAILS":"config.details","CONFIG_PREVIEW":"config.preview","CONFIG_COMMIT":"config.commit","THREADS_LIST":"threads.list","THREADS_OPEN":"threads.open","THREADS_WATCH":"threads.watch","THREADS_UNWATCH":"threads.unwatch","MODELS_LIST":"models.list","SKILLS_LIST":"skills.list","SKILLS_INSPECT":"skills.inspect","SKILLS_SET_ENABLED":"skills.set_enabled","SKILLS_INSTALL":"skills.install","SKILLS_UPDATE":"skills.update","SKILLS_REMOVE":"skills.remove","SKILLS_MARKET_LIST":"skills.market.list","MCP_STATUS":"mcp.status","MCP_ADD":"mcp.add","MCP_REMOVE":"mcp.remove","HOST_ATTACHMENT_CREATE":"host.attachment.create","HOST_ATTACHMENT_REVOKE":"host.attachment.revoke","HOST_CONTROL_ACQUIRE":"host.control.acquire","HOST_CONTROL_RELEASE":"host.control.release","HOST_CONTROL_STATUS":"host.control.status","EVENT":"event","INTERACTION_APPROVAL":"interaction.approval","INTERACTION_QUESTION":"interaction.question"}
+CAPABILITY = {"RUN_CANCEL":"run.cancel","RUN_MULTITHREAD":"run.multithread","HOST_CONTROL":"host.control","CONFIG_READ":"config.read","CONFIG_WRITE":"config.write","THREADS_READ":"threads.read","CONTEXT_MANAGE":"context.manage","SKILLS_READ":"skills.read","SKILLS_MANAGE":"skills.manage","MCP_READ":"mcp.read","MCP_MANAGE":"mcp.manage","MODELS_READ":"models.read","MODELS_SELECT":"models.select","HOST_ATTACH":"host.attach"}
 EVENT_TYPE = {"RUN_STARTED":"run.started","SKILL_LOADED":"skill.loaded","CONTENT_DELTA":"content.delta","TOOL_STARTED":"tool.started","TOOL_DELTA":"tool.delta","TOOL_COMPLETED":"tool.completed","CONTEXT_UPDATED":"context.updated","INTERACTION_RESOLVED":"interaction.resolved","RUN_COMPLETED":"run.completed","RUN_CANCELLED":"run.cancelled","RUN_FAILED":"run.failed"}
 
 JsonValueWire: TypeAlias = None | bool | int | float | str | list["JsonValueWire"] | dict[str, "JsonValueWire"]
@@ -248,9 +250,27 @@ class HostAttachmentCreateParamsWire(TypedDict):
     origin: str
 
 class HostAttachmentCreateResultWire(TypedDict):
+    attachment_id: str
     endpoint: str
     token: str
     expires_at_ms: int
+
+class HostAttachmentRevokeParamsWire(TypedDict):
+    attachment_id: str
+
+class HostAttachmentRevokeResultWire(TypedDict):
+    attachment_id: str
+    revoked: Literal[True]
+    control: ControlStatusWire
+
+class ControlHolderWire(TypedDict):
+    connection_id: str
+    role: Literal["owner", "attached"]
+    attachment_id: NotRequired[str | None]
+
+class ControlStatusWire(TypedDict):
+    state: Literal["owner", "attached", "revoking"]
+    holder: ControlHolderWire
 
 class EventBaseWire(TypedDict):
     event_id: str
@@ -392,6 +412,12 @@ SkillsRemoveParamsWire = SkillsInspectParamsWire
 SkillsRemoveResultWire = JsonObjectWire
 SkillsMarketListResultWire = JsonObjectArrayWire
 McpStatusParamsWire = EmptyParamsWire
+HostControlAcquireParamsWire = EmptyParamsWire
+HostControlAcquireResultWire = ControlStatusWire
+HostControlReleaseParamsWire = EmptyParamsWire
+HostControlReleaseResultWire = ControlStatusWire
+HostControlStatusParamsWire = EmptyParamsWire
+HostControlStatusResultWire = ControlStatusWire
 
 InitializeParams = schema_model("#/$defs/initializeParams", name="InitializeParams")
 InitializeResult = schema_model("#/$defs/initializeResult", name="InitializeResult")
@@ -443,6 +469,14 @@ McpRemoveParams = schema_model("#/$defs/mcpRemoveParams", name="McpRemoveParams"
 McpRemoveResult = schema_model("#/$defs/mcpRemoveResult", name="McpRemoveResult")
 HostAttachmentCreateParams = schema_model("#/$defs/hostAttachmentCreateParams", name="HostAttachmentCreateParams")
 HostAttachmentCreateResult = schema_model("#/$defs/hostAttachmentCreateResult", name="HostAttachmentCreateResult")
+HostAttachmentRevokeParams = schema_model("#/$defs/hostAttachmentRevokeParams", name="HostAttachmentRevokeParams")
+HostAttachmentRevokeResult = schema_model("#/$defs/hostAttachmentRevokeResult", name="HostAttachmentRevokeResult")
+HostControlAcquireParams = schema_model("#/$defs/emptyParams", name="HostControlAcquireParams")
+HostControlAcquireResult = schema_model("#/$defs/controlStatus", name="HostControlAcquireResult")
+HostControlReleaseParams = schema_model("#/$defs/emptyParams", name="HostControlReleaseParams")
+HostControlReleaseResult = schema_model("#/$defs/controlStatus", name="HostControlReleaseResult")
+HostControlStatusParams = schema_model("#/$defs/emptyParams", name="HostControlStatusParams")
+HostControlStatusResult = schema_model("#/$defs/controlStatus", name="HostControlStatusResult")
 
 EventEnvelope = event_model()
 ApprovalResponse = schema_model("#/$defs/approvalResponse", name="ApprovalResponse")

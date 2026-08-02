@@ -5,7 +5,7 @@ import { createHash } from "node:crypto"
 import { resolve } from "node:path"
 
 type Schema = Record<string, any>
-type ContractEntry = { params?: string; result?: string; payload?: string; capability?: string; handle?: string }
+type ContractEntry = { params?: string; result?: string; payload?: string; capability?: string; handle?: string; controlled?: boolean }
 type Metadata = {
   major: number
   minor: number
@@ -15,6 +15,7 @@ type Metadata = {
   events: Record<string, ContractEntry>
   interactions: Record<string, ContractEntry>
   capabilities: string[]
+  error_codes: Record<string, { jsonrpc_code: number; retryable: boolean }>
 }
 
 const protocolRoot = resolve(import.meta.dir, "..")
@@ -81,7 +82,10 @@ export const EVENT_TYPES = ${JSON.stringify(Object.keys(meta.events))} as const
 export const INTERACTION_METHODS = ${JSON.stringify(Object.keys(meta.interactions))} as const
 export const SERVER_CAPABILITIES = ${JSON.stringify(meta.capabilities)} as const
 export const OPERATION_CAPABILITIES = ${JSON.stringify(Object.fromEntries(Object.entries(meta.operations).map(([name, entry]) => [name, entry.capability ?? null])))} as const
+export const CONTROLLED_OPERATIONS = ${JSON.stringify(Object.entries(meta.operations).filter(([, entry]) => entry.controlled).map(([name]) => name))} as const
 export const INTERACTION_HANDLES = ${JSON.stringify(Object.fromEntries(Object.entries(meta.interactions).map(([name, entry]) => [name, entry.handle])))} as const
+export const ERROR_CODES = ${JSON.stringify(Object.fromEntries(Object.entries(meta.error_codes).map(([name, entry]) => [name, { jsonrpcCode: entry.jsonrpc_code, retryable: entry.retryable }])))} as const
+export type ErrorCode = keyof typeof ERROR_CODES
 export const Capability = ${JSON.stringify(Object.fromEntries(meta.capabilities.map(value => [constant(value), value])))} as const
 export const EventType = ${JSON.stringify(Object.fromEntries(Object.keys(meta.events).map(value => [constant(value), value])))} as const
 
@@ -158,6 +162,9 @@ function renderContractFixtures(root: Schema, meta: Metadata): string {
     addFixtureGroup(root, valid, invalid, "interaction.result", name, entry.result!)
   }
   addFixtureGroup(root, valid, invalid, "error", "ProtocolErrorData", "#/$defs/protocolErrorData")
+  for (const [name, entry] of Object.entries(meta.error_codes)) {
+    addValueFixtures(valid, invalid, "error", name, { code: name, retryable: entry.retryable }, {})
+  }
   return `${JSON.stringify({ valid, invalid }, null, 2)}\n`
 }
 
@@ -276,7 +283,9 @@ EVENT_TYPES = ${pythonLiteral(Object.keys(meta.events))}
 INTERACTION_METHODS = ${pythonLiteral(Object.keys(meta.interactions))}
 SERVER_CAPABILITIES = ${pythonLiteral(meta.capabilities)}
 OPERATION_CAPABILITIES = ${pythonLiteral(Object.fromEntries(operations.map(([name, entry]) => [name, entry.capability ?? null])))}
+CONTROLLED_OPERATIONS = ${pythonLiteral(Object.entries(meta.operations).filter(([, entry]) => entry.controlled).map(([name]) => name))}
 INTERACTION_HANDLES = ${pythonLiteral(Object.fromEntries(Object.entries(meta.interactions).map(([name, entry]) => [name, entry.handle])))}
+ERROR_CODES = ${pythonLiteral(Object.fromEntries(Object.entries(meta.error_codes).map(([name, entry]) => [name, { "jsonrpc_code": entry.jsonrpc_code, "retryable": entry.retryable }])))}
 METHOD = ${pythonLiteral(Object.fromEntries([...Object.keys(meta.operations), "event", ...Object.keys(meta.interactions)].map(value => [constant(value), value])))}
 CAPABILITY = ${pythonLiteral(Object.fromEntries(meta.capabilities.map(value => [constant(value), value])))}
 EVENT_TYPE = ${pythonLiteral(Object.fromEntries(Object.keys(meta.events).map(value => [constant(value), value])))}

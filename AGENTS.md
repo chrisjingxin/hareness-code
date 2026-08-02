@@ -12,7 +12,7 @@ Harness Code（命令名 `harness` / `za38`）是一个面向企业研发场景�
 
 ## Agent 开工顺序
 
-1. 先读取 `README.md`、`docs/developer/architecture/架构总览.md` 与任务对应的 `docs/developer/tasks/<ID>.md`。
+1. 先读取 `README.md`、`docs/developer/architecture/架构总览.md` 与任务对应的 `docs/developer/tasks/<ID>.md`；若存在 `docs/developer/designs/<ID>.md`，还必须同时读取该方案设计。
 2. 运行 `git status --short`，识别并保留用户已有改动；不得为清理工作区而回滚无关文件。
 3. 按变更归属选择包：界面和进程管理改 `cli`，跨进程契约改 `protocol`，Agent 与执行逻辑改 `agent`。
 4. 修改前先找到邻近实现与现有测试；协议或生命周期变更必须同时验证 TypeScript 和 Python 两端。
@@ -25,7 +25,7 @@ Harness Code（命令名 `harness` / `za38`）是一个面向企业研发场景�
 - `packages/agent/`：`za38-agent` Python distribution workspace；`harness_agent/host/` 管连接和 Run，`runtime/` 构建 Agent，`threads/` 管持久化与上下文，其余职责按 `config/policy/tools/extensions/protocol` 分层。
 - `packages/*/tests/`：包内测试并镜像源码职责；工程脚本测试位于 `scripts/project/`。
 - `docs/user/`：最终用户的快速开始、配置、交互使用和故障排查。
-- `docs/developer/`：`architecture/` 保存架构与 ADR，`project/` 保存工作流，`research/` 保存调研及历史资料，`tasks/` 保存任务源和生成看板。
+- `docs/developer/`：`architecture/` 保存架构与 ADR，`designs/` 保存按任务 ID 编排的已确认实施方案，`project/` 保存工作流，`research/` 保存调研及历史资料，`tasks/` 保存原始任务源和生成看板。
 - `scripts/project/`：任务、文档与发布一致性检查的工程脚本。
 
 表现层逻辑只能放在 `cli`，Agent/业务逻辑只能放在 `agent`，跨进程契约只能放在 `protocol`。
@@ -89,6 +89,14 @@ Python 测试命名为 `test_<行为>`，Bun 测试命名为 `*.test.ts`。修�
 不推荐：引入 ResolvedExecutionBinding 并统一多个 adapter。
 推荐：模型选择只计算一次，运行、历史记录和界面都使用这同一个结果；实现上由 ResolvedExecutionBinding 保存该结果。
 ```
+
+## 方案设计文档管理
+
+- 所有后续正式方案设计统一写入 `docs/developer/designs/`，文件名固定为 `<任务 ID>.md`；不得把方案分散在临时笔记、handoff 或新建的其他目录。
+- `docs/developer/tasks/<ID>.md` 保留原始需求、范围与验收条件；`docs/developer/designs/<ID>.md` 记录经确认的实现决策、interface、流程、错误语义和测试方案。方案文档必须链接原始任务，不复制或替代任务源。
+- 后续执行 Thread 必须同时以原始任务和方案设计为输入；不得自行补充会改变范围、Protocol、数据形状或生命周期的决策。发现方案与当前代码不符时，先停止实施并修订方案。
+- 方案设计至少包含：通俗问题说明、已确认现状、目标流程与关键 invariant、公开 interface 及错误模式、按依赖排序的实施步骤、可观察验收与非范围。冲突时以用户最新决定和任务原始范围为准，并先同步更新方案。
+- `tmp/handoff.md` 只记录临时进度、未提交改动与验证状态；已有方案不在 handoff 中重复，只引用对应 `designs/<ID>.md`。
 
 ## 协作与功能完成定义
 

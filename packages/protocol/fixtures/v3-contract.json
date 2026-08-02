@@ -467,9 +467,88 @@
       "name": "host.attachment.create",
       "case": "valid",
       "value": {
+        "attachment_id": "x",
         "endpoint": "x",
         "token": "x",
         "expires_at_ms": 1
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "host.attachment.revoke",
+      "case": "valid",
+      "value": {
+        "attachment_id": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "host.attachment.revoke",
+      "case": "valid",
+      "value": {
+        "attachment_id": "x",
+        "revoked": true,
+        "control": {
+          "state": "owner",
+          "holder": {
+            "connection_id": "x",
+            "role": "owner"
+          }
+        }
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "host.control.acquire",
+      "case": "valid",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "host.control.acquire",
+      "case": "valid",
+      "value": {
+        "state": "owner",
+        "holder": {
+          "connection_id": "x",
+          "role": "owner"
+        }
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "host.control.release",
+      "case": "valid",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "host.control.release",
+      "case": "valid",
+      "value": {
+        "state": "owner",
+        "holder": {
+          "connection_id": "x",
+          "role": "owner"
+        }
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "host.control.status",
+      "case": "valid",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "host.control.status",
+      "case": "valid",
+      "value": {
+        "state": "owner",
+        "holder": {
+          "connection_id": "x",
+          "role": "owner"
+        }
       }
     },
     {
@@ -723,6 +802,60 @@
       "value": {
         "code": "x",
         "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "CONTROL_NOT_HOLDER",
+      "case": "valid",
+      "value": {
+        "code": "CONTROL_NOT_HOLDER",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "name": "CONTROL_BUSY",
+      "case": "valid",
+      "value": {
+        "code": "CONTROL_BUSY",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "name": "CONTROL_RELEASE_BLOCKED",
+      "case": "valid",
+      "value": {
+        "code": "CONTROL_RELEASE_BLOCKED",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "name": "ATTACHMENT_NOT_FOUND",
+      "case": "valid",
+      "value": {
+        "code": "ATTACHMENT_NOT_FOUND",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "ATTACHMENT_NOT_ACTIVE",
+      "case": "valid",
+      "value": {
+        "code": "ATTACHMENT_NOT_ACTIVE",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "CONNECTION_RUN_BUSY",
+      "case": "valid",
+      "value": {
+        "code": "CONNECTION_RUN_BUSY",
+        "retryable": true
       }
     }
   ],
@@ -1761,6 +1894,7 @@
       "name": "host.attachment.create",
       "case": "extra_field",
       "value": {
+        "attachment_id": "x",
         "endpoint": "x",
         "token": "x",
         "expires_at_ms": 1,
@@ -1772,8 +1906,200 @@
       "name": "host.attachment.create",
       "case": "missing_field",
       "value": {
+        "endpoint": "x",
         "token": "x",
         "expires_at_ms": 1
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "host.attachment.revoke",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "host.attachment.revoke",
+      "case": "extra_field",
+      "value": {
+        "attachment_id": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "host.attachment.revoke",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "host.attachment.revoke",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "host.attachment.revoke",
+      "case": "extra_field",
+      "value": {
+        "attachment_id": "x",
+        "revoked": true,
+        "control": {
+          "state": "owner",
+          "holder": {
+            "connection_id": "x",
+            "role": "owner"
+          }
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "host.attachment.revoke",
+      "case": "missing_field",
+      "value": {
+        "revoked": true,
+        "control": {
+          "state": "owner",
+          "holder": {
+            "connection_id": "x",
+            "role": "owner"
+          }
+        }
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "host.control.acquire",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "host.control.acquire",
+      "case": "extra_field",
+      "value": {
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "host.control.acquire",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "host.control.acquire",
+      "case": "extra_field",
+      "value": {
+        "state": "owner",
+        "holder": {
+          "connection_id": "x",
+          "role": "owner"
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "host.control.acquire",
+      "case": "missing_field",
+      "value": {
+        "holder": {
+          "connection_id": "x",
+          "role": "owner"
+        }
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "host.control.release",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "host.control.release",
+      "case": "extra_field",
+      "value": {
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "host.control.release",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "host.control.release",
+      "case": "extra_field",
+      "value": {
+        "state": "owner",
+        "holder": {
+          "connection_id": "x",
+          "role": "owner"
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "host.control.release",
+      "case": "missing_field",
+      "value": {
+        "holder": {
+          "connection_id": "x",
+          "role": "owner"
+        }
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "host.control.status",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "host.control.status",
+      "case": "extra_field",
+      "value": {
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "host.control.status",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "host.control.status",
+      "case": "extra_field",
+      "value": {
+        "state": "owner",
+        "holder": {
+          "connection_id": "x",
+          "role": "owner"
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "host.control.status",
+      "case": "missing_field",
+      "value": {
+        "holder": {
+          "connection_id": "x",
+          "role": "owner"
+        }
       }
     },
     {
@@ -2391,6 +2717,42 @@
       "value": {
         "retryable": false
       }
+    },
+    {
+      "kind": "error",
+      "name": "CONTROL_NOT_HOLDER",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "CONTROL_BUSY",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "CONTROL_RELEASE_BLOCKED",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "ATTACHMENT_NOT_FOUND",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "ATTACHMENT_NOT_ACTIVE",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "CONNECTION_RUN_BUSY",
+      "case": "wrong_type",
+      "value": null
     }
   ]
 }

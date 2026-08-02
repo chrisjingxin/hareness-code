@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from harness_agent.host.run_coordinator import (
@@ -110,3 +112,106 @@ async def test_run_coordinator_releases_runtime_and_completes_once() -> None:
     assert await coordinator.execution_registry.list(
         ExecutionRef.root("thread", "run-1")
     ) == ()
+
+
+@pytest.mark.asyncio
+async def test_run_coordinator_limits_second_connection_run_without_multithread() -> None:
+    """无 run.multithread 时，同一 Connection 的第二个 Run 被拒且不影响他人。"""
+    gate = asyncio.Event()
+
+    async def slow_preparation(_command, _persistence):
+        await gate.wait()
+        return RunPreparation()
+
+    coordinator = RunCoordinator(
+        persistence_provider=lambda: _noop_persistence(),
+        preparation_provider=slow_preparation,
+        runtime_provider=lambda run: _noop_runtime(run),
+        interaction_port=_NoopInteraction(),
+        skill_registry_provider=lambda: None,  # type: ignore[return-value]
+    )
+    owner = ConnectionRef("owner")
+    start_task = asyncio.create_task(
+        coordinator.start(
+            StartRun(thread_id="thread-1", run_id="run-1", message="first"),
+            owner,
+        )
+    )
+    await asyncio.sleep(0)
+    with pytest.raises(RunError) as busy:
+        await coordinator.start(
+            StartRun(thread_id="thread-2", run_id="run-2", message="second"),
+            owner,
+        )
+    assert busy.value.code == "CONNECTION_RUN_BUSY"
+    assert busy.value.retryable is True
+
+    # 其他 Connection 不受限制。
+    other_task = asyncio.create_task(
+        coordinator.start(
+            StartRun(thread_id="thread-2", run_id="run-2", message="second"),
+            ConnectionRef("other"),
+        )
+    )
+    await asyncio.sleep(0)
+    gate.set()
+    await start_task
+    other = await other_task
+    await coordinator.cancel(other.ref, ConnectionRef("other"))
+    await _events(other)
+
+
+@pytest.mark.asyncio
+async def test_run_coordinator_allows_multithread_connection_runs() -> None:
+    """有 run.multithread 时，同一 Connection 可在不同 Thread 并发 starting/active。"""
+    gate = asyncio.Event()
+
+    async def slow_preparation(_command, _persistence):
+        await gate.wait()
+        return RunPreparation()
+
+    coordinator = RunCoordinator(
+        persistence_provider=lambda: _noop_persistence(),
+        preparation_provider=slow_preparation,
+        runtime_provider=lambda run: _noop_runtime(run),
+        interaction_port=_NoopInteraction(),
+        skill_registry_provider=lambda: None,  # type: ignore[return-value]
+    )
+    owner = ConnectionRef("owner")
+    first = asyncio.create_task(
+        coordinator.start(
+            StartRun(thread_id="thread-1", run_id="run-1", message="first"),
+            owner,
+            allow_multithread=True,
+        )
+    )
+    await asyncio.sleep(0)
+    second_task = asyncio.create_task(
+        coordinator.start(
+            StartRun(thread_id="thread-2", run_id="run-2", message="second"),
+            owner,
+            allow_multithread=True,
+        )
+    )
+    await asyncio.sleep(0)
+    gate.set()
+    await first
+    second = await second_task
+    await coordinator.cancel(second.ref, owner)
+    await _events(second)
+
+
+async def _noop_persistence():
+    return None
+
+
+async def _noop_runtime(run):
+    async def release() -> None:
+        return None
+
+    return RunRuntime(
+        agent=None,
+        run_context=None,
+        graph_config=lambda thread_id: {"configurable": {"thread_id": thread_id}},
+        release=release,
+    )

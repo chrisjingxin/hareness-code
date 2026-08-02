@@ -1,17 +1,20 @@
 /** 此文件由 packages/protocol/schema/v3.json 生成，请勿手工修改。 */
 
 export const PROTOCOL_MAJOR = 3 as const
-export const PROTOCOL_MINOR = 0 as const
-export const PROTOCOL_SCHEMA_SHA256 = "9c8b6bcc16139877bddf8a353a14be7335e0897cc7cd8c4fa239a20a274d77f5" as const
+export const PROTOCOL_MINOR = 1 as const
+export const PROTOCOL_SCHEMA_SHA256 = "654f3a4ec425fdb8d1d7b02e0290750715fa5fa25d67422d03b9a54ad12ddab7" as const
 export const MAX_FRAME_BYTES = 8388608 as const
 export const MAX_TOOL_PAYLOAD_BYTES = 1048576 as const
-export const CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","mcp.status","mcp.add","mcp.remove","host.attachment.create"] as const
+export const CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","mcp.status","mcp.add","mcp.remove","host.attachment.create","host.attachment.revoke","host.control.acquire","host.control.release","host.control.status"] as const
 export const EVENT_TYPES = ["run.started","skill.loaded","content.delta","tool.started","tool.delta","tool.completed","context.updated","interaction.resolved","run.completed","run.cancelled","run.failed"] as const
 export const INTERACTION_METHODS = ["interaction.approval","interaction.question"] as const
-export const SERVER_CAPABILITIES = ["run.cancel","run.multithread","config.read","config.write","threads.read","context.manage","skills.read","skills.manage","mcp.read","mcp.manage","models.read","models.select","host.attach"] as const
-export const OPERATION_CAPABILITIES = {"initialize":null,"run.start":null,"run.cancel":"run.cancel","context.compact":"context.manage","config.show":"config.read","config.path":"config.read","config.details":"config.write","config.preview":"config.write","config.commit":"config.write","threads.list":"threads.read","threads.open":"threads.read","threads.watch":"threads.read","threads.unwatch":"threads.read","models.list":"models.read","skills.list":"skills.read","skills.inspect":"skills.read","skills.set_enabled":"skills.manage","skills.install":"skills.manage","skills.update":"skills.manage","skills.remove":"skills.manage","skills.market.list":"skills.read","mcp.status":"mcp.read","mcp.add":"mcp.manage","mcp.remove":"mcp.manage","host.attachment.create":"host.attach"} as const
+export const SERVER_CAPABILITIES = ["run.cancel","run.multithread","host.control","config.read","config.write","threads.read","context.manage","skills.read","skills.manage","mcp.read","mcp.manage","models.read","models.select","host.attach"] as const
+export const OPERATION_CAPABILITIES = {"initialize":null,"run.start":null,"run.cancel":"run.cancel","context.compact":"context.manage","config.show":"config.read","config.path":"config.read","config.details":"config.write","config.preview":"config.write","config.commit":"config.write","threads.list":"threads.read","threads.open":"threads.read","threads.watch":"threads.read","threads.unwatch":"threads.read","models.list":"models.read","skills.list":"skills.read","skills.inspect":"skills.read","skills.set_enabled":"skills.manage","skills.install":"skills.manage","skills.update":"skills.manage","skills.remove":"skills.manage","skills.market.list":"skills.read","mcp.status":"mcp.read","mcp.add":"mcp.manage","mcp.remove":"mcp.manage","host.attachment.create":"host.attach","host.attachment.revoke":"host.attach","host.control.acquire":"host.control","host.control.release":"host.control","host.control.status":"host.control"} as const
+export const CONTROLLED_OPERATIONS = ["run.start","run.cancel","context.compact","config.preview","config.commit","skills.set_enabled","skills.install","skills.update","skills.remove","mcp.add","mcp.remove"] as const
 export const INTERACTION_HANDLES = {"interaction.approval":"approval","interaction.question":"question"} as const
-export const Capability = {"RUN_CANCEL":"run.cancel","RUN_MULTITHREAD":"run.multithread","CONFIG_READ":"config.read","CONFIG_WRITE":"config.write","THREADS_READ":"threads.read","CONTEXT_MANAGE":"context.manage","SKILLS_READ":"skills.read","SKILLS_MANAGE":"skills.manage","MCP_READ":"mcp.read","MCP_MANAGE":"mcp.manage","MODELS_READ":"models.read","MODELS_SELECT":"models.select","HOST_ATTACH":"host.attach"} as const
+export const ERROR_CODES = {"CONTROL_NOT_HOLDER":{"jsonrpcCode":-32008,"retryable":true},"CONTROL_BUSY":{"jsonrpcCode":-32008,"retryable":true},"CONTROL_RELEASE_BLOCKED":{"jsonrpcCode":-32008,"retryable":true},"ATTACHMENT_NOT_FOUND":{"jsonrpcCode":-32009,"retryable":false},"ATTACHMENT_NOT_ACTIVE":{"jsonrpcCode":-32009,"retryable":false},"CONNECTION_RUN_BUSY":{"jsonrpcCode":-32000,"retryable":true}} as const
+export type ErrorCode = keyof typeof ERROR_CODES
+export const Capability = {"RUN_CANCEL":"run.cancel","RUN_MULTITHREAD":"run.multithread","HOST_CONTROL":"host.control","CONFIG_READ":"config.read","CONFIG_WRITE":"config.write","THREADS_READ":"threads.read","CONTEXT_MANAGE":"context.manage","SKILLS_READ":"skills.read","SKILLS_MANAGE":"skills.manage","MCP_READ":"mcp.read","MCP_MANAGE":"mcp.manage","MODELS_READ":"models.read","MODELS_SELECT":"models.select","HOST_ATTACH":"host.attach"} as const
 export const EventType = {"RUN_STARTED":"run.started","SKILL_LOADED":"skill.loaded","CONTENT_DELTA":"content.delta","TOOL_STARTED":"tool.started","TOOL_DELTA":"tool.delta","TOOL_COMPLETED":"tool.completed","CONTEXT_UPDATED":"context.updated","INTERACTION_RESOLVED":"interaction.resolved","RUN_COMPLETED":"run.completed","RUN_CANCELLED":"run.cancelled","RUN_FAILED":"run.failed"} as const
 
 export const Method = {
@@ -40,6 +43,10 @@ export const Method = {
   MCP_ADD: "mcp.add",
   MCP_REMOVE: "mcp.remove",
   HOST_ATTACHMENT_CREATE: "host.attachment.create",
+  HOST_ATTACHMENT_REVOKE: "host.attachment.revoke",
+  HOST_CONTROL_ACQUIRE: "host.control.acquire",
+  HOST_CONTROL_RELEASE: "host.control.release",
+  HOST_CONTROL_STATUS: "host.control.status",
   EVENT: "event",
   INTERACTION_APPROVAL: "interaction.approval",
   INTERACTION_QUESTION: "interaction.question",
@@ -105,7 +112,11 @@ export type McpAddResult = { "added": boolean; "connected": boolean; "tool_names
 export type McpRemoveParams = { "name": string }
 export type McpRemoveResult = { "removed": boolean }
 export type HostAttachmentCreateParams = { "origin": string }
-export type HostAttachmentCreateResult = { "endpoint": string; "token": string; "expires_at_ms": number }
+export type HostAttachmentCreateResult = { "attachment_id": string; "endpoint": string; "token": string; "expires_at_ms": number }
+export type HostAttachmentRevokeParams = { "attachment_id": string }
+export type HostAttachmentRevokeResult = { "attachment_id": string; "revoked": true; "control": ControlStatus }
+export type ControlHolder = { "connection_id": string; "role": "owner" | "attached"; "attachment_id"?: string | null }
+export type ControlStatus = { "state": "owner" | "attached" | "revoking"; "holder": ControlHolder }
 export type EventBase = { "event_id": string; "type": string; "thread_id": string; "run_id": string; "sequence": number; "timestamp_ms": number; "execution_id"?: string; "parent_execution_id"?: string | null; "agent_id"?: string; "payload": JsonObject }
 export type RunStartedPayload = { "resumed": boolean; "skills_snapshot_id"?: string | null; "primary_model"?: RunPrimaryModelBinding; "runtime_profile_id"?: string | null }
 export type SkillLoadedPayload = { "skill_id": string; "source": string; "version": string | null; "snapshot_id": string }
@@ -145,6 +156,12 @@ export type SkillsRemoveParams = SkillsInspectParams
 export type SkillsRemoveResult = JsonObject
 export type SkillsMarketListResult = JsonObjectArray
 export type McpStatusParams = EmptyParams
+export type HostControlAcquireParams = EmptyParams
+export type HostControlAcquireResult = ControlStatus
+export type HostControlReleaseParams = EmptyParams
+export type HostControlReleaseResult = ControlStatus
+export type HostControlStatusParams = EmptyParams
+export type HostControlStatusResult = ControlStatus
 
 export interface OperationMap {
   "initialize": { params: InitializeParams; result: InitializeResult }
@@ -172,6 +189,10 @@ export interface OperationMap {
   "mcp.add": { params: McpAddParams; result: McpAddResult }
   "mcp.remove": { params: McpRemoveParams; result: McpRemoveResult }
   "host.attachment.create": { params: HostAttachmentCreateParams; result: HostAttachmentCreateResult }
+  "host.attachment.revoke": { params: HostAttachmentRevokeParams; result: HostAttachmentRevokeResult }
+  "host.control.acquire": { params: HostControlAcquireParams; result: HostControlAcquireResult }
+  "host.control.release": { params: HostControlReleaseParams; result: HostControlReleaseResult }
+  "host.control.status": { params: HostControlStatusParams; result: HostControlStatusResult }
 }
 export type OperationName = keyof OperationMap
 
