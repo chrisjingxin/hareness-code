@@ -148,7 +148,9 @@ function RuntimeMeta(props: { runtime: TuiRuntime; variant: "home" | "thread"; t
   const contentWidth = props.variant === "home"
     ? Math.min(68, Math.max(28, props.terminalWidth - 8))
     : Math.max(28, props.terminalWidth - 10)
-  const model = shorten(modelLabel(props.runtime), Math.max(14, contentWidth - 14))
+  // Shift+Tab 快捷键提示紧跟审批模式展示；窄终端隐藏提示，优先保住模式本身。
+  const showApprovalHint = contentWidth >= 52
+  const model = shorten(modelLabel(props.runtime), Math.max(14, contentWidth - (showApprovalHint ? 22 : 14)))
   const warning = props.runtime.approvalModeWarning
     ? shorten(props.runtime.approvalModeWarning, contentWidth)
     : undefined
@@ -160,7 +162,10 @@ function RuntimeMeta(props: { runtime: TuiRuntime; variant: "home" | "thread"; t
     <box flexDirection="column" paddingTop={1} paddingBottom={1}>
       <box width="100%" flexDirection="row" justifyContent="space-between" gap={2}>
         <text fg={props.runtime.modelConfigured ? tuiTheme.text : tuiTheme.warning}>模型：{model}</text>
-        <text fg={props.runtime.approvalMode === "yolo" ? tuiTheme.warning : tuiTheme.muted}>{approvalModeLabel(props.runtime)}</text>
+        <box flexDirection="row" gap={1}>
+          {showApprovalHint ? <text fg={tuiTheme.subtle}>Shift+Tab</text> : null}
+          <text fg={props.runtime.approvalMode === "yolo" ? tuiTheme.warning : tuiTheme.muted}>{approvalModeLabel(props.runtime)}</text>
+        </box>
       </box>
       {warning ? <text fg={tuiTheme.warning}>{warning}</text> : null}
       {startupError ? <text fg={tuiTheme.warning}>{startupError}</text> : null}

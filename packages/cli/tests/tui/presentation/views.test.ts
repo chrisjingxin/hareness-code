@@ -37,6 +37,7 @@ test("紧凑首页保留品牌、输入框和真实底栏信息", async () => {
     expect(frame).toContain("harness-code")
     expect(frame).toContain("v0.1.0")
     expect(frame).toContain("default")
+    expect(frame).toContain("Shift+Tab")
     expect(frame).not.toContain("未隔离")
   } finally {
     await act(async () => { setup.renderer.destroy() })
@@ -61,6 +62,7 @@ test("首页模型靠左、审批模式靠右，且不重复显示品牌", async
     const runtimeLine = lines.find(line => line.includes("deepseek-v4-flash"))
 
     expect(runtimeLine).toContain("default")
+    expect(runtimeLine).toContain("Shift+Tab")
     expect(runtimeLine).not.toContain("Harness Code")
     expect(runtimeLine).not.toContain("本机执行")
   } finally {

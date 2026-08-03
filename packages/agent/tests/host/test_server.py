@@ -1119,6 +1119,80 @@ async def test_real_hitl_rejection_prevents_file_write():
         assert not destination.exists()
 
 
+async def test_approve_thread_delete_rule_skips_later_deletions_in_same_thread():
+    """delete_file 选择“本线程允许”后，同线程后续删除不再弹审批。
+
+    规则注入镜像生产路径：会话规则保存在 RunCoordinator 内存列表，
+    Agent 的 rules_provider 每次评估时读取该列表与持久化层合并结果。
+    """
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+    from langchain_core.runnables import Runnable
+    from harness_agent.policy.permission_rules import PermissionRule, load_rules, merge_rules
+    from harness_agent.runtime.agent import create_harness_agent
+    from harness_agent.host.agent_host import AgentHost
+
+    class ToolModel(FakeMessagesListChatModel):
+        def bind_tools(self, *_args: Any, **_kwargs: Any) -> Runnable:
+            return self
+
+    with TemporaryDirectory() as workspace:
+        first = Path(workspace) / "first.txt"
+        second = Path(workspace) / "second.txt"
+        first.write_text("a", encoding="utf-8")
+        second.write_text("b", encoding="utf-8")
+
+        host_ref: dict[str, Any] = {}
+
+        def rules_provider() -> list[PermissionRule]:
+            host = host_ref.get("host")
+            persisted = load_rules(project_dir=Path(workspace))
+            if host is not None:
+                persisted["session"] = host._run_coordinator.session_rules
+            return merge_rules(persisted)
+
+        model = ToolModel(
+            responses=[
+                AIMessage(content="", tool_calls=[{"name": "delete_file", "args": {"file_path": str(first)}, "id": "del-1"}]),
+                AIMessage(content="已删除第一个文件"),
+                AIMessage(content="", tool_calls=[{"name": "delete_file", "args": {"file_path": str(second)}, "id": "del-2"}]),
+                AIMessage(content="已删除第二个文件"),
+            ]
+        )
+        model.profile = {"max_input_tokens": 200_000}
+        agent = create_harness_agent(
+            model,
+            cwd=workspace,
+            approval_mode="default",
+            enable_skills=False,
+            enable_memory=False,
+            enable_ask_user=False,
+            rules_provider=rules_provider,
+        )
+        server = AgentHost(agent=agent)
+        host_ref["host"] = server
+        frames = await _capture_server(server)
+
+        # 第一次删除：弹窗审批，选择“本线程允许”后会话规则应落库。
+        await server.dispatch(
+            _request("run.start", {"message": "删除 first.txt", "thread_id": "del-thread", "run_id": "del-run-1"}, "del-start-1")
+        )
+        interaction = await _wait_for(frames, lambda frame: frame.get("method") == "interaction.approval")
+        await server.dispatch({"jsonrpc": "2.0", "id": interaction["id"], "result": {"decision": "approve_thread"}})
+        await _wait_for(frames, lambda frame: frame.get("params", {}).get("type") == "run.completed")
+        assert not first.exists()
+        assert PermissionRule(tool="delete_file", resource="*", effect="allow") in server._run_coordinator.session_rules
+
+        # 第二次删除：会话规则命中，应直接执行，不再出现新的审批请求。
+        await server.dispatch(
+            _request("run.start", {"message": "删除 second.txt", "thread_id": "del-thread", "run_id": "del-run-2"}, "del-start-2")
+        )
+        await _wait_for(frames, lambda frame: _event_count(frames, "run.completed") == 2)
+        approvals = [frame for frame in frames if frame.get("method") == "interaction.approval"]
+        assert len(approvals) == 1
+        assert not second.exists()
+
+
 async def test_workspace_rejection_precedes_default_approval_request():
     """越界文件调用在 HITL 前被拒绝，避免用户看到无法改变边界的审批框。"""
     from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
