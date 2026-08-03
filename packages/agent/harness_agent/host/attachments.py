@@ -39,7 +39,7 @@ class AttachmentManager:
         create_connection: Callable[..., ProtocolConnection],
         dispatch_connection: Callable[[ProtocolConnection, dict[str, Any]], Awaitable[None]],
         close_connection: Callable[[ProtocolConnection], Awaitable[None]],
-        register_attachment: Callable[[str, ProtocolConnection], Awaitable[None]],
+        register_attachment: Callable[[str, str], Awaitable[bool]],
     ) -> None:
         """保存 Host 提供的 Connection 操作，不拥有 Project 运行资源。"""
         self._create_connection = create_connection
@@ -97,6 +97,8 @@ class AttachmentManager:
                     "ATTACHMENT_NOT_FOUND",
                     {"code": "ATTACHMENT_NOT_FOUND", "retryable": False},
                 )
+            # handler 是否仍存活：authenticating/connected 才有 closed_future 解析者。
+            handler_alive = record.state in {"authenticating", "connected"}
             if record.state != "revoked":
                 record.state = "revoked"
                 if record.closed_future is None:
@@ -110,7 +112,9 @@ class AttachmentManager:
             except Exception:
                 # 连接可能已由对端或 Host 关闭；close future 仍会收敛清理。
                 pass
-            if future is not None:
+            if future is not None and handler_alive:
+                # 只有 handler 仍存活时 closed_future 才会被解析；
+                # 已 closed/issued 的终态记录没有解析者，等待只会空耗 5 秒。
                 try:
                     await asyncio.wait_for(future, timeout=5)
                 except TimeoutError:

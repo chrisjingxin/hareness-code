@@ -20,11 +20,48 @@ import { DialogShell, SearchPicker, type SearchPickerRenderContext } from "./pre
 import { SkillPicker, ThreadPicker } from "./presentation/pickers"
 import { tuiTheme } from "./presentation/theme"
 import { ThreadView } from "./presentation/thread"
+import { WebTakeoverView } from "./presentation/web-takeover"
 import { registerCommonSyntaxParsers, shutdownCommonSyntaxClient } from "./platform/syntax-parsers"
 import { win32InstallVtInputGuard } from "./platform/terminal-win32"
+import type {
+  WebHandoffCoordinator,
+  WebHandoffSnapshot,
+} from "../web/handoff-coordinator"
 
 /** 正式 TUI 的启动参数；Controller 和 OpenTUI 共用同一组生命周期选项。 */
-export type TuiOptions = TuiControllerOptions
+export type TuiOptions = TuiControllerOptions & {
+  webHandoff?: WebHandoffCoordinator
+}
+
+/** 根层接管切换：Host 确认 Web holder 后卸载 TUI Controller，恢复后重建。 */
+export function WebAwareRoot(options: TuiOptions) {
+  const coordinator = options.webHandoff
+  const subscribe = useCallback(
+    (listener: (snapshot: WebHandoffSnapshot) => void) =>
+      coordinator?.subscribe(listener) ?? noOpUnsubscribe,
+    [coordinator],
+  )
+  const getSnapshot = useCallback(
+    (): WebHandoffSnapshot | null => coordinator?.getSnapshot() ?? null,
+    [coordinator],
+  )
+  const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+  if (snapshot && snapshot.tuiLocked) {
+    return <WebTakeoverView snapshot={snapshot} onExit={options.onRequestExit} />
+  }
+  const restoring = snapshot?.phase === "idle" && snapshot.handoffVersion > 0
+  return (
+    <Za38Tui
+      key={snapshot?.handoffVersion ?? 0}
+      {...options}
+      initialThreadId={restoring ? snapshot.restoreThreadId : undefined}
+    />
+  )
+}
+
+function noOpUnsubscribe(): void {
+  // 无 Coordinator 时订阅为空操作。
+}
 
 /** 正式 OpenTUI 根组件：所有业务状态来自 Controller snapshot。 */
 export function Za38Tui(options: TuiOptions) {
@@ -308,7 +345,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
     }
     root.render(
       <TuiErrorBoundary onRequestExit={close}>
-        <Za38Tui {...options} onRequestExit={close} />
+        <WebAwareRoot {...options} onRequestExit={close} />
       </TuiErrorBoundary>,
     )
   })

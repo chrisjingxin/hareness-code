@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable
 
 import pytest
 
@@ -13,8 +14,18 @@ from harness_agent.host.control_lease import (
 )
 
 
-def _no_activity() -> ActivityFacts:
-    return ActivityFacts()
+async def _facts(
+    starting_or_active_runs: int = 0,
+    pending_interactions: int = 0,
+) -> ActivityFacts:
+    return ActivityFacts(
+        starting_or_active_runs=starting_or_active_runs,
+        pending_interactions=pending_interactions,
+    )
+
+
+def _no_activity_provider() -> Awaitable[ActivityFacts]:
+    return _facts()
 
 
 @pytest.mark.asyncio
@@ -33,13 +44,13 @@ async def test_attached_can_acquire_and_release_control() -> None:
     """有效 attached Connection 可 acquire，release 后原子归还 owner。"""
     lease = ControlLease("owner-1")
     await lease.register_attachment("att-1", "web-1")
-    status = await lease.acquire("web-1", "att-1", _no_activity())
+    status = await lease.acquire("web-1", "att-1", _no_activity_provider)
     assert status.state == "attached"
     assert status.holder.connection_id == "web-1"
     assert status.holder.role == "attached"
     assert status.holder.attachment_id == "att-1"
 
-    released = await lease.release("web-1", _no_activity())
+    released = await lease.release("web-1", _no_activity_provider)
     assert released.state == "owner"
     assert released.holder.connection_id == "owner-1"
     assert released.holder.attachment_id is None
@@ -57,16 +68,16 @@ async def test_non_holder_operations_are_rejected() -> None:
             pass
     assert before_acquire.value.code == "CONTROL_NOT_HOLDER"
 
-    await lease.acquire("web-1", "att-1", _no_activity())
+    await lease.acquire("web-1", "att-1", _no_activity_provider)
     with pytest.raises(ControlLeaseError) as other_acquire:
-        await lease.acquire("web-2", "att-2", _no_activity())
+        await lease.acquire("web-2", "att-2", _no_activity_provider)
     assert other_acquire.value.code == "CONTROL_BUSY"
     with pytest.raises(ControlLeaseError) as owner_permit:
         async with lease.permit("owner-1"):
             pass
     assert owner_permit.value.code == "CONTROL_NOT_HOLDER"
     with pytest.raises(ControlLeaseError) as other_release:
-        await lease.release("web-2", _no_activity())
+        await lease.release("web-2", _no_activity_provider)
     assert other_release.value.code == "CONTROL_NOT_HOLDER"
 
 
@@ -90,7 +101,7 @@ async def test_acquire_and_owner_permit_contend_at_barrier() -> None:
     async def web_side() -> None:
         await barrier.wait()
         try:
-            status = await lease.acquire("web-1", "att-1", _no_activity())
+            status = await lease.acquire("web-1", "att-1", _no_activity_provider)
             outcomes.append(status.state)
         except ControlLeaseError as exc:
             outcomes.append(exc.code)
@@ -107,24 +118,24 @@ async def test_release_is_blocked_by_permit_runs_and_interactions() -> None:
     """permit、starting/active Run 与 pending Interaction 分别阻止 release。"""
     lease = ControlLease("owner-1")
     await lease.register_attachment("att-1", "web-1")
-    await lease.acquire("web-1", "att-1", _no_activity())
+    await lease.acquire("web-1", "att-1", _no_activity_provider)
 
     async with lease.permit("web-1"):
         with pytest.raises(ControlLeaseError) as blocked:
-            await lease.release("web-1", _no_activity())
+            await lease.release("web-1", _no_activity_provider)
         assert blocked.value.code == "CONTROL_RELEASE_BLOCKED"
 
     with pytest.raises(ControlLeaseError) as runs:
         await lease.release(
             "web-1",
-            ActivityFacts(starting_or_active_runs=1),
+            lambda: _facts(starting_or_active_runs=1),
         )
     assert runs.value.code == "CONTROL_RELEASE_BLOCKED"
 
     with pytest.raises(ControlLeaseError) as interactions:
         await lease.release(
             "web-1",
-            ActivityFacts(pending_interactions=1),
+            lambda: _facts(pending_interactions=1),
         )
     assert interactions.value.code == "CONTROL_RELEASE_BLOCKED"
     assert lease.status().state == "attached"
@@ -139,14 +150,14 @@ async def test_owner_activity_blocks_acquire() -> None:
         await lease.acquire(
             "web-1",
             "att-1",
-            ActivityFacts(starting_or_active_runs=1),
+            lambda: _facts(starting_or_active_runs=1),
         )
     assert runs.value.code == "CONTROL_BUSY"
     with pytest.raises(ControlLeaseError) as interactions:
         await lease.acquire(
             "web-1",
             "att-1",
-            ActivityFacts(pending_interactions=1),
+            lambda: _facts(pending_interactions=1),
         )
     assert interactions.value.code == "CONTROL_BUSY"
     assert lease.status().state == "owner"
@@ -157,8 +168,8 @@ async def test_repeated_acquire_and_revoke_are_idempotent() -> None:
     """holder 重复 acquire 幂等；重复 revoke 不产生第二次状态转换。"""
     lease = ControlLease("owner-1")
     await lease.register_attachment("att-1", "web-1")
-    first = await lease.acquire("web-1", "att-1", _no_activity())
-    second = await lease.acquire("web-1", "att-1", _no_activity())
+    first = await lease.acquire("web-1", "att-1", _no_activity_provider)
+    second = await lease.acquire("web-1", "att-1", _no_activity_provider)
     assert first == second
     assert lease.status().state == "attached"
 
@@ -172,15 +183,23 @@ async def test_repeated_acquire_and_revoke_are_idempotent() -> None:
 
 
 @pytest.mark.asyncio
-async def test_revoked_attachment_cannot_acquire_or_register() -> None:
-    """已撤销 attachment 的 acquire 与二次注册都被拒绝。"""
+async def test_revoking_is_transient_and_revoked_attachment_cannot_acquire() -> None:
+    """revoking 窗口返回可重试 CONTROL_BUSY；收敛后 record 移除返回永久拒绝。"""
     lease = ControlLease("owner-1")
     await lease.register_attachment("att-1", "web-1")
+    await lease.acquire("web-1", "att-1", _no_activity_provider)
     await lease.begin_revoke("att-1")
-    with pytest.raises(ControlLeaseError) as inactive:
-        await lease.acquire("web-1", "att-1", _no_activity())
-    assert inactive.value.code == "ATTACHMENT_NOT_ACTIVE"
     assert await lease.register_attachment("att-1", "web-1") is False
+    with pytest.raises(ControlLeaseError) as transient:
+        await lease.acquire("web-1", "att-1", _no_activity_provider)
+    assert transient.value.code == "CONTROL_BUSY"
+    assert transient.value.retryable is True
+    await lease.complete_revoke("att-1")
+    with pytest.raises(ControlLeaseError) as gone:
+        await lease.acquire("web-1", "att-1", _no_activity_provider)
+    assert gone.value.code == "ATTACHMENT_NOT_ACTIVE"
+    # complete_revoke 已移除记录；重新登记是全新的合法生命周期。
+    assert await lease.register_attachment("att-1", "web-1") is True
 
 
 @pytest.mark.asyncio
@@ -188,7 +207,7 @@ async def test_revoking_rejects_new_permits_until_owner_restored() -> None:
     """revoking 期间 holder 与 owner 的新 permit 都被拒绝。"""
     lease = ControlLease("owner-1")
     await lease.register_attachment("att-1", "web-1")
-    await lease.acquire("web-1", "att-1", _no_activity())
+    await lease.acquire("web-1", "att-1", _no_activity_provider)
     await lease.begin_revoke("att-1")
     assert lease.status().state == "revoking"
     with pytest.raises(ControlLeaseError) as denied_holder:
@@ -211,7 +230,7 @@ async def test_disconnect_restores_owner_after_convergence() -> None:
     """断线先进入 revoking，收敛完成后恢复 owner；未知连接无副作用。"""
     lease = ControlLease("owner-1")
     await lease.register_attachment("att-1", "web-1")
-    await lease.acquire("web-1", "att-1", _no_activity())
+    await lease.acquire("web-1", "att-1", _no_activity_provider)
     attachment_id = await lease.connection_disconnected("web-1")
     assert attachment_id == "att-1"
     assert lease.status().state == "revoking"
@@ -227,12 +246,12 @@ async def test_acquire_requires_matching_registered_attachment() -> None:
     """未登记或连接不匹配的 attachment 不能 acquire。"""
     lease = ControlLease("owner-1")
     with pytest.raises(ControlLeaseError) as missing:
-        await lease.acquire("web-1", "att-missing", _no_activity())
+        await lease.acquire("web-1", "att-missing", _no_activity_provider)
     assert missing.value.code == "ATTACHMENT_NOT_ACTIVE"
 
     await lease.register_attachment("att-1", "web-1")
     with pytest.raises(ControlLeaseError) as mismatch:
-        await lease.acquire("web-2", "att-1", _no_activity())
+        await lease.acquire("web-2", "att-1", _no_activity_provider)
     assert mismatch.value.code == "ATTACHMENT_NOT_ACTIVE"
 
 
@@ -242,5 +261,5 @@ async def test_owner_cannot_acquire() -> None:
     lease = ControlLease("owner-1")
     await lease.register_attachment("att-1", "owner-1")
     with pytest.raises(ControlLeaseError) as busy:
-        await lease.acquire("owner-1", "att-1", _no_activity())
+        await lease.acquire("owner-1", "att-1", _no_activity_provider)
     assert busy.value.code == "CONTROL_BUSY"

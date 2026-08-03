@@ -153,9 +153,11 @@ export type TuiControllerOptions = {
   client: AgentClient
   runtime: TuiRuntime
   resume?: boolean
+  /** Web 接管归还后的一次性恢复输入；null 表示空首页，缺省表示不恢复。 */
+  initialThreadId?: string | null
   promptHistoryFile?: string
   onRequestExit: () => void
-  openWeb?: (threadId: string) => Promise<string>
+  openWeb?: (threadId: string | null) => Promise<void>
 }
 
 type InternalPicker<T> = {
@@ -178,7 +180,7 @@ class TuiControllerImpl implements TuiController {
   private readonly baseRuntime: TuiRuntime
   private readonly promptHistoryFile: string | undefined
   private readonly onRequestExit: () => void
-  private readonly openWeb?: (threadId: string) => Promise<string>
+  private readonly openWeb?: (threadId: string | null) => Promise<void>
   private readonly listeners = new Set<(snapshot: TuiSnapshot) => void>()
   private readonly pendingInteractions = new Map<string, PendingInteraction>()
   private readonly pickerEpoch: Record<PickerKind, number> = { skills: 0, threads: 0, models: 0 }
@@ -232,7 +234,11 @@ class TuiControllerImpl implements TuiController {
       if (!this.closed) this.promptHistory = history
     })
     void this.refreshSkillCatalog()
-    if (options.resume) this.openThreadPicker()
+    if (options.initialThreadId !== undefined) {
+      void this.restoreInitialThread(options.initialThreadId)
+    } else if (options.resume) {
+      this.openThreadPicker()
+    }
   }
 
   /** 创建默认的空状态；保留所有公开方法的同步 snapshot 语义。 */
@@ -529,8 +535,8 @@ class TuiControllerImpl implements TuiController {
           return
         }
         try {
-          const url = await this.openWeb(result.threadId)
-          this.commit(current => appendNotice(current, `Web 已附着当前 thread：${url}`))
+          await this.openWeb(result.threadId)
+          this.commit(current => appendNotice(current, "Web 会话已启动，浏览器就绪并取得控制权后 TUI 将锁定。"))
         } catch (error) {
           this.commit(current => appendNotice(current, `Web 启动失败：${errorMessage(error)}`))
         }
@@ -858,6 +864,45 @@ class TuiControllerImpl implements TuiController {
         this.threadPicker = { ...this.threadPicker, loading: false, error: `Thread 列表读取失败：${errorMessage(error)}` }
         this.publish()
       }
+    }
+  }
+
+  /** Web 接管归还后按一次性 ID 恢复；null 进入空首页，失败不回退陈旧 Thread。 */
+  private async restoreInitialThread(threadId: string | null): Promise<void> {
+    if (this.closed || this.openingThread) return
+    this.openingThread = true
+    try {
+      if (threadId === null) {
+        this.resetThread(createInitialState())
+        return
+      }
+      const opened = threadOpenResult(await this.client.openThread(threadId))
+      let models: readonly ModelProfile[] = []
+      let selection: string | undefined
+      let actual: ModelProfile | undefined
+      try {
+        const result = await this.client.listModels(opened.threadId)
+        models = result.profiles
+        selection = result.thread_selection?.primary_profile
+        actual = result.last_run_binding?.profile
+          ?? result.thread_binding?.roles.executor
+          ?? result.thread_binding?.roles.primary
+      } catch {
+        // 模型绑定读取失败不阻断历史恢复。
+      }
+      this.resetThread(restoreThread(opened.threadId, opened.messages), {
+        models,
+        selection,
+        actual,
+      })
+    } catch (error) {
+      this.resetThread(createInitialState())
+      this.commit(current => appendNotice(
+        current,
+        `Web 会话恢复失败，已回到空首页：${errorMessage(error)}`,
+      ))
+    } finally {
+      this.openingThread = false
     }
   }
 

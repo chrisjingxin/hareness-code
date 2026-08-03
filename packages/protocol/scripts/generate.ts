@@ -142,6 +142,37 @@ function renderContractFixtures(root: Schema, meta: Metadata): string {
   for (const [name, entry] of Object.entries(meta.operations)) {
     addFixtureGroup(root, valid, invalid, "operation.params", name, entry.params!)
     addFixtureGroup(root, valid, invalid, "operation.result", name, entry.result!)
+    if (entry.result === "#/$defs/controlStatus") {
+      // controlHolder.attachment_id 固定存在：owner 为 null，attached 为 string；
+      // 缺省自动 sample 只覆盖 string 场景，这里补齐契约边界样例。
+      valid.push({
+        kind: "operation.result",
+        name,
+        case: "owner_null",
+        value: {
+          state: "owner",
+          holder: { connection_id: "owner", role: "owner", attachment_id: null },
+        },
+      })
+      valid.push({
+        kind: "operation.result",
+        name,
+        case: "attached_string",
+        value: {
+          state: "attached",
+          holder: { connection_id: "web", role: "attached", attachment_id: "att-1" },
+        },
+      })
+      invalid.push({
+        kind: "operation.result",
+        name,
+        case: "missing_attachment_id",
+        value: {
+          state: "owner",
+          holder: { connection_id: "owner", role: "owner" },
+        },
+      })
+    }
   }
   for (const [name, entry] of Object.entries(meta.events)) {
     const envelope = sample(root, { $ref: "#/$defs/eventBase" }) as Record<string, unknown>
@@ -205,6 +236,10 @@ function addValueFixtures(
 
 function sample(root: Schema, input: Schema): unknown {
   const definition = input.$ref ? resolveRef(root, input.$ref) : input
+  if (input.$ref?.endsWith("/controlHolder")) {
+    // role 与 attachment_id 存在 if/then 联动约束；sample 必须产出合法组合。
+    return { connection_id: "x", role: "owner", attachment_id: null }
+  }
   if (definition.const !== undefined) return definition.const
   if (definition.enum) return definition.enum[0]
   if (definition.default !== undefined) return definition.default

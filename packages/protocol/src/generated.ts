@@ -2,7 +2,7 @@
 
 export const PROTOCOL_MAJOR = 3 as const
 export const PROTOCOL_MINOR = 1 as const
-export const PROTOCOL_SCHEMA_SHA256 = "654f3a4ec425fdb8d1d7b02e0290750715fa5fa25d67422d03b9a54ad12ddab7" as const
+export const PROTOCOL_SCHEMA_SHA256 = "0cbc62fa1a4076b914c718d5f9ba167308a3904575e133f1cdcc70dc744c561c" as const
 export const MAX_FRAME_BYTES = 8388608 as const
 export const MAX_TOOL_PAYLOAD_BYTES = 1048576 as const
 export const CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","mcp.status","mcp.add","mcp.remove","host.attachment.create","host.attachment.revoke","host.control.acquire","host.control.release","host.control.status"] as const
@@ -115,7 +115,7 @@ export type HostAttachmentCreateParams = { "origin": string }
 export type HostAttachmentCreateResult = { "attachment_id": string; "endpoint": string; "token": string; "expires_at_ms": number }
 export type HostAttachmentRevokeParams = { "attachment_id": string }
 export type HostAttachmentRevokeResult = { "attachment_id": string; "revoked": true; "control": ControlStatus }
-export type ControlHolder = { "connection_id": string; "role": "owner" | "attached"; "attachment_id"?: string | null }
+export type ControlHolder = { "connection_id": string; "role": "owner" | "attached"; "attachment_id": string | null }
 export type ControlStatus = { "state": "owner" | "attached" | "revoking"; "holder": ControlHolder }
 export type EventBase = { "event_id": string; "type": string; "thread_id": string; "run_id": string; "sequence": number; "timestamp_ms": number; "execution_id"?: string; "parent_execution_id"?: string | null; "agent_id"?: string; "payload": JsonObject }
 export type RunStartedPayload = { "resumed": boolean; "skills_snapshot_id"?: string | null; "primary_model"?: RunPrimaryModelBinding; "runtime_profile_id"?: string | null }

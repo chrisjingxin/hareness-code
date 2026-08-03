@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
@@ -79,6 +79,7 @@ class ControlLease:
         self._permits = 0
         self._attachments: dict[str, _AttachmentRecord] = {}
         self._lock = asyncio.Lock()
+        self._idle_condition = asyncio.Condition(self._lock)
 
     def status(self) -> ControlStatus:
         """返回当前 holder 与状态的不可变快照；只读。"""
@@ -98,7 +99,12 @@ class ControlLease:
         attachment_id: str,
         connection_id: str,
     ) -> bool:
-        """供同步创建 Connection 的嵌入/测试路径登记已认证 attachment。"""
+        """供同步创建 Connection 的嵌入/测试路径登记已认证 attachment。
+
+        该方法不经过异步锁，只能在事件循环尚未并发运行受控操作的同步
+        初始化或单线程测试路径调用；生产 WebSocket 认证统一使用异步
+        ``register_attachment``。
+        """
         return self._register_locked(attachment_id, connection_id)
 
     def _register_locked(self, attachment_id: str, connection_id: str) -> bool:
@@ -124,18 +130,17 @@ class ControlLease:
         self,
         connection_id: str,
         attachment_id: str,
-        owner_activity: ActivityFacts,
+        owner_activity_provider: Callable[[], Awaitable[ActivityFacts]],
     ) -> ControlStatus:
         """把 holder 从 owner 原子转移给一个有效 attached Connection。"""
         async with self._lock:
             record = self._attachments.get(attachment_id)
-            if (
-                record is None
-                or record.revoked
-                or record.connection_id != connection_id
-            ):
+            if record is None or record.connection_id != connection_id:
                 raise ControlLeaseError("ATTACHMENT_NOT_ACTIVE")
             if self._state == "revoking":
+                # 瞬态收敛窗口：holder 即将归还 owner，客户端应重试而不是放弃。
+                raise ControlLeaseError("CONTROL_BUSY", retryable=True)
+            if record.revoked:
                 raise ControlLeaseError("ATTACHMENT_NOT_ACTIVE")
             if self._state == "attached":
                 if (
@@ -146,6 +151,8 @@ class ControlLease:
                 raise ControlLeaseError("CONTROL_BUSY", retryable=True)
             if connection_id == self._owner_connection_id:
                 raise ControlLeaseError("CONTROL_BUSY", retryable=True)
+            # 活动事实必须在租约锁内读取，避免与 owner 受理 Run 之间出现 TOCTOU。
+            owner_activity = await owner_activity_provider()
             if (
                 self._permits > 0
                 or owner_activity.starting_or_active_runs > 0
@@ -160,7 +167,7 @@ class ControlLease:
     async def release(
         self,
         connection_id: str,
-        activity: ActivityFacts,
+        activity_provider: Callable[[], Awaitable[ActivityFacts]],
     ) -> ControlStatus:
         """只允许当前 attached holder 在无未收敛工作时把控制权归还 owner。"""
         async with self._lock:
@@ -169,6 +176,7 @@ class ControlLease:
                 or self._holder_connection_id != connection_id
             ):
                 raise ControlLeaseError("CONTROL_NOT_HOLDER", retryable=True)
+            activity = await activity_provider()
             if (
                 self._permits > 0
                 or activity.starting_or_active_runs > 0
@@ -220,8 +228,9 @@ class ControlLease:
             return attachment_id
 
     async def complete_revoke(self, attachment_id: str) -> ControlStatus:
-        """收敛完成后移除 attachment；若它是 holder 则恢复 owner。"""
-        async with self._lock:
+        """等待进行中 permit 归零后移除 attachment；若它是 holder 则恢复 owner。"""
+        async with self._idle_condition:
+            await self._idle_condition.wait_for(lambda: self._permits == 0)
             record = self._attachments.pop(attachment_id, None)
             if (
                 record is not None
@@ -246,8 +255,20 @@ class ControlLease:
         try:
             yield
         finally:
-            async with self._lock:
-                self._permits -= 1
+            # 任务取消时 await 锁会立即抛 CancelledError 导致计数泄漏；
+            # 先 uncancel 完成递减，再恢复取消状态。
+            task = asyncio.current_task()
+            cancelled = task is not None and task.cancelling() > 0
+            if cancelled:
+                task.uncancel()
+            try:
+                async with self._idle_condition:
+                    self._permits -= 1
+                    if self._permits == 0:
+                        self._idle_condition.notify_all()
+            finally:
+                if cancelled:
+                    task.cancel()
 
     def _snapshot(self) -> ControlStatus:
         role = "attached" if self._holder_attachment_id is not None else "owner"

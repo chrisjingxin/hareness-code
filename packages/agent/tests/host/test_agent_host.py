@@ -41,10 +41,13 @@ def _initialize(*requests: str) -> dict[str, Any]:
 
 async def _recv_response(socket: Any, request_id: str) -> dict[str, Any]:
     """读取 socket 直到返回指定 request_id 的 RPC 响应，跳过事件通知。"""
-    while True:
-        frame = json.loads(await socket.recv())
-        if frame.get("id") == request_id:
-            return frame
+    async def _read() -> dict[str, Any]:
+        while True:
+            frame = json.loads(await socket.recv())
+            if frame.get("id") == request_id:
+                return frame
+
+    return await asyncio.wait_for(_read(), timeout=5)
 
 
 async def test_run_owner_and_observer_receive_identical_events(tmp_path: Path) -> None:
@@ -523,8 +526,7 @@ async def test_owner_revoke_connected_attachment_cancels_run_and_restores_owner(
     assert revoke_result["control"]["holder"]["role"] == "owner"
 
     with pytest.raises(ConnectionClosed):
-        while True:
-            await socket.recv()
+        await asyncio.wait_for(_drain_until_closed(socket), timeout=5)
     for _ in range(200):
         if any(
             frame.get("params", {}).get("type") == "run.cancelled"
@@ -822,3 +824,9 @@ async def test_acquire_and_owner_run_start_race_has_single_winner(
 
 async def _append(frames: list[dict[str, Any]], message: dict[str, Any]) -> None:
     frames.append(message)
+
+
+async def _drain_until_closed(socket: Any) -> None:
+    """持续读取 socket；预期在连接关闭时抛 ConnectionClosed。"""
+    while True:
+        await socket.recv()

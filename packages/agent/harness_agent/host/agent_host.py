@@ -1084,7 +1084,7 @@ class AgentHost:
         status = await self._control_lease.acquire(
             connection.connection_id,
             attachment_id,
-            await self._control_activity(self._owner_connection.connection_id),
+            lambda: self._control_activity(self._owner_connection.connection_id),
         )
         return status.to_record()
 
@@ -1097,7 +1097,7 @@ class AgentHost:
         connection = self._current_connection()
         status = await self._control_lease.release(
             connection.connection_id,
-            await self._control_activity(connection.connection_id),
+            lambda: self._control_activity(connection.connection_id),
         )
         return status.to_record()
 

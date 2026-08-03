@@ -10,7 +10,14 @@ import { AgentClient } from "./ipc/client"
 import { StdioRpcTransport } from "./ipc/stdio-transport"
 import { runTui } from "./tui/app"
 import { CLI_VERSION, createTuiRuntime, type TuiRuntime } from "./tui/application/model"
-import { WebLauncher } from "./web/launcher"
+import { createSystemBrowserOpener } from "./web/browser"
+import { browserBundle } from "./web/bundle"
+import { webHtml } from "./web/html"
+import {
+  createWebHandoffCoordinator,
+  type WebHandoffCoordinator,
+} from "./web/handoff-coordinator"
+import { createWebServer } from "./web/server"
 
 type RunningAgent = {
   client: AgentClient
@@ -30,7 +37,7 @@ export function clientCapabilities(command: Command): string[] {
     Capability.MCP_READ,
     Capability.MCP_MANAGE,
   )
-  if (command.kind === "run" && !command.nonInteractive) capabilities.push(Capability.HOST_ATTACH)
+  if (command.kind === "run" && !command.nonInteractive) capabilities.push(Capability.HOST_ATTACH, Capability.HOST_CONTROL)
   if (command.kind.startsWith("skills.") || (command.kind === "run" && !command.nonInteractive)) capabilities.push(Capability.SKILLS_READ)
   if (command.kind === "skills.set_enabled" || command.kind === "skills.install" || command.kind === "skills.update" || command.kind === "skills.remove") {
     capabilities.push(Capability.SKILLS_MANAGE)
@@ -169,21 +176,46 @@ async function execute(command: Command): Promise<void> {
       return
     }
 
-    const webLauncher = new WebLauncher(agent.client)
+    let webHandoff: WebHandoffCoordinator | undefined
     try {
+      if (!command.nonInteractive) {
+        const server = createWebServer({
+          html: webHtml,
+          getScript: browserBundle,
+          isActiveHandoff: handoffId =>
+            webHandoff !== undefined && isActiveHandoff(webHandoff, handoffId),
+          attachLifecycle: (handoffId, channel) =>
+            webHandoff!.attachLifecycle(handoffId, channel),
+        })
+        webHandoff = createWebHandoffCoordinator({
+          host: agent.client,
+          server,
+          openBrowser: createSystemBrowserOpener(),
+        })
+      }
       await runTui({
         client: agent.client,
         runtime: agent.runtime,
         resume: command.resume,
         onRequestExit: () => undefined,
-        openWeb: threadId => webLauncher.open(threadId),
+        webHandoff,
+        openWeb: threadId => webHandoff!.open(threadId),
       })
     } finally {
-      await webLauncher.close()
+      await webHandoff?.close()
     }
   } finally {
     await agent.stop()
   }
+}
+
+/** 只有当前 handoff 匹配的路径才被静态 server 服务；idle 后旧路径立即 404。 */
+function isActiveHandoff(
+  coordinator: WebHandoffCoordinator,
+  handoffId: string,
+): boolean {
+  const snapshot = coordinator.getSnapshot()
+  return snapshot.phase !== "idle" && snapshot.handoffId === handoffId
 }
 
 /** CLI 主入口：处理帮助/版本短路逻辑后执行用户命令。 */

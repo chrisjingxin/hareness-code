@@ -13,11 +13,14 @@ import {
   validateOperationResult,
   validateProtocolErrorData,
   type EventEnvelope,
+  type ControlStatus,
   type ContextCompactResult,
   type ConfigChange,
   type ConfigCommitResult,
   type ConfigDetailsResult,
   type ConfigPreviewResult,
+  type HostAttachmentCreateResult,
+  type HostAttachmentRevokeResult,
   type InteractionRequestEnvelope,
   type InteractionResponse,
   type InteractionMethod,
@@ -324,6 +327,23 @@ export class AgentClient {
   /** 读取 `/model` Picker 所需的脱敏 Profile 目录与可选 Thread 绑定。 */
   listModels(threadId?: string): Promise<ModelsListResult> {
     return this.request(Method.MODELS_LIST, { thread_id: threadId })
+  }
+
+  /** 签发一个绑定 loopback Origin 的一次性 Web attachment。 */
+  createAttachment(origin: string): Promise<HostAttachmentCreateResult> {
+    return this.request(Method.HOST_ATTACHMENT_CREATE, { origin })
+  }
+
+  /** 按 attachment_id 撤销 attachment；结果携带撤销后的 owner 控制状态。 */
+  revokeAttachment(attachmentId: string): Promise<HostAttachmentRevokeResult> {
+    return this.request(Method.HOST_ATTACHMENT_REVOKE, {
+      attachment_id: attachmentId,
+    })
+  }
+
+  /** 查询当前 Host 控制权 holder；只读，供 TUI/Web 锁定判断。 */
+  controlStatus(): Promise<ControlStatus> {
+    return this.request(Method.HOST_CONTROL_STATUS, {})
   }
 
   /** 主动释放连接并拒绝所有尚未完成的请求。 */

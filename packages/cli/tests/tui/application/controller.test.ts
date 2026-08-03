@@ -26,6 +26,8 @@ const runtime: TuiRuntime = {
     Capability.CONFIG_WRITE,
     Capability.MCP_READ,
     Capability.MCP_MANAGE,
+    Capability.HOST_ATTACH,
+    Capability.HOST_CONTROL,
   ],
 }
 
@@ -228,6 +230,50 @@ test("Controller 接收 Agent event 后更新 reducer，并在终态清理 Inter
   }
 })
 
+test("Controller 的 /web 把 nullable threadId 交给 openWeb 且不泄露 URL", async () => {
+  const opened: Array<string | null> = []
+  const harness = await createHarness({
+    openWeb: async threadId => { opened.push(threadId) },
+  })
+  try {
+    await execute(harness.controller, "/web")
+    expect(opened).toEqual([null])
+    expect(notices(harness.controller)).toContain("Web 会话已启动")
+    expect(notices(harness.controller)).not.toContain("http://")
+  } finally {
+    await harness.cleanup()
+  }
+})
+
+test("Controller 从 Web 归还后按 initialThreadId 恢复历史或空首页", async () => {
+  const restored = await createHarness({ initialThreadId: "thread-2" })
+  try {
+    await flush()
+    expect(restored.controller.getSnapshot().state.threadId).toBe("thread-2")
+    expect(restored.controller.getSnapshot().state.timeline).toHaveLength(2)
+  } finally {
+    await restored.cleanup()
+  }
+
+  const empty = await createHarness({ initialThreadId: null })
+  try {
+    await flush()
+    expect(empty.calls).not.toContain("threads.open")
+    expect(empty.controller.getSnapshot().state.threadId).toBeUndefined()
+  } finally {
+    await empty.cleanup()
+  }
+
+  const failed = await createHarness({ initialThreadId: "thread-2", failOpenThread: true })
+  try {
+    await flush()
+    expect(failed.controller.getSnapshot().state.threadId).toBeUndefined()
+    expect(notices(failed.controller)).toContain("Web 会话恢复失败")
+  } finally {
+    await failed.cleanup()
+  }
+})
+
 type Harness = {
   controller: TuiController
   calls: string[]
@@ -238,7 +284,14 @@ type Harness = {
   cleanup: () => Promise<void>
 }
 
-async function createHarness(options: { configError?: boolean; cancelled?: boolean; holdConfigDetails?: boolean } = {}): Promise<Harness> {
+async function createHarness(options: {
+  configError?: boolean
+  cancelled?: boolean
+  holdConfigDetails?: boolean
+  initialThreadId?: string | null
+  openWeb?: (threadId: string | null) => Promise<void>
+  failOpenThread?: boolean
+} = {}): Promise<Harness> {
   const calls: string[] = []
   const runRequests: Harness["runRequests"] = []
   const listeners = new Map<string, Set<(...args: any[]) => void>>()
@@ -296,6 +349,7 @@ async function createHarness(options: { configError?: boolean; cancelled?: boole
     },
     openThread(threadId: string) {
       calls.push("threads.open")
+      if (options.failOpenThread) return Promise.reject(new Error("THREAD_NOT_FOUND"))
       return Promise.resolve({ thread: threadSummary(threadId, "恢复的请求"), messages: [{ kind: "user", content: "恢复的请求" }, { kind: "tool", tool_name: "execute", content: "恢复的工具结果" }] })
     },
     mcpStatus() {
@@ -334,6 +388,8 @@ async function createHarness(options: { configError?: boolean; cancelled?: boole
     runtime,
     promptHistoryFile: historyFile,
     onRequestExit: () => undefined,
+    ...(options.initialThreadId !== undefined ? { initialThreadId: options.initialThreadId } : {}),
+    ...(options.openWeb !== undefined ? { openWeb: options.openWeb } : {}),
   })
   await flush()
   calls.splice(0)

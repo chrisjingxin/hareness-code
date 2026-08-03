@@ -90,7 +90,7 @@ test("活动任务下 /new 返回确认 Dialog，而不是旧的强制清理分�
   })
 })
 
-test("/web 仅在已协商 host.attach 且当前 Thread 空闲时可用", () => {
+test("/web 在空首页或已有 Thread 时可用，且要求 host.attach/host.control 与空闲", () => {
   const command = parseSlashCommand("/web")
   if (!command) throw new Error("expected web command")
   const base = {
@@ -102,15 +102,35 @@ test("/web 仅在已协商 host.attach 且当前 Thread 空闲时可用", () => 
   expect(dispatchSlashCommand(command, {
     ...base,
     commandContext: defaultCommandContext({
-      capabilities: ["host.attach"],
+      capabilities: ["host.attach", "host.control"],
       hasThread: true,
     }),
   })).toEqual({ type: "web", threadId: "thread-1" })
 
   expect(dispatchSlashCommand(command, {
     ...base,
+    threadId: undefined,
+    commandContext: defaultCommandContext({
+      capabilities: ["host.attach", "host.control"],
+      hasThread: false,
+    }),
+  })).toEqual({ type: "web", threadId: null })
+
+  expect(dispatchSlashCommand(command, {
+    ...base,
     commandContext: defaultCommandContext({
       capabilities: ["host.attach"],
+      hasThread: true,
+    }),
+  })).toEqual({
+    type: "notice",
+    message: "/web 当前不可用。",
+  })
+
+  expect(dispatchSlashCommand(command, {
+    ...base,
+    commandContext: defaultCommandContext({
+      capabilities: ["host.attach", "host.control"],
       hasThread: true,
       activeRun: true,
     }),

@@ -7,7 +7,7 @@ from harness_agent.protocol.runtime import event_model, schema_model
 
 PROTOCOL_MAJOR = 3
 PROTOCOL_MINOR = 1
-PROTOCOL_SCHEMA_SHA256 = "654f3a4ec425fdb8d1d7b02e0290750715fa5fa25d67422d03b9a54ad12ddab7"
+PROTOCOL_SCHEMA_SHA256 = "0cbc62fa1a4076b914c718d5f9ba167308a3904575e133f1cdcc70dc744c561c"
 MAX_FRAME_BYTES = 8388608
 MAX_TOOL_PAYLOAD_BYTES = 1048576
 CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","mcp.status","mcp.add","mcp.remove","host.attachment.create","host.attachment.revoke","host.control.acquire","host.control.release","host.control.status"]
@@ -266,7 +266,7 @@ class HostAttachmentRevokeResultWire(TypedDict):
 class ControlHolderWire(TypedDict):
     connection_id: str
     role: Literal["owner", "attached"]
-    attachment_id: NotRequired[str | None]
+    attachment_id: str | None
 
 class ControlStatusWire(TypedDict):
     state: Literal["owner", "attached", "revoking"]

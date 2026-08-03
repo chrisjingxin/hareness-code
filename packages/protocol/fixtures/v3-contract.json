@@ -492,7 +492,8 @@
           "state": "owner",
           "holder": {
             "connection_id": "x",
-            "role": "owner"
+            "role": "owner",
+            "attachment_id": null
           }
         }
       }
@@ -511,7 +512,34 @@
         "state": "owner",
         "holder": {
           "connection_id": "x",
-          "role": "owner"
+          "role": "owner",
+          "attachment_id": null
+        }
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "host.control.acquire",
+      "case": "owner_null",
+      "value": {
+        "state": "owner",
+        "holder": {
+          "connection_id": "owner",
+          "role": "owner",
+          "attachment_id": null
+        }
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "host.control.acquire",
+      "case": "attached_string",
+      "value": {
+        "state": "attached",
+        "holder": {
+          "connection_id": "web",
+          "role": "attached",
+          "attachment_id": "att-1"
         }
       }
     },
@@ -529,7 +557,34 @@
         "state": "owner",
         "holder": {
           "connection_id": "x",
-          "role": "owner"
+          "role": "owner",
+          "attachment_id": null
+        }
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "host.control.release",
+      "case": "owner_null",
+      "value": {
+        "state": "owner",
+        "holder": {
+          "connection_id": "owner",
+          "role": "owner",
+          "attachment_id": null
+        }
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "host.control.release",
+      "case": "attached_string",
+      "value": {
+        "state": "attached",
+        "holder": {
+          "connection_id": "web",
+          "role": "attached",
+          "attachment_id": "att-1"
         }
       }
     },
@@ -547,7 +602,34 @@
         "state": "owner",
         "holder": {
           "connection_id": "x",
-          "role": "owner"
+          "role": "owner",
+          "attachment_id": null
+        }
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "host.control.status",
+      "case": "owner_null",
+      "value": {
+        "state": "owner",
+        "holder": {
+          "connection_id": "owner",
+          "role": "owner",
+          "attachment_id": null
+        }
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "host.control.status",
+      "case": "attached_string",
+      "value": {
+        "state": "attached",
+        "holder": {
+          "connection_id": "web",
+          "role": "attached",
+          "attachment_id": "att-1"
         }
       }
     },
@@ -1949,7 +2031,8 @@
           "state": "owner",
           "holder": {
             "connection_id": "x",
-            "role": "owner"
+            "role": "owner",
+            "attachment_id": null
           }
         },
         "__extra": true
@@ -1965,7 +2048,8 @@
           "state": "owner",
           "holder": {
             "connection_id": "x",
-            "role": "owner"
+            "role": "owner",
+            "attachment_id": null
           }
         }
       }
@@ -1998,7 +2082,8 @@
         "state": "owner",
         "holder": {
           "connection_id": "x",
-          "role": "owner"
+          "role": "owner",
+          "attachment_id": null
         },
         "__extra": true
       }
@@ -2010,6 +2095,19 @@
       "value": {
         "holder": {
           "connection_id": "x",
+          "role": "owner",
+          "attachment_id": null
+        }
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "host.control.acquire",
+      "case": "missing_attachment_id",
+      "value": {
+        "state": "owner",
+        "holder": {
+          "connection_id": "owner",
           "role": "owner"
         }
       }
@@ -2042,7 +2140,8 @@
         "state": "owner",
         "holder": {
           "connection_id": "x",
-          "role": "owner"
+          "role": "owner",
+          "attachment_id": null
         },
         "__extra": true
       }
@@ -2054,6 +2153,19 @@
       "value": {
         "holder": {
           "connection_id": "x",
+          "role": "owner",
+          "attachment_id": null
+        }
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "host.control.release",
+      "case": "missing_attachment_id",
+      "value": {
+        "state": "owner",
+        "holder": {
+          "connection_id": "owner",
           "role": "owner"
         }
       }
@@ -2086,7 +2198,8 @@
         "state": "owner",
         "holder": {
           "connection_id": "x",
-          "role": "owner"
+          "role": "owner",
+          "attachment_id": null
         },
         "__extra": true
       }
@@ -2098,6 +2211,19 @@
       "value": {
         "holder": {
           "connection_id": "x",
+          "role": "owner",
+          "attachment_id": null
+        }
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "host.control.status",
+      "case": "missing_attachment_id",
+      "value": {
+        "state": "owner",
+        "holder": {
+          "connection_id": "owner",
           "role": "owner"
         }
       }

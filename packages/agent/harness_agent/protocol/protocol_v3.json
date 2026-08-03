@@ -506,13 +506,16 @@
       "additionalProperties": false
     },
     "controlHolder": {
-      "type": "object", "required": ["connection_id", "role"],
+      "type": "object", "required": ["connection_id", "role", "attachment_id"],
       "properties": {
         "connection_id": { "type": "string", "minLength": 1 },
         "role": { "enum": ["owner", "attached"] },
         "attachment_id": { "type": ["string", "null"] }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "if": { "properties": { "role": { "const": "owner" } }, "required": ["role"] },
+      "then": { "properties": { "attachment_id": { "const": null } } },
+      "else": { "properties": { "attachment_id": { "type": "string", "minLength": 1 } } }
     },
     "controlStatus": {
       "type": "object", "required": ["state", "holder"],
