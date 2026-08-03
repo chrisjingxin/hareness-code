@@ -7,10 +7,14 @@ import hashlib
 import json
 import os
 import sqlite3
+import subprocess
+import sys
+import tempfile
+import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator, Literal, Mapping
+from typing import Any, AsyncIterator, Iterable, Literal, Mapping
 
 import aiosqlite
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -22,7 +26,7 @@ from harness_agent.runtime.execution_binding import (
     RunExecutionBinding,
 )
 from harness_agent.context_lifecycle import RunContextSnapshot, snapshot_from_legacy_prompt_epoch
-from harness_agent.prompting import HISTORY_REWRITE_VERSION, PromptEpoch, canonical_json
+from harness_agent.prompting import HISTORY_REWRITE_VERSION, canonical_json
 from harness_agent.agent_engine_profile import AGENT_ENGINE_PROFILE_VERSION, AgentEngineProfile
 from harness_agent.context_projection import (
     CompressionCheckpoint,
@@ -42,10 +46,989 @@ _SCHEMA_VERSION = 11
 _MAX_PREVIEW_CHARS = 160
 _MAX_INLINE_TOOL_BYTES = 64 * 1024
 _TRANSCRIPT_KINDS = ("user", "assistant", "tool", "context")
+_MIGRATION_STATE_VERSION = 1
+_MIGRATION_LOCK_SUFFIX = ".migration.lock"
+_MIGRATION_STATE_SUFFIX = ".migration-state.json"
+_MIGRATION_COMMIT_DEADLINE_SECONDS = 15.0
+_LEGACY_MIGRATION_CHILD_DEADLINE_SECONDS = 30.0
+_LEGACY_MIGRATION_CHILD_TERMINATE_GRACE_SECONDS = 0.25
+_MIGRATION_CHILD_TEST_PHASES = frozenset(
+    {
+        "backup_failure",
+        "bootstrap_failure",
+        "restore_failure",
+        "before_commit",
+        "after_final_validation",
+        "after_commit_before_state",
+        "after_commit_before_reply",
+        "commit_failure_before",
+        "state_committed_failure",
+        "state_clear_failure",
+    }
+)
+
+
+# This registry contains no SQLite connection or asyncio task.  It is only a
+# process-local handoff barrier published before the file lock is released
+# after a child migration timeout.  A fresh process intentionally starts with
+# an empty registry and must make the normal fact-based recovery decision from
+# the durable state/backup instead.
+_MIGRATION_POISONED_PATHS: set[Path] = set()
+_MIGRATION_POISON_LOCK = threading.Lock()
+
+# The child owns this marker only.  A permanently blocked aiosqlite worker is
+# never awaited or cleaned up by the parent; the parent kills and reaps the
+# whole child instead.
+_MIGRATION_CHILD_POISONED_PATHS: set[Path] = set()
+_MIGRATION_CHILD_TEST_PHASE: str | None = None
+_MIGRATION_CHILD_PROCESS_MODE = False
+
+
+def _assert_migration_path_available(path: Path) -> None:
+    """在 open 前检查本进程的迁移 owner poison 状态。"""
+    with _MIGRATION_POISON_LOCK:
+        poisoned = path in _MIGRATION_POISONED_PATHS
+    if poisoned:
+        raise ThreadPersistenceError("CHECKPOINT_MIGRATION_RECOVERY_REQUIRED")
+
+
+def _publish_migration_poison(path: Path) -> None:
+    """在释放同一路径文件锁前发布 fail-closed handoff。"""
+    with _MIGRATION_POISON_LOCK:
+        _MIGRATION_POISONED_PATHS.add(path)
+
+
+def _clear_migration_poison(path: Path) -> None:
+    """只在独立事实已收敛到可服务状态后清除当前进程 poison。"""
+    with _MIGRATION_POISON_LOCK:
+        _MIGRATION_POISONED_PATHS.discard(path)
+
+
+async def _migration_child_pause_if_requested(phase: str) -> None:
+    """测试专用可控 child failpoint；生产启动不会传入 phase。"""
+    if _MIGRATION_CHILD_TEST_PHASE == phase:
+        await asyncio.Future[None]()
+
+
+def _migration_child_test_failure(phase: str, error: BaseException) -> None:
+    """测试 failpoint 只在隔离 worker 内生效，不改变父进程生产路径。"""
+    if _MIGRATION_CHILD_TEST_PHASE == phase:
+        raise error
+
+
+def _requested_migration_test_phase() -> str | None:
+    """只允许 pytest 注入 failpoint，生产环境变量不会改变迁移行为。"""
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        return None
+    phase = os.environ.get("HARNESS_TEST_MIGRATION_CHILD_PHASE")
+    return phase if phase in _MIGRATION_CHILD_TEST_PHASES else None
+
+
+@dataclass(frozen=True, slots=True)
+class _MigrationColumnContract:
+    """v6 源表列的 SQLite 声明契约；不是只按列名存在判断。"""
+
+    name: str
+    declared_type: str
+    not_null: int
+    default: str | None
+    primary_key: int
+
+
+@dataclass(frozen=True, slots=True)
+class _MigrationIndexContract:
+    """v6 源索引的唯一性、列序、排序和 canonical SQL 契约。"""
+
+    name: str
+    unique: int
+    origin: str
+    partial: int
+    columns: tuple[tuple[str, int], ...]
+    sql: str
+
+
+def _migration_column_contracts(
+    table_name: str,
+    source_version: int,
+) -> tuple[_MigrationColumnContract, ...]:
+    """返回受支持 v6 源表的精确列契约；PromptEpoch 按历史版本分支。"""
+    contracts: dict[str, tuple[_MigrationColumnContract, ...]] = {
+        "harness_threads": (
+            _MigrationColumnContract("project_fingerprint", "TEXT", 1, None, 1),
+            _MigrationColumnContract("thread_id", "TEXT", 1, None, 2),
+            _MigrationColumnContract("created_at_ms", "INTEGER", 1, None, 0),
+            _MigrationColumnContract("updated_at_ms", "INTEGER", 1, None, 0),
+            _MigrationColumnContract("first_message", "TEXT", 1, None, 0),
+            _MigrationColumnContract("latest_message", "TEXT", 1, None, 0),
+            _MigrationColumnContract("message_count", "INTEGER", 1, "0", 0),
+        ),
+        "checkpoints": (
+            _MigrationColumnContract("thread_id", "TEXT", 1, None, 1),
+            _MigrationColumnContract("checkpoint_ns", "TEXT", 1, "''", 2),
+            _MigrationColumnContract("checkpoint_id", "TEXT", 1, None, 3),
+            _MigrationColumnContract("parent_checkpoint_id", "TEXT", 0, None, 0),
+            _MigrationColumnContract("type", "TEXT", 0, None, 0),
+            _MigrationColumnContract("checkpoint", "BLOB", 0, None, 0),
+            _MigrationColumnContract("metadata", "BLOB", 0, None, 0),
+        ),
+        "writes": (
+            _MigrationColumnContract("thread_id", "TEXT", 1, None, 1),
+            _MigrationColumnContract("checkpoint_ns", "TEXT", 1, "''", 2),
+            _MigrationColumnContract("checkpoint_id", "TEXT", 1, None, 3),
+            _MigrationColumnContract("task_id", "TEXT", 1, None, 4),
+            _MigrationColumnContract("idx", "INTEGER", 1, None, 5),
+            _MigrationColumnContract("channel", "TEXT", 1, None, 0),
+            _MigrationColumnContract("type", "TEXT", 0, None, 0),
+            _MigrationColumnContract("value", "BLOB", 0, None, 0),
+        ),
+        "harness_context_artifacts": (
+            _MigrationColumnContract("project_fingerprint", "TEXT", 1, None, 1),
+            _MigrationColumnContract("thread_id", "TEXT", 1, None, 2),
+            _MigrationColumnContract("artifact_id", "TEXT", 1, None, 3),
+            _MigrationColumnContract("kind", "TEXT", 1, None, 0),
+            _MigrationColumnContract("content", "TEXT", 1, None, 0),
+            _MigrationColumnContract("source_start", "INTEGER", 1, None, 0),
+            _MigrationColumnContract("source_end", "INTEGER", 1, None, 0),
+            _MigrationColumnContract("created_at_ms", "INTEGER", 1, None, 0),
+        ),
+        "harness_context_summaries": (
+            _MigrationColumnContract("project_fingerprint", "TEXT", 1, None, 0),
+            _MigrationColumnContract("thread_id", "TEXT", 1, None, 0),
+            _MigrationColumnContract("summary_id", "INTEGER", 0, None, 1),
+            _MigrationColumnContract("rewrite_version", "TEXT", 1, None, 0),
+            _MigrationColumnContract("content", "TEXT", 1, None, 0),
+            _MigrationColumnContract("source_start", "INTEGER", 1, None, 0),
+            _MigrationColumnContract("source_end", "INTEGER", 1, None, 0),
+            _MigrationColumnContract("artifact_ids", "TEXT", 1, None, 0),
+            _MigrationColumnContract("created_at_ms", "INTEGER", 1, None, 0),
+        ),
+        "harness_context_state": (
+            _MigrationColumnContract("project_fingerprint", "TEXT", 1, None, 1),
+            _MigrationColumnContract("thread_id", "TEXT", 1, None, 2),
+            _MigrationColumnContract("failures", "INTEGER", 1, "0", 0),
+            _MigrationColumnContract("circuit_open", "INTEGER", 1, "0", 0),
+            _MigrationColumnContract("last_action", "TEXT", 1, "'none'", 0),
+            _MigrationColumnContract("updated_at_ms", "INTEGER", 1, None, 0),
+        ),
+        "harness_runtime_profiles": (
+            _MigrationColumnContract("project_fingerprint", "TEXT", 1, None, 1),
+            _MigrationColumnContract("profile_key", "TEXT", 1, None, 2),
+            _MigrationColumnContract("profile_version", "INTEGER", 1, None, 0),
+            _MigrationColumnContract("topology_id", "TEXT", 1, None, 0),
+            _MigrationColumnContract("topology_version", "INTEGER", 1, None, 0),
+            _MigrationColumnContract("profile_record", "TEXT", 1, None, 0),
+            _MigrationColumnContract("created_at_ms", "INTEGER", 1, None, 0),
+        ),
+        "harness_thread_runtime_profiles": (
+            _MigrationColumnContract("project_fingerprint", "TEXT", 1, None, 1),
+            _MigrationColumnContract("thread_id", "TEXT", 1, None, 2),
+            _MigrationColumnContract("profile_key", "TEXT", 1, None, 0),
+            _MigrationColumnContract("profile_version", "INTEGER", 1, None, 0),
+            _MigrationColumnContract("bound_at_ms", "INTEGER", 1, None, 0),
+        ),
+        "harness_thread_model_bindings": (
+            _MigrationColumnContract("project_fingerprint", "TEXT", 1, None, 1),
+            _MigrationColumnContract("thread_id", "TEXT", 1, None, 2),
+            _MigrationColumnContract("binding_record", "TEXT", 1, None, 0),
+            _MigrationColumnContract("bound_at_ms", "INTEGER", 1, None, 0),
+        ),
+        "harness_run_execution_bindings": (
+            _MigrationColumnContract("project_fingerprint", "TEXT", 1, None, 1),
+            _MigrationColumnContract("thread_id", "TEXT", 1, None, 2),
+            _MigrationColumnContract("run_id", "TEXT", 1, None, 3),
+            _MigrationColumnContract("requested_selection", "TEXT", 1, None, 0),
+            _MigrationColumnContract("actual_primary_binding", "TEXT", 1, None, 0),
+            _MigrationColumnContract("runtime_profile_id", "TEXT", 1, None, 0),
+            _MigrationColumnContract("message_digest", "TEXT", 1, None, 0),
+            _MigrationColumnContract("created_at_ms", "INTEGER", 1, None, 0),
+        ),
+    }
+    if table_name == "harness_prompt_epochs":
+        prompt_columns = (
+            _MigrationColumnContract("project_fingerprint", "TEXT", 1, None, 1),
+            _MigrationColumnContract("thread_id", "TEXT", 1, None, 2),
+            _MigrationColumnContract("prompt_version", "INTEGER", 1, None, 0),
+            _MigrationColumnContract("system_prompt", "TEXT", 1, None, 0),
+            _MigrationColumnContract("environment_snapshot", "TEXT", 1, None, 0),
+            _MigrationColumnContract("readonly_memory", "TEXT", 1, None, 0),
+            _MigrationColumnContract("skill_index", "TEXT", 1, None, 0),
+            _MigrationColumnContract("tool_schema_fingerprint", "TEXT", 1, None, 0),
+            _MigrationColumnContract("system_fingerprint", "TEXT", 1, None, 0),
+            _MigrationColumnContract("history_rewrite_version", "TEXT", 1, None, 0),
+            _MigrationColumnContract("created_at_ms", "INTEGER", 1, None, 0),
+        )
+        if source_version >= 3:
+            prompt_columns += (
+                _MigrationColumnContract(
+                    "prefix_change_reason", "TEXT", 1, "'new_thread'", 0
+                ),
+            )
+        return prompt_columns
+    try:
+        return contracts[table_name]
+    except KeyError as exc:
+        raise ThreadPersistenceError(
+            f"CHECKPOINT_MIGRATION_SOURCE_SCHEMA_INVALID:{table_name}"
+        ) from exc
+
+
+def _migration_named_index_contracts(
+    table_name: str,
+) -> tuple[_MigrationIndexContract, ...]:
+    """返回 v6 关键 named index 契约；PK/UNIQUE 由 table_xinfo/index_list 同时校验。"""
+    common: dict[str, tuple[_MigrationIndexContract, ...]] = {
+        "harness_threads": (
+            _MigrationIndexContract(
+                "harness_threads_project_updated",
+                0,
+                "c",
+                0,
+                (("project_fingerprint", 0), ("updated_at_ms", 1)),
+                "CREATE INDEX harness_threads_project_updated ON harness_threads(project_fingerprint, updated_at_ms DESC)",
+            ),
+        ),
+        "harness_context_artifacts": (
+            _MigrationIndexContract(
+                "harness_context_artifacts_thread_created",
+                0,
+                "c",
+                0,
+                (
+                    ("project_fingerprint", 0),
+                    ("thread_id", 0),
+                    ("created_at_ms", 0),
+                ),
+                "CREATE INDEX harness_context_artifacts_thread_created ON harness_context_artifacts(project_fingerprint, thread_id, created_at_ms)",
+            ),
+        ),
+        "harness_thread_runtime_profiles": (
+            _MigrationIndexContract(
+                "harness_thread_runtime_profiles_project_profile",
+                0,
+                "c",
+                0,
+                (("project_fingerprint", 0), ("profile_key", 0)),
+                "CREATE INDEX harness_thread_runtime_profiles_project_profile ON harness_thread_runtime_profiles(project_fingerprint, profile_key)",
+            ),
+        ),
+        "harness_run_execution_bindings": (
+            _MigrationIndexContract(
+                "harness_run_execution_bindings_thread_created",
+                0,
+                "c",
+                0,
+                (
+                    ("project_fingerprint", 0),
+                    ("thread_id", 0),
+                    ("created_at_ms", 1),
+                ),
+                "CREATE INDEX harness_run_execution_bindings_thread_created ON harness_run_execution_bindings(project_fingerprint, thread_id, created_at_ms DESC)",
+            ),
+        ),
+    }
+    return common.get(table_name, ())
+
+
+def _migration_normalize_sql(sql: str | None) -> str | None:
+    """规范化 sqlite_master SQL，仅消除布局差异，不放宽对象定义。"""
+    if sql is None:
+        return None
+    return " ".join(sql.split()).lower()
+
+
+def _migration_v6_required_tables(source_version: int) -> tuple[str, ...]:
+    """返回某个历史版本必须存在的 v6 核心表，保持版本边界可审计。"""
+    required: list[str] = []
+    if source_version >= 1:
+        required.extend(("harness_threads", "checkpoints", "writes"))
+    if source_version >= 2:
+        required.extend(
+            (
+                "harness_context_artifacts",
+                "harness_context_summaries",
+                "harness_context_state",
+            )
+        )
+    if source_version >= 4:
+        required.extend(
+            ("harness_runtime_profiles", "harness_thread_runtime_profiles")
+        )
+    if source_version >= 5:
+        required.append("harness_thread_model_bindings")
+    if source_version >= 6:
+        required.append("harness_run_execution_bindings")
+    return tuple(required)
+
+
+def _migration_table_sql_contract(
+    table_name: str,
+    source_version: int,
+) -> str | None:
+    """返回无安全尾列时的 canonical CREATE TABLE 定义。"""
+    contracts = {
+        "harness_threads": """
+            CREATE TABLE harness_threads (
+                project_fingerprint TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                first_message TEXT NOT NULL,
+                latest_message TEXT NOT NULL,
+                message_count INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (project_fingerprint, thread_id)
+            )
+        """,
+        "checkpoints": """
+            CREATE TABLE checkpoints (
+                thread_id TEXT NOT NULL,
+                checkpoint_ns TEXT NOT NULL DEFAULT '',
+                checkpoint_id TEXT NOT NULL,
+                parent_checkpoint_id TEXT,
+                type TEXT,
+                checkpoint BLOB,
+                metadata BLOB,
+                PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+            )
+        """,
+        "writes": """
+            CREATE TABLE writes (
+                thread_id TEXT NOT NULL,
+                checkpoint_ns TEXT NOT NULL DEFAULT '',
+                checkpoint_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                idx INTEGER NOT NULL,
+                channel TEXT NOT NULL,
+                type TEXT,
+                value BLOB,
+                PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
+            )
+        """,
+        "harness_context_artifacts": """
+            CREATE TABLE harness_context_artifacts (
+                project_fingerprint TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                artifact_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                content TEXT NOT NULL,
+                source_start INTEGER NOT NULL,
+                source_end INTEGER NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (project_fingerprint, thread_id, artifact_id)
+            )
+        """,
+        "harness_context_summaries": """
+            CREATE TABLE harness_context_summaries (
+                project_fingerprint TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rewrite_version TEXT NOT NULL,
+                content TEXT NOT NULL,
+                source_start INTEGER NOT NULL,
+                source_end INTEGER NOT NULL,
+                artifact_ids TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL
+            )
+        """,
+        "harness_context_state": """
+            CREATE TABLE harness_context_state (
+                project_fingerprint TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                failures INTEGER NOT NULL DEFAULT 0,
+                circuit_open INTEGER NOT NULL DEFAULT 0,
+                last_action TEXT NOT NULL DEFAULT 'none',
+                updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (project_fingerprint, thread_id)
+            )
+        """,
+        "harness_runtime_profiles": """
+            CREATE TABLE harness_runtime_profiles (
+                project_fingerprint TEXT NOT NULL,
+                profile_key TEXT NOT NULL,
+                profile_version INTEGER NOT NULL,
+                topology_id TEXT NOT NULL,
+                topology_version INTEGER NOT NULL,
+                profile_record TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (project_fingerprint, profile_key)
+            )
+        """,
+        "harness_thread_runtime_profiles": """
+            CREATE TABLE harness_thread_runtime_profiles (
+                project_fingerprint TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                profile_key TEXT NOT NULL,
+                profile_version INTEGER NOT NULL,
+                bound_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (project_fingerprint, thread_id)
+            )
+        """,
+        "harness_thread_model_bindings": """
+            CREATE TABLE harness_thread_model_bindings (
+                project_fingerprint TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                binding_record TEXT NOT NULL,
+                bound_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (project_fingerprint, thread_id)
+            )
+        """,
+        "harness_run_execution_bindings": """
+            CREATE TABLE harness_run_execution_bindings (
+                project_fingerprint TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                requested_selection TEXT NOT NULL,
+                actual_primary_binding TEXT NOT NULL,
+                runtime_profile_id TEXT NOT NULL,
+                message_digest TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (project_fingerprint, thread_id, run_id)
+            )
+        """,
+    }
+    if table_name == "harness_prompt_epochs":
+        prefix = (
+            ", prefix_change_reason TEXT NOT NULL DEFAULT 'new_thread'"
+            if source_version >= 3
+            else ""
+        )
+        return f"""
+            CREATE TABLE harness_prompt_epochs (
+                project_fingerprint TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                prompt_version INTEGER NOT NULL,
+                system_prompt TEXT NOT NULL,
+                environment_snapshot TEXT NOT NULL,
+                readonly_memory TEXT NOT NULL,
+                skill_index TEXT NOT NULL,
+                tool_schema_fingerprint TEXT NOT NULL,
+                system_fingerprint TEXT NOT NULL,
+                history_rewrite_version TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL{prefix},
+                PRIMARY KEY (project_fingerprint, thread_id)
+            )
+        """
+    return contracts.get(table_name)
+
+
+def _migration_index_contract_rows(
+    column_contracts: tuple[_MigrationColumnContract, ...],
+    columns: tuple[tuple[str, int], ...],
+) -> tuple[tuple[object, ...], ...]:
+    """把 named index 列定义展开为 PRAGMA index_xinfo 的可比形状。"""
+    column_ids = {column.name: index for index, column in enumerate(column_contracts)}
+    return tuple(
+        (column_ids[name], name, descending, "BINARY", 1)
+        for name, descending in columns
+    ) + ((-1, None, 0, "BINARY", 0),)
+
+
+def _migration_expected_index_contracts(
+    table_name: str,
+    column_contracts: tuple[_MigrationColumnContract, ...],
+) -> tuple[_MigrationIndexContract, ...]:
+    """展开 named index 和复合 PK autoindex 的完整索引集合。"""
+    named = _migration_named_index_contracts(table_name)
+    primary_columns = tuple(
+        sorted(
+            (
+                column.primary_key,
+                column.name,
+            )
+            for column in column_contracts
+            if column.primary_key
+        )
+    )
+    if len(primary_columns) <= 1:
+        return named
+    primary = _MigrationIndexContract(
+        name=f"sqlite_autoindex_{table_name}_1",
+        unique=1,
+        origin="pk",
+        partial=0,
+        columns=tuple((name, 0) for _, name in primary_columns),
+        sql="",
+    )
+    return named + (primary,)
+
+
+def _migration_schema_contract_error(table_name: str, detail: str) -> ThreadPersistenceError:
+    """生成统一的 source schema typed error；不把 SQLite 原文泄露到状态文件。"""
+    return ThreadPersistenceError(
+        f"CHECKPOINT_MIGRATION_SOURCE_SCHEMA_INVALID:{table_name}:{detail}"
+    )
+
+
+def _migration_compare_table_contract(
+    *,
+    table_name: str,
+    source_version: int,
+    table_sql: str | None,
+    column_rows: Iterable[tuple[object, ...]],
+    index_rows: Iterable[tuple[object, ...]],
+    index_xinfo: Mapping[str, Iterable[tuple[object, ...]]],
+    index_sql: Mapping[str, str | None],
+    foreign_keys: Iterable[tuple[object, ...]],
+) -> None:
+    """比较一张 v6 表的完整结构，拒绝同名畸形对象。"""
+    expected_columns = _migration_column_contracts(table_name, source_version)
+    actual_columns = tuple(tuple(row) for row in column_rows)
+    expected_names = tuple(column.name for column in expected_columns)
+    actual_names = tuple(str(row[1]) for row in actual_columns)
+    if actual_names != expected_names:
+        raise _migration_schema_contract_error(table_name, "column_set")
+    expected_column_shape = tuple(
+        (column.name, column.declared_type, column.not_null, column.default, column.primary_key, 0)
+        for column in expected_columns
+    )
+    actual_column_shape = tuple(
+        (str(row[1]), str(row[2]), int(row[3]), row[4], int(row[5]), int(row[6]))
+        for row in actual_columns
+    )
+    if actual_column_shape != expected_column_shape:
+        raise _migration_schema_contract_error(table_name, "column_definition")
+    if list(foreign_keys):
+        raise _migration_schema_contract_error(table_name, "foreign_key")
+
+    expected_sql = _migration_table_sql_contract(table_name, source_version)
+    if _migration_normalize_sql(table_sql) != _migration_normalize_sql(expected_sql):
+        raise _migration_schema_contract_error(table_name, "table_sql")
+
+    expected_indexes = _migration_expected_index_contracts(table_name, expected_columns)
+    actual_index_rows = tuple(tuple(row) for row in index_rows)
+    actual_by_name = {str(row[1]): row for row in actual_index_rows}
+    expected_by_name = {index.name: index for index in expected_indexes}
+    if set(actual_by_name) != set(expected_by_name):
+        raise _migration_schema_contract_error(table_name, "index_set")
+    for index in expected_indexes:
+        row = actual_by_name[index.name]
+        if (int(row[2]), str(row[3]), int(row[4])) != (
+            index.unique,
+            index.origin,
+            index.partial,
+        ):
+            raise _migration_schema_contract_error(table_name, f"index_definition:{index.name}")
+        actual_xinfo = tuple(
+            (int(item[1]), item[2], int(item[3]), str(item[4]), int(item[5]))
+            for item in index_xinfo.get(index.name, ())
+        )
+        expected_xinfo = _migration_index_contract_rows(expected_columns, index.columns)
+        if actual_xinfo != expected_xinfo:
+            raise _migration_schema_contract_error(table_name, f"index_columns:{index.name}")
+        expected_index_sql = None if index.name.startswith("sqlite_autoindex_") else index.sql
+        if _migration_normalize_sql(index_sql.get(index.name)) != _migration_normalize_sql(
+            expected_index_sql
+        ):
+            raise _migration_schema_contract_error(table_name, f"index_sql:{index.name}")
+
+
+def _migration_validate_v6_source_schema_sync(
+    connection: sqlite3.Connection,
+    source_version: int,
+) -> None:
+    """同步校验 backup/恢复使用的 v6 源 schema。"""
+    required = _migration_v6_required_tables(source_version)
+    rows = connection.execute(
+        """
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+        ORDER BY name
+        """
+    ).fetchall()
+    actual_tables = {str(row[0]) for row in rows}
+    allowed_tables = set(required)
+    if source_version >= 2:
+        allowed_tables.add("harness_prompt_epochs")
+    unknown = actual_tables - allowed_tables
+    if unknown:
+        raise _migration_schema_contract_error("<database>", "unexpected_table")
+    for table_name in required:
+        if table_name not in actual_tables:
+            raise _migration_schema_contract_error(table_name, "missing_table")
+    if "harness_prompt_epochs" in actual_tables:
+        prompt_version = max(source_version, 2)
+        _migration_validate_table_contract_sync(connection, "harness_prompt_epochs", prompt_version)
+    for table_name in required:
+        _migration_validate_table_contract_sync(connection, table_name, source_version)
+
+
+def _migration_validate_table_contract_sync(
+    connection: sqlite3.Connection,
+    table_name: str,
+    source_version: int,
+) -> None:
+    """读取 sqlite_master/PRAGMA 并比较单表 canonical contract。"""
+    quoted_table = _migration_identifier(table_name)
+    table_row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    ).fetchone()
+    if table_row is None:
+        raise _migration_schema_contract_error(table_name, "missing_table")
+    index_rows = connection.execute(f"PRAGMA index_list({quoted_table})").fetchall()
+    index_xinfo = {
+        str(row[1]): connection.execute(
+            f"PRAGMA index_xinfo({_migration_identifier(str(row[1]))})"
+        ).fetchall()
+        for row in index_rows
+    }
+    index_sql = {
+        str(row[1]): connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
+            (str(row[1]),),
+        ).fetchone()[0]
+        for row in index_rows
+    }
+    _migration_compare_table_contract(
+        table_name=table_name,
+        source_version=source_version,
+        table_sql=table_row[0],
+        column_rows=connection.execute(f"PRAGMA table_xinfo({quoted_table})").fetchall(),
+        index_rows=index_rows,
+        index_xinfo=index_xinfo,
+        index_sql=index_sql,
+        foreign_keys=connection.execute(f"PRAGMA foreign_key_list({quoted_table})").fetchall(),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _MigrationTableDigest:
+    """迁移边界内一张表的列形状、行数和逐行摘要。"""
+
+    name: str
+    columns: tuple[str, ...]
+    row_count: int
+    digest: str
+
+    def record(self) -> dict[str, object]:
+        """返回可写入 migration state 的不含原文摘要。"""
+        return {
+            "name": self.name,
+            "columns": list(self.columns),
+            "row_count": self.row_count,
+            "digest": self.digest,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class _MigrationDatabaseFingerprint:
+    """证明一次 SQLite 快照的 schema、版本和关键数据没有漂移。"""
+
+    user_version: int
+    integrity_check: str
+    schema_digest: str
+    data_digest: str
+    tables: tuple[_MigrationTableDigest, ...]
+
+    def record(self) -> dict[str, object]:
+        """返回 migration state 使用的严格 JSON 结构。"""
+        return {
+            "user_version": self.user_version,
+            "integrity_check": self.integrity_check,
+            "schema_digest": self.schema_digest,
+            "data_digest": self.data_digest,
+            "tables": [table.record() for table in self.tables],
+        }
+
+
+def _migration_identifier(name: str) -> str:
+    """引用来自 sqlite_master 的标识符，不允许把它当作 SQL 片段。"""
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _migration_value_bytes(value: object) -> bytes:
+    """以带类型边界的编码摘要 SQLite 原子值，不用 ``str`` 伪造数据。"""
+    if value is None:
+        return b"N;"
+    if isinstance(value, bool):
+        return b"I:1;" if value else b"I:0;"
+    if isinstance(value, int):
+        return f"I:{value};".encode("ascii")
+    if isinstance(value, float):
+        return f"F:{value!r};".encode("ascii")
+    if isinstance(value, str):
+        encoded = value.encode("utf-8")
+        return b"T:" + str(len(encoded)).encode("ascii") + b":" + encoded + b";"
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        encoded = bytes(value)
+        return b"B:" + str(len(encoded)).encode("ascii") + b":" + encoded + b";"
+    raise TypeError(f"unsupported SQLite value type: {type(value).__name__}")
+
+
+def _migration_row_digest(row: Iterable[object]) -> str:
+    """计算一行的 typed digest，保持 BLOB、文本和数字不可混淆。"""
+    digest = hashlib.sha256()
+    for value in row:
+        encoded = _migration_value_bytes(value)
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+    return digest.hexdigest()
+
+
+def _migration_rows_digest(rows: Iterable[Iterable[object]]) -> tuple[int, str]:
+    """按无序行集合生成稳定摘要，同时保留重复行的计数。"""
+    row_digests = sorted(_migration_row_digest(row) for row in rows)
+    digest = hashlib.sha256()
+    for row_digest in row_digests:
+        encoded = row_digest.encode("ascii")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+    return len(row_digests), digest.hexdigest()
+
+
+def _migration_schema_digest(payload: object) -> str:
+    """对 sqlite_master、列和索引信息生成确定性 schema 摘要。"""
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _migration_data_digest(tables: Iterable[_MigrationTableDigest]) -> str:
+    """汇总每张用户表的行数、列形状和行摘要。"""
+    payload = [table.record() for table in tables]
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _migration_fingerprint_from_record(value: object) -> _MigrationDatabaseFingerprint:
+    """严格解析 state 中的 fingerprint；损坏状态必须 fail closed。"""
+    if not isinstance(value, Mapping):
+        raise ValueError("fingerprint must be an object")
+    user_version = value.get("user_version")
+    integrity_check = value.get("integrity_check")
+    schema_digest = value.get("schema_digest")
+    data_digest = value.get("data_digest")
+    raw_tables = value.get("tables")
+    if (
+        not isinstance(user_version, int)
+        or isinstance(user_version, bool)
+        or not isinstance(integrity_check, str)
+        or not isinstance(schema_digest, str)
+        or not isinstance(data_digest, str)
+        or not isinstance(raw_tables, list)
+    ):
+        raise ValueError("fingerprint fields are invalid")
+    tables: list[_MigrationTableDigest] = []
+    for raw_table in raw_tables:
+        if not isinstance(raw_table, Mapping):
+            raise ValueError("fingerprint table is invalid")
+        name = raw_table.get("name")
+        columns = raw_table.get("columns")
+        row_count = raw_table.get("row_count")
+        digest = raw_table.get("digest")
+        if (
+            not isinstance(name, str)
+            or not isinstance(columns, list)
+            or not all(isinstance(column, str) for column in columns)
+            or not isinstance(row_count, int)
+            or isinstance(row_count, bool)
+            or row_count < 0
+            or not isinstance(digest, str)
+        ):
+            raise ValueError("fingerprint table fields are invalid")
+        tables.append(
+            _MigrationTableDigest(
+                name=name,
+                columns=tuple(columns),
+                row_count=row_count,
+                digest=digest,
+            )
+        )
+    return _MigrationDatabaseFingerprint(
+        user_version=user_version,
+        integrity_check=integrity_check,
+        schema_digest=schema_digest,
+        data_digest=data_digest,
+        tables=tuple(tables),
+    )
+
+
+def _migration_fingerprint_matches(
+    expected: _MigrationDatabaseFingerprint,
+    actual: _MigrationDatabaseFingerprint,
+) -> bool:
+    """比较 backup/恢复快照的证明字段，不接受仅版本相同的弱校验。"""
+    return (
+        expected.user_version == actual.user_version
+        and expected.integrity_check == actual.integrity_check == "ok"
+        and expected.schema_digest == actual.schema_digest
+        and expected.data_digest == actual.data_digest
+        and expected.tables == actual.tables
+    )
+
+
+def _migration_sqlite_schema_payload(connection: sqlite3.Connection) -> object:
+    """同步收集 sqlite_master、表列和索引列形状。"""
+    master_rows = connection.execute(
+        """
+        SELECT type, name, tbl_name, sql
+        FROM sqlite_master
+        WHERE name NOT LIKE 'sqlite_%'
+          AND type IN ('table', 'index', 'trigger', 'view')
+        ORDER BY type, name
+        """
+    ).fetchall()
+    tables: list[dict[str, object]] = []
+    for row in master_rows:
+        if row[0] != "table":
+            continue
+        table_name = str(row[1])
+        columns = connection.execute(
+            f"PRAGMA table_info({_migration_identifier(table_name)})"
+        ).fetchall()
+        indexes = connection.execute(
+            f"PRAGMA index_list({_migration_identifier(table_name)})"
+        ).fetchall()
+        tables.append(
+            {
+                "name": table_name,
+                "columns": [tuple(column) for column in columns],
+                "indexes": [
+                    {
+                        "row": tuple(index),
+                        "columns": [
+                            tuple(index_column)
+                            for index_column in connection.execute(
+                                f"PRAGMA index_info({_migration_identifier(str(index[1]))})"
+                            ).fetchall()
+                        ],
+                    }
+                    for index in indexes
+                ],
+            }
+        )
+    return {
+        "master": [tuple(row) for row in master_rows],
+        "tables": tables,
+    }
+
+
+def _migration_table_digest_sync(
+    connection: sqlite3.Connection,
+    table_name: str,
+    columns: tuple[str, ...] | None = None,
+) -> _MigrationTableDigest:
+    """同步计算一张表的行数和 typed digest。"""
+    if columns is None:
+        raw_columns = connection.execute(
+            f"PRAGMA table_info({_migration_identifier(table_name)})"
+        ).fetchall()
+        columns = tuple(str(row[1]) for row in raw_columns)
+    select_columns = ", ".join(_migration_identifier(column) for column in columns)
+    rows = connection.execute(
+        f"SELECT {select_columns} FROM {_migration_identifier(table_name)}"
+    ).fetchall()
+    row_count, digest = _migration_rows_digest(rows)
+    return _MigrationTableDigest(table_name, columns, row_count, digest)
+
+
+def _migration_table_rows_sync(
+    backup_path: Path,
+    table_name: str,
+    columns: tuple[str, ...],
+) -> list[tuple[object, ...]]:
+    """从已验证 backup 读取迁移前行，供有意转换表做逐行比对。"""
+    select_columns = ", ".join(_migration_identifier(column) for column in columns)
+    connection = sqlite3.connect(backup_path)
+    try:
+        return [
+            tuple(row)
+            for row in connection.execute(
+                f"SELECT {select_columns} FROM {_migration_identifier(table_name)}"
+            ).fetchall()
+        ]
+    finally:
+        connection.close()
+
+
+def _migration_database_fingerprint_sync(
+    connection: sqlite3.Connection,
+) -> _MigrationDatabaseFingerprint:
+    """同步计算 backup/恢复目标的完整证明摘要。"""
+    integrity_row = connection.execute("PRAGMA integrity_check").fetchone()
+    integrity = str(integrity_row[0]) if integrity_row else ""
+    version_row = connection.execute("PRAGMA user_version").fetchone()
+    version = int(version_row[0]) if version_row else 0
+    master_rows = connection.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+        ORDER BY name
+        """
+    ).fetchall()
+    tables = tuple(
+        _migration_table_digest_sync(connection, str(row[0])) for row in master_rows
+    )
+    return _MigrationDatabaseFingerprint(
+        user_version=version,
+        integrity_check=integrity,
+        schema_digest=_migration_schema_digest(_migration_sqlite_schema_payload(connection)),
+        data_digest=_migration_data_digest(tables),
+        tables=tables,
+    )
 
 
 class ThreadPersistenceError(RuntimeError):
     """线程存储不可用、损坏或版本不兼容时返回的可诊断错误。"""
+
+
+class _MigrationFileLock:
+    """跨进程串行化数据库 open/migration/recovery 的短生命周期锁。"""
+
+    def __init__(self, path: Path) -> None:
+        """保存锁文件路径；真正加锁在异步 open 中完成。"""
+        self.path = path
+        self._descriptor: int | None = None
+        self._fcntl: Any | None = None
+
+    async def acquire(self) -> None:
+        """以非阻塞轮询等待锁，避免同一事件循环中的 opener 互相死锁。"""
+        try:
+            import fcntl
+        except ImportError as exc:  # pragma: no cover - 当前支持平台均提供 fcntl。
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_LOCK_UNAVAILABLE") from exc
+        try:
+            self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            descriptor = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+            os.fchmod(descriptor, 0o600)
+        except OSError as exc:
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_LOCK_UNAVAILABLE") from exc
+        self._descriptor = descriptor
+        self._fcntl = fcntl
+        try:
+            while True:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return
+                except BlockingIOError:
+                    await asyncio.sleep(0.01)
+        except BaseException:
+            self.release()
+            raise
+
+    def release(self) -> None:
+        """释放并关闭锁文件，不删除锁文件避免 inode 竞态。"""
+        descriptor, fcntl = self._descriptor, self._fcntl
+        self._descriptor = None
+        self._fcntl = None
+        if descriptor is None:
+            return
+        try:
+            if fcntl is not None:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,15 +1333,56 @@ class ThreadPersistence:
         """打开用户级数据库、检查完整性并应用 Harness 自有索引迁移。"""
         base_home = (home or Path.home()).expanduser().resolve()
         data_dir = base_home / ".harness"
+        path: Path | None = None
         connection: aiosqlite.Connection | None = None
+        migration_lock: _MigrationFileLock | None = None
         try:
             data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
             os.chmod(data_dir, 0o700)
             path = data_dir / "threads.sqlite3"
+            _assert_migration_path_available(path)
+            migration_lock = _MigrationFileLock(
+                path.with_name(path.name + _MIGRATION_LOCK_SUFFIX)
+            )
+            await migration_lock.acquire()
+            # The first check is only a fast rejection.  A waiter may have
+            # passed it while another opener still owned the file lock; the
+            # second check is the actual handoff boundary and must happen
+            # before any recovery, SQLite connection, backup, or write.
+            _assert_migration_path_available(path)
+            # Recovery 必须在 migration lock 仍由当前 opener 持有时完成；这里
+            # 不把同步的 SQLite backup 丢到可被取消的后台线程，避免提前释放锁。
+            cls._recover_interrupted_migration_sync(path)
+            _assert_migration_path_available(path)
+            project_fingerprint = _project_fingerprint(project)
+            source_version, has_legacy_prompt_epoch = _inspect_migration_source_sync(path)
+            if has_legacy_prompt_epoch and source_version != 6:
+                raise ThreadPersistenceError(
+                    "CHECKPOINT_MIGRATION_LEGACY_TABLE_UNEXPECTED"
+                )
+            # A brand-new empty user database is not a legacy migration and
+            # stays on the normal parent bootstrap path.  Only an existing
+            # historical schema (including the public v6 source) enters the
+            # killable child boundary.
+            if path.is_file() and (
+                (0 < source_version < _SCHEMA_VERSION) or has_legacy_prompt_epoch
+            ):
+                await _run_legacy_migration_child(
+                    path,
+                    project_fingerprint,
+                )
+                # A child can finish or be killed immediately before its
+                # response.  Recheck both the process-local handoff and the
+                # durable database fact before opening the service connection.
+                _assert_migration_path_available(path)
+                source_version, has_legacy_prompt_epoch = _inspect_migration_source_sync(path)
+                if source_version != _SCHEMA_VERSION or has_legacy_prompt_epoch:
+                    raise ThreadPersistenceError(
+                        "CHECKPOINT_MIGRATION_FINAL_VALIDATION_FAILED"
+                    )
             connection = await aiosqlite.connect(path)
             os.chmod(path, 0o600)
             connection.row_factory = aiosqlite.Row
-            project_fingerprint = _project_fingerprint(project)
             operation_lock = asyncio.Lock()
             checkpointer = ProjectScopedAsyncSqliteSaver(
                 connection,
@@ -399,6 +1423,9 @@ class ThreadPersistence:
                 except aiosqlite.Error:
                     pass
             raise ThreadPersistenceError(f"CHECKPOINT_OPEN_FAILED: {exc}") from exc
+        finally:
+            if migration_lock is not None:
+                migration_lock.release()
 
     @property
     def checkpointer(self) -> ProjectScopedAsyncSqliteSaver:
@@ -704,7 +1731,7 @@ class ThreadPersistence:
             SELECT payload
             FROM harness_thread_transcript
             WHERE project_fingerprint = ? AND thread_id = ? AND kind = 'user'
-              AND record_id != ?
+              AND record_id != ? AND run_id IS NULL
             ORDER BY sequence ASC
             """,
             (self._project_fingerprint, thread_id, _user_record_id(run_id)),
@@ -1171,77 +2198,6 @@ class ThreadPersistence:
     async def load_context_state(self, thread_id: str) -> ContextState:
         """读取压缩策略状态，不触及 LangGraph messages 缓存。"""
         return await self._load_context_state(thread_id)
-
-    async def load_prompt_epoch(self, thread_id: str) -> PromptEpoch | None:
-        """读取旧库 PromptEpoch；生产 Run 不再以它作为上下文来源。"""
-        self._ensure_open()
-        try:
-            async with self._lock:
-                cursor = await self._connection.execute(
-                    """
-                    SELECT thread_id, prompt_version, system_prompt, environment_snapshot,
-                           readonly_memory, skill_index, tool_schema_fingerprint,
-                           system_fingerprint, history_rewrite_version, prefix_change_reason,
-                           created_at_ms
-                    FROM harness_prompt_epochs
-                    WHERE project_fingerprint = ? AND thread_id = ?
-                    """,
-                    (self._project_fingerprint, thread_id),
-                )
-                row = await cursor.fetchone()
-                await cursor.close()
-            return PromptEpoch.from_record(dict(row)) if row is not None else None
-        except (aiosqlite.Error, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise ThreadPersistenceError(f"PROMPT_EPOCH_READ_FAILED: {exc}") from exc
-
-    async def persist_prompt_epoch(self, epoch: PromptEpoch) -> None:
-        """保留旧嵌入式调用的兼容写入口；AgentHost 生产路径不会调用它。"""
-        self._ensure_open()
-        record = epoch.record()
-        try:
-            async with self._lock:
-                cursor = await self._connection.execute(
-                    """
-                    SELECT system_fingerprint FROM harness_prompt_epochs
-                    WHERE project_fingerprint = ? AND thread_id = ?
-                    """,
-                    (self._project_fingerprint, epoch.thread_id),
-                )
-                existing = await cursor.fetchone()
-                await cursor.close()
-                if existing is not None:
-                    if str(existing[0]) != epoch.system_fingerprint:
-                        raise ThreadPersistenceError("PROMPT_EPOCH_IMMUTABLE")
-                    return
-                await self._connection.execute(
-                    """
-                    INSERT INTO harness_prompt_epochs (
-                        project_fingerprint, thread_id, prompt_version, system_prompt,
-                        environment_snapshot, readonly_memory, skill_index,
-                        tool_schema_fingerprint, system_fingerprint,
-                        history_rewrite_version, prefix_change_reason, created_at_ms
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        self._project_fingerprint,
-                        record["thread_id"],
-                        record["prompt_version"],
-                        record["system_prompt"],
-                        record["environment_snapshot"],
-                        record["readonly_memory"],
-                        record["skill_index"],
-                        record["tool_schema_fingerprint"],
-                        record["system_fingerprint"],
-                        record["history_rewrite_version"],
-                        record["prefix_change_reason"],
-                        record["created_at_ms"],
-                    ),
-                )
-                await self._connection.commit()
-        except ThreadPersistenceError:
-            raise
-        except aiosqlite.Error as exc:
-            raise ThreadPersistenceError(f"PROMPT_EPOCH_WRITE_FAILED: {exc}") from exc
 
     async def persist_agent_engine_profile(self, profile: AgentEngineProfile) -> None:
         """保存按 project/profile key 去重的 AgentEngine Profile，不绑定 Thread。"""
@@ -2127,6 +3083,7 @@ class ThreadPersistence:
         """提交并关闭连接，确保 CLI 退出后用户可安全删除数据库及 WAL 文件。"""
         if self._closed:
             return
+        _assert_migration_path_available(self._path)
         self._closed = True
         try:
             async with self._lock:
@@ -2136,59 +3093,67 @@ class ThreadPersistence:
             raise ThreadPersistenceError(f"CHECKPOINT_CLOSE_FAILED: {exc}") from exc
 
     async def _prepare(self) -> None:
-        """验证 SQLite、备份旧库并原子升级 Harness 自有 schema。"""
+        """在单一排他状态机内校验、备份、迁移并验证 Harness schema。"""
+        migration_state_written = False
+        migration_committed = False
+        migration_commit_poisoned = False
+        migration_backup: Path | None = None
+        source_fingerprint: _MigrationDatabaseFingerprint | None = None
+        final_fingerprint: _MigrationDatabaseFingerprint | None = None
         try:
-            try:
-                cursor = await self._connection.execute("PRAGMA integrity_check")
-                row = await cursor.fetchone()
-                await cursor.close()
-            except aiosqlite.Error as exc:
-                raise ThreadPersistenceError(f"CHECKPOINT_DATABASE_CORRUPT: {exc}") from exc
-            if not row or row[0] != "ok":
-                detail = row[0] if row else "no result"
-                raise ThreadPersistenceError(f"CHECKPOINT_DATABASE_CORRUPT: {detail}")
+            # busy_timeout 是连接级设置；它不改变数据库文件，真正的
+            # schema/data/journal 边界从 BEGIN IMMEDIATE 开始。
             await self._connection.execute("PRAGMA busy_timeout=5000")
             try:
-                await self._connection.execute("PRAGMA journal_mode=WAL")
-            except aiosqlite.OperationalError as exc:
-                # Two project Hosts may enter bootstrap together.  SQLite's
-                # journal-mode switch can reject the stale opener immediately
-                # even with busy_timeout; the authoritative BEGIN IMMEDIATE
-                # version check below still serializes the migration.  Do not
-                # turn this harmless race into a failed open.
-                if "locked" not in str(exc).lower():
-                    raise
-            candidate_version = await self._read_user_version_under_write_lock()
-            if candidate_version > _SCHEMA_VERSION:
-                raise ThreadPersistenceError(
-                    f"CHECKPOINT_SCHEMA_TOO_NEW: found {candidate_version}, supports {_SCHEMA_VERSION}"
-                )
-            if candidate_version >= _SCHEMA_VERSION:
-                # The checkpoint schema was created by the winning opener.  Do
-                # not run setup here: AsyncSqliteSaver.setup() commits and would
-                # break the migration transaction boundary.
-                self._checkpointer.is_setup = True
-                return
+                await self._connection.execute("BEGIN IMMEDIATE")
+            except aiosqlite.Error as exc:
+                if "not a database" in str(exc).lower():
+                    raise ThreadPersistenceError("CHECKPOINT_DATABASE_CORRUPT") from exc
+                raise ThreadPersistenceError("CHECKPOINT_MIGRATION_LOCK_FAILED") from exc
 
-            # A backup is only a recovery artifact.  It is made outside the
-            # migration write transaction because SQLite backup on a connection
-            # holding BEGIN IMMEDIATE can block.  The second lock/version read
-            # below is authoritative and prevents a stale migrator from doing
-            # any work after another opener has committed the successor schema.
-            await self._create_migration_backup(candidate_version)
-            await self._connection.execute("BEGIN IMMEDIATE")
-            cursor = await self._connection.execute("PRAGMA user_version")
-            row = await cursor.fetchone()
-            await cursor.close()
-            source_version = int(row[0]) if row else 0
+            source_fingerprint = await self._database_fingerprint_async()
+            source_version = source_fingerprint.user_version
             if source_version > _SCHEMA_VERSION:
                 raise ThreadPersistenceError(
                     f"CHECKPOINT_SCHEMA_TOO_NEW: found {source_version}, supports {_SCHEMA_VERSION}"
                 )
-            if source_version >= _SCHEMA_VERSION:
-                await self._connection.rollback()
+            await self._validate_required_schema_async(source_version)
+            has_legacy_prompt_epoch = await self._table_exists("harness_prompt_epochs")
+            if has_legacy_prompt_epoch and source_version != 6:
+                raise ThreadPersistenceError(
+                    "CHECKPOINT_MIGRATION_LEGACY_TABLE_UNEXPECTED"
+                )
+            if (
+                (0 < source_version < _SCHEMA_VERSION or has_legacy_prompt_epoch)
+                and not _MIGRATION_CHILD_PROCESS_MODE
+            ):
+                raise ThreadPersistenceError("CHECKPOINT_MIGRATION_WORKER_REQUIRED")
+            if source_version == _SCHEMA_VERSION and not has_legacy_prompt_epoch:
+                await self._validate_final_database_async(source_fingerprint)
+                await self._connection.commit()
                 self._checkpointer.is_setup = True
                 return
+
+            # 从此处到最终 commit，所有 writer 都被同一 SQLite 写事务阻止；
+            # backup 看到的是含已提交 WAL 内容的同一个稳定快照。
+            migration_backup = await self._create_migration_backup(
+                source_version,
+                source_fingerprint,
+            )
+            await self._write_migration_state(
+                status="migrating",
+                source_fingerprint=source_fingerprint,
+                backup_path=migration_backup,
+            )
+            migration_state_written = True
+
+            # legacy migration 现在整体运行在隔离 child 中。测试故障注入必须
+            # 位于统一事务边界，不能依赖 monkeypatch 某个只在特定旧版本调用的
+            # bootstrap 方法，否则 v8 等版本会绕过真实失败路径。
+            _migration_child_test_failure(
+                "bootstrap_failure",
+                RuntimeError("injected migration bootstrap failure"),
+            )
 
             await self._create_checkpointer_tables_in_transaction()
             version = source_version
@@ -2426,8 +3391,15 @@ class ThreadPersistence:
                     ON harness_run_context_snapshots(project_fingerprint, thread_id, created_at_ms)
                     """
                 )
-                await self._migrate_legacy_prompt_epochs_to_snapshots()
+                if source_version == 6 and has_legacy_prompt_epoch:
+                    await self._migrate_legacy_prompt_epochs_to_snapshots()
                 version = 8
+            if source_version == 6 and has_legacy_prompt_epoch:
+                await self._finalize_legacy_prompt_epoch_adapter()
+            elif source_version < 2 and await self._table_exists("harness_prompt_epochs"):
+                # 旧空 schema 在本次事务内创建的表不是 legacy input；只清理
+                # 迁移自产生的空表，绝不把它当作 PromptEpoch adapter 输入。
+                await self._connection.execute("DROP TABLE harness_prompt_epochs")
             if version < 9:
                 await self._backfill_artifact_metadata()
                 await self._connection.execute(
@@ -2471,37 +3443,1327 @@ class ThreadPersistence:
                 await self._add_context_runtime_state_column()
                 version = 11
             await self._connection.execute(f"PRAGMA user_version={version}")
-            await self._connection.commit()
+            final_fingerprint = await self._database_fingerprint_async()
+            await self._validate_final_database_async(final_fingerprint)
+            if source_fingerprint is not None:
+                if migration_backup is None:
+                    raise ThreadPersistenceError("CHECKPOINT_MIGRATION_STATE_MISSING")
+                await self._validate_preserved_source_data_async(
+                    source_fingerprint,
+                    migration_backup,
+                )
+            await _migration_child_pause_if_requested("after_final_validation")
+            if migration_backup is None or source_fingerprint is None:
+                raise ThreadPersistenceError("CHECKPOINT_MIGRATION_STATE_MISSING")
+            # final fingerprint 必须在 DB commit 之前落盘。这样即使进程在
+            # commit 返回后、写 committed/清理 state 前退出，启动也能用
+            # “当前主库 == 这个 final”证明新库已经提交，绝不把成功迁移回滚。
+            await self._write_migration_state(
+                status="committing",
+                source_fingerprint=source_fingerprint,
+                backup_path=migration_backup,
+                final_fingerprint=final_fingerprint,
+            )
+            await _migration_child_pause_if_requested("before_commit")
+            commit_outcome, commit_error = await self._commit_and_classify_outcome_async(
+                source_fingerprint,
+                final_fingerprint,
+            )
+            if commit_outcome == "unknown":
+                migration_commit_poisoned = True
+                _MIGRATION_CHILD_POISONED_PATHS.add(self._path)
+                await self._write_migration_state(
+                    status="commit_unknown",
+                    source_fingerprint=source_fingerprint,
+                    backup_path=migration_backup,
+                    final_fingerprint=final_fingerprint,
+                )
+                raise commit_error or ThreadPersistenceError(
+                    "CHECKPOINT_MIGRATION_COMMIT_OUTCOME_UNKNOWN"
+                )
+            if commit_outcome == "source":
+                if commit_error is None:
+                    raise ThreadPersistenceError(
+                        "CHECKPOINT_MIGRATION_COMMIT_NOT_APPLIED"
+                    )
+                raise commit_error
+            if commit_outcome != "final":
+                if commit_error is not None:
+                    raise commit_error
+                raise ThreadPersistenceError(
+                    "CHECKPOINT_MIGRATION_COMMIT_OUTCOME_UNKNOWN"
+                )
+            migration_committed = True
+            await _migration_child_pause_if_requested("after_commit_before_state")
+            await self._write_migration_state(
+                status="committed",
+                source_fingerprint=source_fingerprint,
+                backup_path=migration_backup,
+                final_fingerprint=final_fingerprint,
+            )
+            await self._clear_migration_state()
+            if commit_error is not None:
+                if isinstance(commit_error, (asyncio.CancelledError, ThreadPersistenceError)):
+                    raise commit_error
+                raise ThreadPersistenceError(
+                    "CHECKPOINT_MIGRATION_FINALIZE_FAILED"
+                ) from commit_error
             self._checkpointer.is_setup = True
         except BaseException as exc:
+            if migration_commit_poisoned:
+                # commit worker 仍可能在另一个线程中晚到；当前 owner 不得
+                # rollback/restore/close 或复用同一路径，只释放外层 open 锁。
+                if isinstance(exc, (asyncio.CancelledError, ThreadPersistenceError)):
+                    raise
+                raise ThreadPersistenceError(
+                    "CHECKPOINT_MIGRATION_COMMIT_OUTCOME_UNKNOWN"
+                ) from exc
+            if migration_committed:
+                # DB 已经提交；状态发布或清理失败只能 fail closed，绝不能
+                # rollback/restore 旧 backup。保留 committing/committed state
+                # 让下一次 open 按 final fingerprint 修复边界。
+                if isinstance(exc, (asyncio.CancelledError, ThreadPersistenceError)):
+                    raise
+                raise ThreadPersistenceError(
+                    "CHECKPOINT_MIGRATION_FINALIZE_FAILED"
+                ) from exc
             try:
                 await self._connection.rollback()
             except aiosqlite.Error:
                 pass
+            if migration_state_written and migration_backup is not None and source_fingerprint is not None:
+                try:
+                    await self._restore_migration_backup_async(
+                        migration_backup,
+                        source_fingerprint,
+                    )
+                    await self._clear_migration_state()
+                except BaseException as restore_exc:
+                    try:
+                        self._mark_migration_restore_failed(restore_exc)
+                    except BaseException:
+                        pass
+                    raise ThreadPersistenceError(
+                        "CHECKPOINT_MIGRATION_RESTORE_FAILED"
+                    ) from restore_exc
             if isinstance(exc, asyncio.CancelledError):
                 raise
             if isinstance(exc, ThreadPersistenceError):
                 raise
-            raise ThreadPersistenceError(f"CHECKPOINT_MIGRATION_FAILED: {exc}") from exc
+            raise ThreadPersistenceError(
+                f"CHECKPOINT_MIGRATION_FAILED: {type(exc).__name__}"
+            ) from exc
 
-    async def _read_user_version_under_write_lock(self) -> int:
-        """短暂取得 SQLite 写锁并读取版本，协调并发 migration candidate。"""
-        await self._connection.execute("BEGIN IMMEDIATE")
+    async def _commit_and_classify_outcome_async(
+        self,
+        source: _MigrationDatabaseFingerprint,
+        final: _MigrationDatabaseFingerprint,
+    ) -> tuple[Literal["final", "source", "mismatch", "unknown"], BaseException | None]:
+        """在有界 deadline 内 settle commit，之后才用独立连接确认落盘事实。"""
+        _migration_child_test_failure(
+            "commit_failure_before",
+            RuntimeError("injected commit failure before sqlite commit"),
+        )
+        commit_task = asyncio.create_task(self._connection.commit())
+        commit_error: BaseException | None = None
+        deadline = asyncio.get_running_loop().time() + _MIGRATION_COMMIT_DEADLINE_SECONDS
+        while not commit_task.done():
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return (
+                    "unknown",
+                    ThreadPersistenceError(
+                        "CHECKPOINT_MIGRATION_COMMIT_OUTCOME_UNKNOWN"
+                    ),
+                )
+            try:
+                # wait_for 只取消 shield wrapper，不取消 commit_task；超时
+                # 后 task 仍由 poisoned owner 跟踪，禁止任何 restore 竞态。
+                await asyncio.wait_for(
+                    asyncio.shield(commit_task),
+                    timeout=remaining,
+                )
+            except asyncio.TimeoutError:
+                return (
+                    "unknown",
+                    ThreadPersistenceError(
+                        "CHECKPOINT_MIGRATION_COMMIT_OUTCOME_UNKNOWN"
+                    ),
+                )
+            except BaseException as exc:
+                # 外层取消和 worker await 异常都不能把结果解释成未提交；
+                # 若 task 尚未结束，继续在同一个绝对 deadline 内观察。
+                if commit_error is None:
+                    commit_error = exc
         try:
-            cursor = await self._connection.execute("PRAGMA user_version")
+            commit_task.result()
+        except BaseException as exc:
+            if commit_error is None:
+                commit_error = exc
+        outcome = self._classify_migration_database_sync(
+            self._path,
+            source,
+            final,
+        )
+        return outcome, commit_error
+
+    @staticmethod
+    def _classify_migration_database_sync(
+        path: Path,
+        source: _MigrationDatabaseFingerprint,
+        final: _MigrationDatabaseFingerprint,
+    ) -> Literal["final", "source", "mismatch"]:
+        """独立连接只按完整 fingerprint/schema 事实分类 commit outcome。"""
+        if not path.is_file():
+            return "mismatch"
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = sqlite3.connect(path)
+            actual = _migration_database_fingerprint_sync(connection)
+            if _migration_fingerprint_matches(final, actual):
+                if final.user_version != _SCHEMA_VERSION or final.integrity_check != "ok":
+                    return "mismatch"
+                if connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='harness_prompt_epochs'"
+                ).fetchone() is not None:
+                    return "mismatch"
+                return "final"
+            if _migration_fingerprint_matches(source, actual):
+                if 1 <= source.user_version <= 6:
+                    _migration_validate_v6_source_schema_sync(
+                        connection,
+                        source.user_version,
+                    )
+                return "source"
+        except (OSError, sqlite3.Error, ThreadPersistenceError):
+            return "mismatch"
+        finally:
+            if connection is not None:
+                connection.close()
+        return "mismatch"
+
+    async def _database_fingerprint_async(self) -> _MigrationDatabaseFingerprint:
+        """在当前 SQLite 连接和当前事务快照上计算完整证明摘要。"""
+        integrity_cursor = await self._connection.execute("PRAGMA integrity_check")
+        integrity_row = await integrity_cursor.fetchone()
+        await integrity_cursor.close()
+        version_cursor = await self._connection.execute("PRAGMA user_version")
+        version_row = await version_cursor.fetchone()
+        await version_cursor.close()
+        master_cursor = await self._connection.execute(
+            """
+            SELECT type, name, tbl_name, sql
+            FROM sqlite_master
+            WHERE name NOT LIKE 'sqlite_%'
+              AND type IN ('table', 'index', 'trigger', 'view')
+            ORDER BY type, name
+            """
+        )
+        master_rows = [tuple(row) for row in await master_cursor.fetchall()]
+        await master_cursor.close()
+        schema_tables: list[dict[str, object]] = []
+        table_names = [str(row[1]) for row in master_rows if row[0] == "table"]
+        tables: list[_MigrationTableDigest] = []
+        for table_name in table_names:
+            column_cursor = await self._connection.execute(
+                f"PRAGMA table_info({_migration_identifier(table_name)})"
+            )
+            column_rows = [tuple(row) for row in await column_cursor.fetchall()]
+            await column_cursor.close()
+            columns = tuple(str(row[1]) for row in column_rows)
+            index_cursor = await self._connection.execute(
+                f"PRAGMA index_list({_migration_identifier(table_name)})"
+            )
+            index_rows = [tuple(row) for row in await index_cursor.fetchall()]
+            await index_cursor.close()
+            schema_tables.append(
+                {
+                    "name": table_name,
+                    "columns": column_rows,
+                    "indexes": [
+                        {
+                            "row": index,
+                            "columns": await self._index_columns_async(str(index[1])),
+                        }
+                        for index in index_rows
+                    ],
+                }
+            )
+            tables.append(await self._table_digest_async(table_name, columns))
+        schema_payload = {"master": master_rows, "tables": schema_tables}
+        table_tuple = tuple(tables)
+        return _MigrationDatabaseFingerprint(
+            user_version=int(version_row[0]) if version_row else 0,
+            integrity_check=str(integrity_row[0]) if integrity_row else "",
+            schema_digest=_migration_schema_digest(schema_payload),
+            data_digest=_migration_data_digest(table_tuple),
+            tables=table_tuple,
+        )
+
+    async def _index_columns_async(self, index_name: str) -> list[tuple[object, ...]]:
+        """读取一个索引的列序，不把索引名拼接成可执行输入。"""
+        cursor = await self._connection.execute(
+            f"PRAGMA index_info({_migration_identifier(index_name)})"
+        )
+        rows = [tuple(row) for row in await cursor.fetchall()]
+        await cursor.close()
+        return rows
+
+    async def _table_columns_async(self, table_name: str) -> tuple[str, ...]:
+        """读取表列名，供 schema contract 和数据保留校验复用。"""
+        cursor = await self._connection.execute(
+            f"PRAGMA table_info({_migration_identifier(table_name)})"
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return tuple(str(row[1]) for row in rows)
+
+    async def _table_digest_async(
+        self,
+        table_name: str,
+        columns: tuple[str, ...] | None = None,
+    ) -> _MigrationTableDigest:
+        """在当前事务快照中计算指定列的行摘要。"""
+        selected = columns or await self._table_columns_async(table_name)
+        if not selected:
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_SCHEMA_INVALID")
+        select_columns = ", ".join(_migration_identifier(column) for column in selected)
+        cursor = await self._connection.execute(
+            f"SELECT {select_columns} FROM {_migration_identifier(table_name)}"
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        row_count, digest = _migration_rows_digest(rows)
+        return _MigrationTableDigest(table_name, selected, row_count, digest)
+
+    async def _validate_v6_source_schema_async(self, source_version: int) -> None:
+        """异步读取 v6 源 schema 的完整 contract，拒绝未知对象和畸形同名对象。"""
+        cursor = await self._connection.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+            ORDER BY name
+            """
+        )
+        actual_tables = {str(row[0]) for row in await cursor.fetchall()}
+        await cursor.close()
+        required = _migration_v6_required_tables(source_version)
+        allowed_tables = set(required)
+        if source_version >= 2:
+            allowed_tables.add("harness_prompt_epochs")
+        if actual_tables - allowed_tables:
+            raise _migration_schema_contract_error("<database>", "unexpected_table")
+        for table_name in required:
+            if table_name not in actual_tables:
+                raise _migration_schema_contract_error(table_name, "missing_table")
+        if "harness_prompt_epochs" in actual_tables:
+            await self._validate_table_contract_async(
+                "harness_prompt_epochs",
+                max(source_version, 2),
+            )
+        for table_name in required:
+            await self._validate_table_contract_async(table_name, source_version)
+
+    async def _validate_table_contract_async(
+        self,
+        table_name: str,
+        source_version: int,
+    ) -> None:
+        """读取单表 sqlite_master/PRAGMA 并复用同步 contract 比较器。"""
+        cursor = await self._connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        )
+        table_row = await cursor.fetchone()
+        await cursor.close()
+        if table_row is None:
+            raise _migration_schema_contract_error(table_name, "missing_table")
+        quoted_table = _migration_identifier(table_name)
+        cursor = await self._connection.execute(f"PRAGMA index_list({quoted_table})")
+        index_rows = [tuple(row) for row in await cursor.fetchall()]
+        await cursor.close()
+        index_xinfo: dict[str, list[tuple[object, ...]]] = {}
+        index_sql: dict[str, str | None] = {}
+        for index_row in index_rows:
+            index_name = str(index_row[1])
+            cursor = await self._connection.execute(
+                f"PRAGMA index_xinfo({_migration_identifier(index_name)})"
+            )
+            index_xinfo[index_name] = [tuple(row) for row in await cursor.fetchall()]
+            await cursor.close()
+            cursor = await self._connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
+                (index_name,),
+            )
+            index_master_row = await cursor.fetchone()
+            await cursor.close()
+            index_sql[index_name] = (
+                str(index_master_row[0]) if index_master_row and index_master_row[0] is not None else None
+            )
+        cursor = await self._connection.execute(f"PRAGMA table_xinfo({quoted_table})")
+        column_rows = [tuple(row) for row in await cursor.fetchall()]
+        await cursor.close()
+        cursor = await self._connection.execute(f"PRAGMA foreign_key_list({quoted_table})")
+        foreign_keys = [tuple(row) for row in await cursor.fetchall()]
+        await cursor.close()
+        _migration_compare_table_contract(
+            table_name=table_name,
+            source_version=source_version,
+            table_sql=str(table_row[0]) if table_row[0] is not None else None,
+            column_rows=column_rows,
+            index_rows=index_rows,
+            index_xinfo=index_xinfo,
+            index_sql=index_sql,
+            foreign_keys=foreign_keys,
+        )
+
+    async def _validate_required_schema_async(self, version: int) -> None:
+        """校验源版本的关键表、列和索引，拒绝半套 schema 进入 backup。"""
+        if 1 <= version <= 6:
+            await self._validate_v6_source_schema_async(version)
+            return
+        required: list[tuple[str, tuple[str, ...]]] = []
+        if version >= 1:
+            required.extend(
+                [
+                    (
+                        "harness_threads",
+                        (
+                            "project_fingerprint",
+                            "thread_id",
+                            "created_at_ms",
+                            "updated_at_ms",
+                            "first_message",
+                            "latest_message",
+                            "message_count",
+                        ),
+                    ),
+                    (
+                        "checkpoints",
+                        ("thread_id", "checkpoint_ns", "checkpoint_id", "checkpoint"),
+                    ),
+                    (
+                        "writes",
+                        ("thread_id", "checkpoint_ns", "checkpoint_id", "task_id", "idx"),
+                    ),
+                ]
+            )
+        if version >= 2:
+            required.extend(
+                [
+                    (
+                        "harness_context_artifacts",
+                        (
+                            "project_fingerprint",
+                            "thread_id",
+                            "artifact_id",
+                            "kind",
+                            "content",
+                            "source_start",
+                            "source_end",
+                        ),
+                    ),
+                    (
+                        "harness_context_summaries",
+                        (
+                            "project_fingerprint",
+                            "thread_id",
+                            "summary_id",
+                            "content",
+                            "source_start",
+                            "source_end",
+                            "artifact_ids",
+                        ),
+                    ),
+                    (
+                        "harness_context_state",
+                        (
+                            "project_fingerprint",
+                            "thread_id",
+                            "failures",
+                            "circuit_open",
+                            "last_action",
+                            "updated_at_ms",
+                        ),
+                    ),
+                ]
+            )
+        if version >= 4:
+            required.extend(
+                [
+                    (
+                        "harness_runtime_profiles",
+                        ("project_fingerprint", "profile_key", "profile_record"),
+                    ),
+                    (
+                        "harness_thread_runtime_profiles",
+                        ("project_fingerprint", "thread_id", "profile_key"),
+                    ),
+                ]
+            )
+        if version >= 5:
+            required.append(
+                (
+                    "harness_thread_model_bindings",
+                    ("project_fingerprint", "thread_id", "binding_record"),
+                )
+            )
+        if version >= 6:
+            required.append(
+                (
+                    "harness_run_execution_bindings",
+                    (
+                        "project_fingerprint",
+                        "thread_id",
+                        "run_id",
+                        "requested_selection",
+                        "actual_primary_binding",
+                        "runtime_profile_id",
+                        "message_digest",
+                    ),
+                )
+            )
+        if version >= 7:
+            required.extend(
+                [
+                    (
+                        "harness_thread_transcript",
+                        (
+                            "project_fingerprint",
+                            "thread_id",
+                            "record_id",
+                            "sequence",
+                            "kind",
+                            "payload",
+                            "content_sha256",
+                            "byte_length",
+                        ),
+                    ),
+                    (
+                        "harness_thread_history_metadata",
+                        (
+                            "project_fingerprint",
+                            "thread_id",
+                            "legacy_incomplete_history",
+                            "source_schema_version",
+                        ),
+                    ),
+                ]
+            )
+        if version >= 8:
+            required.extend(
+                [
+                    (
+                        "harness_run_context_snapshots",
+                        (
+                            "project_fingerprint",
+                            "snapshot_id",
+                            "thread_id",
+                            "snapshot_record",
+                            "system_fingerprint",
+                            "legacy",
+                        ),
+                    ),
+                    (
+                        "harness_run_execution_bindings",
+                        ("context_snapshot_id",),
+                    ),
+                ]
+            )
+        if version >= 9:
+            required.append(
+                (
+                    "harness_compression_checkpoints",
+                    (
+                        "project_fingerprint",
+                        "thread_id",
+                        "checkpoint_id",
+                        "source_record_sequence",
+                        "source_digest",
+                        "mode",
+                        "projected_messages",
+                    ),
+                )
+            )
+        if version >= 10:
+            required.append(("harness_compression_checkpoints", ("commit_payload",)))
+        if version >= 11:
+            required.append(("harness_context_state", ("runtime_state",)))
+
+        for table_name, expected_columns in required:
+            actual_columns = await self._table_columns_async(table_name)
+            if not actual_columns or any(column not in actual_columns for column in expected_columns):
+                raise ThreadPersistenceError(
+                    f"CHECKPOINT_MIGRATION_SOURCE_SCHEMA_INVALID:{table_name}"
+                )
+        if await self._table_exists("harness_prompt_epochs"):
+            prompt_columns = await self._table_columns_async("harness_prompt_epochs")
+            if any(
+                column not in prompt_columns
+                for column in ("project_fingerprint", "thread_id", "system_prompt", "created_at_ms")
+            ):
+                raise ThreadPersistenceError(
+                    "CHECKPOINT_MIGRATION_SOURCE_SCHEMA_INVALID:harness_prompt_epochs"
+                )
+        required_indexes = []
+        if version >= 1:
+            required_indexes.append("harness_threads_project_updated")
+        if version >= 2:
+            required_indexes.append("harness_context_artifacts_thread_created")
+        if version >= 4:
+            required_indexes.append("harness_thread_runtime_profiles_project_profile")
+        if version >= 6:
+            required_indexes.append("harness_run_execution_bindings_thread_created")
+        if version >= 7:
+            required_indexes.append("harness_thread_transcript_thread_sequence")
+        if version >= 8:
+            required_indexes.append("harness_run_context_snapshots_thread_created")
+        if version >= 9:
+            required_indexes.append("harness_compression_checkpoints_latest")
+        for index_name in required_indexes:
+            cursor = await self._connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
+                (index_name,),
+            )
+            exists = await cursor.fetchone()
+            await cursor.close()
+            if exists is None:
+                raise ThreadPersistenceError(
+                    f"CHECKPOINT_MIGRATION_SOURCE_SCHEMA_INVALID:{index_name}"
+                )
+
+    async def _validate_final_database_async(
+        self,
+        fingerprint: _MigrationDatabaseFingerprint,
+    ) -> None:
+        """验证最终 schema、版本、完整性和一次性 legacy 表退出条件。"""
+        if (
+            fingerprint.user_version != _SCHEMA_VERSION
+            or fingerprint.integrity_check != "ok"
+        ):
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_FINAL_VALIDATION_FAILED")
+        await self._validate_required_schema_async(_SCHEMA_VERSION)
+        if await self._table_exists("harness_prompt_epochs"):
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_LEGACY_TABLE_REMAINS")
+
+    async def _validate_preserved_source_data_async(
+        self,
+        source: _MigrationDatabaseFingerprint,
+        backup_path: Path,
+    ) -> None:
+        """确认旧数据逐行保留；仅放行有明确 canonical 转换的表。"""
+        current_tables = {
+            table.name: table for table in await self._database_tables_async()
+        }
+        for source_table in source.tables:
+            if source_table.name == "harness_prompt_epochs":
+                await self._validate_prompt_epoch_rows_async(backup_path, source_table)
+                continue
+            if source_table.name == "harness_threads":
+                await self._validate_thread_rows_async(backup_path, source_table)
+                continue
+            if source_table.name in {
+                "harness_compression_checkpoints",
+                "harness_run_context_snapshots",
+                "harness_thread_transcript",
+                "harness_thread_history_metadata",
+            }:
+                await self._validate_append_only_table_async(backup_path, source_table)
+                continue
+            if source_table.name == "harness_run_execution_bindings":
+                await self._validate_binding_rows_async(backup_path, source_table)
+                continue
+            if source_table.name not in current_tables:
+                raise ThreadPersistenceError(
+                    f"CHECKPOINT_MIGRATION_DATA_TABLE_MISSING:{source_table.name}"
+                )
+            current_columns = current_tables[source_table.name].columns
+            if any(column not in current_columns for column in source_table.columns):
+                raise ThreadPersistenceError(
+                    f"CHECKPOINT_MIGRATION_DATA_COLUMNS_MISSING:{source_table.name}"
+                )
+            current = await self._table_digest_async(
+                source_table.name,
+                source_table.columns,
+            )
+            if (
+                current.row_count != source_table.row_count
+                or current.digest != source_table.digest
+            ):
+                raise ThreadPersistenceError(
+                    f"CHECKPOINT_MIGRATION_DATA_CHANGED:{source_table.name}"
+                )
+
+    async def _validate_prompt_epoch_rows_async(
+        self,
+        backup_path: Path,
+        source_table: _MigrationTableDigest,
+    ) -> None:
+        """逐行确认每个旧 PromptEpoch 只变成对应的 legacy snapshot。"""
+        source_rows = _migration_table_rows_sync(
+            backup_path,
+            source_table.name,
+            ("project_fingerprint", "thread_id", "system_prompt", "created_at_ms"),
+        )
+        for project, thread_id, system_prompt, created_at_ms in source_rows:
+            expected = snapshot_from_legacy_prompt_epoch(
+                project_fingerprint=str(project),
+                thread_id=str(thread_id),
+                system_prompt=str(system_prompt),
+                created_at_ms=int(created_at_ms),
+            )
+            cursor = await self._connection.execute(
+                """
+                SELECT snapshot_id, snapshot_record, system_fingerprint, created_at_ms
+                FROM harness_run_context_snapshots
+                WHERE project_fingerprint = ? AND thread_id = ? AND legacy = 1
+                """,
+                (str(project), str(thread_id)),
+            )
             row = await cursor.fetchone()
             await cursor.close()
-            await self._connection.rollback()
-            return int(row[0]) if row else 0
-        except BaseException:
+            if row is None:
+                raise ThreadPersistenceError("CHECKPOINT_MIGRATION_LEGACY_DATA_LOSS")
             try:
-                await self._connection.rollback()
-            except aiosqlite.Error:
-                pass
+                record = json.loads(str(row["snapshot_record"]))
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise ThreadPersistenceError(
+                    "CHECKPOINT_MIGRATION_LEGACY_DATA_INVALID"
+                ) from exc
+            if (
+                str(row["snapshot_id"]) != expected.snapshot_id
+                or str(row["system_fingerprint"]) != expected.system_fingerprint
+                or int(row["created_at_ms"]) != expected.created_at_ms
+                or record != expected.record()
+            ):
+                raise ThreadPersistenceError("CHECKPOINT_MIGRATION_LEGACY_DATA_CHANGED")
+
+    async def _validate_thread_rows_async(
+        self,
+        backup_path: Path,
+        source_table: _MigrationTableDigest,
+    ) -> None:
+        """校验 Thread 事实行；只允许索引摘要字段被 transcript 刷新。"""
+        source_rows = _migration_table_rows_sync(
+            backup_path,
+            source_table.name,
+            source_table.columns,
+        )
+        immutable_columns = (
+            "project_fingerprint",
+            "thread_id",
+            "created_at_ms",
+            "first_message",
+        )
+        indexes = {column: source_table.columns.index(column) for column in immutable_columns}
+        for source_row in source_rows:
+            cursor = await self._connection.execute(
+                """
+                SELECT project_fingerprint, thread_id, created_at_ms, first_message
+                FROM harness_threads
+                WHERE project_fingerprint = ? AND thread_id = ?
+                """,
+                (source_row[indexes["project_fingerprint"]], source_row[indexes["thread_id"]]),
+            )
+            current = await cursor.fetchone()
+            await cursor.close()
+            if current is None or tuple(current) != tuple(
+                source_row[indexes[column]] for column in immutable_columns
+            ):
+                raise ThreadPersistenceError("CHECKPOINT_MIGRATION_DATA_CHANGED:harness_threads")
+
+    async def _validate_append_only_table_async(
+        self,
+        backup_path: Path,
+        source_table: _MigrationTableDigest,
+    ) -> None:
+        """校验只会由 canonical bootstrap 追加记录的旧表，禁止改写/删除原行。"""
+        primary_keys = {
+            "harness_compression_checkpoints": (
+                "project_fingerprint",
+                "thread_id",
+                "checkpoint_id",
+            ),
+            "harness_run_context_snapshots": (
+                "project_fingerprint",
+                "snapshot_id",
+            ),
+            "harness_thread_transcript": (
+                "project_fingerprint",
+                "thread_id",
+                "record_id",
+            ),
+            "harness_thread_history_metadata": (
+                "project_fingerprint",
+                "thread_id",
+            ),
+        }
+        key_columns = primary_keys[source_table.name]
+        key_indexes = {column: source_table.columns.index(column) for column in key_columns}
+        select_columns = ", ".join(
+            _migration_identifier(column) for column in source_table.columns
+        )
+        source_rows = _migration_table_rows_sync(
+            backup_path,
+            source_table.name,
+            source_table.columns,
+        )
+        for source_row in source_rows:
+            cursor = await self._connection.execute(
+                f"SELECT {select_columns} FROM {_migration_identifier(source_table.name)} "
+                f"WHERE "
+                + " AND ".join(
+                    f"{_migration_identifier(column)} = ?" for column in key_columns
+                ),
+                tuple(source_row[key_indexes[column]] for column in key_columns),
+            )
+            current = await cursor.fetchone()
+            await cursor.close()
+            if current is None or tuple(current) != source_row:
+                raise ThreadPersistenceError(
+                    f"CHECKPOINT_MIGRATION_DATA_CHANGED:{source_table.name}"
+                )
+
+    async def _validate_binding_rows_async(
+        self,
+        backup_path: Path,
+        source_table: _MigrationTableDigest,
+    ) -> None:
+        """允许 adapter 只回填 binding 的 context_snapshot_id，其余字段逐行不变。"""
+        key_columns = ("project_fingerprint", "thread_id", "run_id")
+        ignored_columns = {"context_snapshot_id"}
+        key_indexes = {column: source_table.columns.index(column) for column in key_columns}
+        select_columns = ", ".join(
+            _migration_identifier(column) for column in source_table.columns
+        )
+        source_rows = _migration_table_rows_sync(
+            backup_path,
+            source_table.name,
+            source_table.columns,
+        )
+        for source_row in source_rows:
+            cursor = await self._connection.execute(
+                f"SELECT {select_columns} FROM {_migration_identifier(source_table.name)} "
+                "WHERE "
+                + " AND ".join(
+                    f"{_migration_identifier(column)} = ?" for column in key_columns
+                ),
+                tuple(source_row[key_indexes[column]] for column in key_columns),
+            )
+            current = await cursor.fetchone()
+            await cursor.close()
+            if current is None:
+                raise ThreadPersistenceError(
+                    "CHECKPOINT_MIGRATION_DATA_CHANGED:harness_run_execution_bindings"
+                )
+            for index, column in enumerate(source_table.columns):
+                if column not in ignored_columns and current[index] != source_row[index]:
+                    raise ThreadPersistenceError(
+                        "CHECKPOINT_MIGRATION_DATA_CHANGED:harness_run_execution_bindings"
+                    )
+
+    async def _database_tables_async(self) -> tuple[_MigrationTableDigest, ...]:
+        """读取当前数据库所有用户表的摘要，避免重复依赖完整 fingerprint。"""
+        cursor = await self._connection.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+            ORDER BY name
+            """
+        )
+        names = [str(row[0]) for row in await cursor.fetchall()]
+        await cursor.close()
+        digests: list[_MigrationTableDigest] = []
+        for name in names:
+            digests.append(await self._table_digest_async(name))
+        return tuple(digests)
+
+    def _migration_state_path(self) -> Path:
+        """返回当前数据库唯一 migration state 文件。"""
+        return self._path.with_name(self._path.name + _MIGRATION_STATE_SUFFIX)
+
+    def _migration_backup_path(self, source_version: int) -> Path:
+        """返回固定备份槽，避免每次启动无限累积 backup。"""
+        return self._path.with_name(
+            f"{self._path.name}.pre-v{source_version}-migration.bak"
+        )
+
+    async def _create_migration_backup(
+        self,
+        source_version: int,
+        source_fingerprint: _MigrationDatabaseFingerprint | None = None,
+    ) -> Path:
+        """在已持有 BEGIN IMMEDIATE 时生成并严格验证独立 SQLite backup。"""
+        _migration_child_test_failure(
+            "backup_failure",
+            ThreadPersistenceError("CHECKPOINT_MIGRATION_BACKUP_FAILED"),
+        )
+        if not self._connection.in_transaction:
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_BOUNDARY_REQUIRED")
+        source = source_fingerprint or await self._database_fingerprint_async()
+        backup_path = self._migration_backup_path(source_version)
+        temporary = backup_path.with_name(
+            f"{backup_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+        )
+        source_connection: sqlite3.Connection | None = None
+        target: sqlite3.Connection | None = None
+        try:
+            # Python sqlite3 cannot run backup from the same connection that
+            # currently owns BEGIN IMMEDIATE: SQLite waits on its own write
+            # transaction.  A second read connection observes the same
+            # committed snapshot while that transaction prevents all writers;
+            # both raw connections stay on this event-loop thread.
+            source_connection = sqlite3.connect(self._path, timeout=5.0)
+            target = sqlite3.connect(temporary)
+            source_connection.backup(target)
+            target.commit()
+            target.close()
+            target = None
+            if any(
+                temporary.with_name(temporary.name + suffix).exists()
+                for suffix in ("-wal", "-shm", "-journal")
+            ):
+                raise ThreadPersistenceError(
+                    "CHECKPOINT_MIGRATION_BACKUP_NOT_STANDALONE"
+                )
+            backup_connection = sqlite3.connect(temporary)
+            try:
+                backup = _migration_database_fingerprint_sync(backup_connection)
+            finally:
+                backup_connection.close()
+            if source.user_version != source_version or not _migration_fingerprint_matches(
+                source, backup
+            ):
+                raise ThreadPersistenceError(
+                    "CHECKPOINT_MIGRATION_BACKUP_VALIDATION_FAILED"
+                )
+            os.chmod(temporary, 0o600)
+            temporary_descriptor = os.open(temporary, os.O_RDONLY)
+            try:
+                os.fsync(temporary_descriptor)
+            finally:
+                os.close(temporary_descriptor)
+            os.replace(temporary, backup_path)
+            directory = os.open(backup_path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+            return backup_path
+        except ThreadPersistenceError:
             raise
+        except (OSError, sqlite3.Error, aiosqlite.Error) as exc:
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_BACKUP_FAILED") from exc
+        finally:
+            if source_connection is not None:
+                source_connection.close()
+            if target is not None:
+                target.close()
+            temporary.unlink(missing_ok=True)
+
+    async def _write_migration_state(
+        self,
+        *,
+        status: str,
+        source_fingerprint: _MigrationDatabaseFingerprint,
+        backup_path: Path,
+        final_fingerprint: _MigrationDatabaseFingerprint | None = None,
+    ) -> None:
+        """原子写入迁移状态；状态写失败时禁止继续启动或迁移。"""
+        if status == "committed" and _MIGRATION_CHILD_TEST_PHASE == "state_committed_failure":
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_STATE_WRITE_FAILED")
+        payload: dict[str, object] = {
+            "version": _MIGRATION_STATE_VERSION,
+            "status": status,
+            "database": self._path.name,
+            "backup": backup_path.name,
+            "source": source_fingerprint.record(),
+        }
+        if final_fingerprint is not None:
+            payload["final"] = final_fingerprint.record()
+        try:
+            self._write_migration_state_sync(payload)
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_STATE_WRITE_FAILED") from exc
+
+    def _write_migration_state_sync(self, payload: Mapping[str, object]) -> None:
+        """以 fsync + 同目录 replace 持久化状态，避免半个 JSON。"""
+        state_path = self._migration_state_path()
+        temporary: Path | None = None
+        try:
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{state_path.name}.",
+                suffix=".tmp",
+                dir=state_path.parent,
+            )
+            temporary = Path(temporary_name)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                os.fchmod(handle.fileno(), 0o600)
+                json.dump(payload, handle, ensure_ascii=False, sort_keys=True, allow_nan=False)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, state_path)
+            temporary = None
+            directory = os.open(state_path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
+    async def _clear_migration_state(self) -> None:
+        """删除已封口 state；删除失败保持 fail closed，下一次可重试。"""
+        _migration_child_test_failure(
+            "state_clear_failure",
+            ThreadPersistenceError("CHECKPOINT_MIGRATION_STATE_CLEAR_FAILED"),
+        )
+        try:
+            self._unlink_migration_state_sync()
+        except OSError as exc:
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_STATE_CLEAR_FAILED") from exc
+
+    def _unlink_migration_state_sync(self) -> None:
+        """删除迁移状态并同步目录，避免已完成状态跨重启复活。"""
+        state_path = self._migration_state_path()
+        state_path.unlink(missing_ok=True)
+        directory = os.open(state_path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+    def _mark_migration_restore_failed(self, error: BaseException) -> None:
+        """保留 backup 并记录稳定错误类型，供下一次启动确定性重试。"""
+        state_path = self._migration_state_path()
+        try:
+            raw = json.loads(state_path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                return
+            raw["status"] = "restore_failed"
+            raw["error"] = "CHECKPOINT_MIGRATION_RESTORE_FAILED"
+            raw["error_type"] = type(error).__name__
+            self._write_migration_state_sync(raw)
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            return
+
+    async def _restore_migration_backup_async(
+        self,
+        backup_path: Path,
+        expected: _MigrationDatabaseFingerprint,
+    ) -> None:
+        """关闭旧连接后原子替换完整快照，不让旧 WAL/SHM 继续挂到目标上。"""
+        self._validate_backup_file_sync(backup_path, expected)
+        await self._connection.rollback()
+        await self._connection.close()
+        self._closed = True
+        self._restore_backup_path_sync(self._path, backup_path, expected)
+
+    def _validate_backup_file_sync(
+        self,
+        backup_path: Path,
+        expected: _MigrationDatabaseFingerprint,
+    ) -> None:
+        """验证固定 backup 槽仍是可独立恢复的原始快照。"""
+        if not backup_path.is_file():
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_BACKUP_UNAVAILABLE")
+        if any(
+            backup_path.with_name(backup_path.name + suffix).exists()
+            for suffix in ("-wal", "-shm", "-journal")
+        ):
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_BACKUP_NOT_STANDALONE")
+        connection = sqlite3.connect(backup_path)
+        try:
+            actual = _migration_database_fingerprint_sync(connection)
+            if 1 <= expected.user_version <= 6:
+                _migration_validate_v6_source_schema_sync(
+                    connection,
+                    expected.user_version,
+                )
+        finally:
+            connection.close()
+        if not _migration_fingerprint_matches(expected, actual):
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_BACKUP_VALIDATION_FAILED")
+
+    @staticmethod
+    def _validate_final_database_path_sync(
+        path: Path,
+        expected: _MigrationDatabaseFingerprint,
+    ) -> None:
+        """验证提交标记对应的最终库，不以 user_version 单独认定成功。"""
+        if expected.user_version != _SCHEMA_VERSION or expected.integrity_check != "ok":
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_FINAL_VALIDATION_FAILED")
+        connection = sqlite3.connect(path)
+        try:
+            actual = _migration_database_fingerprint_sync(connection)
+            if not _migration_fingerprint_matches(expected, actual):
+                raise ThreadPersistenceError("CHECKPOINT_MIGRATION_FINAL_VALIDATION_FAILED")
+            _migration_validate_final_schema_sync(connection)
+            legacy = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='harness_prompt_epochs'"
+            ).fetchone()
+            if legacy is not None:
+                raise ThreadPersistenceError("CHECKPOINT_MIGRATION_LEGACY_TABLE_REMAINS")
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _validate_source_database_path_sync(
+        path: Path,
+        expected: _MigrationDatabaseFingerprint,
+    ) -> None:
+        """验证可重试的当前 v6 主库仍满足 source contract。"""
+        connection = sqlite3.connect(path)
+        try:
+            actual = _migration_database_fingerprint_sync(connection)
+            if not _migration_fingerprint_matches(expected, actual):
+                raise ThreadPersistenceError("CHECKPOINT_MIGRATION_SOURCE_CHANGED")
+            if 1 <= expected.user_version <= 6:
+                _migration_validate_v6_source_schema_sync(
+                    connection,
+                    expected.user_version,
+                )
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _recover_interrupted_migration_sync(
+        path: Path,
+        *,
+        preserve_recovery_state: bool = False,
+    ) -> None:
+        """启动前处理上次崩溃留下的 migration state；失败则不创建正常连接。"""
+        _assert_migration_path_available(path)
+        state_path = path.with_name(path.name + _MIGRATION_STATE_SUFFIX)
+        if not state_path.exists():
+            return
+        try:
+            raw = json.loads(state_path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict) or raw.get("version") != _MIGRATION_STATE_VERSION:
+                raise ValueError("migration state version is invalid")
+            if raw.get("database") != path.name:
+                raise ValueError("migration state database is invalid")
+            status = raw.get("status")
+            if status not in {
+                "migrating",
+                "committing",
+                "commit_unknown",
+                "committed",
+                "restore_failed",
+            }:
+                raise ValueError("migration state status is invalid")
+            source = _migration_fingerprint_from_record(raw.get("source"))
+            expected_backup = path.with_name(
+                f"{path.name}.pre-v{source.user_version}-migration.bak"
+            )
+            if raw.get("backup") != expected_backup.name:
+                raise ValueError("migration state backup is invalid")
+            backup_path = expected_backup
+            final_value = raw.get("final")
+            final = (
+                _migration_fingerprint_from_record(final_value)
+                if final_value is not None
+                else None
+            )
+            if status in {"committing", "commit_unknown", "committed"} and final is None:
+                raise ValueError("committed migration state has no final fingerprint")
+
+            current: _MigrationDatabaseFingerprint | None = None
+            if path.is_file():
+                try:
+                    current_connection = sqlite3.connect(path)
+                    try:
+                        current = _migration_database_fingerprint_sync(current_connection)
+                    finally:
+                        current_connection.close()
+                except (OSError, sqlite3.Error):
+                    current = None
+
+            # 第一优先级是证明主库已经提交。此分支不要求 backup 仍存在：
+            # backup 清理可以在 state 清理前后失败，但绝不能把完整新库回滚。
+            if (
+                final is not None
+                and current is not None
+                and _migration_fingerprint_matches(final, current)
+            ):
+                ThreadPersistence._validate_final_database_path_sync(path, final)
+                ThreadPersistence._unlink_migration_state_path_sync(state_path)
+                return
+
+            # 主库仍是严格 source，说明 DB commit 尚未落地或事务已安全回滚；
+            # 清除过期 state 后让 canonical open 重新生成一次 verified backup。
+            if current is not None and _migration_fingerprint_matches(source, current):
+                ThreadPersistence._validate_backup_path_sync(backup_path, source)
+                ThreadPersistence._validate_source_database_path_sync(path, source)
+                # restore_failed is itself diagnostic durable state.  Keep it
+                # until the next canonical child attempt overwrites it; a
+                # verified exact source is safe to retry but must not erase
+                # evidence that restore failed in the prior owner.
+                if not preserve_recovery_state and status != "restore_failed":
+                    ThreadPersistence._unlink_migration_state_path_sync(state_path)
+                return
+
+            # 只有主库既不是已证明最终库、也不是完整源库时，才验证并恢复
+            # verified backup。半迁移/损坏库不能被 sidecar status 单独决定。
+            ThreadPersistence._validate_backup_path_sync(backup_path, source)
+            ThreadPersistence._restore_backup_path_sync(path, backup_path, source)
+            if not preserve_recovery_state:
+                ThreadPersistence._unlink_migration_state_path_sync(state_path)
+        except ThreadPersistenceError as exc:
+            ThreadPersistence._mark_restore_state_sync(state_path, exc)
+            raise
+        except (OSError, TypeError, ValueError, json.JSONDecodeError, sqlite3.Error) as exc:
+            ThreadPersistence._mark_restore_state_sync(
+                state_path,
+                ThreadPersistenceError("CHECKPOINT_MIGRATION_STATE_INVALID"),
+            )
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_STATE_INVALID") from exc
+
+    @staticmethod
+    def _validate_backup_path_sync(
+        backup_path: Path,
+        expected: _MigrationDatabaseFingerprint,
+    ) -> None:
+        """无实例状态地验证启动恢复使用的 backup。"""
+        if not backup_path.is_file():
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_BACKUP_UNAVAILABLE")
+        if any(
+            backup_path.with_name(backup_path.name + suffix).exists()
+            for suffix in ("-wal", "-shm", "-journal")
+        ):
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_BACKUP_NOT_STANDALONE")
+        connection = sqlite3.connect(backup_path)
+        try:
+            actual = _migration_database_fingerprint_sync(connection)
+            if 1 <= expected.user_version <= 6:
+                _migration_validate_v6_source_schema_sync(
+                    connection,
+                    expected.user_version,
+                )
+        finally:
+            connection.close()
+        if not _migration_fingerprint_matches(expected, actual):
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_BACKUP_VALIDATION_FAILED")
+
+    @staticmethod
+    def _restore_backup_path_sync(
+        path: Path,
+        backup_path: Path,
+        expected: _MigrationDatabaseFingerprint,
+    ) -> None:
+        """把 backup 恢复到新文件并原子替换，清除旧目标的所有 journal sidecar。"""
+        _migration_child_test_failure(
+            "restore_failure",
+            ThreadPersistenceError("CHECKPOINT_MIGRATION_RESTORE_VALIDATION_FAILED"),
+        )
+        ThreadPersistence._validate_backup_path_sync(backup_path, expected)
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.restore.tmp")
+        source = sqlite3.connect(backup_path)
+        target: sqlite3.Connection | None = None
+        try:
+            target = sqlite3.connect(temporary)
+            source.backup(target)
+            target.commit()
+            target.close()
+            target = None
+            for suffix in ("-wal", "-shm", "-journal"):
+                if temporary.with_name(temporary.name + suffix).exists():
+                    raise ThreadPersistenceError(
+                        "CHECKPOINT_MIGRATION_RESTORE_NOT_STANDALONE"
+                    )
+            restored = sqlite3.connect(temporary)
+            try:
+                actual = _migration_database_fingerprint_sync(restored)
+            finally:
+                restored.close()
+            if not _migration_fingerprint_matches(expected, actual):
+                raise ThreadPersistenceError(
+                    "CHECKPOINT_MIGRATION_RESTORE_VALIDATION_FAILED"
+                )
+            os.chmod(temporary, 0o600)
+            temporary_descriptor = os.open(temporary, os.O_RDONLY)
+            try:
+                os.fsync(temporary_descriptor)
+            finally:
+                os.close(temporary_descriptor)
+            # The old target connection has been closed, so these exact sidecars
+            # cannot receive any more frames.  Never leave them beside the new
+            # inode, where a subsequent opener could mistake them for its WAL.
+            for suffix in ("-wal", "-shm", "-journal"):
+                path.with_name(path.name + suffix).unlink(missing_ok=True)
+            os.replace(temporary, path)
+            directory = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        except ThreadPersistenceError:
+            raise
+        except (OSError, sqlite3.Error) as exc:
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_RESTORE_FAILED") from exc
+        finally:
+            source.close()
+            if target is not None:
+                target.close()
+            temporary.unlink(missing_ok=True)
+
+    @staticmethod
+    def _mark_restore_state_sync(state_path: Path, error: BaseException) -> None:
+        """恢复失败只更新稳定错误码，绝不删除已验证 backup。"""
+        try:
+            raw = json.loads(state_path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                return
+            raw["status"] = "restore_failed"
+            raw["error"] = (
+                str(error)
+                if isinstance(error, ThreadPersistenceError)
+                and str(error).startswith("CHECKPOINT_MIGRATION_")
+                else "CHECKPOINT_MIGRATION_RESTORE_FAILED"
+            )
+            raw["error_type"] = type(error).__name__
+            directory = state_path.parent
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{state_path.name}.", suffix=".tmp", dir=directory
+            )
+            temporary = Path(temporary_name)
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    os.fchmod(handle.fileno(), 0o600)
+                    json.dump(raw, handle, ensure_ascii=False, sort_keys=True, allow_nan=False)
+                    handle.write("\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, state_path)
+                directory_descriptor = os.open(directory, os.O_RDONLY)
+                try:
+                    os.fsync(directory_descriptor)
+                finally:
+                    os.close(directory_descriptor)
+            finally:
+                temporary.unlink(missing_ok=True)
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            pass
+
+    @staticmethod
+    def _unlink_migration_state_path_sync(state_path: Path) -> None:
+        """恢复流程使用的无实例 state 删除操作，并同步目录元数据。"""
+        state_path.unlink(missing_ok=True)
+        directory = os.open(state_path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
 
     async def _migrate_legacy_prompt_epochs_to_snapshots(self) -> None:
         """把旧 PromptEpoch 单向转换为 legacy snapshot，并回填旧 Run 引用。"""
+        # Some v6 fixtures legitimately never had the optional PromptEpoch
+        # table.  Their history must remain explicitly incomplete, not fail
+        # migration merely because there is no legacy context to convert.
+        if not await self._table_exists("harness_prompt_epochs"):
+            return
         cursor = await self._connection.execute(
             """
             SELECT project_fingerprint, thread_id, system_prompt, created_at_ms
@@ -2548,6 +4810,22 @@ class ThreadPersistence:
                 (snapshot.snapshot_id, project, thread_id),
             )
 
+    async def _finalize_legacy_prompt_epoch_adapter(self) -> None:
+        """删除已转换的 PromptEpoch 表；legacy 兼容只存在于迁移事务内。"""
+        if not await self._table_exists("harness_prompt_epochs"):
+            return
+        await self._connection.execute("DROP TABLE harness_prompt_epochs")
+
+    async def _table_exists(self, table_name: str) -> bool:
+        """读取 Harness schema 是否仍包含一次性迁移表。"""
+        cursor = await self._connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table_name,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return row is not None
+
     async def _create_checkpointer_tables_in_transaction(self) -> None:
         """在 Harness migration 事务内建立 LangGraph 的基础表，避免 setup 自行 commit。"""
         await self._connection.execute(
@@ -2579,31 +4857,6 @@ class ThreadPersistence:
             )
             """
         )
-
-    async def _create_migration_backup(self, source_version: int) -> Path | None:
-        """在候选版本仍可能升级时创建唯一临时 SQLite 备份。"""
-        backup_path = self._path.with_name(
-            f"{self._path.name}.pre-v{source_version}-migration.bak"
-        )
-        temporary = backup_path.with_name(
-            f"{backup_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
-        )
-        try:
-            target = sqlite3.connect(temporary)
-            try:
-                await self._connection.backup(target)
-                target.commit()
-                row = target.execute("PRAGMA user_version").fetchone()
-                backup_version = int(row[0]) if row else 0
-            finally:
-                target.close()
-            if backup_version != source_version:
-                return None
-            os.replace(temporary, backup_path)
-            os.chmod(backup_path, 0o600)
-            return backup_path
-        finally:
-            temporary.unlink(missing_ok=True)
 
     async def _add_artifact_metadata_columns(self) -> None:
         """为已有 Context Artifact 补齐可验证的摘要和字节长度列。"""
@@ -2778,6 +5031,8 @@ class ThreadPersistence:
             )
     async def _bootstrap_legacy_transcripts(self, source_version: int) -> None:
         """从所有 project 的现存 checkpoint 建立明确不完整的 legacy 起点。"""
+        if _MIGRATION_CHILD_TEST_PHASE in {"bootstrap_failure", "restore_failure"}:
+            raise ValueError("injected legacy bootstrap failure")
         cursor = await self._connection.execute(
             """
             SELECT project_fingerprint, thread_id
@@ -3548,4 +5803,420 @@ def _message_content(value: Any) -> str:
                 if isinstance(text, str):
                     parts.append(text)
         return "".join(parts)
-    return "" if value is None else str(value)
+    # 不支持的 legacy 对象不是可证明的文本事实；不要通过 str() 把它
+    # 伪造成合法 Transcript，周围历史仍由 legacy_incomplete 标记说明边界。
+    return ""
+
+
+def _inspect_migration_source_sync(path: Path) -> tuple[int, bool]:
+    """只读探测迁移入口；schema/data mutation 仍全部留在 child。"""
+    if not path.is_file():
+        return 0, False
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(path)
+        version_row = connection.execute("PRAGMA user_version").fetchone()
+        source_version = int(version_row[0]) if version_row else 0
+        prompt_row = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='harness_prompt_epochs'"
+        ).fetchone()
+        has_prompt = prompt_row is not None
+        if 1 <= source_version <= 6:
+            _migration_validate_v6_source_schema_sync(connection, source_version)
+        return source_version, has_prompt
+    except ThreadPersistenceError:
+        raise
+    except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
+        raise ThreadPersistenceError("CHECKPOINT_DATABASE_CORRUPT") from exc
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def _migration_validate_final_schema_sync(connection: sqlite3.Connection) -> None:
+    """父进程独立确认最终 schema 契约，不把 fingerprint 自比当作证明。"""
+    required: dict[str, tuple[str, ...]] = {
+        "harness_threads": (
+            "project_fingerprint",
+            "thread_id",
+            "created_at_ms",
+            "updated_at_ms",
+            "first_message",
+            "latest_message",
+            "message_count",
+        ),
+        "checkpoints": (
+            "thread_id",
+            "checkpoint_ns",
+            "checkpoint_id",
+            "parent_checkpoint_id",
+            "type",
+            "checkpoint",
+            "metadata",
+        ),
+        "writes": (
+            "thread_id",
+            "checkpoint_ns",
+            "checkpoint_id",
+            "task_id",
+            "idx",
+            "channel",
+            "type",
+            "value",
+        ),
+        "harness_context_artifacts": (
+            "project_fingerprint",
+            "thread_id",
+            "artifact_id",
+            "kind",
+            "content",
+            "source_start",
+            "source_end",
+            "created_at_ms",
+            "content_sha256",
+            "byte_length",
+        ),
+        "harness_context_summaries": (
+            "project_fingerprint",
+            "thread_id",
+            "summary_id",
+            "rewrite_version",
+            "content",
+            "source_start",
+            "source_end",
+            "artifact_ids",
+            "created_at_ms",
+        ),
+        "harness_context_state": (
+            "project_fingerprint",
+            "thread_id",
+            "failures",
+            "circuit_open",
+            "last_action",
+            "updated_at_ms",
+            "runtime_state",
+        ),
+        "harness_runtime_profiles": (
+            "project_fingerprint",
+            "profile_key",
+            "profile_version",
+            "topology_id",
+            "topology_version",
+            "profile_record",
+            "created_at_ms",
+        ),
+        "harness_thread_runtime_profiles": (
+            "project_fingerprint",
+            "thread_id",
+            "profile_key",
+            "profile_version",
+            "bound_at_ms",
+        ),
+        "harness_thread_model_bindings": (
+            "project_fingerprint",
+            "thread_id",
+            "binding_record",
+            "bound_at_ms",
+        ),
+        "harness_run_execution_bindings": (
+            "project_fingerprint",
+            "thread_id",
+            "run_id",
+            "requested_selection",
+            "actual_primary_binding",
+            "runtime_profile_id",
+            "message_digest",
+            "created_at_ms",
+            "context_snapshot_id",
+        ),
+        "harness_thread_transcript": (
+            "project_fingerprint",
+            "thread_id",
+            "record_id",
+            "run_id",
+            "execution_id",
+            "sequence",
+            "kind",
+            "payload",
+            "content_sha256",
+            "byte_length",
+            "artifact_id",
+            "created_at_ms",
+        ),
+        "harness_thread_history_metadata": (
+            "project_fingerprint",
+            "thread_id",
+            "legacy_incomplete_history",
+            "source_schema_version",
+            "migrated_at_ms",
+        ),
+        "harness_run_context_snapshots": (
+            "project_fingerprint",
+            "snapshot_id",
+            "thread_id",
+            "snapshot_record",
+            "system_fingerprint",
+            "created_at_ms",
+            "legacy",
+        ),
+        "harness_compression_checkpoints": (
+            "project_fingerprint",
+            "thread_id",
+            "checkpoint_id",
+            "source_record_sequence",
+            "source_digest",
+            "mode",
+            "rewrite_version",
+            "projected_messages",
+            "artifact_ids",
+            "trigger",
+            "pressure_before",
+            "pressure_after",
+            "created_at_ms",
+            "legacy_incomplete",
+            "commit_payload",
+        ),
+    }
+    for table_name, expected_columns in required.items():
+        rows = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchall()
+        if not rows:
+            raise ThreadPersistenceError(
+                f"CHECKPOINT_MIGRATION_FINAL_SCHEMA_INVALID:{table_name}"
+            )
+        actual_columns = tuple(
+            str(row[1])
+            for row in connection.execute(
+                f"PRAGMA table_xinfo({_migration_identifier(table_name)})"
+            ).fetchall()
+            if int(row[6]) == 0
+        )
+        valid_columns = (
+            actual_columns == expected_columns
+            or (
+                table_name == "harness_context_state"
+                and actual_columns
+                == (
+                    "project_fingerprint",
+                    "thread_id",
+                    "failures",
+                    "circuit_open",
+                    "last_action",
+                    "runtime_state",
+                    "updated_at_ms",
+                )
+            )
+        )
+        if not valid_columns:
+            raise ThreadPersistenceError(
+                f"CHECKPOINT_MIGRATION_FINAL_SCHEMA_INVALID:{table_name}"
+            )
+    required_indexes = (
+        "harness_threads_project_updated",
+        "harness_context_artifacts_thread_created",
+        "harness_thread_runtime_profiles_project_profile",
+        "harness_run_execution_bindings_thread_created",
+        "harness_thread_transcript_thread_sequence",
+        "harness_run_context_snapshots_thread_created",
+        "harness_compression_checkpoints_latest",
+    )
+    for index_name in required_indexes:
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?",
+            (index_name,),
+        ).fetchone() is None:
+            raise ThreadPersistenceError(
+                f"CHECKPOINT_MIGRATION_FINAL_SCHEMA_INVALID:{index_name}"
+            )
+
+
+def _legacy_migration_child_environment() -> dict[str, str]:
+    """为 migration child 提供最小非秘密环境，避免继承 Host 运行上下文。"""
+    package_root = str(Path(__file__).resolve().parents[1])
+    environment = {
+        "PATH": os.environ.get("PATH", ""),
+        "PYTHONPATH": package_root,
+    }
+    test_phase = _requested_migration_test_phase()
+    if test_phase is not None:
+        environment["HARNESS_TEST_MIGRATION_CHILD_PHASE"] = test_phase
+    return environment
+
+
+async def _wait_migration_child(process: subprocess.Popen[bytes], deadline: float) -> bool:
+    """轮询 child，避免在父事件循环中引入不可控等待线程。"""
+    loop = asyncio.get_running_loop()
+    while process.poll() is None:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return False
+        await asyncio.sleep(min(0.01, remaining))
+    return True
+
+
+async def _terminate_and_reap_migration_child(
+    process: subprocess.Popen[bytes],
+) -> None:
+    """先 terminate，再在固定上限内 kill，并确认没有遗留 child。"""
+    if process.poll() is not None:
+        return
+    try:
+        process.terminate()
+    except ProcessLookupError:
+        return
+    loop = asyncio.get_running_loop()
+    if await _wait_migration_child(
+        process,
+        loop.time() + _LEGACY_MIGRATION_CHILD_TERMINATE_GRACE_SECONDS,
+    ):
+        return
+    try:
+        process.kill()
+    except ProcessLookupError:
+        return
+    if not await _wait_migration_child(
+        process,
+        loop.time() + _LEGACY_MIGRATION_CHILD_TERMINATE_GRACE_SECONDS,
+    ):
+        raise ThreadPersistenceError("CHECKPOINT_MIGRATION_WORKER_REAP_FAILED")
+
+
+async def _run_legacy_migration_child_once(
+    path: Path,
+    project_fingerprint: str,
+) -> tuple[bool, bool, str | None]:
+    """运行一次可杀死的 child；返回 (正常退出, 是否超时, typed error)。"""
+    command = [
+        sys.executable,
+        "-m",
+        "harness_agent.migration_worker",
+        "--database",
+        str(path.resolve()),
+        "--project-fingerprint",
+        project_fingerprint,
+    ]
+    test_phase = _requested_migration_test_phase()
+    if test_phase is not None:
+        command.extend(("--test-phase", test_phase))
+    try:
+        process = subprocess.Popen(
+            command,
+            close_fds=True,
+            env=_legacy_migration_child_environment(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        raise ThreadPersistenceError(
+            "CHECKPOINT_MIGRATION_WORKER_START_FAILED"
+        ) from exc
+    try:
+        completed = await _wait_migration_child(
+            process,
+            asyncio.get_running_loop().time() + _LEGACY_MIGRATION_CHILD_DEADLINE_SECONDS,
+        )
+        if not completed:
+            await _terminate_and_reap_migration_child(process)
+            return False, True, None
+        output = process.stdout.read(512) if process.stdout is not None else b""
+        error_code = output.decode("utf-8", errors="replace").splitlines()
+        return (
+            process.returncode == 0,
+            False,
+            error_code[0] if error_code and error_code[0].startswith("CHECKPOINT_") else None,
+        )
+    except BaseException:
+        cleanup = asyncio.create_task(_terminate_and_reap_migration_child(process))
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            try:
+                await asyncio.shield(cleanup)
+            except BaseException:
+                pass
+            raise
+        raise
+    finally:
+        if process.stdout is not None:
+            process.stdout.close()
+
+
+async def _run_legacy_migration_child(
+    path: Path,
+    project_fingerprint: str,
+) -> None:
+    """在父持有 migration lock 时运行并严格收敛一次 legacy migration。"""
+    _child_succeeded, timed_out, child_error_code = await _run_legacy_migration_child_once(
+        path,
+        project_fingerprint,
+    )
+    try:
+        # Exit code is only a prompt to inspect facts; it never chooses
+        # restore/retry by itself.  This call runs after the child is fully
+        # reaped, so no late SQLite worker can race the recovery replacement.
+        ThreadPersistence._recover_interrupted_migration_sync(
+            path,
+            preserve_recovery_state=timed_out,
+        )
+        source_version, has_prompt = _inspect_migration_source_sync(path)
+        if source_version == _SCHEMA_VERSION and not has_prompt:
+            connection = sqlite3.connect(path)
+            try:
+                expected = _migration_database_fingerprint_sync(connection)
+            finally:
+                connection.close()
+            ThreadPersistence._validate_final_database_path_sync(path, expected)
+            _clear_migration_poison(path)
+            return
+    except BaseException:
+        if timed_out:
+            # Publish before returning to open's finally block, which releases
+            # the file lock.  Any waiter that passed the precheck must reject
+            # again after acquiring that same lock.
+            _publish_migration_poison(path)
+        raise
+
+    if timed_out:
+        _publish_migration_poison(path)
+        raise ThreadPersistenceError("CHECKPOINT_MIGRATION_WORKER_TIMEOUT")
+    raise ThreadPersistenceError(
+        child_error_code or "CHECKPOINT_MIGRATION_WORKER_FAILED"
+    )
+
+
+async def run_legacy_migration_child(
+    path: Path,
+    project_fingerprint: str,
+    test_phase: str | None = None,
+) -> None:
+    """migration_worker 入口；整个 legacy 事务只存在于 child 进程。"""
+    global _MIGRATION_CHILD_PROCESS_MODE, _MIGRATION_CHILD_TEST_PHASE
+    _MIGRATION_CHILD_PROCESS_MODE = True
+    _MIGRATION_CHILD_TEST_PHASE = test_phase
+    connection = await aiosqlite.connect(path)
+    connection.row_factory = aiosqlite.Row
+    operation_lock = asyncio.Lock()
+    checkpointer = ProjectScopedAsyncSqliteSaver(
+        connection,
+        project_fingerprint,
+        operation_lock=operation_lock,
+    )
+    persistence = ThreadPersistence(
+        connection=connection,
+        checkpointer=checkpointer,
+        path=path,
+        project_fingerprint=project_fingerprint,
+        operation_lock=operation_lock,
+    )
+    try:
+        await persistence._prepare()
+        await _migration_child_pause_if_requested("after_commit_before_reply")
+    finally:
+        if (
+            path not in _MIGRATION_CHILD_POISONED_PATHS
+            and not persistence._closed
+        ):
+            await connection.close()

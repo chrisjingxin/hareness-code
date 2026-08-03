@@ -19,6 +19,30 @@ async def _store(tmp_path):
     return await ThreadPersistence.open(project=project, home=tmp_path / "home")
 
 
+def test_context_updated_payload_redacts_unstable_diagnostics_and_internal_ids():
+    """诊断只允许安全短码，不把路径、提示词或内部标识送到 TUI。"""
+    from harness_agent.context_window import ContextUpdate
+
+    payload = ContextUpdate(
+        thread_id="thread",
+        action="/Users/test/project prompt=secret",
+        estimated_tokens=10,
+        input_cap_tokens=20,
+        context_window_tokens=30,
+        dynamic_tokens=10,
+        cache_status="/tmp/cache",
+        miss_reason="ValueError:/private/secret/prompt.txt",
+        artifact_ids=("/private/checkpoint-123", "history-safe"),
+    ).payload()
+
+    assert payload["action"] == "context_unknown"
+    assert payload["cache_status"] == "unknown"
+    assert payload["miss_reason"] == "diagnostic_unavailable"
+    assert payload["artifact_ids"] == ["artifact_redacted", "history-safe"]
+    assert "/private" not in str(payload)
+    assert "secret" not in str(payload)
+
+
 async def test_context_window_reports_and_soft_dehydrates_old_tool_results(tmp_path):
     """50% 只报告；60% 将旧工具结果归档为可恢复虚拟文件并保留最近两轮。"""
     from harness_agent.threads.context_window import ContextWindowMiddleware

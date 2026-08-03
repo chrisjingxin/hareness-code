@@ -861,12 +861,14 @@ class AgentHost:
             resolved = await self._resolve_execution_binding(
                 command.thread_id,
                 self._config,
+                persistence=persistence,
                 requested_primary_profile=command.requested_primary_profile,
             )
             spec = await self._resolve_agent_engine_spec(
                 command.thread_id,
                 self._config,
                 resolved,
+                persistence=persistence,
                 skill_registry=registry,
             )
             profile = spec.runtime_profile
@@ -938,11 +940,12 @@ class AgentHost:
             from harness_agent.context_projection import ContextProjector
 
             try:
-                await ContextProjector(persistence).sync_cache(
-                    agent,
+                projector = ContextProjector(persistence)
+                projection = await projector.project(
                     run.thread_id,
                     exclude_record_id=f"run:{run.run_id}:user",
                 )
+                await projector.sync_cache(agent, run.thread_id, projection=projection)
             except BaseException:
                 # Runtime 尚未返回 Coordinator，失败路径必须在此释放
                 # 已取得的 AgentEngine/run lease，避免投影损坏变成资源泄漏。
@@ -1485,6 +1488,7 @@ class AgentHost:
     async def _acquire_default_agent_engine_for_run(self, run: RunState) -> Any | None:
         """为一个生产 run 获取共享 AgentEngine，并将 thread 私有状态写入 RunContext。"""
         reservation = run.preparation.snapshot_reservation
+        lease: AgentEngineLease | None = None
         try:
             lease, engine = await self._acquire_default_agent_engine(
                 run.thread_id,
@@ -1492,12 +1496,8 @@ class AgentHost:
                 profile=run.resolved_agent_engine_profile,
                 snapshot_reservation=reservation,
             )
-        finally:
-            if reservation is not None:
-                await reservation.release()
-        if engine is None:
-            return None
-        try:
+            if engine is None:
+                return None
             artifacts = self._agent_engine_artifacts.get(engine.profile_key)
             spec = self._resolved_agent_specs.get(engine.profile_key)
             if artifacts is None or spec is None or engine.graph is None:
@@ -1513,8 +1513,12 @@ class AgentHost:
             run.agent_engine_profile_key = engine.profile_key
             return engine.graph
         except Exception:
-            await self._release_agent_engine_lease(lease)
+            if lease is not None:
+                await self._release_agent_engine_lease(lease)
             raise
+        finally:
+            if reservation is not None:
+                await reservation.release()
 
     async def _acquire_default_agent_engine(
         self,
@@ -1582,14 +1586,11 @@ class AgentHost:
         config: Za38Config,
         resolved_binding: ResolvedExecutionBinding,
         *,
+        persistence: ThreadPersistence | None = None,
         skill_registry: SkillRegistry,
     ) -> ResolvedAgentSpec:
-        """截取一次角色解析快照，Profile 和 builder 都从它派生。
-
-        ``approval_mode`` 为 Run 级覆盖：TUI 切换审批模式时按模式派生独立
-        Profile，引擎池据此缓存各自强制策略的图，配置值保持不动。
-        """
-        persistence = await self._ensure_thread_persistence()
+        """截取一次角色解析快照，Profile 和 builder 都从它派生。"""
+        persistence = persistence or await self._ensure_thread_persistence()
         await self._ensure_mcp_connected()
         async with self._mcp_state_lock:
             mcp_snapshot = self._mcp_snapshot or build_mcp_snapshot([], "missing")
@@ -1660,10 +1661,11 @@ class AgentHost:
         thread_id: str,
         config: Za38Config,
         *,
+        persistence: ThreadPersistence | None = None,
         requested_primary_profile: str | None = None,
     ) -> ResolvedExecutionBinding:
         """读取 Thread 状态并通过 execution_binding module 解析根模型。"""
-        persistence = await self._ensure_thread_persistence()
+        persistence = persistence or await self._ensure_thread_persistence()
         requested = (
             ThreadExecutionSelection(requested_primary_profile)
             if requested_primary_profile is not None
@@ -1905,45 +1907,36 @@ class AgentHost:
         from harness_agent.context_projection import ModelProjection
         from harness_agent.context_window import ContextUpdate
 
-        # 生产 middleware 只接收 typed request。测试/嵌入式旧 middleware 仍
-        # 走兼容网关，避免把协议外形和本任务的领域事务耦合起来。
         typed_service = getattr(middleware, "compactor", None)
-        if typed_service is not None:
-            if not isinstance(projection, ModelProjection):
-                projection = ModelProjection(
-                    messages=tuple(messages),
-                    checkpoint=None,
-                    tail_start_sequence=0,
-                    source_record_sequence=0,
-                )
-            typed_result = await middleware.compact_now(
-                CompressionRequest(
-                    thread_id=thread_id,
-                    trigger="manual",
-                    projection=projection,
-                    run_context_snapshot=run_context_snapshot,
-                    runtime_state=runtime_state,
-                    current_execution_policy=current_execution_policy,
-                )
-            )
-            if not isinstance(typed_result, CompressionResult):
-                raise RuntimeError("CONTEXT_COMPACTION_TYPED_RESULT_INVALID")
-            compacted = list(typed_result.projected_messages)
-            rewritten = typed_result.compressed
-            updates = middleware.consume_updates(thread_id)
-            update = updates[-1] if updates else ContextUpdate(
+        if typed_service is None:
+            raise RuntimeError("CONTEXT_COMPACTION_TYPED_SERVICE_REQUIRED")
+        if not isinstance(projection, ModelProjection):
+            raise RuntimeError("CONTEXT_COMPACTION_PROJECTION_REQUIRED")
+        typed_result = await middleware.compact_now(
+            CompressionRequest(
                 thread_id=thread_id,
-                action=typed_result.action,
-                estimated_tokens=typed_result.estimated_tokens,
-                input_cap_tokens=typed_result.input_cap_tokens,
-                context_window_tokens=getattr(middleware, "_window", 0),
-                dynamic_tokens=typed_result.estimated_tokens,
-                artifact_ids=typed_result.artifact_ids,
-                miss_reason=typed_result.reason,
+                trigger="manual",
+                projection=projection,
+                run_context_snapshot=run_context_snapshot,
+                runtime_state=runtime_state,
+                current_execution_policy=current_execution_policy,
             )
-        else:
-            compacted, update, rewritten = await middleware.compact_now(thread_id, messages)
-            middleware.consume_updates(thread_id)
+        )
+        if not isinstance(typed_result, CompressionResult):
+            raise RuntimeError("CONTEXT_COMPACTION_TYPED_RESULT_INVALID")
+        compacted = list(typed_result.projected_messages)
+        rewritten = typed_result.compressed
+        updates = middleware.consume_updates(thread_id)
+        update = updates[-1] if updates else ContextUpdate(
+            thread_id=thread_id,
+            action=typed_result.action,
+            estimated_tokens=typed_result.estimated_tokens,
+            input_cap_tokens=typed_result.input_cap_tokens,
+            context_window_tokens=getattr(middleware, "_window", 0),
+            dynamic_tokens=typed_result.estimated_tokens,
+            artifact_ids=typed_result.artifact_ids,
+            miss_reason=typed_result.reason,
+        )
         # `compact_now` 复用运行期状态缓冲；当前请求直接返回结果，因此必须消费，
         # 防止下一次 Agent run 重复发出过期的 context.updated 事件。
         if rewritten:

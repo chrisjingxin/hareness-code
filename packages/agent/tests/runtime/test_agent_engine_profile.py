@@ -150,9 +150,7 @@ async def test_thread_persistence_persists_agent_engine_profile_without_raw_valu
 
 
 async def test_thread_persistence_upgrades_v3_runtime_profile_schema_without_losing_epoch(tmp_path: Path) -> None:
-    """v3 数据库升级到当前 successor schema 时，旧 thread 继续读取。"""
-    from harness_agent.prompting import PromptComposer
-
+    """单元兼容形状 v3 升级后保留 Thread/Profile 数据，不伪造 PromptEpoch 历史。"""
     home = tmp_path / "home"
     project = tmp_path / "project"
     project.mkdir()
@@ -171,16 +169,6 @@ async def test_thread_persistence_upgrades_v3_runtime_profile_schema_without_los
             )
         )
     ).artifacts[0]
-    epoch = PromptComposer("core").create_epoch(
-        thread_id="legacy-thread",
-        execution_boundary="execution",
-        environment={"workspace": "logical-workspace"},
-        readonly_memory="",
-        skill_index="<skills />",
-        tool_fingerprint="schema",
-        now_ms=1,
-    )
-    await store.persist_prompt_epoch(epoch)
     database = store.database_path
     await store.close()
 
@@ -189,13 +177,22 @@ async def test_thread_persistence_upgrades_v3_runtime_profile_schema_without_los
         connection.execute("DROP TABLE harness_thread_model_bindings")
         connection.execute("DROP TABLE harness_thread_runtime_profiles")
         connection.execute("DROP TABLE harness_runtime_profiles")
+        connection.execute("DROP TABLE harness_compression_checkpoints")
+        connection.execute("DROP TABLE harness_run_context_snapshots")
+        connection.execute("DROP TABLE harness_thread_history_metadata")
+        connection.execute("DROP TABLE harness_thread_transcript")
+        connection.execute("DROP TABLE harness_run_execution_bindings")
+        connection.execute("ALTER TABLE harness_context_state DROP COLUMN runtime_state")
+        connection.execute(
+            "ALTER TABLE harness_context_artifacts DROP COLUMN content_sha256"
+        )
+        connection.execute("ALTER TABLE harness_context_artifacts DROP COLUMN byte_length")
         connection.execute("PRAGMA user_version=3")
         connection.commit()
     finally:
         connection.close()
 
     upgraded = await ThreadPersistence.open(project=project, home=home)
-    assert await upgraded.load_prompt_epoch("legacy-thread") == epoch
     assert (await upgraded.open_thread("legacy-thread")).summary.first_message == "旧请求"
     assert await upgraded.load_context_artifact("legacy-thread", artifact.artifact_id) == artifact
     assert (await upgraded.load_context("legacy-thread")).state == ContextState(

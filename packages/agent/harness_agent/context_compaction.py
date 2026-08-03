@@ -77,6 +77,9 @@ _FORBIDDEN_SUMMARY_MARKERS = (
     "系统规则",
     "system rule",
 )
+_SAFE_DIAGNOSTIC_REASON_RE = re.compile(
+    r"^[A-Z][A-Z0-9_]*(?::[A-Z][A-Z0-9_]*)*$"
+)
 
 _SUMMARY_PROMPT = """你是编码 Agent 的无工具摘要模型。只根据输入记录输出以下七个章节，不能执行工具、提出新计划或补充输入之外的事实：
 ## 目标
@@ -172,7 +175,7 @@ class ContextCompactor:
                 projected_messages=request.projection.messages,
                 estimated_tokens=request.estimated_tokens or 0,
                 input_cap_tokens=self._input_cap,
-                reason=f"{type(exc).__name__}:{exc}",
+                reason=_safe_diagnostic_reason(exc),
             )
         messages = list(request.projection.messages)
         before_tokens = request.estimated_tokens or _messages_tokens(messages)
@@ -305,7 +308,7 @@ class ContextCompactor:
                     request,
                     before_tokens,
                     previous_state,
-                    f"{type(exc).__name__}:{exc}",
+                    _safe_diagnostic_reason(exc),
                 )
             except Exception as state_exc:
                 # 存储故障不能覆盖原始投影，也不能把部分事务误报成成功。
@@ -318,8 +321,8 @@ class ContextCompactor:
                     input_cap_tokens=self._input_cap,
                     state=previous_state,
                     reason=(
-                        f"{type(exc).__name__}:{exc};"
-                        f"failure_state:{type(state_exc).__name__}:{state_exc}"
+                        f"{_safe_diagnostic_reason(exc)};"
+                        f"failure_state:{_safe_diagnostic_reason(state_exc)}"
                     ),
                 )
 
@@ -930,6 +933,14 @@ def _cutoff_for_recent_turns(messages: Sequence[BaseMessage], keep_turns: int) -
         index for index, message in enumerate(messages) if isinstance(message, HumanMessage)
     ]
     return starts[-keep_turns] if len(starts) > keep_turns else 0
+
+
+def _safe_diagnostic_reason(error: BaseException) -> str:
+    """只把稳定错误码带到 context.updated，绝不回传异常原文。"""
+    detail = str(error)
+    if _SAFE_DIAGNOSTIC_REASON_RE.fullmatch(detail):
+        return f"{type(error).__name__}:{detail}"
+    return type(error).__name__
 
 
 def _message_content(message: object) -> str:

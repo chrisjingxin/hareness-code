@@ -26,7 +26,10 @@ from harness_agent.context_lifecycle import (
 from harness_agent.run_coordinator import ConnectionRef, RunCoordinator, RunPreparation, StartRun
 from harness_agent.run_context import RunContext, RunContextSnapshotMiddleware
 from harness_agent.thread_persistence import AcceptRun, ThreadPersistence, ThreadPersistenceError
-from thread_fixtures import test_binding as make_test_binding
+from thread_fixtures import (
+    create_legacy_prompt_epoch_table,
+    test_binding as make_test_binding,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -498,8 +501,8 @@ async def test_accept_run_persists_and_reuses_snapshot_atomically(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_legacy_prompt_epoch_migrates_once_to_readable_snapshot(tmp_path: Path) -> None:
-    """v7 旧 PromptEpoch 只转换为 legacy snapshot，不在生产 Run 双写。"""
+async def test_v6_legacy_prompt_epoch_migrates_once_to_readable_snapshot(tmp_path: Path) -> None:
+    """verified v6 source 的 PromptEpoch 只在本次 migration 转换一次。"""
     from harness_agent.agent import create_prompt_epoch
 
     home = tmp_path / "home"
@@ -517,7 +520,6 @@ async def test_legacy_prompt_epoch_migrates_once_to_readable_snapshot(tmp_path: 
         enable_memory=False,
         enable_skills=False,
     )
-    await initial.persist_prompt_epoch(epoch)
     await initial.accept_run(
         AcceptRun(
             message="旧 Run",
@@ -525,14 +527,50 @@ async def test_legacy_prompt_epoch_migrates_once_to_readable_snapshot(tmp_path: 
         )
     )
     database = initial.database_path
+    project_fingerprint = initial.project_fingerprint
     await initial.close()
 
     connection = sqlite3.connect(database)
     try:
-        before = connection.execute(
-            "SELECT COUNT(*) FROM harness_prompt_epochs"
-        ).fetchone()[0]
-        connection.execute("PRAGMA user_version=7")
+        create_legacy_prompt_epoch_table(connection)
+        record = epoch.record()
+        connection.execute(
+            """
+            INSERT INTO harness_prompt_epochs (
+                project_fingerprint, thread_id, prompt_version, system_prompt,
+                environment_snapshot, readonly_memory, skill_index,
+                tool_schema_fingerprint, system_fingerprint,
+                history_rewrite_version, prefix_change_reason, created_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                project_fingerprint,
+                record["thread_id"],
+                record["prompt_version"],
+                record["system_prompt"],
+                record["environment_snapshot"],
+                record["readonly_memory"],
+                record["skill_index"],
+                record["tool_schema_fingerprint"],
+                record["system_fingerprint"],
+                record["history_rewrite_version"],
+                record["prefix_change_reason"],
+                record["created_at_ms"],
+            ),
+        )
+        connection.execute("DROP TABLE harness_compression_checkpoints")
+        connection.execute("DROP TABLE harness_run_context_snapshots")
+        connection.execute("DROP TABLE harness_thread_history_metadata")
+        connection.execute("DROP TABLE harness_thread_transcript")
+        connection.execute(
+            "ALTER TABLE harness_run_execution_bindings DROP COLUMN context_snapshot_id"
+        )
+        connection.execute("ALTER TABLE harness_context_state DROP COLUMN runtime_state")
+        connection.execute(
+            "ALTER TABLE harness_context_artifacts DROP COLUMN content_sha256"
+        )
+        connection.execute("ALTER TABLE harness_context_artifacts DROP COLUMN byte_length")
+        connection.execute("PRAGMA user_version=6")
         connection.commit()
     finally:
         connection.close()
@@ -553,8 +591,8 @@ async def test_legacy_prompt_epoch_migrates_once_to_readable_snapshot(tmp_path: 
     connection = sqlite3.connect(database)
     try:
         assert connection.execute(
-            "SELECT COUNT(*) FROM harness_prompt_epochs"
-        ).fetchone()[0] == before
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'harness_prompt_epochs'"
+        ).fetchone() is None
         assert connection.execute(
             "SELECT COUNT(*) FROM harness_run_context_snapshots"
         ).fetchone()[0] == 1
@@ -562,6 +600,13 @@ async def test_legacy_prompt_epoch_migrates_once_to_readable_snapshot(tmp_path: 
             connection.execute("PRAGMA user_version").fetchone()[0]
             == thread_persistence_module._SCHEMA_VERSION
         )
+        backup = database.with_name(f"{database.name}.pre-v6-migration.bak")
+        assert backup.exists()
+        backup_connection = sqlite3.connect(backup)
+        try:
+            assert backup_connection.execute("PRAGMA user_version").fetchone()[0] == 6
+        finally:
+            backup_connection.close()
     finally:
         connection.close()
 

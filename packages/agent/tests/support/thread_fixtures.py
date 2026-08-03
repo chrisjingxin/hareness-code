@@ -2,13 +2,38 @@
 
 from __future__ import annotations
 
-from harness_agent.runtime.execution_binding import (
+import sqlite3
+
+from harness_agent.execution_binding import (
     RunExecutionBinding,
     SafeModelProfile,
     SelectionOrigin,
     ThreadExecutionSelection,
 )
 from harness_agent.threads.thread_persistence import AcceptRun, ThreadPersistence
+
+
+def create_legacy_prompt_epoch_table(connection: sqlite3.Connection) -> None:
+    """为迁移测试创建 v8 前的临时 PromptEpoch 表。"""
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS harness_prompt_epochs (
+            project_fingerprint TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            prompt_version INTEGER NOT NULL,
+            system_prompt TEXT NOT NULL,
+            environment_snapshot TEXT NOT NULL,
+            readonly_memory TEXT NOT NULL,
+            skill_index TEXT NOT NULL,
+            tool_schema_fingerprint TEXT NOT NULL,
+            system_fingerprint TEXT NOT NULL,
+            history_rewrite_version TEXT NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            prefix_change_reason TEXT NOT NULL DEFAULT 'new_thread',
+            PRIMARY KEY (project_fingerprint, thread_id)
+        )
+        """
+    )
 
 
 def test_binding(thread_id: str, run_id: str) -> RunExecutionBinding:

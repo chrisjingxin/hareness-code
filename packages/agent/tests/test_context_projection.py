@@ -682,14 +682,9 @@ async def test_v8_to_v9_migration_failure_rolls_back_schema_and_keeps_backup(
     finally:
         connection.close()
 
-    async def fail_bootstrap(_self: ThreadPersistence) -> None:
-        raise RuntimeError("injected v9 bootstrap failure")
-
-    monkeypatch.setattr(
-        ThreadPersistence,
-        "_bootstrap_legacy_compression_checkpoints",
-        fail_bootstrap,
-    )
+    # legacy migration 已整体移入隔离 child；父进程 monkeypatch 不会跨进程生效。
+    # 使用受 pytest 限制的 child failpoint，验证真实生产迁移边界的回滚行为。
+    monkeypatch.setenv("HARNESS_TEST_MIGRATION_CHILD_PHASE", "bootstrap_failure")
     with pytest.raises(ThreadPersistenceError, match="CHECKPOINT_MIGRATION_FAILED"):
         await ThreadPersistence.open(
             project=tmp_path / "project", home=tmp_path / "home"

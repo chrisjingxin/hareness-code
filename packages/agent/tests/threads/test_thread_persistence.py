@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import math
 import sqlite3
 import stat
+import threading
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -55,22 +58,43 @@ class ToolCallingFakeChatModel(GenericFakeChatModel):
 
 
 def _downgrade_to_v6(database: Path, *, drop_artifact_metadata: bool = False) -> None:
-    """把当前测试库还原为可迁移的 v6 形状，不触碰生产数据。"""
+    """把当前测试库还原为精确 v6 形状，不触碰生产数据。
+
+    ``drop_artifact_metadata`` 保留为旧测试调用的兼容参数；v6 fixture 现在
+    始终移除所有后续版本对象，避免测试继续依赖开放式 source fallback。
+    """
+    del drop_artifact_metadata
     connection = sqlite3.connect(database)
     try:
+        connection.execute("DROP TABLE IF EXISTS harness_compression_checkpoints")
+        connection.execute("DROP TABLE IF EXISTS harness_run_context_snapshots")
         connection.execute("DROP TABLE IF EXISTS harness_thread_history_metadata")
         connection.execute("DROP TABLE IF EXISTS harness_thread_transcript")
-        if drop_artifact_metadata:
-            connection.execute(
-                "ALTER TABLE harness_context_artifacts DROP COLUMN content_sha256"
-            )
-            connection.execute(
-                "ALTER TABLE harness_context_artifacts DROP COLUMN byte_length"
-            )
+        connection.execute(
+            "ALTER TABLE harness_run_execution_bindings DROP COLUMN context_snapshot_id"
+        )
+        connection.execute("ALTER TABLE harness_context_state DROP COLUMN runtime_state")
+        connection.execute(
+            "ALTER TABLE harness_context_artifacts DROP COLUMN content_sha256"
+        )
+        connection.execute("ALTER TABLE harness_context_artifacts DROP COLUMN byte_length")
         connection.execute("PRAGMA user_version=6")
         connection.commit()
     finally:
         connection.close()
+
+
+async def _new_v6_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """创建一个仅用于迁移回归的真实 v6 主库。"""
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    initial = await ThreadPersistence.open(project=project, home=home)
+    await accept_thread(initial, "migration-fixture", "迁移 fixture")
+    database = initial.database_path
+    await initial.close()
+    _downgrade_to_v6(database)
+    return home, project, database
 
 
 def test_thread_persistence_exposes_lifecycle_interface_only() -> None:
@@ -96,6 +120,8 @@ def test_thread_persistence_exposes_lifecycle_interface_only() -> None:
         "refresh_thread",
         "get_prompt_epoch",
         "save_prompt_epoch",
+        "load_prompt_epoch",
+        "persist_prompt_epoch",
         "get_agent_engine_profile",
         "save_agent_engine_profile",
         "read_context_artifact",
@@ -191,9 +217,17 @@ async def test_checkpoint_and_transcript_writes_share_connection_operation_lock(
 
 
 async def test_thread_persistence_reuses_langgraph_state_across_graph_restart(tmp_path: Path) -> None:
-    """共享图重建后通过持久化 RunContext 恢复同一 thread 的消息和 PromptEpoch。"""
-    from harness_agent.runtime.agent import create_harness_agent, create_prompt_epoch
-    from harness_agent.runtime.run_context import RunContext
+    """共享图重建后通过持久化 RunContextSnapshot 恢复同一 thread 的消息。"""
+    from harness_agent.agent import create_harness_agent
+    from harness_agent.context_lifecycle import (
+        ContextAuthority,
+        ContextBlock,
+        ContextStability,
+        RunContextSnapshot,
+    )
+    import harness_agent.context_lifecycle as context_lifecycle_module
+    from harness_agent.run_context import RunContext
+    from harness_agent.prompting import sha256_text
 
     home = tmp_path / "home"
     project = tmp_path / "project"
@@ -201,18 +235,28 @@ async def test_thread_persistence_reuses_langgraph_state_across_graph_restart(tm
     first = await ThreadPersistence.open(project=project, home=home)
     first_model = ToolCallingFakeChatModel(messages=iter([AIMessage(content="第一轮回答")]))
     first_model.profile = {"max_input_tokens": 200000}
-    epoch = create_prompt_epoch(
-        thread_id="thread-1",
-        system_prompt="持久化前缀",
-        workspace=str(project),
-        sandboxed=False,
-        provider=None,
-        approval_mode="yolo",
-        skill_registry=None,
-        enable_memory=False,
-        enable_skills=False,
+    block = ContextBlock(
+        key="core-policy",
+        authority=ContextAuthority.CORE_POLICY,
+        stability=ContextStability.IMMUTABLE,
+        content="持久化前缀",
     )
-    await first.persist_prompt_epoch(epoch)
+    snapshot = RunContextSnapshot(
+        project_fingerprint=first.project_fingerprint,
+        thread_id="thread-1",
+        snapshot_id=context_lifecycle_module._snapshot_id(
+            project_fingerprint=first.project_fingerprint,
+            thread_id="thread-1",
+            blocks=(block,),
+            system_prompt=block.content,
+            skill_snapshot_id=None,
+            legacy=False,
+        ),
+        blocks=(block,),
+        system_prompt=block.content,
+        system_fingerprint=sha256_text(block.content),
+        created_at_ms=1,
+    )
     first_agent = create_harness_agent(
         first_model,
         cwd=str(project),
@@ -223,7 +267,17 @@ async def test_thread_persistence_reuses_langgraph_state_across_graph_restart(tm
         approval_mode="yolo",
         shared_engine=True,
     )
-    await accept_thread(first, "thread-1", "第一轮请求")
+    first_binding = replace(
+        make_test_binding("thread-1", "run-1"),
+        context_snapshot_id=snapshot.snapshot_id,
+    )
+    await first.accept_run(
+        AcceptRun(
+            message="第一轮请求",
+            binding=first_binding,
+            context_snapshot=snapshot,
+        )
+    )
     _ = [
         event
         async for event in first_agent.astream(
@@ -232,7 +286,7 @@ async def test_thread_persistence_reuses_langgraph_state_across_graph_restart(tm
             context=RunContext(
                 thread_id="thread-1",
                 run_id="run-1",
-                prompt_epoch=epoch,
+                context_snapshot=snapshot,
                 approval_mode="yolo",
             ),
             stream_mode=["messages", "updates"],
@@ -244,8 +298,11 @@ async def test_thread_persistence_reuses_langgraph_state_across_graph_restart(tm
     second = await ThreadPersistence.open(project=project, home=home)
     second_model = ToolCallingFakeChatModel(messages=iter([AIMessage(content="第二轮回答")]))
     second_model.profile = {"max_input_tokens": 200000}
-    restored_epoch = await second.load_prompt_epoch("thread-1")
-    assert restored_epoch == epoch
+    restored_snapshot = await second.load_context_snapshot(
+        snapshot.snapshot_id,
+        thread_id="thread-1",
+    )
+    assert restored_snapshot == snapshot
     second_agent = create_harness_agent(
         second_model,
         cwd=str(project),
@@ -256,7 +313,14 @@ async def test_thread_persistence_reuses_langgraph_state_across_graph_restart(tm
         approval_mode="yolo",
         shared_engine=True,
     )
-    await accept_thread(second, "thread-1", "第二轮请求")
+    second_binding = replace(make_test_binding("thread-1", "run-2"), context_snapshot_id=snapshot.snapshot_id)
+    await second.accept_run(
+        AcceptRun(
+            message="第二轮请求",
+            binding=second_binding,
+            context_snapshot=restored_snapshot,
+        )
+    )
     _ = [
         event
         async for event in second_agent.astream(
@@ -265,7 +329,7 @@ async def test_thread_persistence_reuses_langgraph_state_across_graph_restart(tm
             context=RunContext(
                 thread_id="thread-1",
                 run_id="run-2",
-                prompt_epoch=restored_epoch,
+                context_snapshot=restored_snapshot,
                 approval_mode="yolo",
             ),
             stream_mode=["messages", "updates"],
@@ -306,43 +370,6 @@ async def test_thread_persistence_keeps_projects_isolated_without_raw_paths(tmp_
     assert fingerprints and str(project_a) not in fingerprints
 
 
-async def test_thread_persistence_persists_immutable_prompt_epoch_without_rescan(tmp_path: Path) -> None:
-    """恢复 epoch 应逐字返回已保存前缀，并拒绝同一 thread 的后续形状变化。"""
-    from harness_agent.threads.prompting import PromptComposer
-
-    home = tmp_path / "home"
-    project = tmp_path / "project"
-    project.mkdir()
-    epoch = PromptComposer("core").create_epoch(
-        thread_id="thread-epoch",
-        execution_boundary="execution",
-        environment={"workspace": "logical-workspace"},
-        readonly_memory="memory",
-        skill_index="<skills />",
-        tool_fingerprint="schema",
-        now_ms=1,
-    )
-    first = await ThreadPersistence.open(project=project, home=home)
-    await first.persist_prompt_epoch(epoch)
-    assert (await first.load_prompt_epoch("thread-epoch")) == epoch
-    changed = PromptComposer("different core").create_epoch(
-        thread_id="thread-epoch",
-        execution_boundary="execution",
-        environment={"workspace": "logical-workspace"},
-        readonly_memory="memory",
-        skill_index="<skills />",
-        tool_fingerprint="schema",
-        now_ms=1,
-    )
-    with pytest.raises(ThreadPersistenceError, match="PROMPT_EPOCH_IMMUTABLE"):
-        await first.persist_prompt_epoch(changed)
-    await first.close()
-
-    second = await ThreadPersistence.open(project=project, home=home)
-    assert (await second.load_prompt_epoch("thread-epoch")) == epoch
-    await second.close()
-
-
 async def test_thread_persistence_migrates_and_reads_legacy_model_bindings(tmp_path: Path) -> None:
     """v5 模型快照升级后保持只读可见，并转换为类型化状态。"""
     home = tmp_path / "home"
@@ -371,6 +398,15 @@ async def test_thread_persistence_migrates_and_reads_legacy_model_bindings(tmp_p
     connection = sqlite3.connect(database)
     try:
         connection.execute("DROP TABLE harness_run_execution_bindings")
+        connection.execute("DROP TABLE harness_compression_checkpoints")
+        connection.execute("DROP TABLE harness_run_context_snapshots")
+        connection.execute("DROP TABLE harness_thread_history_metadata")
+        connection.execute("DROP TABLE harness_thread_transcript")
+        connection.execute("ALTER TABLE harness_context_state DROP COLUMN runtime_state")
+        connection.execute(
+            "ALTER TABLE harness_context_artifacts DROP COLUMN content_sha256"
+        )
+        connection.execute("ALTER TABLE harness_context_artifacts DROP COLUMN byte_length")
         connection.execute(
             """
             INSERT INTO harness_thread_model_bindings (
@@ -843,6 +879,29 @@ async def test_v6_bootstrap_is_project_scoped_and_preserves_incomplete_boundary(
     assert len({row[0] for row in rows}) == 2
     assert all(row[3] is None and row[4] is None for row in rows)
     assert [row[1:] for row in metadata] == [(1, 6), (1, 6)]
+    backup = database.with_name(f"{database.name}.pre-v6-migration.bak")
+    assert backup.exists()
+    backup_connection = sqlite3.connect(backup)
+    try:
+        assert backup_connection.execute("PRAGMA user_version").fetchone()[0] == 6
+    finally:
+        backup_connection.close()
+
+    continued = await ThreadPersistence.open(project=project_a, home=home)
+    try:
+        assert (
+            await continued.accept_run(
+                AcceptRun(
+                    message="迁移后继续",
+                    binding=make_test_binding("same-thread", "after-migration"),
+                )
+            )
+        ).created
+        assert [
+            message.content for message in (await continued.open_thread("same-thread")).messages
+        ] == ["A 首条", "A 回答", "迁移后继续"]
+    finally:
+        await continued.close()
 
 
 async def test_v6_bootstrap_preserves_ai_tool_calls_and_tool_result_ids(
@@ -1388,6 +1447,268 @@ async def test_concurrent_v6_openers_serialize_migration_without_downgrade(
     assert all(row[3] is None and row[4] is None for row in rows)
 
 
+async def test_v6_backup_captures_committed_wal_and_is_standalone(
+    tmp_path: Path,
+) -> None:
+    """已提交但仍在 WAL 的 v6 数据进入 backup，脱离原 WAL/SHM 仍可恢复。"""
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    initial = await ThreadPersistence.open(project=project, home=home)
+    await accept_thread(initial, "seed", "seed")
+    project_fingerprint = initial.project_fingerprint
+    database = initial.database_path
+    await initial.close()
+    _downgrade_to_v6(database)
+
+    writer = sqlite3.connect(database, timeout=5.0)
+    try:
+        assert str(writer.execute("PRAGMA journal_mode=WAL").fetchone()[0]).lower() == "wal"
+        writer.execute(
+            """
+            INSERT INTO harness_threads (
+                project_fingerprint, thread_id, created_at_ms, updated_at_ms,
+                first_message, latest_message, message_count
+            ) VALUES (?, ?, 10, 10, ?, ?, 0)
+            """,
+            (project_fingerprint, "wal-thread", "WAL committed", "WAL committed"),
+        )
+        writer.commit()
+        assert database.with_name(database.name + "-wal").exists()
+        migrated = await ThreadPersistence.open(project=project, home=home)
+    finally:
+        writer.close()
+
+    await migrated.close()
+    for suffix in ("-wal", "-shm"):
+        sidecar = database.with_name(database.name + suffix)
+        sidecar.unlink(missing_ok=True)
+        sidecar.write_bytes(b"stale sidecar")
+
+    backup = database.with_name(f"{database.name}.pre-v6-migration.bak")
+    assert backup.exists()
+    assert not backup.with_name(backup.name + "-wal").exists()
+    assert not backup.with_name(backup.name + "-shm").exists()
+    restored = tmp_path / "restored.sqlite3"
+    source = sqlite3.connect(backup)
+    target = sqlite3.connect(restored)
+    try:
+        source.backup(target)
+        target.commit()
+    finally:
+        source.close()
+        target.close()
+    check = sqlite3.connect(restored)
+    try:
+        assert check.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert check.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert check.execute(
+            "SELECT first_message FROM harness_threads WHERE thread_id = 'wal-thread'"
+        ).fetchone()[0] == "WAL committed"
+    finally:
+        check.close()
+
+
+async def test_migration_backup_creation_failure_is_typed_and_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """backup API 创建失败不得进入迁移或留下半套 schema。"""
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    initial = await ThreadPersistence.open(project=project, home=home)
+    database = initial.database_path
+    await initial.close()
+    _downgrade_to_v6(database)
+
+    async def fail_backup(
+        _self: ThreadPersistence,
+        _source_version: int,
+        _source_fingerprint: Any = None,
+    ) -> Path:
+        raise ThreadPersistenceError("CHECKPOINT_MIGRATION_BACKUP_FAILED")
+
+    monkeypatch.setattr(ThreadPersistence, "_create_migration_backup", fail_backup)
+    monkeypatch.setenv("HARNESS_TEST_MIGRATION_CHILD_PHASE", "backup_failure")
+    with pytest.raises(ThreadPersistenceError, match="CHECKPOINT_MIGRATION_BACKUP_FAILED"):
+        await ThreadPersistence.open(project=project, home=home)
+    assert not database.with_name(database.name + ".migration-state.json").exists()
+    check = sqlite3.connect(database)
+    try:
+        assert check.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert check.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'harness_thread_transcript'"
+        ).fetchone() is None
+    finally:
+        check.close()
+
+
+@pytest.mark.parametrize("invalid_field", ("integrity_check", "schema_digest", "data_digest"))
+async def test_migration_backup_rejects_integrity_schema_and_data_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_field: str,
+) -> None:
+    """backup 验证必须同时覆盖 integrity、schema 和 data 证明字段。"""
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    store = await ThreadPersistence.open(project=project, home=home)
+    original_fingerprint = thread_persistence_module._migration_database_fingerprint_sync
+
+    def corrupt_fingerprint(connection: sqlite3.Connection) -> Any:
+        actual = original_fingerprint(connection)
+        if invalid_field == "integrity_check":
+            return replace(actual, integrity_check="not ok")
+        if invalid_field == "schema_digest":
+            return replace(actual, schema_digest="schema-corrupted")
+        return replace(actual, data_digest="data-corrupted")
+
+    monkeypatch.setattr(
+        thread_persistence_module,
+        "_migration_database_fingerprint_sync",
+        corrupt_fingerprint,
+    )
+    await store._connection.execute("BEGIN IMMEDIATE")
+    fingerprint = await store._database_fingerprint_async()
+    with pytest.raises(
+        ThreadPersistenceError,
+        match="CHECKPOINT_MIGRATION_BACKUP_VALIDATION_FAILED",
+    ):
+        await store._create_migration_backup(
+            thread_persistence_module._SCHEMA_VERSION,
+            fingerprint,
+        )
+    await store._connection.rollback()
+    await store.close()
+
+
+async def test_v6_incomplete_source_schema_is_rejected_before_backup(tmp_path: Path) -> None:
+    """源 v6 缺关键表时在 backup 前 fail closed，不把半套库当可迁移库。"""
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    initial = await ThreadPersistence.open(project=project, home=home)
+    database = initial.database_path
+    await initial.close()
+    _downgrade_to_v6(database)
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("DROP TABLE harness_run_execution_bindings")
+        connection.execute("PRAGMA user_version=6")
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(
+        ThreadPersistenceError,
+        match="CHECKPOINT_MIGRATION_SOURCE_SCHEMA_INVALID:harness_run_execution_bindings",
+    ):
+        await ThreadPersistence.open(project=project, home=home)
+    assert not database.with_name(f"{database.name}.pre-v6-migration.bak").exists()
+
+
+async def test_v6_migration_boundary_blocks_second_connection_writer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """第二连接在 backup/迁移排他边界内只能被阻止，不能交错写入。"""
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    initial = await ThreadPersistence.open(project=project, home=home)
+    database = initial.database_path
+    await initial.close()
+    _downgrade_to_v6(database)
+
+    writer_started = threading.Event()
+    writer_finished = threading.Event()
+    writer_result: dict[str, str] = {}
+
+    def concurrent_writer() -> None:
+        connection = sqlite3.connect(database, timeout=0.2)
+        try:
+            writer_started.set()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    """
+                    INSERT INTO harness_threads (
+                        project_fingerprint, thread_id, created_at_ms, updated_at_ms,
+                        first_message, latest_message, message_count
+                    ) VALUES ('writer', 'interleaved', 1, 1, 'bad', 'bad', 0)
+                    """
+                )
+                connection.commit()
+                writer_result["outcome"] = "committed"
+            except sqlite3.OperationalError as exc:
+                writer_result["outcome"] = str(exc)
+        finally:
+            connection.close()
+            writer_finished.set()
+
+    original_fingerprint = ThreadPersistence._database_fingerprint_async
+    fingerprint_calls = 0
+    writer_thread: threading.Thread | None = None
+
+    async def observe_boundary(self: ThreadPersistence) -> Any:
+        nonlocal fingerprint_calls, writer_thread
+        result = await original_fingerprint(self)
+        if fingerprint_calls == 0:
+            fingerprint_calls += 1
+            writer_thread = threading.Thread(target=concurrent_writer)
+            writer_thread.start()
+            assert await asyncio.to_thread(writer_started.wait, 1.0)
+            await asyncio.sleep(0.05)
+        return result
+
+    original_backup = ThreadPersistence._create_migration_backup
+
+    async def hold_after_backup(
+        self: ThreadPersistence,
+        source_version: int,
+        source_fingerprint: Any = None,
+    ) -> Path:
+        result = await original_backup(self, source_version, source_fingerprint)
+        await asyncio.sleep(0.35)
+        return result
+
+    del observe_boundary, hold_after_backup, original_fingerprint, original_backup
+    monkeypatch.setenv("HARNESS_TEST_MIGRATION_CHILD_PHASE", "before_commit")
+    monkeypatch.setattr(
+        thread_persistence_module,
+        "_LEGACY_MIGRATION_CHILD_DEADLINE_SECONDS",
+        3.0,
+    )
+    state_path = database.with_name(database.name + ".migration-state.json")
+    opening = asyncio.create_task(ThreadPersistence.open(project=project, home=home))
+    for _ in range(300):
+        if state_path.exists():
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            if state.get("status") == "committing":
+                break
+        await asyncio.sleep(0.01)
+    else:
+        raise AssertionError("migration child did not reach committing state")
+
+    writer_thread = threading.Thread(target=concurrent_writer)
+    writer_thread.start()
+    assert await asyncio.to_thread(writer_finished.wait, 1.0)
+    writer_thread.join(timeout=1.0)
+    assert writer_result["outcome"] != "committed"
+    assert "locked" in writer_result["outcome"].lower()
+    with pytest.raises(ThreadPersistenceError, match="WORKER_TIMEOUT"):
+        await opening
+    check = sqlite3.connect(database)
+    try:
+        assert check.execute(
+            "SELECT 1 FROM harness_threads WHERE thread_id = 'interleaved'"
+        ).fetchone() is None
+    finally:
+        check.close()
+
+
 async def test_v6_legacy_artifact_backfills_verifiable_metadata(tmp_path: Path) -> None:
     """缺少 v7 两列的旧 Artifact 迁移后补齐真实摘要和字节数。"""
     home = tmp_path / "home"
@@ -1428,11 +1749,19 @@ async def test_v6_migration_failure_restores_backup_without_half_v7_schema(
     database = initial.database_path
     await initial.close()
     _downgrade_to_v6(database)
+    original_connection = sqlite3.connect(database)
+    try:
+        original_thread_row = original_connection.execute(
+            "SELECT * FROM harness_threads WHERE thread_id = 'legacy-failure'"
+        ).fetchone()
+    finally:
+        original_connection.close()
 
     async def fail_bootstrap(_self: ThreadPersistence, _source_version: int) -> None:
         raise ValueError("invalid legacy payload")
 
     monkeypatch.setattr(ThreadPersistence, "_bootstrap_legacy_transcripts", fail_bootstrap)
+    monkeypatch.setenv("HARNESS_TEST_MIGRATION_CHILD_PHASE", "bootstrap_failure")
     with pytest.raises(ThreadPersistenceError, match="CHECKPOINT_MIGRATION_FAILED"):
         await ThreadPersistence.open(project=project, home=home)
     monkeypatch.undo()
@@ -1452,13 +1781,24 @@ async def test_v6_migration_failure_restores_backup_without_half_v7_schema(
             WHERE type = 'table' AND name = 'harness_thread_history_metadata'
             """
         ).fetchone()
+        restored_thread_row = connection.execute(
+            "SELECT * FROM harness_threads WHERE thread_id = 'legacy-failure'"
+        ).fetchone()
     finally:
         connection.close()
     assert version == 6
     assert transcript_table is None
     assert metadata_table is None
+    assert restored_thread_row == original_thread_row
     backup = database.with_name(f"{database.name}.pre-v6-migration.bak")
     assert backup.exists()
+    backup_connection = sqlite3.connect(backup)
+    try:
+        assert backup_connection.execute(
+            "SELECT * FROM harness_threads WHERE thread_id = 'legacy-failure'"
+        ).fetchone() == original_thread_row
+    finally:
+        backup_connection.close()
 
     recovered = await ThreadPersistence.open(project=project, home=home)
     assert (await recovered.open_thread("legacy-failure")).legacy_incomplete_history is True
@@ -1478,16 +1818,20 @@ async def test_v6_migration_cancellation_restores_original_database(
     database = initial.database_path
     await initial.close()
     _downgrade_to_v6(database)
-    started = asyncio.Event()
-    release = asyncio.Event()
-
-    async def block_bootstrap(_self: ThreadPersistence, _source_version: int) -> None:
-        started.set()
-        await release.wait()
-
-    monkeypatch.setattr(ThreadPersistence, "_bootstrap_legacy_transcripts", block_bootstrap)
+    monkeypatch.setenv("HARNESS_TEST_MIGRATION_CHILD_PHASE", "after_final_validation")
+    monkeypatch.setattr(
+        thread_persistence_module,
+        "_LEGACY_MIGRATION_CHILD_DEADLINE_SECONDS",
+        3.0,
+    )
     task = asyncio.create_task(ThreadPersistence.open(project=project, home=home))
-    await started.wait()
+    state_path = database.with_name(database.name + ".migration-state.json")
+    for _ in range(300):
+        if state_path.exists():
+            break
+        await asyncio.sleep(0.01)
+    else:
+        raise AssertionError("migration child did not create recovery state")
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -1520,13 +1864,670 @@ async def test_migration_backup_uses_distinct_temporary_paths(tmp_path: Path, mo
         original_replace(source, destination)
 
     monkeypatch.setattr(thread_persistence_module.os, "replace", capture_replace)
-    await store._create_migration_backup(thread_persistence_module._SCHEMA_VERSION)
-    await store._create_migration_backup(thread_persistence_module._SCHEMA_VERSION)
+    await store._connection.execute("BEGIN IMMEDIATE")
+    fingerprint = await store._database_fingerprint_async()
+    await store._create_migration_backup(thread_persistence_module._SCHEMA_VERSION, fingerprint)
+    await store._create_migration_backup(thread_persistence_module._SCHEMA_VERSION, fingerprint)
+    await store._connection.rollback()
     assert len(temporary_paths) == 2
     assert len(set(temporary_paths)) == 2
     assert all(path.name.endswith(".tmp") for path in temporary_paths)
     assert all(not path.exists() for path in temporary_paths)
     await store.close()
+
+
+async def test_migration_restore_failure_keeps_backup_and_retries_on_next_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """restore 失败保持 verified backup/state；下一次启动可确定性恢复并继续迁移。"""
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    initial = await ThreadPersistence.open(project=project, home=home)
+    database = initial.database_path
+    await initial.close()
+    _downgrade_to_v6(database)
+
+    async def fail_bootstrap(_self: ThreadPersistence, _source_version: int) -> None:
+        raise ValueError("injected migration failure")
+
+    async def fail_restore(
+        _self: ThreadPersistence,
+        _backup_path: Path,
+        _expected: Any,
+    ) -> None:
+        raise ThreadPersistenceError("CHECKPOINT_MIGRATION_RESTORE_VALIDATION_FAILED")
+
+    monkeypatch.setattr(ThreadPersistence, "_bootstrap_legacy_transcripts", fail_bootstrap)
+    monkeypatch.setattr(ThreadPersistence, "_restore_migration_backup_async", fail_restore)
+    monkeypatch.setenv("HARNESS_TEST_MIGRATION_CHILD_PHASE", "restore_failure")
+    with pytest.raises(ThreadPersistenceError, match="CHECKPOINT_MIGRATION_RESTORE_FAILED"):
+        await ThreadPersistence.open(project=project, home=home)
+    monkeypatch.undo()
+
+    backup = database.with_name(f"{database.name}.pre-v6-migration.bak")
+    state_path = database.with_name(database.name + ".migration-state.json")
+    assert backup.exists()
+    assert json.loads(state_path.read_text(encoding="utf-8"))["status"] == "restore_failed"
+
+    # 只有真正偏离 source 的半迁移库才进入 restore；完整 source 会走安全
+    # retry。这里人为留下一个 version/schema 不匹配的主库，覆盖窄评审的
+    # “不能仅凭 restore_failed 无条件恢复”边界。
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("PRAGMA user_version=7")
+        connection.commit()
+    finally:
+        connection.close()
+
+    def fail_atomic_restore(
+        _path: Path,
+        _backup_path: Path,
+        _expected: Any,
+    ) -> None:
+        raise ThreadPersistenceError("CHECKPOINT_MIGRATION_RESTORE_VALIDATION_FAILED")
+
+    monkeypatch.setattr(
+        ThreadPersistence,
+        "_restore_backup_path_sync",
+        staticmethod(fail_atomic_restore),
+    )
+    with pytest.raises(
+        ThreadPersistenceError,
+        match="CHECKPOINT_MIGRATION_RESTORE_VALIDATION_FAILED",
+    ):
+        await ThreadPersistence.open(project=project, home=home)
+    monkeypatch.undo()
+    assert backup.exists()
+    assert json.loads(state_path.read_text(encoding="utf-8"))["status"] == "restore_failed"
+
+    recovered = await ThreadPersistence.open(project=project, home=home)
+    try:
+        check = sqlite3.connect(database)
+        try:
+            assert check.execute("PRAGMA user_version").fetchone()[0] == thread_persistence_module._SCHEMA_VERSION
+        finally:
+            check.close()
+        assert not state_path.exists()
+    finally:
+        await recovered.close()
+
+
+async def test_migration_commit_marker_prevents_rollback_after_process_crash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DB commit 后模拟崩溃，下一次 open 必须保留最终库而非恢复 v6。"""
+    home, project, database = await _new_v6_fixture(tmp_path)
+    monkeypatch.setenv(
+        "HARNESS_TEST_MIGRATION_CHILD_PHASE", "after_commit_before_state"
+    )
+    monkeypatch.setattr(
+        thread_persistence_module,
+        "_LEGACY_MIGRATION_CHILD_DEADLINE_SECONDS",
+        3.0,
+    )
+    recovered = await ThreadPersistence.open(project=project, home=home)
+    await recovered.close()
+    state_path = database.with_name(database.name + ".migration-state.json")
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == thread_persistence_module._SCHEMA_VERSION
+        assert connection.execute(
+            "SELECT latest_message FROM harness_threads WHERE thread_id='migration-fixture'"
+        ).fetchone()[0] == "迁移 fixture"
+    finally:
+        connection.close()
+    assert not state_path.exists()
+
+
+async def test_migration_commit_worker_error_after_sqlite_commit_keeps_final_data(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """底层 commit 已完成但 worker await 抛错时，独立事实优先于异常。"""
+    home, project, database = await _new_v6_fixture(tmp_path)
+    monkeypatch.setenv(
+        "HARNESS_TEST_MIGRATION_CHILD_PHASE", "after_commit_before_reply"
+    )
+    monkeypatch.setattr(
+        thread_persistence_module,
+        "_LEGACY_MIGRATION_CHILD_DEADLINE_SECONDS",
+        3.0,
+    )
+    migrated = await ThreadPersistence.open(project=project, home=home)
+    await migrated.close()
+
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == thread_persistence_module._SCHEMA_VERSION
+        assert connection.execute(
+            "SELECT first_message FROM harness_threads WHERE thread_id='migration-fixture'"
+        ).fetchone()[0] == "迁移 fixture"
+    finally:
+        connection.close()
+    assert not database.with_name(database.name + ".migration-state.json").exists()
+
+
+async def test_migration_commit_cancel_settles_worker_before_final_rethrow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """外层取消终止 child 后保留 source，下一次 owner 再按事实重试。"""
+    home, project, database = await _new_v6_fixture(tmp_path)
+    monkeypatch.setenv("HARNESS_TEST_MIGRATION_CHILD_PHASE", "before_commit")
+    monkeypatch.setattr(
+        thread_persistence_module,
+        "_LEGACY_MIGRATION_CHILD_DEADLINE_SECONDS",
+        3.0,
+    )
+    opening = asyncio.create_task(ThreadPersistence.open(project=project, home=home))
+    state_path = database.with_name(database.name + ".migration-state.json")
+    for _ in range(300):
+        if state_path.exists():
+            break
+        await asyncio.sleep(0.01)
+    else:
+        raise AssertionError("migration child did not create recovery state")
+    opening.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await opening
+    monkeypatch.undo()
+
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE name='harness_thread_transcript'"
+        ).fetchone() is None
+    finally:
+        connection.close()
+    assert database.with_name(database.name + ".migration-state.json").exists()
+
+
+@pytest.mark.parametrize("phase", ("before_commit", "after_final_validation"))
+async def test_migration_child_timeout_poison_blocks_reuse_until_new_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    """child 超时必须被回收；同进程 handoff fail closed，fresh owner 再按事实恢复。"""
+    home, project, database = await _new_v6_fixture(tmp_path)
+    monkeypatch.setenv("HARNESS_TEST_MIGRATION_CHILD_PHASE", phase)
+    monkeypatch.setattr(
+        thread_persistence_module,
+        "_LEGACY_MIGRATION_CHILD_DEADLINE_SECONDS",
+        3.0,
+    )
+    with pytest.raises(
+        ThreadPersistenceError,
+        match="CHECKPOINT_MIGRATION_WORKER_TIMEOUT",
+    ):
+        await asyncio.wait_for(
+            ThreadPersistence.open(project=project, home=home),
+            timeout=6.0,
+        )
+
+    state_path = database.with_name(database.name + ".migration-state.json")
+    backup_path = database.with_name(f"{database.name}.pre-v6-migration.bak")
+    assert json.loads(state_path.read_text(encoding="utf-8"))["status"] in {
+        "migrating",
+        "committing",
+    }
+    assert backup_path.exists()
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE name='harness_thread_transcript'"
+        ).fetchone() is None
+    finally:
+        connection.close()
+
+    # child 已被父进程 terminate/kill + wait；但同一进程的 owner handoff
+    # 仍需 fail closed，不能把超时路径当普通新 open。
+    with pytest.raises(
+        ThreadPersistenceError,
+        match="CHECKPOINT_MIGRATION_RECOVERY_REQUIRED",
+    ):
+        await ThreadPersistence.open(project=project, home=home)
+    monkeypatch.undo()
+    with thread_persistence_module._MIGRATION_POISON_LOCK:
+        thread_persistence_module._MIGRATION_POISONED_PATHS.discard(database)
+
+    recovered = await ThreadPersistence.open(project=project, home=home)
+    try:
+        assert not state_path.exists()
+        assert (await recovered.open_thread("migration-fixture")).summary.first_message == "迁移 fixture"
+    finally:
+        await recovered.close()
+
+
+async def test_migration_poison_is_rechecked_after_lock_wait_for_all_waiters(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """先过 precheck、再等锁的多个 opener 必须在锁后共同拒绝 poison。"""
+    home, project, database = await _new_v6_fixture(tmp_path)
+    monkeypatch.setenv("HARNESS_TEST_MIGRATION_CHILD_PHASE", "before_commit")
+    monkeypatch.setattr(
+        thread_persistence_module,
+        "_LEGACY_MIGRATION_CHILD_DEADLINE_SECONDS",
+        3.0,
+    )
+    original_assert = thread_persistence_module._assert_migration_path_available
+    waiter_prechecked = asyncio.Event()
+    waiter_count = 0
+
+    def observe_assert(path: Path) -> None:
+        nonlocal waiter_count
+        task = asyncio.current_task()
+        if task is not None and task.get_name().startswith("migration-waiter-"):
+            waiter_count += 1
+            if waiter_count >= 3:
+                waiter_prechecked.set()
+        original_assert(path)
+
+    monkeypatch.setattr(
+        thread_persistence_module,
+        "_assert_migration_path_available",
+        observe_assert,
+    )
+    opening = asyncio.create_task(ThreadPersistence.open(project=project, home=home))
+    state_path = database.with_name(database.name + ".migration-state.json")
+    for _ in range(300):
+        if state_path.exists() and json.loads(state_path.read_text(encoding="utf-8")).get(
+            "status"
+        ) == "committing":
+            break
+        await asyncio.sleep(0.01)
+    else:
+        raise AssertionError("migration child did not reach committing state")
+
+    waiters = [
+        asyncio.create_task(
+            ThreadPersistence.open(project=project, home=home),
+            name=f"migration-waiter-{index}",
+        )
+        for index in range(3)
+    ]
+    await asyncio.wait_for(waiter_prechecked.wait(), timeout=0.5)
+    with pytest.raises(ThreadPersistenceError, match="WORKER_TIMEOUT"):
+        await opening
+    results = await asyncio.gather(*waiters, return_exceptions=True)
+    assert all(
+        isinstance(result, ThreadPersistenceError)
+        and "CHECKPOINT_MIGRATION_RECOVERY_REQUIRED" in str(result)
+        for result in results
+    )
+    monkeypatch.undo()
+    with thread_persistence_module._MIGRATION_POISON_LOCK:
+        thread_persistence_module._MIGRATION_POISONED_PATHS.discard(database)
+
+
+async def test_migration_child_deadline_can_be_injected_in_milliseconds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """测试 deadline 可压到毫秒级；生产默认值仍由独立常量控制。"""
+    home, project, database = await _new_v6_fixture(tmp_path)
+    monkeypatch.setenv("HARNESS_TEST_MIGRATION_CHILD_PHASE", "before_commit")
+    monkeypatch.setattr(
+        thread_persistence_module,
+        "_LEGACY_MIGRATION_CHILD_DEADLINE_SECONDS",
+        0.001,
+    )
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(ThreadPersistenceError, match="WORKER_TIMEOUT"):
+        await ThreadPersistence.open(project=project, home=home)
+    assert asyncio.get_running_loop().time() - started < 1.0
+    monkeypatch.undo()
+    with thread_persistence_module._MIGRATION_POISON_LOCK:
+        thread_persistence_module._MIGRATION_POISONED_PATHS.discard(database)
+
+
+async def test_migration_commit_slow_within_deadline_succeeds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """正常慢 commit 在 deadline 内完成，不误入 poisoned recovery。"""
+    home, project, database = await _new_v6_fixture(tmp_path)
+    original_commit = aiosqlite.Connection.commit
+
+    async def slow_commit(self: aiosqlite.Connection) -> None:
+        await asyncio.sleep(0.02)
+        await original_commit(self)
+
+    monkeypatch.setattr(
+        thread_persistence_module,
+        "_MIGRATION_COMMIT_DEADLINE_SECONDS",
+        0.2,
+    )
+    monkeypatch.setattr(aiosqlite.Connection, "commit", slow_commit)
+    migrated = await ThreadPersistence.open(project=project, home=home)
+    await migrated.close()
+    assert database.with_name(database.name + ".migration-state.json").exists() is False
+
+
+async def test_migration_commit_failure_before_sqlite_commit_preserves_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """commit 在落盘前失败时仍回到完整 v6 source，不能留下 successor 表。"""
+    home, project, database = await _new_v6_fixture(tmp_path)
+
+    async def fail_before_commit(_self: aiosqlite.Connection) -> None:
+        raise RuntimeError("commit did not start")
+
+    monkeypatch.setattr(aiosqlite.Connection, "commit", fail_before_commit)
+    monkeypatch.setenv("HARNESS_TEST_MIGRATION_CHILD_PHASE", "commit_failure_before")
+    with pytest.raises(ThreadPersistenceError, match="CHECKPOINT_MIGRATION_FAILED"):
+        await ThreadPersistence.open(project=project, home=home)
+    monkeypatch.undo()
+
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='harness_thread_transcript'"
+        ).fetchone() is None
+    finally:
+        connection.close()
+    recovered = await ThreadPersistence.open(project=project, home=home)
+    await recovered.close()
+
+
+async def test_migration_committed_state_write_failure_never_restores_old_database(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """写 committed 状态失败只留下可恢复 state，不得回滚已提交的新库。"""
+    home, project, database = await _new_v6_fixture(tmp_path)
+    monkeypatch.setenv(
+        "HARNESS_TEST_MIGRATION_CHILD_PHASE", "state_committed_failure"
+    )
+    migrated = await ThreadPersistence.open(project=project, home=home)
+    await migrated.close()
+
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == thread_persistence_module._SCHEMA_VERSION
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='harness_thread_transcript'"
+        ).fetchone() is not None
+    finally:
+        connection.close()
+    assert not database.with_name(database.name + ".migration-state.json").exists()
+
+
+async def test_migration_state_clear_failure_repairs_without_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """清理 committed state 失败时保留新库，下一次 open 只修复状态边界。"""
+    home, project, database = await _new_v6_fixture(tmp_path)
+    monkeypatch.setenv("HARNESS_TEST_MIGRATION_CHILD_PHASE", "state_clear_failure")
+    migrated = await ThreadPersistence.open(project=project, home=home)
+    await migrated.close()
+
+    state_path = database.with_name(database.name + ".migration-state.json")
+    assert database.with_name(f"{database.name}.pre-v6-migration.bak").exists()
+    assert not state_path.exists()
+
+
+async def test_migration_recovery_retries_when_main_database_is_exact_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """state 残留但主库是完整 v6 时安全重试，不调用恢复旧 backup。"""
+    home, project, database = await _new_v6_fixture(tmp_path)
+
+    async def fail_bootstrap(_self: ThreadPersistence, _source_version: int) -> None:
+        raise ValueError("injected migration failure")
+
+    async def fail_restore(
+        _self: ThreadPersistence,
+        _backup_path: Path,
+        _expected: Any,
+    ) -> None:
+        raise ThreadPersistenceError("CHECKPOINT_MIGRATION_RESTORE_VALIDATION_FAILED")
+
+    monkeypatch.setattr(ThreadPersistence, "_bootstrap_legacy_transcripts", fail_bootstrap)
+    monkeypatch.setattr(ThreadPersistence, "_restore_migration_backup_async", fail_restore)
+    monkeypatch.setenv("HARNESS_TEST_MIGRATION_CHILD_PHASE", "bootstrap_failure")
+    with pytest.raises(ThreadPersistenceError, match="CHECKPOINT_MIGRATION_FAILED"):
+        await ThreadPersistence.open(project=project, home=home)
+    monkeypatch.undo()
+
+    def fail_restore_path(
+        _path: Path,
+        _backup_path: Path,
+        _expected: Any,
+    ) -> None:
+        raise AssertionError("exact source must retry migration, not restore")
+
+    monkeypatch.setattr(
+        ThreadPersistence,
+        "_restore_backup_path_sync",
+        staticmethod(fail_restore_path),
+    )
+    retried = await ThreadPersistence.open(project=project, home=home)
+    try:
+        assert retried.database_path == database
+    finally:
+        await retried.close()
+    monkeypatch.undo()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "wrong_index_order",
+        "missing_primary_unique",
+        "wrong_type",
+        "wrong_not_null",
+        "wrong_primary_key",
+        "dangerous_extra_column",
+        "wrong_table_sql",
+    ),
+)
+async def test_v6_schema_contract_rejects_same_name_malformed_objects(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    """v6 同名但定义错误的列、PK、索引和 SQL 必须在 backup 前拒绝。"""
+    _home, project, database = await _new_v6_fixture(tmp_path)
+    connection = sqlite3.connect(database)
+    try:
+        if mutation == "wrong_index_order":
+            connection.execute("DROP INDEX harness_threads_project_updated")
+            connection.execute(
+                """
+                CREATE INDEX harness_threads_project_updated
+                ON harness_threads(updated_at_ms DESC, project_fingerprint)
+                """
+            )
+        else:
+            connection.execute("DROP INDEX harness_threads_project_updated")
+            connection.execute("DROP TABLE harness_threads")
+            message_count = (
+                "message_count TEXT NOT NULL DEFAULT 0"
+                if mutation == "wrong_type"
+                else "message_count INTEGER DEFAULT 0"
+                if mutation == "wrong_not_null"
+                else "message_count INTEGER NOT NULL DEFAULT 0"
+            )
+            primary_key = (
+                "PRIMARY KEY (project_fingerprint)"
+                if mutation == "wrong_primary_key"
+                else ""
+                if mutation == "missing_primary_unique"
+                else "PRIMARY KEY (project_fingerprint, thread_id)"
+            )
+            check = "CHECK(message_count >= 0)" if mutation == "wrong_table_sql" else ""
+            constraints = ",\n                    ".join(
+                constraint for constraint in (check, primary_key) if constraint
+            )
+            constraint_clause = f",\n                    {constraints}" if constraints else ""
+            connection.execute(
+                f"""
+                CREATE TABLE harness_threads (
+                    project_fingerprint TEXT NOT NULL,
+                    thread_id TEXT NOT NULL,
+                    created_at_ms INTEGER NOT NULL,
+                    updated_at_ms INTEGER NOT NULL,
+                    first_message TEXT NOT NULL,
+                    latest_message TEXT NOT NULL,
+                    {message_count}{constraint_clause}
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX harness_threads_project_updated
+                ON harness_threads(project_fingerprint, updated_at_ms DESC)
+                """
+            )
+            if mutation == "dangerous_extra_column":
+                connection.execute(
+                    "ALTER TABLE harness_threads ADD COLUMN dangerous TEXT"
+                )
+        connection.execute("PRAGMA user_version=6")
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(
+        ThreadPersistenceError,
+        match="CHECKPOINT_MIGRATION_SOURCE_SCHEMA_INVALID:harness_threads",
+    ):
+        await ThreadPersistence.open(project=project, home=_home)
+    assert not database.with_name(f"{database.name}.pre-v6-migration.bak").exists()
+
+
+@pytest.mark.parametrize(
+    "extra_table_sql",
+    (
+        "CREATE TABLE harness_thread_transcript (wrong TEXT CHECK(length(wrong) > 0))",
+        "CREATE TABLE harness_unknown_source_table (id INTEGER)",
+    ),
+)
+async def test_v6_source_rejects_forward_or_unknown_tables_before_backup(
+    tmp_path: Path,
+    extra_table_sql: str,
+) -> None:
+    """v6 只接受精确 source 表集，不按名称或尾列放行 successor 对象。"""
+    _home, project, database = await _new_v6_fixture(tmp_path)
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(extra_table_sql)
+        if extra_table_sql.startswith("CREATE TABLE harness_thread_transcript"):
+            connection.execute(
+                "CREATE INDEX harness_thread_transcript_wrong ON harness_thread_transcript(wrong)"
+            )
+        connection.execute("PRAGMA user_version=6")
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(
+        ThreadPersistenceError,
+        match="CHECKPOINT_MIGRATION_SOURCE_SCHEMA_INVALID:<database>:unexpected_table",
+    ):
+        await ThreadPersistence.open(project=project, home=_home)
+    assert not database.with_name(f"{database.name}.pre-v6-migration.bak").exists()
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (
+                "harness_thread_transcript"
+                if extra_table_sql.startswith("CREATE TABLE harness_thread_transcript")
+                else "harness_unknown_source_table",
+            ),
+        ).fetchone()
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("source_version", (8, 9, 10, thread_persistence_module._SCHEMA_VERSION))
+async def test_prompt_epoch_in_non_v6_schema_is_rejected_without_mutation(
+    tmp_path: Path,
+    source_version: int,
+) -> None:
+    """v8/v9/v10/final 带 PromptEpoch 且无 migration state 时必须原样拒绝。"""
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    initial = await ThreadPersistence.open(project=project, home=home)
+    database = initial.database_path
+    await initial.close()
+
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            """
+            CREATE TABLE harness_prompt_epochs (
+                project_fingerprint TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                prompt_version INTEGER NOT NULL,
+                system_prompt TEXT NOT NULL,
+                environment_snapshot TEXT NOT NULL,
+                readonly_memory TEXT NOT NULL,
+                skill_index TEXT NOT NULL,
+                tool_schema_fingerprint TEXT NOT NULL,
+                system_fingerprint TEXT NOT NULL,
+                history_rewrite_version TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                prefix_change_reason TEXT NOT NULL DEFAULT 'new_thread',
+                PRIMARY KEY (project_fingerprint, thread_id)
+            )
+            """
+        )
+        project_fingerprint = hashlib.sha256(
+            str(project.resolve()).encode("utf-8")
+        ).hexdigest()
+        connection.execute(
+            """
+            INSERT INTO harness_prompt_epochs (
+                project_fingerprint, thread_id, prompt_version, system_prompt,
+                environment_snapshot, readonly_memory, skill_index,
+                tool_schema_fingerprint, system_fingerprint,
+                history_rewrite_version, created_at_ms
+            ) VALUES (?, 'legacy-prompt', 1, '历史系统上下文', '{}', '{}', '{}', 'tool', 'fp', 'v1', 123)
+            """,
+            (project_fingerprint,),
+        )
+        connection.execute(f"PRAGMA user_version={source_version}")
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(
+        ThreadPersistenceError,
+        match="CHECKPOINT_MIGRATION_LEGACY_TABLE_UNEXPECTED",
+    ):
+        await ThreadPersistence.open(project=project, home=home)
+
+    state_path = database.with_name(database.name + ".migration-state.json")
+    backup_path = database.with_name(
+        f"{database.name}.pre-v{source_version}-migration.bak"
+    )
+    assert not state_path.exists()
+    assert not backup_path.exists()
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == source_version
+        assert connection.execute(
+            "SELECT system_prompt FROM harness_prompt_epochs WHERE thread_id='legacy-prompt'"
+        ).fetchone()[0] == "历史系统上下文"
+        assert connection.execute(
+            "SELECT COUNT(*) FROM harness_run_context_snapshots"
+        ).fetchone()[0] == 0
+    finally:
+        connection.close()
 
 
 async def test_thread_persistence_commits_context_rewrite_as_one_typed_operation(tmp_path: Path) -> None:

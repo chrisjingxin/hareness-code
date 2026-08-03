@@ -98,6 +98,33 @@ test("context.updated 区分 full、skipped 和 failed 状态", () => {
   expect(state.status).toBe("上下文压缩失败")
 })
 
+test("context.updated 的 report、micro、full、overflow、skipped、failed 都只显示安全摘要", () => {
+  let state = startRun(createInitialState(), run, "检查上下文")
+  const updates = [
+    ["report", "上下文接近预算"],
+    ["pressure_micro", "正在归档工具结果"],
+    ["manual_full", "正在整理上下文"],
+    ["overflow_recovery", "正在恢复上下文"],
+    ["manual_skipped", "上下文压缩已跳过"],
+    ["overflow_failed", "上下文压缩失败"],
+  ] as const
+
+  for (const [sequence, [action, status]] of updates.entries()) {
+    state = applyAgentEvent(state, event("context.updated", sequence + 1, {
+      action,
+      estimated_tokens: 7000,
+      input_cap_tokens: 12288,
+      context_window_tokens: 16384,
+      dynamic_tokens: 7000,
+      miss_reason: "safe-diagnostic-only",
+      artifact_ids: ["internal-artifact-id"],
+    }))
+    expect(state.status).toBe(status)
+    expect(messages(state).at(-1)?.content).not.toContain("internal-artifact-id")
+    expect(messages(state).at(-1)?.content).not.toContain("/Users/")
+  }
+})
+
 test("审批和稳定 question ID 通过时间线 request 进入状态", () => {
   let state = startRun(createInitialState(), run, "修改文件")
   state = applyInteractionRequest(state, request("approval", 1, { description: "写入源文件", requests: { action_requests: [] } }))

@@ -136,11 +136,6 @@ class RunContextSnapshotMiddleware(AgentMiddleware):
         system_prompt = f"{prompt}\n\n{base_prompt}" if base_prompt else prompt
         return await handler(request.override(system_message=SystemMessage(content=system_prompt)))
 
-
-# 保留旧嵌入式调用的导入形状；实现已经改为只读取 RunContextSnapshot。
-PromptEpochMiddleware = RunContextSnapshotMiddleware
-
-
 def _system_message_text(message: object | None) -> str:
     """将 DeepAgents 生成的基础 system message 转为文本，保持现有顺序。"""
     if message is None:

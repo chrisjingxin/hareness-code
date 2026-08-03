@@ -8,10 +8,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from langchain_core.messages import AIMessage
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
-from harness_agent.host.agent_host import AgentHost
+from harness_agent.context_window import ContextUpdate
+from harness_agent.server import AgentHost
 
 
 class _BlockingAgent:
@@ -25,6 +27,13 @@ class _BlockingAgent:
         await asyncio.Event().wait()
         if False:
             yield None
+
+
+class _StreamingAgent:
+    """只产生一条 mock 模型消息，验证 transport 不复制 Run 生命周期。"""
+
+    async def astream(self, *_args: Any, **_kwargs: Any):
+        yield ((), "messages", (AIMessage(content="fixture response"), {}))
 
 
 def _request(method: str, params: dict[str, Any], request_id: str) -> dict[str, Any]:
@@ -72,6 +81,113 @@ async def test_run_owner_and_observer_receive_identical_events(tmp_path: Path) -
     attached_events = [frame["params"] for frame in attached_frames if frame.get("method") == "event"]
     assert owner_events == attached_events
     assert [event["sequence"] for event in owner_events] == [1, 2, 3]
+    await host.close()
+
+
+async def test_stdio_owner_and_websocket_observer_share_context_updated_sequence(
+    tmp_path: Path,
+) -> None:
+    """stdio owner 与真实 WebSocket attachment 看到同一 context.updated/终态序列。"""
+    owner_frames: list[dict[str, Any]] = []
+    host = AgentHost(
+        agent=_StreamingAgent(),
+        config_home=tmp_path / "home",
+        workspace=tmp_path,
+    )
+    host.send = lambda message: _append(owner_frames, message)  # type: ignore[method-assign]
+    await host.dispatch(
+        _request(
+            "initialize",
+            _initialize("host.attach", "run.multithread"),
+            "owner-init",
+        )
+    )
+    import socket
+
+    probe = socket.socket()
+    try:
+        try:
+            probe.bind(("127.0.0.1", 0))
+        except PermissionError:
+            await host.close()
+            pytest.skip("sandbox forbids loopback WebSocket bind")
+    finally:
+        probe.close()
+    await host.dispatch(
+        _request("host.attachment.create", {"origin": "http://127.0.0.1:43210"}, "attach")
+    )
+    attachment_response = owner_frames[-1]
+    if "result" not in attachment_response:
+        await host.close()
+        raise AssertionError(f"WebSocket attachment unexpectedly failed: {attachment_response}")
+    grant = attachment_response["result"]
+    origin = "http://127.0.0.1:43210"
+    websocket_frames: list[dict[str, Any]] = []
+
+    async with connect(grant["endpoint"], origin=origin, proxy=None) as socket:
+        await socket.send(json.dumps({"type": "auth", "token": grant["token"]}))
+        assert json.loads(await socket.recv()) == {"type": "ready"}
+        await socket.send(
+            json.dumps(
+                _request(
+                    "initialize",
+                    _initialize("run.multithread"),
+                    "web-init",
+                )
+            )
+        )
+        initialized = json.loads(await socket.recv())
+        assert initialized["result"]["connection"]["role"] == "attached"
+        attached_connection = next(
+            connection
+            for connection in host._connections.values()
+            if connection is not host._owner_connection
+        )
+        attached_connection.watched_threads.add("thread-transport")
+        host._context_updates["thread-transport"] = [
+            ContextUpdate(
+                thread_id="thread-transport",
+                action="report",
+                estimated_tokens=100,
+                input_cap_tokens=200,
+                context_window_tokens=256,
+                dynamic_tokens=100,
+            )
+        ]
+        await host.dispatch(
+            _request(
+                "run.start",
+                {
+                    "message": "transport continuity",
+                    "thread_id": "thread-transport",
+                    "run_id": "run-transport",
+                },
+                "run-start",
+            )
+        )
+        for _ in range(100):
+            frame = json.loads(await asyncio.wait_for(socket.recv(), timeout=1))
+            websocket_frames.append(frame)
+            if (
+                frame.get("method") == "event"
+                and frame.get("params", {}).get("type") == "run.completed"
+            ):
+                break
+        else:
+            raise AssertionError(f"WebSocket run did not complete: {websocket_frames}")
+
+    owner_events = [frame["params"] for frame in owner_frames if frame.get("method") == "event"]
+    websocket_events = [
+        frame["params"] for frame in websocket_frames if frame.get("method") == "event"
+    ]
+    assert owner_events == websocket_events
+    assert [event["type"] for event in owner_events] == [
+        "run.started",
+        "context.updated",
+        "content.delta",
+        "run.completed",
+    ]
+    assert [event["sequence"] for event in owner_events] == [1, 2, 3, 4]
     await host.close()
 
 

@@ -400,7 +400,7 @@ async def test_context_compact_rewrites_idle_thread_and_returns_context_summary(
     """手动压缩只允许空闲 thread，成功后写回 checkpoint 并同步摘要状态。"""
     from langchain_core.messages import HumanMessage
 
-    from harness_agent.context_window import ContextUpdate
+    from harness_agent.context_compaction import CompressionResult
     from harness_agent.server import AgentHost
     from types import SimpleNamespace
 
@@ -436,22 +436,24 @@ async def test_context_compact_rewrites_idle_thread_and_returns_context_summary(
             self.updates.append((config, update))
 
     class Middleware:
+        compactor = object()
+        _window = 128
+
         def __init__(self, store: Store) -> None:
             self.store = store
 
-        async def compact_now(self, thread_id: str, messages: list[HumanMessage]):
-            update = ContextUpdate(
-                thread_id=thread_id,
+        async def compact_now(self, request: object) -> CompressionResult:
+            compacted = (HumanMessage(content="<harness_context_summary>摘要</harness_context_summary>"),)
+            self.store.messages = compacted
+            return CompressionResult(
+                outcome="compressed",
+                trigger="manual",
                 action="manual_summary",
+                projected_messages=compacted,
                 estimated_tokens=20,
                 input_cap_tokens=100,
-                context_window_tokens=128,
-                dynamic_tokens=10,
                 artifact_ids=("history-123456789",),
             )
-            compacted = [HumanMessage(content="<harness_context_summary>摘要</harness_context_summary>")]
-            self.store.messages = tuple(compacted)
-            return compacted, update, True
 
         @staticmethod
         def consume_updates(_thread_id: str) -> tuple[()]:
@@ -477,7 +479,7 @@ async def test_context_compact_rewrites_idle_thread_and_returns_context_summary(
             "estimated_tokens": 20,
             "input_cap_tokens": 100,
             "context_window_tokens": 128,
-            "dynamic_tokens": 10,
+            "dynamic_tokens": 20,
             "cache_status": "unknown",
             "cached_tokens": None,
             "miss_reason": None,
@@ -624,10 +626,9 @@ executor = "fast"
     assert '"name":"read_file"' in capability.content
     assert '"name":"execute"' in capability.content
 
-    async def forbidden_legacy_write(_epoch: Any) -> None:
-        raise AssertionError("production run path must not write PromptEpoch")
+    from harness_agent.thread_persistence import ThreadPersistence
 
-    server._thread_persistence.persist_prompt_epoch = forbidden_legacy_write  # type: ignore[method-assign]
+    assert not hasattr(ThreadPersistence, "persist_prompt_epoch")
 
     await server.dispatch(_request(
         "run.start",
@@ -1206,7 +1207,7 @@ async def test_default_context_compact_acquires_and_releases_profile_engine(tmp_
         AgentEnginePoolSettings,
         Za38Config,
     )
-    from harness_agent.context_window import ContextUpdate
+    from harness_agent.context_compaction import CompressionResult
     from harness_agent.agent_engine_profile import component_fingerprint
     from harness_agent.server import AgentHost, _AgentEngineArtifacts
     from types import SimpleNamespace
@@ -1246,23 +1247,21 @@ async def test_default_context_compact_acquires_and_releases_profile_engine(tmp_
             return {"configurable": {"thread_id": thread_id}}
 
     class Middleware:
+        compactor = object()
+
         def __init__(self, store: Store) -> None:
             self.store = store
 
-        async def compact_now(self, thread_id: str, _messages: list[HumanMessage]):
-            compacted = [HumanMessage(content="摘要")]
-            self.store.messages = tuple(compacted)
-            return (
-                compacted,
-                ContextUpdate(
-                    thread_id=thread_id,
-                    action="manual_summary",
-                    estimated_tokens=8,
-                    input_cap_tokens=100,
-                    context_window_tokens=128,
-                    dynamic_tokens=4,
-                ),
-                True,
+        async def compact_now(self, request: object) -> CompressionResult:
+            compacted = (HumanMessage(content="摘要"),)
+            self.store.messages = compacted
+            return CompressionResult(
+                outcome="compressed",
+                trigger="manual",
+                action="manual_summary",
+                projected_messages=compacted,
+                estimated_tokens=8,
+                input_cap_tokens=100,
             )
 
         @staticmethod

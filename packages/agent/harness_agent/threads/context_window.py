@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
@@ -45,6 +46,23 @@ from harness_agent.prompting import (
 from harness_agent.run_context import RunContext, thread_id_for_runtime
 from harness_agent.thread_persistence import ContextState, ThreadPersistence
 
+
+_SAFE_CONTEXT_WIRE_TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,96}$")
+
+
+def _safe_context_wire_token(value: object, *, fallback: str) -> str:
+    """只把稳定短标识放到 context.updated，拒绝路径和原始诊断文本。"""
+    if isinstance(value, str) and _SAFE_CONTEXT_WIRE_TOKEN.fullmatch(value):
+        return value
+    return fallback
+
+
+def _safe_context_wire_reason(value: object) -> str | None:
+    """将 miss_reason 限制为可诊断码，不回传异常、提示词或工具内容。"""
+    if value is None:
+        return None
+    return _safe_context_wire_token(value, fallback="diagnostic_unavailable")
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable
     from langchain_core.language_models import BaseChatModel
@@ -68,15 +86,20 @@ class ContextUpdate:
     def payload(self) -> dict[str, object]:
         """转换为不含内部对象的 JSON-RPC 载荷。"""
         return {
-            "action": self.action,
+            "action": _safe_context_wire_token(self.action, fallback="context_unknown"),
             "estimated_tokens": self.estimated_tokens,
             "input_cap_tokens": self.input_cap_tokens,
             "context_window_tokens": self.context_window_tokens,
             "dynamic_tokens": self.dynamic_tokens,
-            "cache_status": self.cache_status,
+            "cache_status": _safe_context_wire_token(
+                self.cache_status, fallback="unknown"
+            ),
             "cached_tokens": self.cached_tokens,
-            "miss_reason": self.miss_reason,
-            "artifact_ids": list(self.artifact_ids),
+            "miss_reason": _safe_context_wire_reason(self.miss_reason),
+            "artifact_ids": [
+                _safe_context_wire_token(artifact_id, fallback="artifact_redacted")
+                for artifact_id in self.artifact_ids
+            ],
         }
 
 
@@ -224,14 +247,15 @@ class ContextWindowMiddleware(AgentMiddleware):
             )
             if recovery is None or not recovery.compressed:
                 reason = recovery.reason if recovery is not None else "persistence_unavailable"
+                safe_reason = _safe_context_wire_reason(reason) or "diagnostic_unavailable"
                 self._publish(
                     thread_id,
                     "overflow_failed",
                     estimated,
-                    miss_reason=reason,
+                    miss_reason=safe_reason,
                 )
                 raise ContextOverflowError(
-                    f"CONTEXT_OVERFLOW_RECOVERY_FAILED:{reason}"
+                    f"CONTEXT_OVERFLOW_RECOVERY_FAILED:{safe_reason}"
                 ) from first_overflow
             prepared = list(recovery.projected_messages)
             rewrite = True

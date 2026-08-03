@@ -121,12 +121,16 @@ class ContextProjector:
         agent: Any,
         thread_id: str,
         *,
+        projection: ModelProjection | None = None,
         exclude_record_id: str | None = None,
     ) -> ModelProjection:
         """从 Harness 事实单向刷新 LangGraph messages 缓存。"""
-        projection = await self.project(
-            thread_id, exclude_record_id=exclude_record_id
-        )
+        if projection is None:
+            projection = await self.project(
+                thread_id, exclude_record_id=exclude_record_id
+            )
+        elif exclude_record_id is not None:
+            raise ContextProjectionError("PROJECTION_PRECOMPUTED_EXCLUSION_CONFLICT")
         await agent.aupdate_state(
             # CompiledStateGraph 把非空 namespace 解释为子图；project 隔离
             # 由 ProjectScopedAsyncSqliteSaver 在根图写入时统一补齐。
