@@ -78,14 +78,15 @@ async def test_consecutive_rewrites_declare_all_artifacts_and_restart_from_lates
             content="",
             tool_calls=[{"id": "tool-first", "name": "read", "args": {}}],
         ),
-        ToolMessage(content="a" * 33_000, tool_call_id="tool-first"),
+            ToolMessage(content="a" * 22_000, tool_call_id="tool-first"),
         AIMessage(
             content="",
             tool_calls=[{"id": "tool-second", "name": "read", "args": {}}],
         ),
-        ToolMessage(content="b" * 33_000, tool_call_id="tool-second"),
-        AIMessage(content="旧结论 " + "c" * 33_000),
+            ToolMessage(content="b" * 22_000, tool_call_id="tool-second"),
+            AIMessage(content="旧结论 " + "c" * 22_000),
         HumanMessage(content="第二轮"),
+        HumanMessage(content="第三轮"),
     ]
     first_messages, first_new_ids, first_changed = await first_middleware._dehydrate(
         "thread", original, keep_turns=1
@@ -137,12 +138,12 @@ async def test_consecutive_rewrites_declare_all_artifacts_and_restart_from_lates
             content="",
             tool_calls=[{"id": "tool-third", "name": "read", "args": {}}],
         ),
-        ToolMessage(content="c" * 33_000, tool_call_id="tool-third"),
+            ToolMessage(content="c" * 24_000, tool_call_id="tool-third"),
         AIMessage(
             content="",
             tool_calls=[{"id": "tool-fourth", "name": "read", "args": {}}],
         ),
-        ToolMessage(content="d" * 33_000, tool_call_id="tool-fourth"),
+            ToolMessage(content="d" * 24_000, tool_call_id="tool-fourth"),
         HumanMessage(content="第三轮"),
     ]
     third_messages, third_new_ids, third_changed = await first_middleware._dehydrate(
@@ -324,7 +325,7 @@ async def test_context_window_manual_compaction_bypasses_threshold_but_keeps_sav
     assert update.action == "manual_summary"
     assert "harness_context_summary" in str(compacted[0].content)
     assert [message.content for message in compacted if isinstance(message, HumanMessage)][-1] == "第三轮"
-    assert (await store.load_context("manual")).state.last_action == "manual_summary"
+    assert (await store.load_context("manual")).state.last_action == "manual_full"
     assert middleware.consume_updates("manual") == (update,)
     await store.close()
 
@@ -440,6 +441,10 @@ async def test_context_rewrite_keeps_current_model_response_in_checkpoint(tmp_pa
     )
     messages = [
         HumanMessage(content="第一轮"),
+        AIMessage(
+            content="",
+            tool_calls=[{"id": "old-tool", "name": "read", "args": {}}],
+        ),
         ToolMessage(content="x" * 42_000, tool_call_id="old-tool"),
         HumanMessage(content="第二轮"),
         HumanMessage(content="第三轮"),

@@ -1,70 +1,58 @@
-"""上下文预算、工具结果归档和低频结构化压缩中间件。
+"""上下文预算中间件与统一压缩服务的运行期适配层。
 
-上下文重写通过一个深模块完成：调用方只提供窗口、模型和 ThreadPersistence；该模块
-负责预算、完整 turn 原子组、归档、摘要、失败熔断和可观测状态。
+真正的自动、手动和 overflow 压缩只在 :mod:`context_compaction` 中实现。本模块
+只负责读取当前模型调用的 canonical projection、把 typed result 转成
+``context.updated``，以及在模型第一次报告 overflow 后最多重试一次。
 """
 
 from __future__ import annotations
 
-import hashlib
-import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
-from langchain.agents.middleware.types import AgentMiddleware, ExtendedModelResponse, ModelRequest, ModelResponse
+from langchain.agents.middleware.types import (
+    AgentMiddleware,
+    ExtendedModelResponse,
+    ModelRequest,
+    ModelResponse,
+)
 from langchain_core.exceptions import ContextOverflowError
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import BaseMessage
 from langgraph.types import Command
 
-from harness_agent.threads.prompting import (
-    HISTORY_REWRITE_VERSION,
-    canonical_json,
-    estimate_tokens,
-    input_cap_tokens,
-    normalized_tool_schemas,
+from harness_agent.context_compaction import (
+    CompressionRequest,
+    CompressionResult,
+    ContextCompactor,
 )
 from harness_agent.context_pressure import (
     ContextPressurePolicy,
     ContextPressureSnapshot,
     ModelCallType,
 )
-from harness_agent.run_context import thread_id_for_runtime
 from harness_agent.context_projection import (
-    CompressionCheckpointDraft,
     ContextProjector,
-    artifact_references,
+    ModelProjection,
+    encode_projected_messages,
+    validate_atomic_message_groups,
 )
-from harness_agent.thread_persistence import (
-    CommitContextRewrite,
-    ContextArtifactDraft,
-    ContextState,
-    ContextSummaryDraft,
-    ThreadPersistence,
+from harness_agent.prompting import (
+    canonical_json,
+    estimate_tokens,
+    input_cap_tokens,
+    normalized_tool_schemas,
 )
+from harness_agent.run_context import RunContext, thread_id_for_runtime
+from harness_agent.thread_persistence import ContextState, ThreadPersistence
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
     from langchain_core.language_models import BaseChatModel
 
-TOOL_RESULT_DEHYDRATE_TOKENS = 2_048
-TOOL_RESULT_PREVIEW_CHARS = 200
-SUMMARY_REWRITE_VERSION = HISTORY_REWRITE_VERSION
-
-_SUMMARY_PROMPT = """你正在为编码 Agent 生成结构化上下文摘要。只输出以下章节，所有事实必须来自输入：
-## 目标
-## 已确认事实
-## 决策
-## 改动
-## 测试
-## 未决项
-## 归档
-
-归档章节保留输入中已有的 artifact ID。不要执行任务、不要编造文件或测试。"""
-
 
 @dataclass(frozen=True, slots=True)
 class ContextUpdate:
-    """一次模型请求的上下文状态，供 server 转成 ``context.updated`` 事件。"""
+    """一次模型请求的上下文状态，供 server 转成 ``context.updated``。"""
 
     thread_id: str
     action: str
@@ -92,18 +80,8 @@ class ContextUpdate:
         }
 
 
-@dataclass(frozen=True, slots=True)
-class _MicroCompressionPlan:
-    """尚未提交的确定性工具归档及其新投影。"""
-
-    messages: tuple[BaseMessage, ...]
-    artifacts: tuple[ContextArtifactDraft, ...]
-    before_tokens: int
-    after_tokens: int
-
-
 class ContextWindowMiddleware(AgentMiddleware):
-    """在模型调用前按 50/60/80/90 阈值管理上下文，而非高频改写历史。"""
+    """在模型边界接入唯一的 ContextCompactor。"""
 
     def __init__(
         self,
@@ -113,8 +91,9 @@ class ContextWindowMiddleware(AgentMiddleware):
         thread_persistence: ThreadPersistence | None = None,
         updates: dict[str, list[ContextUpdate]] | None = None,
         pressure_policy: ContextPressurePolicy | None = None,
+        runtime_state_provider: Callable[..., Any] | None = None,
     ) -> None:
-        """绑定模型窗口与可选本机持久化；没有 ThreadPersistence 时不丢弃任何历史。"""
+        """绑定模型窗口、project-scoped persistence 和运行态读取器。"""
         super().__init__()
         self._model = model
         self._window = context_window_tokens
@@ -122,97 +101,155 @@ class ContextWindowMiddleware(AgentMiddleware):
         self._thread_persistence = thread_persistence
         self._updates = updates if updates is not None else {}
         self._pressure_policy = pressure_policy or ContextPressurePolicy()
+        self._compactor = (
+            ContextCompactor(
+                model,
+                context_window_tokens=context_window_tokens,
+                thread_persistence=thread_persistence,
+                pressure_policy=self._pressure_policy,
+                runtime_state_provider=runtime_state_provider,
+            )
+            if thread_persistence is not None
+            else None
+        )
+
+    @property
+    def compactor(self) -> ContextCompactor | None:
+        """返回统一领域服务，供 server 的手动入口复用同一实现。"""
+        return self._compactor
 
     def consume_updates(self, thread_id: str) -> tuple[ContextUpdate, ...]:
-        """读取并清空指定 thread 的待发送状态，避免中间件直接写 stdout。"""
+        """读取并清空指定 thread 的待发送状态。"""
         return tuple(self._updates.pop(thread_id, []))
 
     async def compact_now(
         self,
-        thread_id: str,
-        messages: list[BaseMessage],
-    ) -> tuple[list[BaseMessage], ContextUpdate, bool]:
-        """按用户命令强制执行一次结构化压缩，并保留最近两个完整 user turn。
-
-        手动压缩不受自动压缩熔断器限制，但仍要求至少节省 20%，避免用户在
-        很短的会话中把原文替换成更长的摘要。调用方负责在成功后写入 checkpoint。
-        """
-        estimated = _messages_tokens(messages)
-        if self._thread_persistence is None:
-            return messages, self._publish(
-                thread_id,
+        request_or_thread: CompressionRequest | str,
+        messages: list[BaseMessage] | None = None,
+    ) -> CompressionResult | tuple[list[BaseMessage], ContextUpdate, bool]:
+        """执行 typed 手动压缩；旧 positional 形状仅作为测试兼容网关。"""
+        if isinstance(request_or_thread, CompressionRequest):
+            result = await self._compress_typed(request_or_thread)
+            self._publish_result(request_or_thread.thread_id, result)
+            return result
+        if messages is None:
+            raise TypeError("COMPRESSION_TYPED_REQUEST_REQUIRED")
+        # 旧调用方不能参与生产路径；它仍然经过同一个 service，避免保留第二套
+        # SQL/摘要实现。正式 server 使用上面的 CompressionRequest 分支。
+        request = await self._legacy_request(
+            request_or_thread,
+            messages,
+            trigger="manual",
+            estimated_tokens=_messages_tokens(messages),
+        )
+        if request is None or self._compactor is None:
+            estimated = _messages_tokens(messages)
+            update = self._publish(
+                request_or_thread,
                 "manual_compaction_unavailable",
                 estimated,
                 miss_reason="thread persistence is unavailable",
-            ), False
-        try:
-            compacted, artifacts, changed = await self._summarize(
-                thread_id,
-                messages,
-                keep_turns=2,
-                state=ContextState(last_action="manual_summary"),
             )
-        except Exception as exc:
-            return messages, self._publish(
-                thread_id,
-                "manual_compaction_failed",
-                estimated,
-                miss_reason=type(exc).__name__,
-            ), False
-        if not changed:
-            return messages, self._publish(
-                thread_id,
-                "manual_compaction_skipped",
-                estimated,
-                miss_reason="not enough complete user turns",
-            ), False
-        after = _messages_tokens(compacted)
-        if not _saves_enough(estimated, after):
-            return messages, self._publish(
-                thread_id,
-                "manual_compaction_skipped",
-                estimated,
-                miss_reason="estimated savings below 20%",
-            ), False
-        return compacted, self._publish(
-            thread_id, "manual_summary", after, artifacts
-        ), True
+            return messages, update, False
+        result = await self._compactor.compress(request)
+        legacy_action = _legacy_manual_action(result)
+        update = self._publish_result(
+            request.thread_id,
+            result,
+            action=legacy_action,
+        )
+        return list(result.projected_messages), update, result.compressed
 
     async def awrap_model_call(
         self,
         request: ModelRequest,
         handler: "Callable[[ModelRequest], Awaitable[ModelResponse]]",
     ) -> ModelResponse | ExtendedModelResponse:
-        """规范化工具后按阈值处理历史；溢出时只做一次无损恢复重试。"""
+        """自动压缩后调用模型，并将 overflow 恢复限制为一次重试。"""
         thread_id = _thread_id(request)
-        ordered_tools = _ordered_request_tools(request.tools)
+        ordered_tools = _ordered_request_tools(list(request.tools or ()))
         estimated = _estimate_request_tokens(request, ordered_tools)
-        prepared = request.messages
-        rewrite = False
-        artifact_ids: tuple[str, ...] = ()
-        action = "within_budget"
         call_type, idle_duration_ms = _next_model_call(request.runtime)
 
-        try:
-            prepared, action, artifact_ids, rewrite = await self._prepare(
-                thread_id,
+        prepared = list(request.messages)
+        rewrite = False
+        projection = await self._canonical_projection(
+            thread_id,
+            request.messages,
+            allow_legacy=not isinstance(_run_context(request.runtime), RunContext),
+        )
+        if projection is not None and self._compactor is not None:
+            pressure = self._measure_pressure(
                 request.messages,
                 estimated,
-                call_type=call_type,
                 idle_duration_ms=idle_duration_ms,
             )
-            result = await handler(request.override(messages=prepared, tools=ordered_tools))
-        except ContextOverflowError:
-            # 网关漏报窗口或估算偏低时，先只归档旧工具输出，再保留最近一轮强制摘要。
-            recovery, recovery_ids, recovered = await self._overflow_recovery(thread_id, request.messages)
-            if not recovered:
-                self._publish(thread_id, "overflow_unrecoverable", estimated)
-                raise
-            result = await handler(request.override(messages=recovery, tools=ordered_tools))
-            prepared = recovery
+            decision = self._pressure_policy.decide(pressure, call_type=call_type)
+            if decision.action in {"micro", "full"}:
+                typed_request = CompressionRequest(
+                    thread_id=thread_id,
+                    trigger="auto",
+                    projection=projection,
+                    run_context_snapshot=_run_context_snapshot(request.runtime),
+                    run_context=_run_context(request.runtime),
+                    pressure_before=pressure,
+                    estimated_tokens=estimated,
+                    call_type=call_type,
+                )
+                compression_result = await self._compactor.compress(typed_request)
+                self._publish_result(thread_id, compression_result)
+                if compression_result.compressed:
+                    prepared = list(compression_result.projected_messages)
+                    rewrite = True
+            elif decision.action == "report":
+                self._publish(thread_id, "report", estimated)
+
+        try:
+            result = await handler(
+                request.override(messages=prepared, tools=ordered_tools)
+            )
+        except ContextOverflowError as first_overflow:
+            # 不把 ContextCompactor 的摘要模型异常带进这里；只有真正的模型
+            # handler overflow 才进入一次 recovery，避免递归压缩循环。
+            overflow_estimated = _estimate_request_tokens(
+                request.override(messages=prepared, tools=ordered_tools),
+                ordered_tools,
+            )
+            recovery = await self._overflow_once(
+                request,
+                thread_id=thread_id,
+                messages=prepared,
+                estimated_tokens=overflow_estimated,
+                call_type=call_type,
+            )
+            if recovery is None or not recovery.compressed:
+                reason = recovery.reason if recovery is not None else "persistence_unavailable"
+                self._publish(
+                    thread_id,
+                    "overflow_failed",
+                    estimated,
+                    miss_reason=reason,
+                )
+                raise ContextOverflowError(
+                    f"CONTEXT_OVERFLOW_RECOVERY_FAILED:{reason}"
+                ) from first_overflow
+            prepared = list(recovery.projected_messages)
             rewrite = True
-            action = "overflow_recovery"
-            artifact_ids = recovery_ids
+            try:
+                result = await handler(
+                    request.override(messages=prepared, tools=ordered_tools)
+                )
+            except ContextOverflowError as second_overflow:
+                self._publish(
+                    thread_id,
+                    "overflow_failed",
+                    recovery.estimated_tokens,
+                    recovery.artifact_ids,
+                    miss_reason="second_overflow_after_single_retry",
+                )
+                raise ContextOverflowError(
+                    "CONTEXT_OVERFLOW_AFTER_RECOVERY"
+                ) from second_overflow
 
         if rewrite:
             return ExtendedModelResponse(
@@ -221,14 +258,127 @@ class ContextWindowMiddleware(AgentMiddleware):
                     update={
                         "messages": [
                             *ContextProjector.cache_rewrite(prepared),
-                            # wrap_model_call 的附加 Command 在模型结果之后应用；必须把
-                            # 本轮响应重新加入，否则 RemoveMessage 会丢失回答或 tool-call。
+                            # 附加 Command 在模型结果之后应用；保留本轮回答或
+                            # tool-call，不能只写入重写后的历史。
                             *result.result,
                         ]
                     }
                 ),
             )
         return result
+
+    async def _compress_typed(self, request: CompressionRequest) -> CompressionResult:
+        """执行 typed service；不存在持久化时返回明确 skipped。"""
+        if self._compactor is None:
+            return CompressionResult(
+                outcome="skipped",
+                trigger=request.trigger,
+                action=f"{request.trigger}_skipped",
+                projected_messages=request.projection.messages,
+                estimated_tokens=request.estimated_tokens or _messages_tokens(request.projection.messages),
+                input_cap_tokens=self._input_cap,
+                reason="thread persistence is unavailable",
+            )
+        return await self._compactor.compress(request)
+
+    async def _overflow_once(
+        self,
+        request: ModelRequest,
+        *,
+        thread_id: str,
+        messages: Sequence[BaseMessage],
+        estimated_tokens: int,
+        call_type: ModelCallType,
+    ) -> CompressionResult | None:
+        """只为第一次模型 overflow 创建一次 typed recovery 请求。"""
+        if self._compactor is None:
+            return None
+        projection = await self._canonical_projection(
+            thread_id,
+            messages,
+            allow_legacy=not isinstance(_run_context(request.runtime), RunContext),
+        )
+        if projection is None:
+            return CompressionResult(
+                outcome="failed",
+                trigger="overflow",
+                action="overflow_failed",
+                projected_messages=tuple(messages),
+                estimated_tokens=estimated_tokens,
+                input_cap_tokens=self._input_cap,
+                reason="canonical_projection_unavailable",
+            )
+        pressure = self._measure_pressure(messages, estimated_tokens)
+        result = await self._compactor.compress(
+            CompressionRequest(
+                thread_id=thread_id,
+                trigger="overflow",
+                projection=projection,
+                run_context_snapshot=_run_context_snapshot(request.runtime),
+                run_context=_run_context(request.runtime),
+                pressure_before=pressure,
+                estimated_tokens=estimated_tokens,
+                call_type=call_type,
+            )
+        )
+        self._publish_result(thread_id, result)
+        return result
+
+    async def _canonical_projection(
+        self,
+        thread_id: str,
+        messages: Sequence[BaseMessage],
+        *,
+        allow_legacy: bool = False,
+    ) -> ModelProjection | None:
+        """只接受 Transcript + latest-valid checkpoint 与模型输入相同的投影。"""
+        if self._thread_persistence is None:
+            return None
+        try:
+            projection = await ContextProjector(self._thread_persistence).project(thread_id)
+            if encode_projected_messages(projection.messages) != encode_projected_messages(messages):
+                # 生产路径 fail closed；当前调用若尚未 flush 到 Transcript，不能
+                # 把内存缓存伪装成可审计 checkpoint。
+                # 非 shared-engine 的嵌入式兼容图没有 RunContext，也没有生产
+                # Transcript flush 边界；它只用于旧库级测试，不进入 Host 生产路径。
+                if allow_legacy:
+                    records = await self._thread_persistence.load_transcript(thread_id)
+                    return ModelProjection(
+                        messages=tuple(messages),
+                        checkpoint=None,
+                        tail_start_sequence=0,
+                        source_record_sequence=records[-1].sequence if records else 0,
+                    )
+                return None
+            return projection
+        except Exception:
+            return None
+
+    async def _legacy_request(
+        self,
+        thread_id: str,
+        messages: Sequence[BaseMessage],
+        *,
+        trigger: str,
+        estimated_tokens: int,
+    ) -> CompressionRequest | None:
+        """为旧测试/嵌入式调用构造最小 projection，不被生产入口使用。"""
+        if self._thread_persistence is None:
+            return None
+        validate_atomic_message_groups(messages)
+        records = await self._thread_persistence.load_transcript(thread_id)
+        source_sequence = records[-1].sequence if records else 0
+        return CompressionRequest(
+            thread_id=thread_id,
+            trigger=trigger,  # type: ignore[arg-type]
+            projection=ModelProjection(
+                messages=tuple(messages),
+                checkpoint=None,
+                tail_start_sequence=0,
+                source_record_sequence=source_sequence,
+            ),
+            estimated_tokens=estimated_tokens,
+        )
 
     async def _prepare(
         self,
@@ -239,26 +389,17 @@ class ContextWindowMiddleware(AgentMiddleware):
         call_type: ModelCallType = "unclassified",
         idle_duration_ms: int | None = None,
     ) -> tuple[list[BaseMessage], str, tuple[str, ...], bool]:
-        """执行 pressure policy：报告、微压缩、重新计量，再按需完整摘要。"""
-        pressure_before = self._measure_pressure(
-            messages,
-            estimated,
-            idle_duration_ms=idle_duration_ms,
+        """旧 middleware 单测网关；内部仍只调用 ContextCompactor。"""
+        pressure = self._measure_pressure(
+            messages, estimated, idle_duration_ms=idle_duration_ms
         )
-        decision = self._pressure_policy.decide(
-            pressure_before,
-            call_type=call_type,
-        )
+        decision = self._pressure_policy.decide(pressure, call_type=call_type)
         if decision.action == "none":
             return messages, "within_budget", (), False
         if decision.action == "report":
             self._publish(thread_id, "report", estimated)
             return messages, "report", (), False
-        if self._thread_persistence is None:
-            # A preview without its durable Artifact would leave an
-            # unrecoverable virtual path in the model cache.  Fail closed for
-            # every automatic compression action, including overflow-adjacent
-            # callers that enter through this preparation path.
+        if self._compactor is None:
             self._publish(
                 thread_id,
                 "micro_skipped",
@@ -266,128 +407,32 @@ class ContextWindowMiddleware(AgentMiddleware):
                 miss_reason="thread persistence is unavailable",
             )
             return messages, "micro_skipped", (), False
-
-        state = await self._state(thread_id)
-        if state.circuit_open:
-            self._publish(
-                thread_id,
-                "circuit_open",
-                estimated,
-                miss_reason="three compression failures",
-            )
-            return messages, "circuit_open", (), False
-
-        try:
-            keep_turns = (
-                1
-                if pressure_before.occupancy_ratio >= self._pressure_policy.config.hard_ratio
-                else 2
-            )
-            micro_plan = await self._plan_dehydrate(
-                messages,
-                keep_turns=keep_turns,
-                keep_recent=decision.keep_recent,
-                estimated_tokens=estimated,
-            )
-            if micro_plan is not None:
-                pressure_after = self._measure_pressure(
-                    list(micro_plan.messages),
-                    micro_plan.after_tokens,
-                )
-                # This is the second, new policy decision.  The old estimate is
-                # never used to decide whether the full model path is still needed.
-                after_decision = self._pressure_policy.decide(
-                    pressure_after,
-                    call_type=call_type,
-                )
-                if after_decision.action != "full":
-                    committed = await self._commit_micro_plan(
-                        thread_id,
-                        micro_plan,
-                        trigger=decision.reason,
-                        pressure_before=pressure_before,
-                        pressure_after=pressure_after,
-                        state=ContextState(
-                            last_action=(
-                                "idle_micro"
-                                if decision.reason == "idle"
-                                else "pressure_micro"
-                            )
-                        ),
-                    )
-                    action = (
-                        "idle_micro" if decision.reason == "idle" else "pressure_micro"
-                    )
-                    self._publish(
-                        thread_id,
-                        action,
-                        micro_plan.after_tokens,
-                        committed,
-                    )
-                    return list(micro_plan.messages), action, committed, True
-
-                # The micro plan is deliberately kept in memory only while the
-                # same request continues into full summarization.  Its Artifact
-                # drafts are committed together with the final full checkpoint.
-                messages_for_full = list(micro_plan.messages)
-                micro_artifacts = micro_plan.artifacts
-                full_before = pressure_after
-                full_estimated = micro_plan.after_tokens
-                keep_turns = (
-                    1
-                    if pressure_after.occupancy_ratio
-                    >= self._pressure_policy.config.hard_ratio
-                    else 2
-                )
-            else:
-                if decision.action != "full":
-                    self._publish(
-                        thread_id,
-                        "micro_skipped",
-                        estimated,
-                        miss_reason=decision.reason,
-                    )
-                    return messages, "micro_skipped", (), False
-                messages_for_full = messages
-                micro_artifacts = ()
-                full_before = pressure_before
-                full_estimated = estimated
-
-            summarized, artifacts, changed = await self._summarize(
-                thread_id,
-                messages_for_full,
-                keep_turns=keep_turns,
-                state=ContextState(
-                    last_action=(
-                        "forced_summary"
-                        if keep_turns == 1
-                        else "summary"
-                    )
-                ),
-                base_artifacts=micro_artifacts,
-                pressure_before=full_before,
-                estimated_tokens=full_estimated,
-            )
-            if changed:
-                after = self._estimate_rewritten_tokens(
-                    full_estimated,
-                    messages_for_full,
-                    summarized,
-                )
-                action = "forced_summary" if keep_turns == 1 else "summary"
-                self._publish(thread_id, action, after, artifacts)
-                return summarized, action, artifacts, True
-            await self._record_failure(thread_id, "summary_insufficient")
-            return messages, "summary_insufficient", (), False
-        except Exception as exc:
-            await self._record_failure(thread_id, "compression_failed")
-            self._publish(
-                thread_id,
-                "compression_failed",
-                estimated,
-                miss_reason=type(exc).__name__,
-            )
-            return messages, "compression_failed", (), False
+        request = await self._legacy_request(
+            thread_id,
+            messages,
+            trigger="auto",
+            estimated_tokens=estimated,
+        )
+        if request is None:
+            return messages, "micro_skipped", (), False
+        request = replace(request, pressure_before=pressure, call_type=call_type)
+        result = await self._compactor.compress(request)
+        if result.compressed:
+            action = _legacy_auto_action(result, pressure)
+            self._publish_result(thread_id, result, action=action)
+            return list(result.projected_messages), action, result.artifact_ids, True
+        if result.action == "auto_skipped_circuit_open":
+            action = "circuit_open"
+        elif decision.action == "micro":
+            action = "micro_skipped"
+        elif result.outcome == "failed":
+            # 旧调用方把空/截断摘要归为 insufficient；typed result 仍在
+            # context.updated 中保留失败原因。
+            action = "summary_insufficient"
+        else:
+            action = "summary_insufficient"
+        self._publish_result(thread_id, result, action=action)
+        return messages, action, (), False
 
     async def _plan_dehydrate(
         self,
@@ -396,55 +441,17 @@ class ContextWindowMiddleware(AgentMiddleware):
         keep_turns: int,
         keep_recent: int,
         estimated_tokens: int | None = None,
-    ) -> _MicroCompressionPlan | None:
-        """只在内存中规划工具归档，不提前写 Artifact 或 checkpoint。"""
-        cutoff = _cutoff_for_recent_turns(messages, keep_turns)
-        if cutoff <= 0:
+    ) -> Any:
+        """旧测试网关，直接复用统一服务的确定性 micro planner。"""
+        if self._compactor is None:
             return None
-        candidates = _dehydratable_tool_candidates(messages, cutoff)
-        reclaimable = candidates[:-max(1, keep_recent)]
-        if not reclaimable:
-            return None
-
-        replacements = list(messages)
-        drafts: list[ContextArtifactDraft] = []
-        for index, message, tool_name in reclaimable:
-            content = _message_content(message)
-            artifact_id = f"tool-{uuid.uuid4().hex}"
-            preview = _tool_preview(
-                content,
-                artifact_id,
-                tool_name=tool_name,
-            )
-            if not _saves_enough(estimate_tokens(content), estimate_tokens(preview)):
-                continue
-            replacements[index] = message.model_copy(update={"content": preview})
-            drafts.append(
-                ContextArtifactDraft(
-                    kind="tool",
-                    content=_render_message(message),
-                    source_start=index,
-                    source_end=index,
-                    artifact_id=artifact_id,
-                )
-            )
-        before_tokens = (
-            estimated_tokens
-            if estimated_tokens is not None
-            else _messages_tokens(messages)
-        )
-        after_tokens = self._estimate_rewritten_tokens(
-            before_tokens,
+        return self._compactor._plan_micro(  # noqa: SLF001
+            "legacy",
             messages,
-            replacements,
-        )
-        if not drafts or not _saves_enough(before_tokens, after_tokens):
-            return None
-        return _MicroCompressionPlan(
-            messages=tuple(replacements),
-            artifacts=tuple(drafts),
-            before_tokens=before_tokens,
-            after_tokens=after_tokens,
+            keep_turns=keep_turns,
+            keep_recent=keep_recent,
+            before_tokens=estimated_tokens or _messages_tokens(messages),
+            trigger="auto",
         )
 
     async def _dehydrate(
@@ -457,77 +464,111 @@ class ContextWindowMiddleware(AgentMiddleware):
         state: ContextState | None = None,
         estimated_tokens: int | None = None,
     ) -> tuple[list[BaseMessage], tuple[str, ...], bool]:
-        """提交一份独立 micro checkpoint；自动升级路径使用未提交的 plan。"""
-        if self._thread_persistence is None:
+        """旧测试网关；micro 仍通过 ContextCompactor 的事务入口提交。"""
+        if self._compactor is None:
             return messages, (), False
-        plan = await self._plan_dehydrate(
+        plan = self._compactor._plan_micro(  # noqa: SLF001
+            thread_id,
             messages,
             keep_turns=keep_turns,
             keep_recent=keep_recent,
-            estimated_tokens=estimated_tokens,
+            before_tokens=estimated_tokens or _messages_tokens(messages),
+            trigger="overflow" if state and state.last_action.startswith("overflow") else "auto",
         )
         if plan is None:
             return messages, (), False
-        before = self._measure_pressure(
-            messages,
-            plan.before_tokens,
-        )
-        after = self._measure_pressure(list(plan.messages), plan.after_tokens)
-        artifact_ids = await self._commit_micro_plan(
+        request = await self._legacy_request(
             thread_id,
-            plan,
-            trigger=state.last_action if state is not None else "automatic",
-            pressure_before=before,
-            pressure_after=after,
-            state=state,
+            messages,
+            trigger="overflow" if state and state.last_action.startswith("overflow") else "auto",
+            estimated_tokens=plan.before_tokens,
         )
-        return list(plan.messages), artifact_ids, True
+        if request is None:
+            return messages, (), False
+        before = self._measure_pressure(messages, plan.before_tokens)
+        after = self._measure_pressure(list(plan.messages), plan.after_tokens)
+        runtime_state = state or ContextState(last_action="auto_micro")
+        result = await self._compactor._commit_projection(  # noqa: SLF001
+            request,
+            messages=plan.messages,
+            artifacts=plan.artifacts,
+            summary=None,
+            state=runtime_state,
+            trigger=request.trigger,
+            action=runtime_state.last_action,
+            before=before,
+            after=after,
+            estimated_tokens=plan.after_tokens,
+        )
+        return list(result.projected_messages), result.artifact_ids, True
 
-    async def _commit_micro_plan(
+    async def _summarize(
         self,
         thread_id: str,
-        plan: _MicroCompressionPlan,
+        messages: list[BaseMessage],
         *,
-        trigger: str,
-        pressure_before: ContextPressureSnapshot,
-        pressure_after: ContextPressureSnapshot,
-        state: ContextState | None,
-    ) -> tuple[str, ...]:
-        """把确定性微压缩和其 Artifact 在同一事务中提交。"""
-        if self._thread_persistence is None:
-            raise RuntimeError("CONTEXT_PERSISTENCE_REQUIRED")
-        committed = await self._thread_persistence.commit_context(
-            CommitContextRewrite(
-                thread_id=thread_id,
-                artifacts=plan.artifacts,
-                state=state,
-                checkpoint=CompressionCheckpointDraft(
-                    checkpoint_id=f"projection-{uuid.uuid4().hex}",
-                    mode="micro",
-                    rewrite_version=SUMMARY_REWRITE_VERSION,
-                    projected_messages=plan.messages,
-                    artifact_ids=artifact_references(plan.messages),
-                    trigger=trigger,
-                    pressure_before=pressure_before.record(),
-                    pressure_after=pressure_after.record(),
-                ),
-            )
+        keep_turns: int,
+        state: ContextState | None = None,
+        base_artifacts: Sequence[Any] = (),
+        pressure_before: ContextPressureSnapshot | None = None,
+        estimated_tokens: int | None = None,
+    ) -> tuple[list[BaseMessage], tuple[str, ...], bool]:
+        """旧测试网关；手动 trigger 明确要求 full。"""
+        if self._compactor is None:
+            return messages, (), False
+        request = await self._legacy_request(
+            thread_id,
+            messages,
+            trigger="manual",
+            estimated_tokens=estimated_tokens or _messages_tokens(messages),
         )
-        return tuple(artifact.artifact_id for artifact in committed.artifacts)
+        if request is None:
+            return messages, (), False
+        request = replace(
+            request,
+            pressure_before=pressure_before
+            or self._measure_pressure(messages, request.estimated_tokens or 0),
+            runtime_state=(state.runtime_state if state is not None else None),
+        )
+        result = await self._compactor.compress(request)
+        if not result.compressed:
+            return messages, (), False
+        return list(result.projected_messages), result.artifact_ids, True
+
+    async def _overflow_recovery(
+        self,
+        thread_id: str,
+        messages: list[BaseMessage],
+    ) -> tuple[list[BaseMessage], tuple[str, ...], bool]:
+        """旧测试网关；真实模型调用使用 ``_overflow_once``。"""
+        if self._compactor is None:
+            return messages, (), False
+        request = await self._legacy_request(
+            thread_id,
+            messages,
+            trigger="overflow",
+            estimated_tokens=_messages_tokens(messages),
+        )
+        if request is None:
+            return messages, (), False
+        result = await self._compactor.compress(request)
+        if not result.compressed:
+            return messages, (), False
+        self._publish_result(thread_id, result)
+        return list(result.projected_messages), result.artifact_ids, True
 
     def _measure_pressure(
         self,
-        messages: list[BaseMessage],
+        messages: Sequence[BaseMessage],
         estimated_tokens: int,
         *,
         idle_duration_ms: int | None = None,
     ) -> ContextPressureSnapshot:
-        """用当前投影重新统计可回收工具压力，不依赖旧快照。"""
-        keep_recent = self._pressure_policy.config.keep_recent
+        """按当前投影测量可回收工具压力。"""
         count, tokens = _reclaimable_tool_pressure(
             messages,
             keep_turns=2,
-            keep_recent=keep_recent,
+            keep_recent=self._pressure_policy.config.keep_recent,
         )
         return self._pressure_policy.measure(
             estimated_tokens,
@@ -543,167 +584,26 @@ class ContextWindowMiddleware(AgentMiddleware):
         before: Sequence[BaseMessage],
         after: Sequence[BaseMessage],
     ) -> int:
-        """保留 system/schema 固定开销，只替换投影消息的估算量。"""
+        """兼容旧测试的投影 token 估算。"""
         return max(
             0,
-            before_tokens - _messages_tokens(list(before)) + _messages_tokens(list(after)),
+            before_tokens - _messages_tokens(before) + _messages_tokens(after),
         )
 
-    async def _summarize(
+    def _publish_result(
         self,
         thread_id: str,
-        messages: list[BaseMessage],
+        result: CompressionResult,
         *,
-        keep_turns: int,
-        state: ContextState | None = None,
-        base_artifacts: Sequence[ContextArtifactDraft] = (),
-        pressure_before: ContextPressureSnapshot | None = None,
-        estimated_tokens: int | None = None,
-    ) -> tuple[list[BaseMessage], tuple[str, ...], bool]:
-        """把完整旧 turn 组生成最多 6% 窗口的结构化摘要，并在成功后归档原文。"""
-        if self._thread_persistence is None:
-            return messages, (), False
-        cutoff = _cutoff_for_recent_turns(messages, keep_turns)
-        if cutoff <= 0:
-            return messages, (), False
-        old, recent = messages[:cutoff], messages[cutoff:]
-        summary_input_cap = min(12_000, self._summary_cap())
-        summary_input = _clip_to_tokens(_render_messages(old), summary_input_cap)
-        response = await self._model.ainvoke(
-            [SystemMessage(content=_SUMMARY_PROMPT), HumanMessage(content=summary_input)]
-        )
-        summary = _message_content(response).strip()
-        if not summary or estimate_tokens(summary) > self._summary_cap():
-            return messages, (), False
-        # 归档必须在摘要和节省率都通过校验后发生。先用等长 ID 占位评估，避免
-        # 节省不足时留下无引用的归档或摘要记录。
-        artifact_id = f"history-{uuid.uuid4().hex}"
-        prospective = [
-            HumanMessage(
-                content=(
-                    "<harness_context_summary>\n"
-                    f"{summary}\n\n"
-                    f"Archived original: /.harness/history/{artifact_id}.md\n"
-                    "</harness_context_summary>"
-                )
-            ),
-            *recent,
-        ]
-        before_tokens = (
-            estimated_tokens
-            if estimated_tokens is not None
-            else _messages_tokens(messages)
-        )
-        after_tokens = self._estimate_rewritten_tokens(
-            before_tokens,
-            messages,
-            prospective,
-        )
-        if not _saves_enough(before_tokens, after_tokens):
-            return messages, (), False
-        # 归档必须在摘要、长度和节省率校验后发生，失败时历史完全不变。
-        summary_artifact = ContextArtifactDraft(
-            kind="history",
-            content=_render_messages(old),
-            source_start=0,
-            source_end=cutoff - 1,
-            artifact_id=artifact_id,
-        )
-        all_artifacts = tuple(base_artifacts) + (summary_artifact,)
-        all_artifact_ids = tuple(
-            artifact.artifact_id
-            for artifact in all_artifacts
-            if artifact.artifact_id is not None
-        )
-        summary_artifact_indexes = tuple(range(len(all_artifacts)))
-        checkpoint_artifact_ids = tuple(
-            dict.fromkeys((*artifact_references(prospective), *all_artifact_ids))
-        )
-        before_record = (
-            pressure_before.record()
-            if pressure_before is not None
-            else {"estimated_tokens": before_tokens}
-        )
-        after_record = self._measure_pressure(
-            list(prospective),
-            after_tokens,
-        ).record()
-        committed = await self._thread_persistence.commit_context(
-            CommitContextRewrite(
-                thread_id=thread_id,
-                artifacts=all_artifacts,
-                summary=ContextSummaryDraft(
-                    rewrite_version=SUMMARY_REWRITE_VERSION,
-                    content=summary,
-                    source_start=0,
-                    source_end=cutoff - 1,
-                    artifact_indexes=summary_artifact_indexes,
-                ),
-                state=state,
-                checkpoint=CompressionCheckpointDraft(
-                    checkpoint_id=f"projection-{uuid.uuid4().hex}",
-                    mode="full",
-                    rewrite_version=SUMMARY_REWRITE_VERSION,
-                    projected_messages=tuple(prospective),
-                    artifact_ids=checkpoint_artifact_ids,
-                    trigger=state.last_action if state is not None else "automatic",
-                    pressure_before=before_record,
-                    pressure_after=after_record,
-                ),
-            )
-        )
-        return prospective, tuple(
-            artifact.artifact_id for artifact in committed.artifacts
-        ), True
-
-    async def _overflow_recovery(
-        self, thread_id: str, messages: list[BaseMessage]
-    ) -> tuple[list[BaseMessage], tuple[str, ...], bool]:
-        """处理一次网关溢出：先工具脱水，仍不足时才强制保留最近一轮摘要。"""
-        dehydrated, artifact_ids, changed = await self._dehydrate(
+        action: str | None = None,
+    ) -> ContextUpdate:
+        """将 typed outcome 翻译为稳定事件，不改变 service 的持久化结果。"""
+        return self._publish(
             thread_id,
-            messages,
-            keep_turns=1,
-            state=ContextState(last_action="overflow_tool_dehydration"),
-        )
-        if changed:
-            self._publish(thread_id, "overflow_tool_dehydration", _messages_tokens(dehydrated), artifact_ids)
-            return dehydrated, artifact_ids, True
-        summarized, artifact_ids, changed = await self._summarize(
-            thread_id,
-            messages,
-            keep_turns=1,
-            state=ContextState(last_action="overflow_summary"),
-        )
-        if changed:
-            self._publish(thread_id, "overflow_summary", _messages_tokens(summarized), artifact_ids)
-        return summarized, artifact_ids, changed
-
-    def _summary_cap(self) -> int:
-        """把摘要长度限定在 2K 到 12K token，并与窗口大小线性相关。"""
-        return max(2_048, min(12_000, int((self._window * 0.06) + 0.999)))
-
-    async def _state(self, thread_id: str) -> ContextState:
-        """读取可选持久化状态；无 persistence 的库调用保持无副作用。"""
-        if self._thread_persistence is None:
-            return ContextState()
-        return await self._thread_persistence.load_context_state(thread_id)
-
-    async def _record_failure(self, thread_id: str, action: str) -> None:
-        """累计摘要失败，第三次打开熔断器且不再自动重写历史。"""
-        if self._thread_persistence is None:
-            return
-        previous = await self._thread_persistence.load_context_state(thread_id)
-        failures = previous.failures + 1
-        await self._thread_persistence.commit_context(
-            CommitContextRewrite(
-                thread_id=thread_id,
-                state=ContextState(
-                    failures=failures,
-                    circuit_open=failures >= 3,
-                    last_action=action,
-                ),
-            )
+            action or result.action,
+            result.estimated_tokens,
+            result.artifact_ids,
+            miss_reason=result.reason,
         )
 
     def _publish(
@@ -715,7 +615,7 @@ class ContextWindowMiddleware(AgentMiddleware):
         *,
         miss_reason: str | None = None,
     ) -> ContextUpdate:
-        """缓冲状态给 server，网关不报告缓存 token 时显式标记为 unknown。"""
+        """缓冲状态给 server；网关未提供缓存 token 时显式标记 unknown。"""
         update = ContextUpdate(
             thread_id=thread_id,
             action=action,
@@ -731,37 +631,69 @@ class ContextWindowMiddleware(AgentMiddleware):
 
 
 def _thread_id(request: ModelRequest) -> str:
-    """优先从 RunContext 获取 thread ID，并拒绝与图配置不一致的调用。"""
+    """优先从 RunContext 获取 thread ID，并拒绝跨 thread 配置。"""
     context_thread_id = thread_id_for_runtime(request.runtime)
     if context_thread_id is not None:
         return context_thread_id
     config = getattr(request.runtime, "config", {})
     configurable = config.get("configurable", {}) if isinstance(config, Mapping) else {}
-    return str(configurable.get("thread_id") or "ephemeral") if isinstance(configurable, Mapping) else "ephemeral"
+    if not isinstance(configurable, Mapping):
+        configurable = {}
+    execution_info = getattr(request.runtime, "execution_info", None)
+    execution_thread_id = getattr(execution_info, "thread_id", None)
+    if isinstance(execution_thread_id, str) and execution_thread_id:
+        return execution_thread_id
+    return (
+        str(configurable.get("thread_id") or "ephemeral")
+        if isinstance(configurable, Mapping)
+        else "ephemeral"
+    )
+
+
+def _run_context(runtime: object) -> Any:
+    """返回当前 RunContext；无头兼容调用不猜测运行态。"""
+    return getattr(runtime, "context", None)
+
+
+def _run_context_snapshot(runtime: object) -> Any:
+    """返回本次 run 的 snapshot，不读取旧摘要或旧 checkpoint。"""
+    context = _run_context(runtime)
+    return getattr(context, "context_snapshot", None)
 
 
 def _ordered_request_tools(tools: list[object]) -> list[object]:
-    """根据规范化 schema 查找原对象并按稳定键排序，避免改变工具对象本身。"""
+    """按规范化 schema 稳定排序工具对象，不改变工具内容。"""
     def key(tool: object) -> tuple[str, str, str]:
         schema = normalized_tool_schemas([tool])[0]
-        return str(schema["name"]), str(schema["description"]), canonical_json(schema["parameters"])
+        return (
+            str(schema["name"]),
+            str(schema["description"]),
+            canonical_json(schema["parameters"]),
+        )
 
     return sorted(tools, key=key)
 
 
 def _estimate_request_tokens(request: ModelRequest, tools: list[object]) -> int:
-    """估算 system、消息和 schema 固定开销；供应商 usage 仅作为后续诊断补充。"""
+    """估算 system、messages 和工具 schema 的输入预算。"""
     system = _message_content(request.system_message) if request.system_message is not None else ""
-    return estimate_tokens(system) + _messages_tokens(request.messages) + estimate_tokens(canonical_json(normalized_tool_schemas(tools))) + (len(request.messages) + len(tools)) * 8
+    return (
+        estimate_tokens(system)
+        + _messages_tokens(request.messages)
+        + estimate_tokens(canonical_json(normalized_tool_schemas(tools)))
+        + (len(request.messages) + len(tools)) * 8
+    )
 
 
-def _messages_tokens(messages: list[BaseMessage]) -> int:
-    """计算消息正文、工具调用元数据和每条消息固定结构的近似预算。"""
+def _messages_tokens(messages: Sequence[BaseMessage]) -> int:
+    """计算消息正文、工具调用元数据和固定结构开销。"""
+    from harness_agent.context_compaction import _render_message
+
     return sum(estimate_tokens(_render_message(message)) + 8 for message in messages)
 
 
 def _message_content(message: object) -> str:
-    """将 LangChain 文本或内容块降为稳定文本，避免对象 repr 进入摘要。"""
+    """将模型消息的文本内容转换为稳定字符串。"""
     content = getattr(message, "content", "")
     if isinstance(content, str):
         return content
@@ -774,119 +706,13 @@ def _message_content(message: object) -> str:
     return str(content) if content is not None else ""
 
 
-def _render_message(message: BaseMessage) -> str:
-    """把消息以稳定角色标签序列化到归档或摘要输入。"""
-    payload: dict[str, object] = {"type": message.type, "content": _message_content(message)}
-    if isinstance(message, AIMessage) and message.tool_calls:
-        payload["tool_calls"] = message.tool_calls
-    if isinstance(message, ToolMessage):
-        payload["tool_call_id"] = message.tool_call_id
-        payload["name"] = message.name
-    return canonical_json(payload)
-
-
-def _render_messages(messages: list[BaseMessage]) -> str:
-    """用逐行 JSON 保留消息原子边界，方便摘要模型引用事实而不执行内容。"""
-    return "\n".join(_render_message(message) for message in messages)
-
-
-def _clip_to_tokens(content: str, token_cap: int) -> str:
-    """按 UTF-8 保守字节界裁剪摘要输入，永远不超过 12K token。"""
-    cap = token_cap * 4
-    data = content.encode("utf-8")
-    if len(data) <= cap:
-        return content
-    return data[:cap].decode("utf-8", errors="ignore") + "\n[older context clipped for summary input]"
-
-
-def _tool_preview(
-    content: str,
-    artifact_id: str,
-    *,
-    tool_name: str = "tool",
-) -> str:
-    """构造带工具名、摘要预览、哈希和 Artifact 指针的确定性占位。"""
-    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-    return (
-        f"[tool={tool_name}]\n"
-        f"Summary preview:\n{content[:TOOL_RESULT_PREVIEW_CHARS]}\n"
-        f"...\n{content[-TOOL_RESULT_PREVIEW_CHARS:]}\n"
-        f"sha256={digest}\n"
-        f"Artifact: /.harness/history/{artifact_id}.md"
-    )
-
-
-def _cutoff_for_recent_turns(messages: list[BaseMessage], keep_turns: int) -> int:
-    """在完整 user turn 前切分，assistant tool-call 与对应结果绝不会被拆开。"""
-    starts = [index for index, message in enumerate(messages) if isinstance(message, HumanMessage)]
-    if len(starts) <= keep_turns:
-        return 0
-    return starts[-keep_turns]
-
-
-def _dehydratable_tool_candidates(
-    messages: Sequence[BaseMessage], cutoff: int
-) -> list[tuple[int, ToolMessage, str]]:
-    """只返回已完成、配对且尚未指向 Artifact 的旧工具结果。"""
-    active_calls: dict[str, tuple[int, str]] = {}
-    candidates: list[tuple[int, ToolMessage, str]] = []
-    for index, message in enumerate(messages[:cutoff]):
-        if isinstance(message, AIMessage):
-            if active_calls:
-                # 不能跨越另一个 assistant 边界猜测工具归属。
-                active_calls.clear()
-            for call in message.tool_calls or ():
-                if isinstance(call, Mapping):
-                    call_id = call.get("id")
-                    if isinstance(call_id, str) and call_id:
-                        call_name = call.get("name")
-                        active_calls[call_id] = (
-                            index,
-                            call_name if isinstance(call_name, str) and call_name else "tool",
-                        )
-            continue
-        if isinstance(message, HumanMessage):
-            active_calls.clear()
-            continue
-        if not isinstance(message, ToolMessage):
-            active_calls.clear()
-            continue
-        call_id = message.tool_call_id
-        call_info = active_calls.pop(call_id, None)
-        if call_info is None:
-            continue
-        _call_index, call_name = call_info
-        content = _message_content(message)
-        if artifact_references((message,)):
-            continue
-        if estimate_tokens(content) <= TOOL_RESULT_DEHYDRATE_TOKENS:
-            continue
-        if not _saves_enough(
-            estimate_tokens(content),
-            estimate_tokens(
-                _tool_preview(
-                    content,
-                    "tool-preview",
-                    tool_name=message.name or call_name,
-                )
-            ),
-        ):
-            continue
-        candidates.append((index, message, message.name or call_name))
-    return candidates
-
-
 def _reclaimable_tool_pressure(
     messages: Sequence[BaseMessage], *, keep_turns: int, keep_recent: int
 ) -> tuple[int, int]:
-    """统计实际可被本次微压缩释放的工具结果，而非所有历史工具结果。"""
-    cutoff = _cutoff_for_recent_turns(list(messages), keep_turns)
-    candidates = _dehydratable_tool_candidates(messages, cutoff)
-    reclaimable = candidates[:-max(1, keep_recent)]
-    return len(reclaimable), sum(
-        estimate_tokens(_message_content(message))
-        for _index, message, _tool_name in reclaimable
-    )
+    """复用统一服务的候选判定，避免 middleware 另有工具归档规则。"""
+    from harness_agent.context_compaction import _reclaimable_tool_pressure as measure
+
+    return measure(messages, keep_turns=keep_turns, keep_recent=keep_recent)
 
 
 def _next_model_call(runtime: object) -> tuple[ModelCallType, int | None]:
@@ -907,6 +733,30 @@ def _next_model_call(runtime: object) -> tuple[ModelCallType, int | None]:
     return "unclassified", None
 
 
-def _saves_enough(before_tokens: int, after_tokens: int) -> bool:
-    """只在预计节省至少 20% 时改写历史，避免压缩反而增加上下文。"""
-    return before_tokens > 0 and after_tokens < before_tokens and (before_tokens - after_tokens) / before_tokens >= 0.20
+def _legacy_auto_action(
+    result: CompressionResult, pressure: ContextPressureSnapshot
+) -> str:
+    """把旧测试需要的动作名映射到新的 typed action。"""
+    if result.action == "auto_micro":
+        return "idle_micro" if pressure.idle_duration_ms is not None else "pressure_micro"
+    if result.action == "auto_full":
+        after_ratio = pressure.occupancy_ratio
+        if result.checkpoint is not None:
+            value = result.checkpoint.pressure_before.get("occupancy_ratio")
+            if isinstance(value, (int, float)):
+                after_ratio = float(value)
+        return (
+            "forced_summary"
+            if after_ratio >= 0.90
+            else "summary"
+        )
+    return result.action
+
+
+def _legacy_manual_action(result: CompressionResult) -> str:
+    """兼容旧 context.compact 测试的动作名；正式 JSON-RPC 保持 typed 名。"""
+    if result.compressed:
+        return "manual_summary"
+    if result.outcome == "failed":
+        return "manual_compaction_failed"
+    return "manual_compaction_skipped"

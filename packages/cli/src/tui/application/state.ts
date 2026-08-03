@@ -568,7 +568,10 @@ function contextValue(value: unknown): { action: string; estimatedTokens?: numbe
 /** 将可观测策略映射为紧凑活动状态，避免把 token 诊断混入模型回答。 */
 function contextStatus(payload: Record<string, unknown>): string {
   const action = stringValue(payload.action, "")
-  if (action.includes("summary")) return "正在整理上下文"
+  if (action.includes("failed") || action.includes("unrecoverable")) return "上下文压缩失败"
+  if (action.includes("skipped") || action.includes("circuit_open")) return "上下文压缩已跳过"
+  if (action.includes("overflow")) return "正在恢复上下文"
+  if (action.includes("full") || action.includes("summary")) return "正在整理上下文"
   if (action.includes("micro") || action.includes("dehydration")) return "正在归档工具结果"
   return action === "report" ? "上下文接近预算" : "正在思考"
 }

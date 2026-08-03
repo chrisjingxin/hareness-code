@@ -142,7 +142,7 @@ function contextCompactNotice(value: unknown): string {
     return `上下文已压缩${budget}${artifacts ? `，归档 ${artifacts} 项` : ""}。`
   }
   const reason = typeof context.miss_reason === "string" ? `：${context.miss_reason}` : ""
-  return action === "manual_compaction_skipped"
+  return action === "manual_compaction_skipped" || action === "manual_skipped"
     ? `上下文无需压缩${reason}。`
     : `上下文压缩未完成${reason}。`
 }

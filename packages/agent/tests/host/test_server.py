@@ -1065,6 +1065,134 @@ async def test_default_context_compact_acquires_and_releases_profile_engine(tmp_
     await server._close_agent_engine_pool()
 
 
+async def test_default_manual_compact_passes_current_policy_to_typed_service(
+    tmp_path: Path, monkeypatch: Any
+):
+    """默认手动 compact 从当前 Profile 恢复策略、Todo、snapshot 和 Artifact 引用。"""
+    from langchain_core.messages import HumanMessage
+    from types import SimpleNamespace
+
+    from harness_agent.context_compaction import CompressionResult
+    from harness_agent.context_projection import ContextProjector, ModelProjection
+    from harness_agent.server import AgentHost, _AgentEngineArtifacts
+
+    projection = ModelProjection(
+        messages=(
+            HumanMessage(
+                content="已归档 /.harness/history/current-artifact.md"
+            ),
+        ),
+        checkpoint=None,
+        tail_start_sequence=1,
+        source_record_sequence=1,
+    )
+
+    async def project(_self: Any, _thread_id: str, **_kwargs: Any) -> ModelProjection:
+        return projection
+
+    async def sync_cache(
+        _self: Any, _agent: Any, _thread_id: str, **_kwargs: Any
+    ) -> ModelProjection:
+        return projection
+
+    monkeypatch.setattr(ContextProjector, "project", project)
+    monkeypatch.setattr(ContextProjector, "sync_cache", sync_cache)
+
+    class Store:
+        def __init__(self) -> None:
+            self.completed: list[str] = []
+
+        async def load_latest_context_snapshot(self, _thread_id: str) -> object:
+            return SimpleNamespace(
+                thread_id="manual-server",
+                snapshot_id="snapshot-current",
+                system_fingerprint="snapshot-capability",
+            )
+
+        async def load_langgraph_state(self, _thread_id: str) -> dict[str, object]:
+            return {
+                "todos": [{"content": "真实 Todo", "status": "pending"}],
+                "execution_mode": "persisted-old-mode",
+                "approval_mode": "persisted-old-approval",
+            }
+
+        async def complete_run(self, thread_id: str) -> None:
+            self.completed.append(thread_id)
+
+    class Middleware:
+        compactor = object()
+
+        def __init__(self) -> None:
+            self.request: Any | None = None
+
+        async def compact_now(self, request: Any) -> CompressionResult:
+            self.request = request
+            return CompressionResult(
+                outcome="compressed",
+                trigger="manual",
+                action="manual_full",
+                projected_messages=projection.messages,
+                estimated_tokens=4,
+                input_cap_tokens=100,
+                artifact_ids=("current-artifact",),
+                state=request.runtime_state,
+            )
+
+        @staticmethod
+        def consume_updates(_thread_id: str) -> tuple[()]:
+            return ()
+
+    class Lease:
+        def __init__(self, engine: Any) -> None:
+            self.engine = engine
+            self.released = False
+
+        async def release(self) -> None:
+            self.released = True
+
+    store = Store()
+    middleware = Middleware()
+    engine = SimpleNamespace(profile_key="current-profile", graph=object())
+    lease = Lease(engine)
+    spec = SimpleNamespace(
+        execution=SimpleNamespace(
+            mode="remote-sandbox",
+            approval_mode="old-execution-approval",
+        ),
+        effective_policy=SimpleNamespace(
+            approval_mode="yolo",
+            fingerprint="current-policy",
+        ),
+        runtime_profile=SimpleNamespace(policy_fingerprint="current-policy"),
+    )
+    server = AgentHost(config_home=tmp_path / "home")
+    server._thread_persistence = store  # type: ignore[assignment]
+    server._resolved_agent_specs[engine.profile_key] = spec  # type: ignore[assignment]
+    server._agent_engine_artifacts[engine.profile_key] = _AgentEngineArtifacts(
+        execution_context=object(),
+        context_compactor=middleware,
+    )
+
+    async def acquire(_thread_id: str) -> tuple[Lease, Any]:
+        return lease, engine
+
+    server._acquire_default_agent_engine = acquire  # type: ignore[method-assign]
+
+    result = await server._compact_idle_thread("manual-server")
+
+    assert result["compacted"] is True
+    assert store.completed == ["manual-server"]
+    assert lease.released is True
+    assert middleware.request is not None
+    runtime = middleware.request.runtime_state
+    assert runtime.todos == ({"content": "真实 Todo", "status": "pending"},)
+    assert runtime.execution_mode == "remote-sandbox"
+    assert runtime.approval_mode == "yolo"
+    assert runtime.context_snapshot_id == "snapshot-current"
+    assert runtime.capability_fingerprint == "snapshot-capability"
+    assert runtime.artifact_ids == ("current-artifact",)
+
+
 async def test_agent_engine_pool_capacity_is_reported_as_stable_rpc_error():
     """无安全淘汰候选时控制面返回稳定资源繁忙码，而不是内部异常类型。"""
     from harness_agent.runtime.agent_engine import AgentEnginePoolCapacityError

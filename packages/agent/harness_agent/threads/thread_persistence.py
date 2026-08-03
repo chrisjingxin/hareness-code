@@ -35,9 +35,10 @@ from harness_agent.context_projection import (
     source_digest,
     strict_json_loads,
 )
+from harness_agent.runtime_state import RuntimeStateError, RuntimeStateSnapshot
 
 
-_SCHEMA_VERSION = 10
+_SCHEMA_VERSION = 11
 _MAX_PREVIEW_CHARS = 160
 _MAX_INLINE_TOOL_BYTES = 64 * 1024
 _TRANSCRIPT_KINDS = ("user", "assistant", "tool", "context")
@@ -114,11 +115,12 @@ class ContextSummary:
 
 @dataclass(frozen=True, slots=True)
 class ContextState:
-    """自动压缩的失败熔断和最近一次策略状态。"""
+    """自动压缩熔断和最近一次真实运行态。"""
 
     failures: int = 0
     circuit_open: bool = False
     last_action: str = "none"
+    runtime_state: RuntimeStateSnapshot | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -611,6 +613,37 @@ class ThreadPersistence:
             raise
         except (aiosqlite.Error, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ThreadPersistenceError(f"RUN_CONTEXT_SNAPSHOT_READ_FAILED: {exc}") from exc
+
+    async def load_latest_context_snapshot(
+        self, thread_id: str
+    ) -> RunContextSnapshot | None:
+        """返回当前 Thread 最近一次已受理 Run 的上下文快照。"""
+        self._ensure_open()
+        try:
+            async with self._lock:
+                cursor = await self._connection.execute(
+                    """
+                    SELECT snapshot_id
+                    FROM harness_run_context_snapshots
+                    WHERE project_fingerprint = ? AND thread_id = ?
+                    ORDER BY created_at_ms DESC, snapshot_id DESC
+                    LIMIT 1
+                    """,
+                    (self._project_fingerprint, thread_id),
+                )
+                row = await cursor.fetchone()
+                await cursor.close()
+            if row is None:
+                return None
+            return await self.load_context_snapshot(
+                str(row["snapshot_id"]), thread_id=thread_id
+            )
+        except ThreadPersistenceError:
+            raise
+        except (aiosqlite.Error, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ThreadPersistenceError(
+                f"RUN_CONTEXT_SNAPSHOT_READ_FAILED: {exc}"
+            ) from exc
 
     async def _insert_context_snapshot_in_transaction(
         self, snapshot: RunContextSnapshot
@@ -1118,6 +1151,22 @@ class ThreadPersistence:
             )
         except aiosqlite.Error as exc:
             raise ThreadPersistenceError(f"CONTEXT_MESSAGES_READ_FAILED: {exc}") from exc
+
+    async def load_langgraph_state(self, thread_id: str) -> Mapping[str, object]:
+        """读取当前根图的结构化 channel，供运行态恢复器消费。"""
+        self._ensure_open()
+        try:
+            checkpoint = await self._checkpointer.aget_tuple(
+                self.graph_config(thread_id)
+            )
+            if checkpoint is None or not isinstance(checkpoint.checkpoint, Mapping):
+                return {}
+            channels = checkpoint.checkpoint.get("channel_values")
+            if not isinstance(channels, Mapping):
+                return {}
+            return dict(channels)
+        except (aiosqlite.Error, TypeError, ValueError) as exc:
+            raise ThreadPersistenceError(f"LANGGRAPH_STATE_READ_FAILED: {exc}") from exc
 
     async def load_context_state(self, thread_id: str) -> ContextState:
         """读取压缩策略状态，不触及 LangGraph messages 缓存。"""
@@ -1669,12 +1718,13 @@ class ThreadPersistence:
                         """
                         INSERT INTO harness_context_state (
                             project_fingerprint, thread_id, failures, circuit_open,
-                            last_action, updated_at_ms
-                        ) VALUES (?, ?, ?, ?, ?, ?)
+                            last_action, runtime_state, updated_at_ms
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(project_fingerprint, thread_id) DO UPDATE SET
                             failures = excluded.failures,
                             circuit_open = excluded.circuit_open,
                             last_action = excluded.last_action,
+                            runtime_state = excluded.runtime_state,
                             updated_at_ms = excluded.updated_at_ms
                         """,
                         (
@@ -1683,6 +1733,11 @@ class ThreadPersistence:
                             command.state.failures,
                             int(command.state.circuit_open),
                             command.state.last_action,
+                            _strict_json(
+                                command.state.runtime_state.record()
+                                if command.state.runtime_state is not None
+                                else {}
+                            ),
                             _now_ms(),
                         ),
                     )
@@ -1916,13 +1971,14 @@ class ThreadPersistence:
             raise ThreadPersistenceError(f"CONTEXT_ARTIFACT_READ_FAILED: {exc}") from exc
 
     async def _load_context_state(self, thread_id: str) -> ContextState:
-        """返回压缩失败熔断状态；缺失记录按未失败初始化。"""
+        """返回压缩熔断和结构化运行态；缺失记录按空状态初始化。"""
         self._ensure_open()
         try:
             async with self._lock:
                 cursor = await self._connection.execute(
                     """
-                    SELECT failures, circuit_open, last_action FROM harness_context_state
+                    SELECT failures, circuit_open, last_action, runtime_state
+                    FROM harness_context_state
                     WHERE project_fingerprint = ? AND thread_id = ?
                     """,
                     (self._project_fingerprint, thread_id),
@@ -1931,8 +1987,20 @@ class ThreadPersistence:
                 await cursor.close()
             if row is None:
                 return ContextState()
-            return ContextState(int(row["failures"]), bool(row["circuit_open"]), str(row["last_action"]))
-        except aiosqlite.Error as exc:
+            encoded_state = row["runtime_state"]
+            decoded_state = strict_json_loads(str(encoded_state)) if encoded_state else {}
+            runtime_state = (
+                None
+                if decoded_state in ({}, None)
+                else RuntimeStateSnapshot.from_record(decoded_state)
+            )
+            return ContextState(
+                failures=int(row["failures"]),
+                circuit_open=bool(row["circuit_open"]),
+                last_action=str(row["last_action"]),
+                runtime_state=runtime_state,
+            )
+        except (aiosqlite.Error, RuntimeStateError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ThreadPersistenceError(f"CONTEXT_STATE_READ_FAILED: {exc}") from exc
 
     async def list_threads(self, limit: int = 80) -> tuple[ThreadSummary, ...]:
@@ -2209,6 +2277,7 @@ class ThreadPersistence:
                         failures INTEGER NOT NULL DEFAULT 0,
                         circuit_open INTEGER NOT NULL DEFAULT 0,
                         last_action TEXT NOT NULL DEFAULT 'none',
+                        runtime_state TEXT NOT NULL DEFAULT '{}',
                         updated_at_ms INTEGER NOT NULL,
                         PRIMARY KEY (project_fingerprint, thread_id)
                     )
@@ -2398,6 +2467,9 @@ class ThreadPersistence:
             if version < 10:
                 await self._add_compression_commit_payload_column()
                 version = 10
+            if version < 11:
+                await self._add_context_runtime_state_column()
+                version = 11
             await self._connection.execute(f"PRAGMA user_version={version}")
             await self._connection.commit()
             self._checkpointer.is_setup = True
@@ -2672,6 +2744,21 @@ class ThreadPersistence:
                 """
                 ALTER TABLE harness_compression_checkpoints
                 ADD COLUMN commit_payload TEXT
+                """
+            )
+
+    async def _add_context_runtime_state_column(self) -> None:
+        """v11 为 ContextState 增加严格 JSON 运行态快照列。"""
+        cursor = await self._connection.execute(
+            "PRAGMA table_info(harness_context_state)"
+        )
+        columns = {str(row[1]) for row in await cursor.fetchall()}
+        await cursor.close()
+        if "runtime_state" not in columns:
+            await self._connection.execute(
+                """
+                ALTER TABLE harness_context_state
+                ADD COLUMN runtime_state TEXT NOT NULL DEFAULT '{}'
                 """
             )
 
@@ -2998,6 +3085,11 @@ def _context_commit_payload(
                     "failures": state.failures,
                     "circuit_open": state.circuit_open,
                     "last_action": state.last_action,
+                    "runtime_state": (
+                        state.runtime_state.record()
+                        if state.runtime_state is not None
+                        else None
+                    ),
                 }
             ),
             "checkpoint": {

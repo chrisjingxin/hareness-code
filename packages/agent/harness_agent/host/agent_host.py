@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from jsonschema.exceptions import ValidationError
 
@@ -115,6 +115,9 @@ from harness_agent.run_coordinator import (
     StartRun,
     _bounded_json,
 )
+
+if TYPE_CHECKING:
+    from harness_agent.runtime_state import RuntimeExecutionPolicy
 
 logger = logging.getLogger(__name__)
 STABLE_ERROR_CODES = {
@@ -978,12 +981,27 @@ class AgentHost:
 
     async def _compact_idle_thread(self, thread_id: str) -> dict[str, object]:
         """在 Coordinator 已锁定为空闲的窗口内完成压缩。"""
-        from harness_agent.context_projection import ContextProjector
+        from harness_agent.context_projection import ContextProjector, artifact_references
+        from harness_agent.runtime_state import (
+            RuntimeExecutionPolicy,
+            RuntimeStateRehydrator,
+        )
 
         persistence = await self._ensure_thread_persistence()
         projection = await ContextProjector(persistence).project(thread_id)
         messages = list(projection.messages)
+        load_snapshot = getattr(persistence, "load_latest_context_snapshot", None)
+        snapshot = await load_snapshot(thread_id) if callable(load_snapshot) else None
+        load_graph_state = getattr(persistence, "load_langgraph_state", None)
+        graph_state = await load_graph_state(thread_id) if callable(load_graph_state) else {}
         if not self._uses_default_agent_factory:
+            runtime_state = RuntimeStateRehydrator.capture(
+                graph_state,
+                None,
+                projection.messages,
+                artifact_ids=artifact_references(projection.messages),
+                context_snapshot=snapshot,
+            )
             agent = await self._ensure_agent()
             middleware = getattr(self, "_context_compactor", None)
             if agent is None or middleware is None:
@@ -994,6 +1012,9 @@ class AgentHost:
                 thread_id=thread_id,
                 messages=messages,
                 persistence=persistence,
+                projection=projection,
+                run_context_snapshot=snapshot,
+                runtime_state=runtime_state,
             )
 
         lease, engine = await self._acquire_default_agent_engine(thread_id)
@@ -1001,14 +1022,28 @@ class AgentHost:
             if lease is None or engine is None:
                 raise RpcError(-32010, "CONTEXT_COMPACTION_UNAVAILABLE")
             artifacts = self._agent_engine_artifacts.get(engine.profile_key)
-            if artifacts is None or engine.graph is None:
+            spec = self._resolved_agent_specs.get(engine.profile_key)
+            if artifacts is None or spec is None or engine.graph is None:
                 raise RpcError(-32010, "CONTEXT_COMPACTION_UNAVAILABLE")
+            current_execution_policy = RuntimeExecutionPolicy.from_resolved_spec(spec)
+            runtime_state = RuntimeStateRehydrator.capture(
+                graph_state,
+                None,
+                projection.messages,
+                artifact_ids=artifact_references(projection.messages),
+                context_snapshot=snapshot,
+                current_execution_policy=current_execution_policy,
+            )
             return await self._compact_with_agent_engine(
                 agent=engine.graph,
                 middleware=artifacts.context_compactor,
                 thread_id=thread_id,
                 messages=messages,
                 persistence=persistence,
+                projection=projection,
+                run_context_snapshot=snapshot,
+                runtime_state=runtime_state,
+                current_execution_policy=current_execution_policy,
             )
         finally:
             await self._release_agent_engine_lease(lease)
@@ -1588,6 +1623,7 @@ class AgentHost:
         from harness_agent.agent import create_harness_agent
         from harness_agent.context_window import ContextWindowMiddleware
         from harness_agent.providers.harness_gateway import create_openai_compatible_model
+        from harness_agent.runtime_state import RuntimeStateRehydrator
 
         persistence = await self._ensure_thread_persistence()
         checkpointer = persistence.checkpointer
@@ -1612,11 +1648,26 @@ class AgentHost:
                 model_settings,
                 async_client=provider_lease.value,
             )
+
+            async def runtime_state_provider(
+                thread_id: str,
+                run_context: RunContext | None,
+                messages: list[Any] | tuple[Any, ...],
+            ) -> Any:
+                """每次压缩从真实 LangGraph channel 重新读取结构化运行态。"""
+                graph_state = await persistence.load_langgraph_state(thread_id)
+                return RuntimeStateRehydrator.capture(
+                    graph_state,
+                    run_context,
+                    messages,
+                )
+
             context_compactor = ContextWindowMiddleware(
                 model,
                 context_window_tokens=model_settings.context_window_tokens,
                 thread_persistence=persistence,
                 updates=self._context_updates,
+                runtime_state_provider=runtime_state_provider,
             )
             graph = create_harness_agent(
                 model,
@@ -1751,12 +1802,57 @@ class AgentHost:
         thread_id: str,
         messages: list[Any],
         persistence: ThreadPersistence,
+        projection: Any | None = None,
+        run_context_snapshot: Any | None = None,
+        runtime_state: Any | None = None,
+        current_execution_policy: RuntimeExecutionPolicy | None = None,
     ) -> dict[str, object]:
         """使用已租用 AgentEngine 的 compactor 提交投影并刷新缓存。"""
-        compacted, update, rewritten = await middleware.compact_now(thread_id, messages)
+        from harness_agent.context_compaction import CompressionRequest, CompressionResult
+        from harness_agent.context_projection import ModelProjection
+        from harness_agent.context_window import ContextUpdate
+
+        # 生产 middleware 只接收 typed request。测试/嵌入式旧 middleware 仍
+        # 走兼容网关，避免把协议外形和本任务的领域事务耦合起来。
+        typed_service = getattr(middleware, "compactor", None)
+        if typed_service is not None:
+            if not isinstance(projection, ModelProjection):
+                projection = ModelProjection(
+                    messages=tuple(messages),
+                    checkpoint=None,
+                    tail_start_sequence=0,
+                    source_record_sequence=0,
+                )
+            typed_result = await middleware.compact_now(
+                CompressionRequest(
+                    thread_id=thread_id,
+                    trigger="manual",
+                    projection=projection,
+                    run_context_snapshot=run_context_snapshot,
+                    runtime_state=runtime_state,
+                    current_execution_policy=current_execution_policy,
+                )
+            )
+            if not isinstance(typed_result, CompressionResult):
+                raise RuntimeError("CONTEXT_COMPACTION_TYPED_RESULT_INVALID")
+            compacted = list(typed_result.projected_messages)
+            rewritten = typed_result.compressed
+            updates = middleware.consume_updates(thread_id)
+            update = updates[-1] if updates else ContextUpdate(
+                thread_id=thread_id,
+                action=typed_result.action,
+                estimated_tokens=typed_result.estimated_tokens,
+                input_cap_tokens=typed_result.input_cap_tokens,
+                context_window_tokens=getattr(middleware, "_window", 0),
+                dynamic_tokens=typed_result.estimated_tokens,
+                artifact_ids=typed_result.artifact_ids,
+                miss_reason=typed_result.reason,
+            )
+        else:
+            compacted, update, rewritten = await middleware.compact_now(thread_id, messages)
+            middleware.consume_updates(thread_id)
         # `compact_now` 复用运行期状态缓冲；当前请求直接返回结果，因此必须消费，
         # 防止下一次 Agent run 重复发出过期的 context.updated 事件。
-        middleware.consume_updates(thread_id)
         if rewritten:
             from harness_agent.context_projection import ContextProjector
 

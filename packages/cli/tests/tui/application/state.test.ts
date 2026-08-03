@@ -68,6 +68,36 @@ test("context.updated 将 micro 显示为归档工具结果并写入 lastRun", (
   expect(state.lastRun?.context).toEqual({ action: "pressure_micro", estimatedTokens: 8200, inputCapTokens: 12288 })
 })
 
+test("context.updated 区分 full、skipped 和 failed 状态", () => {
+  let state = startRun(createInitialState(), run, "检查上下文")
+  state = applyAgentEvent(state, event("context.updated", 1, {
+    action: "manual_full",
+    estimated_tokens: 7000,
+    input_cap_tokens: 12288,
+    context_window_tokens: 16384,
+    dynamic_tokens: 7000,
+  }))
+  expect(state.status).toBe("正在整理上下文")
+  state = applyAgentEvent(state, event("context.updated", 2, {
+    action: "manual_skipped",
+    estimated_tokens: 7000,
+    input_cap_tokens: 12288,
+    context_window_tokens: 16384,
+    dynamic_tokens: 7000,
+    miss_reason: "short_history",
+  }))
+  expect(state.status).toBe("上下文压缩已跳过")
+  state = applyAgentEvent(state, event("context.updated", 3, {
+    action: "overflow_failed",
+    estimated_tokens: 7000,
+    input_cap_tokens: 12288,
+    context_window_tokens: 16384,
+    dynamic_tokens: 7000,
+    miss_reason: "second_overflow_after_single_retry",
+  }))
+  expect(state.status).toBe("上下文压缩失败")
+})
+
 test("审批和稳定 question ID 通过时间线 request 进入状态", () => {
   let state = startRun(createInitialState(), run, "修改文件")
   state = applyInteractionRequest(state, request("approval", 1, { description: "写入源文件", requests: { action_requests: [] } }))
