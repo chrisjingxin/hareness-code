@@ -16,6 +16,7 @@ export type {
 /** 首页与 Thread 视图共用的状态和交互入口。 */
 export type SharedViewProps = {
   interactive: InteractiveSnapshot
+  transientNotice?: { id: string; message: string }
   terminalWidth: number
   terminalHeight: number
   inputRef: RefObject<TextareaRenderable | null>

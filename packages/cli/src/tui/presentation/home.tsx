@@ -27,6 +27,11 @@ export function HomeView(props: SharedViewProps) {
         <box width="100%" maxWidth={75} flexShrink={0}>
           <Composer {...props} variant="home" commandMenuPlacement={compact ? "inline-below" : "above"} />
         </box>
+        {props.transientNotice ? (
+          <box width="100%" maxWidth={75} paddingTop={1} flexShrink={0}>
+            <text fg={tuiTheme.warning} content={props.transientNotice.message} />
+          </box>
+        ) : null}
         {showSupplemental ? <HomeSupplemental terminalWidth={props.terminalWidth} /> : null}
         <box flexGrow={1} minHeight={0} />
       </box>

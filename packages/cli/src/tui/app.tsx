@@ -12,10 +12,10 @@ import { AgentClientInteractiveAdapter } from "../interactive/agent-port"
 import type { InteractiveRuntime } from "../interactive/runtime"
 import {
   createTuiAdapter,
+  type ApprovalDecision,
   type TuiAdapter,
   type TuiAdapterOptions,
   type TuiAdapterSnapshot,
-  type TuiIntent,
 } from "./application/adapter"
 import type { CommandMenuItem } from "../interactive/commands"
 import { isHomeState } from "../interactive/state"
@@ -243,7 +243,7 @@ export function Za38Tui(options: TuiOptions) {
 
   const viewProps = {
     interactive,
-    snapshot,
+    transientNotice: snapshot.transientNotice,
     terminalWidth: terminal.width,
     terminalHeight: terminal.height,
     inputRef,
@@ -262,7 +262,7 @@ export function Za38Tui(options: TuiOptions) {
     showToolDetails: snapshot.showToolDetails,
     expandedTools: snapshot.expandedTools,
     onToggleTool: (toolId: string) => { void adapter.dispatch({ type: "tool-toggle", toolId }) },
-    onApproval: (decision: TuiIntent extends never ? never : import("./application/adapter").ApprovalDecision) => { void adapter.dispatch({ type: "approval", decision }) },
+    onApproval: (decision: ApprovalDecision) => { void adapter.dispatch({ type: "approval", decision }) },
     onQuestion: (answer: string) => { void adapter.dispatch({ type: "question", answer }) },
   }
 

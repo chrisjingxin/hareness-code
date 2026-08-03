@@ -23,6 +23,7 @@ export function ConversationTimeline(props: {
   onApproval: (decision: ApprovalDecision) => void
   onQuestion: (answer: string) => void
   modelName?: string
+  transientNotice?: { id: string; message: string }
 }) {
   return (
     <scrollbox ref={props.scrollRef} stickyScroll stickyStart="bottom" flexGrow={1} minHeight={0} scrollAcceleration={createScrollAcceleration()} viewportOptions={{ paddingRight: 1 }}>
@@ -41,8 +42,19 @@ export function ConversationTimeline(props: {
       ))}
       <TimelineActivity interactive={props.interactive} />
       <RunSummary interactive={props.interactive} modelName={props.modelName} />
+      {props.transientNotice ? <TransientNotice key={props.transientNotice.id} message={props.transientNotice.message} /> : null}
       <box height={1} />
     </scrollbox>
+  )
+}
+
+/** 宿主级结果通知（Web 启动等）在时间线末尾以系统消息样式展示。 */
+function TransientNotice(props: { message: string }) {
+  return (
+    <box marginTop={1} paddingLeft={3} paddingRight={3} flexDirection="row" gap={1}>
+      <text fg={tuiTheme.warning}>·</text>
+      <text content={props.message} fg={tuiTheme.warning} />
+    </box>
   )
 }
 

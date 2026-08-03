@@ -336,6 +336,36 @@ test("窄终端中的 /skills 使用单列浮层且保持可操作", async () =>
   }
 })
 
+test("无 Web launcher 时 /web 显示宿主级通知，不创建 Agent run", async () => {
+  const { client, requests } = createMockClient()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        client,
+        runtime,
+        onRequestExit: () => undefined,
+      }), { width: 100, height: 28 })
+    })
+    await act(async () => { await setup.flush() })
+    await act(async () => {
+      await setup.mockInput.typeText("/web")
+      await setup.flush()
+    })
+    await act(async () => {
+      setup.mockInput.pressEnter()
+      await Bun.sleep(0)
+      await setup.flush()
+    })
+    const frame = await setup.waitForFrame(value => value.includes("未提供 Web launcher"))
+    expect(frame).toContain("未提供 Web launcher")
+    expect(requests).toHaveLength(0)
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+  }
+})
+
 async function sendAndFinish(
   setup: Awaited<ReturnType<typeof testRender>>,
   client: AgentClient,

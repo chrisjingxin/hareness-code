@@ -763,7 +763,8 @@ export class InteractiveControllerImpl implements InteractiveController {
   private resetThread(
     nextState: InteractiveState = clearThread(this.state),
     modelState: { models?: readonly ModelProfile[]; selection?: string; actual?: ModelProfile } = {},
-  ): void {    this.threadEpoch += 1
+  ): void {
+    this.threadEpoch += 1
     this.state = nextState
     this.requestedModelProfileId = modelState.selection ?? null
     this.actualModelProfile = modelState.actual
