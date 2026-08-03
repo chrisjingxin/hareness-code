@@ -7,12 +7,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from harness_agent.runtime.agent_catalog import EffectiveExecutionPolicy
-from harness_agent.config.config import ExecutionSettings, ModelSettings
-from harness_agent.runtime.execution_binding import ResolvedExecutionBinding
-from harness_agent.extensions.mcp import McpConfigSnapshot
-from harness_agent.threads.prompting import canonical_json, sha256_text, tool_schema_fingerprint
-from harness_agent.extensions.skills import SkillRegistry
+from harness_agent.agent_catalog import EffectiveExecutionPolicy
+from harness_agent.agent_engine_profile import component_fingerprint
+from harness_agent.config import ExecutionSettings, ModelSettings
+from harness_agent.execution_binding import ResolvedExecutionBinding
+from harness_agent.mcp import McpConfigSnapshot
+from harness_agent.prompting import canonical_json, sha256_text, tool_schema_fingerprint
+from harness_agent.skills import SkillRegistry
 
 
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
@@ -22,6 +23,20 @@ BUILTIN_MAIN_DEFINITION_FINGERPRINT = sha256_text("builtin-agent:main:v1")
 
 RUN_CONTEXT_SNAPSHOT_MIDDLEWARE_VERSION = "run-context-snapshot-v1"
 """当前生产 RunContextSnapshot middleware 的 Profile 身份版本。"""
+
+
+def skill_catalog_fingerprint(
+    skill_registry: SkillRegistry,
+    *,
+    view_fingerprint: str | None = None,
+) -> str:
+    """从同一 immutable Registry 计算 AgentEngine Profile 的 Skill 身份。"""
+    return component_fingerprint(
+        {
+            "view": view_fingerprint or sha256_text(f"skills:{skill_registry.snapshot_id}"),
+            "snapshot_id": skill_registry.snapshot_id,
+        }
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +94,6 @@ class ResolvedAgentSpec:
         from harness_agent.runtime.agent_engine_profile import (
             AgentEngineProfile,
             ModelRoleBinding,
-            component_fingerprint,
             model_settings_fingerprint,
         )
         from harness_agent.runtime.agent import default_tool_catalog_fingerprint
@@ -104,11 +118,9 @@ class ResolvedAgentSpec:
                     "builtin_tool_catalog": default_tool_catalog_fingerprint(),
                 }
             ),
-            skill_catalog_fingerprint=component_fingerprint(
-                {
-                    "view": self.skill_view_fingerprint,
-                    "snapshot_id": self.skill_registry.snapshot_id,
-                }
+            skill_catalog_fingerprint=skill_catalog_fingerprint(
+                self.skill_registry,
+                view_fingerprint=self.skill_view_fingerprint,
             ),
             mcp_config_fingerprint=self.mcp_snapshot.digest,
             sandbox_config_fingerprint=component_fingerprint(

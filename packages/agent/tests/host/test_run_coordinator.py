@@ -60,7 +60,6 @@ def _coordinator(releases: list[str]) -> RunCoordinator:
         preparation_provider=preparation_provider,
         runtime_provider=runtime_provider,
         interaction_port=_NoopInteraction(),
-        skill_registry_provider=lambda: None,  # type: ignore[return-value]
     )
 
 
@@ -161,7 +160,6 @@ async def test_close_before_run_task_starts_releases_snapshot_reservation_once()
         preparation_provider=preparation_provider,
         runtime_provider=runtime_provider,
         interaction_port=_NoopInteraction(),
-        skill_registry_provider=lambda: None,  # type: ignore[return-value]
     )
 
     await coordinator.start(
@@ -1018,7 +1016,6 @@ async def test_failed_run_flushes_completed_semantics_but_discards_partial_assis
         preparation_provider=preparation_provider,
         runtime_provider=runtime_provider,
         interaction_port=_NoopInteraction(),
-        skill_registry_provider=lambda: None,  # type: ignore[return-value]
     )
     execution = await coordinator.start(
         StartRun(thread_id="thread-failed", run_id="run-failed", message="失败测试"),

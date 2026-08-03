@@ -478,17 +478,17 @@ def create_harness_agent(
             run_scoped_virtual_backend_factory,
         )
 
-        registry = skill_registry or SkillRegistry(local_workspace)
         if shared_engine:
             # ``backend`` 的固定部分只包含工作区资源；虚拟历史必须在每次工具
-            # 调用时按 RunContext 的 thread 重新挂载，不能被编译图闭包捕获。
+            # 调用时按 RunContext 的 thread 和 Skill snapshot 重新挂载，不能被
+            # 编译图闭包捕获。
             backend = run_scoped_virtual_backend_factory(
                 backend,
-                registry=registry,
                 thread_persistence=thread_persistence,
             )
         else:
             assert prompt_epoch is not None
+            registry = skill_registry or SkillRegistry(local_workspace)
             backend = mount_harness_virtual_files(
                 backend,
                 registry=registry,

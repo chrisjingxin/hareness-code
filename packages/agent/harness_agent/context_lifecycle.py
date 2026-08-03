@@ -118,12 +118,15 @@ class RunContextSnapshot:
     system_prompt: str
     system_fingerprint: str
     created_at_ms: int
+    skill_snapshot_id: str | None = None
     legacy: bool = False
 
     def __post_init__(self) -> None:
         """验证排序、指纹和 Thread/project 归属。"""
         if not self.project_fingerprint or not self.thread_id or not self.snapshot_id:
             raise ContextRefreshError("CONTEXT_SNAPSHOT_ID_INVALID")
+        if self.skill_snapshot_id is not None and not self.skill_snapshot_id:
+            raise ContextRefreshError("CONTEXT_SKILL_SNAPSHOT_ID_INVALID")
         if not self.blocks or not self.system_prompt:
             raise ContextRefreshError("CONTEXT_SNAPSHOT_EMPTY")
         ordered = tuple(sorted(self.blocks, key=_block_sort_key))
@@ -136,6 +139,7 @@ class RunContextSnapshot:
             thread_id=self.thread_id,
             blocks=self.blocks,
             system_prompt=self.system_prompt,
+            skill_snapshot_id=self.skill_snapshot_id,
             legacy=self.legacy,
         )
         if self.snapshot_id != expected_id:
@@ -152,6 +156,7 @@ class RunContextSnapshot:
             "system_prompt": self.system_prompt,
             "system_fingerprint": self.system_fingerprint,
             "created_at_ms": self.created_at_ms,
+            "skill_snapshot_id": self.skill_snapshot_id,
             "legacy": self.legacy,
         }
 
@@ -192,6 +197,11 @@ class RunContextSnapshot:
             system_prompt=str(record["system_prompt"]),
             system_fingerprint=str(record["system_fingerprint"]),
             created_at_ms=int(record["created_at_ms"]),
+            skill_snapshot_id=(
+                str(record["skill_snapshot_id"])
+                if record.get("skill_snapshot_id") is not None
+                else None
+            ),
             legacy=bool(record.get("legacy", False)),
         )
 
@@ -230,6 +240,7 @@ class ContextLifecycle:
         """读取当前来源、排序、脱敏并渲染同一 Run 的完整 system prompt。"""
         if spec.project_fingerprint == "":
             raise ContextRefreshError("CONTEXT_PROJECT_INVALID")
+        skill_snapshot_id = getattr(spec.skill_registry, "snapshot_id", None)
         blocks: list[ContextBlock] = [
             ContextBlock(
                 key="core.policy",
@@ -290,12 +301,14 @@ class ContextLifecycle:
                 thread_id=thread_id,
                 blocks=ordered,
                 system_prompt=system_prompt,
+                skill_snapshot_id=skill_snapshot_id,
                 legacy=False,
             ),
             blocks=ordered,
             system_prompt=system_prompt,
             system_fingerprint=sha256_text(system_prompt),
             created_at_ms=current_ms,
+            skill_snapshot_id=skill_snapshot_id,
         )
 
     def _agent_blocks(self) -> list[ContextBlock]:
@@ -399,20 +412,22 @@ def _snapshot_id(
     blocks: tuple[ContextBlock, ...],
     system_prompt: str,
     legacy: bool,
+    skill_snapshot_id: str | None = None,
 ) -> str:
     """从规范化块和渲染结果生成可复用的 snapshot ID。"""
-    return sha256_text(
-        canonical_json(
-            {
-                "version": CONTEXT_SNAPSHOT_VERSION,
-                "project_fingerprint": project_fingerprint,
-                "thread_id": thread_id,
-                "blocks": [block.record() for block in blocks],
-                "system_prompt": system_prompt,
-                "legacy": legacy,
-            }
-        )
-    )
+    payload: dict[str, object] = {
+        "version": CONTEXT_SNAPSHOT_VERSION,
+        "project_fingerprint": project_fingerprint,
+        "thread_id": thread_id,
+        "blocks": [block.record() for block in blocks],
+        "system_prompt": system_prompt,
+        "legacy": legacy,
+    }
+    # 旧 v8 记录没有 Skill identity；省略 None 以保持 legacy snapshot 可读，
+    # 新 Run 只要启用 Skill 就把同一 catalog identity 纳入 Context snapshot。
+    if skill_snapshot_id is not None:
+        payload["skill_snapshot_id"] = skill_snapshot_id
+    return sha256_text(canonical_json(payload))
 
 
 def _capability_text(spec: ContextSourceSpec) -> str:

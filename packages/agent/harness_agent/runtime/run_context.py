@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Mapping
+from typing import Any, Mapping
 
 from langchain.agents.middleware.types import AgentMiddleware, ExtendedModelResponse, ModelRequest, ModelResponse
 from langchain_core.messages import SystemMessage
@@ -68,6 +68,8 @@ class RunContext:
     prompt_epoch: PromptEpoch | None = None
     # 放在兼容字段末尾，避免改变旧嵌入式调用的 positional 参数含义。
     model_call_lifecycle: ModelCallLifecycle = field(default_factory=ModelCallLifecycle)
+    # 共享图只能从当前 Run 取得对应的 immutable Skill snapshot；不写入持久化记录。
+    skill_registry: Any | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         """在执行前验证 thread 与 snapshot 的绑定，阻止跨 project 注入。"""
@@ -88,6 +90,10 @@ class RunContext:
             )
         if self.context_snapshot.thread_id != self.thread_id:
             raise RunContextError("RUN_CONTEXT_SNAPSHOT_THREAD_MISMATCH")
+        snapshot_skill_id = self.context_snapshot.skill_snapshot_id
+        if snapshot_skill_id is not None:
+            if self.skill_registry is None or getattr(self.skill_registry, "snapshot_id", None) != snapshot_skill_id:
+                raise RunContextError("RUN_CONTEXT_SKILL_SNAPSHOT_MISMATCH")
         if not self.execution_id or not self.agent_id:
             raise RunContextError("RUN_CONTEXT_EXECUTION_ID_INVALID")
         if self.parent_execution_id == self.execution_id:

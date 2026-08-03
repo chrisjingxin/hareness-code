@@ -85,9 +85,13 @@ from harness_agent.protocol.runtime import (
     validate_operation_result,
     validate_protocol_error_data,
 )
-from harness_agent.extensions.skills import SkillError, SkillRegistry
-from harness_agent.runtime.agent_spec import ResolvedAgentSpec, resolve_builtin_main_agent_spec
-from harness_agent.extensions.mcp import (
+from harness_agent.skills import LoadedSkill, SkillCatalogManager, SkillError, SkillRegistry
+from harness_agent.agent_spec import (
+    ResolvedAgentSpec,
+    resolve_builtin_main_agent_spec,
+    skill_catalog_fingerprint,
+)
+from harness_agent.mcp import (
     McpConfigError,
     McpConfigSnapshot,
     McpConnectionManager,
@@ -298,7 +302,10 @@ class AgentHost:
         self._config_change_policy = config_change_policy or ManagedConfigPolicy()
         self._config_change_service: ConfigChangeService | None = None
         self._startup_error: str | None = None
-        self._skill_registry: SkillRegistry | None = None
+        self._skill_catalog_manager = SkillCatalogManager(
+            self._workspace,
+            home=self._config_home,
+        )
         self._thread_persistence: ThreadPersistence | None = None
         self._agent_engine_pool: AgentEnginePool | None = None
         self._mcp_manager: McpConnectionManager | None = None
@@ -329,8 +336,7 @@ class AgentHost:
             persistence_provider=self._run_persistence_provider,
             preparation_provider=self._prepare_run,
             runtime_provider=self._acquire_run_runtime,
-            interaction_port=ProtocolInteractionAdapter(self),
-            skill_registry_provider=self._require_skills,
+            interaction_port=_ProtocolInteractionAdapter(self),
             context_updates_provider=self._take_context_updates,
             project_dir=self._workspace,
         )
@@ -686,11 +692,18 @@ class AgentHost:
         negotiated_minor = min(PROTOCOL_MINOR, max_minor)
         async with self._resource_init_lock:
             if not self._resources_ready:
-                self._skill_registry = SkillRegistry(self._workspace, home=self._config_home)
+                reservation = await self._reserve_agent_engine_snapshot()
+                try:
+                    await self._refresh_skill_catalog_locked()
+                finally:
+                    await reservation.release()
                 self._load_config()
                 # MCP 连接不阻塞 initialize 响应；后台建立连接
                 self._mcp_connect_task = asyncio.ensure_future(self._connect_mcp_servers())
                 self._resources_ready = True
+        registry = self._skill_catalog_manager.current
+        if registry is None:
+            registry = await self._refresh_skill_catalog()
         requested = set(parsed.capabilities.requests)
         enabled = requested.intersection(connection.capability_ceiling)
         if connection.role != "owner":
@@ -717,8 +730,8 @@ class AgentHost:
                 "handles": sorted(handles),
             },
             "agent_commands": [],
-            "skills_snapshot": self._skill_registry.snapshot(),
-            "skill_diagnostics": self._skill_registry.diagnostics[:20],
+            "skills_snapshot": registry.snapshot(),
+            "skill_diagnostics": registry.diagnostics[:20],
             "limits": {
                 "max_frame_bytes": MAX_FRAME_BYTES,
                 "max_tool_payload_bytes": MAX_TOOL_PAYLOAD_BYTES,
@@ -828,9 +841,20 @@ class AgentHost:
     ) -> RunPreparation:
         """在登记 Run 前解析模型、Profile、Skill 和 Context 快照。"""
         if persistence is None:
-            return RunPreparation(skill_snapshot_id=self._require_skills().snapshot_id)
+            reservation = await self._reserve_agent_engine_snapshot()
+            try:
+                registry = await self._refresh_skill_catalog_locked()
+                return RunPreparation(
+                    skill_snapshot_id=registry.snapshot_id,
+                    skill_registry=registry,
+                    requested_skill=self._prepare_requested_skill(command, registry),
+                )
+            finally:
+                await reservation.release()
         reservation = await self._reserve_agent_engine_snapshot()
         try:
+            registry = await self._refresh_skill_catalog_locked()
+            requested_skill = self._prepare_requested_skill(command, registry)
             self._load_config()
             if self._config is None:
                 raise ConfigError(self._startup_error or "MODEL_CONFIGURATION_REQUIRED")
@@ -843,6 +867,7 @@ class AgentHost:
                 command.thread_id,
                 self._config,
                 resolved,
+                skill_registry=registry,
             )
             profile = spec.runtime_profile
             context_snapshot = ContextLifecycle(
@@ -862,12 +887,13 @@ class AgentHost:
                 created_at_ms=int(time.time() * 1000),
                 context_snapshot_id=context_snapshot.snapshot_id,
             )
-            registry = self._require_skills()
             return RunPreparation(
                 resolved_execution_binding=resolved,
                 execution_binding=binding,
                 agent_engine_profile=profile,
                 skill_snapshot_id=registry.snapshot_id,
+                skill_registry=registry,
+                requested_skill=requested_skill,
                 context_snapshot=context_snapshot,
                 idle_duration_ms=idle_duration_ms,
                 snapshot_reservation=reservation,
@@ -1267,11 +1293,42 @@ class AgentHost:
         watches.discard(parsed.thread_id)
         return {"removed": removed}
 
-    def _require_skills(self) -> SkillRegistry:
-        """返回初始化时建立的 Skill registry。"""
-        if self._skill_registry is None:
-            self._skill_registry = SkillRegistry(self._workspace, home=self._config_home)
-        return self._skill_registry
+    def _prepare_requested_skill(
+        self,
+        command: StartRun,
+        registry: SkillRegistry,
+    ) -> LoadedSkill | None:
+        """从本次 Run 的唯一 Registry 解析并预加载 requested Skill。"""
+        requested = command.requested_skill
+        if requested is None:
+            return None
+        record = registry.resolve(requested.skill_id)
+        if not record.user_invocable:
+            raise SkillError(f'Skill "{record.skill_id}" is not user-invocable')
+        return registry.load(record.skill_id, requested.args)
+
+    async def _refresh_skill_catalog_locked(self) -> SkillRegistry:
+        """在 Host snapshot reservation 内刷新并定向排空旧 Skill Profile。"""
+        previous = self._skill_catalog_manager.current
+        registry = self._skill_catalog_manager.refresh()
+        if previous is None or previous.snapshot_id == registry.snapshot_id:
+            return registry
+        pool = self._agent_engine_pool
+        if pool is not None:
+            await pool.invalidate(
+                lambda profile: profile.skill_catalog_fingerprint
+                != skill_catalog_fingerprint(registry),
+                reason="skill_catalog_changed",
+            )
+        return registry
+
+    async def _refresh_skill_catalog(self) -> SkillRegistry:
+        """为管理 RPC 建立同一 snapshot boundary，并在完成后释放锁。"""
+        reservation = await self._reserve_agent_engine_snapshot()
+        try:
+            return await self._refresh_skill_catalog_locked()
+        finally:
+            await reservation.release()
 
     @staticmethod
     def _reject_params(params: Mapping[str, Any], allowed: set[str], method: str) -> None:
@@ -1286,7 +1343,7 @@ class AgentHost:
         include_disabled = params.get("include_disabled", True)
         if not isinstance(include_disabled, bool):
             raise RpcError(-32602, "include_disabled must be boolean")
-        registry = self._require_skills()
+        registry = await self._refresh_skill_catalog()
         return {
             "snapshot": registry.snapshot(),
             "skills": registry.list(include_disabled=include_disabled),
@@ -1299,16 +1356,21 @@ class AgentHost:
         skill_id = params.get("id")
         if not isinstance(skill_id, str) or not skill_id.strip():
             raise RpcError(-32602, "id must be a non-empty string")
-        return self._require_skills().inspect(skill_id)
+        return (await self._refresh_skill_catalog()).inspect(skill_id)
 
     async def _handle_skills_set_enabled(self, params: dict[str, Any], _id: str) -> dict[str, Any]:
-        """保存下一次 thread 生效的 Skill 启停偏好。"""
+        """保存下一顶层 Run 生效的 Skill 启停偏好。"""
         self._reject_params(params, {"id", "enabled"}, "skills.set_enabled")
         skill_id = params.get("id")
         enabled = params.get("enabled")
         if not isinstance(skill_id, str) or not skill_id.strip() or not isinstance(enabled, bool):
             raise RpcError(-32602, "id and enabled are required")
-        return self._require_skills().set_enabled(skill_id, enabled)
+        reservation = await self._reserve_agent_engine_snapshot()
+        try:
+            await self._refresh_skill_catalog_locked()
+            return self._skill_catalog_manager.set_enabled(skill_id, enabled)
+        finally:
+            await reservation.release()
 
     async def _handle_skills_market_list(self, params: dict[str, Any], _id: str) -> list[dict[str, object]]:
         """列出已安装的企业市场 Provider 或其 catalog。"""
@@ -1316,7 +1378,7 @@ class AgentHost:
         market = params.get("market")
         if market is not None and not isinstance(market, str):
             raise RpcError(-32602, "market must be a string")
-        return await self._require_skills().marketplace_catalog(market)
+        return await self._skill_catalog_manager.marketplace_catalog(market)
 
     async def _handle_skills_install(self, params: dict[str, Any], _id: str) -> dict[str, object]:
         """通过企业 Provider 安装 Skill；Provider 不存在时返回明确错误。"""
@@ -1324,7 +1386,11 @@ class AgentHost:
         market, name, version = params.get("market"), params.get("name"), params.get("version")
         if not isinstance(market, str) or not isinstance(name, str) or (version is not None and not isinstance(version, str)):
             raise RpcError(-32602, "market and name are required strings")
-        return await self._require_skills().install(market, name, version)
+        reservation = await self._reserve_agent_engine_snapshot()
+        try:
+            return await self._skill_catalog_manager.install(market, name, version)
+        finally:
+            await reservation.release()
 
     async def _handle_skills_update(self, params: dict[str, Any], _id: str) -> dict[str, object]:
         """通过企业 Provider 更新市场 Skill。"""
@@ -1336,7 +1402,12 @@ class AgentHost:
         skill_id = params.get("id")
         if not isinstance(skill_id, str) or not skill_id.strip():
             raise RpcError(-32602, "id must be a non-empty string")
-        return self._require_skills().remove(skill_id)
+        reservation = await self._reserve_agent_engine_snapshot()
+        try:
+            await self._refresh_skill_catalog_locked()
+            return self._skill_catalog_manager.remove(skill_id)
+        finally:
+            await reservation.release()
 
     def _load_config(self) -> None:
         """刷新配置缓存，并保存用户可修复的错误。"""
@@ -1494,10 +1565,12 @@ class AgentHost:
                 thread_id,
                 config,
             )
+            registry = await self._refresh_skill_catalog_locked()
             profile = await self._resolve_agent_engine_profile(
                 thread_id,
                 config,
                 resolved_binding,
+                skill_registry=registry,
             )
         pool = self._ensure_agent_engine_pool(config)
         lease = await pool.acquire(profile)
@@ -1509,7 +1582,7 @@ class AgentHost:
         config: Za38Config,
         resolved_binding: ResolvedExecutionBinding,
         *,
-        approval_mode: ApprovalMode | None = None,
+        skill_registry: SkillRegistry,
     ) -> ResolvedAgentSpec:
         """截取一次角色解析快照，Profile 和 builder 都从它派生。
 
@@ -1517,7 +1590,6 @@ class AgentHost:
         Profile，引擎池据此缓存各自强制策略的图，配置值保持不动。
         """
         persistence = await self._ensure_thread_persistence()
-        registry = self._require_skills()
         await self._ensure_mcp_connected()
         async with self._mcp_state_lock:
             mcp_snapshot = self._mcp_snapshot or build_mcp_snapshot([], "missing")
@@ -1531,8 +1603,8 @@ class AgentHost:
             project_fingerprint=persistence.project_fingerprint,
             workspace=self._workspace,
             binding=resolved_binding,
-            execution=execution,
-            skill_registry=registry,
+            execution=config.execution,
+            skill_registry=skill_registry,
             mcp_snapshot=mcp_snapshot,
             mcp_tools=mcp_tools,
             interactive="question" in self._connection_handles(),
@@ -1549,9 +1621,18 @@ class AgentHost:
         thread_id: str,
         config: Za38Config,
         resolved_binding: ResolvedExecutionBinding,
+        *,
+        skill_registry: SkillRegistry,
     ) -> AgentEngineProfile:
         """兼容现有调用方，只返回由 ResolvedAgentSpec 生成的 Profile。"""
-        return (await self._resolve_agent_engine_spec(thread_id, config, resolved_binding)).runtime_profile
+        return (
+            await self._resolve_agent_engine_spec(
+                thread_id,
+                config,
+                resolved_binding,
+                skill_registry=skill_registry,
+            )
+        ).runtime_profile
 
     async def _invalidate_profiles_for_snapshot(
         self,
@@ -1620,6 +1701,12 @@ class AgentHost:
             raise RuntimeError("RUNTIME_PROFILE_SPEC_MISMATCH")
         if profile.mcp_config_fingerprint != spec.mcp_snapshot.digest:
             raise RuntimeError("RUNTIME_MCP_SNAPSHOT_MISMATCH")
+        profile_skill_fingerprint = getattr(profile, "skill_catalog_fingerprint", None)
+        if (
+            profile_skill_fingerprint is not None
+            and profile_skill_fingerprint != skill_catalog_fingerprint(spec.skill_registry)
+        ):
+            raise RuntimeError("RUNTIME_SKILL_SNAPSHOT_MISMATCH")
         from harness_agent.agent import create_harness_agent
         from harness_agent.context_window import ContextWindowMiddleware
         from harness_agent.providers.harness_gateway import create_openai_compatible_model
@@ -1732,6 +1819,11 @@ class AgentHost:
         snapshot = run.preparation.context_snapshot
         if snapshot is None:
             raise RuntimeError("RUN_CONTEXT_SNAPSHOT_UNAVAILABLE")
+        registry = run.preparation.skill_registry
+        if registry is None or registry is not spec.skill_registry:
+            raise RuntimeError("RUN_SKILL_SNAPSHOT_SPEC_MISMATCH")
+        if snapshot.skill_snapshot_id != registry.snapshot_id:
+            raise RuntimeError("RUN_CONTEXT_SKILL_SNAPSHOT_MISMATCH")
         from harness_agent.context_pressure import ModelCallLifecycle
 
         return RunContext(
@@ -1753,6 +1845,7 @@ class AgentHost:
             agent_id=spec.agent_id,
             execution_mode=ExecutionMode.MANAGED,
             cancellation_token=run.cancellation_token,
+            skill_registry=registry,
         )
 
     async def _handle_peer_response(self, message: dict[str, Any]) -> None:

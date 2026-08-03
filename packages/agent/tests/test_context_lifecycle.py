@@ -113,6 +113,36 @@ def test_snapshot_refreshes_agents_for_next_run_but_freezes_current_run(tmp_path
     assert fourth.system_fingerprint != third.system_fingerprint
 
 
+def test_snapshot_and_prompt_index_carry_the_same_skill_catalog_identity(tmp_path: Path) -> None:
+    """Context snapshot、Prompt Skill index 和 Registry 必须引用同一 ID。"""
+    from harness_agent.skills import SkillRegistry
+
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    skill_dir = workspace / ".harness" / "skills" / "review"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: review\ndescription: review skill\n---\n检查\n",
+        encoding="utf-8",
+    )
+    registry = SkillRegistry(workspace, home=tmp_path / "home")
+    spec = _spec(workspace, home=tmp_path / "home")
+    spec.skill_registry = registry
+
+    snapshot = ContextLifecycle(workspace, home=tmp_path / "home").prepare(
+        thread_id="skill-thread",
+        spec=spec,
+        now_ms=300,
+    )
+
+    assert snapshot.skill_snapshot_id == registry.snapshot_id
+    skills_block = next(block for block in snapshot.blocks if block.key == "skills.index")
+    assert registry.snapshot_id in skills_block.content
+    restored = type(snapshot).from_record(snapshot.record())
+    assert restored.skill_snapshot_id == registry.snapshot_id
+    assert restored.snapshot_id == snapshot.snapshot_id
+
+
 def test_snapshot_order_and_fingerprint_are_byte_deterministic(tmp_path: Path) -> None:
     """权限先于稳定性，工具注册顺序和动态块输入顺序不改变快照字节。"""
     home = tmp_path / "home"
@@ -561,7 +591,6 @@ async def test_context_refresh_failure_happens_before_accept_run() -> None:
         preparation_provider=preparation_provider,
         runtime_provider=runtime_provider,
         interaction_port=None,  # type: ignore[arg-type]
-        skill_registry_provider=lambda: None,  # type: ignore[return-value]
     )
     with pytest.raises(ContextRefreshError, match="CONTEXT_REFERENCE_CHANGED_DURING_READ"):
         await coordinator.start(

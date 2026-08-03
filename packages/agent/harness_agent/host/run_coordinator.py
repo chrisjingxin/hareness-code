@@ -26,7 +26,7 @@ from harness_agent.execution_binding import (
     RunExecutionBinding,
 )
 from harness_agent.run_context import RunCancellationToken, RunContext
-from harness_agent.skills import SkillError, SkillRegistry
+from harness_agent.skills import LoadedSkill
 from harness_agent.thread_persistence import (
     AcceptRun,
     ThreadPersistenceError,
@@ -140,12 +140,33 @@ class RunPreparation:
     execution_binding: RunExecutionBinding | None = None
     agent_engine_profile: AgentEngineProfile | None = None
     skill_snapshot_id: str | None = None
+    skill_registry: Any | None = None
+    requested_skill: LoadedSkill | None = None
     context_snapshot: RunContextSnapshot | None = None
     idle_duration_ms: int | None = None
     # Default AgentHost may hold this reservation from spec resolution until the
     # corresponding AgentEngine lease is acquired.  It is intentionally opaque
     # here so the coordinator does not own the runtime snapshot protocol.
     snapshot_reservation: Any | None = None
+
+    def __post_init__(self) -> None:
+        """拒绝把 requested Skill、Context 和 Profile 拆成不同 snapshot。"""
+        registry_id = (
+            getattr(self.skill_registry, "snapshot_id", None)
+            if self.skill_registry is not None
+            else None
+        )
+        if self.skill_registry is not None and registry_id != self.skill_snapshot_id:
+            raise ValueError("RUN_PREPARATION_SKILL_SNAPSHOT_MISMATCH")
+        if self.requested_skill is not None and (
+            self.skill_registry is None
+            or self.requested_skill.snapshot_id != self.skill_snapshot_id
+        ):
+            raise ValueError("RUN_PREPARATION_REQUESTED_SKILL_SNAPSHOT_MISMATCH")
+        if self.context_snapshot is not None and (
+            self.context_snapshot.skill_snapshot_id != self.skill_snapshot_id
+        ):
+            raise ValueError("RUN_PREPARATION_CONTEXT_SKILL_SNAPSHOT_MISMATCH")
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,7 +283,6 @@ class RunState:
     persistence: Any | None
     preparation: RunPreparation
     root_execution: AgentExecutionBinding | None = None
-    skill_record: Any | None = None
     message: str = ""
     status: str = "accepted"
     sequence: int = 0
@@ -347,7 +367,6 @@ class RunState:
 PersistenceProvider = Callable[[], Awaitable[Any | None]]
 PreparationProvider = Callable[[StartRun, Any | None], Awaitable[RunPreparation]]
 RuntimeProvider = Callable[[RunState], Awaitable[RunRuntime]]
-SkillRegistryProvider = Callable[[], SkillRegistry]
 ContextUpdatesProvider = Callable[[str], list[Any]]
 
 
@@ -361,7 +380,6 @@ class RunCoordinator:
         preparation_provider: PreparationProvider,
         runtime_provider: RuntimeProvider,
         interaction_port: InteractionPort,
-        skill_registry_provider: SkillRegistryProvider,
         context_updates_provider: ContextUpdatesProvider | None = None,
         execution_registry: AgentExecutionRegistry | None = None,
         project_dir: Path | None = None,
@@ -371,7 +389,6 @@ class RunCoordinator:
         self._preparation_provider = preparation_provider
         self._runtime_provider = runtime_provider
         self._interaction_port = interaction_port
-        self._skill_registry_provider = skill_registry_provider
         self._context_updates_provider = context_updates_provider or (lambda _thread_id: [])
         self._execution_registry = execution_registry or AgentExecutionRegistry()
         # approve_always 的规则持久化到该目录的 project 层 settings.json
@@ -422,7 +439,6 @@ class RunCoordinator:
         reservation_transferred = False
         try:
             persistence = await self._persistence_provider()
-            skill_record = self._resolve_requested_skill(command.requested_skill)
             preparation = await self._preparation_provider(command, persistence)
 
             if persistence is not None:
@@ -453,7 +469,6 @@ class RunCoordinator:
                 persistence=persistence,
                 preparation=preparation,
                 root_execution=root_execution,
-                skill_record=skill_record,
             )
             await self._execution_registry.accept(root_execution)
             async with self._lock:
@@ -557,17 +572,6 @@ class RunCoordinator:
                 return
             yield event
 
-    def _resolve_requested_skill(self, requested: RequestedSkill | None) -> Any | None:
-        if requested is None:
-            return None
-        try:
-            skill = self._skill_registry_provider().resolve(requested.skill_id)
-        except SkillError:
-            raise
-        if not skill.user_invocable:
-            raise SkillError(f'Skill "{skill.skill_id}" is not user-invocable')
-        return skill
-
     async def _cancel_runs(self, predicate: Callable[[RunState], bool]) -> None:
         async with self._lock:
             runs = tuple(run for run in self._runs.values() if predicate(run))
@@ -620,11 +624,10 @@ class RunCoordinator:
             self._emit(run, RUN_STARTED, started_payload)
             run.status = "running"
 
-            if run.skill_record is not None:
-                registry = self._skill_registry_provider()
-                requested = run.start.requested_skill
-                assert requested is not None
-                loaded = registry.load(requested.skill_id, requested.args)
+            loaded = run.preparation.requested_skill
+            if loaded is not None:
+                if loaded.snapshot_id != run.preparation.skill_snapshot_id:
+                    raise RunError("RUN_PREPARATION_REQUESTED_SKILL_SNAPSHOT_MISMATCH")
                 self._emit(
                     run,
                     SKILL_LOADED,
@@ -632,7 +635,7 @@ class RunCoordinator:
                         "skill_id": loaded.record.skill_id,
                         "source": loaded.record.source,
                         "version": loaded.record.version,
-                        "snapshot_id": registry.snapshot_id,
+                        "snapshot_id": loaded.snapshot_id,
                     },
                 )
                 run.message = (

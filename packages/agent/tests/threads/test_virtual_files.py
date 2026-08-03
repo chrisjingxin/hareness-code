@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 
 def _write_skill(root: Path) -> None:
     """创建带辅助资源的合法项目 Skill。"""
@@ -56,6 +58,67 @@ async def test_virtual_files_read_skills_and_thread_scoped_history(tmp_path: Pat
     await store.close()
 
 
+async def test_virtual_skill_reads_are_isolated_between_old_and_new_snapshots(
+    tmp_path: Path,
+):
+    """旧 Run 的虚拟正文/资源不随磁盘修改或删除串到下一 Run。"""
+    from harness_agent.skills import SkillRegistry
+    from harness_agent.virtual_files import HarnessVirtualBackend
+
+    workspace = tmp_path / "workspace"
+    _write_skill(workspace / ".harness" / "skills")
+    manifest = workspace / ".harness" / "skills" / "review" / "SKILL.md"
+    resource = manifest.parent / "reference.txt"
+    old_registry = SkillRegistry(workspace, home=tmp_path / "home")
+    old_backend = HarnessVirtualBackend(
+        registry=old_registry,
+        thread_id="thread-a",
+        expected_snapshot_id=old_registry.snapshot_id,
+        require_snapshot_id=True,
+    )
+
+    manifest.write_text(
+        "---\nname: review\ndescription: review skill\n---\n新正文\n",
+        encoding="utf-8",
+    )
+    resource.write_text("新资源\n", encoding="utf-8")
+    new_registry = SkillRegistry(workspace, home=tmp_path / "home")
+    new_backend = HarnessVirtualBackend(
+        registry=new_registry,
+        thread_id="thread-a",
+        expected_snapshot_id=new_registry.snapshot_id,
+        require_snapshot_id=True,
+    )
+
+    old_skill = await old_backend.aread("/.harness/skills/project/review/SKILL.md")
+    old_resource = await old_backend.aread("/.harness/skills/project/review/reference.txt")
+    new_skill = await new_backend.aread("/.harness/skills/project/review/SKILL.md")
+    new_resource = await new_backend.aread("/.harness/skills/project/review/reference.txt")
+    assert old_skill.file_data and "第一行" in old_skill.file_data["content"]
+    assert old_resource.file_data and old_resource.file_data["content"] == "参考一\n参考二\n"
+    assert new_skill.file_data and new_skill.file_data["content"] == "新正文"
+    assert new_resource.file_data and new_resource.file_data["content"] == "新资源\n"
+
+    manifest.unlink()
+    resource.unlink()
+    deleted_registry = SkillRegistry(workspace, home=tmp_path / "home")
+    deleted_backend = HarnessVirtualBackend(
+        registry=deleted_registry,
+        thread_id="thread-a",
+        expected_snapshot_id=deleted_registry.snapshot_id,
+        require_snapshot_id=True,
+    )
+    old_after_delete = await old_backend.aread("/.harness/skills/project/review/SKILL.md")
+    old_resource_after_delete = await old_backend.aread(
+        "/.harness/skills/project/review/reference.txt"
+    )
+    deleted_skill = await deleted_backend.aread("/.harness/skills/project/review/SKILL.md")
+    assert old_after_delete.file_data and "第一行" in old_after_delete.file_data["content"]
+    assert old_resource_after_delete.file_data
+    assert old_resource_after_delete.file_data["content"] == "参考一\n参考二\n"
+    assert deleted_skill.error
+
+
 async def test_run_scoped_virtual_backend_isolates_shared_graph_history(tmp_path: Path):
     """共享图每次工具调用都必须按 RunContext 重新绑定历史归档。"""
     from deepagents.backends import LocalShellBackend
@@ -95,11 +158,11 @@ async def test_run_scoped_virtual_backend_isolates_shared_graph_history(tmp_path
                 enable_skills=False,
             ),
             approval_mode="yolo",
+            skill_registry=registry,
         )
 
     factory = run_scoped_virtual_backend_factory(
         LocalShellBackend(root_dir=workspace, virtual_mode=True),
-        registry=registry,
         thread_persistence=store,
     )
     first = factory(SimpleNamespace(context=context_for("thread-a")))
@@ -108,6 +171,73 @@ async def test_run_scoped_virtual_backend_isolates_shared_graph_history(tmp_path
     assert (await first.aread(f"/.harness/history/{artifact.artifact_id}.md")).file_data["content"] == "only thread a"
     assert (await second.aread(f"/.harness/history/{artifact.artifact_id}.md")).error
     await store.close()
+
+
+async def test_run_scoped_virtual_backend_requires_the_run_skill_snapshot(tmp_path: Path):
+    """共享图的虚拟 Skill 文件只能读取 RunContext 绑定的 catalog identity。"""
+    from deepagents.backends import LocalShellBackend
+
+    from harness_agent.context_lifecycle import ContextLifecycle
+    from harness_agent.run_context import RunContext, RunContextError
+    from harness_agent.skills import SkillRegistry
+    from harness_agent.virtual_files import run_scoped_virtual_backend_factory
+
+    workspace = tmp_path / "workspace"
+    _write_skill(workspace / ".harness" / "skills")
+    home = tmp_path / "home"
+    registry = SkillRegistry(workspace, home=home)
+    spec = SimpleNamespace(
+        project_fingerprint="project-fingerprint",
+        prompt="core prompt",
+        effective_policy=SimpleNamespace(
+            fingerprint="policy-fingerprint",
+            approval_mode="yolo",
+            isolation="local",
+        ),
+        tools=(),
+        skill_registry=registry,
+        execution=SimpleNamespace(
+            mode="local",
+            sandbox_enabled=False,
+            approval_mode="yolo",
+            remote=None,
+        ),
+        workspace=workspace,
+        enable_memory=False,
+        enable_skills=True,
+        enable_ask_user=False,
+    )
+    snapshot = ContextLifecycle(workspace, home=home).prepare(
+        thread_id="thread-snapshot",
+        spec=spec,
+    )
+    context = RunContext(
+        thread_id="thread-snapshot",
+        run_id="run-snapshot",
+        context_snapshot=snapshot,
+        approval_mode="yolo",
+        skill_registry=registry,
+    )
+    factory = run_scoped_virtual_backend_factory(
+        LocalShellBackend(root_dir=workspace, virtual_mode=True),
+    )
+    backend = factory(SimpleNamespace(context=context))
+    result = await backend.aread("/.harness/skills/project/review/SKILL.md")
+    assert result.file_data and "第一行" in result.file_data["content"]
+
+    (workspace / ".harness" / "skills" / "review" / "SKILL.md").write_text(
+        "---\nname: review\ndescription: changed\n---\nchanged\n",
+        encoding="utf-8",
+    )
+    changed_registry = SkillRegistry(workspace, home=home)
+    with pytest.raises(RunContextError, match="RUN_CONTEXT_SKILL_SNAPSHOT_MISMATCH"):
+        RunContext(
+            thread_id="thread-snapshot",
+            run_id="run-mismatch",
+            context_snapshot=snapshot,
+            approval_mode="yolo",
+            skill_registry=changed_registry,
+        )
 
 
 def test_workspace_boundary_allows_only_virtual_read_file(tmp_path: Path):
