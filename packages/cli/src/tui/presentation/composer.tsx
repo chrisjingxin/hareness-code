@@ -6,36 +6,36 @@ import {
   commandMenuItemDescription,
   commandMenuItemLabel,
   type CommandMenuItem,
-} from "../application/commands"
+} from "../../interactive/commands"
 import {
   approvalModeLabel,
-  type TuiRuntime,
   workspaceLabel,
-} from "../application/model"
-import type { TuiState } from "../application/state"
+} from "../../interactive/runtime"
 import { tuiTheme } from "./theme"
 import type { SharedViewProps } from "./types"
 
 /** thread composer 上方的实时模型和运行状态行。 */
-export function ThreadRuntimeLine(props: { runtime: TuiRuntime; state: TuiState }) {
+export function ThreadRuntimeLine(props: { interactive: SharedViewProps["interactive"] }) {
+  const runtime = props.interactive.runtime
+  const status = props.interactive.activity.label
   return (
     <box flexDirection="row" gap={1} paddingBottom={1}>
-      <text fg={statusColor(props.state.status)}>□</text>
+      <text fg={statusColor(props.interactive.activity.kind)}>□</text>
       <text fg={tuiTheme.primary}>Harness Code</text>
       <text fg={tuiTheme.muted}>·</text>
-      <text fg={props.runtime.modelConfigured ? tuiTheme.text : tuiTheme.warning}>模型 {modelLabel(props.runtime)}</text>
-      <text fg={tuiTheme.muted}>· {props.state.status}</text>
+      <text fg={runtime.modelConfigured ? tuiTheme.text : tuiTheme.warning}>模型 {modelLabel(runtime)}</text>
+      <text fg={tuiTheme.muted}>· {status}</text>
     </box>
   )
 }
 
 /** 渲染统一左轨 composer、命令菜单和运行时元信息。 */
-export function Composer(props: Pick<SharedViewProps, "runtime" | "state" | "terminalWidth" | "inputRef" | "value" | "onInput" | "onComposerKeyDown" | "onSubmit" | "commandMenu" | "commandOptions" | "onSelectCommand" | "onHoverCommand" | "selectedSkill" | "pickerVisible" | "onClearSelectedSkill"> & {
+export function Composer(props: Pick<SharedViewProps, "interactive" | "terminalWidth" | "inputRef" | "value" | "onInput" | "onComposerKeyDown" | "onSubmit" | "commandMenu" | "commandOptions" | "onSelectCommand" | "onHoverCommand" | "selectedSkill" | "pickerVisible" | "onClearSelectedSkill"> & {
   variant: "home" | "thread"
   commandMenuPlacement: "above" | "inline-below"
 }) {
-  const active = Boolean(props.state.activeRun)
-  const awaitingQuestion = Boolean(props.state.pendingQuestion)
+  const active = Boolean(props.interactive.activeRun)
+  const awaitingQuestion = props.interactive.interaction?.type === "question"
   const options = props.commandOptions
   const placeholder = awaitingQuestion
     ? "输入你的回答后按 Enter"
@@ -87,7 +87,7 @@ export function Composer(props: Pick<SharedViewProps, "runtime" | "state" | "ter
               <text fg={tuiTheme.muted} onMouseUp={props.onClearSelectedSkill}>×</text>
             </box>
           ) : null}
-          <RuntimeMeta runtime={props.runtime} variant={props.variant} terminalWidth={props.terminalWidth} />
+          <RuntimeMeta interactive={props.interactive} variant={props.variant} terminalWidth={props.terminalWidth} />
         </box>
       </box>
       {commandMenu && props.commandMenuPlacement === "inline-below" ? commandMenu : null}
@@ -142,25 +142,26 @@ function CommandMenu(props: {
 
 
 /** 渲染输入框下方的配置摘要，只展示当前 Thread 的模型选择。 */
-function RuntimeMeta(props: { runtime: TuiRuntime; variant: "home" | "thread"; terminalWidth: number }) {
+function RuntimeMeta(props: { interactive: SharedViewProps["interactive"]; variant: "home" | "thread"; terminalWidth: number }) {
   // 首页 composer 最大宽度固定为 75 列；thread 则以可用终端宽度估算。模型字段
   // 是唯一可能来自企业配置的长文本，因此只截断它，审批模式始终保持可见。
+  const runtime = props.interactive.runtime
   const contentWidth = props.variant === "home"
     ? Math.min(68, Math.max(28, props.terminalWidth - 8))
     : Math.max(28, props.terminalWidth - 10)
-  const model = shorten(modelLabel(props.runtime), Math.max(14, contentWidth - 14))
-  const warning = props.runtime.approvalModeWarning
-    ? shorten(props.runtime.approvalModeWarning, contentWidth)
+  const model = shorten(modelLabel(runtime), Math.max(14, contentWidth - 14))
+  const warning = runtime.approvalModeWarning
+    ? shorten(runtime.approvalModeWarning, contentWidth)
     : undefined
-  const startupError = props.runtime.startupError
-    ? shorten(`配置需要处理：${props.runtime.startupError}`, contentWidth)
+  const startupError = runtime.startupError
+    ? shorten(`配置需要处理：${runtime.startupError}`, contentWidth)
     : undefined
 
   return (
     <box flexDirection="column" paddingTop={1} paddingBottom={1}>
       <box width="100%" flexDirection="row" justifyContent="space-between" gap={2}>
-        <text fg={props.runtime.modelConfigured ? tuiTheme.text : tuiTheme.warning}>模型：{model}</text>
-        <text fg={props.runtime.approvalMode === "yolo" ? tuiTheme.warning : tuiTheme.muted}>{approvalModeLabel(props.runtime)}</text>
+        <text fg={runtime.modelConfigured ? tuiTheme.text : tuiTheme.warning}>模型：{model}</text>
+        <text fg={runtime.approvalMode === "yolo" ? tuiTheme.warning : tuiTheme.muted}>{approvalModeLabel(runtime)}</text>
       </box>
       {warning ? <text fg={tuiTheme.warning}>{warning}</text> : null}
       {startupError ? <text fg={tuiTheme.warning}>{startupError}</text> : null}
@@ -169,19 +170,20 @@ function RuntimeMeta(props: { runtime: TuiRuntime; variant: "home" | "thread"; t
 }
 
 /** 渲染工作区、Git 分支、运行快捷键和 CLI 版本底栏。 */
-export function FooterRail(props: { runtime: TuiRuntime; state: TuiState; terminalWidth: number; thread?: boolean }) {
+export function FooterRail(props: { interactive: SharedViewProps["interactive"]; terminalWidth: number; thread?: boolean }) {
+  const runtime = props.interactive.runtime
   const showFullPath = props.terminalWidth >= 108
-  const showBranch = props.terminalWidth >= 84 && props.runtime.gitBranch
-  const workspace = showFullPath ? props.runtime.workspace : workspaceLabel(props.runtime.workspace)
+  const showBranch = props.terminalWidth >= 84 && runtime.gitBranch
+  const workspace = showFullPath ? runtime.workspace : workspaceLabel(runtime.workspace)
 
   return (
     <box flexDirection="row" justifyContent="space-between" gap={1} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1} flexShrink={0}>
       <box flexDirection="row" gap={1} flexShrink={1}>
         <text fg={tuiTheme.muted}>{workspace}</text>
-        {showBranch ? <text fg={tuiTheme.subtle}>:{props.runtime.gitBranch}</text> : null}
+        {showBranch ? <text fg={tuiTheme.subtle}>:{runtime.gitBranch}</text> : null}
       </box>
-      {props.state.activeRun ? <BusyRunHint /> : props.thread ? <text fg={tuiTheme.muted}>↑↓ 历史 · PgUp/PgDn 滚动 · Ctrl+O 工具</text> : null}
-      <text fg={tuiTheme.subtle}>v{props.runtime.cliVersion}</text>
+      {props.interactive.activeRun ? <BusyRunHint /> : props.thread ? <text fg={tuiTheme.muted}>↑↓ 历史 · PgUp/PgDn 滚动 · Ctrl+O 工具</text> : null}
+      <text fg={tuiTheme.subtle}>v{runtime.cliVersion}</text>
     </box>
   )
 }
@@ -213,7 +215,7 @@ export function useSpinner(active: boolean, interval: number): string {
 }
 
 /** 将运行时模型配置转换为简短状态文案。 */
-function modelLabel(runtime: TuiRuntime): string {
+function modelLabel(runtime: SharedViewProps["interactive"]["runtime"]): string {
   if (!runtime.modelConfigured) return "模型未配置"
   return modelReference(runtime.modelProfileId, runtime.modelName) ?? "已配置模型"
 }
@@ -230,12 +232,12 @@ function shorten(value: string, limit: number): string {
   return `${value.slice(0, Math.max(0, limit - 1))}…`
 }
 
-/** 将运行状态映射到统一语义色。 */
-function statusColor(status: string): string {
-  if (status === "已完成") return tuiTheme.success
-  if (status === "已取消") return tuiTheme.muted
-  if (status === "执行失败") return tuiTheme.danger
-  if (status.includes("审批")) return tuiTheme.warning
+/** 将运行活动 kind 映射到统一语义色。 */
+function statusColor(kind: SharedViewProps["interactive"]["activity"]["kind"]): string {
+  if (kind === "completed") return tuiTheme.success
+  if (kind === "cancelled") return tuiTheme.muted
+  if (kind === "failed") return tuiTheme.danger
+  if (kind === "waiting-interaction") return tuiTheme.warning
   return tuiTheme.primary
 }
 

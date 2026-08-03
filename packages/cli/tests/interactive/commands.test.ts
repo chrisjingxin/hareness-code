@@ -10,8 +10,8 @@ import {
   parseSlashCommand,
   resolveSlashCommand,
   unknownCommandNotice,
-} from "../../../src/tui/application/commands"
-import { dispatchSlashCommand } from "../../../src/tui/application/command-dispatcher"
+} from "../../src/interactive/commands"
+import { dispatchSlashCommand } from "../../src/interactive/command-dispatcher"
 
 test("Registry 以 canonical ID 解析核心 Slash Command 与别名", () => {
   expect(parseSlashCommand("/q")).toEqual({ id: "system.quit", name: "quit", argument: undefined })
@@ -30,7 +30,7 @@ test("Registry 以 canonical ID 解析核心 Slash Command 与别名", () => {
   expect(parseSlashCommand("/web")).toEqual({ id: "host.web", name: "web", argument: undefined })
 })
 
-test("Dispatcher 仅按稳定 ID 返回结构化结果，并统一处理兼容命令", () => {
+test("Dispatcher 仅按稳定 ID 返回 semantic operation，并统一处理兼容命令", () => {
   const base = {
     commandContext: defaultCommandContext({ capabilities: ["threads.read", "context.manage", "skills.read"], hasThread: true }),
     threadId: "thread-1",
@@ -45,9 +45,9 @@ test("Dispatcher 仅按稳定 ID 返回结构化结果，并统一处理兼容�
   const model = parseSlashCommand("/model pro")
   if (!clear || !help || !resume || !forceClear || !compact || !model) throw new Error("expected built-in commands")
 
-  expect(dispatchSlashCommand(clear, base)).toEqual({ type: "local-action", action: "clear-thread" })
+  expect(dispatchSlashCommand(clear, base)).toEqual({ type: "clear-thread" })
   expect(dispatchSlashCommand(help, base)).toMatchObject({ type: "notice", message: expect.stringContaining("/new, /clear") })
-  expect(dispatchSlashCommand(resume, base)).toEqual({ type: "open-picker", picker: "threads" })
+  expect(dispatchSlashCommand(resume, base)).toEqual({ type: "present", target: "threads" })
   expect(dispatchSlashCommand(forceClear, base)).toEqual({
     type: "notice",
     message: "/force-clear 已废弃，请使用 /new；当前任务执行时会先请求确认。",
@@ -55,38 +55,26 @@ test("Dispatcher 仅按稳定 ID 返回结构化结果，并统一处理兼容�
   expect(dispatchSlashCommand(model, {
     ...base,
     commandContext: defaultCommandContext({ capabilities: ["models.read"] }),
-  })).toEqual({ type: "open-picker", picker: "models", initialQuery: "pro" })
-
-  const compactResult = dispatchSlashCommand(compact, base)
-  if (compactResult.type !== "rpc") throw new Error("expected context.compact RPC result")
-  expect(compactResult.method).toBe("context.compact")
-  expect(compactResult.params).toEqual({ thread_id: "thread-1" })
-  expect(compactResult.onSuccess({ compacted: true, context: { artifact_ids: ["archive-1"] } })).toEqual({
-    type: "notice",
-    message: "上下文已压缩，归档 1 项。",
-  })
-  expect(compactResult.onError(new Error("sidecar offline"))).toEqual({
-    type: "notice",
-    message: "上下文压缩失败：sidecar offline",
-  })
+  })).toEqual({ type: "present", target: "models", initialQuery: "pro" })
+  expect(dispatchSlashCommand(compact, base)).toEqual({ type: "compact", threadId: "thread-1" })
 })
 
-test("活动任务下 /new 返回确认 Dialog，而不是旧的强制清理分支", () => {
+test("活动任务下 /new 返回确认 semantic operation，而不是旧分支", () => {
   const command = parseSlashCommand("/new")
   if (!command) throw new Error("expected new command")
   const result = dispatchSlashCommand(command, {
     commandContext: defaultCommandContext({ activeRun: true }),
+    threadId: null,
     runtimeStatus: "运行摘要",
     versionSummary: "version",
   })
   expect(result).toEqual({
-    type: "open-dialog",
-    dialog: {
-      kind: "confirm-new-thread",
-      title: "开始新的 Thread？",
-      message: "当前任务仍在执行。确认后将先取消任务，再清空当前 Thread。",
-      confirm: { type: "local-action", action: "cancel-active-run-and-clear-thread" },
-    },
+    type: "request-confirmation",
+    confirmationId: "clear-thread",
+    title: "开始新的 Thread？",
+    message: "当前任务仍在执行。确认后将先取消任务，再清空当前 Thread。",
+    confirmLabel: "取消任务并新建",
+    cancelLabel: "保留当前 Thread",
   })
 })
 
@@ -94,7 +82,7 @@ test("/web 在空首页或已有 Thread 时可用，且要求 host.attach/host.c
   const command = parseSlashCommand("/web")
   if (!command) throw new Error("expected web command")
   const base = {
-    threadId: "thread-1",
+    threadId: "thread-1" as string | null,
     runtimeStatus: "运行摘要",
     versionSummary: "version",
   }
@@ -105,16 +93,16 @@ test("/web 在空首页或已有 Thread 时可用，且要求 host.attach/host.c
       capabilities: ["host.attach", "host.control"],
       hasThread: true,
     }),
-  })).toEqual({ type: "web", threadId: "thread-1" })
+  })).toEqual({ type: "request-handoff", threadId: "thread-1" })
 
   expect(dispatchSlashCommand(command, {
     ...base,
-    threadId: undefined,
+    threadId: null,
     commandContext: defaultCommandContext({
       capabilities: ["host.attach", "host.control"],
       hasThread: false,
     }),
-  })).toEqual({ type: "web", threadId: null })
+  })).toEqual({ type: "request-handoff", threadId: null })
 
   expect(dispatchSlashCommand(command, {
     ...base,

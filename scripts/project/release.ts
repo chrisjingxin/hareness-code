@@ -104,7 +104,7 @@ export async function setVersion(projectRoot: string, version: string, subjects?
   for (const file of versionFiles) await setPackageVersion(join(projectRoot, file), target.raw)
   await replaceSingle(join(projectRoot, "packages/agent/pyproject.toml"), /^version = ".*"$/m, `version = "${target.raw}"`)
   await replaceSingle(join(projectRoot, "packages/agent/harness_agent/__init__.py"), /^__version__ = ".*"$/m, `__version__ = "${target.raw}"`)
-  await replaceSingle(join(projectRoot, "packages/cli/src/tui/application/model.ts"), /^export const CLI_VERSION = ".*"$/m, `export const CLI_VERSION = "${target.raw}"`)
+  await replaceSingle(join(projectRoot, "packages/cli/src/interactive/runtime.ts"), /^export const CLI_VERSION = ".*"$/m, `export const CLI_VERSION = "${target.raw}"`)
 
   if (existing.includes(`## [${target.raw}] -`)) throw new Error(`CHANGELOG 已包含版本 ${target.raw}`)
   const messages = subjects ?? readCommitSubjects(projectRoot)
@@ -120,7 +120,7 @@ export async function checkRelease(projectRoot = root): Promise<void> {
   }
   const pyproject = await readFile(join(projectRoot, "packages/agent/pyproject.toml"), "utf8")
   const pythonInit = await readFile(join(projectRoot, "packages/agent/harness_agent/__init__.py"), "utf8")
-  const cliModel = await readFile(join(projectRoot, "packages/cli/src/tui/application/model.ts"), "utf8")
+  const cliModel = await readFile(join(projectRoot, "packages/cli/src/interactive/runtime.ts"), "utf8")
   if (!pyproject.includes(`version = "${version}"`) || !pythonInit.includes(`__version__ = "${version}"`) || !cliModel.includes(`CLI_VERSION = "${version}"`)) {
     throw new Error("Python Agent 或 CLI 运行时版本与 VERSION 不一致")
   }

@@ -44,6 +44,7 @@ async function createFixture(): Promise<string> {
     mkdir(join(projectRoot, "docs/developer/architecture/adr"), { recursive: true }),
     mkdir(join(projectRoot, "docs/developer/project"), { recursive: true }),
     mkdir(join(projectRoot, "docs/developer/tasks"), { recursive: true }),
+    mkdir(join(projectRoot, "packages/cli/src/interactive"), { recursive: true }),
     mkdir(join(projectRoot, "packages/cli/src/tui/application"), { recursive: true }),
     mkdir(join(projectRoot, "packages/protocol"), { recursive: true }),
     mkdir(join(projectRoot, "packages/agent/harness_agent"), { recursive: true }),
@@ -65,7 +66,7 @@ async function createFixture(): Promise<string> {
     writeFile(join(projectRoot, "packages/protocol/package.json"), '{"name":"protocol","version":"0.0.0"}\n', "utf8"),
     writeFile(join(projectRoot, "packages/agent/pyproject.toml"), '[project]\nversion = "0.0.0"\n', "utf8"),
     writeFile(join(projectRoot, "packages/agent/harness_agent/__init__.py"), '__version__ = "0.0.0"\n', "utf8"),
-    writeFile(join(projectRoot, "packages/cli/src/tui/application/model.ts"), 'export const CLI_VERSION = "0.0.0"\n', "utf8"),
+    writeFile(join(projectRoot, "packages/cli/src/interactive/runtime.ts"), 'export const CLI_VERSION = "0.0.0"\n', "utf8"),
   ])
   await syncTasks(projectRoot)
   return projectRoot

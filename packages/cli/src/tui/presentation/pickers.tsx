@@ -3,7 +3,7 @@
 import { type TextareaRenderable } from "@opentui/core"
 import { type ReactNode, type RefObject } from "react"
 
-import type { SkillMenuItem } from "../application/commands"
+import type { SkillMenuItem } from "../../interactive/commands"
 import { SearchPicker, type SearchPickerRenderContext } from "./overlays"
 import { tuiTheme } from "./theme"
 import type { ThreadPickerItem } from "./types"

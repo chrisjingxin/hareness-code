@@ -9,9 +9,9 @@ import { act, createElement } from "react"
 import { AgentClient } from "../../src/ipc/client"
 import { StdioRpcTransport } from "../../src/ipc/stdio-transport"
 import { Za38Tui } from "../../src/tui/app"
-import type { TuiRuntime } from "../../src/tui/application/model"
+import type { InteractiveRuntime } from "../../src/interactive/runtime"
 
-const runtime: TuiRuntime = {
+const runtime: InteractiveRuntime = {
   workspace: "/workspace/harness-code",
   cliVersion: "0.1.0",
   modelConfigured: true,

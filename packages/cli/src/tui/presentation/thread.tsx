@@ -7,12 +7,16 @@ import type { SharedViewProps } from "./types"
 
 /** thread 流全宽渲染，工具和审批事件以左轨形成明确的操作时间线。 */
 export function ThreadView(props: SharedViewProps & { modelName?: string }) {
-  const blockingInteraction = Boolean(props.state.pendingApproval || props.state.pendingQuestion?.options.length)
+  const interaction = props.interactive.interaction
+  const blockingInteraction = Boolean(
+    interaction?.type === "approval"
+    || (interaction?.type === "question" && interaction.questions[0]?.options.length),
+  )
 
   return (
     <box flexDirection="column" flexGrow={1} minHeight={0} backgroundColor={tuiTheme.background}>
       <ConversationTimeline
-        state={props.state}
+        interactive={props.interactive}
         scrollRef={props.conversationScrollRef}
         showToolDetails={props.showToolDetails}
         expandedTools={props.expandedTools}
@@ -23,12 +27,11 @@ export function ThreadView(props: SharedViewProps & { modelName?: string }) {
       />
       {!blockingInteraction ? (
         <box flexShrink={0} paddingLeft={2} paddingRight={2}>
-          <ThreadRuntimeLine runtime={props.runtime} state={props.state} />
+          <ThreadRuntimeLine interactive={props.interactive} />
           <Composer {...props} variant="thread" commandMenuPlacement="above" />
         </box>
       ) : null}
-      <FooterRail runtime={props.runtime} state={props.state} terminalWidth={props.terminalWidth} thread />
+      <FooterRail interactive={props.interactive} terminalWidth={props.terminalWidth} thread />
     </box>
   )
 }
-

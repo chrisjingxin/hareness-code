@@ -1,16 +1,16 @@
-/** TUI 运行时展示模型：集中处理握手摘要、终端降级和格式化。 */
+/** Interactive Core 的脱敏运行环境：握手摘要、终端降级与 /status 语义。 */
 
 import type { InitializeResult } from "@za38/protocol"
 
 export const CLI_VERSION = "0.1.0"
 
 /** 规范审批模式；与协议 approvalMode 枚举保持一致。 */
-export type TuiApprovalMode = "plan" | "default" | "auto-edit" | "auto" | "yolo"
+export type InteractiveApprovalMode = "plan" | "default" | "auto-edit" | "auto" | "yolo"
 
 /** Shift+Tab 循环切换顺序，与 Python approval_mode.MODE_CYCLE 对齐。 */
-export const APPROVAL_MODE_CYCLE: readonly TuiApprovalMode[] = ["plan", "default", "auto-edit", "auto", "yolo"]
+export const APPROVAL_MODE_CYCLE: readonly InteractiveApprovalMode[] = ["plan", "default", "auto-edit", "auto", "yolo"]
 
-export type TuiRuntime = {
+export type InteractiveRuntime = {
   workspace: string
   gitBranch?: string
   cliVersion: string
@@ -21,7 +21,7 @@ export type TuiRuntime = {
   startupError?: string
   executionMode: "local" | "remote-sandbox"
   sandboxProvider?: string
-  approvalMode: TuiApprovalMode
+  approvalMode: InteractiveApprovalMode
   approvalModeWarning?: string
   /** initialize 协商后的能力；缺省仅用于兼容未更新的测试运行时。 */
   capabilities?: readonly string[]
@@ -29,11 +29,11 @@ export type TuiRuntime = {
 }
 
 /** 将握手结果收敛为界面可安全显示的运行摘要，避免把配置原样暴露给组件。 */
-export function createTuiRuntime(
+export function createInteractiveRuntime(
   result: InitializeResult,
   cwd: string,
   options: { gitBranch?: string; cliVersion?: string } = {},
-): TuiRuntime {
+): InteractiveRuntime {
   const config = isRecord(result.config_summary) ? result.config_summary : undefined
   const model = config && isRecord(config.model) ? config.model : undefined
   const security = config && isRecord(config.security) ? config.security : undefined
@@ -67,7 +67,7 @@ export function supportsHomeDecoration(width: number, height: number): boolean {
 }
 
 /** 返回执行安全状态，明确本机默认模式不是隔离环境。 */
-export function executionStatusLabel(runtime: TuiRuntime): string {
+export function executionStatusLabel(runtime: InteractiveRuntime): string {
   if (runtime.executionMode === "remote-sandbox") {
     return runtime.sandboxProvider ? `远端沙箱 · ${runtime.sandboxProvider}` : "远端沙箱"
   }
@@ -75,12 +75,12 @@ export function executionStatusLabel(runtime: TuiRuntime): string {
 }
 
 /** 返回与配置和协议一致的英文审批模式名，便于终端快速扫描。 */
-export function approvalModeLabel(runtime: TuiRuntime): string {
+export function approvalModeLabel(runtime: InteractiveRuntime): string {
   return runtime.approvalMode
 }
 
 /** 生成 /status 使用的本地只读运行摘要，不依赖额外 Agent 或 RPC 调用。 */
-export function runtimeStatusSummary(runtime: TuiRuntime): string {
+export function runtimeStatusSummary(runtime: InteractiveRuntime): string {
   const lines = [
     `工作区  ${runtime.workspace}`,
     `模型    ${modelLabel(runtime)}`,
@@ -114,7 +114,7 @@ function compactNumber(value: number): string {
 }
 
 /** 将运行时模型配置转换为状态摘要使用的简短文案。 */
-function modelLabel(runtime: TuiRuntime): string {
+function modelLabel(runtime: InteractiveRuntime): string {
   if (!runtime.modelConfigured) return "模型未配置"
   return modelReference(runtime.modelProfileId, runtime.modelName) ?? "已配置模型"
 }
@@ -141,12 +141,12 @@ function optionalString(value: unknown): string | undefined {
 }
 
 /** 对来自协议的审批模式做白名单解析，未知值回退到保守的默认确认。 */
-function approvalMode(value: unknown): TuiApprovalMode {
-  return (APPROVAL_MODE_CYCLE as readonly unknown[]).includes(value) ? value as TuiApprovalMode : "default"
+function approvalMode(value: unknown): InteractiveApprovalMode {
+  return (APPROVAL_MODE_CYCLE as readonly unknown[]).includes(value) ? value as InteractiveApprovalMode : "default"
 }
 
 /** 按循环顺序返回下一个审批模式。 */
-export function nextApprovalMode(current: TuiApprovalMode): TuiApprovalMode {
+export function nextApprovalMode(current: InteractiveApprovalMode): InteractiveApprovalMode {
   const index = APPROVAL_MODE_CYCLE.indexOf(current)
   return APPROVAL_MODE_CYCLE[(index + 1) % APPROVAL_MODE_CYCLE.length] ?? "default"
 }

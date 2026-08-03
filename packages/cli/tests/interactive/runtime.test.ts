@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 
 import {
-  createTuiRuntime,
+  createInteractiveRuntime,
   approvalModeLabel,
   executionStatusLabel,
   formatDuration,
@@ -9,10 +9,10 @@ import {
   runtimeStatusSummary,
   supportsHomeDecoration,
   workspaceLabel,
-} from "../../../src/tui/application/model"
+} from "../../src/interactive/runtime"
 
 test("从脱敏初始化结果提取可展示的运行上下文", () => {
-  const runtime = createTuiRuntime({
+  const runtime = createInteractiveRuntime({
     protocol: { major: 3, minor: 0 },
     server: { name: "za38-agent", version: "0.1.0" },
     connection: { id: "test", role: "owner", project: { id: "project", label: "za38-cli" } },
@@ -60,7 +60,7 @@ test("首页装饰在窄终端降级，并保留执行安全摘要", () => {
 })
 
 test("审批模式与配置降级提示使用稳定英文展示", () => {
-  const runtime = createTuiRuntime({
+  const runtime = createInteractiveRuntime({
     protocol: { major: 3, minor: 0 },
     server: { name: "za38-agent", version: "0.1.0" },
     connection: { id: "test", role: "owner", project: { id: "project", label: "fallback" } },

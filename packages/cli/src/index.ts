@@ -9,7 +9,7 @@ import { parseArgs, type Command } from "./args"
 import { AgentClient } from "./ipc/client"
 import { StdioRpcTransport } from "./ipc/stdio-transport"
 import { runTui } from "./tui/app"
-import { CLI_VERSION, createTuiRuntime, type TuiRuntime } from "./tui/application/model"
+import { CLI_VERSION, createInteractiveRuntime, type InteractiveRuntime } from "./interactive/runtime"
 import { createSystemBrowserOpener } from "./web/browser"
 import { browserBundle } from "./web/bundle"
 import { webHtml } from "./web/html"
@@ -21,7 +21,7 @@ import { createWebServer } from "./web/server"
 
 type RunningAgent = {
   client: AgentClient
-  runtime: TuiRuntime
+  runtime: InteractiveRuntime
   stop: () => Promise<void>
 }
 
@@ -92,7 +92,7 @@ async function startAgent(command: Command): Promise<RunningAgent> {
   })
   return {
     client,
-    runtime: createTuiRuntime(initialized, command.cwd, {
+    runtime: createInteractiveRuntime(initialized, command.cwd, {
       gitBranch: readGitBranch(command.cwd),
       cliVersion: CLI_VERSION,
     }),

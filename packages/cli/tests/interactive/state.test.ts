@@ -1,8 +1,8 @@
-/** v3 事件和交互请求的 TUI 归约测试。 */
+/** v3 事件和交互请求的共享 reducer 归约测试。 */
 
 import { expect, test } from "bun:test"
 import type { EventEnvelope, InteractionRequestEnvelope } from "@za38/protocol"
-import { applyAgentEvent, applyInteractionRequest, clearPendingInteraction, clearThread, createInitialState, isHomeState, restoreThread, startRun, type TuiState } from "../../../src/tui/application/state"
+import { applyAgentEvent, applyInteractionRequest, clearPendingInteraction, clearThread, createInitialState, isHomeState, restoreThread, startRun, type InteractiveState } from "../../src/interactive/state"
 
 const run = { threadId: "thread-1", runId: "run-1" }
 
@@ -20,9 +20,8 @@ test("恢复 thread 会原子替换时间线并清空旧运行状态", () => {
     { kind: "tool", content: "此前工具结果", toolName: "execute" },
   ])
   expect(active.activeRun).toBeDefined()
-  expect(restored.threadId).toBe("restored-thread")
-  expect(restored.activeRun).toBeUndefined()
-  expect(restored.pendingApproval).toBeUndefined()
+  expect(restored.currentThreadId).toBe("restored-thread")
+  expect(restored.activeRun).toBeNull()
   expect(restored.sequences).toEqual({})
   expect(restored.timeline.map(item => item.type)).toEqual(["message", "message", "tool"])
 })
@@ -60,7 +59,7 @@ test("context.updated 显示紧凑状态并将完成摘要写入 lastRun", () =>
     cache_status: "unknown",
     artifact_ids: ["tool-abc"],
   }))
-  expect(state.status).toBe("正在归档工具结果")
+  expect(state.activity.label).toBe("正在归档工具结果")
   expect(messages(state).at(-1)?.content).toContain("soft_dehydration")
   state = applyAgentEvent(state, event("run.completed", 2, {
     context: { action: "soft_dehydration", estimated_tokens: 8200, input_cap_tokens: 12288 },
@@ -71,13 +70,13 @@ test("context.updated 显示紧凑状态并将完成摘要写入 lastRun", () =>
 test("审批和稳定 question ID 通过时间线 request 进入状态", () => {
   let state = startRun(createInitialState(), run, "修改文件")
   state = applyInteractionRequest(state, request("approval", 1, { description: "写入源文件", requests: { action_requests: [] } }))
-  expect(state.pendingApproval).toMatchObject({ requestId: "request-1", description: "写入源文件" })
+  expect(state.activity.kind).toBe("waiting-interaction")
   expect(interactions(state)[0]).toMatchObject({ id: "request-1", type: "approval", status: "pending" })
   state = clearPendingInteraction(state, "approved")
   expect(interactions(state)[0]).toMatchObject({ id: "request-1", status: "approved" })
   state = applyAgentEvent(state, event("interaction.resolved", 2, { request_id: "request-1", type: "approval" }))
   state = applyInteractionRequest(state, request("question", 3, { questions: [{ id: "question-1", question: "选择目录", options: [{ label: "src", value: "src" }, { label: "tests", value: "tests" }] }] }))
-  expect(state.pendingQuestion).toEqual({ requestId: "request-3", questionId: "question-1", question: "选择目录", options: [{ name: "src", value: "src" }, { name: "tests", value: "tests" }] })
+  expect(state.activity.kind).toBe("waiting-interaction")
   expect(interactions(state)[1]).toMatchObject({ id: "request-3", type: "question", status: "pending" })
 })
 
@@ -153,6 +152,6 @@ function request(type: "approval" | "question", sequence: number, payload: Recor
   return { request_id: `request-${sequence}`, type, thread_id: run.threadId, run_id: run.runId, timeout_ms: 1000, payload } as InteractionRequestEnvelope
 }
 
-function messages(state: TuiState) { return state.timeline.flatMap(item => item.type === "message" ? [item.message] : []) }
-function tools(state: TuiState) { return state.timeline.flatMap(item => item.type === "tool" ? [item.tool] : []) }
-function interactions(state: TuiState) { return state.timeline.flatMap(item => item.type === "interaction" ? [item.interaction] : []) }
+function messages(state: InteractiveState) { return state.timeline.flatMap(item => item.type === "message" ? [item.message] : []) }
+function tools(state: InteractiveState) { return state.timeline.flatMap(item => item.type === "tool" ? [item.tool] : []) }
+function interactions(state: InteractiveState) { return state.timeline.flatMap(item => item.type === "interaction" ? [item.interaction] : []) }

@@ -1,8 +1,8 @@
-/** TUI Slash Command 的 Registry、解析与可用性策略。 */
+/** Interactive Core 的 Slash Command Registry、解析与可用性策略。 */
 
 import { Capability } from "@za38/protocol"
 
-/** 命令打开的交互入口类型；由 Result Adapter 映射为 TUI 副作用。 */
+/** 命令打开的交互入口类型；由 Result Adapter 映射为具体副作用。 */
 export type CommandPresentation = "action" | "picker" | "viewer" | "dialog"
 
 /** Command 来源预留给后续 Skill、MCP 与 Plugin Loader；当前只注册内置命令。 */
@@ -19,7 +19,7 @@ export type CommandRequirements = {
   requiresIdle?: boolean
 }
 
-/** 后续 Dispatcher 复用的最小安全元数据，不能由 TUI 自行扩大权限。 */
+/** 后续 Dispatcher 复用的最小安全元数据，不能由表现层自行扩大权限。 */
 export type CommandSafety = {
   allowedDuringRun?: boolean
   confirmation?: "never" | "when-running" | "always"
@@ -45,7 +45,7 @@ export type CommandDefinition = {
   deprecated?: DeprecatedCommand
 }
 
-/** 用于计算当前命令菜单可用性的最小 TUI 状态快照。 */
+/** 用于计算当前命令菜单可用性的最小共享状态快照。 */
 export type CommandContext = {
   capabilities: ReadonlySet<string>
   hasThread: boolean
@@ -235,6 +235,30 @@ export function findCommandMenuItems(
 /** 将动态 Skill 项渲染成稳定 Slash 形式；内置命令一律显示 canonical 名称。 */
 export function commandMenuItemLabel(item: CommandMenuItem): string {
   return item.kind === "command" ? `/${item.command.name}` : `/skill:${item.skill.id}`
+}
+
+/** 只按 draft 前缀过滤已计算好可用性的菜单项；capability/busy 计算仍在共享层。 */
+export function filterCommandMenuItems(
+  items: readonly CommandMenuItem[],
+  draft: string,
+): readonly CommandMenuItem[] {
+  const query = draft.trimStart()
+  if (!query.startsWith("/") || query.startsWith("//") || query.slice(1).match(/\s/)) return []
+  const needle = query.slice(1).toLowerCase()
+  const commands = items
+    .filter((item): item is Extract<CommandMenuItem, { kind: "command" }> => item.kind === "command")
+    .filter(({ command }) => shouldShowInMenu(command, needle))
+    .filter(({ command }) => [command.name, ...(command.aliases ?? [])]
+      .some(candidate => candidate.startsWith(needle)))
+  const skills = items
+    .filter((item): item is Extract<CommandMenuItem, { kind: "skill" }> => item.kind === "skill")
+    .filter(skill => {
+      const label = `skill:${skill.skill.id}`.toLowerCase()
+      const shortNeedle = needle.startsWith("skill:") ? needle.slice("skill:".length) : needle
+      return [label, skill.skill.id.toLowerCase(), skill.skill.name.toLowerCase(), skill.skill.description.toLowerCase()]
+        .some(candidate => candidate.includes(needle) || candidate.includes(shortNeedle))
+    })
+  return [...commands, ...skills]
 }
 
 /** disabled 命令在菜单中保留原说明和原因，避免用户误以为能力不存在。 */

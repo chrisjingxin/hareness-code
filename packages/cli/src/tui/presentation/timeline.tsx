@@ -3,8 +3,9 @@
 import { type ScrollBoxRenderable } from "@opentui/core"
 import { type RefObject } from "react"
 
-import { formatDuration, formatUsage } from "../application/model"
-import type { ConversationMessage, InteractionCard, TimelineItem, ToolCard, TuiState } from "../application/state"
+import { formatDuration, formatUsage } from "../../interactive/runtime"
+import type { ConversationMessage, InteractionCard, TimelineItem, ToolCard } from "../../interactive/state"
+import type { InteractiveSnapshot } from "../../interactive/types"
 import { getCommonSyntaxClient } from "../platform/syntax-parsers"
 import { collapseToolOutput } from "../upstream/collapse-tool-output"
 import { PROMPT_BORDER, useSpinner } from "./composer"
@@ -14,7 +15,7 @@ import type { ApprovalDecision } from "./types"
 
 /** 使用 ScrollBox 渲染统一 timeline，并保留 sticky-scroll 行为。 */
 export function ConversationTimeline(props: {
-  state: TuiState
+  interactive: InteractiveSnapshot
   scrollRef: RefObject<ScrollBoxRenderable | null>
   showToolDetails: boolean
   expandedTools: ReadonlySet<string>
@@ -26,11 +27,11 @@ export function ConversationTimeline(props: {
   return (
     <scrollbox ref={props.scrollRef} stickyScroll stickyStart="bottom" flexGrow={1} minHeight={0} scrollAcceleration={createScrollAcceleration()} viewportOptions={{ paddingRight: 1 }}>
       <box height={1} />
-      {props.state.timeline.map(item => (
+      {props.interactive.timeline.map(item => (
         <TimelineRow
           key={timelineItemKey(item)}
           item={item}
-          state={props.state}
+          interactive={props.interactive}
           showToolDetails={props.showToolDetails}
           expandedTools={props.expandedTools}
           onToggleTool={props.onToggleTool}
@@ -38,8 +39,8 @@ export function ConversationTimeline(props: {
           onQuestion={props.onQuestion}
         />
       ))}
-      <TimelineActivity state={props.state} />
-      <RunSummary state={props.state} modelName={props.modelName} />
+      <TimelineActivity interactive={props.interactive} />
+      <RunSummary interactive={props.interactive} modelName={props.modelName} />
       <box height={1} />
     </scrollbox>
   )
@@ -52,7 +53,7 @@ export function ConversationTimeline(props: {
 /** 根据统一 timeline item 类型选择消息或工具渲染器。 */
 function TimelineRow(props: {
   item: TimelineItem
-  state: TuiState
+  interactive: InteractiveSnapshot
   showToolDetails: boolean
   expandedTools: ReadonlySet<string>
   onToggleTool: (toolId: string) => void
@@ -61,7 +62,7 @@ function TimelineRow(props: {
 }) {
   if (props.item.type === "message") return <MessageBlock message={props.item.message} />
   if (props.item.type === "interaction") {
-    return <InteractionRow interaction={props.item.interaction} onApproval={props.onApproval} onQuestion={props.onQuestion} />
+    return <InteractionRow interaction={props.item.interaction} activeInteraction={props.interactive.interaction} onApproval={props.onApproval} onQuestion={props.onQuestion} />
   }
   const tool = props.item.tool
   const toolKey = toolTimelineKey(tool)
@@ -148,28 +149,29 @@ function ToolRow(props: { tool: ToolCard; expanded: boolean; onToggle: () => voi
 }
 
 /** 当前运行只在时间线末尾显示临时活动状态，绝不插回已有事件之间。 */
-function TimelineActivity(props: { state: TuiState }) {
-  const tail = props.state.timeline.at(-1)
-  const visible = Boolean(props.state.activeRun)
-    && !props.state.pendingApproval
-    && !props.state.pendingQuestion
-    && props.state.status !== "正在调用工具"
+function TimelineActivity(props: { interactive: InteractiveSnapshot }) {
+  const { interactive } = props
+  const tail = interactive.timeline.at(-1)
+  const visible = Boolean(interactive.activeRun)
+    && interactive.interaction === null
+    && interactive.activity.kind !== "running"
+    && interactive.activity.kind !== "starting"
+    && interactive.activity.kind !== "waiting-interaction"
     && !(tail?.type === "message" && tail.message.role === "assistant" && tail.message.streaming)
   // Hooks 不能因运行状态不同而跳过；否则 thread 恢复后再次执行会破坏 React hook 顺序。
   const frame = useSpinner(visible, 80)
   if (!visible) return null
-  const label = props.state.status === "正在继续执行" ? "继续执行" : props.state.status
   return (
     <box marginTop={1} paddingLeft={3} flexDirection="row" gap={1}>
       <text fg={tuiTheme.warning}>{frame}</text>
-      <text fg={tuiTheme.warning}>{label}</text>
+      <text fg={tuiTheme.warning}>{interactive.activity.label}</text>
     </box>
   )
 }
 
 /** 显示运行终态、耗时和 token 用量摘要。 */
-function RunSummary(props: { state: TuiState; modelName?: string }) {
-  const summary = props.state.lastRun
+function RunSummary(props: { interactive: InteractiveSnapshot; modelName?: string }) {
+  const summary = props.interactive.lastRun
   if (!summary) return null
   const duration = formatDuration(summary.durationMs)
   const usage = formatUsage(summary.usage)
@@ -191,6 +193,7 @@ function RunSummary(props: { state: TuiState; modelName?: string }) {
 /** 审批和问答是不可脱离时间线的阻塞事件，完成后保留用户处理结果。 */
 function InteractionRow(props: {
   interaction: InteractionCard
+  activeInteraction?: InteractiveSnapshot["interaction"]
   onApproval: (decision: ApprovalDecision) => void
   onQuestion: (answer: string) => void
 }) {
@@ -198,6 +201,7 @@ function InteractionRow(props: {
   const pending = interaction.status === "pending"
   const approval = interaction.type === "approval"
   const tone = approval ? tuiTheme.warning : tuiTheme.primary
+  const allowedDecisions = props.activeInteraction?.type === "approval" ? props.activeInteraction.decisions : ALL_APPROVAL_DECISIONS
 
   return (
     <box marginTop={1} marginLeft={2} marginRight={2} border={["left"]} borderColor={tone} customBorderChars={PROMPT_BORDER}>
@@ -214,16 +218,10 @@ function InteractionRow(props: {
           <>
             <select
               focused
-              height={10}
+              height={Math.max(2, Math.min(10, allowedDecisions.length * 2))}
               showDescription
               wrapSelection
-              options={[
-                { name: "允许一次", description: "继续执行当前操作", value: "approve_once" },
-                { name: "本线程允许", description: "当前会话内不再询问", value: "approve_thread" },
-                { name: "永久允许", description: "此后同类操作自动放行", value: "approve_always" },
-                { name: "拒绝", description: "停止此操作并告知 Agent", value: "reject" },
-                { name: "拒绝并反馈", description: "拒绝并附带修改建议", value: "reject_with_feedback" },
-              ]}
+              options={allowedDecisions.map(decision => approvalOption(decision)).filter((option): option is { name: string; description: string; value: string } => option !== undefined)}
               onSelect={(_, option) => {
                 const value = option?.value
                 if (value === "approve_once" || value === "approve_thread" || value === "approve_always" || value === "reject" || value === "reject_with_feedback") {
@@ -320,3 +318,22 @@ function safePreview(value: unknown): string | undefined {
   }
 }
 
+/** 服务端未在 snapshot 提供 decisions 时（历史卡片）使用的完整回退选项。 */
+const ALL_APPROVAL_DECISIONS: readonly ApprovalDecision[] = [
+  "approve_once",
+  "approve_thread",
+  "approve_always",
+  "reject",
+  "reject_with_feedback",
+]
+
+/** 将共享 decisions 映射为可读的 select 选项；未知 decision 不渲染。 */
+function approvalOption(decision: ApprovalDecision): { name: string; description: string; value: string } | undefined {
+  switch (decision) {
+    case "approve_once": return { name: "允许一次", description: "继续执行当前操作", value: decision }
+    case "approve_thread": return { name: "本线程允许", description: "当前会话内不再询问", value: decision }
+    case "approve_always": return { name: "永久允许", description: "此后同类操作自动放行", value: decision }
+    case "reject": return { name: "拒绝", description: "停止此操作并告知 Agent", value: decision }
+    case "reject_with_feedback": return { name: "拒绝并反馈", description: "拒绝并附带修改建议", value: decision }
+  }
+}

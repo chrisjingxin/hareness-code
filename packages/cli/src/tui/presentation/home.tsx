@@ -1,6 +1,6 @@
 /** Harness Code 的沉浸式首页视图。 */
 
-import { supportsHomeDecoration } from "../application/model"
+import { supportsHomeDecoration } from "../../interactive/runtime"
 import { Composer, FooterRail } from "./composer"
 import { HarnessCodeLogo } from "./harness-logo"
 import { StarryBackground } from "./starry-background"
@@ -30,7 +30,7 @@ export function HomeView(props: SharedViewProps) {
         {showSupplemental ? <HomeSupplemental terminalWidth={props.terminalWidth} /> : null}
         <box flexGrow={1} minHeight={0} />
       </box>
-      <FooterRail runtime={props.runtime} state={props.state} terminalWidth={props.terminalWidth} />
+      <FooterRail interactive={props.interactive} terminalWidth={props.terminalWidth} />
     </box>
   )
 }

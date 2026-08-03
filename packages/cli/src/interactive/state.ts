@@ -1,4 +1,4 @@
-/** 把 sidecar 流事件折叠为可被 OpenTUI 渲染的确定性状态。 */
+/** Interactive Core 的纯 reducer：把 sidecar 流事件折叠为稳定领域状态。 */
 
 import { EventType, type EventEnvelope, type InteractionRequestEnvelope } from "@za38/protocol"
 
@@ -46,30 +46,6 @@ export type ActiveRun = {
   runId: string
 }
 
-export type PendingApproval = {
-  requestId: string
-  description: string
-  requests?: unknown
-}
-
-export type PendingQuestion = {
-  requestId: string
-  questionId: string
-  question: string
-  options: Array<{ name: string; value: string }>
-}
-
-export type TuiState = {
-  threadId?: string
-  activeRun?: ActiveRun
-  timeline: TimelineItem[]
-  status: string
-  pendingApproval?: PendingApproval
-  pendingQuestion?: PendingQuestion
-  lastRun?: RunSummary
-  sequences: Record<string, number>
-}
-
 export type RunSummary = {
   runId: string
   outcome: "completed" | "cancelled" | "failed"
@@ -78,41 +54,65 @@ export type RunSummary = {
   context?: { action: string; estimatedTokens?: number; inputCapTokens?: number }
 }
 
-/** 供恢复 RPC 交给表现层的稳定 thread message，禁止把 checkpoint 原始对象带入 TUI。 */
+/** 供恢复 RPC 交给表现层的稳定 thread message，禁止把 checkpoint 原始对象带入 UI。 */
 export type RestoredThreadMessage = {
   kind: "user" | "assistant" | "tool"
   content: string
   toolName?: string
 }
 
-/** 创建无 thread 内容的初始状态，可选保留内部 thread 标识。 */
-export function createInitialState(threadId?: string): TuiState {
+/**
+ * 运行活动使用稳定 kind 表达语义，adapter 不得按中文 label 反推行为；
+ * label 是共享的简短展示文案。
+ */
+export type InteractiveActivity =
+  | { kind: "home"; label: string }
+  | { kind: "idle"; label: string }
+  | { kind: "starting"; label: string }
+  | { kind: "running"; label: string }
+  | { kind: "waiting-interaction"; label: string }
+  | { kind: "cancelling"; label: string }
+  | { kind: "completed"; label: string }
+  | { kind: "cancelled"; label: string }
+  | { kind: "failed"; label: string }
+  | { kind: "restoring"; label: string }
+
+/** 共享 reducer 的内部状态；currentThreadId 用 null 明确表示空首页。 */
+export type InteractiveState = {
+  currentThreadId: string | null
+  activeRun: ActiveRun | null
+  timeline: TimelineItem[]
+  activity: InteractiveActivity
+  lastRun?: RunSummary
+  sequences: Record<string, number>
+}
+
+/** 创建无 thread 内容的初始状态；显式 null 进入空首页。 */
+export function createInitialState(threadId: string | null = null): InteractiveState {
   return {
-    threadId,
+    currentThreadId: threadId,
+    activeRun: null,
     timeline: [],
-    status: "就绪",
+    activity: { kind: threadId ? "idle" : "home", label: threadId ? "已恢复" : "就绪" },
     sequences: {},
   }
 }
 
-/** 空状态不应被欢迎文本污染，/clear 后才能可靠地回到沉浸式首页。 */
-export function isHomeState(state: TuiState): boolean {
+/** 空状态不应被欢迎文本污染，/new 后才能可靠地回到沉浸式首页。 */
+export function isHomeState(state: { activeRun: InteractiveState["activeRun"]; timeline: readonly TimelineItem[]; activity: InteractiveState["activity"] }): boolean {
   return !state.activeRun
-    && !state.pendingApproval
-    && !state.pendingQuestion
     && state.timeline.length === 0
+    && state.activity.kind !== "waiting-interaction"
 }
 
 /** 在发送 run.start 前先登记 run，避免首个流事件与 JSON-RPC 响应相邻到达时丢失。 */
-export function startRun(state: TuiState, run: ActiveRun, prompt: string): TuiState {
+export function startRun(state: InteractiveState, run: ActiveRun, prompt: string): InteractiveState {
   return {
     ...state,
-    threadId: run.threadId,
+    currentThreadId: run.threadId,
     activeRun: run,
-    pendingApproval: undefined,
-    pendingQuestion: undefined,
     lastRun: undefined,
-    status: "正在思考",
+    activity: { kind: "starting", label: "正在思考" },
     timeline: [
       ...state.timeline,
       { type: "message", message: { id: `user-${run.runId}`, role: "user", content: prompt, runId: run.runId } },
@@ -121,7 +121,7 @@ export function startRun(state: TuiState, run: ActiveRun, prompt: string): TuiSt
 }
 
 /** 将协议或本地系统通知追加到统一时间线。 */
-export function appendNotice(state: TuiState, message: string): TuiState {
+export function appendNotice(state: InteractiveState, message: string): InteractiveState {
   return {
     ...state,
     timeline: [...state.timeline, { type: "message", message: { id: `system-${crypto.randomUUID()}`, role: "system", content: message } }],
@@ -129,12 +129,12 @@ export function appendNotice(state: TuiState, message: string): TuiState {
 }
 
 /** 清空当前 thread 并返回沉浸式首页初始状态。 */
-export function clearThread(state: TuiState): TuiState {
-  return createInitialState()
+export function clearThread(state: InteractiveState): InteractiveState {
+  return createInitialState(null)
 }
 
 /** 原子替换当前 thread 的历史，清除旧运行、交互和 sequence，避免跨 thread 串帧。 */
-export function restoreThread(threadId: string, messages: readonly RestoredThreadMessage[]): TuiState {
+export function restoreThread(threadId: string, messages: readonly RestoredThreadMessage[]): InteractiveState {
   const restoredRunId = `restored-${threadId}`
   const timeline: TimelineItem[] = messages.map((message, index) => {
     const id = `restored-${index + 1}`
@@ -162,64 +162,70 @@ export function restoreThread(threadId: string, messages: readonly RestoredThrea
     }
   })
   return {
-    threadId,
+    currentThreadId: threadId,
+    activeRun: null,
     timeline,
-    status: "已恢复",
+    activity: { kind: "idle", label: "已恢复" },
     sequences: {},
   }
 }
 
 /** 将运行状态切换为取消中，等待 sidecar 返回终态事件。 */
-export function markCancelling(state: TuiState): TuiState {
-  return { ...state, status: "正在取消" }
+export function markCancelling(state: InteractiveState): InteractiveState {
+  return { ...state, activity: { kind: "cancelling", label: "正在取消" } }
 }
 
 /** 记录用户对内联交互的选择，并让尾部活动行在恢复前接管当前状态。 */
-export function clearPendingInteraction(state: TuiState, outcome: "approved" | "rejected" | "answered"): TuiState {
-  const requestId = state.pendingApproval?.requestId ?? state.pendingQuestion?.requestId
+export function clearPendingInteraction(state: InteractiveState, outcome: "approved" | "rejected" | "answered"): InteractiveState {
+  const requestId = interactionRequestId(state)
   const runId = state.activeRun?.runId
   return {
     ...state,
-    pendingApproval: undefined,
-    pendingQuestion: undefined,
-    status: "正在继续执行",
+    activity: { kind: "running", label: "正在继续执行" },
     timeline: requestId && runId ? updateInteraction(state.timeline, runId, requestId, outcome) : state.timeline,
   }
 }
 
+/** Interaction 超时或 abandon 后把对应卡片标记为 cancelled，并追加本地 notice。 */
+export function markInteractionTimeout(state: InteractiveState, requestId: string, notice: string): InteractiveState {
+  const settled = state.timeline.map(item => {
+    if (item.type === "interaction" && item.interaction.id === requestId && item.interaction.status === "pending") {
+      return { ...item, interaction: { ...item.interaction, status: "cancelled" as const } }
+    }
+    return item
+  })
+  return appendNotice({
+    ...state,
+    timeline: settled,
+    activity: { kind: "running", label: "正在继续执行" },
+  }, notice)
+}
+
 /** 用失败终态结束指定运行，并把错误文本追加到时间线末尾。 */
-export function markRunFailed(state: TuiState, runId: string, message: string): TuiState {
+export function markRunFailed(state: InteractiveState, runId: string, message: string): InteractiveState {
   if (state.activeRun?.runId !== runId) return state
   return {
     ...state,
-    activeRun: undefined,
-    pendingApproval: undefined,
-    pendingQuestion: undefined,
-    status: "执行失败",
+    activeRun: null,
+    activity: { kind: "failed", label: "执行失败" },
     lastRun: { runId, outcome: "failed" },
     timeline: finishAssistant(settlePendingInteractions(state.timeline, runId), runId, `\n错误：${message}`),
   }
 }
 
 /** 接收 Agent 的反向交互请求；Interaction 不占用公开事件 sequence。 */
-export function applyInteractionRequest(state: TuiState, request: InteractionRequestEnvelope): TuiState {
+export function applyInteractionRequest(state: InteractiveState, request: InteractionRequestEnvelope): InteractiveState {
   const active = state.activeRun
   if (!active || active.threadId !== request.thread_id || active.runId !== request.run_id) return state
-  const next = state
   if (request.type === "approval") {
-    const approval: PendingApproval = {
-      requestId: request.request_id,
-      description: stringValue(request.payload.description, "有操作需要你的审批"),
-      requests: request.payload.requests,
-    }
+    const approval = request.payload
     return {
-      ...next,
-      status: "等待工具审批",
-      pendingApproval: approval,
-      timeline: [...next.timeline, {
+      ...state,
+      activity: { kind: "waiting-interaction", label: "等待工具审批" },
+      timeline: [...state.timeline, {
         type: "interaction",
         interaction: {
-          id: approval.requestId,
+          id: request.request_id,
           runId: request.run_id,
           type: "approval",
           status: "pending",
@@ -229,27 +235,26 @@ export function applyInteractionRequest(state: TuiState, request: InteractionReq
       }],
     }
   }
-  const question = questionRequest(request)
+  const firstQuestion = request.payload.questions[0]
   return {
-    ...next,
-    status: "等待你的回答",
-    pendingQuestion: question,
-    timeline: [...next.timeline, {
+    ...state,
+    activity: { kind: "waiting-interaction", label: "等待你的回答" },
+    timeline: [...state.timeline, {
       type: "interaction",
       interaction: {
-        id: question.requestId,
+        id: request.request_id,
         runId: request.run_id,
         type: "question",
         status: "pending",
-        question: question.question,
-        options: question.options,
+        question: firstQuestion?.question ?? "Agent 需要补充信息",
+        options: questionOptions(firstQuestion?.options),
       },
     }],
   }
 }
 
 /** 丢弃旧 run、重复帧和乱序帧；序号缺口以系统通知报告但不崩溃。 */
-export function applyAgentEvent(state: TuiState, event: EventEnvelope): TuiState {
+export function applyAgentEvent(state: InteractiveState, event: EventEnvelope): InteractiveState {
   const active = state.activeRun
   if (!active || active.threadId !== event.thread_id || active.runId !== event.run_id) return state
   const next = acceptSequence(state, event.thread_id, event.run_id, event.sequence)
@@ -259,13 +264,13 @@ export function applyAgentEvent(state: TuiState, event: EventEnvelope): TuiState
   switch (event.type) {
     case EventType.RUN_STARTED: {
       const payload = event.payload
-      return { ...next, status: payload.resumed ? "已恢复执行" : "正在思考" }
+      return { ...next, activity: payload.resumed ? { kind: "running", label: "已恢复执行" } : { kind: "running", label: "正在思考" } }
     }
     case EventType.SKILL_LOADED: {
       const payload = event.payload
       return {
         ...next,
-        status: "正在思考",
+        activity: { kind: "running", label: "正在思考" },
         timeline: [
           ...next.timeline,
           {
@@ -283,14 +288,14 @@ export function applyAgentEvent(state: TuiState, event: EventEnvelope): TuiState
     case EventType.CONTENT_DELTA: {
       const payload = event.payload
       return typeof payload.text === "string"
-        ? { ...next, timeline: appendAssistantDelta(next.timeline, runId, payload.text), status: "正在生成" }
+        ? { ...next, timeline: appendAssistantDelta(next.timeline, runId, payload.text), activity: { kind: "running", label: "正在生成" } }
         : next
     }
     case EventType.TOOL_STARTED: {
       const payload = event.payload
       return {
         ...next,
-        status: "正在调用工具",
+        activity: { kind: "running", label: "正在调用工具" },
         timeline: updateTool(next.timeline, {
           id: stringValue(payload.tool_call_id, `tool-${runId}`),
           runId,
@@ -324,7 +329,7 @@ export function applyAgentEvent(state: TuiState, event: EventEnvelope): TuiState
       const payload = event.payload
       return {
         ...next,
-        status: contextStatus(payload),
+        activity: { kind: "running", label: contextStatus(payload) },
         timeline: appendNotice(next, contextNotice(payload)).timeline,
       }
     }
@@ -332,9 +337,7 @@ export function applyAgentEvent(state: TuiState, event: EventEnvelope): TuiState
       const payload = event.payload
       return {
         ...next,
-        pendingApproval: undefined,
-        pendingQuestion: undefined,
-        status: "正在继续执行",
+        activity: { kind: "running", label: "正在继续执行" },
         timeline: resolveInteraction(next.timeline, runId, stringValue(payload.request_id, "")),
       }
     }
@@ -342,10 +345,8 @@ export function applyAgentEvent(state: TuiState, event: EventEnvelope): TuiState
       const payload = event.payload
       return {
         ...next,
-        activeRun: undefined,
-        pendingApproval: undefined,
-        pendingQuestion: undefined,
-        status: "已完成",
+        activeRun: null,
+        activity: { kind: "completed", label: "已完成" },
         lastRun: {
           runId,
           outcome: "completed",
@@ -360,10 +361,8 @@ export function applyAgentEvent(state: TuiState, event: EventEnvelope): TuiState
       const payload = event.payload
       return {
         ...next,
-        activeRun: undefined,
-        pendingApproval: undefined,
-        pendingQuestion: undefined,
-        status: "已取消",
+        activeRun: null,
+        activity: { kind: "cancelled", label: "已取消" },
         lastRun: { runId, outcome: "cancelled" },
         timeline: finishAssistant(settlePendingInteractions(next.timeline, runId), runId, `\n已取消：${stringValue(payload.reason, "用户取消")}`),
       }
@@ -376,7 +375,7 @@ export function applyAgentEvent(state: TuiState, event: EventEnvelope): TuiState
 }
 
 /** 返回更新过 sequence 的状态；重复/倒序返回 null，缺口则追加可见诊断。 */
-function acceptSequence(state: TuiState, threadId: string, runId: string, sequence: number): TuiState | null {
+function acceptSequence(state: InteractiveState, threadId: string, runId: string, sequence: number): InteractiveState | null {
   const key = `${threadId}:${runId}`
   const previous = state.sequences[key] ?? 0
   if (sequence <= previous) return null
@@ -384,6 +383,13 @@ function acceptSequence(state: TuiState, threadId: string, runId: string, sequen
   return previous > 0 && sequence > previous + 1
     ? appendNotice(withSequence, `协议序号缺口：${previous} → ${sequence}`)
     : withSequence
+}
+
+/** 从当前挂起交互中读取 requestId，供清除交互时更新时间线卡片。 */
+function interactionRequestId(state: InteractiveState): string | undefined {
+  return state.timeline.findLast((item): item is Extract<TimelineItem, { type: "interaction" }> => (
+    item.type === "interaction" && item.interaction.status === "pending"
+  ))?.interaction.id
 }
 
 /** 将增量追加到末尾回答；工具之后收到文本时创建新的回答项。 */
@@ -442,7 +448,7 @@ function updateTool(timeline: TimelineItem[], tool: ToolCard): TimelineItem[] {
 }
 
 /** 把协议中的参数和输出分片分别附加到对应调用，禁止在同一预览中混写。 */
-function applyToolDelta(state: TuiState, runId: string, payload: Record<string, unknown>): TuiState {
+function applyToolDelta(state: InteractiveState, runId: string, payload: Record<string, unknown>): InteractiveState {
   const toolId = stringValue(payload.tool_call_id, `tool-${runId}`)
   let timeline = state.timeline
   if (typeof payload.arguments_delta === "string") {
@@ -593,20 +599,6 @@ function questionOptions(value: unknown): Array<{ name: string; value: string }>
     }
     return []
   })
-}
-
-/** 从完整问题组提取当前 UI 能渲染的首题和选项。 */
-function questionRequest(request: Extract<InteractionRequestEnvelope, { type: "question" }>): PendingQuestion {
-  const questions = request.payload.questions
-  const firstQuestion = Array.isArray(questions) && questions[0] && typeof questions[0] === "object"
-    ? questions[0] as Record<string, unknown>
-    : undefined
-  return {
-    requestId: request.request_id,
-    questionId: stringValue(firstQuestion?.id, "question-1"),
-    question: stringValue(firstQuestion?.question, "Agent 需要补充信息"),
-    options: questionOptions(firstQuestion?.options),
-  }
 }
 
 function objectRecord(value: unknown): Record<string, unknown> {

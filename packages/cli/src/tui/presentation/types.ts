@@ -1,28 +1,21 @@
-/** TUI 表现层与 Controller 之间共享的视图契约。 */
+/** TUI 表现层与 Adapter 之间共享的视图契约。 */
 
 import type { KeyEvent, ScrollBoxRenderable, TextareaRenderable } from "@opentui/core"
 import type { RefObject } from "react"
 
-import type { CommandMenuItem } from "../application/commands"
-import type {
-  ApprovalDecision,
-  CommandMenuState,
-  SelectedSkill,
-} from "../application/controller"
-import type { TuiRuntime } from "../application/model"
-import type { TuiState } from "../application/state"
+import type { CommandMenuItem, SkillMenuItem } from "../../interactive/commands"
+import type { InteractiveSnapshot } from "../../interactive/types"
+import type { ApprovalDecision, CommandMenuState } from "../application/adapter"
 
 export type {
   ApprovalDecision,
   CommandMenuState,
-  SelectedSkill,
   ThreadPickerItem,
-} from "../application/controller"
+} from "../application/adapter"
 
 /** 首页与 Thread 视图共用的状态和交互入口。 */
 export type SharedViewProps = {
-  runtime: TuiRuntime
-  state: TuiState
+  interactive: InteractiveSnapshot
   terminalWidth: number
   terminalHeight: number
   inputRef: RefObject<TextareaRenderable | null>
@@ -35,7 +28,7 @@ export type SharedViewProps = {
   commandOptions: readonly CommandMenuItem[]
   onSelectCommand: (command: CommandMenuItem) => void
   onHoverCommand: (index: number) => void
-  selectedSkill?: SelectedSkill
+  selectedSkill?: SkillMenuItem
   pickerVisible: boolean
   onClearSelectedSkill: () => void
   showToolDetails: boolean

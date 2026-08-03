@@ -365,18 +365,11 @@ class RunCoordinator:
         """返回供未来 DelegationDispatcher 复用的执行树 seam。"""
         return self._execution_registry
 
-<<<<<<< HEAD
     @property
     def session_rules(self) -> list[PermissionRule]:
         """返回本会话内审批产生的内存权限规则。"""
         return self._session_rules
 
-    async def start(self, command: StartRun, owner: ConnectionRef) -> RunExecution:
-        """受理一次 Run，并在受理成功后创建唯一执行任务。"""
-||||||| parent of baf0a1c (feat: 完成ZC-101 Host控制租约与可撤销Web Attachment实现)
-    async def start(self, command: StartRun, owner: ConnectionRef) -> RunExecution:
-        """受理一次 Run，并在受理成功后创建唯一执行任务。"""
-=======
     async def start(
         self,
         command: StartRun,
@@ -385,7 +378,6 @@ class RunCoordinator:
         allow_multithread: bool = False,
     ) -> RunExecution:
         """受理一次 Run，并在同一锁内判定 Thread 与 Connection 并发限制。"""
->>>>>>> baf0a1c (feat: 完成ZC-101 Host控制租约与可撤销Web Attachment实现)
         if not command.message.strip():
             raise RunError("INVALID_MESSAGE")
         async with self._lock:

@@ -3,29 +3,63 @@ import { RGBA, type ScrollBoxRenderable, type TextareaRenderable } from "@opentu
 import { testRender } from "@opentui/react/test-utils"
 import { act, createElement, createRef } from "react"
 
-import type { TuiRuntime } from "../../../src/tui/application/model"
+import type { InteractiveSnapshot } from "../../../src/interactive/types"
+import { createInteractiveRuntime } from "../../../src/interactive/runtime"
+import { createInitialState, startRun, type InteractiveState } from "../../../src/interactive/state"
 import { registerCommonSyntaxParsers } from "../../../src/tui/platform/syntax-parsers"
 import { HomeView } from "../../../src/tui/presentation/home"
 import { SkillPicker, ThreadPicker } from "../../../src/tui/presentation/pickers"
-import { createInitialState, startRun, type TuiState } from "../../../src/tui/application/state"
 import { tuiTheme } from "../../../src/tui/presentation/theme"
 import { ThreadView } from "../../../src/tui/presentation/thread"
 
-const runtime: TuiRuntime = {
-  workspace: "/workspace/harness-code",
-  gitBranch: "main",
-  cliVersion: "0.1.0",
-  modelName: "enterprise-model",
-  modelConfigured: true,
-  executionMode: "local",
-  approvalMode: "default",
+const runtime = createInteractiveRuntime({
+  protocol: { major: 3, minor: 0 },
+  server: { name: "za38-agent", version: "0.1.0" },
+  connection: { id: "test", role: "owner", project: { id: "project", label: "za38-cli" } },
+  capabilities: { available: [], enabled: [], handles: [] },
+  agent_commands: [],
+  skills_snapshot: { id: "snapshot", count: 0 },
+  skill_diagnostics: [],
+  limits: { max_frame_bytes: 8388608, max_tool_payload_bytes: 1048576 },
+  config_summary: {
+    workspace: "/workspace/harness-code",
+    model: { name: "enterprise-model", api_key_configured: true },
+    security: { approval_mode: "default" },
+  },
+  startup_error: null,
+}, "/workspace/harness-code", { gitBranch: "main", cliVersion: "0.1.0" })
+
+function snapshotOf(state: InteractiveState): InteractiveSnapshot {
+  return {
+    currentThreadId: state.currentThreadId,
+    activity: state.activity,
+    activeRun: state.activeRun,
+    timeline: state.timeline,
+    interaction: null,
+    confirmation: null,
+    lastRun: state.lastRun ?? null,
+    runtime,
+    connection: { status: "open" },
+    commands: [],
+    catalogs: {
+      threads: { status: "idle", items: [] },
+      models: { status: "idle", items: [] },
+      skills: { status: "idle", items: [] },
+      mcp: { status: "idle", items: [] },
+    },
+    selection: {
+      requestedModelProfileId: null,
+      actualModel: null,
+      armedSkill: null,
+    },
+  }
 }
 
 test("紧凑首页保留品牌、输入框和真实底栏信息", async () => {
   let setup: Awaited<ReturnType<typeof testRender>>
   await act(async () => {
     setup = await testRender(
-      createElement(HomeView, viewProps(createInitialState(), 80, 24)),
+      createElement(HomeView, viewProps(snapshotOf(createInitialState()), 80, 24)),
       { width: 80, height: 24 },
     )
   })
@@ -44,14 +78,14 @@ test("紧凑首页保留品牌、输入框和真实底栏信息", async () => {
 })
 
 test("首页模型靠左、审批模式靠右，且不重复显示品牌", async () => {
-  const longModelRuntime: TuiRuntime = {
+  const longModelRuntime = {
     ...runtime,
     modelName: "deepseek-v4-flash",
   }
   let setup: Awaited<ReturnType<typeof testRender>>
   await act(async () => {
     setup = await testRender(
-      createElement(HomeView, { ...viewProps(createInitialState(), 130, 40), runtime: longModelRuntime }),
+      createElement(HomeView, { ...viewProps(snapshotOf(createInitialState()), 130, 40), interactive: { ...snapshotOf(createInitialState()), runtime: longModelRuntime } }),
       { width: 130, height: 40 },
     )
   })
@@ -77,13 +111,13 @@ test("thread 渲染显示工具卡片和底部 composer", async () => {
       state.timeline[0]!,
       { type: "tool", tool: { id: "tool-1", runId: run.runId, name: "read_file", arguments: "{\"file_path\":\"src/app.ts\"}", output: "src/app.ts", status: "completed" } },
     ],
-    activeRun: undefined,
-    status: "已完成",
+    activeRun: null,
+    activity: { kind: "completed", label: "已完成" },
   }
   let setup: Awaited<ReturnType<typeof testRender>>
   await act(async () => {
     setup = await testRender(
-      createElement(ThreadView, viewProps(state, 130, 40)),
+      createElement(ThreadView, viewProps(snapshotOf(state), 130, 40)),
       { width: 130, height: 40 },
     )
   })
@@ -101,10 +135,10 @@ test("thread 通过原生 Markdown renderer 隐藏标题和代码围栏标记", 
   registerCommonSyntaxParsers()
   const run = { threadId: "thread-markdown", runId: "run-markdown" }
   const started = startRun(createInitialState(), run, "展示 Markdown")
-  const state: TuiState = {
+  const state: InteractiveState = {
     ...started,
-    activeRun: undefined,
-    status: "已完成",
+    activeRun: null,
+    activity: { kind: "completed", label: "已完成" },
     timeline: [
       started.timeline[0]!,
       {
@@ -120,7 +154,7 @@ test("thread 通过原生 Markdown renderer 隐藏标题和代码围栏标记", 
   }
   let setup: Awaited<ReturnType<typeof testRender>>
   await act(async () => {
-    setup = await testRender(createElement(ThreadView, viewProps(state, 100, 28)), { width: 100, height: 28 })
+    setup = await testRender(createElement(ThreadView, viewProps(snapshotOf(state), 100, 28)), { width: 100, height: 28 })
   })
   try {
     // Markdown 的 Tree-sitter 高亮在异步 worker 返回后提交一帧；不能只检查初始占位帧。
@@ -141,9 +175,9 @@ test("thread 通过原生 Markdown renderer 隐藏标题和代码围栏标记", 
 test("审批作为内联时间线事件保留选项高度", async () => {
   const run = { threadId: "thread-1", runId: "run-1" }
   const started = startRun(createInitialState(), run, "写入文件")
-  const state: TuiState = {
+  const state: InteractiveState = {
     ...started,
-    status: "等待工具审批",
+    activity: { kind: "waiting-interaction", label: "等待工具审批" },
     timeline: [
       started.timeline[0]!,
       { type: "tool", tool: { id: "tool-1", runId: run.runId, name: "execute", arguments: "{\"command\":\"pwd\"}", output: "/workspace", status: "completed" } },
@@ -159,15 +193,21 @@ test("审批作为内联时间线事件保留选项高度", async () => {
         },
       },
     ],
-    pendingApproval: {
+  }
+  const snapshot = {
+    ...snapshotOf(state),
+    interaction: {
+      type: "approval" as const,
       requestId: "approval-1",
       description: "执行 shell 命令",
       requests: { action_requests: [{ name: "execute", args: { command: "pwd" } }] },
+      decisions: ["approve_once" as const, "approve_thread" as const, "approve_always" as const, "reject" as const, "reject_with_feedback" as const],
+      deadlineAtMs: Date.now() + 5_000,
     },
   }
   let setup: Awaited<ReturnType<typeof testRender>>
   await act(async () => {
-    setup = await testRender(createElement(ThreadView, viewProps(state, 100, 28)), { width: 100, height: 28 })
+    setup = await testRender(createElement(ThreadView, viewProps(snapshot, 100, 28)), { width: 100, height: 28 })
   })
   try {
     await act(async () => { await setup.flush() })
@@ -187,9 +227,9 @@ test("审批作为内联时间线事件保留选项高度", async () => {
 test("继续执行只作为历史事件之后的底部活动行", async () => {
   const run = { threadId: "thread-2", runId: "run-2" }
   const started = startRun(createInitialState(), run, "继续任务")
-  const state: TuiState = {
+  const state: InteractiveState = {
     ...started,
-    status: "正在继续执行",
+    activity: { kind: "running", label: "正在继续执行" },
     timeline: [
       started.timeline[0]!,
       { type: "tool", tool: { id: "tool-1", runId: run.runId, name: "read_file", arguments: "{\"file_path\":\"src/app.ts\"}", output: "export const value = 1", status: "completed" } },
@@ -198,7 +238,7 @@ test("继续执行只作为历史事件之后的底部活动行", async () => {
   }
   let setup: Awaited<ReturnType<typeof testRender>>
   await act(async () => {
-    setup = await testRender(createElement(ThreadView, viewProps(state, 100, 28)), { width: 100, height: 28 })
+    setup = await testRender(createElement(ThreadView, viewProps(snapshotOf(state), 100, 28)), { width: 100, height: 28 })
   })
   try {
     await act(async () => { await setup.flush() })
@@ -218,7 +258,7 @@ test("Skills 与 Threads 选择器压暗底层 thread，但不压暗自身面板
       picker: createElement(SkillPicker, {
         visible: true,
         loading: false,
-        skills: [{ id: "review", description: "审查改动" }],
+        skills: [{ id: "review", name: "review", description: "审查改动", source: "user", enabled: true, userInvocable: true }],
         query: "",
         selectedIndex: 0,
         terminalWidth: 80,
@@ -283,10 +323,9 @@ test("Skills 与 Threads 选择器压暗底层 thread，但不压暗自身面板
   }
 })
 
-function viewProps(state: TuiState, terminalWidth: number, terminalHeight: number) {
+function viewProps(interactive: InteractiveSnapshot, terminalWidth: number, terminalHeight: number) {
   return {
-    runtime,
-    state,
+    interactive,
     terminalWidth,
     terminalHeight,
     inputRef: createRef<TextareaRenderable>(),
@@ -296,9 +335,11 @@ function viewProps(state: TuiState, terminalWidth: number, terminalHeight: numbe
     onComposerKeyDown: () => undefined,
     onSubmit: () => undefined,
     commandMenu: { visible: false, selectedIndex: 0 },
+    commandOptions: [],
     onSelectCommand: () => undefined,
     onHoverCommand: () => undefined,
     pickerVisible: false,
+    onClearSelectedSkill: () => undefined,
     showToolDetails: false,
     expandedTools: new Set<string>(),
     onToggleTool: () => undefined,

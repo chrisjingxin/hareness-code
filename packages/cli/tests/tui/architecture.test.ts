@@ -1,10 +1,11 @@
-/** TUI 分层规则测试：固定组合入口和单向依赖边界。 */
+/** 分层规则测试：固定组合入口和单向依赖边界。 */
 
 import { expect, test } from "bun:test"
 import { readFileSync, readdirSync } from "node:fs"
 import { resolve } from "node:path"
 
 const tuiRoot = resolve(import.meta.dir, "../../src/tui")
+const interactiveRoot = resolve(import.meta.dir, "../../src/interactive")
 
 test("TUI 根目录只保留组合入口", () => {
   const rootFiles = readdirSync(tuiRoot, { withFileTypes: true })
@@ -16,8 +17,22 @@ test("TUI 根目录只保留组合入口", () => {
 })
 
 test("Presentation 不直连 IPC，Application 不反向依赖 Presentation", () => {
-  expect(layerImports("presentation")).not.toMatch(/(?:^|[/"])ipc(?:[/"]|$)/m)
-  expect(layerImports("application")).not.toMatch(/(?:^|[/"])presentation(?:[/"]|$)/m)
+  expect(layerImports(resolve(tuiRoot, "presentation"))).not.toMatch(/(?:^|[/"])ipc(?:[/"]|$)/m)
+  expect(layerImports(resolve(tuiRoot, "application"))).not.toMatch(/(?:^|[/"])presentation(?:[/"]|$)/m)
+})
+
+test("interactive 共享模块不依赖 TUI/Web/React/OpenTUI/DOM", () => {
+  const imports = layerImports(resolve(interactiveRoot))
+  expect(imports).not.toMatch(/(?:^|[/"])\.\.\/tui(?:[/"]|$)/m)
+  expect(imports).not.toMatch(/(?:^|[/"])\.\.\/web(?:[/"]|$)/m)
+  expect(imports).not.toMatch(/@opentui/m)
+  expect(imports).not.toMatch(/(?:^|[/"])react(?:[/"]|$)/m)
+  expect(imports).not.toMatch(/(?:^|[/"])react-dom(?:[/"]|$)/m)
+})
+
+test("TUI Application 只依赖 interactive 与终端表现模块，不直接调用 IPC", () => {
+  const imports = layerImports(resolve(tuiRoot, "application"))
+  expect(imports).not.toMatch(/(?:^|[/"])\.\.\/\.\.\/ipc(?:[/"]|$)/m)
 })
 
 test("语法资源维护脚本写入 Platform canonical 路径", () => {
@@ -28,8 +43,7 @@ test("语法资源维护脚本写入 Platform canonical 路径", () => {
   expect(script).not.toContain('resolve(tuiRoot, "assets/syntax")')
 })
 
-function layerImports(layer: "application" | "presentation"): string {
-  const directory = resolve(tuiRoot, layer)
+function layerImports(directory: string): string {
   return readdirSync(directory, { withFileTypes: true })
     .filter(entry => entry.isFile() && /\.[cm]?[jt]sx?$/.test(entry.name))
     .map(entry => readFileSync(resolve(directory, entry.name), "utf8"))
