@@ -626,6 +626,26 @@ test("Interaction timeout 按 scheduler 收敛为 fail-closed 响应", async () 
   }
 })
 
+test("timeout_ms=0 的 Interaction 立即收敛，不残留 pending 状态", async () => {
+  const harness = makeHarness()
+  try {
+    await harness.controller.dispatch({ type: "input.submit", value: "零超时审批" })
+    const run = harness.runHandles.at(-1)!
+    const request = {
+      ...approvalRequest(run.threadId, run.runId),
+      timeout_ms: 0,
+    }
+    const responsePromise = harness.port.sendInteraction(request)
+    await flush()
+    const snapshot = harness.controller.getSnapshot()
+    expect(snapshot.interaction).toBeNull()
+    expect(notices(snapshot)).toContain("审批等待超时")
+    expect(await responsePromise).toMatchObject({ type: "approval", decision: "reject" })
+  } finally {
+    await harness.controller.close()
+  }
+})
+
 test("Run 终态与 Controller close 都会 abandon 未完成 Interaction", async () => {
   const harness = makeHarness()
   try {

@@ -362,9 +362,18 @@ export class InteractiveControllerImpl implements InteractiveController {
     }
     return new Promise(resolve => {
       const deadlineAtMs = Date.now() + request.timeout_ms
-      const clearTimer = this.scheduler.setTimeout(() => {
-        const pending = this.pendingInteraction
-        if (!pending || pending.request.request_id !== request.request_id) return
+      const pending: PendingInteraction = {
+        request,
+        resolve,
+        deadlineAtMs,
+        clearTimer: () => undefined,
+      }
+      // 先登记 pending 再注册 timer：timeout_ms=0 时 timer 可能在赋值前同步触发，
+      // 导致已 resolve 的 Interaction 仍停留在 pending 状态。
+      this.pendingInteraction = pending
+      pending.clearTimer = this.scheduler.setTimeout(() => {
+        const current = this.pendingInteraction
+        if (!current || current.request.request_id !== request.request_id) return
         this.pendingInteraction = null
         const activeRun = this.state.activeRun
         if (activeRun && activeRun.threadId === request.thread_id && activeRun.runId === request.run_id) {
@@ -379,7 +388,6 @@ export class InteractiveControllerImpl implements InteractiveController {
           request.type === "approval" ? "审批等待超时，已按拒绝处理。" : "提问等待超时，已按空回答处理。",
         ))
       }, Math.max(0, request.timeout_ms))
-      this.pendingInteraction = { request, resolve, deadlineAtMs, clearTimer }
       this.commit(current => applyInteractionRequest(current, request))
     })
   }
