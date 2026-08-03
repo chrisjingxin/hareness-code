@@ -1959,6 +1959,28 @@ class ThreadPersistence:
         except aiosqlite.Error as exc:
             raise ThreadPersistenceError(f"CHECKPOINT_LIST_FAILED: {exc}") from exc
 
+    async def load_thread_activity_ms(self, thread_id: str) -> int | None:
+        """读取当前 project/thread 的最后活动时间，缺失时返回 ``None``。"""
+        self._ensure_open()
+        try:
+            async with self._lock:
+                cursor = await self._connection.execute(
+                    """
+                    SELECT updated_at_ms
+                    FROM harness_threads
+                    WHERE project_fingerprint = ? AND thread_id = ?
+                    """,
+                    (self._project_fingerprint, thread_id),
+                )
+                row = await cursor.fetchone()
+                await cursor.close()
+            if row is None:
+                return None
+            value = row["updated_at_ms"]
+            return value if isinstance(value, int) and not isinstance(value, bool) else None
+        except (aiosqlite.Error, TypeError, ValueError) as exc:
+            raise ThreadPersistenceError(f"THREAD_ACTIVITY_READ_FAILED: {exc}") from exc
+
     async def open_thread(self, thread_id: str) -> OpenThread:
         """从 Transcript 读取完整 UI 历史；不把 checkpoint 作为 UI fallback。"""
         self._ensure_open()

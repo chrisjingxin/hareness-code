@@ -21,6 +21,7 @@ from harness_agent.context_lifecycle import (
     RunContextSnapshot,
     snapshot_from_legacy_prompt_epoch,
 )
+from harness_agent.context_pressure import ModelCallLifecycle
 from harness_agent.prompting import PromptEpoch
 
 
@@ -65,6 +66,8 @@ class RunContext:
     # 仅供旧嵌入式调用把已存在的 PromptEpoch 转成一次性 legacy snapshot；
     # AgentHost 生产路径不再读取或写入该字段。
     prompt_epoch: PromptEpoch | None = None
+    # 放在兼容字段末尾，避免改变旧嵌入式调用的 positional 参数含义。
+    model_call_lifecycle: ModelCallLifecycle = field(default_factory=ModelCallLifecycle)
 
     def __post_init__(self) -> None:
         """在执行前验证 thread 与 snapshot 的绑定，阻止跨 project 注入。"""

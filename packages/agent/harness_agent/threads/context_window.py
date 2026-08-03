@@ -6,9 +6,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
 from langchain.agents.middleware.types import AgentMiddleware, ExtendedModelResponse, ModelRequest, ModelResponse
 from langchain_core.exceptions import ContextOverflowError
@@ -21,6 +22,11 @@ from harness_agent.threads.prompting import (
     estimate_tokens,
     input_cap_tokens,
     normalized_tool_schemas,
+)
+from harness_agent.context_pressure import (
+    ContextPressurePolicy,
+    ContextPressureSnapshot,
+    ModelCallType,
 )
 from harness_agent.run_context import thread_id_for_runtime
 from harness_agent.context_projection import (
@@ -86,6 +92,16 @@ class ContextUpdate:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class _MicroCompressionPlan:
+    """尚未提交的确定性工具归档及其新投影。"""
+
+    messages: tuple[BaseMessage, ...]
+    artifacts: tuple[ContextArtifactDraft, ...]
+    before_tokens: int
+    after_tokens: int
+
+
 class ContextWindowMiddleware(AgentMiddleware):
     """在模型调用前按 50/60/80/90 阈值管理上下文，而非高频改写历史。"""
 
@@ -96,6 +112,7 @@ class ContextWindowMiddleware(AgentMiddleware):
         context_window_tokens: int,
         thread_persistence: ThreadPersistence | None = None,
         updates: dict[str, list[ContextUpdate]] | None = None,
+        pressure_policy: ContextPressurePolicy | None = None,
     ) -> None:
         """绑定模型窗口与可选本机持久化；没有 ThreadPersistence 时不丢弃任何历史。"""
         super().__init__()
@@ -104,6 +121,7 @@ class ContextWindowMiddleware(AgentMiddleware):
         self._input_cap = input_cap_tokens(context_window_tokens)
         self._thread_persistence = thread_persistence
         self._updates = updates if updates is not None else {}
+        self._pressure_policy = pressure_policy or ContextPressurePolicy()
 
     def consume_updates(self, thread_id: str) -> tuple[ContextUpdate, ...]:
         """读取并清空指定 thread 的待发送状态，避免中间件直接写 stdout。"""
@@ -173,10 +191,15 @@ class ContextWindowMiddleware(AgentMiddleware):
         rewrite = False
         artifact_ids: tuple[str, ...] = ()
         action = "within_budget"
+        call_type, idle_duration_ms = _next_model_call(request.runtime)
 
         try:
             prepared, action, artifact_ids, rewrite = await self._prepare(
-                thread_id, request.messages, estimated
+                thread_id,
+                request.messages,
+                estimated,
+                call_type=call_type,
+                idle_duration_ms=idle_duration_ms,
             )
             result = await handler(request.override(messages=prepared, tools=ordered_tools))
         except ContextOverflowError:
@@ -212,89 +235,190 @@ class ContextWindowMiddleware(AgentMiddleware):
         thread_id: str,
         messages: list[BaseMessage],
         estimated: int,
+        *,
+        call_type: ModelCallType = "unclassified",
+        idle_duration_ms: int | None = None,
     ) -> tuple[list[BaseMessage], str, tuple[str, ...], bool]:
-        """执行分层状态机：50%报告、60%脱水、80/90%摘要，并在失败时保持原历史。"""
-        ratio = estimated / self._input_cap if self._input_cap else 1.0
-        if ratio < 0.50:
+        """执行 pressure policy：报告、微压缩、重新计量，再按需完整摘要。"""
+        pressure_before = self._measure_pressure(
+            messages,
+            estimated,
+            idle_duration_ms=idle_duration_ms,
+        )
+        decision = self._pressure_policy.decide(
+            pressure_before,
+            call_type=call_type,
+        )
+        if decision.action == "none":
             return messages, "within_budget", (), False
-        if ratio < 0.60:
+        if decision.action == "report":
             self._publish(thread_id, "report", estimated)
             return messages, "report", (), False
+        if self._thread_persistence is None:
+            # A preview without its durable Artifact would leave an
+            # unrecoverable virtual path in the model cache.  Fail closed for
+            # every automatic compression action, including overflow-adjacent
+            # callers that enter through this preparation path.
+            self._publish(
+                thread_id,
+                "micro_skipped",
+                estimated,
+                miss_reason="thread persistence is unavailable",
+            )
+            return messages, "micro_skipped", (), False
 
         state = await self._state(thread_id)
         if state.circuit_open:
-            self._publish(thread_id, "circuit_open", estimated, miss_reason="three compression failures")
+            self._publish(
+                thread_id,
+                "circuit_open",
+                estimated,
+                miss_reason="three compression failures",
+            )
             return messages, "circuit_open", (), False
 
         try:
-            if ratio < 0.80:
-                dehydrated, artifacts, changed = await self._dehydrate(
-                    thread_id,
-                    messages,
-                    keep_turns=2,
-                    state=ContextState(last_action="soft_dehydration"),
-                    estimated_tokens=estimated,
-                )
-                if changed:
-                    after = _messages_tokens(dehydrated)
-                    if _saves_enough(estimated, after):
-                        self._publish(thread_id, "soft_dehydration", after, artifacts)
-                        return dehydrated, "soft_dehydration", artifacts, True
-                self._publish(thread_id, "soft_dehydration_skipped", estimated)
-                return messages, "soft_dehydration_skipped", (), False
-
-            keep_turns = 1 if ratio >= 0.90 else 2
-            summarized, artifacts, changed = await self._summarize(
-                thread_id,
+            keep_turns = (
+                1
+                if pressure_before.occupancy_ratio >= self._pressure_policy.config.hard_ratio
+                else 2
+            )
+            micro_plan = await self._plan_dehydrate(
                 messages,
                 keep_turns=keep_turns,
+                keep_recent=decision.keep_recent,
+                estimated_tokens=estimated,
+            )
+            if micro_plan is not None:
+                pressure_after = self._measure_pressure(
+                    list(micro_plan.messages),
+                    micro_plan.after_tokens,
+                )
+                # This is the second, new policy decision.  The old estimate is
+                # never used to decide whether the full model path is still needed.
+                after_decision = self._pressure_policy.decide(
+                    pressure_after,
+                    call_type=call_type,
+                )
+                if after_decision.action != "full":
+                    committed = await self._commit_micro_plan(
+                        thread_id,
+                        micro_plan,
+                        trigger=decision.reason,
+                        pressure_before=pressure_before,
+                        pressure_after=pressure_after,
+                        state=ContextState(
+                            last_action=(
+                                "idle_micro"
+                                if decision.reason == "idle"
+                                else "pressure_micro"
+                            )
+                        ),
+                    )
+                    action = (
+                        "idle_micro" if decision.reason == "idle" else "pressure_micro"
+                    )
+                    self._publish(
+                        thread_id,
+                        action,
+                        micro_plan.after_tokens,
+                        committed,
+                    )
+                    return list(micro_plan.messages), action, committed, True
+
+                # The micro plan is deliberately kept in memory only while the
+                # same request continues into full summarization.  Its Artifact
+                # drafts are committed together with the final full checkpoint.
+                messages_for_full = list(micro_plan.messages)
+                micro_artifacts = micro_plan.artifacts
+                full_before = pressure_after
+                full_estimated = micro_plan.after_tokens
+                keep_turns = (
+                    1
+                    if pressure_after.occupancy_ratio
+                    >= self._pressure_policy.config.hard_ratio
+                    else 2
+                )
+            else:
+                if decision.action != "full":
+                    self._publish(
+                        thread_id,
+                        "micro_skipped",
+                        estimated,
+                        miss_reason=decision.reason,
+                    )
+                    return messages, "micro_skipped", (), False
+                messages_for_full = messages
+                micro_artifacts = ()
+                full_before = pressure_before
+                full_estimated = estimated
+
+            summarized, artifacts, changed = await self._summarize(
+                thread_id,
+                messages_for_full,
+                keep_turns=keep_turns,
                 state=ContextState(
-                    last_action="forced_summary" if keep_turns == 1 else "summary"
+                    last_action=(
+                        "forced_summary"
+                        if keep_turns == 1
+                        else "summary"
+                    )
                 ),
+                base_artifacts=micro_artifacts,
+                pressure_before=full_before,
+                estimated_tokens=full_estimated,
             )
             if changed:
-                after = _messages_tokens(summarized)
-                if _saves_enough(estimated, after):
-                    action = "forced_summary" if keep_turns == 1 else "summary"
-                    self._publish(thread_id, action, after, artifacts)
-                    return summarized, action, artifacts, True
+                after = self._estimate_rewritten_tokens(
+                    full_estimated,
+                    messages_for_full,
+                    summarized,
+                )
+                action = "forced_summary" if keep_turns == 1 else "summary"
+                self._publish(thread_id, action, after, artifacts)
+                return summarized, action, artifacts, True
             await self._record_failure(thread_id, "summary_insufficient")
             return messages, "summary_insufficient", (), False
         except Exception as exc:
             await self._record_failure(thread_id, "compression_failed")
-            self._publish(thread_id, "compression_failed", estimated, miss_reason=type(exc).__name__)
+            self._publish(
+                thread_id,
+                "compression_failed",
+                estimated,
+                miss_reason=type(exc).__name__,
+            )
             return messages, "compression_failed", (), False
 
-    async def _dehydrate(
+    async def _plan_dehydrate(
         self,
-        thread_id: str,
         messages: list[BaseMessage],
         *,
         keep_turns: int,
-        state: ContextState | None = None,
+        keep_recent: int,
         estimated_tokens: int | None = None,
-    ) -> tuple[list[BaseMessage], tuple[str, ...], bool]:
-        """将旧的大工具结果归档并替换为首尾预览，完整 user turn 保持原子边界。"""
-        if self._thread_persistence is None:
-            return messages, (), False
+    ) -> _MicroCompressionPlan | None:
+        """只在内存中规划工具归档，不提前写 Artifact 或 checkpoint。"""
         cutoff = _cutoff_for_recent_turns(messages, keep_turns)
         if cutoff <= 0:
-            return messages, (), False
+            return None
+        candidates = _dehydratable_tool_candidates(messages, cutoff)
+        reclaimable = candidates[:-max(1, keep_recent)]
+        if not reclaimable:
+            return None
+
         replacements = list(messages)
         drafts: list[ContextArtifactDraft] = []
-        for index, message in enumerate(messages[:cutoff]):
-            if not isinstance(message, ToolMessage):
-                continue
+        for index, message, tool_name in reclaimable:
             content = _message_content(message)
-            if estimate_tokens(content) <= TOOL_RESULT_DEHYDRATE_TOKENS:
-                continue
             artifact_id = f"tool-{uuid.uuid4().hex}"
-            preview = _tool_preview(content, artifact_id)
+            preview = _tool_preview(
+                content,
+                artifact_id,
+                tool_name=tool_name,
+            )
             if not _saves_enough(estimate_tokens(content), estimate_tokens(preview)):
                 continue
-            replacements[index] = message.model_copy(
-                update={"content": preview}
-            )
+            replacements[index] = message.model_copy(update={"content": preview})
             drafts.append(
                 ContextArtifactDraft(
                     kind="tool",
@@ -304,32 +428,126 @@ class ContextWindowMiddleware(AgentMiddleware):
                     artifact_id=artifact_id,
                 )
             )
-        before_tokens = estimated_tokens if estimated_tokens is not None else _messages_tokens(messages)
-        if not drafts or not _saves_enough(
-            before_tokens, _messages_tokens(replacements)
-        ):
+        before_tokens = (
+            estimated_tokens
+            if estimated_tokens is not None
+            else _messages_tokens(messages)
+        )
+        after_tokens = self._estimate_rewritten_tokens(
+            before_tokens,
+            messages,
+            replacements,
+        )
+        if not drafts or not _saves_enough(before_tokens, after_tokens):
+            return None
+        return _MicroCompressionPlan(
+            messages=tuple(replacements),
+            artifacts=tuple(drafts),
+            before_tokens=before_tokens,
+            after_tokens=after_tokens,
+        )
+
+    async def _dehydrate(
+        self,
+        thread_id: str,
+        messages: list[BaseMessage],
+        *,
+        keep_turns: int,
+        keep_recent: int = 1,
+        state: ContextState | None = None,
+        estimated_tokens: int | None = None,
+    ) -> tuple[list[BaseMessage], tuple[str, ...], bool]:
+        """提交一份独立 micro checkpoint；自动升级路径使用未提交的 plan。"""
+        if self._thread_persistence is None:
             return messages, (), False
+        plan = await self._plan_dehydrate(
+            messages,
+            keep_turns=keep_turns,
+            keep_recent=keep_recent,
+            estimated_tokens=estimated_tokens,
+        )
+        if plan is None:
+            return messages, (), False
+        before = self._measure_pressure(
+            messages,
+            plan.before_tokens,
+        )
+        after = self._measure_pressure(list(plan.messages), plan.after_tokens)
+        artifact_ids = await self._commit_micro_plan(
+            thread_id,
+            plan,
+            trigger=state.last_action if state is not None else "automatic",
+            pressure_before=before,
+            pressure_after=after,
+            state=state,
+        )
+        return list(plan.messages), artifact_ids, True
+
+    async def _commit_micro_plan(
+        self,
+        thread_id: str,
+        plan: _MicroCompressionPlan,
+        *,
+        trigger: str,
+        pressure_before: ContextPressureSnapshot,
+        pressure_after: ContextPressureSnapshot,
+        state: ContextState | None,
+    ) -> tuple[str, ...]:
+        """把确定性微压缩和其 Artifact 在同一事务中提交。"""
+        if self._thread_persistence is None:
+            raise RuntimeError("CONTEXT_PERSISTENCE_REQUIRED")
         committed = await self._thread_persistence.commit_context(
             CommitContextRewrite(
                 thread_id=thread_id,
-                artifacts=tuple(drafts),
+                artifacts=plan.artifacts,
                 state=state,
                 checkpoint=CompressionCheckpointDraft(
                     checkpoint_id=f"projection-{uuid.uuid4().hex}",
-                    mode="full",
+                    mode="micro",
                     rewrite_version=SUMMARY_REWRITE_VERSION,
-                    projected_messages=tuple(replacements),
-                    artifact_ids=artifact_references(replacements),
-                    trigger=state.last_action if state is not None else "automatic",
-                    pressure_before={"estimated_tokens": before_tokens},
-                    pressure_after={
-                        "estimated_tokens": _messages_tokens(replacements)
-                    },
+                    projected_messages=plan.messages,
+                    artifact_ids=artifact_references(plan.messages),
+                    trigger=trigger,
+                    pressure_before=pressure_before.record(),
+                    pressure_after=pressure_after.record(),
                 ),
             )
         )
-        artifact_ids = tuple(artifact.artifact_id for artifact in committed.artifacts)
-        return replacements, artifact_ids, True
+        return tuple(artifact.artifact_id for artifact in committed.artifacts)
+
+    def _measure_pressure(
+        self,
+        messages: list[BaseMessage],
+        estimated_tokens: int,
+        *,
+        idle_duration_ms: int | None = None,
+    ) -> ContextPressureSnapshot:
+        """用当前投影重新统计可回收工具压力，不依赖旧快照。"""
+        keep_recent = self._pressure_policy.config.keep_recent
+        count, tokens = _reclaimable_tool_pressure(
+            messages,
+            keep_turns=2,
+            keep_recent=keep_recent,
+        )
+        return self._pressure_policy.measure(
+            estimated_tokens,
+            self._input_cap,
+            reclaimable_tool_tokens=tokens,
+            reclaimable_tool_count=count,
+            idle_duration_ms=idle_duration_ms,
+        )
+
+    @staticmethod
+    def _estimate_rewritten_tokens(
+        before_tokens: int,
+        before: Sequence[BaseMessage],
+        after: Sequence[BaseMessage],
+    ) -> int:
+        """保留 system/schema 固定开销，只替换投影消息的估算量。"""
+        return max(
+            0,
+            before_tokens - _messages_tokens(list(before)) + _messages_tokens(list(after)),
+        )
 
     async def _summarize(
         self,
@@ -338,6 +556,9 @@ class ContextWindowMiddleware(AgentMiddleware):
         *,
         keep_turns: int,
         state: ContextState | None = None,
+        base_artifacts: Sequence[ContextArtifactDraft] = (),
+        pressure_before: ContextPressureSnapshot | None = None,
+        estimated_tokens: int | None = None,
     ) -> tuple[list[BaseMessage], tuple[str, ...], bool]:
         """把完整旧 turn 组生成最多 6% 窗口的结构化摘要，并在成功后归档原文。"""
         if self._thread_persistence is None:
@@ -368,27 +589,55 @@ class ContextWindowMiddleware(AgentMiddleware):
             ),
             *recent,
         ]
-        if not _saves_enough(_messages_tokens(messages), _messages_tokens(prospective)):
+        before_tokens = (
+            estimated_tokens
+            if estimated_tokens is not None
+            else _messages_tokens(messages)
+        )
+        after_tokens = self._estimate_rewritten_tokens(
+            before_tokens,
+            messages,
+            prospective,
+        )
+        if not _saves_enough(before_tokens, after_tokens):
             return messages, (), False
         # 归档必须在摘要、长度和节省率校验后发生，失败时历史完全不变。
+        summary_artifact = ContextArtifactDraft(
+            kind="history",
+            content=_render_messages(old),
+            source_start=0,
+            source_end=cutoff - 1,
+            artifact_id=artifact_id,
+        )
+        all_artifacts = tuple(base_artifacts) + (summary_artifact,)
+        all_artifact_ids = tuple(
+            artifact.artifact_id
+            for artifact in all_artifacts
+            if artifact.artifact_id is not None
+        )
+        summary_artifact_indexes = tuple(range(len(all_artifacts)))
+        checkpoint_artifact_ids = tuple(
+            dict.fromkeys((*artifact_references(prospective), *all_artifact_ids))
+        )
+        before_record = (
+            pressure_before.record()
+            if pressure_before is not None
+            else {"estimated_tokens": before_tokens}
+        )
+        after_record = self._measure_pressure(
+            list(prospective),
+            after_tokens,
+        ).record()
         committed = await self._thread_persistence.commit_context(
             CommitContextRewrite(
                 thread_id=thread_id,
-                artifacts=(
-                    ContextArtifactDraft(
-                        kind="history",
-                        content=_render_messages(old),
-                        source_start=0,
-                        source_end=cutoff - 1,
-                        artifact_id=artifact_id,
-                    ),
-                ),
+                artifacts=all_artifacts,
                 summary=ContextSummaryDraft(
                     rewrite_version=SUMMARY_REWRITE_VERSION,
                     content=summary,
                     source_start=0,
                     source_end=cutoff - 1,
-                    artifact_indexes=(0,),
+                    artifact_indexes=summary_artifact_indexes,
                 ),
                 state=state,
                 checkpoint=CompressionCheckpointDraft(
@@ -396,19 +645,16 @@ class ContextWindowMiddleware(AgentMiddleware):
                     mode="full",
                     rewrite_version=SUMMARY_REWRITE_VERSION,
                     projected_messages=tuple(prospective),
-                    artifact_ids=artifact_references(prospective),
+                    artifact_ids=checkpoint_artifact_ids,
                     trigger=state.last_action if state is not None else "automatic",
-                    pressure_before={
-                        "estimated_tokens": _messages_tokens(messages)
-                    },
-                    pressure_after={
-                        "estimated_tokens": _messages_tokens(prospective)
-                    },
+                    pressure_before=before_record,
+                    pressure_after=after_record,
                 ),
             )
         )
-        artifact = committed.artifacts[0]
-        return prospective, (artifact.artifact_id,), True
+        return prospective, tuple(
+            artifact.artifact_id for artifact in committed.artifacts
+        ), True
 
     async def _overflow_recovery(
         self, thread_id: str, messages: list[BaseMessage]
@@ -553,12 +799,20 @@ def _clip_to_tokens(content: str, token_cap: int) -> str:
     return data[:cap].decode("utf-8", errors="ignore") + "\n[older context clipped for summary input]"
 
 
-def _tool_preview(content: str, artifact_id: str) -> str:
-    """构造首尾各 200 字符与 artifact 指针，供模型决定是否按需恢复原文。"""
+def _tool_preview(
+    content: str,
+    artifact_id: str,
+    *,
+    tool_name: str = "tool",
+) -> str:
+    """构造带工具名、摘要预览、哈希和 Artifact 指针的确定性占位。"""
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
     return (
-        f"{content[:TOOL_RESULT_PREVIEW_CHARS]}\n"
-        f"[tool result dehydrated: /.harness/history/{artifact_id}.md]\n"
-        f"{content[-TOOL_RESULT_PREVIEW_CHARS:]}"
+        f"[tool={tool_name}]\n"
+        f"Summary preview:\n{content[:TOOL_RESULT_PREVIEW_CHARS]}\n"
+        f"...\n{content[-TOOL_RESULT_PREVIEW_CHARS:]}\n"
+        f"sha256={digest}\n"
+        f"Artifact: /.harness/history/{artifact_id}.md"
     )
 
 
@@ -568,6 +822,89 @@ def _cutoff_for_recent_turns(messages: list[BaseMessage], keep_turns: int) -> in
     if len(starts) <= keep_turns:
         return 0
     return starts[-keep_turns]
+
+
+def _dehydratable_tool_candidates(
+    messages: Sequence[BaseMessage], cutoff: int
+) -> list[tuple[int, ToolMessage, str]]:
+    """只返回已完成、配对且尚未指向 Artifact 的旧工具结果。"""
+    active_calls: dict[str, tuple[int, str]] = {}
+    candidates: list[tuple[int, ToolMessage, str]] = []
+    for index, message in enumerate(messages[:cutoff]):
+        if isinstance(message, AIMessage):
+            if active_calls:
+                # 不能跨越另一个 assistant 边界猜测工具归属。
+                active_calls.clear()
+            for call in message.tool_calls or ():
+                if isinstance(call, Mapping):
+                    call_id = call.get("id")
+                    if isinstance(call_id, str) and call_id:
+                        call_name = call.get("name")
+                        active_calls[call_id] = (
+                            index,
+                            call_name if isinstance(call_name, str) and call_name else "tool",
+                        )
+            continue
+        if isinstance(message, HumanMessage):
+            active_calls.clear()
+            continue
+        if not isinstance(message, ToolMessage):
+            active_calls.clear()
+            continue
+        call_id = message.tool_call_id
+        call_info = active_calls.pop(call_id, None)
+        if call_info is None:
+            continue
+        _call_index, call_name = call_info
+        content = _message_content(message)
+        if artifact_references((message,)):
+            continue
+        if estimate_tokens(content) <= TOOL_RESULT_DEHYDRATE_TOKENS:
+            continue
+        if not _saves_enough(
+            estimate_tokens(content),
+            estimate_tokens(
+                _tool_preview(
+                    content,
+                    "tool-preview",
+                    tool_name=message.name or call_name,
+                )
+            ),
+        ):
+            continue
+        candidates.append((index, message, message.name or call_name))
+    return candidates
+
+
+def _reclaimable_tool_pressure(
+    messages: Sequence[BaseMessage], *, keep_turns: int, keep_recent: int
+) -> tuple[int, int]:
+    """统计实际可被本次微压缩释放的工具结果，而非所有历史工具结果。"""
+    cutoff = _cutoff_for_recent_turns(list(messages), keep_turns)
+    candidates = _dehydratable_tool_candidates(messages, cutoff)
+    reclaimable = candidates[:-max(1, keep_recent)]
+    return len(reclaimable), sum(
+        estimate_tokens(_message_content(message))
+        for _index, message, _tool_name in reclaimable
+    )
+
+
+def _next_model_call(runtime: object) -> tuple[ModelCallType, int | None]:
+    """从显式 Run 生命周期消费调用类型；缺少上下文时关闭 idle 触发。"""
+    context = getattr(runtime, "context", None)
+    lifecycle = getattr(context, "model_call_lifecycle", None)
+    begin = getattr(lifecycle, "begin", None)
+    if not callable(begin):
+        return "unclassified", None
+    value = begin()
+    if (
+        isinstance(value, tuple)
+        and len(value) == 2
+        and isinstance(value[0], str)
+        and isinstance(value[1], (int, type(None)))
+    ):
+        return value[0], value[1]  # type: ignore[return-value]
+    return "unclassified", None
 
 
 def _saves_enough(before_tokens: int, after_tokens: int) -> bool:

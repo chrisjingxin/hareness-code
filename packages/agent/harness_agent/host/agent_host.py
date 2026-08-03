@@ -849,6 +849,9 @@ class AgentHost:
                 thread_id=command.thread_id,
                 spec=spec,
             )
+            idle_duration_ms = await self._top_level_idle_duration_ms(
+                persistence, command.thread_id
+            )
             binding = resolved.bind_run(
                 thread_id=command.thread_id,
                 run_id=command.run_id,
@@ -863,11 +866,27 @@ class AgentHost:
                 agent_engine_profile=profile,
                 skill_snapshot_id=registry.snapshot_id,
                 context_snapshot=context_snapshot,
+                idle_duration_ms=idle_duration_ms,
                 snapshot_reservation=reservation,
             )
         except BaseException:
             await reservation.release()
             raise
+
+    async def _top_level_idle_duration_ms(
+        self, persistence: ThreadPersistence, thread_id: str
+    ) -> int | None:
+        """只为新的顶层 Run 读取可证明的 Thread 空闲时长。"""
+        updated_at_ms = await persistence.load_thread_activity_ms(thread_id)
+        now_ms = int(time.time() * 1000)
+        if (
+            not isinstance(updated_at_ms, int)
+            or isinstance(updated_at_ms, bool)
+            or updated_at_ms <= 0
+            or now_ms < updated_at_ms
+        ):
+            return None
+        return now_ms - updated_at_ms
 
     async def _acquire_run_runtime(self, run: RunState) -> RunRuntime:
         """把 AgentEngine/注入 Agent 的差异收敛成 Coordinator 可消费的 Runtime。"""
@@ -1662,10 +1681,20 @@ class AgentHost:
         snapshot = run.preparation.context_snapshot
         if snapshot is None:
             raise RuntimeError("RUN_CONTEXT_SNAPSHOT_UNAVAILABLE")
+        from harness_agent.context_pressure import ModelCallLifecycle
+
         return RunContext(
             thread_id=run.thread_id,
             run_id=run.run_id,
             context_snapshot=snapshot,
+            model_call_lifecycle=ModelCallLifecycle(
+                next_call_type=(
+                    "subagent"
+                    if run.root_execution_ref.parent_execution_id is not None
+                    else "top_level_initial"
+                ),
+                idle_duration_ms=run.preparation.idle_duration_ms,
+            ),
             approval_mode=spec.effective_policy.approval_mode or spec.execution.approval_mode,
             profile_key=profile.profile_key,
             execution_id=run.root_execution_ref.execution_id,

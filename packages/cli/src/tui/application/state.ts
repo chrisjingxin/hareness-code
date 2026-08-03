@@ -569,7 +569,7 @@ function contextValue(value: unknown): { action: string; estimatedTokens?: numbe
 function contextStatus(payload: Record<string, unknown>): string {
   const action = stringValue(payload.action, "")
   if (action.includes("summary")) return "正在整理上下文"
-  if (action.includes("dehydration")) return "正在归档工具结果"
+  if (action.includes("micro") || action.includes("dehydration")) return "正在归档工具结果"
   return action === "report" ? "上下文接近预算" : "正在思考"
 }
 

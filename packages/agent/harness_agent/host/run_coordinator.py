@@ -141,6 +141,7 @@ class RunPreparation:
     agent_engine_profile: AgentEngineProfile | None = None
     skill_snapshot_id: str | None = None
     context_snapshot: RunContextSnapshot | None = None
+    idle_duration_ms: int | None = None
     # Default AgentHost may hold this reservation from spec resolution until the
     # corresponding AgentEngine lease is acquired.  It is intentionally opaque
     # here so the coordinator does not own the runtime snapshot protocol.
@@ -878,6 +879,11 @@ class RunCoordinator:
         runtime = run.runtime
         if runtime is None or runtime.agent is None:
             return None
+        if resume is not None and run.run_context is not None:
+            # Interaction resume is an explicit non-initial model phase.  The
+            # pressure middleware must not reinterpret the resume as a new
+            # idle top-level Run merely because the user took time to answer.
+            run.run_context.model_call_lifecycle.schedule("interaction_resume")
         stream_input: Any = (
             Command(resume=resume)
             if resume is not None
