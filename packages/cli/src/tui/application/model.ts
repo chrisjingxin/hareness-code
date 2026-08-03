@@ -4,6 +4,12 @@ import type { InitializeResult } from "@za38/protocol"
 
 export const CLI_VERSION = "0.1.0"
 
+/** 规范审批模式；与协议 approvalMode 枚举保持一致。 */
+export type TuiApprovalMode = "plan" | "default" | "auto-edit" | "auto" | "yolo"
+
+/** Shift+Tab 循环切换顺序，与 Python approval_mode.MODE_CYCLE 对齐。 */
+export const APPROVAL_MODE_CYCLE: readonly TuiApprovalMode[] = ["plan", "default", "auto-edit", "auto", "yolo"]
+
 export type TuiRuntime = {
   workspace: string
   gitBranch?: string
@@ -15,7 +21,7 @@ export type TuiRuntime = {
   startupError?: string
   executionMode: "local" | "remote-sandbox"
   sandboxProvider?: string
-  approvalMode: "plan" | "default" | "auto-edit" | "yolo"
+  approvalMode: TuiApprovalMode
   approvalModeWarning?: string
   /** initialize 协商后的能力；缺省仅用于兼容未更新的测试运行时。 */
   capabilities?: readonly string[]
@@ -135,7 +141,12 @@ function optionalString(value: unknown): string | undefined {
 }
 
 /** 对来自协议的审批模式做白名单解析，未知值回退到保守的默认确认。 */
-function approvalMode(value: unknown): "plan" | "default" | "auto-edit" | "yolo" {
-  if (value === "plan" || value === "default" || value === "auto-edit" || value === "yolo") return value
-  return "default"
+function approvalMode(value: unknown): TuiApprovalMode {
+  return (APPROVAL_MODE_CYCLE as readonly unknown[]).includes(value) ? value as TuiApprovalMode : "default"
+}
+
+/** 按循环顺序返回下一个审批模式。 */
+export function nextApprovalMode(current: TuiApprovalMode): TuiApprovalMode {
+  const index = APPROVAL_MODE_CYCLE.indexOf(current)
+  return APPROVAL_MODE_CYCLE[(index + 1) % APPROVAL_MODE_CYCLE.length] ?? "default"
 }

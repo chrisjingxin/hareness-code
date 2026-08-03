@@ -2,22 +2,35 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from langchain.agents.middleware.types import AgentMiddleware, ContextT, ResponseT
 from langchain.tools.tool_node import ToolCallRequest
 from langchain_core.messages import ToolMessage
 
 from harness_agent.policy.approval_mode import ApprovalMode
+from harness_agent.policy.auto_mode import evaluate_auto_mode
 from harness_agent.policy.tool_risk import ToolKind, get_tool_kind, get_mode_permission, is_read_only
 from harness_agent.policy.permission_rules import PermissionRule, evaluate_rules
 from harness_agent.policy.sensitive_paths import requires_safety_check
 
+logger = logging.getLogger(__name__)
+
 _DEFAULT_HITL_TOOLS = frozenset(
     {"execute", "write_file", "edit_file", "delete", "delete_file", "task", "web_fetch", "apply_patch", "monitor", "task_stop"}
 )
-_AUTO_EDIT_HITL_TOOLS = frozenset({"execute", "delete", "delete_file", "task", "web_fetch", "monitor", "task_stop"})
+# auto-edit 模式下编辑类工具必须纳入 HITL 集合：敏感路径（如 .git/config）的
+# 编辑仍需由预检弹窗确认；工作区内非敏感编辑由预检自动放行，不会真正弹窗。
+_AUTO_EDIT_HITL_TOOLS = frozenset(
+    {"execute", "write_file", "edit_file", "delete", "delete_file", "task", "web_fetch", "apply_patch", "monitor", "task_stop"}
+)
+# auto 模式下编辑类工具同样必须纳入 HITL 集合：让编辑类调用经过四层过滤器
+# 判断——F1 快速通道自动放行，敏感路径与 F4 回退仍走弹窗审批。
+_AUTO_HITL_TOOLS = frozenset(
+    {"execute", "write_file", "edit_file", "delete", "delete_file", "task", "web_fetch", "apply_patch", "monitor", "task_stop"}
+)
 _PLAN_ALLOWED_TOOLS = frozenset(
     {
         "ls",
@@ -27,13 +40,46 @@ _PLAN_ALLOWED_TOOLS = frozenset(
         "ask_user",
         "write_todos",
         "web_search",
+        "web_fetch",
         "lsp",
         "tool_search",
         "memory_search",
+        "task_output",
         "enter_plan_mode",
         "exit_plan_mode",
     }
 )
+
+
+# ---------------------------------------------------------------------------
+# Extension 权限钩子接口（预留，当前为空列表）
+# ---------------------------------------------------------------------------
+
+class ExtensionPermissionHook(Protocol):
+    """Extension/Plugin 权限钩子协议（预留接口）。
+
+    Extension 钩子只能收紧权限（deny 覆盖 allow），不能放宽（主流程 deny 不可覆盖）。
+    后续 /extension 功能上线时，用户自定义的权限逻辑通过此接口注册。
+    """
+
+    def check(
+        self, tool_name: str, tool_args: dict[str, Any], base_decision: str
+    ) -> Literal["allow", "deny", "passthrough"]:
+        """检查工具调用权限。
+
+        Args:
+            tool_name: 工具名称。
+            tool_args: 工具参数。
+            base_decision: 主审批管线的决策结果（"allow" 或 "ask"）。
+
+        Returns:
+            "deny" 收紧拒绝，"allow" 无实际效果（不可放宽），"passthrough" 不影响。
+        """
+        ...
+
+
+# 已注册的 Extension 权限钩子（当前为空，后续 /extension 功能填充）
+_extension_permission_hooks: list[ExtensionPermissionHook] = []
 
 
 def interrupt_on_for_approval_mode(
@@ -49,15 +95,16 @@ def interrupt_on_for_approval_mode(
 
     Args:
         extra_interrupt_tools: 需要一并纳入审批的额外工具名（如 MCP 工具）。
-            仅在 default 和 auto-edit 模式下生效；plan 和 yolo 忽略。
+            仅在 default、auto-edit 和 auto 模式下生效；plan 和 yolo 忽略。
     """
     if approval_mode in {"plan", "yolo"}:
         return None
-    tool_names = (
-        _DEFAULT_HITL_TOOLS
-        if approval_mode == "default"
-        else _AUTO_EDIT_HITL_TOOLS
-    )
+    if approval_mode == "default":
+        tool_names = _DEFAULT_HITL_TOOLS
+    elif approval_mode == "auto-edit":
+        tool_names = _AUTO_EDIT_HITL_TOOLS
+    else:  # auto 模式
+        tool_names = _AUTO_HITL_TOOLS
     if extra_interrupt_tools:
         tool_names = tool_names | extra_interrupt_tools
     from langchain.agents.middleware.human_in_the_loop import InterruptOnConfig
@@ -88,6 +135,15 @@ def approval_mode_prompt(approval_mode: ApprovalMode) -> str:
 
 工作区内的文件创建和编辑会自动执行；命令执行、删除和子 Agent 仍会等待
 用户审批。工作区边界和其他安全策略始终有效。
+"""
+    if approval_mode == "auto":
+        return """
+
+## 审批模式：自动
+
+系统通过多层过滤器自动判断工具调用安全性。只读操作和工作区内编辑自动
+执行；破坏性命令被硬拦截；其他操作由 AI 分类器判断安全性。分类器不可用
+时安全回退到手动审批。工作区边界和其他安全策略始终有效。
 """
     if approval_mode == "yolo":
         return """
@@ -144,6 +200,149 @@ class PlanModeMiddleware(AgentMiddleware[dict[str, Any], ContextT, ResponseT]):
         return await handler(request)
 
 
+class DenyRulesMiddleware(AgentMiddleware[dict[str, Any], ContextT, ResponseT]):
+    """在所有审批模式下强制执行 deny 规则，deny 命中即硬拒绝。
+
+    该中间件注册在所有其他中间件之前，确保 deny 规则不可被任何模式覆盖（包括 yolo）。
+    """
+
+    def __init__(self, rules_provider: Callable[[], list[PermissionRule]]) -> None:
+        """初始化 deny 规则中间件。
+
+        Args:
+            rules_provider: 返回当前所有权限规则的回调函数。
+        """
+        self._rules_provider = rules_provider
+
+    def _check_deny(self, request: ToolCallRequest) -> ToolMessage | None:
+        """检查工具调用是否命中 deny 规则，命中则返回错误消息。"""
+        tool_call = request.tool_call
+        tool_name = str(tool_call.get("name", "unknown"))
+        tool_args = tool_call.get("args") or {}
+        if not isinstance(tool_args, dict):
+            tool_args = {}
+
+        rules = self._rules_provider()
+        if not rules:
+            return None
+
+        resource = _extract_resource(tool_name, tool_args)
+        effect = evaluate_rules(tool_name, resource, rules)
+        if effect == "deny":
+            # L2 deny 硬拦截审计：记录拒绝原因，任何模式（包括 yolo）不可覆盖。
+            logger.info(
+                "approval_deny source=rule tool=%s resource=%s",
+                tool_name,
+                resource,
+            )
+            return ToolMessage(
+                content=f"权限规则拒绝 {tool_name}：该操作已被 deny 规则禁止，不可覆盖。",
+                name=tool_name,
+                tool_call_id=str(tool_call.get("id") or "deny-rule"),
+                status="error",
+            )
+        return None
+
+    def wrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Any],
+    ) -> Any:
+        """同步调用：deny 规则命中时硬拒绝。"""
+        rejection = self._check_deny(request)
+        if rejection is not None:
+            return rejection
+        return handler(request)
+
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Awaitable[Any]],
+    ) -> Any:
+        """异步调用：deny 规则命中时硬拒绝。"""
+        rejection = self._check_deny(request)
+        if rejection is not None:
+            return rejection
+        return await handler(request)
+
+
+class AutoDestructiveGuardMiddleware(AgentMiddleware[dict[str, Any], ContextT, ResponseT]):
+    """AUTO 模式 F3 破坏性命令执行层守卫。
+
+    预检对 F3 deny 决策会跳过审批弹窗，本中间件在工具实际执行前兜底硬拒绝，
+    保证破坏性命令"直接拒绝、不经过弹窗和分类器"。
+    """
+
+    def __init__(
+        self,
+        rules_provider: Callable[[], list[PermissionRule]] | None,
+        workspace_root: str | None,
+    ) -> None:
+        """初始化 AUTO 模式破坏性命令守卫。
+
+        Args:
+            rules_provider: 返回当前合并权限规则的回调；为 None 或返回空列表
+                时跳过规则判断，直接进入 AUTO 四层过滤器。
+            workspace_root: 工作区根目录，供 AUTO 过滤器判断路径归属。
+        """
+        self._rules_provider = rules_provider
+        self._workspace_root = workspace_root
+
+    def _check(self, request: ToolCallRequest) -> ToolMessage | None:
+        """检查工具调用是否应被 AUTO 模式硬拒绝，命中时返回错误消息。"""
+        tool_call = request.tool_call
+        tool_name = str(tool_call.get("name", "unknown"))
+        tool_args = tool_call.get("args") or {}
+        if not isinstance(tool_args, dict):
+            tool_args = {}
+
+        rules = self._rules_provider() if self._rules_provider is not None else []
+        if rules:
+            effect = evaluate_rules(tool_name, _extract_resource(tool_name, tool_args), rules)
+            # deny 由 DenyRulesMiddleware 统一硬拒绝；allow 规则按设计优先于
+            # AUTO 过滤器（用户明确批准的操作不再进入过滤器判断）。
+            if effect in ("allow", "deny"):
+                return None
+
+        decision, reason = evaluate_auto_mode(tool_name, tool_args, self._workspace_root)
+        if decision == "deny":
+            # F3 静默硬拒绝审计：破坏性命令不弹窗直接拒绝，必须留痕。
+            logger.info(
+                "approval_deny source=auto_destructive_guard tool=%s reason=%s",
+                tool_name,
+                reason,
+            )
+            return ToolMessage(
+                content=f"AUTO 模式拒绝 {tool_name}：{reason}",
+                name=tool_name,
+                tool_call_id=str(tool_call.get("id") or "auto-deny"),
+                status="error",
+            )
+        return None
+
+    def wrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Any],
+    ) -> Any:
+        """同步调用：AUTO 模式 F3 硬拒绝时不调用底层 handler。"""
+        rejection = self._check(request)
+        if rejection is not None:
+            return rejection
+        return handler(request)
+
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Awaitable[Any]],
+    ) -> Any:
+        """异步调用：AUTO 模式 F3 硬拒绝时不调用底层 handler。"""
+        rejection = self._check(request)
+        if rejection is not None:
+            return rejection
+        return await handler(request)
+
+
 # ---------------------------------------------------------------------------
 # 多级审批流水线
 # ---------------------------------------------------------------------------
@@ -157,21 +356,27 @@ def evaluate_permission(
     tool_args: dict[str, Any],
     approval_mode: ApprovalMode,
     rules: list[PermissionRule] | None = None,
+    *,
+    auto_filter: Callable[[str, dict[str, Any]], PermissionDecision] | None = None,
 ) -> PermissionDecision:
-    """多级审批流水线：L2 deny 硬拦截 → L3 只读放行 → L4 规则评估 → L5 模式覆盖。
+    """多级审批流水线：L1 工具风险声明 → L2 deny 硬拦截 → L3 只读放行 → L3.5 敏感路径 → L4 规则评估 → L5 模式覆盖 → L6 Extension 钩子。
 
     Args:
         tool_name: 工具名称。
         tool_args: 工具参数字典。
         approval_mode: 当前审批模式。
-        rules: 已合并的权限规则列表（session + project + user），按优先级排列。
+        rules: 已合并的权限规则列表（session + project + user + system）。
+        auto_filter: AUTO 模式四层过滤器回调（仅 auto 模式时调用）。
 
     Returns:
         "allow" 直接执行，"ask" 需要用户审批，"deny" 硬拒绝。
     """
+    # L1: 工具风险声明提取
+    kind = get_tool_kind(tool_name)
+    resource = _extract_resource(tool_name, tool_args)
+
     # L2: deny 规则硬拦截（任何模式不可覆盖）
     if rules:
-        resource = _extract_resource(tool_name, tool_args)
         effect = evaluate_rules(tool_name, resource, rules)
         if effect == "deny":
             return "deny"
@@ -180,13 +385,12 @@ def evaluate_permission(
     if is_read_only(tool_name):
         return "allow"
 
-    # 敏感路径 safetyCheck（yolo 免疫）
-    if requires_safety_check(tool_name, tool_args):
+    # L3.5: 敏感路径 safetyCheck（yolo 免疫）
+    if approval_mode != "yolo" and requires_safety_check(tool_name, tool_args):
         return "ask"
 
-    # L4: 规则评估（allow/ask 规则）
+    # L4: 规则评估（allow/ask 规则，两级优先级）
     if rules:
-        resource = _extract_resource(tool_name, tool_args)
         effect = evaluate_rules(tool_name, resource, rules)
         if effect == "allow":
             return "allow"
@@ -194,9 +398,25 @@ def evaluate_permission(
             return "ask"
 
     # L5: 审批模式覆盖（按 ToolKind 查表）
-    kind = get_tool_kind(tool_name)
     mode_perm = get_mode_permission(kind, approval_mode)
-    return mode_perm  # type: ignore[return-value]
+
+    # auto 模式下 "filter" 表示进入 AUTO 四层过滤器
+    if mode_perm == "filter":
+        if auto_filter is not None:
+            return auto_filter(tool_name, tool_args)
+        # 过滤器不可用时回退到 ask（安全优先）
+        return "ask"
+
+    decision = mode_perm  # type: ignore[assignment]
+
+    # L6: Extension 权限钩子（预留，当前为空列表直接跳过）
+    if decision != "deny" and _extension_permission_hooks:
+        for hook in _extension_permission_hooks:
+            hook_result = hook.check(tool_name, tool_args, decision)
+            if hook_result == "deny":
+                return "deny"
+
+    return decision
 
 
 def _extract_resource(tool_name: str, tool_args: dict[str, Any]) -> str:

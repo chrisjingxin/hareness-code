@@ -16,8 +16,11 @@ from langchain.agents.middleware.types import AgentMiddleware, ExtendedModelResp
 from langchain_core.messages import SystemMessage
 
 from harness_agent.policy.approval_mode import ApprovalMode
+from harness_agent.policy.approval_policy import approval_mode_prompt
 from harness_agent.runtime.execution_binding import ExecutionMode
 from harness_agent.threads.prompting import PromptEpoch
+
+_LEGACY_APPROVAL_MODE_MARKER = "\n\n## 审批模式："
 
 
 class RunContextError(ValueError):
@@ -100,12 +103,25 @@ class PromptEpochMiddleware(AgentMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse | ExtendedModelResponse:
-        """保留 DeepAgents 基础提示词，并在其前拼接当前 run 的稳定前缀。"""
+        """保留 DeepAgents 基础提示词，并在其前拼接当前 run 的稳定前缀。
+
+        审批模式事实按本轮 RunContext 动态追加，保证 TUI 切换模式后模型看到
+        的边界说明与实际强制策略一致；旧 epoch 内嵌的模式小节先剥离避免重复。
+        """
         context = require_run_context(request.runtime)
         base_prompt = _system_message_text(request.system_message)
-        prompt = context.prompt_epoch.system_prompt
+        prompt = _without_legacy_approval_mode_section(context.prompt_epoch.system_prompt)
+        prompt = f"{prompt}{approval_mode_prompt(context.approval_mode)}"
         system_prompt = f"{prompt}\n\n{base_prompt}" if base_prompt else prompt
         return await handler(request.override(system_message=SystemMessage(content=system_prompt)))
+
+
+def _without_legacy_approval_mode_section(prompt: str) -> str:
+    """剥离历史 epoch 末尾内嵌的审批模式小节，模式事实改由本轮动态追加。"""
+    index = prompt.find(_LEGACY_APPROVAL_MODE_MARKER)
+    if index == -1:
+        return prompt
+    return prompt[:index]
 
 
 def _system_message_text(message: object | None) -> str:

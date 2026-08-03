@@ -12,9 +12,12 @@ from jsonschema import Draft202012Validator
 
 
 SCHEMA_PATH = Path(__file__).with_name("protocol_v3.json")
-SCHEMA_TEXT = SCHEMA_PATH.read_text(encoding="utf-8")
+# 摘要必须按原始字节计算：生成器对 UTF-8 字节取 sha256，若用 read_text
+# 读取，Windows 检出的 CRLF 会被通用换行规则归一化成 LF，导致摘要漂移。
+SCHEMA_BYTES = SCHEMA_PATH.read_bytes()
+SCHEMA_TEXT = SCHEMA_BYTES.decode("utf-8")
 EXPECTED_DIGEST = Path(__file__).with_name("protocol_v3.sha256").read_text(encoding="ascii").strip()
-ACTUAL_DIGEST = hashlib.sha256(SCHEMA_TEXT.encode("utf-8")).hexdigest()
+ACTUAL_DIGEST = hashlib.sha256(SCHEMA_BYTES).hexdigest()
 if ACTUAL_DIGEST != EXPECTED_DIGEST:
     raise RuntimeError("protocol_v3.json digest mismatch; regenerate the protocol package")
 SCHEMA: dict[str, Any] = json.loads(SCHEMA_TEXT)

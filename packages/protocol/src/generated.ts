@@ -2,7 +2,7 @@
 
 export const PROTOCOL_MAJOR = 3 as const
 export const PROTOCOL_MINOR = 0 as const
-export const PROTOCOL_SCHEMA_SHA256 = "f4adaa242e1b825c6fd52ee285d7f4135da8cddcf505393b53d8607b2da038db" as const
+export const PROTOCOL_SCHEMA_SHA256 = "9c8b6bcc16139877bddf8a353a14be7335e0897cc7cd8c4fa239a20a274d77f5" as const
 export const MAX_FRAME_BYTES = 8388608 as const
 export const MAX_TOOL_PAYLOAD_BYTES = 1048576 as const
 export const CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","mcp.status","mcp.add","mcp.remove","host.attachment.create"] as const
@@ -64,9 +64,10 @@ export type InitializeParams = { "protocol": ProtocolRange; "client": ClientInfo
 export type InitializeResult = { "protocol": { "major": 3; "minor": number }; "server": { "name": string; "version": string }; "connection": { "id": string; "role": "owner" | "attached"; "project": { "id": string; "label": string } }; "capabilities": { "available": Array<string>; "enabled": Array<string>; "handles": Array<"approval" | "question"> }; "agent_commands": Array<JsonObject>; "skills_snapshot": { "id": string; "count": number }; "skill_diagnostics": Array<string>; "limits": { "max_frame_bytes": number; "max_tool_payload_bytes": number }; "config_summary": (JsonObject) | (null); "startup_error": ({ "code": string; "message": string }) | (null) }
 export type RequestedSkill = { "id": string; "args"?: string }
 export type ThreadModelSelection = { "primary_profile": string }
+export type ApprovalMode = "plan" | "default" | "auto-edit" | "auto" | "yolo"
 export type ModelProfile = { "id": string; "model": string; "provider_label": string; "context_window_tokens": number; "capabilities": Array<string>; "is_default": boolean; "available": boolean; "unavailable_reason"?: string | null; "source": string }
 export type RunPrimaryModelBinding = { "profile": ModelProfile; "source": string; "runtime_profile_id": string }
-export type RunStartParams = { "message": string; "thread_id": string; "run_id": string; "requested_skill"?: RequestedSkill; "model_selection"?: ThreadModelSelection }
+export type RunStartParams = { "message": string; "thread_id": string; "run_id": string; "requested_skill"?: RequestedSkill; "model_selection"?: ThreadModelSelection; "approval_mode"?: ApprovalMode }
 export type RunStartResult = { "thread_id": string; "run_id": string; "accepted": true }
 export type RunCancelParams = { "thread_id": string; "run_id": string }
 export type RunCancelResult = { "cancelled": boolean; "run_id": string }

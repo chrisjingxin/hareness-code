@@ -27,7 +27,7 @@ import {
   type SlashCommand,
 } from "./commands"
 import { dispatchSlashCommand, type CommandResult } from "./command-dispatcher"
-import { runtimeStatusSummary, type TuiRuntime } from "./model"
+import { nextApprovalMode, runtimeStatusSummary, type TuiApprovalMode, type TuiRuntime } from "./model"
 import {
   loadPromptHistory,
   movePromptHistory,
@@ -201,6 +201,7 @@ class TuiControllerImpl implements TuiController {
   private modelPicker: InternalPicker<ModelProfile> = emptyPicker()
   private selectedSkill: SelectedSkill | undefined
   private threadModelSelection: string | undefined
+  private approvalModeOverride: TuiApprovalMode | undefined
   private actualModelProfile: ModelProfile | undefined
   private commandDialog: TuiSnapshot["commandDialog"]
   private modelBindingDialog: TuiSnapshot["modelBindingDialog"]
@@ -350,14 +351,17 @@ class TuiControllerImpl implements TuiController {
   private buildSnapshot(): TuiSnapshot {
     const selectedModel = this.models.find(model => model.id === this.threadModelSelection)
     const displayedModel = selectedModel ?? this.actualModelProfile
-    const runtime: TuiRuntime = displayedModel
-      ? {
-          ...this.baseRuntime,
-          modelName: displayedModel.model,
-          modelProfileId: displayedModel.id,
-          modelConfigured: true,
-        }
-      : { ...this.baseRuntime }
+    const runtime: TuiRuntime = {
+      ...(displayedModel
+        ? {
+            ...this.baseRuntime,
+            modelName: displayedModel.model,
+            modelProfileId: displayedModel.id,
+            modelConfigured: true,
+          }
+        : { ...this.baseRuntime }),
+      approvalMode: this.approvalModeOverride ?? this.baseRuntime.approvalMode,
+    }
     return {
       state: this.state,
       runtime,
@@ -590,6 +594,9 @@ class TuiControllerImpl implements TuiController {
       case "toggle-tool-details":
         this.showToolDetails = !this.showToolDetails
         this.publish()
+        return
+      case "cycle-approval-mode":
+        this.cycleApprovalMode()
         return
       case "clear-selected-skill":
         this.selectedSkill = undefined
@@ -1007,6 +1014,13 @@ class TuiControllerImpl implements TuiController {
     }
   }
 
+  /** Shift+Tab：循环切换审批模式，从下一次 Run 起生效并立即更新右下角展示。 */
+  private cycleApprovalMode(): void {
+    const current = this.approvalModeOverride ?? this.baseRuntime.approvalMode
+    this.approvalModeOverride = nextApprovalMode(current)
+    this.publish()
+  }
+
   /** 登记消息、启动 Run，并把 AgentRun 队列交给 drain 释放。 */
   private async sendAgentMessage(message: string, requestedSkill?: RequestedSkill): Promise<void> {
     const current = this.state
@@ -1025,6 +1039,7 @@ class TuiControllerImpl implements TuiController {
       threadId: current.threadId,
       requestedSkill: armedSkill,
       modelSelection,
+      approvalMode: this.approvalModeOverride ?? this.baseRuntime.approvalMode,
     })
     const run = agentRun.ref
     this.commit(state => startRun(state, run, message))

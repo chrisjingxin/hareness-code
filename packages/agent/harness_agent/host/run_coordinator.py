@@ -9,9 +9,12 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any, Protocol
 
+from harness_agent.policy.approval_mode import ApprovalMode
+from harness_agent.policy.permission_rules import PermissionRule, save_rule
 from harness_agent.runtime.agent_execution import AgentExecutionRegistry, ExecutionRegistryError
 from harness_agent.runtime.agent_engine import AgentEnginePoolCapacityError
 from harness_agent.runtime.agent_engine_profile import AgentEngineProfile
@@ -105,6 +108,7 @@ class StartRun:
     message: str
     requested_skill: RequestedSkill | None = None
     requested_primary_profile: str | None = None
+    requested_approval_mode: ApprovalMode | None = None
 
     @property
     def ref(self) -> RunRef:
@@ -121,6 +125,7 @@ class StartRun:
             skill.skill_id if skill else None,
             skill.args if skill else None,
             self.requested_primary_profile,
+            self.requested_approval_mode,
         )
 
 
@@ -336,6 +341,7 @@ class RunCoordinator:
         skill_registry_provider: SkillRegistryProvider,
         context_updates_provider: ContextUpdatesProvider | None = None,
         execution_registry: AgentExecutionRegistry | None = None,
+        project_dir: Path | None = None,
     ) -> None:
         """注入 Project 资源 adapter，保持外部 Run interface 与 Protocol 解耦。"""
         self._persistence_provider = persistence_provider
@@ -345,6 +351,10 @@ class RunCoordinator:
         self._skill_registry_provider = skill_registry_provider
         self._context_updates_provider = context_updates_provider or (lambda _thread_id: [])
         self._execution_registry = execution_registry or AgentExecutionRegistry()
+        # approve_always 的规则持久化到该目录的 project 层 settings.json
+        self._project_dir = project_dir
+        # approve_thread 的会话级规则只保存在内存，不落盘
+        self._session_rules: list[PermissionRule] = []
         self._runs: dict[str, RunState] = {}
         self._starting_threads: set[str] = set()
         self._lock = asyncio.Lock()
@@ -354,6 +364,11 @@ class RunCoordinator:
     def execution_registry(self) -> AgentExecutionRegistry:
         """返回供未来 DelegationDispatcher 复用的执行树 seam。"""
         return self._execution_registry
+
+    @property
+    def session_rules(self) -> list[PermissionRule]:
+        """返回本会话内审批产生的内存权限规则。"""
+        return self._session_rules
 
     async def start(self, command: StartRun, owner: ConnectionRef) -> RunExecution:
         """受理一次 Run，并在受理成功后创建唯一执行任务。"""
@@ -825,6 +840,7 @@ class RunCoordinator:
                     INTERACTION_RESOLVED,
                     {"request_id": interaction.request_id, "type": interaction.type},
                 )
+                self._record_approval_rules(interaction, result.value)
                 return _resume_value(interaction, result.value)
             for event_type, payload in _translate_stream_event(event, run):
                 self._emit(run, event_type, payload)
@@ -836,6 +852,42 @@ class RunCoordinator:
             payload = update.payload() if hasattr(update, "payload") else dict(update)
             run.context_summary = payload
             self._emit(run, CONTEXT_UPDATED, payload)
+
+    def _record_approval_rules(self, spec: InteractionRequest, response: object) -> None:
+        """审批通过后按决策范围记录或持久化 allow 权限规则。
+
+        - approve_thread：规则只保存在会话内存列表，进程结束即失效；
+        - approve_always：规则持久化到 project 层 settings.json。
+        工具上下文来自 interrupt payload 中保存的 action_requests。
+        """
+        if spec.type != "approval" or not isinstance(response, Mapping):
+            return
+        decision = response.get("decision")
+        if decision not in {"approve_thread", "approve_always"}:
+            return
+        requests = spec.payload.get("requests")
+        action_requests = (
+            requests.get("action_requests") if isinstance(requests, Mapping) else None
+        )
+        if not isinstance(action_requests, list):
+            return
+        for action in action_requests:
+            if not isinstance(action, Mapping):
+                continue
+            tool_name = str(action.get("name") or "")
+            tool_args = action.get("args")
+            if not tool_name or not isinstance(tool_args, Mapping):
+                continue
+            rule = _generate_permission_rule(tool_name, tool_args)
+            if decision == "approve_thread":
+                if rule not in self._session_rules:
+                    self._session_rules.append(rule)
+            else:
+                save_rule(
+                    replace(rule, scope="project"),
+                    scope="project",
+                    project_dir=self._project_dir,
+                )
 
 
 def _extract_interaction(event: tuple[Any, ...]) -> InteractionRequest | None:
@@ -906,7 +958,13 @@ def _extract_interaction(event: tuple[Any, ...]) -> InteractionRequest | None:
             "interrupt_id": interrupt_id,
             "description": description,
             "requests": _bounded_json(value),
-            "decisions": ["approve_once", "reject"],
+            "decisions": [
+                "approve_once",
+                "approve_thread",
+                "approve_always",
+                "reject",
+                "reject_with_feedback",
+            ],
         },
         interrupt_id=interrupt_id,
         action_count=action_count,
@@ -919,14 +977,18 @@ def _resume_value(spec: InteractionRequest, response: object) -> dict[str, objec
         response = {}
     if spec.type == "approval":
         decision = response.get("decision")
-        langgraph_decision = (
-            "approve"
-            if decision in {"approve_once", "approve_thread", "approve_always"}
-            else "reject"
-        )
+        feedback = response.get("feedback", "")
+        if decision in {"approve_once", "approve_thread", "approve_always"}:
+            langgraph_decision: dict[str, object] = {"type": "approve"}
+        elif decision == "reject_with_feedback" and feedback:
+            # 反馈必须落在每个 decision 的 args 中，才符合
+            # HumanInTheLoopMiddleware 的 resume 契约；顶层 feedback 会被忽略。
+            langgraph_decision = {"type": "reject", "args": {"message": feedback}}
+        else:
+            langgraph_decision = {"type": "reject"}
         return {
             spec.interrupt_id: {
-                "decisions": [{"type": langgraph_decision}] * spec.action_count
+                "decisions": [langgraph_decision] * spec.action_count
             }
         }
     answers_by_id = response.get("answers", {})
@@ -937,6 +999,28 @@ def _resume_value(spec: InteractionRequest, response: object) -> dict[str, objec
             answers.append(str(values[0]) if isinstance(values, list) and values else "")
     status = "answered" if any(answers) else "cancelled"
     return {spec.interrupt_id: {"status": status, "answers": answers}}
+
+
+def _generate_permission_rule(
+    tool_name: str, tool_args: Mapping[str, object]
+) -> PermissionRule:
+    """从被批准的工具调用上下文生成 allow 权限规则。
+
+    资源模式按工具类别收敛：
+    - execute/monitor：取命令首词作为前缀模式（如 ``git commit -m 'x'`` → ``git *``）；
+    - 文件写/删类工具（write_file/edit_file/delete_file/apply_patch）：
+      使用 ``*`` 项目级通配。用户明确批准后，项目路径内的修改与删除不再
+      反复弹窗；工作区边界由边界预检短路，敏感路径（.git/.harness 等）由
+      L3.5 安全检查继续强制弹窗，因此通配不会放宽硬性保护；
+    - 其他工具：资源使用 ``*``。
+    """
+    if tool_name in {"execute", "monitor"}:
+        command = str(tool_args.get("command") or "").strip()
+        prefix = command.split()[0] if command else ""
+        resource = f"{prefix} *" if prefix else "*"
+    else:
+        resource = "*"
+    return PermissionRule(tool=tool_name, resource=resource, effect="allow")
 
 
 def _translate_stream_event(

@@ -65,10 +65,10 @@ def test_execution_context_prompt_marks_local_and_remote_boundaries():
     from harness_agent.runtime.agent import _with_execution_context
 
     local = _with_execution_context(
-        "base", workspace="/tmp/work", sandboxed=False, provider=None, approval_mode="default"
+        "base", workspace="/tmp/work", sandboxed=False, provider=None
     )
     remote = _with_execution_context(
-        "base", workspace="/workspace", sandboxed=True, provider="corp", approval_mode="yolo"
+        "base", workspace="/workspace", sandboxed=True, provider="corp"
     )
 
     assert "本机工作目录是：`/tmp/work`" in local
@@ -76,6 +76,80 @@ def test_execution_context_prompt_marks_local_and_remote_boundaries():
     assert "不能通过审批绕过" in local
     assert "corp` 远端沙箱" in remote
     assert "`/workspace`" in remote
+    # 审批模式事实不再写入稳定边界文本，改由每次 Run 动态追加。
+    assert "审批模式" not in local
+    assert "审批模式" not in remote
+
+
+def test_prompt_epoch_keeps_mode_snapshot_but_not_mode_prompt():
+    """epoch 环境快照记录初始模式，但系统提示词不再内嵌模式事实。"""
+    from harness_agent.runtime.agent import create_prompt_epoch
+
+    epoch = create_prompt_epoch(
+        thread_id="thread-mode",
+        system_prompt="base",
+        workspace=".",
+        sandboxed=False,
+        provider=None,
+        approval_mode="yolo",
+        skill_registry=None,
+        enable_memory=False,
+        enable_skills=False,
+    )
+
+    assert "approval_mode: yolo" in epoch.environment_snapshot.content
+    assert "审批模式" not in epoch.system_prompt
+
+
+def test_prompt_epoch_middleware_appends_current_run_mode_fact():
+    """共享图每轮按 RunContext 追加模式事实，并剥离旧 epoch 内嵌小节。"""
+    from harness_agent.runtime.agent import create_prompt_epoch
+    from harness_agent.runtime.run_context import (
+        PromptEpochMiddleware,
+        RunContext,
+        _without_legacy_approval_mode_section,
+    )
+
+    legacy = _without_legacy_approval_mode_section(
+        "base\n\n## 执行环境\n\nx\n\n## 审批模式：默认确认\n\n旧事实"
+    )
+    assert legacy == "base\n\n## 执行环境\n\nx"
+
+    epoch = create_prompt_epoch(
+        thread_id="thread-mw",
+        system_prompt="base",
+        workspace=".",
+        sandboxed=False,
+        provider=None,
+        approval_mode="default",
+        skill_registry=None,
+        enable_memory=False,
+        enable_skills=False,
+    )
+    context = RunContext(
+        thread_id="thread-mw",
+        run_id="run-mw",
+        prompt_epoch=epoch,
+        approval_mode="yolo",
+    )
+
+    captured: dict[str, str] = {}
+
+    async def handler(request):
+        captured["system"] = str(request.system_message.content)
+        return SimpleNamespace()
+
+    import asyncio
+
+    request = SimpleNamespace(
+        runtime=SimpleNamespace(context=context, config={}),
+        system_message=None,
+        override=lambda **kwargs: SimpleNamespace(**kwargs),
+    )
+    asyncio.run(PromptEpochMiddleware().awrap_model_call(request, handler))
+
+    assert "审批模式：YOLO" in captured["system"]
+    assert captured["system"].count("## 审批模式：") == 1
 
 
 def test_default_local_subagent_has_its_own_workspace_guard(tmp_path):

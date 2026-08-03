@@ -13,7 +13,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +35,9 @@ from harness_agent.runtime.agent_engine import (
     AgentEngineResourceBundle,
 )
 from harness_agent.config.config import ConfigError, Za38Config, load_config
+from harness_agent.policy.approval_mode import ApprovalMode
 from harness_agent.policy.concurrency import AsyncRWLock
+from harness_agent.policy.permission_rules import PermissionRule
 from harness_agent.config.config_change_service import (
     ConfigChange,
     ConfigChangeError,
@@ -215,6 +217,7 @@ class AgentHost:
             interaction_port=ProtocolInteractionAdapter(self),
             skill_registry_provider=self._require_skills,
             context_updates_provider=self._take_context_updates,
+            project_dir=self._workspace,
         )
         self._handlers = {
             METHOD["INITIALIZE"]: self._handle_initialize,
@@ -649,6 +652,7 @@ class AgentHost:
                 if parsed.model_selection is not None
                 else None
             ),
+            requested_approval_mode=parsed.approval_mode,
         )
         try:
             execution = await self._run_coordinator.start(
@@ -708,6 +712,7 @@ class AgentHost:
             command.thread_id,
             self._config,
             resolved,
+            approval_mode=command.requested_approval_mode,
         )
         profile = spec.runtime_profile
         binding = resolved.bind_run(
@@ -1251,19 +1256,30 @@ class AgentHost:
         thread_id: str,
         config: Za38Config,
         resolved_binding: ResolvedExecutionBinding,
+        *,
+        approval_mode: ApprovalMode | None = None,
     ) -> ResolvedAgentSpec:
-        """截取一次角色解析快照，Profile 和 builder 都从它派生。"""
+        """截取一次角色解析快照，Profile 和 builder 都从它派生。
+
+        ``approval_mode`` 为 Run 级覆盖：TUI 切换审批模式时按模式派生独立
+        Profile，引擎池据此缓存各自强制策略的图，配置值保持不动。
+        """
         persistence = await self._ensure_thread_persistence()
         registry = self._require_skills()
         await self._ensure_mcp_connected()
         async with self._mcp_state_lock:
             mcp_snapshot = self._mcp_snapshot or build_mcp_snapshot([], "missing")
             mcp_tools = tuple(self._mcp_manager.get_tools()) if self._mcp_manager else ()
+        execution = (
+            replace(config.execution, approval_mode=approval_mode)
+            if approval_mode is not None
+            else config.execution
+        )
         spec = resolve_builtin_main_agent_spec(
             project_fingerprint=persistence.project_fingerprint,
             workspace=self._workspace,
             binding=resolved_binding,
-            execution=config.execution,
+            execution=execution,
             skill_registry=registry,
             mcp_snapshot=mcp_snapshot,
             mcp_tools=mcp_tools,
@@ -1343,6 +1359,15 @@ class AgentHost:
             updates=self._context_updates,
         )
         mcp_tools = list(spec.tools)
+
+        def _get_current_rules() -> list[PermissionRule]:
+            """获取当前会话的所有规则（session 内存 + project/user/system 持久化）。"""
+            from harness_agent.policy.permission_rules import load_rules, merge_rules
+
+            persisted = load_rules(project_dir=self._workspace)
+            persisted["session"] = self._run_coordinator.session_rules
+            return merge_rules(persisted)
+
         graph = create_harness_agent(
             model,
             tools=mcp_tools or None,
@@ -1364,6 +1389,7 @@ class AgentHost:
             context_window_tokens=model_settings.context_window_tokens,
             shared_engine=True,
             concurrency_lock=self._tool_concurrency_lock,
+            rules_provider=_get_current_rules,
         )
         self._agent_engine_artifacts[profile.profile_key] = _AgentEngineArtifacts(
             execution_context=execution_context,

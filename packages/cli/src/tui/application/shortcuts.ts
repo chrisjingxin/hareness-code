@@ -6,6 +6,7 @@ export type ScrollIntent = "line-up" | "line-down" | "page-up" | "page-down" | "
 type KeyLike = {
   name: string
   ctrl: boolean
+  shift?: boolean
 }
 
 export type ShortcutContext = {
@@ -52,6 +53,7 @@ export type ShortcutAction =
   | "exit"
   | "clear-selected-skill"
   | "toggle-tool-details"
+  | "cycle-approval-mode"
   | "scroll-line-up"
   | "scroll-line-down"
   | "scroll-page-up"
@@ -132,6 +134,8 @@ export function resolveShortcut(key: KeyLike, context: ShortcutContext): Shortcu
   if (key.name === "escape" && context.activeRun) return "cancel-run"
   if (key.name === "escape" && !context.hasDraft) return "clear-selected-skill"
   if (key.ctrl && key.name === "o") return "toggle-tool-details"
+  // Shift+Tab 循环切换审批模式；浮层打开时让位，避免选择器焦点下误切换。
+  if (key.shift && key.name === "tab") return "cycle-approval-mode"
   if (key.ctrl && key.name === "d" && !context.activeRun && !context.hasDraft) return "exit"
   return "none"
 }

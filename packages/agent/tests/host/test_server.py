@@ -1358,6 +1358,116 @@ async def test_plan_mode_returns_tool_message_without_writing_or_requesting_appr
         assert not any(str(frame.get("method", "")).startswith("interaction.") for frame in frames)
 
 
+async def test_run_start_approval_mode_override_derives_mode_specific_profile(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """run.start 携带 approval_mode 时按模式派生独立 Profile，配置默认值保持不动。"""
+    from harness_agent.host.agent_host import AgentHost
+
+    home = tmp_path / "home"
+    config = home / ".harness" / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        """[config]
+version = 1
+
+[models]
+default_profile = "fast"
+
+[models.profiles.fast]
+provider = "openai-compatible"
+provider_label = "Fast Gateway"
+model = "fast-model"
+base_url = "https://fast.example/v1"
+api_key_env = "FAST_KEY"
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FAST_KEY", "fast-secret")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    server = AgentHost(config_home=home, workspace=workspace)
+    frames: list[dict[str, Any]] = []
+    server.send = lambda message: _append(frames, message)  # type: ignore[method-assign]
+    await server.dispatch(
+        _request("initialize", _initialize_params(capabilities=[]), "init-approval")
+    )
+
+    from harness_agent.host.run_coordinator import RunRuntime
+
+    async def no_runtime(_run: Any) -> RunRuntime:
+        async def release() -> None:
+            return None
+
+        return RunRuntime(
+            agent=None,
+            run_context=None,
+            graph_config=lambda thread_id: {"configurable": {"thread_id": thread_id}},
+            release=release,
+        )
+
+    server._run_coordinator._runtime_provider = no_runtime
+
+    def response(request_id: str) -> dict[str, Any]:
+        return next(frame for frame in frames if frame.get("id") == request_id)
+
+    await server.dispatch(
+        _request(
+            "run.start",
+            {
+                "message": "覆盖为 yolo",
+                "thread_id": "thread-approval",
+                "run_id": "override-run",
+                "approval_mode": "yolo",
+            },
+            "start-override",
+        )
+    )
+    assert response("start-override")["result"]["accepted"] is True
+    # 等待首个 Run 结束，保证同一 Thread 的第二次 run.start 不会撞上 THREAD_BUSY。
+    await _wait_for(frames, lambda frame: frame.get("params", {}).get("type") == "run.completed")
+
+    assert server._config is not None
+    # Run 级覆盖不得改动配置默认模式。
+    assert server._config.execution.approval_mode == "default"
+    override_specs = list(server._resolved_agent_specs.values())
+    assert [spec.effective_policy.approval_mode for spec in override_specs] == ["yolo"]
+
+    await server.dispatch(
+        _request(
+            "run.start",
+            {
+                "message": "回到配置默认",
+                "thread_id": "thread-approval",
+                "run_id": "default-run",
+            },
+            "start-default",
+        )
+    )
+    assert response("start-default")["result"]["accepted"] is True
+
+    def both_runs_completed(frame: dict[str, Any]) -> bool:
+        del frame
+        return (
+            sum(
+                1
+                for item in frames
+                if item.get("params", {}).get("type") == "run.completed"
+            )
+            >= 2
+        )
+
+    await _wait_for(frames, both_runs_completed)
+
+    specs = {spec.effective_policy.approval_mode: spec for spec in server._resolved_agent_specs.values()}
+    # 两种模式必须派生出不同的 Profile key，引擎池据此各自缓存强制策略图。
+    assert set(specs) == {"default", "yolo"}
+    assert (
+        specs["default"].runtime_profile.profile_key != specs["yolo"].runtime_profile.profile_key
+    )
+    await server._close_thread_persistence()
+
+
 async def test_missing_interaction_capability_fails_closed_without_reverse_request():
     """无头客户端不声明交互能力时，服务端直接返回拒绝而不发送 request。"""
     from harness_agent.host.run_coordinator import ConnectionRef, InteractionRequest, RunRef

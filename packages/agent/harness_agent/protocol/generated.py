@@ -7,7 +7,7 @@ from harness_agent.protocol.runtime import event_model, schema_model
 
 PROTOCOL_MAJOR = 3
 PROTOCOL_MINOR = 0
-PROTOCOL_SCHEMA_SHA256 = "f4adaa242e1b825c6fd52ee285d7f4135da8cddcf505393b53d8607b2da038db"
+PROTOCOL_SCHEMA_SHA256 = "9c8b6bcc16139877bddf8a353a14be7335e0897cc7cd8c4fa239a20a274d77f5"
 MAX_FRAME_BYTES = 8388608
 MAX_TOOL_PAYLOAD_BYTES = 1048576
 CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","mcp.status","mcp.add","mcp.remove","host.attachment.create"]
@@ -67,6 +67,8 @@ class RequestedSkillWire(TypedDict):
 class ThreadModelSelectionWire(TypedDict):
     primary_profile: str
 
+ApprovalModeWire: TypeAlias = Literal["plan", "default", "auto-edit", "auto", "yolo"]
+
 class ModelProfileWire(TypedDict):
     id: str
     model: str
@@ -89,6 +91,7 @@ class RunStartParamsWire(TypedDict):
     run_id: str
     requested_skill: NotRequired[RequestedSkillWire]
     model_selection: NotRequired[ThreadModelSelectionWire]
+    approval_mode: NotRequired[ApprovalModeWire]
 
 class RunStartResultWire(TypedDict):
     thread_id: str

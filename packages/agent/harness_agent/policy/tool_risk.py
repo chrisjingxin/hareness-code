@@ -52,54 +52,63 @@ TOOL_KIND_MAP: dict[str, ToolKind] = {
     "web_fetch": ToolKind.FETCH,
 }
 
-# 各 ToolKind 在审批模式 plan/default/auto-edit/yolo 下的默认行为
+# 各 ToolKind 在审批模式 plan/default/auto-edit/auto/yolo 下的默认行为
+# auto 模式下标记为 "filter" 的类别将进入 AUTO 四层过滤器管线
 KIND_MODE_PERMISSION: dict[ToolKind, dict[str, str]] = {
     ToolKind.READ: {
         "plan": "allow",
         "default": "allow",
         "auto-edit": "allow",
+        "auto": "allow",
         "yolo": "allow",
     },
     ToolKind.EDIT: {
         "plan": "deny",
         "default": "ask",
         "auto-edit": "allow",
+        "auto": "filter",
         "yolo": "allow",
     },
     ToolKind.DELETE: {
         "plan": "deny",
         "default": "ask",
         "auto-edit": "ask",
+        "auto": "filter",
         "yolo": "allow",
     },
     ToolKind.EXECUTE: {
         "plan": "deny",
         "default": "ask",
         "auto-edit": "ask",
+        "auto": "filter",
         "yolo": "allow",
     },
     ToolKind.AGENT: {
         "plan": "deny",
         "default": "ask",
         "auto-edit": "ask",
+        "auto": "filter",
         "yolo": "allow",
     },
     ToolKind.INTERACT: {
         "plan": "allow",
         "default": "allow",
         "auto-edit": "allow",
+        "auto": "allow",
         "yolo": "allow",
     },
     ToolKind.PLAN: {
         "plan": "allow",
         "default": "allow",
         "auto-edit": "allow",
+        "auto": "allow",
         "yolo": "allow",
     },
     ToolKind.FETCH: {
         "plan": "allow",
         "default": "ask",
         "auto-edit": "ask",
+        "auto": "filter",
         "yolo": "allow",
     },
 }

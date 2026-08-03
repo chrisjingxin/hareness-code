@@ -122,13 +122,14 @@ def test_mode_permission_matrix(kind: ToolKind, mode: str, expected: str):
 
 
 def test_permission_matrix_covers_all_kinds_and_modes():
-    """权限矩阵应覆盖全部 ToolKind 和四种审批模式。"""
-    modes = {"plan", "default", "auto-edit", "yolo"}
+    """权限矩阵应覆盖全部 ToolKind 和五种审批模式。"""
+    modes = {"plan", "default", "auto-edit", "auto", "yolo"}
     assert set(KIND_MODE_PERMISSION.keys()) == set(ToolKind)
     for kind, mode_map in KIND_MODE_PERMISSION.items():
         assert set(mode_map.keys()) == modes, f"{kind} 缺少模式覆盖"
         for mode, action in mode_map.items():
-            assert action in {"allow", "ask", "deny"}, f"{kind}/{mode} 行为非法"
+            # auto 模式允许 "filter" 表示进入 AUTO 四层过滤器管线
+            assert action in {"allow", "ask", "deny", "filter"}, f"{kind}/{mode} 行为非法"
 
 
 def test_tool_kind_map_covers_all_expected_tools():

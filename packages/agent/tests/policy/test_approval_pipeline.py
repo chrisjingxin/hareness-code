@@ -29,13 +29,20 @@ class TestReadOnlyTools:
 
 
 class TestSensitivePathSafety:
-    """敏感路径写操作即使在 yolo 模式下也触发 ask。"""
+    """敏感路径写操作在非 yolo 模式下强制 ask，yolo 模式免疫。"""
 
-    def test_sensitive_path_forces_ask_in_yolo(self) -> None:
+    def test_sensitive_path_forces_ask_in_non_yolo_modes(self) -> None:
+        for mode in ("default", "auto-edit", "auto"):
+            result = evaluate_permission(
+                "write_file", {"file_path": "/home/user/.git/config"}, mode
+            )
+            assert result == "ask", f"sensitive path should force ask in {mode} mode"
+
+    def test_sensitive_path_immune_in_yolo(self) -> None:
         result = evaluate_permission(
             "write_file", {"file_path": "/home/user/.git/config"}, "yolo"
         )
-        assert result == "ask"
+        assert result == "allow"
 
 
 class TestAllowRuleSkipsApproval:

@@ -4,6 +4,7 @@ import {
   EventType,
   Method,
   assertEventEnvelope,
+  type ApprovalMode,
   assertJsonRpcMessage,
   isInteractionMethod,
   validateInteractionParams,
@@ -56,6 +57,7 @@ export type StartRunInput = {
   threadId?: string
   requestedSkill?: RequestedSkill
   modelSelection?: ThreadModelSelection
+  approvalMode?: ApprovalMode
 }
 
 export type RunCompletion =
@@ -188,6 +190,7 @@ export class AgentClient {
       run_id: runId,
       requested_skill: input.requestedSkill,
       model_selection: input.modelSelection,
+      approval_mode: input.approvalMode,
     }).then(result => {
       if (result.thread_id !== threadId || result.run_id !== runId || !result.accepted) {
         throw new Error("run.start returned a mismatched identity")

@@ -53,13 +53,18 @@ def test_matches_pattern_no_match():
 # ---------------------------------------------------------------------------
 
 
-def test_evaluate_rules_last_match_wins():
-    """后定义的规则覆盖先定义的同范围规则（最后匹配优先）。"""
-    rules = [
+def test_evaluate_rules_deny_takes_priority_over_allow_regardless_of_order():
+    """两级优先级：deny 优先于 allow，与规则定义顺序无关。"""
+    deny_first = [
         PermissionRule(tool="execute", resource="*", effect="deny"),
         PermissionRule(tool="execute", resource="*", effect="allow"),
     ]
-    assert evaluate_rules("execute", "rm -rf /", rules) == "allow"
+    allow_first = [
+        PermissionRule(tool="execute", resource="*", effect="allow"),
+        PermissionRule(tool="execute", resource="*", effect="deny"),
+    ]
+    assert evaluate_rules("execute", "rm -rf /", deny_first) == "deny"
+    assert evaluate_rules("execute", "rm -rf /", allow_first) == "deny"
 
 
 def test_evaluate_rules_no_match_returns_none():
@@ -112,8 +117,12 @@ def test_load_rules_reads_project_permissions(tmp_path: Path):
 
     result = load_rules(project_dir=tmp_path)
     assert len(result["project"]) == 2
-    assert result["project"][0] == PermissionRule(tool="execute", resource="*", effect="ask")
-    assert result["project"][1] == PermissionRule(tool="read", resource="*.py", effect="allow")
+    assert result["project"][0] == PermissionRule(
+        tool="execute", resource="*", effect="ask", scope="project"
+    )
+    assert result["project"][1] == PermissionRule(
+        tool="read", resource="*.py", effect="allow", scope="project"
+    )
 
 
 def test_load_rules_malformed_json_returns_empty(tmp_path: Path):
@@ -156,7 +165,7 @@ def test_load_rules_skips_invalid_entries(tmp_path: Path):
 
 def test_save_rule_writes_to_project_scope(tmp_path: Path):
     """save_rule 将规则追加到 project 层级的 settings.json。"""
-    rule = PermissionRule(tool="execute", resource="*.sh", effect="ask")
+    rule = PermissionRule(tool="execute", resource="*.sh", effect="ask", scope="project")
     save_rule(rule, scope="project", project_dir=tmp_path)
 
     settings_file = tmp_path / ".harness" / "settings.json"
@@ -164,7 +173,7 @@ def test_save_rule_writes_to_project_scope(tmp_path: Path):
 
     data = json.loads(settings_file.read_text(encoding="utf-8"))
     assert data["permissions"] == [
-        {"tool": "execute", "resource": "*.sh", "effect": "ask"}
+        {"tool": "execute", "resource": "*.sh", "effect": "ask", "scope": "project"}
     ]
 
 
@@ -193,14 +202,16 @@ def test_save_rule_user_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """save_rule 将规则写入 user 层级的 ~/.harness/settings.json。"""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-    rule = PermissionRule(tool="*", resource="*", effect="ask")
+    rule = PermissionRule(tool="*", resource="*", effect="ask", scope="user")
     save_rule(rule, scope="user")
 
     settings_file = tmp_path / ".harness" / "settings.json"
     assert settings_file.exists()
 
     data = json.loads(settings_file.read_text(encoding="utf-8"))
-    assert data["permissions"] == [{"tool": "*", "resource": "*", "effect": "ask"}]
+    assert data["permissions"] == [
+        {"tool": "*", "resource": "*", "effect": "ask", "scope": "user"}
+    ]
 
 
 def test_save_rule_session_scope_does_not_write(tmp_path: Path):

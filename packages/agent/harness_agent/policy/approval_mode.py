@@ -2,16 +2,25 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Literal, TypeAlias
 
-ApprovalMode: TypeAlias = Literal["plan", "default", "auto-edit", "yolo"]
+logger = logging.getLogger(__name__)
+
+ApprovalMode: TypeAlias = Literal["plan", "default", "auto-edit", "auto", "yolo"]
 """面向配置、Agent 和 TUI 的规范审批模式。"""
 
 DEFAULT_APPROVAL_MODE: ApprovalMode = "default"
 """未配置或无法识别时使用的保守默认审批模式。"""
 
-_CANONICAL_MODES = frozenset({"plan", "default", "auto-edit", "yolo"})
+_CANONICAL_MODES = frozenset({"plan", "default", "auto-edit", "auto", "yolo"})
 _LEGACY_MODE_ALIASES = {"ask": "default"}
+
+# 模式切换循环顺序（Shift+Tab 循环切换）
+MODE_CYCLE: list[ApprovalMode] = ["plan", "default", "auto-edit", "auto", "yolo"]
+
+# 预留：bubble 模式用于子代理审批冒泡，当前未启用
+_RESERVED_MODES = frozenset({"bubble"})
 
 
 def parse_approval_mode(value: object | None) -> tuple[ApprovalMode, str | None]:
@@ -32,4 +41,17 @@ def parse_approval_mode(value: object | None) -> tuple[ApprovalMode, str | None]
             _LEGACY_MODE_ALIASES[normalized],
             "审批模式 ask 已按默认确认模式执行。",
         )
+    # 预留模式：bubble 当前未启用，降级为 default 并输出警告
+    if normalized in _RESERVED_MODES:
+        logger.warning("审批模式 %s 已预留但尚未启用，降级为 default", normalized)
+        return DEFAULT_APPROVAL_MODE, f"审批模式 {normalized} 尚未启用，已降级为默认确认模式。"
     return DEFAULT_APPROVAL_MODE, "审批模式无效，已安全降级为默认确认模式。"
+
+
+def next_mode(current: ApprovalMode) -> ApprovalMode:
+    """返回模式切换循环中的下一个模式。"""
+    try:
+        idx = MODE_CYCLE.index(current)
+        return MODE_CYCLE[(idx + 1) % len(MODE_CYCLE)]
+    except ValueError:
+        return DEFAULT_APPROVAL_MODE
