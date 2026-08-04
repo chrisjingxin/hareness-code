@@ -56,14 +56,15 @@ Prompt、绝对路径、工具原文、密钥、Header 或认证 Query。诊断�
 
 ### 迁移与未来长期记忆
 
-v6 直接升级到当前 schema。父进程只持有迁移排他锁并做只读事实检查，完整的 verified backup、
+v1-v6 直接升级到当前 schema。父进程只持有迁移排他锁并做只读事实检查，完整的 verified backup、
 DDL/data、final validation 和 commit 事务运行在可终止的 `harness_agent.migration_worker` child
 中；child 超时先 terminate，再有界 kill+wait，父进程确认 child 已退出后才按 final/source/half
 事实恢复或返回 typed fail-closed。超时 poison 在释放 lock 前发布，锁后再次检查；verified
-backup/state 留给下一 owner。旧 `harness_prompt_epochs` 只在 verified v6 source backup 的这次
-事务内作为单向 adapter：转换为明确的 `legacy` snapshot、回填可证明的旧 binding，随后在同一
+backup/state 留给下一 owner。旧 `harness_prompt_epochs` 只在 verified v2-v6 source backup 的这次
+事务内作为单向 adapter：转换为明确的 `legacy` snapshot、只回填可证明的旧 binding，随后在同一
 成功事务中删除旧表；任一步失败不伪造历史，缺失或无法证明的消息保持 `legacy/incomplete`。
-最终/v8+ 普通库残留该表没有受保护 migration state 时 fail closed；adapter 的退出条件就是
+v2-v5 没有 Run binding 时不创建关联；v7 及更高普通库残留该表且没有受保护 migration state 时
+fail closed；adapter 的退出条件就是
 迁移成功且旧表不再存在。
 
 长期记忆不属于本 ADR 的实现范围。未来若引入，只能作为 `ContextLifecycle` 的 Run 级动态块

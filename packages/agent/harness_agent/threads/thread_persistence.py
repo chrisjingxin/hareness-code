@@ -84,6 +84,11 @@ _MIGRATION_CHILD_TEST_PHASE: str | None = None
 _MIGRATION_CHILD_PROCESS_MODE = False
 
 
+def _is_supported_legacy_prompt_epoch_source(source_version: int) -> bool:
+    """仅接纳具有严格历史 schema 契约的 PromptEpoch 来源。"""
+    return 2 <= source_version <= 6
+
+
 def _assert_migration_path_available(path: Path) -> None:
     """在 open 前检查本进程的迁移 owner poison 状态。"""
     with _MIGRATION_POISON_LOCK:
@@ -126,7 +131,7 @@ def _requested_migration_test_phase() -> str | None:
 
 @dataclass(frozen=True, slots=True)
 class _MigrationColumnContract:
-    """v6 源表列的 SQLite 声明契约；不是只按列名存在判断。"""
+    """legacy v1-v6 源表列的 SQLite 声明契约；不是只按列名存在判断。"""
 
     name: str
     declared_type: str
@@ -137,7 +142,7 @@ class _MigrationColumnContract:
 
 @dataclass(frozen=True, slots=True)
 class _MigrationIndexContract:
-    """v6 源索引的唯一性、列序、排序和 canonical SQL 契约。"""
+    """legacy v1-v6 源索引的唯一性、列序、排序和 canonical SQL 契约。"""
 
     name: str
     unique: int
@@ -151,7 +156,7 @@ def _migration_column_contracts(
     table_name: str,
     source_version: int,
 ) -> tuple[_MigrationColumnContract, ...]:
-    """返回受支持 v6 源表的精确列契约；PromptEpoch 按历史版本分支。"""
+    """返回 legacy v1-v6 源表的精确列契约；PromptEpoch 按历史版本分支。"""
     contracts: dict[str, tuple[_MigrationColumnContract, ...]] = {
         "harness_threads": (
             _MigrationColumnContract("project_fingerprint", "TEXT", 1, None, 1),
@@ -336,8 +341,8 @@ def _migration_normalize_sql(sql: str | None) -> str | None:
     return " ".join(sql.split()).lower()
 
 
-def _migration_v6_required_tables(source_version: int) -> tuple[str, ...]:
-    """返回某个历史版本必须存在的 v6 核心表，保持版本边界可审计。"""
+def _migration_legacy_required_tables(source_version: int) -> tuple[str, ...]:
+    """返回某个 legacy 版本必须存在的核心表，保持版本边界可审计。"""
     required: list[str] = []
     if source_version >= 1:
         required.extend(("harness_threads", "checkpoints", "writes"))
@@ -621,12 +626,12 @@ def _migration_compare_table_contract(
             raise _migration_schema_contract_error(table_name, f"index_sql:{index.name}")
 
 
-def _migration_validate_v6_source_schema_sync(
+def _migration_validate_legacy_source_schema_sync(
     connection: sqlite3.Connection,
     source_version: int,
 ) -> None:
-    """同步校验 backup/恢复使用的 v6 源 schema。"""
-    required = _migration_v6_required_tables(source_version)
+    """同步校验 backup/恢复使用的 legacy v1-v6 源 schema。"""
+    required = _migration_legacy_required_tables(source_version)
     rows = connection.execute(
         """
         SELECT name FROM sqlite_master
@@ -1356,7 +1361,9 @@ class ThreadPersistence:
             _assert_migration_path_available(path)
             project_fingerprint = _project_fingerprint(project)
             source_version, has_legacy_prompt_epoch = _inspect_migration_source_sync(path)
-            if has_legacy_prompt_epoch and source_version != 6:
+            if has_legacy_prompt_epoch and not _is_supported_legacy_prompt_epoch_source(
+                source_version
+            ):
                 raise ThreadPersistenceError(
                     "CHECKPOINT_MIGRATION_LEGACY_TABLE_UNEXPECTED"
                 )
@@ -3119,7 +3126,9 @@ class ThreadPersistence:
                 )
             await self._validate_required_schema_async(source_version)
             has_legacy_prompt_epoch = await self._table_exists("harness_prompt_epochs")
-            if has_legacy_prompt_epoch and source_version != 6:
+            if has_legacy_prompt_epoch and not _is_supported_legacy_prompt_epoch_source(
+                source_version
+            ):
                 raise ThreadPersistenceError(
                     "CHECKPOINT_MIGRATION_LEGACY_TABLE_UNEXPECTED"
                 )
@@ -3391,10 +3400,10 @@ class ThreadPersistence:
                     ON harness_run_context_snapshots(project_fingerprint, thread_id, created_at_ms)
                     """
                 )
-                if source_version == 6 and has_legacy_prompt_epoch:
+                if has_legacy_prompt_epoch:
                     await self._migrate_legacy_prompt_epochs_to_snapshots()
                 version = 8
-            if source_version == 6 and has_legacy_prompt_epoch:
+            if has_legacy_prompt_epoch:
                 await self._finalize_legacy_prompt_epoch_adapter()
             elif source_version < 2 and await self._table_exists("harness_prompt_epochs"):
                 # 旧空 schema 在本次事务内创建的表不是 legacy input；只清理
@@ -3630,7 +3639,7 @@ class ThreadPersistence:
                 return "final"
             if _migration_fingerprint_matches(source, actual):
                 if 1 <= source.user_version <= 6:
-                    _migration_validate_v6_source_schema_sync(
+                    _migration_validate_legacy_source_schema_sync(
                         connection,
                         source.user_version,
                     )
@@ -3736,8 +3745,8 @@ class ThreadPersistence:
         row_count, digest = _migration_rows_digest(rows)
         return _MigrationTableDigest(table_name, selected, row_count, digest)
 
-    async def _validate_v6_source_schema_async(self, source_version: int) -> None:
-        """异步读取 v6 源 schema 的完整 contract，拒绝未知对象和畸形同名对象。"""
+    async def _validate_legacy_source_schema_async(self, source_version: int) -> None:
+        """异步读取 legacy v1-v6 schema 的完整 contract，拒绝未知对象。"""
         cursor = await self._connection.execute(
             """
             SELECT name FROM sqlite_master
@@ -3747,7 +3756,7 @@ class ThreadPersistence:
         )
         actual_tables = {str(row[0]) for row in await cursor.fetchall()}
         await cursor.close()
-        required = _migration_v6_required_tables(source_version)
+        required = _migration_legacy_required_tables(source_version)
         allowed_tables = set(required)
         if source_version >= 2:
             allowed_tables.add("harness_prompt_epochs")
@@ -3820,7 +3829,7 @@ class ThreadPersistence:
     async def _validate_required_schema_async(self, version: int) -> None:
         """校验源版本的关键表、列和索引，拒绝半套 schema 进入 backup。"""
         if 1 <= version <= 6:
-            await self._validate_v6_source_schema_async(version)
+            await self._validate_legacy_source_schema_async(version)
             return
         required: list[tuple[str, tuple[str, ...]]] = []
         if version >= 1:
@@ -4478,7 +4487,7 @@ class ThreadPersistence:
         try:
             actual = _migration_database_fingerprint_sync(connection)
             if 1 <= expected.user_version <= 6:
-                _migration_validate_v6_source_schema_sync(
+                _migration_validate_legacy_source_schema_sync(
                     connection,
                     expected.user_version,
                 )
@@ -4521,7 +4530,7 @@ class ThreadPersistence:
             if not _migration_fingerprint_matches(expected, actual):
                 raise ThreadPersistenceError("CHECKPOINT_MIGRATION_SOURCE_CHANGED")
             if 1 <= expected.user_version <= 6:
-                _migration_validate_v6_source_schema_sync(
+                _migration_validate_legacy_source_schema_sync(
                     connection,
                     expected.user_version,
                 )
@@ -4638,7 +4647,7 @@ class ThreadPersistence:
         try:
             actual = _migration_database_fingerprint_sync(connection)
             if 1 <= expected.user_version <= 6:
-                _migration_validate_v6_source_schema_sync(
+                _migration_validate_legacy_source_schema_sync(
                     connection,
                     expected.user_version,
                 )
@@ -4759,9 +4768,8 @@ class ThreadPersistence:
 
     async def _migrate_legacy_prompt_epochs_to_snapshots(self) -> None:
         """把旧 PromptEpoch 单向转换为 legacy snapshot，并回填旧 Run 引用。"""
-        # Some v6 fixtures legitimately never had the optional PromptEpoch
-        # table.  Their history must remain explicitly incomplete, not fail
-        # migration merely because there is no legacy context to convert.
+        # 合法 v2-v6 数据库可以没有可选 PromptEpoch；缺少旧上下文时保持
+        # legacy incomplete，不能为满足迁移形状而伪造 snapshot。
         if not await self._table_exists("harness_prompt_epochs"):
             return
         cursor = await self._connection.execute(
@@ -5822,7 +5830,7 @@ def _inspect_migration_source_sync(path: Path) -> tuple[int, bool]:
         ).fetchone()
         has_prompt = prompt_row is not None
         if 1 <= source_version <= 6:
-            _migration_validate_v6_source_schema_sync(connection, source_version)
+            _migration_validate_legacy_source_schema_sync(connection, source_version)
         return source_version, has_prompt
     except ThreadPersistenceError:
         raise

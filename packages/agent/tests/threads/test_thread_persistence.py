@@ -2452,12 +2452,12 @@ async def test_v6_source_rejects_forward_or_unknown_tables_before_backup(
         connection.close()
 
 
-@pytest.mark.parametrize("source_version", (8, 9, 10, thread_persistence_module._SCHEMA_VERSION))
-async def test_prompt_epoch_in_non_v6_schema_is_rejected_without_mutation(
+@pytest.mark.parametrize("source_version", (7, 8, 9, 10, thread_persistence_module._SCHEMA_VERSION))
+async def test_prompt_epoch_in_unsupported_schema_is_rejected_without_mutation(
     tmp_path: Path,
     source_version: int,
 ) -> None:
-    """v8/v9/v10/final 带 PromptEpoch 且无 migration state 时必须原样拒绝。"""
+    """v7 及更高 schema 带 PromptEpoch 且无 migration state 时必须原样拒绝。"""
     home = tmp_path / "home"
     project = tmp_path / "project"
     project.mkdir()

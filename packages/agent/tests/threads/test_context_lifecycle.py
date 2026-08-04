@@ -22,6 +22,7 @@ from harness_agent.threads.context_lifecycle import (
     ContextLifecycle,
     ContextRefreshError,
     ContextStability,
+    snapshot_from_legacy_prompt_epoch,
 )
 from harness_agent.host.run_coordinator import ConnectionRef, RunCoordinator, RunPreparation, StartRun
 from harness_agent.runtime.run_context import RunContext, RunContextSnapshotMiddleware
@@ -501,8 +502,12 @@ async def test_accept_run_persists_and_reuses_snapshot_atomically(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_v6_legacy_prompt_epoch_migrates_once_to_readable_snapshot(tmp_path: Path) -> None:
-    """verified v6 source 的 PromptEpoch 只在本次 migration 转换一次。"""
+@pytest.mark.parametrize("source_version", (2, 3, 4, 5, 6))
+async def test_verified_legacy_prompt_epoch_migrates_once_to_readable_snapshot(
+    tmp_path: Path,
+    source_version: int,
+) -> None:
+    """verified v2-v6 source 的 PromptEpoch 只在本次 migration 转换一次。"""
     from harness_agent.runtime.agent import create_prompt_epoch
 
     home = tmp_path / "home"
@@ -570,21 +575,42 @@ async def test_v6_legacy_prompt_epoch_migrates_once_to_readable_snapshot(tmp_pat
             "ALTER TABLE harness_context_artifacts DROP COLUMN content_sha256"
         )
         connection.execute("ALTER TABLE harness_context_artifacts DROP COLUMN byte_length")
-        connection.execute("PRAGMA user_version=6")
+        if source_version < 6:
+            connection.execute("DROP TABLE harness_run_execution_bindings")
+        if source_version < 5:
+            connection.execute("DROP TABLE harness_thread_model_bindings")
+        if source_version < 4:
+            connection.execute("DROP TABLE harness_thread_runtime_profiles")
+            connection.execute("DROP TABLE harness_runtime_profiles")
+        if source_version < 3:
+            connection.execute(
+                "ALTER TABLE harness_prompt_epochs DROP COLUMN prefix_change_reason"
+            )
+        connection.execute(f"PRAGMA user_version={source_version}")
         connection.commit()
     finally:
         connection.close()
 
     migrated = await ThreadPersistence.open(project=workspace, home=home)
     try:
-        latest = (await migrated.load_run_state("thread-legacy-snapshot")).latest_run
-        assert latest is not None
-        assert latest.context_snapshot_id is not None
+        expected_snapshot = snapshot_from_legacy_prompt_epoch(
+            project_fingerprint=project_fingerprint,
+            thread_id=epoch.thread_id,
+            system_prompt=epoch.system_prompt,
+            created_at_ms=epoch.created_at_ms,
+        )
         snapshot = await migrated.load_context_snapshot(
-            latest.context_snapshot_id, thread_id="thread-legacy-snapshot"
+            expected_snapshot.snapshot_id,
+            thread_id="thread-legacy-snapshot",
         )
         assert snapshot.legacy is True
         assert "历史 PromptEpoch" in snapshot.system_prompt
+        latest = (await migrated.load_run_state("thread-legacy-snapshot")).latest_run
+        if source_version == 6:
+            assert latest is not None
+            assert latest.context_snapshot_id == expected_snapshot.snapshot_id
+        else:
+            assert latest is None
     finally:
         await migrated.close()
 
@@ -600,15 +626,34 @@ async def test_v6_legacy_prompt_epoch_migrates_once_to_readable_snapshot(tmp_pat
             connection.execute("PRAGMA user_version").fetchone()[0]
             == thread_persistence_module._SCHEMA_VERSION
         )
-        backup = database.with_name(f"{database.name}.pre-v6-migration.bak")
+        assert connection.execute(
+            "SELECT COUNT(*) FROM harness_run_execution_bindings"
+        ).fetchone()[0] == (1 if source_version == 6 else 0)
+        backup = database.with_name(
+            f"{database.name}.pre-v{source_version}-migration.bak"
+        )
         assert backup.exists()
         backup_connection = sqlite3.connect(backup)
         try:
-            assert backup_connection.execute("PRAGMA user_version").fetchone()[0] == 6
+            assert (
+                backup_connection.execute("PRAGMA integrity_check").fetchone()[0]
+                == "ok"
+            )
+            assert (
+                backup_connection.execute("PRAGMA user_version").fetchone()[0]
+                == source_version
+            )
+            assert backup_connection.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'harness_prompt_epochs'"
+            ).fetchone()
         finally:
             backup_connection.close()
     finally:
         connection.close()
+
+    reopened = await ThreadPersistence.open(project=workspace, home=home)
+    await reopened.close()
 
 
 @pytest.mark.asyncio
