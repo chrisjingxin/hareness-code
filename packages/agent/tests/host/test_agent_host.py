@@ -249,5 +249,87 @@ async def test_attachment_token_is_origin_bound_single_use_and_capability_limite
     await host.close()
 
 
+class TestBuildApprovalClassifier:
+    """AUTO 模式分类器装配：profile 解析失败时优雅降级而不是崩溃。"""
+
+    @staticmethod
+    def _fake_host(config: Any) -> Any:
+        """构造只带 _config 属性的伪 host，供未绑定方法调用。"""
+        from types import SimpleNamespace
+
+        return SimpleNamespace(_config=config)
+
+    @staticmethod
+    def _model_settings(api_key: str | None) -> Any:
+        """构造分类器 profile 用的模型设置；使用独立环境变量避免串用。"""
+        from harness_agent.config.config import ModelSettings
+
+        return ModelSettings(
+            name="small-fast",
+            base_url="https://gateway.example.internal/v1",
+            api_key_env="HARNESS_CLASSIFIER_TEST_KEY",
+            api_key=api_key,
+            timeout_seconds=120.0,
+        )
+
+    def test_returns_classifier_when_profile_available(self, monkeypatch: pytest.MonkeyPatch):
+        """profile 存在且密钥可用时返回 SafetyClassifier，并使用收紧的超时。"""
+        from types import SimpleNamespace
+
+        from harness_agent.config.config import ModelProfile
+        from harness_agent.policy.classifier import SafetyClassifier
+
+        monkeypatch.delenv("HARNESS_CLASSIFIER_TEST_KEY", raising=False)
+        settings = self._model_settings(api_key="test-key")
+        profile = ModelProfile(
+            profile_id="small-fast", settings=settings, is_default=False, source="test"
+        )
+        config = SimpleNamespace(
+            model_catalog=SimpleNamespace(require_profile=lambda _id: profile)
+        )
+
+        classifier = AgentHost._build_approval_classifier(self._fake_host(config), "small-fast")
+
+        assert isinstance(classifier, SafetyClassifier)
+
+    def test_missing_profile_degrades_to_none(self):
+        """profile 不存在时返回 None（回退人工审批），不抛异常。"""
+        from types import SimpleNamespace
+
+        from harness_agent.config.config import ConfigError
+
+        def require_profile(_id: str) -> Any:
+            raise ConfigError("MODEL_PROFILE_NOT_FOUND: nope")
+
+        config = SimpleNamespace(model_catalog=SimpleNamespace(require_profile=require_profile))
+
+        assert AgentHost._build_approval_classifier(self._fake_host(config), "nope") is None
+
+    def test_missing_api_key_degrades_to_none(self, monkeypatch: pytest.MonkeyPatch):
+        """profile 无可用密钥时返回 None（回退人工审批），不抛异常。"""
+        from types import SimpleNamespace
+
+        from harness_agent.config.config import ModelProfile
+
+        monkeypatch.delenv("HARNESS_CLASSIFIER_TEST_KEY", raising=False)
+        profile = ModelProfile(
+            profile_id="small-fast",
+            settings=self._model_settings(api_key=None),
+            is_default=False,
+            source="test",
+        )
+        config = SimpleNamespace(
+            model_catalog=SimpleNamespace(require_profile=lambda _id: profile)
+        )
+
+        assert (
+            AgentHost._build_approval_classifier(self._fake_host(config), "small-fast") is None
+        )
+
+    def test_missing_model_catalog_degrades_to_none(self):
+        """配置未加载模型目录时返回 None，不阻断引擎构建。"""
+        assert AgentHost._build_approval_classifier(self._fake_host(None), "small-fast") is None
+
+
 async def _append(frames: list[dict[str, Any]], message: dict[str, Any]) -> None:
     frames.append(message)
