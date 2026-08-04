@@ -3,6 +3,8 @@
 import { readFile, writeFile } from "node:fs/promises"
 import { createHash } from "node:crypto"
 import { resolve } from "node:path"
+import Ajv2020 from "ajv/dist/2020"
+import standaloneCode from "ajv/dist/standalone"
 
 type Schema = Record<string, any>
 type ContractEntry = { params?: string; result?: string; payload?: string; capability?: string; handle?: string; controlled?: boolean }
@@ -27,6 +29,7 @@ const schema = JSON.parse(schemaText) as Schema
 const metadata = schema["x-harness"] as Metadata
 const targets = [
   [resolve(protocolRoot, "src/generated.ts"), renderTypeScript(schema, metadata, schemaDigest)],
+  [resolve(protocolRoot, "src/validators.generated.ts"), renderValidators(schema, metadata)],
   [resolve(protocolRoot, "fixtures/v3-contract.json"), renderContractFixtures(schema, metadata)],
   [resolve(repositoryRoot, "packages/agent/harness_agent/protocol/generated.py"), renderPython(schema, metadata, schemaDigest)],
   [resolve(repositoryRoot, "packages/agent/harness_agent/protocol/protocol_v3.json"), schemaText],
@@ -133,6 +136,67 @@ export type InteractionMethod = keyof InteractionMap
 export type InteractionRequest = {
   [M in InteractionMethod]: { method: M; id: string; params: InteractionMap[M]["params"] }
 }[InteractionMethod]
+`
+}
+
+/**
+ * 在构建期生成独立校验函数。Browser 的 CSP 禁止 unsafe-eval，不能在运行时
+ * 调用 Ajv.compile；这里仍以 canonical Schema 为唯一契约来源。
+ */
+function renderValidators(root: Schema, meta: Metadata): string {
+  const ajv = new Ajv2020({
+    allErrors: true,
+    strict: true,
+    useDefaults: true,
+    code: { source: true, esm: true },
+  })
+  const rootId = root.$id as string
+  ajv.addSchema({ $schema: root.$schema, $id: rootId, $defs: root.$defs }, rootId)
+
+  const refs = new Set<string>(["#/$defs/eventBase", "#/$defs/protocolErrorData"])
+  for (const entry of Object.values(meta.operations)) {
+    refs.add(entry.params!)
+    refs.add(entry.result!)
+  }
+  for (const entry of Object.values(meta.events)) refs.add(entry.payload!)
+  for (const entry of Object.values(meta.interactions)) {
+    refs.add(entry.params!)
+    refs.add(entry.result!)
+  }
+
+  const exportsByRef = Object.fromEntries([...refs].sort().map((ref) => {
+    const definition = ref.split("/").at(-1)
+    if (!definition) throw new Error(`无效 Schema ref: ${ref}`)
+    const exportName = `validate${pascal(definition)}`
+    const schemaId = `urn:harness:validator:${definition}`
+    ajv.addSchema({ $ref: `${rootId}${ref}` }, schemaId)
+    return [ref, { exportName, schemaId }]
+  }))
+  const moduleCode = standaloneCode(
+    ajv,
+    Object.fromEntries(Object.values(exportsByRef).map(value => [value.exportName, value.schemaId])),
+  )
+    // standalone 默认引用 Ajv/fast-deep-equal 的 CommonJS helper；Browser
+    // 即时构建无法稳定解析 workspace 内的传递依赖，因此把仅有的两个纯函数内联。
+    .replace(
+      /const (\w+) = require\("ajv\/dist\/runtime\/ucs2length"\)\.default;/,
+      "const $1 = function ucs2length(value){let length=0;for(let index=0;index<value.length;index++,length++){const first=value.charCodeAt(index);if(first>=55296&&first<=56319&&index+1<value.length&&(value.charCodeAt(index+1)&64512)===56320)index++;}return length;};",
+    )
+    .replace(
+      /const (\w+) = require\("ajv\/dist\/runtime\/equal"\)\.default;/,
+      "const $1 = function deepEqual(left,right){if(left===right)return true;if(left&&right&&typeof left===\"object\"&&typeof right===\"object\"){if(left.constructor!==right.constructor)return false;if(Array.isArray(left)){if(left.length!==right.length)return false;for(let i=left.length;i--!==0;)if(!deepEqual(left[i],right[i]))return false;return true;}if(left.constructor===RegExp)return left.source===right.source&&left.flags===right.flags;if(left.valueOf!==Object.prototype.valueOf)return left.valueOf()===right.valueOf();if(left.toString!==Object.prototype.toString)return left.toString()===right.toString();const keys=Object.keys(left);if(keys.length!==Object.keys(right).length)return false;for(const key of keys)if(!Object.prototype.hasOwnProperty.call(right,key)||!deepEqual(left[key],right[key]))return false;return true;}return left!==left&&right!==right;};",
+    )
+  const mapEntries = Object.entries(exportsByRef)
+    .map(([ref, value]) => `  ${JSON.stringify(ref)}: ${value.exportName},`)
+    .join("\n")
+  return `/** 此文件由 packages/protocol/schema/v3.json 构建期生成，请勿手工修改。 */
+// @ts-nocheck -- Ajv standalone 输出是可执行 JavaScript，由契约测试覆盖。
+
+${moduleCode}
+
+export const validatorsByRef = {
+${mapEntries}
+}
 `
 }
 

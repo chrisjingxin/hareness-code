@@ -18,7 +18,7 @@
     "@opentui/core": "0.4.3",
     "@opentui/react": "0.4.3",
     "@za38/protocol": "workspace:*",
-    "lucide-react": "^1.28.0",
+    "lucide-react": "1.28.0",
     "marked": "17.0.1",
     "react": "19.2.6",
     "react-dom": "19.2.6",

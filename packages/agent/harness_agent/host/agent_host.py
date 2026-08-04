@@ -479,6 +479,9 @@ class AgentHost:
                     result = await handler(params, request_id)
             else:
                 result = await handler(params, request_id)
+            if result is not None:
+                validate_operation_result(method, result)
+                await self.send_response(request_id, result)
         except ValidationError as exc:
             await self.send_error(
                 request_id,
@@ -524,10 +527,6 @@ class AgentHost:
         except Exception as exc:  # pragma: no cover - 最后的协议隔离层。
             logger.exception("Unhandled JSON-RPC handler error for %s", method)
             await self.send_error(request_id, -32603, f"{type(exc).__name__}: {exc}")
-        else:
-            if result is not None:
-                validate_operation_result(method, result)
-                await self.send_response(request_id, result)
 
     async def send(self, message: dict[str, Any]) -> None:
         """向 owner stdio 写出单帧；测试也通过替换此 seam 捕获输出。"""

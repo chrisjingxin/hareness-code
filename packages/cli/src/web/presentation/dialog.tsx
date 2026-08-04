@@ -16,7 +16,7 @@ export function DialogHost(props: {
   snapshot: WebAdapterSnapshot
   dispatch: (intent: WebIntent) => void
   disabled?: boolean
-}): React.ReactElement {
+}): React.ReactNode {
   const { snapshot, dispatch } = props
   const confirmation = snapshot.interactive.confirmation
   const confirmRef = useRef<HTMLButtonElement | null>(null)
@@ -48,7 +48,7 @@ export function DialogHost(props: {
     return () => window.removeEventListener("keydown", handler)
   }, [confirmation, dispatch, props.disabled])
 
-  if (!confirmation) return null as unknown as React.ReactElement
+  if (!confirmation) return null
 
   const cancel = () => {
     if (!props.disabled) dispatch({ type: "confirmation-resolve", confirmationId: confirmation.confirmationId, confirmed: false })

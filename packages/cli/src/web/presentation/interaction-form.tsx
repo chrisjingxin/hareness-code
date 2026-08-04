@@ -33,9 +33,9 @@ export function InteractionForm(props: {
   snapshot: WebAdapterSnapshot
   dispatch: (intent: WebIntent) => void | Promise<void>
   disabled?: boolean
-}): React.ReactElement {
+}): React.ReactNode {
   const interaction = props.snapshot.interactive.interaction
-  if (!interaction) return null as unknown as React.ReactElement
+  if (!interaction) return null
 
   return (
     <section className="interaction-card" aria-label="待处理请求">

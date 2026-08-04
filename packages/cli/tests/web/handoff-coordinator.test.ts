@@ -9,6 +9,7 @@ import type {
 } from "@za38/protocol"
 
 import { AsyncQueue } from "../../src/ipc/transport"
+import type { DiagnosticLogger } from "../../src/diagnostics/local-logger"
 import {
   createWebHandoffCoordinator,
   parseLifecycleMessage,
@@ -135,6 +136,7 @@ function createHarness(
     readyTimeoutMs?: number
     ownerPollMs?: number
     ownerWaitMs?: number
+    diagnostics?: DiagnosticLogger
   } = {},
 ): Harness {
   const host = new FakeHost()
@@ -150,6 +152,7 @@ function createHarness(
     readyTimeoutMs: overrides.readyTimeoutMs ?? 65_000,
     ownerPollMs: overrides.ownerPollMs ?? 1,
     ownerWaitMs: overrides.ownerWaitMs ?? 200,
+    diagnostics: overrides.diagnostics,
   })
   const snapshots: WebHandoffSnapshot[] = []
   const unsubscribe = coordinator.subscribe(snapshot => snapshots.push(snapshot))
@@ -505,10 +508,49 @@ test("parseLifecycleMessage 只接受精确的合法消息", () => {
   expect(parseLifecycleMessage(JSON.stringify({ type: "thread.changed", thread_id: "" }))).toBeUndefined()
   expect(parseLifecycleMessage(JSON.stringify({ type: "thread.changed", thread_id: "x".repeat(257) }))).toBeUndefined()
   expect(parseLifecycleMessage(JSON.stringify({ type: "thread.changed" }))).toBeUndefined()
+  const diagnostic = {
+    type: "diagnostic",
+    stage: "agent.initialize",
+    error_name: "EvalError",
+    error_message: "unsafe-eval blocked by CSP",
+  }
+  expect(parseLifecycleMessage(JSON.stringify(diagnostic))).toEqual(diagnostic)
+  expect(parseLifecycleMessage(JSON.stringify({ ...diagnostic, endpoint: "secret" }))).toBeUndefined()
+  expect(parseLifecycleMessage(JSON.stringify({ ...diagnostic, stage: "unknown" }))).toBeUndefined()
+  expect(parseLifecycleMessage(JSON.stringify({ ...diagnostic, error_message: "x".repeat(201) }))).toBeUndefined()
   expect(parseLifecycleMessage(JSON.stringify({ type: "unknown" }))).toBeUndefined()
   expect(parseLifecycleMessage(JSON.stringify({ type: "ready" }).repeat(100))).toBeUndefined()
   const oversized = "x".repeat(17 * 1024)
   expect(parseLifecycleMessage(oversized)).toBeUndefined()
+})
+
+test("opening 阶段接收安全诊断但不改变 handoff 状态", async () => {
+  const errors: Array<{ event: string; fields?: object; debugFields?: object }> = []
+  const diagnostics: DiagnosticLogger = {
+    filePath: null,
+    isDebug: true,
+    info: () => undefined,
+    debug: () => undefined,
+    error: (event, fields, debugFields) => errors.push({ event, fields, debugFields }),
+    close: () => undefined,
+  }
+  const h = createHarness({ diagnostics })
+  const { channel } = await openAndAccept(h)
+  channel.messages.push(JSON.stringify({
+    type: "diagnostic",
+    stage: "agent.initialize",
+    error_name: "EvalError",
+    error_message: "unsafe-eval blocked by CSP",
+  }))
+  await waitFor(() => errors.length === 1)
+  expect(h.coordinator.getSnapshot().phase).toBe("opening")
+  expect(errors[0]).toEqual({
+    event: "web.bootstrap.failed",
+    fields: { stage: "agent.initialize", error_name: "EvalError" },
+    debugFields: { error_message: "unsafe-eval blocked by CSP" },
+  })
+  await h.coordinator.close()
+  h.unsubscribe()
 })
 
 test("opener 失败会撤销 attachment 并允许下一次 open", async () => {

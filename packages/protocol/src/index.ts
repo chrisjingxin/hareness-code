@@ -2,8 +2,8 @@
 
 export * from "./generated"
 
-import Ajv2020, { type ValidateFunction } from "ajv/dist/2020"
 import schema from "../schema/v3.json" with { type: "json" }
+import { validatorsByRef } from "./validators.generated"
 import {
   CLIENT_METHODS,
   EVENT_TYPES,
@@ -35,11 +35,13 @@ type ContractMetadata = {
   events: Record<string, ContractEntry>
   interactions: Record<string, ContractEntry>
 }
+type ContractValidationError = { instancePath: string; message?: string; keyword: string }
+type ContractValidator = {
+  (value: unknown): boolean
+  errors?: ContractValidationError[] | null
+}
 
 const metadata = (schema as unknown as { "x-harness": ContractMetadata })["x-harness"]
-const ajv = new Ajv2020({ allErrors: true, strict: true, useDefaults: true })
-const validators = new Map<string, ValidateFunction>()
-
 /** 校验并返回 operation params；默认值由 Schema 注入。 */
 export function validateOperationParams<M extends OperationName>(
   method: M,
@@ -129,13 +131,12 @@ export function isInteractionMethod(value: string): value is InteractionMethod {
 }
 
 function validateRef(ref: string, value: unknown, label: string): void {
-  let validator = validators.get(ref)
-  if (!validator) {
-    validator = ajv.compile({ $ref: ref, $defs: (schema as any).$defs })
-    validators.set(ref, validator)
-  }
+  const validator = validatorsByRef[ref as keyof typeof validatorsByRef] as ContractValidator | undefined
+  if (!validator) throw new Error(`未知 Schema ref：${ref}`)
   if (!validator(value)) {
-    const detail = ajv.errorsText(validator.errors, { separator: "; " })
+    const detail = (validator.errors ?? [])
+      .map(error => `${error.instancePath || "/"} ${error.message ?? error.keyword}`)
+      .join("; ")
     throw new Error(`${label} 不符合 v3 contract：${detail}`)
   }
 }

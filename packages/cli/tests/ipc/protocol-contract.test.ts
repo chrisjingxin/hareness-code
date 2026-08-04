@@ -32,6 +32,22 @@ test("TypeScript 拒绝全部共享无效 fixture", () => {
   for (const fixture of fixtures.invalid) expect(() => validate(fixture)).toThrow()
 })
 
+test("Browser CSP 禁止动态代码时仍可校验 initialize", () => {
+  const nativeFunction = globalThis.Function
+  globalThis.Function = function () {
+    throw new EvalError("unsafe-eval blocked by CSP")
+  } as FunctionConstructor
+  try {
+    expect(() => validateOperationParams("initialize", {
+      protocol: { major: 3, min_minor: 0, max_minor: 1 },
+      client: { name: "csp-test", version: "0", kind: "web" },
+      capabilities: { requests: [], handles: [] },
+    })).not.toThrow()
+  } finally {
+    globalThis.Function = nativeFunction
+  }
+})
+
 function validate(fixture: Fixture): void {
   if (fixture.kind === "operation.params") {
     validateOperationParams(fixture.name as OperationName, fixture.value)

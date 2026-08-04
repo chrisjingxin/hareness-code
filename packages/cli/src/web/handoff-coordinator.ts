@@ -7,6 +7,15 @@ import type {
   HostAttachmentCreateResult,
   HostAttachmentRevokeResult,
 } from "@za38/protocol"
+import type { DiagnosticLogger } from "../diagnostics/local-logger"
+
+export type WebBootstrapStage =
+  | "lifecycle.accepted"
+  | "attachment.auth"
+  | "agent.initialize"
+  | "host.control.acquire"
+  | "thread.restore"
+  | "react.mount"
 
 /** Browser 归还控制权的可观察原因；只用于状态展示，不参与业务分支。 */
 export type WebReturnReason =
@@ -37,6 +46,7 @@ export type LifecycleServerMessage =
 export type LifecycleBrowserMessage =
   | { type: "ready"; thread_id: string | null }
   | { type: "thread.changed"; thread_id: string | null }
+  | { type: "diagnostic"; stage: WebBootstrapStage; error_name: string; error_message: string }
   | { type: "released" }
   | { type: "exit.requested" }
 
@@ -125,6 +135,7 @@ export type WebHandoffCoordinatorOptions = {
   ownerPollMs?: number
   ownerWaitMs?: number
   scheduler?: WebScheduler
+  diagnostics?: DiagnosticLogger
 }
 
 export interface WebHandoffCoordinator {
@@ -147,6 +158,7 @@ class WebHandoffCoordinatorImpl implements WebHandoffCoordinator {
   private readonly ownerPollMs: number
   private readonly ownerWaitMs: number
   private readonly scheduler: WebScheduler
+  private readonly diagnostics: DiagnosticLogger | undefined
   private readonly listeners = new Set<(snapshot: WebHandoffSnapshot) => void>()
 
   private phase: "idle" | "opening" | "active" | "returning" = "idle"
@@ -177,6 +189,7 @@ class WebHandoffCoordinatorImpl implements WebHandoffCoordinator {
     this.ownerPollMs = options.ownerPollMs ?? 100
     this.ownerWaitMs = options.ownerWaitMs ?? 30_000
     this.scheduler = options.scheduler ?? createDefaultScheduler()
+    this.diagnostics = options.diagnostics
     this.sleep = options.scheduler?.sleep
       ?? (ms => new Promise(resolve => setTimeout(resolve, ms)))
     this.snapshot = this.buildSnapshot()
@@ -197,6 +210,7 @@ class WebHandoffCoordinatorImpl implements WebHandoffCoordinator {
     // 新 handoff 重置 exit handler 触发门：上一轮 exit-requested 已停止 pending，
     // 重新进入 opening 时未注册的 handler 不能被新 handoff 自动消费。
     this.exitHandlerPending = false
+    this.diagnostics?.info("web.handoff.opening")
     this.publish()
     try {
       await this.server.start()
@@ -317,6 +331,7 @@ class WebHandoffCoordinatorImpl implements WebHandoffCoordinator {
       return
     }
     this.primary = channel
+    this.diagnostics?.info("web.lifecycle.accepted")
     void this.consumeLifecycle(channel)
   }
 
@@ -342,6 +357,18 @@ class WebHandoffCoordinatorImpl implements WebHandoffCoordinator {
         if (message === undefined) {
           await this.cleanup("invalid-message")
           return
+        }
+        if (message.type === "diagnostic") {
+          if (this.phase !== "opening") {
+            await this.cleanup("invalid-message")
+            return
+          }
+          this.diagnostics?.error(
+            "web.bootstrap.failed",
+            { stage: message.stage, error_name: message.error_name },
+            { error_message: message.error_message },
+          )
+          continue
         }
         if (message.type === "ready") {
           // opening 只接受一次 ready；ready 携带的 thread_id 是 Browser
@@ -420,6 +447,7 @@ class WebHandoffCoordinatorImpl implements WebHandoffCoordinator {
       this.readyTimer?.clear()
       this.readyTimer = undefined
       this.publish()
+      this.diagnostics?.info("web.handoff.active")
       // Browser 收到 active 才允许启用输入；send 失败由 channel close 收敛。
       if (this.primary !== undefined) {
         try {
@@ -444,6 +472,7 @@ class WebHandoffCoordinatorImpl implements WebHandoffCoordinator {
     reason: WebReturnReason,
     error?: unknown,
   ): Promise<void> {
+    this.diagnostics?.info("web.handoff.returning", { reason })
     const attachmentId = this.attachmentId
     const primary = this.primary
     if (this.phase !== "returning") {
@@ -625,7 +654,32 @@ export function parseLifecycleMessage(value: unknown): LifecycleBrowserMessage |
     }
     return { type: "thread.changed", thread_id: threadId }
   }
+  if (type === "diagnostic") {
+    if (!exactFields(parsed, ["type", "stage", "error_name", "error_message"])) return undefined
+    if (!isBootstrapStage(parsed.stage)) return undefined
+    if (typeof parsed.error_name !== "string" || parsed.error_name.length === 0 || parsed.error_name.length > 80) {
+      return undefined
+    }
+    if (typeof parsed.error_message !== "string" || parsed.error_message.length > 200) return undefined
+    return {
+      type: "diagnostic",
+      stage: parsed.stage,
+      error_name: parsed.error_name,
+      error_message: parsed.error_message,
+    }
+  }
   return undefined
+}
+
+function isBootstrapStage(value: unknown): value is WebBootstrapStage {
+  return typeof value === "string" && [
+    "lifecycle.accepted",
+    "attachment.auth",
+    "agent.initialize",
+    "host.control.acquire",
+    "thread.restore",
+    "react.mount",
+  ].includes(value)
 }
 
 /** 把归还原因映射为 lifecycle shutdown 稳定原因。 */

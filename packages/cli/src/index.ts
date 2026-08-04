@@ -6,6 +6,7 @@ import { delimiter, resolve } from "node:path"
 import { Capability, EventType, PROTOCOL_VERSION, isClientMethod } from "@za38/protocol"
 
 import { parseArgs, type Command } from "./args"
+import { createDiagnosticLogger } from "./diagnostics/local-logger"
 import { AgentClient } from "./ipc/client"
 import { StdioRpcTransport } from "./ipc/stdio-transport"
 import { runTui } from "./tui/app"
@@ -53,12 +54,12 @@ export function clientInteractionHandles(command: Command): Array<"approval" | "
 /** 启动 Python sidecar、完成 initialize 握手，并返回可关闭的运行句柄。 */
 async function startAgent(command: Command): Promise<RunningAgent> {
   validateWorkspace(command.cwd)
-  const sourcePython = resolve(import.meta.dir, "../../agent/.venv/bin/python")
-  const sourcePythonWin = resolve(import.meta.dir, "../../agent/.venv/Scripts/python.exe")
+  const locations = resolveAgentRuntimeLocations(import.meta.dir)
   // Windows 上 .venv 布局是 Scripts/python.exe，Unix 是 bin/python；两者都探测后再降级到 PATH。
   const python = process.env.HARNESS_AGENT_PYTHON
-    ?? (existsSync(sourcePython) ? sourcePython : existsSync(sourcePythonWin) ? sourcePythonWin : "python3")
-  const sourceAgent = resolve(import.meta.dir, "../../agent")
+    ?? locations.pythonExecutables.find(existsSync)
+    ?? "python3"
+  const sourceAgent = locations.agentDirectories.find(existsSync) ?? locations.agentDirectories[0]!
   const sandboxEnvironment = command.kind === "run" && command.sandbox !== undefined
     // CLI 显式参数必须高于用户环境变量；sidecar 仅把这个内部字段当作
     // 最后一层覆盖，不对外暴露为可长期配置的环境变量。
@@ -110,6 +111,24 @@ export function validateWorkspace(cwd: string): void {
   }
   if (!statSync(cwd).isDirectory()) {
     throw new Error(`Workspace is not a directory: ${cwd}`)
+  }
+}
+
+/** 解析源码入口和编译后 dist 入口都能使用的 Agent sidecar 路径。 */
+export function resolveAgentRuntimeLocations(moduleDir: string): {
+  agentDirectories: readonly string[]
+  pythonExecutables: readonly string[]
+} {
+  const agentDirectories = [...new Set([
+    resolve(moduleDir, "../../agent"),
+    resolve(moduleDir, "../../../packages/agent"),
+  ])]
+  return {
+    agentDirectories,
+    pythonExecutables: agentDirectories.flatMap(directory => [
+      resolve(directory, ".venv/bin/python"),
+      resolve(directory, ".venv/Scripts/python.exe"),
+    ]),
   }
 }
 
@@ -176,6 +195,10 @@ async function execute(command: Command): Promise<void> {
       return
     }
 
+    const diagnostics = createDiagnosticLogger()
+    diagnostics.info("cli.interactive.started", {
+      log_level: diagnostics.isDebug ? "debug" : "info",
+    })
     let webHandoff: WebHandoffCoordinator | undefined
     try {
       if (!command.nonInteractive) {
@@ -191,6 +214,7 @@ async function execute(command: Command): Promise<void> {
           host: agent.client,
           server,
           openBrowser: createSystemBrowserOpener(),
+          diagnostics,
         })
       }
       await runTui({
@@ -203,6 +227,8 @@ async function execute(command: Command): Promise<void> {
       })
     } finally {
       await webHandoff?.close()
+      diagnostics.info("cli.interactive.stopped")
+      diagnostics.close()
     }
   } finally {
     await agent.stop()

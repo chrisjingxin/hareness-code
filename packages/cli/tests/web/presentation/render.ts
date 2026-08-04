@@ -12,8 +12,7 @@ try {
 }
 
 // React 19 的 act 需要显式声明测试环境，否则异步更新不会被等待。
-// @ts-expect-error 该标记是 React 测试环境约定，不在 DOM 类型中。
-globalThis.IS_REACT_ACT_ENVIRONMENT = true
+globalThis.IS_REACT_ACT_ENVIRONMENT = true as boolean
 
 export type RenderHandle = {
   container: HTMLDivElement
