@@ -370,6 +370,30 @@ class ContextCompactor:
                 previous_state,
             )
 
+        if request.trigger == "manual":
+            _, minimum_projection = _build_full_projection(
+                request,
+                cutoff=cutoff,
+                old=old,
+                recent=recent,
+                summary="",
+            )
+            minimum_after_tokens = _estimate_rewritten_tokens(
+                before.projected_input_tokens,
+                messages,
+                minimum_projection,
+            )
+            if not _reduces_context(
+                before.projected_input_tokens, minimum_after_tokens
+            ):
+                return self._skipped(
+                    request,
+                    before.projected_input_tokens,
+                    "manual_skipped",
+                    "manual_history_too_small",
+                    previous_state,
+                )
+
         response = await self._model.ainvoke(
             [
                 SystemMessage(content=_SUMMARY_PROMPT),
@@ -396,36 +420,30 @@ class ContextCompactor:
                 "summary_source_artifact_boundary_invalid",
             )
 
-        history_id = _stable_artifact_id(
-            "history",
-            request.thread_id,
-            request.projection.source_record_sequence,
-            cutoff,
-            _render_messages(old),
-            summary,
-        )
-        prospective = (
-            HumanMessage(
-                content=(
-                    "<harness_context_summary>\n"
-                    f"{summary}\n\n"
-                    f"Archived original: /.harness/history/{history_id}.md\n"
-                    "</harness_context_summary>"
-                )
-            ),
-            *recent,
+        history_id, prospective = _build_full_projection(
+            request,
+            cutoff=cutoff,
+            old=old,
+            recent=recent,
+            summary=summary,
         )
         after_tokens = _estimate_rewritten_tokens(
             before.projected_input_tokens,
             messages,
             prospective,
         )
-        if not _saves_enough(before.projected_input_tokens, after_tokens):
+        savings_reason = None
+        if request.trigger == "manual":
+            if not _reduces_context(before.projected_input_tokens, after_tokens):
+                savings_reason = "manual_no_savings"
+        elif not _saves_enough(before.projected_input_tokens, after_tokens):
+            savings_reason = "savings_below_20_percent"
+        if savings_reason is not None:
             return self._skipped(
                 request,
                 before.projected_input_tokens,
                 f"{request.trigger}_skipped",
-                "savings_below_20_percent",
+                savings_reason,
                 previous_state,
             )
 
@@ -1006,6 +1024,36 @@ def _stable_artifact_id(
     return f"{kind}-{hashlib.sha256(material.encode('utf-8')).hexdigest()[:32]}"
 
 
+def _build_full_projection(
+    request: CompressionRequest,
+    *,
+    cutoff: int,
+    old: Sequence[BaseMessage],
+    recent: Sequence[BaseMessage],
+    summary: str,
+) -> tuple[str, tuple[BaseMessage, ...]]:
+    """构造 full 候选投影；手动预检与最终提交必须使用同一包装开销。"""
+    history_id = _stable_artifact_id(
+        "history",
+        request.thread_id,
+        request.projection.source_record_sequence,
+        cutoff,
+        _render_messages(old),
+        summary,
+    )
+    return history_id, (
+        HumanMessage(
+            content=(
+                "<harness_context_summary>\n"
+                f"{summary}\n\n"
+                f"Archived original: /.harness/history/{history_id}.md\n"
+                "</harness_context_summary>"
+            )
+        ),
+        *recent,
+    )
+
+
 def _stable_checkpoint_id(
     request: CompressionRequest,
     messages: Sequence[BaseMessage],
@@ -1028,7 +1076,11 @@ def _stable_checkpoint_id(
 
 def _saves_enough(before_tokens: int, after_tokens: int) -> bool:
     return (
-        before_tokens > 0
-        and after_tokens < before_tokens
+        _reduces_context(before_tokens, after_tokens)
         and (before_tokens - after_tokens) / before_tokens >= MIN_SAVINGS_RATIO
     )
+
+
+def _reduces_context(before_tokens: int, after_tokens: int) -> bool:
+    """手动压缩只要求投影严格变小，不复用自动路径的收益率门槛。"""
+    return before_tokens > 0 and after_tokens < before_tokens

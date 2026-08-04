@@ -65,6 +65,27 @@ test("Dispatcher 仅按稳定 ID 返回结构化结果，并统一处理兼容�
     type: "notice",
     message: "上下文已压缩，归档 1 项。",
   })
+  expect(compactResult.onSuccess({
+    compacted: false,
+    context: { action: "manual_skipped", miss_reason: "manual_history_too_small" },
+  })).toEqual({
+    type: "notice",
+    message: "上下文无需压缩：当前可压缩历史过短，压缩后不会减少上下文。",
+  })
+  expect(compactResult.onSuccess({
+    compacted: false,
+    context: { action: "manual_skipped", miss_reason: "manual_no_savings" },
+  })).toEqual({
+    type: "notice",
+    message: "上下文无需压缩：摘要后上下文没有减少。",
+  })
+  expect(compactResult.onSuccess({
+    compacted: false,
+    context: { action: "manual_skipped", miss_reason: "internal_future_reason" },
+  })).toEqual({
+    type: "notice",
+    message: "上下文无需压缩：未满足安全压缩条件。",
+  })
   expect(compactResult.onError(new Error("sidecar offline"))).toEqual({
     type: "notice",
     message: "上下文压缩失败：sidecar offline",

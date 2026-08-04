@@ -18,6 +18,10 @@ from harness_agent.threads.context_compaction import (
     CompressionRequest,
     ContextCompactor,
     SUMMARY_INPUT_SAFETY_MARGIN_TOKENS,
+    _build_full_projection,
+    _cutoff_for_recent_turns,
+    _estimate_rewritten_tokens,
+    _messages_tokens,
     _render_message,
     _select_complete_summary_input,
 )
@@ -133,6 +137,104 @@ async def _long_thread(store: ThreadPersistence, thread_id: str) -> None:
                 content=content,
             )
         )
+
+
+async def _medium_thread(store: ThreadPersistence, thread_id: str) -> None:
+    """建立可产生正收益但低于 20% 的手动摘要历史。"""
+    await store.accept_run(
+        AcceptRun(
+            message="第一轮 " + "x" * 3_500,
+            binding=make_binding(thread_id, f"run-{thread_id}"),
+        )
+    )
+    await store.append_transcript(
+        TranscriptAppend(
+            thread_id=thread_id,
+            record_id=f"assistant-{thread_id}",
+            kind="assistant",
+            content="已确认 " + "y" * 3_500,
+        )
+    )
+    for record_id, content in (
+        ("user-two", "第二轮"),
+        ("user-three", "第三轮"),
+        ("user-four", "第四轮"),
+    ):
+        await store.append_transcript(
+            TranscriptAppend(
+                thread_id=thread_id,
+                record_id=f"{record_id}-{thread_id}",
+                kind="user",
+                content=content,
+            )
+        )
+
+
+async def _short_manual_thread(store: ThreadPersistence, thread_id: str) -> None:
+    """建立三轮极短历史，验证手动摘要可在模型调用前判定无收益。"""
+    await store.accept_run(
+        AcceptRun(message="第一轮", binding=make_binding(thread_id, f"run-{thread_id}"))
+    )
+    for index, content in enumerate(("第一轮答复", "第二轮", "第二轮答复", "第三轮"), 1):
+        await store.append_transcript(
+            TranscriptAppend(
+                thread_id=thread_id,
+                record_id=f"short-{thread_id}-{index}",
+                kind="assistant" if index in {1, 3} else "user",
+                content=content,
+            )
+        )
+
+
+def _low_positive_savings_summary(request: CompressionRequest) -> tuple[str, int, int]:
+    """构造严格正收益但低于 20% 的合法摘要，避免测试依赖固定字符猜测。"""
+    messages = list(request.projection.messages)
+    before_tokens = _messages_tokens(messages)
+    cutoff = _cutoff_for_recent_turns(messages, 2)
+    old = messages[:cutoff]
+    recent = messages[cutoff:]
+    for padding in range(0, 8_000, 4):
+        summary = f"{SUMMARY}\n" + "z" * padding
+        _, prospective = _build_full_projection(
+            request,
+            cutoff=cutoff,
+            old=old,
+            recent=recent,
+            summary=summary,
+        )
+        after_tokens = _estimate_rewritten_tokens(
+            before_tokens, messages, prospective
+        )
+        saved_ratio = (before_tokens - after_tokens) / before_tokens
+        if 0 < saved_ratio < 0.20:
+            return summary, before_tokens, after_tokens
+    raise AssertionError("unable to construct low positive savings summary")
+
+
+def _non_saving_summary(request: CompressionRequest) -> tuple[str, int, int]:
+    """构造模型已返回但投影没有缩小的合法摘要。"""
+    messages = list(request.projection.messages)
+    before_tokens = _messages_tokens(messages)
+    cutoff = _cutoff_for_recent_turns(messages, 2)
+    old = messages[:cutoff]
+    recent = messages[cutoff:]
+    for padding in range(0, 8_000, 4):
+        summary = f"{SUMMARY}\n" + "z" * padding
+        if estimate_tokens(summary) >= 2_048:
+            break
+        _, prospective = _build_full_projection(
+            request,
+            cutoff=cutoff,
+            old=old,
+            recent=recent,
+            summary=summary,
+        )
+        after_tokens = _estimate_rewritten_tokens(
+            before_tokens, messages, prospective
+        )
+        if after_tokens >= before_tokens:
+            return summary, before_tokens, after_tokens
+    raise AssertionError("unable to construct non-saving summary")
 
 
 class CountingModel(FakeMessagesListChatModel):
@@ -311,6 +413,118 @@ async def test_manual_force_full_bypasses_auto_circuit_but_short_history_is_type
     assert full.action == "manual_full"
     assert full.state is not None and full.state.failures == 0
     assert CountingModel.calls == 1
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_manual_full_commits_any_positive_savings_but_auto_and_overflow_keep_twenty_percent(
+    tmp_path: Path,
+) -> None:
+    """手动尊重明确用户意图，自动和 overflow 继续拒绝低于 20% 的收益。"""
+    store = await _store(tmp_path)
+    await _medium_thread(store, "manual-positive")
+    manual_projection = await ContextProjector(store).project("manual-positive")
+    manual_request = _request("manual-positive", manual_projection, "manual")
+    summary, before_tokens, after_tokens = _low_positive_savings_summary(manual_request)
+    assert 0 < (before_tokens - after_tokens) / before_tokens < 0.20
+
+    CountingModel.calls = 0
+    manual = await ContextCompactor(
+        CountingModel(responses=[AIMessage(content=summary)]),
+        context_window_tokens=16_384,
+        thread_persistence=store,
+    ).compress(manual_request)
+    assert manual.outcome == "compressed"
+    assert manual.action == "manual_full"
+    assert manual.estimated_tokens == after_tokens
+    assert manual.checkpoint is not None and manual.checkpoint.mode == "full"
+    assert CountingModel.calls == 1
+
+    await _medium_thread(store, "auto-low-savings")
+    auto_projection = await ContextProjector(store).project("auto-low-savings")
+    auto_request = _request(
+        "auto-low-savings", auto_projection, "auto", estimated=10_000
+    )
+    CountingModel.calls = 0
+    automatic = await ContextCompactor(
+        CountingModel(responses=[AIMessage(content=summary)]),
+        context_window_tokens=16_384,
+        thread_persistence=store,
+    ).compress(auto_request)
+    assert automatic.outcome == "skipped"
+    assert automatic.reason == "savings_below_20_percent"
+    assert CountingModel.calls == 1
+
+    await _medium_thread(store, "overflow-low-savings")
+    overflow_projection = await ContextProjector(store).project(
+        "overflow-low-savings"
+    )
+    overflow_request = _request(
+        "overflow-low-savings", overflow_projection, "overflow"
+    )
+    overflow_summary, overflow_before, overflow_after = (
+        _low_positive_savings_summary(overflow_request)
+    )
+    assert 0 < (overflow_before - overflow_after) / overflow_before < 0.20
+    CountingModel.calls = 0
+    overflow = await ContextCompactor(
+        CountingModel(responses=[AIMessage(content=overflow_summary)]),
+        context_window_tokens=16_384,
+        thread_persistence=store,
+    ).compress(overflow_request)
+    assert overflow.outcome == "skipped"
+    assert overflow.reason == "savings_below_20_percent"
+    assert CountingModel.calls == 1
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_manual_full_skips_impossible_savings_before_summary_model(tmp_path: Path) -> None:
+    """连空摘要都无法缩小投影时不支付手动摘要模型调用。"""
+    store = await _store(tmp_path)
+    await _short_manual_thread(store, "manual-too-small")
+    projection = await ContextProjector(store).project("manual-too-small")
+    CountingModel.calls = 0
+    result = await ContextCompactor(
+        CountingModel(responses=[AIMessage(content=SUMMARY)]),
+        context_window_tokens=16_384,
+        thread_persistence=store,
+    ).compress(_request("manual-too-small", projection, "manual"))
+
+    assert result.outcome == "skipped"
+    assert result.reason == "manual_history_too_small"
+    assert result.projected_messages == projection.messages
+    assert CountingModel.calls == 0
+    assert await store.load_latest_valid_compression_checkpoint("manual-too-small") is None
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_manual_full_keeps_projection_when_actual_summary_has_no_savings(
+    tmp_path: Path,
+) -> None:
+    """手动摘要模型返回后若没有正收益，不写入任何新投影。"""
+    store = await _store(tmp_path)
+    await _medium_thread(store, "manual-no-savings")
+    projection = await ContextProjector(store).project("manual-no-savings")
+    request = _request("manual-no-savings", projection, "manual")
+    summary, before_tokens, after_tokens = _non_saving_summary(request)
+    assert after_tokens >= before_tokens
+    CountingModel.calls = 0
+
+    result = await ContextCompactor(
+        CountingModel(responses=[AIMessage(content=summary)]),
+        context_window_tokens=16_384,
+        thread_persistence=store,
+    ).compress(request)
+
+    assert result.outcome == "skipped"
+    assert result.reason == "manual_no_savings"
+    assert result.projected_messages == projection.messages
+    assert CountingModel.calls == 1
+    assert await store.load_latest_valid_compression_checkpoint(
+        "manual-no-savings"
+    ) is None
     await store.close()
 
 
