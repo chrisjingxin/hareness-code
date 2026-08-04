@@ -1,6 +1,7 @@
 /** Web Thread 侧边栏：桌面 260px 左栏，移动端全高抽屉；只展示用户可识别的 Thread 摘要。 */
 /** @jsxImportSource react */
 
+import { useEffect, useRef } from "react"
 import { Plus, RefreshCw, Search, X } from "lucide-react"
 
 import type { ThreadSummary } from "@za38/protocol"
@@ -11,9 +12,9 @@ import type { WebAdapterSnapshot, WebIntent } from "../application/adapter"
  * 渲染 Thread 导航与移动端抽屉。
  *
  * 桌面（`narrow=false`）使用 `sidebar` 左栏，移动端（`narrow=true`）改为 `sidebar-drawer`
- * 并通过 `snapshot.sidebarOpen` 控制可见性；close 按钮 dispatch `sidebar-toggle { open:false }`，
- * 桌面端若需要折叠也走同一条 intent。所有用户动作只回传稳定 ID 或 typed intent，
- * 不直接访问 AgentClient，也不渲染内部 thread_id。
+ * 并通过 `snapshot.sidebarOpen` 控制可见性；close 按钮 dispatch `sidebar-toggle { open:false }`。
+ * 移动端抽屉打开时把焦点限制在抽屉内，关闭时由 WebApp 恢复触发器焦点。
+ * 所有用户动作只回传稳定 ID 或 typed intent，不直接访问 AgentClient，也不渲染内部 thread_id。
  */
 export function ThreadSidebar({
   snapshot,
@@ -33,11 +34,12 @@ export function ThreadSidebar({
   const query = snapshot.panelSearch.threads.query
   const items = filterThreads(threads.items, query)
   const isDrawer = narrow
+  const drawerRef = useRef<HTMLDivElement | null>(null)
 
   const newThread = (
     <button
       type="button"
-      className="button button-primary sidebar-new"
+      className="new-thread-button"
       onClick={() => dispatch({ type: "thread-new" })}
       disabled={disabled || busy}
       aria-disabled={disabled || busy}
@@ -48,44 +50,38 @@ export function ThreadSidebar({
     </button>
   )
 
-  const newThreadWithReason = busyReason ? (
-    <div className="sidebar-action">
-      {newThread}
-      <p className="sidebar-disabled-reason">{busyReason}</p>
-    </div>
-  ) : (
-    <div className="sidebar-action">{newThread}</div>
-  )
-
-  const search = (
-    <label className="sidebar-search">
-      <Search aria-hidden="true" />
-      <input
-        type="search"
-        value={query}
-        placeholder="搜索 Thread…"
-        aria-label="搜索 Thread"
-        onChange={event => dispatch({
-          type: "panel-search",
-          panel: "threads",
-          query: event.currentTarget.value,
-        })}
+  const searchRow = (
+    <div className="sidebar-toolbar">
+      <label className="sidebar-search">
+        <Search aria-hidden="true" />
+        <input
+          type="search"
+          value={query}
+          placeholder="搜索 Thread…"
+          aria-label="搜索 Thread"
+          onChange={event => dispatch({
+            type: "panel-search",
+            panel: "threads",
+            query: event.currentTarget.value,
+          })}
+          disabled={disabled}
+        />
+      </label>
+      <button
+        type="button"
+        className="icon-button sidebar-refresh"
+        onClick={() => dispatch({ type: "thread-refresh" })}
         disabled={disabled}
-      />
-    </label>
+        aria-label="刷新 Thread 列表"
+        title="刷新"
+      >
+        <RefreshCw aria-hidden="true" />
+      </button>
+    </div>
   )
 
-  const refresh = (
-    <button
-      type="button"
-      className="icon-button sidebar-refresh"
-      onClick={() => dispatch({ type: "thread-refresh" })}
-      disabled={disabled}
-      aria-label="刷新 Thread 列表"
-      title="刷新"
-    >
-      <RefreshCw aria-hidden="true" />
-    </button>
+  const sectionLabel = (
+    <div className="sidebar-section-label">最近 Thread</div>
   )
 
   const list = (
@@ -101,47 +97,94 @@ export function ThreadSidebar({
     />
   )
 
+  const footer = (
+    <footer className="sidebar-footer">
+      <span className="sidebar-footer-label">本地工作区</span>
+      <span className={`sidebar-footer-status ${interactive.connection.status === "open" ? "is-open" : "is-closed"}`}>
+        {interactive.connection.status === "open" ? "连接正常" : "连接异常"}
+      </span>
+    </footer>
+  )
+
+  // 抽屉打开时限制 Tab 焦点在抽屉内并聚焦第一项；Escape 由 WebApp 全局处理。
+  useEffect(() => {
+    if (!isDrawer || !snapshot.sidebarOpen) return
+    const drawer = drawerRef.current
+    if (!drawer) return
+    const focusables = drawer.querySelectorAll<HTMLElement>(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+    )
+    focusables[0]?.focus()
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Tab" || focusables.length === 0) return
+      const first = focusables[0]
+      const last = focusables[focusables.length - 1]
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    drawer.addEventListener("keydown", onKeyDown)
+    return () => drawer.removeEventListener("keydown", onKeyDown)
+  }, [isDrawer, snapshot.sidebarOpen])
+
+  const heading = (
+    <div className="sidebar-heading">
+      <div>
+        <span className="eyebrow">Threads</span>
+        <h2>Thread</h2>
+      </div>
+    </div>
+  )
+
   if (!isDrawer) {
     return (
       <aside className="sidebar" aria-label="Thread 列表">
-        <div className="sidebar-toolbar">
-          {newThreadWithReason}
-          {search}
-          {refresh}
-        </div>
+        {newThread}
+        {searchRow}
+        {sectionLabel}
         {list}
+        {footer}
       </aside>
     )
   }
 
   return (
-    <div
-      className="sidebar-drawer"
-      data-open={snapshot.sidebarOpen ? "true" : "false"}
-      role="dialog"
-      aria-modal="true"
-      aria-label="Thread 列表"
-      aria-hidden={!snapshot.sidebarOpen}
-    >
-      <header className="sidebar-drawer-header">
-        <h2>Thread</h2>
-        <button
-          type="button"
-          className="icon-button sidebar-close"
-          onClick={() => dispatch({ type: "sidebar-toggle", open: false })}
-          disabled={disabled}
-          aria-label="关闭 Thread 列表"
-        >
-          <X aria-hidden="true" />
-        </button>
-      </header>
-      <div className="sidebar-toolbar">
-        {newThreadWithReason}
-        {search}
-        {refresh}
+    <>
+      <div
+        ref={drawerRef}
+        className="sidebar-drawer"
+        data-open={snapshot.sidebarOpen ? "true" : "false"}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Thread 列表"
+        aria-hidden={!snapshot.sidebarOpen}
+      >
+        <header className="sidebar-drawer-header">
+          <h2>Thread</h2>
+          <button
+            type="button"
+            className="icon-button sidebar-close"
+            onClick={() => dispatch({ type: "sidebar-toggle", open: false })}
+            disabled={disabled}
+            aria-label="关闭 Thread 列表"
+          >
+            <X aria-hidden="true" />
+          </button>
+        </header>
+        {newThread}
+        {searchRow}
+        {sectionLabel}
+        {list}
+        {footer}
       </div>
-      {list}
-    </div>
+      {snapshot.sidebarOpen ? (
+        <div className="drawer-scrim" onClick={() => dispatch({ type: "sidebar-toggle", open: false })} />
+      ) : null}
+    </>
   )
 }
 
@@ -203,6 +246,9 @@ function ThreadList({
               onClick={() => dispatch({ type: "thread-select", threadId: item.thread_id })}
             >
               <span className="thread-item-title">{item.first_message || item.latest_message || "（无标题）"}</span>
+              {item.latest_message && item.latest_message !== item.first_message ? (
+                <span className="thread-item-summary">{item.latest_message}</span>
+              ) : null}
               <span className="thread-item-meta">{`${formatUpdated(item.updated_at_ms)} · ${item.message_count} 条消息`}</span>
             </button>
           </li>

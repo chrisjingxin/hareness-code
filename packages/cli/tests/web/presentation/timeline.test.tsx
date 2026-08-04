@@ -62,8 +62,8 @@ describe("Timeline", () => {
       <Timeline snapshot={makeSnapshot({ interactive })} dispatch={() => {}} />,
     )
     try {
-      const bubbles = handle.container.querySelectorAll(".message-bubble")
-      expect(bubbles.length).toBe(2)
+      const messages = handle.container.querySelectorAll(".timeline-message")
+      expect(messages.length).toBe(2)
       expect(handle.container.querySelector(".tool-card")).not.toBeNull()
       expect(handle.container.querySelector(".interaction-card")).not.toBeNull()
       expect(handle.container.textContent).toContain("你好")

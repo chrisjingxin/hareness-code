@@ -1,14 +1,13 @@
-/** Web React 工作台：组合布局与可访问性，不拥有 Agent 或命令业务状态。 */
+/** Web React 工作台：组合蓝色三栏布局与可访问性，不拥有 Agent 或命令业务状态。 */
 /** @jsxImportSource react */
 
-import { CircleHelp, Menu, Plug, Settings2, ShieldCheck, Terminal, X } from "lucide-react"
-import { useCallback, useEffect, useState, useSyncExternalStore } from "react"
-import type { ReactNode } from "react"
+import { Ellipsis, Menu, X } from "lucide-react"
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react"
 import { Capability } from "@za38/protocol"
 
-import { workspaceLabel } from "../../interactive/runtime"
+import { approvalModeLabel, workspaceLabel } from "../../interactive/runtime"
 import type { InteractiveSnapshot } from "../../interactive/types"
-import type { WebInteractiveAdapter, WebAdapterSnapshot, WebIntent } from "../application/adapter"
+import type { WebInteractiveAdapter, WebAdapterSnapshot, WebIntent, WebTheme } from "../application/adapter"
 import { Composer } from "./composer"
 import { DialogHost } from "./dialog"
 import { InteractionForm } from "./interaction-form"
@@ -32,6 +31,10 @@ export function WebApp(props: {
   const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
   const onIntent = useCallback(
     (intent: WebIntent) => {
+      // 移动端抽屉/面板打开前记录当前焦点元素，关闭时用于恢复触发器焦点。
+      if ((intent.type === "sidebar-toggle" && intent.open) || intent.type === "panel-open") {
+        drawerTriggerRef.current = document.activeElement as HTMLElement | null
+      }
       return props.adapter.dispatch(intent)
     },
     [props.adapter],
@@ -43,6 +46,51 @@ export function WebApp(props: {
   const returnBlocked = Boolean(interactive.activeRun || interactive.interaction)
   const capabilities = new Set(interactive.runtime.capabilities ?? [])
 
+  const overflowTriggerRef = useRef<HTMLButtonElement | null>(null)
+  const headerMenuRef = useRef<HTMLDivElement | null>(null)
+  const wasHeaderMenuOpenRef = useRef(false)
+  const drawerTriggerRef = useRef<HTMLElement | null>(null)
+  const wasSidebarOpenRef = useRef(false)
+  const wasPanelOpenRef = useRef(false)
+
+  // 打开 header menu 后焦点进入第一项；关闭后焦点返回 overflow trigger。
+  useEffect(() => {
+    if (snapshot.headerMenuOpen) {
+      headerMenuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus()
+    } else if (wasHeaderMenuOpenRef.current) {
+      overflowTriggerRef.current?.focus()
+    }
+    wasHeaderMenuOpenRef.current = snapshot.headerMenuOpen
+  }, [snapshot.headerMenuOpen])
+
+  // 移动端抽屉/面板关闭后恢复打开前焦点；打开动作在 onIntent 中记录触发器。
+  useEffect(() => {
+    if (snapshot.sidebarOpen === false && wasSidebarOpenRef.current) {
+      drawerTriggerRef.current?.focus()
+    }
+    wasSidebarOpenRef.current = snapshot.sidebarOpen
+  }, [snapshot.sidebarOpen])
+
+  useEffect(() => {
+    const panelOpen = snapshot.activePanel !== null
+    if (panelOpen === false && wasPanelOpenRef.current) {
+      drawerTriggerRef.current?.focus()
+    }
+    wasPanelOpenRef.current = panelOpen
+  }, [snapshot.activePanel])
+
+  // 点击菜单外任意位置关闭 header menu。
+  useEffect(() => {
+    if (!snapshot.headerMenuOpen) return
+    const onPointerDown = (event: MouseEvent) => {
+      const target = event.target as Node
+      if (headerMenuRef.current?.contains(target) || overflowTriggerRef.current?.contains(target)) return
+      onIntent({ type: "header-menu-toggle", open: false })
+    }
+    document.addEventListener("pointerdown", onPointerDown)
+    return () => document.removeEventListener("pointerdown", onPointerDown)
+  }, [snapshot.headerMenuOpen, onIntent])
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
@@ -51,13 +99,16 @@ export function WebApp(props: {
         return
       }
       if (event.key !== "Escape") return
-      // Escape 先关闭最上层 drawer/dialog/menu，再取消 Run。
+      // Escape 关闭顺序固定：确认 Dialog → 命令菜单 → header overflow 菜单 → Utility 面板 → Thread 抽屉 → 取消 Run。
       if (interactive.confirmation) {
         // DialogHost 自己注册了 Escape handler；这里不再重复派发一次 resolve。
         return
       } else if (snapshot.commandMenuOpen) {
         event.preventDefault()
         onIntent({ type: "command-menu-close" })
+      } else if (snapshot.headerMenuOpen) {
+        event.preventDefault()
+        onIntent({ type: "header-menu-toggle", open: false })
       } else if (snapshot.activePanel) {
         event.preventDefault()
         onIntent({ type: "panel-close" })
@@ -71,35 +122,68 @@ export function WebApp(props: {
     }
     window.addEventListener("keydown", onKeyDown)
     return () => window.removeEventListener("keydown", onKeyDown)
-  }, [interactive.activeRun, interactive.confirmation, narrow, onIntent, readOnly, snapshot.activePanel, snapshot.commandMenuOpen, snapshot.sidebarOpen])
+  }, [interactive.activeRun, interactive.confirmation, narrow, onIntent, readOnly, snapshot.activePanel, snapshot.commandMenuOpen, snapshot.headerMenuOpen, snapshot.sidebarOpen])
 
   return (
-    <div className={`web-shell ${props.active ? "is-active" : "is-opening"} ${snapshot.leaving ? "is-leaving" : ""}`}>
+    <div className="web-shell" data-theme={snapshot.theme} data-active={props.active ? "true" : "false"}>
       <header className="topbar">
-        <div className="topbar-project">
-          {narrow ? (
-            <button type="button" className="icon-button mobile-only" aria-label="打开 Thread 导航" title="打开 Thread 导航" disabled={readOnly} onClick={() => { onIntent({ type: "sidebar-toggle", open: true }) }}>
-              <Menu aria-hidden="true" size={18} />
-            </button>
-          ) : null}
-          <div>
-            <div className="project-name">{workspaceLabel(interactive.runtime.workspace)}</div>
-            <div className="project-meta">{interactive.runtime.gitBranch ? `branch · ${interactive.runtime.gitBranch}` : "local workspace"}</div>
+        <div className="brand">
+          <span className="brand-mark" aria-hidden="true">H</span>
+          <span className="brand-name">Harness Code</span>
+          <span className="brand-version">{interactive.runtime.cliVersion}</span>
+        </div>
+        <div className="topbar-main">
+          <div className="topbar-project">
+            {narrow ? (
+              <button type="button" className="icon-button mobile-only" aria-label="打开 Thread 导航" title="打开 Thread 导航" disabled={readOnly} onClick={() => { onIntent({ type: "sidebar-toggle", open: true }) }}>
+                <Menu aria-hidden="true" size={18} />
+              </button>
+            ) : null}
+            <div className="topbar-project-copy">
+              <span className="project-name">{workspaceLabel(interactive.runtime.workspace)}</span>
+              {interactive.runtime.gitBranch ? <span className="project-meta">{interactive.runtime.gitBranch}</span> : null}
+            </div>
           </div>
-        </div>
-        <div className="topbar-status" aria-live="polite">
-          <span className={`status-pill status-${interactive.activity.kind}`}><span className="status-dot" />{props.active ? interactive.activity.label : "正在接管"}</span>
-          <span className="status-pill model-pill">{modelLabel(interactive)}</span>
-          <span className={`status-pill connection-${interactive.connection.status}`}>{connectionLabel(interactive.connection.status)}</span>
-        </div>
-        <div className="topbar-actions">
-          <ToolbarButton label="模型" icon={<Settings2 aria-hidden="true" size={16} />} hidden={!capabilities.has(Capability.MODELS_READ)} disabled={readOnly} onClick={() => { onIntent({ type: "panel-open", panel: "models" }) }} />
-          <ToolbarButton label="Skills" icon={<ShieldCheck aria-hidden="true" size={16} />} hidden={!capabilities.has(Capability.SKILLS_READ)} disabled={readOnly} onClick={() => { onIntent({ type: "panel-open", panel: "skills" }) }} />
-          <ToolbarButton label="MCP" icon={<Plug aria-hidden="true" size={16} />} hidden={!capabilities.has(Capability.MCP_READ)} disabled={readOnly} onClick={() => { onIntent({ type: "panel-open", panel: "mcp" }) }} />
-          <ToolbarButton label="状态" icon={<Terminal aria-hidden="true" size={16} />} disabled={readOnly} onClick={() => { onIntent({ type: "panel-open", panel: "status" }) }} />
-          <ToolbarButton label="帮助" icon={<CircleHelp aria-hidden="true" size={16} />} disabled={readOnly} onClick={() => { onIntent({ type: "panel-open", panel: "help" }) }} />
-          <button type="button" className="button button-secondary return-button" disabled={!props.active || snapshot.leaving || returnBlocked} title={returnBlocked ? "当前任务结束或交互完成后可返回 TUI" : "归还控制权并恢复 TUI"} onClick={() => { onIntent({ type: "return-to-tui" }) }}>返回 TUI</button>
-          <button type="button" className="button button-quiet" disabled={!props.active || snapshot.leaving} onClick={() => { onIntent({ type: "exit-harness" }) }}>退出</button>
+          <div className="topbar-meta">
+            <button type="button" className="meta-chip" hidden={!capabilities.has(Capability.MODELS_READ)} disabled={readOnly} onClick={() => { onIntent({ type: "panel-open", panel: "models" }) }} title="模型设置">
+              <span className="meta-chip-label">模型</span>
+              <span className="meta-chip-value">{modelLabel(interactive)}</span>
+            </button>
+            <span className="meta-chip" title="审批模式">
+              <span className="meta-chip-label">审批</span>
+              <span className="meta-chip-value">{approvalModeLabel(interactive.runtime)}</span>
+            </span>
+            <button type="button" className="meta-chip" disabled={readOnly} onClick={() => { onIntent({ type: "panel-open", panel: "status" }) }} title="连接与活动状态">
+              <span className={`status-dot status-dot-${interactive.activity.kind}`} />
+              <span className="meta-chip-value">{props.active ? interactive.activity.label : "正在接管"}{interactive.connection.status !== "open" ? ` · ${connectionLabel(interactive.connection.status)}` : ""}</span>
+            </button>
+          </div>
+          <div className="topbar-actions">
+            <button type="button" className="button button-secondary return-button" disabled={!props.active || snapshot.leaving || returnBlocked} title={returnBlocked ? "当前任务结束或交互完成后可返回 TUI" : "归还控制权并恢复 TUI"} onClick={() => { onIntent({ type: "return-to-tui" }) }}>返回 TUI</button>
+            <button
+              type="button"
+              ref={overflowTriggerRef}
+              className="icon-button overflow-trigger"
+              aria-label="更多操作"
+              aria-haspopup="menu"
+              aria-expanded={snapshot.headerMenuOpen}
+              onClick={() => { onIntent({ type: "header-menu-toggle", open: !snapshot.headerMenuOpen }) }}
+            >
+              <Ellipsis aria-hidden="true" size={18} />
+            </button>
+            {snapshot.headerMenuOpen ? (
+              <div ref={headerMenuRef} className="header-menu" role="menu" aria-label="更多操作">
+                <button type="button" role="menuitem" className="header-menu-item" onClick={() => { onIntent({ type: "theme-set", theme: nextTheme(snapshot.theme) }) }}>
+                  {snapshot.theme === "light" ? "使用深色主题" : "使用浅色主题"}
+                </button>
+                <button type="button" role="menuitem" className="header-menu-item" onClick={() => { onIntent({ type: "panel-open", panel: "help" }) }}>帮助</button>
+                {narrow ? (
+                  <button type="button" role="menuitem" className="header-menu-item" disabled={!props.active || snapshot.leaving || returnBlocked} title={returnBlocked ? "当前任务结束或交互完成后可返回 TUI" : "归还控制权并恢复 TUI"} onClick={() => { onIntent({ type: "return-to-tui" }) }}>返回 TUI</button>
+                ) : null}
+                <button type="button" role="menuitem" className="header-menu-item" disabled={!props.active || snapshot.leaving} onClick={() => { onIntent({ type: "exit-harness" }) }}>退出 Harness</button>
+              </div>
+            ) : null}
+          </div>
         </div>
       </header>
 
@@ -110,10 +194,6 @@ export function WebApp(props: {
       <div className={`workspace-grid ${snapshot.activePanel ? "has-utility-panel" : ""}`}>
         <ThreadSidebar snapshot={snapshot} dispatch={onIntent} narrow={narrow} disabled={readOnly} />
         <main className="conversation-column">
-          <div className="mobile-thread-bar">
-            <button type="button" className="button button-quiet" onClick={() => { onIntent({ type: "sidebar-toggle", open: true }) }}><Menu aria-hidden="true" size={16} /> Threads</button>
-            <span>{interactive.currentThreadId ? "当前 Thread" : "New Thread"}</span>
-          </div>
           <div className="timeline-scroll">
             <Timeline snapshot={snapshot} dispatch={onIntent} disabled={readOnly} />
           </div>
@@ -123,17 +203,12 @@ export function WebApp(props: {
           </div>
           <Composer snapshot={snapshot} dispatch={onIntent} disabled={readOnly} />
         </main>
-        <UtilityPanels snapshot={snapshot} dispatch={onIntent} disabled={readOnly} />
+        <UtilityPanels snapshot={snapshot} dispatch={onIntent} narrow={narrow} disabled={readOnly} />
       </div>
 
       <DialogHost snapshot={snapshot} dispatch={onIntent} disabled={readOnly} />
     </div>
   )
-}
-
-function ToolbarButton(props: { label: string; icon: ReactNode; hidden?: boolean; disabled?: boolean; onClick: () => void }) {
-  if (props.hidden) return null
-  return <button type="button" className="button button-quiet toolbar-button" disabled={props.disabled} onClick={props.onClick}>{props.icon}<span>{props.label}</span></button>
 }
 
 /** 订阅窄屏媒体查询；仅在 web 环境（matchMedia 存在）时生效。 */
@@ -148,6 +223,11 @@ function useMediaQuery(query: string): boolean {
     return () => media.removeEventListener("change", onChange)
   }, [query])
   return matches
+}
+
+/** 主题切换的下一状态：浅色 ↔ 深色，菜单文案始终表达下一动作。 */
+function nextTheme(theme: WebTheme): WebTheme {
+  return theme === "light" ? "dark" : "light"
 }
 
 function modelLabel(snapshot: InteractiveSnapshot): string {

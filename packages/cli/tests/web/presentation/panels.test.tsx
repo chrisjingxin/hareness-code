@@ -204,4 +204,54 @@ describe("UtilityPanels", () => {
       handle.unmount()
     }
   })
+
+  test("主 tab 使用 tablist/tab 语义；当前 tab 有 aria-selected 且点击 dispatch panel-open", () => {
+    const intents: WebIntent[] = []
+    const handle = mountPanel(makeSnapshot({ activePanel: "models" }), intents)
+    try {
+      const tablist = handle.container.querySelector<HTMLElement>('[role="tablist"]')
+      expect(tablist).not.toBeNull()
+      const tabs = Array.from(handle.container.querySelectorAll<HTMLButtonElement>('[role="tab"]'))
+      expect(tabs.length).toBe(4)
+      const modelTab = tabs.find(tab => tab.textContent === "Model")
+      const statusTab = tabs.find(tab => tab.textContent === "Status")
+      expect(modelTab?.getAttribute("aria-selected")).toBe("true")
+      expect(statusTab?.getAttribute("aria-selected")).toBe("false")
+      expect(modelTab?.getAttribute("aria-controls")).toBe("workspace-panel-models")
+      act(() => { statusTab?.click() })
+      expect(intents).toContainEqual({ type: "panel-open", panel: "status" })
+      const panel = handle.container.querySelector('[role="tabpanel"]')
+      expect(panel?.getAttribute("id")).toBe("workspace-panel-models")
+    } finally {
+      handle.unmount()
+    }
+  })
+
+  test("主 tab 受 capability 过滤：无 MODELS_READ/SKILLS_READ/MCP_READ 时只显示 Status", () => {
+    const intents: WebIntent[] = []
+    const interactive = makeInteractive({
+      runtime: makeRuntime({ capabilities: ["status.read"] }),
+    })
+    const handle = mountPanel(makeSnapshot({ interactive, activePanel: "status" }), intents)
+    try {
+      const tabs = Array.from(handle.container.querySelectorAll<HTMLButtonElement>('[role="tab"]'))
+      expect(tabs.map(tab => tab.textContent)).toEqual(["Status"])
+    } finally {
+      handle.unmount()
+    }
+  })
+
+  test("activePanel=help 时标题为「帮助」且不渲染主 tab；内容列出命令", () => {
+    const intents: WebIntent[] = []
+    const interactive = makeInteractive({ commands: [] })
+    const handle = mountPanel(makeSnapshot({ interactive, activePanel: "help" }), intents)
+    try {
+      const title = handle.container.querySelector(".utility-drawer-title")
+      expect(title?.textContent).toBe("帮助")
+      expect(handle.container.querySelector('[role="tablist"]')).toBeNull()
+      expect(handle.container.querySelector(".help-view")).not.toBeNull()
+    } finally {
+      handle.unmount()
+    }
+  })
 })

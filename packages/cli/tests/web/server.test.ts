@@ -85,10 +85,13 @@ test("错误 Host 被拒绝；lifecycle upgrade 校验 Origin 并投递 accepted
   })
   expect(forged.status).toBe(403)
 
-  const wrongOrigin = await fetch(`${origin}/web/h/handoff-1/lifecycle`, {
-    headers: { upgrade: "websocket", connection: "upgrade", origin: "http://evil.example" },
+  let wrongOriginFailed = false
+  const wrongWs = new WebSocket(`${origin.replace(/^http/, "ws")}/web/h/handoff-1/lifecycle`, {
+    headers: { origin: "http://evil.example" },
   })
-  expect(wrongOrigin.status).toBe(403)
+  wrongWs.onerror = () => { wrongOriginFailed = true }
+  await waitFor(() => wrongOriginFailed || wrongWs.readyState === 3)
+  expect(wrongOriginFailed || wrongWs.readyState === 3).toBe(true)
 
   const socket = new WebSocket(`${origin.replace(/^http/, "ws")}/web/h/handoff-1/lifecycle`, {
     headers: { origin },

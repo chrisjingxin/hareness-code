@@ -19,12 +19,12 @@ const COMPOSER_MIN_ROWS = 1
 const CHARS_PER_ROW = 48
 
 /**
- * Web Composer：textarea + Skill chip + 命令菜单 + 发送/取消。
+ * Web Composer：textarea + 底部 action rail（Skill chip / 键盘提示 / 发送-取消）。
  *
  * - 受控输入：textarea 的值始终从 snapshot.draft 读取，onChange 派发 draft-change。
  * - 自动增长：按字符数估算行数，clamp 到 [1, 8]；Esc/Ctrl+K 走对应意图。
  * - 命令菜单：snapshot.commandMenuOpen 为真且 snapshot.commandOptions 非空时渲染。
- * - 发送/取消：activeRun 时显示取消按钮；其他时候显示发送按钮。
+ * - 发送/取消：activeRun 时显示取消按钮；其他时候显示发送按钮，不同时展示两个主动作。
  */
 export function Composer(props: {
   snapshot: WebAdapterSnapshot
@@ -35,7 +35,7 @@ export function Composer(props: {
   const interactive = snapshot.interactive
   const activeRun = Boolean(interactive.activeRun)
   const connectionOpen = interactive.connection.status === "open"
-  const composedDisabled = Boolean(disabled) || snapshot.leaving || !connectionOpen
+  const composedDisabled = Boolean(disabled) || snapshot.leaving || !connectionOpen || snapshot.composerSubmitting
 
   const draft = snapshot.draft
   const armedSkill = interactive.selection.armedSkill
@@ -44,12 +44,8 @@ export function Composer(props: {
   const selectedIndex = clampIndex(snapshot.commandMenuIndex, items.length)
 
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const isComposingRef = useRef(false)
   const [rows, setRows] = useState(COMPOSER_MIN_ROWS)
-
-  useLayoutEffect(() => {
-    if (!textareaRef.current) return
-    textareaRef.current.value = draft
-  }, [draft])
 
   useEffect(() => {
     setRows(estimateRows(draft))
@@ -59,14 +55,25 @@ export function Composer(props: {
     dispatch({ type: "draft-change", value: event.target.value })
   }
 
+  const handleCompositionStart = () => {
+    isComposingRef.current = true
+  }
+
+  const handleCompositionEnd = () => {
+    isComposingRef.current = false
+  }
+
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (menuVisible && handleMenuKeyDown(event, items, selectedIndex, dispatch)) {
       event.preventDefault()
       return
     }
-    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+    const isComposing = event.nativeEvent.isComposing || isComposingRef.current || event.keyCode === 229
+    if (event.key === "Enter" && !event.shiftKey && !isComposing) {
       event.preventDefault()
-      handleSubmit(draft, dispatch, composedDisabled)
+      if (!composedDisabled && draft.trim().length > 0) {
+        dispatch({ type: "submit" })
+      }
       return
     }
     if (event.key === "Escape") {
@@ -87,73 +94,99 @@ export function Composer(props: {
     }
   }
 
+  const handleFormSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!composedDisabled && draft.trim().length > 0) {
+      dispatch({ type: "submit" })
+    }
+  }
+
   return (
     <div className="composer-bar">
-      {armedSkill ? (
-        <div className="skill-chip" role="status">
-          <Wrench aria-hidden="true" className="skill-chip-icon" />
-          <span className="skill-chip-label">Skill</span>
-          <span className="skill-chip-name">{armedSkill.name}</span>
-          <button
-            type="button"
-            className="skill-chip-clear"
-            aria-label="取消已选择 Skill"
-            disabled={composedDisabled}
-            onClick={() => dispatch({ type: "skill-clear" })}
-          >
-            <X aria-hidden="true" />
-          </button>
+      <form className="composer-inner" onSubmit={handleFormSubmit}>
+        {menuVisible ? (
+          <CommandMenu
+            items={items}
+            selectedIndex={selectedIndex}
+            dispatch={dispatch}
+          />
+        ) : null}
+        <div className="composer-box">
+          <textarea
+            ref={textareaRef}
+            className="composer-textarea"
+            rows={rows}
+            value={draft}
+            onChange={handleChange}
+            onCompositionStart={handleCompositionStart}
+            onCompositionEnd={handleCompositionEnd}
+            onKeyDown={handleKeyDown}
+            disabled={composedDisabled && !activeRun}
+            placeholder={placeholderFor(snapshot, activeRun)}
+            aria-label="消息，Enter 发送，Shift+Enter 换行"
+          />
+          <div className="composer-rail">
+            <div className="composer-rail-left">
+              {armedSkill ? (
+                <span className="skill-chip" role="status">
+                  <Wrench aria-hidden="true" className="skill-chip-icon" />
+                  <span className="skill-chip-label">Skill</span>
+                  <span className="skill-chip-name">{armedSkill.name}</span>
+                  <button
+                    type="button"
+                    className="skill-chip-clear"
+                    aria-label="取消已选择 Skill"
+                    disabled={composedDisabled}
+                    onClick={() => dispatch({ type: "skill-clear" })}
+                  >
+                    <X aria-hidden="true" />
+                  </button>
+                </span>
+              ) : null}
+              <span className="composer-hint">Enter 发送 · Shift+Enter 换行</span>
+            </div>
+            <div className="composer-rail-right">
+              {activeRun ? (
+                <button
+                  type="button"
+                  className="cancel-button"
+                  aria-label="取消当前任务"
+                  onClick={() => dispatch({ type: "cancel-run" })}
+                  disabled={snapshot.leaving}
+                >
+                  <Loader2 aria-hidden="true" className="cancel-button-spinner" />
+                  <span>取消</span>
+                </button>
+              ) : (
+                <button
+                  type="submit"
+                  className="send-button"
+                  aria-label="发送消息"
+                  disabled={composedDisabled || draft.trim().length === 0}
+                >
+                  {snapshot.composerSubmitting ? (
+                    <Loader2 aria-hidden="true" className="cancel-button-spinner" />
+                  ) : (
+                    <Send aria-hidden="true" />
+                  )}
+                  <span>发送</span>
+                </button>
+              )}
+            </div>
+          </div>
         </div>
-      ) : null}
-      {menuVisible ? (
-        <CommandMenu
-          items={items}
-          selectedIndex={selectedIndex}
-          dispatch={dispatch}
-        />
-      ) : null}
-      <div className="composer-row">
-        <textarea
-          ref={textareaRef}
-          className="composer-textarea"
-          rows={rows}
-          value={draft}
-          onChange={handleChange}
-          onKeyDown={handleKeyDown}
-          disabled={composedDisabled}
-          placeholder={placeholderFor(snapshot, activeRun)}
-          aria-label="消息，Enter 发送，Shift+Enter 换行"
-        />
-        {activeRun ? (
-          <button
-            type="button"
-            className="cancel-button"
-            aria-label="取消当前任务"
-            onClick={() => dispatch({ type: "cancel-run" })}
-            disabled={snapshot.leaving}
-          >
-            <Loader2 aria-hidden="true" className="cancel-button-spinner" />
-            <span>取消</span>
-          </button>
-        ) : (
-          <button
-            type="button"
-            className="send-button"
-            aria-label="发送消息"
-            onClick={() => handleSubmit(draft, dispatch, composedDisabled)}
-            disabled={composedDisabled || draft.trim().length === 0}
-          >
-            <Send aria-hidden="true" />
-            <span>发送</span>
-          </button>
-        )}
-      </div>
-      {composedDisabled && !activeRun ? (
-        <p className="composer-status" role="status">
-          <AlertTriangle aria-hidden="true" />
-          <span>{disabledReason(snapshot, Boolean(disabled))}</span>
-        </p>
-      ) : null}
+        {snapshot.composerError ? (
+          <p className="composer-status composer-status-error" role="alert">
+            <AlertTriangle aria-hidden="true" />
+            <span>{snapshot.composerError}</span>
+          </p>
+        ) : composedDisabled && !activeRun ? (
+          <p className="composer-status" role="status">
+            <AlertTriangle aria-hidden="true" />
+            <span>{disabledReason(snapshot, Boolean(disabled))}</span>
+          </p>
+        ) : null}
+      </form>
     </div>
   )
 }
@@ -259,17 +292,6 @@ function handleMenuKeyDown(
     return true
   }
   return false
-}
-
-function handleSubmit(
-  draft: string,
-  dispatch: (intent: WebIntent) => void,
-  composedDisabled: boolean,
-): void {
-  if (composedDisabled) return
-  const value = draft.trim()
-  if (!value) return
-  dispatch({ type: "submit", value: draft })
 }
 
 function estimateRows(draft: string): number {

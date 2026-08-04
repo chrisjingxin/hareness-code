@@ -25,6 +25,9 @@ import { Markdown } from "./markdown"
 /** 自动滚动判定阈值：用户视口底部离容器底部的距离小于该值即视为靠近底部。 */
 const BOTTOM_THRESHOLD_PX = 48
 
+/** Tool 参数摘要最大长度；超出后截断，避免折叠头撑破阅读列。 */
+const ARGUMENT_SUMMARY_MAX = 80
+
 /**
  * 渲染 Thread 的统一时间线。
  *
@@ -95,7 +98,13 @@ export function Timeline({
     [disabled, dispatch],
   )
 
-  const visibleItems = timeline.filter(item => !isPendingLive(item, pendingRequestId))
+  const visibleItems = timeline.filter(item => {
+    if (isPendingLive(item, pendingRequestId)) return false
+    if (item.type === "message" && item.message.role === "assistant" && !item.message.streaming && !item.message.content.trim()) {
+      return false
+    }
+    return true
+  })
 
   return (
     <div
@@ -106,6 +115,9 @@ export function Timeline({
       aria-label="对话与工具时间线"
       onScroll={handleScroll}
     >
+      {snapshot.interactive.currentThreadId !== null && visibleItems.length > 0 ? (
+        <div className="timeline-header">THREAD · {timeline.length} 项记录</div>
+      ) : null}
       {visibleItems.length === 0 ? (
         <div className="timeline-empty" role="status">
           发送第一条消息后，这里会显示 Agent 的回答、工具调用与审批记录。
@@ -178,14 +190,20 @@ function TimelineRowImpl({
   }
   if (item.type === "tool") {
     return (
-      <MemoToolCard
-        tool={item.tool}
-        expanded={expandedTools.has(item.tool.id)}
-        onToggle={onToggleTool}
-      />
+      <div className="timeline-tool">
+        <MemoToolCard
+          tool={item.tool}
+          expanded={expandedTools.has(item.tool.id)}
+          onToggle={onToggleTool}
+        />
+      </div>
     )
   }
-  return <MemoInteractionCard interaction={item.interaction} />
+  return (
+    <div className="timeline-interaction">
+      <MemoInteractionCard interaction={item.interaction} />
+    </div>
+  )
 }
 
 const TimelineRow = memo(TimelineRowImpl)
@@ -194,32 +212,56 @@ TimelineRow.displayName = "TimelineRow"
 /** 流式 Assistant 消息：内容随时 in-place 更新；不 memo 才能接收每帧变更。 */
 function StreamingAssistantBubble({ message }: { message: ConversationMessage }): ReactElement {
   return (
-    <div className="message-bubble assistant" data-streaming="true">
-      {message.content.length > 0 ? <Markdown text={message.content} /> : null}
-      <span className="streaming-cursor" aria-hidden="true" />
+    <div className="timeline-message message-assistant" data-streaming="true">
+      <div className="message-head">
+        <span className="message-author">Harness</span>
+      </div>
+      <div className="message-body">
+        <span className="message-avatar avatar-assistant" aria-hidden="true">H</span>
+        <div className="message-content">
+          {message.content.length > 0 ? <Markdown text={message.content} /> : null}
+          <span className="streaming-cursor" aria-hidden="true" />
+        </div>
+      </div>
     </div>
   )
 }
 
-/** 用户、Assistant（已结束）和系统消息气泡；Assistant 内容用 Markdown 渲染。 */
+/** 用户、Assistant（已结束）和系统消息；统一左对齐阅读流，角色由 avatar 标识。 */
 function MessageBubbleImpl({ message }: { message: ConversationMessage }): ReactElement {
   if (message.role === "assistant") {
     return (
-      <div className="message-bubble assistant" data-streaming={message.streaming ? "true" : undefined}>
-        {message.content.length > 0 ? <Markdown text={message.content} /> : null}
+      <div className="timeline-message message-assistant" data-streaming={message.streaming ? "true" : undefined}>
+        <div className="message-head">
+          <span className="message-author">Harness</span>
+        </div>
+        <div className="message-body">
+          <span className="message-avatar avatar-assistant" aria-hidden="true">H</span>
+          <div className="message-content">
+            {message.content.length > 0 ? <Markdown text={message.content} /> : null}
+          </div>
+        </div>
       </div>
     )
   }
   if (message.role === "system") {
     return (
-      <div className="message-bubble system" role="status">
+      <div className="message-system" role="status">
         {message.content}
       </div>
     )
   }
   return (
-    <div className="message-bubble user">
-      {message.content}
+    <div className="timeline-message message-user">
+      <div className="message-head">
+        <span className="message-author">你</span>
+      </div>
+      <div className="message-body">
+        <span className="message-avatar avatar-user" aria-hidden="true">U</span>
+        <div className="message-content">
+          {message.content}
+        </div>
+      </div>
     </div>
   )
 }
@@ -228,9 +270,9 @@ const MemoMessageBubble = memo(MessageBubbleImpl)
 MemoMessageBubble.displayName = "MessageBubble"
 
 /**
- * Tool 卡：默认折叠展示名称/状态/摘要；展开后显示参数与输出。
+ * Tool 卡：默认折叠展示名称/状态/参数摘要；展开后显示参数与输出。
  *
- * Tool 详情使用 `<pre class="tool-details">` 并自带滚动；外部样式需设置
+ * Tool 详情使用 `<pre class="tool-details-pre">` 并自带滚动；外部样式需设置
  * max-height 与 overflow 才能让长输出在卡片内独立滚动而不是撑破时间线。
  */
 function ToolCardImpl({
@@ -242,6 +284,7 @@ function ToolCardImpl({
   expanded: boolean
   onToggle: (toolId: string) => void
 }): ReactElement {
+  const summary = argumentSummary(tool.arguments)
   return (
     <div className={`tool-card tool-card-${tool.status}`} data-tool-id={tool.id}>
       <button
@@ -251,6 +294,7 @@ function ToolCardImpl({
         onClick={() => onToggle(tool.id)}
       >
         <span className="tool-card-name">{tool.name}</span>
+        {summary ? <span className="tool-card-args">{summary}</span> : null}
         <span className="tool-card-status">{renderToolStatus(tool.status)}</span>
         <ChevronDown
           aria-hidden="true"
@@ -289,6 +333,43 @@ const MemoToolCard = memo(ToolCardImpl, (previous, next) => {
   )
 })
 MemoToolCard.displayName = "ToolCard"
+
+/**
+ * 折叠头参数摘要：只在该字段能安全收敛为单行文本时显示。
+ * arguments 是 JSON 字符串时取 key: value 摘要；否则做空白归一化并截断。
+ * 不显示任何虚构的 path / duration / 完成时间。
+ */
+function argumentSummary(argumentsText: string | undefined): string | null {
+  if (!argumentsText) return null
+  const trimmed = argumentsText.trim()
+  if (!trimmed) return null
+  try {
+    const parsed = JSON.parse(trimmed) as Record<string, unknown>
+    const entries = Object.entries(parsed)
+    if (entries.length === 0) return null
+    const summary = entries.map(([key, value]) => `${key}: ${stringifySummaryValue(value)}`).join(" · ")
+    return truncateSingleLine(summary)
+  } catch {
+    return truncateSingleLine(trimmed)
+  }
+}
+
+/** 把 JSON 标量/嵌套值收敛为短字符串；对象与数组只保留第一层规模。 */
+function stringifySummaryValue(value: unknown): string {
+  if (value === null) return "null"
+  if (typeof value === "string") return value.length > 24 ? `${value.slice(0, 21)}…` : value
+  if (typeof value === "object") {
+    const size = Array.isArray(value) ? value.length : Object.keys(value).length
+    return `{${size}}`
+  }
+  return String(value)
+}
+
+function truncateSingleLine(text: string): string {
+  const singleLine = text.replace(/\s+/g, " ").trim()
+  if (singleLine.length <= ARGUMENT_SUMMARY_MAX) return singleLine
+  return `${singleLine.slice(0, ARGUMENT_SUMMARY_MAX - 1)}…`
+}
 
 /** Tool 状态标签：使用 lucide 图标而不是 Unicode，保持视觉一致。 */
 function renderToolStatus(status: ToolCard["status"]): ReactNode {

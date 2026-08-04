@@ -4,9 +4,14 @@ import { existsSync } from "node:fs"
 import { readFile } from "node:fs/promises"
 import { resolve } from "node:path"
 
+import { bundledSyntaxLanguages } from "./syntax/catalog.generated"
+
 export type WebAssets = {
   script: string
   style: string
+  syntaxWorkerScript: string
+  treeSitterWasm: Uint8Array
+  languageWasms: ReadonlyMap<string, Uint8Array>
 }
 
 /** 根据当前 bundle 模块所在目录解析 source 与 dist 两种运行形态的资源位置。 */
@@ -27,11 +32,7 @@ export function resolveWebBundleLocations(moduleDir: string): {
 }
 
 export async function browserBundle(): Promise<WebAssets> {
-  // source 入口位于 src/web，编译后的 index.js 位于 dist；两种运行形态都要
-  // 找到同一份 dist/web.{js,css}，否则生产 CLI 会错误解析到 packages/dist。
   const locations = resolveWebBundleLocations(import.meta.dir)
-  // 从 src/web 直接运行时始终即时构建源码，避免旧 dist/web.js 掩盖刚修改的
-  // Browser 代码；编译后的 dist/index.js 没有同目录 app.tsx，仍读取发布产物。
   const localSourceEntrypoint = locations.sourceEntrypoints[0]!
   if (existsSync(localSourceEntrypoint)) return buildSourceBundle(localSourceEntrypoint)
   const builtDirectories = locations.builtDirectories
@@ -40,7 +41,13 @@ export async function browserBundle(): Promise<WebAssets> {
     const builtStyle = resolve(directory, "web.css")
     if (!existsSync(built) || !existsSync(builtStyle)) continue
     const [script, style] = await Promise.all([readFile(built, "utf8"), readFile(builtStyle, "utf8")])
-    return { script, style }
+    return {
+      script,
+      style,
+      syntaxWorkerScript: "",
+      treeSitterWasm: new Uint8Array(),
+      languageWasms: new Map(),
+    }
   }
 
   const sourceEntrypoint = locations.sourceEntrypoints.find(entrypoint => existsSync(entrypoint))
@@ -49,20 +56,46 @@ export async function browserBundle(): Promise<WebAssets> {
 }
 
 async function buildSourceBundle(sourceEntrypoint: string): Promise<WebAssets> {
+  const workerEntrypoint = resolve(import.meta.dir, "syntax/worker.ts")
   const result = await Bun.build({
-    entrypoints: [sourceEntrypoint],
+    entrypoints: [sourceEntrypoint, workerEntrypoint],
     target: "browser",
     minify: true,
+    external: ["module", "node:module", "fs", "node:fs", "path", "node:path"],
   })
-  const scriptOutput = result.outputs.find(output => output.path.endsWith(".js"))
+
+  const scriptOutput = result.outputs.find(output => output.path.endsWith("app.js") || output.path.endsWith("app.tsx.js")) ?? result.outputs[0]
   const styleOutput = result.outputs.find(output => output.path.endsWith(".css"))
+  const workerOutput = result.outputs.find(output => output.path.endsWith("worker.js") || output.path.endsWith("worker.ts.js")) ?? result.outputs[1]
+
   if (!result.success || !scriptOutput || !styleOutput) {
     throw new Error(
       result.logs.map(log => log.message).join("\n") || "Web bundle build failed",
     )
   }
+
+  const script = await scriptOutput.text()
+  const style = await styleOutput.text()
+  const syntaxWorkerScript = workerOutput ? await workerOutput.text() : ""
+
+  const treeSitterWasmPath = resolve(import.meta.dir, "../../node_modules/web-tree-sitter/tree-sitter.wasm")
+  const treeSitterWasm = existsSync(treeSitterWasmPath)
+    ? new Uint8Array(await readFile(treeSitterWasmPath))
+    : new Uint8Array()
+
+  const languageWasms = new Map<string, Uint8Array>()
+  for (const entry of bundledSyntaxLanguages) {
+    const wasmPath = resolve(import.meta.dir, `../tui/platform/assets/syntax/${entry.filetype}/${entry.wasmFileName}`)
+    if (existsSync(wasmPath)) {
+      languageWasms.set(entry.assetId, new Uint8Array(await readFile(wasmPath)))
+    }
+  }
+
   return {
-    script: await scriptOutput.text(),
-    style: await styleOutput.text(),
+    script,
+    style,
+    syntaxWorkerScript,
+    treeSitterWasm,
+    languageWasms,
   }
 }

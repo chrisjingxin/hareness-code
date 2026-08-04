@@ -103,6 +103,8 @@ export function makeSnapshot(overrides: Partial<WebAdapterSnapshot> = {}): WebAd
     transientNotice: null,
     scrollRequest: null,
     confirmationId: null,
+    theme: "light",
+    headerMenuOpen: false,
     ...overrides,
   }
 }

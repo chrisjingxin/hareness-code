@@ -7,6 +7,16 @@ import { Check, Loader2 } from "lucide-react"
 import type { ApprovalDecision, InteractiveInteraction, InteractiveQuestion } from "../../interactive/types"
 import type { WebAdapterSnapshot, WebIntent } from "../application/adapter"
 
+/** 把 approval 的 requests（unknown 载荷）安全收敛为 mono 预览 JSON；空或不可序列化时返回 null。 */
+function requestPreview(requests: unknown): string | null {
+  if (!Array.isArray(requests) || requests.length === 0) return null
+  try {
+    return JSON.stringify(requests, null, 2)
+  } catch {
+    return null
+  }
+}
+
 /** approval decision 与中文显示文案；保持与 TUI 列表一致。 */
 const APPROVAL_LABELS: Readonly<Record<ApprovalDecision, string>> = {
   approve_once: "允许一次",
@@ -69,6 +79,7 @@ function ApprovalForm(props: {
   const showFeedback = allowFeedback && decision === "reject_with_feedback"
   const expired = isExpired(interaction.deadlineAtMs)
   const buttonsDisabled = submitting || disabled || expired
+  const preview = requestPreview(interaction.requests)
 
   const handleDecision = (next: ApprovalDecision) => {
     if (buttonsDisabled) return
@@ -111,6 +122,7 @@ function ApprovalForm(props: {
         <Deadline deadlineAtMs={interaction.deadlineAtMs} />
       </header>
       {interaction.description ? <p className="interaction-description">{interaction.description}</p> : null}
+      {preview ? <pre className="approval-request-preview">{preview}</pre> : null}
       <div className="approval-buttons" role="group" aria-label="审批选项">
         {interaction.decisions.map(item => (
           <button

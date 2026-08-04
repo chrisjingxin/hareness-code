@@ -1,7 +1,7 @@
 /** Web 工具面板：model / skills / mcp / status / help；只渲染共享 snapshot 与 WebIntent。 */
 /** @jsxImportSource react */
 
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import {
   Cpu,
   Info,
@@ -13,6 +13,7 @@ import {
   Wrench,
   X,
 } from "lucide-react"
+import { Capability } from "@za38/protocol"
 
 import type { McpServerStatus, ModelProfile } from "@za38/protocol"
 
@@ -29,20 +30,28 @@ import type {
 } from "../../interactive/types"
 import type { WebAdapterSnapshot, WebIntent } from "../application/adapter"
 
+/** 工作台主 tab：只有 capability 允许的 tab 可见；Help 与 Threads 不属于主 tab。 */
+type MainTab = "models" | "skills" | "mcp" | "status"
+
+const MAIN_TABS: readonly MainTab[] = ["models", "skills", "mcp", "status"]
+
 /**
- * 渲染当前激活的工具面板。
+ * 渲染稳定的 Utility workspace：右侧工作台壳 + Model/Skills/MCP/Status 主 tab。
  *
- * `activePanel` 为 null 时返回空节点；其他值在 `utility-drawer` 容器内绘制
- * 标题、搜索（如适用）、关闭按钮与对应领域内容。用户动作只回传稳定 ID 或 typed
+ * `activePanel` 为 null 时返回空节点。主 tab 切换复用 `panel-open` 意图（Adapter 负责
+ * catalog refresh）；Help/Threads 复用同一 372px 外壳但隐藏主 tab。移动端（`narrow`）
+ * 该外壳变为从右侧进入的抽屉，带 scrim 与焦点限制。用户动作只回传稳定 ID 或 typed
  * intent；不直接访问 AgentClient，也不重新计算 capability/busy 状态。
  */
 export function UtilityPanels({
   snapshot,
   dispatch,
+  narrow = false,
   disabled = false,
 }: {
   snapshot: WebAdapterSnapshot
   dispatch: (intent: WebIntent) => void
+  narrow?: boolean
   disabled?: boolean
 }): React.ReactElement {
   const panel = snapshot.activePanel
@@ -50,55 +59,117 @@ export function UtilityPanels({
   const interactive = snapshot.interactive
   const busy = Boolean(interactive.activeRun) || Boolean(interactive.interaction)
   const busyReason = busy ? "当前任务结束后可用" : null
+  const capabilities = new Set(interactive.runtime.capabilities ?? [])
+  const isMainTab = panel === "models" || panel === "skills" || panel === "mcp" || panel === "status"
+  const title = panel === "help" ? "帮助" : panel === "threads" ? "Threads" : "工作台"
+  const drawerRef = useRef<HTMLDivElement | null>(null)
+
+  // 移动端抽屉打开时限制 Tab 焦点在抽屉内并聚焦第一项；关闭后由 WebApp 恢复触发器焦点。
+  useEffect(() => {
+    if (!narrow || panel === null) return
+    const drawer = drawerRef.current
+    if (!drawer) return
+    const focusables = drawer.querySelectorAll<HTMLElement>(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+    )
+    focusables[0]?.focus()
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Tab" || focusables.length === 0) return
+      const first = focusables[0]
+      const last = focusables[focusables.length - 1]
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    drawer.addEventListener("keydown", onKeyDown)
+    return () => drawer.removeEventListener("keydown", onKeyDown)
+  }, [narrow, panel])
 
   return (
-    <aside
-      className="utility-drawer"
-      data-open="true"
-      role="dialog"
-      aria-modal="false"
-      aria-label={panelTitle(panel)}
-    >
-      <header className="utility-drawer-header">
-        <h2 className="utility-drawer-title">{panelTitle(panel)}</h2>
-        <button
-          type="button"
-          className="icon-button panel-close"
-          onClick={() => dispatch({ type: "panel-close" })}
-          disabled={disabled}
-          aria-label="关闭面板"
-        >
-          <X aria-hidden="true" />
-        </button>
-      </header>
-      <div className="utility-drawer-body">
-        {panel === "threads" ? (
-          <ThreadsPanel snapshot={snapshot} dispatch={dispatch} disabled={disabled} />
+    <>
+      <aside
+        ref={drawerRef}
+        className="utility-drawer"
+        data-open="true"
+        role="dialog"
+        aria-modal="false"
+        aria-label={title}
+      >
+        <header className="utility-drawer-header">
+          <h2 className="utility-drawer-title">{title}</h2>
+          <button
+            type="button"
+            className="icon-button panel-close"
+            onClick={() => dispatch({ type: "panel-close" })}
+            disabled={disabled}
+            aria-label="关闭面板"
+          >
+            <X aria-hidden="true" />
+          </button>
+        </header>
+        {isMainTab ? (
+          <div className="workspace-tabs" role="tablist" aria-label="工作台面板">
+            {MAIN_TABS.filter(tab => tabVisible(tab, capabilities)).map(tab => (
+              <button
+                type="button"
+                key={tab}
+                role="tab"
+                id={`workspace-tab-${tab}`}
+                aria-selected={panel === tab}
+                aria-controls={`workspace-panel-${tab}`}
+                className={panel === tab ? "workspace-tab is-selected" : "workspace-tab"}
+                disabled={disabled}
+                onClick={() => dispatch({ type: "panel-open", panel: tab })}
+              >
+                {tabLabel(tab)}
+              </button>
+            ))}
+          </div>
         ) : null}
-        {panel === "models" ? (
-          <ModelsPanel snapshot={snapshot} busyReason={busyReason} disabled={disabled} dispatch={dispatch} />
-        ) : null}
-        {panel === "skills" ? (
-          <SkillsPanel snapshot={snapshot} dispatch={dispatch} disabled={disabled} />
-        ) : null}
-        {panel === "mcp" ? (
-          <McpPanel snapshot={snapshot} dispatch={dispatch} disabled={disabled} />
-        ) : null}
-        {panel === "status" ? <StatusPanel snapshot={snapshot} /> : null}
-        {panel === "help" ? <HelpPanel snapshot={snapshot} /> : null}
-      </div>
-    </aside>
+        <div className="utility-drawer-body" role="tabpanel" id={isMainTab ? `workspace-panel-${panel}` : undefined}>
+          {panel === "threads" ? (
+            <ThreadsPanel snapshot={snapshot} dispatch={dispatch} disabled={disabled} />
+          ) : null}
+          {panel === "models" ? (
+            <ModelsPanel snapshot={snapshot} busyReason={busyReason} disabled={disabled} dispatch={dispatch} />
+          ) : null}
+          {panel === "skills" ? (
+            <SkillsPanel snapshot={snapshot} dispatch={dispatch} disabled={disabled} />
+          ) : null}
+          {panel === "mcp" ? (
+            <McpPanel snapshot={snapshot} dispatch={dispatch} disabled={disabled} />
+          ) : null}
+          {panel === "status" ? <StatusPanel snapshot={snapshot} /> : null}
+          {panel === "help" ? <HelpPanel snapshot={snapshot} /> : null}
+        </div>
+      </aside>
+      {narrow ? (
+        <div className="drawer-scrim" onClick={() => dispatch({ type: "panel-close" })} />
+      ) : null}
+    </>
   )
 }
 
-function panelTitle(panel: Exclude<WebAdapterSnapshot["activePanel"], null>): string {
-  switch (panel) {
-    case "threads": return "Threads"
-    case "models": return "Models"
+/** 主 tab 可见性：只显示 capability 允许的 tab；Status 始终可见。 */
+function tabVisible(tab: MainTab, capabilities: Set<string>): boolean {
+  switch (tab) {
+    case "models": return capabilities.has(Capability.MODELS_READ)
+    case "skills": return capabilities.has(Capability.SKILLS_READ)
+    case "mcp": return capabilities.has(Capability.MCP_READ)
+    case "status": return true
+  }
+}
+
+function tabLabel(tab: MainTab): string {
+  switch (tab) {
+    case "models": return "Model"
     case "skills": return "Skills"
     case "mcp": return "MCP"
     case "status": return "Status"
-    case "help": return "Help"
   }
 }
 

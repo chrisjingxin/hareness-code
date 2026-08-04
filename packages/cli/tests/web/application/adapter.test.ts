@@ -329,7 +329,7 @@ test("plain input submit 产生 input.submit 携带原始 draft；resolve 后才
   const adapter = createWebInteractiveAdapter({ controller, handoff, frameScheduler: scheduler })
   await adapter.dispatch({ type: "draft-change", value: "你好" })
   expect(adapter.getSnapshot().draft).toBe("你好")
-  await adapter.dispatch({ type: "submit", value: "你好" })
+  await adapter.dispatch({ type: "submit" })
   expect(controller.dispatches).toEqual([{ type: "input.submit", value: "你好" }])
   expect(adapter.getSnapshot().draft).toBe("")
   expect(adapter.getSnapshot().scrollRequest).toBe("to-bottom")
@@ -349,7 +349,7 @@ test("普通 submit 继续解释 Controller 的 present/request-exit 结果", as
   const adapter = createWebInteractiveAdapter({ controller, handoff, frameScheduler: scheduler })
 
   await adapter.dispatch({ type: "draft-change", value: "/models" })
-  await adapter.dispatch({ type: "submit", value: "/models" })
+  await adapter.dispatch({ type: "submit" })
   expect(adapter.getSnapshot().activePanel).toBe("models")
   expect(controller.dispatches).toContainEqual({ type: "catalog.refresh", catalog: "models" })
   await adapter.close()
@@ -361,9 +361,12 @@ test("slash input、`//`、未知命令都只转交 controller，不在 adapter 
   const scheduler = createManualScheduler()
   const adapter = createWebInteractiveAdapter({ controller, handoff, frameScheduler: scheduler })
 
-  await adapter.dispatch({ type: "submit", value: "/help" })
-  await adapter.dispatch({ type: "submit", value: "//escape" })
-  await adapter.dispatch({ type: "submit", value: "/no-such-command" })
+  await adapter.dispatch({ type: "draft-change", value: "/help" })
+  await adapter.dispatch({ type: "submit" })
+  await adapter.dispatch({ type: "draft-change", value: "//escape" })
+  await adapter.dispatch({ type: "submit" })
+  await adapter.dispatch({ type: "draft-change", value: "/no-such-command" })
+  await adapter.dispatch({ type: "submit" })
 
   expect(controller.dispatches.map(intent => intent.type)).toEqual([
     "input.submit",
@@ -627,7 +630,8 @@ test("close 幂等：第二次 close 不抛错、不再调用 frameScheduler.can
   await adapter.close()
   await adapter.close()
   // dispatch 在 close 之后是 no-op，不会调用 controller
-  await adapter.dispatch({ type: "submit", value: "ignored" })
+  await adapter.dispatch({ type: "draft-change", value: "ignored" })
+  await adapter.dispatch({ type: "submit" })
   expect(controller.dispatches.find(intent => intent.type === "input.submit" && intent.value === "ignored")).toBeUndefined()
 })
 
@@ -803,5 +807,151 @@ test("snapshot 字段：interactive 是引用而非拷贝；expandedTools 是新
   const second = adapter.getSnapshot()
   expect(second.expandedTools.has("外部工具")).toBe(false)
   expect(second.expandedTools.has("t-2")).toBe(true)
+  void adapter.close()
+})
+
+test("主题初始固定 light，与外部 matchMedia / controller 状态无关", () => {
+  const controller = createFakeController()
+  const handoff = createFakeHandoff()
+  const scheduler = createManualScheduler()
+  const adapter = createWebInteractiveAdapter({ controller, handoff, frameScheduler: scheduler })
+  expect(adapter.getSnapshot().theme).toBe("light")
+  expect(adapter.getSnapshot().headerMenuOpen).toBe(false)
+  void adapter.close()
+})
+
+test("theme-set 更新主题并发布一次；重复设置当前值不重复发布", async () => {
+  const controller = createFakeController()
+  const handoff = createFakeHandoff()
+  const scheduler = createManualScheduler()
+  const adapter = createWebInteractiveAdapter({ controller, handoff, frameScheduler: scheduler })
+  const publications: WebAdapterSnapshot[] = []
+  adapter.subscribe(snapshot => { publications.push(snapshot) })
+  const baseline = publications.length
+
+  await adapter.dispatch({ type: "theme-set", theme: "dark" })
+  scheduler.runScheduled()
+  expect(adapter.getSnapshot().theme).toBe("dark")
+  expect(publications.length).toBe(baseline + 1)
+
+  // 重复设置为当前主题：不产生新发布
+  await adapter.dispatch({ type: "theme-set", theme: "dark" })
+  scheduler.runScheduled()
+  expect(publications.length).toBe(baseline + 1)
+
+  await adapter.dispatch({ type: "theme-set", theme: "light" })
+  scheduler.runScheduled()
+  expect(adapter.getSnapshot().theme).toBe("light")
+  expect(publications.length).toBe(baseline + 2)
+
+  void adapter.close()
+})
+
+test("theme/header menu 意图是纯表现动作：不调用 controller、handoff 或 catalog", async () => {
+  const controller = createFakeController()
+  const handoff = createFakeHandoff()
+  const scheduler = createManualScheduler()
+  const adapter = createWebInteractiveAdapter({ controller, handoff, frameScheduler: scheduler })
+
+  await adapter.dispatch({ type: "theme-set", theme: "dark" })
+  await adapter.dispatch({ type: "header-menu-toggle", open: true })
+  await adapter.dispatch({ type: "header-menu-toggle", open: false })
+
+  expect(controller.dispatches).toEqual([])
+  expect(handoff.state.returnCalls).toBe(0)
+  expect(handoff.state.exitCalls).toBe(0)
+  void adapter.close()
+})
+
+test("header menu 关闭规则：选择主题/打开 Help/返回 TUI/退出都先关闭菜单", async () => {
+  const controller = createFakeController()
+  const handoff = createFakeHandoff()
+  const scheduler = createManualScheduler()
+  const adapter = createWebInteractiveAdapter({ controller, handoff, frameScheduler: scheduler })
+
+  await adapter.dispatch({ type: "header-menu-toggle", open: true })
+  expect(adapter.getSnapshot().headerMenuOpen).toBe(true)
+  await adapter.dispatch({ type: "theme-set", theme: "dark" })
+  expect(adapter.getSnapshot().headerMenuOpen).toBe(false)
+
+  await adapter.dispatch({ type: "header-menu-toggle", open: true })
+  await adapter.dispatch({ type: "panel-open", panel: "help" })
+  expect(adapter.getSnapshot().headerMenuOpen).toBe(false)
+  expect(adapter.getSnapshot().activePanel).toBe("help")
+
+  await adapter.dispatch({ type: "panel-close" })
+  await adapter.dispatch({ type: "header-menu-toggle", open: true })
+  await adapter.dispatch({ type: "return-to-tui" })
+  expect(adapter.getSnapshot().headerMenuOpen).toBe(false)
+  expect(handoff.state.returnCalls).toBe(1)
+  await adapter.close()
+
+  const exitController = createFakeController()
+  const exitHandoff = createFakeHandoff()
+  const exitScheduler = createManualScheduler()
+  const exitAdapter = createWebInteractiveAdapter({ controller: exitController, handoff: exitHandoff, frameScheduler: exitScheduler })
+  await exitAdapter.dispatch({ type: "header-menu-toggle", open: true })
+  await exitAdapter.dispatch({ type: "exit-harness" })
+  expect(exitAdapter.getSnapshot().headerMenuOpen).toBe(false)
+  expect(exitHandoff.state.exitCalls).toBe(1)
+  await exitAdapter.close()
+})
+
+test("连接变为只读时关闭 header menu 并立即发布", async () => {
+  const controller = createFakeController()
+  const handoff = createFakeHandoff()
+  const scheduler = createManualScheduler()
+  const adapter = createWebInteractiveAdapter({ controller, handoff, frameScheduler: scheduler })
+
+  await adapter.dispatch({ type: "header-menu-toggle", open: true })
+  expect(adapter.getSnapshot().headerMenuOpen).toBe(true)
+
+  controller.setConnection({ status: "closed", message: "transport closed" })
+  controller.emit()
+  expect(adapter.getSnapshot().headerMenuOpen).toBe(false)
+  expect(adapter.getSnapshot().interactive.connection.status).toBe("closed")
+  void adapter.close()
+})
+
+test("close 之后 theme/header menu intent 安全 no-op", async () => {
+  const controller = createFakeController()
+  const handoff = createFakeHandoff()
+  const scheduler = createManualScheduler()
+  const adapter = createWebInteractiveAdapter({ controller, handoff, frameScheduler: scheduler })
+  await adapter.close()
+
+  await adapter.dispatch({ type: "theme-set", theme: "dark" })
+  await adapter.dispatch({ type: "header-menu-toggle", open: true })
+  expect(adapter.getSnapshot().theme).toBe("light")
+  expect(adapter.getSnapshot().headerMenuOpen).toBe(false)
+  expect(controller.dispatches).toEqual([])
+})
+
+test("移动端抽屉互斥：打开 Thread 抽屉关闭面板，打开面板关闭抽屉，选择 Thread 关闭抽屉", async () => {
+  const controller = createFakeController({ threadId: "thread-1" })
+  const handoff = createFakeHandoff()
+  const scheduler = createManualScheduler()
+  const adapter = createWebInteractiveAdapter({ controller, handoff, frameScheduler: scheduler })
+
+  await adapter.dispatch({ type: "panel-open", panel: "models" })
+  expect(adapter.getSnapshot().activePanel).toBe("models")
+
+  // 打开 Thread 抽屉：右侧面板收起
+  await adapter.dispatch({ type: "sidebar-toggle", open: true })
+  expect(adapter.getSnapshot().sidebarOpen).toBe(true)
+  expect(adapter.getSnapshot().activePanel).toBeNull()
+
+  // 打开面板：左侧抽屉收起
+  await adapter.dispatch({ type: "panel-open", panel: "status" })
+  expect(adapter.getSnapshot().activePanel).toBe("status")
+  expect(adapter.getSnapshot().sidebarOpen).toBe(false)
+
+  // 选中 Thread：抽屉自动收起
+  await adapter.dispatch({ type: "sidebar-toggle", open: true })
+  expect(adapter.getSnapshot().sidebarOpen).toBe(true)
+  await adapter.dispatch({ type: "thread-select", threadId: "thread-9" })
+  expect(adapter.getSnapshot().sidebarOpen).toBe(false)
+  expect(controller.dispatches).toContainEqual({ type: "thread.open", threadId: "thread-9" })
+
   void adapter.close()
 })

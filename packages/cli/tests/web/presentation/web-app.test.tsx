@@ -54,11 +54,13 @@ describe("WebApp", () => {
     const { adapter, handle } = mountWebApp(false, makeSnapshot())
     try {
       const opening = handle.container.querySelector(".web-shell")
-      expect(opening?.classList.contains("is-opening")).toBe(true)
+      expect(opening?.getAttribute("data-active")).toBe("false")
+      expect(opening?.getAttribute("data-theme")).toBe("light")
       const handoff = handle.container.querySelector(".handoff-banner")
       expect(handoff?.textContent).toContain("等待 CLI 确认控制权")
-      const statusPill = handle.container.querySelector(".status-pill.status-home")
-      expect(statusPill?.textContent).toBe("正在接管")
+      const statusChips = handle.container.querySelectorAll(".topbar-meta .meta-chip")
+      const statusChip = statusChips[statusChips.length - 1]
+      expect(statusChip?.textContent).toContain("正在接管")
       const composer = handle.container.querySelector<HTMLTextAreaElement>(".composer-textarea")
       expect(composer?.disabled).toBe(true)
       expect(adapter.intentLog.length).toBe(0)
@@ -71,7 +73,7 @@ describe("WebApp", () => {
     const { handle } = mountWebApp(true, makeSnapshot({ draft: "hello" }))
     try {
       const opening = handle.container.querySelector(".web-shell")
-      expect(opening?.classList.contains("is-active")).toBe(true)
+      expect(opening?.getAttribute("data-active")).toBe("true")
       expect(handle.container.querySelector(".handoff-banner")).toBeNull()
       const composer = handle.container.querySelector<HTMLTextAreaElement>(".composer-textarea")
       expect(composer?.disabled).toBe(false)
@@ -106,6 +108,63 @@ describe("WebApp", () => {
       })
       const updated = handle.container.querySelector<HTMLTextAreaElement>(".composer-textarea")
       expect(updated?.value).toBe("second")
+    } finally {
+      handle.unmount()
+    }
+  })
+
+  test("data-theme 跟随 snapshot.theme 变化；theme-set 派发到 adapter", () => {
+    const adapter = createFakeAdapter(makeSnapshot())
+    const handle = render(<WebApp adapter={adapter} active={true} />)
+    try {
+      const shell = handle.container.querySelector(".web-shell")
+      expect(shell?.getAttribute("data-theme")).toBe("light")
+      act(() => {
+        adapter.emit(makeSnapshot({ theme: "dark" }))
+      })
+      expect(shell?.getAttribute("data-theme")).toBe("dark")
+    } finally {
+      handle.unmount()
+    }
+  })
+
+  test("overflow trigger 具备 aria-haspopup/aria-expanded；打开菜单后主题项文案表达下一动作", () => {
+    const adapter = createFakeAdapter(makeSnapshot())
+    const handle = render(<WebApp adapter={adapter} active={true} />)
+    try {
+      const trigger = handle.container.querySelector<HTMLButtonElement>(".overflow-trigger")
+      expect(trigger?.getAttribute("aria-haspopup")).toBe("menu")
+      expect(trigger?.getAttribute("aria-expanded")).toBe("false")
+      expect(handle.container.querySelector(".header-menu")).toBeNull()
+
+      act(() => { trigger?.click() })
+      expect(adapter.intentLog).toContainEqual({ type: "header-menu-toggle", open: true })
+
+      act(() => {
+        adapter.emit(makeSnapshot({ headerMenuOpen: true }))
+      })
+      const menu = handle.container.querySelector(".header-menu")
+      expect(menu).not.toBeNull()
+      expect(trigger?.getAttribute("aria-expanded")).toBe("true")
+      const themeItem = Array.from(handle.container.querySelectorAll<HTMLButtonElement>(".header-menu-item"))
+        .find(item => item.textContent?.includes("主题"))
+      expect(themeItem?.textContent).toBe("使用深色主题")
+
+      act(() => { themeItem?.click() })
+      expect(adapter.intentLog).toContainEqual({ type: "theme-set", theme: "dark" })
+    } finally {
+      handle.unmount()
+    }
+  })
+
+  test("Escape 优先级：header menu 打开时先关闭菜单而非关闭 panel", () => {
+    const adapter = createFakeAdapter(makeSnapshot({ headerMenuOpen: true, activePanel: "status" }))
+    const handle = render(<WebApp adapter={adapter} active={true} />)
+    try {
+      const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })
+      window.dispatchEvent(event)
+      expect(adapter.intentLog).toContainEqual({ type: "header-menu-toggle", open: false })
+      expect(adapter.intentLog.find(intent => intent.type === "panel-close")).toBeUndefined()
     } finally {
       handle.unmount()
     }

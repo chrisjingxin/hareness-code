@@ -56,9 +56,9 @@ describe("ThreadSidebar", () => {
     })
     const handle = mountSidebar(makeSnapshot({ interactive }), intents, false)
     try {
-      const newButton = handle.container.querySelector<HTMLButtonElement>(".sidebar-new")
+      const newButton = handle.container.querySelector<HTMLButtonElement>(".new-thread-button")
       expect(newButton?.disabled).toBe(true)
-      expect(handle.container.querySelector(".sidebar-disabled-reason")?.textContent).toBe("当前任务结束后可用")
+      expect(newButton?.title).toBe("当前任务结束后可用")
       const items = Array.from(handle.container.querySelectorAll<HTMLButtonElement>(".thread-item"))
       const inactive = items.find(button => button.getAttribute("data-active") === "false")
       expect(inactive?.disabled).toBe(true)

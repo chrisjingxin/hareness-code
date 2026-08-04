@@ -80,7 +80,7 @@ describe("Composer", () => {
       act(() => {
         pressKey(textarea!, { key: "Enter" })
       })
-      expect(intents[0]).toEqual({ type: "submit", value: "你好" })
+      expect(intents[0]).toEqual({ type: "submit" })
       intents.length = 0
       act(() => {
         pressKey(textarea!, { key: "Enter", shiftKey: true })

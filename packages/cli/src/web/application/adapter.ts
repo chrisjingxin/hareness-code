@@ -17,6 +17,9 @@ export type WebFrameScheduler = {
 /** Web 表现层使用的语义面板标识；null 表示当前没有主面板。 */
 export type WebPanel = "threads" | "models" | "skills" | "mcp" | "status" | "help" | null
 
+/** Web 页面主题：纯表现状态，只属于当前 Web 接管，不持久化、不跟随系统主题。 */
+export type WebTheme = "light" | "dark"
+
 /** 面板共用的提交/搜索状态：搜索词、提交中、局部错误都属于表现层。 */
 export type WebPanelSearchState = {
   readonly query: string
@@ -47,6 +50,10 @@ export type WebAdapterSnapshot = {
   readonly interactive: InteractiveSnapshot
   /** 当前输入草稿；提交后由 Adapter 自行清空。 */
   readonly draft: string
+  /** Composer 正在提交中。 */
+  readonly composerSubmitting: boolean
+  /** Composer 提交或输入错误提示。 */
+  readonly composerError: string | null
   /** 命令菜单可见性；`//` 与未知命令均不显示菜单。 */
   readonly commandMenuOpen: boolean
   /** 命令菜单选中索引；菜单不可见时无意义。 */
@@ -70,12 +77,17 @@ export type WebAdapterSnapshot = {
   readonly scrollRequest: WebScrollRequest
   /** 当前确认对话框的稳定 ID；用于 confirmation.resolve。 */
   readonly confirmationId: string | null
+  /** 当前页面的主题；每次新 Web 接管固定从 light 开始，不读取系统主题。 */
+  readonly theme: WebTheme
+  /** 顶栏 overflow menu 是否打开；主题/帮助/返回/退出动作都从这里发起。 */
+  readonly headerMenuOpen: boolean
 }
 
 /** React / DOM 事件通过这些语义意图驱动 Adapter；不允许携带 DOM event。 */
 export type WebIntent =
   | { type: "draft-change"; value: string }
-  | { type: "submit"; value: string }
+  | { type: "submit" }
+  | { type: "composer-error-dismiss" }
   | { type: "command-menu-open" }
   | { type: "command-menu-close" }
   | { type: "command-menu-select"; item: CommandMenuItem }
@@ -98,6 +110,8 @@ export type WebIntent =
   | { type: "tool-toggle"; toolId: string }
   | { type: "cancel-run" }
   | { type: "sidebar-toggle"; open: boolean }
+  | { type: "theme-set"; theme: WebTheme }
+  | { type: "header-menu-toggle"; open: boolean }
   | { type: "return-to-tui" }
   | { type: "exit-harness" }
 
@@ -141,11 +155,15 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
 
   private snapshot: WebAdapterSnapshot
   private draft = ""
+  private composerSubmittingFlag = false
+  private composerErrorStr: string | null = null
   private commandMenuOpenFlag = false
   private commandMenuIndex = 0
   private activePanel: WebPanel = null
   private readonly panelState: Record<PanelSlot, PanelState> = createEmptyPanelState()
   private sidebarOpenFlag = false
+  private theme: WebTheme = "light"
+  private headerMenuOpenFlag = false
   private expandedTools: Set<string> = new Set()
   private interactionDraft: WebInteractionDraft | null = null
   private leavingFlag = false
@@ -189,7 +207,11 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
         this.updateDraft(intent.value)
         return
       case "submit":
-        await this.submit(intent.value)
+        await this.submit()
+        return
+      case "composer-error-dismiss":
+        this.composerErrorStr = null
+        this.publishNow()
         return
       case "command-menu-open":
         this.openCommandMenu()
@@ -257,7 +279,15 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
         return
       case "sidebar-toggle":
         this.sidebarOpenFlag = intent.open
+        // 移动端 Thread 抽屉与 Utility 面板互斥：打开抽屉时收起右侧面板。
+        if (intent.open) this.activePanel = null
         this.schedulePublish()
+        return
+      case "theme-set":
+        this.setTheme(intent.theme)
+        return
+      case "header-menu-toggle":
+        this.setHeaderMenuOpen(intent.open)
         return
       case "return-to-tui":
         await this.returnToTui()
@@ -287,6 +317,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
       return
     }
     if (connectionChanged(previous.connection, next.connection)) {
+      this.closeHeaderMenu()
       this.publishNow()
       return
     }
@@ -328,6 +359,8 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     return {
       interactive,
       draft: this.draft,
+      composerSubmitting: this.composerSubmittingFlag,
+      composerError: this.composerErrorStr,
       commandMenuOpen: this.commandMenuOpenFlag,
       commandMenuIndex: this.commandMenuIndex,
       commandOptions: filterCommandMenuItems(interactive.commands, this.draft),
@@ -340,34 +373,53 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
       transientNotice: this.transientNotice,
       scrollRequest: this.pendingScrollRequest,
       confirmationId: interactive.confirmation?.confirmationId ?? null,
+      theme: this.theme,
+      headerMenuOpen: this.headerMenuOpenFlag,
     }
   }
 
   /** draft 变化：只有 `/` 前缀且未进入参数区、未转义时才打开命令菜单。 */
   private updateDraft(value: string): void {
     this.draft = value
+    this.composerErrorStr = null
     const query = value.trimStart()
     const shouldShowMenu = query.startsWith("/") && !query.startsWith("//") && !query.slice(1).match(/\s/)
     this.commandMenuOpenFlag = shouldShowMenu
     if (shouldShowMenu) this.commandMenuIndex = 0
-    this.schedulePublish()
+    this.publishNow()
   }
 
-  /** 把当前 draft 提交给 Controller；只有成功发出 intent 后才清空 draft。 */
-  private async submit(rawValue: string): Promise<void> {
-    const value = rawValue.trim()
-    if (!value) return
-    const previousDraft = this.draft
-    // 先发出 intent，Controller 统一解释 Slash/转义/未知命令/普通消息；不重写 draft。
-    const result = await this.controller.dispatch({ type: "input.submit", value: rawValue })
-    await this.handleInteractiveResult(result)
-    if (this.closed) return
-    // 成功后才清空 draft，避免 Controller 拒绝/通知时用户输入丢失。
-    if (this.draft === previousDraft) this.draft = ""
-    this.commandMenuOpenFlag = false
-    this.commandMenuIndex = 0
-    this.pendingScrollRequest = "to-bottom"
+  /** 把当前 draft 提交给 Controller；从 Adapter 当前 draft 读取，不信任外部传入值。 */
+  private async submit(): Promise<void> {
+    const submittedDraft = this.draft
+    const value = submittedDraft.trim()
+    const interactive = this.controller.getSnapshot()
+    if (!value || this.composerSubmittingFlag || this.leavingFlag || interactive.connection.status !== "open" || Boolean(interactive.activeRun)) {
+      return
+    }
+    this.composerSubmittingFlag = true
+    this.composerErrorStr = null
     this.publishNow()
+
+    try {
+      const result = await this.controller.dispatch({ type: "input.submit", value: submittedDraft })
+      await this.handleInteractiveResult(result)
+      if (this.closed) return
+      if (this.draft === submittedDraft) {
+        this.draft = ""
+      }
+      this.commandMenuOpenFlag = false
+      this.commandMenuIndex = 0
+      this.pendingScrollRequest = "to-bottom"
+    } catch (error) {
+      if (this.closed) return
+      this.composerErrorStr = errorMessage(error)
+    } finally {
+      if (!this.closed) {
+        this.composerSubmittingFlag = false
+        this.publishNow()
+      }
+    }
   }
 
   /** 打开命令菜单并保留当前输入语义；与 TUI Adapter 行为保持一致。 */
@@ -415,6 +467,9 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
   /** 打开某个面板：先重置该面板的局部状态，再 dispatch catalog.refresh。 */
   private openPanel(panel: PanelSlot): void {
     this.activePanel = panel
+    this.closeHeaderMenu()
+    // 移动端 Utility 抽屉与 Thread 抽屉互斥：打开面板时收起左侧抽屉。
+    this.sidebarOpenFlag = false
     this.panelState[panel] = { query: "", submitting: false, error: null }
     this.schedulePublish()
     const catalog = panel === "status" || panel === "help" ? null : panel
@@ -430,6 +485,26 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     this.schedulePublish()
   }
 
+  /** 显式设置主题；与当前主题相同时不重复发布，设置后总是先关闭 header menu。 */
+  private setTheme(theme: WebTheme): void {
+    if (this.theme === theme) return
+    this.theme = theme
+    this.closeHeaderMenu()
+    this.schedulePublish()
+  }
+
+  /** 打开/关闭顶栏 overflow menu；菜单状态属于本次接管的纯表现状态。 */
+  private setHeaderMenuOpen(open: boolean): void {
+    if (this.headerMenuOpenFlag === open) return
+    this.headerMenuOpenFlag = open
+    this.schedulePublish()
+  }
+
+  /** 菜单关闭规则：选择主题、打开面板、开始 leaving 或连接变化时统一关闭。 */
+  private closeHeaderMenu(): void {
+    this.setHeaderMenuOpen(false)
+  }
+
   /** 写入面板搜索词；adapter 只记录表现状态，不直接驱动 Controller。 */
   private updatePanelSearch(panel: PanelSlot, query: string): void {
     this.panelState[panel] = { ...this.panelState[panel], query, error: null }
@@ -439,6 +514,8 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
   /** 切换 Thread：依赖 Controller 做 generation 校验。 */
   private async selectThread(threadId: string): Promise<void> {
     this.activePanel = null
+    // 移动端选中 Thread 后自动收起抽屉；桌面端该 flag 始终为 false，无副作用。
+    this.sidebarOpenFlag = false
     this.publishNow()
     await this.controller.dispatch({ type: "thread.open", threadId })
   }
@@ -527,6 +604,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
 
   /** 归还控制权：active Run/Interaction 必须在本地阻止，不调用 handoff。 */
   private async returnToTui(): Promise<void> {
+    this.closeHeaderMenu()
     const interactive = this.controller.getSnapshot()
     if (interactive.activeRun) {
       this.showTransientNotice("当前任务结束或交互完成后可返回 TUI。")
@@ -549,6 +627,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
 
   /** 退出 Harness：只走 handoff.requestExit，不调用 process.exit。 */
   private async exitHarness(): Promise<void> {
+    this.closeHeaderMenu()
     this.leavingFlag = true
     this.publishNow()
     try {

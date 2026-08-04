@@ -4,6 +4,8 @@
 import { lexer, type Token, type Tokens } from "marked"
 import type { ReactElement, ReactNode } from "react"
 
+import { CodeBlock } from "./code-block"
+
 /**
  * 渲染支持 GFM 的安全 Markdown。
  *
@@ -56,11 +58,7 @@ function renderBlock(token: Token, key: string): ReactNode {
     }
     case "code": {
       const code = token as Tokens.Code
-      return (
-        <pre key={key} className="markdown-code">
-          <code data-language={code.lang || undefined}>{code.text}</code>
-        </pre>
-      )
+      return <CodeBlock key={key} code={code.text} language={code.lang} />
     }
     case "hr":
       return <hr key={key} />

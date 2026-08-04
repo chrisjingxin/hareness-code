@@ -30,7 +30,7 @@ const COMMON_HEADERS = {
 
 const HTML_CSP = [
   "default-src 'none'",
-  "script-src 'self'",
+  "script-src 'self' 'wasm-unsafe-eval'",
   "style-src 'self'",
   "connect-src ws://127.0.0.1:*",
   "base-uri 'none'",
@@ -41,7 +41,13 @@ const HTML_CSP = [
 /** 创建只服务当前 handoff 的本机静态 server；start 前不绑定端口。 */
 export function createWebServer(options: WebServerOptions): WebServer {
   let server: ReturnType<typeof Bun.serve<BunWebSocketData>> | undefined
-  let assets: WebAssets = { script: "", style: "" }
+  let assets: WebAssets = {
+    script: "",
+    style: "",
+    syntaxWorkerScript: "",
+    treeSitterWasm: new Uint8Array(),
+    languageWasms: new Map(),
+  }
   const queues = new WeakMap<BunServerWebSocket, AsyncQueue<unknown>>()
 
   const origin = () => (server ? `http://127.0.0.1:${server.port}` : "")
@@ -65,6 +71,30 @@ export function createWebServer(options: WebServerOptions): WebServer {
         return new Response("Method Not Allowed", { status: 405 })
       }
       return staticResponse("text/css; charset=utf-8", assets.style)
+    }
+    if (path === "/web/syntax-worker.js") {
+      if (request.method !== "GET" || isUpgrade) {
+        return new Response("Method Not Allowed", { status: 405 })
+      }
+      return staticResponse("text/javascript; charset=utf-8", assets.syntaxWorkerScript || "")
+    }
+    if (path === "/web/syntax/tree-sitter.wasm") {
+      if (request.method !== "GET" || isUpgrade) {
+        return new Response("Method Not Allowed", { status: 405 })
+      }
+      return binaryResponse("application/wasm", assets.treeSitterWasm || new Uint8Array())
+    }
+    const langWasmMatch = path.match(/^\/web\/syntax\/lang\/([a-zA-Z0-9_-]+)\.wasm$/)
+    if (langWasmMatch) {
+      if (request.method !== "GET" || isUpgrade) {
+        return new Response("Method Not Allowed", { status: 405 })
+      }
+      const assetId = langWasmMatch[1]
+      const wasm = assets.languageWasms?.get(assetId)
+      if (!wasm) {
+        return new Response("Not Found", { status: 404 })
+      }
+      return binaryResponse("application/wasm", wasm)
     }
     const match = matchHandoffPath(path)
     if (!match) return new Response("Not Found", { status: 404 })
@@ -132,8 +162,7 @@ export function createWebServer(options: WebServerOptions): WebServer {
         try {
           server = Bun.serve<BunWebSocketData>({
             hostname: "127.0.0.1",
-            // 当前 Bun runner 对 port 0 的行为不一致；随机非特权端口并在碰撞时重试。
-            port: randomLoopbackPort(),
+            port: randomLoopbackPort(attempt),
             fetch: handleFetch,
             websocket,
           })
@@ -152,7 +181,8 @@ export function createWebServer(options: WebServerOptions): WebServer {
   }
 }
 
-function randomLoopbackPort(): number {
+function randomLoopbackPort(attempt: number): number {
+  if (attempt === 0) return 0
   return 40_000 + Math.floor(Math.random() * 20_000)
 }
 
@@ -183,6 +213,12 @@ function decodePathSegment(value: string): string | undefined {
 
 function staticResponse(contentType: string, body: string): Response {
   return new Response(body, {
+    headers: { "content-type": contentType, ...COMMON_HEADERS },
+  })
+}
+
+function binaryResponse(contentType: string, body: Uint8Array): Response {
+  return new Response(body as unknown as BodyInit, {
     headers: { "content-type": contentType, ...COMMON_HEADERS },
   })
 }

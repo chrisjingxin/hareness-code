@@ -25,6 +25,7 @@ const platformRoot = resolve(import.meta.dir, "../src/tui/platform")
 const assetsRoot = resolve(platformRoot, "assets/syntax")
 const outputPath = resolve(platformRoot, "generated-syntax-parsers.ts")
 const manifestPath = resolve(assetsRoot, "manifest.json")
+const webCatalogPath = resolve(import.meta.dir, "../src/web/syntax/catalog.generated.ts")
 
 /**
  * 此脚本只在维护 parser 版本时运行。它会重新建立资源目录，避免已删除语言的
@@ -55,6 +56,7 @@ async function main(): Promise<void> {
 
   await writeFile(manifestPath, `${JSON.stringify({ version: 1, parsers: manifest }, null, 2)}\n`, "utf8")
   await writeFile(outputPath, renderGeneratedParsers(parsers), "utf8")
+  await writeFile(webCatalogPath, renderWebCatalog(parsers), "utf8")
 }
 
 /** 下载阶段保留系统 TLS 校验；企业代理异常应在维护环境解决，不能降低 CLI 运行时安全性。 */
@@ -111,6 +113,30 @@ function renderGeneratedParsers(parsers: readonly ParserConfig[]): string {
     return `  { filetype: "${parser.filetype}", ${aliases}wasm: ${id}Wasm, queries: { highlights: [${id}Highlights]${injections} }${mapping} },`
   }).join("\n")
   return `// 此文件由 scripts/vendor-syntax-assets.ts 生成，请勿手动编辑。\nimport type { FiletypeParserOptions } from "@opentui/core"\n\n${imports}\n\nexport const bundledSyntaxParsers = [\n${definitions}\n] as const satisfies readonly FiletypeParserOptions[]\n`
+}
+
+/** 生成 Web 专用的只读 Catalog。 */
+function renderWebCatalog(parsers: readonly ParserConfig[]): string {
+  const languageEntries = parsers.map(parser => {
+    const id = parser.filetype.replaceAll(/[^a-zA-Z0-9]/g, "_")
+    const aliases = parser.aliases ? JSON.stringify(parser.aliases) : "[]"
+    const wasmFileName = basename(new URL(parser.wasm).pathname)
+    return `  {\n    filetype: "${parser.filetype}",\n    aliases: ${aliases},\n    assetId: "${id}",\n    wasmFileName: "${wasmFileName}",\n  },`
+  }).join("\n")
+
+  return `// 此文件由 scripts/vendor-syntax-assets.ts 生成，请勿手动编辑。
+
+export type WebCatalogEntry = {
+  readonly filetype: string
+  readonly aliases: readonly string[]
+  readonly assetId: string
+  readonly wasmFileName: string
+}
+
+export const bundledSyntaxLanguages: readonly WebCatalogEntry[] = [
+${languageEntries}
+] as const
+`
 }
 
 await main()
