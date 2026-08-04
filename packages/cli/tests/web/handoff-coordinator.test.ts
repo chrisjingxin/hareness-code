@@ -177,13 +177,27 @@ async function openAndAccept(h: Harness): Promise<{ channel: FakeChannel; handof
   return { channel, handoffId: opening.handoffId }
 }
 
-async function activate(h: Harness, channel: FakeChannel, attachmentId: string): Promise<void> {
+async function activate(
+  h: Harness,
+  channel: FakeChannel,
+  attachmentId: string,
+  readyThreadId: string | null = "thread-1",
+): Promise<void> {
   h.host.status = {
     state: "attached",
     holder: { connection_id: "web-1", role: "attached", attachment_id: attachmentId },
   }
-  channel.messages.push(JSON.stringify({ type: "ready" }))
+  channel.messages.push(JSON.stringify({ type: "ready", thread_id: readyThreadId }))
   await waitFor(() => h.coordinator.getSnapshot().phase === "active")
+  await waitFor(() => channel.sent.some(message => message.type === "active"))
+}
+
+function pushReady(channel: FakeChannel, threadId: string | null): void {
+  channel.messages.push(JSON.stringify({ type: "ready", thread_id: threadId }))
+}
+
+function pushExitRequested(channel: FakeChannel): void {
+  channel.messages.push(JSON.stringify({ type: "exit.requested" }))
 }
 
 test("初始 snapshot 是 idle，且不携带凭据", () => {
@@ -229,7 +243,7 @@ test("第一个 lifecycle 被 accepted，第二个收到 already-open 且不影�
 test("ready 但 Host status 不是 matching attachment 时进入 cleanup", async () => {
   const h = createHarness()
   const { channel } = await openAndAccept(h)
-  channel.messages.push(JSON.stringify({ type: "ready" }))
+  pushReady(channel, "thread-1")
   await waitFor(() => h.coordinator.getSnapshot().phase === "idle")
   expect(h.host.revoked).toHaveLength(1)
   const snapshot = h.coordinator.getSnapshot()
@@ -239,7 +253,55 @@ test("ready 但 Host status 不是 matching attachment 时进入 cleanup", async
   h.unsubscribe()
 })
 
-test("matching holder 后进入 active/tuiLocked，thread.changed 可切换 null", async () => {
+test("ready 携带的最终 thread_id 覆盖 open 初值，restoreThreadId 记录它", async () => {
+  const h = createHarness()
+  // open(null) 表示没有恢复任何 Thread；ready 帧携带 Browser 实际恢复后的 ID。
+  await h.coordinator.open(null)
+  const opening = h.coordinator.getSnapshot()
+  if (opening.phase !== "opening") throw new Error("expected opening")
+  expect(opening.threadId).toBeNull()
+  const channel = new FakeChannel()
+  await h.coordinator.attachLifecycle(opening.handoffId, channel)
+  h.host.status = {
+    state: "attached",
+    holder: { connection_id: "web-1", role: "attached", attachment_id: h.host.created[0].attachment_id },
+  }
+  pushReady(channel, "thread-restored")
+  await waitFor(() => h.coordinator.getSnapshot().phase === "active")
+  // active snapshot 反映的是 ready 帧的最终 thread_id，而非 open() 的 null。
+  const active = h.coordinator.getSnapshot()
+  if (active.phase !== "active") throw new Error("expected active")
+  expect(active.threadId).toBe("thread-restored")
+
+  channel.messages.push(JSON.stringify({ type: "released" }))
+  await waitFor(() => h.coordinator.getSnapshot().phase === "idle")
+  const idle = h.coordinator.getSnapshot()
+  if (idle.phase !== "idle") throw new Error("expected idle")
+  expect(idle.restoreThreadId).toBe("thread-restored")
+  expect(idle.handoffVersion).toBe(1)
+  h.unsubscribe()
+})
+
+test("ready 携带 null thread_id 表示 Browser 完成恢复为新 Thread", async () => {
+  const h = createHarness()
+  await h.coordinator.open("thread-old")
+  const opening = h.coordinator.getSnapshot()
+  if (opening.phase !== "opening") throw new Error("expected opening")
+  const channel = new FakeChannel()
+  await h.coordinator.attachLifecycle(opening.handoffId, channel)
+  h.host.status = {
+    state: "attached",
+    holder: { connection_id: "web-1", role: "attached", attachment_id: h.host.created[0].attachment_id },
+  }
+  pushReady(channel, null)
+  await waitFor(() => h.coordinator.getSnapshot().phase === "active")
+  const active = h.coordinator.getSnapshot()
+  if (active.phase !== "active") throw new Error("expected active")
+  expect(active.threadId).toBeNull()
+  h.unsubscribe()
+})
+
+test("matching holder 后进入 active/tuiLocked，并向 primary 发送 active ack", async () => {
   const h = createHarness()
   const { channel } = await openAndAccept(h)
   await activate(h, channel, h.host.created[0].attachment_id)
@@ -247,6 +309,11 @@ test("matching holder 后进入 active/tuiLocked，thread.changed 可切换 null
   if (active.phase !== "active") throw new Error("expected active")
   expect(active.tuiLocked).toBe(true)
   expect(active.threadId).toBe("thread-1")
+  // 顺序：accepted → active 一定在 ready 校验通过后由 coordinator 主动发出。
+  expect(channel.sent).toEqual([
+    { type: "accepted" },
+    { type: "active" },
+  ])
 
   channel.messages.push(JSON.stringify({ type: "thread.changed", thread_id: "thread-9" }))
   await waitFor(() => h.coordinator.getSnapshot().phase === "active"
@@ -264,15 +331,15 @@ test("matching holder 后进入 active/tuiLocked，thread.changed 可切换 null
   h.unsubscribe()
 })
 
-test("重复 ready 幂等忽略，不会触发第二次状态转换", async () => {
+test("active 阶段重复 ready 按 lifecycle 状态机拒绝", async () => {
   const h = createHarness()
   const { channel } = await openAndAccept(h)
   await activate(h, channel, h.host.created[0].attachment_id)
-  channel.messages.push(JSON.stringify({ type: "ready" }))
+  channel.messages.push(JSON.stringify({ type: "ready", thread_id: "thread-2" }))
   await new Promise(resolve => setTimeout(resolve, 5))
   const snapshot = h.coordinator.getSnapshot()
-  expect(snapshot.phase).toBe("active")
-  expect(h.host.revoked).toHaveLength(0)
+  expect(snapshot.phase).toBe("idle")
+  if (snapshot.phase === "idle") expect(snapshot.restoreThreadId).toBe("thread-1")
   h.unsubscribe()
 })
 
@@ -414,9 +481,23 @@ test("未知 handoff 的 channel 收到 invalid-handoff", async () => {
 test("parseLifecycleMessage 只接受精确的合法消息", () => {
   expect(parseLifecycleMessage({ type: "ready" })).toBeUndefined()
   expect(parseLifecycleMessage("not json")).toBeUndefined()
-  expect(parseLifecycleMessage(JSON.stringify({ type: "ready" }))).toEqual({ type: "ready" })
-  expect(parseLifecycleMessage(JSON.stringify({ type: "ready", extra: 1 }))).toBeUndefined()
+  // ready 必须携带 thread_id。
+  expect(parseLifecycleMessage(JSON.stringify({ type: "ready" }))).toBeUndefined()
+  expect(parseLifecycleMessage(JSON.stringify({ type: "ready", thread_id: null })))
+    .toEqual({ type: "ready", thread_id: null })
+  expect(parseLifecycleMessage(JSON.stringify({ type: "ready", thread_id: "t" })))
+    .toEqual({ type: "ready", thread_id: "t" })
+  expect(parseLifecycleMessage(JSON.stringify({ type: "ready", thread_id: "" }))).toBeUndefined()
+  expect(parseLifecycleMessage(JSON.stringify({ type: "ready", thread_id: "x".repeat(257) }))).toBeUndefined()
+  expect(parseLifecycleMessage(JSON.stringify({ type: "ready", thread_id: 1 }))).toBeUndefined()
+  expect(parseLifecycleMessage(JSON.stringify({ type: "ready", thread_id: "t", extra: 1 }))).toBeUndefined()
+  // exit.requested 只接受精确 { type }。
+  expect(parseLifecycleMessage(JSON.stringify({ type: "exit.requested" })))
+    .toEqual({ type: "exit.requested" })
+  expect(parseLifecycleMessage(JSON.stringify({ type: "exit.requested", extra: 1 }))).toBeUndefined()
+  // released 形态保持。
   expect(parseLifecycleMessage(JSON.stringify({ type: "released" }))).toEqual({ type: "released" })
+  // thread.changed 保持原有规则。
   expect(parseLifecycleMessage(JSON.stringify({ type: "thread.changed", thread_id: null })))
     .toEqual({ type: "thread.changed", thread_id: null })
   expect(parseLifecycleMessage(JSON.stringify({ type: "thread.changed", thread_id: "t" })))
@@ -504,7 +585,7 @@ test("openBrowser 挂起期间完成 active 时，返回后不再 arm ready time
     state: "attached",
     holder: { connection_id: "web-1", role: "attached", attachment_id: "att-1" },
   }
-  channel.messages.push(JSON.stringify({ type: "ready" }))
+  pushReady(channel, "thread-1")
   await waitFor(() => coordinator.getSnapshot().phase === "active")
   releaseOpen()
   await opening
@@ -547,7 +628,7 @@ test("owner 超时后仍保持 returning，后台轮询在 owner 恢复后回到
     state: "attached",
     holder: { connection_id: "web-1", role: "attached", attachment_id: "att-1" },
   }
-  channel.messages.push(JSON.stringify({ type: "ready" }))
+  pushReady(channel, "thread-1")
   await waitFor(() => coordinator.getSnapshot().phase === "active")
   host.revokeAttachment = async (id: string) => {
     host.revoked.push(id)
@@ -596,4 +677,104 @@ test("close 在 owner 轮询期间立即收敛，不等待 ownerWaitMs 上限", 
   expect(h.server.stopped).toBe(1)
   expect(h.host.revoked).toHaveLength(1)
   h.unsubscribe()
+})
+
+test("exit.requested 在 opening 阶段被判定为 invalid-message", async () => {
+  const h = createHarness()
+  const { channel } = await openAndAccept(h)
+  pushExitRequested(channel)
+  await waitFor(() => h.coordinator.getSnapshot().phase === "idle")
+  const shutdown = channel.sent.find(message => message.type === "shutdown")
+  expect(shutdown).toEqual({ type: "shutdown", reason: "invalid-message" })
+  expect(h.host.revoked).toHaveLength(1)
+  h.unsubscribe()
+})
+
+test("exit.requested 在 active 阶段触发 cleanup，owner 确认后调用 exit handler 一次", async () => {
+  const h = createHarness()
+  const { channel } = await openAndAccept(h)
+  await activate(h, channel, h.host.created[0].attachment_id)
+  let exitHandlerCalls = 0
+  h.coordinator.registerExitHandler(() => { exitHandlerCalls += 1 })
+  pushExitRequested(channel)
+  await waitFor(() => h.coordinator.getSnapshot().phase === "idle")
+  expect(exitHandlerCalls).toBe(1)
+  const returning = h.snapshots.find(s => s.phase === "returning")
+  if (returning?.phase !== "returning") throw new Error("expected returning snapshot")
+  expect(returning.reason).toBe("exit-requested")
+  // Browser 收到 shutdown 后 release 路径与 released 共享逻辑，仍由 primary 关闭。
+  expect(channel.closed?.code).toBe(1000)
+  h.unsubscribe()
+})
+
+test("exit.requested 在 active 重复发送只触发一次 exit handler", async () => {
+  const h = createHarness()
+  const { channel } = await openAndAccept(h)
+  await activate(h, channel, h.host.created[0].attachment_id)
+  let exitHandlerCalls = 0
+  h.coordinator.registerExitHandler(() => { exitHandlerCalls += 1 })
+  pushExitRequested(channel)
+  pushExitRequested(channel)
+  await waitFor(() => h.coordinator.getSnapshot().phase === "idle")
+  // 等到任何潜在二次回调都跑完。
+  await new Promise(resolve => setTimeout(resolve, 20))
+  expect(exitHandlerCalls).toBe(1)
+  h.unsubscribe()
+})
+
+test("exit.requested 在 owner 未及时确认时延迟触发 handler，背景轮询恢复后调用", async () => {
+  const h = createHarness({ ownerPollMs: 1, ownerWaitMs: 5 })
+  const { channel } = await openAndAccept(h)
+  await activate(h, channel, h.host.created[0].attachment_id)
+  let exitHandlerCalls = 0
+  h.coordinator.registerExitHandler(() => { exitHandlerCalls += 1 })
+  // revoke 后保持 attached：cleanup 窗口内 owner 不会被立刻确认。
+  h.host.revokeAttachment = async (id: string) => {
+    h.host.revoked.push(id)
+    return {
+      attachment_id: id,
+      revoked: true,
+      control: {
+        state: "attached",
+        holder: { connection_id: "web-1", role: "attached", attachment_id: id },
+      },
+    }
+  }
+  pushExitRequested(channel)
+  // 等待 cleanup 走完 returning 锁定路径。
+  await waitFor(() => h.coordinator.getSnapshot().phase === "returning")
+  // owner 尚未确认，handler 不能被提早调用。
+  expect(exitHandlerCalls).toBe(0)
+  // 恢复 owner：背景轮询命中后回到 idle 并触发 handler。
+  h.host.status = {
+    state: "owner",
+    holder: { connection_id: "owner", role: "owner", attachment_id: null },
+  }
+  await waitFor(() => h.coordinator.getSnapshot().phase === "idle", 2_000)
+  expect(exitHandlerCalls).toBe(1)
+  h.unsubscribe()
+})
+
+test("registerExitHandler 返回的 unregister 阻止 handler 被调用", async () => {
+  const h = createHarness()
+  const { channel } = await openAndAccept(h)
+  await activate(h, channel, h.host.created[0].attachment_id)
+  let exitHandlerCalls = 0
+  const unregister = h.coordinator.registerExitHandler(() => { exitHandlerCalls += 1 })
+  unregister()
+  pushExitRequested(channel)
+  await waitFor(() => h.coordinator.getSnapshot().phase === "idle")
+  expect(exitHandlerCalls).toBe(0)
+  h.unsubscribe()
+})
+
+test("CLI close 不触发 exit handler；新 handoff 的 exit.requested 可再次触发", async () => {
+  const h = createHarness()
+  let exitHandlerCalls = 0
+  h.coordinator.registerExitHandler(() => { exitHandlerCalls += 1 })
+  await h.coordinator.open("thread-1")
+  // close 由 CLI 自身发起，不会调用注册的 exit handler。
+  await h.coordinator.close()
+  expect(exitHandlerCalls).toBe(0)
+  await h.unsubscribe()
 })

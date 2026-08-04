@@ -40,6 +40,10 @@ function accepted(socket: FakeSocket): void {
   socket.emit("message", { data: JSON.stringify({ type: "accepted" }) })
 }
 
+function active(socket: FakeSocket): void {
+  socket.emit("message", { data: JSON.stringify({ type: "active" }) })
+}
+
 test("accepted 前 close/error 拒绝 waitForAccepted 并关闭 socket", async () => {
   const socket = new FakeSocket()
   const supervisor = createBrowserConnectionSupervisor(socket)
@@ -120,4 +124,73 @@ test("waitForAccepted 在 accepted 后重复调用直接成功", async () => {
   accepted(socket)
   await supervisor.waitForAccepted()
   await supervisor.waitForAccepted()
+})
+
+test("active 在 accepted 之前到达按协议错误收敛", async () => {
+  const socket = new FakeSocket()
+  const supervisor = createBrowserConnectionSupervisor(socket)
+  const waiting = supervisor.waitForActive()
+  active(socket)
+  await expect(waiting).rejects.toThrow("lifecycle-invalid")
+  expect(supervisor.signal.aborted).toBe(true)
+})
+
+test("active 在 accepted 之后到达，waitForActive 完成", async () => {
+  const socket = new FakeSocket()
+  const supervisor = createBrowserConnectionSupervisor(socket)
+  accepted(socket)
+  await supervisor.waitForAccepted()
+  const waiting = supervisor.waitForActive()
+  active(socket)
+  await waiting
+  // 重复 active 不影响：已经 active，后续帧幂等忽略。
+  active(socket)
+  await new Promise(resolve => setTimeout(resolve, 2))
+  expect(supervisor.signal.aborted).toBe(false)
+})
+
+test("未知或带额外字段的 lifecycle server 帧按协议错误收敛", async () => {
+  const socket = new FakeSocket()
+  const supervisor = createBrowserConnectionSupervisor(socket)
+  const waiting = supervisor.waitForAccepted()
+  socket.emit("message", { data: JSON.stringify({ type: "accepted", extra: true }) })
+  await expect(waiting).rejects.toThrow("lifecycle-invalid")
+  expect(supervisor.signal.aborted).toBe(true)
+})
+
+test("abort 同时拒绝 waitForAccepted 与 waitForActive", async () => {
+  const socket = new FakeSocket()
+  const supervisor = createBrowserConnectionSupervisor(socket)
+  const acceptedWait = supervisor.waitForAccepted()
+  const activeWait = supervisor.waitForActive()
+  supervisor.abort("shutdown:invalid-handoff")
+  await expect(acceptedWait).rejects.toThrow("invalid-handoff")
+  await expect(activeWait).rejects.toThrow("invalid-handoff")
+  accepted(socket)
+  active(socket)
+  await new Promise(resolve => setTimeout(resolve, 2))
+  expect(supervisor.signal.aborted).toBe(true)
+})
+
+test("waitForActive 在 abort 之后调用立即 reject", async () => {
+  const socket = new FakeSocket()
+  const supervisor = createBrowserConnectionSupervisor(socket)
+  accepted(socket)
+  await supervisor.waitForAccepted()
+  supervisor.abort("lifecycle-closed")
+  await expect(supervisor.waitForActive()).rejects.toThrow("lifecycle-closed")
+})
+
+test("dispose 后 active 帧不再被处理", () => {
+  const socket = new FakeSocket()
+  const supervisor = createBrowserConnectionSupervisor(socket)
+  accepted(socket)
+  supervisor.dispose()
+  active(socket)
+  // 仍然没有 abort 路径触发，waitForActive 永久挂起。
+  let resolved = false
+  void supervisor.waitForActive().then(() => { resolved = true })
+  return new Promise<void>(resolve => setTimeout(resolve, 5)).then(() => {
+    expect(resolved).toBe(false)
+  })
 })

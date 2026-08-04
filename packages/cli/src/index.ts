@@ -181,7 +181,7 @@ async function execute(command: Command): Promise<void> {
       if (!command.nonInteractive) {
         const server = createWebServer({
           html: webHtml,
-          getScript: browserBundle,
+          getAssets: browserBundle,
           isActiveHandoff: handoffId =>
             webHandoff !== undefined && isActiveHandoff(webHandoff, handoffId),
           attachLifecycle: (handoffId, channel) =>

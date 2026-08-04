@@ -188,6 +188,9 @@ export class InteractiveControllerImpl implements InteractiveController {
         this.armedSkill = undefined
         this.publish()
         return
+      case "skill.set-enabled":
+        await this.setSkillEnabled(intent.skillId, intent.enabled)
+        return
       case "mcp.add":
         await this.addMcpServer(intent.input)
         return
@@ -606,6 +609,36 @@ export class InteractiveControllerImpl implements InteractiveController {
     this.publish()
   }
 
+  /**
+   * 设置 Skill 启用状态：依次门禁 skills.manage 能力、当前 Run/Interaction 空闲、目标仍存在，
+   * 通过后再调用 port。失败保留原状态并输出脱敏 notice，禁用当前 armed Skill 时一并清除。
+   */
+  private async setSkillEnabled(skillId: string, enabled: boolean): Promise<void> {
+    if (!this.baseRuntime.capabilities?.includes(Capability.SKILLS_MANAGE)) {
+      this.commit(current => appendNotice(current, "当前客户端未协商 skills.manage，无法启停 Skill。"))
+      return
+    }
+    if (this.state.activeRun || this.pendingInteraction) {
+      this.commit(current => appendNotice(current, "当前任务结束或交互完成后可用。"))
+      return
+    }
+    const target = this.catalogs.skills.items.find(value => value.id === skillId)
+    if (!target) {
+      this.commit(current => appendNotice(current, "所选 Skill 不存在。"))
+      return
+    }
+    try {
+      await this.agent.setSkillEnabled(skillId, enabled)
+    } catch (error) {
+      this.commit(current => appendNotice(current, `Skill 启停失败：${errorMessage(error)}`))
+      return
+    }
+    if (!enabled && this.armedSkill?.id === skillId) {
+      this.armedSkill = undefined
+    }
+    await this.refreshSkillCatalog()
+  }
+
   /** 通过共享语义执行 /mcp；Slash 文本与 typed intent 最终调用同一内部方法。 */
   private async handleMcp(argument?: string): Promise<void> {
     const subArgs = argument?.trim()
@@ -836,13 +869,13 @@ export class InteractiveControllerImpl implements InteractiveController {
     }
   }
 
-  /** 读取 Skill catalog；失败不阻断消息发送，但保持 catalog error 可观察。 */
+  /** 读取 Skill catalog；始终拉取权威全集（含 disabled），命令菜单与选择继续按 enabled && userInvocable 过滤。 */
   private async refreshSkillCatalog(): Promise<void> {
     const epoch = ++this.catalogs.skills.epoch
     this.catalogs.skills = { status: "loading", items: this.catalogs.skills.items, epoch }
     this.publish()
     try {
-      const result = await this.agent.listSkills()
+      const result = await this.agent.listSkills(true)
       if (this.closed || epoch !== this.catalogs.skills.epoch) return
       const next = Array.isArray(result.skills)
         ? result.skills.map(skillMenuItem).filter((item): item is SkillMenuItem => item !== undefined)

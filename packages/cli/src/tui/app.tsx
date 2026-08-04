@@ -377,11 +377,18 @@ export async function runTui(options: TuiOptions): Promise<void> {
   })
   const uninstallVtGuard = win32InstallVtInputGuard()
   const root = createRoot(renderer)
+  // closeRef 让 coordinator 退出 handler 与 React 子树共享同一 close 路径，
+  // 注册先于 render，避免 Browser 在挂载前发来 exit.requested 漏掉 handler。
+  const closeRef: { current: (() => void) | null } = { current: null }
+  const unregisterExit = options.webHandoff?.registerExitHandler(() => {
+    closeRef.current?.()
+  })
   await new Promise<void>(resolve => {
     let closed = false
     const close = () => {
       if (closed) return
       closed = true
+      unregisterExit?.()
       uninstallVtGuard?.()
       root.unmount()
       void shutdownCommonSyntaxClient().finally(() => {
@@ -389,6 +396,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
         resolve()
       })
     }
+    closeRef.current = close
     root.render(
       <TuiErrorBoundary onRequestExit={close}>
         <WebAwareRoot {...options} onRequestExit={close} />

@@ -98,6 +98,7 @@ export type InteractiveIntent =
   | { type: "model.select"; profileId: string }
   | { type: "skill.arm"; skillId: string }
   | { type: "skill.clear" }
+  | { type: "skill.set-enabled"; skillId: string; enabled: boolean }
   | { type: "mcp.add"; input: InteractiveMcpInput }
   | { type: "mcp.remove"; name: string }
   | { type: "interaction.respond"; requestId: string; response: InteractiveResponse }

@@ -12,9 +12,16 @@ export type LifecycleSocket = {
 export type BrowserConnectionSupervisor = {
   readonly signal: AbortSignal
   waitForAccepted(): Promise<void>
+  waitForActive(): Promise<void>
   bindAgent(closeAgent: () => void): void
   abort(reason: string): void
   dispose(): void
+}
+
+/** 等待者形状：accept/active 等待共享同一 reject 语义。 */
+type Waiter = {
+  resolve: () => void
+  reject: (error: Error) => void
 }
 
 class BrowserConnectionSupervisorImpl implements BrowserConnectionSupervisor {
@@ -23,11 +30,10 @@ class BrowserConnectionSupervisorImpl implements BrowserConnectionSupervisor {
   private closeAgent: (() => void) | undefined
   private agentClosed = false
   private accepted = false
+  private active = false
   private abortedReason: string | undefined
-  private readonly waiters: Array<{
-    resolve: () => void
-    reject: (error: Error) => void
-  }> = []
+  private readonly acceptedWaiters: Waiter[] = []
+  private readonly activeWaiters: Waiter[] = []
 
   private readonly onMessage = (event: unknown) => this.handleMessage(event)
   private readonly onClose = () => this.abort("lifecycle-closed")
@@ -35,7 +41,7 @@ class BrowserConnectionSupervisorImpl implements BrowserConnectionSupervisor {
 
   constructor(socket: LifecycleSocket) {
     this.socket = socket
-    // 消息监听在整个 handoff 期间保留：accepted 只完成等待，不卸载 shutdown 处理。
+    // 消息监听在整个 handoff 期间保留：accepted/active 只完成等待，不卸载 shutdown 处理。
     socket.addEventListener("message", this.onMessage)
     socket.addEventListener("close", this.onClose)
     socket.addEventListener("error", this.onError)
@@ -50,7 +56,15 @@ class BrowserConnectionSupervisorImpl implements BrowserConnectionSupervisor {
     if (this.abortedReason !== undefined) {
       return Promise.reject(new Error(`Lifecycle aborted: ${this.abortedReason}`))
     }
-    return new Promise((resolve, reject) => this.waiters.push({ resolve, reject }))
+    return new Promise((resolve, reject) => this.acceptedWaiters.push({ resolve, reject }))
+  }
+
+  waitForActive(): Promise<void> {
+    if (this.active) return Promise.resolve()
+    if (this.abortedReason !== undefined) {
+      return Promise.reject(new Error(`Lifecycle aborted: ${this.abortedReason}`))
+    }
+    return new Promise((resolve, reject) => this.activeWaiters.push({ resolve, reject }))
   }
 
   bindAgent(closeAgent: () => void): void {
@@ -67,7 +81,10 @@ class BrowserConnectionSupervisorImpl implements BrowserConnectionSupervisor {
     } catch {
       // socket 可能已断开；close 动作幂等。
     }
-    for (const waiter of this.waiters.splice(0)) {
+    for (const waiter of this.acceptedWaiters.splice(0)) {
+      waiter.reject(new Error(`Lifecycle aborted: ${reason}`))
+    }
+    for (const waiter of this.activeWaiters.splice(0)) {
       waiter.reject(new Error(`Lifecycle aborted: ${reason}`))
     }
     this.closeAgentNow()
@@ -91,18 +108,46 @@ class BrowserConnectionSupervisorImpl implements BrowserConnectionSupervisor {
     try {
       message = JSON.parse(String(data))
     } catch {
+      this.abort("lifecycle-invalid")
       return
     }
-    if (!isRecord(message)) return
+    if (!isRecord(message)) {
+      this.abort("lifecycle-invalid")
+      return
+    }
     if (message.type === "accepted") {
+      // 接受后到达的 accepted 帧不重复 resolve；abort 之后则直接忽略。
+      if (this.abortedReason !== undefined) return
+      if (!exactFields(message, ["type"])) {
+        this.abort("lifecycle-invalid")
+        return
+      }
       if (this.accepted) return
       this.accepted = true
-      for (const waiter of this.waiters.splice(0)) waiter.resolve()
+      for (const waiter of this.acceptedWaiters.splice(0)) waiter.resolve()
+      return
+    }
+    if (message.type === "active") {
+      // active 必须先 accepted；生产由 server 顺序保证，乱序帧仍按协议错误收敛。
+      if (this.abortedReason !== undefined) return
+      if (!exactFields(message, ["type"]) || !this.accepted) {
+        this.abort("lifecycle-invalid")
+        return
+      }
+      if (this.active) return
+      this.active = true
+      for (const waiter of this.activeWaiters.splice(0)) waiter.resolve()
       return
     }
     if (message.type === "shutdown") {
+      if (!exactFields(message, ["type", "reason"]) || typeof message.reason !== "string") {
+        this.abort("lifecycle-invalid")
+        return
+      }
       this.abort(`shutdown:${String(message.reason)}`)
+      return
     }
+    this.abort("lifecycle-invalid")
   }
 }
 
@@ -114,4 +159,9 @@ export function createBrowserConnectionSupervisor(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function exactFields(value: Record<string, unknown>, fields: readonly string[]): boolean {
+  const keys = Object.keys(value)
+  return keys.length === fields.length && fields.every(field => field in value)
 }

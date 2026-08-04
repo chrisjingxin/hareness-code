@@ -16,7 +16,7 @@ function createHarness(): Harness {
   const activeHandoffs = new Set<string>()
   const server = createWebServer({
     html: "<!doctype html><title>shell</title>",
-    getScript: async () => "console.log('app')",
+    getAssets: async () => ({ script: "console.log('app')", style: "body{}" }),
     isActiveHandoff: handoffId => activeHandoffs.has(handoffId),
     attachLifecycle: async (handoffId, channel) => {
       attachCalls.push({ handoffId, channel })
@@ -56,6 +56,9 @@ test("白名单路由与安全 headers 精确存在；未知路由返回 404/405
   expect(script.headers.get("content-type")).toContain("javascript")
   expect(script.headers.get("cache-control")).toBe("no-store")
   expect(script.headers.get("cross-origin-opener-policy")).toBeNull()
+  const style = await fetch(`${origin}/web/app.css`)
+  expect(style.status).toBe(200)
+  expect(style.headers.get("content-type")).toContain("text/css")
 
   expect((await fetch(`${origin}/`)).status).toBe(404)
   expect((await fetch(`${origin}/index.html`)).status).toBe(404)

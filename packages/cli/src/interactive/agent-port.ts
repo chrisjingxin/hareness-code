@@ -14,6 +14,7 @@ import {
   type ModelsListResult,
   type RunCancelResult,
   type SkillsListResult,
+  type SkillsSetEnabledResult,
   type ThreadsListResult,
   type ThreadsOpenResult,
 } from "@za38/protocol"
@@ -61,7 +62,13 @@ export interface InteractiveAgentPort {
   mcpAdd(params: McpAddParams): Promise<McpAddResult>
   mcpRemove(name: string): Promise<McpRemoveResult>
   listModels(threadId?: string): Promise<ModelsListResult>
-  listSkills(): Promise<SkillsListResult>
+  /**
+   * 读取 Skill catalog；`includeDisabled=true` 用于拉取权威全集，命令菜单与 Skill 选择
+   * 仍按 `enabled && userInvocable` 过滤。
+   */
+  listSkills(includeDisabled: boolean): Promise<SkillsListResult>
+  /** 设置 Skill 启用状态；受控方需协商 `skills.manage` 能力，Controller 负责门禁。 */
+  setSkillEnabled(skillId: string, enabled: boolean): Promise<SkillsSetEnabledResult>
 }
 
 /** 生产 adapter：把 transport-neutral 的 AgentClient 适配为 InteractiveAgentPort。 */
@@ -141,7 +148,11 @@ export class AgentClientInteractiveAdapter implements InteractiveAgentPort {
     return this.client.listModels(threadId)
   }
 
-  async listSkills(): Promise<SkillsListResult> {
-    return this.client.request("skills.list", { include_disabled: false })
+  async listSkills(includeDisabled: boolean): Promise<SkillsListResult> {
+    return this.client.request("skills.list", { include_disabled: includeDisabled })
+  }
+
+  async setSkillEnabled(skillId: string, enabled: boolean): Promise<SkillsSetEnabledResult> {
+    return this.client.request("skills.set_enabled", { id: skillId, enabled })
   }
 }

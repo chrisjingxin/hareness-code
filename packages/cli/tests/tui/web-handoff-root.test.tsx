@@ -185,7 +185,7 @@ test("WebAwareRoot 挂载不抛 this 异常，两轮 handoff 中 opening 保留 
         state: "attached",
         holder: { connection_id: "web-1", role: "attached", attachment_id: "att-root" },
       }
-      channel.messages.push(JSON.stringify({ type: "ready" }))
+      channel.messages.push(JSON.stringify({ type: "ready", thread_id: "thread-1" }))
       await setup.flush()
     })
     await act(async () => {
@@ -232,7 +232,7 @@ test("WebAwareRoot 挂载不抛 this 异常，两轮 handoff 中 opening 保留 
         state: "attached",
         holder: { connection_id: "web-2", role: "attached", attachment_id: "att-root" },
       }
-      second.messages.push(JSON.stringify({ type: "ready" }))
+      second.messages.push(JSON.stringify({ type: "ready", thread_id: "thread-1" }))
       await setup.flush()
     })
     await act(async () => {

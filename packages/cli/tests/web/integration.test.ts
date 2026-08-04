@@ -52,12 +52,12 @@ async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<voi
   }
 }
 
-test("open 后真实 server 提供 handoff 页面，lifecycle 走 accepted → ready → active → released", async () => {
+test("open 后真实 server 提供 handoff 页面，lifecycle 走 accepted → ready{thread_id} → active → released", async () => {
   const host = new FakeHost()
   let coordinator: ReturnType<typeof createWebHandoffCoordinator> | undefined
   const server = createWebServer({
     html: "<!doctype html><title>web</title>",
-    getScript: async () => "console.log('app')",
+    getAssets: async () => ({ script: "console.log('app')", style: "body{}" }),
     isActiveHandoff: handoffId =>
       coordinator !== undefined
       && coordinator.getSnapshot().phase !== "idle"
@@ -100,12 +100,17 @@ test("open 后真实 server 提供 handoff 页面，lifecycle 走 accepted → r
       attachment_id: "att-integration",
     },
   }
-  socket.send(JSON.stringify({ type: "ready" }))
-  await waitFor(() => coordinator!.getSnapshot().phase === "active")
+  socket.send(JSON.stringify({ type: "ready", thread_id: "thread-1" }))
+  await waitFor(() => coordinator!.getSnapshot().phase === "active"
+    && messages.some(message => (message as { type?: string }).type === "active"))
   const active = coordinator!.getSnapshot()
   if (active.phase !== "active") throw new Error("expected active")
   expect(active.tuiLocked).toBe(true)
   expect(active.threadId).toBe("thread-1")
+  const acceptedIndex = messages.findIndex(m => (m as { type?: string }).type === "accepted")
+  const activeIndex = messages.findIndex(m => (m as { type?: string }).type === "active")
+  expect(acceptedIndex).toBeGreaterThanOrEqual(0)
+  expect(activeIndex).toBeGreaterThan(acceptedIndex)
 
   socket.send(JSON.stringify({ type: "released" }))
   await waitFor(() => coordinator!.getSnapshot().phase === "idle")

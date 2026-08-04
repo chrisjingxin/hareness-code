@@ -17,6 +17,7 @@ export type WebReturnReason =
   | "opener-failed"
   | "host-control-failed"
   | "cli-exit"
+  | "exit-requested"
 
 /** lifecycle shutdown 的稳定原因；Browser 只按 type 处理。 */
 export type LifecycleShutdownReason =
@@ -30,12 +31,14 @@ export type LifecycleShutdownReason =
 
 export type LifecycleServerMessage =
   | { type: "accepted" }
+  | { type: "active" }
   | { type: "shutdown"; reason: LifecycleShutdownReason }
 
 export type LifecycleBrowserMessage =
-  | { type: "ready" }
+  | { type: "ready"; thread_id: string | null }
   | { type: "thread.changed"; thread_id: string | null }
   | { type: "released" }
+  | { type: "exit.requested" }
 
 /** Bun WebSocket 与内存测试 adapter 共用的 lifecycle channel seam。 */
 export type LifecycleChannel = {
@@ -129,6 +132,7 @@ export interface WebHandoffCoordinator {
   getSnapshot(): WebHandoffSnapshot
   subscribe(listener: (snapshot: WebHandoffSnapshot) => void): () => void
   attachLifecycle(handoffId: string, channel: LifecycleChannel): Promise<void>
+  registerExitHandler(handler: () => void): () => void
   close(): Promise<void>
 }
 
@@ -159,6 +163,9 @@ class WebHandoffCoordinatorImpl implements WebHandoffCoordinator {
   private cleanupPromise: Promise<void> | undefined
   private recoveryTimer: WebTimer | undefined
   private closed = false
+  private exitHandler: (() => void) | undefined
+  /** 当前 handoff 是否还有未触发的 exit handler；open 时清零、handler 触发后清零。 */
+  private exitHandlerPending = false
   private snapshot: WebHandoffSnapshot
   private readonly sleep: (ms: number) => Promise<void>
 
@@ -187,6 +194,9 @@ class WebHandoffCoordinatorImpl implements WebHandoffCoordinator {
     this.error = undefined
     this.primary = undefined
     this.attachmentId = undefined
+    // 新 handoff 重置 exit handler 触发门：上一轮 exit-requested 已停止 pending，
+    // 重新进入 opening 时未注册的 handler 不能被新 handoff 自动消费。
+    this.exitHandlerPending = false
     this.publish()
     try {
       await this.server.start()
@@ -274,6 +284,14 @@ class WebHandoffCoordinatorImpl implements WebHandoffCoordinator {
     return () => this.listeners.delete(listener)
   }
 
+  /** 注册 CLI 退出 handler；返回的函数在 unmount/close 时调用以解绑。 */
+  registerExitHandler(handler: () => void): () => void {
+    this.exitHandler = handler
+    return () => {
+      if (this.exitHandler === handler) this.exitHandler = undefined
+    }
+  }
+
   /** 消费一个已经完成 upgrade 的 lifecycle channel，并完成首连接竞争。 */
   async attachLifecycle(handoffId: string, channel: LifecycleChannel): Promise<void> {
     if (this.closed || this.handoffId !== handoffId || this.phase === "idle") {
@@ -308,6 +326,8 @@ class WebHandoffCoordinatorImpl implements WebHandoffCoordinator {
     this.closed = true
     this.recoveryTimer?.clear()
     this.recoveryTimer = undefined
+    // close 由 CLI 自身触发，不需要再回调 exit handler；清理悬挂标记。
+    this.exitHandlerPending = false
     if (this.phase !== "idle") {
       await this.cleanup("cli-exit")
     }
@@ -324,7 +344,15 @@ class WebHandoffCoordinatorImpl implements WebHandoffCoordinator {
           return
         }
         if (message.type === "ready") {
-          if (this.phase === "opening") await this.confirmReady()
+          // opening 只接受一次 ready；ready 携带的 thread_id 是 Browser
+          // 恢复/创建后的最终值，覆盖 open() 时的初值。
+          if (this.phase !== "opening") {
+            await this.cleanup("invalid-message")
+            return
+          }
+          this.threadId = message.thread_id
+          this.publish()
+          await this.confirmReady()
           continue
         }
         if (message.type === "thread.changed") {
@@ -342,6 +370,19 @@ class WebHandoffCoordinatorImpl implements WebHandoffCoordinator {
             await this.cleanup("released")
             return
           }
+          if (this.phase === "opening") {
+            await this.cleanup("invalid-message")
+            return
+          }
+        }
+        if (message.type === "exit.requested") {
+          if (this.phase === "active") {
+            this.exitHandlerPending = true
+            await this.cleanup("exit-requested")
+            return
+          }
+          // opening 阶段还没有 host holder 也没锁定 TUI，exit 视为
+          // 非法流程；fail-closed 进入 invalid-message 收敛。
           if (this.phase === "opening") {
             await this.cleanup("invalid-message")
             return
@@ -379,6 +420,14 @@ class WebHandoffCoordinatorImpl implements WebHandoffCoordinator {
       this.readyTimer?.clear()
       this.readyTimer = undefined
       this.publish()
+      // Browser 收到 active 才允许启用输入；send 失败由 channel close 收敛。
+      if (this.primary !== undefined) {
+        try {
+          await this.primary.send({ type: "active" })
+        } catch {
+          // Browser 已断；不动 cleanup，由 channel close 触发 browser-close。
+        }
+      }
     } else {
       await this.cleanup("host-control-failed")
     }
@@ -448,6 +497,7 @@ class WebHandoffCoordinatorImpl implements WebHandoffCoordinator {
       }
     }
     if (ownerConfirmed) {
+      this.invokeExitHandlerIfPending()
       this.restoreToIdle()
     } else if (!this.closed) {
       // owner 在窗口内未确认：保持 returning，但继续后台轮询，owner 一旦
@@ -480,6 +530,7 @@ class WebHandoffCoordinatorImpl implements WebHandoffCoordinator {
     try {
       const status = await this.host.controlStatus()
       if (status.state === "owner") {
+        this.invokeExitHandlerIfPending()
         this.restoreToIdle()
         return
       }
@@ -487,6 +538,22 @@ class WebHandoffCoordinatorImpl implements WebHandoffCoordinator {
       // 查询失败继续轮询。
     }
     this.scheduleOwnerRecovery()
+  }
+
+  /**
+   * 触发注册的 CLI exit handler；必须在 owner 确认之后调用，避免
+   * Browser 主动退出时直接杀掉 TUI / Python sidecar。
+   */
+  private invokeExitHandlerIfPending(): void {
+    if (!this.exitHandlerPending) return
+    this.exitHandlerPending = false
+    const handler = this.exitHandler
+    if (handler === undefined) return
+    try {
+      handler()
+    } catch {
+      // handler 异常不阻止 coordinator 收敛；exit 由调用方实现自己处理。
+    }
   }
 
   private restoreToIdle(): void {
@@ -527,10 +594,23 @@ export function parseLifecycleMessage(value: unknown): LifecycleBrowserMessage |
   if (!isRecord(parsed)) return undefined
   const type = parsed.type
   if (type === "ready") {
-    return exactFields(parsed, ["type"]) ? { type: "ready" } : undefined
+    if (!exactFields(parsed, ["type", "thread_id"])) return undefined
+    const threadId = parsed.thread_id
+    if (
+      threadId !== null
+      && (typeof threadId !== "string"
+        || threadId.length === 0
+        || threadId.length > 256)
+    ) {
+      return undefined
+    }
+    return { type: "ready", thread_id: threadId }
   }
   if (type === "released") {
     return exactFields(parsed, ["type"]) ? { type: "released" } : undefined
+  }
+  if (type === "exit.requested") {
+    return exactFields(parsed, ["type"]) ? { type: "exit.requested" } : undefined
   }
   if (type === "thread.changed") {
     if (!exactFields(parsed, ["type", "thread_id"])) return undefined
@@ -559,6 +639,10 @@ function shutdownReason(reason: WebReturnReason): LifecycleShutdownReason {
       return "host-control-failed"
     case "cli-exit":
       return "cli-exit"
+    case "exit-requested":
+      // Browser 主动退出仍走 returning；shutdown reason 用于 Browser 侧
+      // 收敛状态展示，不影响命令面板或 Thread 切换。
+      return "returning"
     default:
       return "returning"
   }

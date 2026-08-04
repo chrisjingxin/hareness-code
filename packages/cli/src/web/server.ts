@@ -1,11 +1,12 @@
 /** Bun 静态 server adapter：handoff 路由白名单、精确 Host/Origin 与 lifecycle upgrade。 */
 
 import { AsyncQueue } from "../ipc/transport"
+import type { WebAssets } from "./bundle"
 import type { LifecycleChannel } from "./handoff-coordinator"
 
 export type WebServerOptions = {
   html: string
-  getScript: () => Promise<string>
+  getAssets: () => Promise<WebAssets>
   isActiveHandoff: (handoffId: string) => boolean
   attachLifecycle: (handoffId: string, channel: LifecycleChannel) => Promise<void>
 }
@@ -30,7 +31,7 @@ const COMMON_HEADERS = {
 const HTML_CSP = [
   "default-src 'none'",
   "script-src 'self'",
-  "style-src 'unsafe-inline'",
+  "style-src 'self'",
   "connect-src ws://127.0.0.1:*",
   "base-uri 'none'",
   "form-action 'none'",
@@ -40,7 +41,7 @@ const HTML_CSP = [
 /** 创建只服务当前 handoff 的本机静态 server；start 前不绑定端口。 */
 export function createWebServer(options: WebServerOptions): WebServer {
   let server: ReturnType<typeof Bun.serve<BunWebSocketData>> | undefined
-  let script = ""
+  let assets: WebAssets = { script: "", style: "" }
   const queues = new WeakMap<BunServerWebSocket, AsyncQueue<unknown>>()
 
   const origin = () => (server ? `http://127.0.0.1:${server.port}` : "")
@@ -57,7 +58,13 @@ export function createWebServer(options: WebServerOptions): WebServer {
       if (request.method !== "GET" || isUpgrade) {
         return new Response("Method Not Allowed", { status: 405 })
       }
-      return staticResponse("text/javascript; charset=utf-8", script)
+      return staticResponse("text/javascript; charset=utf-8", assets.script)
+    }
+    if (path === "/web/app.css") {
+      if (request.method !== "GET" || isUpgrade) {
+        return new Response("Method Not Allowed", { status: 405 })
+      }
+      return staticResponse("text/css; charset=utf-8", assets.style)
     }
     const match = matchHandoffPath(path)
     if (!match) return new Response("Not Found", { status: 404 })
@@ -89,42 +96,53 @@ export function createWebServer(options: WebServerOptions): WebServer {
     pathFor: handoffId => `/web/h/${handoffId}`,
     start: async () => {
       if (server) return
-      script = await options.getScript()
-      server = Bun.serve<BunWebSocketData>({
-        hostname: "127.0.0.1",
-        port: 0,
-        fetch: handleFetch,
-        websocket: {
-          open(ws) {
-            const queue = new AsyncQueue<unknown>()
-            queues.set(ws, queue)
-            const channel: LifecycleChannel = {
-              messages: queue,
-              send: async message => {
-                if (ws.readyState === 1) {
-                  ws.send(JSON.stringify(message))
-                }
-              },
-              close: async (code, reason) => {
-                try {
-                  ws.close(code, reason)
-                } catch {
-                  // 已断开时忽略。
-                }
-                queue.end()
-              },
-            }
-            void options.attachLifecycle(ws.data.handoffId, channel)
-          },
-          message(ws, raw) {
-            queues.get(ws)?.push(raw)
-          },
-          close(ws) {
-            queues.get(ws)?.end()
-            queues.delete(ws)
-          },
+      assets = await options.getAssets()
+      const websocket = {
+        open(ws: BunServerWebSocket) {
+          const queue = new AsyncQueue<unknown>()
+          queues.set(ws, queue)
+          const channel: LifecycleChannel = {
+            messages: queue,
+            send: async message => {
+              if (ws.readyState === 1) {
+                ws.send(JSON.stringify(message))
+              }
+            },
+            close: async (code, reason) => {
+              try {
+                ws.close(code, reason)
+              } catch {
+                // 已断开时忽略。
+              }
+              queue.end()
+            },
+          }
+          void options.attachLifecycle(ws.data.handoffId, channel)
         },
-      })
+        message(ws: BunServerWebSocket, raw: string | Uint8Array) {
+          queues.get(ws)?.push(raw)
+        },
+        close(ws: BunServerWebSocket) {
+          queues.get(ws)?.end()
+          queues.delete(ws)
+        },
+      }
+      let lastError: unknown
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        try {
+          server = Bun.serve<BunWebSocketData>({
+            hostname: "127.0.0.1",
+            // 当前 Bun runner 对 port 0 的行为不一致；随机非特权端口并在碰撞时重试。
+            port: randomLoopbackPort(),
+            fetch: handleFetch,
+            websocket,
+          })
+          break
+        } catch (error) {
+          lastError = error
+        }
+      }
+      if (!server) throw lastError instanceof Error ? lastError : new Error("Failed to start Web server")
     },
     stop: async () => {
       if (!server) return
@@ -134,17 +152,33 @@ export function createWebServer(options: WebServerOptions): WebServer {
   }
 }
 
+function randomLoopbackPort(): number {
+  return 40_000 + Math.floor(Math.random() * 20_000)
+}
+
 /** 只解析两条精确路径；不做任何文件系统读取。 */
 function matchHandoffPath(
   path: string,
 ): { handoffId: string; kind: "page" | "lifecycle" } | undefined {
   const page = path.match(/^\/web\/h\/([^/]+)$/)
-  if (page) return { handoffId: decodeURIComponent(page[1]), kind: "page" }
+  if (page) {
+    const handoffId = decodePathSegment(page[1])
+    if (handoffId !== undefined) return { handoffId, kind: "page" }
+  }
   const lifecycle = path.match(/^\/web\/h\/([^/]+)\/lifecycle$/)
   if (lifecycle) {
-    return { handoffId: decodeURIComponent(lifecycle[1]), kind: "lifecycle" }
+    const handoffId = decodePathSegment(lifecycle[1])
+    if (handoffId !== undefined) return { handoffId, kind: "lifecycle" }
   }
   return undefined
+}
+
+function decodePathSegment(value: string): string | undefined {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return undefined
+  }
 }
 
 function staticResponse(contentType: string, body: string): Response {
