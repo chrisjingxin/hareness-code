@@ -158,6 +158,7 @@ def test_middleware_preflight_matches_the_execution_boundary(tmp_path: Path):
 
     assert middleware.allows_approval(outside) is False
     assert middleware.allows_approval(inside) is True
+    assert inside.tool_call["args"]["file_path"] == str(tmp_path / "inside.md")
 
 
 async def test_async_middleware_rejection_does_not_call_handler(tmp_path: Path):

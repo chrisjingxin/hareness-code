@@ -15,8 +15,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
-from harness_agent.agent_engine_profile import AgentEngineProfile
-from harness_agent.resource_lifecycle import ResourceScope, SharedResourceLease
+from harness_agent.runtime.agent_engine_profile import AgentEngineProfile
+from harness_agent.runtime.resource_lifecycle import ResourceScope, SharedResourceLease
 
 logger = logging.getLogger(__name__)
 

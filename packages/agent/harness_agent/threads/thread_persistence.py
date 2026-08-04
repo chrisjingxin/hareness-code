@@ -25,10 +25,10 @@ from harness_agent.runtime.execution_binding import (
     PersistedBindingState,
     RunExecutionBinding,
 )
-from harness_agent.context_lifecycle import RunContextSnapshot, snapshot_from_legacy_prompt_epoch
-from harness_agent.prompting import HISTORY_REWRITE_VERSION, canonical_json
-from harness_agent.agent_engine_profile import AGENT_ENGINE_PROFILE_VERSION, AgentEngineProfile
-from harness_agent.context_projection import (
+from harness_agent.threads.context_lifecycle import RunContextSnapshot, snapshot_from_legacy_prompt_epoch
+from harness_agent.threads.prompting import HISTORY_REWRITE_VERSION, canonical_json
+from harness_agent.runtime.agent_engine_profile import AGENT_ENGINE_PROFILE_VERSION, AgentEngineProfile
+from harness_agent.threads.context_projection import (
     CompressionCheckpoint,
     CompressionCheckpointDraft,
     ContextProjectionError,
@@ -39,7 +39,7 @@ from harness_agent.context_projection import (
     source_digest,
     strict_json_loads,
 )
-from harness_agent.runtime_state import RuntimeStateError, RuntimeStateSnapshot
+from harness_agent.threads.runtime_state import RuntimeStateError, RuntimeStateSnapshot
 
 
 _SCHEMA_VERSION = 11
@@ -6091,7 +6091,7 @@ async def _run_legacy_migration_child_once(
     command = [
         sys.executable,
         "-m",
-        "harness_agent.migration_worker",
+        "harness_agent.threads.migration_worker",
         "--database",
         str(path.resolve()),
         "--project-fingerprint",

@@ -10,9 +10,9 @@ import pytest
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.base import empty_checkpoint
 
-import harness_agent.thread_persistence as thread_persistence_module
-from harness_agent.config import ModelSettings
-from harness_agent.agent_engine_profile import (
+import harness_agent.threads.thread_persistence as thread_persistence_module
+from harness_agent.config.config import ModelSettings
+from harness_agent.runtime.agent_engine_profile import (
     ModelRoleBinding,
     AgentEngineProfile,
     component_fingerprint,

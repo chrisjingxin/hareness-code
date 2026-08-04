@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Mapping, Sequence
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
 if TYPE_CHECKING:
-    from harness_agent.run_context import RunContext
+    from harness_agent.runtime.run_context import RunContext
 
 
 class RuntimeStateError(ValueError):
@@ -297,7 +297,7 @@ def _todos_from_state(value: object) -> tuple[Mapping[str, object], ...]:
 
 def _latest_tool_group(messages: Sequence[BaseMessage]) -> str | None:
     """保存最近一个已经闭合的 tool call/result 组的严格编码。"""
-    from harness_agent.context_projection import (
+    from harness_agent.threads.context_projection import (
         encode_projected_messages,
         validate_atomic_message_groups,
     )

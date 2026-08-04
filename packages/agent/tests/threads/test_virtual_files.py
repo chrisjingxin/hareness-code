@@ -62,8 +62,8 @@ async def test_virtual_skill_reads_are_isolated_between_old_and_new_snapshots(
     tmp_path: Path,
 ):
     """旧 Run 的虚拟正文/资源不随磁盘修改或删除串到下一 Run。"""
-    from harness_agent.skills import SkillRegistry
-    from harness_agent.virtual_files import HarnessVirtualBackend
+    from harness_agent.extensions.skills import SkillRegistry
+    from harness_agent.threads.virtual_files import HarnessVirtualBackend
 
     workspace = tmp_path / "workspace"
     _write_skill(workspace / ".harness" / "skills")
@@ -177,10 +177,10 @@ async def test_run_scoped_virtual_backend_requires_the_run_skill_snapshot(tmp_pa
     """共享图的虚拟 Skill 文件只能读取 RunContext 绑定的 catalog identity。"""
     from deepagents.backends import LocalShellBackend
 
-    from harness_agent.context_lifecycle import ContextLifecycle
-    from harness_agent.run_context import RunContext, RunContextError
-    from harness_agent.skills import SkillRegistry
-    from harness_agent.virtual_files import run_scoped_virtual_backend_factory
+    from harness_agent.threads.context_lifecycle import ContextLifecycle
+    from harness_agent.runtime.run_context import RunContext, RunContextError
+    from harness_agent.extensions.skills import SkillRegistry
+    from harness_agent.threads.virtual_files import run_scoped_virtual_backend_factory
 
     workspace = tmp_path / "workspace"
     _write_skill(workspace / ".harness" / "skills")

@@ -9,8 +9,8 @@ import json
 import httpx
 from langchain_core.language_models.chat_models import BaseChatModel
 
-from harness_agent.config import ModelSettings
-from harness_agent.resource_lifecycle import (
+from harness_agent.config.config import ModelSettings
+from harness_agent.runtime.resource_lifecycle import (
     ResourceScope,
     ResourceState,
     SharedResourceHandle,

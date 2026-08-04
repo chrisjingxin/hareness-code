@@ -14,21 +14,21 @@ from harness_agent.runtime.agent_engine_profile import (
     ModelRoleBinding,
     component_fingerprint,
 )
-from harness_agent.agent_spec import (
+from harness_agent.runtime.agent_spec import (
     RUN_CONTEXT_SNAPSHOT_MIDDLEWARE_VERSION,
     resolve_builtin_main_agent_spec,
 )
-from harness_agent.approval_mode import DEFAULT_APPROVAL_MODE
-from harness_agent.config import ExecutionSettings, ModelProfile, ModelSettings
-from harness_agent.execution_binding import (
+from harness_agent.policy.approval_mode import DEFAULT_APPROVAL_MODE
+from harness_agent.config.config import ExecutionSettings, ModelProfile, ModelSettings
+from harness_agent.runtime.execution_binding import (
     ResolvedExecutionBinding,
     SafeModelProfile,
     SelectionOrigin,
     ThreadExecutionSelection,
 )
-from harness_agent.mcp import McpServerConfig, build_mcp_snapshot
-from harness_agent.skills import SkillRegistry
-from harness_agent.prompting import sha256_text
+from harness_agent.extensions.mcp import McpServerConfig, build_mcp_snapshot
+from harness_agent.extensions.skills import SkillRegistry
+from harness_agent.threads.prompting import sha256_text
 
 
 def _binding(model_name: str = "fast-model", *, api_key: str | None = "secret") -> ResolvedExecutionBinding:

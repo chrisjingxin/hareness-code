@@ -18,7 +18,7 @@ from langchain_core.messages import (
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 if TYPE_CHECKING:
-    from harness_agent.thread_persistence import ThreadPersistence, TranscriptRecord
+    from harness_agent.threads.thread_persistence import ThreadPersistence, TranscriptRecord
 
 
 PROJECTED_MESSAGES_VERSION = 1

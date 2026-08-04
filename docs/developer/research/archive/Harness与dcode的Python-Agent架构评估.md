@@ -5,7 +5,7 @@
 > Harness Code：`9dbc5deda02cee996ce3d19c4faf2fb4629e22ce`  
 > Deep Agents Code（下文简称 dcode）：`4338671aa1d9bd1fd70f20069aac5468697606bf`
 
-> 历史快照：本文中的任务排序和待办判断只对应上述评估提交；当前任务顺序以[架构重构计划](../architecture/架构重构计划.md)和[任务看板](../tasks/任务看板.md)为准。
+> 历史快照：本文中的任务排序和待办判断只对应上述评估提交；当前任务顺序以[架构重构计划](../../architecture/架构重构计划.md)和[任务看板](../../tasks/任务看板.md)为准。
 
 ## 结论先行
 
@@ -528,25 +528,25 @@ Harness 当前的主要问题不是方向错误，而是**骨架已经较重，�
 
 ### Harness Code
 
-- [H-Architecture]：[架构总览](../architecture/架构总览.md)
-- [H-Refactor]：[架构重构计划](../architecture/架构重构计划.md)
-- [H-Task-085]：[ZC-085 清理未接线框架](../tasks/archive/ZC-085.md)
-- [H-Task-086]：[ZC-086 提取模型绑定领域服务](../tasks/archive/ZC-086.md)
-- [H-Package]：[`packages/agent/pyproject.toml`](../../../packages/agent/pyproject.toml)
-- [H-Agent]：[`harness_agent/runtime/agent.py`](../../../packages/agent/harness_agent/runtime/agent.py)
-- [H-Server]：[`harness_agent/host/agent_host.py`](../../../packages/agent/harness_agent/host/agent_host.py)
-- [H-Profile]：[`harness_agent/runtime/agent_engine_profile.py`](../../../packages/agent/harness_agent/runtime/agent_engine_profile.py)
-- [H-AgentEngine]：[`harness_agent/runtime/agent_engine.py`](../../../packages/agent/harness_agent/runtime/agent_engine.py)
-- [H-RunContext]：[`harness_agent/runtime/run_context.py`](../../../packages/agent/harness_agent/runtime/run_context.py)
-- [H-Prompt]：[`harness_agent/threads/prompting.py`](../../../packages/agent/harness_agent/threads/prompting.py)
-- [H-Context]：[`harness_agent/threads/context_window.py`](../../../packages/agent/harness_agent/threads/context_window.py)
-- [H-Persistence]：[`harness_agent/threads/thread_persistence.py`](../../../packages/agent/harness_agent/threads/thread_persistence.py)
-- [H-Skills]：[`harness_agent/extensions/skills.py`](../../../packages/agent/harness_agent/extensions/skills.py)
-- [H-Execution]：[`harness_agent/runtime/execution.py`](../../../packages/agent/harness_agent/runtime/execution.py)
-- [H-Workspace]：[`harness_agent/policy/workspace_boundary.py`](../../../packages/agent/harness_agent/policy/workspace_boundary.py)
-- [H-Approval]：[`harness_agent/policy/approval_policy.py`](../../../packages/agent/harness_agent/policy/approval_policy.py)
-- [H-Concurrency]：[`harness_agent/policy/concurrency_guard.py`](../../../packages/agent/harness_agent/policy/concurrency_guard.py)
-- [H-MCP]：[`harness_agent/extensions/mcp.py`](../../../packages/agent/harness_agent/extensions/mcp.py)
+- [H-Architecture]：[架构总览](../../architecture/架构总览.md)
+- [H-Refactor]：[架构重构计划](../../architecture/架构重构计划.md)
+- [H-Task-085]：[ZC-085 清理未接线框架](../../tasks/archive/ZC-085.md)
+- [H-Task-086]：[ZC-086 提取模型绑定领域服务](../../tasks/archive/ZC-086.md)
+- [H-Package]：[`packages/agent/pyproject.toml`](../../../../packages/agent/pyproject.toml)
+- [H-Agent]：[`harness_agent/runtime/agent.py`](../../../../packages/agent/harness_agent/runtime/agent.py)
+- [H-Server]：[`harness_agent/host/agent_host.py`](../../../../packages/agent/harness_agent/host/agent_host.py)
+- [H-Profile]：[`harness_agent/runtime/agent_engine_profile.py`](../../../../packages/agent/harness_agent/runtime/agent_engine_profile.py)
+- [H-AgentEngine]：[`harness_agent/runtime/agent_engine.py`](../../../../packages/agent/harness_agent/runtime/agent_engine.py)
+- [H-RunContext]：[`harness_agent/runtime/run_context.py`](../../../../packages/agent/harness_agent/runtime/run_context.py)
+- [H-Prompt]：[`harness_agent/threads/prompting.py`](../../../../packages/agent/harness_agent/threads/prompting.py)
+- [H-Context]：[`harness_agent/threads/context_window.py`](../../../../packages/agent/harness_agent/threads/context_window.py)
+- [H-Persistence]：[`harness_agent/threads/thread_persistence.py`](../../../../packages/agent/harness_agent/threads/thread_persistence.py)
+- [H-Skills]：[`harness_agent/extensions/skills.py`](../../../../packages/agent/harness_agent/extensions/skills.py)
+- [H-Execution]：[`harness_agent/runtime/execution.py`](../../../../packages/agent/harness_agent/runtime/execution.py)
+- [H-Workspace]：[`harness_agent/policy/workspace_boundary.py`](../../../../packages/agent/harness_agent/policy/workspace_boundary.py)
+- [H-Approval]：[`harness_agent/policy/approval_policy.py`](../../../../packages/agent/harness_agent/policy/approval_policy.py)
+- [H-Concurrency]：[`harness_agent/policy/concurrency_guard.py`](../../../../packages/agent/harness_agent/policy/concurrency_guard.py)
+- [H-MCP]：[`harness_agent/extensions/mcp.py`](../../../../packages/agent/harness_agent/extensions/mcp.py)
 
 ### Deep Agents Code
 
@@ -568,25 +568,25 @@ Harness 当前的主要问题不是方向错误，而是**骨架已经较重，�
 - [D-Memory]：[`deepagents/middleware/memory.py`](https://github.com/langchain-ai/deepagents/blob/4338671aa1d9bd1fd70f20069aac5468697606bf/libs/deepagents/deepagents/middleware/memory.py)
 - [D-Filesystem]：[`deepagents/backends/filesystem.py`](https://github.com/langchain-ai/deepagents/blob/4338671aa1d9bd1fd70f20069aac5468697606bf/libs/deepagents/deepagents/backends/filesystem.py)
 
-[H-Architecture]: ../architecture/架构总览.md
-[H-Refactor]: ../architecture/架构重构计划.md
-[H-Task-085]: ../tasks/archive/ZC-085.md
-[H-Task-086]: ../tasks/archive/ZC-086.md
-[H-Package]: ../../../packages/agent/pyproject.toml
-[H-Agent]: ../../../packages/agent/harness_agent/runtime/agent.py
-[H-Server]: ../../../packages/agent/harness_agent/host/agent_host.py
-[H-Profile]: ../../../packages/agent/harness_agent/runtime/agent_engine_profile.py
-[H-AgentEngine]: ../../../packages/agent/harness_agent/runtime/agent_engine.py
-[H-RunContext]: ../../../packages/agent/harness_agent/runtime/run_context.py
-[H-Prompt]: ../../../packages/agent/harness_agent/threads/prompting.py
-[H-Context]: ../../../packages/agent/harness_agent/threads/context_window.py
-[H-Persistence]: ../../../packages/agent/harness_agent/threads/thread_persistence.py
-[H-Skills]: ../../../packages/agent/harness_agent/extensions/skills.py
-[H-Execution]: ../../../packages/agent/harness_agent/runtime/execution.py
-[H-Workspace]: ../../../packages/agent/harness_agent/policy/workspace_boundary.py
-[H-Approval]: ../../../packages/agent/harness_agent/policy/approval_policy.py
-[H-Concurrency]: ../../../packages/agent/harness_agent/policy/concurrency_guard.py
-[H-MCP]: ../../../packages/agent/harness_agent/extensions/mcp.py
+[H-Architecture]: ../../architecture/架构总览.md
+[H-Refactor]: ../../architecture/架构重构计划.md
+[H-Task-085]: ../../tasks/archive/ZC-085.md
+[H-Task-086]: ../../tasks/archive/ZC-086.md
+[H-Package]: ../../../../packages/agent/pyproject.toml
+[H-Agent]: ../../../../packages/agent/harness_agent/runtime/agent.py
+[H-Server]: ../../../../packages/agent/harness_agent/host/agent_host.py
+[H-Profile]: ../../../../packages/agent/harness_agent/runtime/agent_engine_profile.py
+[H-AgentEngine]: ../../../../packages/agent/harness_agent/runtime/agent_engine.py
+[H-RunContext]: ../../../../packages/agent/harness_agent/runtime/run_context.py
+[H-Prompt]: ../../../../packages/agent/harness_agent/threads/prompting.py
+[H-Context]: ../../../../packages/agent/harness_agent/threads/context_window.py
+[H-Persistence]: ../../../../packages/agent/harness_agent/threads/thread_persistence.py
+[H-Skills]: ../../../../packages/agent/harness_agent/extensions/skills.py
+[H-Execution]: ../../../../packages/agent/harness_agent/runtime/execution.py
+[H-Workspace]: ../../../../packages/agent/harness_agent/policy/workspace_boundary.py
+[H-Approval]: ../../../../packages/agent/harness_agent/policy/approval_policy.py
+[H-Concurrency]: ../../../../packages/agent/harness_agent/policy/concurrency_guard.py
+[H-MCP]: ../../../../packages/agent/harness_agent/extensions/mcp.py
 [D-Package]: https://github.com/langchain-ai/deepagents/blob/4338671aa1d9bd1fd70f20069aac5468697606bf/libs/code/pyproject.toml
 [D-Agent]: https://github.com/langchain-ai/deepagents/blob/4338671aa1d9bd1fd70f20069aac5468697606bf/libs/code/deepagents_code/agent.py
 [D-ServerGraph]: https://github.com/langchain-ai/deepagents/blob/4338671aa1d9bd1fd70f20069aac5468697606bf/libs/code/deepagents_code/server_graph.py

@@ -12,8 +12,8 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from deepagents.backends import LocalShellBackend
 from deepagents.backends.protocol import SandboxBackendProtocol
 
-from harness_agent.config import ConfigError, ExecutionSettings, RemoteSandboxSettings
-from harness_agent.resource_lifecycle import (
+from harness_agent.config.config import ConfigError, ExecutionSettings, RemoteSandboxSettings
+from harness_agent.runtime.resource_lifecycle import (
     ResourceScope,
     ResourceState,
     SharedResourceHandle,

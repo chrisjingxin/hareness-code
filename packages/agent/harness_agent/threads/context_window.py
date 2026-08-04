@@ -21,30 +21,30 @@ from langchain_core.exceptions import ContextOverflowError
 from langchain_core.messages import BaseMessage
 from langgraph.types import Command
 
-from harness_agent.context_compaction import (
+from harness_agent.threads.context_compaction import (
     CompressionRequest,
     CompressionResult,
     ContextCompactor,
 )
-from harness_agent.context_pressure import (
+from harness_agent.threads.context_pressure import (
     ContextPressurePolicy,
     ContextPressureSnapshot,
     ModelCallType,
 )
-from harness_agent.context_projection import (
+from harness_agent.threads.context_projection import (
     ContextProjector,
     ModelProjection,
     encode_projected_messages,
     validate_atomic_message_groups,
 )
-from harness_agent.prompting import (
+from harness_agent.threads.prompting import (
     canonical_json,
     estimate_tokens,
     input_cap_tokens,
     normalized_tool_schemas,
 )
-from harness_agent.run_context import RunContext, thread_id_for_runtime
-from harness_agent.thread_persistence import ContextState, ThreadPersistence
+from harness_agent.runtime.run_context import RunContext, thread_id_for_runtime
+from harness_agent.threads.thread_persistence import ContextState, ThreadPersistence
 
 
 _SAFE_CONTEXT_WIRE_TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,96}$")
@@ -711,7 +711,7 @@ def _estimate_request_tokens(request: ModelRequest, tools: list[object]) -> int:
 
 def _messages_tokens(messages: Sequence[BaseMessage]) -> int:
     """计算消息正文、工具调用元数据和固定结构开销。"""
-    from harness_agent.context_compaction import _render_message
+    from harness_agent.threads.context_compaction import _render_message
 
     return sum(estimate_tokens(_render_message(message)) + 8 for message in messages)
 
@@ -734,7 +734,7 @@ def _reclaimable_tool_pressure(
     messages: Sequence[BaseMessage], *, keep_turns: int, keep_recent: int
 ) -> tuple[int, int]:
     """复用统一服务的候选判定，避免 middleware 另有工具归档规则。"""
-    from harness_agent.context_compaction import _reclaimable_tool_pressure as measure
+    from harness_agent.threads.context_compaction import _reclaimable_tool_pressure as measure
 
     return measure(messages, keep_turns=keep_turns, keep_recent=keep_recent)
 

@@ -21,7 +21,7 @@ async def _store(tmp_path):
 
 def test_context_updated_payload_redacts_unstable_diagnostics_and_internal_ids():
     """诊断只允许安全短码，不把路径、提示词或内部标识送到 TUI。"""
-    from harness_agent.context_window import ContextUpdate
+    from harness_agent.threads.context_window import ContextUpdate
 
     payload = ContextUpdate(
         thread_id="thread",
@@ -85,9 +85,9 @@ async def test_context_window_reports_and_soft_dehydrates_old_tool_results(tmp_p
 
 async def test_consecutive_rewrites_declare_all_artifacts_and_restart_from_latest(tmp_path):
     """连续脱水、摘要、再脱水必须继承旧指针，重启后 latest checkpoint 仍有效。"""
-    from harness_agent.context_projection import ContextProjector, artifact_references
-    from harness_agent.context_window import ContextWindowMiddleware
-    from harness_agent.thread_persistence import ThreadPersistence, TranscriptAppend
+    from harness_agent.threads.context_projection import ContextProjector, artifact_references
+    from harness_agent.threads.context_window import ContextWindowMiddleware
+    from harness_agent.threads.thread_persistence import ThreadPersistence, TranscriptAppend
 
     store = await _store(tmp_path)
     await accept_thread(store, "thread", "第一轮")
@@ -280,7 +280,7 @@ async def test_context_window_overflow_recovery_archives_before_single_retry(tmp
 
 async def test_automatic_compaction_without_persistence_fails_closed(tmp_path):
     """没有 ThreadPersistence 时中低/高水位和 overflow 都不伪造 Artifact。"""
-    from harness_agent.context_window import ContextWindowMiddleware
+    from harness_agent.threads.context_window import ContextWindowMiddleware
 
     class CountingModel(FakeMessagesListChatModel):
         """确认不可持久化路径不会调用摘要模型。"""
@@ -444,7 +444,7 @@ async def test_context_rewrite_keeps_current_model_response_in_checkpoint(tmp_pa
         ]
     )
     model.profile = {"max_input_tokens": 16_384}
-    from harness_agent.context_window import ContextWindowMiddleware
+    from harness_agent.threads.context_window import ContextWindowMiddleware
 
     middleware = ContextWindowMiddleware(
         model,
@@ -493,7 +493,7 @@ async def test_context_rewrite_keeps_current_model_response_in_checkpoint(tmp_pa
 
 async def test_full_pressure_micro_remeasures_and_skips_summary_model(tmp_path):
     """达到 full 先归档旧工具；pressure_after 足够时只提交 micro。"""
-    from harness_agent.context_window import ContextWindowMiddleware
+    from harness_agent.threads.context_window import ContextWindowMiddleware
 
     class CountingModel(FakeMessagesListChatModel):
         """记录是否错误地调用了完整摘要模型。"""
@@ -539,7 +539,7 @@ async def test_full_pressure_micro_remeasures_and_skips_summary_model(tmp_path):
 
 async def test_idle_micro_requires_explicit_top_level_call_type(tmp_path):
     """同一空闲时长只在显式顶层首调触发，工具续跑不重复触发。"""
-    from harness_agent.context_window import ContextWindowMiddleware
+    from harness_agent.threads.context_window import ContextWindowMiddleware
 
     store = await _store(tmp_path)
     await accept_thread(store, "idle-boundary", "第一轮")
@@ -581,7 +581,7 @@ async def test_idle_micro_requires_explicit_top_level_call_type(tmp_path):
 
 async def test_full_pressure_keeps_micro_in_memory_before_full_checkpoint(tmp_path):
     """微压缩后仍超过 full 时只留下最终 full checkpoint。"""
-    from harness_agent.context_window import ContextWindowMiddleware
+    from harness_agent.threads.context_window import ContextWindowMiddleware
 
     class CountingModel(FakeMessagesListChatModel):
         """记录完整摘要调用次数。"""
@@ -664,8 +664,8 @@ async def test_full_pressure_keeps_micro_in_memory_before_full_checkpoint(tmp_pa
 
     project = tmp_path / "project"
     await store.close()
-    from harness_agent.context_projection import ContextProjector
-    from harness_agent.thread_persistence import ThreadPersistence
+    from harness_agent.threads.context_projection import ContextProjector
+    from harness_agent.threads.thread_persistence import ThreadPersistence
 
     reopened = await ThreadPersistence.open(project=project, home=tmp_path / "home")
     recovered = await ContextProjector(reopened).project("full-after-micro")
@@ -677,7 +677,7 @@ async def test_full_pressure_keeps_micro_in_memory_before_full_checkpoint(tmp_pa
 
 async def test_full_pressure_after_micro_uses_new_snapshot_for_retention(tmp_path):
     """hard 前 micro 后降到 full/hard 间时，full 改为普通摘要并保留两轮。"""
-    from harness_agent.context_window import ContextWindowMiddleware
+    from harness_agent.threads.context_window import ContextWindowMiddleware
 
     summary = AIMessage(
         content=(
@@ -738,7 +738,7 @@ async def test_full_pressure_after_micro_uses_new_snapshot_for_retention(tmp_pat
 
 async def test_full_pressure_failure_does_not_leave_micro_artifacts(tmp_path):
     """摘要失败时内存 micro 草稿不产生孤儿 Artifact 或 checkpoint。"""
-    from harness_agent.context_window import ContextWindowMiddleware
+    from harness_agent.threads.context_window import ContextWindowMiddleware
 
     class CountingModel(FakeMessagesListChatModel):
         """记录失败路径是否错误地重复调用或提交。"""
@@ -796,7 +796,7 @@ async def test_full_pressure_failure_does_not_leave_micro_artifacts(tmp_path):
 
 async def test_micro_compression_is_idempotent_for_artifact_placeholders(tmp_path):
     """再次处理已替换的工具结果不创建第二份 Artifact。"""
-    from harness_agent.context_window import ContextWindowMiddleware
+    from harness_agent.threads.context_window import ContextWindowMiddleware
 
     store = await _store(tmp_path)
     await accept_thread(store, "micro-idempotent", "第一轮")

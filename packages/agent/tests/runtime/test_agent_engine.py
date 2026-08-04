@@ -67,7 +67,7 @@ async def test_agent_engine_pool_single_flight_builds_one_engine_for_concurrent_
 
 async def test_pool_invalidate_reserves_building_generation_until_stale_build_is_discarded():
     """失效发生在首建期间时不能发布旧图或启动第二个旧 key 构建。"""
-    from harness_agent.agent_engine import (
+    from harness_agent.runtime.agent_engine import (
         AgentEngine,
         AgentEnginePool,
         AgentEngineState,
@@ -549,8 +549,8 @@ async def test_agent_engine_pool_structured_logs_use_only_short_profile_id(caplo
 
 async def test_engine_eviction_releases_shared_lease_without_closing_host_resource():
     """淘汰引擎只释放借用；共享资源要等 Host owner 关闭。"""
-    from harness_agent.agent_engine import AgentEngine, AgentEngineResourceBundle
-    from harness_agent.resource_lifecycle import ResourceScope, SharedResourceHandle
+    from harness_agent.runtime.agent_engine import AgentEngine, AgentEngineResourceBundle
+    from harness_agent.runtime.resource_lifecycle import ResourceScope, SharedResourceHandle
 
     closed: list[str] = []
     shared = SharedResourceHandle(
@@ -579,7 +579,7 @@ async def test_engine_eviction_releases_shared_lease_without_closing_host_resour
 
 async def test_pool_invalidate_drains_only_matching_profile_and_rejects_new_acquire():
     """Profile 失效会保留活动引擎收尾，但不让新执行复用 draining 图。"""
-    from harness_agent.agent_engine import (
+    from harness_agent.runtime.agent_engine import (
         AgentEngine,
         AgentEnginePool,
         AgentEngineState,

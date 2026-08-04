@@ -21,9 +21,9 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import Runnable
 from langgraph.checkpoint.base import empty_checkpoint
 
-import harness_agent.thread_persistence as thread_persistence_module
-from harness_agent.context_projection import ContextProjectionError, ContextProjector
-from harness_agent.execution_binding import (
+import harness_agent.threads.thread_persistence as thread_persistence_module
+from harness_agent.threads.context_projection import ContextProjectionError, ContextProjector
+from harness_agent.runtime.execution_binding import (
     RunExecutionBinding,
     SafeModelProfile,
     SelectionOrigin,
@@ -40,7 +40,7 @@ from harness_agent.threads.thread_persistence import (
     ThreadPersistence,
     ThreadPersistenceError,
 )
-from thread_fixtures import accept_thread, test_binding as make_test_binding
+from tests.support.thread_fixtures import accept_thread, test_binding as make_test_binding
 
 
 class ToolCallingFakeChatModel(GenericFakeChatModel):
@@ -218,16 +218,16 @@ async def test_checkpoint_and_transcript_writes_share_connection_operation_lock(
 
 async def test_thread_persistence_reuses_langgraph_state_across_graph_restart(tmp_path: Path) -> None:
     """共享图重建后通过持久化 RunContextSnapshot 恢复同一 thread 的消息。"""
-    from harness_agent.agent import create_harness_agent
-    from harness_agent.context_lifecycle import (
+    from harness_agent.runtime.agent import create_harness_agent
+    from harness_agent.threads.context_lifecycle import (
         ContextAuthority,
         ContextBlock,
         ContextStability,
         RunContextSnapshot,
     )
-    import harness_agent.context_lifecycle as context_lifecycle_module
-    from harness_agent.run_context import RunContext
-    from harness_agent.prompting import sha256_text
+    import harness_agent.threads.context_lifecycle as context_lifecycle_module
+    from harness_agent.runtime.run_context import RunContext
+    from harness_agent.threads.prompting import sha256_text
 
     home = tmp_path / "home"
     project = tmp_path / "project"

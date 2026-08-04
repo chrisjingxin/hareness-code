@@ -9,7 +9,7 @@ import pytest
 
 async def test_shared_resource_rejects_new_leases_after_draining() -> None:
     """配置失效只停止新借用，已有借用释放后 owner 才能关闭。"""
-    from harness_agent.resource_lifecycle import (
+    from harness_agent.runtime.resource_lifecycle import (
         ResourceScope,
         SharedResourceBusyError,
         SharedResourceHandle,
@@ -38,7 +38,7 @@ async def test_shared_resource_rejects_new_leases_after_draining() -> None:
 
 async def test_shared_resource_close_is_idempotent() -> None:
     """Host close 的重复调用不会重复关闭底层 transport。"""
-    from harness_agent.resource_lifecycle import ResourceScope, SharedResourceHandle
+    from harness_agent.runtime.resource_lifecycle import ResourceScope, SharedResourceHandle
 
     calls = 0
 
@@ -64,8 +64,8 @@ async def test_workspace_execution_pool_shares_backend_and_releases_after_invali
     """同一 workspace 身份共享 backend，配置失效不提前关闭活动借用。"""
     from types import SimpleNamespace
 
-    from harness_agent.config import ExecutionSettings
-    from harness_agent.execution import ExecutionContext, WorkspaceExecutionResourcePool
+    from harness_agent.config.config import ExecutionSettings
+    from harness_agent.runtime.execution import ExecutionContext, WorkspaceExecutionResourcePool
 
     closed: list[str] = []
 
@@ -77,7 +77,7 @@ async def test_workspace_execution_pool_shares_backend_and_releases_after_invali
             provider=None,
         )
 
-    monkeypatch.setattr("harness_agent.execution.create_execution_context", create)
+    monkeypatch.setattr("harness_agent.runtime.execution.create_execution_context", create)
     pool = WorkspaceExecutionResourcePool()
     settings = ExecutionSettings()
     first = await pool.acquire("sandbox-a", settings, tmp_path)
@@ -98,8 +98,8 @@ async def test_workspace_pool_keeps_draining_generation_when_same_key_reacquires
     """同 key 重租新 backend 不会覆盖仍有 borrower 的旧 generation。"""
     from types import SimpleNamespace
 
-    from harness_agent.config import ExecutionSettings
-    from harness_agent.execution import ExecutionContext, WorkspaceExecutionResourcePool
+    from harness_agent.config.config import ExecutionSettings
+    from harness_agent.runtime.execution import ExecutionContext, WorkspaceExecutionResourcePool
 
     created: list[str] = []
     closed: list[str] = []
@@ -114,7 +114,7 @@ async def test_workspace_pool_keeps_draining_generation_when_same_key_reacquires
             provider=None,
         )
 
-    monkeypatch.setattr("harness_agent.execution.create_execution_context", create)
+    monkeypatch.setattr("harness_agent.runtime.execution.create_execution_context", create)
     pool = WorkspaceExecutionResourcePool()
     settings = ExecutionSettings()
 

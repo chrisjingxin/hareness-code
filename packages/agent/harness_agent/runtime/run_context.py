@@ -15,14 +15,17 @@ from typing import Any, Mapping
 from langchain.agents.middleware.types import AgentMiddleware, ExtendedModelResponse, ModelRequest, ModelResponse
 from langchain_core.messages import SystemMessage
 
-from harness_agent.approval_mode import ApprovalMode
-from harness_agent.execution_binding import ExecutionMode
-from harness_agent.context_lifecycle import (
+from harness_agent.policy.approval_mode import ApprovalMode
+from harness_agent.policy.approval_policy import approval_mode_prompt
+from harness_agent.runtime.execution_binding import ExecutionMode
+from harness_agent.threads.context_lifecycle import (
     RunContextSnapshot,
     snapshot_from_legacy_prompt_epoch,
 )
-from harness_agent.context_pressure import ModelCallLifecycle
-from harness_agent.prompting import PromptEpoch
+from harness_agent.threads.context_pressure import ModelCallLifecycle
+from harness_agent.threads.prompting import PromptEpoch
+
+_LEGACY_APPROVAL_MODE_MARKER = "\n\n## 审批模式："
 
 
 class RunContextError(ValueError):
@@ -129,12 +132,27 @@ class RunContextSnapshotMiddleware(AgentMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse | ExtendedModelResponse:
-        """保留 DeepAgents 基础提示词，并在其前拼接当前 Run 快照。"""
+        """保留基础提示词，并注入快照及本 Run 的实际审批模式。
+
+        旧快照可能内嵌创建时的模式小节，必须先剥离，再根据当前
+        ``RunContext`` 追加，保证 TUI 切换模式后提示与强制策略一致。
+        """
         context = require_run_context(request.runtime)
         base_prompt = _system_message_text(request.system_message)
-        prompt = context.context_snapshot.system_prompt
+        prompt = _without_legacy_approval_mode_section(
+            context.context_snapshot.system_prompt
+        )
+        prompt = f"{prompt}{approval_mode_prompt(context.approval_mode)}"
         system_prompt = f"{prompt}\n\n{base_prompt}" if base_prompt else prompt
         return await handler(request.override(system_message=SystemMessage(content=system_prompt)))
+
+
+def _without_legacy_approval_mode_section(prompt: str) -> str:
+    """剥离旧 PromptEpoch 末尾内嵌的审批模式小节。"""
+    index = prompt.find(_LEGACY_APPROVAL_MODE_MARKER)
+    if index == -1:
+        return prompt
+    return prompt[:index]
 
 def _system_message_text(message: object | None) -> str:
     """将 DeepAgents 生成的基础 system message 转为文本，保持现有顺序。"""

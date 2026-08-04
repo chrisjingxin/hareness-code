@@ -85,13 +85,13 @@ from harness_agent.protocol.runtime import (
     validate_operation_result,
     validate_protocol_error_data,
 )
-from harness_agent.skills import LoadedSkill, SkillCatalogManager, SkillError, SkillRegistry
-from harness_agent.agent_spec import (
+from harness_agent.extensions.skills import LoadedSkill, SkillCatalogManager, SkillError, SkillRegistry
+from harness_agent.runtime.agent_spec import (
     ResolvedAgentSpec,
     resolve_builtin_main_agent_spec,
     skill_catalog_fingerprint,
 )
-from harness_agent.mcp import (
+from harness_agent.extensions.mcp import (
     McpConfigError,
     McpConfigSnapshot,
     McpConnectionManager,
@@ -102,10 +102,10 @@ from harness_agent.runtime.run_context import RunContext
 from harness_agent.runtime.agent_engine_profile import (
     AgentEngineProfile,
 )
-from harness_agent.context_lifecycle import ContextLifecycle, ContextRefreshError
-from harness_agent.thread_persistence import ThreadPersistence, ThreadPersistenceError
-from harness_agent.providers.harness_gateway import ProviderClientPool
-from harness_agent.run_coordinator import (
+from harness_agent.threads.context_lifecycle import ContextLifecycle, ContextRefreshError
+from harness_agent.threads.thread_persistence import ThreadPersistence, ThreadPersistenceError
+from harness_agent.extensions.providers.harness_gateway import ProviderClientPool
+from harness_agent.host.run_coordinator import (
     AgentEvent,
     ConnectionRef,
     RunCoordinator,
@@ -121,7 +121,7 @@ from harness_agent.run_coordinator import (
 )
 
 if TYPE_CHECKING:
-    from harness_agent.runtime_state import RuntimeExecutionPolicy
+    from harness_agent.threads.runtime_state import RuntimeExecutionPolicy
 
 logger = logging.getLogger(__name__)
 STABLE_ERROR_CODES = {
@@ -162,97 +162,6 @@ class _AgentEngineSnapshotReservation:
             return
         self._released = True
         self._lock.release()
-
-
-@dataclass(slots=True)
-class ProtocolConnection:
-    """一个前端连接的协议状态，不拥有任何 Agent 运行资源。"""
-
-    connection_id: str
-    role: str
-    sender: Callable[[dict[str, Any]], Awaitable[None]] | None = None
-    capability_ceiling: frozenset[str] = field(
-        default_factory=lambda: frozenset(SERVER_CAPABILITIES)
-    )
-    initialized: bool = False
-    protocol_minor: int = PROTOCOL_MINOR
-    enabled_capabilities: set[str] = field(default_factory=set)
-    interaction_handles: set[str] = field(default_factory=set)
-    watched_threads: set[str] = field(default_factory=set)
-    pending_requests: dict[str, asyncio.Future[object]] = field(default_factory=dict)
-    interaction_specs: dict[str, InteractionRequest] = field(default_factory=dict)
-    closed: bool = False
-
-
-class _ProtocolInteractionAdapter:
-    """把类型化 Interaction 映射为 owner Connection 上的 JSON-RPC reverse request。"""
-
-    def __init__(self, host: "AgentHost") -> None:
-        """保存 Host 引用；RunCoordinator 不会看到该 transport 对象。"""
-        self._host = host
-
-    async def request(
-        self,
-        owner: ConnectionRef,
-        run: RunRef,
-        interaction: InteractionRequest,
-    ) -> InteractionResult:
-        """向 owner 请求审批/问答，超时、断开和缺少 capability 均安全降级。"""
-        connection = self._host._connections.get(owner.connection_id)
-        if (
-            connection is None
-            or connection.closed
-            or interaction.type not in self._host._connection_handles(connection)
-        ):
-            logger.info("Interaction %s disabled by capability negotiation", interaction.request_id)
-            return InteractionResult(self._default_value(interaction), expired=True)
-
-        future: asyncio.Future[object] = asyncio.get_running_loop().create_future()
-        connection.pending_requests[interaction.request_id] = future
-        connection.interaction_specs[interaction.request_id] = interaction
-        method = (
-            METHOD["INTERACTION_APPROVAL"]
-            if interaction.type == "approval"
-            else METHOD["INTERACTION_QUESTION"]
-        )
-        try:
-            await self._host._send_to(
-                connection,
-                {
-                    "jsonrpc": "2.0",
-                    "method": method,
-                    "id": interaction.request_id,
-                    "params": {
-                        "thread_id": run.thread_id,
-                        "run_id": run.run_id,
-                        "timeout_ms": INTERACTION_TIMEOUT_MS,
-                        "payload": dict(interaction.payload),
-                    },
-                },
-            )
-            return InteractionResult(
-                await asyncio.wait_for(future, timeout=INTERACTION_TIMEOUT_MS / 1000)
-            )
-        except (TimeoutError, RpcError, ValidationError) as exc:
-            logger.warning("Interaction %s failed closed: %s", interaction.request_id, exc)
-            return InteractionResult(self._default_value(interaction), expired=True)
-        finally:
-            connection.pending_requests.pop(interaction.request_id, None)
-            connection.interaction_specs.pop(interaction.request_id, None)
-
-    @staticmethod
-    def _default_value(interaction: InteractionRequest) -> dict[str, object]:
-        """返回 LangGraph 可接受的安全默认交互结果。"""
-        return {"decision": "reject"} if interaction.type == "approval" else {"answers": {}}
-
-
-@dataclass(frozen=True, slots=True)
-class _AttachmentGrant:
-    """尚未消费的本机 Web attachment 凭证。"""
-
-    origin: str
-    expires_at_ms: int
-    capability_ceiling: frozenset[str]
 
 
 AgentFactory = Callable[[Za38Config, Path], Any | Awaitable[Any]]
@@ -336,7 +245,7 @@ class AgentHost:
             persistence_provider=self._run_persistence_provider,
             preparation_provider=self._prepare_run,
             runtime_provider=self._acquire_run_runtime,
-            interaction_port=_ProtocolInteractionAdapter(self),
+            interaction_port=ProtocolInteractionAdapter(self),
             context_updates_provider=self._take_context_updates,
             project_dir=self._workspace,
         )
@@ -436,11 +345,7 @@ class AgentHost:
                 connection,
                 RpcError(-32004, "Peer connection closed"),
             )
-        if self._websocket_server is not None:
-            self._websocket_server.close()
-            await self._websocket_server.wait_closed()
-            self._websocket_server = None
-        self._attachment_grants.clear()
+        await self._attachments.close()
         # AgentEngine 先释放自己的图和共享租约，Host owner 再关闭 MCP、
         # workspace/sandbox、Provider transport，最后才关闭 ThreadPersistence。
         await self._close_agent_engine_pool()
@@ -870,6 +775,7 @@ class AgentHost:
                 resolved,
                 persistence=persistence,
                 skill_registry=registry,
+                approval_mode=command.requested_approval_mode,
             )
             profile = spec.runtime_profile
             context_snapshot = ContextLifecycle(
@@ -937,7 +843,7 @@ class AgentHost:
             and agent is not None
             and callable(getattr(agent, "aupdate_state", None))
         ):
-            from harness_agent.context_projection import ContextProjector
+            from harness_agent.threads.context_projection import ContextProjector
 
             try:
                 projector = ContextProjector(persistence)
@@ -1010,8 +916,8 @@ class AgentHost:
 
     async def _compact_idle_thread(self, thread_id: str) -> dict[str, object]:
         """在 Coordinator 已锁定为空闲的窗口内完成压缩。"""
-        from harness_agent.context_projection import ContextProjector, artifact_references
-        from harness_agent.runtime_state import (
+        from harness_agent.threads.context_projection import ContextProjector, artifact_references
+        from harness_agent.threads.runtime_state import (
             RuntimeExecutionPolicy,
             RuntimeStateRehydrator,
         )
@@ -1588,8 +1494,9 @@ class AgentHost:
         *,
         persistence: ThreadPersistence | None = None,
         skill_registry: SkillRegistry,
+        approval_mode: ApprovalMode | None = None,
     ) -> ResolvedAgentSpec:
-        """截取一次角色解析快照，Profile 和 builder 都从它派生。"""
+        """截取一次角色解析快照，Profile、审批策略和 builder 都从它派生。"""
         persistence = persistence or await self._ensure_thread_persistence()
         await self._ensure_mcp_connected()
         async with self._mcp_state_lock:
@@ -1604,7 +1511,7 @@ class AgentHost:
             project_fingerprint=persistence.project_fingerprint,
             workspace=self._workspace,
             binding=resolved_binding,
-            execution=config.execution,
+            execution=execution,
             skill_registry=skill_registry,
             mcp_snapshot=mcp_snapshot,
             mcp_tools=mcp_tools,
@@ -1689,7 +1596,7 @@ class AgentHost:
     def _ensure_workspace_execution_resources(self) -> Any:
         """在首次默认构图时加载并创建 workspace 资源 owner。"""
         if self._workspace_execution_resources is None:
-            from harness_agent.execution import WorkspaceExecutionResourcePool
+            from harness_agent.runtime.execution import WorkspaceExecutionResourcePool
 
             self._workspace_execution_resources = WorkspaceExecutionResourcePool()
         return self._workspace_execution_resources
@@ -1709,10 +1616,10 @@ class AgentHost:
             and profile_skill_fingerprint != skill_catalog_fingerprint(spec.skill_registry)
         ):
             raise RuntimeError("RUNTIME_SKILL_SNAPSHOT_MISMATCH")
-        from harness_agent.agent import create_harness_agent
-        from harness_agent.context_window import ContextWindowMiddleware
-        from harness_agent.providers.harness_gateway import create_openai_compatible_model
-        from harness_agent.runtime_state import RuntimeStateRehydrator
+        from harness_agent.runtime.agent import create_harness_agent
+        from harness_agent.threads.context_window import ContextWindowMiddleware
+        from harness_agent.extensions.providers.harness_gateway import create_openai_compatible_model
+        from harness_agent.threads.runtime_state import RuntimeStateRehydrator
 
         persistence = await self._ensure_thread_persistence()
         checkpointer = persistence.checkpointer
@@ -1826,7 +1733,7 @@ class AgentHost:
             raise RuntimeError("RUN_SKILL_SNAPSHOT_SPEC_MISMATCH")
         if snapshot.skill_snapshot_id != registry.snapshot_id:
             raise RuntimeError("RUN_CONTEXT_SKILL_SNAPSHOT_MISMATCH")
-        from harness_agent.context_pressure import ModelCallLifecycle
+        from harness_agent.threads.context_pressure import ModelCallLifecycle
 
         return RunContext(
             thread_id=run.thread_id,
@@ -1903,9 +1810,9 @@ class AgentHost:
         current_execution_policy: RuntimeExecutionPolicy | None = None,
     ) -> dict[str, object]:
         """使用已租用 AgentEngine 的 compactor 提交投影并刷新缓存。"""
-        from harness_agent.context_compaction import CompressionRequest, CompressionResult
-        from harness_agent.context_projection import ModelProjection
-        from harness_agent.context_window import ContextUpdate
+        from harness_agent.threads.context_compaction import CompressionRequest, CompressionResult
+        from harness_agent.threads.context_projection import ModelProjection
+        from harness_agent.threads.context_window import ContextUpdate
 
         typed_service = getattr(middleware, "compactor", None)
         if typed_service is None:
@@ -1940,7 +1847,7 @@ class AgentHost:
         # `compact_now` 复用运行期状态缓冲；当前请求直接返回结果，因此必须消费，
         # 防止下一次 Agent run 重复发出过期的 context.updated 事件。
         if rewritten:
-            from harness_agent.context_projection import ContextProjector
+            from harness_agent.threads.context_projection import ContextProjector
 
             projected = await ContextProjector(persistence).sync_cache(
                 agent, thread_id

@@ -10,12 +10,12 @@ from typing import TYPE_CHECKING, Awaitable, Callable, Literal, Mapping, Sequenc
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
-from harness_agent.context_pressure import (
+from harness_agent.threads.context_pressure import (
     ContextPressurePolicy,
     ContextPressureSnapshot,
     ModelCallType,
 )
-from harness_agent.context_projection import (
+from harness_agent.threads.context_projection import (
     CompressionCheckpoint,
     CompressionCheckpointDraft,
     ContextProjectionError,
@@ -24,13 +24,13 @@ from harness_agent.context_projection import (
     encode_projected_messages,
     validate_atomic_message_groups,
 )
-from harness_agent.prompting import HISTORY_REWRITE_VERSION, canonical_json, estimate_tokens, input_cap_tokens
-from harness_agent.runtime_state import (
+from harness_agent.threads.prompting import HISTORY_REWRITE_VERSION, canonical_json, estimate_tokens, input_cap_tokens
+from harness_agent.threads.runtime_state import (
     RuntimeExecutionPolicy,
     RuntimeStateRehydrator,
     RuntimeStateSnapshot,
 )
-from harness_agent.thread_persistence import (
+from harness_agent.threads.thread_persistence import (
     CommitContextRewrite,
     ContextArtifactDraft,
     ContextState,
@@ -41,8 +41,8 @@ from harness_agent.thread_persistence import (
 
 if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
-    from harness_agent.context_lifecycle import RunContextSnapshot
-    from harness_agent.run_context import RunContext
+    from harness_agent.threads.context_lifecycle import RunContextSnapshot
+    from harness_agent.runtime.run_context import RunContext
 
 
 CompressionTrigger = Literal["auto", "manual", "overflow"]

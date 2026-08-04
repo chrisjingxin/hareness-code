@@ -13,11 +13,13 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
-from harness_agent.agent_execution import AgentExecutionRegistry, ExecutionRegistryError
-from harness_agent.agent_engine import AgentEnginePoolCapacityError
-from harness_agent.agent_engine_profile import AgentEngineProfile
-from harness_agent.context_lifecycle import RunContextSnapshot
-from harness_agent.execution_binding import (
+from harness_agent.policy.approval_mode import ApprovalMode
+from harness_agent.policy.permission_rules import PermissionRule, save_rule
+from harness_agent.runtime.agent_execution import AgentExecutionRegistry, ExecutionRegistryError
+from harness_agent.runtime.agent_engine import AgentEnginePoolCapacityError
+from harness_agent.runtime.agent_engine_profile import AgentEngineProfile
+from harness_agent.threads.context_lifecycle import RunContextSnapshot
+from harness_agent.runtime.execution_binding import (
     AgentExecutionBinding,
     ExecutionMode,
     ExecutionRef,
@@ -25,9 +27,9 @@ from harness_agent.execution_binding import (
     ResolvedExecutionBinding,
     RunExecutionBinding,
 )
-from harness_agent.run_context import RunCancellationToken, RunContext
-from harness_agent.skills import LoadedSkill
-from harness_agent.thread_persistence import (
+from harness_agent.runtime.run_context import RunCancellationToken, RunContext
+from harness_agent.extensions.skills import LoadedSkill
+from harness_agent.threads.thread_persistence import (
     AcceptRun,
     ThreadPersistenceError,
     TranscriptAppend,
@@ -1093,12 +1095,29 @@ def _resume_value(spec: InteractionRequest, response: object) -> dict[str, objec
     return {spec.interrupt_id: {"status": status, "answers": answers}}
 
 
+def _generate_permission_rule(
+    tool_name: str, tool_args: Mapping[str, object]
+) -> PermissionRule:
+    """从被批准的工具调用上下文生成 allow 权限规则。
+
+    Shell 调用按命令首词收敛；文件及其他工具使用通配资源。工作区边界和
+    敏感路径检查仍在实际执行前强制生效，因此规则不会放宽硬性保护。
+    """
+    if tool_name in {"execute", "monitor"}:
+        command = str(tool_args.get("command") or "").strip()
+        prefix = command.split()[0] if command else ""
+        resource = f"{prefix} *" if prefix else "*"
+    else:
+        resource = "*"
+    return PermissionRule(tool=tool_name, resource=resource, effect="allow")
+
+
 def _message_stream_chunk(event: tuple[Any, ...]) -> object | None:
     """从 messages stream 取出原始消息块，供 wire 截断前的语义捕获使用。"""
     if len(event) == 3:
         namespace, stream_mode, data = event
         # ``subgraphs=True`` uses a non-empty namespace for child graph
-        # messages.  ZC-098 only owns the linear root Transcript; those
+        # messages.  ZC-101 only owns the linear root Transcript; those
         # messages are explicitly suppressed at the v3 adapter boundary until
         # a later execution/provenance projection can represent them safely.
         if namespace:
@@ -1363,7 +1382,7 @@ def _translate_stream_event(
     if len(event) == 3:
         namespace, stream_mode, data = event
         if namespace:
-            # ZC-098 keeps root canonical/tool-correlation state separate from
+            # ZC-101 keeps root canonical/tool-correlation state separate from
             # child graph state.  Child messages may still be observed by a
             # future execution/provenance projection, but dropping them here
             # is safer than mutating root IDs while preserving a v3 wire shape.

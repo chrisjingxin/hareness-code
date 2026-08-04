@@ -7,13 +7,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from harness_agent.agent_catalog import EffectiveExecutionPolicy
-from harness_agent.agent_engine_profile import component_fingerprint
-from harness_agent.config import ExecutionSettings, ModelSettings
-from harness_agent.execution_binding import ResolvedExecutionBinding
-from harness_agent.mcp import McpConfigSnapshot
-from harness_agent.prompting import canonical_json, sha256_text, tool_schema_fingerprint
-from harness_agent.skills import SkillRegistry
+from harness_agent.runtime.agent_catalog import EffectiveExecutionPolicy
+from harness_agent.runtime.agent_engine_profile import component_fingerprint
+from harness_agent.config.config import ExecutionSettings, ModelSettings
+from harness_agent.runtime.execution_binding import ResolvedExecutionBinding
+from harness_agent.extensions.mcp import McpConfigSnapshot
+from harness_agent.threads.prompting import canonical_json, sha256_text, tool_schema_fingerprint
+from harness_agent.extensions.skills import SkillRegistry
 
 
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")

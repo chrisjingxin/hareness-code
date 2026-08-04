@@ -7,7 +7,7 @@ import asyncio
 import sys
 from pathlib import Path
 
-from harness_agent.thread_persistence import run_legacy_migration_child
+from harness_agent.threads.thread_persistence import run_legacy_migration_child
 
 
 def main() -> int:

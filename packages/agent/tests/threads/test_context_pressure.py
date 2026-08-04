@@ -7,7 +7,7 @@ import pytest
 
 def test_default_pressure_fixture_keeps_order_and_calibrated_values() -> None:
     """工具密集、文本密集和混合 fixture 校准默认压力行为。"""
-    from harness_agent.context_pressure import (
+    from harness_agent.threads.context_pressure import (
         ContextPressurePolicy,
         ContextPressurePolicyConfig,
     )
@@ -51,7 +51,7 @@ def test_default_pressure_fixture_keeps_order_and_calibrated_values() -> None:
 
 def test_policy_rejects_unordered_thresholds() -> None:
     """调用方不能以配置覆盖 50/60/80/90 的顺序约束。"""
-    from harness_agent.context_pressure import ContextPressurePolicyConfig
+    from harness_agent.threads.context_pressure import ContextPressurePolicyConfig
 
     with pytest.raises(ValueError, match="THRESHOLDS_UNORDERED"):
         ContextPressurePolicyConfig(report_ratio=0.7, micro_ratio=0.6)
@@ -59,7 +59,7 @@ def test_policy_rejects_unordered_thresholds() -> None:
 
 def test_policy_idle_requires_top_level_initial_and_reclaimable_content() -> None:
     """idle 只在显式顶层首调且确有可回收内容时触发。"""
-    from harness_agent.context_pressure import ContextPressurePolicy
+    from harness_agent.threads.context_pressure import ContextPressurePolicy
 
     policy = ContextPressurePolicy()
     snapshot = policy.measure(
@@ -87,7 +87,7 @@ def test_policy_idle_requires_top_level_initial_and_reclaimable_content() -> Non
 @pytest.mark.parametrize("invalid_idle", [-1, 900_000.0, "900000", True])
 def test_policy_ignores_missing_or_abnormal_idle_timestamps(invalid_idle: object) -> None:
     """缺失、未来计算异常或非整数时间戳不得意外触发 idle。"""
-    from harness_agent.context_pressure import ContextPressurePolicy
+    from harness_agent.threads.context_pressure import ContextPressurePolicy
 
     policy = ContextPressurePolicy()
     snapshot = policy.measure(
@@ -102,7 +102,7 @@ def test_policy_ignores_missing_or_abnormal_idle_timestamps(invalid_idle: object
 
 def test_policy_hard_and_real_overflow_are_distinct() -> None:
     """90% 仍是兼容的强制 full 水位，真实 overflow 才选择恢复动作。"""
-    from harness_agent.context_pressure import ContextPressurePolicy
+    from harness_agent.threads.context_pressure import ContextPressurePolicy
 
     policy = ContextPressurePolicy()
     hard = policy.decide(policy.measure(14_500, 16_000))
@@ -113,7 +113,7 @@ def test_policy_hard_and_real_overflow_are_distinct() -> None:
 
 def test_model_call_lifecycle_consumes_idle_once_and_explicitly_schedules_resume() -> None:
     """生命周期阶段推进不读取时间戳，也不会把 Interaction 恢复当成 idle。"""
-    from harness_agent.context_pressure import ModelCallLifecycle
+    from harness_agent.threads.context_pressure import ModelCallLifecycle
 
     lifecycle = ModelCallLifecycle(
         next_call_type="top_level_initial", idle_duration_ms=900_000

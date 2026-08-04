@@ -1,4 +1,4 @@
-"""ZC-104 跨层上下文连续性验收；全部使用临时 project/home 和 typed fixture。"""
+"""ZC-107 跨层上下文连续性验收；全部使用临时 project/home 和 typed fixture。"""
 
 from __future__ import annotations
 
@@ -9,11 +9,11 @@ from types import SimpleNamespace
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
 
-from harness_agent.context_compaction import CompressionCheckpointDraft
-from harness_agent.context_lifecycle import ContextLifecycle
-from harness_agent.context_projection import ContextProjector
-from harness_agent.runtime_state import RuntimeStateSnapshot
-from harness_agent.run_coordinator import (
+from harness_agent.threads.context_compaction import CompressionCheckpointDraft
+from harness_agent.threads.context_lifecycle import ContextLifecycle
+from harness_agent.threads.context_projection import ContextProjector
+from harness_agent.threads.runtime_state import RuntimeStateSnapshot
+from harness_agent.host.run_coordinator import (
     ConnectionRef,
     InteractionResult,
     RunCoordinator,
@@ -21,9 +21,9 @@ from harness_agent.run_coordinator import (
     RunRuntime,
     StartRun,
 )
-from harness_agent.skills import SkillCatalogManager
-from harness_agent.prompting import HISTORY_REWRITE_VERSION
-from harness_agent.thread_persistence import (
+from harness_agent.extensions.skills import SkillCatalogManager
+from harness_agent.threads.prompting import HISTORY_REWRITE_VERSION
+from harness_agent.threads.thread_persistence import (
     AcceptRun,
     CommitContextRewrite,
     ContextArtifactDraft,
@@ -31,7 +31,7 @@ from harness_agent.thread_persistence import (
     ThreadPersistence,
     TranscriptAppend,
 )
-from thread_fixtures import test_binding as make_test_binding
+from tests.support.thread_fixtures import test_binding as make_test_binding
 
 
 class _NoopInteraction:
@@ -162,7 +162,7 @@ default_profile = "fixture"
 
 [models.profiles.fixture]
 provider = "openai-compatible"
-provider_label = "ZC-104 fixture"
+provider_label = "ZC-107 fixture"
 model = "fixture-model"
 base_url = "https://fixture.invalid/v1"
 api_key_env = "ZC104_FIXTURE_KEY"
@@ -251,7 +251,7 @@ capabilities = ["tool-calling", "streaming"]
         raise AssertionError(f"run {run_id} did not complete: {frames}")
 
     import asyncio
-    from harness_agent.server import AgentHost
+    from harness_agent.host.agent_host import AgentHost
 
     frames: list[dict[str, object]] = []
     graph = FakeGraph()

@@ -12,8 +12,8 @@ from langchain_core.messages import AIMessage
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
-from harness_agent.context_window import ContextUpdate
-from harness_agent.server import AgentHost
+from harness_agent.threads.context_window import ContextUpdate
+from harness_agent.host.agent_host import AgentHost
 
 
 class _BlockingAgent:

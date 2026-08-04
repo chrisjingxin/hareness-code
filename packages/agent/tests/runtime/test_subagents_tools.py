@@ -1,6 +1,6 @@
 """工具作用域过滤的单元测试。"""
 import pytest
-from harness_agent.subagents import (
+from harness_agent.runtime.subagents import (
     ALL_TOOL_NAMES,
     SUBAGENT_EXCLUDED_TOOLS,
     filter_tools_for_agent,

@@ -1,4 +1,4 @@
-"""ZC-099 RunContextSnapshot 的排序、刷新、冻结和脱敏回归测试。"""
+"""ZC-102 RunContextSnapshot 的排序、刷新、冻结和脱敏回归测试。"""
 
 from __future__ import annotations
 
@@ -12,21 +12,21 @@ from langchain.agents.middleware.types import ModelRequest
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
-import harness_agent.context_lifecycle as context_lifecycle_module
-import harness_agent.thread_persistence as thread_persistence_module
-from harness_agent.agent_catalog import EffectiveExecutionPolicy
-from harness_agent.config import ExecutionSettings, RemoteSandboxSettings
-from harness_agent.context_lifecycle import (
+import harness_agent.threads.context_lifecycle as context_lifecycle_module
+import harness_agent.threads.thread_persistence as thread_persistence_module
+from harness_agent.runtime.agent_catalog import EffectiveExecutionPolicy
+from harness_agent.config.config import ExecutionSettings, RemoteSandboxSettings
+from harness_agent.threads.context_lifecycle import (
     ContextAuthority,
     ContextBlock,
     ContextLifecycle,
     ContextRefreshError,
     ContextStability,
 )
-from harness_agent.run_coordinator import ConnectionRef, RunCoordinator, RunPreparation, StartRun
-from harness_agent.run_context import RunContext, RunContextSnapshotMiddleware
-from harness_agent.thread_persistence import AcceptRun, ThreadPersistence, ThreadPersistenceError
-from thread_fixtures import (
+from harness_agent.host.run_coordinator import ConnectionRef, RunCoordinator, RunPreparation, StartRun
+from harness_agent.runtime.run_context import RunContext, RunContextSnapshotMiddleware
+from harness_agent.threads.thread_persistence import AcceptRun, ThreadPersistence, ThreadPersistenceError
+from tests.support.thread_fixtures import (
     create_legacy_prompt_epoch_table,
     test_binding as make_test_binding,
 )
@@ -34,7 +34,7 @@ from thread_fixtures import (
 
 @dataclass(frozen=True, slots=True)
 class _SkillIndex:
-    """不扫描目录的最小 Skill snapshot，验证 ZC-100 不在本任务范围内。"""
+    """不扫描目录的最小 Skill snapshot，验证 ZC-103 不在本任务范围内。"""
 
     fragment: str = "<harness_available_skills>\n- inspect\n</harness_available_skills>"
 
@@ -118,7 +118,7 @@ def test_snapshot_refreshes_agents_for_next_run_but_freezes_current_run(tmp_path
 
 def test_snapshot_and_prompt_index_carry_the_same_skill_catalog_identity(tmp_path: Path) -> None:
     """Context snapshot、Prompt Skill index 和 Registry 必须引用同一 ID。"""
-    from harness_agent.skills import SkillRegistry
+    from harness_agent.extensions.skills import SkillRegistry
 
     workspace = tmp_path / "project"
     workspace.mkdir()
@@ -321,7 +321,7 @@ def test_environment_block_preserves_local_remote_and_plan_boundaries(tmp_path: 
     assert "当前本机工作目录是：`<workspace>`" in local_environment
     assert "虚拟路径（相对于工作区根目录）" in local_environment
     assert "`execute` 不是文件沙箱" in local_environment
-    assert "审批模式：计划" in local_environment
+    assert "审批模式" not in local_environment
     assert str(workspace) not in local_environment
 
     remote = lifecycle.prepare(
@@ -347,7 +347,7 @@ def test_environment_block_preserves_local_remote_and_plan_boundaries(tmp_path: 
     assert "corp` 远端沙箱" in remote_environment
     assert "`<sandbox-workspace>`" in remote_environment
     assert "宿主机的 `<host-path>`" in remote_environment
-    assert "审批模式：YOLO" in remote_environment
+    assert "审批模式" not in remote_environment
     assert str(workspace) not in remote_environment
 
 
@@ -503,7 +503,7 @@ async def test_accept_run_persists_and_reuses_snapshot_atomically(tmp_path: Path
 @pytest.mark.asyncio
 async def test_v6_legacy_prompt_epoch_migrates_once_to_readable_snapshot(tmp_path: Path) -> None:
     """verified v6 source 的 PromptEpoch 只在本次 migration 转换一次。"""
-    from harness_agent.agent import create_prompt_epoch
+    from harness_agent.runtime.agent import create_prompt_epoch
 
     home = tmp_path / "home"
     workspace = tmp_path / "project"

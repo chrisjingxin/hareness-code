@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from harness_agent.execution_binding import (
+from harness_agent.runtime.execution_binding import (
     RunExecutionBinding,
     SafeModelProfile,
     SelectionOrigin,

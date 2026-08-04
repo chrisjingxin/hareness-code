@@ -453,7 +453,7 @@ class TestMcpHotConnectDisconnect:
         assert result["status"] == "skipped"
 
     def test_remove_server(self) -> None:
-        from harness_agent.mcp import build_mcp_snapshot
+        from harness_agent.extensions.mcp import build_mcp_snapshot
 
         snapshot = build_mcp_snapshot(
             [
@@ -498,7 +498,7 @@ class TestMcpHotConnectDisconnect:
     @pytest.mark.asyncio
     async def test_apply_snapshot_keeps_old_resource_for_borrowing_engine(self) -> None:
         """MCP 热更新不能关闭仍被旧 AgentEngine 借用的 snapshot。"""
-        from harness_agent.mcp import build_mcp_snapshot
+        from harness_agent.extensions.mcp import build_mcp_snapshot
 
         old_tool = MagicMock(name="old_tool")
         old_tool.name = "old_search"
@@ -536,7 +536,7 @@ class TestMcpHotConnectDisconnect:
     @pytest.mark.asyncio
     async def test_apply_snapshot_reaps_idle_old_resource_after_invalidation(self) -> None:
         """没有活动 AgentEngine 时，MCP 热更新的失效路径立即回收旧连接。"""
-        from harness_agent.mcp import build_mcp_snapshot
+        from harness_agent.extensions.mcp import build_mcp_snapshot
 
         old_client = MagicMock()
         old_client.get_tools = AsyncMock(return_value=[])

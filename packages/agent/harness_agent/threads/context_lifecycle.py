@@ -20,7 +20,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol
 
-from harness_agent.prompting import canonical_json, normalized_tool_schemas, sha256_text
+from harness_agent.threads.prompting import canonical_json, normalized_tool_schemas, sha256_text
 
 
 MAX_AGENT_REFERENCE_BYTES = 32 * 1024
@@ -432,7 +432,7 @@ def _snapshot_id(
 
 def _capability_text(spec: ContextSourceSpec) -> str:
     """只从真实 Policy、Sandbox 和工具集合生成能力说明。"""
-    from harness_agent.agent import default_tool_schemas
+    from harness_agent.runtime.agent import default_tool_schemas
 
     policy = getattr(spec.effective_policy, "fingerprint", "")
     policy_record = asdict(spec.effective_policy) if is_dataclass(spec.effective_policy) else None
@@ -468,7 +468,7 @@ def _environment_text(
     home: Path,
 ) -> str:
     """复用旧执行边界说明，但只向模型暴露稳定逻辑路径标签。"""
-    from harness_agent.agent import _with_execution_context
+    from harness_agent.runtime.agent import _with_execution_context
 
     execution = spec.execution
     sandboxed = bool(getattr(execution, "sandbox_enabled", False))
@@ -478,7 +478,6 @@ def _environment_text(
         workspace="<sandbox-workspace>" if sandboxed else "<workspace>",
         sandboxed=sandboxed,
         provider=getattr(remote, "provider", None),
-        approval_mode=getattr(execution, "approval_mode", "default"),
     )
     return _sanitize_text(content.strip(), workspace, home)
 

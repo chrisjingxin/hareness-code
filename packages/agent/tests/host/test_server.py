@@ -400,8 +400,8 @@ async def test_context_compact_rewrites_idle_thread_and_returns_context_summary(
     """手动压缩只允许空闲 thread，成功后写回 checkpoint 并同步摘要状态。"""
     from langchain_core.messages import HumanMessage
 
-    from harness_agent.context_compaction import CompressionResult
-    from harness_agent.server import AgentHost
+    from harness_agent.threads.context_compaction import CompressionResult
+    from harness_agent.host.agent_host import AgentHost
     from types import SimpleNamespace
 
     class Store:
@@ -626,7 +626,7 @@ executor = "fast"
     assert '"name":"read_file"' in capability.content
     assert '"name":"execute"' in capability.content
 
-    from harness_agent.thread_persistence import ThreadPersistence
+    from harness_agent.threads.thread_persistence import ThreadPersistence
 
     assert not hasattr(ThreadPersistence, "persist_prompt_epoch")
 
@@ -657,8 +657,8 @@ async def test_default_sidecar_shares_engine_by_profile_without_draining_other_m
     tmp_path: Path,
 ):
     """默认 Sidecar 以 Profile 而非 thread 缓存图；模型快照变化只排空旧 Profile。"""
-    from harness_agent.agent_engine import AgentEngine
-    from harness_agent.config import (
+    from harness_agent.runtime.agent_engine import AgentEngine
+    from harness_agent.config.config import (
         ExecutionSettings,
         ModelSettings,
         AgentEnginePoolSettings,
@@ -747,8 +747,8 @@ async def test_skill_catalog_refresh_reuses_unchanged_snapshot_and_drains_only_o
     """Skill catalog 变化经 ZC-095 seam 只排空旧 Skill Profile。"""
     from types import SimpleNamespace
 
-    from harness_agent.agent_spec import skill_catalog_fingerprint
-    from harness_agent.server import AgentHost
+    from harness_agent.runtime.agent_spec import skill_catalog_fingerprint
+    from harness_agent.host.agent_host import AgentHost
 
     workspace = tmp_path / "workspace"
     skill_dir = workspace / ".harness" / "skills" / "review"
@@ -801,16 +801,16 @@ async def test_skill_text_only_changes_skill_prompt_not_tools_or_effective_polic
     """Skill 正文是低可信上下文，不能改变 Profile 的安全能力。"""
     from dataclasses import fields
 
-    from harness_agent.agent_engine_profile import component_fingerprint
-    from harness_agent.config import (
+    from harness_agent.runtime.agent_engine_profile import component_fingerprint
+    from harness_agent.config.config import (
         AgentEnginePoolSettings,
         ExecutionSettings,
         ModelSettings,
         Za38Config,
     )
-    from harness_agent.run_coordinator import RequestedSkill, StartRun
-    from harness_agent.server import AgentHost
-    from harness_agent.virtual_files import HarnessVirtualBackend
+    from harness_agent.host.run_coordinator import RequestedSkill, StartRun
+    from harness_agent.host.agent_host import AgentHost
+    from harness_agent.threads.virtual_files import HarnessVirtualBackend
 
     workspace = tmp_path / "workspace"
     skill_dir = workspace / ".harness" / "skills" / "review"
@@ -842,7 +842,7 @@ async def test_skill_text_only_changes_skill_prompt_not_tools_or_effective_polic
             return None
 
         async def load_run_state(self, _thread_id: str) -> object:
-            from harness_agent.execution_binding import PersistedBindingState
+            from harness_agent.runtime.execution_binding import PersistedBindingState
 
             return PersistedBindingState()
 
@@ -1002,14 +1002,14 @@ async def test_host_snapshot_boundary_serializes_update_with_single_flight_acqui
     """更新等待旧 Run 的首建完成，新 Profile 才能在失效边界后取得图。"""
     from types import SimpleNamespace
 
-    from harness_agent.agent_engine import AgentEngine, AgentEnginePool, AgentEngineState
-    from harness_agent.agent_engine_profile import (
+    from harness_agent.runtime.agent_engine import AgentEngine, AgentEnginePool, AgentEngineState
+    from harness_agent.runtime.agent_engine_profile import (
         AgentEngineProfile,
         ModelRoleBinding,
         component_fingerprint,
     )
-    from harness_agent.mcp import McpServerConfig, build_mcp_snapshot
-    from harness_agent.server import AgentHost
+    from harness_agent.extensions.mcp import McpServerConfig, build_mcp_snapshot
+    from harness_agent.host.agent_host import AgentHost
 
     def profile(mcp_fingerprint: str) -> AgentEngineProfile:
         def fingerprint(component: str) -> str:
@@ -1108,12 +1108,12 @@ async def test_default_engine_builder_passes_one_host_lock_to_each_profile(
     """不同 Profile 的默认图必须共享所属 AgentHost 的工具读写锁。"""
     from types import SimpleNamespace
 
-    import harness_agent.agent as agent_module
-    import harness_agent.context_window as context_window_module
-    import harness_agent.execution as execution_module
-    import harness_agent.providers.harness_gateway as gateway_module
-    from harness_agent.mcp import McpConnectionManager, build_mcp_snapshot
-    from harness_agent.server import AgentHost
+    import harness_agent.runtime.agent as agent_module
+    import harness_agent.threads.context_window as context_window_module
+    import harness_agent.runtime.execution as execution_module
+    import harness_agent.extensions.providers.harness_gateway as gateway_module
+    from harness_agent.extensions.mcp import McpConnectionManager, build_mcp_snapshot
+    from harness_agent.host.agent_host import AgentHost
 
     captured_locks: list[object] = []
     monkeypatch.setattr(
@@ -1207,9 +1207,9 @@ async def test_default_context_compact_acquires_and_releases_profile_engine(tmp_
         AgentEnginePoolSettings,
         Za38Config,
     )
-    from harness_agent.context_compaction import CompressionResult
-    from harness_agent.agent_engine_profile import component_fingerprint
-    from harness_agent.server import AgentHost, _AgentEngineArtifacts
+    from harness_agent.threads.context_compaction import CompressionResult
+    from harness_agent.runtime.agent_engine_profile import component_fingerprint
+    from harness_agent.host.agent_host import AgentHost, _AgentEngineArtifacts
     from types import SimpleNamespace
 
     class Store:
@@ -1329,9 +1329,9 @@ async def test_default_manual_compact_passes_current_policy_to_typed_service(
     from langchain_core.messages import HumanMessage
     from types import SimpleNamespace
 
-    from harness_agent.context_compaction import CompressionResult
-    from harness_agent.context_projection import ContextProjector, ModelProjection
-    from harness_agent.server import AgentHost, _AgentEngineArtifacts
+    from harness_agent.threads.context_compaction import CompressionResult
+    from harness_agent.threads.context_projection import ContextProjector, ModelProjection
+    from harness_agent.host.agent_host import AgentHost, _AgentEngineArtifacts
 
     projection = ModelProjection(
         messages=(
@@ -2154,7 +2154,7 @@ async def test_agent_host_closes_engines_before_shared_resource_owners(tmp_path:
     """Host 先释放 AgentEngine lease，再按 owner 顺序关闭共享资源。"""
     from types import SimpleNamespace
 
-    from harness_agent.server import AgentHost
+    from harness_agent.host.agent_host import AgentHost
 
     order: list[str] = []
     server = AgentHost(allow_echo=True, config_home=tmp_path / "home", workspace=tmp_path)

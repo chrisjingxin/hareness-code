@@ -18,7 +18,7 @@ from types import MappingProxyType
 from typing import Any, Literal
 from urllib.parse import parse_qsl, urlsplit
 
-from harness_agent.resource_lifecycle import (
+from harness_agent.runtime.resource_lifecycle import (
     ResourceScope,
     ResourceState,
     SharedResourceHandle,

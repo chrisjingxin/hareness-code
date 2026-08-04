@@ -45,7 +45,7 @@ def _marketplace_archive(
 
 def _marketplace_artifact(name: str, version: str, archive: bytes) -> Any:
     """把测试归档包装为已验证摘要的 Provider 返回值。"""
-    from harness_agent.skills import MarketplaceArtifact
+    from harness_agent.extensions.skills import MarketplaceArtifact
 
     return MarketplaceArtifact(
         market="acme",
@@ -100,7 +100,7 @@ def test_registry_skips_invalid_and_symlink_manifests(tmp_path: Path):
 
 def test_skill_load_checks_snapshot_digest_and_resource_boundary(tmp_path: Path):
     """正文和资源固定在旧 snapshot，路径逃逸仍 fail closed。"""
-    from harness_agent.skills import SkillError, SkillRegistry
+    from harness_agent.extensions.skills import SkillError, SkillRegistry
 
     workspace = tmp_path / "workspace"
     manifest = _write_skill(workspace / ".harness" / "skills", "review", "读取参考资料", version="1.0.0")
@@ -136,8 +136,8 @@ def test_skill_file_validation_is_fd_anchored_and_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """校验期间替换文件不会返回旧摘要配新正文，边界输入继续拒绝。"""
-    import harness_agent.skills as skills_module
-    from harness_agent.skills import SkillError
+    import harness_agent.extensions.skills as skills_module
+    from harness_agent.extensions.skills import SkillError
 
     manifest = tmp_path / "SKILL.md"
     manifest.write_text("---\nname: review\ndescription: review\n---\n旧正文\n", encoding="utf-8")
@@ -202,8 +202,8 @@ def test_skill_manifest_parent_swap_to_symlink_is_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """manifest 父目录在校验和 openat 之间换成外部 symlink 时不得越界。"""
-    import harness_agent.skills as skills_module
-    from harness_agent.skills import SkillError, SkillRegistry
+    import harness_agent.extensions.skills as skills_module
+    from harness_agent.extensions.skills import SkillError, SkillRegistry
 
     workspace = tmp_path / "workspace"
     skills_root = workspace / ".harness" / "skills"
@@ -255,8 +255,8 @@ def test_skill_nested_directory_swap_to_symlink_is_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """资源子目录在 stat 和 openat 之间换成外部 symlink 时不读取外部文件。"""
-    import harness_agent.skills as skills_module
-    from harness_agent.skills import SkillError, SkillRegistry
+    import harness_agent.extensions.skills as skills_module
+    from harness_agent.extensions.skills import SkillError, SkillRegistry
 
     workspace = tmp_path / "workspace"
     skills_root = workspace / ".harness" / "skills"
@@ -331,7 +331,7 @@ def test_skill_catalog_manager_reuses_unchanged_snapshot_and_applies_mutations_o
     tmp_path: Path,
 ):
     """catalog 无变化复用对象，内容和启停变化只在下一次 refresh 发布。"""
-    from harness_agent.skills import SkillCatalogManager, SkillError
+    from harness_agent.extensions.skills import SkillCatalogManager, SkillError
 
     workspace = tmp_path / "workspace"
     home = tmp_path / "home"
@@ -389,8 +389,8 @@ async def test_marketplace_install_validates_before_replacing_existing_skill(
     manifest: str,
 ):
     """非法 artifact 不推进 manager，且保留旧的有效安装。"""
-    import harness_agent.skills as skills_module
-    from harness_agent.skills import SkillCatalogManager, SkillError
+    import harness_agent.extensions.skills as skills_module
+    from harness_agent.extensions.skills import SkillCatalogManager, SkillError
 
     class Provider:
         name = "acme"
@@ -437,8 +437,8 @@ async def test_marketplace_install_rename_failure_rolls_back_old_skill(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """正式目录切换失败时恢复旧目录，不发布坏 snapshot。"""
-    import harness_agent.skills as skills_module
-    from harness_agent.skills import SkillCatalogManager, SkillError
+    import harness_agent.extensions.skills as skills_module
+    from harness_agent.extensions.skills import SkillCatalogManager, SkillError
 
     class Provider:
         name = "acme"
@@ -500,8 +500,8 @@ async def test_marketplace_install_recovers_old_version_after_switch_crash(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """旧目录移入 backup 后崩溃时，下一 manager 恢复完整旧版本。"""
-    import harness_agent.skills as skills_module
-    from harness_agent.skills import SkillCatalogManager
+    import harness_agent.extensions.skills as skills_module
+    from harness_agent.extensions.skills import SkillCatalogManager
 
     class Provider:
         name = "acme"
@@ -563,8 +563,8 @@ async def test_marketplace_install_recovers_new_version_after_target_switch_cras
     monkeypatch: pytest.MonkeyPatch,
 ):
     """新目录已成为 target、清理 backup 前崩溃时，下一 manager 保留完整新版本。"""
-    import harness_agent.skills as skills_module
-    from harness_agent.skills import SkillCatalogManager
+    import harness_agent.extensions.skills as skills_module
+    from harness_agent.extensions.skills import SkillCatalogManager
 
     class Provider:
         name = "acme"
@@ -622,8 +622,8 @@ async def test_marketplace_install_rollback_failure_is_recovered_on_next_manager
     monkeypatch: pytest.MonkeyPatch,
 ):
     """正式切换和即时 rollback 都失败时，journal 仍能在下次启动恢复旧版本。"""
-    import harness_agent.skills as skills_module
-    from harness_agent.skills import SkillCatalogManager, SkillError
+    import harness_agent.extensions.skills as skills_module
+    from harness_agent.extensions.skills import SkillCatalogManager, SkillError
 
     class Provider:
         name = "acme"
@@ -688,8 +688,8 @@ async def test_marketplace_install_extraction_failure_keeps_existing_skill(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """暂存复制失败发生在正式切换前，旧版本仍然可读。"""
-    import harness_agent.skills as skills_module
-    from harness_agent.skills import SkillCatalogManager, SkillError
+    import harness_agent.extensions.skills as skills_module
+    from harness_agent.extensions.skills import SkillCatalogManager, SkillError
 
     class Provider:
         name = "acme"
@@ -787,8 +787,8 @@ async def test_next_run_preparation_uses_new_skill_snapshot_without_crossing_act
     tmp_path: Path,
 ):
     """同一 Thread 的活动准备保留旧正文，后续顶层 Run 取得新 catalog。"""
-    from harness_agent.run_coordinator import RequestedSkill, StartRun
-    from harness_agent.server import AgentHost
+    from harness_agent.host.run_coordinator import RequestedSkill, StartRun
+    from harness_agent.host.agent_host import AgentHost
 
     workspace = tmp_path / "workspace"
     manifest = _write_skill(workspace / ".harness" / "skills", "review", "第一版正文")
@@ -836,13 +836,13 @@ async def test_active_run_keeps_old_skill_preparation_until_next_same_thread_run
     tmp_path: Path,
 ):
     """真实 RunCoordinator 生命周期中，活动 Run 不会串入下一 snapshot。"""
-    from harness_agent.run_coordinator import (
+    from harness_agent.host.run_coordinator import (
         ConnectionRef,
         RequestedSkill,
         RunRuntime,
         StartRun,
     )
-    from harness_agent.server import AgentHost
+    from harness_agent.host.agent_host import AgentHost
 
     workspace = tmp_path / "workspace"
     manifest = _write_skill(workspace / ".harness" / "skills", "review", "活动 Run 旧正文")

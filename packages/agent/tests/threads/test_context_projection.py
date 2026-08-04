@@ -12,13 +12,13 @@ from langchain_core.language_models.fake_chat_models import FakeMessagesListChat
 from langchain_core.runnables import Runnable
 from langgraph.checkpoint.base import empty_checkpoint
 
-from harness_agent.context_projection import (
+from harness_agent.threads.context_projection import (
     CompressionCheckpointDraft,
     ContextProjectionError,
     ContextProjector,
 )
-from harness_agent.prompting import HISTORY_REWRITE_VERSION
-from harness_agent.thread_persistence import (
+from harness_agent.threads.prompting import HISTORY_REWRITE_VERSION
+from harness_agent.threads.thread_persistence import (
     CommitContextRewrite,
     ContextArtifactDraft,
     ContextState,
@@ -27,7 +27,7 @@ from harness_agent.thread_persistence import (
     ThreadPersistenceError,
     TranscriptAppend,
 )
-from thread_fixtures import accept_thread
+from tests.support.thread_fixtures import accept_thread
 
 
 async def _store(tmp_path, name: str = "project") -> ThreadPersistence:
@@ -444,7 +444,7 @@ async def test_full_context_rewrite_idempotence_covers_artifact_summary_and_stat
 
 async def test_missing_tool_arguments_and_non_string_ids_fail_closed(tmp_path):
     """valid 参数必须有显式对象，持久化 JSON 中的 typed ID 不允许强制转字符串。"""
-    from harness_agent.context_projection import decode_projected_messages
+    from harness_agent.threads.context_projection import decode_projected_messages
 
     store = await _store(tmp_path)
     await accept_thread(store, "thread", "u")
@@ -512,7 +512,7 @@ async def test_missing_tool_arguments_and_non_string_ids_fail_closed(tmp_path):
 
 async def test_projector_is_the_only_writer_that_replaces_langgraph_cache(tmp_path):
     """首次 Run 尚无 checkpoint 时也能从 Transcript 创建空的前置缓存。"""
-    from harness_agent.agent import create_harness_agent
+    from harness_agent.runtime.agent import create_harness_agent
 
     class ToolModel(FakeMessagesListChatModel):
         def bind_tools(self, *_args: Any, **_kwargs: Any) -> Runnable:
@@ -601,7 +601,7 @@ async def test_v8_migration_keeps_legacy_projection_auditable_but_syncs_transcri
     assert [message.content for message in projection.messages] == ["visible"]
     assert [message.content for message in opened.messages] == ["visible"]
 
-    from harness_agent.agent import create_harness_agent
+    from harness_agent.runtime.agent import create_harness_agent
 
     class ToolModel(FakeMessagesListChatModel):
         def bind_tools(self, *_args: Any, **_kwargs: Any) -> Runnable:

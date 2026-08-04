@@ -21,13 +21,13 @@ from harness_agent.host.run_coordinator import (
     _extract_interaction,
     _translate_stream_event,
 )
-from harness_agent.execution_binding import ExecutionRef
-from harness_agent.thread_persistence import (
+from harness_agent.runtime.execution_binding import ExecutionRef
+from harness_agent.threads.thread_persistence import (
     ThreadPersistence,
     ThreadPersistenceError,
     TranscriptAppend,
 )
-from thread_fixtures import test_binding as make_test_binding
+from tests.support.thread_fixtures import test_binding as make_test_binding
 
 
 class _NoopInteraction:
@@ -608,7 +608,7 @@ async def test_tool_call_only_assistant_round_trips_arguments_and_conflicts_on_c
     tmp_path,
 ) -> None:
     """无正文 assistant 也持久化完整参数，幂等重试不能吞掉参数差异。"""
-    from thread_fixtures import accept_thread
+    from tests.support.thread_fixtures import accept_thread
 
     home = tmp_path / "home"
     project = tmp_path / "project"
@@ -684,7 +684,7 @@ async def test_tool_call_only_assistant_round_trips_arguments_and_conflicts_on_c
 @pytest.mark.asyncio
 async def test_parallel_stable_tool_calls_keep_result_pairing(tmp_path) -> None:
     """并行稳定调用 ID 按结果到达顺序也保持各自的 Transcript 归属。"""
-    from thread_fixtures import accept_thread
+    from tests.support.thread_fixtures import accept_thread
 
     home = tmp_path / "home"
     project = tmp_path / "project"
@@ -754,7 +754,7 @@ async def test_parallel_stable_tool_calls_keep_result_pairing(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_subgraph_messages_are_not_flattened_into_root_transcript(tmp_path) -> None:
     """无 provenance 时显式抑制非空 namespace 的 child live 事件，不写 root 事实。"""
-    from thread_fixtures import accept_thread
+    from tests.support.thread_fixtures import accept_thread
 
     home = tmp_path / "home"
     project = tmp_path / "project"
@@ -843,7 +843,7 @@ async def test_completed_tool_batch_is_readable_while_run_waits_for_next_model_s
     tmp_path,
 ) -> None:
     """Tool 边界提交后，独立连接可在后续模型阶段阻塞时恢复已完成语义。"""
-    from thread_fixtures import accept_thread
+    from tests.support.thread_fixtures import accept_thread
 
     home = tmp_path / "home"
     project = tmp_path / "project"

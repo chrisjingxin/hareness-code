@@ -1,4 +1,4 @@
-"""ZC-103 typed full compression、overflow 和运行态恢复测试。"""
+"""ZC-106 typed full compression、overflow 和运行态恢复测试。"""
 
 from __future__ import annotations
 
@@ -14,30 +14,30 @@ from langchain_core.language_models.fake_chat_models import FakeMessagesListChat
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import PrivateAttr
 
-from harness_agent.context_compaction import (
+from harness_agent.threads.context_compaction import (
     CompressionRequest,
     ContextCompactor,
     SUMMARY_INPUT_SAFETY_MARGIN_TOKENS,
     _render_message,
     _select_complete_summary_input,
 )
-from harness_agent.context_projection import ContextProjector
-from harness_agent.context_window import ContextWindowMiddleware
-from harness_agent.prompting import estimate_tokens
-from harness_agent.runtime_state import (
+from harness_agent.threads.context_projection import ContextProjector
+from harness_agent.threads.context_window import ContextWindowMiddleware
+from harness_agent.threads.prompting import estimate_tokens
+from harness_agent.threads.runtime_state import (
     RuntimeExecutionPolicy,
     RuntimeStateError,
     RuntimeStateRehydrator,
     RuntimeStateSnapshot,
 )
-from harness_agent.thread_persistence import (
+from harness_agent.threads.thread_persistence import (
     AcceptRun,
     CommitContextRewrite,
     ContextState,
     ThreadPersistence,
     TranscriptAppend,
 )
-from thread_fixtures import test_binding as make_binding
+from tests.support.thread_fixtures import test_binding as make_binding
 
 
 SUMMARY = (
