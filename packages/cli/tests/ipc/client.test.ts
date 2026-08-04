@@ -80,6 +80,23 @@ test("AgentRun 使用原生 UUID 并携带 Thread 模型选择", async () => {
   })
 })
 
+test("run.start 受理不设置会产生幽灵 Run 的本地超时", async () => {
+  const { client, stdin, stdout } = peer()
+  let request: any
+  stdin.on("data", data => { request = JSON.parse(data.toString()) })
+
+  const run = client.startRun({ message: "等待受理", threadId: "thread-slow-start" })
+  await Bun.sleep(0)
+  expect((client as any).pending.get(request.id).timeout).toBeUndefined()
+
+  stdout.write(JSON.stringify({
+    jsonrpc: "2.0",
+    id: request.id,
+    result: { thread_id: request.params.thread_id, run_id: request.params.run_id, accepted: true },
+  }) + "\n")
+  await run.accepted
+})
+
 test("Peer 通过受控配置接口传递详情、预览和 CAS 提交参数", async () => {
   const { client, stdin, stdout } = peer()
   const requests: any[] = []
@@ -155,6 +172,57 @@ test("Peer 拒绝超过限制的无换行帧并关闭 pending 请求", async () 
   stdout.write("x".repeat(65))
   expect(await pending).toBeInstanceOf(Error)
   expect(errors[0]?.message).toContain("exceeds")
+})
+
+test("context.compact 等待服务端终态而不使用通用请求超时", async () => {
+  const { client, stdin, stdout } = peer()
+  let request: any
+  stdin.on("data", data => { request = JSON.parse(data.toString()) })
+
+  let settled = false
+  const result = client.compactContext("thread-compact").finally(() => { settled = true })
+  await Bun.sleep(40)
+  expect(settled).toBeFalse()
+
+  stdout.write(JSON.stringify({
+    jsonrpc: "2.0",
+    id: request.id,
+    result: {
+      compacted: false,
+      context: {
+        action: "manual_skipped",
+        estimated_tokens: 10,
+        input_cap_tokens: 100,
+        context_window_tokens: 128,
+        dynamic_tokens: 10,
+        cache_status: "unknown",
+        cached_tokens: null,
+        miss_reason: "short_history",
+        artifact_ids: [],
+      },
+    },
+  }) + "\n")
+
+  expect(await result).toMatchObject({ compacted: false, context: { action: "manual_skipped" } })
+})
+
+test("Peer 只忽略已超时 ID 的迟到响应并继续报告真正未知 ID", async () => {
+  const { client, stdin, stdout } = peer()
+  const errors: Error[] = []
+  let request: any
+  client.on("protocolError", error => errors.push(error))
+  stdin.on("data", data => { request = JSON.parse(data.toString()) })
+
+  const timedOut = await client.request("config.show", {}, 5).catch(error => error)
+  expect(timedOut).toBeInstanceOf(Error)
+  expect(timedOut.message).toContain("Timed out waiting for config.show")
+
+  stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }) + "\n")
+  stdout.write(JSON.stringify({ jsonrpc: "2.0", id: "never-sent", result: {} }) + "\n")
+  await Bun.sleep(10)
+
+  expect(errors).toHaveLength(1)
+  expect(errors[0]?.message).toBe("Unknown JSON-RPC response id: never-sent")
 })
 
 function peer(limit?: number) {

@@ -50,6 +50,7 @@ export type CommandContext = {
   capabilities: ReadonlySet<string>
   hasThread: boolean
   activeRun: boolean
+  pendingOperation: boolean
   hasPendingInteraction: boolean
 }
 
@@ -129,7 +130,7 @@ export class CommandRegistry {
     if (definition.requirements?.requiresThread && !context.hasThread) {
       return { state: "disabled", reason: "当前没有可用 thread" }
     }
-    if (definition.requirements?.requiresIdle && (context.activeRun || context.hasPendingInteraction)) {
+    if (definition.requirements?.requiresIdle && (context.activeRun || context.pendingOperation || context.hasPendingInteraction)) {
       return { state: "disabled", reason: "当前任务结束或交互完成后可用" }
     }
     return { state: "available" }
@@ -190,6 +191,7 @@ export function defaultCommandContext(overrides: Partial<Omit<CommandContext, "c
     capabilities: new Set(overrides.capabilities ?? builtinCommandCapabilities),
     hasThread: overrides.hasThread ?? false,
     activeRun: overrides.activeRun ?? false,
+    pendingOperation: overrides.pendingOperation ?? false,
     hasPendingInteraction: overrides.hasPendingInteraction ?? false,
   }
 }

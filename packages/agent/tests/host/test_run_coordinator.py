@@ -126,6 +126,52 @@ async def test_run_coordinator_releases_runtime_and_completes_once() -> None:
 
 
 @pytest.mark.asyncio
+async def test_idle_thread_reserves_only_target_thread_and_releases_after_error() -> None:
+    """长耗时 compact/watch 只占用目标 Thread，不阻断其他 Thread 受理。"""
+    coordinator = _coordinator([])
+    owner = ConnectionRef("owner")
+
+    with pytest.raises(RuntimeError, match="injected maintenance failure"):
+        async with coordinator.idle_thread("thread-maintenance"):
+            assert await coordinator.is_active("thread-maintenance") is True
+            with pytest.raises(RunError, match="THREAD_BUSY"):
+                await coordinator.start(
+                    StartRun(
+                        thread_id="thread-maintenance",
+                        run_id="run-blocked",
+                        message="must wait",
+                    ),
+                    owner,
+                )
+
+            other = await coordinator.start(
+                StartRun(
+                    thread_id="thread-other",
+                    run_id="run-other",
+                    message="may proceed",
+                ),
+                owner,
+            )
+            assert [event.type for event in await _events(other)] == [
+                "run.started",
+                "content.delta",
+                "run.completed",
+            ]
+            raise RuntimeError("injected maintenance failure")
+
+    assert await coordinator.is_active("thread-maintenance") is False
+    recovered = await coordinator.start(
+        StartRun(
+            thread_id="thread-maintenance",
+            run_id="run-recovered",
+            message="continue",
+        ),
+        owner,
+    )
+    assert (await _events(recovered))[-1].type == "run.completed"
+
+
+@pytest.mark.asyncio
 async def test_close_before_run_task_starts_releases_snapshot_reservation_once() -> None:
     """尚未取得首个时间片的 Run 也必须释放 Host reservation，且只释放一次。"""
     release_calls = 0

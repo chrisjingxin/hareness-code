@@ -2,7 +2,7 @@
 
 import { expect, test } from "bun:test"
 import type { EventEnvelope, InteractionRequestEnvelope } from "@za38/protocol"
-import { applyAgentEvent, applyInteractionRequest, clearPendingInteraction, clearThread, createInitialState, isHomeState, restoreThread, startRun, type TuiState } from "../../../src/tui/application/state"
+import { applyAgentEvent, applyInteractionRequest, clearPendingInteraction, clearThread, createInitialState, finishContextCompaction, isHomeState, restoreThread, startContextCompaction, startRun, type TuiState } from "../../../src/tui/application/state"
 
 const run = { threadId: "thread-1", runId: "run-1" }
 
@@ -10,6 +10,18 @@ test("初始状态和清空后的状态进入首页", () => {
   const initial = createInitialState()
   expect(isHomeState(initial)).toBeTrue()
   expect(isHomeState(clearThread(startRun(initial, run, "生成组件")))).toBeTrue()
+})
+
+test("手动压缩使用独立操作态并在终态释放", () => {
+  const pending = startContextCompaction(createInitialState("thread-compact"))
+  expect(pending.pendingOperation).toEqual({ kind: "context.compact" })
+  expect(pending.activeRun).toBeUndefined()
+  expect(pending.status).toBe("正在压缩上下文")
+  expect(isHomeState(pending)).toBeFalse()
+
+  const finished = finishContextCompaction(pending)
+  expect(finished.pendingOperation).toBeUndefined()
+  expect(finished.status).toBe("就绪")
 })
 
 test("恢复 thread 会原子替换时间线并清空旧运行状态", () => {

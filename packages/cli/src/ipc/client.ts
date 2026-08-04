@@ -93,8 +93,10 @@ export class JsonRpcRemoteError extends Error {
 
 /** 连接 Python Agent sidecar 的双向 JSON-RPC Peer。 */
 export class AgentClient {
+  private static readonly MAX_TIMED_OUT_REQUEST_IDS = 256
   private nextId = 1
   private readonly pending = new Map<string, PendingRequest>()
+  private readonly timedOutRequestIds = new Set<string>()
   private readonly inboundRequests = new Set<string>()
   private readonly listeners = new Map<string, Set<(...args: any[]) => void>>()
   private closed = false
@@ -191,7 +193,7 @@ export class AgentClient {
       requested_skill: input.requestedSkill,
       model_selection: input.modelSelection,
       approval_mode: input.approvalMode,
-    }).then(result => {
+    }, 0).then(result => {
       if (result.thread_id !== threadId || result.run_id !== runId || !result.accepted) {
         throw new Error("run.start returned a mismatched identity")
       }
@@ -259,6 +261,7 @@ export class AgentClient {
       const timeout = timeoutMs > 0
         ? setTimeout(() => {
             this.pending.delete(id)
+            this.rememberTimedOutRequest(id)
             reject(new Error(`Timed out waiting for ${method}`))
           }, timeoutMs)
         : undefined
@@ -278,7 +281,7 @@ export class AgentClient {
 
   /** 在当前 thread 空闲时请求 sidecar 强制生成一次结构化上下文摘要。 */
   compactContext(threadId: string): Promise<ContextCompactResult> {
-    return this.request(Method.CONTEXT_COMPACT, { thread_id: threadId })
+    return this.request(Method.CONTEXT_COMPACT, { thread_id: threadId }, 0)
   }
 
   /** 读取受控配置字段、来源锁和可修改范围；不返回 TOML 原文或秘密。 */
@@ -378,6 +381,7 @@ export class AgentClient {
     if (!("id" in message) || typeof message.id !== "string") return
     const pending = this.pending.get(message.id)
     if (!pending) {
+      if (this.timedOutRequestIds.delete(message.id)) return
       this.emit("protocolError", new Error(`Unknown JSON-RPC response id: ${message.id}`))
       return
     }
@@ -396,6 +400,16 @@ export class AgentClient {
       } catch (error) {
         pending.reject(error instanceof Error ? error : new Error(String(error)))
       }
+    }
+  }
+
+  /** 有界记住本地已超时 ID，只屏蔽对应迟到响应而不吞未知帧。 */
+  private rememberTimedOutRequest(id: string): void {
+    this.timedOutRequestIds.add(id)
+    while (this.timedOutRequestIds.size > AgentClient.MAX_TIMED_OUT_REQUEST_IDS) {
+      const oldest = this.timedOutRequestIds.values().next().value
+      if (typeof oldest !== "string") return
+      this.timedOutRequestIds.delete(oldest)
     }
   }
 
@@ -445,6 +459,7 @@ export class AgentClient {
     if (this.closed) return
     this.closed = true
     this.inboundRequests.clear()
+    this.timedOutRequestIds.clear()
     for (const [id, pending] of this.pending) {
       this.pending.delete(id)
       if (pending.timeout) clearTimeout(pending.timeout)

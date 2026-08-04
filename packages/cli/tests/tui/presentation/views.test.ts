@@ -7,7 +7,7 @@ import type { TuiRuntime } from "../../../src/tui/application/model"
 import { registerCommonSyntaxParsers } from "../../../src/tui/platform/syntax-parsers"
 import { HomeView } from "../../../src/tui/presentation/home"
 import { SkillPicker, ThreadPicker } from "../../../src/tui/presentation/pickers"
-import { createInitialState, startRun, type TuiState } from "../../../src/tui/application/state"
+import { createInitialState, startContextCompaction, startRun, type TuiState } from "../../../src/tui/application/state"
 import { tuiTheme } from "../../../src/tui/presentation/theme"
 import { ThreadView } from "../../../src/tui/presentation/thread"
 
@@ -94,6 +94,33 @@ test("thread 渲染显示工具卡片和底部 composer", async () => {
     const frame = setup.captureCharFrame()
     expect(frame).toContain("read_file")
     expect(frame).toContain("Harness Code")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("手动压缩期间 composer 失焦并显示专用等待状态", async () => {
+  const state = startContextCompaction({
+    ...createInitialState("thread-compact"),
+    timeline: [{
+      type: "message",
+      message: { id: "user-1", role: "user", content: "需要压缩的历史" },
+    }],
+  })
+  const inputRef = createRef<TextareaRenderable>()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(
+      createElement(ThreadView, { ...viewProps(state, 130, 40), inputRef }),
+      { width: 130, height: 40 },
+    )
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("正在压缩上下文")
+    expect(frame).toContain("上下文压缩中 · 请稍候")
+    expect(inputRef.current?.focused).toBeFalse()
   } finally {
     await act(async () => { setup.renderer.destroy() })
   }

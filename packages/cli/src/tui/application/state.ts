@@ -46,6 +46,10 @@ export type ActiveRun = {
   runId: string
 }
 
+export type PendingOperation = {
+  kind: "context.compact"
+}
+
 export type PendingApproval = {
   requestId: string
   description: string
@@ -62,6 +66,7 @@ export type PendingQuestion = {
 export type TuiState = {
   threadId?: string
   activeRun?: ActiveRun
+  pendingOperation?: PendingOperation
   timeline: TimelineItem[]
   status: string
   pendingApproval?: PendingApproval
@@ -98,9 +103,29 @@ export function createInitialState(threadId?: string): TuiState {
 /** 空状态不应被欢迎文本污染，/clear 后才能可靠地回到沉浸式首页。 */
 export function isHomeState(state: TuiState): boolean {
   return !state.activeRun
+    && !state.pendingOperation
     && !state.pendingApproval
     && !state.pendingQuestion
     && state.timeline.length === 0
+}
+
+/** 手动压缩不是 Agent Run，但会独占当前 Thread 的模型投影。 */
+export function startContextCompaction(state: TuiState): TuiState {
+  return {
+    ...state,
+    pendingOperation: { kind: "context.compact" },
+    status: "正在压缩上下文",
+  }
+}
+
+/** 只结束与当前匹配的压缩操作，避免迟到结果清除其他状态。 */
+export function finishContextCompaction(state: TuiState): TuiState {
+  if (state.pendingOperation?.kind !== "context.compact") return state
+  return {
+    ...state,
+    pendingOperation: undefined,
+    status: "就绪",
+  }
 }
 
 /** 在发送 run.start 前先登记 run，避免首个流事件与 JSON-RPC 响应相邻到达时丢失。 */

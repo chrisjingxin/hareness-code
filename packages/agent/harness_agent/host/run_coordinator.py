@@ -399,6 +399,7 @@ class RunCoordinator:
         self._session_rules: list[PermissionRule] = []
         self._runs: dict[str, RunState] = {}
         self._starting_threads: set[str] = set()
+        self._maintenance_threads: set[str] = set()
         self._lock = asyncio.Lock()
         self._closed = False
 
@@ -434,6 +435,8 @@ class RunCoordinator:
                     )
                 raise RunError("THREAD_BUSY", retryable=True)
             if command.thread_id in self._starting_threads:
+                raise RunError("THREAD_BUSY", retryable=True)
+            if command.thread_id in self._maintenance_threads:
                 raise RunError("THREAD_BUSY", retryable=True)
             self._starting_threads.add(command.thread_id)
 
@@ -530,24 +533,32 @@ class RunCoordinator:
                 await self._force_cancel(run)
 
     async def is_active(self, thread_id: str) -> bool:
-        """返回 Thread 是否正在受理或执行 Run。"""
+        """返回 Thread 是否正在受理、执行或被维护操作占用。"""
         async with self._lock:
-            return thread_id in self._starting_threads or self._is_active(
-                self._runs.get(thread_id)
+            return (
+                thread_id in self._starting_threads
+                or thread_id in self._maintenance_threads
+                or self._is_active(self._runs.get(thread_id))
             )
 
     @asynccontextmanager
     async def idle_thread(self, thread_id: str) -> AsyncIterator[None]:
-        """在 registry 锁内暂时保持 Thread 空闲，供 watch/compact 保证原子性。"""
-        await self._lock.acquire()
-        try:
+        """为 watch/compact 保留目标 Thread，不跨耗时 I/O 持有全局锁。"""
+        async with self._lock:
             if self._closed:
                 raise RunError("HOST_CLOSED", "Host is closed")
-            if thread_id in self._starting_threads or self._is_active(self._runs.get(thread_id)):
+            if (
+                thread_id in self._starting_threads
+                or thread_id in self._maintenance_threads
+                or self._is_active(self._runs.get(thread_id))
+            ):
                 raise RunError("THREAD_BUSY", retryable=True)
+            self._maintenance_threads.add(thread_id)
+        try:
             yield
         finally:
-            self._lock.release()
+            async with self._lock:
+                self._maintenance_threads.discard(thread_id)
 
     async def _lookup(self, ref: RunRef) -> RunState:
         async with self._lock:

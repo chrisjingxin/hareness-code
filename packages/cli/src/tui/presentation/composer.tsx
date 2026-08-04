@@ -34,12 +34,14 @@ export function Composer(props: Pick<SharedViewProps, "runtime" | "state" | "ter
   variant: "home" | "thread"
   commandMenuPlacement: "above" | "inline-below"
 }) {
-  const active = Boolean(props.state.activeRun)
+  const active = Boolean(props.state.activeRun || props.state.pendingOperation)
   const awaitingQuestion = Boolean(props.state.pendingQuestion)
   const options = props.commandOptions
   const placeholder = awaitingQuestion
     ? "输入你的回答后按 Enter"
-    : active
+    : props.state.pendingOperation
+      ? "正在压缩上下文…"
+      : active
       ? "正在执行；Esc 中断"
       : "输入消息…（输入 / 唤起命令）"
 
@@ -185,7 +187,7 @@ export function FooterRail(props: { runtime: TuiRuntime; state: TuiState; termin
         <text fg={tuiTheme.muted}>{workspace}</text>
         {showBranch ? <text fg={tuiTheme.subtle}>:{props.runtime.gitBranch}</text> : null}
       </box>
-      {props.state.activeRun ? <BusyRunHint /> : props.thread ? <text fg={tuiTheme.muted}>↑↓ 历史 · PgUp/PgDn 滚动 · Ctrl+O 工具</text> : null}
+      {props.state.pendingOperation ? <BusyContextOperationHint /> : props.state.activeRun ? <BusyRunHint /> : props.thread ? <text fg={tuiTheme.muted}>↑↓ 历史 · PgUp/PgDn 滚动 · Ctrl+O 工具</text> : null}
       <text fg={tuiTheme.subtle}>v{props.runtime.cliVersion}</text>
     </box>
   )
@@ -198,6 +200,17 @@ function BusyRunHint() {
     <box flexDirection="row" gap={1}>
       <text fg={tuiTheme.primary}>{frame}</text>
       <text fg={tuiTheme.muted}>PgUp/PgDn 滚动 · Esc 中断</text>
+    </box>
+  )
+}
+
+/** 手动压缩尚无取消协议，底栏只展示等待语义。 */
+function BusyContextOperationHint() {
+  const frame = useSpinner(true, 80)
+  return (
+    <box flexDirection="row" gap={1}>
+      <text fg={tuiTheme.primary}>{frame}</text>
+      <text fg={tuiTheme.muted}>上下文压缩中 · 请稍候</text>
     </box>
   )
 }

@@ -90,6 +90,27 @@ test("活动任务下 /new 返回确认 Dialog，而不是旧的强制清理分�
   })
 })
 
+test("手动压缩操作期间 requiresIdle 命令统一禁用", () => {
+  const context = defaultCommandContext({
+    capabilities: ["threads.read", "context.manage", "models.read", "host.attach"],
+    hasThread: true,
+    pendingOperation: true,
+  })
+  for (const source of ["/compact", "/resume", "/model", "/web"]) {
+    const command = parseSlashCommand(source)
+    if (!command) throw new Error(`expected command: ${source}`)
+    expect(dispatchSlashCommand(command, {
+      commandContext: context,
+      threadId: "thread-1",
+      runtimeStatus: "正在压缩上下文",
+      versionSummary: "version",
+    })).toEqual({
+      type: "notice",
+      message: `${source} 暂不可用：当前任务结束或交互完成后可用。`,
+    })
+  }
+})
+
 test("/web 仅在已协商 host.attach 且当前 Thread 空闲时可用", () => {
   const command = parseSlashCommand("/web")
   if (!command) throw new Error("expected web command")
