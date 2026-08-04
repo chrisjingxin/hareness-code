@@ -100,8 +100,8 @@ export async function processHighlightRequest(request: {
 }): Promise<SyntaxWorkerResponse> {
   const { requestId, language, code } = request
 
-  // 代码超过 64 KiB 边界直接 plain 降级
-  if (new TextEncoder().encode(code).length > 64 * 1024) {
+  // 代码超过 64 KiB 或 2,000 行边界直接 plain 降级，避免 Worker 独占主机资源。
+  if (new TextEncoder().encode(code).length > 64 * 1024 || (code ? code.split("\n").length : 0) > 2_000) {
     return { type: "plain", requestId, reason: "too-large" }
   }
 

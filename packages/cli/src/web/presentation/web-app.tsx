@@ -1,7 +1,7 @@
 /** Web React 工作台：组合蓝色三栏布局与可访问性，不拥有 Agent 或命令业务状态。 */
 /** @jsxImportSource react */
 
-import { Ellipsis, Menu, X } from "lucide-react"
+import { Activity, Cpu, Ellipsis, Menu, ShieldCheck, X } from "lucide-react"
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react"
 import { Capability } from "@za38/protocol"
 
@@ -91,6 +91,21 @@ export function WebApp(props: {
     return () => document.removeEventListener("pointerdown", onPointerDown)
   }, [snapshot.headerMenuOpen, onIntent])
 
+  /** Overflow 菜单按 APG menu 习惯在可用项间循环移动焦点。 */
+  const handleHeaderMenuKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)'))
+    if (items.length === 0) return
+    const currentIndex = Math.max(0, items.indexOf(document.activeElement as HTMLButtonElement))
+    let nextIndex: number | null = null
+    if (event.key === "ArrowDown") nextIndex = (currentIndex + 1) % items.length
+    if (event.key === "ArrowUp") nextIndex = (currentIndex - 1 + items.length) % items.length
+    if (event.key === "Home") nextIndex = 0
+    if (event.key === "End") nextIndex = items.length - 1
+    if (nextIndex === null) return
+    event.preventDefault()
+    items[nextIndex]?.focus()
+  }
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
@@ -136,7 +151,7 @@ export function WebApp(props: {
           <div className="topbar-project">
             {narrow ? (
               <button type="button" className="icon-button mobile-only" aria-label="打开 Thread 导航" title="打开 Thread 导航" disabled={readOnly} onClick={() => { onIntent({ type: "sidebar-toggle", open: true }) }}>
-                <Menu aria-hidden="true" size={18} />
+                <Menu aria-hidden="true" size={16} />
               </button>
             ) : null}
             <div className="topbar-project-copy">
@@ -146,15 +161,18 @@ export function WebApp(props: {
           </div>
           <div className="topbar-meta">
             <button type="button" className="meta-chip" hidden={!capabilities.has(Capability.MODELS_READ)} disabled={readOnly} onClick={() => { onIntent({ type: "panel-open", panel: "models" }) }} title="模型设置">
-              <span className="meta-chip-label">模型</span>
+              <Cpu aria-hidden="true" size={16} />
+              <span className="sr-only">模型</span>
               <span className="meta-chip-value">{modelLabel(interactive)}</span>
             </button>
             <span className="meta-chip" title="审批模式">
-              <span className="meta-chip-label">审批</span>
+              <ShieldCheck aria-hidden="true" size={16} />
+              <span className="sr-only">审批</span>
               <span className="meta-chip-value">{approvalModeLabel(interactive.runtime)}</span>
             </span>
             <button type="button" className="meta-chip" disabled={readOnly} onClick={() => { onIntent({ type: "panel-open", panel: "status" }) }} title="连接与活动状态">
-              <span className={`status-dot status-dot-${interactive.activity.kind}`} />
+              <Activity aria-hidden="true" size={16} />
+              <span className={`status-dot status-dot-${interactive.activity.kind}`} aria-hidden="true" />
               <span className="meta-chip-value">{props.active ? interactive.activity.label : "正在接管"}{interactive.connection.status !== "open" ? ` · ${connectionLabel(interactive.connection.status)}` : ""}</span>
             </button>
           </div>
@@ -169,10 +187,10 @@ export function WebApp(props: {
               aria-expanded={snapshot.headerMenuOpen}
               onClick={() => { onIntent({ type: "header-menu-toggle", open: !snapshot.headerMenuOpen }) }}
             >
-              <Ellipsis aria-hidden="true" size={18} />
+              <Ellipsis aria-hidden="true" size={16} />
             </button>
             {snapshot.headerMenuOpen ? (
-              <div ref={headerMenuRef} className="header-menu" role="menu" aria-label="更多操作">
+              <div ref={headerMenuRef} className="header-menu" role="menu" aria-label="更多操作" onKeyDown={handleHeaderMenuKeyDown}>
                 <button type="button" role="menuitem" className="header-menu-item" onClick={() => { onIntent({ type: "theme-set", theme: nextTheme(snapshot.theme) }) }}>
                   {snapshot.theme === "light" ? "使用深色主题" : "使用浅色主题"}
                 </button>

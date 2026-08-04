@@ -26,6 +26,23 @@ test("可访问性别名 token 存在：action/link/success/warning/danger 文�
   }
 })
 
+test("紧凑/标准/字段三档尺寸与窄屏 44px 命中目标保持为 token contract", () => {
+  for (const token of ["--control-compact", "--control-standard", "--control-field", "--radius-control", "--radius-surface"]) {
+    expect(css).toContain(token)
+  }
+  expect(css).toContain("--control-standard: 44px")
+  expect(css).toContain(".composer-textarea { font-size: 16px; }")
+  expect(css).toContain(".send-button, .cancel-button { width: var(--control-standard); height: var(--control-standard); }")
+})
+
+test("CodeBlock 独占一层 surface，prose/表格/代码各自维持局部滚动", () => {
+  expect(css).toContain(".code-block {")
+  expect(css).toContain(".code-block-body {")
+  expect(css).toContain("overflow-x: auto")
+  expect(css).not.toContain(".markdown-code {")
+  expect(css).toContain("max-inline-size: min(72ch, 100%)")
+})
+
 test("历史双轨 class 已删除：同一组件不再保留旧 class 规则", () => {
   for (const legacy of [".message-bubble", ".composer-wrap", ".status-pill", ".thread-sidebar", ".utility-panel", ".topbar-status", ".mobile-thread-bar", ".sidebar-action", ".sidebar-disabled-reason"]) {
     expect(css).not.toContain(legacy)

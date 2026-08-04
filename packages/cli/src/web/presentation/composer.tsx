@@ -1,8 +1,8 @@
 /** Web Composer：textarea 自动增长、Skill chip、命令菜单、发送/取消按钮。 */
 /** @jsxImportSource react */
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react"
-import { AlertTriangle, ChevronDown, Loader2, Send, Wrench, X } from "lucide-react"
+import { useEffect, useRef, useState } from "react"
+import { AlertTriangle, ChevronDown, Loader2, Send, Square, Wrench, X } from "lucide-react"
 
 import {
   commandMenuItemDescription,
@@ -43,7 +43,6 @@ export function Composer(props: {
   const items = snapshot.commandOptions
   const selectedIndex = clampIndex(snapshot.commandMenuIndex, items.length)
 
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const isComposingRef = useRef(false)
   const [rows, setRows] = useState(COMPOSER_MIN_ROWS)
 
@@ -64,34 +63,24 @@ export function Composer(props: {
   }
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (menuVisible && handleMenuKeyDown(event, items, selectedIndex, dispatch)) {
-      event.preventDefault()
-      return
-    }
     const isComposing = event.nativeEvent.isComposing || isComposingRef.current || event.keyCode === 229
-    if (event.key === "Enter" && !event.shiftKey && !isComposing) {
+    const resolved = resolveComposerKeyboardIntent({
+      key: event.key,
+      shiftKey: event.shiftKey,
+      ctrlKey: event.ctrlKey,
+      metaKey: event.metaKey,
+      isComposing,
+      menuVisible,
+      items,
+      selectedIndex,
+      draft,
+      composedDisabled,
+      activeRun,
+    })
+    if (resolved.preventDefault) {
       event.preventDefault()
-      if (!composedDisabled && draft.trim().length > 0) {
-        dispatch({ type: "submit" })
-      }
-      return
     }
-    if (event.key === "Escape") {
-      if (menuVisible) {
-        event.preventDefault()
-        dispatch({ type: "command-menu-close" })
-        return
-      }
-      if (activeRun) {
-        event.preventDefault()
-        dispatch({ type: "cancel-run" })
-      }
-      return
-    }
-    if (isCmdOrCtrl(event) && (event.key === "k" || event.key === "K")) {
-      event.preventDefault()
-      dispatch({ type: "command-menu-open" })
-    }
+    if (resolved.intent) dispatch(resolved.intent)
   }
 
   const handleFormSubmit = (event: React.FormEvent<HTMLFormElement>) => {
@@ -113,7 +102,6 @@ export function Composer(props: {
         ) : null}
         <div className="composer-box">
           <textarea
-            ref={textareaRef}
             className="composer-textarea"
             rows={rows}
             value={draft}
@@ -151,17 +139,18 @@ export function Composer(props: {
                   type="button"
                   className="cancel-button"
                   aria-label="取消当前任务"
+                  title="取消当前任务"
                   onClick={() => dispatch({ type: "cancel-run" })}
                   disabled={snapshot.leaving}
                 >
-                  <Loader2 aria-hidden="true" className="cancel-button-spinner" />
-                  <span>取消</span>
+                  <Square aria-hidden="true" />
                 </button>
               ) : (
                 <button
                   type="submit"
                   className="send-button"
                   aria-label="发送消息"
+                  title="发送消息"
                   disabled={composedDisabled || draft.trim().length === 0}
                 >
                   {snapshot.composerSubmitting ? (
@@ -169,7 +158,6 @@ export function Composer(props: {
                   ) : (
                     <Send aria-hidden="true" />
                   )}
-                  <span>发送</span>
                 </button>
               )}
             </div>
@@ -263,35 +251,72 @@ function commandItemKey(item: CommandMenuItem, index: number): string {
   return `skill-${item.skill.id}-${index}`
 }
 
-function handleMenuKeyDown(
-  event: React.KeyboardEvent<HTMLTextAreaElement>,
+/** Composer 键盘状态机：独立于 DOM，保证 IME 的 Enter 永远不提交或选中命令。 */
+export function resolveComposerKeyboardIntent(
+  input: {
+    key: string
+    shiftKey: boolean
+    ctrlKey: boolean
+    metaKey: boolean
+    isComposing: boolean
+    menuVisible: boolean
+    items: readonly CommandMenuItem[]
+    selectedIndex: number
+    draft: string
+    composedDisabled: boolean
+    activeRun: boolean
+  },
+): { preventDefault: boolean; intent: WebIntent | null } {
+  if (input.isComposing) return { preventDefault: false, intent: null }
+  if (input.menuVisible) {
+    const menuResolution = resolveMenuKeyboardIntent(
+      input.key,
+      input.items,
+      input.selectedIndex,
+    )
+    if (menuResolution.handled) return { preventDefault: true, intent: menuResolution.intent }
+  }
+  if (input.key === "Enter" && !input.shiftKey) {
+    return {
+      preventDefault: true,
+      intent: !input.composedDisabled && input.draft.trim().length > 0 ? { type: "submit" } : null,
+    }
+  }
+  if (input.key === "Escape" && input.activeRun) {
+    return { preventDefault: true, intent: { type: "cancel-run" } }
+  }
+  if ((input.metaKey || input.ctrlKey) && (input.key === "k" || input.key === "K")) {
+    return { preventDefault: true, intent: { type: "command-menu-open" } }
+  }
+  return { preventDefault: false, intent: null }
+}
+
+/** 命令菜单已打开时的键盘解析；无候选项则交还给 textarea 默认行为。 */
+function resolveMenuKeyboardIntent(
+  key: string,
   items: readonly CommandMenuItem[],
   selectedIndex: number,
-  dispatch: (intent: WebIntent) => void,
-): boolean {
-  if (items.length === 0) return false
-  if (event.key === "ArrowDown") {
+): { handled: boolean; intent: WebIntent | null } {
+  if (items.length === 0) return { handled: false, intent: null }
+  if (key === "ArrowDown") {
     const next = selectedIndex + 1 >= items.length ? 0 : selectedIndex + 1
-    dispatch({ type: "command-menu-hover", selectedIndex: next })
-    return true
+    return { handled: true, intent: { type: "command-menu-hover", selectedIndex: next } }
   }
-  if (event.key === "ArrowUp") {
+  if (key === "ArrowUp") {
     const next = selectedIndex - 1 < 0 ? items.length - 1 : selectedIndex - 1
-    dispatch({ type: "command-menu-hover", selectedIndex: next })
-    return true
+    return { handled: true, intent: { type: "command-menu-hover", selectedIndex: next } }
   }
-  if (event.key === "Enter") {
+  if (key === "Enter") {
     const item = items[selectedIndex]
-    if (item && !isItemDisabled(item)) {
-      dispatch({ type: "command-menu-select", item })
+    return {
+      handled: true,
+      intent: item && !isItemDisabled(item) ? { type: "command-menu-select", item } : null,
     }
-    return true
   }
-  if (event.key === "Escape") {
-    dispatch({ type: "command-menu-close" })
-    return true
+  if (key === "Escape") {
+    return { handled: true, intent: { type: "command-menu-close" } }
   }
-  return false
+  return { handled: false, intent: null }
 }
 
 function estimateRows(draft: string): number {
@@ -302,10 +327,6 @@ function estimateRows(draft: string): number {
     COMPOSER_MIN_ROWS,
     Math.min(COMPOSER_MAX_ROWS, Math.max(lineBreaks, width)),
   )
-}
-
-function isCmdOrCtrl(event: React.KeyboardEvent<HTMLTextAreaElement>): boolean {
-  return event.metaKey || event.ctrlKey
 }
 
 function placeholderFor(snapshot: WebAdapterSnapshot, activeRun: boolean): string {

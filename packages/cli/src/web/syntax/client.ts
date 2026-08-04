@@ -5,9 +5,17 @@ import type { SyntaxWorkerRequest, SyntaxWorkerResponse } from "./protocol"
 
 const HIGHLIGHT_TIMEOUT_MS = 1500
 const MAX_CACHE_SIZE = 128
+const MAX_CACHE_BYTES = 4 * 1024 * 1024
 const MAX_CODE_BYTES = 64 * 1024
+const MAX_CODE_LINES = 2_000
 const MAX_CONSECUTIVE_FATALS = 3
 
+type CachedHighlight = {
+  readonly response: SyntaxWorkerResponse
+  readonly bytes: number
+}
+
+/** 主线程 Syntax Worker 管理器：负责限额、缓存、超时、熔断与生命周期收敛。 */
 export class SyntaxClient {
   private worker: Worker | null = null
   private requestIdCounter = 0
@@ -20,7 +28,8 @@ export class SyntaxClient {
       timer: ReturnType<typeof setTimeout>
     }
   >()
-  private cache = new Map<string, SyntaxWorkerResponse>()
+  private cache = new Map<string, CachedHighlight>()
+  private cacheBytes = 0
 
   constructor(private workerUrl = "/web/syntax-worker.js") {}
 
@@ -81,13 +90,18 @@ export class SyntaxClient {
       return { type: "plain", requestId: 0, reason: "unknown-language" }
     }
 
-    if (new TextEncoder().encode(code).length > MAX_CODE_BYTES) {
+    const codeBytes = new TextEncoder().encode(code).length
+    if (codeBytes > MAX_CODE_BYTES || lineCount(code) > MAX_CODE_LINES) {
       return { type: "plain", requestId: 0, reason: "too-large" }
     }
 
     const cacheKey = `${catalogEntry.filetype}:${code}`
     if (this.cache.has(cacheKey)) {
-      return this.cache.get(cacheKey)!
+      const cached = this.cache.get(cacheKey)!
+      // 命中时刷新 LRU 顺序；Map 的迭代首项始终是下一条淘汰项。
+      this.cache.delete(cacheKey)
+      this.cache.set(cacheKey, cached)
+      return cached.response
     }
 
     const worker = this.getOrCreateWorker()
@@ -116,11 +130,7 @@ export class SyntaxClient {
       this.pendingRequests.set(requestId, {
         resolve: (res: SyntaxWorkerResponse) => {
           if (res.type === "highlighted") {
-            if (this.cache.size >= MAX_CACHE_SIZE) {
-              const firstKey = this.cache.keys().next().value
-              if (firstKey) this.cache.delete(firstKey)
-            }
-            this.cache.set(cacheKey, res)
+            this.cacheHighlight(cacheKey, res, codeBytes)
           }
           resolve(res)
         },
@@ -139,19 +149,62 @@ export class SyntaxClient {
       } catch {}
       this.worker = null
     }
-    for (const req of this.pendingRequests.values()) {
+    for (const [requestId, req] of this.pendingRequests.entries()) {
       clearTimeout(req.timer)
+      req.resolve({ type: "plain", requestId, reason: "load-failed" })
     }
     this.pendingRequests.clear()
     this.cache.clear()
+    this.cacheBytes = 0
+  }
+
+  /** 写入有界 LRU，避免长会话将整段代码和 token 无限保留在浏览器内存中。 */
+  private cacheHighlight(cacheKey: string, response: SyntaxWorkerResponse, codeBytes: number): void {
+    const responseBytes = response.type === "highlighted" ? response.spans.length * 24 : 0
+    const bytes = codeBytes + responseBytes
+    if (bytes > MAX_CACHE_BYTES) return
+    while (this.cache.size >= MAX_CACHE_SIZE || this.cacheBytes + bytes > MAX_CACHE_BYTES) {
+      const firstKey = this.cache.keys().next().value as string | undefined
+      if (!firstKey) break
+      const first = this.cache.get(firstKey)
+      this.cache.delete(firstKey)
+      this.cacheBytes -= first?.bytes ?? 0
+    }
+    this.cache.set(cacheKey, { response, bytes })
+    this.cacheBytes += bytes
   }
 }
 
 let globalSyntaxClient: SyntaxClient | null = null
+let syntaxClientUsers = 0
 
-export function getSyntaxClient(): SyntaxClient {
+/** 按需创建页面内唯一 SyntaxClient；只能由 acquire/release 生命周期使用。 */
+function getSyntaxClient(): SyntaxClient {
   if (!globalSyntaxClient) {
     globalSyntaxClient = new SyntaxClient()
   }
   return globalSyntaxClient
+}
+
+/** CodeBlock 开始一次高亮任务时获取共享 client；最后一个释放者负责终止 Worker。 */
+export function acquireSyntaxClient(): SyntaxClient {
+  syntaxClientUsers += 1
+  return getSyntaxClient()
+}
+
+/** CodeBlock 卸载或替换代码时归还 client；不影响仍在显示的其它代码块。 */
+export function releaseSyntaxClient(): void {
+  syntaxClientUsers = Math.max(0, syntaxClientUsers - 1)
+  if (syntaxClientUsers === 0) closeSyntaxClient()
+}
+
+/** 页面卸载时释放全局 Worker 与缓存；下次代码块按需重新创建。 */
+export function closeSyntaxClient(): void {
+  globalSyntaxClient?.close()
+  globalSyntaxClient = null
+  syntaxClientUsers = 0
+}
+
+function lineCount(code: string): number {
+  return code ? code.split("\n").length : 0
 }

@@ -40,7 +40,12 @@ export function render(element: ReactElement): RenderHandle {
   }
 }
 
-/** 触发受控 React input 的变更事件：先调用原生 setter 再 dispatch 事件。 */
+/**
+ * 派发浏览器原生的受控输入事件。
+ *
+ * Happy DOM 与 React 19 对 textarea/input 的委托实现存在已知不兼容；调用方只能把
+ * 此函数当作环境能力探针，不能以其结果替代真实浏览器输入验收。
+ */
 export function setControlledValue(
   element: HTMLInputElement | HTMLTextAreaElement,
   value: string,
@@ -49,85 +54,10 @@ export function setControlledValue(
     ? HTMLTextAreaElement.prototype
     : HTMLInputElement.prototype
   const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set
-  if (!setter) {
-    element.value = value
-    return
-  }
-  setter.call(element, value)
+  if (setter) setter.call(element, value)
+  else element.value = value
   element.dispatchEvent(new Event("input", { bubbles: true }))
   element.dispatchEvent(new Event("change", { bubbles: true }))
-}
-
-/**
- * React 19 在 happy-dom 下的事件委托会在 value-change 检测处崩溃
- * （getInstIfValueChanged 拿不到 fiber），因此 input/keydown 统一
- * 直接调用元素上 React 注册的 handler，绕过 DOM 事件委托。
- */
-type ReactProps = Record<string, unknown> & {
-  onChange?: (event: ReactChangeLike) => void
-  onKeyDown?: (event: ReactKeyDownLike) => void
-  onClick?: () => void
-}
-
-/** 模拟 React onChange 合成事件所需的最小形状。 */
-export type ReactChangeLike = {
-  target: { value: string }
-  currentTarget: { value: string }
-}
-
-/** 模拟 React onKeyDown 合成事件所需的最小形状。 */
-export type ReactKeyDownLike = {
-  key: string
-  shiftKey: boolean
-  ctrlKey: boolean
-  metaKey: boolean
-  preventDefault(): void
-  nativeEvent: { isComposing: boolean }
-}
-
-function reactPropsOf(element: Element): ReactProps {
-  const key = Object.keys(element).find(name => name.startsWith("__reactProps$"))
-  if (!key) throw new Error(`Element has no React props: ${element.tagName}`)
-  return (element as unknown as Record<string, ReactProps>)[key]
-}
-
-/** 调用元素上的 React onChange，模拟一次受控输入变更。 */
-export function changeValue(element: HTMLInputElement | HTMLTextAreaElement, value: string): void {
-  const props = reactPropsOf(element)
-  if (props.onChange) {
-    const change = { target: { value }, currentTarget: { value } }
-    props.onChange(change)
-    return
-  }
-  setControlledValue(element, value)
-}
-
-/** 调用元素上的 React onKeyDown，模拟一次按键。 */
-export function pressKey(element: Element, init: KeyboardEventInit): void {
-  const props = reactPropsOf(element)
-  if (props.onKeyDown) {
-    const event: ReactKeyDownLike = {
-      key: init.key ?? "",
-      shiftKey: init.shiftKey ?? false,
-      ctrlKey: init.ctrlKey ?? false,
-      metaKey: init.metaKey ?? false,
-      preventDefault() {},
-      nativeEvent: { isComposing: false },
-    }
-    props.onKeyDown(event)
-    return
-  }
-  element.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }))
-}
-
-/** 调用元素上的 React onClick；无 handler 时退化为原生 click。 */
-export function clickElement(element: Element): void {
-  const props = reactPropsOf(element)
-  if (props.onClick) {
-    props.onClick()
-    return
-  }
-  element.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }))
 }
 
 /** 通过 createElement + 任意 props 渲染一个组件。 */

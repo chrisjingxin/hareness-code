@@ -21,6 +21,7 @@ import type { WebBootstrapStage } from "./handoff-coordinator"
 import { createWebHandoffPort, type WebHandoffPort } from "./handoff-port"
 import { PresentationErrorBoundary } from "./presentation/error-boundary"
 import { WebApp } from "./presentation/web-app"
+import { closeSyntaxClient } from "./syntax/client"
 import "./presentation/styles.css"
 
 const WEB_CAPABILITIES = [
@@ -71,6 +72,7 @@ export async function bootstrapWebApp(): Promise<void> {
     closed = true
     await adapter?.close()
     root?.unmount()
+    closeSyntaxClient()
     await controller?.close()
     client?.destroy()
     handoff?.close()

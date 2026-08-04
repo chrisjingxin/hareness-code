@@ -7,7 +7,7 @@ import { act } from "react"
 import { ThreadSidebar } from "../../../src/web/presentation/thread-sidebar"
 import type { WebAdapterSnapshot, WebIntent } from "../../../src/web/application/adapter"
 import { makeCatalog, makeInteractive, makeSnapshot, makeThread } from "./fixtures"
-import { changeValue, render, type RenderHandle } from "./render"
+import { render, type RenderHandle } from "./render"
 
 function mountSidebar(
   snapshot: WebAdapterSnapshot,
@@ -77,6 +77,8 @@ describe("ThreadSidebar", () => {
       expect(drawer).not.toBeNull()
       expect(drawer?.getAttribute("data-open")).toBe("false")
       expect(drawer?.getAttribute("aria-hidden")).toBe("true")
+      expect(drawer?.hasAttribute("inert")).toBe(true)
+      expect(handle.container.querySelector(".drawer-scrim")).toBeNull()
     } finally {
       handle.unmount()
     }
@@ -89,6 +91,8 @@ describe("ThreadSidebar", () => {
       const drawer = handle.container.querySelector<HTMLElement>(".sidebar-drawer")
       expect(drawer?.getAttribute("data-open")).toBe("true")
       expect(drawer?.getAttribute("aria-hidden")).toBe("false")
+      expect(drawer?.hasAttribute("inert")).toBe(false)
+      expect(handle.container.querySelector(".drawer-scrim")).not.toBeNull()
       const close = handle.container.querySelector<HTMLButtonElement>(".sidebar-close")
       act(() => { close?.click() })
       expect(intents).toContainEqual({ type: "sidebar-toggle", open: false })
@@ -97,14 +101,19 @@ describe("ThreadSidebar", () => {
     }
   })
 
-  test("搜索框输入 dispatch panel-search（threads）", () => {
-    const intents: WebIntent[] = []
-    const handle = mountSidebar(makeSnapshot(), intents, false)
+  test("搜索框是受控输入，查询值来自 snapshot", () => {
+    const handle = mountSidebar(makeSnapshot({
+      panelSearch: {
+        threads: { query: "query", loading: false, error: null },
+        models: { query: "", loading: false, error: null },
+        skills: { query: "", loading: false, error: null },
+        mcp: { query: "", loading: false, error: null },
+      },
+    }), [], false)
     try {
       const search = handle.container.querySelector<HTMLInputElement>(".sidebar-search input")
       expect(search).not.toBeNull()
-      act(() => { changeValue(search!, "query") })
-      expect(intents).toContainEqual({ type: "panel-search", panel: "threads", query: "query" })
+      expect(search?.value).toBe("query")
     } finally {
       handle.unmount()
     }

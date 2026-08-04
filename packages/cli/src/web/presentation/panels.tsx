@@ -64,6 +64,24 @@ export function UtilityPanels({
   const title = panel === "help" ? "帮助" : panel === "threads" ? "Threads" : "工作台"
   const drawerRef = useRef<HTMLDivElement | null>(null)
 
+  /** tablist 内使用方向键/Home/End 循环移动并立即激活对应面板。 */
+  const handleTabListKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const tabs = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]:not(:disabled)'))
+    if (tabs.length === 0) return
+    const currentIndex = Math.max(0, tabs.indexOf(document.activeElement as HTMLButtonElement))
+    let nextIndex: number | null = null
+    if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % tabs.length
+    if (event.key === "ArrowLeft") nextIndex = (currentIndex - 1 + tabs.length) % tabs.length
+    if (event.key === "Home") nextIndex = 0
+    if (event.key === "End") nextIndex = tabs.length - 1
+    if (nextIndex === null) return
+    event.preventDefault()
+    const next = tabs[nextIndex]
+    next?.focus()
+    const nextPanel = next?.dataset.panel as MainTab | undefined
+    if (nextPanel) dispatch({ type: "panel-open", panel: nextPanel })
+  }
+
   // 移动端抽屉打开时限制 Tab 焦点在抽屉内并聚焦第一项；关闭后由 WebApp 恢复触发器焦点。
   useEffect(() => {
     if (!narrow || panel === null) return
@@ -91,12 +109,13 @@ export function UtilityPanels({
 
   return (
     <>
+      {narrow ? <button type="button" className="drawer-scrim utility-drawer-scrim" aria-label="关闭工作台面板" onClick={() => dispatch({ type: "panel-close" })} /> : null}
       <aside
         ref={drawerRef}
         className="utility-drawer"
         data-open="true"
-        role="dialog"
-        aria-modal="false"
+        role={narrow ? "dialog" : undefined}
+        aria-modal={narrow ? true : undefined}
         aria-label={title}
       >
         <header className="utility-drawer-header">
@@ -112,7 +131,7 @@ export function UtilityPanels({
           </button>
         </header>
         {isMainTab ? (
-          <div className="workspace-tabs" role="tablist" aria-label="工作台面板">
+          <div className="workspace-tabs" role="tablist" aria-label="工作台面板" onKeyDown={handleTabListKeyDown}>
             {MAIN_TABS.filter(tab => tabVisible(tab, capabilities)).map(tab => (
               <button
                 type="button"
@@ -121,6 +140,7 @@ export function UtilityPanels({
                 id={`workspace-tab-${tab}`}
                 aria-selected={panel === tab}
                 aria-controls={`workspace-panel-${tab}`}
+                data-panel={tab}
                 className={panel === tab ? "workspace-tab is-selected" : "workspace-tab"}
                 disabled={disabled}
                 onClick={() => dispatch({ type: "panel-open", panel: tab })}

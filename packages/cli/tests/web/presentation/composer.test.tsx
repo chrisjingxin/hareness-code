@@ -5,14 +5,14 @@ import { describe, expect, test } from "bun:test"
 import { act } from "react"
 import { createElement, type ReactElement } from "react"
 
-import { Composer } from "../../../src/web/presentation/composer"
+import { Composer, resolveComposerKeyboardIntent } from "../../../src/web/presentation/composer"
 import type {
   CommandMenuItem,
   SkillMenuItem,
 } from "../../../src/interactive/commands"
 import type { WebAdapterSnapshot, WebIntent } from "../../../src/web/application/adapter"
 import { makeInteractive, makeSnapshot, makeSkill } from "./fixtures"
-import { changeValue, pressKey, render, type RenderHandle } from "./render"
+import { render, type RenderHandle } from "./render"
 
 function mountComposer(snapshot: WebAdapterSnapshot, intents: WebIntent[]): RenderHandle {
   return render(
@@ -59,36 +59,41 @@ const DISABLED_COMMAND: CommandMenuItem = {
 }
 
 describe("Composer", () => {
-  test("textarea 跟随 snapshot.draft；输入 dispatch draft-change", () => {
-    const intents: WebIntent[] = []
-    const handle = mountComposer(makeSnapshot({ draft: "初始" }), intents)
+  test("textarea 跟随 snapshot.draft；受控输入由 Adapter 的 draft-change 路径承载", () => {
+    const handle = mountComposer(makeSnapshot({ draft: "初始" }), [])
     try {
       const textarea = handle.container.querySelector<HTMLTextAreaElement>(".composer-textarea")
       expect(textarea?.value).toBe("初始")
-      changeValue(textarea!, "新的输入")
-      expect(intents[0]).toEqual({ type: "draft-change", value: "新的输入" })
     } finally {
       handle.unmount()
     }
   })
 
-  test("Enter 触发 submit（保留原值，不 trim）；Shift+Enter 不提交", () => {
-    const intents: WebIntent[] = []
-    const handle = mountComposer(makeSnapshot({ draft: "你好" }), intents)
-    try {
-      const textarea = handle.container.querySelector<HTMLTextAreaElement>(".composer-textarea")
-      act(() => {
-        pressKey(textarea!, { key: "Enter" })
-      })
-      expect(intents[0]).toEqual({ type: "submit" })
-      intents.length = 0
-      act(() => {
-        pressKey(textarea!, { key: "Enter", shiftKey: true })
-      })
-      expect(intents).toEqual([])
-    } finally {
-      handle.unmount()
+  test("IME、Enter、Shift+Enter 与命令菜单走同一键盘状态机", () => {
+    const base = {
+      shiftKey: false,
+      ctrlKey: false,
+      metaKey: false,
+      isComposing: false,
+      menuVisible: false,
+      items: [] as readonly CommandMenuItem[],
+      selectedIndex: 0,
+      draft: "你好",
+      composedDisabled: false,
+      activeRun: false,
     }
+    expect(resolveComposerKeyboardIntent({ ...base, key: "Enter", isComposing: true }))
+      .toEqual({ preventDefault: false, intent: null })
+    expect(resolveComposerKeyboardIntent({ ...base, key: "Enter" }))
+      .toEqual({ preventDefault: true, intent: { type: "submit" } })
+    expect(resolveComposerKeyboardIntent({ ...base, key: "Enter", shiftKey: true }))
+      .toEqual({ preventDefault: false, intent: null })
+    expect(resolveComposerKeyboardIntent({ ...base, key: "ArrowDown", menuVisible: true, items: [SAMPLE_COMMAND] }))
+      .toEqual({ preventDefault: true, intent: { type: "command-menu-hover", selectedIndex: 0 } })
+    expect(resolveComposerKeyboardIntent({ ...base, key: "Enter", menuVisible: true, items: [SAMPLE_COMMAND] }))
+      .toEqual({ preventDefault: true, intent: { type: "command-menu-select", item: SAMPLE_COMMAND } })
+    expect(resolveComposerKeyboardIntent({ ...base, key: "Enter", menuVisible: true, items: [DISABLED_COMMAND] }))
+      .toEqual({ preventDefault: true, intent: null })
   })
 
   test("activeRun 时显示取消按钮且 dispatch cancel-run；idle 时显示发送按钮", () => {
@@ -193,44 +198,4 @@ describe("Composer", () => {
     }
   })
 
-  test("键盘 ArrowDown 改变 hover 索引并 dispatch command-menu-hover", () => {
-    const intents: WebIntent[] = []
-    const snapshot = makeSnapshot({
-      draft: "/",
-      commandMenuOpen: true,
-      commandOptions: [SAMPLE_COMMAND, DISABLED_COMMAND, SAMPLE_COMMAND],
-      commandMenuIndex: 0,
-    })
-    const handle = mountComposer(snapshot, intents)
-    try {
-      const textarea = handle.container.querySelector<HTMLTextAreaElement>(".composer-textarea")
-      act(() => {
-        pressKey(textarea!, { key: "ArrowDown" })
-      })
-      expect(intents).toContainEqual({ type: "command-menu-hover", selectedIndex: 1 })
-    } finally {
-      handle.unmount()
-    }
-  })
-
-  test("菜单打开时按 Enter 在可用项上 dispatch command-menu-select", () => {
-    const intents: WebIntent[] = []
-    const snapshot = makeSnapshot({
-      draft: "/",
-      commandMenuOpen: true,
-      commandOptions: [SAMPLE_COMMAND],
-      commandMenuIndex: 0,
-    })
-    const handle = mountComposer(snapshot, intents)
-    try {
-      const textarea = handle.container.querySelector<HTMLTextAreaElement>(".composer-textarea")
-      act(() => {
-        pressKey(textarea!, { key: "Enter" })
-      })
-      const select = intents.find(intent => intent.type === "command-menu-select")
-      expect(select).toBeDefined()
-    } finally {
-      handle.unmount()
-    }
-  })
 })

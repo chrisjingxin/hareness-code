@@ -9,9 +9,9 @@ import type { WebAdapterSnapshot, WebIntent } from "../../../src/web/application
 import { makeCatalog, makeInteractive, makeMcp, makeModel, makeRuntime, makeSkill, makeSnapshot } from "./fixtures"
 import { render, type RenderHandle } from "./render"
 
-function mountPanel(snapshot: WebAdapterSnapshot, intents: WebIntent[]): RenderHandle {
+function mountPanel(snapshot: WebAdapterSnapshot, intents: WebIntent[], narrow = false): RenderHandle {
   return render(
-    <UtilityPanels snapshot={snapshot} dispatch={intent => intents.push(intent)} />,
+    <UtilityPanels snapshot={snapshot} dispatch={intent => intents.push(intent)} narrow={narrow} />,
   )
 }
 
@@ -224,6 +224,46 @@ describe("UtilityPanels", () => {
       expect(panel?.getAttribute("id")).toBe("workspace-panel-models")
     } finally {
       handle.unmount()
+    }
+  })
+
+  test("主 tab 支持 Arrow/Home/End：移动焦点并派发对应 panel-open", () => {
+    const intents: WebIntent[] = []
+    const handle = mountPanel(makeSnapshot({ activePanel: "models" }), intents)
+    try {
+      const tablist = handle.container.querySelector<HTMLElement>('[role="tablist"]')
+      const tabs = Array.from(handle.container.querySelectorAll<HTMLButtonElement>('[role="tab"]'))
+      tabs[0]?.focus()
+      act(() => { tablist?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true })) })
+      expect(document.activeElement).toBe(tabs[1])
+      expect(intents).toContainEqual({ type: "panel-open", panel: "skills" })
+      act(() => { tablist?.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true, cancelable: true })) })
+      expect(document.activeElement).toBe(tabs[tabs.length - 1])
+      expect(intents).toContainEqual({ type: "panel-open", panel: "status" })
+    } finally {
+      handle.unmount()
+    }
+  })
+
+  test("窄屏 Utility 仅在抽屉模式声明 dialog/modal，并提供 scrim", () => {
+    const intents: WebIntent[] = []
+    const desktop = mountPanel(makeSnapshot({ activePanel: "status" }), intents)
+    try {
+      const aside = desktop.container.querySelector(".utility-drawer")
+      expect(aside?.getAttribute("role")).toBeNull()
+      expect(aside?.getAttribute("aria-modal")).toBeNull()
+    } finally {
+      desktop.unmount()
+    }
+
+    const mobile = mountPanel(makeSnapshot({ activePanel: "status" }), intents, true)
+    try {
+      const aside = mobile.container.querySelector(".utility-drawer")
+      expect(aside?.getAttribute("role")).toBe("dialog")
+      expect(aside?.getAttribute("aria-modal")).toBe("true")
+      expect(mobile.container.querySelector(".utility-drawer-scrim")).not.toBeNull()
+    } finally {
+      mobile.unmount()
     }
   })
 

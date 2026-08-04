@@ -16,7 +16,13 @@ function createHarness(): Harness {
   const activeHandoffs = new Set<string>()
   const server = createWebServer({
     html: "<!doctype html><title>shell</title>",
-    getAssets: async () => ({ script: "console.log('app')", style: "body{}" }),
+    getAssets: async () => ({
+      script: "console.log('app')",
+      style: "body{}",
+      syntaxWorkerScript: "console.log('syntax worker')",
+      treeSitterWasm: new Uint8Array([0, 97, 115, 109]),
+      languageWasms: new Map([["python", new Uint8Array([1, 2, 3])]]),
+    }),
     isActiveHandoff: handoffId => activeHandoffs.has(handoffId),
     attachLifecycle: async (handoffId, channel) => {
       attachCalls.push({ handoffId, channel })
@@ -45,6 +51,7 @@ test("白名单路由与安全 headers 精确存在；未知路由返回 404/405
   expect(await page.text()).toContain("<title>shell</title>")
   expect(page.headers.get("content-security-policy")).toContain("default-src 'none'")
   expect(page.headers.get("content-security-policy")).toContain("connect-src ws://127.0.0.1:*")
+  expect(page.headers.get("content-security-policy")).toContain("wasm-unsafe-eval")
   expect(page.headers.get("cache-control")).toBe("no-store")
   expect(page.headers.get("referrer-policy")).toBe("no-referrer")
   expect(page.headers.get("x-content-type-options")).toBe("nosniff")
@@ -59,9 +66,22 @@ test("白名单路由与安全 headers 精确存在；未知路由返回 404/405
   const style = await fetch(`${origin}/web/app.css`)
   expect(style.status).toBe(200)
   expect(style.headers.get("content-type")).toContain("text/css")
+  const syntaxWorker = await fetch(`${origin}/web/syntax-worker.js`)
+  expect(syntaxWorker.status).toBe(200)
+  expect(syntaxWorker.headers.get("content-type")).toContain("javascript")
+  expect(await syntaxWorker.text()).toContain("syntax worker")
+  const treeSitter = await fetch(`${origin}/web/syntax/tree-sitter.wasm`)
+  expect(treeSitter.status).toBe(200)
+  expect(treeSitter.headers.get("content-type")).toContain("application/wasm")
+  expect(new Uint8Array(await treeSitter.arrayBuffer())).toEqual(new Uint8Array([0, 97, 115, 109]))
+  const language = await fetch(`${origin}/web/syntax/lang/python.wasm`)
+  expect(language.status).toBe(200)
+  expect(new Uint8Array(await language.arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]))
 
   expect((await fetch(`${origin}/`)).status).toBe(404)
   expect((await fetch(`${origin}/index.html`)).status).toBe(404)
+  expect((await fetch(`${origin}/web/syntax/lang/not-in-catalog.wasm`)).status).toBe(404)
+  expect((await fetch(`${origin}/web/syntax/lang/python.wasm`, { method: "POST" })).status).toBe(405)
   expect((await fetch(`${origin}/web/h/unknown-handoff`)).status).toBe(404)
   expect((await fetch(`${origin}/web/h/handoff-1/../app.js`)).status).toBe(404)
   expect((await fetch(`${origin}/web/h/handoff-1`, { method: "POST" })).status).toBe(405)

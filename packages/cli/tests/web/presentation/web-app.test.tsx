@@ -157,6 +157,22 @@ describe("WebApp", () => {
     }
   })
 
+  test("overflow menu 支持 Arrow/Home/End 焦点导航", () => {
+    const adapter = createFakeAdapter(makeSnapshot({ headerMenuOpen: true }))
+    const handle = render(<WebApp adapter={adapter} active={true} />)
+    try {
+      const menu = handle.container.querySelector<HTMLElement>(".header-menu")
+      const items = Array.from(handle.container.querySelectorAll<HTMLButtonElement>(".header-menu-item"))
+      items[0]?.focus()
+      act(() => { menu?.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true, cancelable: true })) })
+      expect(document.activeElement).toBe(items[items.length - 1])
+      act(() => { menu?.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true, cancelable: true })) })
+      expect(document.activeElement).toBe(items[0])
+    } finally {
+      handle.unmount()
+    }
+  })
+
   test("Escape 优先级：header menu 打开时先关闭菜单而非关闭 panel", () => {
     const adapter = createFakeAdapter(makeSnapshot({ headerMenuOpen: true, activePanel: "status" }))
     const handle = render(<WebApp adapter={adapter} active={true} />)

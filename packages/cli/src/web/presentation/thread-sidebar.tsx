@@ -162,6 +162,7 @@ export function ThreadSidebar({
         aria-modal="true"
         aria-label="Thread 列表"
         aria-hidden={!snapshot.sidebarOpen}
+        inert={!snapshot.sidebarOpen}
       >
         <header className="sidebar-drawer-header">
           <h2>Thread</h2>
@@ -182,7 +183,7 @@ export function ThreadSidebar({
         {footer}
       </div>
       {snapshot.sidebarOpen ? (
-        <div className="drawer-scrim" onClick={() => dispatch({ type: "sidebar-toggle", open: false })} />
+        <button type="button" className="drawer-scrim" aria-label="关闭 Thread 导航" onClick={() => dispatch({ type: "sidebar-toggle", open: false })} />
       ) : null}
     </>
   )
