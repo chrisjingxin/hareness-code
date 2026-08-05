@@ -259,6 +259,39 @@ async def test_draining_engine_rejects_new_lease_until_old_run_and_lease_release
     assert await pool.state_for(profile.profile_key) == AgentEngineState.MISSING
 
 
+async def test_snapshot_invalidation_only_drains_outdated_profiles():
+    """资源快照变化只排空引用旧指纹的角色图。"""
+    from dataclasses import replace
+
+    from harness_agent.runtime.agent_engine import AgentEngine, AgentEnginePool, AgentEngineState
+
+    old_profile = _profile("old-mcp")
+    current_profile = replace(
+        _profile("current-mcp"),
+        mcp_config_fingerprint="a" * 64,
+    )
+    old_lease = None
+    pool = AgentEnginePool(
+        lambda requested: AgentEngine(profile=requested, graph=object())
+    )
+    old_lease = await pool.acquire(old_profile)
+    current_lease = await pool.acquire(current_profile)
+
+    affected = await pool.invalidate_outdated(
+        resource="mcp",
+        current_fingerprint=current_profile.mcp_config_fingerprint,
+        reason="test-change",
+    )
+    assert affected == (old_profile.profile_key,)
+    assert await pool.state_for(old_profile.profile_key) == AgentEngineState.DRAINING
+    assert await pool.state_for(current_profile.profile_key) == AgentEngineState.ACTIVE
+
+    await old_lease.release()
+    await pool.finalize_draining(old_profile.profile_key)
+    await current_lease.release()
+    await pool.aclose()
+
+
 async def test_engine_close_continues_after_resource_failure_and_is_idempotent():
     """一个资源关闭失败时仍按顺序关闭其余资源，并最终清空图引用。"""
     from harness_agent.runtime.agent_engine import (
@@ -293,6 +326,20 @@ async def test_engine_close_continues_after_resource_failure_and_is_idempotent()
     assert first.failures[0].resource_name == "tool:scheduler"
     assert engine.graph is None
     assert engine.state == AgentEngineState.CLOSED
+
+
+def test_engine_resource_bundle_rejects_borrowed_host_resource_closer():
+    """AgentEngine Bundle 不能登记借用的 Host 资源关闭器。"""
+    from harness_agent.runtime.agent_engine import AgentEngineCloseAdapter
+    from harness_agent.runtime.resource_ownership import ResourceAccess, ResourceScope
+
+    with pytest.raises(ValueError, match="RUNTIME_CLOSE_ADAPTER_INVALID"):
+        AgentEngineCloseAdapter(
+            "host-mcp",
+            lambda: None,
+            scope=ResourceScope.HOST,
+            access=ResourceAccess.BORROWED,
+        )
 
 
 async def test_engine_close_cancels_registered_background_tasks():

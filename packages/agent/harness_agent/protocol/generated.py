@@ -7,17 +7,17 @@ from harness_agent.protocol.runtime import event_model, schema_model
 
 PROTOCOL_MAJOR = 3
 PROTOCOL_MINOR = 0
-PROTOCOL_SCHEMA_SHA256 = "45c91425e64abad7fc679a7a5928d0a8cb137535b7c90f487d41a7254b672cc3"
+PROTOCOL_SCHEMA_SHA256 = "1abd4b1dc9073c96af8d46e9282851080f32a695b50d9f18c02d0f3000f71de9"
 MAX_FRAME_BYTES = 8388608
 MAX_TOOL_PAYLOAD_BYTES = 1048576
-CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","mcp.status","mcp.add","mcp.remove","host.attachment.create"]
+CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","plugins.list","plugins.inspect","plugins.validate","plugins.install","plugins.set_enabled","plugins.remove","agents.list","agents.inspect","teams.list","teams.inspect","teams.generate","teams.run","teams.cancel","mcp.status","mcp.add","mcp.remove","host.attachment.create"]
 EVENT_TYPES = ["run.started","skill.loaded","content.delta","tool.started","tool.delta","tool.completed","context.updated","interaction.resolved","run.completed","run.cancelled","run.failed"]
 INTERACTION_METHODS = ["interaction.approval","interaction.question"]
-SERVER_CAPABILITIES = ["run.cancel","run.multithread","config.read","config.write","threads.read","context.manage","skills.read","skills.manage","mcp.read","mcp.manage","models.read","models.select","host.attach"]
-OPERATION_CAPABILITIES = {"initialize":None,"run.start":None,"run.cancel":"run.cancel","context.compact":"context.manage","config.show":"config.read","config.path":"config.read","config.details":"config.write","config.preview":"config.write","config.commit":"config.write","threads.list":"threads.read","threads.open":"threads.read","threads.watch":"threads.read","threads.unwatch":"threads.read","models.list":"models.read","skills.list":"skills.read","skills.inspect":"skills.read","skills.set_enabled":"skills.manage","skills.install":"skills.manage","skills.update":"skills.manage","skills.remove":"skills.manage","skills.market.list":"skills.read","mcp.status":"mcp.read","mcp.add":"mcp.manage","mcp.remove":"mcp.manage","host.attachment.create":"host.attach"}
+SERVER_CAPABILITIES = ["run.cancel","run.multithread","config.read","config.write","threads.read","context.manage","skills.read","skills.manage","mcp.read","mcp.manage","plugins.read","plugins.manage","agents.read","teams.read","teams.manage","models.read","models.select","host.attach"]
+OPERATION_CAPABILITIES = {"initialize":None,"run.start":None,"run.cancel":"run.cancel","context.compact":"context.manage","config.show":"config.read","config.path":"config.read","config.details":"config.write","config.preview":"config.write","config.commit":"config.write","threads.list":"threads.read","threads.open":"threads.read","threads.watch":"threads.read","threads.unwatch":"threads.read","models.list":"models.read","skills.list":"skills.read","skills.inspect":"skills.read","skills.set_enabled":"skills.manage","skills.install":"skills.manage","skills.update":"skills.manage","skills.remove":"skills.manage","skills.market.list":"skills.read","plugins.list":"plugins.read","plugins.inspect":"plugins.read","plugins.validate":"plugins.read","plugins.install":"plugins.manage","plugins.set_enabled":"plugins.manage","plugins.remove":"plugins.manage","agents.list":"agents.read","agents.inspect":"agents.read","teams.list":"teams.read","teams.inspect":"teams.read","teams.generate":"teams.manage","teams.run":"teams.manage","teams.cancel":"teams.manage","mcp.status":"mcp.read","mcp.add":"mcp.manage","mcp.remove":"mcp.manage","host.attachment.create":"host.attach"}
 INTERACTION_HANDLES = {"interaction.approval":"approval","interaction.question":"question"}
-METHOD = {"INITIALIZE":"initialize","RUN_START":"run.start","RUN_CANCEL":"run.cancel","CONTEXT_COMPACT":"context.compact","CONFIG_SHOW":"config.show","CONFIG_PATH":"config.path","CONFIG_DETAILS":"config.details","CONFIG_PREVIEW":"config.preview","CONFIG_COMMIT":"config.commit","THREADS_LIST":"threads.list","THREADS_OPEN":"threads.open","THREADS_WATCH":"threads.watch","THREADS_UNWATCH":"threads.unwatch","MODELS_LIST":"models.list","SKILLS_LIST":"skills.list","SKILLS_INSPECT":"skills.inspect","SKILLS_SET_ENABLED":"skills.set_enabled","SKILLS_INSTALL":"skills.install","SKILLS_UPDATE":"skills.update","SKILLS_REMOVE":"skills.remove","SKILLS_MARKET_LIST":"skills.market.list","MCP_STATUS":"mcp.status","MCP_ADD":"mcp.add","MCP_REMOVE":"mcp.remove","HOST_ATTACHMENT_CREATE":"host.attachment.create","EVENT":"event","INTERACTION_APPROVAL":"interaction.approval","INTERACTION_QUESTION":"interaction.question"}
-CAPABILITY = {"RUN_CANCEL":"run.cancel","RUN_MULTITHREAD":"run.multithread","CONFIG_READ":"config.read","CONFIG_WRITE":"config.write","THREADS_READ":"threads.read","CONTEXT_MANAGE":"context.manage","SKILLS_READ":"skills.read","SKILLS_MANAGE":"skills.manage","MCP_READ":"mcp.read","MCP_MANAGE":"mcp.manage","MODELS_READ":"models.read","MODELS_SELECT":"models.select","HOST_ATTACH":"host.attach"}
+METHOD = {"INITIALIZE":"initialize","RUN_START":"run.start","RUN_CANCEL":"run.cancel","CONTEXT_COMPACT":"context.compact","CONFIG_SHOW":"config.show","CONFIG_PATH":"config.path","CONFIG_DETAILS":"config.details","CONFIG_PREVIEW":"config.preview","CONFIG_COMMIT":"config.commit","THREADS_LIST":"threads.list","THREADS_OPEN":"threads.open","THREADS_WATCH":"threads.watch","THREADS_UNWATCH":"threads.unwatch","MODELS_LIST":"models.list","SKILLS_LIST":"skills.list","SKILLS_INSPECT":"skills.inspect","SKILLS_SET_ENABLED":"skills.set_enabled","SKILLS_INSTALL":"skills.install","SKILLS_UPDATE":"skills.update","SKILLS_REMOVE":"skills.remove","SKILLS_MARKET_LIST":"skills.market.list","PLUGINS_LIST":"plugins.list","PLUGINS_INSPECT":"plugins.inspect","PLUGINS_VALIDATE":"plugins.validate","PLUGINS_INSTALL":"plugins.install","PLUGINS_SET_ENABLED":"plugins.set_enabled","PLUGINS_REMOVE":"plugins.remove","AGENTS_LIST":"agents.list","AGENTS_INSPECT":"agents.inspect","TEAMS_LIST":"teams.list","TEAMS_INSPECT":"teams.inspect","TEAMS_GENERATE":"teams.generate","TEAMS_RUN":"teams.run","TEAMS_CANCEL":"teams.cancel","MCP_STATUS":"mcp.status","MCP_ADD":"mcp.add","MCP_REMOVE":"mcp.remove","HOST_ATTACHMENT_CREATE":"host.attachment.create","EVENT":"event","INTERACTION_APPROVAL":"interaction.approval","INTERACTION_QUESTION":"interaction.question"}
+CAPABILITY = {"RUN_CANCEL":"run.cancel","RUN_MULTITHREAD":"run.multithread","CONFIG_READ":"config.read","CONFIG_WRITE":"config.write","THREADS_READ":"threads.read","CONTEXT_MANAGE":"context.manage","SKILLS_READ":"skills.read","SKILLS_MANAGE":"skills.manage","MCP_READ":"mcp.read","MCP_MANAGE":"mcp.manage","PLUGINS_READ":"plugins.read","PLUGINS_MANAGE":"plugins.manage","AGENTS_READ":"agents.read","TEAMS_READ":"teams.read","TEAMS_MANAGE":"teams.manage","MODELS_READ":"models.read","MODELS_SELECT":"models.select","HOST_ATTACH":"host.attach"}
 EVENT_TYPE = {"RUN_STARTED":"run.started","SKILL_LOADED":"skill.loaded","CONTENT_DELTA":"content.delta","TOOL_STARTED":"tool.started","TOOL_DELTA":"tool.delta","TOOL_COMPLETED":"tool.completed","CONTEXT_UPDATED":"context.updated","INTERACTION_RESOLVED":"interaction.resolved","RUN_COMPLETED":"run.completed","RUN_CANCELLED":"run.cancelled","RUN_FAILED":"run.failed"}
 
 JsonValueWire: TypeAlias = None | bool | int | float | str | list["JsonValueWire"] | dict[str, "JsonValueWire"]
@@ -25,6 +25,14 @@ JsonValueWire: TypeAlias = None | bool | int | float | str | list["JsonValueWire
 JsonObjectWire: TypeAlias = dict[str, JsonValueWire]
 
 JsonObjectArrayWire: TypeAlias = list[JsonObjectWire]
+
+class AgentCommandWire(TypedDict):
+    id: str
+    name: str
+    description: str
+    argument_hint: str | None
+    requested_skill_id: str
+    plugin_id: str
 
 class EmptyParamsWire(TypedDict):
     pass
@@ -53,7 +61,7 @@ class InitializeResultWire(TypedDict):
     server: dict[str, Any]
     connection: dict[str, Any]
     capabilities: dict[str, Any]
-    agent_commands: list[JsonObjectWire]
+    agent_commands: list[AgentCommandWire]
     skills_snapshot: dict[str, Any]
     skill_diagnostics: list[str]
     limits: dict[str, Any]
@@ -219,9 +227,111 @@ class SkillsListResultWire(TypedDict):
     skills: JsonObjectArrayWire
     diagnostics: list[str]
 
+class PluginsListParamsWire(TypedDict):
+    include_disabled: NotRequired[bool]
+
+class PluginsInspectParamsWire(TypedDict):
+    id: str
+
+class PluginsSourceParamsWire(TypedDict):
+    source: str
+    format: NotRequired[Literal["auto", "agent-plugins-1.0", "claude-code"]]
+
+class PluginsSetEnabledParamsWire(TypedDict):
+    id: str
+    enabled: bool
+    capability_fingerprint: NotRequired[str]
+
+class PluginsRemoveParamsWire(TypedDict):
+    id: str
+    purge_data: NotRequired[bool]
+
+class AgentSummaryWire(TypedDict):
+    id: str
+    description: str | None
+    purpose: str
+    model_profile_id: str
+    execution_policy_id: str
+    requested_skills: list[str]
+    requested_mcp_servers: list[str]
+    max_turns: int | None
+    source: str
+    fingerprint: str
+
+class AgentsListResultWire(TypedDict):
+    snapshot_id: str
+    agents: list[AgentSummaryWire]
+    diagnostics: list[str]
+
+class AgentsInspectParamsWire(TypedDict):
+    id: str
+
+class TeamTaskDefinitionWire(TypedDict):
+    id: str
+    agent_id: str
+    depends_on: list[str]
+    access: Literal["read", "write"]
+    timeout_seconds: float
+
+class TeamDefinitionWire(TypedDict):
+    id: str
+    description: str | None
+    max_parallelism: int
+    failure_policy: Literal["fail-fast", "continue", "continue-to-synthesis"]
+    tasks: list[TeamTaskDefinitionWire]
+
+class TeamTaskStateWire(TypedDict):
+    id: str
+    status: Literal["pending", "running", "completed", "failed", "cancelled", "blocked"]
+    execution_id: str | None
+    result: JsonObjectWire
+    error_code: str | None
+    attempts: int
+
+class TeamRunWire(TypedDict):
+    run_id: str
+    team_id: str
+    thread_id: str
+    status: Literal["running", "completed", "failed", "cancelled"]
+    terminal_count: int
+    tasks: list[TeamTaskStateWire]
+
+class TeamsListResultWire(TypedDict):
+    teams: list[TeamDefinitionWire]
+    diagnostics: list[str]
+
+class TeamsInspectParamsWire(TypedDict):
+    kind: Literal["definition", "run"]
+    id: str
+
+class TeamsGenerateParamsWire(TypedDict):
+    id: str
+    lead_agent_id: str
+    worker_agent_ids: list[str]
+    max_parallelism: NotRequired[int]
+
+class TeamsRunParamsWire(TypedDict):
+    team_id: str
+    request: str
+    thread_id: str
+    run_id: str
+
+class TeamsRunResultWire(TypedDict):
+    team_id: str
+    run_id: str
+    accepted: Literal[True]
+
+class TeamsCancelParamsWire(TypedDict):
+    run_id: str
+
+class TeamsCancelResultWire(TypedDict):
+    run_id: str
+    cancelled: bool
+
 class McpServerStatusWire(TypedDict):
     name: str
     transport: Literal["stdio", "http", "sse"]
+    source: NotRequired[str]
     status: Literal["connected", "failed", "skipped"]
     error: NotRequired[str]
     tool_names: list[str]
@@ -391,6 +501,19 @@ SkillsUpdateResultWire = JsonObjectWire
 SkillsRemoveParamsWire = SkillsInspectParamsWire
 SkillsRemoveResultWire = JsonObjectWire
 SkillsMarketListResultWire = JsonObjectArrayWire
+PluginsListResultWire = JsonObjectWire
+PluginsInspectResultWire = JsonObjectWire
+PluginsValidateParamsWire = PluginsSourceParamsWire
+PluginsValidateResultWire = JsonObjectWire
+PluginsInstallParamsWire = PluginsSourceParamsWire
+PluginsInstallResultWire = JsonObjectWire
+PluginsSetEnabledResultWire = JsonObjectWire
+PluginsRemoveResultWire = JsonObjectWire
+AgentsListParamsWire = EmptyParamsWire
+AgentsInspectResultWire = AgentSummaryWire
+TeamsListParamsWire = EmptyParamsWire
+TeamsInspectResultWire = JsonObjectWire
+TeamsGenerateResultWire = TeamDefinitionWire
 McpStatusParamsWire = EmptyParamsWire
 
 InitializeParams = schema_model("#/$defs/initializeParams", name="InitializeParams")
@@ -435,6 +558,32 @@ SkillsRemoveParams = schema_model("#/$defs/skillsInspectParams", name="SkillsRem
 SkillsRemoveResult = schema_model("#/$defs/jsonObject", name="SkillsRemoveResult")
 SkillsMarketListParams = schema_model("#/$defs/skillsMarketListParams", name="SkillsMarketListParams")
 SkillsMarketListResult = schema_model("#/$defs/jsonObjectArray", name="SkillsMarketListResult")
+PluginsListParams = schema_model("#/$defs/pluginsListParams", name="PluginsListParams")
+PluginsListResult = schema_model("#/$defs/jsonObject", name="PluginsListResult")
+PluginsInspectParams = schema_model("#/$defs/pluginsInspectParams", name="PluginsInspectParams")
+PluginsInspectResult = schema_model("#/$defs/jsonObject", name="PluginsInspectResult")
+PluginsValidateParams = schema_model("#/$defs/pluginsSourceParams", name="PluginsValidateParams")
+PluginsValidateResult = schema_model("#/$defs/jsonObject", name="PluginsValidateResult")
+PluginsInstallParams = schema_model("#/$defs/pluginsSourceParams", name="PluginsInstallParams")
+PluginsInstallResult = schema_model("#/$defs/jsonObject", name="PluginsInstallResult")
+PluginsSetEnabledParams = schema_model("#/$defs/pluginsSetEnabledParams", name="PluginsSetEnabledParams")
+PluginsSetEnabledResult = schema_model("#/$defs/jsonObject", name="PluginsSetEnabledResult")
+PluginsRemoveParams = schema_model("#/$defs/pluginsRemoveParams", name="PluginsRemoveParams")
+PluginsRemoveResult = schema_model("#/$defs/jsonObject", name="PluginsRemoveResult")
+AgentsListParams = schema_model("#/$defs/emptyParams", name="AgentsListParams")
+AgentsListResult = schema_model("#/$defs/agentsListResult", name="AgentsListResult")
+AgentsInspectParams = schema_model("#/$defs/agentsInspectParams", name="AgentsInspectParams")
+AgentsInspectResult = schema_model("#/$defs/agentSummary", name="AgentsInspectResult")
+TeamsListParams = schema_model("#/$defs/emptyParams", name="TeamsListParams")
+TeamsListResult = schema_model("#/$defs/teamsListResult", name="TeamsListResult")
+TeamsInspectParams = schema_model("#/$defs/teamsInspectParams", name="TeamsInspectParams")
+TeamsInspectResult = schema_model("#/$defs/jsonObject", name="TeamsInspectResult")
+TeamsGenerateParams = schema_model("#/$defs/teamsGenerateParams", name="TeamsGenerateParams")
+TeamsGenerateResult = schema_model("#/$defs/teamDefinition", name="TeamsGenerateResult")
+TeamsRunParams = schema_model("#/$defs/teamsRunParams", name="TeamsRunParams")
+TeamsRunResult = schema_model("#/$defs/teamsRunResult", name="TeamsRunResult")
+TeamsCancelParams = schema_model("#/$defs/teamsCancelParams", name="TeamsCancelParams")
+TeamsCancelResult = schema_model("#/$defs/teamsCancelResult", name="TeamsCancelResult")
 McpStatusParams = schema_model("#/$defs/emptyParams", name="McpStatusParams")
 McpStatusResult = schema_model("#/$defs/mcpStatusResult", name="McpStatusResult")
 McpAddParams = schema_model("#/$defs/mcpAddParams", name="McpAddParams")

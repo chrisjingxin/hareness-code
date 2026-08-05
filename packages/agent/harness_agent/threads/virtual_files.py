@@ -174,12 +174,20 @@ class HarnessVirtualBackend:
             raise SkillError("RunContext Skill snapshot identity mismatch")
         if path.name == "SKILL.md":
             skill_id = "/".join(path.parts[1:-1])
-            return self._registry.load(skill_id).body
-        skill_id = "/".join(path.parts[1:3])
-        relative = "/".join(path.parts[3:])
-        if not relative:
-            raise ValueError("skill resource path is required")
-        return self._registry.read_resource(skill_id, relative)
+            virtual_id = self._registry.resolve_virtual_id(skill_id)
+            return self._registry.load(virtual_id).body
+        # canonical ID 可以包含多个路径段。按最长前缀解析，避免 Plugin ID 被固定两段截断。
+        for boundary in range(len(path.parts) - 1, 1, -1):
+            skill_id = "/".join(path.parts[1:boundary])
+            try:
+                virtual_id = self._registry.resolve_virtual_id(skill_id)
+            except SkillError:
+                continue
+            relative = "/".join(path.parts[boundary:])
+            if not relative:
+                raise ValueError("skill resource path is required")
+            return self._registry.read_resource(virtual_id, relative)
+        raise ValueError("unknown canonical Skill ID")
 
     @staticmethod
     def _page(content: str, offset: int, limit: int) -> ReadResult:

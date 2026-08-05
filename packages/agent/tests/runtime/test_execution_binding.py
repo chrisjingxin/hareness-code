@@ -202,9 +202,12 @@ def test_resolve_execution_binding_rejects_unknown_profile() -> None:
     ],
 )
 def test_resolve_execution_binding_rejects_unusable_model(
-    profile: ModelProfile, error: str
+    profile: ModelProfile, error: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """根模型缺少凭据或必要能力时必须 fail closed。"""
+    # 测试必须与开发者 shell 中可能存在的真实凭据隔离，避免缺失 key 的
+    # profile 因环境覆盖而被错误视为可用。
+    monkeypatch.delenv("HARNESS_API_KEY", raising=False)
     catalog = ModelCatalog(
         default_profile=profile.profile_id,
         profiles={profile.profile_id: profile},

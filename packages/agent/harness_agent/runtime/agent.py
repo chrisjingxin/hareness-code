@@ -27,13 +27,22 @@ from harness_agent.policy.auto_mode import evaluate_auto_mode
 from harness_agent.policy.permission_rules import PermissionRule, evaluate_rules
 from harness_agent.policy.sensitive_paths import requires_safety_check
 from harness_agent.policy.tool_risk import ToolKind, get_tool_kind
-from harness_agent.threads.prompting import PromptComposer, PromptEpoch, read_only_memory_snapshot, tool_schema_fingerprint
+from harness_agent.threads.prompting import (
+    PromptComposer,
+    PromptEpoch,
+    read_only_memory_snapshot,
+    sha256_text,
+    tool_schema_fingerprint,
+)
 from harness_agent.runtime.run_context import RunContext, RunContextSnapshotMiddleware
 
 if TYPE_CHECKING:
     from harness_agent.policy.concurrency import AsyncRWLock
     from harness_agent.threads.thread_persistence import ThreadPersistence
     from harness_agent.policy.workspace_boundary import WorkspaceBoundaryMiddleware
+    from harness_agent.runtime.agent_execution import AgentExecutionRegistry
+    from harness_agent.policy.capability_policy import EffectiveCapabilityView
+    from harness_agent.runtime.execution_binding import SafeModelProfile
 
 logger = logging.getLogger(__name__)
 
@@ -168,7 +177,10 @@ def default_prompt_template_fingerprint() -> str:
 
 
 def _create_default_subagents(
-    *, workspace: str | Path | None, approval_mode: ApprovalMode
+    *,
+    workspace: str | Path | None,
+    approval_mode: ApprovalMode,
+    capability_view: EffectiveCapabilityView | None = None,
 ) -> list[dict[str, Any]]:
     """创建继承计划模式和本机工作区边界的默认子 Agent 规格。"""
     from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
@@ -180,6 +192,16 @@ def _create_default_subagents(
         from harness_agent.policy.workspace_boundary import WorkspaceBoundaryMiddleware
 
         middleware.append(WorkspaceBoundaryMiddleware(workspace))
+    if capability_view is not None:
+        from harness_agent.policy.capability_policy import CapabilityPolicyMiddleware
+
+        middleware.insert(
+            0,
+            CapabilityPolicyMiddleware(
+                capability_view,
+                workspace=workspace or ".",
+            ),
+        )
 
     # deepagents 的 general-purpose 子 Agent 有独立 middleware 栈；计划模式和
     # 本机工作区边界都必须在此重新注册，不能只依赖主 Agent 的配置。
@@ -195,6 +217,160 @@ def _create_default_subagents(
             "middleware": middleware,
         }
     ]
+
+
+def _create_controlled_inline_subagents(
+    *,
+    model: BaseChatModel,
+    backend: Any,
+    tools: Sequence[Any],
+    workspace: str | Path | None,
+    approval_mode: ApprovalMode,
+    capability_view: EffectiveCapabilityView,
+    execution_registry: AgentExecutionRegistry,
+    model_view: SafeModelProfile | None,
+    managed_targets: Sequence[Any] = (),
+    concurrency_lock: AsyncRWLock | None = None,
+    plugin_middleware: Any | None = None,
+) -> tuple[list[dict[str, Any]], Any]:
+    """创建内置 Inline worker，并合并 Host 注册的 Managed Plugin target。"""
+    from deepagents.middleware.filesystem import FilesystemMiddleware
+    from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
+    from langchain.agents import create_agent
+    from langchain.agents.middleware import TodoListMiddleware
+    from langchain_core.messages import HumanMessage
+    from langchain_core.runnables import RunnableLambda
+
+    from harness_agent.runtime.agent_delegation import (
+        AgentDelegationError,
+        AgentDelegator,
+        DelegateAgent,
+        DelegationContextMiddleware,
+        DelegationTarget,
+        current_delegation_call,
+    )
+    from harness_agent.runtime.execution_binding import ExecutionMode, ExecutionRef
+
+    child_middleware: list[Any] = [
+        TodoListMiddleware(),
+        FilesystemMiddleware(backend=backend),
+    ]
+    if capability_view is not None:
+        from harness_agent.policy.capability_policy import CapabilityPolicyMiddleware
+
+        child_middleware.append(
+            CapabilityPolicyMiddleware(
+                capability_view,
+                workspace=workspace or ".",
+            )
+        )
+    if plugin_middleware is not None:
+        child_middleware.append(plugin_middleware)
+    if approval_mode == "plan":
+        child_middleware.append(PlanModeMiddleware())
+    if workspace is not None:
+        from harness_agent.policy.workspace_boundary import WorkspaceBoundaryMiddleware
+
+        child_middleware.append(WorkspaceBoundaryMiddleware(workspace))
+    from harness_agent.policy.concurrency import AsyncRWLock as RuntimeAsyncRWLock
+    from harness_agent.policy.concurrency_guard import ConcurrencyGuardMiddleware
+
+    child_middleware.append(
+        ConcurrencyGuardMiddleware(concurrency_lock or RuntimeAsyncRWLock())
+    )
+
+    child_graph = create_agent(
+        model,
+        tools=list(tools),
+        middleware=child_middleware,
+        system_prompt=(
+            f"{GENERAL_PURPOSE_SUBAGENT['system_prompt']}"
+            f"{_LOCAL_SUBAGENT_BOUNDARY_PROMPT if workspace is not None else ''}"
+        ),
+        name="general-purpose-inline",
+    )
+
+    async def run_inline(command: DelegateAgent) -> dict[str, Any]:
+        """执行临时子图；具体工具通过 Host 共享锁协调读写。"""
+        return await child_graph.ainvoke(
+            {"messages": [HumanMessage(content=command.task)]},
+        )
+
+    targets = (
+        DelegationTarget(
+            agent_id="general-purpose",
+            mode=ExecutionMode.INLINE,
+            runner=run_inline,
+            description=GENERAL_PURPOSE_SUBAGENT["description"],
+            model=model_view,
+            policy_fingerprint=capability_view.policy_fingerprint,
+            definition_fingerprint=sha256_text("builtin-agent:general-purpose:inline:v1"),
+        ),
+        *tuple(managed_targets),
+    )
+    delegator = AgentDelegator(
+        execution_registry,
+        targets=targets,
+    )
+
+    def controlled_runnable(target_agent_id: str) -> RunnableLambda:
+        """为每个可信 target 建立只固定目标 ID 的 task Runnable。"""
+
+        async def invoke_controlled(state: dict[str, Any]) -> dict[str, Any]:
+            """把 DeepAgents task 的临时输入转换为受控 DelegateAgent。"""
+            call = current_delegation_call()
+            context = call.run_context
+            policy = context.delegation_policy
+            if policy is None:
+                raise AgentDelegationError("DELEGATION_POLICY_REQUIRED")
+            messages = state.get("messages", [])
+            task = next(
+                (
+                    str(message.content)
+                    for message in reversed(messages)
+                    if isinstance(message, HumanMessage)
+                ),
+                "",
+            )
+            result = await delegator.execute(
+                DelegateAgent(
+                    parent_ref=ExecutionRef(
+                        thread_id=context.thread_id,
+                        run_id=context.run_id,
+                        execution_id=context.execution_id,
+                        parent_execution_id=context.parent_execution_id,
+                    ),
+                    target_agent_id=target_agent_id,
+                    task=task,
+                    idempotency_key=f"{call.tool_call_id}:{target_agent_id}",
+                    delegation_policy=policy,
+                    cancellation_token=context.cancellation_token,
+                )
+            )
+            return dict(result.output)
+
+        def invoke_sync(_state: dict[str, Any]) -> dict[str, Any]:
+            """生产图只允许异步 delegation，防止同步入口绕过取消和资源清理。"""
+            raise AgentDelegationError("DELEGATION_ASYNC_REQUIRED")
+
+        return RunnableLambda(invoke_sync, afunc=invoke_controlled)
+
+    subagents = [
+        {
+            "name": "general-purpose",
+            "description": GENERAL_PURPOSE_SUBAGENT["description"],
+            "runnable": controlled_runnable("general-purpose"),
+        }
+    ]
+    subagents.extend(
+        {
+            "name": target.agent_id,
+            "description": target.description or f"Plugin Agent: {target.agent_id}",
+            "runnable": controlled_runnable(target.agent_id),
+        }
+        for target in managed_targets
+    )
+    return subagents, DelegationContextMiddleware()
 
 
 def _with_execution_context(
@@ -371,6 +547,11 @@ def create_harness_agent(
     shared_engine: bool = False,
     concurrency_lock: AsyncRWLock | None = None,
     rules_provider: Callable[[], list[PermissionRule]] | None = None,
+    capability_view: EffectiveCapabilityView | None = None,
+    execution_registry: AgentExecutionRegistry | None = None,
+    delegation_model: SafeModelProfile | None = None,
+    delegation_targets: Sequence[Any] = (),
+    plugin_runtime: Any | None = None,
 ) -> Any:
     """创建 za38 编码 agent。
 
@@ -400,6 +581,11 @@ def create_harness_agent(
         shared_engine: True 时编译可服务多个 thread 的图，所有 thread 状态从 RunContext 读取。
         concurrency_lock: Host 注入的跨图工具读写锁；None 时仅为本图创建局部锁。
         rules_provider: 返回当前合并权限规则的回调；allow 命中时 HITL 预检跳过审批。
+        capability_view: 角色解析得到的不可变能力视图；同时约束 schema 与执行入口。
+        execution_registry: Host 的 AgentExecutionRegistry；传入后 `task` 走受控 delegation。
+        delegation_model: 写入 Inline child execution 的脱敏模型事实。
+        delegation_targets: Host 从可信 Plugin catalog 注册的 Managed target。
+        plugin_runtime: Host 持有的 PluginRuntimeManager；提供 Hook middleware 与 LSP。
 
     Returns:
         编译后的 LangGraph agent（CompiledStateGraph）。
@@ -426,12 +612,20 @@ def create_harness_agent(
     # 服务端会同时传 cwd 与 ExecutionContext；库调用方可能只传后者。守卫必须
     # 始终以本机 backend 实际绑定的工作区为准，不能退化为当前进程目录。
     local_workspace = prompt_workspace if not sandboxed else root
+    if capability_view is not None:
+        tools = tuple(
+            tool
+            for tool in (tools or ())
+            if capability_view.allows_tool(str(getattr(tool, "name", "")))
+        )
+        if skill_registry is not None:
+            skill_registry = skill_registry.restricted(capability_view.skill_ids)
     if shared_engine and prompt_epoch is not None:
         raise ValueError("SHARED_RUNTIME_PROMPT_EPOCH_MUST_USE_RUN_CONTEXT")
     if prompt_epoch is None and not shared_engine:
         # 库调用没有 ThreadPersistence 时仍使用相同的确定性顺序，但不会声称可恢复。
         if enable_skills and not sandboxed and skill_registry is None:
-            from harness_agent.extensions.skills import SkillRegistry
+            from harness_agent.extensions.plugin_skills import SkillRegistry
 
             skill_registry = SkillRegistry(local_workspace)
         prompt_epoch = create_prompt_epoch(
@@ -456,6 +650,17 @@ def create_harness_agent(
     if rules_provider is not None:
         # deny 规则必须最先执行：命中即硬拒绝，任何审批模式（包括 yolo）不可覆盖。
         agent_middleware.append(DenyRulesMiddleware(rules_provider))
+    if capability_view is not None:
+        from harness_agent.policy.capability_policy import CapabilityPolicyMiddleware
+
+        # 必须早于其他工具 handler：即使上游伪造了未出现在模型 schema 中的
+        # tool call，也会在 Workspace/HITL/并发锁之前被稳定拒绝。
+        agent_middleware.append(
+            CapabilityPolicyMiddleware(
+                capability_view,
+                workspace=local_workspace,
+            )
+        )
     if approval_mode == "plan":
         # 必须早于文件边界和 HITL 执行：计划模式不应先创建审批再自动拒绝。
         agent_middleware.append(PlanModeMiddleware())
@@ -476,7 +681,6 @@ def create_harness_agent(
     # 3. Skill 正文和归档只通过 `read_file` 的虚拟后端按需读取，模型不再拥有
     # load_skill/read_skill_resource/retrieve_context_artifact 等专用工具。
     if enable_skills and not sandboxed:
-        from harness_agent.extensions.skills import SkillRegistry
         from harness_agent.threads.virtual_files import (
             mount_harness_virtual_files,
             run_scoped_virtual_backend_factory,
@@ -507,6 +711,22 @@ def create_harness_agent(
         from harness_agent.policy.shell_allow_list import ShellAllowListMiddleware
         agent_middleware.append(ShellAllowListMiddleware(shell_allow_list))
 
+    all_tools = list(tools) if tools else []
+
+    # 注入 Harness 扩展工具（web_search/web_fetch/delete_file 等）。
+    from harness_agent.tools.harness_tools import create_harness_tools
+
+    all_tools.extend(
+        create_harness_tools(
+            root,
+            lsp_manager=getattr(plugin_runtime, "lsp", None),
+        )
+    )
+    if capability_view is not None:
+        all_tools = [
+            tool for tool in all_tools if capability_view.allows_tool(tool.name)
+        ]
+
     subagents: list[dict[str, Any]] | None = None
     workspace_guard: WorkspaceBoundaryMiddleware | None = None
     if not sandboxed:
@@ -515,13 +735,36 @@ def create_harness_agent(
         workspace_guard = WorkspaceBoundaryMiddleware(local_workspace)
         agent_middleware.append(workspace_guard)
         subagents = _create_default_subagents(
-            workspace=local_workspace, approval_mode=approval_mode
+            workspace=local_workspace,
+            approval_mode=approval_mode,
+            capability_view=capability_view,
         )
     elif approval_mode == "plan":
         # 远端 backend 同样需要计划模式守卫；其余模式由 provider 和 HITL 处理。
         subagents = _create_default_subagents(
-            workspace=None, approval_mode=approval_mode
+            workspace=None,
+            approval_mode=approval_mode,
+            capability_view=capability_view,
         )
+    if (
+        execution_registry is not None
+        and capability_view is not None
+        and capability_view.allows_tool("task")
+    ):
+        subagents, delegation_middleware = _create_controlled_inline_subagents(
+            model=resolved_model,
+            backend=backend,
+            tools=all_tools,
+            workspace=None if sandboxed else local_workspace,
+            approval_mode=approval_mode,
+            capability_view=capability_view,
+            execution_registry=execution_registry,
+            model_view=delegation_model,
+            managed_targets=delegation_targets,
+            concurrency_lock=concurrency_lock,
+            plugin_middleware=getattr(plugin_runtime, "middleware", None),
+        )
+        agent_middleware.append(delegation_middleware)
 
     # 5. HITL（interrupt_on）。计划模式和 YOLO 不创建 HITL；前者由白名单
     # 中间件硬拒绝，后者仅关闭 Harness 人工确认而不影响其他硬性策略。
@@ -547,6 +790,8 @@ def create_harness_agent(
     # 前暂停，审批恢复后才会经过这里，因此锁不会跨用户等待持有。
     from harness_agent.policy.concurrency import AsyncRWLock
     from harness_agent.policy.concurrency_guard import ConcurrencyGuardMiddleware
+    if plugin_runtime is not None:
+        agent_middleware.append(plugin_runtime.middleware)
     agent_middleware.append(ConcurrencyGuardMiddleware(concurrency_lock or AsyncRWLock()))
 
     # 6. 预算中间件在模型调用前管理工具结果和摘要；不暴露模型可调用压缩工具。

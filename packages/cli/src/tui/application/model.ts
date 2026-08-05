@@ -1,6 +1,6 @@
 /** TUI 运行时展示模型：集中处理握手摘要、终端降级和格式化。 */
 
-import type { InitializeResult } from "@za38/protocol"
+import type { AgentCommand, InitializeResult } from "@za38/protocol"
 
 export const CLI_VERSION = "0.1.0"
 
@@ -25,6 +25,8 @@ export type TuiRuntime = {
   approvalModeWarning?: string
   /** initialize 协商后的能力；缺省仅用于兼容未更新的测试运行时。 */
   capabilities?: readonly string[]
+  /** Host 启动快照中的 Plugin Command；只含展示信息和 requested Skill ID。 */
+  agentCommands?: readonly AgentCommand[]
   mcpSummary?: string
 }
 
@@ -50,6 +52,7 @@ export function createTuiRuntime(
     approvalMode: approvalMode(security?.approval_mode),
     approvalModeWarning: optionalString(security?.approval_mode_warning),
     capabilities: [...new Set(result.capabilities.enabled)],
+    agentCommands: [...result.agent_commands],
     mcpSummary: mcpServers && mcpServers.length > 0 ? `${mcpServers.length} 个服务器` : undefined,
   }
 }

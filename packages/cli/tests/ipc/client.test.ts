@@ -120,6 +120,102 @@ test("Peer 通过受控配置接口传递详情、预览和 CAS 提交参数", a
   ])
 })
 
+test("Peer 通过类型化 Plugin 接口传递来源、trust 指纹和 data 删除选择", async () => {
+  const { client, stdin, stdout } = peer()
+  const requests: any[] = []
+  stdin.on("data", data => {
+    const message = JSON.parse(data.toString())
+    requests.push(message)
+    stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {} }) + "\n")
+  })
+
+  await client.listPlugins()
+  await client.inspectPlugin("local-source/review")
+  await client.validatePlugin("./review.zip", "claude-code")
+  await client.installPlugin("./review.zip")
+  await client.setPluginEnabled("local-source/review", true, "a".repeat(64))
+  await client.removePlugin("local-source/review", true)
+
+  expect(requests.map(request => [request.method, request.params])).toEqual([
+    ["plugins.list", { include_disabled: true }],
+    ["plugins.inspect", { id: "local-source/review" }],
+    ["plugins.validate", { source: "./review.zip", format: "claude-code" }],
+    ["plugins.install", { source: "./review.zip", format: "auto" }],
+    ["plugins.set_enabled", {
+      id: "local-source/review",
+      enabled: true,
+      capability_fingerprint: "a".repeat(64),
+    }],
+    ["plugins.remove", { id: "local-source/review", purge_data: true }],
+  ])
+})
+
+test("Peer 通过类型化 Agent 与 Team 接口传递受控目录和运行参数", async () => {
+  const { client, stdin, stdout } = peer()
+  const requests: any[] = []
+  stdin.on("data", data => {
+    const message = JSON.parse(data.toString())
+    requests.push(message)
+    const result: Record<string, unknown> = {
+      "agents.list": { snapshot_id: "snapshot", agents: [], diagnostics: [] },
+      "agents.inspect": {
+        id: "lead", description: null, purpose: "lead", model_profile_id: "fast",
+        execution_policy_id: "read", requested_skills: [], requested_mcp_servers: [],
+        max_turns: null, source: "plugin:test", fingerprint: "fingerprint",
+      },
+      "teams.list": { teams: [], diagnostics: [] },
+      "teams.inspect": {},
+      "teams.generate": {
+        id: "review", description: null, max_parallelism: 2,
+        failure_policy: "continue-to-synthesis", tasks: [{
+          id: "worker", agent_id: "worker", depends_on: [], access: "read", timeout_seconds: 300,
+        }],
+      },
+      "teams.run": { team_id: "review", run_id: "run-1", accepted: true },
+      "teams.cancel": { run_id: "run-1", cancelled: true },
+    }[message.method] as Record<string, unknown>
+    stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }) + "\n")
+  })
+
+  await client.listAgents()
+  await client.inspectAgent("lead")
+  await client.listTeams()
+  await client.inspectTeam("run", "run-1")
+  await client.generateTeam({
+    id: "review",
+    lead_agent_id: "lead",
+    worker_agent_ids: ["worker"],
+    max_parallelism: 2,
+  })
+  await client.runTeam({
+    team_id: "review",
+    request: "检查变更",
+    thread_id: "thread-1",
+    run_id: "run-1",
+  })
+  await client.cancelTeam("run-1")
+
+  expect(requests.map(request => [request.method, request.params])).toEqual([
+    ["agents.list", {}],
+    ["agents.inspect", { id: "lead" }],
+    ["teams.list", {}],
+    ["teams.inspect", { kind: "run", id: "run-1" }],
+    ["teams.generate", {
+      id: "review",
+      lead_agent_id: "lead",
+      worker_agent_ids: ["worker"],
+      max_parallelism: 2,
+    }],
+    ["teams.run", {
+      team_id: "review",
+      request: "检查变更",
+      thread_id: "thread-1",
+      run_id: "run-1",
+    }],
+    ["teams.cancel", { run_id: "run-1" }],
+  ])
+})
+
 test("Peer 处理半帧、多帧和统一 event", async () => {
   const { client, stdout } = peer()
   const events: any[] = []

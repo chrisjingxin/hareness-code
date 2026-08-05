@@ -1,0 +1,14 @@
+id: demo-test-reviewer
+description: 只读分析测试布局与验证缺口
+purpose: 为 Demo Team 提供可执行的测试验证建议
+instructions: ../instructions/demo-test-reviewer.md
+model:
+  strategy: inherit
+policy: demo-readonly
+skills: [project-health]
+mcpServers: [demo-tools]
+limits:
+  maxTurns: 6
+successCriteria:
+  - 找到真实测试入口
+  - 不修改工作区

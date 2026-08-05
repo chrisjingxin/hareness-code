@@ -30,6 +30,11 @@ def _initialize_params(**overrides: Any) -> dict[str, Any]:
             "mcp.manage",
             "config.write",
             "skills.manage",
+            "plugins.read",
+            "plugins.manage",
+            "agents.read",
+            "teams.read",
+            "teams.manage",
             "interactive.approval",
             "interactive.question",
         ],
@@ -91,6 +96,194 @@ async def test_initialize_negotiates_v3_and_capabilities(tmp_path: Path):
     assert "run.multithread" in result["capabilities"]["enabled"]
     assert result["limits"]["max_frame_bytes"] == 8 * 1024 * 1024
     assert result["config_summary"]["security"]["mode"] == "local"
+
+
+async def test_agent_and_team_control_plane_uses_fixed_catalog(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """Agent/Team RPC 只展示脱敏目录，并能生成不可由客户端篡改的固定 DAG。"""
+    from harness_agent.runtime.agent_catalog import PluginAgentSource
+    from harness_agent.host.agent_host import AgentHost
+
+    home = tmp_path / "home"
+    config_path = home / ".harness" / "config.toml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        '''[config]
+version = 1
+
+[models]
+default_profile = "fast"
+
+[models.profiles.fast]
+model = "test-model"
+base_url = "https://gateway.example/v1"
+api_key_env = "HARNESS_AGENT_TEAM_TEST_KEY"
+''',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HARNESS_AGENT_TEAM_TEST_KEY", "test-only")
+    plugin = tmp_path / "plugin"
+    (plugin / "agents").mkdir(parents=True)
+    (plugin / "policies").mkdir()
+    (plugin / "policies" / "read.json").write_text(
+        json.dumps(
+            {
+                "id": "read",
+                "tools": {"allow": ["read_file"]},
+                "delegation": {"enabled": False},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (plugin / "agents" / "instructions.md").write_text(
+        "只返回结构化结论。",
+        encoding="utf-8",
+    )
+    agent_files: list[Path] = []
+    for agent_id in ("lead", "worker-a", "worker-b"):
+        path = plugin / "agents" / f"{agent_id}.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "id": agent_id,
+                    "purpose": f"{agent_id} purpose",
+                    "instructions": "instructions.md",
+                    "model": {"strategy": "profile", "profile": "fast"},
+                    "policy": "read",
+                }
+            ),
+            encoding="utf-8",
+        )
+        agent_files.append(path)
+
+    server = AgentHost(config_home=home, workspace=tmp_path / "workspace")
+    frames = await _capture_server(server)
+    server._plugin_agent_sources = (
+        PluginAgentSource(
+            "test-plugin",
+            plugin,
+            agent_files=tuple(agent_files),
+            policy_files=(plugin / "policies" / "read.json",),
+        ),
+    )
+    server._agent_catalog = None
+
+    await server.dispatch(_request("agents.list", {}, "agents-list"))
+    agents = frames[-1]["result"]
+    assert [agent["id"] for agent in agents["agents"]] == ["lead", "worker-a", "worker-b"]
+    assert str(tmp_path) not in str(agents)
+
+    await server.dispatch(
+        _request(
+            "teams.generate",
+            {
+                "id": "review-team",
+                "lead_agent_id": "lead",
+                "worker_agent_ids": ["worker-a", "worker-b"],
+                "max_parallelism": 2,
+            },
+            "teams-generate",
+        )
+    )
+    generated = frames[-1]["result"]
+    assert generated["id"] == "review-team"
+    assert [task["id"] for task in generated["tasks"]] == [
+        "worker-a",
+        "worker-b",
+        "synthesis",
+    ]
+
+    await server.dispatch(_request("teams.list", {}, "teams-list"))
+    assert [team["id"] for team in frames[-1]["result"]["teams"]] == ["review-team"]
+    await server.dispatch(
+        _request(
+            "teams.inspect",
+            {"kind": "definition", "id": "review-team"},
+            "teams-inspect",
+        )
+    )
+    assert frames[-1]["result"] == generated
+
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from harness_agent.runtime.agent_catalog import DelegationPolicy
+    from harness_agent.runtime.agent_delegation import DelegationTarget
+    from harness_agent.runtime.execution_binding import ExecutionMode
+
+    async def member_runner(command: Any) -> dict[str, object]:
+        return {"agent": command.target_agent_id, "task": command.task}
+
+    targets = tuple(
+        DelegationTarget(
+            agent_id=agent_id,
+            mode=ExecutionMode.MANAGED,
+            runner=member_runner,
+            engine_profile_key=f"profile-{agent_id}",
+        )
+        for agent_id in ("lead", "worker-a", "worker-b")
+    )
+    parent_spec = SimpleNamespace(
+        effective_policy=SimpleNamespace(
+            delegation=DelegationPolicy(
+                enabled=True,
+                allowed_agents=("lead", "worker-a", "worker-b"),
+                max_depth=1,
+                max_parallelism=2,
+            ),
+            fingerprint="parent-policy",
+        ),
+        model_view=None,
+        runtime_profile=SimpleNamespace(profile_key="parent-profile"),
+    )
+    monkeypatch.setattr(
+        server,
+        "_resolve_execution_binding",
+        AsyncMock(return_value=object()),
+    )
+    monkeypatch.setattr(
+        server,
+        "_resolve_agent_engine_spec",
+        AsyncMock(return_value=parent_spec),
+    )
+    monkeypatch.setattr(
+        server,
+        "_plugin_delegation_targets",
+        AsyncMock(return_value=targets),
+    )
+    await server.dispatch(
+        _request(
+            "teams.run",
+            {
+                "team_id": "review-team",
+                "request": "检查当前变更",
+                "thread_id": "thread-team",
+                "run_id": "team-run-1",
+            },
+            "teams-run",
+        )
+    )
+    assert frames[-1]["result"] == {
+        "team_id": "review-team",
+        "run_id": "team-run-1",
+        "accepted": True,
+    }
+    for _ in range(100):
+        if "team-run-1" not in server._active_team_tasks:
+            break
+        await asyncio.sleep(0.01)
+    await server.dispatch(
+        _request(
+            "teams.inspect",
+            {"kind": "run", "id": "team-run-1"},
+            "teams-run-inspect",
+        )
+    )
+    assert frames[-1]["result"]["status"] == "completed"
+    assert frames[-1]["result"]["terminal_count"] == 1
+    await server.close()
 
 
 async def test_initialize_rejects_incompatible_major_and_pre_initialize_calls():
@@ -744,7 +937,7 @@ async def test_default_sidecar_shares_engine_by_profile_without_draining_other_m
 async def test_skill_catalog_refresh_reuses_unchanged_snapshot_and_drains_only_old_profiles(
     tmp_path: Path,
 ):
-    """Skill catalog 变化经 ZC-095 seam 只排空旧 Skill Profile。"""
+    """Skill catalog 变化经 ZC-095 seam 排空旧 catalog 下的全部 Skill Profile。"""
     from types import SimpleNamespace
 
     from harness_agent.runtime.agent_spec import skill_catalog_fingerprint
@@ -788,8 +981,11 @@ async def test_skill_catalog_refresh_reuses_unchanged_snapshot_and_drains_only_o
     assert len(pool.calls) == 1
     predicate, reason = pool.calls[0]
     assert reason == "skill_catalog_changed"
+    # Profile fingerprint also contains the policy-derived view; the catalog
+    # boundary cannot reconstruct that view from the new registry, so every
+    # profile from the previous snapshot must be retired.
     assert predicate(SimpleNamespace(skill_catalog_fingerprint=skill_catalog_fingerprint(old)))
-    assert not predicate(SimpleNamespace(skill_catalog_fingerprint=skill_catalog_fingerprint(new)))
+    assert predicate(SimpleNamespace(skill_catalog_fingerprint=skill_catalog_fingerprint(new)))
 
     server._agent_engine_pool = None
     await server.close()
@@ -952,7 +1148,9 @@ async def test_skill_text_only_changes_skill_prompt_not_tools_or_effective_polic
         assert second_spec.effective_policy.filesystem_write is None
         assert second_spec.effective_policy.shell is None
         assert second_spec.effective_policy.network is None
-        assert second_spec.effective_policy.delegation is None
+        assert second_spec.effective_policy.delegation == first_spec.effective_policy.delegation
+        assert second_spec.effective_policy.delegation is not None
+        assert second_spec.effective_policy.delegation.enabled is True
         assert second_profile.tool_catalog_fingerprint == first_profile.tool_catalog_fingerprint
         assert second_profile.policy_fingerprint == first_profile.policy_fingerprint
         assert second_profile.sandbox_config_fingerprint == first_profile.sandbox_config_fingerprint
@@ -1114,6 +1312,8 @@ async def test_default_engine_builder_passes_one_host_lock_to_each_profile(
     import harness_agent.extensions.providers.harness_gateway as gateway_module
     from harness_agent.extensions.mcp import McpConnectionManager, build_mcp_snapshot
     from harness_agent.host.agent_host import AgentHost
+    from harness_agent.runtime.agent_spec import skill_catalog_fingerprint
+    from harness_agent.runtime.agent_engine_profile import component_fingerprint
 
     captured_locks: list[object] = []
     monkeypatch.setattr(
@@ -1151,12 +1351,19 @@ async def test_default_engine_builder_passes_one_host_lock_to_each_profile(
         return SimpleNamespace(checkpointer=object())
 
     mcp_snapshot = build_mcp_snapshot([], revision="test")
+    skill_registry = SimpleNamespace(snapshot_id="skill-snapshot")
 
     def profile(profile_key: str) -> SimpleNamespace:
+        view_fingerprint = component_fingerprint({"view": profile_key})
         return SimpleNamespace(
             profile_key=profile_key,
             mcp_config_fingerprint=mcp_snapshot.digest,
             sandbox_config_fingerprint="sandbox",
+            skill_catalog_fingerprint=skill_catalog_fingerprint(
+                skill_registry,
+                view_fingerprint=view_fingerprint,
+            ),
+            skill_view_fingerprint=view_fingerprint,
         )
 
     def spec(runtime_profile: SimpleNamespace) -> SimpleNamespace:
@@ -1166,13 +1373,16 @@ async def test_default_engine_builder_passes_one_host_lock_to_each_profile(
             execution=SimpleNamespace(approval_mode="yolo"),
             workspace=tmp_path,
             model_settings=SimpleNamespace(context_window_tokens=128_000),
+            model_view=None,
             tools=(),
             interactive=False,
             enable_ask_user=False,
             enable_memory=False,
             enable_skills=False,
             effective_policy=SimpleNamespace(approval_mode=None),
-            skill_registry=object(),
+            capability_view=object(),
+            skill_registry=skill_registry,
+            skill_view_fingerprint=runtime_profile.skill_view_fingerprint,
             pinned=False,
         )
 
@@ -2189,6 +2399,231 @@ async def test_agent_host_closes_engines_before_shared_resource_owners(tmp_path:
     assert order == ["run", "engine", "mcp", "workspace", "provider", "persistence"]
 
 
+async def test_plugin_rpc_validates_installs_trusts_and_removes_local_package(
+    tmp_path: Path,
+) -> None:
+    """Plugin RPC 贯通安全校验、disabled 安装、指纹启用和默认保留 data 的删除。"""
+    from harness_agent.host.agent_host import AgentHost
+
+    workspace = tmp_path / "workspace"
+    source = workspace / "plugin"
+    source.mkdir(parents=True)
+    (source / "plugin.json").write_text(
+        json.dumps(
+            {
+                "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+                "name": "rpc-plugin",
+                "version": "1.0.0",
+            }
+        ),
+        encoding="utf-8",
+    )
+    skill = source / "skills" / "review" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\nname: review\ndescription: Review code\n---\n\nReview code.\n",
+        encoding="utf-8",
+    )
+    server = AgentHost(
+        allow_echo=True,
+        config_home=tmp_path / "home",
+        workspace=workspace,
+    )
+    frames = await _capture_server(server)
+
+    await server.dispatch(
+        _request(
+            "plugins.validate",
+            {"source": "plugin", "format": "auto"},
+            "plugin-validate",
+        )
+    )
+    assert frames[-1]["result"]["plugin"]["name"] == "rpc-plugin"
+
+    await server.dispatch(
+        _request("plugins.install", {"source": "plugin"}, "plugin-install")
+    )
+    installed = frames[-1]["result"]["plugin"]
+    assert installed["enabled"] is False
+    plugin_id = installed["id"]
+    fingerprint = installed["capability_fingerprint"]
+
+    await server.dispatch(
+        _request(
+            "plugins.set_enabled",
+            {
+                "id": plugin_id,
+                "enabled": True,
+                "capability_fingerprint": "0" * 64,
+            },
+            "plugin-enable-bad",
+        )
+    )
+    assert frames[-1]["error"]["code"] == -32040
+    assert (
+        frames[-1]["error"]["data"]["code"]
+        == "PLUGIN_CAPABILITY_CONFIRMATION_REQUIRED"
+    )
+
+    await server.dispatch(
+        _request(
+            "plugins.set_enabled",
+            {
+                "id": plugin_id,
+                "enabled": True,
+                "capability_fingerprint": fingerprint,
+            },
+            "plugin-enable",
+        )
+    )
+    assert frames[-1]["result"]["plugin"]["trusted"] is True
+
+    await server.dispatch(
+        _request("plugins.list", {}, "plugin-list")
+    )
+    serialized = json.dumps(frames[-1]["result"])
+    assert str(workspace) not in serialized
+    assert str(tmp_path / "home") not in serialized
+    assert frames[-1]["result"]["catalog"]["count"] == 1
+
+    await server.dispatch(
+        _request("plugins.remove", {"id": plugin_id}, "plugin-remove")
+    )
+    assert frames[-1]["result"]["removed"] is True
+    assert frames[-1]["result"]["data_retained"] is True
+
+
+async def test_host_startup_uses_one_enabled_plugin_snapshot_for_skill_and_mcp(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """Host 重启后从同一 enabled catalog 装配 Plugin Skill 与 MCP。"""
+    from harness_agent.extensions.mcp import McpConnectionManager
+    from harness_agent.plugins.manager import PluginManager
+    from harness_agent.host.agent_host import AgentHost
+
+    async def skip_external_connections(self: McpConnectionManager) -> None:
+        """测试只验证装配快照，不启动真实 Plugin 子进程。"""
+        self._connected = True
+
+    monkeypatch.setattr(McpConnectionManager, "connect_all", skip_external_connections)
+    workspace = tmp_path / "workspace"
+    source = tmp_path / "startup-plugin"
+    source.mkdir()
+    (source / "plugin.json").write_text(
+        json.dumps(
+            {
+                "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+                "name": "startup-plugin",
+                "version": "1.0.0",
+            }
+        ),
+        encoding="utf-8",
+    )
+    skill = source / "skills" / "review" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\nname: review\ndescription: Review from plugin\n---\nReview.\n",
+        encoding="utf-8",
+    )
+    command = source / "commands" / "audit.md"
+    command.parent.mkdir()
+    command.write_text(
+        "---\ndescription: Audit from plugin\n---\nAudit the requested files.\n",
+        encoding="utf-8",
+    )
+    plugin_manifest = json.loads((source / "plugin.json").read_text(encoding="utf-8"))
+    plugin_manifest["extensions"] = {
+        "com.za38.harness": {
+            "schemaVersion": "1.0.0",
+            "commands": "./commands",
+        }
+    }
+    (source / "plugin.json").write_text(json.dumps(plugin_manifest), encoding="utf-8")
+    executable = source / "bin" / "check"
+    executable.parent.mkdir()
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+    (source / "mcp.json").write_text(
+        json.dumps(
+            {
+                "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+                "mcpServers": {
+                    "check": {
+                        "type": "stdio",
+                        "command": "./bin/check",
+                        "args": [],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    home = tmp_path / "home"
+    manager = PluginManager(home=home)
+    installed = manager.install(source)["plugin"]
+    assert isinstance(installed, dict)
+    manager.set_enabled(
+        str(installed["id"]),
+        enabled=True,
+        capability_fingerprint=str(installed["capability_fingerprint"]),
+    )
+
+    server = AgentHost(allow_echo=True, config_home=home, workspace=workspace)
+    frames = await _capture_server(server)
+    task = server._mcp_connect_task
+    assert task is not None
+    await task
+    plugin_id = manager.catalog().plugins[0].plugin_id
+    assert frames[0]["result"]["skills_snapshot"]["count"] >= 1
+    assert server._skill_registry is not None
+    assert server._skill_registry.resolve(f"plugin/{plugin_id}/review")
+    assert frames[0]["result"]["agent_commands"] == [
+        {
+            "id": f"plugin/{plugin_id}/command/audit",
+            "name": f"plugin:{plugin_id.replace('/', ':')}:audit",
+            "description": "Audit from plugin",
+            "argument_hint": None,
+            "requested_skill_id": f"plugin/{plugin_id}/command/audit",
+            "plugin_id": plugin_id,
+        }
+    ]
+    assert server._plugin_catalog_snapshot is not None
+    assert server._mcp_snapshot is not None
+    assert server._mcp_snapshot.revision != server._plugin_catalog_snapshot.snapshot_id
+    plugin_servers = [
+        item for item in server._mcp_snapshot.servers if item.source == f"plugin:{plugin_id}"
+    ]
+    assert len(plugin_servers) == 1
+    assert plugin_servers[0].source_fingerprint == manager.catalog().plugins[0].package_digest
+    await server.close()
+
+
+async def test_plugin_manage_rpc_requires_negotiated_capability(tmp_path: Path) -> None:
+    """只协商 plugins.read 的连接不能安装或改变 Plugin registry。"""
+    from harness_agent.host.agent_host import AgentHost
+
+    server = AgentHost(
+        allow_echo=True,
+        config_home=tmp_path / "home",
+        workspace=tmp_path,
+    )
+    frames: list[dict[str, Any]] = []
+    server.send = lambda message: _append(frames, message)  # type: ignore[method-assign]
+    await server.dispatch(
+        _request(
+            "initialize",
+            _initialize_params(capabilities=["plugins.read"]),
+            "init-plugin-read",
+        )
+    )
+    await server.dispatch(
+        _request("plugins.install", {"source": "missing"}, "plugin-install-denied")
+    )
+    assert frames[-1]["error"]["code"] == -32002
+    assert frames[-1]["error"]["data"]["capability"] == "plugins.manage"
+
+
 async def test_mcp_status_no_config(tmp_path: Path):
     """未配置 MCP 服务器时 mcp.status 返回空列表和零工具数。"""
     from harness_agent.host.agent_host import AgentHost
@@ -2196,6 +2631,56 @@ async def test_mcp_status_no_config(tmp_path: Path):
     server = AgentHost(allow_echo=True, config_home=tmp_path / "home")
     frames = await _capture_server(server)
     await server.dispatch(_request("mcp.status", {}, "mcp-status"))
+    assert frames[-1]["result"] == {"servers": [], "total_tools": 0}
+
+
+async def test_mcp_status_accepts_plugin_source_and_keeps_transport_alive(tmp_path: Path):
+    """Plugin MCP 状态包含来源时仍通过协议校验，后续请求不应关闭 sidecar。"""
+    from types import SimpleNamespace
+
+    from harness_agent.host.agent_host import AgentHost
+
+    server = AgentHost(allow_echo=True, config_home=tmp_path / "home")
+    frames = await _capture_server(server)
+    if server._mcp_connect_task is not None:
+        await server._mcp_connect_task
+        server._mcp_connect_task = None
+    server._mcp_manager = SimpleNamespace(
+        get_server_statuses=lambda: [
+            {
+                "name": "demo-tools",
+                "transport": "stdio",
+                "source": "plugin:demo/full-demo",
+                "status": "connected",
+                "tool_names": ["demo-tools_inventory"],
+            }
+        ]
+    )
+
+    await server.dispatch(_request("mcp.status", {}, "mcp-status-source"))
+    assert frames[-1]["result"]["servers"][0]["source"] == "plugin:demo/full-demo"
+
+    await server.dispatch(_request("mcp.status", {}, "mcp-status-after-source"))
+    assert frames[-1]["result"]["total_tools"] == 1
+
+
+async def test_invalid_handler_result_returns_error_without_closing_dispatch_loop(tmp_path: Path):
+    """内部 handler 返回畸形结果时应回错误帧，而不是让 sidecar 进程退出。"""
+    from harness_agent.host.agent_host import AgentHost
+
+    server = AgentHost(allow_echo=True, config_home=tmp_path / "home")
+    frames = await _capture_server(server)
+    original = server._handlers["mcp.status"]
+
+    async def invalid_handler(_params: dict[str, Any], _request_id: str) -> dict[str, Any]:
+        return {"servers": [], "total_tools": 0, "unexpected": True}
+
+    server._handlers["mcp.status"] = invalid_handler
+    await server.dispatch(_request("mcp.status", {}, "mcp-status-invalid"))
+    assert frames[-1]["error"]["code"] == -32603
+
+    server._handlers["mcp.status"] = original
+    await server.dispatch(_request("mcp.status", {}, "mcp-status-after-invalid"))
     assert frames[-1]["result"] == {"servers": [], "total_tools": 0}
 
 
@@ -2227,7 +2712,7 @@ async def test_mcp_add_stdio(tmp_path: Path):
     ):
         mock_instance = MockManager.return_value
         mock_instance.connect_all = AsyncMock()
-        mock_instance.apply_snapshot = AsyncMock(return_value=[fake_status])
+        mock_instance.get_server_statuses.return_value = [fake_status]
         server = AgentHost(allow_echo=True, config_home=config_home)
         frames = await _capture_server(server)
         await server.dispatch(

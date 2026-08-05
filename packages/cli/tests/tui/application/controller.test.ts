@@ -26,6 +26,7 @@ const runtime: TuiRuntime = {
     Capability.CONFIG_WRITE,
     Capability.MCP_READ,
     Capability.MCP_MANAGE,
+    Capability.SKILLS_READ,
   ],
 }
 
@@ -293,18 +294,58 @@ test("Controller 接收 Agent event 后更新 reducer，并在终态清理 Inter
   }
 })
 
+test("Controller 使用 initialize 的 Plugin Command 快照发起 requested Skill Run", async () => {
+  const agentCommand = {
+    id: "plugin/local-source/review-tools/command/audit",
+    name: "plugin:local-source:review-tools:audit",
+    description: "审计指定文件",
+    argument_hint: "<paths>",
+    requested_skill_id: "plugin/local-source/review-tools/command/audit",
+    plugin_id: "local-source/review-tools",
+  }
+  const harness = await createHarness({ agentCommands: [agentCommand] })
+  try {
+    await harness.controller.dispatch({
+      type: "submit",
+      value: "/plugin:local-source:review-tools:audit src/auth.ts --strict",
+    })
+    expect(harness.runRequests.at(-1)).toMatchObject({
+      message: "src/auth.ts --strict",
+      requestedSkill: {
+        id: agentCommand.requested_skill_id,
+        args: "src/auth.ts --strict",
+      },
+    })
+  } finally {
+    await harness.cleanup()
+  }
+})
+
 type Harness = {
   controller: TuiController
   calls: string[]
-  runRequests: Array<{ threadId: string; runId: string; modelSelection?: { primary_profile: string } }>
   releaseCompact: () => void
+  runRequests: Array<{
+    threadId: string
+    runId: string
+    message: string
+    requestedSkill?: { id: string; args?: string }
+    modelSelection?: { primary_profile: string }
+  }>
   releaseConfigDetails: () => void
   emit: (event: EventEnvelope) => void
   sendInteraction: (request: InteractionRequestEnvelope) => Promise<unknown>
   cleanup: () => Promise<void>
 }
 
-async function createHarness(options: { configError?: boolean; cancelled?: boolean; holdConfigDetails?: boolean; holdCompact?: boolean; compactError?: boolean } = {}): Promise<Harness> {
+async function createHarness(options: {
+  configError?: boolean
+  cancelled?: boolean
+  holdConfigDetails?: boolean
+  holdCompact?: boolean
+  compactError?: boolean
+  agentCommands?: TuiRuntime["agentCommands"]
+} = {}): Promise<Harness> {
   const calls: string[] = []
   const runRequests: Harness["runRequests"] = []
   const listeners = new Map<string, Set<(...args: any[]) => void>>()
@@ -391,10 +432,21 @@ async function createHarness(options: { configError?: boolean; cancelled?: boole
       calls.push("run.cancel")
       return Promise.resolve({ cancelled: options.cancelled ?? true, run_id: runRequests.at(-1)?.runId ?? "" })
     },
-    startRun(input: { message: string; threadId?: string; modelSelection?: { primary_profile: string } }) {
+    startRun(input: {
+      message: string
+      threadId?: string
+      requestedSkill?: { id: string; args?: string }
+      modelSelection?: { primary_profile: string }
+    }) {
       const threadId = input.threadId ?? `thread-${runNumber + 1}`
       const runId = `run-${++runNumber}`
-      runRequests.push({ threadId, runId, modelSelection: input.modelSelection })
+      runRequests.push({
+        threadId,
+        runId,
+        message: input.message,
+        requestedSkill: input.requestedSkill,
+        modelSelection: input.modelSelection,
+      })
       return {
         ref: { threadId, runId },
         accepted: Promise.resolve(),
@@ -408,7 +460,7 @@ async function createHarness(options: { configError?: boolean; cancelled?: boole
   const historyFile = join(tmpdir(), `za38-controller-${crypto.randomUUID()}.jsonl`)
   const controller = createTuiController({
     client,
-    runtime,
+    runtime: { ...runtime, agentCommands: options.agentCommands },
     promptHistoryFile: historyFile,
     onRequestExit: () => undefined,
   })

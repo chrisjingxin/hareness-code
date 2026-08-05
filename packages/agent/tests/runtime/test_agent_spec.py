@@ -20,6 +20,18 @@ from harness_agent.runtime.agent_spec import (
 )
 from harness_agent.policy.approval_mode import DEFAULT_APPROVAL_MODE
 from harness_agent.config.config import ExecutionSettings, ModelProfile, ModelSettings
+from harness_agent.runtime.agent_catalog import AgentCatalog, PluginAgentSource
+from harness_agent.runtime.agent_spec import (
+    resolve_builtin_main_agent_spec,
+    resolve_plugin_agent_spec,
+)
+from harness_agent.policy.approval_mode import DEFAULT_APPROVAL_MODE
+from harness_agent.config.config import (
+    ExecutionSettings,
+    ModelCatalog,
+    ModelProfile,
+    ModelSettings,
+)
 from harness_agent.runtime.execution_binding import (
     ResolvedExecutionBinding,
     SafeModelProfile,
@@ -72,9 +84,14 @@ def test_same_resolved_agent_spec_reuses_key_but_static_behavior_changes_do_not(
     changed_model = _spec(tmp_path, model_name="pro-model")
     assert changed_model.runtime_profile.profile_key != first.runtime_profile.profile_key
 
+    stricter_policy = replace(first.effective_policy, approval_mode="always")
     changed_policy = replace(
         first,
-        effective_policy=replace(first.effective_policy, approval_mode="always"),
+        effective_policy=stricter_policy,
+        capability_view=replace(
+            first.capability_view,
+            policy_fingerprint=stricter_policy.fingerprint,
+        ),
     )
     assert changed_policy.runtime_profile.profile_key != first.runtime_profile.profile_key
 
@@ -235,3 +252,96 @@ async def test_legacy_profile_cannot_be_persisted(tmp_path: Path) -> None:
             await store.persist_agent_engine_profile(legacy)
     finally:
         await store.close()
+
+
+def test_plugin_spec_only_exposes_declared_skill_and_mcp_subsets(
+    tmp_path: Path,
+) -> None:
+    """Plugin Agent 未声明的 Skill/MCP 不得从父 Agent 能力中继承。"""
+    root = tmp_path / "plugin"
+    policy = root / "policies" / "review.yaml"
+    policy.parent.mkdir(parents=True)
+    policy.write_text(
+        "id: review\n"
+        "tools:\n"
+        "  allow: [read_file, plugin__local__portable__repo_index_search]\n"
+        "filesystem:\n"
+        "  read: ['**/*']\n"
+        "  write: []\n",
+        encoding="utf-8",
+    )
+    agent = root / "agents" / "reviewer.yaml"
+    agent.parent.mkdir()
+    agent.write_text(
+        "id: reviewer\n"
+        "description: Review\n"
+        "instructions: reviewer.md\n"
+        "model: {strategy: inherit}\n"
+        "policy: review\n"
+        "mcpServers: [repo-index]\n",
+        encoding="utf-8",
+    )
+    (agent.parent / "reviewer.md").write_text("Review safely.", encoding="utf-8")
+    models = ModelCatalog(
+        default_profile="fast",
+        profiles={"fast": _binding().primary_profile},
+        role_profiles={},
+    )
+    catalog = AgentCatalog(
+        model_catalog=models,
+        sources=(
+            PluginAgentSource(
+                "portable",
+                root,
+                format="agent-plugins-1.0",
+                agent_files=(agent,),
+                policy_files=(policy,),
+            ),
+        ),
+    )
+    parent = _spec(tmp_path)
+    requested_server = McpServerConfig(
+        name="plugin__local__portable__repo_index",
+        transport="stdio",
+        command="server",
+        source="plugin:local/portable",
+    )
+    user_server = McpServerConfig(
+        name="user_server",
+        transport="stdio",
+        command="server",
+        source="config",
+    )
+    mcp_snapshot = build_mcp_snapshot(
+        (requested_server, user_server),
+        revision="plugins",
+    )
+    requested_tool = {
+        "name": "plugin__local__portable__repo_index_search",
+        "parameters": {},
+    }
+    unrelated_tool = {"name": "user_server_search", "parameters": {}}
+
+    resolved = resolve_plugin_agent_spec(
+        definition=catalog.require_agent("reviewer"),
+        catalog=catalog,
+        parent_policy=parent.effective_policy,
+        model_catalog=models,
+        project_fingerprint=parent.project_fingerprint,
+        workspace=parent.workspace,
+        execution=parent.execution,
+        skill_registry=parent.skill_registry,
+        mcp_snapshot=mcp_snapshot,
+        mcp_tools=(requested_tool, unrelated_tool),
+        interactive=False,
+        inherited_model_profile_id=parent.model_profile_id,
+    )
+
+    assert resolved.capability_view.skill_ids == ()
+    assert resolved.capability_view.mcp_tool_names == (
+        "plugin__local__portable__repo_index_search",
+    )
+    assert resolved.tools == (requested_tool,)
+    assert [server.name for server in resolved.mcp_snapshot.servers] == [
+        requested_server.name
+    ]

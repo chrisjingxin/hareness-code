@@ -1,0 +1,10 @@
+{
+  "name": "harness-full-demo",
+  "version": "1.0.0",
+  "description": "Harness Code Claude Runtime 兼容能力演示",
+  "hooks": "./hooks/hooks.json",
+  "lspServers": "./.lsp.json",
+  "experimental": {
+    "monitors": "./monitors/monitors.json"
+  }
+}

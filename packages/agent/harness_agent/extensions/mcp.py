@@ -63,6 +63,10 @@ class McpServerConfig:
     url: str | None = None
     headers: Mapping[str, str] = field(default_factory=dict)
     timeout_seconds: float = DEFAULT_CONNECT_TIMEOUT_SECONDS
+    cwd: str | None = None
+    source: str = "config"
+    source_fingerprint: str | None = None
+    inherit_environment: bool = True
 
     def __post_init__(self) -> None:
         """冻结嵌套映射，避免快照建立后仍被调用方修改。"""
@@ -70,6 +74,10 @@ class McpServerConfig:
         object.__setattr__(self, "env", MappingProxyType(dict(self.env)))
         object.__setattr__(self, "headers", MappingProxyType(dict(self.headers)))
         object.__setattr__(self, "timeout_seconds", float(self.timeout_seconds))
+        if self.cwd is not None and not self.cwd.strip():
+            raise McpConfigError("MCP_CWD_INVALID", "MCP cwd 不能为空", field="mcp.servers.cwd")
+        if not self.source:
+            raise McpConfigError("MCP_SOURCE_INVALID", "MCP source 不能为空")
 
     @classmethod
     def from_mapping(cls, entry: Mapping[str, object]) -> "McpServerConfig":
@@ -235,7 +243,8 @@ def mcp_config_fingerprint(configs: list[McpServerConfig]) -> str:
 
     包含所有影响运行行为的非秘密字段：name、transport、command（stdio）、
     url（http/sse）、args、env 变量名列表（仅 key）、header 引用名列表（仅 key）、
-    timeout_seconds。不包含 env 变量值、header 值或任何 token/秘密。
+    timeout_seconds、来源、包内容指纹、cwd 与环境继承策略。不包含 env
+    变量值、header 值或任何 token/秘密。
     无配置时返回与 {"transport": "disabled"} 一致的固定值。
     """
     from harness_agent.runtime.agent_engine_profile import component_fingerprint
@@ -257,6 +266,10 @@ def _engine_identity_for_server(config: McpServerConfig) -> dict[str, object]:
         "env_keys": tuple(sorted(config.env)),
         "header_keys": tuple(sorted(config.headers)),
         "timeout_seconds": config.timeout_seconds,
+        "cwd": config.cwd,
+        "source": config.source,
+        "source_fingerprint": config.source_fingerprint,
+        "inherit_environment": config.inherit_environment,
     }
     if config.transport == "stdio":
         identity["command"] = config.command
@@ -366,8 +379,10 @@ class McpConnectionManager:
     将 MCP 工具转换为 LangChain BaseTool 供 Agent 使用。
     """
 
-    def __init__(self, snapshot: McpConfigSnapshot) -> None:
+    def __init__(self, snapshot: McpConfigSnapshot | Sequence[McpServerConfig]) -> None:
         """保存初始快照，并把每个连接快照置于 Host owner 之下。"""
+        if not isinstance(snapshot, McpConfigSnapshot):
+            snapshot = build_mcp_snapshot(snapshot, revision="legacy")
         self._resources: dict[str, list[SharedResourceHandle[_McpRuntime]]] = {}
         self._current_resource = self._create_resource(snapshot)
         self._resources[snapshot.digest] = [self._current_resource]
@@ -420,9 +435,11 @@ class McpConnectionManager:
             entry = dict(runtime.server_statuses.get(config.name, {
                 "name": config.name,
                 "transport": config.transport,
+                "source": config.source,
                 "status": "failed",
                 "error": "not connected",
             }))
+            entry.setdefault("source", config.source)
             # 按服务器名称前缀匹配归属工具
             prefix = f"{config.name}_"
             entry["tool_names"] = [
@@ -511,8 +528,10 @@ class McpConnectionManager:
             {
                 "name": config.name,
                 "transport": config.transport,
+                "source": config.source,
                 "status": "failed",
                 "error": "not connected",
+                "tool_names": [],
             },
         )
 
@@ -544,6 +563,7 @@ class McpConnectionManager:
             runtime.server_statuses[name] = {
                 "name": name,
                 "transport": old_runtime.server_statuses.get(name, {}).get("transport", "stdio"),
+                "source": old_runtime.server_statuses.get(name, {}).get("source", "config"),
                 "status": "removed",
                 "tool_names": [],
             }
@@ -598,6 +618,7 @@ class McpConnectionManager:
                 runtime.server_statuses[name] = {
                     "name": name,
                     "transport": next(c.transport for c in configs if c.name == name),
+                    "source": next(c.source for c in configs if c.name == name),
                     "status": "connected",
                 }
             logger.info(
@@ -612,6 +633,7 @@ class McpConnectionManager:
                 runtime.server_statuses[name] = {
                     "name": name,
                     "transport": next(c.transport for c in configs if c.name == name),
+                    "source": next(c.source for c in configs if c.name == name),
                     "status": "failed",
                     "error": "connection timed out",
                 }
@@ -623,6 +645,7 @@ class McpConnectionManager:
                 runtime.server_statuses[name] = {
                     "name": name,
                     "transport": next(c.transport for c in configs if c.name == name),
+                    "source": next(c.source for c in configs if c.name == name),
                     "status": "failed",
                     "error": str(exc),
                 }
@@ -659,6 +682,7 @@ class McpConnectionManager:
                 runtime.server_statuses[config.name] = {
                     "name": config.name,
                     "transport": config.transport,
+                    "source": config.source,
                     "status": "skipped",
                     "error": "environment variable(s) not set",
                 }
@@ -687,12 +711,29 @@ class McpConnectionManager:
                     )
                     return None
                 env[key] = expanded
-            return {
+            if config.inherit_environment:
+                process_env = env or None
+            else:
+                # Plugin MCP 不继承 API Key 等宿主环境；只保留命令查找和临时目录所需字段。
+                process_env = {
+                    key: value
+                    for key in ("PATH", "TMPDIR", "TEMP", "TMP", "SYSTEMROOT", "COMSPEC")
+                    if (value := os.environ.get(key))
+                }
+                process_env.update(env)
+            connection: dict[str, Any] = {
                 "transport": "stdio",
                 "command": command,
                 "args": args,
-                "env": env or None,
+                "env": process_env or None,
             }
+            if config.cwd is not None:
+                cwd = expand_env_vars(config.cwd)
+                if cwd is None:
+                    logger.warning("MCP server %r: missing env vars in cwd; skipping", config.name)
+                    return None
+                connection["cwd"] = cwd
+            return connection
 
         # http / sse
         url = expand_env_vars(config.url or "")

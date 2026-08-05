@@ -45,13 +45,22 @@ from harness_agent.config.config_change_service import (
     ManagedConfigPolicy,
 )
 from harness_agent.runtime.execution_binding import (
+    AgentExecutionBinding,
     ExecutionBindingError,
     ExecutionMode,
+    ExecutionRef,
+    ExecutionStatus,
     ResolvedExecutionBinding,
     RunExecutionBinding,
     ThreadExecutionSelection,
     describe_thread_binding,
     resolve_execution_binding,
+)
+from harness_agent.runtime.agent_catalog import (
+    AgentCatalog,
+    AgentCatalogError,
+    DelegationPolicy,
+    PluginAgentSource,
 )
 from harness_agent.protocol.generated import (
     MAX_FRAME_BYTES,
@@ -64,6 +73,7 @@ from harness_agent.protocol.generated import (
     OPERATION_CAPABILITIES,
     SERVER_CAPABILITIES,
     ApprovalResponse,
+    AgentsInspectParams,
     ContextCompactParams,
     ConfigCommitParams,
     ConfigDetailsParams,
@@ -73,9 +83,19 @@ from harness_agent.protocol.generated import (
     ModelsListParams,
     McpAddParams,
     McpRemoveParams,
+    PluginsInspectParams,
+    PluginsInstallParams,
+    PluginsListParams,
+    PluginsRemoveParams,
+    PluginsSetEnabledParams,
+    PluginsValidateParams,
     QuestionResponse,
     RunCancelParams,
     RunStartParams,
+    TeamsCancelParams,
+    TeamsGenerateParams,
+    TeamsInspectParams,
+    TeamsRunParams,
     ThreadsListParams,
     ThreadsOpenParams,
 )
@@ -85,12 +105,26 @@ from harness_agent.protocol.runtime import (
     validate_operation_result,
     validate_protocol_error_data,
 )
-from harness_agent.extensions.skills import LoadedSkill, SkillCatalogManager, SkillError, SkillRegistry
+from harness_agent.extensions.plugin_skills import (
+    LoadedSkill,
+    PluginSkillSource,
+    SkillError,
+    SkillRegistry,
+)
+from harness_agent.plugins import (
+    PluginError,
+    PluginManager,
+    PluginRuntimeCatalog,
+    PluginRuntimeManager,
+)
+from harness_agent.plugins.model import ExtensionCatalogSnapshot, catalog_snapshot_id
 from harness_agent.runtime.agent_spec import (
     ResolvedAgentSpec,
     resolve_builtin_main_agent_spec,
+    resolve_plugin_agent_spec,
     skill_catalog_fingerprint,
 )
+from harness_agent.extensions.skills import SkillCatalogManager, SkillError as CatalogSkillError
 from harness_agent.extensions.mcp import (
     McpConfigError,
     McpConfigSnapshot,
@@ -98,9 +132,12 @@ from harness_agent.extensions.mcp import (
     McpServerConfig,
     build_mcp_snapshot,
 )
-from harness_agent.runtime.run_context import RunContext
-from harness_agent.runtime.agent_engine_profile import (
-    AgentEngineProfile,
+from harness_agent.runtime.run_context import RunCancellationToken, RunContext
+from harness_agent.runtime.agent_engine_profile import AgentEngineProfile
+from harness_agent.runtime.resource_ownership import (
+    ResourceScope,
+    SharedResourceLease,
+    SharedResourceOwner,
 )
 from harness_agent.threads.context_lifecycle import ContextLifecycle, ContextRefreshError
 from harness_agent.threads.thread_persistence import ThreadPersistence, ThreadPersistenceError
@@ -118,6 +155,15 @@ from harness_agent.host.run_coordinator import (
     RequestedSkill,
     StartRun,
     _bounded_json,
+)
+from harness_agent.runtime.team_coordinator import (
+    TeamCoordinator,
+    TeamDefinition,
+    TeamError,
+    TeamRun,
+    TeamRunStatus,
+    TeamTaskState,
+    generate_fanout_team,
 )
 
 if TYPE_CHECKING:
@@ -146,6 +192,7 @@ class _AgentEngineArtifacts:
 
     execution_context: Any
     context_compactor: Any
+    mcp_lease: SharedResourceLease[McpConnectionManager] | None = None
 
 
 class _AgentEngineSnapshotReservation:
@@ -215,9 +262,31 @@ class AgentHost:
             self._workspace,
             home=self._config_home,
         )
+        self._skill_registry: SkillRegistry | None = None
+        self._skill_registry_source_signature: tuple[str, str] | None = None
+        self._plugin_manager = PluginManager(home=self._config_home)
+        self._plugin_catalog_snapshot: ExtensionCatalogSnapshot | None = None
+        self._plugin_skill_sources: tuple[PluginSkillSource, ...] = ()
+        self._plugin_agent_sources: tuple[PluginAgentSource, ...] = ()
+        self._plugin_team_definitions: tuple[TeamDefinition, ...] = ()
+        self._generated_team_definitions: dict[str, TeamDefinition] = {}
+        self._active_team_tasks: dict[str, asyncio.Task[None]] = {}
+        self._active_team_tokens: dict[str, RunCancellationToken] = {}
+        self._plugin_mcp_servers: tuple[McpServerConfig, ...] = ()
+        self._plugin_runtime_catalog = PluginRuntimeCatalog()
+        self._plugin_runtime_manager: PluginRuntimeManager | None = None
+        self._plugin_runtime_start_task: asyncio.Task[None] | None = None
+        self._plugin_diagnostics: tuple[str, ...] = ()
+        self._agent_catalog: AgentCatalog | None = None
         self._thread_persistence: ThreadPersistence | None = None
         self._agent_engine_pool: AgentEnginePool | None = None
         self._mcp_manager: McpConnectionManager | None = None
+        self._mcp_owner: SharedResourceOwner[McpConnectionManager] | None = None
+        self._retired_mcp_owners: list[SharedResourceOwner[McpConnectionManager]] = []
+        self._profile_mcp_owners: dict[
+            str,
+            SharedResourceOwner[McpConnectionManager],
+        ] = {}
         self._mcp_snapshot: McpConfigSnapshot | None = None
         self._mcp_connect_task: asyncio.Task[None] | None = None
         self._mcp_state_lock = asyncio.Lock()
@@ -271,6 +340,19 @@ class AgentHost:
             METHOD["SKILLS_UPDATE"]: self._handle_skills_update,
             METHOD["SKILLS_REMOVE"]: self._handle_skills_remove,
             METHOD["SKILLS_MARKET_LIST"]: self._handle_skills_market_list,
+            METHOD["PLUGINS_LIST"]: self._handle_plugins_list,
+            METHOD["PLUGINS_INSPECT"]: self._handle_plugins_inspect,
+            METHOD["PLUGINS_VALIDATE"]: self._handle_plugins_validate,
+            METHOD["PLUGINS_INSTALL"]: self._handle_plugins_install,
+            METHOD["PLUGINS_SET_ENABLED"]: self._handle_plugins_set_enabled,
+            METHOD["PLUGINS_REMOVE"]: self._handle_plugins_remove,
+            METHOD["AGENTS_LIST"]: self._handle_agents_list,
+            METHOD["AGENTS_INSPECT"]: self._handle_agents_inspect,
+            METHOD["TEAMS_LIST"]: self._handle_teams_list,
+            METHOD["TEAMS_INSPECT"]: self._handle_teams_inspect,
+            METHOD["TEAMS_GENERATE"]: self._handle_teams_generate,
+            METHOD["TEAMS_RUN"]: self._handle_teams_run,
+            METHOD["TEAMS_CANCEL"]: self._handle_teams_cancel,
             METHOD["MCP_STATUS"]: self._handle_mcp_status,
             METHOD["MCP_ADD"]: self._handle_mcp_add,
             METHOD["MCP_REMOVE"]: self._handle_mcp_remove,
@@ -337,6 +419,15 @@ class AgentHost:
         """关闭 Host 及其持有的运行时资源；可重复调用。"""
         self._running = False
         await self._run_coordinator.close()
+        for token in self._active_team_tokens.values():
+            token.cancel()
+        if self._active_team_tasks:
+            await asyncio.gather(
+                *tuple(self._active_team_tasks.values()),
+                return_exceptions=True,
+            )
+        self._active_team_tasks.clear()
+        self._active_team_tokens.clear()
         if self._run_event_tasks:
             await asyncio.gather(*tuple(self._run_event_tasks), return_exceptions=True)
         for connection in list(self._connections.values()):
@@ -349,11 +440,34 @@ class AgentHost:
         # AgentEngine 先释放自己的图和共享租约，Host owner 再关闭 MCP、
         # workspace/sandbox、Provider transport，最后才关闭 ThreadPersistence。
         await self._close_agent_engine_pool()
-        if self._mcp_manager is not None:
+        if self._mcp_connect_task is not None:
+            await asyncio.gather(self._mcp_connect_task, return_exceptions=True)
+            self._mcp_connect_task = None
+        if self._plugin_runtime_start_task is not None:
+            await asyncio.gather(
+                self._plugin_runtime_start_task,
+                return_exceptions=True,
+            )
+            self._plugin_runtime_start_task = None
+        if self._plugin_runtime_manager is not None:
+            await self._plugin_runtime_manager.aclose()
+            self._plugin_runtime_manager = None
+        owners = [
+            *self._retired_mcp_owners,
+            *([self._mcp_owner] if self._mcp_owner is not None else []),
+        ]
+        for owner in owners:
+            await owner.aclose()
+        if not owners and self._mcp_manager is not None:
+            # 初始化尚未完成或测试替换 manager 时没有 SharedResourceOwner，仍须
+            # 直接释放当前 MCP 连接，不能因 owner 缺失而泄漏子进程/transport。
             await self._mcp_manager.close_all()
-            self._mcp_manager = None
+        self._retired_mcp_owners.clear()
+        self._mcp_owner = None
+        self._mcp_manager = None
         if self._workspace_execution_resources is not None:
             await self._workspace_execution_resources.aclose()
+            self._workspace_execution_resources = None
         await self._provider_client_pool.aclose()
         await self._close_thread_persistence()
 
@@ -474,14 +588,42 @@ class AgentHost:
                     },
                 },
             )
-        except SkillError as exc:
+        except (SkillError, CatalogSkillError) as exc:
             await self.send_error(request_id, -32602, str(exc))
+        except PluginError as exc:
+            details = {"field": exc.field} if exc.field is not None else None
+            await self.send_error(
+                request_id,
+                -32040,
+                exc.code,
+                {"code": exc.code, "retryable": False, "details": details},
+            )
+        except TeamError as exc:
+            await self.send_error(
+                request_id,
+                -32050,
+                exc.code,
+                {"code": exc.code, "retryable": False},
+            )
+        except AgentCatalogError as exc:
+            code = str(exc).split(":", 1)[0]
+            await self.send_error(
+                request_id,
+                -32041,
+                code,
+                {"code": code, "retryable": False},
+            )
         except ThreadPersistenceError as exc:
+            # 初始化失败时不能只返回一个笼统错误码；CLI 启动阶段没有可用的
+            # 业务上下文，必须把持久化层的稳定诊断码放进 message，便于用户
+            # 区分迁移、权限、损坏和版本过新的数据库。原始异常仍通过 data
+            # 返回给具备结构化错误处理能力的客户端。
+            detail = str(exc) or type(exc).__name__
             await self.send_error(
                 request_id,
                 -32020,
-                "THREAD_STORE_UNAVAILABLE",
-                {"code": str(exc)},
+                f"THREAD_STORE_UNAVAILABLE: {detail}",
+                {"code": detail},
             )
         except AgentEnginePoolCapacityError as exc:
             await self.send_error(
@@ -500,7 +642,14 @@ class AgentHost:
             await self.send_error(request_id, -32603, f"{type(exc).__name__}: {exc}")
         else:
             if result is not None:
-                validate_operation_result(method, result)
+                try:
+                    validate_operation_result(method, result)
+                except ValidationError:
+                    # 响应 schema 不匹配属于 sidecar 内部错误，不能让异常穿出
+                    # JSON-RPC 主循环并关闭 stdio；否则客户端只能看到 transport closed。
+                    logger.exception("Invalid handler result for %s", method)
+                    await self.send_error(request_id, -32603, "Invalid handler result")
+                    return
                 await self.send_response(request_id, result)
 
     async def send(self, message: dict[str, Any]) -> None:
@@ -602,13 +751,15 @@ class AgentHost:
                     await self._refresh_skill_catalog_locked()
                 finally:
                     await reservation.release()
+                self._skill_registry = self._build_skill_registry()
                 self._load_config()
                 # MCP 连接不阻塞 initialize 响应；后台建立连接
                 self._mcp_connect_task = asyncio.ensure_future(self._connect_mcp_servers())
+                self._plugin_runtime_start_task = asyncio.ensure_future(
+                    self._start_plugin_runtime()
+                )
                 self._resources_ready = True
-        registry = self._skill_catalog_manager.current
-        if registry is None:
-            registry = await self._refresh_skill_catalog()
+        registry = self._require_skills()
         requested = set(parsed.capabilities.requests)
         enabled = requested.intersection(connection.capability_ceiling)
         if connection.role != "owner":
@@ -618,6 +769,11 @@ class AgentHost:
         connection.interaction_handles = handles
         connection.enabled_capabilities = enabled
         connection.initialized = True
+        project_id = "echo"
+        # 仅在客户端明确请求 thread 读取能力时打开用户级 SQLite；插件/Skill
+        # 管理命令不应因本地历史库权限或迁移状态而无法启动。
+        if CAPABILITY["THREADS_READ"] in enabled and self._thread_persistence_enabled():
+            project_id = (await self._ensure_thread_persistence()).project_fingerprint
         return {
             "protocol": {"major": PROTOCOL_MAJOR, "minor": negotiated_minor},
             "server": {"name": "za38-agent", "version": __version__},
@@ -625,7 +781,7 @@ class AgentHost:
                 "id": connection.connection_id,
                 "role": connection.role,
                 "project": {
-                    "id": (await self._ensure_thread_persistence()).project_fingerprint if self._thread_persistence_enabled() else "echo",
+                    "id": project_id,
                     "label": self._workspace.name,
                 },
             },
@@ -634,7 +790,7 @@ class AgentHost:
                 "enabled": sorted(enabled),
                 "handles": sorted(handles),
             },
-            "agent_commands": [],
+            "agent_commands": registry.agent_commands(),
             "skills_snapshot": registry.snapshot(),
             "skill_diagnostics": registry.diagnostics[:20],
             "limits": {
@@ -653,17 +809,70 @@ class AgentHost:
         """根据配置建立 MCP 服务器连接并构建初始 snapshot；失败不阻止启动。"""
         async with self._mcp_state_lock:
             try:
-                snapshot = self._config_changes().read_mcp_snapshot()
+                config_snapshot = self._config_changes().read_mcp_snapshot()
             except ConfigChangeError:
                 # 配置在 initialize 阶段已失败时仍以空快照启动，不阻塞协议握手。
-                snapshot = build_mcp_snapshot([], "missing")
+                config_snapshot = build_mcp_snapshot([], "missing")
+            snapshot = self._combine_mcp_snapshot(config_snapshot)
             self._mcp_snapshot = snapshot
-            self._mcp_manager = McpConnectionManager(snapshot)
-            await self._mcp_manager.connect_all()
+            await self._replace_mcp_generation(snapshot)
+
+    async def _replace_mcp_generation(
+        self,
+        snapshot: McpConfigSnapshot,
+    ) -> list[dict[str, object]]:
+        """建立新 MCP generation，再让旧 owner 延迟到最后借用者退出后关闭。
+
+        调用方必须持有 `_mcp_state_lock`，从而保证新 spec 不会同时绑定旧 manager
+        和新 snapshot。
+        """
+        manager = McpConnectionManager(snapshot)
+        await manager.connect_all()
+        owner = SharedResourceOwner(
+            manager,
+            name=f"mcp-{snapshot.digest[:12]}",
+            scope=ResourceScope.HOST,
+            fingerprint=snapshot.digest,
+            close=lambda resource: resource.close_all(),
+        )
+        previous = self._mcp_owner
+        self._mcp_manager = manager
+        self._mcp_owner = owner
+        if previous is not None:
+            self._retired_mcp_owners.append(previous)
+            await previous.retire()
+        return manager.get_server_statuses()
+
+    async def _invalidate_mcp_profiles(self, snapshot: McpConfigSnapshot) -> None:
+        """让仍绑定旧 MCP 快照的角色图进入 DRAINING。"""
+        pool = self._agent_engine_pool
+        if pool is None:
+            return
+        await pool.invalidate_outdated(
+            resource="mcp",
+            current_fingerprint=snapshot.digest,
+            reason="snapshot_changed",
+        )
 
     async def _ensure_mcp_connected(self) -> None:
         """等待后台 MCP 连接任务完成（若仍在运行）。"""
         task = self._mcp_connect_task
+        if task is not None and not task.done():
+            await task
+
+    async def _start_plugin_runtime(self) -> None:
+        """启动 Monitor；坏 Monitor 已在 runtime catalog 中隔离，不阻止 Host。"""
+        manager = self._plugin_runtime_manager
+        if manager is None:
+            return
+        try:
+            await manager.start()
+        except Exception:
+            logger.exception("Plugin runtime startup failed")
+
+    async def _ensure_plugin_runtime_started(self) -> None:
+        """在构图前等待启动任务，确保 Hook/LSP/Monitor 使用同一快照。"""
+        task = self._plugin_runtime_start_task
         if task is not None and not task.done():
             await task
 
@@ -777,6 +986,17 @@ class AgentHost:
                 skill_registry=registry,
                 approval_mode=command.requested_approval_mode,
             )
+            # Policy resolution may narrow the source catalog to a role-level
+            # immutable view.  The Run must carry that exact view into the
+            # Context/virtual backend; otherwise a delegate could retain the
+            # unrestricted catalog even though its capability envelope was
+            # narrowed during spec resolution.
+            effective_registry = spec.skill_registry
+            if command.requested_skill is not None:
+                requested_skill = self._prepare_requested_skill(
+                    command,
+                    effective_registry,
+                )
             profile = spec.runtime_profile
             context_snapshot = ContextLifecycle(
                 self._workspace,
@@ -799,8 +1019,8 @@ class AgentHost:
                 resolved_execution_binding=resolved,
                 execution_binding=binding,
                 agent_engine_profile=profile,
-                skill_snapshot_id=registry.snapshot_id,
-                skill_registry=registry,
+                skill_snapshot_id=effective_registry.snapshot_id,
+                skill_registry=effective_registry,
                 requested_skill=requested_skill,
                 context_snapshot=context_snapshot,
                 idle_duration_ms=idle_duration_ms,
@@ -1064,6 +1284,21 @@ class AgentHost:
                 )
             except ConfigChangeError as exc:
                 raise RpcError(-32602, str(exc), exc.redacted_data()) from exc
+        async with self._mcp_state_lock:
+            current = self._mcp_snapshot or self._config_changes().read_mcp_snapshot()
+            if any(server.name == mcp_config.name for server in current.servers):
+                raise RpcError(
+                    -32602,
+                    f"MCP 服务器 '{mcp_config.name}' 已存在",
+                    {"code": "MCP_SERVER_DUPLICATE", "field": "mcp.servers.name"},
+                )
+        try:
+            config_snapshot = self._config_changes().add_mcp_server(
+                mcp_config,
+                expected_revision=current.revision,
+            )
+        except ConfigChangeError as exc:
+            raise RpcError(-32602, str(exc), exc.redacted_data()) from exc
 
             async with self._mcp_state_lock:
                 self._mcp_snapshot = snapshot
@@ -1072,6 +1307,12 @@ class AgentHost:
                 statuses = await self._mcp_manager.apply_snapshot(snapshot)
                 status = next((item for item in statuses if item.get("name") == mcp_config.name), {})
             await self._invalidate_profiles_for_snapshot(snapshot, reason="mcp_snapshot_changed")
+        async with self._mcp_state_lock:
+            snapshot = self._combine_mcp_snapshot(config_snapshot)
+            self._mcp_snapshot = snapshot
+            statuses = await self._replace_mcp_generation(snapshot)
+            status = next((item for item in statuses if item.get("name") == mcp_config.name), {})
+        await self._invalidate_mcp_profiles(snapshot)
 
         return {
             "added": True,
@@ -1096,12 +1337,26 @@ class AgentHost:
                 )
             except ConfigChangeError as exc:
                 raise RpcError(-32602, str(exc), exc.redacted_data()) from exc
+        async with self._mcp_state_lock:
+            current = self._mcp_snapshot or self._config_changes().read_mcp_snapshot()
+        try:
+            config_snapshot = self._config_changes().remove_mcp_server(
+                name,
+                expected_revision=current.revision,
+            )
+        except ConfigChangeError as exc:
+            raise RpcError(-32602, str(exc), exc.redacted_data()) from exc
 
             async with self._mcp_state_lock:
                 self._mcp_snapshot = snapshot
                 if self._mcp_manager is not None:
                     await self._mcp_manager.apply_snapshot(snapshot)
             await self._invalidate_profiles_for_snapshot(snapshot, reason="mcp_snapshot_changed")
+        async with self._mcp_state_lock:
+            snapshot = self._combine_mcp_snapshot(config_snapshot)
+            self._mcp_snapshot = snapshot
+            await self._replace_mcp_generation(snapshot)
+        await self._invalidate_mcp_profiles(snapshot)
 
         return {"removed": True}
 
@@ -1218,15 +1473,22 @@ class AgentHost:
 
     async def _refresh_skill_catalog_locked(self) -> SkillRegistry:
         """在 Host snapshot reservation 内刷新并定向排空旧 Skill Profile。"""
-        previous = self._skill_catalog_manager.current
-        registry = self._skill_catalog_manager.refresh()
+        # SkillCatalogManager 负责安全恢复/校验市场安装；真正交给 Run 的
+        # registry 还要合并同一 Plugin catalog 的 Skill 来源。
+        self._skill_catalog_manager.refresh()
+        previous = self._skill_registry
+        registry = self._build_skill_registry()
+        self._skill_registry = registry
         if previous is None or previous.snapshot_id == registry.snapshot_id:
             return registry
         pool = self._agent_engine_pool
         if pool is not None:
+            # Profile 的 Skill 指纹同时包含 capability policy 生成的 view
+            # 指纹；这里只持有新的 catalog，无法从 profile 反推出旧 view，
+            # 因而 catalog 发生变化时必须排空所有旧 Skill Profile。否则会
+            # 用不完整的 catalog 指纹误判，留下旧图继续被复用。
             await pool.invalidate(
-                lambda profile: profile.skill_catalog_fingerprint
-                != skill_catalog_fingerprint(registry),
+                lambda _profile: True,
                 reason="skill_catalog_changed",
             )
         return registry
@@ -1238,6 +1500,103 @@ class AgentHost:
             return await self._refresh_skill_catalog_locked()
         finally:
             await reservation.release()
+    def _require_skills(self) -> SkillRegistry:
+        """返回初始化时建立的 Skill registry。"""
+        if self._skill_registry is None:
+            self._skill_registry = self._build_skill_registry()
+        return self._skill_registry
+
+    def _build_skill_registry(self) -> SkillRegistry:
+        """一次读取 Plugin catalog，并装配同一启动快照的 Skill 与 MCP 来源。"""
+        canonical = self._skill_catalog_manager.current
+        if canonical is not None and self._plugin_catalog_snapshot is not None:
+            signature = (canonical.snapshot_id, self._plugin_catalog_snapshot.snapshot_id)
+            if self._skill_registry is not None and self._skill_registry_source_signature == signature:
+                return self._skill_registry
+        if self._plugin_catalog_snapshot is None:
+            diagnostics: list[str] = []
+            try:
+                catalog = self._plugin_manager.catalog()
+            except PluginError as exc:
+                catalog = ExtensionCatalogSnapshot(
+                    snapshot_id=catalog_snapshot_id(0, ()),
+                    registry_revision=0,
+                    plugins=(),
+                )
+                diagnostics.append(f"plugin:catalog: {exc.code}: {exc}")
+            skill_result = self._plugin_manager.skill_sources(catalog)
+            agent_result = self._plugin_manager.agent_sources(catalog)
+            team_result = self._plugin_manager.team_definitions(catalog)
+            runtime_catalog = self._plugin_manager.runtime_catalog(
+                catalog,
+                workspace=self._workspace,
+            )
+            mcp_result = self._plugin_manager.mcp_servers(
+                catalog,
+                workspace=self._workspace,
+            )
+            self._plugin_catalog_snapshot = catalog
+            self._plugin_skill_sources = skill_result.sources
+            self._plugin_agent_sources = agent_result.sources
+            self._plugin_team_definitions = team_result.teams
+            self._plugin_runtime_catalog = runtime_catalog
+            self._plugin_runtime_manager = PluginRuntimeManager(runtime_catalog)
+            self._plugin_mcp_servers = mcp_result.servers
+            diagnostics.extend(skill_result.diagnostics)
+            diagnostics.extend(agent_result.diagnostics)
+            diagnostics.extend(team_result.diagnostics)
+            diagnostics.extend(runtime_catalog.diagnostics)
+            diagnostics.extend(mcp_result.diagnostics)
+            self._plugin_diagnostics = tuple(diagnostics)
+            for diagnostic in self._plugin_diagnostics:
+                logging.getLogger(__name__).warning("Plugin runtime component disabled: %s", diagnostic)
+        registry = SkillRegistry(
+            self._workspace,
+            home=self._config_home,
+            plugin_sources=self._plugin_skill_sources,
+            plugin_diagnostics=self._plugin_diagnostics,
+        )
+        canonical = self._skill_catalog_manager.current
+        self._skill_registry_source_signature = (
+            canonical.snapshot_id if canonical is not None else registry.snapshot_id,
+            self._plugin_catalog_snapshot.snapshot_id if self._plugin_catalog_snapshot is not None else "none",
+        )
+        return registry
+
+    def _require_agent_catalog(self, config: Za38Config) -> AgentCatalog:
+        """从同一个启动期 Plugin snapshot 建立 canonical Agent/Policy catalog。"""
+        if self._agent_catalog is None:
+            if config.model_catalog is None:
+                raise RuntimeError("MODEL_CATALOG_REQUIRED")
+            self._require_skills()
+            self._agent_catalog = AgentCatalog(
+                model_catalog=config.model_catalog,
+                sources=self._plugin_agent_sources,
+            )
+            for diagnostic in self._agent_catalog.diagnostics:
+                logger.warning("Plugin Agent disabled: %s", diagnostic)
+        return self._agent_catalog
+
+    def _combine_mcp_snapshot(
+        self,
+        config_snapshot: McpConfigSnapshot,
+    ) -> McpConfigSnapshot:
+        """用用户配置 revision 合并固定 Plugin MCP，用户同名项优先且不被覆盖。"""
+        names = {server.name for server in config_snapshot.servers}
+        plugin_servers: list[McpServerConfig] = []
+        for server in self._plugin_mcp_servers:
+            if server.name in names:
+                logger.warning(
+                    "Plugin MCP %r disabled because a user MCP has the same canonical name",
+                    server.name,
+                )
+                continue
+            names.add(server.name)
+            plugin_servers.append(server)
+        return build_mcp_snapshot(
+            (*config_snapshot.servers, *plugin_servers),
+            config_snapshot.revision,
+        )
 
     @staticmethod
     def _reject_params(params: Mapping[str, Any], allowed: set[str], method: str) -> None:
@@ -1317,6 +1676,352 @@ class AgentHost:
             return self._skill_catalog_manager.remove(skill_id)
         finally:
             await reservation.release()
+
+    async def _handle_plugins_list(
+        self,
+        params: dict[str, Any],
+        _id: str,
+    ) -> dict[str, object]:
+        """列出 Plugin registry 与 enabled catalog，不返回宿主文件路径。"""
+        parsed = PluginsListParams.model_validate(params)
+        return self._plugin_manager.list(include_disabled=parsed.include_disabled)
+
+    async def _handle_plugins_inspect(
+        self,
+        params: dict[str, Any],
+        _id: str,
+    ) -> dict[str, object]:
+        """返回一个安装 Plugin 的兼容性和 trust 摘要。"""
+        parsed = PluginsInspectParams.model_validate(params)
+        return self._plugin_manager.inspect(parsed.id)
+
+    async def _handle_plugins_validate(
+        self,
+        params: dict[str, Any],
+        _id: str,
+    ) -> dict[str, object]:
+        """离线校验本地目录或 zip，不修改 PluginStore。"""
+        parsed = PluginsValidateParams.model_validate(params)
+        return self._plugin_manager.validate(
+            self._plugin_source_path(parsed.source),
+            format=parsed.format,
+        )
+
+    async def _handle_plugins_install(
+        self,
+        params: dict[str, Any],
+        _id: str,
+    ) -> dict[str, object]:
+        """copy-on-install 本地 Plugin，新记录始终为 disabled。"""
+        parsed = PluginsInstallParams.model_validate(params)
+        return self._plugin_manager.install(
+            self._plugin_source_path(parsed.source),
+            format=parsed.format,
+        )
+
+    async def _handle_plugins_set_enabled(
+        self,
+        params: dict[str, Any],
+        _id: str,
+    ) -> dict[str, object]:
+        """按 capability fingerprint 显式启用或停用 Plugin。"""
+        parsed = PluginsSetEnabledParams.model_validate(params)
+        return self._plugin_manager.set_enabled(
+            parsed.id,
+            enabled=parsed.enabled,
+            capability_fingerprint=parsed.capability_fingerprint,
+        )
+
+    async def _handle_plugins_remove(
+        self,
+        params: dict[str, Any],
+        _id: str,
+    ) -> dict[str, object]:
+        """移除安装记录；只有 purge_data=true 时清除持久数据。"""
+        parsed = PluginsRemoveParams.model_validate(params)
+        return self._plugin_manager.remove(parsed.id, purge_data=parsed.purge_data)
+
+    async def _handle_agents_list(
+        self,
+        params: dict[str, Any],
+        _id: str,
+    ) -> dict[str, object]:
+        """列出当前启动快照中可派发的 Plugin Agent，不返回 Prompt 正文。"""
+        self._reject_params(params, set(), "agents.list")
+        catalog = self._agent_catalog_for_control_plane()
+        return {
+            "snapshot_id": catalog.snapshot_id,
+            "agents": catalog.list_agents(),
+            "diagnostics": [*self._plugin_diagnostics, *catalog.diagnostics],
+        }
+
+    async def _handle_agents_inspect(
+        self,
+        params: dict[str, Any],
+        _id: str,
+    ) -> dict[str, object]:
+        """返回一个 Agent 的脱敏定义摘要。"""
+        parsed = AgentsInspectParams.model_validate(params)
+        return self._agent_catalog_for_control_plane().require_agent(parsed.id).summary()
+
+    async def _handle_teams_list(
+        self,
+        params: dict[str, Any],
+        _id: str,
+    ) -> dict[str, object]:
+        """列出固定与当前 Host 已确认生成的 TeamDefinition。"""
+        self._reject_params(params, set(), "teams.list")
+        self._agent_catalog_for_control_plane()
+        return {
+            "teams": [
+                _team_definition_payload(definition)
+                for definition in self._all_team_definitions()
+            ],
+            "diagnostics": list(self._plugin_diagnostics),
+        }
+
+    async def _handle_teams_inspect(
+        self,
+        params: dict[str, Any],
+        _id: str,
+    ) -> dict[str, object]:
+        """按类型查看 TeamDefinition 或可恢复 TeamRun。"""
+        parsed = TeamsInspectParams.model_validate(params)
+        if parsed.kind == "definition":
+            return _team_definition_payload(self._require_team_definition(parsed.id))
+        persistence = await self._ensure_thread_persistence()
+        run = await persistence.team_state_store().load(parsed.id)
+        if run is None:
+            raise TeamError("TEAM_RUN_NOT_FOUND")
+        return _team_run_payload(run)
+
+    async def _handle_teams_generate(
+        self,
+        params: dict[str, Any],
+        _id: str,
+    ) -> dict[str, object]:
+        """由已验证 AgentDefinition 生成固定 fanout Team，并保存当前 Host 预览。"""
+        parsed = TeamsGenerateParams.model_validate(params)
+        if any(team.team_id == parsed.id for team in self._plugin_team_definitions):
+            raise TeamError("TEAM_ID_CONFLICT")
+        catalog = self._agent_catalog_for_control_plane()
+        definition = generate_fanout_team(
+            team_id=parsed.id,
+            agents=catalog.agents,
+            lead_agent_id=parsed.lead_agent_id,
+            worker_agent_ids=tuple(parsed.worker_agent_ids),
+            max_parallelism=parsed.max_parallelism,
+        )
+        existing = self._generated_team_definitions.get(definition.team_id)
+        if existing is not None and existing != definition:
+            raise TeamError("TEAM_ID_CONFLICT")
+        self._generated_team_definitions[definition.team_id] = definition
+        return _team_definition_payload(definition)
+
+    async def _handle_teams_run(
+        self,
+        params: dict[str, Any],
+        _id: str,
+    ) -> dict[str, object]:
+        """受理一个后台 TeamRun；成员只能来自启动期 Agent catalog。"""
+        parsed = TeamsRunParams.model_validate(params)
+        if parsed.run_id in self._active_team_tasks:
+            raise TeamError("TEAM_RUN_BUSY")
+        definition = self._require_team_definition(parsed.team_id)
+        config = self._config
+        if config is None or config.model_catalog is None:
+            raise TeamError("TEAM_MODEL_CATALOG_REQUIRED")
+        catalog = self._agent_catalog_for_control_plane()
+        known_agents = {agent.agent_id for agent in catalog.agents}
+        if any(task.agent_id not in known_agents for task in definition.tasks):
+            raise TeamError("TEAM_AGENT_NOT_FOUND")
+
+        persistence = await self._ensure_thread_persistence()
+        store = persistence.team_state_store()
+        existing = await store.load(parsed.run_id)
+        parent_ref = (
+            existing.parent_ref
+            if existing is not None
+            else ExecutionRef(
+                thread_id=parsed.thread_id,
+                run_id=parsed.run_id,
+                execution_id=f"team-root-{parsed.run_id}",
+            )
+        )
+        if (
+            existing is not None
+            and (
+                existing.team_id != definition.team_id
+                or existing.parent_ref.thread_id != parsed.thread_id
+            )
+        ):
+            raise TeamError("TEAM_RUN_IDENTITY_CONFLICT")
+        if existing is not None and existing.status.terminal:
+            return {
+                "team_id": definition.team_id,
+                "run_id": parsed.run_id,
+                "accepted": True,
+            }
+
+        binding = await self._resolve_execution_binding(parsed.thread_id, config)
+        parent_spec = await self._resolve_agent_engine_spec(
+            parsed.thread_id,
+            config,
+            binding,
+        )
+        delegation_policy = parent_spec.effective_policy.delegation
+        if delegation_policy is None or not delegation_policy.enabled:
+            raise TeamError("TEAM_DELEGATION_DISABLED")
+
+        from harness_agent.runtime.agent_delegation import AgentDelegator
+
+        registry = self._run_coordinator.execution_registry
+        targets = await self._plugin_delegation_targets(parent_spec)
+        target_ids = {target.agent_id for target in targets}
+        if any(task.agent_id not in target_ids for task in definition.tasks):
+            raise TeamError("TEAM_AGENT_UNAVAILABLE")
+        await registry.accept(
+            AgentExecutionBinding(
+                ref=parent_ref,
+                agent_id="team-coordinator",
+                mode=ExecutionMode.MANAGED,
+                depth=0,
+                model=parent_spec.model_view,
+                policy_fingerprint=parent_spec.effective_policy.fingerprint,
+                engine_profile_key=parent_spec.runtime_profile.profile_key,
+                definition_fingerprint=definition.team_id,
+            )
+        )
+        await registry.start(parent_ref)
+        if existing is None:
+            await store.save(
+                TeamRun(
+                    run_id=parsed.run_id,
+                    team_id=definition.team_id,
+                    parent_ref=parent_ref,
+                    status=TeamRunStatus.RUNNING,
+                    tasks=tuple(
+                        TeamTaskState(task.task_id)
+                        for task in definition.tasks
+                    ),
+                )
+            )
+        token = RunCancellationToken()
+        coordinator = TeamCoordinator(
+            AgentDelegator(registry, targets=targets),
+            store=store,
+        )
+        task = asyncio.create_task(
+            self._execute_team_run(
+                coordinator=coordinator,
+                definition=definition,
+                run_id=parsed.run_id,
+                parent_ref=parent_ref,
+                request=parsed.request,
+                delegation_policy=delegation_policy,
+                cancellation_token=token,
+            ),
+            name=f"harness-team-{definition.team_id}-{parsed.run_id}",
+        )
+        self._active_team_tokens[parsed.run_id] = token
+        self._active_team_tasks[parsed.run_id] = task
+        return {
+            "team_id": definition.team_id,
+            "run_id": parsed.run_id,
+            "accepted": True,
+        }
+
+    async def _handle_teams_cancel(
+        self,
+        params: dict[str, Any],
+        _id: str,
+    ) -> dict[str, object]:
+        """协作式取消活动 Team，不影响其他 Run。"""
+        parsed = TeamsCancelParams.model_validate(params)
+        token = self._active_team_tokens.get(parsed.run_id)
+        if token is None:
+            persistence = await self._ensure_thread_persistence()
+            existing = await persistence.team_state_store().load(parsed.run_id)
+            if existing is None:
+                raise TeamError("TEAM_RUN_NOT_FOUND")
+            return {"run_id": parsed.run_id, "cancelled": False}
+        token.cancel()
+        return {"run_id": parsed.run_id, "cancelled": True}
+
+    def _plugin_source_path(self, source: str) -> Path:
+        """把相对安装来源解释为 Host workspace 下的显式本地路径。"""
+        path = Path(source).expanduser()
+        return path if path.is_absolute() else self._workspace / path
+
+    def _agent_catalog_for_control_plane(self) -> AgentCatalog:
+        """返回初始化时固定的 Agent catalog，配置缺失时不构造半成品响应。"""
+        config = self._config
+        if config is None or config.model_catalog is None:
+            raise AgentCatalogError("AGENT_MODEL_CATALOG_REQUIRED")
+        return self._require_agent_catalog(config)
+
+    def _all_team_definitions(self) -> tuple[TeamDefinition, ...]:
+        """合并 Plugin 固定 Team 与当前 Host 的生成预览，拒绝 ID 遮蔽。"""
+        definitions: dict[str, TeamDefinition] = {}
+        for definition in self._plugin_team_definitions:
+            if definition.team_id in definitions:
+                raise TeamError("TEAM_ID_CONFLICT")
+            definitions[definition.team_id] = definition
+        for team_id, definition in self._generated_team_definitions.items():
+            if team_id in definitions:
+                raise TeamError("TEAM_ID_CONFLICT")
+            definitions[team_id] = definition
+        return tuple(definitions[key] for key in sorted(definitions))
+
+    def _require_team_definition(self, team_id: str) -> TeamDefinition:
+        """按稳定 ID 读取 TeamDefinition。"""
+        for definition in self._all_team_definitions():
+            if definition.team_id == team_id:
+                return definition
+        raise TeamError("TEAM_DEFINITION_NOT_FOUND")
+
+    async def _execute_team_run(
+        self,
+        *,
+        coordinator: TeamCoordinator,
+        definition: TeamDefinition,
+        run_id: str,
+        parent_ref: ExecutionRef,
+        request: str,
+        delegation_policy: DelegationPolicy,
+        cancellation_token: RunCancellationToken,
+    ) -> None:
+        """后台执行 Team，并把协调根 execution 收敛到同一个终态。"""
+        registry = self._run_coordinator.execution_registry
+        terminal_status = ExecutionStatus.FAILED
+        try:
+            result = await coordinator.run(
+                definition,
+                run_id=run_id,
+                parent_ref=parent_ref,
+                request=request,
+                delegation_policy=delegation_policy,
+                cancellation_token=cancellation_token,
+            )
+            terminal_status = {
+                TeamRunStatus.COMPLETED: ExecutionStatus.COMPLETED,
+                TeamRunStatus.CANCELLED: ExecutionStatus.CANCELLED,
+                TeamRunStatus.FAILED: ExecutionStatus.FAILED,
+            }[result.status]
+        except Exception:
+            logger.exception("Team run %s failed outside coordinator state machine", run_id)
+            await registry.cancel_run(parent_ref)
+        finally:
+            current = await registry.get(parent_ref)
+            if current is not None and not current.status.terminal:
+                await registry.finalize(parent_ref, status=terminal_status)
+            try:
+                await registry.seal_run(parent_ref)
+                await registry.discard_run(parent_ref)
+            except Exception:
+                logger.exception("Team run %s execution registry cleanup failed", run_id)
+            self._active_team_tasks.pop(run_id, None)
+            self._active_team_tokens.pop(run_id, None)
 
     def _load_config(self) -> None:
         """刷新配置缓存，并保存用户可修复的错误。"""
@@ -1507,6 +2212,12 @@ class AgentHost:
             if approval_mode is not None
             else config.execution
         )
+        mcp_owner = self._mcp_owner
+        agent_catalog = (
+            self._require_agent_catalog(config)
+            if config.model_catalog is not None
+            else None
+        )
         spec = resolve_builtin_main_agent_spec(
             project_fingerprint=persistence.project_fingerprint,
             workspace=self._workspace,
@@ -1517,8 +2228,15 @@ class AgentHost:
             mcp_tools=mcp_tools,
             interactive="question" in self._connection_handles(),
             pinned=config.agent_engine_pool.pin_default_profile,
+            delegation_agent_ids=(
+                tuple(definition.agent_id for definition in agent_catalog.agents)
+                if agent_catalog is not None
+                else ()
+            ),
         )
         profile = spec.runtime_profile
+        if mcp_owner is not None:
+            self._profile_mcp_owners.setdefault(profile.profile_key, mcp_owner)
         await persistence.persist_agent_engine_profile(profile)
         # 同一 Key 保留第一次解析出的对象，保证 Pool builder 与 RunContext
         # 取回的是同一个快照，而不是后续请求重新拼出的近似对象。
@@ -1601,8 +2319,139 @@ class AgentHost:
             self._workspace_execution_resources = WorkspaceExecutionResourcePool()
         return self._workspace_execution_resources
 
+    async def _plugin_delegation_targets(
+        self,
+        parent_spec: ResolvedAgentSpec,
+    ) -> tuple[Any, ...]:
+        """把 Plugin Agent spec 注册为复用 AgentEnginePool 的 Managed target。"""
+        if getattr(parent_spec, "agent_id", "main") != "main":
+            return ()
+        config = self._config
+        if config is None or config.model_catalog is None:
+            return ()
+        from langchain_core.messages import HumanMessage
+
+        from harness_agent.runtime.agent import create_prompt_epoch
+        from harness_agent.runtime.agent_delegation import (
+            DelegationTarget,
+            child_execution_ref,
+            managed_engine_runner,
+        )
+
+        catalog = self._require_agent_catalog(config)
+        persistence = await self._ensure_thread_persistence()
+        registry = self._require_skills()
+        async with self._mcp_state_lock:
+            mcp_snapshot = self._mcp_snapshot or build_mcp_snapshot([], "missing")
+            mcp_tools = tuple(self._mcp_manager.get_tools()) if self._mcp_manager else ()
+            mcp_owner = self._mcp_owner
+        pool = self._ensure_agent_engine_pool(config)
+        targets: list[DelegationTarget] = []
+        for definition in catalog.agents:
+            try:
+                child_spec = resolve_plugin_agent_spec(
+                    definition=definition,
+                    catalog=catalog,
+                    parent_policy=parent_spec.effective_policy,
+                    model_catalog=config.model_catalog,
+                    project_fingerprint=persistence.project_fingerprint,
+                    workspace=self._workspace,
+                    execution=config.execution,
+                    skill_registry=registry,
+                    mcp_snapshot=mcp_snapshot,
+                    mcp_tools=mcp_tools,
+                    interactive=False,
+                    inherited_model_profile_id=parent_spec.model_profile_id,
+                )
+            except (AgentCatalogError, ConfigError, ValueError) as exc:
+                logger.warning(
+                    "Plugin Agent %s disabled during resolution: %s",
+                    definition.agent_id,
+                    exc,
+                )
+                continue
+            child_profile = child_spec.runtime_profile
+            self._resolved_agent_specs.setdefault(child_profile.profile_key, child_spec)
+            if mcp_owner is not None:
+                self._profile_mcp_owners.setdefault(child_profile.profile_key, mcp_owner)
+            await persistence.persist_agent_engine_profile(child_profile)
+
+            async def invoke(
+                engine: AgentEngine,
+                command: Any,
+                *,
+                resolved: ResolvedAgentSpec = child_spec,
+            ) -> Mapping[str, Any]:
+                """在独立 checkpoint namespace 中运行 Plugin Agent。"""
+                child_ref = child_execution_ref(command)
+                epoch = create_prompt_epoch(
+                    thread_id=child_ref.thread_id,
+                    system_prompt=resolved.prompt,
+                    workspace=str(resolved.workspace),
+                    sandboxed=resolved.execution.mode == "remote-sandbox",
+                    provider=(
+                        resolved.execution.remote.provider
+                        if resolved.execution.remote is not None
+                        else None
+                    ),
+                    approval_mode=(
+                        resolved.effective_policy.approval_mode
+                        or resolved.execution.approval_mode
+                    ),
+                    skill_registry=resolved.skill_registry,
+                    enable_memory=resolved.enable_memory,
+                    enable_skills=resolved.enable_skills,
+                    extra_tools=resolved.tools,
+                )
+                context = RunContext(
+                    thread_id=child_ref.thread_id,
+                    run_id=child_ref.run_id,
+                    prompt_epoch=epoch,
+                    approval_mode=(
+                        resolved.effective_policy.approval_mode
+                        or resolved.execution.approval_mode
+                    ),
+                    profile_key=resolved.runtime_profile.profile_key,
+                    execution_id=child_ref.execution_id,
+                    parent_execution_id=child_ref.parent_execution_id,
+                    agent_id=resolved.agent_id,
+                    execution_mode=ExecutionMode.MANAGED,
+                    cancellation_token=command.cancellation_token,
+                    delegation_policy=resolved.effective_policy.delegation,
+                )
+                result = await engine.graph.ainvoke(
+                    {"messages": [HumanMessage(content=command.task)]},
+                    config={
+                        "configurable": {
+                            "thread_id": child_ref.thread_id,
+                            "checkpoint_ns": child_ref.checkpoint_namespace(
+                                resolved.project_fingerprint
+                            ),
+                        }
+                    },
+                    context=context,
+                )
+                messages = result.get("messages", ()) if isinstance(result, Mapping) else ()
+                final = getattr(messages[-1], "content", "") if messages else ""
+                return {"final": str(final)}
+
+            targets.append(
+                DelegationTarget(
+                    agent_id=definition.agent_id,
+                    mode=ExecutionMode.MANAGED,
+                    runner=managed_engine_runner(pool, child_profile, invoke),
+                    description=definition.description or definition.purpose,
+                    model=child_spec.model_view,
+                    policy_fingerprint=child_spec.effective_policy.fingerprint,
+                    engine_profile_key=child_profile.profile_key,
+                    definition_fingerprint=definition.fingerprint,
+                )
+            )
+        return tuple(targets)
+
     async def _build_default_agent_engine(self, profile: AgentEngineProfile) -> AgentEngine:
         """按 Profile key 取回同一 ResolvedAgentSpec，再构建共享图。"""
+        await self._ensure_plugin_runtime_started()
         spec = self._resolved_agent_specs.get(profile.profile_key)
         if spec is None:
             raise RuntimeError("RUNTIME_RESOLVED_AGENT_SPEC_MISSING")
@@ -1611,9 +2460,13 @@ class AgentHost:
         if profile.mcp_config_fingerprint != spec.mcp_snapshot.digest:
             raise RuntimeError("RUNTIME_MCP_SNAPSHOT_MISMATCH")
         profile_skill_fingerprint = getattr(profile, "skill_catalog_fingerprint", None)
+        expected_skill_fingerprint = skill_catalog_fingerprint(
+            spec.skill_registry,
+            view_fingerprint=spec.skill_view_fingerprint,
+        )
         if (
             profile_skill_fingerprint is not None
-            and profile_skill_fingerprint != skill_catalog_fingerprint(spec.skill_registry)
+            and profile_skill_fingerprint != expected_skill_fingerprint
         ):
             raise RuntimeError("RUNTIME_SKILL_SNAPSHOT_MISMATCH")
         from harness_agent.runtime.agent import create_harness_agent
@@ -1640,6 +2493,7 @@ class AgentHost:
             mcp_lease = await self._mcp_manager.acquire(spec.mcp_snapshot)
             mcp_tools = list(mcp_lease.value.tools)
             execution_context = workspace_lease.value
+            delegation_targets = await self._plugin_delegation_targets(spec)
             model = create_openai_compatible_model(
                 model_settings,
                 async_client=provider_lease.value,
@@ -1686,10 +2540,16 @@ class AgentHost:
                 context_window_tokens=model_settings.context_window_tokens,
                 shared_engine=True,
                 concurrency_lock=self._tool_concurrency_lock,
+                capability_view=spec.capability_view,
+                execution_registry=self._run_coordinator.execution_registry,
+                delegation_model=spec.model_view,
+                delegation_targets=delegation_targets,
+                plugin_runtime=self._plugin_runtime_manager,
             )
             self._agent_engine_artifacts[profile.profile_key] = _AgentEngineArtifacts(
                 execution_context=execution_context,
                 context_compactor=context_compactor,
+                mcp_lease=mcp_lease,
             )
             resources = AgentEngineResourceBundle.from_sequences(
                 flushers=(
@@ -1755,6 +2615,7 @@ class AgentHost:
             execution_mode=ExecutionMode.MANAGED,
             cancellation_token=run.cancellation_token,
             skill_registry=registry,
+            delegation_policy=spec.effective_policy.delegation,
         )
 
     async def _handle_peer_response(self, message: dict[str, Any]) -> None:
@@ -1890,8 +2751,11 @@ class AgentHost:
 
     async def _drop_agent_engine_artifacts(self, profile_key: str) -> None:
         """清除已关闭 AgentEngine 的 middleware/执行上下文引用，避免 Sidecar 持有旧资源。"""
-        self._agent_engine_artifacts.pop(profile_key, None)
+        artifacts = self._agent_engine_artifacts.pop(profile_key, None)
+        if artifacts is not None and artifacts.mcp_lease is not None:
+            await artifacts.mcp_lease.release()
         self._resolved_agent_specs.pop(profile_key, None)
+        self._profile_mcp_owners.pop(profile_key, None)
 
     async def _close_agent_engine_pool(self) -> None:
         """在关闭 SQLite 前停止 AgentEnginePool，保证 middleware 不再访问已关闭的 Persistence。"""
@@ -1903,6 +2767,7 @@ class AgentHost:
                 logger.warning("AgentEnginePool closed with %s resource failures", len(failures))
         self._agent_engine_artifacts.clear()
         self._resolved_agent_specs.clear()
+        self._profile_mcp_owners.clear()
 
     async def _agent_engine_pool_diagnostics(self) -> dict[str, object]:
         """返回 config.show 的运行池摘要；未初始化/已关闭时不保留旧 AgentEngine 引用。"""
@@ -1913,7 +2778,26 @@ class AgentHost:
                 "state": "not_initialized",
                 "memory": {"estimated_bytes": None, "rss_bytes": None, "status": "not_collected"},
             }
-        return (await pool.diagnostics()).payload()
+        payload = (await pool.diagnostics()).payload()
+        owners = [
+            *self._retired_mcp_owners,
+            *([self._mcp_owner] if self._mcp_owner is not None else []),
+        ]
+        shared_resources = []
+        for owner in owners:
+            snapshot = await owner.snapshot()
+            shared_resources.append(
+                {
+                    "name": snapshot.name,
+                    "scope": snapshot.scope.value,
+                    "fingerprint_id": snapshot.fingerprint[:12],
+                    "borrowers": snapshot.borrowers,
+                    "retired": snapshot.retired,
+                    "closed": snapshot.closed,
+                }
+            )
+        payload["shared_resources"] = shared_resources
+        return payload
 
     def _threads_enabled(self) -> bool:
         """只有协商了读取能力的交互客户端才启用可恢复 thread 存储。"""
@@ -1978,11 +2862,57 @@ class AgentHost:
         connection.pending_requests.clear()
         connection.interaction_specs.clear()
 
+
+def _team_definition_payload(definition: TeamDefinition) -> dict[str, object]:
+    """将 TeamDefinition 转成不含输入模板正文的控制面摘要。"""
+    return {
+        "id": definition.team_id,
+        "description": definition.description,
+        "max_parallelism": definition.max_parallelism,
+        "failure_policy": str(definition.failure_policy),
+        "tasks": [
+            {
+                "id": task.task_id,
+                "agent_id": task.agent_id,
+                "depends_on": list(task.depends_on),
+                "access": str(task.access),
+                "timeout_seconds": task.timeout_seconds,
+            }
+            for task in definition.tasks
+        ],
+    }
+
+
+def _team_run_payload(run: TeamRun) -> dict[str, object]:
+    """将持久化 TeamRun 转成有界结构化状态，不返回成员消息或 Prompt。"""
+    return {
+        "run_id": run.run_id,
+        "team_id": run.team_id,
+        "thread_id": run.parent_ref.thread_id,
+        "status": str(run.status),
+        "terminal_count": run.terminal_count,
+        "tasks": [
+            {
+                "id": task.task_id,
+                "status": str(task.status),
+                "execution_id": task.execution_id,
+                "result": dict(task.result),
+                "error_code": task.error_code,
+                "attempts": task.attempts,
+            }
+            for task in run.tasks
+        ],
+    }
+
+
 def _protocol_error_data(message: str, data: object | None) -> dict[str, object]:
     """把既有领域异常收敛为 v3 稳定错误枚举。"""
     raw = data if isinstance(data, Mapping) else {}
     raw_code = raw.get("code")
-    if isinstance(raw_code, str) and raw_code in STABLE_ERROR_CODES:
+    if isinstance(raw_code, str) and (
+        raw_code in STABLE_ERROR_CODES
+        or raw_code.startswith(("PLUGIN_", "AGENT_", "TEAM_"))
+    ):
         stable_code = raw_code
     else:
         stable_code = {

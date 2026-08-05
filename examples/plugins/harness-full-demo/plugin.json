@@ -1,0 +1,25 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "harness-full-demo",
+  "version": "1.0.0",
+  "description": "Harness Code 完整扩展机制体验插件",
+  "author": {
+    "name": "Harness Code"
+  },
+  "license": "MIT",
+  "keywords": [
+    "harness",
+    "demo",
+    "agent-team",
+    "mcp"
+  ],
+  "extensions": {
+    "com.za38.harness": {
+      "schemaVersion": "1.0.0",
+      "commands": "./harness-commands",
+      "agents": "./agents",
+      "policies": "./policies",
+      "teams": "./teams"
+    }
+  }
+}

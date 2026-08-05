@@ -3,7 +3,7 @@
 export type Command =
   | { kind: "run"; message?: string; nonInteractive: boolean; json: boolean; cwd: string; configPath?: string; resume: boolean; sandbox?: "remote" | false }
   | { kind: "config.show" | "config.path"; cwd: string; configPath?: string; params?: Record<string, unknown> }
-  | { kind: SkillCommandKind; cwd: string; configPath?: string; params: Record<string, unknown> }
+  | { kind: SkillCommandKind | PluginCommandKind; cwd: string; configPath?: string; params: Record<string, unknown> }
 
 export type SkillCommandKind =
   | "skills.list"
@@ -13,6 +13,14 @@ export type SkillCommandKind =
   | "skills.update"
   | "skills.remove"
   | "skills.market.list"
+
+export type PluginCommandKind =
+  | "plugins.list"
+  | "plugins.inspect"
+  | "plugins.validate"
+  | "plugins.install"
+  | "plugins.set_enabled"
+  | "plugins.remove"
 
 /** 解析交互、无头执行和配置管理命令，并保留工作区与配置路径。 */
 export function parseArgs(argv: string[], cwd = process.cwd()): Command {
@@ -25,6 +33,7 @@ export function parseArgs(argv: string[], cwd = process.cwd()): Command {
     return { kind: `config.${action}`, cwd, configPath }
   }
   if (command === "skills") return parseSkillsCommand(args.slice(1), cwd)
+  if (command === "plugins") return parsePluginsCommand(args.slice(1), cwd)
 
   const configPath = optionValue(args, "--config")
   const cwdValue = optionValue(args, "--cwd")
@@ -92,9 +101,79 @@ function skillIdCommand(args: string[], cwd: string, configPath: string | undefi
   return { kind, cwd, configPath, params: { id: positionalValue(args, `${kind} requires a Skill id`) } }
 }
 
-/** 读取指定位置的非开关参数，避免把选项值误当成 Skill 名称。 */
+/** 解析 Plugin 本地安装和 trust 管理命令。 */
+function parsePluginsCommand(args: string[], cwd: string): Command {
+  const action = args[0] ?? "list"
+  const workspace = optionValue(args, "--workspace") ?? optionValue(args, "--cwd") ?? cwd
+  const configPath = optionValue(args, "--config")
+  if (action === "list") {
+    return {
+      kind: "plugins.list",
+      cwd: workspace,
+      configPath,
+      params: { include_disabled: !hasOption(args, "--enabled-only") },
+    }
+  }
+  if (action === "inspect") {
+    return {
+      kind: "plugins.inspect",
+      cwd: workspace,
+      configPath,
+      params: { id: positionalValue(args, "harness plugins inspect requires a Plugin id") },
+    }
+  }
+  if (action === "validate" || action === "install") {
+    return {
+      kind: action === "validate" ? "plugins.validate" : "plugins.install",
+      cwd: workspace,
+      configPath,
+      params: {
+        source: positionalValue(args, `harness plugins ${action} requires a directory or zip path`),
+        format: pluginFormat(args),
+      },
+    }
+  }
+  if (action === "enable" || action === "disable") {
+    const fingerprint = optionValue(args, "--capability-fingerprint")
+    if (action === "enable" && !fingerprint) {
+      throw new Error("harness plugins enable requires --capability-fingerprint SHA256")
+    }
+    return {
+      kind: "plugins.set_enabled",
+      cwd: workspace,
+      configPath,
+      params: {
+        id: positionalValue(args, `harness plugins ${action} requires a Plugin id`),
+        enabled: action === "enable",
+        capability_fingerprint: fingerprint,
+      },
+    }
+  }
+  if (action === "remove") {
+    return {
+      kind: "plugins.remove",
+      cwd: workspace,
+      configPath,
+      params: {
+        id: positionalValue(args, "harness plugins remove requires a Plugin id"),
+        purge_data: hasOption(args, "--purge-data"),
+      },
+    }
+  }
+  throw new Error("Usage: harness plugins <list|inspect|validate|install|enable|disable|remove>")
+}
+
+/** 读取指定位置的非开关参数，避免把选项值误当成资源名称。 */
 function positionalValue(args: string[], message: string): string {
-  const valueOptions = new Set(["--workspace", "--cwd", "--config", "--market", "--version"])
+  const valueOptions = new Set([
+    "--workspace",
+    "--cwd",
+    "--config",
+    "--market",
+    "--version",
+    "--format",
+    "--capability-fingerprint",
+  ])
   for (let index = 1; index < args.length; index += 1) {
     const value = args[index]
     if (valueOptions.has(value)) {
@@ -136,6 +215,13 @@ function optionValue(args: string[], name: string): string | undefined {
   const value = args[index + 1]
   if (!value || value.startsWith("-")) throw new Error(`${name} requires a value`)
   return value
+}
+
+/** 限制 Plugin Adapter 选择，未知值在启动 sidecar 前失败。 */
+function pluginFormat(args: string[]): "auto" | "agent-plugins-1.0" | "claude-code" {
+  const value = optionValue(args, "--format") ?? "auto"
+  if (value === "auto" || value === "agent-plugins-1.0" || value === "claude-code") return value
+  throw new Error("--format only supports auto, agent-plugins-1.0 or claude-code")
 }
 
 /** 解析 Qwen 风格 sandbox 开关；当前只支持企业远端 provider。 */

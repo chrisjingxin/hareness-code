@@ -164,6 +164,36 @@ class SkillRegistry:
         """返回启动时固定的有序记录。"""
         return tuple(self._records.values())
 
+    def restricted(self, allowed_ids: tuple[str, ...]) -> "SkillRegistry":
+        """从当前 immutable snapshot 建立角色级 Skill 子集，不重新读取磁盘。"""
+        allowed = frozenset(allowed_ids)
+        view = object.__new__(SkillRegistry)
+        view.workspace = self.workspace
+        view.home = self.home
+        view.state_path = self.state_path
+        view._state = self._state
+        view._records = {
+            skill_id: record
+            for skill_id, record in self._records.items()
+            if skill_id in allowed
+        }
+        view.diagnostics = self.diagnostics
+        view._snapshot_files = MappingProxyType(
+            {
+                skill_id: self._snapshot_files[skill_id]
+                for skill_id in view._records
+            }
+        )
+        view._snapshot_errors = MappingProxyType(
+            {
+                skill_id: self._snapshot_errors.get(skill_id, MappingProxyType({}))
+                for skill_id in view._records
+            }
+        )
+        view.snapshot_id = view._snapshot_id()
+        view._state_digest = self._state_digest
+        return view
+
     def snapshot(self) -> dict[str, object]:
         """返回 Kimi Wire 风格的轻量 snapshot 摘要。"""
         return {"id": self.snapshot_id, "count": len(self.records)}
@@ -231,6 +261,24 @@ class SkillRegistry:
         if len(matches) > 1:
             raise SkillAmbiguousError(value, [record.skill_id for record in matches])
         return matches[0]
+
+    def resolve_virtual_id(self, value: str) -> str:
+        """解析虚拟 ``/.harness`` 路径里的 Skill ID。
+
+        虚拟文件后端有时会把包含 ``/`` 的 canonical ID 展平为连字符；只在
+        当前不可变快照中存在唯一匹配时恢复它，管理接口仍只接受 canonical ID。
+        """
+        try:
+            return self.resolve(value).skill_id
+        except SkillError as original:
+            candidates = [
+                record.skill_id
+                for record in self.records
+                if record.enabled and record.skill_id.replace("/", "-") == value
+            ]
+            if len(candidates) == 1:
+                return candidates[0]
+            raise original
 
     def load(self, value: str, args: str = "") -> LoadedSkill:
         """从当前 immutable snapshot 读取 Skill 正文，不回读可变磁盘。"""

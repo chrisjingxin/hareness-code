@@ -11,6 +11,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Mapping
+from typing import TYPE_CHECKING, Mapping
 
 from langchain.agents.middleware.types import AgentMiddleware, ExtendedModelResponse, ModelRequest, ModelResponse
 from langchain_core.messages import SystemMessage
@@ -26,6 +27,9 @@ from harness_agent.threads.context_pressure import ModelCallLifecycle
 from harness_agent.threads.prompting import PromptEpoch
 
 _LEGACY_APPROVAL_MODE_MARKER = "\n\n## 审批模式："
+
+if TYPE_CHECKING:
+    from harness_agent.runtime.agent_catalog import DelegationPolicy
 
 
 class RunContextError(ValueError):
@@ -73,6 +77,7 @@ class RunContext:
     model_call_lifecycle: ModelCallLifecycle = field(default_factory=ModelCallLifecycle)
     # 共享图只能从当前 Run 取得对应的 immutable Skill snapshot；不写入持久化记录。
     skill_registry: Any | None = field(default=None, repr=False)
+    delegation_policy: DelegationPolicy | None = None
 
     def __post_init__(self) -> None:
         """在执行前验证 thread 与 snapshot 的绑定，阻止跨 project 注入。"""

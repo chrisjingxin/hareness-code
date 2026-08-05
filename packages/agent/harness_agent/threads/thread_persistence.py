@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
+import stat
 import sqlite3
 import subprocess
 import sys
@@ -87,6 +88,57 @@ _MIGRATION_CHILD_PROCESS_MODE = False
 def _is_supported_legacy_prompt_epoch_source(source_version: int) -> bool:
     """仅接纳具有严格历史 schema 契约的 PromptEpoch 来源。"""
     return 2 <= source_version <= 6
+
+
+def _is_pre_transcript_prompt_epoch_source_sync(
+    connection: sqlite3.Connection,
+    source_version: int,
+) -> bool:
+    """识别合并前曾使用 ``user_version=7`` 的旧 PromptEpoch 数据库。
+
+    该版本号在一条历史分支中先于 Transcript 表落地，不能直接按当前
+    v7 契约解释。只有完整的 v6 表集合（加上已知 Team 状态表）、没有
+    Transcript/Context Snapshot 等后继表时才降级为 v6 进入现有迁移器；
+    当前 v7+ schema 携带 PromptEpoch 仍会按异常残留拒绝。
+    """
+    if source_version != 7:
+        return False
+    tables = {
+        str(row[0])
+        for row in connection.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+            """
+        ).fetchall()
+    }
+    if "harness_prompt_epochs" not in tables:
+        return False
+    if tables.intersection(
+        {
+            "harness_thread_transcript",
+            "harness_thread_history_metadata",
+            "harness_run_context_snapshots",
+            "harness_compression_checkpoints",
+        }
+    ):
+        return False
+    try:
+        _migration_validate_legacy_source_schema_sync(connection, 6)
+    except ThreadPersistenceError:
+        return False
+    return True
+
+
+def _validate_source_schema_for_fingerprint_sync(
+    connection: sqlite3.Connection,
+    source_version: int,
+) -> None:
+    """按 fingerprint 的真实版本校验旧库，兼容已识别的旧分支 v7。"""
+    if 1 <= source_version <= 6:
+        _migration_validate_legacy_source_schema_sync(connection, source_version)
+    elif _is_pre_transcript_prompt_epoch_source_sync(connection, source_version):
+        _migration_validate_legacy_source_schema_sync(connection, 6)
 
 
 def _assert_migration_path_available(path: Path) -> None:
@@ -247,6 +299,18 @@ def _migration_column_contracts(
             _MigrationColumnContract("message_digest", "TEXT", 1, None, 0),
             _MigrationColumnContract("created_at_ms", "INTEGER", 1, None, 0),
         ),
+        "harness_team_runs": (
+            _MigrationColumnContract("project_fingerprint", "TEXT", 1, None, 1),
+            _MigrationColumnContract("run_id", "TEXT", 1, None, 2),
+            _MigrationColumnContract("team_id", "TEXT", 1, None, 0),
+            _MigrationColumnContract("thread_id", "TEXT", 1, None, 0),
+            _MigrationColumnContract("parent_run_id", "TEXT", 1, None, 0),
+            _MigrationColumnContract("parent_execution_id", "TEXT", 1, None, 0),
+            _MigrationColumnContract("parent_parent_execution_id", "TEXT", 0, None, 0),
+            _MigrationColumnContract("status", "TEXT", 1, None, 0),
+            _MigrationColumnContract("tasks_json", "TEXT", 1, None, 0),
+            _MigrationColumnContract("terminal_count", "INTEGER", 1, None, 0),
+        ),
     }
     if table_name == "harness_prompt_epochs":
         prompt_columns = (
@@ -328,6 +392,20 @@ def _migration_named_index_contracts(
                     ("created_at_ms", 1),
                 ),
                 "CREATE INDEX harness_run_execution_bindings_thread_created ON harness_run_execution_bindings(project_fingerprint, thread_id, created_at_ms DESC)",
+            ),
+        ),
+        "harness_team_runs": (
+            _MigrationIndexContract(
+                "harness_team_runs_parent",
+                0,
+                "c",
+                0,
+                (
+                    ("project_fingerprint", 0),
+                    ("thread_id", 0),
+                    ("parent_run_id", 0),
+                ),
+                "CREATE INDEX harness_team_runs_parent ON harness_team_runs(project_fingerprint, thread_id, parent_run_id)",
             ),
         ),
     }
@@ -489,6 +567,21 @@ def _migration_table_sql_contract(
                 PRIMARY KEY (project_fingerprint, thread_id, run_id)
             )
         """,
+        "harness_team_runs": """
+            CREATE TABLE harness_team_runs (
+                project_fingerprint TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                team_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                parent_run_id TEXT NOT NULL,
+                parent_execution_id TEXT NOT NULL,
+                parent_parent_execution_id TEXT,
+                status TEXT NOT NULL,
+                tasks_json TEXT NOT NULL,
+                terminal_count INTEGER NOT NULL,
+                PRIMARY KEY (project_fingerprint, run_id)
+            )
+        """,
     }
     if table_name == "harness_prompt_epochs":
         prefix = (
@@ -641,6 +734,9 @@ def _migration_validate_legacy_source_schema_sync(
     ).fetchall()
     actual_tables = {str(row[0]) for row in rows}
     allowed_tables = set(required)
+    # Team 状态表由 TeamStateStore 在较新的扩展分支中提前创建；它不改变
+    # Thread schema 版本，但迁移时必须作为已知用户数据原样保留。
+    allowed_tables.add("harness_team_runs")
     if source_version >= 2:
         allowed_tables.add("harness_prompt_epochs")
     unknown = actual_tables - allowed_tables
@@ -652,6 +748,8 @@ def _migration_validate_legacy_source_schema_sync(
     if "harness_prompt_epochs" in actual_tables:
         prompt_version = max(source_version, 2)
         _migration_validate_table_contract_sync(connection, "harness_prompt_epochs", prompt_version)
+    if "harness_team_runs" in actual_tables:
+        _migration_validate_table_contract_sync(connection, "harness_team_runs", source_version)
     for table_name in required:
         _migration_validate_table_contract_sync(connection, table_name, source_version)
 
@@ -1343,7 +1441,13 @@ class ThreadPersistence:
         migration_lock: _MigrationFileLock | None = None
         try:
             data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-            os.chmod(data_dir, 0o700)
+            try:
+                os.chmod(data_dir, 0o700)
+            except PermissionError:
+                # 受限沙箱可能禁止对已存在目录重复 chmod；目录本身仍必须保持
+                # 用户私有，否则继续失败而不掩盖真正的安全问题。
+                if stat.S_IMODE(data_dir.stat().st_mode) & 0o077:
+                    raise
             path = data_dir / "threads.sqlite3"
             _assert_migration_path_available(path)
             migration_lock = _MigrationFileLock(
@@ -1388,7 +1492,11 @@ class ThreadPersistence:
                         "CHECKPOINT_MIGRATION_FINAL_VALIDATION_FAILED"
                     )
             connection = await aiosqlite.connect(path)
-            os.chmod(path, 0o600)
+            try:
+                os.chmod(path, 0o600)
+            except PermissionError:
+                if stat.S_IMODE(path.stat().st_mode) & 0o077:
+                    raise
             connection.row_factory = aiosqlite.Row
             operation_lock = asyncio.Lock()
             checkpointer = ProjectScopedAsyncSqliteSaver(
@@ -1448,6 +1556,17 @@ class ThreadPersistence:
     def project_fingerprint(self) -> str:
         """返回仅用于 namespace 和索引过滤的不可逆 project 标识。"""
         return self._project_fingerprint
+
+    def team_state_store(self) -> "SqliteTeamStateStore":
+        """返回借用同一连接和事务锁的项目级 Team 状态存储。"""
+        self._ensure_open()
+        from harness_agent.runtime.team_coordinator import SqliteTeamStateStore
+
+        return SqliteTeamStateStore(
+            self._connection,
+            project_fingerprint=self._project_fingerprint,
+            lock=self._lock,
+        )
 
     def graph_config(self, thread_id: str) -> dict[str, dict[str, str]]:
         """构造 LangGraph 所需的 thread_id 和 project 隔离 checkpoint namespace。"""
@@ -3118,8 +3237,12 @@ class ThreadPersistence:
                     raise ThreadPersistenceError("CHECKPOINT_DATABASE_CORRUPT") from exc
                 raise ThreadPersistenceError("CHECKPOINT_MIGRATION_LOCK_FAILED") from exc
 
+            # 合并前旧分支曾把尚未建立 Transcript 表的 v6 数据库标成 v7。
+            # 只在内存中把迁移步骤解释为 v6；原始 fingerprint 仍保留真实的
+            # user_version=7，保证 backup/recovery 能逐字节证明源库没有被改写。
+            pre_transcript_legacy = await self._is_pre_transcript_prompt_epoch_source()
             source_fingerprint = await self._database_fingerprint_async()
-            source_version = source_fingerprint.user_version
+            source_version = 6 if pre_transcript_legacy else source_fingerprint.user_version
             if source_version > _SCHEMA_VERSION:
                 raise ThreadPersistenceError(
                     f"CHECKPOINT_SCHEMA_TOO_NEW: found {source_version}, supports {_SCHEMA_VERSION}"
@@ -3146,7 +3269,7 @@ class ThreadPersistence:
             # 从此处到最终 commit，所有 writer 都被同一 SQLite 写事务阻止；
             # backup 看到的是含已提交 WAL 内容的同一个稳定快照。
             migration_backup = await self._create_migration_backup(
-                source_version,
+                source_fingerprint.user_version,
                 source_fingerprint,
             )
             await self._write_migration_state(
@@ -3638,11 +3761,7 @@ class ThreadPersistence:
                     return "mismatch"
                 return "final"
             if _migration_fingerprint_matches(source, actual):
-                if 1 <= source.user_version <= 6:
-                    _migration_validate_legacy_source_schema_sync(
-                        connection,
-                        source.user_version,
-                    )
+                _validate_source_schema_for_fingerprint_sync(connection, source.user_version)
                 return "source"
         except (OSError, sqlite3.Error, ThreadPersistenceError):
             return "mismatch"
@@ -3758,6 +3877,8 @@ class ThreadPersistence:
         await cursor.close()
         required = _migration_legacy_required_tables(source_version)
         allowed_tables = set(required)
+        # 见同步校验：Team 状态表是已知扩展对象，不参与 Thread schema 版本。
+        allowed_tables.add("harness_team_runs")
         if source_version >= 2:
             allowed_tables.add("harness_prompt_epochs")
         if actual_tables - allowed_tables:
@@ -3769,6 +3890,11 @@ class ThreadPersistence:
             await self._validate_table_contract_async(
                 "harness_prompt_epochs",
                 max(source_version, 2),
+            )
+        if "harness_team_runs" in actual_tables:
+            await self._validate_table_contract_async(
+                "harness_team_runs",
+                source_version,
             )
         for table_name in required:
             await self._validate_table_contract_async(table_name, source_version)
@@ -4076,6 +4202,7 @@ class ThreadPersistence:
                 "harness_run_context_snapshots",
                 "harness_thread_transcript",
                 "harness_thread_history_metadata",
+                "harness_context_artifacts",
             }:
                 await self._validate_append_only_table_async(backup_path, source_table)
                 continue
@@ -4188,6 +4315,11 @@ class ThreadPersistence:
     ) -> None:
         """校验只会由 canonical bootstrap 追加记录的旧表，禁止改写/删除原行。"""
         primary_keys = {
+            "harness_context_artifacts": (
+                "project_fingerprint",
+                "thread_id",
+                "artifact_id",
+            ),
             "harness_compression_checkpoints": (
                 "project_fingerprint",
                 "thread_id",
@@ -4361,6 +4493,7 @@ class ThreadPersistence:
             return backup_path
         except ThreadPersistenceError:
             raise
+
         except (OSError, sqlite3.Error, aiosqlite.Error) as exc:
             raise ThreadPersistenceError("CHECKPOINT_MIGRATION_BACKUP_FAILED") from exc
         finally:
@@ -4369,6 +4502,32 @@ class ThreadPersistence:
             if target is not None:
                 target.close()
             temporary.unlink(missing_ok=True)
+
+    async def _is_pre_transcript_prompt_epoch_source(self) -> bool:
+        """异步识别可按 v6 迁移的旧分支 v7 数据库，不修改原始版本号。"""
+        cursor = await self._connection.execute("PRAGMA user_version")
+        row = await cursor.fetchone()
+        await cursor.close()
+        source_version = int(row[0]) if row else 0
+        if source_version != 7:
+            return False
+        if not await self._table_exists("harness_prompt_epochs"):
+            return False
+        for table_name in (
+            "harness_thread_transcript",
+            "harness_thread_history_metadata",
+            "harness_run_context_snapshots",
+            "harness_compression_checkpoints",
+        ):
+            if await self._table_exists(table_name):
+                return False
+        try:
+            await self._validate_legacy_source_schema_async(6)
+        except ThreadPersistenceError:
+            # 保持当前 v7+ 异常残留的原有 fail-closed 行为；上层会返回
+            # CHECKPOINT_MIGRATION_LEGACY_TABLE_UNEXPECTED。
+            return False
+        return True
 
     async def _write_migration_state(
         self,
@@ -4486,11 +4645,7 @@ class ThreadPersistence:
         connection = sqlite3.connect(backup_path)
         try:
             actual = _migration_database_fingerprint_sync(connection)
-            if 1 <= expected.user_version <= 6:
-                _migration_validate_legacy_source_schema_sync(
-                    connection,
-                    expected.user_version,
-                )
+            _validate_source_schema_for_fingerprint_sync(connection, expected.user_version)
         finally:
             connection.close()
         if not _migration_fingerprint_matches(expected, actual):
@@ -4529,11 +4684,7 @@ class ThreadPersistence:
             actual = _migration_database_fingerprint_sync(connection)
             if not _migration_fingerprint_matches(expected, actual):
                 raise ThreadPersistenceError("CHECKPOINT_MIGRATION_SOURCE_CHANGED")
-            if 1 <= expected.user_version <= 6:
-                _migration_validate_legacy_source_schema_sync(
-                    connection,
-                    expected.user_version,
-                )
+            _validate_source_schema_for_fingerprint_sync(connection, expected.user_version)
         finally:
             connection.close()
 
@@ -4646,11 +4797,7 @@ class ThreadPersistence:
         connection = sqlite3.connect(backup_path)
         try:
             actual = _migration_database_fingerprint_sync(connection)
-            if 1 <= expected.user_version <= 6:
-                _migration_validate_legacy_source_schema_sync(
-                    connection,
-                    expected.user_version,
-                )
+            _validate_source_schema_for_fingerprint_sync(connection, expected.user_version)
         finally:
             connection.close()
         if not _migration_fingerprint_matches(expected, actual):
@@ -5829,6 +5976,10 @@ def _inspect_migration_source_sync(path: Path) -> tuple[int, bool]:
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='harness_prompt_epochs'"
         ).fetchone()
         has_prompt = prompt_row is not None
+        if _is_pre_transcript_prompt_epoch_source_sync(connection, source_version):
+            # 旧分支把 v6 的表结构错误标成 v7；只把经过完整契约校验的
+            # 数据库映射回 v6，交给既有隔离迁移流程升级到当前 schema。
+            return 6, True
         if 1 <= source_version <= 6:
             _migration_validate_legacy_source_schema_sync(connection, source_version)
         return source_version, has_prompt

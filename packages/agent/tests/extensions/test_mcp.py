@@ -254,6 +254,23 @@ class TestMcpConnectionManager:
         assert conns["fs"]["command"] == "npx"
         assert conns["fs"]["args"] == ["-y", "server"]
 
+    def test_plugin_stdio_uses_minimal_environment(self, monkeypatch):
+        """Plugin MCP 不继承宿主秘密，只保留最小系统环境和 manifest env。"""
+        monkeypatch.setenv("HARNESS_TEST_SECRET", "must-not-leak")
+        config = McpServerConfig(
+            name="plugin__local__review__check",
+            transport="stdio",
+            command="check",
+            env={"PLUGIN_MODE": "safe"},
+            source="plugin:local/review",
+            source_fingerprint="a" * 64,
+            inherit_environment=False,
+        )
+        connection = McpConnectionManager([config])._build_single_connection(config)
+        assert connection is not None
+        assert connection["env"]["PLUGIN_MODE"] == "safe"
+        assert "HARNESS_TEST_SECRET" not in connection["env"]
+
     def test_build_connections_http(self):
         configs = [
             McpServerConfig(
@@ -735,6 +752,28 @@ class TestMcpConfigFingerprintExpanded:
         c1 = [McpServerConfig(name="s", transport="stdio", command="cmd", timeout_seconds=10)]
         c2 = [McpServerConfig(name="s", transport="stdio", command="cmd", timeout_seconds=60)]
         assert mcp_config_fingerprint(c1) != mcp_config_fingerprint(c2)
+
+    def test_fingerprint_sensitive_to_plugin_package_identity(self):
+        """同一 MCP 定义来自不同 Plugin 包内容时必须产生不同 Engine 身份。"""
+        from harness_agent.extensions.mcp import McpServerConfig, mcp_config_fingerprint
+
+        first = McpServerConfig(
+            name="plugin__local__review__server",
+            transport="stdio",
+            command="server",
+            source="plugin:local/review",
+            source_fingerprint="a" * 64,
+            inherit_environment=False,
+        )
+        second = McpServerConfig(
+            name=first.name,
+            transport="stdio",
+            command="server",
+            source=first.source,
+            source_fingerprint="b" * 64,
+            inherit_environment=False,
+        )
+        assert mcp_config_fingerprint([first]) != mcp_config_fingerprint([second])
 
     def test_fingerprint_order_independent(self):
         from harness_agent.extensions.mcp import McpServerConfig, mcp_config_fingerprint

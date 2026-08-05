@@ -1,0 +1,33 @@
+id: demo-quality-team
+description: 代码与测试并行审查，再由 lead 汇总
+maxParallelism: 2
+failurePolicy: continue-to-synthesis
+tasks:
+  - id: code-review
+    agent: demo-code-reviewer
+    input: |
+      用户请求：
+      {{request}}
+
+      检查代码结构、实现风险和安全边界。
+  - id: test-review
+    agent: demo-test-reviewer
+    input: |
+      用户请求：
+      {{request}}
+
+      检查测试入口、已有覆盖和验证缺口。
+  - id: synthesis
+    agent: demo-review-lead
+    dependsOn: [code-review, test-review]
+    input: |
+      用户请求：
+      {{request}}
+
+      代码审查结果：
+      {{tasks.code-review.result}}
+
+      测试审查结果：
+      {{tasks.test-review.result}}
+
+      请合并为最终项目健康报告。

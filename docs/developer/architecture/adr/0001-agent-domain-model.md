@@ -118,19 +118,22 @@ interface AgentDefinition {
   id: string
   description?: string
   purpose: string
-  instructionsRef: string
-  instructionFragments?: string[]
-  inputContractRef?: string
-  outputContractRef?: string
+  instructions: string
+  inputContract?: string
+  outputContract?: string
   successCriteria?: string[]
-  modelProfileId: string
-  executionPolicyId: string
+  model: { strategy: "inherit" } | { strategy: "profile"; profile: string }
+  policy: string
+  skills?: string[]
+  mcpServers?: string[]
+  limits?: { maxTurns?: number }
 }
 ```
 
 任务职责、工作方法和表达要求都是同一 Agent 指令的章节；它们不拆分为 Role 或 Persona。
 输入/输出 contract 与 instruction fragment 是被 Agent 引用的资产，不是可独立选择的核心
-对象。AgentDefinition 不内联 Provider、模型参数、权限明细、父子关系或 Thread 状态。当前生产路径不加载 Agent catalog，也不扫描用户或项目目录；Plugin 方向重新立项前不得接入运行路径。
+对象。AgentDefinition 不内联 Provider、模型参数、权限明细、父子关系或 Thread 状态。生产路径
+只加载已安装、已校验并已启用的 Plugin catalog，仍不扫描普通用户或项目 Agent 目录。
 
 #### ThreadExecutionSelection
 
@@ -203,7 +206,7 @@ run.start 中的 ThreadExecutionSelection.rootModelProfileId
 动态子 Agent 模型
 合法 spawn model override
     > ThreadExecutionSelection.agentModelOverrides（未来能力）
-    > AgentDefinition.modelProfileId
+    > AgentDefinition.model 的 profile/inherit 策略
 ```
 
 根 Agent 的 Thread override 不应用于子 Agent；否则一次 `/model` 会意外改变 Explorer、
@@ -224,8 +227,10 @@ Reviewer 或 Tester 的成本与能力。Policy 不存在“低优先级覆盖�
 | ResolvedAgentSpec | 单次角色解析到 AgentEngine 构建/调用 | 不可变快照 | 由其静态指纹构成 Profile，不持久化 |
 
 `ResolvedAgentSpec` 是将一个内置 Agent 或未来受信 `AgentDefinition`、Model、EffectiveExecutionPolicy、
-能力 snapshot、Prompt 和执行后端描述解析后的内部 DTO；它不是配置对象、数据库表或 JSON-RPC DTO。
-当前生产实现只解析内置 `main`，不读取 Plugin Agent，也不把 Thread、Run、Team 组合或任务正文放入
+`EffectiveCapabilityView`、Prompt 和执行后端描述解析后的内部 DTO；它不是配置对象、数据库表或 JSON-RPC DTO。
+能力视图由当前实际 Tool、Skill、MCP 快照与 Policy 求交产生，并同时控制模型 schema、Skill/MCP
+子集和工具执行守卫；因此父窄子宽、Prompt 提权和伪造 tool call 都不能扩大能力。
+当前生产实现解析内置 `main` 和受信 Plugin Agent，但不把 Thread、Run、Team 组合或任务正文放入
 spec。AgentEngineProfile 只能由该 spec 的静态视图生成，AgentEngine builder 再按 Profile key 取回
 同一个 spec，不能重新解释配置。有效 Agent/Model/Policy/Prompt/工具/Skill/MCP/Sandbox/middleware
 指纹可以参与；`thread_id`、消息、run ID、审批状态、取消令牌、执行树和凭据绝不参与。
@@ -236,8 +241,10 @@ spec。AgentEngineProfile 只能由该 spec 的静态视图生成，AgentEngine 
   生命周期、可切换 UI 或跨 Agent 的强复用，必须以新 ADR 从 AgentDefinition 中抽取。
 - `InstructionFragment`、JSON Schema：文件资产，由 AgentDefinition 引用，不独立参与执行
   选择。
-- `AgentWorkflow` / `AgentTeam` / `Mailbox`：固定编排的可选未来模式。Harness 当前选择主
-  Agent 动态 delegation，故它们不是 Thread、Model 或 Run 的前置语义。
+- `AgentWorkflow`：仍是可选未来模式，不作为 Thread、Model 或 Run 的前置语义。
+- `AgentTeam`：已作为独立 TeamCoordinator 的固定 DAG 模式存在，只引用 AgentDefinition，
+  不改变 Thread、Model、Run 或 AgentEngine 的基础语义。
+- `Mailbox`：没有真实需求，当前明确不实现。
 
 ## 现有实现的兼容映射
 
@@ -251,6 +258,9 @@ spec。AgentEngineProfile 只能由该 spec 的静态视图生成，AgentEngine 
 | `ActiveRun`、`RunContext` | 单次调用控制状态 | 继续保存取消、审批、PromptEpoch 路由等易失状态；不取代持久 RunExecutionBinding |
 | TUI `threadModelSelection` / `actualModelProfile` | ThreadExecutionSelection 的当前临时投影 | 已区分未来选择与本 Run 实际绑定，并以 `run.started` 校准 |
 | `create_harness_agent()` | Python 内置主 Agent | 继续作为固定 root；不得改为读取 AgentDefinition |
+| DeepAgents `task` / `general-purpose` | `AgentDelegator` 的兼容工具与受控 Inline target | 模型只提交 target/task；模式、Policy、execution 身份和资源由 Host 决定 |
+| `AgentCatalog` / Plugin `agents/*.md` | 受信 AgentDefinition 与 ExecutionPolicy snapshot | 只通过 Managed target 进入 Pool；不得覆盖 `main` |
+| `TeamCoordinator` | 固定 TeamDefinition 的 Run-scoped DAG owner | 只调用 AgentDelegator；不持有图、消息、Prompt 或 checkpoint |
 
 当前 TOML Profile 之所以可以同时投影 Provider 和 Model，是因为 v1 仅支持 OpenAI-compatible
 连接，且每个 Profile 自带 `base_url`、凭据和模型名。该投影可能临时为每个 Profile 生成一个
@@ -261,7 +271,8 @@ canonical model 和凭据脱敏边界。
 
 - ThreadExecutionSelection、每 Run 模型解析、RunExecutionBinding 和 AgentEngineProfile 选择必须由同一领域 module 协调，不得在 Server、TUI 和存储 adapter 中各自推断。
 - 内置主 Agent 继续由 Python 固定构建，不放入 Agent catalog。
-- Agent catalog、动态 Subagent、Agent 定向模型、固定 Workflow、Team/Mailbox 和第二 Provider 都是未启用的产品方向，统一记录在 [新功能候选](../../project/新功能候选.md)。
+- Plugin Agent catalog、Agent 定向模型和固定 Team DAG 已接入；固定 Workflow、Mailbox、Team
+  产品协议/UI 和第二 Provider 仍是后续产品方向。
 - 在第二 Provider adapter 出现前不建立 Canonical Message port；出现真实的第二 adapter 时，必须先阻止 Provider 私有历史跨 adapter 泄漏。
 - `/model` 更新未来新 Thread 的配置默认时，不能修改既有 ThreadExecutionSelection 或历史 RunBinding。
 

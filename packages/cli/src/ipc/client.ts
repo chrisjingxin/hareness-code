@@ -13,6 +13,8 @@ import {
   validateOperationResult,
   validateProtocolErrorData,
   type EventEnvelope,
+  type AgentsListResult,
+  type AgentSummary,
   type ContextCompactResult,
   type ConfigChange,
   type ConfigCommitResult,
@@ -28,6 +30,13 @@ import {
   type McpRemoveResult,
   type McpStatusResult,
   type ModelsListResult,
+  type PluginsInspectResult,
+  type PluginsInstallResult,
+  type PluginsListResult,
+  type PluginsRemoveResult,
+  type PluginsSetEnabledResult,
+  type PluginsSourceParams,
+  type PluginsValidateResult,
   type OperationMap,
   type OperationName,
   type InitializeParams,
@@ -37,6 +46,14 @@ import {
   type ThreadModelSelection,
   type ThreadsListResult,
   type ThreadsOpenResult,
+  type TeamDefinition,
+  type TeamsCancelResult,
+  type TeamsGenerateParams,
+  type TeamsInspectParams,
+  type TeamsInspectResult,
+  type TeamsListResult,
+  type TeamsRunParams,
+  type TeamsRunResult,
 } from "@za38/protocol"
 import { AsyncQueue, type RpcTransport } from "./transport"
 
@@ -322,6 +339,85 @@ export class AgentClient {
   /** 从用户配置中删除 MCP 服务器。 */
   mcpRemove(name: string): Promise<McpRemoveResult> {
     return this.request(Method.MCP_REMOVE, { name })
+  }
+
+  /** 列出 Plugin registry 与当前已启用 catalog。 */
+  listPlugins(includeDisabled = true): Promise<PluginsListResult> {
+    return this.request(Method.PLUGINS_LIST, { include_disabled: includeDisabled })
+  }
+
+  /** 查看一个 Plugin 的组件兼容性和 trust 摘要。 */
+  inspectPlugin(id: string): Promise<PluginsInspectResult> {
+    return this.request(Method.PLUGINS_INSPECT, { id })
+  }
+
+  /** 离线校验本地目录或 zip，不修改 PluginStore。 */
+  validatePlugin(
+    source: string,
+    format: PluginsSourceParams["format"] = "auto",
+  ): Promise<PluginsValidateResult> {
+    return this.request(Method.PLUGINS_VALIDATE, { source, format })
+  }
+
+  /** copy-on-install 本地 Plugin；安装结果始终为 disabled。 */
+  installPlugin(
+    source: string,
+    format: PluginsSourceParams["format"] = "auto",
+  ): Promise<PluginsInstallResult> {
+    return this.request(Method.PLUGINS_INSTALL, { source, format })
+  }
+
+  /** 使用当前 capability fingerprint 显式启用或停用 Plugin。 */
+  setPluginEnabled(
+    id: string,
+    enabled: boolean,
+    capabilityFingerprint?: string,
+  ): Promise<PluginsSetEnabledResult> {
+    return this.request(Method.PLUGINS_SET_ENABLED, {
+      id,
+      enabled,
+      capability_fingerprint: capabilityFingerprint,
+    })
+  }
+
+  /** 删除 Plugin 安装记录；持久数据默认保留。 */
+  removePlugin(id: string, purgeData = false): Promise<PluginsRemoveResult> {
+    return this.request(Method.PLUGINS_REMOVE, { id, purge_data: purgeData })
+  }
+
+  /** 列出启动期固定的 Plugin Agent 摘要。 */
+  listAgents(): Promise<AgentsListResult> {
+    return this.request(Method.AGENTS_LIST, {})
+  }
+
+  /** 查看一个 Plugin Agent 的脱敏定义。 */
+  inspectAgent(id: string): Promise<AgentSummary> {
+    return this.request(Method.AGENTS_INSPECT, { id })
+  }
+
+  /** 列出固定 Team 与当前 Host 已确认的生成预览。 */
+  listTeams(): Promise<TeamsListResult> {
+    return this.request(Method.TEAMS_LIST, {})
+  }
+
+  /** 查看 TeamDefinition 或可恢复 TeamRun。 */
+  inspectTeam(kind: TeamsInspectParams["kind"], id: string): Promise<TeamsInspectResult> {
+    return this.request(Method.TEAMS_INSPECT, { kind, id })
+  }
+
+  /** 从已验证 Agent ID 生成 fanout Team 预览。 */
+  generateTeam(params: TeamsGenerateParams): Promise<TeamDefinition> {
+    return this.request(Method.TEAMS_GENERATE, params)
+  }
+
+  /** 异步启动一个固定 Team。 */
+  runTeam(params: TeamsRunParams): Promise<TeamsRunResult> {
+    return this.request(Method.TEAMS_RUN, params)
+  }
+
+  /** 请求取消一个当前 Host 中活动的 TeamRun。 */
+  cancelTeam(runId: string): Promise<TeamsCancelResult> {
+    return this.request(Method.TEAMS_CANCEL, { run_id: runId })
   }
 
   /** 读取 `/model` Picker 所需的脱敏 Profile 目录与可选 Thread 绑定。 */

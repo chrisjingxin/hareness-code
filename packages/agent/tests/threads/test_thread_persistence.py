@@ -40,7 +40,11 @@ from harness_agent.threads.thread_persistence import (
     ThreadPersistence,
     ThreadPersistenceError,
 )
-from tests.support.thread_fixtures import accept_thread, test_binding as make_test_binding
+from tests.support.thread_fixtures import (
+    accept_thread,
+    create_legacy_prompt_epoch_table,
+    test_binding as make_test_binding,
+)
 
 
 class ToolCallingFakeChatModel(GenericFakeChatModel):
@@ -2450,6 +2454,74 @@ async def test_v6_source_rejects_forward_or_unknown_tables_before_backup(
         ).fetchone()
     finally:
         connection.close()
+
+
+async def test_pre_transcript_branch_v7_prompt_epoch_migrates_to_current_schema(
+    tmp_path: Path,
+) -> None:
+    """合并前把 v6 误标为 v7 的旧库可安全迁移且保留 Team 状态表。"""
+    home, project, database = await _new_v6_fixture(tmp_path)
+    project_fingerprint = hashlib.sha256(str(project.resolve()).encode("utf-8")).hexdigest()
+    connection = sqlite3.connect(database)
+    try:
+        create_legacy_prompt_epoch_table(connection)
+        connection.execute(
+            """
+            INSERT INTO harness_prompt_epochs (
+                project_fingerprint, thread_id, prompt_version, system_prompt,
+                environment_snapshot, readonly_memory, skill_index,
+                tool_schema_fingerprint, system_fingerprint,
+                history_rewrite_version, prefix_change_reason, created_at_ms
+            ) VALUES (?, 'migration-fixture', 1, '旧分支上下文', '{}', '{}', '{}', 'tool', 'fp', 'v1', 'new_thread', 123)
+            """,
+            (project_fingerprint,),
+        )
+        connection.execute(
+            """
+            CREATE TABLE harness_team_runs (
+                project_fingerprint TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                team_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                parent_run_id TEXT NOT NULL,
+                parent_execution_id TEXT NOT NULL,
+                parent_parent_execution_id TEXT,
+                status TEXT NOT NULL,
+                tasks_json TEXT NOT NULL,
+                terminal_count INTEGER NOT NULL,
+                PRIMARY KEY (project_fingerprint, run_id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX harness_team_runs_parent
+            ON harness_team_runs(project_fingerprint, thread_id, parent_run_id)
+            """
+        )
+        connection.execute("PRAGMA user_version=7")
+        connection.commit()
+    finally:
+        connection.close()
+
+    migrated = await ThreadPersistence.open(project=project, home=home)
+    try:
+        check = sqlite3.connect(database)
+        try:
+            assert check.execute("PRAGMA user_version").fetchone()[0] == thread_persistence_module._SCHEMA_VERSION
+            assert check.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='harness_prompt_epochs'"
+            ).fetchone() is None
+            assert check.execute(
+                "SELECT COUNT(*) FROM harness_run_context_snapshots WHERE legacy=1"
+            ).fetchone()[0] == 1
+            assert check.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='harness_team_runs'"
+            ).fetchone() is not None
+        finally:
+            check.close()
+    finally:
+        await migrated.close()
 
 
 @pytest.mark.parametrize("source_version", (7, 8, 9, 10, thread_persistence_module._SCHEMA_VERSION))

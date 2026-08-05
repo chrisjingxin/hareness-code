@@ -2,16 +2,16 @@
 
 export const PROTOCOL_MAJOR = 3 as const
 export const PROTOCOL_MINOR = 0 as const
-export const PROTOCOL_SCHEMA_SHA256 = "45c91425e64abad7fc679a7a5928d0a8cb137535b7c90f487d41a7254b672cc3" as const
+export const PROTOCOL_SCHEMA_SHA256 = "1abd4b1dc9073c96af8d46e9282851080f32a695b50d9f18c02d0f3000f71de9" as const
 export const MAX_FRAME_BYTES = 8388608 as const
 export const MAX_TOOL_PAYLOAD_BYTES = 1048576 as const
-export const CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","mcp.status","mcp.add","mcp.remove","host.attachment.create"] as const
+export const CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","plugins.list","plugins.inspect","plugins.validate","plugins.install","plugins.set_enabled","plugins.remove","agents.list","agents.inspect","teams.list","teams.inspect","teams.generate","teams.run","teams.cancel","mcp.status","mcp.add","mcp.remove","host.attachment.create"] as const
 export const EVENT_TYPES = ["run.started","skill.loaded","content.delta","tool.started","tool.delta","tool.completed","context.updated","interaction.resolved","run.completed","run.cancelled","run.failed"] as const
 export const INTERACTION_METHODS = ["interaction.approval","interaction.question"] as const
-export const SERVER_CAPABILITIES = ["run.cancel","run.multithread","config.read","config.write","threads.read","context.manage","skills.read","skills.manage","mcp.read","mcp.manage","models.read","models.select","host.attach"] as const
-export const OPERATION_CAPABILITIES = {"initialize":null,"run.start":null,"run.cancel":"run.cancel","context.compact":"context.manage","config.show":"config.read","config.path":"config.read","config.details":"config.write","config.preview":"config.write","config.commit":"config.write","threads.list":"threads.read","threads.open":"threads.read","threads.watch":"threads.read","threads.unwatch":"threads.read","models.list":"models.read","skills.list":"skills.read","skills.inspect":"skills.read","skills.set_enabled":"skills.manage","skills.install":"skills.manage","skills.update":"skills.manage","skills.remove":"skills.manage","skills.market.list":"skills.read","mcp.status":"mcp.read","mcp.add":"mcp.manage","mcp.remove":"mcp.manage","host.attachment.create":"host.attach"} as const
+export const SERVER_CAPABILITIES = ["run.cancel","run.multithread","config.read","config.write","threads.read","context.manage","skills.read","skills.manage","mcp.read","mcp.manage","plugins.read","plugins.manage","agents.read","teams.read","teams.manage","models.read","models.select","host.attach"] as const
+export const OPERATION_CAPABILITIES = {"initialize":null,"run.start":null,"run.cancel":"run.cancel","context.compact":"context.manage","config.show":"config.read","config.path":"config.read","config.details":"config.write","config.preview":"config.write","config.commit":"config.write","threads.list":"threads.read","threads.open":"threads.read","threads.watch":"threads.read","threads.unwatch":"threads.read","models.list":"models.read","skills.list":"skills.read","skills.inspect":"skills.read","skills.set_enabled":"skills.manage","skills.install":"skills.manage","skills.update":"skills.manage","skills.remove":"skills.manage","skills.market.list":"skills.read","plugins.list":"plugins.read","plugins.inspect":"plugins.read","plugins.validate":"plugins.read","plugins.install":"plugins.manage","plugins.set_enabled":"plugins.manage","plugins.remove":"plugins.manage","agents.list":"agents.read","agents.inspect":"agents.read","teams.list":"teams.read","teams.inspect":"teams.read","teams.generate":"teams.manage","teams.run":"teams.manage","teams.cancel":"teams.manage","mcp.status":"mcp.read","mcp.add":"mcp.manage","mcp.remove":"mcp.manage","host.attachment.create":"host.attach"} as const
 export const INTERACTION_HANDLES = {"interaction.approval":"approval","interaction.question":"question"} as const
-export const Capability = {"RUN_CANCEL":"run.cancel","RUN_MULTITHREAD":"run.multithread","CONFIG_READ":"config.read","CONFIG_WRITE":"config.write","THREADS_READ":"threads.read","CONTEXT_MANAGE":"context.manage","SKILLS_READ":"skills.read","SKILLS_MANAGE":"skills.manage","MCP_READ":"mcp.read","MCP_MANAGE":"mcp.manage","MODELS_READ":"models.read","MODELS_SELECT":"models.select","HOST_ATTACH":"host.attach"} as const
+export const Capability = {"RUN_CANCEL":"run.cancel","RUN_MULTITHREAD":"run.multithread","CONFIG_READ":"config.read","CONFIG_WRITE":"config.write","THREADS_READ":"threads.read","CONTEXT_MANAGE":"context.manage","SKILLS_READ":"skills.read","SKILLS_MANAGE":"skills.manage","MCP_READ":"mcp.read","MCP_MANAGE":"mcp.manage","PLUGINS_READ":"plugins.read","PLUGINS_MANAGE":"plugins.manage","AGENTS_READ":"agents.read","TEAMS_READ":"teams.read","TEAMS_MANAGE":"teams.manage","MODELS_READ":"models.read","MODELS_SELECT":"models.select","HOST_ATTACH":"host.attach"} as const
 export const EventType = {"RUN_STARTED":"run.started","SKILL_LOADED":"skill.loaded","CONTENT_DELTA":"content.delta","TOOL_STARTED":"tool.started","TOOL_DELTA":"tool.delta","TOOL_COMPLETED":"tool.completed","CONTEXT_UPDATED":"context.updated","INTERACTION_RESOLVED":"interaction.resolved","RUN_COMPLETED":"run.completed","RUN_CANCELLED":"run.cancelled","RUN_FAILED":"run.failed"} as const
 
 export const Method = {
@@ -36,6 +36,19 @@ export const Method = {
   SKILLS_UPDATE: "skills.update",
   SKILLS_REMOVE: "skills.remove",
   SKILLS_MARKET_LIST: "skills.market.list",
+  PLUGINS_LIST: "plugins.list",
+  PLUGINS_INSPECT: "plugins.inspect",
+  PLUGINS_VALIDATE: "plugins.validate",
+  PLUGINS_INSTALL: "plugins.install",
+  PLUGINS_SET_ENABLED: "plugins.set_enabled",
+  PLUGINS_REMOVE: "plugins.remove",
+  AGENTS_LIST: "agents.list",
+  AGENTS_INSPECT: "agents.inspect",
+  TEAMS_LIST: "teams.list",
+  TEAMS_INSPECT: "teams.inspect",
+  TEAMS_GENERATE: "teams.generate",
+  TEAMS_RUN: "teams.run",
+  TEAMS_CANCEL: "teams.cancel",
   MCP_STATUS: "mcp.status",
   MCP_ADD: "mcp.add",
   MCP_REMOVE: "mcp.remove",
@@ -56,12 +69,13 @@ export type JsonRpcMessage = JsonRpcRequest | JsonRpcNotification | JsonRpcRespo
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
 export type JsonObject = Record<string, JsonValue>
 export type JsonObjectArray = Array<JsonObject>
+export type AgentCommand = { "id": string; "name": string; "description": string; "argument_hint": string | null; "requested_skill_id": string; "plugin_id": string }
 export type EmptyParams = {  }
 export type ProtocolRange = { "major": 3; "min_minor": number; "max_minor": number }
 export type ClientInfo = { "name": string; "version": string; "kind": string }
 export type ClientCapabilities = { "requests": Array<string>; "handles": Array<"approval" | "question"> }
 export type InitializeParams = { "protocol": ProtocolRange; "client": ClientInfo; "capabilities": ClientCapabilities }
-export type InitializeResult = { "protocol": { "major": 3; "minor": number }; "server": { "name": string; "version": string }; "connection": { "id": string; "role": "owner" | "attached"; "project": { "id": string; "label": string } }; "capabilities": { "available": Array<string>; "enabled": Array<string>; "handles": Array<"approval" | "question"> }; "agent_commands": Array<JsonObject>; "skills_snapshot": { "id": string; "count": number }; "skill_diagnostics": Array<string>; "limits": { "max_frame_bytes": number; "max_tool_payload_bytes": number }; "config_summary": (JsonObject) | (null); "startup_error": ({ "code": string; "message": string }) | (null) }
+export type InitializeResult = { "protocol": { "major": 3; "minor": number }; "server": { "name": string; "version": string }; "connection": { "id": string; "role": "owner" | "attached"; "project": { "id": string; "label": string } }; "capabilities": { "available": Array<string>; "enabled": Array<string>; "handles": Array<"approval" | "question"> }; "agent_commands": Array<AgentCommand>; "skills_snapshot": { "id": string; "count": number }; "skill_diagnostics": Array<string>; "limits": { "max_frame_bytes": number; "max_tool_payload_bytes": number }; "config_summary": (JsonObject) | (null); "startup_error": ({ "code": string; "message": string }) | (null) }
 export type RequestedSkill = { "id": string; "args"?: string }
 export type ThreadModelSelection = { "primary_profile": string }
 export type ApprovalMode = "plan" | "default" | "auto-edit" | "auto" | "yolo"
@@ -98,7 +112,26 @@ export type SkillsSetEnabledParams = { "id": string; "enabled": boolean }
 export type SkillsInstallParams = { "market": string; "name": string; "version"?: string }
 export type SkillsMarketListParams = { "market"?: string }
 export type SkillsListResult = { "snapshot": JsonObject; "skills": JsonObjectArray; "diagnostics": Array<string> }
-export type McpServerStatus = { "name": string; "transport": "stdio" | "http" | "sse"; "status": "connected" | "failed" | "skipped"; "error"?: string; "tool_names": Array<string> }
+export type PluginsListParams = { "include_disabled"?: boolean }
+export type PluginsInspectParams = { "id": string }
+export type PluginsSourceParams = { "source": string; "format"?: "auto" | "agent-plugins-1.0" | "claude-code" }
+export type PluginsSetEnabledParams = { "id": string; "enabled": boolean; "capability_fingerprint"?: string }
+export type PluginsRemoveParams = { "id": string; "purge_data"?: boolean }
+export type AgentSummary = { "id": string; "description": string | null; "purpose": string; "model_profile_id": string; "execution_policy_id": string; "requested_skills": Array<string>; "requested_mcp_servers": Array<string>; "max_turns": number | null; "source": string; "fingerprint": string }
+export type AgentsListResult = { "snapshot_id": string; "agents": Array<AgentSummary>; "diagnostics": Array<string> }
+export type AgentsInspectParams = { "id": string }
+export type TeamTaskDefinition = { "id": string; "agent_id": string; "depends_on": Array<string>; "access": "read" | "write"; "timeout_seconds": number }
+export type TeamDefinition = { "id": string; "description": string | null; "max_parallelism": number; "failure_policy": "fail-fast" | "continue" | "continue-to-synthesis"; "tasks": Array<TeamTaskDefinition> }
+export type TeamTaskState = { "id": string; "status": "pending" | "running" | "completed" | "failed" | "cancelled" | "blocked"; "execution_id": string | null; "result": JsonObject; "error_code": string | null; "attempts": number }
+export type TeamRun = { "run_id": string; "team_id": string; "thread_id": string; "status": "running" | "completed" | "failed" | "cancelled"; "terminal_count": number; "tasks": Array<TeamTaskState> }
+export type TeamsListResult = { "teams": Array<TeamDefinition>; "diagnostics": Array<string> }
+export type TeamsInspectParams = { "kind": "definition" | "run"; "id": string }
+export type TeamsGenerateParams = { "id": string; "lead_agent_id": string; "worker_agent_ids": Array<string>; "max_parallelism"?: number }
+export type TeamsRunParams = { "team_id": string; "request": string; "thread_id": string; "run_id": string }
+export type TeamsRunResult = { "team_id": string; "run_id": string; "accepted": true }
+export type TeamsCancelParams = { "run_id": string }
+export type TeamsCancelResult = { "run_id": string; "cancelled": boolean }
+export type McpServerStatus = { "name": string; "transport": "stdio" | "http" | "sse"; "source"?: string; "status": "connected" | "failed" | "skipped"; "error"?: string; "tool_names": Array<string> }
 export type McpStatusResult = { "servers": Array<McpServerStatus>; "total_tools": number }
 export type McpAddParams = ({ "name": string; "transport": "stdio"; "command": string; "args"?: Array<string>; "env"?: Record<string, string> }) | ({ "name": string; "transport": "http" | "sse"; "url": string; "headers"?: Record<string, string> })
 export type McpAddResult = { "added": boolean; "connected": boolean; "tool_names": Array<string>; "error"?: string | null }
@@ -144,6 +177,19 @@ export type SkillsUpdateResult = JsonObject
 export type SkillsRemoveParams = SkillsInspectParams
 export type SkillsRemoveResult = JsonObject
 export type SkillsMarketListResult = JsonObjectArray
+export type PluginsListResult = JsonObject
+export type PluginsInspectResult = JsonObject
+export type PluginsValidateParams = PluginsSourceParams
+export type PluginsValidateResult = JsonObject
+export type PluginsInstallParams = PluginsSourceParams
+export type PluginsInstallResult = JsonObject
+export type PluginsSetEnabledResult = JsonObject
+export type PluginsRemoveResult = JsonObject
+export type AgentsListParams = EmptyParams
+export type AgentsInspectResult = AgentSummary
+export type TeamsListParams = EmptyParams
+export type TeamsInspectResult = JsonObject
+export type TeamsGenerateResult = TeamDefinition
 export type McpStatusParams = EmptyParams
 
 export interface OperationMap {
@@ -168,6 +214,19 @@ export interface OperationMap {
   "skills.update": { params: SkillsUpdateParams; result: SkillsUpdateResult }
   "skills.remove": { params: SkillsRemoveParams; result: SkillsRemoveResult }
   "skills.market.list": { params: SkillsMarketListParams; result: SkillsMarketListResult }
+  "plugins.list": { params: PluginsListParams; result: PluginsListResult }
+  "plugins.inspect": { params: PluginsInspectParams; result: PluginsInspectResult }
+  "plugins.validate": { params: PluginsValidateParams; result: PluginsValidateResult }
+  "plugins.install": { params: PluginsInstallParams; result: PluginsInstallResult }
+  "plugins.set_enabled": { params: PluginsSetEnabledParams; result: PluginsSetEnabledResult }
+  "plugins.remove": { params: PluginsRemoveParams; result: PluginsRemoveResult }
+  "agents.list": { params: AgentsListParams; result: AgentsListResult }
+  "agents.inspect": { params: AgentsInspectParams; result: AgentsInspectResult }
+  "teams.list": { params: TeamsListParams; result: TeamsListResult }
+  "teams.inspect": { params: TeamsInspectParams; result: TeamsInspectResult }
+  "teams.generate": { params: TeamsGenerateParams; result: TeamsGenerateResult }
+  "teams.run": { params: TeamsRunParams; result: TeamsRunResult }
+  "teams.cancel": { params: TeamsCancelParams; result: TeamsCancelResult }
   "mcp.status": { params: McpStatusParams; result: McpStatusResult }
   "mcp.add": { params: McpAddParams; result: McpAddResult }
   "mcp.remove": { params: McpRemoveParams; result: McpRemoveResult }

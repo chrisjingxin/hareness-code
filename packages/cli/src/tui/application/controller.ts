@@ -17,12 +17,14 @@ import {
 
 import { AgentClient, JsonRpcRemoteError } from "../../ipc/client"
 import {
+  createCommandRegistry,
   defaultCommandContext,
   findCommandMenuItems,
   parseSlashCommand,
   resolveSlashCommand,
   unknownCommandNotice,
   type CommandMenuItem,
+  type CommandRegistry,
   type SkillMenuItem,
   type SlashCommand,
 } from "./commands"
@@ -178,6 +180,7 @@ type PendingInteraction = {
 class TuiControllerImpl implements TuiController {
   private readonly client: AgentClient
   private readonly baseRuntime: TuiRuntime
+  private readonly commandRegistry: CommandRegistry
   private readonly promptHistoryFile: string | undefined
   private readonly onRequestExit: () => void
   private readonly openWeb?: (threadId: string) => Promise<string>
@@ -219,6 +222,7 @@ class TuiControllerImpl implements TuiController {
   constructor(options: TuiControllerOptions) {
     this.client = options.client
     this.baseRuntime = options.runtime
+    this.commandRegistry = createCommandRegistry(options.runtime.agentCommands)
     this.promptHistoryFile = options.promptHistoryFile
     this.onRequestExit = options.onRequestExit
     this.openWeb = options.openWeb
@@ -372,7 +376,12 @@ class TuiControllerImpl implements TuiController {
       draft: this.draft,
       draftCursor: this.draftCursor,
       commandMenu: { ...this.commandMenu },
-      commandOptions: findCommandMenuItems(this.draft, this.skills, tuiCommandContext(runtime, this.state)),
+      commandOptions: findCommandMenuItems(
+        this.draft,
+        this.skills,
+        tuiCommandContext(runtime, this.state),
+        this.commandRegistry,
+      ),
       selectedSkill: this.selectedSkill,
       skills: this.pickerSnapshot(this.skillPicker, filterSkills(this.skills, this.skillPicker.query)),
       threads: this.pickerSnapshot(this.threadPicker, filterThreads(this.threads, this.threadPicker.query)),
@@ -411,7 +420,7 @@ class TuiControllerImpl implements TuiController {
     this.draftCursor = undefined
     this.draft = value
     const query = value.trimStart()
-    const resolution = resolveSlashCommand(query)
+    const resolution = resolveSlashCommand(query, this.commandRegistry)
     const shouldShowMenu = query.startsWith("/")
       && !query.startsWith("//")
       && !query.slice(1).match(/\s/)
@@ -462,7 +471,7 @@ class TuiControllerImpl implements TuiController {
       this.respondQuestion(input)
       return
     }
-    const resolution = resolveSlashCommand(rawValue)
+    const resolution = resolveSlashCommand(rawValue, this.commandRegistry)
     if (resolution.kind === "command") {
       await this.executeSlashCommand(resolution.command)
       return
@@ -484,7 +493,14 @@ class TuiControllerImpl implements TuiController {
   /** 解析稳定命令 ID 后交给 Dispatcher，再由 Controller 执行完整工作流。 */
   private async executeSlashCommand(command: SlashCommand): Promise<void> {
     const current = this.state
-    await this.applyCommandResult(dispatchSlashCommandForController(command, this.snapshot.runtime, current))
+    await this.applyCommandResult(
+      dispatchSlashCommandForController(
+        command,
+        this.snapshot.runtime,
+        current,
+        this.commandRegistry,
+      ),
+    )
   }
 
   /** 执行 Dispatcher 结果；React 不再解释任何领域命令分支。 */
@@ -522,7 +538,11 @@ class TuiControllerImpl implements TuiController {
         this.commit(startContextCompaction)
         try {
           if (!isClientMethod(result.method)) throw new Error(`Unsupported operation: ${result.method}`)
-          const value = await this.client.compactContext(result.params.thread_id)
+          const threadId = result.params.thread_id
+          if (typeof threadId !== "string" || !threadId) {
+            throw new Error("context.compact requires a thread_id")
+          }
+          const value = await this.client.compactContext(threadId)
           await this.applyCommandResult(result.onSuccess(value))
         } catch (error) {
           await this.applyCommandResult(result.onError(error))
@@ -585,7 +605,7 @@ class TuiControllerImpl implements TuiController {
         await this.selectCommandMenu()
         return
       case "command-block": {
-        const resolution = resolveSlashCommand(this.draft)
+        const resolution = resolveSlashCommand(this.draft, this.commandRegistry)
         if (resolution.kind === "unknown") {
           this.clearDraft()
           this.commit(current => appendNotice(current, unknownCommandNotice(resolution)))
@@ -674,7 +694,7 @@ class TuiControllerImpl implements TuiController {
 
   /** 处理当前命令菜单选中项；领域命令仍按 canonical ID 执行。 */
   private async selectCommandMenu(): Promise<void> {
-    const directCommand = parseSlashCommand(this.draft)
+    const directCommand = parseSlashCommand(this.draft, this.commandRegistry)
     if (directCommand && !directCommand.argument) {
       this.clearDraft()
       await this.executeSlashCommand(directCommand)
@@ -701,7 +721,7 @@ class TuiControllerImpl implements TuiController {
       return
     }
     if (this.state.activeRun) {
-      const command = parseSlashCommand(`/${item.command.name}`)
+      const command = parseSlashCommand(`/${item.command.name}`, this.commandRegistry)
       this.clearDraft()
       if (command) await this.executeSlashCommand(command)
       return
@@ -1241,13 +1261,14 @@ function dispatchSlashCommandForController(
   command: SlashCommand,
   runtime: TuiRuntime,
   state: TuiState,
+  registry: CommandRegistry,
 ): CommandResult {
   return dispatchSlashCommand(command, {
     commandContext: tuiCommandContext(runtime, state),
     threadId: state.threadId,
     runtimeStatus: runtimeStatusSummary(runtime),
     versionSummary: `za38-cli ${runtime.cliVersion} · JSON-RPC v3`,
-  })
+  }, registry)
 }
 
 function tuiCommandContext(runtime: TuiRuntime, state: TuiState) {

@@ -7,13 +7,27 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from harness_agent.runtime.agent_catalog import EffectiveExecutionPolicy
+from harness_agent.runtime.agent_catalog import (
+    AgentCatalog,
+    AgentDefinition,
+    DelegationPolicy,
+    EffectiveExecutionPolicy,
+    ExecutionPolicyDefinition,
+    StringRule,
+    intersect_execution_policies,
+)
 from harness_agent.runtime.agent_engine_profile import component_fingerprint
-from harness_agent.config.config import ExecutionSettings, ModelSettings
-from harness_agent.runtime.execution_binding import ResolvedExecutionBinding
+from harness_agent.config.config import ExecutionSettings, ModelCatalog, ModelSettings
+from harness_agent.runtime.execution_binding import ResolvedExecutionBinding, SafeModelProfile
 from harness_agent.extensions.mcp import McpConfigSnapshot
 from harness_agent.threads.prompting import canonical_json, sha256_text, tool_schema_fingerprint
-from harness_agent.extensions.skills import SkillRegistry
+from harness_agent.extensions.plugin_skills import SkillRegistry
+from harness_agent.policy.capability_policy import (
+    BUILTIN_TOOL_NAMES,
+    EffectiveCapabilityView,
+    resolve_effective_capability_view,
+)
+from harness_agent.extensions.mcp import build_mcp_snapshot
 
 
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
@@ -49,7 +63,9 @@ class ResolvedAgentSpec:
     definition_fingerprint: str
     model_profile_id: str
     model_settings: ModelSettings
+    model_view: SafeModelProfile
     effective_policy: EffectiveExecutionPolicy
+    capability_view: EffectiveCapabilityView
     tools: tuple[Any, ...]
     skill_registry: SkillRegistry
     mcp_snapshot: McpConfigSnapshot
@@ -85,6 +101,8 @@ class ResolvedAgentSpec:
                 raise ValueError(f"RESOLVED_AGENT_{name.upper()}_INVALID")
         if not self.prompt:
             raise ValueError("RESOLVED_AGENT_PROMPT_INVALID")
+        if self.capability_view.policy_fingerprint != self.effective_policy.fingerprint:
+            raise ValueError("RESOLVED_AGENT_CAPABILITY_POLICY_MISMATCH")
         object.__setattr__(self, "tools", tuple(self.tools))
         object.__setattr__(self, "workspace", Path(self.workspace))
 
@@ -172,26 +190,50 @@ def resolve_builtin_main_agent_spec(
     mcp_tools: tuple[Any, ...],
     interactive: bool,
     pinned: bool,
+    delegation_agent_ids: tuple[str, ...] = (),
 ) -> ResolvedAgentSpec:
     """解析当前内置 main；不读取 Plugin catalog，也不携带 Thread/Run 状态。"""
     from harness_agent.runtime.agent import (
         default_prompt_template_fingerprint,
         default_system_prompt,
-        default_tool_catalog_fingerprint,
     )
 
     policy = EffectiveExecutionPolicy(
         policy_ids=("builtin-main",),
         tools=None,
+        mcp_tools=None,
+        skills=None,
         filesystem_read=None,
         filesystem_write=None,
         shell=None,
         network=None,
         isolation=execution.mode,
         approval_mode=str(execution.approval_mode),
-        delegation=None,
+        delegation=DelegationPolicy(
+            enabled=True,
+            allowed_agents=("general-purpose", *tuple(sorted(set(delegation_agent_ids)))),
+            max_depth=1,
+            max_parallelism=4,
+        ),
     )
-    tools = tuple(mcp_tools)
+    mcp_tool_names = tuple(
+        str(getattr(tool, "name", ""))
+        if not isinstance(tool, dict)
+        else str(tool.get("name", ""))
+        for tool in mcp_tools
+    )
+    capability_view = resolve_effective_capability_view(
+        policy,
+        available_tools=(*BUILTIN_TOOL_NAMES, *mcp_tool_names),
+        mcp_tool_names=mcp_tool_names,
+        available_skill_ids=(record.skill_id for record in skill_registry.records),
+    )
+    tools = tuple(
+        tool
+        for tool, name in zip(mcp_tools, mcp_tool_names, strict=True)
+        if name in capability_view.mcp_tool_names
+    )
+    effective_skills = skill_registry.restricted(capability_view.skill_ids)
     return ResolvedAgentSpec(
         project_fingerprint=project_fingerprint,
         role="primary",
@@ -199,23 +241,25 @@ def resolve_builtin_main_agent_spec(
         definition_fingerprint=BUILTIN_MAIN_DEFINITION_FINGERPRINT,
         model_profile_id=binding.primary_profile.profile_id,
         model_settings=binding.primary_profile.settings,
+        model_view=binding.safe_primary,
         effective_policy=policy,
+        capability_view=capability_view,
         tools=tools,
-        skill_registry=skill_registry,
+        skill_registry=effective_skills,
         mcp_snapshot=mcp_snapshot,
         prompt=default_system_prompt(),
         execution=execution,
         workspace=workspace,
         interactive=interactive,
-        tool_view_fingerprint=sha256_text(
+        tool_view_fingerprint=capability_view.fingerprint,
+        skill_view_fingerprint=sha256_text(
             canonical_json(
                 {
-                    "builtin": default_tool_catalog_fingerprint(),
-                    "mcp": tool_schema_fingerprint(tools),
+                    "view": capability_view.fingerprint,
+                    "skills": effective_skills.snapshot_id,
                 }
             )
         ),
-        skill_view_fingerprint=sha256_text(f"skills:{skill_registry.snapshot_id}"),
         middleware_fingerprint=sha256_text(
             str(
                 (
@@ -243,4 +287,189 @@ def resolve_builtin_main_agent_spec(
         ),
         pinned=pinned,
         enable_ask_user=interactive,
+    )
+
+
+def resolve_plugin_agent_spec(
+    *,
+    definition: AgentDefinition,
+    catalog: AgentCatalog,
+    parent_policy: EffectiveExecutionPolicy,
+    model_catalog: ModelCatalog,
+    project_fingerprint: str,
+    workspace: Path,
+    execution: ExecutionSettings,
+    skill_registry: SkillRegistry,
+    mcp_snapshot: McpConfigSnapshot,
+    mcp_tools: tuple[Any, ...],
+    interactive: bool,
+    inherited_model_profile_id: str,
+) -> ResolvedAgentSpec:
+    """把 Plugin Agent 请求解析为唯一、只收紧的构图快照。"""
+    model_profile = model_catalog.require_profile(
+        inherited_model_profile_id
+        if definition.model_profile_id == "inherit"
+        else definition.model_profile_id
+    )
+    effective = catalog.effective_policy(
+        definition.agent_id,
+        envelope=parent_policy,
+    )
+    requested_skill_ids = _resolve_requested_skill_ids(
+        definition.requested_skills,
+        skill_registry,
+        source=definition.source,
+    )
+    effective = intersect_execution_policies(
+        effective,
+        ExecutionPolicyDefinition(
+            policy_id=f"{definition.agent_id}-component-request",
+            source=definition.source,
+            skills=StringRule(allow=requested_skill_ids),
+            mcp_tools=StringRule(
+                allow=_resolve_requested_mcp_tool_names(
+                    definition,
+                    mcp_snapshot,
+                    mcp_tools,
+                )
+            ),
+        ),
+    )
+    mcp_tool_names = tuple(
+        str(getattr(tool, "name", ""))
+        if not isinstance(tool, dict)
+        else str(tool.get("name", ""))
+        for tool in mcp_tools
+    )
+    capability_view = resolve_effective_capability_view(
+        effective,
+        available_tools=(*BUILTIN_TOOL_NAMES, *mcp_tool_names),
+        mcp_tool_names=mcp_tool_names,
+        available_skill_ids=(record.skill_id for record in skill_registry.records),
+    )
+    tools = tuple(
+        tool
+        for tool, name in zip(mcp_tools, mcp_tool_names, strict=True)
+        if name in capability_view.mcp_tool_names
+    )
+    selected_servers = tuple(
+        server
+        for server in mcp_snapshot.servers
+        if any(
+            name.startswith(f"{server.name}_")
+            for name in capability_view.mcp_tool_names
+        )
+    )
+    effective_mcp_snapshot = build_mcp_snapshot(
+        selected_servers,
+        revision=mcp_snapshot.revision,
+    )
+    effective_skills = skill_registry.restricted(capability_view.skill_ids)
+    prompt_fingerprint = sha256_text(definition.prompt)
+    return ResolvedAgentSpec(
+        project_fingerprint=project_fingerprint,
+        role="delegate",
+        agent_id=definition.agent_id,
+        definition_fingerprint=definition.fingerprint,
+        model_profile_id=model_profile.profile_id,
+        model_settings=model_profile.settings,
+        model_view=SafeModelProfile.from_profile(model_profile),
+        effective_policy=effective,
+        capability_view=capability_view,
+        tools=tools,
+        skill_registry=effective_skills,
+        mcp_snapshot=effective_mcp_snapshot,
+        prompt=definition.prompt,
+        execution=execution,
+        workspace=workspace,
+        interactive=interactive,
+        tool_view_fingerprint=capability_view.fingerprint,
+        skill_view_fingerprint=sha256_text(
+            canonical_json(
+                {
+                    "view": capability_view.fingerprint,
+                    "skills": effective_skills.snapshot_id,
+                }
+            )
+        ),
+        middleware_fingerprint=sha256_text(
+            canonical_json(
+                {
+                    "kind": "plugin-agent-v1",
+                    "source": definition.source,
+                    "max_turns": definition.max_turns,
+                }
+            )
+        ),
+        prompt_template_fingerprint=prompt_fingerprint,
+        sandbox_config_fingerprint=sha256_text(
+            canonical_json(
+                {
+                    "mode": execution.mode,
+                    "provider": execution.remote.provider if execution.remote else None,
+                    "working_directory": (
+                        execution.remote.working_directory if execution.remote else None
+                    ),
+                    "params": dict(execution.remote.params) if execution.remote else {},
+                }
+            )
+        ),
+        pinned=False,
+        enable_ask_user=False,
+        enable_memory=False,
+    )
+
+
+def _resolve_requested_skill_ids(
+    requested: tuple[str, ...],
+    registry: SkillRegistry,
+    *,
+    source: str,
+) -> tuple[str, ...]:
+    """将 Claude/portable 的包内短名解析为当前 snapshot 的唯一 canonical ID。"""
+    plugin_name = source.removeprefix("plugin:")
+    resolved: list[str] = []
+    for name in requested:
+        exact = [record.skill_id for record in registry.records if record.skill_id == name]
+        suffix = [
+            record.skill_id
+            for record in registry.records
+            if record.skill_id.endswith(f"/{plugin_name}/{name}")
+        ]
+        matches = exact or suffix
+        if len(matches) == 1:
+            resolved.append(matches[0])
+    return tuple(sorted(set(resolved)))
+
+
+def _resolve_requested_mcp_tool_names(
+    definition: AgentDefinition,
+    snapshot: McpConfigSnapshot,
+    tools: tuple[Any, ...],
+) -> tuple[str, ...]:
+    """把 Agent 的包内 MCP Server 短名解析为该 Server 的实际 Tool 名。"""
+    plugin_name = definition.source.removeprefix("plugin:")
+    requested = {
+        re.sub(r"[^A-Za-z0-9_]", "_", name).strip("_")
+        for name in definition.requested_mcp_servers
+    }
+    server_prefixes = tuple(
+        f"{server.name}_"
+        for server in snapshot.servers
+        if server.source.startswith("plugin:")
+        and server.source.endswith(f"/{plugin_name}")
+        and any(server.name.endswith(f"__{name}") for name in requested)
+    )
+    names = (
+        str(getattr(tool, "name", ""))
+        if not isinstance(tool, dict)
+        else str(tool.get("name", ""))
+        for tool in tools
+    )
+    return tuple(
+        sorted(
+            name
+            for name in names
+            if name and any(name.startswith(prefix) for prefix in server_prefixes)
+        )
     )

@@ -1,0 +1,7 @@
+[
+  {
+    "name": "demo-heartbeat",
+    "description": "向模型提供一条可识别的 Demo Plugin 状态数据",
+    "command": "python3 -u \"${CLAUDE_PLUGIN_ROOT}/scripts/demo_monitor.py\""
+  }
+]

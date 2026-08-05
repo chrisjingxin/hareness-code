@@ -17,6 +17,7 @@ from typing import Any
 
 from harness_agent.runtime.agent_engine_profile import AgentEngineProfile
 from harness_agent.runtime.resource_lifecycle import ResourceScope, SharedResourceLease
+from harness_agent.runtime.resource_ownership import ResourceAccess
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +107,7 @@ class AgentEnginePoolEvent:
 
     event: str
     profile_id: str
+    agent_id: str
     reason: str | None
     duration_ms: float | None
     close_failures: int
@@ -116,6 +118,7 @@ class AgentEnginePoolEvent:
         result: dict[str, object] = {
             "event": self.event,
             "profile_id": self.profile_id,
+            "agent_id": self.agent_id,
             "close_failures": self.close_failures,
         }
         if self.reason is not None:
@@ -130,12 +133,12 @@ class AgentEngineDiagnostic:
     """单个 AgentEngine 的脱敏诊断；不含完整 Profile Key 或原始配置。"""
 
     profile_id: str
+    agent_id: str
     state: AgentEngineState
     active_leases: int
     active_runs: int
     queued_runs: int
     pinned: bool
-    agent_id: str
     resource_scopes: tuple[str, ...]
     drain_reason: str | None
     build_duration_ms: float | None
@@ -144,12 +147,12 @@ class AgentEngineDiagnostic:
         """转换为稳定 JSON 形状，供 config.show 和未来指标适配器复用。"""
         return {
             "profile_id": self.profile_id,
+            "agent_id": self.agent_id,
             "state": self.state.value,
             "active_leases": self.active_leases,
             "active_runs": self.active_runs,
             "queued_runs": self.queued_runs,
             "pinned": self.pinned,
-            "agent_id": self.agent_id,
             "resource_scopes": list(self.resource_scopes),
             "drain_reason": self.drain_reason,
             "build_duration_ms": (
@@ -235,10 +238,16 @@ class AgentEngineCloseAdapter:
     name: str
     close: CloseCallback
     scope: ResourceScope = ResourceScope.ENGINE
+    access: ResourceAccess = ResourceAccess.OWNED
 
     def __post_init__(self) -> None:
         """拒绝无法在诊断中定位的空名称或不可调用关闭器。"""
-        if not self.name or not callable(self.close) or self.scope is not ResourceScope.ENGINE:
+        if (
+            not self.name
+            or not callable(self.close)
+            or self.scope is not ResourceScope.ENGINE
+            or self.access is not ResourceAccess.OWNED
+        ):
             raise ValueError("RUNTIME_CLOSE_ADAPTER_INVALID")
 
     async def invoke(self) -> None:
@@ -816,11 +825,11 @@ class AgentEnginePool:
                     AgentEngineDiagnostic(
                         profile_id=_profile_id(entry.profile.profile_key),
                         state=entry.state,
+                        agent_id=entry.profile.agent_id,
                         active_leases=0,
                         active_runs=0,
                         queued_runs=0,
                         pinned=False,
-                        agent_id=entry.profile.agent_id,
                         resource_scopes=(),
                         drain_reason=entry.drain_reason,
                         build_duration_ms=entry.build_duration_ms,
@@ -831,12 +840,12 @@ class AgentEnginePool:
             diagnostics.append(
                 AgentEngineDiagnostic(
                     profile_id=_profile_id(snapshot.profile_key),
+                    agent_id=entry.profile.agent_id,
                     state=snapshot.state,
                     active_leases=snapshot.active_leases,
                     active_runs=snapshot.active_runs,
                     queued_runs=snapshot.queued_runs,
                     pinned=snapshot.pinned,
-                    agent_id=entry.profile.agent_id,
                     resource_scopes=snapshot.resource_scopes,
                     drain_reason=entry.drain_reason,
                     build_duration_ms=entry.build_duration_ms,
@@ -938,6 +947,58 @@ class AgentEnginePool:
         async with self._lock:
             entry = self._entries.get(profile_key)
             return entry.engine if entry is not None else None
+
+    async def invalidate_outdated(
+        self,
+        *,
+        resource: str,
+        current_fingerprint: str,
+        reason: str,
+    ) -> tuple[str, ...]:
+        """按一种 Profile 资源指纹定向排空旧图，不影响未变化的角色。
+
+        返回已经进入 DRAINING 或被立即关闭的 Profile Key。活动 execution
+        可以继续使用旧快照；新 acquire 会由 AgentEngine 自身 fail closed。
+        """
+        fields = {
+            "mcp": "mcp_config_fingerprint",
+            "skill": "skill_catalog_fingerprint",
+            "model": None,
+            "policy": "policy_fingerprint",
+            "sandbox": "sandbox_config_fingerprint",
+            "agent": "definition_fingerprint",
+        }
+        if resource not in fields:
+            raise ValueError("RUNTIME_INVALIDATION_RESOURCE_INVALID")
+        async with self._lock:
+            entries = tuple(self._entries.items())
+        affected: list[str] = []
+        for profile_key, entry in entries:
+            if resource == "model":
+                fingerprint = "|".join(
+                    binding.model_config_fingerprint
+                    for binding in entry.profile.model_roles
+                )
+            else:
+                field_name = fields[resource]
+                assert field_name is not None
+                fingerprint = str(getattr(entry.profile, field_name))
+            if fingerprint == current_fingerprint:
+                continue
+            engine = entry.engine
+            if engine is None:
+                continue
+            await self.evict(
+                profile_key,
+                reason=f"{resource}:{reason}",
+                force=True,
+            )
+            if await self.state_for(profile_key) in {
+                AgentEngineState.DRAINING,
+                AgentEngineState.MISSING,
+            }:
+                affected.append(profile_key)
+        return tuple(affected)
 
     async def evict(
         self,
@@ -1161,6 +1222,11 @@ class AgentEnginePool:
         item = AgentEnginePoolEvent(
             event=event,
             profile_id=_profile_id(profile_key),
+            agent_id=(
+                self._entries[profile_key].profile.agent_id
+                if profile_key in self._entries
+                else "unknown"
+            ),
             reason=reason,
             duration_ms=duration_ms,
             close_failures=close_failures,

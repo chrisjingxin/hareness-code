@@ -94,13 +94,13 @@ pin_default_profile = false
 # 未实现：更新通道和版本策略。
 # [updates]
 
-# 未实现：生命周期 Hook；不得在项目配置中自动执行。
+# Plugin command Hook 已实现受控子集，但不从 TOML 配置；随已信任 Plugin 启用。
 # [hooks]
 
-# 未实现：本地 Extension 加载；需要来源隔离和工件信任。
+# 本地 Extension 通过 `harness plugins install/enable` 管理，不从 TOML 自动加载。
 # [extensions]
 
-# 未实现：Plugin 与企业插件源；不得自动下载或执行。
+# Plugin 本地目录/zip 已由 CLI 管理；企业插件源和自动下载尚未实现。
 # [plugins]
 
 # 未实现：仅企业 managed TOML 可定义不可覆盖策略。

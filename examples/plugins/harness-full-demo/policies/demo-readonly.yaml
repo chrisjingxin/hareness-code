@@ -1,0 +1,10 @@
+id: demo-readonly
+filesystem:
+  read: ["**/*"]
+  write: []
+shell:
+  enabled: false
+network:
+  enabled: false
+delegation:
+  enabled: false
