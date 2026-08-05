@@ -46,6 +46,10 @@ export type ActiveRun = {
   runId: string
 }
 
+export type PendingOperation = {
+  kind: "context.compact"
+}
+
 export type PendingApproval = {
   requestId: string
   description: string
@@ -62,6 +66,7 @@ export type PendingQuestion = {
 export type TuiState = {
   threadId?: string
   activeRun?: ActiveRun
+  pendingOperation?: PendingOperation
   timeline: TimelineItem[]
   status: string
   pendingApproval?: PendingApproval
@@ -98,9 +103,29 @@ export function createInitialState(threadId?: string): TuiState {
 /** 空状态不应被欢迎文本污染，/clear 后才能可靠地回到沉浸式首页。 */
 export function isHomeState(state: TuiState): boolean {
   return !state.activeRun
+    && !state.pendingOperation
     && !state.pendingApproval
     && !state.pendingQuestion
     && state.timeline.length === 0
+}
+
+/** 手动压缩不是 Agent Run，但会独占当前 Thread 的模型投影。 */
+export function startContextCompaction(state: TuiState): TuiState {
+  return {
+    ...state,
+    pendingOperation: { kind: "context.compact" },
+    status: "正在压缩上下文",
+  }
+}
+
+/** 只结束与当前匹配的压缩操作，避免迟到结果清除其他状态。 */
+export function finishContextCompaction(state: TuiState): TuiState {
+  if (state.pendingOperation?.kind !== "context.compact") return state
+  return {
+    ...state,
+    pendingOperation: undefined,
+    status: "就绪",
+  }
 }
 
 /** 在发送 run.start 前先登记 run，避免首个流事件与 JSON-RPC 响应相邻到达时丢失。 */
@@ -568,8 +593,11 @@ function contextValue(value: unknown): { action: string; estimatedTokens?: numbe
 /** 将可观测策略映射为紧凑活动状态，避免把 token 诊断混入模型回答。 */
 function contextStatus(payload: Record<string, unknown>): string {
   const action = stringValue(payload.action, "")
-  if (action.includes("summary")) return "正在整理上下文"
-  if (action.includes("dehydration")) return "正在归档工具结果"
+  if (action.includes("failed") || action.includes("unrecoverable")) return "上下文压缩失败"
+  if (action.includes("skipped") || action.includes("circuit_open")) return "上下文压缩已跳过"
+  if (action.includes("overflow")) return "正在恢复上下文"
+  if (action.includes("full") || action.includes("summary")) return "正在整理上下文"
+  if (action.includes("micro") || action.includes("dehydration")) return "正在归档工具结果"
   return action === "report" ? "上下文接近预算" : "正在思考"
 }
 

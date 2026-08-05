@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import inspect
 from dataclasses import dataclass
@@ -12,6 +13,12 @@ from deepagents.backends import LocalShellBackend
 from deepagents.backends.protocol import SandboxBackendProtocol
 
 from harness_agent.config.config import ConfigError, ExecutionSettings, RemoteSandboxSettings
+from harness_agent.runtime.resource_lifecycle import (
+    ResourceScope,
+    ResourceState,
+    SharedResourceHandle,
+    SharedResourceLease,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -49,6 +56,99 @@ class ExecutionContext:
     def sandboxed(self) -> bool:
         """判断工具是否运行在企业远端沙箱。"""
         return self.mode == "remote-sandbox"
+
+    async def aclose(self) -> None:
+        """释放远端 sandbox；本机 backend 没有关闭步骤时保持空操作。"""
+        close = getattr(self.backend, "aclose", None)
+        if close is None:
+            close = getattr(self.backend, "close", None)
+        if callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+
+
+class WorkspaceExecutionResourcePool:
+    """按 workspace/sandbox 身份共享执行环境，并由 Host 统一关闭。"""
+
+    def __init__(self) -> None:
+        """创建惰性 workspace 资源表；不同 Host 不共享此 Pool。"""
+        # Keep every generation until its borrowers are gone.  Re-acquiring a
+        # key while the previous handle drains must never orphan that handle.
+        self._resources: dict[str, list[SharedResourceHandle[ExecutionContext]]] = {}
+        self._lock = asyncio.Lock()
+
+    async def acquire(
+        self,
+        key: str,
+        settings: ExecutionSettings,
+        workspace: Path,
+    ) -> SharedResourceLease[ExecutionContext]:
+        """取得一个共享执行环境租约；同一 Profile 身份只创建一次 backend。"""
+        if not key:
+            raise ValueError("WORKSPACE_RESOURCE_KEY_INVALID")
+        async with self._lock:
+            generations = self._resources.setdefault(key, [])
+            resource = next(
+                (candidate for candidate in reversed(generations) if candidate.state is ResourceState.READY),
+                None,
+            )
+            if resource is None:
+                context = create_execution_context(settings, workspace)
+                resource = SharedResourceHandle(
+                    name=f"workspace-execution:{key[:12]}",
+                    scope=ResourceScope.WORKSPACE,
+                    value=context,
+                    close=context.aclose,
+                )
+                generations.append(resource)
+            # Keep selection and borrowing in one pool boundary.  A producer
+            # cannot drain this generation between these two operations.
+            return await resource.acquire()
+
+    async def invalidate(self, key: str, *, reason: str) -> None:
+        """排空一个变更后的 workspace resource，但不打断旧引擎的借用。"""
+        async with self._lock:
+            resources = tuple(self._resources.get(key, ()))
+            for resource in resources:
+                await resource.begin_draining(reason=reason)
+        await self.reap()
+
+    async def reap(self) -> None:
+        """关闭已经没有借用者的排空资源。"""
+        async with self._lock:
+            resources = tuple(
+                (key, resource)
+                for key, generations in self._resources.items()
+                for resource in generations
+            )
+            for key, resource in resources:
+                snapshot = await resource.snapshot()
+                if snapshot.state is not ResourceState.DRAINING or snapshot.borrowers:
+                    continue
+                await resource.close()
+                generations = self._resources.get(key)
+                if generations is None:
+                    continue
+                self._resources[key] = [candidate for candidate in generations if candidate is not resource]
+                if not self._resources[key]:
+                    self._resources.pop(key, None)
+
+    async def aclose(self) -> None:
+        """按 Host 关闭所有执行环境；调用方应先关闭 AgentEnginePool。"""
+        async with self._lock:
+            resources = [
+                resource
+                for generations in self._resources.values()
+                for resource in generations
+            ]
+            self._resources = {}
+        for resource in resources:
+            await resource.begin_draining(reason="host_shutdown")
+            try:
+                await resource.close()
+            except Exception:
+                await resource.close(force=True)
 
 
 def create_execution_context(

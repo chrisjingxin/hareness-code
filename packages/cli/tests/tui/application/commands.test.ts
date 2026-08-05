@@ -65,6 +65,27 @@ test("Dispatcher 仅按稳定 ID 返回结构化结果，并统一处理兼容�
     type: "notice",
     message: "上下文已压缩，归档 1 项。",
   })
+  expect(compactResult.onSuccess({
+    compacted: false,
+    context: { action: "manual_skipped", miss_reason: "manual_history_too_small" },
+  })).toEqual({
+    type: "notice",
+    message: "上下文无需压缩：当前可压缩历史过短，压缩后不会减少上下文。",
+  })
+  expect(compactResult.onSuccess({
+    compacted: false,
+    context: { action: "manual_skipped", miss_reason: "manual_no_savings" },
+  })).toEqual({
+    type: "notice",
+    message: "上下文无需压缩：摘要后上下文没有减少。",
+  })
+  expect(compactResult.onSuccess({
+    compacted: false,
+    context: { action: "manual_skipped", miss_reason: "internal_future_reason" },
+  })).toEqual({
+    type: "notice",
+    message: "上下文无需压缩：未满足安全压缩条件。",
+  })
   expect(compactResult.onError(new Error("sidecar offline"))).toEqual({
     type: "notice",
     message: "上下文压缩失败：sidecar offline",
@@ -88,6 +109,27 @@ test("活动任务下 /new 返回确认 Dialog，而不是旧的强制清理分�
       confirm: { type: "local-action", action: "cancel-active-run-and-clear-thread" },
     },
   })
+})
+
+test("手动压缩操作期间 requiresIdle 命令统一禁用", () => {
+  const context = defaultCommandContext({
+    capabilities: ["threads.read", "context.manage", "models.read", "host.attach"],
+    hasThread: true,
+    pendingOperation: true,
+  })
+  for (const source of ["/compact", "/resume", "/model", "/web"]) {
+    const command = parseSlashCommand(source)
+    if (!command) throw new Error(`expected command: ${source}`)
+    expect(dispatchSlashCommand(command, {
+      commandContext: context,
+      threadId: "thread-1",
+      runtimeStatus: "正在压缩上下文",
+      versionSummary: "version",
+    })).toEqual({
+      type: "notice",
+      message: `${source} 暂不可用：当前任务结束或交互完成后可用。`,
+    })
+  }
 })
 
 test("/web 仅在已协商 host.attach 且当前 Thread 空闲时可用", () => {

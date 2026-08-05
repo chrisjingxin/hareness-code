@@ -147,7 +147,6 @@ def _coordinator(project_dir: Path | None = None) -> RunCoordinator:
         preparation_provider=no_preparation,  # type: ignore[arg-type]
         runtime_provider=no_runtime,  # type: ignore[arg-type]
         interaction_port=object(),  # type: ignore[arg-type]
-        skill_registry_provider=lambda: None,  # type: ignore[return-value]
         project_dir=project_dir,
     )
 

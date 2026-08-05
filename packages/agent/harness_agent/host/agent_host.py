@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from jsonschema.exceptions import ValidationError
 
@@ -85,8 +85,12 @@ from harness_agent.protocol.runtime import (
     validate_operation_result,
     validate_protocol_error_data,
 )
-from harness_agent.extensions.skills import SkillError, SkillRegistry
-from harness_agent.runtime.agent_spec import ResolvedAgentSpec, resolve_builtin_main_agent_spec
+from harness_agent.extensions.skills import LoadedSkill, SkillCatalogManager, SkillError, SkillRegistry
+from harness_agent.runtime.agent_spec import (
+    ResolvedAgentSpec,
+    resolve_builtin_main_agent_spec,
+    skill_catalog_fingerprint,
+)
 from harness_agent.extensions.mcp import (
     McpConfigError,
     McpConfigSnapshot,
@@ -98,6 +102,7 @@ from harness_agent.runtime.run_context import RunContext
 from harness_agent.runtime.agent_engine_profile import (
     AgentEngineProfile,
 )
+from harness_agent.threads.context_lifecycle import ContextLifecycle, ContextRefreshError
 from harness_agent.threads.thread_persistence import ThreadPersistence, ThreadPersistenceError
 from harness_agent.extensions.providers.harness_gateway import ProviderClientPool
 from harness_agent.host.run_coordinator import (
@@ -114,6 +119,9 @@ from harness_agent.host.run_coordinator import (
     StartRun,
     _bounded_json,
 )
+
+if TYPE_CHECKING:
+    from harness_agent.threads.runtime_state import RuntimeExecutionPolicy
 
 logger = logging.getLogger(__name__)
 STABLE_ERROR_CODES = {
@@ -138,6 +146,22 @@ class _AgentEngineArtifacts:
 
     execution_context: Any
     context_compactor: Any
+
+
+class _AgentEngineSnapshotReservation:
+    """Keep the Host snapshot boundary from resolution through pool acquire."""
+
+    def __init__(self, lock: asyncio.Lock) -> None:
+        """The caller must have acquired ``lock`` before constructing this token."""
+        self._lock = lock
+        self._released = False
+
+    async def release(self) -> None:
+        """Release the reservation exactly once on success, failure, or cancellation."""
+        if self._released:
+            return
+        self._released = True
+        self._lock.release()
 
 
 AgentFactory = Callable[[Za38Config, Path], Any | Awaitable[Any]]
@@ -174,6 +198,7 @@ class AgentHost:
         self._running = True
         self._send_lock = asyncio.Lock()
         self._agent_build_lock = asyncio.Lock()
+        self._agent_engine_snapshot_lock = asyncio.Lock()
         self._run_event_tasks: set[asyncio.Task[None]] = set()
         self._workspace = (workspace or Path.cwd()).resolve()
         # ponytail: Host 固定绑定一个 workspace，先用一把锁覆盖跨 Profile 图；
@@ -186,13 +211,19 @@ class AgentHost:
         self._config_change_policy = config_change_policy or ManagedConfigPolicy()
         self._config_change_service: ConfigChangeService | None = None
         self._startup_error: str | None = None
-        self._skill_registry: SkillRegistry | None = None
+        self._skill_catalog_manager = SkillCatalogManager(
+            self._workspace,
+            home=self._config_home,
+        )
         self._thread_persistence: ThreadPersistence | None = None
         self._agent_engine_pool: AgentEnginePool | None = None
         self._mcp_manager: McpConnectionManager | None = None
         self._mcp_snapshot: McpConfigSnapshot | None = None
         self._mcp_connect_task: asyncio.Task[None] | None = None
         self._mcp_state_lock = asyncio.Lock()
+        # execution.py 会加载 deepagents；保持其惰性导入，避免拖慢 initialize
+        # 前的 sidecar 启动路径。资源池在第一次默认构图时建立。
+        self._workspace_execution_resources: Any | None = None
         # Profile key 只索引构建时解析出的同一个 spec，避免再次解释配置。
         self._resolved_agent_specs: dict[str, ResolvedAgentSpec] = {}
         self._agent_engine_artifacts: dict[str, _AgentEngineArtifacts] = {}
@@ -215,7 +246,6 @@ class AgentHost:
             preparation_provider=self._prepare_run,
             runtime_provider=self._acquire_run_runtime,
             interaction_port=ProtocolInteractionAdapter(self),
-            skill_registry_provider=self._require_skills,
             context_updates_provider=self._take_context_updates,
             project_dir=self._workspace,
         )
@@ -316,10 +346,15 @@ class AgentHost:
                 RpcError(-32004, "Peer connection closed"),
             )
         await self._attachments.close()
+        # AgentEngine 先释放自己的图和共享租约，Host owner 再关闭 MCP、
+        # workspace/sandbox、Provider transport，最后才关闭 ThreadPersistence。
+        await self._close_agent_engine_pool()
         if self._mcp_manager is not None:
             await self._mcp_manager.close_all()
             self._mcp_manager = None
-        await self._close_agent_engine_pool()
+        if self._workspace_execution_resources is not None:
+            await self._workspace_execution_resources.aclose()
+        await self._provider_client_pool.aclose()
         await self._close_thread_persistence()
 
     async def close_connection(self, connection: ProtocolConnection) -> None:
@@ -562,11 +597,18 @@ class AgentHost:
         negotiated_minor = min(PROTOCOL_MINOR, max_minor)
         async with self._resource_init_lock:
             if not self._resources_ready:
-                self._skill_registry = SkillRegistry(self._workspace, home=self._config_home)
+                reservation = await self._reserve_agent_engine_snapshot()
+                try:
+                    await self._refresh_skill_catalog_locked()
+                finally:
+                    await reservation.release()
                 self._load_config()
                 # MCP 连接不阻塞 initialize 响应；后台建立连接
                 self._mcp_connect_task = asyncio.ensure_future(self._connect_mcp_servers())
                 self._resources_ready = True
+        registry = self._skill_catalog_manager.current
+        if registry is None:
+            registry = await self._refresh_skill_catalog()
         requested = set(parsed.capabilities.requests)
         enabled = requested.intersection(connection.capability_ceiling)
         if connection.role != "owner":
@@ -593,8 +635,8 @@ class AgentHost:
                 "handles": sorted(handles),
             },
             "agent_commands": [],
-            "skills_snapshot": self._skill_registry.snapshot(),
-            "skill_diagnostics": self._skill_registry.diagnostics[:20],
+            "skills_snapshot": registry.snapshot(),
+            "skill_diagnostics": registry.diagnostics[:20],
             "limits": {
                 "max_frame_bytes": MAX_FRAME_BYTES,
                 "max_tool_payload_bytes": MAX_TOOL_PAYLOAD_BYTES,
@@ -659,7 +701,12 @@ class AgentHost:
                 command,
                 ConnectionRef(self._current_connection().connection_id),
             )
-        except (ConfigError, ExecutionBindingError, ThreadPersistenceError) as exc:
+        except (
+            ConfigError,
+            ContextRefreshError,
+            ExecutionBindingError,
+            ThreadPersistenceError,
+        ) as exc:
             raise RpcError(-32004, str(exc)) from exc
 
         await self.send_response(
@@ -697,37 +744,86 @@ class AgentHost:
         command: StartRun,
         persistence: ThreadPersistence | None,
     ) -> RunPreparation:
-        """在登记 Run 前解析一次模型绑定、Profile 和 Skill 快照。"""
+        """在登记 Run 前解析模型、Profile、Skill 和 Context 快照。"""
         if persistence is None:
-            return RunPreparation(skill_snapshot_id=self._require_skills().snapshot_id)
-        self._load_config()
-        if self._config is None:
-            raise ConfigError(self._startup_error or "MODEL_CONFIGURATION_REQUIRED")
-        resolved = await self._resolve_execution_binding(
-            command.thread_id,
-            self._config,
-            requested_primary_profile=command.requested_primary_profile,
-        )
-        spec = await self._resolve_agent_engine_spec(
-            command.thread_id,
-            self._config,
-            resolved,
-            approval_mode=command.requested_approval_mode,
-        )
-        profile = spec.runtime_profile
-        binding = resolved.bind_run(
-            thread_id=command.thread_id,
-            run_id=command.run_id,
-            runtime_profile_id=profile.profile_key[:12],
-            created_at_ms=int(time.time() * 1000),
-        )
-        registry = self._require_skills()
-        return RunPreparation(
-            resolved_execution_binding=resolved,
-            execution_binding=binding,
-            agent_engine_profile=profile,
-            skill_snapshot_id=registry.snapshot_id,
-        )
+            reservation = await self._reserve_agent_engine_snapshot()
+            try:
+                registry = await self._refresh_skill_catalog_locked()
+                return RunPreparation(
+                    skill_snapshot_id=registry.snapshot_id,
+                    skill_registry=registry,
+                    requested_skill=self._prepare_requested_skill(command, registry),
+                )
+            finally:
+                await reservation.release()
+        reservation = await self._reserve_agent_engine_snapshot()
+        try:
+            registry = await self._refresh_skill_catalog_locked()
+            requested_skill = self._prepare_requested_skill(command, registry)
+            self._load_config()
+            if self._config is None:
+                raise ConfigError(self._startup_error or "MODEL_CONFIGURATION_REQUIRED")
+            resolved = await self._resolve_execution_binding(
+                command.thread_id,
+                self._config,
+                persistence=persistence,
+                requested_primary_profile=command.requested_primary_profile,
+            )
+            spec = await self._resolve_agent_engine_spec(
+                command.thread_id,
+                self._config,
+                resolved,
+                persistence=persistence,
+                skill_registry=registry,
+                approval_mode=command.requested_approval_mode,
+            )
+            profile = spec.runtime_profile
+            context_snapshot = ContextLifecycle(
+                self._workspace,
+                home=self._config_home,
+            ).prepare(
+                thread_id=command.thread_id,
+                spec=spec,
+            )
+            idle_duration_ms = await self._top_level_idle_duration_ms(
+                persistence, command.thread_id
+            )
+            binding = resolved.bind_run(
+                thread_id=command.thread_id,
+                run_id=command.run_id,
+                runtime_profile_id=profile.profile_key[:12],
+                created_at_ms=int(time.time() * 1000),
+                context_snapshot_id=context_snapshot.snapshot_id,
+            )
+            return RunPreparation(
+                resolved_execution_binding=resolved,
+                execution_binding=binding,
+                agent_engine_profile=profile,
+                skill_snapshot_id=registry.snapshot_id,
+                skill_registry=registry,
+                requested_skill=requested_skill,
+                context_snapshot=context_snapshot,
+                idle_duration_ms=idle_duration_ms,
+                snapshot_reservation=reservation,
+            )
+        except BaseException:
+            await reservation.release()
+            raise
+
+    async def _top_level_idle_duration_ms(
+        self, persistence: ThreadPersistence, thread_id: str
+    ) -> int | None:
+        """只为新的顶层 Run 读取可证明的 Thread 空闲时长。"""
+        updated_at_ms = await persistence.load_thread_activity_ms(thread_id)
+        now_ms = int(time.time() * 1000)
+        if (
+            not isinstance(updated_at_ms, int)
+            or isinstance(updated_at_ms, bool)
+            or updated_at_ms <= 0
+            or now_ms < updated_at_ms
+        ):
+            return None
+        return now_ms - updated_at_ms
 
     async def _acquire_run_runtime(self, run: RunState) -> RunRuntime:
         """把 AgentEngine/注入 Agent 的差异收敛成 Coordinator 可消费的 Runtime。"""
@@ -742,6 +838,25 @@ class AgentHost:
         if agent is None and not self._allow_echo:
             raise ConfigError(self._startup_error or "Agent is not configured")
         persistence = run.persistence
+        if (
+            persistence is not None
+            and agent is not None
+            and callable(getattr(agent, "aupdate_state", None))
+        ):
+            from harness_agent.threads.context_projection import ContextProjector
+
+            try:
+                projector = ContextProjector(persistence)
+                projection = await projector.project(
+                    run.thread_id,
+                    exclude_record_id=f"run:{run.run_id}:user",
+                )
+                await projector.sync_cache(agent, run.thread_id, projection=projection)
+            except BaseException:
+                # Runtime 尚未返回 Coordinator，失败路径必须在此释放
+                # 已取得的 AgentEngine/run lease，避免投影损坏变成资源泄漏。
+                await self._release_run_agent_engine(run)
+                raise
         graph_config = (
             persistence.graph_config
             if persistence is not None
@@ -801,12 +916,27 @@ class AgentHost:
 
     async def _compact_idle_thread(self, thread_id: str) -> dict[str, object]:
         """在 Coordinator 已锁定为空闲的窗口内完成压缩。"""
+        from harness_agent.threads.context_projection import ContextProjector, artifact_references
+        from harness_agent.threads.runtime_state import (
+            RuntimeExecutionPolicy,
+            RuntimeStateRehydrator,
+        )
+
         persistence = await self._ensure_thread_persistence()
-        context = await persistence.load_context(thread_id)
-        if not context.recoverable:
-            raise RpcError(-32004, "THREAD_NOT_RECOVERABLE")
-        messages = list(context.messages)
+        projection = await ContextProjector(persistence).project(thread_id)
+        messages = list(projection.messages)
+        load_snapshot = getattr(persistence, "load_latest_context_snapshot", None)
+        snapshot = await load_snapshot(thread_id) if callable(load_snapshot) else None
+        load_graph_state = getattr(persistence, "load_langgraph_state", None)
+        graph_state = await load_graph_state(thread_id) if callable(load_graph_state) else {}
         if not self._uses_default_agent_factory:
+            runtime_state = RuntimeStateRehydrator.capture(
+                graph_state,
+                None,
+                projection.messages,
+                artifact_ids=artifact_references(projection.messages),
+                context_snapshot=snapshot,
+            )
             agent = await self._ensure_agent()
             middleware = getattr(self, "_context_compactor", None)
             if agent is None or middleware is None:
@@ -817,6 +947,9 @@ class AgentHost:
                 thread_id=thread_id,
                 messages=messages,
                 persistence=persistence,
+                projection=projection,
+                run_context_snapshot=snapshot,
+                runtime_state=runtime_state,
             )
 
         lease, engine = await self._acquire_default_agent_engine(thread_id)
@@ -824,14 +957,28 @@ class AgentHost:
             if lease is None or engine is None:
                 raise RpcError(-32010, "CONTEXT_COMPACTION_UNAVAILABLE")
             artifacts = self._agent_engine_artifacts.get(engine.profile_key)
-            if artifacts is None or engine.graph is None:
+            spec = self._resolved_agent_specs.get(engine.profile_key)
+            if artifacts is None or spec is None or engine.graph is None:
                 raise RpcError(-32010, "CONTEXT_COMPACTION_UNAVAILABLE")
+            current_execution_policy = RuntimeExecutionPolicy.from_resolved_spec(spec)
+            runtime_state = RuntimeStateRehydrator.capture(
+                graph_state,
+                None,
+                projection.messages,
+                artifact_ids=artifact_references(projection.messages),
+                context_snapshot=snapshot,
+                current_execution_policy=current_execution_policy,
+            )
             return await self._compact_with_agent_engine(
                 agent=engine.graph,
                 middleware=artifacts.context_compactor,
                 thread_id=thread_id,
                 messages=messages,
                 persistence=persistence,
+                projection=projection,
+                run_context_snapshot=snapshot,
+                runtime_state=runtime_state,
+                current_execution_policy=current_execution_policy,
             )
         finally:
             await self._release_agent_engine_lease(lease)
@@ -907,22 +1054,24 @@ class AgentHost:
             raise RpcError(-32602, str(exc), {"code": exc.code, "field": exc.field}) from exc
 
         await self._ensure_mcp_connected()
-        async with self._mcp_state_lock:
-            current = self._mcp_snapshot or self._config_changes().read_mcp_snapshot()
-        try:
-            snapshot = self._config_changes().add_mcp_server(
-                mcp_config,
-                expected_revision=current.revision,
-            )
-        except ConfigChangeError as exc:
-            raise RpcError(-32602, str(exc), exc.redacted_data()) from exc
+        async with self._agent_engine_snapshot_lock:
+            async with self._mcp_state_lock:
+                current = self._mcp_snapshot or self._config_changes().read_mcp_snapshot()
+            try:
+                snapshot = self._config_changes().add_mcp_server(
+                    mcp_config,
+                    expected_revision=current.revision,
+                )
+            except ConfigChangeError as exc:
+                raise RpcError(-32602, str(exc), exc.redacted_data()) from exc
 
-        async with self._mcp_state_lock:
-            self._mcp_snapshot = snapshot
-            if self._mcp_manager is None:
-                self._mcp_manager = McpConnectionManager(snapshot)
-            statuses = await self._mcp_manager.apply_snapshot(snapshot)
-            status = next((item for item in statuses if item.get("name") == mcp_config.name), {})
+            async with self._mcp_state_lock:
+                self._mcp_snapshot = snapshot
+                if self._mcp_manager is None:
+                    self._mcp_manager = McpConnectionManager(snapshot)
+                statuses = await self._mcp_manager.apply_snapshot(snapshot)
+                status = next((item for item in statuses if item.get("name") == mcp_config.name), {})
+            await self._invalidate_profiles_for_snapshot(snapshot, reason="mcp_snapshot_changed")
 
         return {
             "added": True,
@@ -937,20 +1086,22 @@ class AgentHost:
         name = parsed.name
 
         await self._ensure_mcp_connected()
-        async with self._mcp_state_lock:
-            current = self._mcp_snapshot or self._config_changes().read_mcp_snapshot()
-        try:
-            snapshot = self._config_changes().remove_mcp_server(
-                name,
-                expected_revision=current.revision,
-            )
-        except ConfigChangeError as exc:
-            raise RpcError(-32602, str(exc), exc.redacted_data()) from exc
+        async with self._agent_engine_snapshot_lock:
+            async with self._mcp_state_lock:
+                current = self._mcp_snapshot or self._config_changes().read_mcp_snapshot()
+            try:
+                snapshot = self._config_changes().remove_mcp_server(
+                    name,
+                    expected_revision=current.revision,
+                )
+            except ConfigChangeError as exc:
+                raise RpcError(-32602, str(exc), exc.redacted_data()) from exc
 
-        async with self._mcp_state_lock:
-            self._mcp_snapshot = snapshot
-            if self._mcp_manager is not None:
-                await self._mcp_manager.apply_snapshot(snapshot)
+            async with self._mcp_state_lock:
+                self._mcp_snapshot = snapshot
+                if self._mcp_manager is not None:
+                    await self._mcp_manager.apply_snapshot(snapshot)
+            await self._invalidate_profiles_for_snapshot(snapshot, reason="mcp_snapshot_changed")
 
         return {"removed": True}
 
@@ -1021,7 +1172,7 @@ class AgentHost:
         return {"threads": [_thread_summary_payload(thread) for thread in threads]}
 
     async def _handle_threads_open(self, params: dict[str, Any], _id: str) -> dict[str, object]:
-        """读取当前 project 的一个 thread 历史，拒绝跨 project 或无 checkpoint 记录。"""
+        """读取当前 project 的一个 thread Transcript 历史，不以 checkpoint 兜底。"""
         self._require_threads_capability()
         parsed = ThreadsOpenParams.model_validate(params)
         try:
@@ -1051,11 +1202,42 @@ class AgentHost:
         watches.discard(parsed.thread_id)
         return {"removed": removed}
 
-    def _require_skills(self) -> SkillRegistry:
-        """返回初始化时建立的 Skill registry。"""
-        if self._skill_registry is None:
-            self._skill_registry = SkillRegistry(self._workspace, home=self._config_home)
-        return self._skill_registry
+    def _prepare_requested_skill(
+        self,
+        command: StartRun,
+        registry: SkillRegistry,
+    ) -> LoadedSkill | None:
+        """从本次 Run 的唯一 Registry 解析并预加载 requested Skill。"""
+        requested = command.requested_skill
+        if requested is None:
+            return None
+        record = registry.resolve(requested.skill_id)
+        if not record.user_invocable:
+            raise SkillError(f'Skill "{record.skill_id}" is not user-invocable')
+        return registry.load(record.skill_id, requested.args)
+
+    async def _refresh_skill_catalog_locked(self) -> SkillRegistry:
+        """在 Host snapshot reservation 内刷新并定向排空旧 Skill Profile。"""
+        previous = self._skill_catalog_manager.current
+        registry = self._skill_catalog_manager.refresh()
+        if previous is None or previous.snapshot_id == registry.snapshot_id:
+            return registry
+        pool = self._agent_engine_pool
+        if pool is not None:
+            await pool.invalidate(
+                lambda profile: profile.skill_catalog_fingerprint
+                != skill_catalog_fingerprint(registry),
+                reason="skill_catalog_changed",
+            )
+        return registry
+
+    async def _refresh_skill_catalog(self) -> SkillRegistry:
+        """为管理 RPC 建立同一 snapshot boundary，并在完成后释放锁。"""
+        reservation = await self._reserve_agent_engine_snapshot()
+        try:
+            return await self._refresh_skill_catalog_locked()
+        finally:
+            await reservation.release()
 
     @staticmethod
     def _reject_params(params: Mapping[str, Any], allowed: set[str], method: str) -> None:
@@ -1070,7 +1252,7 @@ class AgentHost:
         include_disabled = params.get("include_disabled", True)
         if not isinstance(include_disabled, bool):
             raise RpcError(-32602, "include_disabled must be boolean")
-        registry = self._require_skills()
+        registry = await self._refresh_skill_catalog()
         return {
             "snapshot": registry.snapshot(),
             "skills": registry.list(include_disabled=include_disabled),
@@ -1083,16 +1265,21 @@ class AgentHost:
         skill_id = params.get("id")
         if not isinstance(skill_id, str) or not skill_id.strip():
             raise RpcError(-32602, "id must be a non-empty string")
-        return self._require_skills().inspect(skill_id)
+        return (await self._refresh_skill_catalog()).inspect(skill_id)
 
     async def _handle_skills_set_enabled(self, params: dict[str, Any], _id: str) -> dict[str, Any]:
-        """保存下一次 thread 生效的 Skill 启停偏好。"""
+        """保存下一顶层 Run 生效的 Skill 启停偏好。"""
         self._reject_params(params, {"id", "enabled"}, "skills.set_enabled")
         skill_id = params.get("id")
         enabled = params.get("enabled")
         if not isinstance(skill_id, str) or not skill_id.strip() or not isinstance(enabled, bool):
             raise RpcError(-32602, "id and enabled are required")
-        return self._require_skills().set_enabled(skill_id, enabled)
+        reservation = await self._reserve_agent_engine_snapshot()
+        try:
+            await self._refresh_skill_catalog_locked()
+            return self._skill_catalog_manager.set_enabled(skill_id, enabled)
+        finally:
+            await reservation.release()
 
     async def _handle_skills_market_list(self, params: dict[str, Any], _id: str) -> list[dict[str, object]]:
         """列出已安装的企业市场 Provider 或其 catalog。"""
@@ -1100,7 +1287,7 @@ class AgentHost:
         market = params.get("market")
         if market is not None and not isinstance(market, str):
             raise RpcError(-32602, "market must be a string")
-        return await self._require_skills().marketplace_catalog(market)
+        return await self._skill_catalog_manager.marketplace_catalog(market)
 
     async def _handle_skills_install(self, params: dict[str, Any], _id: str) -> dict[str, object]:
         """通过企业 Provider 安装 Skill；Provider 不存在时返回明确错误。"""
@@ -1108,7 +1295,11 @@ class AgentHost:
         market, name, version = params.get("market"), params.get("name"), params.get("version")
         if not isinstance(market, str) or not isinstance(name, str) or (version is not None and not isinstance(version, str)):
             raise RpcError(-32602, "market and name are required strings")
-        return await self._require_skills().install(market, name, version)
+        reservation = await self._reserve_agent_engine_snapshot()
+        try:
+            return await self._skill_catalog_manager.install(market, name, version)
+        finally:
+            await reservation.release()
 
     async def _handle_skills_update(self, params: dict[str, Any], _id: str) -> dict[str, object]:
         """通过企业 Provider 更新市场 Skill。"""
@@ -1120,7 +1311,12 @@ class AgentHost:
         skill_id = params.get("id")
         if not isinstance(skill_id, str) or not skill_id.strip():
             raise RpcError(-32602, "id must be a non-empty string")
-        return self._require_skills().remove(skill_id)
+        reservation = await self._reserve_agent_engine_snapshot()
+        try:
+            await self._refresh_skill_catalog_locked()
+            return self._skill_catalog_manager.remove(skill_id)
+        finally:
+            await reservation.release()
 
     def _load_config(self) -> None:
         """刷新配置缓存，并保存用户可修复的错误。"""
@@ -1197,14 +1393,17 @@ class AgentHost:
 
     async def _acquire_default_agent_engine_for_run(self, run: RunState) -> Any | None:
         """为一个生产 run 获取共享 AgentEngine，并将 thread 私有状态写入 RunContext。"""
-        lease, engine = await self._acquire_default_agent_engine(
-            run.thread_id,
-            run.resolved_execution_binding,
-            profile=run.resolved_agent_engine_profile,
-        )
-        if engine is None:
-            return None
+        reservation = run.preparation.snapshot_reservation
+        lease: AgentEngineLease | None = None
         try:
+            lease, engine = await self._acquire_default_agent_engine(
+                run.thread_id,
+                run.resolved_execution_binding,
+                profile=run.resolved_agent_engine_profile,
+                snapshot_reservation=reservation,
+            )
+            if engine is None:
+                return None
             artifacts = self._agent_engine_artifacts.get(engine.profile_key)
             spec = self._resolved_agent_specs.get(engine.profile_key)
             if artifacts is None or spec is None or engine.graph is None:
@@ -1220,8 +1419,12 @@ class AgentHost:
             run.agent_engine_profile_key = engine.profile_key
             return engine.graph
         except Exception:
-            await self._release_agent_engine_lease(lease)
+            if lease is not None:
+                await self._release_agent_engine_lease(lease)
             raise
+        finally:
+            if reservation is not None:
+                await reservation.release()
 
     async def _acquire_default_agent_engine(
         self,
@@ -1229,10 +1432,40 @@ class AgentHost:
         resolved_binding: ResolvedExecutionBinding | None = None,
         *,
         profile: AgentEngineProfile | None = None,
+        snapshot_reservation: _AgentEngineSnapshotReservation | None = None,
     ) -> tuple[AgentEngineLease | None, AgentEngine | None]:
         """为 Run 或手动压缩取得按实际模型计算的共享 AgentEngine。"""
         if self._allow_echo:
             return None, None
+        if snapshot_reservation is None:
+            reservation = await self._reserve_agent_engine_snapshot()
+            try:
+                return await self._acquire_default_agent_engine_locked(
+                    thread_id,
+                    resolved_binding,
+                    profile=profile,
+                )
+            finally:
+                await reservation.release()
+        return await self._acquire_default_agent_engine_locked(
+            thread_id,
+            resolved_binding,
+            profile=profile,
+        )
+
+    async def _reserve_agent_engine_snapshot(self) -> _AgentEngineSnapshotReservation:
+        """Reserve the Host boundary shared by snapshot producers and engine acquires."""
+        await self._agent_engine_snapshot_lock.acquire()
+        return _AgentEngineSnapshotReservation(self._agent_engine_snapshot_lock)
+
+    async def _acquire_default_agent_engine_locked(
+        self,
+        thread_id: str,
+        resolved_binding: ResolvedExecutionBinding | None = None,
+        *,
+        profile: AgentEngineProfile | None = None,
+    ) -> tuple[AgentEngineLease | None, AgentEngine | None]:
+        """Resolve and acquire while the caller owns the Host snapshot reservation."""
         self._load_config()
         config = self._config
         if config is None or config.model is None:
@@ -1242,10 +1475,12 @@ class AgentHost:
                 thread_id,
                 config,
             )
+            registry = await self._refresh_skill_catalog_locked()
             profile = await self._resolve_agent_engine_profile(
                 thread_id,
                 config,
                 resolved_binding,
+                skill_registry=registry,
             )
         pool = self._ensure_agent_engine_pool(config)
         lease = await pool.acquire(profile)
@@ -1257,15 +1492,12 @@ class AgentHost:
         config: Za38Config,
         resolved_binding: ResolvedExecutionBinding,
         *,
+        persistence: ThreadPersistence | None = None,
+        skill_registry: SkillRegistry,
         approval_mode: ApprovalMode | None = None,
     ) -> ResolvedAgentSpec:
-        """截取一次角色解析快照，Profile 和 builder 都从它派生。
-
-        ``approval_mode`` 为 Run 级覆盖：TUI 切换审批模式时按模式派生独立
-        Profile，引擎池据此缓存各自强制策略的图，配置值保持不动。
-        """
-        persistence = await self._ensure_thread_persistence()
-        registry = self._require_skills()
+        """截取一次角色解析快照，Profile、审批策略和 builder 都从它派生。"""
+        persistence = persistence or await self._ensure_thread_persistence()
         await self._ensure_mcp_connected()
         async with self._mcp_state_lock:
             mcp_snapshot = self._mcp_snapshot or build_mcp_snapshot([], "missing")
@@ -1280,7 +1512,7 @@ class AgentHost:
             workspace=self._workspace,
             binding=resolved_binding,
             execution=execution,
-            skill_registry=registry,
+            skill_registry=skill_registry,
             mcp_snapshot=mcp_snapshot,
             mcp_tools=mcp_tools,
             interactive="question" in self._connection_handles(),
@@ -1297,19 +1529,50 @@ class AgentHost:
         thread_id: str,
         config: Za38Config,
         resolved_binding: ResolvedExecutionBinding,
+        *,
+        skill_registry: SkillRegistry,
     ) -> AgentEngineProfile:
         """兼容现有调用方，只返回由 ResolvedAgentSpec 生成的 Profile。"""
-        return (await self._resolve_agent_engine_spec(thread_id, config, resolved_binding)).runtime_profile
+        return (
+            await self._resolve_agent_engine_spec(
+                thread_id,
+                config,
+                resolved_binding,
+                skill_registry=skill_registry,
+            )
+        ).runtime_profile
+
+    async def _invalidate_profiles_for_snapshot(
+        self,
+        snapshot: McpConfigSnapshot,
+        *,
+        reason: str,
+    ) -> None:
+        """Invalidate old MCP profiles and reap idle resources within the update boundary."""
+        pool = self._agent_engine_pool
+        if pool is not None:
+            await pool.invalidate(
+                lambda profile: profile.mcp_config_fingerprint != snapshot.digest,
+                reason=reason,
+            )
+        manager = self._mcp_manager
+        if manager is not None:
+            reap = getattr(manager, "reap", None)
+            if callable(reap):
+                result = reap()
+                if inspect.isawaitable(result):
+                    await result
 
     async def _resolve_execution_binding(
         self,
         thread_id: str,
         config: Za38Config,
         *,
+        persistence: ThreadPersistence | None = None,
         requested_primary_profile: str | None = None,
     ) -> ResolvedExecutionBinding:
         """读取 Thread 状态并通过 execution_binding module 解析根模型。"""
-        persistence = await self._ensure_thread_persistence()
+        persistence = persistence or await self._ensure_thread_persistence()
         requested = (
             ThreadExecutionSelection(requested_primary_profile)
             if requested_primary_profile is not None
@@ -1330,6 +1593,14 @@ class AgentHost:
             )
         return self._agent_engine_pool
 
+    def _ensure_workspace_execution_resources(self) -> Any:
+        """在首次默认构图时加载并创建 workspace 资源 owner。"""
+        if self._workspace_execution_resources is None:
+            from harness_agent.runtime.execution import WorkspaceExecutionResourcePool
+
+            self._workspace_execution_resources = WorkspaceExecutionResourcePool()
+        return self._workspace_execution_resources
+
     async def _build_default_agent_engine(self, profile: AgentEngineProfile) -> AgentEngine:
         """按 Profile key 取回同一 ResolvedAgentSpec，再构建共享图。"""
         spec = self._resolved_agent_specs.get(profile.profile_key)
@@ -1339,82 +1610,127 @@ class AgentHost:
             raise RuntimeError("RUNTIME_PROFILE_SPEC_MISMATCH")
         if profile.mcp_config_fingerprint != spec.mcp_snapshot.digest:
             raise RuntimeError("RUNTIME_MCP_SNAPSHOT_MISMATCH")
+        profile_skill_fingerprint = getattr(profile, "skill_catalog_fingerprint", None)
+        if (
+            profile_skill_fingerprint is not None
+            and profile_skill_fingerprint != skill_catalog_fingerprint(spec.skill_registry)
+        ):
+            raise RuntimeError("RUNTIME_SKILL_SNAPSHOT_MISMATCH")
         from harness_agent.runtime.agent import create_harness_agent
         from harness_agent.threads.context_window import ContextWindowMiddleware
-        from harness_agent.runtime.execution import create_execution_context
         from harness_agent.extensions.providers.harness_gateway import create_openai_compatible_model
+        from harness_agent.threads.runtime_state import RuntimeStateRehydrator
 
-        execution_context = create_execution_context(spec.execution, spec.workspace)
         persistence = await self._ensure_thread_persistence()
         checkpointer = persistence.checkpointer
         model_settings = spec.model_settings
-        model = create_openai_compatible_model(
-            model_settings,
-            async_client=await self._provider_client_pool.get_async_client(model_settings),
-        )
-        context_compactor = ContextWindowMiddleware(
-            model,
-            context_window_tokens=model_settings.context_window_tokens,
-            thread_persistence=persistence,
-            updates=self._context_updates,
-        )
-        mcp_tools = list(spec.tools)
+        provider_lease = None
+        workspace_lease = None
+        mcp_lease = None
+        try:
+            provider_lease = await self._provider_client_pool.acquire(model_settings)
+            workspace_resources = self._ensure_workspace_execution_resources()
+            workspace_lease = await workspace_resources.acquire(
+                profile.sandbox_config_fingerprint,
+                spec.execution,
+                spec.workspace,
+            )
+            if self._mcp_manager is None:
+                raise RuntimeError("RUNTIME_MCP_MANAGER_REQUIRED")
+            mcp_lease = await self._mcp_manager.acquire(spec.mcp_snapshot)
+            mcp_tools = list(mcp_lease.value.tools)
+            execution_context = workspace_lease.value
+            model = create_openai_compatible_model(
+                model_settings,
+                async_client=provider_lease.value,
+            )
 
-        def _get_current_rules() -> list[PermissionRule]:
-            """获取当前会话的所有规则（session 内存 + project/user/system 持久化）。"""
-            from harness_agent.policy.permission_rules import load_rules, merge_rules
+            async def runtime_state_provider(
+                thread_id: str,
+                run_context: RunContext | None,
+                messages: list[Any] | tuple[Any, ...],
+            ) -> Any:
+                """每次压缩从真实 LangGraph channel 重新读取结构化运行态。"""
+                graph_state = await persistence.load_langgraph_state(thread_id)
+                return RuntimeStateRehydrator.capture(
+                    graph_state,
+                    run_context,
+                    messages,
+                )
 
-            persisted = load_rules(project_dir=self._workspace)
-            persisted["session"] = self._run_coordinator.session_rules
-            return merge_rules(persisted)
+            context_compactor = ContextWindowMiddleware(
+                model,
+                context_window_tokens=model_settings.context_window_tokens,
+                thread_persistence=persistence,
+                updates=self._context_updates,
+                runtime_state_provider=runtime_state_provider,
+            )
 
-        approval_mode = spec.effective_policy.approval_mode or spec.execution.approval_mode
-        classifier = None
-        if approval_mode == "auto" and spec.execution.approval_classifier:
-            classifier = self._build_approval_classifier(spec.execution.approval_classifier)
+            def _get_current_rules() -> list[PermissionRule]:
+                """获取当前会话的所有规则（session 内存 + project/user/system 持久化）。"""
+                from harness_agent.policy.permission_rules import load_rules, merge_rules
 
-        graph = create_harness_agent(
-            model,
-            tools=mcp_tools or None,
-            mcp_server_info=True if mcp_tools else None,
-            cwd=str(spec.workspace),
-            # 无头客户端不协商 question 能力时不注册 ask_user；审批仍由
-            # `_ProtocolInteractionAdapter` 在缺少 approval 能力时 fail closed。
-            interactive=spec.interactive,
-            enable_ask_user=spec.enable_ask_user,
-            enable_memory=spec.enable_memory,
-            enable_skills=spec.enable_skills,
-            approval_mode=approval_mode,
-            classifier=classifier,
-            execution_context=execution_context,
-            skill_registry=spec.skill_registry,
-            checkpointer=checkpointer,
-            thread_persistence=persistence,
-            context_updates=self._context_updates,
-            context_middleware=context_compactor,
-            context_window_tokens=model_settings.context_window_tokens,
-            shared_engine=True,
-            concurrency_lock=self._tool_concurrency_lock,
-            rules_provider=_get_current_rules,
-        )
-        self._agent_engine_artifacts[profile.profile_key] = _AgentEngineArtifacts(
-            execution_context=execution_context,
-            context_compactor=context_compactor,
-        )
-        resources = AgentEngineResourceBundle.from_sequences(
-            flushers=(
-                AgentEngineCloseAdapter(
-                    "server-runtime-artifacts",
-                    lambda: self._drop_agent_engine_artifacts(profile.profile_key),
+                persisted = load_rules(project_dir=self._workspace)
+                persisted["session"] = self._run_coordinator.session_rules
+                return merge_rules(persisted)
+
+            approval_mode = spec.effective_policy.approval_mode or spec.execution.approval_mode
+            classifier = None
+            if approval_mode == "auto" and spec.execution.approval_classifier:
+                classifier = self._build_approval_classifier(spec.execution.approval_classifier)
+
+            graph = create_harness_agent(
+                model,
+                tools=mcp_tools or None,
+                mcp_server_info=True if mcp_tools else None,
+                cwd=str(spec.workspace),
+                # 无头客户端不协商 question 能力时不注册 ask_user；审批仍由
+                # `_ProtocolInteractionAdapter` 在缺少 approval 能力时 fail closed。
+                interactive=spec.interactive,
+                enable_ask_user=spec.enable_ask_user,
+                enable_memory=spec.enable_memory,
+                enable_skills=spec.enable_skills,
+                approval_mode=approval_mode,
+                classifier=classifier,
+                execution_context=execution_context,
+                skill_registry=spec.skill_registry,
+                checkpointer=checkpointer,
+                thread_persistence=persistence,
+                context_updates=self._context_updates,
+                context_middleware=context_compactor,
+                context_window_tokens=model_settings.context_window_tokens,
+                shared_engine=True,
+                concurrency_lock=self._tool_concurrency_lock,
+                rules_provider=_get_current_rules,
+            )
+            self._agent_engine_artifacts[profile.profile_key] = _AgentEngineArtifacts(
+                execution_context=execution_context,
+                context_compactor=context_compactor,
+            )
+            resources = AgentEngineResourceBundle.from_sequences(
+                flushers=(
+                    AgentEngineCloseAdapter(
+                        "server-runtime-artifacts",
+                        lambda: self._drop_agent_engine_artifacts(profile.profile_key),
+                    ),
+                ),
+                shared_leases=tuple(
+                    lease
+                    for lease in (provider_lease, workspace_lease, mcp_lease)
+                    if lease is not None
                 ),
             )
-        )
-        return AgentEngine(
-            profile=profile,
-            graph=graph,
-            resources=resources,
-            pinned=spec.pinned,
-        )
+            return AgentEngine(
+                profile=profile,
+                graph=graph,
+                resources=resources,
+                pinned=spec.pinned,
+            )
+        except Exception:
+            for lease in (mcp_lease, workspace_lease, provider_lease):
+                if lease is not None:
+                    await lease.release()
+            raise
 
     def _build_approval_classifier(self, profile_id: str) -> Any:
         """为 AUTO 模式构建 LLM 安全分类器；不可用时返回 None 降级为人工确认。
@@ -1465,29 +1781,29 @@ class AgentHost:
         spec: ResolvedAgentSpec,
         execution_context: Any,
     ) -> RunContext:
-        """从持久化状态恢复本轮 PromptEpoch，禁止把 thread 数据保存在共享图中。"""
-        from harness_agent.runtime.agent import create_prompt_epoch
+        """把准备阶段已生成的 snapshot 注入共享图，Run 内不重新读取来源。"""
+        snapshot = run.preparation.context_snapshot
+        if snapshot is None:
+            raise RuntimeError("RUN_CONTEXT_SNAPSHOT_UNAVAILABLE")
+        registry = run.preparation.skill_registry
+        if registry is None or registry is not spec.skill_registry:
+            raise RuntimeError("RUN_SKILL_SNAPSHOT_SPEC_MISMATCH")
+        if snapshot.skill_snapshot_id != registry.snapshot_id:
+            raise RuntimeError("RUN_CONTEXT_SKILL_SNAPSHOT_MISMATCH")
+        from harness_agent.threads.context_pressure import ModelCallLifecycle
 
-        persistence = await self._ensure_thread_persistence()
-        epoch = await persistence.load_prompt_epoch(run.thread_id)
-        if epoch is None:
-            epoch = create_prompt_epoch(
-                thread_id=run.thread_id,
-                system_prompt=spec.prompt,
-                workspace=str(getattr(execution_context, "workspace_path", self._workspace)),
-                sandboxed=bool(getattr(execution_context, "sandboxed", False)),
-                provider=getattr(execution_context, "provider", None),
-                approval_mode=spec.effective_policy.approval_mode or spec.execution.approval_mode,
-                skill_registry=spec.skill_registry,
-                enable_memory=spec.enable_memory,
-                enable_skills=spec.enable_skills,
-                extra_tools=spec.tools,
-            )
-            await persistence.persist_prompt_epoch(epoch)
         return RunContext(
             thread_id=run.thread_id,
             run_id=run.run_id,
-            prompt_epoch=epoch,
+            context_snapshot=snapshot,
+            model_call_lifecycle=ModelCallLifecycle(
+                next_call_type=(
+                    "subagent"
+                    if run.root_execution_ref.parent_execution_id is not None
+                    else "top_level_initial"
+                ),
+                idle_duration_ms=run.preparation.idle_duration_ms,
+            ),
             approval_mode=spec.effective_policy.approval_mode or spec.execution.approval_mode,
             profile_key=profile.profile_key,
             execution_id=run.root_execution_ref.execution_id,
@@ -1495,6 +1811,7 @@ class AgentHost:
             agent_id=spec.agent_id,
             execution_mode=ExecutionMode.MANAGED,
             cancellation_token=run.cancellation_token,
+            skill_registry=registry,
         )
 
     async def _handle_peer_response(self, message: dict[str, Any]) -> None:
@@ -1544,23 +1861,56 @@ class AgentHost:
         thread_id: str,
         messages: list[Any],
         persistence: ThreadPersistence,
+        projection: Any | None = None,
+        run_context_snapshot: Any | None = None,
+        runtime_state: Any | None = None,
+        current_execution_policy: RuntimeExecutionPolicy | None = None,
     ) -> dict[str, object]:
-        """使用已租用 AgentEngine 的共享 compactor 改写一个空闲 thread 的 checkpoint。"""
-        compacted, update, rewritten = await middleware.compact_now(thread_id, messages)
+        """使用已租用 AgentEngine 的 compactor 提交投影并刷新缓存。"""
+        from harness_agent.threads.context_compaction import CompressionRequest, CompressionResult
+        from harness_agent.threads.context_projection import ModelProjection
+        from harness_agent.threads.context_window import ContextUpdate
+
+        typed_service = getattr(middleware, "compactor", None)
+        if typed_service is None:
+            raise RuntimeError("CONTEXT_COMPACTION_TYPED_SERVICE_REQUIRED")
+        if not isinstance(projection, ModelProjection):
+            raise RuntimeError("CONTEXT_COMPACTION_PROJECTION_REQUIRED")
+        typed_result = await middleware.compact_now(
+            CompressionRequest(
+                thread_id=thread_id,
+                trigger="manual",
+                projection=projection,
+                run_context_snapshot=run_context_snapshot,
+                runtime_state=runtime_state,
+                current_execution_policy=current_execution_policy,
+            )
+        )
+        if not isinstance(typed_result, CompressionResult):
+            raise RuntimeError("CONTEXT_COMPACTION_TYPED_RESULT_INVALID")
+        compacted = list(typed_result.projected_messages)
+        rewritten = typed_result.compressed
+        updates = middleware.consume_updates(thread_id)
+        update = updates[-1] if updates else ContextUpdate(
+            thread_id=thread_id,
+            action=typed_result.action,
+            estimated_tokens=typed_result.estimated_tokens,
+            input_cap_tokens=typed_result.input_cap_tokens,
+            context_window_tokens=getattr(middleware, "_window", 0),
+            dynamic_tokens=typed_result.estimated_tokens,
+            artifact_ids=typed_result.artifact_ids,
+            miss_reason=typed_result.reason,
+        )
         # `compact_now` 复用运行期状态缓冲；当前请求直接返回结果，因此必须消费，
         # 防止下一次 Agent run 重复发出过期的 context.updated 事件。
-        middleware.consume_updates(thread_id)
         if rewritten:
-            from langchain_core.messages import RemoveMessage
-            from langgraph.graph.message import REMOVE_ALL_MESSAGES
+            from harness_agent.threads.context_projection import ContextProjector
 
-            await agent.aupdate_state(
-                # CompiledStateGraph 将非空 checkpoint_ns 解释为子图路径；项目隔离
-                # 由 ProjectScopedAsyncSqliteSaver 在根图空 namespace 上自动补齐。
-                persistence.graph_config(thread_id),
-                {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *compacted]},
-                as_node="model",
+            projected = await ContextProjector(persistence).sync_cache(
+                agent, thread_id
             )
+            if tuple(compacted) != projected.messages:
+                raise RuntimeError("COMPRESSION_PROJECTION_COMMIT_MISMATCH")
             await persistence.complete_run(thread_id)
         return {"compacted": rewritten, "context": update.payload()}
 
@@ -1590,6 +1940,10 @@ class AgentHost:
         if pool is not None:
             await pool.finalize_draining(key)
             await pool.sweep()
+        if self._mcp_manager is not None:
+            await self._mcp_manager.reap()
+        if self._workspace_execution_resources is not None:
+            await self._workspace_execution_resources.reap()
 
     async def _drop_agent_engine_artifacts(self, profile_key: str) -> None:
         """清除已关闭 AgentEngine 的 middleware/执行上下文引用，避免 Sidecar 持有旧资源。"""
@@ -1606,7 +1960,6 @@ class AgentHost:
                 logger.warning("AgentEnginePool closed with %s resource failures", len(failures))
         self._agent_engine_artifacts.clear()
         self._resolved_agent_specs.clear()
-        await self._provider_client_pool.aclose()
 
     async def _agent_engine_pool_diagnostics(self) -> dict[str, object]:
         """返回 config.show 的运行池摘要；未初始化/已关闭时不保留旧 AgentEngine 引用。"""
@@ -1727,7 +2080,7 @@ def _thread_summary_payload(summary: Any) -> dict[str, object]:
 
 
 def _thread_message_payload(message: Any) -> dict[str, object]:
-    """把 checkpoint 归一化消息限制为 TUI 可回放的 project/thread/message 数据。"""
+    """把 Transcript 消息限制为 TUI 可回放的 project/thread/message 数据。"""
     payload: dict[str, object] = {"kind": message.kind, "content": message.content}
     if message.tool_name is not None:
         payload["tool_name"] = message.tool_name

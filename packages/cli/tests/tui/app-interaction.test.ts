@@ -220,15 +220,11 @@ test("SearchPicker 的 Esc 关闭浮层后会恢复 composer，且不把搜索�
     await act(async () => {
       await setup.mockInput.typeText("review")
       setup.mockInput.pressEscape()
-      await setup.flush()
-      await Bun.sleep(0)
-      await setup.flush()
-    })
-    await setup.waitForFrame(value => !value.includes("搜索 Skills"))
-    await act(async () => {
-      await Bun.sleep(5)
+      // OpenTUI 会等待 20ms，以区分单独 Esc 与 Alt/Meta 组合键前缀。
+      await Bun.sleep(30)
       await setup.flush()
     })
+    await setup.waitForFrame(value => !value.includes("Skills"))
 
     await act(async () => {
       await setup.mockInput.typeText("关闭后继续执行")

@@ -173,7 +173,12 @@ class WorkspaceBoundaryMiddleware(AgentMiddleware[dict[str, Any], ContextT, Resp
         self.policy = WorkspacePathPolicy(workspace)
         self.approval_mode = approval_mode
 
-    def _validate_tool_call(self, request: ToolCallRequest) -> ToolMessage | None:
+    def _validate_tool_call(
+        self,
+        request: ToolCallRequest,
+        *,
+        rewrite_backend_path: bool = True,
+    ) -> ToolMessage | None:
         """检查受管工具参数；拒绝时构造错误 ToolMessage，成功则返回 None。
 
         在验证前将 Windows 盘符路径转换为虚拟路径并写回 args，使
@@ -182,9 +187,10 @@ class WorkspaceBoundaryMiddleware(AgentMiddleware[dict[str, Any], ContextT, Resp
         """
         tool_call = request.tool_call
         tool_name = str(tool_call.get("name", ""))
-        args = tool_call.get("args") or {}
-        if not isinstance(args, dict):
+        source_args = tool_call.get("args") or {}
+        if not isinstance(source_args, dict):
             return self._rejection(tool_name, tool_call.get("id"), "工具参数必须是对象")
+        args = source_args if rewrite_backend_path else dict(source_args)
 
         # ── 路径归一化：Windows 盘符路径 → 虚拟路径 ──
         # 直接修改 args dict，使 handler 和后端收到 validate_path 可接受的格式。
@@ -243,7 +249,10 @@ class WorkspaceBoundaryMiddleware(AgentMiddleware[dict[str, Any], ContextT, Resp
         此方法不替代 ``wrap_tool_call``：模型输出到实际执行之间仍可能被修改，
         因此后者必须继续作为最终的工具执行边界。
         """
-        return self._validate_tool_call(request) is None
+        # 预检只能判断，不能把绝对路径提前改写成后端虚拟路径。实际执行还会
+        # 再经过一次校验；若此处污染原始 args，第二次会把 `/file` 误认成宿主
+        # 绝对路径并拒绝工作区内调用。
+        return self._validate_tool_call(request, rewrite_backend_path=False) is None
 
     def _rejection(self, tool_name: str, tool_call_id: object, reason: str) -> ToolMessage:
         """将策略失败转成模型可纠正的错误结果，而不是抛出图执行异常。"""

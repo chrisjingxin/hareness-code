@@ -10,6 +10,12 @@ import httpx
 from langchain_core.language_models.chat_models import BaseChatModel
 
 from harness_agent.config.config import ModelSettings
+from harness_agent.runtime.resource_lifecycle import (
+    ResourceScope,
+    ResourceState,
+    SharedResourceHandle,
+    SharedResourceLease,
+)
 
 
 class ProviderClientPool:
@@ -21,30 +27,45 @@ class ProviderClientPool:
 
     def __init__(self) -> None:
         """初始化惰性连接表和串行创建锁。"""
-        self._clients: dict[str, httpx.AsyncClient] = {}
+        self._resources: dict[str, SharedResourceHandle[httpx.AsyncClient]] = {}
         self._lock = asyncio.Lock()
 
-    async def get_async_client(self, settings: ModelSettings) -> httpx.AsyncClient:
-        """按 endpoint 与超时复用无默认 Header 的异步 HTTP transport。"""
-        key = hashlib.sha256(json.dumps({
-            "base_url": settings.base_url,
-            "timeout_seconds": settings.timeout_seconds,
-        }, sort_keys=True).encode("utf-8")).hexdigest()
+    async def acquire(self, settings: ModelSettings) -> SharedResourceLease[httpx.AsyncClient]:
+        """按 endpoint 与超时取得带引用计数的 Host 级 transport 租约。"""
+        key = self._transport_key(settings)
         async with self._lock:
-            client = self._clients.get(key)
-            if client is None or client.is_closed:
+            resource = self._resources.get(key)
+            if resource is None or resource.state is not ResourceState.READY:
                 client = httpx.AsyncClient(timeout=settings.timeout_seconds)
-                self._clients[key] = client
-            return client
+                resource = SharedResourceHandle(
+                    name=f"provider-http:{key[:12]}",
+                    scope=ResourceScope.HOST,
+                    value=client,
+                    close=client.aclose,
+                )
+                self._resources[key] = resource
+        return await resource.acquire()
 
     async def aclose(self) -> None:
         """在 sidecar 退出时关闭所有共享 transport，失败不阻断其余关闭。"""
         async with self._lock:
-            clients, self._clients = list(self._clients.values()), {}
-        results = await asyncio.gather(*(client.aclose() for client in clients), return_exceptions=True)
-        if any(isinstance(result, Exception) for result in results):
-            # 关闭阶段只需确保其余 transport 继续释放；调用方会记录生命周期日志。
-            return
+            resources, self._resources = list(self._resources.values()), {}
+        for resource in resources:
+            await resource.begin_draining(reason="host_shutdown")
+            try:
+                await resource.close()
+            except Exception:
+                # Host 关闭顺序保证引擎租约已释放；这里仍以 force 作为最后的
+                # shutdown 兜底，避免一个异常 transport 阻断其他 Host 资源释放。
+                await resource.close(force=True)
+
+    @staticmethod
+    def _transport_key(settings: ModelSettings) -> str:
+        """计算不含凭据、模型名或 Header 的共享 transport 身份。"""
+        return hashlib.sha256(json.dumps({
+            "base_url": settings.base_url,
+            "timeout_seconds": settings.timeout_seconds,
+        }, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 def create_openai_compatible_model(

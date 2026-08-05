@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from harness_agent.subagents import (
+from harness_agent.runtime.subagents import (
     AgentColor,
     AgentDefinition,
     AgentSource,

@@ -1,4 +1,4 @@
-"""单次 Agent Run 的显式上下文和动态 PromptEpoch 注入。
+"""单次 Agent Run 的显式上下文和冻结 RunContextSnapshot 注入。
 
 本模块只承载一次调用的 thread、run、提示词与取消状态。它不会写入
 LangGraph checkpoint，也不会被 Agent 图长期持有，因此同一编译图可安全
@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Mapping
+from typing import Any, Mapping
 
 from langchain.agents.middleware.types import AgentMiddleware, ExtendedModelResponse, ModelRequest, ModelResponse
 from langchain_core.messages import SystemMessage
@@ -18,6 +18,11 @@ from langchain_core.messages import SystemMessage
 from harness_agent.policy.approval_mode import ApprovalMode
 from harness_agent.policy.approval_policy import approval_mode_prompt
 from harness_agent.runtime.execution_binding import ExecutionMode
+from harness_agent.threads.context_lifecycle import (
+    RunContextSnapshot,
+    snapshot_from_legacy_prompt_epoch,
+)
+from harness_agent.threads.context_pressure import ModelCallLifecycle
 from harness_agent.threads.prompting import PromptEpoch
 
 _LEGACY_APPROVAL_MODE_MARKER = "\n\n## 审批模式："
@@ -53,21 +58,45 @@ class RunContext:
 
     thread_id: str
     run_id: str
-    prompt_epoch: PromptEpoch
     approval_mode: ApprovalMode
+    context_snapshot: RunContextSnapshot | None = None
     profile_key: str | None = None
     execution_id: str = "root"
     parent_execution_id: str | None = None
     agent_id: str = "main"
     execution_mode: ExecutionMode = ExecutionMode.MANAGED
     cancellation_token: RunCancellationToken = field(default_factory=RunCancellationToken)
+    # 仅供旧嵌入式调用把已存在的 PromptEpoch 转成一次性 legacy snapshot；
+    # AgentHost 生产路径不再读取或写入该字段。
+    prompt_epoch: PromptEpoch | None = None
+    # 放在兼容字段末尾，避免改变旧嵌入式调用的 positional 参数含义。
+    model_call_lifecycle: ModelCallLifecycle = field(default_factory=ModelCallLifecycle)
+    # 共享图只能从当前 Run 取得对应的 immutable Skill snapshot；不写入持久化记录。
+    skill_registry: Any | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
-        """在执行前验证 thread 与 epoch 的绑定，阻止跨 thread 前缀注入。"""
+        """在执行前验证 thread 与 snapshot 的绑定，阻止跨 project 注入。"""
         if not self.thread_id or not self.run_id:
             raise RunContextError("RUN_CONTEXT_ID_INVALID")
-        if self.prompt_epoch.thread_id != self.thread_id:
-            raise RunContextError("RUN_CONTEXT_PROMPT_EPOCH_THREAD_MISMATCH")
+        if self.context_snapshot is None:
+            if self.prompt_epoch is None:
+                raise RunContextError("RUN_CONTEXT_SNAPSHOT_REQUIRED")
+            object.__setattr__(
+                self,
+                "context_snapshot",
+                snapshot_from_legacy_prompt_epoch(
+                    project_fingerprint="legacy",
+                    thread_id=self.prompt_epoch.thread_id,
+                    system_prompt=self.prompt_epoch.system_prompt,
+                    created_at_ms=self.prompt_epoch.created_at_ms,
+                ),
+            )
+        if self.context_snapshot.thread_id != self.thread_id:
+            raise RunContextError("RUN_CONTEXT_SNAPSHOT_THREAD_MISMATCH")
+        snapshot_skill_id = self.context_snapshot.skill_snapshot_id
+        if snapshot_skill_id is not None:
+            if self.skill_registry is None or getattr(self.skill_registry, "snapshot_id", None) != snapshot_skill_id:
+                raise RunContextError("RUN_CONTEXT_SKILL_SNAPSHOT_MISMATCH")
         if not self.execution_id or not self.agent_id:
             raise RunContextError("RUN_CONTEXT_EXECUTION_ID_INVALID")
         if self.parent_execution_id == self.execution_id:
@@ -95,34 +124,35 @@ def thread_id_for_runtime(runtime: object) -> str | None:
     return None
 
 
-class PromptEpochMiddleware(AgentMiddleware):
-    """在模型调用边界按 RunContext 注入 thread 私有的不可变 PromptEpoch。"""
+class RunContextSnapshotMiddleware(AgentMiddleware):
+    """在模型调用边界注入本 Run 冻结的 system prompt。"""
 
     async def awrap_model_call(
         self,
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse | ExtendedModelResponse:
-        """保留 DeepAgents 基础提示词，并在其前拼接当前 run 的稳定前缀。
+        """保留基础提示词，并注入快照及本 Run 的实际审批模式。
 
-        审批模式事实按本轮 RunContext 动态追加，保证 TUI 切换模式后模型看到
-        的边界说明与实际强制策略一致；旧 epoch 内嵌的模式小节先剥离避免重复。
+        旧快照可能内嵌创建时的模式小节，必须先剥离，再根据当前
+        ``RunContext`` 追加，保证 TUI 切换模式后提示与强制策略一致。
         """
         context = require_run_context(request.runtime)
         base_prompt = _system_message_text(request.system_message)
-        prompt = _without_legacy_approval_mode_section(context.prompt_epoch.system_prompt)
+        prompt = _without_legacy_approval_mode_section(
+            context.context_snapshot.system_prompt
+        )
         prompt = f"{prompt}{approval_mode_prompt(context.approval_mode)}"
         system_prompt = f"{prompt}\n\n{base_prompt}" if base_prompt else prompt
         return await handler(request.override(system_message=SystemMessage(content=system_prompt)))
 
 
 def _without_legacy_approval_mode_section(prompt: str) -> str:
-    """剥离历史 epoch 末尾内嵌的审批模式小节，模式事实改由本轮动态追加。"""
+    """剥离旧 PromptEpoch 末尾内嵌的审批模式小节。"""
     index = prompt.find(_LEGACY_APPROVAL_MODE_MARKER)
     if index == -1:
         return prompt
     return prompt[:index]
-
 
 def _system_message_text(message: object | None) -> str:
     """将 DeepAgents 生成的基础 system message 转为文本，保持现有顺序。"""

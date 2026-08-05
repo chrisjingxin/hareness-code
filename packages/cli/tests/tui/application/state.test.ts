@@ -2,7 +2,7 @@
 
 import { expect, test } from "bun:test"
 import type { EventEnvelope, InteractionRequestEnvelope } from "@za38/protocol"
-import { applyAgentEvent, applyInteractionRequest, clearPendingInteraction, clearThread, createInitialState, isHomeState, restoreThread, startRun, type TuiState } from "../../../src/tui/application/state"
+import { applyAgentEvent, applyInteractionRequest, clearPendingInteraction, clearThread, createInitialState, finishContextCompaction, isHomeState, restoreThread, startContextCompaction, startRun, type TuiState } from "../../../src/tui/application/state"
 
 const run = { threadId: "thread-1", runId: "run-1" }
 
@@ -10,6 +10,18 @@ test("初始状态和清空后的状态进入首页", () => {
   const initial = createInitialState()
   expect(isHomeState(initial)).toBeTrue()
   expect(isHomeState(clearThread(startRun(initial, run, "生成组件")))).toBeTrue()
+})
+
+test("手动压缩使用独立操作态并在终态释放", () => {
+  const pending = startContextCompaction(createInitialState("thread-compact"))
+  expect(pending.pendingOperation).toEqual({ kind: "context.compact" })
+  expect(pending.activeRun).toBeUndefined()
+  expect(pending.status).toBe("正在压缩上下文")
+  expect(isHomeState(pending)).toBeFalse()
+
+  const finished = finishContextCompaction(pending)
+  expect(finished.pendingOperation).toBeUndefined()
+  expect(finished.status).toBe("就绪")
 })
 
 test("恢复 thread 会原子替换时间线并清空旧运行状态", () => {
@@ -49,10 +61,10 @@ test("skill.loaded 事件加入可追踪的系统时间线项", () => {
   expect(messages(state).at(-1)).toMatchObject({ role: "system", content: "已加载 Skill：project/review" })
 })
 
-test("context.updated 显示紧凑状态并将完成摘要写入 lastRun", () => {
+test("context.updated 将 micro 显示为归档工具结果并写入 lastRun", () => {
   let state = startRun(createInitialState(), run, "长任务")
   state = applyAgentEvent(state, event("context.updated", 1, {
-    action: "soft_dehydration",
+    action: "pressure_micro",
     estimated_tokens: 8200,
     input_cap_tokens: 12288,
     context_window_tokens: 16384,
@@ -61,11 +73,68 @@ test("context.updated 显示紧凑状态并将完成摘要写入 lastRun", () =>
     artifact_ids: ["tool-abc"],
   }))
   expect(state.status).toBe("正在归档工具结果")
-  expect(messages(state).at(-1)?.content).toContain("soft_dehydration")
+  expect(messages(state).at(-1)?.content).toContain("pressure_micro")
   state = applyAgentEvent(state, event("run.completed", 2, {
-    context: { action: "soft_dehydration", estimated_tokens: 8200, input_cap_tokens: 12288 },
+    context: { action: "pressure_micro", estimated_tokens: 8200, input_cap_tokens: 12288 },
   }))
-  expect(state.lastRun?.context).toEqual({ action: "soft_dehydration", estimatedTokens: 8200, inputCapTokens: 12288 })
+  expect(state.lastRun?.context).toEqual({ action: "pressure_micro", estimatedTokens: 8200, inputCapTokens: 12288 })
+})
+
+test("context.updated 区分 full、skipped 和 failed 状态", () => {
+  let state = startRun(createInitialState(), run, "检查上下文")
+  state = applyAgentEvent(state, event("context.updated", 1, {
+    action: "manual_full",
+    estimated_tokens: 7000,
+    input_cap_tokens: 12288,
+    context_window_tokens: 16384,
+    dynamic_tokens: 7000,
+  }))
+  expect(state.status).toBe("正在整理上下文")
+  state = applyAgentEvent(state, event("context.updated", 2, {
+    action: "manual_skipped",
+    estimated_tokens: 7000,
+    input_cap_tokens: 12288,
+    context_window_tokens: 16384,
+    dynamic_tokens: 7000,
+    miss_reason: "short_history",
+  }))
+  expect(state.status).toBe("上下文压缩已跳过")
+  state = applyAgentEvent(state, event("context.updated", 3, {
+    action: "overflow_failed",
+    estimated_tokens: 7000,
+    input_cap_tokens: 12288,
+    context_window_tokens: 16384,
+    dynamic_tokens: 7000,
+    miss_reason: "second_overflow_after_single_retry",
+  }))
+  expect(state.status).toBe("上下文压缩失败")
+})
+
+test("context.updated 的 report、micro、full、overflow、skipped、failed 都只显示安全摘要", () => {
+  let state = startRun(createInitialState(), run, "检查上下文")
+  const updates = [
+    ["report", "上下文接近预算"],
+    ["pressure_micro", "正在归档工具结果"],
+    ["manual_full", "正在整理上下文"],
+    ["overflow_recovery", "正在恢复上下文"],
+    ["manual_skipped", "上下文压缩已跳过"],
+    ["overflow_failed", "上下文压缩失败"],
+  ] as const
+
+  for (const [sequence, [action, status]] of updates.entries()) {
+    state = applyAgentEvent(state, event("context.updated", sequence + 1, {
+      action,
+      estimated_tokens: 7000,
+      input_cap_tokens: 12288,
+      context_window_tokens: 16384,
+      dynamic_tokens: 7000,
+      miss_reason: "safe-diagnostic-only",
+      artifact_ids: ["internal-artifact-id"],
+    }))
+    expect(state.status).toBe(status)
+    expect(messages(state).at(-1)?.content).not.toContain("internal-artifact-id")
+    expect(messages(state).at(-1)?.content).not.toContain("/Users/")
+  }
 })
 
 test("审批和稳定 question ID 通过时间线 request 进入状态", () => {

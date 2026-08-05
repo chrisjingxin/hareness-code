@@ -7,7 +7,7 @@ import type { TuiRuntime } from "../../../src/tui/application/model"
 import { registerCommonSyntaxParsers } from "../../../src/tui/platform/syntax-parsers"
 import { HomeView } from "../../../src/tui/presentation/home"
 import { SkillPicker, ThreadPicker } from "../../../src/tui/presentation/pickers"
-import { createInitialState, startRun, type TuiState } from "../../../src/tui/application/state"
+import { createInitialState, startContextCompaction, startRun, type TuiState } from "../../../src/tui/application/state"
 import { tuiTheme } from "../../../src/tui/presentation/theme"
 import { ThreadView } from "../../../src/tui/presentation/thread"
 
@@ -99,6 +99,33 @@ test("thread 渲染显示工具卡片和底部 composer", async () => {
   }
 })
 
+test("手动压缩期间 composer 失焦并显示专用等待状态", async () => {
+  const state = startContextCompaction({
+    ...createInitialState("thread-compact"),
+    timeline: [{
+      type: "message",
+      message: { id: "user-1", role: "user", content: "需要压缩的历史" },
+    }],
+  })
+  const inputRef = createRef<TextareaRenderable>()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(
+      createElement(ThreadView, { ...viewProps(state, 130, 40), inputRef }),
+      { width: 130, height: 40 },
+    )
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("正在压缩上下文")
+    expect(frame).toContain("上下文压缩中 · 请稍候")
+    expect(inputRef.current?.focused).toBeFalse()
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
 test("thread 通过原生 Markdown renderer 隐藏标题和代码围栏标记", async () => {
   registerCommonSyntaxParsers()
   const run = { threadId: "thread-markdown", runId: "run-markdown" }
@@ -125,12 +152,21 @@ test("thread 通过原生 Markdown renderer 隐藏标题和代码围栏标记", 
     setup = await testRender(createElement(ThreadView, viewProps(state, 100, 28)), { width: 100, height: 28 })
   })
   try {
-    // Markdown 的 Tree-sitter 高亮在异步 worker 返回后提交一帧；不能只检查初始占位帧。
-    await act(async () => {
-      await Bun.sleep(150)
-      await setup.flush()
-    })
-    const frame = setup.captureCharFrame()
+    // Markdown 的 Tree-sitter 高亮由 renderer 调度器之外的异步 worker 返回，需带墙钟
+    // 间隔轮询完整帧；一旦内容齐全立即结束，最迟等待 500ms。
+    let frame = setup.captureCharFrame()
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (
+        frame.includes("示例标题")
+        && frame.includes("重点内容")
+        && frame.includes("public class Demo {}")
+      ) break
+      await act(async () => {
+        await Bun.sleep(25)
+        await setup.flush()
+      })
+      frame = setup.captureCharFrame()
+    }
     expect(frame).toContain("示例标题")
     expect(frame).toContain("重点内容")
     expect(frame).toContain("public class Demo {}")

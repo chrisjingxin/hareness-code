@@ -202,7 +202,7 @@ export function Za38Tui(options: TuiOptions) {
         terminalHeight={terminal.height}
         searchRef={skillSearchRef}
         restoreFocusRef={inputRef}
-        shouldRestoreFocus={!snapshot.state.activeRun}
+        shouldRestoreFocus={!snapshot.state.activeRun && !snapshot.state.pendingOperation}
         onSearch={query => { void controller.dispatch({ type: "picker-search", picker: "skills", query }) }}
         onSelect={skill => { void controller.dispatch({ type: "picker-select-skill", skill }) }}
         onHover={selectedIndex => { void controller.dispatch({ type: "picker-hover", picker: "skills", selectedIndex }) }}
@@ -219,7 +219,7 @@ export function Za38Tui(options: TuiOptions) {
         terminalHeight={terminal.height}
         searchRef={threadSearchRef}
         restoreFocusRef={inputRef}
-        shouldRestoreFocus={!snapshot.state.activeRun}
+        shouldRestoreFocus={!snapshot.state.activeRun && !snapshot.state.pendingOperation}
         onSearch={query => { void controller.dispatch({ type: "picker-search", picker: "threads", query }) }}
         onSelect={thread => { void controller.dispatch({ type: "picker-select-thread", thread }) }}
         onHover={selectedIndex => { void controller.dispatch({ type: "picker-hover", picker: "threads", selectedIndex }) }}
@@ -236,7 +236,7 @@ export function Za38Tui(options: TuiOptions) {
         terminalHeight={terminal.height}
         searchRef={modelSearchRef}
         restoreFocusRef={inputRef}
-        shouldRestoreFocus={!snapshot.state.activeRun}
+        shouldRestoreFocus={!snapshot.state.activeRun && !snapshot.state.pendingOperation}
         searchId="model-search"
         title={snapshot.state.threadId ? "选择当前 Thread 下一次运行的模型" : "选择下一次新 Thread 运行的模型"}
         searchPlaceholder="按 Profile、模型或 Provider 搜索"
@@ -257,7 +257,7 @@ export function Za38Tui(options: TuiOptions) {
         terminalWidth={terminal.width}
         terminalHeight={terminal.height}
         restoreFocusRef={inputRef}
-        shouldRestoreFocus={!snapshot.state.activeRun}
+        shouldRestoreFocus={!snapshot.state.activeRun && !snapshot.state.pendingOperation}
         onConfirm={() => { void controller.dispatch({ type: "dialog-resolve", kind: "command", confirmed: true }) }}
         onCancel={() => { void controller.dispatch({ type: "dialog-resolve", kind: "command", confirmed: false }) }}
       />
@@ -268,7 +268,7 @@ export function Za38Tui(options: TuiOptions) {
         terminalWidth={terminal.width}
         terminalHeight={terminal.height}
         restoreFocusRef={inputRef}
-        shouldRestoreFocus={!snapshot.state.activeRun}
+        shouldRestoreFocus={!snapshot.state.activeRun && !snapshot.state.pendingOperation}
         confirmLabel="新建 Thread"
         cancelLabel="保留当前 Thread"
         onConfirm={() => { void controller.dispatch({ type: "dialog-resolve", kind: "model-binding", confirmed: true }) }}

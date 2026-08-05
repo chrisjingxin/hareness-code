@@ -193,6 +193,71 @@ test("Controller 的 /new 确认后原子清理 Thread 和未完成 Interaction"
   }
 })
 
+test("Controller 在 /compact 期间拒绝新输入和重复压缩", async () => {
+  const harness = await createHarness({ holdCompact: true })
+  try {
+    await harness.controller.dispatch({ type: "submit", value: "建立 Thread" })
+    const run = harness.runRequests.at(-1)!
+    harness.emit({
+      event_id: "event-ready",
+      type: EventType.RUN_COMPLETED,
+      thread_id: run.threadId,
+      run_id: run.runId,
+      sequence: 1,
+      timestamp_ms: 1,
+      payload: { usage: { input_tokens: 1, output_tokens: 1 }, duration_ms: 1, finish_reason: "stop", context: {} },
+    })
+    const compact = parseSlashCommand("/compact")!
+    const pending = harness.controller.dispatch({ type: "execute-command", command: compact })
+    await flush()
+
+    expect(harness.controller.getSnapshot().state.pendingOperation).toEqual({ kind: "context.compact" })
+    expect(harness.controller.getSnapshot().state.status).toBe("正在压缩上下文")
+    await harness.controller.dispatch({ type: "draft-input", value: "你好" })
+    await harness.controller.dispatch({ type: "submit", value: "你好" })
+    await harness.controller.dispatch({ type: "execute-command", command: compact })
+
+    expect(harness.controller.getSnapshot().draft).toBe("")
+    expect(harness.runRequests).toHaveLength(1)
+    expect(harness.calls.filter(call => call === "context.compact")).toHaveLength(1)
+    expect(notices(harness.controller)).toContain("上下文正在压缩；完成前不能提交新消息")
+    expect(notices(harness.controller)).toContain("/compact 暂不可用")
+
+    harness.releaseCompact()
+    await pending
+    expect(harness.controller.getSnapshot().state.pendingOperation).toBeUndefined()
+    expect(harness.controller.getSnapshot().state.status).toBe("就绪")
+    expect(notices(harness.controller)).toContain("上下文已压缩")
+  } finally {
+    harness.releaseCompact()
+    await harness.cleanup()
+  }
+})
+
+test("Controller 在 /compact 失败后也释放操作态", async () => {
+  const harness = await createHarness({ compactError: true })
+  try {
+    await harness.controller.dispatch({ type: "submit", value: "建立 Thread" })
+    const run = harness.runRequests.at(-1)!
+    harness.emit({
+      event_id: "event-ready",
+      type: EventType.RUN_COMPLETED,
+      thread_id: run.threadId,
+      run_id: run.runId,
+      sequence: 1,
+      timestamp_ms: 1,
+      payload: { usage: { input_tokens: 1, output_tokens: 1 }, duration_ms: 1, finish_reason: "stop", context: {} },
+    })
+    await execute(harness.controller, "/compact")
+
+    expect(harness.controller.getSnapshot().state.pendingOperation).toBeUndefined()
+    expect(harness.controller.getSnapshot().state.status).toBe("就绪")
+    expect(notices(harness.controller)).toContain("上下文压缩失败：summary model unavailable")
+  } finally {
+    await harness.cleanup()
+  }
+})
+
 test("Controller 接收 Agent event 后更新 reducer，并在终态清理 Interaction", async () => {
   const harness = await createHarness()
   try {
@@ -232,21 +297,26 @@ type Harness = {
   controller: TuiController
   calls: string[]
   runRequests: Array<{ threadId: string; runId: string; modelSelection?: { primary_profile: string } }>
+  releaseCompact: () => void
   releaseConfigDetails: () => void
   emit: (event: EventEnvelope) => void
   sendInteraction: (request: InteractionRequestEnvelope) => Promise<unknown>
   cleanup: () => Promise<void>
 }
 
-async function createHarness(options: { configError?: boolean; cancelled?: boolean; holdConfigDetails?: boolean } = {}): Promise<Harness> {
+async function createHarness(options: { configError?: boolean; cancelled?: boolean; holdConfigDetails?: boolean; holdCompact?: boolean; compactError?: boolean } = {}): Promise<Harness> {
   const calls: string[] = []
   const runRequests: Harness["runRequests"] = []
   const listeners = new Map<string, Set<(...args: any[]) => void>>()
   let requestHandler: ((request: InteractionRequestEnvelope) => Promise<unknown>) | undefined
   let runNumber = 0
   let releaseConfigDetails = () => undefined
+  let releaseCompact = () => undefined
   const configDetailsGate = options.holdConfigDetails
     ? new Promise<void>(resolve => { releaseConfigDetails = resolve })
+    : undefined
+  const compactGate = options.holdCompact
+    ? new Promise<void>(resolve => { releaseCompact = resolve })
     : undefined
   const profiles = createProfiles()
 
@@ -266,11 +336,18 @@ async function createHarness(options: { configError?: boolean; cancelled?: boole
       return () => { if (requestHandler === handler) requestHandler = undefined }
     },
     abandonInteraction(_requestId: string) {},
-    request(method: string) {
+    async request(method: string) {
       calls.push(method)
-      if (method === "skills.list") return Promise.resolve({ skills: [] })
-      if (method === "context.compact") return Promise.resolve({ compacted: true, context: { action: "manual_summary" } })
-      return Promise.reject(new Error(`Unexpected request: ${method}`))
+      if (method === "skills.list") return { skills: [] }
+      if (method === "context.compact") {
+        if (compactGate) await compactGate
+        if (options.compactError) throw new Error("summary model unavailable")
+        return { compacted: true, context: { action: "manual_summary" } }
+      }
+      throw new Error(`Unexpected request: ${method}`)
+    },
+    compactContext(threadId: string) {
+      return client.request("context.compact", { thread_id: threadId })
     },
     listModels() {
       calls.push("models.list")
@@ -342,6 +419,7 @@ async function createHarness(options: { configError?: boolean; cancelled?: boole
     controller,
     calls,
     runRequests,
+    releaseCompact,
     releaseConfigDetails,
     emit(event) {
       for (const listener of listeners.get("event") ?? []) listener(event)
@@ -351,6 +429,7 @@ async function createHarness(options: { configError?: boolean; cancelled?: boole
       return requestHandler(request)
     },
     cleanup: async () => {
+      releaseCompact()
       await controller.close()
       await rm(historyFile, { force: true })
     },

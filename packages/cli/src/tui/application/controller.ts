@@ -43,9 +43,11 @@ import {
   clearPendingInteraction,
   clearThread,
   createInitialState,
+  finishContextCompaction,
   markCancelling,
   markRunFailed,
   restoreThread,
+  startContextCompaction,
   startRun,
   type TuiState,
 } from "./state"
@@ -251,6 +253,7 @@ class TuiControllerImpl implements TuiController {
     if (this.closed) return
     switch (intent.type) {
       case "draft-input":
+        if (this.state.pendingOperation) return
         this.updateDraft(intent.value)
         return
       case "submit":
@@ -450,6 +453,10 @@ class TuiControllerImpl implements TuiController {
   private async submit(rawValue: string): Promise<void> {
     const input = rawValue.trim()
     if (!input) return
+    if (this.state.pendingOperation) {
+      this.commit(current => appendNotice(current, "上下文正在压缩；完成前不能提交新消息。"))
+      return
+    }
     this.clearDraft()
     if (this.state.pendingQuestion) {
       this.respondQuestion(input)
@@ -512,12 +519,15 @@ class TuiControllerImpl implements TuiController {
         this.publish()
         return
       case "rpc":
+        this.commit(startContextCompaction)
         try {
           if (!isClientMethod(result.method)) throw new Error(`Unsupported operation: ${result.method}`)
-          const value = await this.client.request(result.method, result.params as never)
+          const value = await this.client.compactContext(result.params.thread_id)
           await this.applyCommandResult(result.onSuccess(value))
         } catch (error) {
           await this.applyCommandResult(result.onError(error))
+        } finally {
+          this.commit(finishContextCompaction)
         }
         return
       case "mcp":
@@ -676,6 +686,11 @@ class TuiControllerImpl implements TuiController {
 
   /** 处理鼠标或键盘选中的命令/Skill。 */
   private async selectCommandMenuItem(item: CommandMenuItem): Promise<void> {
+    if (this.state.pendingOperation) {
+      this.commandMenu = { visible: false, selectedIndex: 0 }
+      this.commit(current => appendNotice(current, "上下文正在压缩；完成前不能选择新命令或 Skill。"))
+      return
+    }
     if (item.kind === "skill") {
       this.selectSkill(item.skill)
       return
@@ -709,8 +724,8 @@ class TuiControllerImpl implements TuiController {
 
   /** 读取当前 project 的 Thread 摘要并打开恢复 Picker。 */
   private openThreadPicker(): void {
-    if (this.state.activeRun || this.state.pendingApproval || this.state.pendingQuestion) {
-      this.commit(current => appendNotice(current, "当前 thread 仍在执行或等待交互，不能恢复其他 thread。"))
+    if (this.state.activeRun || this.state.pendingOperation || this.state.pendingApproval || this.state.pendingQuestion) {
+      this.commit(current => appendNotice(current, "当前 thread 尚未回到空闲状态，不能恢复其他 thread。"))
       return
     }
     const epoch = ++this.pickerEpoch.threads
@@ -722,6 +737,10 @@ class TuiControllerImpl implements TuiController {
   /** 打开 Model Picker；legacy immutable binding 只展示说明 Dialog。 */
   private openModelPicker(initialQuery = ""): void {
     const current = this.state
+    if (current.pendingOperation) {
+      this.commit(state => appendNotice(state, "上下文正在压缩；完成前不能切换模型。"))
+      return
+    }
     if (current.threadId && !this.supportsThreadModelSelection) {
       void this.client.listModels(current.threadId).then(result => {
         const binding = result.thread_binding
@@ -864,9 +883,9 @@ class TuiControllerImpl implements TuiController {
   /** 恢复 Thread 时只在最后一步替换 state，避免半条历史覆盖当前内容。 */
   private async selectThread(thread: ThreadPickerItem): Promise<void> {
     if (this.openingThread) return
-    if (this.state.activeRun || this.state.pendingApproval || this.state.pendingQuestion) {
+    if (this.state.activeRun || this.state.pendingOperation || this.state.pendingApproval || this.state.pendingQuestion) {
       this.closePicker("threads")
-      this.commit(current => appendNotice(current, "当前 thread 状态已变化，未恢复其他 thread。"))
+      this.commit(current => appendNotice(current, "当前 thread 状态已变化且不再空闲，未恢复其他 thread。"))
       return
     }
     this.openingThread = true
@@ -890,9 +909,9 @@ class TuiControllerImpl implements TuiController {
         // 模型绑定读取失败不阻断历史恢复；本次 Thread 不展示旧 Thread 的模型。
       }
       if (!this.threadPicker.visible || this.pickerEpoch.threads !== epoch) return
-      if (this.state.activeRun || this.state.pendingApproval || this.state.pendingQuestion) {
+      if (this.state.activeRun || this.state.pendingOperation || this.state.pendingApproval || this.state.pendingQuestion) {
         this.closePicker("threads")
-        this.commit(current => appendNotice(current, "当前 thread 状态已变化，未恢复其他 thread。"))
+        this.commit(current => appendNotice(current, "当前 thread 状态已变化且不再空闲，未恢复其他 thread。"))
         return
       }
       this.resetThread(restoreThread(opened.threadId, opened.messages), {
@@ -912,6 +931,11 @@ class TuiControllerImpl implements TuiController {
 
   /** 先改变当前 Thread 的下一次模型，再独立同步未来新 Thread 默认值。 */
   private async selectModel(model: ModelProfile): Promise<void> {
+    if (this.state.pendingOperation) {
+      this.closePicker("models")
+      this.commit(state => appendNotice(state, "上下文正在压缩；完成前不能切换模型。"))
+      return
+    }
     if (!model.available) {
       this.modelPicker = { ...this.modelPicker, error: `${model.provider_label} · ${model.model} 不可用：${model.unavailable_reason ?? "配置不可用"}` }
       this.publish()
@@ -1024,6 +1048,10 @@ class TuiControllerImpl implements TuiController {
   /** 登记消息、启动 Run，并把 AgentRun 队列交给 drain 释放。 */
   private async sendAgentMessage(message: string, requestedSkill?: RequestedSkill): Promise<void> {
     const current = this.state
+    if (current.pendingOperation) {
+      this.commit(state => appendNotice(state, "上下文正在压缩；完成前不能启动新任务。"))
+      return
+    }
     if (current.activeRun) {
       this.commit(state => appendNotice(state, "当前 thread 仍在执行；请等待、审批或按 Ctrl+C 取消。"))
       return
@@ -1227,6 +1255,7 @@ function tuiCommandContext(runtime: TuiRuntime, state: TuiState) {
     capabilities: runtime.capabilities,
     hasThread: Boolean(state.threadId),
     activeRun: Boolean(state.activeRun),
+    pendingOperation: Boolean(state.pendingOperation),
     hasPendingInteraction: Boolean(state.pendingApproval || state.pendingQuestion),
   })
 }

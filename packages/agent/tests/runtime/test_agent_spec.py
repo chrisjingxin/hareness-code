@@ -14,7 +14,10 @@ from harness_agent.runtime.agent_engine_profile import (
     ModelRoleBinding,
     component_fingerprint,
 )
-from harness_agent.runtime.agent_spec import resolve_builtin_main_agent_spec
+from harness_agent.runtime.agent_spec import (
+    RUN_CONTEXT_SNAPSHOT_MIDDLEWARE_VERSION,
+    resolve_builtin_main_agent_spec,
+)
 from harness_agent.policy.approval_mode import DEFAULT_APPROVAL_MODE
 from harness_agent.config.config import ExecutionSettings, ModelProfile, ModelSettings
 from harness_agent.runtime.execution_binding import (
@@ -25,6 +28,7 @@ from harness_agent.runtime.execution_binding import (
 )
 from harness_agent.extensions.mcp import McpServerConfig, build_mcp_snapshot
 from harness_agent.extensions.skills import SkillRegistry
+from harness_agent.threads.prompting import sha256_text
 
 
 def _binding(model_name: str = "fast-model", *, api_key: str | None = "secret") -> ResolvedExecutionBinding:
@@ -103,6 +107,39 @@ def test_same_resolved_agent_spec_reuses_key_but_static_behavior_changes_do_not(
 
     changed_workspace = replace(first, workspace=tmp_path / "other-workspace")
     assert changed_workspace.runtime_profile.profile_key != first.runtime_profile.profile_key
+
+
+def test_snapshot_middleware_profile_key_is_not_legacy_prompt_epoch(tmp_path: Path) -> None:
+    """RunContextSnapshot middleware 与旧 PromptEpoch 语义不能复用 Profile。"""
+    current = _spec(tmp_path)
+    legacy_marker = sha256_text(
+        str(
+            (
+                "prompt-epoch-v1",
+                "context-window-v1",
+                "workspace-boundary-v1",
+                "interactive-question",
+                "memory-on",
+                "skills-on",
+            )
+        )
+    )
+    legacy = replace(current, middleware_fingerprint=legacy_marker)
+
+    expected_marker = sha256_text(
+        str(
+            (
+                RUN_CONTEXT_SNAPSHOT_MIDDLEWARE_VERSION,
+                "context-window-v1",
+                "workspace-boundary-v1",
+                "interactive-question",
+                "memory-on",
+                "skills-on",
+            )
+        )
+    )
+    assert current.middleware_fingerprint == expected_marker
+    assert current.runtime_profile.profile_key != legacy.runtime_profile.profile_key
 
 
 def test_dynamic_run_context_and_credentials_do_not_enter_profile_identity(tmp_path: Path) -> None:

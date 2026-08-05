@@ -49,6 +49,10 @@ X-Enterprise-Tenant = "HARNESS_TENANT"
 
 [approval]
 mode = "default"
+# AUTO 模式 F4 层两阶段 LLM 安全分类器使用的 Profile id，
+# 填写 [models.profiles] 中实际存在的项；这里默认复用 fast。
+# 未配置或解析失败时 F4 回退人工审批（fail-closed），不会自动放行。
+classifier = "fast"
 
 [execution]
 backend = "local"

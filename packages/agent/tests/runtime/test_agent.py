@@ -151,8 +151,8 @@ def test_prompt_epoch_middleware_appends_current_run_mode_fact():
     """共享图每轮按 RunContext 追加模式事实，并剥离旧 epoch 内嵌小节。"""
     from harness_agent.runtime.agent import create_prompt_epoch
     from harness_agent.runtime.run_context import (
-        PromptEpochMiddleware,
         RunContext,
+        RunContextSnapshotMiddleware,
         _without_legacy_approval_mode_section,
     )
 
@@ -192,7 +192,7 @@ def test_prompt_epoch_middleware_appends_current_run_mode_fact():
         system_message=None,
         override=lambda **kwargs: SimpleNamespace(**kwargs),
     )
-    asyncio.run(PromptEpochMiddleware().awrap_model_call(request, handler))
+    asyncio.run(RunContextSnapshotMiddleware().awrap_model_call(request, handler))
 
     assert "审批模式：YOLO" in captured["system"]
     assert captured["system"].count("## 审批模式：") == 1

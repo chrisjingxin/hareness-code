@@ -141,10 +141,23 @@ function contextCompactNotice(value: unknown): string {
     const budget = estimated !== undefined && cap !== undefined ? ` ${estimated}/${cap}` : ""
     return `上下文已压缩${budget}${artifacts ? `，归档 ${artifacts} 项` : ""}。`
   }
-  const reason = typeof context.miss_reason === "string" ? `：${context.miss_reason}` : ""
-  return action === "manual_compaction_skipped"
-    ? `上下文无需压缩${reason}。`
-    : `上下文压缩未完成${reason}。`
+  const reason = compactMissReason(context.miss_reason)
+  return action === "manual_compaction_skipped" || action === "manual_skipped"
+    ? `上下文无需压缩：${reason}。`
+    : `上下文压缩未完成：${reason}。`
+}
+
+/** 将服务端稳定诊断码翻译为用户可执行的说明，避免直接暴露内部枚举。 */
+function compactMissReason(value: unknown): string {
+  if (typeof value !== "string") return "未满足安全压缩条件"
+  return {
+    short_history: "可压缩历史不足两轮",
+    manual_history_too_small: "当前可压缩历史过短，压缩后不会减少上下文",
+    manual_no_savings: "摘要后上下文没有减少",
+    summary_input_cap_exhausted: "摘要模型的输入预算不足",
+    summary_input_no_complete_group: "没有可安全压缩的完整对话",
+    savings_below_20_percent: "预计节省不足 20%",
+  }[value] ?? "未满足安全压缩条件"
 }
 
 /** 将未知错误转成可展示但不会泄漏 Error 对象结构的文字。 */

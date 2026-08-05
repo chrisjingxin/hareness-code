@@ -162,6 +162,7 @@ def test_middleware_preflight_matches_the_execution_boundary(tmp_path: Path):
 
     assert middleware.allows_approval(outside) is False
     assert middleware.allows_approval(inside) is True
+    assert inside.tool_call["args"]["file_path"] == str(tmp_path / "inside.md")
 
 
 def test_resolve_outside_workspace_write_only_matches_absolute_outside_writes(tmp_path: Path):

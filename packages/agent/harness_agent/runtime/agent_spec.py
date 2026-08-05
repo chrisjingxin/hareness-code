@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from harness_agent.runtime.agent_catalog import EffectiveExecutionPolicy
+from harness_agent.runtime.agent_engine_profile import component_fingerprint
 from harness_agent.config.config import ExecutionSettings, ModelSettings
 from harness_agent.runtime.execution_binding import ResolvedExecutionBinding
 from harness_agent.extensions.mcp import McpConfigSnapshot
@@ -19,6 +20,23 @@ _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 BUILTIN_MAIN_DEFINITION_FINGERPRINT = sha256_text("builtin-agent:main:v1")
 """内置 main 的实现身份；它不是可由 Plugin 覆盖的 AgentDefinition。"""
+
+RUN_CONTEXT_SNAPSHOT_MIDDLEWARE_VERSION = "run-context-snapshot-v1"
+"""当前生产 RunContextSnapshot middleware 的 Profile 身份版本。"""
+
+
+def skill_catalog_fingerprint(
+    skill_registry: SkillRegistry,
+    *,
+    view_fingerprint: str | None = None,
+) -> str:
+    """从同一 immutable Registry 计算 AgentEngine Profile 的 Skill 身份。"""
+    return component_fingerprint(
+        {
+            "view": view_fingerprint or sha256_text(f"skills:{skill_registry.snapshot_id}"),
+            "snapshot_id": skill_registry.snapshot_id,
+        }
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,7 +94,6 @@ class ResolvedAgentSpec:
         from harness_agent.runtime.agent_engine_profile import (
             AgentEngineProfile,
             ModelRoleBinding,
-            component_fingerprint,
             model_settings_fingerprint,
         )
         from harness_agent.runtime.agent import default_tool_catalog_fingerprint
@@ -101,11 +118,9 @@ class ResolvedAgentSpec:
                     "builtin_tool_catalog": default_tool_catalog_fingerprint(),
                 }
             ),
-            skill_catalog_fingerprint=component_fingerprint(
-                {
-                    "view": self.skill_view_fingerprint,
-                    "snapshot_id": self.skill_registry.snapshot_id,
-                }
+            skill_catalog_fingerprint=skill_catalog_fingerprint(
+                self.skill_registry,
+                view_fingerprint=self.skill_view_fingerprint,
             ),
             mcp_config_fingerprint=self.mcp_snapshot.digest,
             sandbox_config_fingerprint=component_fingerprint(
@@ -206,7 +221,7 @@ def resolve_builtin_main_agent_spec(
         middleware_fingerprint=sha256_text(
             str(
                 (
-                    "prompt-epoch-v1",
+                    RUN_CONTEXT_SNAPSHOT_MIDDLEWARE_VERSION,
                     "context-window-v1",
                     "workspace-boundary-v1",
                     "interactive-question" if interactive else "headless",

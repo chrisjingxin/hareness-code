@@ -10,10 +10,16 @@ import pytest
 from harness_agent.extensions.mcp import (
     McpConnectionManager,
     McpServerConfig,
+    build_mcp_snapshot,
     expand_env_vars,
     mcp_config_fingerprint,
     parse_mcp_config,
 )
+
+
+def _manager(configs: list[McpServerConfig] | tuple[McpServerConfig, ...] = ()) -> McpConnectionManager:
+    """用 canonical immutable snapshot 构造测试用 MCP owner。"""
+    return McpConnectionManager(build_mcp_snapshot(configs, revision="test"))
 
 
 class TestParseMcpConfig:
@@ -209,21 +215,21 @@ class TestMcpConnectionManager:
     """McpConnectionManager 的连接管理行为。"""
 
     def test_empty_configs_connects_immediately(self):
-        mgr = McpConnectionManager([])
+        mgr = _manager()
         import asyncio
         asyncio.run(mgr.connect_all())
         assert mgr.connected
         assert mgr.get_tools() == []
 
     def test_get_tool_names_empty(self):
-        mgr = McpConnectionManager([])
+        mgr = _manager()
         assert mgr.get_tool_names() == []
 
     @pytest.mark.asyncio
     async def test_connect_failure_does_not_raise(self):
         """连接失败不抛异常，标记为已连接但无工具。"""
         configs = [McpServerConfig(name="bad", transport="stdio", command="nonexistent-cmd-xyz")]
-        mgr = McpConnectionManager(configs)
+        mgr = _manager(configs)
         # 不应抛出异常
         await mgr.connect_all()
         assert mgr.connected
@@ -231,7 +237,7 @@ class TestMcpConnectionManager:
 
     @pytest.mark.asyncio
     async def test_close_all_safe_when_not_connected(self):
-        mgr = McpConnectionManager([])
+        mgr = _manager()
         await mgr.close_all()  # 不应抛出
 
     def test_build_connections_stdio(self):
@@ -241,7 +247,7 @@ class TestMcpConnectionManager:
                 args=("-y", "server"), env={"KEY": "val"},
             )
         ]
-        mgr = McpConnectionManager(configs)
+        mgr = _manager(configs)
         conns = mgr._build_connections()
         assert "fs" in conns
         assert conns["fs"]["transport"] == "stdio"
@@ -255,7 +261,7 @@ class TestMcpConnectionManager:
                 headers={"Authorization": "Bearer tok"},
             )
         ]
-        mgr = McpConnectionManager(configs)
+        mgr = _manager(configs)
         conns = mgr._build_connections()
         assert "gh" in conns
         assert conns["gh"]["transport"] == "streamable_http"
@@ -269,7 +275,7 @@ class TestMcpConnectionManager:
                 name="bad", transport="http", url="http://${MISSING_MCP_ENV}/mcp",
             )
         ]
-        mgr = McpConnectionManager(configs)
+        mgr = _manager(configs)
         conns = mgr._build_connections()
         assert "bad" not in conns
 
@@ -278,7 +284,7 @@ class TestMcpServerStatuses:
     """McpConnectionManager 的逐服务器状态跟踪行为。"""
 
     def test_empty_config_returns_empty_list(self):
-        mgr = McpConnectionManager([])
+        mgr = _manager()
         assert mgr.get_server_statuses() == []
 
     @pytest.mark.asyncio
@@ -288,7 +294,7 @@ class TestMcpServerStatuses:
             McpServerConfig(name="alpha", transport="stdio", command="cmd-a"),
             McpServerConfig(name="beta", transport="http", url="http://beta/mcp"),
         ]
-        mgr = McpConnectionManager(configs)
+        mgr = _manager(configs)
 
         # 构造带名称前缀的 mock 工具
         tool_a = MagicMock()
@@ -323,7 +329,7 @@ class TestMcpServerStatuses:
         configs = [
             McpServerConfig(name="srv", transport="stdio", command="cmd-x"),
         ]
-        mgr = McpConnectionManager(configs)
+        mgr = _manager(configs)
 
         mock_client = MagicMock()
         mock_client.get_tools = AsyncMock(side_effect=RuntimeError("boom"))
@@ -349,7 +355,7 @@ class TestMcpServerStatuses:
                 command="${MISSING_STATUS_VAR}/bin/server",
             ),
         ]
-        mgr = McpConnectionManager(configs)
+        mgr = _manager(configs)
         await mgr.connect_all()
 
         statuses = mgr.get_server_statuses()
@@ -366,7 +372,7 @@ class TestMcpServerStatuses:
             McpServerConfig(name="fs", transport="stdio", command="cmd-fs"),
             McpServerConfig(name="git", transport="stdio", command="cmd-git"),
         ]
-        mgr = McpConnectionManager(configs)
+        mgr = _manager(configs)
 
         # 构造归属不同服务器的工具
         tool_fs_read = MagicMock()
@@ -403,7 +409,7 @@ class TestMcpHotConnectDisconnect:
     @pytest.mark.asyncio
     async def test_add_server_success(self) -> None:
         config = McpServerConfig(name="test", transport="stdio", command="echo")
-        manager = McpConnectionManager([])
+        manager = _manager()
 
         mock_tool = MagicMock()
         mock_tool.name = "test_tool1"
@@ -424,7 +430,7 @@ class TestMcpHotConnectDisconnect:
     @pytest.mark.asyncio
     async def test_add_server_failure(self) -> None:
         config = McpServerConfig(name="bad", transport="stdio", command="nonexistent")
-        manager = McpConnectionManager([])
+        manager = _manager()
 
         with patch(
             "langchain_mcp_adapters.client.MultiServerMCPClient"
@@ -442,38 +448,44 @@ class TestMcpHotConnectDisconnect:
     @pytest.mark.asyncio
     async def test_add_server_skipped_env(self) -> None:
         config = McpServerConfig(name="env", transport="stdio", command="${MISSING_VAR}")
-        manager = McpConnectionManager([])
+        manager = _manager()
         result = await manager.add_server(config)
         assert result["status"] == "skipped"
 
     def test_remove_server(self) -> None:
-        manager = McpConnectionManager([])
+        from harness_agent.extensions.mcp import build_mcp_snapshot
+
+        snapshot = build_mcp_snapshot(
+            [
+                McpServerConfig(name="fs", transport="stdio", command="x"),
+                McpServerConfig(name="gh", transport="http", url="http://x"),
+            ],
+            revision="test",
+        )
+        manager = McpConnectionManager(snapshot)
         tool1 = MagicMock()
         tool1.name = "fs_read"
         tool2 = MagicMock()
         tool2.name = "gh_pr"
-        manager._tools = [tool1, tool2]
-        manager._server_statuses["fs"] = {"name": "fs", "transport": "stdio", "status": "connected"}
-        manager._server_statuses["gh"] = {"name": "gh", "transport": "http", "status": "connected"}
-        manager._configs = [
-            McpServerConfig(name="fs", transport="stdio", command="x"),
-            McpServerConfig(name="gh", transport="http", url="http://x"),
-        ]
+        runtime = manager._current_resource.value
+        runtime.tools = [tool1, tool2]
+        runtime.server_statuses["fs"] = {"name": "fs", "transport": "stdio", "status": "connected"}
+        runtime.server_statuses["gh"] = {"name": "gh", "transport": "http", "status": "connected"}
 
         assert manager.remove_server("fs") is True
         assert len(manager.get_tools()) == 1
         assert manager.get_tools()[0].name == "gh_pr"
-        assert manager._server_statuses["fs"]["status"] == "removed"
+        assert manager._current_resource.value.server_statuses["fs"]["status"] == "removed"
 
     def test_remove_nonexistent_server(self) -> None:
-        manager = McpConnectionManager([])
+        manager = _manager()
         assert manager.remove_server("nonexistent") is False
 
     @pytest.mark.asyncio
     async def test_apply_snapshot_replaces_runtime_input(self) -> None:
         from harness_agent.extensions.mcp import build_mcp_snapshot
 
-        manager = McpConnectionManager([])
+        manager = _manager()
         snapshot = build_mcp_snapshot(
             [McpServerConfig(name="new", transport="stdio", command="missing-command")],
             revision="rev-2",
@@ -482,6 +494,77 @@ class TestMcpHotConnectDisconnect:
         assert manager.snapshot is snapshot
         assert [item["name"] for item in manager.get_server_statuses()] == ["new"]
         assert manager.get_server_statuses()[0]["status"] == "failed"
+
+    @pytest.mark.asyncio
+    async def test_apply_snapshot_keeps_old_resource_for_borrowing_engine(self) -> None:
+        """MCP 热更新不能关闭仍被旧 AgentEngine 借用的 snapshot。"""
+        from harness_agent.extensions.mcp import build_mcp_snapshot
+
+        old_tool = MagicMock(name="old_tool")
+        old_tool.name = "old_search"
+        new_tool = MagicMock(name="new_tool")
+        new_tool.name = "new_search"
+        old_client = MagicMock()
+        old_client.get_tools = AsyncMock(return_value=[old_tool])
+        new_client = MagicMock()
+        new_client.get_tools = AsyncMock(return_value=[new_tool])
+        snapshots = build_mcp_snapshot(
+            [McpServerConfig(name="old", transport="stdio", command="old")],
+            revision="old",
+        )
+        updated = build_mcp_snapshot(
+            [McpServerConfig(name="new", transport="stdio", command="new")],
+            revision="new",
+        )
+        manager = McpConnectionManager(snapshots)
+        with patch(
+            "langchain_mcp_adapters.client.MultiServerMCPClient",
+            side_effect=[old_client, new_client],
+        ):
+            await manager.connect_all()
+            old_lease = await manager.acquire(snapshots)
+            await manager.apply_snapshot(updated)
+            new_lease = await manager.acquire(updated)
+
+        assert [tool.name for tool in old_lease.value.tools] == ["old_search"]
+        assert [tool.name for tool in new_lease.value.tools] == ["new_search"]
+        assert manager.get_tool_names() == ["new_search"]
+        await old_lease.release()
+        await new_lease.release()
+        await manager.close_all()
+
+    @pytest.mark.asyncio
+    async def test_apply_snapshot_reaps_idle_old_resource_after_invalidation(self) -> None:
+        """没有活动 AgentEngine 时，MCP 热更新的失效路径立即回收旧连接。"""
+        from harness_agent.extensions.mcp import build_mcp_snapshot
+
+        old_client = MagicMock()
+        old_client.get_tools = AsyncMock(return_value=[])
+        old_client.aclose = AsyncMock()
+        new_client = MagicMock()
+        new_client.get_tools = AsyncMock(return_value=[])
+        new_client.aclose = AsyncMock()
+        old_snapshot = build_mcp_snapshot(
+            [McpServerConfig(name="old", transport="stdio", command="old")],
+            revision="old-idle",
+        )
+        new_snapshot = build_mcp_snapshot(
+            [McpServerConfig(name="new", transport="stdio", command="new")],
+            revision="new-idle",
+        )
+        manager = McpConnectionManager(old_snapshot)
+        with patch(
+            "langchain_mcp_adapters.client.MultiServerMCPClient",
+            side_effect=[old_client, new_client],
+        ):
+            await manager.connect_all()
+            await manager.apply_snapshot(new_snapshot)
+
+        assert old_client.aclose.await_count == 0
+        await manager.reap()
+        assert old_client.aclose.await_count == 1
+        await manager.close_all()
+        assert new_client.aclose.await_count == 1
 
 
 class TestMcpConfigSnapshot:

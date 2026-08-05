@@ -27,7 +27,15 @@ async def test_provider_client_pool_reuses_uncredentialed_transport() -> None:
         api_key="third-key",
     )
     try:
-        assert await pool.get_async_client(first) is await pool.get_async_client(same_transport)
-        assert await pool.get_async_client(first) is not await pool.get_async_client(isolated)
+        first_lease = await pool.acquire(first)
+        same_lease = await pool.acquire(same_transport)
+        isolated_lease = await pool.acquire(isolated)
+        try:
+            assert first_lease.value is same_lease.value
+            assert first_lease.value is not isolated_lease.value
+        finally:
+            await first_lease.release()
+            await same_lease.release()
+            await isolated_lease.release()
     finally:
         await pool.aclose()
