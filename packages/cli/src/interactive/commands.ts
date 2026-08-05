@@ -88,7 +88,7 @@ export type CommandMenuItem =
   | { kind: "skill"; skill: SkillMenuItem }
 
 /** 内置命令所需 capability 的全集，供旧的测试运行时提供兼容默认值。 */
-export const builtinCommandCapabilities = [Capability.THREADS_READ, Capability.CONTEXT_MANAGE, Capability.MODELS_READ, Capability.MODELS_SELECT, Capability.SKILLS_READ, Capability.HOST_ATTACH, Capability.HOST_CONTROL] as const
+export const builtinCommandCapabilities = [Capability.THREADS_READ, Capability.CONTEXT_MANAGE, Capability.MODELS_READ, Capability.MODELS_SELECT, Capability.SKILLS_READ] as const
 
 /** 所有动态来源必须通过同一不可变 Registry 构造，避免覆盖内置命令或产生不确定别名。 */
 export class CommandRegistry {
@@ -175,7 +175,7 @@ export const commandRegistry = new CommandRegistry([
   { id: "model.select", name: "model", aliases: ["models"], description: "选择当前 thread 下一次运行的模型 Profile", source: { type: "builtin" }, presentation: "picker", suggested: true, argumentHint: "[query]", requirements: { capabilities: [Capability.MODELS_READ], requiresIdle: true } },
   { id: "skills.open", name: "skills", description: "打开 Skill 选择器", source: { type: "builtin" }, presentation: "picker", suggested: true, requirements: { capabilities: [Capability.SKILLS_READ] } },
   { id: "mcp.manage", name: "mcp", description: "查看 MCP 服务器状态", source: { type: "builtin" }, presentation: "viewer", suggested: true },
-  { id: "host.web", name: "web", description: "在浏览器中接管当前会话，可从空首页或当前 thread 启动", source: { type: "builtin" }, presentation: "action", suggested: true, requirements: { capabilities: [Capability.HOST_ATTACH, Capability.HOST_CONTROL], requiresIdle: true } },
+  { id: "host.web", name: "web", description: "在浏览器中接管当前会话，可从空首页或当前 thread 启动", source: { type: "builtin" }, presentation: "action", suggested: true, requirements: { requiresIdle: true } },
 ])
 
 /** 兼容既有帮助渲染器；内容仍完全由 Registry 生成。 */

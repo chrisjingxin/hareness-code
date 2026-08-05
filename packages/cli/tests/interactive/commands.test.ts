@@ -78,7 +78,7 @@ test("活动任务下 /new 返回确认 semantic operation，而不是旧分支"
   })
 })
 
-test("/web 在空首页或已有 Thread 时可用，且要求 host.attach/host.control 与空闲", () => {
+test("/web 无需 Host 能力（ZC-114 共享 Core），空闲即可用；运行中禁用", () => {
   const command = parseSlashCommand("/web")
   if (!command) throw new Error("expected web command")
   const base = {
@@ -87,10 +87,11 @@ test("/web 在空首页或已有 Thread 时可用，且要求 host.attach/host.c
     versionSummary: "version",
   }
 
+  // 不声明任何 Host 能力也可用：内置 Web 只消费 CLI 进程内共享 Core。
   expect(dispatchSlashCommand(command, {
     ...base,
     commandContext: defaultCommandContext({
-      capabilities: ["host.attach", "host.control"],
+      capabilities: [],
       hasThread: true,
     }),
   })).toEqual({ type: "request-handoff", threadId: "thread-1" })
@@ -99,7 +100,7 @@ test("/web 在空首页或已有 Thread 时可用，且要求 host.attach/host.c
     ...base,
     threadId: null,
     commandContext: defaultCommandContext({
-      capabilities: ["host.attach", "host.control"],
+      capabilities: [],
       hasThread: false,
     }),
   })).toEqual({ type: "request-handoff", threadId: null })
@@ -107,18 +108,7 @@ test("/web 在空首页或已有 Thread 时可用，且要求 host.attach/host.c
   expect(dispatchSlashCommand(command, {
     ...base,
     commandContext: defaultCommandContext({
-      capabilities: ["host.attach"],
-      hasThread: true,
-    }),
-  })).toEqual({
-    type: "notice",
-    message: "/web 当前不可用。",
-  })
-
-  expect(dispatchSlashCommand(command, {
-    ...base,
-    commandContext: defaultCommandContext({
-      capabilities: ["host.attach", "host.control"],
+      capabilities: [],
       hasThread: true,
       activeRun: true,
     }),

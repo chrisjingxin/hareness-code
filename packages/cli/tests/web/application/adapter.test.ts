@@ -192,6 +192,17 @@ test("命令菜单 items 由 filterCommandMenuItems 计算；`//` 与缺少 `/` 
   expect(adapter.getSnapshot().commandMenuOpen).toBe(false)
 })
 
+test("Web 命令菜单隐藏 host.web（TUI 入口，共享 Core 不能嵌套接管）", () => {
+  const interactive = makeInteractive()
+  interactive.commands = [commandItem("host.web", "web"), commandItem("system.help", "help")]
+  const { adapter } = makeAdapter(createFakeClient(interactive))
+  adapter.dispatch({ type: "draft-change", value: "/" })
+  const ids = adapter.getSnapshot().commandOptions
+    .filter(item => item.kind === "command")
+    .map(item => (item.kind === "command" ? item.command.id : ""))
+  expect(ids).toEqual(["system.help"])
+})
+
 test("present result 打开对应面板并触发 catalog.refresh", async () => {
   const { adapter, client } = makeAdapter()
   client.nextOutcome = { status: "accepted", effects: [{ type: "present", target: "threads" }] }

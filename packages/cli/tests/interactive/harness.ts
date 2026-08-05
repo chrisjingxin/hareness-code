@@ -29,8 +29,6 @@ export const runtime: InteractiveRuntime = {
     Capability.CONFIG_WRITE,
     Capability.MCP_READ,
     Capability.MCP_MANAGE,
-    Capability.HOST_ATTACH,
-    Capability.HOST_CONTROL,
   ],
 }
 

@@ -356,7 +356,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
       composerError: this.composerErrorStr,
       commandMenuOpen: this.commandMenuOpenFlag,
       commandMenuIndex: this.commandMenuIndex,
-      commandOptions: filterCommandMenuItems(interactive.commands, this.draft),
+      commandOptions: filterCommandMenuItems(webRenderableCommands(interactive.commands), this.draft),
       activePanel: this.activePanel,
       panelSearch: freezePanelState(this.panelState),
       sidebarOpen: this.sidebarOpenFlag,
@@ -826,6 +826,12 @@ function cloneInteractionDraft(draft: WebInteractionDraft): WebInteractionDraft 
     answers,
     touched: draft.touched,
   }
+}
+
+/** 命令菜单数据来自共享 snapshot，只按 draft 做显示过滤，不重新计算可用性。 */
+function webRenderableCommands(items: readonly CommandMenuItem[]): readonly CommandMenuItem[] {
+  // host.web 是 TUI 入口；共享 Core 下 Web 页面不能嵌套接管，从命令菜单隐藏。
+  return items.filter(item => item.kind !== "command" || item.command.id !== "host.web")
 }
 
 function errorMessage(error: unknown): string {
