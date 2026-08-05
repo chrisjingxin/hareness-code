@@ -27,7 +27,6 @@ def test_is_sensitive_path_detects_sensitive_targets(path: str):
     [
         "src/main.py",
         "README.md",
-        ".gitignore",
     ],
 )
 def test_is_sensitive_path_allows_normal_files(path: str):

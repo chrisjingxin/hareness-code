@@ -5,7 +5,12 @@ from __future__ import annotations
 import logging
 from typing import Literal, TypeAlias
 
+from harness_agent.policy.dangerous_rules import strip_dangerous_rules
+
 logger = logging.getLogger(__name__)
+
+_dangerous_rules_stash: list = []
+"""AUTO 模式下被剥离的危险 allow 规则暂存区，退出 AUTO 时恢复。"""
 
 ApprovalMode: TypeAlias = Literal["plan", "default", "auto-edit", "auto", "yolo"]
 """面向配置、Agent 和 TUI 的规范审批模式。"""
@@ -46,6 +51,27 @@ def parse_approval_mode(value: object | None) -> tuple[ApprovalMode, str | None]
         logger.warning("审批模式 %s 已预留但尚未启用，降级为 default", normalized)
         return DEFAULT_APPROVAL_MODE, f"审批模式 {normalized} 尚未启用，已降级为默认确认模式。"
     return DEFAULT_APPROVAL_MODE, "审批模式无效，已安全降级为默认确认模式。"
+
+
+def on_mode_entered(mode: str, current_rules: list) -> list:
+    """进入新模式时对规则做预处理。
+
+    - 进入 ``"auto"`` 模式：调用 ``strip_dangerous_rules`` 剥离危险 allow
+      规则，并将其暂存到 ``_dangerous_rules_stash``。
+    - 退出 AUTO（模式非 ``"auto"`` 且 stash 非空）：将暂存的规则恢复回规则列表。
+    - 其他情况：原样返回 current_rules。
+    """
+    global _dangerous_rules_stash
+    if mode == "auto":
+        safe, stripped = strip_dangerous_rules(current_rules)
+        _dangerous_rules_stash.clear()
+        _dangerous_rules_stash.extend(stripped)
+        return safe
+    elif _dangerous_rules_stash:
+        restored = list(current_rules) + list(_dangerous_rules_stash)
+        _dangerous_rules_stash.clear()
+        return restored
+    return current_rules
 
 
 def next_mode(current: ApprovalMode) -> ApprovalMode:

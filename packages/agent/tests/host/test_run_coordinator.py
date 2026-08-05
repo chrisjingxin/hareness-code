@@ -630,7 +630,9 @@ def test_child_namespace_interrupt_does_not_trigger_root_interaction() -> None:
             ]
         },
     )
-    assert _extract_interaction(child_event) is None
+    result, auto_resume = _extract_interaction(child_event)
+    assert result is None
+    assert auto_resume is None
 
     root_event = (
         "updates",
@@ -646,7 +648,8 @@ def test_child_namespace_interrupt_does_not_trigger_root_interaction() -> None:
             ]
         },
     )
-    assert _extract_interaction(root_event) is not None
+    result, auto_resume = _extract_interaction(root_event)
+    assert result is not None
 
 
 @pytest.mark.asyncio

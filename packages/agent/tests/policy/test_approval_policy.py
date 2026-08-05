@@ -264,11 +264,11 @@ class TestApprovalPreflight:
         request = _make_request("write_file", {"file_path": self._outside_file(tmp_path)})
         assert preflight(request) is True
 
-    def test_auto_outside_write_falls_back_to_dialog(self, tmp_path: Path):
-        """auto 模式 + 越界写入：F1 不适用，F4 回退弹窗人工审批。"""
+    def test_auto_outside_write_allowed_by_f1(self, tmp_path: Path):
+        """auto 模式 + 越界写入：F1 快速通道自动放行，不再弹窗。"""
         preflight = _make_preflight(tmp_path, "auto", original=lambda _request: False)
         request = _make_request("write_file", {"file_path": self._outside_file(tmp_path)})
-        assert preflight(request) is True
+        assert preflight(request) is False
 
     @pytest.mark.parametrize("tool_name", ["write_file", "edit_file"])
     def test_auto_edit_outside_write_still_asks(self, tmp_path: Path, tool_name: str):

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from harness_agent.policy.approval_mode import ApprovalMode
+from harness_agent.policy.bash_parser import extract_command_rule as _extract_command_rule
 from harness_agent.policy.permission_rules import PermissionRule, save_rule
 from harness_agent.runtime.agent_execution import AgentExecutionRegistry, ExecutionRegistryError
 from harness_agent.runtime.agent_engine import AgentEnginePoolCapacityError
@@ -914,7 +915,10 @@ class RunCoordinator:
             stream_kwargs["context"] = runtime.run_context
         async for event in runtime.agent.astream(stream_input, **stream_kwargs):
             self._drain_context_updates(run)
-            interaction = _extract_interaction(event)
+            interaction, auto_resume = _extract_interaction(event)
+            if auto_resume is not None:
+                # 全部是并发安全工具，直接放行
+                return auto_resume
             if interaction is not None:
                 run.status = "interacting"
                 result = await self._interaction_port.request(
@@ -989,8 +993,28 @@ class RunCoordinator:
                 )
 
 
-def _extract_interaction(event: tuple[Any, ...]) -> InteractionRequest | None:
-    """从 DeepAgents updates 流提取首个 AskUser 或 HITL interrupt。"""
+_CONCURRENCY_SAFE_TOOLS = frozenset({
+    "ls", "read_file", "glob", "grep", "web_search",
+    "lsp", "tool_search", "memory_search", "task_output",
+    "ask_user", "write_todos", "memory_save",
+    "enter_plan_mode", "exit_plan_mode",
+})
+
+
+def _is_concurrency_safe(tool_name: str) -> bool:
+    """并发安全工具无需审批，可直接并行执行。"""
+    return tool_name in _CONCURRENCY_SAFE_TOOLS
+
+
+def _extract_interaction(
+    event: tuple[Any, ...],
+) -> tuple[InteractionRequest | None, dict[str, object] | None]:
+    """从 DeepAgents updates 流提取首个 AskUser 或 HITL interrupt。
+
+    返回 (InteractionRequest, None) 表示需要用户交互；
+    返回 (None, dict) 表示全部并发安全工具，自动放行，dict 为 resume 值；
+    返回 (None, None) 表示没有交互需要处理。
+    """
     if len(event) == 3:
         namespace, stream_mode, data = event
         # Protocol v3 has no execution/provenance field for child graph
@@ -998,16 +1022,16 @@ def _extract_interaction(event: tuple[Any, ...]) -> InteractionRequest | None:
         # interaction request; treating it as one would surface a child
         # interrupt as a root approval/question.
         if namespace:
-            return None
+            return None, None
     elif len(event) == 2:
         stream_mode, data = event
     else:
-        return None
+        return None, None
     if stream_mode != "updates" or not isinstance(data, Mapping):
-        return None
+        return None, None
     interrupts = data.get("__interrupt__")
     if not interrupts:
-        return None
+        return None, None
     interrupt = (interrupts if isinstance(interrupts, (list, tuple)) else [interrupts])[0]
     value = getattr(interrupt, "value", interrupt)
     interrupt_id = str(getattr(interrupt, "id", uuid.uuid4()))
@@ -1036,48 +1060,82 @@ def _extract_interaction(event: tuple[Any, ...]) -> InteractionRequest | None:
                     "allow_other": True,
                 }
             )
-        return InteractionRequest(
-            request_id=interrupt_id,
-            type="question",
-            payload={"interrupt_id": interrupt_id, "questions": normalized},
-            interrupt_id=interrupt_id,
-            questions=questions,
+        return (
+            InteractionRequest(
+                request_id=interrupt_id,
+                type="question",
+                payload={"interrupt_id": interrupt_id, "questions": normalized},
+                interrupt_id=interrupt_id,
+                questions=questions,
+            ),
+            None,
         )
 
+    # --- 审批分支：分离并发安全与非并发安全工具 ---
     description = "A tool execution requires approval"
-    action_count = 1
+    unsafe_count = 1
+    safe_indices: list[int] = []
+    unsafe_indices: list[int] = []
     if isinstance(value, Mapping):
         action_requests = value.get("action_requests", [])
-        action_count = len(action_requests) if isinstance(action_requests, list) else 1
-        descriptions = [
-            str(request.get("description"))
-            for request in action_requests
-            if isinstance(request, Mapping) and request.get("description")
-        ]
-        if descriptions:
-            description = "\n\n".join(descriptions)
-    return InteractionRequest(
-        request_id=interrupt_id,
-        type="approval",
-        payload={
-            "interrupt_id": interrupt_id,
-            "description": description,
-            "requests": _bounded_json(value),
-            "decisions": [
-                "approve_once",
-                "approve_thread",
-                "approve_always",
-                "reject",
-                "reject_with_feedback",
-            ],
-        },
-        interrupt_id=interrupt_id,
-        action_count=action_count,
+        if isinstance(action_requests, list) and action_requests:
+            for i, request in enumerate(action_requests):
+                if not isinstance(request, Mapping):
+                    continue
+                tool_name = str(request.get("name", ""))
+                if _is_concurrency_safe(tool_name):
+                    safe_indices.append(i)
+                else:
+                    unsafe_indices.append(i)
+
+            # 全部是并发安全工具 → 直接放行，不产生审批交互
+            if not unsafe_indices:
+                total = len(action_requests)
+                decisions: list[dict[str, object]] = [{"type": "approve"}] * total
+                auto_resume = {interrupt_id: {"decisions": decisions}}
+                return None, auto_resume
+
+            # 只取第一个非并发安全工具的描述
+            first_unsafe_index = unsafe_indices[0]
+            first_request = action_requests[first_unsafe_index]
+            description = str(first_request.get("description", description))
+            unsafe_count = len(unsafe_indices)
+        elif isinstance(action_requests, list):
+            unsafe_count = 0
+
+    sequence_info = f"第 1/{unsafe_count} 个"
+    return (
+        InteractionRequest(
+            request_id=interrupt_id,
+            type="approval",
+            payload={
+                "interrupt_id": interrupt_id,
+                "description": description,
+                "requests": _bounded_json(value),
+                "decisions": [
+                    "approve_once",
+                    "approve_thread",
+                    "approve_always",
+                    "reject",
+                    "reject_with_feedback",
+                ],
+                "pending_count": unsafe_count,
+                "sequence_info": sequence_info,
+                "safe_indices": safe_indices,
+                "unsafe_indices": unsafe_indices,
+            },
+            interrupt_id=interrupt_id,
+            action_count=unsafe_count,
+        ),
+        None,
     )
 
 
 def _resume_value(spec: InteractionRequest, response: object) -> dict[str, object]:
-    """将语言无关交互结果映射回 LangGraph interrupt resume 契约。"""
+    """将语言无关交互结果映射回 LangGraph interrupt resume 契约。
+
+    并发安全工具始终 generate approve；非并发安全工具按用户决策统一处理。
+    """
     if not isinstance(response, dict):
         response = {}
     if spec.type == "approval":
@@ -1086,14 +1144,25 @@ def _resume_value(spec: InteractionRequest, response: object) -> dict[str, objec
         if decision in {"approve_once", "approve_thread", "approve_always"}:
             langgraph_decision: dict[str, object] = {"type": "approve"}
         elif decision == "reject_with_feedback" and feedback:
-            # 反馈必须落在每个 decision 的 args 中，才符合
-            # HumanInTheLoopMiddleware 的 resume 契约；顶层 feedback 会被忽略。
             langgraph_decision = {"type": "reject", "args": {"message": feedback}}
         else:
             langgraph_decision = {"type": "reject"}
+
+        safe_indices = spec.payload.get("safe_indices", [])
+        unsafe_indices = spec.payload.get("unsafe_indices", [])
+        if safe_indices or unsafe_indices:
+            total = len(safe_indices) + len(unsafe_indices)
+            decisions: list[dict[str, object]] = [langgraph_decision] * total
+            for i in safe_indices:
+                decisions[i] = {"type": "approve"}
+            for i in unsafe_indices:
+                decisions[i] = langgraph_decision
+        else:
+            # 无索引信息时按 action_count 广播，保持向后兼容
+            decisions = [langgraph_decision] * spec.action_count
         return {
             spec.interrupt_id: {
-                "decisions": [langgraph_decision] * spec.action_count
+                "decisions": decisions,
             }
         }
     answers_by_id = response.get("answers", {})
@@ -1111,13 +1180,36 @@ def _generate_permission_rule(
 ) -> PermissionRule:
     """从被批准的工具调用上下文生成 allow 权限规则。
 
-    Shell 调用按命令首词收敛；文件及其他工具使用通配资源。工作区边界和
-    敏感路径检查仍在实际执行前强制生效，因此规则不会放宽硬性保护。
+    Shell 调用基于 tree-sitter AST 提取最小范围规则（如 git clone *）；
+    文件工具按目录递归生成规则；WebFetch 按域名生成；其他工具保持通配。
     """
-    if tool_name in {"execute", "monitor"}:
-        command = str(tool_args.get("command") or "").strip()
-        prefix = command.split()[0] if command else ""
-        resource = f"{prefix} *" if prefix else "*"
+    command = str(tool_args.get("command") or "").strip()
+    file_path = str(tool_args.get("file_path") or "").strip()
+    url = str(tool_args.get("url") or "").strip()
+
+    if tool_name in {"execute", "monitor"} and command:
+        # Shell 命令：使用 AST 提取最小范围规则
+        resource = _extract_command_rule(command)
+    elif tool_name in {"write_file", "edit_file", "apply_patch"} and file_path:
+        # 文件工具：生成目录递归规则
+        from pathlib import Path
+        parent = Path(file_path).parent
+        if parent != Path("."):
+            resource = f"{parent.as_posix()}/**"
+        else:
+            resource = "**"
+    elif tool_name == "web_fetch" and url:
+        # WebFetch：生成域名规则
+        from urllib.parse import urlparse
+        try:
+            parsed = urlparse(url)
+            hostname = parsed.hostname or url
+            resource = f"domain:{hostname}"
+        except Exception:
+            resource = "*"
+    elif tool_name == "delete_file" and file_path:
+        # 删除操作：保守处理，使用具体文件路径（不泛化到目录）
+        resource = file_path
     else:
         resource = "*"
     return PermissionRule(tool=tool_name, resource=resource, effect="allow")

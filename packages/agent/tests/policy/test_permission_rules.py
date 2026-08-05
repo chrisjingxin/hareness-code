@@ -172,9 +172,7 @@ def test_save_rule_writes_to_project_scope(tmp_path: Path):
     assert settings_file.exists()
 
     data = json.loads(settings_file.read_text(encoding="utf-8"))
-    assert data["permissions"] == [
-        {"tool": "execute", "resource": "*.sh", "effect": "ask", "scope": "project"}
-    ]
+    assert data["permissions"] == ["Bash(*.sh)"]
 
 
 def test_save_rule_appends_to_existing_permissions(tmp_path: Path):
@@ -194,8 +192,8 @@ def test_save_rule_appends_to_existing_permissions(tmp_path: Path):
         (tmp_path / ".harness" / "settings.json").read_text(encoding="utf-8")
     )
     assert len(data["permissions"]) == 2
-    assert data["permissions"][0]["tool"] == "read"
-    assert data["permissions"][1]["tool"] == "execute"
+    assert data["permissions"][0] == "read"
+    assert data["permissions"][1] == "Bash"
 
 
 def test_save_rule_user_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -209,9 +207,7 @@ def test_save_rule_user_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     assert settings_file.exists()
 
     data = json.loads(settings_file.read_text(encoding="utf-8"))
-    assert data["permissions"] == [
-        {"tool": "*", "resource": "*", "effect": "ask", "scope": "user"}
-    ]
+    assert data["permissions"] == ["*"]
 
 
 def test_save_rule_session_scope_does_not_write(tmp_path: Path):

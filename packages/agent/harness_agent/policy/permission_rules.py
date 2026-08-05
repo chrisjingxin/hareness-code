@@ -10,7 +10,7 @@ import fnmatch
 import json
 import platform
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -125,8 +125,13 @@ def _settings_path(scope: RuleScope, project_dir: Path | None) -> Path | None:
 def _read_permissions(path: Path, scope: RuleScope) -> list[PermissionRule]:
     """从 JSON 文件读取 permissions 数组并转换为 PermissionRule 列表。
 
-    文件不存在、JSON 格式错误或字段缺失时静默返回空列表。
+    兼容读取 DSL 字符串格式（如 ``"Bash(git clone *)"``）和旧 JSON 对象格式
+    （如 ``{"tool": "execute", "resource": "git clone *", "effect": "allow"}``）。
+    文件不存在、格式错误或字段缺失时静默返回空列表。
     """
+    # 延迟导入，避免与 rule_parser 之间的循环依赖
+    from harness_agent.policy.rule_parser import parse_rule_list
+
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
@@ -139,19 +144,12 @@ def _read_permissions(path: Path, scope: RuleScope) -> list[PermissionRule]:
     if not isinstance(raw_rules, list):
         return []
 
-    rules: list[PermissionRule] = []
-    for item in raw_rules:
-        if not isinstance(item, dict):
-            continue
-        tool = item.get("tool")
-        resource = item.get("resource")
-        effect = item.get("effect")
-        if (
-            isinstance(tool, str)
-            and isinstance(resource, str)
-            and effect in ("allow", "deny", "ask")
-        ):
-            rules.append(PermissionRule(tool=tool, resource=resource, effect=effect, scope=scope))
+    rules = parse_rule_list(raw_rules, scope=scope)
+    # 确保所有规则的 scope 统一为当前文件的作用域
+    rules = [
+        PermissionRule(tool=r.tool, resource=r.resource, effect=r.effect, scope=scope)  # type: ignore[arg-type]
+        for r in rules
+    ]
     return rules
 
 
@@ -204,7 +202,7 @@ def merge_rules(scoped_rules: dict[RuleScope, list[PermissionRule]]) -> list[Per
 def save_rule(
     rule: PermissionRule, scope: RuleScope, project_dir: Path | None = None
 ) -> None:
-    """将一条权限规则追加写入对应作用域的 settings.json。
+    """将一条权限规则以 DSL 字符串格式追加写入对应作用域的 settings.json。
 
     - scope="session" 时不写文件，由调用方管理内存。
     - scope="project" 写入 project_dir/.harness/settings.json。
@@ -212,7 +210,11 @@ def save_rule(
     - scope="system" 为只读层，不允许通过此函数写入。
 
     目录不存在时自动创建；已有文件内容保留，仅追加到 permissions 数组。
+    规则以 DSL 格式写入，如 ``"Bash(git clone *)"``。
     """
+    # 延迟导入，避免与 rule_parser 之间的循环依赖
+    from harness_agent.policy.rule_parser import serialize_rule
+
     if scope == "system":
         # system 层为企业管控只读层，不允许运行时写入
         return
@@ -232,7 +234,7 @@ def save_rule(
     if not isinstance(permissions, list):
         permissions = []
 
-    permissions.append(asdict(rule))
+    permissions.append(serialize_rule(rule))
     data["permissions"] = permissions
 
     path.parent.mkdir(parents=True, exist_ok=True)

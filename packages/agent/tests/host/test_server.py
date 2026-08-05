@@ -1660,7 +1660,10 @@ async def test_real_hitl_rejection_prevents_file_write():
 
 
 async def test_approve_thread_delete_rule_skips_later_deletions_in_same_thread():
-    """delete_file 选择“本线程允许”后，同线程后续删除不再弹审批。
+    """delete_file 选择\u201c本线程允许\u201d后，同线程同一文件删除不再弹审批。
+
+    delete_file 规则使用精确文件路径（保守策略），因此 approve_thread
+    只豁免被批准的那个文件，后续删除不同文件仍需弹审批。
 
     规则注入镜像生产路径：会话规则保存在 RunCoordinator 内存列表，
     Agent 的 rules_provider 每次评估时读取该列表与持久化层合并结果。
@@ -1721,15 +1724,17 @@ async def test_approve_thread_delete_rule_skips_later_deletions_in_same_thread()
         await server.dispatch({"jsonrpc": "2.0", "id": interaction["id"], "result": {"decision": "approve_thread"}})
         await _wait_for(frames, lambda frame: frame.get("params", {}).get("type") == "run.completed")
         assert not first.exists()
-        assert PermissionRule(tool="delete_file", resource="*", effect="allow") in server._run_coordinator.session_rules
+        assert PermissionRule(tool="delete_file", resource=str(first), effect="allow") in server._run_coordinator.session_rules
 
-        # 第二次删除：会话规则命中，应直接执行，不再出现新的审批请求。
+        # 第二次删除（不同文件）：精确路径规则不覆盖，仍需弹审批。
         await server.dispatch(
             _request("run.start", {"message": "删除 second.txt", "thread_id": "del-thread", "run_id": "del-run-2"}, "del-start-2")
         )
+        interaction2 = await _wait_for(frames, lambda frame: frame.get("method") == "interaction.approval")
+        await server.dispatch({"jsonrpc": "2.0", "id": interaction2["id"], "result": {"decision": "approve_once"}})
         await _wait_for(frames, lambda frame: _event_count(frames, "run.completed") == 2)
         approvals = [frame for frame in frames if frame.get("method") == "interaction.approval"]
-        assert len(approvals) == 1
+        assert len(approvals) == 2
         assert not second.exists()
 
 

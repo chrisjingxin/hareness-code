@@ -95,24 +95,20 @@ def test_resume_value_reject_with_feedback_empty_feedback_is_plain_reject() -> N
 def test_generate_permission_rule_execute_uses_command_prefix() -> None:
     """execute 工具取命令首词生成前缀通配模式。"""
     rule = _generate_permission_rule("execute", {"command": "git commit -m 'x'"})
-    assert rule == PermissionRule(tool="execute", resource="git *", effect="allow")
+    assert rule == PermissionRule(tool="execute", resource="git commit *", effect="allow")
 
 
 def test_generate_permission_rule_file_tools_use_project_wildcard() -> None:
-    """文件写/删类工具使用项目级通配：批准后项目内同类操作不再反复弹窗。
-
-    敏感路径（.git/.harness 等）仍由预检的 L3.5 安全检查强制弹窗，
-    工作区边界由边界预检短路，因此通配不会放宽硬性保护。
-    """
-    for tool_name in ("write_file", "edit_file", "delete_file", "apply_patch"):
+    """文件写/编辑/打补丁工具按目录递归生成规则；删除工具使用精确文件路径。"""
+    for tool_name in ("write_file", "edit_file", "apply_patch"):
         rule = _generate_permission_rule(tool_name, {"file_path": "src/app/main.py"})
-        assert rule == PermissionRule(tool=tool_name, resource="*", effect="allow")
+        assert rule == PermissionRule(tool=tool_name, resource="src/app/**", effect="allow")
 
 
-def test_generate_permission_rule_other_tool_uses_wildcard() -> None:
-    """其他工具的资源模式为通配符。"""
+def test_generate_permission_rule_web_fetch_uses_domain_extraction() -> None:
+    """web_fetch 按 URL 域名生成规则。"""
     rule = _generate_permission_rule("web_fetch", {"url": "https://example.com"})
-    assert rule == PermissionRule(tool="web_fetch", resource="*", effect="allow")
+    assert rule == PermissionRule(tool="web_fetch", resource="domain:example.com", effect="allow")
 
 
 def _approval_spec(action_requests: list[dict]) -> InteractionRequest:
@@ -157,7 +153,7 @@ def test_approve_thread_stores_session_rule_in_memory() -> None:
     spec = _approval_spec([{"name": "execute", "args": {"command": "git status"}}])
     coordinator._record_approval_rules(spec, {"decision": "approve_thread"})
     assert coordinator.session_rules == [
-        PermissionRule(tool="execute", resource="git *", effect="allow")
+        PermissionRule(tool="execute", resource="git status *", effect="allow")
     ]
 
 
@@ -170,14 +166,7 @@ def test_approve_always_persists_rule_to_project_layer(tmp_path: Path) -> None:
     saved = json.loads(
         (tmp_path / ".harness" / "settings.json").read_text(encoding="utf-8")
     )
-    assert saved["permissions"] == [
-        {
-            "tool": "execute",
-            "resource": "git *",
-            "effect": "allow",
-            "scope": "project",
-        }
-    ]
+    assert saved["permissions"] == ["Bash(git status *)"]
 
 
 def test_other_decisions_do_not_record_rules() -> None:
@@ -227,10 +216,10 @@ class TestDeleteFileThreadApprovalRegression:
         coordinator._record_approval_rules(spec, {"decision": "approve_thread"})
 
         preflight = self._preflight(coordinator, tmp_path)
-        # 同路径、其他文件、不同路径形态均不再弹窗
+        # 同路径命中规则不再弹窗；其他文件不匹配精确规则需重新审批
         assert preflight(self._delete_request("/tmp/a.txt")) is False
-        assert preflight(self._delete_request("/tmp/other.txt")) is False
-        assert preflight(self._delete_request(str(tmp_path / "src" / "b.txt"))) is False
+        assert preflight(self._delete_request("/tmp/other.txt")) is True
+        assert preflight(self._delete_request(str(tmp_path / "src" / "b.txt"))) is True
 
     def test_thread_approval_still_asks_for_sensitive_delete(
         self, tmp_path: Path
