@@ -117,7 +117,7 @@ test("open 后真实 server 提供 handoff 页面，lifecycle 走 accepted → r
   expect(host.revoked).toEqual(["att-integration"])
   const idle = coordinator!.getSnapshot()
   if (idle.phase !== "idle") throw new Error("expected idle")
-  expect(idle.restoreThreadId).toBe("thread-1")
+  expect(idle.threadId).toBe("thread-1")
   expect(idle.handoffVersion).toBe(1)
 
   socket.close()

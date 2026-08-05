@@ -9,6 +9,9 @@ import { act, createElement } from "react"
 import { AgentClient } from "../../src/ipc/client"
 import { StdioRpcTransport } from "../../src/ipc/stdio-transport"
 import { Za38Tui } from "../../src/tui/app"
+import { createInteractiveController } from "../../src/interactive/controller"
+import { AgentClientGateway } from "../../src/infrastructure/agent-client-gateway"
+import { createTuiAdapter } from "../../src/tui/application/adapter"
 import type { InteractiveRuntime } from "../../src/interactive/runtime"
 
 const runtime: InteractiveRuntime = {
@@ -23,13 +26,13 @@ const runtime: InteractiveRuntime = {
 
 test("真实 textarea 在光标边界用上下键回填历史，而不是被全局快捷键截获", async () => {
   const historyHome = await mkdtemp(join(tmpdir(), "za38-tui-history-"))
-  const { client, requests } = createMockClient()
+  const { client, requests, controller, adapter } = createSession()
   let setup: Awaited<ReturnType<typeof testRender>>
   try {
     await act(async () => {
       setup = await testRender(createElement(Za38Tui, {
-        client,
-        runtime,
+        controller,
+        adapter,
         promptHistoryFile: join(historyHome, "prompt-history.jsonl"),
         onRequestExit: () => undefined,
       }), { width: 80, height: 24 })
@@ -50,18 +53,20 @@ test("真实 textarea 在光标边界用上下键回填历史，而不是被全�
   } finally {
     if (setup!) await act(async () => { setup.renderer.destroy() })
     client.destroy()
+    await adapter.close()
+    await controller.close()
     await rm(historyHome, { recursive: true, force: true })
   }
 })
 
 test("/status 只展示本地运行摘要，不创建 Agent run", async () => {
-  const { client, requests } = createMockClient()
+  const { client, requests, controller, adapter } = createSession()
   let setup: Awaited<ReturnType<typeof testRender>>
   try {
     await act(async () => {
       setup = await testRender(createElement(Za38Tui, {
-        client,
-        runtime,
+        controller,
+        adapter,
         onRequestExit: () => undefined,
       }), { width: 100, height: 28 })
     })
@@ -83,18 +88,20 @@ test("/status 只展示本地运行摘要，不创建 Agent run", async () => {
   } finally {
     if (setup!) await act(async () => { setup.renderer.destroy() })
     client.destroy()
+    await adapter.close()
+    await controller.close()
   }
 })
 
 
 test("未知 Slash Command 只显示本地建议，不会创建 Agent run", async () => {
-  const { client, requests } = createMockClient()
+  const { client, requests, controller, adapter } = createSession()
   let setup: Awaited<ReturnType<typeof testRender>>
   try {
     await act(async () => {
       setup = await testRender(createElement(Za38Tui, {
-        client,
-        runtime,
+        controller,
+        adapter,
         onRequestExit: () => undefined,
       }), { width: 100, height: 30 })
       await setup.flush()
@@ -110,17 +117,19 @@ test("未知 Slash Command 只显示本地建议，不会创建 Agent run", asyn
   } finally {
     if (setup!) await act(async () => { setup.renderer.destroy() })
     client.destroy()
+    await adapter.close()
+    await controller.close()
   }
 })
 
 test("双斜杠转义会原样向 Agent 提交单个前导斜杠", async () => {
-  const { client, requests } = createMockClient()
+  const { client, requests, controller, adapter } = createSession()
   let setup: Awaited<ReturnType<typeof testRender>>
   try {
     await act(async () => {
       setup = await testRender(createElement(Za38Tui, {
-        client,
-        runtime,
+        controller,
+        adapter,
         onRequestExit: () => undefined,
       }), { width: 100, height: 30 })
       await setup.flush()
@@ -134,18 +143,20 @@ test("双斜杠转义会原样向 Agent 提交单个前导斜杠", async () => {
   } finally {
     if (setup!) await act(async () => { setup.renderer.destroy() })
     client.destroy()
+    await adapter.close()
+    await controller.close()
   }
 })
 
 
 test("/skills 打开可搜索选择器，并把选中的 Skill 附到下一次运行", async () => {
-  const { client, requests } = createMockClient()
+  const { client, requests, controller, adapter } = createSession()
   let setup: Awaited<ReturnType<typeof testRender>>
   try {
     await act(async () => {
       setup = await testRender(createElement(Za38Tui, {
-        client,
-        runtime,
+        controller,
+        adapter,
         onRequestExit: () => undefined,
       }), { width: 100, height: 30 })
       await setup.flush()
@@ -192,18 +203,20 @@ test("/skills 打开可搜索选择器，并把选中的 Skill 附到下一次�
   } finally {
     if (setup!) await act(async () => { setup.renderer.destroy() })
     client.destroy()
+    await adapter.close()
+    await controller.close()
   }
 })
 
 
 test("SearchPicker 的 Esc 关闭浮层后会恢复 composer，且不把搜索文字带入下一次输入", async () => {
-  const { client, requests } = createMockClient()
+  const { client, requests, controller, adapter } = createSession()
   let setup: Awaited<ReturnType<typeof testRender>>
   try {
     await act(async () => {
       setup = await testRender(createElement(Za38Tui, {
-        client,
-        runtime,
+        controller,
+        adapter,
         onRequestExit: () => undefined,
       }), { width: 100, height: 30 })
       await setup.flush()
@@ -238,19 +251,20 @@ test("SearchPicker 的 Esc 关闭浮层后会恢复 composer，且不把搜索�
   } finally {
     if (setup!) await act(async () => { setup.renderer.destroy() })
     client.destroy()
+    await adapter.close()
+    await controller.close()
   }
 })
 
 
 test("启动 --resume 等价于打开同一 thread 选择器", async () => {
-  const { client } = createMockClient()
+  const { client, controller, adapter } = createSession(true)
   let setup: Awaited<ReturnType<typeof testRender>>
   try {
     await act(async () => {
       setup = await testRender(createElement(Za38Tui, {
-        client,
-        runtime,
-        resume: true,
+        controller,
+        adapter,
         onRequestExit: () => undefined,
       }), { width: 100, height: 30 })
       await Bun.sleep(0)
@@ -261,17 +275,19 @@ test("启动 --resume 等价于打开同一 thread 选择器", async () => {
   } finally {
     if (setup!) await act(async () => { setup.renderer.destroy() })
     client.destroy()
+    await adapter.close()
+    await controller.close()
   }
 })
 
 test("Slash 菜单显示 skill:<id> 并可直接选择", async () => {
-  const { client, requests } = createMockClient()
+  const { client, requests, controller, adapter } = createSession()
   let setup: Awaited<ReturnType<typeof testRender>>
   try {
     await act(async () => {
       setup = await testRender(createElement(Za38Tui, {
-        client,
-        runtime,
+        controller,
+        adapter,
         onRequestExit: () => undefined,
       }), { width: 100, height: 30 })
       await setup.flush()
@@ -302,18 +318,20 @@ test("Slash 菜单显示 skill:<id> 并可直接选择", async () => {
   } finally {
     if (setup!) await act(async () => { setup.renderer.destroy() })
     client.destroy()
+    await adapter.close()
+    await controller.close()
   }
 })
 
 
 test("窄终端中的 /skills 使用单列浮层且保持可操作", async () => {
-  const { client } = createMockClient()
+  const { client, controller, adapter } = createSession()
   let setup: Awaited<ReturnType<typeof testRender>>
   try {
     await act(async () => {
       setup = await testRender(createElement(Za38Tui, {
-        client,
-        runtime,
+        controller,
+        adapter,
         onRequestExit: () => undefined,
       }), { width: 58, height: 18 })
       await setup.flush()
@@ -332,17 +350,19 @@ test("窄终端中的 /skills 使用单列浮层且保持可操作", async () =>
   } finally {
     if (setup!) await act(async () => { setup.renderer.destroy() })
     client.destroy()
+    await adapter.close()
+    await controller.close()
   }
 })
 
 test("无 Web launcher 时 /web 显示宿主级通知，不创建 Agent run", async () => {
-  const { client, requests } = createMockClient()
+  const { client, requests, controller, adapter } = createSession()
   let setup: Awaited<ReturnType<typeof testRender>>
   try {
     await act(async () => {
       setup = await testRender(createElement(Za38Tui, {
-        client,
-        runtime,
+        controller,
+        adapter,
         onRequestExit: () => undefined,
       }), { width: 100, height: 28 })
     })
@@ -362,6 +382,8 @@ test("无 Web launcher 时 /web 显示宿主级通知，不创建 Agent run", as
   } finally {
     if (setup!) await act(async () => { setup.renderer.destroy() })
     client.destroy()
+    await adapter.close()
+    await controller.close()
   }
 })
 
@@ -390,6 +412,21 @@ async function sendAndFinish(
     })
     await setup.flush()
   })
+}
+
+/** Composition 语义测试辅助：AgentClient → Controller → TUI Adapter（镜像 index.ts 组合路径）。 */
+function createSession(resume = false) {
+  const { client, requests } = createMockClient()
+  const controller = createInteractiveController({
+    gateway: new AgentClientGateway(client),
+    runtime,
+  })
+  const adapter = createTuiAdapter({
+    controller,
+    resume,
+    onRequestExit: () => undefined,
+  })
+  return { client, requests, controller, adapter }
 }
 
 function createMockClient() {

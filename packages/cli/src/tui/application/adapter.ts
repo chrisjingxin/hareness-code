@@ -106,6 +106,8 @@ export interface TuiAdapter {
   subscribe(listener: (snapshot: TuiAdapterSnapshot) => void): () => void
   dispatch(intent: TuiIntent): Promise<void>
   close(): Promise<void>
+  /** Handoff 返回 TUI 后按 Web 会话期间的 Thread 重同步（过渡机制，ZC-114 共享 Core 后删除）。 */
+  resyncAfterHandoff(webThreadId: string | null): Promise<void>
 }
 
 /** 创建 TUI Adapter；一次 TUI 挂载对应一个 Adapter 与共享 Controller。 */
@@ -247,6 +249,26 @@ class TuiAdapterImpl implements TuiAdapter {
     if (this.closed) return
     this.closed = true
     this.unsubscribeInteractive()
+  }
+
+  /** web-active 期间 TUI Controller 不消费 Web 侧变更；返回时按 Web 会话 Thread 重拉最新内容。 */
+  async resyncAfterHandoff(webThreadId: string | null): Promise<void> {
+    if (this.closed) return
+    const current = this.controller.getSnapshot()
+    if (current.activeRun) {
+      // 任务仍在运行：thread.open 会被 busy 拒绝，保留当前 Thread 并明确提示。
+      this.showTransientNotice("任务仍在运行，已返回原 Thread。")
+      return
+    }
+    if (webThreadId !== null) {
+      const outcome = await this.controller.dispatch({ type: "thread.open", threadId: webThreadId })
+      if (outcome.status === "rejected") {
+        this.showTransientNotice("未能恢复到 Web 会话的 Thread。")
+      }
+    } else {
+      // 空首页且无运行中任务：thread.new 在无运行时不弹确认，直接清空。
+      await this.controller.dispatch({ type: "command.execute", commandId: "thread.new" })
+    }
   }
 
   /** 把共享 snapshot 与表现状态一起发布为新快照。 */

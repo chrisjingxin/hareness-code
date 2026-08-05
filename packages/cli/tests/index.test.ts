@@ -1,8 +1,9 @@
 /** CLI 启动层测试：验证工作区错误能在启动 Python 前得到清晰诊断。 */
 import { expect, test } from "bun:test"
+import { readFileSync } from "node:fs"
 import { mkdtemp, readFile, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
 import { resolve } from "node:path"
+import { tmpdir } from "node:os"
 
 import {
   clientCapabilities,
@@ -12,6 +13,18 @@ import {
   validateWorkspace,
 } from "../src/index"
 import { parseArgs } from "../src/args"
+
+test("CLI shutdown 顺序：runTui 返回后 webHandoff → controller.close，agent.stop 最后", () => {
+  const source = readFileSync(resolve(import.meta.dir, "../src/index.ts"), "utf8")
+  const runTuiAt = source.indexOf("await runTui(")
+  const webHandoffCloseAt = source.indexOf("await webHandoff?.close()")
+  const controllerCloseAt = source.indexOf("await controller?.close()")
+  const agentStopAt = source.indexOf("await agent.stop()")
+  expect(runTuiAt).toBeGreaterThan(-1)
+  expect(webHandoffCloseAt).toBeGreaterThan(runTuiAt)
+  expect(controllerCloseAt).toBeGreaterThan(webHandoffCloseAt)
+  expect(agentStopAt).toBeGreaterThan(controllerCloseAt)
+})
 
 test("不存在的工作区会给出明确错误", () => {
   const missing = resolve(tmpdir(), `za38-missing-${crypto.randomUUID()}`)

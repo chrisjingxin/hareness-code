@@ -5,10 +5,8 @@ import { createRoot, useKeyboard, useTerminalDimensions } from "@opentui/react"
 import { useCallback, useEffect, useRef, useSyncExternalStore, type ReactNode } from "react"
 import type { ModelProfile } from "@za38/protocol"
 
-import type { InteractiveController, InteractiveControllerOptions } from "../interactive/types"
-import { createInteractiveController } from "../interactive/controller"
+import type { InteractiveController } from "../interactive/types"
 import type { AgentClient } from "../ipc/client"
-import { AgentClientGateway } from "../infrastructure/agent-client-gateway"
 import type { InteractiveRuntime } from "../interactive/runtime"
 import {
   createTuiAdapter,
@@ -35,37 +33,21 @@ import type {
   WebHandoffSnapshot,
 } from "../web/handoff-coordinator"
 
-/** 正式 TUI 的启动参数；Controller/Adapter 和 OpenTUI 共用同一组生命周期选项。 */
+/** 正式 TUI 的启动参数；Controller 由 CLI Composition Root 创建并注入。 */
 export type TuiOptions = {
-  client: AgentClient
-  runtime: InteractiveRuntime
+  controller: InteractiveController
   resume?: boolean
-  initialThreadId?: string | null
   promptHistoryFile?: string
   onRequestExit: () => void
   openWeb?: (threadId: string | null) => Promise<void>
   webHandoff?: WebHandoffCoordinator
 }
 
-/** 创建一次 TUI 挂载对应的 Interactive Core + Adapter；不持久化任何领域对象。 */
-export function createTuiSession(options: TuiOptions): { controller: InteractiveController; adapter: TuiAdapter } {
-  const controller = createInteractiveController({
-    gateway: new AgentClientGateway(options.client),
-    runtime: options.runtime,
-    ...(options.initialThreadId !== undefined ? { initialThreadId: options.initialThreadId } : {}),
-  })
-  const adapter = createTuiAdapter({
-    controller,
-    promptHistoryFile: options.promptHistoryFile,
-    resume: options.resume,
-    onRequestExit: options.onRequestExit,
-    openWeb: options.openWeb,
-  })
-  return { controller, adapter }
-}
+/** runTui 渲染树内部使用的完整选项：adapter 由 runTui 创建一次并注入，跨 handoff 复用。 */
+export type RenderedTuiOptions = TuiOptions & { adapter: TuiAdapter }
 
-/** 根层接管切换：Host 确认 Web holder 后卸载 TUI Adapter，恢复后重建。 */
-export function WebAwareRoot(options: TuiOptions) {
+/** 根层接管切换：Host 确认 Web holder 后卸载 TUI 渲染，恢复后复用同一 Controller/Adapter。 */
+export function WebAwareRoot(options: RenderedTuiOptions) {
   const coordinator = options.webHandoff
   const subscribe = useCallback(
     (listener: (snapshot: WebHandoffSnapshot) => void) =>
@@ -80,35 +62,30 @@ export function WebAwareRoot(options: TuiOptions) {
   if (snapshot && snapshot.tuiLocked) {
     return <WebTakeoverView snapshot={snapshot} onExit={options.onRequestExit} />
   }
-  const restoring = snapshot?.phase === "idle" && snapshot.handoffVersion > 0
-  return (
-    <Za38Tui
-      key={snapshot?.handoffVersion ?? 0}
-      {...options}
-      initialThreadId={restoring ? snapshot.restoreThreadId : undefined}
-    />
-  )
+  return <Za38Tui {...options} />
 }
 
 function noOpUnsubscribe(): void {
   // 无 Coordinator 时订阅为空操作。
 }
 
-/** 正式 OpenTUI 根组件：所有业务状态来自 Adapter snapshot。 */
-export function Za38Tui(options: TuiOptions) {
-  const adapterRef = useRef<TuiAdapter | null>(null)
-  const controllerRef = useRef<InteractiveController | null>(null)
-  if (!adapterRef.current) {
-    const session = createTuiSession(options)
-    controllerRef.current = session.controller
-    adapterRef.current = session.adapter
-  }
-  const adapter = adapterRef.current
-  const controller = controllerRef.current!
+/** 正式 OpenTUI 根组件：所有业务状态来自 Adapter snapshot；Controller/Adapter 由宿主注入。 */
+export function Za38Tui(options: RenderedTuiOptions) {
+  const adapter = options.adapter
   const subscribe = useCallback((listener: (snapshot: TuiAdapterSnapshot) => void) => adapter.subscribe(listener), [adapter])
   const getSnapshot = useCallback(() => adapter.getSnapshot(), [adapter])
   const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
   const interactive = snapshot.interactive
+
+  // Handoff 返回后按 Web 会话 Thread 重同步。
+  // 依赖 WebAwareRoot 的组件类型切换（Za38Tui ↔ WebTakeoverView）保证返回时必然重挂载，
+  // 因此本 effect 只在每次返回挂载时触发一次（首次挂载 handoffVersion=0 跳过；ZC-114 共享 Core 后删除）。
+  useEffect(() => {
+    const handoff = options.webHandoff?.getSnapshot()
+    if (handoff && handoff.phase === "idle" && handoff.handoffVersion > 0) {
+      void adapter.resyncAfterHandoff(handoff.threadId)
+    }
+  }, [adapter, options.webHandoff])
 
   const inputRef = useRef<TextareaRenderable | null>(null)
   const conversationScrollRef = useRef<ScrollBoxRenderable | null>(null)
@@ -118,10 +95,7 @@ export function Za38Tui(options: TuiOptions) {
   const terminal = useTerminalDimensions()
   const lastScrollRequestRef = useRef(snapshot.scrollRequest)
 
-  useEffect(() => () => {
-    void adapter.close()
-    void controller.close()
-  }, [adapter, controller])
+  // Controller/Adapter 由 CLI Composition Root 统一关闭；handoff 往返不销毁实例。
 
   const syncInputBuffer = useCallback((draft: string, cursor: "start" | "end" | undefined) => {
     const input = inputRef.current
@@ -364,6 +338,15 @@ function displayedModelName(snapshot: InteractiveSnapshot): string | undefined {
 /** 创建 OpenTUI renderer、挂载错误边界；退出时将控制权交回 CLI 关闭 Python sidecar。 */
 export async function runTui(options: TuiOptions): Promise<void> {
   registerCommonSyntaxParsers()
+  // Adapter 在 CLI 层创建一次：handoff 往返复用同一实例，本地表现状态跨会话保留。
+  const adapter = createTuiAdapter({
+    controller: options.controller,
+    promptHistoryFile: options.promptHistoryFile,
+    resume: options.resume,
+    onRequestExit: options.onRequestExit,
+    openWeb: options.openWeb,
+  })
+  const renderedOptions: RenderedTuiOptions = { ...options, adapter }
   const renderer = await createCliRenderer({
     externalOutputMode: "passthrough",
     targetFps: 60,
@@ -391,6 +374,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
       unregisterExit?.()
       uninstallVtGuard?.()
       root.unmount()
+      void adapter.close()
       void shutdownCommonSyntaxClient().finally(() => {
         renderer.destroy()
         resolve()
@@ -399,7 +383,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
     closeRef.current = close
     root.render(
       <TuiErrorBoundary onRequestExit={close}>
-        <WebAwareRoot {...options} onRequestExit={close} />
+        <WebAwareRoot {...renderedOptions} onRequestExit={close} />
       </TuiErrorBoundary>,
     )
   })

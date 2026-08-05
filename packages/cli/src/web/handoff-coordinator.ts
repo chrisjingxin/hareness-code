@@ -62,7 +62,7 @@ export type WebHandoffSnapshot =
   | {
       phase: "idle"
       tuiLocked: false
-      restoreThreadId: string | null
+      threadId: string | null
       handoffVersion: number
       error?: string
     }
@@ -163,7 +163,6 @@ class WebHandoffCoordinatorImpl implements WebHandoffCoordinator {
 
   private phase: "idle" | "opening" | "active" | "returning" = "idle"
   private handoffVersion = 0
-  private restoreThreadId: string | null = null
   private handoffId: string | null = null
   private threadId: string | null = null
   private tuiLocked = false
@@ -286,7 +285,7 @@ class WebHandoffCoordinatorImpl implements WebHandoffCoordinator {
         return {
           phase: "idle",
           tuiLocked: false,
-          restoreThreadId: this.restoreThreadId,
+          threadId: this.threadId,
           handoffVersion: this.handoffVersion,
           ...(this.error !== undefined ? { error: this.error } : {}),
         }
@@ -588,7 +587,6 @@ class WebHandoffCoordinatorImpl implements WebHandoffCoordinator {
   private restoreToIdle(): void {
     this.recoveryTimer?.clear()
     this.recoveryTimer = undefined
-    this.restoreThreadId = this.threadId
     this.handoffVersion += 1
     this.phase = "idle"
     this.handoffId = null

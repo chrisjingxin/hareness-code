@@ -11,6 +11,9 @@ import { AgentClient } from "./ipc/client"
 import { StdioRpcTransport } from "./ipc/stdio-transport"
 import { runTui } from "./tui/app"
 import { CLI_VERSION, createInteractiveRuntime, type InteractiveRuntime } from "./interactive/runtime"
+import { createInteractiveController } from "./interactive/controller"
+import type { InteractiveController } from "./interactive/types"
+import { AgentClientGateway } from "./infrastructure/agent-client-gateway"
 import { createSystemBrowserOpener } from "./web/browser"
 import { browserBundle } from "./web/bundle"
 import { webHtml } from "./web/html"
@@ -200,6 +203,7 @@ async function execute(command: Command): Promise<void> {
       log_level: diagnostics.isDebug ? "debug" : "info",
     })
     let webHandoff: WebHandoffCoordinator | undefined
+    let controller: InteractiveController | undefined
     try {
       if (!command.nonInteractive) {
         const server = createWebServer({
@@ -217,16 +221,22 @@ async function execute(command: Command): Promise<void> {
           diagnostics,
         })
       }
-      await runTui({
-        client: agent.client,
+      // CLI Composition Root：全生命周期唯一 Controller，TUI/Web 共用（D-01）。
+      controller = createInteractiveController({
+        gateway: new AgentClientGateway(agent.client),
         runtime: agent.runtime,
+      })
+      await runTui({
+        controller,
         resume: command.resume,
         onRequestExit: () => undefined,
         webHandoff,
         openWeb: threadId => webHandoff!.open(threadId),
       })
     } finally {
+      // 关闭顺序：Web 通道 → Controller → diagnostics → agent.stop（外层 finally）。
       await webHandoff?.close()
+      await controller?.close()
       diagnostics.info("cli.interactive.stopped")
       diagnostics.close()
     }

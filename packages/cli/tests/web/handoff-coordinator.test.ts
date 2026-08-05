@@ -209,7 +209,7 @@ test("初始 snapshot 是 idle，且不携带凭据", () => {
   expect(snapshot).toEqual({
     phase: "idle",
     tuiLocked: false,
-    restoreThreadId: null,
+    threadId: null,
     handoffVersion: 0,
   })
   h.unsubscribe()
@@ -252,11 +252,11 @@ test("ready 但 Host status 不是 matching attachment 时进入 cleanup", async
   const snapshot = h.coordinator.getSnapshot()
   if (snapshot.phase !== "idle") throw new Error("expected idle")
   expect(snapshot.handoffVersion).toBe(1)
-  expect(snapshot.restoreThreadId).toBe("thread-1")
+  expect(snapshot.threadId).toBe("thread-1")
   h.unsubscribe()
 })
 
-test("ready 携带的最终 thread_id 覆盖 open 初值，restoreThreadId 记录它", async () => {
+test("ready 携带的最终 thread_id 覆盖 open 初值，threadId 记录它", async () => {
   const h = createHarness()
   // open(null) 表示没有恢复任何 Thread；ready 帧携带 Browser 实际恢复后的 ID。
   await h.coordinator.open(null)
@@ -280,7 +280,7 @@ test("ready 携带的最终 thread_id 覆盖 open 初值，restoreThreadId 记�
   await waitFor(() => h.coordinator.getSnapshot().phase === "idle")
   const idle = h.coordinator.getSnapshot()
   if (idle.phase !== "idle") throw new Error("expected idle")
-  expect(idle.restoreThreadId).toBe("thread-restored")
+  expect(idle.threadId).toBe("thread-restored")
   expect(idle.handoffVersion).toBe(1)
   h.unsubscribe()
 })
@@ -329,7 +329,7 @@ test("matching holder 后进入 active/tuiLocked，并向 primary 发送 active 
   await waitFor(() => h.coordinator.getSnapshot().phase === "idle")
   const idle = h.coordinator.getSnapshot()
   if (idle.phase !== "idle") throw new Error("expected idle")
-  expect(idle.restoreThreadId).toBeNull()
+  expect(idle.threadId).toBeNull()
   expect(idle.handoffVersion).toBe(1)
   h.unsubscribe()
 })
@@ -342,11 +342,11 @@ test("active 阶段重复 ready 按 lifecycle 状态机拒绝", async () => {
   await new Promise(resolve => setTimeout(resolve, 5))
   const snapshot = h.coordinator.getSnapshot()
   expect(snapshot.phase).toBe("idle")
-  if (snapshot.phase === "idle") expect(snapshot.restoreThreadId).toBe("thread-1")
+  if (snapshot.phase === "idle") expect(snapshot.threadId).toBe("thread-1")
   h.unsubscribe()
 })
 
-test("release 后 restoreThreadId 保留最终值且 handoffVersion 只递增一次", async () => {
+test("release 后 threadId 保留最终值且 handoffVersion 只递增一次", async () => {
   const h = createHarness()
   const { channel } = await openAndAccept(h)
   await activate(h, channel, h.host.created[0].attachment_id)
@@ -356,7 +356,7 @@ test("release 后 restoreThreadId 保留最终值且 handoffVersion 只递增一
   await waitFor(() => h.coordinator.getSnapshot().phase === "idle")
   const idle = h.coordinator.getSnapshot()
   if (idle.phase !== "idle") throw new Error("expected idle")
-  expect(idle.restoreThreadId).toBe("thread-2")
+  expect(idle.threadId).toBe("thread-2")
   expect(idle.handoffVersion).toBe(1)
   expect(h.host.revoked).toEqual([h.host.created[0].attachment_id])
   h.unsubscribe()
