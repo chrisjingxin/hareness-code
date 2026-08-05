@@ -3,12 +3,13 @@
 import { type ScrollBoxRenderable } from "@opentui/core"
 import { type RefObject } from "react"
 
-import { formatDuration, formatUsage } from "../../interactive/runtime"
 import type { ConversationMessage, InteractionCard, TimelineItem, ToolCard } from "../../interactive/state"
 import type { InteractiveSnapshot } from "../../interactive/types"
-import { activityLabel } from "../../presentation-shared"
+import { formatContext, formatDuration, formatUsage } from "../../presentation-shared/formatters"
+import { APPROVAL_DECISION_ORDER, approvalDecisionDescription, approvalDecisionLabel, isApprovalDecision } from "../../presentation-shared/interaction-policy"
+import { activityLabel, interactionStatusLabel, toolStatusLabel } from "../../presentation-shared/timeline-presenter"
+import { collapseToolOutput } from "../../presentation-shared/tool-output-policy"
 import { getCommonSyntaxClient } from "../platform/syntax-parsers"
-import { collapseToolOutput } from "../upstream/collapse-tool-output"
 import { PROMPT_BORDER, useSpinner } from "./composer"
 import { createScrollAcceleration } from "./scroll.js"
 import { markdownSyntax, tuiTheme } from "./theme"
@@ -133,7 +134,7 @@ function MessageBlock(props: { message: ConversationMessage }) {
 function ToolRow(props: { tool: ToolCard; expanded: boolean; onToggle: () => void }) {
   const tone = props.tool.status === "failed" ? tuiTheme.danger : props.tool.status === "completed" ? tuiTheme.success : tuiTheme.primary
   const marker = props.tool.status === "failed" ? "×" : props.tool.status === "completed" ? "✓" : "◌"
-  const label = props.tool.status === "failed" ? "失败" : props.tool.status === "completed" ? "已完成" : "执行中"
+  const label = toolStatusLabel(props.tool.status)
   const collapsed = collapseToolOutput(props.tool.output, 4, 360)
   const output = props.expanded ? props.tool.output : collapsed.output
   const argumentsPreview = collapseToolOutput(props.tool.arguments, 1, 240).output
@@ -189,7 +190,7 @@ function RunSummary(props: { interactive: InteractiveSnapshot; modelName?: strin
   const duration = formatDuration(summary.durationMs)
   const usage = formatUsage(summary.usage)
   const context = summary.context?.estimatedTokens && summary.context.inputCapTokens
-    ? `ctx ${summary.context.estimatedTokens}/${summary.context.inputCapTokens}`
+    ? `ctx ${formatContext(summary.context.estimatedTokens, summary.context.inputCapTokens)}`
     : undefined
   const outcome = summary.outcome === "completed" ? "已完成" : summary.outcome === "cancelled" ? "已取消" : "失败"
   const color = summary.outcome === "completed" ? tuiTheme.success : summary.outcome === "cancelled" ? tuiTheme.muted : tuiTheme.danger
@@ -214,7 +215,10 @@ function InteractionRow(props: {
   const pending = interaction.status === "pending"
   const approval = interaction.type === "approval"
   const tone = approval ? tuiTheme.warning : tuiTheme.primary
-  const allowedDecisions = props.activeInteraction?.type === "approval" ? props.activeInteraction.decisions : ALL_APPROVAL_DECISIONS
+  const allowedDecisions = props.activeInteraction?.type === "approval" ? props.activeInteraction.decisions : APPROVAL_DECISION_ORDER
+  const decisionOptions = allowedDecisions
+    .filter(isApprovalDecision)
+    .map(decision => ({ name: approvalDecisionLabel(decision), description: approvalDecisionDescription(decision), value: decision }))
 
   return (
     <box marginTop={1} marginLeft={2} marginRight={2} border={["left"]} borderColor={tone} customBorderChars={PROMPT_BORDER}>
@@ -234,7 +238,7 @@ function InteractionRow(props: {
               height={Math.max(2, Math.min(10, allowedDecisions.length * 2))}
               showDescription
               wrapSelection
-              options={allowedDecisions.map(decision => approvalOption(decision)).filter((option): option is { name: string; description: string; value: string } => option !== undefined)}
+              options={decisionOptions}
               onSelect={(_, option) => {
                 const value = option?.value
                 if (value === "approve_once" || value === "approve_thread" || value === "approve_always" || value === "reject" || value === "reject_with_feedback") {
@@ -275,15 +279,6 @@ function timelineItemKey(item: TimelineItem): string {
   if (item.type === "message") return ["message", item.message.id].join(":")
   if (item.type === "tool") return toolTimelineKey(item.tool)
   return ["interaction", item.interaction.runId, item.interaction.id].join(":")
-}
-
-/** 将已落定的交互状态压缩为简短、可扫描的历史标签。 */
-function interactionStatusLabel(status: InteractionCard["status"]): string {
-  if (status === "approved") return "已允许"
-  if (status === "rejected") return "已拒绝"
-  if (status === "answered") return "已回答"
-  if (status === "cancelled") return "未完成"
-  return "已恢复执行"
 }
 
 /** 拒绝和取消保留警示色，其余处理结果按成功状态展示。 */
@@ -328,25 +323,5 @@ function safePreview(value: unknown): string | undefined {
     return shorten(JSON.stringify(value), 120)
   } catch {
     return "参数不可序列化"
-  }
-}
-
-/** 服务端未在 snapshot 提供 decisions 时（历史卡片）使用的完整回退选项。 */
-const ALL_APPROVAL_DECISIONS: readonly ApprovalDecision[] = [
-  "approve_once",
-  "approve_thread",
-  "approve_always",
-  "reject",
-  "reject_with_feedback",
-]
-
-/** 将共享 decisions 映射为可读的 select 选项；未知 decision 不渲染。 */
-function approvalOption(decision: ApprovalDecision): { name: string; description: string; value: string } | undefined {
-  switch (decision) {
-    case "approve_once": return { name: "允许一次", description: "继续执行当前操作", value: decision }
-    case "approve_thread": return { name: "本线程允许", description: "当前会话内不再询问", value: decision }
-    case "approve_always": return { name: "永久允许", description: "此后同类操作自动放行", value: decision }
-    case "reject": return { name: "拒绝", description: "停止此操作并告知 Agent", value: decision }
-    case "reject_with_feedback": return { name: "拒绝并反馈", description: "拒绝并附带修改建议", value: decision }
   }
 }

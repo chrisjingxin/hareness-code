@@ -1,7 +1,8 @@
 /** Web Interactive Adapter：只拥有浏览器表现状态，把用户动作映射为 InteractiveIntent。 */
 
 import type { ApprovalDecision, InteractiveController, InteractiveIntent, InteractiveMcpInput, IntentOutcome, InteractiveResult, InteractiveSnapshot, InteractiveResponse } from "../../interactive/types"
-import { filterCommandMenuItems, type CommandMenuItem } from "../../interactive/commands"
+import { filterCommandMenuItems } from "../../presentation-shared/command-menu-policy"
+import type { CommandMenuItem } from "../../interactive/commands"
 import type { WebHandoffPort } from "../handoff-port"
 
 /** 每帧合并表现发布的可注入调度器；rAF 不可用时由工厂实现回退到 setTimeout(16)。 */

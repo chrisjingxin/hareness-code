@@ -3,7 +3,8 @@
 import type { ModelProfile } from "@za38/protocol"
 
 import type { InteractiveController, InteractiveIntent, InteractiveResult, InteractiveSnapshot, PresentationEffect } from "../../interactive/types"
-import { filterCommandMenuItems, parseSlashCommand, resolveSlashCommand, type CommandMenuItem, type SkillMenuItem } from "../../interactive/commands"
+import { filterCommandMenuItems } from "../../presentation-shared/command-menu-policy"
+import { parseSlashCommand, resolveSlashCommand, type CommandMenuItem, type SkillMenuItem } from "../../interactive/commands"
 import type { ThreadSummary } from "@za38/protocol"
 import {
   loadPromptHistory,

@@ -4,8 +4,7 @@
 import { Activity, Cpu, Ellipsis, Menu, ShieldCheck, X } from "lucide-react"
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react"
 import { activityLabel } from "../../presentation-shared"
-import { Capability } from "@za38/protocol"
-
+import { selectNavigationView } from "../../interactive/selectors"
 import { approvalModeLabel, workspaceLabel } from "../../interactive/runtime"
 import type { InteractiveSnapshot } from "../../interactive/types"
 import type { WebInteractiveAdapter, WebAdapterSnapshot, WebIntent, WebTheme } from "../application/adapter"
@@ -45,7 +44,7 @@ export function WebApp(props: {
   const connectionReadOnly = interactive.connection.status !== "open"
   const readOnly = !props.active || snapshot.leaving || connectionReadOnly
   const returnBlocked = Boolean(interactive.activeRun || interactive.interaction)
-  const capabilities = new Set(interactive.runtime.capabilities ?? [])
+  const { availability } = selectNavigationView(interactive)
 
   const overflowTriggerRef = useRef<HTMLButtonElement | null>(null)
   const headerMenuRef = useRef<HTMLDivElement | null>(null)
@@ -161,7 +160,7 @@ export function WebApp(props: {
             </div>
           </div>
           <div className="topbar-meta">
-            <button type="button" className="meta-chip" hidden={!capabilities.has(Capability.MODELS_READ)} disabled={readOnly} onClick={() => { onIntent({ type: "panel-open", panel: "models" }) }} title="模型设置">
+            <button type="button" className="meta-chip" hidden={!availability.canOpenModelsPanel} disabled={readOnly} onClick={() => { onIntent({ type: "panel-open", panel: "models" }) }} title="模型设置">
               <Cpu aria-hidden="true" size={16} />
               <span className="sr-only">模型</span>
               <span className="meta-chip-value">{modelLabel(interactive)}</span>

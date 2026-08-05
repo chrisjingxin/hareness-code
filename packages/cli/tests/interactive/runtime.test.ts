@@ -4,8 +4,6 @@ import {
   createInteractiveRuntime,
   approvalModeLabel,
   executionStatusLabel,
-  formatDuration,
-  formatUsage,
   runtimeStatusSummary,
   supportsHomeDecoration,
   workspaceLabel,
@@ -83,12 +81,6 @@ test("审批模式与配置降级提示使用稳定英文展示", () => {
   expect(approvalModeLabel({ ...runtime, approvalMode: "auto-edit" })).toBe("auto-edit")
   expect(approvalModeLabel({ ...runtime, approvalMode: "yolo" })).toBe("yolo")
   expect(runtime.approvalModeWarning).toContain("安全降级")
-})
-
-test("运行摘要以紧凑格式显示耗时和 token", () => {
-  expect(formatDuration(840)).toBe("840ms")
-  expect(formatDuration(1350)).toBe("1.4s")
-  expect(formatUsage({ inputTokens: 1200, outputTokens: 35 })).toBe("1.2k in · 35 out")
 })
 
 test("/status 汇总真实的本机后端和英文审批模式", () => {

@@ -12,7 +12,8 @@ import {
   type ReactElement,
   type ReactNode,
 } from "react"
-import { activityLabel } from "../../presentation-shared"
+import { activityLabel, interactionStatusLabel, toolStatusLabel } from "../../presentation-shared/timeline-presenter"
+import { toolArgumentSummary } from "../../presentation-shared/tool-output-policy"
 
 import type {
   ConversationMessage,
@@ -25,9 +26,6 @@ import { Markdown } from "./markdown"
 
 /** 自动滚动判定阈值：用户视口底部离容器底部的距离小于该值即视为靠近底部。 */
 const BOTTOM_THRESHOLD_PX = 48
-
-/** Tool 参数摘要最大长度；超出后截断，避免折叠头撑破阅读列。 */
-const ARGUMENT_SUMMARY_MAX = 80
 
 /**
  * 渲染 Thread 的统一时间线。
@@ -285,7 +283,7 @@ function ToolCardImpl({
   expanded: boolean
   onToggle: (toolId: string) => void
 }): ReactElement {
-  const summary = argumentSummary(tool.arguments)
+  const summary = toolArgumentSummary(tool.arguments)
   return (
     <div className={`tool-card tool-card-${tool.status}`} data-tool-id={tool.id}>
       <button
@@ -335,50 +333,14 @@ const MemoToolCard = memo(ToolCardImpl, (previous, next) => {
 })
 MemoToolCard.displayName = "ToolCard"
 
-/**
- * 折叠头参数摘要：只在该字段能安全收敛为单行文本时显示。
- * arguments 是 JSON 字符串时取 key: value 摘要；否则做空白归一化并截断。
- * 不显示任何虚构的 path / duration / 完成时间。
- */
-function argumentSummary(argumentsText: string | undefined): string | null {
-  if (!argumentsText) return null
-  const trimmed = argumentsText.trim()
-  if (!trimmed) return null
-  try {
-    const parsed = JSON.parse(trimmed) as Record<string, unknown>
-    const entries = Object.entries(parsed)
-    if (entries.length === 0) return null
-    const summary = entries.map(([key, value]) => `${key}: ${stringifySummaryValue(value)}`).join(" · ")
-    return truncateSingleLine(summary)
-  } catch {
-    return truncateSingleLine(trimmed)
-  }
-}
-
-/** 把 JSON 标量/嵌套值收敛为短字符串；对象与数组只保留第一层规模。 */
-function stringifySummaryValue(value: unknown): string {
-  if (value === null) return "null"
-  if (typeof value === "string") return value.length > 24 ? `${value.slice(0, 21)}…` : value
-  if (typeof value === "object") {
-    const size = Array.isArray(value) ? value.length : Object.keys(value).length
-    return `{${size}}`
-  }
-  return String(value)
-}
-
-function truncateSingleLine(text: string): string {
-  const singleLine = text.replace(/\s+/g, " ").trim()
-  if (singleLine.length <= ARGUMENT_SUMMARY_MAX) return singleLine
-  return `${singleLine.slice(0, ARGUMENT_SUMMARY_MAX - 1)}…`
-}
-
 /** Tool 状态标签：使用 lucide 图标而不是 Unicode，保持视觉一致。 */
 function renderToolStatus(status: ToolCard["status"]): ReactNode {
+  const label = toolStatusLabel(status)
   if (status === "running") {
     return (
       <span className="tool-status-running">
         <Loader2 aria-hidden="true" focusable="false" className="tool-status-icon spinning" />
-        运行中
+        {label}
       </span>
     )
   }
@@ -386,14 +348,14 @@ function renderToolStatus(status: ToolCard["status"]): ReactNode {
     return (
       <span className="tool-status-failed">
         <AlertTriangle aria-hidden="true" focusable="false" className="tool-status-icon" />
-        失败
+        {label}
       </span>
     )
   }
   return (
     <span className="tool-status-completed">
       <Check aria-hidden="true" focusable="false" className="tool-status-icon" />
-      已完成
+      {label}
     </span>
   )
 }
@@ -437,18 +399,13 @@ function interactionTerminalLabel(interaction: InteractionCard): {
   text: string
   tone: "ok" | "reject" | "timeout" | "neutral"
 } {
-  switch (interaction.status) {
-    case "approved":
-      return { text: "已允许", tone: "ok" }
-    case "rejected":
-      return { text: "已拒绝", tone: "reject" }
-    case "answered":
-      return { text: "已回答", tone: "ok" }
-    case "cancelled":
-      return { text: "已超时", tone: "timeout" }
-    case "resolved":
-      return { text: "已解决", tone: "neutral" }
-    case "pending":
-      return { text: "等待中", tone: "neutral" }
+  const tones: Record<InteractionCard["status"], "ok" | "reject" | "timeout" | "neutral"> = {
+    approved: "ok",
+    rejected: "reject",
+    answered: "ok",
+    cancelled: "timeout",
+    resolved: "neutral",
+    pending: "neutral",
   }
+  return { text: interactionStatusLabel(interaction.status), tone: tones[interaction.status] }
 }

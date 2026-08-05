@@ -95,25 +95,6 @@ export function runtimeStatusSummary(runtime: InteractiveRuntime): string {
   return lines.join("\n")
 }
 
-/** 将毫秒耗时格式化为紧凑的毫秒或秒显示。 */
-export function formatDuration(durationMs: number | undefined): string | undefined {
-  if (!durationMs || durationMs < 1) return undefined
-  if (durationMs < 1000) return `${durationMs}ms`
-  return `${(durationMs / 1000).toFixed(durationMs < 10_000 ? 1 : 0)}s`
-}
-
-/** 将 token 用量格式化为终端底栏可读的 in/out 摘要。 */
-export function formatUsage(usage: { inputTokens: number; outputTokens: number } | undefined): string | undefined {
-  if (!usage) return undefined
-  return `${compactNumber(usage.inputTokens)} in · ${compactNumber(usage.outputTokens)} out`
-}
-
-/** 将大数字转换为 k 单位，避免底栏在窄终端换行。 */
-function compactNumber(value: number): string {
-  if (value < 1000) return String(value)
-  return `${(value / 1000).toFixed(value >= 10_000 ? 0 : 1)}k`
-}
-
 /** 将运行时模型配置转换为状态摘要使用的简短文案。 */
 function modelLabel(runtime: InteractiveRuntime): string {
   if (!runtime.modelConfigured) return "模型未配置"

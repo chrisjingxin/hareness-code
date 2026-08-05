@@ -13,9 +13,8 @@ import {
   Wrench,
   X,
 } from "lucide-react"
-import { Capability } from "@za38/protocol"
-
 import type { McpServerStatus, ModelProfile } from "@za38/protocol"
+import { selectNavigationView, type FeatureAvailability } from "../../interactive/selectors"
 
 import type { CommandMenuItem } from "../../interactive/commands"
 import {
@@ -59,7 +58,7 @@ export function UtilityPanels({
   const interactive = snapshot.interactive
   const busy = Boolean(interactive.activeRun) || Boolean(interactive.interaction)
   const busyReason = busy ? "当前任务结束后可用" : null
-  const capabilities = new Set(interactive.runtime.capabilities ?? [])
+  const { availability } = selectNavigationView(interactive)
   const isMainTab = panel === "models" || panel === "skills" || panel === "mcp" || panel === "status"
   const title = panel === "help" ? "帮助" : panel === "threads" ? "Threads" : "工作台"
   const drawerRef = useRef<HTMLDivElement | null>(null)
@@ -132,7 +131,7 @@ export function UtilityPanels({
         </header>
         {isMainTab ? (
           <div className="workspace-tabs" role="tablist" aria-label="工作台面板" onKeyDown={handleTabListKeyDown}>
-            {MAIN_TABS.filter(tab => tabVisible(tab, capabilities)).map(tab => (
+            {MAIN_TABS.filter(tab => tabVisible(tab, availability)).map(tab => (
               <button
                 type="button"
                 key={tab}
@@ -175,11 +174,11 @@ export function UtilityPanels({
 }
 
 /** 主 tab 可见性：只显示 capability 允许的 tab；Status 始终可见。 */
-function tabVisible(tab: MainTab, capabilities: Set<string>): boolean {
+function tabVisible(tab: MainTab, availability: Pick<FeatureAvailability, "canOpenModelsPanel" | "canOpenSkillsPanel" | "canOpenMcpPanel">): boolean {
   switch (tab) {
-    case "models": return capabilities.has(Capability.MODELS_READ)
-    case "skills": return capabilities.has(Capability.SKILLS_READ)
-    case "mcp": return capabilities.has(Capability.MCP_READ)
+    case "models": return availability.canOpenModelsPanel
+    case "skills": return availability.canOpenSkillsPanel
+    case "mcp": return availability.canOpenMcpPanel
     case "status": return true
   }
 }
@@ -427,7 +426,7 @@ function SkillsPanel({
   const query = snapshot.panelSearch.skills.query
   const items = filterSkills(catalog.items, query)
   const armedId = snapshot.interactive.selection.armedSkill?.id ?? null
-  const manageAllowed = (snapshot.interactive.runtime.capabilities ?? []).includes("skills.manage")
+  const manageAllowed = selectNavigationView(snapshot.interactive).availability.hasSkillManage
   const busy = Boolean(snapshot.interactive.activeRun) || Boolean(snapshot.interactive.interaction)
   const isLoading = catalog.status === "loading" && catalog.items.length === 0
   return (
@@ -533,7 +532,7 @@ function McpPanel({
   const items = filterMcp(catalog.items, snapshot.panelSearch.mcp.query)
   const isLoading = catalog.status === "loading" && catalog.items.length === 0
   const panelState = snapshot.panelSearch.mcp
-  const manageAllowed = (snapshot.interactive.runtime.capabilities ?? []).includes("mcp.manage")
+  const manageAllowed = selectNavigationView(snapshot.interactive).availability.hasMcpManage
   const busy = Boolean(snapshot.interactive.activeRun) || Boolean(snapshot.interactive.interaction)
   return (
     <div className="panel panel-mcp">
