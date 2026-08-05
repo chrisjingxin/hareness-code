@@ -8,7 +8,7 @@ import type { ModelProfile } from "@za38/protocol"
 import type { InteractiveController, InteractiveControllerOptions } from "../interactive/types"
 import { createInteractiveController } from "../interactive/controller"
 import type { AgentClient } from "../ipc/client"
-import { AgentClientInteractiveAdapter } from "../interactive/agent-port"
+import { AgentClientGateway } from "../infrastructure/agent-client-gateway"
 import type { InteractiveRuntime } from "../interactive/runtime"
 import {
   createTuiAdapter,
@@ -50,7 +50,7 @@ export type TuiOptions = {
 /** 创建一次 TUI 挂载对应的 Interactive Core + Adapter；不持久化任何领域对象。 */
 export function createTuiSession(options: TuiOptions): { controller: InteractiveController; adapter: TuiAdapter } {
   const controller = createInteractiveController({
-    agent: new AgentClientInteractiveAdapter(options.client),
+    gateway: new AgentClientGateway(options.client),
     runtime: options.runtime,
     ...(options.initialThreadId !== undefined ? { initialThreadId: options.initialThreadId } : {}),
   })

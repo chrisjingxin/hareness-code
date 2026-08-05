@@ -2,7 +2,7 @@
 
 import type { ModelProfile } from "@za38/protocol"
 
-import type { InteractiveController, InteractiveIntent, InteractiveResult, InteractiveSnapshot } from "../../interactive/types"
+import type { InteractiveController, InteractiveIntent, InteractiveResult, InteractiveSnapshot, PresentationEffect } from "../../interactive/types"
 import { filterCommandMenuItems, parseSlashCommand, resolveSlashCommand, type CommandMenuItem, type SkillMenuItem } from "../../interactive/commands"
 import type { ThreadSummary } from "@za38/protocol"
 import {
@@ -97,6 +97,9 @@ export type TuiIntent =
   | { type: "tool-toggle"; toolId: string }
 
 /** TUI Adapter 的最小 external interface；终端动作与共享 Controller 解耦。 */
+import type { PromptHistoryStore } from "../../interactive/ports"
+import { FilePromptHistoryStore } from "../../infrastructure/prompt-history-file-store"
+
 export interface TuiAdapter {
   getSnapshot(): TuiAdapterSnapshot
   subscribe(listener: (snapshot: TuiAdapterSnapshot) => void): () => void
@@ -108,6 +111,7 @@ export interface TuiAdapter {
 export type TuiAdapterOptions = {
   controller: InteractiveController
   promptHistoryFile?: string
+  promptHistoryStore?: PromptHistoryStore
   resume?: boolean
   onRequestExit: () => void
   openWeb?: (threadId: string | null) => Promise<void>
@@ -148,15 +152,18 @@ class TuiAdapterImpl implements TuiAdapter {
   private transientNotice: TuiAdapterSnapshot["transientNotice"]
   private closed = false
 
+  private historyStore: PromptHistoryStore
+
   constructor(options: TuiAdapterOptions) {
     this.controller = options.controller
     this.promptHistoryFile = options.promptHistoryFile
+    this.historyStore = options.promptHistoryStore ?? new FilePromptHistoryStore(options.promptHistoryFile)
     this.onRequestExit = options.onRequestExit
     this.openWeb = options.openWeb
     this.snapshot = this.buildSnapshot()
     this.unsubscribeInteractive = this.controller.subscribe(() => this.publish())
 
-    void loadPromptHistory(this.promptHistoryFile).then(history => {
+    void this.historyStore.load().then(history => {
       if (!this.closed) this.promptHistory = history
     })
     if (options.resume) {
@@ -333,30 +340,41 @@ class TuiAdapterImpl implements TuiAdapter {
     this.publish()
   }
 
-  /** 提交用户输入；共享 Controller 统一处理 Slash/转义/普通消息。 */
+  /** 提交用户输入；仅在 accepted 后清空草稿输入与记录历史。 */
   private async submit(rawValue: string): Promise<void> {
     const input = rawValue.trim()
     if (!input) return
-    this.clearDraft()
     const interactive = this.controller.getSnapshot()
     if (interactive.interaction?.type === "question") {
       const firstQuestion = interactive.interaction.questions[0]
       if (firstQuestion) {
-        await this.controller.dispatch({
+        const outcome = await this.controller.dispatch({
           type: "interaction.respond",
           requestId: interactive.interaction.requestId,
           response: { kind: "question", answers: { [firstQuestion.id]: [input] } },
         })
+        if (outcome.status === "accepted") {
+          this.clearDraft()
+        } else {
+          this.showTransientNotice(outcome.message)
+        }
         return
       }
     }
-    const previousHistory = this.promptHistory
-    const nextHistory = rememberPrompt(previousHistory, input)
-    this.promptHistory = nextHistory
-    void persistPromptHistory(previousHistory, nextHistory, this.promptHistoryFile)
-    this.scrollRequest += 1
-    this.publish()
-    await this.controller.dispatch({ type: "input.submit", value: rawValue })
+
+    const outcome = await this.controller.dispatch({ type: "input.submit", value: rawValue })
+    if (outcome.status === "accepted") {
+      this.clearDraft()
+      const previousHistory = this.promptHistory
+      const nextHistory = rememberPrompt(previousHistory, input)
+      this.promptHistory = nextHistory
+      void this.historyStore.append(input)
+      this.scrollRequest += 1
+      this.publish()
+      await this.applyPresentationEffects(outcome.effects)
+    } else {
+      this.showTransientNotice(outcome.message)
+    }
   }
 
   /** 解析稳定命令 ID 后交给共享 Dispatcher。 */
@@ -364,30 +382,42 @@ class TuiAdapterImpl implements TuiAdapter {
     await this.dispatchInteractive({ type: "command.execute", commandId, argument })
   }
 
-  /** dispatch 共享 intent，并解释宿主级 InteractiveResult。 */
+  /** dispatch 共享 intent，仅在 accepted 时触发效果，rejected 时提示通知。 */
   private async dispatchInteractive(intent: InteractiveIntent): Promise<void> {
-    const result = await this.controller.dispatch(intent)
-    if (!result) return
-    switch (result.type) {
-      case "present":
-        if (result.target === "threads") this.openThreadPicker()
-        else if (result.target === "models") this.openModelPicker(result.initialQuery)
-        else this.openSkillPicker()
-        return
-      case "request-handoff":
-        if (!this.openWeb) {
-          this.showTransientNotice("当前启动方式未提供 Web launcher。")
-          return
-        }
-        try {
-          await this.openWeb(result.threadId)
-          this.showTransientNotice("Web 会话已启动，浏览器就绪并取得控制权后 TUI 将锁定。")
-        } catch (error) {
-          this.showTransientNotice(`Web 启动失败：${errorMessage(error)}`)
-        }
-        return
-      case "request-exit":
-        this.onRequestExit()
+    const outcome = await this.controller.dispatch(intent)
+    if (outcome.status === "rejected") {
+      this.showTransientNotice(outcome.message)
+      return
+    }
+    await this.applyPresentationEffects(outcome.effects)
+  }
+
+  /** 应用从 controller outcome 返回的 UI 呈现效果。 */
+  private async applyPresentationEffects(effects?: readonly PresentationEffect[]): Promise<void> {
+    if (!effects) return
+    for (const effect of effects) {
+      switch (effect.type) {
+        case "present":
+          if (effect.target === "threads") this.openThreadPicker()
+          else if (effect.target === "models") this.openModelPicker(effect.initialQuery)
+          else this.openSkillPicker()
+          break
+        case "request-handoff":
+          if (!this.openWeb) {
+            this.showTransientNotice("当前启动方式未提供 Web launcher。")
+            break
+          }
+          try {
+            await this.openWeb(effect.threadId)
+            this.showTransientNotice("Web 会话已启动，浏览器就绪并取得控制权后 TUI 将锁定。")
+          } catch (error) {
+            this.showTransientNotice(`Web 启动失败：${errorMessage(error)}`)
+          }
+          break
+        case "request-exit":
+          this.onRequestExit()
+          break
+      }
     }
   }
 

@@ -1,40 +1,38 @@
 import { describe, expect, test } from "bun:test"
 import { isValidElement } from "react"
 
-import { resolveSyntaxLanguage } from "../../../src/web/syntax/catalog.generated"
-import { acquireSyntaxClient, closeSyntaxClient, releaseSyntaxClient, SyntaxClient } from "../../../src/web/syntax/client"
-import { captureToScope, processHighlightRequest } from "../../../src/web/syntax/worker"
+import { resolveLanguage } from "../../../src/presentation-shared/language-catalog"
+import { acquireHighlightService, closeHighlightService, releaseHighlightService, ShikiHighlightService } from "../../../src/web/syntax/highlight-service"
+import { colorToScope, processHighlightRequest } from "../../../src/web/syntax/worker"
 import { renderSpans } from "../../../src/web/presentation/code-block"
 
 describe("Web Syntax Catalog & Resolution", () => {
   test("准确解析主语言与别名", () => {
-    expect(resolveSyntaxLanguage("python")?.filetype).toBe("python")
-    expect(resolveSyntaxLanguage("py")?.filetype).toBe("python")
-    expect(resolveSyntaxLanguage("c++")?.filetype).toBe("cpp")
-    expect(resolveSyntaxLanguage("sh")?.filetype).toBe("bash")
-    expect(resolveSyntaxLanguage("yml")?.filetype).toBe("yaml")
-    expect(resolveSyntaxLanguage("unknown_lang")).toBeNull()
+    expect(resolveLanguage("python").canonical).toBe("python")
+    expect(resolveLanguage("py").canonical).toBe("python")
+    expect(resolveLanguage("c++").canonical).toBe("cpp")
+    expect(resolveLanguage("sh").canonical).toBe("bash")
+    expect(resolveLanguage("yml").canonical).toBe("yaml")
+    expect(resolveLanguage("unknown_lang").canonical).toBe("plaintext")
   })
 
-  test("captureToScope 正确映射 query capture 节点", () => {
-    expect(captureToScope("comment.line")).toBe("comment")
-    expect(captureToScope("keyword.control")).toBe("keyword")
-    expect(captureToScope("function.method")).toBe("function")
-    expect(captureToScope("variable.parameter")).toBe("variable")
-    expect(captureToScope("string.quoted")).toBe("string")
-    expect(captureToScope("number.float")).toBe("number")
-    expect(captureToScope("type.class")).toBe("type")
-    expect(captureToScope("custom.unknown")).toBe("plain")
+  test("colorToScope 正确映射 Shiki 经典 Hex 颜色到 Scope", () => {
+    expect(colorToScope("#6a9955")).toBe("comment")
+    expect(colorToScope("#569cd6")).toBe("keyword")
+    expect(colorToScope("#dcdcaa")).toBe("function")
+    expect(colorToScope("#9cdcfe")).toBe("variable")
+    expect(colorToScope("#ce9178")).toBe("string")
+    expect(colorToScope("#b5cea8")).toBe("number")
+    expect(colorToScope("#4ec9b0")).toBe("type")
+    expect(colorToScope("#ffffff")).toBe("plain")
   })
 })
 
 describe("UTF-8 to UTF-16 Span Rendering", () => {
-  test(" renderSpans 输出内容与原始包含多字节字符代码完全一致", () => {
+  test("renderSpans 输出内容与原始包含多字节字符代码完全一致", () => {
     const code = "def hello():\n    # 中文注释\n    print('你好')"
     const encoder = new TextEncoder()
-    const bytes = encoder.encode(code)
 
-    // 假定一段 UTF-8 字节范围 (注释部分)
     const commentStartByte = encoder.encode("def hello():\n    ").length
     const commentEndByte = commentStartByte + encoder.encode("# 中文注释").length
 
@@ -59,24 +57,24 @@ describe("UTF-8 to UTF-16 Span Rendering", () => {
   })
 })
 
-describe("SyntaxClient Fallback", () => {
+describe("ShikiHighlightService Fallback", () => {
   test("超出大小或无 Worker 环境平滑降级", async () => {
-    const client = new SyntaxClient()
+    const service = new ShikiHighlightService()
     const largeCode = "x".repeat(70 * 1024)
-    const result = await client.highlight("python", largeCode)
+    const result = await service.highlight("python", largeCode)
     expect(result.type).toBe("plain")
     expect(result.reason).toBe("too-large")
-    client.close()
+    service.close()
   })
 
   test("超过 2,000 行在主线程与 Worker 入口都 plain 降级", async () => {
     const code = Array.from({ length: 2_001 }, () => "x").join("\n")
-    const client = new SyntaxClient()
-    const clientResult = await client.highlight("python", code)
+    const service = new ShikiHighlightService()
+    const clientResult = await service.highlight("python", code)
     const workerResult = await processHighlightRequest({ requestId: 7, language: "python", code })
     expect(clientResult).toMatchObject({ type: "plain", reason: "too-large" })
     expect(workerResult).toMatchObject({ type: "plain", requestId: 7, reason: "too-large" })
-    client.close()
+    service.close()
   })
 
   test("close 终止 Worker、释放待决请求；全局 Worker 不可用时不泄漏", async () => {
@@ -89,9 +87,9 @@ describe("SyntaxClient Fallback", () => {
       }
     } as unknown as typeof Worker
     try {
-      const client = new SyntaxClient()
-      const pending = client.highlight("python", "print('pending')")
-      client.close()
+      const service = new ShikiHighlightService()
+      const pending = service.highlight("python", "print('pending')")
+      service.close()
       await expect(pending).resolves.toMatchObject({ type: "plain", reason: "load-failed" })
       expect(workers[0]?.terminated).toBe(true)
     } finally {
@@ -99,7 +97,7 @@ describe("SyntaxClient Fallback", () => {
     }
   })
 
-  test("最后一个 CodeBlock 释放共享 client 时终止 Worker", async () => {
+  test("最后一个 CodeBlock 释放共享 service 时终止 Worker", async () => {
     const originalWorker = globalThis.Worker
     const workers: FakeWorker[] = []
     globalThis.Worker = class extends FakeWorker {
@@ -109,13 +107,13 @@ describe("SyntaxClient Fallback", () => {
       }
     } as unknown as typeof Worker
     try {
-      const client = acquireSyntaxClient()
-      const pending = client.highlight("python", "print('pending')")
-      releaseSyntaxClient()
+      const service = acquireHighlightService()
+      const pending = service.highlight("python", "print('pending')")
+      releaseHighlightService()
       await expect(pending).resolves.toMatchObject({ type: "plain", reason: "load-failed" })
       expect(workers[0]?.terminated).toBe(true)
     } finally {
-      closeSyntaxClient()
+      closeHighlightService()
       globalThis.Worker = originalWorker
     }
   })
@@ -127,16 +125,16 @@ describe("SyntaxClient Fallback", () => {
       constructor() { return worker }
     } as unknown as typeof Worker
     try {
-      const client = new SyntaxClient()
+      const service = new ShikiHighlightService()
       const firstCode = `0${"x".repeat(60 * 1024)}`
-      await client.highlight("python", firstCode)
+      await service.highlight("python", firstCode)
       for (let index = 1; index <= 60; index += 1) {
-        await client.highlight("python", `${index}${"x".repeat(60 * 1024)}`)
+        await service.highlight("python", `${index}${"x".repeat(60 * 1024)}`)
       }
       const postsBeforeRetry = worker.postCount
-      await client.highlight("python", firstCode)
+      await service.highlight("python", firstCode)
       expect(worker.postCount).toBe(postsBeforeRetry + 1)
-      client.close()
+      service.close()
     } finally {
       globalThis.Worker = originalWorker
     }

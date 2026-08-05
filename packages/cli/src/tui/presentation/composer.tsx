@@ -12,12 +12,13 @@ import {
   workspaceLabel,
 } from "../../interactive/runtime"
 import { tuiTheme } from "./theme"
+import { activityLabel } from "../../presentation-shared"
 import type { SharedViewProps } from "./types"
 
 /** thread composer 上方的实时模型和运行状态行。 */
 export function ThreadRuntimeLine(props: { interactive: SharedViewProps["interactive"] }) {
   const runtime = props.interactive.runtime
-  const status = props.interactive.activity.label
+  const status = activityLabel(props.interactive.activity.kind)
   return (
     <box flexDirection="row" gap={1} paddingBottom={1}>
       <text fg={statusColor(props.interactive.activity.kind)}>□</text>

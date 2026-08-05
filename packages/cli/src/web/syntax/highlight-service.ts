@@ -1,6 +1,6 @@
-/** Main 线程语法高亮 Client：管理 Worker 实例、LRU 缓存、请求超时与熔断机制。 */
+/** Main 线程 Shiki 高亮 Service：管理 Worker 实例、LRU 缓存、请求超时与熔断机制。 */
 
-import { resolveSyntaxLanguage } from "./catalog.generated"
+import { resolveLanguage } from "../../presentation-shared/language-catalog"
 import type { SyntaxWorkerRequest, SyntaxWorkerResponse } from "./protocol"
 
 const HIGHLIGHT_TIMEOUT_MS = 1500
@@ -15,8 +15,8 @@ type CachedHighlight = {
   readonly bytes: number
 }
 
-/** 主线程 Syntax Worker 管理器：负责限额、缓存、超时、熔断与生命周期收敛。 */
-export class SyntaxClient {
+/** 主线程 Shiki Worker 管理服务：负责限额、LRU 缓存、超时、熔断与生命周期收敛。 */
+export class ShikiHighlightService {
   private worker: Worker | null = null
   private requestIdCounter = 0
   private consecutiveFatals = 0
@@ -64,7 +64,6 @@ export class SyntaxClient {
       } catch {}
       this.worker = null
     }
-    // 清理所有待决请求
     for (const [id, req] of this.pendingRequests.entries()) {
       clearTimeout(req.timer)
       req.resolve({ type: "plain", requestId: id, reason: "load-failed" })
@@ -84,9 +83,9 @@ export class SyntaxClient {
     pending.resolve(response)
   }
 
-  async highlight(language: string, code: string): Promise<SyntaxWorkerResponse> {
-    const catalogEntry = resolveSyntaxLanguage(language)
-    if (!catalogEntry) {
+  async highlight(language: string, code: string, theme = "dark-plus"): Promise<SyntaxWorkerResponse> {
+    const catalogEntry = resolveLanguage(language)
+    if (catalogEntry.canonical === "plaintext" && language && language.trim() !== "" && language !== "plaintext" && language !== "text" && language !== "txt") {
       return { type: "plain", requestId: 0, reason: "unknown-language" }
     }
 
@@ -95,10 +94,9 @@ export class SyntaxClient {
       return { type: "plain", requestId: 0, reason: "too-large" }
     }
 
-    const cacheKey = `${catalogEntry.filetype}:${code}`
+    const cacheKey = `${theme}:${catalogEntry.canonical}:${code}`
     if (this.cache.has(cacheKey)) {
       const cached = this.cache.get(cacheKey)!
-      // 命中时刷新 LRU 顺序；Map 的迭代首项始终是下一条淘汰项。
       this.cache.delete(cacheKey)
       this.cache.set(cacheKey, cached)
       return cached.response
@@ -113,8 +111,9 @@ export class SyntaxClient {
     const request: SyntaxWorkerRequest = {
       type: "highlight",
       requestId,
-      language: catalogEntry.filetype,
+      language: catalogEntry.canonical,
       code,
+      theme,
     }
 
     return new Promise<SyntaxWorkerResponse>(resolve => {
@@ -158,7 +157,6 @@ export class SyntaxClient {
     this.cacheBytes = 0
   }
 
-  /** 写入有界 LRU，避免长会话将整段代码和 token 无限保留在浏览器内存中。 */
   private cacheHighlight(cacheKey: string, response: SyntaxWorkerResponse, codeBytes: number): void {
     const responseBytes = response.type === "highlighted" ? response.spans.length * 24 : 0
     const bytes = codeBytes + responseBytes
@@ -175,35 +173,37 @@ export class SyntaxClient {
   }
 }
 
-let globalSyntaxClient: SyntaxClient | null = null
-let syntaxClientUsers = 0
+let globalService: ShikiHighlightService | null = null
+let serviceUsers = 0
 
-/** 按需创建页面内唯一 SyntaxClient；只能由 acquire/release 生命周期使用。 */
-function getSyntaxClient(): SyntaxClient {
-  if (!globalSyntaxClient) {
-    globalSyntaxClient = new SyntaxClient()
+function getService(): ShikiHighlightService {
+  if (!globalService) {
+    globalService = new ShikiHighlightService()
   }
-  return globalSyntaxClient
+  return globalService
 }
 
-/** CodeBlock 开始一次高亮任务时获取共享 client；最后一个释放者负责终止 Worker。 */
-export function acquireSyntaxClient(): SyntaxClient {
-  syntaxClientUsers += 1
-  return getSyntaxClient()
+export function acquireHighlightService(): ShikiHighlightService {
+  serviceUsers += 1
+  return getService()
 }
 
-/** CodeBlock 卸载或替换代码时归还 client；不影响仍在显示的其它代码块。 */
-export function releaseSyntaxClient(): void {
-  syntaxClientUsers = Math.max(0, syntaxClientUsers - 1)
-  if (syntaxClientUsers === 0) closeSyntaxClient()
+export function releaseHighlightService(): void {
+  serviceUsers = Math.max(0, serviceUsers - 1)
+  if (serviceUsers === 0) closeHighlightService()
 }
 
-/** 页面卸载时释放全局 Worker 与缓存；下次代码块按需重新创建。 */
-export function closeSyntaxClient(): void {
-  globalSyntaxClient?.close()
-  globalSyntaxClient = null
-  syntaxClientUsers = 0
+export function closeHighlightService(): void {
+  globalService?.close()
+  globalService = null
+  serviceUsers = 0
 }
+
+export const closeSyntaxClient = closeHighlightService
+export const acquireSyntaxClient = acquireHighlightService
+export const releaseSyntaxClient = releaseHighlightService
+
+
 
 function lineCount(code: string): number {
   return code ? code.split("\n").length : 0

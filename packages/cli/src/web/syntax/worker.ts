@@ -1,166 +1,82 @@
-/** Web Syntax Worker 实现：基于 web-tree-sitter 离线解析并返回范围 Token。 */
+/** Web Syntax Worker 实现：基于 Shiki (fine-grained imports) 离线高亮并返回范围 Token。 */
 
-import { Parser, Language, type Query } from "web-tree-sitter"
-
-import bashHighlights from "../../tui/platform/assets/syntax/bash/highlights.scm" with { type: "text" }
-import cHighlights from "../../tui/platform/assets/syntax/c/highlights.scm" with { type: "text" }
-import cppHighlights from "../../tui/platform/assets/syntax/cpp/highlights.scm" with { type: "text" }
-import cssHighlights from "../../tui/platform/assets/syntax/css/highlights.scm" with { type: "text" }
-import goHighlights from "../../tui/platform/assets/syntax/go/highlights.scm" with { type: "text" }
-import htmlHighlights from "../../tui/platform/assets/syntax/html/highlights.scm" with { type: "text" }
-import javaHighlights from "../../tui/platform/assets/syntax/java/highlights.scm" with { type: "text" }
-import jsonHighlights from "../../tui/platform/assets/syntax/json/highlights.scm" with { type: "text" }
-import pythonHighlights from "../../tui/platform/assets/syntax/python/highlights.scm" with { type: "text" }
-import yamlHighlights from "../../tui/platform/assets/syntax/yaml/highlights.scm" with { type: "text" }
-
-import { resolveSyntaxLanguage } from "./catalog.generated"
+import { resolveLanguage } from "../../presentation-shared/language-catalog"
+import { getShikiHighlighter } from "./language-loader"
 import type { SyntaxScope, SyntaxSpan, SyntaxWorkerRequest, SyntaxWorkerResponse } from "./protocol"
 
-const queriesMap: Record<string, string> = {
-  bash: bashHighlights,
-  c: cHighlights,
-  cpp: cppHighlights,
-  css: cssHighlights,
-  go: goHighlights,
-  html: htmlHighlights,
-  java: javaHighlights,
-  json: jsonHighlights,
-  python: pythonHighlights,
-  yaml: yamlHighlights,
-}
-
-let parserInitPromise: Promise<void> | null = null
-const languageCache = new Map<string, { lang: Language; query: Query }>()
-const parserInstanceMap = new Map<string, Parser>()
-
-async function initParser(): Promise<void> {
-  if (!parserInitPromise) {
-    parserInitPromise = Parser.init({
-      locateFile: (scriptName: string) => `/web/syntax/${scriptName}`,
-    })
-  }
-  return parserInitPromise
-}
-
-export function captureToScope(captureName: string): SyntaxScope {
-  const root = captureName.split(".")[0]
-  switch (root) {
-    case "comment":
-      return "comment"
-    case "keyword":
-    case "repeat":
-    case "conditional":
-    case "include":
-    case "exception":
-      return "keyword"
-    case "function":
-    case "method":
-    case "constructor":
-      return "function"
-    case "variable":
-    case "field":
-    case "property":
-    case "parameter":
-    case "member":
-      return "variable"
-    case "string":
-    case "character":
-    case "escape":
-      return "string"
-    case "number":
-    case "float":
-    case "boolean":
-      return "number"
-    case "type":
-    case "class":
-    case "structure":
-    case "enum":
-      return "type"
-    case "operator":
-      return "operator"
-    case "punctuation":
-    case "delimiter":
-    case "bracket":
-      return "punctuation"
-    case "tag":
-      return "tag"
-    case "attribute":
-      return "attribute"
-    case "constant":
-      return "constant"
-    default:
-      return "plain"
-  }
+export function colorToScope(color?: string): SyntaxScope {
+  if (!color) return "plain"
+  const hex = color.toLowerCase()
+  // 注释
+  if (hex === "#6a9955" || hex === "#6e7781" || hex === "#8b949e") return "comment"
+  // 关键字与控制流
+  if (hex === "#569cd6" || hex === "#c586c0" || hex === "#cf222e" || hex === "#ff7b72" || hex === "#d73a49") return "keyword"
+  // 函数与方法
+  if (hex === "#dcdcaa" || hex === "#8250df" || hex === "#d2a8ff" || hex === "#6f42c1") return "function"
+  // 变量与属性
+  if (hex === "#9cdcfe" || hex === "#4fc1ff" || hex === "#953800" || hex === "#ffa657" || hex === "#0550ae") return "variable"
+  // 字符串
+  if (hex === "#ce9178" || hex === "#d7ba7d" || hex === "#0a3069" || hex === "#a5d6ff" || hex === "#032f62") return "string"
+  // 数字与常量
+  if (hex === "#b5cea8" || hex === "#79c0ff" || hex === "#005cc5") return "number"
+  // 类型与类
+  if (hex === "#4ec9b0") return "type"
+  return "plain"
 }
 
 export async function processHighlightRequest(request: {
   requestId: number
   language: string
   code: string
+  theme?: string
 }): Promise<SyntaxWorkerResponse> {
-  const { requestId, language, code } = request
+  const { requestId, language, code, theme = "dark-plus" } = request
 
-  // 代码超过 64 KiB 或 2,000 行边界直接 plain 降级，避免 Worker 独占主机资源。
-  if (new TextEncoder().encode(code).length > 64 * 1024 || (code ? code.split("\n").length : 0) > 2_000) {
+  const codeBytes = new TextEncoder().encode(code).length
+  if (codeBytes > 64 * 1024 || (code ? code.split("\n").length : 0) > 2_000) {
     return { type: "plain", requestId, reason: "too-large" }
   }
 
-  const catalogEntry = resolveSyntaxLanguage(language)
-  if (!catalogEntry) {
-    return { type: "plain", requestId, reason: "unknown-language" }
-  }
-
-  const queryText = queriesMap[catalogEntry.filetype]
-  if (!queryText) {
+  const catalogEntry = resolveLanguage(language)
+  if (catalogEntry.canonical === "plaintext" && language && language.trim() !== "" && language !== "plaintext" && language !== "text" && language !== "txt") {
     return { type: "plain", requestId, reason: "unknown-language" }
   }
 
   try {
-    await initParser()
+    const highlighter = await getShikiHighlighter()
+    const tokensResult = highlighter.codeToTokens(code, {
+      lang: catalogEntry.webLanguage,
+      theme,
+    })
 
-    let cacheItem = languageCache.get(catalogEntry.filetype)
-    if (!cacheItem) {
-      const wasmUrl = `/web/syntax/lang/${catalogEntry.assetId}.wasm`
-      const lang = await Language.load(wasmUrl)
-      const query = lang.query(queryText)
-      cacheItem = { lang, query }
-      languageCache.set(catalogEntry.filetype, cacheItem)
-    }
+    const encoder = new TextEncoder()
+    const spans: SyntaxSpan[] = []
 
-    let parser = parserInstanceMap.get(catalogEntry.filetype)
-    if (!parser) {
-      parser = new Parser()
-      parser.setLanguage(cacheItem.lang)
-      parserInstanceMap.set(catalogEntry.filetype, parser)
-    }
+    let currentByte = 0
+    for (let lineIndex = 0; lineIndex < tokensResult.tokens.length; lineIndex++) {
+      const lineTokens = tokensResult.tokens[lineIndex]!
+      for (const token of lineTokens) {
+        const tokenBytes = encoder.encode(token.content).length
+        const startByte = currentByte
+        const endByte = currentByte + tokenBytes
+        currentByte = endByte
 
-    const tree = parser.parse(code)
-    if (!tree) {
-      return { type: "plain", requestId, reason: "parse-failed" }
-    }
-
-    const captures = cacheItem.query.captures(tree.rootNode)
-
-    const rawSpans: SyntaxSpan[] = []
-    for (const capture of captures) {
-      const scope = captureToScope(capture.name)
-      if (scope === "plain") continue
-      const startByte = capture.node.startIndex
-      const endByte = capture.node.endIndex
-      if (startByte < endByte) {
-        rawSpans.push({ startByte, endByte, scope })
+        const scope = colorToScope(token.color)
+        if (scope !== "plain" && startByte < endByte) {
+          spans.push({ startByte, endByte, scope })
+        }
+      }
+      // 如果不是最后一行，说明这行后面有换行符 \n (1 字节)
+      if (lineIndex < tokensResult.tokens.length - 1) {
+        currentByte += 1
       }
     }
 
-    // 按起始位置与范围排序去重
-    rawSpans.sort((a, b) => a.startByte - b.startByte || (b.endByte - a.endByte))
-
-    tree.delete()
     return {
       type: "highlighted",
       requestId,
-      language: catalogEntry.filetype,
-      spans: rawSpans,
+      language: catalogEntry.canonical,
+      spans,
     }
   } catch (error) {
     return { type: "plain", requestId, reason: "parse-failed" }
@@ -172,11 +88,6 @@ if (typeof self !== "undefined" && typeof postMessage === "function" && "onmessa
   (self as unknown as { onmessage: (event: MessageEvent<SyntaxWorkerRequest>) => void }).onmessage = async (event: MessageEvent<SyntaxWorkerRequest>) => {
     const data = event.data
     if (data.type === "dispose") {
-      for (const parser of parserInstanceMap.values()) {
-        parser.delete()
-      }
-      parserInstanceMap.clear()
-      languageCache.clear()
       return
     }
     if (data.type === "highlight") {

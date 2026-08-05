@@ -1,17 +1,13 @@
-/** 加载 Web JS/CSS/Worker/WASM 构建产物；源码开发模式下即时构建同一份资源。 */
+/** 加载 Web JS/CSS/Worker 构建产物；源码开发模式下即时构建同一份资源。 */
 
 import { existsSync } from "node:fs"
 import { readFile } from "node:fs/promises"
 import { resolve } from "node:path"
 
-import { bundledSyntaxLanguages } from "./syntax/catalog.generated"
-
 export type WebAssets = {
   script: string
   style: string
   syntaxWorkerScript: string
-  treeSitterWasm: Uint8Array
-  languageWasms: ReadonlyMap<string, Uint8Array>
 }
 
 /**
@@ -23,8 +19,6 @@ export type WebAssetsManifest = {
   readonly script: string
   readonly style: string
   readonly syntaxWorkerScript: string
-  readonly treeSitterWasm: string
-  readonly languageWasms: Readonly<Record<string, string>>
 }
 
 /** 根据当前 bundle 模块所在目录解析 source 与 dist 两种运行形态的资源位置。 */
@@ -88,25 +82,10 @@ async function buildSourceBundle(sourceEntrypoint: string): Promise<WebAssets> {
   const style = await styleOutput.text()
   const syntaxWorkerScript = workerOutput ? await workerOutput.text() : ""
 
-  const treeSitterWasmPath = resolve(import.meta.dir, "../../node_modules/web-tree-sitter/tree-sitter.wasm")
-  const treeSitterWasm = existsSync(treeSitterWasmPath)
-    ? new Uint8Array(await readFile(treeSitterWasmPath))
-    : new Uint8Array()
-
-  const languageWasms = new Map<string, Uint8Array>()
-  for (const entry of bundledSyntaxLanguages) {
-    const wasmPath = resolve(import.meta.dir, `../tui/platform/assets/syntax/${entry.filetype}/${entry.wasmFileName}`)
-    if (existsSync(wasmPath)) {
-      languageWasms.set(entry.assetId, new Uint8Array(await readFile(wasmPath)))
-    }
-  }
-
   return {
     script,
     style,
     syntaxWorkerScript,
-    treeSitterWasm,
-    languageWasms,
   }
 }
 
@@ -120,22 +99,12 @@ export async function readBuiltWebAssets(directory: string): Promise<WebAssets |
     throw new Error(`Web 资产清单无效：${manifestPath}`)
   }
 
-  const languageWasms = new Map<string, Uint8Array>()
-  for (const entry of bundledSyntaxLanguages) {
-    const assetPath = raw.languageWasms[entry.assetId]
-    if (!assetPath) {
-      throw new Error(`Web 资产清单缺少语法 WASM：${entry.assetId}`)
-    }
-    languageWasms.set(entry.assetId, new Uint8Array(await readFile(resolveAssetPath(directory, assetPath))))
-  }
-
-  const [script, style, syntaxWorkerScript, treeSitterWasm] = await Promise.all([
+  const [script, style, syntaxWorkerScript] = await Promise.all([
     readFile(resolveAssetPath(directory, raw.script), "utf8"),
     readFile(resolveAssetPath(directory, raw.style), "utf8"),
     readFile(resolveAssetPath(directory, raw.syntaxWorkerScript), "utf8"),
-    readFile(resolveAssetPath(directory, raw.treeSitterWasm)),
   ])
-  return { script, style, syntaxWorkerScript, treeSitterWasm: new Uint8Array(treeSitterWasm), languageWasms }
+  return { script, style, syntaxWorkerScript }
 }
 
 /** 只接受 dist 内普通相对文件名，避免被损坏的清单带出构建目录。 */
@@ -153,7 +122,4 @@ function isWebAssetsManifest(value: unknown): value is WebAssetsManifest {
     && typeof manifest.script === "string"
     && typeof manifest.style === "string"
     && typeof manifest.syntaxWorkerScript === "string"
-    && typeof manifest.treeSitterWasm === "string"
-    && typeof manifest.languageWasms === "object"
-    && manifest.languageWasms !== null
 }

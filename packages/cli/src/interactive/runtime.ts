@@ -55,7 +55,8 @@ export function createInteractiveRuntime(
 }
 
 /** 将绝对工作区路径压缩成窄终端可显示的最后一级目录名。 */
-export function workspaceLabel(workspace: string): string {
+export function workspaceLabel(workspace?: string): string {
+  if (!workspace) return "~"
   const normalized = workspace.replace(/\\/g, "/").replace(/\/+$/, "")
   const parts = normalized.split("/").filter(Boolean)
   return parts.at(-1) ?? workspace

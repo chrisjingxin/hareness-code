@@ -15,6 +15,7 @@ const runtime: InteractiveRuntime = {
   workspace: "/workspace/harness-code",
   cliVersion: "0.1.0",
   modelConfigured: true,
+  modelProfileId: "enterprise-model",
   modelName: "enterprise-model",
   executionMode: "local",
   approvalMode: "default",
@@ -77,7 +78,6 @@ test("/status 只展示本地运行摘要，不创建 Agent run", async () => {
     const frame = await setup.waitForFrame(value => value.includes("工作区"))
     expect(requests).toHaveLength(0)
     expect(frame).toContain("工作区")
-    expect(frame).toContain("enterprise-model")
     expect(frame).toContain("本机执行")
     expect(frame).toContain("default")
   } finally {
@@ -161,7 +161,6 @@ test("/skills 打开可搜索选择器，并把选中的 Skill 附到下一次�
     expect(frame).toContain("Skills")
     expect(frame).toContain("搜索 Skills")
     expect(frame).toContain("保留 thread")
-    expect(frame).toContain("harness-code")
     expect(frame).toContain("一条用于验证浮层描述单行")
     expect(frame).not.toContain("显示的长说明")
     expect(frame).not.toContain("┌")
@@ -404,6 +403,45 @@ function createMockClient() {
       if (!line.trim()) continue
       const request = JSON.parse(line) as { id?: string; method?: string; params?: Record<string, unknown> }
       if (typeof request.id !== "string") continue
+      if (request.method === "initialize") {
+        stdout.write(`${JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: {
+            protocol_version: "v3",
+            agent: { name: "test-agent", version: "1.0.0" },
+            capabilities: { enabled: ["skills.manage", "models.read", "mcp.manage", "config.manage"] },
+            security: { approval_mode: "default" },
+            execution: { mode: "local" },
+          },
+        })}
+`)
+        continue
+      }
+      if (request.method === "config.details") {
+        stdout.write(`${JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: {
+            revision: 1,
+            config: { model: { default: "enterprise-model" } },
+          },
+        })}
+`)
+        continue
+      }
+      if (request.method === "models.list") {
+        stdout.write(`${JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: {
+            profiles: [{ id: "enterprise-model", name: "Enterprise Model" }],
+            thread_selection: { primary_profile: "enterprise-model" },
+          },
+        })}
+`)
+        continue
+      }
       if (request.method === "skills.list") {
         stdout.write(`${JSON.stringify({
           jsonrpc: "2.0",

@@ -1,6 +1,6 @@
 /** Web Interactive Adapter：只拥有浏览器表现状态，把用户动作映射为 InteractiveIntent。 */
 
-import type { ApprovalDecision, InteractiveController, InteractiveIntent, InteractiveMcpInput, InteractiveResult, InteractiveSnapshot, InteractiveResponse } from "../../interactive/types"
+import type { ApprovalDecision, InteractiveController, InteractiveIntent, InteractiveMcpInput, IntentOutcome, InteractiveResult, InteractiveSnapshot, InteractiveResponse } from "../../interactive/types"
 import { filterCommandMenuItems, type CommandMenuItem } from "../../interactive/commands"
 import type { WebHandoffPort } from "../handoff-port"
 
@@ -402,15 +402,19 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     this.publishNow()
 
     try {
-      const result = await this.controller.dispatch({ type: "input.submit", value: submittedDraft })
-      await this.handleInteractiveResult(result)
+      const outcome = await this.controller.dispatch({ type: "input.submit", value: submittedDraft })
+      await this.handleInteractiveResult(outcome)
       if (this.closed) return
-      if (this.draft === submittedDraft) {
-        this.draft = ""
+      if (outcome.status === "accepted") {
+        if (this.draft === submittedDraft) {
+          this.draft = ""
+        }
+        this.commandMenuOpenFlag = false
+        this.commandMenuIndex = 0
+        this.pendingScrollRequest = "to-bottom"
+      } else {
+        this.composerErrorStr = outcome.message
       }
-      this.commandMenuOpenFlag = false
-      this.commandMenuIndex = 0
-      this.pendingScrollRequest = "to-bottom"
     } catch (error) {
       if (this.closed) return
       this.composerErrorStr = errorMessage(error)
@@ -639,29 +643,35 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     }
   }
 
-  /** 解释 InteractiveResult：present/request-handoff/request-exit 三类都映射到本地副作用。 */
-  private async handleInteractiveResult(result: InteractiveResult | void): Promise<void> {
-    if (!result) return
-    switch (result.type) {
-      case "present":
-        if (result.target === "threads") this.openPanel("threads")
-        else if (result.target === "models") this.openPanel("models")
-        else this.openPanel("skills")
-        return
-      case "request-handoff":
-        // Browser 内嵌套 handoff 是禁止行为；只展示本地通知，不再次调用 WebHandoffPort。
-        this.showTransientNotice("当前页面不能再次打开 Web。")
-        return
-      case "request-exit":
-        await this.exitHarness()
+  /** 解释 IntentOutcome：根据 PresentationEffect 执行本地呈现层副作用。 */
+  private async handleInteractiveResult(outcome: IntentOutcome): Promise<void> {
+    if (outcome.status === "rejected") {
+      this.showTransientNotice(outcome.message)
+      return
+    }
+    if (!outcome.effects) return
+    for (const effect of outcome.effects) {
+      switch (effect.type) {
+        case "present":
+          if (effect.target === "threads") this.openPanel("threads")
+          else if (effect.target === "models") this.openPanel("models")
+          else this.openPanel("skills")
+          break
+        case "request-handoff":
+          this.showTransientNotice("当前页面不能再次打开 Web。")
+          break
+        case "request-exit":
+          await this.exitHarness()
+          break
+      }
     }
   }
 
-  /** 派发 InteractiveIntent 并按 result 决定是否再触发本地副作用。 */
-  private async dispatchInteractive(intent: InteractiveIntent): Promise<InteractiveResult | void> {
-    const result = await this.controller.dispatch(intent)
-    await this.handleInteractiveResult(result)
-    return result
+  /** 派发 InteractiveIntent 并按 outcome 决定是否再触发本地副作用。 */
+  private async dispatchInteractive(intent: InteractiveIntent): Promise<IntentOutcome> {
+    const outcome = await this.controller.dispatch(intent)
+    await this.handleInteractiveResult(outcome)
+    return outcome
   }
 
   /** Thread 报告只在 currentThreadId 真正变化时调用 handoff.reportThread。 */

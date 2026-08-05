@@ -3,6 +3,7 @@
 import { expect, test } from "bun:test"
 
 import type {
+  IntentOutcome,
   InteractiveCommandItem,
   InteractiveConfirmation,
   InteractiveConnectionState,
@@ -31,7 +32,7 @@ import {
 
 type Listener = (snapshot: InteractiveSnapshot) => void
 
-type DispatchHandler = (intent: InteractiveIntent) => Promise<InteractiveResult | void>
+type DispatchHandler = (intent: InteractiveIntent) => Promise<IntentOutcome>
 
 /** 测试用 frameScheduler：手动驱动；schedule 的任务不会自动执行。 */
 function createManualScheduler(): WebFrameScheduler & { runScheduled(): void; pending: () => boolean } {
@@ -208,7 +209,7 @@ function createFakeController(options: FakeControllerOptions = {}): InteractiveC
     async dispatch(intent) {
       dispatches.push(intent)
       if (dispatchHandler) return await dispatchHandler(intent)
-      return undefined
+      return { status: "accepted" }
     },
     async close() {
       listeners.clear()
@@ -342,9 +343,9 @@ test("普通 submit 继续解释 Controller 的 present/request-exit 结果", as
   const scheduler = createManualScheduler()
   controller.setDispatchHandler(async intent => {
     if (intent.type === "input.submit" && intent.value === "/models") {
-      return { type: "present", target: "models" }
+      return { status: "accepted", effects: [{ type: "present", target: "models" }] }
     }
-    return undefined
+    return { status: "accepted" }
   })
   const adapter = createWebInteractiveAdapter({ controller, handoff, frameScheduler: scheduler })
 
@@ -420,12 +421,12 @@ test("present result 打开对应 panel 并触发 catalog.refresh", async () => 
   const scheduler = createManualScheduler()
   controller.setDispatchHandler(async intent => {
     if (intent.type === "command.execute" && intent.commandId === "model.select") {
-      return { type: "present", target: "models" }
+      return { status: "accepted", effects: [{ type: "present", target: "models" }] }
     }
     if (intent.type === "command.execute" && intent.commandId === "thread.resume") {
-      return { type: "present", target: "threads" }
+      return { status: "accepted", effects: [{ type: "present", target: "threads" }] }
     }
-    return undefined
+    return { status: "accepted" }
   })
   const adapter = createWebInteractiveAdapter({ controller, handoff, frameScheduler: scheduler })
 
@@ -447,9 +448,9 @@ test("request-handoff result 只显示本地通知，不调用 handoff 任何方
   const scheduler = createManualScheduler()
   controller.setDispatchHandler(async intent => {
     if (intent.type === "command.execute" && intent.commandId === "host.web") {
-      return { type: "request-handoff", threadId: "thread-1" }
+      return { status: "accepted", effects: [{ type: "request-handoff", threadId: "thread-1" }] }
     }
-    return undefined
+    return { status: "accepted" }
   })
   const adapter = createWebInteractiveAdapter({ controller, handoff, frameScheduler: scheduler })
 
@@ -466,9 +467,9 @@ test("request-exit result 触发 handoff.requestExit 并设置 leaving", async (
   const scheduler = createManualScheduler()
   controller.setDispatchHandler(async intent => {
     if (intent.type === "command.execute" && intent.commandId === "system.quit") {
-      return { type: "request-exit" }
+      return { status: "accepted", effects: [{ type: "request-exit" }] }
     }
-    return undefined
+    return { status: "accepted" }
   })
   const adapter = createWebInteractiveAdapter({ controller, handoff, frameScheduler: scheduler })
 

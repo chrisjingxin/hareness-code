@@ -22,7 +22,7 @@ export type SyntaxSpan = {
 }
 
 export type SyntaxWorkerRequest =
-  | { type: "highlight"; requestId: number; language: string; code: string }
+  | { type: "highlight"; requestId: number; language: string; code: string; theme?: string }
   | { type: "dispose" }
 
 export type SyntaxWorkerResponse =

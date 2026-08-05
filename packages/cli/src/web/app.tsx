@@ -10,7 +10,7 @@ import { createRoot, type Root } from "react-dom/client"
 import { useEffect, useState } from "react"
 
 import { AgentClient } from "../ipc/client"
-import { AgentClientInteractiveAdapter } from "../interactive/agent-port"
+import { AgentClientGateway } from "../infrastructure/agent-client-gateway"
 import { createInteractiveController } from "../interactive/controller"
 import { createInteractiveRuntime } from "../interactive/runtime"
 import { createWebInteractiveAdapter, type WebInteractiveAdapter } from "./application/adapter"
@@ -21,8 +21,9 @@ import type { WebBootstrapStage } from "./handoff-coordinator"
 import { createWebHandoffPort, type WebHandoffPort } from "./handoff-port"
 import { PresentationErrorBoundary } from "./presentation/error-boundary"
 import { WebApp } from "./presentation/web-app"
-import { closeSyntaxClient } from "./syntax/client"
+import { closeHighlightService } from "./syntax/highlight-service"
 import "./presentation/styles.css"
+
 
 const WEB_CAPABILITIES = [
   Capability.HOST_CONTROL,
@@ -72,7 +73,7 @@ export async function bootstrapWebApp(): Promise<void> {
     closed = true
     await adapter?.close()
     root?.unmount()
-    closeSyntaxClient()
+    closeHighlightService()
     await controller?.close()
     client?.destroy()
     handoff?.close()
@@ -113,8 +114,8 @@ export async function bootstrapWebApp(): Promise<void> {
     }
 
     const runtime = createInteractiveRuntime(initialized, workspaceFromInitialize(initialized), { cliVersion: "0.1.0" })
-    const agent = new AgentClientInteractiveAdapter(client)
-    controller = createInteractiveController({ agent, runtime })
+    const gateway = new AgentClientGateway(client)
+    controller = createInteractiveController({ gateway, runtime })
     if (bootstrap.threadId !== null) {
       stage = "thread.restore"
       await controller.dispatch({ type: "thread.open", threadId: bootstrap.threadId })

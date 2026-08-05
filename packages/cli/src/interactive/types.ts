@@ -10,10 +10,12 @@ import type {
 import type { CommandMenuItem, SkillMenuItem } from "./commands"
 import type { InteractiveRuntime } from "./runtime"
 import type { InteractiveActivity, ActiveRun, RunSummary, TimelineItem } from "./state"
-import type { InteractiveAgentPort } from "./agent-port"
+import type { AgentGateway, Clock, IdGenerator, Scheduler } from "./ports"
 
 /** 审批决定类型，与协议 ApprovalResponse.decision 保持一致。 */
 export type ApprovalDecision = "approve_once" | "approve_thread" | "approve_always" | "reject" | "reject_with_feedback"
+
+export type { InteractiveActivity } from "./state"
 
 /** Skill catalog 项：与 Slash 菜单共用的最小领域视图。 */
 export type SkillSummary = SkillMenuItem
@@ -82,11 +84,29 @@ export type InteractiveConfirmation = {
 /** MCP 添加的 typed 输入；Slash 文本解析与 Web typed intent 最终调用同一路径。 */
 export type InteractiveMcpInput = McpAddParams
 
-/** 表现层必须由宿主完成的动作返回小型结果；其余 intent 只更新 snapshot。 */
-export type InteractiveResult =
+/** 表现层必须由宿主完成的依赖副作用。 */
+export type PresentationEffect =
   | { type: "present"; target: "threads" | "models" | "skills"; initialQuery?: string }
   | { type: "request-handoff"; threadId: string | null }
   | { type: "request-exit" }
+
+/** 拒绝原因分类：涵盖从繁忙、缺少能力到通信与校验错误的稳定错误码。 */
+export type RejectionCode =
+  | "busy"
+  | "connection-closed"
+  | "stale-interaction"
+  | "capability-missing"
+  | "not-found"
+  | "invalid-argument"
+  | "agent-error"
+
+/** Interactive Core 执行任何 Intent 的确定性处理结果。 */
+export type IntentOutcome =
+  | { status: "accepted"; effects?: readonly PresentationEffect[] }
+  | { status: "rejected"; code: RejectionCode; message: string }
+
+/** 兼容别名（暂保留） */
+export type InteractiveResult = PresentationEffect
 
 /** 表现层唯一的输入入口；不携带选中行、DOM event 或 OpenTUI key。 */
 export type InteractiveIntent =
@@ -136,22 +156,25 @@ export interface InteractiveController {
   getSnapshot(): InteractiveSnapshot
   /** 订阅 snapshot 发布；listener 在回调中取消订阅不影响当前发布。 */
   subscribe(listener: (snapshot: InteractiveSnapshot) => void): () => void
-  /** 执行一个 intent 及其必要的 Agent effect；完成后返回宿主级结果或 void。 */
-  dispatch(intent: InteractiveIntent): Promise<InteractiveResult | void>
+  /** 执行一个 intent 及其必要的 Agent effect；返回确定性 IntentOutcome。 */
+  dispatch(intent: InteractiveIntent): Promise<IntentOutcome>
   /** 停止接收 intent、使 generation 失效、卸载 Agent listener，但不关闭外层 transport。 */
   close(): Promise<void>
 }
 
-/** 可注入的本地定时器，测试使用手动 scheduler 驱动 Interaction timeout。 */
-export type InteractiveScheduler = {
-  setTimeout(callback: () => void, ms: number): () => void
-}
+/** 兼容导出：可注入的本地定时器。 */
+export type InteractiveScheduler = Scheduler
 
 /** 创建 InteractiveController 的依赖与一次性恢复输入。 */
 export type InteractiveControllerOptions = {
-  agent: InteractiveAgentPort
-  runtime: InteractiveRuntime
+  gateway?: AgentGateway
+  /** 兼容别名属性：AgentGateway 传入 */
+  agent?: AgentGateway
+  runtime?: InteractiveRuntime
+  baseRuntime?: InteractiveRuntime
   /** 缺省表示不做启动恢复；显式 null 进入空首页；字符串调用 canonical threads.open。 */
   initialThreadId?: string | null
-  scheduler?: InteractiveScheduler
+  clock?: Clock
+  scheduler?: Scheduler
+  idGenerator?: IdGenerator
 }

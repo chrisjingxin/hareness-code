@@ -6,6 +6,7 @@ import { resolve } from "node:path"
 
 const webRoot = resolve(import.meta.dir, "../../src/web")
 const interactiveRoot = resolve(import.meta.dir, "../../src/interactive")
+const cliSrcRoot = resolve(import.meta.dir, "../../src")
 
 test("Web 根目录只保留组合入口与白名单基础设施文件", () => {
   const entries = readdirSync(webRoot, { withFileTypes: true })
@@ -51,6 +52,18 @@ test("Web presentation 不直连 IPC、agent-transport、handoff 凭据或 JSON-
   expect(imports).not.toMatch(/dangerouslySetInnerHTML/)
 })
 
+test("Web syntax 高亮模块独立且不跨端引用 tui/platform 或 ../tui/", () => {
+  const syntaxDir = resolve(webRoot, "syntax")
+  const imports = layerImports(syntaxDir)
+  expect(imports).not.toMatch(/from\s+["'][^"']*tui\/platform/)
+  expect(imports).not.toMatch(/from\s+["'][^"']*\.\.\/tui/)
+})
+
+test("CLI 生产代码中无 web-tree-sitter 依赖引用", () => {
+  const allSource = readAllSourceFiles(cliSrcRoot)
+  expect(allSource).not.toMatch(/web-tree-sitter/)
+})
+
 test("Web composition root 是唯一同时装配 infrastructure 与 React 的入口", () => {
   const app = readFileSync(resolve(webRoot, "app.tsx"), "utf8")
   expect(app).toContain("createInteractiveController")
@@ -62,7 +75,6 @@ test("Web composition root 是唯一同时装配 infrastructure 与 React 的入
 
 test("presentation 可以使用交互式类型与 @za38/protocol 枚举", () => {
   const source = readDirectory(resolve(webRoot, "presentation"))
-  // 类型导入允许指向 interactive 与 @za38/protocol。
   expect(source).toMatch(/from\s+["']\.\.\/\.\.\/interactive\//)
   expect(source).toMatch(/from\s+["']@za38\/protocol/)
 })
@@ -90,4 +102,18 @@ function layerImports(directory: string): string {
     .map(entry => readFileSync(resolve(directory, entry.name), "utf8"))
     .flatMap(source => source.match(/^import .*$/gm) ?? [])
     .join("\n")
+}
+
+function readAllSourceFiles(dir: string): string {
+  let results: string[] = []
+  const entries = readdirSync(dir, { withFileTypes: true })
+  for (const entry of entries) {
+    const fullPath = resolve(dir, entry.name)
+    if (entry.isDirectory()) {
+      results.push(readAllSourceFiles(fullPath))
+    } else if (/\.[cm]?[jt]sx?$/.test(entry.name)) {
+      results.push(readFileSync(fullPath, "utf8"))
+    }
+  }
+  return results.join("\n")
 }

@@ -12,6 +12,7 @@ import {
   type ReactElement,
   type ReactNode,
 } from "react"
+import { activityLabel } from "../../presentation-shared"
 
 import type {
   ConversationMessage,
@@ -134,7 +135,7 @@ export function Timeline({
       )}
       <div className="live-interaction-slot" data-pending-request-id={pendingRequestId ?? undefined} />
       <div className="run-status-live" aria-live="polite">
-        {snapshot.interactive.activity.label}
+        {activityLabel(snapshot.interactive.activity.kind)}
       </div>
       {showScrollButton ? (
         <button

@@ -166,7 +166,7 @@ describe("Timeline", () => {
       expect(log?.getAttribute("aria-relevant")).toBe("additions")
       const live = handle.container.querySelector(".run-status-live")
       expect(live?.getAttribute("aria-live")).toBe("polite")
-      expect(live?.textContent).toBe("正在思考")
+      expect(live?.textContent).toBe("正在运行")
     } finally {
       handle.unmount()
     }

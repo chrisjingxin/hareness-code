@@ -1,4 +1,4 @@
-/** Bun 静态 server adapter：handoff 路由白名单、精确 Host/Origin 与 lifecycle upgrade。 */
+/** Bun 静态 server adapter：handoff 路由白名单、精细 Host/Origin 与 lifecycle upgrade。 */
 
 import { AsyncQueue } from "../ipc/transport"
 import type { WebAssets } from "./bundle"
@@ -30,7 +30,7 @@ const COMMON_HEADERS = {
 
 const HTML_CSP = [
   "default-src 'none'",
-  "script-src 'self' 'wasm-unsafe-eval'",
+  "script-src 'self'",
   "style-src 'self'",
   "connect-src ws://127.0.0.1:*",
   "base-uri 'none'",
@@ -45,8 +45,6 @@ export function createWebServer(options: WebServerOptions): WebServer {
     script: "",
     style: "",
     syntaxWorkerScript: "",
-    treeSitterWasm: new Uint8Array(),
-    languageWasms: new Map(),
   }
   const queues = new WeakMap<BunServerWebSocket, AsyncQueue<unknown>>()
 
@@ -77,24 +75,6 @@ export function createWebServer(options: WebServerOptions): WebServer {
         return new Response("Method Not Allowed", { status: 405 })
       }
       return staticResponse("text/javascript; charset=utf-8", assets.syntaxWorkerScript || "")
-    }
-    if (path === "/web/syntax/tree-sitter.wasm") {
-      if (request.method !== "GET" || isUpgrade) {
-        return new Response("Method Not Allowed", { status: 405 })
-      }
-      return binaryResponse("application/wasm", assets.treeSitterWasm || new Uint8Array())
-    }
-    const langWasmMatch = path.match(/^\/web\/syntax\/lang\/([a-zA-Z0-9_-]+)\.wasm$/)
-    if (langWasmMatch) {
-      if (request.method !== "GET" || isUpgrade) {
-        return new Response("Method Not Allowed", { status: 405 })
-      }
-      const assetId = langWasmMatch[1]
-      const wasm = assets.languageWasms?.get(assetId)
-      if (!wasm) {
-        return new Response("Not Found", { status: 404 })
-      }
-      return binaryResponse("application/wasm", wasm)
     }
     const match = matchHandoffPath(path)
     if (!match) return new Response("Not Found", { status: 404 })
@@ -213,12 +193,6 @@ function decodePathSegment(value: string): string | undefined {
 
 function staticResponse(contentType: string, body: string): Response {
   return new Response(body, {
-    headers: { "content-type": contentType, ...COMMON_HEADERS },
-  })
-}
-
-function binaryResponse(contentType: string, body: Uint8Array): Response {
-  return new Response(body as unknown as BodyInit, {
     headers: { "content-type": contentType, ...COMMON_HEADERS },
   })
 }

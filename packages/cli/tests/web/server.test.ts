@@ -20,8 +20,6 @@ function createHarness(): Harness {
       script: "console.log('app')",
       style: "body{}",
       syntaxWorkerScript: "console.log('syntax worker')",
-      treeSitterWasm: new Uint8Array([0, 97, 115, 109]),
-      languageWasms: new Map([["python", new Uint8Array([1, 2, 3])]]),
     }),
     isActiveHandoff: handoffId => activeHandoffs.has(handoffId),
     attachLifecycle: async (handoffId, channel) => {
@@ -40,7 +38,7 @@ async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<voi
   }
 }
 
-test("白名单路由与安全 headers 精确存在；未知路由返回 404/405", async () => {
+test("白名单路由与安全 headers 精确存在；已知 WASM 路由删除后返回 404；未知路由返回 404/405", async () => {
   const { server, activeHandoffs } = createHarness()
   await server.start()
   activeHandoffs.add("handoff-1")
@@ -51,7 +49,7 @@ test("白名单路由与安全 headers 精确存在；未知路由返回 404/405
   expect(await page.text()).toContain("<title>shell</title>")
   expect(page.headers.get("content-security-policy")).toContain("default-src 'none'")
   expect(page.headers.get("content-security-policy")).toContain("connect-src ws://127.0.0.1:*")
-  expect(page.headers.get("content-security-policy")).toContain("wasm-unsafe-eval")
+  expect(page.headers.get("content-security-policy")).not.toContain("wasm-unsafe-eval")
   expect(page.headers.get("cache-control")).toBe("no-store")
   expect(page.headers.get("referrer-policy")).toBe("no-referrer")
   expect(page.headers.get("x-content-type-options")).toBe("nosniff")
@@ -70,24 +68,21 @@ test("白名单路由与安全 headers 精确存在；未知路由返回 404/405
   expect(syntaxWorker.status).toBe(200)
   expect(syntaxWorker.headers.get("content-type")).toContain("javascript")
   expect(await syntaxWorker.text()).toContain("syntax worker")
+
+  // WASM 路由被全量删除，已返回 404
   const treeSitter = await fetch(`${origin}/web/syntax/tree-sitter.wasm`)
-  expect(treeSitter.status).toBe(200)
-  expect(treeSitter.headers.get("content-type")).toContain("application/wasm")
-  expect(new Uint8Array(await treeSitter.arrayBuffer())).toEqual(new Uint8Array([0, 97, 115, 109]))
+  expect(treeSitter.status).toBe(404)
   const language = await fetch(`${origin}/web/syntax/lang/python.wasm`)
-  expect(language.status).toBe(200)
-  expect(new Uint8Array(await language.arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]))
+  expect(language.status).toBe(404)
 
   expect((await fetch(`${origin}/`)).status).toBe(404)
   expect((await fetch(`${origin}/index.html`)).status).toBe(404)
   expect((await fetch(`${origin}/web/syntax/lang/not-in-catalog.wasm`)).status).toBe(404)
-  expect((await fetch(`${origin}/web/syntax/lang/python.wasm`, { method: "POST" })).status).toBe(405)
   expect((await fetch(`${origin}/web/h/unknown-handoff`)).status).toBe(404)
   expect((await fetch(`${origin}/web/h/handoff-1/../app.js`)).status).toBe(404)
   expect((await fetch(`${origin}/web/h/handoff-1`, { method: "POST" })).status).toBe(405)
   expect((await fetch(`${origin}/web/h/handoff-1/lifecycle`)).status).toBe(405)
 
-  // idle 后旧 handoff path 立即失效。
   activeHandoffs.delete("handoff-1")
   expect((await fetch(`${origin}/web/h/handoff-1`)).status).toBe(404)
 
@@ -136,7 +131,6 @@ test("lifecycle 消息原样投递给 coordinator，二进制/畸形帧不解析
     headers: { origin },
   })
   await waitFor(() => attachCalls.length === 1)
-  // 通过 channel.messages 消费一条帧验证投递。
   const iterator = attachCalls[0].channel.messages[Symbol.asyncIterator]()
   socket.send(JSON.stringify({ type: "thread.changed", thread_id: "t-1" }))
   const first = await Promise.race([iterator.next(), sleep(500)])

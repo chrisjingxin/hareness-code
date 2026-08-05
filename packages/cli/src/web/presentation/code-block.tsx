@@ -1,59 +1,85 @@
-/** Web CodeBlock 组件：无缝 plain-first 离线高亮、复制按钮与安全 DOM 渲染。 */
+/** Web CodeBlock 组件：无缝 plain-first 离线 Shiki 高亮、流式 debounce、复制按钮与安全 DOM 渲染。 */
 /** @jsxImportSource react */
 
 import { useEffect, useRef, useState } from "react"
 import { Check, Copy } from "lucide-react"
 
-import { resolveSyntaxLanguage } from "../syntax/catalog.generated"
-import { acquireSyntaxClient, releaseSyntaxClient } from "../syntax/client"
+import { resolveLanguage } from "../../presentation-shared/language-catalog"
+import { acquireHighlightService, releaseHighlightService } from "../syntax/highlight-service"
 import type { SyntaxSpan } from "../syntax/protocol"
+
+const STREAMING_DEBOUNCE_MS = 100
 
 /** 渲染 fenced code 的 plain-first 高亮、复制状态与安全 span。 */
 export function CodeBlock(props: {
   code: string
   language?: string
+  theme?: string
 }): React.ReactElement {
-  const { code, language = "" } = props
+  const { code, language = "", theme = "dark-plus" } = props
   const [spans, setSpans] = useState<readonly SyntaxSpan[] | null>(null)
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">("idle")
   const [loading, setLoading] = useState(false)
   const resetCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const catalogEntry = resolveSyntaxLanguage(language)
-  const displayLanguage = catalogEntry ? catalogEntry.filetype : language || "文本"
+  const catalogEntry = resolveLanguage(language)
+  const displayLanguage = catalogEntry.canonical !== "plaintext" ? catalogEntry.canonical : (language || "文本")
 
   useEffect(() => {
     let active = true
-    if (!catalogEntry || !code.trim()) {
+
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current)
+      debounceTimerRef.current = null
+    }
+
+    if (catalogEntry.canonical === "plaintext" && language && language.trim() !== "" && language !== "plaintext" && language !== "text" && language !== "txt") {
       setSpans(null)
       setLoading(false)
       return
     }
 
-    setSpans(null)
-    setLoading(true)
-    acquireSyntaxClient()
-      .highlight(catalogEntry.filetype, code)
-      .then(res => {
-        if (!active) return
-        setLoading(false)
-        if (res.type === "highlighted") {
-          setSpans(res.spans)
-        } else {
+    if (!code.trim()) {
+      setSpans(null)
+      setLoading(false)
+      return
+    }
+
+    // 流式防抖：在快速累积输出时延迟高亮请求
+    debounceTimerRef.current = setTimeout(() => {
+      if (!active) return
+      setLoading(true)
+      const service = acquireHighlightService()
+
+      service
+        .highlight(catalogEntry.canonical, code, theme)
+        .then(res => {
+          if (!active) return
+          setLoading(false)
+          if (res.type === "highlighted") {
+            setSpans(res.spans)
+          } else {
+            setSpans(null)
+          }
+        })
+        .catch(() => {
+          if (!active) return
+          setLoading(false)
           setSpans(null)
-        }
-      })
-      .catch(() => {
-        if (!active) return
-        setLoading(false)
-        setSpans(null)
-      })
+        })
+        .finally(() => {
+          releaseHighlightService()
+        })
+    }, STREAMING_DEBOUNCE_MS)
 
     return () => {
       active = false
-      releaseSyntaxClient()
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current)
+      }
     }
-  }, [code, language, catalogEntry])
+  }, [code, language, theme, catalogEntry])
 
   useEffect(() => {
     return () => {
@@ -105,7 +131,6 @@ export function CodeBlock(props: {
 export function renderSpans(code: string, spans: readonly SyntaxSpan[]): React.ReactNode {
   if (!spans || spans.length === 0) return code
 
-  // 建立 UTF-8 边界到 UTF-16 索引的映射；落在多字节字符中间的范围一律 fail closed。
   const encoder = new TextEncoder()
   const bytes = encoder.encode(code)
   const byteToCharIndex = new Int32Array(bytes.length + 1).fill(-1)
@@ -131,7 +156,6 @@ export function renderSpans(code: string, spans: readonly SyntaxSpan[]): React.R
     charSpans.push({ startByte: span.startByte, endByte: span.endByte, startChar, endChar, scope: span.scope })
   }
 
-  // 范围重叠无法安全决定 token 优先级时整块降级，不猜测切割。
   charSpans.sort((a, b) => a.startByte - b.startByte || a.endByte - b.endByte)
   for (let i = 1; i < charSpans.length; i++) {
     if (charSpans[i]!.startByte < charSpans[i - 1]!.endByte) return code

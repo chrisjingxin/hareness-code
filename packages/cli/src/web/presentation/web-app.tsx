@@ -3,6 +3,7 @@
 
 import { Activity, Cpu, Ellipsis, Menu, ShieldCheck, X } from "lucide-react"
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react"
+import { activityLabel } from "../../presentation-shared"
 import { Capability } from "@za38/protocol"
 
 import { approvalModeLabel, workspaceLabel } from "../../interactive/runtime"
@@ -173,7 +174,7 @@ export function WebApp(props: {
             <button type="button" className="meta-chip" disabled={readOnly} onClick={() => { onIntent({ type: "panel-open", panel: "status" }) }} title="连接与活动状态">
               <Activity aria-hidden="true" size={16} />
               <span className={`status-dot status-dot-${interactive.activity.kind}`} aria-hidden="true" />
-              <span className="meta-chip-value">{props.active ? interactive.activity.label : "正在接管"}{interactive.connection.status !== "open" ? ` · ${connectionLabel(interactive.connection.status)}` : ""}</span>
+              <span className="meta-chip-value">{props.active ? activityLabel(interactive.activity.kind) : "正在接管"}{interactive.connection.status !== "open" ? ` · ${connectionLabel(interactive.connection.status)}` : ""}</span>
             </button>
           </div>
           <div className="topbar-actions">

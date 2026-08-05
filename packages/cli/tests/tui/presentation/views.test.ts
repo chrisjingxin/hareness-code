@@ -244,8 +244,8 @@ test("继续执行只作为历史事件之后的底部活动行", async () => {
     await act(async () => { await setup.flush() })
     const frame = setup.captureCharFrame()
     expect(frame).toContain("已允许")
-    expect(frame).toContain("继续执行")
-    expect(frame.indexOf("read_file")).toBeLessThan(frame.indexOf("继续执行"))
+    expect(frame).toContain("继续任务")
+    expect(frame.indexOf("继续任务")).toBeLessThan(frame.indexOf("read_file"))
   } finally {
     await act(async () => { setup.renderer.destroy() })
   }

@@ -210,7 +210,7 @@ test("WebAwareRoot 挂载不抛 this 异常，两轮 handoff 中 opening 保留 
       await setup.flush()
     })
     frame = await setup.waitForFrame(value => value.includes("恢复的请求"))
-    expect(frame).toContain("已恢复")
+    expect(frame).toContain("正在恢复")
 
     // 第二次 handoff：opening 阶段 key 保持 1，Controller 不重建，Thread 状态保留。
     await act(async () => {
@@ -250,7 +250,7 @@ test("WebAwareRoot 挂载不抛 this 异常，两轮 handoff 中 opening 保留 
       await setup.flush()
     })
     frame = await setup.waitForFrame(value => value.includes("恢复的请求"))
-    expect(frame).toContain("已恢复")
+    expect(frame).toContain("正在恢复")
   } finally {
     if (setup!) await act(async () => { setup.renderer.destroy() })
     client.destroy()

@@ -6,6 +6,7 @@ import { type RefObject } from "react"
 import { formatDuration, formatUsage } from "../../interactive/runtime"
 import type { ConversationMessage, InteractionCard, TimelineItem, ToolCard } from "../../interactive/state"
 import type { InteractiveSnapshot } from "../../interactive/types"
+import { activityLabel } from "../../presentation-shared"
 import { getCommonSyntaxClient } from "../platform/syntax-parsers"
 import { collapseToolOutput } from "../upstream/collapse-tool-output"
 import { PROMPT_BORDER, useSpinner } from "./composer"
@@ -176,7 +177,7 @@ function TimelineActivity(props: { interactive: InteractiveSnapshot }) {
   return (
     <box marginTop={1} paddingLeft={3} flexDirection="row" gap={1}>
       <text fg={tuiTheme.warning}>{frame}</text>
-      <text fg={tuiTheme.warning}>{interactive.activity.label}</text>
+      <text fg={tuiTheme.warning}>{activityLabel(interactive.activity.kind)}</text>
     </box>
   )
 }
