@@ -1,4 +1,4 @@
-/** Web 安全 HTML shell：不内嵌业务脚本、样式或 attachment 数据。 */
+/** Web 安全 HTML shell：不内嵌业务脚本、样式或凭据数据。 */
 
 export const webHtml = `<!doctype html>
 <html lang="zh-CN">

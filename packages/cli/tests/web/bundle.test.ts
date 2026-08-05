@@ -12,7 +12,8 @@ test("源码开发模式从 bundle 模块构建 Web bundle", async () => {
   expect(assets.script.length).toBeGreaterThan(0)
   expect(assets.style.length).toBeGreaterThan(0)
   expect(assets.syntaxWorkerScript.length).toBeGreaterThan(0)
-  expect(assets.script).toContain("error_name")
+  expect(assets.script).toContain("state.replace")
+  expect(assets.script).toContain("handoff.ready")
 })
 
 test("生产 manifest 只从固定 dist 内资源加载 app、worker 脚本", async () => {

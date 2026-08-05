@@ -14,15 +14,17 @@ import {
 } from "../src/index"
 import { parseArgs } from "../src/args"
 
-test("CLI shutdown 顺序：runTui 返回后 webHandoff → controller.close，agent.stop 最后", () => {
+test("CLI shutdown 顺序：runTui 返回后 gateway → coordinator → controller.close，agent.stop 最后", () => {
   const source = readFileSync(resolve(import.meta.dir, "../src/index.ts"), "utf8")
   const runTuiAt = source.indexOf("await runTui(")
-  const webHandoffCloseAt = source.indexOf("await webHandoff?.close()")
+  const gatewayCloseAt = source.indexOf("await webUiGateway?.close()")
+  const coordinatorCloseAt = source.indexOf("await presentationCoordinator?.close()")
   const controllerCloseAt = source.indexOf("await controller?.close()")
   const agentStopAt = source.indexOf("await agent.stop()")
   expect(runTuiAt).toBeGreaterThan(-1)
-  expect(webHandoffCloseAt).toBeGreaterThan(runTuiAt)
-  expect(controllerCloseAt).toBeGreaterThan(webHandoffCloseAt)
+  expect(gatewayCloseAt).toBeGreaterThan(runTuiAt)
+  expect(coordinatorCloseAt).toBeGreaterThan(gatewayCloseAt)
+  expect(controllerCloseAt).toBeGreaterThan(coordinatorCloseAt)
   expect(agentStopAt).toBeGreaterThan(controllerCloseAt)
 })
 
@@ -75,7 +77,9 @@ test("无头 CLI 不声明 Interaction handler", () => {
   expect(clientInteractionHandles(interactive)).toEqual(["approval", "question"])
   expect(clientCapabilities(interactive)).toContain("threads.read")
   expect(clientCapabilities(interactive)).toContain("context.manage")
-  expect(clientCapabilities(interactive)).toContain("host.attach")
+  // ZC-114：内置 Web 不再直连 Host，CLI 不声明 attachment/control 能力。
+  expect(clientCapabilities(interactive)).not.toContain("host.attach")
+  expect(clientCapabilities(interactive)).not.toContain("host.control")
   expect(clientCapabilities(interactive)).toContain("mcp.read")
   expect(clientCapabilities(interactive)).toContain("mcp.manage")
 })

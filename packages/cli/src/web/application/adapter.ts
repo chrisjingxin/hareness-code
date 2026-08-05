@@ -1,17 +1,14 @@
-/** Web Interactive Adapter：只拥有浏览器表现状态，把用户动作映射为 InteractiveIntent。 */
+/** Web Interactive Adapter：只拥有浏览器表现状态，通过 WebUiClient 消费共享 Core 视图并提交 intent。 */
 
-import type { ApprovalDecision, InteractiveController, InteractiveIntent, InteractiveMcpInput, IntentOutcome, InteractiveResult, InteractiveSnapshot, InteractiveResponse } from "../../interactive/types"
-import { filterCommandMenuItems } from "../../presentation-shared/command-menu-policy"
+import type { ApprovalDecision, InteractiveIntent, InteractiveMcpInput, IntentOutcome, InteractiveSnapshot, InteractiveResponse } from "../../interactive/types"
 import type { CommandMenuItem } from "../../interactive/commands"
-import type { WebHandoffPort } from "../handoff-port"
+import { filterCommandMenuItems } from "../../presentation-shared"
+import type { WebUiClient } from "../ui-client"
 
 /** 每帧合并表现发布的可注入调度器；rAF 不可用时由工厂实现回退到 setTimeout(16)。 */
 export type WebFrameScheduler = {
-  /** 在下一帧安排一次任务；同一帧内多次 schedule 只能真正执行最后一次。 */
   schedule(task: () => void): void
-  /** 取消已 schedule 的任务；未调度时必须安全 no-op。 */
   cancel(): void
-  /** 强制立即执行已 schedule 或下一帧任务；用于交互/连接/leaving 立即发布。 */
   flush(): void
 }
 
@@ -45,9 +42,9 @@ export type WebInteractionDraft = {
 /** 表现层滚动意图；具体 DOM scroll 位置由 React 维护。 */
 export type WebScrollRequest = "new-message" | "to-bottom" | null
 
-/** Web Adapter 发布的完整表现快照；领域事实来自共享 Controller。 */
+/** Web Adapter 发布的完整表现快照；领域事实来自共享 Core 视图（WebUiClient 缓存）。 */
 export type WebAdapterSnapshot = {
-  /** 共享 InteractiveSnapshot 原样引用，不复制 Timeline reducer。 */
+  /** 由网关视图分片重组得到的 InteractiveSnapshot；与 TUI 看到的同一 Core 状态。 */
   readonly interactive: InteractiveSnapshot
   /** 当前输入草稿；提交后由 Adapter 自行清空。 */
   readonly draft: string
@@ -125,8 +122,7 @@ export type WebInteractionDraftPatch =
 
 /** Adapter 工厂入参；frameScheduler 默认实现使用 requestAnimationFrame。 */
 export type WebAdapterOptions = {
-  controller: InteractiveController
-  handoff: WebHandoffPort
+  client: WebUiClient
   frameScheduler?: WebFrameScheduler
 }
 
@@ -148,11 +144,10 @@ type PanelState = {
 
   /** Adapter 内部可变的整套表现状态；集中存放便于 frame batching 时整体替换。 */
 class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
-  private readonly controller: InteractiveController
-  private readonly handoff: WebHandoffPort
+  private readonly client: WebUiClient
   private readonly frameScheduler: WebFrameScheduler
   private readonly listeners = new Set<(snapshot: WebAdapterSnapshot) => void>()
-  private readonly unsubscribeInteractive: () => void
+  private readonly unsubscribeState: () => void
 
   private snapshot: WebAdapterSnapshot
   private draft = ""
@@ -173,11 +168,10 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
   private closed = false
 
   constructor(options: WebAdapterOptions) {
-    this.controller = options.controller
-    this.handoff = options.handoff
+    this.client = options.client
     this.frameScheduler = options.frameScheduler ?? createDefaultFrameScheduler()
     this.snapshot = this.buildSnapshot()
-    this.unsubscribeInteractive = this.controller.subscribe(() => this.onControllerPublish())
+    this.unsubscribeState = this.client.subscribeState(() => this.onViewUpdate())
   }
 
   getSnapshot(): WebAdapterSnapshot {
@@ -240,28 +234,28 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
         await this.selectThread(intent.threadId)
         return
       case "thread-new":
-        await this.controller.dispatch({ type: "command.execute", commandId: "thread.new" })
+        await this.client.submitIntent({ type: "command.execute", commandId: "thread.new" })
         return
       case "thread-refresh":
-        await this.controller.dispatch({ type: "catalog.refresh", catalog: "threads" })
+        await this.client.submitIntent({ type: "catalog.refresh", catalog: "threads" })
         return
       case "model-select":
         await this.selectModel(intent.profileId)
         return
       case "skill-arm":
-        await this.controller.dispatch({ type: "skill.arm", skillId: intent.skillId })
+        await this.client.submitIntent({ type: "skill.arm", skillId: intent.skillId })
         return
       case "skill-clear":
-        await this.controller.dispatch({ type: "skill.clear" })
+        await this.client.submitIntent({ type: "skill.clear" })
         return
       case "skill-set-enabled":
-        await this.controller.dispatch({ type: "skill.set-enabled", skillId: intent.skillId, enabled: intent.enabled })
+        await this.client.submitIntent({ type: "skill.set-enabled", skillId: intent.skillId, enabled: intent.enabled })
         return
       case "mcp-add":
-        await this.controller.dispatch({ type: "mcp.add", input: intent.input })
+        await this.client.submitIntent({ type: "mcp.add", input: intent.input })
         return
       case "mcp-remove":
-        await this.controller.dispatch({ type: "mcp.remove", name: intent.name })
+        await this.client.submitIntent({ type: "mcp.remove", name: intent.name })
         return
       case "interaction-draft-change":
         this.updateInteractionDraft(intent.requestId, intent.patch)
@@ -270,13 +264,13 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
         await this.submitInteraction(intent.requestId, intent.response)
         return
       case "confirmation-resolve":
-        await this.controller.dispatch({ type: "confirmation.resolve", confirmationId: intent.confirmationId, confirmed: intent.confirmed })
+        await this.client.submitIntent({ type: "confirmation.resolve", confirmationId: intent.confirmationId, confirmed: intent.confirmed })
         return
       case "tool-toggle":
         this.toggleTool(intent.toolId)
         return
       case "cancel-run":
-        await this.controller.dispatch({ type: "run.cancel" })
+        await this.client.submitIntent({ type: "run.cancel" })
         return
       case "sidebar-toggle":
         this.sidebarOpenFlag = intent.open
@@ -298,19 +292,19 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     }
   }
 
-  /** 关闭 Adapter 自己的订阅；Controller 与 handoff port 由宿主关闭。 */
+  /** 关闭 Adapter 自己的订阅；WebUiClient 由 bootstrap 宿主关闭。 */
   async close(): Promise<void> {
     if (this.closed) return
     this.closed = true
-    this.unsubscribeInteractive()
+    this.unsubscribeState()
     this.frameScheduler.cancel()
   }
 
-  /** 处理 Controller 的 snapshot 发布，按类别决定是批处理还是立即 flush。 */
-  private onControllerPublish(): void {
+  /** 视图更新（replace/patch 合并后）→ 与本地状态一起重发布。 */
+  private onViewUpdate(): void {
     if (this.closed) return
     const previous = this.snapshot.interactive
-    const next = this.controller.getSnapshot()
+    const next = this.getInteractive()
     // Interaction 变化（包含 requestId 变化）必须立即 flush：草稿原子重置与表单状态都依赖该通知。
     if (previous.interaction?.requestId !== next.interaction?.requestId) {
       this.interactionDraft = null
@@ -339,7 +333,6 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     this.snapshot = this.buildSnapshot()
     this.snapshot = { ...this.snapshot, scrollRequest: this.pendingScrollRequest }
     this.pendingScrollRequest = null
-    this.reportThreadIfChanged()
     for (const listener of [...this.listeners]) listener(this.snapshot)
   }
 
@@ -350,13 +343,12 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     this.snapshot = this.buildSnapshot()
     this.snapshot = { ...this.snapshot, scrollRequest: this.pendingScrollRequest }
     this.pendingScrollRequest = null
-    this.reportThreadIfChanged()
     for (const listener of [...this.listeners]) listener(this.snapshot)
   }
 
   /** 生成对外快照；面板状态以 record 形式发布，调用方按需读取。 */
   private buildSnapshot(): WebAdapterSnapshot {
-    const interactive = this.controller.getSnapshot()
+    const interactive = this.getInteractive()
     return {
       interactive,
       draft: this.draft,
@@ -379,6 +371,25 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     }
   }
 
+  /** 从网关视图缓存重组 InteractiveSnapshot；五个 Selector 分片覆盖全部领域事实。 */
+  private getInteractive(): InteractiveSnapshot {
+    const view = this.client.getState()
+    return {
+      currentThreadId: view.conversation.currentThreadId,
+      activity: view.conversation.activity,
+      activeRun: view.conversation.activeRun,
+      timeline: view.conversation.timeline,
+      lastRun: view.conversation.lastRun,
+      interaction: view.interaction.interaction,
+      confirmation: view.interaction.confirmation,
+      catalogs: view.navigation.catalogs,
+      commands: view.command.commands,
+      runtime: view.runtime.runtime,
+      connection: view.runtime.connection,
+      selection: view.runtime.selection,
+    }
+  }
+
   /** draft 变化：只有 `/` 前缀且未进入参数区、未转义时才打开命令菜单。 */
   private updateDraft(value: string): void {
     this.draft = value
@@ -390,11 +401,11 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     this.publishNow()
   }
 
-  /** 把当前 draft 提交给 Controller；从 Adapter 当前 draft 读取，不信任外部传入值。 */
+  /** 把当前 draft 提交给共享 Core；从 Adapter 当前 draft 读取，不信任外部传入值。 */
   private async submit(): Promise<void> {
     const submittedDraft = this.draft
     const value = submittedDraft.trim()
-    const interactive = this.controller.getSnapshot()
+    const interactive = this.getInteractive()
     if (!value || this.composerSubmittingFlag || this.leavingFlag || interactive.connection.status !== "open" || Boolean(interactive.activeRun)) {
       return
     }
@@ -403,7 +414,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     this.publishNow()
 
     try {
-      const outcome = await this.controller.dispatch({ type: "input.submit", value: submittedDraft })
+      const outcome = await this.client.submitIntent({ type: "input.submit", value: submittedDraft })
       await this.handleInteractiveResult(outcome)
       if (this.closed) return
       if (outcome.status === "accepted") {
@@ -445,7 +456,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
   /** 命令/Skill 选中：按 menu item 类型分别处理，命令通过 command.execute 转发。 */
   private async selectCommandMenuItem(item: CommandMenuItem): Promise<void> {
     if (item.kind === "skill") {
-      await this.controller.dispatch({ type: "skill.arm", skillId: item.skill.id })
+      await this.client.submitIntent({ type: "skill.arm", skillId: item.skill.id })
       this.draft = ""
       this.commandMenuOpenFlag = false
       this.publishNow()
@@ -455,7 +466,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
       this.showTransientNotice(`/${item.command.name} 暂不可用：${item.availability.reason}。`)
       return
     }
-    const interactive = this.controller.getSnapshot()
+    const interactive = this.getInteractive()
     if (interactive.activeRun) {
       // active run 中命令直接走共享 dispatcher，结果由 handleInteractiveResult 解释。
       this.draft = ""
@@ -479,7 +490,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     this.schedulePublish()
     const catalog = panel === "status" || panel === "help" ? null : panel
     if (catalog === "threads" || catalog === "models" || catalog === "skills" || catalog === "mcp") {
-      void this.controller.dispatch({ type: "catalog.refresh", catalog })
+      void this.client.submitIntent({ type: "catalog.refresh", catalog })
     }
   }
 
@@ -510,27 +521,27 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     this.setHeaderMenuOpen(false)
   }
 
-  /** 写入面板搜索词；adapter 只记录表现状态，不直接驱动 Controller。 */
+  /** 写入面板搜索词；adapter 只记录表现状态，不直接驱动 Core。 */
   private updatePanelSearch(panel: PanelSlot, query: string): void {
     this.panelState[panel] = { ...this.panelState[panel], query, error: null }
     this.schedulePublish()
   }
 
-  /** 切换 Thread：依赖 Controller 做 generation 校验。 */
+  /** 切换 Thread：依赖共享 Core 做 generation 校验。 */
   private async selectThread(threadId: string): Promise<void> {
     this.activePanel = null
     // 移动端选中 Thread 后自动收起抽屉；桌面端该 flag 始终为 false，无副作用。
     this.sidebarOpenFlag = false
     this.publishNow()
-    await this.controller.dispatch({ type: "thread.open", threadId })
+    await this.client.submitIntent({ type: "thread.open", threadId })
   }
 
-  /** 切换模型：能力门禁与不可用性都交由 Controller 处理。 */
+  /** 切换模型：能力门禁与不可用性都交由共享 Core 处理。 */
   private async selectModel(profileId: string): Promise<void> {
     this.panelState.models = { ...this.panelState.models, submitting: true, error: null }
     this.publishNow()
     try {
-      await this.controller.dispatch({ type: "model.select", profileId })
+      await this.client.submitIntent({ type: "model.select", profileId })
       this.activePanel = null
       this.panelState.models = { ...this.panelState.models, submitting: false }
       this.publishNow()
@@ -542,7 +553,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
 
   /** 草稿合并：feedback、answer、reset 都只对当前 requestId 生效。 */
   private updateInteractionDraft(requestId: string, patch: WebInteractionDraftPatch): void {
-    const interactive = this.controller.getSnapshot()
+    const interactive = this.getInteractive()
     if (interactive.interaction?.requestId !== requestId) {
       // 旧 requestId 上的草稿必须原子清空，绝不能跨 requestId 提交。
       if (this.interactionDraft && this.interactionDraft.requestId !== requestId) {
@@ -577,9 +588,9 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     this.publishNow()
   }
 
-  /** 提交 Interaction 答案：依赖 Controller 校验 requestId 仍有效。 */
+  /** 提交 Interaction 答案：依赖共享 Core 校验 requestId 仍有效。 */
   private async submitInteraction(requestId: string, response: InteractiveResponse): Promise<void> {
-    const interactive = this.controller.getSnapshot()
+    const interactive = this.getInteractive()
     if (interactive.interaction?.requestId !== requestId) {
       this.interactionDraft = null
       this.publishNow()
@@ -589,7 +600,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
       this.interactionDraft = { ...this.interactionDraft, touched: false }
     }
     this.publishNow()
-    await this.controller.dispatch({ type: "interaction.respond", requestId, response })
+    await this.client.submitIntent({ type: "interaction.respond", requestId, response })
   }
 
   /** 折叠/展开单个 Tool 卡片。 */
@@ -607,10 +618,10 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     this.schedulePublish()
   }
 
-  /** 归还控制权：active Run/Interaction 必须在本地阻止，不调用 handoff。 */
+  /** 归还控制权：active Run/Interaction 必须在本地阻止，再发送 handoff.return。 */
   private async returnToTui(): Promise<void> {
     this.closeHeaderMenu()
-    const interactive = this.controller.getSnapshot()
+    const interactive = this.getInteractive()
     if (interactive.activeRun) {
       this.showTransientNotice("当前任务结束或交互完成后可返回 TUI。")
       return
@@ -622,7 +633,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     this.leavingFlag = true
     this.publishNow()
     try {
-      await this.handoff.returnToTui()
+      this.client.returnToTui()
     } catch (error) {
       this.leavingFlag = false
       this.showTransientNotice(`返回 TUI 失败：${errorMessage(error)}`)
@@ -630,13 +641,13 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     }
   }
 
-  /** 退出 Harness：只走 handoff.requestExit，不调用 process.exit。 */
+  /** 退出 Harness：只发送 handoff.exit，不调用 process.exit。 */
   private async exitHarness(): Promise<void> {
     this.closeHeaderMenu()
     this.leavingFlag = true
     this.publishNow()
     try {
-      await this.handoff.requestExit()
+      this.client.requestExit()
     } catch (error) {
       this.leavingFlag = false
       this.showTransientNotice(`退出失败：${errorMessage(error)}`)
@@ -670,19 +681,13 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
 
   /** 派发 InteractiveIntent 并按 outcome 决定是否再触发本地副作用。 */
   private async dispatchInteractive(intent: InteractiveIntent): Promise<IntentOutcome> {
-    const outcome = await this.controller.dispatch(intent)
+    const outcome = await this.client.submitIntent(intent)
     await this.handleInteractiveResult(outcome)
     return outcome
   }
-
-  /** Thread 报告只在 currentThreadId 真正变化时调用 handoff.reportThread。 */
-  private reportThreadIfChanged(): void {
-    const currentThreadId = this.snapshot.interactive.currentThreadId
-    this.handoff.reportThread(currentThreadId)
-  }
 }
 
-/** 创建 Web Interactive Adapter；宿主在 React 首次 commit 后显式调用 handoff.activate。 */
+/** 创建 Web Interactive Adapter；bootstrap 在收到首帧 state.replace 后创建。 */
 export function createWebInteractiveAdapter(options: WebAdapterOptions): WebInteractiveAdapter {
   return new WebInteractiveAdapterImpl(options)
 }

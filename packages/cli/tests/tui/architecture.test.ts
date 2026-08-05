@@ -8,7 +8,6 @@ const tuiRoot = resolve(import.meta.dir, "../../src/tui")
 const interactiveRoot = resolve(import.meta.dir, "../../src/interactive")
 const cliRoot = resolve(import.meta.dir, "../../src")
 const indexPath = resolve(cliRoot, "index.ts")
-const webAppPath = resolve(cliRoot, "web/app.tsx")
 
 test("TUI 根目录只保留组合入口", () => {
   const rootFiles = readdirSync(tuiRoot, { withFileTypes: true })
@@ -19,7 +18,7 @@ test("TUI 根目录只保留组合入口", () => {
   expect(rootFiles).toEqual(["app.tsx"])
 })
 
-test("createInteractiveController 生产调用点收敛：CLI/TUI 侧仅 index.ts，web 侧豁免至 ZC-114", () => {
+test("createInteractiveController 生产调用点仅 CLI Composition Root 一处（ZC-114 移除 web 豁免）", () => {
   const sources = readdirSync(cliRoot, { recursive: true, withFileTypes: true })
     .filter(entry => entry.isFile() && /\.tsx?$/.test(entry.name))
     .map(entry => resolve(entry.parentPath, entry.name))
@@ -30,8 +29,8 @@ test("createInteractiveController 生产调用点收敛：CLI/TUI 侧仅 index.t
     .filter(file => readFileSync(file, "utf8").includes("createInteractiveController("))
     .sort()
 
-  // index.ts 是唯一 Composition Root；web/app.tsx 的自建 Controller 由 ZC-114 移除。
-  expect(callers).toEqual([indexPath, webAppPath].sort())
+  // index.ts 是唯一 Composition Root；web/app.tsx 的自建 Controller 已由 ZC-114 移除。
+  expect(callers).toEqual([indexPath])
   // TUI 侧不再自行创建 Controller。
   expect(callers.filter(file => file.startsWith(tuiRoot))).toEqual([])
 })

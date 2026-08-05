@@ -2,29 +2,31 @@
 
 import { useKeyboard } from "@opentui/react"
 
-import type { WebHandoffSnapshot } from "../../web/handoff-coordinator"
+import type { PresentationState } from "../../presentation-coordinator"
 import { tuiTheme } from "./theme"
 
 /** 只显示 phase 与恢复提示；用户可通过浏览器返回或 Ctrl+C 退出。 */
 export function WebTakeoverView(props: {
-  snapshot: WebHandoffSnapshot
+  state: PresentationState
   onExit: () => void
 }) {
-  const { snapshot, onExit } = props
+  const { state, onExit } = props
   useKeyboard(key => {
     if (key.ctrl && key.name === "c") {
       key.preventDefault()
       onExit()
     }
   })
-  const title = snapshot.phase === "active" ? "已移交 Web" : "正在回收控制权"
-  const detail = snapshot.phase === "active"
-    ? "当前会话已由浏览器接管。完成操作后点击页面中的“返回 TUI”，或直接关闭浏览器窗口。"
-    : snapshot.phase === "returning"
-      ? snapshot.tuiLocked
-        ? "浏览器已归还控制权，正在等待 Host 确认后恢复终端输入。"
-        : "Web 会话正在回收，稍候将恢复终端。"
-      : "正在启动 Web 会话。"
+  const title = state.phase === "web-active"
+    ? "已移交 Web"
+    : state.phase === "opening-web"
+      ? "正在启动 Web 会话"
+      : "正在恢复终端输入"
+  const detail = state.phase === "opening-web"
+    ? "正在启动 Web 会话。"
+    : state.phase === "web-active"
+      ? "当前会话已由浏览器接管。完成操作后点击页面中的“返回 TUI”，或直接关闭浏览器窗口。"
+      : "浏览器已归还控制权，正在恢复终端输入。"
   return (
     <box
       flexGrow={1}

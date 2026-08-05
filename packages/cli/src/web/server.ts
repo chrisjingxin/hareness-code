@@ -1,14 +1,17 @@
-/** Bun 静态 server adapter：handoff 路由白名单、精细 Host/Origin 与 lifecycle upgrade。 */
+/** Bun 静态 server adapter：白名单路由、精细 Host/Origin 校验与 UI token 升级门禁。 */
 
 import { AsyncQueue } from "../ipc/transport"
+import type { GatewayChannel } from "../presentation-coordinator"
 import type { WebAssets } from "./bundle"
-import type { LifecycleChannel } from "./handoff-coordinator"
 
 export type WebServerOptions = {
   html: string
   getAssets: () => Promise<WebAssets>
   isActiveHandoff: (handoffId: string) => boolean
-  attachLifecycle: (handoffId: string, channel: LifecycleChannel) => Promise<void>
+  /** 升级请求携带的 UI token 校验；通过后该连接获得渲染资格。 */
+  consumeUiToken: (handoffId: string, token: string, origin: string) => boolean
+  /** 把已完成升级的渲染 channel 交给 Coordinator；生命周期与业务帧由上层处理。 */
+  attachRenderer: (handoffId: string, channel: GatewayChannel) => Promise<void>
 }
 
 export type WebServer = {
@@ -93,6 +96,14 @@ export function createWebServer(options: WebServerOptions): WebServer {
     if (request.headers.get("origin") !== origin()) {
       return new Response("Forbidden", { status: 403 })
     }
+    // UI token 从升级 URL 的查询参数读取（fragment 无法送达服务端）；token 绑定
+    // handoffId、Origin 与 TTL，页面 fragment 中的 token 在创建 WebSocket 前已被剥离。
+    // 本 server 只服务 127.0.0.1、无访问日志，token 单次 URL 使用——禁止为该 server
+    // 开启访问日志或接入代理，否则 token 会以明文出现在日志中。
+    const token = url.searchParams.get("ui")
+    if (!token || !options.consumeUiToken(match.handoffId, token, origin())) {
+      return new Response("Forbidden", { status: 403 })
+    }
     if (!server.upgrade(request, { data: { handoffId: match.handoffId } })) {
       return new Response("Upgrade Failed", { status: 500 })
     }
@@ -111,7 +122,7 @@ export function createWebServer(options: WebServerOptions): WebServer {
         open(ws: BunServerWebSocket) {
           const queue = new AsyncQueue<unknown>()
           queues.set(ws, queue)
-          const channel: LifecycleChannel = {
+          const channel: GatewayChannel = {
             messages: queue,
             send: async message => {
               if (ws.readyState === 1) {
@@ -127,10 +138,13 @@ export function createWebServer(options: WebServerOptions): WebServer {
               queue.end()
             },
           }
-          void options.attachLifecycle(ws.data.handoffId, channel)
+          void options.attachRenderer(ws.data.handoffId, channel)
         },
         message(ws: BunServerWebSocket, raw: string | Uint8Array) {
-          queues.get(ws)?.push(raw)
+          // 帧形状/大小校验统一由网关执行：超限帧按协议违规走 notifyInvalidMessage
+          // fail-closed 收敛，与畸形帧路径一致；此处只解码后原样入队。
+          const text = typeof raw === "string" ? raw : new TextDecoder().decode(raw)
+          queues.get(ws)?.push(text)
         },
         close(ws: BunServerWebSocket) {
           queues.get(ws)?.end()
@@ -169,16 +183,16 @@ function randomLoopbackPort(attempt: number): number {
 /** 只解析两条精确路径；不做任何文件系统读取。 */
 function matchHandoffPath(
   path: string,
-): { handoffId: string; kind: "page" | "lifecycle" } | undefined {
+): { handoffId: string; kind: "page" | "ui" } | undefined {
   const page = path.match(/^\/web\/h\/([^/]+)$/)
   if (page) {
     const handoffId = decodePathSegment(page[1])
     if (handoffId !== undefined) return { handoffId, kind: "page" }
   }
-  const lifecycle = path.match(/^\/web\/h\/([^/]+)\/lifecycle$/)
-  if (lifecycle) {
-    const handoffId = decodePathSegment(lifecycle[1])
-    if (handoffId !== undefined) return { handoffId, kind: "lifecycle" }
+  const ui = path.match(/^\/web\/h\/([^/]+)\/ui$/)
+  if (ui) {
+    const handoffId = decodePathSegment(ui[1])
+    if (handoffId !== undefined) return { handoffId, kind: "ui" }
   }
   return undefined
 }

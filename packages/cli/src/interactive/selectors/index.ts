@@ -3,7 +3,7 @@
 export * from "./types"
 
 import type { InteractiveSnapshot } from "../types"
-import { CAPABILITY_GATE, type FeatureAvailability } from "./types"
+import { CAPABILITY_GATE, type CommandView, type ConversationView, type FeatureAvailability, type InteractionView, type NavigationView, type RuntimeView } from "./types"
 
 /** 由 snapshot 推导全部展示可用性；与 commands.ts 的 availability 计算共享同一输入。 */
 export function selectFeatureAvailability(snapshot: InteractiveSnapshot): FeatureAvailability {
@@ -28,7 +28,7 @@ export function selectFeatureAvailability(snapshot: InteractiveSnapshot): Featur
 }
 
 /** 对话视图：时间线与当前运行状态。 */
-export function selectConversationView(snapshot: InteractiveSnapshot) {
+export function selectConversationView(snapshot: InteractiveSnapshot): ConversationView {
   return {
     currentThreadId: snapshot.currentThreadId,
     activity: snapshot.activity,
@@ -39,7 +39,7 @@ export function selectConversationView(snapshot: InteractiveSnapshot) {
 }
 
 /** 交互视图：挂起 Interaction 与破坏性确认。 */
-export function selectInteractionView(snapshot: InteractiveSnapshot) {
+export function selectInteractionView(snapshot: InteractiveSnapshot): InteractionView {
   return {
     interaction: snapshot.interaction,
     confirmation: snapshot.confirmation,
@@ -47,7 +47,7 @@ export function selectInteractionView(snapshot: InteractiveSnapshot) {
 }
 
 /** 导航视图：四类 catalog 与打开/变更可用性。 */
-export function selectNavigationView(snapshot: InteractiveSnapshot) {
+export function selectNavigationView(snapshot: InteractiveSnapshot): NavigationView {
   const availability = selectFeatureAvailability(snapshot)
   return {
     catalogs: snapshot.catalogs,
@@ -63,7 +63,7 @@ export function selectNavigationView(snapshot: InteractiveSnapshot) {
 }
 
 /** 命令视图：可用命令与提交可用性。 */
-export function selectCommandView(snapshot: InteractiveSnapshot) {
+export function selectCommandView(snapshot: InteractiveSnapshot): CommandView {
   return {
     commands: snapshot.commands,
     availability: {
@@ -73,7 +73,7 @@ export function selectCommandView(snapshot: InteractiveSnapshot) {
 }
 
 /** 运行时视图：runtime/connection/selection 与运行控制可用性。 */
-export function selectRuntimeView(snapshot: InteractiveSnapshot) {
+export function selectRuntimeView(snapshot: InteractiveSnapshot): RuntimeView {
   const availability = selectFeatureAvailability(snapshot)
   return {
     runtime: snapshot.runtime,

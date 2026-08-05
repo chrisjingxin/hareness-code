@@ -1,19 +1,22 @@
-/** Bun 静态 server adapter：路由白名单、安全 headers 与 lifecycle upgrade 测试。 */
+/** Bun 静态 server adapter：路由白名单、安全 headers 与 /ui 升级门禁测试。 */
 
 import { expect, test } from "bun:test"
 
 import { createWebServer, type WebServer } from "../../src/web/server"
-import type { LifecycleChannel } from "../../src/web/handoff-coordinator"
+import { MAX_UI_FRAME_BYTES } from "../../src/presentation-coordinator"
+import type { GatewayChannel } from "../../src/presentation-coordinator"
 
 type Harness = {
   server: WebServer
-  attachCalls: Array<{ handoffId: string; channel: LifecycleChannel }>
+  attachCalls: Array<{ handoffId: string; channel: GatewayChannel }>
   activeHandoffs: Set<string>
+  validTokens: Set<string>
 }
 
 function createHarness(): Harness {
-  const attachCalls: Array<{ handoffId: string; channel: LifecycleChannel }> = []
+  const attachCalls: Array<{ handoffId: string; channel: GatewayChannel }> = []
   const activeHandoffs = new Set<string>()
+  const validTokens = new Set<string>()
   const server = createWebServer({
     html: "<!doctype html><title>shell</title>",
     getAssets: async () => ({
@@ -22,12 +25,13 @@ function createHarness(): Harness {
       syntaxWorkerScript: "console.log('syntax worker')",
     }),
     isActiveHandoff: handoffId => activeHandoffs.has(handoffId),
-    attachLifecycle: async (handoffId, channel) => {
+    consumeUiToken: (_handoffId, token, _origin) => validTokens.has(token),
+    attachRenderer: async (handoffId, channel) => {
       attachCalls.push({ handoffId, channel })
-      await channel.send({ type: "accepted" })
+      await channel.send({ type: "handoff.state", state: { phase: "opening-web", handoffId } })
     },
   })
-  return { server, attachCalls, activeHandoffs }
+  return { server, attachCalls, activeHandoffs, validTokens }
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
@@ -81,7 +85,10 @@ test("白名单路由与安全 headers 精确存在；已知 WASM 路由删除�
   expect((await fetch(`${origin}/web/h/unknown-handoff`)).status).toBe(404)
   expect((await fetch(`${origin}/web/h/handoff-1/../app.js`)).status).toBe(404)
   expect((await fetch(`${origin}/web/h/handoff-1`, { method: "POST" })).status).toBe(405)
-  expect((await fetch(`${origin}/web/h/handoff-1/lifecycle`)).status).toBe(405)
+  // 旧 lifecycle 路由已删除 → 404；/ui 是升级专用路由，普通 GET 返回 405
+  expect((await fetch(`${origin}/web/h/handoff-1/lifecycle`)).status).toBe(404)
+  expect((await fetch(`${origin}/web/h/handoff-1/ui`)).status).toBe(405)
+  expect((await fetch(`${origin}/web/h/handoff-1/ui`, { method: "POST" })).status).toBe(405)
 
   activeHandoffs.delete("handoff-1")
   expect((await fetch(`${origin}/web/h/handoff-1`)).status).toBe(404)
@@ -89,10 +96,11 @@ test("白名单路由与安全 headers 精确存在；已知 WASM 路由删除�
   await server.stop()
 })
 
-test("错误 Host 被拒绝；lifecycle upgrade 校验 Origin 并投递 accepted", async () => {
-  const { server, attachCalls, activeHandoffs } = createHarness()
+test("错误 Host 被拒绝；/ui upgrade 校验 Origin 与 UI token 并投递 handoff.state", async () => {
+  const { server, attachCalls, activeHandoffs, validTokens } = createHarness()
   await server.start()
   activeHandoffs.add("handoff-1")
+  validTokens.add("token-1")
   const origin = server.origin
 
   const forged = await fetch(`${origin}/web/h/handoff-1`, {
@@ -100,15 +108,23 @@ test("错误 Host 被拒绝；lifecycle upgrade 校验 Origin 并投递 accepted
   })
   expect(forged.status).toBe(403)
 
+  // 错误 Origin 的升级被拒
   let wrongOriginFailed = false
-  const wrongWs = new WebSocket(`${origin.replace(/^http/, "ws")}/web/h/handoff-1/lifecycle`, {
+  const wrongWs = new WebSocket(`${origin.replace(/^http/, "ws")}/web/h/handoff-1/ui?ui=token-1`, {
     headers: { origin: "http://evil.example" },
   })
   wrongWs.onerror = () => { wrongOriginFailed = true }
   await waitFor(() => wrongOriginFailed || wrongWs.readyState === 3)
   expect(wrongOriginFailed || wrongWs.readyState === 3).toBe(true)
 
-  const socket = new WebSocket(`${origin.replace(/^http/, "ws")}/web/h/handoff-1/lifecycle`, {
+  // 错误 / 缺失 token 的升级被 403
+  const uiHttp = `${origin}/web/h/handoff-1/ui`
+  const upgradeHeaders = (value: string) => ({ upgrade: "websocket", connection: "Upgrade", origin: value })
+  expect((await fetch(`${uiHttp}?ui=wrong`, { headers: upgradeHeaders(origin) })).status).toBe(403)
+  expect((await fetch(uiHttp, { headers: upgradeHeaders(origin) })).status).toBe(403)
+
+  // 正确 token + Origin → attachRenderer 收到 channel，帧原样投递给 Browser
+  const socket = new WebSocket(`${origin.replace(/^http/, "ws")}/web/h/handoff-1/ui?ui=token-1`, {
     headers: { origin },
   })
   const messages: unknown[] = []
@@ -116,29 +132,36 @@ test("错误 Host 被拒绝；lifecycle upgrade 校验 Origin 并投递 accepted
   await waitFor(() => attachCalls.length === 1)
   expect(attachCalls[0].handoffId).toBe("handoff-1")
   await waitFor(() => messages.length >= 1)
-  expect(messages[0]).toEqual({ type: "accepted" })
+  expect(messages[0]).toEqual({ type: "handoff.state", state: { phase: "opening-web", handoffId: "handoff-1" } })
   socket.close()
   await waitFor(() => socket.readyState === WebSocket.CLOSED)
   await server.stop()
 })
 
-test("lifecycle 消息原样投递给 coordinator，二进制/畸形帧不解析", async () => {
-  const { server, attachCalls, activeHandoffs } = createHarness()
+test("客户端帧原样投递给 coordinator；二进制不解析；超大帧原样入队由网关拒绝", async () => {
+  const { server, attachCalls, activeHandoffs, validTokens } = createHarness()
   await server.start()
   activeHandoffs.add("handoff-1")
+  validTokens.add("token-1")
   const origin = server.origin
-  const socket = new WebSocket(`${origin.replace(/^http/, "ws")}/web/h/handoff-1/lifecycle`, {
+  const socket = new WebSocket(`${origin.replace(/^http/, "ws")}/web/h/handoff-1/ui?ui=token-1`, {
     headers: { origin },
   })
   await waitFor(() => attachCalls.length === 1)
   const iterator = attachCalls[0].channel.messages[Symbol.asyncIterator]()
-  socket.send(JSON.stringify({ type: "thread.changed", thread_id: "t-1" }))
+  socket.send(JSON.stringify({ type: "handoff.ready" }))
   const first = await Promise.race([iterator.next(), sleep(500)])
-  expect(first && "value" in first ? first.value : undefined).toBe(JSON.stringify({ type: "thread.changed", thread_id: "t-1" }))
+  expect(first && "value" in first ? first.value : undefined).toBe(JSON.stringify({ type: "handoff.ready" }))
   socket.send(new Uint8Array([1, 2, 3]))
   const second = await Promise.race([iterator.next(), sleep(500)])
-  expect(second && "value" in second ? second.value : undefined).toBeInstanceOf(Uint8Array)
-  socket.close()
+  // 二进制帧被服务器解码为文本后原样投递（不做 JSON 解析）
+  expect(second && "value" in second ? second.value : undefined).toBe("\u0001\u0002\u0003")
+
+  // 超大帧不在此处关闭：服务器只解码入队，尺寸/形状校验统一由网关按协议违规
+  // fail-closed（parseClientFrame 拒绝 → notifyInvalidMessage），保证与畸形帧同路径。
+  socket.send("x".repeat(MAX_UI_FRAME_BYTES + 1))
+  const third = await Promise.race([iterator.next(), sleep(500)])
+  expect(third && "value" in third ? third.value : undefined).toBe("x".repeat(MAX_UI_FRAME_BYTES + 1))
   await server.stop()
 })
 

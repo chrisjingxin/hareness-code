@@ -1,44 +1,16 @@
-/** Web composition root：按 lifecycle → attachment → controller → React 的顺序启动。 */
+/** Web composition root：按 UI token → gateway WS → 视图缓存 → React 的顺序启动。 */
 /** @jsxImportSource react */
 
-import {
-  Capability,
-  Method,
-  PROTOCOL_VERSION,
-} from "@za38/protocol"
 import { createRoot, type Root } from "react-dom/client"
 import { useEffect, useState } from "react"
 
-import { AgentClient } from "../ipc/client"
-import { AgentClientGateway } from "../infrastructure/agent-client-gateway"
-import { createInteractiveController } from "../interactive/controller"
-import { createInteractiveRuntime } from "../interactive/runtime"
 import { createWebInteractiveAdapter, type WebInteractiveAdapter } from "./application/adapter"
-import { WebSocketRpcTransport, authenticate } from "./agent-transport"
-import { parseBootstrapFragment, validateAgentEndpoint } from "./bootstrap-url"
-import { createBrowserConnectionSupervisor } from "./connection-supervisor"
-import type { WebBootstrapStage } from "./handoff-coordinator"
-import { createWebHandoffPort, type WebHandoffPort } from "./handoff-port"
 import { PresentationErrorBoundary } from "./presentation/error-boundary"
 import { WebApp } from "./presentation/web-app"
 import { closeHighlightService } from "./syntax/highlight-service"
+import { createWebUiClient, readUiToken, type WebUiClient } from "./ui-client"
+import type { PresentationState } from "../presentation-coordinator"
 import "./presentation/styles.css"
-
-
-const WEB_CAPABILITIES = [
-  Capability.HOST_CONTROL,
-  Capability.RUN_CANCEL,
-  Capability.THREADS_READ,
-  Capability.CONFIG_READ,
-  Capability.CONFIG_WRITE,
-  Capability.CONTEXT_MANAGE,
-  Capability.MODELS_READ,
-  Capability.MODELS_SELECT,
-  Capability.SKILLS_READ,
-  Capability.SKILLS_MANAGE,
-  Capability.MCP_READ,
-  Capability.MCP_MANAGE,
-] as const
 
 /**
  * 启动当前 handoff 页面；URL fragment 在创建任何 WebSocket 前被清除。
@@ -48,142 +20,104 @@ export async function bootstrapWebApp(): Promise<void> {
   const rootElement = document.querySelector<HTMLElement>("#root")
   if (!rootElement) throw new Error("Web root is missing")
 
-  const bootstrap = parseBootstrapFragment(window.location.hash)
-  // token、endpoint 和 attachment 永不进入 React props；hash 先清除再校验 socket。
-  window.history.replaceState(null, "", window.location.pathname)
   const handoffMatch = window.location.pathname.match(/^\/web\/h\/([^/]+)$/)
-  if (!bootstrap || !handoffMatch || !validateAgentEndpoint(bootstrap.endpoint)) {
+  // token 在创建 socket 前从 fragment 剥离并写入 sessionStorage；不进入 React props。
+  const handoffId = handoffMatch?.[1]
+  const token = handoffId ? readUiToken(handoffId) : undefined
+  if (!handoffId || !token) {
     renderStatic(rootElement, "Web 接管链接无效，请返回 TUI 后重新执行 /web。", "fatal")
     return
   }
 
-  const handoffId = handoffMatch[1]!
-  const lifecycle = new WebSocket(`ws://${window.location.host}/web/h/${encodeURIComponent(handoffId)}/lifecycle`)
-  const supervisor = createBrowserConnectionSupervisor(lifecycle)
-  let client: AgentClient | undefined
-  let controller: ReturnType<typeof createInteractiveController> | undefined
+  let client: WebUiClient | undefined
   let adapter: WebInteractiveAdapter | undefined
-  let handoff: WebHandoffPort | undefined
   let root: Root | undefined
   let closed = false
-  let stage: WebBootstrapStage = "lifecycle.accepted"
+  let resolveFirstState: (() => void) | undefined
+  const firstState = new Promise<void>(resolve => { resolveFirstState = resolve })
 
-  const closeGate = async (message?: string): Promise<void> => {
+  const closeGate = (message?: string): void => {
     if (closed) return
     closed = true
-    await adapter?.close()
+    void adapter?.close()
     root?.unmount()
     closeHighlightService()
-    await controller?.close()
-    client?.destroy()
-    handoff?.close()
-    supervisor.abort("web-close")
-    supervisor.dispose()
+    client?.close()
     if (message) renderStatic(rootElement, message, "closed")
   }
 
-  supervisor.signal.addEventListener("abort", () => {
-    void closeGate("本次 Web 接管已结束。请返回 TUI 后重新执行 /web。")
-  }, { once: true })
+  let readyGate: ReturnType<typeof createReadyGate> | undefined
+  client = createWebUiClient({
+    socket: new WebSocket(
+      `ws://${window.location.host}/web/h/${encodeURIComponent(handoffId)}/ui?ui=${encodeURIComponent(token)}`,
+    ),
+    onState: () => {
+      // onState 在消息回调中触发，此时 readyGate 已赋值。
+      readyGate?.onState()
+      const resolve = resolveFirstState
+      resolveFirstState = undefined
+      resolve?.()
+    },
+    onClosed: reason => {
+      void closeGate("本次 Web 接管已结束。请返回 TUI 后重新执行 /web。")
+      void reason
+    },
+  })
+  readyGate = createReadyGate(client)
+  client.subscribeHandoff(() => readyGate!.onHandoffState())
+
   window.addEventListener("pagehide", () => { void closeGate() }, { once: true })
 
-  try {
-    // lifecycle accepted 之前不触碰 Python Agent endpoint。
-    stage = "lifecycle.accepted"
-    await supervisor.waitForAccepted()
-    stage = "attachment.auth"
-    const socket = await authenticate(bootstrap.endpoint, bootstrap.token, supervisor.signal)
-    client = new AgentClient(new WebSocketRpcTransport(socket))
-    supervisor.bindAgent(() => client?.destroy())
-    client.on("close", () => supervisor.abort("agent-closed"))
-    client.handleInteractions(() => Promise.reject(new Error("Interaction handler is not ready")))
-    stage = "agent.initialize"
-    const initialized = await client.initialize({
-      protocol: {
-        major: PROTOCOL_VERSION.major,
-        min_minor: 0,
-        max_minor: PROTOCOL_VERSION.minor,
-      },
-      client: { name: "harness-web", version: "0.1.0", kind: "web" },
-      capabilities: { requests: [...WEB_CAPABILITIES], handles: ["approval", "question"] },
-    })
-    stage = "host.control.acquire"
-    const control = await client.request(Method.HOST_CONTROL_ACQUIRE, {})
-    if (control.state !== "attached" || control.holder.attachment_id !== bootstrap.attachmentId) {
-      throw new Error("Host control was not acquired")
-    }
+  // 首帧 state.replace 到达前不渲染业务树；失败只显示通用文案，不暴露端点或 token。
+  await firstState
+  if (closed) return
 
-    const runtime = createInteractiveRuntime(initialized, workspaceFromInitialize(initialized), { cliVersion: "0.1.0" })
-    const gateway = new AgentClientGateway(client)
-    controller = createInteractiveController({ gateway, runtime })
-    if (bootstrap.threadId !== null) {
-      stage = "thread.restore"
-      await controller.dispatch({ type: "thread.open", threadId: bootstrap.threadId })
-    }
-    handoff = createWebHandoffPort({
-      supervisor,
-      sendLifecycle: async message => {
-        if (lifecycle.readyState !== WebSocket.OPEN) throw new Error("Lifecycle socket is closed")
-        lifecycle.send(JSON.stringify(message))
-      },
-      release: async () => {
-        const released = await client!.request(Method.HOST_CONTROL_RELEASE, {})
-        if (released.state !== "owner") throw new Error("Host control was not returned to TUI")
-      },
-    })
-    adapter = createWebInteractiveAdapter({ controller, handoff })
-    stage = "react.mount"
-    root = createRoot(rootElement)
-    const onActivationFailure = () => {
-      void closeGate("Web 接管确认失败，请返回 TUI 后重新执行 /web。")
-    }
-    root.render(<WebBootstrapRoot adapter={adapter} handoff={handoff} onFailure={onActivationFailure} />)
-  } catch (error) {
-    // 页面只显示阶段，不显示 endpoint、token、原始 JSON-RPC 或企业路径；详细错误留在本地 DevTools。
-    const safeError = safeBootstrapError(error)
-    console.error("[harness-web] bootstrap failed", { stage, error: safeError })
-    if (lifecycle.readyState === WebSocket.OPEN) {
-      lifecycle.send(JSON.stringify({
-        type: "diagnostic",
-        stage,
-        error_name: safeError.name,
-        error_message: safeError.message,
-      }))
-    }
-    await closeGate(`Web 接管失败（${stage}），请返回 TUI 后重新执行 /web。`)
+  adapter = createWebInteractiveAdapter({ client })
+  root = createRoot(rootElement)
+  const onFailure = () => {
+    void closeGate("Web 接管确认失败，请返回 TUI 后重新执行 /web。")
   }
+  root.render(<WebBootstrapRoot adapter={adapter} client={client} onFailure={onFailure} />)
 }
 
-function safeBootstrapError(error: unknown): { name: string; message: string } {
-  const name = error instanceof Error && error.name ? error.name : "Error"
-  const rawMessage = error instanceof Error ? error.message : String(error)
-  const redactedMessage = rawMessage
-    .replaceAll(/wss?:\/\/[^\s"']+/gi, "[redacted-url]")
-    .replaceAll(/\b(token|authorization|api[_-]?key)\s*[:=]\s*[^\s,;]+/gi, "$1=[redacted]")
-    .replaceAll(/(?:\/[A-Za-z0-9._~-]+){3,}/g, "[redacted-path]")
+/**
+ * ready 上报门：只有"已收到首帧视图"且"处于 opening-web"才发送 handoff.ready。
+ * 服务端按 state.replace → handoff.state 顺序首帧，因此 handoff.state(opening-web)
+ * 到达时视图必已就绪；重连（web-active）与已发送过 ready 时都保持静默。
+ */
+export function createReadyGate(client: Pick<WebUiClient, "ready" | "getHandoffState">): {
+  onState(): void
+  onHandoffState(): void
+} {
+  let haveState = false
+  let sent = false
+  const maybeSendReady = (): void => {
+    if (sent || !haveState) return
+    if (client.getHandoffState().phase !== "opening-web") return
+    sent = true
+    client.ready()
+  }
   return {
-    name: name.slice(0, 80),
-    message: redactedMessage.length > 200 ? `${redactedMessage.slice(0, 200)}…` : redactedMessage,
+    onState() {
+      haveState = true
+      maybeSendReady()
+    },
+    onHandoffState() {
+      maybeSendReady()
+    },
   }
 }
 
-function WebBootstrapRoot(props: { adapter: WebInteractiveAdapter; handoff: WebHandoffPort; onFailure: () => void }) {
-  const [active, setActive] = useState(false)
+/** 根组件：订阅 handoff 状态决定页面是否可交互；只读等待期间保持挂载。 */
+function WebBootstrapRoot(props: { adapter: WebInteractiveAdapter; client: WebUiClient; onFailure: () => void }) {
+  const [phase, setPhase] = useState<PresentationState["phase"] | null>(null)
   useEffect(() => {
-    let mounted = true
-    // 首次 React commit 后才报告最终 Thread；active ack 前页面保持只读。
-    void props.handoff.activate(props.adapter.getSnapshot().interactive.currentThreadId)
-      .then(() => {
-        if (mounted) setActive(true)
-      })
-      .catch(() => {
-        if (mounted) props.onFailure()
-      })
-    return () => { mounted = false }
-  }, [props.adapter, props.handoff, props.onFailure])
+    // 已收到 opening-web 即上报 ready；之后 phase 变化驱动 active 开关。
+    return props.client.subscribeHandoff(state => setPhase(state.phase))
+  }, [props.client])
   return (
     <PresentationErrorBoundary onError={() => props.onFailure()}>
-      <WebApp adapter={props.adapter} active={active} />
+      <WebApp adapter={props.adapter} active={phase === "web-active"} />
     </PresentationErrorBoundary>
   )
 }
@@ -198,11 +132,6 @@ function renderStatic(root: HTMLElement, message: string, kind: "fatal" | "close
   detail.textContent = message
   container.append(heading, detail)
   root.append(container)
-}
-
-function workspaceFromInitialize(value: { config_summary: Record<string, unknown> | null }): string {
-  const workspace = value.config_summary?.workspace
-  return typeof workspace === "string" && workspace ? workspace : "当前工作区"
 }
 
 if (typeof window !== "undefined" && typeof document !== "undefined") {

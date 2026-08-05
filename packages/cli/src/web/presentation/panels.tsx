@@ -40,7 +40,7 @@ const MAIN_TABS: readonly MainTab[] = ["models", "skills", "mcp", "status"]
  * `activePanel` 为 null 时返回空节点。主 tab 切换复用 `panel-open` 意图（Adapter 负责
  * catalog refresh）；Help/Threads 复用同一 372px 外壳但隐藏主 tab。移动端（`narrow`）
  * 该外壳变为从右侧进入的抽屉，带 scrim 与焦点限制。用户动作只回传稳定 ID 或 typed
- * intent；不直接访问 AgentClient，也不重新计算 capability/busy 状态。
+ * intent；不直接访问 WebUiClient 或网关，也不重新计算 capability/busy 状态。
  */
 export function UtilityPanels({
   snapshot,

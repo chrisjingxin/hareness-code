@@ -2,7 +2,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process"
 
-import type { WebBrowserOpener } from "./handoff-coordinator"
+import type { WebBrowserOpener } from "../presentation-coordinator"
 
 export type SpawnAdapter = (
   command: string,

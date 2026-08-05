@@ -14,7 +14,7 @@ import type { WebAdapterSnapshot, WebIntent } from "../application/adapter"
  * 桌面（`narrow=false`）使用 `sidebar` 左栏，移动端（`narrow=true`）改为 `sidebar-drawer`
  * 并通过 `snapshot.sidebarOpen` 控制可见性；close 按钮 dispatch `sidebar-toggle { open:false }`。
  * 移动端抽屉打开时把焦点限制在抽屉内，关闭时由 WebApp 恢复触发器焦点。
- * 所有用户动作只回传稳定 ID 或 typed intent，不直接访问 AgentClient，也不渲染内部 thread_id。
+ * 所有用户动作只回传稳定 ID 或 typed intent，不直接访问 WebUiClient 或网关，也不渲染内部 thread_id。
  */
 export function ThreadSidebar({
   snapshot,

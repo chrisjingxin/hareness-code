@@ -28,10 +28,11 @@ import { ThreadView } from "./presentation/thread"
 import { WebTakeoverView } from "./presentation/web-takeover"
 import { registerCommonSyntaxParsers, shutdownCommonSyntaxClient } from "./platform/syntax-parsers"
 import { win32InstallVtInputGuard } from "./platform/terminal-win32"
-import type {
-  WebHandoffCoordinator,
-  WebHandoffSnapshot,
-} from "../web/handoff-coordinator"
+import {
+  tuiLocked,
+  type PresentationCoordinator,
+  type PresentationState,
+} from "../presentation-coordinator"
 
 /** 正式 TUI 的启动参数；Controller 由 CLI Composition Root 创建并注入。 */
 export type TuiOptions = {
@@ -40,27 +41,27 @@ export type TuiOptions = {
   promptHistoryFile?: string
   onRequestExit: () => void
   openWeb?: (threadId: string | null) => Promise<void>
-  webHandoff?: WebHandoffCoordinator
+  webHandoff?: PresentationCoordinator
 }
 
 /** runTui 渲染树内部使用的完整选项：adapter 由 runTui 创建一次并注入，跨 handoff 复用。 */
 export type RenderedTuiOptions = TuiOptions & { adapter: TuiAdapter }
 
-/** 根层接管切换：Host 确认 Web holder 后卸载 TUI 渲染，恢复后复用同一 Controller/Adapter。 */
+/** 根层接管切换：Web 持有输入权时卸载 TUI 渲染，归还后复用同一 Controller/Adapter。 */
 export function WebAwareRoot(options: RenderedTuiOptions) {
   const coordinator = options.webHandoff
   const subscribe = useCallback(
-    (listener: (snapshot: WebHandoffSnapshot) => void) =>
+    (listener: (state: PresentationState) => void) =>
       coordinator?.subscribe(listener) ?? noOpUnsubscribe,
     [coordinator],
   )
   const getSnapshot = useCallback(
-    (): WebHandoffSnapshot | null => coordinator?.getSnapshot() ?? null,
+    (): PresentationState | null => coordinator?.getSnapshot() ?? null,
     [coordinator],
   )
   const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
-  if (snapshot && snapshot.tuiLocked) {
-    return <WebTakeoverView snapshot={snapshot} onExit={options.onRequestExit} />
+  if (snapshot && tuiLocked(snapshot)) {
+    return <WebTakeoverView state={snapshot} onExit={options.onRequestExit} />
   }
   return <Za38Tui {...options} />
 }
@@ -76,16 +77,6 @@ export function Za38Tui(options: RenderedTuiOptions) {
   const getSnapshot = useCallback(() => adapter.getSnapshot(), [adapter])
   const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
   const interactive = snapshot.interactive
-
-  // Handoff 返回后按 Web 会话 Thread 重同步。
-  // 依赖 WebAwareRoot 的组件类型切换（Za38Tui ↔ WebTakeoverView）保证返回时必然重挂载，
-  // 因此本 effect 只在每次返回挂载时触发一次（首次挂载 handoffVersion=0 跳过；ZC-114 共享 Core 后删除）。
-  useEffect(() => {
-    const handoff = options.webHandoff?.getSnapshot()
-    if (handoff && handoff.phase === "idle" && handoff.handoffVersion > 0) {
-      void adapter.resyncAfterHandoff(handoff.threadId)
-    }
-  }, [adapter, options.webHandoff])
 
   const inputRef = useRef<TextareaRenderable | null>(null)
   const conversationScrollRef = useRef<ScrollBoxRenderable | null>(null)
@@ -345,6 +336,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
     resume: options.resume,
     onRequestExit: options.onRequestExit,
     openWeb: options.openWeb,
+    dispatchGate: options.webHandoff ? (intent) => options.webHandoff!.tuiDispatch(intent) : undefined,
   })
   const renderedOptions: RenderedTuiOptions = { ...options, adapter }
   const renderer = await createCliRenderer({

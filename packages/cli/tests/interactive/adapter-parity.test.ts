@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import { createTuiAdapter, type TuiAdapterOptions } from "../../src/tui/application/adapter"
 import { createWebInteractiveAdapter, type WebAdapterOptions } from "../../src/web/application/adapter"
+import { buildWebUiState } from "../../src/presentation-coordinator"
+import type { WebUiClient } from "../../src/web/ui-client"
 import { createInitialState } from "../../src/interactive/state"
 import type {
   AgentGateway,
@@ -98,14 +100,24 @@ describe("Adapter Parity (TUI vs Web)", () => {
       historyStore,
     })
 
-    const webHandoff = {
-      reportThread: () => {},
-      requestExit: async () => {},
-    }
+    // Web Adapter 经 WebUiClient 提交 intent；client 把 intent 转发给同一 Controller，
+    // 保证两端对同一意图序列产生相同的 IntentOutcome。
+    const client = {
+      state: buildWebUiState(controller.getSnapshot()),
+      handoffState: { phase: "web-active", handoffId: "h1" },
+      getState: () => client.state,
+      getHandoffState: () => client.handoffState,
+      subscribeState: () => () => {},
+      subscribeHandoff: () => () => {},
+      submitIntent: (intent: InteractiveIntent) => controller.dispatch(intent),
+      ready: () => {},
+      returnToTui: () => {},
+      requestExit: () => {},
+      close: () => {},
+    } as unknown as WebUiClient
 
     const webAdapter = createWebInteractiveAdapter({
-      controller,
-      handoff: webHandoff,
+      client,
       frameScheduler: {
         schedule: (fn) => fn(),
         cancel: () => {},

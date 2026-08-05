@@ -1,50 +1,19 @@
-/** Coordinator 与真实 loopback server 的端到端接线测试。 */
+/** 真实 loopback 集成测试：createWebServer + createPresentationCoordinator + createWebUiGateway + 内存 controller。 */
 
 import { expect, test } from "bun:test"
 
-import type {
-  ControlStatus,
-  HostAttachmentCreateResult,
-  HostAttachmentRevokeResult,
-} from "@za38/protocol"
-
-import {
-  createWebHandoffCoordinator,
-  type WebHostControl,
-} from "../../src/web/handoff-coordinator"
+import { makeHarness } from "../interactive/harness"
 import { createWebServer } from "../../src/web/server"
+import {
+  createPresentationCoordinator,
+} from "../../src/presentation-coordinator/coordinator"
+import {
+  createWebUiGateway,
+  type WebUiGateway,
+} from "../../src/presentation-coordinator/web-ui-gateway"
+import type { WebUiServerMessage } from "../../src/presentation-coordinator/contracts/messages"
 
-class FakeHost implements WebHostControl {
-  status: ControlStatus = {
-    state: "owner",
-    holder: { connection_id: "owner", role: "owner", attachment_id: null },
-  }
-  revoked: string[] = []
-
-  async createAttachment(origin: string): Promise<HostAttachmentCreateResult> {
-    return {
-      attachment_id: "att-integration",
-      endpoint: "ws://127.0.0.1:1",
-      token: "token-integration",
-      expires_at_ms: 0,
-    }
-  }
-
-  async revokeAttachment(id: string): Promise<HostAttachmentRevokeResult> {
-    this.revoked.push(id)
-    this.status = {
-      state: "owner",
-      holder: { connection_id: "owner", role: "owner", attachment_id: null },
-    }
-    return { attachment_id: id, revoked: true, control: this.status }
-  }
-
-  async controlStatus(): Promise<ControlStatus> {
-    return this.status
-  }
-}
-
-async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
+async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (!predicate()) {
     if (Date.now() > deadline) throw new Error("waitFor 超时")
@@ -52,74 +21,92 @@ async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<voi
   }
 }
 
-test("open 后真实 server 提供 handoff 页面，lifecycle 走 accepted → ready{thread_id} → active → released", async () => {
-  const host = new FakeHost()
-  let coordinator: ReturnType<typeof createWebHandoffCoordinator> | undefined
+test("open 后真实 loopback：页面 200；带 token 的 WS 收到 replace/handoff.state；ready → web-active；patch；intent outcome；return 收敛；错误 token 403", async () => {
+  const { controller } = makeHarness({ initialThreadId: "thread-1" })
+  let gateway!: WebUiGateway
+  let openedUrl = ""
   const server = createWebServer({
     html: "<!doctype html><title>web</title>",
-    getAssets: async () => ({ script: "console.log('app')", style: "body{}" }),
-    isActiveHandoff: handoffId =>
-      coordinator !== undefined
-      && coordinator.getSnapshot().phase !== "idle"
-      && coordinator.getSnapshot().handoffId === handoffId,
-    attachLifecycle: (handoffId, channel) => coordinator!.attachLifecycle(handoffId, channel),
+    getAssets: async () => ({ script: "console.log('app')", style: "body{}", syntaxWorkerScript: "" }),
+    isActiveHandoff: handoffId => coordinator.isHandoffActive(handoffId),
+    consumeUiToken: (handoffId, token, origin) => coordinator.consumeUiToken(handoffId, token, origin),
+    attachRenderer: (handoffId, channel) => coordinator.attachRenderer(handoffId, channel),
   })
-  let openedUrl = ""
-  coordinator = createWebHandoffCoordinator({
-    host,
+  const coordinator = createPresentationCoordinator({
     server,
     openBrowser: async url => { openedUrl = url },
-    ownerPollMs: 1,
-    ownerWaitMs: 100,
+    dispatch: intent => controller.dispatch(intent),
+    onRendererConnected: channel => gateway.connectRenderer(channel),
   })
-  await coordinator.open("thread-1")
-  const opening = coordinator.getSnapshot()
-  if (opening.phase !== "opening") throw new Error("expected opening")
-  expect(openedUrl).toContain(server.pathFor(opening.handoffId))
-  // Bun 页面与 Python attachment 是两个独立随机端口；打开的 URL 端口不同也合法。
-  const pageUrl = new URL(openedUrl)
-  expect(pageUrl.port).toBe(new URL(server.origin).port)
-  expect(new URL("ws://127.0.0.1:1").port).not.toBe(pageUrl.port)
+  gateway = createWebUiGateway({ coordinator, controller })
 
+  await coordinator.open()
+  const opening = coordinator.getSnapshot()
+  if (opening.phase !== "opening-web") throw new Error("expected opening-web")
+  const token = new URL(openedUrl).hash.slice("#ui=".length)
+  expect(token.length).toBeGreaterThan(0)
+
+  // 页面可达
   const page = await fetch(`${server.origin}${server.pathFor(opening.handoffId)}`)
   expect(page.status).toBe(200)
+  expect(await page.text()).toContain("<title>web</title>")
 
-  const socket = new WebSocket(
-    `${server.origin.replace(/^http/, "ws")}${server.pathFor(opening.handoffId)}/lifecycle`,
-    { headers: { origin: server.origin } },
-  )
-  const messages: unknown[] = []
+  const uiHttp = `${server.origin}${server.pathFor(opening.handoffId)}/ui`
+  const upgradeHeaders = (origin: string) => ({ upgrade: "websocket", connection: "Upgrade", origin })
+
+  // 错误 token / 缺 token / 错误 Origin 的升级一律 403
+  expect((await fetch(`${uiHttp}?ui=wrong-token`, { headers: upgradeHeaders(server.origin) })).status).toBe(403)
+  expect((await fetch(uiHttp, { headers: upgradeHeaders(server.origin) })).status).toBe(403)
+  expect((await fetch(`${uiHttp}?ui=${token}`, { headers: upgradeHeaders("http://evil.example") })).status).toBe(403)
+
+  // 正确 token 的 WebSocket 连接
+  const wsBase = `${server.origin.replace(/^http/, "ws")}${server.pathFor(opening.handoffId)}/ui`
+  const socket = new WebSocket(`${wsBase}?ui=${token}`, { headers: { origin: server.origin } })
+  const messages: WebUiServerMessage[] = []
+  const closeCodes: number[] = []
   socket.onmessage = event => messages.push(JSON.parse(String(event.data)))
-  await waitFor(() => messages.some(message => (message as { type?: string }).type === "accepted"))
+  socket.onclose = event => { closeCodes.push(event.code) }
 
-  host.status = {
-    state: "attached",
-    holder: {
-      connection_id: "web-1",
-      role: "attached",
-      attachment_id: "att-integration",
-    },
-  }
-  socket.send(JSON.stringify({ type: "ready", thread_id: "thread-1" }))
-  await waitFor(() => coordinator!.getSnapshot().phase === "active"
-    && messages.some(message => (message as { type?: string }).type === "active"))
-  const active = coordinator!.getSnapshot()
-  if (active.phase !== "active") throw new Error("expected active")
-  expect(active.tuiLocked).toBe(true)
-  expect(active.threadId).toBe("thread-1")
-  const acceptedIndex = messages.findIndex(m => (m as { type?: string }).type === "accepted")
-  const activeIndex = messages.findIndex(m => (m as { type?: string }).type === "active")
-  expect(acceptedIndex).toBeGreaterThanOrEqual(0)
-  expect(activeIndex).toBeGreaterThan(acceptedIndex)
+  // 首帧：state.replace（revision 1）+ handoff.state(opening-web)
+  await waitFor(() => messages.some(message => message.type === "state.replace" && message.revision === 1))
+  expect(messages[0]).toMatchObject({ type: "state.replace", revision: 1 })
+  expect(Object.keys((messages[0] as Extract<WebUiServerMessage, { type: "state.replace" }>).state)).toEqual([
+    "conversation",
+    "interaction",
+    "navigation",
+    "command",
+    "runtime",
+  ])
+  expect(messages[1]).toMatchObject({ type: "handoff.state", state: { phase: "opening-web" } })
 
-  socket.send(JSON.stringify({ type: "released" }))
-  await waitFor(() => coordinator!.getSnapshot().phase === "idle")
-  expect(host.revoked).toEqual(["att-integration"])
-  const idle = coordinator!.getSnapshot()
-  if (idle.phase !== "idle") throw new Error("expected idle")
-  expect(idle.threadId).toBe("thread-1")
-  expect(idle.handoffVersion).toBe(1)
+  // ready → web-active
+  socket.send(JSON.stringify({ type: "handoff.ready" }))
+  await waitFor(() => messages.some(message => message.type === "handoff.state" && message.state.phase === "web-active"))
+
+  // controller 状态变化 → state.patch（只含变化分片）
+  await controller.dispatch({ type: "approval-mode.cycle" })
+  await waitFor(() => messages.some(message => message.type === "state.patch"))
+  const patch = messages.find(message => message.type === "state.patch") as Extract<WebUiServerMessage, { type: "state.patch" }>
+  expect(patch.revision).toBe(2)
+  expect(Object.keys(patch.patch)).toEqual(["runtime"])
+
+  // intent 受理 → intent.outcome 与 requestId 一一对应
+  socket.send(JSON.stringify({ type: "intent", requestId: "it-1", revision: 1, intent: { type: "approval-mode.cycle" } }))
+  await waitFor(() => messages.some(message => message.type === "intent.outcome" && message.requestId === "it-1"))
+  expect(messages.find(message => message.type === "intent.outcome" && message.requestId === "it-1")).toEqual({
+    type: "intent.outcome",
+    requestId: "it-1",
+    outcome: { status: "accepted" },
+  })
+
+  // handoff.return → returning-tui 帧、coordinator 回 tui-active、连接被网关收敛关闭
+  socket.send(JSON.stringify({ type: "handoff.return" }))
+  await waitFor(() => messages.some(message => message.type === "handoff.state" && message.state.phase === "returning-tui"))
+  await waitFor(() => coordinator.getSnapshot().phase === "tui-active")
+  await waitFor(() => socket.readyState === WebSocket.CLOSED)
+  expect(closeCodes).toContain(1000)
 
   socket.close()
+  await server.stop()
   await coordinator.close()
 })

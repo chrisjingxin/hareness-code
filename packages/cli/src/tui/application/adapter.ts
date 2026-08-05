@@ -2,7 +2,7 @@
 
 import type { ModelProfile } from "@za38/protocol"
 
-import type { InteractiveController, InteractiveIntent, InteractiveResult, InteractiveSnapshot, PresentationEffect } from "../../interactive/types"
+import type { InteractiveController, InteractiveIntent, InteractiveResult, InteractiveSnapshot, IntentOutcome, PresentationEffect } from "../../interactive/types"
 import { filterCommandMenuItems } from "../../presentation-shared/command-menu-policy"
 import { parseSlashCommand, resolveSlashCommand, type CommandMenuItem, type SkillMenuItem } from "../../interactive/commands"
 import type { ThreadSummary } from "@za38/protocol"
@@ -106,8 +106,6 @@ export interface TuiAdapter {
   subscribe(listener: (snapshot: TuiAdapterSnapshot) => void): () => void
   dispatch(intent: TuiIntent): Promise<void>
   close(): Promise<void>
-  /** Handoff 返回 TUI 后按 Web 会话期间的 Thread 重同步（过渡机制，ZC-114 共享 Core 后删除）。 */
-  resyncAfterHandoff(webThreadId: string | null): Promise<void>
 }
 
 /** 创建 TUI Adapter；一次 TUI 挂载对应一个 Adapter 与共享 Controller。 */
@@ -118,6 +116,8 @@ export type TuiAdapterOptions = {
   resume?: boolean
   onRequestExit: () => void
   openWeb?: (threadId: string | null) => Promise<void>
+  /** 输入租约门禁：注入 Coordinator 的 tuiDispatch 后，仅 tui-active 阶段受理可变 intent。 */
+  dispatchGate?: (intent: InteractiveIntent) => Promise<IntentOutcome>
 }
 
 type InternalPicker<T> = {
@@ -135,6 +135,7 @@ class TuiAdapterImpl implements TuiAdapter {
   private readonly promptHistoryFile: string | undefined
   private readonly onRequestExit: () => void
   private readonly openWeb?: (threadId: string | null) => Promise<void>
+  private readonly dispatchGate: ((intent: InteractiveIntent) => Promise<IntentOutcome>) | undefined
   private readonly listeners = new Set<(snapshot: TuiAdapterSnapshot) => void>()
   private readonly unsubscribeInteractive: () => void
 
@@ -163,6 +164,7 @@ class TuiAdapterImpl implements TuiAdapter {
     this.historyStore = options.promptHistoryStore ?? new FilePromptHistoryStore(options.promptHistoryFile)
     this.onRequestExit = options.onRequestExit
     this.openWeb = options.openWeb
+    this.dispatchGate = options.dispatchGate
     this.snapshot = this.buildSnapshot()
     this.unsubscribeInteractive = this.controller.subscribe(() => this.publish())
 
@@ -231,7 +233,7 @@ class TuiAdapterImpl implements TuiAdapter {
         await this.resolveDialog(intent.kind, intent.confirmed)
         return
       case "clear-selected-skill":
-        await this.controller.dispatch({ type: "skill.clear" })
+        await this.routeDispatch({ type: "skill.clear" })
         return
       case "approval":
         await this.respondApproval(intent.decision)
@@ -249,26 +251,6 @@ class TuiAdapterImpl implements TuiAdapter {
     if (this.closed) return
     this.closed = true
     this.unsubscribeInteractive()
-  }
-
-  /** web-active 期间 TUI Controller 不消费 Web 侧变更；返回时按 Web 会话 Thread 重拉最新内容。 */
-  async resyncAfterHandoff(webThreadId: string | null): Promise<void> {
-    if (this.closed) return
-    const current = this.controller.getSnapshot()
-    if (current.activeRun) {
-      // 任务仍在运行：thread.open 会被 busy 拒绝，保留当前 Thread 并明确提示。
-      this.showTransientNotice("任务仍在运行，已返回原 Thread。")
-      return
-    }
-    if (webThreadId !== null) {
-      const outcome = await this.controller.dispatch({ type: "thread.open", threadId: webThreadId })
-      if (outcome.status === "rejected") {
-        this.showTransientNotice("未能恢复到 Web 会话的 Thread。")
-      }
-    } else {
-      // 空首页且无运行中任务：thread.new 在无运行时不弹确认，直接清空。
-      await this.controller.dispatch({ type: "command.execute", commandId: "thread.new" })
-    }
   }
 
   /** 把共享 snapshot 与表现状态一起发布为新快照。 */
@@ -371,7 +353,7 @@ class TuiAdapterImpl implements TuiAdapter {
     if (interactive.interaction?.type === "question") {
       const firstQuestion = interactive.interaction.questions[0]
       if (firstQuestion) {
-        const outcome = await this.controller.dispatch({
+        const outcome = await this.routeDispatch({
           type: "interaction.respond",
           requestId: interactive.interaction.requestId,
           response: { kind: "question", answers: { [firstQuestion.id]: [input] } },
@@ -385,7 +367,7 @@ class TuiAdapterImpl implements TuiAdapter {
       }
     }
 
-    const outcome = await this.controller.dispatch({ type: "input.submit", value: rawValue })
+    const outcome = await this.routeDispatch({ type: "input.submit", value: rawValue })
     if (outcome.status === "accepted") {
       this.clearDraft()
       const previousHistory = this.promptHistory
@@ -407,12 +389,17 @@ class TuiAdapterImpl implements TuiAdapter {
 
   /** dispatch 共享 intent，仅在 accepted 时触发效果，rejected 时提示通知。 */
   private async dispatchInteractive(intent: InteractiveIntent): Promise<void> {
-    const outcome = await this.controller.dispatch(intent)
+    const outcome = await this.routeDispatch(intent)
     if (outcome.status === "rejected") {
       this.showTransientNotice(outcome.message)
       return
     }
     await this.applyPresentationEffects(outcome.effects)
+  }
+
+  /** 领域 intent 统一出口：注入 dispatchGate 时经 Coordinator 输入租约，否则直连共享 Controller。 */
+  private routeDispatch(intent: InteractiveIntent): Promise<IntentOutcome> {
+    return this.dispatchGate ? this.dispatchGate(intent) : this.controller.dispatch(intent)
   }
 
   /** 应用从 controller outcome 返回的 UI 呈现效果。 */
@@ -489,7 +476,7 @@ class TuiAdapterImpl implements TuiAdapter {
         const value = this.draft
         this.clearDraft()
         if (resolution.kind === "unknown") {
-          await this.controller.dispatch({ type: "input.submit", value })
+          await this.routeDispatch({ type: "input.submit", value })
         }
         return
       }
@@ -500,17 +487,17 @@ class TuiAdapterImpl implements TuiAdapter {
         this.clearDraft()
         return
       case "cancel-run":
-        await this.controller.dispatch({ type: "run.cancel" })
+        await this.routeDispatch({ type: "run.cancel" })
         return
       case "toggle-tool-details":
         this.showToolDetails = !this.showToolDetails
         this.publish()
         return
       case "cycle-approval-mode":
-        await this.controller.dispatch({ type: "approval-mode.cycle" })
+        await this.routeDispatch({ type: "approval-mode.cycle" })
         return
       case "clear-selected-skill":
-        await this.controller.dispatch({ type: "skill.clear" })
+        await this.routeDispatch({ type: "skill.clear" })
         return
       case "exit":
         this.onRequestExit()
@@ -612,21 +599,21 @@ class TuiAdapterImpl implements TuiAdapter {
   private openSkillPicker(): void {
     this.skillPicker = { ...this.skillPicker, visible: true, loading: false, query: "", selectedIndex: 0, error: undefined }
     this.publish()
-    void this.controller.dispatch({ type: "catalog.refresh", catalog: "skills" })
+    void this.routeDispatch({ type: "catalog.refresh", catalog: "skills" })
   }
 
   /** 打开 Thread Picker；运行态校验由共享 Controller 的 present 语义保证。 */
   private openThreadPicker(): void {
     this.threadPicker = { ...this.threadPicker, visible: true, loading: false, query: "", selectedIndex: 0, error: undefined }
     this.publish()
-    void this.controller.dispatch({ type: "catalog.refresh", catalog: "threads" })
+    void this.routeDispatch({ type: "catalog.refresh", catalog: "threads" })
   }
 
   /** 打开 Model Picker；legacy immutable binding 由共享 Controller 发布 confirmation。 */
   private openModelPicker(initialQuery = ""): void {
     this.modelPicker = { ...this.modelPicker, visible: true, loading: false, query: initialQuery, selectedIndex: 0, error: undefined, syncingDefault: undefined }
     this.publish()
-    void this.controller.dispatch({ type: "catalog.refresh", catalog: "models" })
+    void this.routeDispatch({ type: "catalog.refresh", catalog: "models" })
   }
 
   /** 关闭 Picker；保存默认模型期间不允许通过 Esc 打断事务。 */
@@ -692,14 +679,14 @@ class TuiAdapterImpl implements TuiAdapter {
   private selectSkill(skill: SkillMenuItem): void {
     this.clearDraft()
     this.skillPicker = { ...this.skillPicker, visible: false, loading: false, query: "", selectedIndex: 0 }
-    void this.controller.dispatch({ type: "skill.arm", skillId: skill.id })
+    void this.routeDispatch({ type: "skill.arm", skillId: skill.id })
   }
 
   /** 恢复 Thread；共享 Controller 完成原子替换与 generation 校验。 */
   private async selectThread(thread: ThreadPickerItem): Promise<void> {
     this.threadPicker = { ...this.threadPicker, visible: false, loading: false, error: undefined }
     this.publish()
-    await this.controller.dispatch({ type: "thread.open", threadId: thread.threadId })
+    await this.routeDispatch({ type: "thread.open", threadId: thread.threadId })
   }
 
   /** 选择模型；共享 Controller 更新当前选择并独立同步默认值。 */
@@ -713,7 +700,7 @@ class TuiAdapterImpl implements TuiAdapter {
     this.modelPicker = { ...this.modelPicker, syncingDefault: true, error: undefined }
     this.publish()
     try {
-      await this.controller.dispatch({ type: "model.select", profileId: model.id })
+      await this.routeDispatch({ type: "model.select", profileId: model.id })
     } finally {
       this.modelPicker = { ...this.modelPicker, visible: false, loading: false, syncingDefault: false, error: undefined }
       this.publish()
@@ -725,7 +712,7 @@ class TuiAdapterImpl implements TuiAdapter {
     const interactive = this.controller.getSnapshot()
     const confirmation = interactive.confirmation
     if (!confirmation) return
-    await this.controller.dispatch({
+    await this.routeDispatch({
       type: "confirmation.resolve",
       confirmationId: confirmation.confirmationId,
       confirmed,
@@ -737,7 +724,7 @@ class TuiAdapterImpl implements TuiAdapter {
     const interactive = this.controller.getSnapshot()
     const approval = interactive.interaction
     if (!approval || approval.type !== "approval") return
-    await this.controller.dispatch({
+    await this.routeDispatch({
       type: "interaction.respond",
       requestId: approval.requestId,
       response: { kind: "approval", decision },
@@ -751,7 +738,7 @@ class TuiAdapterImpl implements TuiAdapter {
     if (!question || question.type !== "question") return
     const firstQuestion = question.questions[0]
     if (!firstQuestion) return
-    await this.controller.dispatch({
+    await this.routeDispatch({
       type: "interaction.respond",
       requestId: question.requestId,
       response: { kind: "question", answers: { [firstQuestion.id]: [answer] } },

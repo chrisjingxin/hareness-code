@@ -12,10 +12,10 @@ import type { InteractiveRuntime } from "./runtime"
 import type { InteractiveActivity, ActiveRun, RunSummary, TimelineItem } from "./state"
 import type { AgentGateway, Clock, IdGenerator, Scheduler } from "./ports"
 
+export type { ActiveRun, InteractiveActivity, InteractiveRuntime, RunSummary, TimelineItem }
+
 /** 审批决定类型，与协议 ApprovalResponse.decision 保持一致。 */
 export type ApprovalDecision = "approve_once" | "approve_thread" | "approve_always" | "reject" | "reject_with_feedback"
-
-export type { InteractiveActivity } from "./state"
 
 /** Skill catalog 项：与 Slash 菜单共用的最小领域视图。 */
 export type SkillSummary = SkillMenuItem

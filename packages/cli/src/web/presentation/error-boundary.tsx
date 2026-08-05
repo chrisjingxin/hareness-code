@@ -14,7 +14,7 @@ type PresentationErrorBoundaryState = {
 
 /**
  * 只包住 Web presentation；错误详情不进入页面，composition root 负责关闭
- * Controller、AgentClient 和 lifecycle 后展示统一脱敏状态。
+ * WebUiClient 与 Adapter 后展示统一脱敏状态。
  */
 export class PresentationErrorBoundary extends Component<
   PresentationErrorBoundaryProps,
