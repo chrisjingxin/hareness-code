@@ -77,8 +77,40 @@ test("紧凑首页保留品牌、输入框和真实底栏信息", async () => {
   }
 })
 
-test("首页模型靠左、审批模式靠右，且不重复显示品牌", async () => {
-  const longModelRuntime = {
+test("TUI 模型显示跟随 /model 选择，不读陈旧的握手 runtime.modelName", async () => {
+  const base = snapshotOf(createInitialState())
+  const interactive = {
+    ...base,
+    catalogs: {
+      ...base.catalogs,
+      models: { status: "ready" as const, items: [
+        { id: "fast", model: "fast-model", provider_label: "fast", context_window_tokens: 128000, capabilities: [], is_default: true, available: true, source: "user" },
+        { id: "pro", model: "pro-model", provider_label: "pro", context_window_tokens: 256000, capabilities: [], is_default: false, available: true, source: "user" },
+      ] },
+    },
+    selection: { ...base.selection, requestedModelProfileId: "fast" },
+    // 握手 runtime 仍是陈旧的 pro 模型（会话中途握手不会更新）。
+    runtime: { ...runtime, modelName: "pro-model", modelProfileId: undefined },
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(
+      createElement(HomeView, viewProps(interactive, 80, 24)),
+      { width: 80, height: 24 },
+    )
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    // 选择 fast 后必须显示 fast 的模型，而不是握手时缓存的 pro 模型。
+    expect(frame).toContain("fast-model")
+    expect(frame).not.toContain("pro-model")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("首页模型靠左、审批模式靠右，且不重复显示品牌", async () => {  const longModelRuntime = {
     ...runtime,
     modelName: "deepseek-v4-flash",
   }

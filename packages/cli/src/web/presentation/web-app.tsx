@@ -3,7 +3,7 @@
 
 import { Activity, Cpu, Ellipsis, Menu, ShieldCheck, X } from "lucide-react"
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react"
-import { activityLabel } from "../../presentation-shared"
+import { activityLabel, modelSelectionLabel } from "../../presentation-shared"
 import { selectNavigationView } from "../../interactive/selectors"
 import { approvalModeLabel, workspaceLabel } from "../../interactive/runtime"
 import type { InteractiveSnapshot } from "../../interactive/types"
@@ -252,8 +252,8 @@ function nextTheme(theme: WebTheme): WebTheme {
 }
 
 function modelLabel(snapshot: InteractiveSnapshot): string {
-  const model = snapshot.selection.actualModel ?? snapshot.catalogs.models.items.find(item => item.id === snapshot.selection.requestedModelProfileId)
-  return model ? `${model.provider_label} · ${model.model}` : snapshot.runtime.modelName ?? snapshot.runtime.modelProfileId ?? "未配置模型"
+  // 与 TUI 共用同一展示策略：选择优先，回退握手运行时。
+  return modelSelectionLabel(snapshot)
 }
 
 function connectionLabel(status: InteractiveSnapshot["connection"]["status"]): string {

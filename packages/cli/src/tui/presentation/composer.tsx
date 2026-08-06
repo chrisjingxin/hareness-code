@@ -12,7 +12,7 @@ import {
   workspaceLabel,
 } from "../../interactive/runtime"
 import { tuiTheme } from "./theme"
-import { activityLabel } from "../../presentation-shared"
+import { activityLabel, modelSelectionLabel } from "../../presentation-shared"
 import type { SharedViewProps } from "./types"
 
 /** thread composer 上方的实时模型和运行状态行。 */
@@ -24,7 +24,7 @@ export function ThreadRuntimeLine(props: { interactive: SharedViewProps["interac
       <text fg={statusColor(props.interactive.activity.kind)}>□</text>
       <text fg={tuiTheme.primary}>Harness Code</text>
       <text fg={tuiTheme.muted}>·</text>
-      <text fg={runtime.modelConfigured ? tuiTheme.text : tuiTheme.warning}>模型 {modelLabel(runtime)}</text>
+      <text fg={runtime.modelConfigured ? tuiTheme.text : tuiTheme.warning}>模型 {modelSelectionLabel(props.interactive)}</text>
       <text fg={tuiTheme.muted}>· {status}</text>
     </box>
   )
@@ -150,7 +150,7 @@ function RuntimeMeta(props: { interactive: SharedViewProps["interactive"]; varia
   const contentWidth = props.variant === "home"
     ? Math.min(68, Math.max(28, props.terminalWidth - 8))
     : Math.max(28, props.terminalWidth - 10)
-  const model = shorten(modelLabel(runtime), Math.max(14, contentWidth - 14))
+  const model = shorten(modelSelectionLabel(props.interactive), Math.max(14, contentWidth - 14))
   const warning = runtime.approvalModeWarning
     ? shorten(runtime.approvalModeWarning, contentWidth)
     : undefined
@@ -213,18 +213,6 @@ export function useSpinner(active: boolean, interval: number): string {
     return () => clearInterval(timer)
   }, [active, interval])
   return SPINNER_FRAMES[frame % SPINNER_FRAMES.length] ?? "·"
-}
-
-/** 将运行时模型配置转换为简短状态文案。 */
-function modelLabel(runtime: SharedViewProps["interactive"]["runtime"]): string {
-  if (!runtime.modelConfigured) return "模型未配置"
-  return modelReference(runtime.modelProfileId, runtime.modelName) ?? "已配置模型"
-}
-
-/** 用同一格式输出脱敏 Profile ID 与模型名。 */
-function modelReference(profileId: string | undefined, modelName: string | undefined): string | undefined {
-  if (!profileId && !modelName) return undefined
-  return `${profileId ? `${profileId} · ` : ""}${modelName ?? "已配置模型"}`
 }
 
 /** 按字符数截断 composer 内的长文案。 */
