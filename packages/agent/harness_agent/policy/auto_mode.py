@@ -3,28 +3,29 @@
 AUTO 审批模式下，``evaluate_permission()`` 的模式权限矩阵把某次工具调用标记为
 ``"filter"`` 时，由本模块的四层过滤器管线决定其最终去向：
 
-- F1 acceptEdits 快速通道：EDIT 类工具且目标路径位于工作区内、不命中敏感路径
-  时自动放行；
+- F1 acceptEdits 快速通道：EDIT 类工具不经分类器直接放行，仅受保护路径
+  （敏感文件/目录、``.github/workflows/`` 前缀）命中或目标路径在工作区外
+  时转入后续层判断；
 - F2 安全工具白名单：READ/INTERACT/PLAN 等只读/交互类工具自动放行；
-- F3 破坏性命令守卫：匹配 ``DESTRUCTIVE_PATTERNS`` 中破坏性命令模式的 Shell
-  调用硬拦截（deny）；DELETE 类工具目标为绝对路径且层级过浅（如 ``/``、
-  ``/home``、``C:/Users``）时同样硬拦截，防止误删高层目录；
+- F3 破坏性命令守卫：对 Shell 命令使用 ``extract_segments`` 拆分后逐段检查
+  ``DESTRUCTIVE_PATTERNS``；命中破坏性模式时默认硬拦截（deny），但如果用户
+  最近消息中包含明确的破坏意图关键词（如"删除""销毁""force"等），则降级为
+  人工确认（ask），避免误拦用户主动发起的合法危险操作；DELETE 类工具目标为
+  绝对路径且层级过浅（如 ``/``、``/home``、``C:/Users``）时同样硬拦截，
+  防止误删高层目录；
 - F4 LLM 分类器：当前为占位实现，分类器尚未接入，一律回退人工审批（ask）。
 
 任何一层无法给出确定性结论时继续进入下一层；没有任何一层能自动放行或硬拦截
-时，最终安全回退到人工审批。本模块不依赖任何 LLM API 调用。
-"""
+时，最终安全回退到人工审批。本模块不依赖任何 LLM API 调用。"""
 
 from __future__ import annotations
 
 import re
-import sys
-from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
-from harness_agent.policy.sensitive_paths import is_sensitive_path
+from harness_agent.policy.bash_parser import extract_segments
+from harness_agent.policy.sensitive_paths import is_protected_edit_path
 from harness_agent.policy.tool_risk import ToolKind, get_tool_kind
 
 
@@ -64,10 +65,66 @@ DESTRUCTIVE_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\bchmod\s+-R\s+0?777\s+/"),
     # > /etc/ 或 >> /etc/：重定向覆盖关键系统配置
     re.compile(r">{1,2}\s*/etc/"),
+    # git checkout -- .：丢弃工作区所有未暂存改动
+    re.compile(r"\bgit\s+checkout\b[^|&;\n]*--\s*\."),
+    # git stash drop：删除指定（或最新）stash
+    re.compile(r"\bgit\s+stash\s+drop\b"),
+    # git stash clear：清空所有 stash
+    re.compile(r"\bgit\s+stash\s+clear\b"),
+    # git commit --amend：改写最近一次提交历史
+    re.compile(r"\bgit\s+commit\b[^|&;\n]*--amend\b"),
+    # git branch -D：强制删除分支（含 --delete --force 缩写变体）
+    re.compile(r"\bgit\s+branch\b[^|&;\n]*-D\b"),
+    # kubectl delete：删除 Kubernetes 资源
+    re.compile(r"\bkubectl\s+delete\b"),
+    # chmod -R 777：递归放开全部权限
+    re.compile(r"\bchmod\s+-R\s+777\b"),
+    # chown -R：递归变更文件所有者
+    re.compile(r"\bchown\s+-R\b"),
+    # pulumi destroy：销毁 Pulumi 管理的云资源
+    re.compile(r"\bpulumi\s+destroy\b"),
+    # cdk destroy：销毁 CDK（AWS Cloud Development Kit）部署的资源
+    re.compile(r"\bcdk\s+destroy\b"),
 ]
 
-# should_block=True 时各层对应的最终决策：F3 是硬拒绝，F4 是回退人工审批。
-_BLOCKED_OUTCOME: dict[str, str] = {"F3": "deny", "F4": "ask"}
+# should_block=True 时各层对应的最终决策：F3 是硬拒绝，F3_exempt 是有破坏意图
+# 时降级的人工确认，F4 是回退人工审批。
+_BLOCKED_OUTCOME: dict[str, str] = {"F3": "deny", "F3_exempt": "ask", "F4": "ask"}
+
+
+def has_destructive_intent(user_messages: list[str]) -> bool:
+    """检测用户最近消息是否包含明确的破坏意图关键词。
+
+    用于 F3 破坏性命令守卫的意图豁免：当命令命中破坏性模式但用户最近消息中
+    有明确的"删除""重置""destroy""force"等关键词时，认为用户主动发起危险操作，
+    降级为人工确认而非硬拦截。
+
+    Args:
+        user_messages: 最近几条用户消息（非模型消息）的文本列表。
+
+    Returns:
+        任一条消息匹配任一关键词则返回 ``True``。
+    """
+    if not user_messages:
+        return False
+
+    _DESTRUCTIVE_INTENT_ZH: frozenset[str] = frozenset({
+        "丢弃", "清除", "重置", "撤销", "回滚", "删除", "销毁", "彻底", "强制", "放弃",
+    })
+    _DESTRUCTIVE_INTENT_EN: frozenset[str] = frozenset({
+        "discard", "wipe", "reset", "destroy", "force", "nuke", "clean", "purge", "obliterate",
+    })
+
+    combined = user_messages
+    for msg in combined:
+        msg_lower = msg.lower()
+        for kw in _DESTRUCTIVE_INTENT_ZH:
+            if kw in msg_lower:
+                return True
+        for kw in _DESTRUCTIVE_INTENT_EN:
+            if kw in msg_lower:
+                return True
+    return False
 
 
 def evaluate_auto_mode(
@@ -75,35 +132,36 @@ def evaluate_auto_mode(
     tool_args: dict[str, Any],
     workspace_root: str | None = None,
     consecutive_reject_count: int = 0,
-    *,
-    sensitive_check_fn: Callable[[str], bool] | None = None,
+    user_messages: list[str] | None = None,
 ) -> tuple[str, str]:
     """运行 AUTO 模式四层过滤器，返回工具调用的处置决策。
 
     四层过滤器按 F1 → F2 → F3 → F4 顺序短路执行：前序层未给出结论时才进入
     下一层。F4 目前为占位实现，任何到达该层的调用都回退人工审批。
 
+    F3 破坏性命令守卫支持用户意图豁免：当命令命中破坏性模式但 user_messages
+    中包含明确的破坏意图关键词时，降级为人工确认（ask）而非硬拦截（deny）。
+
     Args:
         tool_name: 工具名称。
         tool_args: 工具参数字典。
-        workspace_root: 工作区根目录，F1 层判断路径归属时必需；为 None 时
-            F1 层不产生结论。
+        workspace_root: 工作区根目录；F1 用它判断编辑目标是否越界
+            （越界编辑不享受快速放行）。
         consecutive_reject_count: 用户连续拒绝次数；>= 3 时 F4 层直接回退
             人工审批，避免过滤器在用户已多次拒绝后仍反复自动判定。
-        sensitive_check_fn: 自定义敏感路径判断函数；默认使用
-            ``is_sensitive_path``。
+        user_messages: 最近几条用户消息文本列表，供 F3 意图豁免判断；为 None
+            时跳过豁免，匹配破坏性模式直接 deny。
 
     Returns:
         (decision, reason) 二元组：decision 为 "allow"（自动放行）、"deny"
         （硬拦截）或 "ask"（回退人工审批），reason 为决策原因。
     """
     kind = get_tool_kind(tool_name)
-    sensitive_check = sensitive_check_fn or is_sensitive_path
 
     decision = (
-        _filter_accept_edits(kind, tool_args, workspace_root, sensitive_check)
+        _filter_accept_edits(tool_name, kind, tool_args, workspace_root)
         or _filter_safe_allowlist(kind)
-        or _filter_destructive_command(tool_args)
+        or _filter_destructive_command(tool_args, user_messages)
         or _filter_destructive_delete(kind, tool_args)
         or _filter_llm_classifier(consecutive_reject_count)
     )
@@ -114,28 +172,38 @@ def evaluate_auto_mode(
 
 
 def _filter_accept_edits(
+    tool_name: str,
     kind: ToolKind,
     tool_args: dict[str, Any],
     workspace_root: str | None,
-    sensitive_check: Callable[[str], bool],
 ) -> AutoModeDecision | None:
-    """F1 acceptEdits 快速通道：工作区内且非敏感的 EDIT 调用自动放行。
+    """F1 acceptEdits 快速通道：EDIT 类工具不经分类器直接放行。
 
-    目标路径缺失、不在工作区内或命中敏感路径时返回 None，交由后续层处理。
+    两类例外转入后续过滤层：
+
+    - 受保护路径（敏感文件/目录、``.github/workflows/`` 前缀）；
+    - 工作区外的写入目标（如 ``/etc/hosts``）：与 HITL 预检共用
+      ``resolve_outside_workspace_write`` 判定，越界编辑必须走人工审批。
+
+    Delete 类工具不进入本层（``ToolKind.DELETE`` ≠ ``ToolKind.EDIT``），
+    非 AUTO 模式由调用入口做模式过滤，本函数不做额外检查。
     """
-    if kind is not ToolKind.EDIT or workspace_root is None:
+    if kind is not ToolKind.EDIT:
         return None
     file_path = tool_args.get("file_path")
     if not isinstance(file_path, str) or not file_path:
         return None
-    if not _path_within_workspace(file_path, workspace_root):
+    if is_protected_edit_path(file_path):
         return None
-    if sensitive_check(file_path):
+    # 延迟导入避免模块间循环；相对路径在该判定中视为工作区内。
+    from harness_agent.policy.workspace_boundary import resolve_outside_workspace_write
+
+    if resolve_outside_workspace_write(tool_name, tool_args, workspace_root) is not None:
         return None
     return AutoModeDecision(
         via="F1",
         should_block=False,
-        reason="acceptEdits 快速通道：工作区内非敏感编辑，自动放行",
+        reason="auto mode edit fast-path",
     )
 
 
@@ -150,8 +218,18 @@ def _filter_safe_allowlist(kind: ToolKind) -> AutoModeDecision | None:
     return None
 
 
-def _filter_destructive_command(tool_args: dict[str, Any]) -> AutoModeDecision | None:
-    """F3 破坏性命令守卫：命令参数命中破坏性模式时硬拦截。
+def _filter_destructive_command(
+    tool_args: dict[str, Any],
+    user_messages: list[str] | None = None,
+) -> AutoModeDecision | None:
+    """F3 破坏性命令守卫：逐段检查命令是否匹配破坏性模式。
+
+    使用 ``extract_segments`` 将命令拆分为独立段后逐段匹配
+    ``DESTRUCTIVE_PATTERNS``。命中破坏性模式时：
+
+    - 若 ``user_messages`` 非空且 ``has_destructive_intent(user_messages)``
+      为 True → 认定用户有明确破坏意图，降级为人工确认（ask）。
+    - 否则 → 硬拦截（deny）。
 
     只检查参数中携带的 ``command`` 字符串；无命令参数或未命中任何模式时
     返回 None，交由后续层处理。
@@ -159,13 +237,25 @@ def _filter_destructive_command(tool_args: dict[str, Any]) -> AutoModeDecision |
     command = tool_args.get("command")
     if not isinstance(command, str) or not command:
         return None
-    for pattern in DESTRUCTIVE_PATTERNS:
-        if pattern.search(command):
-            return AutoModeDecision(
-                via="F3",
-                should_block=True,
-                reason=f"破坏性命令守卫：命令匹配破坏性模式 {pattern.pattern}",
-            )
+
+    segments = extract_segments(command)
+    for segment in segments:
+        for pattern in DESTRUCTIVE_PATTERNS:
+            if pattern.search(segment):
+                if user_messages and has_destructive_intent(user_messages):
+                    return AutoModeDecision(
+                        via="F3_exempt",
+                        should_block=True,
+                        reason=(
+                            f"破坏性命令守卫：命令段 '{segment}' 匹配破坏性模式 "
+                            f"{pattern.pattern}，但用户有明确破坏意图，降级为人工确认"
+                        ),
+                    )
+                return AutoModeDecision(
+                    via="F3",
+                    should_block=True,
+                    reason=f"破坏性命令守卫：命令段 '{segment}' 匹配破坏性模式 {pattern.pattern}",
+                )
     return None
 
 
@@ -218,20 +308,4 @@ def _filter_llm_classifier(consecutive_reject_count: int) -> AutoModeDecision:
     )
 
 
-def _path_within_workspace(file_path: str, workspace_root: str) -> bool:
-    """判断文件路径经规范化解析后是否包含在工作区内。
 
-    与工作区边界中间件的约定一致：Windows 上 ``/`` 开头的虚拟路径按工作区
-    相对路径拼接后解析；其余路径按真实绝对路径解析后再做 containment 检查。
-    解析失败一律视为越界（fail-closed）。
-    """
-    workspace = Path(workspace_root).resolve(strict=False)
-    if file_path.startswith("/") and sys.platform == "win32":
-        candidate = (workspace / file_path.lstrip("/")).resolve(strict=False)
-    else:
-        candidate = Path(file_path).resolve(strict=False)
-    try:
-        candidate.relative_to(workspace)
-        return True
-    except (ValueError, OSError, RuntimeError):
-        return False

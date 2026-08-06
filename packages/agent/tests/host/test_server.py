@@ -67,11 +67,18 @@ async def _capture_server(server: Any) -> list[dict[str, Any]]:
     return frames
 
 
-async def _wait_for(frames: list[dict[str, Any]], predicate: Any) -> dict[str, Any]:
+async def _wait_for(frames: list[dict[str, Any]], predicate: Any, *, skip: int = 0) -> dict[str, Any]:
+    """等待 frames 中出现符合 predicate 的帧。
+
+    Args:
+        frames: 已捕获的消息帧列表。
+        predicate: 判断帧是否符合条件的函数。
+        skip: 跳过前 N 个符合条件的帧（用于等待第 N+1 个匹配帧）。
+    """
     for _ in range(200):
-        for frame in frames:
-            if predicate(frame):
-                return frame
+        matched = [frame for frame in frames if predicate(frame)]
+        if len(matched) > skip:
+            return matched[skip]
         await asyncio.sleep(0.01)
     raise AssertionError(f"Timed out; received: {frames}")
 
@@ -1662,6 +1669,9 @@ async def test_real_hitl_rejection_prevents_file_write():
 async def test_approve_thread_delete_rule_skips_later_deletions_in_same_thread():
     """delete_file 选择“本线程允许”后，同线程后续删除不再弹审批。
 
+    规范：文件写/删工具生成项目级通配规则（resource="*"），approve_thread
+    豁免本线程内该工具的后续调用；敏感路径与工作区边界仍由预检兜底。
+
     规则注入镜像生产路径：会话规则保存在 RunCoordinator 内存列表，
     Agent 的 rules_provider 每次评估时读取该列表与持久化层合并结果。
     """
@@ -1723,7 +1733,7 @@ async def test_approve_thread_delete_rule_skips_later_deletions_in_same_thread()
         assert not first.exists()
         assert PermissionRule(tool="delete_file", resource="*", effect="allow") in server._run_coordinator.session_rules
 
-        # 第二次删除：会话规则命中，应直接执行，不再出现新的审批请求。
+        # 第二次删除（不同文件）：项目级通配规则覆盖，自动放行不再弹窗。
         await server.dispatch(
             _request("run.start", {"message": "删除 second.txt", "thread_id": "del-thread", "run_id": "del-run-2"}, "del-start-2")
         )
@@ -1879,7 +1889,7 @@ async def test_auto_edit_writes_without_interruption_but_shell_still_requires_ap
 
 
 async def test_batch_tool_call_approval_restores_one_decision_per_hanging_call():
-    """模型一轮发出多个需审批工具调用时，单个审批决定应复制到每个挂起调用。"""
+    """模型一轮发出多个需审批工具调用时，逐个串行弹窗并各自收集决策。"""
     from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
     from langchain_core.messages import AIMessage
     from langchain_core.runnables import Runnable
@@ -1896,9 +1906,9 @@ async def test_batch_tool_call_approval_restores_one_decision_per_hanging_call()
                 AIMessage(
                     content="",
                     tool_calls=[
-                        {"name": "execute", "args": {"command": "echo a"}, "id": "call-1"},
-                        {"name": "execute", "args": {"command": "echo b"}, "id": "call-2"},
-                        {"name": "execute", "args": {"command": "echo c"}, "id": "call-3"},
+                        {"name": "execute", "args": {"command": "touch a.txt"}, "id": "call-1"},
+                        {"name": "execute", "args": {"command": "touch b.txt"}, "id": "call-2"},
+                        {"name": "execute", "args": {"command": "touch c.txt"}, "id": "call-3"},
                     ],
                 ),
                 AIMessage(content="已完成"),
@@ -1918,17 +1928,85 @@ async def test_batch_tool_call_approval_restores_one_decision_per_hanging_call()
         await server.dispatch(
             _request("run.start", {"message": "批量执行", "thread_id": "batch", "run_id": "batch-run"}, "batch-start")
         )
-        interaction = await _wait_for(frames, lambda frame: frame.get("method") == "interaction.approval")
-        assert interaction["method"] == "interaction.approval"
+        # 串行审批：每个挂起调用各自弹窗，逐个应答 approve_once
+        for index in range(3):
+            interaction = await _wait_for(
+                frames,
+                lambda frame: frame.get("method") == "interaction.approval",
+                skip=index,
+            )
+            assert interaction["method"] == "interaction.approval"
+            await server.dispatch(
+                {
+                    "jsonrpc": "2.0",
+                    "id": interaction["id"],
+                    "result": {"decision": "approve_once"},
+                }
+            )
+        completed = await _wait_for(frames, lambda frame: frame.get("params", {}).get("type") == "run.completed")
+        assert completed["params"]["payload"]["finish_reason"] == "completed"
+
+
+async def test_batch_write_thread_approval_auto_approves_same_batch_siblings():
+    """同一批串行审批中首个 write_file 选“本线程允许”后，同批后续写入自动放行。
+
+    场景回归：用户一轮创建 a.txt/b.txt/c.txt，第一个弹窗选择“本线程允许”
+    后，会话通配规则（write_file, *）应立即作用于 _collect_serial_approvals
+    中排队的后续调用，不再弹窗；三个文件全部写成功。
+    """
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+    from langchain_core.runnables import Runnable
+    from harness_agent.runtime.agent import create_harness_agent
+    from harness_agent.host.agent_host import AgentHost
+
+    class ToolModel(FakeMessagesListChatModel):
+        def bind_tools(self, *_args: Any, **_kwargs: Any) -> Runnable:
+            return self
+
+    with TemporaryDirectory() as workspace:
+        targets = [Path(workspace) / name for name in ("a.txt", "b.txt", "c.txt")]
+        model = ToolModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": "write_file", "args": {"file_path": str(targets[0]), "content": "1"}, "id": "wf-1"},
+                        {"name": "write_file", "args": {"file_path": str(targets[1]), "content": "2"}, "id": "wf-2"},
+                        {"name": "write_file", "args": {"file_path": str(targets[2]), "content": "3"}, "id": "wf-3"},
+                    ],
+                ),
+                AIMessage(content="已创建三个文件"),
+            ]
+        )
+        model.profile = {"max_input_tokens": 200_000}
+        agent = create_harness_agent(
+            model,
+            cwd=workspace,
+            approval_mode="default",
+            enable_skills=False,
+            enable_memory=False,
+            enable_ask_user=False,
+        )
+        # host workspace 必须与 agent cwd 一致，否则协调器的越界写入
+        # 预检会把临时目录中的文件判为工作区外，从而拒绝自动放行
+        server = AgentHost(agent=agent, workspace=Path(workspace))
+        frames = await _capture_server(server)
         await server.dispatch(
-            {
-                "jsonrpc": "2.0",
-                "id": interaction["id"],
-                "result": {"decision": "approve_once"},
-            }
+            _request("run.start", {"message": "创建三个文件", "thread_id": "batch-write", "run_id": "batch-write-run"}, "batch-write-start")
+        )
+        interaction = await _wait_for(
+            frames, lambda frame: frame.get("method") == "interaction.approval"
+        )
+        await server.dispatch(
+            {"jsonrpc": "2.0", "id": interaction["id"], "result": {"decision": "approve_thread"}}
         )
         completed = await _wait_for(frames, lambda frame: frame.get("params", {}).get("type") == "run.completed")
         assert completed["params"]["payload"]["finish_reason"] == "completed"
+        approvals = [frame for frame in frames if frame.get("method") == "interaction.approval"]
+        assert len(approvals) == 1
+        for target in targets:
+            assert target.exists()
 
 
 async def test_plan_mode_returns_tool_message_without_writing_or_requesting_approval():

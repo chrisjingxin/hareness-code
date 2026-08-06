@@ -355,12 +355,20 @@ export function applyAgentEvent(state: TuiState, event: EventEnvelope): TuiState
     }
     case EventType.INTERACTION_RESOLVED: {
       const payload = event.payload
+      const resolvedId = stringValue(payload.request_id, "")
+      // 事件队列与反向请求通道不保序：串行审批中上一个请求的 resolved
+      // 事件可能晚于下一个审批请求到达，只清理解散对象匹配的阻塞状态，
+      // 否则刚弹出的下一个审批对话框会丢失状态、按键无法回写。
+      const resolvesApproval = next.pendingApproval?.requestId === resolvedId
+      const resolvesQuestion = next.pendingQuestion?.requestId === resolvedId
+      const pendingApproval = resolvesApproval ? undefined : next.pendingApproval
+      const pendingQuestion = resolvesQuestion ? undefined : next.pendingQuestion
       return {
         ...next,
-        pendingApproval: undefined,
-        pendingQuestion: undefined,
-        status: "正在继续执行",
-        timeline: resolveInteraction(next.timeline, runId, stringValue(payload.request_id, "")),
+        pendingApproval,
+        pendingQuestion,
+        status: pendingApproval || pendingQuestion ? next.status : "正在继续执行",
+        timeline: resolveInteraction(next.timeline, runId, resolvedId),
       }
     }
     case EventType.RUN_COMPLETED: {

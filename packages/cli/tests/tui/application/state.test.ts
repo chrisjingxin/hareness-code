@@ -150,6 +150,22 @@ test("审批和稳定 question ID 通过时间线 request 进入状态", () => {
   expect(interactions(state)[1]).toMatchObject({ id: "request-3", type: "question", status: "pending" })
 })
 
+test("晚到的 resolved 事件不清除串行审批中下一个弹窗", () => {
+  let state = startRun(createInitialState(), run, "创建三个文件")
+  state = applyInteractionRequest(state, request("approval", 1, { description: "（第 1/3 个待审批操作）写入 a.txt", requests: { action_requests: [] } }))
+  state = clearPendingInteraction(state, "approved")
+  // 事件队列与反向请求通道不保序：第二个审批请求先到，第一个的 resolved 事件后到
+  state = applyInteractionRequest(state, request("approval", 2, { description: "（第 2/3 个待审批操作）写入 b.txt", requests: { action_requests: [] } }))
+  expect(state.pendingApproval).toMatchObject({ requestId: "request-2" })
+  state = applyAgentEvent(state, event("interaction.resolved", 1, { request_id: "request-1", type: "approval" }))
+  expect(state.pendingApproval).toMatchObject({ requestId: "request-2" })
+  expect(state.status).toBe("等待工具审批")
+  expect(interactions(state)[1]).toMatchObject({ id: "request-2", status: "pending" })
+  state = applyAgentEvent(state, event("interaction.resolved", 2, { request_id: "request-2", type: "approval" }))
+  expect(state.pendingApproval).toBeUndefined()
+  expect(state.status).toBe("正在继续执行")
+})
+
 test("重复和倒序事件被忽略，sequence 缺口产生诊断但继续应用", () => {
   let state = startRun(createInitialState(), run, "生成组件")
   state = applyAgentEvent(state, event("content.delta", 2, { text: "新内容" }))

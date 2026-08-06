@@ -320,7 +320,17 @@ class TuiControllerImpl implements TuiController {
     }
     if (TERMINAL_EVENT_TYPES.has(event.type)) {
       const requestId = this.state.pendingApproval?.requestId ?? this.state.pendingQuestion?.requestId
-      if (requestId) this.settleAbandonedInteraction(requestId)
+      // 事件队列与反向请求通道不保序：串行审批中上一个请求的 resolved 事件
+      // 可能晚于下一个审批请求到达。此时若按"当前 pending"无条件废弃，刚登记的
+      // 下一个审批会被误删——对话框仍显示、焦点仍在，但按键回写查不到 resolver
+      // 而静默早退，表现为第二个审批键盘鼠标都卡死。因此 resolved 事件只在
+      // request_id 匹配时才废弃；run 级终态事件才清理所有未回写的 Interaction。
+      const resolvedId = event.type === EventType.INTERACTION_RESOLVED && typeof event.payload.request_id === "string"
+        ? event.payload.request_id
+        : ""
+      if (requestId && (resolvedId === "" ? event.type !== EventType.INTERACTION_RESOLVED : requestId === resolvedId)) {
+        this.settleAbandonedInteraction(requestId)
+      }
     }
     this.commit(current => applyAgentEvent(current, event))
   }

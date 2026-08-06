@@ -332,6 +332,103 @@ test("窄终端中的 /skills 使用单列浮层且保持可操作", async () =>
   }
 })
 
+test("串行审批竞态下第二个对话框回车仍可回写", async () => {
+  const { client, requests, approvals, writeServer } = createMockClient()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        client,
+        runtime,
+        onRequestExit: () => undefined,
+      }), { width: 100, height: 30 })
+      await setup.flush()
+    })
+
+    await act(async () => {
+      await setup.mockInput.typeText("删除两个文件")
+      setup.mockInput.pressEnter()
+      await setup.flush()
+    })
+    const run = requests.at(-1)
+    expect(run?.message).toBe("删除两个文件")
+
+    await act(async () => {
+      client.emit("event", {
+        event_id: crypto.randomUUID(),
+        type: "run.started",
+        thread_id: run?.threadId,
+        run_id: run?.runId,
+        sequence: 1,
+        timestamp_ms: Date.now(),
+        payload: {},
+      })
+      await setup.flush()
+    })
+
+    // 第一个审批反向请求
+    await act(async () => {
+      writeServer({ jsonrpc: "2.0", id: "request-1", method: "interaction.approval", params: approvalParams(run!, "（第 1/2 个待审批操作）删除 a.txt") })
+      await setup.flush()
+    })
+    await setup.waitForFrame(frame => frame.includes("需要审批") && frame.includes("1/2"))
+
+    await act(async () => {
+      setup.mockInput.pressEnter()
+      await Bun.sleep(0)
+      await setup.flush()
+    })
+    expect(approvals.map(item => [item.id, item.decision])).toEqual([["request-1", "approve_once"]])
+
+    // 真实竞态：第二个请求先于第一个的 resolved 事件到达
+    await act(async () => {
+      writeServer({ jsonrpc: "2.0", id: "request-2", method: "interaction.approval", params: approvalParams(run!, "（第 2/2 个待审批操作）删除 b.txt") })
+      await setup.flush()
+    })
+    await setup.waitForFrame(frame => frame.includes("2/2"))
+    await act(async () => {
+      client.emit("event", {
+        event_id: crypto.randomUUID(),
+        type: "interaction.resolved",
+        thread_id: run?.threadId,
+        run_id: run?.runId,
+        sequence: 2,
+        timestamp_ms: Date.now(),
+        payload: { request_id: "request-1", type: "approval" },
+      })
+      await setup.flush()
+    })
+
+    await act(async () => {
+      setup.mockInput.pressEnter()
+      await Bun.sleep(0)
+      await setup.flush()
+    })
+    expect(approvals.map(item => [item.id, item.decision])).toEqual([
+      ["request-1", "approve_once"],
+      ["request-2", "approve_once"],
+    ])
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+  }
+})
+
+/** 与 run_coordinator 串行审批相同形状的 wire params。 */
+function approvalParams(run: { threadId: string; runId: string }, description: string) {
+  return {
+    thread_id: run.threadId,
+    run_id: run.runId,
+    timeout_ms: 5000,
+    payload: {
+      interrupt_id: "interrupt-1",
+      description,
+      requests: JSON.stringify({ action_requests: [{ name: "delete_file", args: { file_path: "/a.txt" } }] }),
+      decisions: ["approve_once", "approve_thread", "approve_always", "reject", "reject_with_feedback"],
+    },
+  }
+}
+
 async function sendAndFinish(
   setup: Awaited<ReturnType<typeof testRender>>,
   client: AgentClient,
@@ -364,12 +461,20 @@ function createMockClient() {
   const stdin = new PassThrough()
   const client = new AgentClient(new StdioRpcTransport(stdin, stdout))
   const requests: Array<{ message: string; threadId: string; runId: string; requestedSkill?: { id: string; args?: string }; modelProfile?: string; modelSelection?: { primary_profile: string } }> = []
+  const approvals: Array<{ id: string; decision: string }> = []
+  const writeServer = (message: Record<string, unknown>) => {
+    stdout.write(`${JSON.stringify(message)}\n`)
+  }
 
   stdin.on("data", data => {
     for (const line of data.toString("utf8").split("\n")) {
       if (!line.trim()) continue
-      const request = JSON.parse(line) as { id?: string; method?: string; params?: Record<string, unknown> }
+      const request = JSON.parse(line) as { id?: string; method?: string; params?: Record<string, unknown>; result?: Record<string, unknown> }
       if (typeof request.id !== "string") continue
+      if (!request.method && typeof request.result?.decision === "string") {
+        approvals.push({ id: request.id, decision: request.result.decision })
+        continue
+      }
       if (request.method === "skills.list") {
         stdout.write(`${JSON.stringify({
           jsonrpc: "2.0",
@@ -440,5 +545,5 @@ function createMockClient() {
 `)
     }
   })
-  return { client, requests }
+  return { client, requests, approvals, writeServer }
 }
