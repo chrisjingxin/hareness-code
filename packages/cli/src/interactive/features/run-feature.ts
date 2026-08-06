@@ -64,6 +64,7 @@ export class RunFeature {
         if (this.activeRunHandle?.ref.runId !== run.ref.runId) return
         this.activeRunHandle = null
         ctx.commit(current => markRunFailed(current, run.ref.runId, errorMessage(error)))
+        options.onRunFinish()
       })
 
       // 消费事件流；终态事件经 applyAgentEvent 收敛 activeRun，事件流随之自然结束。
@@ -81,6 +82,7 @@ export class RunFeature {
           if (active?.runId === run.ref.runId) {
             this.activeRunHandle = null
             ctx.commit(current => markRunFailed(current, run.ref.runId, errorMessage(error)))
+            options.onRunFinish()
           }
         }
       })()
@@ -91,9 +93,10 @@ export class RunFeature {
         options.onAbandonInteraction()
         options.onRunFinish()
       }).catch(() => {
-        // completion 拒绝时事件流已负责收敛；这里只兜底清理句柄。
+        // completion 拒绝（非事件流路径的失败）也要收敛 Thread catalog 与选择。
         if (this.activeRunHandle?.ref.runId !== run.ref.runId) return
         this.activeRunHandle = null
+        options.onRunFinish()
       })
 
       return { status: "accepted" }

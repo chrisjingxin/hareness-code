@@ -194,6 +194,9 @@ export function WebApp(props: {
                 <button type="button" role="menuitem" className="header-menu-item" onClick={() => { onIntent({ type: "theme-set", theme: nextTheme(snapshot.theme) }) }}>
                   {snapshot.theme === "light" ? "使用深色主题" : "使用浅色主题"}
                 </button>
+                <button type="button" role="menuitem" className="header-menu-item" onClick={() => { onIntent({ type: "approval-mode-cycle" }) }}>
+                  切换审批模式（当前：{approvalModeLabel(interactive.runtime)}）
+                </button>
                 <button type="button" role="menuitem" className="header-menu-item" onClick={() => { onIntent({ type: "panel-open", panel: "help" }) }}>帮助</button>
                 {narrow ? (
                   <button type="button" role="menuitem" className="header-menu-item" disabled={!props.active || snapshot.leaving || returnBlocked} title={returnBlocked ? "当前任务结束或交互完成后可返回 TUI" : "归还控制权并恢复 TUI"} onClick={() => { onIntent({ type: "return-to-tui" }) }}>返回 TUI</button>
@@ -213,7 +216,7 @@ export function WebApp(props: {
         <ThreadSidebar snapshot={snapshot} dispatch={onIntent} narrow={narrow} disabled={readOnly} />
         <main className="conversation-column">
           <div className="timeline-scroll">
-            <Timeline snapshot={snapshot} dispatch={onIntent} disabled={readOnly} />
+            <Timeline snapshot={snapshot} dispatch={onIntent} />
           </div>
           {/* Interaction 卡固定在 composer 上方；无待处理请求时渲染空占位。 */}
           <div className="interaction-dock">

@@ -22,6 +22,7 @@ import type {
   ToolCard,
 } from "../../interactive/state"
 import type { WebAdapterSnapshot, WebIntent, WebScrollRequest } from "../application/adapter"
+import { toolKey } from "../application/adapter"
 import { Markdown } from "./markdown"
 
 /** 自动滚动判定阈值：用户视口底部离容器底部的距离小于该值即视为靠近底部。 */
@@ -37,11 +38,9 @@ const BOTTOM_THRESHOLD_PX = 48
 export function Timeline({
   snapshot,
   dispatch,
-  disabled = false,
 }: {
   snapshot: WebAdapterSnapshot
   dispatch: (intent: WebIntent) => void
-  disabled?: boolean
 }): ReactElement {
   const timeline = snapshot.interactive.timeline
   const pendingRequestId = snapshot.interactive.interaction?.requestId ?? null
@@ -90,11 +89,11 @@ export function Timeline({
   }, [scrollContainerToBottom])
 
   const handleToggleTool = useCallback(
-    (toolId: string) => {
-      if (disabled) return
-      void dispatch({ type: "tool-toggle", toolId })
+    (runId: string, toolId: string) => {
+      // Tool 展开是纯本地表现（不修改 Agent 状态），不受只读/断连状态阻断。
+      void dispatch({ type: "tool-toggle", runId, toolId })
     },
-    [disabled, dispatch],
+    [dispatch],
   )
 
   const visibleItems = timeline.filter(item => {
@@ -179,7 +178,7 @@ function TimelineRowImpl({
 }: {
   item: TimelineItem
   expandedTools: ReadonlySet<string>
-  onToggleTool: (toolId: string) => void
+  onToggleTool: (runId: string, toolId: string) => void
 }): ReactElement {
   if (item.type === "message") {
     if (item.message.role === "assistant" && item.message.streaming === true) {
@@ -192,7 +191,7 @@ function TimelineRowImpl({
       <div className="timeline-tool">
         <MemoToolCard
           tool={item.tool}
-          expanded={expandedTools.has(item.tool.id)}
+          expanded={expandedTools.has(toolKey(item.tool.runId, item.tool.id))}
           onToggle={onToggleTool}
         />
       </div>
@@ -281,7 +280,7 @@ function ToolCardImpl({
 }: {
   tool: ToolCard
   expanded: boolean
-  onToggle: (toolId: string) => void
+  onToggle: (runId: string, toolId: string) => void
 }): ReactElement {
   const summary = toolArgumentSummary(tool.arguments)
   return (
@@ -290,7 +289,7 @@ function ToolCardImpl({
         type="button"
         className="tool-card-header"
         aria-expanded={expanded}
-        onClick={() => onToggle(tool.id)}
+        onClick={() => onToggle(tool.runId, tool.id)}
       >
         <span className="tool-card-name">{tool.name}</span>
         {summary ? <span className="tool-card-args">{summary}</span> : null}

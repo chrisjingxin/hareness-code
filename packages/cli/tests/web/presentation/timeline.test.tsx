@@ -6,7 +6,7 @@ import { act, useState } from "react"
 import { createElement, type ReactElement } from "react"
 
 import { Timeline } from "../../../src/web/presentation/timeline"
-import type { WebAdapterSnapshot, WebIntent } from "../../../src/web/application/adapter"
+import { toolKey, type WebAdapterSnapshot, type WebIntent } from "../../../src/web/application/adapter"
 import type {
   ConversationMessage,
   InteractionCard,
@@ -96,7 +96,51 @@ describe("Timeline", () => {
       const header = card?.querySelector<HTMLButtonElement>(".tool-card-header")
       expect(header?.getAttribute("aria-expanded")).toBe("false")
       act(() => { header?.click() })
-      expect(intents).toEqual([{ type: "tool-toggle", toolId: "t1" }])
+      expect(intents).toEqual([{ type: "tool-toggle", runId: "run-1", toolId: "t1" }])
+    } finally {
+      handle.unmount()
+    }
+  })
+
+  test("两个 Run 中相同 toolId 的展开状态互不影响", () => {
+    const interactive = makeInteractive({
+      timeline: [
+        toolItem({ id: "t1", name: "read_file", runId: "run-a" }),
+        toolItem({ id: "t1", name: "read_file", runId: "run-b" }),
+      ],
+    })
+    const Harness = (): ReactElement => {
+      const [snapshot, setSnapshot] = useState<WebAdapterSnapshot>(() => makeSnapshot({ interactive }))
+      const dispatch = (intent: WebIntent): void => {
+        if (intent.type === "tool-toggle") {
+          setSnapshot(prev => {
+            const key = toolKey(intent.runId, intent.toolId)
+            const next = new Set(prev.expandedTools)
+            if (next.has(key)) next.delete(key)
+            else next.add(key)
+            return { ...prev, expandedTools: next }
+          })
+        }
+      }
+      return <Timeline snapshot={snapshot} dispatch={dispatch} />
+    }
+    const handle = render(<Harness />)
+    const headers = (): NodeListOf<HTMLButtonElement> => handle.container.querySelectorAll<HTMLButtonElement>(".tool-card-header")
+    const clickAt = (index: number): void => {
+      act(() => { headers()[index]?.click() })
+    }
+    try {
+      expect(headers().length).toBe(2)
+      expect(headers()[0]?.getAttribute("aria-expanded")).toBe("false")
+      clickAt(0)
+      expect(headers()[0]?.getAttribute("aria-expanded")).toBe("true")
+      expect(headers()[1]?.getAttribute("aria-expanded")).toBe("false")
+      clickAt(1)
+      expect(headers()[0]?.getAttribute("aria-expanded")).toBe("true")
+      expect(headers()[1]?.getAttribute("aria-expanded")).toBe("true")
+      clickAt(0)
+      expect(headers()[0]?.getAttribute("aria-expanded")).toBe("false")
+      expect(headers()[1]?.getAttribute("aria-expanded")).toBe("true")
     } finally {
       handle.unmount()
     }
@@ -116,7 +160,7 @@ describe("Timeline", () => {
         if (intent.type === "tool-toggle") {
           setSnapshot(prev => ({
             ...prev,
-            expandedTools: new Set(prev.expandedTools).add(intent.toolId),
+            expandedTools: new Set(prev.expandedTools).add(toolKey(intent.runId, intent.toolId)),
           }))
         }
       }

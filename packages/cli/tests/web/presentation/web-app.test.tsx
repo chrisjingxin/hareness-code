@@ -117,6 +117,45 @@ describe("WebApp", () => {
     }
   })
 
+  test("header menu 提供审批模式切换：展示当前模式并派发 approval-mode-cycle", () => {
+    const { adapter, handle } = mountWebApp(true, makeSnapshot())
+    try {
+      act(() => {
+        adapter.emit(makeSnapshot({ headerMenuOpen: true }))
+      })
+      const menu = handle.container.querySelector(".header-menu")
+      expect(menu).not.toBeNull()
+      const approvalItem = Array.from(handle.container.querySelectorAll<HTMLButtonElement>(".header-menu-item"))
+        .find(item => item.textContent?.includes("审批模式"))
+      expect(approvalItem?.textContent).toContain("default")
+      act(() => { approvalItem?.click() })
+      expect(adapter.intentLog).toContainEqual({ type: "approval-mode-cycle" })
+    } finally {
+      handle.unmount()
+    }
+  })
+
+  test("连接断开（只读）时 Tool 仍可展开：本地表现不受连接状态阻断", () => {
+    const interactive = makeInteractive({
+      connection: { status: "closed", message: "连接已断开" },
+      timeline: [
+        {
+          type: "tool",
+          tool: { id: "t1", runId: "run-1", name: "exec", arguments: "", output: "结果", status: "completed" },
+        },
+      ],
+    })
+    const { adapter, handle } = mountWebApp(true, makeSnapshot({ interactive }))
+    try {
+      const header = handle.container.querySelector<HTMLButtonElement>(".tool-card-header")
+      expect(header).not.toBeNull()
+      act(() => { header?.click() })
+      expect(adapter.intentLog).toContainEqual({ type: "tool-toggle", runId: "run-1", toolId: "t1" })
+    } finally {
+      handle.unmount()
+    }
+  })
+
   test("data-theme 跟随 snapshot.theme 变化；theme-set 派发到 adapter", () => {
     const adapter = createFakeAdapter(makeSnapshot())
     const handle = render(<WebApp adapter={adapter} active={true} />)

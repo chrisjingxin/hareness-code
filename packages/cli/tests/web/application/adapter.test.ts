@@ -5,7 +5,9 @@ import { expect, test } from "bun:test"
 import type { InteractiveIntent, InteractiveSnapshot, IntentOutcome } from "../../../src/interactive/types"
 import { buildWebUiState, type PresentationState, type WebUiState } from "../../../src/presentation-coordinator"
 import {
+  createDefaultFrameScheduler,
   createWebInteractiveAdapter,
+  toolKey,
   type WebAdapterSnapshot,
   type WebFrameScheduler,
   type WebIntent,
@@ -53,7 +55,7 @@ function createFakeClient(initial = makeInteractive()): WebUiClient & {
   const handoffListeners = new Set<(state: PresentationState) => void>()
   const client = {
     state: buildWebUiState(initial),
-    handoffState: { phase: "web-active", handoffId: "h1" } as PresentationState,
+    handoffState: { phase: "opening-web", handoffId: "h1" } as PresentationState,
     intents: [] as InteractiveIntent[],
     nextOutcome: null as IntentOutcome | null,
     readyCalls: 0,
@@ -223,6 +225,23 @@ test("request-handoff result 只显示本地通知，不调用 client 任何方�
   expect(client.readyCalls).toBe(0)
 })
 
+test("handoff 进入 web-active 时自动刷新 Thread catalog；非 web-active 不刷新", async () => {
+  const { adapter, client } = makeAdapter()
+  expect(client.intents).toEqual([])
+  client.pushHandoffState({ phase: "opening-web", handoffId: "h1" })
+  expect(client.intents).toEqual([])
+  client.pushHandoffState({ phase: "web-active", handoffId: "h1" })
+  expect(client.intents).toContainEqual({ type: "catalog.refresh", catalog: "threads" })
+})
+
+test("连接建立时已处于 web-active（重连）也会刷新 Thread catalog", async () => {
+  const client = createFakeClient()
+  client.pushHandoffState({ phase: "web-active", handoffId: "h1" })
+  const adapter = createWebInteractiveAdapter({ client })
+  expect(client.intents).toContainEqual({ type: "catalog.refresh", catalog: "threads" })
+  await adapter.close()
+})
+
 test("request-exit result 触发 client.requestExit 并设置 leaving", async () => {
   const { adapter, client } = makeAdapter()
   client.nextOutcome = { status: "accepted", effects: [{ type: "request-exit" }] }
@@ -245,6 +264,41 @@ test("Thread/Model/Skill/MCP click 意图只携带稳定 ID 或 typed input", as
   expect(intents).toEqual(["thread.open", "model.select", "skill.arm", "skill.clear", "mcp.add", "mcp.remove", "run.cancel"])
   expect(client.intents[0]).toEqual({ type: "thread.open", threadId: "t-9" })
   expect(client.intents[1]).toEqual({ type: "model.select", profileId: "p-1" })
+})
+
+test("model-select rejected 时保持面板打开并显示错误；不关闭面板", async () => {
+  const { adapter, client } = makeAdapter()
+  await adapter.dispatch({ type: "panel-open", panel: "models" })
+  client.nextOutcome = { status: "rejected", code: "busy", message: "运行中不能切换模型" }
+  await adapter.dispatch({ type: "model-select", profileId: "p-1" })
+  const snapshot = adapter.getSnapshot()
+  expect(snapshot.activePanel).toBe("models")
+  expect(snapshot.panelSearch.models.error).toBe("运行中不能切换模型")
+  expect(snapshot.panelSearch.models.submitting).toBe(false)
+})
+
+test("model-select accepted 后关闭面板并清除 submitting", async () => {
+  const { adapter, client } = makeAdapter()
+  await adapter.dispatch({ type: "panel-open", panel: "models" })
+  client.nextOutcome = { status: "accepted" }
+  await adapter.dispatch({ type: "model-select", profileId: "p-1" })
+  const snapshot = adapter.getSnapshot()
+  expect(snapshot.activePanel).toBeNull()
+  expect(snapshot.panelSearch.models.submitting).toBe(false)
+})
+
+test("thread-new rejected 时显示 transient notice", async () => {
+  const { adapter, client } = makeAdapter()
+  client.nextOutcome = { status: "rejected", code: "busy", message: "存在未完成交互" }
+  await adapter.dispatch({ type: "thread-new" })
+  expect(adapter.getSnapshot().transientNotice).toBe("存在未完成交互")
+})
+
+test("thread-select rejected 时显示 transient notice", async () => {
+  const { adapter, client } = makeAdapter()
+  client.nextOutcome = { status: "rejected", code: "busy", message: "当前任务执行中" }
+  await adapter.dispatch({ type: "thread-select", threadId: "t-9" })
+  expect(adapter.getSnapshot().transientNotice).toBe("当前任务执行中")
 })
 
 test("returnToTui 正常时发送 handoff.return；active Run 或 pending interaction 时阻止并通知", async () => {
@@ -296,12 +350,18 @@ test("confirmation-resolve 把 confirmationId/confirmed 透传给 client", async
   expect(client.intents).toEqual([{ type: "confirmation.resolve", confirmationId: "c-1", confirmed: true }])
 })
 
-test("tool-toggle 维护 expandedTools 集合", async () => {
+test("tool-toggle 使用 runId:toolId 复合键，跨 Run 相同 toolId 不冲突", async () => {
   const { adapter } = makeAdapter()
-  await adapter.dispatch({ type: "tool-toggle", toolId: "tool-1" })
-  expect(adapter.getSnapshot().expandedTools.has("tool-1")).toBe(true)
-  await adapter.dispatch({ type: "tool-toggle", toolId: "tool-1" })
-  expect(adapter.getSnapshot().expandedTools.has("tool-1")).toBe(false)
+  await adapter.dispatch({ type: "tool-toggle", runId: "run-a", toolId: "t1" })
+  const snapshot = adapter.getSnapshot()
+  expect(snapshot.expandedTools.has(toolKey("run-a", "t1"))).toBe(true)
+  expect(snapshot.expandedTools.has(toolKey("run-b", "t1"))).toBe(false)
+  await adapter.dispatch({ type: "tool-toggle", runId: "run-b", toolId: "t1" })
+  expect(adapter.getSnapshot().expandedTools.has(toolKey("run-b", "t1"))).toBe(true)
+  expect(adapter.getSnapshot().expandedTools.has(toolKey("run-a", "t1"))).toBe(true)
+  await adapter.dispatch({ type: "tool-toggle", runId: "run-a", toolId: "t1" })
+  expect(adapter.getSnapshot().expandedTools.has(toolKey("run-a", "t1"))).toBe(false)
+  expect(adapter.getSnapshot().expandedTools.has(toolKey("run-b", "t1"))).toBe(true)
 })
 
 test("panel search 写入 panelSearch；panel open 触发对应 catalog.refresh", async () => {
@@ -356,6 +416,44 @@ test("theme-set 更新主题并发布一次；重复设置当前值不重复发�
   scheduler.runScheduled()
   expect(publishes.length).toBe(1)
 })
+
+test("approval-mode-cycle 转发共享 Core 的 approval-mode.cycle", async () => {
+  const { adapter, client } = makeAdapter()
+  await adapter.dispatch({ type: "approval-mode-cycle" })
+  expect(client.intents).toContainEqual({ type: "approval-mode.cycle" })
+})
+
+test("createDefaultFrameScheduler 包装宿主 rAF，避免 detached 调用 Illegal invocation", async () => {
+    // 模拟 window 上的宿主方法：detached 调用（this !== globalThis）必须抛 Illegal invocation。
+    const frames: FrameRequestCallback[] = []
+    function hostRequestAnimationFrame(this: unknown, callback: FrameRequestCallback): number {
+      if (this !== globalThis) throw new TypeError("Illegal invocation")
+      frames.push(callback)
+      return 1
+    }
+    function hostCancelAnimationFrame(this: unknown, _handle: number): void {
+      if (this !== globalThis) throw new TypeError("Illegal invocation")
+    }
+    const originalRaf = globalThis.requestAnimationFrame
+    const originalCaf = globalThis.cancelAnimationFrame
+    Object.defineProperty(globalThis, "requestAnimationFrame", { value: hostRequestAnimationFrame, configurable: true, writable: true })
+    Object.defineProperty(globalThis, "cancelAnimationFrame", { value: hostCancelAnimationFrame, configurable: true, writable: true })
+    try {
+      const scheduler = createDefaultFrameScheduler()
+      let fired = 0
+      scheduler.schedule(() => { fired += 1 })
+      scheduler.schedule(() => { fired += 10 })
+      expect(frames.length).toBe(1)
+      frames[0]!(0)
+      expect(fired).toBe(10)
+      scheduler.cancel()
+      expect(frames.length).toBe(1)
+    } finally {
+      Object.defineProperty(globalThis, "requestAnimationFrame", { value: originalRaf, configurable: true, writable: true })
+      Object.defineProperty(globalThis, "cancelAnimationFrame", { value: originalCaf, configurable: true, writable: true })
+    }
+  })
+
 
 test("theme/header menu 意图是纯表现动作：不调用 client 业务方法", async () => {
   const { adapter, client } = makeAdapter()

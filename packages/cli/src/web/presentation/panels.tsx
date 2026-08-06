@@ -336,6 +336,7 @@ function ModelsPanel({
 }): React.ReactElement {
   const catalog = snapshot.interactive.catalogs.models
   const query = snapshot.panelSearch.models.query
+  const panelError = snapshot.panelSearch.models.error
   const items = filterModels(catalog.items, query)
   const selectedId = snapshot.interactive.selection.requestedModelProfileId
     ?? snapshot.interactive.selection.actualModel?.id
@@ -350,7 +351,13 @@ function ModelsPanel({
         onRefresh={() => dispatch({ type: "panel-open", panel: "models" })}
         disabled={disabled}
       />
-      {catalog.status === "error" ? (
+      {panelError ? (
+        <PanelError
+          message={panelError}
+          onRetry={() => dispatch({ type: "panel-open", panel: "models" })}
+          disabled={disabled}
+        />
+      ) : catalog.status === "error" ? (
         <PanelError
           message={catalog.message}
           onRetry={() => dispatch({ type: "panel-open", panel: "models" })}

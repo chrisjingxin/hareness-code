@@ -17,6 +17,11 @@ function skillMenuItem(skill: Record<string, unknown>): SkillMenuItem | undefine
   }
 }
 
+/** 按最近更新时间降序排列 Thread；TUI 与 Web 共用同一排序，避免两端顺序不一致。 */
+export function sortThreadsByRecency(threads: readonly ThreadSummary[]): ThreadSummary[] {
+  return threads.slice().sort((a, b) => b.updated_at_ms - a.updated_at_ms)
+}
+
 export type CatalogKey = "threads" | "models" | "skills" | "mcp"
 
 export type InternalCatalog<T> = LoadableCatalog<T> & { epoch: number }
@@ -75,7 +80,7 @@ export class CatalogFeature {
     try {
       const result = await ctx.gateway.listThreads()
       if (this.closed || epoch !== this.state.threads.epoch) return
-      this.state.threads = { status: "ready", items: result.threads, epoch }
+      this.state.threads = { status: "ready", items: sortThreadsByRecency(result.threads), epoch }
       ctx.publish()
     } catch (error) {
       if (this.closed || epoch !== this.state.threads.epoch) return

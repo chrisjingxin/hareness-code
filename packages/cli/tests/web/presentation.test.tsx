@@ -104,7 +104,7 @@ test("Timeline Tool 默认独立渲染，展开只发送 tool-toggle intent", as
   expect(header).not.toBeNull()
   expect(container.querySelector(".tool-details")).toBeNull()
   await act(async () => { header!.click() })
-  expect(intents).toEqual([{ type: "tool-toggle", toolId: "tool-1" }])
+  expect(intents).toEqual([{ type: "tool-toggle", runId: "run-1", toolId: "tool-1" }])
   unmount()
 })
 

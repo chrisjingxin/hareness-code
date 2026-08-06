@@ -101,7 +101,10 @@ export class InteractiveControllerImpl implements InteractiveController {
 
       case "thread.open":
         return this.threadFeature.openThread(intent.threadId, this.featureContext, {
-          hasPendingInteraction: this.hasPendingInteraction, onBeforeOpen: () => this.resetThreadState(), onSuccess: () => this.refreshModelSelection(),
+          hasPendingInteraction: this.hasPendingInteraction, onBeforeOpen: () => this.resetThreadState(), onSuccess: () => {
+            this.refreshModelSelection()
+            void this.catalogFeature.refreshThreadCatalog(this.featureContext)
+          },
         })
 
       case "model.select":
@@ -182,7 +185,10 @@ export class InteractiveControllerImpl implements InteractiveController {
       requestedModelProfileId: this.modelFeature.requestedModelProfileId,
       armedSkill: this.skillFeature.armedSkill,
       onEvent: event => this.timelineFeature.processAgentEvent(event, this.featureContext),
-      onRunFinish: () => this.refreshModelSelection(),
+      onRunFinish: () => {
+        this.refreshModelSelection()
+        void this.catalogFeature.refreshThreadCatalog(this.featureContext)
+      },
       onAbandonInteraction: () => this.interactionFeature.abandonPendingInteraction(this.featureContext),
     })
   }

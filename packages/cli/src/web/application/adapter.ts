@@ -2,6 +2,7 @@
 
 import type { ApprovalDecision, InteractiveIntent, InteractiveMcpInput, IntentOutcome, InteractiveSnapshot, InteractiveResponse } from "../../interactive/types"
 import type { CommandMenuItem } from "../../interactive/commands"
+import type { PresentationState } from "../../presentation-coordinator"
 import { filterCommandMenuItems } from "../../presentation-shared"
 import type { WebUiClient } from "../ui-client"
 
@@ -105,7 +106,8 @@ export type WebIntent =
   | { type: "interaction-draft-change"; requestId: string; patch: WebInteractionDraftPatch }
   | { type: "interaction-submit"; requestId: string; response: InteractiveResponse }
   | { type: "confirmation-resolve"; confirmationId: string; confirmed: boolean }
-  | { type: "tool-toggle"; toolId: string }
+  | { type: "tool-toggle"; runId: string; toolId: string }
+  | { type: "approval-mode-cycle" }
   | { type: "cancel-run" }
   | { type: "sidebar-toggle"; open: boolean }
   | { type: "theme-set"; theme: WebTheme }
@@ -148,6 +150,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
   private readonly frameScheduler: WebFrameScheduler
   private readonly listeners = new Set<(snapshot: WebAdapterSnapshot) => void>()
   private readonly unsubscribeState: () => void
+  private readonly unsubscribeHandoff: () => void
 
   private snapshot: WebAdapterSnapshot
   private draft = ""
@@ -165,6 +168,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
   private leavingFlag = false
   private transientNotice: string | null = null
   private pendingScrollRequest: WebScrollRequest = null
+  private webActiveRefreshSent = false
   private closed = false
 
   constructor(options: WebAdapterOptions) {
@@ -172,6 +176,9 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     this.frameScheduler = options.frameScheduler ?? createDefaultFrameScheduler()
     this.snapshot = this.buildSnapshot()
     this.unsubscribeState = this.client.subscribeState(() => this.onViewUpdate())
+    this.unsubscribeHandoff = this.client.subscribeHandoff(state => this.onHandoffState(state))
+    // 重连时 handoff.state(web-active) 可能在 Adapter 创建前就已到达，构造时补一次检查。
+    this.onHandoffState(this.client.getHandoffState())
   }
 
   getSnapshot(): WebAdapterSnapshot {
@@ -234,7 +241,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
         await this.selectThread(intent.threadId)
         return
       case "thread-new":
-        await this.client.submitIntent({ type: "command.execute", commandId: "thread.new" })
+        await this.executeCoreIntent({ type: "command.execute", commandId: "thread.new" })
         return
       case "thread-refresh":
         await this.client.submitIntent({ type: "catalog.refresh", catalog: "threads" })
@@ -267,7 +274,10 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
         await this.client.submitIntent({ type: "confirmation.resolve", confirmationId: intent.confirmationId, confirmed: intent.confirmed })
         return
       case "tool-toggle":
-        this.toggleTool(intent.toolId)
+        this.toggleTool(intent.runId, intent.toolId)
+        return
+      case "approval-mode-cycle":
+        await this.client.submitIntent({ type: "approval-mode.cycle" })
         return
       case "cancel-run":
         await this.client.submitIntent({ type: "run.cancel" })
@@ -297,7 +307,16 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     if (this.closed) return
     this.closed = true
     this.unsubscribeState()
+    this.unsubscribeHandoff()
     this.frameScheduler.cancel()
+  }
+
+  /** Web 接管成功后预取 Thread catalog；每个 Adapter 实例只触发一次（含重连时已 web-active）。 */
+  private onHandoffState(state: PresentationState): void {
+    if (this.webActiveRefreshSent) return
+    if (state.phase !== "web-active") return
+    this.webActiveRefreshSent = true
+    void this.client.submitIntent({ type: "catalog.refresh", catalog: "threads" })
   }
 
   /** 视图更新（replace/patch 合并后）→ 与本地状态一起重发布。 */
@@ -527,21 +546,30 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     this.schedulePublish()
   }
 
-  /** 切换 Thread：依赖共享 Core 做 generation 校验。 */
+  /** 切换 Thread：依赖共享 Core 做 generation 校验；rejected 时保留选择并提示。 */
   private async selectThread(threadId: string): Promise<void> {
     this.activePanel = null
     // 移动端选中 Thread 后自动收起抽屉；桌面端该 flag 始终为 false，无副作用。
     this.sidebarOpenFlag = false
     this.publishNow()
-    await this.client.submitIntent({ type: "thread.open", threadId })
+    await this.executeCoreIntent({ type: "thread.open", threadId })
   }
 
-  /** 切换模型：能力门禁与不可用性都交由共享 Core 处理。 */
+  /** 切换模型：能力门禁与不可用性都交由共享 Core 处理；rejected 不关闭面板并显示错误。 */
   private async selectModel(profileId: string): Promise<void> {
     this.panelState.models = { ...this.panelState.models, submitting: true, error: null }
     this.publishNow()
     try {
-      await this.client.submitIntent({ type: "model.select", profileId })
+      const outcome = await this.executeCoreIntent(
+        { type: "model.select", profileId },
+        {
+          onRejected: message => {
+            this.panelState.models = { ...this.panelState.models, submitting: false, error: message }
+            this.publishNow()
+          },
+        },
+      )
+      if (outcome.status === "rejected") return
       this.activePanel = null
       this.panelState.models = { ...this.panelState.models, submitting: false }
       this.publishNow()
@@ -603,11 +631,12 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     await this.client.submitIntent({ type: "interaction.respond", requestId, response })
   }
 
-  /** 折叠/展开单个 Tool 卡片。 */
-  private toggleTool(toolId: string): void {
+  /** 折叠/展开单个 Tool 卡片；展开状态只属于表现层，使用 runId+toolId 复合键。 */
+  private toggleTool(runId: string, toolId: string): void {
+    const key = toolKey(runId, toolId)
     const next = new Set(this.expandedTools)
-    if (next.has(toolId)) next.delete(toolId)
-    else next.add(toolId)
+    if (next.has(key)) next.delete(key)
+    else next.add(key)
     this.expandedTools = next
     this.schedulePublish()
   }
@@ -655,6 +684,23 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     }
   }
 
+  /**
+   * 统一业务意图执行器：submitIntent 恒 resolve（rejected 也是 outcome），
+   * 因此所有业务动作必须显式检查 outcome，不能依赖 try/catch。
+   * rejected 默认显示 transient notice；需要面板内错误时可注入 onRejected。
+   */
+  private async executeCoreIntent(
+    intent: InteractiveIntent,
+    options: { onRejected?: (message: string) => void } = {},
+  ): Promise<IntentOutcome> {
+    const outcome = await this.client.submitIntent(intent)
+    if (outcome.status === "rejected") {
+      if (options.onRejected) options.onRejected(outcome.message)
+      else this.showTransientNotice(outcome.message)
+    }
+    return outcome
+  }
+
   /** 解释 IntentOutcome：根据 PresentationEffect 执行本地呈现层副作用。 */
   private async handleInteractiveResult(outcome: IntentOutcome): Promise<void> {
     if (outcome.status === "rejected") {
@@ -692,10 +738,20 @@ export function createWebInteractiveAdapter(options: WebAdapterOptions): WebInte
   return new WebInteractiveAdapterImpl(options)
 }
 
+/** Tool 展开状态的复合键：runId + toolId，跨 Run 相同 toolId 不冲突。 */
+export function toolKey(runId: string, toolId: string): string {
+  return `${runId}:${toolId}`
+}
+
 /** 创建默认 frameScheduler：使用 requestAnimationFrame，回退到 setTimeout(16)。 */
 export function createDefaultFrameScheduler(): WebFrameScheduler {
   if (typeof globalThis.requestAnimationFrame === "function") {
-    return new RafFrameScheduler(globalThis.requestAnimationFrame, globalThis.cancelAnimationFrame)
+    // 直接传函数引用会在调用时丢失 receiver（window 上的 rAF/cAF 是宿主方法），
+    // 触发 "Illegal invocation" 导致 schedulePublish 静默失败；必须用箭头包装保持 this。
+    return new RafFrameScheduler(
+      callback => globalThis.requestAnimationFrame(callback),
+      handle => globalThis.cancelAnimationFrame(handle),
+    )
   }
   return new TimeoutFrameScheduler(16)
 }
