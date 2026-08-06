@@ -80,3 +80,10 @@ test("历史双轨 class 已删除：同一组件不再保留旧 class 规则", 
 test("保留 prefers-reduced-motion 可访问性规则", () => {
   expect(css).toContain("prefers-reduced-motion")
 })
+
+test("行号列保持逐行垂直排列：.line-numbers 必须 white-space: pre（否则 \\n 被折叠为一行）", () => {
+  const block = css.slice(css.indexOf(".line-numbers {"), css.indexOf(".file-code-pre"))
+  expect(block).toContain("white-space: pre")
+  // 与代码侧同字号同行高，保证行号与代码行一一对齐。
+  expect(block).toContain("line-height: 1.6")
+})

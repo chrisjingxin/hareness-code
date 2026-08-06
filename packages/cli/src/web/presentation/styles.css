@@ -786,6 +786,8 @@ button.meta-chip { cursor: pointer; }
   line-height: 1.6;
   text-align: right;
   user-select: none;
+  /* 行号文本用 \n 连接：必须保留换行，否则所有行号折叠为一行水平排列。 */
+  white-space: pre;
 }
 .file-code-pre { margin: 0; padding: 10px 12px; white-space: pre; font-size: 13px; line-height: 1.6; }
 .file-code-pre code { padding: 0; border-radius: 0; background: transparent; color: var(--text); font: inherit; word-break: normal; }
