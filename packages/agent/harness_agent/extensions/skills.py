@@ -34,6 +34,9 @@ _INSTALL_JOURNAL_VERSION = 1
 _NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 _FRONTMATTER_RE = re.compile(r"\A---\r?\n(?P<header>.*?)\r?\n---(?:\r?\n|\Z)(?P<body>.*)\Z", re.DOTALL)
+# Windows 没有 O_NOFOLLOW/O_DIRECTORY，也不支持目录 fd 与 dir_fd 系列操作；
+# 平台分支集中在安全文件原语内部，调用方保持单一路径。
+_IS_WINDOWS = os.name == "nt"
 
 
 class SkillError(ValueError):
@@ -440,11 +443,11 @@ class SkillRegistry:
                             parent_stat=entry_stat,
                         )
                     finally:
-                        os.close(entry_fd)
+                        entry_fd.close()
         except (OSError, SkillError) as exc:
             diagnostics.append(f"{root}: {exc}")
         finally:
-            os.close(root_fd)
+            root_fd.close()
 
     def _scan_skill_fd(
         self,
@@ -457,13 +460,13 @@ class SkillRegistry:
         label: str,
         entry_name: str,
         skill_path: Path,
-        skill_fd: int,
+        skill_fd: _DirectoryHandle,
         path_stat: os.stat_result | None = None,
-        parent_fd: int | None = None,
+        parent_fd: _DirectoryHandle | None = None,
         parent_name: str | None = None,
         parent_stat: os.stat_result | None = None,
     ) -> None:
-        """从已锚定 Skill fd 读取 manifest 和完整资源树。"""
+        """从已锚定 Skill 目录句柄读取 manifest 和完整资源树。"""
         manifest = skill_path / "SKILL.md"
         try:
             manifest_info = _stat_entry_at(skill_fd, "SKILL.md")
@@ -494,7 +497,7 @@ class SkillRegistry:
                 user_invocable=parsed["user_invocable"],
                 argument_hint=parsed["argument_hint"],
                 root=skill_path,
-                root_identity=path_stat or os.fstat(skill_fd),
+                root_identity=path_stat or skill_fd.fstat(),
                 manifest=manifest,
                 digest=_digest_bytes(raw_manifest),
                 enabled=skill_id not in set(self._state.get("disabled", [])),
@@ -590,7 +593,7 @@ class SkillRegistry:
                                         parent_stat=version_stat,
                                     )
                                 finally:
-                                    os.close(version_fd)
+                                    version_fd.close()
                                 break
                         finally:
                             try:
@@ -600,17 +603,17 @@ class SkillRegistry:
                                     skill_parent_stat,
                                 )
                             finally:
-                                os.close(skill_parent_fd)
+                                skill_parent_fd.close()
                 finally:
                     try:
                         _assert_entry_unchanged(market_fd, market_name, provider_stat)
                     finally:
-                        os.close(provider_fd)
+                        provider_fd.close()
             _assert_path_unchanged(market_root, market_stat)
         except (OSError, SkillError) as exc:
             diagnostics.append(f"{market_root}: {exc}")
         finally:
-            os.close(market_fd)
+            market_fd.close()
 
     def _read_state(self) -> dict[str, object]:
         """读取版本化启停状态；损坏状态按空状态处理并保持 fail-closed。"""
@@ -830,13 +833,53 @@ def _parse_manifest_content(content: str) -> dict[str, Any]:
     }
 
 
+class _DirectoryHandle:
+    """已锚定的受信目录：POSIX 持有真实 fd，Windows 持有固定绝对路径。"""
+
+    __slots__ = ("_descriptor", "_path")
+
+    def __init__(self, descriptor: int | None, path: Path) -> None:
+        """记录平台对应的锚定资源；POSIX 传 fd，Windows 传 None + 路径。"""
+        self._descriptor = descriptor
+        self._path = path
+
+    @property
+    def path(self) -> Path:
+        """返回锚定的绝对目录路径。"""
+        return self._path
+
+    @property
+    def descriptor(self) -> int:
+        """返回 POSIX fd；仅 POSIX 分支允许访问。"""
+        if self._descriptor is None:
+            raise SkillError("directory descriptor is unavailable")
+        return self._descriptor
+
+    def close(self) -> None:
+        """释放底层 fd；Windows 分支没有可释放资源。"""
+        if self._descriptor is not None:
+            os.close(self._descriptor)
+
+    def fstat(self) -> os.stat_result:
+        """返回锚定目录自身的 stat 身份。"""
+        if self._descriptor is not None:
+            return os.fstat(self._descriptor)
+        return os.stat(self._path, follow_symlinks=False)
+
+    def scandir(self) -> Any:
+        """枚举直接子项；POSIX 从 fd，Windows 从固定路径。"""
+        if self._descriptor is not None:
+            return os.scandir(self._descriptor)
+        return os.scandir(self._path)
+
+
 def _read_limited_text(path: Path, limit: int) -> str:
     """读取 UTF-8 普通文件并限制字节大小。"""
     return _decode_utf8(_read_file_bytes(path, limit), limit)
 
 
 def _secure_file_flags() -> int:
-    """返回拒绝 symlink 的文件打开 flags；能力不足时拒绝继续。"""
+    """返回拒绝 symlink 的文件打开 flags；仅 POSIX 分支调用。"""
     nofollow = getattr(os, "O_NOFOLLOW", None)
     if nofollow is None:
         raise SkillError("secure file opening is unavailable")
@@ -844,7 +887,7 @@ def _secure_file_flags() -> int:
 
 
 def _secure_directory_flags() -> int:
-    """返回拒绝 symlink 且必须为目录的打开 flags。"""
+    """返回拒绝 symlink 且必须为目录的打开 flags；仅 POSIX 分支调用。"""
     nofollow = getattr(os, "O_NOFOLLOW", None)
     directory = getattr(os, "O_DIRECTORY", None)
     if nofollow is None or directory is None:
@@ -852,10 +895,32 @@ def _secure_directory_flags() -> int:
     return os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | nofollow | directory
 
 
-def _open_directory_path(path: Path) -> tuple[int, os.stat_result]:
-    """逐级以 nofollow 打开受信根目录，并返回固定 fd/identity。"""
+def _plain_file_flags() -> int:
+    """返回 Windows 读取普通文件的 flags；O_BINARY 避免换行符转换。"""
+    return os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
+
+
+def _stat_directory_component(path: Path) -> os.stat_result:
+    """lstat 单个目录层级；symlink 或非目录都拒绝继续。"""
+    try:
+        info = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise SkillError("directory must be a regular directory") from exc
+    if stat.S_ISLNK(info.st_mode):
+        raise SkillError("directory must not be a symlink")
+    if not stat.S_ISDIR(info.st_mode):
+        raise SkillError("directory must be a regular directory")
+    return info
+
+
+def _open_directory_path(path: Path) -> tuple[_DirectoryHandle, os.stat_result]:
+    """逐级打开受信根目录，POSIX 用 nofollow fd，Windows 用路径身份校验。"""
     if not path.is_absolute():
         raise SkillError("secure directory opening requires an absolute path")
+    if _IS_WINDOWS:
+        return _open_directory_path_by_path(path)
     flags = _secure_directory_flags()
     try:
         descriptor = os.open("/", flags)
@@ -863,49 +928,78 @@ def _open_directory_path(path: Path) -> tuple[int, os.stat_result]:
         raise
     except OSError as exc:
         raise SkillError("directory must be a regular directory") from exc
+    handle = _DirectoryHandle(descriptor, Path("/"))
     try:
         for component in path.parts[1:]:
-            component_info = _stat_entry_at(descriptor, component)
-            next_descriptor, _ = _open_directory_at(
-                descriptor,
+            component_info = _stat_entry_at(handle, component)
+            next_handle, _ = _open_directory_at(
+                handle,
                 component,
                 expected=component_info,
             )
-            os.close(descriptor)
-            descriptor = next_descriptor
-        identity = os.fstat(descriptor)
-        return descriptor, identity
+            handle.close()
+            handle = next_handle
+        identity = handle.fstat()
+        return handle, identity
     except BaseException:
-        os.close(descriptor)
+        handle.close()
         raise
+
+
+def _open_directory_path_by_path(path: Path) -> tuple[_DirectoryHandle, os.stat_result]:
+    """Windows 无目录 fd：逐级 lstat 确认每一层都是非 symlink 的真实目录。"""
+    current = Path(path.parts[0])
+    identity = _stat_directory_component(current)
+    for component in path.parts[1:]:
+        current = current / component
+        identity = _stat_directory_component(current)
+    return _DirectoryHandle(None, current), identity
 
 
 def _ensure_directory_path(path: Path) -> None:
     """逐级创建目录，并拒绝现有或竞态替换的 symlink。"""
     if not path.is_absolute():
         raise SkillError("secure directory creation requires an absolute path")
+    if _IS_WINDOWS:
+        _ensure_directory_path_by_path(path)
+        return
     descriptor = os.open("/", _secure_directory_flags())
+    handle = _DirectoryHandle(descriptor, Path("/"))
     try:
         for component in path.parts[1:]:
             try:
-                expected = _stat_entry_at(descriptor, component)
+                expected = _stat_entry_at(handle, component)
             except FileNotFoundError:
                 try:
-                    os.mkdir(component, 0o700, dir_fd=descriptor)
+                    os.mkdir(component, 0o700, dir_fd=handle.descriptor)
                 except FileExistsError:
                     pass
-                expected = _stat_entry_at(descriptor, component)
+                expected = _stat_entry_at(handle, component)
             if not stat.S_ISDIR(expected.st_mode):
                 raise SkillError("directory must be a regular directory")
-            next_descriptor, _ = _open_directory_at(
-                descriptor,
-                component,
-                expected=expected,
-            )
-            os.close(descriptor)
-            descriptor = next_descriptor
+            next_handle, _ = _open_directory_at(handle, component, expected=expected)
+            handle.close()
+            handle = next_handle
     finally:
-        os.close(descriptor)
+        handle.close()
+
+
+def _ensure_directory_path_by_path(path: Path) -> None:
+    """Windows 分支：逐级检查存在性，缺失时创建并拒绝 symlink。"""
+    current = Path(path.parts[0])
+    _stat_directory_component(current)
+    for component in path.parts[1:]:
+        current = current / component
+        try:
+            _stat_directory_component(current)
+            continue
+        except FileNotFoundError:
+            pass
+        try:
+            os.mkdir(current, 0o700)
+        except FileExistsError:
+            pass
+        _stat_directory_component(current)
 
 
 def _read_relative_file_bytes(
@@ -934,13 +1028,13 @@ def _read_relative_file_bytes(
             raise SkillError("Skill tree root changed during read")
         for component in components[:-1]:
             component_info = _stat_entry_at(current, component)
-            next_descriptor, _ = _open_directory_at(
+            next_handle, _ = _open_directory_at(
                 current,
                 component,
                 expected=component_info,
             )
-            os.close(current)
-            current = next_descriptor
+            current.close()
+            current = next_handle
         file_info = _stat_entry_at(current, components[-1])
         content = _read_file_at(
             current,
@@ -952,32 +1046,48 @@ def _read_relative_file_bytes(
             _assert_path_unchanged(root, expected_root)
         return content
     finally:
-        os.close(current)
+        current.close()
 
 
 def _open_directory_at(
-    parent: int,
+    parent: _DirectoryHandle,
     name: str,
     *,
     expected: os.stat_result | None = None,
-) -> tuple[int, os.stat_result]:
-    """以父目录 fd + O_NOFOLLOW 打开下一层目录。"""
+) -> tuple[_DirectoryHandle, os.stat_result]:
+    """以父目录句柄打开下一层目录，拒绝 symlink 与替换竞态。"""
     _validate_tree_name(name)
     entry_identity = _stat_entry_at(parent, name)
     if expected is not None and not _same_file_stat(expected, entry_identity):
         raise SkillError("directory changed during snapshot")
+    if _IS_WINDOWS:
+        # Windows 无法用 fd 消除 stat 与 open 之间的替换竞态；
+        # 这里用条目身份复核近似逼近 POSIX 的 nofollow 语义。
+        if stat.S_ISLNK(entry_identity.st_mode):
+            raise SkillError("directory must not be a symlink")
+        if not stat.S_ISDIR(entry_identity.st_mode):
+            raise SkillError("directory must be a regular directory")
+        handle = _DirectoryHandle(None, parent.path / name)
+        identity = handle.fstat()
+        if expected is not None and not _same_file_stat(expected, identity):
+            raise SkillError("directory changed during snapshot")
+        entry_identity = _stat_entry_at(parent, name)
+        if not _same_file_stat(identity, entry_identity):
+            raise SkillError("directory changed during snapshot")
+        return handle, identity
     try:
         descriptor = os.open(
             name,
             _secure_directory_flags(),
-            dir_fd=parent,
+            dir_fd=parent.descriptor,
         )
     except FileNotFoundError:
         raise
     except OSError as exc:
         raise SkillError("directory must not be a symlink") from exc
+    handle = _DirectoryHandle(descriptor, parent.path / name)
     try:
-        identity = os.fstat(descriptor)
+        identity = handle.fstat()
         if not stat.S_ISDIR(identity.st_mode):
             raise SkillError("directory must be a regular directory")
         if expected is not None and not _same_file_stat(expected, identity):
@@ -985,16 +1095,16 @@ def _open_directory_at(
         entry_identity = _stat_entry_at(parent, name)
         if not _same_file_stat(identity, entry_identity):
             raise SkillError("directory changed during snapshot")
-        return descriptor, identity
+        return handle, identity
     except BaseException:
-        os.close(descriptor)
+        handle.close()
         raise
 
 
-def _list_directory_names(directory: int) -> list[str]:
-    """只通过已打开目录 fd 枚举直接子项。"""
+def _list_directory_names(directory: _DirectoryHandle) -> list[str]:
+    """只通过已锚定目录句柄枚举直接子项。"""
     try:
-        with os.scandir(directory) as iterator:
+        with directory.scandir() as iterator:
             names = [entry.name for entry in iterator]
     except (OSError, TypeError) as exc:
         raise SkillError("directory enumeration failed closed") from exc
@@ -1013,11 +1123,13 @@ def _validate_tree_name(name: str) -> None:
         raise SkillError("Skill tree contains an unsafe entry name")
 
 
-def _stat_entry_at(parent: int, name: str) -> os.stat_result:
-    """以父目录 fd 获取不跟随 symlink 的子项 identity。"""
+def _stat_entry_at(parent: _DirectoryHandle, name: str) -> os.stat_result:
+    """以父目录句柄获取不跟随 symlink 的子项 identity。"""
     _validate_tree_name(name)
     try:
-        return os.stat(name, dir_fd=parent, follow_symlinks=False)
+        if _IS_WINDOWS:
+            return os.stat(parent.path / name, follow_symlinks=False)
+        return os.stat(name, dir_fd=parent.descriptor, follow_symlinks=False)
     except FileNotFoundError:
         raise
     except OSError as exc:
@@ -1036,40 +1148,52 @@ def _assert_entry_unchanged(
 
 
 def _assert_path_unchanged(path: Path, expected: os.stat_result) -> None:
-    """确认受信根路径没有在 fd 扫描期间换成 symlink 或其他对象。"""
+    """确认受信根路径没有在扫描期间换成 symlink 或其他对象。"""
     try:
-        descriptor, actual = _open_directory_path(path)
+        handle, actual = _open_directory_path(path)
     except (FileNotFoundError, SkillError) as exc:
         raise SkillError("Skill tree root changed during snapshot") from exc
     finally:
-        if "descriptor" in locals():
-            os.close(descriptor)
+        if "handle" in locals():
+            handle.close()
     if not _same_file_stat(expected, actual):
         raise SkillError("Skill tree root changed during snapshot")
 
 
 def _read_file_at(
-    parent: int,
+    parent: _DirectoryHandle,
     name: str,
     limit: int,
     *,
     expected: os.stat_result | None = None,
 ) -> bytes:
-    """以 parent fd 锚定最终文件，并校验打开前后同一目录项。"""
+    """以 parent 句柄锚定最终文件，并校验打开前后同一目录项。"""
     _validate_tree_name(name)
     before_entry = _stat_entry_at(parent, name)
     if expected is not None and not _same_file_stat(expected, before_entry):
         raise SkillError("file changed during read")
-    try:
-        descriptor = os.open(
-            name,
-            _secure_file_flags(),
-            dir_fd=parent,
-        )
-    except FileNotFoundError:
-        raise
-    except OSError as exc:
-        raise SkillError("file must be a regular file") from exc
+    if _IS_WINDOWS:
+        # Windows 无 O_NOFOLLOW：先用 lstat 拒绝 symlink；stat 与 open 之间
+        # 的替换竞态无法用 fd 消除，由读取前后的身份比较兜底。
+        if stat.S_ISLNK(before_entry.st_mode):
+            raise SkillError("file must be a regular file")
+        try:
+            descriptor = os.open(parent.path / name, _plain_file_flags())
+        except FileNotFoundError:
+            raise
+        except OSError as exc:
+            raise SkillError("file must be a regular file") from exc
+    else:
+        try:
+            descriptor = os.open(
+                name,
+                _secure_file_flags(),
+                dir_fd=parent.descriptor,
+            )
+        except FileNotFoundError:
+            raise
+        except OSError as exc:
+            raise SkillError("file must be a regular file") from exc
     try:
         if not stat.S_ISREG(before_entry.st_mode):
             raise SkillError("file must be a regular file")
@@ -1115,26 +1239,33 @@ def _read_descriptor_bytes(
 
 
 def _read_file_bytes(path: Path, limit: int) -> bytes:
-    """通过受信父目录 fd 读取一次固定 bytes，并完成 TOCTOU 校验。"""
+    """通过受信父目录句柄读取一次固定 bytes，并完成 TOCTOU 校验。"""
     _validate_tree_name(path.name)
     parent, _ = _open_directory_path(path.parent)
     try:
         expected = _stat_entry_at(parent, path.name)
         return _read_file_at(parent, path.name, limit, expected=expected)
     finally:
-        os.close(parent)
+        parent.close()
 
 
 def _same_file_stat(left: os.stat_result, right: os.stat_result) -> bool:
     """比较读取期间不能变化的文件身份和内容相关元数据。"""
-    return (
-        left.st_dev == right.st_dev
-        and left.st_ino == right.st_ino
-        and stat.S_IFMT(left.st_mode) == stat.S_IFMT(right.st_mode)
-        and left.st_size == right.st_size
-        and left.st_mtime_ns == right.st_mtime_ns
-        and left.st_ctime_ns == right.st_ctime_ns
-    )
+    if (
+        left.st_dev != right.st_dev
+        or left.st_ino != right.st_ino
+        or stat.S_IFMT(left.st_mode) != stat.S_IFMT(right.st_mode)
+        or left.st_size != right.st_size
+        or left.st_mtime_ns != right.st_mtime_ns
+    ):
+        return False
+    if _IS_WINDOWS:
+        # Windows 路径 stat 的 st_ctime 是创建时间，fstat 却返回与 mtime 相同
+        # 的值，两种取样来源天生不一致，不代表文件被替换；dev/ino 已能唯一
+        # 锚定文件身份，这里不做跨源 ctime 比较。POSIX 的 ctime 是 inode 变更
+        # 时间，仍保留比较以捕获元数据篡改。
+        return True
+    return left.st_ctime_ns == right.st_ctime_ns
 
 
 def _decode_utf8(content: bytes, limit: int | None = None) -> str:
@@ -1153,17 +1284,17 @@ def _digest_bytes(content: bytes) -> str:
 
 
 def _capture_snapshot_files_fd(
-    root: int,
+    root: _DirectoryHandle,
     raw_manifest: bytes,
 ) -> tuple[dict[str, bytes], dict[str, str]]:
-    """以 root fd 锚定枚举并固定 Skill 正文和受限资源。"""
+    """以 root 句柄锚定枚举并固定 Skill 正文和受限资源。"""
     files: dict[str, bytes] = {"SKILL.md": raw_manifest}
     errors: dict[str, str] = {}
     captured_files = 1
     captured_bytes = 0
 
-    def visit(directory: int, prefix: str, depth: int) -> None:
-        """递归捕获普通文件，不离开 root fd。"""
+    def visit(directory: _DirectoryHandle, prefix: str, depth: int) -> None:
+        """递归捕获普通文件，不离开 root 句柄。"""
         nonlocal captured_bytes, captured_files
         if depth > MAX_SKILL_TREE_DEPTH:
             raise SkillError("Skill resource tree exceeds the depth limit")
@@ -1195,7 +1326,7 @@ def _capture_snapshot_files_fd(
                     visit(child, relative, depth + 1)
                     _assert_entry_unchanged(directory, name, child_identity)
                 finally:
-                    os.close(child)
+                    child.close()
                 continue
             if not stat.S_ISREG(info.st_mode):
                 errors[relative] = "Skill resource must be a regular file"
@@ -1294,8 +1425,8 @@ def _catalog_metadata_signature(workspace: Path, home: Path) -> tuple[object, ..
             )
         )
 
-    def visit_fd(directory: int, path: Path, depth: int) -> None:
-        """从已打开目录 fd 递归记录节点。"""
+    def visit_fd(directory: _DirectoryHandle, path: Path, depth: int) -> None:
+        """从已锚定目录句柄递归记录节点。"""
         if len(entries) >= max_entries:
             return
         try:
@@ -1337,7 +1468,7 @@ def _catalog_metadata_signature(workspace: Path, home: Path) -> tuple[object, ..
                 except (FileNotFoundError, SkillError) as exc:
                     entries.append((str(child_path), "changed", str(exc)))
             finally:
-                os.close(child_fd)
+                child_fd.close()
             if len(entries) >= max_entries:
                 break
 
@@ -1359,7 +1490,7 @@ def _catalog_metadata_signature(workspace: Path, home: Path) -> tuple[object, ..
             except SkillError as exc:
                 entries.append((str(path), "changed", str(exc)))
         finally:
-            os.close(descriptor)
+            descriptor.close()
 
     def visit_file(path: Path) -> None:
         """安全打开父目录并记录一个普通文件或 symlink。"""
@@ -1383,7 +1514,7 @@ def _catalog_metadata_signature(workspace: Path, home: Path) -> tuple[object, ..
             kind = "symlink" if stat.S_ISLNK(info.st_mode) else "file"
             append_info(path, info, kind)
         finally:
-            os.close(parent)
+            parent.close()
 
     for root in roots:
         if root.name == "state.json":
@@ -1546,7 +1677,7 @@ def _validate_staged_skill(
     except (FileNotFoundError, SkillError) as exc:
         raise SkillError("Marketplace Skill root is unavailable") from exc
     if allowed_directory_names is not None and root.name not in allowed_directory_names:
-        os.close(root_fd)
+        root_fd.close()
         raise SkillError("Marketplace Skill directory does not match its identity")
     try:
         manifest_info = _stat_entry_at(root_fd, "SKILL.md")
@@ -1570,11 +1701,11 @@ def _validate_staged_skill(
     except (FileNotFoundError, OSError, yaml.YAMLError) as exc:
         raise SkillError("Marketplace Skill changed during validation") from exc
     finally:
-        os.close(root_fd)
+        root_fd.close()
 
 
-def _validate_skill_tree_fd(directory: int, depth: int) -> None:
-    """从暂存 root fd 验证每个节点，不跟随 symlink。"""
+def _validate_skill_tree_fd(directory: _DirectoryHandle, depth: int) -> None:
+    """从暂存 root 句柄验证每个节点，不跟随 symlink。"""
     if depth > MAX_SKILL_TREE_DEPTH:
         raise SkillError("Marketplace Skill tree exceeds the depth limit")
     for name in _list_directory_names(directory):
@@ -1592,7 +1723,7 @@ def _validate_skill_tree_fd(directory: int, depth: int) -> None:
                 _validate_skill_tree_fd(child, depth + 1)
                 _assert_entry_unchanged(directory, name, child_identity)
             finally:
-                os.close(child)
+                child.close()
             continue
         if not stat.S_ISREG(info.st_mode):
             raise SkillError("Marketplace Skill may contain only regular files")
@@ -1609,62 +1740,74 @@ def _validate_skill_tree_fd(directory: int, depth: int) -> None:
 
 
 def _stat_path_nofollow(path: Path) -> os.stat_result:
-    """通过受信父目录 fd 获取路径项，不跟随任意父目录或最终 symlink。"""
+    """通过受信父目录句柄获取路径项，不跟随任意父目录或最终 symlink。"""
     _validate_tree_name(path.name)
     parent, _ = _open_directory_path(path.parent)
     try:
         return _stat_entry_at(parent, path.name)
     finally:
-        os.close(parent)
+        parent.close()
 
 
 def _fsync_directory(path: Path) -> None:
-    """把目录项更新刷到磁盘；能力不足时拒绝进入切换协议。"""
+    """把目录项更新刷到磁盘；Windows 无目录 fsync，依赖 NTFS 日志。"""
+    if _IS_WINDOWS:
+        return
     descriptor, _ = _open_directory_path(path)
     try:
-        os.fsync(descriptor)
+        os.fsync(descriptor.descriptor)
     except OSError as exc:
         raise SkillError("directory durability is unavailable") from exc
     finally:
-        os.close(descriptor)
+        descriptor.close()
 
 
 def _replace_path(source: Path, destination: Path) -> None:
-    """以两个受信父目录 fd 执行 rename，避免父目录 symlink 逃逸。"""
+    """以两个受信父目录句柄执行 rename，避免父目录 symlink 逃逸。"""
     _validate_tree_name(source.name)
     _validate_tree_name(destination.name)
     source_parent, _ = _open_directory_path(source.parent)
     try:
         destination_parent, _ = _open_directory_path(destination.parent)
     except BaseException:
-        os.close(source_parent)
+        source_parent.close()
         raise
     try:
-        os.replace(
-            source.name,
-            destination.name,
-            src_dir_fd=source_parent,
-            dst_dir_fd=destination_parent,
-        )
+        if _IS_WINDOWS:
+            # 父目录已通过逐级非 symlink 校验；Windows 不支持 dir_fd rename。
+            os.replace(source, destination)
+        else:
+            os.replace(
+                source.name,
+                destination.name,
+                src_dir_fd=source_parent.descriptor,
+                dst_dir_fd=destination_parent.descriptor,
+            )
     finally:
-        os.close(source_parent)
-        os.close(destination_parent)
+        source_parent.close()
+        destination_parent.close()
 
 
-def _remove_tree_at(parent: int, name: str) -> None:
-    """以 dir_fd 递归删除内部临时树，不跟随 symlink。"""
+def _remove_tree_at(parent: _DirectoryHandle, name: str) -> None:
+    """以父目录句柄递归删除内部临时树，不跟随 symlink。"""
     _validate_tree_name(name)
     info = _stat_entry_at(parent, name)
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-        os.unlink(name, dir_fd=parent)
+        if _IS_WINDOWS:
+            os.unlink(parent.path / name)
+        else:
+            os.unlink(name, dir_fd=parent.descriptor)
         return
     directory, identity = _open_directory_at(parent, name, expected=info)
     try:
         for child_name in _list_directory_names(directory):
             _remove_tree_at(directory, child_name)
     finally:
-        os.close(directory)
-    os.rmdir(name, dir_fd=parent)
+        directory.close()
+    if _IS_WINDOWS:
+        os.rmdir(parent.path / name)
+    else:
+        os.rmdir(name, dir_fd=parent.descriptor)
 
 
 def _remove_tree_path(path: Path) -> None:
@@ -1682,7 +1825,7 @@ def _remove_tree_path(path: Path) -> None:
     except FileNotFoundError:
         return
     finally:
-        os.close(parent)
+        parent.close()
 
 
 def _journal_relative(skills_root: Path, path: Path) -> str:
@@ -1818,12 +1961,15 @@ def _remove_install_journal(skills_root: Path) -> None:
     parent, _ = _open_directory_path(skills_root)
     try:
         try:
-            os.unlink(_INSTALL_JOURNAL_NAME, dir_fd=parent)
+            if _IS_WINDOWS:
+                os.unlink(parent.path / _INSTALL_JOURNAL_NAME)
+            else:
+                os.unlink(_INSTALL_JOURNAL_NAME, dir_fd=parent.descriptor)
         except FileNotFoundError:
             return
         _fsync_directory(skills_root)
     finally:
-        os.close(parent)
+        parent.close()
 
 
 def _install_failpoint(_name: str) -> None:

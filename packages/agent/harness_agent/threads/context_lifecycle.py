@@ -486,7 +486,8 @@ def _read_stable_reference(path: Path, *, workspace: Path, home: Path) -> str:
     """以固定父目录 fd、O_NOFOLLOW 和前后 fstat/路径 stat 读取 AGENTS。"""
     nofollow = getattr(os, "O_NOFOLLOW", None)
     if nofollow is None:
-        raise ContextRefreshError("CONTEXT_REFERENCE_NOFOLLOW_UNAVAILABLE")
+        # Windows 没有 O_NOFOLLOW/dir_fd；改走 lstat 校验的路径分支。
+        return _read_stable_reference_by_path(path, workspace=workspace, home=home)
     directory_flag = getattr(os, "O_DIRECTORY", 0)
     close_on_exec = getattr(os, "O_CLOEXEC", 0)
     parent_fd: int | None = None
@@ -557,9 +558,76 @@ def _read_stable_reference(path: Path, *, workspace: Path, home: Path) -> str:
             os.close(file_fd)
         if parent_fd is not None:
             os.close(parent_fd)
+    return _finalize_reference(
+        raw,
+        before_fd,
+        after_fd,
+        after_path,
+        workspace=workspace,
+        home=home,
+    )
+
+
+def _read_stable_reference_by_path(path: Path, *, workspace: Path, home: Path) -> str:
+    """无 O_NOFOLLOW 平台（Windows）用 lstat 拒绝 symlink 并复核读取前后身份。"""
+    try:
+        before_path = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return ""
+    except OSError as exc:
+        raise ContextRefreshError(f"CONTEXT_REFERENCE_STAT_FAILED: {path.name}") from exc
+    if stat.S_ISLNK(before_path.st_mode):
+        raise ContextRefreshError("CONTEXT_REFERENCE_SYMLINK_REJECTED")
+    if not stat.S_ISREG(before_path.st_mode):
+        raise ContextRefreshError("CONTEXT_REFERENCE_NOT_REGULAR_FILE")
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+    except FileNotFoundError as exc:
+        raise ContextRefreshError("CONTEXT_REFERENCE_CHANGED_DURING_READ") from exc
+    except OSError as exc:
+        raise ContextRefreshError(f"CONTEXT_REFERENCE_READ_FAILED: {path.name}") from exc
+    try:
+        before_fd = os.fstat(descriptor)
+        if _stat_signature(before_path) != _stat_signature(before_fd):
+            raise ContextRefreshError("CONTEXT_REFERENCE_CHANGED_DURING_READ")
+        raw = _read_reference_fd(descriptor)
+        after_fd = os.fstat(descriptor)
+        try:
+            after_path = os.stat(path, follow_symlinks=False)
+        except FileNotFoundError as exc:
+            raise ContextRefreshError("CONTEXT_REFERENCE_CHANGED_DURING_READ") from exc
+    except ContextRefreshError:
+        raise
+    except OSError as exc:
+        raise ContextRefreshError(f"CONTEXT_REFERENCE_READ_FAILED: {path.name}") from exc
+    finally:
+        os.close(descriptor)
+    return _finalize_reference(
+        raw,
+        before_fd,
+        after_fd,
+        after_path,
+        workspace=workspace,
+        home=home,
+    )
+
+
+def _finalize_reference(
+    raw: bytes,
+    before: os.stat_result,
+    after_fd: os.stat_result,
+    after_path: os.stat_result,
+    *,
+    workspace: Path,
+    home: Path,
+) -> str:
+    """校验读取前后身份一致，截断超长内容并脱敏。"""
     if (
-        _stat_signature(before_fd) != _stat_signature(after_fd)
-        or _stat_signature(before_fd) != _stat_signature(after_path)
+        _stat_signature(before) != _stat_signature(after_fd)
+        or _stat_signature(before) != _stat_signature(after_path)
     ):
         raise ContextRefreshError("CONTEXT_REFERENCE_CHANGED_DURING_READ")
     if len(raw) > MAX_AGENT_REFERENCE_BYTES:
@@ -582,16 +650,20 @@ def _read_reference_fd(file_fd: int) -> bytes:
     return b"".join(chunks)
 
 
-def _stat_signature(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
+def _stat_signature(value: os.stat_result) -> tuple[int, ...]:
     """返回足以检测替换/写入的文件身份、类型、尺寸和时间。"""
-    return (
+    signature = (
         value.st_dev,
         value.st_ino,
         value.st_mode,
         value.st_size,
         value.st_mtime_ns,
-        value.st_ctime_ns,
     )
+    if os.name == "nt":
+        # Windows 路径 stat 的 st_ctime 是创建时间，fstat 却返回与 mtime 相同
+        # 的值，跨来源比较必然不等，不能作为替换证据；dev/ino 已唯一锚定文件。
+        return signature
+    return (*signature, value.st_ctime_ns)
 
 
 _HOST_PATH_RE = re.compile(

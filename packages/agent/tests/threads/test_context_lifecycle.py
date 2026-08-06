@@ -360,7 +360,10 @@ def test_reference_file_symlink_fails_closed(tmp_path: Path) -> None:
     harness_dir.mkdir(parents=True)
     outside = tmp_path / "outside-agents.md"
     outside.write_text("outside-rule", encoding="utf-8")
-    (harness_dir / "AGENTS.md").symlink_to(outside)
+    try:
+        (harness_dir / "AGENTS.md").symlink_to(outside)
+    except OSError:
+        pytest.skip("当前环境无 symlink 特权")
 
     with pytest.raises(ContextRefreshError, match="CONTEXT_REFERENCE_SYMLINK_REJECTED"):
         ContextLifecycle(workspace, home=home).prepare(
@@ -390,8 +393,14 @@ def test_reference_replacement_after_open_fails_closed(
         data = original_read(file_fd, size)
         if not replaced:
             replaced = True
-            agents.unlink()
-            agents.symlink_to(outside)
+            try:
+                agents.unlink()
+                agents.symlink_to(outside)
+            except OSError:
+                # Windows 在 fd 打开期间无法 unlink（WinError 32），创建
+                # symlink 也需要特权；原地覆写改变尺寸与 mtime，前后身份
+                # 校验同样必须拒绝该替换。
+                agents.write_text("replaced-rule", encoding="utf-8")
         return data
 
     monkeypatch.setattr(context_lifecycle_module.os, "read", replace_after_first_read)

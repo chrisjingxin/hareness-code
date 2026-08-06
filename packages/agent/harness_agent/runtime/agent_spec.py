@@ -176,6 +176,8 @@ def _execution_identity(settings: ExecutionSettings) -> dict[str, object]:
         "provider": settings.remote.provider if settings.remote else None,
         "working_directory": settings.remote.working_directory if settings.remote else None,
         "params": dict(settings.remote.params) if settings.remote else {},
+        # AUTO 模式分类器 profile 变化会改变中间件构成，必须参与引擎指纹。
+        "approval_classifier": settings.approval_classifier,
     }
 
 
@@ -282,6 +284,7 @@ def resolve_builtin_main_agent_spec(
                         execution.remote.working_directory if execution.remote else None
                     ),
                     "params": dict(execution.remote.params) if execution.remote else {},
+                    "approval_classifier": execution.approval_classifier,
                 }
             )
         ),

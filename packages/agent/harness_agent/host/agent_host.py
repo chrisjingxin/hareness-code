@@ -2519,6 +2519,20 @@ class AgentHost:
                 updates=self._context_updates,
                 runtime_state_provider=runtime_state_provider,
             )
+
+            def _get_current_rules() -> list[PermissionRule]:
+                """获取当前会话的所有规则（session 内存 + project/user/system 持久化）。"""
+                from harness_agent.policy.permission_rules import load_rules, merge_rules
+
+                persisted = load_rules(project_dir=self._workspace)
+                persisted["session"] = self._run_coordinator.session_rules
+                return merge_rules(persisted)
+
+            approval_mode = spec.effective_policy.approval_mode or spec.execution.approval_mode
+            classifier = None
+            if approval_mode == "auto" and spec.execution.approval_classifier:
+                classifier = self._build_approval_classifier(spec.execution.approval_classifier)
+
             graph = create_harness_agent(
                 model,
                 tools=mcp_tools or None,
@@ -2530,7 +2544,8 @@ class AgentHost:
                 enable_ask_user=spec.enable_ask_user,
                 enable_memory=spec.enable_memory,
                 enable_skills=spec.enable_skills,
-                approval_mode=spec.effective_policy.approval_mode or spec.execution.approval_mode,
+                approval_mode=approval_mode,
+                classifier=classifier,
                 execution_context=execution_context,
                 skill_registry=spec.skill_registry,
                 checkpointer=checkpointer,
@@ -2540,11 +2555,13 @@ class AgentHost:
                 context_window_tokens=model_settings.context_window_tokens,
                 shared_engine=True,
                 concurrency_lock=self._tool_concurrency_lock,
+                wdl1
                 capability_view=spec.capability_view,
                 execution_registry=self._run_coordinator.execution_registry,
                 delegation_model=spec.model_view,
                 delegation_targets=delegation_targets,
                 plugin_runtime=self._plugin_runtime_manager,
+                rules_provider=_get_current_rules,
             )
             self._agent_engine_artifacts[profile.profile_key] = _AgentEngineArtifacts(
                 execution_context=execution_context,
@@ -2575,6 +2592,47 @@ class AgentHost:
                 if lease is not None:
                     await lease.release()
             raise
+
+    def _build_approval_classifier(self, profile_id: str) -> Any:
+        """为 AUTO 模式构建 LLM 安全分类器；不可用时返回 None 降级为人工确认。
+
+        profile 不存在或 API Key 缺失只记录警告并优雅降级，
+        不让分类器配置错误阻断 Agent 引擎构建。
+        """
+        from harness_agent.extensions.providers.harness_gateway import create_openai_compatible_model
+        from harness_agent.policy.classifier import SafetyClassifier
+
+        config = self._config
+        if config is None or config.model_catalog is None:
+            logger.warning(
+                "approval classifier profile %s unavailable: model catalog missing", profile_id
+            )
+            return None
+        try:
+            profile = config.model_catalog.require_profile(profile_id)
+        except ConfigError:
+            logger.warning(
+                "approval classifier profile %s not found; falling back to manual approval",
+                profile_id,
+            )
+            return None
+        settings = profile.settings
+        if settings.api_key_source() == "missing":
+            logger.warning(
+                "approval classifier profile %s has no API key; falling back to manual approval",
+                profile_id,
+            )
+            return None
+        # 分类调用发生在工具审批路径上，使用更短超时并禁用重试，避免慢网关放大工具等待；
+        # replace 需显式回传保存在 InitVar 中的 TOML 降级密钥，否则替换后密钥会丢失。
+        classifier_settings = replace(
+            settings,
+            api_key=settings._api_key,
+            timeout_seconds=min(settings.timeout_seconds, 10.0),
+            max_retries=0,
+        )
+        model = create_openai_compatible_model(classifier_settings)
+        return SafetyClassifier(model)
 
     async def _create_run_context(
         self,

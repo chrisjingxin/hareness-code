@@ -24,12 +24,23 @@ def _write_config(
     api_key_env: str = "HARNESS_API_KEY",
     api_key: str | None = None,
     approval_mode: str | None = None,
+    approval_classifier: str | None = None,
     backend: str = "local",
     remote: bool = False,
 ) -> None:
-    """生成最小可信 v1 TOML，避免测试散落旧配置结构。"""
+    """生成最小可信 v1 TOML，避免测试散落旧配置结构。
+
+    approval_classifier 是 classifier 键的原始 TOML 字面量（含引号或数字），
+    便于测试字符串以外的非法类型。
+    """
     literal_api_key = f'api_key = "{api_key}"\n' if api_key is not None else ""
-    approval = f"\n[approval]\nmode = \"{approval_mode}\"\n" if approval_mode else ""
+    approval = ""
+    if approval_mode or approval_classifier is not None:
+        approval = "\n[approval]\n"
+        if approval_mode:
+            approval += f'mode = "{approval_mode}"\n'
+        if approval_classifier is not None:
+            approval += f"classifier = {approval_classifier}\n"
     remote_table = (
         "\n[execution.remote]\nprovider = \"corp\"\nfactory = \"corp_sandbox:create_backend\"\n"
         if remote
@@ -453,9 +464,9 @@ pin_default_profile = true
         load_config(workspace=tmp_path, home=tmp_path / "home", config_path=path)
 
 
-@pytest.mark.parametrize("value", ["plan", "default", "auto-edit", "yolo"])
+@pytest.mark.parametrize("value", ["plan", "default", "auto-edit", "auto", "yolo"])
 def test_execution_accepts_all_canonical_approval_modes(tmp_path: Path, value: str):
-    """四个公开模式都应从 v1 [approval] 原样进入最终执行设置。"""
+    """五个公开模式都应从 v1 [approval] 原样进入最终执行设置。"""
     path = tmp_path / "approval.toml"
     _write_config(path, approval_mode=value)
 
@@ -476,6 +487,37 @@ def test_execution_normalizes_ask_and_invalid_values_safely(tmp_path: Path):
     invalid_config = load_config(workspace=tmp_path, home=tmp_path / "home", config_path=invalid)
     assert invalid_config.execution.approval_mode == "default"
     assert "安全降级" in str(invalid_config.redacted()["security"]["approval_mode_warning"])
+
+
+def test_approval_classifier_profile_enters_execution_settings(tmp_path: Path):
+    """[approval] classifier 配置的模型 profile 名进入执行设置与脱敏摘要。"""
+    path = tmp_path / "classifier.toml"
+    _write_config(path, approval_mode="auto", approval_classifier='"small-fast"')
+
+    config = load_config(workspace=tmp_path, home=tmp_path / "home", config_path=path)
+
+    assert config.execution.approval_classifier == "small-fast"
+    assert config.redacted()["security"]["approval_classifier"] == "small-fast"
+
+
+def test_approval_classifier_blank_normalized_to_none(tmp_path: Path):
+    """空白 classifier 值归一为 None，等价于未配置分类器。"""
+    path = tmp_path / "classifier-blank.toml"
+    _write_config(path, approval_mode="auto", approval_classifier='"   "')
+
+    config = load_config(workspace=tmp_path, home=tmp_path / "home", config_path=path)
+
+    assert config.execution.approval_classifier is None
+    assert "approval_classifier" not in config.redacted()["security"]
+
+
+def test_approval_classifier_non_string_rejected(tmp_path: Path):
+    """非字符串 classifier 值在配置阶段直接失败。"""
+    path = tmp_path / "classifier-invalid.toml"
+    _write_config(path, approval_mode="auto", approval_classifier="123")
+
+    with pytest.raises(ConfigError, match="approval.classifier must be a string"):
+        load_config(workspace=tmp_path, home=tmp_path / "home", config_path=path)
 
 
 def test_environment_and_cli_override_execution_in_order(tmp_path: Path):

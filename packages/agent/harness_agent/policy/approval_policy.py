@@ -4,17 +4,22 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from langchain.agents.middleware.types import AgentMiddleware, ContextT, ResponseT
 from langchain.tools.tool_node import ToolCallRequest
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 
 from harness_agent.policy.approval_mode import ApprovalMode
 from harness_agent.policy.auto_mode import evaluate_auto_mode
 from harness_agent.policy.tool_risk import ToolKind, get_tool_kind, get_mode_permission, is_read_only
 from harness_agent.policy.permission_rules import PermissionRule, evaluate_rules
 from harness_agent.policy.sensitive_paths import requires_safety_check
+
+if TYPE_CHECKING:
+    from langchain.agents.middleware.types import ModelRequest, ModelResponse
+
+    from harness_agent.policy.classifier import SafetyClassifier
 
 logger = logging.getLogger(__name__)
 
@@ -267,16 +272,18 @@ class DenyRulesMiddleware(AgentMiddleware[dict[str, Any], ContextT, ResponseT]):
 
 
 class AutoDestructiveGuardMiddleware(AgentMiddleware[dict[str, Any], ContextT, ResponseT]):
-    """AUTO 模式 F3 破坏性命令执行层守卫。
+    """AUTO 模式破坏性操作执行层守卫（F3 + F4 deny 兜底）。
 
-    预检对 F3 deny 决策会跳过审批弹窗，本中间件在工具实际执行前兜底硬拒绝，
-    保证破坏性命令"直接拒绝、不经过弹窗和分类器"。
+    预检对 deny 决策会跳过审批弹窗，本中间件在工具实际执行前兜底硬拒绝，
+    保证破坏性命令"直接拒绝、不经过弹窗"。注入了分类器时优先复用其决策
+    缓存（模型响应阶段已完成分类），缓存未命中再走确定性过滤器判断。
     """
 
     def __init__(
         self,
         rules_provider: Callable[[], list[PermissionRule]] | None,
         workspace_root: str | None,
+        classifier: SafetyClassifier | None = None,
     ) -> None:
         """初始化 AUTO 模式破坏性命令守卫。
 
@@ -284,9 +291,11 @@ class AutoDestructiveGuardMiddleware(AgentMiddleware[dict[str, Any], ContextT, R
             rules_provider: 返回当前合并权限规则的回调；为 None 或返回空列表
                 时跳过规则判断，直接进入 AUTO 四层过滤器。
             workspace_root: 工作区根目录，供 AUTO 过滤器判断路径归属。
+            classifier: F4 LLM 分类器；提供时其决策缓存作为守卫依据。
         """
         self._rules_provider = rules_provider
         self._workspace_root = workspace_root
+        self._classifier = classifier
 
     def _check(self, request: ToolCallRequest) -> ToolMessage | None:
         """检查工具调用是否应被 AUTO 模式硬拒绝，命中时返回错误消息。"""
@@ -304,21 +313,37 @@ class AutoDestructiveGuardMiddleware(AgentMiddleware[dict[str, Any], ContextT, R
             if effect in ("allow", "deny"):
                 return None
 
+        # 分类器决策缓存命中时直接执行其结论：deny 硬拒绝；allow/ask 放行
+        # （ask 已由 HITL 弹窗处理，用户批准后才会走到执行层）。
+        if self._classifier is not None:
+            cached = self._classifier.lookup_decision(str(tool_call.get("id") or ""))
+            if cached is not None:
+                decision, reason = cached
+                if decision == "deny":
+                    return self._rejection(tool_call, tool_name, reason, source="classifier")
+                return None
+
         decision, reason = evaluate_auto_mode(tool_name, tool_args, self._workspace_root)
         if decision == "deny":
-            # F3 静默硬拒绝审计：破坏性命令不弹窗直接拒绝，必须留痕。
-            logger.info(
-                "approval_deny source=auto_destructive_guard tool=%s reason=%s",
-                tool_name,
-                reason,
-            )
-            return ToolMessage(
-                content=f"AUTO 模式拒绝 {tool_name}：{reason}",
-                name=tool_name,
-                tool_call_id=str(tool_call.get("id") or "auto-deny"),
-                status="error",
+            return self._rejection(
+                tool_call, tool_name, reason, source="auto_destructive_guard"
             )
         return None
+
+    @staticmethod
+    def _rejection(
+        tool_call: dict[str, Any], tool_name: str, reason: str, *, source: str
+    ) -> ToolMessage:
+        """生成硬拒绝消息并记录审计日志；静默拒绝必须留痕。"""
+        logger.info(
+            "approval_deny source=%s tool=%s reason=%s", source, tool_name, reason
+        )
+        return ToolMessage(
+            content=f"AUTO 模式拒绝 {tool_name}：{reason}",
+            name=tool_name,
+            tool_call_id=str(tool_call.get("id") or "auto-deny"),
+            status="error",
+        )
 
     def wrap_tool_call(
         self,
@@ -341,6 +366,118 @@ class AutoDestructiveGuardMiddleware(AgentMiddleware[dict[str, Any], ContextT, R
         if rejection is not None:
             return rejection
         return await handler(request)
+
+
+class AutoClassifierMiddleware(AgentMiddleware[dict[str, Any], ContextT, ResponseT]):
+    """AUTO 模式 F4 分类器中间件：在模型响应阶段完成安全分类。
+
+    HITL 预检（``when`` 回调）是同步的，无法在其中调用 LLM。本中间件挂在
+    模型调用链上：模型返回工具调用后、HITL after_model 裁决前，对每个会进入
+    F4 的调用执行两阶段分类，并把结论写入分类器决策缓存。预检与执行层守卫
+    随后读取缓存决定弹窗与否，保证同一次工具调用最多被分类一次。
+
+    分类前的裁决顺序与预检保持一致：deny/allow 规则、敏感路径和 F1-F3
+    确定性过滤器能给出结论的调用不消耗分类器额度。
+    """
+
+    def __init__(
+        self,
+        classifier: SafetyClassifier,
+        rules_provider: Callable[[], list[PermissionRule]] | None,
+        workspace_root: str | None,
+    ) -> None:
+        """初始化 F4 分类器中间件。
+
+        Args:
+            classifier: 两阶段 LLM 安全分类器，同时充当决策缓存。
+            rules_provider: 返回当前合并权限规则的回调。
+            workspace_root: 工作区根目录，供 AUTO 过滤器判断路径归属。
+        """
+        self._classifier = classifier
+        self._rules_provider = rules_provider
+        self._workspace_root = workspace_root
+
+    def _needs_classifier(self, tool_name: str, tool_args: dict[str, Any]) -> bool:
+        """判断调用是否会进入 F4：规则和确定性过滤器已裁决的不需要分类。"""
+        rules = self._rules_provider() if self._rules_provider is not None else []
+        if rules:
+            effect = evaluate_rules(
+                tool_name, _extract_resource(tool_name, tool_args), rules
+            )
+            # deny 由 DenyRulesMiddleware 硬拒绝；allow 由预检/守卫处理
+            # （敏感路径仍弹窗），两者都不需要分类器参与。
+            if effect in ("allow", "deny"):
+                return False
+        # 敏感路径由预检强制弹窗，结论确定，不进入分类器。
+        if requires_safety_check(tool_name, tool_args):
+            return False
+        # F1/F2 放行与 F3 硬拦截都是确定性结论；仅 ask（F4 未决）需要分类。
+        decision, _ = evaluate_auto_mode(tool_name, tool_args, self._workspace_root)
+        return decision == "ask"
+
+    async def _classify_response(self, response: Any) -> None:
+        """对模型响应中的工具调用逐个分类并记录结论。"""
+        for tool_call in _iter_response_tool_calls(response):
+            tool_call_id = str(tool_call.get("id") or "")
+            tool_name = str(tool_call.get("name") or "")
+            tool_args = tool_call.get("args") or {}
+            if not isinstance(tool_args, dict):
+                tool_args = {}
+            if not tool_name or self._classifier.lookup_decision(tool_call_id):
+                continue
+            if not self._needs_classifier(tool_name, tool_args):
+                continue
+            decision, reason = await self._classifier.aclassify(tool_name, tool_args)
+            self._classifier.record_decision(tool_call_id, decision, reason)
+
+    def _classify_response_sync(self, response: Any) -> None:
+        """同步路径分类：阻塞调用模型，仅供同步执行与测试使用。"""
+        for tool_call in _iter_response_tool_calls(response):
+            tool_call_id = str(tool_call.get("id") or "")
+            tool_name = str(tool_call.get("name") or "")
+            tool_args = tool_call.get("args") or {}
+            if not isinstance(tool_args, dict):
+                tool_args = {}
+            if not tool_name or self._classifier.lookup_decision(tool_call_id):
+                continue
+            if not self._needs_classifier(tool_name, tool_args):
+                continue
+            decision, reason = self._classifier.classify(tool_name, tool_args)
+            self._classifier.record_decision(tool_call_id, decision, reason)
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest[dict[str, Any]],
+        handler: Callable[[ModelRequest[dict[str, Any]]], ModelResponse[Any]],
+    ) -> Any:
+        """同步模型调用：先取响应，再对其中的工具调用分类。"""
+        response = handler(request)
+        self._classify_response_sync(response)
+        return response
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[dict[str, Any]],
+        handler: Callable[[ModelRequest[dict[str, Any]]], Awaitable[ModelResponse[Any]]],
+    ) -> Any:
+        """异步模型调用：先取响应，再对其中的工具调用异步分类。"""
+        response = await handler(request)
+        await self._classify_response(response)
+        return response
+
+
+def _iter_response_tool_calls(response: Any) -> list[dict[str, Any]]:
+    """从模型响应中收集工具调用，兼容 AIMessage 与各类响应包装。"""
+    target = getattr(response, "model_response", None) or response
+    result = getattr(target, "result", None)
+    messages = result if isinstance(result, (list, tuple)) else [target]
+    calls: list[dict[str, Any]] = []
+    for message in messages:
+        if isinstance(message, AIMessage):
+            for tool_call in message.tool_calls:
+                if isinstance(tool_call, dict):
+                    calls.append(tool_call)
+    return calls
 
 
 # ---------------------------------------------------------------------------

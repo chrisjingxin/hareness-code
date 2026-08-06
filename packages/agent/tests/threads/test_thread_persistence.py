@@ -6,13 +6,14 @@ import asyncio
 import hashlib
 import json
 import math
+import os
 import sqlite3
 import stat
 import threading
 import uuid
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import pytest
 import aiosqlite
@@ -45,6 +46,52 @@ from tests.support.thread_fixtures import (
     create_legacy_prompt_epoch_table,
     test_binding as make_test_binding,
 )
+
+# Windows 上 migration child 的冷启动（解释器 + 模块导入）约需 2.5~3 秒，且
+# 受杀毒软件/磁盘负载影响波动明显，POSIX 约 0.5 秒。测试压缩的截止时间必须
+# 按平台放宽，否则 child 还没进入迁移就被误判超时。Windows 取生产默认值 30s，
+# 覆盖 pytest 全量运行时磁盘/杀软争用导致的冷启动劣化。
+_MIGRATION_CHILD_TEST_DEADLINE = 30.0 if os.name == "nt" else 3.0
+
+
+async def _await_migration_state(
+    state_path: Path,
+    predicate: Callable[[dict[str, Any]], bool],
+    timeout: float,
+    description: str,
+    opening_task: asyncio.Task | None = None,
+) -> None:
+    """在预算内轮询迁移状态文件，直到 predicate 成立。
+
+    计数式轮询受 asyncio.sleep 粒度的平台差异影响（Windows 单次 sleep 实际
+    约 4~16ms），同样次数覆盖的真实窗口可能相差数倍，因此以墙钟时间为准。
+    状态文件可能短暂处于半写状态，读取/解析失败需容忍并重试。
+
+    ``opening_task`` 传入发起迁移的 open 任务；若它在状态达标前就带着异常
+    结束，说明 child 提前崩溃或被拒，直接上抛原始错误以便定位，而不是等到
+    轮询预算耗尽才报笼统断言。
+    """
+    loop = asyncio.get_running_loop()
+    end = loop.time() + timeout
+    while loop.time() < end:
+        if opening_task is not None and opening_task.done():
+            exception = opening_task.exception()
+            if exception is not None:
+                raise AssertionError(
+                    f"migration child {description}: open() exited early"
+                ) from exception
+            raise AssertionError(
+                f"migration child {description}: open() returned early"
+            )
+        if state_path.exists():
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                state = None
+            if isinstance(state, dict) and predicate(state):
+                return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"migration child {description}")
 
 
 class ToolCallingFakeChatModel(GenericFakeChatModel):
@@ -173,8 +220,10 @@ async def test_thread_persistence_recovers_messages_after_reopen(tmp_path: Path)
     assert opened.summary.first_message == "请检查当前改动"
     assert opened.summary.message_count == 2
     assert second.graph_config("thread-1")["configurable"]["checkpoint_ns"] == first_fingerprint
-    assert stat.S_IMODE(database_path.stat().st_mode) == 0o600
-    assert stat.S_IMODE(database_path.parent.stat().st_mode) == 0o700
+    if os.name != "nt":
+        # Windows 的 chmod 只映射只读属性，文件默认模式位固定为 0o666。
+        assert stat.S_IMODE(database_path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(database_path.parent.stat().st_mode) == 0o700
     await second.close()
 
 
@@ -1683,18 +1732,16 @@ async def test_v6_migration_boundary_blocks_second_connection_writer(
     monkeypatch.setattr(
         thread_persistence_module,
         "_LEGACY_MIGRATION_CHILD_DEADLINE_SECONDS",
-        3.0,
+        _MIGRATION_CHILD_TEST_DEADLINE,
     )
     state_path = database.with_name(database.name + ".migration-state.json")
     opening = asyncio.create_task(ThreadPersistence.open(project=project, home=home))
-    for _ in range(300):
-        if state_path.exists():
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-            if state.get("status") == "committing":
-                break
-        await asyncio.sleep(0.01)
-    else:
-        raise AssertionError("migration child did not reach committing state")
+    await _await_migration_state(
+        state_path,
+        lambda state: state.get("status") == "committing",
+        _MIGRATION_CHILD_TEST_DEADLINE + 5.0,
+        "did not reach committing state",
+    )
 
     writer_thread = threading.Thread(target=concurrent_writer)
     writer_thread.start()
@@ -1826,16 +1873,16 @@ async def test_v6_migration_cancellation_restores_original_database(
     monkeypatch.setattr(
         thread_persistence_module,
         "_LEGACY_MIGRATION_CHILD_DEADLINE_SECONDS",
-        3.0,
+        _MIGRATION_CHILD_TEST_DEADLINE,
     )
     task = asyncio.create_task(ThreadPersistence.open(project=project, home=home))
     state_path = database.with_name(database.name + ".migration-state.json")
-    for _ in range(300):
-        if state_path.exists():
-            break
-        await asyncio.sleep(0.01)
-    else:
-        raise AssertionError("migration child did not create recovery state")
+    await _await_migration_state(
+        state_path,
+        lambda _state: True,
+        _MIGRATION_CHILD_TEST_DEADLINE + 5.0,
+        "did not create recovery state",
+    )
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -1970,7 +2017,7 @@ async def test_migration_commit_marker_prevents_rollback_after_process_crash(
     monkeypatch.setattr(
         thread_persistence_module,
         "_LEGACY_MIGRATION_CHILD_DEADLINE_SECONDS",
-        3.0,
+        _MIGRATION_CHILD_TEST_DEADLINE,
     )
     recovered = await ThreadPersistence.open(project=project, home=home)
     await recovered.close()
@@ -1998,7 +2045,7 @@ async def test_migration_commit_worker_error_after_sqlite_commit_keeps_final_dat
     monkeypatch.setattr(
         thread_persistence_module,
         "_LEGACY_MIGRATION_CHILD_DEADLINE_SECONDS",
-        3.0,
+        _MIGRATION_CHILD_TEST_DEADLINE,
     )
     migrated = await ThreadPersistence.open(project=project, home=home)
     await migrated.close()
@@ -2024,16 +2071,16 @@ async def test_migration_commit_cancel_settles_worker_before_final_rethrow(
     monkeypatch.setattr(
         thread_persistence_module,
         "_LEGACY_MIGRATION_CHILD_DEADLINE_SECONDS",
-        3.0,
+        _MIGRATION_CHILD_TEST_DEADLINE,
     )
     opening = asyncio.create_task(ThreadPersistence.open(project=project, home=home))
     state_path = database.with_name(database.name + ".migration-state.json")
-    for _ in range(300):
-        if state_path.exists():
-            break
-        await asyncio.sleep(0.01)
-    else:
-        raise AssertionError("migration child did not create recovery state")
+    await _await_migration_state(
+        state_path,
+        lambda _state: True,
+        _MIGRATION_CHILD_TEST_DEADLINE + 5.0,
+        "did not create recovery state",
+    )
     opening.cancel()
     with pytest.raises(asyncio.CancelledError):
         await opening
@@ -2062,7 +2109,7 @@ async def test_migration_child_timeout_poison_blocks_reuse_until_new_owner(
     monkeypatch.setattr(
         thread_persistence_module,
         "_LEGACY_MIGRATION_CHILD_DEADLINE_SECONDS",
-        3.0,
+        _MIGRATION_CHILD_TEST_DEADLINE,
     )
     with pytest.raises(
         ThreadPersistenceError,
@@ -2070,7 +2117,8 @@ async def test_migration_child_timeout_poison_blocks_reuse_until_new_owner(
     ):
         await asyncio.wait_for(
             ThreadPersistence.open(project=project, home=home),
-            timeout=6.0,
+            # 外层预算必须覆盖 deadline 本身加上杀 child 与恢复的开销。
+            timeout=_MIGRATION_CHILD_TEST_DEADLINE + 5.0,
         )
 
     state_path = database.with_name(database.name + ".migration-state.json")
@@ -2118,7 +2166,7 @@ async def test_migration_poison_is_rechecked_after_lock_wait_for_all_waiters(
     monkeypatch.setattr(
         thread_persistence_module,
         "_LEGACY_MIGRATION_CHILD_DEADLINE_SECONDS",
-        3.0,
+        _MIGRATION_CHILD_TEST_DEADLINE,
     )
     original_assert = thread_persistence_module._assert_migration_path_available
     waiter_prechecked = asyncio.Event()
@@ -2140,14 +2188,13 @@ async def test_migration_poison_is_rechecked_after_lock_wait_for_all_waiters(
     )
     opening = asyncio.create_task(ThreadPersistence.open(project=project, home=home))
     state_path = database.with_name(database.name + ".migration-state.json")
-    for _ in range(300):
-        if state_path.exists() and json.loads(state_path.read_text(encoding="utf-8")).get(
-            "status"
-        ) == "committing":
-            break
-        await asyncio.sleep(0.01)
-    else:
-        raise AssertionError("migration child did not reach committing state")
+    await _await_migration_state(
+        state_path,
+        lambda state: state.get("status") == "committing",
+        _MIGRATION_CHILD_TEST_DEADLINE + 5.0,
+        "did not reach committing state",
+        opening,
+    )
 
     waiters = [
         asyncio.create_task(

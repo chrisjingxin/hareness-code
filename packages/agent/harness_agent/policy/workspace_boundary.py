@@ -4,6 +4,19 @@
 因绝对路径、``..`` 或符号链接而访问 ``--cwd`` 以外的文件。它不是 shell
 沙箱，``execute``、MCP 与企业远端 sandbox 由各自的安全机制负责。
 
+越界写入按审批模式分流
+----------------------
+读取、搜索类工具越界时仍然硬拒绝；写入类工具（write_file/edit_file/
+delete_file/delete）越界时按审批模式决定去向：
+
+- plan：直接拒绝；
+- default/auto/auto-edit：HITL 预检放行到审批流程（弹窗或显式 allow
+  规则），批准后由本中间件绕过虚拟根限制，直接向真实路径写出；
+- yolo：无审批门禁，由本中间件直接真实写出。
+
+中间件到达执行层时 deny 规则与破坏性守卫已先行裁决（见 agent 构图的
+中间件顺序），因此直写不会绕过这些硬策略。
+
 路径格式约定
 ------------
 deepagents 的 ``FilesystemMiddleware`` 在每个工具执行前调用
@@ -15,12 +28,15 @@ deepagents 的 ``FilesystemMiddleware`` 在每个工具执行前调用
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from deepagents.backends.utils import perform_string_replacement
 from langchain.agents.middleware.types import AgentMiddleware, ContextT, ResponseT
 from langchain.tools.tool_node import ToolCallRequest
 from langchain_core.messages import ToolMessage
@@ -37,6 +53,10 @@ _DIRECT_PATH_ARGUMENTS = {
 _SEARCH_TOOLS = frozenset({"glob", "grep"})
 _VIRTUAL_ROOT = "/.harness"
 _WINDOWS_ABSOLUTE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
+
+# 支持越界定向放行的写入类工具。apply_patch 不在此列：它的补丁可覆盖多个
+# 文件且由工具自身做工作区穿越检查，越界时保持硬拒绝。
+_OUTSIDE_WRITE_TOOLS = frozenset({"write_file", "edit_file", "delete_file", "delete"})
 
 
 class WorkspacePathPolicy:
@@ -136,12 +156,22 @@ class WorkspacePathPolicy:
 
 
 class WorkspaceBoundaryMiddleware(AgentMiddleware[dict[str, Any], ContextT, ResponseT]):
-    """在本机文件工具执行前强制工作区 containment，失败时不调用处理器。"""
+    """在本机文件工具执行前强制工作区 containment，失败时不调用处理器。
 
-    def __init__(self, workspace: str | Path) -> None:
-        """为一个 Agent 中间件实例创建不可变的工作区路径策略。"""
+    越界写入类调用按 ``approval_mode`` 分流：plan 直接拒绝；其余模式由
+    本中间件直接向真实路径写出（到达执行层时该调用要么已通过 HITL 批准
+    或命中 allow 规则，要么处于无审批门禁的 yolo 模式）。
+    """
+
+    def __init__(self, workspace: str | Path, approval_mode: str = "plan") -> None:
+        """为一个 Agent 中间件实例创建不可变的工作区路径策略。
+
+        ``approval_mode`` 缺省为最保守的 plan（越界写入硬拒绝），未显式
+        传入审批模式的构图路径不会获得越界直写能力。
+        """
         super().__init__()
         self.policy = WorkspacePathPolicy(workspace)
+        self.approval_mode = approval_mode
 
     def _validate_tool_call(
         self,
@@ -237,12 +267,151 @@ class WorkspaceBoundaryMiddleware(AgentMiddleware[dict[str, Any], ContextT, Resp
             status="error",
         )
 
+    def _maybe_handle_outside_write(self, request: ToolCallRequest) -> ToolMessage | None:
+        """越界写入定向放行入口；非越界写入返回 None 走常规边界校验。
+
+        必须在 ``_validate_tool_call`` 之前调用：常规校验会拒绝越界路径，
+        而这里按审批模式决定拒绝或真实写出。直写不再调用 handler，因此
+        不经过内层的虚拟后端与并发锁；越界写入不触碰 thread 虚拟文件等
+        进程内共享状态，且 deny 规则等硬策略在本中间件外层已先行裁决。
+        """
+        tool_call = request.tool_call
+        tool_name = str(tool_call.get("name", ""))
+        args = tool_call.get("args") or {}
+        if not isinstance(args, dict):
+            return None
+        target = resolve_outside_workspace_write(tool_name, args, self.policy.workspace)
+        if target is None:
+            return None
+
+        raw_path = str(args.get(_DIRECT_PATH_ARGUMENTS[tool_name]) or target)
+        tool_call_id = str(tool_call.get("id") or "workspace-boundary")
+        if self.approval_mode == "plan":
+            return self._rejection(tool_name, tool_call_id, "计划模式禁止写入工作区外的文件")
+        if tool_name == "write_file":
+            return self._perform_outside_write_file(raw_path, target, args, tool_call_id)
+        if tool_name == "edit_file":
+            return self._perform_outside_edit_file(raw_path, target, args, tool_call_id)
+        return self._perform_outside_delete_file(tool_name, raw_path, target, tool_call_id)
+
+    def _perform_outside_write_file(
+        self, raw_path: str, target: Path, args: dict[str, Any], tool_call_id: str
+    ) -> ToolMessage:
+        """复现 deepagents 后端的 write 语义：已存在报错、自动建父目录、不做换行转换。"""
+        content = args.get("content")
+        if not isinstance(content, str):
+            return self._rejection("write_file", tool_call_id, "content 参数必须是字符串")
+        try:
+            if target.exists():
+                return ToolMessage(
+                    content=(
+                        f"Cannot write to {raw_path} because it already exists. "
+                        "Read and then make an edit, or write to a new path."
+                    ),
+                    name="write_file",
+                    tool_call_id=tool_call_id,
+                    status="error",
+                )
+            target.parent.mkdir(parents=True, exist_ok=True)
+            # 与后端一致：O_NOFOLLOW 避免透过符号链接写出。
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            fd = os.open(target, flags, 0o644)
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as file:
+                file.write(content)
+        except (OSError, UnicodeEncodeError) as exc:
+            return ToolMessage(
+                content=f"Error writing file '{raw_path}': {exc}",
+                name="write_file",
+                tool_call_id=tool_call_id,
+                status="error",
+            )
+        return ToolMessage(
+            content=f"Updated file {raw_path}",
+            name="write_file",
+            tool_call_id=tool_call_id,
+            status="success",
+        )
+
+    def _perform_outside_edit_file(
+        self, raw_path: str, target: Path, args: dict[str, Any], tool_call_id: str
+    ) -> ToolMessage:
+        """复现 deepagents 后端的 edit 语义：换行归一化、唯一匹配或 replace_all。"""
+        old_string = args.get("old_string")
+        new_string = args.get("new_string")
+        if not isinstance(old_string, str) or not isinstance(new_string, str):
+            return self._rejection("edit_file", tool_call_id, "old_string/new_string 参数必须是字符串")
+        replace_all = bool(args.get("replace_all", False))
+        try:
+            if not target.exists() or not target.is_file():
+                return ToolMessage(
+                    content=f"Error: File '{raw_path}' not found",
+                    name="edit_file",
+                    tool_call_id=tool_call_id,
+                    status="error",
+                )
+            fd = os.open(target, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            with os.fdopen(fd, encoding="utf-8") as file:
+                content = file.read()
+            # 与后端一致：读入为 universal newlines，old/new 也需归一化后再匹配。
+            old_normalized = old_string.replace("\r\n", "\n").replace("\r", "\n")
+            new_normalized = new_string.replace("\r\n", "\n").replace("\r", "\n")
+            result = perform_string_replacement(content, old_normalized, new_normalized, replace_all)
+            if isinstance(result, str):
+                return ToolMessage(
+                    content=result, name="edit_file", tool_call_id=tool_call_id, status="error"
+                )
+            new_content, occurrences = result
+            flags = os.O_WRONLY | os.O_TRUNC
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            fd = os.open(target, flags)
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as file:
+                file.write(new_content)
+        except (OSError, UnicodeDecodeError, UnicodeEncodeError) as exc:
+            return ToolMessage(
+                content=f"Error editing file '{raw_path}': {exc}",
+                name="edit_file",
+                tool_call_id=tool_call_id,
+                status="error",
+            )
+        return ToolMessage(
+            content=f"Successfully replaced {occurrences} instance(s) of the string in '{raw_path}'",
+            name="edit_file",
+            tool_call_id=tool_call_id,
+            status="success",
+        )
+
+    def _perform_outside_delete_file(
+        self, tool_name: str, raw_path: str, target: Path, tool_call_id: str
+    ) -> ToolMessage:
+        """复现 harness delete_file 工具的 JSON 结果契约。"""
+        try:
+            if not target.exists():
+                payload: dict[str, Any] = {"success": False, "error": f"文件不存在：{raw_path}"}
+            elif target.is_dir():
+                payload = {"success": False, "error": f"不允许删除目录：{raw_path}"}
+            else:
+                target.unlink()
+                payload = {"success": True, "deleted": raw_path}
+        except OSError as exc:
+            payload = {"success": False, "error": str(exc)}
+        return ToolMessage(
+            content=json.dumps(payload, ensure_ascii=False),
+            name=tool_name,
+            tool_call_id=tool_call_id,
+            status="success" if payload["success"] else "error",
+        )
+
     def wrap_tool_call(
         self,
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Any],
     ) -> Any:
-        """同步入口先执行路径策略，拒绝后不让底层工具获得调用机会。"""
+        """同步入口先裁决越界写入，再执行路径策略，拒绝后不让底层工具获得调用机会。"""
+        if (handled := self._maybe_handle_outside_write(request)) is not None:
+            return handled
         if (rejection := self._validate_tool_call(request)) is not None:
             return rejection
         return handler(request)
@@ -253,9 +422,54 @@ class WorkspaceBoundaryMiddleware(AgentMiddleware[dict[str, Any], ContextT, Resp
         handler: Callable[[ToolCallRequest], Awaitable[Any]],
     ) -> Any:
         """异步入口复用同步验证逻辑，确保两种调用方式安全语义一致。"""
+        if (handled := self._maybe_handle_outside_write(request)) is not None:
+            return handled
         if (rejection := self._validate_tool_call(request)) is not None:
             return rejection
         return await handler(request)
+
+
+def resolve_outside_workspace_write(
+    tool_name: str, tool_args: object, workspace_root: str | Path | None
+) -> Path | None:
+    """调用为工作区外文件写入时解析并返回真实目标路径，否则返回 None。
+
+    HITL 组合预检与边界中间件共用同一判定，保证"是否弹窗"与"是否直写"
+    基于完全相同的路径语义。以下情形不属于可放行的越界写入，交由常规
+    边界校验处理（拒绝或按工作区内流程执行）：
+
+    - 非写入类工具、路径缺失或不是绝对路径（含相对路径）；
+    - ``/.harness`` 虚拟路径、UNC 路径、含 ``..`` 的穿越路径；
+    - 路径经真实解析后仍在工作区内。
+    """
+    if tool_name not in _OUTSIDE_WRITE_TOOLS or workspace_root is None:
+        return None
+    if not isinstance(tool_args, dict):
+        return None
+    raw = tool_args.get(_DIRECT_PATH_ARGUMENTS[tool_name])
+    if not isinstance(raw, str) or not raw:
+        return None
+    # 相对路径不参与定向放行：其解析结果依赖进程工作目录，语义不可预期。
+    if not (raw.startswith("/") or _WINDOWS_ABSOLUTE_PATH.match(raw)):
+        return None
+    if _is_virtual_path(raw):
+        return None
+    normalized = raw.replace("\\", "/")
+    if raw.startswith("\\") or normalized.startswith("//"):
+        return None
+    if ".." in PurePosixPath(normalized).parts:
+        return None
+    workspace = Path(workspace_root).resolve(strict=False)
+    if raw.startswith("/") and sys.platform == "win32":
+        # Windows virtual_mode 下 `/...` 是工作区相对路径，拼回工作区解析。
+        candidate = (workspace / raw.lstrip("/")).resolve(strict=False)
+    else:
+        candidate = Path(raw).resolve(strict=False)
+    try:
+        candidate.relative_to(workspace)
+    except (ValueError, OSError, RuntimeError):
+        return candidate
+    return None
 
 
 def _is_virtual_path(value: object) -> bool:

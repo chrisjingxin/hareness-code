@@ -15,7 +15,6 @@ from langchain_core.messages import (
     RemoveMessage,
     ToolMessage,
 )
-from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 if TYPE_CHECKING:
     from harness_agent.threads.thread_persistence import ThreadPersistence, TranscriptRecord
@@ -143,6 +142,11 @@ class ContextProjector:
     @staticmethod
     def cache_rewrite(messages: Sequence[BaseMessage]) -> list[BaseMessage]:
         """生成 reducer 所需的全量缓存替换，不改动 Transcript。"""
+        # 惰性导入：langgraph.graph.message 会级联加载 langchain_core tracers
+        # 与 langsmith，在 Windows 上给迁移子进程增加数秒冷启动；迁移与投影
+        # 校验路径都不经过 cache_rewrite，不应在模块导入期付出该成本。
+        from langgraph.graph.message import REMOVE_ALL_MESSAGES
+
         validate_atomic_message_groups(messages)
         return [RemoveMessage(id=REMOVE_ALL_MESSAGES), *messages]
 

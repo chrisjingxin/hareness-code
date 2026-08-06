@@ -1943,8 +1943,8 @@ async def test_approve_thread_delete_rule_skips_later_deletions_in_same_thread()
         assert not second.exists()
 
 
-async def test_workspace_rejection_precedes_default_approval_request():
-    """越界文件调用在 HITL 前被拒绝，避免用户看到无法改变边界的审批框。"""
+async def test_outside_write_asks_approval_and_writes_when_approved():
+    """default 模式越界写入弹出审批框，批准后真实写出工作区外路径。"""
     from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
     from langchain_core.messages import AIMessage
     from langchain_core.runnables import Runnable
@@ -1956,7 +1956,7 @@ async def test_workspace_rejection_precedes_default_approval_request():
             return self
 
     with TemporaryDirectory() as workspace, TemporaryDirectory() as outside:
-        destination = Path(outside) / "must-not-write.md"
+        destination = Path(outside) / "approved-outside.md"
         model = ToolModel(
             responses=[
                 AIMessage(
@@ -1964,12 +1964,12 @@ async def test_workspace_rejection_precedes_default_approval_request():
                     tool_calls=[
                         {
                             "name": "write_file",
-                            "args": {"file_path": str(destination), "content": "blocked"},
+                            "args": {"file_path": str(destination), "content": "written after approval"},
                             "id": "call-outside",
                         }
                     ],
                 ),
-                AIMessage(content="越界已拒绝"),
+                AIMessage(content="越界写入已完成"),
             ]
         )
         model.profile = {"max_input_tokens": 200_000}
@@ -1986,10 +1986,20 @@ async def test_workspace_rejection_precedes_default_approval_request():
         await server.dispatch(
             _request("run.start", {"message": "越界写入", "thread_id": "outside", "run_id": "outside-run"}, "outside-start")
         )
+        approval = await _wait_for(
+            frames, lambda frame: str(frame.get("method", "")) == "interaction.approval"
+        )
+
+        # 批准前不得写出；批准后必须真实落到工作区外路径。
+        assert "write_file" in str(approval["params"]["payload"]["description"])
+        assert not destination.exists()
+
+        await server.dispatch(
+            {"jsonrpc": "2.0", "id": approval["id"], "result": {"decision": "approve_once"}}
+        )
         await _wait_for(frames, lambda frame: frame.get("params", {}).get("type") == "run.completed")
 
-        assert not destination.exists()
-        assert not any(str(frame.get("method", "")).startswith("interaction.") for frame in frames)
+        assert destination.read_text(encoding="utf-8") == "written after approval"
 
 
 async def test_auto_edit_writes_without_interruption_but_shell_still_requires_approval():

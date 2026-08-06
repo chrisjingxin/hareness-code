@@ -1086,6 +1086,37 @@ class ThreadPersistenceError(RuntimeError):
     """线程存储不可用、损坏或版本不兼容时返回的可诊断错误。"""
 
 
+def _restrict_owner_mode(descriptor: int) -> None:
+    """把文件收窄为所有者读写；Windows 没有 fchmod，权限由创建时的 ACL 决定。"""
+    if hasattr(os, "fchmod"):
+        os.fchmod(descriptor, 0o600)
+
+
+def _fsync_directory_best_effort(directory: Path) -> None:
+    """目录 fsync 仅 POSIX 可用；Windows 依赖 NTFS 日志保证崩溃一致性。"""
+    if os.name == "nt":
+        return
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _fsync_file_path(path: Path) -> None:
+    """把文件内容刷到磁盘；Windows 的 FlushFileBuffers 要求写权限句柄。"""
+    if os.name == "nt":
+        # POSIX 允许对只读句柄 fsync；Windows 上只读句柄会报 EBADF，
+        # 因此以可写方式重新打开同一文件再刷盘。
+        descriptor = os.open(path, os.O_RDWR)
+    else:
+        descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 class _MigrationFileLock:
     """跨进程串行化数据库 open/migration/recovery 的短生命周期锁。"""
 
@@ -1094,27 +1125,40 @@ class _MigrationFileLock:
         self.path = path
         self._descriptor: int | None = None
         self._fcntl: Any | None = None
+        self._msvcrt: Any | None = None
 
     async def acquire(self) -> None:
         """以非阻塞轮询等待锁，避免同一事件循环中的 opener 互相死锁。"""
-        try:
-            import fcntl
-        except ImportError as exc:  # pragma: no cover - 当前支持平台均提供 fcntl。
-            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_LOCK_UNAVAILABLE") from exc
+        if os.name == "nt":
+            # Windows 没有 flock；改用 msvcrt 对锁文件首字节的非阻塞区间锁。
+            import msvcrt
+
+            self._msvcrt = msvcrt
+        else:
+            try:
+                import fcntl
+            except ImportError as exc:  # pragma: no cover - POSIX 平台均提供 fcntl。
+                raise ThreadPersistenceError("CHECKPOINT_MIGRATION_LOCK_UNAVAILABLE") from exc
+            self._fcntl = fcntl
         try:
             self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             descriptor = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
-            os.fchmod(descriptor, 0o600)
+            _restrict_owner_mode(descriptor)
         except OSError as exc:
             raise ThreadPersistenceError("CHECKPOINT_MIGRATION_LOCK_UNAVAILABLE") from exc
         self._descriptor = descriptor
-        self._fcntl = fcntl
         try:
             while True:
                 try:
-                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    if self._msvcrt is not None:
+                        # msvcrt.locking 按当前文件位置加锁，先回到首字节。
+                        os.lseek(descriptor, 0, os.SEEK_SET)
+                        self._msvcrt.locking(descriptor, self._msvcrt.LK_NBLCK, 1)
+                    else:
+                        self._fcntl.flock(descriptor, self._fcntl.LOCK_EX | self._fcntl.LOCK_NB)
                     return
-                except BlockingIOError:
+                # POSIX 竞争抛 BlockingIOError；Windows 竞争抛 EACCES（PermissionError）。
+                except (BlockingIOError, PermissionError):
                     await asyncio.sleep(0.01)
         except BaseException:
             self.release()
@@ -1122,14 +1166,22 @@ class _MigrationFileLock:
 
     def release(self) -> None:
         """释放并关闭锁文件，不删除锁文件避免 inode 竞态。"""
-        descriptor, fcntl = self._descriptor, self._fcntl
+        descriptor, fcntl, msvcrt = self._descriptor, self._fcntl, self._msvcrt
         self._descriptor = None
         self._fcntl = None
+        self._msvcrt = None
         if descriptor is None:
             return
         try:
             if fcntl is not None:
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
+            elif msvcrt is not None:
+                try:
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    # 解锁失败不阻碍关闭；进程退出时系统会回收区间锁。
+                    pass
         finally:
             os.close(descriptor)
 
@@ -4202,6 +4254,10 @@ class ThreadPersistence:
                 "harness_run_context_snapshots",
                 "harness_thread_transcript",
                 "harness_thread_history_metadata",
+                wdl1
+                "harness_context_artifacts",
+                # transcript bootstrap 会把超过内联上限的旧工具输出提取为新
+                # artifact；原 artifact 行逐字段保留，允许 canonical 追加。
                 "harness_context_artifacts",
             }:
                 await self._validate_append_only_table_async(backup_path, source_table)
@@ -4337,6 +4393,11 @@ class ThreadPersistence:
             "harness_thread_history_metadata": (
                 "project_fingerprint",
                 "thread_id",
+            ),
+            "harness_context_artifacts": (
+                "project_fingerprint",
+                "thread_id",
+                "artifact_id",
             ),
         }
         key_columns = primary_keys[source_table.name]
@@ -4479,17 +4540,9 @@ class ThreadPersistence:
                     "CHECKPOINT_MIGRATION_BACKUP_VALIDATION_FAILED"
                 )
             os.chmod(temporary, 0o600)
-            temporary_descriptor = os.open(temporary, os.O_RDONLY)
-            try:
-                os.fsync(temporary_descriptor)
-            finally:
-                os.close(temporary_descriptor)
+            _fsync_file_path(temporary)
             os.replace(temporary, backup_path)
-            directory = os.open(backup_path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
+            _fsync_directory_best_effort(backup_path.parent)
             return backup_path
         except ThreadPersistenceError:
             raise
@@ -4566,18 +4619,14 @@ class ThreadPersistence:
             )
             temporary = Path(temporary_name)
             with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                os.fchmod(handle.fileno(), 0o600)
+                _restrict_owner_mode(handle.fileno())
                 json.dump(payload, handle, ensure_ascii=False, sort_keys=True, allow_nan=False)
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, state_path)
             temporary = None
-            directory = os.open(state_path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
+            _fsync_directory_best_effort(state_path.parent)
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
@@ -4597,11 +4646,7 @@ class ThreadPersistence:
         """删除迁移状态并同步目录，避免已完成状态跨重启复活。"""
         state_path = self._migration_state_path()
         state_path.unlink(missing_ok=True)
-        directory = os.open(state_path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        _fsync_directory_best_effort(state_path.parent)
 
     def _mark_migration_restore_failed(self, error: BaseException) -> None:
         """保留 backup 并记录稳定错误类型，供下一次启动确定性重试。"""
@@ -4839,22 +4884,14 @@ class ThreadPersistence:
                     "CHECKPOINT_MIGRATION_RESTORE_VALIDATION_FAILED"
                 )
             os.chmod(temporary, 0o600)
-            temporary_descriptor = os.open(temporary, os.O_RDONLY)
-            try:
-                os.fsync(temporary_descriptor)
-            finally:
-                os.close(temporary_descriptor)
+            _fsync_file_path(temporary)
             # The old target connection has been closed, so these exact sidecars
             # cannot receive any more frames.  Never leave them beside the new
             # inode, where a subsequent opener could mistake them for its WAL.
             for suffix in ("-wal", "-shm", "-journal"):
                 path.with_name(path.name + suffix).unlink(missing_ok=True)
             os.replace(temporary, path)
-            directory = os.open(path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
+            _fsync_directory_best_effort(path.parent)
         except ThreadPersistenceError:
             raise
         except (OSError, sqlite3.Error) as exc:
@@ -4887,17 +4924,13 @@ class ThreadPersistence:
             temporary = Path(temporary_name)
             try:
                 with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                    os.fchmod(handle.fileno(), 0o600)
+                    _restrict_owner_mode(handle.fileno())
                     json.dump(raw, handle, ensure_ascii=False, sort_keys=True, allow_nan=False)
                     handle.write("\n")
                     handle.flush()
                     os.fsync(handle.fileno())
                 os.replace(temporary, state_path)
-                directory_descriptor = os.open(directory, os.O_RDONLY)
-                try:
-                    os.fsync(directory_descriptor)
-                finally:
-                    os.close(directory_descriptor)
+                _fsync_directory_best_effort(directory)
             finally:
                 temporary.unlink(missing_ok=True)
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
@@ -4907,11 +4940,7 @@ class ThreadPersistence:
     def _unlink_migration_state_path_sync(state_path: Path) -> None:
         """恢复流程使用的无实例 state 删除操作，并同步目录元数据。"""
         state_path.unlink(missing_ok=True)
-        directory = os.open(state_path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        _fsync_directory_best_effort(state_path.parent)
 
     async def _migrate_legacy_prompt_epochs_to_snapshots(self) -> None:
         """把旧 PromptEpoch 单向转换为 legacy snapshot，并回填旧 Run 引用。"""
@@ -6191,6 +6220,32 @@ def _migration_validate_final_schema_sync(connection: sqlite3.Connection) -> Non
             )
 
 
+# Windows 的 Winsock/DLL 装载与临时目录依赖这些系统变量；child 若拿不到，
+# asyncio 的 overlapped IO 初始化会直接失败（WinError 10106）。
+_WINDOWS_REQUIRED_ENV_VARS = (
+    "SystemRoot",
+    "SYSTEMROOT",
+    "SystemDrive",
+    "COMSPEC",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "LOCALAPPDATA",
+    "APPDATA",
+    "ProgramData",
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "ProgramW6432",
+    "CommonProgramFiles",
+    "NUMBER_OF_PROCESSORS",
+    "OS",
+    "PROCESSOR_ARCHITECTURE",
+)
+
+
 def _legacy_migration_child_environment() -> dict[str, str]:
     """为 migration child 提供最小非秘密环境，避免继承 Host 运行上下文。"""
     package_root = str(Path(__file__).resolve().parents[1])
@@ -6198,6 +6253,13 @@ def _legacy_migration_child_environment() -> dict[str, str]:
         "PATH": os.environ.get("PATH", ""),
         "PYTHONPATH": package_root,
     }
+    if os.name == "nt":
+        # 环境变量名在 Windows 上不区分大小写；按小写索引后回填真实键值。
+        lowered = {name.lower(): (name, value) for name, value in os.environ.items()}
+        for required in _WINDOWS_REQUIRED_ENV_VARS:
+            entry = lowered.get(required.lower())
+            if entry is not None:
+                environment[entry[0]] = entry[1]
     test_phase = _requested_migration_test_phase()
     if test_phase is not None:
         environment["HARNESS_TEST_MIGRATION_CHILD_PHASE"] = test_phase
