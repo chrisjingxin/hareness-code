@@ -2,11 +2,13 @@
  * UI 契约帧校验：尺寸、JSON、精确字段与类型白名单。
  *
  * 校验只做结构防御（形状/类型/长度），业务语义（Thread 是否存在、能力是否具备、
- * requestId 是否过期）由 Coordinator / InteractiveCore 决定，不在此重复。
+ * requestId 是否过期、工作区路径是否越界）由 Coordinator / InteractiveCore /
+ * WorkspaceExplorer 决定，不在此重复。
  */
 
 import type { IntentOutcome, InteractiveIntent } from "../../interactive/types"
-import { MAX_REQUEST_ID_LENGTH, MAX_UI_FRAME_BYTES, type WebPresentationIntent, type WebUiClientMessage, type WebUiPatch, type WebUiServerMessage, type WebUiState } from "./messages"
+import type { WorkspaceIntent, WorkspaceOutcome } from "../../workspace/types"
+import { MAX_REQUEST_ID_LENGTH, MAX_UI_FRAME_BYTES, type WebUiClientMessage, type WebUiPatch, type WebUiServerMessage, type WebUiState } from "./messages"
 import type { PresentationState, ReturnReason } from "../state"
 
 const textEncoder = new TextEncoder()
@@ -17,7 +19,7 @@ export function parseClientFrame(value: unknown): WebUiClientMessage | undefined
   if (parsed === undefined) return undefined
   if (!isRecord(parsed)) return undefined
   const type = parsed.type
-  if (type === "intent") {
+  if (type === "interactive.intent") {
     if (!exactFields(parsed, ["type", "requestId", "revision", "intent"])) return undefined
     const requestId = parsed.requestId
     const revision = parsed.revision
@@ -25,13 +27,17 @@ export function parseClientFrame(value: unknown): WebUiClientMessage | undefined
     if (!isNonNegativeInt(revision)) return undefined
     const intent = parsed.intent
     if (!isInteractiveIntent(intent)) return undefined
-    return { type: "intent", requestId, revision, intent }
+    return { type: "interactive.intent", requestId, revision, intent }
   }
-  if (type === "presentation-intent") {
-    if (!exactFields(parsed, ["type", "intent"])) return undefined
-    const intent = isPresentationIntent(parsed.intent)
-    if (!intent) return undefined
-    return { type: "presentation-intent", intent }
+  if (type === "workspace.intent") {
+    if (!exactFields(parsed, ["type", "requestId", "revision", "intent"])) return undefined
+    const requestId = parsed.requestId
+    const revision = parsed.revision
+    if (!isRequestId(requestId)) return undefined
+    if (!isNonNegativeInt(revision)) return undefined
+    const intent = parsed.intent
+    if (!isWorkspaceIntent(intent)) return undefined
+    return { type: "workspace.intent", requestId, revision, intent }
   }
   if (type === "handoff.ready" || type === "handoff.return" || type === "handoff.exit") {
     return exactFields(parsed, ["type"]) ? { type } : undefined
@@ -60,10 +66,18 @@ export function parseServerFrame(value: unknown): WebUiServerMessage | undefined
     return { type: "state.patch", revision: parsed.revision, patch }
   }
   if (type === "intent.outcome") {
-    if (!exactFields(parsed, ["type", "requestId", "outcome"])) return undefined
+    if (!exactFields(parsed, ["type", "requestId", "domain", "outcome"])) return undefined
     if (!isRequestId(parsed.requestId)) return undefined
-    if (!isIntentOutcome(parsed.outcome)) return undefined
-    return { type: "intent.outcome", requestId: parsed.requestId, outcome: parsed.outcome }
+    const domain = parsed.domain
+    if (domain === "interactive") {
+      if (!isIntentOutcome(parsed.outcome)) return undefined
+      return { type: "intent.outcome", requestId: parsed.requestId, domain, outcome: parsed.outcome }
+    }
+    if (domain === "workspace") {
+      if (!isWorkspaceOutcome(parsed.outcome)) return undefined
+      return { type: "intent.outcome", requestId: parsed.requestId, domain, outcome: parsed.outcome }
+    }
+    return undefined
   }
   if (type === "handoff.state") {
     if (!exactFields(parsed, ["type", "state"])) return undefined
@@ -204,29 +218,40 @@ function isInteractionResponse(value: unknown): boolean {
   return false
 }
 
-function isPresentationIntent(value: unknown): WebPresentationIntent | undefined {
-  if (!isRecord(value)) return undefined
-  if (value.type === "theme.set") {
-    if (!exactFields(value, ["type", "theme"])) return undefined
-    if (value.theme !== "light" && value.theme !== "dark") return undefined
-    return { type: "theme.set", theme: value.theme }
+/** WorkspaceIntent 白名单：5 个 intent，精确字段校验；路径语义由 Explorer 决定。 */
+const WORKSPACE_INTENT_TYPES = new Set([
+  "workspace.load",
+  "workspace.refresh",
+  "workspace.toggle-directory",
+  "workspace.preview-file",
+  "workspace.refresh-preview",
+])
+
+function isWorkspaceIntent(value: unknown): value is WorkspaceIntent {
+  if (!isRecord(value)) return false
+  const type = value.type
+  if (typeof type !== "string" || !WORKSPACE_INTENT_TYPES.has(type)) return false
+  switch (type) {
+    case "workspace.load":
+    case "workspace.refresh":
+      return exactFields(value, ["type"])
+    case "workspace.toggle-directory":
+    case "workspace.preview-file":
+    case "workspace.refresh-preview":
+      return exactFields(value, ["type", "path"]) && isNonEmptyString(value.path, 4096)
+    default:
+      return false
   }
-  if (value.type === "panel.open") {
-    if (!exactFields(value, ["type", "panel"])) return undefined
-    if (typeof value.panel !== "string" || value.panel.length > 64) return undefined
-    return { type: "panel.open", panel: value.panel }
-  }
-  if (value.type === "panel.close") {
-    return exactFields(value, ["type"]) ? { type: "panel.close" } : undefined
-  }
-  return undefined
 }
 
-/** state.replace 的完整状态：五个分片全部必须存在（缺失视为畸形帧）。 */
+/** state.replace 的完整状态：七个分片全部必须存在（缺失视为畸形帧）。 */
 function isWebUiState(value: unknown): WebUiState | undefined {
   if (!isRecord(value)) return undefined
-  if (!exactFields(value, ["conversation", "interaction", "navigation", "command", "runtime"])) return undefined
+  const slices = ["conversation", "interaction", "navigation", "command", "runtime", "workspaceTree", "workspacePreview"]
+  if (!exactFields(value, slices)) return undefined
   if (!isRecord(value.conversation) || !isRecord(value.interaction) || !isRecord(value.navigation) || !isRecord(value.command) || !isRecord(value.runtime)) return undefined
+  if (!isWorkspaceTreeView(value.workspaceTree)) return undefined
+  if (!isWorkspacePreviewView(value.workspacePreview)) return undefined
   return value as unknown as WebUiState
 }
 
@@ -235,11 +260,86 @@ function isWebUiPatch(value: unknown): WebUiPatch | undefined {
   if (!isRecord(value)) return undefined
   const keys = Object.keys(value)
   if (keys.length === 0) return undefined
-  if (!keys.every(key => key === "conversation" || key === "interaction" || key === "navigation" || key === "command" || key === "runtime")) return undefined
+  const allowed = new Set(["conversation", "interaction", "navigation", "command", "runtime", "workspaceTree", "workspacePreview"])
+  if (!keys.every(key => allowed.has(key))) return undefined
   for (const key of keys) {
-    if (!isRecord(value[key])) return undefined
+    if (key === "workspaceTree") {
+      if (!isWorkspaceTreeView(value[key])) return undefined
+    } else if (key === "workspacePreview") {
+      if (!isWorkspacePreviewView(value[key])) return undefined
+    } else if (!isRecord(value[key])) {
+      return undefined
+    }
   }
   return value as unknown as WebUiPatch
+}
+
+/** 文件树视图：status 联合 + 固定字段；message 仅 error 时存在。 */
+function isWorkspaceTreeView(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  const keys = Object.keys(value)
+  const allowed = new Set(["status", "rows", "selectedPath", "limited", "message"])
+  if (!keys.every(key => allowed.has(key))) return false
+  if (value.status !== "idle" && value.status !== "loading" && value.status !== "ready" && value.status !== "error") return false
+  if (!Array.isArray(value.rows)) return false
+  for (const row of value.rows) {
+    if (!isWorkspaceTreeRow(row)) return false
+  }
+  if (value.selectedPath !== null && typeof value.selectedPath !== "string") return false
+  if (typeof value.limited !== "boolean") return false
+  if (value.message !== undefined && typeof value.message !== "string") return false
+  return true
+}
+
+/** 单行树节点：kind 枚举 + 固定字段。 */
+function isWorkspaceTreeRow(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  if (!exactFields(value, ["path", "name", "kind", "depth", "expanded", "loading", "hasChildren"])) return false
+  if (typeof value.path !== "string" || typeof value.name !== "string") return false
+  if (value.kind !== "directory" && value.kind !== "file" && value.kind !== "symlink") return false
+  const depth = value.depth
+  if (typeof depth !== "number" || !Number.isSafeInteger(depth) || depth < 0) return false
+  if (typeof value.expanded !== "boolean" || typeof value.loading !== "boolean" || typeof value.hasChildren !== "boolean") return false
+  return true
+}
+
+/** 预览状态机：status 判别 + 各分支固定字段。 */
+function isWorkspacePreviewView(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  const status = value.status
+  if (status === "idle") return exactFields(value, ["status"])
+  if (status === "loading") {
+    return exactFields(value, ["status", "path"]) && isString(value.path, 4096)
+  }
+  if (status === "ready") {
+    if (!exactFields(value, ["status", "file"])) return false
+    return isWorkspaceFilePreview(value.file)
+  }
+  if (status === "unsupported") {
+    if (!exactFields(value, ["status", "path", "reason", "sizeBytes"])) return false
+    if (!isString(value.path, 4096) || !isString(value.reason, 2048)) return false
+    return Number.isSafeInteger(value.sizeBytes) && (value.sizeBytes as number) >= 0
+  }
+  if (status === "error") {
+    if (!exactFields(value, ["status", "path", "code", "message"])) return false
+    if (!isString(value.path, 4096) || !isString(value.message, 4096)) return false
+    // 与 isWorkspaceOutcome 共用稳定错误码白名单。
+    return typeof value.code === "string" && WORKSPACE_ERROR_CODES.has(value.code)
+  }
+  return false
+}
+
+/** 预览文件载荷：固定字段与类型。 */
+function isWorkspaceFilePreview(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  const fields = ["path", "name", "content", "language", "sizeBytes", "lineCount", "modifiedAtMs", "truncated", "version"]
+  if (!exactFields(value, fields)) return false
+  if (!isString(value.path, 4096) || !isString(value.name, 1024) || !isString(value.content, 512 * 1024)) return false
+  if (value.language !== null && typeof value.language !== "string") return false
+  if (!Number.isSafeInteger(value.sizeBytes) || (value.sizeBytes as number) < 0) return false
+  if (!Number.isSafeInteger(value.lineCount) || (value.lineCount as number) < 0) return false
+  if (typeof value.modifiedAtMs !== "number" || !isString(value.version, 256)) return false
+  return typeof value.truncated === "boolean"
 }
 
 function isIntentOutcome(value: unknown): value is IntentOutcome {
@@ -252,6 +352,34 @@ function isIntentOutcome(value: unknown): value is IntentOutcome {
   if (value.status === "rejected") {
     if (!exactFields(value, ["status", "code", "message"])) return false
     if (typeof value.code !== "string" || value.code.length > 64) return false
+    if (!isString(value.message, 4096)) return false
+    return true
+  }
+  return false
+}
+
+/** WorkspaceOutcome 校验：错误码必须是稳定白名单。 */
+const WORKSPACE_ERROR_CODES = new Set([
+  "invalid-path",
+  "outside-workspace",
+  "not-found",
+  "permission-denied",
+  "not-directory",
+  "not-file",
+  "unsupported-file",
+  "unsupported-encoding",
+  "workspace-too-large",
+  "workspace-changed",
+  "io-error",
+  "invalid-argument",
+])
+
+function isWorkspaceOutcome(value: unknown): value is WorkspaceOutcome {
+  if (!isRecord(value)) return false
+  if (value.status === "accepted") return exactFields(value, ["status"])
+  if (value.status === "rejected") {
+    if (!exactFields(value, ["status", "code", "message"])) return false
+    if (typeof value.code !== "string" || !WORKSPACE_ERROR_CODES.has(value.code)) return false
     if (!isString(value.message, 4096)) return false
     return true
   }

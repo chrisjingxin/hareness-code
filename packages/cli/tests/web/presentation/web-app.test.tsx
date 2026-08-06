@@ -233,14 +233,43 @@ describe("WebApp", () => {
     }
   })
 
-  test("Escape 优先级：header menu 打开时先关闭菜单而非关闭 panel", () => {
-    const adapter = createFakeAdapter(makeSnapshot({ headerMenuOpen: true, activePanel: "status" }))
+  test("Escape 优先级：header menu 打开时先关闭菜单而非关闭 Dock", () => {
+    const adapter = createFakeAdapter(makeSnapshot({
+      headerMenuOpen: true,
+      contextDock: { open: true, activePanel: "status", widthPx: 560, code: { tabs: [], activePath: null, previews: {}, previewErrors: {} } },
+    }))
     const handle = render(<WebApp adapter={adapter} active={true} />)
     try {
       const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })
       window.dispatchEvent(event)
       expect(adapter.intentLog).toContainEqual({ type: "header-menu-toggle", open: false })
-      expect(adapter.intentLog.find(intent => intent.type === "panel-close")).toBeUndefined()
+      expect(adapter.intentLog.find(intent => intent.type === "dock-close")).toBeUndefined()
+    } finally {
+      handle.unmount()
+    }
+  })
+
+  test("Dock 打开时渲染 .context-dock，且中间 Conversation（composer）不被预览替换", () => {
+    const adapter = createFakeAdapter(makeSnapshot({
+      contextDock: { open: true, activePanel: "code", widthPx: 560, code: { tabs: [], activePath: null, previews: {}, previewErrors: {} } },
+    }))
+    const handle = render(<WebApp adapter={adapter} active={true} />)
+    try {
+      expect(handle.container.querySelector(".context-dock")).not.toBeNull()
+      expect(handle.container.querySelector(".desktop-workspace")?.classList.contains("has-context-dock")).toBe(true)
+      const composer = handle.container.querySelector<HTMLTextAreaElement>(".composer-textarea")
+      expect(composer).not.toBeNull() // Conversation 永不被文件预览替换
+    } finally {
+      handle.unmount()
+    }
+  })
+
+  test("Dock 关闭时 .context-dock 不渲染，workspace 恢复两列", () => {
+    const adapter = createFakeAdapter(makeSnapshot())
+    const handle = render(<WebApp adapter={adapter} active={true} />)
+    try {
+      expect(handle.container.querySelector(".context-dock")).toBeNull()
+      expect(handle.container.querySelector(".desktop-workspace")?.classList.contains("has-context-dock")).toBe(false)
     } finally {
       handle.unmount()
     }

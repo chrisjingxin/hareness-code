@@ -16,7 +16,18 @@ import { webHtml } from "../../src/web/html"
 import { browserBundle } from "../../src/web/bundle"
 import { createPresentationCoordinator, type PresentationCoordinator } from "../../src/presentation-coordinator/coordinator"
 import { createWebUiGateway, type WebUiGateway } from "../../src/presentation-coordinator/web-ui-gateway"
+import type { WorkspaceExplorer } from "../../src/workspace/types"
 import type { PresentationState } from "../../src/presentation-coordinator"
+
+/** 空 explorer fake：网关构造必需，本测试不关心工作区。 */
+function createFakeExplorer(): WorkspaceExplorer {
+  return {
+    getSnapshot: () => ({ tree: { status: "idle", rows: [], selectedPath: null, limited: false }, preview: { status: "idle" } }),
+    subscribe: () => () => {},
+    dispatch: async () => ({ status: "accepted" }),
+    close: async () => {},
+  }
+}
 
 test(
   "web-active 帧丢失后页面看门狗重载并恢复 active",
@@ -53,7 +64,7 @@ test(
         listener(state)
       })
 
-    gateway = createWebUiGateway({ coordinator: wrapped, controller })
+    gateway = createWebUiGateway({ coordinator: wrapped, controller, workspaceExplorer: createFakeExplorer() })
     await coordinator.open()
 
     const browser = await chromium.launch({ headless: true })

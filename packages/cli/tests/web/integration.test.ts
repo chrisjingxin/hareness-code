@@ -12,6 +12,17 @@ import {
   type WebUiGateway,
 } from "../../src/presentation-coordinator/web-ui-gateway"
 import type { WebUiServerMessage } from "../../src/presentation-coordinator/contracts/messages"
+import type { WorkspaceExplorer } from "../../src/workspace/types"
+
+/** 空 explorer fake：网关构造必需，本测试不关心工作区。 */
+function createFakeExplorer(): WorkspaceExplorer {
+  return {
+    getSnapshot: () => ({ tree: { status: "idle", rows: [], selectedPath: null, limited: false }, preview: { status: "idle" } }),
+    subscribe: () => () => {},
+    dispatch: async () => ({ status: "accepted" }),
+    close: async () => {},
+  }
+}
 
 async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
   const deadline = Date.now() + timeoutMs
@@ -38,7 +49,7 @@ test("open 后真实 loopback：页面 200；带 token 的 WS 收到 replace/han
     dispatch: intent => controller.dispatch(intent),
     onRendererConnected: channel => gateway.connectRenderer(channel),
   })
-  gateway = createWebUiGateway({ coordinator, controller })
+  gateway = createWebUiGateway({ coordinator, controller, workspaceExplorer: createFakeExplorer() })
 
   await coordinator.open()
   const opening = coordinator.getSnapshot()
@@ -76,6 +87,8 @@ test("open 后真实 loopback：页面 200；带 token 的 WS 收到 replace/han
     "navigation",
     "command",
     "runtime",
+    "workspaceTree",
+    "workspacePreview",
   ])
   expect(messages[1]).toMatchObject({ type: "handoff.state", state: { phase: "opening-web" } })
 
@@ -90,12 +103,13 @@ test("open 后真实 loopback：页面 200；带 token 的 WS 收到 replace/han
   expect(patch.revision).toBe(2)
   expect(Object.keys(patch.patch)).toEqual(["runtime"])
 
-  // intent 受理 → intent.outcome 与 requestId 一一对应
-  socket.send(JSON.stringify({ type: "intent", requestId: "it-1", revision: 1, intent: { type: "approval-mode.cycle" } }))
+  // intent 受理 → intent.outcome（domain=interactive）与 requestId 一一对应
+  socket.send(JSON.stringify({ type: "interactive.intent", requestId: "it-1", revision: 1, intent: { type: "approval-mode.cycle" } }))
   await waitFor(() => messages.some(message => message.type === "intent.outcome" && message.requestId === "it-1"))
   expect(messages.find(message => message.type === "intent.outcome" && message.requestId === "it-1")).toEqual({
     type: "intent.outcome",
     requestId: "it-1",
+    domain: "interactive",
     outcome: { status: "accepted" },
   })
 

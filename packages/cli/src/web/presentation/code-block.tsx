@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from "react"
 import { Check, Copy } from "lucide-react"
 
 import { resolveLanguage } from "../../presentation-shared/language-catalog"
-import { acquireHighlightService, releaseHighlightService } from "../syntax/highlight-service"
+import { useSyntaxHighlight } from "./code/use-syntax-highlight"
 import type { SyntaxSpan } from "../syntax/protocol"
 
 const STREAMING_DEBOUNCE_MS = 100
@@ -17,69 +17,32 @@ export function CodeBlock(props: {
   theme?: string
 }): React.ReactElement {
   const { code, language = "", theme = "dark-plus" } = props
-  const [spans, setSpans] = useState<readonly SyntaxSpan[] | null>(null)
+  const [displayCode, setDisplayCode] = useState(code)
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">("idle")
-  const [loading, setLoading] = useState(false)
   const resetCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const catalogEntry = resolveLanguage(language)
   const displayLanguage = catalogEntry.canonical !== "plaintext" ? catalogEntry.canonical : (language || "文本")
+  const highlightLanguage = catalogEntry.canonical === "plaintext" ? null : catalogEntry.canonical
 
+  // 流式防抖：快速累积输出时延迟高亮输入更新。
   useEffect(() => {
-    let active = true
-
     if (debounceTimerRef.current) {
       clearTimeout(debounceTimerRef.current)
       debounceTimerRef.current = null
     }
-
-    if (catalogEntry.canonical === "plaintext" && language && language.trim() !== "" && language !== "plaintext" && language !== "text" && language !== "txt") {
-      setSpans(null)
-      setLoading(false)
-      return
-    }
-
-    if (!code.trim()) {
-      setSpans(null)
-      setLoading(false)
-      return
-    }
-
-    // 流式防抖：在快速累积输出时延迟高亮请求
     debounceTimerRef.current = setTimeout(() => {
-      if (!active) return
-      setLoading(true)
-      const service = acquireHighlightService()
-
-      service
-        .highlight(catalogEntry.canonical, code, theme)
-        .then(res => {
-          if (!active) return
-          setLoading(false)
-          if (res.type === "highlighted") {
-            setSpans(res.spans)
-          } else {
-            setSpans(null)
-          }
-        })
-        .catch(() => {
-          if (!active) return
-          setLoading(false)
-          setSpans(null)
-        })
-        .finally(() => {
-          releaseHighlightService()
-        })
+      setDisplayCode(code)
     }, STREAMING_DEBOUNCE_MS)
-
     return () => {
-      active = false
       if (debounceTimerRef.current) {
         clearTimeout(debounceTimerRef.current)
       }
     }
-  }, [code, language, theme, catalogEntry])
+  }, [code])
+
+  const highlight = useSyntaxHighlight({ code: displayCode, language: highlightLanguage, theme })
 
   useEffect(() => {
     return () => {
@@ -98,12 +61,13 @@ export function CodeBlock(props: {
     resetCopyTimerRef.current = setTimeout(() => setCopyStatus("idle"), 1_500)
   }
 
+  const highlighted = highlight.status === "highlighted" && highlight.spans
   return (
     <div className="code-block">
       <div className="code-block-header">
         <span className="code-block-lang">
           {displayLanguage}
-          {loading ? <span className="code-block-loading-hint"> (高亮中)</span> : null}
+          {highlight.status === "loading" ? <span className="code-block-loading-hint"> (高亮中)</span> : null}
         </span>
         <button
           type="button"
@@ -117,7 +81,7 @@ export function CodeBlock(props: {
       </div>
       <div className="code-block-body">
         <pre className="code-block-pre">
-          <code data-language={language || undefined}>{spans ? renderSpans(code, spans) : code}</code>
+          <code data-language={language || undefined}>{highlighted ? renderSpans(displayCode, highlight.spans!) : displayCode}</code>
         </pre>
       </div>
       <span className="sr-only" role="status" aria-live="polite">

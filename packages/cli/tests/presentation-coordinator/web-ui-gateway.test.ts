@@ -1,4 +1,4 @@
-/** WebUiGateway 测试：真实 InteractiveController + 真实 Coordinator 驱动的分片发布与意图受理。 */
+/** WebUiGateway 测试：真实 InteractiveController + 真实 Coordinator 驱动的分片发布与双域意图受理。 */
 
 import { expect, test } from "bun:test"
 
@@ -7,6 +7,7 @@ import { makeHarness } from "../interactive/harness"
 import {
   createPresentationCoordinator,
   type GatewayChannel,
+  type PresentationCoordinator,
   type PresentationScheduler,
   type PresentationServer,
 } from "../../src/presentation-coordinator/coordinator"
@@ -16,10 +17,36 @@ import {
 } from "../../src/presentation-coordinator/web-ui-gateway"
 import type { WebUiClientMessage, WebUiServerMessage } from "../../src/presentation-coordinator/contracts/messages"
 import type { InteractiveController, InteractiveIntent } from "../../src/interactive/types"
+import type { WorkspaceExplorer, WorkspaceIntent, WorkspacePreviewState, WorkspaceSnapshot, WorkspaceTreeState } from "../../src/workspace/types"
+
+// ---- 命名形状（避免 ReturnType 发布契约） -------------------------------------
+
+type FakeChannel = {
+  channel: GatewayChannel
+  queue: AsyncQueue<unknown>
+  sent: WebUiServerMessage[]
+  closed: Array<{ code: number; reason: string }>
+}
+
+type FakeExplorer = WorkspaceExplorer & {
+  intents: WorkspaceIntent[]
+  setTree(next: WorkspaceTreeState): void
+  setPreview(next: WorkspacePreviewState): void
+}
+
+type TestSystem = {
+  controller: InteractiveController
+  coordinator: PresentationCoordinator
+  gateway: WebUiGateway
+  explorer: FakeExplorer
+  server: PresentationServer
+  openedUrls: string[]
+  timers: Array<{ callback: () => void; at: number; active: boolean }>
+}
 
 // ---- fakes -----------------------------------------------------------------
 
-function createFakeChannel() {
+function createFakeChannel(): FakeChannel {
   const queue = new AsyncQueue<unknown>()
   const sent: WebUiServerMessage[] = []
   const closed: Array<{ code: number; reason: string }> = []
@@ -31,8 +58,37 @@ function createFakeChannel() {
   return { channel, queue, sent, closed }
 }
 
-function sendClient(ch: ReturnType<typeof createFakeChannel>, message: WebUiClientMessage): void {
+function sendClient(ch: FakeChannel, message: WebUiClientMessage): void {
   ch.queue.push(JSON.stringify(message))
+}
+
+/** 内存 fake explorer：记录 workspace intent、可按需发布新树/预览快照。 */
+function createFakeExplorer(): FakeExplorer {
+  const listeners = new Set<(snapshot: WorkspaceSnapshot) => void>()
+  let tree: WorkspaceTreeState = { status: "idle", rows: [], selectedPath: null, limited: false }
+  let preview: WorkspacePreviewState = { status: "idle" }
+  const explorer: FakeExplorer = {
+    intents: [],
+    getSnapshot: () => ({ tree, preview }),
+    subscribe: listener => {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    },
+    dispatch: async intent => {
+      explorer.intents.push(intent)
+      return { status: "accepted" }
+    },
+    close: async () => {},
+    setTree(next) {
+      tree = next
+      for (const listener of [...listeners]) listener({ tree, preview })
+    },
+    setPreview(next) {
+      preview = next
+      for (const listener of [...listeners]) listener({ tree, preview })
+    },
+  }
+  return explorer
 }
 
 /** 包装真实 controller 并对 dispatch 计数；用于重放/并发去重断言。 */
@@ -59,15 +115,18 @@ async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<voi
   const deadline = Date.now() + timeoutMs
   while (!predicate()) {
     if (Date.now() > deadline) throw new Error("waitFor 超时")
-    await new Promise(resolve => setTimeout(resolve, 2))
+    const { promise, resolve } = Promise.withResolvers<void>()
+    setTimeout(resolve, 2)
+    await promise
   }
 }
 
 // ---- 系统装配 ---------------------------------------------------------------
 
-function createSystem(options: { controller?: InteractiveController } = {}) {
+function createSystem(options: { controller?: InteractiveController; explorer?: FakeExplorer } = {}): TestSystem {
   const harness = makeHarness({ initialThreadId: "thread-1" })
   const controller = options.controller ?? harness.controller
+  const explorer = options.explorer ?? createFakeExplorer()
   const openedUrls: string[] = []
   const timers: Array<{ callback: () => void; at: number; active: boolean }> = []
   const scheduler: PresentationScheduler = {
@@ -95,12 +154,12 @@ function createSystem(options: { controller?: InteractiveController } = {}) {
     uiTokenTtlMs: 60_000,
     scheduler,
   })
-  gateway = createWebUiGateway({ coordinator, controller })
-  return { controller, harness, coordinator, gateway, server, openedUrls, timers }
+  gateway = createWebUiGateway({ coordinator, controller, workspaceExplorer: explorer })
+  return { controller, coordinator, gateway, explorer, server, openedUrls, timers }
 }
 
 /** open + attachRenderer（opening-web 阶段，尚未 ready）。 */
-async function connectRenderer(system: ReturnType<typeof createSystem>) {
+async function connectRenderer(system: TestSystem) {
   await system.coordinator.open()
   const opening = system.coordinator.getSnapshot()
   if (opening.phase !== "opening-web") throw new Error("expected opening-web")
@@ -110,14 +169,14 @@ async function connectRenderer(system: ReturnType<typeof createSystem>) {
   return { handoffId: opening.handoffId, ch }
 }
 
-async function connectAndReady(system: ReturnType<typeof createSystem>) {
+async function connectAndReady(system: TestSystem) {
   const { handoffId, ch } = await connectRenderer(system)
   sendClient(ch, { type: "handoff.ready" })
   await waitFor(() => ch.sent.some(message => message.type === "handoff.state" && message.state.phase === "web-active"))
   return { handoffId, ch }
 }
 
-function lastSent(ch: ReturnType<typeof createFakeChannel>): WebUiServerMessage {
+function lastSent(ch: FakeChannel): WebUiServerMessage {
   const last = ch.sent.at(-1)
   if (!last) throw new Error("no messages sent")
   return last
@@ -125,7 +184,7 @@ function lastSent(ch: ReturnType<typeof createFakeChannel>): WebUiServerMessage 
 
 // ---- 首帧与分片发布 ---------------------------------------------------------
 
-test("connectRenderer：首帧 state.replace（revision 1、五个分片完整）+ handoff.state(opening-web)", async () => {
+test("connectRenderer：首帧 state.replace（revision 1、七个分片完整）+ handoff.state(opening-web)", async () => {
   const system = createSystem()
   await flush() // 等构造期的 catalog/thread 恢复发布先落定
   const { ch } = await connectRenderer(system)
@@ -133,7 +192,7 @@ test("connectRenderer：首帧 state.replace（revision 1、五个分片完整�
   const replace = ch.sent[0]
   expect(replace).toMatchObject({ type: "state.replace", revision: 1 })
   const state = (replace as Extract<WebUiServerMessage, { type: "state.replace" }>).state
-  expect(Object.keys(state)).toEqual(["conversation", "interaction", "navigation", "command", "runtime"])
+  expect(Object.keys(state)).toEqual(["conversation", "interaction", "navigation", "command", "runtime", "workspaceTree", "workspacePreview"])
   for (const key of Object.keys(state)) {
     expect(typeof (state as Record<string, unknown>)[key]).toBe("object")
   }
@@ -162,26 +221,48 @@ test("controller publish → state.patch：只含变化分片且 revision 单调
   expect(patch2.revision).toBe(3)
 })
 
-// ---- 意图受理 ---------------------------------------------------------------
-
-test("intent 受理：intent.outcome 与 requestId 一一对应", async () => {
+test("explorer publish → state.patch 只含 workspaceTree，且不混入 interactive 分片", async () => {
   const system = createSystem()
   await flush()
   const { ch } = await connectAndReady(system)
 
-  sendClient(ch, { type: "intent", requestId: "it-1", revision: 1, intent: { type: "approval-mode.cycle" } })
+  system.explorer.setTree({ status: "ready", rows: [{ path: "src", name: "src", kind: "directory", depth: 0, expanded: false, loading: false, hasChildren: true }], selectedPath: null, limited: false })
+  await flush()
+  const patch = lastSent(ch)
+  expect(patch.type).toBe("state.patch")
+  expect(patch.revision).toBe(2)
+  expect(Object.keys(patch.patch)).toEqual(["workspaceTree"])
+
+  system.explorer.setPreview({ status: "loading", path: "src/a.ts" })
+  await flush()
+  const patch2 = lastSent(ch)
+  expect(patch2.type).toBe("state.patch")
+  expect(patch2.revision).toBe(3)
+  expect(Object.keys(patch2.patch)).toEqual(["workspacePreview"])
+})
+
+// ---- interactive 意图受理 ---------------------------------------------------
+
+test("interactive.intent 受理：intent.outcome 带 domain=interactive 且与 requestId 一一对应", async () => {
+  const system = createSystem()
+  await flush()
+  const { ch } = await connectAndReady(system)
+
+  sendClient(ch, { type: "interactive.intent", requestId: "it-1", revision: 1, intent: { type: "approval-mode.cycle" } })
   await waitFor(() => ch.sent.some(message => message.type === "intent.outcome" && message.requestId === "it-1"))
   expect(ch.sent.find(message => message.type === "intent.outcome" && message.requestId === "it-1")).toEqual({
     type: "intent.outcome",
     requestId: "it-1",
+    domain: "interactive",
     outcome: { status: "accepted" },
   })
 
-  sendClient(ch, { type: "intent", requestId: "it-2", revision: 1, intent: { type: "run.cancel" } })
+  sendClient(ch, { type: "interactive.intent", requestId: "it-2", revision: 1, intent: { type: "run.cancel" } })
   await waitFor(() => ch.sent.some(message => message.type === "intent.outcome" && message.requestId === "it-2"))
   expect(ch.sent.find(message => message.type === "intent.outcome" && message.requestId === "it-2")).toEqual({
     type: "intent.outcome",
     requestId: "it-2",
+    domain: "interactive",
     outcome: { status: "rejected", code: "not-found", message: "No active run to cancel" },
   })
 })
@@ -194,17 +275,18 @@ test("重放同一 requestId：返回缓存 outcome 且 controller.dispatch 只�
   await flush()
   const { ch } = await connectAndReady(countingSystem)
 
-  sendClient(ch, { type: "intent", requestId: "r-1", revision: 1, intent: { type: "approval-mode.cycle" } })
+  sendClient(ch, { type: "interactive.intent", requestId: "r-1", revision: 1, intent: { type: "approval-mode.cycle" } })
   await waitFor(() => ch.sent.some(message => message.type === "intent.outcome" && message.requestId === "r-1"))
   expect(counting.dispatchCalls).toBe(1)
 
   // 重放同一 requestId：缓存命中，不再执行
-  sendClient(ch, { type: "intent", requestId: "r-1", revision: 1, intent: { type: "approval-mode.cycle" } })
+  sendClient(ch, { type: "interactive.intent", requestId: "r-1", revision: 1, intent: { type: "approval-mode.cycle" } })
   await waitFor(() => ch.sent.filter(message => message.type === "intent.outcome" && message.requestId === "r-1").length === 2)
   expect(counting.dispatchCalls).toBe(1)
   expect(ch.sent.filter(message => message.type === "intent.outcome" && message.requestId === "r-1")[1]).toEqual({
     type: "intent.outcome",
     requestId: "r-1",
+    domain: "interactive",
     outcome: { status: "accepted" },
   })
 })
@@ -217,8 +299,8 @@ test("并发相同 requestId 去重：两次帧只执行一次 dispatch，各自
   await flush()
   const { ch } = await connectAndReady(countingSystem)
 
-  sendClient(ch, { type: "intent", requestId: "dup", revision: 1, intent: { type: "approval-mode.cycle" } })
-  sendClient(ch, { type: "intent", requestId: "dup", revision: 1, intent: { type: "approval-mode.cycle" } })
+  sendClient(ch, { type: "interactive.intent", requestId: "dup", revision: 1, intent: { type: "approval-mode.cycle" } })
+  sendClient(ch, { type: "interactive.intent", requestId: "dup", revision: 1, intent: { type: "approval-mode.cycle" } })
   await waitFor(() => ch.sent.filter(message => message.type === "intent.outcome" && message.requestId === "dup").length === 2)
   expect(counting.dispatchCalls).toBe(1)
 })
@@ -229,16 +311,17 @@ test("revision 超前/过旧 → rejected invalid-argument；合法 revision 受
   const { ch } = await connectAndReady(system)
 
   // revision 0（低于 BASE_REVISION=1）
-  sendClient(ch, { type: "intent", requestId: "old", revision: 0, intent: { type: "approval-mode.cycle" } })
+  sendClient(ch, { type: "interactive.intent", requestId: "old", revision: 0, intent: { type: "approval-mode.cycle" } })
   await waitFor(() => ch.sent.some(message => message.type === "intent.outcome" && message.requestId === "old"))
   expect(ch.sent.find(message => message.type === "intent.outcome" && message.requestId === "old")).toEqual({
     type: "intent.outcome",
     requestId: "old",
+    domain: "interactive",
     outcome: { status: "rejected", code: "invalid-argument", message: "Invalid revision; resync from state.replace" },
   })
 
   // revision 超前于网关发布序列
-  sendClient(ch, { type: "intent", requestId: "fut", revision: 99, intent: { type: "approval-mode.cycle" } })
+  sendClient(ch, { type: "interactive.intent", requestId: "fut", revision: 99, intent: { type: "approval-mode.cycle" } })
   await waitFor(() => ch.sent.some(message => message.type === "intent.outcome" && message.requestId === "fut"))
   expect(ch.sent.find(message => message.type === "intent.outcome" && message.requestId === "fut")?.outcome).toMatchObject({
     status: "rejected",
@@ -246,11 +329,12 @@ test("revision 超前/过旧 → rejected invalid-argument；合法 revision 受
   })
 
   // 合法 revision
-  sendClient(ch, { type: "intent", requestId: "ok", revision: 1, intent: { type: "approval-mode.cycle" } })
+  sendClient(ch, { type: "interactive.intent", requestId: "ok", revision: 1, intent: { type: "approval-mode.cycle" } })
   await waitFor(() => ch.sent.some(message => message.type === "intent.outcome" && message.requestId === "ok"))
   expect(ch.sent.find(message => message.type === "intent.outcome" && message.requestId === "ok")).toEqual({
     type: "intent.outcome",
     requestId: "ok",
+    domain: "interactive",
     outcome: { status: "accepted" },
   })
 })
@@ -261,22 +345,56 @@ test("非 web-active 阶段 intent：只回 handoff.state，不发 outcome", asy
   const { ch } = await connectRenderer(system) // 仍在 opening-web，未 ready
   const before = ch.sent.length
 
-  sendClient(ch, { type: "intent", requestId: "early", revision: 1, intent: { type: "approval-mode.cycle" } })
+  sendClient(ch, { type: "interactive.intent", requestId: "early", revision: 1, intent: { type: "approval-mode.cycle" } })
+  sendClient(ch, { type: "workspace.intent", requestId: "early-ws", revision: 1, intent: { type: "workspace.refresh" } })
   await waitFor(() => ch.sent.length > before)
   expect(lastSent(ch)).toMatchObject({ type: "handoff.state", state: { phase: "opening-web" } })
   expect(ch.sent.some(message => message.type === "intent.outcome")).toBe(false)
+  expect(system.explorer.intents).toEqual([]) // workspace 也未受理
 })
 
-test("presentation-intent：无害 no-op，不产生任何帧", async () => {
+// ---- workspace 意图受理 -----------------------------------------------------
+
+test("workspace.intent 路由到 explorer；outcome 带 domain=workspace 回传", async () => {
   const system = createSystem()
   await flush()
   const { ch } = await connectAndReady(system)
-  const before = ch.sent.length
 
-  sendClient(ch, { type: "presentation-intent", intent: { type: "theme.set", theme: "dark" } })
-  sendClient(ch, { type: "presentation-intent", intent: { type: "panel.open", panel: "threads" } })
+  sendClient(ch, { type: "workspace.intent", requestId: "ws-1", revision: 1, intent: { type: "workspace.refresh" } })
+  await waitFor(() => ch.sent.some(message => message.type === "intent.outcome" && message.requestId === "ws-1"))
+  expect(system.explorer.intents).toEqual([{ type: "workspace.refresh" }])
+  expect(ch.sent.find(message => message.type === "intent.outcome" && message.requestId === "ws-1")).toEqual({
+    type: "intent.outcome",
+    requestId: "ws-1",
+    domain: "workspace",
+    outcome: { status: "accepted" },
+  })
+
+  sendClient(ch, { type: "workspace.intent", requestId: "ws-2", revision: 1, intent: { type: "workspace.preview-file", path: "src/a.ts" } })
+  await waitFor(() => ch.sent.some(message => message.type === "intent.outcome" && message.requestId === "ws-2"))
+  expect(system.explorer.intents.at(-1)).toEqual({ type: "workspace.preview-file", path: "src/a.ts" })
+  expect(ch.sent.find(message => message.type === "intent.outcome" && message.requestId === "ws-2")).toEqual({
+    type: "intent.outcome",
+    requestId: "ws-2",
+    domain: "workspace",
+    outcome: { status: "accepted" },
+  })
+})
+
+test("workspace.intent 复用 revision 门禁：超前 revision → rejected", async () => {
+  const system = createSystem()
   await flush()
-  expect(ch.sent.length).toBe(before)
+  const { ch } = await connectAndReady(system)
+
+  sendClient(ch, { type: "workspace.intent", requestId: "ws-fut", revision: 99, intent: { type: "workspace.refresh" } })
+  await waitFor(() => ch.sent.some(message => message.type === "intent.outcome" && message.requestId === "ws-fut"))
+  expect(ch.sent.find(message => message.type === "intent.outcome" && message.requestId === "ws-fut")).toEqual({
+    type: "intent.outcome",
+    requestId: "ws-fut",
+    domain: "workspace",
+    outcome: { status: "rejected", code: "invalid-argument", message: "Invalid revision; resync from state.replace" },
+  })
+  expect(system.explorer.intents).toEqual([])
 })
 
 // ---- 生命周期转发 -----------------------------------------------------------
@@ -297,7 +415,7 @@ test("handoff.state 变化转发给 renderer；returning-tui 时 channel.close �
   expect(system.coordinator.getSnapshot().phase).toBe("tui-active")
 })
 
-test("gateway close()：停止 controller 订阅与帧受理", async () => {
+test("gateway close()：停止 controller/explorer 订阅与帧受理", async () => {
   const system = createSystem()
   await flush()
   const { ch } = await connectAndReady(system)
@@ -305,12 +423,14 @@ test("gateway close()：停止 controller 订阅与帧受理", async () => {
   const before = ch.sent.length
 
   // 客户端帧不再受理
-  sendClient(ch, { type: "intent", requestId: "late", revision: 1, intent: { type: "approval-mode.cycle" } })
+  sendClient(ch, { type: "interactive.intent", requestId: "late", revision: 1, intent: { type: "approval-mode.cycle" } })
+  sendClient(ch, { type: "workspace.intent", requestId: "late-ws", revision: 1, intent: { type: "workspace.refresh" } })
   await flush()
   expect(ch.sent.length).toBe(before)
 
-  // controller 发布不再产生 patch
+  // controller / explorer 发布不再产生 patch
   await system.controller.dispatch({ type: "approval-mode.cycle" })
+  system.explorer.setTree({ status: "ready", rows: [], selectedPath: null, limited: false })
   await flush()
   expect(ch.sent.length).toBe(before)
 })

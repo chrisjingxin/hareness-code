@@ -1,22 +1,20 @@
-/** Web React 工作台：组合蓝色三栏布局与可访问性，不拥有 Agent 或命令业务状态。 */
+/** Web React 工作台：组合桌面三栏布局与可访问性，不拥有 Agent 或命令业务状态。 */
 /** @jsxImportSource react */
 
-import { Activity, Cpu, Ellipsis, Menu, ShieldCheck, X } from "lucide-react"
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react"
+import { Activity, Cpu, Ellipsis, ShieldCheck, X } from "lucide-react"
+import { useCallback, useEffect, useRef } from "react"
+import { useSyncExternalStore } from "react"
 import { activityLabel, gitWorkspaceLabel, modelSelectionLabel } from "../../presentation-shared"
 import { selectNavigationView } from "../../interactive/selectors"
 import { approvalModeLabel, workspaceLabel } from "../../interactive/runtime"
 import type { InteractiveSnapshot } from "../../interactive/types"
 import type { WebInteractiveAdapter, WebAdapterSnapshot, WebIntent, WebTheme } from "../application/adapter"
 import { Composer } from "./composer"
+import { ContextDock } from "./context-dock/context-dock"
 import { DialogHost } from "./dialog"
 import { InteractionForm } from "./interaction-form"
-import { UtilityPanels } from "./panels"
-import { ThreadSidebar } from "./thread-sidebar"
+import { WorkspaceSidebar } from "./workspace-sidebar/workspace-sidebar"
 import { Timeline } from "./timeline"
-
-/** 窄屏断点：与 styles.css 的移动端布局保持一致，抽屉代替侧栏。 */
-const NARROW_QUERY = "(max-width: 899px)"
 
 /** 订阅 WebAdapterSnapshot 并转发 dispatch；页面唯一的状态来源。 */
 export function WebApp(props: {
@@ -30,16 +28,9 @@ export function WebApp(props: {
   const getSnapshot = useCallback(() => props.adapter.getSnapshot(), [props.adapter])
   const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
   const onIntent = useCallback(
-    (intent: WebIntent) => {
-      // 移动端抽屉/面板打开前记录当前焦点元素，关闭时用于恢复触发器焦点。
-      if ((intent.type === "sidebar-toggle" && intent.open) || intent.type === "panel-open") {
-        drawerTriggerRef.current = document.activeElement as HTMLElement | null
-      }
-      return props.adapter.dispatch(intent)
-    },
+    (intent: WebIntent) => props.adapter.dispatch(intent),
     [props.adapter],
   )
-  const narrow = useMediaQuery(NARROW_QUERY)
   const interactive = snapshot.interactive
   const connectionReadOnly = interactive.connection.status !== "open"
   const readOnly = !props.active || snapshot.leaving || connectionReadOnly
@@ -49,9 +40,6 @@ export function WebApp(props: {
   const overflowTriggerRef = useRef<HTMLButtonElement | null>(null)
   const headerMenuRef = useRef<HTMLDivElement | null>(null)
   const wasHeaderMenuOpenRef = useRef(false)
-  const drawerTriggerRef = useRef<HTMLElement | null>(null)
-  const wasSidebarOpenRef = useRef(false)
-  const wasPanelOpenRef = useRef(false)
 
   // 打开 header menu 后焦点进入第一项；关闭后焦点返回 overflow trigger。
   useEffect(() => {
@@ -62,22 +50,6 @@ export function WebApp(props: {
     }
     wasHeaderMenuOpenRef.current = snapshot.headerMenuOpen
   }, [snapshot.headerMenuOpen])
-
-  // 移动端抽屉/面板关闭后恢复打开前焦点；打开动作在 onIntent 中记录触发器。
-  useEffect(() => {
-    if (snapshot.sidebarOpen === false && wasSidebarOpenRef.current) {
-      drawerTriggerRef.current?.focus()
-    }
-    wasSidebarOpenRef.current = snapshot.sidebarOpen
-  }, [snapshot.sidebarOpen])
-
-  useEffect(() => {
-    const panelOpen = snapshot.activePanel !== null
-    if (panelOpen === false && wasPanelOpenRef.current) {
-      drawerTriggerRef.current?.focus()
-    }
-    wasPanelOpenRef.current = panelOpen
-  }, [snapshot.activePanel])
 
   // 点击菜单外任意位置关闭 header menu。
   useEffect(() => {
@@ -114,7 +86,7 @@ export function WebApp(props: {
         return
       }
       if (event.key !== "Escape") return
-      // Escape 关闭顺序固定：确认 Dialog → 命令菜单 → header overflow 菜单 → Utility 面板 → Thread 抽屉 → 取消 Run。
+      // Escape 关闭顺序固定：确认 Dialog → 命令菜单 → header overflow 菜单 → Context Dock → 取消 Run。
       if (interactive.confirmation) {
         // DialogHost 自己注册了 Escape handler；这里不再重复派发一次 resolve。
         return
@@ -124,12 +96,9 @@ export function WebApp(props: {
       } else if (snapshot.headerMenuOpen) {
         event.preventDefault()
         onIntent({ type: "header-menu-toggle", open: false })
-      } else if (snapshot.activePanel) {
+      } else if (snapshot.contextDock.open) {
         event.preventDefault()
-        onIntent({ type: "panel-close" })
-      } else if (narrow && snapshot.sidebarOpen) {
-        event.preventDefault()
-        onIntent({ type: "sidebar-toggle", open: false })
+        onIntent({ type: "dock-close" })
       } else if (!readOnly && interactive.activeRun) {
         event.preventDefault()
         onIntent({ type: "cancel-run" })
@@ -137,7 +106,7 @@ export function WebApp(props: {
     }
     window.addEventListener("keydown", onKeyDown)
     return () => window.removeEventListener("keydown", onKeyDown)
-  }, [interactive.activeRun, interactive.confirmation, narrow, onIntent, readOnly, snapshot.activePanel, snapshot.commandMenuOpen, snapshot.headerMenuOpen, snapshot.sidebarOpen])
+  }, [interactive.activeRun, interactive.confirmation, onIntent, readOnly, snapshot.commandMenuOpen, snapshot.contextDock.open, snapshot.headerMenuOpen])
 
   return (
     <div className="web-shell" data-theme={snapshot.theme} data-active={props.active ? "true" : "false"}>
@@ -149,18 +118,13 @@ export function WebApp(props: {
         </div>
         <div className="topbar-main">
           <div className="topbar-project">
-            {narrow ? (
-              <button type="button" className="icon-button mobile-only" aria-label="打开 Thread 导航" title="打开 Thread 导航" disabled={readOnly} onClick={() => { onIntent({ type: "sidebar-toggle", open: true }) }}>
-                <Menu aria-hidden="true" size={16} />
-              </button>
-            ) : null}
             <div className="topbar-project-copy">
               <span className="project-name">{workspaceLabel(interactive.runtime.workspace)}</span>
               {gitWorkspaceLabel(interactive.runtime.gitWorkspace) ? <span className="project-meta">{gitWorkspaceLabel(interactive.runtime.gitWorkspace)}</span> : null}
             </div>
           </div>
           <div className="topbar-meta">
-            <button type="button" className="meta-chip" hidden={!availability.canOpenModelsPanel} disabled={readOnly} onClick={() => { onIntent({ type: "panel-open", panel: "models" }) }} title="模型设置">
+            <button type="button" className="meta-chip" hidden={!availability.canOpenModelsPanel} disabled={readOnly} onClick={() => { onIntent({ type: "dock-open", panel: "models" }) }} title="模型设置">
               <Cpu aria-hidden="true" size={16} />
               <span className="sr-only">模型</span>
               <span className="meta-chip-value">{modelLabel(interactive)}</span>
@@ -170,7 +134,7 @@ export function WebApp(props: {
               <span className="sr-only">审批</span>
               <span className="meta-chip-value">{approvalModeLabel(interactive.runtime)}</span>
             </span>
-            <button type="button" className="meta-chip" disabled={readOnly} onClick={() => { onIntent({ type: "panel-open", panel: "status" }) }} title="连接与活动状态">
+            <button type="button" className="meta-chip" disabled={readOnly} onClick={() => { onIntent({ type: "dock-open", panel: "status" }) }} title="连接与活动状态">
               <Activity aria-hidden="true" size={16} />
               <span className={`status-dot status-dot-${interactive.activity.kind}`} aria-hidden="true" />
               <span className="meta-chip-value">{props.active ? activityLabel(interactive.activity.kind) : "正在接管"}{interactive.connection.status !== "open" ? ` · ${connectionLabel(interactive.connection.status)}` : ""}</span>
@@ -197,10 +161,7 @@ export function WebApp(props: {
                 <button type="button" role="menuitem" className="header-menu-item" onClick={() => { onIntent({ type: "approval-mode-cycle" }) }}>
                   切换审批模式（当前：{approvalModeLabel(interactive.runtime)}）
                 </button>
-                <button type="button" role="menuitem" className="header-menu-item" onClick={() => { onIntent({ type: "panel-open", panel: "help" }) }}>帮助</button>
-                {narrow ? (
-                  <button type="button" role="menuitem" className="header-menu-item" disabled={!props.active || snapshot.leaving || returnBlocked} title={returnBlocked ? "当前任务结束或交互完成后可返回 TUI" : "归还控制权并恢复 TUI"} onClick={() => { onIntent({ type: "return-to-tui" }) }}>返回 TUI</button>
-                ) : null}
+                <button type="button" role="menuitem" className="header-menu-item" onClick={() => { onIntent({ type: "dock-open", panel: "help" }) }}>帮助</button>
                 <button type="button" role="menuitem" className="header-menu-item" disabled={!props.active || snapshot.leaving} onClick={() => { onIntent({ type: "exit-harness" }) }}>退出 Harness</button>
               </div>
             ) : null}
@@ -208,12 +169,12 @@ export function WebApp(props: {
         </div>
       </header>
 
-      {snapshot.transientNotice ? <div className="notice-banner" role="status"><span>{snapshot.transientNotice}</span><button type="button" className="icon-button" aria-label="关闭通知" title="关闭通知" onClick={() => { onIntent({ type: "panel-close" }) }}><X aria-hidden="true" size={14} /></button></div> : null}
+      {snapshot.transientNotice ? <div className="notice-banner" role="status"><span>{snapshot.transientNotice}</span><button type="button" className="icon-button" aria-label="关闭通知" title="关闭通知" onClick={() => { onIntent({ type: "notice-dismiss" }) }}><X aria-hidden="true" size={14} /></button></div> : null}
       {interactive.connection.status !== "open" ? <div className="connection-banner" role="alert">{interactive.connection.message}</div> : null}
       {!props.active ? <div className="handoff-banner" role="status">浏览器正在等待 CLI 确认控制权，页面保持只读。</div> : null}
 
-      <div className={`workspace-grid ${snapshot.activePanel ? "has-utility-panel" : ""}`}>
-        <ThreadSidebar snapshot={snapshot} dispatch={onIntent} narrow={narrow} disabled={readOnly} />
+      <div className={`desktop-workspace${snapshot.contextDock.open ? " has-context-dock" : ""}`}>
+        <WorkspaceSidebar snapshot={snapshot} dispatch={onIntent} disabled={readOnly} />
         <main className="conversation-column">
           <div className="timeline-scroll">
             <Timeline snapshot={snapshot} dispatch={onIntent} />
@@ -224,26 +185,12 @@ export function WebApp(props: {
           </div>
           <Composer snapshot={snapshot} dispatch={onIntent} disabled={readOnly} />
         </main>
-        <UtilityPanels snapshot={snapshot} dispatch={onIntent} narrow={narrow} disabled={readOnly} />
+        {snapshot.contextDock.open ? <ContextDock snapshot={snapshot} dispatch={onIntent} disabled={readOnly} /> : null}
       </div>
 
       <DialogHost snapshot={snapshot} dispatch={onIntent} disabled={readOnly} />
     </div>
   )
-}
-
-/** 订阅窄屏媒体查询；仅在 web 环境（matchMedia 存在）时生效。 */
-function useMediaQuery(query: string): boolean {
-  const [matches, setMatches] = useState(false)
-  useEffect(() => {
-    if (typeof window === "undefined") return
-    const media = window.matchMedia(query)
-    const onChange = (event: MediaQueryListEvent) => setMatches(event.matches)
-    media.addEventListener("change", onChange)
-    setMatches(media.matches)
-    return () => media.removeEventListener("change", onChange)
-  }, [query])
-  return matches
 }
 
 /** 主题切换的下一状态：浅色 ↔ 深色，菜单文案始终表达下一动作。 */

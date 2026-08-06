@@ -18,6 +18,8 @@ import { detectGitWorkspace } from "./infrastructure/git-workspace"
 import { createSystemBrowserOpener } from "./web/browser"
 import { browserBundle } from "./web/bundle"
 import { webHtml } from "./web/html"
+import { createWorkspaceExplorer } from "./workspace/explorer"
+import type { WorkspaceExplorer } from "./workspace/types"
 import {
   createPresentationCoordinator,
   createWebUiGateway,
@@ -192,6 +194,7 @@ async function execute(command: Command): Promise<void> {
     })
     let presentationCoordinator: PresentationCoordinator | undefined
     let webUiGateway: WebUiGateway | undefined
+    let workspaceExplorer: WorkspaceExplorer | undefined
     let controller: InteractiveController | undefined
     try {
       // CLI Composition Root：全生命周期唯一 Controller，TUI/Web 共用（D-01）。
@@ -200,6 +203,8 @@ async function execute(command: Command): Promise<void> {
         runtime: agent.runtime,
       })
       if (!command.nonInteractive) {
+        // 工作区文件浏览独立于 Interactive Core；根解析失败时 explorer 自身进入 error 状态。
+        workspaceExplorer = await createWorkspaceExplorer(command.cwd)
         const server = createWebServer({
           html: webHtml,
           getAssets: browserBundle,
@@ -220,6 +225,7 @@ async function execute(command: Command): Promise<void> {
         webUiGateway = createWebUiGateway({
           coordinator: presentationCoordinator,
           controller,
+          workspaceExplorer,
           diagnostics,
         })
       }
@@ -231,8 +237,9 @@ async function execute(command: Command): Promise<void> {
         openWeb: () => presentationCoordinator!.open(),
       })
     } finally {
-      // 关闭顺序：Web 通道 → Coordinator → Controller → diagnostics → agent.stop（外层 finally）。
+      // 关闭顺序：Web 通道 → WorkspaceExplorer → Coordinator → Controller → diagnostics → agent.stop（外层 finally）。
       await webUiGateway?.close()
+      await workspaceExplorer?.close()
       await presentationCoordinator?.close()
       await controller?.close()
       diagnostics.info("cli.interactive.stopped")

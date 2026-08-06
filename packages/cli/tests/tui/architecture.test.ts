@@ -53,6 +53,11 @@ test("TUI Application 只依赖 interactive 与终端表现模块，不直接调
   expect(imports).not.toMatch(/(?:^|[/"])\.\.\/\.\.\/ipc(?:[/"]|$)/m)
 })
 
+test("TUI 不依赖 workspace 领域模块（文件浏览只属于 Web 桌面端）", () => {
+  const imports = layerImports(tuiRoot)
+  expect(imports).not.toMatch(/(?:^|[/"])\.\.\/workspace(?:\/.*)?["']/m)
+})
+
 test("语法资源维护脚本写入 Platform canonical 路径", () => {
   const script = readFileSync(resolve(import.meta.dir, "../../scripts/vendor-syntax-assets.ts"), "utf8")
   expect(script).toContain('resolve(import.meta.dir, "../src/tui/platform")')

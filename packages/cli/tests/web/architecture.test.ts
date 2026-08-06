@@ -4,7 +4,7 @@ import { expect, test } from "bun:test"
 import { readFileSync, readdirSync } from "node:fs"
 import { resolve } from "node:path"
 
-import { layerImports, readAllSourceFiles, readDirectory, sourceFiles } from "../acceptance/arch-imports"
+import { layerImports, readAllSourceFiles, sourceFiles } from "../acceptance/arch-imports"
 
 const webRoot = resolve(import.meta.dir, "../../src/web")
 const interactiveRoot = resolve(import.meta.dir, "../../src/interactive")
@@ -60,6 +60,13 @@ test("Web presentation 不直连 IPC、Agent 凭据、服务器侧 Coordinator �
   expect(imports).not.toMatch(/dangerouslySetInnerHTML/)
 })
 
+test("Web presentation 不直连文件系统与 workspace 领域模块（表现层经 WebIntent 间接通信）", () => {
+  const imports = layerImports(resolve(webRoot, "presentation"))
+  expect(imports).not.toMatch(/from\s+["']node:fs/)
+  expect(imports).not.toMatch(/from\s+["']node:path/)
+  expect(imports).not.toMatch(/from\s+["'][^"']*\/workspace\//)
+})
+
 test("Web 生产源码无 AgentClient / host.control / attachment token 残留", () => {
   const allSource = readAllSourceFiles(webRoot)
   expect(allSource).not.toMatch(/AgentClient/)
@@ -99,8 +106,8 @@ test("createInteractiveController 生产调用点仅 CLI Composition Root 一处
 })
 
 test("presentation 可以使用交互式类型与 @za38/protocol 枚举", () => {
-  const source = readDirectory(resolve(webRoot, "presentation"))
-  expect(source).toMatch(/from\s+["']\.\.\/\.\.\/interactive\//)
+  const source = readAllSourceFiles(resolve(webRoot, "presentation"))
+  expect(source).toMatch(/from\s+["'][^"']*interactive\//)
   expect(source).toMatch(/from\s+["']@za38\/protocol/)
 })
 

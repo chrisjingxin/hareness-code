@@ -1,12 +1,13 @@
 /**
  * Browser 侧 WebUiClient：WebSocket → CLI WebUiGateway。
  *
- * 职责：UI token 认证、state.replace/patch 视图缓存、intent 提交与
- * requestId 关联的 outcome 回传、handoff 状态订阅。凭据只存在于连接建立时
- * 的 URL 查询参数，永不进入 React props 或日志。
+ * 职责：UI token 认证、state.replace/patch 视图缓存、interactive/workspace
+ * 双域 intent 提交与 requestId 关联的 outcome 回传、handoff 状态订阅。
+ * 凭据只存在于连接建立时的 URL 查询参数，永不进入 React props 或日志。
  */
 
 import type { InteractiveIntent, IntentOutcome } from "../interactive/types"
+import type { WorkspaceIntent, WorkspaceOutcome } from "../workspace/types"
 import { parseServerFrame, type PresentationState, type WebUiPatch, type WebUiState } from "../presentation-coordinator"
 import { isWebActive } from "../presentation-coordinator"
 
@@ -42,8 +43,10 @@ export interface WebUiClient {
   subscribeState(listener: (state: WebUiState) => void): () => void
   /** 订阅 handoff 状态变化；返回解绑函数。 */
   subscribeHandoff(listener: (state: PresentationState) => void): () => void
-  /** 提交业务 intent；Promise 恒 resolve（rejected 也走 outcome），不会 reject。 */
+  /** 提交 interactive 业务 intent；Promise 恒 resolve（rejected 也走 outcome），不会 reject。 */
   submitIntent(intent: InteractiveIntent): Promise<IntentOutcome>
+  /** 提交 workspace 业务 intent；Promise 恒 resolve（rejected 也走 outcome），不会 reject。 */
+  workspaceIntent(intent: WorkspaceIntent): Promise<WorkspaceOutcome>
   /** Browser 已就绪（首次渲染完成）；仅 opening-web 阶段有效。 */
   ready(): void
   /** 请求归还输入权给 TUI。 */
@@ -64,7 +67,7 @@ class WebUiClientImpl implements WebUiClient {
   private state: WebUiState
   private handoffState: PresentationState = { phase: "tui-active" }
   private lastRevision = 0
-  private readonly pending = new Map<string, { resolve: (outcome: IntentOutcome) => void }>()
+  private readonly pending = new Map<string, { resolve: (outcome: IntentOutcome | WorkspaceOutcome) => void }>()
   private closed = false
 
   private readonly onMessage = (event: unknown) => this.handleMessage(event)
@@ -101,15 +104,24 @@ class WebUiClientImpl implements WebUiClient {
   }
 
   submitIntent(intent: InteractiveIntent): Promise<IntentOutcome> {
+    return this.submit("interactive.intent", intent) as Promise<IntentOutcome>
+  }
+
+  workspaceIntent(intent: WorkspaceIntent): Promise<WorkspaceOutcome> {
+    return this.submit("workspace.intent", intent) as Promise<WorkspaceOutcome>
+  }
+
+  /** 双域共用提交路径：requestId 由 crypto.randomUUID 生成，outcome 按 domain 回传。 */
+  private submit(type: "interactive.intent" | "workspace.intent", intent: InteractiveIntent | WorkspaceIntent): Promise<IntentOutcome | WorkspaceOutcome> {
     if (this.closed) {
       return Promise.resolve({ status: "rejected", code: "connection-closed", message: "Web 会话已结束" })
     }
     const requestId = crypto.randomUUID()
-    const message = JSON.stringify({ type: "intent", requestId, revision: this.lastRevision, intent })
+    const message = JSON.stringify({ type, requestId, revision: this.lastRevision, intent })
     if (this.socket.readyState !== 1) {
       return Promise.resolve({ status: "rejected", code: "connection-closed", message: "Web 会话连接已断开" })
     }
-    return new Promise<IntentOutcome>(resolve => {
+    return new Promise<IntentOutcome | WorkspaceOutcome>(resolve => {
       this.pending.set(requestId, { resolve })
       try {
         this.socket.send(message)
@@ -248,6 +260,8 @@ function mergePatch(state: WebUiState, patch: WebUiPatch): WebUiState {
     navigation: patch.navigation ?? state.navigation,
     command: patch.command ?? state.command,
     runtime: patch.runtime ?? state.runtime,
+    workspaceTree: patch.workspaceTree ?? state.workspaceTree,
+    workspacePreview: patch.workspacePreview ?? state.workspacePreview,
   }
 }
 
@@ -258,6 +272,8 @@ function emptyState(): WebUiState {
     navigation: { catalogs: { threads: { status: "idle", items: [] }, models: { status: "idle", items: [] }, skills: { status: "idle", items: [] }, mcp: { status: "idle", items: [] } }, availability: { canOpenThread: false, canOpenModelsPanel: false, canOpenSkillsPanel: false, canOpenMcpPanel: false, hasSkillManage: false, hasMcpManage: false } },
     command: { commands: [], availability: { canSubmit: false } },
     runtime: { runtime: { workspace: "", cliVersion: "0.1.0", modelConfigured: false, executionMode: "local", approvalMode: "default", capabilities: [] }, connection: { status: "closed", message: "connecting" }, selection: { requestedModelProfileId: null, actualModel: null, armedSkill: null }, availability: { canCancelRun: false, canToggleSkill: false, canManageMcp: false, canChangeModel: false } },
+    workspaceTree: { status: "idle", rows: [], selectedPath: null, limited: false },
+    workspacePreview: { status: "idle" },
   }
 }
 

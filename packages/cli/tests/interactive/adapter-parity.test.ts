@@ -103,13 +103,17 @@ describe("Adapter Parity (TUI vs Web)", () => {
     // Web Adapter 经 WebUiClient 提交 intent；client 把 intent 转发给同一 Controller，
     // 保证两端对同一意图序列产生相同的 IntentOutcome。
     const client = {
-      state: buildWebUiState(controller.getSnapshot()),
+      state: buildWebUiState(controller.getSnapshot(), {
+        tree: { status: "idle", rows: [], selectedPath: null, limited: false },
+        preview: { status: "idle" },
+      }),
       handoffState: { phase: "web-active", handoffId: "h1" },
       getState: () => client.state,
       getHandoffState: () => client.handoffState,
       subscribeState: () => () => {},
       subscribeHandoff: () => () => {},
       submitIntent: (intent: InteractiveIntent) => controller.dispatch(intent),
+      workspaceIntent: async () => ({ status: "accepted" }),
       ready: () => {},
       returnToTui: () => {},
       requestExit: () => {},

@@ -15,7 +15,7 @@ import type {
   ThreadSummary,
 } from "../../../src/interactive/types"
 import type { InteractiveRuntime } from "../../../src/interactive/runtime"
-import type { WebAdapterSnapshot, WebPanel } from "../../../src/web/application/adapter"
+import type { WebAdapterSnapshot } from "../../../src/web/application/adapter"
 
 type PanelState = WebAdapterSnapshot["panelSearch"]
 
@@ -81,7 +81,7 @@ export function makeInteractive(
 /** 默认 WebAdapterSnapshot；interactive 字段可独立覆盖。 */
 export function makeSnapshot(overrides: Partial<WebAdapterSnapshot> = {}): WebAdapterSnapshot {
   const panelSearch: PanelState = {
-    threads: { query: "", submitting: false, error: null },
+    code: { query: "", submitting: false, error: null },
     models: { query: "", submitting: false, error: null },
     skills: { query: "", submitting: false, error: null },
     mcp: { query: "", submitting: false, error: null },
@@ -94,9 +94,15 @@ export function makeSnapshot(overrides: Partial<WebAdapterSnapshot> = {}): WebAd
     commandMenuOpen: false,
     commandMenuIndex: 0,
     commandOptions: [],
-    activePanel: null,
+    contextDock: {
+      open: false,
+      activePanel: "code",
+      widthPx: 560,
+      code: { tabs: [], activePath: null, previews: {}, previewErrors: {} },
+    },
+    workspaceTree: { status: "idle", rows: [], selectedPath: null, limited: false },
+    workspaceSidebar: { threadRatio: 0.38, selectedPath: null },
     panelSearch,
-    sidebarOpen: false,
     expandedTools: new Set<string>(),
     interactionDraft: null,
     leaving: false,
@@ -224,9 +230,4 @@ export function makeConfirmation(
 /** 简单 Command menu item：内置 help 命令。 */
 export function makeCommandMenu(items: readonly CommandMenuItem[] = []): readonly CommandMenuItem[] {
   return items
-}
-
-/** 把 panel 切换为有效面板标识。 */
-export function withPanel(panel: Exclude<WebPanel, null>): Partial<WebAdapterSnapshot> {
-  return { activePanel: panel }
 }

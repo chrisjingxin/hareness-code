@@ -1,11 +1,11 @@
-/** UtilityPanels：activePanel 切换、各面板内容、retry 行为、Skill 启停受 capability 约束。 */
+/** ContextDock：各面板内容、主 tab 语义、capability 门禁、dock-close / dock-width-change（迁移自 panels.test）。 */
 /** @jsxImportSource react */
 
 import { afterAll, describe, expect, test } from "bun:test"
 import { act } from "react"
 
-import { UtilityPanels } from "../../../src/web/presentation/panels"
-import type { WebAdapterSnapshot, WebIntent } from "../../../src/web/application/adapter"
+import { ContextDock } from "../../../src/web/presentation/context-dock/context-dock"
+import type { ContextDockPanel, WebAdapterSnapshot, WebIntent } from "../../../src/web/application/adapter"
 import { makeCatalog, makeInteractive, makeMcp, makeModel, makeRuntime, makeSkill, makeSnapshot } from "./fixtures"
 import { registerTestDom, render, type RenderHandle } from "./render"
 
@@ -13,18 +13,25 @@ const unregisterTestDom = registerTestDom()
 afterAll(() => unregisterTestDom())
 
 
-function mountPanel(snapshot: WebAdapterSnapshot, intents: WebIntent[], narrow = false): RenderHandle {
+function mountDock(snapshot: WebAdapterSnapshot, intents: WebIntent[]): RenderHandle {
   return render(
-    <UtilityPanels snapshot={snapshot} dispatch={intent => intents.push(intent)} narrow={narrow} />,
+    <ContextDock snapshot={snapshot} dispatch={intent => intents.push(intent)} />,
   )
 }
 
-describe("UtilityPanels", () => {
-  test("activePanel 为 null 时不渲染任何内容", () => {
+function dockSnapshot(activePanel: ContextDockPanel, overrides: Partial<WebAdapterSnapshot> = {}): WebAdapterSnapshot {
+  return makeSnapshot({
+    contextDock: { open: true, activePanel, widthPx: 560, code: { tabs: [], activePath: null, previews: {}, previewErrors: {} } },
+    ...overrides,
+  })
+}
+
+describe("ContextDock", () => {
+  test("dock 关闭时不渲染任何内容", () => {
     const intents: WebIntent[] = []
-    const handle = mountPanel(makeSnapshot(), intents)
+    const handle = mountDock(makeSnapshot(), intents)
     try {
-      expect(handle.container.querySelector(".utility-drawer")).toBeNull()
+      expect(handle.container.querySelector(".context-dock")).toBeNull()
     } finally {
       handle.unmount()
     }
@@ -38,7 +45,7 @@ describe("UtilityPanels", () => {
         models: makeCatalog([makeModel({ id: "p1", model: "gpt-x", provider_label: "Prov" }), makeModel({ id: "p2", model: "gpt-y", provider_label: "Prov" })]),
       },
     })
-    const handle = mountPanel(makeSnapshot({ interactive, activePanel: "models" }), intents)
+    const handle = mountDock(dockSnapshot("models", { interactive }), intents)
     try {
       const items = Array.from(handle.container.querySelectorAll<HTMLButtonElement>(".panel-item"))
       expect(items.length).toBe(2)
@@ -58,7 +65,7 @@ describe("UtilityPanels", () => {
         skills: makeCatalog([makeSkill({ id: "s1", name: "Skill 1", enabled: true, userInvocable: true })]),
       },
     })
-    const handle = mountPanel(makeSnapshot({ interactive, activePanel: "skills" }), intents)
+    const handle = mountDock(dockSnapshot("skills", { interactive }), intents)
     try {
       const items = handle.container.querySelectorAll(".panel-item")
       expect(items.length).toBe(1)
@@ -77,7 +84,7 @@ describe("UtilityPanels", () => {
         skills: makeCatalog([makeSkill({ id: "s1", name: "Skill 1", enabled: true, userInvocable: true })]),
       },
     })
-    const handle = mountPanel(makeSnapshot({ interactive, activePanel: "skills" }), intents)
+    const handle = mountDock(dockSnapshot("skills", { interactive }), intents)
     try {
       const toggle = handle.container.querySelector<HTMLInputElement>(".skill-toggle input[type=checkbox]")
       expect(toggle).not.toBeNull()
@@ -101,7 +108,7 @@ describe("UtilityPanels", () => {
         ]),
       },
     })
-    const handle = mountPanel(makeSnapshot({ interactive, activePanel: "skills" }), intents)
+    const handle = mountDock(dockSnapshot("skills", { interactive }), intents)
     try {
       const items = Array.from(handle.container.querySelectorAll<HTMLButtonElement>(".panel-item"))
       const disabled = items.find(button => button.getAttribute("data-disabled") === "true")
@@ -122,7 +129,7 @@ describe("UtilityPanels", () => {
         mcp: makeCatalog([makeMcp({ name: "server-a" }), makeMcp({ name: "server-b" })]),
       },
     })
-    const handle = mountPanel(makeSnapshot({ interactive, activePanel: "mcp" }), intents)
+    const handle = mountDock(dockSnapshot("mcp", { interactive }), intents)
     try {
       const items = handle.container.querySelectorAll(".panel-list li")
       expect(items.length).toBe(2)
@@ -141,43 +148,21 @@ describe("UtilityPanels", () => {
       runtime: makeRuntime({ workspace: "/workspace", modelName: "gpt-x", gitWorkspace: { kind: "branch", branch: "main", root: "/workspace" } }),
       connection: { status: "open" },
     })
-    const handle = mountPanel(makeSnapshot({ interactive, activePanel: "status" }), intents)
+    const handle = mountDock(dockSnapshot("status", { interactive }), intents)
     try {
       const status = handle.container.querySelector(".status-view")
       expect(status).not.toBeNull()
       expect(status?.textContent).toContain("workspace")
       expect(status?.textContent).toContain("gpt-x")
       expect(status?.textContent).toContain("main")
-      const view = handle.container.querySelector(".status-view")
-      const businessButtons = view?.querySelectorAll("button")
+      const businessButtons = status?.querySelectorAll("button")
       expect(businessButtons?.length ?? 0).toBe(0)
     } finally {
       handle.unmount()
     }
   })
 
-  test("activePanel=threads 加载错误时显示重试，点击 dispatch thread-refresh", () => {
-    const intents: WebIntent[] = []
-    const interactive = makeInteractive({
-      catalogs: {
-        ...makeInteractive().catalogs,
-        threads: makeCatalog([], "error", "网络异常"),
-      },
-    })
-    const handle = mountPanel(makeSnapshot({ interactive, activePanel: "threads" }), intents)
-    try {
-      const error = handle.container.querySelector(".panel-error")
-      expect(error?.textContent).toContain("网络异常")
-      const retry = error?.querySelector<HTMLButtonElement>("button")
-      expect(retry).not.toBeNull()
-      act(() => { retry?.click() })
-      expect(intents).toContainEqual({ type: "thread-refresh" })
-    } finally {
-      handle.unmount()
-    }
-  })
-
-  test("activePanel=models 加载错误时点击重试 dispatch panel-open models", () => {
+  test("activePanel=models 加载错误时点击重试 dispatch dock-panel-select models", () => {
     const intents: WebIntent[] = []
     const interactive = makeInteractive({
       catalogs: {
@@ -185,101 +170,78 @@ describe("UtilityPanels", () => {
         models: makeCatalog([], "error", "请求失败"),
       },
     })
-    const handle = mountPanel(makeSnapshot({ interactive, activePanel: "models" }), intents)
+    const handle = mountDock(dockSnapshot("models", { interactive }), intents)
     try {
       const retry = handle.container.querySelector<HTMLButtonElement>(".panel-error button")
       expect(retry).not.toBeNull()
       act(() => { retry?.click() })
-      expect(intents).toContainEqual({ type: "panel-open", panel: "models" })
+      expect(intents).toContainEqual({ type: "dock-panel-select", panel: "models" })
     } finally {
       handle.unmount()
     }
   })
 
-  test("面板关闭按钮 dispatch panel-close", () => {
+  test("dock 关闭按钮 dispatch dock-close", () => {
     const intents: WebIntent[] = []
-    const handle = mountPanel(makeSnapshot({ activePanel: "status" }), intents)
+    const handle = mountDock(dockSnapshot("status"), intents)
     try {
       const close = handle.container.querySelector<HTMLButtonElement>(".panel-close")
       expect(close).not.toBeNull()
       act(() => { close?.click() })
-      expect(intents).toContainEqual({ type: "panel-close" })
+      expect(intents).toContainEqual({ type: "dock-close" })
     } finally {
       handle.unmount()
     }
   })
 
-  test("主 tab 使用 tablist/tab 语义；当前 tab 有 aria-selected 且点击 dispatch panel-open", () => {
+  test("主 tab 使用 tablist/tab 语义：Code 恒可见；点击 dispatch dock-panel-select", () => {
     const intents: WebIntent[] = []
-    const handle = mountPanel(makeSnapshot({ activePanel: "models" }), intents)
+    const handle = mountDock(dockSnapshot("models"), intents)
     try {
       const tablist = handle.container.querySelector<HTMLElement>('[role="tablist"]')
       expect(tablist).not.toBeNull()
       const tabs = Array.from(handle.container.querySelectorAll<HTMLButtonElement>('[role="tab"]'))
-      expect(tabs.length).toBe(4)
+      expect(tabs.length).toBe(5) // Code|Model|Skills|MCP|Status
       const modelTab = tabs.find(tab => tab.textContent === "Model")
-      const statusTab = tabs.find(tab => tab.textContent === "Status")
+      const codeTab = tabs.find(tab => tab.textContent === "Code")
       expect(modelTab?.getAttribute("aria-selected")).toBe("true")
-      expect(statusTab?.getAttribute("aria-selected")).toBe("false")
-      expect(modelTab?.getAttribute("aria-controls")).toBe("workspace-panel-models")
-      act(() => { statusTab?.click() })
-      expect(intents).toContainEqual({ type: "panel-open", panel: "status" })
+      expect(codeTab?.getAttribute("aria-selected")).toBe("false")
+      act(() => { codeTab?.click() })
+      expect(intents).toContainEqual({ type: "dock-panel-select", panel: "code" })
       const panel = handle.container.querySelector('[role="tabpanel"]')
-      expect(panel?.getAttribute("id")).toBe("workspace-panel-models")
+      expect(panel?.getAttribute("id")).toBe("context-dock-panel")
     } finally {
       handle.unmount()
     }
   })
 
-  test("主 tab 支持 Arrow/Home/End：移动焦点并派发对应 panel-open", () => {
+  test("主 tab 支持 Arrow/Home/End：移动焦点并派发对应 dock-panel-select", () => {
     const intents: WebIntent[] = []
-    const handle = mountPanel(makeSnapshot({ activePanel: "models" }), intents)
+    const handle = mountDock(dockSnapshot("models"), intents)
     try {
       const tablist = handle.container.querySelector<HTMLElement>('[role="tablist"]')
       const tabs = Array.from(handle.container.querySelectorAll<HTMLButtonElement>('[role="tab"]'))
-      tabs[0]?.focus()
+      tabs[0]?.focus() // Code 是第一个 tab
       act(() => { tablist?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true })) })
       expect(document.activeElement).toBe(tabs[1])
-      expect(intents).toContainEqual({ type: "panel-open", panel: "skills" })
+      expect(intents).toContainEqual({ type: "dock-panel-select", panel: "models" })
       act(() => { tablist?.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true, cancelable: true })) })
       expect(document.activeElement).toBe(tabs[tabs.length - 1])
-      expect(intents).toContainEqual({ type: "panel-open", panel: "status" })
+      expect(intents).toContainEqual({ type: "dock-panel-select", panel: "status" })
     } finally {
       handle.unmount()
     }
   })
 
-  test("窄屏 Utility 仅在抽屉模式声明 dialog/modal，并提供 scrim", () => {
-    const intents: WebIntent[] = []
-    const desktop = mountPanel(makeSnapshot({ activePanel: "status" }), intents)
-    try {
-      const aside = desktop.container.querySelector(".utility-drawer")
-      expect(aside?.getAttribute("role")).toBeNull()
-      expect(aside?.getAttribute("aria-modal")).toBeNull()
-    } finally {
-      desktop.unmount()
-    }
-
-    const mobile = mountPanel(makeSnapshot({ activePanel: "status" }), intents, true)
-    try {
-      const aside = mobile.container.querySelector(".utility-drawer")
-      expect(aside?.getAttribute("role")).toBe("dialog")
-      expect(aside?.getAttribute("aria-modal")).toBe("true")
-      expect(mobile.container.querySelector(".utility-drawer-scrim")).not.toBeNull()
-    } finally {
-      mobile.unmount()
-    }
-  })
-
-  test("主 tab 受 capability 过滤：无 MODELS_READ/SKILLS_READ/MCP_READ 时只显示 Status", () => {
+  test("主 tab 受 capability 过滤：无 MODELS_READ/SKILLS_READ/MCP_READ 时只显示 Code + Status", () => {
     const intents: WebIntent[] = []
     const interactive = makeInteractive({
       runtime: makeRuntime({ capabilities: ["status.read"] }),
     })
-    const handle = mountPanel(makeSnapshot({ interactive, activePanel: "status" }), intents)
+    const handle = mountDock(dockSnapshot("status", { interactive }), intents)
     try {
       const tabs = Array.from(handle.container.querySelectorAll<HTMLButtonElement>('[role="tab"]'))
-      expect(tabs.map(tab => tab.textContent)).toEqual(["Status"])
+      expect(tabs.map(tab => tab.textContent)).toEqual(["Code", "Status"])
     } finally {
       handle.unmount()
     }
@@ -288,12 +250,32 @@ describe("UtilityPanels", () => {
   test("activePanel=help 时标题为「帮助」且不渲染主 tab；内容列出命令", () => {
     const intents: WebIntent[] = []
     const interactive = makeInteractive({ commands: [] })
-    const handle = mountPanel(makeSnapshot({ interactive, activePanel: "help" }), intents)
+    const handle = mountDock(dockSnapshot("help", { interactive }), intents)
     try {
-      const title = handle.container.querySelector(".utility-drawer-title")
+      const title = handle.container.querySelector(".context-dock-title")
       expect(title?.textContent).toBe("帮助")
       expect(handle.container.querySelector('[role="tablist"]')).toBeNull()
       expect(handle.container.querySelector(".help-view")).not.toBeNull()
+    } finally {
+      handle.unmount()
+    }
+  })
+
+  test("Dock 宽度：左缘拖动 dispatch dock-width-change（宽度随位移递减）", () => {
+    const intents: WebIntent[] = []
+    const handle = mountDock(dockSnapshot("code"), intents)
+    try {
+      const resizeHandle = handle.container.querySelector<HTMLElement>(".dock-resize-handle")
+      expect(resizeHandle).not.toBeNull()
+      act(() => { resizeHandle!.dispatchEvent(new PointerEvent("pointerdown", { clientX: 500, bubbles: true })) })
+      act(() => { window.dispatchEvent(new PointerEvent("pointermove", { clientX: 450, bubbles: true })) })
+      act(() => { window.dispatchEvent(new PointerEvent("pointerup", { clientX: 450, bubbles: true })) })
+      const widthIntent = intents.find(intent => intent.type === "dock-width-change")
+      expect(widthIntent?.type).toBe("dock-width-change")
+      if (widthIntent?.type === "dock-width-change") {
+        // 起始 560 - (450 - 500) = 610（向左拖变宽）
+        expect(widthIntent.widthPx).toBe(610)
+      }
     } finally {
       handle.unmount()
     }
