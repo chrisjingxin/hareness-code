@@ -2,7 +2,7 @@
 /** @jsxImportSource react */
 
 import { useState } from "react"
-import { RefreshCw, Search } from "lucide-react"
+import { Search } from "lucide-react"
 
 import type { ThreadSummary } from "@za38/protocol"
 
@@ -39,16 +39,6 @@ export function ThreadSection({
             disabled={disabled}
           />
         </label>
-        <button
-          type="button"
-          className="icon-button sidebar-refresh"
-          onClick={() => dispatch({ type: "thread-refresh" })}
-          disabled={disabled}
-          aria-label="刷新 Thread 列表"
-          title="刷新"
-        >
-          <RefreshCw aria-hidden="true" />
-        </button>
       </div>
       <div className="sidebar-section-label">最近 Thread</div>
       <ThreadList

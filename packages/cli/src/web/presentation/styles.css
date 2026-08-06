@@ -431,7 +431,6 @@ button.meta-chip { cursor: pointer; }
 }
 .sidebar-search svg { width: var(--icon-sm); height: var(--icon-sm); flex: 0 0 auto; }
 .sidebar-search input { width: 100%; min-width: 0; border: 0; outline: 0; color: var(--text); background: transparent; font-size: 14px; }
-.sidebar-refresh { margin-left: auto; }
 
 .sidebar-section-label { padding: 0 12px 6px; color: var(--muted); font-size: 12px; letter-spacing: .05em; }
 .sidebar-list, .sidebar-list ul { min-height: 0; margin: 0; padding: 0; overflow-y: auto; list-style: none; }

@@ -512,7 +512,9 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     this.runEndTimer = this.setTimeoutFn(() => {
       this.runEndTimer = null
       if (this.closed) return
+      // run 结束：文件树、当前预览与 Thread 列表一起刷新（消息数/时间戳已变化）。
       void this.client.workspaceIntent({ type: "workspace.refresh" })
+      void this.client.submitIntent({ type: "catalog.refresh", catalog: "threads" })
       const activePath = this.contextDock.code.activePath
       if (activePath !== null) {
         void this.client.workspaceIntent({ type: "workspace.refresh-preview", path: activePath })

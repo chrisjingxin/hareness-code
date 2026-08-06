@@ -834,7 +834,7 @@ test("close 之后 theme/header menu intent 安全 no-op", async () => {
 
 // ---- run 结束自动刷新 --------------------------------------------------------
 
-test("run 结束（activeRun 非空 → null）延迟触发 workspace.refresh + 当前预览 refresh", async () => {
+test("run 结束（activeRun 非空 → null）延迟触发 workspace.refresh + 当前预览 refresh + threads 刷新", async () => {
   const { adapter, client, timer } = makeAdapter()
   await adapter.dispatch({ type: "workspace-file-open", path: "src/a.ts" })
   client.workspaceIntents.length = 0
@@ -847,15 +847,18 @@ test("run 结束（activeRun 非空 → null）延迟触发 workspace.refresh + 
   timer.run()
   expect(client.workspaceIntents).toContainEqual({ type: "workspace.refresh" })
   expect(client.workspaceIntents).toContainEqual({ type: "workspace.refresh-preview", path: "src/a.ts" })
+  // Thread 列表（消息数/时间戳）也随 run 结束自动刷新，无需手动按钮。
+  expect(client.intents).toContainEqual({ type: "catalog.refresh", catalog: "threads" })
 })
 
-test("run 结束刷新：无打开文件时只刷新树；close 后定时器不再触发", async () => {
+test("run 结束刷新：无打开文件时只刷新树与 threads；close 后定时器不再触发", async () => {
   const { adapter, client, timer } = makeAdapter()
   client.pushInteractive(snapshot => ({ ...snapshot, activeRun: { threadId: "t", runId: "run-1" } }))
   client.pushInteractive(snapshot => ({ ...snapshot, activeRun: null }))
   timer.run()
   expect(client.workspaceIntents).toContainEqual({ type: "workspace.refresh" })
   expect(client.workspaceIntents.filter(intent => intent.type === "workspace.refresh-preview")).toEqual([])
+  expect(client.intents).toContainEqual({ type: "catalog.refresh", catalog: "threads" })
 
   // 关闭后 run 结束不触发
   client.workspaceIntents.length = 0
