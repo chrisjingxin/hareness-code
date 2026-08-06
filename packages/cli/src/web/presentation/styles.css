@@ -280,11 +280,14 @@ button.meta-chip { cursor: pointer; }
 .meta-chip-value { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .meta-chip svg { width: var(--icon-sm); height: var(--icon-sm); flex: 0 0 auto; color: var(--accent-strong); }
 
+/* 活动状态圆点：语义色区分（绿=就绪/完成，蓝=运行中，黄=思考/等待/取消中，红=失败，灰=已取消）。 */
 .status-dot { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: var(--subtle); }
-.status-dot-running, .status-dot-starting, .status-dot-cancelling, .status-dot-waiting-interaction { background: var(--accent); }
+.status-dot-idle, .status-dot-home { background: var(--success); }
+.status-dot-running { background: var(--inline-code-text); }
+.status-dot-starting, .status-dot-waiting-interaction, .status-dot-cancelling { background: var(--warning); }
 .status-dot-completed { background: var(--success); }
+.status-dot-cancelled { background: var(--muted); }
 .status-dot-failed { background: var(--danger); }
-.status-dot-home, .status-dot-idle { background: var(--muted); }
 
 .topbar-actions { position: relative; display: flex; align-items: center; gap: 6px; flex: 0 0 auto; min-width: 0; }
 /* “返回 TUI”收敛为紧凑次按钮：不喧宾夺主，与右侧图标按钮同一视觉层级。

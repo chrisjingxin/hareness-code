@@ -83,6 +83,14 @@ test("历史双轨 class 已删除：同一组件不再保留旧 class 规则", 
   }
 })
 
+test("状态圆点语义色：就绪/完成=绿，运行中=蓝，思考/等待/取消中=黄，失败=红，已取消=灰", () => {
+  expect(css).toContain(".status-dot-idle, .status-dot-home { background: var(--success); }")
+  expect(css).toContain(".status-dot-running { background: var(--inline-code-text); }")
+  expect(css).toContain(".status-dot-starting, .status-dot-waiting-interaction, .status-dot-cancelling { background: var(--warning); }")
+  expect(css).toContain(".status-dot-failed { background: var(--danger); }")
+  expect(css).toContain(".status-dot-cancelled { background: var(--muted); }")
+})
+
 test("保留 prefers-reduced-motion 可访问性规则", () => {
   expect(css).toContain("prefers-reduced-motion")
 })
