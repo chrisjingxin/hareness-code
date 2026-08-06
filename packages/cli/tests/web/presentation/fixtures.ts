@@ -101,7 +101,7 @@ export function makeSnapshot(overrides: Partial<WebAdapterSnapshot> = {}): WebAd
       code: { tabs: [], activePath: null, previews: {}, previewErrors: {} },
     },
     workspaceTree: { status: "idle", rows: [], selectedPath: null, limited: false },
-    workspaceSidebar: { threadRatio: 0.38, selectedPath: null },
+    workspaceSidebar: { threadRatio: 0.38, selectedPath: null, widthPx: 280 },
     panelSearch,
     expandedTools: new Set<string>(),
     interactionDraft: null,

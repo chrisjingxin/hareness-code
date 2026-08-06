@@ -109,7 +109,12 @@ export function WebApp(props: {
   }, [interactive.activeRun, interactive.confirmation, onIntent, readOnly, snapshot.commandMenuOpen, snapshot.contextDock.open, snapshot.headerMenuOpen])
 
   return (
-    <div className="web-shell" data-theme={snapshot.theme} data-active={props.active ? "true" : "false"}>
+    <div
+      className="web-shell"
+      data-theme={snapshot.theme}
+      data-active={props.active ? "true" : "false"}
+      style={{ "--sidebar-width": `${snapshot.workspaceSidebar.widthPx}px` } as React.CSSProperties}
+    >
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark" aria-hidden="true">H</span>

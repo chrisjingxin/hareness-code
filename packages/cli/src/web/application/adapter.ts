@@ -89,6 +89,8 @@ export type WebAdapterSnapshot = {
     readonly threadRatio: number
     /** 文件树当前选中行；null 表示无选中。 */
     readonly selectedPath: string | null
+    /** 侧栏宽度（px）；顶栏品牌列与侧栏共用，保证竖线连续对齐。 */
+    readonly widthPx: number
   }
   /** 各面板局部状态（搜索词/提交/错误）。 */
   readonly panelSearch: Readonly<Record<ContextDockPanel, WebPanelSearchState>>
@@ -124,6 +126,7 @@ export type WebIntent =
   | { type: "dock-close" }
   | { type: "dock-width-change"; widthPx: number }
   | { type: "sidebar-thread-ratio-change"; ratio: number }
+  | { type: "sidebar-width-change"; widthPx: number }
   | { type: "panel-search"; panel: ContextDockPanel; query: string }
   | { type: "thread-select"; threadId: string }
   | { type: "thread-new" }
@@ -200,6 +203,10 @@ const MAX_FILE_TABS = 12
 const DOCK_WIDTH_MIN = 400
 const DOCK_WIDTH_MAX = 760
 const DOCK_WIDTH_INITIAL = 560
+/** 左侧侧栏宽度（顶栏品牌列同步）：保证分隔竖线上下连续对齐。 */
+const SIDEBAR_WIDTH_MIN = 220
+const SIDEBAR_WIDTH_MAX = 480
+const SIDEBAR_WIDTH_INITIAL = 280
 const THREAD_RATIO_INITIAL = 0.38
 /** Thread 分区比例夹取区间：下限保证 Files 可见，上限保证 Thread 可见（CSS 另有 px 级 min）。 */
 const THREAD_RATIO_MIN = 0.2
@@ -231,6 +238,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     code: { tabs: [], activePath: null, previews: {}, previewErrors: {} },
   }
   private threadRatio = THREAD_RATIO_INITIAL
+  private sidebarWidthPx = SIDEBAR_WIDTH_INITIAL
   private workspaceSelectedPath: string | null = null
   private theme: WebTheme = "light"
   private headerMenuOpenFlag = false
@@ -319,6 +327,10 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
         return
       case "sidebar-thread-ratio-change":
         this.threadRatio = clamp(intent.ratio, THREAD_RATIO_MIN, THREAD_RATIO_MAX)
+        this.schedulePublish()
+        return
+      case "sidebar-width-change":
+        this.sidebarWidthPx = clamp(intent.widthPx, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX)
         this.schedulePublish()
         return
       case "panel-search":
@@ -558,7 +570,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
         },
       },
       workspaceTree: this.client.getState().workspaceTree,
-      workspaceSidebar: { threadRatio: this.threadRatio, selectedPath: this.workspaceSelectedPath },
+      workspaceSidebar: { threadRatio: this.threadRatio, selectedPath: this.workspaceSelectedPath, widthPx: this.sidebarWidthPx },
       panelSearch: freezePanelState(this.panelState),
       expandedTools: new Set(this.expandedTools),
       interactionDraft: this.interactionDraft ? cloneInteractionDraft(this.interactionDraft) : null,

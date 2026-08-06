@@ -213,7 +213,7 @@ test("初始 snapshot：interactive 由五个分片重组，workspace 分片来�
   const snapshot = adapter.getSnapshot()
   expect(snapshot.interactive.currentThreadId).toBe("t-1")
   expect(snapshot.workspaceTree.status).toBe("idle")
-  expect(snapshot.workspaceSidebar).toEqual({ threadRatio: 0.38, selectedPath: null })
+  expect(snapshot.workspaceSidebar).toEqual({ threadRatio: 0.38, selectedPath: null, widthPx: 280 })
   expect(snapshot.contextDock).toMatchObject({ open: false, activePanel: "code", widthPx: 560 })
   expect(snapshot.contextDock.code).toEqual({ tabs: [], activePath: null, previews: {}, previewErrors: {} })
   expect(snapshot.expandedTools).toBeInstanceOf(Set)
@@ -326,6 +326,16 @@ test("sidebar-thread-ratio-change：夹取比例并写入 workspaceSidebar", asy
   expect(adapter.getSnapshot().workspaceSidebar.threadRatio).toBe(0.2)
   await adapter.dispatch({ type: "sidebar-thread-ratio-change", ratio: 0.5 })
   expect(adapter.getSnapshot().workspaceSidebar.threadRatio).toBe(0.5)
+})
+
+test("sidebar-width-change：夹取 220-480 并写入 workspaceSidebar.widthPx", async () => {
+  const { adapter } = makeAdapter()
+  await adapter.dispatch({ type: "sidebar-width-change", widthPx: 9999 })
+  expect(adapter.getSnapshot().workspaceSidebar.widthPx).toBe(480)
+  await adapter.dispatch({ type: "sidebar-width-change", widthPx: 10 })
+  expect(adapter.getSnapshot().workspaceSidebar.widthPx).toBe(220)
+  await adapter.dispatch({ type: "sidebar-width-change", widthPx: 320 })
+  expect(adapter.getSnapshot().workspaceSidebar.widthPx).toBe(320)
 })
 
 test("panel search 写入 panelSearch；仅本地表现状态，不触发 client", async () => {

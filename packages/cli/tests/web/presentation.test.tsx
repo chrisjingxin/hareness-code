@@ -59,7 +59,7 @@ function adapterSnapshot(interactive: InteractiveSnapshot, overrides: Partial<We
       code: { tabs: [], activePath: null, previews: {}, previewErrors: {} },
     },
     workspaceTree: { status: "idle", rows: [], selectedPath: null, limited: false },
-    workspaceSidebar: { threadRatio: 0.38, selectedPath: null },
+    workspaceSidebar: { threadRatio: 0.38, selectedPath: null, widthPx: 280 },
     panelSearch: {
       code: { query: "", submitting: false, error: null },
       models: { query: "", submitting: false, error: null },

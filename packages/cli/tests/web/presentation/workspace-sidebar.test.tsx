@@ -126,6 +126,26 @@ describe("WorkspaceSidebar", () => {
     }
   })
 
+  test("侧栏右缘拖动 dispatch sidebar-width-change（向右拖动增大宽度）", () => {
+    const intents: WebIntent[] = []
+    const handle = mountSidebar(makeSnapshot(), intents)
+    try {
+      const resizeHandle = handle.container.querySelector<HTMLElement>(".sidebar-resize-handle")
+      expect(resizeHandle).not.toBeNull()
+      act(() => { resizeHandle!.dispatchEvent(new PointerEvent("pointerdown", { clientX: 200, bubbles: true })) })
+      act(() => { window.dispatchEvent(new PointerEvent("pointermove", { clientX: 260, bubbles: true })) })
+      act(() => { window.dispatchEvent(new PointerEvent("pointerup", { clientX: 260, bubbles: true })) })
+      const widthIntent = intents.find(intent => intent.type === "sidebar-width-change")
+      expect(widthIntent?.type).toBe("sidebar-width-change")
+      if (widthIntent?.type === "sidebar-width-change") {
+        // 起始 280 + (260 - 200) = 340
+        expect(widthIntent.widthPx).toBe(340)
+      }
+    } finally {
+      handle.unmount()
+    }
+  })
+
   test("Files 分区渲染文件树行；目录行点击 dispatch workspace-directory-toggle", () => {
     const intents: WebIntent[] = []
     const workspaceTree = {

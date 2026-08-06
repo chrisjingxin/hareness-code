@@ -29,7 +29,7 @@ function row(overrides: Partial<WorkspaceTreeRow>): WorkspaceTreeRow {
 
 function mountTree(tree: WorkspaceTreeState, intents: WebIntent[], selectedPath: string | null = null): RenderHandle {
   return render(
-    <FileTree snapshot={makeSnapshot({ workspaceTree: tree, workspaceSidebar: { threadRatio: 0.38, selectedPath } })} dispatch={intent => intents.push(intent)} />,
+    <FileTree snapshot={makeSnapshot({ workspaceTree: tree, workspaceSidebar: { threadRatio: 0.38, selectedPath, widthPx: 280 } })} dispatch={intent => intents.push(intent)} />,
   )
 }
 
