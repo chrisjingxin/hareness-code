@@ -428,12 +428,14 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     this.frameScheduler.cancel()
   }
 
-  /** Web 接管成功后预取 Thread catalog；每个 Adapter 实例只触发一次（含重连时已 web-active）。 */
+  /** Web 接管成功后预取 Thread catalog 与工作区文件树；每个 Adapter 实例只触发一次（含重连时已 web-active）。 */
   private onHandoffState(state: PresentationState): void {
     if (this.webActiveRefreshSent) return
     if (state.phase !== "web-active") return
     this.webActiveRefreshSent = true
     void this.client.submitIntent({ type: "catalog.refresh", catalog: "threads" })
+    // 首次加载文件树：不预取则左侧 Files 保持 idle 空态，必须手动刷新才出现文件。
+    void this.client.workspaceIntent({ type: "workspace.load" })
   }
 
   /** 视图更新（replace/patch 合并后）→ 合并工作区预览、检测 run 结束 → 与本地状态一起重发布。 */

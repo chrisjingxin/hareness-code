@@ -526,6 +526,23 @@ test("handoff 进入 web-active 时自动刷新 Thread catalog；非 web-active 
   expect(client.intents).toContainEqual({ type: "catalog.refresh", catalog: "threads" })
 })
 
+test("首次 web-active 时自动派发 workspace.load：文件树无需手动刷新即加载", async () => {
+  const { adapter, client } = makeAdapter()
+  expect(client.workspaceIntents).toEqual([])
+  client.pushHandoffState({ phase: "opening-web", handoffId: "h1" })
+  expect(client.workspaceIntents).toEqual([])
+  client.pushHandoffState({ phase: "web-active", handoffId: "h1" })
+  expect(client.workspaceIntents).toContainEqual({ type: "workspace.load" })
+})
+
+test("连接建立时已处于 web-active（重连）也会派发 workspace.load", async () => {
+  const client = createFakeClient()
+  client.pushHandoffState({ phase: "web-active", handoffId: "h1" })
+  const adapter = createWebInteractiveAdapter({ client })
+  expect(client.workspaceIntents).toContainEqual({ type: "workspace.load" })
+  await adapter.close()
+})
+
 test("连接建立时已处于 web-active（重连）也会刷新 Thread catalog", async () => {
   const client = createFakeClient()
   client.pushHandoffState({ phase: "web-active", handoffId: "h1" })
