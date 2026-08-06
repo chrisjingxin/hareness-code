@@ -1,6 +1,6 @@
 /** Interactive Core 薄协调器：只做 intent 路由、listener 管理、snapshot 组装与 Feature 生命周期编排；具体业务逻辑在 features/ 下按 Feature 拆分。 */
 
-import type { Capability } from "@za38/protocol"
+import type { Capability, ModelProfile } from "@za38/protocol"
 import { contextCompactNotice, type CommandResult, dispatchSlashCommand } from "./command-dispatcher"
 import { builtinCommandCapabilities } from "./commands"
 import { CatalogFeature, CommandFeature, InteractionFeature, McpFeature, ModelFeature, RunFeature, SkillFeature, ThreadFeature, TimelineFeature, type FeatureContext } from "./features"
@@ -117,6 +117,9 @@ export class InteractiveControllerImpl implements InteractiveController {
         })
 
       case "model.select":
+        if (this.state.activeRun || this.hasPendingInteraction) {
+          return { status: "rejected", code: "busy", message: "任务运行中或存在待处理交互，暂不能切换模型" }
+        }
         return this.modelFeature.selectModel(intent.profileId, this.featureContext, {
           models: this.catalogFeature.state.models.items, onModelsRefreshed: () => this.refreshModelSelection(),
         })
@@ -157,6 +160,9 @@ export class InteractiveControllerImpl implements InteractiveController {
         return this.resolveConfirmation(intent.confirmationId, intent.confirmed)
 
       case "approval-mode.cycle":
+        if (this.state.activeRun || this.hasPendingInteraction) {
+          return { status: "rejected", code: "busy", message: "任务运行中或存在待处理交互，暂不能切换审批模式" }
+        }
         return this.runFeature.cycleApprovalMode(this.featureContext)
       case "run.cancel":
         return this.runFeature.cancelActiveRun(this.featureContext, () => this.interactionFeature.abandonPendingInteraction(this.featureContext))
@@ -194,7 +200,9 @@ export class InteractiveControllerImpl implements InteractiveController {
       requestedModelProfileId: this.modelFeature.requestedModelProfileId,
       armedSkill: this.skillFeature.armedSkill,
       onEvent: event => this.timelineFeature.processAgentEvent(event, this.featureContext),
-      onRunFinish: () => {
+      onRunFinish: (actualModel?: ModelProfile) => {
+        // 实际绑定优先于显式选择：Run 真的用了哪个模型就显示哪个。
+        if (actualModel) this.modelFeature.actualModelProfile = actualModel
         this.refreshModelSelection()
         void this.catalogFeature.refreshThreadCatalog(this.featureContext)
       },

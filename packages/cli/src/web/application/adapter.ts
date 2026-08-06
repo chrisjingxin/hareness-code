@@ -250,19 +250,27 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
         await this.selectModel(intent.profileId)
         return
       case "skill-arm":
-        await this.client.submitIntent({ type: "skill.arm", skillId: intent.skillId })
+        await this.executeCoreIntent({ type: "skill.arm", skillId: intent.skillId })
         return
       case "skill-clear":
-        await this.client.submitIntent({ type: "skill.clear" })
+        await this.executeCoreIntent({ type: "skill.clear" })
         return
       case "skill-set-enabled":
-        await this.client.submitIntent({ type: "skill.set-enabled", skillId: intent.skillId, enabled: intent.enabled })
+        await this.executeCoreIntent({ type: "skill.set-enabled", skillId: intent.skillId, enabled: intent.enabled })
         return
       case "mcp-add":
-        await this.client.submitIntent({ type: "mcp.add", input: intent.input })
+        await this.executeCoreIntent(
+          { type: "mcp.add", input: intent.input },
+          {
+            onRejected: message => {
+              this.panelState.mcp = { ...this.panelState.mcp, error: message }
+              this.publishNow()
+            },
+          },
+        )
         return
       case "mcp-remove":
-        await this.client.submitIntent({ type: "mcp.remove", name: intent.name })
+        await this.executeCoreIntent({ type: "mcp.remove", name: intent.name })
         return
       case "interaction-draft-change":
         this.updateInteractionDraft(intent.requestId, intent.patch)
@@ -271,16 +279,16 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
         await this.submitInteraction(intent.requestId, intent.response)
         return
       case "confirmation-resolve":
-        await this.client.submitIntent({ type: "confirmation.resolve", confirmationId: intent.confirmationId, confirmed: intent.confirmed })
+        await this.executeCoreIntent({ type: "confirmation.resolve", confirmationId: intent.confirmationId, confirmed: intent.confirmed })
         return
       case "tool-toggle":
         this.toggleTool(intent.runId, intent.toolId)
         return
       case "approval-mode-cycle":
-        await this.client.submitIntent({ type: "approval-mode.cycle" })
+        await this.executeCoreIntent({ type: "approval-mode.cycle" })
         return
       case "cancel-run":
-        await this.client.submitIntent({ type: "run.cancel" })
+        await this.executeCoreIntent({ type: "run.cancel" })
         return
       case "sidebar-toggle":
         this.sidebarOpenFlag = intent.open
@@ -628,7 +636,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
       this.interactionDraft = { ...this.interactionDraft, touched: false }
     }
     this.publishNow()
-    await this.client.submitIntent({ type: "interaction.respond", requestId, response })
+    await this.executeCoreIntent({ type: "interaction.respond", requestId, response })
   }
 
   /** 折叠/展开单个 Tool 卡片；展开状态只属于表现层，使用 runId+toolId 复合键。 */

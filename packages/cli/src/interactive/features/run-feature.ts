@@ -1,6 +1,6 @@
 /** Run Feature：管理 Run 的启动、取消、底层 Agent 订阅句柄与终态清理。 */
 
-import type { ApprovalMode, ModelProfile, RequestedSkill } from "@za38/protocol"
+import { EventType, type ApprovalMode, type ModelProfile, type RequestedSkill } from "@za38/protocol"
 import type { IntentOutcome, InteractiveAgentRun, SkillSummary } from "../ports"
 import { markCancelling, markRunFailed, startRun as startRunState } from "../state"
 import { nextApprovalMode, type InteractiveApprovalMode } from "../runtime"
@@ -8,6 +8,36 @@ import type { FeatureContext } from "./types"
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/** 从 RUN_STARTED 事件提取实际主模型绑定；字段缺失或形状不符时不回填。 */
+function actualModelFromStarted(payload: Record<string, unknown>): ModelProfile | undefined {
+  const binding = objectRecord(payload.primary_model)
+  const profile = binding ? objectRecord(binding.profile) : undefined
+  if (!profile) return undefined
+  const id = stringValue(profile.id, "")
+  const model = stringValue(profile.model, "")
+  const providerLabel = stringValue(profile.provider_label, "")
+  if (!id || !model || !providerLabel) return undefined
+  return {
+    id,
+    model,
+    provider_label: providerLabel,
+    context_window_tokens: typeof profile.context_window_tokens === "number" && Number.isFinite(profile.context_window_tokens) ? profile.context_window_tokens : 0,
+    capabilities: [],
+    is_default: Boolean(profile.is_default),
+    available: profile.available !== false,
+    source: stringValue(profile.source, "agent"),
+  }
+}
+
+/** 类型守卫：把未知值窄化为可读对象。 */
+function objectRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null ? value as Record<string, unknown> : undefined
+}
+
+function stringValue(value: unknown, fallback: string): string {
+  return typeof value === "string" && value ? value : fallback
 }
 
 export class RunFeature {
@@ -68,12 +98,16 @@ export class RunFeature {
       })
 
       // 消费事件流；终态事件经 applyAgentEvent 收敛 activeRun，事件流随之自然结束。
+      let actualModel: ModelProfile | undefined
       void (async () => {
         try {
           for await (const event of run.events) {
             const active = ctx.getState().activeRun
             if (!active || active.runId !== run.ref.runId) return
             if (event.thread_id !== run.ref.threadId || event.run_id !== run.ref.runId) continue
+            if (event.type === EventType.RUN_STARTED) {
+              actualModel = actualModelFromStarted(event.payload)
+            }
             options.onEvent(event)
           }
         } catch (error) {
@@ -82,7 +116,7 @@ export class RunFeature {
           if (active?.runId === run.ref.runId) {
             this.activeRunHandle = null
             ctx.commit(current => markRunFailed(current, run.ref.runId, errorMessage(error)))
-            options.onRunFinish()
+            options.onRunFinish(actualModel)
           }
         }
       })()
@@ -91,12 +125,12 @@ export class RunFeature {
         if (this.activeRunHandle?.ref.runId !== run.ref.runId) return
         this.activeRunHandle = null
         options.onAbandonInteraction()
-        options.onRunFinish()
+        options.onRunFinish(actualModel)
       }).catch(() => {
         // completion 拒绝（非事件流路径的失败）也要收敛 Thread catalog 与选择。
         if (this.activeRunHandle?.ref.runId !== run.ref.runId) return
         this.activeRunHandle = null
-        options.onRunFinish()
+        options.onRunFinish(actualModel)
       })
 
       return { status: "accepted" }

@@ -493,9 +493,11 @@ class TuiAdapterImpl implements TuiAdapter {
         this.showToolDetails = !this.showToolDetails
         this.publish()
         return
-      case "cycle-approval-mode":
-        await this.routeDispatch({ type: "approval-mode.cycle" })
+      case "cycle-approval-mode": {
+        const outcome = await this.routeDispatch({ type: "approval-mode.cycle" })
+        if (outcome.status === "rejected") this.showTransientNotice(outcome.message)
         return
+      }
       case "clear-selected-skill":
         await this.routeDispatch({ type: "skill.clear" })
         return

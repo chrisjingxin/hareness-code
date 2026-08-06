@@ -301,6 +301,38 @@ test("thread-select rejected 时显示 transient notice", async () => {
   expect(adapter.getSnapshot().transientNotice).toBe("当前任务执行中")
 })
 
+test("skill-arm / skill-clear rejected 时显示 transient notice", async () => {
+  const { adapter, client } = makeAdapter()
+  client.nextOutcome = { status: "rejected", code: "busy", message: "技能不可用" }
+  await adapter.dispatch({ type: "skill-arm", skillId: "s-1" })
+  expect(adapter.getSnapshot().transientNotice).toBe("技能不可用")
+  client.nextOutcome = { status: "rejected", code: "busy", message: "技能未清除" }
+  await adapter.dispatch({ type: "skill-clear" })
+  expect(adapter.getSnapshot().transientNotice).toBe("技能未清除")
+})
+
+test("mcp-add rejected 时在面板内显示错误", async () => {
+  const { adapter, client } = makeAdapter()
+  await adapter.dispatch({ type: "panel-open", panel: "mcp" })
+  client.nextOutcome = { status: "rejected", code: "agent-error", message: "MCP 服务器连接失败" }
+  await adapter.dispatch({ type: "mcp-add", input: { name: "mcp-1" } as never })
+  expect(adapter.getSnapshot().panelSearch.mcp.error).toBe("MCP 服务器连接失败")
+})
+
+test("cancel-run rejected 时显示 transient notice", async () => {
+  const { adapter, client } = makeAdapter()
+  client.nextOutcome = { status: "rejected", code: "not-found", message: "No active run to cancel" }
+  await adapter.dispatch({ type: "cancel-run" })
+  expect(adapter.getSnapshot().transientNotice).toBe("No active run to cancel")
+})
+
+test("approval-mode-cycle rejected 时显示 transient notice", async () => {
+  const { adapter, client } = makeAdapter()
+  client.nextOutcome = { status: "rejected", code: "busy", message: "任务运行中不能切换审批模式" }
+  await adapter.dispatch({ type: "approval-mode-cycle" })
+  expect(adapter.getSnapshot().transientNotice).toBe("任务运行中不能切换审批模式")
+})
+
 test("returnToTui 正常时发送 handoff.return；active Run 或 pending interaction 时阻止并通知", async () => {
   const { adapter, client } = makeAdapter()
   await adapter.dispatch({ type: "return-to-tui" })

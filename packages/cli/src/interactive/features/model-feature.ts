@@ -57,6 +57,8 @@ export class ModelFeature {
     }
 
     this.requestedModelProfileId = model.id
+    // 显式选择取代上一次运行的实际绑定：展示跟随意图，直到下一次 Run 产生新事实。
+    this.actualModelProfile = undefined
     this.explicitlySelected = true
     ctx.publish()
     const label = `${model.provider_label} · ${model.model}`
