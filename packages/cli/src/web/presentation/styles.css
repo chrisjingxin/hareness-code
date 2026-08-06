@@ -621,7 +621,9 @@ button.meta-chip { cursor: pointer; }
 
 /* ---------- Composer ---------- */
 .composer-bar { flex: 0 0 auto; background: var(--composer-bg); border-top: 1px solid var(--line); }
-.composer-inner { width: min(880px, calc(100% - 48px)); margin: 0 auto; padding: 12px 0 14px; }
+/* 定位上下文：命令菜单浮层相对 form 向上弹出，不占 flow 高度，
+   避免矮窗口下把 composer-bar 撑高导致输入框底部被 conversation-column 裁剪。 */
+.composer-inner { position: relative; width: min(880px, calc(100% - 48px)); margin: 0 auto; padding: 12px 0 14px; }
 .composer-box { border: 1px solid var(--line-strong); border-radius: var(--radius-surface); background: var(--surface); }
 .composer-box:focus-within { border-color: var(--accent); }
 .composer-textarea {
@@ -673,8 +675,13 @@ button.meta-chip { cursor: pointer; }
 
 /* ---------- 命令菜单 ---------- */
 .command-menu {
+  position: absolute;
+  inset-inline: 0;
+  /* 菜单底边 = form 顶 + 6px = composer-box 顶上方 6px（form padding-top 固定 12px）。 */
+  bottom: calc(100% - 6px);
+  z-index: 5;
   max-height: 260px;
-  margin: 0 0 6px;
+  margin: 0;
   padding: 4px;
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-surface);
