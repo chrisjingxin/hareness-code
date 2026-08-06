@@ -42,7 +42,10 @@ test("CodeBlock 独占一层 surface，prose/表格/代码各自维持局部滚�
   expect(css).toContain(".code-block-body {")
   expect(css).toContain("overflow-x: auto")
   expect(css).not.toContain(".markdown-code {")
-  expect(css).toContain("max-inline-size: min(72ch, 100%)")
+  // 72ch 阅读宽度只约束纯文本段落；代码块/表格不受其收窄，与工具卡同宽。
+  expect(css).toContain(".markdown p,")
+  expect(css).toContain("max-inline-size: 72ch")
+  expect(css).not.toContain("max-inline-size: min(72ch, 100%)")
 })
 
 test("桌面三栏布局与文件预览样式存在：desktop-workspace / context-dock / file-code-view", () => {

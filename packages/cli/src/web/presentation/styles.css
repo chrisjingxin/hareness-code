@@ -976,10 +976,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   word-break: normal;
 }
 
-/* 72ch 测量限制 */
-.message-assistant .message-content,
-.message-user .message-content {
-  max-inline-size: min(72ch, 100%);
+/* 72ch 阅读宽度只约束纯文本段落；代码块/表格占满消息内容区，与工具卡同宽对齐。 */
+.markdown p,
+.markdown li,
+.markdown blockquote {
+  max-inline-size: 72ch;
 }
 .message-user .message-content {
   inline-size: fit-content;
