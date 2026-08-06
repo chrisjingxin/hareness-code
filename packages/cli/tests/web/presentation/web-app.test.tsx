@@ -6,7 +6,7 @@ import { act } from "react"
 
 import { WebApp } from "../../../src/web/presentation/web-app"
 import type { WebAdapterSnapshot, WebIntent, WebInteractiveAdapter } from "../../../src/web/application/adapter"
-import { makeInteractive, makeSnapshot } from "./fixtures"
+import { makeInteractive, makeRuntime, makeSnapshot } from "./fixtures"
 import { registerTestDom, render, type RenderHandle } from "./render"
 
 const unregisterTestDom = registerTestDom()
@@ -82,6 +82,23 @@ describe("WebApp", () => {
       const composer = handle.container.querySelector<HTMLTextAreaElement>(".composer-textarea")
       expect(composer?.disabled).toBe(false)
       expect(composer?.value).toBe("hello")
+    } finally {
+      handle.unmount()
+    }
+  })
+
+  test("project-meta 展示 Git 分支状态", () => {
+    const { handle } = mountWebApp(
+      true,
+      makeSnapshot({
+        interactive: makeInteractive({
+          runtime: makeRuntime({ gitWorkspace: { kind: "branch", branch: "main", root: "/workspace" } }),
+        }),
+      }),
+    )
+    try {
+      const meta = handle.container.querySelector(".project-meta")
+      expect(meta?.textContent).toBe("main")
     } finally {
       handle.unmount()
     }

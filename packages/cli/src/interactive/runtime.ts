@@ -10,9 +10,16 @@ export type InteractiveApprovalMode = "plan" | "default" | "auto-edit" | "auto" 
 /** Shift+Tab 循环切换顺序，与 Python approval_mode.MODE_CYCLE 对齐。 */
 export const APPROVAL_MODE_CYCLE: readonly InteractiveApprovalMode[] = ["plan", "default", "auto-edit", "auto", "yolo"]
 
+/** Git 工作区状态：探测结果只有这四种稳定形态，未知/失败统一为 unavailable。 */
+export type GitWorkspaceState =
+  | { kind: "branch"; branch: string; root: string }
+  | { kind: "detached"; shortSha: string; root: string }
+  | { kind: "not-repository" }
+  | { kind: "unavailable"; message: string }
+
 export type InteractiveRuntime = {
   workspace: string
-  gitBranch?: string
+  gitWorkspace?: GitWorkspaceState
   cliVersion: string
   modelName?: string
   /** 当前实际使用或待绑定的脱敏模型 Profile ID。 */
@@ -32,7 +39,7 @@ export type InteractiveRuntime = {
 export function createInteractiveRuntime(
   result: InitializeResult,
   cwd: string,
-  options: { gitBranch?: string; cliVersion?: string } = {},
+  options: { gitWorkspace?: GitWorkspaceState; cliVersion?: string } = {},
 ): InteractiveRuntime {
   const config = isRecord(result.config_summary) ? result.config_summary : undefined
   const model = config && isRecord(config.model) ? config.model : undefined
@@ -40,7 +47,7 @@ export function createInteractiveRuntime(
   const mcpServers = config && Array.isArray(config.mcp_servers) ? config.mcp_servers : undefined
   return {
     workspace: stringValue(config?.workspace, cwd),
-    gitBranch: optionalString(options.gitBranch),
+    gitWorkspace: options.gitWorkspace,
     cliVersion: options.cliVersion ?? CLI_VERSION,
     modelName: optionalString(model?.name),
     modelConfigured: model?.api_key_configured === true,

@@ -25,11 +25,11 @@ test("从脱敏初始化结果提取可展示的运行上下文", () => {
       security: { mode: "remote-sandbox", provider: "corp", approval_mode: "default" },
     },
     startup_error: null,
-  }, "/fallback", { gitBranch: "main" })
+  }, "/fallback", { gitWorkspace: { kind: "branch", branch: "main", root: "/work/za38-cli" } })
 
   expect(runtime).toEqual({
     workspace: "/work/za38-cli",
-    gitBranch: "main",
+    gitWorkspace: { kind: "branch", branch: "main", root: "/work/za38-cli" },
     cliVersion: "0.1.0",
     modelName: "deepseek-v4-flash",
     modelConfigured: true,

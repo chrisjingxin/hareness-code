@@ -22,6 +22,7 @@ import {
   executionStatusLabel,
   workspaceLabel,
 } from "../../interactive/runtime"
+import { gitWorkspaceLabel } from "../../presentation-shared"
 import type {
   InteractiveMcpInput,
   McpServerSummary,
@@ -793,10 +794,10 @@ function StatusPanel({
       <dl className="status-list">
         <dt>工作区</dt>
         <dd>{workspaceLabel(runtime.workspace)}</dd>
-        {runtime.gitBranch ? (
+        {gitWorkspaceLabel(runtime.gitWorkspace) ? (
           <>
             <dt>分支</dt>
-            <dd>{runtime.gitBranch}</dd>
+            <dd>{gitWorkspaceLabel(runtime.gitWorkspace)}</dd>
           </>
         ) : null}
         <dt>当前模型</dt>

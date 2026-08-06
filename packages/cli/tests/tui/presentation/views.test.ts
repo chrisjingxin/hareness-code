@@ -27,7 +27,7 @@ const runtime = createInteractiveRuntime({
     security: { approval_mode: "default" },
   },
   startup_error: null,
-}, "/workspace/harness-code", { gitBranch: "main", cliVersion: "0.1.0" })
+}, "/workspace/harness-code", { gitWorkspace: { kind: "branch", branch: "main", root: "/workspace/harness-code" }, cliVersion: "0.1.0" })
 
 function snapshotOf(state: InteractiveState): InteractiveSnapshot {
   return {
@@ -351,6 +351,36 @@ test("Skills 与 Threads 选择器压暗底层 thread，但不压暗自身面板
       expect(panelTitle?.fg.toInts()).toEqual(RGBA.fromHex(tuiTheme.text).toInts())
     } finally {
       await act(async () => { setup.renderer.destroy() })
+    }
+  }
+})
+
+test("FooterRail 展示分支标签与 detached 标签", async () => {
+  const base = snapshotOf(createInitialState())
+  const cases: Array<{ interactive: InteractiveSnapshot; expected: string }> = [
+    {
+      interactive: { ...base, runtime: { ...base.runtime, gitWorkspace: { kind: "branch", branch: "main", root: "/workspace/harness-code" } } },
+      expected: ":main",
+    },
+    {
+      interactive: { ...base, runtime: { ...base.runtime, gitWorkspace: { kind: "detached", shortSha: "abc1234", root: "/workspace/harness-code" } } },
+      expected: ":detached@abc1234",
+    },
+  ]
+  for (const c of cases) {
+    let setup: Awaited<ReturnType<typeof testRender>>
+    await act(async () => {
+      setup = await testRender(
+        createElement(ThreadView, viewProps(c.interactive, 130, 40)),
+        { width: 130, height: 40 },
+      )
+    })
+    try {
+      await act(async () => { await setup.flush() })
+      const frame = setup.captureCharFrame()
+      expect(frame).toContain(c.expected)
+    } finally {
+      await act(async () => { await setup.renderer.destroy() })
     }
   }
 })

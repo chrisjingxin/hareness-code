@@ -12,7 +12,7 @@ import {
   workspaceLabel,
 } from "../../interactive/runtime"
 import { tuiTheme } from "./theme"
-import { activityLabel, modelSelectionLabel } from "../../presentation-shared"
+import { activityLabel, gitWorkspaceLabel, modelSelectionLabel } from "../../presentation-shared"
 import type { SharedViewProps } from "./types"
 
 /** thread composer 上方的实时模型和运行状态行。 */
@@ -173,15 +173,16 @@ function RuntimeMeta(props: { interactive: SharedViewProps["interactive"]; varia
 /** 渲染工作区、Git 分支、运行快捷键和 CLI 版本底栏。 */
 export function FooterRail(props: { interactive: SharedViewProps["interactive"]; terminalWidth: number; thread?: boolean }) {
   const runtime = props.interactive.runtime
+  const branchLabel = gitWorkspaceLabel(runtime.gitWorkspace)
   const showFullPath = props.terminalWidth >= 108
-  const showBranch = props.terminalWidth >= 84 && runtime.gitBranch
+  const showBranch = props.terminalWidth >= 84 && branchLabel !== undefined
   const workspace = showFullPath ? runtime.workspace : workspaceLabel(runtime.workspace)
 
   return (
     <box flexDirection="row" justifyContent="space-between" gap={1} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1} flexShrink={0}>
       <box flexDirection="row" gap={1} flexShrink={1}>
         <text fg={tuiTheme.muted}>{workspace}</text>
-        {showBranch ? <text fg={tuiTheme.subtle}>:{runtime.gitBranch}</text> : null}
+        {showBranch ? <text fg={tuiTheme.subtle}>:{branchLabel}</text> : null}
       </box>
       {props.interactive.activeRun ? <BusyRunHint /> : props.thread ? <text fg={tuiTheme.muted}>↑↓ 历史 · PgUp/PgDn 滚动 · Ctrl+O 工具</text> : null}
       <text fg={tuiTheme.subtle}>v{runtime.cliVersion}</text>

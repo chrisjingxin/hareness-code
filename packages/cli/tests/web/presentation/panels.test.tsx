@@ -138,7 +138,7 @@ describe("UtilityPanels", () => {
   test("activePanel=status 只读展示 runtime 与连接信息；内部不出现业务操作按钮", () => {
     const intents: WebIntent[] = []
     const interactive = makeInteractive({
-      runtime: makeRuntime({ workspace: "/workspace", modelName: "gpt-x", gitBranch: "main" }),
+      runtime: makeRuntime({ workspace: "/workspace", modelName: "gpt-x", gitWorkspace: { kind: "branch", branch: "main", root: "/workspace" } }),
       connection: { status: "open" },
     })
     const handle = mountPanel(makeSnapshot({ interactive, activePanel: "status" }), intents)

@@ -3,7 +3,7 @@
 
 import { Activity, Cpu, Ellipsis, Menu, ShieldCheck, X } from "lucide-react"
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react"
-import { activityLabel, modelSelectionLabel } from "../../presentation-shared"
+import { activityLabel, gitWorkspaceLabel, modelSelectionLabel } from "../../presentation-shared"
 import { selectNavigationView } from "../../interactive/selectors"
 import { approvalModeLabel, workspaceLabel } from "../../interactive/runtime"
 import type { InteractiveSnapshot } from "../../interactive/types"
@@ -156,7 +156,7 @@ export function WebApp(props: {
             ) : null}
             <div className="topbar-project-copy">
               <span className="project-name">{workspaceLabel(interactive.runtime.workspace)}</span>
-              {interactive.runtime.gitBranch ? <span className="project-meta">{interactive.runtime.gitBranch}</span> : null}
+              {gitWorkspaceLabel(interactive.runtime.gitWorkspace) ? <span className="project-meta">{gitWorkspaceLabel(interactive.runtime.gitWorkspace)}</span> : null}
             </div>
           </div>
           <div className="topbar-meta">

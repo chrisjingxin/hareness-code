@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /** za38 CLI 启动层：管理 Python sidecar 生命周期并选择 TUI 或无头执行模式。 */
-import { execFileSync, spawn } from "node:child_process"
+import { spawn } from "node:child_process"
 import { existsSync, statSync } from "node:fs"
 import { delimiter, resolve } from "node:path"
 import { Capability, EventType, PROTOCOL_VERSION, isClientMethod } from "@za38/protocol"
@@ -14,6 +14,7 @@ import { CLI_VERSION, createInteractiveRuntime, type InteractiveRuntime } from "
 import { createInteractiveController } from "./interactive/controller"
 import type { InteractiveController } from "./interactive/types"
 import { AgentClientGateway } from "./infrastructure/agent-client-gateway"
+import { detectGitWorkspace } from "./infrastructure/git-workspace"
 import { createSystemBrowserOpener } from "./web/browser"
 import { browserBundle } from "./web/bundle"
 import { webHtml } from "./web/html"
@@ -98,7 +99,7 @@ async function startAgent(command: Command): Promise<RunningAgent> {
   return {
     client,
     runtime: createInteractiveRuntime(initialized, command.cwd, {
-      gitBranch: readGitBranch(command.cwd),
+      gitWorkspace: await detectGitWorkspace(command.cwd),
       cliVersion: CLI_VERSION,
     }),
     stop: async () => {
@@ -140,20 +141,6 @@ export function resolveAgentRuntimeLocations(moduleDir: string): {
 export function validateInteractiveTerminal(stdinIsTty: boolean | undefined, stdoutIsTty: boolean | undefined): void {
   if (!stdinIsTty || !stdoutIsTty) {
     throw new Error("Interactive TUI requires a real terminal. Run the root command directly, or use -n for non-interactive mode.")
-  }
-}
-
-/** Git 信息仅用于底部状态栏；失败时不影响 Agent 启动或非 Git 工作区。 */
-export function readGitBranch(cwd: string): string | undefined {
-  try {
-    const branch = execFileSync("git", ["-C", cwd, "branch", "--show-current"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 500,
-    }).trim()
-    return branch || undefined
-  } catch {
-    return undefined
   }
 }
 
