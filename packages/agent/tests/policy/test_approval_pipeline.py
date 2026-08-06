@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from harness_agent.policy.approval_policy import evaluate_permission, _extract_resource
-from harness_agent.policy.permission_rules import PermissionRule
+from harness_agent.policy.approval_policy import evaluate_permission
+from harness_agent.policy.permission_rules import PermissionRule, extract_tool_resource
 
 
 class TestDenyRuleOverridesMode:
@@ -93,10 +93,36 @@ class TestExtractResource:
     """资源提取辅助函数验证。"""
 
     def test_extract_resource_execute(self) -> None:
-        assert _extract_resource("execute", {"command": "npm run build"}) == "npm run build"
-        assert _extract_resource("monitor", {"command": "top"}) == "top"
+        assert extract_tool_resource("execute", {"command": "npm run build"}) == "npm run build"
+        assert extract_tool_resource("monitor", {"command": "top"}) == "top"
 
     def test_extract_resource_file(self) -> None:
-        assert _extract_resource("write_file", {"file_path": "/src/main.py"}) == "/src/main.py"
-        assert _extract_resource("edit_file", {"file_path": "a.txt"}) == "a.txt"
-        assert _extract_resource("delete_file", {}) == "*"
+        assert extract_tool_resource("write_file", {"file_path": "/src/main.py"}) == "/src/main.py"
+        assert extract_tool_resource("edit_file", {"file_path": "a.txt"}) == "a.txt"
+        assert extract_tool_resource("delete_file", {}) == "*"
+
+    def test_extract_resource_normalizes_backslash(self) -> None:
+        assert extract_tool_resource("write_file", {"file_path": "src\\main.py"}) == "src/main.py"
+
+    def test_extract_resource_web_fetch(self) -> None:
+        assert (
+            extract_tool_resource("web_fetch", {"url": "https://api.github.com/repos"})
+            == "https://api.github.com/repos"
+        )
+
+
+class TestSafeCommandSegments:
+    """L3.1 安全命令白名单对链式命令逐段判定。"""
+
+    def test_all_safe_segments_auto_allowed(self) -> None:
+        result = evaluate_permission(
+            "execute", {"command": "git status && git diff"}, "default"
+        )
+        assert result == "allow"
+
+    def test_dangerous_segment_blocks_fast_path(self) -> None:
+        # 首段安全但次段危险时，不得借白名单整体放行
+        result = evaluate_permission(
+            "execute", {"command": "git status && rm -rf /"}, "default"
+        )
+        assert result == "ask"

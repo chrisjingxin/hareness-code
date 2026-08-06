@@ -4,7 +4,8 @@ AUTO 审批模式下，``evaluate_permission()`` 的模式权限矩阵把某次�
 ``"filter"`` 时，由本模块的四层过滤器管线决定其最终去向：
 
 - F1 acceptEdits 快速通道：EDIT 类工具不经分类器直接放行，仅受保护路径
-  （敏感文件/目录、``.github/workflows/`` 前缀）命中时转入后续层判断；
+  （敏感文件/目录、``.github/workflows/`` 前缀）命中或目标路径在工作区外
+  时转入后续层判断；
 - F2 安全工具白名单：READ/INTERACT/PLAN 等只读/交互类工具自动放行；
 - F3 破坏性命令守卫：对 Shell 命令使用 ``extract_segments`` 拆分后逐段检查
   ``DESTRUCTIVE_PATTERNS``；命中破坏性模式时默认硬拦截（deny），但如果用户
@@ -144,8 +145,8 @@ def evaluate_auto_mode(
     Args:
         tool_name: 工具名称。
         tool_args: 工具参数字典。
-        workspace_root: 工作区根目录；当前各层不直接依赖此参数（保留以兼容
-            现有调用方）。
+        workspace_root: 工作区根目录；F1 用它判断编辑目标是否越界
+            （越界编辑不享受快速放行）。
         consecutive_reject_count: 用户连续拒绝次数；>= 3 时 F4 层直接回退
             人工审批，避免过滤器在用户已多次拒绝后仍反复自动判定。
         user_messages: 最近几条用户消息文本列表，供 F3 意图豁免判断；为 None
@@ -158,7 +159,7 @@ def evaluate_auto_mode(
     kind = get_tool_kind(tool_name)
 
     decision = (
-        _filter_accept_edits(kind, tool_args)
+        _filter_accept_edits(tool_name, kind, tool_args, workspace_root)
         or _filter_safe_allowlist(kind)
         or _filter_destructive_command(tool_args, user_messages)
         or _filter_destructive_delete(kind, tool_args)
@@ -171,13 +172,19 @@ def evaluate_auto_mode(
 
 
 def _filter_accept_edits(
+    tool_name: str,
     kind: ToolKind,
     tool_args: dict[str, Any],
+    workspace_root: str | None,
 ) -> AutoModeDecision | None:
     """F1 acceptEdits 快速通道：EDIT 类工具不经分类器直接放行。
 
-    仅受保护路径（敏感文件/目录、``.github/workflows/`` 前缀）命中时放行
-    进入后续过滤层；其余 EDIT 调用（含工作区外编辑）一律直接 allow。
+    两类例外转入后续过滤层：
+
+    - 受保护路径（敏感文件/目录、``.github/workflows/`` 前缀）；
+    - 工作区外的写入目标（如 ``/etc/hosts``）：与 HITL 预检共用
+      ``resolve_outside_workspace_write`` 判定，越界编辑必须走人工审批。
+
     Delete 类工具不进入本层（``ToolKind.DELETE`` ≠ ``ToolKind.EDIT``），
     非 AUTO 模式由调用入口做模式过滤，本函数不做额外检查。
     """
@@ -187,6 +194,11 @@ def _filter_accept_edits(
     if not isinstance(file_path, str) or not file_path:
         return None
     if is_protected_edit_path(file_path):
+        return None
+    # 延迟导入避免模块间循环；相对路径在该判定中视为工作区内。
+    from harness_agent.policy.workspace_boundary import resolve_outside_workspace_write
+
+    if resolve_outside_workspace_write(tool_name, tool_args, workspace_root) is not None:
         return None
     return AutoModeDecision(
         via="F1",

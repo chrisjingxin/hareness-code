@@ -9,6 +9,7 @@ import pytest
 from harness_agent.policy.permission_rules import (
     PermissionRule,
     evaluate_rules,
+    evaluate_tool_rules,
     load_rules,
     matches_pattern,
     save_rule,
@@ -87,6 +88,101 @@ def test_evaluate_rules_deny_takes_precedence_when_last():
 
 
 # ---------------------------------------------------------------------------
+# evaluate_tool_rules —— 统一规则匹配入口
+# ---------------------------------------------------------------------------
+
+
+class TestEvaluateToolRules:
+    """统一规则入口 evaluate_tool_rules 的语义匹配行为。"""
+
+    def test_shell_rule_allows_matching_command(self):
+        """allow 规则命中完整命令段时返回 allow。"""
+        rules = [PermissionRule(tool="execute", resource="git clone *", effect="allow")]
+        assert (
+            evaluate_tool_rules("execute", {"command": "git clone https://x.git"}, rules)
+            == "allow"
+        )
+
+    def test_shell_rule_does_not_allow_chained_dangerous_segment(self):
+        """allow 规则不得放行链式命令中未命中的危险段。"""
+        rules = [PermissionRule(tool="execute", resource="git clone *", effect="allow")]
+        result = evaluate_tool_rules(
+            "execute", {"command": "git clone x && rm -rf /"}, rules
+        )
+        assert result != "allow"
+
+    def test_shell_no_rule_hit_returns_none(self):
+        """所有段都无规则命中时返回 None，交回默认审批管线。"""
+        rules = [PermissionRule(tool="execute", resource="npm *", effect="allow")]
+        assert evaluate_tool_rules("execute", {"command": "git status"}, rules) is None
+
+    def test_shell_deny_wins_over_allow(self):
+        """同段命中 deny 与 allow 时 deny 优先。"""
+        rules = [
+            PermissionRule(tool="execute", resource="git push *", effect="allow"),
+            PermissionRule(tool="execute", resource="git push --force *", effect="deny"),
+        ]
+        assert (
+            evaluate_tool_rules(
+                "execute", {"command": "git push --force origin main"}, rules
+            )
+            == "deny"
+        )
+
+    def test_monitor_rule_applies_to_execute(self):
+        """execute/monitor 都执行 Shell，两者规则互相适用。"""
+        rules = [PermissionRule(tool="monitor", resource="npm test", effect="allow")]
+        assert evaluate_tool_rules("execute", {"command": "npm test"}, rules) == "allow"
+
+    def test_file_rule_glob_match(self):
+        """文件工具按路径通配匹配，目录外不命中。"""
+        rules = [PermissionRule(tool="edit_file", resource="src/utils/**", effect="allow")]
+        assert (
+            evaluate_tool_rules("edit_file", {"file_path": "src/utils/format.ts"}, rules)
+            == "allow"
+        )
+        assert (
+            evaluate_tool_rules("edit_file", {"file_path": "src/other/format.ts"}, rules)
+            is None
+        )
+
+    def test_file_rule_normalizes_backslash(self):
+        """Windows 反斜杠路径归一化后仍可匹配 POSIX 风格规则。"""
+        rules = [PermissionRule(tool="write_file", resource="src/**", effect="allow")]
+        assert (
+            evaluate_tool_rules("write_file", {"file_path": "src\\main.py"}, rules)
+            == "allow"
+        )
+
+    def test_web_fetch_domain_match(self):
+        """web_fetch 支持 domain: 域名匹配（含子域），不同域名不命中。"""
+        rules = [
+            PermissionRule(tool="web_fetch", resource="domain:github.com", effect="allow")
+        ]
+        assert (
+            evaluate_tool_rules("web_fetch", {"url": "https://github.com/x"}, rules)
+            == "allow"
+        )
+        assert (
+            evaluate_tool_rules("web_fetch", {"url": "https://api.github.com/repos"}, rules)
+            == "allow"
+        )
+        assert (
+            evaluate_tool_rules("web_fetch", {"url": "https://evil.com/github.com"}, rules)
+            is None
+        )
+
+    def test_mcp_rule_matches_external_tool_only(self):
+        """mcp_tool 规则适用于内置风险表之外的外部工具，不误伤内置工具。"""
+        rules = [PermissionRule(tool="mcp_tool", resource="amap-maps_*", effect="allow")]
+        assert (
+            evaluate_tool_rules("amap-maps_maps_weather", {"city": "110000"}, rules)
+            == "allow"
+        )
+        assert evaluate_tool_rules("execute", {"command": "ls"}, rules) is None
+
+
+# ---------------------------------------------------------------------------
 # load_rules
 # ---------------------------------------------------------------------------
 
@@ -146,7 +242,7 @@ def test_load_rules_skips_invalid_entries(tmp_path: Path):
                     {"tool": "execute", "resource": "*", "effect": "allow"},
                     {"tool": 123, "resource": "*", "effect": "allow"},
                     {"tool": "read", "resource": "*", "effect": "invalid_effect"},
-                    "not_a_dict",
+                    "123bad",
                 ]
             }
         ),

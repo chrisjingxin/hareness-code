@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -10,12 +11,36 @@ from jsonschema.exceptions import ValidationError
 
 from harness_agent.policy.permission_rules import PermissionRule
 from harness_agent.protocol.generated import ApprovalResponse
+from harness_agent.protocol.runtime import validate_interaction_params
 from harness_agent.host.run_coordinator import (
+    ConnectionRef,
     InteractionRequest,
+    InteractionResult,
     RunCoordinator,
+    RunPreparation,
+    RunState,
+    StartRun,
+    _extract_interaction,
     _generate_permission_rule,
     _resume_value,
 )
+
+
+def _assert_approval_params_schema_compliant(spec: InteractionRequest) -> None:
+    """审批反向请求参数必须通过协议 schema 校验。
+
+    回归护栏：approvalRequest.payload 为 additionalProperties: false，
+    任何附加字段都会让客户端校验失败、整次审批静默降级为 reject（无弹窗）。
+    """
+    validate_interaction_params(
+        "interaction.approval",
+        {
+            "thread_id": "thread-x",
+            "run_id": "run-x",
+            "timeout_ms": 1000,
+            "payload": dict(spec.payload),
+        },
+    )
 
 
 def test_approval_response_accepts_approve_always() -> None:
@@ -44,52 +69,285 @@ def test_approval_response_rejects_invalid_decision() -> None:
         })
 
 
-def test_resume_value_approve_always_maps_to_approve() -> None:
-    """验证 _resume_value 中 approve_always 映射为 approve。"""
+def test_resume_value_question_maps_answers() -> None:
+    """提问类交互的回复按问题序号映射为 answers。"""
     spec = InteractionRequest(
-        request_id="req-4",
-        type="approval",
-        payload={"interrupt_id": "int-1", "description": "test"},
-        interrupt_id="int-1",
-        action_count=1,
+        request_id="req-q",
+        type="question",
+        payload={"interrupt_id": "int-q"},
+        interrupt_id="int-q",
+        questions=({"question": "选哪个", "choices": []},),
     )
-    result = _resume_value(spec, {"decision": "approve_always"})
-    assert result == {"int-1": {"decisions": [{"type": "approve"}]}}
+    result = _resume_value(spec, {"answers": {"question-1": ["选项A"]}})
+    assert result == {"int-q": {"status": "answered", "answers": ["选项A"]}}
 
 
-def test_resume_value_reject_with_feedback_puts_message_in_decision_args() -> None:
-    """reject_with_feedback 的反馈应写入每个 decision 的 args.message。"""
-    spec = InteractionRequest(
-        request_id="req-5",
+class _ScriptedInteractionPort:
+    """按脚本顺序返回审批结果的测试用交互端口。"""
+
+    def __init__(self, responses: list[dict[str, object]]) -> None:
+        """保存按请求顺序消费的响应脚本。"""
+        self._responses = list(responses)
+        self.requests: list[InteractionRequest] = []
+
+    async def request(
+        self, owner: object, ref: object, spec: InteractionRequest
+    ) -> InteractionResult:
+        """记录请求并返回下一个脚本响应，脚本耗尽时默认拒绝。"""
+        self.requests.append(spec)
+        value = self._responses.pop(0) if self._responses else {"decision": "reject"}
+        return InteractionResult(value=value)
+
+
+def _serial_spec(
+    actions: list[dict[str, object]],
+    safe_indices: list[int],
+    unsafe_indices: list[int],
+    interrupt_id: str = "int-serial",
+) -> InteractionRequest:
+    """构造与 _extract_interaction 输出同形的串行审批首批请求。
+
+    串行元数据经 serial_context 传递，wire payload 只含 schema 四字段。
+    """
+    return InteractionRequest(
+        request_id="req-serial",
         type="approval",
-        payload={"interrupt_id": "int-2", "description": "test"},
-        interrupt_id="int-2",
-        action_count=2,
-    )
-    result = _resume_value(
-        spec, {"decision": "reject_with_feedback", "feedback": "危险操作"}
-    )
-    assert result == {
-        "int-2": {
+        payload={
+            "interrupt_id": interrupt_id,
+            "description": "test",
+            "requests": {"action_requests": []},
             "decisions": [
-                {"type": "reject", "args": {"message": "危险操作"}},
-                {"type": "reject", "args": {"message": "危险操作"}},
-            ]
-        }
-    }
-
-
-def test_resume_value_reject_with_feedback_empty_feedback_is_plain_reject() -> None:
-    """反馈为空时退化为普通 reject，不携带 args。"""
-    spec = InteractionRequest(
-        request_id="req-6",
-        type="approval",
-        payload={"interrupt_id": "int-3", "description": "test"},
-        interrupt_id="int-3",
+                "approve_once",
+                "approve_thread",
+                "approve_always",
+                "reject",
+                "reject_with_feedback",
+            ],
+        },
+        interrupt_id=interrupt_id,
         action_count=1,
+        serial_context={
+            "all_action_requests": actions,
+            "safe_indices": safe_indices,
+            "unsafe_indices": unsafe_indices,
+        },
     )
-    result = _resume_value(spec, {"decision": "reject_with_feedback", "feedback": ""})
-    assert result == {"int-3": {"decisions": [{"type": "reject"}]}}
+
+
+def _serial_run() -> RunState:
+    """构造串行审批测试用的最小 RunState。"""
+    return RunState(
+        start=StartRun(thread_id="thread-serial", run_id="run-serial", message="执行"),
+        owner=ConnectionRef("owner"),
+        persistence=None,
+        preparation=RunPreparation(),
+    )
+
+
+class TestSerialApprovals:
+    """多工具逐个串行审批：单次 interrupt，本地收集决策后一次性 resume。"""
+
+    @staticmethod
+    def _collect(coordinator: RunCoordinator, run: RunState, spec: InteractionRequest):
+        return asyncio.run(coordinator._collect_serial_approvals(run, spec))
+
+    def test_all_approved_in_order(self) -> None:
+        """两个 unsafe 工具逐个弹窗，decisions 按原始顺序全部 approve。"""
+        port = _ScriptedInteractionPort(
+            [{"decision": "approve_once"}, {"decision": "approve_once"}]
+        )
+        coordinator = _coordinator_with_port(port)
+        actions = [
+            {"name": "execute", "args": {"command": "npm build"}},
+            {"name": "read_file", "args": {"file_path": "a.txt"}},
+            {"name": "execute", "args": {"command": "npm test"}},
+        ]
+        run = _serial_run()
+        result = self._collect(
+            coordinator, run, _serial_spec(actions, [1], [0, 2])
+        )
+        assert result == {
+            "int-serial": {
+                "decisions": [
+                    {"type": "approve"},
+                    {"type": "approve"},
+                    {"type": "approve"},
+                ]
+            }
+        }
+        # safe 工具不弹窗，只弹了两次；序号并入 description 展示
+        assert [r.payload["description"] for r in port.requests] == [
+            "（第 1/2 个待审批操作）A tool execution requires approval",
+            "（第 2/2 个待审批操作）A tool execution requires approval",
+        ]
+        # 每个弹窗的 wire payload 都必须通过协议 schema 校验
+        for spec in port.requests:
+            _assert_approval_params_schema_compliant(spec)
+        assert run.batch_rejected is False
+        assert run.pending_approvals == []
+
+    def test_user_reject_cancels_remaining_batch(self) -> None:
+        """UserReject 终止同批：剩余工具不再弹窗并收到取消原因。"""
+        port = _ScriptedInteractionPort(
+            [{"decision": "approve_once"}, {"decision": "reject"}]
+        )
+        coordinator = _coordinator_with_port(port)
+        actions = [
+            {"name": "execute", "args": {"command": "npm build"}},
+            {"name": "execute", "args": {"command": "npm test"}},
+            {"name": "execute", "args": {"command": "npm publish"}},
+        ]
+        run = _serial_run()
+        result = self._collect(coordinator, run, _serial_spec(actions, [], [0, 1, 2]))
+        decisions = result["int-serial"]["decisions"]
+        assert decisions[0] == {"type": "approve"}
+        assert decisions[1] == {"type": "reject"}
+        assert decisions[2] == {
+            "type": "reject",
+            "args": {"message": "cancelled due to earlier permission rejection"},
+        }
+        # 第三个工具没有弹窗
+        assert len(port.requests) == 2
+        assert run.batch_rejected is True
+
+    def test_reject_with_feedback_carries_message(self) -> None:
+        """reject_with_feedback 的反馈写入当前工具 decision 的 args.message。"""
+        port = _ScriptedInteractionPort(
+            [{"decision": "reject_with_feedback", "feedback": "危险操作"}]
+        )
+        coordinator = _coordinator_with_port(port)
+        actions = [{"name": "execute", "args": {"command": "rm -rf /"}}]
+        result = self._collect(
+            coordinator, _serial_run(), _serial_spec(actions, [], [0])
+        )
+        assert result["int-serial"]["decisions"] == [
+            {"type": "reject", "args": {"message": "危险操作"}}
+        ]
+
+    def test_approve_thread_auto_approves_matching_queued_tool(self) -> None:
+        """approve_thread 生成的规则立即自动放行同批匹配的后续工具。"""
+        port = _ScriptedInteractionPort([{"decision": "approve_thread"}])
+        coordinator = _coordinator_with_port(port)
+        actions = [
+            {"name": "execute", "args": {"command": "git status"}},
+            {"name": "execute", "args": {"command": "git status --short"}},
+        ]
+        run = _serial_run()
+        result = self._collect(coordinator, run, _serial_spec(actions, [], [0, 1]))
+        assert result["int-serial"]["decisions"] == [
+            {"type": "approve"},
+            {"type": "approve"},
+        ]
+        # 第二个工具命中会话规则，未弹窗
+        assert len(port.requests) == 1
+
+    def test_policy_deny_continues_with_next_tool(self) -> None:
+        """deny 规则命中的排队工具按 PolicyDeny 拒绝，但不终止同批后续工具。"""
+        port = _ScriptedInteractionPort([{"decision": "approve_once"}])
+        coordinator = _coordinator_with_port(port)
+        coordinator._session_rules.append(
+            PermissionRule(tool="execute", resource="rm *", effect="deny")
+        )
+        actions = [
+            {"name": "execute", "args": {"command": "rm -rf build"}},
+            {"name": "execute", "args": {"command": "npm test"}},
+        ]
+        run = _serial_run()
+        result = self._collect(coordinator, run, _serial_spec(actions, [], [0, 1]))
+        decisions = result["int-serial"]["decisions"]
+        assert decisions[0] == {
+            "type": "reject",
+            "args": {"message": "denied by policy rule"},
+        }
+        assert decisions[1] == {"type": "approve"}
+        # deny 不弹窗，只有第二个工具弹了窗
+        assert len(port.requests) == 1
+        assert run.batch_rejected is False
+
+    def test_sensitive_path_not_auto_approved_by_queued_rule(self, tmp_path: Path) -> None:
+        """敏感路径即使命中排队 allow 规则也必须弹窗确认。"""
+        port = _ScriptedInteractionPort(
+            [{"decision": "approve_thread"}, {"decision": "approve_once"}]
+        )
+        coordinator = _coordinator_with_port(port, project_dir=tmp_path)
+        actions = [
+            {"name": "edit_file", "args": {"file_path": "src/a.txt"}},
+            {"name": "edit_file", "args": {"file_path": "src/.git/config"}},
+        ]
+        result = self._collect(
+            coordinator, _serial_run(), _serial_spec(actions, [], [0, 1])
+        )
+        assert result["int-serial"]["decisions"] == [
+            {"type": "approve"},
+            {"type": "approve"},
+        ]
+        # 第二个工具命中 src/** 但属敏感路径，仍需弹窗
+        assert len(port.requests) == 2
+
+
+class _FakeInterrupt:
+    """模拟 LangGraph interrupt 对象，携带 value 与 id。"""
+
+    def __init__(self, value: object, interrupt_id: str = "int-schema") -> None:
+        self.value = value
+        self.id = interrupt_id
+
+
+def test_extract_interaction_approval_payload_passes_schema() -> None:
+    """interrupt 提取出的审批请求 payload 必须通过协议 schema 校验。
+
+    回归：历史实现把 all_action_requests/safe_indices 等串行元数据塞进
+    payload，客户端 additionalProperties: false 校验失败后整次审批静默
+    降级为 reject，用户看不到任何弹窗。
+    """
+    spec, auto_resume = _extract_interaction((
+        "updates",
+        {
+            "__interrupt__": [
+                _FakeInterrupt({
+                    "action_requests": [
+                        {
+                            "name": "execute",
+                            "args": {"command": "npm test"},
+                            "description": "run tests",
+                        },
+                        {"name": "read_file", "args": {"file_path": "a.txt"}},
+                    ]
+                })
+            ]
+        },
+    ))
+    assert auto_resume is None
+    assert spec is not None
+    _assert_approval_params_schema_compliant(spec)
+    # 串行元数据只走 serial_context，不进入 wire payload
+    assert "all_action_requests" not in spec.payload
+    assert "safe_indices" not in spec.payload
+    assert "unsafe_indices" not in spec.payload
+    assert spec.serial_context is not None
+    assert spec.serial_context["unsafe_indices"] == [0]
+    assert spec.serial_context["safe_indices"] == [1]
+
+
+def test_extract_interaction_all_safe_tools_auto_resume() -> None:
+    """全部并发安全工具直接自动放行，不产生审批交互。"""
+    spec, auto_resume = _extract_interaction((
+        "updates",
+        {
+            "__interrupt__": [
+                _FakeInterrupt({
+                    "action_requests": [
+                        {"name": "read_file", "args": {"file_path": "a.txt"}},
+                        {"name": "glob", "args": {"pattern": "*.py"}},
+                    ]
+                })
+            ]
+        },
+    ))
+    assert spec is None
+    assert auto_resume == {
+        "int-schema": {"decisions": [{"type": "approve"}, {"type": "approve"}]}
+    }
 
 
 def test_generate_permission_rule_execute_uses_command_prefix() -> None:
@@ -99,31 +357,16 @@ def test_generate_permission_rule_execute_uses_command_prefix() -> None:
 
 
 def test_generate_permission_rule_file_tools_use_project_wildcard() -> None:
-    """文件写/编辑/打补丁工具按目录递归生成规则；删除工具使用精确文件路径。"""
-    for tool_name in ("write_file", "edit_file", "apply_patch"):
+    """文件写/编辑/打补丁/删除工具按规范生成项目级通配规则。"""
+    for tool_name in ("write_file", "edit_file", "apply_patch", "delete_file"):
         rule = _generate_permission_rule(tool_name, {"file_path": "src/app/main.py"})
-        assert rule == PermissionRule(tool=tool_name, resource="src/app/**", effect="allow")
+        assert rule == PermissionRule(tool=tool_name, resource="*", effect="allow")
 
 
 def test_generate_permission_rule_web_fetch_uses_domain_extraction() -> None:
     """web_fetch 按 URL 域名生成规则。"""
     rule = _generate_permission_rule("web_fetch", {"url": "https://example.com"})
     assert rule == PermissionRule(tool="web_fetch", resource="domain:example.com", effect="allow")
-
-
-def _approval_spec(action_requests: list[dict]) -> InteractionRequest:
-    """构造携带 action_requests 工具上下文的审批交互请求。"""
-    return InteractionRequest(
-        request_id="req-7",
-        type="approval",
-        payload={
-            "interrupt_id": "int-4",
-            "description": "test",
-            "requests": {"action_requests": action_requests},
-        },
-        interrupt_id="int-4",
-        action_count=len(action_requests),
-    )
 
 
 def _coordinator(project_dir: Path | None = None) -> RunCoordinator:
@@ -147,11 +390,21 @@ def _coordinator(project_dir: Path | None = None) -> RunCoordinator:
     )
 
 
+def _coordinator_with_port(
+    port: object, project_dir: Path | None = None
+) -> RunCoordinator:
+    """构造携带脚本化交互端口的 RunCoordinator，用于串行审批测试。"""
+    coordinator = _coordinator(project_dir=project_dir)
+    coordinator._interaction_port = port  # type: ignore[assignment]
+    return coordinator
+
+
 def test_approve_thread_stores_session_rule_in_memory() -> None:
     """approve_thread 生成规则并保存到会话内存列表，不写文件。"""
     coordinator = _coordinator()
-    spec = _approval_spec([{"name": "execute", "args": {"command": "git status"}}])
-    coordinator._record_approval_rules(spec, {"decision": "approve_thread"})
+    coordinator._record_approval_rule(
+        "execute", {"command": "git status"}, "approve_thread"
+    )
     assert coordinator.session_rules == [
         PermissionRule(tool="execute", resource="git status *", effect="allow")
     ]
@@ -160,8 +413,9 @@ def test_approve_thread_stores_session_rule_in_memory() -> None:
 def test_approve_always_persists_rule_to_project_layer(tmp_path: Path) -> None:
     """approve_always 生成规则并通过 save_rule 持久化到 project 层。"""
     coordinator = _coordinator(project_dir=tmp_path)
-    spec = _approval_spec([{"name": "execute", "args": {"command": "git status"}}])
-    coordinator._record_approval_rules(spec, {"decision": "approve_always"})
+    coordinator._record_approval_rule(
+        "execute", {"command": "git status"}, "approve_always"
+    )
     assert coordinator.session_rules == []
     saved = json.loads(
         (tmp_path / ".harness" / "settings.json").read_text(encoding="utf-8")
@@ -172,10 +426,20 @@ def test_approve_always_persists_rule_to_project_layer(tmp_path: Path) -> None:
 def test_other_decisions_do_not_record_rules() -> None:
     """approve_once 与 reject 类决策不产生权限规则。"""
     coordinator = _coordinator()
-    spec = _approval_spec([{"name": "execute", "args": {"command": "git status"}}])
     for decision in ("approve_once", "reject", "reject_with_feedback"):
-        coordinator._record_approval_rules(spec, {"decision": decision, "feedback": "x"})
+        coordinator._record_approval_rule(
+            "execute", {"command": "git status"}, decision
+        )
     assert coordinator.session_rules == []
+
+
+def test_generate_permission_rule_top_level_file_uses_tool_wildcard() -> None:
+    """顶层文件与绝对根文件同样生成工具级通配，硬保护由预检兜底。"""
+    rule = _generate_permission_rule("edit_file", {"file_path": "main.py"})
+    assert rule == PermissionRule(tool="edit_file", resource="*", effect="allow")
+
+    rule = _generate_permission_rule("write_file", {"file_path": "/main.py"})
+    assert rule == PermissionRule(tool="write_file", resource="*", effect="allow")
 
 
 class TestDeleteFileThreadApprovalRegression:
@@ -210,26 +474,24 @@ class TestDeleteFileThreadApprovalRegression:
     def test_thread_approval_covers_later_deletes(self, tmp_path: Path) -> None:
         """本线程允许一次删除后，其他文件的删除也自动放行。"""
         coordinator = _coordinator()
-        spec = _approval_spec(
-            [{"name": "delete_file", "args": {"file_path": "/tmp/a.txt"}}]
+        coordinator._record_approval_rule(
+            "delete_file", {"file_path": "/tmp/a.txt"}, "approve_thread"
         )
-        coordinator._record_approval_rules(spec, {"decision": "approve_thread"})
 
         preflight = self._preflight(coordinator, tmp_path)
-        # 同路径命中规则不再弹窗；其他文件不匹配精确规则需重新审批
+        # 项目级通配规则：同路径、其他虚拟路径、工作区内绝对路径都不再弹窗
         assert preflight(self._delete_request("/tmp/a.txt")) is False
-        assert preflight(self._delete_request("/tmp/other.txt")) is True
-        assert preflight(self._delete_request(str(tmp_path / "src" / "b.txt"))) is True
+        assert preflight(self._delete_request("/tmp/other.txt")) is False
+        assert preflight(self._delete_request(str(tmp_path / "src" / "b.txt"))) is False
 
     def test_thread_approval_still_asks_for_sensitive_delete(
         self, tmp_path: Path
     ) -> None:
         """allow 规则命中敏感路径删除时仍强制弹窗确认。"""
         coordinator = _coordinator()
-        spec = _approval_spec(
-            [{"name": "delete_file", "args": {"file_path": "/tmp/a.txt"}}]
+        coordinator._record_approval_rule(
+            "delete_file", {"file_path": "/tmp/a.txt"}, "approve_thread"
         )
-        coordinator._record_approval_rules(spec, {"decision": "approve_thread"})
 
         preflight = self._preflight(coordinator, tmp_path)
         assert preflight(self._delete_request("/.git/index")) is True

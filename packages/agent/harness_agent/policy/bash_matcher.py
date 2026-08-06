@@ -85,16 +85,20 @@ def matches_command_glob(pattern: str, command: str) -> bool:
 
 
 def evaluate_bash_segment(
-    segment: str, rules: list[PermissionRule]
+    segment: str,
+    rules: list[PermissionRule],
+    tool_names: frozenset[str] = frozenset({"execute", "*"}),
 ) -> str | None:
     """对单个 Bash 段的权限规则评估。
 
-    只考虑 ``tool`` 为 ``"execute"`` 或 ``"*"`` 的规则，对每条规则
+    只考虑 ``tool`` 属于 ``tool_names`` 的规则（默认 ``execute`` 与通配；
+    ``monitor`` 等同样执行 Shell 的工具可传入自己的工具名），对每条规则
     调用合适的前缀匹配函数，按 deny > allow > ask 优先级返回决策。
 
     Args:
         segment: 单个 Bash 命令段字符串。
         rules: 权限规则列表。
+        tool_names: 参与评估的规则工具名集合。
 
     Returns:
         ``"allow"`` | ``"deny"`` | ``"ask"`` | ``None``：
@@ -108,8 +112,8 @@ def evaluate_bash_segment(
     matched_ask = False
 
     for rule in rules:
-        # 只考虑 execute 或通配工具规则
-        if rule.tool not in ("execute", "*"):
+        # 只考虑指定工具名或通配工具规则
+        if rule.tool not in tool_names:
             continue
 
         # 根据 resource 是否含 * 选择匹配策略
@@ -136,7 +140,9 @@ def evaluate_bash_segment(
 
 
 def evaluate_bash(
-    command: str, rules: list[PermissionRule]
+    command: str,
+    rules: list[PermissionRule],
+    tool_names: frozenset[str] = frozenset({"execute", "*"}),
 ) -> dict[str, Any]:
     """对整条 Bash 命令的完整权限评估。
 
@@ -151,6 +157,7 @@ def evaluate_bash(
     Args:
         command: 待评估的完整 Bash 命令字符串。
         rules: 权限规则列表。
+        tool_names: 参与评估的规则工具名集合，透传给逐段评估。
 
     Returns:
         字典 ``{"decision": str, "segments": list}``：
@@ -174,7 +181,7 @@ def evaluate_bash(
     for raw_segment in raw_segments:
         # 剥离包装器后评估
         processed = strip_wrappers(raw_segment, max_depth=3)
-        decision = evaluate_bash_segment(processed, rules)
+        decision = evaluate_bash_segment(processed, rules, tool_names)
         segment_results.append(
             _make_segment_result(raw_segment, processed, decision)
         )

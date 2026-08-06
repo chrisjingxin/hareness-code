@@ -16,7 +16,7 @@ dependencies = [
     "pydantic==2.12.5",
     "tomli-w>=1.1.0",
     "websockets==15.0.1",
-    "tree-sitter>=0.24.0,<0.25.0",
+    "tree-sitter>=0.24.0,<0.27.0",
     "tree-sitter-bash>=0.25.0,<0.26.0",
 ]
 

@@ -198,7 +198,7 @@ class TestApprovalPreflight:
     def test_default_unmatched_execute_asks(self, tmp_path: Path):
         """default 模式 + 无规则命中 execute：进入 HITL 集合默认弹窗。"""
         preflight = _make_preflight(tmp_path, "default")
-        request = _make_request("execute", {"command": "ls"})
+        request = _make_request("execute", {"command": "npm install"})
         assert preflight(request) is True
 
     def test_default_ask_rule_forces_dialog(self, tmp_path: Path):
@@ -264,11 +264,11 @@ class TestApprovalPreflight:
         request = _make_request("write_file", {"file_path": self._outside_file(tmp_path)})
         assert preflight(request) is True
 
-    def test_auto_outside_write_allowed_by_f1(self, tmp_path: Path):
-        """auto 模式 + 越界写入：F1 快速通道自动放行，不再弹窗。"""
+    def test_auto_outside_write_not_fast_tracked(self, tmp_path: Path):
+        """auto 模式 + 越界写入：F1 快速通道不产生假审批，必须弹窗确认。"""
         preflight = _make_preflight(tmp_path, "auto", original=lambda _request: False)
         request = _make_request("write_file", {"file_path": self._outside_file(tmp_path)})
-        assert preflight(request) is False
+        assert preflight(request) is True
 
     @pytest.mark.parametrize("tool_name", ["write_file", "edit_file"])
     def test_auto_edit_outside_write_still_asks(self, tmp_path: Path, tool_name: str):

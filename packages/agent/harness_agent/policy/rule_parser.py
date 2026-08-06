@@ -60,8 +60,9 @@ _TOOL_NAME_REVERSE: dict[str, str] = {
 }
 
 # 解析正则：ToolName 或 ToolName(content)
+# 工具名允许字母、数字、下划线和连字符（MCP 工具名可能包含连字符）；
 # 内容中允许出现转义括号 \\( 和 \\)
-_PARSE_PATTERN = re.compile(r"^([A-Za-z]\w*)(?:\((.+)\))?$")
+_PARSE_PATTERN = re.compile(r"^([A-Za-z][\w-]*)(?:\((.+)\))?$")
 
 
 def _unescape_parens(raw: str) -> str:
@@ -114,10 +115,9 @@ def parse_rule(
     dsl_tool = m.group(1)
     raw_resource = m.group(2)
 
-    if dsl_tool not in _TOOL_NAME_MAP:
-        raise ValueError(f"未知的 DSL 工具名: {dsl_tool!r}")
-
-    tool = _TOOL_NAME_MAP[dsl_tool]
+    # 已知 DSL 名映射为规范工具名；未知名称（如 MCP 工具名）原样保留，
+    # 保证 approve_always 生成的规则与运行时工具名可往返。
+    tool = _TOOL_NAME_MAP.get(dsl_tool, dsl_tool)
 
     if raw_resource is None:
         resource = "*"

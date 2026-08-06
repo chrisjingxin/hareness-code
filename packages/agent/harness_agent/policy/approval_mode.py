@@ -74,10 +74,31 @@ def on_mode_entered(mode: str, current_rules: list) -> list:
     return current_rules
 
 
-def next_mode(current: ApprovalMode) -> ApprovalMode:
-    """返回模式切换循环中的下一个模式。"""
+def next_mode(current: ApprovalMode, project_dir: str | None = None) -> ApprovalMode:
+    """返回模式切换循环中的下一个模式。
+
+    如果提供了 project_dir，会检查受信目录门禁：未受信目录不允许切换到
+    auto/yolo 模式，强制保持在 default 模式。
+
+    Args:
+        current: 当前审批模式。
+        project_dir: 项目目录路径，用于受信目录门禁检查。
+
+    Returns:
+        下一个审批模式。如果目录不受信且目标是 auto/yolo，返回 default。
+    """
     try:
         idx = MODE_CYCLE.index(current)
-        return MODE_CYCLE[(idx + 1) % len(MODE_CYCLE)]
+        target = MODE_CYCLE[(idx + 1) % len(MODE_CYCLE)]
     except ValueError:
         return DEFAULT_APPROVAL_MODE
+
+    # 受信目录门禁：未受信目录不允许切换到 auto/yolo
+    if project_dir and target in ("auto", "yolo"):
+        from harness_agent.policy.trust_gate import is_restricted_mode_for_untrusted
+        restricted, _reason = is_restricted_mode_for_untrusted(target, project_dir)
+        if restricted:
+            logger.warning("未受信目录，权限模式锁定为 default")
+            return DEFAULT_APPROVAL_MODE
+
+    return target

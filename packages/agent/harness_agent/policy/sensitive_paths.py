@@ -18,6 +18,9 @@ from __future__ import annotations
 import os
 from pathlib import Path, PurePosixPath
 
+# 敏感文件清单与规格对齐：Shell/Git 个人配置与构建入口（Makefile）。
+# package.json、.gitignore 等日常频繁编辑的项目文件不在此列，避免 default
+# 模式下正常编辑也被强制弹窗。
 SENSITIVE_FILES: frozenset[str] = frozenset({
     ".gitconfig",
     ".bashrc",
@@ -27,12 +30,7 @@ SENSITIVE_FILES: frozenset[str] = frozenset({
     ".profile",
     ".mcp.json",
     ".ripgreprc",
-    "package.json",
     "Makefile",
-    ".npmrc",
-    ".gitignore",
-    "settings.json",
-    "QWEN.md",
 })
 
 SENSITIVE_DIRECTORIES: frozenset[str] = frozenset({

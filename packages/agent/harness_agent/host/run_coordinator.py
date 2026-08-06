@@ -15,7 +15,15 @@ from typing import Any, Protocol
 
 from harness_agent.policy.approval_mode import ApprovalMode
 from harness_agent.policy.bash_parser import extract_command_rule as _extract_command_rule
-from harness_agent.policy.permission_rules import PermissionRule, save_rule
+from harness_agent.policy.permission_rules import (
+    PermissionRule,
+    evaluate_tool_rules,
+    load_rules,
+    merge_rules,
+    save_rule,
+)
+from harness_agent.policy.sensitive_paths import requires_safety_check
+from harness_agent.policy.workspace_boundary import resolve_outside_workspace_write
 from harness_agent.runtime.agent_execution import AgentExecutionRegistry, ExecutionRegistryError
 from harness_agent.runtime.agent_engine import AgentEnginePoolCapacityError
 from harness_agent.runtime.agent_engine_profile import AgentEngineProfile
@@ -227,6 +235,9 @@ class InteractionRequest:
     interrupt_id: str
     questions: tuple[Mapping[str, object], ...] = ()
     action_count: int = 1
+    # 服务端串行审批元数据（完整动作列表与安全/危险索引），仅存内存、
+    # 不进入 wire payload：协议 schema 对 payload 附加字段零容忍。
+    serial_context: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,6 +334,10 @@ class RunState:
     completion: RunCompletion | None = None
     terminal_event_emitted: bool = False
     events: asyncio.Queue[AgentEvent | None] = field(default_factory=asyncio.Queue)
+    # 多工具逐个串行审批队列：存储待审批的工具调用
+    pending_approvals: list[dict[str, object]] = field(default_factory=list)
+    # 标记是否因用户拒绝而终止同批后续工具
+    batch_rejected: bool = False
 
     def __post_init__(self) -> None:
         """默认使用受理请求中的原始消息。"""
@@ -920,6 +935,10 @@ class RunCoordinator:
                 # 全部是并发安全工具，直接放行
                 return auto_resume
             if interaction is not None:
+                if interaction.type == "approval":
+                    # 多工具串行审批：interrupt 只能整体 resume 一次，
+                    # 由本地循环逐个收集决策，最后一次提交完整 decisions。
+                    return await self._collect_serial_approvals(run, interaction)
                 run.status = "interacting"
                 result = await self._interaction_port.request(
                     run.owner,
@@ -932,7 +951,6 @@ class RunCoordinator:
                     INTERACTION_RESOLVED,
                     {"request_id": interaction.request_id, "type": interaction.type},
                 )
-                self._record_approval_rules(interaction, result.value)
                 return _resume_value(interaction, result.value)
             chunk = _message_stream_chunk(event)
             if chunk is not None:
@@ -956,41 +974,172 @@ class RunCoordinator:
             run.context_summary = payload
             self._emit(run, CONTEXT_UPDATED, payload)
 
-    def _record_approval_rules(self, spec: InteractionRequest, response: object) -> None:
-        """审批通过后按决策范围记录或持久化 allow 权限规则。
+    def _record_approval_rule(
+        self, tool_name: str, tool_args: Mapping[str, object], decision: str
+    ) -> None:
+        """单个工具调用审批通过后按决策范围记录或持久化 allow 权限规则。
 
         - approve_thread：规则只保存在会话内存列表，进程结束即失效；
         - approve_always：规则持久化到 project 层 settings.json。
-        工具上下文来自 interrupt payload 中保存的 action_requests。
         """
-        if spec.type != "approval" or not isinstance(response, Mapping):
+        if decision not in {"approve_thread", "approve_always"} or not tool_name:
             return
-        decision = response.get("decision")
-        if decision not in {"approve_thread", "approve_always"}:
-            return
-        requests = spec.payload.get("requests")
-        action_requests = (
-            requests.get("action_requests") if isinstance(requests, Mapping) else None
-        )
-        if not isinstance(action_requests, list):
-            return
-        for action in action_requests:
-            if not isinstance(action, Mapping):
+        rule = _generate_permission_rule(tool_name, tool_args)
+        if decision == "approve_thread":
+            if rule not in self._session_rules:
+                self._session_rules.append(rule)
+        else:
+            save_rule(
+                replace(rule, scope="project"),
+                scope="project",
+                project_dir=self._project_dir,
+            )
+
+    def _evaluate_queued_rule(self, tool_name: str, tool_args: dict[str, object]) -> str | None:
+        """合并会话与持久化规则评估排队中的工具调用。
+
+        approve_thread/approve_always 产生的新规则应立即作用于同批后续请求；
+        但敏感路径与工作区外写入即使命中 allow 规则也不自动放行（保持弹窗）。
+        """
+        if not tool_name:
+            return None
+        scoped = load_rules(project_dir=self._project_dir)
+        scoped["session"] = list(self._session_rules)
+        rules = merge_rules(scoped)
+        if not rules:
+            return None
+        effect = evaluate_tool_rules(tool_name, tool_args, rules)
+        if effect == "allow":
+            if requires_safety_check(tool_name, tool_args):
+                return None
+            if (
+                resolve_outside_workspace_write(tool_name, tool_args, self._project_dir)
+                is not None
+            ):
+                return None
+        return effect
+
+    async def _collect_serial_approvals(
+        self, run: RunState, first_spec: InteractionRequest
+    ) -> dict[str, object]:
+        """逐个串行收集一批工具调用的审批决策，最后按原始顺序一次性 resume。
+
+        LangGraph 的 interrupt 恢复时节点会从头重放，因此不能 per-tool
+        interrupt；本方法在本地串行循环中逐个弹窗收集决策：
+
+        - 并发安全工具直接 approve；
+        - 排队工具先查合并规则：deny（PolicyDeny）按拒绝处理但继续后续工具，
+          allow 自动批准（敏感路径与越界写入除外）；
+        - 用户拒绝（UserReject）终止同批后续工具，剩余工具收到带取消原因
+          的 reject；已批准/已执行的调用不回滚。
+        """
+        payload = first_spec.payload
+        interrupt_id = str(first_spec.interrupt_id or payload.get("interrupt_id") or "")
+        # 串行元数据走服务端 serial_context，wire payload 只保留 schema 字段
+        context = first_spec.serial_context or {}
+        all_requests = context.get("all_action_requests")
+        if not isinstance(all_requests, list):
+            all_requests = []
+        safe_indices = [
+            i for i in context.get("safe_indices", []) if isinstance(i, int)
+        ]
+        unsafe_indices = [
+            i for i in context.get("unsafe_indices", []) if isinstance(i, int)
+        ]
+        total = len(all_requests)
+
+        decisions: list[dict[str, object]] = [{"type": "reject"} for _ in range(total)]
+        for i in safe_indices:
+            if 0 <= i < total:
+                decisions[i] = {"type": "approve"}
+
+        run.batch_rejected = False
+        run.pending_approvals = [
+            all_requests[i] for i in unsafe_indices if 0 <= i < total
+        ]
+        total_unsafe = len(unsafe_indices)
+        cancel_message = "cancelled due to earlier permission rejection"
+
+        for position, index in enumerate(unsafe_indices):
+            if not 0 <= index < total:
                 continue
-            tool_name = str(action.get("name") or "")
-            tool_args = action.get("args")
-            if not tool_name or not isinstance(tool_args, Mapping):
+            action = all_requests[index]
+            action_map = action if isinstance(action, Mapping) else {}
+            tool_name = str(action_map.get("name") or "")
+            raw_args = action_map.get("args")
+            tool_args: dict[str, object] = dict(raw_args) if isinstance(raw_args, Mapping) else {}
+
+            # UserReject 已终止同批：剩余工具直接收到取消 reject，不再弹窗
+            if run.batch_rejected:
+                decisions[index] = {"type": "reject", "args": {"message": cancel_message}}
                 continue
-            rule = _generate_permission_rule(tool_name, tool_args)
-            if decision == "approve_thread":
-                if rule not in self._session_rules:
-                    self._session_rules.append(rule)
+
+            # 规则已明确裁决的排队工具不弹窗：
+            # deny（PolicyDeny）继续处理后续工具；allow 自动批准
+            effect = self._evaluate_queued_rule(tool_name, tool_args)
+            if effect == "deny":
+                decisions[index] = {
+                    "type": "reject",
+                    "args": {"message": "denied by policy rule"},
+                }
+                continue
+            if effect == "allow":
+                decisions[index] = {"type": "approve"}
+                continue
+
+            base_description = str(
+                action_map.get("description") or "A tool execution requires approval"
+            )
+            # 序号并入 description 展示；payload 严格保持 schema 四字段
+            description = (
+                f"（第 {position + 1}/{total_unsafe} 个待审批操作）{base_description}"
+                if total_unsafe > 1
+                else base_description
+            )
+            spec = InteractionRequest(
+                request_id=first_spec.request_id if position == 0 else f"{interrupt_id}-{position}",
+                type="approval",
+                payload={
+                    "interrupt_id": interrupt_id,
+                    "description": description,
+                    "requests": _bounded_json({"action_requests": [dict(action_map)]}),
+                    "decisions": [
+                        "approve_once",
+                        "approve_thread",
+                        "approve_always",
+                        "reject",
+                        "reject_with_feedback",
+                    ],
+                },
+                interrupt_id=interrupt_id,
+                action_count=1,
+            )
+            run.status = "interacting"
+            result = await self._interaction_port.request(run.owner, run.ref, spec)
+            run.status = "running"
+            self._emit(
+                run,
+                INTERACTION_RESOLVED,
+                {"request_id": spec.request_id, "type": spec.type},
+            )
+            response = result.value if isinstance(result.value, Mapping) else {}
+            decision = str(response.get("decision") or "")
+            feedback = str(response.get("feedback") or "")
+            self._record_approval_rule(tool_name, tool_args, decision)
+
+            if decision in {"approve_once", "approve_thread", "approve_always"}:
+                decisions[index] = {"type": "approve"}
+            elif decision == "reject_with_feedback" and feedback:
+                decisions[index] = {"type": "reject", "args": {"message": feedback}}
+                run.batch_rejected = True
             else:
-                save_rule(
-                    replace(rule, scope="project"),
-                    scope="project",
-                    project_dir=self._project_dir,
-                )
+                decisions[index] = {"type": "reject"}
+                run.batch_rejected = True
+
+            run.pending_approvals = run.pending_approvals[1:]
+
+        run.pending_approvals = []
+        return {interrupt_id: {"decisions": decisions}}
 
 
 _CONCURRENCY_SAFE_TOOLS = frozenset({
@@ -1073,15 +1222,14 @@ def _extract_interaction(
 
     # --- 审批分支：分离并发安全与非并发安全工具 ---
     description = "A tool execution requires approval"
-    unsafe_count = 1
     safe_indices: list[int] = []
     unsafe_indices: list[int] = []
+    action_requests_list: list[dict[str, object]] = []
     if isinstance(value, Mapping):
         action_requests = value.get("action_requests", [])
         if isinstance(action_requests, list) and action_requests:
-            for i, request in enumerate(action_requests):
-                if not isinstance(request, Mapping):
-                    continue
+            action_requests_list = [r for r in action_requests if isinstance(r, Mapping)]
+            for i, request in enumerate(action_requests_list):
                 tool_name = str(request.get("name", ""))
                 if _is_concurrency_safe(tool_name):
                     safe_indices.append(i)
@@ -1090,20 +1238,28 @@ def _extract_interaction(
 
             # 全部是并发安全工具 → 直接放行，不产生审批交互
             if not unsafe_indices:
-                total = len(action_requests)
+                total = len(action_requests_list)
                 decisions: list[dict[str, object]] = [{"type": "approve"}] * total
                 auto_resume = {interrupt_id: {"decisions": decisions}}
                 return None, auto_resume
 
             # 只取第一个非并发安全工具的描述
             first_unsafe_index = unsafe_indices[0]
-            first_request = action_requests[first_unsafe_index]
+            first_request = action_requests_list[first_unsafe_index]
             description = str(first_request.get("description", description))
-            unsafe_count = len(unsafe_indices)
-        elif isinstance(action_requests, list):
-            unsafe_count = 0
 
-    sequence_info = f"第 1/{unsafe_count} 个"
+    # 构造首个 unsafe 工具的审批请求；串行元数据（完整动作列表与索引）
+    # 放入 serial_context 由 _collect_serial_approvals 消费，wire payload
+    # 只保留协议 schema 允许的四个字段，附加字段会触发客户端 schema 校验
+    # 失败并导致整次审批静默降级为 reject。
+    current_unsafe_index = unsafe_indices[0] if unsafe_indices else 0
+    current_action_requests = []
+    if action_requests_list:
+        # 预览包含所有 safe 工具与当前要审批的 unsafe 工具
+        for i in safe_indices:
+            current_action_requests.append(action_requests_list[i])
+        current_action_requests.append(action_requests_list[current_unsafe_index])
+
     return (
         InteractionRequest(
             request_id=interrupt_id,
@@ -1111,7 +1267,7 @@ def _extract_interaction(
             payload={
                 "interrupt_id": interrupt_id,
                 "description": description,
-                "requests": _bounded_json(value),
+                "requests": _bounded_json({"action_requests": current_action_requests}),
                 "decisions": [
                     "approve_once",
                     "approve_thread",
@@ -1119,52 +1275,27 @@ def _extract_interaction(
                     "reject",
                     "reject_with_feedback",
                 ],
-                "pending_count": unsafe_count,
-                "sequence_info": sequence_info,
+            },
+            interrupt_id=interrupt_id,
+            action_count=1,  # 每次只审批一个工具
+            serial_context={
+                "all_action_requests": action_requests_list,
                 "safe_indices": safe_indices,
                 "unsafe_indices": unsafe_indices,
             },
-            interrupt_id=interrupt_id,
-            action_count=unsafe_count,
         ),
         None,
     )
 
 
 def _resume_value(spec: InteractionRequest, response: object) -> dict[str, object]:
-    """将语言无关交互结果映射回 LangGraph interrupt resume 契约。
+    """将语言无关的提问结果映射回 LangGraph interrupt resume 契约。
 
-    并发安全工具始终 generate approve；非并发安全工具按用户决策统一处理。
+    审批类交互的 resume 值由 ``_collect_serial_approvals`` 串行收集后直接
+    构造；本函数仅处理 ask_user 提问。
     """
     if not isinstance(response, dict):
         response = {}
-    if spec.type == "approval":
-        decision = response.get("decision")
-        feedback = response.get("feedback", "")
-        if decision in {"approve_once", "approve_thread", "approve_always"}:
-            langgraph_decision: dict[str, object] = {"type": "approve"}
-        elif decision == "reject_with_feedback" and feedback:
-            langgraph_decision = {"type": "reject", "args": {"message": feedback}}
-        else:
-            langgraph_decision = {"type": "reject"}
-
-        safe_indices = spec.payload.get("safe_indices", [])
-        unsafe_indices = spec.payload.get("unsafe_indices", [])
-        if safe_indices or unsafe_indices:
-            total = len(safe_indices) + len(unsafe_indices)
-            decisions: list[dict[str, object]] = [langgraph_decision] * total
-            for i in safe_indices:
-                decisions[i] = {"type": "approve"}
-            for i in unsafe_indices:
-                decisions[i] = langgraph_decision
-        else:
-            # 无索引信息时按 action_count 广播，保持向后兼容
-            decisions = [langgraph_decision] * spec.action_count
-        return {
-            spec.interrupt_id: {
-                "decisions": decisions,
-            }
-        }
     answers_by_id = response.get("answers", {})
     answers: list[str] = []
     if isinstance(answers_by_id, Mapping):
@@ -1181,7 +1312,8 @@ def _generate_permission_rule(
     """从被批准的工具调用上下文生成 allow 权限规则。
 
     Shell 调用基于 tree-sitter AST 提取最小范围规则（如 git clone *）；
-    文件工具按目录递归生成规则；WebFetch 按域名生成；其他工具保持通配。
+    文件写/删工具按规范生成项目级通配；WebFetch 按域名生成；其他工具
+    保持通配。
     """
     command = str(tool_args.get("command") or "").strip()
     file_path = str(tool_args.get("file_path") or "").strip()
@@ -1190,14 +1322,14 @@ def _generate_permission_rule(
     if tool_name in {"execute", "monitor"} and command:
         # Shell 命令：使用 AST 提取最小范围规则
         resource = _extract_command_rule(command)
-    elif tool_name in {"write_file", "edit_file", "apply_patch"} and file_path:
-        # 文件工具：生成目录递归规则
-        from pathlib import Path
-        parent = Path(file_path).parent
-        if parent != Path("."):
-            resource = f"{parent.as_posix()}/**"
-        else:
-            resource = "**"
+    elif (
+        tool_name in {"write_file", "edit_file", "apply_patch", "delete_file"}
+        and file_path
+    ):
+        # 规范：文件写/删工具生成项目级通配规则，用户明确批准后不再反复
+        # 弹窗；L3.5 敏感路径与工作区边界预检仍强制裁决，通配不放宽
+        # 硬性保护。
+        resource = "*"
     elif tool_name == "web_fetch" and url:
         # WebFetch：生成域名规则
         from urllib.parse import urlparse
@@ -1207,9 +1339,6 @@ def _generate_permission_rule(
             resource = f"domain:{hostname}"
         except Exception:
             resource = "*"
-    elif tool_name == "delete_file" and file_path:
-        # 删除操作：保守处理，使用具体文件路径（不泛化到目录）
-        resource = file_path
     else:
         resource = "*"
     return PermissionRule(tool=tool_name, resource=resource, effect="allow")
