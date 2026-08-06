@@ -4,7 +4,7 @@ import { expect, test } from "bun:test"
 import { activityLabel, interactionStatusLabel, toolStatusLabel } from "../../src/presentation-shared/timeline-presenter"
 
 test("activityLabel：领域 Kind 全部映射为稳定中文标签", () => {
-  const kinds = ["home", "idle", "starting", "running", "waiting-interaction", "cancelling", "completed", "cancelled", "failed", "restoring"] as const
+  const kinds = ["home", "idle", "starting", "running", "waiting-interaction", "cancelling", "completed", "cancelled", "failed"] as const
   for (const kind of kinds) {
     expect(activityLabel(kind)).toBeTypeOf("string")
   }

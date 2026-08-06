@@ -24,8 +24,6 @@ export function activityLabel(kind: InteractiveActivity["kind"]): string {
       return "已取消"
     case "failed":
       return "运行失败"
-    case "restoring":
-      return "正在恢复"
     default:
       return "就绪"
   }

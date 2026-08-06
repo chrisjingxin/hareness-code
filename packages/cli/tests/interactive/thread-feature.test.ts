@@ -14,6 +14,8 @@ test("Thread 切换：/resume 打开选择器并原子恢复，运行中禁止�
     let snapshot = harness.controller.getSnapshot()
     expect(snapshot.currentThreadId).toBe("thread-2")
     expect(snapshot.timeline).toHaveLength(2)
+    // 恢复完成后 activity 必须回到 idle（"就绪"）；不得永久停在 restoring。
+    expect(snapshot.activity.kind).toBe("idle")
 
     await harness.controller.dispatch({ type: "input.submit", value: "运行中" })
     const outcome = await harness.controller.dispatch({ type: "thread.open", threadId: "thread-1" })

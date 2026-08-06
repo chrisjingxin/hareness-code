@@ -73,7 +73,6 @@ export type InteractiveActivity =
   | { kind: "completed" }
   | { kind: "cancelled" }
   | { kind: "failed" }
-  | { kind: "restoring" }
 
 let defaultCounter = 0
 const defaultIdGenerator: IdGenerator = {
@@ -169,7 +168,8 @@ export function restoreThread(threadId: string, messages: readonly RestoredThrea
     currentThreadId: threadId,
     activeRun: null,
     timeline,
-    activity: { kind: "restoring" },
+    // 恢复已完成（timeline 已构建）：活动状态必须是 idle，不得停在 restoring。
+    activity: { kind: "idle" },
     sequences: {},
   }
 }
