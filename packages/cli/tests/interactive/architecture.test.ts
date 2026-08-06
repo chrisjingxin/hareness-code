@@ -1,20 +1,15 @@
 /** Interactive Core 架构与依赖隔离性静态断言测试。 */
 
 import { expect, test } from "bun:test"
-import { readdir, readFile } from "node:fs/promises"
+import { readFile } from "node:fs/promises"
 import { resolve } from "node:path"
+
+import { sourceFiles } from "../acceptance/arch-imports"
 
 const interactiveSrcDir = resolve(import.meta.dir, "../../src/interactive")
 
-async function getSourceFiles(directory: string): Promise<string[]> {
-  const entries = await readdir(directory, { recursive: true, withFileTypes: true })
-  return entries
-    .filter(entry => entry.isFile() && entry.name.endsWith(".ts"))
-    .map(entry => resolve(entry.parentPath, entry.name))
-}
-
 test("interactive/ 生产代码零 ../ipc/、零 JsonRpcRemoteError 依赖", async () => {
-  const files = await getSourceFiles(interactiveSrcDir)
+  const files = sourceFiles(interactiveSrcDir)
   expect(files.length).toBeGreaterThan(0)
 
   for (const filePath of files) {
@@ -25,7 +20,7 @@ test("interactive/ 生产代码零 ../ipc/、零 JsonRpcRemoteError 依赖", asy
 })
 
 test("interactive/ 生产代码零 crypto.randomUUID() 与 Date.now() 直调（全量经 Port 注入）", async () => {
-  const files = await getSourceFiles(interactiveSrcDir)
+  const files = sourceFiles(interactiveSrcDir)
 
   for (const filePath of files) {
     const content = await readFile(filePath, "utf8")
@@ -35,7 +30,7 @@ test("interactive/ 生产代码零 crypto.randomUUID() 与 Date.now() 直调（�
 })
 
 test("interactive/ 生产代码零 UI/平台库（react, @opentui, tui, web, WebSocket, node:*）", async () => {
-  const files = await getSourceFiles(interactiveSrcDir)
+  const files = sourceFiles(interactiveSrcDir)
 
   for (const filePath of files) {
     const content = await readFile(filePath, "utf8")

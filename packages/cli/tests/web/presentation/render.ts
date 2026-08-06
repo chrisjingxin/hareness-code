@@ -5,14 +5,23 @@ import { act, createElement } from "react"
 import type { ReactElement } from "react"
 import { createRoot, type Root } from "react-dom/client"
 
-try {
+/**
+ * 按测试文件显式注册 happy-dom 全局环境（document/window/WebSocket 等），返回解绑函数。
+ * 必须在文件顶层调用并把返回值交给 afterAll：只在渲染期间替换全局，避免污染同进程内
+ * 依赖真实 WebSocket / DOM 的其它测试（如 loopback 集成测试）。
+ */
+export function registerTestDom(): () => void {
   GlobalRegistrator.register()
-} catch {
-  // happy-dom 已由其它测试文件注册；全局只允许注册一次。
+  // React 19 的 act 需要显式声明测试环境，否则异步更新不会被等待。
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true as boolean
+  return () => {
+    try {
+      GlobalRegistrator.unregister()
+    } catch {
+      // 解绑失败不阻断后续测试。
+    }
+  }
 }
-
-// React 19 的 act 需要显式声明测试环境，否则异步更新不会被等待。
-globalThis.IS_REACT_ACT_ENVIRONMENT = true as boolean
 
 export type RenderHandle = {
   container: HTMLDivElement

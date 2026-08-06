@@ -20,7 +20,6 @@ async function main(): Promise<void> {
   const appResult = await Bun.build({
     entrypoints: [resolve(sourceRoot, "web/app.tsx")],
     outdir: distRoot,
-    entryNaming: "web.[ext]",
     target: "browser",
     minify: true,
   })
@@ -35,6 +34,22 @@ async function main(): Promise<void> {
   const workerOutput = workerResult.outputs.find(output => output.type.startsWith("text/javascript"))
   if (!workerOutput) throw new Error("Web syntax Worker 未生成 JavaScript 输出")
   await Bun.write(resolve(distRoot, "web-syntax-worker.js"), workerOutput)
+
+  // Bun 1.3.x 会忽略 entryNaming，入口输出固定命名为 app.js/app.css；这里从
+  // 构建结果读取实际输出并显式写入 manifest 的固定文件名，防止服务端加载到
+  // 上次构建残留的陈旧 web.js/web.css。
+  const scriptOutput = appResult.outputs.find(output => output.type.startsWith("text/javascript"))
+  const styleOutput = appResult.outputs.find(output => output.type.startsWith("text/css"))
+  if (!scriptOutput || !styleOutput) {
+    throw new Error(`Web app 构建缺少脚本或样式输出：${appResult.outputs.map(output => output.path).join(", ")}`)
+  }
+  await Promise.all([
+    Bun.write(resolve(distRoot, "web.js"), scriptOutput),
+    Bun.write(resolve(distRoot, "web.css"), styleOutput),
+  ])
+  // 清理 Bun 按默认命名写出的 app.js/app.css 副产物，避免与 manifest 文件混淆。
+  await rm(resolve(distRoot, "app.js"), { force: true })
+  await rm(resolve(distRoot, "app.css"), { force: true })
 
   const manifest: WebAssetsManifest = {
     version: 1,

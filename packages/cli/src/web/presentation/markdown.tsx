@@ -11,7 +11,7 @@ import { CodeBlock } from "./code-block"
  *
  * marked 只用于把字符串切分为 token 树；不允许的 token（raw HTML、image、非法 scheme）
  * 全部降级为纯文本或 alt 文本。模型输出不会因为 Markdown 解析而触发脚本、事件属性、
- * SVG 或远端图片请求，也不会有 `dangerouslySetInnerHTML` 把字符串交给 DOM。
+ * SVG 或远端图片请求，也不会把字符串直接交给 DOM 渲染为 HTML。
  */
 export function Markdown({ text }: { text: string }): ReactElement {
   let tokens: Token[]

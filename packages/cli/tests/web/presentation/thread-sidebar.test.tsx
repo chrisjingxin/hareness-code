@@ -1,13 +1,17 @@
 /** ThreadSidebar：桌面侧栏 / 移动抽屉 / busy 禁用 / thread-select dispatch。 */
 /** @jsxImportSource react */
 
-import { describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, test } from "bun:test"
 import { act } from "react"
 
 import { ThreadSidebar } from "../../../src/web/presentation/thread-sidebar"
 import type { WebAdapterSnapshot, WebIntent } from "../../../src/web/application/adapter"
 import { makeCatalog, makeInteractive, makeSnapshot, makeThread } from "./fixtures"
-import { render, type RenderHandle } from "./render"
+import { registerTestDom, render, type RenderHandle } from "./render"
+
+const unregisterTestDom = registerTestDom()
+afterAll(() => unregisterTestDom())
+
 
 function mountSidebar(
   snapshot: WebAdapterSnapshot,

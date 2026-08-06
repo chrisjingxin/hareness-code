@@ -1,7 +1,7 @@
 /** InteractionForm：动态 approval 决策、question 单/多选/other、完整答案集合提交。 */
 /** @jsxImportSource react */
 
-import { describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, test } from "bun:test"
 import { act, useState } from "react"
 import { createElement, type ReactElement } from "react"
 
@@ -9,7 +9,11 @@ import { InteractionForm } from "../../../src/web/presentation/interaction-form"
 import type { ApprovalDecision, InteractiveQuestion } from "../../../src/interactive/types"
 import type { WebAdapterSnapshot, WebIntent } from "../../../src/web/application/adapter"
 import { makeInteractive, makeSnapshot } from "./fixtures"
-import { render, setControlledValue, type RenderHandle } from "./render"
+import { registerTestDom, render, setControlledValue, type RenderHandle } from "./render"
+
+const unregisterTestDom = registerTestDom()
+afterAll(() => unregisterTestDom())
+
 
 function HarnessDraft(props: {
   initial: WebAdapterSnapshot

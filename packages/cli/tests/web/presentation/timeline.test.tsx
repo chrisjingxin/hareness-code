@@ -1,7 +1,7 @@
 /** Timeline：用户/Assistant/Tool/Interaction 时间线 + Tool 折叠 dispatch + ARIA 属性。 */
 /** @jsxImportSource react */
 
-import { describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, test } from "bun:test"
 import { act, useState } from "react"
 import { createElement, type ReactElement } from "react"
 
@@ -14,7 +14,11 @@ import type {
   ToolCard,
 } from "../../../src/interactive/state"
 import { makeInteractive, makeSnapshot } from "./fixtures"
-import { render, type RenderHandle } from "./render"
+import { registerTestDom, render, type RenderHandle } from "./render"
+
+const unregisterTestDom = registerTestDom()
+afterAll(() => unregisterTestDom())
+
 
 function message(item: Partial<ConversationMessage> & { id: string; role: ConversationMessage["role"]; content: string }): TimelineItem {
   return { type: "message", message: item }

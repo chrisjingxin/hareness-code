@@ -1,13 +1,17 @@
 /** WebApp：active=false 时显示接管只读提示；active=true 时 composer 可用。 */
 /** @jsxImportSource react */
 
-import { describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, test } from "bun:test"
 import { act } from "react"
 
 import { WebApp } from "../../../src/web/presentation/web-app"
 import type { WebAdapterSnapshot, WebIntent, WebInteractiveAdapter } from "../../../src/web/application/adapter"
 import { makeInteractive, makeSnapshot } from "./fixtures"
-import { render, type RenderHandle } from "./render"
+import { registerTestDom, render, type RenderHandle } from "./render"
+
+const unregisterTestDom = registerTestDom()
+afterAll(() => unregisterTestDom())
+
 
 type AdapterHarness = WebInteractiveAdapter & {
   emit(next: WebAdapterSnapshot): void

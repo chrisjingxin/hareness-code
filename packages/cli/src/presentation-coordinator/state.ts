@@ -2,7 +2,7 @@
  * Presentation 所有权状态：TUI 与内置 Web UI 之间表现层输入权的显式状态机。
  *
  * 状态只表达"表现层输入权"（谁可以提交可变 intent）；Agent Host 控制权始终属于
- * CLI owner，本状态机不迁移 Host control lease（与 ZC-101 ControlLease 解耦）。
+ * CLI owner，本状态机不迁移 Host 侧控制租约（ZC-101 的 Host 多 Connection 能力保留，本模块不触碰）。
  */
 
 /** 当前拥有表现层输入权的表现层。 */

@@ -1,13 +1,17 @@
 /** DialogHost：confirmation 模态焦点、确认/取消 dispatch、Escape 行为。 */
 /** @jsxImportSource react */
 
-import { describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, test } from "bun:test"
 import { act } from "react"
 
 import { DialogHost } from "../../../src/web/presentation/dialog"
 import type { WebAdapterSnapshot, WebIntent } from "../../../src/web/application/adapter"
 import { makeConfirmation, makeInteractive, makeSnapshot } from "./fixtures"
-import { render, type RenderHandle } from "./render"
+import { registerTestDom, render, type RenderHandle } from "./render"
+
+const unregisterTestDom = registerTestDom()
+afterAll(() => unregisterTestDom())
+
 
 function mountDialog(snapshot: WebAdapterSnapshot, intents: WebIntent[]): RenderHandle {
   return render(

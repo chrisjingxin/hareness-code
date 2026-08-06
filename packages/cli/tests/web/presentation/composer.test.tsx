@@ -1,7 +1,7 @@
 /** Composer：受控 draft、发送/取消、Skill chip、命令菜单与键盘交互。 */
 /** @jsxImportSource react */
 
-import { describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, test } from "bun:test"
 import { act } from "react"
 import { createElement, type ReactElement } from "react"
 
@@ -12,7 +12,11 @@ import type {
 } from "../../../src/interactive/commands"
 import type { WebAdapterSnapshot, WebIntent } from "../../../src/web/application/adapter"
 import { makeInteractive, makeSnapshot, makeSkill } from "./fixtures"
-import { render, type RenderHandle } from "./render"
+import { registerTestDom, render, type RenderHandle } from "./render"
+
+const unregisterTestDom = registerTestDom()
+afterAll(() => unregisterTestDom())
+
 
 function mountComposer(snapshot: WebAdapterSnapshot, intents: WebIntent[]): RenderHandle {
   return render(

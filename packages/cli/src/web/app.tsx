@@ -2,7 +2,7 @@
 /** @jsxImportSource react */
 
 import { createRoot, type Root } from "react-dom/client"
-import { useEffect, useState } from "react"
+import { useLayoutEffect, useState } from "react"
 
 import { createWebInteractiveAdapter, type WebInteractiveAdapter } from "./application/adapter"
 import { PresentationErrorBoundary } from "./presentation/error-boundary"
@@ -54,6 +54,9 @@ export async function bootstrapWebApp(): Promise<void> {
     onState: () => {
       // onState 在消息回调中触发，此时 readyGate 已赋值。
       readyGate?.onState()
+      // 首帧到达即武装看门狗：覆盖 opening-web 帧与 replace 一起丢失的镜像场景
+      // （页面停在默认 tui-active，handoff 订阅不触发，只能靠重载试探重连）。
+      armWatchdog()
       const resolve = resolveFirstState
       resolveFirstState = undefined
       resolve?.()
@@ -63,8 +66,55 @@ export async function bootstrapWebApp(): Promise<void> {
       void reason
     },
   })
+
+  // 接管确认看门狗：页面停留在 opening-web 超过宽限期时整页重载重连同一 handoff。
+  // 覆盖两类单帧丢失：a) 页面已发 ready 但 web-active 帧被浏览器冻结/休眠/扩展
+  // 干扰丢弃（服务端已 active，重连后网关首帧直接下发 web-active 恢复可写）；
+  // b) 首帧不完整、ready 从未发出（服务端仍在 opening-web，旧连接关闭会让
+  // Coordinator 立即收敛回 TUI，重连被拒后显示脱敏引导）。UI token 在 sessionStorage
+  // 且 TTL 60s 内可复用，重载窗口远小于 TTL；限制重载次数防止服务端异常时死循环。
+  const takeoverConfirmMs = 5_000
+  const maxReloads = 3
+  const reloadKey = `harness-takeover-reloads:${handoffId}`
+  let watchdogTimer: ReturnType<typeof setTimeout> | undefined
+  let reloadCount = 0
+  try {
+    reloadCount = Number(sessionStorage.getItem(reloadKey) ?? 0) || 0
+  } catch {
+    // sessionStorage 不可用时看门狗照常工作，只是不累计重载次数。
+  }
+  const cancelWatchdog = (): void => {
+    if (watchdogTimer !== undefined) {
+      clearTimeout(watchdogTimer)
+      watchdogTimer = undefined
+    }
+  }
+  const armWatchdog = (): void => {
+    if (watchdogTimer !== undefined) return
+    watchdogTimer = setTimeout(() => {
+      watchdogTimer = undefined
+      const phase = client?.getHandoffState().phase
+      // opening-web 与从未收到 handoff.state 的默认 tui-active 都在重载范围内；
+      // 任何真实 handoff.state（web-active/returning-tui/tui-active 收敛）都会先
+      // 通过订阅取消看门狗。
+      if (phase !== "opening-web" && phase !== "tui-active") return
+      reloadCount += 1
+      if (reloadCount > maxReloads) return
+      try {
+        sessionStorage.setItem(reloadKey, String(reloadCount))
+      } catch {
+        // 存储失败不阻止重载恢复。
+      }
+      window.location.reload()
+    }, takeoverConfirmMs)
+  }
+
   readyGate = createReadyGate(client)
-  client.subscribeHandoff(() => readyGate!.onHandoffState())
+  client.subscribeHandoff(state => {
+    readyGate!.onHandoffState()
+    if (state.phase === "opening-web") armWatchdog()
+    else cancelWatchdog()
+  })
 
   window.addEventListener("pagehide", () => { void closeGate() }, { once: true })
 
@@ -110,8 +160,13 @@ export function createReadyGate(client: Pick<WebUiClient, "ready" | "getHandoffS
 
 /** 根组件：订阅 handoff 状态决定页面是否可交互；只读等待期间保持挂载。 */
 function WebBootstrapRoot(props: { adapter: WebInteractiveAdapter; client: WebUiClient; onFailure: () => void }) {
-  const [phase, setPhase] = useState<PresentationState["phase"] | null>(null)
-  useEffect(() => {
+  // 初始值从 client 当前状态读取：重连（如看门狗重载后）时 handoff.state 可能在
+  // React 挂载前就已到达，仅靠订阅会永久错过 web-active。
+  const [phase, setPhase] = useState<PresentationState["phase"]>(props.client.getHandoffState().phase)
+  // 必须用 useLayoutEffect（同步提交）而不是 useEffect（被动效果异步 flush）：
+  // 被动效果的订阅注册晚于下一次宏任务，handoff.state(web-active) 帧可落在
+  // "挂载完成 → 订阅注册"的空隙里被永久错过（真实页面历史越多渲染越慢，空隙越大）。
+  useLayoutEffect(() => {
     // 已收到 opening-web 即上报 ready；之后 phase 变化驱动 active 开关。
     return props.client.subscribeHandoff(state => setPhase(state.phase))
   }, [props.client])

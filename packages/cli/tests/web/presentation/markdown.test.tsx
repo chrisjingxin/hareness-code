@@ -1,10 +1,14 @@
 /** Markdown：GFM token 渲染、raw HTML 惰性化、非法 scheme 文本化、图片仅 alt。 */
 /** @jsxImportSource react */
 
-import { describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, test } from "bun:test"
 
 import { Markdown } from "../../../src/web/presentation/markdown"
-import { render } from "./render"
+import { registerTestDom, render } from "./render"
+
+const unregisterTestDom = registerTestDom()
+afterAll(() => unregisterTestDom())
+
 
 describe("Markdown", () => {
   test("渲染 GFM 标题、强调、表格、任务列表、围栏代码、内联代码、链接", () => {

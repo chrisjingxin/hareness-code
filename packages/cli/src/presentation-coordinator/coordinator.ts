@@ -3,7 +3,7 @@
  *
  * 管理 TUI ↔ 内置 Web UI 的输入权切换（tui-active → opening-web → web-active →
  * returning-tui → tui-active）、UI token 签发/校验与单 renderer 门禁。状态机只
- * 决定"谁能提交可变 intent"，不迁移 Agent Host 控制权（ControlLease 始终属于 owner）。
+ * 决定"谁能提交可变 intent"，不迁移 Agent Host 控制权（Host 侧控制租约始终属于 owner）。
  *
  * Coordinator 不直接写业务状态帧：渲染 channel 由 WebUiGateway 独占写入，本模块
  * 只把已认证的 channel 通过 onRendererConnected 交给网关，并把生命周期事件
@@ -22,6 +22,12 @@ export type GatewayChannel = {
   readonly messages: AsyncIterable<unknown>
   send(message: WebUiServerMessage): Promise<void>
   close(code: number, reason: string): Promise<void>
+  /**
+   * 活性探测：true 表示连接仍可用。缺省视为可用（保守：不主动替换主连接）。
+   * Bun 实现返回底层 ws.readyState === 1，供 attachRenderer 区分"失效主连接
+   * 的同 handoff 重连"（可替换接管）与"第二窗口"（必须拒绝）。
+   */
+  isOpen?(): boolean
 }
 
 /** 静态 server adapter 的最小 interface；实现不暴露 Bun 对象。 */
@@ -219,9 +225,17 @@ class PresentationCoordinatorImpl implements PresentationCoordinator {
       return
     }
     if (this.primary !== undefined) {
-      await channel.send({ type: "handoff.state", state: this.state })
-      await channel.close(1008, "already-open")
-      return
+      // 主连接已失效（如整页重载重连时旧 socket 关闭事件还没驱动到 consume 循环
+      // 清理、primary 尚未释放）时允许同 handoff 的新连接替换接管；仍活跃的
+      // 主连接才视为第二窗口拒绝，保持单窗口 invariant。
+      if (this.primary.isOpen?.() !== false) {
+        await channel.send({ type: "handoff.state", state: this.state })
+        await channel.close(1008, "already-open")
+        return
+      }
+      const stale = this.primary
+      this.primary = undefined
+      void stale.close(1001, "superseded")
     }
     this.primary = channel
     this.reconnectTimer?.clear()

@@ -181,6 +181,30 @@ test("attachRenderer：合法 channel 交接给 onRendererConnected；第二个�
   expect(c.coordinator.consumeUiToken(handoffId, token, c.server.origin)).toBe(true)
 })
 
+test("attachRenderer：web-active 时失效主连接可被同 handoff 新连接替换接管", async () => {
+  const c = createCoordinator()
+  const { handoffId } = await openAndExtract(c.coordinator, c.openedUrls)
+  const ch1 = createFakeChannel()
+  await c.coordinator.attachRenderer(handoffId, ch1.channel)
+  c.coordinator.requestReady()
+  expect(c.coordinator.getSnapshot().phase).toBe("web-active")
+
+  // 活跃主连接：第二窗口仍被拒绝（单窗口 invariant 不回归）。
+  const chLive = createFakeChannel()
+  await c.coordinator.attachRenderer(handoffId, chLive.channel)
+  expect(chLive.closed).toEqual([{ code: 1008, reason: "already-open" }])
+  expect(c.connectedChannels).toHaveLength(1)
+
+  // 主连接失效（模拟整页重载重连：旧 socket 关闭事件尚未驱动 consume 清理，
+  // primary 仍指向已关闭的连接）：新连接替换接管，旧连接被收敛关闭。
+  ;(ch1.channel as GatewayChannel & { isOpen?: () => boolean }).isOpen = () => false
+  const ch2 = createFakeChannel()
+  await c.coordinator.attachRenderer(handoffId, ch2.channel)
+  expect(ch1.closed).toContainEqual({ code: 1001, reason: "superseded" })
+  expect(ch2.closed).toHaveLength(0)
+  expect(c.connectedChannels).toEqual([ch1.channel, ch2.channel])
+})
+
 test("attachRenderer：错误 handoffId 拒绝（invalid-handoff）", async () => {
   const c = createCoordinator()
   const { handoffId } = await openAndExtract(c.coordinator, c.openedUrls)

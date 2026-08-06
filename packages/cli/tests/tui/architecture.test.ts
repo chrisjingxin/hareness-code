@@ -4,6 +4,8 @@ import { expect, test } from "bun:test"
 import { readFileSync, readdirSync } from "node:fs"
 import { resolve } from "node:path"
 
+import { layerImports, sourceFiles } from "../acceptance/arch-imports"
+
 const tuiRoot = resolve(import.meta.dir, "../../src/tui")
 const interactiveRoot = resolve(import.meta.dir, "../../src/interactive")
 const cliRoot = resolve(import.meta.dir, "../../src")
@@ -19,10 +21,7 @@ test("TUI 根目录只保留组合入口", () => {
 })
 
 test("createInteractiveController 生产调用点仅 CLI Composition Root 一处（ZC-114 移除 web 豁免）", () => {
-  const sources = readdirSync(cliRoot, { recursive: true, withFileTypes: true })
-    .filter(entry => entry.isFile() && /\.tsx?$/.test(entry.name))
-    .map(entry => resolve(entry.parentPath, entry.name))
-    .filter(file => !file.includes("/tests/"))
+  const sources = sourceFiles(cliRoot).filter(file => !file.includes("/tests/"))
 
   const callers = sources
     .filter(file => file !== resolve(interactiveRoot, "controller.ts"))
@@ -62,10 +61,3 @@ test("语法资源维护脚本写入 Platform canonical 路径", () => {
   expect(script).not.toContain('resolve(tuiRoot, "assets/syntax")')
 })
 
-function layerImports(directory: string): string {
-  return readdirSync(directory, { withFileTypes: true })
-    .filter(entry => entry.isFile() && /\.[cm]?[jt]sx?$/.test(entry.name))
-    .map(entry => readFileSync(resolve(directory, entry.name), "utf8"))
-    .flatMap(source => source.match(/^import .*$/gm) ?? [])
-    .join("\n")
-}

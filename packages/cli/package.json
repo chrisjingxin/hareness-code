@@ -12,7 +12,7 @@
     "build": "bun build src/index.ts --outdir dist --target bun --external @opentui/core --external @opentui/react --external react --external react-dom --external react-reconciler && bun run scripts/build-web-assets.ts",
     "syntax:assets": "bun run scripts/vendor-syntax-assets.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "bun test --isolate"
+    "test": "bun test"
   },
   "dependencies": {
     "@opentui/core": "0.4.3",

@@ -137,6 +137,8 @@ export function createWebServer(options: WebServerOptions): WebServer {
               }
               queue.end()
             },
+            // 活性探测：关闭/关闭中的连接视为失效，供 attachRenderer 替换接管。
+            isOpen: () => ws.readyState === 1,
           }
           void options.attachRenderer(ws.data.handoffId, channel)
         },

@@ -1,13 +1,17 @@
 /** UtilityPanels：activePanel 切换、各面板内容、retry 行为、Skill 启停受 capability 约束。 */
 /** @jsxImportSource react */
 
-import { describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, test } from "bun:test"
 import { act } from "react"
 
 import { UtilityPanels } from "../../../src/web/presentation/panels"
 import type { WebAdapterSnapshot, WebIntent } from "../../../src/web/application/adapter"
 import { makeCatalog, makeInteractive, makeMcp, makeModel, makeRuntime, makeSkill, makeSnapshot } from "./fixtures"
-import { render, type RenderHandle } from "./render"
+import { registerTestDom, render, type RenderHandle } from "./render"
+
+const unregisterTestDom = registerTestDom()
+afterAll(() => unregisterTestDom())
+
 
 function mountPanel(snapshot: WebAdapterSnapshot, intents: WebIntent[], narrow = false): RenderHandle {
   return render(

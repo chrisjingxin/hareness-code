@@ -1,7 +1,7 @@
 /** Web presentation DOM 契约：安全 Markdown、Tool 折叠和动态 Interaction 不越过 Adapter seam。 */
 /** @jsxImportSource react */
 
-import { expect, test } from "bun:test"
+import { afterAll, expect, test } from "bun:test"
 import { act, createElement } from "react"
 
 import type { WebAdapterSnapshot, WebIntent } from "../../src/web/application/adapter"
@@ -9,7 +9,10 @@ import { InteractionForm } from "../../src/web/presentation/interaction-form"
 import { Markdown } from "../../src/web/presentation/markdown"
 import { Timeline } from "../../src/web/presentation/timeline"
 import type { InteractiveSnapshot } from "../../src/interactive/types"
-import { render, setControlledValue } from "./presentation/render"
+import { registerTestDom, render, setControlledValue } from "./presentation/render"
+
+const unregisterTestDom = registerTestDom()
+afterAll(() => unregisterTestDom())
 
 function snapshot(overrides: Partial<InteractiveSnapshot> = {}): InteractiveSnapshot {
   const base: InteractiveSnapshot = {

@@ -4,6 +4,8 @@ import { expect, test } from "bun:test"
 import { readFileSync, readdirSync } from "node:fs"
 import { resolve } from "node:path"
 
+import { layerImports, readAllSourceFiles, readDirectory, sourceFiles } from "../acceptance/arch-imports"
+
 const webRoot = resolve(import.meta.dir, "../../src/web")
 const interactiveRoot = resolve(import.meta.dir, "../../src/interactive")
 const cliSrcRoot = resolve(import.meta.dir, "../../src")
@@ -112,26 +114,8 @@ test("interactive 共享模块不依赖 TUI/Web/React/OpenTUI/DOM", () => {
   expect(imports).not.toMatch(/(?:^|[/"])happy-dom(?:[/"]|$)/m)
 })
 
-function readDirectory(directory: string): string {
-  return readdirSync(directory, { withFileTypes: true })
-    .filter(entry => entry.isFile() && /\.[cm]?[jt]sx?$/.test(entry.name))
-    .map(entry => readFileSync(resolve(directory, entry.name), "utf8"))
-    .join("\n")
-}
 
-function layerImports(directory: string): string {
-  return readdirSync(directory, { withFileTypes: true })
-    .filter(entry => entry.isFile() && /\.[cm]?[jt]sx?$/.test(entry.name))
-    .map(entry => readFileSync(resolve(directory, entry.name), "utf8"))
-    .flatMap(source => source.match(/^import .*$/gm) ?? [])
-    .join("\n")
-}
 
-function readAllSourceFiles(dir: string): string {
-  let results: string[] = []
-  for (const file of sourceFiles(dir)) results.push(readFileSync(file, "utf8"))
-  return results.join("\n")
-}
 
 /** 递归收集目录内全部 TS/TSX 源文件绝对路径。 */
 function sourceFiles(dir: string): string[] {

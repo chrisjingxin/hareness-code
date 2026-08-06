@@ -2,7 +2,9 @@
   "name": "za38-cli",
   "private": true,
   "packageManager": "bun@1.2.19",
-  "workspaces": ["packages/*"],
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "build": "bun run --filter '@za38/cli' build",
     "dev": "bun packages/cli/src/index.ts",
@@ -20,6 +22,10 @@
     "task:complete": "bun run scripts/project/index.ts task:complete",
     "version:set": "bun run scripts/project/index.ts version:set",
     "release:check": "bun run scripts/project/index.ts release:check",
-    "project:check": "bun run protocol:check && bun run scripts/project/index.ts project:check"
+    "project:check": "bun run protocol:check && bun run scripts/project/index.ts project:check",
+    "test:web:e2e": "bunx playwright test -c packages/cli/tests/e2e"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1"
   }
 }
