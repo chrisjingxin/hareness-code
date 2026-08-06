@@ -625,7 +625,7 @@ button.meta-chip { cursor: pointer; }
    避免矮窗口下把 composer-bar 撑高导致输入框底部被 conversation-column 裁剪。 */
 .composer-inner { position: relative; width: min(880px, calc(100% - 48px)); margin: 0 auto; padding: 12px 0 14px; }
 .composer-box { border: 1px solid var(--line-strong); border-radius: var(--radius-surface); background: var(--surface); }
-.composer-box:focus-within { border-color: var(--accent); }
+/* 聚焦态不再把边框染成炭黑（用户反馈的黑框）；光标与边框本身即焦点指示。 */
 .composer-textarea {
   width: 100%;
   min-width: 0;
