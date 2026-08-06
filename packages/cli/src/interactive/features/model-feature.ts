@@ -33,6 +33,8 @@ function safeModelDefaultSyncError(error: unknown): string {
 export class ModelFeature {
   requestedModelProfileId: string | null = null
   actualModelProfile: ModelProfile | undefined
+  /** 用户是否在本会话显式选择过模型；为 true 时 catalog 刷新不得用持久化选择覆盖。 */
+  explicitlySelected = false
 
   /** 先改变当前 Thread 的下一次模型，再独立同步未来新 Thread 默认值。 */
   async selectModel(
@@ -55,6 +57,7 @@ export class ModelFeature {
     }
 
     this.requestedModelProfileId = model.id
+    this.explicitlySelected = true
     ctx.publish()
     const label = `${model.provider_label} · ${model.model}`
     try {

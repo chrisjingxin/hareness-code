@@ -81,6 +81,8 @@ function createPort() {
     { id: "fast", model: "fast-model", provider_label: "Fast Gateway", context_window_tokens: 128000, capabilities: ["streaming"], is_default: true, available: true, source: "user" },
     { id: "pro", model: "pro-model", provider_label: "Pro Gateway", context_window_tokens: 256000, capabilities: ["streaming"], is_default: false, available: true, source: "user" },
   ]
+  // 模拟服务端持久化的线程模型选择（最近一次 Run 的 requested_selection）。
+  let threadSelection: string | null = null
   let skillsList: { snapshot: Record<string, never>; skills: ReturnType<typeof skill>[]; diagnostics: string[] } = {
     snapshot: {},
     skills: [skill("user/repo-review-demo", true), skill("builtin/disabled-demo", false)],
@@ -98,6 +100,7 @@ function createPort() {
     protocolError: (message: string) => void
     closeConnection: (message: string) => void
     setProfiles: (next: ModelProfile[]) => void
+    setThreadSelection: (next: string | null) => void
     setSkillsList: (next: { skills: ReturnType<typeof skill>[] }) => void
     setSkillEnabledImpl: (impl: (skillId: string, enabled: boolean) => Promise<Record<string, never>>) => void
     lastRunSelection: () => { message: string; threadId: string; runId: string; modelSelection?: { primary_profile: string }; requestedSkill?: { id: string; args?: string } } | undefined
@@ -175,7 +178,10 @@ function createPort() {
     },
     async listModels() {
       calls.push("models.list")
-      return { profiles }
+      return {
+        profiles,
+        ...(threadSelection !== null ? { thread_selection: { primary_profile: threadSelection } } : {}),
+      }
     },
     async listSkills(includeDisabled: boolean) {
       calls.push(`skills.list(${includeDisabled})`)
@@ -219,6 +225,9 @@ function createPort() {
     },
     setProfiles(next) {
       profiles = next
+    },
+    setThreadSelection(next) {
+      threadSelection = next
     },
     setSkillsList(next) {
       skillsList = { snapshot: {}, skills: next.skills, diagnostics: [] }

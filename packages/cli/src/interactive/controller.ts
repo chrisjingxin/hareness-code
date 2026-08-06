@@ -44,7 +44,16 @@ export class InteractiveControllerImpl implements InteractiveController {
 
   /** 刷新 Model catalog 并把当前 thread 的 selection 收敛到共享选择。 */
   private refreshModelSelection(): Promise<void> {
-    return this.catalogFeature.refreshModelCatalog(this.featureContext, id => { this.modelFeature.requestedModelProfileId = id })
+    return this.catalogFeature.refreshModelCatalog(this.featureContext, id => this.adoptThreadSelection(id))
+  }
+
+  /**
+   * 采纳服务端持久化的线程模型选择（重连/切换 Thread 恢复语义）。
+   * 用户本会话已显式 /model 选择时不再采纳，避免陈旧的持久化值覆盖用户意图。
+   */
+  private adoptThreadSelection(id: string): void {
+    if (this.modelFeature.explicitlySelected) return
+    this.modelFeature.requestedModelProfileId = id
   }
   constructor(options: InteractiveControllerOptions) {
     this.gateway = options.gateway ?? options.agent ?? createFallbackNoopGateway()
@@ -138,7 +147,7 @@ export class InteractiveControllerImpl implements InteractiveController {
         })
 
       case "catalog.refresh":
-        await this.catalogFeature.refreshCatalog(intent.catalog, this.featureContext, id => { this.modelFeature.requestedModelProfileId = id })
+        await this.catalogFeature.refreshCatalog(intent.catalog, this.featureContext, id => this.adoptThreadSelection(id))
         return { status: "accepted" }
 
       case "interaction.respond":
@@ -218,7 +227,7 @@ export class InteractiveControllerImpl implements InteractiveController {
             return { status: "accepted" }
           }
         }
-        await this.catalogFeature.refreshCatalog(result.target, this.featureContext, id => { this.modelFeature.requestedModelProfileId = id })
+        await this.catalogFeature.refreshCatalog(result.target, this.featureContext, id => this.adoptThreadSelection(id))
         return { status: "accepted", effects: [{ type: "present", target: result.target, initialQuery: result.initialQuery }] }
       case "compact":
         try {
@@ -261,6 +270,7 @@ export class InteractiveControllerImpl implements InteractiveController {
     this.state = nextState
     this.modelFeature.requestedModelProfileId = null
     this.modelFeature.actualModelProfile = undefined
+    this.modelFeature.explicitlySelected = false
     this.skillFeature.armedSkill = undefined
     this.confirmation = null
     this.interactionFeature.settlePendingInteraction(this.featureContext)
