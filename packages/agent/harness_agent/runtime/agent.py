@@ -29,7 +29,6 @@ from harness_agent.policy.permission_rules import PermissionRule, evaluate_rules
 from harness_agent.policy.sensitive_paths import requires_safety_check
 from harness_agent.policy.tool_risk import ToolKind, get_tool_kind
 from harness_agent.policy.workspace_boundary import resolve_outside_workspace_write
-from harness_agent.threads.prompting import PromptComposer, PromptEpoch, read_only_memory_snapshot, tool_schema_fingerprint
 from harness_agent.threads.prompting import (
     PromptComposer,
     PromptEpoch,
@@ -247,7 +246,6 @@ def _create_controlled_inline_subagents(
     from langchain_core.messages import HumanMessage
     from langchain_core.runnables import RunnableLambda
 
-    wdl1
     from harness_agent.runtime.agent_delegation import (
         AgentDelegationError,
         AgentDelegator,
@@ -854,12 +852,6 @@ def create_harness_agent(
         # 该中间件仅读取本轮 context，不保存 thread 私有 PromptEpoch。
         agent_middleware.append(RunContextSnapshotMiddleware())
     agent_middleware.append(context_middleware)
-
-    all_tools = list(tools) if tools else []
-
-    # 注入 Harness 扩展工具（web_search/web_fetch/delete_file 等）
-    from harness_agent.tools.harness_tools import create_harness_tools
-    all_tools.extend(create_harness_tools(root))
 
     # DeepAgents 的内建压缩会抢先改写历史，且与本机归档语义不兼容。构图时
     # 临时排除它，确保 ContextWindowMiddleware 是唯一的历史重写入口。

@@ -275,7 +275,7 @@ class AgentHost:
         self._plugin_mcp_servers: tuple[McpServerConfig, ...] = ()
         self._plugin_runtime_catalog = PluginRuntimeCatalog()
         self._plugin_runtime_manager: PluginRuntimeManager | None = None
-        self._plugin_runtime_start_task: asyncio.Task[None] | None = None
+        self._plugin_runtime_start_lock = asyncio.Lock()
         self._plugin_diagnostics: tuple[str, ...] = ()
         self._agent_catalog: AgentCatalog | None = None
         self._thread_persistence: ThreadPersistence | None = None
@@ -443,12 +443,6 @@ class AgentHost:
         if self._mcp_connect_task is not None:
             await asyncio.gather(self._mcp_connect_task, return_exceptions=True)
             self._mcp_connect_task = None
-        if self._plugin_runtime_start_task is not None:
-            await asyncio.gather(
-                self._plugin_runtime_start_task,
-                return_exceptions=True,
-            )
-            self._plugin_runtime_start_task = None
         if self._plugin_runtime_manager is not None:
             await self._plugin_runtime_manager.aclose()
             self._plugin_runtime_manager = None
@@ -755,9 +749,6 @@ class AgentHost:
                 self._load_config()
                 # MCP 连接不阻塞 initialize 响应；后台建立连接
                 self._mcp_connect_task = asyncio.ensure_future(self._connect_mcp_servers())
-                self._plugin_runtime_start_task = asyncio.ensure_future(
-                    self._start_plugin_runtime()
-                )
                 self._resources_ready = True
         registry = self._require_skills()
         requested = set(parsed.capabilities.requests)
@@ -871,10 +862,9 @@ class AgentHost:
             logger.exception("Plugin runtime startup failed")
 
     async def _ensure_plugin_runtime_started(self) -> None:
-        """在构图前等待启动任务，确保 Hook/LSP/Monitor 使用同一快照。"""
-        task = self._plugin_runtime_start_task
-        if task is not None and not task.done():
-            await task
+        """在首次构图前启动 Monitor，确保短生命周期 Host 不泄漏后台进程。"""
+        async with self._plugin_runtime_start_lock:
+            await self._start_plugin_runtime()
 
     async def _handle_run_start(self, params: dict[str, Any], request_id: str) -> None:
         """把协议输入转换成 StartRun，并让 Coordinator 先完成受理再启动事件流。"""
@@ -1277,41 +1267,20 @@ class AgentHost:
         async with self._agent_engine_snapshot_lock:
             async with self._mcp_state_lock:
                 current = self._mcp_snapshot or self._config_changes().read_mcp_snapshot()
-            try:
-                snapshot = self._config_changes().add_mcp_server(
-                    mcp_config,
-                    expected_revision=current.revision,
-                )
-            except ConfigChangeError as exc:
-                raise RpcError(-32602, str(exc), exc.redacted_data()) from exc
-        async with self._mcp_state_lock:
-            current = self._mcp_snapshot or self._config_changes().read_mcp_snapshot()
-            if any(server.name == mcp_config.name for server in current.servers):
-                raise RpcError(
-                    -32602,
-                    f"MCP 服务器 '{mcp_config.name}' 已存在",
-                    {"code": "MCP_SERVER_DUPLICATE", "field": "mcp.servers.name"},
-                )
-        try:
-            config_snapshot = self._config_changes().add_mcp_server(
-                mcp_config,
-                expected_revision=current.revision,
-            )
-        except ConfigChangeError as exc:
-            raise RpcError(-32602, str(exc), exc.redacted_data()) from exc
-
-            async with self._mcp_state_lock:
+                try:
+                    config_snapshot = self._config_changes().add_mcp_server(
+                        mcp_config,
+                        expected_revision=current.revision,
+                    )
+                except ConfigChangeError as exc:
+                    raise RpcError(-32602, str(exc), exc.redacted_data()) from exc
+                snapshot = self._combine_mcp_snapshot(config_snapshot)
                 self._mcp_snapshot = snapshot
-                if self._mcp_manager is None:
-                    self._mcp_manager = McpConnectionManager(snapshot)
-                statuses = await self._mcp_manager.apply_snapshot(snapshot)
-                status = next((item for item in statuses if item.get("name") == mcp_config.name), {})
-            await self._invalidate_profiles_for_snapshot(snapshot, reason="mcp_snapshot_changed")
-        async with self._mcp_state_lock:
-            snapshot = self._combine_mcp_snapshot(config_snapshot)
-            self._mcp_snapshot = snapshot
-            statuses = await self._replace_mcp_generation(snapshot)
-            status = next((item for item in statuses if item.get("name") == mcp_config.name), {})
+                statuses = await self._replace_mcp_generation(snapshot)
+                status = next(
+                    (item for item in statuses if item.get("name") == mcp_config.name),
+                    {},
+                )
         await self._invalidate_mcp_profiles(snapshot)
 
         return {
@@ -1330,32 +1299,16 @@ class AgentHost:
         async with self._agent_engine_snapshot_lock:
             async with self._mcp_state_lock:
                 current = self._mcp_snapshot or self._config_changes().read_mcp_snapshot()
-            try:
-                snapshot = self._config_changes().remove_mcp_server(
-                    name,
-                    expected_revision=current.revision,
-                )
-            except ConfigChangeError as exc:
-                raise RpcError(-32602, str(exc), exc.redacted_data()) from exc
-        async with self._mcp_state_lock:
-            current = self._mcp_snapshot or self._config_changes().read_mcp_snapshot()
-        try:
-            config_snapshot = self._config_changes().remove_mcp_server(
-                name,
-                expected_revision=current.revision,
-            )
-        except ConfigChangeError as exc:
-            raise RpcError(-32602, str(exc), exc.redacted_data()) from exc
-
-            async with self._mcp_state_lock:
+                try:
+                    config_snapshot = self._config_changes().remove_mcp_server(
+                        name,
+                        expected_revision=current.revision,
+                    )
+                except ConfigChangeError as exc:
+                    raise RpcError(-32602, str(exc), exc.redacted_data()) from exc
+                snapshot = self._combine_mcp_snapshot(config_snapshot)
                 self._mcp_snapshot = snapshot
-                if self._mcp_manager is not None:
-                    await self._mcp_manager.apply_snapshot(snapshot)
-            await self._invalidate_profiles_for_snapshot(snapshot, reason="mcp_snapshot_changed")
-        async with self._mcp_state_lock:
-            snapshot = self._combine_mcp_snapshot(config_snapshot)
-            self._mcp_snapshot = snapshot
-            await self._replace_mcp_generation(snapshot)
+                await self._replace_mcp_generation(snapshot)
         await self._invalidate_mcp_profiles(snapshot)
 
         return {"removed": True}
@@ -2555,7 +2508,6 @@ class AgentHost:
                 context_window_tokens=model_settings.context_window_tokens,
                 shared_engine=True,
                 concurrency_lock=self._tool_concurrency_lock,
-                wdl1
                 capability_view=spec.capability_view,
                 execution_registry=self._run_coordinator.execution_registry,
                 delegation_model=spec.model_view,

@@ -42,7 +42,6 @@ from harness_agent.threads.context_projection import (
 )
 from harness_agent.threads.runtime_state import RuntimeStateError, RuntimeStateSnapshot
 
-
 _SCHEMA_VERSION = 11
 _MAX_PREVIEW_CHARS = 160
 _MAX_INLINE_TOOL_BYTES = 64 * 1024
@@ -68,7 +67,6 @@ _MIGRATION_CHILD_TEST_PHASES = frozenset(
     }
 )
 
-
 # This registry contains no SQLite connection or asyncio task.  It is only a
 # process-local handoff barrier published before the file lock is released
 # after a child migration timeout.  A fresh process intentionally starts with
@@ -91,8 +89,8 @@ def _is_supported_legacy_prompt_epoch_source(source_version: int) -> bool:
 
 
 def _is_pre_transcript_prompt_epoch_source_sync(
-    connection: sqlite3.Connection,
-    source_version: int,
+        connection: sqlite3.Connection,
+        source_version: int,
 ) -> bool:
     """识别合并前曾使用 ``user_version=7`` 的旧 PromptEpoch 数据库。
 
@@ -107,20 +105,22 @@ def _is_pre_transcript_prompt_epoch_source_sync(
         str(row[0])
         for row in connection.execute(
             """
-            SELECT name FROM sqlite_master
-            WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name NOT LIKE 'sqlite_%'
             """
         ).fetchall()
     }
     if "harness_prompt_epochs" not in tables:
         return False
     if tables.intersection(
-        {
-            "harness_thread_transcript",
-            "harness_thread_history_metadata",
-            "harness_run_context_snapshots",
-            "harness_compression_checkpoints",
-        }
+            {
+                "harness_thread_transcript",
+                "harness_thread_history_metadata",
+                "harness_run_context_snapshots",
+                "harness_compression_checkpoints",
+            }
     ):
         return False
     try:
@@ -131,8 +131,8 @@ def _is_pre_transcript_prompt_epoch_source_sync(
 
 
 def _validate_source_schema_for_fingerprint_sync(
-    connection: sqlite3.Connection,
-    source_version: int,
+        connection: sqlite3.Connection,
+        source_version: int,
 ) -> None:
     """按 fingerprint 的真实版本校验旧库，兼容已识别的旧分支 v7。"""
     if 1 <= source_version <= 6:
@@ -205,8 +205,8 @@ class _MigrationIndexContract:
 
 
 def _migration_column_contracts(
-    table_name: str,
-    source_version: int,
+        table_name: str,
+        source_version: int,
 ) -> tuple[_MigrationColumnContract, ...]:
     """返回 legacy v1-v6 源表的精确列契约；PromptEpoch 按历史版本分支。"""
     contracts: dict[str, tuple[_MigrationColumnContract, ...]] = {
@@ -342,7 +342,7 @@ def _migration_column_contracts(
 
 
 def _migration_named_index_contracts(
-    table_name: str,
+        table_name: str,
 ) -> tuple[_MigrationIndexContract, ...]:
     """返回 v6 关键 named index 契约；PK/UNIQUE 由 table_xinfo/index_list 同时校验。"""
     common: dict[str, tuple[_MigrationIndexContract, ...]] = {
@@ -416,7 +416,14 @@ def _migration_normalize_sql(sql: str | None) -> str | None:
     """规范化 sqlite_master SQL，仅消除布局差异，不放宽对象定义。"""
     if sql is None:
         return None
-    return " ".join(sql.split()).lower()
+    normalized = " ".join(sql.split()).lower()
+    # 合并后的 SQL 字面量可能把约束括号和逗号拆到独立行；这些空格
+    # 只属于布局，不应让同一份 schema 被误判为结构变更。
+    return (
+        normalized.replace("( ", "(")
+        .replace(" )", ")")
+        .replace(", ", ",")
+    )
 
 
 def _migration_legacy_required_tables(source_version: int) -> tuple[str, ...]:
@@ -444,144 +451,155 @@ def _migration_legacy_required_tables(source_version: int) -> tuple[str, ...]:
 
 
 def _migration_table_sql_contract(
-    table_name: str,
-    source_version: int,
+        table_name: str,
+        source_version: int,
 ) -> str | None:
     """返回无安全尾列时的 canonical CREATE TABLE 定义。"""
     contracts = {
         "harness_threads": """
-            CREATE TABLE harness_threads (
-                project_fingerprint TEXT NOT NULL,
-                thread_id TEXT NOT NULL,
-                created_at_ms INTEGER NOT NULL,
-                updated_at_ms INTEGER NOT NULL,
-                first_message TEXT NOT NULL,
-                latest_message TEXT NOT NULL,
-                message_count INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (project_fingerprint, thread_id)
-            )
-        """,
+                           CREATE TABLE harness_threads
+                           (
+                               project_fingerprint TEXT    NOT NULL,
+                               thread_id           TEXT    NOT NULL,
+                               created_at_ms       INTEGER NOT NULL,
+                               updated_at_ms       INTEGER NOT NULL,
+                               first_message       TEXT    NOT NULL,
+                               latest_message      TEXT    NOT NULL,
+                               message_count       INTEGER NOT NULL DEFAULT 0,
+                               PRIMARY KEY (project_fingerprint, thread_id)
+                           )
+                           """,
         "checkpoints": """
-            CREATE TABLE checkpoints (
-                thread_id TEXT NOT NULL,
-                checkpoint_ns TEXT NOT NULL DEFAULT '',
-                checkpoint_id TEXT NOT NULL,
-                parent_checkpoint_id TEXT,
-                type TEXT,
-                checkpoint BLOB,
-                metadata BLOB,
-                PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
-            )
-        """,
+                       CREATE TABLE checkpoints
+                       (
+                           thread_id            TEXT NOT NULL,
+                           checkpoint_ns        TEXT NOT NULL DEFAULT '',
+                           checkpoint_id        TEXT NOT NULL,
+                           parent_checkpoint_id TEXT,
+                           type                 TEXT,
+                           checkpoint           BLOB,
+                           metadata             BLOB,
+                           PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+                       )
+                       """,
         "writes": """
-            CREATE TABLE writes (
-                thread_id TEXT NOT NULL,
-                checkpoint_ns TEXT NOT NULL DEFAULT '',
-                checkpoint_id TEXT NOT NULL,
-                task_id TEXT NOT NULL,
-                idx INTEGER NOT NULL,
-                channel TEXT NOT NULL,
-                type TEXT,
-                value BLOB,
-                PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
-            )
-        """,
+                  CREATE TABLE writes
+                  (
+                      thread_id     TEXT    NOT NULL,
+                      checkpoint_ns TEXT    NOT NULL DEFAULT '',
+                      checkpoint_id TEXT    NOT NULL,
+                      task_id       TEXT    NOT NULL,
+                      idx           INTEGER NOT NULL,
+                      channel       TEXT    NOT NULL,
+                      type          TEXT,
+                      value         BLOB,
+                      PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
+                  )
+                  """,
         "harness_context_artifacts": """
-            CREATE TABLE harness_context_artifacts (
-                project_fingerprint TEXT NOT NULL,
-                thread_id TEXT NOT NULL,
-                artifact_id TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                content TEXT NOT NULL,
-                source_start INTEGER NOT NULL,
-                source_end INTEGER NOT NULL,
-                created_at_ms INTEGER NOT NULL,
-                PRIMARY KEY (project_fingerprint, thread_id, artifact_id)
-            )
-        """,
+                                     CREATE TABLE harness_context_artifacts
+                                     (
+                                         project_fingerprint TEXT    NOT NULL,
+                                         thread_id           TEXT    NOT NULL,
+                                         artifact_id         TEXT    NOT NULL,
+                                         kind                TEXT    NOT NULL,
+                                         content             TEXT    NOT NULL,
+                                         source_start        INTEGER NOT NULL,
+                                         source_end          INTEGER NOT NULL,
+                                         created_at_ms       INTEGER NOT NULL,
+                                         PRIMARY KEY (project_fingerprint, thread_id, artifact_id)
+                                     )
+                                     """,
         "harness_context_summaries": """
-            CREATE TABLE harness_context_summaries (
-                project_fingerprint TEXT NOT NULL,
-                thread_id TEXT NOT NULL,
-                summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                rewrite_version TEXT NOT NULL,
-                content TEXT NOT NULL,
-                source_start INTEGER NOT NULL,
-                source_end INTEGER NOT NULL,
-                artifact_ids TEXT NOT NULL,
-                created_at_ms INTEGER NOT NULL
-            )
-        """,
+                                     CREATE TABLE harness_context_summaries
+                                     (
+                                         project_fingerprint TEXT    NOT NULL,
+                                         thread_id           TEXT    NOT NULL,
+                                         summary_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                                         rewrite_version     TEXT    NOT NULL,
+                                         content             TEXT    NOT NULL,
+                                         source_start        INTEGER NOT NULL,
+                                         source_end          INTEGER NOT NULL,
+                                         artifact_ids        TEXT    NOT NULL,
+                                         created_at_ms       INTEGER NOT NULL
+                                     )
+                                     """,
         "harness_context_state": """
-            CREATE TABLE harness_context_state (
-                project_fingerprint TEXT NOT NULL,
-                thread_id TEXT NOT NULL,
-                failures INTEGER NOT NULL DEFAULT 0,
-                circuit_open INTEGER NOT NULL DEFAULT 0,
-                last_action TEXT NOT NULL DEFAULT 'none',
-                updated_at_ms INTEGER NOT NULL,
-                PRIMARY KEY (project_fingerprint, thread_id)
-            )
-        """,
+                                 CREATE TABLE harness_context_state
+                                 (
+                                     project_fingerprint TEXT    NOT NULL,
+                                     thread_id           TEXT    NOT NULL,
+                                     failures            INTEGER NOT NULL DEFAULT 0,
+                                     circuit_open        INTEGER NOT NULL DEFAULT 0,
+                                     last_action         TEXT    NOT NULL DEFAULT 'none',
+                                     updated_at_ms       INTEGER NOT NULL,
+                                     PRIMARY KEY (project_fingerprint, thread_id)
+                                 )
+                                 """,
         "harness_runtime_profiles": """
-            CREATE TABLE harness_runtime_profiles (
-                project_fingerprint TEXT NOT NULL,
-                profile_key TEXT NOT NULL,
-                profile_version INTEGER NOT NULL,
-                topology_id TEXT NOT NULL,
-                topology_version INTEGER NOT NULL,
-                profile_record TEXT NOT NULL,
-                created_at_ms INTEGER NOT NULL,
-                PRIMARY KEY (project_fingerprint, profile_key)
-            )
-        """,
+                                    CREATE TABLE harness_runtime_profiles
+                                    (
+                                        project_fingerprint TEXT    NOT NULL,
+                                        profile_key         TEXT    NOT NULL,
+                                        profile_version     INTEGER NOT NULL,
+                                        topology_id         TEXT    NOT NULL,
+                                        topology_version    INTEGER NOT NULL,
+                                        profile_record      TEXT    NOT NULL,
+                                        created_at_ms       INTEGER NOT NULL,
+                                        PRIMARY KEY (project_fingerprint, profile_key)
+                                    )
+                                    """,
         "harness_thread_runtime_profiles": """
-            CREATE TABLE harness_thread_runtime_profiles (
-                project_fingerprint TEXT NOT NULL,
-                thread_id TEXT NOT NULL,
-                profile_key TEXT NOT NULL,
-                profile_version INTEGER NOT NULL,
-                bound_at_ms INTEGER NOT NULL,
-                PRIMARY KEY (project_fingerprint, thread_id)
-            )
-        """,
+                                           CREATE TABLE harness_thread_runtime_profiles
+                                           (
+                                               project_fingerprint TEXT    NOT NULL,
+                                               thread_id           TEXT    NOT NULL,
+                                               profile_key         TEXT    NOT NULL,
+                                               profile_version     INTEGER NOT NULL,
+                                               bound_at_ms         INTEGER NOT NULL,
+                                               PRIMARY KEY (project_fingerprint, thread_id)
+                                           )
+                                           """,
         "harness_thread_model_bindings": """
-            CREATE TABLE harness_thread_model_bindings (
-                project_fingerprint TEXT NOT NULL,
-                thread_id TEXT NOT NULL,
-                binding_record TEXT NOT NULL,
-                bound_at_ms INTEGER NOT NULL,
-                PRIMARY KEY (project_fingerprint, thread_id)
-            )
-        """,
+                                         CREATE TABLE harness_thread_model_bindings
+                                         (
+                                             project_fingerprint TEXT    NOT NULL,
+                                             thread_id           TEXT    NOT NULL,
+                                             binding_record      TEXT    NOT NULL,
+                                             bound_at_ms         INTEGER NOT NULL,
+                                             PRIMARY KEY (project_fingerprint, thread_id)
+                                         )
+                                         """,
         "harness_run_execution_bindings": """
-            CREATE TABLE harness_run_execution_bindings (
-                project_fingerprint TEXT NOT NULL,
-                thread_id TEXT NOT NULL,
-                run_id TEXT NOT NULL,
-                requested_selection TEXT NOT NULL,
-                actual_primary_binding TEXT NOT NULL,
-                runtime_profile_id TEXT NOT NULL,
-                message_digest TEXT NOT NULL,
-                created_at_ms INTEGER NOT NULL,
-                PRIMARY KEY (project_fingerprint, thread_id, run_id)
-            )
-        """,
+                                          CREATE TABLE harness_run_execution_bindings
+                                          (
+                                              project_fingerprint    TEXT    NOT NULL,
+                                              thread_id              TEXT    NOT NULL,
+                                              run_id                 TEXT    NOT NULL,
+                                              requested_selection    TEXT    NOT NULL,
+                                              actual_primary_binding TEXT    NOT NULL,
+                                              runtime_profile_id     TEXT    NOT NULL,
+                                              message_digest         TEXT    NOT NULL,
+                                              created_at_ms          INTEGER NOT NULL,
+                                              PRIMARY KEY (project_fingerprint, thread_id, run_id)
+                                          )
+                                          """,
         "harness_team_runs": """
-            CREATE TABLE harness_team_runs (
-                project_fingerprint TEXT NOT NULL,
-                run_id TEXT NOT NULL,
-                team_id TEXT NOT NULL,
-                thread_id TEXT NOT NULL,
-                parent_run_id TEXT NOT NULL,
-                parent_execution_id TEXT NOT NULL,
-                parent_parent_execution_id TEXT,
-                status TEXT NOT NULL,
-                tasks_json TEXT NOT NULL,
-                terminal_count INTEGER NOT NULL,
-                PRIMARY KEY (project_fingerprint, run_id)
-            )
-        """,
+                             CREATE TABLE harness_team_runs
+                             (
+                                 project_fingerprint        TEXT    NOT NULL,
+                                 run_id                     TEXT    NOT NULL,
+                                 team_id                    TEXT    NOT NULL,
+                                 thread_id                  TEXT    NOT NULL,
+                                 parent_run_id              TEXT    NOT NULL,
+                                 parent_execution_id        TEXT    NOT NULL,
+                                 parent_parent_execution_id TEXT,
+                                 status                     TEXT    NOT NULL,
+                                 tasks_json                 TEXT    NOT NULL,
+                                 terminal_count             INTEGER NOT NULL,
+                                 PRIMARY KEY (project_fingerprint, run_id)
+                             )
+                             """,
     }
     if table_name == "harness_prompt_epochs":
         prefix = (
@@ -609,8 +627,8 @@ def _migration_table_sql_contract(
 
 
 def _migration_index_contract_rows(
-    column_contracts: tuple[_MigrationColumnContract, ...],
-    columns: tuple[tuple[str, int], ...],
+        column_contracts: tuple[_MigrationColumnContract, ...],
+        columns: tuple[tuple[str, int], ...],
 ) -> tuple[tuple[object, ...], ...]:
     """把 named index 列定义展开为 PRAGMA index_xinfo 的可比形状。"""
     column_ids = {column.name: index for index, column in enumerate(column_contracts)}
@@ -621,8 +639,8 @@ def _migration_index_contract_rows(
 
 
 def _migration_expected_index_contracts(
-    table_name: str,
-    column_contracts: tuple[_MigrationColumnContract, ...],
+        table_name: str,
+        column_contracts: tuple[_MigrationColumnContract, ...],
 ) -> tuple[_MigrationIndexContract, ...]:
     """展开 named index 和复合 PK autoindex 的完整索引集合。"""
     named = _migration_named_index_contracts(table_name)
@@ -657,15 +675,15 @@ def _migration_schema_contract_error(table_name: str, detail: str) -> ThreadPers
 
 
 def _migration_compare_table_contract(
-    *,
-    table_name: str,
-    source_version: int,
-    table_sql: str | None,
-    column_rows: Iterable[tuple[object, ...]],
-    index_rows: Iterable[tuple[object, ...]],
-    index_xinfo: Mapping[str, Iterable[tuple[object, ...]]],
-    index_sql: Mapping[str, str | None],
-    foreign_keys: Iterable[tuple[object, ...]],
+        *,
+        table_name: str,
+        source_version: int,
+        table_sql: str | None,
+        column_rows: Iterable[tuple[object, ...]],
+        index_rows: Iterable[tuple[object, ...]],
+        index_xinfo: Mapping[str, Iterable[tuple[object, ...]]],
+        index_sql: Mapping[str, str | None],
+        foreign_keys: Iterable[tuple[object, ...]],
 ) -> None:
     """比较一张 v6 表的完整结构，拒绝同名畸形对象。"""
     expected_columns = _migration_column_contracts(table_name, source_version)
@@ -700,9 +718,9 @@ def _migration_compare_table_contract(
     for index in expected_indexes:
         row = actual_by_name[index.name]
         if (int(row[2]), str(row[3]), int(row[4])) != (
-            index.unique,
-            index.origin,
-            index.partial,
+                index.unique,
+                index.origin,
+                index.partial,
         ):
             raise _migration_schema_contract_error(table_name, f"index_definition:{index.name}")
         actual_xinfo = tuple(
@@ -714,21 +732,23 @@ def _migration_compare_table_contract(
             raise _migration_schema_contract_error(table_name, f"index_columns:{index.name}")
         expected_index_sql = None if index.name.startswith("sqlite_autoindex_") else index.sql
         if _migration_normalize_sql(index_sql.get(index.name)) != _migration_normalize_sql(
-            expected_index_sql
+                expected_index_sql
         ):
             raise _migration_schema_contract_error(table_name, f"index_sql:{index.name}")
 
 
 def _migration_validate_legacy_source_schema_sync(
-    connection: sqlite3.Connection,
-    source_version: int,
+        connection: sqlite3.Connection,
+        source_version: int,
 ) -> None:
     """同步校验 backup/恢复使用的 legacy v1-v6 源 schema。"""
     required = _migration_legacy_required_tables(source_version)
     rows = connection.execute(
         """
-        SELECT name FROM sqlite_master
-        WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name NOT LIKE 'sqlite_%'
         ORDER BY name
         """
     ).fetchall()
@@ -755,9 +775,9 @@ def _migration_validate_legacy_source_schema_sync(
 
 
 def _migration_validate_table_contract_sync(
-    connection: sqlite3.Connection,
-    table_name: str,
-    source_version: int,
+        connection: sqlite3.Connection,
+        table_name: str,
+        source_version: int,
 ) -> None:
     """读取 sqlite_master/PRAGMA 并比较单表 canonical contract。"""
     quoted_table = _migration_identifier(table_name)
@@ -913,12 +933,12 @@ def _migration_fingerprint_from_record(value: object) -> _MigrationDatabaseFinge
     data_digest = value.get("data_digest")
     raw_tables = value.get("tables")
     if (
-        not isinstance(user_version, int)
-        or isinstance(user_version, bool)
-        or not isinstance(integrity_check, str)
-        or not isinstance(schema_digest, str)
-        or not isinstance(data_digest, str)
-        or not isinstance(raw_tables, list)
+            not isinstance(user_version, int)
+            or isinstance(user_version, bool)
+            or not isinstance(integrity_check, str)
+            or not isinstance(schema_digest, str)
+            or not isinstance(data_digest, str)
+            or not isinstance(raw_tables, list)
     ):
         raise ValueError("fingerprint fields are invalid")
     tables: list[_MigrationTableDigest] = []
@@ -930,13 +950,13 @@ def _migration_fingerprint_from_record(value: object) -> _MigrationDatabaseFinge
         row_count = raw_table.get("row_count")
         digest = raw_table.get("digest")
         if (
-            not isinstance(name, str)
-            or not isinstance(columns, list)
-            or not all(isinstance(column, str) for column in columns)
-            or not isinstance(row_count, int)
-            or isinstance(row_count, bool)
-            or row_count < 0
-            or not isinstance(digest, str)
+                not isinstance(name, str)
+                or not isinstance(columns, list)
+                or not all(isinstance(column, str) for column in columns)
+                or not isinstance(row_count, int)
+                or isinstance(row_count, bool)
+                or row_count < 0
+                or not isinstance(digest, str)
         ):
             raise ValueError("fingerprint table fields are invalid")
         tables.append(
@@ -957,16 +977,16 @@ def _migration_fingerprint_from_record(value: object) -> _MigrationDatabaseFinge
 
 
 def _migration_fingerprint_matches(
-    expected: _MigrationDatabaseFingerprint,
-    actual: _MigrationDatabaseFingerprint,
+        expected: _MigrationDatabaseFingerprint,
+        actual: _MigrationDatabaseFingerprint,
 ) -> bool:
     """比较 backup/恢复快照的证明字段，不接受仅版本相同的弱校验。"""
     return (
-        expected.user_version == actual.user_version
-        and expected.integrity_check == actual.integrity_check == "ok"
-        and expected.schema_digest == actual.schema_digest
-        and expected.data_digest == actual.data_digest
-        and expected.tables == actual.tables
+            expected.user_version == actual.user_version
+            and expected.integrity_check == actual.integrity_check == "ok"
+            and expected.schema_digest == actual.schema_digest
+            and expected.data_digest == actual.data_digest
+            and expected.tables == actual.tables
     )
 
 
@@ -977,7 +997,10 @@ def _migration_sqlite_schema_payload(connection: sqlite3.Connection) -> object:
         SELECT type, name, tbl_name, sql
         FROM sqlite_master
         WHERE name NOT LIKE 'sqlite_%'
-          AND type IN ('table', 'index', 'trigger', 'view')
+          AND type IN ('table'
+            , 'index'
+            , 'trigger'
+            , 'view')
         ORDER BY type, name
         """
     ).fetchall()
@@ -1017,9 +1040,9 @@ def _migration_sqlite_schema_payload(connection: sqlite3.Connection) -> object:
 
 
 def _migration_table_digest_sync(
-    connection: sqlite3.Connection,
-    table_name: str,
-    columns: tuple[str, ...] | None = None,
+        connection: sqlite3.Connection,
+        table_name: str,
+        columns: tuple[str, ...] | None = None,
 ) -> _MigrationTableDigest:
     """同步计算一张表的行数和 typed digest。"""
     if columns is None:
@@ -1036,9 +1059,9 @@ def _migration_table_digest_sync(
 
 
 def _migration_table_rows_sync(
-    backup_path: Path,
-    table_name: str,
-    columns: tuple[str, ...],
+        backup_path: Path,
+        table_name: str,
+        columns: tuple[str, ...],
 ) -> list[tuple[object, ...]]:
     """从已验证 backup 读取迁移前行，供有意转换表做逐行比对。"""
     select_columns = ", ".join(_migration_identifier(column) for column in columns)
@@ -1055,7 +1078,7 @@ def _migration_table_rows_sync(
 
 
 def _migration_database_fingerprint_sync(
-    connection: sqlite3.Connection,
+        connection: sqlite3.Connection,
 ) -> _MigrationDatabaseFingerprint:
     """同步计算 backup/恢复目标的完整证明摘要。"""
     integrity_row = connection.execute("PRAGMA integrity_check").fetchone()
@@ -1066,7 +1089,8 @@ def _migration_database_fingerprint_sync(
         """
         SELECT name
         FROM sqlite_master
-        WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+        WHERE type = 'table'
+          AND name NOT LIKE 'sqlite_%'
         ORDER BY name
         """
     ).fetchall()
@@ -1360,11 +1384,11 @@ class ProjectScopedAsyncSqliteSaver(AsyncSqliteSaver):
     """将 LangGraph 自动归一的 checkpoint namespace 固定映射到当前 project。"""
 
     def __init__(
-        self,
-        connection: aiosqlite.Connection,
-        project_fingerprint: str,
-        *,
-        operation_lock: asyncio.Lock | None = None,
+            self,
+            connection: aiosqlite.Connection,
+            project_fingerprint: str,
+            *,
+            operation_lock: asyncio.Lock | None = None,
     ) -> None:
         """复用同一 SQLite 连接，并保留 project 指纹作为根 namespace。"""
         super().__init__(connection)
@@ -1377,31 +1401,31 @@ class ProjectScopedAsyncSqliteSaver(AsyncSqliteSaver):
         return await super().aget_tuple(self._scoped_config(config))
 
     async def alist(
-        self,
-        config: dict[str, Any] | None,
-        *,
-        filter: dict[str, Any] | None = None,
-        before: dict[str, Any] | None = None,
-        limit: int | None = None,
+            self,
+            config: dict[str, Any] | None,
+            *,
+            filter: dict[str, Any] | None = None,
+            before: dict[str, Any] | None = None,
+            limit: int | None = None,
     ) -> AsyncIterator[Any]:
         """列举时要求 thread 范围，禁止通过底层 saver 跨 project 扫描。"""
         if config is None:
             raise ThreadPersistenceError("CHECKPOINT_LIST_REQUIRES_THREAD")
         scoped_before = self._scoped_config(before) if before is not None else None
         async for checkpoint in super().alist(
-            self._scoped_config(config),
-            filter=filter,
-            before=scoped_before,
-            limit=limit,
+                self._scoped_config(config),
+                filter=filter,
+                before=scoped_before,
+                limit=limit,
         ):
             yield checkpoint
 
     async def aput(
-        self,
-        config: dict[str, Any],
-        checkpoint: dict[str, Any],
-        metadata: dict[str, Any],
-        new_versions: dict[str, Any],
+            self,
+            config: dict[str, Any],
+            checkpoint: dict[str, Any],
+            metadata: dict[str, Any],
+            new_versions: dict[str, Any],
     ) -> dict[str, Any]:
         """写入时给根图补回 project namespace，并为子图保留独立后缀。"""
         return await super().aput(
@@ -1412,11 +1436,11 @@ class ProjectScopedAsyncSqliteSaver(AsyncSqliteSaver):
         )
 
     async def aput_writes(
-        self,
-        config: dict[str, Any],
-        writes: Any,
-        task_id: str,
-        task_path: str = "",
+            self,
+            config: dict[str, Any],
+            writes: Any,
+            task_id: str,
+            task_path: str = "",
     ) -> None:
         """将中间 writes 与对应 checkpoint 放入同一 project namespace。"""
         await super().aput_writes(
@@ -1460,13 +1484,13 @@ class ThreadPersistence:
     """按 Thread、Run 和 Context 生命周期封装 SQLite 与 checkpoint 细节。"""
 
     def __init__(
-        self,
-        *,
-        connection: aiosqlite.Connection,
-        checkpointer: ProjectScopedAsyncSqliteSaver,
-        path: Path,
-        project_fingerprint: str,
-        operation_lock: asyncio.Lock | None = None,
+            self,
+            *,
+            connection: aiosqlite.Connection,
+            checkpointer: ProjectScopedAsyncSqliteSaver,
+            path: Path,
+            project_fingerprint: str,
+            operation_lock: asyncio.Lock | None = None,
     ) -> None:
         """保存已验证的连接和固定 project namespace。"""
         self._connection = connection
@@ -1480,10 +1504,10 @@ class ThreadPersistence:
 
     @classmethod
     async def open(
-        cls,
-        *,
-        project: Path,
-        home: Path | None = None,
+            cls,
+            *,
+            project: Path,
+            home: Path | None = None,
     ) -> "ThreadPersistence":
         """打开用户级数据库、检查完整性并应用 Harness 自有索引迁移。"""
         base_home = (home or Path.home()).expanduser().resolve()
@@ -1518,7 +1542,7 @@ class ThreadPersistence:
             project_fingerprint = _project_fingerprint(project)
             source_version, has_legacy_prompt_epoch = _inspect_migration_source_sync(path)
             if has_legacy_prompt_epoch and not _is_supported_legacy_prompt_epoch_source(
-                source_version
+                    source_version
             ):
                 raise ThreadPersistenceError(
                     "CHECKPOINT_MIGRATION_LEGACY_TABLE_UNEXPECTED"
@@ -1528,7 +1552,7 @@ class ThreadPersistence:
             # historical schema (including the public v6 source) enters the
             # killable child boundary.
             if path.is_file() and (
-                (0 < source_version < _SCHEMA_VERSION) or has_legacy_prompt_epoch
+                    (0 < source_version < _SCHEMA_VERSION) or has_legacy_prompt_epoch
             ):
                 await _run_legacy_migration_child(
                     path,
@@ -1639,10 +1663,10 @@ class ThreadPersistence:
         )
 
     async def _record_run_start(
-        self,
-        message: str,
-        binding: RunExecutionBinding,
-        context_snapshot: RunContextSnapshot | None = None,
+            self,
+            message: str,
+            binding: RunExecutionBinding,
+            context_snapshot: RunContextSnapshot | None = None,
     ) -> bool:
         """原子登记 snapshot、binding、Thread 索引和用户记录。"""
         self._ensure_open()
@@ -1662,10 +1686,15 @@ class ThreadPersistence:
                 await self._connection.execute("BEGIN IMMEDIATE")
                 cursor = await self._connection.execute(
                     """
-                    SELECT requested_selection, actual_primary_binding, runtime_profile_id,
-                           message_digest, context_snapshot_id
+                    SELECT requested_selection,
+                           actual_primary_binding,
+                           runtime_profile_id,
+                           message_digest,
+                           context_snapshot_id
                     FROM harness_run_execution_bindings
-                    WHERE project_fingerprint = ? AND thread_id = ? AND run_id = ?
+                    WHERE project_fingerprint = ?
+                      AND thread_id = ?
+                      AND run_id = ?
                     """,
                     (self._project_fingerprint, thread_id, run_id),
                 )
@@ -1673,16 +1702,16 @@ class ThreadPersistence:
                 await cursor.close()
                 if existing is not None:
                     if (
-                        str(existing["requested_selection"]) == encoded_selection
-                        and str(existing["actual_primary_binding"]) == encoded_primary
-                        and str(existing["runtime_profile_id"]) == binding.runtime_profile_id
-                        and str(existing["message_digest"]) == message_digest
-                        and (
+                            str(existing["requested_selection"]) == encoded_selection
+                            and str(existing["actual_primary_binding"]) == encoded_primary
+                            and str(existing["runtime_profile_id"]) == binding.runtime_profile_id
+                            and str(existing["message_digest"]) == message_digest
+                            and (
                             str(existing["context_snapshot_id"])
                             if existing["context_snapshot_id"] is not None
                             else None
-                        )
-                        == binding.context_snapshot_id
+                    )
+                            == binding.context_snapshot_id
                     ):
                         if context_snapshot is not None:
                             await self._insert_context_snapshot_in_transaction(context_snapshot)
@@ -1695,7 +1724,7 @@ class ThreadPersistence:
                             execution_id=_root_execution_id(run_id),
                         )
                         if not await self._has_legacy_user_record_in_transaction(
-                            thread_id, run_id, message
+                                thread_id, run_id, message
                         ):
                             await self._append_transcript_in_transaction(user_command)
                         await self._refresh_thread_index_in_transaction(thread_id, now)
@@ -1706,11 +1735,10 @@ class ThreadPersistence:
                     await self._insert_context_snapshot_in_transaction(context_snapshot)
                 await self._connection.execute(
                     """
-                    INSERT INTO harness_threads (
-                        project_fingerprint, thread_id, created_at_ms, updated_at_ms,
-                        first_message, latest_message, message_count
-                    ) VALUES (?, ?, ?, ?, ?, ?, 0)
-                    ON CONFLICT(project_fingerprint, thread_id) DO UPDATE SET
+                    INSERT INTO harness_threads (project_fingerprint, thread_id, created_at_ms, updated_at_ms,
+                                                 first_message, latest_message, message_count)
+                    VALUES (?, ?, ?, ?, ?, ?, 0) ON CONFLICT(project_fingerprint, thread_id) DO
+                    UPDATE SET
                         updated_at_ms = excluded.updated_at_ms,
                         latest_message = excluded.latest_message
                     """,
@@ -1735,11 +1763,12 @@ class ThreadPersistence:
                 )
                 await self._connection.execute(
                     """
-                    INSERT INTO harness_run_execution_bindings (
-                        project_fingerprint, thread_id, run_id, requested_selection,
-                        actual_primary_binding, runtime_profile_id, message_digest,
-                        created_at_ms, context_snapshot_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO harness_run_execution_bindings (project_fingerprint, thread_id, run_id,
+                                                                requested_selection,
+                                                                actual_primary_binding, runtime_profile_id,
+                                                                message_digest,
+                                                                created_at_ms, context_snapshot_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         self._project_fingerprint,
@@ -1762,7 +1791,7 @@ class ThreadPersistence:
                 except aiosqlite.Error:
                     pass
                 if isinstance(exc, ThreadPersistenceError) or isinstance(
-                    exc, asyncio.CancelledError
+                        exc, asyncio.CancelledError
                 ):
                     raise
                 if isinstance(exc, aiosqlite.Error):
@@ -1772,9 +1801,9 @@ class ThreadPersistence:
                 raise
 
     def _validate_context_snapshot(
-        self,
-        snapshot: RunContextSnapshot,
-        binding: RunExecutionBinding,
+            self,
+            snapshot: RunContextSnapshot,
+            binding: RunExecutionBinding,
     ) -> None:
         """验证 snapshot 与当前 project、Thread 和 binding 是同一准备结果。"""
         if snapshot.project_fingerprint != self._project_fingerprint:
@@ -1785,17 +1814,18 @@ class ThreadPersistence:
             raise ThreadPersistenceError("RUN_CONTEXT_SNAPSHOT_BINDING_MISMATCH")
 
     async def load_context_snapshot(
-        self, snapshot_id: str, *, thread_id: str | None = None
+            self, snapshot_id: str, *, thread_id: str | None = None
     ) -> RunContextSnapshot:
         """按当前 project 和可选 Thread 读取可审计的 Context snapshot。"""
         self._ensure_open()
         try:
             async with self._lock:
                 query = """
-                    SELECT snapshot_record
-                    FROM harness_run_context_snapshots
-                    WHERE project_fingerprint = ? AND snapshot_id = ?
-                """
+                        SELECT snapshot_record
+                        FROM harness_run_context_snapshots
+                        WHERE project_fingerprint = ?
+                          AND snapshot_id = ?
+                        """
                 parameters: tuple[object, ...] = (
                     self._project_fingerprint,
                     snapshot_id,
@@ -1820,7 +1850,7 @@ class ThreadPersistence:
             raise ThreadPersistenceError(f"RUN_CONTEXT_SNAPSHOT_READ_FAILED: {exc}") from exc
 
     async def load_latest_context_snapshot(
-        self, thread_id: str
+            self, thread_id: str
     ) -> RunContextSnapshot | None:
         """返回当前 Thread 最近一次已受理 Run 的上下文快照。"""
         self._ensure_open()
@@ -1830,9 +1860,9 @@ class ThreadPersistence:
                     """
                     SELECT snapshot_id
                     FROM harness_run_context_snapshots
-                    WHERE project_fingerprint = ? AND thread_id = ?
-                    ORDER BY created_at_ms DESC, snapshot_id DESC
-                    LIMIT 1
+                    WHERE project_fingerprint = ?
+                      AND thread_id = ?
+                    ORDER BY created_at_ms DESC, snapshot_id DESC LIMIT 1
                     """,
                     (self._project_fingerprint, thread_id),
                 )
@@ -1851,7 +1881,7 @@ class ThreadPersistence:
             ) from exc
 
     async def _insert_context_snapshot_in_transaction(
-        self, snapshot: RunContextSnapshot
+            self, snapshot: RunContextSnapshot
     ) -> None:
         """在 accept_run 的 IMMEDIATE 事务中幂等保存 snapshot。"""
         encoded = canonical_json(snapshot.record())
@@ -1859,7 +1889,8 @@ class ThreadPersistence:
             """
             SELECT thread_id, snapshot_record, system_fingerprint, legacy
             FROM harness_run_context_snapshots
-            WHERE project_fingerprint = ? AND snapshot_id = ?
+            WHERE project_fingerprint = ?
+              AND snapshot_id = ?
             """,
             (self._project_fingerprint, snapshot.snapshot_id),
         )
@@ -1875,19 +1906,18 @@ class ThreadPersistence:
             # the identity of equivalent content prepared by a later Run.
             existing_record["created_at_ms"] = incoming_record["created_at_ms"]
             if (
-                str(existing["thread_id"]) != snapshot.thread_id
-                or canonical_json(existing_record) != canonical_json(incoming_record)
-                or str(existing["system_fingerprint"]) != snapshot.system_fingerprint
-                or bool(existing["legacy"]) != snapshot.legacy
+                    str(existing["thread_id"]) != snapshot.thread_id
+                    or canonical_json(existing_record) != canonical_json(incoming_record)
+                    or str(existing["system_fingerprint"]) != snapshot.system_fingerprint
+                    or bool(existing["legacy"]) != snapshot.legacy
             ):
                 raise ThreadPersistenceError("RUN_CONTEXT_SNAPSHOT_CONFLICT")
             return
         await self._connection.execute(
             """
-            INSERT INTO harness_run_context_snapshots (
-                project_fingerprint, snapshot_id, thread_id, snapshot_record,
-                system_fingerprint, created_at_ms, legacy
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO harness_run_context_snapshots (project_fingerprint, snapshot_id, thread_id, snapshot_record,
+                                                       system_fingerprint, created_at_ms, legacy)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 self._project_fingerprint,
@@ -1901,14 +1931,16 @@ class ThreadPersistence:
         )
 
     async def _has_legacy_user_record_in_transaction(
-        self, thread_id: str, run_id: str, message: str
+            self, thread_id: str, run_id: str, message: str
     ) -> bool:
         """识别 v6 已迁移的同一用户消息，避免幂等重试制造重复可见记录。"""
         cursor = await self._connection.execute(
             """
             SELECT payload
             FROM harness_thread_transcript
-            WHERE project_fingerprint = ? AND thread_id = ? AND kind = 'user'
+            WHERE project_fingerprint = ?
+              AND thread_id = ?
+              AND kind = 'user'
               AND record_id != ? AND run_id IS NULL
             ORDER BY sequence ASC
             """,
@@ -1924,7 +1956,7 @@ class ThreadPersistence:
         return records[0]
 
     async def append_transcript_batch(
-        self, commands: tuple[TranscriptAppend, ...]
+            self, commands: tuple[TranscriptAppend, ...]
     ) -> tuple[TranscriptRecord, ...]:
         """在一个事务中追加同一 Thread 的记录，失败时全部回滚。"""
         self._ensure_open()
@@ -1954,7 +1986,7 @@ class ThreadPersistence:
                 except aiosqlite.Error:
                     pass
                 if isinstance(exc, ThreadPersistenceError) or isinstance(
-                    exc, asyncio.CancelledError
+                        exc, asyncio.CancelledError
                 ):
                     raise
                 if isinstance(exc, aiosqlite.Error):
@@ -1968,11 +2000,20 @@ class ThreadPersistence:
             async with self._lock:
                 cursor = await self._connection.execute(
                     """
-                    SELECT record_id, thread_id, run_id, execution_id, sequence,
-                           kind, payload, content_sha256, byte_length, artifact_id,
+                    SELECT record_id,
+                           thread_id,
+                           run_id,
+                           execution_id,
+                           sequence,
+                           kind,
+                           payload,
+                           content_sha256,
+                           byte_length,
+                           artifact_id,
                            created_at_ms
                     FROM harness_thread_transcript
-                    WHERE project_fingerprint = ? AND thread_id = ?
+                    WHERE project_fingerprint = ?
+                      AND thread_id = ?
                     ORDER BY sequence ASC
                     """,
                     (self._project_fingerprint, thread_id),
@@ -1984,7 +2025,7 @@ class ThreadPersistence:
             raise ThreadPersistenceError(f"TRANSCRIPT_READ_FAILED: {exc}") from exc
 
     async def _get_latest_run_execution_binding(
-        self, thread_id: str
+            self, thread_id: str
     ) -> RunExecutionBinding | None:
         """读取最后一个已受理 Run 的模型选择与实际模型，不推测或修复损坏记录。"""
         self._ensure_open()
@@ -1992,12 +2033,17 @@ class ThreadPersistence:
             async with self._lock:
                 cursor = await self._connection.execute(
                     """
-                    SELECT thread_id, run_id, requested_selection, actual_primary_binding,
-                           runtime_profile_id, created_at_ms, context_snapshot_id
+                    SELECT thread_id,
+                           run_id,
+                           requested_selection,
+                           actual_primary_binding,
+                           runtime_profile_id,
+                           created_at_ms,
+                           context_snapshot_id
                     FROM harness_run_execution_bindings
-                    WHERE project_fingerprint = ? AND thread_id = ?
-                    ORDER BY created_at_ms DESC, rowid DESC
-                    LIMIT 1
+                    WHERE project_fingerprint = ?
+                      AND thread_id = ?
+                    ORDER BY created_at_ms DESC, rowid DESC LIMIT 1
                     """,
                     (self._project_fingerprint, thread_id),
                 )
@@ -2025,20 +2071,20 @@ class ThreadPersistence:
         except ThreadPersistenceError:
             raise
         except (
-            aiosqlite.Error,
-            ExecutionBindingError,
-            TypeError,
-            ValueError,
-            json.JSONDecodeError,
+                aiosqlite.Error,
+                ExecutionBindingError,
+                TypeError,
+                ValueError,
+                json.JSONDecodeError,
         ) as exc:
             raise ThreadPersistenceError(f"RUN_EXECUTION_BINDING_READ_FAILED: {exc}") from exc
 
     async def _append_transcript_in_transaction(
-        self,
-        command: TranscriptAppend,
-        *,
-        project_fingerprint: str | None = None,
-        allow_legacy_invalid: bool = False,
+            self,
+            command: TranscriptAppend,
+            *,
+            project_fingerprint: str | None = None,
+            allow_legacy_invalid: bool = False,
     ) -> TranscriptRecord:
         """在调用方已持有 IMMEDIATE 事务时追加或校验一条记录。"""
         project = project_fingerprint or self._project_fingerprint
@@ -2048,10 +2094,21 @@ class ThreadPersistence:
             raise ThreadPersistenceError("TRANSCRIPT_KIND_INVALID")
         cursor = await self._connection.execute(
             """
-            SELECT record_id, thread_id, run_id, execution_id, sequence, kind,
-                   payload, content_sha256, byte_length, artifact_id, created_at_ms
+            SELECT record_id,
+                   thread_id,
+                   run_id,
+                   execution_id,
+                   sequence,
+                   kind,
+                   payload,
+                   content_sha256,
+                   byte_length,
+                   artifact_id,
+                   created_at_ms
             FROM harness_thread_transcript
-            WHERE project_fingerprint = ? AND thread_id = ? AND record_id = ?
+            WHERE project_fingerprint = ?
+              AND thread_id = ?
+              AND record_id = ?
             """,
             (project, command.thread_id, command.record_id),
         )
@@ -2060,10 +2117,10 @@ class ThreadPersistence:
         if existing is not None:
             record = _transcript_record(existing)
             if _transcript_matches(
-                record,
-                command,
-                project_fingerprint=project,
-                allow_legacy_invalid=allow_legacy_invalid,
+                    record,
+                    command,
+                    project_fingerprint=project,
+                    allow_legacy_invalid=allow_legacy_invalid,
             ):
                 artifact_id = record.artifact_id
                 if artifact_id is not None:
@@ -2075,8 +2132,10 @@ class ThreadPersistence:
 
         cursor = await self._connection.execute(
             """
-            SELECT 1 FROM harness_threads
-            WHERE project_fingerprint = ? AND thread_id = ?
+            SELECT 1
+            FROM harness_threads
+            WHERE project_fingerprint = ?
+              AND thread_id = ?
             """,
             (project, command.thread_id),
         )
@@ -2135,7 +2194,8 @@ class ThreadPersistence:
             """
             SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence
             FROM harness_thread_transcript
-            WHERE project_fingerprint = ? AND thread_id = ?
+            WHERE project_fingerprint = ?
+              AND thread_id = ?
             """,
             (project, command.thread_id),
         )
@@ -2146,11 +2206,11 @@ class ThreadPersistence:
         try:
             await self._connection.execute(
                 """
-                INSERT INTO harness_thread_transcript (
-                    project_fingerprint, thread_id, record_id, run_id, execution_id,
-                    sequence, kind, payload, content_sha256, byte_length, artifact_id,
-                    created_at_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO harness_thread_transcript (project_fingerprint, thread_id, record_id, run_id, execution_id,
+                                                       sequence, kind, payload, content_sha256, byte_length,
+                                                       artifact_id,
+                                                       created_at_ms)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project,
@@ -2184,17 +2244,17 @@ class ThreadPersistence:
         )
 
     async def _insert_transcript_artifact_in_transaction(
-        self,
-        *,
-        thread_id: str,
-        artifact_id: str,
-        kind: str,
-        content: str,
-        source_start: int,
-        source_end: int,
-        content_sha256: str,
-        byte_length: int,
-        project_fingerprint: str | None = None,
+            self,
+            *,
+            thread_id: str,
+            artifact_id: str,
+            kind: str,
+            content: str,
+            source_start: int,
+            source_end: int,
+            content_sha256: str,
+            byte_length: int,
+            project_fingerprint: str | None = None,
     ) -> None:
         """在 Transcript 事务内幂等保存大型工具原文。"""
         project = project_fingerprint or self._project_fingerprint
@@ -2202,7 +2262,9 @@ class ThreadPersistence:
             """
             SELECT content, content_sha256, byte_length
             FROM harness_context_artifacts
-            WHERE project_fingerprint = ? AND thread_id = ? AND artifact_id = ?
+            WHERE project_fingerprint = ?
+              AND thread_id = ?
+              AND artifact_id = ?
             """,
             (project, thread_id, artifact_id),
         )
@@ -2210,17 +2272,20 @@ class ThreadPersistence:
         await cursor.close()
         if existing is not None:
             if (
-                str(existing["content"]) != content
-                or str(existing["content_sha256"]) not in {"", content_sha256}
-                or int(existing["byte_length"]) not in {0, byte_length}
+                    str(existing["content"]) != content
+                    or str(existing["content_sha256"]) not in {"", content_sha256}
+                    or int(existing["byte_length"]) not in {0, byte_length}
             ):
                 raise ThreadPersistenceError("TRANSCRIPT_ARTIFACT_CONFLICT")
             if str(existing["content_sha256"]) == "" or int(existing["byte_length"]) == 0:
                 await self._connection.execute(
                     """
                     UPDATE harness_context_artifacts
-                    SET content_sha256 = ?, byte_length = ?
-                    WHERE project_fingerprint = ? AND thread_id = ? AND artifact_id = ?
+                    SET content_sha256 = ?,
+                        byte_length    = ?
+                    WHERE project_fingerprint = ?
+                      AND thread_id = ?
+                      AND artifact_id = ?
                     """,
                     (
                         content_sha256,
@@ -2233,10 +2298,9 @@ class ThreadPersistence:
             return
         await self._connection.execute(
             """
-            INSERT INTO harness_context_artifacts (
-                project_fingerprint, thread_id, artifact_id, kind, content,
-                source_start, source_end, created_at_ms, content_sha256, byte_length
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO harness_context_artifacts (project_fingerprint, thread_id, artifact_id, kind, content,
+                                                   source_start, source_end, created_at_ms, content_sha256, byte_length)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 project,
@@ -2253,18 +2317,21 @@ class ThreadPersistence:
         )
 
     async def _ensure_transcript_artifact_exists(
-        self,
-        thread_id: str,
-        artifact_id: str,
-        *,
-        project_fingerprint: str | None = None,
+            self,
+            thread_id: str,
+            artifact_id: str,
+            *,
+            project_fingerprint: str | None = None,
     ) -> None:
         """校验幂等重试引用的 Artifact 仍属于当前 project/thread。"""
         project = project_fingerprint or self._project_fingerprint
         cursor = await self._connection.execute(
             """
-            SELECT 1 FROM harness_context_artifacts
-            WHERE project_fingerprint = ? AND thread_id = ? AND artifact_id = ?
+            SELECT 1
+            FROM harness_context_artifacts
+            WHERE project_fingerprint = ?
+              AND thread_id = ?
+              AND artifact_id = ?
             """,
             (project, thread_id, artifact_id),
         )
@@ -2274,11 +2341,11 @@ class ThreadPersistence:
             raise ThreadPersistenceError("TRANSCRIPT_ARTIFACT_MISSING")
 
     async def _refresh_thread_index_in_transaction(
-        self,
-        thread_id: str,
-        updated_at_ms: int,
-        *,
-        project_fingerprint: str | None = None,
+            self,
+            thread_id: str,
+            updated_at_ms: int,
+            *,
+            project_fingerprint: str | None = None,
     ) -> None:
         """用 Transcript 重新计算索引摘要，不读取 LangGraph checkpoint。"""
         project = project_fingerprint or self._project_fingerprint
@@ -2286,7 +2353,9 @@ class ThreadPersistence:
             """
             SELECT COUNT(*) AS message_count
             FROM harness_thread_transcript
-            WHERE project_fingerprint = ? AND thread_id = ? AND kind != 'context'
+            WHERE project_fingerprint = ?
+              AND thread_id = ?
+              AND kind != 'context'
             """,
             (project, thread_id),
         )
@@ -2294,8 +2363,11 @@ class ThreadPersistence:
         await cursor.close()
         cursor = await self._connection.execute(
             """
-            SELECT payload FROM harness_thread_transcript
-            WHERE project_fingerprint = ? AND thread_id = ? AND kind != 'context'
+            SELECT payload
+            FROM harness_thread_transcript
+            WHERE project_fingerprint = ?
+              AND thread_id = ?
+              AND kind != 'context'
             ORDER BY sequence DESC LIMIT 1
             """,
             (project, thread_id),
@@ -2306,9 +2378,11 @@ class ThreadPersistence:
         await self._connection.execute(
             """
             UPDATE harness_threads
-            SET updated_at_ms = ?, message_count = ?,
+            SET updated_at_ms  = ?,
+                message_count  = ?,
                 latest_message = COALESCE(?, latest_message)
-            WHERE project_fingerprint = ? AND thread_id = ?
+            WHERE project_fingerprint = ?
+              AND thread_id = ?
             """,
             (
                 updated_at_ms,
@@ -2336,7 +2410,8 @@ class ThreadPersistence:
                     """
                     UPDATE harness_threads
                     SET updated_at_ms = ?
-                    WHERE project_fingerprint = ? AND thread_id = ?
+                    WHERE project_fingerprint = ?
+                      AND thread_id = ?
                     """,
                     (_now_ms(), self._project_fingerprint, thread_id),
                 )
@@ -2390,11 +2465,9 @@ class ThreadPersistence:
             async with self._lock:
                 await self._connection.execute(
                     """
-                    INSERT INTO harness_runtime_profiles (
-                        project_fingerprint, profile_key, profile_version,
-                        topology_id, topology_version, profile_record, created_at_ms
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(project_fingerprint, profile_key) DO NOTHING
+                    INSERT INTO harness_runtime_profiles (project_fingerprint, profile_key, profile_version,
+                                                          topology_id, topology_version, profile_record, created_at_ms)
+                    VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(project_fingerprint, profile_key) DO NOTHING
                     """,
                     (
                         self._project_fingerprint,
@@ -2413,7 +2486,7 @@ class ThreadPersistence:
             raise ThreadPersistenceError(f"RUNTIME_PROFILE_WRITE_FAILED: {exc}") from exc
 
     async def _get_legacy_model_bindings(
-        self, thread_id: str
+            self, thread_id: str
     ) -> LegacyModelBindings | None:
         """读取并校验 v5 legacy Thread 模型快照。"""
         self._ensure_open()
@@ -2421,8 +2494,10 @@ class ThreadPersistence:
             async with self._lock:
                 cursor = await self._connection.execute(
                     """
-                    SELECT binding_record FROM harness_thread_model_bindings
-                    WHERE project_fingerprint = ? AND thread_id = ?
+                    SELECT binding_record
+                    FROM harness_thread_model_bindings
+                    WHERE project_fingerprint = ?
+                      AND thread_id = ?
                     """,
                     (self._project_fingerprint, thread_id),
                 )
@@ -2437,11 +2512,11 @@ class ThreadPersistence:
         except ThreadPersistenceError:
             raise
         except (
-            aiosqlite.Error,
-            ExecutionBindingError,
-            TypeError,
-            ValueError,
-            json.JSONDecodeError,
+                aiosqlite.Error,
+                ExecutionBindingError,
+                TypeError,
+                ValueError,
+                json.JSONDecodeError,
         ) as exc:
             raise ThreadPersistenceError(f"THREAD_MODEL_BINDING_READ_FAILED: {exc}") from exc
 
@@ -2452,8 +2527,10 @@ class ThreadPersistence:
             async with self._lock:
                 cursor = await self._connection.execute(
                     """
-                    SELECT 1 FROM harness_thread_runtime_profiles
-                    WHERE project_fingerprint = ? AND thread_id = ?
+                    SELECT 1
+                    FROM harness_thread_runtime_profiles
+                    WHERE project_fingerprint = ?
+                      AND thread_id = ?
                     """,
                     (self._project_fingerprint, thread_id),
                 )
@@ -2464,11 +2541,11 @@ class ThreadPersistence:
             raise ThreadPersistenceError(f"RUNTIME_PROFILE_READ_FAILED: {exc}") from exc
 
     async def load_latest_valid_compression_checkpoint(
-        self,
-        thread_id: str,
-        *,
-        max_source_sequence: int | None = None,
-        include_legacy_incomplete: bool = False,
+            self,
+            thread_id: str,
+            *,
+            max_source_sequence: int | None = None,
+            include_legacy_incomplete: bool = False,
     ) -> CompressionCheckpoint | None:
         """按来源边界和创建顺序选择 latest-valid 检查点。
 
@@ -2486,12 +2563,22 @@ class ThreadPersistence:
             async with self._lock:
                 cursor = await self._connection.execute(
                     """
-                    SELECT checkpoint_id, thread_id, source_record_sequence,
-                           source_digest, mode, rewrite_version, projected_messages,
-                           artifact_ids, trigger, pressure_before, pressure_after,
-                           created_at_ms, legacy_incomplete
+                    SELECT checkpoint_id,
+                           thread_id,
+                           source_record_sequence,
+                           source_digest,
+                           mode,
+                           rewrite_version,
+                           projected_messages,
+                           artifact_ids,
+                           trigger,
+                           pressure_before,
+                           pressure_after,
+                           created_at_ms,
+                           legacy_incomplete
                     FROM harness_compression_checkpoints
-                    WHERE project_fingerprint = ? AND thread_id = ?
+                    WHERE project_fingerprint = ?
+                      AND thread_id = ?
                       AND source_record_sequence <= ?
                     ORDER BY source_record_sequence DESC, created_at_ms DESC,
                              checkpoint_id DESC
@@ -2506,11 +2593,11 @@ class ThreadPersistence:
                             row, records
                         )
                     except (
-                        ContextProjectionError,
-                        ThreadPersistenceError,
-                        TypeError,
-                        ValueError,
-                        json.JSONDecodeError,
+                            ContextProjectionError,
+                            ThreadPersistenceError,
+                            TypeError,
+                            ValueError,
+                            json.JSONDecodeError,
                     ):
                         continue
                     if checkpoint.legacy_incomplete and not include_legacy_incomplete:
@@ -2523,9 +2610,9 @@ class ThreadPersistence:
             ) from exc
 
     async def _checkpoint_from_row_in_transaction(
-        self,
-        row: Mapping[str, Any],
-        records: tuple[TranscriptRecord, ...],
+            self,
+            row: Mapping[str, Any],
+            records: tuple[TranscriptRecord, ...],
     ) -> CompressionCheckpoint:
         """在同一 project 连接上校验一个候选检查点。"""
         sequence = int(row["source_record_sequence"])
@@ -2534,7 +2621,7 @@ class ThreadPersistence:
         rewrite_version = str(row["rewrite_version"])
         legacy_incomplete = bool(row["legacy_incomplete"])
         if rewrite_version != HISTORY_REWRITE_VERSION and not (
-            legacy_incomplete and rewrite_version in SUPPORTED_REWRITE_VERSIONS
+                legacy_incomplete and rewrite_version in SUPPORTED_REWRITE_VERSIONS
         ):
             raise ContextProjectionError("PROJECTION_REWRITE_VERSION_UNSUPPORTED")
         mode = str(row["mode"])
@@ -2545,11 +2632,11 @@ class ThreadPersistence:
         before = strict_json_loads(str(row["pressure_before"]))
         after = strict_json_loads(str(row["pressure_after"]))
         if (
-            not isinstance(artifact_ids_value, list)
-            or not all(isinstance(value, str) and value for value in artifact_ids_value)
-            or len(set(artifact_ids_value)) != len(artifact_ids_value)
-            or not isinstance(before, Mapping)
-            or not isinstance(after, Mapping)
+                not isinstance(artifact_ids_value, list)
+                or not all(isinstance(value, str) and value for value in artifact_ids_value)
+                or len(set(artifact_ids_value)) != len(artifact_ids_value)
+                or not isinstance(before, Mapping)
+                or not isinstance(after, Mapping)
         ):
             raise ContextProjectionError("PROJECTION_CHECKPOINT_JSON_INVALID")
         try:
@@ -2568,7 +2655,9 @@ class ThreadPersistence:
                 """
                 SELECT content, content_sha256, byte_length
                 FROM harness_context_artifacts
-                WHERE project_fingerprint = ? AND thread_id = ? AND artifact_id = ?
+                WHERE project_fingerprint = ?
+                  AND thread_id = ?
+                  AND artifact_id = ?
                 """,
                 (self._project_fingerprint, str(row["thread_id"]), artifact_id),
             )
@@ -2578,8 +2667,8 @@ class ThreadPersistence:
                 raise ContextProjectionError("PROJECTION_CHECKPOINT_ARTIFACT_MISSING")
             content = str(artifact["content"])
             if (
-                str(artifact["content_sha256"]) != _content_sha256(content)
-                or int(artifact["byte_length"]) != len(content.encode("utf-8"))
+                    str(artifact["content_sha256"]) != _content_sha256(content)
+                    or int(artifact["byte_length"]) != len(content.encode("utf-8"))
             ):
                 raise ContextProjectionError("PROJECTION_CHECKPOINT_ARTIFACT_INVALID")
         return CompressionCheckpoint(
@@ -2607,7 +2696,7 @@ class ThreadPersistence:
             if not draft.content:
                 raise ThreadPersistenceError("CONTEXT_ARTIFACT_EMPTY")
             if not draft.kind or any(
-                char not in "abcdefghijklmnopqrstuvwxyz0123456789-_" for char in draft.kind
+                    char not in "abcdefghijklmnopqrstuvwxyz0123456789-_" for char in draft.kind
             ):
                 raise ThreadPersistenceError("CONTEXT_ARTIFACT_KIND_INVALID")
             source_start = max(0, draft.source_start)
@@ -2623,8 +2712,8 @@ class ThreadPersistence:
                 else f"{draft.kind}-{uuid.uuid4().hex}"
             )
             if not artifact_id or any(
-                char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
-                for char in artifact_id
+                    char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+                    for char in artifact_id
             ):
                 raise ThreadPersistenceError("CONTEXT_ARTIFACT_ID_INVALID")
             artifacts.append(
@@ -2647,29 +2736,29 @@ class ThreadPersistence:
         )
         if checkpoint_draft is not None:
             if (
-                not checkpoint_draft.checkpoint_id
-                or len(checkpoint_draft.checkpoint_id) > 160
-                or any(
-                    char
-                    not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
-                    for char in checkpoint_draft.checkpoint_id
-                )
-                or checkpoint_draft.mode not in {"micro", "full"}
-                or (
+                    not checkpoint_draft.checkpoint_id
+                    or len(checkpoint_draft.checkpoint_id) > 160
+                    or any(
+                char
+                not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+                for char in checkpoint_draft.checkpoint_id
+            )
+                    or checkpoint_draft.mode not in {"micro", "full"}
+                    or (
                     checkpoint_draft.rewrite_version != HISTORY_REWRITE_VERSION
                     and not (
-                        checkpoint_draft.legacy_incomplete
-                        and checkpoint_draft.rewrite_version
-                        in SUPPORTED_REWRITE_VERSIONS
-                    )
-                )
+                    checkpoint_draft.legacy_incomplete
+                    and checkpoint_draft.rewrite_version
+                    in SUPPORTED_REWRITE_VERSIONS
+            )
+            )
             ):
                 raise ThreadPersistenceError("COMPRESSION_CHECKPOINT_INVALID")
             # 诊断只允许严格 JSON，禁止 NaN/Infinity 和隐式字符串化。
             _strict_json(dict(checkpoint_draft.pressure_before))
             _strict_json(dict(checkpoint_draft.pressure_after))
             if not set(
-                artifact_references(checkpoint_draft.projected_messages)
+                    artifact_references(checkpoint_draft.projected_messages)
             ).issubset(set(checkpoint_draft.artifact_ids)):
                 raise ThreadPersistenceError(
                     "COMPRESSION_CHECKPOINT_ARTIFACT_UNDECLARED"
@@ -2699,8 +2788,10 @@ class ThreadPersistence:
                 if checkpoint_draft is not None:
                     cursor = await self._connection.execute(
                         """
-                        SELECT 1 FROM harness_threads
-                        WHERE project_fingerprint = ? AND thread_id = ?
+                        SELECT 1
+                        FROM harness_threads
+                        WHERE project_fingerprint = ?
+                          AND thread_id = ?
                         """,
                         (self._project_fingerprint, command.thread_id),
                     )
@@ -2710,12 +2801,24 @@ class ThreadPersistence:
                         raise ThreadPersistenceError("THREAD_NOT_FOUND")
                     cursor = await self._connection.execute(
                         """
-                        SELECT checkpoint_id, thread_id, source_record_sequence,
-                               source_digest, mode, rewrite_version, projected_messages,
-                               artifact_ids, trigger, pressure_before, pressure_after,
-                               created_at_ms, legacy_incomplete, commit_payload
+                        SELECT checkpoint_id,
+                               thread_id,
+                               source_record_sequence,
+                               source_digest,
+                               mode,
+                               rewrite_version,
+                               projected_messages,
+                               artifact_ids,
+                               trigger,
+                               pressure_before,
+                               pressure_after,
+                               created_at_ms,
+                               legacy_incomplete,
+                               commit_payload
                         FROM harness_compression_checkpoints
-                        WHERE project_fingerprint = ? AND thread_id = ? AND checkpoint_id = ?
+                        WHERE project_fingerprint = ?
+                          AND thread_id = ?
+                          AND checkpoint_id = ?
                         """,
                         (
                             self._project_fingerprint,
@@ -2752,23 +2855,23 @@ class ThreadPersistence:
                         existing_checkpoint, records
                     )
                     if (
-                        existing_checkpoint["commit_payload"] is None
-                        or str(existing_checkpoint["commit_payload"])
-                        != requested_commit_payload
-                        or existing.source_record_sequence != requested_sequence
-                        or existing.source_digest != requested_digest
-                        or existing.mode != checkpoint_draft.mode
-                        or existing.rewrite_version != checkpoint_draft.rewrite_version
-                        or encode_projected_messages(existing.projected_messages)
-                        != checkpoint_messages
-                        or existing.artifact_ids != checkpoint_draft.artifact_ids
-                        or existing.trigger != checkpoint_draft.trigger
-                        or dict(existing.pressure_before)
-                        != dict(checkpoint_draft.pressure_before)
-                        or dict(existing.pressure_after)
-                        != dict(checkpoint_draft.pressure_after)
-                        or existing.legacy_incomplete
-                        != checkpoint_draft.legacy_incomplete
+                            existing_checkpoint["commit_payload"] is None
+                            or str(existing_checkpoint["commit_payload"])
+                            != requested_commit_payload
+                            or existing.source_record_sequence != requested_sequence
+                            or existing.source_digest != requested_digest
+                            or existing.mode != checkpoint_draft.mode
+                            or existing.rewrite_version != checkpoint_draft.rewrite_version
+                            or encode_projected_messages(existing.projected_messages)
+                            != checkpoint_messages
+                            or existing.artifact_ids != checkpoint_draft.artifact_ids
+                            or existing.trigger != checkpoint_draft.trigger
+                            or dict(existing.pressure_before)
+                            != dict(checkpoint_draft.pressure_before)
+                            or dict(existing.pressure_after)
+                            != dict(checkpoint_draft.pressure_after)
+                            or existing.legacy_incomplete
+                            != checkpoint_draft.legacy_incomplete
                     ):
                         raise ThreadPersistenceError(
                             "COMPRESSION_CHECKPOINT_CONFLICT"
@@ -2781,10 +2884,16 @@ class ThreadPersistence:
                 for artifact in artifacts:
                     cursor = await self._connection.execute(
                         """
-                        SELECT kind, content, source_start, source_end,
-                               content_sha256, byte_length
+                        SELECT kind,
+                               content,
+                               source_start,
+                               source_end,
+                               content_sha256,
+                               byte_length
                         FROM harness_context_artifacts
-                        WHERE project_fingerprint = ? AND thread_id = ? AND artifact_id = ?
+                        WHERE project_fingerprint = ?
+                          AND thread_id = ?
+                          AND artifact_id = ?
                         """,
                         (
                             self._project_fingerprint,
@@ -2796,24 +2905,25 @@ class ThreadPersistence:
                     await cursor.close()
                     if existing_artifact is not None:
                         if (
-                            str(existing_artifact["kind"]) != artifact.kind
-                            or str(existing_artifact["content"]) != artifact.content
-                            or int(existing_artifact["source_start"])
-                            != artifact.source_start
-                            or int(existing_artifact["source_end"]) != artifact.source_end
-                            or str(existing_artifact["content_sha256"])
-                            != artifact.content_sha256
-                            or int(existing_artifact["byte_length"])
-                            != artifact.byte_length
+                                str(existing_artifact["kind"]) != artifact.kind
+                                or str(existing_artifact["content"]) != artifact.content
+                                or int(existing_artifact["source_start"])
+                                != artifact.source_start
+                                or int(existing_artifact["source_end"]) != artifact.source_end
+                                or str(existing_artifact["content_sha256"])
+                                != artifact.content_sha256
+                                or int(existing_artifact["byte_length"])
+                                != artifact.byte_length
                         ):
                             raise ThreadPersistenceError("CONTEXT_ARTIFACT_CONFLICT")
                         continue
                     await self._connection.execute(
                         """
-                        INSERT INTO harness_context_artifacts (
-                            project_fingerprint, thread_id, artifact_id, kind, content,
-                            source_start, source_end, created_at_ms, content_sha256, byte_length
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO harness_context_artifacts (project_fingerprint, thread_id, artifact_id, kind,
+                                                               content,
+                                                               source_start, source_end, created_at_ms, content_sha256,
+                                                               byte_length)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             self._project_fingerprint,
@@ -2831,10 +2941,9 @@ class ThreadPersistence:
                 if summary is not None:
                     await self._connection.execute(
                         """
-                        INSERT INTO harness_context_summaries (
-                            project_fingerprint, thread_id, rewrite_version, content,
-                            source_start, source_end, artifact_ids, created_at_ms
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO harness_context_summaries (project_fingerprint, thread_id, rewrite_version, content,
+                                                               source_start, source_end, artifact_ids, created_at_ms)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             self._project_fingerprint,
@@ -2850,11 +2959,10 @@ class ThreadPersistence:
                 if command.state is not None:
                     await self._connection.execute(
                         """
-                        INSERT INTO harness_context_state (
-                            project_fingerprint, thread_id, failures, circuit_open,
-                            last_action, runtime_state, updated_at_ms
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(project_fingerprint, thread_id) DO UPDATE SET
+                        INSERT INTO harness_context_state (project_fingerprint, thread_id, failures, circuit_open,
+                                                           last_action, runtime_state, updated_at_ms)
+                        VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(project_fingerprint, thread_id) DO
+                        UPDATE SET
                             failures = excluded.failures,
                             circuit_open = excluded.circuit_open,
                             last_action = excluded.last_action,
@@ -2909,13 +3017,13 @@ class ThreadPersistence:
                     )
                     await self._connection.execute(
                         """
-                        INSERT INTO harness_compression_checkpoints (
-                            project_fingerprint, thread_id, checkpoint_id,
-                            source_record_sequence, source_digest, mode,
-                            rewrite_version, projected_messages, artifact_ids,
-                            trigger, pressure_before, pressure_after, created_at_ms,
-                            legacy_incomplete, commit_payload
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO harness_compression_checkpoints (project_fingerprint, thread_id, checkpoint_id,
+                                                                     source_record_sequence, source_digest, mode,
+                                                                     rewrite_version, projected_messages, artifact_ids,
+                                                                     trigger, pressure_before, pressure_after,
+                                                                     created_at_ms,
+                                                                     legacy_incomplete, commit_payload)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             self._project_fingerprint,
@@ -2972,22 +3080,30 @@ class ThreadPersistence:
         return ContextCommit(tuple(artifacts), summary, command.state, checkpoint)
 
     async def _context_commit_result_in_transaction(
-        self,
-        thread_id: str,
-        artifacts: list[ContextArtifact],
-        summary: ContextSummary | None,
-        state: ContextState | None,
-        checkpoint: CompressionCheckpoint,
+            self,
+            thread_id: str,
+            artifacts: list[ContextArtifact],
+            summary: ContextSummary | None,
+            state: ContextState | None,
+            checkpoint: CompressionCheckpoint,
     ) -> ContextCommit:
         """按已验证的稳定命令恢复首次提交结果，而不是返回空的快速成功。"""
         original_artifacts: list[ContextArtifact] = []
         for artifact in artifacts:
             cursor = await self._connection.execute(
                 """
-                SELECT artifact_id, kind, content, source_start, source_end,
-                       created_at_ms, content_sha256, byte_length
+                SELECT artifact_id,
+                       kind,
+                       content,
+                       source_start,
+                       source_end,
+                       created_at_ms,
+                       content_sha256,
+                       byte_length
                 FROM harness_context_artifacts
-                WHERE project_fingerprint = ? AND thread_id = ? AND artifact_id = ?
+                WHERE project_fingerprint = ?
+                  AND thread_id = ?
+                  AND artifact_id = ?
                 """,
                 (self._project_fingerprint, thread_id, artifact.artifact_id),
             )
@@ -3001,14 +3117,21 @@ class ThreadPersistence:
         if summary is not None:
             cursor = await self._connection.execute(
                 """
-                SELECT rewrite_version, content, source_start, source_end,
-                       artifact_ids, created_at_ms
+                SELECT rewrite_version,
+                       content,
+                       source_start,
+                       source_end,
+                       artifact_ids,
+                       created_at_ms
                 FROM harness_context_summaries
-                WHERE project_fingerprint = ? AND thread_id = ?
-                  AND rewrite_version = ? AND content = ?
-                  AND source_start = ? AND source_end = ? AND artifact_ids = ?
-                ORDER BY summary_id ASC
-                LIMIT 1
+                WHERE project_fingerprint = ?
+                  AND thread_id = ?
+                  AND rewrite_version = ?
+                  AND content = ?
+                  AND source_start = ?
+                  AND source_end = ?
+                  AND artifact_ids = ?
+                ORDER BY summary_id ASC LIMIT 1
                 """,
                 (
                     self._project_fingerprint,
@@ -3026,7 +3149,7 @@ class ThreadPersistence:
                 raise ThreadPersistenceError("COMPRESSION_CHECKPOINT_CONFLICT")
             artifact_ids = strict_json_loads(str(row["artifact_ids"]))
             if not isinstance(artifact_ids, list) or not all(
-                isinstance(value, str) for value in artifact_ids
+                    isinstance(value, str) for value in artifact_ids
             ):
                 raise ThreadPersistenceError("COMPRESSION_CHECKPOINT_CONFLICT")
             original_summary = ContextSummary(
@@ -3042,16 +3165,25 @@ class ThreadPersistence:
         )
 
     async def _load_transcript_in_transaction(
-        self, thread_id: str
+            self, thread_id: str
     ) -> tuple[TranscriptRecord, ...]:
         """在调用方已持有锁和事务时读取 Transcript 前缀。"""
         cursor = await self._connection.execute(
             """
-            SELECT record_id, thread_id, run_id, execution_id, sequence,
-                   kind, payload, content_sha256, byte_length, artifact_id,
+            SELECT record_id,
+                   thread_id,
+                   run_id,
+                   execution_id,
+                   sequence,
+                   kind,
+                   payload,
+                   content_sha256,
+                   byte_length,
+                   artifact_id,
                    created_at_ms
             FROM harness_thread_transcript
-            WHERE project_fingerprint = ? AND thread_id = ?
+            WHERE project_fingerprint = ?
+              AND thread_id = ?
             ORDER BY sequence ASC
             """,
             (self._project_fingerprint, thread_id),
@@ -3064,8 +3196,10 @@ class ThreadPersistence:
         """返回当前 project/thread 已存在的 Artifact ID。"""
         cursor = await self._connection.execute(
             """
-            SELECT artifact_id FROM harness_context_artifacts
-            WHERE project_fingerprint = ? AND thread_id = ?
+            SELECT artifact_id
+            FROM harness_context_artifacts
+            WHERE project_fingerprint = ?
+              AND thread_id = ?
             """,
             (self._project_fingerprint, thread_id),
         )
@@ -3080,10 +3214,18 @@ class ThreadPersistence:
             async with self._lock:
                 cursor = await self._connection.execute(
                     """
-                    SELECT artifact_id, kind, content, source_start, source_end, created_at_ms
-                           , content_sha256, byte_length
+                    SELECT artifact_id
+                         , kind
+                         , content
+                         , source_start
+                         , source_end
+                         , created_at_ms
+                         , content_sha256
+                         , byte_length
                     FROM harness_context_artifacts
-                    WHERE project_fingerprint = ? AND thread_id = ? AND artifact_id = ?
+                    WHERE project_fingerprint = ?
+                      AND thread_id = ?
+                      AND artifact_id = ?
                     """,
                     (self._project_fingerprint, thread_id, artifact_id),
                 )
@@ -3113,7 +3255,8 @@ class ThreadPersistence:
                     """
                     SELECT failures, circuit_open, last_action, runtime_state
                     FROM harness_context_state
-                    WHERE project_fingerprint = ? AND thread_id = ?
+                    WHERE project_fingerprint = ?
+                      AND thread_id = ?
                     """,
                     (self._project_fingerprint, thread_id),
                 )
@@ -3146,12 +3289,15 @@ class ThreadPersistence:
             async with self._lock:
                 cursor = await self._connection.execute(
                     """
-                    SELECT thread_id, created_at_ms, updated_at_ms, first_message,
-                           latest_message, message_count
+                    SELECT thread_id,
+                           created_at_ms,
+                           updated_at_ms,
+                           first_message,
+                           latest_message,
+                           message_count
                     FROM harness_threads
                     WHERE project_fingerprint = ?
-                    ORDER BY updated_at_ms DESC, thread_id ASC
-                    LIMIT ?
+                    ORDER BY updated_at_ms DESC, thread_id ASC LIMIT ?
                     """,
                     (self._project_fingerprint, limit),
                 )
@@ -3170,7 +3316,8 @@ class ThreadPersistence:
                     """
                     SELECT updated_at_ms
                     FROM harness_threads
-                    WHERE project_fingerprint = ? AND thread_id = ?
+                    WHERE project_fingerprint = ?
+                      AND thread_id = ?
                     """,
                     (self._project_fingerprint, thread_id),
                 )
@@ -3192,10 +3339,15 @@ class ThreadPersistence:
                 try:
                     cursor = await self._connection.execute(
                         """
-                        SELECT thread_id, created_at_ms, updated_at_ms, first_message,
-                               latest_message, message_count
+                        SELECT thread_id,
+                               created_at_ms,
+                               updated_at_ms,
+                               first_message,
+                               latest_message,
+                               message_count
                         FROM harness_threads
-                        WHERE project_fingerprint = ? AND thread_id = ?
+                        WHERE project_fingerprint = ?
+                          AND thread_id = ?
                         """,
                         (self._project_fingerprint, thread_id),
                     )
@@ -3207,11 +3359,20 @@ class ThreadPersistence:
 
                     cursor = await self._connection.execute(
                         """
-                        SELECT record_id, thread_id, run_id, execution_id, sequence,
-                               kind, payload, content_sha256, byte_length, artifact_id,
+                        SELECT record_id,
+                               thread_id,
+                               run_id,
+                               execution_id,
+                               sequence,
+                               kind,
+                               payload,
+                               content_sha256,
+                               byte_length,
+                               artifact_id,
                                created_at_ms
                         FROM harness_thread_transcript
-                        WHERE project_fingerprint = ? AND thread_id = ?
+                        WHERE project_fingerprint = ?
+                          AND thread_id = ?
                         ORDER BY sequence ASC
                         """,
                         (self._project_fingerprint, thread_id),
@@ -3223,7 +3384,8 @@ class ThreadPersistence:
                         """
                         SELECT legacy_incomplete_history
                         FROM harness_thread_history_metadata
-                        WHERE project_fingerprint = ? AND thread_id = ?
+                        WHERE project_fingerprint = ?
+                          AND thread_id = ?
                         """,
                         (self._project_fingerprint, thread_id),
                     )
@@ -3302,14 +3464,14 @@ class ThreadPersistence:
             await self._validate_required_schema_async(source_version)
             has_legacy_prompt_epoch = await self._table_exists("harness_prompt_epochs")
             if has_legacy_prompt_epoch and not _is_supported_legacy_prompt_epoch_source(
-                source_version
+                    source_version
             ):
                 raise ThreadPersistenceError(
                     "CHECKPOINT_MIGRATION_LEGACY_TABLE_UNEXPECTED"
                 )
             if (
-                (0 < source_version < _SCHEMA_VERSION or has_legacy_prompt_epoch)
-                and not _MIGRATION_CHILD_PROCESS_MODE
+                    (0 < source_version < _SCHEMA_VERSION or has_legacy_prompt_epoch)
+                    and not _MIGRATION_CHILD_PROCESS_MODE
             ):
                 raise ThreadPersistenceError("CHECKPOINT_MIGRATION_WORKER_REQUIRED")
             if source_version == _SCHEMA_VERSION and not has_legacy_prompt_epoch:
@@ -3344,92 +3506,255 @@ class ThreadPersistence:
             if version < 1:
                 await self._connection.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS harness_threads (
-                        project_fingerprint TEXT NOT NULL,
-                        thread_id TEXT NOT NULL,
-                        created_at_ms INTEGER NOT NULL,
-                        updated_at_ms INTEGER NOT NULL,
-                        first_message TEXT NOT NULL,
-                        latest_message TEXT NOT NULL,
-                        message_count INTEGER NOT NULL DEFAULT 0,
-                        PRIMARY KEY (project_fingerprint, thread_id)
+                    CREATE TABLE IF NOT EXISTS harness_threads
+                    (
+                        project_fingerprint
+                        TEXT
+                        NOT
+                        NULL,
+                        thread_id
+                        TEXT
+                        NOT
+                        NULL,
+                        created_at_ms
+                        INTEGER
+                        NOT
+                        NULL,
+                        updated_at_ms
+                        INTEGER
+                        NOT
+                        NULL,
+                        first_message
+                        TEXT
+                        NOT
+                        NULL,
+                        latest_message
+                        TEXT
+                        NOT
+                        NULL,
+                        message_count
+                        INTEGER
+                        NOT
+                        NULL
+                        DEFAULT
+                        0,
+                        PRIMARY
+                        KEY
+                    (
+                        project_fingerprint,
+                        thread_id
                     )
+                        )
                     """
                 )
                 await self._connection.execute(
                     """
                     CREATE INDEX IF NOT EXISTS harness_threads_project_updated
-                    ON harness_threads(project_fingerprint, updated_at_ms DESC)
+                        ON harness_threads(project_fingerprint, updated_at_ms DESC)
                     """
                 )
                 version = 1
             if version < 2:
                 await self._connection.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS harness_prompt_epochs (
-                        project_fingerprint TEXT NOT NULL,
-                        thread_id TEXT NOT NULL,
-                        prompt_version INTEGER NOT NULL,
-                        system_prompt TEXT NOT NULL,
-                        environment_snapshot TEXT NOT NULL,
-                        readonly_memory TEXT NOT NULL,
-                        skill_index TEXT NOT NULL,
-                        tool_schema_fingerprint TEXT NOT NULL,
-                        system_fingerprint TEXT NOT NULL,
-                        history_rewrite_version TEXT NOT NULL,
-                        created_at_ms INTEGER NOT NULL,
-                        PRIMARY KEY (project_fingerprint, thread_id)
+                    CREATE TABLE IF NOT EXISTS harness_prompt_epochs
+                    (
+                        project_fingerprint
+                        TEXT
+                        NOT
+                        NULL,
+                        thread_id
+                        TEXT
+                        NOT
+                        NULL,
+                        prompt_version
+                        INTEGER
+                        NOT
+                        NULL,
+                        system_prompt
+                        TEXT
+                        NOT
+                        NULL,
+                        environment_snapshot
+                        TEXT
+                        NOT
+                        NULL,
+                        readonly_memory
+                        TEXT
+                        NOT
+                        NULL,
+                        skill_index
+                        TEXT
+                        NOT
+                        NULL,
+                        tool_schema_fingerprint
+                        TEXT
+                        NOT
+                        NULL,
+                        system_fingerprint
+                        TEXT
+                        NOT
+                        NULL,
+                        history_rewrite_version
+                        TEXT
+                        NOT
+                        NULL,
+                        created_at_ms
+                        INTEGER
+                        NOT
+                        NULL,
+                        PRIMARY
+                        KEY
+                    (
+                        project_fingerprint,
+                        thread_id
                     )
+                        )
                     """
                 )
                 await self._connection.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS harness_context_artifacts (
-                        project_fingerprint TEXT NOT NULL,
-                        thread_id TEXT NOT NULL,
-                        artifact_id TEXT NOT NULL,
-                        kind TEXT NOT NULL,
-                        content TEXT NOT NULL,
-                        source_start INTEGER NOT NULL,
-                        source_end INTEGER NOT NULL,
-                        created_at_ms INTEGER NOT NULL,
-                        PRIMARY KEY (project_fingerprint, thread_id, artifact_id)
+                    CREATE TABLE IF NOT EXISTS harness_context_artifacts
+                    (
+                        project_fingerprint
+                        TEXT
+                        NOT
+                        NULL,
+                        thread_id
+                        TEXT
+                        NOT
+                        NULL,
+                        artifact_id
+                        TEXT
+                        NOT
+                        NULL,
+                        kind
+                        TEXT
+                        NOT
+                        NULL,
+                        content
+                        TEXT
+                        NOT
+                        NULL,
+                        source_start
+                        INTEGER
+                        NOT
+                        NULL,
+                        source_end
+                        INTEGER
+                        NOT
+                        NULL,
+                        created_at_ms
+                        INTEGER
+                        NOT
+                        NULL,
+                        PRIMARY
+                        KEY
+                    (
+                        project_fingerprint,
+                        thread_id,
+                        artifact_id
                     )
+                        )
                     """
                 )
                 await self._connection.execute(
                     """
                     CREATE INDEX IF NOT EXISTS harness_context_artifacts_thread_created
-                    ON harness_context_artifacts(project_fingerprint, thread_id, created_at_ms)
+                        ON harness_context_artifacts(project_fingerprint, thread_id, created_at_ms)
                     """
                 )
                 await self._connection.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS harness_context_summaries (
-                        project_fingerprint TEXT NOT NULL,
-                        thread_id TEXT NOT NULL,
-                        summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        rewrite_version TEXT NOT NULL,
-                        content TEXT NOT NULL,
-                        source_start INTEGER NOT NULL,
-                        source_end INTEGER NOT NULL,
-                        artifact_ids TEXT NOT NULL,
-                        created_at_ms INTEGER NOT NULL
+                    CREATE TABLE IF NOT EXISTS harness_context_summaries
+                    (
+                        project_fingerprint
+                        TEXT
+                        NOT
+                        NULL,
+                        thread_id
+                        TEXT
+                        NOT
+                        NULL,
+                        summary_id
+                        INTEGER
+                        PRIMARY
+                        KEY
+                        AUTOINCREMENT,
+                        rewrite_version
+                        TEXT
+                        NOT
+                        NULL,
+                        content
+                        TEXT
+                        NOT
+                        NULL,
+                        source_start
+                        INTEGER
+                        NOT
+                        NULL,
+                        source_end
+                        INTEGER
+                        NOT
+                        NULL,
+                        artifact_ids
+                        TEXT
+                        NOT
+                        NULL,
+                        created_at_ms
+                        INTEGER
+                        NOT
+                        NULL
                     )
                     """
                 )
                 await self._connection.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS harness_context_state (
-                        project_fingerprint TEXT NOT NULL,
-                        thread_id TEXT NOT NULL,
-                        failures INTEGER NOT NULL DEFAULT 0,
-                        circuit_open INTEGER NOT NULL DEFAULT 0,
-                        last_action TEXT NOT NULL DEFAULT 'none',
-                        runtime_state TEXT NOT NULL DEFAULT '{}',
-                        updated_at_ms INTEGER NOT NULL,
-                        PRIMARY KEY (project_fingerprint, thread_id)
+                    CREATE TABLE IF NOT EXISTS harness_context_state
+                    (
+                        project_fingerprint
+                        TEXT
+                        NOT
+                        NULL,
+                        thread_id
+                        TEXT
+                        NOT
+                        NULL,
+                        failures
+                        INTEGER
+                        NOT
+                        NULL
+                        DEFAULT
+                        0,
+                        circuit_open
+                        INTEGER
+                        NOT
+                        NULL
+                        DEFAULT
+                        0,
+                        last_action
+                        TEXT
+                        NOT
+                        NULL
+                        DEFAULT
+                        'none',
+                        runtime_state
+                        TEXT
+                        NOT
+                        NULL
+                        DEFAULT
+                        '{}',
+                        updated_at_ms
+                        INTEGER
+                        NOT
+                        NULL,
+                        PRIMARY
+                        KEY
+                    (
+                        project_fingerprint,
+                        thread_id
                     )
+                        )
                     """
                 )
                 version = 2
@@ -3437,77 +3762,174 @@ class ThreadPersistence:
                 await self._connection.execute(
                     """
                     ALTER TABLE harness_prompt_epochs
-                    ADD COLUMN prefix_change_reason TEXT NOT NULL DEFAULT 'new_thread'
+                        ADD COLUMN prefix_change_reason TEXT NOT NULL DEFAULT 'new_thread'
                     """
                 )
                 version = 3
             if version < 4:
                 await self._connection.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS harness_runtime_profiles (
-                        project_fingerprint TEXT NOT NULL,
-                        profile_key TEXT NOT NULL,
-                        profile_version INTEGER NOT NULL,
-                        topology_id TEXT NOT NULL,
-                        topology_version INTEGER NOT NULL,
-                        profile_record TEXT NOT NULL,
-                        created_at_ms INTEGER NOT NULL,
-                        PRIMARY KEY (project_fingerprint, profile_key)
+                    CREATE TABLE IF NOT EXISTS harness_runtime_profiles
+                    (
+                        project_fingerprint
+                        TEXT
+                        NOT
+                        NULL,
+                        profile_key
+                        TEXT
+                        NOT
+                        NULL,
+                        profile_version
+                        INTEGER
+                        NOT
+                        NULL,
+                        topology_id
+                        TEXT
+                        NOT
+                        NULL,
+                        topology_version
+                        INTEGER
+                        NOT
+                        NULL,
+                        profile_record
+                        TEXT
+                        NOT
+                        NULL,
+                        created_at_ms
+                        INTEGER
+                        NOT
+                        NULL,
+                        PRIMARY
+                        KEY
+                    (
+                        project_fingerprint,
+                        profile_key
                     )
+                        )
                     """
                 )
                 await self._connection.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS harness_thread_runtime_profiles (
-                        project_fingerprint TEXT NOT NULL,
-                        thread_id TEXT NOT NULL,
-                        profile_key TEXT NOT NULL,
-                        profile_version INTEGER NOT NULL,
-                        bound_at_ms INTEGER NOT NULL,
-                        PRIMARY KEY (project_fingerprint, thread_id)
+                    CREATE TABLE IF NOT EXISTS harness_thread_runtime_profiles
+                    (
+                        project_fingerprint
+                        TEXT
+                        NOT
+                        NULL,
+                        thread_id
+                        TEXT
+                        NOT
+                        NULL,
+                        profile_key
+                        TEXT
+                        NOT
+                        NULL,
+                        profile_version
+                        INTEGER
+                        NOT
+                        NULL,
+                        bound_at_ms
+                        INTEGER
+                        NOT
+                        NULL,
+                        PRIMARY
+                        KEY
+                    (
+                        project_fingerprint,
+                        thread_id
                     )
+                        )
                     """
                 )
                 await self._connection.execute(
                     """
                     CREATE INDEX IF NOT EXISTS harness_thread_runtime_profiles_project_profile
-                    ON harness_thread_runtime_profiles(project_fingerprint, profile_key)
+                        ON harness_thread_runtime_profiles(project_fingerprint, profile_key)
                     """
                 )
                 version = 4
             if version < 5:
                 await self._connection.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS harness_thread_model_bindings (
-                        project_fingerprint TEXT NOT NULL,
-                        thread_id TEXT NOT NULL,
-                        binding_record TEXT NOT NULL,
-                        bound_at_ms INTEGER NOT NULL,
-                        PRIMARY KEY (project_fingerprint, thread_id)
+                    CREATE TABLE IF NOT EXISTS harness_thread_model_bindings
+                    (
+                        project_fingerprint
+                        TEXT
+                        NOT
+                        NULL,
+                        thread_id
+                        TEXT
+                        NOT
+                        NULL,
+                        binding_record
+                        TEXT
+                        NOT
+                        NULL,
+                        bound_at_ms
+                        INTEGER
+                        NOT
+                        NULL,
+                        PRIMARY
+                        KEY
+                    (
+                        project_fingerprint,
+                        thread_id
                     )
+                        )
                     """
                 )
                 version = 5
             if version < 6:
                 await self._connection.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS harness_run_execution_bindings (
-                        project_fingerprint TEXT NOT NULL,
-                        thread_id TEXT NOT NULL,
-                        run_id TEXT NOT NULL,
-                        requested_selection TEXT NOT NULL,
-                        actual_primary_binding TEXT NOT NULL,
-                        runtime_profile_id TEXT NOT NULL,
-                        message_digest TEXT NOT NULL,
-                        created_at_ms INTEGER NOT NULL,
-                        PRIMARY KEY (project_fingerprint, thread_id, run_id)
+                    CREATE TABLE IF NOT EXISTS harness_run_execution_bindings
+                    (
+                        project_fingerprint
+                        TEXT
+                        NOT
+                        NULL,
+                        thread_id
+                        TEXT
+                        NOT
+                        NULL,
+                        run_id
+                        TEXT
+                        NOT
+                        NULL,
+                        requested_selection
+                        TEXT
+                        NOT
+                        NULL,
+                        actual_primary_binding
+                        TEXT
+                        NOT
+                        NULL,
+                        runtime_profile_id
+                        TEXT
+                        NOT
+                        NULL,
+                        message_digest
+                        TEXT
+                        NOT
+                        NULL,
+                        created_at_ms
+                        INTEGER
+                        NOT
+                        NULL,
+                        PRIMARY
+                        KEY
+                    (
+                        project_fingerprint,
+                        thread_id,
+                        run_id
                     )
+                        )
                     """
                 )
                 await self._connection.execute(
                     """
                     CREATE INDEX IF NOT EXISTS harness_run_execution_bindings_thread_created
-                    ON harness_run_execution_bindings(project_fingerprint, thread_id, created_at_ms DESC)
+                        ON harness_run_execution_bindings(project_fingerprint, thread_id, created_at_ms DESC)
                     """
                 )
                 version = 6
@@ -3515,40 +3937,98 @@ class ThreadPersistence:
                 await self._add_artifact_metadata_columns()
                 await self._connection.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS harness_thread_transcript (
-                        project_fingerprint TEXT NOT NULL,
-                        thread_id TEXT NOT NULL,
-                        record_id TEXT NOT NULL,
-                        run_id TEXT,
-                        execution_id TEXT,
-                        sequence INTEGER NOT NULL,
-                        kind TEXT NOT NULL CHECK(kind IN ('user', 'assistant', 'tool', 'context')),
+                    CREATE TABLE IF NOT EXISTS harness_thread_transcript
+                    (
+                        project_fingerprint
+                        TEXT
+                        NOT
+                        NULL,
+                        thread_id
+                        TEXT
+                        NOT
+                        NULL,
+                        record_id
+                        TEXT
+                        NOT
+                        NULL,
+                        run_id
+                        TEXT,
+                        execution_id
+                        TEXT,
+                        sequence
+                        INTEGER
+                        NOT
+                        NULL,
+                        kind
+                        TEXT
+                        NOT
+                        NULL
+                        CHECK (
+                        kind
+                        IN
+                    (
+                        'user',
+                        'assistant',
+                        'tool',
+                        'context'
+                    )),
                         payload TEXT NOT NULL,
                         content_sha256 TEXT NOT NULL,
                         byte_length INTEGER NOT NULL,
                         artifact_id TEXT,
                         created_at_ms INTEGER NOT NULL,
-                        PRIMARY KEY (project_fingerprint, thread_id, record_id),
-                        UNIQUE (project_fingerprint, thread_id, sequence)
+                        PRIMARY KEY
+                    (
+                        project_fingerprint,
+                        thread_id,
+                        record_id
+                    ),
+                        UNIQUE
+                    (
+                        project_fingerprint,
+                        thread_id,
+                        sequence
                     )
+                        )
                     """
                 )
                 await self._connection.execute(
                     """
                     CREATE INDEX IF NOT EXISTS harness_thread_transcript_thread_sequence
-                    ON harness_thread_transcript(project_fingerprint, thread_id, sequence)
+                        ON harness_thread_transcript(project_fingerprint, thread_id, sequence)
                     """
                 )
                 await self._connection.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS harness_thread_history_metadata (
-                        project_fingerprint TEXT NOT NULL,
-                        thread_id TEXT NOT NULL,
-                        legacy_incomplete_history INTEGER NOT NULL,
-                        source_schema_version INTEGER NOT NULL,
-                        migrated_at_ms INTEGER NOT NULL,
-                        PRIMARY KEY (project_fingerprint, thread_id)
+                    CREATE TABLE IF NOT EXISTS harness_thread_history_metadata
+                    (
+                        project_fingerprint
+                        TEXT
+                        NOT
+                        NULL,
+                        thread_id
+                        TEXT
+                        NOT
+                        NULL,
+                        legacy_incomplete_history
+                        INTEGER
+                        NOT
+                        NULL,
+                        source_schema_version
+                        INTEGER
+                        NOT
+                        NULL,
+                        migrated_at_ms
+                        INTEGER
+                        NOT
+                        NULL,
+                        PRIMARY
+                        KEY
+                    (
+                        project_fingerprint,
+                        thread_id
                     )
+                        )
                     """
                 )
                 await self._bootstrap_legacy_transcripts(source_version)
@@ -3557,22 +4037,51 @@ class ThreadPersistence:
                 await self._add_context_snapshot_column()
                 await self._connection.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS harness_run_context_snapshots (
-                        project_fingerprint TEXT NOT NULL,
-                        snapshot_id TEXT NOT NULL,
-                        thread_id TEXT NOT NULL,
-                        snapshot_record TEXT NOT NULL,
-                        system_fingerprint TEXT NOT NULL,
-                        created_at_ms INTEGER NOT NULL,
-                        legacy INTEGER NOT NULL DEFAULT 0,
-                        PRIMARY KEY (project_fingerprint, snapshot_id)
+                    CREATE TABLE IF NOT EXISTS harness_run_context_snapshots
+                    (
+                        project_fingerprint
+                        TEXT
+                        NOT
+                        NULL,
+                        snapshot_id
+                        TEXT
+                        NOT
+                        NULL,
+                        thread_id
+                        TEXT
+                        NOT
+                        NULL,
+                        snapshot_record
+                        TEXT
+                        NOT
+                        NULL,
+                        system_fingerprint
+                        TEXT
+                        NOT
+                        NULL,
+                        created_at_ms
+                        INTEGER
+                        NOT
+                        NULL,
+                        legacy
+                        INTEGER
+                        NOT
+                        NULL
+                        DEFAULT
+                        0,
+                        PRIMARY
+                        KEY
+                    (
+                        project_fingerprint,
+                        snapshot_id
                     )
+                        )
                     """
                 )
                 await self._connection.execute(
                     """
                     CREATE INDEX IF NOT EXISTS harness_run_context_snapshots_thread_created
-                    ON harness_run_context_snapshots(project_fingerprint, thread_id, created_at_ms)
+                        ON harness_run_context_snapshots(project_fingerprint, thread_id, created_at_ms)
                     """
                 )
                 if has_legacy_prompt_epoch:
@@ -3588,13 +4097,39 @@ class ThreadPersistence:
                 await self._backfill_artifact_metadata()
                 await self._connection.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS harness_compression_checkpoints (
-                        project_fingerprint TEXT NOT NULL,
-                        thread_id TEXT NOT NULL,
-                        checkpoint_id TEXT NOT NULL,
-                        source_record_sequence INTEGER NOT NULL,
-                        source_digest TEXT NOT NULL,
-                        mode TEXT NOT NULL CHECK(mode IN ('micro', 'full')),
+                    CREATE TABLE IF NOT EXISTS harness_compression_checkpoints
+                    (
+                        project_fingerprint
+                        TEXT
+                        NOT
+                        NULL,
+                        thread_id
+                        TEXT
+                        NOT
+                        NULL,
+                        checkpoint_id
+                        TEXT
+                        NOT
+                        NULL,
+                        source_record_sequence
+                        INTEGER
+                        NOT
+                        NULL,
+                        source_digest
+                        TEXT
+                        NOT
+                        NULL,
+                        mode
+                        TEXT
+                        NOT
+                        NULL
+                        CHECK (
+                        mode
+                        IN
+                    (
+                        'micro',
+                        'full'
+                    )),
                         rewrite_version TEXT NOT NULL,
                         projected_messages TEXT NOT NULL,
                         artifact_ids TEXT NOT NULL,
@@ -3603,19 +4138,22 @@ class ThreadPersistence:
                         pressure_after TEXT NOT NULL,
                         created_at_ms INTEGER NOT NULL,
                         legacy_incomplete INTEGER NOT NULL DEFAULT 0,
-                        PRIMARY KEY (
-                            project_fingerprint, thread_id, checkpoint_id
-                        )
+                        PRIMARY KEY
+                    (
+                        project_fingerprint,
+                        thread_id,
+                        checkpoint_id
                     )
+                        )
                     """
                 )
                 await self._connection.execute(
                     """
                     CREATE INDEX IF NOT EXISTS harness_compression_checkpoints_latest
-                    ON harness_compression_checkpoints(
+                        ON harness_compression_checkpoints(
                         project_fingerprint, thread_id,
                         source_record_sequence DESC, created_at_ms DESC
-                    )
+                        )
                     """
                 )
                 await self._bootstrap_legacy_compression_checkpoints()
@@ -3739,9 +4277,9 @@ class ThreadPersistence:
             ) from exc
 
     async def _commit_and_classify_outcome_async(
-        self,
-        source: _MigrationDatabaseFingerprint,
-        final: _MigrationDatabaseFingerprint,
+            self,
+            source: _MigrationDatabaseFingerprint,
+            final: _MigrationDatabaseFingerprint,
     ) -> tuple[Literal["final", "source", "mismatch", "unknown"], BaseException | None]:
         """在有界 deadline 内 settle commit，之后才用独立连接确认落盘事实。"""
         _migration_child_test_failure(
@@ -3793,9 +4331,9 @@ class ThreadPersistence:
 
     @staticmethod
     def _classify_migration_database_sync(
-        path: Path,
-        source: _MigrationDatabaseFingerprint,
-        final: _MigrationDatabaseFingerprint,
+            path: Path,
+            source: _MigrationDatabaseFingerprint,
+            final: _MigrationDatabaseFingerprint,
     ) -> Literal["final", "source", "mismatch"]:
         """独立连接只按完整 fingerprint/schema 事实分类 commit outcome。"""
         if not path.is_file():
@@ -3808,7 +4346,7 @@ class ThreadPersistence:
                 if final.user_version != _SCHEMA_VERSION or final.integrity_check != "ok":
                     return "mismatch"
                 if connection.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='harness_prompt_epochs'"
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='harness_prompt_epochs'"
                 ).fetchone() is not None:
                     return "mismatch"
                 return "final"
@@ -3835,7 +4373,10 @@ class ThreadPersistence:
             SELECT type, name, tbl_name, sql
             FROM sqlite_master
             WHERE name NOT LIKE 'sqlite_%'
-              AND type IN ('table', 'index', 'trigger', 'view')
+              AND type IN ('table'
+                , 'index'
+                , 'trigger'
+                , 'view')
             ORDER BY type, name
             """
         )
@@ -3899,9 +4440,9 @@ class ThreadPersistence:
         return tuple(str(row[1]) for row in rows)
 
     async def _table_digest_async(
-        self,
-        table_name: str,
-        columns: tuple[str, ...] | None = None,
+            self,
+            table_name: str,
+            columns: tuple[str, ...] | None = None,
     ) -> _MigrationTableDigest:
         """在当前事务快照中计算指定列的行摘要。"""
         selected = columns or await self._table_columns_async(table_name)
@@ -3920,8 +4461,10 @@ class ThreadPersistence:
         """异步读取 legacy v1-v6 schema 的完整 contract，拒绝未知对象。"""
         cursor = await self._connection.execute(
             """
-            SELECT name FROM sqlite_master
-            WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name NOT LIKE 'sqlite_%'
             ORDER BY name
             """
         )
@@ -3952,9 +4495,9 @@ class ThreadPersistence:
             await self._validate_table_contract_async(table_name, source_version)
 
     async def _validate_table_contract_async(
-        self,
-        table_name: str,
-        source_version: int,
+            self,
+            table_name: str,
+            source_version: int,
     ) -> None:
         """读取单表 sqlite_master/PRAGMA 并复用同步 contract 比较器。"""
         cursor = await self._connection.execute(
@@ -4186,8 +4729,8 @@ class ThreadPersistence:
         if await self._table_exists("harness_prompt_epochs"):
             prompt_columns = await self._table_columns_async("harness_prompt_epochs")
             if any(
-                column not in prompt_columns
-                for column in ("project_fingerprint", "thread_id", "system_prompt", "created_at_ms")
+                    column not in prompt_columns
+                    for column in ("project_fingerprint", "thread_id", "system_prompt", "created_at_ms")
             ):
                 raise ThreadPersistenceError(
                     "CHECKPOINT_MIGRATION_SOURCE_SCHEMA_INVALID:harness_prompt_epochs"
@@ -4220,13 +4763,13 @@ class ThreadPersistence:
                 )
 
     async def _validate_final_database_async(
-        self,
-        fingerprint: _MigrationDatabaseFingerprint,
+            self,
+            fingerprint: _MigrationDatabaseFingerprint,
     ) -> None:
         """验证最终 schema、版本、完整性和一次性 legacy 表退出条件。"""
         if (
-            fingerprint.user_version != _SCHEMA_VERSION
-            or fingerprint.integrity_check != "ok"
+                fingerprint.user_version != _SCHEMA_VERSION
+                or fingerprint.integrity_check != "ok"
         ):
             raise ThreadPersistenceError("CHECKPOINT_MIGRATION_FINAL_VALIDATION_FAILED")
         await self._validate_required_schema_async(_SCHEMA_VERSION)
@@ -4234,9 +4777,9 @@ class ThreadPersistence:
             raise ThreadPersistenceError("CHECKPOINT_MIGRATION_LEGACY_TABLE_REMAINS")
 
     async def _validate_preserved_source_data_async(
-        self,
-        source: _MigrationDatabaseFingerprint,
-        backup_path: Path,
+            self,
+            source: _MigrationDatabaseFingerprint,
+            backup_path: Path,
     ) -> None:
         """确认旧数据逐行保留；仅放行有明确 canonical 转换的表。"""
         current_tables = {
@@ -4254,8 +4797,6 @@ class ThreadPersistence:
                 "harness_run_context_snapshots",
                 "harness_thread_transcript",
                 "harness_thread_history_metadata",
-                wdl1
-                "harness_context_artifacts",
                 # transcript bootstrap 会把超过内联上限的旧工具输出提取为新
                 # artifact；原 artifact 行逐字段保留，允许 canonical 追加。
                 "harness_context_artifacts",
@@ -4279,17 +4820,17 @@ class ThreadPersistence:
                 source_table.columns,
             )
             if (
-                current.row_count != source_table.row_count
-                or current.digest != source_table.digest
+                    current.row_count != source_table.row_count
+                    or current.digest != source_table.digest
             ):
                 raise ThreadPersistenceError(
                     f"CHECKPOINT_MIGRATION_DATA_CHANGED:{source_table.name}"
                 )
 
     async def _validate_prompt_epoch_rows_async(
-        self,
-        backup_path: Path,
-        source_table: _MigrationTableDigest,
+            self,
+            backup_path: Path,
+            source_table: _MigrationTableDigest,
     ) -> None:
         """逐行确认每个旧 PromptEpoch 只变成对应的 legacy snapshot。"""
         source_rows = _migration_table_rows_sync(
@@ -4308,7 +4849,9 @@ class ThreadPersistence:
                 """
                 SELECT snapshot_id, snapshot_record, system_fingerprint, created_at_ms
                 FROM harness_run_context_snapshots
-                WHERE project_fingerprint = ? AND thread_id = ? AND legacy = 1
+                WHERE project_fingerprint = ?
+                  AND thread_id = ?
+                  AND legacy = 1
                 """,
                 (str(project), str(thread_id)),
             )
@@ -4323,17 +4866,17 @@ class ThreadPersistence:
                     "CHECKPOINT_MIGRATION_LEGACY_DATA_INVALID"
                 ) from exc
             if (
-                str(row["snapshot_id"]) != expected.snapshot_id
-                or str(row["system_fingerprint"]) != expected.system_fingerprint
-                or int(row["created_at_ms"]) != expected.created_at_ms
-                or record != expected.record()
+                    str(row["snapshot_id"]) != expected.snapshot_id
+                    or str(row["system_fingerprint"]) != expected.system_fingerprint
+                    or int(row["created_at_ms"]) != expected.created_at_ms
+                    or record != expected.record()
             ):
                 raise ThreadPersistenceError("CHECKPOINT_MIGRATION_LEGACY_DATA_CHANGED")
 
     async def _validate_thread_rows_async(
-        self,
-        backup_path: Path,
-        source_table: _MigrationTableDigest,
+            self,
+            backup_path: Path,
+            source_table: _MigrationTableDigest,
     ) -> None:
         """校验 Thread 事实行；只允许索引摘要字段被 transcript 刷新。"""
         source_rows = _migration_table_rows_sync(
@@ -4353,29 +4896,25 @@ class ThreadPersistence:
                 """
                 SELECT project_fingerprint, thread_id, created_at_ms, first_message
                 FROM harness_threads
-                WHERE project_fingerprint = ? AND thread_id = ?
+                WHERE project_fingerprint = ?
+                  AND thread_id = ?
                 """,
                 (source_row[indexes["project_fingerprint"]], source_row[indexes["thread_id"]]),
             )
             current = await cursor.fetchone()
             await cursor.close()
             if current is None or tuple(current) != tuple(
-                source_row[indexes[column]] for column in immutable_columns
+                    source_row[indexes[column]] for column in immutable_columns
             ):
                 raise ThreadPersistenceError("CHECKPOINT_MIGRATION_DATA_CHANGED:harness_threads")
 
     async def _validate_append_only_table_async(
-        self,
-        backup_path: Path,
-        source_table: _MigrationTableDigest,
+            self,
+            backup_path: Path,
+            source_table: _MigrationTableDigest,
     ) -> None:
         """校验只会由 canonical bootstrap 追加记录的旧表，禁止改写/删除原行。"""
         primary_keys = {
-            "harness_context_artifacts": (
-                "project_fingerprint",
-                "thread_id",
-                "artifact_id",
-            ),
             "harness_compression_checkpoints": (
                 "project_fingerprint",
                 "thread_id",
@@ -4427,9 +4966,9 @@ class ThreadPersistence:
                 )
 
     async def _validate_binding_rows_async(
-        self,
-        backup_path: Path,
-        source_table: _MigrationTableDigest,
+            self,
+            backup_path: Path,
+            source_table: _MigrationTableDigest,
     ) -> None:
         """允许 adapter 只回填 binding 的 context_snapshot_id，其余字段逐行不变。"""
         key_columns = ("project_fingerprint", "thread_id", "run_id")
@@ -4468,8 +5007,10 @@ class ThreadPersistence:
         """读取当前数据库所有用户表的摘要，避免重复依赖完整 fingerprint。"""
         cursor = await self._connection.execute(
             """
-            SELECT name FROM sqlite_master
-            WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name NOT LIKE 'sqlite_%'
             ORDER BY name
             """
         )
@@ -4491,9 +5032,9 @@ class ThreadPersistence:
         )
 
     async def _create_migration_backup(
-        self,
-        source_version: int,
-        source_fingerprint: _MigrationDatabaseFingerprint | None = None,
+            self,
+            source_version: int,
+            source_fingerprint: _MigrationDatabaseFingerprint | None = None,
     ) -> Path:
         """在已持有 BEGIN IMMEDIATE 时生成并严格验证独立 SQLite backup。"""
         _migration_child_test_failure(
@@ -4522,8 +5063,8 @@ class ThreadPersistence:
             target.close()
             target = None
             if any(
-                temporary.with_name(temporary.name + suffix).exists()
-                for suffix in ("-wal", "-shm", "-journal")
+                    temporary.with_name(temporary.name + suffix).exists()
+                    for suffix in ("-wal", "-shm", "-journal")
             ):
                 raise ThreadPersistenceError(
                     "CHECKPOINT_MIGRATION_BACKUP_NOT_STANDALONE"
@@ -4534,7 +5075,7 @@ class ThreadPersistence:
             finally:
                 backup_connection.close()
             if source.user_version != source_version or not _migration_fingerprint_matches(
-                source, backup
+                    source, backup
             ):
                 raise ThreadPersistenceError(
                     "CHECKPOINT_MIGRATION_BACKUP_VALIDATION_FAILED"
@@ -4567,10 +5108,10 @@ class ThreadPersistence:
         if not await self._table_exists("harness_prompt_epochs"):
             return False
         for table_name in (
-            "harness_thread_transcript",
-            "harness_thread_history_metadata",
-            "harness_run_context_snapshots",
-            "harness_compression_checkpoints",
+                "harness_thread_transcript",
+                "harness_thread_history_metadata",
+                "harness_run_context_snapshots",
+                "harness_compression_checkpoints",
         ):
             if await self._table_exists(table_name):
                 return False
@@ -4583,12 +5124,12 @@ class ThreadPersistence:
         return True
 
     async def _write_migration_state(
-        self,
-        *,
-        status: str,
-        source_fingerprint: _MigrationDatabaseFingerprint,
-        backup_path: Path,
-        final_fingerprint: _MigrationDatabaseFingerprint | None = None,
+            self,
+            *,
+            status: str,
+            source_fingerprint: _MigrationDatabaseFingerprint,
+            backup_path: Path,
+            final_fingerprint: _MigrationDatabaseFingerprint | None = None,
     ) -> None:
         """原子写入迁移状态；状态写失败时禁止继续启动或迁移。"""
         if status == "committed" and _MIGRATION_CHILD_TEST_PHASE == "state_committed_failure":
@@ -4663,9 +5204,9 @@ class ThreadPersistence:
             return
 
     async def _restore_migration_backup_async(
-        self,
-        backup_path: Path,
-        expected: _MigrationDatabaseFingerprint,
+            self,
+            backup_path: Path,
+            expected: _MigrationDatabaseFingerprint,
     ) -> None:
         """关闭旧连接后原子替换完整快照，不让旧 WAL/SHM 继续挂到目标上。"""
         self._validate_backup_file_sync(backup_path, expected)
@@ -4675,16 +5216,16 @@ class ThreadPersistence:
         self._restore_backup_path_sync(self._path, backup_path, expected)
 
     def _validate_backup_file_sync(
-        self,
-        backup_path: Path,
-        expected: _MigrationDatabaseFingerprint,
+            self,
+            backup_path: Path,
+            expected: _MigrationDatabaseFingerprint,
     ) -> None:
         """验证固定 backup 槽仍是可独立恢复的原始快照。"""
         if not backup_path.is_file():
             raise ThreadPersistenceError("CHECKPOINT_MIGRATION_BACKUP_UNAVAILABLE")
         if any(
-            backup_path.with_name(backup_path.name + suffix).exists()
-            for suffix in ("-wal", "-shm", "-journal")
+                backup_path.with_name(backup_path.name + suffix).exists()
+                for suffix in ("-wal", "-shm", "-journal")
         ):
             raise ThreadPersistenceError("CHECKPOINT_MIGRATION_BACKUP_NOT_STANDALONE")
         connection = sqlite3.connect(backup_path)
@@ -4698,8 +5239,8 @@ class ThreadPersistence:
 
     @staticmethod
     def _validate_final_database_path_sync(
-        path: Path,
-        expected: _MigrationDatabaseFingerprint,
+            path: Path,
+            expected: _MigrationDatabaseFingerprint,
     ) -> None:
         """验证提交标记对应的最终库，不以 user_version 单独认定成功。"""
         if expected.user_version != _SCHEMA_VERSION or expected.integrity_check != "ok":
@@ -4720,8 +5261,8 @@ class ThreadPersistence:
 
     @staticmethod
     def _validate_source_database_path_sync(
-        path: Path,
-        expected: _MigrationDatabaseFingerprint,
+            path: Path,
+            expected: _MigrationDatabaseFingerprint,
     ) -> None:
         """验证可重试的当前 v6 主库仍满足 source contract。"""
         connection = sqlite3.connect(path)
@@ -4735,9 +5276,9 @@ class ThreadPersistence:
 
     @staticmethod
     def _recover_interrupted_migration_sync(
-        path: Path,
-        *,
-        preserve_recovery_state: bool = False,
+            path: Path,
+            *,
+            preserve_recovery_state: bool = False,
     ) -> None:
         """启动前处理上次崩溃留下的 migration state；失败则不创建正常连接。"""
         _assert_migration_path_available(path)
@@ -4789,9 +5330,9 @@ class ThreadPersistence:
             # 第一优先级是证明主库已经提交。此分支不要求 backup 仍存在：
             # backup 清理可以在 state 清理前后失败，但绝不能把完整新库回滚。
             if (
-                final is not None
-                and current is not None
-                and _migration_fingerprint_matches(final, current)
+                    final is not None
+                    and current is not None
+                    and _migration_fingerprint_matches(final, current)
             ):
                 ThreadPersistence._validate_final_database_path_sync(path, final)
                 ThreadPersistence._unlink_migration_state_path_sync(state_path)
@@ -4828,15 +5369,15 @@ class ThreadPersistence:
 
     @staticmethod
     def _validate_backup_path_sync(
-        backup_path: Path,
-        expected: _MigrationDatabaseFingerprint,
+            backup_path: Path,
+            expected: _MigrationDatabaseFingerprint,
     ) -> None:
         """无实例状态地验证启动恢复使用的 backup。"""
         if not backup_path.is_file():
             raise ThreadPersistenceError("CHECKPOINT_MIGRATION_BACKUP_UNAVAILABLE")
         if any(
-            backup_path.with_name(backup_path.name + suffix).exists()
-            for suffix in ("-wal", "-shm", "-journal")
+                backup_path.with_name(backup_path.name + suffix).exists()
+                for suffix in ("-wal", "-shm", "-journal")
         ):
             raise ThreadPersistenceError("CHECKPOINT_MIGRATION_BACKUP_NOT_STANDALONE")
         connection = sqlite3.connect(backup_path)
@@ -4850,9 +5391,9 @@ class ThreadPersistence:
 
     @staticmethod
     def _restore_backup_path_sync(
-        path: Path,
-        backup_path: Path,
-        expected: _MigrationDatabaseFingerprint,
+            path: Path,
+            backup_path: Path,
+            expected: _MigrationDatabaseFingerprint,
     ) -> None:
         """把 backup 恢复到新文件并原子替换，清除旧目标的所有 journal sidecar。"""
         _migration_child_test_failure(
@@ -4913,7 +5454,7 @@ class ThreadPersistence:
             raw["error"] = (
                 str(error)
                 if isinstance(error, ThreadPersistenceError)
-                and str(error).startswith("CHECKPOINT_MIGRATION_")
+                   and str(error).startswith("CHECKPOINT_MIGRATION_")
                 else "CHECKPOINT_MIGRATION_RESTORE_FAILED"
             )
             raw["error_type"] = type(error).__name__
@@ -4969,11 +5510,9 @@ class ThreadPersistence:
             encoded = canonical_json(snapshot.record())
             await self._connection.execute(
                 """
-                INSERT INTO harness_run_context_snapshots (
-                    project_fingerprint, snapshot_id, thread_id, snapshot_record,
-                    system_fingerprint, created_at_ms, legacy
-                ) VALUES (?, ?, ?, ?, ?, ?, 1)
-                ON CONFLICT(project_fingerprint, snapshot_id) DO NOTHING
+                INSERT INTO harness_run_context_snapshots (project_fingerprint, snapshot_id, thread_id, snapshot_record,
+                                                           system_fingerprint, created_at_ms, legacy)
+                VALUES (?, ?, ?, ?, ?, ?, 1) ON CONFLICT(project_fingerprint, snapshot_id) DO NOTHING
                 """,
                 (
                     project,
@@ -4988,7 +5527,8 @@ class ThreadPersistence:
                 """
                 UPDATE harness_run_execution_bindings
                 SET context_snapshot_id = ?
-                WHERE project_fingerprint = ? AND thread_id = ?
+                WHERE project_fingerprint = ?
+                  AND thread_id = ?
                   AND context_snapshot_id IS NULL
                 """,
                 (snapshot.snapshot_id, project, thread_id),
@@ -5014,31 +5554,84 @@ class ThreadPersistence:
         """在 Harness migration 事务内建立 LangGraph 的基础表，避免 setup 自行 commit。"""
         await self._connection.execute(
             """
-            CREATE TABLE IF NOT EXISTS checkpoints (
-                thread_id TEXT NOT NULL,
-                checkpoint_ns TEXT NOT NULL DEFAULT '',
-                checkpoint_id TEXT NOT NULL,
-                parent_checkpoint_id TEXT,
-                type TEXT,
-                checkpoint BLOB,
-                metadata BLOB,
-                PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+            CREATE TABLE IF NOT EXISTS checkpoints
+            (
+                thread_id
+                TEXT
+                NOT
+                NULL,
+                checkpoint_ns
+                TEXT
+                NOT
+                NULL
+                DEFAULT
+                '',
+                checkpoint_id
+                TEXT
+                NOT
+                NULL,
+                parent_checkpoint_id
+                TEXT,
+                type
+                TEXT,
+                checkpoint
+                BLOB,
+                metadata
+                BLOB,
+                PRIMARY
+                KEY
+            (
+                thread_id,
+                checkpoint_ns,
+                checkpoint_id
             )
+                )
             """
         )
         await self._connection.execute(
             """
-            CREATE TABLE IF NOT EXISTS writes (
-                thread_id TEXT NOT NULL,
-                checkpoint_ns TEXT NOT NULL DEFAULT '',
-                checkpoint_id TEXT NOT NULL,
-                task_id TEXT NOT NULL,
-                idx INTEGER NOT NULL,
-                channel TEXT NOT NULL,
-                type TEXT,
-                value BLOB,
-                PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
+            CREATE TABLE IF NOT EXISTS writes
+            (
+                thread_id
+                TEXT
+                NOT
+                NULL,
+                checkpoint_ns
+                TEXT
+                NOT
+                NULL
+                DEFAULT
+                '',
+                checkpoint_id
+                TEXT
+                NOT
+                NULL,
+                task_id
+                TEXT
+                NOT
+                NULL,
+                idx
+                INTEGER
+                NOT
+                NULL,
+                channel
+                TEXT
+                NOT
+                NULL,
+                type
+                TEXT,
+                value
+                BLOB,
+                PRIMARY
+                KEY
+            (
+                thread_id,
+                checkpoint_ns,
+                checkpoint_id,
+                task_id,
+                idx
             )
+                )
             """
         )
 
@@ -5051,14 +5644,14 @@ class ThreadPersistence:
             await self._connection.execute(
                 """
                 ALTER TABLE harness_context_artifacts
-                ADD COLUMN content_sha256 TEXT NOT NULL DEFAULT ''
+                    ADD COLUMN content_sha256 TEXT NOT NULL DEFAULT ''
                 """
             )
         if "byte_length" not in columns:
             await self._connection.execute(
                 """
                 ALTER TABLE harness_context_artifacts
-                ADD COLUMN byte_length INTEGER NOT NULL DEFAULT 0
+                    ADD COLUMN byte_length INTEGER NOT NULL DEFAULT 0
                 """
             )
 
@@ -5068,7 +5661,8 @@ class ThreadPersistence:
             """
             SELECT project_fingerprint, thread_id, artifact_id, content
             FROM harness_context_artifacts
-            WHERE content_sha256 = '' OR byte_length = 0
+            WHERE content_sha256 = ''
+               OR byte_length = 0
             """
         )
         rows = await cursor.fetchall()
@@ -5078,8 +5672,11 @@ class ThreadPersistence:
             await self._connection.execute(
                 """
                 UPDATE harness_context_artifacts
-                SET content_sha256 = ?, byte_length = ?
-                WHERE project_fingerprint = ? AND thread_id = ? AND artifact_id = ?
+                SET content_sha256 = ?,
+                    byte_length    = ?
+                WHERE project_fingerprint = ?
+                  AND thread_id = ?
+                  AND artifact_id = ?
                 """,
                 (
                     _content_sha256(content),
@@ -5131,11 +5728,20 @@ class ThreadPersistence:
                     continue
             cursor = await self._connection.execute(
                 """
-                SELECT record_id, thread_id, run_id, execution_id, sequence,
-                       kind, payload, content_sha256, byte_length, artifact_id,
+                SELECT record_id,
+                       thread_id,
+                       run_id,
+                       execution_id,
+                       sequence,
+                       kind,
+                       payload,
+                       content_sha256,
+                       byte_length,
+                       artifact_id,
                        created_at_ms
                 FROM harness_thread_transcript
-                WHERE project_fingerprint = ? AND thread_id = ?
+                WHERE project_fingerprint = ?
+                  AND thread_id = ?
                 ORDER BY sequence ASC
                 """,
                 (project, thread_id),
@@ -5148,15 +5754,14 @@ class ThreadPersistence:
             ).hexdigest()[:32]
             await self._connection.execute(
                 """
-                INSERT INTO harness_compression_checkpoints (
-                    project_fingerprint, thread_id, checkpoint_id,
-                    source_record_sequence, source_digest, mode,
-                    rewrite_version, projected_messages, artifact_ids,
-                    trigger, pressure_before, pressure_after, created_at_ms,
-                    legacy_incomplete
-                ) VALUES (?, ?, ?, ?, ?, 'full', 'legacy-incomplete-v1', ?,
-                          ?, 'legacy-migration', '{}', '{}', ?, 1)
-                ON CONFLICT(project_fingerprint, thread_id, checkpoint_id) DO NOTHING
+                INSERT INTO harness_compression_checkpoints (project_fingerprint, thread_id, checkpoint_id,
+                                                             source_record_sequence, source_digest, mode,
+                                                             rewrite_version, projected_messages, artifact_ids,
+                                                             trigger, pressure_before, pressure_after, created_at_ms,
+                                                             legacy_incomplete)
+                VALUES (?, ?, ?, ?, ?, 'full', 'legacy-incomplete-v1', ?,
+                        ?, 'legacy-migration', '{}', '{}', ?,
+                        1) ON CONFLICT(project_fingerprint, thread_id, checkpoint_id) DO NOTHING
                 """,
                 (
                     project,
@@ -5169,6 +5774,7 @@ class ThreadPersistence:
                     _now_ms(),
                 ),
             )
+
     async def _add_compression_commit_payload_column(self) -> None:
         """v10 为整条 rewrite 幂等语义增加列，并兼容降版本测试库。"""
         cursor = await self._connection.execute(
@@ -5180,7 +5786,7 @@ class ThreadPersistence:
             await self._connection.execute(
                 """
                 ALTER TABLE harness_compression_checkpoints
-                ADD COLUMN commit_payload TEXT
+                    ADD COLUMN commit_payload TEXT
                 """
             )
 
@@ -5195,7 +5801,7 @@ class ThreadPersistence:
             await self._connection.execute(
                 """
                 ALTER TABLE harness_context_state
-                ADD COLUMN runtime_state TEXT NOT NULL DEFAULT '{}'
+                    ADD COLUMN runtime_state TEXT NOT NULL DEFAULT '{}'
                 """
             )
 
@@ -5210,9 +5816,10 @@ class ThreadPersistence:
             await self._connection.execute(
                 """
                 ALTER TABLE harness_run_execution_bindings
-                ADD COLUMN context_snapshot_id TEXT
+                    ADD COLUMN context_snapshot_id TEXT
                 """
             )
+
     async def _bootstrap_legacy_transcripts(self, source_version: int) -> None:
         """从所有 project 的现存 checkpoint 建立明确不完整的 legacy 起点。"""
         if _MIGRATION_CHILD_TEST_PHASE in {"bootstrap_failure", "restore_failure"}:
@@ -5229,8 +5836,10 @@ class ThreadPersistence:
         for project_fingerprint, thread_id in threads:
             cursor = await self._connection.execute(
                 """
-                SELECT 1 FROM harness_thread_history_metadata
-                WHERE project_fingerprint = ? AND thread_id = ?
+                SELECT 1
+                FROM harness_thread_history_metadata
+                WHERE project_fingerprint = ?
+                  AND thread_id = ?
                 """,
                 (project_fingerprint, thread_id),
             )
@@ -5290,15 +5899,15 @@ class ThreadPersistence:
                     if isinstance(raw_tool_call_id, str) and raw_tool_call_id:
                         legacy_tool_call_id = raw_tool_call_id
                         if (
-                            not legacy_invalid_fields
-                            and raw_tool_call_id in pending_tool_call_ids
+                                not legacy_invalid_fields
+                                and raw_tool_call_id in pending_tool_call_ids
                         ):
                             pending_tool_call_ids.remove(raw_tool_call_id)
                         else:
                             legacy_tool_call_id_status = "unmatched"
                     elif (raw_tool_call_id is None or raw_tool_call_id == "") and (
-                        not legacy_invalid_fields
-                        and len(pending_tool_call_ids) == 1
+                            not legacy_invalid_fields
+                            and len(pending_tool_call_ids) == 1
                     ):
                         # A single unresolved assistant declaration is the
                         # only safe legacy no-ID result binding.  This also
@@ -5331,10 +5940,9 @@ class ThreadPersistence:
                 )
             await self._connection.execute(
                 """
-                INSERT INTO harness_thread_history_metadata (
-                    project_fingerprint, thread_id, legacy_incomplete_history,
-                    source_schema_version, migrated_at_ms
-                ) VALUES (?, ?, 1, ?, ?)
+                INSERT INTO harness_thread_history_metadata (project_fingerprint, thread_id, legacy_incomplete_history,
+                                                             source_schema_version, migrated_at_ms)
+                VALUES (?, ?, 1, ?, ?)
                 """,
                 (
                     project_fingerprint,
@@ -5348,7 +5956,7 @@ class ThreadPersistence:
             )
 
     async def _legacy_messages_for_project(
-        self, project_fingerprint: str, thread_id: str
+            self, project_fingerprint: str, thread_id: str
     ) -> list[Any] | None:
         """使用 project-scoped saver 读取迁移前 checkpoint，不伪造 Run 身份。"""
         saver = ProjectScopedAsyncSqliteSaver(
@@ -5382,7 +5990,8 @@ class ThreadPersistence:
                 """
                 SELECT legacy_incomplete_history
                 FROM harness_thread_history_metadata
-                WHERE project_fingerprint = ? AND thread_id = ?
+                WHERE project_fingerprint = ?
+                  AND thread_id = ?
                 """,
                 (self._project_fingerprint, thread_id),
             )
@@ -5457,11 +6066,11 @@ def _strict_json(value: object) -> str:
 
 
 def _rewrite_artifact_id(
-    project_fingerprint: str,
-    thread_id: str,
-    checkpoint_id: str,
-    index: int,
-    draft: ContextArtifactDraft,
+        project_fingerprint: str,
+        thread_id: str,
+        checkpoint_id: str,
+        index: int,
+        draft: ContextArtifactDraft,
 ) -> str:
     """为带 checkpoint 的无 ID Artifact 生成可跨进程重试的稳定 ID。"""
     material = _strict_json(
@@ -5480,14 +6089,14 @@ def _rewrite_artifact_id(
 
 
 def _context_commit_payload(
-    thread_id: str,
-    artifacts: list[ContextArtifact],
-    summary: ContextSummary | None,
-    state: ContextState | None,
-    checkpoint: CompressionCheckpointDraft,
-    projected_messages: str,
-    source_record_sequence: int,
-    source_digest_value: str,
+        thread_id: str,
+        artifacts: list[ContextArtifact],
+        summary: ContextSummary | None,
+        state: ContextState | None,
+        checkpoint: CompressionCheckpointDraft,
+        projected_messages: str,
+        source_record_sequence: int,
+        source_digest_value: str,
 ) -> str:
     """编码整个 CommitContextRewrite 的稳定语义，排除生成时间。"""
     return _strict_json(
@@ -5572,7 +6181,7 @@ def _root_execution_id(run_id: str) -> str:
 
 
 def _transcript_artifact_id(
-    project_fingerprint: str, thread_id: str, record_id: str
+        project_fingerprint: str, thread_id: str, record_id: str
 ) -> str:
     """生成不含路径和原文的确定性 Transcript Artifact ID。"""
     seed = f"{project_fingerprint}:{thread_id}:{record_id}".encode("utf-8")
@@ -5603,9 +6212,9 @@ def _payload_content(payload: str | Mapping[str, object]) -> str:
 
 
 def _normalize_transcript_tool_calls(
-    tool_calls: tuple[Mapping[str, object], ...],
-    *,
-    allow_legacy_invalid: bool = False,
+        tool_calls: tuple[Mapping[str, object], ...],
+        *,
+        allow_legacy_invalid: bool = False,
 ) -> list[dict[str, object]]:
     """规范化 assistant tool calls，使幂等比较不依赖调用方字典顺序。"""
     normalized: list[dict[str, object]] = []
@@ -5618,12 +6227,12 @@ def _normalize_transcript_tool_calls(
             if not allow_legacy_invalid:
                 raise ThreadPersistenceError("TRANSCRIPT_TOOL_CALL_INVALID")
             if (
-                not isinstance(legacy_invalid_fields, (list, tuple))
-                or not legacy_invalid_fields
-                or not all(
-                    isinstance(field, str) and field
-                    for field in legacy_invalid_fields
-                )
+                    not isinstance(legacy_invalid_fields, (list, tuple))
+                    or not legacy_invalid_fields
+                    or not all(
+                isinstance(field, str) and field
+                for field in legacy_invalid_fields
+            )
             ):
                 raise ThreadPersistenceError("TRANSCRIPT_TOOL_CALL_INVALID")
             try:
@@ -5675,7 +6284,7 @@ def _normalize_transcript_tool_calls(
                 else "unavailable"
             )
         if canonical["arguments_status"] == "valid" and not (
-            "arguments" in canonical or "args" in canonical
+                "arguments" in canonical or "args" in canonical
         ):
             raise ThreadPersistenceError("TRANSCRIPT_TOOL_CALL_ARGUMENTS_MISSING")
         if canonical["arguments_status"] == "valid":
@@ -5714,11 +6323,11 @@ def _transcript_record(row: Mapping[str, Any]) -> TranscriptRecord:
 
 
 def _transcript_matches(
-    record: TranscriptRecord,
-    command: TranscriptAppend,
-    *,
-    project_fingerprint: str,
-    allow_legacy_invalid: bool = False,
+        record: TranscriptRecord,
+        command: TranscriptAppend,
+        *,
+        project_fingerprint: str,
+        allow_legacy_invalid: bool = False,
 ) -> bool:
     """判断重复追加是否是同一语义，而不是吞掉 Run ID 冲突。"""
     content_bytes = command.content.encode("utf-8")
@@ -5736,15 +6345,15 @@ def _transcript_matches(
     )
     payload = record.payload
     if (
-        record.thread_id != command.thread_id
-        or record.run_id != command.run_id
-        or record.execution_id != command.execution_id
-        or record.kind != command.kind
-        or record.content_sha256 != _content_sha256(command.content)
-        or record.byte_length != len(content_bytes)
-        or payload.get("content") != expected_content
-        or payload.get("content_sha256") != record.content_sha256
-        or payload.get("original_bytes") != record.byte_length
+            record.thread_id != command.thread_id
+            or record.run_id != command.run_id
+            or record.execution_id != command.execution_id
+            or record.kind != command.kind
+            or record.content_sha256 != _content_sha256(command.content)
+            or record.byte_length != len(content_bytes)
+            or payload.get("content") != expected_content
+            or payload.get("content_sha256") != record.content_sha256
+            or payload.get("original_bytes") != record.byte_length
     ):
         return False
     if command.kind != "tool":
@@ -5758,19 +6367,19 @@ def _transcript_matches(
             return False
         return payload.get("tool_calls", []) == expected_tool_calls
     return (
-        payload.get("tool_call_id") == (command.tool_call_id or command.record_id)
-        and (
-            ("name" not in payload and "name" in command.legacy_invalid_fields)
-            or payload.get("name") == (command.tool_name or "tool")
-        )
-        and (
-            ("status" not in payload and "status" in command.legacy_invalid_fields)
-            or payload.get("status") == (command.tool_status or "success")
-        )
-        and payload.get("tool_call_id_status") == command.tool_call_id_status
-        and payload.get("legacy_invalid_fields", [])
-        == list(command.legacy_invalid_fields)
-        and record.artifact_id == expected_artifact_id
+            payload.get("tool_call_id") == (command.tool_call_id or command.record_id)
+            and (
+                    ("name" not in payload and "name" in command.legacy_invalid_fields)
+                    or payload.get("name") == (command.tool_name or "tool")
+            )
+            and (
+                    ("status" not in payload and "status" in command.legacy_invalid_fields)
+                    or payload.get("status") == (command.tool_status or "success")
+            )
+            and payload.get("tool_call_id_status") == command.tool_call_id_status
+            and payload.get("legacy_invalid_fields", [])
+            == list(command.legacy_invalid_fields)
+            and record.artifact_id == expected_artifact_id
     )
 
 
@@ -5785,8 +6394,8 @@ def _thread_message_from_transcript(record: TranscriptRecord) -> ThreadMessage |
     tool_name = (
         raw_tool_name
         if record.kind == "tool"
-        and isinstance(raw_tool_name, str)
-        and raw_tool_name
+           and isinstance(raw_tool_name, str)
+           and raw_tool_name
         else None
     )
     return ThreadMessage(kind=record.kind, content=content, tool_name=tool_name)  # type: ignore[arg-type]
@@ -5812,7 +6421,8 @@ def _replay_delta_messages(history: Mapping[str, Any]) -> list[Any]:
     seed_messages = getattr(seed, "value", seed)
     base = list(seed_messages) if isinstance(seed_messages, list) else []
     writes = entry.get("writes")
-    values = [write[2] for write in writes if isinstance(write, tuple) and len(write) >= 3] if isinstance(writes, list) else []
+    values = [write[2] for write in writes if isinstance(write, tuple) and len(write) >= 3] if isinstance(writes,
+                                                                                                          list) else []
     if not values:
         return base
     from deepagents._messages_reducer import _messages_delta_reducer
@@ -5843,11 +6453,11 @@ def _normalize_message(value: Any) -> ThreadMessage | None:
 
 
 def _legacy_tool_calls(
-    value: Any,
-    *,
-    project_fingerprint: str,
-    thread_id: str,
-    sequence: int,
+        value: Any,
+        *,
+        project_fingerprint: str,
+        thread_id: str,
+        sequence: int,
 ) -> tuple[Mapping[str, object], ...]:
     """保留 v6 checkpoint 中 AI tool call 的可证明字段，不读取 Tool 结果猜参数。"""
     if type(value).__name__ != "AIMessage":
@@ -5923,7 +6533,7 @@ def _legacy_tool_calls(
 
 
 def _set_legacy_tool_call_arguments(
-    call: dict[str, object], value: object
+        call: dict[str, object], value: object
 ) -> None:
     """将 legacy 参数转成严格 JSON，无法解析时保留 raw/invalid。"""
     if value is None:
@@ -5966,7 +6576,7 @@ def _set_legacy_tool_call_arguments(
 
 
 def _legacy_tool_call_id(
-    project_fingerprint: str, thread_id: str, sequence: int, index: int
+        project_fingerprint: str, thread_id: str, sequence: int, index: int
 ) -> str:
     """为 checkpoint 明确没有 call ID 的事实生成可重复的内部标识。"""
     seed = f"legacy-call:{project_fingerprint}:{thread_id}:{sequence}:{index}"
@@ -6182,20 +6792,20 @@ def _migration_validate_final_schema_sync(connection: sqlite3.Connection) -> Non
             if int(row[6]) == 0
         )
         valid_columns = (
-            actual_columns == expected_columns
-            or (
-                table_name == "harness_context_state"
-                and actual_columns
-                == (
-                    "project_fingerprint",
-                    "thread_id",
-                    "failures",
-                    "circuit_open",
-                    "last_action",
-                    "runtime_state",
-                    "updated_at_ms",
+                actual_columns == expected_columns
+                or (
+                        table_name == "harness_context_state"
+                        and actual_columns
+                        == (
+                            "project_fingerprint",
+                            "thread_id",
+                            "failures",
+                            "circuit_open",
+                            "last_action",
+                            "runtime_state",
+                            "updated_at_ms",
+                        )
                 )
-            )
         )
         if not valid_columns:
             raise ThreadPersistenceError(
@@ -6212,8 +6822,8 @@ def _migration_validate_final_schema_sync(connection: sqlite3.Connection) -> Non
     )
     for index_name in required_indexes:
         if connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?",
-            (index_name,),
+                "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?",
+                (index_name,),
         ).fetchone() is None:
             raise ThreadPersistenceError(
                 f"CHECKPOINT_MIGRATION_FINAL_SCHEMA_INVALID:{index_name}"
@@ -6278,7 +6888,7 @@ async def _wait_migration_child(process: subprocess.Popen[bytes], deadline: floa
 
 
 async def _terminate_and_reap_migration_child(
-    process: subprocess.Popen[bytes],
+        process: subprocess.Popen[bytes],
 ) -> None:
     """先 terminate，再在固定上限内 kill，并确认没有遗留 child。"""
     if process.poll() is not None:
@@ -6289,8 +6899,8 @@ async def _terminate_and_reap_migration_child(
         return
     loop = asyncio.get_running_loop()
     if await _wait_migration_child(
-        process,
-        loop.time() + _LEGACY_MIGRATION_CHILD_TERMINATE_GRACE_SECONDS,
+            process,
+            loop.time() + _LEGACY_MIGRATION_CHILD_TERMINATE_GRACE_SECONDS,
     ):
         return
     try:
@@ -6298,15 +6908,15 @@ async def _terminate_and_reap_migration_child(
     except ProcessLookupError:
         return
     if not await _wait_migration_child(
-        process,
-        loop.time() + _LEGACY_MIGRATION_CHILD_TERMINATE_GRACE_SECONDS,
+            process,
+            loop.time() + _LEGACY_MIGRATION_CHILD_TERMINATE_GRACE_SECONDS,
     ):
         raise ThreadPersistenceError("CHECKPOINT_MIGRATION_WORKER_REAP_FAILED")
 
 
 async def _run_legacy_migration_child_once(
-    path: Path,
-    project_fingerprint: str,
+        path: Path,
+        project_fingerprint: str,
 ) -> tuple[bool, bool, str | None]:
     """运行一次可杀死的 child；返回 (正常退出, 是否超时, typed error)。"""
     command = [
@@ -6366,8 +6976,8 @@ async def _run_legacy_migration_child_once(
 
 
 async def _run_legacy_migration_child(
-    path: Path,
-    project_fingerprint: str,
+        path: Path,
+        project_fingerprint: str,
 ) -> None:
     """在父持有 migration lock 时运行并严格收敛一次 legacy migration。"""
     _child_succeeded, timed_out, child_error_code = await _run_legacy_migration_child_once(
@@ -6409,9 +7019,9 @@ async def _run_legacy_migration_child(
 
 
 async def run_legacy_migration_child(
-    path: Path,
-    project_fingerprint: str,
-    test_phase: str | None = None,
+        path: Path,
+        project_fingerprint: str,
+        test_phase: str | None = None,
 ) -> None:
     """migration_worker 入口；整个 legacy 事务只存在于 child 进程。"""
     global _MIGRATION_CHILD_PROCESS_MODE, _MIGRATION_CHILD_TEST_PHASE
@@ -6437,7 +7047,7 @@ async def run_legacy_migration_child(
         await _migration_child_pause_if_requested("after_commit_before_reply")
     finally:
         if (
-            path not in _MIGRATION_CHILD_POISONED_PATHS
-            and not persistence._closed
+                path not in _MIGRATION_CHILD_POISONED_PATHS
+                and not persistence._closed
         ):
             await connection.close()
