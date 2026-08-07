@@ -1,0 +1,282 @@
+---
+id: ZC-107
+title: 完成上下文连续性切换与端到端恢复
+priority: P0
+status: 已完成
+owner: Codex (Luna Max)
+branch: master
+scope: 将 Transcript、RunContextSnapshot、Skill snapshot、ContextProjector 和分级压缩接入唯一生产路径，清理旧 PromptEpoch/直接消息重写分支，并完成恢复、协议表现、迁移、ADR 和跨层验收。
+acceptance: 同一 Thread 可同时获得完整 UI 历史、latest checkpoint + tail 模型投影和下一 Run 最新 AGENTS/Skill；进程重启、多次压缩及 v6 迁移均可恢复；旧双写与 Server 直改 LangGraph 历史路径被删除。
+user_docs: docs/user/交互使用.md、docs/user/故障排查.md
+developer_docs: docs/developer/architecture/架构总览.md、docs/developer/architecture/上下文管理改造需求.md、docs/developer/architecture/上下文管理顶层设计.md、docs/developer/architecture/adr/README.md、docs/developer/architecture/adr/0003-transcript-context-projection-lifecycle.md
+test_evidence: 用户接受最终评审遗留的 migration child 强制清理 P1，并转交 ZC-108；不得描述为已修复。上下文连续性/迁移直接回归 72 passed；ThreadPersistence 68 passed（后续统一 failpoint 修正后 Python full 727 passed/2 skipped，唯一 sandbox WebSocket bind failure 在沙箱外单测 1 passed）；CLI full 114 passed/1 skipped/1 既有 Markdown renderer 波动；typecheck、project:check、git diff --check passed。
+references: docs/developer/tasks/ZC-108.md
+completed_at: 2026-08-03
+---
+
+## 背景
+
+ZC-101～ZC-106 分别建立规范记录、Run 级上下文、Skill 热更新、模型投影、分级微压缩和完整压缩恢复。它们可以沿两条依赖链并行推进：
+
+```text
+ZC-101 → ZC-102 → ZC-103
+   └───→ ZC-104 → ZC-105 → ZC-106
+```
+
+本任务是唯一生产路径的最终切换与跨层验收，不再新增另一套上下文算法。它覆盖需求规格中的端到端场景，并把长期架构决策写入正式 ADR。
+
+## 当前存在的问题
+
+### 1. 分阶段实施可能留下过渡入口
+
+在前置任务陆续完成期间，仓库可能暂时同时存在 legacy PromptEpoch、checkpoint 历史读取、Server 手动 `RemoveMessage`、全局 SkillRegistry 或旧 Context commit 名称。最终必须收敛为一个 canonical path。
+
+### 2. 单模块测试不能证明 Thread 连续性
+
+需要验证一次真实 Thread 生命周期中，UI、模型投影、系统上下文和 Skill snapshot 各自恢复正确，而不是每个模块单独通过。
+
+### 3. Protocol 和 TUI 可能误解新动作
+
+`context.updated.action` 当前允许字符串，但 TUI 只识别 summary、dehydration 和 report。micro/full/idle/overflow 必须安全显示，且不能把内部检查点 ID 或完整 Prompt 暴露给客户端。
+
+### 4. 必须支持从当前 v6 直接升级
+
+用户不会依次运行每个开发分支。最终 schema migration 必须从公开存在的 v6 数据直接到最新 schema，并验证备份、失败回滚和旧 Artifact/Summary 可读。
+
+## 为什么现在要修改
+
+- 上下文管理涉及 ThreadPersistence、RunCoordinator、AgentEngine、LangGraph、Protocol 和 TUI，只有端到端切换才能删除临时兼容。
+- Prompt、Skill 和压缩是安全与恢复边界，不能长期依靠“新旧两条都能工作”的模糊状态。
+- 这是进入具体长期记忆设计前必须稳定的扩展基础。
+
+## 目标生产路径
+
+```text
+run.start
+→ RunPreparation 取得最新 AGENTS 和同一 Skill snapshot，并生成 RunContextSnapshot、ResolvedAgentSpec 和 AgentEngineProfile
+→ ThreadPersistence 原子受理 binding + snapshot + 用户 Transcript
+→ acquire 对应 AgentEngine
+→ 构造 RunContext
+→ ContextProjector 生成 latest checkpoint + tail 并刷新 LangGraph 缓存
+→ LangGraph 每次模型调用前执行 ContextPressurePolicy
+→ 必要时 micro → 重新计量 → full
+→ RuntimeStateRehydrator 恢复当前结构化状态
+→ 完成的助手/工具语义记录追加 Transcript
+
+threads.open
+→ 只返回完整 Transcript UI 历史
+
+下一次 run.start
+→ 重新准备系统上下文和 Skill
+→ 继续使用同一 Thread 的模型投影
+```
+
+最终所有权：
+
+```text
+ThreadPersistence = Transcript、RunContextSnapshot、CompressionCheckpoint、Artifact 的事实来源
+LangGraph          = 执行状态和模型投影缓存
+RunContext         = 单次 Run 不可变上下文、Skill snapshot 和执行状态
+AgentEngineProfile = 工具、Skill、MCP、Policy 等真实能力身份
+```
+
+未来 Grok 风格长期记忆只能在 `ContextLifecycle` 的 Run 级动态块位置接入：结果受长度限制、低于安全规则和 AGENTS/Skill、属于本次 snapshot，并可在首轮或压缩后重新检索。当前任务不实现 Provider、向量库或检索策略。
+
+## 实施步骤
+
+1. 画出最终调用图，逐项标记新旧入口；确认每个 Thread/Run/Context 操作只有一个 owner 和一个生产调用路径。
+2. 将 `run.start` 受理顺序固定为“统一 RunPreparation → 原子 persistence acceptance → acquire 对应 AgentEngine → 构造 RunContext → 执行”。
+3. 确认 `threads.open` 只从 Transcript 返回 UI 历史，模型只从 ContextProjector 读取 latest valid checkpoint + tail。
+4. 确认 requested Skill、Prompt Skill index、虚拟 Skill 文件、ResolvedAgentSpec 和 Profile 来自同一 snapshot。
+5. 删除旧 `load/persist_prompt_epoch` 生产写入、Thread 永久 epoch 假设、Server 直接 `RemoveMessage` 提交、从 checkpoint 生成完整 UI 历史和进程永久 SkillRegistry 路径。
+6. 合并 schema migration，使当前 v6 可以直接升级到最终版本；升级前备份，任何一步失败时恢复原 schema/version/data。
+7. 保留只为不可逆本地数据需要的单向 legacy adapter，并明确退出条件；不保留 alias、fallback、双写或不可达表。
+8. 更新 `context.updated` 的 action 约定和 TUI 显示；优先复用现有 v3 字段，只有确实需要新字段才修改 Schema、生成代码和双端 fixtures。
+9. 新增完整重启测试：压缩、关闭 Host、重新启动、`threads.open`、再次 `run.start`，分别核对 UI 历史、模型投影、RunContextSnapshot 和 Skill snapshot。
+10. 新增同 Thread 热更新测试：压缩后修改 AGENTS/Skill，下一 Run 使用新系统上下文但保留正确 latest checkpoint + tail。
+11. 新增 legacy v6、连续 micro/full、失败回滚、取消/Interaction 恢复和多 Thread 并发测试。
+12. 新建 ADR，记录“Transcript 是事实、LangGraph 是投影缓存、Run 边界刷新、分级压缩、长期记忆注入位置”；同步用户和开发者文档。
+
+## 主要代码位置
+
+- `packages/agent/harness_agent/server.py`
+- `packages/agent/harness_agent/run_coordinator.py`
+- `packages/agent/harness_agent/thread_persistence.py`
+- `packages/agent/harness_agent/context_lifecycle.py`
+- `packages/agent/harness_agent/context_projection.py`
+- `packages/agent/harness_agent/context_pressure.py`
+- `packages/agent/harness_agent/context_window.py`
+- `packages/agent/harness_agent/run_context.py`
+- `packages/agent/harness_agent/skills.py`
+- `packages/agent/harness_agent/virtual_files.py`
+- `packages/protocol/schema/v3.json`（仅必要时）
+- `packages/cli/src/tui/state.ts`
+- `packages/agent/tests/`
+- `packages/cli/tests/ipc/protocol-contract.test.ts`
+- `packages/cli/tests/tui/state.test.ts`
+- `docs/developer/architecture/adr/`
+
+## 范围
+
+- 将所有前置能力接入唯一生产路径并删除过渡实现。
+- 从当前 v6 到最终 schema 的直接迁移、备份和回滚。
+- stdio/WebSocket 共用的 Thread/Run 恢复行为。
+- 现有 JSON-RPC v3 与 TUI 的安全表现。
+- ADR、用户文档、架构文档和完整项目检查。
+
+## 非范围
+
+- 不实现长期记忆 Provider、向量数据库、Embedding、记忆提取或跨 Thread召回。
+- 不实现 OpenCode Context Epoch、Cline complete-history rebase、Rewind、Fork 或 Timeline 协议。
+- 不实现 Agent Team、后台任务或 mailbox 恢复。
+- 不修改参考项目或引入其运行时依赖。
+
+## 端到端验收清单
+
+- [x] 同一 Thread 修改 AGENTS 后，下一 Run 使用新内容，前一 Run 审计仍指向旧 snapshot。
+- [x] 同一 Thread 修改 Skill 后，下一 Run 使用新 Registry/Profile，活动 Run 不受影响。
+- [x] 自动压缩后模型使用有限投影，`threads.open` 仍返回完整用户可见历史。
+- [x] 达到 full 水位时先 micro 并重新计量；micro 足够时不调用摘要模型。
+- [x] 连续 micro/full 和多个 full 检查点恢复时只使用 latest valid + tail。
+- [x] 压缩后 Todo、模式、Artifact 和当前 Run system context 正确恢复。
+- [x] 关闭并重启 Host 后，UI、模型投影、Run binding 和上下文快照保持一致。
+- [x] v6 数据可直接升级；缺失历史被标记为 legacy incomplete，迁移失败可以恢复备份。
+- [x] 不存在旧 PromptEpoch 双写、Server 直改完整历史或全局永久 SkillRegistry 生产路径。
+- [x] stdio 与 WebSocket 观察到相同、连续的 context.updated 和 Run 终态；`test_agent_host.py` transport suite 在 sandbox 外 localhost 已 `6 passed`。
+- [x] TUI 对 report、micro、full、overflow、skip 和 failure 均可安全渲染。
+- [x] 诊断不暴露完整 Prompt、绝对路径、工具原文、API Key、Header 或认证 Query。
+
+## 验证命令
+
+```bash
+cd packages/agent && .venv/bin/python -m pytest -q
+cd ../.. && bun run protocol:check
+bun run typecheck
+bun run test
+bun run project:check
+```
+
+若修改 Protocol：
+
+```bash
+bun run protocol:generate
+bun run protocol:check
+cd packages/cli && bun test tests/ipc/protocol-contract.test.ts tests/tui/state.test.ts
+```
+
+另需记录一次基于临时 v6 fixture 的“备份 → 升级 → 恢复 → 继续 Run”证据；不得使用真实模型凭据。
+
+## 版本影响
+
+本任务完成用户可见上下文行为切换，但最终评审仍保留迁移子进程强制清理 P1，并已转入
+[ZC-108](ZC-108-legacy.md)。本次提交不执行 `version:set`，也不作为正式发布节点；待 ZC-108 关闭后，
+再将整体上下文切换按 SemVer minor 候选统一评估。当前用户文档已同步行为说明。
+
+## ZC-107 实施结果与已接受风险
+
+### 已收敛的生产入口
+
+- `AgentHost` 的 `run.start` 已固定为 RunPreparation → 原子 `accept_run` → AgentEngine
+  acquire → RunContext → ContextProjector → 执行；RunPreparation 内的 AGENTS、Skill、requested
+  Skill、ResolvedAgentSpec、Profile 和 snapshot 来自同一 immutable registry。
+- `threads.open` 只查询 Transcript；checkpoint 只由 ContextProjector 为模型生成投影。
+- Server 旧的 `compact_now(thread_id, messages)` 生产 fallback 已删除；生产压缩只提交 typed
+  `CompressionRequest/CompressionResult`。`RemoveMessage` 只存在于 Projector 的缓存全量替换，
+  不再由 Server 直接改完整历史。
+- ThreadPersistence 的 PromptEpoch 公共读写入口和旧 commit alias 已删除；旧 PromptEpoch 表只在
+  verified v6 source backup 的一次性迁移事务内出现。最终 schema 带该表且没有受保护 recovery state
+  时 fail closed；迁移成功前转换可证明 snapshot，成功提交内删除旧表。
+
+### 已加入的跨层证据
+
+- `tests/test_zc104_context_continuity.py` 覆盖固定受理顺序、同 Thread AGENTS/Skill 热更新与旧
+  snapshot 审计、重启后 latest-valid checkpoint + Transcript tail、Artifact 和 RuntimeState 恢复。
+- `tests/test_thread_persistence.py`、`tests/test_context_lifecycle.py`、
+  `tests/test_agent_engine_profile.py` 覆盖 v6 legacy adapter、legacy incomplete 和 PromptEpoch
+  表终结；P1 回归另覆盖 committed WAL backup 独立恢复、backup integrity/schema/data 校验、
+  第二连接 writer 阻断、逐行 schema/data 恢复和 restore fail-closed 重启；新增 migration child
+  的 before-commit、final-validation、commit-after-durable、cancel、terminate/kill+wait 及
+  多 waiter poison 二次检查；已有 ZC-106 测试覆盖 micro/full/recovery、失败熔断和原子提交。
+- `packages/cli/tests/tui/state.test.ts` 覆盖 report/micro/full/overflow/skipped/failed 的安全
+  TUI 摘要；当前新增 TUI 状态测试 12 passed，完整 CLI 为 113 passed/2 个已知既有 TUI 波动/1 skipped；
+  协议、类型、项目、任务和文档检查均通过。sandbox 内的 WebSocket bind 限制已在升权环境的 AgentHost
+  transport 验收中验证为 2 passed；完整 Python 的旧基线结果见下方，当前窄复审只重跑直接套件。
+
+### 已接受并转交的评审风险
+
+- 最终窄评审确认：若 migration child 的 terminate、kill、poll、wait 或 reap 出现未处理异常，
+  当前分支未保证在释放文件锁前发布 poison；未知 child 可能仍访问数据库，后续 opener 存在并发进入风险。
+- child 被 SIGKILL 或 crash 后，backup/restore `.tmp` 文件的清理由 child 内 `finally` 承担；父进程
+  尚未实现按 migration identity 验证归属后的有界清理。
+- 用户明确决定上述强制清理问题不再阻断 ZC-107 提交。风险没有被描述为已修复，后续唯一任务为
+  [ZC-108](ZC-108-legacy.md)；在其完成前，本提交不作为正式发布节点。
+
+## 前置
+
+- ZC-103
+- ZC-106
+
+## ZC-107 调用图与旧路径审计
+
+```text
+stdio / WebSocket
+  → AgentHost protocol adapter（参数校验、fanout；不拥有事实）
+  → RunCoordinator（Thread busy、owner、幂等、取消/Interaction、唯一终态）
+  → AgentHost._prepare_run
+      → SkillCatalogManager.refresh（顶层 Run 边界 snapshot）
+      → requested Skill / ResolvedAgentSpec / Profile / ContextLifecycle snapshot
+  → ThreadPersistence.accept_run（binding + snapshot + user Transcript 同一事务）
+  → AgentEnginePool.acquire（对应 Profile）
+  → RunContext（本次 snapshot、Skill registry、取消令牌）
+  → ContextProjector.project（latest-valid checkpoint + Transcript tail）
+  → ContextProjector.sync_cache（唯一 RemoveMessage/cache rewrite owner）
+  → Agent graph / ContextWindowMiddleware / ContextCompactor
+  → Transcript append + RunCoordinator terminal event
+```
+
+Owner 边界已经按源码核对：`ThreadPersistence` 拥有 Transcript、snapshot、Artifact、Summary、
+checkpoint 和 migration 事务；`ContextProjector` 拥有模型投影及 LangGraph cache rewrite；
+`ContextCompactor` 拥有分级压缩的 typed 结果和 `commit_context()`；`RunCoordinator` 拥有
+受理幂等、owner、取消/Interaction、终态和 lease 清理；`AgentHost` 只做准备、资源装配和协议
+适配；TUI 只消费安全 `context.updated` 摘要。
+
+本次实际删除或封口的旧路径：
+
+- 删除 `ThreadPersistence.load_prompt_epoch()`、`persist_prompt_epoch()` 公共入口及
+  `PromptEpochMiddleware` alias；`RunContext.prompt_epoch`、`create_prompt_epoch()` 只服务非共享
+  嵌入式兼容调用，`AgentHost` 默认 shared engine 不读取它。
+- 删除 Server 的 positional `compact_now(thread_id, messages)` 生产 fallback；生产入口只提交
+  typed `CompressionRequest`，Server 不直接组合压缩表写入。
+- Server 不再构造/提交 `RemoveMessage`；它只存在于 `ContextProjector.cache_rewrite()`，只替换
+  LangGraph 模型缓存，不生成 UI 历史。
+- `threads.open` 只走 `ThreadPersistence.open_thread()`；checkpoint、LangGraph `load_context()`
+  和 cache 不再作为 UI fallback。requested Skill 只在同一 `_prepare_run` refresh 后解析。
+- `harness_prompt_epochs` 只在 v6→v11 migration transaction 内作为单向 adapter：转换可证明内容为
+  legacy snapshot，成功提交前不暴露生产读写，成功后 `DROP TABLE`；没有可证明内容的历史保持
+  `legacy/incomplete`。adapter 的退出条件是最终 schema 已提交且旧表不存在。
+
+## ZC-107 实际复核记录
+
+- 升权真实 loopback WebSocket：`test_stdio_owner_and_websocket_observer_share_context_updated_sequence`
+  与 `test_attachment_token_is_origin_bound_single_use_and_capability_limited`，`2 passed`；
+  前一受限 sandbox 的 bind failure 仅为环境限制。
+- 升权完整 Python（P1 修复前基线）：`696 passed, 1 skipped`；唯一 skip 是
+  `tests/test_gateway_e2e.py` 要求显式 `HARNESS_RUN_LOOPBACK_E2E=1`，未使用真实 API。
+- P1 窄回归：`tests/test_thread_persistence.py` 当前全量 `68 passed`，新增毫秒 deadline 与
+  多 waiter 直接测试另为 `2 passed`；`tests/test_zc104_context_continuity.py` 为 `4 passed`。
+  legacy migration 不再把不可终止的 aiosqlite worker 放在 Host 进程：父进程持有 migration lock，
+  只把规范化 DB path、project fingerprint 和非秘密参数交给 `harness_agent.migration_worker`；
+  child deadline 为 30 秒，超时先 terminate、再有界 kill+wait，父进程确认 child 已退出后才按
+  final/source/half 事实恢复或返回 typed fail-closed。超时在同一 lock handoff 内发布 path poison，
+  锁前 precheck 通过的 waiter 在取得锁后再次检查并拒绝；verified backup 和 recovery state 保留
+  给下一 owner。v6 source contract 只接受精确历史表集，
+  拒绝 name-only forward 表、未知表、任意额外列和未验证表级约束；列属性、PK、索引列序/排序、
+  foreign key 和 canonical SQL 均逐项校验。
+- PromptEpoch 仅在 verified v6 source backup 的唯一迁移事务内转换、写入 legacy snapshot 并删除；
+  v8/v9/v10/final 带 PromptEpoch 且无 migration state 均在 backup/mutation 前拒绝。v6 成功路径与
+  非 v6 拒绝/timeout poison 组合回归为 `6 passed`。
+- Agent 全量此前一次性结果：`726 passed, 1 failed, 1 skipped`；失败是已知
+  `test_stdio_subprocess_end_to_end_echo_mode` 时序超时，隔离重跑为 `1 passed`；skip 仍是需要
+  显式 `HARNESS_RUN_LOOPBACK_E2E=1` 的 gateway e2e，未使用真实 API。
+- 当前版本动作仍未执行；版本影响建议保持在窄评审通过后由主任务决定 SemVer patch/minor，
+  本任务继续保持“进行中”。

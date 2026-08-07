@@ -7,7 +7,7 @@ import { Capability, EventType, PROTOCOL_VERSION, isClientMethod } from "@za38/p
 
 import { parseArgs, type Command } from "./args"
 import { createDiagnosticLogger } from "./diagnostics/local-logger"
-import { AgentClient } from "./ipc/client"
+import { AgentClient, JsonRpcRemoteError } from "./ipc/client"
 import { StdioRpcTransport } from "./ipc/stdio-transport"
 import { runTui } from "./tui/app"
 import { CLI_VERSION, createInteractiveRuntime, type InteractiveRuntime } from "./interactive/runtime"
@@ -45,10 +45,17 @@ export function clientCapabilities(command: Command): string[] {
     Capability.MODELS_SELECT,
     Capability.MCP_READ,
     Capability.MCP_MANAGE,
+    Capability.AGENTS_READ,
+    Capability.TEAMS_READ,
+    Capability.TEAMS_MANAGE,
   )
   if (command.kind.startsWith("skills.") || (command.kind === "run" && !command.nonInteractive)) capabilities.push(Capability.SKILLS_READ)
   if (command.kind === "skills.set_enabled" || command.kind === "skills.install" || command.kind === "skills.update" || command.kind === "skills.remove") {
     capabilities.push(Capability.SKILLS_MANAGE)
+  }
+  if (command.kind.startsWith("plugins.")) capabilities.push(Capability.PLUGINS_READ)
+  if (command.kind === "plugins.install" || command.kind === "plugins.set_enabled" || command.kind === "plugins.remove") {
+    capabilities.push(Capability.PLUGINS_MANAGE)
   }
   return capabilities
 }
@@ -253,7 +260,7 @@ async function execute(command: Command): Promise<void> {
 /** CLI 主入口：处理帮助/版本短路逻辑后执行用户命令。 */
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   if (argv.includes("--help") || argv.includes("-h")) {
-    console.log("Usage: harness [--resume] [-n TEXT] [--json] [--config PATH] [--cwd PATH] [--sandbox[=remote|false]] | harness skills <list|inspect|enable|disable|trust|install|update|remove|market>")
+    console.log("Usage: harness [--resume] [-n TEXT] [--json] [--config PATH] [--cwd PATH] [--sandbox[=remote|false]] | harness skills <...> | harness plugins <list|inspect|validate|install|enable|disable|remove>")
     return
   }
   if (argv.includes("--version") || argv.includes("-v")) {
@@ -265,7 +272,18 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
 
 if (import.meta.main) {
   main().catch(error => {
-    console.error(`za38: ${error instanceof Error ? error.message : String(error)}`)
+    // 旧 sidecar 仍可能只把 THREAD_STORE_UNAVAILABLE 放在 message 中、将
+    // 真正的迁移诊断码放在 JSON-RPC data.code；启动失败时把这个稳定码透传，
+    // 避免用户只能看到无法行动的笼统错误。
+    const message = error instanceof JsonRpcRemoteError
+      && error.message === "THREAD_STORE_UNAVAILABLE"
+      && typeof error.data === "object"
+      && error.data !== null
+      && "code" in error.data
+      && typeof error.data.code === "string"
+      ? `${error.message}: ${error.data.code}`
+      : error instanceof Error ? error.message : String(error)
+    console.error(`za38: ${message}`)
     process.exitCode = 1
   })
 }

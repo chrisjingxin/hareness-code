@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from harness_agent.plugins.runtime import PluginLspManager
 
 _VALID_LSP_ACTIONS = ("definition", "references", "diagnostics", "hover")
 _MAX_SEARCH_RESULTS = 20
@@ -16,6 +19,7 @@ async def lsp(
     line: int | None = None,
     column: int | None = None,
     workspace_root: str = "",
+    manager: "PluginLspManager | None" = None,
 ) -> dict[str, Any]:
     """通过语言服务协议获取代码智能信息。
 
@@ -39,7 +43,16 @@ async def lsp(
         if not resolved.is_file():
             return {"error": f"文件不存在: {file_path}"}
 
-        # 预留 LSP 客户端连接点：通过环境变量配置语言服务器命令
+        if manager is not None:
+            return await manager.query(
+                action,
+                file_path,
+                line,
+                column,
+                workspace_root,
+            )
+
+        # 没有 Plugin runtime 时保留旧的显式环境提示。
         lsp_command = os.environ.get("HARNESS_LSP_COMMAND", "")
         if not lsp_command:
             return {

@@ -80,6 +80,23 @@ test("AgentRun 使用原生 UUID 并携带 Thread 模型选择", async () => {
   })
 })
 
+test("run.start 受理不设置会产生幽灵 Run 的本地超时", async () => {
+  const { client, stdin, stdout } = peer()
+  let request: any
+  stdin.on("data", data => { request = JSON.parse(data.toString()) })
+
+  const run = client.startRun({ message: "等待受理", threadId: "thread-slow-start" })
+  await Bun.sleep(0)
+  expect((client as any).pending.get(request.id).timeout).toBeUndefined()
+
+  stdout.write(JSON.stringify({
+    jsonrpc: "2.0",
+    id: request.id,
+    result: { thread_id: request.params.thread_id, run_id: request.params.run_id, accepted: true },
+  }) + "\n")
+  await run.accepted
+})
+
 test("Peer 通过受控配置接口传递详情、预览和 CAS 提交参数", async () => {
   const { client, stdin, stdout } = peer()
   const requests: any[] = []
@@ -100,6 +117,102 @@ test("Peer 通过受控配置接口传递详情、预览和 CAS 提交参数", a
     {},
     { changes: [{ path: "approval.mode", value: "plan" }] },
     { expected_revision: "r2", changes: [{ path: "approval.mode", value: "plan" }] },
+  ])
+})
+
+test("Peer 通过类型化 Plugin 接口传递来源、trust 指纹和 data 删除选择", async () => {
+  const { client, stdin, stdout } = peer()
+  const requests: any[] = []
+  stdin.on("data", data => {
+    const message = JSON.parse(data.toString())
+    requests.push(message)
+    stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {} }) + "\n")
+  })
+
+  await client.listPlugins()
+  await client.inspectPlugin("local-source/review")
+  await client.validatePlugin("./review.zip", "claude-code")
+  await client.installPlugin("./review.zip")
+  await client.setPluginEnabled("local-source/review", true, "a".repeat(64))
+  await client.removePlugin("local-source/review", true)
+
+  expect(requests.map(request => [request.method, request.params])).toEqual([
+    ["plugins.list", { include_disabled: true }],
+    ["plugins.inspect", { id: "local-source/review" }],
+    ["plugins.validate", { source: "./review.zip", format: "claude-code" }],
+    ["plugins.install", { source: "./review.zip", format: "auto" }],
+    ["plugins.set_enabled", {
+      id: "local-source/review",
+      enabled: true,
+      capability_fingerprint: "a".repeat(64),
+    }],
+    ["plugins.remove", { id: "local-source/review", purge_data: true }],
+  ])
+})
+
+test("Peer 通过类型化 Agent 与 Team 接口传递受控目录和运行参数", async () => {
+  const { client, stdin, stdout } = peer()
+  const requests: any[] = []
+  stdin.on("data", data => {
+    const message = JSON.parse(data.toString())
+    requests.push(message)
+    const result: Record<string, unknown> = {
+      "agents.list": { snapshot_id: "snapshot", agents: [], diagnostics: [] },
+      "agents.inspect": {
+        id: "lead", description: null, purpose: "lead", model_profile_id: "fast",
+        execution_policy_id: "read", requested_skills: [], requested_mcp_servers: [],
+        max_turns: null, source: "plugin:test", fingerprint: "fingerprint",
+      },
+      "teams.list": { teams: [], diagnostics: [] },
+      "teams.inspect": {},
+      "teams.generate": {
+        id: "review", description: null, max_parallelism: 2,
+        failure_policy: "continue-to-synthesis", tasks: [{
+          id: "worker", agent_id: "worker", depends_on: [], access: "read", timeout_seconds: 300,
+        }],
+      },
+      "teams.run": { team_id: "review", run_id: "run-1", accepted: true },
+      "teams.cancel": { run_id: "run-1", cancelled: true },
+    }[message.method] as Record<string, unknown>
+    stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }) + "\n")
+  })
+
+  await client.listAgents()
+  await client.inspectAgent("lead")
+  await client.listTeams()
+  await client.inspectTeam("run", "run-1")
+  await client.generateTeam({
+    id: "review",
+    lead_agent_id: "lead",
+    worker_agent_ids: ["worker"],
+    max_parallelism: 2,
+  })
+  await client.runTeam({
+    team_id: "review",
+    request: "检查变更",
+    thread_id: "thread-1",
+    run_id: "run-1",
+  })
+  await client.cancelTeam("run-1")
+
+  expect(requests.map(request => [request.method, request.params])).toEqual([
+    ["agents.list", {}],
+    ["agents.inspect", { id: "lead" }],
+    ["teams.list", {}],
+    ["teams.inspect", { kind: "run", id: "run-1" }],
+    ["teams.generate", {
+      id: "review",
+      lead_agent_id: "lead",
+      worker_agent_ids: ["worker"],
+      max_parallelism: 2,
+    }],
+    ["teams.run", {
+      team_id: "review",
+      request: "检查变更",
+      thread_id: "thread-1",
+      run_id: "run-1",
+    }],
+    ["teams.cancel", { run_id: "run-1" }],
   ])
 })
 
@@ -155,6 +268,57 @@ test("Peer 拒绝超过限制的无换行帧并关闭 pending 请求", async () 
   stdout.write("x".repeat(65))
   expect(await pending).toBeInstanceOf(Error)
   expect(errors[0]?.message).toContain("exceeds")
+})
+
+test("context.compact 等待服务端终态而不使用通用请求超时", async () => {
+  const { client, stdin, stdout } = peer()
+  let request: any
+  stdin.on("data", data => { request = JSON.parse(data.toString()) })
+
+  let settled = false
+  const result = client.compactContext("thread-compact").finally(() => { settled = true })
+  await Bun.sleep(40)
+  expect(settled).toBeFalse()
+
+  stdout.write(JSON.stringify({
+    jsonrpc: "2.0",
+    id: request.id,
+    result: {
+      compacted: false,
+      context: {
+        action: "manual_skipped",
+        estimated_tokens: 10,
+        input_cap_tokens: 100,
+        context_window_tokens: 128,
+        dynamic_tokens: 10,
+        cache_status: "unknown",
+        cached_tokens: null,
+        miss_reason: "short_history",
+        artifact_ids: [],
+      },
+    },
+  }) + "\n")
+
+  expect(await result).toMatchObject({ compacted: false, context: { action: "manual_skipped" } })
+})
+
+test("Peer 只忽略已超时 ID 的迟到响应并继续报告真正未知 ID", async () => {
+  const { client, stdin, stdout } = peer()
+  const errors: Error[] = []
+  let request: any
+  client.on("protocolError", error => errors.push(error))
+  stdin.on("data", data => { request = JSON.parse(data.toString()) })
+
+  const timedOut = await client.request("config.show", {}, 5).catch(error => error)
+  expect(timedOut).toBeInstanceOf(Error)
+  expect(timedOut.message).toContain("Timed out waiting for config.show")
+
+  stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }) + "\n")
+  stdout.write(JSON.stringify({ jsonrpc: "2.0", id: "never-sent", result: {} }) + "\n")
+  await Bun.sleep(10)
+
+  expect(errors).toHaveLength(1)
+  expect(errors[0]?.message).toBe("Unknown JSON-RPC response id: never-sent")
 })
 
 function peer(limit?: number) {

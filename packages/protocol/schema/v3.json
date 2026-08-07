@@ -29,6 +29,19 @@
       "skills.update": { "params": "#/$defs/skillsInstallParams", "result": "#/$defs/jsonObject", "capability": "skills.manage", "controlled": true },
       "skills.remove": { "params": "#/$defs/skillsInspectParams", "result": "#/$defs/jsonObject", "capability": "skills.manage", "controlled": true },
       "skills.market.list": { "params": "#/$defs/skillsMarketListParams", "result": "#/$defs/jsonObjectArray", "capability": "skills.read" },
+      "plugins.list": { "params": "#/$defs/pluginsListParams", "result": "#/$defs/jsonObject", "capability": "plugins.read" },
+      "plugins.inspect": { "params": "#/$defs/pluginsInspectParams", "result": "#/$defs/jsonObject", "capability": "plugins.read" },
+      "plugins.validate": { "params": "#/$defs/pluginsSourceParams", "result": "#/$defs/jsonObject", "capability": "plugins.read" },
+      "plugins.install": { "params": "#/$defs/pluginsSourceParams", "result": "#/$defs/jsonObject", "capability": "plugins.manage" },
+      "plugins.set_enabled": { "params": "#/$defs/pluginsSetEnabledParams", "result": "#/$defs/jsonObject", "capability": "plugins.manage" },
+      "plugins.remove": { "params": "#/$defs/pluginsRemoveParams", "result": "#/$defs/jsonObject", "capability": "plugins.manage" },
+      "agents.list": { "params": "#/$defs/emptyParams", "result": "#/$defs/agentsListResult", "capability": "agents.read" },
+      "agents.inspect": { "params": "#/$defs/agentsInspectParams", "result": "#/$defs/agentSummary", "capability": "agents.read" },
+      "teams.list": { "params": "#/$defs/emptyParams", "result": "#/$defs/teamsListResult", "capability": "teams.read" },
+      "teams.inspect": { "params": "#/$defs/teamsInspectParams", "result": "#/$defs/jsonObject", "capability": "teams.read" },
+      "teams.generate": { "params": "#/$defs/teamsGenerateParams", "result": "#/$defs/teamDefinition", "capability": "teams.manage" },
+      "teams.run": { "params": "#/$defs/teamsRunParams", "result": "#/$defs/teamsRunResult", "capability": "teams.manage" },
+      "teams.cancel": { "params": "#/$defs/teamsCancelParams", "result": "#/$defs/teamsCancelResult", "capability": "teams.manage" },
       "mcp.status": { "params": "#/$defs/emptyParams", "result": "#/$defs/mcpStatusResult", "capability": "mcp.read" },
       "mcp.add": { "params": "#/$defs/mcpAddParams", "result": "#/$defs/mcpAddResult", "capability": "mcp.manage", "controlled": true },
       "mcp.remove": { "params": "#/$defs/mcpRemoveParams", "result": "#/$defs/mcpRemoveResult", "capability": "mcp.manage", "controlled": true },
@@ -58,6 +71,7 @@
     "capabilities": [
       "run.cancel", "run.multithread", "host.control", "config.read", "config.write", "threads.read",
       "context.manage", "skills.read", "skills.manage", "mcp.read", "mcp.manage",
+      "plugins.read", "plugins.manage", "agents.read", "teams.read", "teams.manage",
       "models.read", "models.select", "host.attach"
     ],
     "error_codes": {
@@ -79,6 +93,19 @@
     },
     "jsonObject": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } },
     "jsonObjectArray": { "type": "array", "items": { "$ref": "#/$defs/jsonObject" } },
+    "agentCommand": {
+      "type": "object",
+      "required": ["id", "name", "description", "argument_hint", "requested_skill_id", "plugin_id"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "pattern": "^plugin:[a-z0-9-]+:[a-z0-9-]+:[a-z0-9-]+$" },
+        "description": { "type": "string", "minLength": 1 },
+        "argument_hint": { "type": ["string", "null"] },
+        "requested_skill_id": { "type": "string", "minLength": 1 },
+        "plugin_id": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
     "emptyParams": { "type": "object", "additionalProperties": false },
     "protocolRange": {
       "type": "object",
@@ -155,7 +182,7 @@
           },
           "additionalProperties": false
         },
-        "agent_commands": { "type": "array", "items": { "$ref": "#/$defs/jsonObject" } },
+        "agent_commands": { "type": "array", "items": { "$ref": "#/$defs/agentCommand" } },
         "skills_snapshot": {
           "type": "object", "required": ["id", "count"],
           "properties": { "id": { "type": "string" }, "count": { "type": "integer", "minimum": 0 } },
@@ -425,10 +452,198 @@
       },
       "additionalProperties": false
     },
+    "pluginsListParams": {
+      "type": "object",
+      "properties": { "include_disabled": { "type": "boolean", "default": true } },
+      "additionalProperties": false
+    },
+    "pluginsInspectParams": {
+      "type": "object",
+      "required": ["id"],
+      "properties": { "id": { "type": "string", "minLength": 1 } },
+      "additionalProperties": false
+    },
+    "pluginsSourceParams": {
+      "type": "object",
+      "required": ["source"],
+      "properties": {
+        "source": { "type": "string", "minLength": 1 },
+        "format": { "enum": ["auto", "agent-plugins-1.0", "claude-code"], "default": "auto" }
+      },
+      "additionalProperties": false
+    },
+    "pluginsSetEnabledParams": {
+      "type": "object",
+      "required": ["id", "enabled"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "enabled": { "type": "boolean" },
+        "capability_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      },
+      "additionalProperties": false
+    },
+    "pluginsRemoveParams": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "purge_data": { "type": "boolean", "default": false }
+      },
+      "additionalProperties": false
+    },
+    "agentSummary": {
+      "type": "object",
+      "required": ["id", "description", "purpose", "model_profile_id", "execution_policy_id", "requested_skills", "requested_mcp_servers", "max_turns", "source", "fingerprint"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "description": { "type": ["string", "null"] },
+        "purpose": { "type": "string", "minLength": 1 },
+        "model_profile_id": { "type": "string", "minLength": 1 },
+        "execution_policy_id": { "type": "string", "minLength": 1 },
+        "requested_skills": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "requested_mcp_servers": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "max_turns": { "type": ["integer", "null"], "minimum": 1 },
+        "source": { "type": "string", "minLength": 1 },
+        "fingerprint": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "agentsListResult": {
+      "type": "object",
+      "required": ["snapshot_id", "agents", "diagnostics"],
+      "properties": {
+        "snapshot_id": { "type": "string", "minLength": 1 },
+        "agents": { "type": "array", "items": { "$ref": "#/$defs/agentSummary" } },
+        "diagnostics": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+    "agentsInspectParams": {
+      "type": "object",
+      "required": ["id"],
+      "properties": { "id": { "type": "string", "minLength": 1 } },
+      "additionalProperties": false
+    },
+    "teamTaskDefinition": {
+      "type": "object",
+      "required": ["id", "agent_id", "depends_on", "access", "timeout_seconds"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "agent_id": { "type": "string", "minLength": 1 },
+        "depends_on": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "access": { "enum": ["read", "write"] },
+        "timeout_seconds": { "type": "number", "exclusiveMinimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "teamDefinition": {
+      "type": "object",
+      "required": ["id", "description", "max_parallelism", "failure_policy", "tasks"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "description": { "type": ["string", "null"] },
+        "max_parallelism": { "type": "integer", "minimum": 1 },
+        "failure_policy": { "enum": ["fail-fast", "continue", "continue-to-synthesis"] },
+        "tasks": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/teamTaskDefinition" } }
+      },
+      "additionalProperties": false
+    },
+    "teamTaskState": {
+      "type": "object",
+      "required": ["id", "status", "execution_id", "result", "error_code", "attempts"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["pending", "running", "completed", "failed", "cancelled", "blocked"] },
+        "execution_id": { "type": ["string", "null"] },
+        "result": { "$ref": "#/$defs/jsonObject" },
+        "error_code": { "type": ["string", "null"] },
+        "attempts": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "teamRun": {
+      "type": "object",
+      "required": ["run_id", "team_id", "thread_id", "status", "terminal_count", "tasks"],
+      "properties": {
+        "run_id": { "type": "string", "minLength": 1 },
+        "team_id": { "type": "string", "minLength": 1 },
+        "thread_id": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["running", "completed", "failed", "cancelled"] },
+        "terminal_count": { "type": "integer", "minimum": 0, "maximum": 1 },
+        "tasks": { "type": "array", "items": { "$ref": "#/$defs/teamTaskState" } }
+      },
+      "additionalProperties": false
+    },
+    "teamsListResult": {
+      "type": "object",
+      "required": ["teams", "diagnostics"],
+      "properties": {
+        "teams": { "type": "array", "items": { "$ref": "#/$defs/teamDefinition" } },
+        "diagnostics": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+    "teamsInspectParams": {
+      "type": "object",
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": { "enum": ["definition", "run"] },
+        "id": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "teamsGenerateParams": {
+      "type": "object",
+      "required": ["id", "lead_agent_id", "worker_agent_ids"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$" },
+        "lead_agent_id": { "type": "string", "minLength": 1 },
+        "worker_agent_ids": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "max_parallelism": { "type": "integer", "minimum": 1, "maximum": 32, "default": 4 }
+      },
+      "additionalProperties": false
+    },
+    "teamsRunParams": {
+      "type": "object",
+      "required": ["team_id", "request", "thread_id", "run_id"],
+      "properties": {
+        "team_id": { "type": "string", "minLength": 1 },
+        "request": { "type": "string", "minLength": 1, "maxLength": 1048576 },
+        "thread_id": { "type": "string", "minLength": 1 },
+        "run_id": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "teamsRunResult": {
+      "type": "object",
+      "required": ["team_id", "run_id", "accepted"],
+      "properties": {
+        "team_id": { "type": "string" },
+        "run_id": { "type": "string" },
+        "accepted": { "const": true }
+      },
+      "additionalProperties": false
+    },
+    "teamsCancelParams": {
+      "type": "object",
+      "required": ["run_id"],
+      "properties": { "run_id": { "type": "string", "minLength": 1 } },
+      "additionalProperties": false
+    },
+    "teamsCancelResult": {
+      "type": "object",
+      "required": ["run_id", "cancelled"],
+      "properties": {
+        "run_id": { "type": "string" },
+        "cancelled": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
     "mcpServerStatus": {
       "type": "object", "required": ["name", "transport", "status", "tool_names"],
       "properties": {
         "name": { "type": "string" }, "transport": { "enum": ["stdio", "http", "sse"] },
+        "source": { "type": "string", "minLength": 1 },
         "status": { "enum": ["connected", "failed", "skipped"] }, "error": { "type": "string" },
         "tool_names": { "type": "array", "items": { "type": "string" } }
       },

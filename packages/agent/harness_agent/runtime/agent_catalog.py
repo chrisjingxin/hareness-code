@@ -1,8 +1,8 @@
 """Agent 与 ExecutionPolicy 的受限静态目录。
 
-本模块只建立由 Plugin loader 显式传入的启动期只读快照，不构建 AgentEngine、不注册子 Agent，
-也不读取用户或项目目录。Python 内置主 Agent 不使用本目录；未来动态 delegation 只能从
-已校验的 catalog 取 Plugin 定义，不能将仓库文件、Prompt 或权限配置直接传入执行层。
+本模块只建立由 Plugin loader 显式传入的启动期只读快照，不构建 AgentEngine，也不读取用户或
+项目目录。Python 内置主 Agent 不使用本目录；Plugin Managed delegation 只能从已校验 catalog
+取定义，不能将仓库文件、Prompt 或权限配置直接传入执行层。
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
 
+import yaml
 from harness_agent.config.config import ConfigError, ModelCatalog
 from harness_agent.threads.prompting import canonical_json
 
@@ -25,7 +26,16 @@ MAX_CATALOG_FILE_BYTES = 64 * 1024
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _TOOL_IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 _ISOLATION_MODES = frozenset({"local", "remote", "worktree", "container"})
-_APPROVAL_MODES = ("never", "on-risk", "always")
+_RESERVED_AGENT_IDS = frozenset({"main", "general-purpose"})
+_APPROVAL_RANK = {
+    "never": 0,
+    "yolo": 0,
+    "on-risk": 1,
+    "auto-edit": 1,
+    "always": 2,
+    "default": 2,
+    "plan": 3,
+}
 
 
 class AgentCatalogError(ValueError):
@@ -38,11 +48,25 @@ class PluginAgentSource:
 
     plugin_id: str
     root: Path
+    format: str = "harness"
+    agent_files: tuple[Path, ...] = ()
+    policy_files: tuple[Path, ...] = ()
+    package_digest: str | None = None
 
     def __post_init__(self) -> None:
         """限制 Plugin 身份，目录本身仍会在读取时拒绝 symlink。"""
         if not _IDENTIFIER_RE.fullmatch(self.plugin_id):
             raise AgentCatalogError("plugin_id must be kebab-case")
+        if self.format not in {
+            "harness",
+            "agent-plugins-1.0",
+            "claude-code",
+            "hybrid",
+        }:
+            raise AgentCatalogError("plugin format is unsupported")
+        object.__setattr__(self, "root", Path(self.root))
+        object.__setattr__(self, "agent_files", tuple(Path(path) for path in self.agent_files))
+        object.__setattr__(self, "policy_files", tuple(Path(path) for path in self.policy_files))
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +134,8 @@ class ExecutionPolicyDefinition:
     policy_id: str
     source: str
     tools: StringRule | None = None
+    mcp_tools: StringRule | None = None
+    skills: StringRule | None = None
     filesystem_read: tuple[str, ...] | None = None
     filesystem_write: tuple[str, ...] | None = None
     shell: ShellPolicy | None = None
@@ -128,6 +154,8 @@ class ExecutionPolicyDefinition:
         return {
             "id": self.policy_id,
             "tools": self.tools.record() if self.tools else None,
+            "mcp_tools": self.mcp_tools.record() if self.mcp_tools else None,
+            "skills": self.skills.record() if self.skills else None,
             "filesystem": {
                 "read": list(self.filesystem_read) if self.filesystem_read is not None else None,
                 "write": list(self.filesystem_write) if self.filesystem_write is not None else None,
@@ -162,12 +190,16 @@ class AgentDefinition:
     purpose: str
     source: str
     instructions: CatalogAsset
+    prompt: str
     instruction_fragments: tuple[CatalogAsset, ...]
     input_contract: CatalogAsset | None
     output_contract: CatalogAsset | None
     success_criteria: tuple[str, ...]
     model_profile_id: str
     execution_policy_id: str
+    requested_skills: tuple[str, ...] = ()
+    requested_mcp_servers: tuple[str, ...] = ()
+    max_turns: int | None = None
 
     @property
     def fingerprint(self) -> str:
@@ -178,12 +210,16 @@ class AgentDefinition:
                 "description": self.description,
                 "purpose": self.purpose,
                 "instructions": self.instructions.digest,
+                "prompt": _digest(self.prompt.encode()),
                 "fragments": [(asset.name, asset.digest) for asset in self.instruction_fragments],
                 "input_contract": self.input_contract.digest if self.input_contract else None,
                 "output_contract": self.output_contract.digest if self.output_contract else None,
                 "success_criteria": list(self.success_criteria),
                 "model_profile": self.model_profile_id,
                 "execution_policy": self.execution_policy_id,
+                "skills": list(self.requested_skills),
+                "mcp_servers": list(self.requested_mcp_servers),
+                "max_turns": self.max_turns,
             }
         )
 
@@ -195,6 +231,9 @@ class AgentDefinition:
             "purpose": self.purpose,
             "model_profile_id": self.model_profile_id,
             "execution_policy_id": self.execution_policy_id,
+            "requested_skills": list(self.requested_skills),
+            "requested_mcp_servers": list(self.requested_mcp_servers),
+            "max_turns": self.max_turns,
             "source": self.source,
             "fingerprint": self.fingerprint,
         }
@@ -205,14 +244,16 @@ class EffectiveExecutionPolicy:
     """多个安全 envelope 取交集后的内部值对象，不是可配置目录项。"""
 
     policy_ids: tuple[str, ...]
-    tools: StringRule | None
-    filesystem_read: tuple[str, ...] | None
-    filesystem_write: tuple[str, ...] | None
-    shell: ShellPolicy | None
-    network: NetworkPolicy | None
-    isolation: str | None
-    approval_mode: str | None
-    delegation: DelegationPolicy | None
+    tools: StringRule | None = None
+    mcp_tools: StringRule | None = None
+    skills: StringRule | None = None
+    filesystem_read: tuple[str, ...] | None = None
+    filesystem_write: tuple[str, ...] | None = None
+    shell: ShellPolicy | None = None
+    network: NetworkPolicy | None = None
+    isolation: str | None = None
+    approval_mode: str | None = None
+    delegation: DelegationPolicy | None = None
 
     @property
     def fingerprint(self) -> str:
@@ -221,6 +262,8 @@ class EffectiveExecutionPolicy:
             {
                 "policy_ids": list(self.policy_ids),
                 "tools": self.tools.record() if self.tools else None,
+                "mcp_tools": self.mcp_tools.record() if self.mcp_tools else None,
+                "skills": self.skills.record() if self.skills else None,
                 "filesystem_read": list(self.filesystem_read) if self.filesystem_read is not None else None,
                 "filesystem_write": list(self.filesystem_write) if self.filesystem_write is not None else None,
                 "shell": self.shell.record() if self.shell else None,
@@ -253,15 +296,77 @@ class AgentCatalog:
                 diagnostics.append(f"{label}: plugin root must not be a symlink")
                 continue
             accepted_policies: dict[str, ExecutionPolicyDefinition] = {}
-            for policy_id, policy in self._load_policies(root / "policies", label, diagnostics).items():
+            policy_files = (
+                source.policy_files
+                if source.policy_files
+                else tuple(_structured_files(root / "policies"))
+            )
+            for policy_id, policy in self._load_policies(
+                root,
+                policy_files,
+                label,
+                diagnostics,
+            ).items():
                 if policy_id in policies:
                     diagnostics.append(f'{label} policy "{policy_id}": duplicate policy ID ignored')
                     continue
                 policies[policy_id] = policy
                 accepted_policies[policy_id] = policy
-            for agent_id, agent in self._load_agents(
-                root / "agents", label, root, accepted_policies, diagnostics
-            ).items():
+            agent_files = (
+                source.agent_files
+                if source.agent_files
+                else tuple(_structured_files(root / "agents", include_markdown=source.format == "claude-code"))
+            )
+            if source.format in {"claude-code", "hybrid"}:
+                claude_files = (
+                    agent_files
+                    if source.format == "claude-code"
+                    else tuple(
+                        path
+                        for path in agent_files
+                        if _looks_like_claude_agent(_inside_root(root, path))
+                    )
+                )
+                portable_files = (
+                    ()
+                    if source.format == "claude-code"
+                    else tuple(path for path in agent_files if path not in claude_files)
+                )
+                loaded_agents = self._load_agents(
+                    root,
+                    portable_files,
+                    label,
+                    accepted_policies,
+                    diagnostics,
+                )
+                claude_agents, derived_policies = self._load_claude_agents(
+                    root,
+                    claude_files,
+                    label,
+                    diagnostics,
+                )
+                for policy_id, policy in derived_policies.items():
+                    if policy_id in policies:
+                        diagnostics.append(f'{label} policy "{policy_id}": duplicate policy ID ignored')
+                        continue
+                    policies[policy_id] = policy
+                    accepted_policies[policy_id] = policy
+                for agent_id, agent in claude_agents.items():
+                    if agent_id in loaded_agents:
+                        diagnostics.append(
+                            f'{label} agent "{agent_id}": duplicate Agent ID ignored'
+                        )
+                        continue
+                    loaded_agents[agent_id] = agent
+            else:
+                loaded_agents = self._load_agents(
+                    root,
+                    agent_files,
+                    label,
+                    accepted_policies,
+                    diagnostics,
+                )
+            for agent_id, agent in loaded_agents.items():
                 if agent_id in agents:
                     diagnostics.append(f'{label} agent "{agent_id}": duplicate Agent ID ignored')
                     continue
@@ -329,13 +434,17 @@ class AgentCatalog:
         return intersect_execution_policies(envelope, target)
 
     def _load_policies(
-        self, root: Path, source: str, diagnostics: list[str]
+        self,
+        root: Path,
+        files: tuple[Path, ...],
+        source: str,
+        diagnostics: list[str],
     ) -> dict[str, ExecutionPolicyDefinition]:
-        """读取单层 JSON Policy；损坏项只增加脱敏诊断。"""
+        """读取 Adapter 指定的 Policy；损坏项只增加脱敏诊断。"""
         records: dict[str, ExecutionPolicyDefinition] = {}
-        for path in _json_files(root):
+        for path in files:
             try:
-                policy = _parse_policy(path, source)
+                policy = _parse_policy(_inside_root(root, path), source)
                 if policy.policy_id in records:
                     raise AgentCatalogError("duplicate policy ID")
                 records[policy.policy_id] = policy
@@ -346,20 +455,20 @@ class AgentCatalog:
     def _load_agents(
         self,
         root: Path,
+        files: tuple[Path, ...],
         source: str,
-        asset_root: Path,
         policies: Mapping[str, ExecutionPolicyDefinition],
         diagnostics: list[str],
     ) -> dict[str, AgentDefinition]:
-        """读取单层 JSON Agent，并只允许其引用同一可信来源根目录内的资产。"""
+        """读取 Harness Agent，并只允许其引用同一可信来源根目录内的资产。"""
         records: dict[str, AgentDefinition] = {}
-        for path in _json_files(root):
+        for candidate in files:
+            path = _inside_root(root, candidate)
             try:
                 agent = _parse_agent(
                     path,
                     source=source,
-                    root=root,
-                    asset_root=asset_root,
+                    asset_root=root,
                     policies=policies,
                     model_catalog=self._model_catalog,
                 )
@@ -369,6 +478,32 @@ class AgentCatalog:
             except (AgentCatalogError, ConfigError, OSError, json.JSONDecodeError) as exc:
                 diagnostics.append(_diagnostic(source, "agent", path.name, exc))
         return records
+
+    def _load_claude_agents(
+        self,
+        root: Path,
+        files: tuple[Path, ...],
+        source: str,
+        diagnostics: list[str],
+    ) -> tuple[dict[str, AgentDefinition], dict[str, ExecutionPolicyDefinition]]:
+        """把 Claude `agents/*.md` 转为相同 Agent/Policy 类型。"""
+        agents: dict[str, AgentDefinition] = {}
+        policies: dict[str, ExecutionPolicyDefinition] = {}
+        for candidate in files:
+            path = _inside_root(root, candidate)
+            try:
+                agent, policy = _parse_claude_agent(
+                    path,
+                    source=source,
+                    model_catalog=self._model_catalog,
+                )
+                if agent.agent_id in agents:
+                    raise AgentCatalogError("duplicate Agent ID")
+                agents[agent.agent_id] = agent
+                policies[policy.policy_id] = policy
+            except (AgentCatalogError, ConfigError, OSError, yaml.YAMLError) as exc:
+                diagnostics.append(_diagnostic(source, "agent", path.name, exc))
+        return agents, policies
 
 
 def intersect_execution_policies(
@@ -385,6 +520,8 @@ def intersect_execution_policies(
     return EffectiveExecutionPolicy(
         policy_ids=(*base.policy_ids, target.policy_id),
         tools=_intersect_rule(base.tools, target.tools),
+        mcp_tools=_intersect_rule(base.mcp_tools, target.mcp_tools),
+        skills=_intersect_rule(base.skills, target.skills),
         filesystem_read=_intersect_paths(base.filesystem_read, target.filesystem_read),
         filesystem_write=_intersect_paths(base.filesystem_write, target.filesystem_write),
         shell=_intersect_shell(base.shell, target.shell),
@@ -400,6 +537,8 @@ def _effective_from_definition(policy: ExecutionPolicyDefinition) -> EffectiveEx
     return EffectiveExecutionPolicy(
         policy_ids=(policy.policy_id,),
         tools=policy.tools,
+        mcp_tools=policy.mcp_tools,
+        skills=policy.skills,
         filesystem_read=policy.filesystem_read,
         filesystem_write=policy.filesystem_write,
         shell=policy.shell,
@@ -481,12 +620,20 @@ def _intersect_isolation(left: str | None, right: str | None) -> str | None:
 
 
 def _intersect_approval(left: str | None, right: str | None) -> str | None:
-    """按 never < on-risk < always 选择更严格的审批要求。"""
+    """在外部 Policy 与 Harness 模式之间选择更严格的一方。"""
     if left is None:
         return right
     if right is None:
         return left
-    return max((left, right), key=_APPROVAL_MODES.index)
+    try:
+        selected = max((left, right), key=_APPROVAL_RANK.__getitem__)
+    except KeyError as exc:
+        raise AgentCatalogError("EXECUTION_POLICY_APPROVAL_UNSUPPORTED") from exc
+    return {
+        "never": "yolo",
+        "on-risk": "auto-edit",
+        "always": "default",
+    }.get(selected, selected)
 
 
 def _intersect_delegation(
@@ -515,11 +662,22 @@ def _minimum(left: int | None, right: int | None) -> int | None:
 
 
 def _parse_policy(path: Path, source: str) -> ExecutionPolicyDefinition:
-    """解析一个 Policy JSON，拒绝未知字段和无法安全解释的值。"""
-    data = _read_json_object(path)
+    """解析一个 JSON/YAML Policy，拒绝未知字段和无法安全解释的值。"""
+    data = _read_structured_object(path)
     _reject_unknown(
         data,
-        {"id", "tools", "filesystem", "shell", "network", "isolation", "approval", "delegation"},
+        {
+            "id",
+            "tools",
+            "mcpTools",
+            "skills",
+            "filesystem",
+            "shell",
+            "network",
+            "isolation",
+            "approval",
+            "delegation",
+        },
         "policy",
     )
     policy_id = _identifier(data.get("id"), "policy.id")
@@ -527,13 +685,23 @@ def _parse_policy(path: Path, source: str) -> ExecutionPolicyDefinition:
         policy_id=policy_id,
         source=source,
         tools=_parse_rule(data.get("tools"), "policy.tools", identifier_values=True),
+        mcp_tools=_parse_rule(
+            data.get("mcpTools"),
+            "policy.mcpTools",
+            identifier_values=True,
+        ),
+        skills=_parse_rule(data.get("skills"), "policy.skills", identifier_values=False),
         filesystem_read=_parse_paths(data.get("filesystem"), "read"),
         filesystem_write=_parse_paths(data.get("filesystem"), "write"),
         shell=_parse_shell(data.get("shell")),
         network=_parse_network(data.get("network")),
         isolation=_parse_isolation(data.get("isolation")),
         approval_mode=_parse_approval(data.get("approval")),
-        delegation=_parse_delegation(data.get("delegation")),
+        delegation=(
+            _parse_delegation(data.get("delegation"))
+            if "delegation" in data
+            else DelegationPolicy(enabled=False)
+        ),
     )
 
 
@@ -541,56 +709,234 @@ def _parse_agent(
     path: Path,
     *,
     source: str,
-    root: Path,
     asset_root: Path,
     policies: Mapping[str, ExecutionPolicyDefinition],
     model_catalog: ModelCatalog,
 ) -> AgentDefinition:
-    """解析一个 Agent JSON，并在加载点完成所有引用与资产边界校验。"""
-    data = _read_json_object(path)
+    """解析 Harness Agent，并在加载点完成所有引用与资产边界校验。"""
+    data = _read_structured_object(path)
     _reject_unknown(
         data,
         {
-            "id", "description", "purpose", "instructionsRef", "instructionFragments",
-            "inputContractRef", "outputContractRef", "successCriteria", "modelProfileId", "executionPolicyId",
+            "id",
+            "description",
+            "purpose",
+            "instructions",
+            "model",
+            "policy",
+            "skills",
+            "mcpServers",
+            "limits",
+            "successCriteria",
+            "inputContract",
+            "outputContract",
         },
         "agent",
     )
     agent_id = _identifier(data.get("id"), "agent.id")
+    if agent_id in _RESERVED_AGENT_IDS:
+        raise AgentCatalogError("agent.id is reserved by Harness")
     description = _optional_text(data.get("description"), "agent.description")
-    purpose = _required_text(data.get("purpose"), "agent.purpose")
-    model_profile_id = _required_text(data.get("modelProfileId"), "agent.modelProfileId")
-    model_catalog.require_profile(model_profile_id)
-    policy_id = _identifier(data.get("executionPolicyId"), "agent.executionPolicyId")
+    purpose = _required_text(
+        data.get("purpose", description),
+        "agent.purpose",
+    )
+    model_profile_id = _parse_agent_model(data.get("model"), model_catalog)
+    policy_id = _identifier(data.get("policy"), "agent.policy")
+    instructions = _relative_asset(
+        asset_root,
+        path.parent,
+        data.get("instructions"),
+        ".md",
+        "agent.instructions",
+    )
+    fragments: tuple[CatalogAsset, ...] = ()
+    input_contract = _optional_relative_asset(
+        asset_root,
+        path.parent,
+        data.get("inputContract"),
+        ".json",
+        "agent.inputContract",
+    )
+    output_contract = _optional_relative_asset(
+        asset_root,
+        path.parent,
+        data.get("outputContract"),
+        ".json",
+        "agent.outputContract",
+    )
+    requested_skills = tuple(
+        _string_list(data.get("skills"), "agent.skills", required=False)
+    )
+    requested_mcp = tuple(
+        _string_list(data.get("mcpServers"), "agent.mcpServers", required=False)
+    )
+    max_turns = _parse_agent_max_turns(data.get("limits"))
     if policy_id not in policies:
-        raise AgentCatalogError("agent.executionPolicyId references an unknown policy")
-    instructions = _asset(root, data.get("instructionsRef"), ".md", "agent.instructionsRef")
-    fragments = tuple(
-        _asset(asset_root / "instructions", value, ".md", "agent.instructionFragments")
-        for value in _string_list(data.get("instructionFragments"), "agent.instructionFragments", required=False)
-    )
-    input_contract = _optional_asset(
-        asset_root / "schemas", data.get("inputContractRef"), ".json", "agent.inputContractRef"
-    )
-    output_contract = _optional_asset(
-        asset_root / "schemas", data.get("outputContractRef"), ".json", "agent.outputContractRef"
-    )
+        raise AgentCatalogError("agent.policy references an unknown policy")
     for contract in (input_contract, output_contract):
         if contract is not None:
             _validate_json_schema(contract.path)
+    prompt_parts = [_read_limited_text(instructions.path)]
+    prompt_parts.extend(_read_limited_text(fragment.path) for fragment in fragments)
     return AgentDefinition(
         agent_id=agent_id,
         description=description,
         purpose=purpose,
         source=source,
         instructions=instructions,
+        prompt="\n\n".join(prompt_parts),
         instruction_fragments=fragments,
         input_contract=input_contract,
         output_contract=output_contract,
         success_criteria=tuple(_string_list(data.get("successCriteria"), "agent.successCriteria", required=False)),
         model_profile_id=model_profile_id,
         execution_policy_id=policy_id,
+        requested_skills=requested_skills,
+        requested_mcp_servers=requested_mcp,
+        max_turns=max_turns,
     )
+
+
+_CLAUDE_TOOL_MAP = {
+    "Read": "read_file",
+    "Glob": "glob",
+    "Grep": "grep",
+    "Write": "write_file",
+    "Edit": "edit_file",
+    "Bash": "execute",
+    "Agent": "task",
+}
+
+
+def _parse_claude_agent(
+    path: Path,
+    *,
+    source: str,
+    model_catalog: ModelCatalog,
+) -> tuple[AgentDefinition, ExecutionPolicyDefinition]:
+    """解析 Claude Agent Markdown；权限字段只形成目标 Policy 上限。"""
+    if path.suffix != ".md":
+        raise AgentCatalogError("Claude Agent must be Markdown")
+    content = _read_limited_text(path)
+    match = re.match(r"\A---\s*\n(?P<header>.*?)\n---\s*(?:\n|\Z)", content, re.DOTALL)
+    if match is None:
+        raise AgentCatalogError("Claude Agent is missing YAML front matter")
+    raw = yaml.safe_load(match.group("header"))
+    if not isinstance(raw, Mapping):
+        raise AgentCatalogError("Claude Agent front matter must be an object")
+    _reject_unknown(
+        raw,
+        {
+            "name",
+            "description",
+            "tools",
+            "disallowedTools",
+            "disallowed-tools",
+            "model",
+            "skills",
+            "maxTurns",
+            "effort",
+            "memory",
+            "background",
+            "isolation",
+            "color",
+            "permissionMode",
+            "hooks",
+            "mcpServers",
+        },
+        "claude.agent",
+    )
+    body = content[match.end():].strip()
+    if not body:
+        raise AgentCatalogError("Claude Agent prompt must not be empty")
+    agent_id = _identifier(raw.get("name", path.stem), "claude.agent.name")
+    if agent_id in _RESERVED_AGENT_IDS:
+        raise AgentCatalogError("claude.agent.name is reserved by Harness")
+    description = _optional_text(raw.get("description"), "claude.agent.description")
+    model_profile_id = _parse_claude_model(raw.get("model"), model_catalog)
+    tools_declared = raw.get("tools") is not None
+    allowed = _map_claude_tools(raw.get("tools"), "claude.agent.tools")
+    denied = _map_claude_tools(
+        raw.get("disallowedTools", raw.get("disallowed-tools")),
+        "claude.agent.disallowedTools",
+    )
+    policy_id = f"{agent_id}-claude"
+    policy = ExecutionPolicyDefinition(
+        policy_id=policy_id,
+        source=source,
+        tools=StringRule(
+            allow=tuple(sorted(allowed)) if tools_declared else None,
+            deny=tuple(sorted(denied)),
+        ),
+        filesystem_read=(
+            (("**/*",) if allowed & FILE_READ_TOOL_NAMES else ())
+            if tools_declared
+            else None
+        ),
+        filesystem_write=(
+            (("**/*",) if allowed & FILE_WRITE_TOOL_NAMES else ())
+            if tools_declared
+            else None
+        ),
+        shell=ShellPolicy(enabled="execute" in allowed) if tools_declared else None,
+        network=NetworkPolicy(enabled=False),
+        delegation=DelegationPolicy(
+            enabled=tools_declared and "task" in allowed,
+            allowed_agents=None,
+            max_depth=1,
+            max_parallelism=1,
+        ),
+    )
+    instructions = CatalogAsset(
+        name=path.name,
+        path=path.resolve(),
+        digest=_digest(content.encode()),
+    )
+    skills = tuple(_string_list(raw.get("skills"), "claude.agent.skills", required=False))
+    max_turns = _positive_int(raw.get("maxTurns"), "claude.agent.maxTurns")
+    agent = AgentDefinition(
+        agent_id=agent_id,
+        description=description,
+        purpose=description or f"Claude Plugin Agent {agent_id}",
+        source=source,
+        instructions=instructions,
+        prompt=body,
+        instruction_fragments=(),
+        input_contract=None,
+        output_contract=None,
+        success_criteria=(),
+        model_profile_id=model_profile_id,
+        execution_policy_id=policy_id,
+        requested_skills=skills,
+        max_turns=max_turns,
+    )
+    return agent, policy
+
+
+def _looks_like_claude_agent(path: Path) -> bool:
+    """在 Hybrid 包中只把带 front matter 和正文的 Markdown 交给 Claude Adapter。"""
+    if path.suffix.lower() != ".md":
+        return False
+    try:
+        content = _read_limited_text(path)
+    except (AgentCatalogError, OSError):
+        return False
+    match = re.match(
+        r"\A---\s*\n(?P<header>.*?)\n---\s*(?:\n|\Z)",
+        content,
+        re.DOTALL,
+    )
+    if match is None or not content[match.end():].strip():
+        return False
+    try:
+        return isinstance(yaml.safe_load(match.group("header")), Mapping)
+    except yaml.YAMLError:
+        return False
+
+
+FILE_READ_TOOL_NAMES = frozenset({"read_file", "glob", "grep"})
+FILE_WRITE_TOOL_NAMES = frozenset({"write_file", "edit_file"})
 
 
 def _parse_rule(value: object, field: str, *, identifier_values: bool) -> StringRule | None:
@@ -675,7 +1021,7 @@ def _parse_approval(value: object) -> str | None:
         raise AgentCatalogError("policy.approval must be an object")
     _reject_unknown(value, {"mode"}, "policy.approval")
     mode = value.get("mode")
-    if not isinstance(mode, str) or mode not in _APPROVAL_MODES:
+    if not isinstance(mode, str) or mode not in {"never", "on-risk", "always"}:
         raise AgentCatalogError("policy.approval.mode is unsupported")
     return mode
 
@@ -699,22 +1045,105 @@ def _parse_delegation(value: object) -> DelegationPolicy | None:
     )
 
 
-def _asset(root: Path, value: object, suffix: str, field: str) -> CatalogAsset:
-    """读取受根目录约束的单个资产，不允许绝对路径、父目录或 symlink。"""
-    if not isinstance(value, str) or not value:
-        raise AgentCatalogError(f"{field} must be a non-empty filename")
-    if Path(value).name != value or not value.endswith(suffix):
-        raise AgentCatalogError(f"{field} must be a {suffix} filename without a path")
-    path = root / value
+def _relative_asset(
+    asset_root: Path,
+    definition_root: Path,
+    value: object,
+    suffix: str,
+    field: str,
+) -> CatalogAsset:
+    """解析相对定义文件的资产，并证明最终路径仍在 Plugin 根内。"""
+    if not isinstance(value, str) or not value or Path(value).is_absolute():
+        raise AgentCatalogError(f"{field} must be a relative {suffix} path")
+    path = _inside_root(asset_root, definition_root / value)
+    if path.suffix != suffix:
+        raise AgentCatalogError(f"{field} must reference a {suffix} file")
     content = _read_limited_text(path)
     if suffix == ".md" and not content.strip():
         raise AgentCatalogError(f"{field} must not reference an empty file")
-    return CatalogAsset(name=value, path=path.resolve(), digest=_digest(content.encode()))
+    return CatalogAsset(
+        name=path.relative_to(asset_root.resolve()).as_posix(),
+        path=path,
+        digest=_digest(content.encode()),
+    )
 
 
-def _optional_asset(root: Path, value: object, suffix: str, field: str) -> CatalogAsset | None:
-    """在可选引用缺失时返回 None，其余情况与必填资产同样严格校验。"""
-    return None if value is None else _asset(root, value, suffix, field)
+def _optional_relative_asset(
+    asset_root: Path,
+    definition_root: Path,
+    value: object,
+    suffix: str,
+    field: str,
+) -> CatalogAsset | None:
+    """解析可选的 Plugin 根内相对资产。"""
+    if value is None:
+        return None
+    return _relative_asset(asset_root, definition_root, value, suffix, field)
+
+
+def _parse_agent_model(value: object, catalog: ModelCatalog) -> str:
+    """解析 Harness model strategy；inherit 在执行时绑定父 Profile。"""
+    if value is None:
+        return "inherit"
+    if isinstance(value, str):
+        profile_id = value
+    elif isinstance(value, Mapping):
+        _reject_unknown(value, {"strategy", "profile"}, "agent.model")
+        strategy = value.get("strategy")
+        if strategy == "inherit":
+            return "inherit"
+        if strategy != "profile":
+            raise AgentCatalogError("agent.model.strategy must be inherit or profile")
+        profile_id = value.get("profile")
+    else:
+        raise AgentCatalogError("agent.model must be a string or object")
+    if not isinstance(profile_id, str):
+        raise AgentCatalogError("agent.model.profile must be a string")
+    catalog.require_profile(profile_id)
+    return profile_id
+
+
+def _parse_claude_model(value: object, catalog: ModelCatalog) -> str:
+    """映射 Claude model；标准家族缺少同名 Profile 时安全继承父模型。"""
+    if value is None or value == "inherit":
+        return "inherit"
+    if not isinstance(value, str) or not value:
+        raise AgentCatalogError("claude.agent.model must be a string")
+    if value in catalog.profiles:
+        return value
+    if value in {"sonnet", "opus", "haiku"}:
+        return "inherit"
+    catalog.require_profile(value)
+    return value
+
+
+def _parse_agent_max_turns(value: object) -> int | None:
+    """解析 Harness limits.maxTurns，拒绝其他尚未执行的预算字段。"""
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise AgentCatalogError("agent.limits must be an object")
+    _reject_unknown(value, {"maxTurns"}, "agent.limits")
+    return _positive_int(value.get("maxTurns"), "agent.limits.maxTurns")
+
+
+def _map_claude_tools(value: object, field: str) -> set[str]:
+    """把 Claude Tool 名显式映射到 Harness；未知名称使 Agent inactive。"""
+    if value is None:
+        return set()
+    if isinstance(value, str):
+        values = [item.strip() for item in value.split(",") if item.strip()]
+    elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+        values = [str(item).strip() for item in value if str(item).strip()]
+    else:
+        raise AgentCatalogError(f"{field} must be a string or string array")
+    mapped: set[str] = set()
+    for name in values:
+        canonical = _CLAUDE_TOOL_MAP.get(name)
+        if canonical is None:
+            raise AgentCatalogError(f"CLAUDE_TOOL_UNMAPPED: {name}")
+        mapped.add(canonical)
+    return mapped
 
 
 def _validate_json_schema(path: Path) -> None:
@@ -750,6 +1179,21 @@ def _read_json_object(path: Path) -> dict[str, Any]:
     return value
 
 
+def _read_structured_object(path: Path) -> dict[str, Any]:
+    """读取限制大小的 JSON/YAML 对象；YAML 禁止自定义构造器。"""
+    if path.suffix == ".json":
+        return _read_json_object(path)
+    if path.suffix not in {".yaml", ".yml"}:
+        raise AgentCatalogError("structured definition must be JSON or YAML")
+    try:
+        value = yaml.safe_load(_read_limited_text(path))
+    except yaml.YAMLError as exc:
+        raise AgentCatalogError("invalid YAML") from exc
+    if not isinstance(value, dict):
+        raise AgentCatalogError("YAML root must be an object")
+    return value
+
+
 def _read_limited_text(path: Path) -> str:
     """只读取普通 UTF-8 文件，避免 symlink 和超大资产穿透信任边界。"""
     if path.is_symlink() or not path.is_file():
@@ -759,14 +1203,43 @@ def _read_limited_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def _json_files(root: Path) -> tuple[Path, ...]:
-    """列出目录第一层普通 JSON 文件；不存在、symlink 或项目目录均不递归。"""
+def _structured_files(root: Path, *, include_markdown: bool = False) -> tuple[Path, ...]:
+    """列出目录第一层普通定义文件，不递归、不跟随 symlink。"""
     if not root.is_dir() or root.is_symlink():
         return ()
+    suffixes = {".json", ".yaml", ".yml"}
+    if include_markdown:
+        suffixes.add(".md")
     try:
-        return tuple(sorted((path for path in root.iterdir() if path.suffix == ".json" and path.is_file() and not path.is_symlink()), key=lambda path: path.name))
+        return tuple(
+            sorted(
+                (
+                    path
+                    for path in root.iterdir()
+                    if path.suffix in suffixes and path.is_file() and not path.is_symlink()
+                ),
+                key=lambda path: path.name,
+            )
+        )
     except OSError:
         return ()
+
+
+def _inside_root(root: Path, candidate: Path) -> Path:
+    """证明候选文件位于 Plugin 根内，拒绝 symlink 和路径逃逸。"""
+    resolved_root = root.resolve()
+    try:
+        resolved = candidate.resolve()
+        resolved.relative_to(resolved_root)
+    except (OSError, ValueError) as exc:
+        raise AgentCatalogError("definition path escapes plugin root") from exc
+    relative = resolved.relative_to(resolved_root)
+    current = resolved_root
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise AgentCatalogError("definition path must not contain symlink")
+    return resolved
 
 
 def _identifier(value: object, field: str) -> str:

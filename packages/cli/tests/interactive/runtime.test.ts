@@ -39,6 +39,8 @@ test("从脱敏初始化结果提取可展示的运行上下文", () => {
     approvalMode: "default",
     approvalModeWarning: undefined,
     capabilities: [],
+    agentCommands: [],
+    mcpSummary: undefined,
   })
   expect(workspaceLabel(runtime.workspace)).toBe("za38-cli")
   expect(executionStatusLabel(runtime)).toBe("远端沙箱 · corp")

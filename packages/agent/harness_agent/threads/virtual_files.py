@@ -39,14 +39,18 @@ class HarnessVirtualBackend:
     def __init__(
         self,
         *,
-        registry: SkillRegistry,
+        registry: SkillRegistry | None,
         thread_id: str,
         thread_persistence: "ThreadPersistence | None" = None,
+        expected_snapshot_id: str | None = None,
+        require_snapshot_id: bool = False,
     ) -> None:
-        """绑定启动时固定的 Skill catalog 和当前 project/thread 的归档读取器。"""
+        """绑定一个 Run 的 Skill snapshot 和当前 project/thread 的归档读取器。"""
         self._registry = registry
         self._thread_id = thread_id
         self._thread_persistence = thread_persistence
+        self._expected_snapshot_id = expected_snapshot_id
+        self._require_snapshot_id = require_snapshot_id
         self._history_cache: dict[str, str] = {}
 
     def read(self, file_path: str, offset: int = 0, limit: int = 2_000) -> ReadResult:
@@ -158,15 +162,32 @@ class HarnessVirtualBackend:
         return path
 
     def _read_skill(self, path: PurePosixPath) -> str:
-        """从固定 registry 安全读取 Skill 正文或资源，绝不泄露根目录。"""
+        """从当前 Run 的 Skill snapshot 安全读取正文或资源，绝不泄露根目录。"""
+        if self._registry is None:
+            raise SkillError("RunContext Skill snapshot is unavailable")
+        if self._require_snapshot_id and self._expected_snapshot_id is None:
+            raise SkillError("RunContext Skill snapshot identity is unavailable")
+        if (
+            self._expected_snapshot_id is not None
+            and self._registry.snapshot_id != self._expected_snapshot_id
+        ):
+            raise SkillError("RunContext Skill snapshot identity mismatch")
         if path.name == "SKILL.md":
             skill_id = "/".join(path.parts[1:-1])
-            return self._registry.load(skill_id).body
-        skill_id = "/".join(path.parts[1:3])
-        relative = "/".join(path.parts[3:])
-        if not relative:
-            raise ValueError("skill resource path is required")
-        return self._registry.read_resource(skill_id, relative)
+            virtual_id = self._registry.resolve_virtual_id(skill_id)
+            return self._registry.load(virtual_id).body
+        # canonical ID 可以包含多个路径段。按最长前缀解析，避免 Plugin ID 被固定两段截断。
+        for boundary in range(len(path.parts) - 1, 1, -1):
+            skill_id = "/".join(path.parts[1:boundary])
+            try:
+                virtual_id = self._registry.resolve_virtual_id(skill_id)
+            except SkillError:
+                continue
+            relative = "/".join(path.parts[boundary:])
+            if not relative:
+                raise ValueError("skill resource path is required")
+            return self._registry.read_resource(virtual_id, relative)
+        raise ValueError("unknown canonical Skill ID")
 
     @staticmethod
     def _page(content: str, offset: int, limit: int) -> ReadResult:
@@ -182,38 +203,52 @@ class HarnessVirtualBackend:
 def mount_harness_virtual_files(
     default_backend: "BackendProtocol",
     *,
-    registry: SkillRegistry,
+    registry: SkillRegistry | None,
     thread_id: str,
     thread_persistence: "ThreadPersistence | None" = None,
+    expected_snapshot_id: str | None = None,
+    require_snapshot_id: bool = False,
 ) -> CompositeBackend:
     """把虚拟只读后端挂在真实 backend 之前，文件工具仍使用统一 ``read_file``。"""
     return CompositeBackend(
         default=default_backend,
-        routes={f"{VIRTUAL_ROOT}/": HarnessVirtualBackend(registry=registry, thread_id=thread_id, thread_persistence=thread_persistence)},
+        routes={
+            f"{VIRTUAL_ROOT}/": HarnessVirtualBackend(
+                registry=registry,
+                thread_id=thread_id,
+                thread_persistence=thread_persistence,
+                expected_snapshot_id=expected_snapshot_id,
+                require_snapshot_id=require_snapshot_id,
+            )
+        },
     )
 
 
 def run_scoped_virtual_backend_factory(
     default_backend: "BackendProtocol",
     *,
-    registry: SkillRegistry,
     thread_persistence: "ThreadPersistence | None" = None,
 ) -> Callable[[Any], CompositeBackend]:
     """返回按当前 RunContext 解析虚拟历史的 backend factory。
 
-    编译图可以安全共享 ``default_backend``，但 ``/.harness/history`` 必须以
-    当前工具调用的 thread 为边界。RunContext 缺失时 ``require_run_context`` 会
-    直接拒绝调用，避免把某个 thread 的归档静默暴露给另一个 thread。
+    编译图可以安全共享 ``default_backend``，但 Skill 和 ``/.harness/history``
+    必须以当前 RunContext 为边界。RunContext 缺失或没有 Skill identity 时
+    直接拒绝 Skill 读取，避免共享图闭包捕获构图期旧 Registry。
     """
 
     def backend_for_run(runtime: Any) -> CompositeBackend:
         """在工具执行边界创建仅绑定当前 thread 的虚拟挂载。"""
         context = require_run_context(runtime)
+        snapshot = context.context_snapshot
         return mount_harness_virtual_files(
             default_backend,
-            registry=registry,
+            registry=context.skill_registry,
             thread_id=context.thread_id,
             thread_persistence=thread_persistence,
+            expected_snapshot_id=(
+                snapshot.skill_snapshot_id if snapshot is not None else None
+            ),
+            require_snapshot_id=True,
         )
 
     return backend_for_run

@@ -1,0 +1,14 @@
+id: demo-code-reviewer
+description: 只读分析代码结构与实现风险
+purpose: 为 Demo Team 提供带文件证据的代码审查结果
+instructions: ../instructions/demo-code-reviewer.md
+model:
+  strategy: inherit
+policy: demo-readonly
+skills: [project-health]
+mcpServers: [demo-tools]
+limits:
+  maxTurns: 6
+successCriteria:
+  - 每项结论包含文件证据
+  - 不修改工作区

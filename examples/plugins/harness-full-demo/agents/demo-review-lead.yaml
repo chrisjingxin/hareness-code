@@ -1,0 +1,14 @@
+id: demo-review-lead
+description: 汇总代码与测试审查结果
+purpose: 合并 Demo Team 成员结果并生成按优先级排序的结论
+instructions: ../instructions/demo-review-lead.md
+model:
+  strategy: inherit
+policy: demo-readonly
+skills: [project-health]
+mcpServers: [demo-tools]
+limits:
+  maxTurns: 6
+successCriteria:
+  - 区分事实、风险和建议
+  - 保留成员提供的文件证据

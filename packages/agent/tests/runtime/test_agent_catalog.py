@@ -58,17 +58,14 @@ def _write_plugin_agent(root: Path, *, model: str = "fast") -> None:
         {
             "id": "reviewer",
             "purpose": "审查代码变更",
-            "instructionsRef": "reviewer.md",
-            "instructionFragments": ["evidence-first.md"],
-            "outputContractRef": "review-result.json",
-            "modelProfileId": model,
-            "executionPolicyId": "review",
+            "instructions": "reviewer.md",
+            "outputContract": "../schemas/review-result.json",
+            "model": {"strategy": "profile", "profile": model},
+            "policy": "review",
         },
     )
     (root / "agents").mkdir(parents=True, exist_ok=True)
     (root / "agents" / "reviewer.md").write_text("只报告有证据的问题。", encoding="utf-8")
-    (root / "instructions").mkdir(parents=True, exist_ok=True)
-    (root / "instructions" / "evidence-first.md").write_text("结论必须包含证据。", encoding="utf-8")
     _write_json(root / "schemas" / "review-result.json", {"type": "object", "properties": {"issues": {"type": "array"}}})
 
 
@@ -86,8 +83,8 @@ def test_catalog_loads_plugin_assets_and_fingerprints_content(tmp_path: Path) ->
         first.require_agent("main")
     assert str(tmp_path) not in str(first.list_agents())
 
-    fragment = root / "instructions" / "evidence-first.md"
-    fragment.write_text("每条结论都必须包含可复核证据。", encoding="utf-8")
+    instructions = root / "agents" / "reviewer.md"
+    instructions.write_text("每条结论都必须包含可复核证据。", encoding="utf-8")
     second = AgentCatalog(model_catalog=_models(), sources=(source,))
     assert second.snapshot_id != first.snapshot_id
 
@@ -99,7 +96,13 @@ def test_invalid_or_unpassed_sources_do_not_enter_plugin_catalog(tmp_path: Path)
     invalid_root = tmp_path / "invalid-plugin"
     _write_json(
         invalid_root / "agents" / "broken.json",
-        {"id": "broken", "purpose": "bad", "instructionsRef": "../../secret.md"},
+        {
+            "id": "broken",
+            "purpose": "bad",
+            "instructions": "../../secret.md",
+            "model": {"strategy": "inherit"},
+            "policy": "missing",
+        },
     )
     project = tmp_path / "project" / ".harness" / "agents"
     _write_json(
@@ -107,9 +110,9 @@ def test_invalid_or_unpassed_sources_do_not_enter_plugin_catalog(tmp_path: Path)
         {
             "id": "project-agent",
             "purpose": "不可信项目定义",
-            "instructionsRef": "project-agent.md",
-            "modelProfileId": "fast",
-            "executionPolicyId": "main",
+            "instructions": "project-agent.md",
+            "model": {"strategy": "profile", "profile": "fast"},
+            "policy": "main",
         },
     )
 
@@ -138,6 +141,8 @@ def test_policy_intersection_cannot_relax_parent_envelope(tmp_path: Path) -> Non
         policy_id="parent",
         source="test",
         tools=StringRule(allow=("read_file",)),
+        mcp_tools=StringRule(allow=("mcp_read",)),
+        skills=StringRule(allow=("plugin/review",)),
         filesystem_read=("**/*",),
         filesystem_write=(),
         shell=ShellPolicy(enabled=False),
@@ -148,10 +153,12 @@ def test_policy_intersection_cannot_relax_parent_envelope(tmp_path: Path) -> Non
     effective = catalog.effective_policy("reviewer", envelope=parent)
 
     assert effective.tools is not None and effective.tools.allow == ("read_file",)
+    assert effective.mcp_tools is not None and effective.mcp_tools.allow == ("mcp_read",)
+    assert effective.skills is not None and effective.skills.allow == ("plugin/review",)
     assert effective.filesystem_write == ()
     assert effective.shell is not None and effective.shell.enabled is False
     assert effective.network is not None and effective.network.enabled is False
-    assert effective.approval_mode == "always"
+    assert effective.approval_mode == "default"
     assert effective.delegation is not None and effective.delegation.enabled is False
 
 
@@ -161,3 +168,127 @@ def test_policy_intersection_rejects_incompatible_isolation() -> None:
     target = ExecutionPolicyDefinition(policy_id="target", source="test", isolation="worktree")
     with pytest.raises(AgentCatalogError, match="ISOLATION_CONFLICT"):
         intersect_execution_policies(parent, target)
+
+
+def test_portable_yaml_agent_uses_canonical_fields_and_inherit_model(
+    tmp_path: Path,
+) -> None:
+    """最终 Harness extension YAML 不需要旧 JSON-only 字段。"""
+    root = tmp_path / "portable"
+    policy = root / "policies" / "review.yaml"
+    policy.parent.mkdir(parents=True)
+    policy.write_text(
+        "id: read-only\n"
+        "tools:\n"
+        "  allow: [read_file, glob, grep]\n"
+        "filesystem:\n"
+        "  read: ['**/*']\n"
+        "  write: []\n"
+        "shell:\n"
+        "  enabled: false\n"
+        "network:\n"
+        "  enabled: false\n",
+        encoding="utf-8",
+    )
+    agent = root / "agents" / "reviewer.yaml"
+    agent.parent.mkdir(parents=True)
+    agent.write_text(
+        "id: reviewer\n"
+        "description: Review safely\n"
+        "instructions: ../instructions/reviewer.md\n"
+        "model:\n"
+        "  strategy: inherit\n"
+        "policy: read-only\n"
+        "skills: [review-checklist]\n"
+        "limits:\n"
+        "  maxTurns: 8\n",
+        encoding="utf-8",
+    )
+    instructions = root / "instructions" / "reviewer.md"
+    instructions.parent.mkdir()
+    instructions.write_text("Only report evidence.", encoding="utf-8")
+
+    catalog = AgentCatalog(
+        model_catalog=_models(),
+        sources=(
+            PluginAgentSource(
+                "portable",
+                root,
+                format="agent-plugins-1.0",
+                agent_files=(agent,),
+                policy_files=(policy,),
+            ),
+        ),
+    )
+    definition = catalog.require_agent("reviewer")
+
+    assert definition.prompt == "Only report evidence."
+    assert definition.model_profile_id == "inherit"
+    assert definition.requested_skills == ("review-checklist",)
+    assert definition.max_turns == 8
+    assert catalog.require_policy("read-only").delegation == DelegationPolicy(
+        enabled=False
+    )
+
+
+def test_hybrid_source_routes_portable_and_claude_agents_by_document(
+    tmp_path: Path,
+) -> None:
+    """双 manifest 包中的两种 Agent 文档必须进入同一个 canonical catalog。"""
+    root = tmp_path / "hybrid"
+    policy = root / "policies" / "read-only.yaml"
+    policy.parent.mkdir(parents=True)
+    policy.write_text(
+        "id: read-only\n"
+        "filesystem:\n"
+        "  read: ['**/*']\n"
+        "  write: []\n",
+        encoding="utf-8",
+    )
+    portable = root / "agents" / "portable.yaml"
+    portable.parent.mkdir(parents=True)
+    portable.write_text(
+        "id: portable-reviewer\n"
+        "purpose: Review portable definitions\n"
+        "instructions: ../instructions/portable.md\n"
+        "policy: read-only\n",
+        encoding="utf-8",
+    )
+    instructions = root / "instructions" / "portable.md"
+    instructions.parent.mkdir()
+    instructions.write_text("Review without writing.", encoding="utf-8")
+    claude = root / "agents" / "claude-reviewer.md"
+    claude.write_text(
+        "---\n"
+        "name: claude-reviewer\n"
+        "description: Review Claude definitions\n"
+        "tools: Read, Glob, Grep\n"
+        "model: inherit\n"
+        "---\n\n"
+        "Only report repository evidence.\n",
+        encoding="utf-8",
+    )
+
+    catalog = AgentCatalog(
+        model_catalog=_models(),
+        sources=(
+            PluginAgentSource(
+                "hybrid-demo",
+                root,
+                format="hybrid",
+                agent_files=(portable, claude),
+                policy_files=(policy,),
+            ),
+        ),
+    )
+
+    assert catalog.diagnostics == ()
+    assert {agent.agent_id for agent in catalog.agents} == {
+        "claude-reviewer",
+        "portable-reviewer",
+    }
+    assert catalog.require_agent("portable-reviewer").execution_policy_id == "read-only"
+    assert (
+        catalog.require_agent("claude-reviewer").execution_policy_id
+        == "claude-reviewer-claude"
+    )

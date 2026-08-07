@@ -26,11 +26,10 @@ def _internal_imports(path: Path) -> set[str]:
 
 
 def test_package_root_contains_only_entrypoints() -> None:
-    """生产模块必须进入职责目录，package 根只保留入口与顶层子 Agent 装配。"""
+    """生产模块必须进入职责目录，package 根只保留两个入口。"""
     assert {path.name for path in PACKAGE_ROOT.glob("*.py")} == {
         "__init__.py",
         "__main__.py",
-        "subagents.py",
     }
 
 

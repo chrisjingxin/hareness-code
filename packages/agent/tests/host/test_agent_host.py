@@ -8,9 +8,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from langchain_core.messages import AIMessage
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
+from harness_agent.threads.context_window import ContextUpdate
 from harness_agent.host.agent_host import AgentHost
 
 
@@ -25,6 +27,13 @@ class _BlockingAgent:
         await asyncio.Event().wait()
         if False:
             yield None
+
+
+class _StreamingAgent:
+    """只产生一条 mock 模型消息，验证 transport 不复制 Run 生命周期。"""
+
+    async def astream(self, *_args: Any, **_kwargs: Any):
+        yield ((), "messages", (AIMessage(content="fixture response"), {}))
 
 
 def _request(method: str, params: dict[str, Any], request_id: str) -> dict[str, Any]:
@@ -92,6 +101,114 @@ async def test_run_owner_and_observer_receive_identical_events(tmp_path: Path) -
     attached_events = [frame["params"] for frame in attached_frames if frame.get("method") == "event"]
     assert owner_events == attached_events
     assert [event["sequence"] for event in owner_events] == [1, 2, 3]
+    await host.close()
+
+
+
+async def test_stdio_owner_and_websocket_observer_share_context_updated_sequence(
+    tmp_path: Path,
+) -> None:
+    """stdio owner 与真实 WebSocket attachment 看到同一 context.updated/终态序列。"""
+    owner_frames: list[dict[str, Any]] = []
+    host = AgentHost(
+        agent=_StreamingAgent(),
+        config_home=tmp_path / "home",
+        workspace=tmp_path,
+    )
+    host.send = lambda message: _append(owner_frames, message)  # type: ignore[method-assign]
+    await host.dispatch(
+        _request(
+            "initialize",
+            _initialize("host.attach", "run.multithread"),
+            "owner-init",
+        )
+    )
+    import socket
+
+    probe = socket.socket()
+    try:
+        try:
+            probe.bind(("127.0.0.1", 0))
+        except PermissionError:
+            await host.close()
+            pytest.skip("sandbox forbids loopback WebSocket bind")
+    finally:
+        probe.close()
+    await host.dispatch(
+        _request("host.attachment.create", {"origin": "http://127.0.0.1:43210"}, "attach")
+    )
+    attachment_response = owner_frames[-1]
+    if "result" not in attachment_response:
+        await host.close()
+        raise AssertionError(f"WebSocket attachment unexpectedly failed: {attachment_response}")
+    grant = attachment_response["result"]
+    origin = "http://127.0.0.1:43210"
+    websocket_frames: list[dict[str, Any]] = []
+
+    async with connect(grant["endpoint"], origin=origin, proxy=None) as socket:
+        await socket.send(json.dumps({"type": "auth", "token": grant["token"]}))
+        assert json.loads(await socket.recv()) == {"type": "ready"}
+        await socket.send(
+            json.dumps(
+                _request(
+                    "initialize",
+                    _initialize("run.multithread"),
+                    "web-init",
+                )
+            )
+        )
+        initialized = json.loads(await socket.recv())
+        assert initialized["result"]["connection"]["role"] == "attached"
+        attached_connection = next(
+            connection
+            for connection in host._connections.values()
+            if connection is not host._owner_connection
+        )
+        attached_connection.watched_threads.add("thread-transport")
+        host._context_updates["thread-transport"] = [
+            ContextUpdate(
+                thread_id="thread-transport",
+                action="report",
+                estimated_tokens=100,
+                input_cap_tokens=200,
+                context_window_tokens=256,
+                dynamic_tokens=100,
+            )
+        ]
+        await host.dispatch(
+            _request(
+                "run.start",
+                {
+                    "message": "transport continuity",
+                    "thread_id": "thread-transport",
+                    "run_id": "run-transport",
+                },
+                "run-start",
+            )
+        )
+        for _ in range(100):
+            frame = json.loads(await asyncio.wait_for(socket.recv(), timeout=1))
+            websocket_frames.append(frame)
+            if (
+                frame.get("method") == "event"
+                and frame.get("params", {}).get("type") == "run.completed"
+            ):
+                break
+        else:
+            raise AssertionError(f"WebSocket run did not complete: {websocket_frames}")
+
+    owner_events = [frame["params"] for frame in owner_frames if frame.get("method") == "event"]
+    websocket_events = [
+        frame["params"] for frame in websocket_frames if frame.get("method") == "event"
+    ]
+    assert owner_events == websocket_events
+    assert [event["type"] for event in owner_events] == [
+        "run.started",
+        "context.updated",
+        "content.delta",
+        "run.completed",
+    ]
+    assert [event["sequence"] for event in owner_events] == [1, 2, 3, 4]
     await host.close()
 
 
@@ -306,6 +423,7 @@ async def test_attachment_token_is_origin_bound_single_use_and_capability_limite
         with pytest.raises(ConnectionClosed):
             await socket.recv()
     await host.close()
+
 
 
 async def test_attached_controlled_operation_without_acquire_is_rejected(
@@ -820,6 +938,89 @@ async def test_acquire_and_owner_run_start_race_has_single_winner(
         acquire_accepted = "result" in web_acquire.result()
         assert start_accepted != acquire_accepted
     await host.close()
+
+
+class TestBuildApprovalClassifier:
+    """AUTO 模式分类器装配：profile 解析失败时优雅降级而不是崩溃。"""
+
+    @staticmethod
+    def _fake_host(config: Any) -> Any:
+        """构造只带 _config 属性的伪 host，供未绑定方法调用。"""
+        from types import SimpleNamespace
+
+        return SimpleNamespace(_config=config)
+
+    @staticmethod
+    def _model_settings(api_key: str | None) -> Any:
+        """构造分类器 profile 用的模型设置；使用独立环境变量避免串用。"""
+        from harness_agent.config.config import ModelSettings
+
+        return ModelSettings(
+            name="small-fast",
+            base_url="https://gateway.example.internal/v1",
+            api_key_env="HARNESS_CLASSIFIER_TEST_KEY",
+            api_key=api_key,
+            timeout_seconds=120.0,
+        )
+
+    def test_returns_classifier_when_profile_available(self, monkeypatch: pytest.MonkeyPatch):
+        """profile 存在且密钥可用时返回 SafetyClassifier，并使用收紧的超时。"""
+        from types import SimpleNamespace
+
+        from harness_agent.config.config import ModelProfile
+        from harness_agent.policy.classifier import SafetyClassifier
+
+        monkeypatch.delenv("HARNESS_CLASSIFIER_TEST_KEY", raising=False)
+        settings = self._model_settings(api_key="test-key")
+        profile = ModelProfile(
+            profile_id="small-fast", settings=settings, is_default=False, source="test"
+        )
+        config = SimpleNamespace(
+            model_catalog=SimpleNamespace(require_profile=lambda _id: profile)
+        )
+
+        classifier = AgentHost._build_approval_classifier(self._fake_host(config), "small-fast")
+
+        assert isinstance(classifier, SafetyClassifier)
+
+    def test_missing_profile_degrades_to_none(self):
+        """profile 不存在时返回 None（回退人工审批），不抛异常。"""
+        from types import SimpleNamespace
+
+        from harness_agent.config.config import ConfigError
+
+        def require_profile(_id: str) -> Any:
+            raise ConfigError("MODEL_PROFILE_NOT_FOUND: nope")
+
+        config = SimpleNamespace(model_catalog=SimpleNamespace(require_profile=require_profile))
+
+        assert AgentHost._build_approval_classifier(self._fake_host(config), "nope") is None
+
+    def test_missing_api_key_degrades_to_none(self, monkeypatch: pytest.MonkeyPatch):
+        """profile 无可用密钥时返回 None（回退人工审批），不抛异常。"""
+        from types import SimpleNamespace
+
+        from harness_agent.config.config import ModelProfile
+
+        monkeypatch.delenv("HARNESS_CLASSIFIER_TEST_KEY", raising=False)
+        profile = ModelProfile(
+            profile_id="small-fast",
+            settings=self._model_settings(api_key=None),
+            is_default=False,
+            source="test",
+        )
+        config = SimpleNamespace(
+            model_catalog=SimpleNamespace(require_profile=lambda _id: profile)
+        )
+
+        assert (
+            AgentHost._build_approval_classifier(self._fake_host(config), "small-fast") is None
+        )
+
+    def test_missing_model_catalog_degrades_to_none(self):
+        """配置未加载模型目录时返回 None，不阻断引擎构建。"""
+        assert AgentHost._build_approval_classifier(self._fake_host(None), "small-fast") is None
+
 
 
 async def _append(frames: list[dict[str, Any]], message: dict[str, Any]) -> None:

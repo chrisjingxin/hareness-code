@@ -1,0 +1,14 @@
+{
+  "demo-language": {
+    "command": "python3",
+    "args": [
+      "${CLAUDE_PLUGIN_ROOT}/scripts/demo_lsp.py"
+    ],
+    "transport": "stdio",
+    "extensionToLanguage": {
+      ".demo": "harness-demo"
+    },
+    "startupTimeout": 5000,
+    "shutdownTimeout": 2000
+  }
+}

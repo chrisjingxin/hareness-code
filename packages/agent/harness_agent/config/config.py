@@ -200,6 +200,8 @@ class ExecutionSettings:
     approval_mode: ApprovalMode = DEFAULT_APPROVAL_MODE
     approval_mode_warning: str | None = None
     remote: RemoteSandboxSettings | None = None
+    #: AUTO 模式 LLM 分类器使用的模型 profile 名；None 表示未配置（分类结果回退人工确认）
+    approval_classifier: str | None = None
 
     @property
     def mode(self) -> Literal["local", "remote-sandbox"]:
@@ -217,6 +219,8 @@ class ExecutionSettings:
         }
         if self.approval_mode_warning:
             result["approval_mode_warning"] = self.approval_mode_warning
+        if self.approval_classifier:
+            result["approval_classifier"] = self.approval_classifier
         return result
 
 
@@ -709,10 +713,11 @@ def _parse_execution(
     approval_values: Mapping[str, object], execution_values: Mapping[str, object]
 ) -> ExecutionSettings:
     """把 v1 ``[approval]`` 与 ``[execution]`` 转换为现有执行后端设置。"""
-    unknown_approval = set(approval_values) - {"mode"}
+    unknown_approval = set(approval_values) - {"mode", "classifier"}
     if unknown_approval:
         raise ConfigError(f"[approval] contains unsupported fields: {', '.join(sorted(unknown_approval))}")
     approval_mode, approval_mode_warning = parse_approval_mode(approval_values.get("mode"))
+    approval_classifier = _parse_optional_string(approval_values.get("classifier"), "approval.classifier")
 
     unknown_execution = set(execution_values) - {"backend", "remote"}
     if unknown_execution:
@@ -725,6 +730,7 @@ def _parse_execution(
             sandbox_enabled=False,
             approval_mode=approval_mode,
             approval_mode_warning=approval_mode_warning,
+            approval_classifier=approval_classifier,
         )
 
     remote = execution_values.get("remote")
@@ -748,6 +754,7 @@ def _parse_execution(
         sandbox_enabled=True,
         approval_mode=approval_mode,
         approval_mode_warning=approval_mode_warning,
+        approval_classifier=approval_classifier,
         remote=RemoteSandboxSettings(
             provider=provider,
             factory=factory,
@@ -812,6 +819,16 @@ def _required_string(values: Mapping[str, object], key: str, path: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ConfigError(f"{path} must be a non-empty string")
     return value.strip()
+
+
+def _parse_optional_string(value: object, path: str) -> str | None:
+    """读取可选字符串字段：缺省或空白串归一为 None，非字符串类型报错。"""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ConfigError(f"{path} must be a string")
+    stripped = value.strip()
+    return stripped or None
 
 
 def _number(value: object, path: str, *, minimum: float) -> float:

@@ -71,6 +71,7 @@ test("紧凑首页保留品牌、输入框和真实底栏信息", async () => {
     expect(frame).toContain("harness-code")
     expect(frame).toContain("v0.1.0")
     expect(frame).toContain("default")
+    expect(frame).toContain("Shift+Tab")
     expect(frame).not.toContain("未隔离")
   } finally {
     await act(async () => { setup.renderer.destroy() })
@@ -127,6 +128,7 @@ test("首页模型靠左、审批模式靠右，且不重复显示品牌", async
     const runtimeLine = lines.find(line => line.includes("deepseek-v4-flash"))
 
     expect(runtimeLine).toContain("default")
+    expect(runtimeLine).toContain("Shift+Tab")
     expect(runtimeLine).not.toContain("Harness Code")
     expect(runtimeLine).not.toContain("本机执行")
   } finally {
@@ -189,12 +191,21 @@ test("thread 通过原生 Markdown renderer 隐藏标题和代码围栏标记", 
     setup = await testRender(createElement(ThreadView, viewProps(snapshotOf(state), 100, 28)), { width: 100, height: 28 })
   })
   try {
-    // Markdown 的 Tree-sitter 高亮在异步 worker 返回后提交一帧；不能只检查初始占位帧。
-    await act(async () => {
-      await Bun.sleep(150)
-      await setup.flush()
-    })
-    const frame = setup.captureCharFrame()
+    // Markdown 的 Tree-sitter 高亮由 renderer 调度器之外的异步 worker 返回，需带墙钟
+    // 间隔轮询完整帧；一旦内容齐全立即结束，最迟等待 500ms。
+    let frame = setup.captureCharFrame()
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (
+        frame.includes("示例标题")
+        && frame.includes("重点内容")
+        && frame.includes("public class Demo {}")
+      ) break
+      await act(async () => {
+        await Bun.sleep(25)
+        await setup.flush()
+      })
+      frame = setup.captureCharFrame()
+    }
     expect(frame).toContain("示例标题")
     expect(frame).toContain("重点内容")
     expect(frame).toContain("public class Demo {}")

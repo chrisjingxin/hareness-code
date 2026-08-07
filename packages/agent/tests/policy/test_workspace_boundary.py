@@ -15,7 +15,11 @@ from langchain_core.runnables import Runnable
 
 from harness_agent.runtime.agent import create_harness_agent
 from harness_agent.runtime.execution import ExecutionContext
-from harness_agent.policy.workspace_boundary import WorkspaceBoundaryMiddleware, WorkspacePathPolicy
+from harness_agent.policy.workspace_boundary import (
+    WorkspaceBoundaryMiddleware,
+    WorkspacePathPolicy,
+    resolve_outside_workspace_write,
+)
 
 
 class _ToolCallingFakeModel(FakeMessagesListChatModel):
@@ -158,6 +162,163 @@ def test_middleware_preflight_matches_the_execution_boundary(tmp_path: Path):
 
     assert middleware.allows_approval(outside) is False
     assert middleware.allows_approval(inside) is True
+    assert inside.tool_call["args"]["file_path"] == str(tmp_path / "inside.md")
+
+
+def test_resolve_outside_workspace_write_only_matches_absolute_outside_writes(tmp_path: Path):
+    """越界写入判定只覆盖真实的绝对越界路径，其余交给常规边界校验。"""
+    outside = tmp_path.parent / "outside.md"
+    assert resolve_outside_workspace_write(
+        "write_file", {"file_path": str(outside)}, tmp_path
+    ) == outside.resolve()
+    # 工作区内路径、相对路径、虚拟根、穿越路径与非写入工具均不放行。
+    assert resolve_outside_workspace_write(
+        "write_file", {"file_path": str(tmp_path / "inside.md")}, tmp_path
+    ) is None
+    assert resolve_outside_workspace_write("write_file", {"file_path": "relative.md"}, tmp_path) is None
+    assert resolve_outside_workspace_write(
+        "write_file", {"file_path": "/.harness/thread/x"}, tmp_path
+    ) is None
+    assert resolve_outside_workspace_write(
+        "write_file", {"file_path": str(tmp_path / ".." / "escaped.md")}, tmp_path
+    ) is None
+    assert resolve_outside_workspace_write(
+        "read_file", {"file_path": str(outside)}, tmp_path
+    ) is None
+
+
+@pytest.mark.parametrize("mode", ["default", "auto-edit", "auto", "yolo"])
+def test_middleware_non_plan_mode_writes_outside_workspace(tmp_path: Path, mode: str):
+    """非 plan 模式的越界 write_file 必须真实写出且不经过底层 handler。"""
+    with TemporaryDirectory() as outside:
+        destination = Path(outside) / "nested" / "note.md"
+        middleware = WorkspaceBoundaryMiddleware(tmp_path, approval_mode=mode)
+        request = SimpleNamespace(
+            tool_call={
+                "name": "write_file",
+                "id": "call-outside-write",
+                "args": {"file_path": str(destination), "content": "hello outside"},
+            }
+        )
+        invoked = False
+
+        def handler(_request: object) -> object:
+            nonlocal invoked
+            invoked = True
+            return object()
+
+        result = middleware.wrap_tool_call(request, handler)
+
+        assert invoked is False
+        assert result.status == "success"
+        assert str(result.content) == f"Updated file {destination}"
+        assert destination.read_text(encoding="utf-8") == "hello outside"
+
+
+def test_middleware_plan_mode_rejects_outside_write_without_touching_fs(tmp_path: Path):
+    """plan 模式的越界写入必须直接拒绝且不创建任何文件。"""
+    with TemporaryDirectory() as outside:
+        destination = Path(outside) / "blocked.md"
+        middleware = WorkspaceBoundaryMiddleware(tmp_path, approval_mode="plan")
+        request = SimpleNamespace(
+            tool_call={
+                "name": "write_file",
+                "id": "call-plan-blocked",
+                "args": {"file_path": str(destination), "content": "blocked"},
+            }
+        )
+        result = middleware.wrap_tool_call(request, lambda _request: object())
+
+        assert result.status == "error"
+        assert "工作区边界拒绝" in str(result.content)
+        assert not destination.exists()
+
+
+def test_middleware_non_plan_mode_edits_outside_workspace(tmp_path: Path):
+    """非 plan 模式的越界 edit_file 必须复现唯一匹配替换语义并真实写回。"""
+    with TemporaryDirectory() as outside:
+        destination = Path(outside) / "config.txt"
+        destination.write_text("alpha\nbeta\n", encoding="utf-8")
+        middleware = WorkspaceBoundaryMiddleware(tmp_path, approval_mode="default")
+
+        edit = SimpleNamespace(
+            tool_call={
+                "name": "edit_file",
+                "id": "call-outside-edit",
+                "args": {
+                    "file_path": str(destination),
+                    "old_string": "beta",
+                    "new_string": "gamma",
+                },
+            }
+        )
+        result = middleware.wrap_tool_call(edit, lambda _request: object())
+        assert result.status == "success"
+        assert f"Successfully replaced 1 instance(s) of the string in '{destination}'" == str(result.content)
+        assert destination.read_text(encoding="utf-8") == "alpha\ngamma\n"
+
+        missing = SimpleNamespace(
+            tool_call={
+                "name": "edit_file",
+                "id": "call-outside-missing",
+                "args": {
+                    "file_path": str(Path(outside) / "missing.txt"),
+                    "old_string": "x",
+                    "new_string": "y",
+                },
+            }
+        )
+        error = middleware.wrap_tool_call(missing, lambda _request: object())
+        assert error.status == "error"
+        assert "not found" in str(error.content)
+
+
+def test_middleware_non_plan_mode_deletes_outside_workspace(tmp_path: Path):
+    """非 plan 模式的越界 delete_file 必须真实删除并返回工具 JSON 契约。"""
+    import json
+
+    with TemporaryDirectory() as outside:
+        destination = Path(outside) / "obsolete.log"
+        destination.write_text("stale", encoding="utf-8")
+        middleware = WorkspaceBoundaryMiddleware(tmp_path, approval_mode="yolo")
+        request = SimpleNamespace(
+            tool_call={
+                "name": "delete_file",
+                "id": "call-outside-delete",
+                "args": {"file_path": str(destination)},
+            }
+        )
+        result = middleware.wrap_tool_call(request, lambda _request: object())
+
+        assert result.status == "success"
+        assert json.loads(str(result.content)) == {"success": True, "deleted": str(destination)}
+        assert not destination.exists()
+
+
+@pytest.mark.parametrize("tool_name", ["read_file", "ls", "glob", "grep"])
+def test_middleware_non_plan_mode_still_rejects_outside_reads(tmp_path: Path, tool_name: str):
+    """越界读取与搜索在任何审批模式下都保持硬拒绝。"""
+    outside = _outside_path(tmp_path)
+    args_map: dict[str, dict[str, str]] = {
+        "read_file": {"file_path": f"{outside}.txt"},
+        "ls": {"path": outside},
+        "glob": {"pattern": "**/*.py", "path": outside},
+        "grep": {"pattern": "secret", "path": outside},
+    }
+    middleware = WorkspaceBoundaryMiddleware(tmp_path, approval_mode="yolo")
+    request = SimpleNamespace(
+        tool_call={"name": tool_name, "id": "call-outside-read", "args": args_map[tool_name]}
+    )
+    invoked = False
+
+    def handler(_request: object) -> object:
+        nonlocal invoked
+        invoked = True
+        return object()
+
+    result = middleware.wrap_tool_call(request, handler)
+    assert invoked is False
+    assert result.status == "error"
 
 
 async def test_async_middleware_rejection_does_not_call_handler(tmp_path: Path):
@@ -182,10 +343,10 @@ async def test_async_middleware_rejection_does_not_call_handler(tmp_path: Path):
     assert result.status == "error"
 
 
-async def test_real_agent_workflow_cannot_write_outside_workspace(tmp_path: Path):
-    """真实 Agent 图收到越界写入工具调用时不得在工作区外创建文件。"""
+async def test_real_agent_workflow_writes_outside_workspace_in_yolo(tmp_path: Path):
+    """yolo 模式的真实 Agent 图收到越界写入时必须真实写出工作区外文件。"""
     with TemporaryDirectory() as outside:
-        destination = Path(outside) / "must-not-exist.md"
+        destination = Path(outside) / "yolo-outside.md"
         model = _ToolCallingFakeModel(
             responses=[
                 AIMessage(
@@ -193,12 +354,12 @@ async def test_real_agent_workflow_cannot_write_outside_workspace(tmp_path: Path
                     tool_calls=[
                         {
                             "name": "write_file",
-                            "args": {"file_path": str(destination), "content": "blocked"},
+                            "args": {"file_path": str(destination), "content": "written outside"},
                             "id": "call-outside",
                         }
                     ],
                 ),
-                AIMessage(content="越界写入已被拒绝"),
+                AIMessage(content="越界写入已完成"),
             ]
         )
         model.profile = {"max_input_tokens": 200_000}
@@ -220,8 +381,50 @@ async def test_real_agent_workflow_cannot_write_outside_workspace(tmp_path: Path
             )
         ]
 
-    assert events
-    assert not destination.exists()
+        assert events
+        assert destination.read_text(encoding="utf-8") == "written outside"
+
+
+async def test_real_agent_workflow_pauses_outside_write_before_approval(tmp_path: Path):
+    """default 模式的越界写入进入审批中断，批准前不得写出工作区外文件。"""
+    with TemporaryDirectory() as outside:
+        destination = Path(outside) / "needs-approval.md"
+        model = _ToolCallingFakeModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "write_file",
+                            "args": {"file_path": str(destination), "content": "blocked"},
+                            "id": "call-outside",
+                        }
+                    ],
+                ),
+                AIMessage(content="越界写入已被拒绝"),
+            ]
+        )
+        model.profile = {"max_input_tokens": 200_000}
+        agent = create_harness_agent(
+            model,
+            cwd=str(tmp_path),
+            approval_mode="default",
+            enable_ask_user=False,
+            enable_memory=False,
+            enable_skills=False,
+        )
+
+        events = [
+            event
+            async for event in agent.astream(
+                {"messages": [HumanMessage(content="在工作区外写文件")]},
+                config={"configurable": {"thread_id": "workspace-boundary-approval"}},
+                stream_mode=["messages", "updates"],
+            )
+        ]
+
+        assert events
+        assert not destination.exists()
 
 
 async def test_execution_context_workspace_is_used_when_cwd_is_omitted(tmp_path: Path):

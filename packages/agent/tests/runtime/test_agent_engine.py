@@ -65,6 +65,47 @@ async def test_agent_engine_pool_single_flight_builds_one_engine_for_concurrent_
     await pool.aclose()
 
 
+async def test_pool_invalidate_reserves_building_generation_until_stale_build_is_discarded():
+    """失效发生在首建期间时不能发布旧图或启动第二个旧 key 构建。"""
+    from harness_agent.runtime.agent_engine import (
+        AgentEngine,
+        AgentEnginePool,
+        AgentEngineState,
+        AgentEngineUnavailableError,
+    )
+
+    profile = _profile("building-invalidation")
+    builder_started = asyncio.Event()
+    release_builder = asyncio.Event()
+    built: list[AgentEngine] = []
+
+    async def build(requested: Any) -> AgentEngine:
+        builder_started.set()
+        await release_builder.wait()
+        engine = AgentEngine(profile=requested, graph=object())
+        built.append(engine)
+        return engine
+
+    pool = AgentEnginePool(build)
+    acquire_task = asyncio.create_task(pool.acquire(profile))
+    await builder_started.wait()
+
+    assert await pool.invalidate(
+        lambda candidate: candidate.profile_key == profile.profile_key,
+        reason="mcp_snapshot_changed",
+    ) == (profile.profile_key,)
+    assert await pool.state_for(profile.profile_key) == AgentEngineState.DRAINING
+
+    release_builder.set()
+    with pytest.raises(AgentEngineUnavailableError, match="RUNTIME_BUILD_INVALIDATED"):
+        await acquire_task
+
+    assert len(built) == 1
+    assert built[0].graph is None
+    assert await pool.state_for(profile.profile_key) == AgentEngineState.MISSING
+    await pool.aclose()
+
+
 async def test_agent_engine_pool_discards_failed_build_and_allows_retry():
     """失败的构建不能残留为不可用缓存项，下一次 acquire 必须重新调用工厂。"""
     from harness_agent.runtime.agent_engine import AgentEngine, AgentEngineState, AgentEnginePool
@@ -218,6 +259,39 @@ async def test_draining_engine_rejects_new_lease_until_old_run_and_lease_release
     assert await pool.state_for(profile.profile_key) == AgentEngineState.MISSING
 
 
+async def test_snapshot_invalidation_only_drains_outdated_profiles():
+    """资源快照变化只排空引用旧指纹的角色图。"""
+    from dataclasses import replace
+
+    from harness_agent.runtime.agent_engine import AgentEngine, AgentEnginePool, AgentEngineState
+
+    old_profile = _profile("old-mcp")
+    current_profile = replace(
+        _profile("current-mcp"),
+        mcp_config_fingerprint="a" * 64,
+    )
+    old_lease = None
+    pool = AgentEnginePool(
+        lambda requested: AgentEngine(profile=requested, graph=object())
+    )
+    old_lease = await pool.acquire(old_profile)
+    current_lease = await pool.acquire(current_profile)
+
+    affected = await pool.invalidate_outdated(
+        resource="mcp",
+        current_fingerprint=current_profile.mcp_config_fingerprint,
+        reason="test-change",
+    )
+    assert affected == (old_profile.profile_key,)
+    assert await pool.state_for(old_profile.profile_key) == AgentEngineState.DRAINING
+    assert await pool.state_for(current_profile.profile_key) == AgentEngineState.ACTIVE
+
+    await old_lease.release()
+    await pool.finalize_draining(old_profile.profile_key)
+    await current_lease.release()
+    await pool.aclose()
+
+
 async def test_engine_close_continues_after_resource_failure_and_is_idempotent():
     """一个资源关闭失败时仍按顺序关闭其余资源，并最终清空图引用。"""
     from harness_agent.runtime.agent_engine import (
@@ -252,6 +326,20 @@ async def test_engine_close_continues_after_resource_failure_and_is_idempotent()
     assert first.failures[0].resource_name == "tool:scheduler"
     assert engine.graph is None
     assert engine.state == AgentEngineState.CLOSED
+
+
+def test_engine_resource_bundle_rejects_borrowed_host_resource_closer():
+    """AgentEngine Bundle 不能登记借用的 Host 资源关闭器。"""
+    from harness_agent.runtime.agent_engine import AgentEngineCloseAdapter
+    from harness_agent.runtime.resource_ownership import ResourceAccess, ResourceScope
+
+    with pytest.raises(ValueError, match="RUNTIME_CLOSE_ADAPTER_INVALID"):
+        AgentEngineCloseAdapter(
+            "host-mcp",
+            lambda: None,
+            scope=ResourceScope.HOST,
+            access=ResourceAccess.BORROWED,
+        )
 
 
 async def test_engine_close_cancels_registered_background_tasks():
@@ -374,6 +462,7 @@ async def test_agent_engine_pool_diagnostics_are_bounded_and_redacted():
         "close_reports": 1,
         "close_failures": 1,
         "close_duration_ms_total": pytest.approx(diagnostics.close_duration_ms_total, abs=0.001),
+        "resource_scope_counts": {"engine": 1},
     }
     assert payload["runtimes"][0]["profile_id"] == second.profile_key[:12]
     assert first.profile_key not in str(payload)
@@ -502,4 +591,66 @@ async def test_agent_engine_pool_structured_logs_use_only_short_profile_id(caplo
         for message in messages
     )
     assert all(profile.profile_key not in message for message in messages)
+    await pool.aclose()
+
+
+async def test_engine_eviction_releases_shared_lease_without_closing_host_resource():
+    """淘汰引擎只释放借用；共享资源要等 Host owner 关闭。"""
+    from harness_agent.runtime.agent_engine import AgentEngine, AgentEngineResourceBundle
+    from harness_agent.runtime.resource_lifecycle import ResourceScope, SharedResourceHandle
+
+    closed: list[str] = []
+    shared = SharedResourceHandle(
+        name="test-provider",
+        scope=ResourceScope.HOST,
+        value=object(),
+        close=lambda: closed.append("host"),
+    )
+    shared_lease = await shared.acquire()
+    engine = AgentEngine(
+        profile=_profile("shared-resource"),
+        graph=object(),
+        resources=AgentEngineResourceBundle.from_sequences(shared_leases=(shared_lease,)),
+    )
+
+    await engine.aclose()
+    snapshot = await shared.snapshot()
+    assert snapshot.borrowers == 0
+    assert snapshot.state.value == "ready"
+    assert closed == []
+
+    await shared.begin_draining(reason="host_shutdown")
+    await shared.close()
+    assert closed == ["host"]
+
+
+async def test_pool_invalidate_drains_only_matching_profile_and_rejects_new_acquire():
+    """Profile 失效会保留活动引擎收尾，但不让新执行复用 draining 图。"""
+    from harness_agent.runtime.agent_engine import (
+        AgentEngine,
+        AgentEnginePool,
+        AgentEngineState,
+        AgentEngineUnavailableError,
+    )
+
+    first = _profile("invalidate-first")
+    second = _profile("invalidate-second")
+    pool = AgentEnginePool(lambda requested: AgentEngine(profile=requested, graph=object()))
+    first_lease = await pool.acquire(first)
+    second_lease = await pool.acquire(second)
+
+    await pool.invalidate(
+        lambda profile: profile.profile_key == first.profile_key,
+        reason="mcp_snapshot_changed",
+    )
+    assert await pool.state_for(first.profile_key) == AgentEngineState.DRAINING
+    assert await pool.state_for(second.profile_key) == AgentEngineState.ACTIVE
+    with pytest.raises(AgentEngineUnavailableError, match="RUNTIME_DRAINING"):
+        await pool.acquire(first)
+
+    await first_lease.release()
+    assert await pool.finalize_draining(first.profile_key) is True
+    await second_lease.release()
+    diagnostics = await pool.diagnostics()
+    assert diagnostics.eviction_reasons == {"mcp_snapshot_changed": 1}
     await pool.aclose()

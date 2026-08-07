@@ -28,7 +28,11 @@ from harness_agent.tools.tools_mode import BackgroundTaskManager, PlanModeState
 logger = logging.getLogger(__name__)
 
 
-def create_harness_tools(workspace_root: str) -> list[StructuredTool]:
+def create_harness_tools(
+    workspace_root: str,
+    *,
+    lsp_manager: Any | None = None,
+) -> list[StructuredTool]:
     """创建所有 Harness 扩展工具的 BaseTool 实例列表。
 
     Args:
@@ -119,7 +123,14 @@ def create_harness_tools(workspace_root: str) -> list[StructuredTool]:
             line: 行号（从 1 开始），可选。
             column: 列号（从 1 开始），可选。
         """
-        result = await _lsp_impl(action, file_path, line, column, workspace_root)
+        result = await _lsp_impl(
+            action,
+            file_path,
+            line,
+            column,
+            workspace_root,
+            manager=lsp_manager,
+        )
         return json.dumps(result, ensure_ascii=False)
 
     tools.append(StructuredTool.from_function(

@@ -82,4 +82,16 @@ test("无头 CLI 不声明 Interaction handler", () => {
   expect(clientCapabilities(interactive)).not.toContain("host.control")
   expect(clientCapabilities(interactive)).toContain("mcp.read")
   expect(clientCapabilities(interactive)).toContain("mcp.manage")
+  expect(clientCapabilities(interactive)).toContain("agents.read")
+  expect(clientCapabilities(interactive)).toContain("teams.read")
+  expect(clientCapabilities(interactive)).toContain("teams.manage")
+})
+
+test("Plugin CLI 按操作声明最小读写能力", () => {
+  const validation = parseArgs(["plugins", "validate", "./plugin"])
+  const install = parseArgs(["plugins", "install", "./plugin"])
+  expect(clientCapabilities(validation)).toContain("plugins.read")
+  expect(clientCapabilities(validation)).not.toContain("plugins.manage")
+  expect(clientCapabilities(install)).toContain("plugins.read")
+  expect(clientCapabilities(install)).toContain("plugins.manage")
 })

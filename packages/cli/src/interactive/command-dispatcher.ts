@@ -1,23 +1,45 @@
 /** Slash Command 的 Dispatcher：只返回表现层无关的 semantic operation。 */
 
-import type { RequestedSkill } from "@za38/protocol"
+import {
+  Capability,
+  type AgentsListResult,
+  type RequestedSkill,
+  type TeamDefinition,
+  type TeamsListResult,
+} from "@za38/protocol"
 
 import {
   commandRegistry,
-  slashCommandHelp,
+  commandHelp,
   type CommandContext,
   type CommandDefinition,
   type CommandRegistry,
   type SlashCommand,
 } from "./commands"
+import type { IdGenerator } from "./ports/id-generator"
 
 /** 命令选择器目标；与 InteractiveResult.present 的 target 保持一致。 */
 export type CommandPickerTarget = "skills" | "threads" | "models"
 
-/**
- * Handler 的唯一输出协议。它不返回 RPC method 字符串、success/error closure、
- * React callback 或 TUI local action；Controller 解释这些语义并完成所有 Agent effect。
- */
+/** Handler 的唯一输出协议。它不返回 RPC method 字符串、success/error closure、
+ * React callback 或 TUI local action；Controller 解释这些语义并完成所有 Agent effect。 */
+export type CommandRpcMethod =
+  | "agents.list"
+  | "teams.list"
+  | "teams.inspect"
+  | "teams.generate"
+  | "teams.run"
+  | "teams.cancel"
+
+/** RPC 结果可将成功与失败重新映射到下一条结构化命令结果。 */
+export type CommandRpcResult = {
+  type: "rpc"
+  method: CommandRpcMethod
+  params: Record<string, unknown>
+  onSuccess: (value: unknown) => CommandResult
+  onError: (error: unknown) => CommandResult
+}
+
 export type CommandResult =
   | { type: "notice"; message: string }
   | { type: "request-exit" }
@@ -28,6 +50,7 @@ export type CommandResult =
   | { type: "mcp"; argument?: string }
   | { type: "request-handoff"; threadId: string | null }
   | { type: "submit-prompt"; prompt: string; requestedSkill?: RequestedSkill }
+  | CommandRpcResult
 
 /** Dispatcher 所需的最小状态快照；展示文案由调用方在进入 Handler 前生成。 */
 export type CommandDispatchContext = {
@@ -35,11 +58,14 @@ export type CommandDispatchContext = {
   threadId: string | null
   runtimeStatus: string
   versionSummary: string
+  /** 唯一 ID 生成器（Port 注入），供需要本地生成 run_id 的命令使用。 */
+  idGenerator: IdGenerator
 }
 
 type CommandHandlerContext = CommandDispatchContext & {
   command: SlashCommand
   definition: CommandDefinition
+  registry: CommandRegistry
 }
 
 type CommandHandler = (context: CommandHandlerContext) => CommandResult
@@ -60,14 +86,22 @@ export function dispatchSlashCommand(
   if (availability.state === "hidden") return notice(`/${definition.name} 当前不可用。`)
   if (availability.state === "disabled") return notice(`/${definition.name} 暂不可用：${availability.reason}。`)
 
+  if (definition.source.type === "plugin" && definition.requestedSkillId) {
+    const args = command.argument?.trim() ?? ""
+    return {
+      type: "submit-prompt",
+      prompt: args || `执行 Plugin Command /${definition.name}`,
+      requestedSkill: { id: definition.requestedSkillId, args },
+    }
+  }
   const handler = builtinHandlers[definition.id]
   if (!handler) return notice(`/${definition.name} 尚未接入当前客户端。`)
-  return handler({ ...context, command, definition })
+  return handler({ ...context, command, definition, registry })
 }
 
 /** 所有现有 Builtin Handler 的稳定 ID 映射；禁止回退为按 name 的 switch。 */
 const builtinHandlers: Readonly<Record<string, CommandHandler>> = {
-  "system.help": () => notice(slashCommandHelp.map(item => `${item.command}  ${item.description}`).join("\n")),
+  "system.help": context => notice(commandHelp(context.registry).map(item => `${item.command}  ${item.description}`).join("\n")),
   "system.quit": () => ({ type: "request-exit" }),
   "thread.new": context => context.commandContext.activeRun
     ? {
@@ -92,10 +126,172 @@ const builtinHandlers: Readonly<Record<string, CommandHandler>> = {
     : { type: "present", target: "threads" },
   "model.select": context => ({ type: "present", target: "models", initialQuery: context.command.argument }),
   "skills.open": () => ({ type: "present", target: "skills" }),
+  "agents.list": context => context.command.argument
+    ? notice("/agents 不接受参数。")
+    : teamRpc(
+        "agents.list",
+        {},
+        formatAgents,
+        "Agent 查询失败",
+      ),
+  "teams.manage": handleTeamsCommand,
   "mcp.manage": context => ({ type: "mcp", argument: context.command.argument }),
   "host.web": context => context.command.argument
     ? notice("/web 不接受参数。")
     : { type: "request-handoff", threadId: context.threadId },
+}
+
+/** 把 `/teams` 子命令映射成类型化 RPC；客户端不能提交任意 TeamDefinition。 */
+function handleTeamsCommand(context: CommandHandlerContext): CommandResult {
+  const argument = context.command.argument?.trim() ?? ""
+  if (!argument || argument === "list") {
+    return teamRpc(
+      "teams.list",
+      {},
+      formatTeams,
+      "Team 查询失败",
+    )
+  }
+  const [action, remainder = ""] = splitFirst(argument)
+  if (action === "show" || action === "status") {
+    const id = remainder.trim()
+    if (!id) return notice(`/teams ${action} 需要 ID。`)
+    return teamRpc(
+      "teams.inspect",
+      { kind: action === "show" ? "definition" : "run", id },
+      formatTeamInspect,
+      "Team 详情查询失败",
+    )
+  }
+  if (!context.commandContext.capabilities.has(Capability.TEAMS_MANAGE)) {
+    return notice("当前客户端未协商 teams.manage。")
+  }
+  if (action === "cancel") {
+    const runId = remainder.trim()
+    if (!runId) return notice("/teams cancel 需要 run ID。")
+    return teamRpc(
+      "teams.cancel",
+      { run_id: runId },
+      value => {
+        const result = value as { run_id?: unknown; cancelled?: unknown }
+        return result.cancelled === true
+          ? `已请求取消 Team Run ${String(result.run_id)}。`
+          : `Team Run ${String(result.run_id)} 已结束或不在当前 Host 中运行。`
+      },
+      "Team 取消失败",
+    )
+  }
+  if (action === "generate") {
+    const parts = remainder.trim().split(/\s+/)
+    if (parts.length < 3) {
+      return notice("/teams generate 用法：/teams generate <team-id> <lead-agent> <worker1,worker2> [max-parallelism]")
+    }
+    const [id, leadAgentId, workersRaw, parallelRaw] = parts
+    const workerAgentIds = workersRaw.split(",").map(value => value.trim()).filter(Boolean)
+    const maxParallelism = parallelRaw === undefined ? 4 : Number(parallelRaw)
+    if (!workerAgentIds.length || !Number.isInteger(maxParallelism) || maxParallelism < 1 || maxParallelism > 32) {
+      return notice("worker 列表或 max-parallelism 无效。")
+    }
+    return teamRpc(
+      "teams.generate",
+      {
+        id,
+        lead_agent_id: leadAgentId,
+        worker_agent_ids: workerAgentIds,
+        max_parallelism: maxParallelism,
+      },
+      value => formatTeamDefinition(value as TeamDefinition),
+      "Team 生成失败",
+    )
+  }
+  if (action === "run") {
+    const [teamId, request] = splitFirst(remainder.trim())
+    if (!teamId || !request.trim()) {
+      return notice("/teams run 用法：/teams run <team-id> <任务描述>")
+    }
+    if (!context.threadId) return notice("请先发送消息创建 Thread，再启动 Team。")
+    const runId = context.idGenerator.uuid()
+    return teamRpc(
+      "teams.run",
+      {
+        team_id: teamId,
+        request,
+        thread_id: context.threadId,
+        run_id: runId,
+      },
+      () => `Team ${teamId} 已启动，run ID：${runId}。使用 /teams status ${runId} 查看进度。`,
+      "Team 启动失败",
+    )
+  }
+  return notice("未知 Team 子命令。可用：list、show、status、generate、run、cancel。")
+}
+
+/** 构造统一 Team RPC 结果并将远端错误收敛为 notice。 */
+function teamRpc(
+  method: CommandRpcResult["method"],
+  params: Record<string, unknown>,
+  format: (value: unknown) => string,
+  errorPrefix: string,
+): CommandRpcResult {
+  return {
+    type: "rpc",
+    method,
+    params,
+    onSuccess: value => notice(format(value)),
+    onError: error => notice(`${errorPrefix}：${errorMessage(error)}`),
+  }
+}
+
+function formatAgents(value: unknown): string {
+  const result = value as AgentsListResult
+  if (!result.agents.length) return "当前没有可派发的 Plugin Agent。"
+  return [
+    `Plugin Agents（snapshot ${result.snapshot_id.slice(0, 12)}）：`,
+    ...result.agents.map(agent =>
+      `- ${agent.id} · ${agent.description ?? agent.purpose} · model=${agent.model_profile_id}`,
+    ),
+    ...(result.diagnostics.length ? [`诊断：${result.diagnostics.join("；")}`] : []),
+  ].join("\n")
+}
+
+function formatTeams(value: unknown): string {
+  const result = value as TeamsListResult
+  if (!result.teams.length) return "当前没有固定或已生成的 Agent Team。"
+  return [
+    "Agent Teams：",
+    ...result.teams.map(team =>
+      `- ${team.id} · ${team.description ?? "无说明"} · ${team.tasks.length} tasks · max=${team.max_parallelism}`,
+    ),
+    ...(result.diagnostics.length ? [`诊断：${result.diagnostics.join("；")}`] : []),
+  ].join("\n")
+}
+
+function formatTeamInspect(value: unknown): string {
+  const record = value && typeof value === "object" ? value as Record<string, unknown> : {}
+  if (Array.isArray(record.tasks) && typeof record.run_id === "string") {
+    const tasks = record.tasks as Array<Record<string, unknown>>
+    return [
+      `Team Run ${record.run_id} · ${String(record.status)}`,
+      ...tasks.map(task =>
+        `- ${String(task.id)} · ${String(task.status)}${task.error_code ? ` · ${String(task.error_code)}` : ""}`,
+      ),
+    ].join("\n")
+  }
+  return formatTeamDefinition(value as TeamDefinition)
+}
+
+function formatTeamDefinition(team: TeamDefinition): string {
+  return [
+    `Team ${team.id} · ${team.failure_policy} · max=${team.max_parallelism}`,
+    ...team.tasks.map(task =>
+      `- ${task.id} → ${task.agent_id} · ${task.access}${task.depends_on.length ? ` · after=${task.depends_on.join(",")}` : ""}`,
+    ),
+  ].join("\n")
+}
+
+function splitFirst(value: string): [string, string] {
+  const match = /^(\S+)(?:\s+([\s\S]*))?$/.exec(value)
+  return match ? [match[1], match[2] ?? ""] : ["", ""]
 }
 
 /** 生成统一 notice，减少 Handler 中重复的结构字面量。 */
@@ -117,8 +313,26 @@ export function contextCompactNotice(value: unknown): string {
     const budget = estimated !== undefined && cap !== undefined ? ` ${estimated}/${cap}` : ""
     return `上下文已压缩${budget}${artifacts ? `，归档 ${artifacts} 项` : ""}。`
   }
-  const reason = typeof context.miss_reason === "string" ? `：${context.miss_reason}` : ""
-  return action === "manual_compaction_skipped"
-    ? `上下文无需压缩${reason}。`
-    : `上下文压缩未完成${reason}。`
+  const reason = compactMissReason(context.miss_reason)
+  return action === "manual_compaction_skipped" || action === "manual_skipped"
+    ? `上下文无需压缩：${reason}。`
+    : `上下文压缩未完成：${reason}。`
+}
+
+/** 将服务端稳定诊断码翻译为用户可执行的说明，避免直接暴露内部枚举。 */
+function compactMissReason(value: unknown): string {
+  if (typeof value !== "string") return "未满足安全压缩条件"
+  return {
+    short_history: "可压缩历史不足两轮",
+    manual_history_too_small: "当前可压缩历史过短，压缩后不会减少上下文",
+    manual_no_savings: "摘要后上下文没有减少",
+    summary_input_cap_exhausted: "摘要模型的输入预算不足",
+    summary_input_no_complete_group: "没有可安全压缩的完整对话",
+    savings_below_20_percent: "预计节省不足 20%",
+  }[value] ?? "未满足安全压缩条件"
+}
+
+/** 将未知错误转成可展示但不会泄漏 Error 对象结构的文字。 */
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }

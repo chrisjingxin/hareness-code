@@ -60,6 +60,52 @@ def test_create_harness_agent_returns_compiled_graph():
     assert hasattr(agent, "ainvoke")
 
 
+async def test_auto_mode_preflight_uses_classifier_cache_end_to_end():
+    """接线回归：auto 模式分类器缓存 allow 命中时不弹窗，工具直接执行。
+
+    防止 create_harness_agent 组装预检时丢失 classifier 参数导致
+    F4 缓存永远查不到、所有未决调用回退弹窗。
+    """
+    from langchain_core.messages import ToolMessage
+    from langgraph.checkpoint.memory import MemorySaver
+
+    from harness_agent.policy.classifier import SafetyClassifier
+    from harness_agent.runtime.agent import create_harness_agent
+
+    call = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "execute",
+                "args": {"command": "python --version"},
+                "id": "call-1",
+                "type": "tool_call",
+            }
+        ],
+    )
+    model = ToolCallingFakeChatModel(messages=iter([call, AIMessage(content="done")]))
+    model.profile = {"max_input_tokens": 200000}
+    classifier = SafetyClassifier(model=object())  # type: ignore[arg-type]
+    classifier.record_decision("call-1", "allow", "回归缓存")
+
+    agent = create_harness_agent(
+        model,
+        checkpointer=MemorySaver(),
+        enable_skills=False,
+        enable_memory=False,
+        enable_ask_user=False,
+        approval_mode="auto",
+        classifier=classifier,
+    )
+    result = await agent.ainvoke(
+        {"messages": [HumanMessage(content="看下版本")]},
+        config={"configurable": {"thread_id": "auto-classifier-cache"}},
+    )
+
+    assert "__interrupt__" not in result
+    assert any(isinstance(message, ToolMessage) for message in result["messages"])
+
+
 def test_execution_context_prompt_marks_local_and_remote_boundaries():
     """提示词必须如实说明本机默认模式与远端逻辑工作目录。"""
     from harness_agent.runtime.agent import _with_execution_context
@@ -105,8 +151,8 @@ def test_prompt_epoch_middleware_appends_current_run_mode_fact():
     """共享图每轮按 RunContext 追加模式事实，并剥离旧 epoch 内嵌小节。"""
     from harness_agent.runtime.agent import create_prompt_epoch
     from harness_agent.runtime.run_context import (
-        PromptEpochMiddleware,
         RunContext,
+        RunContextSnapshotMiddleware,
         _without_legacy_approval_mode_section,
     )
 
@@ -146,7 +192,7 @@ def test_prompt_epoch_middleware_appends_current_run_mode_fact():
         system_message=None,
         override=lambda **kwargs: SimpleNamespace(**kwargs),
     )
-    asyncio.run(PromptEpochMiddleware().awrap_model_call(request, handler))
+    asyncio.run(RunContextSnapshotMiddleware().awrap_model_call(request, handler))
 
     assert "审批模式：YOLO" in captured["system"]
     assert captured["system"].count("## 审批模式：") == 1

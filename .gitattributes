@@ -1,0 +1,9 @@
+# 协议 Schema 与双端生成产物必须固定 LF 换行：
+# Python sidecar 按原始字节计算 protocol_v3.json 的 sha256 摘要，
+# Windows 上 autocrlf 检出 CRLF 会导致摘要漂移、sidecar 启动即崩溃。
+packages/protocol/schema/v3.json text eol=lf
+packages/protocol/src/generated.ts text eol=lf
+packages/protocol/fixtures/v3-contract.json text eol=lf
+packages/agent/harness_agent/protocol/protocol_v3.json text eol=lf
+packages/agent/harness_agent/protocol/protocol_v3.sha256 text eol=lf
+packages/agent/harness_agent/protocol/generated.py text eol=lf

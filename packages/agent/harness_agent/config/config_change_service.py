@@ -68,7 +68,8 @@ CONFIG_FIELD_DEFINITIONS: tuple[ConfigFieldDefinition, ...] = (
         "approval",
         str,
         "restart",
-        frozenset({"plan", "default", "auto-edit", "yolo"}),
+        # 与 approval_mode.ApprovalMode 五值规范保持一致。
+        frozenset({"plan", "default", "auto-edit", "auto", "yolo"}),
     ),
     ConfigFieldDefinition(
         "execution.backend",

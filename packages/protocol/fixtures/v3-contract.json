@@ -405,6 +405,230 @@
     },
     {
       "kind": "operation.params",
+      "name": "plugins.list",
+      "case": "valid",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "plugins.list",
+      "case": "valid",
+      "value": {}
+    },
+    {
+      "kind": "operation.params",
+      "name": "plugins.inspect",
+      "case": "valid",
+      "value": {
+        "id": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "plugins.inspect",
+      "case": "valid",
+      "value": {}
+    },
+    {
+      "kind": "operation.params",
+      "name": "plugins.validate",
+      "case": "valid",
+      "value": {
+        "source": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "plugins.validate",
+      "case": "valid",
+      "value": {}
+    },
+    {
+      "kind": "operation.params",
+      "name": "plugins.install",
+      "case": "valid",
+      "value": {
+        "source": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "plugins.install",
+      "case": "valid",
+      "value": {}
+    },
+    {
+      "kind": "operation.params",
+      "name": "plugins.set_enabled",
+      "case": "valid",
+      "value": {
+        "id": "x",
+        "enabled": false
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "plugins.set_enabled",
+      "case": "valid",
+      "value": {}
+    },
+    {
+      "kind": "operation.params",
+      "name": "plugins.remove",
+      "case": "valid",
+      "value": {
+        "id": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "plugins.remove",
+      "case": "valid",
+      "value": {}
+    },
+    {
+      "kind": "operation.params",
+      "name": "agents.list",
+      "case": "valid",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "agents.list",
+      "case": "valid",
+      "value": {
+        "snapshot_id": "x",
+        "agents": [],
+        "diagnostics": []
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "agents.inspect",
+      "case": "valid",
+      "value": {
+        "id": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "agents.inspect",
+      "case": "valid",
+      "value": {
+        "id": "x",
+        "description": "x",
+        "purpose": "x",
+        "model_profile_id": "x",
+        "execution_policy_id": "x",
+        "requested_skills": [],
+        "requested_mcp_servers": [],
+        "max_turns": 1,
+        "source": "x",
+        "fingerprint": "x"
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "teams.list",
+      "case": "valid",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "teams.list",
+      "case": "valid",
+      "value": {
+        "teams": [],
+        "diagnostics": []
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "teams.inspect",
+      "case": "valid",
+      "value": {
+        "kind": "definition",
+        "id": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "teams.inspect",
+      "case": "valid",
+      "value": {}
+    },
+    {
+      "kind": "operation.params",
+      "name": "teams.generate",
+      "case": "valid",
+      "value": {
+        "id": "x",
+        "lead_agent_id": "x",
+        "worker_agent_ids": [
+          "x"
+        ]
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "teams.generate",
+      "case": "valid",
+      "value": {
+        "id": "x",
+        "description": "x",
+        "max_parallelism": 1,
+        "failure_policy": "fail-fast",
+        "tasks": [
+          {
+            "id": "x",
+            "agent_id": "x",
+            "depends_on": [],
+            "access": "read",
+            "timeout_seconds": 1
+          }
+        ]
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "teams.run",
+      "case": "valid",
+      "value": {
+        "team_id": "x",
+        "request": "x",
+        "thread_id": "x",
+        "run_id": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "teams.run",
+      "case": "valid",
+      "value": {
+        "team_id": "x",
+        "run_id": "x",
+        "accepted": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "teams.cancel",
+      "case": "valid",
+      "value": {
+        "run_id": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "teams.cancel",
+      "case": "valid",
+      "value": {
+        "run_id": "x",
+        "cancelled": false
+      }
+    },
+    {
+      "kind": "operation.params",
       "name": "mcp.status",
       "case": "valid",
       "value": {}
@@ -1831,6 +2055,508 @@
       "name": "skills.market.list",
       "case": "wrong_type",
       "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "plugins.list",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "plugins.list",
+      "case": "extra_field",
+      "value": {
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "plugins.list",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "plugins.inspect",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "plugins.inspect",
+      "case": "extra_field",
+      "value": {
+        "id": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "plugins.inspect",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "plugins.inspect",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "plugins.validate",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "plugins.validate",
+      "case": "extra_field",
+      "value": {
+        "source": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "plugins.validate",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "plugins.validate",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "plugins.install",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "plugins.install",
+      "case": "extra_field",
+      "value": {
+        "source": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "plugins.install",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "plugins.install",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "plugins.set_enabled",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "plugins.set_enabled",
+      "case": "extra_field",
+      "value": {
+        "id": "x",
+        "enabled": false,
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "plugins.set_enabled",
+      "case": "missing_field",
+      "value": {
+        "enabled": false
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "plugins.set_enabled",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "plugins.remove",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "plugins.remove",
+      "case": "extra_field",
+      "value": {
+        "id": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "plugins.remove",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "plugins.remove",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "agents.list",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "agents.list",
+      "case": "extra_field",
+      "value": {
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "agents.list",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "agents.list",
+      "case": "extra_field",
+      "value": {
+        "snapshot_id": "x",
+        "agents": [],
+        "diagnostics": [],
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "agents.list",
+      "case": "missing_field",
+      "value": {
+        "agents": [],
+        "diagnostics": []
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "agents.inspect",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "agents.inspect",
+      "case": "extra_field",
+      "value": {
+        "id": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "agents.inspect",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "agents.inspect",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "agents.inspect",
+      "case": "extra_field",
+      "value": {
+        "id": "x",
+        "description": "x",
+        "purpose": "x",
+        "model_profile_id": "x",
+        "execution_policy_id": "x",
+        "requested_skills": [],
+        "requested_mcp_servers": [],
+        "max_turns": 1,
+        "source": "x",
+        "fingerprint": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "agents.inspect",
+      "case": "missing_field",
+      "value": {
+        "description": "x",
+        "purpose": "x",
+        "model_profile_id": "x",
+        "execution_policy_id": "x",
+        "requested_skills": [],
+        "requested_mcp_servers": [],
+        "max_turns": 1,
+        "source": "x",
+        "fingerprint": "x"
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "teams.list",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "teams.list",
+      "case": "extra_field",
+      "value": {
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "teams.list",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "teams.list",
+      "case": "extra_field",
+      "value": {
+        "teams": [],
+        "diagnostics": [],
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "teams.list",
+      "case": "missing_field",
+      "value": {
+        "diagnostics": []
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "teams.inspect",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "teams.inspect",
+      "case": "extra_field",
+      "value": {
+        "kind": "definition",
+        "id": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "teams.inspect",
+      "case": "missing_field",
+      "value": {
+        "id": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "teams.inspect",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "teams.generate",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "teams.generate",
+      "case": "extra_field",
+      "value": {
+        "id": "x",
+        "lead_agent_id": "x",
+        "worker_agent_ids": [
+          "x"
+        ],
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "teams.generate",
+      "case": "missing_field",
+      "value": {
+        "lead_agent_id": "x",
+        "worker_agent_ids": [
+          "x"
+        ]
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "teams.generate",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "teams.generate",
+      "case": "extra_field",
+      "value": {
+        "id": "x",
+        "description": "x",
+        "max_parallelism": 1,
+        "failure_policy": "fail-fast",
+        "tasks": [
+          {
+            "id": "x",
+            "agent_id": "x",
+            "depends_on": [],
+            "access": "read",
+            "timeout_seconds": 1
+          }
+        ],
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "teams.generate",
+      "case": "missing_field",
+      "value": {
+        "description": "x",
+        "max_parallelism": 1,
+        "failure_policy": "fail-fast",
+        "tasks": [
+          {
+            "id": "x",
+            "agent_id": "x",
+            "depends_on": [],
+            "access": "read",
+            "timeout_seconds": 1
+          }
+        ]
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "teams.run",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "teams.run",
+      "case": "extra_field",
+      "value": {
+        "team_id": "x",
+        "request": "x",
+        "thread_id": "x",
+        "run_id": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "teams.run",
+      "case": "missing_field",
+      "value": {
+        "request": "x",
+        "thread_id": "x",
+        "run_id": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "teams.run",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "teams.run",
+      "case": "extra_field",
+      "value": {
+        "team_id": "x",
+        "run_id": "x",
+        "accepted": true,
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "teams.run",
+      "case": "missing_field",
+      "value": {
+        "run_id": "x",
+        "accepted": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "teams.cancel",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "teams.cancel",
+      "case": "extra_field",
+      "value": {
+        "run_id": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "teams.cancel",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "teams.cancel",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "teams.cancel",
+      "case": "extra_field",
+      "value": {
+        "run_id": "x",
+        "cancelled": false,
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "teams.cancel",
+      "case": "missing_field",
+      "value": {
+        "cancelled": false
+      }
     },
     {
       "kind": "operation.params",

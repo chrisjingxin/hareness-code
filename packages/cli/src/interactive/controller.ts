@@ -31,7 +31,7 @@ export class InteractiveControllerImpl implements InteractiveController {
   private readonly mcpFeature = new McpFeature()
   private readonly modelFeature = new ModelFeature()
   private readonly threadFeature = new ThreadFeature()
-  private readonly commandFeature = new CommandFeature()
+  private readonly commandFeature: CommandFeature
   private readonly interactionFeature = new InteractionFeature()
   private readonly timelineFeature = new TimelineFeature()
   private readonly runFeature = new RunFeature()
@@ -60,6 +60,7 @@ export class InteractiveControllerImpl implements InteractiveController {
     const defaultRuntime: InteractiveRuntime = { workspace: "", cliVersion: "0.1.0", modelConfigured: false, executionMode: "local", approvalMode: "default", capabilities: builtinCommandCapabilities }
     const rawRuntime = options.baseRuntime ?? options.runtime ?? defaultRuntime
     this.baseRuntime = { ...defaultRuntime, ...rawRuntime, capabilities: rawRuntime.capabilities ?? builtinCommandCapabilities }
+    this.commandFeature = new CommandFeature(this.baseRuntime.agentCommands)
     this.clock = options.clock ?? systemClock
     this.scheduler = options.scheduler ?? systemScheduler
     this.idGenerator = options.idGenerator ?? cryptoIdGenerator

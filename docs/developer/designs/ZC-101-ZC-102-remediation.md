@@ -1,6 +1,6 @@
 # ZC-101 / ZC-102 回检问题整改方案
 
-原始需求：[ZC-101](../tasks/archive/ZC-101.md)、[ZC-102](../tasks/ZC-102.md)
+原始需求：[ZC-101](../tasks/archive/ZC-101-legacy.md)、[ZC-102](../tasks/ZC-102.md)
 
 原始方案：[ZC-101 方案](ZC-101.md)、[ZC-102 方案](ZC-102.md)
 

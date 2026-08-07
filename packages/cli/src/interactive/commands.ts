@@ -1,6 +1,6 @@
 /** Interactive Core 的 Slash Command Registry、解析与可用性策略。 */
 
-import { Capability } from "@za38/protocol"
+import { Capability, type AgentCommand } from "@za38/protocol"
 
 /** 命令打开的交互入口类型；由 Result Adapter 映射为具体副作用。 */
 export type CommandPresentation = "action" | "picker" | "viewer" | "dialog"
@@ -43,6 +43,7 @@ export type CommandDefinition = {
   requirements?: CommandRequirements
   safety?: CommandSafety
   deprecated?: DeprecatedCommand
+  requestedSkillId?: string
 }
 
 /** 用于计算当前命令菜单可用性的最小共享状态快照。 */
@@ -50,6 +51,7 @@ export type CommandContext = {
   capabilities: ReadonlySet<string>
   hasThread: boolean
   activeRun: boolean
+  pendingOperation: boolean
   hasPendingInteraction: boolean
 }
 
@@ -88,7 +90,17 @@ export type CommandMenuItem =
   | { kind: "skill"; skill: SkillMenuItem }
 
 /** 内置命令所需 capability 的全集，供旧的测试运行时提供兼容默认值。 */
-export const builtinCommandCapabilities = [Capability.THREADS_READ, Capability.CONTEXT_MANAGE, Capability.MODELS_READ, Capability.MODELS_SELECT, Capability.SKILLS_READ] as const
+export const builtinCommandCapabilities = [
+  Capability.THREADS_READ,
+  Capability.CONTEXT_MANAGE,
+  Capability.MODELS_READ,
+  Capability.MODELS_SELECT,
+  Capability.SKILLS_READ,
+  Capability.AGENTS_READ,
+  Capability.TEAMS_READ,
+  Capability.TEAMS_MANAGE,
+  Capability.HOST_ATTACH,
+] as const
 
 /** 所有动态来源必须通过同一不可变 Registry 构造，避免覆盖内置命令或产生不确定别名。 */
 export class CommandRegistry {
@@ -129,7 +141,7 @@ export class CommandRegistry {
     if (definition.requirements?.requiresThread && !context.hasThread) {
       return { state: "disabled", reason: "当前没有可用 thread" }
     }
-    if (definition.requirements?.requiresIdle && (context.activeRun || context.hasPendingInteraction)) {
+    if (definition.requirements?.requiresIdle && (context.activeRun || context.pendingOperation || context.hasPendingInteraction)) {
       return { state: "disabled", reason: "当前任务结束或交互完成后可用" }
     }
     return { state: "available" }
@@ -163,7 +175,7 @@ export class CommandRegistry {
 }
 
 /** 当前已交付命令的唯一注册来源；未来 Loader 只能构造新的 Registry 快照。 */
-export const commandRegistry = new CommandRegistry([
+export const builtinCommandDefinitions: readonly CommandDefinition[] = [
   { id: "system.help", name: "help", description: "显示可用命令", source: { type: "builtin" }, presentation: "viewer", suggested: true },
   { id: "system.quit", name: "quit", aliases: ["q"], description: "退出 za38", source: { type: "builtin" }, presentation: "action", suggested: true },
   { id: "thread.new", name: "new", aliases: ["clear"], description: "开启新的 thread", source: { type: "builtin" }, presentation: "dialog", suggested: true, safety: { confirmation: "when-running" } },
@@ -174,9 +186,30 @@ export const commandRegistry = new CommandRegistry([
   { id: "thread.resume", name: "resume", aliases: ["continue", "threads"], description: "打开 thread 恢复选择器", source: { type: "builtin" }, presentation: "picker", suggested: true, requirements: { capabilities: [Capability.THREADS_READ], requiresIdle: true } },
   { id: "model.select", name: "model", aliases: ["models"], description: "选择当前 thread 下一次运行的模型 Profile", source: { type: "builtin" }, presentation: "picker", suggested: true, argumentHint: "[query]", requirements: { capabilities: [Capability.MODELS_READ], requiresIdle: true } },
   { id: "skills.open", name: "skills", description: "打开 Skill 选择器", source: { type: "builtin" }, presentation: "picker", suggested: true, requirements: { capabilities: [Capability.SKILLS_READ] } },
+  { id: "agents.list", name: "agents", description: "查看可派发的 Plugin Agent", source: { type: "builtin" }, presentation: "viewer", suggested: true, requirements: { capabilities: [Capability.AGENTS_READ] } },
+  { id: "teams.manage", name: "teams", description: "查看或控制 Agent Team", source: { type: "builtin" }, presentation: "viewer", argumentHint: "[show|status|generate|run|cancel] ...", suggested: true, requirements: { capabilities: [Capability.TEAMS_READ] } },
   { id: "mcp.manage", name: "mcp", description: "查看 MCP 服务器状态", source: { type: "builtin" }, presentation: "viewer", suggested: true },
   { id: "host.web", name: "web", description: "在浏览器中接管当前会话，可从空首页或当前 thread 启动", source: { type: "builtin" }, presentation: "action", suggested: true, requirements: { requiresIdle: true } },
-])
+]
+
+export const commandRegistry = new CommandRegistry(builtinCommandDefinitions)
+
+/** 把 Host 已校验的 Plugin Command 摘要合并进单一 Registry；正文从不进入 CLI。 */
+export function createCommandRegistry(agentCommands: readonly AgentCommand[] = []): CommandRegistry {
+  const pluginDefinitions = agentCommands.map((command): CommandDefinition => ({
+    id: command.id,
+    name: command.name,
+    description: command.description,
+    source: { type: "plugin", id: command.plugin_id },
+    presentation: "action",
+    argumentHint: command.argument_hint ?? undefined,
+    suggested: true,
+    requirements: { capabilities: [Capability.SKILLS_READ], requiresIdle: true },
+    safety: { confirmation: "never" },
+    requestedSkillId: command.requested_skill_id,
+  }))
+  return new CommandRegistry([...builtinCommandDefinitions, ...pluginDefinitions])
+}
 
 /** 兼容既有帮助渲染器；内容仍完全由 Registry 生成。 */
 export const slashCommandHelp: ReadonlyArray<{ command: string; description: string }> = commandRegistry.definitions.map(definition => ({
@@ -184,22 +217,37 @@ export const slashCommandHelp: ReadonlyArray<{ command: string; description: str
   description: definition.description,
 }))
 
+/** 从指定不可变 Registry 生成帮助，动态 Plugin Command 与菜单保持同一事实来源。 */
+export function commandHelp(
+  registry: CommandRegistry,
+): ReadonlyArray<{ command: string; description: string }> {
+  return registry.definitions.map(definition => ({
+    command: `/${definition.name}${definition.aliases?.length ? `, /${definition.aliases.join(", /")}` : ""}`,
+    description: definition.description,
+  }))
+}
+
 /** 返回默认交互式 capability 集合，旧测试未提供握手结果时保持已有菜单行为。 */
 export function defaultCommandContext(overrides: Partial<Omit<CommandContext, "capabilities">> & { capabilities?: Iterable<string> } = {}): CommandContext {
   return {
     capabilities: new Set(overrides.capabilities ?? builtinCommandCapabilities),
     hasThread: overrides.hasThread ?? false,
     activeRun: overrides.activeRun ?? false,
+    pendingOperation: overrides.pendingOperation ?? false,
     hasPendingInteraction: overrides.hasPendingInteraction ?? false,
   }
 }
 
 /** 只在输入以 / 开头且尚未进入参数区时，为 Prompt 提供可选内置命令。 */
-export function findSlashCommands(value: string, context = defaultCommandContext()): readonly CommandDefinition[] {
+export function findSlashCommands(
+  value: string,
+  context = defaultCommandContext(),
+  registry = commandRegistry,
+): readonly CommandDefinition[] {
   const query = value.trimStart()
   if (!query.startsWith("/") || query.startsWith("//") || query.slice(1).match(/\s/)) return []
   const name = query.slice(1).toLowerCase()
-  return commandRegistry.list(context)
+  return registry.list(context)
     .filter(({ definition }) => shouldShowInMenu(definition, name))
     .filter(({ definition }) => [definition.name, ...(definition.aliases ?? [])]
       .some(candidate => candidate.startsWith(name)))
@@ -211,11 +259,12 @@ export function findCommandMenuItems(
   value: string,
   skills: readonly SkillMenuItem[],
   context = defaultCommandContext(),
+  registry = commandRegistry,
 ): readonly CommandMenuItem[] {
   const query = value.trimStart()
   if (!query.startsWith("/") || query.startsWith("//") || query.slice(1).match(/\s/)) return []
   const needle = query.slice(1).toLowerCase()
-  const commands: CommandMenuItem[] = commandRegistry.list(context)
+  const commands: CommandMenuItem[] = registry.list(context)
     .filter(({ definition }) => shouldShowInMenu(definition, needle))
     .filter(({ definition }) => [definition.name, ...(definition.aliases ?? [])]
       .some(candidate => candidate.startsWith(needle)))
@@ -260,8 +309,11 @@ export function resolveSlashCommand(input: string, registry = commandRegistry): 
 }
 
 /** 保留旧调用点的成功解析 API；未知命令必须使用 resolveSlashCommand 区分。 */
-export function parseSlashCommand(input: string): SlashCommand | null {
-  const resolution = resolveSlashCommand(input)
+export function parseSlashCommand(
+  input: string,
+  registry = commandRegistry,
+): SlashCommand | null {
+  const resolution = resolveSlashCommand(input, registry)
   return resolution.kind === "command" ? resolution.command : null
 }
 

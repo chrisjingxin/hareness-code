@@ -185,12 +185,16 @@ export function applyInteractionRequest(state: InteractiveState, envelope: Inter
   const kind = (req.type ?? req.kind) as string | undefined
 
   if (kind === "approval") {
+    const payload = req.payload && typeof req.payload === "object" ? req.payload as Record<string, unknown> : {}
+    const description = typeof payload.description === "string"
+      ? payload.description
+      : (req.prompt ?? req.reason ?? "") as string
     const card: InteractionCard = {
       id: envelope.request_id,
       runId: envelope.run_id,
       type: "approval",
       status: "pending",
-      description: (req.prompt ?? req.reason ?? "") as string,
+      description,
       requests: req,
     }
     const timeline = existingIndex >= 0

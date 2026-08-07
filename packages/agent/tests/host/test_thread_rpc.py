@@ -1,4 +1,4 @@
-"""thread 恢复 RPC：能力协商、project 范围和不可恢复错误回归测试。"""
+"""thread 恢复 RPC：能力协商、project 范围和 Transcript 回放回归测试。"""
 
 from __future__ import annotations
 
@@ -52,12 +52,13 @@ async def test_thread_rpc_requires_capability_and_only_lists_current_project(tmp
         "updated_at_ms": listed[0]["updated_at_ms"],
         "first_message": "恢复这个 thread",
         "latest_message": "恢复这个 thread",
-        "message_count": 0,
+        "message_count": 1,
     }]
 
     await server.dispatch(_request("threads.open", {"thread_id": "thread-1"}, "open"))
-    assert frames[-1]["error"]["code"] == -32004
-    assert frames[-1]["error"]["message"] == "THREAD_NOT_RECOVERABLE"
+    assert frames[-1]["result"]["messages"] == [
+        {"kind": "user", "content": "恢复这个 thread"}
+    ]
     await server.close()
 
 

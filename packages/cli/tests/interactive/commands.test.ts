@@ -4,6 +4,7 @@ import {
   CommandRegistry,
   commandMenuItemDescription,
   commandMenuItemLabel,
+  createCommandRegistry,
   defaultCommandContext,
   findCommandMenuItems,
   findSlashCommands,
@@ -25,6 +26,8 @@ test("Registry 以 canonical ID 解析核心 Slash Command 与别名", () => {
   expect(parseSlashCommand("/continue")).toEqual({ id: "thread.resume", name: "resume", argument: undefined })
   expect(parseSlashCommand("/threads")).toEqual({ id: "thread.resume", name: "resume", argument: undefined })
   expect(parseSlashCommand("/skills")).toEqual({ id: "skills.open", name: "skills", argument: undefined })
+  expect(parseSlashCommand("/agents")).toEqual({ id: "agents.list", name: "agents", argument: undefined })
+  expect(parseSlashCommand("/teams list")).toEqual({ id: "teams.manage", name: "teams", argument: "list" })
   expect(parseSlashCommand("/models")).toEqual({ id: "model.select", name: "model", argument: undefined })
   expect(parseSlashCommand("/mcp")).toEqual({ id: "mcp.manage", name: "mcp", argument: undefined })
   expect(parseSlashCommand("/web")).toEqual({ id: "host.web", name: "web", argument: undefined })
@@ -57,6 +60,56 @@ test("Dispatcher 仅按稳定 ID 返回 semantic operation，并统一处理兼�
     commandContext: defaultCommandContext({ capabilities: ["models.read"] }),
   })).toEqual({ type: "present", target: "models", initialQuery: "pro" })
   expect(dispatchSlashCommand(compact, base)).toEqual({ type: "compact", threadId: "thread-1" })
+})
+
+test("Agent 与 Team 命令只生成受控目录和固定参数 RPC", () => {
+  const base = {
+    commandContext: defaultCommandContext({
+      capabilities: ["agents.read", "teams.read", "teams.manage"],
+      hasThread: true,
+    }),
+    threadId: "thread-1",
+    runtimeStatus: "运行摘要",
+    versionSummary: "version",
+    idGenerator: { uuid: () => "00000000-0000-4000-8000-000000000000" },
+  }
+  const agents = parseSlashCommand("/agents")
+  const generate = parseSlashCommand("/teams generate review lead worker-a,worker-b 2")
+  const run = parseSlashCommand("/teams run review 检查当前变更")
+  const status = parseSlashCommand("/teams status team-run-1")
+  if (!agents || !generate || !run || !status) throw new Error("expected Agent/Team commands")
+
+  expect(dispatchSlashCommand(agents, base)).toMatchObject({
+    type: "rpc",
+    method: "agents.list",
+    params: {},
+  })
+  expect(dispatchSlashCommand(generate, base)).toMatchObject({
+    type: "rpc",
+    method: "teams.generate",
+    params: {
+      id: "review",
+      lead_agent_id: "lead",
+      worker_agent_ids: ["worker-a", "worker-b"],
+      max_parallelism: 2,
+    },
+  })
+  const runResult = dispatchSlashCommand(run, base)
+  expect(runResult).toMatchObject({
+    type: "rpc",
+    method: "teams.run",
+    params: {
+      team_id: "review",
+      request: "检查当前变更",
+      thread_id: "thread-1",
+      run_id: expect.stringMatching(/^[0-9a-f-]{36}$/),
+    },
+  })
+  expect(dispatchSlashCommand(status, base)).toMatchObject({
+    type: "rpc",
+    method: "teams.inspect",
+    params: { kind: "run", id: "team-run-1" },
+  })
 })
 
 test("活动任务下 /new 返回确认 semantic operation，而不是旧分支", () => {
@@ -199,4 +252,59 @@ test("Slash 菜单将可调用 Skill 渲染为 skill:<canonical-id>", () => {
   expect(findCommandMenuItems("/", skills).map(commandMenuItemLabel)).toContain("/skill:user/repo-review-demo")
   expect(findCommandMenuItems("/skill:repo", skills).map(commandMenuItemLabel)).toEqual(["/skill:user/repo-review-demo"])
   expect(findCommandMenuItems("/skill:", [{ ...skills[0]!, enabled: false }])).toEqual([])
+})
+
+test("Host Plugin Command 合并进同一 Registry，并提交 requested Skill 与原始参数", () => {
+  const registry = createCommandRegistry([{
+    id: "plugin/local/review-tools/command/audit",
+    name: "plugin:local:review-tools:audit",
+    description: "审计指定文件",
+    argument_hint: "<paths>",
+    requested_skill_id: "plugin/local/review-tools/command/audit",
+    plugin_id: "local/review-tools",
+  }])
+  const command = parseSlashCommand(
+    "/plugin:local:review-tools:audit src/auth.ts  --strict",
+    registry,
+  )
+  if (!command) throw new Error("expected Plugin command")
+  expect(findCommandMenuItems(
+    "/plugin:local",
+    [],
+    defaultCommandContext({ capabilities: ["skills.read"] }),
+    registry,
+  ).map(commandMenuItemLabel)).toEqual(["/plugin:local:review-tools:audit"])
+  expect(dispatchSlashCommand(command, {
+    commandContext: defaultCommandContext({ capabilities: ["skills.read"] }),
+    runtimeStatus: "status",
+    versionSummary: "version",
+  }, registry)).toEqual({
+    type: "submit-prompt",
+    prompt: "src/auth.ts  --strict",
+    requestedSkill: {
+      id: "plugin/local/review-tools/command/audit",
+      args: "src/auth.ts  --strict",
+    },
+  })
+  const help = parseSlashCommand("/help", registry)
+  if (!help) throw new Error("expected help")
+  expect(dispatchSlashCommand(help, {
+    commandContext: defaultCommandContext({ capabilities: ["skills.read"] }),
+    runtimeStatus: "status",
+    versionSummary: "version",
+  }, registry)).toMatchObject({
+    type: "notice",
+    message: expect.stringContaining("/plugin:local:review-tools:audit"),
+  })
+})
+
+test("动态 Plugin Command 不能覆盖 builtin 名称或别名", () => {
+  expect(() => createCommandRegistry([{
+    id: "plugin/local/bad/command/help",
+    name: "help",
+    description: "bad",
+    argument_hint: null,
+    requested_skill_id: "plugin/local/bad/command/help",
+    plugin_id: "local/bad",
+  }])).toThrow("Command 名称或别名冲突")
 })

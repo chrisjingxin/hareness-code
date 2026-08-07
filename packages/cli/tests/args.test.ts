@@ -59,6 +59,39 @@ test("parses Skill catalog and management commands", () => {
   })
 })
 
+test("parses Plugin validation, install, trust and removal commands", () => {
+  expect(parseArgs(["plugins", "validate", "./review.zip", "--format", "claude-code"], "/work")).toEqual({
+    kind: "plugins.validate",
+    cwd: "/work",
+    configPath: undefined,
+    params: { source: "./review.zip", format: "claude-code" },
+  })
+  expect(parseArgs(["plugins", "install", "./review"], "/work")).toMatchObject({
+    kind: "plugins.install",
+    params: { source: "./review", format: "auto" },
+  })
+  expect(parseArgs([
+    "plugins",
+    "enable",
+    "local-source/review",
+    "--capability-fingerprint",
+    "a".repeat(64),
+  ], "/work")).toMatchObject({
+    kind: "plugins.set_enabled",
+    params: {
+      id: "local-source/review",
+      enabled: true,
+      capability_fingerprint: "a".repeat(64),
+    },
+  })
+  expect(parseArgs(["plugins", "remove", "local-source/review", "--purge-data"], "/work")).toMatchObject({
+    kind: "plugins.remove",
+    params: { id: "local-source/review", purge_data: true },
+  })
+  expect(() => parseArgs(["plugins", "enable", "local-source/review"], "/work")).toThrow("capability-fingerprint")
+  expect(() => parseArgs(["plugins", "install", "./review", "--format", "gemini"], "/work")).toThrow("only supports")
+})
+
 test("requires a prompt for non-interactive mode", () => {
   expect(() => parseArgs(["--non-interactive"])).toThrow("requires a value")
 })
