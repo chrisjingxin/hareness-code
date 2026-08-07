@@ -9,7 +9,7 @@ export const QUESTION_OTHER_VALUE = "__other__"
 export const APPROVAL_DECISION_ORDER: readonly ApprovalDecision[] = [
   "approve_once",
   "approve_thread",
-  "approve_always",
+  "approve_project",
   "reject",
   "reject_with_feedback",
 ]
@@ -17,8 +17,8 @@ export const APPROVAL_DECISION_ORDER: readonly ApprovalDecision[] = [
 /** approval decision 的展示元数据：中文标签与简短描述，两端共用一份。 */
 const APPROVAL_DECISION_META: Readonly<Record<ApprovalDecision, { label: string; description: string }>> = {
   approve_once: { label: "允许一次", description: "继续执行当前操作" },
-  approve_thread: { label: "本线程允许", description: "当前会话内不再询问" },
-  approve_always: { label: "永久允许", description: "此后同类操作自动放行" },
+  approve_thread: { label: "本会话允许", description: "当前会话内不再询问" },
+  approve_project: { label: "本项目允许", description: "本项目内同类操作自动放行" },
   reject: { label: "拒绝", description: "停止此操作并告知 Agent" },
   reject_with_feedback: { label: "拒绝并反馈", description: "拒绝并附带修改建议" },
 }

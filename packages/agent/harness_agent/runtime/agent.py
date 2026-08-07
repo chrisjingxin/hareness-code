@@ -24,6 +24,7 @@ from harness_agent.policy.approval_policy import (
     interrupt_on_for_approval_mode,
 )
 from harness_agent.policy.auto_mode import evaluate_auto_mode
+from harness_agent.policy.bash_matcher import allow_remainder_triggers_floor
 from harness_agent.policy.permission_rules import PermissionRule, evaluate_tool_rules
 from harness_agent.policy.sensitive_paths import requires_safety_check
 from harness_agent.policy.safe_commands import is_safe_command
@@ -513,9 +514,20 @@ def _make_approval_preflight(
 
         # L4：allow 规则命中通常跳过审批；
         # 但 L3.5 敏感路径即使命中 allow 规则也必须弹窗确认；
-        # 工作区外写入同样强制弹窗，由用户确认越界行为。
+        # 工作区外写入同样强制弹窗，由用户确认越界行为；
+        # Shell 命令按规则前缀的剩余部分复核安全底线（ZC-117 约束 B）。
         if effect == "allow":
-            return sensitive or outside_write
+            if sensitive or outside_write:
+                return True
+            if tool_name in {"execute", "monitor"}:
+                command = str(tool_args.get("command", "")).strip()
+                if command and allow_remainder_triggers_floor(command, rules):
+                    logger.info(
+                        "allow 规则命中但剩余部分触发安全底线，强制审批: %s",
+                        command,
+                    )
+                    return True
+            return False
 
         # L3.1：Shell 安全命令白名单（default 模式下自动放行只读安全的命令）。
         # 预检阶段直接跳过审批弹窗，与 evaluate_permission 的 L3.1 逻辑保持一致。
@@ -559,6 +571,21 @@ def _make_approval_preflight(
             return False
 
         # default：进入 HITL 集合的工具默认弹窗。
+        if rules and tool_name in {"execute", "monitor"}:
+            command = str(tool_args.get("command", "")).strip()
+            if command:
+                allow_resources = [
+                    rule.resource
+                    for rule in rules
+                    if rule.effect == "allow"
+                    and rule.tool in {tool_name, "*", "execute", "monitor"}
+                ]
+                if allow_resources:
+                    logger.debug(
+                        "审批弹窗：同工具 allow 规则未命中 command=%r rules=%r",
+                        command,
+                        allow_resources,
+                    )
         return True
 
     return composite

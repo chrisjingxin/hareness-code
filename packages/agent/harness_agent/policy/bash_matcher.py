@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Callable
 
 from harness_agent.policy.bash_parser import extract_segments, strip_wrappers
 from harness_agent.policy.permission_rules import PermissionRule
@@ -205,6 +205,80 @@ def evaluate_bash(
         overall = "ask"
 
     return {"decision": overall, "segments": segment_results}
+
+
+def remainder_after_command_prefix(command: str, prefix: str) -> str | None:
+    """剥掉命令前缀后返回剩余部分；前缀不匹配时返回 ``None``。
+
+    使用与 :func:`matches_command_prefix` 相同的词边界拆分，保证判定一致。
+    """
+    prefix = prefix.strip()
+    if not prefix:
+        return None
+    prefix_tokens = prefix.split()
+    command_tokens = command.strip().split()
+    if len(prefix_tokens) > len(command_tokens):
+        return None
+    if command_tokens[: len(prefix_tokens)] != prefix_tokens:
+        return None
+    return " ".join(command_tokens[len(prefix_tokens) :])
+
+
+def find_matching_allow_resource(
+    segment: str,
+    rules: list[PermissionRule],
+    tool_names: frozenset[str] = frozenset({"execute", "monitor", "*"}),
+) -> str | None:
+    """返回命中该命令段的第一条 allow 规则的 resource；无匹配返回 ``None``。"""
+    segment = segment.strip()
+    if not segment:
+        return None
+    for rule in rules:
+        if rule.tool not in tool_names or rule.effect != "allow":
+            continue
+        if "*" in rule.resource:
+            matched = matches_command_glob(rule.resource, segment)
+        else:
+            matched = matches_command_prefix(rule.resource, segment)
+        if matched:
+            return rule.resource
+    return None
+
+
+def allow_remainder_triggers_floor(
+    command: str,
+    rules: list[PermissionRule],
+    *,
+    floor_evaluator: Callable[[str], dict[str, Any]] | None = None,
+) -> bool:
+    """allow 规则命中后，按剩余部分检查安全底线是否触发（ZC-117 约束 B）。
+
+    - 纯前缀规则：剥掉前缀后对 remainder 跑底线
+    - 含 ``*`` 的手写宽规则：对整段命令跑底线
+    - 任一段触发底线 → ``True``（应强制弹窗）
+    """
+    from harness_agent.policy.bash_floors import evaluate_safety_floors
+
+    evaluator = floor_evaluator or evaluate_safety_floors
+    for raw_segment in extract_segments(command):
+        processed = strip_wrappers(raw_segment, max_depth=3)
+        resource = find_matching_allow_resource(processed, rules)
+        if resource is None:
+            continue
+        if "*" in resource:
+            subject = processed
+        else:
+            remainder = remainder_after_command_prefix(processed, resource)
+            if remainder is None:
+                subject = processed
+            elif not remainder.strip():
+                continue
+            else:
+                subject = remainder
+        floors = evaluator(subject)
+        if floors.get("any_floor_triggered"):
+            return True
+    return False
 
 
 def _make_segment_result(

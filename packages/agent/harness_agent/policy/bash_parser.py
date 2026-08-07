@@ -1,12 +1,15 @@
 """基于 tree-sitter 的 Bash 命令解析器。
 
 本模块提供 Bash 命令的 AST 解析、链式命令拆分、包装器剥离、命令根提取、
-"Always Allow" 规则生成以及危险参数检测功能。所有函数在 tree-sitter 解析
+「本项目允许」规则生成以及危险参数检测功能。所有函数在 tree-sitter 解析
 失败时均会优雅降级，不抛出异常。
 """
 from __future__ import annotations
 
 import logging
+import re
+import shlex
+import sys
 from typing import Any
 
 import tree_sitter_bash as tsbash
@@ -46,6 +49,52 @@ _ARG_NODE_TYPES: frozenset[str] = frozenset({
     "simple_expansion",
     "concatenation",
     "ansi_c_string",
+})
+
+# ---------------------------------------------------------------------------
+# 规则生成：词分类与裸根禁令（ZC-117 决策 3/4/5）
+# ---------------------------------------------------------------------------
+
+_SUBCOMMAND_WORD_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+_WIN_FLAG_RE = re.compile(r"^/[A-Za-z][A-Za-z0-9]{0,7}$")
+_FORWARDING_SUBCOMMANDS: frozenset[str] = frozenset({"run", "exec", "x", "dlx"})
+
+# 不得单独成规则的根命令：裸根前缀匹配会过度放行（如 rm → rm -rf /）。
+BARE_ROOT_FORBIDDEN: frozenset[str] = frozenset({
+    "rm",
+    "del",
+    "erase",
+    "rmdir",
+    "rd",
+    "mv",
+    "move",
+    "cp",
+    "copy",
+    "chmod",
+    "chown",
+    "attrib",
+    "dd",
+    "kill",
+    "taskkill",
+    "curl",
+    "wget",
+    "ssh",
+    "scp",
+    "python",
+    "python3",
+    "node",
+    "bun",
+    "deno",
+    "ruby",
+    "perl",
+    "php",
+    "bash",
+    "sh",
+    "zsh",
+    "powershell",
+    "pwsh",
+    "cmd",
+    "docker",
 })
 
 
@@ -522,56 +571,124 @@ def get_command_root(segment: str) -> str:
     return words[0] if words else ""
 
 
-def extract_command_rule(command: str) -> str:
-    """基于 AST 提取最小范围的规则字符串，用于生成 "Always Allow" 持久化规则。
+def _is_subcommand_word(token: str) -> bool:
+    """判断 token 是否为子命令词（不含路径/通配/赋值字符）。"""
+    if any(ch in token for ch in "./\\:~*?="):
+        return False
+    return bool(_SUBCOMMAND_WORD_RE.match(token))
 
-    规则生成逻辑：
-    - 单命令无参：``"whoami"`` → ``"whoami"``
-    - 单命令有参：保留根命令＋第一非 flag 子命令，参数通配
-    - 二级命令：``"npm install express"`` → ``"npm install *"``
-    - 三级命令：``"docker compose up -d"`` → ``"docker compose up *"``
-    - 不支持的命令：回退到 ``get_command_root(command) + " *"``
 
-    Args:
-        command: 命令字符串。
+def _is_flag_token(token: str, platform: str) -> bool:
+    """判断 token 是否为开关；Windows 平台额外识别 /b 风格。"""
+    if token.startswith("-"):
+        return True
+    if platform.startswith("win") and _WIN_FLAG_RE.match(token):
+        return True
+    return False
 
-    Returns:
-        "Always Allow" 规则字符串。
-    """
+
+def _is_operand_token(token: str, platform: str) -> bool:
+    """判断 token 是否为操作数（路径、文件名、URL、数字等）。"""
+    if _is_flag_token(token, platform) or _is_subcommand_word(token):
+        return False
+    return True
+
+
+def _tokenize_command_for_rule(command: str, platform: str) -> list[str]:
+    """将单段命令拆为 token，优先 AST，失败时按平台选择 shlex 模式。"""
     tree = _parse_bash_ast(command)
     if tree is not None:
         source = tree.root_node.text
         for node in _walk_tree(tree.root_node):
-            if node.type == "command":
-                cmd_name = None
-                # 收集所有非 flag、非赋值参数及其位置信息
-                candidates: list[tuple[str, int]] = []
-                has_flag_after_last_candidate = False
-                for child in node.children:
-                    if child.type == "command_name":
-                        cmd_name = _node_text(child, source)
-                    elif _is_arg_node(child):
-                        text = _node_text(child, source)
-                        if text.startswith("-"):
-                            has_flag_after_last_candidate = True
-                        elif "=" not in text:
-                            candidates.append((text, child.start_byte))
-                            has_flag_after_last_candidate = False
-                if cmd_name:
-                    if not candidates:
-                        return cmd_name
-                    # 如果最后一个候选之后没有 flag，去掉它（更可能是参数而非子命令）
-                    if not has_flag_after_last_candidate and len(candidates) > 1:
-                        candidates.pop()
-                    rule_parts = [cmd_name] + [c[0] for c in candidates[:2]]
-                    return " ".join(rule_parts) + " *"
-                break
+            if node.type != "command":
+                continue
+            tokens: list[str] = []
+            for child in node.children:
+                if child.type == "command_name":
+                    tokens.append(_node_text(child, source))
+                elif _is_arg_node(child):
+                    text = _node_text(child, source)
+                    # 跳过 VAR=value 前缀赋值
+                    if "=" in text and not text.startswith("-") and not tokens:
+                        continue
+                    tokens.append(text)
+            if tokens:
+                return tokens
 
-    # 回退
-    root = get_command_root(command)
-    if root:
-        return root + " *"
-    return command + " *"
+    posix = not platform.startswith("win")
+    try:
+        tokens = shlex.split(command, posix=posix)
+    except ValueError:
+        tokens = command.split()
+    # 跳过前导 VAR=value
+    while tokens and "=" in tokens[0] and not tokens[0].startswith("-"):
+        tokens = tokens[1:]
+    return tokens
+
+
+def extract_command_rule(command: str, *, platform: str | None = None) -> str:
+    """基于词分类提取纯前缀规则字符串，用于「本项目允许」持久化。
+
+    规则生成逻辑（ZC-117 决策 3/5）：
+    - 不再追加 ``" *"``，输出纯前缀，供 ``matches_command_prefix`` 匹配
+    - 命令根始终保留；遇到开关或操作数即停止
+    - 第一个子命令词无条件保留；第二个及以后仅当其后紧跟开关时保留
+    - ``run``/``exec``/``x``/``dlx`` 转发特例：其后那个词必须保留
+    - 最多保留 3 个词（命令根 + 2 层子命令）
+    - 若最终只剩裸根且根命令在 :data:`BARE_ROOT_FORBIDDEN` 中，返回空串（不生成规则）
+
+    Args:
+        command: 命令字符串（通常已 strip_wrappers）。
+        platform: 宿主平台标识，默认 ``sys.platform``；用于 Windows 开关识别。
+
+    Returns:
+        纯前缀规则字符串；不应生成规则时返回空串。
+    """
+    command = command.strip()
+    if not command:
+        return ""
+
+    host = platform if platform is not None else sys.platform
+    tokens = _tokenize_command_for_rule(command, host)
+    if not tokens:
+        return ""
+
+    root = tokens[0]
+    kept: list[str] = [root]
+    subcommand_count = 0
+    i = 1
+    while i < len(tokens) and len(kept) < 3:
+        token = tokens[i]
+        if _is_flag_token(token, host) or _is_operand_token(token, host):
+            break
+        # 子命令词
+        if subcommand_count == 0:
+            kept.append(token)
+            subcommand_count += 1
+            # 转发执行特例：run/exec 后必须再保留一个词（若存在且非开关）
+            if token in _FORWARDING_SUBCOMMANDS and i + 1 < len(tokens):
+                nxt = tokens[i + 1]
+                if not _is_flag_token(nxt, host) and len(kept) < 3:
+                    kept.append(nxt)
+                    subcommand_count += 1
+                    i += 2
+                    continue
+            i += 1
+            continue
+        # 第二个及以后的子命令词：仅当其后紧跟开关时保留
+        next_is_flag = (
+            i + 1 < len(tokens) and _is_flag_token(tokens[i + 1], host)
+        )
+        if next_is_flag:
+            kept.append(token)
+            subcommand_count += 1
+            i += 1
+            continue
+        break
+
+    if len(kept) == 1 and root in BARE_ROOT_FORBIDDEN:
+        return ""
+    return " ".join(kept)
 
 
 def has_dangerous_args(segment: str) -> bool:

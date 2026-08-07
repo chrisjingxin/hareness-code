@@ -43,12 +43,12 @@ def _assert_approval_params_schema_compliant(spec: InteractionRequest) -> None:
     )
 
 
-def test_approval_response_accepts_approve_always() -> None:
-    """ApprovalResponse 接受 approve_always 决策。"""
+def test_approval_response_accepts_approve_project() -> None:
+    """ApprovalResponse 接受 approve_project 决策。"""
     resp = ApprovalResponse.model_validate({
-        "decision": "approve_always",
+        "decision": "approve_project",
     })
-    assert resp.decision == "approve_always"
+    assert resp.decision == "approve_project"
 
 
 def test_approval_response_accepts_reject_with_feedback() -> None:
@@ -119,7 +119,7 @@ def _serial_spec(
             "decisions": [
                 "approve_once",
                 "approve_thread",
-                "approve_always",
+                "approve_project",
                 "reject",
                 "reject_with_feedback",
             ],
@@ -351,22 +351,44 @@ def test_extract_interaction_all_safe_tools_auto_resume() -> None:
 
 
 def test_generate_permission_rule_execute_uses_command_prefix() -> None:
-    """execute 工具取命令首词生成前缀通配模式。"""
-    rule = _generate_permission_rule("execute", {"command": "git commit -m 'x'"})
-    assert rule == PermissionRule(tool="execute", resource="git commit *", effect="allow")
+    """execute 工具按词分类生成纯前缀规则。"""
+    rules = _generate_permission_rule("execute", {"command": "git commit -m 'x'"})
+    assert rules == [
+        PermissionRule(tool="execute", resource="git commit", effect="allow")
+    ]
 
 
 def test_generate_permission_rule_file_tools_use_project_wildcard() -> None:
     """文件写/编辑/打补丁/删除工具按规范生成项目级通配规则。"""
     for tool_name in ("write_file", "edit_file", "apply_patch", "delete_file"):
-        rule = _generate_permission_rule(tool_name, {"file_path": "src/app/main.py"})
-        assert rule == PermissionRule(tool=tool_name, resource="*", effect="allow")
+        rules = _generate_permission_rule(tool_name, {"file_path": "src/app/main.py"})
+        assert rules == [PermissionRule(tool=tool_name, resource="*", effect="allow")]
 
 
 def test_generate_permission_rule_web_fetch_uses_domain_extraction() -> None:
     """web_fetch 按 URL 域名生成规则。"""
-    rule = _generate_permission_rule("web_fetch", {"url": "https://example.com"})
-    assert rule == PermissionRule(tool="web_fetch", resource="domain:example.com", effect="allow")
+    rules = _generate_permission_rule("web_fetch", {"url": "https://example.com"})
+    assert rules == [
+        PermissionRule(tool="web_fetch", resource="domain:example.com", effect="allow")
+    ]
+
+
+def test_generate_permission_rule_chained_command_produces_per_segment_rules() -> None:
+    """链式命令逐段生成规则，且去重。"""
+    rules = _generate_permission_rule(
+        "execute",
+        {"command": 'echo hello > a.txt && dir /b "C:\\tmp"'},
+    )
+    resources = [r.resource for r in rules]
+    assert "echo hello" in resources
+    assert "dir" in resources
+    assert len(resources) == len(set(resources))
+
+
+def test_generate_permission_rule_rm_produces_no_bare_root() -> None:
+    """rm foo.txt 命中裸根禁令，不产生规则。"""
+    rules = _generate_permission_rule("execute", {"command": "rm foo.txt"})
+    assert rules == []
 
 
 def _coordinator(project_dir: Path | None = None) -> RunCoordinator:
@@ -406,21 +428,21 @@ def test_approve_thread_stores_session_rule_in_memory() -> None:
         "execute", {"command": "git status"}, "approve_thread"
     )
     assert coordinator.session_rules == [
-        PermissionRule(tool="execute", resource="git status *", effect="allow")
+        PermissionRule(tool="execute", resource="git status", effect="allow")
     ]
 
 
-def test_approve_always_persists_rule_to_project_layer(tmp_path: Path) -> None:
-    """approve_always 生成规则并通过 save_rule 持久化到 project 层。"""
+def test_approve_project_persists_rule_to_project_layer(tmp_path: Path) -> None:
+    """approve_project 生成规则并通过 save_rule 持久化到 project 层。"""
     coordinator = _coordinator(project_dir=tmp_path)
     coordinator._record_approval_rule(
-        "execute", {"command": "git status"}, "approve_always"
+        "execute", {"command": "git status"}, "approve_project"
     )
     assert coordinator.session_rules == []
     saved = json.loads(
         (tmp_path / ".harness" / "settings.json").read_text(encoding="utf-8")
     )
-    assert saved["permissions"] == ["Bash(git status *)"]
+    assert saved["permissions"] == ["Bash(git status)"]
 
 
 def test_other_decisions_do_not_record_rules() -> None:
@@ -435,11 +457,11 @@ def test_other_decisions_do_not_record_rules() -> None:
 
 def test_generate_permission_rule_top_level_file_uses_tool_wildcard() -> None:
     """顶层文件与绝对根文件同样生成工具级通配，硬保护由预检兜底。"""
-    rule = _generate_permission_rule("edit_file", {"file_path": "main.py"})
-    assert rule == PermissionRule(tool="edit_file", resource="*", effect="allow")
+    rules = _generate_permission_rule("edit_file", {"file_path": "main.py"})
+    assert rules == [PermissionRule(tool="edit_file", resource="*", effect="allow")]
 
-    rule = _generate_permission_rule("write_file", {"file_path": "/main.py"})
-    assert rule == PermissionRule(tool="write_file", resource="*", effect="allow")
+    rules = _generate_permission_rule("write_file", {"file_path": "/main.py"})
+    assert rules == [PermissionRule(tool="write_file", resource="*", effect="allow")]
 
 
 class TestDeleteFileThreadApprovalRegression:

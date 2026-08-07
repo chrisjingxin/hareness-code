@@ -116,7 +116,7 @@ def parse_rule(
     raw_resource = m.group(2)
 
     # 已知 DSL 名映射为规范工具名；未知名称（如 MCP 工具名）原样保留，
-    # 保证 approve_always 生成的规则与运行时工具名可往返。
+    # 保证 approve_project 生成的规则与运行时工具名可往返。
     tool = _TOOL_NAME_MAP.get(dsl_tool, dsl_tool)
 
     if raw_resource is None:

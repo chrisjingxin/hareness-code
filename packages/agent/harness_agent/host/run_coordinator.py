@@ -409,7 +409,7 @@ class RunCoordinator:
         self._interaction_port = interaction_port
         self._context_updates_provider = context_updates_provider or (lambda _thread_id: [])
         self._execution_registry = execution_registry or AgentExecutionRegistry()
-        # approve_always 的规则持久化到该目录的 project 层 settings.json
+        # approve_project 的规则持久化到该目录的 project 层 settings.json
         self._project_dir = project_dir
         # approve_thread 的会话级规则只保存在内存，不落盘
         self._session_rules: list[PermissionRule] = []
@@ -1014,25 +1014,26 @@ class RunCoordinator:
         """单个工具调用审批通过后按决策范围记录或持久化 allow 权限规则。
 
         - approve_thread：规则只保存在会话内存列表，进程结束即失效；
-        - approve_always：规则持久化到 project 层 settings.json。
+        - approve_project：规则持久化到 project 层 settings.json。
         """
-        if decision not in {"approve_thread", "approve_always"} or not tool_name:
+        if decision not in {"approve_thread", "approve_project"} or not tool_name:
             return
-        rule = _generate_permission_rule(tool_name, tool_args)
-        if decision == "approve_thread":
-            if rule not in self._session_rules:
-                self._session_rules.append(rule)
-        else:
-            save_rule(
-                replace(rule, scope="project"),
-                scope="project",
-                project_dir=self._project_dir,
-            )
+        rules = _generate_permission_rule(tool_name, tool_args)
+        for rule in rules:
+            if decision == "approve_thread":
+                if rule not in self._session_rules:
+                    self._session_rules.append(rule)
+            else:
+                save_rule(
+                    replace(rule, scope="project"),
+                    scope="project",
+                    project_dir=self._project_dir,
+                )
 
     def _evaluate_queued_rule(self, tool_name: str, tool_args: dict[str, object]) -> str | None:
         """合并会话与持久化规则评估排队中的工具调用。
 
-        approve_thread/approve_always 产生的新规则应立即作用于同批后续请求；
+        approve_thread/approve_project 产生的新规则应立即作用于同批后续请求；
         但敏感路径与工作区外写入即使命中 allow 规则也不自动放行（保持弹窗）。
         """
         if not tool_name:
@@ -1140,7 +1141,7 @@ class RunCoordinator:
                     "decisions": [
                         "approve_once",
                         "approve_thread",
-                        "approve_always",
+                        "approve_project",
                         "reject",
                         "reject_with_feedback",
                     ],
@@ -1161,7 +1162,7 @@ class RunCoordinator:
             feedback = str(response.get("feedback") or "")
             self._record_approval_rule(tool_name, tool_args, decision)
 
-            if decision in {"approve_once", "approve_thread", "approve_always"}:
+            if decision in {"approve_once", "approve_thread", "approve_project"}:
                 decisions[index] = {"type": "approve"}
             elif decision == "reject_with_feedback" and feedback:
                 decisions[index] = {"type": "reject", "args": {"message": feedback}}
@@ -1305,7 +1306,7 @@ def _extract_interaction(
                 "decisions": [
                     "approve_once",
                     "approve_thread",
-                    "approve_always",
+                    "approve_project",
                     "reject",
                     "reject_with_feedback",
                 ],
@@ -1342,21 +1343,32 @@ def _resume_value(spec: InteractionRequest, response: object) -> dict[str, objec
 
 def _generate_permission_rule(
     tool_name: str, tool_args: Mapping[str, object]
-) -> PermissionRule:
-    """从被批准的工具调用上下文生成 allow 权限规则。
+) -> list[PermissionRule]:
+    """从被批准的工具调用上下文生成 allow 权限规则列表。
 
-    Shell 调用基于 tree-sitter AST 提取最小范围规则（如 git clone *）；
-    文件写/删工具按规范生成项目级通配；WebFetch 按域名生成；其他工具
-    保持通配。
+    Shell 工具按链式命令分段逐段生成；其余工具生成单元素列表。
+    某段无法生成有效规则（空串 / 裸根禁令）时跳过该段，不写入通配兜底。
     """
+    from harness_agent.policy.bash_parser import extract_segments, strip_wrappers
+
     command = str(tool_args.get("command") or "").strip()
     file_path = str(tool_args.get("file_path") or "").strip()
     url = str(tool_args.get("url") or "").strip()
 
     if tool_name in {"execute", "monitor"} and command:
-        # Shell 命令：使用 AST 提取最小范围规则
-        resource = _extract_command_rule(command)
-    elif (
+        rules: list[PermissionRule] = []
+        seen: set[str] = set()
+        for raw_segment in extract_segments(command):
+            processed = strip_wrappers(raw_segment, max_depth=3)
+            resource = _extract_command_rule(processed)
+            if not resource or resource in seen:
+                continue
+            seen.add(resource)
+            rules.append(
+                PermissionRule(tool=tool_name, resource=resource, effect="allow")
+            )
+        return rules
+    if (
         tool_name in {"write_file", "edit_file", "apply_patch", "delete_file"}
         and file_path
     ):
@@ -1365,8 +1377,8 @@ def _generate_permission_rule(
         # 硬性保护。
         resource = "*"
     elif tool_name == "web_fetch" and url:
-        # WebFetch：生成域名规则
         from urllib.parse import urlparse
+
         try:
             parsed = urlparse(url)
             hostname = parsed.hostname or url
@@ -1375,7 +1387,7 @@ def _generate_permission_rule(
             resource = "*"
     else:
         resource = "*"
-    return PermissionRule(tool=tool_name, resource=resource, effect="allow")
+    return [PermissionRule(tool=tool_name, resource=resource, effect="allow")]
 
 
 def _message_stream_chunk(event: tuple[Any, ...]) -> object | None:

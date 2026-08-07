@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import logging
 import platform
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
 
 RuleScope = Literal["session", "project", "user", "system"]
 """规则作用域：session 由调用方内存管理，project/user/system 持久化到 JSON 文件。"""
@@ -299,6 +302,16 @@ def _read_permissions(path: Path, scope: RuleScope) -> list[PermissionRule]:
         PermissionRule(tool=r.tool, resource=r.resource, effect=r.effect, scope=scope)  # type: ignore[arg-type]
         for r in rules
     ]
+    # ZC-117 决策 6：提示旧版「末尾 * + 绝对路径」残留规则，不改写文件
+    for rule in rules:
+        resource = rule.resource
+        if resource.endswith(" *") and (":" in resource or "\\" in resource):
+            logger.info(
+                "检测到可能已失效的旧版权限规则（可手工删除）: scope=%s resource=%r path=%s",
+                scope,
+                resource,
+                path,
+            )
     return rules
 
 

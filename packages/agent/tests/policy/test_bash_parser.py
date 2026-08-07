@@ -310,47 +310,91 @@ class TestGetCommandRoot:
 
 
 class TestExtractCommandRule:
-    """extract_command_rule 基于 AST 生成最小范围规则。"""
+    """extract_command_rule 基于词分类生成纯前缀规则（ZC-117）。"""
 
     def test_single_command_no_args(self):
         """无参数命令返回命令名本身。"""
         assert extract_command_rule("whoami") == "whoami"
 
     def test_command_with_subcommand(self):
-        """带子命令的命令保留根＋子命令＋通配符。"""
-        rule = extract_command_rule("git status --porcelain")
-        assert rule == "git status *"
+        """带子命令的命令保留根＋子命令，无通配符。"""
+        assert extract_command_rule("git status --porcelain") == "git status"
 
     def test_npm_install(self):
-        """npm install express → npm install *"""
-        rule = extract_command_rule("npm install express")
-        assert rule == "npm install *"
+        """npm install express → npm install（express 为操作数位置）。"""
+        assert extract_command_rule("npm install express") == "npm install"
 
     def test_docker_compose_up(self):
-        """docker compose up -d → docker compose up *"""
-        rule = extract_command_rule("docker compose up -d")
-        assert rule == "docker compose up *"
+        """docker compose up -d → docker compose up。"""
+        assert extract_command_rule("docker compose up -d") == "docker compose up"
 
     def test_command_with_only_flags(self):
-        """只有 flag 参数的命令返回命令名本身（无候选子命令，不追加通配符）。"""
-        rule = extract_command_rule("ls -la --color")
-        assert rule == "ls"
+        """只有 flag 参数的命令返回命令名本身。"""
+        assert extract_command_rule("ls -la --color") == "ls"
 
-    def test_empty_string_fallback(self):
-        """空字符串回退。"""
-        rule = extract_command_rule("")
-        # 回退到 command + " *"
-        assert rule.endswith("*")
+    def test_empty_string(self):
+        """空字符串不生成规则。"""
+        assert extract_command_rule("") == ""
 
     def test_two_level_command(self):
-        """两级命令如 git commit → git commit *"""
-        rule = extract_command_rule("git commit -m 'test'")
-        assert rule == "git commit *"
+        """两级命令如 git commit → git commit。"""
+        assert extract_command_rule("git commit -m 'test'") == "git commit"
 
-    def test_single_arg_command(self):
-        """只有一个非 flag 参数的命令。"""
-        rule = extract_command_rule("cat file.txt")
-        assert rule == "cat file.txt *"
+    def test_path_operand_dropped(self):
+        """路径操作数不进入规则。"""
+        assert extract_command_rule('dir "C:\\Users\\PC\\Desktop"') == "dir"
+        assert extract_command_rule('type "C:\\a\\hhh.txt"') == "type"
+        assert extract_command_rule("cat file.txt") == "cat"
+
+    def test_windows_flag_stops(self):
+        """Windows 平台 /b 视为开关，不进入规则。"""
+        assert extract_command_rule(
+            'dir /b "C:\\Users\\PC\\Desktop"', platform="win32"
+        ) == "dir"
+
+    def test_unix_absolute_path_not_flag(self):
+        """Unix 上 /etc/hosts 是路径而非开关。"""
+        assert extract_command_rule("cat /etc/hosts", platform="linux") == "cat"
+
+    def test_npm_run_build_forwarding(self):
+        """run 转发特例保留其后的词。"""
+        assert extract_command_rule("npm run build") == "npm run build"
+
+    def test_kubectl_get_pods(self):
+        """第二个子命令词无后续开关时丢弃。"""
+        assert extract_command_rule("kubectl get pods") == "kubectl get"
+
+    def test_bare_root_forbidden_rm(self):
+        """rm foo.txt 不生成裸根规则。"""
+        assert extract_command_rule("rm foo.txt") == ""
+
+    def test_bare_root_forbidden_python(self):
+        """python script.py 不生成裸根规则。"""
+        assert extract_command_rule("python script.py") == ""
+
+    def test_self_match_closed_loop(self):
+        """生成的规则必须能前缀匹配原命令（自匹配闭环）。"""
+        from harness_agent.policy.bash_matcher import matches_command_prefix
+
+        cases = [
+            "whoami",
+            "git status",
+            "git status --porcelain",
+            "git commit -m x",
+            "npm install express",
+            "npm run build",
+            "docker compose up -d",
+            "ls -la",
+            'dir "C:\\Users\\PC\\Desktop"',
+            "kubectl get pods",
+            "cargo build --release",
+        ]
+        for cmd in cases:
+            rule = extract_command_rule(cmd, platform="win32")
+            assert rule, f"unexpected empty rule for {cmd!r}"
+            assert matches_command_prefix(rule, cmd), (
+                f"rule {rule!r} does not match command {cmd!r}"
+            )
 
 
 # ===================================================================

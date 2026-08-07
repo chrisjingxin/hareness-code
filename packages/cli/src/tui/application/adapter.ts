@@ -15,7 +15,7 @@ import {
 } from "./prompt-history"
 import type { ShortcutAction } from "./shortcuts"
 
-export type ApprovalDecision = "approve_once" | "approve_thread" | "approve_always" | "reject" | "reject_with_feedback"
+export type ApprovalDecision = "approve_once" | "approve_thread" | "approve_project" | "reject" | "reject_with_feedback"
 
 export type CommandMenuState = {
   visible: boolean
