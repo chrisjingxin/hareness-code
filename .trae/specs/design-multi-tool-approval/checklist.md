@@ -1,0 +1,31 @@
+# Checklist
+
+- [x] `approval_mode.py` 支持 5 种模式（plan/default/auto-edit/auto/yolo），未知值安全降级为 default
+- [x] 模式切换循环顺序为 plan → default → auto-edit → auto → yolo → plan
+- [x] `evaluate_permission()` 按 L1→L2→L3→L4→L5 五层顺序评估
+- [x] L2 deny 规则在任何模式下（包括 yolo）都不可覆盖
+- [x] 规则引擎两级优先级：第一级 deny > allow > ask；第二级同动作内 session > project > user > system
+- [x] 用户 allowAlwaysSession 后，即使 project 有 ask 规则，本会话不再弹窗
+- [x] 任何来源的 deny 不可被 session/project allow 覆盖
+- [x] plan 模式阻止所有非 READ/INTERACT/PLAN 类工具
+- [x] yolo 模式将 ask 转为 allow（deny 除外）
+- [x] auto-edit 模式自动批准 EDIT 类工具，EXECUTE/DELETE 仍需审批
+- [x] auto 模式 F1：工作区内 EDIT 且非敏感路径自动通过
+- [x] auto 模式 F2：READ/INTERACT/PLAN 白名单工具自动通过
+- [x] auto 模式 F3：破坏性命令（rm -rf /、git push --force 等）正则硬拦截
+- [x] auto 模式 F4：两阶段 LLM 分类器（`policy/classifier.py` + `AutoClassifierMiddleware` 模型响应阶段分类、按 tool_call id 决策缓存去重）；未配置 `[approval] classifier`、调用异常或解析失败均 fail-closed 回退人工审批；连续 3 次拒绝后回退并重置
+- [x] auto 模式连续 3 次分类器拒绝后回退到手动审批
+- [x] 审批弹窗提供五种选项：allowOnce / allowAlwaysSession / allowAlwaysProject / deny+feedback / deny
+- [x] allowAlwaysSession 生成规则并写入 session 层（内存），当前会话内匹配调用自动通过，会话结束规则消失
+- [x] allowAlwaysProject 生成规则并写入项目级 `.harness/settings.json`，跨会话持久生效
+- [x] deny+feedback 将反馈注入 Agent 上下文，Agent 修改后重新触发审批
+- [x] 规则支持 session/project/user/system 四层作用域
+- [x] system 层路径按平台正确选择（Linux: /etc/harness/，Windows: C:\ProgramData\harness\，macOS: /Library/Application Support/Harness/）
+- [x] system 层只读，审批选项不可写入；文件不存在时静默返回空列表
+- [ ] 规则 DSL 支持 `Bash(git *)`、`Edit(src/**)`、`Read(.env)` 格式
+- [x] Extension 权限钩子接口已预留：`ExtensionPermissionHook` Protocol 定义存在
+- [x] Extension 钩子只能收紧（deny 覆盖 allow），不能放宽（主流程 deny 不可覆盖）
+- [x] 主流程 deny 时 Extension 钩子不被调用
+- [x] 审批拦截通过 `AgentMiddleware.wrap_tool_call` 实现（等价 PreToolUseHook）
+- [x] 协议层 `interaction.approval` 选项枚举与实现一致
+- [ ] 所有新增/修改模块有对应单元测试且通过
