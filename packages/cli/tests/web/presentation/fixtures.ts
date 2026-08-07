@@ -106,6 +106,8 @@ export function makeSnapshot(overrides: Partial<WebAdapterSnapshot> = {}): WebAd
     expandedTools: new Set<string>(),
     interactionDraft: null,
     leaving: false,
+    threadNewSubmitting: false,
+    composerFocusRequest: 0,
     transientNotice: null,
     scrollRequest: null,
     confirmationId: null,

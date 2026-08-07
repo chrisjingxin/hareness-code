@@ -49,6 +49,31 @@ test("/new 确认后取消并清空 Thread；取消失败保留原 Thread", asyn
   }
 })
 
+test("新建 Thread 只清 conversation scope：全局 Thread catalog 保留、连接保持 open", async () => {
+  const harness = makeHarness()
+  try {
+    await harness.controller.dispatch({ type: "thread.open", threadId: "thread-1" })
+    await flush()
+    const opened = harness.controller.getSnapshot()
+    expect(opened.currentThreadId).toBe("thread-1")
+    expect(opened.catalogs.threads.status).toBe("ready")
+    expect(opened.catalogs.threads.items).toHaveLength(2)
+
+    await harness.controller.dispatch({ type: "command.execute", commandId: "thread.new" })
+    await flush()
+    const snapshot = harness.controller.getSnapshot()
+    expect(snapshot.currentThreadId).toBeNull()
+    expect(snapshot.timeline).toHaveLength(0)
+    expect(snapshot.activity.kind).toBe("home")
+    // catalog 不被清空：侧栏历史 Thread 立即可见、可切回。
+    expect(snapshot.catalogs.threads.status).toBe("ready")
+    expect(snapshot.catalogs.threads.items).toHaveLength(2)
+    expect(snapshot.connection.status).toBe("open")
+  } finally {
+    await harness.controller.close()
+  }
+})
+
 test("Thread 打开期间重复打开被拒绝，stale 模型结果不覆盖新 Thread", async () => {
   const harness = makeHarness()
   let releaseFirst!: () => void

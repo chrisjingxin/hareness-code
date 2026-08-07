@@ -100,6 +100,10 @@ export type WebAdapterSnapshot = {
   readonly interactionDraft: WebInteractionDraft | null
   /** 正在执行 returnToTui / requestExit，期间页面只读。 */
   readonly leaving: boolean
+  /** 「新建 Thread」提交中；按钮据此禁用防重复点击。 */
+  readonly threadNewSubmitting: boolean
+  /** 新建 Thread 成功后自增；Composer 监听变化把焦点还给输入框。 */
+  readonly composerFocusRequest: number
   /** 脱敏临时通知；同一通知幂等替换。 */
   readonly transientNotice: string | null
   /** 表现层滚动意图；DOM 实际位置由 presentation 维护。 */
@@ -251,6 +255,10 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
   /** 上次观测到的 activeRun.runId；用于检测 run 结束（非空 → null）。 */
   private lastActiveRun: string | null = null
   private runEndTimer: unknown = null
+  /** 「新建 Thread」提交中：按钮禁用防重复点击。 */
+  private threadNewSubmittingFlag = false
+  /** 新建 Thread 成功后自增；Composer 监听变化把焦点还给输入框。 */
+  private composerFocusRequestValue = 0
   private closed = false
 
   constructor(options: WebAdapterOptions) {
@@ -340,7 +348,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
         await this.selectThread(intent.threadId)
         return
       case "thread-new":
-        await this.executeCoreIntent({ type: "command.execute", commandId: "thread.new" })
+        await this.createNewThread()
         return
       case "thread-refresh":
         await this.client.submitIntent({ type: "catalog.refresh", catalog: "threads" })
@@ -577,6 +585,8 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
       expandedTools: new Set(this.expandedTools),
       interactionDraft: this.interactionDraft ? cloneInteractionDraft(this.interactionDraft) : null,
       leaving: this.leavingFlag,
+      threadNewSubmitting: this.threadNewSubmittingFlag,
+      composerFocusRequest: this.composerFocusRequestValue,
       transientNotice: this.transientNotice,
       scrollRequest: this.pendingScrollRequest,
       confirmationId: interactive.confirmation?.confirmationId ?? null,
@@ -753,6 +763,28 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
   private async selectThread(threadId: string): Promise<void> {
     this.publishNow()
     await this.executeCoreIntent({ type: "thread.open", threadId })
+  }
+
+  /**
+   * 新建 Thread：提交期间禁用按钮防重复；成功后清空 Web 本地 Thread 级表现状态，
+   * 并递增 composerFocusRequest 让 Composer 把焦点还给输入框。领域语义（clear-thread /
+   * 保留全局 Catalog）由共享 Core 的 beginNewThread 执行，这里只做本地表现收尾。
+   */
+  private async createNewThread(): Promise<void> {
+    if (this.threadNewSubmittingFlag) return
+    this.threadNewSubmittingFlag = true
+    this.publishNow()
+    const outcome = await this.executeCoreIntent({ type: "command.execute", commandId: "thread.new" })
+    this.threadNewSubmittingFlag = false
+    if (outcome.status === "accepted") {
+      this.draft = ""
+      this.composerErrorStr = null
+      this.commandMenuOpenFlag = false
+      this.interactionDraft = null
+      this.expandedTools = new Set()
+      this.composerFocusRequestValue += 1
+    }
+    this.publishNow()
   }
 
   /** 切换模型：能力门禁与不可用性都交由共享 Core 处理；rejected 不关闭 Dock 并显示错误。 */

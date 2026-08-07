@@ -217,7 +217,7 @@ export class InteractiveControllerImpl implements InteractiveController {
       case "request-exit":
         return { status: "accepted", effects: [{ type: "request-exit" }] }
       case "clear-thread":
-        this.resetThreadState(clearThread(this.state))
+        this.beginNewThread()
         return { status: "accepted" }
       case "request-confirmation":
         this.confirmation = { confirmationId: result.confirmationId, title: result.title, message: result.message, confirmLabel: result.confirmLabel, cancelLabel: result.cancelLabel }
@@ -268,12 +268,15 @@ export class InteractiveControllerImpl implements InteractiveController {
         return { status: "accepted" }
       }
     }
-    if (confirmationId === "clear-thread" || confirmationId === "model-binding") {
+    if (confirmationId === "clear-thread") {
+      this.beginNewThread()
+    } else if (confirmationId === "model-binding") {
       this.resetThreadState(clearThread(this.state))
     }
     return { status: "accepted" }
   }
-  private resetThreadState(nextState: InteractiveState = clearThread(this.state)): void {
+  /** 重置 conversation scope（Thread/Timeline/模型与 Skill 选择/Interaction/Confirmation/sequence），不清全局 Catalog。 */
+  private resetConversationScope(nextState: InteractiveState = clearThread(this.state)): void {
     this.threadFeature.threadEpoch += 1
     this.state = nextState
     this.modelFeature.requestedModelProfileId = null
@@ -283,6 +286,17 @@ export class InteractiveControllerImpl implements InteractiveController {
     this.confirmation = null
     this.interactionFeature.settlePendingInteraction(this.featureContext)
     this.timelineFeature.resetSequence()
+  }
+
+  /** 新建 Thread 唯一领域入口：/new 命令结果与确认对话框共用；保留全局 Catalog（侧栏历史立即可切回）。 */
+  private beginNewThread(): void {
+    this.resetConversationScope()
+    this.publish()
+  }
+
+  /** 打开 Thread 前的旧状态重置：保持既有行为（catalog 重置后由打开流程刷新）。 */
+  private resetThreadState(nextState: InteractiveState = clearThread(this.state)): void {
+    this.resetConversationScope(nextState)
     this.catalogFeature.reset({}, this.featureContext)
   }
   private hasCapability(capability: string): boolean {

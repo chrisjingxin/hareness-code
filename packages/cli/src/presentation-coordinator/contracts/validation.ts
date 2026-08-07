@@ -148,10 +148,16 @@ function isInteractiveIntent(value: unknown): value is InteractiveIntent {
   switch (type) {
     case "input.submit":
       return exactFields(value, ["type", "value"]) && isString(value.value, 64 * 1024)
-    case "command.execute":
-      return exactFields(value, ["type", "commandId", "argument"])
+    case "command.execute": {
+      // argument 与类型契约（InteractiveIntent.command.execute.argument?）一致为可选；
+      // 键必须是 type/commandId/argument 子集且不得带未知键（长度 2 或 3）。
+      const keys = Object.keys(value)
+      const knownKeys = keys.every(key => key === "type" || key === "commandId" || key === "argument")
+      return knownKeys
+        && (keys.length === 2 || keys.length === 3)
         && isNonEmptyString(value.commandId, 128)
         && (value.argument === undefined || isString(value.argument, 64 * 1024))
+    }
     case "run.cancel":
       return exactFields(value, ["type"])
     case "catalog.refresh":

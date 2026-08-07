@@ -607,11 +607,55 @@ test("model-select accepted 后关闭 Dock 并清除 submitting", async () => {
   expect(snapshot.panelSearch.models.submitting).toBe(false)
 })
 
-test("thread-new rejected 时显示 transient notice", async () => {
+test("thread-new 只发射 command.execute(thread.new)，不触发退出/归还", async () => {
+  const { adapter, client } = makeAdapter()
+  client.nextOutcome = { status: "accepted" }
+  await adapter.dispatch({ type: "thread-new" })
+  // 发射形状精确固化：不带 argument（与网关帧校验的契约一致）。
+  expect(client.intents).toEqual([{ type: "command.execute", commandId: "thread.new" }])
+  expect(client.exitCalls).toBe(0)
+  expect(client.returnCalls).toBe(0)
+})
+
+test("thread-new 成功后清空本地 Thread 级状态并请求 composer 聚焦", async () => {
+  const { adapter, client } = makeAdapter()
+  await adapter.dispatch({ type: "draft-change", value: "草稿内容" })
+  await adapter.dispatch({ type: "command-menu-open" })
+  await adapter.dispatch({ type: "tool-toggle", runId: "r-1", toolId: "t-1" })
+  client.nextOutcome = { status: "accepted" }
+  await adapter.dispatch({ type: "thread-new" })
+  const snapshot = adapter.getSnapshot()
+  expect(snapshot.draft).toBe("")
+  expect(snapshot.commandMenuOpen).toBe(false)
+  expect(snapshot.expandedTools.size).toBe(0)
+  expect(snapshot.threadNewSubmitting).toBe(false)
+  expect(snapshot.composerFocusRequest).toBe(1)
+})
+
+test("thread-new 提交中防重复：第二次点击不发射新 intent", async () => {
+  const { adapter, client } = makeAdapter()
+  let resolveOutcome!: (outcome: IntentOutcome) => void
+  client.submitIntent = (intent: InteractiveIntent) => {
+    client.intents.push(intent)
+    return new Promise<IntentOutcome>(resolve => { resolveOutcome = resolve })
+  }
+  const first = adapter.dispatch({ type: "thread-new" })
+  // 提交中：按钮应禁用（threadNewSubmitting=true），再次点击直接忽略。
+  expect(adapter.getSnapshot().threadNewSubmitting).toBe(true)
+  await adapter.dispatch({ type: "thread-new" })
+  expect(client.intents).toHaveLength(1)
+  resolveOutcome({ status: "accepted" })
+  await first
+  expect(adapter.getSnapshot().threadNewSubmitting).toBe(false)
+})
+
+test("thread-new rejected 时显示 transient notice 并恢复按钮状态", async () => {
   const { adapter, client } = makeAdapter()
   client.nextOutcome = { status: "rejected", code: "busy", message: "存在未完成交互" }
   await adapter.dispatch({ type: "thread-new" })
-  expect(adapter.getSnapshot().transientNotice).toBe("存在未完成交互")
+  const snapshot = adapter.getSnapshot()
+  expect(snapshot.transientNotice).toBe("存在未完成交互")
+  expect(snapshot.threadNewSubmitting).toBe(false)
 })
 
 test("thread-select rejected 时显示 transient notice", async () => {

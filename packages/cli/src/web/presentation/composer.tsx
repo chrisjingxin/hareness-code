@@ -44,11 +44,17 @@ export function Composer(props: {
   const selectedIndex = clampIndex(snapshot.commandMenuIndex, items.length)
 
   const isComposingRef = useRef(false)
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const [rows, setRows] = useState(COMPOSER_MIN_ROWS)
 
   useEffect(() => {
     setRows(estimateRows(draft))
   }, [draft])
+
+  // 新建 Thread 成功后 Adapter 递增 composerFocusRequest，焦点回到输入框。
+  useEffect(() => {
+    if (snapshot.composerFocusRequest > 0) textareaRef.current?.focus()
+  }, [snapshot.composerFocusRequest])
 
   const handleChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
     dispatch({ type: "draft-change", value: event.target.value })
@@ -102,6 +108,7 @@ export function Composer(props: {
         ) : null}
         <div className="composer-box">
           <textarea
+            ref={textareaRef}
             className="composer-textarea"
             rows={rows}
             value={draft}

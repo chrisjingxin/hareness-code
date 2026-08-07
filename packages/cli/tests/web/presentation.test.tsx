@@ -71,6 +71,8 @@ function adapterSnapshot(interactive: InteractiveSnapshot, overrides: Partial<We
     expandedTools: new Set<string>(),
     interactionDraft: null,
     leaving: false,
+    threadNewSubmitting: false,
+    composerFocusRequest: 0,
     transientNotice: null,
     scrollRequest: null,
     confirmationId: null,

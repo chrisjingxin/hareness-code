@@ -205,10 +205,14 @@ test("interactive.intent：各 type 的最小字段校验", () => {
   // input.submit value 非 string / 缺失
   expect(parseClientFrame(frame({ type: "input.submit", value: 42 }))).toBeUndefined()
   expect(parseClientFrame(frame({ type: "input.submit" }))).toBeUndefined()
-  // command.execute 缺 commandId / 缺 argument 键 / argument 非 string
-  expect(parseClientFrame(frame({ type: "command.execute", commandId: "clear" }))).toBeUndefined()
-  expect(parseClientFrame(frame({ type: "command.execute", argument: "" }))).toBeUndefined()
+  // command.execute：argument 与类型契约一致为可选；缺 commandId / argument 非 string / 未知键拒绝
+  expect(parseClientFrame(frame({ type: "command.execute", commandId: "clear" }))).not.toBeUndefined()
+  expect(parseClientFrame(frame({ type: "command.execute", commandId: "clear", argument: "" }))).not.toBeUndefined()
+  expect(parseClientFrame(frame({ type: "command.execute", commandId: "clear", argument: "text" }))).not.toBeUndefined()
+  expect(parseClientFrame(frame({ type: "command.execute" }))).toBeUndefined()
+  expect(parseClientFrame(frame({ type: "command.execute", commandId: "", argument: "" }))).toBeUndefined()
   expect(parseClientFrame(frame({ type: "command.execute", commandId: "clear", argument: 42 }))).toBeUndefined()
+  expect(parseClientFrame(frame({ type: "command.execute", commandId: "clear", extra: 1 }))).toBeUndefined()
   // run.cancel 带多余字段
   expect(parseClientFrame(frame({ type: "run.cancel", extra: 1 }))).toBeUndefined()
   // catalog.refresh 未知 catalog

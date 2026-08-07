@@ -243,6 +243,31 @@ test("explorer publish → state.patch 只含 workspaceTree，且不混入 inter
 
 // ---- interactive 意图受理 ---------------------------------------------------
 
+test("command.execute 无 argument（Web adapter 真实发射形状）受理且不触发会话收敛", async () => {
+  const system = createSystem()
+  await flush()
+  const { ch } = await connectAndReady(system)
+  const before = system.controller.getSnapshot().catalogs.threads.items
+
+  // Web adapter thread-new 发射的精确形状：command.execute 不带 argument。
+  sendClient(ch, { type: "interactive.intent", requestId: "new-1", revision: 1, intent: { type: "command.execute", commandId: "thread.new" } })
+  await waitFor(() => ch.sent.some(message => message.type === "intent.outcome" && message.requestId === "new-1"))
+
+  expect(ch.sent.find(message => message.type === "intent.outcome" && message.requestId === "new-1")).toMatchObject({
+    type: "intent.outcome",
+    requestId: "new-1",
+    domain: "interactive",
+    outcome: { status: "accepted" },
+  })
+
+  // 会话未收敛：channel 未被关闭、阶段仍 web-active、回到沉浸式首页。
+  expect(ch.closed).toEqual([])
+  expect(system.coordinator.getSnapshot().phase).toBe("web-active")
+  expect(system.controller.getSnapshot().currentThreadId).toBeNull()
+  // 新建只清 conversation scope，全局 Thread catalog 保留（侧栏历史立即可切回）。
+  expect(system.controller.getSnapshot().catalogs.threads.items).toEqual(before)
+})
+
 test("interactive.intent 受理：intent.outcome 带 domain=interactive 且与 requestId 一一对应", async () => {
   const system = createSystem()
   await flush()

@@ -85,6 +85,20 @@ describe("WorkspaceSidebar", () => {
     }
   })
 
+  test("新建 Thread 提交中（threadNewSubmitting）按钮禁用防重复点击", () => {
+    const intents: WebIntent[] = []
+    const handle = mountSidebar(makeSnapshot({ threadNewSubmitting: true }), intents)
+    try {
+      const newButton = handle.container.querySelector<HTMLButtonElement>(".new-thread-button")
+      expect(newButton?.disabled).toBe(true)
+      expect(newButton?.title).toBe("正在新建…")
+      act(() => { newButton?.click() })
+      expect(intents).toHaveLength(0)
+    } finally {
+      handle.unmount()
+    }
+  })
+
   test("Thread 搜索框渲染且列表展示全部项；Files 分区同屏", () => {
     const interactive = makeInteractive({
       catalogs: {

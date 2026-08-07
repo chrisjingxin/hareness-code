@@ -35,9 +35,9 @@ export function WorkspaceSidebar({
         type="button"
         className="new-thread-button"
         onClick={() => dispatch({ type: "thread-new" })}
-        disabled={disabled || busy}
-        aria-disabled={disabled || busy}
-        title={disabled ? "接管尚未完成或连接不可用" : busy ? "当前任务结束后可用" : "新建 Thread"}
+        disabled={disabled || busy || snapshot.threadNewSubmitting}
+        aria-disabled={disabled || busy || snapshot.threadNewSubmitting}
+        title={disabled ? "接管尚未完成或连接不可用" : busy ? "当前任务结束后可用" : snapshot.threadNewSubmitting ? "正在新建…" : "新建 Thread"}
       >
         <Plus aria-hidden="true" size={14} />
         <span>新建 Thread</span>
