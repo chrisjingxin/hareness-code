@@ -13,8 +13,15 @@ from langchain_core.messages import AIMessage, ToolMessage
 from harness_agent.policy.approval_mode import ApprovalMode
 from harness_agent.policy.auto_mode import evaluate_auto_mode
 from harness_agent.policy.tool_risk import ToolKind, get_tool_kind, get_mode_permission, is_read_only
-from harness_agent.policy.permission_rules import PermissionRule, evaluate_rules
+from harness_agent.policy.permission_rules import (
+    PermissionRule,
+    evaluate_tool_rules,
+    extract_tool_resource,
+)
 from harness_agent.policy.sensitive_paths import requires_safety_check
+from harness_agent.policy.safe_commands import is_safe_command
+from harness_agent.policy.bash_floors import evaluate_safety_floors
+from harness_agent.policy.bash_parser import extract_segments
 
 if TYPE_CHECKING:
     from langchain.agents.middleware.types import ModelRequest, ModelResponse
@@ -231,14 +238,13 @@ class DenyRulesMiddleware(AgentMiddleware[dict[str, Any], ContextT, ResponseT]):
         if not rules:
             return None
 
-        resource = _extract_resource(tool_name, tool_args)
-        effect = evaluate_rules(tool_name, resource, rules)
+        effect = evaluate_tool_rules(tool_name, tool_args, rules)
         if effect == "deny":
             # L2 deny 硬拦截审计：记录拒绝原因，任何模式（包括 yolo）不可覆盖。
             logger.info(
                 "approval_deny source=rule tool=%s resource=%s",
                 tool_name,
-                resource,
+                extract_tool_resource(tool_name, tool_args),
             )
             return ToolMessage(
                 content=f"权限规则拒绝 {tool_name}：该操作已被 deny 规则禁止，不可覆盖。",
@@ -307,7 +313,7 @@ class AutoDestructiveGuardMiddleware(AgentMiddleware[dict[str, Any], ContextT, R
 
         rules = self._rules_provider() if self._rules_provider is not None else []
         if rules:
-            effect = evaluate_rules(tool_name, _extract_resource(tool_name, tool_args), rules)
+            effect = evaluate_tool_rules(tool_name, tool_args, rules)
             # deny 由 DenyRulesMiddleware 统一硬拒绝；allow 规则按设计优先于
             # AUTO 过滤器（用户明确批准的操作不再进入过滤器判断）。
             if effect in ("allow", "deny"):
@@ -401,9 +407,7 @@ class AutoClassifierMiddleware(AgentMiddleware[dict[str, Any], ContextT, Respons
         """判断调用是否会进入 F4：规则和确定性过滤器已裁决的不需要分类。"""
         rules = self._rules_provider() if self._rules_provider is not None else []
         if rules:
-            effect = evaluate_rules(
-                tool_name, _extract_resource(tool_name, tool_args), rules
-            )
+            effect = evaluate_tool_rules(tool_name, tool_args, rules)
             # deny 由 DenyRulesMiddleware 硬拒绝；allow 由预检/守卫处理
             # （敏感路径仍弹窗），两者都不需要分类器参与。
             if effect in ("allow", "deny"):
@@ -510,11 +514,10 @@ def evaluate_permission(
     """
     # L1: 工具风险声明提取
     kind = get_tool_kind(tool_name)
-    resource = _extract_resource(tool_name, tool_args)
 
     # L2: deny 规则硬拦截（任何模式不可覆盖）
     if rules:
-        effect = evaluate_rules(tool_name, resource, rules)
+        effect = evaluate_tool_rules(tool_name, tool_args, rules)
         if effect == "deny":
             return "deny"
 
@@ -522,13 +525,30 @@ def evaluate_permission(
     if is_read_only(tool_name):
         return "allow"
 
+    # L3.1: Shell 安全命令白名单（default 模式下自动放行只读安全的命令）
+    # 仅对 execute 工具生效，且需要检查安全底线。
+    # 链式命令必须逐段判定：任一段不在白名单内则整体不走快速放行，
+    # 防止 "git status && rm -rf /" 这类危险命令借首段白名单逃逸。
+    if tool_name == "execute" and approval_mode == "default":
+        command = str(tool_args.get("command", "")).strip()
+        if command:
+            segments = extract_segments(command)
+            if segments and all(is_safe_command(segment) for segment in segments):
+                # 白名单命中，但仍需检查安全底线
+                floors = evaluate_safety_floors(command)
+                if not floors["any_floor_triggered"]:
+                    return "allow"
+                # 底线触发，强制 ask
+                logger.info("安全命令白名单命中但底线触发: %s", command)
+                return "ask"
+
     # L3.5: 敏感路径 safetyCheck（yolo 免疫）
     if approval_mode != "yolo" and requires_safety_check(tool_name, tool_args):
         return "ask"
 
     # L4: 规则评估（allow/ask 规则，两级优先级）
     if rules:
-        effect = evaluate_rules(tool_name, resource, rules)
+        effect = evaluate_tool_rules(tool_name, tool_args, rules)
         if effect == "allow":
             return "allow"
         if effect == "ask":
@@ -554,20 +574,3 @@ def evaluate_permission(
                 return "deny"
 
     return decision
-
-
-def _extract_resource(tool_name: str, tool_args: dict[str, Any]) -> str:
-    """从工具参数中提取资源标识，用于规则匹配。
-
-    - execute/monitor: 使用 command 参数
-    - write_file/edit_file/delete_file: 使用 file_path 参数
-    - web_fetch: 使用 url 参数
-    - 其他: 使用 "*" 通配
-    """
-    if tool_name in ("execute", "monitor"):
-        return str(tool_args.get("command", "*"))
-    if tool_name in ("write_file", "edit_file", "delete_file", "apply_patch"):
-        return str(tool_args.get("file_path", "*"))
-    if tool_name == "web_fetch":
-        return str(tool_args.get("url", "*"))
-    return "*"

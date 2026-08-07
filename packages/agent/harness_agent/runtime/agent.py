@@ -20,13 +20,15 @@ from harness_agent.policy.approval_policy import (
     AutoDestructiveGuardMiddleware,
     DenyRulesMiddleware,
     PlanModeMiddleware,
-    _extract_resource,
     approval_mode_prompt,
     interrupt_on_for_approval_mode,
 )
 from harness_agent.policy.auto_mode import evaluate_auto_mode
-from harness_agent.policy.permission_rules import PermissionRule, evaluate_rules
+from harness_agent.policy.permission_rules import PermissionRule, evaluate_tool_rules
 from harness_agent.policy.sensitive_paths import requires_safety_check
+from harness_agent.policy.safe_commands import is_safe_command
+from harness_agent.policy.bash_floors import evaluate_safety_floors
+from harness_agent.policy.bash_parser import extract_segments
 from harness_agent.policy.tool_risk import ToolKind, get_tool_kind
 from harness_agent.policy.workspace_boundary import resolve_outside_workspace_write
 from harness_agent.threads.prompting import (
@@ -497,7 +499,7 @@ def _make_approval_preflight(
 
         rules = rules_provider() if rules_provider is not None else []
         effect = (
-            evaluate_rules(tool_name, _extract_resource(tool_name, tool_args), rules)
+            evaluate_tool_rules(tool_name, tool_args, rules)
             if rules
             else None
         )
@@ -510,9 +512,23 @@ def _make_approval_preflight(
         sensitive = requires_safety_check(tool_name, tool_args)
 
         # L4：allow 规则命中通常跳过审批；
-        # 但 L3.5 敏感路径即使命中 allow 规则也必须弹窗确认。
+        # 但 L3.5 敏感路径即使命中 allow 规则也必须弹窗确认；
+        # 工作区外写入同样强制弹窗，由用户确认越界行为。
         if effect == "allow":
-            return sensitive
+            return sensitive or outside_write
+
+        # L3.1：Shell 安全命令白名单（default 模式下自动放行只读安全的命令）。
+        # 预检阶段直接跳过审批弹窗，与 evaluate_permission 的 L3.1 逻辑保持一致。
+        # 链式命令逐段判定：任一段不在白名单内则不跳过审批。
+        if tool_name == "execute" and approval_mode == "default":
+            command = str(tool_args.get("command", "")).strip()
+            if command:
+                segments = extract_segments(command)
+                if segments and all(is_safe_command(segment) for segment in segments):
+                    floors = evaluate_safety_floors(command)
+                    if not floors["any_floor_triggered"]:
+                        return False
+                    logger.info("安全命令白名单命中但底线触发，强制审批: %s", command)
 
         # L5 auto 模式：进入四层过滤器（设计规定 ask 规则命中同样进入过滤器）。
         if approval_mode == "auto":
