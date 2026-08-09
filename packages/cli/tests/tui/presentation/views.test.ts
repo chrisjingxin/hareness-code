@@ -36,6 +36,7 @@ function snapshotOf(state: InteractiveState): InteractiveSnapshot {
     activeRun: state.activeRun,
     timeline: state.timeline,
     runProgress: state.runProgress,
+    reasoning: state.reasoning,
     interaction: null,
     confirmation: null,
     lastRun: state.lastRun ?? null,
@@ -312,6 +313,49 @@ test("TUI 运行期间显示事实阶段、活动时长和取消提示", async (
     expect(frame).toContain("等待模型响应")
     expect(frame).toContain("已运行")
     expect(frame).toContain("Esc 取消")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("TUI 运行期间显示思考中状态与思考文本", async () => {
+  const run = { threadId: "thread-reasoning", runId: "run-reasoning" }
+  const started = startRun(createInitialState(), run, "检查")
+  const state: InteractiveState = {
+    ...started,
+    reasoning: { text: "正在检查代码路径", active: true },
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(ThreadView, viewProps(snapshotOf(state), 100, 40)), { width: 100, height: 40 })
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("思考中")
+    expect(frame).toContain("正在检查代码路径")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("TUI 思考段冻结后显示折叠头与展开提示", async () => {
+  const run = { threadId: "thread-reasoning", runId: "run-reasoning" }
+  const started = startRun(createInitialState(), run, "检查")
+  const state: InteractiveState = {
+    ...started,
+    reasoning: { text: "第一行思考\n后续细节", active: false },
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(ThreadView, viewProps(snapshotOf(state), 100, 40)), { width: 100, height: 40 })
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("思考")
+    expect(frame).toContain("展开")
+    expect(frame).toContain("第一行思考")
   } finally {
     await act(async () => { setup.renderer.destroy() })
   }

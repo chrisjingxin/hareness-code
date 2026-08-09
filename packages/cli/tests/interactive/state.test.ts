@@ -46,6 +46,26 @@ test("运行进度只存在于当前 Run，并在终态清理", () => {
   expect(state.runProgress).toBeNull()
 })
 
+test("思考增量累积、正文冻结并在终态清理", () => {
+  let state = startRun(createInitialState(), run, "检查代码")
+  state = applyAgentEvent(state, event("reasoning.delta", 1, { text: "正在" }))
+  expect(state.reasoning).toEqual({ text: "正在", active: true })
+  state = applyAgentEvent(state, event("reasoning.delta", 2, { text: "检查" }))
+  expect(state.reasoning).toEqual({ text: "正在检查", active: true })
+  // 正文到达：思考段冻结（文本保留，不再流式）
+  state = applyAgentEvent(state, event("content.delta", 3, { text: "结论" }))
+  expect(state.reasoning).toEqual({ text: "正在检查", active: false })
+  // 新一轮思考：重置为新段
+  state = applyAgentEvent(state, event("reasoning.delta", 4, { text: "再次" }))
+  expect(state.reasoning).toEqual({ text: "再次", active: true })
+  // 工具开始也冻结思考段
+  state = applyAgentEvent(state, event("tool.started", 5, { tool_call_id: "t-1", name: "execute" }))
+  expect(state.reasoning).toEqual({ text: "再次", active: false })
+  // 终态清理
+  state = applyAgentEvent(state, event("run.completed", 6, { duration_ms: 200, usage: { input_tokens: 1, output_tokens: 1 } }))
+  expect(state.reasoning).toBeNull()
+})
+
 test("skill.loaded 事件加入可追踪的系统时间线项", () => {
   let state = startRun(createInitialState(), run, "检查变更")
   state = applyAgentEvent(state, event("skill.loaded", 1, {

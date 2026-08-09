@@ -1,7 +1,7 @@
 /** Thread 消息、工具和 Interaction 的统一时间线。 */
 
 import { type ScrollBoxRenderable } from "@opentui/core"
-import { type RefObject } from "react"
+import { type RefObject, useState } from "react"
 
 import type { ConversationMessage, InteractionCard, TimelineItem, ToolCard } from "../../interactive/state"
 import type { InteractiveSnapshot } from "../../interactive/types"
@@ -42,6 +42,7 @@ export function ConversationTimeline(props: {
           onQuestion={props.onQuestion}
         />
       ))}
+      <ReasoningBlock interactive={props.interactive} />
       <TimelineActivity interactive={props.interactive} />
       <RunSummary interactive={props.interactive} modelName={props.modelName} />
       {props.transientNotice ? <TransientNotice key={props.transientNotice.id} message={props.transientNotice.message} /> : null}
@@ -157,6 +158,28 @@ function ToolRow(props: { tool: ToolCard; expanded: boolean; onToggle: () => voi
           </box>
         ) : null}
         {output ? <text content={output} fg={tuiTheme.muted} /> : null}
+      </box>
+    </box>
+  )
+}
+
+/** 运行期思考块：流式中显示 spinner+内容，冻结后折叠为可展开摘要头。 */
+function ReasoningBlock(props: { interactive: InteractiveSnapshot }) {
+  const reasoning = props.interactive.reasoning
+  const [expanded, setExpanded] = useState(false)
+  const frame = useSpinner(Boolean(reasoning?.active), 80)
+  if (!reasoning) return null
+  const firstLine = reasoning.text.split("\n")[0] ?? ""
+  const showFull = expanded || reasoning.active
+  return (
+    <box marginTop={1} marginLeft={3} marginRight={3} border={["left"]} borderColor={tuiTheme.primarySoft} customBorderChars={PROMPT_BORDER}>
+      <box backgroundColor={tuiTheme.toolSurface} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1} onMouseUp={() => setExpanded(current => !current)}>
+        <box flexDirection="row" gap={1}>
+          {reasoning.active ? <text fg={tuiTheme.warning}>{frame}</text> : <text fg={tuiTheme.primary}>◆</text>}
+          <text fg={tuiTheme.primary}>{reasoning.active ? "思考中" : "思考"}</text>
+          {reasoning.active ? null : <text fg={tuiTheme.muted}>{expanded ? "收起" : "展开"}</text>}
+        </box>
+        {showFull ? <text content={reasoning.text} fg={tuiTheme.muted} /> : <text content={firstLine} fg={tuiTheme.muted} />}
       </box>
     </box>
   )

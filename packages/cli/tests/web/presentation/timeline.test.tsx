@@ -240,4 +240,46 @@ describe("Timeline", () => {
       handle.unmount()
     }
   })
+
+  test("流式思考中显示思考状态与文本", () => {
+    const interactive = makeInteractive({
+      activeRun: { threadId: "thread-1", runId: "run-1" },
+      activity: { kind: "running" },
+      reasoning: { text: "正在检查代码路径", active: true },
+    })
+    const handle = render(
+      <Timeline snapshot={makeSnapshot({ interactive })} dispatch={() => {}} />,
+    )
+    try {
+      const reasoning = handle.container.querySelector(".reasoning")
+      expect(reasoning?.getAttribute("role")).toBe("status")
+      expect(reasoning?.getAttribute("aria-live")).toBe("polite")
+      expect(reasoning?.getAttribute("data-active")).toBe("true")
+      expect(reasoning?.textContent).toContain("思考中")
+      expect(reasoning?.textContent).toContain("正在检查代码路径")
+    } finally {
+      handle.unmount()
+    }
+  })
+
+  test("思考段冻结后折叠为标题与展开按钮", () => {
+    const interactive = makeInteractive({
+      activeRun: { threadId: "thread-1", runId: "run-1" },
+      activity: { kind: "running" },
+      reasoning: { text: "第一行思考\n后续细节", active: false },
+    })
+    const handle = render(
+      <Timeline snapshot={makeSnapshot({ interactive })} dispatch={() => {}} />,
+    )
+    try {
+      const reasoning = handle.container.querySelector(".reasoning")
+      expect(reasoning?.getAttribute("data-active")).toBe("false")
+      expect(reasoning?.textContent).toContain("思考")
+      expect(reasoning?.querySelector(".reasoning-toggle")?.textContent).toBe("展开")
+      expect(reasoning?.textContent).toContain("第一行思考")
+      expect(reasoning?.textContent).not.toContain("后续细节")
+    } finally {
+      handle.unmount()
+    }
+  })
 })

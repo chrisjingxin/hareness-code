@@ -1016,3 +1016,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .file-tree::-webkit-scrollbar-track,
 .file-tabs::-webkit-scrollbar-track,
 .file-code-view::-webkit-scrollbar-track { background: transparent; }
+
+/* 运行期思考块：与 Tool 卡同宽，默认折叠为标题行，流式中展示全文。 */
+.reasoning { margin: 12px 0 0 37px; padding: 10px 12px; border-left: 2px solid var(--accent-border-strong); border-radius: 0 var(--radius-control) var(--radius-control) 0; background: var(--surface-raised); }
+.reasoning-header { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.reasoning-dot { color: var(--accent-strong); font-size: 12px; }
+.reasoning-title { color: var(--accent-strong); font-size: 12px; font-weight: 650; }
+.reasoning-toggle { margin-left: auto; padding: 2px 8px; border: 1px solid var(--border-control); border-radius: var(--radius-control); background: transparent; color: var(--text-secondary); font-size: 12px; cursor: pointer; }
+.reasoning-toggle:hover { border-color: var(--accent-border-strong); color: var(--text-primary); }
+.reasoning-text { margin-top: 5px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-secondary); font-size: 13px; }

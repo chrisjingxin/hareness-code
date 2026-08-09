@@ -9,10 +9,10 @@ import type {
 
 import type { CommandMenuItem, SkillMenuItem } from "./commands"
 import type { InteractiveRuntime } from "./runtime"
-import type { InteractiveActivity, ActiveRun, RunProgress, RunSummary, TimelineItem } from "./state"
+import type { InteractiveActivity, ActiveRun, ReasoningState, RunProgress, RunSummary, TimelineItem } from "./state"
 import type { AgentGateway, Clock, IdGenerator, Scheduler } from "./ports"
 
-export type { ActiveRun, InteractiveActivity, InteractiveRuntime, RunProgress, RunSummary, TimelineItem }
+export type { ActiveRun, InteractiveActivity, InteractiveRuntime, ReasoningState, RunProgress, RunSummary, TimelineItem }
 
 /** 审批决定类型，与协议 ApprovalResponse.decision 保持一致。 */
 export type ApprovalDecision = "approve_once" | "approve_thread" | "approve_project" | "reject" | "reject_with_feedback"
@@ -132,6 +132,7 @@ export type InteractiveSnapshot = {
   readonly activeRun: ActiveRun | null
   readonly timeline: readonly TimelineItem[]
   readonly runProgress: RunProgress | null
+  readonly reasoning: ReasoningState | null
   readonly interaction: InteractiveInteraction | null
   readonly confirmation: InteractiveConfirmation | null
   readonly lastRun: RunSummary | null

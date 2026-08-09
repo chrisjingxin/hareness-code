@@ -60,6 +60,12 @@ export type RunProgress = {
   elapsedMs: number
 }
 
+/** 当前 Run 的思考文本与流式状态；仅运行期可见，不进入 Timeline 或历史。 */
+export type ReasoningState = {
+  text: string
+  active: boolean
+}
+
 export type RestoredThreadMessage = {
   kind: "user" | "assistant" | "tool"
   content: string
@@ -93,6 +99,8 @@ export type InteractiveState = {
   activity: InteractiveActivity
   /** 仅当前 Run 可见的事实进度，不进入 Timeline 或 Thread 历史。 */
   runProgress: RunProgress | null
+  /** 仅当前 Run 可见的思考文本，不进入 Timeline 或 Thread 历史。 */
+  reasoning: ReasoningState | null
   lastRun?: RunSummary
   sequences: Record<string, number>
 }
@@ -105,6 +113,7 @@ export function createInitialState(threadId: string | null = null): InteractiveS
     timeline: [],
     activity: { kind: threadId ? "idle" : "home" },
     runProgress: null,
+    reasoning: null,
     sequences: {},
   }
 }
@@ -125,6 +134,7 @@ export function startRun(state: InteractiveState, run: ActiveRun, prompt: string
     lastRun: undefined,
     activity: { kind: "starting" },
     runProgress: { phase: "preparing", elapsedMs: 0 },
+    reasoning: null,
     timeline: [
       ...state.timeline,
       { type: "message", message: { id: `user-${run.runId}`, role: "user", content: prompt, runId: run.runId } },
@@ -181,6 +191,7 @@ export function restoreThread(threadId: string, messages: readonly RestoredThrea
     // 恢复已完成（timeline 已构建）：活动状态必须是 idle，不得停在 restoring。
     activity: { kind: "idle" },
     runProgress: null,
+    reasoning: null,
     sequences: {},
   }
 }
@@ -270,6 +281,7 @@ export function markRunFailed(state: InteractiveState, runId: string, message: s
     activeRun: null,
     activity: { kind: "failed" },
     runProgress: null,
+    reasoning: null,
     lastRun: { runId, outcome: "failed" },
     timeline: finishAssistant(settlePendingInteractions(state.timeline, runId), runId, `error: ${message}`, idGenerator),
   }
@@ -318,14 +330,28 @@ export function applyAgentEvent(state: InteractiveState, event: EventEnvelope, i
     case EventType.CONTENT_DELTA: {
       const payload = event.payload
       return typeof payload.text === "string"
-        ? { ...next, timeline: appendAssistantDelta(next.timeline, runId, payload.text, idGenerator), activity: { kind: "running" } }
+        ? { ...next, timeline: appendAssistantDelta(next.timeline, runId, payload.text, idGenerator), activity: { kind: "running" }, reasoning: freezeReasoning(next.reasoning) }
         : next
+    }
+    case EventType.REASONING_DELTA: {
+      const payload = event.payload
+      const text = payloadText(payload.text)
+      if (!text) return next
+      const previous = next.reasoning
+      // 新思考段开始（此前无思考或上一段已被正文/工具冻结）时重置文本。
+      const startNewSegment = previous === null || !previous.active
+      return {
+        ...next,
+        activity: { kind: "running" },
+        reasoning: { text: startNewSegment ? text : `${previous.text}${text}`, active: true },
+      }
     }
     case EventType.TOOL_STARTED: {
       const payload = event.payload
       return {
         ...next,
         activity: { kind: "running" },
+        reasoning: freezeReasoning(next.reasoning),
         timeline: updateTool(next.timeline, {
           id: stringValue(payload.tool_call_id, `tool-${runId}`),
           runId,
@@ -378,6 +404,7 @@ export function applyAgentEvent(state: InteractiveState, event: EventEnvelope, i
         activeRun: null,
         activity: { kind: "completed" },
         runProgress: null,
+        reasoning: null,
         lastRun: {
           runId,
           outcome: "completed",
@@ -395,6 +422,7 @@ export function applyAgentEvent(state: InteractiveState, event: EventEnvelope, i
         activeRun: null,
         activity: { kind: "cancelled" },
         runProgress: null,
+        reasoning: null,
         lastRun: { runId, outcome: "cancelled" },
         timeline: finishAssistant(settlePendingInteractions(next.timeline, runId), runId, `cancelled: ${stringValue(payload.reason, "user cancelled")}`, idGenerator),
       }
@@ -566,6 +594,14 @@ function contextNotice(payload: Record<string, unknown>): string {
 
 function stringValue(value: unknown, fallback: string): string {
   return typeof value === "string" && value.trim() ? value : fallback
+}
+
+function payloadText(value: unknown): string {
+  return typeof value === "string" ? value : ""
+}
+
+function freezeReasoning(reasoning: ReasoningState | null): ReasoningState | null {
+  return reasoning === null ? null : { ...reasoning, active: false }
 }
 
 function numberValue(value: unknown): number | undefined {

@@ -50,6 +50,71 @@ class _OpenAIStreamingHandler(BaseHTTPRequestHandler):
         pass
 
 
+class _ReasoningStreamingHandler(BaseHTTPRequestHandler):
+    """模拟 DeepSeek/MiMo 风格：流式 delta 携带 reasoning_content。"""
+
+    requests: list[dict[str, Any]] = []
+
+    def do_POST(self) -> None:  # noqa: N802
+        payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+        self.requests.append(payload)
+        chunks = [
+            {"id": "mock", "object": "chat.completion.chunk", "created": 0, "model": "mock",
+             "choices": [{"index": 0, "delta": {"role": "assistant", "content": "", "reasoning_content": "正在"}, "finish_reason": None}]},
+            {"id": "mock", "object": "chat.completion.chunk", "created": 0, "model": "mock",
+             "choices": [{"index": 0, "delta": {"content": None, "reasoning_content": "思考"}, "finish_reason": None}]},
+            {"id": "mock", "object": "chat.completion.chunk", "created": 0, "model": "mock",
+             "choices": [{"index": 0, "delta": {"content": "结论", "reasoning_content": None}, "finish_reason": None}]},
+            {"id": "mock", "object": "chat.completion.chunk", "created": 0, "model": "mock",
+             "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+             "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}},
+        ]
+        encoded = ("".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks) + "data: [DONE]\n\n").encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def log_message(self, *_: object) -> None:
+        pass
+
+
+@pytest.mark.e2e
+async def test_openai_compatible_stream_keeps_reasoning_content(monkeypatch: pytest.MonkeyPatch):
+    """raw SSE 解析必须把 reasoning_content 注入 additional_kwargs。"""
+    if os.environ.get("HARNESS_RUN_LOOPBACK_E2E") != "1":
+        pytest.skip("Set HARNESS_RUN_LOOPBACK_E2E=1 to run loopback gateway coverage")
+    _ReasoningStreamingHandler.requests = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _ReasoningStreamingHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv("HARNESS_TEST_KEY", "test-key")
+    try:
+        model = create_openai_compatible_model(
+            ModelSettings(
+                name="mock",
+                base_url=f"http://127.0.0.1:{server.server_port}/v1",
+                api_key_env="HARNESS_TEST_KEY",
+            )
+        )
+        reasoning_parts: list[str] = []
+        text_parts: list[str] = []
+        async for chunk in model.astream([HumanMessage(content="hi")]):
+            reasoning = chunk.additional_kwargs.get("reasoning_content")
+            if isinstance(reasoning, str) and reasoning:
+                reasoning_parts.append(reasoning)
+            if chunk.text:
+                text_parts.append(chunk.text)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert reasoning_parts == ["正在", "思考"], reasoning_parts
+    assert "".join(text_parts) == "结论"
+    assert _ReasoningStreamingHandler.requests[0]["stream"] is True
+
+
 @pytest.mark.e2e
 async def test_openai_compatible_agent_streams_against_mock_gateway(monkeypatch: pytest.MonkeyPatch):
     if os.environ.get("HARNESS_RUN_LOOPBACK_E2E") != "1":

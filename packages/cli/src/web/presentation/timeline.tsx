@@ -50,6 +50,10 @@ export function Timeline({
   const isNearBottomRef = useRef<boolean>(true)
   const lastScrollRequestRef = useRef<WebScrollRequest>(null)
   const [showScrollButton, setShowScrollButton] = useState(false)
+  const [reasoningExpanded, setReasoningExpanded] = useState(false)
+  const handleToggleReasoning = useCallback(() => {
+    setReasoningExpanded(current => !current)
+  }, [])
   const activeRun = snapshot.interactive.activeRun
   const baseElapsedMs = snapshot.interactive.runProgress?.elapsedMs
   const elapsedMs = useLiveElapsed(Boolean(activeRun), baseElapsedMs)
@@ -136,6 +140,28 @@ export function Timeline({
         ))
       )}
       <div className="live-interaction-slot" data-pending-request-id={pendingRequestId ?? undefined} />
+      {activeRun && snapshot.interactive.reasoning ? (
+        <div className="reasoning" role="status" aria-live="polite" data-active={snapshot.interactive.reasoning.active}>
+          <div className="reasoning-header" onClick={handleToggleReasoning}>
+            {snapshot.interactive.reasoning.active ? (
+              <Loader2 aria-hidden="true" focusable="false" className="run-progress-spinner spinning" />
+            ) : (
+              <span className="reasoning-dot" aria-hidden="true">◆</span>
+            )}
+            <span className="reasoning-title">{snapshot.interactive.reasoning.active ? "思考中" : "思考"}</span>
+            {snapshot.interactive.reasoning.active ? null : (
+              <button type="button" className="reasoning-toggle" onClick={handleToggleReasoning}>
+                {reasoningExpanded ? "收起" : "展开"}
+              </button>
+            )}
+          </div>
+          <div className="reasoning-text">
+            {reasoningExpanded || snapshot.interactive.reasoning.active
+              ? snapshot.interactive.reasoning.text
+              : firstLine(snapshot.interactive.reasoning.text)}
+          </div>
+        </div>
+      ) : null}
       <div className="run-status-live" aria-live="polite">
         {activeRun ? (
           <div
@@ -180,6 +206,12 @@ function useLiveElapsed(active: boolean, baseElapsedMs: number | undefined): num
     return () => window.clearInterval(timer)
   }, [active, baseElapsedMs])
   return elapsedMs
+}
+
+/** 思考文本折叠时只展示首行，减少长推理占用的阅读空间。 */
+function firstLine(text: string): string {
+  const line = text.split("\n")[0] ?? ""
+  return line
 }
 
 /** 生成稳定的 React key：每种 timeline item 用其身份字段，跨 run 也不冲突。 */

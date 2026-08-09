@@ -1,12 +1,12 @@
 /** 此文件由 packages/protocol/schema/v3.json 生成，请勿手工修改。 */
 
 export const PROTOCOL_MAJOR = 3 as const
-export const PROTOCOL_MINOR = 2 as const
-export const PROTOCOL_SCHEMA_SHA256 = "9ba1bd73466e15f91d92f14ab3d0d31ade69de65af3d27b8f0790d16df55f359" as const
+export const PROTOCOL_MINOR = 3 as const
+export const PROTOCOL_SCHEMA_SHA256 = "8edf3a6e8e7b6ba65cc89865f2b3bbd4259716617bc136d9253227ea203ab8d9" as const
 export const MAX_FRAME_BYTES = 8388608 as const
 export const MAX_TOOL_PAYLOAD_BYTES = 1048576 as const
 export const CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","plugins.list","plugins.inspect","plugins.validate","plugins.install","plugins.set_enabled","plugins.remove","agents.list","agents.inspect","teams.list","teams.inspect","teams.generate","teams.run","teams.cancel","mcp.status","mcp.add","mcp.remove","host.attachment.create","host.attachment.revoke","host.control.acquire","host.control.release","host.control.status"] as const
-export const EVENT_TYPES = ["run.started","run.progress","skill.loaded","content.delta","tool.started","tool.delta","tool.completed","context.updated","interaction.resolved","run.completed","run.cancelled","run.failed"] as const
+export const EVENT_TYPES = ["run.started","run.progress","skill.loaded","content.delta","reasoning.delta","tool.started","tool.delta","tool.completed","context.updated","interaction.resolved","run.completed","run.cancelled","run.failed"] as const
 export const INTERACTION_METHODS = ["interaction.approval","interaction.question"] as const
 export const SERVER_CAPABILITIES = ["run.cancel","run.multithread","host.control","config.read","config.write","threads.read","context.manage","skills.read","skills.manage","mcp.read","mcp.manage","plugins.read","plugins.manage","agents.read","teams.read","teams.manage","models.read","models.select","host.attach"] as const
 export const OPERATION_CAPABILITIES = {"initialize":null,"run.start":null,"run.cancel":"run.cancel","context.compact":"context.manage","config.show":"config.read","config.path":"config.read","config.details":"config.write","config.preview":"config.write","config.commit":"config.write","threads.list":"threads.read","threads.open":"threads.read","threads.watch":"threads.read","threads.unwatch":"threads.read","models.list":"models.read","skills.list":"skills.read","skills.inspect":"skills.read","skills.set_enabled":"skills.manage","skills.install":"skills.manage","skills.update":"skills.manage","skills.remove":"skills.manage","skills.market.list":"skills.read","plugins.list":"plugins.read","plugins.inspect":"plugins.read","plugins.validate":"plugins.read","plugins.install":"plugins.manage","plugins.set_enabled":"plugins.manage","plugins.remove":"plugins.manage","agents.list":"agents.read","agents.inspect":"agents.read","teams.list":"teams.read","teams.inspect":"teams.read","teams.generate":"teams.manage","teams.run":"teams.manage","teams.cancel":"teams.manage","mcp.status":"mcp.read","mcp.add":"mcp.manage","mcp.remove":"mcp.manage","host.attachment.create":"host.attach","host.attachment.revoke":"host.attach","host.control.acquire":"host.control","host.control.release":"host.control","host.control.status":"host.control"} as const
@@ -15,7 +15,7 @@ export const INTERACTION_HANDLES = {"interaction.approval":"approval","interacti
 export const ERROR_CODES = {"CONTROL_NOT_HOLDER":{"jsonrpcCode":-32008,"retryable":true},"CONTROL_BUSY":{"jsonrpcCode":-32008,"retryable":true},"CONTROL_RELEASE_BLOCKED":{"jsonrpcCode":-32008,"retryable":true},"ATTACHMENT_NOT_FOUND":{"jsonrpcCode":-32009,"retryable":false},"ATTACHMENT_NOT_ACTIVE":{"jsonrpcCode":-32009,"retryable":false},"CONNECTION_RUN_BUSY":{"jsonrpcCode":-32000,"retryable":true}} as const
 export type ErrorCode = keyof typeof ERROR_CODES
 export const Capability = {"RUN_CANCEL":"run.cancel","RUN_MULTITHREAD":"run.multithread","HOST_CONTROL":"host.control","CONFIG_READ":"config.read","CONFIG_WRITE":"config.write","THREADS_READ":"threads.read","CONTEXT_MANAGE":"context.manage","SKILLS_READ":"skills.read","SKILLS_MANAGE":"skills.manage","MCP_READ":"mcp.read","MCP_MANAGE":"mcp.manage","PLUGINS_READ":"plugins.read","PLUGINS_MANAGE":"plugins.manage","AGENTS_READ":"agents.read","TEAMS_READ":"teams.read","TEAMS_MANAGE":"teams.manage","MODELS_READ":"models.read","MODELS_SELECT":"models.select","HOST_ATTACH":"host.attach"} as const
-export const EventType = {"RUN_STARTED":"run.started","RUN_PROGRESS":"run.progress","SKILL_LOADED":"skill.loaded","CONTENT_DELTA":"content.delta","TOOL_STARTED":"tool.started","TOOL_DELTA":"tool.delta","TOOL_COMPLETED":"tool.completed","CONTEXT_UPDATED":"context.updated","INTERACTION_RESOLVED":"interaction.resolved","RUN_COMPLETED":"run.completed","RUN_CANCELLED":"run.cancelled","RUN_FAILED":"run.failed"} as const
+export const EventType = {"RUN_STARTED":"run.started","RUN_PROGRESS":"run.progress","SKILL_LOADED":"skill.loaded","CONTENT_DELTA":"content.delta","REASONING_DELTA":"reasoning.delta","TOOL_STARTED":"tool.started","TOOL_DELTA":"tool.delta","TOOL_COMPLETED":"tool.completed","CONTEXT_UPDATED":"context.updated","INTERACTION_RESOLVED":"interaction.resolved","RUN_COMPLETED":"run.completed","RUN_CANCELLED":"run.cancelled","RUN_FAILED":"run.failed"} as const
 
 export const Method = {
   INITIALIZE: "initialize",
@@ -155,6 +155,7 @@ export type RunStartedPayload = { "resumed": boolean; "skills_snapshot_id"?: str
 export type RunProgressPayload = { "phase": "preparing" | "model"; "elapsed_ms": number }
 export type SkillLoadedPayload = { "skill_id": string; "source": string; "version": string | null; "snapshot_id": string }
 export type ContentDeltaPayload = { "text": string }
+export type ReasoningDeltaPayload = { "text": string }
 export type ToolStartedPayload = { "tool_call_id": string; "name": string }
 export type ToolDeltaPayload = { "tool_call_id": string; "arguments_delta"?: string; "output_delta"?: string; "truncated"?: boolean; "original_bytes"?: number }
 export type ToolResult = { "content": string; "is_error": boolean; "truncated": boolean; "original_bytes": number }
@@ -273,6 +274,7 @@ export type AgentEvent =
   | AgentEventOf<"run.progress", RunProgressPayload>
   | AgentEventOf<"skill.loaded", SkillLoadedPayload>
   | AgentEventOf<"content.delta", ContentDeltaPayload>
+  | AgentEventOf<"reasoning.delta", ReasoningDeltaPayload>
   | AgentEventOf<"tool.started", ToolStartedPayload>
   | AgentEventOf<"tool.delta", ToolDeltaPayload>
   | AgentEventOf<"tool.completed", ToolCompletedPayload>

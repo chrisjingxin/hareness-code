@@ -384,8 +384,8 @@ def test_reasoning_content_is_not_captured_as_transcript_content() -> None:
     assert run.pending_transcript == []
 
 
-def test_reasoning_only_chunk_emits_safe_progress_without_raw_reasoning() -> None:
-    """reasoning-only 不能静默丢失，也不能把原始 reasoning 当作正文。"""
+def test_reasoning_only_chunk_emits_reasoning_delta_without_content() -> None:
+    """reasoning-only chunk 产生 reasoning.delta，原始思维不进入正文。"""
     run = RunState(
         start=StartRun(thread_id="thread-reasoning", run_id="run-reasoning", message="检查"),
         owner=ConnectionRef("owner"),
@@ -396,13 +396,13 @@ def test_reasoning_only_chunk_emits_safe_progress_without_raw_reasoning() -> Non
 
     events = list(_translate_stream_event(("messages", (chunk, {})), run))
 
-    assert [event_type for event_type, _ in events] == ["run.progress"]
-    assert "正在检查代码路径" not in str(events)
+    assert [event_type for event_type, _ in events] == ["reasoning.delta"]
+    assert events[0][1] == {"text": "正在检查代码路径"}
     assert _message_text(chunk) == ""
 
 
-def test_chat_completions_reasoning_content_emits_progress_only() -> None:
-    """Chat Completions 的非标准 reasoning_content 不能被当作公开摘要。"""
+def test_chat_completions_reasoning_content_emits_reasoning_delta() -> None:
+    """Chat Completions 的 reasoning_content 产生独立 reasoning.delta。"""
     run = RunState(
         start=StartRun(thread_id="thread-completions-reasoning", run_id="run-completions-reasoning", message="检查"),
         owner=ConnectionRef("owner"),
@@ -411,17 +411,18 @@ def test_chat_completions_reasoning_content_emits_progress_only() -> None:
     )
     chunk = AIMessageChunk(
         content="",
-        additional_kwargs={"reasoning_content": "内部思考，不应展示"},
+        additional_kwargs={"reasoning_content": "正在检查代码路径"},
     )
 
     events = list(_translate_stream_event(("messages", (chunk, {})), run))
 
-    assert [event_type for event_type, _ in events] == ["run.progress"]
-    assert "内部思考，不应展示" not in str(events)
+    assert [event_type for event_type, _ in events] == ["reasoning.delta"]
+    assert events[0][1] == {"text": "正在检查代码路径"}
+    assert _message_text(chunk) == ""
 
 
-def test_reasoning_block_is_not_interpreted_as_public_summary() -> None:
-    """reasoning block 不能被仅支持 Completions 的 Host 解释成公开摘要。"""
+def test_reasoning_block_and_text_emit_separate_deltas() -> None:
+    """reasoning 与正文分别投影为独立增量事件，互不污染。"""
     run = RunState(
         start=StartRun(thread_id="thread-summary", run_id="run-summary", message="检查"),
         owner=ConnectionRef("owner"),
@@ -437,16 +438,17 @@ def test_reasoning_block_is_not_interpreted_as_public_summary() -> None:
 
     events = list(_translate_stream_event(("messages", (chunk, {})), run))
 
-    assert [event_type for event_type, _ in events] == ["content.delta"]
+    assert [event_type for event_type, _ in events] == ["content.delta", "reasoning.delta"]
     assert events[0][1] == {"text": "结论"}
+    assert events[1][1] == {"text": "内部思考"}
 
 
-def test_unknown_or_encrypted_reasoning_fails_closed() -> None:
-    """无法确认公开边界时只给事实进度，不透传供应商私有字段。"""
-    for content in (
-        [{"type": "reasoning", "reasoning": "secret", "encrypted_content": "secret"}],
-        [{"type": "reasoning", "reasoning": "私有", "reasoning_details": "private"}],
-        [{"type": "reasoning", "reasoning": "公开", "vendor_private": "私有"}],
+def test_reasoning_text_is_shown_but_private_fields_never_leak() -> None:
+    """reasoning 字段文本可显示；加密/供应商私有字段绝不进入事件或正文。"""
+    for content, expected_reasoning in (
+        ([{"type": "reasoning", "reasoning": "检查", "encrypted_content": "secret"}], "检查"),
+        ([{"type": "reasoning", "reasoning": "私有", "reasoning_details": "private"}], "私有"),
+        ([{"type": "reasoning", "reasoning": "公开", "vendor_private": "私有"}], "公开"),
     ):
         run = RunState(
             start=StartRun(thread_id="thread-safe", run_id="run-safe", message="检查"),
@@ -455,9 +457,11 @@ def test_unknown_or_encrypted_reasoning_fails_closed() -> None:
             preparation=RunPreparation(),
         )
         events = list(_translate_stream_event(("messages", (AIMessageChunk(content=content), {})), run))
-        assert [event_type for event_type, _ in events] == ["run.progress"]
+        assert [event_type for event_type, _ in events] == ["reasoning.delta"]
+        assert events[0][1] == {"text": expected_reasoning}
         assert "secret" not in str(events)
-        assert "私有" not in str(events)
+        assert "private" not in str(events)
+        assert "vendor_private" not in str(events)
 
 
 def test_non_string_text_block_is_not_promoted_to_assistant_text() -> None:

@@ -53,6 +53,7 @@ RUN_STARTED = "run.started"
 RUN_PROGRESS = "run.progress"
 SKILL_LOADED = "skill.loaded"
 CONTENT_DELTA = "content.delta"
+REASONING_DELTA = "reasoning.delta"
 TOOL_STARTED = "tool.started"
 TOOL_DELTA = "tool.delta"
 TOOL_COMPLETED = "tool.completed"
@@ -1682,7 +1683,12 @@ def _translate_stream_event(
     content = _message_text(chunk)
     if content and type(chunk).__name__ != "ToolMessage":
         events.append((CONTENT_DELTA, {"text": content}))
-    if (
+    reasoning = _reasoning_text(chunk)
+    if reasoning:
+        # 供应商明确返回的思维内容（如 Chat Completions reasoning_content）。
+        # 只走运行期事件，绝不进入 assistant 正文或 Transcript。
+        events.append((REASONING_DELTA, {"text": reasoning}))
+    elif (
         type(chunk).__name__ in {"AIMessage", "AIMessageChunk"}
         and not content
         and not getattr(chunk, "tool_call_chunks", None)
@@ -1960,6 +1966,36 @@ def _message_text(message: object) -> str:
             )
         )
     return _content_text(content)
+
+
+def _reasoning_text(message: object) -> str:
+    """提取供应商明确返回的思维文本，只用于运行期 reasoning.delta。
+
+    优先读取 Chat Completions 的 ``additional_kwargs.reasoning_content``
+    （由 gateway 适配器在 raw SSE 解析时注入）；其次兼容 content blocks 中
+    ``type=reasoning`` 的 ``text``/``reasoning`` 字段。提取结果不会进入
+    assistant 正文、日志或 Transcript。
+    """
+    kwargs = getattr(message, "additional_kwargs", None)
+    if isinstance(kwargs, dict):
+        value = kwargs.get("reasoning_content")
+        if isinstance(value, str) and value:
+            return value
+    blocks = getattr(message, "content_blocks", None)
+    if not isinstance(blocks, list):
+        blocks = getattr(message, "content", None)
+    if not isinstance(blocks, list):
+        return ""
+    parts: list[str] = []
+    for block in blocks:
+        if not isinstance(block, Mapping) or block.get("type") != "reasoning":
+            continue
+        text = block.get("text")
+        if not isinstance(text, str) or not text:
+            text = block.get("reasoning")
+        if isinstance(text, str) and text:
+            parts.append(text)
+    return "".join(parts)
 
 
 def _has_reasoning_block(message: object) -> bool:
