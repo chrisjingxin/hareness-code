@@ -7,10 +7,10 @@ import { basename, dirname, extname, join, relative, resolve } from "node:path"
 
 const root = resolve(import.meta.dir, "../..")
 
-export const TASK_STATUSES = ["待认领", "进行中", "阻塞", "待验收", "已完成"] as const
+export const TASK_STATUSES = ["待认领", "进行中", "阻塞", "待验收", "已完成", "已过时"] as const
 export const TASK_PRIORITIES = ["P0", "P1", "P2"] as const
 
-const TASK_FIELDS = [
+const REQUIRED_TASK_FIELDS = [
   "id",
   "title",
   "priority",
@@ -26,7 +26,44 @@ const TASK_FIELDS = [
   "completed_at",
 ] as const
 
+const TRACEABILITY_TASK_FIELDS = [
+  "feature_area",
+  "parent_task",
+  "decomposed_by",
+  "reviewed_at",
+  "review_due",
+] as const
+
+const TASK_FIELDS = [
+  "id",
+  "title",
+  "feature_area",
+  "parent_task",
+  "decomposed_by",
+  "priority",
+  "status",
+  "owner",
+  "branch",
+  "reviewed_at",
+  "review_due",
+  "scope",
+  "acceptance",
+  "user_docs",
+  "developer_docs",
+  "test_evidence",
+  "references",
+  "completed_at",
+] as const
+
 type TaskField = typeof TASK_FIELDS[number]
+
+const TRACEABILITY_DEFAULTS: Record<typeof TRACEABILITY_TASK_FIELDS[number], string> = {
+  feature_area: "历史未归类",
+  parent_task: "-",
+  decomposed_by: "历史未记录",
+  reviewed_at: "-",
+  review_due: "-",
+}
 
 export type TaskRecord = {
   file: string
@@ -50,10 +87,13 @@ export function parseTaskDocument(source: string, file: string): TaskRecord {
   }
 
   const metadata = {} as Record<TaskField, string>
-  for (const field of TASK_FIELDS) {
+  for (const field of REQUIRED_TASK_FIELDS) {
     const value = values.get(field)
     if (!value) throw new Error(`${file} 缺少必填元数据：${field}`)
     metadata[field] = value
+  }
+  for (const field of TRACEABILITY_TASK_FIELDS) {
+    metadata[field] = values.get(field) || TRACEABILITY_DEFAULTS[field]
   }
   return { file, metadata, body: match[2] }
 }
@@ -68,6 +108,10 @@ export function validateTask(task: TaskRecord): void {
   if (!TASK_STATUSES.includes(metadata.status as typeof TASK_STATUSES[number])) {
     throw new Error(`${task.file} 的 status 无效：${metadata.status}`)
   }
+  if (metadata.parent_task !== "-" && !/^ZC-\d{3,}$/.test(metadata.parent_task)) {
+    throw new Error(`${task.file} 的 parent_task 必须为任务 ID 或 -`)
+  }
+  validateReviewDates(task)
 
   const claimed = metadata.owner !== "未认领" && metadata.branch !== "-"
   if (metadata.status === "进行中" && !claimed) {
@@ -82,6 +126,11 @@ export function validateTask(task: TaskRecord): void {
     }
     if ([metadata.user_docs, metadata.developer_docs].some(value => !value || value === "待确定")) {
       throw new Error(`${task.file} 已完成任务必须记录用户和开发者文档影响`)
+    }
+  }
+  if (metadata.status === "已过时") {
+    if (metadata.reviewed_at === "-" || metadata.review_due !== "-" || metadata.references === "-") {
+      throw new Error(`${task.file} 已过时任务必须填写 reviewed_at 和替代 references，并清空 review_due`)
     }
   }
 }
@@ -115,8 +164,10 @@ export async function loadTasks(projectRoot = root): Promise<TaskRecord[]> {
 export function renderTaskBoard(tasks: readonly TaskRecord[]): string {
   const rows = tasks.map(task => {
     const value = task.metadata
+    const ownership = `拆解：${value.decomposed_by}<br>认领：${value.owner}`
+    const feature = `板块：${value.feature_area}<br>上层：${value.parent_task}`
     const documentImpact = `用户：${value.user_docs}<br>开发：${value.developer_docs}`
-    return `| ${value.id} | ${value.priority} | ${value.status} | ${escapeTable(value.title)} | ${escapeTable(value.owner)} | ${escapeTable(value.branch)} | ${escapeTable(documentImpact)} |`
+    return `| ${value.id} | ${value.priority} | ${value.status} | ${escapeTable(value.title)} | ${escapeTable(feature)} | ${escapeTable(ownership)} | ${escapeTable(value.branch)} | ${escapeTable(value.review_due)} | ${escapeTable(documentImpact)} |`
   })
   return [
     "<!-- 此文件由 `bun run tasks:sync` 生成，请勿手动编辑。 -->",
@@ -124,9 +175,9 @@ export function renderTaskBoard(tasks: readonly TaskRecord[]): string {
     "",
     "活动任务文件位于 `docs/developer/tasks/`；已完成任务归档于 `docs/developer/tasks/archive/`，不进入看板。认领请使用 `bun run task:claim -- <ID> --owner <名称> --branch <分支>`；完成请使用 `bun run task:complete` 并提供测试证据。",
     "",
-    "| ID | 优先级 | 状态 | 标题 | 负责人 | 分支 | 文档影响 |",
-    "| --- | --- | --- | --- | --- | --- | --- |",
-    ...(rows.length ? rows : ["| - | - | - | 暂无任务 | - | - | - |"]),
+    "| ID | 优先级 | 状态 | 标题 | 功能归属 | 责任人 | 分支 | 下次复核 | 文档影响 |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ...(rows.length ? rows : ["| - | - | - | 暂无任务 | - | - | - | - | - |"]),
     "",
   ].join("\n")
 }
@@ -153,6 +204,8 @@ export async function claimTask(projectRoot: string, id: string, owner: string, 
   task.metadata.status = "进行中"
   task.metadata.owner = owner.trim()
   task.metadata.branch = branch.trim()
+  if (task.metadata.reviewed_at === "-") task.metadata.reviewed_at = today()
+  if (task.metadata.review_due === "-") task.metadata.review_due = addDays(today(), 14)
   await saveTask(projectRoot, task)
   await syncTasks(projectRoot)
 }
@@ -171,6 +224,8 @@ export async function completeTask(projectRoot: string, id: string, evidence: st
   task.metadata.test_evidence = evidence.trim()
   task.metadata.references = references?.trim() || task.metadata.references
   task.metadata.completed_at = today()
+  task.metadata.reviewed_at = today()
+  task.metadata.review_due = "-"
   await saveTask(projectRoot, task)
   await syncTasks(projectRoot)
 }
@@ -222,6 +277,31 @@ function escapeTable(value: string): string {
 
 function today(): string {
   return new Date().toISOString().slice(0, 10)
+}
+
+/** 活动任务的复核日期必须成对存在，且到期后阻止项目检查继续忽略。 */
+function validateReviewDates(task: TaskRecord): void {
+  const { reviewed_at: reviewedAt, review_due: reviewDue, status } = task.metadata
+  for (const [field, value] of [["reviewed_at", reviewedAt], ["review_due", reviewDue]] as const) {
+    if (value !== "-" && !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+      throw new Error(`${task.file} 的 ${field} 必须为 YYYY-MM-DD 或 -`)
+    }
+  }
+  if ((reviewedAt === "-") !== (reviewDue === "-") && !(["已完成", "已过时"] as string[]).includes(status)) {
+    throw new Error(`${task.file} 的 reviewed_at 与 review_due 必须同时填写`)
+  }
+  if (reviewedAt !== "-" && reviewDue !== "-" && reviewDue < reviewedAt) {
+    throw new Error(`${task.file} 的 review_due 不能早于 reviewed_at`)
+  }
+  if (!(["已完成", "已过时"] as string[]).includes(status) && reviewDue !== "-" && reviewDue < today()) {
+    throw new Error(`${task.file} 已到复核日期 ${reviewDue}，请确认任务仍有效并更新 reviewed_at/review_due`)
+  }
+}
+
+function addDays(date: string, days: number): string {
+  const value = new Date(`${date}T00:00:00.000Z`)
+  value.setUTCDate(value.getUTCDate() + days)
+  return value.toISOString().slice(0, 10)
 }
 
 function isNotFound(error: unknown): boolean {

@@ -23,10 +23,15 @@ import {
 const taskMetadata = {
   id: "ZC-001",
   title: "测试任务",
+  feature_area: "项目协作基础设施",
+  parent_task: "-",
+  decomposed_by: "codex",
   priority: "P0",
   status: "待认领",
   owner: "未认领",
   branch: "-",
+  reviewed_at: "2026-08-09",
+  review_due: "2099-12-31",
   scope: "验证协作脚本。",
   acceptance: "命令可执行。",
   user_docs: "不涉及",
@@ -118,6 +123,27 @@ test("任务看板以优先级和任务 ID 稳定排序", async () => {
     await syncTasks(projectRoot)
     const board = await readFile(join(projectRoot, "docs/developer/tasks/任务看板.md"), "utf8")
     expect(board.indexOf("ZC-002")).toBeLessThan(board.indexOf("ZC-001"))
+    expect(board).toContain("板块：项目协作基础设施")
+    expect(board).toContain("拆解：codex")
+  } finally {
+    await rm(projectRoot, { recursive: true, force: true })
+  }
+})
+
+test("活动任务到期必须复核，过时任务必须记录替代依据", async () => {
+  const projectRoot = await createFixture()
+  try {
+    const taskPath = join(projectRoot, "docs/developer/tasks/ZC-001.md")
+    await writeFile(taskPath, renderTask({ ...taskMetadata, reviewed_at: "2019-12-01", review_due: "2020-01-01" }), "utf8")
+    await expect(loadTasks(projectRoot)).rejects.toThrow("已到复核日期")
+
+    await writeFile(taskPath, renderTask({
+      ...taskMetadata,
+      status: "已过时",
+      review_due: "-",
+      references: "ZC-002",
+    }), "utf8")
+    await expect(loadTasks(projectRoot)).resolves.toHaveLength(1)
   } finally {
     await rm(projectRoot, { recursive: true, force: true })
   }
