@@ -499,6 +499,11 @@ button.meta-chip { cursor: pointer; }
 .streaming-cursor { display: inline-block; width: 6px; height: 1.1em; margin-left: 3px; vertical-align: -.15em; background: var(--accent); animation: cursor-blink 1s steps(2, start) infinite; }
 @keyframes cursor-blink { 50% { opacity: 0; } }
 .run-status-live { margin-top: auto; padding-top: 12px; color: var(--muted); font-size: 13px; }
+.run-progress { display: inline-flex; align-items: center; gap: 6px; }
+.run-progress-spinner { width: 14px; height: 14px; color: var(--accent-strong); flex: 0 0 auto; }
+.reasoning-summary { margin: 12px 0 0 37px; padding: 10px 12px; border-left: 2px solid var(--accent-border-strong); border-radius: 0 var(--radius-control) var(--radius-control) 0; background: var(--surface-2); color: var(--text-soft); }
+.reasoning-summary-title { color: var(--accent-strong); font-size: 12px; font-weight: 650; }
+.reasoning-summary-text { margin-top: 5px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .live-interaction-slot { min-height: 0; }
 .scroll-to-bottom { position: sticky; bottom: 12px; display: block; margin: 10px auto 0; padding: 6px 12px; border-color: var(--line-strong); border-radius: var(--radius-control); background: var(--surface); color: var(--accent-strong); font-size: 13px; cursor: pointer; }
 
@@ -898,7 +903,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 /* ---------- Reduced motion ---------- */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; scroll-behavior: auto !important; }
-  .spinning, .spinner, .cancel-button-spinner, .interaction-submit-spinner, .streaming-cursor { animation: none !important; }
+  .run-progress-spinner, .spinning, .spinner, .cancel-button-spinner, .interaction-submit-spinner, .streaming-cursor { animation: none !important; }
 }
 
 /* 低频 hover/展开过渡；高频输入和发送操作保持即时反馈。 */

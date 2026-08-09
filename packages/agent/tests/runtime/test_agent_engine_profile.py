@@ -11,7 +11,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.base import empty_checkpoint
 
 import harness_agent.threads.thread_persistence as thread_persistence_module
-from harness_agent.config.config import ModelSettings
+from harness_agent.config.config import ModelSettings, ReasoningSettings
 from harness_agent.runtime.agent_engine_profile import (
     ModelRoleBinding,
     AgentEngineProfile,
@@ -116,6 +116,23 @@ def test_model_settings_fingerprint_does_not_leak_secrets() -> None:
     assert "toml-secret" not in encoded
     assert "trace-secret" not in encoded
     assert "gateway.example" not in encoded
+
+
+def test_model_settings_fingerprint_includes_reasoning_profile() -> None:
+    """公开 reasoning 选项变化必须形成不同 AgentEngine 身份。"""
+    first = ModelSettings(
+        name="fast-model",
+        base_url="https://gateway.example/v1",
+        reasoning=ReasoningSettings(effort="low", summary="auto"),
+    )
+    second = ModelSettings(
+        name="fast-model",
+        base_url="https://gateway.example/v1",
+        reasoning=ReasoningSettings(effort="high", summary="auto"),
+    )
+    assert model_settings_fingerprint(profile_name="p", model=first) != model_settings_fingerprint(
+        profile_name="p", model=second
+    )
 
 
 async def test_thread_persistence_persists_agent_engine_profile_without_raw_values(tmp_path: Path) -> None:

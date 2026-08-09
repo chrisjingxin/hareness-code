@@ -29,6 +29,11 @@ export function activityLabel(kind: InteractiveActivity["kind"]): string {
   }
 }
 
+/** 将 Host 已观测的运行阶段转换为不虚构内部步骤的文案。 */
+export function progressPhaseLabel(phase: "preparing" | "model"): string {
+  return phase === "preparing" ? "准备运行" : "等待模型响应"
+}
+
 /** Tool 卡状态的中文标签。 */
 export function toolStatusLabel(status: "running" | "completed" | "failed"): string {
   switch (status) {

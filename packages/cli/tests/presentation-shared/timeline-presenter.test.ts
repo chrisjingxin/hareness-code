@@ -1,7 +1,7 @@
 /** 共享 Timeline 展示语义测试：activity/tool/interaction 状态的中文文案。 */
 
 import { expect, test } from "bun:test"
-import { activityLabel, interactionStatusLabel, toolStatusLabel } from "../../src/presentation-shared/timeline-presenter"
+import { activityLabel, interactionStatusLabel, progressPhaseLabel, toolStatusLabel } from "../../src/presentation-shared/timeline-presenter"
 
 test("activityLabel：领域 Kind 全部映射为稳定中文标签", () => {
   const kinds = ["home", "idle", "starting", "running", "waiting-interaction", "cancelling", "completed", "cancelled", "failed"] as const
@@ -17,6 +17,11 @@ test("toolStatusLabel：运行中/完成/失败", () => {
   expect(toolStatusLabel("running")).toBe("运行中")
   expect(toolStatusLabel("completed")).toBe("已完成")
   expect(toolStatusLabel("failed")).toBe("失败")
+})
+
+test("progressPhaseLabel：只映射 Host 已观测阶段", () => {
+  expect(progressPhaseLabel("preparing")).toBe("准备运行")
+  expect(progressPhaseLabel("model")).toBe("等待模型响应")
 })
 
 test("interactionStatusLabel：历史交互结果标签", () => {

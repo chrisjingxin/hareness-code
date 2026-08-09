@@ -875,6 +875,23 @@
     },
     {
       "kind": "event",
+      "name": "run.progress",
+      "case": "valid",
+      "value": {
+        "event_id": "x",
+        "type": "run.progress",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "phase": "preparing",
+          "elapsed_ms": 1
+        }
+      }
+    },
+    {
+      "kind": "event",
       "name": "skill.loaded",
       "case": "valid",
       "value": {
@@ -899,6 +916,22 @@
       "value": {
         "event_id": "x",
         "type": "content.delta",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "text": "x"
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "reasoning.summary",
+      "case": "valid",
+      "value": {
+        "event_id": "x",
+        "type": "reasoning.summary",
         "thread_id": "x",
         "run_id": "x",
         "sequence": 1,
@@ -2994,6 +3027,46 @@
     },
     {
       "kind": "event",
+      "name": "run.progress",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "event",
+      "name": "run.progress",
+      "case": "extra_field",
+      "value": {
+        "event_id": "x",
+        "type": "run.progress",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "phase": "preparing",
+          "elapsed_ms": 1
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "event",
+      "name": "run.progress",
+      "case": "missing_field",
+      "value": {
+        "type": "run.progress",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "phase": "preparing",
+          "elapsed_ms": 1
+        }
+      }
+    },
+    {
+      "kind": "event",
       "name": "skill.loaded",
       "case": "wrong_type",
       "value": null
@@ -3065,6 +3138,44 @@
       "case": "missing_field",
       "value": {
         "type": "content.delta",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "text": "x"
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "reasoning.summary",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "event",
+      "name": "reasoning.summary",
+      "case": "extra_field",
+      "value": {
+        "event_id": "x",
+        "type": "reasoning.summary",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "text": "x"
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "event",
+      "name": "reasoning.summary",
+      "case": "missing_field",
+      "value": {
+        "type": "reasoning.summary",
         "thread_id": "x",
         "run_id": "x",
         "sequence": 1,

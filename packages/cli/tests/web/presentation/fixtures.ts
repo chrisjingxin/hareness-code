@@ -61,6 +61,8 @@ export function makeInteractive(
     activity: { kind: "home", label: "就绪" },
     activeRun: null,
     timeline: [],
+    reasoningSummary: null,
+    runProgress: null,
     interaction: null,
     confirmation: null,
     lastRun: null,

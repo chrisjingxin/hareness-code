@@ -216,6 +216,9 @@ def model_settings_fingerprint(
             "capabilities": sorted(str(capability) for capability in model.capabilities),
             "headers": dict(model.headers),
             "headers_env": dict(model.headers_env),
+            "reasoning": (
+                model.reasoning.to_payload() if model.reasoning is not None else None
+            ),
         }
     )
 

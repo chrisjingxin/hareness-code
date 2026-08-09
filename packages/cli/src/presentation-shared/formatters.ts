@@ -7,6 +7,13 @@ export function formatDuration(durationMs: number | undefined): string | undefin
   return `${(durationMs / 1000).toFixed(durationMs < 10_000 ? 1 : 0)}s`
 }
 
+/** 将活动 Run 的时长格式化为始终可见的秒数，包含刚启动的 0s。 */
+export function formatElapsed(durationMs: number): string {
+  if (!Number.isFinite(durationMs) || durationMs < 0) return "0s"
+  if (durationMs < 1000) return "0s"
+  return `${(durationMs / 1000).toFixed(durationMs < 10_000 ? 1 : 0)}s`
+}
+
 /** 将 token 用量格式化为 in/out 摘要；缺失不展示。 */
 export function formatUsage(usage: { inputTokens: number; outputTokens: number } | undefined): string | undefined {
   if (!usage) return undefined

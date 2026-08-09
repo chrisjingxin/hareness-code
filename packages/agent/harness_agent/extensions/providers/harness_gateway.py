@@ -92,6 +92,11 @@ def create_openai_compatible_model(
     }
     if async_client is not None:
         kwargs["http_async_client"] = async_client
+    if settings.reasoning is not None:
+        # 通过 canonical ModelSettings 显式选择 Responses block；不使用
+        # extra_body，避免 reasoning 选项脱离 AgentEngine Profile 身份。
+        kwargs["reasoning"] = settings.reasoning.to_payload()
+        kwargs["output_version"] = "responses/v1"
     model = ChatOpenAI(**kwargs)
     # LangChain/DeepAgents 的预算中间件读取 profile；企业网关不会可靠地返回
     # 模型窗口，因此使用经配置校验后的保守显式值。

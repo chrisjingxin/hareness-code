@@ -221,6 +221,20 @@ export function useSpinner(active: boolean, interval: number): string {
   return SPINNER_FRAMES[frame % SPINNER_FRAMES.length] ?? "·"
 }
 
+/** 以最近一次 Host elapsed_ms 为基准在本地连续显示活动时长。 */
+export function useRunElapsed(active: boolean, baseElapsedMs: number | undefined): number {
+  const [elapsed, setElapsed] = useState(baseElapsedMs ?? 0)
+  useEffect(() => {
+    const base = Math.max(0, baseElapsedMs ?? 0)
+    setElapsed(base)
+    if (!active) return
+    const startedAt = Date.now() - base
+    const timer = setInterval(() => setElapsed(Math.max(0, Date.now() - startedAt)), 1_000)
+    return () => clearInterval(timer)
+  }, [active, baseElapsedMs])
+  return elapsed
+}
+
 /** 按字符数截断 composer 内的长文案。 */
 function shorten(value: string, limit: number): string {
   if (value.length <= limit) return value
