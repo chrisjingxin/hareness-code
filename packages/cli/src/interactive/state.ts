@@ -91,8 +91,6 @@ export type InteractiveState = {
   activeRun: ActiveRun | null
   timeline: TimelineItem[]
   activity: InteractiveActivity
-  /** 仅当前 Run 可见的公开摘要，不进入 Timeline 或 Thread 历史。 */
-  reasoningSummary: string | null
   /** 仅当前 Run 可见的事实进度，不进入 Timeline 或 Thread 历史。 */
   runProgress: RunProgress | null
   lastRun?: RunSummary
@@ -106,7 +104,6 @@ export function createInitialState(threadId: string | null = null): InteractiveS
     activeRun: null,
     timeline: [],
     activity: { kind: threadId ? "idle" : "home" },
-    reasoningSummary: null,
     runProgress: null,
     sequences: {},
   }
@@ -127,7 +124,6 @@ export function startRun(state: InteractiveState, run: ActiveRun, prompt: string
     activeRun: run,
     lastRun: undefined,
     activity: { kind: "starting" },
-    reasoningSummary: null,
     runProgress: { phase: "preparing", elapsedMs: 0 },
     timeline: [
       ...state.timeline,
@@ -184,7 +180,6 @@ export function restoreThread(threadId: string, messages: readonly RestoredThrea
     timeline,
     // 恢复已完成（timeline 已构建）：活动状态必须是 idle，不得停在 restoring。
     activity: { kind: "idle" },
-    reasoningSummary: null,
     runProgress: null,
     sequences: {},
   }
@@ -274,7 +269,6 @@ export function markRunFailed(state: InteractiveState, runId: string, message: s
     ...state,
     activeRun: null,
     activity: { kind: "failed" },
-    reasoningSummary: null,
     runProgress: null,
     lastRun: { runId, outcome: "failed" },
     timeline: finishAssistant(settlePendingInteractions(state.timeline, runId), runId, `error: ${message}`, idGenerator),
@@ -326,15 +320,6 @@ export function applyAgentEvent(state: InteractiveState, event: EventEnvelope, i
       return typeof payload.text === "string"
         ? { ...next, timeline: appendAssistantDelta(next.timeline, runId, payload.text, idGenerator), activity: { kind: "running" } }
         : next
-    }
-    case EventType.REASONING_SUMMARY: {
-      const text = payloadText(event.payload.text)
-      if (!text) return next
-      return {
-        ...next,
-        activity: { kind: "running" },
-        reasoningSummary: appendReasoningSummary(next.reasoningSummary, text),
-      }
     }
     case EventType.TOOL_STARTED: {
       const payload = event.payload
@@ -392,7 +377,6 @@ export function applyAgentEvent(state: InteractiveState, event: EventEnvelope, i
         ...next,
         activeRun: null,
         activity: { kind: "completed" },
-        reasoningSummary: null,
         runProgress: null,
         lastRun: {
           runId,
@@ -410,7 +394,6 @@ export function applyAgentEvent(state: InteractiveState, event: EventEnvelope, i
         ...next,
         activeRun: null,
         activity: { kind: "cancelled" },
-        reasoningSummary: null,
         runProgress: null,
         lastRun: { runId, outcome: "cancelled" },
         timeline: finishAssistant(settlePendingInteractions(next.timeline, runId), runId, `cancelled: ${stringValue(payload.reason, "user cancelled")}`, idGenerator),
@@ -583,16 +566,6 @@ function contextNotice(payload: Record<string, unknown>): string {
 
 function stringValue(value: unknown, fallback: string): string {
   return typeof value === "string" && value.trim() ? value : fallback
-}
-
-function payloadText(value: unknown): string {
-  return typeof value === "string" ? value : ""
-}
-
-function appendReasoningSummary(previous: string | null, delta: string): string {
-  const next = `${previous ?? ""}${delta}`
-  // Host 已做字节上限，Core 再加字符上限保护长寿命 UI state。
-  return next.length <= 32_768 ? next : next.slice(-32_768)
 }
 
 function numberValue(value: unknown): number | undefined {

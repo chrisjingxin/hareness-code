@@ -927,22 +927,6 @@
     },
     {
       "kind": "event",
-      "name": "reasoning.summary",
-      "case": "valid",
-      "value": {
-        "event_id": "x",
-        "type": "reasoning.summary",
-        "thread_id": "x",
-        "run_id": "x",
-        "sequence": 1,
-        "timestamp_ms": 1,
-        "payload": {
-          "text": "x"
-        }
-      }
-    },
-    {
-      "kind": "event",
       "name": "tool.started",
       "case": "valid",
       "value": {
@@ -3138,44 +3122,6 @@
       "case": "missing_field",
       "value": {
         "type": "content.delta",
-        "thread_id": "x",
-        "run_id": "x",
-        "sequence": 1,
-        "timestamp_ms": 1,
-        "payload": {
-          "text": "x"
-        }
-      }
-    },
-    {
-      "kind": "event",
-      "name": "reasoning.summary",
-      "case": "wrong_type",
-      "value": null
-    },
-    {
-      "kind": "event",
-      "name": "reasoning.summary",
-      "case": "extra_field",
-      "value": {
-        "event_id": "x",
-        "type": "reasoning.summary",
-        "thread_id": "x",
-        "run_id": "x",
-        "sequence": 1,
-        "timestamp_ms": 1,
-        "payload": {
-          "text": "x"
-        },
-        "__extra": true
-      }
-    },
-    {
-      "kind": "event",
-      "name": "reasoning.summary",
-      "case": "missing_field",
-      "value": {
-        "type": "reasoning.summary",
         "thread_id": "x",
         "run_id": "x",
         "sequence": 1,

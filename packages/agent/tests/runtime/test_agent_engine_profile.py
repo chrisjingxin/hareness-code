@@ -123,12 +123,12 @@ def test_model_settings_fingerprint_includes_reasoning_profile() -> None:
     first = ModelSettings(
         name="fast-model",
         base_url="https://gateway.example/v1",
-        reasoning=ReasoningSettings(effort="low", summary="auto"),
+        reasoning=ReasoningSettings(effort="low"),
     )
     second = ModelSettings(
         name="fast-model",
         base_url="https://gateway.example/v1",
-        reasoning=ReasoningSettings(effort="high", summary="auto"),
+        reasoning=ReasoningSettings(effort="high"),
     )
     assert model_settings_fingerprint(profile_name="p", model=first) != model_settings_fingerprint(
         profile_name="p", model=second

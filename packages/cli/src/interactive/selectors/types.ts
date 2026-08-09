@@ -45,7 +45,6 @@ export type ConversationView = {
   readonly activity: InteractiveActivity
   readonly activeRun: ActiveRun | null
   readonly timeline: readonly TimelineItem[]
-  readonly reasoningSummary: string | null
   readonly runProgress: InteractiveSnapshot["runProgress"]
   readonly lastRun: RunSummary | null
 }

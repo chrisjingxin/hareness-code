@@ -95,9 +95,8 @@ test("保留 prefers-reduced-motion 可访问性规则", () => {
   expect(css).toContain("prefers-reduced-motion")
 })
 
-test("运行进度和思考摘要具备独立样式，并在 reduced-motion 下停用动画", () => {
+test("运行进度具备独立样式，并在 reduced-motion 下停用动画", () => {
   expect(css).toContain(".run-progress {")
-  expect(css).toContain(".reasoning-summary {")
   expect(css).toContain(".run-progress-spinner")
   expect(css).toContain(".run-progress-spinner, .spinning")
 })

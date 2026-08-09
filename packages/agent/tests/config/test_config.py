@@ -577,31 +577,48 @@ def test_openai_compatible_adapter_is_constructed_without_network(monkeypatch: p
     assert model.openai_api_key.get_secret_value() == "toml-key"
 
 
-def test_reasoning_profile_is_parsed_and_forwarded_as_responses_configuration(
+def test_reasoning_profile_is_parsed_and_forwarded_as_chat_completions_configuration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """reasoning 是 Profile 配置，不通过 extra_body 绕过身份。"""
+    """reasoning effort 必须作为 Chat Completions 参数传递，不能切换到 Responses。"""
     monkeypatch.setenv("HARNESS_REASONING_KEY", "test-key")
     path = tmp_path / "reasoning.toml"
     path.write_text(
-        """[config]\nversion = 1\n\n[models]\ndefault_profile = \"enterprise\"\n\n[models.profiles.enterprise]\nprovider = \"openai-compatible\"\nmodel = \"enterprise-model\"\nbase_url = \"https://gateway.example.internal/v1\"\napi_key_env = \"HARNESS_REASONING_KEY\"\n\n[models.profiles.enterprise.reasoning]\neffort = \"medium\"\nsummary = \"auto\"\n""",
+        """[config]\nversion = 1\n\n[models]\ndefault_profile = \"enterprise\"\n\n[models.profiles.enterprise]\nprovider = \"openai-compatible\"\nmodel = \"enterprise-model\"\nbase_url = \"https://gateway.example.internal/v1\"\napi_key_env = \"HARNESS_REASONING_KEY\"\n\n[models.profiles.enterprise.reasoning]\neffort = \"medium\"\n""",
         encoding="utf-8",
     )
 
     config = load_config(workspace=tmp_path, home=tmp_path / "home", config_path=path)
     settings = config.require_model()
-    assert settings.reasoning == ReasoningSettings(effort="medium", summary="auto")
+    assert settings.reasoning == ReasoningSettings(effort="medium")
 
     model = create_openai_compatible_model(settings)
-    assert model.reasoning == {"effort": "medium", "summary": "auto"}
-    assert model.output_version == "responses/v1"
+    assert model.reasoning_effort == "medium"
+    assert model.reasoning is None
+    assert model.output_version is None
+    assert model.use_responses_api is False
+    assert model._default_params["reasoning_effort"] == "medium"
+    assert "reasoning" not in model._default_params
+    assert model._use_responses_api(model._default_params) is False
+
+
+def test_responses_reasoning_summary_configuration_is_rejected(tmp_path: Path):
+    """Responses 专属 summary 选项不能混入仅支持 Completions 的 Profile。"""
+    path = tmp_path / "responses-reasoning.toml"
+    path.write_text(
+        """[config]\nversion = 1\n\n[models]\ndefault_profile = \"enterprise\"\n\n[models.profiles.enterprise]\nmodel = \"enterprise-model\"\nbase_url = \"https://gateway.example.internal/v1\"\n\n[models.profiles.enterprise.reasoning]\neffort = \"medium\"\nsummary = \"auto\"\n""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="reasoning contains unsupported fields: summary"):
+        load_config(workspace=tmp_path, home=tmp_path / "home", config_path=path)
 
 
 def test_invalid_reasoning_profile_fails_closed(tmp_path: Path):
     """未知 effort 不能静默落到 adapter 私有参数。"""
     path = tmp_path / "invalid-reasoning.toml"
     path.write_text(
-        """[config]\nversion = 1\n\n[models]\ndefault_profile = \"enterprise\"\n\n[models.profiles.enterprise]\nmodel = \"enterprise-model\"\nbase_url = \"https://gateway.example.internal/v1\"\n\n[models.profiles.enterprise.reasoning]\neffort = \"maximum\"\nsummary = \"auto\"\n""",
+        """[config]\nversion = 1\n\n[models]\ndefault_profile = \"enterprise\"\n\n[models.profiles.enterprise]\nmodel = \"enterprise-model\"\nbase_url = \"https://gateway.example.internal/v1\"\n\n[models.profiles.enterprise.reasoning]\neffort = \"maximum\"\n""",
         encoding="utf-8",
     )
 

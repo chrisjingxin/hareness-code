@@ -39,24 +39,20 @@ SUPPORTED_MODEL_CAPABILITIES = frozenset({"tool-calling", "streaming", "vision",
 
 @dataclass(frozen=True, slots=True)
 class ReasoningSettings:
-    """OpenAI Responses 公开 reasoning summary 的显式请求配置。"""
+    """OpenAI Chat Completions reasoning effort 的显式请求配置。"""
 
     effort: Literal["low", "medium", "high"] | None = None
-    summary: Literal["auto", "concise", "detailed"] | None = None
 
     def __post_init__(self) -> None:
-        """拒绝空配置，确保 adapter 只接收已确认的 canonical 选项。"""
-        if self.effort is None and self.summary is None:
-            raise ConfigError("models.profiles.<name>.reasoning must configure effort or summary")
+        """拒绝空配置，确保 Chat Completions 只接收已确认的 effort。"""
+        if self.effort is None:
+            raise ConfigError("models.profiles.<name>.reasoning must configure effort")
 
     def to_payload(self) -> dict[str, str]:
-        """转换为不含秘密的 ChatOpenAI reasoning 参数。"""
-        payload: dict[str, str] = {}
-        if self.effort is not None:
-            payload["effort"] = self.effort
-        if self.summary is not None:
-            payload["summary"] = self.summary
-        return payload
+        """转换为不含秘密的 Profile 身份字段。"""
+        if self.effort is None:  # pragma: no cover - __post_init__ 已保证不变量。
+            raise ConfigError("models.profiles.<name>.reasoning must configure effort")
+        return {"effort": self.effort}
 
 
 @dataclass(frozen=True, slots=True)
@@ -737,12 +733,12 @@ def _parse_model_settings(values: Mapping[str, object]) -> ModelSettings:
 
 
 def _parse_reasoning_settings(value: object) -> ReasoningSettings | None:
-    """解析公开 reasoning 选项；未知字段和枚举值一律在配置阶段失败。"""
+    """解析 Chat Completions reasoning effort；未知字段和值在配置阶段失败。"""
     if value is None:
         return None
     if not isinstance(value, Mapping):
         raise ConfigError("models.profiles.<name>.reasoning must be a TOML table")
-    unknown = set(value) - {"effort", "summary"}
+    unknown = set(value) - {"effort"}
     if unknown:
         raise ConfigError(
             "models.profiles.<name>.reasoning contains unsupported fields: "
@@ -753,12 +749,7 @@ def _parse_reasoning_settings(value: object) -> ReasoningSettings | None:
         not isinstance(effort, str) or effort not in {"low", "medium", "high"}
     ):
         raise ConfigError("models.profiles.<name>.reasoning.effort must be low, medium, or high")
-    summary = value.get("summary")
-    if summary is not None and (
-        not isinstance(summary, str) or summary not in {"auto", "concise", "detailed"}
-    ):
-        raise ConfigError("models.profiles.<name>.reasoning.summary must be auto, concise, or detailed")
-    return ReasoningSettings(effort=effort, summary=summary)  # type: ignore[arg-type]
+    return ReasoningSettings(effort=effort)  # type: ignore[arg-type]
 
 
 def _parse_execution(

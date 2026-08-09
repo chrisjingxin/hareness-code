@@ -42,26 +42,11 @@ export function ConversationTimeline(props: {
           onQuestion={props.onQuestion}
         />
       ))}
-      <ReasoningSummary interactive={props.interactive} />
       <TimelineActivity interactive={props.interactive} />
       <RunSummary interactive={props.interactive} modelName={props.modelName} />
       {props.transientNotice ? <TransientNotice key={props.transientNotice.id} message={props.transientNotice.message} /> : null}
       <box height={1} />
     </scrollbox>
-  )
-}
-
-/** 运行期公开摘要单独展示，绝不把它伪装成 assistant 正文或历史消息。 */
-function ReasoningSummary(props: { interactive: InteractiveSnapshot }) {
-  const { interactive } = props
-  if (!interactive.activeRun || !interactive.reasoningSummary) return null
-  return (
-    <box marginTop={1} marginLeft={3} marginRight={3} border={["left"]} borderColor={tuiTheme.primarySoft} customBorderChars={PROMPT_BORDER}>
-      <box backgroundColor={tuiTheme.toolSurface} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
-        <text fg={tuiTheme.primary}>思考摘要（仅本次运行）</text>
-        <text content={interactive.reasoningSummary} fg={tuiTheme.muted} />
-      </box>
-    </box>
   )
 }
 
