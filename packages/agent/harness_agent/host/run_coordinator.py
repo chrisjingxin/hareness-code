@@ -47,14 +47,12 @@ from harness_agent.threads.thread_persistence import (
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_PAYLOAD_BYTES = 1 * 1024 * 1024
-MAX_REASONING_SUMMARY_BYTES = 64 * 1024
 INTERACTION_TIMEOUT_MS = 300_000
 
 RUN_STARTED = "run.started"
 RUN_PROGRESS = "run.progress"
 SKILL_LOADED = "skill.loaded"
 CONTENT_DELTA = "content.delta"
-REASONING_SUMMARY = "reasoning.summary"
 TOOL_STARTED = "tool.started"
 TOOL_DELTA = "tool.delta"
 TOOL_COMPLETED = "tool.completed"
@@ -1684,10 +1682,7 @@ def _translate_stream_event(
     content = _message_text(chunk)
     if content and type(chunk).__name__ != "ToolMessage":
         events.append((CONTENT_DELTA, {"text": content}))
-    summary = _reasoning_summary_text(chunk)
-    if summary:
-        events.append((REASONING_SUMMARY, {"text": summary}))
-    elif (
+    if (
         type(chunk).__name__ in {"AIMessage", "AIMessageChunk"}
         and not content
         and not getattr(chunk, "tool_call_chunks", None)
@@ -1974,54 +1969,6 @@ def _has_reasoning_block(message: object) -> bool:
         isinstance(block, Mapping) and block.get("type") == "reasoning"
         for block in blocks
     )
-
-
-def _reasoning_summary_text(message: object) -> str:
-    """只从原始 Responses block 提取公开 summary_text，未知形状 fail closed。"""
-    raw_content = getattr(message, "content", None)
-    # ChatOpenAI 的 provider translator 会把 summary_text 规范化为同名的
-    # ``reasoning`` 字段；该字段也可能代表原始思维，不能据此公开。只有
-    # 原始 Responses block 明确保留 ``summary`` 容器时，边界才是可确认的。
-    blocks = (
-        raw_content
-        if isinstance(raw_content, list)
-        else getattr(message, "content_blocks", None)
-    )
-    if not isinstance(blocks, list):
-        return ""
-    parts: list[str] = []
-    for block in blocks:
-        if not isinstance(block, Mapping) or block.get("type") != "reasoning":
-            continue
-        # ``content`` is the raw reasoning channel; encrypted/unknown fields
-        # make the public boundary ambiguous even when summary_text exists.
-        if set(block) - {"type", "summary", "id", "index", "status"}:
-            continue
-        summary = block.get("summary")
-        if not isinstance(summary, list) or not summary:
-            continue
-        if not all(
-            isinstance(item, Mapping)
-            and item.get("type") == "summary_text"
-            and isinstance(item.get("text"), str)
-            and not (set(item) - {"type", "text", "index"})
-            for item in summary
-        ):
-            continue
-        parts.extend(
-            item["text"]
-            for item in summary
-            if isinstance(item["text"], str) and item["text"]
-        )
-    return _truncate_reasoning_summary("".join(parts))
-
-
-def _truncate_reasoning_summary(value: str) -> str:
-    """限制公开摘要大小，避免 provider 文本撑爆单帧或运行时状态。"""
-    encoded = value.encode("utf-8")
-    if len(encoded) <= MAX_REASONING_SUMMARY_BYTES:
-        return value
-    return encoded[:MAX_REASONING_SUMMARY_BYTES].decode("utf-8", errors="ignore")
 
 
 def _run_progress_payload(run: RunState, phase: str) -> dict[str, object]:

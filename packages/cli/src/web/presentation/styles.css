@@ -501,9 +501,6 @@ button.meta-chip { cursor: pointer; }
 .run-status-live { margin-top: auto; padding-top: 12px; color: var(--muted); font-size: 13px; }
 .run-progress { display: inline-flex; align-items: center; gap: 6px; }
 .run-progress-spinner { width: 14px; height: 14px; color: var(--accent-strong); flex: 0 0 auto; }
-.reasoning-summary { margin: 12px 0 0 37px; padding: 10px 12px; border-left: 2px solid var(--accent-border-strong); border-radius: 0 var(--radius-control) var(--radius-control) 0; background: var(--surface-2); color: var(--text-soft); }
-.reasoning-summary-title { color: var(--accent-strong); font-size: 12px; font-weight: 650; }
-.reasoning-summary-text { margin-top: 5px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .live-interaction-slot { min-height: 0; }
 .scroll-to-bottom { position: sticky; bottom: 12px; display: block; margin: 10px auto 0; padding: 6px 12px; border-color: var(--line-strong); border-radius: var(--radius-control); background: var(--surface); color: var(--accent-strong); font-size: 13px; cursor: pointer; }
 

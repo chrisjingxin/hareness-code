@@ -56,7 +56,6 @@
       "run.progress": { "payload": "#/$defs/runProgressPayload" },
       "skill.loaded": { "payload": "#/$defs/skillLoadedPayload" },
       "content.delta": { "payload": "#/$defs/contentDeltaPayload" },
-      "reasoning.summary": { "payload": "#/$defs/reasoningSummaryPayload" },
       "tool.started": { "payload": "#/$defs/toolStartedPayload" },
       "tool.delta": { "payload": "#/$defs/toolDeltaPayload" },
       "tool.completed": { "payload": "#/$defs/toolCompletedPayload" },
@@ -781,11 +780,6 @@
     },
     "contentDeltaPayload": {
       "type": "object", "required": ["text"], "properties": { "text": { "type": "string" } }, "additionalProperties": false
-    },
-    "reasoningSummaryPayload": {
-      "type": "object", "required": ["text"],
-      "properties": { "text": { "type": "string", "minLength": 1 } },
-      "additionalProperties": false
     },
     "toolStartedPayload": {
       "type": "object", "required": ["tool_call_id", "name"],

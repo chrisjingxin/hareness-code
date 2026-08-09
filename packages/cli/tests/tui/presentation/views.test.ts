@@ -35,7 +35,6 @@ function snapshotOf(state: InteractiveState): InteractiveSnapshot {
     activity: state.activity,
     activeRun: state.activeRun,
     timeline: state.timeline,
-    reasoningSummary: state.reasoningSummary,
     runProgress: state.runProgress,
     interaction: null,
     confirmation: null,
@@ -296,12 +295,11 @@ test("继续执行只作为历史事件之后的底部活动行", async () => {
   }
 })
 
-test("TUI 运行期间显示公开摘要、事实阶段和取消提示", async () => {
+test("TUI 运行期间显示事实阶段、活动时长和取消提示", async () => {
   const run = { threadId: "thread-progress", runId: "run-progress" }
   const started = startRun(createInitialState(), run, "检查")
   const state: InteractiveState = {
     ...started,
-    reasoningSummary: "检查代码路径",
     runProgress: { phase: "model", elapsedMs: 1_200 },
   }
   let setup: Awaited<ReturnType<typeof testRender>>
@@ -311,8 +309,6 @@ test("TUI 运行期间显示公开摘要、事实阶段和取消提示", async (
   try {
     await act(async () => { await setup.flush() })
     const frame = setup.captureCharFrame()
-    expect(frame).toContain("思考摘要")
-    expect(frame).toContain("检查代码路径")
     expect(frame).toContain("等待模型响应")
     expect(frame).toContain("已运行")
     expect(frame).toContain("Esc 取消")

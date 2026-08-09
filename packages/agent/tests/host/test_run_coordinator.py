@@ -363,8 +363,8 @@ async def test_transcript_capture_keeps_full_tool_text_before_wire_truncation() 
     assert result["content"] != full_tool_text
 
 
-def test_public_reasoning_summary_is_not_captured_as_transcript_content() -> None:
-    """公开摘要只属于运行期事件，不能进入助手正文或 Transcript。"""
+def test_reasoning_content_is_not_captured_as_transcript_content() -> None:
+    """Chat Completions reasoning 内容不能进入助手正文或 Transcript。"""
     run = RunState(
         start=StartRun(thread_id="thread-summary-transcript", run_id="run-summary-transcript", message="检查"),
         owner=ConnectionRef("owner"),
@@ -375,9 +375,8 @@ def test_public_reasoning_summary_is_not_captured_as_transcript_content() -> Non
         run,
         AIMessageChunk(
             content=[
-                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "公开摘要"}]},
+                {"type": "reasoning", "reasoning": "内部思考"},
             ],
-            response_metadata={"model_provider": "openai"},
         ),
     )
 
@@ -402,8 +401,27 @@ def test_reasoning_only_chunk_emits_safe_progress_without_raw_reasoning() -> Non
     assert _message_text(chunk) == ""
 
 
-def test_public_reasoning_summary_is_separate_from_text_delta() -> None:
-    """标准 summary_text 只产生独立摘要事件，不混入 assistant 正文。"""
+def test_chat_completions_reasoning_content_emits_progress_only() -> None:
+    """Chat Completions 的非标准 reasoning_content 不能被当作公开摘要。"""
+    run = RunState(
+        start=StartRun(thread_id="thread-completions-reasoning", run_id="run-completions-reasoning", message="检查"),
+        owner=ConnectionRef("owner"),
+        persistence=None,
+        preparation=RunPreparation(),
+    )
+    chunk = AIMessageChunk(
+        content="",
+        additional_kwargs={"reasoning_content": "内部思考，不应展示"},
+    )
+
+    events = list(_translate_stream_event(("messages", (chunk, {})), run))
+
+    assert [event_type for event_type, _ in events] == ["run.progress"]
+    assert "内部思考，不应展示" not in str(events)
+
+
+def test_reasoning_block_is_not_interpreted_as_public_summary() -> None:
+    """reasoning block 不能被仅支持 Completions 的 Host 解释成公开摘要。"""
     run = RunState(
         start=StartRun(thread_id="thread-summary", run_id="run-summary", message="检查"),
         owner=ConnectionRef("owner"),
@@ -412,25 +430,23 @@ def test_public_reasoning_summary_is_separate_from_text_delta() -> None:
     )
     chunk = AIMessageChunk(
         content=[
-            {"type": "reasoning", "summary": [{"type": "summary_text", "text": "检查代码路径"}]},
+            {"type": "reasoning", "reasoning": "内部思考"},
             {"type": "text", "text": "结论"},
         ],
-        response_metadata={"model_provider": "openai"},
     )
 
     events = list(_translate_stream_event(("messages", (chunk, {})), run))
 
-    assert [event_type for event_type, _ in events] == ["content.delta", "reasoning.summary"]
+    assert [event_type for event_type, _ in events] == ["content.delta"]
     assert events[0][1] == {"text": "结论"}
-    assert events[1][1] == {"text": "检查代码路径"}
 
 
 def test_unknown_or_encrypted_reasoning_fails_closed() -> None:
     """无法确认公开边界时只给事实进度，不透传供应商私有字段。"""
     for content in (
-        [{"type": "reasoning", "summary": [{"type": "summary_text", "text": "公开"}], "encrypted_content": "secret"}],
-        [{"type": "reasoning", "summary": [{"type": "vendor_private", "text": "私有"}]}],
-        [{"type": "reasoning", "summary": [{"type": "summary_text", "text": "公开"}], "vendor_private": "私有"}],
+        [{"type": "reasoning", "reasoning": "secret", "encrypted_content": "secret"}],
+        [{"type": "reasoning", "reasoning": "私有", "reasoning_details": "private"}],
+        [{"type": "reasoning", "reasoning": "公开", "vendor_private": "私有"}],
     ):
         run = RunState(
             start=StartRun(thread_id="thread-safe", run_id="run-safe", message="检查"),

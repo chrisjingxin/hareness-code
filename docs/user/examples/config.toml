@@ -23,10 +23,9 @@ max_retries = 2
 context_window_tokens = 128000
 # 未声明时兼容 tool-calling、streaming；可选 vision。
 capabilities = ["tool-calling", "streaming"]
-# 仅对明确支持 OpenAI Responses 公开 summary 的 Provider 开启；不展示 raw reasoning。
+# 可选的 Chat Completions reasoning effort；不展示 raw reasoning，也不会切换到 Responses。
 # [models.profiles.fast.reasoning]
 # effort = "medium"
-# summary = "auto"
 
 # 固定 Header 只能包含非秘密值；Authorization、Cookie 和 API Key 必须放入 headers_env。
 [models.profiles.fast.headers]

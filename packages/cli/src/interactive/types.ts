@@ -131,7 +131,6 @@ export type InteractiveSnapshot = {
   readonly activity: InteractiveActivity
   readonly activeRun: ActiveRun | null
   readonly timeline: readonly TimelineItem[]
-  readonly reasoningSummary: string | null
   readonly runProgress: RunProgress | null
   readonly interaction: InteractiveInteraction | null
   readonly confirmation: InteractiveConfirmation | null

@@ -136,12 +136,6 @@ export function Timeline({
         ))
       )}
       <div className="live-interaction-slot" data-pending-request-id={pendingRequestId ?? undefined} />
-      {activeRun && snapshot.interactive.reasoningSummary ? (
-        <div className="reasoning-summary" role="status" aria-label="思考摘要（仅本次运行）">
-          <div className="reasoning-summary-title">思考摘要（仅本次运行）</div>
-          <div className="reasoning-summary-text">{snapshot.interactive.reasoningSummary}</div>
-        </div>
-      ) : null}
       <div className="run-status-live" aria-live="polite">
         {activeRun ? (
           <div
