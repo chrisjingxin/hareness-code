@@ -245,7 +245,9 @@ describe("Timeline", () => {
     const interactive = makeInteractive({
       activeRun: { threadId: "thread-1", runId: "run-1" },
       activity: { kind: "running" },
-      reasoning: { text: "正在检查代码路径", active: true },
+      timeline: [
+        { type: "reasoning", reasoning: { id: "r-1", runId: "run-1", text: "正在检查代码路径", active: true } },
+      ],
     })
     const handle = render(
       <Timeline snapshot={makeSnapshot({ interactive })} dispatch={() => {}} />,
@@ -266,7 +268,9 @@ describe("Timeline", () => {
     const interactive = makeInteractive({
       activeRun: { threadId: "thread-1", runId: "run-1" },
       activity: { kind: "running" },
-      reasoning: { text: "第一行思考\n后续细节", active: false },
+      timeline: [
+        { type: "reasoning", reasoning: { id: "r-1", runId: "run-1", text: "第一行思考\n后续细节", active: false } },
+      ],
     })
     const handle = render(
       <Timeline snapshot={makeSnapshot({ interactive })} dispatch={() => {}} />,

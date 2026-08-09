@@ -39,6 +39,7 @@ export type InteractionCard = {
 export type TimelineItem =
   | { type: "message"; message: ConversationMessage }
   | { type: "tool"; tool: ToolCard }
+  | { type: "reasoning"; reasoning: ReasoningCard }
   | { type: "interaction"; interaction: InteractionCard }
 
 export type ActiveRun = {
@@ -60,8 +61,10 @@ export type RunProgress = {
   elapsedMs: number
 }
 
-/** 当前 Run 的思考文本与流式状态；仅运行期可见，不进入 Timeline 或历史。 */
-export type ReasoningState = {
+/** 时间线中的思考条目：按流式顺序与消息/工具交错，冻结后可折叠。 */
+export type ReasoningCard = {
+  id: string
+  runId: string
   text: string
   active: boolean
 }
@@ -99,8 +102,6 @@ export type InteractiveState = {
   activity: InteractiveActivity
   /** 仅当前 Run 可见的事实进度，不进入 Timeline 或 Thread 历史。 */
   runProgress: RunProgress | null
-  /** 仅当前 Run 可见的思考文本，不进入 Timeline 或 Thread 历史。 */
-  reasoning: ReasoningState | null
   lastRun?: RunSummary
   sequences: Record<string, number>
 }
@@ -113,7 +114,6 @@ export function createInitialState(threadId: string | null = null): InteractiveS
     timeline: [],
     activity: { kind: threadId ? "idle" : "home" },
     runProgress: null,
-    reasoning: null,
     sequences: {},
   }
 }
@@ -134,7 +134,6 @@ export function startRun(state: InteractiveState, run: ActiveRun, prompt: string
     lastRun: undefined,
     activity: { kind: "starting" },
     runProgress: { phase: "preparing", elapsedMs: 0 },
-    reasoning: null,
     timeline: [
       ...state.timeline,
       { type: "message", message: { id: `user-${run.runId}`, role: "user", content: prompt, runId: run.runId } },
@@ -191,7 +190,6 @@ export function restoreThread(threadId: string, messages: readonly RestoredThrea
     // 恢复已完成（timeline 已构建）：活动状态必须是 idle，不得停在 restoring。
     activity: { kind: "idle" },
     runProgress: null,
-    reasoning: null,
     sequences: {},
   }
 }
@@ -281,9 +279,8 @@ export function markRunFailed(state: InteractiveState, runId: string, message: s
     activeRun: null,
     activity: { kind: "failed" },
     runProgress: null,
-    reasoning: null,
     lastRun: { runId, outcome: "failed" },
-    timeline: finishAssistant(settlePendingInteractions(state.timeline, runId), runId, `error: ${message}`, idGenerator),
+    timeline: freezeReasoning(finishAssistant(settlePendingInteractions(state.timeline, runId), runId, `error: ${message}`, idGenerator), runId),
   }
 }
 
@@ -330,20 +327,17 @@ export function applyAgentEvent(state: InteractiveState, event: EventEnvelope, i
     case EventType.CONTENT_DELTA: {
       const payload = event.payload
       return typeof payload.text === "string"
-        ? { ...next, timeline: appendAssistantDelta(next.timeline, runId, payload.text, idGenerator), activity: { kind: "running" }, reasoning: freezeReasoning(next.reasoning) }
+        ? { ...next, timeline: freezeReasoning(appendAssistantDelta(next.timeline, runId, payload.text, idGenerator), runId), activity: { kind: "running" } }
         : next
     }
     case EventType.REASONING_DELTA: {
       const payload = event.payload
       const text = payloadText(payload.text)
       if (!text) return next
-      const previous = next.reasoning
-      // 新思考段开始（此前无思考或上一段已被正文/工具冻结）时重置文本。
-      const startNewSegment = previous === null || !previous.active
       return {
         ...next,
         activity: { kind: "running" },
-        reasoning: { text: startNewSegment ? text : `${previous.text}${text}`, active: true },
+        timeline: appendReasoningDelta(next.timeline, runId, text, idGenerator),
       }
     }
     case EventType.TOOL_STARTED: {
@@ -351,15 +345,14 @@ export function applyAgentEvent(state: InteractiveState, event: EventEnvelope, i
       return {
         ...next,
         activity: { kind: "running" },
-        reasoning: freezeReasoning(next.reasoning),
-        timeline: updateTool(next.timeline, {
+        timeline: freezeReasoning(updateTool(next.timeline, {
           id: stringValue(payload.tool_call_id, `tool-${runId}`),
           runId,
           name: stringValue(payload.name, "tool"),
           arguments: "",
           output: "",
           status: "running",
-        }),
+        }), runId),
       }
     }
     case EventType.TOOL_DELTA:
@@ -404,7 +397,6 @@ export function applyAgentEvent(state: InteractiveState, event: EventEnvelope, i
         activeRun: null,
         activity: { kind: "completed" },
         runProgress: null,
-        reasoning: null,
         lastRun: {
           runId,
           outcome: "completed",
@@ -412,7 +404,7 @@ export function applyAgentEvent(state: InteractiveState, event: EventEnvelope, i
           usage: usageValue(payload.usage),
           context: contextValue(payload.context),
         },
-        timeline: finishAssistant(settlePendingInteractions(next.timeline, runId), runId, "", idGenerator),
+        timeline: finishAssistant(settlePendingInteractions(freezeReasoning(next.timeline, runId), runId), runId, "", idGenerator),
       }
     }
     case EventType.RUN_CANCELLED: {
@@ -422,9 +414,8 @@ export function applyAgentEvent(state: InteractiveState, event: EventEnvelope, i
         activeRun: null,
         activity: { kind: "cancelled" },
         runProgress: null,
-        reasoning: null,
         lastRun: { runId, outcome: "cancelled" },
-        timeline: finishAssistant(settlePendingInteractions(next.timeline, runId), runId, `cancelled: ${stringValue(payload.reason, "user cancelled")}`, idGenerator),
+        timeline: freezeReasoning(finishAssistant(settlePendingInteractions(next.timeline, runId), runId, `cancelled: ${stringValue(payload.reason, "user cancelled")}`, idGenerator), runId),
       }
     }
     case EventType.RUN_FAILED:
@@ -600,8 +591,26 @@ function payloadText(value: unknown): string {
   return typeof value === "string" ? value : ""
 }
 
-function freezeReasoning(reasoning: ReasoningState | null): ReasoningState | null {
-  return reasoning === null ? null : { ...reasoning, active: false }
+function appendReasoningDelta(timeline: TimelineItem[], runId: string, text: string, idGenerator: IdGenerator = defaultIdGenerator): TimelineItem[] {
+  const index = timeline.findLastIndex(item => item.type === "reasoning" && item.reasoning.runId === runId && item.reasoning.active)
+  if (index < 0) {
+    return [...timeline, { type: "reasoning", reasoning: { id: `reasoning-${runId}-${idGenerator.uuid()}`, runId, text, active: true } }]
+  }
+  return timeline.map((entry, itemIndex) => (
+    itemIndex === index && entry.type === "reasoning"
+      ? { ...entry, reasoning: { ...entry.reasoning, text: entry.reasoning.text + text } }
+      : entry
+  ))
+}
+
+function freezeReasoning(timeline: TimelineItem[], runId: string): TimelineItem[] {
+  const index = timeline.findLastIndex(item => item.type === "reasoning" && item.reasoning.runId === runId && item.reasoning.active)
+  if (index < 0) return timeline
+  return timeline.map((entry, itemIndex) => (
+    itemIndex === index && entry.type === "reasoning"
+      ? { ...entry, reasoning: { ...entry.reasoning, active: false } }
+      : entry
+  ))
 }
 
 function numberValue(value: unknown): number | undefined {

@@ -36,7 +36,6 @@ function snapshotOf(state: InteractiveState): InteractiveSnapshot {
     activeRun: state.activeRun,
     timeline: state.timeline,
     runProgress: state.runProgress,
-    reasoning: state.reasoning,
     interaction: null,
     confirmation: null,
     lastRun: state.lastRun ?? null,
@@ -318,12 +317,16 @@ test("TUI 运行期间显示事实阶段、活动时长和取消提示", async (
   }
 })
 
-test("TUI 运行期间显示思考中状态与思考文本", async () => {
+test("TUI 时间线交错显示思考中条目与思考文本", async () => {
   const run = { threadId: "thread-reasoning", runId: "run-reasoning" }
   const started = startRun(createInitialState(), run, "检查")
   const state: InteractiveState = {
     ...started,
-    reasoning: { text: "正在检查代码路径", active: true },
+    timeline: [
+      ...started.timeline,
+      { type: "reasoning", reasoning: { id: "r-1", runId: run.runId, text: "正在检查代码路径", active: true } },
+      { type: "message", message: { id: "a-1", role: "assistant", content: "结论", runId: run.runId, streaming: false } },
+    ],
   }
   let setup: Awaited<ReturnType<typeof testRender>>
   await act(async () => {
@@ -344,7 +347,10 @@ test("TUI 思考段冻结后显示折叠头与展开提示", async () => {
   const started = startRun(createInitialState(), run, "检查")
   const state: InteractiveState = {
     ...started,
-    reasoning: { text: "第一行思考\n后续细节", active: false },
+    timeline: [
+      ...started.timeline,
+      { type: "reasoning", reasoning: { id: "r-1", runId: run.runId, text: "第一行思考\n后续细节", active: false } },
+    ],
   }
   let setup: Awaited<ReturnType<typeof testRender>>
   await act(async () => {

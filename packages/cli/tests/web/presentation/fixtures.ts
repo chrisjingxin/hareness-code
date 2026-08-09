@@ -62,7 +62,6 @@ export function makeInteractive(
     activeRun: null,
     timeline: [],
     runProgress: null,
-    reasoning: null,
     interaction: null,
     confirmation: null,
     lastRun: null,

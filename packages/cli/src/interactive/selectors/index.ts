@@ -35,7 +35,6 @@ export function selectConversationView(snapshot: InteractiveSnapshot): Conversat
     activeRun: snapshot.activeRun,
     timeline: snapshot.timeline,
     runProgress: snapshot.runProgress,
-    reasoning: snapshot.reasoning,
     lastRun: snapshot.lastRun,
   }
 }

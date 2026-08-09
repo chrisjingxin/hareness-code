@@ -3,7 +3,7 @@
 import { type ScrollBoxRenderable } from "@opentui/core"
 import { type RefObject, useState } from "react"
 
-import type { ConversationMessage, InteractionCard, TimelineItem, ToolCard } from "../../interactive/state"
+import type { ConversationMessage, InteractionCard, ReasoningCard, TimelineItem, ToolCard } from "../../interactive/state"
 import type { InteractiveSnapshot } from "../../interactive/types"
 import { formatContext, formatDuration, formatElapsed, formatUsage } from "../../presentation-shared/formatters"
 import { APPROVAL_DECISION_ORDER, approvalDecisionDescription, approvalDecisionLabel, isApprovalDecision } from "../../presentation-shared/interaction-policy"
@@ -42,7 +42,6 @@ export function ConversationTimeline(props: {
           onQuestion={props.onQuestion}
         />
       ))}
-      <ReasoningBlock interactive={props.interactive} />
       <TimelineActivity interactive={props.interactive} />
       <RunSummary interactive={props.interactive} modelName={props.modelName} />
       {props.transientNotice ? <TransientNotice key={props.transientNotice.id} message={props.transientNotice.message} /> : null}
@@ -76,6 +75,7 @@ function TimelineRow(props: {
   onQuestion: (answer: string) => void
 }) {
   if (props.item.type === "message") return <MessageBlock message={props.item.message} />
+  if (props.item.type === "reasoning") return <ReasoningRow reasoning={props.item.reasoning} />
   if (props.item.type === "interaction") {
     return <InteractionRow interaction={props.item.interaction} activeInteraction={props.interactive.interaction} onApproval={props.onApproval} onQuestion={props.onQuestion} />
   }
@@ -163,12 +163,11 @@ function ToolRow(props: { tool: ToolCard; expanded: boolean; onToggle: () => voi
   )
 }
 
-/** 运行期思考块：流式中显示 spinner+内容，冻结后折叠为可展开摘要头。 */
-function ReasoningBlock(props: { interactive: InteractiveSnapshot }) {
-  const reasoning = props.interactive.reasoning
+/** 时间线中的思考条目：流式中显示 spinner+全文，冻结后折叠为可展开摘要头。 */
+function ReasoningRow(props: { reasoning: ReasoningCard }) {
+  const { reasoning } = props
   const [expanded, setExpanded] = useState(false)
-  const frame = useSpinner(Boolean(reasoning?.active), 80)
-  if (!reasoning) return null
+  const frame = useSpinner(reasoning.active, 80)
   const firstLine = reasoning.text.split("\n")[0] ?? ""
   const showFull = expanded || reasoning.active
   return (
@@ -301,6 +300,7 @@ function toolTimelineKey(tool: ToolCard): string {
 function timelineItemKey(item: TimelineItem): string {
   if (item.type === "message") return ["message", item.message.id].join(":")
   if (item.type === "tool") return toolTimelineKey(item.tool)
+  if (item.type === "reasoning") return ["reasoning", item.reasoning.id].join(":")
   return ["interaction", item.interaction.runId, item.interaction.id].join(":")
 }
 
