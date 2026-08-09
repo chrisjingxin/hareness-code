@@ -244,7 +244,7 @@ test("审批作为内联时间线事件保留选项高度", async () => {
       requestId: "approval-1",
       description: "执行 shell 命令",
       requests: { action_requests: [{ name: "execute", args: { command: "pwd" } }] },
-      decisions: ["approve_once" as const, "approve_thread" as const, "approve_always" as const, "reject" as const, "reject_with_feedback" as const],
+      decisions: ["approve_once" as const, "approve_thread" as const, "approve_project" as const, "reject" as const, "reject_with_feedback" as const],
       deadlineAtMs: Date.now() + 5_000,
     },
   }
@@ -257,8 +257,8 @@ test("审批作为内联时间线事件保留选项高度", async () => {
     const frame = setup.captureCharFrame()
     expect(frame).toContain("需要审批")
     expect(frame).toContain("允许一次")
-    expect(frame).toContain("本线程允许")
-    expect(frame).toContain("永久允许")
+    expect(frame).toContain("本会话允许")
+    expect(frame).toContain("本项目允许")
     expect(frame).toContain("拒绝")
     expect(frame).toContain("拒绝并反馈")
     expect(frame.indexOf("execute")).toBeLessThan(frame.indexOf("需要审批"))

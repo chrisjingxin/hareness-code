@@ -241,7 +241,7 @@ function InteractionRow(props: {
               options={decisionOptions}
               onSelect={(_, option) => {
                 const value = option?.value
-                if (value === "approve_once" || value === "approve_thread" || value === "approve_always" || value === "reject" || value === "reject_with_feedback") {
+                if (value === "approve_once" || value === "approve_thread" || value === "approve_project" || value === "reject" || value === "reject_with_feedback") {
                   props.onApproval(value)
                 }
               }}

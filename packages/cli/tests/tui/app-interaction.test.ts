@@ -475,7 +475,7 @@ function approvalParams(run: { threadId: string; runId: string }, description: s
       interrupt_id: "interrupt-1",
       description,
       requests: JSON.stringify({ action_requests: [{ name: "delete_file", args: { file_path: "/a.txt" } }] }),
-      decisions: ["approve_once", "approve_thread", "approve_always", "reject", "reject_with_feedback"],
+      decisions: ["approve_once", "approve_thread", "approve_project", "reject", "reject_with_feedback"],
     },
   }
 }

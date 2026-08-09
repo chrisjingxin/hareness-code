@@ -1,8 +1,7 @@
 """安全命令白名单测试。
 
-覆盖 safe_commands 模块的三级白名单（ALWAYS_SAFE_COMMANDS（30 个）/ SAFE_GIT_SUBCOMMANDS /
-SAFE_SEARCH_COMMANDS）、危险参数检测（has_dangerous_args）以及综合判断（is_safe_command）
-的公开 API 及边界场景。
+覆盖按平台门控的只读命令白名单、Git/搜索子命令、危险参数检测与
+综合判断（is_safe_command）的公开 API。
 """
 from __future__ import annotations
 
@@ -15,44 +14,53 @@ from harness_agent.policy.safe_commands import (
     has_dangerous_args,
     is_safe_command,
     is_safe_command_root,
+    safe_commands_for_platform,
 )
 
 
 # ===================================================================
-# ALWAYS_SAFE_COMMANDS — 28 个只读文件查看命令
+# 平台白名单结构
 # ===================================================================
 
 
-class TestAlwaysSafeCommands:
-    """ALWAYS_SAFE_COMMANDS 包含 30 个只读安全命令。"""
+class TestPlatformSafeCommands:
+    """按平台门控的白名单集合。"""
 
-    def test_count_is_30(self):
-        """白名单命令数量必须为 30。"""
-        assert len(ALWAYS_SAFE_COMMANDS) == 30
+    def test_windows_includes_dir_type_where(self):
+        win = safe_commands_for_platform("win32")
+        assert "dir" in win
+        assert "type" in win
+        assert "where" in win
+        assert "Get-ChildItem" in win
+        assert "cd" in win
 
-    @pytest.mark.parametrize("cmd", [
-        "ls", "cat", "pwd", "whoami", "head", "tail", "wc", "sort",
-        "uniq", "tr", "cut", "echo", "date", "uname", "df", "du",
-        "free", "uptime", "which", "whereis", "file", "stat", "id",
-        "groups", "hostname", "printenv", "basename", "dirname",
-    ])
-    def test_known_commands_in_whitelist(self, cmd):
-        """已知的只读命令均在白名单中。"""
-        assert cmd in ALWAYS_SAFE_COMMANDS
+    def test_windows_excludes_date_and_sort(self):
+        win = safe_commands_for_platform("win32")
+        assert "date" not in win
+        assert "sort" not in win
 
-    def test_realpath_and_readlink_in_whitelist(self):
-        """realpath 和 readlink 也在白名单中（补齐 28 个）。"""
-        assert "realpath" in ALWAYS_SAFE_COMMANDS
-        assert "readlink" in ALWAYS_SAFE_COMMANDS
+    def test_macos_includes_sw_vers(self):
+        mac = safe_commands_for_platform("darwin")
+        assert "sw_vers" in mac
+        assert "vm_stat" in mac
+        assert "date" in mac
 
-    def test_dangerous_commands_not_in_whitelist(self):
-        """rm、chmod、curl 等危险命令不在白名单中。"""
+    def test_linux_includes_free_lscpu(self):
+        linux = safe_commands_for_platform("linux")
+        assert "free" in linux
+        assert "lscpu" in linux
+        assert "uptime" in linux
+
+    def test_union_exported_as_always_safe(self):
+        """ALWAYS_SAFE_COMMANDS 为三平台并集，仅作枚举。"""
+        assert "dir" in ALWAYS_SAFE_COMMANDS
+        assert "sw_vers" in ALWAYS_SAFE_COMMANDS
+        assert "ls" in ALWAYS_SAFE_COMMANDS
+        assert isinstance(ALWAYS_SAFE_COMMANDS, frozenset)
+
+    def test_dangerous_commands_not_in_any_platform(self):
         for cmd in ("rm", "chmod", "chown", "curl", "wget", "pip", "npm", "git"):
             assert cmd not in ALWAYS_SAFE_COMMANDS
-
-    def test_is_frozenset(self):
-        """白名单类型为 frozenset，不可变。"""
-        assert isinstance(ALWAYS_SAFE_COMMANDS, frozenset)
 
 
 # ===================================================================
@@ -131,8 +139,8 @@ class TestIsSafeCommandRoot:
         "printenv PATH", "basename /a/b/c", "dirname /a/b/c",
     ])
     def test_always_safe_commands_with_args(self, cmd):
-        """ALWAYS_SAFE_COMMANDS 中的命令带参数也返回 True。"""
-        assert is_safe_command_root(cmd) is True
+        """Unix 平台白名单中的命令带参数也返回 True。"""
+        assert is_safe_command_root(cmd, platform="linux") is True
 
     # --- Git 只读子命令 ---
 
@@ -351,8 +359,8 @@ class TestIsSafeCommand:
         "printenv HOME", "basename /a/b/c",
     ])
     def test_safe_commands_pass(self, cmd):
-        """白名单命令且无危险参数返回 True。"""
-        assert is_safe_command(cmd) is True
+        """白名单命令且无危险参数返回 True（以 Linux 语义覆盖 date/sort）。"""
+        assert is_safe_command(cmd, platform="linux") is True
 
     # --- 搜索命令安全场景 ---
 
@@ -443,3 +451,40 @@ class TestIsSafeCommand:
     def test_git_stash_safe_operations(self, cmd):
         """git stash list/show 等只读操作是安全的。"""
         assert is_safe_command(cmd) is True
+
+
+class TestCrossPlatformSafeCommands:
+    """三平台只读命令与 ScriptBlock / date / sort 防护。"""
+
+    @pytest.mark.parametrize("cmd", [
+        "dir", 'dir /b "C:\\tmp"', "type a.txt", "where python",
+        "findstr foo bar.txt", "Get-ChildItem", "Get-Content a.txt",
+        "Test-Path a", "cd",
+    ])
+    def test_windows_readonly_allowed(self, cmd):
+        assert is_safe_command(cmd, platform="win32") is True
+
+    def test_windows_date_and_sort_blocked(self):
+        assert is_safe_command("date", platform="win32") is False
+        assert is_safe_command("sort /O out.txt", platform="win32") is False
+
+    def test_macos_sw_vers_allowed(self):
+        assert is_safe_command("sw_vers", platform="darwin") is True
+        assert is_safe_command("vm_stat", platform="darwin") is True
+
+    def test_linux_free_uptime_allowed(self):
+        assert is_safe_command("free -h", platform="linux") is True
+        assert is_safe_command("uptime", platform="linux") is True
+        assert is_safe_command("lscpu", platform="linux") is True
+
+    def test_scriptblock_rejected(self):
+        assert is_safe_command(
+            "Get-ChildItem | where { rm x }", platform="win32"
+        ) is False
+        assert is_safe_command("ForEach-Object { 1 }", platform="win32") is False
+
+    def test_windows_backslash_path_dangerous_args_still_detected(self):
+        """非 POSIX 分词下，带反斜杠路径的 -exec 仍被检出。"""
+        assert has_dangerous_args(
+            r"find C:\x -exec rm {} ;", platform="win32"
+        ) is True

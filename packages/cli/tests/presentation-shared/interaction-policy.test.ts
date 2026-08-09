@@ -9,13 +9,13 @@ import {
 } from "../../src/presentation-shared/interaction-policy"
 
 test("approval 选项顺序稳定：先批准类、再拒绝类", () => {
-  expect(APPROVAL_DECISION_ORDER).toEqual(["approve_once", "approve_thread", "approve_always", "reject", "reject_with_feedback"])
+  expect(APPROVAL_DECISION_ORDER).toEqual(["approve_once", "approve_thread", "approve_project", "reject", "reject_with_feedback"])
 })
 
 test("approval 中文文案两端统一", () => {
   expect(approvalDecisionLabel("approve_once")).toBe("允许一次")
-  expect(approvalDecisionLabel("approve_thread")).toBe("本线程允许")
-  expect(approvalDecisionLabel("approve_always")).toBe("永久允许")
+  expect(approvalDecisionLabel("approve_thread")).toBe("本会话允许")
+  expect(approvalDecisionLabel("approve_project")).toBe("本项目允许")
   expect(approvalDecisionLabel("reject")).toBe("拒绝")
   expect(approvalDecisionLabel("reject_with_feedback")).toBe("拒绝并反馈")
 })

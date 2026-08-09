@@ -550,6 +550,13 @@ def evaluate_permission(
     if rules:
         effect = evaluate_tool_rules(tool_name, tool_args, rules)
         if effect == "allow":
+            # Shell：按规则前缀的剩余部分复核安全底线（ZC-117 约束 B）
+            if tool_name in {"execute", "monitor"}:
+                from harness_agent.policy.bash_matcher import allow_remainder_triggers_floor
+
+                command = str(tool_args.get("command", "")).strip()
+                if command and allow_remainder_triggers_floor(command, rules):
+                    return "ask"
             return "allow"
         if effect == "ask":
             return "ask"

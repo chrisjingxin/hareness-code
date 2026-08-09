@@ -12,7 +12,7 @@ test("approval 校验 decisions allowlist，reject_with_feedback 携带反馈", 
     await harness.controller.dispatch({
       type: "interaction.respond",
       requestId: "approval-1",
-      response: { kind: "approval", decision: "approve_always" },
+      response: { kind: "approval", decision: "approve_project" },
     })
     // 非法 decision 不发送响应，Interaction 保持等待。
     expect(notices(harness.controller.getSnapshot())).toContain("不支持的审批决定")

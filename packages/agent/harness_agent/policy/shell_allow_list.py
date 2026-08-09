@@ -18,13 +18,17 @@ SHELL_ALLOW_ALL = type("SHELL_ALLOW_ALL", (), {"__repr__": lambda self: "SHELL_A
 
 _RECOMMENDED_SHELL_ALLOW_LIST = [
     "ls", "cat", "grep", "find", "head", "tail", "wc", "sort", "uniq",
-    "echo", "pwd", "which", "whereis", "file", "stat", "du", "df",
+    "echo", "pwd", "which", "whereis", "file", "stat", "du", "df", "cd",
     "git", "diff", "rg", "ag", "sed", "awk", "tr", "cut", "paste",
     "python", "python3", "pip", "pip3", "uv", "node", "npm", "npx",
     "bun", "yarn", "pnpm", "cargo", "go", "rustc", "gcc", "g++", "make",
     "cmake", "pytest", "ruff", "black", "mypy", "pyright", "tsc",
     "eslint", "prettier", "oxlint", "jq", "yq", "tree", "basename",
     "dirname", "realpath", "mkdir", "touch", "cp", "mv", "ln",
+    # Windows cmd / PowerShell 只读常用命令（ZC-117）
+    "dir", "type", "where", "findstr", "ver", "vol",
+    "Get-ChildItem", "Get-Content", "Get-Location", "Test-Path",
+    "Select-String", "Get-Item",
 ]
 
 _SHELL_OPERATOR_CHARS = frozenset("();<>|&")

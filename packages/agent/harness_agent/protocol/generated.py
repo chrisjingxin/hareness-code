@@ -7,7 +7,7 @@ from harness_agent.protocol.runtime import event_model, schema_model
 
 PROTOCOL_MAJOR = 3
 PROTOCOL_MINOR = 1
-PROTOCOL_SCHEMA_SHA256 = "15ab52a18ea65bf21831428e313c25c6d6e049b280f63973595a29f3a21e1a9e"
+PROTOCOL_SCHEMA_SHA256 = "245cc242a5a6c917d6d16a5cb110dbc6540eebec6f1ef51db67b5f46df8a5cc3"
 MAX_FRAME_BYTES = 8388608
 MAX_TOOL_PAYLOAD_BYTES = 1048576
 CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","plugins.list","plugins.inspect","plugins.validate","plugins.install","plugins.set_enabled","plugins.remove","agents.list","agents.inspect","teams.list","teams.inspect","teams.generate","teams.run","teams.cancel","mcp.status","mcp.add","mcp.remove","host.attachment.create","host.attachment.revoke","host.control.acquire","host.control.release","host.control.status"]
@@ -479,7 +479,7 @@ class ApprovalRequestWire(TypedDict):
     payload: dict[str, Any]
 
 class ApprovalResponseWire(TypedDict):
-    decision: Literal["approve_once", "approve_thread", "approve_always", "reject", "reject_with_feedback"]
+    decision: Literal["approve_once", "approve_thread", "approve_project", "reject", "reject_with_feedback"]
     feedback: NotRequired[str]
 
 class QuestionWire(TypedDict):
