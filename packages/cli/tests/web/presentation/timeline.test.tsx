@@ -219,4 +219,27 @@ describe("Timeline", () => {
       handle.unmount()
     }
   })
+
+  test("运行期间显示事实阶段、活动时长和独立公开摘要", () => {
+    const interactive = makeInteractive({
+      activeRun: { threadId: "thread-1", runId: "run-1" },
+      activity: { kind: "running" },
+      runProgress: { phase: "model", elapsedMs: 1_200 },
+      reasoningSummary: "检查代码路径",
+    })
+    const handle = render(
+      <Timeline snapshot={makeSnapshot({ interactive })} dispatch={() => {}} />,
+    )
+    try {
+      expect(handle.container.querySelector(".reasoning-summary")?.textContent).toContain("检查代码路径")
+      const progress = handle.container.querySelector(".run-progress")
+      expect(progress?.getAttribute("data-phase")).toBe("model")
+      expect(progress?.getAttribute("role")).toBe("status")
+      expect(progress?.getAttribute("aria-live")).toBe("polite")
+      expect(progress?.textContent).toContain("1.2s")
+      expect(progress?.textContent).toContain("Esc 取消")
+    } finally {
+      handle.unmount()
+    }
+  })
 })

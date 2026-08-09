@@ -1,7 +1,7 @@
 /** 共享 formatters 的边界测试：时长、token 用量与上下文预算格式化的确定性。 */
 
 import { expect, test } from "bun:test"
-import { formatContext, formatDuration, formatUsage } from "../../src/presentation-shared/formatters"
+import { formatContext, formatDuration, formatElapsed, formatUsage } from "../../src/presentation-shared/formatters"
 
 test("formatDuration：缺失/零/亚毫秒统一返回 undefined", () => {
   expect(formatDuration(undefined)).toBeUndefined()
@@ -23,6 +23,13 @@ test("formatDuration：1 秒以上显示秒，短时长保留 1 位小数", () =
 test("formatDuration：10 秒以上取整秒", () => {
   expect(formatDuration(10_000)).toBe("10s")
   expect(formatDuration(125_000)).toBe("125s")
+})
+
+test("formatElapsed：运行刚开始也显示 0s，并拒绝非法时长", () => {
+  expect(formatElapsed(0)).toBe("0s")
+  expect(formatElapsed(840)).toBe("0s")
+  expect(formatElapsed(1_350)).toBe("1.4s")
+  expect(formatElapsed(Number.NaN)).toBe("0s")
 })
 
 test("formatUsage：缺失返回 undefined，正常返回 in/out 摘要", () => {

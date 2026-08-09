@@ -81,6 +81,25 @@ def test_python_accepts_execution_identity_on_event_envelope() -> None:
     )
 
 
+def test_python_accepts_reasoning_summary_and_run_progress_events() -> None:
+    """新事件拥有独立 payload，不能借用 content.delta 的正文语义。"""
+    for event_type, payload in (
+        ("run.progress", {"phase": "preparing", "elapsed_ms": 12}),
+        ("reasoning.summary", {"text": "检查代码路径"}),
+    ):
+        EventEnvelope.model_validate(
+            {
+                "event_id": f"{event_type}-event",
+                "type": event_type,
+                "thread_id": "thread-1",
+                "run_id": "run-1",
+                "sequence": 1,
+                "timestamp_ms": 1,
+                "payload": payload,
+            }
+        )
+
+
 def _validate(fixture: dict[str, Any]) -> None:
     kind = fixture["kind"]
     if kind == "operation.params":

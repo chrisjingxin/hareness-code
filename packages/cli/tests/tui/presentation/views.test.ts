@@ -35,6 +35,8 @@ function snapshotOf(state: InteractiveState): InteractiveSnapshot {
     activity: state.activity,
     activeRun: state.activeRun,
     timeline: state.timeline,
+    reasoningSummary: state.reasoningSummary,
+    runProgress: state.runProgress,
     interaction: null,
     confirmation: null,
     lastRun: state.lastRun ?? null,
@@ -289,6 +291,31 @@ test("继续执行只作为历史事件之后的底部活动行", async () => {
     expect(frame).toContain("已允许")
     expect(frame).toContain("继续任务")
     expect(frame.indexOf("继续任务")).toBeLessThan(frame.indexOf("read_file"))
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("TUI 运行期间显示公开摘要、事实阶段和取消提示", async () => {
+  const run = { threadId: "thread-progress", runId: "run-progress" }
+  const started = startRun(createInitialState(), run, "检查")
+  const state: InteractiveState = {
+    ...started,
+    reasoningSummary: "检查代码路径",
+    runProgress: { phase: "model", elapsedMs: 1_200 },
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(ThreadView, viewProps(snapshotOf(state), 100, 40)), { width: 100, height: 40 })
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("思考摘要")
+    expect(frame).toContain("检查代码路径")
+    expect(frame).toContain("等待模型响应")
+    expect(frame).toContain("已运行")
+    expect(frame).toContain("Esc 取消")
   } finally {
     await act(async () => { setup.renderer.destroy() })
   }

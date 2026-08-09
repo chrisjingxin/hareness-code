@@ -777,9 +777,15 @@ async def test_explicit_skill_run_emits_loaded_event_before_content(tmp_path: Pa
             break
         await asyncio.sleep(0.01)
     events = [frame["params"] for frame in frames if frame.get("method") == "event"]
-    assert [event["type"] for event in events] == ["run.started", "skill.loaded", "content.delta", "run.completed"]
-    assert events[1]["payload"]["skill_id"] == "project/review"
-    assert "/.harness/skills/project/review/SKILL.md" in events[2]["payload"]["text"]
+    assert [event["type"] for event in events] == [
+        "run.started",
+        "run.progress",
+        "skill.loaded",
+        "content.delta",
+        "run.completed",
+    ]
+    assert events[2]["payload"]["skill_id"] == "project/review"
+    assert "/.harness/skills/project/review/SKILL.md" in events[3]["payload"]["text"]
 
 
 @pytest.mark.asyncio

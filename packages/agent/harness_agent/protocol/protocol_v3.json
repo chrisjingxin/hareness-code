@@ -4,7 +4,7 @@
   "title": "Harness Agent Protocol v3",
   "x-harness": {
     "major": 3,
-    "minor": 1,
+    "minor": 2,
     "max_frame_bytes": 8388608,
     "max_tool_payload_bytes": 1048576,
     "operations": {
@@ -53,8 +53,10 @@
     },
     "events": {
       "run.started": { "payload": "#/$defs/runStartedPayload" },
+      "run.progress": { "payload": "#/$defs/runProgressPayload" },
       "skill.loaded": { "payload": "#/$defs/skillLoadedPayload" },
       "content.delta": { "payload": "#/$defs/contentDeltaPayload" },
+      "reasoning.summary": { "payload": "#/$defs/reasoningSummaryPayload" },
       "tool.started": { "payload": "#/$defs/toolStartedPayload" },
       "tool.delta": { "payload": "#/$defs/toolDeltaPayload" },
       "tool.completed": { "payload": "#/$defs/toolCompletedPayload" },
@@ -762,6 +764,14 @@
       },
       "additionalProperties": false
     },
+    "runProgressPayload": {
+      "type": "object", "required": ["phase", "elapsed_ms"],
+      "properties": {
+        "phase": { "enum": ["preparing", "model"] },
+        "elapsed_ms": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
     "skillLoadedPayload": {
       "type": "object", "required": ["skill_id", "source", "version", "snapshot_id"],
       "properties": {
@@ -771,6 +781,11 @@
     },
     "contentDeltaPayload": {
       "type": "object", "required": ["text"], "properties": { "text": { "type": "string" } }, "additionalProperties": false
+    },
+    "reasoningSummaryPayload": {
+      "type": "object", "required": ["text"],
+      "properties": { "text": { "type": "string", "minLength": 1 } },
+      "additionalProperties": false
     },
     "toolStartedPayload": {
       "type": "object", "required": ["tool_call_id", "name"],

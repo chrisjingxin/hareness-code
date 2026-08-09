@@ -318,6 +318,8 @@ export class InteractiveControllerImpl implements InteractiveController {
       activity: this.state.activity,
       activeRun: this.state.activeRun,
       timeline: this.state.timeline,
+      reasoningSummary: this.state.reasoningSummary,
+      runProgress: this.state.runProgress,
       interaction: this.interactionFeature.interactionDto(this.interactionFeature.pendingInteraction, this.clock),
       confirmation: this.confirmation,
       lastRun: this.state.lastRun ?? null,

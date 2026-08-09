@@ -5,12 +5,12 @@ import { type RefObject } from "react"
 
 import type { ConversationMessage, InteractionCard, TimelineItem, ToolCard } from "../../interactive/state"
 import type { InteractiveSnapshot } from "../../interactive/types"
-import { formatContext, formatDuration, formatUsage } from "../../presentation-shared/formatters"
+import { formatContext, formatDuration, formatElapsed, formatUsage } from "../../presentation-shared/formatters"
 import { APPROVAL_DECISION_ORDER, approvalDecisionDescription, approvalDecisionLabel, isApprovalDecision } from "../../presentation-shared/interaction-policy"
-import { activityLabel, interactionStatusLabel, toolStatusLabel } from "../../presentation-shared/timeline-presenter"
+import { activityLabel, interactionStatusLabel, progressPhaseLabel, toolStatusLabel } from "../../presentation-shared/timeline-presenter"
 import { collapseToolOutput } from "../../presentation-shared/tool-output-policy"
 import { getCommonSyntaxClient } from "../platform/syntax-parsers"
-import { PROMPT_BORDER, useSpinner } from "./composer"
+import { PROMPT_BORDER, useRunElapsed, useSpinner } from "./composer"
 import { createScrollAcceleration } from "./scroll.js"
 import { markdownSyntax, tuiTheme } from "./theme"
 import type { ApprovalDecision } from "./types"
@@ -42,11 +42,26 @@ export function ConversationTimeline(props: {
           onQuestion={props.onQuestion}
         />
       ))}
+      <ReasoningSummary interactive={props.interactive} />
       <TimelineActivity interactive={props.interactive} />
       <RunSummary interactive={props.interactive} modelName={props.modelName} />
       {props.transientNotice ? <TransientNotice key={props.transientNotice.id} message={props.transientNotice.message} /> : null}
       <box height={1} />
     </scrollbox>
+  )
+}
+
+/** 运行期公开摘要单独展示，绝不把它伪装成 assistant 正文或历史消息。 */
+function ReasoningSummary(props: { interactive: InteractiveSnapshot }) {
+  const { interactive } = props
+  if (!interactive.activeRun || !interactive.reasoningSummary) return null
+  return (
+    <box marginTop={1} marginLeft={3} marginRight={3} border={["left"]} borderColor={tuiTheme.primarySoft} customBorderChars={PROMPT_BORDER}>
+      <box backgroundColor={tuiTheme.toolSurface} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
+        <text fg={tuiTheme.primary}>思考摘要（仅本次运行）</text>
+        <text content={interactive.reasoningSummary} fg={tuiTheme.muted} />
+      </box>
+    </box>
   )
 }
 
@@ -165,20 +180,20 @@ function ToolRow(props: { tool: ToolCard; expanded: boolean; onToggle: () => voi
 /** 当前运行只在时间线末尾显示临时活动状态，绝不插回已有事件之间。 */
 function TimelineActivity(props: { interactive: InteractiveSnapshot }) {
   const { interactive } = props
-  const tail = interactive.timeline.at(-1)
   const visible = Boolean(interactive.activeRun)
     && interactive.interaction === null
-    && interactive.activity.kind !== "running"
-    && interactive.activity.kind !== "starting"
     && interactive.activity.kind !== "waiting-interaction"
-    && !(tail?.type === "message" && tail.message.role === "assistant" && tail.message.streaming)
   // Hooks 不能因运行状态不同而跳过；否则 thread 恢复后再次执行会破坏 React hook 顺序。
   const frame = useSpinner(visible, 80)
+  const elapsed = useRunElapsed(visible, interactive.runProgress?.elapsedMs)
   if (!visible) return null
+  const phase = interactive.runProgress
+    ? progressPhaseLabel(interactive.runProgress.phase)
+    : activityLabel(interactive.activity.kind)
   return (
     <box marginTop={1} paddingLeft={3} flexDirection="row" gap={1}>
       <text fg={tuiTheme.warning}>{frame}</text>
-      <text fg={tuiTheme.warning}>{activityLabel(interactive.activity.kind)}</text>
+      <text fg={tuiTheme.warning}>{phase} · 已运行 {formatElapsed(elapsed)} · Esc 取消</text>
     </box>
   )
 }

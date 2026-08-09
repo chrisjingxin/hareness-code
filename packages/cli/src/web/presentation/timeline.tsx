@@ -13,6 +13,8 @@ import {
   type ReactNode,
 } from "react"
 import { activityLabel, interactionStatusLabel, toolStatusLabel } from "../../presentation-shared/timeline-presenter"
+import { progressPhaseLabel } from "../../presentation-shared/timeline-presenter"
+import { formatElapsed } from "../../presentation-shared/formatters"
 import { toolArgumentSummary } from "../../presentation-shared/tool-output-policy"
 
 import type {
@@ -48,6 +50,9 @@ export function Timeline({
   const isNearBottomRef = useRef<boolean>(true)
   const lastScrollRequestRef = useRef<WebScrollRequest>(null)
   const [showScrollButton, setShowScrollButton] = useState(false)
+  const activeRun = snapshot.interactive.activeRun
+  const baseElapsedMs = snapshot.interactive.runProgress?.elapsedMs
+  const elapsedMs = useLiveElapsed(Boolean(activeRun), baseElapsedMs)
 
   /** 把容器滚到底部；调用方负责在调用后维护 near-bottom 状态。 */
   const scrollContainerToBottom = useCallback(() => {
@@ -131,8 +136,29 @@ export function Timeline({
         ))
       )}
       <div className="live-interaction-slot" data-pending-request-id={pendingRequestId ?? undefined} />
+      {activeRun && snapshot.interactive.reasoningSummary ? (
+        <div className="reasoning-summary" role="status" aria-label="思考摘要（仅本次运行）">
+          <div className="reasoning-summary-title">思考摘要（仅本次运行）</div>
+          <div className="reasoning-summary-text">{snapshot.interactive.reasoningSummary}</div>
+        </div>
+      ) : null}
       <div className="run-status-live" aria-live="polite">
-        {activityLabel(snapshot.interactive.activity.kind)}
+        {activeRun ? (
+          <div
+            className="run-progress"
+            role="status"
+            aria-live="polite"
+            data-phase={snapshot.interactive.runProgress?.phase ?? "preparing"}
+          >
+            <Loader2 aria-hidden="true" focusable="false" className="run-progress-spinner spinning" />
+            <span>
+              {progressPhaseLabel(snapshot.interactive.runProgress?.phase ?? "preparing")}
+              {" · 已运行 "}
+              {formatElapsed(elapsedMs)}
+              {" · Esc 取消"}
+            </span>
+          </div>
+        ) : activityLabel(snapshot.interactive.activity.kind)}
       </div>
       {showScrollButton ? (
         <button
@@ -146,6 +172,20 @@ export function Timeline({
       ) : null}
     </div>
   )
+}
+
+/** 以最近一次 Host elapsed_ms 为基准连续更新活动时长；无 active Run 时停止计时。 */
+function useLiveElapsed(active: boolean, baseElapsedMs: number | undefined): number {
+  const [elapsedMs, setElapsedMs] = useState(baseElapsedMs ?? 0)
+  useEffect(() => {
+    const base = Math.max(0, baseElapsedMs ?? 0)
+    setElapsedMs(base)
+    if (!active) return
+    const startedAt = Date.now() - base
+    const timer = window.setInterval(() => setElapsedMs(Math.max(0, Date.now() - startedAt)), 1_000)
+    return () => window.clearInterval(timer)
+  }, [active, baseElapsedMs])
+  return elapsedMs
 }
 
 /** 生成稳定的 React key：每种 timeline item 用其身份字段，跨 run 也不冲突。 */

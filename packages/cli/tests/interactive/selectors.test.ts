@@ -28,6 +28,8 @@ function snapshot(overrides: Partial<InteractiveSnapshot> = {}): InteractiveSnap
     activity: { kind: "idle" },
     activeRun: null,
     timeline: [],
+    reasoningSummary: null,
+    runProgress: null,
     interaction: null,
     confirmation: null,
     lastRun: null,

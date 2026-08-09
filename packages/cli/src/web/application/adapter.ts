@@ -603,6 +603,8 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
       activity: view.conversation.activity,
       activeRun: view.conversation.activeRun,
       timeline: view.conversation.timeline,
+      reasoningSummary: view.conversation.reasoningSummary,
+      runProgress: view.conversation.runProgress,
       lastRun: view.conversation.lastRun,
       interaction: view.interaction.interaction,
       confirmation: view.interaction.confirmation,

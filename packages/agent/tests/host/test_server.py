@@ -524,8 +524,8 @@ async def test_echo_run_response_precedes_ordered_terminal_events():
     await _wait_for(frames, lambda frame: frame.get("params", {}).get("type") == "run.completed")
     run_frames = frames[1:]
     assert run_frames[0]["result"]["accepted"] is True
-    assert _event_types(run_frames) == ["run.started", "content.delta", "run.completed"]
-    assert [frame["params"]["sequence"] for frame in run_frames if frame.get("method") == "event"] == [1, 2, 3]
+    assert _event_types(run_frames) == ["run.started", "run.progress", "content.delta", "run.completed"]
+    assert [frame["params"]["sequence"] for frame in run_frames if frame.get("method") == "event"] == [1, 2, 3, 4]
 
 
 async def test_run_started_emits_authoritative_primary_model_binding():

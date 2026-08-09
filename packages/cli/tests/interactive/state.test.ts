@@ -37,6 +37,20 @@ test("v3 事件按 sequence 更新消息、工具和终态", () => {
   expect(state.lastRun).toMatchObject({ outcome: "completed", durationMs: 1340, usage: { inputTokens: 1200, outputTokens: 35 } })
 })
 
+test("运行进度和公开思考摘要只存在于当前 Run，并在终态清理", () => {
+  let state = startRun(createInitialState(), run, "检查代码")
+  expect(state.runProgress).toEqual({ phase: "preparing", elapsedMs: 0 })
+  state = applyAgentEvent(state, event("run.progress", 1, { phase: "model", elapsed_ms: 180 }))
+  state = applyAgentEvent(state, event("reasoning.summary", 2, { text: "检查代码路径" }))
+  expect(state.runProgress).toEqual({ phase: "model", elapsedMs: 180 })
+  expect(state.reasoningSummary).toBe("检查代码路径")
+  state = applyAgentEvent(state, event("reasoning.summary", 2, { text: "重复摘要" }))
+  expect(state.reasoningSummary).toBe("检查代码路径")
+  state = applyAgentEvent(state, event("run.completed", 3, { duration_ms: 200, usage: { input_tokens: 1, output_tokens: 1 } }))
+  expect(state.runProgress).toBeNull()
+  expect(state.reasoningSummary).toBeNull()
+})
+
 test("skill.loaded 事件加入可追踪的系统时间线项", () => {
   let state = startRun(createInitialState(), run, "检查变更")
   state = applyAgentEvent(state, event("skill.loaded", 1, {

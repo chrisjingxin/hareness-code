@@ -95,6 +95,13 @@ test("保留 prefers-reduced-motion 可访问性规则", () => {
   expect(css).toContain("prefers-reduced-motion")
 })
 
+test("运行进度和思考摘要具备独立样式，并在 reduced-motion 下停用动画", () => {
+  expect(css).toContain(".run-progress {")
+  expect(css).toContain(".reasoning-summary {")
+  expect(css).toContain(".run-progress-spinner")
+  expect(css).toContain(".run-progress-spinner, .spinning")
+})
+
 test("行号列保持逐行垂直排列：.line-numbers 必须 white-space: pre（否则 \\n 被折叠为一行）", () => {
   const block = css.slice(css.indexOf(".line-numbers {"), css.indexOf(".file-code-pre"))
   expect(block).toContain("white-space: pre")

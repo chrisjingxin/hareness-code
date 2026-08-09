@@ -47,11 +47,14 @@ from harness_agent.threads.thread_persistence import (
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_PAYLOAD_BYTES = 1 * 1024 * 1024
+MAX_REASONING_SUMMARY_BYTES = 64 * 1024
 INTERACTION_TIMEOUT_MS = 300_000
 
 RUN_STARTED = "run.started"
+RUN_PROGRESS = "run.progress"
 SKILL_LOADED = "skill.loaded"
 CONTENT_DELTA = "content.delta"
+REASONING_SUMMARY = "reasoning.summary"
 TOOL_STARTED = "tool.started"
 TOOL_DELTA = "tool.delta"
 TOOL_COMPLETED = "tool.completed"
@@ -686,6 +689,7 @@ class RunCoordinator:
                 started_payload["runtime_profile_id"] = binding.runtime_profile_id
             self._emit(run, RUN_STARTED, started_payload)
             run.status = "running"
+            self._emit(run, RUN_PROGRESS, _run_progress_payload(run, "preparing"))
 
             loaded = run.preparation.requested_skill
             if loaded is not None:
@@ -945,6 +949,7 @@ class RunCoordinator:
         runtime = run.runtime
         if runtime is None or runtime.agent is None:
             return None
+        self._emit(run, RUN_PROGRESS, _run_progress_payload(run, "model"))
         if resume is not None and run.run_context is not None:
             # Interaction resume is an explicit non-initial model phase.  The
             # pressure middleware must not reinterpret the resume as a new
@@ -1679,6 +1684,18 @@ def _translate_stream_event(
     content = _message_text(chunk)
     if content and type(chunk).__name__ != "ToolMessage":
         events.append((CONTENT_DELTA, {"text": content}))
+    summary = _reasoning_summary_text(chunk)
+    if summary:
+        events.append((REASONING_SUMMARY, {"text": summary}))
+    elif (
+        type(chunk).__name__ in {"AIMessage", "AIMessageChunk"}
+        and not content
+        and not getattr(chunk, "tool_call_chunks", None)
+        and _has_reasoning_block(chunk)
+    ):
+        # Translator 也可能被独立调用（例如恢复/测试 seam），此时仍需给
+        # reasoning-only chunk 一个事实进度事件，而不是依赖 _stream_agent。
+        events.append((RUN_PROGRESS, _run_progress_payload(run, "model")))
     for tool_chunk in getattr(chunk, "tool_call_chunks", None) or []:
         tool_id = _resolve_tool_stream_id(run, tool_chunk, source_message=chunk)
         if tool_chunk.get("name") and tool_id not in run.started_tool_ids:
@@ -1923,17 +1940,97 @@ def _content_text(content: object) -> str:
 
 
 def _message_text(message: object) -> str:
-    """优先从标准 content_blocks 提取正文，兼容旧式 content。"""
+    """只读取显式 text block；不透明 content_blocks 不得回退成正文。"""
     blocks = getattr(message, "content_blocks", None)
     if isinstance(blocks, list):
-        text = "".join(
-            str(block.get("text", ""))
+        return "".join(
+            block["text"]
             for block in blocks
-            if isinstance(block, Mapping) and block.get("type") == "text"
+            if isinstance(block, Mapping)
+            and block.get("type") == "text"
+            and isinstance(block.get("text"), str)
         )
-        if text:
-            return text
-    return _content_text(getattr(message, "content", None))
+    content = getattr(message, "content", None)
+    if isinstance(content, list):
+        return "".join(
+            item
+            if isinstance(item, str)
+            else item["text"]
+            for item in content
+            if isinstance(item, str)
+            or (
+                isinstance(item, Mapping)
+                and item.get("type") == "text"
+                and isinstance(item.get("text"), str)
+            )
+        )
+    return _content_text(content)
+
+
+def _has_reasoning_block(message: object) -> bool:
+    """判断消息是否包含 reasoning block，但不读取其私有内容。"""
+    blocks = getattr(message, "content_blocks", None)
+    return isinstance(blocks, list) and any(
+        isinstance(block, Mapping) and block.get("type") == "reasoning"
+        for block in blocks
+    )
+
+
+def _reasoning_summary_text(message: object) -> str:
+    """只从原始 Responses block 提取公开 summary_text，未知形状 fail closed。"""
+    raw_content = getattr(message, "content", None)
+    # ChatOpenAI 的 provider translator 会把 summary_text 规范化为同名的
+    # ``reasoning`` 字段；该字段也可能代表原始思维，不能据此公开。只有
+    # 原始 Responses block 明确保留 ``summary`` 容器时，边界才是可确认的。
+    blocks = (
+        raw_content
+        if isinstance(raw_content, list)
+        else getattr(message, "content_blocks", None)
+    )
+    if not isinstance(blocks, list):
+        return ""
+    parts: list[str] = []
+    for block in blocks:
+        if not isinstance(block, Mapping) or block.get("type") != "reasoning":
+            continue
+        # ``content`` is the raw reasoning channel; encrypted/unknown fields
+        # make the public boundary ambiguous even when summary_text exists.
+        if set(block) - {"type", "summary", "id", "index", "status"}:
+            continue
+        summary = block.get("summary")
+        if not isinstance(summary, list) or not summary:
+            continue
+        if not all(
+            isinstance(item, Mapping)
+            and item.get("type") == "summary_text"
+            and isinstance(item.get("text"), str)
+            and not (set(item) - {"type", "text", "index"})
+            for item in summary
+        ):
+            continue
+        parts.extend(
+            item["text"]
+            for item in summary
+            if isinstance(item["text"], str) and item["text"]
+        )
+    return _truncate_reasoning_summary("".join(parts))
+
+
+def _truncate_reasoning_summary(value: str) -> str:
+    """限制公开摘要大小，避免 provider 文本撑爆单帧或运行时状态。"""
+    encoded = value.encode("utf-8")
+    if len(encoded) <= MAX_REASONING_SUMMARY_BYTES:
+        return value
+    return encoded[:MAX_REASONING_SUMMARY_BYTES].decode("utf-8", errors="ignore")
+
+
+def _run_progress_payload(run: RunState, phase: str) -> dict[str, object]:
+    """生成只包含事实阶段和活动时长的运行进度 payload。"""
+    safe_phase = phase if phase in {"preparing", "model"} else "preparing"
+    return {
+        "phase": safe_phase,
+        "elapsed_ms": max(0, round((time.monotonic() - run.started_at) * 1000)),
+    }
 
 
 def _json_safe(value: object) -> object:

@@ -100,7 +100,7 @@ async def test_run_owner_and_observer_receive_identical_events(tmp_path: Path) -
     owner_events = [frame["params"] for frame in owner_frames if frame.get("method") == "event"]
     attached_events = [frame["params"] for frame in attached_frames if frame.get("method") == "event"]
     assert owner_events == attached_events
-    assert [event["sequence"] for event in owner_events] == [1, 2, 3]
+    assert [event["sequence"] for event in owner_events] == [1, 2, 3, 4]
     await host.close()
 
 
@@ -204,11 +204,13 @@ async def test_stdio_owner_and_websocket_observer_share_context_updated_sequence
     assert owner_events == websocket_events
     assert [event["type"] for event in owner_events] == [
         "run.started",
+        "run.progress",
+        "run.progress",
         "context.updated",
         "content.delta",
         "run.completed",
     ]
-    assert [event["sequence"] for event in owner_events] == [1, 2, 3, 4]
+    assert [event["sequence"] for event in owner_events] == [1, 2, 3, 4, 5, 6]
     await host.close()
 
 

@@ -10,7 +10,14 @@ from pathlib import Path
 import pytest
 
 import harness_agent.config.config as config_module
-from harness_agent.config.config import ConfigError, ExecutionSettings, ModelSettings, RemoteSandboxSettings, load_config
+from harness_agent.config.config import (
+    ConfigError,
+    ExecutionSettings,
+    ModelSettings,
+    ReasoningSettings,
+    RemoteSandboxSettings,
+    load_config,
+)
 from harness_agent.config.config_manifest import ConfigManifest
 from harness_agent.runtime.execution import create_execution_context
 from harness_agent.extensions.providers.harness_gateway import create_openai_compatible_model
@@ -568,6 +575,38 @@ def test_openai_compatible_adapter_is_constructed_without_network(monkeypatch: p
     assert model.model_name == "enterprise-model"
     assert model.openai_api_key is not None
     assert model.openai_api_key.get_secret_value() == "toml-key"
+
+
+def test_reasoning_profile_is_parsed_and_forwarded_as_responses_configuration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """reasoning 是 Profile 配置，不通过 extra_body 绕过身份。"""
+    monkeypatch.setenv("HARNESS_REASONING_KEY", "test-key")
+    path = tmp_path / "reasoning.toml"
+    path.write_text(
+        """[config]\nversion = 1\n\n[models]\ndefault_profile = \"enterprise\"\n\n[models.profiles.enterprise]\nprovider = \"openai-compatible\"\nmodel = \"enterprise-model\"\nbase_url = \"https://gateway.example.internal/v1\"\napi_key_env = \"HARNESS_REASONING_KEY\"\n\n[models.profiles.enterprise.reasoning]\neffort = \"medium\"\nsummary = \"auto\"\n""",
+        encoding="utf-8",
+    )
+
+    config = load_config(workspace=tmp_path, home=tmp_path / "home", config_path=path)
+    settings = config.require_model()
+    assert settings.reasoning == ReasoningSettings(effort="medium", summary="auto")
+
+    model = create_openai_compatible_model(settings)
+    assert model.reasoning == {"effort": "medium", "summary": "auto"}
+    assert model.output_version == "responses/v1"
+
+
+def test_invalid_reasoning_profile_fails_closed(tmp_path: Path):
+    """未知 effort 不能静默落到 adapter 私有参数。"""
+    path = tmp_path / "invalid-reasoning.toml"
+    path.write_text(
+        """[config]\nversion = 1\n\n[models]\ndefault_profile = \"enterprise\"\n\n[models.profiles.enterprise]\nmodel = \"enterprise-model\"\nbase_url = \"https://gateway.example.internal/v1\"\n\n[models.profiles.enterprise.reasoning]\neffort = \"maximum\"\nsummary = \"auto\"\n""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="reasoning.effort"):
+        load_config(workspace=tmp_path, home=tmp_path / "home", config_path=path)
 
 
 def test_local_execution_backend_does_not_inherit_model_secret(

@@ -38,6 +38,28 @@ SUPPORTED_MODEL_CAPABILITIES = frozenset({"tool-calling", "streaming", "vision",
 
 
 @dataclass(frozen=True, slots=True)
+class ReasoningSettings:
+    """OpenAI Responses 公开 reasoning summary 的显式请求配置。"""
+
+    effort: Literal["low", "medium", "high"] | None = None
+    summary: Literal["auto", "concise", "detailed"] | None = None
+
+    def __post_init__(self) -> None:
+        """拒绝空配置，确保 adapter 只接收已确认的 canonical 选项。"""
+        if self.effort is None and self.summary is None:
+            raise ConfigError("models.profiles.<name>.reasoning must configure effort or summary")
+
+    def to_payload(self) -> dict[str, str]:
+        """转换为不含秘密的 ChatOpenAI reasoning 参数。"""
+        payload: dict[str, str] = {}
+        if self.effort is not None:
+            payload["effort"] = self.effort
+        if self.summary is not None:
+            payload["summary"] = self.summary
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
 class ModelSettings:
     """由 v1 TOML 和环境变量解析出的 OpenAI 兼容模型配置。"""
 
@@ -54,6 +76,7 @@ class ModelSettings:
     capabilities: frozenset[str] = DEFAULT_MODEL_CAPABILITIES
     headers: dict[str, str] = field(default_factory=dict)
     headers_env: dict[str, str] = field(default_factory=dict)
+    reasoning: ReasoningSettings | None = None
 
     def __post_init__(self, api_key: str | None) -> None:
         """将已校验的 TOML 降级密钥保存到不参与 repr 的私有字段。"""
@@ -110,6 +133,7 @@ class ModelSettings:
             "capabilities": sorted(self.capabilities),
             "headers": dict(self.headers),
             "headers_env": dict(self.headers_env),
+            "reasoning": self.reasoning.to_payload() if self.reasoning is not None else None,
         }
 
 
@@ -525,6 +549,7 @@ def _merge_profile_values(base: dict[str, object], override: dict[str, object]) 
         "capabilities",
         "headers",
         "headers_env",
+        "reasoning",
     }
     unknown = set(override) - allowed
     if unknown:
@@ -533,7 +558,7 @@ def _merge_profile_values(base: dict[str, object], override: dict[str, object]) 
         )
     merged = dict(base)
     for key, value in override.items():
-        if key in {"headers", "headers_env"}:
+        if key in {"headers", "headers_env", "reasoning"}:
             if not isinstance(value, dict):
                 raise ConfigError(f"models.profiles.<name>.{key} must be a TOML table")
             existing = merged.get(key, {})
@@ -689,6 +714,7 @@ def _parse_model_settings(values: Mapping[str, object]) -> ModelSettings:
         capabilities = frozenset(item.strip() for item in raw_capabilities)
         if not capabilities or not capabilities.issubset(SUPPORTED_MODEL_CAPABILITIES):
             raise ConfigError("models.profiles.<name>.capabilities contains unsupported values")
+    reasoning = _parse_reasoning_settings(values.get("reasoning"))
     return ModelSettings(
         name=name,
         base_url=base_url,
@@ -706,7 +732,33 @@ def _parse_model_settings(values: Mapping[str, object]) -> ModelSettings:
         capabilities=capabilities,
         headers=headers,
         headers_env=headers_env,
+        reasoning=reasoning,
     )
+
+
+def _parse_reasoning_settings(value: object) -> ReasoningSettings | None:
+    """解析公开 reasoning 选项；未知字段和枚举值一律在配置阶段失败。"""
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ConfigError("models.profiles.<name>.reasoning must be a TOML table")
+    unknown = set(value) - {"effort", "summary"}
+    if unknown:
+        raise ConfigError(
+            "models.profiles.<name>.reasoning contains unsupported fields: "
+            + ", ".join(sorted(str(item) for item in unknown))
+        )
+    effort = value.get("effort")
+    if effort is not None and (
+        not isinstance(effort, str) or effort not in {"low", "medium", "high"}
+    ):
+        raise ConfigError("models.profiles.<name>.reasoning.effort must be low, medium, or high")
+    summary = value.get("summary")
+    if summary is not None and (
+        not isinstance(summary, str) or summary not in {"auto", "concise", "detailed"}
+    ):
+        raise ConfigError("models.profiles.<name>.reasoning.summary must be auto, concise, or detailed")
+    return ReasoningSettings(effort=effort, summary=summary)  # type: ignore[arg-type]
 
 
 def _parse_execution(
