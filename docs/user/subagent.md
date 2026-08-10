@@ -144,7 +144,7 @@ maxTurns: 20
 
 ## 可用工具列表
 
-当前项目注册的全部工具（23 个）：
+当前项目注册的全部工具（22 个）：
 
 | 工具 | 说明 |
 | --- | --- |
@@ -160,7 +160,6 @@ maxTurns: 20
 | `web_search` | 网络搜索 |
 | `web_fetch` | 获取网页内容 |
 | `delete_file` | 删除文件 |
-| `apply_patch` | 应用补丁 |
 | `lsp` | 语言服务协议操作 |
 | `tool_search` | 搜索已连接的 MCP 外部工具（`select:name1,name2` 精确选择或关键词搜索，返回参数 schema） |
 | `memory_save` | 保存记忆 |
