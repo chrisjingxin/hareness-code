@@ -44,12 +44,12 @@ export function HomeView(props: SharedViewProps) {
 function HomeSupplemental(props: { terminalWidth: number }) {
   return (
     <>
-      <box paddingTop={1} flexDirection="row" gap={2} flexShrink={0}>
+      <box paddingTop={2} flexDirection="row" gap={2} flexShrink={0} justifyContent="center">
         <text fg={tuiTheme.muted}><span fg={tuiTheme.text}>Enter</span> 发送</text>
         <text fg={tuiTheme.muted}><span fg={tuiTheme.text}>/</span> 命令</text>
         {props.terminalWidth >= 72 ? <text fg={tuiTheme.muted}><span fg={tuiTheme.text}>Ctrl+C</span> 清空/退出</text> : null}
       </box>
-      <box paddingTop={2} flexShrink={0}>
+      <box paddingTop={1} flexShrink={0} justifyContent="center">
         <text fg={tuiTheme.muted}>
           <span fg={tuiTheme.primary}>提示</span>　输入 <span fg={tuiTheme.text}>/help</span> 查看当前可用命令
         </text>

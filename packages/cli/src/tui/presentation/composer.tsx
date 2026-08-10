@@ -42,7 +42,7 @@ export function Composer(props: Pick<SharedViewProps, "interactive" | "terminalW
     ? "输入你的回答后按 Enter"
     : active
       ? "正在执行；Esc 中断"
-      : "输入消息…（输入 / 唤起命令）"
+      : "输入消息..（输入 / 唤起命令）"
 
   const commandMenu = props.commandMenu.visible ? (
     <CommandMenu
@@ -54,6 +54,9 @@ export function Composer(props: Pick<SharedViewProps, "interactive" | "terminalW
     />
   ) : null
 
+  const isHome = props.variant === "home"
+  const modeBadgeLabel = props.interactive.runtime.approvalMode === "yolo" ? "Yolo" : "Build"
+
   return (
     <box position="relative" flexDirection="column" flexShrink={0}>
       {commandMenu && props.commandMenuPlacement === "above" ? (
@@ -61,25 +64,52 @@ export function Composer(props: Pick<SharedViewProps, "interactive" | "terminalW
           {commandMenu}
         </box>
       ) : null}
-      <box border={["left"]} borderColor={active ? tuiTheme.primarySoft : tuiTheme.primary} customBorderChars={PROMPT_BORDER}>
-        <box backgroundColor={tuiTheme.composer} paddingLeft={2} paddingRight={2} paddingTop={1} flexShrink={0} flexGrow={1}>
-          <textarea
-            ref={props.inputRef}
-            placeholder={placeholder}
-            placeholderColor={tuiTheme.muted}
-            textColor={tuiTheme.text}
-            focusedTextColor={tuiTheme.text}
-            backgroundColor={tuiTheme.composer}
-            focusedBackgroundColor={tuiTheme.composer}
-            cursorColor={tuiTheme.primary}
-            minHeight={1}
-            maxHeight={6}
-            keyBindings={COMPOSER_KEY_BINDINGS}
-            focused={(!active || awaitingQuestion) && !props.pickerVisible}
-            onContentChange={() => props.onInput(props.inputRef.current?.plainText ?? "")}
-            onKeyDown={props.onComposerKeyDown}
-            onSubmit={props.onSubmit}
-          />
+      <box
+        border={isHome ? [] : ["left"]}
+        borderColor={active ? tuiTheme.primarySoft : tuiTheme.primary}
+        customBorderChars={PROMPT_BORDER}
+      >
+        <box backgroundColor={tuiTheme.composer} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={isHome ? 1 : 0} flexShrink={0} flexGrow={1}>
+          {isHome ? (
+            <box flexDirection="row" gap={2} alignItems="flex-start">
+              <text fg={tuiTheme.warning} bold>{modeBadgeLabel}</text>
+              <textarea
+                ref={props.inputRef}
+                placeholder={placeholder}
+                placeholderColor={tuiTheme.muted}
+                textColor={tuiTheme.text}
+                focusedTextColor={tuiTheme.text}
+                backgroundColor={tuiTheme.composer}
+                focusedBackgroundColor={tuiTheme.composer}
+                cursorColor={tuiTheme.primary}
+                minHeight={1}
+                maxHeight={6}
+                keyBindings={COMPOSER_KEY_BINDINGS}
+                focused={(!active || awaitingQuestion) && !props.pickerVisible}
+                onContentChange={() => props.onInput(props.inputRef.current?.plainText ?? "")}
+                onKeyDown={props.onComposerKeyDown}
+                onSubmit={props.onSubmit}
+              />
+            </box>
+          ) : (
+            <textarea
+              ref={props.inputRef}
+              placeholder={placeholder}
+              placeholderColor={tuiTheme.muted}
+              textColor={tuiTheme.text}
+              focusedTextColor={tuiTheme.text}
+              backgroundColor={tuiTheme.composer}
+              focusedBackgroundColor={tuiTheme.composer}
+              cursorColor={tuiTheme.primary}
+              minHeight={1}
+              maxHeight={6}
+              keyBindings={COMPOSER_KEY_BINDINGS}
+              focused={(!active || awaitingQuestion) && !props.pickerVisible}
+              onContentChange={() => props.onInput(props.inputRef.current?.plainText ?? "")}
+              onKeyDown={props.onComposerKeyDown}
+              onSubmit={props.onSubmit}
+            />
+          )}
           {props.selectedSkill ? (
             <box paddingTop={1} flexDirection="row" gap={1}>
               <text fg={tuiTheme.primary}>Skill</text>
@@ -152,13 +182,30 @@ function RuntimeMeta(props: { interactive: SharedViewProps["interactive"]; varia
     : Math.max(28, props.terminalWidth - 10)
   // Shift+Tab 快捷键提示紧跟审批模式展示；窄终端隐藏提示，优先保住模式本身。
   const showApprovalHint = contentWidth >= 52
-  const model = shorten(modelSelectionLabel(props.interactive), Math.max(14, contentWidth - (showApprovalHint ? 22 : 14)))
+  const modelName = modelSelectionLabel(props.interactive)
+  const model = shorten(modelName, Math.max(14, contentWidth - (showApprovalHint ? 22 : 14)))
   const warning = runtime.approvalModeWarning
     ? shorten(runtime.approvalModeWarning, contentWidth)
     : undefined
   const startupError = runtime.startupError
     ? shorten(`配置需要处理：${runtime.startupError}`, contentWidth)
     : undefined
+
+  if (props.variant === "home") {
+    return (
+      <box flexDirection="column" paddingTop={1}>
+        <box width="100%" flexDirection="row" justifyContent="space-between" gap={2}>
+          <text fg={runtime.modelConfigured ? tuiTheme.muted : tuiTheme.warning}>{model}</text>
+          <box flexDirection="row" gap={2}>
+            <text fg={tuiTheme.subtle}>shift+enter <span fg={tuiTheme.subtle}>new line</span></text>
+            <text fg={tuiTheme.subtle}>tab <span fg={tuiTheme.subtle}>modes</span></text>
+          </box>
+        </box>
+        {warning ? <text fg={tuiTheme.warning}>{warning}</text> : null}
+        {startupError ? <text fg={tuiTheme.warning}>{startupError}</text> : null}
+      </box>
+    )
+  }
 
   return (
     <box flexDirection="column" paddingTop={1} paddingBottom={1}>
@@ -187,7 +234,7 @@ export function FooterRail(props: { interactive: SharedViewProps["interactive"];
     <box flexDirection="row" justifyContent="space-between" gap={1} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1} flexShrink={0}>
       <box flexDirection="row" gap={1} flexShrink={1}>
         <text fg={tuiTheme.muted}>{workspace}</text>
-        {showBranch ? <text fg={tuiTheme.subtle}>:{branchLabel}</text> : null}
+        {showBranch ? <text fg={tuiTheme.muted}>:{branchLabel}</text> : null}
       </box>
       {props.interactive.activeRun ? <BusyRunHint /> : props.thread ? <text fg={tuiTheme.muted}>↑↓ 历史 · PgUp/PgDn 滚动 · Ctrl+O 工具</text> : null}
       <text fg={tuiTheme.subtle}>v{runtime.cliVersion}</text>

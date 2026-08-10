@@ -21,8 +21,8 @@ export const METEOR_ANGLE = 0.36
 export const METEOR_TAIL = 32
 export const METEOR_STEP = 0.15
 
-const STAR_CHARS = ["✦", "✧", "✦", "✧", "✦", "✧", "✦", " "]
-const HOT_CHAR = "✶"
+const STAR_CHARS = ["+", "+", "+", "+", "+", "+", "+", " "]
+const HOT_CHAR = "+"
 const HOT_THRESHOLD = 0.88
 
 export type RandomSource = () => number

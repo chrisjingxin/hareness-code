@@ -12,7 +12,7 @@ Harness Code（命令名 `harness` / `za38`）是一个面向企业研发场景�
 
 ## Agent 开工顺序
 
-1. 先读取 `README.md`、`docs/developer/architecture/架构总览.md` 与任务对应的 `docs/developer/tasks/<ID>.md`；若存在 `docs/developer/designs/<ID>.md`，还必须同时读取该方案设计。
+1. 先读取 `README.md`、`docs/developer/architecture/架构总览.md` 与任务对应的 `docs/developer/tasks/<ID>.md`；功能任务还必须读取同 ID 的 `docs/developer/designs/<ID>.md`。执行 Agent 同时以任务中的“实施计划”和“执行 Todo”为工作清单。
 2. 运行 `git status --short`，识别并保留用户已有改动；不得为清理工作区而回滚无关文件。
 3. 按变更归属选择包：界面和进程管理改 `cli`，跨进程契约改 `protocol`，Agent 与执行逻辑改 `agent`。
 4. 修改前先找到邻近实现与现有测试；协议或生命周期变更必须同时验证 TypeScript 和 Python 两端。
@@ -25,7 +25,7 @@ Harness Code（命令名 `harness` / `za38`）是一个面向企业研发场景�
 - `packages/agent/`：`za38-agent` Python distribution workspace；`harness_agent/host/` 管连接和 Run，`runtime/` 构建 Agent，`threads/` 管持久化与上下文，其余职责按 `config/policy/tools/extensions/protocol` 分层。
 - `packages/*/tests/`：包内测试并镜像源码职责；工程脚本测试位于 `scripts/project/`。
 - `docs/user/`：最终用户的快速开始、配置、交互使用和故障排查。
-- `docs/developer/`：`architecture/` 保存架构与 ADR，`designs/` 保存按任务 ID 编排的已确认实施方案，`project/` 保存工作流，`research/` 保存调研及历史资料，`tasks/` 保存原始任务源和生成看板。
+- `docs/developer/`：`architecture/` 保存架构与 ADR，`designs/` 保存与完整功能 Task 一一对应的已确认功能设计，`project/` 保存工作流，`research/` 保存调研及历史资料，`tasks/` 保存功能任务、实施计划、执行 Todo、证据和生成看板。
 - `scripts/project/`：任务、文档与发布一致性检查的工程脚本。
 
 表现层逻辑只能放在 `cli`，Agent/业务逻辑只能放在 `agent`，跨进程契约只能放在 `protocol`。
@@ -72,9 +72,47 @@ Python 测试命名为 `test_<行为>`，Bun 测试命名为 `*.test.ts`。修�
 
 修改服务端生命周期时，必须补充取消、中断/恢复、畸形帧和终态错误事件的回归测试。
 
-## 计划与任务文档表达
+## 功能开发流程与模型分工
 
-所有 Agent 输出的实施计划，以及 `docs/developer/tasks/<ID>.md`，必须让不熟悉当前实现的人也能直接检视：
+一个功能从需求到完成固定经过以下阶段：
+
+```text
+需求
+  → Task：定义完整用户结果、范围和验收
+  → Design：确认该功能如何工作
+  → Plan：安排实现顺序、文件边界和验证方式
+  → Todo：形成快速模型可逐项执行的清单
+  → Execute：按 Todo 实现和快速验证
+  → Verify：强模型复核设计、diff、测试和完成证据
+```
+
+各阶段职责如下：
+
+- **Task**：一个完整功能的工作入口，回答“为什么做、用户最终得到什么、什么算完成”。Task 不是某一层代码、某一个类或某一个实现步骤。
+- **Design**：描述这个功能的已确认设计，回答“目标流程、interface、状态、错误语义和关键 invariant 是什么”。Design 与功能 Task 使用相同 ID，一项功能只维护一份 canonical Design。
+- **Plan**：放在 Task 正文的“实施计划”中，把 Design 转换为有依赖顺序的实现步骤；每一步写清改什么、为什么、如何验证。
+- **Todo**：放在同一 Task 正文的“执行 Todo”中，是 Plan 的可执行清单。Todo 可以很细，但 Todo 不是 Task，不创建独立 ID、owner、branch、Design 或复核周期。
+- **Execute**：执行 Agent 只实现已确认 Todo，更新复选框、验证结果和证据，不重新定义功能。
+- **Verify**：完成前由强模型对照 Task、Design 和验收复核完整 diff；发现设计缺口时回到 Design/Plan 修订，不用新增实现子任务掩盖问题。
+
+模型分工按能力而不是具体产品名固定：
+
+- 强模型负责需求澄清、Design、Plan、Todo、跨包/Protocol/生命周期决策、复杂排障和最终复核。
+- 快速模型负责拿着已经确认的 Task、Design 和 Todo 做实现、focused tests、机械迁移、文档同步和证据记录。
+- 快速模型不得自行改变范围、公开 interface、数据形状、错误语义、生命周期或兼容策略。若 Todo 与代码冲突或必须新增决策，应停止相关实现，在 Task 中记录阻塞点，交回强模型修订 Design/Plan；不要现场创建新 Task 或兼容分支。
+- 一个 Task 可以由多个执行 Thread 依次接力，但它们共享同一 Task、Design、Plan 和 Todo；Thread 数量不等于 Task 数量。
+
+推荐 Skill：
+
+- Design 默认使用 `mattpocock-skills:codebase-design` 检查 module、interface、seam 和可测试性；涉及领域术语或难以逆转的架构决策时叠加 `mattpocock-skills:domain-modeling`。
+- 外部事实不确定时使用 `mattpocock-skills:research`；必须用可运行结果回答设计问题时使用 `mattpocock-skills:prototype`。Research/Prototype 只为 Design 提供证据，不替代 Design。
+- Plan/Todo 由强模型依据本节格式直接写入 Task；不要使用会把一个功能默认拆成多个 ticket 的工作流。只有多个关联性弱、可独立交付的功能已经确认需要分开时，才分别建立 Task。
+- 执行行为变更时可使用 `mattpocock-skills:tdd`；复杂 bug 使用 `mattpocock-skills:diagnosing-bugs`。
+- 完成前优先使用 `mattpocock-skills:code-review` 或 `check-work` 做强模型验证，结论仍须写回 Task 的测试与验收证据。
+
+## Plan、Todo 与任务文档表达
+
+所有 Design、实施计划、执行 Todo，以及 `docs/developer/tasks/<ID>.md`，必须让不熟悉当前实现的人也能直接检视：
 
 - 先用通俗语言说明：现在有什么问题、准备怎么解决、改完后会有什么变化。
 - 复杂流程优先写成 `输入 → 判断 → 执行 → 输出`，再补充文件、类型和方法名。
@@ -83,6 +121,14 @@ Python 测试命名为 `test_<行为>`，Bun 测试命名为 `*.test.ts`。修�
 - 验收项必须描述可观察结果，避免“完成重构”“优化架构”等无法直接验证的说法。
 - 技术细节放在通俗说明之后；如果两者冲突，以便于用户检视为优先。
 
+强模型产出的 Plan 和 Todo 还必须满足：
+
+- Plan 按真实依赖排序，不按 `cli/protocol/agent` 水平分层凑步骤；一次行为变更需要同时改多层时，应保留在同一步中形成可验证的纵向结果。
+- Todo 使用 Markdown checkbox，每项包含明确动作和完成信号，例如“修改哪些相邻文件/行为”“运行哪条 focused test”“期望观察到什么”。
+- 一个 Todo 应能在不中途发明新设计的情况下执行完成；如果 Todo 仍写着“决定”“评估”“选择一种方案”，说明 Design/Plan 尚未完成，不能交给快速模型。
+- Todo 可以按实现、测试、文档、项目检查拆细，但不得为了 Todo 数量创建新的 Task。
+- Plan/Todo 可以随代码事实修订，但任何改变范围、interface、Protocol、数据形状、生命周期或错误语义的修订，必须先更新 Design 并由强模型复核。
+
 对照示例：
 
 ```text
@@ -90,33 +136,38 @@ Python 测试命名为 `test_<行为>`，Bun 测试命名为 `*.test.ts`。修�
 推荐：模型选择只计算一次，运行、历史记录和界面都使用这同一个结果；实现上由 ResolvedExecutionBinding 保存该结果。
 ```
 
-## 任务拆解、归属与定期复核
+## Task 粒度、归属与定期复核
 
-任务数量增加时，必须先保证每个任务能回答“谁拆的、谁在做、服务哪个功能、现在是否仍有效”，再追求拆得更细：
+默认规则是“一个完整功能 = 一个 Task = 一个同 ID Design”。不得预设每个功能必须拆成 3～5 个 Task，也不得为了并行、缩短单次 context 或区分代码层而制造上层/下层任务树。
 
-- 一个需求需要拆成多个任务时，先建立一个上层任务和对应 `docs/developer/designs/<上层任务 ID>.md`。上层任务描述完整用户结果、共同 invariant、依赖顺序和最终验收；子任务只承担一个可独立认领、可单独验证的交付边界。
+- 功能内部的基础设施、Protocol、Agent、CLI、测试、文档和迁移步骤，通常写成同一 Task 的 Plan/Todo，不分别建 Task。会反复修改同一批文件、共享同一套 design 决策、必须一起上线或任一部分单独完成都不可用的工作，必须保留在一个 Task。
+- 只有当工作项关联性弱，并且每一项都具备独立用户/工程价值、独立验收、独立上线或关闭不会让另一项处于不可用中间态时，才拆成不同 Task。拆分后的每个 Task 都是平级完整功能，分别拥有自己的 Design；不需要再建立只用于汇总的上层 Task。
+- 只有真正的产品级项目同时包含多个可独立交付功能，且需要单独跟踪共同里程碑时，才允许建立 parent Task。parent Task 不承载某个单一功能的 Design；每个子功能仍各自拥有同 ID Design。不得用 parent/child 表达一个功能的实现步骤。
+- 功能太大、一次 context 放不下时，先由强模型在同一 Task 中产出分阶段 Plan/Todo，再让多个执行 Thread 按 Todo 接力；这不是拆 Task 的理由。
 - 新建或实质调整任务时，front matter 必须填写 `decomposed_by`（拆解者）、`feature_area`（大的功能板块）、`parent_task`（直接上层任务，没有则为 `-`）、`reviewed_at` 和 `review_due`。`decomposed_by` 记录方案拆解责任，不等同于实现负责人；不得在认领时覆盖。
 - `owner` 和 `branch` 只表示当前认领者与实施分支，必须通过 `bun run task:claim` 写入。禁止为了表示“谁创建了任务”预填 `owner`；未认领任务固定使用 `owner: 未认领`、`branch: -`。
-- 子任务正文必须链接上层任务与设计，写清自己为哪一项用户结果服务、依赖哪些任务、会修改什么、明确不修改什么。不得创建没有上层归属的零散“顺手优化”任务；真正独立的根任务须在 `feature_area` 中给出稳定板块名称。
-- 拆解粒度以“一个 Agent/分支可以在不等待另一个未完成 diff 的情况下实现并验证”为准。会反复修改同一批文件、必须同时上线或单独交付会形成不可用中间态的内容，应保留在同一任务或明确串行依赖，不能为了并行数量强行拆分。
-- 上层任务不能因为设计文档完成就标记完成。只有所有子任务已经 `已完成` 或有依据地 `已过时`，共同验收、用户文档、项目检查和版本影响全部闭环后，上层任务才允许完成。
+- 相邻问题只有形成独立完整结果时才新建 Task；否则记入当前 Task 的 Todo 或用一句“可选后续”保留，不创建零散“顺手优化”任务。
+- `decomposed_by` 记录谁整理了 Task 边界；它不表示必须发生任务拆解。普通功能 Task 默认 `parent_task: -`。
+- parent Task 不能因为子功能 Design 完成就标记完成；只有里程碑验收和所有关联功能状态闭环后才允许完成。
 
-活动任务默认每 14 天复核一次，并在下列时点提前复核：认领前、上层设计变更后、相邻架构合并后、准备发布或关闭上层任务前。复核必须更新任务的 `reviewed_at`、`review_due`，并在正文“定期复核记录”中写明结论：
+活动任务默认每 14 天复核一次，并在下列时点提前复核：认领前、对应 Design 变更后、相邻架构合并后、准备发布或关闭 Task 前。复核必须更新任务的 `reviewed_at`、`review_due`，并在正文“定期复核记录”中写明结论：
 
 - 仍有效：确认现状、范围、依赖和验收没有失真，安排下一次复核日期。
 - 实际已完成：补齐代码、测试、文档和版本证据后走 `task:complete`，不得只勾选清单或凭合并印象关闭。
 - 已过时或被替代：设置 `status: 已过时`、清空 `review_due`，在 `references` 和复核记录中指向替代任务/设计并说明仍可保留的历史产物；不得删除任务来抹掉历史。
-- 部分仍有效：保留原始需求和历史证据，在复核记录中明确剩余边界；若范围已经无法独立认领，则建立新的上层/子任务并让旧任务指向替代项，避免一个任务同时维护新旧两套目标。
+- 部分仍有效：保留原始需求和历史证据，在复核记录中明确剩余边界。若原 Task 实际混入多个关联性弱的完整功能，则分别建立平级替代 Task 并让旧 Task 指向它们；否则把剩余工作收敛到同一 Task 的 Plan/Todo，避免同时维护新旧两套目标。
 
 `bun run tasks:check` 会拒绝超过 `review_due` 仍未复核的活动任务。生成看板必须展示功能板块、上层任务、拆解者、认领者和下次复核日期；不得直接修改看板规避检查。
 
-## 方案设计文档管理
+## Design、Plan 与 Todo 文档管理
 
-- 所有后续正式方案设计统一写入 `docs/developer/designs/`，文件名固定为 `<任务 ID>.md`；不得把方案分散在临时笔记、handoff 或新建的其他目录。
+- 所有正式功能 Design 统一写入 `docs/developer/designs/`，文件名固定为 `<功能 Task ID>.md`；不得按实施步骤、Todo 或执行 Thread 再建 Design，也不得把同一功能的设计分散在 parent/child Task。
 - `docs/developer/tasks/<ID>.md` 保留原始需求、范围与验收条件；`docs/developer/designs/<ID>.md` 记录经确认的实现决策、interface、流程、错误语义和测试方案。方案文档必须链接原始任务，不复制或替代任务源。
-- 后续执行 Thread 必须同时以原始任务和方案设计为输入；不得自行补充会改变范围、Protocol、数据形状或生命周期的决策。发现方案与当前代码不符时，先停止实施并修订方案。
-- 方案设计至少包含：通俗问题说明、已确认现状、目标流程与关键 invariant、公开 interface 及错误模式、按依赖排序的实施步骤、可观察验收与非范围。冲突时以用户最新决定和任务原始范围为准，并先同步更新方案。
-- `tmp/handoff.md` 只记录临时进度、未提交改动与验证状态；已有方案不在 handoff 中重复，只引用对应 `designs/<ID>.md`。
+- Task 在 Design 确认后追加“实施计划”和“执行 Todo”；Plan/Todo 只描述如何落地 Design，不复制 Design，也不新增范围。
+- 后续执行 Thread 必须同时以 Task、同 ID Design 和 Task 内 Plan/Todo 为输入；不得自行补充会改变范围、Protocol、数据形状或生命周期的决策。发现 Design 与当前代码不符时，停止相关 Todo，由强模型先修订 Design 和 Plan。
+- Design 至少包含：通俗问题说明、已确认现状、目标流程与关键 invariant、公开 interface 及错误模式、可观察验收与非范围。依赖顺序、文件清单和验证命令主要写入 Task 的 Plan/Todo，避免实现细节污染长期 Design。
+- Task 与 Design 冲突时，以用户最新决定和 Task 的原始用户结果为准；先同步更新 Design，再更新 Plan/Todo，最后继续执行。
+- `tmp/handoff.md` 只记录执行 Thread 的临时进度、正在进行的 Todo、未提交改动与验证状态；已有 Task、Design、Plan/Todo 不在 handoff 中重复，只引用路径和 Todo 项。
 
 ## 协作与功能完成定义
 

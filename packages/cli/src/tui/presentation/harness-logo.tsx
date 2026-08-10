@@ -1,16 +1,10 @@
-/** Harness Code 品牌字标：使用 OpenTUI shade 栅格实现可降级的像素 Logo。 */
+/** Harness Code 品牌字标：使用 OpenTUI 栅格实现可降级的像素 Logo。 */
 
-import { fonts, RGBA, TextAttributes } from "@opentui/core"
+import { RGBA, TextAttributes } from "@opentui/core"
 import { useEffect, useMemo, useState } from "react"
 
 import { tuiTheme } from "./theme"
 import { blendRgba } from "./colors"
-
-type ShadeFont = {
-  lines: number
-  letterspace: string[]
-  chars: Record<string, string[]>
-}
 
 type LogoShape = {
   left: string[]
@@ -24,15 +18,30 @@ const SWEEP_INTERVAL_MS = 10_000
 const SWEEP_DURATION_MS = 1_900
 const GAP = 1
 
-const shadeFont = fonts.shade as ShadeFont
+/** 参考 MiMo 官方 logoThin 的三行半块字符构型，确保与 MiMo Code 品牌字形完全对齐。 */
+const MIMO_THIN_STYLE_FONT: Record<string, string[]> = {
+  H: ["█  █", "█▀▀█", "▀  ▀"],
+  A: ["█▀▀█", "█▀▀█", "▀  ▀"],
+  R: ["█▀▀▄", "█▀▀▄", "▀  ▀"],
+  N: ["█▄ █", "█ ▀█", "▀  ▀"],
+  E: ["█▀▀▀", "█▀▀ ", "▀▀▀▀"],
+  S: ["▄▀▀▀", " ▀▀▄", "▀▀▀ "],
+  C: ["█▀▀▀", "█   ", "▀▀▀▀"],
+  O: ["▄▀▀▄", "█  █", " ▀▀ "],
+  D: ["█▀▀▄", "█  █", "▀▀▀ "],
+}
+
 const fullShape = createShape("HARNESS", "CODE")
 
-/** MiMo 的 Logo 是字符栅格而非图片；沿用这一表达方式以保证各终端一致。 */
+/** Harness Code 品牌字标：使用硬朗方块像素字形实现。 */
 export function HarnessCodeLogo(props: { compact: boolean }) {
   if (props.compact) {
     return (
       <box width={22} height={2} position="relative" flexShrink={0}>
-        <text fg={tuiTheme.primary} selectable={false}>HARNESS CODE</text>
+        <text selectable={false}>
+          <span fg={tuiTheme.primary}>HARNESS </span>
+          <span fg={tuiTheme.text}>CODE</span>
+        </text>
         <box position="absolute" right={0} bottom={0}>
           <PoweredBy />
         </box>
@@ -49,6 +58,8 @@ export const HARNESS_WORDMARK_DIMENSIONS = {
   height: fullShape.full.length + 2,
 }
 
+const HARNESS_LEFT_WIDTH = fullShape.left[0]?.length ?? 0
+
 /** 以定时器驱动 shimmer，并将 powered by 锚定在完整字标右下角。 */
 function AnimatedWordmark(props: { shape: LogoShape }) {
   const [now, setNow] = useState(() => performance.now())
@@ -57,7 +68,7 @@ function AnimatedWordmark(props: { shape: LogoShape }) {
     return () => clearInterval(timer)
   }, [])
 
-  const lines = useMemo(() => props.shape.full.map((line, y) => renderLine(line, y, now)), [now, props.shape.full])
+  const lines = useMemo(() => props.shape.full.map((line, y) => renderLine(line, y, now, HARNESS_LEFT_WIDTH)), [now, props.shape.full])
   return (
     <box width={HARNESS_WORDMARK_DIMENSIONS.width} height={HARNESS_WORDMARK_DIMENSIONS.height} position="relative" flexDirection="column" flexShrink={0}>
       {lines.map((line, index) => <box key={index} flexDirection="row" height={1}>{line}</box>)}
@@ -78,25 +89,28 @@ function PoweredBy() {
 }
 
 /** 将单行字形栅格映射到冷白与 za38 蓝色层，并应用 MiMo 风格的呼吸与扫光算法。 */
-function renderLine(line: string, y: number, now: number) {
-  const primary = RGBA.fromHex(tuiTheme.primary)
-  const shadow = RGBA.fromHex(tuiTheme.primarySoft)
+function renderLine(line: string, y: number, now: number, leftWidth: number) {
+  const bluePrimary = RGBA.fromHex(tuiTheme.primary)
+  const whitePrimary = RGBA.fromHex(tuiTheme.text)
   const peak = RGBA.fromInts(229, 241, 255)
+
   return Array.from(line).map((char, x) => {
     if (char === " ") return <text key={x} selectable={false}> </text>
+
+    const isHarness = x < leftWidth
+    const primary = isHarness ? bluePrimary : whitePrimary
+
     const shimmer = shimmerStrength(x, y, line.length, now)
     const foreground = blendRgba(primary, peak, shimmer)
-    const background = char === "█" ? blendRgba(shadow, primary, Math.min(0.72, 0.18 + shimmer * 0.5)) : undefined
-    const muted = char === "░" || char === "▒" || char === "▓"
+
     return (
       <text
         key={x}
-        fg={muted ? blendRgba(shadow, primary, shimmer * 0.26) : foreground}
-        bg={background}
+        fg={foreground}
         attributes={TextAttributes.BOLD}
         selectable={false}
       >
-        {char === "█" ? "▀" : char}
+        {char}
       </text>
     )
   })
@@ -114,10 +128,10 @@ function shimmerStrength(x: number, y: number, width: number, now: number): numb
   return Math.min(1, ambient + sweep * sweep * 0.82)
 }
 
-/** 拼接 HARNESS 与 CODE 两个 shade 字形区域。 */
+/** 拼接 HARNESS 与 CODE 两个半块字形区域。 */
 function createShape(left: string, right: string): LogoShape {
-  const leftRows = rasterize(left)
-  const rightRows = rasterize(right)
+  const leftRows = rasterizeWord(left)
+  const rightRows = rasterizeWord(right)
   return {
     left: leftRows,
     right: rightRows,
@@ -125,15 +139,11 @@ function createShape(left: string, right: string): LogoShape {
   }
 }
 
-/** 将字体行数据转换为不含 OpenTUI 颜色标签的纯栅格。 */
-function rasterize(text: string): string[] {
-  return Array.from({ length: shadeFont.lines }, (_, row) => text
-    .split("")
-    .map(char => stripColorTags(shadeFont.chars[char]?.[row] ?? ""))
-    .join(stripColorTags(shadeFont.letterspace[row] ?? " ")))
-}
-
-/** 删除字体资源中的颜色标签，颜色由 Harness 主题统一控制。 */
-function stripColorTags(value: string): string {
-  return value.replace(/<\/?c\d+>/g, "")
+/** 提取 3 行半块字栅格，利用终端字符的上下半格避免标题显得纵向拉长。 */
+function rasterizeWord(text: string): string[] {
+  const rows: string[] = []
+  for (let r = 0; r < 3; r++) {
+    rows.push(text.split("").map(char => MIMO_THIN_STYLE_FONT[char]?.[r] ?? "    ").join(" "))
+  }
+  return rows
 }
