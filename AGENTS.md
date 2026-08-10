@@ -34,7 +34,7 @@ Harness Code（命令名 `harness` / `za38`）是一个面向企业研发场景�
 
 下列本地 Coding Agent 源码可用于对照交互体验、会话恢复、工具事件流、Skill 与 Agent 架构的成熟实现；它们不是本仓库的依赖，也不能覆盖本仓库的任务文档、架构约束和用户决策。
 
-- Pi：`/Users/zhangjingxin/Code/OpenSource/pi`
+- Oh My Pi：`/Users/zhangjingxin/Code/OpenSource/oh-my-pi`
 - Qwen Code：`/Users/zhangjingxin/Code/OpenSource/qwen-code`
 - Codex：`/Users/zhangjingxin/Code/OpenSource/codex`
 - DeepAgents：`/Users/zhangjingxin/Code/OpenSource/deepagents`

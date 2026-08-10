@@ -27,7 +27,7 @@ class ToolCallingFakeChatModel(GenericFakeChatModel):
 
 
 class RecordingFakeChatModel(ToolCallingFakeChatModel):
-    """记录模型实际收到的消息，用于验证共享图的动态 PromptEpoch 注入。"""
+    """记录模型实际收到的消息，用于验证共享图的动态 Context 注入。"""
 
     received: list[list[BaseMessage]] = Field(default_factory=list)
 
@@ -127,11 +127,11 @@ def test_execution_context_prompt_marks_local_and_remote_boundaries():
     assert "审批模式" not in remote
 
 
-def test_prompt_epoch_keeps_mode_snapshot_but_not_mode_prompt():
-    """epoch 环境快照记录初始模式，但系统提示词不再内嵌模式事实。"""
-    from harness_agent.runtime.agent import create_prompt_epoch
+def test_embedded_context_snapshot_keeps_policy_mode_without_legacy_prompt_section():
+    """直接库调用的 canonical snapshot 保留实际模式且不生成旧 epoch 文本。"""
+    from harness_agent.threads.context_lifecycle import prepare_embedded_context_snapshot
 
-    epoch = create_prompt_epoch(
+    snapshot = prepare_embedded_context_snapshot(
         thread_id="thread-mode",
         system_prompt="base",
         workspace=".",
@@ -141,15 +141,16 @@ def test_prompt_epoch_keeps_mode_snapshot_but_not_mode_prompt():
         skill_registry=None,
         enable_memory=False,
         enable_skills=False,
+        enable_ask_user=False,
     )
 
-    assert "approval_mode: yolo" in epoch.environment_snapshot.content
-    assert "审批模式" not in epoch.system_prompt
+    assert "yolo" in snapshot.system_prompt
+    assert "PromptEpoch" not in snapshot.system_prompt
 
 
-def test_prompt_epoch_middleware_appends_current_run_mode_fact():
-    """共享图每轮按 RunContext 追加模式事实，并剥离旧 epoch 内嵌小节。"""
-    from harness_agent.runtime.agent import create_prompt_epoch
+def test_context_snapshot_middleware_appends_current_run_mode_fact():
+    """共享图每轮按 RunContext 追加模式事实，并保留迁移快照清理规则。"""
+    from harness_agent.threads.context_lifecycle import prepare_embedded_context_snapshot
     from harness_agent.runtime.run_context import (
         RunContext,
         RunContextSnapshotMiddleware,
@@ -161,7 +162,7 @@ def test_prompt_epoch_middleware_appends_current_run_mode_fact():
     )
     assert legacy == "base\n\n## 执行环境\n\nx"
 
-    epoch = create_prompt_epoch(
+    snapshot = prepare_embedded_context_snapshot(
         thread_id="thread-mw",
         system_prompt="base",
         workspace=".",
@@ -171,11 +172,12 @@ def test_prompt_epoch_middleware_appends_current_run_mode_fact():
         skill_registry=None,
         enable_memory=False,
         enable_skills=False,
+        enable_ask_user=False,
     )
     context = RunContext(
         thread_id="thread-mw",
         run_id="run-mw",
-        prompt_epoch=epoch,
+        context_snapshot=snapshot,
         approval_mode="yolo",
     )
 
@@ -230,11 +232,12 @@ async def test_agent_streams_events():
     assert events
 
 
-async def test_shared_agent_injects_prompt_epoch_per_run_without_thread_state_leakage():
+async def test_shared_agent_injects_context_snapshot_per_run_without_thread_state_leakage():
     """同一编译图服务两个 thread 时，模型输入和 checkpoint 必须彼此隔离。"""
     from langgraph.checkpoint.memory import MemorySaver
 
-    from harness_agent.runtime.agent import create_harness_agent, create_prompt_epoch
+    from harness_agent.runtime.agent import create_harness_agent
+    from harness_agent.threads.context_lifecycle import prepare_embedded_context_snapshot
     from harness_agent.runtime.run_context import RunContext
 
     model = RecordingFakeChatModel(
@@ -255,7 +258,7 @@ async def test_shared_agent_injects_prompt_epoch_per_run_without_thread_state_le
         return RunContext(
             thread_id=thread_id,
             run_id=f"run-{thread_id}",
-            prompt_epoch=create_prompt_epoch(
+            context_snapshot=prepare_embedded_context_snapshot(
                 thread_id=thread_id,
                 system_prompt=marker,
                 workspace=".",
@@ -265,6 +268,7 @@ async def test_shared_agent_injects_prompt_epoch_per_run_without_thread_state_le
                 skill_registry=None,
                 enable_memory=False,
                 enable_skills=False,
+                enable_ask_user=False,
             ),
             approval_mode="yolo",
         )
@@ -297,13 +301,13 @@ async def test_shared_agent_injects_prompt_epoch_per_run_without_thread_state_le
 
 def test_run_context_rejects_mismatched_langgraph_thread_id():
     """共享图配置与 RunContext 指向不同 thread 时必须 fail closed。"""
-    from harness_agent.runtime.agent import create_prompt_epoch
+    from harness_agent.threads.context_lifecycle import prepare_embedded_context_snapshot
     from harness_agent.runtime.run_context import RunContext, RunContextError, thread_id_for_runtime
 
     context = RunContext(
         thread_id="thread-a",
         run_id="run-a",
-        prompt_epoch=create_prompt_epoch(
+        context_snapshot=prepare_embedded_context_snapshot(
             thread_id="thread-a",
             system_prompt="test prompt",
             workspace=".",
@@ -313,6 +317,7 @@ def test_run_context_rejects_mismatched_langgraph_thread_id():
             skill_registry=None,
             enable_memory=False,
             enable_skills=False,
+            enable_ask_user=False,
         ),
         approval_mode="yolo",
     )

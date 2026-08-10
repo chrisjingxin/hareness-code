@@ -24,6 +24,12 @@ from harness_agent.threads.context_lifecycle import (
     ContextStability,
     snapshot_from_legacy_prompt_epoch,
 )
+from harness_agent.threads.prompting import (
+    HISTORY_REWRITE_VERSION,
+    canonical_json,
+    sha256_text,
+    tool_schema_fingerprint,
+)
 from harness_agent.host.run_coordinator import ConnectionRef, RunCoordinator, RunPreparation, StartRun
 from harness_agent.runtime.run_context import RunContext, RunContextSnapshotMiddleware
 from harness_agent.threads.thread_persistence import AcceptRun, ThreadPersistence, ThreadPersistenceError
@@ -117,6 +123,185 @@ def test_snapshot_refreshes_agents_for_next_run_but_freezes_current_run(tmp_path
     assert fourth.system_fingerprint != third.system_fingerprint
 
 
+def test_snapshot_loads_repository_agents_from_far_to_near_and_keeps_boundaries(
+    tmp_path: Path,
+) -> None:
+    """仓库根到当前目录的规则按远到近注入，且不越过仓库根。"""
+    home = tmp_path / "home"
+    repository = tmp_path / "repository"
+    workspace = repository / "packages" / "agent"
+    (repository / ".git").mkdir(parents=True)
+    workspace.mkdir(parents=True)
+    (home / ".harness").mkdir(parents=True)
+    (workspace / ".harness").mkdir()
+
+    (tmp_path / "AGENTS.md").write_text("outside-repository-rule", encoding="utf-8")
+    (home / ".harness" / "AGENTS.md").write_text("user-rule", encoding="utf-8")
+    (repository / "AGENTS.md").write_text("repository-rule", encoding="utf-8")
+    (repository / "packages" / "AGENTS.md").write_text("packages-rule", encoding="utf-8")
+    (workspace / "AGENTS.md").write_text("workspace-rule", encoding="utf-8")
+    (workspace / ".harness" / "AGENTS.md").write_text(
+        "project-harness-rule", encoding="utf-8"
+    )
+
+    snapshot = ContextLifecycle(workspace, home=home).prepare(
+        thread_id="thread-repository-agents",
+        spec=_spec(workspace, home=home),
+        now_ms=110,
+    )
+
+    reference_blocks = [
+        block for block in snapshot.blocks if block.authority is ContextAuthority.REFERENCE
+    ]
+    assert [block.key for block in reference_blocks] == [
+        "agents.user",
+        "agents.repo.0000",
+        "agents.repo.0001",
+        "agents.repo.0002",
+        "agents.project",
+    ]
+    prompt = snapshot.system_prompt
+    assert prompt.index("user-rule") < prompt.index("repository-rule")
+    assert prompt.index("repository-rule") < prompt.index("packages-rule")
+    assert prompt.index("packages-rule") < prompt.index("workspace-rule")
+    assert prompt.index("workspace-rule") < prompt.index("project-harness-rule")
+    assert "outside-repository-rule" not in prompt
+
+
+def test_snapshot_keeps_same_content_at_distinct_levels_but_deduplicates_same_path(
+    tmp_path: Path,
+) -> None:
+    """相同正文来自不同目录时仍是两条规则；user/project 同路径只读一次。"""
+    repository = tmp_path / "repository"
+    workspace = repository / "nested"
+    (repository / ".git").mkdir(parents=True)
+    workspace.mkdir(parents=True)
+    (repository / "AGENTS.md").write_text("repeated-rule", encoding="utf-8")
+    (workspace / "AGENTS.md").write_text("repeated-rule", encoding="utf-8")
+
+    snapshot = ContextLifecycle(workspace, home=workspace).prepare(
+        thread_id="thread-duplicate-agents",
+        spec=_spec(workspace, home=workspace),
+        now_ms=111,
+    )
+
+    reference_blocks = [
+        block for block in snapshot.blocks if block.authority is ContextAuthority.REFERENCE
+    ]
+    assert [block.key for block in reference_blocks] == [
+        "agents.repo.0000",
+        "agents.repo.0001",
+    ]
+    assert snapshot.system_prompt.count("repeated-rule") == 2
+
+
+def test_snapshot_has_no_agent_blocks_without_reference_files(tmp_path: Path) -> None:
+    """没有任何来源文件时不制造空 AGENTS block。"""
+    repository = tmp_path / "repository"
+    workspace = repository / "nested"
+    (repository / ".git").mkdir(parents=True)
+    workspace.mkdir(parents=True)
+
+    snapshot = ContextLifecycle(workspace, home=tmp_path / "home").prepare(
+        thread_id="thread-no-agents",
+        spec=_spec(workspace, home=tmp_path / "home"),
+        now_ms=112,
+    )
+
+    assert not any(block.key.startswith("agents.") for block in snapshot.blocks)
+
+
+def test_snapshot_uses_non_git_workspace_as_repository_boundary(tmp_path: Path) -> None:
+    """没有 Git 标记时仍读取 workspace 自身，但不向上读取父目录。"""
+    parent = tmp_path / "parent"
+    workspace = parent / "workspace"
+    workspace.mkdir(parents=True)
+    (parent / "AGENTS.md").write_text("parent-rule", encoding="utf-8")
+    (workspace / "AGENTS.md").write_text("workspace-rule", encoding="utf-8")
+
+    snapshot = ContextLifecycle(workspace, home=tmp_path / "home").prepare(
+        thread_id="thread-non-git-boundary",
+        spec=_spec(workspace, home=tmp_path / "home"),
+        now_ms=113,
+    )
+
+    assert [
+        block.key
+        for block in snapshot.blocks
+        if block.authority is ContextAuthority.REFERENCE
+    ] == ["agents.repo.0000"]
+    assert "workspace-rule" in snapshot.system_prompt
+    assert "parent-rule" not in snapshot.system_prompt
+
+
+def test_find_repository_root_accepts_git_worktree_file(tmp_path: Path) -> None:
+    """普通文件形式的 .git 标记必须支持 Git worktree 仓库。"""
+    repository = tmp_path / "repository"
+    workspace = repository / "nested"
+    workspace.mkdir(parents=True)
+    (repository / ".git").write_text("gitdir: /external/worktree", encoding="utf-8")
+    (repository / "AGENTS.md").write_text("worktree-root-rule", encoding="utf-8")
+    (workspace / "AGENTS.md").write_text("worktree-local-rule", encoding="utf-8")
+
+    snapshot = ContextLifecycle(workspace, home=tmp_path / "home").prepare(
+        thread_id="thread-worktree-root",
+        spec=_spec(workspace, home=tmp_path / "home"),
+        now_ms=114,
+    )
+
+    assert [
+        block.key
+        for block in snapshot.blocks
+        if block.authority is ContextAuthority.REFERENCE
+    ] == ["agents.repo.0000", "agents.repo.0001"]
+    assert snapshot.system_prompt.index("worktree-root-rule") < snapshot.system_prompt.index(
+        "worktree-local-rule"
+    )
+
+
+def test_find_repository_root_rejects_git_symlink_and_continues_upward(
+    tmp_path: Path,
+) -> None:
+    """symlink .git 不得改变边界，向上的真实仓库标记仍可生效。"""
+    repository = tmp_path / "repository"
+    nested = repository / "nested"
+    workspace = nested / "workspace"
+    workspace.mkdir(parents=True)
+    (repository / ".git").mkdir()
+    (repository / ".git-target").mkdir()
+    (nested / ".git").symlink_to(repository / ".git-target", target_is_directory=True)
+    (repository / "AGENTS.md").write_text("outer-root-rule", encoding="utf-8")
+    (nested / "AGENTS.md").write_text("symlink-marker-parent-rule", encoding="utf-8")
+    (workspace / "AGENTS.md").write_text("symlink-marker-local-rule", encoding="utf-8")
+
+    snapshot = ContextLifecycle(workspace, home=tmp_path / "home").prepare(
+        thread_id="thread-symlink-git-marker",
+        spec=_spec(workspace, home=tmp_path / "home"),
+        now_ms=115,
+    )
+
+    assert [
+        block.key
+        for block in snapshot.blocks
+        if block.authority is ContextAuthority.REFERENCE
+    ] == ["agents.repo.0000", "agents.repo.0001", "agents.repo.0002"]
+    assert "outer-root-rule" in snapshot.system_prompt
+    assert "symlink-marker-parent-rule" in snapshot.system_prompt
+    assert "symlink-marker-local-rule" in snapshot.system_prompt
+
+
+def test_ancestor_directories_rejects_an_invalid_repository_root(tmp_path: Path) -> None:
+    """未来若破坏 root 不变量，祖先遍历必须失败而不能在 / 无限循环。"""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    with pytest.raises(ContextRefreshError, match="CONTEXT_REPOSITORY_ROOT_INVALID"):
+        context_lifecycle_module._ancestor_directories(
+            workspace,
+            tmp_path / "not-an-ancestor",
+        )
+
+
 def test_snapshot_and_prompt_index_carry_the_same_skill_catalog_identity(tmp_path: Path) -> None:
     """Context snapshot、Prompt Skill index 和 Registry 必须引用同一 ID。"""
     from harness_agent.extensions.skills import SkillRegistry
@@ -201,6 +386,7 @@ def test_snapshot_order_and_fingerprint_are_byte_deterministic(tmp_path: Path) -
     assert capability.content.index("tool-a") < capability.content.index("tool-z")
     assert "dynamic-secret" not in first.system_prompt
     assert "/tmp/dynamic-secret" not in first.system_prompt
+    assert "AGENTS source order" in first.system_prompt
 
 
 def test_capability_envelope_tracks_interactive_tool_view(tmp_path: Path) -> None:
@@ -373,6 +559,28 @@ def test_reference_file_symlink_fails_closed(tmp_path: Path) -> None:
         )
 
 
+def test_reference_harness_directory_symlink_fails_closed(tmp_path: Path) -> None:
+    """.harness 目录是 symlink 时不能沿链接读取 user/project 规则。"""
+    home = tmp_path / "home"
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    outside_harness = tmp_path / "outside-harness"
+    outside_harness.mkdir()
+    (outside_harness / "AGENTS.md").write_text("outside-rule", encoding="utf-8")
+    (home / ".harness").parent.mkdir(parents=True)
+    try:
+        (home / ".harness").symlink_to(outside_harness, target_is_directory=True)
+    except OSError:
+        pytest.skip("当前环境无 symlink 特权")
+
+    with pytest.raises(ContextRefreshError, match="CONTEXT_REFERENCE_SYMLINK_REJECTED"):
+        ContextLifecycle(workspace, home=home).prepare(
+            thread_id="thread-harness-directory-symlink",
+            spec=_spec(workspace, home=home),
+            now_ms=327,
+        )
+
+
 def test_reference_replacement_after_open_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -517,27 +725,38 @@ async def test_verified_legacy_prompt_epoch_migrates_once_to_readable_snapshot(
     source_version: int,
 ) -> None:
     """verified v2-v6 source 的 PromptEpoch 只在本次 migration 转换一次。"""
-    from harness_agent.runtime.agent import create_prompt_epoch
-
     home = tmp_path / "home"
     workspace = tmp_path / "project"
     workspace.mkdir()
     initial = await ThreadPersistence.open(project=workspace, home=home)
-    epoch = create_prompt_epoch(
-        thread_id="thread-legacy-snapshot",
-        system_prompt="历史 PromptEpoch",
-        workspace=str(workspace),
-        sandboxed=False,
-        provider=None,
-        approval_mode="yolo",
-        skill_registry=None,
-        enable_memory=False,
-        enable_skills=False,
-    )
+    legacy_thread_id = "thread-legacy-snapshot"
+    legacy_system_prompt = "历史 PromptEpoch"
+    legacy_created_at_ms = 1_000
+    legacy_record = {
+        "thread_id": legacy_thread_id,
+        "prompt_version": 2,
+        "system_prompt": legacy_system_prompt,
+        "environment_snapshot": canonical_json(
+            {
+                "input_fingerprint": "b" * 64,
+                "snapshot_id": "b" * 16,
+                "content": "- execution_mode: local",
+                "created_at_ms": legacy_created_at_ms,
+                "expires_at_ms": legacy_created_at_ms + 86_400_000,
+            }
+        ),
+        "readonly_memory": "",
+        "skill_index": "<harness_available_skills>\n</harness_available_skills>",
+        "tool_schema_fingerprint": tool_schema_fingerprint(()),
+        "system_fingerprint": sha256_text(legacy_system_prompt),
+        "history_rewrite_version": HISTORY_REWRITE_VERSION,
+        "prefix_change_reason": "new_thread",
+        "created_at_ms": legacy_created_at_ms,
+    }
     await initial.accept_run(
         AcceptRun(
             message="旧 Run",
-            binding=make_test_binding("thread-legacy-snapshot", "legacy-run"),
+            binding=make_test_binding(legacy_thread_id, "legacy-run"),
         )
     )
     database = initial.database_path
@@ -547,7 +766,6 @@ async def test_verified_legacy_prompt_epoch_migrates_once_to_readable_snapshot(
     connection = sqlite3.connect(database)
     try:
         create_legacy_prompt_epoch_table(connection)
-        record = epoch.record()
         connection.execute(
             """
             INSERT INTO harness_prompt_epochs (
@@ -559,17 +777,17 @@ async def test_verified_legacy_prompt_epoch_migrates_once_to_readable_snapshot(
             """,
             (
                 project_fingerprint,
-                record["thread_id"],
-                record["prompt_version"],
-                record["system_prompt"],
-                record["environment_snapshot"],
-                record["readonly_memory"],
-                record["skill_index"],
-                record["tool_schema_fingerprint"],
-                record["system_fingerprint"],
-                record["history_rewrite_version"],
-                record["prefix_change_reason"],
-                record["created_at_ms"],
+                legacy_record["thread_id"],
+                legacy_record["prompt_version"],
+                legacy_record["system_prompt"],
+                legacy_record["environment_snapshot"],
+                legacy_record["readonly_memory"],
+                legacy_record["skill_index"],
+                legacy_record["tool_schema_fingerprint"],
+                legacy_record["system_fingerprint"],
+                legacy_record["history_rewrite_version"],
+                legacy_record["prefix_change_reason"],
+                legacy_record["created_at_ms"],
             ),
         )
         connection.execute("DROP TABLE harness_compression_checkpoints")
@@ -604,9 +822,9 @@ async def test_verified_legacy_prompt_epoch_migrates_once_to_readable_snapshot(
     try:
         expected_snapshot = snapshot_from_legacy_prompt_epoch(
             project_fingerprint=project_fingerprint,
-            thread_id=epoch.thread_id,
-            system_prompt=epoch.system_prompt,
-            created_at_ms=epoch.created_at_ms,
+            thread_id=legacy_thread_id,
+            system_prompt=legacy_system_prompt,
+            created_at_ms=legacy_created_at_ms,
         )
         snapshot = await migrated.load_context_snapshot(
             expected_snapshot.snapshot_id,

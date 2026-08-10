@@ -1,8 +1,9 @@
 """按顶层 Run 生成冻结的上下文快照。
 
 本模块把 Prompt 的来源读取、可信层级、变化频率、脱敏和确定性渲染集中在
-一次准备操作中。AGENTS 是每次准备时重新观察的低可信参考；Policy、Sandbox
-和工具能力只从已经解析的 ``ResolvedAgentSpec`` 读取，不能被参考内容扩大。
+一次准备操作中。AGENTS 是每次准备时重新观察的低可信参考；仓库根目录到
+当前 workspace 的祖先链按远到近加载。Policy、Sandbox 和工具能力只从已经
+解析的 ``ResolvedAgentSpec`` 读取，不能被参考内容扩大。
 """
 
 from __future__ import annotations
@@ -69,6 +70,8 @@ _STABILITY_ORDER = {
 _CONTEXT_KEY_RE = re.compile(r"^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$")
 _MAX_CONTEXT_KEY_LENGTH = 128
 """Context block key 的稳定 ASCII 格式和上限，避免 key 成为结构注入入口。"""
+_AGENT_REPOSITORY_KEY_RE = re.compile(r"^agents\.repo\.(\d+)$")
+"""仓库祖先 AGENTS block 的稳定序号格式。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,7 +228,7 @@ class ContextLifecycle:
     """每次顶层 Run 重新观察可刷新来源并生成快照。"""
 
     def __init__(self, workspace: Path | str, *, home: Path | None = None) -> None:
-        """固定 Host 的 project/home 根；不缓存 AGENTS 内容。"""
+        """固定当前 workspace 与 user 根；不缓存 AGENTS 内容。"""
         self.workspace = Path(workspace).expanduser().resolve()
         self.home = (home or Path.home()).expanduser().resolve()
 
@@ -312,12 +315,9 @@ class ContextLifecycle:
         )
 
     def _agent_blocks(self) -> list[ContextBlock]:
-        """按 user → project 读取 AGENTS；读取中发生变化时 fail closed。"""
+        """按 user → 远祖 → 近祖 → project 读取 AGENTS；读取时 fail closed。"""
         blocks: list[ContextBlock] = []
-        sources = (
-            ("agents.user", self.home / ".harness" / "AGENTS.md"),
-            ("agents.project", self.workspace / ".harness" / "AGENTS.md"),
-        )
+        sources = _agent_reference_sources(self.workspace, self.home)
         for key, path in sources:
             content = _read_stable_reference(path, workspace=self.workspace, home=self.home)
             if content:
@@ -333,6 +333,94 @@ class ContextLifecycle:
                     )
                 )
         return blocks
+
+
+def prepare_embedded_context_snapshot(
+    *,
+    thread_id: str,
+    system_prompt: str,
+    workspace: Path | str,
+    sandboxed: bool,
+    provider: str | None,
+    approval_mode: str,
+    skill_registry: Any | None,
+    enable_memory: bool,
+    enable_skills: bool,
+    enable_ask_user: bool,
+    tools: Iterable[Any] = (),
+    project_fingerprint: str | None = None,
+    home: Path | None = None,
+    now_ms: int | None = None,
+) -> RunContextSnapshot:
+    """为直接嵌入式 Agent 调用构造同一套 canonical Context 快照。
+
+    这只是把没有完整 ``ResolvedAgentSpec`` 的库调用适配为
+    ``ContextLifecycle.prepare`` 输入；AGENTS 的发现、读取、排序和安全边界
+    仍全部由 ContextLifecycle 执行，不提供另一套来源链。
+    """
+    from harness_agent.config.config import ExecutionSettings, RemoteSandboxSettings
+    from harness_agent.runtime.agent_catalog import EffectiveExecutionPolicy
+
+    root = Path(workspace).expanduser().resolve()
+    if enable_skills and not sandboxed and skill_registry is None:
+        raise ContextRefreshError("CONTEXT_SKILL_REGISTRY_REQUIRED")
+    execution = ExecutionSettings(
+        sandbox_enabled=sandboxed,
+        approval_mode=approval_mode,  # type: ignore[arg-type]
+        remote=(
+            RemoteSandboxSettings(
+                provider=provider,
+                factory="embedded",
+            )
+            if provider is not None
+            else None
+        ),
+    )
+    spec = _EmbeddedContextSource(
+        project_fingerprint=project_fingerprint
+        or sha256_text(
+            canonical_json(
+                {
+                    "kind": "embedded-agent",
+                    "workspace": str(root),
+                }
+            )
+        ),
+        prompt=system_prompt,
+        effective_policy=EffectiveExecutionPolicy(
+            policy_ids=("embedded-agent",),
+            isolation=execution.mode,
+            approval_mode=approval_mode,
+        ),
+        tools=tuple(tools),
+        skill_registry=skill_registry,
+        execution=execution,
+        workspace=root,
+        enable_memory=enable_memory,
+        enable_skills=enable_skills,
+        enable_ask_user=enable_ask_user,
+    )
+    return ContextLifecycle(root, home=home).prepare(
+        thread_id=thread_id,
+        spec=spec,
+        now_ms=now_ms,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _EmbeddedContextSource:
+    """直接库调用的最小 ContextSourceSpec，不承载额外执行能力。"""
+
+    project_fingerprint: str
+    prompt: str
+    effective_policy: Any
+    tools: tuple[Any, ...]
+    skill_registry: Any | None
+    execution: Any
+    workspace: Path
+    enable_memory: bool
+    enable_skills: bool
+    enable_ask_user: bool
 
 
 def snapshot_from_legacy_prompt_epoch(
@@ -374,21 +462,101 @@ def snapshot_from_legacy_prompt_epoch(
     )
 
 
-def _block_sort_key(block: ContextBlock) -> tuple[int, int, str, str]:
-    """权限优先，其次稳定性，最后 key，保证字节顺序不依赖来源遍历。"""
+def _block_sort_key(block: ContextBlock) -> tuple[int, int, int, int, str, str]:
+    """权限优先，其次稳定性和 AGENTS 来源顺序，最后 key 保证字节稳定。"""
+    agent_order = (
+        _agent_block_order(block.key)
+        if block.authority is ContextAuthority.REFERENCE
+        else (0, 0)
+    )
     return (
         _AUTHORITY_ORDER[block.authority],
         _STABILITY_ORDER[block.stability],
+        agent_order[0],
+        agent_order[1],
         block.key,
         block.digest,
     )
+
+
+def _agent_block_order(key: str) -> tuple[int, int]:
+    """把 AGENTS 来源映射为 user、远祖到近祖、project 的稳定顺序。"""
+    if key == "agents.user":
+        return (0, 0)
+    match = _AGENT_REPOSITORY_KEY_RE.fullmatch(key)
+    if match is not None:
+        return (1, int(match.group(1)))
+    if key == "agents.project":
+        return (2, 0)
+    # legacy PromptEpoch 等其他 reference block 不参与目录链排序。
+    return (3, 0)
+
+
+def _agent_reference_sources(
+    workspace: Path,
+    home: Path,
+) -> tuple[tuple[str, Path], ...]:
+    """返回去重后的 AGENTS 来源，仓库目录按远到近排列。
+
+    普通 ``AGENTS.md`` 只在 Git 仓库根到当前 workspace 的祖先链内发现；
+    找不到仓库标记时，workspace 本身就是安全边界。用户级和项目级
+    ``.harness/AGENTS.md`` 仍保留原有来源，重复的规范路径只读取一次。
+    """
+    candidates: list[tuple[str, Path]] = [
+        ("agents.user", home / ".harness" / "AGENTS.md"),
+    ]
+    repository_root = _find_repository_root(workspace)
+    for index, directory in enumerate(
+        _ancestor_directories(workspace, repository_root)
+    ):
+        candidates.append((f"agents.repo.{index:04d}", directory / "AGENTS.md"))
+    candidates.append(("agents.project", workspace / ".harness" / "AGENTS.md"))
+
+    sources: list[tuple[str, Path]] = []
+    seen_paths: set[Path] = set()
+    for key, path in candidates:
+        if path in seen_paths:
+            continue
+        seen_paths.add(path)
+        sources.append((key, path))
+    return tuple(sources)
+
+
+def _find_repository_root(workspace: Path) -> Path:
+    """从 workspace 向上寻找最近的真实 ``.git`` 标记，找不到则停在 workspace。"""
+    for candidate in (workspace, *workspace.parents):
+        marker = candidate / ".git"
+        try:
+            marker_stat = marker.lstat()
+        except OSError:
+            continue
+        # Git worktree 的 .git 可以是普通文件；拒绝 symlink，避免用外部
+        # 链接改变 AGENTS 的搜索边界。该标记只用于确定范围，不读取其内容。
+        if stat.S_ISDIR(marker_stat.st_mode) or stat.S_ISREG(marker_stat.st_mode):
+            return candidate
+    return workspace
+
+
+def _ancestor_directories(workspace: Path, repository_root: Path) -> tuple[Path, ...]:
+    """返回 repository_root 到 workspace 的目录链，最远目录在前。"""
+    chain: list[Path] = []
+    current = workspace
+    while True:
+        chain.append(current)
+        if current == repository_root:
+            break
+        if current == current.parent:
+            raise ContextRefreshError("CONTEXT_REPOSITORY_ROOT_INVALID")
+        current = current.parent
+    chain.reverse()
+    return tuple(chain)
 
 
 def _render_blocks(blocks: tuple[ContextBlock, ...]) -> str:
     """以稳定标签渲染 block，并对 key/content 做确定性结构转义。"""
     rendered: list[str] = [
         "<harness_run_context version=\"1\">",
-        "The following blocks are ordered by authority and then stability.",
+        "The following blocks are ordered by authority, stability, and AGENTS source order.",
     ]
     for block in blocks:
         safe_key = html.escape(block.key, quote=True)
@@ -493,6 +661,12 @@ def _read_stable_reference(path: Path, *, workspace: Path, home: Path) -> str:
     parent_fd: int | None = None
     file_fd: int | None = None
     try:
+        try:
+            parent_path_stat = path.parent.lstat()
+        except FileNotFoundError:
+            parent_path_stat = None
+        if parent_path_stat is not None and stat.S_ISLNK(parent_path_stat.st_mode):
+            raise ContextRefreshError("CONTEXT_REFERENCE_SYMLINK_REJECTED")
         parent_fd = os.open(
             path.parent,
             os.O_RDONLY | directory_flag | nofollow | close_on_exec,

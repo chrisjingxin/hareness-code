@@ -32,13 +32,11 @@ from harness_agent.policy.bash_floors import evaluate_safety_floors
 from harness_agent.policy.bash_parser import extract_segments
 from harness_agent.policy.tool_risk import ToolKind, get_tool_kind
 from harness_agent.policy.workspace_boundary import resolve_outside_workspace_write
-from harness_agent.threads.prompting import (
-    PromptComposer,
-    PromptEpoch,
-    read_only_memory_snapshot,
-    sha256_text,
-    tool_schema_fingerprint,
+from harness_agent.threads.context_lifecycle import (
+    RunContextSnapshot,
+    prepare_embedded_context_snapshot,
 )
+from harness_agent.threads.prompting import sha256_text, tool_schema_fingerprint
 from harness_agent.runtime.run_context import RunContext, RunContextSnapshotMiddleware
 
 if TYPE_CHECKING:
@@ -418,46 +416,6 @@ def _with_execution_context(
     return f"{prompt.rstrip()}{context}"
 
 
-def create_prompt_epoch(
-    *,
-    thread_id: str,
-    system_prompt: str | None,
-    workspace: str,
-    sandboxed: bool,
-    provider: str | None,
-    approval_mode: ApprovalMode,
-    skill_registry: Any | None,
-    enable_memory: bool,
-    enable_skills: bool,
-    extra_tools: Sequence[BaseTool | Any] | None = None,
-) -> PromptEpoch:
-    """为非共享兼容调用创建旧 PromptEpoch；生产 Host 使用 Run snapshot。"""
-    core = system_prompt or _load_system_prompt()
-    execution = _with_execution_context(
-        "",
-        workspace=workspace,
-        sandboxed=sandboxed,
-        provider=provider,
-    ).strip()
-    registry = skill_registry if enable_skills and not sandboxed else None
-    skill_index = registry.system_prompt_fragment() if registry is not None else "<harness_available_skills>\n</harness_available_skills>"
-    readonly_memory = read_only_memory_snapshot(workspace) if enable_memory and not sandboxed else ""
-    schema_inputs = [*_BUILTIN_TOOL_SHAPES, *(list(extra_tools) if extra_tools else [])]
-    return PromptComposer(core).create_epoch(
-        thread_id=thread_id,
-        execution_boundary=execution,
-        environment={
-            "approval_mode": approval_mode,
-            "execution_mode": "remote-sandbox" if sandboxed else "local",
-            "provider": provider or "local",
-            "workspace": workspace,
-        },
-        readonly_memory=readonly_memory,
-        skill_index=skill_index,
-        tool_fingerprint=tool_schema_fingerprint(schema_inputs),
-    )
-
-
 def _make_approval_preflight(
     approval_mode: ApprovalMode,
     original_preflight: Callable[[ToolCallRequest], bool] | None,
@@ -609,7 +567,6 @@ def create_harness_agent(
     workdir: str | None = None,
     execution_context: Any | None = None,
     skill_registry: Any | None = None,
-    prompt_epoch: PromptEpoch | None = None,
     thread_persistence: ThreadPersistence | None = None,
     context_updates: dict[str, list[Any]] | None = None,
     context_middleware: Any | None = None,
@@ -644,7 +601,6 @@ def create_harness_agent(
         workdir: 工作目录别名（优先于 cwd）。
         execution_context: 服务端已创建的本机或远端工具执行上下文。
         skill_registry: 服务端建立的固定 Skill catalog；未传入时由本机调用方创建。
-        prompt_epoch: 非共享库调用的稳定 system 前缀；共享运行时必须在 RunContext 中传入。
         thread_persistence: 当前 project 的本机归档/epoch 存储。
         context_updates: server 持有的上下文事件缓冲，避免中间件直接写协议。
         context_middleware: 可由 server 显式持有的共享压缩器，用于用户手动触发压缩。
@@ -692,17 +648,17 @@ def create_harness_agent(
         )
         if skill_registry is not None:
             skill_registry = skill_registry.restricted(capability_view.skill_ids)
-    if shared_engine and prompt_epoch is not None:
-        raise ValueError("SHARED_RUNTIME_PROMPT_EPOCH_MUST_USE_RUN_CONTEXT")
-    if prompt_epoch is None and not shared_engine:
-        # 库调用没有 ThreadPersistence 时仍使用相同的确定性顺序，但不会声称可恢复。
+    embedded_context_snapshot: RunContextSnapshot | None = None
+    if not shared_engine:
+        # 直接库调用也必须经过 ContextLifecycle；这里只适配最小输入，不复制
+        # AGENTS 的发现、读取或排序逻辑。
         if enable_skills and not sandboxed and skill_registry is None:
             from harness_agent.extensions.plugin_skills import SkillRegistry
 
             skill_registry = SkillRegistry(local_workspace)
-        prompt_epoch = create_prompt_epoch(
+        embedded_context_snapshot = prepare_embedded_context_snapshot(
             thread_id="ephemeral",
-            system_prompt=system_prompt,
+            system_prompt=system_prompt or _load_system_prompt(),
             workspace=prompt_workspace,
             sandboxed=sandboxed,
             provider=sandbox_provider,
@@ -710,11 +666,12 @@ def create_harness_agent(
             skill_registry=skill_registry,
             enable_memory=enable_memory,
             enable_skills=enable_skills,
-            extra_tools=tools,
+            enable_ask_user=interactive and enable_ask_user,
+            tools=tools or (),
         )
-    if prompt_epoch is not None:
-        # 非共享图的 epoch 与模式静态绑定，模式事实直接拼入 system 前缀。
-        prompt = f"{prompt_epoch.system_prompt}{approval_mode_prompt(approval_mode)}"
+        # 非共享图没有 RunContext middleware，审批模式事实在构图时追加到
+        # canonical snapshot 的渲染结果之后。
+        prompt = f"{embedded_context_snapshot.system_prompt}{approval_mode_prompt(approval_mode)}"
     else:
         prompt = None
 
@@ -776,12 +733,12 @@ def create_harness_agent(
                 thread_persistence=thread_persistence,
             )
         else:
-            assert prompt_epoch is not None
+            assert embedded_context_snapshot is not None
             registry = skill_registry or SkillRegistry(local_workspace)
             backend = mount_harness_virtual_files(
                 backend,
                 registry=registry,
-                thread_id=prompt_epoch.thread_id,
+                thread_id=embedded_context_snapshot.thread_id,
                 thread_persistence=thread_persistence,
             )
     elif enable_skills:
@@ -892,7 +849,7 @@ def create_harness_agent(
             updates=context_updates,
         )
     if shared_engine:
-        # 该中间件仅读取本轮 context，不保存 thread 私有 PromptEpoch。
+        # 该中间件仅读取本轮 context，不保存 thread 私有 Context snapshot。
         agent_middleware.append(RunContextSnapshotMiddleware())
     agent_middleware.append(context_middleware)
 

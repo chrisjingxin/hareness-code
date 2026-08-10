@@ -2432,7 +2432,6 @@ class AgentHost:
             return ()
         from langchain_core.messages import HumanMessage
 
-        from harness_agent.runtime.agent import create_prompt_epoch
         from harness_agent.runtime.agent_delegation import (
             DelegationTarget,
             child_execution_ref,
@@ -2485,29 +2484,18 @@ class AgentHost:
             ) -> Mapping[str, Any]:
                 """在独立 checkpoint namespace 中运行 Plugin Agent。"""
                 child_ref = child_execution_ref(command)
-                epoch = create_prompt_epoch(
+                context_snapshot = ContextLifecycle(
+                    resolved.workspace,
+                    home=self._config_home,
+                ).prepare(
                     thread_id=child_ref.thread_id,
-                    system_prompt=resolved.prompt,
-                    workspace=str(resolved.workspace),
-                    sandboxed=resolved.execution.mode == "remote-sandbox",
-                    provider=(
-                        resolved.execution.remote.provider
-                        if resolved.execution.remote is not None
-                        else None
-                    ),
-                    approval_mode=(
-                        resolved.effective_policy.approval_mode
-                        or resolved.execution.approval_mode
-                    ),
-                    skill_registry=resolved.skill_registry,
-                    enable_memory=resolved.enable_memory,
-                    enable_skills=resolved.enable_skills,
-                    extra_tools=resolved.tools,
+                    spec=resolved,
                 )
                 context = RunContext(
                     thread_id=child_ref.thread_id,
                     run_id=child_ref.run_id,
-                    prompt_epoch=epoch,
+                    context_snapshot=context_snapshot,
+                    skill_registry=resolved.skill_registry,
                     approval_mode=(
                         resolved.effective_policy.approval_mode
                         or resolved.execution.approval_mode

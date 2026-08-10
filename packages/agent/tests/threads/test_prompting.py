@@ -33,35 +33,42 @@ def test_skill_index_is_sorted_bounded_and_does_not_leak_body(tmp_path: Path):
     assert "a" * 131 not in index
 
 
-def test_prompt_epoch_reuses_environment_snapshot_and_normalizes_tool_order(tmp_path: Path):
-    """相同输入必须得到字节一致前缀，工具注册顺序不能改变 schema 指纹。"""
-    from harness_agent.threads.prompting import PromptComposer, tool_schema_fingerprint
+def test_embedded_context_snapshot_is_stable_and_normalizes_tool_order(tmp_path: Path):
+    """直接库调用也走 ContextLifecycle，工具注册顺序不能改变快照正文。"""
+    from harness_agent.threads.context_lifecycle import prepare_embedded_context_snapshot
 
-    composer = PromptComposer("core")
-    first = composer.create_epoch(
-        thread_id="one",
-        execution_boundary="execution",
-        environment={"workspace": str(tmp_path), "approval_mode": "default"},
-        readonly_memory="memory",
-        skill_index="<skills />",
-        tool_fingerprint=tool_schema_fingerprint(
-            [{"name": "z", "description": "z", "parameters": {"b": 1, "a": 2}}, {"name": "a", "description": "a", "parameters": {}}]
-        ),
+    tools = [
+        {"name": "z", "description": "z", "parameters": {"b": 1, "a": 2}},
+        {"name": "a", "description": "a", "parameters": {}},
+    ]
+    first = prepare_embedded_context_snapshot(
+        thread_id="embedded",
+        system_prompt="core",
+        workspace=tmp_path,
+        sandboxed=False,
+        provider=None,
+        approval_mode="default",
+        skill_registry=None,
+        enable_memory=False,
+        enable_skills=False,
+        enable_ask_user=False,
+        tools=tools,
         now_ms=1_000,
     )
-    second = composer.create_epoch(
-        thread_id="two",
-        execution_boundary="execution",
-        environment={"approval_mode": "default", "workspace": str(tmp_path)},
-        readonly_memory="memory",
-        skill_index="<skills />",
-        tool_fingerprint=tool_schema_fingerprint(
-            [{"name": "a", "description": "a", "parameters": {}}, {"name": "z", "description": "z", "parameters": {"a": 2, "b": 1}}]
-        ),
+    second = prepare_embedded_context_snapshot(
+        thread_id="embedded",
+        system_prompt="core",
+        workspace=tmp_path,
+        sandboxed=False,
+        provider=None,
+        approval_mode="default",
+        skill_registry=None,
+        enable_memory=False,
+        enable_skills=False,
+        enable_ask_user=False,
+        tools=reversed(tools),
         now_ms=2_000,
     )
 
     assert first.system_prompt == second.system_prompt
-    assert first.environment_snapshot.snapshot_id == second.environment_snapshot.snapshot_id
-    assert first.tool_schema_fingerprint == second.tool_schema_fingerprint
     assert first.system_fingerprint == second.system_fingerprint

@@ -1150,9 +1150,8 @@ class PluginRuntimeMiddleware(AgentMiddleware):
         super().__init__()
         self._hooks = hooks
         self._monitors = monitors
-        # PromptEpoch 只保存可持久化的提示词事实，不携带工作区 Path；Hook
-        # 的 cwd 必须来自启动期固定的 Runtime Catalog，避免把运行时路径
-        # 错当成 PromptEpoch 的成员或从不可信请求参数读取。
+        # Context snapshot 不携带工作区 Path；Hook 的 cwd 必须来自启动期固定
+        # 的 Runtime Catalog，避免从不可信请求参数读取运行时路径。
         self._workspace = workspace
 
     async def awrap_model_call(

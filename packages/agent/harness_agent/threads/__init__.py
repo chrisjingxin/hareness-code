@@ -1,1 +1,1 @@
-"""Thread 持久化、上下文与 PromptEpoch 模块。"""
+"""Thread 持久化、RunContextSnapshot 与上下文压缩模块。"""

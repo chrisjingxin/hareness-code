@@ -271,16 +271,16 @@ async def test_hook_runner_exit_two_blocks_and_nonblocking_error_continues(
 async def test_plugin_runtime_middleware_uses_catalog_workspace_for_run_context(
     tmp_path: Path,
 ) -> None:
-    """真实 RunContext 的 PromptEpoch 不含 workspace 时 Hook 仍能读取 Skill。"""
+    """真实 RunContext 不携带 workspace 时 Hook 仍能读取 Skill。"""
     from types import SimpleNamespace
 
-    from harness_agent.runtime.agent import create_prompt_epoch
     from harness_agent.plugins.runtime import (
         HookDefinition,
         MonitorManager,
         PluginRuntimeCatalog,
         PluginRuntimeManager,
     )
+    from harness_agent.threads.context_lifecycle import prepare_embedded_context_snapshot
     from harness_agent.runtime.run_context import RunContext
 
     workspace = tmp_path / "workspace"
@@ -304,7 +304,7 @@ async def test_plugin_runtime_middleware_uses_catalog_workspace_for_run_context(
     context = RunContext(
         thread_id="thread-1",
         run_id="run-1",
-        prompt_epoch=create_prompt_epoch(
+        context_snapshot=prepare_embedded_context_snapshot(
             thread_id="thread-1",
             system_prompt="test",
             workspace=str(workspace),
@@ -314,6 +314,7 @@ async def test_plugin_runtime_middleware_uses_catalog_workspace_for_run_context(
             skill_registry=None,
             enable_memory=False,
             enable_skills=False,
+            enable_ask_user=False,
         ),
         approval_mode="yolo",
     )

@@ -293,6 +293,173 @@ api_key_env = "HARNESS_AGENT_TEAM_TEST_KEY"
     await server.close()
 
 
+async def test_managed_plugin_child_passes_skill_snapshot_to_run_context(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """Managed Plugin Agent 开启 Skill 时，子 Run 使用同一个 Skill snapshot。"""
+    from types import SimpleNamespace
+
+    from harness_agent.extensions.plugin_skills import SkillRegistry
+    from harness_agent.host.agent_host import AgentHost
+    from harness_agent.runtime.agent_catalog import (
+        DelegationPolicy,
+        EffectiveExecutionPolicy,
+        PluginAgentSource,
+    )
+    from harness_agent.runtime.agent_delegation import DelegateAgent
+    from harness_agent.runtime.execution_binding import ExecutionRef
+    from harness_agent.runtime.run_context import RunCancellationToken
+
+    home = tmp_path / "home"
+    config_path = home / ".harness" / "config.toml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        """[config]
+version = 1
+
+[models]
+default_profile = "fast"
+
+[models.profiles.fast]
+model = "test-model"
+base_url = "https://gateway.example/v1"
+api_key_env = "HARNESS_MANAGED_PLUGIN_TEST_KEY"
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HARNESS_MANAGED_PLUGIN_TEST_KEY", "test-only")
+
+    workspace = tmp_path / "workspace"
+    skill_manifest = workspace / ".harness" / "skills" / "review" / "SKILL.md"
+    skill_manifest.parent.mkdir(parents=True)
+    skill_manifest.write_text(
+        "---\nname: review\ndescription: Review files\n---\nReview the requested files.\n",
+        encoding="utf-8",
+    )
+
+    plugin = tmp_path / "plugin"
+    (plugin / "agents").mkdir(parents=True)
+    (plugin / "policies").mkdir()
+    policy_path = plugin / "policies" / "read.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "id": "read",
+                "tools": {"allow": ["read_file"]},
+                "delegation": {"enabled": False},
+            }
+        ),
+        encoding="utf-8",
+    )
+    instructions_path = plugin / "agents" / "reviewer.md"
+    instructions_path.write_text("只返回审查结论。", encoding="utf-8")
+    agent_path = plugin / "agents" / "reviewer.json"
+    agent_path.write_text(
+        json.dumps(
+            {
+                "id": "reviewer",
+                "purpose": "Review files",
+                "instructions": instructions_path.name,
+                "model": {"strategy": "profile", "profile": "fast"},
+                "policy": "read",
+                "skills": ["project/review"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    captured: dict[str, Any] = {}
+
+    class FakeGraph:
+        """捕获 Managed child 传入的显式 RunContext。"""
+
+        async def ainvoke(self, *_args: Any, context: Any, **_kwargs: Any) -> dict[str, Any]:
+            captured["context"] = context
+            return {"messages": [SimpleNamespace(content="PLUGIN_REVIEW_OK")]}
+
+    class FakeRunLease:
+        async def release(self) -> None:
+            """模拟已完成的 Engine run lease。"""
+
+    class FakeLease:
+        def __init__(self, engine: Any) -> None:
+            self.engine = engine
+
+        async def run(self) -> FakeRunLease:
+            """返回可释放的 fake run lease。"""
+            return FakeRunLease()
+
+        async def release(self) -> None:
+            """模拟释放 Engine lease。"""
+
+    class FakePool:
+        def __init__(self) -> None:
+            self.engine = SimpleNamespace(graph=FakeGraph())
+
+        async def acquire(self, _profile: Any) -> FakeLease:
+            """返回不构建真实模型的 Managed Engine。"""
+            return FakeLease(self.engine)
+
+        async def finalize_draining(self, _profile_key: str) -> None:
+            """模拟排空检查。"""
+
+        async def aclose(self) -> tuple[object, ...]:
+            """满足 Host 关闭 fake Pool 的生命周期契约。"""
+            return ()
+
+    server = AgentHost(config_home=home, workspace=workspace)
+    server._load_config()
+    assert server._config is not None
+    server._plugin_agent_sources = (
+        PluginAgentSource(
+            "test-plugin",
+            plugin,
+            agent_files=(agent_path,),
+            policy_files=(policy_path,),
+        ),
+    )
+    server._skill_registry = SkillRegistry(workspace, home=home)
+    server._agent_catalog = None
+    server._agent_engine_pool = FakePool()
+    parent_policy = EffectiveExecutionPolicy(
+        policy_ids=("parent",),
+        delegation=DelegationPolicy(
+            enabled=True,
+            allowed_agents=("reviewer",),
+            max_depth=1,
+            max_parallelism=1,
+        ),
+    )
+    parent_spec = SimpleNamespace(
+        agent_id="main",
+        effective_policy=parent_policy,
+        model_profile_id="fast",
+    )
+
+    try:
+        targets = await server._plugin_delegation_targets(parent_spec)
+        assert [target.agent_id for target in targets] == ["reviewer"]
+        assert parent_policy.delegation is not None
+        result = await targets[0].runner(
+            DelegateAgent(
+                parent_ref=ExecutionRef.root("thread-managed-plugin", "run-1"),
+                target_agent_id="reviewer",
+                task="检查文件",
+                idempotency_key="managed-plugin-test",
+                delegation_policy=parent_policy.delegation,
+                cancellation_token=RunCancellationToken(),
+            )
+        )
+        assert result == {"final": "PLUGIN_REVIEW_OK"}
+        context = captured["context"]
+        assert context.skill_registry is not None
+        assert context.context_snapshot.skill_snapshot_id == context.skill_registry.snapshot_id
+        assert context.skill_registry.resolve("project/review").name == "review"
+    finally:
+        await server.close()
+
+
 async def test_initialize_rejects_incompatible_major_and_pre_initialize_calls():
     """不兼容 Major 和握手前业务调用必须被结构化拒绝。"""
     from harness_agent.host.agent_host import AgentHost

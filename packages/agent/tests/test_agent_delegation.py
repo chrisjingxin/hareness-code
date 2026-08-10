@@ -271,13 +271,14 @@ async def test_delegation_policy_rejects_target_and_depth_before_runner() -> Non
 
 async def test_production_task_tool_routes_through_execution_registry(tmp_path) -> None:
     """生产图的 `task` 接口保持不变，但必须登记受控 Inline child。"""
-    from harness_agent.runtime.agent import create_harness_agent, create_prompt_epoch
+    from harness_agent.runtime.agent import create_harness_agent
     from harness_agent.runtime.agent_catalog import EffectiveExecutionPolicy
     from harness_agent.policy.capability_policy import (
         BUILTIN_TOOL_NAMES,
         resolve_effective_capability_view,
     )
     from harness_agent.runtime.run_context import RunContext
+    from harness_agent.threads.context_lifecycle import prepare_embedded_context_snapshot
 
     registry, root = await _registry()
     policy = EffectiveExecutionPolicy(
@@ -338,7 +339,7 @@ async def test_production_task_tool_routes_through_execution_registry(tmp_path) 
     context = RunContext(
         thread_id=root.thread_id,
         run_id=root.run_id,
-        prompt_epoch=create_prompt_epoch(
+        context_snapshot=prepare_embedded_context_snapshot(
             thread_id=root.thread_id,
             system_prompt="test",
             workspace=str(tmp_path),
@@ -348,6 +349,7 @@ async def test_production_task_tool_routes_through_execution_registry(tmp_path) 
             skill_registry=None,
             enable_memory=False,
             enable_skills=False,
+            enable_ask_user=False,
         ),
         approval_mode="yolo",
         execution_id=root.execution_id,
@@ -371,13 +373,14 @@ async def test_production_task_tool_routes_through_execution_registry(tmp_path) 
 
 async def test_production_task_exposes_host_registered_plugin_target(tmp_path) -> None:
     """Host 注册的 Plugin Agent 通过同一个 task schema 走 Managed execution。"""
-    from harness_agent.runtime.agent import create_harness_agent, create_prompt_epoch
+    from harness_agent.runtime.agent import create_harness_agent
     from harness_agent.runtime.agent_catalog import EffectiveExecutionPolicy
     from harness_agent.policy.capability_policy import (
         BUILTIN_TOOL_NAMES,
         resolve_effective_capability_view,
     )
     from harness_agent.runtime.run_context import RunContext
+    from harness_agent.threads.context_lifecycle import prepare_embedded_context_snapshot
 
     registry, root = await _registry()
     policy = EffectiveExecutionPolicy(
@@ -451,7 +454,7 @@ async def test_production_task_exposes_host_registered_plugin_target(tmp_path) -
     context = RunContext(
         thread_id=root.thread_id,
         run_id=root.run_id,
-        prompt_epoch=create_prompt_epoch(
+        context_snapshot=prepare_embedded_context_snapshot(
             thread_id=root.thread_id,
             system_prompt="test",
             workspace=str(tmp_path),
@@ -461,6 +464,7 @@ async def test_production_task_exposes_host_registered_plugin_target(tmp_path) -
             skill_registry=None,
             enable_memory=False,
             enable_skills=False,
+            enable_ask_user=False,
         ),
         approval_mode="yolo",
         execution_id=root.execution_id,

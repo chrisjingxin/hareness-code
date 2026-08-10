@@ -19,12 +19,8 @@ from langchain_core.messages import SystemMessage
 from harness_agent.policy.approval_mode import ApprovalMode
 from harness_agent.policy.approval_policy import approval_mode_prompt
 from harness_agent.runtime.execution_binding import ExecutionMode
-from harness_agent.threads.context_lifecycle import (
-    RunContextSnapshot,
-    snapshot_from_legacy_prompt_epoch,
-)
+from harness_agent.threads.context_lifecycle import RunContextSnapshot
 from harness_agent.threads.context_pressure import ModelCallLifecycle
-from harness_agent.threads.prompting import PromptEpoch
 
 _LEGACY_APPROVAL_MODE_MARKER = "\n\n## 审批模式："
 
@@ -70,10 +66,6 @@ class RunContext:
     agent_id: str = "main"
     execution_mode: ExecutionMode = ExecutionMode.MANAGED
     cancellation_token: RunCancellationToken = field(default_factory=RunCancellationToken)
-    # 仅供旧嵌入式调用把已存在的 PromptEpoch 转成一次性 legacy snapshot；
-    # AgentHost 生产路径不再读取或写入该字段。
-    prompt_epoch: PromptEpoch | None = None
-    # 放在兼容字段末尾，避免改变旧嵌入式调用的 positional 参数含义。
     model_call_lifecycle: ModelCallLifecycle = field(default_factory=ModelCallLifecycle)
     # 共享图只能从当前 Run 取得对应的 immutable Skill snapshot；不写入持久化记录。
     skill_registry: Any | None = field(default=None, repr=False)
@@ -84,18 +76,7 @@ class RunContext:
         if not self.thread_id or not self.run_id:
             raise RunContextError("RUN_CONTEXT_ID_INVALID")
         if self.context_snapshot is None:
-            if self.prompt_epoch is None:
-                raise RunContextError("RUN_CONTEXT_SNAPSHOT_REQUIRED")
-            object.__setattr__(
-                self,
-                "context_snapshot",
-                snapshot_from_legacy_prompt_epoch(
-                    project_fingerprint="legacy",
-                    thread_id=self.prompt_epoch.thread_id,
-                    system_prompt=self.prompt_epoch.system_prompt,
-                    created_at_ms=self.prompt_epoch.created_at_ms,
-                ),
-            )
+            raise RunContextError("RUN_CONTEXT_SNAPSHOT_REQUIRED")
         if self.context_snapshot.thread_id != self.thread_id:
             raise RunContextError("RUN_CONTEXT_SNAPSHOT_THREAD_MISMATCH")
         snapshot_skill_id = self.context_snapshot.skill_snapshot_id
@@ -144,20 +125,19 @@ class RunContextSnapshotMiddleware(AgentMiddleware):
         """
         context = require_run_context(request.runtime)
         base_prompt = _system_message_text(request.system_message)
-        prompt = _without_legacy_approval_mode_section(
-            context.context_snapshot.system_prompt
-        )
+        prompt = _without_legacy_approval_mode_section(context.context_snapshot.system_prompt)
         prompt = f"{prompt}{approval_mode_prompt(context.approval_mode)}"
         system_prompt = f"{prompt}\n\n{base_prompt}" if base_prompt else prompt
         return await handler(request.override(system_message=SystemMessage(content=system_prompt)))
 
 
 def _without_legacy_approval_mode_section(prompt: str) -> str:
-    """剥离旧 PromptEpoch 末尾内嵌的审批模式小节。"""
+    """剥离历史迁移快照末尾可能内嵌的审批模式小节。"""
     index = prompt.find(_LEGACY_APPROVAL_MODE_MARKER)
     if index == -1:
         return prompt
     return prompt[:index]
+
 
 def _system_message_text(message: object | None) -> str:
     """将 DeepAgents 生成的基础 system message 转为文本，保持现有顺序。"""

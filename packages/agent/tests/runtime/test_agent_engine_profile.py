@@ -168,8 +168,6 @@ async def test_thread_persistence_persists_agent_engine_profile_without_raw_valu
 
 async def test_thread_persistence_upgrades_v3_runtime_profile_schema_without_losing_epoch(tmp_path: Path) -> None:
     """v3 数据库升级到 v7 时，旧 thread 继续读取且保持未绑定兼容状态。"""
-    from harness_agent.threads.prompting import PromptComposer
-
     """单元兼容形状 v3 升级后保留 Thread/Profile 数据，不伪造 PromptEpoch 历史。"""
     home = tmp_path / "home"
     project = tmp_path / "project"

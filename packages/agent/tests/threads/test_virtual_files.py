@@ -123,7 +123,7 @@ async def test_run_scoped_virtual_backend_isolates_shared_graph_history(tmp_path
     """共享图每次工具调用都必须按 RunContext 重新绑定历史归档。"""
     from deepagents.backends import LocalShellBackend
 
-    from harness_agent.runtime.agent import create_prompt_epoch
+    from harness_agent.threads.context_lifecycle import prepare_embedded_context_snapshot
     from harness_agent.runtime.run_context import RunContext
     from harness_agent.extensions.skills import SkillRegistry
     from harness_agent.threads.thread_persistence import CommitContextRewrite, ContextArtifactDraft, ThreadPersistence
@@ -146,7 +146,7 @@ async def test_run_scoped_virtual_backend_isolates_shared_graph_history(tmp_path
         return RunContext(
             thread_id=thread_id,
             run_id=f"run-{thread_id}",
-            prompt_epoch=create_prompt_epoch(
+            context_snapshot=prepare_embedded_context_snapshot(
                 thread_id=thread_id,
                 system_prompt="test prompt",
                 workspace=str(workspace),
@@ -156,6 +156,7 @@ async def test_run_scoped_virtual_backend_isolates_shared_graph_history(tmp_path
                 skill_registry=registry,
                 enable_memory=False,
                 enable_skills=False,
+                enable_ask_user=False,
             ),
             approval_mode="yolo",
             skill_registry=registry,
