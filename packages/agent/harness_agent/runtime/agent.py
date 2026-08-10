@@ -185,6 +185,7 @@ def _create_default_subagents(
     workspace: str | Path | None,
     approval_mode: ApprovalMode,
     capability_view: EffectiveCapabilityView | None = None,
+    file_tool_contract: Any | None = None,
 ) -> list[dict[str, Any]]:
     """创建继承计划模式和本机工作区边界的默认子 Agent 规格。"""
     from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
@@ -198,6 +199,12 @@ def _create_default_subagents(
         # 子 Agent 的工具调用不经过主图 HITL 弹窗，无法保证"先批准后写"，
         # 因此边界守卫不接收审批模式，越界写入保持硬拒绝。
         middleware.append(WorkspaceBoundaryMiddleware(workspace))
+    if file_tool_contract is not None:
+        from harness_agent.tools.file_tools import HarnessFileToolsMiddleware
+
+        # DeepAgents 的 declarative subagent 有独立的 FilesystemMiddleware；
+        # 同一个注入 contract 必须在该独立栈中再次接管，不能只依赖主图。
+        middleware.append(HarnessFileToolsMiddleware(file_tool_contract))
     if capability_view is not None:
         from harness_agent.policy.capability_policy import CapabilityPolicyMiddleware
 
@@ -238,6 +245,7 @@ def _create_controlled_inline_subagents(
     managed_targets: Sequence[Any] = (),
     concurrency_lock: AsyncRWLock | None = None,
     plugin_middleware: Any | None = None,
+    file_tool_contract: Any | None = None,
 ) -> tuple[list[dict[str, Any]], Any]:
     """创建内置 Inline worker，并合并 Host 注册的 Managed Plugin target。"""
     from deepagents.middleware.filesystem import FilesystemMiddleware
@@ -284,6 +292,13 @@ def _create_controlled_inline_subagents(
     child_middleware.append(
         ConcurrencyGuardMiddleware(concurrency_lock or RuntimeAsyncRWLock())
     )
+    if file_tool_contract is not None:
+        from harness_agent.tools.file_tools import HarnessFileToolsMiddleware
+
+        # Inline child 与 declarative child 使用同一 contract；middleware 实例
+        # 分别属于各自 graph，但不会产生第二套文件执行逻辑。放在并发守卫之后，
+        # 让 Harness dispatch 仍然受父图的读写锁覆盖。
+        child_middleware.append(HarnessFileToolsMiddleware(file_tool_contract))
 
     child_graph = create_agent(
         model,
@@ -655,6 +670,8 @@ def create_harness_agent(
     delegation_targets: Sequence[Any] = (),
     plugin_runtime: Any | None = None,
     defer_tools: str | bool | None = None,
+    file_tool_contract: Any | None = None,
+    snapshot_store: Any | None = None,
 ) -> Any:
     """创建 za38 编码 agent。
 
@@ -693,6 +710,10 @@ def create_harness_agent(
             True/``"on"`` 启用延迟（D8 低频内置与 MCP 工具不绑定模型，搜索命中
             后 reveal）；False/``"off"`` 全量注入保持稳定前缀；None/``"auto"``
             按模型是否缓存敏感自动选择（deepseek 系自动回退 off）。
+        file_tool_contract: Harness-owned 文件 schema/dispatch contract；未传入时
+            使用当前 exact-string contract，不固化后续 Snapshot edit schema。
+        snapshot_store: Host 生命周期内的 ThreadSnapshotStore；只由当前 RunContext
+            提供 Thread 归属，绝不写入 Thread 持久化。
 
     Returns:
         编译后的 LangGraph agent（CompiledStateGraph）。
@@ -823,6 +844,28 @@ def create_harness_agent(
     elif enable_skills:
         logger.info("Skills middleware is disabled in remote sandbox mode")
 
+    # DeepAgents 的 FilesystemMiddleware 仍作为受保护脚手架存在，但模型可见
+    # schema 与 ToolNode 执行必须进入同一个 Harness contract。contract 在
+    # virtual backend 完成组装后创建，避免共享图捕获构图期 Thread/Skill。
+    from harness_agent.tools.file_tools import (
+        BUILTIN_FILE_TOOL_NAMES,
+        HarnessFileToolsMiddleware,
+        create_legacy_file_tool_contract,
+    )
+
+    if file_tool_contract is None:
+        text_backend = None
+        if not sandboxed:
+            from harness_agent.threads.text_backend import LocalTextMutationBackend
+
+            text_backend = LocalTextMutationBackend(local_workspace)
+        file_tool_contract = create_legacy_file_tool_contract(
+            backend,
+            local_workspace,
+            snapshot_store=snapshot_store,
+            text_backend=text_backend,
+        )
+
     # 4. ShellAllowListMiddleware（shell 白名单）
     if shell_allow_list:
         from harness_agent.policy.shell_allow_list import ShellAllowListMiddleware
@@ -865,8 +908,22 @@ def create_harness_agent(
             else None
         ),
         reveal=defer_middleware.reveal if defer_middleware is not None else None,
+        # delete_file 与其它文件工具一样由 Harness seam 统一接管，不能再以
+        # 独立 StructuredTool 形成第二个模型/执行入口。
+        include_delete_file=False,
     )
     all_tools.extend(harness_tool_list)
+    # DeepAgents 没有 delete_file builtin；只把 contract 的非 builtin
+    # registration 加入 ToolNode，使它能进入默认 request。read/write/edit 等
+    # 名称由 middleware 在模型边界去重替换，不重复注册。
+    registration_tools = tuple(
+        getattr(file_tool_contract, "registration_tools", ())
+    )
+    all_tools.extend(
+        tool
+        for tool in registration_tools
+        if str(getattr(tool, "name", "")) not in BUILTIN_FILE_TOOL_NAMES
+    )
     if defer_middleware is not None and prompt is not None:
         # 摘要与候选同样受能力视图约束：被策略隐藏的内置工具不列出、
         # 不可搜索到（与 MCP 候选共用同一收敛逻辑）。
@@ -897,6 +954,7 @@ def create_harness_agent(
             workspace=local_workspace,
             approval_mode=approval_mode,
             capability_view=capability_view,
+            file_tool_contract=file_tool_contract,
         )
     elif approval_mode == "plan":
         # 远端 backend 同样需要计划模式守卫；其余模式由 provider 和 HITL 处理。
@@ -904,6 +962,7 @@ def create_harness_agent(
             workspace=None,
             approval_mode=approval_mode,
             capability_view=capability_view,
+            file_tool_contract=file_tool_contract,
         )
     if (
         execution_registry is not None
@@ -922,6 +981,7 @@ def create_harness_agent(
             managed_targets=delegation_targets,
             concurrency_lock=concurrency_lock,
             plugin_middleware=getattr(plugin_runtime, "middleware", None),
+            file_tool_contract=file_tool_contract,
         )
         agent_middleware.append(delegation_middleware)
 
@@ -953,6 +1013,10 @@ def create_harness_agent(
     if plugin_runtime is not None:
         agent_middleware.append(plugin_runtime.middleware)
     agent_middleware.append(ConcurrencyGuardMiddleware(concurrency_lock or AsyncRWLock()))
+    # 必须位于 WorkspaceBoundary 和并发守卫之后：边界先完成 canonical
+    # path/virtual route 校验，并发锁再覆盖实际 dispatch，最后由 seam 短路
+    # DeepAgents builtin handler。
+    agent_middleware.append(HarnessFileToolsMiddleware(file_tool_contract))
 
     # 6. 预算中间件在模型调用前管理工具结果和摘要；不暴露模型可调用压缩工具。
     from harness_agent.threads.context_window import ContextWindowMiddleware

@@ -54,6 +54,7 @@ def create_harness_tools(
     mcp_tools: Sequence[Any] | None = None,
     deferred_builtin_names: frozenset[str] | None = None,
     reveal: Callable[[Sequence[str]], None] | None = None,
+    include_delete_file: bool = True,
 ) -> list[StructuredTool]:
     """创建所有 Harness 扩展工具的 BaseTool 实例列表。
 
@@ -69,6 +70,8 @@ def create_harness_tools(
             （候选仅 MCP 工具）。
         reveal: 搜索结果命中后回调（如 ``DeferredToolMiddleware.reveal``）；
             命中工具在下一轮模型请求中可见。None 时仅返回结果不做 reveal。
+        include_delete_file: 是否注册 legacy delete_file。生产 Agent 由统一
+            HarnessFileTools contract 接管时传 False，避免 ToolNode 形成第二执行入口。
 
     Returns:
         可直接传入 create_deep_agent(tools=...) 的工具列表。
@@ -113,21 +116,22 @@ def create_harness_tools(
         description="获取指定 URL 的网页内容，支持 text/markdown/html 格式输出。",
     ))
 
-    # --- delete_file ---
-    def _delete_file(file_path: str) -> str:
-        """删除指定文件。
+    if include_delete_file:
+        # --- delete_file ---
+        def _delete_file(file_path: str) -> str:
+            """删除指定文件。
 
-        Args:
-            file_path: 要删除的文件路径（相对于工作区根目录，以 / 开头）。
-        """
-        result = _delete_file_impl(file_path, workspace_root)
-        return json.dumps(result, ensure_ascii=False)
+            Args:
+                file_path: 要删除的文件路径（相对于工作区根目录，以 / 开头）。
+            """
+            result = _delete_file_impl(file_path, workspace_root)
+            return json.dumps(result, ensure_ascii=False)
 
-    tools.append(StructuredTool.from_function(
-        func=_delete_file,
-        name="delete_file",
-        description="删除工作区内的指定文件。不可逆操作，需要用户审批。",
-    ))
+        tools.append(StructuredTool.from_function(
+            func=_delete_file,
+            name="delete_file",
+            description="删除工作区内的指定文件。不可逆操作，需要用户审批。",
+        ))
 
     # --- apply_patch ---
     def _apply_patch(patch: str) -> str:

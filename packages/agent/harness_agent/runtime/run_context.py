@@ -70,6 +70,9 @@ class RunContext:
     # 共享图只能从当前 Run 取得对应的 immutable Skill snapshot；不写入持久化记录。
     skill_registry: Any | None = field(default=None, repr=False)
     delegation_policy: DelegationPolicy | None = None
+    # Host-owned 的进程内 Snapshot store；文件 contract 只能从本字段取得当前
+    # Run 的 Thread，不能把构图期 thread 捕获进共享 graph 闭包。
+    snapshot_store: Any | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         """在执行前验证 thread 与 snapshot 的绑定，阻止跨 project 注入。"""

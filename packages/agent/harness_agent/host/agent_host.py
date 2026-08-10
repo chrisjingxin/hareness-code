@@ -148,6 +148,7 @@ from harness_agent.runtime.resource_ownership import (
     SharedResourceOwner,
 )
 from harness_agent.threads.context_lifecycle import ContextLifecycle, ContextRefreshError
+from harness_agent.threads.snapshots import ThreadSnapshotStore
 from harness_agent.threads.thread_persistence import ThreadPersistence, ThreadPersistenceError
 from harness_agent.extensions.providers.harness_gateway import ProviderClientPool
 from harness_agent.host.run_coordinator import (
@@ -307,6 +308,8 @@ class AgentHost:
         self._plugin_diagnostics: tuple[str, ...] = ()
         self._agent_catalog: AgentCatalog | None = None
         self._thread_persistence: ThreadPersistence | None = None
+        # Snapshot 只存在于 Host 进程内；不复用 SQLite，也不跨 Host/进程恢复。
+        self._snapshot_store = ThreadSnapshotStore()
         self._agent_engine_pool: AgentEnginePool | None = None
         self._mcp_manager: McpConnectionManager | None = None
         self._mcp_owner: SharedResourceOwner[McpConnectionManager] | None = None
@@ -497,6 +500,7 @@ class AgentHost:
             await self._workspace_execution_resources.aclose()
             self._workspace_execution_resources = None
         await self._provider_client_pool.aclose()
+        self._snapshot_store.close()
         await self._close_thread_persistence()
 
     async def close_connection(self, connection: ProtocolConnection) -> None:
@@ -2653,6 +2657,7 @@ class AgentHost:
                 defer_tools=(
                     self._config.tools.tool_search_defer if self._config is not None else "auto"
                 ),
+                snapshot_store=self._snapshot_store,
             )
             self._agent_engine_artifacts[profile.profile_key] = _AgentEngineArtifacts(
                 execution_context=execution_context,
@@ -2765,6 +2770,7 @@ class AgentHost:
             cancellation_token=run.cancellation_token,
             skill_registry=registry,
             delegation_policy=spec.effective_policy.delegation,
+            snapshot_store=self._snapshot_store,
         )
 
     async def _handle_peer_response(self, message: dict[str, Any]) -> None:
