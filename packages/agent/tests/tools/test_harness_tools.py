@@ -26,6 +26,19 @@ def _tool_search_instance(tools: list[StructuredTool]) -> StructuredTool:
     return instance
 
 
+def test_removed_patch_tool_is_not_registered() -> None:
+    """扩展工具注册和 tool_search 候选都不再包含历史补丁工具。"""
+    tools = create_harness_tools(
+        "/tmp",
+        deferred_builtin_names=frozenset({"apply_patch", "lsp"}),
+    )
+
+    assert "apply_patch" not in {tool.name for tool in tools}
+    search = _tool_search_instance(tools)
+    result = json.loads(search.invoke({"query": "apply_patch"}))
+    assert all(item["name"] != "apply_patch" for item in result["results"])
+
+
 def test_tool_search_no_mcp_tools_returns_empty():
     """未传入 mcp_tools 时 tool_search 保持"无已注册的 MCP 工具"语义。"""
     tools = create_harness_tools("/tmp")

@@ -32,7 +32,6 @@ TOOL_KIND_MAP: dict[str, ToolKind] = {
     # EDIT
     "write_file": ToolKind.EDIT,
     "edit_file": ToolKind.EDIT,
-    "apply_patch": ToolKind.EDIT,
     # DELETE
     "delete_file": ToolKind.DELETE,
     # EXECUTE

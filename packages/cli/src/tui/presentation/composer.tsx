@@ -1,5 +1,6 @@
 /** Composer、运行状态与底栏视图。 */
 
+import { TextAttributes } from "@opentui/core"
 import { useEffect, useState } from "react"
 
 import {
@@ -72,7 +73,7 @@ export function Composer(props: Pick<SharedViewProps, "interactive" | "terminalW
         <box backgroundColor={tuiTheme.composer} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={isHome ? 1 : 0} flexShrink={0} flexGrow={1}>
           {isHome ? (
             <box flexDirection="row" gap={2} alignItems="flex-start">
-              <text fg={tuiTheme.warning} bold>{modeBadgeLabel}</text>
+              <text fg={tuiTheme.warning} attributes={TextAttributes.BOLD}>{modeBadgeLabel}</text>
               <textarea
                 ref={props.inputRef}
                 placeholder={placeholder}

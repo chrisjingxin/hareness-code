@@ -45,7 +45,6 @@ _WRITE_TOOLS: frozenset[str] = frozenset({
     "write_file",
     "edit_file",
     "delete_file",
-    "apply_patch",
 })
 
 
@@ -86,8 +85,8 @@ def is_sensitive_path(file_path: str) -> bool:
 def requires_safety_check(tool_name: str, tool_args: dict) -> bool:
     """判断指定工具调用是否需要触发敏感路径安全检查。
 
-    仅对写操作工具（``write_file``、``edit_file``、``delete_file``、
-    ``apply_patch``）检查其 ``file_path`` 参数；只读工具一律放行。
+    仅对写操作工具（``write_file``、``edit_file``、``delete_file``）检查其
+    ``file_path`` 参数；只读工具一律放行。
 
     Args:
         tool_name: 工具名称。

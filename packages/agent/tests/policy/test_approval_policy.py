@@ -25,11 +25,9 @@ _ALL_HITL_TOOLS = {
     "execute",
     "write_file",
     "edit_file",
-    "delete",
     "delete_file",
     "task",
     "web_fetch",
-    "apply_patch",
     "monitor",
     "task_stop",
 }
@@ -77,7 +75,7 @@ def test_plan_mode_allows_only_explicit_read_and_thread_tools(tool_name: str):
 
 @pytest.mark.parametrize(
     "tool_name",
-    ["write_file", "edit_file", "execute", "delete", "task", "mcp_future_tool"],
+    ["write_file", "edit_file", "execute", "delete_file", "task", "mcp_future_tool"],
 )
 async def test_plan_mode_rejects_mutation_and_unknown_future_tools(tool_name: str):
     """计划模式必须在执行前短路写入、shell、子 Agent 和未来 MCP。"""
@@ -123,6 +121,21 @@ def test_extra_interrupt_tools_none_keeps_original_set():
     default = interrupt_on_for_approval_mode("default", extra_interrupt_tools=None)
     assert default is not None
     assert set(default) == _ALL_HITL_TOOLS
+
+
+def test_hitl_configuration_preserves_file_mutation_dynamic_description():
+    """文件 mutation 可向既有审批协议提供动态 diff 描述，不改变其他工具配置。"""
+    def file_diff(_call: dict[str, Any], _state: Any, _runtime: Any) -> str:
+        return "精确 diff"
+
+    configured = interrupt_on_for_approval_mode(
+        "default",
+        approval_descriptions={"edit_file": file_diff},
+    )
+
+    assert configured is not None
+    assert configured["edit_file"]["description"] is file_diff
+    assert "description" not in configured["execute"]
 
 
 def test_approval_mode_prompts_state_the_actual_enforced_policy():
@@ -258,24 +271,24 @@ class TestApprovalPreflight:
         """返回一个真实越界的 OS 绝对路径，跨平台安全。"""
         return str(tmp_path.parent / "outside.md")
 
-    def test_default_outside_write_asks(self, tmp_path: Path):
-        """default 模式 + 越界写入：不再短路，落入兜底弹窗。"""
+    def test_default_outside_write_skips_dialog(self, tmp_path: Path):
+        """越界写入在审批前被边界拒绝，不产生无法执行的弹窗。"""
         preflight = _make_preflight(tmp_path, "default", original=lambda _request: False)
         request = _make_request("write_file", {"file_path": self._outside_file(tmp_path)})
-        assert preflight(request) is True
+        assert preflight(request) is False
 
-    def test_auto_outside_write_not_fast_tracked(self, tmp_path: Path):
-        """auto 模式 + 越界写入：F1 快速通道不产生假审批，必须弹窗确认。"""
+    def test_auto_outside_write_skips_dialog(self, tmp_path: Path):
+        """AUTO 不把越界工具调用交给分类器或审批。"""
         preflight = _make_preflight(tmp_path, "auto", original=lambda _request: False)
         request = _make_request("write_file", {"file_path": self._outside_file(tmp_path)})
-        assert preflight(request) is True
+        assert preflight(request) is False
 
     @pytest.mark.parametrize("tool_name", ["write_file", "edit_file"])
-    def test_auto_edit_outside_write_still_asks(self, tmp_path: Path, tool_name: str):
-        """auto-edit 模式 + 越界写入/编辑：不得享受编辑免弹窗。"""
+    def test_auto_edit_outside_write_skips_dialog(self, tmp_path: Path, tool_name: str):
+        """auto-edit 也不扩展路径能力，越界调用直接拒绝。"""
         preflight = _make_preflight(tmp_path, "auto-edit", original=lambda _request: False)
         request = _make_request(tool_name, {"file_path": self._outside_file(tmp_path)})
-        assert preflight(request) is True
+        assert preflight(request) is False
 
     def test_outside_read_still_skips_dialog(self, tmp_path: Path):
         """越界读取在任何非 plan 模式下仍不产生审批弹窗（执行层硬拒绝）。"""

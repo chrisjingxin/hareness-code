@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Sequence
 
@@ -60,6 +61,22 @@ def test_create_harness_agent_returns_compiled_graph():
     assert hasattr(agent, "ainvoke")
 
 
+def test_default_tool_schema_exposes_only_canonical_snapshot_file_mutations():
+    """静态 schema/指纹与运行时 contract 共用同一套 Snapshot 文件参数。"""
+    from harness_agent.runtime.agent import default_tool_schemas
+
+    schemas = {str(schema["name"]): schema["parameters"] for schema in default_tool_schemas()}
+    names = set(schemas)
+    assert "apply_patch" not in names
+    assert schemas["edit_file"] == {
+        "file_path": "string",
+        "snapshot_id": "string",
+        "old_string": "string",
+        "new_string": "string",
+    }
+    assert schemas["delete_file"] == {"file_path": "string", "snapshot_id": "string"}
+
+
 async def test_auto_mode_preflight_uses_classifier_cache_end_to_end():
     """接线回归：auto 模式分类器缓存 allow 命中时不弹窗，工具直接执行。
 
@@ -104,6 +121,170 @@ async def test_auto_mode_preflight_uses_classifier_cache_end_to_end():
 
     assert "__interrupt__" not in result
     assert any(isinstance(message, ToolMessage) for message in result["messages"])
+
+
+async def test_default_hitl_shows_prepared_file_diff_before_edit(tmp_path: Path):
+    """真实 Agent 图在审批前展示已固定的文件 diff，而不是仅展示模型参数。"""
+    from langgraph.checkpoint.memory import MemorySaver
+
+    from harness_agent.threads.snapshots import ThreadSnapshotStore
+    from harness_agent.threads.text_backend import LocalTextMutationBackend
+    from harness_agent.tools.snapshot_file_contract import create_snapshot_file_tool_contract
+    from harness_agent.runtime.agent import create_harness_agent
+    from harness_agent.runtime.run_context import RunContext
+    from harness_agent.threads.context_lifecycle import prepare_embedded_context_snapshot
+
+    target = tmp_path / "approval.txt"
+    target.write_text("before\n", encoding="utf-8")
+    backend = LocalTextMutationBackend(tmp_path)
+    document = backend.read_text_document("/approval.txt")
+    snapshots = ThreadSnapshotStore()
+    record = snapshots.record_read(
+        "prepared-diff",
+        "/approval.txt",
+        backend.backend_id,
+        document.content,
+        offset=0,
+        limit=1,
+        raw_bytes=b"before\n",
+    )
+    assert record is not None
+    call = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "edit_file",
+                "args": {
+                    "file_path": "/approval.txt",
+                    "snapshot_id": record.snapshot_id,
+                    "old_string": "before\n",
+                    "new_string": "approved\n",
+                },
+                "id": "prepared-edit",
+            }
+        ],
+    )
+    model = ToolCallingFakeChatModel(messages=iter([call, AIMessage(content="done")]))
+    model.profile = {"max_input_tokens": 200_000}
+    contract = create_snapshot_file_tool_contract(
+        object(),
+        snapshot_store=snapshots,
+        text_backend=backend,
+    )
+    agent = create_harness_agent(
+        model,
+        cwd=str(tmp_path),
+        checkpointer=MemorySaver(),
+        approval_mode="default",
+        enable_skills=False,
+        enable_memory=False,
+        enable_ask_user=False,
+        file_tool_contract=contract,
+        shared_engine=True,
+    )
+    context = RunContext(
+        thread_id="prepared-diff",
+        run_id="run-prepared-diff",
+        context_snapshot=prepare_embedded_context_snapshot(
+            thread_id="prepared-diff",
+            system_prompt="test",
+            workspace=str(tmp_path),
+            sandboxed=False,
+            provider=None,
+            approval_mode="default",
+            skill_registry=None,
+            enable_memory=False,
+            enable_skills=False,
+            enable_ask_user=False,
+        ),
+        approval_mode="default",
+        snapshot_store=snapshots,
+    )
+
+    result = await agent.ainvoke(
+        {"messages": [HumanMessage(content="修改文件")]},
+        config={"configurable": {"thread_id": "prepared-diff"}},
+        context=context,
+    )
+
+    interrupt = result["__interrupt__"][0].value
+    action = interrupt["action_requests"][0]
+    assert action["args"]["file_path"] == "/approval.txt"
+    assert "-before" in action["description"]
+    assert "+approved" in action["description"]
+
+
+async def test_production_toolnode_attaches_bounded_lsp_diagnostics_after_write(tmp_path: Path):
+    """真实 ToolNode 的异步文件入口在提交后追加 LSP 摘要，而不会回显诊断正文。"""
+    import json
+
+    from langchain.agents.middleware import AgentMiddleware
+    from langchain_core.messages import ToolMessage
+    from langgraph.checkpoint.memory import MemorySaver
+
+    from harness_agent.runtime.agent import create_harness_agent
+
+    class FakeLspManager:
+        """模拟 Host 注入的已连接 LSP，只返回一项包含不可信正文的诊断。"""
+
+        async def query(self, *_args: Any, **_kwargs: Any) -> dict[str, object]:
+            return {
+                "action": "diagnostics",
+                "results": {
+                    "kind": "full",
+                    "items": [
+                        {
+                            "range": {"start": {"line": 0}, "end": {"line": 0}},
+                            "severity": 1,
+                            "code": "TEST001",
+                            "message": "diagnostic-body-must-not-appear",
+                        }
+                    ],
+                },
+            }
+
+    call = AIMessage(
+        content="",
+        tool_calls=[
+                {
+                    "name": "write_file",
+                    "args": {"file_path": str(tmp_path / "new.txt"), "content": "created\n"},
+                "id": "write-with-lsp",
+            }
+        ],
+    )
+    model = ToolCallingFakeChatModel(messages=iter([call, AIMessage(content="done")]))
+    model.profile = {"max_input_tokens": 200_000}
+    plugin_runtime = SimpleNamespace(lsp=FakeLspManager(), middleware=AgentMiddleware())
+    agent = create_harness_agent(
+        model,
+        cwd=str(tmp_path),
+        checkpointer=MemorySaver(),
+        approval_mode="yolo",
+        enable_skills=False,
+        enable_memory=False,
+        enable_ask_user=False,
+        plugin_runtime=plugin_runtime,
+    )
+
+    result = await agent.ainvoke(
+        {"messages": [HumanMessage(content="创建文件")]},
+        config={"configurable": {"thread_id": "post-write-lsp"}},
+    )
+
+    tool_message = next(message for message in result["messages"] if isinstance(message, ToolMessage))
+    payload = json.loads(str(tool_message.content))
+    assert payload["ok"] is True
+    assert payload["diagnostics"] == {
+        "status": "ok",
+        "count": 1,
+        "items": [
+            {"start_line": 1, "end_line": 1, "severity": "error", "code": "TEST001"}
+        ],
+        "truncated": False,
+        "latency_ms": payload["diagnostics"]["latency_ms"],
+    }
+    assert "diagnostic-body-must-not-appear" not in str(tool_message.content)
 
 
 def test_execution_context_prompt_marks_local_and_remote_boundaries():

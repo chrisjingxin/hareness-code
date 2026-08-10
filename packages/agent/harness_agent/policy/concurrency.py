@@ -21,7 +21,7 @@ _READ_ONLY_TOOLS = frozenset({
 })
 """始终可并行的只读工具。"""
 
-_WRITE_TOOLS = frozenset({"write_file", "edit_file", "delete_file", "apply_patch"})
+_WRITE_TOOLS = frozenset({"write_file", "edit_file", "delete_file"})
 """始终不可并行的写工具。"""
 
 # ---------------------------------------------------------------------------

@@ -17,6 +17,7 @@ def test_full_inheritance():
     assert "read_file" in result
     assert "execute" in result
     assert "write_file" in result
+    assert "apply_patch" not in result
 
 
 def test_whitelist():

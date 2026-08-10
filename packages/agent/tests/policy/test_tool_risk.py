@@ -28,7 +28,6 @@ from harness_agent.policy.tool_risk import (
         ("task_output", ToolKind.READ),
         ("write_file", ToolKind.EDIT),
         ("edit_file", ToolKind.EDIT),
-        ("apply_patch", ToolKind.EDIT),
         ("delete_file", ToolKind.DELETE),
         ("execute", ToolKind.EXECUTE),
         ("monitor", ToolKind.EXECUTE),
@@ -133,5 +132,5 @@ def test_permission_matrix_covers_all_kinds_and_modes():
 
 
 def test_tool_kind_map_covers_all_expected_tools():
-    """TOOL_KIND_MAP 应包含全部 23 个已定义工具。"""
-    assert len(TOOL_KIND_MAP) == 23
+    """TOOL_KIND_MAP 应包含全部 22 个已定义工具。"""
+    assert len(TOOL_KIND_MAP) == 22

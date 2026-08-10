@@ -510,6 +510,15 @@ async def test_config_show_exposes_redacted_agent_engine_pool_diagnostics(tmp_pa
     assert diagnostics["runtimes"][0]["profile_id"] == profile.profile_key[:12]
     assert profile.profile_key not in str(diagnostics)
     assert diagnostics["memory"]["status"] == "not_collected"
+    file_metrics = result["file_tool_metrics"]
+    assert file_metrics["read_calls"] == file_metrics["reread_calls"] == 0
+    assert file_metrics["error_codes"] == {}
+    assert file_metrics["diagnostics"] == {
+        "calls": 0,
+        "unavailable": 0,
+        "timeouts": 0,
+        "latency_ms_total": 0.0,
+    }
 
 
 async def test_config_write_rpc_previews_and_commits_user_default_model(
@@ -2031,7 +2040,7 @@ async def test_real_hitl_rejection_prevents_file_write():
 
     with TemporaryDirectory() as workspace:
         destination = Path(workspace) / "blocked.txt"
-        model = ToolModel(responses=[AIMessage(content="", tool_calls=[{"name": "write_file", "args": {"file_path": str(destination), "content": "x"}, "id": "call-1"}]), AIMessage(content="已拒绝")])
+        model = ToolModel(responses=[AIMessage(content="", tool_calls=[{"name": "write_file", "args": {"file_path": "/blocked.txt", "content": "x"}, "id": "call-1"}]), AIMessage(content="已拒绝")])
         model.profile = {"max_input_tokens": 200_000}
         agent = create_harness_agent(model, cwd=workspace, enable_skills=False, enable_memory=False, enable_ask_user=False, approval_mode="default")
         server = AgentHost(agent=agent)
@@ -2058,6 +2067,8 @@ async def test_approve_thread_delete_rule_skips_later_deletions_in_same_thread()
     from harness_agent.policy.permission_rules import PermissionRule, load_rules, merge_rules
     from harness_agent.runtime.agent import create_harness_agent
     from harness_agent.host.agent_host import AgentHost
+    from harness_agent.threads.snapshots import ThreadSnapshotStore
+    from harness_agent.threads.text_backend import LocalTextMutationBackend
 
     class ToolModel(FakeMessagesListChatModel):
         def bind_tools(self, *_args: Any, **_kwargs: Any) -> Runnable:
@@ -2068,6 +2079,30 @@ async def test_approve_thread_delete_rule_skips_later_deletions_in_same_thread()
         second = Path(workspace) / "second.txt"
         first.write_text("a", encoding="utf-8")
         second.write_text("b", encoding="utf-8")
+        # 本用例只验证 delete 的审批规则；先以同一个 backend identity 和真实
+        # Thread 建立完整读取证明，避免把 Snapshot 读取流程混入 Host 交互断言。
+        snapshot_store = ThreadSnapshotStore()
+        text_backend = LocalTextMutationBackend(workspace)
+
+        def snapshot_for(path: Path) -> str:
+            """为同一 Thread 的完整已读文件准备 delete_file 参数。"""
+            document = text_backend.read_text_document(f"/{path.name}")
+            record = snapshot_store.record_read(
+                "del-thread",
+                document.path,
+                text_backend.backend_id,
+                document.content,
+                offset=0,
+                limit=document.content.count("\n") + 1,
+                encoding=document.identity.encoding,
+                has_bom=document.identity.has_bom,
+                raw_bytes=path.read_bytes(),
+            )
+            assert record is not None
+            return record.snapshot_id
+
+        first_snapshot = snapshot_for(first)
+        second_snapshot = snapshot_for(second)
 
         host_ref: dict[str, Any] = {}
 
@@ -2080,9 +2115,9 @@ async def test_approve_thread_delete_rule_skips_later_deletions_in_same_thread()
 
         model = ToolModel(
             responses=[
-                AIMessage(content="", tool_calls=[{"name": "delete_file", "args": {"file_path": str(first)}, "id": "del-1"}]),
+                AIMessage(content="", tool_calls=[{"name": "delete_file", "args": {"file_path": "/first.txt", "snapshot_id": first_snapshot}, "id": "del-1"}]),
                 AIMessage(content="已删除第一个文件"),
-                AIMessage(content="", tool_calls=[{"name": "delete_file", "args": {"file_path": str(second)}, "id": "del-2"}]),
+                AIMessage(content="", tool_calls=[{"name": "delete_file", "args": {"file_path": "/second.txt", "snapshot_id": second_snapshot}, "id": "del-2"}]),
                 AIMessage(content="已删除第二个文件"),
             ]
         )
@@ -2095,6 +2130,7 @@ async def test_approve_thread_delete_rule_skips_later_deletions_in_same_thread()
             enable_memory=False,
             enable_ask_user=False,
             rules_provider=rules_provider,
+            snapshot_store=snapshot_store,
         )
         server = AgentHost(agent=agent)
         host_ref["host"] = server
@@ -2120,8 +2156,8 @@ async def test_approve_thread_delete_rule_skips_later_deletions_in_same_thread()
         assert not second.exists()
 
 
-async def test_outside_write_asks_approval_and_writes_when_approved():
-    """default 模式越界写入弹出审批框，批准后真实写出工作区外路径。"""
+async def test_outside_write_is_rejected_without_approval():
+    """default 模式越界写入在创建审批交互前被边界拒绝。"""
     from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
     from langchain_core.messages import AIMessage
     from langchain_core.runnables import Runnable
@@ -2132,8 +2168,8 @@ async def test_outside_write_asks_approval_and_writes_when_approved():
         def bind_tools(self, *_args: Any, **_kwargs: Any) -> Runnable:
             return self
 
-    with TemporaryDirectory() as workspace, TemporaryDirectory() as outside:
-        destination = Path(outside) / "approved-outside.md"
+    with TemporaryDirectory() as workspace:
+        destination = Path(workspace).parent / f"{Path(workspace).name}-outside.md"
         model = ToolModel(
             responses=[
                 AIMessage(
@@ -2141,7 +2177,7 @@ async def test_outside_write_asks_approval_and_writes_when_approved():
                     tool_calls=[
                         {
                             "name": "write_file",
-                            "args": {"file_path": str(destination), "content": "written after approval"},
+                            "args": {"file_path": f"../{destination.name}", "content": "written after approval"},
                             "id": "call-outside",
                         }
                     ],
@@ -2163,20 +2199,10 @@ async def test_outside_write_asks_approval_and_writes_when_approved():
         await server.dispatch(
             _request("run.start", {"message": "越界写入", "thread_id": "outside", "run_id": "outside-run"}, "outside-start")
         )
-        approval = await _wait_for(
-            frames, lambda frame: str(frame.get("method", "")) == "interaction.approval"
-        )
-
-        # 批准前不得写出；批准后必须真实落到工作区外路径。
-        assert "write_file" in str(approval["params"]["payload"]["description"])
-        assert not destination.exists()
-
-        await server.dispatch(
-            {"jsonrpc": "2.0", "id": approval["id"], "result": {"decision": "approve_once"}}
-        )
         await _wait_for(frames, lambda frame: frame.get("params", {}).get("type") == "run.completed")
 
-        assert destination.read_text(encoding="utf-8") == "written after approval"
+        assert not destination.exists()
+        assert not any(frame.get("method") == "interaction.approval" for frame in frames)
 
 
 async def test_auto_edit_writes_without_interruption_but_shell_still_requires_approval():
@@ -2200,7 +2226,7 @@ async def test_auto_edit_writes_without_interruption_but_shell_still_requires_ap
                         {
                             "name": "write_file",
                             "args": {
-                                "file_path": str(Path(workspace) / "auto.txt"),
+                                "file_path": "/auto.txt",
                                 "content": "written",
                             },
                             "id": "call-write",
@@ -2348,9 +2374,9 @@ async def test_batch_write_thread_approval_auto_approves_same_batch_siblings():
                 AIMessage(
                     content="",
                     tool_calls=[
-                        {"name": "write_file", "args": {"file_path": str(targets[0]), "content": "1"}, "id": "wf-1"},
-                        {"name": "write_file", "args": {"file_path": str(targets[1]), "content": "2"}, "id": "wf-2"},
-                        {"name": "write_file", "args": {"file_path": str(targets[2]), "content": "3"}, "id": "wf-3"},
+                        {"name": "write_file", "args": {"file_path": "/a.txt", "content": "1"}, "id": "wf-1"},
+                        {"name": "write_file", "args": {"file_path": "/b.txt", "content": "2"}, "id": "wf-2"},
+                        {"name": "write_file", "args": {"file_path": "/c.txt", "content": "3"}, "id": "wf-3"},
                     ],
                 ),
                 AIMessage(content="已创建三个文件"),

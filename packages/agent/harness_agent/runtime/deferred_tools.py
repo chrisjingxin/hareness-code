@@ -20,6 +20,8 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.tools import BaseTool
 
+from harness_agent.tools.file_tool_catalog import RESIDENT_FILE_TOOL_NAMES
+
 
 class DeferredToolMiddleware(AgentMiddleware):
     """把 deferred 工具从模型绑定中隐藏，经 tool_search 命中后按需 reveal。
@@ -81,12 +83,7 @@ class DeferredToolMiddleware(AgentMiddleware):
 
 # D8 常驻名单：文件/执行原语 + 交互 + 模式切换 + 发现入口 + 编辑审批常用。
 RESIDENT_TOOL_NAMES: frozenset[str] = frozenset({
-    "ls",
-    "read_file",
-    "write_file",
-    "edit_file",
-    "glob",
-    "grep",
+    *RESIDENT_FILE_TOOL_NAMES,
     "execute",
     "write_todos",
     "task",
@@ -94,8 +91,6 @@ RESIDENT_TOOL_NAMES: frozenset[str] = frozenset({
     "enter_plan_mode",
     "exit_plan_mode",
     "tool_search",
-    "apply_patch",
-    "delete_file",
 })
 
 # D8 deferred 名单：低频/场景特定内置工具，经 tool_search 发现后 reveal。

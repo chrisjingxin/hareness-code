@@ -10,7 +10,7 @@ from __future__ import annotations
 import fnmatch
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import Any
 
 from langchain.agents.middleware.types import AgentMiddleware, ModelRequest, ModelResponse
@@ -19,15 +19,12 @@ from langchain_core.messages import ToolMessage
 
 from harness_agent.runtime.agent_catalog import EffectiveExecutionPolicy, StringRule
 from harness_agent.threads.prompting import canonical_json, sha256_text
-
-
-FILESYSTEM_READ_TOOLS = frozenset({"ls", "read_file", "glob", "grep", "lsp"})
-"""会直接读取工作区文件的内置工具。"""
-
-FILESYSTEM_WRITE_TOOLS = frozenset(
-    {"write_file", "edit_file", "delete", "delete_file", "apply_patch"}
+from harness_agent.tools.file_tool_catalog import (
+    FILESYSTEM_READ_TOOL_NAMES as FILESYSTEM_READ_TOOLS,
+    FILESYSTEM_WRITE_TOOL_NAMES as FILESYSTEM_WRITE_TOOLS,
+    DIRECT_FILE_TOOL_PATH_ARGUMENTS as _DIRECT_PATH_ARGUMENTS,
 )
-"""会修改工作区文件的内置工具。"""
+
 
 SHELL_TOOLS = frozenset({"execute", "monitor"})
 """会启动本机或远端命令的工具。"""
@@ -55,17 +52,6 @@ BUILTIN_TOOL_NAMES = frozenset(
     }
 )
 """当前 DeepAgents 与 Harness 共同提供的稳定内置工具名。"""
-
-_DIRECT_PATH_ARGUMENTS = {
-    "ls": "path",
-    "read_file": "file_path",
-    "write_file": "file_path",
-    "edit_file": "file_path",
-    "delete": "file_path",
-    "delete_file": "file_path",
-    "lsp": "file_path",
-}
-
 
 @dataclass(frozen=True, slots=True)
 class EffectiveCapabilityView:
@@ -133,13 +119,6 @@ def resolve_effective_capability_view(
         visible.difference_update(FILESYSTEM_READ_TOOLS)
     if policy.filesystem_write == ():
         visible.difference_update(FILESYSTEM_WRITE_TOOLS)
-    elif (
-        policy.filesystem_write is not None
-        and policy.filesystem_write != ("**/*",)
-    ):
-        # apply_patch 可同时包含多个目标，进入执行前无法可靠证明所有路径均属于
-        # 一个有限 glob 子集，因此在路径受限角色中保守隐藏。
-        visible.discard("apply_patch")
     if policy.shell is not None and not policy.shell.enabled:
         visible.difference_update(SHELL_TOOLS)
     if policy.network is not None and not policy.network.enabled:
@@ -193,13 +172,10 @@ class CapabilityPolicyMiddleware(AgentMiddleware):
     def __init__(
         self,
         view: EffectiveCapabilityView,
-        *,
-        workspace: str | Path,
     ) -> None:
-        """固定能力视图和路径匹配基准，运行期间不接受可变配置。"""
+        """固定能力视图，运行期间不接受可变配置。"""
         super().__init__()
         self._view = view
-        self._workspace = Path(workspace).resolve(strict=False)
 
     def wrap_model_call(
         self,
@@ -284,21 +260,15 @@ class CapabilityPolicyMiddleware(AgentMiddleware):
         return None
 
     def _relative_path(self, value: object) -> str:
-        """把宿主绝对路径或 DeepAgents 虚拟路径转换成工作区相对路径。"""
+        """把统一的工作区虚拟路径转换成 Policy 使用的相对路径。"""
         if not isinstance(value, str) or not value:
             raise ValueError("文件路径必须是非空字符串")
         normalized = value.replace("\\", "/")
+        if not normalized.startswith("/") or normalized.startswith("//"):
+            raise ValueError("文件路径必须使用以 `/` 开头的工作区虚拟路径")
         if ".." in PurePosixPath(normalized).parts:
             raise ValueError("文件路径不能包含 '..' 路径段")
-        if normalized.startswith("/.harness/"):
-            return normalized.lstrip("/")
-        candidate = Path(value).resolve(strict=False)
-        try:
-            return candidate.relative_to(self._workspace).as_posix() or "."
-        except ValueError:
-            # DeepAgents 本机 backend 使用 `/src/file` 表示工作区虚拟路径；
-            # 真实宿主绝对路径若不在工作区，后续 WorkspaceBoundary 仍会拒绝。
-            return normalized.lstrip("/")
+        return normalized.lstrip("/") or "."
 
     def _rejection(self, call: dict[str, Any], reason: str) -> ToolMessage:
         """把授权失败转换为稳定错误结果，避免图异常或审批误导。"""

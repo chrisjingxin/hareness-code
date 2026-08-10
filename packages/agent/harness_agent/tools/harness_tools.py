@@ -1,8 +1,8 @@
 """Harness 扩展工具注册：将新增工具函数包装为 LangChain BaseTool 并注入 Agent 图。
 
 deepagents 框架仅自动注入 ls/read_file/write_file/edit_file/glob/grep/execute/
-write_todos/task 等核心工具。本模块负责将 web_search、web_fetch、delete_file、
-apply_patch、lsp、tool_search、memory_search、memory_save、enter_plan_mode、
+write_todos/task 等核心工具。本模块负责将 web_search、web_fetch、lsp、
+tool_search、memory_search、memory_save、enter_plan_mode、
 exit_plan_mode、task_output、task_stop、monitor 等扩展工具包装为 BaseTool 实例，
 使 Agent 在运行时能实际调用它们。
 """
@@ -18,8 +18,6 @@ from langchain_core.tools import StructuredTool
 
 from harness_agent.tools.tools_web import web_fetch as _web_fetch_impl
 from harness_agent.tools.tools_web import web_search as _web_search_impl
-from harness_agent.tools.tools_file import delete_file as _delete_file_impl
-from harness_agent.tools.tools_file import apply_patch as _apply_patch_impl
 from harness_agent.tools.tools_intelligence import lsp as _lsp_impl
 from harness_agent.tools.tools_intelligence import tool_search as _tool_search_impl
 from harness_agent.tools.tools_memory import memory_save as _memory_save_impl
@@ -111,38 +109,6 @@ def create_harness_tools(
         coroutine=_web_fetch,
         name="web_fetch",
         description="获取指定 URL 的网页内容，支持 text/markdown/html 格式输出。",
-    ))
-
-    # --- delete_file ---
-    def _delete_file(file_path: str) -> str:
-        """删除指定文件。
-
-        Args:
-            file_path: 要删除的文件路径（相对于工作区根目录，以 / 开头）。
-        """
-        result = _delete_file_impl(file_path, workspace_root)
-        return json.dumps(result, ensure_ascii=False)
-
-    tools.append(StructuredTool.from_function(
-        func=_delete_file,
-        name="delete_file",
-        description="删除工作区内的指定文件。不可逆操作，需要用户审批。",
-    ))
-
-    # --- apply_patch ---
-    def _apply_patch(patch: str) -> str:
-        """应用 unified diff 格式的补丁到工作区文件。
-
-        Args:
-            patch: unified diff 格式的补丁内容。
-        """
-        result = _apply_patch_impl(patch, workspace_root)
-        return json.dumps(result, ensure_ascii=False)
-
-    tools.append(StructuredTool.from_function(
-        func=_apply_patch,
-        name="apply_patch",
-        description="应用 unified diff 格式补丁，支持修改、创建和删除文件。",
     ))
 
     # --- lsp ---

@@ -92,7 +92,6 @@ class TestParseRuleToolMapping:
             ("MCP", "mcp_tool"),
             ("NotebookRead", "read_file"),
             ("NotebookEdit", "edit_file"),
-            ("ApplyPatch", "apply_patch"),
             ("ToolSearch", "tool_search"),
         ],
     )
@@ -314,7 +313,6 @@ class TestSerializeRuleReverseMapping:
             ("task", "Agent"),
             ("task_stop", "KillShell"),
             ("mcp_tool", "MCP"),
-            ("apply_patch", "ApplyPatch"),
             ("tool_search", "ToolSearch"),
         ],
     )
