@@ -2659,7 +2659,7 @@ class AgentHost:
                 plugin_runtime=self._plugin_runtime_manager,
                 rules_provider=_get_current_rules,
                 defer_tools=(
-                    self._config.tools.tool_search_defer if self._config is not None else "auto"
+                    self._config.tools.defer if self._config is not None else "auto"
                 ),
                 snapshot_store=self._snapshot_store,
                 file_tool_metrics=self._file_tool_metrics,

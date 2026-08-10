@@ -1486,7 +1486,7 @@ async def test_host_snapshot_boundary_serializes_update_with_single_flight_acqui
 async def test_default_engine_builder_passes_one_host_lock_to_each_profile(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
-    """不同 Profile 的默认图必须共享所属 AgentHost 的工具读写锁。"""
+    """不同 Profile 的默认图必须共享 Host 锁并使用 canonical 延迟工具配置。"""
     from types import SimpleNamespace
 
     import harness_agent.runtime.agent as agent_module
@@ -1494,15 +1494,19 @@ async def test_default_engine_builder_passes_one_host_lock_to_each_profile(
     import harness_agent.runtime.execution as execution_module
     import harness_agent.extensions.providers.harness_gateway as gateway_module
     from harness_agent.extensions.mcp import McpConnectionManager, build_mcp_snapshot
+    from harness_agent.config.config import ToolSearchSettings
     from harness_agent.host.agent_host import AgentHost
     from harness_agent.runtime.agent_spec import skill_catalog_fingerprint
     from harness_agent.runtime.agent_engine_profile import component_fingerprint
 
-    captured_locks: list[object] = []
+    captured_settings: list[tuple[object, object]] = []
     monkeypatch.setattr(
         agent_module,
         "create_harness_agent",
-        lambda *_args, **kwargs: captured_locks.append(kwargs["concurrency_lock"]) or object(),
+        lambda *_args, **kwargs: captured_settings.append(
+            (kwargs["concurrency_lock"], kwargs["defer_tools"])
+        )
+        or object(),
     )
     monkeypatch.setattr(
         context_window_module,
@@ -1570,6 +1574,10 @@ async def test_default_engine_builder_passes_one_host_lock_to_each_profile(
         )
 
     server = AgentHost(allow_echo=True, workspace=tmp_path)
+    server._config = SimpleNamespace(
+        tools=ToolSearchSettings(defer="off"),
+        model_catalog=None,
+    )
     server._mcp_manager = McpConnectionManager(mcp_snapshot)
     server._provider_client_pool = ProviderClients()  # type: ignore[assignment]
     server._ensure_thread_persistence = persistence  # type: ignore[method-assign]
@@ -1583,8 +1591,11 @@ async def test_default_engine_builder_passes_one_host_lock_to_each_profile(
     first = await server._build_default_agent_engine(first_profile)  # type: ignore[arg-type]
     second = await server._build_default_agent_engine(second_profile)  # type: ignore[arg-type]
 
-    assert captured_locks == [server._tool_concurrency_lock, server._tool_concurrency_lock]
-    assert captured_locks[0] is captured_locks[1]
+    assert captured_settings == [
+        (server._tool_concurrency_lock, "off"),
+        (server._tool_concurrency_lock, "off"),
+    ]
+    assert captured_settings[0][0] is captured_settings[1][0]
     await first.aclose()
     await second.aclose()
 
