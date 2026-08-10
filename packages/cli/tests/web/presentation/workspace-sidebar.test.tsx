@@ -74,6 +74,7 @@ describe("WorkspaceSidebar", () => {
     try {
       const newButton = handle.container.querySelector<HTMLButtonElement>(".new-thread-button")
       expect(newButton?.disabled).toBe(true)
+      expect(newButton?.classList.contains("button-secondary")).toBe(true)
       expect(newButton?.title).toBe("当前任务结束后可用")
       const items = Array.from(handle.container.querySelectorAll<HTMLButtonElement>(".thread-item"))
       const inactive = items.find(button => button.getAttribute("data-active") === "false")

@@ -200,6 +200,11 @@ describe("ContextDock", () => {
     try {
       const tablist = handle.container.querySelector<HTMLElement>('[role="tablist"]')
       expect(tablist).not.toBeNull()
+      const header = handle.container.querySelector<HTMLElement>(".context-dock-header")
+      expect(header?.querySelector('[role="tablist"]')).toBe(tablist)
+      expect(header?.querySelector(".context-dock-title")).toBeNull()
+      expect(header?.querySelector(".panel-close")).not.toBeNull()
+      expect(handle.container.querySelectorAll(".context-dock-header")).toHaveLength(1)
       const tabs = Array.from(handle.container.querySelectorAll<HTMLButtonElement>('[role="tab"]'))
       expect(tabs.length).toBe(5) // Code|Model|Skills|MCP|Status
       const modelTab = tabs.find(tab => tab.textContent === "Model")

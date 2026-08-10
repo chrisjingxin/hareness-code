@@ -1,4 +1,4 @@
-/** Context Dock：右侧常驻面板（Code|Model|Skills|MCP|Status）；Help 只从顶栏更多菜单打开不占 tab。 */
+/** Context Dock：右侧常驻面板；主 tab 与关闭动作共用一层 header，Help 仍从顶栏菜单打开。 */
 /** @jsxImportSource react */
 
 import { useEffect, useRef, useState } from "react"
@@ -36,7 +36,26 @@ export function ContextDock({
     <aside className="context-dock" style={{ width: widthPx }} aria-label="Context Dock">
       <DockResizeHandle widthPx={widthPx} dispatch={dispatch} disabled={disabled} />
       <header className="context-dock-header">
-        <h2 className="context-dock-title">{activePanel === "help" ? "帮助" : "Context Dock"}</h2>
+        {isMainTab ? (
+          <div className="context-dock-tabs" role="tablist" aria-label="Context Dock 面板" onKeyDown={event => handleTabListKeyDown(event, dispatch)}>
+            {DOCK_TABS.filter(tab => tabVisible(tab, availability)).map(tab => (
+              <button
+                type="button"
+                key={tab}
+                role="tab"
+                id={`dock-tab-${tab}`}
+                aria-selected={activePanel === tab}
+                aria-controls="context-dock-panel"
+                data-panel={tab}
+                className={activePanel === tab ? "dock-tab is-selected" : "dock-tab"}
+                disabled={disabled}
+                onClick={() => dispatch({ type: "dock-panel-select", panel: tab })}
+              >
+                {tabLabel(tab)}
+              </button>
+            ))}
+          </div>
+        ) : <h2 className="context-dock-title">帮助</h2>}
         <button
           type="button"
           className="icon-button panel-close"
@@ -47,26 +66,6 @@ export function ContextDock({
           <X aria-hidden="true" />
         </button>
       </header>
-      {isMainTab ? (
-        <div className="context-dock-tabs" role="tablist" aria-label="Context Dock 面板" onKeyDown={event => handleTabListKeyDown(event, dispatch)}>
-          {DOCK_TABS.filter(tab => tabVisible(tab, availability)).map(tab => (
-            <button
-              type="button"
-              key={tab}
-              role="tab"
-              id={`dock-tab-${tab}`}
-              aria-selected={activePanel === tab}
-              aria-controls="context-dock-panel"
-              data-panel={tab}
-              className={activePanel === tab ? "dock-tab is-selected" : "dock-tab"}
-              disabled={disabled}
-              onClick={() => dispatch({ type: "dock-panel-select", panel: tab })}
-            >
-              {tabLabel(tab)}
-            </button>
-          ))}
-        </div>
-      ) : null}
       <div className="context-dock-body" id="context-dock-panel" role="tabpanel">
         {activePanel === "code" ? <CodePanel snapshot={snapshot} dispatch={dispatch} disabled={disabled} /> : null}
         {activePanel === "models" ? <ModelsPanel snapshot={snapshot} busyReason={busyReason} disabled={disabled} dispatch={dispatch} /> : null}

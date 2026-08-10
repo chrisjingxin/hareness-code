@@ -139,7 +139,7 @@ export function WebApp(props: {
               <span className="sr-only">审批</span>
               <span className="meta-chip-value">{approvalModeLabel(interactive.runtime)}</span>
             </span>
-            <button type="button" className="meta-chip" disabled={readOnly} onClick={() => { onIntent({ type: "dock-open", panel: "status" }) }} title="连接与活动状态">
+            <button type="button" className="meta-chip meta-chip-run" disabled={readOnly} onClick={() => { onIntent({ type: "dock-open", panel: "status" }) }} title="连接与活动状态">
               <Activity aria-hidden="true" size={16} />
               <span className={`status-dot status-dot-${interactive.activity.kind}`} aria-hidden="true" />
               <span className="meta-chip-value">{props.active ? activityLabel(interactive.activity.kind) : "正在接管"}{interactive.connection.status !== "open" ? ` · ${connectionLabel(interactive.connection.status)}` : ""}</span>

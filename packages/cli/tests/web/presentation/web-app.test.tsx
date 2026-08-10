@@ -87,6 +87,21 @@ describe("WebApp", () => {
     }
   })
 
+  test("Run 状态使用 Topbar 最高状态层级，仍保留文字和状态图标语义", () => {
+    const { handle } = mountWebApp(true, makeSnapshot({
+      interactive: makeInteractive({ activity: { kind: "running" }, activeRun: { threadId: "t1", runId: "r1" } }),
+    }))
+    try {
+      const runChip = handle.container.querySelector<HTMLButtonElement>(".meta-chip-run")
+      expect(runChip).not.toBeNull()
+      expect(runChip?.textContent).toContain("正在运行")
+      expect(runChip?.querySelector(".status-dot-running")).not.toBeNull()
+      expect(handle.container.querySelectorAll(".topbar-meta .meta-chip-run")).toHaveLength(1)
+    } finally {
+      handle.unmount()
+    }
+  })
+
   test("project-meta 展示 Git 分支状态", () => {
     const { handle } = mountWebApp(
       true,

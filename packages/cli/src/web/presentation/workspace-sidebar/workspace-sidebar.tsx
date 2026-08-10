@@ -33,7 +33,7 @@ export function WorkspaceSidebar({
       <SidebarResizeHandle widthPx={snapshot.workspaceSidebar.widthPx} dispatch={dispatch} disabled={disabled} />
       <button
         type="button"
-        className="new-thread-button"
+        className="new-thread-button button-secondary"
         onClick={() => dispatch({ type: "thread-new" })}
         disabled={disabled || busy || snapshot.threadNewSubmitting}
         aria-disabled={disabled || busy || snapshot.threadNewSubmitting}

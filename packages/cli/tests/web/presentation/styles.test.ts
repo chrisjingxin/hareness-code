@@ -9,19 +9,31 @@ test("styles.css 不包含颜色型系统主题覆盖（prefers-color-scheme）"
   expect(css).not.toContain("prefers-color-scheme")
 })
 
-test("light/dark 主题通过 .web-shell[data-theme] 选择器挂载，且关键 token 均存在", () => {
+test("light/dark 主题通过 .web-shell[data-theme] 选择器挂载，且使用 ZC-124 semantic token", () => {
   expect(css).toContain('.web-shell[data-theme="light"]')
   expect(css).toContain('.web-shell[data-theme="dark"]')
   const lightBlock = css.slice(css.indexOf('.web-shell[data-theme="light"]'), css.indexOf('.web-shell[data-theme="dark"]'))
   const darkBlock = css.slice(css.indexOf('.web-shell[data-theme="dark"]'))
-  for (const token of ["--bg", "--surface", "--surface-2", "--surface-3", "--line", "--line-strong", "--text", "--text-soft", "--muted", "--subtle", "--accent", "--accent-strong", "--accent-soft", "--accent-border", "--accent-border-strong", "--success", "--warning", "--danger", "--chrome", "--tool-output-bg", "--tool-output-text", "--interaction-bg", "--command-bg", "--command-text", "--composer-bg", "--drawer-bg"]) {
+  const semanticTokens = ["--bg", "--surface", "--surface-2", "--surface-3", "--line", "--line-strong", "--text", "--text-soft", "--muted", "--subtle", "--accent", "--accent-hover", "--accent-soft", "--accent-border", "--accent-border-strong", "--action", "--success", "--warning", "--danger", "--chrome", "--tool-output-bg", "--tool-output-text", "--interaction-bg", "--command-bg", "--command-text", "--composer-bg", "--drawer-bg"]
+  for (const token of semanticTokens) {
     expect(lightBlock).toContain(token)
     expect(darkBlock).toContain(token)
   }
+  expect(lightBlock).toContain("--surface-2: #f2f1ec")
+  expect(lightBlock).toContain("--line: #e1e0da")
+  expect(lightBlock).toContain("--accent: #2563eb")
+  expect(lightBlock).toContain("--action: #181715")
+  expect(darkBlock).toContain("--surface-2: #23211d")
+  expect(darkBlock).toContain("--line: #38352f")
+  expect(darkBlock).toContain("--accent: #60a5fa")
+  expect(darkBlock).toContain("--action: #f3f1ea")
+  const rootBlock = css.slice(css.indexOf(":root {"), css.indexOf("* {"))
+  expect(rootBlock).not.toContain("--bg")
+  expect(css).not.toContain("--accent-strong")
 })
 
-test("可访问性别名 token 存在：action/link/success/warning/danger 文字与按钮色", () => {
-  for (const token of ["--action-bg", "--action-text", "--link-text", "--success-text", "--warning-text", "--danger-text"]) {
+test("可访问性辅助 token 存在：action/link/success/warning/danger 文字与按钮色", () => {
+  for (const token of ["--action-text", "--link-text", "--success-text", "--warning-text", "--danger-text"]) {
     expect(css).toContain(token)
   }
 })
@@ -30,9 +42,12 @@ test("紧凑/标准/字段三档尺寸与桌面命中目标保持为 token contr
   for (const token of ["--control-compact", "--control-standard", "--control-field", "--radius-control", "--radius-surface"]) {
     expect(css).toContain(token)
   }
-  // 桌面化清理后 44px 移动端命中目标已删除；基础 32px 三档保留。
-  expect(css).toContain("--control-standard: 32px")
-  expect(css).not.toContain("--control-standard: 44px")
+  expect(css).toContain("--topbar-height: 52px")
+  expect(css).toContain("--control-compact: 30px")
+  expect(css).toContain("--control-standard: 34px")
+  expect(css).toContain("--control-field: 36px")
+  expect(css).toContain("--radius-control: 5px")
+  expect(css).toContain("--radius-surface: 7px")
   expect(css).toContain(".composer-textarea {")
   expect(css).toContain(".send-button, .cancel-button { width: var(--control-standard); height: var(--control-standard);")
 })
@@ -85,10 +100,27 @@ test("历史双轨 class 已删除：同一组件不再保留旧 class 规则", 
 
 test("状态圆点语义色：就绪/完成=绿，运行中=蓝，思考/等待/取消中=黄，失败=红，已取消=灰", () => {
   expect(css).toContain(".status-dot-idle, .status-dot-home { background: var(--success); }")
-  expect(css).toContain(".status-dot-running { background: var(--inline-code-text); }")
+  expect(css).toContain(".status-dot-running { background: var(--accent); }")
   expect(css).toContain(".status-dot-starting, .status-dot-waiting-interaction, .status-dot-cancelling { background: var(--warning); }")
   expect(css).toContain(".status-dot-failed { background: var(--danger); }")
   expect(css).toContain(".status-dot-cancelled { background: var(--muted); }")
+})
+
+test("外围 chrome 层级：新建 Thread 为 secondary，Run status 使用 accent 层级，focus ring 使用 accent", () => {
+  const newThreadBlock = css.slice(css.indexOf(".new-thread-button {"), css.indexOf(".sidebar-toolbar"))
+  expect(newThreadBlock).toContain("background: var(--surface)")
+  expect(newThreadBlock).not.toContain("var(--action)")
+  expect(css).toContain(".meta-chip-run {")
+  expect(css).toContain("background: var(--accent-soft)")
+  expect(css).toContain("outline: 2px solid var(--accent); outline-offset: 2px")
+})
+
+test("reasoning block 只引用 semantic token，保留 ZC-118 的可见状态样式", () => {
+  const reasoningBlock = css.slice(css.indexOf(".reasoning {"), css.indexOf(".reasoning-header"))
+  expect(reasoningBlock).toContain("background: var(--surface-2)")
+  expect(reasoningBlock).toContain("border-left: 2px solid var(--accent-border-strong)")
+  expect(css).not.toContain("--surface-raised")
+  expect(css).not.toContain("--border-control")
 })
 
 test("保留 prefers-reduced-motion 可访问性规则", () => {
