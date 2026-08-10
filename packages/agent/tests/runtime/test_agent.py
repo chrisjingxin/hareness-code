@@ -328,3 +328,75 @@ def test_run_context_rejects_mismatched_langgraph_thread_id():
 
     with pytest.raises(RunContextError, match="RUN_CONTEXT_CONFIG_THREAD_MISMATCH"):
         thread_id_for_runtime(runtime)
+
+
+def test_tool_search_candidates_respect_capability_view():
+    """tool_search 候选与能力视图一致：被策略隐藏的 MCP 工具不可搜索到。
+
+    构图时 ``create_harness_agent`` 先把 ``tools`` 按 capability 过滤，再把
+    过滤后的集合传给 ``create_harness_tools(mcp_tools=...)``；搜索候选与
+    注入集合共用同一可见集合，不会泄露被隐藏的工具。
+    """
+    import json
+
+    from langchain_core.tools import StructuredTool
+
+    from harness_agent.policy.capability_policy import (
+        BUILTIN_TOOL_NAMES,
+        resolve_effective_capability_view,
+    )
+    from harness_agent.runtime.agent import create_harness_agent
+    from harness_agent.runtime.agent_catalog import (
+        DelegationPolicy,
+        EffectiveExecutionPolicy,
+        StringRule,
+    )
+
+    def _mcp(name: str, description: str) -> StructuredTool:
+        def _impl(x: str) -> str:
+            return x
+
+        return StructuredTool.from_function(
+            func=_impl,
+            name=name,
+            description=description,
+        )
+
+    mcp = [_mcp("server_a_tool", "A 工具"), _mcp("server_b_tool", "B 工具")]
+    policy = EffectiveExecutionPolicy(
+        policy_ids=("main",),
+        tools=None,
+        mcp_tools=StringRule(allow=("server_a_tool",)),
+        skills=None,
+        filesystem_read=None,
+        filesystem_write=None,
+        shell=None,
+        network=None,
+        isolation="local",
+        approval_mode="yolo",
+        delegation=DelegationPolicy(
+            enabled=False,
+            allowed_agents=(),
+            max_depth=1,
+            max_parallelism=1,
+        ),
+    )
+    view = resolve_effective_capability_view(
+        policy,
+        available_tools=(*BUILTIN_TOOL_NAMES, *(t.name for t in mcp)),
+        mcp_tool_names=(t.name for t in mcp),
+    )
+    agent = create_harness_agent(
+        _make_fake_model(),
+        tools=mcp,
+        capability_view=view,
+        enable_skills=False,
+        enable_memory=False,
+        enable_ask_user=False,
+    )
+    tool_node = agent.nodes["tools"].bound
+    # 注入集合与搜索候选都只含可见的 server_a_tool。
+    assert "server_a_tool" in tool_node.tools_by_name
+    assert "server_b_tool" not in tool_node.tools_by_name
+    result = json.loads(tool_node.tools_by_name["tool_search"].func("server"))
+    assert [item["name"] for item in result["results"]] == ["server_a_tool"]

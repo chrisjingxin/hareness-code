@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 from langchain_core.tools import StructuredTool
@@ -28,15 +29,38 @@ from harness_agent.tools.tools_mode import BackgroundTaskManager, PlanModeState
 logger = logging.getLogger(__name__)
 
 
+def _tool_input_schema(tool: Any) -> dict[str, object] | None:
+    """提取 LangChain BaseTool 的参数 JSON Schema；无法提取时返回 None。
+
+    优先用 Pydantic ``args_schema`` 的完整 schema；退化到 ``tool.args``
+    （langchain 只暴露 properties 子集，需包装成完整 JSON Schema）。
+    """
+    args_schema = getattr(tool, "args_schema", None)
+    if args_schema is not None:
+        try:
+            return args_schema.model_json_schema()
+        except (AttributeError, TypeError, ValueError):
+            pass
+    args = getattr(tool, "args", None)
+    if isinstance(args, dict):
+        return {"type": "object", "properties": args}
+    return None
+
+
 def create_harness_tools(
     workspace_root: str,
     *,
     lsp_manager: Any | None = None,
+    mcp_tools: Sequence[Any] | None = None,
 ) -> list[StructuredTool]:
     """创建所有 Harness 扩展工具的 BaseTool 实例列表。
 
     Args:
         workspace_root: 工作区根目录的绝对路径，用于路径安全校验。
+        lsp_manager: Host 注入的 Plugin LSP 管理器（可选）。
+        mcp_tools: 已连接 MCP 服务器的 LangChain BaseTool 列表（可选）。
+            作为 ``tool_search`` 的候选集，供模型按关键词发现外部工具；
+            应传入经能力视图过滤后的可见集合，避免泄露被策略隐藏的工具。
 
     Returns:
         可直接传入 create_deep_agent(tools=...) 的工具列表。
@@ -146,14 +170,29 @@ def create_harness_tools(
         Args:
             query: 搜索关键词，匹配工具名称或描述。
         """
-        # 当前版本返回空列表，后续可从 MCP 注册表获取
-        result = _tool_search_impl(query, available_tools=None)
+        # 把运行时真实 MCP 工具投影为搜索候选：名称、描述、服务器名
+        # search_hint 与参数 schema。MCP 工具名按 ``{server}_{tool}`` 拼接
+        # （extensions/mcp.py 归属匹配同前缀），首个下划线前即服务器名；
+        # 服务器名规范不允许空格，此启发式对合法配置成立。
+        candidates: list[dict[str, object]] = []
+        for tool in mcp_tools or ():
+            name = str(getattr(tool, "name", ""))
+            if not name:
+                continue
+            candidates.append({
+                "name": name,
+                "description": str(getattr(tool, "description", "") or ""),
+                "search_hint": name.split("_", 1)[0],
+                "is_mcp": True,
+                "input_schema": _tool_input_schema(tool),
+            })
+        result = _tool_search_impl(query, available_tools=candidates or None)
         return json.dumps(result, ensure_ascii=False)
 
     tools.append(StructuredTool.from_function(
         func=_tool_search,
         name="tool_search",
-        description="搜索可用的 MCP 外部工具，按名称或描述匹配。",
+        description="搜索可用的 MCP 外部工具。支持 select:name1,name2 精确选择，或用关键词模糊搜索工具名称、描述与所属服务器，返回工具参数 schema。",
     ))
 
     # --- memory_save ---

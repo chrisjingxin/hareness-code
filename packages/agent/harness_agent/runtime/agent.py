@@ -758,6 +758,9 @@ def create_harness_agent(
         create_harness_tools(
             root,
             lsp_manager=getattr(plugin_runtime, "lsp", None),
+            # tools 已在上方经 capability_view 过滤（函数开头），与注入集合
+            # 共用同一可见集合，tool_search 不会泄露被策略隐藏的工具。
+            mcp_tools=all_tools,
         )
     )
     if capability_view is not None:

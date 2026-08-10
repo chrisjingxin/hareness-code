@@ -162,7 +162,7 @@ maxTurns: 20
 | `delete_file` | 删除文件 |
 | `apply_patch` | 应用补丁 |
 | `lsp` | 语言服务协议操作 |
-| `tool_search` | 搜索可用工具 |
+| `tool_search` | 搜索已连接的 MCP 外部工具（`select:name1,name2` 精确选择或关键词搜索，返回参数 schema） |
 | `memory_save` | 保存记忆 |
 | `memory_search` | 搜索记忆 |
 | `enter_plan_mode` | 进入计划模式 |

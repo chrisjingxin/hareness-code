@@ -116,6 +116,31 @@ Harness 与 Qwen/Claude/Codex 的架构差异：**LangGraph 编译图，工具�
 
 另外可探索 C：langchain `ToolNode` 的 `ToolCallRequest` 动态工具机制（`agent.py:12` 已 import），评估能否支撑运行期 reveal——这是落地前必须做的小型技术验证（spike），放入 TS-4。
 
+### D8：Phase 2 搜索候选集 = MCP 工具 + 内置低频工具（不区分来源，只看可见性）
+参考 Qwen/Claude 的规则：**defer 的对象不是"外部工具"，而是"低频/场景特定工具"**；搜索候选 = 所有 deferred（模型不可见）工具。内置工具按调用频率与工作流绑定度分档：
+
+**常驻（不 defer，始终可见）—— 对应 Qwen/Claude 的 alwaysLoad 档：**
+
+| 工具 | 理由 |
+|---|---|
+| `ls`/`read_file`/`write_file`/`edit_file`/`glob`/`grep`/`execute`/`write_todos`/`task` | 文件与执行原语，每轮都可能用（无任何项目 defer 过） |
+| `ask_user` | 交互通道，隐藏会让模型退化为散文式提问 |
+| `enter_plan_mode`/`exit_plan_mode` | 模式切换；exit 必须 alwaysLoad（模式提示词要求模型直接调用） |
+| `tool_search` | 发现入口自身，不能被自己隐藏 |
+| `apply_patch`/`delete_file` | 编辑审批流程常用，保守常驻（Qwen 无直接对应物，不冒险） |
+
+**defer（Phase 2 纳入搜索候选）—— 低频/场景特定：**
+
+| 工具 | 理由（对照 Qwen 同类工具的 shouldDefer=true 决策） |
+|---|---|
+| `lsp` | 语言服务查询低频（Qwen lsp.ts:1151 同款 defer） |
+| `monitor` | 后台监控场景特定（Qwen monitor.ts:719 / Claude Monitor 同款 defer） |
+| `task_output`/`task_stop` | 仅在有后台任务后使用（Qwen task-stop.ts:252 同款 defer） |
+| `web_search`/`web_fetch` | 网络操作低频（Qwen web-fetch.ts:301 同款 defer） |
+| `memory_save`/`memory_search` | 记忆存取低频 |
+
+**实现形态**：`create_harness_tools` 为内置工具增加 `should_defer` 标记（默认 False，上述清单显式 True）；构图时 deferred 内置不进模型绑定（Phase 2 路线确定后），`tool_search` 候选 = `mcp_tools + deferred 内置`（metadata 投影同 D3，`is_mcp=False` 走内置权重）。常驻集合即"注入少数核心"的最终答案：框架内置 9 + ask_user + 模式切换 2 + tool_search + apply_patch/delete_file = 15 个常驻，defer 9 个内置 + MCP 全部。
+
 ## 5. 依赖图
 
 ```text
@@ -197,10 +222,11 @@ prompt/能力说明（TS-3）—— 与 tool_search 用途引导
 - 依赖：检查点 1 的用户决策
 
 **TS-5：deferred 注入落地（XL→按路线拆分子任务）**
-- 描述：按选定路线实现——MCP 工具 schema 不绑定模型（或走 use_tool 网关）；prompt 注入 deferred 摘要块（名字+一行描述）；tool_search 命中返回完整 schema。
+- 描述：按选定路线实现——**候选集 = MCP 工具全部 + 内置低频工具（D8 名单：lsp/monitor/task_output/task_stop/web_search/web_fetch/memory_save/memory_search，经 `should_defer` 标记）** 的 schema 不绑定模型（或走 use_tool 网关）；prompt 注入 deferred 摘要块（名字+一行描述，无 schema）；tool_search 命中返回完整 schema；常驻 15 个工具（D8 表格）保持可见。
 - 验收：（按路线细化，先列通用项）
-  - [ ] 构图后模型绑定集合不含 MCP 工具 schema
+  - [ ] 构图后模型绑定集合不含 MCP 工具与 deferred 内置工具的 schema（常驻 15 个仍可见）
   - [ ] prompt 含 deferred 工具摘要（无 schema，只有名字与描述）
+  - [ ] `tool_search` 可搜到 MCP 工具与 deferred 内置工具（含 lsp/monitor/web_search 等）
   - [ ] 搜索命中后模型可正常调用对应工具（执行路径通）
 - 依赖：TS-4
 
@@ -222,6 +248,7 @@ prompt/能力说明（TS-3）—— 与 tool_search 用途引导
 |---|---|---|
 | 搜索候选与注入集合不一致导致"搜得到调不了"或泄露 | 高 | TS-1 强制共用 capability 过滤后的集合（D2），构图级测试覆盖 |
 | LangGraph 编译图无法动态 reveal（Phase 2） | 高 | TS-4 先行 spike；备选路线 A（use_tool 网关） |
+| 内置工具 defer 后模型绑定与执行入口不一致（搜到但调不了） | 高 | 执行侧保持全量注册（路线 C）或 use_tool 网关统一调度（路线 A）；TS-5 验收含"搜索命中后可调用" |
 | 打分算法回归（多关键词 AND 过严导致空结果） | 中 | 保留子串兜底：单关键词时退化为宽松匹配；测试覆盖边界 |
 | 返回 input_schema 体积过大（工具参数多） | 低 | 上限 20 条 + 按分排序；schema 原文返回不做截断（与 Codex/Grok 一致） |
 | capability 过滤提前影响其他工具注入路径 | 中 | 过滤逻辑收敛为单一函数，TS-1 构图级测试覆盖 |
@@ -232,3 +259,4 @@ prompt/能力说明（TS-3）—— 与 tool_search 用途引导
 2. **Phase 2 路线偏好**：A（use_tool 网关，Grok 模式，改动大但对齐主流）vs C（ToolCallRequest 动态 reveal，需 spike 验证）vs B（不 defer，维持全量注入）。
 3. **打分权重**：按 D4 默认（12/6/4/2）还是更保守（仅名称+描述）？默认采用 D4，可调。
 4. **搜索结果是否需要 `input_schema`**：Phase 1 工具已全量注入（模型本就有 schema），返回 schema 是冗余但无害；若追求最小改动可只在 Phase 2 返回。默认 Phase 1 就返回（与 Codex/Grok 一致，为 Phase 2 铺路）。
+5. **内置 defer 名单（D8）是否照单执行？** 默认采用；`apply_patch`/`delete_file` 保守常驻，若后续观测到 prompt 体积压力可再评估。名单落地前不需要额外决策，随 TS-5 一并实现。
