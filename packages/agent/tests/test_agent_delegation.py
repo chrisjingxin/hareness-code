@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import Runnable
+from pydantic import Field
 
 from harness_agent.runtime.agent_catalog import DelegationPolicy
 from harness_agent.runtime.agent_delegation import (
@@ -30,9 +32,16 @@ from harness_agent.runtime.run_context import RunCancellationToken
 class _ToolCallingModel(GenericFakeChatModel):
     """支持 DeepAgents bind_tools 的离线模型。"""
 
+    received: list[list[BaseMessage]] = Field(default_factory=list)
+
     def bind_tools(self, _tools, **_kwargs) -> Runnable:
         """测试不执行真实 provider，只保留预置响应序列。"""
         return self
+
+    def _generate(self, messages: list[BaseMessage], *args, **kwargs):
+        """记录主、子 Agent 的实际消息，验证文件 Snapshot 的公开 Thread scope。"""
+        self.received.append(list(messages))
+        return super()._generate(messages, *args, **kwargs)
 
 
 async def _registry() -> tuple[AgentExecutionRegistry, ExecutionRef]:
@@ -270,7 +279,7 @@ async def test_delegation_policy_rejects_target_and_depth_before_runner() -> Non
 
 
 async def test_production_task_tool_routes_through_execution_registry(tmp_path) -> None:
-    """生产图的 `task` 接口保持不变，但必须登记受控 Inline child。"""
+    """Inline child 使用父 Thread 调用文件工具，并登记独立 child execution。"""
     from harness_agent.runtime.agent import create_harness_agent
     from harness_agent.runtime.agent_catalog import EffectiveExecutionPolicy
     from harness_agent.policy.capability_policy import (
@@ -279,6 +288,7 @@ async def test_production_task_tool_routes_through_execution_registry(tmp_path) 
     )
     from harness_agent.runtime.run_context import RunContext
     from harness_agent.threads.context_lifecycle import prepare_embedded_context_snapshot
+    from harness_agent.threads.snapshots import ThreadSnapshotStore
 
     registry, root = await _registry()
     policy = EffectiveExecutionPolicy(
@@ -303,6 +313,9 @@ async def test_production_task_tool_routes_through_execution_registry(tmp_path) 
         policy,
         available_tools=BUILTIN_TOOL_NAMES,
     )
+    target = tmp_path / "child.txt"
+    target.write_text("child context\n", encoding="utf-8")
+    snapshots = ThreadSnapshotStore()
     model = _ToolCallingModel(
         messages=iter(
             [
@@ -316,6 +329,16 @@ async def test_production_task_tool_routes_through_execution_registry(tmp_path) 
                                 "subagent_type": "general-purpose",
                             },
                             "id": "task-call-1",
+                        }
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "read_file",
+                            "args": {"file_path": "/child.txt", "offset": 0, "limit": 20},
+                            "id": "child-read-1",
                         }
                     ],
                 ),
@@ -335,6 +358,7 @@ async def test_production_task_tool_routes_through_execution_registry(tmp_path) 
         shared_engine=True,
         capability_view=view,
         execution_registry=registry,
+        snapshot_store=snapshots,
     )
     context = RunContext(
         thread_id=root.thread_id,
@@ -356,6 +380,7 @@ async def test_production_task_tool_routes_through_execution_registry(tmp_path) 
         agent_id="main",
         cancellation_token=RunCancellationToken(),
         delegation_policy=policy.delegation,
+        snapshot_store=snapshots,
     )
     result = await graph.ainvoke(
         {"messages": [HumanMessage(content="delegate")]},
@@ -369,6 +394,14 @@ async def test_production_task_tool_routes_through_execution_registry(tmp_path) 
     assert executions[-1].agent_id == "general-purpose"
     assert executions[-1].mode is ExecutionMode.INLINE
     assert executions[-1].status is ExecutionStatus.COMPLETED
+    read_message = next(
+        message
+        for batch in model.received
+        for message in batch
+        if isinstance(message, ToolMessage) and message.name == "read_file"
+    )
+    snapshot_id = json.loads(str(read_message.content))["snapshot_id"]
+    snapshots.resolve(snapshot_id, root.thread_id, "/child.txt", f"local:{tmp_path.resolve()}")
 
 
 async def test_production_task_exposes_host_registered_plugin_target(tmp_path) -> None:

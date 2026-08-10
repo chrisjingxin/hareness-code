@@ -359,8 +359,8 @@ def test_generate_permission_rule_execute_uses_command_prefix() -> None:
 
 
 def test_generate_permission_rule_file_tools_use_project_wildcard() -> None:
-    """文件写/编辑/打补丁/删除工具按规范生成项目级通配规则。"""
-    for tool_name in ("write_file", "edit_file", "apply_patch", "delete_file"):
+    """文件写/编辑/删除工具按规范生成项目级通配规则。"""
+    for tool_name in ("write_file", "edit_file", "delete_file"):
         rules = _generate_permission_rule(tool_name, {"file_path": "src/app/main.py"})
         assert rules == [PermissionRule(tool=tool_name, resource="*", effect="allow")]
 

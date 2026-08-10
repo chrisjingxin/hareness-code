@@ -9,14 +9,13 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 import tempfile
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol, runtime_checkable
-
-from deepagents.backends.protocol import ReadResult
 
 from harness_agent.threads.snapshots import VIRTUAL_READ_ONLY_ROOT
 
@@ -98,6 +97,10 @@ def _document(path: str, raw: bytes) -> TextDocument:
     """从真实字节生成完整文本 document 和强 identity。"""
     has_bom = raw.startswith(b"\xef\xbb\xbf")
     payload = raw[3:] if has_bom else raw
+    # NUL 虽能被 UTF-8 解码，但在文件工具语义中代表二进制内容；不能让它获得
+    # Snapshot 后走 exact-string mutation，必须要求专用工具处理。
+    if b"\x00" in payload:
+        raise TextMutationError("TEXT_ENCODING_UNSUPPORTED", "文件包含二进制 NUL 字节")
     try:
         content = payload.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -204,8 +207,10 @@ class LocalTextMutationBackend:
             current = self.read_text_document(path)
             self._require_identity(current, expected_content_identity)
             raw = _encode_content(proposed_content, expected=current.identity)
+            original_mode = stat.S_IMODE(target.stat(follow_symlinks=False).st_mode)
             fd, temporary_name = tempfile.mkstemp(prefix=".harness-text-", dir=target.parent)
             try:
+                os.chmod(temporary_name, original_mode)
                 with os.fdopen(fd, "wb") as file:
                     file.write(raw)
                     file.flush()
@@ -283,15 +288,14 @@ class RemoteTextMutationBackend:
         return self._backend_id
 
     def read_text_document(self, path: str) -> TextDocument:
-        """优先使用 provider 原生完整读取，否则仅适配 raw read。"""
+        """只接受 provider 原生完整读取，分页 read 不能充当内容 identity。"""
         method = getattr(self._provider, "read_text_document", None)
         if callable(method):
             return _coerce_document(path, method(path))
-        read = getattr(self._provider, "read", None)
-        if not callable(read):
-            raise TextMutationError("BACKEND_READ_UNSUPPORTED")
-        result = read(path, offset=0, limit=1_000_000)
-        return _coerce_read_result(path, result)
+        raise TextMutationError(
+            "BACKEND_TEXT_UNSUPPORTED",
+            "远端 backend 未提供可证明完整性的文本读取 contract",
+        )
 
     def create_text_document(self, path: str, content: str) -> TextDocument:
         """只有 provider 明确声明 create contract 时才允许创建。"""
@@ -372,20 +376,6 @@ def _coerce_document(path: str, value: Any) -> TextDocument:
         identity = value.get("identity")
         if isinstance(content, str) and isinstance(identity, ContentIdentity):
             return TextDocument(path=path, content=content, identity=identity)
-    raise TextMutationError("BACKEND_DOCUMENT_INVALID")
-
-
-def _coerce_read_result(path: str, value: Any) -> TextDocument:
-    """把 DeepAgents ReadResult 的 UTF-8 full-text 形状转换成 document。"""
-    if isinstance(value, ReadResult):
-        if value.error:
-            raise TextMutationError("BACKEND_READ_FAILED", value.error)
-        data = value.file_data or {}
-        if data.get("encoding", "utf-8") != "utf-8" or not isinstance(data.get("content"), str):
-            raise TextMutationError("TEXT_ENCODING_UNSUPPORTED")
-        return _document(path, data["content"].encode("utf-8"))
-    if isinstance(value, str):
-        return _document(path, value.encode("utf-8"))
     raise TextMutationError("BACKEND_DOCUMENT_INVALID")
 
 

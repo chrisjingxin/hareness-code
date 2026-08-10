@@ -36,7 +36,6 @@ _TOOL_NAME_MAP: dict[str, str] = {
     "MCP": "mcp_tool",
     "NotebookRead": "read_file",
     "NotebookEdit": "edit_file",
-    "ApplyPatch": "apply_patch",
     "ToolSearch": "tool_search",
 }
 
@@ -55,7 +54,6 @@ _TOOL_NAME_REVERSE: dict[str, str] = {
     "task": "Agent",
     "task_stop": "KillShell",
     "mcp_tool": "MCP",
-    "apply_patch": "ApplyPatch",
     "tool_search": "ToolSearch",
 }
 

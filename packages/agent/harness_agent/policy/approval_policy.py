@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from langchain.agents.middleware.types import AgentMiddleware, ContextT, ResponseT
@@ -22,6 +22,7 @@ from harness_agent.policy.sensitive_paths import requires_safety_check
 from harness_agent.policy.safe_commands import is_safe_command
 from harness_agent.policy.bash_floors import evaluate_safety_floors
 from harness_agent.policy.bash_parser import extract_segments
+from harness_agent.tools.file_tool_catalog import FILESYSTEM_WRITE_TOOL_NAMES
 
 if TYPE_CHECKING:
     from langchain.agents.middleware.types import ModelRequest, ModelResponse
@@ -31,17 +32,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _DEFAULT_HITL_TOOLS = frozenset(
-    {"execute", "write_file", "edit_file", "delete", "delete_file", "task", "web_fetch", "apply_patch", "monitor", "task_stop"}
+    {"execute", *FILESYSTEM_WRITE_TOOL_NAMES, "task", "web_fetch", "monitor", "task_stop"}
 )
 # auto-edit 模式下编辑类工具必须纳入 HITL 集合：敏感路径（如 .git/config）的
 # 编辑仍需由预检弹窗确认；工作区内非敏感编辑由预检自动放行，不会真正弹窗。
 _AUTO_EDIT_HITL_TOOLS = frozenset(
-    {"execute", "write_file", "edit_file", "delete", "delete_file", "task", "web_fetch", "apply_patch", "monitor", "task_stop"}
+    {"execute", *FILESYSTEM_WRITE_TOOL_NAMES, "task", "web_fetch", "monitor", "task_stop"}
 )
 # auto 模式下编辑类工具同样必须纳入 HITL 集合：让编辑类调用经过四层过滤器
 # 判断——F1 快速通道自动放行，敏感路径与 F4 回退仍走弹窗审批。
 _AUTO_HITL_TOOLS = frozenset(
-    {"execute", "write_file", "edit_file", "delete", "delete_file", "task", "web_fetch", "apply_patch", "monitor", "task_stop"}
+    {"execute", *FILESYSTEM_WRITE_TOOL_NAMES, "task", "web_fetch", "monitor", "task_stop"}
 )
 _PLAN_ALLOWED_TOOLS = frozenset(
     {
@@ -99,6 +100,7 @@ def interrupt_on_for_approval_mode(
     *,
     preflight: Callable[[ToolCallRequest], bool] | None = None,
     extra_interrupt_tools: frozenset[str] | None = None,
+    approval_descriptions: Mapping[str, Callable[[dict[str, Any], Any, Any], str]] | None = None,
 ) -> dict[str, Any] | None:
     """返回应由 HumanInTheLoopMiddleware 拦截的工具集合。
 
@@ -108,6 +110,8 @@ def interrupt_on_for_approval_mode(
     Args:
         extra_interrupt_tools: 需要一并纳入审批的额外工具名（如 MCP 工具）。
             仅在 default、auto-edit 和 auto 模式下生效；plan 和 yolo 忽略。
+        approval_descriptions: 每个工具可选的动态审批描述。文件 mutation 使用它展示
+            prepare 阶段固定的精确 diff，其他工具继续使用框架默认描述。
     """
     if approval_mode in {"plan", "yolo"}:
         return None
@@ -121,12 +125,17 @@ def interrupt_on_for_approval_mode(
         tool_names = tool_names | extra_interrupt_tools
     from langchain.agents.middleware.human_in_the_loop import InterruptOnConfig
 
-    approval = InterruptOnConfig(allowed_decisions=["approve", "reject"])
-    if preflight is not None:
-        # HumanInTheLoopMiddleware 在实际 ToolNode 之前暂停。把与执行守卫
-        # 共用的预检挂在 `when`，越界文件调用就不会产生无法批准的假审批。
-        approval["when"] = preflight
-    return {name: approval for name in tool_names}
+    interrupt_on: dict[str, InterruptOnConfig] = {}
+    for name in tool_names:
+        approval = InterruptOnConfig(allowed_decisions=["approve", "reject"])
+        if preflight is not None:
+            # HumanInTheLoopMiddleware 在实际 ToolNode 之前暂停。把与执行守卫
+            # 共用的预检挂在 `when`，越界文件调用就不会产生无法批准的假审批。
+            approval["when"] = preflight
+        if approval_descriptions is not None and (description := approval_descriptions.get(name)):
+            approval["description"] = description
+        interrupt_on[name] = approval
+    return interrupt_on
 
 
 def approval_mode_prompt(approval_mode: ApprovalMode) -> str:

@@ -111,7 +111,7 @@ def evaluate_rules(
 _SHELL_TOOLS: frozenset[str] = frozenset({"execute", "monitor"})
 # 文件类工具：规则 resource 按目标路径通配匹配
 _FILE_TOOLS: frozenset[str] = frozenset(
-    {"write_file", "edit_file", "delete_file", "apply_patch"}
+    {"write_file", "edit_file", "delete_file"}
 )
 
 

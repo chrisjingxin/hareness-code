@@ -179,11 +179,8 @@ def _filter_accept_edits(
 ) -> AutoModeDecision | None:
     """F1 acceptEdits 快速通道：EDIT 类工具不经分类器直接放行。
 
-    两类例外转入后续过滤层：
-
-    - 受保护路径（敏感文件/目录、``.github/workflows/`` 前缀）；
-    - 工作区外的写入目标（如 ``/etc/hosts``）：与 HITL 预检共用
-      ``resolve_outside_workspace_write`` 判定，越界编辑必须走人工审批。
+    受保护路径（敏感文件/目录、``.github/workflows/`` 前缀）转入后续过滤层；
+    工作区外目标由 WorkspaceBoundaryMiddleware 在审批前直接拒绝。
 
     Delete 类工具不进入本层（``ToolKind.DELETE`` ≠ ``ToolKind.EDIT``），
     非 AUTO 模式由调用入口做模式过滤，本函数不做额外检查。
@@ -194,11 +191,6 @@ def _filter_accept_edits(
     if not isinstance(file_path, str) or not file_path:
         return None
     if is_protected_edit_path(file_path):
-        return None
-    # 延迟导入避免模块间循环；相对路径在该判定中视为工作区内。
-    from harness_agent.policy.workspace_boundary import resolve_outside_workspace_write
-
-    if resolve_outside_workspace_write(tool_name, tool_args, workspace_root) is not None:
         return None
     return AutoModeDecision(
         via="F1",

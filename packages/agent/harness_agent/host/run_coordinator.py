@@ -23,7 +23,6 @@ from harness_agent.policy.permission_rules import (
     save_rule,
 )
 from harness_agent.policy.sensitive_paths import requires_safety_check
-from harness_agent.policy.workspace_boundary import resolve_outside_workspace_write
 from harness_agent.runtime.agent_execution import AgentExecutionRegistry, ExecutionRegistryError
 from harness_agent.runtime.agent_engine import AgentEnginePoolCapacityError
 from harness_agent.runtime.agent_engine_profile import AgentEngineProfile
@@ -1038,7 +1037,7 @@ class RunCoordinator:
         """合并会话与持久化规则评估排队中的工具调用。
 
         approve_thread/approve_project 产生的新规则应立即作用于同批后续请求；
-        但敏感路径与工作区外写入即使命中 allow 规则也不自动放行（保持弹窗）。
+        但敏感路径即使命中 allow 规则也不自动放行（保持弹窗）。
         """
         if not tool_name:
             return None
@@ -1050,11 +1049,6 @@ class RunCoordinator:
         effect = evaluate_tool_rules(tool_name, tool_args, rules)
         if effect == "allow":
             if requires_safety_check(tool_name, tool_args):
-                return None
-            if (
-                resolve_outside_workspace_write(tool_name, tool_args, self._project_dir)
-                is not None
-            ):
                 return None
         return effect
 
@@ -1068,7 +1062,7 @@ class RunCoordinator:
 
         - 并发安全工具直接 approve；
         - 排队工具先查合并规则：deny（PolicyDeny）按拒绝处理但继续后续工具，
-          allow 自动批准（敏感路径与越界写入除外）；
+          allow 自动批准（敏感路径除外）；
         - 用户拒绝（UserReject）终止同批后续工具，剩余工具收到带取消原因
           的 reject；已批准/已执行的调用不回滚。
         """
@@ -1373,7 +1367,7 @@ def _generate_permission_rule(
             )
         return rules
     if (
-        tool_name in {"write_file", "edit_file", "apply_patch", "delete_file"}
+        tool_name in {"write_file", "edit_file", "delete_file"}
         and file_path
     ):
         # 规范：文件写/删工具生成项目级通配规则，用户明确批准后不再反复

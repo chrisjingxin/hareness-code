@@ -150,6 +150,7 @@ from harness_agent.runtime.resource_ownership import (
 from harness_agent.threads.context_lifecycle import ContextLifecycle, ContextRefreshError
 from harness_agent.threads.snapshots import ThreadSnapshotStore
 from harness_agent.threads.thread_persistence import ThreadPersistence, ThreadPersistenceError
+from harness_agent.tools.file_tool_metrics import FileToolMetrics
 from harness_agent.extensions.providers.harness_gateway import ProviderClientPool
 from harness_agent.host.run_coordinator import (
     AgentEvent,
@@ -310,6 +311,8 @@ class AgentHost:
         self._thread_persistence: ThreadPersistence | None = None
         # Snapshot 只存在于 Host 进程内；不复用 SQLite，也不跨 Host/进程恢复。
         self._snapshot_store = ThreadSnapshotStore()
+        # 文件工具指标同样只保留在 Host；它不携带任何源码、路径或 Snapshot 句柄。
+        self._file_tool_metrics = FileToolMetrics()
         self._agent_engine_pool: AgentEnginePool | None = None
         self._mcp_manager: McpConnectionManager | None = None
         self._mcp_owner: SharedResourceOwner[McpConnectionManager] | None = None
@@ -1273,6 +1276,7 @@ class AgentHost:
             raise RpcError(-32010, self._startup_error or "Configuration is unavailable")
         summary = self._config.redacted()
         summary["runtime_pool_diagnostics"] = await self._agent_engine_pool_diagnostics()
+        summary["file_tool_metrics"] = self._file_tool_metrics.snapshot().payload()
         return summary
 
     async def _handle_config_details(self, params: dict[str, Any], _id: str) -> dict[str, object]:
@@ -2658,6 +2662,7 @@ class AgentHost:
                     self._config.tools.tool_search_defer if self._config is not None else "auto"
                 ),
                 snapshot_store=self._snapshot_store,
+                file_tool_metrics=self._file_tool_metrics,
             )
             self._agent_engine_artifacts[profile.profile_key] = _AgentEngineArtifacts(
                 execution_context=execution_context,

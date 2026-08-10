@@ -110,5 +110,6 @@ def test_resident_and_deferred_lists_match_design():
     """常驻与 deferred 名单互斥，且覆盖设计 D8 的全部内置工具。"""
     assert not (RESIDENT_TOOL_NAMES & DEFERRED_BUILTIN_TOOL_NAMES)
     assert "tool_search" in RESIDENT_TOOL_NAMES
+    assert "apply_patch" not in RESIDENT_TOOL_NAMES | DEFERRED_BUILTIN_TOOL_NAMES
     assert {"lsp", "monitor", "task_output", "task_stop", "web_search", "web_fetch",
             "memory_save", "memory_search"} <= DEFERRED_BUILTIN_TOOL_NAMES

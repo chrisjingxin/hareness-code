@@ -15,6 +15,8 @@ from pathlib import Path
 
 import yaml
 
+from harness_agent.tools.file_tool_catalog import FILE_TOOL_NAMES
+
 _NAME_RE = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$")
 """kebab-case 名称校验正则。"""
 
@@ -335,9 +337,9 @@ class AgentRegistry:
 
 # 项目已有的全部工具名（来自 tool_risk.py 的 TOOL_KIND_MAP + ask_user）
 ALL_TOOL_NAMES: frozenset[str] = frozenset({
-    "ls", "read_file", "write_file", "edit_file", "glob", "grep",
+    *FILE_TOOL_NAMES,
     "execute", "write_todos", "task",
-    "web_search", "web_fetch", "delete_file", "apply_patch", "lsp",
+    "web_search", "web_fetch",
     "tool_search", "memory_save", "memory_search",
     "enter_plan_mode", "exit_plan_mode", "task_output", "task_stop",
     "monitor", "ask_user",

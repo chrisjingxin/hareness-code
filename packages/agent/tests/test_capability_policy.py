@@ -66,7 +66,7 @@ def test_capability_middleware_hides_schema_and_rejects_forged_tool_call(tmp_pat
         _readonly_policy(),
         available_tools=("read_file", "write_file"),
     )
-    middleware = CapabilityPolicyMiddleware(view, workspace=tmp_path)
+    middleware = CapabilityPolicyMiddleware(view)
     request = SimpleNamespace(
         tools=[
             SimpleNamespace(name="write_file"),
@@ -99,7 +99,7 @@ def test_capability_middleware_hides_schema_and_rejects_forged_tool_call(tmp_pat
             tool_call={
                 "name": "write_file",
                 "id": "forged-write",
-                "args": {"file_path": str(tmp_path / "blocked.txt")},
+                "args": {"file_path": "/blocked.txt"},
             }
         ),
         tool_handler,
@@ -115,7 +115,7 @@ def test_capability_middleware_enforces_role_path_subset(tmp_path) -> None:
         _readonly_policy(),
         available_tools=("read_file",),
     )
-    middleware = CapabilityPolicyMiddleware(view, workspace=tmp_path)
+    middleware = CapabilityPolicyMiddleware(view)
     invoked = False
 
     def handler(_request):
@@ -128,7 +128,7 @@ def test_capability_middleware_enforces_role_path_subset(tmp_path) -> None:
             tool_call={
                 "name": "read_file",
                 "id": "outside-role-subset",
-                "args": {"file_path": str(tmp_path / "secrets.txt")},
+                "args": {"file_path": "/secrets.txt"},
             }
         ),
         handler,
@@ -141,7 +141,7 @@ def test_capability_middleware_enforces_role_path_subset(tmp_path) -> None:
             tool_call={
                 "name": "read_file",
                 "id": "inside-role-subset",
-                "args": {"file_path": str(tmp_path / "src" / "main.py")},
+                "args": {"file_path": "/src/main.py"},
             }
         ),
         handler,
