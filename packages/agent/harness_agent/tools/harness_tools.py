@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from langchain_core.tools import StructuredTool
@@ -52,6 +52,8 @@ def create_harness_tools(
     *,
     lsp_manager: Any | None = None,
     mcp_tools: Sequence[Any] | None = None,
+    deferred_builtin_names: frozenset[str] | None = None,
+    reveal: Callable[[Sequence[str]], None] | None = None,
 ) -> list[StructuredTool]:
     """创建所有 Harness 扩展工具的 BaseTool 实例列表。
 
@@ -61,6 +63,12 @@ def create_harness_tools(
         mcp_tools: 已连接 MCP 服务器的 LangChain BaseTool 列表（可选）。
             作为 ``tool_search`` 的候选集，供模型按关键词发现外部工具；
             应传入经能力视图过滤后的可见集合，避免泄露被策略隐藏的工具。
+        deferred_builtin_names: 内置低频工具名集合（D8 名单）；命中时这些
+            工具也进入 ``tool_search`` 候选（is_mcp=False 走内置权重），
+            便于模型在延迟加载模式下发现它们。None 时保持 Phase 1 语义
+            （候选仅 MCP 工具）。
+        reveal: 搜索结果命中后回调（如 ``DeferredToolMiddleware.reveal``）；
+            命中工具在下一轮模型请求中可见。None 时仅返回结果不做 reveal。
 
     Returns:
         可直接传入 create_deep_agent(tools=...) 的工具列表。
@@ -186,7 +194,19 @@ def create_harness_tools(
                 "is_mcp": True,
                 "input_schema": _tool_input_schema(tool),
             })
+        # 延迟加载模式（Phase 2）：内置低频工具同样可被发现（is_mcp=False）。
+        for tool in deferred_builtin:
+            candidates.append({
+                "name": tool.name,
+                "description": tool.description or "",
+                "is_mcp": False,
+                "input_schema": _tool_input_schema(tool),
+            })
         result = _tool_search_impl(query, available_tools=candidates or None)
+        if reveal is not None:
+            hit_names = [item["name"] for item in result.get("results", ())]
+            if hit_names:
+                reveal(hit_names)
         return json.dumps(result, ensure_ascii=False)
 
     tools.append(StructuredTool.from_function(
@@ -306,5 +326,12 @@ def create_harness_tools(
         name="monitor",
         description="在后台持续执行命令（如开发服务器），可通过 task_output 获取实时输出。",
     ))
+
+    # 延迟加载模式（Phase 2）：按名单收集内置低频工具作为搜索候选。
+    deferred_builtin: list[StructuredTool] = []
+    if deferred_builtin_names:
+        deferred_builtin = [
+            tool for tool in tools if tool.name in deferred_builtin_names
+        ]
 
     return tools

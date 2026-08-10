@@ -87,3 +87,47 @@ def test_tool_search_ignores_nameless_tools():
     result = json.loads(search.invoke({"query": "search"}))
 
     assert result["results"] == []
+
+
+def test_tool_search_includes_deferred_builtin_and_reveals():
+    """延迟加载模式：内置低频工具进入候选（is_mcp=False），命中后触发 reveal。"""
+    revealed: list[str] = []
+    tools = create_harness_tools(
+        "/tmp",
+        deferred_builtin_names=frozenset({"lsp", "monitor"}),
+        reveal=revealed.extend,
+    )
+    search = _tool_search_instance(tools)
+
+    result = json.loads(search.invoke({"query": "代码智能"}))
+
+    assert len(result["results"]) == 1
+    entry = result["results"][0]
+    assert entry["name"] == "lsp"
+    # is_mcp 是候选内部打分标记，不暴露给模型；search_hint 为内置工具省略。
+    assert "is_mcp" not in entry
+    assert revealed == ["lsp"]
+
+
+def test_tool_search_deferred_builtin_no_reveal_callback():
+    """未提供 reveal 回调时 deferred 内置仍可搜索，且不报错。"""
+    tools = create_harness_tools(
+        "/tmp",
+        deferred_builtin_names=frozenset({"web_search"}),
+        reveal=None,
+    )
+    search = _tool_search_instance(tools)
+
+    result = json.loads(search.invoke({"query": "网络搜索"}))
+
+    assert [item["name"] for item in result["results"]] == ["web_search"]
+
+
+def test_tool_search_deferred_names_off_by_default():
+    """未传 deferred_builtin_names 时保持 Phase 1 语义：内置工具不进候选。"""
+    tools = create_harness_tools("/tmp")
+    search = _tool_search_instance(tools)
+
+    result = json.loads(search.invoke({"query": "语言服务"}))
+
+    assert result["results"] == []

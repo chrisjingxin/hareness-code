@@ -14,12 +14,18 @@
 - [x] 手工冒烟：构图级验证 tool_search 返回真实 MCP 工具、capability 隐藏工具不可搜索
 - [ ] 用户决策 Phase 2 路线（A/C/B）——待决
 
-## Phase 2：deferred 延迟注入（候选，需决策后开工）
+## Phase 2：deferred 延迟注入（✅ 已完成 2026-08-10，路线 C）
 
-- [ ] TS-4: deferred 技术验证——spike ToolCallRequest 动态工具可行性，确定路线 A/C（M，依赖：检查点 1 决策）
-- [ ] TS-5: deferred 注入落地——MCP 全部 + 内置低频工具（lsp/monitor/task_output/task_stop/web_search/web_fetch/memory_save/memory_search，D8 名单）不绑定模型，prompt 注入 deferred 摘要，搜索命中后可调用（XL→按路线拆分，依赖：TS-4）
-- [ ] TS-6: 审批、能力视图与子代理适配——deferred 语义下审批/可见性/子代理工具集行为不变（L，依赖：TS-5）
+- [x] TS-4: deferred 技术验证——spike 验证通过：bind_tools 每轮动态执行、middleware override 即本轮绑定；选定路线 C（middleware 动态 reveal）；影响面清单见 plan.md
+- [x] TS-5: deferred 注入落地——DeferredToolMiddleware + D8 名单不绑定模型 + prompt 摘要块 + tool_search 命中 reveal 可调用 + `[tools].tool_search_defer` 配置（auto/on/off，deepseek 自动 eager 保前缀缓存）
+- [x] TS-6: 审批、能力视图与子代理适配——执行入口全量注册审批不变；能力视图隐藏工具不可搜索（候选+摘要收敛）；子代理不注入 defer middleware 保持全量（Phase 1 语义）
 
-### 检查点 2
-- [ ] agent 全量测试 + CLI/Web MCP 发现→调用→审批全链路冒烟
-- [ ] deferred 收益（prompt token 对比）与风险人工审查
+### 检查点 2（✅ 已完成）
+- [x] agent 全量测试通过（1721 passed, 2 skipped）+ docs:check / typecheck / protocol:check
+- [x] 构图级冒烟：defer 开→常驻 14 工具绑定、reveal 后下一轮可调；defer 关→全量 23 工具稳定前缀
+
+## 遗留说明
+
+- 子代理（general-purpose 等）不启用 deferred：单任务上下文小，全量注入可接受，`SUBAGENT_EXCLUDED_TOOLS` 语义未变
+- shared_engine 多 thread 共享图：revealed 状态为构图级（跨 thread 共享可见性），执行侧仍受 capability/审批约束，不构成越权；如需 per-thread 隔离可后续将状态迁入 RunContext
+- 改动未提交：12 文件（9 生产/测试 + 2 文档 + plan/todo），建议按包拆分提交

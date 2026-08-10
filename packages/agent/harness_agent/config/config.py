@@ -264,6 +264,26 @@ class AgentEnginePoolSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolSearchSettings:
+    """tool_search 延迟加载开关（设计 D9）。
+
+    - ``off``：全部工具注入模型，保持稳定前缀（缓存友好）；tool_search 仅作
+      发现辅助（Phase 1 语义）。
+    - ``on``：低频工具（D8 名单）与 MCP 工具延迟加载，经 tool_search 命中后
+      下一轮请求可见。
+    - ``auto``（默认）：按模型是否缓存敏感自动选择——deepseek 系
+      自动回退 off（对齐 Qwen Code 对 deepseek 系禁用 tool_search 的决策），
+      其他模型使用 on。
+    """
+
+    defer: Literal["auto", "on", "off"] = "auto"
+
+    def redacted(self) -> dict[str, object]:
+        """返回适合诊断展示的稳定开关摘要。"""
+        return {"tool_search_defer": self.defer}
+
+
+@dataclass(frozen=True, slots=True)
 class Za38Config:
     """最终生效的 Harness v1 配置、来源路径和运行时摘要。"""
 
@@ -276,6 +296,7 @@ class Za38Config:
     sources: Mapping[str, str]
     mcp_servers: tuple[McpServerConfig, ...] = ()
     model_catalog: ModelCatalog | None = None
+    tools: ToolSearchSettings = field(default_factory=ToolSearchSettings)
 
     def require_model(self, profile_id: str | None = None) -> ModelSettings:
         """返回指定或默认模型；保留单 Profile 调用方的兼容入口。"""
@@ -315,6 +336,7 @@ class Za38Config:
             "mcp_servers": [
                 {"name": s.name, "transport": s.transport} for s in self.mcp_servers
             ],
+            "tools": self.tools.redacted(),
         }
 
 
@@ -346,7 +368,7 @@ def load_config(
             (explicit_path, ConfigSource.EXPLICIT, _read_document(explicit_path, ConfigSource.EXPLICIT))
         )
 
-    models, approval_values, execution_values, agent_engine_pool_values, mcp_values, sources = _merge_documents(documents)
+    models, approval_values, execution_values, agent_engine_pool_values, mcp_values, tools_values, sources = _merge_documents(documents)
     _apply_environment_overrides(models, approval_values, execution_values, environment, sources)
     _apply_cli_overrides(execution_values, environment, sources)
     model_catalog = _parse_model_catalog(models, sources["models"])
@@ -364,6 +386,7 @@ def load_config(
         workspace=resolved_workspace,
         sources=sources,
         model_catalog=model_catalog,
+        tools=_parse_tools(tools_values),
     )
 
 
@@ -450,6 +473,7 @@ def _merge_documents(
     dict[str, object],
     dict[str, object],
     dict[str, object],
+    dict[str, object],
     dict[str, str],
 ]:
     """按用户到显式配置的顺序合并已验证字段，并记录最后贡献来源。"""
@@ -458,12 +482,14 @@ def _merge_documents(
     execution_values: dict[str, object] = {}
     agent_engine_pool_values: dict[str, object] = {}
     mcp_values: dict[str, object] = {}
+    tools_values: dict[str, object] = {}
     sources = {
         "models": "default",
         "approval": "default",
         "execution": "default",
         "runtime_pool": "default",
         "mcp": "default",
+        "tools": "default",
     }
     for _, source, document in documents:
         if "models" in document:
@@ -481,7 +507,10 @@ def _merge_documents(
         if "mcp" in document:
             mcp_values = document["mcp"]  # type: ignore[assignment]
             sources["mcp"] = source.value
-    return models, approval_values, execution_values, agent_engine_pool_values, mcp_values, sources
+        if "tools" in document:
+            tools_values = _merge_flat_values(tools_values, document["tools"])
+            sources["tools"] = source.value
+    return models, approval_values, execution_values, agent_engine_pool_values, mcp_values, tools_values, sources
 
 
 def _merge_models(target: dict[str, object], value: object, source: str) -> None:
@@ -844,6 +873,27 @@ def _parse_agent_engine_pool(values: Mapping[str, object]) -> AgentEnginePoolSet
         ),
         pin_default_profile=pin_default_profile,
     )
+
+
+def _parse_tools(values: Mapping[str, object]) -> ToolSearchSettings:
+    """解析 ``[tools]`` 的 tool_search 延迟加载开关（D9）。"""
+    allowed = {"tool_search_defer"}
+    unknown = set(values) - allowed
+    if unknown:
+        raise ConfigError(
+            f"[tools] contains unsupported fields: {', '.join(sorted(unknown))}"
+        )
+    raw = values.get("tool_search_defer", "auto")
+    if isinstance(raw, bool):
+        defer: Literal["auto", "on", "off"] = "on" if raw else "off"
+    elif isinstance(raw, str):
+        normalized = raw.strip().lower()
+        if normalized not in {"auto", "on", "off"}:
+            raise ConfigError("tools.tool_search_defer must be 'auto', true, or false")
+        defer = normalized  # type: ignore[assignment]
+    else:
+        raise ConfigError("tools.tool_search_defer must be 'auto', true, or false")
+    return ToolSearchSettings(defer=defer)
 
 
 def _sandbox_backend(value: object) -> str:

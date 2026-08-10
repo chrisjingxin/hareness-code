@@ -141,6 +141,15 @@ Harness 与 Qwen/Claude/Codex 的架构差异：**LangGraph 编译图，工具�
 
 **实现形态**：`create_harness_tools` 为内置工具增加 `should_defer` 标记（默认 False，上述清单显式 True）；构图时 deferred 内置不进模型绑定（Phase 2 路线确定后），`tool_search` 候选 = `mcp_tools + deferred 内置`（metadata 投影同 D3，`is_mcp=False` 走内置权重）。常驻集合即"注入少数核心"的最终答案：框架内置 9 + ask_user + 模式切换 2 + tool_search + apply_patch/delete_file = 15 个常驻，defer 9 个内置 + MCP 全部。
 
+### D9：前缀缓存影响与缓解（路线 C 的固有权衡）
+动态 reveal 改变每轮请求的 tools 段 → **reveal 发生的那轮前缀缓存 miss**。这是 deferred 模式的本质权衡（Qwen `client.ts:871-888` 注释明确承认：tool_search 禁用时 eager-reveal 全部工具"保证前缀稳定、KV 缓存命中"；`config.ts:1770-1789` 对 deepseek-v3/v4/chat 系自动禁用 tool_search）。缓解：
+
+1. **排序稳定 + 追加式 reveal**：tools 按 `normalized_tool_schemas` 稳定排序，新 reveal 只追加尾部，已存在定义位置不动，最大化已缓存段复用；不 reveal 的轮次 tools 完全不变（spike 已验证）。
+2. **模型感知开关**：deepseek 系自动 eager-reveal 全部 deferred（对齐 Qwen）；其他模型默认 defer。识别方式：构图时 `resolved_model` 的 provider/名称关键词，配 `defer_tools: bool | None`（None=auto）。
+3. **配置项**：`tools.toolSearch.defer` 三态 auto/on/off（Claude tst-auto 同型），默认 auto。
+4. **摘要块静态化**：deferred 工具摘要（名字+一行描述）构图期生成一次，不随 reveal 变化，不破坏 system 前缀（system 段是缓存大头）。
+5. **阈值参考**（后续可选）：工具占用上下文比例低于阈值时不 defer（Claude tst-auto 默认 10% 上下文）。
+
 ## 5. 依赖图
 
 ```text
@@ -214,12 +223,19 @@ prompt/能力说明（TS-3）—— 与 tool_search 用途引导
 
 ### Phase 2：deferred 延迟注入（候选，需决策）
 
-**TS-4：deferred 技术验证与路线确认（M）**
-- 描述：spike 验证 langchain `ToolCallRequest` 动态工具机制是否支撑运行期 reveal（路线 C）；输出路线 A/C 的最终选择与影响面清单。
-- 验收：
-  - [ ] spike 结论文档化：C 路线可行性（模型绑定集合能否动态扩展）结论明确
-  - [ ] 选定路线后更新本设计文档
-- 依赖：检查点 1 的用户决策
+**TS-4：deferred 技术验证与路线确认（M）✅ 已完成（2026-08-10）**
+- 描述：spike 验证 langchain `ToolCallRequest`/middleware 动态工具机制是否支撑运行期 reveal；输出路线 A/C 的最终选择与影响面清单。
+- **spike 结论：路线 C 可行，机制成立**（`tmp/spike_tool_reveal.py` 端到端验证）：
+  - langchain `factory.py:1367`：模型绑定**每轮动态执行** `request.model.bind_tools(final_tools)`，`final_tools` 来自 `request.tools`；middleware `wrap_model_call` 的 `request.override(tools=...)` 即本轮模型实际绑定（`CapabilityPolicyMiddleware` 已用此机制做减法，证明可行）。
+  - 端到端结果：第 1 轮绑定 = 常驻工具（无 deferred）；`tool_search` 执行后 reveal；第 2 轮绑定自动包含已 reveal 工具、未 reveal 的保持隐藏；模型直接按名调用成功（ToolNode 全量注册，执行入口不变）。
+  - langchain 自带 `ProviderToolSearchMiddleware` 是 **provider 原生**搜索（仅 Anthropic/OpenAI 服务器端 `defer_loading`），与客户端 reveal 机制无关，不采用。
+- **选定路线：C（middleware 动态 reveal）**。影响面清单：
+  1. 新增 `DeferredToolMiddleware`（revealed 集合 + `wrap_model_call` override 过滤），挂在 `agent.py` middleware 链（ShellAllowListMiddleware 之后、构图前）
+  2. `create_harness_tools` 增加 reveal 回调参数；`tool_search` 命中后 reveal（下一轮绑定生效）；无外部 API 状态，无需 Qwen 式回滚
+  3. 最终可见 = 全量 ∩ (常驻 ∪ revealed) ∩ capability；与 `CapabilityPolicyMiddleware` 叠加（独立 middleware，顺序在 capability 之后）
+  4. **shared_engine 注意**：同一图服务多 thread，revealed 状态需 per-thread（存 RunContext，经 `require_run_context(runtime)` 取），不能放 middleware 实例字段（spike 用实例字段仅验证机制）
+  5. 执行入口/审批/能力视图不动（ToolNode 全量注册，wrap_tool_call 校验不变）
+- 依赖：检查点 1 的用户决策（路线已由 spike 确认，默认按 C 推进）
 
 **TS-5：deferred 注入落地（XL→按路线拆分子任务）**
 - 描述：按选定路线实现——**候选集 = MCP 工具全部 + 内置低频工具（D8 名单：lsp/monitor/task_output/task_stop/web_search/web_fetch/memory_save/memory_search，经 `should_defer` 标记）** 的 schema 不绑定模型（或走 use_tool 网关）；prompt 注入 deferred 摘要块（名字+一行描述，无 schema）；tool_search 命中返回完整 schema；常驻 15 个工具（D8 表格）保持可见。
@@ -256,7 +272,7 @@ prompt/能力说明（TS-3）—— 与 tool_search 用途引导
 ## 8. 开放问题（需人工决策）
 
 1. **Phase 2 是否纳入本次整改？** 建议先落地 Phase 1（tool_search 独立生效，风险低），Phase 2 按检查点 1 决策。
-2. **Phase 2 路线偏好**：A（use_tool 网关，Grok 模式，改动大但对齐主流）vs C（ToolCallRequest 动态 reveal，需 spike 验证）vs B（不 defer，维持全量注入）。
+2. **Phase 2 路线**：~~A vs C vs B~~ **已定：C（middleware 动态 reveal）**——TS-4 spike 端到端验证通过（bind_tools 每轮动态执行，middleware override 即本轮绑定）；A（use_tool 网关）留作 C 失效时的备选；B 不再考虑。
 3. **打分权重**：按 D4 默认（12/6/4/2）还是更保守（仅名称+描述）？默认采用 D4，可调。
 4. **搜索结果是否需要 `input_schema`**：Phase 1 工具已全量注入（模型本就有 schema），返回 schema 是冗余但无害；若追求最小改动可只在 Phase 2 返回。默认 Phase 1 就返回（与 Codex/Grok 一致，为 Phase 2 铺路）。
 5. **内置 defer 名单（D8）是否照单执行？** 默认采用；`apply_patch`/`delete_file` 保守常驻，若后续观测到 prompt 体积压力可再评估。名单落地前不需要额外决策，随 TS-5 一并实现。

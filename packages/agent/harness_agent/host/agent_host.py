@@ -2650,6 +2650,9 @@ class AgentHost:
                 delegation_targets=delegation_targets,
                 plugin_runtime=self._plugin_runtime_manager,
                 rules_provider=_get_current_rules,
+                defer_tools=(
+                    self._config.tools.tool_search_defer if self._config is not None else "auto"
+                ),
             )
             self._agent_engine_artifacts[profile.profile_key] = _AgentEngineArtifacts(
                 execution_context=execution_context,

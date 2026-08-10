@@ -416,6 +416,80 @@ def _with_execution_context(
     return f"{prompt.rstrip()}{context}"
 
 
+_CACHE_SENSITIVE_MODEL_HINTS = ("deepseek",)
+
+
+def _model_is_cache_sensitive(model: BaseChatModel) -> bool:
+    """判断模型是否以前缀缓存经济著称（deepseek 系）。
+
+    auto 模式下这类模型回退全量注入：动态 reveal 会破坏前缀缓存，对以缓存
+    经济为卖点的模型得不偿失（对齐 Qwen Code 对 deepseek 系禁用 tool_search
+    的决策，config.ts:1770-1789）。
+    """
+    candidates = (
+        str(getattr(model, "model_name", "")),
+        str(getattr(model, "model", "")),
+        type(model).__name__,
+        str(getattr(model, "provider", "")),
+    )
+    lowered = " ".join(candidates).lower()
+    return any(hint in lowered for hint in _CACHE_SENSITIVE_MODEL_HINTS)
+
+
+def _resolve_defer_tools(defer_tools: str | bool | None, model: BaseChatModel) -> bool:
+    """把 ``[tools].tool_search_defer`` 配置解析为是否启用延迟加载。"""
+    if defer_tools is None:
+        defer_tools = "auto"
+    if isinstance(defer_tools, bool):
+        return defer_tools
+    normalized = str(defer_tools).strip().lower()
+    if normalized == "auto":
+        return not _model_is_cache_sensitive(model)
+    if normalized == "on":
+        return True
+    if normalized == "off":
+        return False
+    raise ValueError(
+        f"defer_tools must be 'auto', 'on', 'off', or a boolean; got {defer_tools!r}"
+    )
+
+
+def _deferred_tools_summary(
+    harness_tools: Sequence[Any],
+    mcp_tools: Sequence[Any],
+) -> str:
+    """生成 deferred 工具摘要提示（D9-4：构图期一次生成，不随 reveal 变化）。
+
+    摘要只列内置低频工具（名字+描述）与 MCP 工具数量，不含参数 schema，
+    模型据此决定调用 tool_search 搜索什么。
+    """
+    from harness_agent.runtime.deferred_tools import DEFERRED_BUILTIN_TOOL_NAMES
+
+    deferred_builtin = [
+        tool
+        for tool in harness_tools
+        if str(getattr(tool, "name", "")) in DEFERRED_BUILTIN_TOOL_NAMES
+    ]
+    mcp_count = sum(
+        1
+        for tool in mcp_tools
+        if str(getattr(tool, "name", ""))
+        and str(getattr(tool, "name", "")) not in DEFERRED_BUILTIN_TOOL_NAMES
+    )
+    if not deferred_builtin and not mcp_count:
+        return ""
+    lines = [
+        "以下工具默认未加载，需要时用 tool_search 按关键词或 select:name 搜索，命中后即可直接调用："
+    ]
+    for tool in sorted(deferred_builtin, key=lambda t: str(getattr(t, "name", ""))):
+        lines.append(
+            f"- {tool.name}：{str(getattr(tool, 'description', '') or '').strip()}"
+        )
+    if mcp_count:
+        lines.append(f"- {mcp_count} 个已连接的 MCP 外部工具（可用 tool_search 按服务器名或关键词搜索）")
+    return "\n".join(lines)
+
+
 def _make_approval_preflight(
     approval_mode: ApprovalMode,
     original_preflight: Callable[[ToolCallRequest], bool] | None,
@@ -580,6 +654,7 @@ def create_harness_agent(
     delegation_model: SafeModelProfile | None = None,
     delegation_targets: Sequence[Any] = (),
     plugin_runtime: Any | None = None,
+    defer_tools: str | bool | None = None,
 ) -> Any:
     """创建 za38 编码 agent。
 
@@ -614,6 +689,10 @@ def create_harness_agent(
         delegation_model: 写入 Inline child execution 的脱敏模型事实。
         delegation_targets: Host 从可信 Plugin catalog 注册的 Managed target。
         plugin_runtime: Host 持有的 PluginRuntimeManager；提供 Hook middleware 与 LSP。
+        defer_tools: tool_search 延迟加载开关（对应 ``[tools].tool_search_defer``）。
+            True/``"on"`` 启用延迟（D8 低频内置与 MCP 工具不绑定模型，搜索命中
+            后 reveal）；False/``"off"`` 全量注入保持稳定前缀；None/``"auto"``
+            按模型是否缓存敏感自动选择（deepseek 系自动回退 off）。
 
     Returns:
         编译后的 LangGraph agent（CompiledStateGraph）。
@@ -750,19 +829,56 @@ def create_harness_agent(
         agent_middleware.append(ShellAllowListMiddleware(shell_allow_list))
 
     all_tools = list(tools) if tools else []
+    # MCP 等外部工具的副本：摘要只统计外部工具，不含 Harness 常驻内置。
+    external_tool_list = list(all_tools)
+
+    # 延迟加载（Phase 2，路线 C）：低频内置与 MCP 工具不绑定模型，经
+    # tool_search 命中后 reveal；middleware 只控制模型可见性，执行入口
+    # （ToolNode）保持全量注册，审批与能力视图校验不受影响。
+    defer_middleware: DeferredToolMiddleware | None = None
+    if _resolve_defer_tools(defer_tools, resolved_model):
+        from harness_agent.runtime.deferred_tools import (
+            DEFERRED_BUILTIN_TOOL_NAMES,
+            RESIDENT_TOOL_NAMES,
+            DeferredToolMiddleware,
+        )
+
+        defer_middleware = DeferredToolMiddleware(resident=RESIDENT_TOOL_NAMES)
+        agent_middleware.append(defer_middleware)
 
     # 注入 Harness 扩展工具（web_search/web_fetch/delete_file 等）。
     from harness_agent.tools.harness_tools import create_harness_tools
 
-    all_tools.extend(
-        create_harness_tools(
-            root,
-            lsp_manager=getattr(plugin_runtime, "lsp", None),
-            # tools 已在上方经 capability_view 过滤（函数开头），与注入集合
-            # 共用同一可见集合，tool_search 不会泄露被策略隐藏的工具。
-            mcp_tools=all_tools,
-        )
+    harness_tool_list = create_harness_tools(
+        root,
+        lsp_manager=getattr(plugin_runtime, "lsp", None),
+        # 外部工具副本：all_tools 后续会被 extend，不能把引用直接传给
+        # tool_search 闭包，否则 Harness 内置工具会被误投影为 MCP 候选。
+        mcp_tools=external_tool_list,
+        deferred_builtin_names=(
+            frozenset(
+                name
+                for name in DEFERRED_BUILTIN_TOOL_NAMES
+                if capability_view is None or capability_view.allows_tool(name)
+            )
+            if defer_middleware is not None
+            else None
+        ),
+        reveal=defer_middleware.reveal if defer_middleware is not None else None,
     )
+    all_tools.extend(harness_tool_list)
+    if defer_middleware is not None and prompt is not None:
+        # 摘要与候选同样受能力视图约束：被策略隐藏的内置工具不列出、
+        # 不可搜索到（与 MCP 候选共用同一收敛逻辑）。
+        if capability_view is not None:
+            harness_tool_list = [
+                tool
+                for tool in harness_tool_list
+                if capability_view.allows_tool(tool.name)
+            ]
+        deferred_summary = _deferred_tools_summary(harness_tool_list, external_tool_list)
+        if deferred_summary:
+            prompt = f"{prompt.rstrip()}\n\n{deferred_summary}"
     if capability_view is not None:
         all_tools = [
             tool for tool in all_tools if capability_view.allows_tool(tool.name)

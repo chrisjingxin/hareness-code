@@ -427,6 +427,7 @@ def test_execution_defaults_to_local_and_redacts_security_summary(tmp_path: Path
         "execution": "default",
         "runtime_pool": "default",
         "mcp": "default",
+        "tools": "default",
     }
 
 
@@ -691,3 +692,65 @@ def test_remote_backend_factory_receives_workspace_contract(
     assert received["workspace"] == tmp_path
     assert received["provider"] == "corp"
     assert received["params"] == {"project": "payments"}
+
+
+def _load_with_tools(tmp_path: Path, tool_table: str) -> "config_module.Za38Config":
+    """在最小 v1 配置上附加 [tools] 表并加载。"""
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    _write_config(home / ".harness" / "config.toml")
+    config_path = home / ".harness" / "config.toml"
+    with open(config_path, "a", encoding="utf-8") as handle:
+        handle.write(tool_table)
+    return load_config(workspace=workspace, config_path=config_path, home=home)
+
+
+def test_tools_section_defaults_to_auto(tmp_path: Path):
+    """未配置 [tools] 时默认 auto（模型感知）。"""
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    _write_config(home / ".harness" / "config.toml")
+    config = load_config(
+        workspace=workspace,
+        config_path=home / ".harness" / "config.toml",
+        home=home,
+    )
+
+    assert config.tools.defer == "auto"
+
+
+def test_tools_section_accepts_boolean_and_string(tmp_path: Path):
+    """tool_search_defer 接受布尔与 auto/on/off 字符串。"""
+    config = _load_with_tools(tmp_path, "\n[tools]\ntool_search_defer = true\n")
+    assert config.tools.defer == "on"
+
+    config = _load_with_tools(tmp_path, "\n[tools]\ntool_search_defer = false\n")
+    assert config.tools.defer == "off"
+
+    config = _load_with_tools(tmp_path, "\n[tools]\ntool_search_defer = \"auto\"\n")
+    assert config.tools.defer == "auto"
+
+    config = _load_with_tools(tmp_path, "\n[tools]\ntool_search_defer = \"on\"\n")
+    assert config.tools.defer == "on"
+
+
+def test_tools_section_rejects_invalid_values(tmp_path: Path):
+    """非法 defer 值与未知字段必须报错，不静默忽略。"""
+    with pytest.raises(ConfigError, match="tool_search_defer"):
+        _load_with_tools(tmp_path, "\n[tools]\ntool_search_defer = \"maybe\"\n")
+
+    with pytest.raises(ConfigError, match="tool_search_defer"):
+        _load_with_tools(tmp_path, "\n[tools]\ntool_search_defer = 42\n")
+
+    with pytest.raises(ConfigError, match="unsupported fields"):
+        _load_with_tools(tmp_path, "\n[tools]\nunknown_field = 1\n")
+
+
+def test_tools_section_in_redacted_summary(tmp_path: Path):
+    """配置摘要包含脱敏后的 tools 开关。"""
+    config = _load_with_tools(tmp_path, "\n[tools]\ntool_search_defer = false\n")
+
+    summary = config.redacted()
+
+    assert summary["tools"] == {"tool_search_defer": "off"}
+    assert "tools" in summary["sources"]

@@ -400,3 +400,207 @@ def test_tool_search_candidates_respect_capability_view():
     assert "server_b_tool" not in tool_node.tools_by_name
     result = json.loads(tool_node.tools_by_name["tool_search"].func("server"))
     assert [item["name"] for item in result["results"]] == ["server_a_tool"]
+
+
+async def _run_defer_graph(
+    defer: bool,
+    messages: list[AIMessage],
+) -> tuple[list[list[str]], list[str], list[BaseMessage]]:
+    """按 defer 开关构图并跑完整工具循环，返回每轮绑定、system 摘要与最终消息。"""
+    import json
+
+    from langchain_core.tools import StructuredTool
+
+    from harness_agent.runtime.agent import create_harness_agent
+
+    class RecordingModel(ToolCallingFakeChatModel):
+        """记录每轮 bind_tools 收到的工具名与 system 内容。"""
+
+        bindings: list[list[str]] = Field(default_factory=list)
+        system_contents: list[str] = Field(default_factory=list)
+
+        def bind_tools(
+            self,
+            tools: Sequence[Any],
+            *,
+            tool_choice: str | None = None,
+            **kwargs: Any,
+        ) -> Runnable:
+            self.bindings.append(
+                sorted(getattr(t, "name", str(t)) for t in tools)
+            )
+            return self
+
+        def _generate(self, messages: list[BaseMessage], *args: Any, **kwargs: Any):
+            for message in messages:
+                if message.type == "system":
+                    self.system_contents.append(str(message.content or ""))
+            return super()._generate(messages, *args, **kwargs)
+
+    def _mcp(name: str, description: str) -> StructuredTool:
+        def _impl(x: str) -> str:
+            return f"{name} handled {x}"
+
+        return StructuredTool.from_function(
+            func=_impl,
+            name=name,
+            description=description,
+        )
+
+    model = RecordingModel(messages=iter(messages))
+    model.profile = {"max_input_tokens": 200000}
+    agent = create_harness_agent(
+        model,
+        tools=[_mcp("server_a_tool", "A 工具"), _mcp("server_b_tool", "B 工具")],
+        enable_skills=False,
+        enable_memory=False,
+        enable_ask_user=False,
+        defer_tools=defer,
+    )
+    result = await agent.ainvoke(
+        {"messages": []},
+        config={"configurable": {"thread_id": "defer-test"}},
+    )
+    return model.bindings, model.system_contents, result["messages"]
+
+
+async def test_defer_tools_hides_then_reveals_on_search():
+    """defer 开启：deferred/MCP 工具初始不绑定，tool_search 命中后下一轮可调用。"""
+    first = AIMessage(
+        content="",
+        tool_calls=[{"name": "tool_search", "args": {"query": "server_a"}, "id": "t1"}],
+    )
+    second = AIMessage(
+        content="",
+        tool_calls=[{"name": "server_a_tool", "args": {"x": "hi"}, "id": "t2"}],
+    )
+    bindings, system_contents, messages = await _run_defer_graph(
+        defer=True,
+        messages=[first, second, AIMessage(content="done")],
+    )
+
+    # 第 1 轮只有常驻工具；MCP 与 deferred 内置（lsp 等）均不绑定。
+    assert "server_a_tool" not in bindings[0]
+    assert "server_b_tool" not in bindings[0]
+    assert "lsp" not in bindings[0]
+    assert "tool_search" in bindings[0]
+    # 搜索命中后下一轮绑定包含该工具，未命中的仍隐藏。
+    assert "server_a_tool" in bindings[1]
+    assert "server_b_tool" not in bindings[1]
+    # 模型直接调用成功，且 prompt 含 deferred 摘要与内置名单。
+    assert any(m.type == "tool" and m.name == "server_a_tool" for m in messages)
+    assert any("以下工具默认未加载" in content for content in system_contents)
+    assert any(
+        "lsp" in content and "monitor" in content and "web_search" in content
+        for content in system_contents
+    )
+
+
+async def test_defer_tools_off_binds_everything():
+    """defer 关闭：MCP 与 deferred 内置全量绑定，保持稳定前缀（D9）。"""
+    bindings, system_contents, _ = await _run_defer_graph(
+        defer=False,
+        messages=[AIMessage(content="done")],
+    )
+
+    assert "server_a_tool" in bindings[0]
+    assert "server_b_tool" in bindings[0]
+    assert "lsp" in bindings[0]
+    assert not any("以下工具默认未加载" in content for content in system_contents)
+
+
+async def test_defer_hidden_tools_not_searchable_in_capability_view():
+    """能力视图隐藏的内置工具不出现在 tool_search 候选与摘要中（TS-6）。"""
+    import json
+
+    from langchain_core.tools import StructuredTool
+
+    from harness_agent.policy.capability_policy import (
+        BUILTIN_TOOL_NAMES,
+        resolve_effective_capability_view,
+    )
+    from harness_agent.runtime.agent import create_harness_agent
+    from harness_agent.runtime.agent_catalog import (
+        DelegationPolicy,
+        EffectiveExecutionPolicy,
+        NetworkPolicy,
+        StringRule,
+    )
+
+    class HiddenModel(ToolCallingFakeChatModel):
+        bindings: list[list[str]] = Field(default_factory=list)
+        system_contents: list[str] = Field(default_factory=list)
+
+        def bind_tools(
+            self,
+            tools: Sequence[Any],
+            *,
+            tool_choice: str | None = None,
+            **kwargs: Any,
+        ) -> Runnable:
+            self.bindings.append(sorted(getattr(t, "name", str(t)) for t in tools))
+            return self
+
+        def _generate(self, messages: list[BaseMessage], *args: Any, **kwargs: Any):
+            for message in messages:
+                if message.type == "system":
+                    self.system_contents.append(str(message.content or ""))
+            return super()._generate(messages, *args, **kwargs)
+
+    def _mcp(name: str, description: str) -> StructuredTool:
+        def _impl(x: str) -> str:
+            return f"{name} handled {x}"
+
+        return StructuredTool.from_function(
+            func=_impl,
+            name=name,
+            description=description,
+        )
+
+    model = HiddenModel(messages=iter([AIMessage(content="done")]))
+    model.profile = {"max_input_tokens": 200000}
+    mcp = [_mcp("server_a_tool", "A 工具")]
+    all_names = {t.name for t in mcp}
+    # 网络关闭 → web_search/web_fetch 被能力视图隐藏。
+    policy = EffectiveExecutionPolicy(
+        policy_ids=("main",),
+        tools=None,
+        mcp_tools=StringRule(allow=("server_a_tool",)),
+        skills=None,
+        filesystem_read=None,
+        filesystem_write=None,
+        shell=None,
+        network=NetworkPolicy(enabled=False),
+        isolation="local",
+        approval_mode="yolo",
+        delegation=DelegationPolicy(
+            enabled=False,
+            allowed_agents=(),
+            max_depth=1,
+            max_parallelism=1,
+        ),
+    )
+    view = resolve_effective_capability_view(
+        policy,
+        available_tools=(*BUILTIN_TOOL_NAMES, *all_names),
+        mcp_tool_names=all_names,
+    )
+    assert "web_search" not in view.tool_names
+    agent = create_harness_agent(
+        model,
+        tools=mcp,
+        capability_view=view,
+        enable_skills=False,
+        enable_memory=False,
+        enable_ask_user=False,
+        defer_tools=True,
+    )
+    tool_node = agent.nodes["tools"].bound
+    # 被能力视图隐藏的 web_search 不可搜索到。
+    hidden = json.loads(tool_node.tools_by_name["tool_search"].func("网络搜索"))
+    assert hidden["results"] == []
+    # 未被隐藏的 deferred 内置（lsp）仍可搜索。
+    visible = json.loads(tool_node.tools_by_name["tool_search"].func("代码智能"))
+    assert [item["name"] for item in visible["results"]] == ["lsp"]
+    # 摘要不列出被隐藏工具。
+    assert not any("web_search" in content for content in model.system_contents)
