@@ -69,6 +69,14 @@ export type RunSummary = {
   durationMs?: number
   usage?: { inputTokens: number; outputTokens: number }
   context?: { action: string; estimatedTokens?: number; inputCapTokens?: number }
+  /** Compose Run 的终态摘要：阶段/任务/evidence 的最终事实，供 Timeline 结果摘要。 */
+  composeSummary?: {
+    stage: ComposeStageId
+    status: ComposeProjection["status"]
+    tasks: Array<{ id: string; title: string; status: string }>
+    evidence: Array<{ label: string; status: string }>
+    blockedReason: string | null
+  }
 }
 
 /** 当前 Run 的事实模型阶段；不描述未观测到的内部步骤。 */
@@ -497,6 +505,17 @@ export function applyAgentEvent(state: InteractiveState, event: EventEnvelope, i
           durationMs: numberValue(payload.duration_ms),
           usage: usageValue(payload.usage),
           context: contextValue(payload.context),
+          ...(next.composeState
+            ? {
+                composeSummary: {
+                  stage: next.composeState.stage,
+                  status: next.composeState.status,
+                  tasks: next.composeState.tasks,
+                  evidence: next.composeState.evidence,
+                  blockedReason: next.composeState.blockedReason,
+                },
+              }
+            : {}),
         },
         composeState: null,
         timeline: finishAssistant(settlePendingInteractions(freezeReasoning(next.timeline, runId), runId), runId, "", idGenerator),

@@ -203,7 +203,7 @@ async def test_happy_path_understands_plans_and_waits_at_gate(tmp_path: Path) ->
             _task_result(task_id="task-1"),
             _task_result(task_id="task-2", red_evidence=""),
         ],
-        [{"decision": "approve_once"}],
+        [{"answers": {"question-1": ["approve"]}}],
     )
     types = [event.type for event in events]
     assert types[0] == "run.started"
@@ -215,11 +215,10 @@ async def test_happy_path_understands_plans_and_waits_at_gate(tmp_path: Path) ->
 
     # 批准前只有 understand/plan；批准后才出现 Builder 写入。
     assert stage_agent.calls == ["understand", "plan", "build", "build"]
-    assert [request.type for request in interactions.requests] == ["approval"]
-    assert interactions.requests[0].payload["decisions"] == [
-        "approve_once",
-        "reject_with_feedback",
-        "reject",
+    assert [request.type for request in interactions.requests] == ["question"]
+    assert interactions.requests[0].payload["questions"][0]["options"] == [
+        {"label": "批准", "value": "approve"},
+        {"label": "取消", "value": "cancel"},
     ]
 
     frames = _state_frames(events)
@@ -258,10 +257,10 @@ async def test_open_decisions_are_asked_and_rebuilt_into_artifact(tmp_path: Path
         ],
         [
             {"answers": {"question-1": ["使用 SQLite"]}},
-            {"decision": "approve_once"},
+            {"answers": {"question-1": ["approve"]}},
         ],
     )
-    assert [request.type for request in interactions.requests] == ["question", "approval"]
+    assert [request.type for request in interactions.requests] == ["question", "question"]
     question = interactions.requests[0]
     assert question.payload["questions"][0]["question"] == "数据存储用 SQLite 还是 JSON 文件？"
     assert "使用 SQLite" in stage_agent.tasks[1]
@@ -285,8 +284,8 @@ async def test_plan_revise_with_feedback_returns_to_plan(tmp_path: Path) -> None
             _task_result(task_id="task-2", red_evidence=""),
         ],
         [
-            {"decision": "reject_with_feedback", "feedback": "增加端到端测试"},
-            {"decision": "approve_once"},
+            {"answers": {"question-1": ["增加端到端测试"]}},
+            {"answers": {"question-1": ["approve"]}},
         ],
     )
     assert stage_agent.calls == ["understand", "plan", "plan", "build", "build"]
@@ -303,7 +302,7 @@ async def test_plan_reject_cancels_run_with_single_terminal(tmp_path: Path) -> N
     events, stage_agent, interactions = await _run_compose(
         tmp_path,
         [_understanding(), _plan()],
-        [{"decision": "reject"}],
+        [{"answers": {"question-1": ["cancel"]}}],
     )
     assert events[-1].type == "run.cancelled"
     frames = _state_frames(events)
@@ -340,7 +339,7 @@ async def test_malformed_stage_output_is_treated_as_schema_invalid(tmp_path: Pat
             _task_result(task_id="task-1"),
             _task_result(task_id="task-2", red_evidence=""),
         ],
-        [{"decision": "approve_once"}],
+        [{"answers": {"question-1": ["approve"]}}],
     )
     assert stage_agent.calls == ["understand", "understand", "plan", "build", "build"]
     assert events[-1].type == "run.failed"

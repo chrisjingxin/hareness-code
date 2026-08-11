@@ -207,7 +207,7 @@ async def test_verify_pass_reaches_review_boundary_with_evidence(tmp_path: Path)
             _reviewer(), _reviewer(),
         ],
         [_evidence(exit_code=0)],
-        [{"decision": "approve_once"}],
+        [{"answers": {"question-1": ["approve"]}}],
     )
     frames = _state_frames(events)
     assert frames[-1]["stage"] == "review"
@@ -233,7 +233,7 @@ async def test_verify_fail_creates_fix_task_and_reloops(tmp_path: Path) -> None:
             _reviewer(),
         ],
         [_evidence(exit_code=1), _evidence(exit_code=0)],
-        [{"decision": "approve_once"}],
+        [{"answers": {"question-1": ["approve"]}}],
     )
     # fix task 在第二阶段被执行并完成。
     assert any("fix-verify-1" in text for text in stage_agent.tasks)
@@ -262,7 +262,7 @@ async def test_verify_fix_budget_exhausted_blocks(tmp_path: Path) -> None:
             _evidence(exit_code=1),
             _evidence(exit_code=1),
         ],
-        [{"decision": "approve_once"}],
+        [{"answers": {"question-1": ["approve"]}}],
     )
     assert events[-1].type == "run.failed"
     assert events[-1].payload["error"]["code"] == "COMPOSE_BLOCKED"
@@ -280,7 +280,7 @@ async def test_verify_policy_denied_blocks_without_fix_loop(tmp_path: Path) -> N
         tmp_path,
         [_understanding(), _plan(), _task_result(task_id="task-1")],
         [VerificationError("POLICY_DENIED", "denied")],
-        [{"decision": "approve_once"}],
+        [{"answers": {"question-1": ["approve"]}}],
     )
     assert events[-1].type == "run.failed"
     assert events[-1].payload["error"]["code"] == "COMPOSE_BLOCKED"

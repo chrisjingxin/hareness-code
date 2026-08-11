@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -88,11 +89,9 @@ def _progress_payload(run: Any, phase: str) -> dict[str, object]:
     """生成只包含事实阶段和活动时长的运行进度 payload。"""
     safe_phase = phase if phase in {"preparing", "model"} else "preparing"
     started = getattr(run, "started_at", None) or 0
-    import time as _time
-
     return {
         "phase": safe_phase,
-        "elapsed_ms": max(0, round((_time.monotonic() - started) * 1000)),
+        "elapsed_ms": max(0, round((time.monotonic() - started) * 1000)),
     }
 
 
@@ -112,7 +111,7 @@ class ComposeServices:
     stage_agent: StageAgentPort
     method_assets: Mapping[str, str]
     workspace_root: str = ""
-    verification: Any = None
+    verification: VerificationPort | None = None
     now_ms: Callable[[], int] = field(
         default=lambda: int(time.time() * 1000)
     )
@@ -197,10 +196,12 @@ class ComposeWorkflow:
         run.status = "running"
         port.emit(run, RUN_PROGRESS, _progress_payload(run, "preparing"))
         self._emit_state(run, port, state)
+        await self._store.save_run(state)
         while not state.terminal:
             if port.is_cancelled(run):
                 raise asyncio.CancelledError
             state = await self._drive_stage(run, port, state)
+        await self._record_final_summary(run, port, state)
         return self._outcome(state)
 
     async def _drive_stage(
@@ -237,16 +238,16 @@ class ComposeWorkflow:
         while True:
             task = self._next_pending_task(state)
             if task is None:
-                return self._apply(run, port, state, ComposeEvent.BUILD_COMPLETE)
-            state = self._apply(
+                return await self._apply(run, port, state, ComposeEvent.BUILD_COMPLETE)
+            state = await self._apply(
                 run, port, state, ComposeEvent.TASK_STARTED, task_id=task.id
             )
             failed = await self._execute_task(run, port, state, task)
             if failed:
-                return self._apply(
+                return await self._apply(
                     run, port, state, ComposeEvent.TASK_FAIL, task_id=task.id
                 )
-            state = self._apply(
+            state = await self._apply(
                 run, port, state, ComposeEvent.TASK_COMPLETE, task_id=task.id
             )
 
@@ -387,7 +388,7 @@ class ComposeWorkflow:
                 evidence = await verification.run(request)
             except VerificationError as exc:
                 # 策略拒绝/用户拒绝/后端缺失不可修复：直接 blocked。
-                return self._apply(
+                return await self._apply(
                     run,
                     port,
                     state,
@@ -435,7 +436,7 @@ class ComposeWorkflow:
                 failed_command = command
                 break
         if not failed_command:
-            return self._apply(
+            return await self._apply(
                 run,
                 port,
                 state,
@@ -451,7 +452,7 @@ class ComposeWorkflow:
             acceptance=f"验证命令通过：{failed_command[:120]}",
             verification_commands=(failed_command,),
         )
-        return self._apply(
+        return await self._apply(
             run,
             port,
             state,
@@ -469,7 +470,8 @@ class ComposeWorkflow:
         command: str,
     ) -> bool:
         """验证命令的审批弹窗；approve 语义与工具审批一致。"""
-        request_id = f"compose-verify-{state.revision}"
+        command_digest = hashlib.sha256(command.encode("utf-8")).hexdigest()[:8]
+        request_id = f"compose-verify-{state.revision}-{command_digest}"
         result = await port.request_approval(
             run,
             request_id=request_id,
@@ -515,7 +517,7 @@ class ComposeWorkflow:
         try:
             report = validate_review_report(report_payload)
         except ValueError as exc:
-            return self._fail(
+            return await self._fail(
                 run, port, state, "COMPOSE_ARTIFACT_INVALID", str(exc)
             )
         required = [
@@ -558,7 +560,7 @@ class ComposeWorkflow:
                 )
                 for index, finding in enumerate(required)
             )
-            return self._apply(
+            return await self._apply(
                 run,
                 port,
                 state,
@@ -566,7 +568,7 @@ class ComposeWorkflow:
                 report_id=report_row.artifact_id,
                 fix_tasks=fix_tasks,
             )
-        return self._apply(
+        return await self._apply(
             run,
             port,
             state,
@@ -714,10 +716,10 @@ class ComposeWorkflow:
             except ValueError as exc:
                 schema_retries += 1
                 if schema_retries > SCHEMA_INVALID_RETRY_ALLOWED:
-                    return self._fail(
+                    return await self._fail(
                         run, port, state, "COMPOSE_ARTIFACT_INVALID", str(exc)
                     )
-                state = self._apply(run, port, state, ComposeEvent.STAGE_RETRY)
+                state = await self._apply(run, port, state, ComposeEvent.STAGE_RETRY)
                 continue
             if artifact.open_decisions:
                 self._pending_answers = await self._ask_questions(
@@ -732,7 +734,7 @@ class ComposeWorkflow:
                 payload=_understanding_payload(artifact),
             )
             await self._store.save_artifact(artifact_row)
-            return self._apply(
+            return await self._apply(
                 run,
                 port,
                 state,
@@ -767,10 +769,10 @@ class ComposeWorkflow:
             except ValueError as exc:
                 schema_retries += 1
                 if schema_retries > SCHEMA_INVALID_RETRY_ALLOWED:
-                    return self._fail(
+                    return await self._fail(
                         run, port, state, "COMPOSE_ARTIFACT_INVALID", str(exc)
                     )
-                state = self._apply(run, port, state, ComposeEvent.STAGE_RETRY)
+                state = await self._apply(run, port, state, ComposeEvent.STAGE_RETRY)
                 continue
             artifact_row = make_artifact(
                 ArtifactKind.PLAN,
@@ -780,7 +782,7 @@ class ComposeWorkflow:
                 payload=_plan_payload(plan),
             )
             await self._store.save_artifact(artifact_row)
-            return self._apply(
+            return await self._apply(
                 run,
                 port,
                 state,
@@ -794,29 +796,51 @@ class ComposeWorkflow:
         port: Any,
         state: ComposeRunState,
     ) -> ComposeRunState:
-        """整体方案门禁：批准 / 携 feedback 修改 / 取消。"""
+        """整体方案门禁（workflow question）：批准 / 携 feedback 修改 / 取消。"""
         plan = await self._load_plan(run, state)
-        spec = await self._approval_spec(state, _plan_summary(plan))
-        result = await port.request_approval(
+        interrupt_id = f"compose-plan-{state.revision}"
+        result = await port.request_question(
             run,
-            request_id=spec["request_id"],
-            interrupt_id=spec["interrupt_id"],
-            description=spec["description"],
-            decisions=spec["decisions"],
-            action_requests=spec["action_requests"],
+            request_id=interrupt_id,
+            interrupt_id=interrupt_id,
+            questions=[
+                {
+                    "id": "question-1",
+                    "question": (
+                        "请批准、修改或取消整体方案。\n"
+                        + _plan_summary(plan)
+                        + "\n选择「批准」或「取消」；要修改方案，请直接输入修改意见。"
+                    ),
+                    "header": "整体方案确认",
+                    "body": "",
+                    "options": [
+                        {"label": "批准", "value": "approve"},
+                        {"label": "取消", "value": "cancel"},
+                    ],
+                    "multi_select": False,
+                    "allow_other": True,
+                }
+            ],
         )
         value = result.value if isinstance(result.value, Mapping) else {}
-        decision = str(value.get("decision") or "")
-        feedback = str(value.get("feedback") or "")
-        if decision == "approve_once":
-            return self._apply(
+        answers_by_id = value.get("answers", {})
+        raw = (
+            answers_by_id.get("question-1", [])
+            if isinstance(answers_by_id, Mapping)
+            else []
+        )
+        answer = str(raw[0]) if isinstance(raw, list) and raw else ""
+        if answer == "approve":
+            return await self._apply(
                 run, port, state, ComposeEvent.PLAN_APPROVE, tasks=plan.tasks
             )
-        if decision == "reject_with_feedback" and feedback.strip():
-            self._feedback = feedback
-            return self._apply(run, port, state, ComposeEvent.PLAN_REVISE)
-        # reject / 无 feedback 的修改请求都视为取消整体方案。
-        return self._apply(run, port, state, ComposeEvent.PLAN_CANCEL)
+        if answer == "cancel":
+            return await self._apply(run, port, state, ComposeEvent.PLAN_CANCEL)
+        if answer.strip():
+            # 其它输入即修改意见（必须携带 feedback 才能回到 Plan）。
+            self._feedback = answer
+            return await self._apply(run, port, state, ComposeEvent.PLAN_REVISE)
+        return await self._apply(run, port, state, ComposeEvent.PLAN_CANCEL)
 
     async def _ask_questions(
         self,
@@ -853,23 +877,6 @@ class ComposeWorkflow:
             answers.append((decision, answer))
         return tuple(answers)
 
-    async def _approval_spec(self, state: ComposeRunState, summary: str) -> Any:
-        """构造整体方案批准请求；decisions 白名单与协议一致。"""
-        interrupt_id = f"compose-plan-{state.revision}"
-        return {
-            "request_id": interrupt_id,
-            "interrupt_id": interrupt_id,
-            "description": summary,
-            "decisions": ["approve_once", "reject_with_feedback", "reject"],
-            "action_requests": [
-                {
-                    "name": "compose.plan.approve",
-                    "description": "批准整体方案进入执行；选择修改必须填写意见；选择拒绝将取消本次 Run",
-                    "args": {},
-                }
-            ],
-        }
-
     async def _load_understanding(
         self, run: Any, state: ComposeRunState
     ) -> UnderstandingArtifact:
@@ -899,17 +906,31 @@ class ComposeWorkflow:
     async def _run_stage(
         self, run: Any, stage: str, task: str
     ) -> Any:
-        """启动一次 fresh Managed stage execution。"""
+        """启动一次 fresh Managed stage execution；基础设施失败收敛稳定错误码。"""
         profile = run.preparation.agent_engine_profile
-        return await self._services.stage_agent.run(
-            StageRequest(
-                stage=stage,
-                task=task,
-                parent_ref=run.root_execution_ref,
-                profile_key=profile.profile_key if profile is not None else "",
-                cancellation_token=run.cancellation_token,
+        try:
+            return await self._services.stage_agent.run(
+                StageRequest(
+                    stage=stage,
+                    task=task,
+                    parent_ref=run.root_execution_ref,
+                    profile_key=profile.profile_key if profile is not None else "",
+                    cancellation_token=run.cancellation_token,
+                )
             )
-        )
+        except ValueError:
+            # schema-invalid 结构化重试路径由各阶段循环处理。
+            raise
+        except ComposeWorkflowError:
+            raise
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # 原始异常文本不越过 wire，只保留稳定错误码与异常类型名。
+            raise ComposeWorkflowError(
+                "COMPOSE_STAGE_EXECUTION_FAILED",
+                f"{stage} stage failed: {type(exc).__name__}",
+            ) from exc
 
     def _method(self, stage: str) -> str:
         """读取私有方法资产；缺失直接 fail closed。"""
@@ -920,7 +941,7 @@ class ComposeWorkflow:
             )
         return asset
 
-    def _apply(
+    async def _apply(
         self,
         run: Any,
         port: Any,
@@ -928,16 +949,56 @@ class ComposeWorkflow:
         event: ComposeEvent,
         **payload: Any,
     ) -> ComposeRunState:
-        """应用一次合法 transition 并发布 revision 递增的完整 projection。"""
+        """应用一次合法 transition，持久化投影并发布 revision 递增的完整帧。"""
         next_state = ComposeStateMachine.apply(state, event, **payload)
         self._emit_state(run, port, next_state)
+        await self._store.save_run(next_state)
         return next_state
+
+    async def _record_final_summary(
+        self, run: Any, port: Any, state: ComposeRunState
+    ) -> None:
+        """终态时把一条有界结果摘要写入 Transcript（invariant 9 的可见结果）。"""
+        from harness_agent.threads.thread_persistence import TranscriptAppend
+
+        summary = self._final_summary_text(state)
+        if not summary:
+            return
+        run.pending_transcript.append(
+            TranscriptAppend(
+                thread_id=run.ref.thread_id,
+                record_id=f"run:{run.ref.run_id}:compose:summary",
+                kind="assistant",
+                content=summary,
+                run_id=run.ref.run_id,
+                execution_id=run.root_execution_ref.execution_id,
+            )
+        )
+        await port.flush_transcript(run)
+
+    def _final_summary_text(self, state: ComposeRunState) -> str:
+        """生成终态摘要：阶段状态、任务/证据计数与评审结论，全部有界。"""
+        projection = state.projection()
+        stage_summary = " → ".join(
+            f"{stage['id']}:{stage['status']}" for stage in projection["stages"]
+        )
+        tasks = projection["tasks"]
+        passed = sum(1 for task in tasks if task["status"] == "passed")
+        evidence = projection["evidence"]
+        passed_evidence = sum(1 for item in evidence if item["status"] == "passed")
+        lines = [
+            f"Compose {state.status.value}：{stage_summary}",
+            f"任务：{passed}/{len(tasks)} 通过；验证：{passed_evidence}/{len(evidence)} 通过",
+        ]
+        if state.blocked_reason:
+            lines.append(f"阻塞：{state.blocked_reason[:300]}")
+        return "\n".join(lines)[:1_000]
 
     def _emit_state(self, run: Any, port: Any, state: ComposeRunState) -> None:
         """发布有界 compose.state projection；不含 artifact 正文。"""
         port.emit(run, COMPOSE_STATE, state.projection())
 
-    def _fail(
+    async def _fail(
         self,
         run: Any,
         port: Any,
@@ -948,7 +1009,7 @@ class ComposeWorkflow:
         """记录稳定错误码并收敛为 failed 终态。"""
         self._failure_code = code
         self._failure_message = message
-        return self._apply(run, port, state, ComposeEvent.FAIL)
+        return await self._apply(run, port, state, ComposeEvent.FAIL)
 
     def _outcome(self, state: ComposeRunState) -> ComposeOutcome:
         """把 workflow 终态映射为 host 可收敛的终态提议。"""

@@ -198,7 +198,7 @@ async def test_review_pass_completes_run_with_single_terminal(tmp_path: Path) ->
             _reviewer(verdict="pass"),
         ],
         [_evidence(exit_code=0)],
-        [{"decision": "approve_once"}],
+        [{"answers": {"question-1": ["approve"]}}],
     )
     assert stage_agent.calls == [
         "understand", "plan", "build",
@@ -224,7 +224,7 @@ async def test_optional_findings_do_not_block_completion(tmp_path: Path) -> None
             _reviewer(verdict="pass", findings=[_required("optional", "建议补注释")]),
         ],
         [_evidence(exit_code=0)],
-        [{"decision": "approve_once"}],
+        [{"answers": {"question-1": ["approve"]}}],
     )
     assert events[-1].type == "run.completed"
 
@@ -244,7 +244,7 @@ async def test_required_finding_fixes_and_reloops_to_completion(tmp_path: Path) 
             _reviewer(verdict="pass"),
         ],
         [_evidence(exit_code=0), _evidence(exit_code=0)],
-        [{"decision": "approve_once"}],
+        [{"answers": {"question-1": ["approve"]}}],
     )
     assert events[-1].type == "run.completed"
     assert stage_agent.calls.count("build") == 2
@@ -272,7 +272,7 @@ async def test_review_fix_budget_exhausted_blocks(tmp_path: Path) -> None:
             _reviewer(verdict="fail", findings=[_required()]),
         ],
         [_evidence(exit_code=0), _evidence(exit_code=0), _evidence(exit_code=0)],
-        [{"decision": "approve_once"}],
+        [{"answers": {"question-1": ["approve"]}}],
     )
     assert events[-1].type == "run.failed"
     assert events[-1].payload["error"]["code"] == "COMPOSE_BLOCKED"
@@ -293,7 +293,7 @@ async def test_reviewer_invalid_output_fails_after_retry(tmp_path: Path) -> None
             {"verdict": "maybe"},
         ],
         [_evidence(exit_code=0)],
-        [{"decision": "approve_once"}],
+        [{"answers": {"question-1": ["approve"]}}],
     )
     assert events[-1].type == "run.failed"
     assert events[-1].payload["error"]["code"] == "COMPOSE_ARTIFACT_INVALID"
@@ -316,7 +316,7 @@ async def test_requirement_and_code_reviewers_are_independent_executions(tmp_pat
             _reviewer(verdict="pass"),
         ],
         [_evidence(exit_code=0), _evidence(exit_code=0)],
-        [{"decision": "approve_once"}],
+        [{"answers": {"question-1": ["approve"]}}],
     )
     assert stage_agent.calls[-2] == "requirement-reviewer"
     assert stage_agent.calls[-1] == "code-reviewer"

@@ -195,7 +195,7 @@ async def test_build_runs_tasks_in_order_and_stops_at_verify_boundary(tmp_path: 
             _task_result(task_id="task-1"),          # behavior + RED
             _task_result(task_id="task-2", red_evidence=""),  # docs direct
         ],
-        [{"decision": "approve_once"}],
+        [{"answers": {"question-1": ["approve"]}}],
     )
     # Builder 只执行了 build stage 的 task-1/task-2，顺序正确。
     assert stage_agent.calls == ["understand", "plan", "build", "build"]
@@ -233,7 +233,7 @@ async def test_tdd_task_without_red_evidence_gets_debug_retry(tmp_path: Path) ->
             _task_result(task_id="task-1", red_evidence=""),  # 缺 RED
             _task_result(task_id="task-1"),                   # Debug 后成功
         ],
-        [{"decision": "approve_once"}],
+        [{"answers": {"question-1": ["approve"]}}],
     )
     assert stage_agent.calls == ["understand", "plan", "build", "build"]
     assert "DEBUG-METHOD" in stage_agent.tasks[3]
@@ -261,7 +261,7 @@ async def test_task_attempt_budget_exhausted_blocks_run(tmp_path: Path) -> None:
             _task_result(task_id="task-1", remaining_issue="实现失败"),
             _task_result(task_id="task-1", remaining_issue="仍然失败"),
         ],
-        [{"decision": "approve_once"}],
+        [{"answers": {"question-1": ["approve"]}}],
     )
     assert stage_agent.calls == ["understand", "plan", "build", "build"]
     assert events[-1].type == "run.failed"
@@ -291,7 +291,7 @@ async def test_malformed_builder_output_retries_then_fails_attempt(tmp_path: Pat
             "仍然不是 JSON",
             _task_result(task_id="task-1"),
         ],
-        [{"decision": "approve_once"}],
+        [{"answers": {"question-1": ["approve"]}}],
     )
     assert stage_agent.calls == ["understand", "plan", "build", "build", "build"]
     assert "DEBUG-METHOD" in stage_agent.tasks[4]
@@ -309,7 +309,7 @@ async def test_dependency_order_prevents_second_task_without_first(tmp_path: Pat
             _task_result(task_id="task-1", remaining_issue="失败"),
             _task_result(task_id="task-1", remaining_issue="失败"),
         ],
-        [{"decision": "approve_once"}],
+        [{"answers": {"question-1": ["approve"]}}],
     )
     build_calls = [
         text for text in stage_agent.tasks if "## 任务" in text and "BUILD-METHOD" in text
@@ -350,7 +350,7 @@ async def test_cancel_during_build_produces_single_cancelled_terminal(tmp_path: 
             )
 
     stage_agent = _BlockingBuilder()
-    interactions = _ScriptedInteraction([{"decision": "approve_once"}])
+    interactions = _ScriptedInteraction([{"answers": {"question-1": ["approve"]}}])
 
     async def persistence_provider() -> ThreadPersistence:
         return persistence

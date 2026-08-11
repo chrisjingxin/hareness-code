@@ -199,7 +199,7 @@ async def test_e2e_happy_path_completes_with_single_terminal(tmp_path: Path) -> 
             _reviewer("pass"),
         ],
         [_evidence(exit_code=0)],
-        [{"decision": "approve_once"}],
+        [{"answers": {"question-1": ["approve"]}}],
     )
     assert stage_agent.calls == [
         "understand", "plan", "build",
@@ -236,13 +236,13 @@ async def test_e2e_decision_revise_and_verify_fix_journey(tmp_path: Path) -> Non
         [_evidence(exit_code=1), _evidence(exit_code=0), _evidence(exit_code=0)],
         [
             {"answers": {"question-1": ["使用 SQLite"]}},
-            {"decision": "reject_with_feedback", "feedback": "增加端到端测试"},
-            {"decision": "approve_once"},
+            {"answers": {"question-1": ["增加端到端测试"]}},
+            {"answers": {"question-1": ["approve"]}},
         ],
     )
     assert events[-1].type == "run.completed"
     assert [event.type for event in events].count("run.completed") == 1
-    assert [r.type for r in interactions.requests] == ["question", "approval", "approval"]
+    assert [r.type for r in interactions.requests] == ["question", "question", "question"]
     assert stage_agent.calls.count("build") == 3
     assert stage_agent.calls.count("requirement-reviewer") == 2
     assert stage_agent.calls.count("code-reviewer") == 2
@@ -260,7 +260,7 @@ async def test_e2e_budget_exhausted_blocks_with_evidence(tmp_path: Path) -> None
             _task_result(task_id="fix-verify-2"),
         ],
         [_evidence(exit_code=1), _evidence(exit_code=1), _evidence(exit_code=1)],
-        [{"decision": "approve_once"}],
+        [{"answers": {"question-1": ["approve"]}}],
     )
     assert events[-1].type == "run.failed"
     assert events[-1].payload["error"]["code"] == "COMPOSE_BLOCKED"
@@ -313,3 +313,133 @@ async def test_e2e_build_mode_regression(tmp_path: Path) -> None:
     ]
     assert events[0].payload["mode"] == "build"
     assert [event.type for event in events].count("run.completed") == 1
+
+
+async def test_e2e_run_projection_persisted_with_single_terminal(tmp_path: Path) -> None:
+    """每次 transition 的 projection 持久化到审计表，终态计数唯一。"""
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    persistence = await ThreadPersistence.open(project=project, home=home)
+    stage_agent = _FakeStageAgent([
+        _understanding(),
+        _plan(),
+        _task_result(task_id="task-1"),
+        _reviewer("pass"),
+        _reviewer("pass"),
+    ])
+    verification = _FakeVerification([_evidence(exit_code=0)])
+    interactions = _ScriptedInteraction([{"answers": {"question-1": ["approve"]}}])
+
+    async def persistence_provider() -> ThreadPersistence:
+        return persistence
+
+    async def preparation_provider(_command, _persistence) -> RunPreparation:
+        return RunPreparation(execution_binding=make_test_binding("thread-1", "run-1"))
+
+    async def noop_runtime(_run) -> RunRuntime:
+        async def release() -> None:
+            return None
+
+        return RunRuntime(
+            agent=None,
+            run_context=None,
+            graph_config=lambda thread_id: {"configurable": {"thread_id": thread_id}},
+            release=release,
+        )
+
+    async def compose_services() -> ComposeServices | None:
+        return ComposeServices(
+            stage_agent=stage_agent,
+            method_assets={
+                "understand": "u", "plan": "p", "build": "BUILD-METHOD",
+                "tdd": "TDD-METHOD", "debug": "DEBUG-METHOD",
+                "code-review": "REVIEW-METHOD",
+            },
+            workspace_root=str(project),
+            verification=verification,
+            now_ms=lambda: 42,
+        )
+
+    coordinator = RunCoordinator(
+        persistence_provider=persistence_provider,
+        preparation_provider=preparation_provider,
+        runtime_provider=noop_runtime,
+        interaction_port=interactions,
+        compose_services_provider=compose_services,
+    )
+    execution = await coordinator.start(
+        StartRun(thread_id="thread-1", run_id="run-1", message="实现搜索功能", mode="compose"),
+        ConnectionRef("owner"),
+    )
+    events = [event async for event in execution.events]
+    await coordinator.close()
+
+    store = persistence.compose_artifact_store()
+    persisted = await store.load_run("run-1")
+    assert persisted is not None
+    assert persisted.status.value == "completed"
+    frames = [event.payload for event in events if event.type == "compose.state"]
+    assert persisted.revision == frames[-1]["revision"]  # 最后一帧已持久化
+    assert await store.terminal_count("run-1") == 1
+    # 终态摘要进入 Transcript（用户消息 + 最终可见 assistant 结果）。
+    records = await persistence.load_transcript("thread-1")
+    kinds = [record.kind for record in records]
+    assert kinds == ["user", "assistant"]
+    assert "Compose completed" in records[-1].payload["content"]
+    await persistence.close()
+
+
+async def test_e2e_stage_infrastructure_failure_converges_stable_code(tmp_path: Path) -> None:
+    """stage 执行基础设施失败收敛为 COMPOSE_STAGE_EXECUTION_FAILED，不泄漏原始异常。"""
+    class _ExplodingAgent:
+        async def run(self, request: StageRequest) -> StageResult:
+            raise RuntimeError("engine exploded: secret detail")
+
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    persistence = await ThreadPersistence.open(project=project, home=home)
+
+    async def persistence_provider() -> ThreadPersistence:
+        return persistence
+
+    async def preparation_provider(_command, _persistence) -> RunPreparation:
+        return RunPreparation(execution_binding=make_test_binding("thread-1", "run-1"))
+
+    async def noop_runtime(_run) -> RunRuntime:
+        async def release() -> None:
+            return None
+
+        return RunRuntime(
+            agent=None,
+            run_context=None,
+            graph_config=lambda thread_id: {"configurable": {"thread_id": thread_id}},
+            release=release,
+        )
+
+    async def compose_services() -> ComposeServices | None:
+        return ComposeServices(
+            stage_agent=_ExplodingAgent(),
+            method_assets={"understand": "u", "plan": "p"},
+            workspace_root=str(project),
+            now_ms=lambda: 42,
+        )
+
+    coordinator = RunCoordinator(
+        persistence_provider=persistence_provider,
+        preparation_provider=preparation_provider,
+        runtime_provider=noop_runtime,
+        interaction_port=_ScriptedInteraction([]),
+        compose_services_provider=compose_services,
+    )
+    execution = await coordinator.start(
+        StartRun(thread_id="thread-1", run_id="run-1", message="实现搜索功能", mode="compose"),
+        ConnectionRef("owner"),
+    )
+    events = [event async for event in execution.events]
+    await coordinator.close()
+    await persistence.close()
+    assert events[-1].type == "run.failed"
+    assert events[-1].payload["error"]["code"] == "COMPOSE_STAGE_EXECUTION_FAILED"
+    assert "secret detail" not in str(events[-1].payload["error"])
