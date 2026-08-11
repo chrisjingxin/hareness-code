@@ -42,7 +42,7 @@ from harness_agent.threads.context_projection import (
 )
 from harness_agent.threads.runtime_state import RuntimeStateError, RuntimeStateSnapshot
 
-_SCHEMA_VERSION = 11
+_SCHEMA_VERSION = 12
 _MAX_PREVIEW_CHARS = 160
 _MAX_INLINE_TOOL_BYTES = 64 * 1024
 _TRANSCRIPT_KINDS = ("user", "assistant", "tool", "context")
@@ -757,6 +757,10 @@ def _migration_validate_legacy_source_schema_sync(
     # Team 状态表由 TeamStateStore 在较新的扩展分支中提前创建；它不改变
     # Thread schema 版本，但迁移时必须作为已知用户数据原样保留。
     allowed_tables.add("harness_team_runs")
+    # Compose 审计表由 v12 迁移创建；降级测试库或新版本库被误标旧版本时
+    # 必须按已知扩展对象保留，而不是当成未知表拒绝。
+    allowed_tables.add("harness_compose_runs")
+    allowed_tables.add("harness_compose_artifacts")
     if source_version >= 2:
         allowed_tables.add("harness_prompt_epochs")
     unknown = actual_tables - allowed_tables
@@ -1639,6 +1643,17 @@ class ThreadPersistence:
         from harness_agent.runtime.team_coordinator import SqliteTeamStateStore
 
         return SqliteTeamStateStore(
+            self._connection,
+            project_fingerprint=self._project_fingerprint,
+            lock=self._lock,
+        )
+
+    def compose_artifact_store(self) -> "ComposeArtifactStore":
+        """返回借用同一连接和事务锁的项目级 Compose artifact 存储。"""
+        self._ensure_open()
+        from harness_agent.threads.compose_artifact_store import ComposeArtifactStore
+
+        return ComposeArtifactStore(
             self._connection,
             project_fingerprint=self._project_fingerprint,
             lock=self._lock,
@@ -4164,6 +4179,9 @@ class ThreadPersistence:
             if version < 11:
                 await self._add_context_runtime_state_column()
                 version = 11
+            if version < 12:
+                await self._add_compose_tables()
+                version = 12
             await self._connection.execute(f"PRAGMA user_version={version}")
             final_fingerprint = await self._database_fingerprint_async()
             await self._validate_final_database_async(final_fingerprint)
@@ -4474,6 +4492,8 @@ class ThreadPersistence:
         allowed_tables = set(required)
         # 见同步校验：Team 状态表是已知扩展对象，不参与 Thread schema 版本。
         allowed_tables.add("harness_team_runs")
+        allowed_tables.add("harness_compose_runs")
+        allowed_tables.add("harness_compose_artifacts")
         if source_version >= 2:
             allowed_tables.add("harness_prompt_epochs")
         if actual_tables - allowed_tables:
@@ -4719,6 +4739,41 @@ class ThreadPersistence:
             required.append(("harness_compression_checkpoints", ("commit_payload",)))
         if version >= 11:
             required.append(("harness_context_state", ("runtime_state",)))
+        if version >= 12:
+            required.extend(
+                [
+                    (
+                        "harness_compose_runs",
+                        (
+                            "project_fingerprint",
+                            "run_id",
+                            "revision",
+                            "stage",
+                            "status",
+                            "stages_json",
+                            "stage_attempts_json",
+                            "tasks_json",
+                            "evidence_json",
+                            "terminal_count",
+                            "updated_at_ms",
+                        ),
+                    ),
+                    (
+                        "harness_compose_artifacts",
+                        (
+                            "project_fingerprint",
+                            "run_id",
+                            "artifact_id",
+                            "kind",
+                            "version",
+                            "source_execution_id",
+                            "created_at_ms",
+                            "payload_json",
+                            "content_digest",
+                        ),
+                    ),
+                ]
+            )
 
         for table_name, expected_columns in required:
             actual_columns = await self._table_columns_async(table_name)
@@ -4750,6 +4805,9 @@ class ThreadPersistence:
             required_indexes.append("harness_run_context_snapshots_thread_created")
         if version >= 9:
             required_indexes.append("harness_compression_checkpoints_latest")
+        if version >= 12:
+            required_indexes.append("harness_compose_runs_thread_updated")
+            required_indexes.append("harness_compose_artifacts_run_created")
         for index_name in required_indexes:
             cursor = await self._connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
@@ -5804,6 +5862,65 @@ class ThreadPersistence:
                     ADD COLUMN runtime_state TEXT NOT NULL DEFAULT '{}'
                 """
             )
+
+    async def _add_compose_tables(self) -> None:
+        """v12 为 Compose 工作模式增加只读审计表；正文不进 Transcript。"""
+        await self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS harness_compose_runs
+            (
+                project_fingerprint TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                stage TEXT NOT NULL,
+                status TEXT NOT NULL,
+                stages_json TEXT NOT NULL,
+                stage_attempts_json TEXT NOT NULL,
+                tasks_json TEXT NOT NULL,
+                evidence_json TEXT NOT NULL,
+                understanding_artifact_id TEXT,
+                plan_artifact_id TEXT,
+                verification_evidence_id TEXT,
+                review_report_id TEXT,
+                verify_fix_round INTEGER NOT NULL,
+                review_fix_round INTEGER NOT NULL,
+                blocked_reason TEXT,
+                terminal_count INTEGER NOT NULL DEFAULT 0,
+                updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (project_fingerprint, run_id)
+            )
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS harness_compose_runs_thread_updated
+                ON harness_compose_runs(project_fingerprint, thread_id, updated_at_ms DESC)
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS harness_compose_artifacts
+            (
+                project_fingerprint TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                artifact_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                source_execution_id TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                payload_json TEXT NOT NULL,
+                content_digest TEXT NOT NULL,
+                PRIMARY KEY (project_fingerprint, run_id, artifact_id)
+            )
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS harness_compose_artifacts_run_created
+                ON harness_compose_artifacts(project_fingerprint, run_id, created_at_ms)
+            """
+        )
 
     async def _add_context_snapshot_column(self) -> None:
         """为旧 Run binding 增加可为空的 snapshot 引用，兼容降级库。"""
