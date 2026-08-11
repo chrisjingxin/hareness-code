@@ -203,3 +203,30 @@ describe("Composer", () => {
   })
 
 })
+
+test("Tab 空闲且无草稿时切换 Work Mode；输入中/运行中不劫持", () => {
+  const base = {
+    key: "",
+    shiftKey: false,
+    ctrlKey: false,
+    metaKey: false,
+    isComposing: false,
+    menuVisible: false,
+    items: [] as readonly CommandMenuItem[],
+    selectedIndex: 0,
+    draft: "",
+    composedDisabled: false,
+    activeRun: false,
+  }
+  expect(resolveComposerKeyboardIntent({ ...base, key: "Tab" }))
+    .toEqual({ preventDefault: true, intent: { type: "work-mode-cycle" } })
+  // 输入中保留默认行为（焦点移动）
+  expect(resolveComposerKeyboardIntent({ ...base, key: "Tab", draft: "你好" }))
+    .toEqual({ preventDefault: false, intent: null })
+  // 运行中不劫持
+  expect(resolveComposerKeyboardIntent({ ...base, key: "Tab", activeRun: true }))
+    .toEqual({ preventDefault: false, intent: null })
+  // 菜单打开时 Tab 保留选择语义
+  expect(resolveComposerKeyboardIntent({ ...base, key: "Tab", menuVisible: true, items: [SAMPLE_COMMAND] }))
+    .toEqual({ preventDefault: true, intent: { type: "command-menu-select", item: SAMPLE_COMMAND } })
+})

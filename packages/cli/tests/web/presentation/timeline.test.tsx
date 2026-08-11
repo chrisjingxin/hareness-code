@@ -287,3 +287,69 @@ describe("Timeline", () => {
     }
   })
 })
+
+test("Compose 进度面板渲染五阶段、当前任务与 blocked 摘要", async () => {
+  const interactive = makeInteractive({
+    timeline: [],
+    composeState: {
+      revision: 5,
+      stage: "verify",
+      status: "running",
+      stages: [
+        { id: "understand", status: "passed", attempts: 1 },
+        { id: "plan", status: "passed", attempts: 1 },
+        { id: "build", status: "passed", attempts: 1 },
+        { id: "verify", status: "running", attempts: 1 },
+        { id: "review", status: "pending", attempts: 0 },
+      ],
+      tasks: [
+        { id: "task-1", title: "实现搜索", status: "passed" },
+        { id: "task-2", title: "补充文档", status: "pending" },
+      ],
+      evidence: [{ label: "pytest -q tests/test_search.py", status: "failed" }],
+      blockedReason: null,
+    },
+  })
+  const handle = render(createElement(Timeline, { snapshot: makeSnapshot({ interactive }), dispatch: () => {} }))
+  try {
+    const progress = handle.container.querySelector(".compose-progress")
+    expect(progress).not.toBeNull()
+    const text = progress?.textContent ?? ""
+    expect(text).toContain("理解")
+    expect(text).toContain("验证")
+    expect(text).toContain("补充文档")
+    expect(text).toContain("pytest -q")
+    expect(text).toContain("rev 5")
+  } finally {
+    handle.unmount()
+  }
+})
+
+test("Compose blocked 投影展示阻塞原因", async () => {
+  const interactive = makeInteractive({
+    timeline: [],
+    composeState: {
+      revision: 7,
+      stage: "verify",
+      status: "blocked",
+      stages: [
+        { id: "understand", status: "passed", attempts: 1 },
+        { id: "plan", status: "passed", attempts: 1 },
+        { id: "build", status: "passed", attempts: 1 },
+        { id: "verify", status: "blocked", attempts: 3 },
+        { id: "review", status: "pending", attempts: 0 },
+      ],
+      tasks: [],
+      evidence: [],
+      blockedReason: "verify fix budget exhausted",
+    },
+  })
+  const handle = render(createElement(Timeline, { snapshot: makeSnapshot({ interactive }), dispatch: () => {} }))
+  try {
+    const text = handle.container.querySelector(".compose-progress")?.textContent ?? ""
+    expect(text).toContain("阻塞")
+    expect(text).toContain("verify fix budget exhausted")
+  } finally {
+    handle.unmount()
+  }
+})

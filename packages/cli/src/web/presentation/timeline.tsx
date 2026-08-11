@@ -18,6 +18,7 @@ import { formatElapsed } from "../../presentation-shared/formatters"
 import { toolArgumentSummary } from "../../presentation-shared/tool-output-policy"
 
 import type {
+  ComposeProjection,
   ConversationMessage,
   InteractionCard,
   ReasoningCard,
@@ -121,6 +122,9 @@ export function Timeline({
     >
       {snapshot.interactive.currentThreadId !== null && visibleItems.length > 0 ? (
         <div className="timeline-header">THREAD · {timeline.length} 项记录</div>
+      ) : null}
+      {snapshot.interactive.composeState ? (
+        <ComposeProgress state={snapshot.interactive.composeState} />
       ) : null}
       {visibleItems.length === 0 ? (
         <div className="timeline-empty" role="status">
@@ -478,4 +482,34 @@ function interactionTerminalLabel(interaction: InteractionCard): {
     pending: "neutral",
   }
   return { text: interactionStatusLabel(interaction.status), tone: tones[interaction.status] }
+}
+
+
+/** Compose 五阶段/当前任务/evidence/blocked 的只读进度条。 */
+function ComposeProgress({ state }: { state: ComposeProjection }) {
+  const stageLabels: Record<string, string> = {
+    understand: "理解",
+    plan: "计划",
+    build: "构建",
+    verify: "验证",
+    review: "评审",
+  }
+  const currentTask = state.tasks.find(task => task.status === "running" || task.status === "pending")
+  const failedEvidence = state.evidence.find(item => item.status === "failed")
+  return (
+    <div className="compose-progress" role="status" aria-label="Compose 工作流进度">
+      <div className="compose-stages">
+        {state.stages.map(stage => (
+          <span key={stage.id} className={`compose-stage compose-stage-${stage.status}`}>
+            {stageLabels[stage.id] ?? stage.id}
+            {stage.status === "running" ? "…" : stage.status === "passed" ? "✓" : ""}
+          </span>
+        ))}
+        <span className="compose-revision">rev {state.revision}</span>
+      </div>
+      {currentTask ? <div className="compose-task">任务：{currentTask.title}</div> : null}
+      {failedEvidence ? <div className="compose-task compose-task-failed">验证：{failedEvidence.label}</div> : null}
+      {state.blockedReason ? <div className="compose-blocked">阻塞：{state.blockedReason}</div> : null}
+    </div>
+  )
 }

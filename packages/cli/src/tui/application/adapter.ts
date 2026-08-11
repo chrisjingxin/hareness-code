@@ -498,6 +498,11 @@ class TuiAdapterImpl implements TuiAdapter {
         if (outcome.status === "rejected") this.showTransientNotice(outcome.message)
         return
       }
+      case "cycle-work-mode": {
+        const outcome = await this.routeDispatch({ type: "work-mode.cycle" })
+        if (outcome.status === "rejected") this.showTransientNotice(outcome.message)
+        return
+      }
       case "clear-selected-skill":
         await this.routeDispatch({ type: "skill.clear" })
         return

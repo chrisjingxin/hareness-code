@@ -1,9 +1,9 @@
 /** Thread 消息、工具和 Interaction 的统一时间线。 */
 
-import { type ScrollBoxRenderable } from "@opentui/core"
+import { TextAttributes, type ScrollBoxRenderable } from "@opentui/core"
 import { type RefObject, useState } from "react"
 
-import type { ConversationMessage, InteractionCard, ReasoningCard, TimelineItem, ToolCard } from "../../interactive/state"
+import type { ComposeProjection, ConversationMessage, InteractionCard, ReasoningCard, TimelineItem, ToolCard } from "../../interactive/state"
 import type { InteractiveSnapshot } from "../../interactive/types"
 import { formatContext, formatDuration, formatElapsed, formatUsage } from "../../presentation-shared/formatters"
 import { APPROVAL_DECISION_ORDER, approvalDecisionDescription, approvalDecisionLabel, isApprovalDecision } from "../../presentation-shared/interaction-policy"
@@ -14,6 +14,50 @@ import { PROMPT_BORDER, useRunElapsed, useSpinner } from "./composer"
 import { createScrollAcceleration } from "./scroll.js"
 import { markdownSyntax, tuiTheme } from "./theme"
 import type { ApprovalDecision } from "./types"
+
+const COMPOSE_STAGE_LABELS: Record<string, string> = {
+  understand: "理解",
+  plan: "计划",
+  build: "构建",
+  verify: "验证",
+  review: "评审",
+}
+
+function stageColor(status: string): string {
+  if (status === "passed" || status === "completed") return tuiTheme.success
+  if (status === "running" || status === "waiting_user") return tuiTheme.primary
+  if (status === "failed" || status === "blocked" || status === "cancelled") return tuiTheme.danger
+  return tuiTheme.muted
+}
+
+/** Compose 运行进度：只显示五阶段、当前 task、evidence 与 blocked 摘要。 */
+function ComposeProgress(props: { state: ComposeProjection }) {
+  const state = props.state
+  const currentTask = state.tasks.find(task => task.status === "running" || task.status === "pending")
+  const runningEvidence = state.evidence.find(item => item.status === "running" || item.status === "failed")
+  return (
+    <box flexDirection="column" paddingBottom={1} paddingLeft={1} paddingRight={1}>
+      <box flexDirection="row" gap={1}>
+        {state.stages.map(stage => (
+          <text key={stage.id} fg={stageColor(stage.status)} attributes={stage.status === "running" ? TextAttributes.BOLD : undefined}>
+            {COMPOSE_STAGE_LABELS[stage.id] ?? stage.id}
+            {stage.status === "running" ? "*" : stage.status === "passed" ? "✓" : ""}
+          </text>
+        ))}
+        <text fg={tuiTheme.muted}>rev {state.revision}</text>
+      </box>
+      {currentTask ? (
+        <text fg={tuiTheme.text}>任务：{shorten(currentTask.title, 60)}</text>
+      ) : null}
+      {runningEvidence ? (
+        <text fg={stageColor(runningEvidence.status)}>验证：{shorten(runningEvidence.label, 60)}</text>
+      ) : null}
+      {state.blockedReason ? (
+        <text fg={tuiTheme.danger}>阻塞：{shorten(state.blockedReason, 80)}</text>
+      ) : null}
+    </box>
+  )
+}
 
 /** 使用 ScrollBox 渲染统一 timeline，并保留 sticky-scroll 行为。 */
 export function ConversationTimeline(props: {
@@ -30,6 +74,7 @@ export function ConversationTimeline(props: {
   return (
     <scrollbox ref={props.scrollRef} stickyScroll stickyStart="bottom" flexGrow={1} minHeight={0} scrollAcceleration={createScrollAcceleration()} viewportOptions={{ paddingRight: 1 }}>
       <box height={1} />
+      {props.interactive.composeState ? <ComposeProgress state={props.interactive.composeState} /> : null}
       {props.interactive.timeline.map(item => (
         <TimelineRow
           key={timelineItemKey(item)}

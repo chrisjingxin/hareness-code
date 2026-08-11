@@ -152,6 +152,7 @@ export type WebIntent =
   | { type: "confirmation-resolve"; confirmationId: string; confirmed: boolean }
   | { type: "tool-toggle"; runId: string; toolId: string }
   | { type: "approval-mode-cycle" }
+  | { type: "work-mode-cycle" }
   | { type: "cancel-run" }
   | { type: "notice-dismiss" }
   | { type: "theme-set"; theme: WebTheme }
@@ -413,6 +414,9 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
         return
       case "approval-mode-cycle":
         await this.executeCoreIntent({ type: "approval-mode.cycle" })
+        return
+      case "work-mode-cycle":
+        await this.executeCoreIntent({ type: "work-mode.cycle" })
         return
       case "cancel-run":
         await this.executeCoreIntent({ type: "run.cancel" })

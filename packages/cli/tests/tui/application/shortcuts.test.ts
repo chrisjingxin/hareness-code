@@ -85,3 +85,17 @@ test("浮层打开时滚动键让位给选择器，不在背后滚动历史", ()
   const threads = { ...idle, threadPickerVisible: true, threadOptionCount: 1 }
   expect(resolveShortcut({ name: "pageup", ctrl: false }, threads)).toBe("none")
 })
+
+test("Tab 空闲切换 Work Mode；Shift+Tab 仍只切 Approval", () => {
+  expect(resolveShortcut({ name: "tab", ctrl: false }, idle)).toBe("cycle-work-mode")
+  expect(resolveShortcut({ name: "tab", ctrl: false }, { ...idle, hasDraft: true })).toBe("none")
+  expect(resolveShortcut({ name: "tab", ctrl: false }, { ...idle, activeRun: true })).toBe("none")
+  expect(resolveShortcut({ name: "tab", shift: true }, idle)).toBe("cycle-approval-mode")
+})
+
+test("浮层打开时 Tab 保留选择语义，不切换 Work Mode", () => {
+  const menu = { ...idle, commandMenuVisible: true, commandOptionCount: 2, hasDraft: true }
+  expect(resolveShortcut({ name: "tab", ctrl: false }, menu)).toBe("command-select")
+  const picker = { ...idle, skillPickerVisible: true, skillOptionCount: 2, commandMenuVisible: true }
+  expect(resolveShortcut({ name: "tab", ctrl: false }, picker)).toBe("skill-select")
+})
