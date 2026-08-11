@@ -353,3 +353,38 @@ test("Compose blocked 投影展示阻塞原因", async () => {
     handle.unmount()
   }
 })
+
+test("Compose 失败后 Web 渲染冻结的终态阶段面板", async () => {
+  const interactive = makeInteractive({
+    timeline: [],
+    activeRun: null,
+    lastRun: {
+      runId: "run-1",
+      outcome: "failed",
+      composeSummary: {
+        revision: 2,
+        stage: "understand",
+        status: "failed",
+        stages: [
+          { id: "understand", status: "failed", attempts: 2 },
+          { id: "plan", status: "pending", attempts: 0 },
+          { id: "build", status: "pending", attempts: 0 },
+          { id: "verify", status: "pending", attempts: 0 },
+          { id: "review", status: "pending", attempts: 0 },
+        ],
+        tasks: [],
+        evidence: [],
+        blockedReason: null,
+      },
+    },
+  })
+  const handle = render(createElement(Timeline, { snapshot: makeSnapshot({ interactive }), dispatch: () => {} }))
+  try {
+    const text = handle.container.querySelector(".compose-progress")?.textContent ?? ""
+    expect(text).toContain("理解")
+    expect(text).toContain("验证")
+    expect(text).toContain("rev 2")
+  } finally {
+    handle.unmount()
+  }
+})

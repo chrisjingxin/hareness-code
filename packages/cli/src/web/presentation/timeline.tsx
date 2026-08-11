@@ -25,6 +25,7 @@ import type {
   TimelineItem,
   ToolCard,
 } from "../../interactive/state"
+import type { InteractiveSnapshot } from "../../interactive/types"
 import type { WebAdapterSnapshot, WebIntent, WebScrollRequest } from "../application/adapter"
 import { toolKey } from "../application/adapter"
 import { Markdown } from "./markdown"
@@ -123,9 +124,7 @@ export function Timeline({
       {snapshot.interactive.currentThreadId !== null && visibleItems.length > 0 ? (
         <div className="timeline-header">THREAD · {timeline.length} 项记录</div>
       ) : null}
-      {snapshot.interactive.composeState ? (
-        <ComposeProgress state={snapshot.interactive.composeState} />
-      ) : null}
+      {renderComposeProgress(snapshot.interactive)}
       {visibleItems.length === 0 ? (
         <div className="timeline-empty" role="status">
           发送第一条消息后，这里会显示 Agent 的回答、工具调用与审批记录。
@@ -484,6 +483,15 @@ function interactionTerminalLabel(interaction: InteractionCard): {
   return { text: interactionStatusLabel(interaction.status), tone: tones[interaction.status] }
 }
 
+
+/** 活动投影优先；失败/完成后退回终态摘要快照，保证画面不空白。 */
+function renderComposeProgress(interactive: InteractiveSnapshot): React.ReactNode {
+  const live = interactive.composeState
+  if (live) return <ComposeProgress state={live} />
+  const summary = interactive.lastRun?.composeSummary
+  if (!summary) return null
+  return <ComposeProgress state={summary} />
+}
 
 /** Compose 五阶段/当前任务/evidence/blocked 的只读进度条。 */
 function ComposeProgress({ state }: { state: ComposeProjection }) {

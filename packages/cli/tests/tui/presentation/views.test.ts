@@ -536,3 +536,48 @@ test("Compose 投影渲染五阶段、任务与 blocked 摘要", async () => {
     await act(async () => { setup.renderer.destroy() })
   }
 })
+
+test("Compose 失败后仍渲染冻结的终态阶段面板", async () => {
+  const run = { threadId: "thread-1", runId: "run-1" }
+  let state = startRun(createInitialState(), run, "实现搜索")
+  state = {
+    ...state,
+    activeRun: null,
+    activity: { kind: "failed", label: "失败" },
+    composeState: null,
+    lastRun: {
+      runId: run.runId,
+      outcome: "failed",
+      composeSummary: {
+        revision: 2,
+        stage: "understand",
+        status: "failed",
+        stages: [
+          { id: "understand", status: "failed", attempts: 2 },
+          { id: "plan", status: "pending", attempts: 0 },
+          { id: "build", status: "pending", attempts: 0 },
+          { id: "verify", status: "pending", attempts: 0 },
+          { id: "review", status: "pending", attempts: 0 },
+        ],
+        tasks: [],
+        evidence: [],
+        blockedReason: null,
+      },
+    },
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(
+      createElement(ThreadView, viewProps(snapshotOf(state), 130, 40)),
+      { width: 130, height: 40 },
+    )
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("理解")
+    expect(frame).toContain("验证")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})

@@ -30,6 +30,15 @@ function stageColor(status: string): string {
   return tuiTheme.muted
 }
 
+/** 活动投影优先；失败/完成后退回终态摘要快照，保证画面不空白。 */
+function renderComposeProgress(interactive: InteractiveSnapshot): React.ReactNode {
+  const live = interactive.composeState
+  if (live) return <ComposeProgress state={live} />
+  const summary = interactive.lastRun?.composeSummary
+  if (!summary) return null
+  return <ComposeProgress state={summary} />
+}
+
 /** Compose 运行进度：只显示五阶段、当前 task、evidence 与 blocked 摘要。 */
 function ComposeProgress(props: { state: ComposeProjection }) {
   const state = props.state
@@ -74,7 +83,7 @@ export function ConversationTimeline(props: {
   return (
     <scrollbox ref={props.scrollRef} stickyScroll stickyStart="bottom" flexGrow={1} minHeight={0} scrollAcceleration={createScrollAcceleration()} viewportOptions={{ paddingRight: 1 }}>
       <box height={1} />
-      {props.interactive.composeState ? <ComposeProgress state={props.interactive.composeState} /> : null}
+      {renderComposeProgress(props.interactive)}
       {props.interactive.timeline.map(item => (
         <TimelineRow
           key={timelineItemKey(item)}
