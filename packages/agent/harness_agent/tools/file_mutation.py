@@ -37,6 +37,9 @@ MAX_PREPARED_MUTATION_BYTES = 8 * 1024 * 1024
 MAX_CONSUMED_PLAN_KEYS = 512
 """仅保存指纹的已消费计划上限，防止旧批准因缓存淘汰而被重新 prepare。"""
 
+_INVALIDATED_PLAN_FINGERPRINT = "invalidated"
+"""标记待审批计划曾发生改参；原参数和新参数都不得再提交。"""
+
 
 @dataclass(frozen=True, slots=True)
 class MutationMetadata:
@@ -136,8 +139,15 @@ class FileMutationService:
         key = (thread_id, tool_call_id)
         with self._lock:
             plan = self._prepared.get(key)
-            if plan is None or plan.fingerprint != fingerprint:
+            if plan is None:
                 return None
+            if plan.fingerprint != fingerprint:
+                # Tool Call ID 是审批关联身份；审批后改参不能作为
+                # 一次“新计划”现场重建，否则会提交用户未批准的 diff。
+                self._prepared.pop(key)
+                self._prepared_bytes -= plan.retained_bytes
+                self._remember_consumed(key, _INVALIDATED_PLAN_FINGERPRINT)
+                raise TextMutationError("COMMIT_CONFLICT", "已审批调用的参数已变化")
             self._prepared.move_to_end(key)
             return plan
 
@@ -148,11 +158,11 @@ class FileMutationService:
         tool_call_id: str,
         fingerprint: str,
     ) -> bool:
-        """判断同一调用的计划是否已提交、失败或因预算淘汰，旧批准必须 fail closed。"""
+        """判断相同参数是否已消费，或该调用是否已因待审批改参作废。"""
         key = (thread_id, tool_call_id)
         with self._lock:
             consumed = self._consumed_fingerprints.get(key)
-            if consumed != fingerprint:
+            if consumed not in {fingerprint, _INVALIDATED_PLAN_FINGERPRINT}:
                 return False
             self._consumed_fingerprints.move_to_end(key)
             return True
@@ -280,10 +290,19 @@ class FileMutationService:
         """以 LRU 形式保留待审批计划，超过总预算时淘汰旧计划。"""
         key = (plan.metadata.thread_id, plan.metadata.tool_call_id)
         with self._lock:
+            consumed = self._consumed_fingerprints.get(key)
+            if consumed in {plan.fingerprint, _INVALIDATED_PLAN_FINGERPRINT}:
+                raise TextMutationError("COMMIT_CONFLICT", "已消费的调用 ID 不能重新准备")
+            self._consumed_fingerprints.pop(key, None)
+            previous = self._prepared.get(key)
+            if previous is not None and previous.fingerprint != plan.fingerprint:
+                self._prepared.pop(key)
+                self._prepared_bytes -= previous.retained_bytes
+                self._remember_consumed(key, _INVALIDATED_PLAN_FINGERPRINT)
+                raise TextMutationError("COMMIT_CONFLICT", "已准备调用的参数已变化")
             previous = self._prepared.pop(key, None)
             if previous is not None:
                 self._prepared_bytes -= previous.retained_bytes
-            self._consumed_fingerprints.pop(key, None)
             self._prepared[key] = plan
             self._prepared_bytes += plan.retained_bytes
             while self._prepared and self._prepared_bytes > self._max_prepared_bytes:

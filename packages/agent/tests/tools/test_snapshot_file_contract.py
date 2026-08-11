@@ -187,6 +187,31 @@ def test_edit_allows_unique_text_copied_from_middle_of_seen_line(tmp_path: Path)
     assert target.read_text(encoding="utf-8") == "prefix changed suffix\n"
 
 
+def test_edit_rejects_overlapping_matches_as_ambiguous(tmp_path: Path) -> None:
+    """old_string 的重叠出现也是多个候选位置，不能静默选择第一处。"""
+    target = tmp_path / "overlapping.txt"
+    target.write_text("aaa\n", encoding="utf-8")
+    contract = _contract(tmp_path)
+    read = _payload(contract.dispatch(_request("read_file", {"file_path": "/overlapping.txt"})))
+
+    rejected = _payload(
+        contract.dispatch(
+            _request(
+                "edit_file",
+                {
+                    "file_path": "/overlapping.txt",
+                    "snapshot_id": read["snapshot_id"],
+                    "old_string": "aa",
+                    "new_string": "changed",
+                },
+            )
+        )
+    )
+
+    assert rejected["error"]["code"] == "AMBIGUOUS_MATCH"
+    assert target.read_text(encoding="utf-8") == "aaa\n"
+
+
 def test_edit_rejects_stale_cross_thread_ambiguous_and_legacy_parameters(tmp_path: Path) -> None:
     """所有 Snapshot/unique-match 前置条件失败时保持原始字节不变。"""
     target = tmp_path / "sample.txt"
@@ -520,6 +545,51 @@ def test_approval_diff_is_the_prepared_content_and_conflict_invalidates_approval
     # 旧批准在冲突后不能因文件恰好恢复原样而被重新 prepare 或重放。
     target.write_text("before\n", encoding="utf-8")
     replay = _payload(contract.dispatch(edit_request))
+    assert replay["error"]["code"] == "COMMIT_CONFLICT"
+    assert target.read_text(encoding="utf-8") == "before\n"
+
+
+def test_approval_rejects_changed_arguments_for_the_same_tool_call(tmp_path: Path) -> None:
+    """同一 Tool Call 的参数指纹变化必须使已审批计划失效，不得现场重建后提交。"""
+    target = tmp_path / "approval-arguments.txt"
+    target.write_text("before\n", encoding="utf-8")
+    contract = _contract(tmp_path)
+    read = _payload(
+        contract.dispatch(_request("read_file", {"file_path": "/approval-arguments.txt"}))
+    )
+    approved = _request(
+        "edit_file",
+        {
+            "file_path": "/approval-arguments.txt",
+            "snapshot_id": read["snapshot_id"],
+            "old_string": "before\n",
+            "new_string": "approved\n",
+        },
+        call_id="edit-approved-arguments",
+    )
+    changed = _request(
+        "edit_file",
+        {
+            "file_path": "/approval-arguments.txt",
+            "snapshot_id": read["snapshot_id"],
+            "old_string": "before\n",
+            "new_string": "not-approved\n",
+        },
+        call_id="edit-approved-arguments",
+    )
+
+    assert contract.approval_preflight(approved) is True
+    assert "+approved" in contract.approval_description(
+        approved.tool_call,
+        None,
+        approved.runtime,
+    )
+
+    rejected = _payload(contract.dispatch(changed))
+    assert rejected["error"]["code"] == "COMMIT_CONFLICT"
+    assert target.read_text(encoding="utf-8") == "before\n"
+
+    replay = _payload(contract.dispatch(approved))
     assert replay["error"]["code"] == "COMMIT_CONFLICT"
     assert target.read_text(encoding="utf-8") == "before\n"
 

@@ -567,12 +567,13 @@ class SnapshotFileToolContract:
         self._require_current(record, current)
         old_source = _normalize_line_endings(old_string, current)
         new_source = _normalize_line_endings(new_string, current)
-        matches = current.content.count(old_source)
-        if matches == 0:
+        start = current.content.find(old_source)
+        if start < 0:
             raise FileToolContractError("EXACT_MATCH_NOT_FOUND")
-        if matches != 1:
+        # str.count 只统计不重叠匹配；从首个起点的下一字符继续
+        # 搜索，才能把 `aaa` 中的两个 `aa` 正确判为歧义。
+        if current.content.find(old_source, start + 1) >= 0:
             raise FileToolContractError("AMBIGUOUS_MATCH")
-        start = current.content.index(old_source)
         start_line, end_line = _source_line_range(current.content, start, old_source)
         if not self._snapshot_store.has_seen(record, start_line, end_line):
             raise FileToolContractError("UNREAD_RANGE")
