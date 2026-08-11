@@ -146,6 +146,35 @@ test("active Run 时 work-mode.cycle 被拒绝（busy）", async () => {
   }
 })
 
+test("上下文压缩收敛期间 work-mode.cycle 被拒绝（busy）", async () => {
+  let finishCompact!: () => void
+  const compactResult = new Promise<{ compacted: true; context: { action: "manual_summary" } }>(resolve => {
+    finishCompact = () => resolve({ compacted: true, context: { action: "manual_summary" } })
+  })
+  const harness = makeHarness({ compactContextImpl: async () => compactResult })
+  try {
+    await harness.controller.dispatch({ type: "input.submit", value: "建立可压缩的 thread" })
+    const run = harness.runHandles.at(-1)!
+    harness.port.completeRun(run.threadId, run.runId)
+    await flush()
+
+    const compactDispatch = harness.controller.dispatch({ type: "command.execute", commandId: "context.compact" })
+    await flush()
+    const outcome = await harness.controller.dispatch({ type: "work-mode.cycle" })
+
+    expect(outcome).toEqual({ status: "rejected", code: "busy", message: expect.any(String) })
+    expect(harness.controller.getSnapshot().workMode).toBe("build")
+
+    finishCompact()
+    await compactDispatch
+    await harness.controller.dispatch({ type: "work-mode.cycle" })
+    expect(harness.controller.getSnapshot().workMode).toBe("compose")
+  } finally {
+    finishCompact?.()
+    await harness.controller.close()
+  }
+})
+
 test("compose.state 事件经 controller 折叠进 snapshot", async () => {
   const harness = makeHarness()
   try {

@@ -24,6 +24,7 @@ export class InteractiveControllerImpl implements InteractiveController {
   private connection: InteractiveConnectionState = { status: "open" }
   private confirmation: InteractiveConfirmation | null = null
   private closed = false
+  private compactInFlight = false
 
   // 九大 Feature 子模块实作
   private readonly catalogFeature = new CatalogFeature()
@@ -166,8 +167,8 @@ export class InteractiveControllerImpl implements InteractiveController {
         }
         return this.runFeature.cycleApprovalMode(this.featureContext)
       case "work-mode.cycle":
-        if (this.state.activeRun || this.hasPendingInteraction || this.state.activity.kind === "cancelling") {
-          return { status: "rejected", code: "busy", message: "任务运行中或存在待处理交互，暂不能切换工作模式" }
+        if (this.state.activeRun || this.hasPendingInteraction || this.state.activity.kind === "cancelling" || this.compactInFlight) {
+          return { status: "rejected", code: "busy", message: "任务运行中、上下文压缩中或存在待处理交互，暂不能切换工作模式" }
         }
         this.commit(current => setWorkMode(current, current.workMode === "build" ? "compose" : "build"))
         return { status: "accepted" }
@@ -247,11 +248,17 @@ export class InteractiveControllerImpl implements InteractiveController {
         await this.catalogFeature.refreshCatalog(result.target, this.featureContext, id => this.adoptThreadSelection(id))
         return { status: "accepted", effects: [{ type: "present", target: result.target, initialQuery: result.initialQuery }] }
       case "compact":
+        if (this.compactInFlight) {
+          return { status: "rejected", code: "busy", message: "上下文正在压缩，请等待当前操作完成" }
+        }
+        this.compactInFlight = true
         try {
           const compacted = await this.gateway.compactContext(result.threadId)
           this.commit(current => appendNotice(current, contextCompactNotice(compacted)))
         } catch (error) {
           this.commit(current => appendNotice(current, `上下文压缩失败：${error instanceof Error ? error.message : String(error)}`))
+        } finally {
+          this.compactInFlight = false
         }
         return { status: "accepted" }
       case "mcp":

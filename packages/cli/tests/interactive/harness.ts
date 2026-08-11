@@ -69,7 +69,9 @@ export function manualScheduler() {
 }
 
 /** 内存 port：记录调用、可注入 Run 事件与 Interaction。 */
-function createPort() {
+function createPort(options: {
+  compactContextImpl?: InteractiveAgentPort["compactContext"]
+} = {}) {
   const calls: string[] = []
   const runHandles: Array<{ threadId: string; runId: string }> = []
   let protocolErrorListener: ((error: Error) => void) | undefined
@@ -140,9 +142,10 @@ function createPort() {
       const run = runHandles.at(-1)!
       return { cancelled: true, run_id: run.runId }
     },
-    async compactContext() {
+    async compactContext(threadId) {
       calls.push("context.compact")
-      return { compacted: true, context: { action: "manual_summary" } }
+      return options.compactContextImpl?.(threadId)
+        ?? { compacted: true, context: { action: "manual_summary" } }
     },
     async configDetails() {
       calls.push("config.details")
@@ -353,8 +356,9 @@ export function makeHarness(options: {
   holdConfigDetails?: boolean
   scheduler?: InteractiveScheduler
   capabilities?: Capability[]
+  compactContextImpl?: InteractiveAgentPort["compactContext"]
 } = {}) {
-  const portState = createPort()
+  const portState = createPort({ compactContextImpl: options.compactContextImpl })
   const runtimeOverride: InteractiveRuntime = options.capabilities
     ? { ...runtime, capabilities: options.capabilities }
     : runtime
