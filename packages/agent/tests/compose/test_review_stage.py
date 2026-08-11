@@ -250,6 +250,9 @@ async def test_optional_findings_do_not_block_completion(tmp_path: Path) -> None
         [{"answers": {"question-1": ["approve"]}}],
     )
     assert events[-1].type == "run.completed"
+    summaries = [event.payload["text"] for event in events if event.type == "content.delta"]
+    assert len(summaries) == 1
+    assert "未解决风险：可以拆小函数；建议补注释" in summaries[0]
 
 
 async def test_fail_verdict_without_required_finding_never_completes(

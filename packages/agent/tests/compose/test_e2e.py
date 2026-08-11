@@ -225,6 +225,12 @@ async def test_e2e_happy_path_completes_with_single_terminal(tmp_path: Path) -> 
     revisions = [frame["revision"] for frame in frames]
     assert revisions == sorted(revisions) and revisions[-1] >= 5
     assert frames[-1]["status"] == "completed"
+    summaries = [event.payload["text"] for event in events if event.type == "content.delta"]
+    assert len(summaries) == 1
+    assert "改动文件：1" in summaries[0]
+    assert "验证：1/1 通过" in summaries[0]
+    assert "Review：需求 pass；代码 pass" in summaries[0]
+    assert "未解决风险：无" in summaries[0]
 
 
 async def test_e2e_decision_revise_and_verify_fix_journey(tmp_path: Path) -> None:

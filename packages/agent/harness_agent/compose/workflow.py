@@ -61,6 +61,7 @@ if TYPE_CHECKING:
 RUN_STARTED = EVENT_TYPE["RUN_STARTED"]
 RUN_PROGRESS = EVENT_TYPE["RUN_PROGRESS"]
 COMPOSE_STATE = EVENT_TYPE["COMPOSE_STATE"]
+CONTENT_DELTA = EVENT_TYPE["CONTENT_DELTA"]
 
 
 class ComposeWorkflowError(RuntimeError):
@@ -176,6 +177,9 @@ class ComposeWorkflow:
         self._feedback = ""
         self._failure_code = "COMPOSE_FAILED"
         self._failure_message = "Compose workflow failed"
+        self._changed_file_count: int | None = None
+        self._review_verdict: tuple[str, str] | None = None
+        self._unresolved_risks: tuple[str, ...] = ()
 
     async def run(
         self,
@@ -559,6 +563,18 @@ class ComposeWorkflow:
                 "COMPOSE_ARTIFACT_INVALID",
                 "failed reviewer verdict requires a Critical or Required finding",
             )
+        # 终态摘要只使用本轮实际 workspace snapshot 与已校验 Review report，
+        # 不依赖 Builder 自报路径，也不让 UI 再拼一套事实。
+        self._changed_file_count = sum(
+            1 for line in workspace_changes.status_summary.splitlines() if line.strip()
+        )
+        self._review_verdict = (
+            report.requirement_verdict,
+            report.code_verdict,
+        )
+        self._unresolved_risks = tuple(
+            finding.message[:160] for finding in report.findings[:5]
+        )
         report_row = make_artifact(
             ArtifactKind.REVIEW,
             run_id=run.ref.run_id,
@@ -1042,6 +1058,7 @@ class ComposeWorkflow:
             ),
         )
         await port.flush_transcript(run)
+        port.emit(run, CONTENT_DELTA, {"text": summary})
 
     def _final_summary_text(self, state: ComposeRunState) -> str:
         """生成终态摘要：阶段状态、任务/证据计数与评审结论，全部有界。"""
@@ -1055,8 +1072,20 @@ class ComposeWorkflow:
         passed_evidence = sum(1 for item in evidence if item["status"] == "passed")
         lines = [
             f"Compose {state.status.value}：{stage_summary}",
-            f"任务：{passed}/{len(tasks)} 通过；验证：{passed_evidence}/{len(evidence)} 通过",
+            (
+                f"改动文件：{self._changed_file_count if self._changed_file_count is not None else '未统计'}；"
+                f"任务：{passed}/{len(tasks)} 通过；验证：{passed_evidence}/{len(evidence)} 通过"
+            ),
         ]
+        if self._review_verdict is None:
+            lines.append("Review：未完成")
+        else:
+            requirement, code = self._review_verdict
+            lines.append(f"Review：需求 {requirement}；代码 {code}")
+        lines.append(
+            "未解决风险："
+            + ("；".join(self._unresolved_risks) if self._unresolved_risks else "无")
+        )
         if state.blocked_reason:
             lines.append(f"阻塞：{state.blocked_reason[:300]}")
         return "\n".join(lines)[:1_000]
