@@ -149,15 +149,26 @@ class ManagedVerificationPort:
                 backend,
                 "git status --short --untracked-files=all",
             )
-            diff = await self._execute_readonly_git(
+            staged_diff = await self._execute_readonly_git(
+                backend,
+                "git diff --cached --no-ext-diff --unified=3 -- .",
+            )
+            unstaged_diff = await self._execute_readonly_git(
                 backend,
                 "git diff --no-ext-diff --unified=3 -- .",
             )
+            diff_sections: list[str] = []
+            if staged_diff.strip():
+                diff_sections.append("## Staged changes\n" + staged_diff.strip())
+            if unstaged_diff.strip():
+                diff_sections.append("## Unstaged changes\n" + unstaged_diff.strip())
             return WorkspaceChangesSnapshot(
                 status_summary=_bounded_change_text(
                     status, MAX_WORKSPACE_STATUS_CHARS, "status"
                 ),
-                diff=_bounded_change_text(diff, MAX_WORKSPACE_DIFF_CHARS, "diff"),
+                diff=_bounded_change_text(
+                    "\n\n".join(diff_sections), MAX_WORKSPACE_DIFF_CHARS, "diff"
+                ),
             )
         finally:
             try:

@@ -201,10 +201,25 @@ class ComposeWorkflow:
         port.emit(run, RUN_PROGRESS, _progress_payload(run, "preparing"))
         self._emit_state(run, port, state)
         await self._store.save_run(state)
-        while not state.terminal:
-            if port.is_cancelled(run):
-                raise asyncio.CancelledError
-            state = await self._drive_stage(run, port, state)
+        try:
+            while not state.terminal:
+                if port.is_cancelled(run):
+                    raise asyncio.CancelledError
+                state = await self._drive_stage(run, port, state)
+        except asyncio.CancelledError:
+            # 外部取消也必须先发布/持久化唯一 cancelled projection，不能只让
+            # Coordinator 发 terminal event 而把 Compose 面板留在 running。
+            if not state.terminal:
+                state = await self._apply(run, port, state, ComposeEvent.CANCEL)
+            await self._record_final_summary(run, port, state)
+            raise
+        except ComposeWorkflowError:
+            # 阶段基础设施或 schema retry 耗尽可能在 handler 内直接抛错；
+            # 统一把当前阶段收敛为 failed，再交给 Host 映射稳定错误码。
+            if not state.terminal:
+                state = await self._apply(run, port, state, ComposeEvent.FAIL)
+            await self._record_final_summary(run, port, state)
+            raise
         await self._record_final_summary(run, port, state)
         return self._outcome(state)
 

@@ -275,6 +275,12 @@ async def test_fail_verdict_without_required_finding_never_completes(
     assert events[-1].payload["error"]["code"] == "COMPOSE_ARTIFACT_INVALID"
     assert stage_agent.calls.count("requirement-reviewer") == 2
     assert stage_agent.calls.count("code-reviewer") == 0
+    frames = _state_frames(events)
+    assert frames[-1]["stage"] == "review"
+    assert frames[-1]["status"] == "failed"
+    summaries = [event.payload["text"] for event in events if event.type == "content.delta"]
+    assert len(summaries) == 1
+    assert "Review：未完成" in summaries[0]
 
 
 async def test_required_finding_fixes_and_reloops_to_completion(tmp_path: Path) -> None:

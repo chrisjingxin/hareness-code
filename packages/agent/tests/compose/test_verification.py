@@ -590,7 +590,8 @@ async def test_managed_port_captures_bounded_real_workspace_changes(
     backend = _ScriptedBackend(
         [
             type("R", (), {"output": " M src/search.py\n?? src/new.py", "exit_code": 0})(),
-            type("R", (), {"output": "diff --git a/src/search.py b/src/search.py\n+real", "exit_code": 0})(),
+            type("R", (), {"output": "diff --git a/src/staged.py b/src/staged.py\n+staged", "exit_code": 0})(),
+            type("R", (), {"output": "diff --git a/src/search.py b/src/search.py\n+unstaged", "exit_code": 0})(),
         ]
     )
     lease = _FakeLease(backend, workspace_path=str(workspace))
@@ -605,9 +606,13 @@ async def test_managed_port_captures_bounded_real_workspace_changes(
     )
     snapshot = await port.capture_workspace_changes("fp-1")
     assert snapshot.status_summary == " M src/search.py\n?? src/new.py"
-    assert "+real" in snapshot.diff
+    assert "## Staged changes" in snapshot.diff
+    assert "+staged" in snapshot.diff
+    assert "## Unstaged changes" in snapshot.diff
+    assert "+unstaged" in snapshot.diff
     assert backend.commands == [
         "git status --short --untracked-files=all",
+        "git diff --cached --no-ext-diff --unified=3 -- .",
         "git diff --no-ext-diff --unified=3 -- .",
     ]
     assert lease.released is True

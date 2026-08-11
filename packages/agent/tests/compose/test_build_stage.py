@@ -404,3 +404,9 @@ async def test_cancel_during_build_produces_single_cancelled_terminal(tmp_path: 
     await persistence.close()
     assert [event.type for event in events].count("run.cancelled") == 1
     assert events[-1].type == "run.cancelled"
+    frames = [event.payload for event in events if event.type == "compose.state"]
+    assert frames[-1]["stage"] == "build"
+    assert frames[-1]["status"] == "cancelled"
+    summaries = [event.payload["text"] for event in events if event.type == "content.delta"]
+    assert len(summaries) == 1
+    assert "Compose cancelled" in summaries[0]
