@@ -103,7 +103,7 @@ function createPort() {
     setThreadSelection: (next: string | null) => void
     setSkillsList: (next: { skills: ReturnType<typeof skill>[] }) => void
     setSkillEnabledImpl: (impl: (skillId: string, enabled: boolean) => Promise<Record<string, never>>) => void
-    lastRunSelection: () => { message: string; threadId: string; runId: string; modelSelection?: { primary_profile: string }; requestedSkill?: { id: string; args?: string } } | undefined
+    lastRunSelection: () => { message: string; threadId: string; runId: string; mode: "build" | "compose"; modelSelection?: { primary_profile: string }; requestedSkill?: { id: string; args?: string } } | undefined
   } = {
     onProtocolError(listener) {
       protocolErrorListener = listener
@@ -242,6 +242,7 @@ function createPort() {
         message: runStates.get(keyOf(run))?.input.message ?? "",
         threadId: run.threadId,
         runId: run.runId,
+        mode: runStates.get(keyOf(run))?.input.mode ?? "build",
         modelSelection: runSelection(run),
         requestedSkill: runSkill(run),
         approvalMode: runStates.get(keyOf(run))?.input.approvalMode,

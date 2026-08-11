@@ -8,7 +8,7 @@ import type { AgentGateway, Clock, IdGenerator, IntentOutcome, InteractiveConfir
 import { createFallbackNoopGateway } from "./ports"
 import { cryptoIdGenerator, systemClock, systemScheduler } from "../infrastructure"
 import type { InteractiveRuntime } from "./runtime"
-import { appendNotice, clearThread, createInitialState, type InteractiveState } from "./state"
+import { appendNotice, clearThread, createInitialState, setWorkMode, type InteractiveState } from "./state"
 export class InteractiveControllerImpl implements InteractiveController {
   private readonly gateway: AgentGateway
   private readonly clock: Clock
@@ -165,6 +165,12 @@ export class InteractiveControllerImpl implements InteractiveController {
           return { status: "rejected", code: "busy", message: "任务运行中或存在待处理交互，暂不能切换审批模式" }
         }
         return this.runFeature.cycleApprovalMode(this.featureContext)
+      case "work-mode.cycle":
+        if (this.state.activeRun || this.hasPendingInteraction || this.state.activity.kind === "cancelling") {
+          return { status: "rejected", code: "busy", message: "任务运行中或存在待处理交互，暂不能切换工作模式" }
+        }
+        this.commit(current => setWorkMode(current, current.workMode === "build" ? "compose" : "build"))
+        return { status: "accepted" }
       case "run.cancel":
         return this.runFeature.cancelActiveRun(this.featureContext, () => this.interactionFeature.abandonPendingInteraction(this.featureContext))
 
@@ -198,8 +204,8 @@ export class InteractiveControllerImpl implements InteractiveController {
 
     const message = resolution.kind === "escaped" ? resolution.message : value
     return this.runFeature.startRun(message, this.featureContext, {
-      // WP8 引入 Work Mode 状态后改读共享选择；当前 UI 唯一可用的工作模式是 Build。
-      mode: "build",
+      // 下一次 Run 的工作模式由共享状态决定，受理后冻结。
+      mode: this.state.workMode,
       requestedModelProfileId: this.modelFeature.requestedModelProfileId,
       armedSkill: this.skillFeature.armedSkill,
       onEvent: event => this.timelineFeature.processAgentEvent(event, this.featureContext),
@@ -329,6 +335,8 @@ export class InteractiveControllerImpl implements InteractiveController {
       catalogs: { threads: publicCatalog(this.catalogFeature.state.threads), models: publicCatalog(this.catalogFeature.state.models), skills: publicCatalog(this.catalogFeature.state.skills), mcp: publicCatalog(this.catalogFeature.state.mcp) },
       commands: this.commandFeature.buildCommandItems(this.catalogFeature.state.skills.items, this.featureContext, this.hasPendingInteraction),
       selection: { requestedModelProfileId: this.modelFeature.requestedModelProfileId, actualModel: this.modelFeature.actualModelProfile ?? null, armedSkill: this.skillFeature.armedSkill ?? null },
+      workMode: this.state.workMode,
+      composeState: this.state.composeState,
     }
   }
 }

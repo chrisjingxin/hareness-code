@@ -612,6 +612,8 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
       runtime: view.runtime.runtime,
       connection: view.runtime.connection,
       selection: view.runtime.selection,
+      workMode: view.runtime.workMode,
+      composeState: view.runtime.composeState,
     }
   }
 

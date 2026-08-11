@@ -81,6 +81,8 @@ export type RuntimeView = {
   readonly runtime: InteractiveRuntime
   readonly connection: InteractiveConnectionState
   readonly selection: InteractiveSnapshot["selection"]
+  readonly workMode: InteractiveSnapshot["workMode"]
+  readonly composeState: InteractiveSnapshot["composeState"]
   readonly availability: {
     readonly canCancelRun: boolean
     readonly canToggleSkill: boolean

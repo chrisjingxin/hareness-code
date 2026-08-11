@@ -80,6 +80,8 @@ export function selectRuntimeView(snapshot: InteractiveSnapshot): RuntimeView {
     runtime: snapshot.runtime,
     connection: snapshot.connection,
     selection: snapshot.selection,
+    workMode: snapshot.workMode,
+    composeState: snapshot.composeState,
     availability: {
       canCancelRun: availability.canCancelRun,
       canToggleSkill: availability.canToggleSkill,

@@ -2,7 +2,7 @@
 
 import { expect, test } from "bun:test"
 import type { EventEnvelope, InteractionRequestEnvelope } from "@za38/protocol"
-import { applyAgentEvent, applyInteractionRequest, clearPendingInteraction, clearThread, createInitialState, isHomeState, restoreThread, startRun, type InteractiveState } from "../../src/interactive/state"
+import { applyAgentEvent, applyInteractionRequest, applyComposeState, clearPendingInteraction, clearThread, createInitialState, isHomeState, restoreThread, setWorkMode, startRun, type InteractiveState } from "../../src/interactive/state"
 
 const run = { threadId: "thread-1", runId: "run-1" }
 
@@ -173,3 +173,106 @@ function request(type: "approval" | "question", sequence: number, payload: Recor
 function messages(state: InteractiveState) { return state.timeline.flatMap(item => item.type === "message" ? [item.message] : []) }
 function tools(state: InteractiveState) { return state.timeline.flatMap(item => item.type === "tool" ? [item.tool] : []) }
 function interactions(state: InteractiveState) { return state.timeline.flatMap(item => item.type === "interaction" ? [item.interaction] : []) }
+
+
+function composeEvent(sequence: number, payload: Record<string, unknown>) {
+  return event("compose.state", sequence, payload)
+}
+
+test("workMode 默认 build，可在空闲时切换并跨 Run 保留", () => {
+  const initial = createInitialState()
+  expect(initial.workMode).toBe("build")
+  const switched = setWorkMode(initial, "compose")
+  expect(switched.workMode).toBe("compose")
+  // 相同模式幂等
+  expect(setWorkMode(switched, "compose")).toBe(switched)
+  // startRun 保留选择（Run 受理后冻结）
+  const started = startRun(switched, run, "请求")
+  expect(started.workMode).toBe("compose")
+})
+
+test("compose.state 折叠为 projection，waiting_user 进入等待交互", () => {
+  let state = startRun(createInitialState(), run, "实现搜索")
+  const projection = {
+    revision: 2,
+    stage: "plan",
+    status: "waiting_user",
+    stages: [
+      { id: "understand", status: "passed", attempts: 1 },
+      { id: "plan", status: "passed", attempts: 1 },
+      { id: "build", status: "pending", attempts: 0 },
+      { id: "verify", status: "pending", attempts: 0 },
+      { id: "review", status: "pending", attempts: 0 },
+    ],
+    tasks: [{ id: "task-1", title: "实现搜索", status: "pending" }],
+    evidence: [],
+    blocked_reason: null,
+  }
+  state = applyAgentEvent(state, composeEvent(1, projection))
+  expect(state.composeState).toEqual({
+    revision: 2,
+    stage: "plan",
+    status: "waiting_user",
+    stages: projection.stages,
+    tasks: projection.tasks,
+    evidence: projection.evidence,
+    blockedReason: null,
+  })
+  expect(state.activity.kind).toBe("waiting-interaction")
+  expect(state.composeState?.revision).toBe(2)
+})
+
+test("compose.state 迟到帧（revision 不递增）被拒绝", () => {
+  let state = startRun(createInitialState(), run, "实现搜索")
+  const base = {
+    revision: 1,
+    stage: "understand",
+    status: "running",
+    stages: [
+      { id: "understand", status: "running", attempts: 1 },
+      { id: "plan", status: "pending", attempts: 0 },
+      { id: "build", status: "pending", attempts: 0 },
+      { id: "verify", status: "pending", attempts: 0 },
+      { id: "review", status: "pending", attempts: 0 },
+    ],
+    tasks: [],
+    evidence: [],
+    blocked_reason: null,
+  }
+  state = applyAgentEvent(state, composeEvent(1, base))
+  const stale = applyAgentEvent(state, composeEvent(2, base))
+  expect(stale.composeState?.revision).toBe(1)
+})
+
+test("畸形 compose.state 被拒绝且不改变状态", () => {
+  const state = startRun(createInitialState(), run, "实现搜索")
+  const malformed = applyAgentEvent(state, composeEvent(1, { revision: -1, stage: "deploy", status: "running", stages: [], tasks: [], evidence: [] }))
+  expect(malformed.composeState).toBeNull()
+  const nonObject = applyComposeState(state, "not-an-object")
+  expect(nonObject.composeState).toBeNull()
+})
+
+test("终态清理 compose projection", () => {
+  let state = startRun(createInitialState(), run, "实现搜索")
+  state = applyAgentEvent(state, composeEvent(1, {
+    revision: 1, stage: "understand", status: "running",
+    stages: [
+      { id: "understand", status: "running", attempts: 1 },
+      { id: "plan", status: "pending", attempts: 0 },
+      { id: "build", status: "pending", attempts: 0 },
+      { id: "verify", status: "pending", attempts: 0 },
+      { id: "review", status: "pending", attempts: 0 },
+    ],
+    tasks: [], evidence: [], blocked_reason: null,
+  }))
+  expect(state.composeState).not.toBeNull()
+  state = applyAgentEvent(state, event("run.completed", 2, { duration_ms: 10, usage: { input_tokens: 1, output_tokens: 1 } }))
+  expect(state.composeState).toBeNull()
+})
+
+test("restoreThread 保留会话级 workMode 并清空 compose projection", () => {
+  const state = setWorkMode(createInitialState(), "compose")
+  const restored = restoreThread("thread-2", [{ kind: "user", content: "历史" }], state.workMode)
+  expect(restored.workMode).toBe("compose")
+  expect(restored.composeState).toBeNull()
+})

@@ -114,3 +114,66 @@ test("connection close 禁止新 Run 并收敛 Interaction", async () => {
   }
 })
 
+
+
+test("work-mode.cycle 空闲时切换 Build/Compose 并传给下一次 Run", async () => {
+  const harness = makeHarness()
+  try {
+    expect(harness.controller.getSnapshot().workMode).toBe("build")
+    await harness.controller.dispatch({ type: "work-mode.cycle" })
+    expect(harness.controller.getSnapshot().workMode).toBe("compose")
+    await harness.controller.dispatch({ type: "work-mode.cycle" })
+    expect(harness.controller.getSnapshot().workMode).toBe("build")
+
+    await harness.controller.dispatch({ type: "work-mode.cycle" })
+    await harness.controller.dispatch({ type: "input.submit", value: "实现搜索" })
+    const selection = harness.port.lastRunSelection()
+    expect(selection).toMatchObject({ message: "实现搜索", mode: "compose" })
+  } finally {
+    await harness.controller.close()
+  }
+})
+
+test("active Run 时 work-mode.cycle 被拒绝（busy）", async () => {
+  const harness = makeHarness()
+  try {
+    await harness.controller.dispatch({ type: "input.submit", value: "第一次" })
+    const outcome = await harness.controller.dispatch({ type: "work-mode.cycle" })
+    expect(outcome).toEqual({ status: "rejected", code: "busy", message: expect.any(String) })
+    expect(harness.controller.getSnapshot().workMode).toBe("build")
+  } finally {
+    await harness.controller.close()
+  }
+})
+
+test("compose.state 事件经 controller 折叠进 snapshot", async () => {
+  const harness = makeHarness()
+  try {
+    await harness.controller.dispatch({ type: "input.submit", value: "实现搜索" })
+    const run = harness.runHandles.at(-1)!
+    harness.port.emitEvent(terminalEvent(EventType.COMPOSE_STATE, run.threadId, run.runId, 1, {
+      revision: 1,
+      stage: "understand",
+      status: "running",
+      stages: [
+        { id: "understand", status: "running", attempts: 1 },
+        { id: "plan", status: "pending", attempts: 0 },
+        { id: "build", status: "pending", attempts: 0 },
+        { id: "verify", status: "pending", attempts: 0 },
+        { id: "review", status: "pending", attempts: 0 },
+      ],
+      tasks: [],
+      evidence: [],
+      blocked_reason: null,
+    }))
+    await flush()
+    const snapshot = harness.controller.getSnapshot()
+    expect(snapshot.composeState?.stage).toBe("understand")
+    expect(snapshot.composeState?.revision).toBe(1)
+    harness.port.completeRun(run.threadId, run.runId)
+    await flush()
+    expect(harness.controller.getSnapshot().composeState).toBeNull()
+  } finally {
+    await harness.controller.close()
+  }
+})

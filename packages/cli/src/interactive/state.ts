@@ -230,13 +230,20 @@ export function appendNotice(state: InteractiveState, message: string, idGenerat
   }
 }
 
-/** 清空当前 thread 并返回沉浸式首页初始状态。 */
+/** 清空当前 thread 并返回沉浸式首页初始状态；Work Mode 是会话级选择。 */
 export function clearThread(state: InteractiveState): InteractiveState {
-  return createInitialState(null)
+  return createInitialState(null, state.workMode)
 }
 
-/** 原子替换当前 thread 的历史，清除旧运行、交互和 sequence。 */
-export function restoreThread(threadId: string, messages: readonly RestoredThreadMessage[]): InteractiveState {
+/**
+ * 原子替换当前 thread 的历史，清除旧运行、交互和 sequence；
+ * workMode 是会话级选择，跨 thread 切换保留。
+ */
+export function restoreThread(
+  threadId: string,
+  messages: readonly RestoredThreadMessage[],
+  workMode: WorkMode = "build",
+): InteractiveState {
   const restoredRunId = `restored-${threadId}`
   const timeline: TimelineItem[] = messages.map((message, index) => {
     const id = `restored-${index + 1}`
@@ -272,6 +279,8 @@ export function restoreThread(threadId: string, messages: readonly RestoredThrea
     activity: { kind: "idle" },
     runProgress: null,
     sequences: {},
+    workMode,
+    composeState: null,
   }
 }
 
@@ -360,6 +369,7 @@ export function markRunFailed(state: InteractiveState, runId: string, message: s
     activeRun: null,
     activity: { kind: "failed" },
     runProgress: null,
+    composeState: null,
     lastRun: { runId, outcome: "failed" },
     timeline: freezeReasoning(finishAssistant(settlePendingInteractions(state.timeline, runId), runId, `error: ${message}`, idGenerator), runId),
   }
@@ -463,6 +473,9 @@ export function applyAgentEvent(state: InteractiveState, event: EventEnvelope, i
         timeline: appendNotice(next, contextNotice(payload), idGenerator).timeline,
       }
     }
+    case EventType.COMPOSE_STATE: {
+      return applyComposeState(next, event.payload)
+    }
     case EventType.INTERACTION_RESOLVED: {
       const payload = event.payload
       return {
@@ -485,6 +498,7 @@ export function applyAgentEvent(state: InteractiveState, event: EventEnvelope, i
           usage: usageValue(payload.usage),
           context: contextValue(payload.context),
         },
+        composeState: null,
         timeline: finishAssistant(settlePendingInteractions(freezeReasoning(next.timeline, runId), runId), runId, "", idGenerator),
       }
     }
@@ -496,6 +510,7 @@ export function applyAgentEvent(state: InteractiveState, event: EventEnvelope, i
         activity: { kind: "cancelled" },
         runProgress: null,
         lastRun: { runId, outcome: "cancelled" },
+        composeState: null,
         timeline: freezeReasoning(finishAssistant(settlePendingInteractions(next.timeline, runId), runId, `cancelled: ${stringValue(payload.reason, "user cancelled")}`, idGenerator), runId),
       }
     }
