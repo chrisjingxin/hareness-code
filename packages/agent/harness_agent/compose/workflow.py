@@ -372,6 +372,8 @@ class ComposeWorkflow:
         )
         items: list[EvidenceItem] = []
         failed_command = ""
+        evidence_anchor_id = ""
+        source_execution_id = f"verify-{state.revision}"
         for index, command in enumerate(commands):
             if port.is_cancelled(run):
                 raise asyncio.CancelledError
@@ -407,24 +409,24 @@ class ComposeWorkflow:
                     "truncated": evidence.truncated,
                 }
             )
-            await self._store.save_artifact(
-                make_artifact(
-                    ArtifactKind.VERIFICATION,
-                    run_id=run.ref.run_id,
-                    source_execution_id=f"verify-{state.revision}",
-                    created_at_ms=self._services.now_ms(),
-                    payload={
-                        "command": evidence.command,
-                        "working_dir": evidence.working_dir,
-                        "started_at_ms": evidence.started_at_ms,
-                        "finished_at_ms": evidence.finished_at_ms,
-                        "exit_code": evidence.exit_code,
-                        "output_digest": evidence.output_digest,
-                        "output_summary": evidence.output_summary,
-                        "truncated": evidence.truncated,
-                    },
-                )
+            evidence_row = make_artifact(
+                ArtifactKind.VERIFICATION,
+                run_id=run.ref.run_id,
+                source_execution_id=source_execution_id,
+                created_at_ms=self._services.now_ms(),
+                payload={
+                    "command": evidence.command,
+                    "working_dir": evidence.working_dir,
+                    "started_at_ms": evidence.started_at_ms,
+                    "finished_at_ms": evidence.finished_at_ms,
+                    "exit_code": evidence.exit_code,
+                    "output_digest": evidence.output_digest,
+                    "output_summary": evidence.output_summary,
+                    "truncated": evidence.truncated,
+                },
             )
+            await self._store.save_artifact(evidence_row)
+            evidence_anchor_id = evidence_row.artifact_id
             passed = evidence.exit_code == 0
             items.append(
                 EvidenceItem(
@@ -441,7 +443,7 @@ class ComposeWorkflow:
                 port,
                 state,
                 ComposeEvent.VERIFY_PASS,
-                evidence_id=f"verify-{state.revision}",
+                evidence_id=evidence_anchor_id,
                 evidence=tuple(items),
             )
         # 失败创建来源明确的 fix task；不能修改原 acceptance。
@@ -499,15 +501,36 @@ class ComposeWorkflow:
         understanding = await self._load_understanding(run, state)
         plan = await self._load_plan(run, state)
         task_results = await self._load_task_results(run)
-        evidence = await self._load_verification_evidence(run)
+        evidence = await self._load_verification_evidence(run, state)
+        verification = self._services.verification
+        if verification is None:
+            raise ComposeWorkflowError(
+                "COMPOSE_REVIEW_INPUT_UNAVAILABLE",
+                "workspace change capture unavailable",
+            )
+        profile = run.preparation.agent_engine_profile
+        resource_key = (
+            profile.sandbox_config_fingerprint
+            if profile is not None
+            else "compose-default"
+        )
+        try:
+            workspace_changes = await verification.capture_workspace_changes(
+                resource_key
+            )
+        except VerificationError as exc:
+            raise ComposeWorkflowError(
+                "COMPOSE_REVIEW_INPUT_UNAVAILABLE",
+                exc.code,
+            ) from exc
 
         requirement = await self._run_reviewer(
             run, port, state, "requirement-reviewer", understanding, plan,
-            task_results, evidence,
+            task_results, evidence, workspace_changes,
         )
         code = await self._run_reviewer(
             run, port, state, "code-reviewer", understanding, plan,
-            task_results, evidence,
+            task_results, evidence, workspace_changes,
         )
         report_payload = {
             "requirement_verdict": requirement["verdict"],
@@ -597,6 +620,7 @@ class ComposeWorkflow:
         plan: PlanArtifact,
         task_results: tuple[dict[str, object], ...],
         evidence: tuple[dict[str, object], ...],
+        workspace_changes: Any,
     ) -> dict[str, object]:
         """运行一个 Reviewer；schema invalid 只结构化重试一次。"""
         axis = "requirement" if stage == "requirement-reviewer" else "code"
@@ -613,6 +637,8 @@ class ComposeWorkflow:
                 plan=plan,
                 task_results=task_results,
                 evidence=evidence,
+                workspace_status=workspace_changes.status_summary,
+                workspace_diff=workspace_changes.diff,
                 workspace_root=self._services.workspace_root,
             )
             try:
@@ -691,13 +717,28 @@ class ComposeWorkflow:
         return tuple(results)
 
     async def _load_verification_evidence(
-        self, run: Any
+        self, run: Any, state: ComposeRunState
     ) -> tuple[dict[str, object], ...]:
-        """读取全部 Verification artifact 摘要，供 Reviewer 核对证据。"""
+        """沿当前状态的 anchor 只读取本轮 Verification evidence。"""
+        anchor_id = state.verification_evidence_id
+        if not anchor_id:
+            raise ComposeWorkflowError(
+                "COMPOSE_WORKFLOW_STATE_INVALID",
+                "verification evidence anchor missing",
+            )
+        anchor = await self._store.load_artifact(run.ref.run_id, anchor_id)
+        if anchor is None or anchor.kind is not ArtifactKind.VERIFICATION:
+            raise ComposeWorkflowError(
+                "COMPOSE_WORKFLOW_STATE_INVALID",
+                "verification evidence anchor unavailable",
+            )
         artifacts = await self._store.list_artifacts(run.ref.run_id)
         evidence: list[dict[str, object]] = []
         for row in artifacts:
-            if row.kind is not ArtifactKind.VERIFICATION:
+            if (
+                row.kind is not ArtifactKind.VERIFICATION
+                or row.source_execution_id != anchor.source_execution_id
+            ):
                 continue
             payload = dict(row.payload)
             evidence.append(

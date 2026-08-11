@@ -138,6 +138,8 @@ def build_review_pack(
     plan: PlanArtifact,
     task_results: tuple[Mapping[str, object], ...],
     evidence: tuple[Mapping[str, object], ...],
+    workspace_status: str,
+    workspace_diff: str,
     workspace_root: str = "",
 ) -> ContextPack:
     """构造 Review 双轴之一的有界输入；只含 spec/diff/evidence 摘要。"""
@@ -164,6 +166,14 @@ def build_review_pack(
                 + f"；证据：{str(result.get('focused_test_evidence', ''))[:200]}"
             )
         sections.append("## Diff 摘要\n" + "\n".join(result_lines))
+    sections.append(
+        "## 真实工作区状态\n"
+        + _bounded(workspace_status or "clean", "workspace_status")
+    )
+    sections.append(
+        "## 真实 Git diff\n"
+        + _bounded(workspace_diff or "无 tracked diff", "workspace_diff")
+    )
     if evidence:
         evidence_lines = [
             f"- {item.get('command')} → exit {item.get('exit_code')} digest {str(item.get('output_digest', ''))[:16]}"

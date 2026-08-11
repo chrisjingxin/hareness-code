@@ -18,6 +18,7 @@ from harness_agent.compose.verification import (
     ManagedVerificationPort,
     VerificationError,
     VerificationRequest,
+    WorkspaceChangesSnapshot,
 )
 from harness_agent.compose.workflow import ComposeServices
 from harness_agent.host.run_coordinator import (
@@ -120,6 +121,14 @@ class _FakeVerification:
             raise item
         return item
 
+    async def capture_workspace_changes(
+        self, _resource_key: str
+    ) -> WorkspaceChangesSnapshot:
+        return WorkspaceChangesSnapshot(
+            status_summary=" M src/search.py",
+            diff="diff --git a/src/search.py b/src/search.py\n+change",
+        )
+
 
 class _ScriptedInteraction:
     def __init__(self, responses: list[dict[str, Any]]) -> None:
@@ -189,9 +198,16 @@ async def _run_compose(
         ConnectionRef("owner"),
     )
     events = [event async for event in execution.events]
+    store = persistence.compose_artifact_store()
+    stored_state = await store.load_run("run-1")
+    anchor = (
+        await store.load_artifact("run-1", stored_state.verification_evidence_id)
+        if stored_state is not None and stored_state.verification_evidence_id
+        else None
+    )
     await coordinator.close()
     await persistence.close()
-    return events, stage_agent, verification, interactions
+    return events, stage_agent, verification, interactions, stored_state, anchor
 
 
 def _state_frames(events) -> list[dict[str, Any]]:
@@ -200,7 +216,7 @@ def _state_frames(events) -> list[dict[str, Any]]:
 
 async def test_verify_pass_reaches_review_boundary_with_evidence(tmp_path: Path) -> None:
     """全部命令 fresh pass 后进入 Review；evidence 进入 projection 并完成。"""
-    events, stage_agent, verification, interactions = await _run_compose(
+    events, stage_agent, verification, interactions, stored_state, anchor = await _run_compose(
         tmp_path,
         [
             _understanding(), _plan(), _task_result(task_id="task-1"),
@@ -218,11 +234,15 @@ async def test_verify_pass_reaches_review_boundary_with_evidence(tmp_path: Path)
     assert [request.command for request in verification.requests] == [
         "pytest -q tests/test_search.py"
     ]
+    assert stored_state is not None
+    assert anchor is not None
+    assert anchor.artifact_id == stored_state.verification_evidence_id
+    assert anchor.kind.value == "verification"
 
 
 async def test_verify_fail_creates_fix_task_and_reloops(tmp_path: Path) -> None:
     """验证失败生成来源明确的 fix task，经 Build 修复后重新 Verify。"""
-    events, stage_agent, verification, interactions = await _run_compose(
+    events, stage_agent, verification, interactions, stored_state, anchor = await _run_compose(
         tmp_path,
         [
             _understanding(),
@@ -244,11 +264,19 @@ async def test_verify_fail_creates_fix_task_and_reloops(tmp_path: Path) -> None:
     assert [frame["status"] for frame in frames].count("waiting_user") == 1
     # 只执行了一个 fix 轮，双轴 Review 后完成。
     assert events[-1].type == "run.completed"
+    reviewer_packs = [
+        task
+        for stage, task in zip(stage_agent.calls, stage_agent.tasks, strict=True)
+        if stage in {"requirement-reviewer", "code-reviewer"}
+    ]
+    assert reviewer_packs
+    assert all("exit 1" not in pack for pack in reviewer_packs)
+    assert all(pack.count("exit 0") == 1 for pack in reviewer_packs)
 
 
 async def test_verify_fix_budget_exhausted_blocks(tmp_path: Path) -> None:
     """Verify 两轮 fix 后仍失败进入 blocked，保留失败 evidence。"""
-    events, stage_agent, verification, interactions = await _run_compose(
+    events, stage_agent, verification, interactions, stored_state, anchor = await _run_compose(
         tmp_path,
         [
             _understanding(),
@@ -276,7 +304,7 @@ async def test_verify_fix_budget_exhausted_blocks(tmp_path: Path) -> None:
 
 async def test_verify_policy_denied_blocks_without_fix_loop(tmp_path: Path) -> None:
     """策略拒绝/用户拒绝的验证命令不可修复，直接 blocked。"""
-    events, stage_agent, verification, interactions = await _run_compose(
+    events, stage_agent, verification, interactions, stored_state, anchor = await _run_compose(
         tmp_path,
         [_understanding(), _plan(), _task_result(task_id="task-1")],
         [VerificationError("POLICY_DENIED", "denied")],
@@ -305,6 +333,16 @@ class _FakeBackend:
         return self.response
 
 
+class _ScriptedBackend:
+    def __init__(self, responses: list[Any]) -> None:
+        self.responses = list(responses)
+        self.commands: list[str] = []
+
+    def execute(self, command: str, *, timeout: int | None = None):
+        self.commands.append(command)
+        return self.responses.pop(0)
+
+
 class _FakeLease:
     def __init__(self, backend: Any, workspace_path: str = "packages/agent") -> None:
         self.value = type("Context", (), {"backend": backend, "workspace_path": workspace_path})()
@@ -331,8 +369,16 @@ class _FailingPool:
 
 class _FakeLock:
     def __init__(self) -> None:
+        self.read_count = 0
+        self.read_release_count = 0
         self.write_count = 0
         self.release_count = 0
+
+    async def acquire_read(self) -> None:
+        self.read_count += 1
+
+    async def release_read(self) -> None:
+        self.read_release_count += 1
 
     async def acquire_write(self) -> None:
         self.write_count += 1
@@ -532,3 +578,36 @@ async def test_managed_port_releases_write_lock_when_resource_acquire_fails() ->
         )
     assert lock.write_count == 1
     assert lock.release_count == 1
+
+
+@pytest.mark.asyncio
+async def test_managed_port_captures_bounded_real_workspace_changes(
+    tmp_path: Path,
+) -> None:
+    """Reviewer 的变更输入来自 backend 的 Git 状态与 diff，不依赖 Builder 自报。"""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    backend = _ScriptedBackend(
+        [
+            type("R", (), {"output": " M src/search.py\n?? src/new.py", "exit_code": 0})(),
+            type("R", (), {"output": "diff --git a/src/search.py b/src/search.py\n+real", "exit_code": 0})(),
+        ]
+    )
+    lease = _FakeLease(backend, workspace_path=str(workspace))
+    lock = _FakeLock()
+    port = ManagedVerificationPort(
+        pool=_FakePool(lease),  # type: ignore[arg-type]
+        settings=type("S", (), {"sandbox_enabled": False})(),  # type: ignore[arg-type]
+        workspace=workspace,
+        rules_provider=lambda: [],
+        rwlock=lock,
+        now_ms=lambda: 7,
+    )
+    snapshot = await port.capture_workspace_changes("fp-1")
+    assert snapshot.status_summary == " M src/search.py\n?? src/new.py"
+    assert "+real" in snapshot.diff
+    assert backend.commands == [
+        "git status --short --untracked-files=all",
+        "git diff --no-ext-diff --unified=3 -- .",
+    ]
+    assert lease.released is True

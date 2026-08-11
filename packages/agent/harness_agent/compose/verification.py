@@ -21,6 +21,8 @@ if TYPE_CHECKING:
 
 DEFAULT_VERIFY_TIMEOUT_SECONDS = 180.0
 MAX_OUTPUT_SUMMARY_CHARS = 2_000
+MAX_WORKSPACE_STATUS_CHARS = 8_000
+MAX_WORKSPACE_DIFF_CHARS = 20_000
 TIMEOUT_EXIT_CODE = 124
 
 _SECRET_PATTERNS = (
@@ -79,10 +81,22 @@ class VerificationRequest:
             raise ValueError("VERIFICATION_TIMEOUT_INVALID")
 
 
+@dataclass(frozen=True, slots=True)
+class WorkspaceChangesSnapshot:
+    """Review 使用的真实工作区 Git 状态与有界 diff。"""
+
+    status_summary: str
+    diff: str
+
+
 class VerificationPort(Protocol):
-    """执行一条有界验证命令并返回 fresh evidence 的 seam。"""
+    """通过 canonical backend 生成验证证据与只读工作区变更快照。"""
 
     async def run(self, request: VerificationRequest) -> VerificationEvidence: ...
+
+    async def capture_workspace_changes(
+        self, resource_key: str
+    ) -> WorkspaceChangesSnapshot: ...
 
 
 class ManagedVerificationPort:
@@ -109,6 +123,67 @@ class ManagedVerificationPort:
         self._rules_provider = rules_provider
         self._rwlock = rwlock
         self._now_ms = now_ms
+
+    async def capture_workspace_changes(
+        self, resource_key: str
+    ) -> WorkspaceChangesSnapshot:
+        """经 canonical backend 和 Host 读锁捕获真实 Git 状态与 diff。"""
+        if not resource_key:
+            raise ValueError("VERIFICATION_RESOURCE_KEY_INVALID")
+        await self._rwlock.acquire_read()
+        lease = None
+        try:
+            try:
+                lease = await self._pool.acquire(
+                    resource_key,
+                    self._settings,
+                    self._workspace,
+                )
+            except Exception as exc:
+                raise VerificationError(
+                    "REVIEW_DIFF_UNAVAILABLE",
+                    f"execution resource unavailable: {type(exc).__name__}",
+                ) from exc
+            backend = lease.value.backend
+            status = await self._execute_readonly_git(
+                backend,
+                "git status --short --untracked-files=all",
+            )
+            diff = await self._execute_readonly_git(
+                backend,
+                "git diff --no-ext-diff --unified=3 -- .",
+            )
+            return WorkspaceChangesSnapshot(
+                status_summary=_bounded_change_text(
+                    status, MAX_WORKSPACE_STATUS_CHARS, "status"
+                ),
+                diff=_bounded_change_text(diff, MAX_WORKSPACE_DIFF_CHARS, "diff"),
+            )
+        finally:
+            try:
+                if lease is not None:
+                    await lease.release()
+            finally:
+                await self._rwlock.release_read()
+
+    async def _execute_readonly_git(self, backend: Any, command: str) -> str:
+        """执行固定只读 Git 命令；失败时不向 Reviewer 提供伪造空 diff。"""
+        try:
+            response = await asyncio.wait_for(
+                asyncio.to_thread(backend.execute, command, timeout=30),
+                timeout=60.0,
+            )
+        except Exception as exc:
+            raise VerificationError(
+                "REVIEW_DIFF_UNAVAILABLE",
+                f"git inspection failed: {type(exc).__name__}",
+            ) from exc
+        if response.exit_code != 0:
+            raise VerificationError(
+                "REVIEW_DIFF_UNAVAILABLE",
+                "git inspection returned a non-zero exit code",
+            )
+        return str(response.output or "")
 
     async def run(self, request: VerificationRequest) -> VerificationEvidence:
         """执行一条命令；所有路径都经过既有安全边界并返回 fresh evidence。"""
@@ -230,3 +305,10 @@ class ManagedVerificationPort:
             output_summary=summary,
             truncated=truncated,
         )
+
+
+def _bounded_change_text(text: str, limit: int, label: str) -> str:
+    """限制 Review 变更输入大小，并显式标记截断。"""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"\n[{label} 已按上限截断]"

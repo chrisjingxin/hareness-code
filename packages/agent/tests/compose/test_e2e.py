@@ -14,7 +14,10 @@ import pytest
 
 from harness_agent.compose.models import VerificationEvidence
 from harness_agent.compose.stage_agents import StageRequest, StageResult
-from harness_agent.compose.verification import VerificationRequest
+from harness_agent.compose.verification import (
+    VerificationRequest,
+    WorkspaceChangesSnapshot,
+)
 from harness_agent.compose.workflow import ComposeServices
 from harness_agent.host.run_coordinator import (
     ConnectionRef,
@@ -111,6 +114,14 @@ class _FakeVerification:
 
     async def run(self, request: VerificationRequest) -> VerificationEvidence:
         return self.script.pop(0)
+
+    async def capture_workspace_changes(
+        self, _resource_key: str
+    ) -> WorkspaceChangesSnapshot:
+        return WorkspaceChangesSnapshot(
+            status_summary=" M src/search.py",
+            diff="diff --git a/src/search.py b/src/search.py\n+change",
+        )
 
 
 class _ScriptedInteraction:

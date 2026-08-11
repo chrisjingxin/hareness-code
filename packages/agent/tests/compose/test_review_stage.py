@@ -9,7 +9,10 @@ import pytest
 
 from harness_agent.compose.models import VerificationEvidence
 from harness_agent.compose.stage_agents import StageRequest, StageResult
-from harness_agent.compose.verification import VerificationRequest
+from harness_agent.compose.verification import (
+    VerificationRequest,
+    WorkspaceChangesSnapshot,
+)
 from harness_agent.compose.workflow import ComposeServices
 from harness_agent.host.run_coordinator import (
     ConnectionRef,
@@ -87,9 +90,11 @@ class _FakeStageAgent:
     def __init__(self, script: list[Any]) -> None:
         self.script = list(script)
         self.calls: list[str] = []
+        self.tasks: list[str] = []
 
     async def run(self, request: StageRequest) -> StageResult:
         self.calls.append(request.stage)
+        self.tasks.append(request.task)
         item = self.script.pop(0)
         if not isinstance(item, dict):
             raise ValueError("STAGE_OUTPUT_NOT_OBJECT")
@@ -104,9 +109,19 @@ class _FakeStageAgent:
 class _FakeVerification:
     def __init__(self, script: list[VerificationEvidence]) -> None:
         self.script = list(script)
+        self.workspace_change_requests: list[str] = []
 
     async def run(self, request: VerificationRequest) -> VerificationEvidence:
         return self.script.pop(0)
+
+    async def capture_workspace_changes(
+        self, resource_key: str
+    ) -> WorkspaceChangesSnapshot:
+        self.workspace_change_requests.append(resource_key)
+        return WorkspaceChangesSnapshot(
+            status_summary=" M src/search.py\n?? src/unreported.py",
+            diff="diff --git a/src/search.py b/src/search.py\n+actual change",
+        )
 
 
 class _ScriptedInteraction:
@@ -179,7 +194,7 @@ async def _run_compose(
     events = [event async for event in execution.events]
     await coordinator.close()
     await persistence.close()
-    return events, stage_agent, interactions
+    return events, stage_agent, verification, interactions
 
 
 def _state_frames(events) -> list[dict[str, Any]]:
@@ -188,7 +203,7 @@ def _state_frames(events) -> list[dict[str, Any]]:
 
 async def test_review_pass_completes_run_with_single_terminal(tmp_path: Path) -> None:
     """双轴 Review 通过后 Run 进入唯一 completed 终态。"""
-    events, stage_agent, interactions = await _run_compose(
+    events, stage_agent, verification, interactions = await _run_compose(
         tmp_path,
         [
             _understanding(),
@@ -210,11 +225,19 @@ async def test_review_pass_completes_run_with_single_terminal(tmp_path: Path) ->
     frames = _state_frames(events)
     assert frames[-1]["status"] == "completed"
     assert frames[-1]["stage"] == "review"
+    reviewer_packs = [
+        task
+        for stage, task in zip(stage_agent.calls, stage_agent.tasks, strict=True)
+        if stage in {"requirement-reviewer", "code-reviewer"}
+    ]
+    assert all("?? src/unreported.py" in pack for pack in reviewer_packs)
+    assert all("+actual change" in pack for pack in reviewer_packs)
+    assert len(verification.workspace_change_requests) == 1
 
 
 async def test_optional_findings_do_not_block_completion(tmp_path: Path) -> None:
     """Optional/Nit finding 进入最终报告但不阻止完成。"""
-    events, stage_agent, interactions = await _run_compose(
+    events, stage_agent, verification, interactions = await _run_compose(
         tmp_path,
         [
             _understanding(),
@@ -233,7 +256,7 @@ async def test_fail_verdict_without_required_finding_never_completes(
     tmp_path: Path,
 ) -> None:
     """Reviewer 明确 fail 时不能因 findings 为空而误判 completed。"""
-    events, stage_agent, interactions = await _run_compose(
+    events, stage_agent, verification, interactions = await _run_compose(
         tmp_path,
         [
             _understanding(),
@@ -253,7 +276,7 @@ async def test_fail_verdict_without_required_finding_never_completes(
 
 async def test_required_finding_fixes_and_reloops_to_completion(tmp_path: Path) -> None:
     """Required finding 生成 fix task，重新 Build→Verify→Review 后完成。"""
-    events, stage_agent, interactions = await _run_compose(
+    events, stage_agent, verification, interactions = await _run_compose(
         tmp_path,
         [
             _understanding(),
@@ -278,7 +301,7 @@ async def test_required_finding_fixes_and_reloops_to_completion(tmp_path: Path) 
 
 async def test_review_fix_budget_exhausted_blocks(tmp_path: Path) -> None:
     """Review 两轮修复后仍失败进入 blocked。"""
-    events, stage_agent, interactions = await _run_compose(
+    events, stage_agent, verification, interactions = await _run_compose(
         tmp_path,
         [
             _understanding(),
@@ -305,7 +328,7 @@ async def test_review_fix_budget_exhausted_blocks(tmp_path: Path) -> None:
 
 async def test_reviewer_invalid_output_fails_after_retry(tmp_path: Path) -> None:
     """Reviewer schema invalid 只重试一次；仍无效以稳定错误码 failed。"""
-    events, stage_agent, interactions = await _run_compose(
+    events, stage_agent, verification, interactions = await _run_compose(
         tmp_path,
         [
             _understanding(),
@@ -325,7 +348,7 @@ async def test_reviewer_invalid_output_fails_after_retry(tmp_path: Path) -> None
 
 async def test_requirement_and_code_reviewers_are_independent_executions(tmp_path: Path) -> None:
     """Requirement 与 Code Reviewer 是不同 execution identity 的独立调用。"""
-    events, stage_agent, interactions = await _run_compose(
+    events, stage_agent, verification, interactions = await _run_compose(
         tmp_path,
         [
             _understanding(),
