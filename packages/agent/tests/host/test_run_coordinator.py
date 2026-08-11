@@ -11,13 +11,15 @@ from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 from harness_agent.host.run_coordinator import (
     ConnectionRef,
     InteractionResult,
-    MAX_TOOL_PAYLOAD_BYTES,
     RunCoordinator,
     RunError,
     RunPreparation,
     RunRuntime,
     RunState,
     StartRun,
+)
+from harness_agent.host.run_execution import (
+    MAX_TOOL_PAYLOAD_BYTES,
     _capture_transcript_message,
     _extract_interaction,
     _message_text,
@@ -226,6 +228,73 @@ async def test_same_run_different_work_mode_conflicts() -> None:
     gate.set()
     events = await _events(first)
     assert [event.type for event in events][-1] == "run.completed"
+    await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_adapter_terminal_signal_rejected_by_coordinator() -> None:
+    """adapter 通过 lifecycle port 发终态事件必须被拒绝，终态只由 coordinator 产生。"""
+    class _MalformedAdapter:
+        async def execute(self, run, port):
+            # 恶意 adapter 试图自己发出 run.completed，必须被 port 拒绝。
+            port.emit(run, "run.completed", {"usage": {"input_tokens": 0, "output_tokens": 0}})
+
+    async def prep(_command, _persistence) -> RunPreparation:
+        return RunPreparation()
+
+    coordinator = RunCoordinator(
+        persistence_provider=_noop_persistence,
+        preparation_provider=prep,
+        runtime_provider=_noop_runtime,
+        interaction_port=_NoopInteraction(),
+    )
+    coordinator._execution_adapters["build"] = _MalformedAdapter()
+    execution = await coordinator.start(
+        StartRun(thread_id="thread", run_id="run-1", message="hello", mode="build"),
+        ConnectionRef("owner"),
+    )
+    events = await _events(execution)
+    assert [event.type for event in events] == ["run.failed"]
+    assert events[0].payload["error"]["code"] == "ADAPTER_TERMINAL_VIOLATION"
+    await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_compose_adapter_stub_has_single_terminal() -> None:
+    """Compose 空壳在完整实现前只以稳定错误收敛，不产生第二套生命周期。"""
+    coordinator = _coordinator([])
+    execution = await coordinator.start(
+        StartRun(thread_id="thread", run_id="run-1", message="hello", mode="compose"),
+        ConnectionRef("owner"),
+    )
+    events = await _events(execution)
+    assert [event.type for event in events] == ["run.failed"]
+    assert events[0].payload["error"]["code"] == "COMPOSE_ADAPTER_NOT_READY"
+    await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_propagates_through_adapter_boundary() -> None:
+    """取消必须穿透 adapter 的阻塞执行并产生唯一 cancelled 终态。"""
+    gate = asyncio.Event()
+
+    class _BlockingAdapter:
+        async def execute(self, run, port):
+            port.emit(run, "run.started", {"resumed": False, "mode": "build"})
+            run.status = "running"
+            await gate.wait()
+
+    coordinator = _coordinator([])
+    coordinator._execution_adapters["build"] = _BlockingAdapter()
+    execution = await coordinator.start(
+        StartRun(thread_id="thread", run_id="run-1", message="hello", mode="build"),
+        ConnectionRef("owner"),
+    )
+    await asyncio.sleep(0)
+    cancelled = await coordinator.cancel(execution.ref, ConnectionRef("owner"))
+    assert cancelled.cancelled is True
+    events = await _events(execution)
+    assert [event.type for event in events] == ["run.started", "run.cancelled"]
     await coordinator.close()
 
 
@@ -1154,7 +1223,10 @@ async def test_subgraph_messages_are_not_flattened_into_root_transcript(tmp_path
                 release=lambda: _noop_async(),
             ),
         )
-        await _coordinator([])._stream_agent(run, None)
+        coordinator = _coordinator([])
+        await coordinator._execution_adapters["build"]._stream_agent(
+            run, coordinator._lifecycle_port, None
+        )
 
         records = await store.load_transcript("thread-root")
         assert [record.kind for record in records] == ["user", "assistant", "tool"]
@@ -1247,7 +1319,11 @@ async def test_completed_tool_batch_is_readable_while_run_waits_for_next_model_s
         ),
     )
     coordinator = _coordinator([])
-    stream_task = asyncio.create_task(coordinator._stream_agent(run, None))
+    stream_task = asyncio.create_task(
+        coordinator._execution_adapters["build"]._stream_agent(
+            run, coordinator._lifecycle_port, None
+        )
+    )
     try:
         await asyncio.wait_for(blocked.wait(), 5)
         independent = await ThreadPersistence.open(project=project, home=home)

@@ -712,8 +712,8 @@ async def test_run_started_carries_frozen_work_mode():
     frames = await _capture_server(server)
     await server.dispatch(_request(
         "run.start",
-        {"mode": "compose", "message": "hello", "thread_id": "t", "run_id": "r"},
-        "compose-start",
+        {"mode": "build", "message": "hello", "thread_id": "t", "run_id": "r"},
+        "mode-start",
     ))
     await _wait_for(frames, lambda frame: frame.get("params", {}).get("type") == "run.completed")
     started = next(
@@ -721,7 +721,7 @@ async def test_run_started_carries_frozen_work_mode():
         for frame in frames
         if frame.get("method") == "event" and frame["params"]["type"] == "run.started"
     )
-    assert started["payload"]["mode"] == "compose"
+    assert started["payload"]["mode"] == "build"
 
 
 async def test_run_started_emits_authoritative_primary_model_binding():
@@ -1912,8 +1912,8 @@ def test_stream_translation_prefers_normalized_content_blocks():
         RunPreparation,
         RunState,
         StartRun,
-        _translate_stream_event,
     )
+    from harness_agent.host.run_execution import _translate_stream_event
 
     chunk = SimpleNamespace(
         content="",
@@ -1942,8 +1942,8 @@ def test_tool_fragments_with_missing_ids_are_merged_by_index():
         RunPreparation,
         RunState,
         StartRun,
-        _translate_stream_event,
     )
+    from harness_agent.host.run_execution import _translate_stream_event
 
     run = RunState(
         start=StartRun(mode="build", thread_id="thread", run_id="run", message="执行 pwd"),
@@ -1974,8 +1974,8 @@ def test_tool_stream_reuses_index_for_later_calls_without_overwriting_history():
         RunPreparation,
         RunState,
         StartRun,
-        _translate_stream_event,
     )
+    from harness_agent.host.run_execution import _translate_stream_event
 
     run = RunState(
         start=StartRun(mode="build", thread_id="thread", run_id="run", message="连续执行两次"),
@@ -2641,7 +2641,7 @@ async def test_missing_interaction_capability_fails_closed_without_reverse_reque
 def test_tool_output_is_utf8_safely_truncated():
     """超限工具输出携带截断标记和原始字节数。"""
     from harness_agent.protocol.generated import MAX_TOOL_PAYLOAD_BYTES
-    from harness_agent.host.run_coordinator import _truncate_text
+    from harness_agent.host.run_execution import _truncate_text
 
     original = "界" * (MAX_TOOL_PAYLOAD_BYTES // 2)
     clipped, truncated, original_bytes = _truncate_text(original)

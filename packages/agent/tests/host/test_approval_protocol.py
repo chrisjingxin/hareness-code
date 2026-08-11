@@ -20,10 +20,9 @@ from harness_agent.host.run_coordinator import (
     RunPreparation,
     RunState,
     StartRun,
-    _extract_interaction,
     _generate_permission_rule,
-    _resume_value,
 )
+from harness_agent.host.run_execution import _extract_interaction, _resume_value
 
 
 def _assert_approval_params_schema_compliant(spec: InteractionRequest) -> None:

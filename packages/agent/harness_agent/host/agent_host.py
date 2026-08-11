@@ -164,8 +164,8 @@ from harness_agent.host.run_coordinator import (
     RunRef,
     RequestedSkill,
     StartRun,
-    _bounded_json,
 )
+from harness_agent.host.run_execution import _bounded_json
 from harness_agent.runtime.team_coordinator import (
     TeamCoordinator,
     TeamDefinition,
