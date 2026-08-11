@@ -72,10 +72,10 @@ def test_initial_state_starts_understand_and_has_stable_projection() -> None:
 def test_happy_path_reaches_completed_with_monotonic_revision() -> None:
     """Understand→Plan→批准→Build→Verify→Review→completed 全链路合法。"""
     state = _initial()
-    state = ComposeStateMachine.apply(state, ComposeEvent.UNDERSTAND_COMPLETE)
+    state = ComposeStateMachine.apply(state, ComposeEvent.UNDERSTAND_COMPLETE, artifact_id="understanding-1")
     assert state.stage is ComposeStage.PLAN and state.stages[ComposeStage.PLAN] is StageState.RUNNING
 
-    state = ComposeStateMachine.apply(state, ComposeEvent.PLAN_COMPLETE)
+    state = ComposeStateMachine.apply(state, ComposeEvent.PLAN_COMPLETE, artifact_id="plan-1")
     assert state.status is ComposeRunStatus.WAITING_USER
 
     state = ComposeStateMachine.apply(state, ComposeEvent.PLAN_APPROVE, tasks=_tasks())
@@ -107,12 +107,12 @@ def test_stage_attempts_are_counted_per_stage_entry() -> None:
     """阶段每次（重新）进入都递增 attempts。"""
     state = _initial()
     assert state.stage_attempts[ComposeStage.UNDERSTAND] == 1
-    state = ComposeStateMachine.apply(state, ComposeEvent.UNDERSTAND_COMPLETE)
+    state = ComposeStateMachine.apply(state, ComposeEvent.UNDERSTAND_COMPLETE, artifact_id="understanding-1")
     assert state.stage_attempts[ComposeStage.PLAN] == 1
-    state = ComposeStateMachine.apply(state, ComposeEvent.PLAN_COMPLETE)
+    state = ComposeStateMachine.apply(state, ComposeEvent.PLAN_COMPLETE, artifact_id="plan-1")
     state = ComposeStateMachine.apply(state, ComposeEvent.PLAN_REVISE)
     assert state.stage_attempts[ComposeStage.PLAN] == 2
-    state = ComposeStateMachine.apply(state, ComposeEvent.PLAN_COMPLETE)
+    state = ComposeStateMachine.apply(state, ComposeEvent.PLAN_COMPLETE, artifact_id="plan-1")
     state = ComposeStateMachine.apply(state, ComposeEvent.PLAN_APPROVE, tasks=_tasks())
     assert state.stage_attempts[ComposeStage.BUILD] == 1
 
@@ -120,8 +120,8 @@ def test_stage_attempts_are_counted_per_stage_entry() -> None:
 def test_plan_revise_returns_to_plan_and_cancel_is_terminal() -> None:
     """修改返回 Plan；取消产生唯一 cancelled 终态。"""
     state = _initial()
-    state = ComposeStateMachine.apply(state, ComposeEvent.UNDERSTAND_COMPLETE)
-    state = ComposeStateMachine.apply(state, ComposeEvent.PLAN_COMPLETE)
+    state = ComposeStateMachine.apply(state, ComposeEvent.UNDERSTAND_COMPLETE, artifact_id="understanding-1")
+    state = ComposeStateMachine.apply(state, ComposeEvent.PLAN_COMPLETE, artifact_id="plan-1")
     assert state.status is ComposeRunStatus.WAITING_USER
 
     cancelled = ComposeStateMachine.apply(state, ComposeEvent.PLAN_CANCEL)
@@ -343,8 +343,8 @@ def test_projection_reflects_tasks_and_evidence() -> None:
 def _enter_build() -> ComposeRunState:
     """走到 Build running 并装载两个任务的公共状态。"""
     state = _initial()
-    state = ComposeStateMachine.apply(state, ComposeEvent.UNDERSTAND_COMPLETE)
-    state = ComposeStateMachine.apply(state, ComposeEvent.PLAN_COMPLETE)
+    state = ComposeStateMachine.apply(state, ComposeEvent.UNDERSTAND_COMPLETE, artifact_id="understanding-1")
+    state = ComposeStateMachine.apply(state, ComposeEvent.PLAN_COMPLETE, artifact_id="plan-1")
     state = ComposeStateMachine.apply(state, ComposeEvent.PLAN_APPROVE, tasks=_tasks())
     return state
 

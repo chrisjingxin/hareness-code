@@ -98,7 +98,13 @@ def _on_stage_retry(state: ComposeRunState, payload: Mapping[str, Any]) -> Compo
 def _on_understand_complete(state: ComposeRunState, payload: Mapping[str, Any]) -> ComposeRunState:
     """Understand 完成（open_decisions 为空由 workflow 校验后发送）。"""
     _require_stage(state, ComposeStage.UNDERSTAND, ComposeEvent.UNDERSTAND_COMPLETE)
+    artifact_id = payload.get("artifact_id")
+    if not isinstance(artifact_id, str):
+        raise ComposeTransitionError(
+            "COMPOSE_ARTIFACT_ID_MISSING", "understand complete requires artifact_id"
+        )
     next_state = _copy(state)
+    next_state.understanding_artifact_id = artifact_id
     next_state.stages[ComposeStage.UNDERSTAND] = StageState.PASSED
     next_state.stage = ComposeStage.PLAN
     next_state.stages[ComposeStage.PLAN] = StageState.RUNNING
@@ -110,7 +116,13 @@ def _on_understand_complete(state: ComposeRunState, payload: Mapping[str, Any]) 
 def _on_plan_complete(state: ComposeRunState, payload: Mapping[str, Any]) -> ComposeRunState:
     """Plan 就绪；进入用户确认门禁（等待整体方案批准）。"""
     _require_stage(state, ComposeStage.PLAN, ComposeEvent.PLAN_COMPLETE)
+    artifact_id = payload.get("artifact_id")
+    if not isinstance(artifact_id, str):
+        raise ComposeTransitionError(
+            "COMPOSE_ARTIFACT_ID_MISSING", "plan complete requires artifact_id"
+        )
     next_state = _copy(state)
+    next_state.plan_artifact_id = artifact_id
     next_state.stages[ComposeStage.PLAN] = StageState.PASSED
     next_state.status = ComposeRunStatus.WAITING_USER
     next_state.revision += 1

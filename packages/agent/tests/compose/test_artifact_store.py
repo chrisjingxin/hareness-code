@@ -250,7 +250,9 @@ async def test_run_round_trip_preserves_all_facts(tmp_path: Path) -> None:
     """save_run/load_run 保留 revision、stages、tasks、budget 与终态计数。"""
     persistence, store = await _open_store(tmp_path)
     state = _run_state("run-rt")
-    state = ComposeStateMachine.apply(state, ComposeEvent.UNDERSTAND_COMPLETE)
+    state = ComposeStateMachine.apply(
+        state, ComposeEvent.UNDERSTAND_COMPLETE, artifact_id="understanding-1"
+    )
     await store.save_run(state)
 
     loaded = await store.load_run("run-rt")
@@ -311,9 +313,13 @@ async def test_concurrent_run_writes_are_linearized(tmp_path: Path) -> None:
 
     async def write(index: int) -> None:
         state = ComposeStateMachine.initial("thread-c", "run-c")
-        state = ComposeStateMachine.apply(state, ComposeEvent.UNDERSTAND_COMPLETE)
+        state = ComposeStateMachine.apply(
+            state, ComposeEvent.UNDERSTAND_COMPLETE, artifact_id="understanding-1"
+        )
         if index % 2:
-            state = ComposeStateMachine.apply(state, ComposeEvent.PLAN_COMPLETE)
+            state = ComposeStateMachine.apply(
+                state, ComposeEvent.PLAN_COMPLETE, artifact_id="plan-1"
+            )
         await store.save_run(state)
 
     await asyncio.gather(*(write(i) for i in range(8)))
@@ -323,7 +329,9 @@ async def test_concurrent_run_writes_are_linearized(tmp_path: Path) -> None:
     assert (loaded.revision == 1 and loaded.stage.value == "plan" and loaded.status.value == "running") or (
         loaded.revision == 2 and loaded.status.value == "waiting_user"
     )
-    assert loaded.understanding_artifact_id is None  # 没有半写字段
+    assert loaded.understanding_artifact_id == "understanding-1"  # 没有半写字段
+    if loaded.revision == 2:
+        assert loaded.plan_artifact_id == "plan-1"
     assert await store.terminal_count("run-c") == 0
     await persistence.close()
 

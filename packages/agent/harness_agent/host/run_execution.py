@@ -16,9 +16,16 @@ import json
 import time
 import uuid
 from collections.abc import Iterable, Mapping
-from typing import TYPE_CHECKING, Any, Protocol
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from harness_agent.threads.thread_persistence import TranscriptAppend
+from harness_agent.compose.workflow import (
+    ComposeOutcome,
+    ComposeServices,
+    ComposeWorkflow,
+    ComposeWorkflowError,
+)
 
 if TYPE_CHECKING:
     from harness_agent.host.run_coordinator import (
@@ -71,6 +78,26 @@ class RunLifecyclePort(Protocol):
         self, run: RunState, spec: InteractionRequest
     ) -> InteractionResult: ...
 
+    async def request_question(
+        self,
+        run: RunState,
+        *,
+        request_id: str,
+        interrupt_id: str,
+        questions: list[dict[str, object]],
+    ) -> InteractionResult: ...
+
+    async def request_approval(
+        self,
+        run: RunState,
+        *,
+        request_id: str,
+        interrupt_id: str,
+        description: str,
+        decisions: list[str],
+        action_requests: list[dict[str, object]],
+    ) -> InteractionResult: ...
+
     async def collect_serial_approvals(
         self, run: RunState, spec: InteractionRequest
     ) -> dict[str, object]: ...
@@ -83,11 +110,23 @@ class RunLifecyclePort(Protocol):
 class RunExecutionAdapter(Protocol):
     """一次 Run 的执行策略；按 run.start.mode 选择，与 coordinator 解耦。
 
-    成功返回后由 RunCoordinator 发唯一 completed 终态；抛出的异常由
-    coordinator 统一收敛为 failed/cancelled，adapter 不得自己发终态。
+    成功返回 None 时由 RunCoordinator 发默认 completed 终态；返回
+    AdapterOutcome 时 coordinator 按提议收敛终态。adapter 不得自己发终态。
     """
 
-    async def execute(self, run: RunState, port: RunLifecyclePort) -> None: ...
+    async def execute(
+        self, run: RunState, port: RunLifecyclePort
+    ) -> AdapterOutcome | None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class AdapterOutcome:
+    """adapter 提议的终态；RunCoordinator 是唯一终态 owner。"""
+
+    status: Literal["completed", "failed", "cancelled"]
+    code: str | None = None
+    message: str = ""
+    retryable: bool = False
 
 
 class BuildRunAdapter:
@@ -212,14 +251,53 @@ class BuildRunAdapter:
 
 
 class ComposeRunAdapter:
-    """Compose 工作模式的执行 adapter；由 Compose 五阶段状态机驱动。
+    """Compose 工作模式的执行 adapter；由 ComposeWorkflow 驱动五阶段。
 
-    WP3/WP4 起由 compose workflow 实现替换；在完整实现落地前，任何
-    Compose Run 都以稳定错误码收敛，不产生第二套 Run 生命周期。
+    Compose workflow 位于 harness_agent.compose（不反向依赖 host）；
+    本 adapter 负责 host 边界：把 ComposeWorkflowError 映射为 RunError，
+    把 ComposeOutcome 映射为 coordinator 可收敛的 AdapterOutcome。
+    未注入 ComposeServices 时保持稳定失败空壳。
     """
 
-    async def execute(self, run: RunState, port: RunLifecyclePort) -> None:
-        raise _run_error("COMPOSE_ADAPTER_NOT_READY", "Compose mode is not available yet")
+    def __init__(self, services: ComposeServices | None = None) -> None:
+        """保存 Host 提供的 workflow 依赖（可为空壳）。"""
+        self._services = services
+
+    async def execute(
+        self,
+        run: RunState,
+        port: RunLifecyclePort,
+    ) -> AdapterOutcome | None:
+        """执行 Compose workflow 直到唯一终态提议；终态仍归 coordinator。"""
+        if self._services is None:
+            raise _run_error(
+                "COMPOSE_ADAPTER_NOT_READY", "Compose mode is not available yet"
+            )
+        if run.persistence is None:
+            raise _run_error(
+                "COMPOSE_PERSISTENCE_REQUIRED",
+                "Compose mode requires thread persistence",
+            )
+        from harness_agent.compose.state_machine import ComposeStateMachine
+
+        store = run.persistence.compose_artifact_store()
+        workflow = ComposeWorkflow(services=self._services, store=store)
+        state = ComposeStateMachine.initial(run.ref.thread_id, run.ref.run_id)
+        try:
+            outcome = await workflow.run(run, port, state)
+        except ComposeWorkflowError as exc:
+            raise _run_error(exc.code, str(exc)) from exc
+        return _adapter_outcome(outcome)
+
+
+def _adapter_outcome(outcome: ComposeOutcome) -> AdapterOutcome:
+    """把 compose-owned 终态提议映射为 adapter 提议。"""
+    return AdapterOutcome(
+        status=outcome.status,
+        code=outcome.code,
+        message=outcome.message,
+        retryable=outcome.retryable,
+    )
 
 
 _CONCURRENCY_SAFE_TOOLS = frozenset({

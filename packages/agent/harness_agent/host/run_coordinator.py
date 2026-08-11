@@ -13,7 +13,9 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
+from harness_agent.compose.workflow import ComposeServices
 from harness_agent.host.run_execution import (
+    AdapterOutcome,
     BuildRunAdapter,
     ComposeRunAdapter,
     CONTEXT_UPDATED,
@@ -437,6 +439,52 @@ class _CoordinatorLifecyclePort:
         )
         return result
 
+    async def request_question(
+        self,
+        run: RunState,
+        *,
+        request_id: str,
+        interrupt_id: str,
+        questions: list[dict[str, object]],
+    ) -> InteractionResult:
+        """构造 typed question 并请求 owner 回答（workflow 只传纯数据）。"""
+        spec = InteractionRequest(
+            request_id=request_id,
+            type="question",
+            payload={"interrupt_id": interrupt_id, "questions": questions},
+            interrupt_id=interrupt_id,
+            questions=[
+                {"question": str(question.get("question", ""))}
+                for question in questions
+            ],
+        )
+        return await self.request_interaction(run, spec)
+
+    async def request_approval(
+        self,
+        run: RunState,
+        *,
+        request_id: str,
+        interrupt_id: str,
+        description: str,
+        decisions: list[str],
+        action_requests: list[dict[str, object]],
+    ) -> InteractionResult:
+        """构造 typed approval 并请求 owner 决策（workflow 只传纯数据）。"""
+        spec = InteractionRequest(
+            request_id=request_id,
+            type="approval",
+            payload={
+                "interrupt_id": interrupt_id,
+                "description": description,
+                "requests": {"action_requests": action_requests},
+                "decisions": decisions,
+            },
+            interrupt_id=interrupt_id,
+            action_count=1,
+        )
+        return await self.request_interaction(run, spec)
+
     async def collect_serial_approvals(
         self, run: RunState, spec: InteractionRequest
     ) -> dict[str, object]:
@@ -465,6 +513,9 @@ class RunCoordinator:
         context_updates_provider: ContextUpdatesProvider | None = None,
         execution_registry: AgentExecutionRegistry | None = None,
         project_dir: Path | None = None,
+        compose_services_provider: (
+            Callable[[], Awaitable[ComposeServices | None]] | None
+        ) = None,
     ) -> None:
         """注入 Project 资源 adapter，保持外部 Run interface 与 Protocol 解耦。"""
         self._persistence_provider = persistence_provider
@@ -477,11 +528,11 @@ class RunCoordinator:
         self._project_dir = project_dir
         # approve_thread 的会话级规则只保存在内存，不落盘
         self._session_rules: list[PermissionRule] = []
-        # 每个工作模式一个执行 adapter；Compose 在完整实现前是稳定失败空壳。
-        self._execution_adapters: dict[InteractionMode, RunExecutionAdapter] = {
+        # Build adapter 常驻；Compose adapter 首次使用时才按 provider 组装。
+        self._execution_adapters: dict[str, RunExecutionAdapter] = {
             "build": BuildRunAdapter(),
-            "compose": ComposeRunAdapter(),
         }
+        self._compose_services_provider = compose_services_provider
         self._lifecycle_port = _CoordinatorLifecyclePort(self)
         self._runs: dict[str, RunState] = {}
         self._starting_runs: dict[str, ConnectionRef] = {}
@@ -732,6 +783,18 @@ class RunCoordinator:
                 self._runs.pop(run.ref.thread_id, None)
         run.events.put_nowait(None)
 
+    async def _adapter_for(self, mode: InteractionMode) -> RunExecutionAdapter:
+        """返回 mode 对应的执行 adapter；Compose 首次使用时按 provider 组装。"""
+        existing = self._execution_adapters.get(mode)
+        if existing is not None:
+            return existing
+        services = None
+        if self._compose_services_provider is not None:
+            services = await self._compose_services_provider()
+        adapter: RunExecutionAdapter = ComposeRunAdapter(services)
+        self._execution_adapters[mode] = adapter
+        return adapter
+
     async def _execute(self, run: RunState) -> None:
         try:
             if run.cancel_requested or run.cancellation_token.cancelled:
@@ -746,18 +809,37 @@ class RunCoordinator:
                     return
                 raise
 
-            adapter = self._execution_adapters[run.start.mode]
-            await adapter.execute(run, self._lifecycle_port)
-            self._finish(
-                run,
-                "completed",
-                {
-                    "usage": run.usage,
-                    "duration_ms": round((time.monotonic() - run.started_at) * 1000),
-                    "finish_reason": "completed",
-                    "context": run.context_summary,
-                },
-            )
+            adapter = await self._adapter_for(run.start.mode)
+            outcome = await adapter.execute(run, self._lifecycle_port)
+            if outcome is None or outcome.status == "completed":
+                self._finish(
+                    run,
+                    "completed",
+                    {
+                        "usage": run.usage,
+                        "duration_ms": round((time.monotonic() - run.started_at) * 1000),
+                        "finish_reason": "completed",
+                        "context": run.context_summary,
+                    },
+                )
+            elif outcome.status == "cancelled":
+                self._finish(
+                    run,
+                    "cancelled",
+                    {"reason": outcome.message or "Cancelled"},
+                )
+            else:
+                self._finish(
+                    run,
+                    "failed",
+                    {
+                        "error": {
+                            "code": outcome.code or "ADAPTER_FAILED",
+                            "message": outcome.message,
+                            "retryable": outcome.retryable,
+                        }
+                    },
+                )
         except asyncio.CancelledError:
             self._finish(run, "cancelled", {"reason": "Cancelled by client"})
         except AgentEnginePoolCapacityError as exc:

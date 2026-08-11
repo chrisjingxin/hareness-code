@@ -151,6 +151,8 @@ from harness_agent.threads.context_lifecycle import ContextLifecycle, ContextRef
 from harness_agent.threads.snapshots import ThreadSnapshotStore
 from harness_agent.threads.thread_persistence import ThreadPersistence, ThreadPersistenceError
 from harness_agent.tools.file_tool_metrics import FileToolMetrics
+from harness_agent.compose.stage_agents import ManagedStageAgentPort
+from harness_agent.compose.workflow import ComposeServices, load_method_assets
 from harness_agent.extensions.providers.harness_gateway import ProviderClientPool
 from harness_agent.host.run_coordinator import (
     AgentEvent,
@@ -352,6 +354,7 @@ class AgentHost:
             interaction_port=ProtocolInteractionAdapter(self),
             context_updates_provider=self._take_context_updates,
             project_dir=self._workspace,
+            compose_services_provider=self._provide_compose_services,
         )
         self._handlers = {
             METHOD["INITIALIZE"]: self._handle_initialize,
@@ -2428,6 +2431,32 @@ class AgentHost:
 
             self._workspace_execution_resources = WorkspaceExecutionResourcePool()
         return self._workspace_execution_resources
+
+    async def _provide_compose_services(self) -> ComposeServices | None:
+        """按需组装 Compose workflow 依赖；配置缺失时返回 None（保持空壳）。"""
+        config = self._config
+        if config is None or config.model_catalog is None:
+            return None
+        try:
+            pool = self._ensure_agent_engine_pool(config)
+        except Exception:
+            logger.exception("Compose services unavailable")
+            return None
+        return ComposeServices(
+            stage_agent=ManagedStageAgentPort(
+                registry=self._run_coordinator.execution_registry,
+                pool=pool,
+                resolve_spec=self._resolve_compose_stage_spec,
+                config_home=self._config_home,
+                workspace=self._workspace,
+            ),
+            method_assets=load_method_assets(),
+            workspace_root=str(self._workspace),
+        )
+
+    def _resolve_compose_stage_spec(self, profile_key: str) -> ResolvedAgentSpec | None:
+        """返回按 profile key 缓存的主 Agent spec；Compose 复用同一可信 spec。"""
+        return self._resolved_agent_specs.get(profile_key)
 
     async def _plugin_delegation_targets(
         self,
