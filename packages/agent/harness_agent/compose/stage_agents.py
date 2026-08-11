@@ -190,17 +190,28 @@ class ManagedStageAgentPort:
             definition_fingerprint=spec.definition_fingerprint,
         )
         delegator = AgentDelegator(self._registry, targets=(target,))
+        from harness_agent.runtime.agent_catalog import DelegationPolicy
         from harness_agent.runtime.agent_delegation import DelegateAgent
 
         idempotency_key = hashlib.sha256(
             f"{request.stage}:{request.parent_ref.execution_id}:{hashlib.sha256(request.task.encode('utf-8')).hexdigest()[:16]}".encode("utf-8")
         ).hexdigest()[:20]
+        # stage 不能复用主 Agent 的 delegation policy：其 allowed_agents 只含
+        # general-purpose/Plugin id，内置 stage id 会被 DELEGATION_TARGET_FORBIDDEN
+        # 拒绝。这里收紧为只允许当前 stage 一个 id，且 depth 封顶 1（stage
+        # Agent 不能再委派），不扩大任何委派权限。
+        stage_policy = DelegationPolicy(
+            enabled=True,
+            allowed_agents=(request.stage,),
+            max_depth=1,
+            max_parallelism=1,
+        )
         command = DelegateAgent(
             parent_ref=request.parent_ref,
             target_agent_id=request.stage,
             task=request.task,
             idempotency_key=idempotency_key,
-            delegation_policy=spec.effective_policy.delegation,
+            delegation_policy=stage_policy,
             cancellation_token=request.cancellation_token,
             timeout_seconds=request.timeout_seconds,
         )

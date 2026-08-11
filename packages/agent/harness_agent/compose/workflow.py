@@ -926,10 +926,16 @@ class ComposeWorkflow:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            # 原始异常文本不越过 wire，只保留稳定错误码与异常类型名。
+            # 原始异常文本不越过 wire：只保留稳定错误码与异常类型名，
+            # AgentDelegationError 额外带其稳定 code 便于诊断。
+            from harness_agent.runtime.agent_delegation import AgentDelegationError
+
+            if isinstance(exc, AgentDelegationError):
+                detail = f"{stage} stage failed: {exc.code}"
+            else:
+                detail = f"{stage} stage failed: {type(exc).__name__}"
             raise ComposeWorkflowError(
-                "COMPOSE_STAGE_EXECUTION_FAILED",
-                f"{stage} stage failed: {type(exc).__name__}",
+                "COMPOSE_STAGE_EXECUTION_FAILED", detail
             ) from exc
 
     def _method(self, stage: str) -> str:
