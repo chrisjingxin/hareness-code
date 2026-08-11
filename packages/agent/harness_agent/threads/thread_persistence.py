@@ -10,8 +10,8 @@ import stat
 import sqlite3
 import subprocess
 import sys
-import tempfile
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,12 +46,37 @@ _SCHEMA_VERSION = 11
 _MAX_PREVIEW_CHARS = 160
 _MAX_INLINE_TOOL_BYTES = 64 * 1024
 _TRANSCRIPT_KINDS = ("user", "assistant", "tool", "context")
-_MIGRATION_STATE_VERSION = 1
+_MIGRATION_STATE_VERSION = 2
+_MIGRATION_STATE_VERSION_LEGACY = 1
 _MIGRATION_LOCK_SUFFIX = ".migration.lock"
 _MIGRATION_STATE_SUFFIX = ".migration-state.json"
 _MIGRATION_COMMIT_DEADLINE_SECONDS = 15.0
 _LEGACY_MIGRATION_CHILD_DEADLINE_SECONDS = 30.0
 _LEGACY_MIGRATION_CHILD_TERMINATE_GRACE_SECONDS = 0.25
+
+# ZC-108: durable migration attempt supervision markers。
+# active attempt 自身就是 durable fail-closed guard；durable poison 是诊断增强。
+# marker schema、原子写入、身份校验和清理分类见本文件下半部的 helper 区段。
+_MIGRATION_ATTEMPT_SUFFIX = ".migration-attempt.json"
+_MIGRATION_POISON_SUFFIX = ".migration-poison.json"
+_MIGRATION_ATTEMPT_STAGING_SUFFIX = ".migration-attempt.staging.json"
+_MIGRATION_POISON_STAGING_SUFFIX = ".migration-poison.staging.json"
+_MIGRATION_STATE_STAGING_SUFFIX = ".migration-state.staging.json"
+_MIGRATION_CHILD_READY_NAME = "child-ready.json"
+_MIGRATION_CHILD_READY_STAGING_NAME = "child-ready.staging.json"
+_MIGRATION_ATTEMPT_TEMP_BACKUP_NAME = "backup.tmp"
+_MIGRATION_ATTEMPT_TEMP_RESTORE_NAME = "restore.tmp"
+_MIGRATION_ATTEMPT_MARKER_VERSION = 1
+_MIGRATION_POISON_MARKER_VERSION = 1
+_MIGRATION_CHILD_READY_MARKER_VERSION = 1
+_MIGRATION_ATTEMPT_STATUSES = frozenset(
+    {"preparing", "prepared", "exit_unknown", "settled"}
+)
+_MIGRATION_ATTEMPT_ACTIVE_STATUSES = frozenset(
+    {"preparing", "prepared", "exit_unknown"}
+)
+_MIGRATION_SETTLED_RESULTS = frozenset({"source", "final"})
+_MIGRATION_MARKER_MAX_BYTES = 256 * 1024
 _MIGRATION_CHILD_TEST_PHASES = frozenset(
     {
         "backup_failure",
@@ -64,6 +89,14 @@ _MIGRATION_CHILD_TEST_PHASES = frozenset(
         "commit_failure_before",
         "state_committed_failure",
         "state_clear_failure",
+        # ZC-108 新增 failpoint：覆盖四个 temp crash 窗口与 child-ready。
+        "backup_temp_created_before_copy",
+        "backup_temp_copied_before_replace",
+        "restore_temp_created_before_copy",
+        "restore_temp_copied_before_replace",
+        "bootstrap_failure_restore_temp_created_before_copy",
+        "bootstrap_failure_restore_temp_copied_before_replace",
+        "child_ready_failure",
     }
 )
 
@@ -167,9 +200,41 @@ async def _migration_child_pause_if_requested(phase: str) -> None:
         await asyncio.Future[None]()
 
 
+def _migration_child_pause_sync(phase: str) -> None:
+    """测试专用同步 child failpoint；供 restore 等同步函数使用。
+
+    ZC-108：restore 两个 phase 使用同步 pause，不在同步函数内伪装 await。
+    生产启动不会传入 phase，此函数立即返回。
+    """
+    active_phase = _MIGRATION_CHILD_TEST_PHASE
+    aliases = {
+        "bootstrap_failure_restore_temp_created_before_copy": (
+            "bootstrap_failure", "restore_temp_created_before_copy",
+        ),
+        "bootstrap_failure_restore_temp_copied_before_replace": (
+            "bootstrap_failure", "restore_temp_copied_before_replace",
+        ),
+    }
+    if active_phase == phase or phase in aliases.get(active_phase or "", ()):
+        # 组合 phase 在 bootstrap_failure 处应抛错，只有 restore 窗口同步暂停。
+        if phase == "bootstrap_failure":
+            return
+        # 同步阻塞，等待父进程 timeout 后 terminate/kill。
+        while True:
+            time.sleep(60)
+
+
 def _migration_child_test_failure(phase: str, error: BaseException) -> None:
     """测试 failpoint 只在隔离 worker 内生效，不改变父进程生产路径。"""
-    if _MIGRATION_CHILD_TEST_PHASE == phase:
+    active_phase = _MIGRATION_CHILD_TEST_PHASE
+    combined_restore_failure = (
+        phase == "bootstrap_failure"
+        and active_phase in {
+            "bootstrap_failure_restore_temp_created_before_copy",
+            "bootstrap_failure_restore_temp_copied_before_replace",
+        }
+    )
+    if active_phase == phase or combined_restore_failure:
         raise error
 
 
@@ -990,6 +1055,177 @@ def _migration_fingerprint_matches(
     )
 
 
+# ---------------------------------------------------------------------------
+# ZC-108: durable migration attempt supervision types。
+# 这些 dataclass 只表示已通过 strict parser 校验的 marker 内容；损坏 JSON
+# 不构造这些对象，直接失败关闭。attempt manifest 只由父进程写，child 通过
+# 独立、一次性的 child-ready marker 报到，避免父子同时重写同一 JSON。
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _MigrationFileIdentity:
+    """跨进程文件身份证明；POSIX 使用 st_dev+st_ino。
+
+    Windows 必须使用稳定 FileId adapter；当前实现只在 POSIX 验证，Windows
+    identity cleanup 作为阻塞项交回验收方。
+    """
+
+    st_dev: int
+    st_ino: int
+
+    def record(self) -> dict[str, object]:
+        """返回可写入 marker 的不含路径身份结构。"""
+        return {"st_dev": self.st_dev, "st_ino": self.st_ino}
+
+
+def _assert_migration_file_identity_supported() -> None:
+    """拒绝在没有稳定文件身份适配器的平台启动 ZC-108 attempt。"""
+    if os.name == "nt":
+        raise ThreadPersistenceError(
+            "CHECKPOINT_MIGRATION_FILE_IDENTITY_UNSUPPORTED"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _MigrationReapAuthority:
+    """当前 owner 的内存退出证明；不可从磁盘 JSON 构造业务意义。
+
+    只有 supervisor 在 Popen 的 poll/wait 已确定 returncode、child 已由
+    当前进程 settle 后创建。fresh owner 没有此对象，无法绕过 active guard。
+    """
+
+    attempt_id: str
+    pid: int
+    returncode: int
+    child_ready_seen: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _MigrationChildOutcome:
+    """迁移 child 的 typed 退出事实，替换含义模糊的 (bool, bool, str)。
+
+    timeout 不是独立事实：timeout 后成功 kill+reap 仍是 exited_reaped；
+    只有无法证明退出才是 exit_unknown。
+    """
+
+    classification: Literal["not_started", "exited_reaped", "exit_unknown"]
+    returncode: int | None
+    error_code: str | None
+    failure_stage: str | None
+    pid: int | None
+    child_ready_seen: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _MigrationCleanupResult:
+    """登记临时文件清理的结构化结果，只按归属判断，不按内容或年龄。
+
+    只有 owned_remaining、unregistered_remaining、errors 均为空才可封口。
+    内容损坏不阻止删除：当 child 已 reaped 且身份严格匹配时，该 temp 已
+    确定是本 attempt 的残留。
+    """
+
+    deleted: tuple[str, ...]
+    resolved_absent: tuple[str, ...]
+    foreign_replacements: tuple[str, ...]
+    owned_remaining: tuple[str, ...]
+    unregistered_remaining: tuple[str, ...]
+    errors: tuple[str, ...]
+
+    @property
+    def closable(self) -> bool:
+        """只有阻塞性分类为空才允许封口。"""
+        return not (self.owned_remaining or self.unregistered_remaining or self.errors)
+
+
+@dataclass(frozen=True, slots=True)
+class _MigrationAttemptContext:
+    """ThreadPersistence 私有迁移上下文。
+
+    普通 parent open 为 None；child 必须携带匹配 context 才能在 active
+    guard 下执行迁移写入。
+    """
+
+    attempt_id: str
+    database: str
+    temp_dir: Path
+    backup_temp: Path
+    backup_temp_identity: _MigrationFileIdentity
+    restore_temp: Path
+    restore_temp_identity: _MigrationFileIdentity
+    source: _MigrationDatabaseFingerprint
+
+
+@dataclass(frozen=True, slots=True)
+class _MigrationAttemptManifest:
+    """解析后的 attempt manifest；损坏 marker 不构造此对象。"""
+
+    version: int
+    status: str
+    database: str
+    attempt_id: str
+    created_at_ms: int
+    source: _MigrationDatabaseFingerprint
+    temp_dir_name: str
+    temp_dir_identity: _MigrationFileIdentity | None
+    backup_temp_name: str
+    backup_temp_identity: _MigrationFileIdentity | None
+    restore_temp_name: str
+    restore_temp_identity: _MigrationFileIdentity | None
+    last_error: str | None
+    settled_result: str | None
+    settled_database: _MigrationDatabaseFingerprint | None
+    child_returncode: int | None
+    cleanup_summary: Mapping[str, object] | None
+
+    @property
+    def is_active(self) -> bool:
+        """preparing、prepared、exit_unknown 均是 active guard。"""
+        return self.status in _MIGRATION_ATTEMPT_ACTIVE_STATUSES
+
+    @property
+    def is_settled(self) -> bool:
+        """settled 是唯一已封口状态，只允许幂等 housekeeping。"""
+        return self.status == "settled"
+
+
+@dataclass(frozen=True, slots=True)
+class _MigrationPoisonMarker:
+    """解析后的 durable poison marker；只保存稳定诊断字段。"""
+
+    version: int
+    database: str
+    attempt_id: str
+    reason: str
+    failure_stage: str | None
+    created_at_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class _MigrationChildReadyMarker:
+    """解析后的 child-ready marker；child 在首次访问 SQLite 前发布。"""
+
+    version: int
+    attempt_id: str
+    pid: int
+    process_birth_identity: str | None
+    marker_identity: _MigrationFileIdentity
+
+
+@dataclass(frozen=True, slots=True)
+class _MigrationState:
+    """严格解析后的 migration state；v2 必须绑定 durable attempt。"""
+
+    version: int
+    status: str
+    database: str
+    attempt_id: str | None
+    backup: str
+    source: _MigrationDatabaseFingerprint
+    final: _MigrationDatabaseFingerprint | None
+
+
 def _migration_sqlite_schema_payload(connection: sqlite3.Connection) -> object:
     """同步收集 sqlite_master、表列和索引列形状。"""
     master_rows = connection.execute(
@@ -1141,6 +1377,1070 @@ def _fsync_file_path(path: Path) -> None:
         os.close(descriptor)
 
 
+# ---------------------------------------------------------------------------
+# ZC-108: marker path、原子写入、身份校验、strict parser 和状态转换 helper。
+# 这些纯函数不依赖 ThreadPersistence 实例状态；损坏 marker 不自动覆盖，
+# 直接失败关闭。测试通过 _MIGRATION_ATOMIC_WRITE_FAULTS 注入各写盘失败点。
+# ---------------------------------------------------------------------------
+
+# 测试可注入的写盘失败点；生产路径保持空集。每个 fault key 对应原子写入
+# 的一个具体步骤：staging_create、write、file_fsync、replace、dir_fsync。
+_MIGRATION_ATOMIC_WRITE_FAULTS: set[str] = set()
+_MIGRATION_UNLINK_FAULTS: set[str] = set()
+
+
+def _migration_atomic_fault(point: str) -> None:
+    """测试专用：在指定写盘点抛出 OSError；生产路径不触发。"""
+    if point in _MIGRATION_ATOMIC_WRITE_FAULTS:
+        raise OSError(f"injected migration marker fault: {point}")
+
+
+def _migration_unlink_fault(point: str) -> None:
+    """测试专用：在指定删除点抛出 OSError；生产路径不触发。"""
+    if point in _MIGRATION_UNLINK_FAULTS:
+        raise OSError(f"injected migration unlink fault: {point}")
+
+
+def _migration_attempt_manifest_path(path: Path) -> Path:
+    """返回固定 attempt manifest marker 路径。"""
+    return path.with_name(path.name + _MIGRATION_ATTEMPT_SUFFIX)
+
+
+def _migration_attempt_staging_path(path: Path) -> Path:
+    """返回固定 attempt staging 路径；同目录固定 basename 避免无界残留。"""
+    return path.with_name(path.name + _MIGRATION_ATTEMPT_STAGING_SUFFIX)
+
+
+def _migration_poison_path(path: Path) -> Path:
+    """返回固定 durable poison marker 路径。"""
+    return path.with_name(path.name + _MIGRATION_POISON_SUFFIX)
+
+
+def _migration_poison_staging_path(path: Path) -> Path:
+    """返回固定 poison staging 路径。"""
+    return path.with_name(path.name + _MIGRATION_POISON_STAGING_SUFFIX)
+
+
+def _migration_state_staging_path(path: Path) -> Path:
+    """返回固定 state staging 路径；替代随机 mkstemp 避免无界残留。"""
+    state_path = path.with_name(path.name + _MIGRATION_STATE_SUFFIX)
+    return state_path.with_name(state_path.name + _MIGRATION_STATE_STAGING_SUFFIX)
+
+
+def _migration_attempt_dir_name(database: str, attempt_id: str) -> str:
+    """由 database 和 attempt ID 确定性重算私有目录 basename。"""
+    return f".{database}.migration-attempt-{attempt_id}"
+
+
+def _migration_attempt_dir_path(path: Path, attempt_id: str) -> Path:
+    """返回私有 attempt 目录路径；名称必须由 database 和 attempt ID 确定性重算。"""
+    return path.with_name(_migration_attempt_dir_name(path.name, attempt_id))
+
+
+def _migration_attempt_child_ready_path(temp_dir: Path) -> Path:
+    """返回私有目录内的 child-ready marker 路径。"""
+    return temp_dir / _MIGRATION_CHILD_READY_NAME
+
+
+def _migration_attempt_child_ready_staging_path(temp_dir: Path) -> Path:
+    """返回私有目录内 child-ready staging 路径。"""
+    return temp_dir / _MIGRATION_CHILD_READY_STAGING_NAME
+
+
+def _migration_attempt_backup_temp_path(temp_dir: Path) -> Path:
+    """返回私有目录内 backup temp 路径。"""
+    return temp_dir / _MIGRATION_ATTEMPT_TEMP_BACKUP_NAME
+
+
+def _migration_attempt_restore_temp_path(temp_dir: Path) -> Path:
+    """返回私有目录内 restore temp 路径。"""
+    return temp_dir / _MIGRATION_ATTEMPT_TEMP_RESTORE_NAME
+
+
+def _validate_migration_marker_basename(name: str) -> None:
+    """只允许单一 basename，拒绝路径分隔符、..、NUL、绝对路径和规范化后变化。"""
+    if not name or name in (".", ".."):
+        raise ValueError("migration marker basename is empty or reserved")
+    if "/" in name or "\\" in name or "\x00" in name:
+        raise ValueError("migration marker basename contains separator or NUL")
+    # 规范化后必须保持不变，防止 ``a/../b`` 之类逃逸。
+    if os.path.normpath(name) != name:
+        raise ValueError("migration marker basename changes after normalization")
+    if os.path.isabs(name):
+        raise ValueError("migration marker basename is absolute")
+
+
+def _migration_file_identity_from_stat(
+        stat_result: os.stat_result,
+) -> _MigrationFileIdentity:
+    """从 stat 结果构造文件身份。"""
+    return _MigrationFileIdentity(
+        st_dev=int(stat_result.st_dev),
+        st_ino=int(stat_result.st_ino),
+    )
+
+
+def _migration_file_identity_from_fd(descriptor: int) -> _MigrationFileIdentity:
+    """从已打开 fd 的 fstat 构造身份，避免 TOCTOU。"""
+    stat_result = os.fstat(descriptor)
+    _validate_migration_owned_regular_stat(stat_result, require_private=True)
+    return _migration_file_identity_from_stat(stat_result)
+
+
+def _migration_file_identity_from_path_lstat(
+        path: Path,
+) -> _MigrationFileIdentity:
+    """从 lstat 构造身份，拒绝 symlink、错误 owner/mode 和非普通文件。"""
+    stat_result = path.lstat()
+    _validate_migration_owned_regular_stat(stat_result, require_private=True)
+    return _migration_file_identity_from_stat(stat_result)
+
+
+def _migration_file_identity_matches(
+        expected: _MigrationFileIdentity | None,
+        actual: _MigrationFileIdentity,
+) -> bool:
+    """比较文件身份；expected 为 None 时表示尚未登记，永远不匹配。"""
+    if expected is None:
+        return False
+    return expected.st_dev == actual.st_dev and expected.st_ino == actual.st_ino
+
+
+def _validate_migration_owned_regular_stat(
+        stat_result: os.stat_result,
+        *,
+        require_private: bool,
+) -> None:
+    """校验迁移文件类型、owner，以及需要时的私有权限。"""
+    if not stat.S_ISREG(stat_result.st_mode):
+        raise ValueError("migration path is not a regular file")
+    if os.name != "nt":
+        if stat_result.st_uid != os.geteuid():
+            raise ValueError("migration path owner is not the current user")
+        if require_private and stat.S_IMODE(stat_result.st_mode) & 0o077:
+            raise ValueError("migration path mode is too permissive")
+
+
+def _validate_migration_owned_regular_path(
+        path: Path,
+        *,
+        error_code: str,
+        require_private: bool,
+) -> os.stat_result:
+    """以 lstat 验证 SQLite/backup 路径，不跟随 symlink。"""
+    try:
+        stat_result = path.lstat()
+        _validate_migration_owned_regular_stat(
+            stat_result, require_private=require_private,
+        )
+    except (OSError, ValueError) as exc:
+        raise ThreadPersistenceError(error_code) from exc
+    return stat_result
+
+
+def _validate_migration_attempt_directory(
+        path: Path,
+        expected_identity: _MigrationFileIdentity | None,
+) -> None:
+    """验证 attempt 目录类型、owner/mode 和 manifest 登记身份。"""
+    stat_result = path.lstat()
+    if not stat.S_ISDIR(stat_result.st_mode):
+        raise ValueError("migration attempt directory is not a directory")
+    if os.name != "nt":
+        if stat_result.st_uid != os.geteuid():
+            raise ValueError("migration attempt directory owner is invalid")
+        if stat.S_IMODE(stat_result.st_mode) & 0o077:
+            raise ValueError("migration attempt directory mode is too permissive")
+    actual_identity = _migration_file_identity_from_stat(stat_result)
+    if not _migration_file_identity_matches(expected_identity, actual_identity):
+        raise ValueError("migration attempt directory identity mismatch")
+
+
+def _migration_path_entry_exists(path: Path) -> bool:
+    """判断目录项是否存在；dangling symlink 也必须按存在处理。"""
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _validate_migration_marker_stat(
+        path: Path,
+        stat_result: os.stat_result,
+        *,
+        max_size: int,
+) -> None:
+    """校验 marker 文件是普通文件、owner 匹配、mode 安全、大小在限内。
+
+    symlink 通过 lstat 已在上游拒绝；这里只检查 stat 结果的属性。
+    Windows 没有 st_mode 权限语义，权限由创建时的 ACL 决定。
+    """
+    _validate_migration_owned_regular_stat(stat_result, require_private=True)
+    if stat_result.st_size > max_size:
+        raise ValueError("migration marker exceeds size limit")
+
+
+def _migration_atomic_write_json(
+        target: Path,
+        staging: Path,
+        payload: Mapping[str, object],
+        *,
+        fault_key: str,
+) -> None:
+    """原子写入 JSON marker：固定 staging basename、O_EXCL、fsync、replace、dir fsync。
+
+    每种 canonical marker 使用一个确定性的 staging basename，不能每次生成
+    新的随机 mkstemp 文件，否则 parent/child SIGKILL 会制造新的无界残留。
+
+    测试通过 ``_MIGRATION_ATOMIC_WRITE_FAULTS`` 注入各步骤失败：
+    ``{fault_key}_staging_create``、``{fault_key}_write``、
+    ``{fault_key}_file_fsync``、``{fault_key}_replace``、``{fault_key}_dir_fsync``。
+    """
+    # staging 必须在 target 的同一目录，且使用固定 basename。
+    if staging.parent != target.parent:
+        raise ValueError("migration staging must be in the same directory as target")
+    directory = target.parent
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    descriptor: int | None = None
+    staging_created = False
+    try:
+        _migration_atomic_fault(f"{fault_key}_staging_create")
+        # O_CREAT|O_EXCL 保证只有当前进程创建；O_NOFOLLOW 拒绝 symlink 替换。
+        descriptor = os.open(
+            staging,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY | no_follow,
+            0o600,
+        )
+        staging_created = True
+        _migration_atomic_fault(f"{fault_key}_write")
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = None  # fdopen 拥有 fd，关闭由 with 负责。
+            json.dump(
+                payload,
+                handle,
+                ensure_ascii=False,
+                sort_keys=True,
+                allow_nan=False,
+            )
+            handle.write("\n")
+            handle.flush()
+            _migration_atomic_fault(f"{fault_key}_file_fsync")
+            os.fsync(handle.fileno())
+        _migration_atomic_fault(f"{fault_key}_replace")
+        os.replace(staging, target)
+        staging_created = False
+        _migration_atomic_fault(f"{fault_key}_dir_fsync")
+        _fsync_directory_best_effort(directory)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if staging_created:
+            try:
+                staging.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _migration_unlink_strict_marker(path: Path) -> None:
+    """只删除受控 basename 下可证明为当前用户私有普通文件的 marker。"""
+    if not _migration_path_entry_exists(path):
+        return
+    stat_result = path.lstat()
+    _validate_migration_marker_stat(
+        path,
+        stat_result,
+        max_size=_MIGRATION_MARKER_MAX_BYTES,
+    )
+    path.unlink()
+    _fsync_directory_best_effort(path.parent)
+
+
+def _migration_read_marker_json(path: Path, *, max_size: int) -> dict[str, object]:
+    """lstat 拒绝 symlink 和非普通文件，校验 owner/mode/大小后解析 JSON。
+
+    损坏 marker 不自动覆盖，直接抛出 ValueError 让调用方失败关闭。
+    """
+    stat_result = path.lstat()
+    _validate_migration_marker_stat(path, stat_result, max_size=max_size)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError("migration marker JSON is invalid") from exc
+    if not isinstance(raw, dict):
+        raise ValueError("migration marker is not a JSON object")
+    return raw
+
+
+def _parse_migration_file_identity(
+        value: object,
+) -> _MigrationFileIdentity | None:
+    """严格解析 marker 中的 file identity；null 表示尚未登记。"""
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ValueError("migration marker identity is not an object")
+    st_dev = value.get("st_dev")
+    st_ino = value.get("st_ino")
+    if (
+            not isinstance(st_dev, int)
+            or isinstance(st_dev, bool)
+            or not isinstance(st_ino, int)
+            or isinstance(st_ino, bool)
+    ):
+        raise ValueError("migration marker identity fields are invalid")
+    return _MigrationFileIdentity(st_dev=st_dev, st_ino=st_ino)
+
+
+def _parse_migration_attempt_manifest(
+        path: Path,
+        *,
+        expected_database: str | None = None,
+) -> _MigrationAttemptManifest | None:
+    """严格解析 attempt manifest；不存在返回 None，损坏失败关闭。
+
+    ``expected_database`` 用于校验 manifest 记录的 database 与实际路径一致。
+    """
+    if not _migration_path_entry_exists(path):
+        return None
+    raw = _migration_read_marker_json(path, max_size=_MIGRATION_MARKER_MAX_BYTES)
+    version = raw.get("version")
+    status = raw.get("status")
+    database = raw.get("database")
+    attempt_id = raw.get("attempt_id")
+    created_at_ms = raw.get("created_at_ms")
+    source_value = raw.get("source")
+    temp_dir_value = raw.get("temp_dir")
+    temps_value = raw.get("temps")
+    last_error = raw.get("last_error")
+    settled_result = raw.get("settled_result")
+    settled_database_value = raw.get("settled_database")
+    child_returncode = raw.get("child_returncode")
+    cleanup_summary = raw.get("cleanup_summary")
+    if (
+            not isinstance(version, int)
+            or isinstance(version, bool)
+            or version != _MIGRATION_ATTEMPT_MARKER_VERSION
+    ):
+        raise ValueError("migration attempt manifest version is invalid")
+    if not isinstance(status, str) or status not in _MIGRATION_ATTEMPT_STATUSES:
+        raise ValueError("migration attempt manifest status is invalid")
+    if not isinstance(database, str) or not database:
+        raise ValueError("migration attempt manifest database is invalid")
+    if expected_database is not None and database != expected_database:
+        raise ValueError("migration attempt manifest database mismatch")
+    if (
+            not isinstance(attempt_id, str)
+            or len(attempt_id) != 32
+            or any(character not in "0123456789abcdef" for character in attempt_id)
+    ):
+        raise ValueError("migration attempt manifest attempt_id is invalid")
+    if (
+            not isinstance(created_at_ms, int)
+            or isinstance(created_at_ms, bool)
+            or created_at_ms < 0
+    ):
+        raise ValueError("migration attempt manifest created_at_ms is invalid")
+    source = _migration_fingerprint_from_record(source_value)
+    if not isinstance(temp_dir_value, Mapping):
+        raise ValueError("migration attempt manifest temp_dir is invalid")
+    temp_dir_name = temp_dir_value.get("name")
+    if not isinstance(temp_dir_name, str) or not temp_dir_name:
+        raise ValueError("migration attempt manifest temp_dir name is invalid")
+    _validate_migration_marker_basename(temp_dir_name)
+    if temp_dir_name != _migration_attempt_dir_name(database, attempt_id):
+        raise ValueError("migration attempt manifest temp_dir name is not deterministic")
+    temp_dir_identity = _parse_migration_file_identity(temp_dir_value.get("identity"))
+    if not isinstance(temps_value, Mapping):
+        raise ValueError("migration attempt manifest temps is invalid")
+    backup_value = temps_value.get("backup")
+    restore_value = temps_value.get("restore")
+    if not isinstance(backup_value, Mapping) or not isinstance(restore_value, Mapping):
+        raise ValueError("migration attempt manifest temps entries are invalid")
+    backup_temp_name = backup_value.get("name")
+    restore_temp_name = restore_value.get("name")
+    if (
+            not isinstance(backup_temp_name, str)
+            or backup_temp_name != _MIGRATION_ATTEMPT_TEMP_BACKUP_NAME
+    ):
+        raise ValueError("migration attempt manifest backup temp name is invalid")
+    if (
+            not isinstance(restore_temp_name, str)
+            or restore_temp_name != _MIGRATION_ATTEMPT_TEMP_RESTORE_NAME
+    ):
+        raise ValueError("migration attempt manifest restore temp name is invalid")
+    backup_temp_identity = _parse_migration_file_identity(backup_value.get("identity"))
+    restore_temp_identity = _parse_migration_file_identity(restore_value.get("identity"))
+    if status == "preparing" and any(
+            identity is not None
+            for identity in (
+                temp_dir_identity, backup_temp_identity, restore_temp_identity,
+            )
+    ):
+        raise ValueError("preparing manifest must not contain registered identities")
+    if status in {"prepared", "exit_unknown"} and any(
+            identity is None
+            for identity in (
+                temp_dir_identity, backup_temp_identity, restore_temp_identity,
+            )
+    ):
+        raise ValueError("active prepared manifest must contain all identities")
+    if last_error is not None and not isinstance(last_error, str):
+        raise ValueError("migration attempt manifest last_error is invalid")
+    if settled_result is not None and not isinstance(settled_result, str):
+        raise ValueError("migration attempt manifest settled_result is invalid")
+    if status == "settled":
+        if settled_result not in _MIGRATION_SETTLED_RESULTS:
+            raise ValueError("migration attempt manifest settled_result is invalid")
+        if settled_database_value is None:
+            raise ValueError("settled manifest must have settled_database")
+    else:
+        if settled_result is not None:
+            raise ValueError("non-settled manifest must not have settled_result")
+        if settled_database_value is not None:
+            raise ValueError("non-settled manifest must not have settled_database")
+    settled_database = (
+        _migration_fingerprint_from_record(settled_database_value)
+        if settled_database_value is not None
+        else None
+    )
+    if child_returncode is not None and (
+            not isinstance(child_returncode, int) or isinstance(child_returncode, bool)
+    ):
+        raise ValueError("migration attempt manifest child_returncode is invalid")
+    if cleanup_summary is not None and not isinstance(cleanup_summary, Mapping):
+        raise ValueError("migration attempt manifest cleanup_summary is invalid")
+    if status != "settled" and cleanup_summary is not None:
+        raise ValueError("non-settled manifest must not have cleanup_summary")
+    return _MigrationAttemptManifest(
+        version=version,
+        status=status,
+        database=database,
+        attempt_id=attempt_id,
+        created_at_ms=created_at_ms,
+        source=source,
+        temp_dir_name=temp_dir_name,
+        temp_dir_identity=temp_dir_identity,
+        backup_temp_name=backup_temp_name,
+        backup_temp_identity=backup_temp_identity,
+        restore_temp_name=restore_temp_name,
+        restore_temp_identity=restore_temp_identity,
+        last_error=last_error,
+        settled_result=settled_result,
+        settled_database=settled_database,
+        child_returncode=child_returncode,
+        cleanup_summary=cleanup_summary,
+    )
+
+
+def _parse_migration_poison_marker(
+        path: Path,
+        *,
+        expected_database: str | None = None,
+) -> _MigrationPoisonMarker | None:
+    """严格解析 durable poison marker；不存在返回 None，损坏失败关闭。"""
+    if not _migration_path_entry_exists(path):
+        return None
+    raw = _migration_read_marker_json(path, max_size=_MIGRATION_MARKER_MAX_BYTES)
+    version = raw.get("version")
+    database = raw.get("database")
+    attempt_id = raw.get("attempt_id")
+    reason = raw.get("reason")
+    failure_stage = raw.get("failure_stage")
+    created_at_ms = raw.get("created_at_ms")
+    if (
+            not isinstance(version, int)
+            or isinstance(version, bool)
+            or version != _MIGRATION_POISON_MARKER_VERSION
+    ):
+        raise ValueError("migration poison marker version is invalid")
+    if not isinstance(database, str) or not database:
+        raise ValueError("migration poison marker database is invalid")
+    if expected_database is not None and database != expected_database:
+        raise ValueError("migration poison marker database mismatch")
+    if (
+            not isinstance(attempt_id, str)
+            or len(attempt_id) != 32
+            or any(character not in "0123456789abcdef" for character in attempt_id)
+    ):
+        raise ValueError("migration poison marker attempt_id is invalid")
+    if not isinstance(reason, str) or not reason:
+        raise ValueError("migration poison marker reason is invalid")
+    if failure_stage is not None and not isinstance(failure_stage, str):
+        raise ValueError("migration poison marker failure_stage is invalid")
+    if (
+            not isinstance(created_at_ms, int)
+            or isinstance(created_at_ms, bool)
+            or created_at_ms < 0
+    ):
+        raise ValueError("migration poison marker created_at_ms is invalid")
+    return _MigrationPoisonMarker(
+        version=version,
+        database=database,
+        attempt_id=attempt_id,
+        reason=reason,
+        failure_stage=failure_stage,
+        created_at_ms=created_at_ms,
+    )
+
+
+def _parse_migration_child_ready_marker(
+        path: Path,
+        *,
+        expected_attempt_id: str | None = None,
+        expected_pid: int | None = None,
+) -> _MigrationChildReadyMarker | None:
+    """严格解析 child-ready marker；不存在返回 None，损坏失败关闭。"""
+    if not _migration_path_entry_exists(path):
+        return None
+    raw = _migration_read_marker_json(path, max_size=_MIGRATION_MARKER_MAX_BYTES)
+    version = raw.get("version")
+    attempt_id = raw.get("attempt_id")
+    pid = raw.get("pid")
+    process_birth_identity = raw.get("process_birth_identity")
+    marker_identity_value = raw.get("marker_identity")
+    if (
+            not isinstance(version, int)
+            or isinstance(version, bool)
+            or version != _MIGRATION_CHILD_READY_MARKER_VERSION
+    ):
+        raise ValueError("child-ready marker version is invalid")
+    if (
+            not isinstance(attempt_id, str)
+            or len(attempt_id) != 32
+            or any(character not in "0123456789abcdef" for character in attempt_id)
+    ):
+        raise ValueError("child-ready marker attempt_id is invalid")
+    if expected_attempt_id is not None and attempt_id != expected_attempt_id:
+        raise ValueError("child-ready marker attempt_id mismatch")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        raise ValueError("child-ready marker pid is invalid")
+    if expected_pid is not None and pid != expected_pid:
+        raise ValueError("child-ready marker pid mismatch")
+    if process_birth_identity is not None and not isinstance(process_birth_identity, str):
+        raise ValueError("child-ready marker process_birth_identity is invalid")
+    marker_identity = _parse_migration_file_identity(marker_identity_value)
+    if marker_identity is None:
+        raise ValueError("child-ready marker must have marker_identity")
+    actual_identity = _migration_file_identity_from_path_lstat(path)
+    if not _migration_file_identity_matches(marker_identity, actual_identity):
+        raise ValueError("child-ready marker identity mismatch")
+    return _MigrationChildReadyMarker(
+        version=version,
+        attempt_id=attempt_id,
+        pid=pid,
+        process_birth_identity=process_birth_identity,
+        marker_identity=marker_identity,
+    )
+
+
+def _parse_migration_state(
+        path: Path,
+        *,
+        expected_database: str,
+        expected_attempt_id: str | None = None,
+) -> _MigrationState | None:
+    """严格解析 migration state，不把缺字段的 v2 当作 legacy state。"""
+    if not _migration_path_entry_exists(path):
+        return None
+    raw = _migration_read_marker_json(path, max_size=_MIGRATION_MARKER_MAX_BYTES)
+    version = raw.get("version")
+    if (
+            not isinstance(version, int)
+            or isinstance(version, bool)
+            or version not in {_MIGRATION_STATE_VERSION_LEGACY, _MIGRATION_STATE_VERSION}
+    ):
+        raise ValueError("migration state version is invalid")
+    database = raw.get("database")
+    if database != expected_database:
+        raise ValueError("migration state database is invalid")
+    status = raw.get("status")
+    if status not in {
+        "migrating", "committing", "commit_unknown", "committed",
+        "restore_failed", "restored_source",
+    }:
+        raise ValueError("migration state status is invalid")
+    source = _migration_fingerprint_from_record(raw.get("source"))
+    expected_backup = f"{database}.pre-v{source.user_version}-migration.bak"
+    backup = raw.get("backup")
+    if backup != expected_backup:
+        raise ValueError("migration state backup is invalid")
+    raw_attempt_id = raw.get("attempt_id")
+    attempt_id: str | None
+    if version == _MIGRATION_STATE_VERSION_LEGACY:
+        if raw_attempt_id is not None:
+            raise ValueError("legacy migration state must not have attempt_id")
+        attempt_id = None
+        if expected_attempt_id is not None:
+            raise ValueError("active attempt cannot use legacy migration state")
+    else:
+        if (
+                not isinstance(raw_attempt_id, str)
+                or len(raw_attempt_id) != 32
+                or any(character not in "0123456789abcdef" for character in raw_attempt_id)
+        ):
+            raise ValueError("migration state attempt_id is invalid")
+        attempt_id = raw_attempt_id
+        if expected_attempt_id is not None and attempt_id != expected_attempt_id:
+            raise ValueError("migration state attempt_id mismatch")
+    final_value = raw.get("final")
+    final = (
+        _migration_fingerprint_from_record(final_value)
+        if final_value is not None
+        else None
+    )
+    if status in {"committing", "commit_unknown", "committed"} and final is None:
+        raise ValueError("committed migration state has no final fingerprint")
+    if status in {"migrating", "restored_source"} and final is not None:
+        raise ValueError("source migration state must not have final fingerprint")
+    return _MigrationState(
+        version=version,
+        status=status,
+        database=database,
+        attempt_id=attempt_id,
+        backup=backup,
+        source=source,
+        final=final,
+    )
+
+
+def _validate_migration_attempt_transition(
+        old_status: str | None,
+        new_status: str,
+) -> None:
+    """校验 attempt 状态转换合法性；非法转换、状态倒退均失败关闭。
+
+    合法转换：
+    - None → preparing（首次发布）
+    - preparing → prepared（temp identity 已持久化）
+    - preparing → settled（Popen 失败且清理完成）
+    - prepared → exit_unknown（child exit 无法证明）
+    - prepared → settled（child exited_reaped + DB 收敛 + cleanup 完成）
+    - exit_unknown → settled（显式离线恢复）
+    - settled → settled（幂等 housekeeping）
+    """
+    if new_status not in _MIGRATION_ATTEMPT_STATUSES:
+        raise ValueError(f"migration attempt status is invalid: {new_status}")
+    legal: dict[str | None, frozenset[str]] = {
+        None: frozenset({"preparing"}),
+        "preparing": frozenset({"prepared", "settled"}),
+        "prepared": frozenset({"exit_unknown", "settled"}),
+        "exit_unknown": frozenset({"settled"}),
+        "settled": frozenset({"settled"}),
+    }
+    allowed = legal.get(old_status)
+    if allowed is None or new_status not in allowed:
+        raise ValueError(
+            f"migration attempt transition is illegal: {old_status} -> {new_status}"
+        )
+
+
+def _migration_now_ms() -> int:
+    """返回当前墙钟毫秒时间戳；用于 marker 的 created_at_ms。"""
+    return int(time.time() * 1000)
+
+
+def _migration_process_birth_identity() -> str | None:
+    """获取进程 birth identity，仅用于诊断和同一 parent 一致性检查。
+
+    - Linux：读取 /proc/<pid>/stat 的 starttime（第 22 字段）。
+    - Windows：取 process creation time。
+    - macOS：取不到稳定值时返回 null。
+
+    它不用于 fresh owner 自动解除 guard。
+    """
+    pid = os.getpid()
+    if os.name == "posix" and sys.platform.startswith("linux"):
+        try:
+            stat_line = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+            # /proc/<pid>/stat 的 comm 字段可能含空格和括号；从最后一个
+            # 右括号之后分割以正确解析剩余字段。starttime 是第 22 个字段
+            # （从 1 开始计数），即 split 后索引 19（从 0 开始）。
+            after_comm = stat_line[stat_line.rindex(")") + 2:]
+            fields = after_comm.split()
+            if len(fields) >= 20:
+                return f"linux:{pid}:{fields[19]}"
+        except (OSError, ValueError, IndexError):
+            return None
+    # macOS 和其他平台取不到稳定值。
+    return None
+
+
+def _migration_build_attempt_manifest_payload(
+        *,
+        status: str,
+        database: str,
+        attempt_id: str,
+        created_at_ms: int,
+        source: _MigrationDatabaseFingerprint,
+        temp_dir_name: str,
+        temp_dir_identity: _MigrationFileIdentity | None,
+        backup_temp_name: str,
+        backup_temp_identity: _MigrationFileIdentity | None,
+        restore_temp_name: str,
+        restore_temp_identity: _MigrationFileIdentity | None,
+        last_error: str | None = None,
+        settled_result: str | None = None,
+        settled_database: _MigrationDatabaseFingerprint | None = None,
+        child_returncode: int | None = None,
+        cleanup_summary: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """构造 attempt manifest 的严格 JSON payload。"""
+    payload: dict[str, object] = {
+        "version": _MIGRATION_ATTEMPT_MARKER_VERSION,
+        "status": status,
+        "database": database,
+        "attempt_id": attempt_id,
+        "created_at_ms": created_at_ms,
+        "source": source.record(),
+        "temp_dir": {
+            "name": temp_dir_name,
+            "identity": (
+                temp_dir_identity.record() if temp_dir_identity is not None else None
+            ),
+        },
+        "temps": {
+            "backup": {
+                "name": backup_temp_name,
+                "identity": (
+                    backup_temp_identity.record()
+                    if backup_temp_identity is not None
+                    else None
+                ),
+            },
+            "restore": {
+                "name": restore_temp_name,
+                "identity": (
+                    restore_temp_identity.record()
+                    if restore_temp_identity is not None
+                    else None
+                ),
+            },
+        },
+        "last_error": last_error,
+        "settled_result": settled_result,
+        "settled_database": (
+            settled_database.record() if settled_database is not None else None
+        ),
+        "child_returncode": child_returncode,
+        "cleanup_summary": dict(cleanup_summary) if cleanup_summary is not None else None,
+    }
+    return payload
+
+
+def _migration_write_attempt_manifest(
+        path: Path,
+        manifest_path: Path,
+        payload: Mapping[str, object],
+        *,
+        old_status: str | None,
+) -> None:
+    """原子写入 attempt manifest；校验状态转换合法后才落盘。
+
+    canonical attempt 不存在而只剩 attempt staging 时，按协议可证明 child
+    尚未被合法 spawn；启动方仍须在 migration lock 下验证 staging 是普通文件、
+    owner/mode 正确后删除并 fsync，无法验证或删除就失败关闭。
+    """
+    new_status = payload.get("status")
+    if not isinstance(new_status, str):
+        raise ValueError("attempt manifest payload must have string status")
+    _validate_migration_attempt_transition(old_status, new_status)
+    staging = _migration_attempt_staging_path(path)
+    _migration_atomic_write_json(
+        manifest_path,
+        staging,
+        payload,
+        fault_key="attempt",
+    )
+
+
+def _migration_build_poison_payload(
+        *,
+        database: str,
+        attempt_id: str,
+        reason: str,
+        failure_stage: str | None,
+        created_at_ms: int,
+) -> dict[str, object]:
+    """构造 durable poison 的严格 JSON payload；不保存绝对路径或异常原文。"""
+    return {
+        "version": _MIGRATION_POISON_MARKER_VERSION,
+        "database": database,
+        "attempt_id": attempt_id,
+        "reason": reason,
+        "failure_stage": failure_stage,
+        "created_at_ms": created_at_ms,
+    }
+
+
+def _migration_write_poison(
+        path: Path,
+        poison_path: Path,
+        payload: Mapping[str, object],
+) -> None:
+    """原子写入 durable poison marker。"""
+    staging = _migration_poison_staging_path(path)
+    _migration_atomic_write_json(
+        poison_path,
+        staging,
+        payload,
+        fault_key="poison",
+    )
+
+
+def _migration_write_child_ready(
+        temp_dir: Path,
+        *,
+        attempt_id: str,
+        pid: int,
+        process_birth_identity: str | None,
+) -> _MigrationFileIdentity:
+    """child 在首次访问 SQLite 前发布一次性 child-ready 事实。
+
+    使用 O_CREAT|O_EXCL|O_NOFOLLOW 创建 0600 文件，通过 fstat 取得自身
+    identity，写入 payload 后 fsync 文件和 attempt 目录。任一步失败 child
+    直接退出，不访问 SQLite。
+    """
+    ready_path = _migration_attempt_child_ready_path(temp_dir)
+    staging = _migration_attempt_child_ready_staging_path(temp_dir)
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    descriptor: int | None = None
+    staging_created = False
+    try:
+        descriptor = os.open(
+            staging,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY | no_follow,
+            0o600,
+        )
+        staging_created = True
+        marker_identity = _migration_file_identity_from_fd(descriptor)
+        payload: dict[str, object] = {
+            "version": _MIGRATION_CHILD_READY_MARKER_VERSION,
+            "attempt_id": attempt_id,
+            "pid": pid,
+            "process_birth_identity": process_birth_identity,
+            "marker_identity": marker_identity.record(),
+        }
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = None
+            json.dump(
+                payload,
+                handle,
+                ensure_ascii=False,
+                sort_keys=True,
+                allow_nan=False,
+            )
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(staging, ready_path)
+        staging_created = False
+        _fsync_directory_best_effort(temp_dir)
+        return marker_identity
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if staging_created:
+            try:
+                staging.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _migration_cleanup_registered_file(
+        path: Path,
+        expected_identity: _MigrationFileIdentity | None,
+        *,
+        unlink_fault_key: str,
+        is_control_file: bool = False,
+) -> Literal[
+    "deleted", "resolved_absent", "foreign_replacement",
+    "owned_remaining", "unregistered_remaining", "delete_error",
+]:
+    """对单个登记项执行归属清理，返回互斥结果。
+
+    - identity 匹配 + 类型/owner/mode 正常 → deleted
+    - 精确路径不存在 → resolved_absent
+    - identity 不同 → foreign_replacement（不删除）
+    - identity 相同但类型/owner/mode 异常 → owned_remaining
+    - planned 但无 identity → unregistered_remaining（data temp）
+    - unlink 失败 → delete_error
+
+    ``is_control_file`` 为 True 时（如 child-ready.json），不要求 identity：
+    存在且为普通文件 + 正确 owner/mode 即删除。
+    """
+    if not _migration_path_entry_exists(path):
+        return "resolved_absent"
+    try:
+        stat_result = path.lstat()
+    except OSError:
+        return "delete_error"
+    if not stat.S_ISREG(stat_result.st_mode):
+        # 非普通文件（symlink 等）不删除，避免跟随符号链接。
+        return "foreign_replacement"
+    if is_control_file:
+        # 控制文件不登记 identity；只要类型/owner/mode 正确即可删除。
+        if os.name != "nt":
+            if stat_result.st_uid != os.geteuid():
+                return "owned_remaining"
+            if stat.S_IMODE(stat_result.st_mode) & 0o077:
+                return "owned_remaining"
+        try:
+            _migration_unlink_fault(unlink_fault_key)
+            path.unlink()
+            _fsync_directory_best_effort(path.parent)
+        except OSError:
+            return "delete_error"
+        return "deleted"
+    actual_identity = _migration_file_identity_from_stat(stat_result)
+    if expected_identity is None:
+        # planned 但 manifest 尚无 identity：不猜测删除。
+        return "unregistered_remaining"
+    if not _migration_file_identity_matches(expected_identity, actual_identity):
+        # 不同 inode：不删除外来文件。
+        return "foreign_replacement"
+    # identity 严格匹配，进一步校验 owner/mode。
+    if os.name != "nt":
+        if stat_result.st_uid != os.geteuid():
+            return "owned_remaining"
+        if stat.S_IMODE(stat_result.st_mode) & 0o077:
+            return "owned_remaining"
+    try:
+        _migration_unlink_fault(unlink_fault_key)
+        path.unlink()
+        _fsync_directory_best_effort(path.parent)
+    except OSError:
+        return "delete_error"
+    return "deleted"
+
+
+def _migration_cleanup_attempt_temps(
+        temp_dir: Path,
+        manifest: _MigrationAttemptManifest,
+        *,
+        unlink_fault_prefix: str,
+) -> _MigrationCleanupResult:
+    """清理 attempt 的登记 temp 和 child-ready，返回结构化结果。
+
+    每个登记项返回互斥结果，只有 owned_remaining、unregistered_remaining、
+    errors 均为空才可封口。内容损坏不阻止删除：当 child 已 reaped 且身份
+    严格匹配时，该 temp 已确定是本 attempt 的残留。
+    """
+    deleted: list[str] = []
+    resolved_absent: list[str] = []
+    foreign_replacements: list[str] = []
+    owned_remaining: list[str] = []
+    unregistered_remaining: list[str] = []
+    errors: list[str] = []
+
+    ready_path = _migration_attempt_child_ready_path(temp_dir)
+    ready_identity: _MigrationFileIdentity | None = None
+    ready_invalid = False
+    if _migration_path_entry_exists(ready_path):
+        try:
+            ready = _parse_migration_child_ready_marker(
+                ready_path,
+                expected_attempt_id=manifest.attempt_id,
+            )
+            ready_identity = ready.marker_identity if ready is not None else None
+        except (OSError, ValueError):
+            ready_invalid = True
+
+    registered: list[tuple[str, Path, _MigrationFileIdentity | None, str, bool]] = [
+        (
+            manifest.backup_temp_name,
+            _migration_attempt_backup_temp_path(temp_dir),
+            manifest.backup_temp_identity,
+            f"{unlink_fault_prefix}_backup",
+            False,
+        ),
+        (
+            manifest.restore_temp_name,
+            _migration_attempt_restore_temp_path(temp_dir),
+            manifest.restore_temp_identity,
+            f"{unlink_fault_prefix}_restore",
+            False,
+        ),
+        (
+            _MIGRATION_CHILD_READY_NAME,
+            ready_path,
+            ready_identity,
+            f"{unlink_fault_prefix}_ready",
+            False,
+        ),
+        (
+            _MIGRATION_CHILD_READY_STAGING_NAME,
+            _migration_attempt_child_ready_staging_path(temp_dir),
+            None,
+            f"{unlink_fault_prefix}_ready_staging",
+            True,
+        ),
+    ]
+    for name, file_path, expected_identity, fault_key, is_control in registered:
+        if name == _MIGRATION_CHILD_READY_NAME and ready_invalid:
+            owned_remaining.append(name)
+            continue
+        result = _migration_cleanup_registered_file(
+            file_path,
+            expected_identity,
+            unlink_fault_key=fault_key,
+            is_control_file=is_control,
+        )
+        if result == "deleted":
+            deleted.append(name)
+        elif result == "resolved_absent":
+            resolved_absent.append(name)
+        elif result == "foreign_replacement":
+            foreign_replacements.append(name)
+        elif result == "owned_remaining":
+            owned_remaining.append(name)
+        elif result == "unregistered_remaining":
+            unregistered_remaining.append(name)
+        elif result == "delete_error":
+            errors.append(name)
+    return _MigrationCleanupResult(
+        deleted=tuple(deleted),
+        resolved_absent=tuple(resolved_absent),
+        foreign_replacements=tuple(foreign_replacements),
+        owned_remaining=tuple(owned_remaining),
+        unregistered_remaining=tuple(unregistered_remaining),
+        errors=tuple(errors),
+    )
+
+
+def _migration_remove_empty_attempt_dir(
+        temp_dir: Path,
+        cleanup_result: _MigrationCleanupResult,
+) -> tuple[bool, str | None]:
+    """删除空 attempt 目录并 fsync data_dir。
+
+    如果目录因 foreign_replacement 非空，不删除外来文件，可以封口并保留
+    该目录；其他 rmdir/fsync 错误阻止封口。
+    """
+    if not _migration_path_entry_exists(temp_dir):
+        return True, None
+    if cleanup_result.foreign_replacements:
+        # foreign replacement 例外：不删除外来文件，可以封口并保留目录。
+        return True, None
+    try:
+        temp_dir.rmdir()
+    except OSError:
+        # 目录非空或权限错误；检查是否只剩外来文件。
+        try:
+            remaining = list(temp_dir.iterdir())
+        except OSError as exc:
+            return False, f"iterdir_failed:{exc.errno}"
+        if remaining:
+            return False, "directory_not_empty"
+        # 目录为空但 rmdir 失败。
+        return False, "rmdir_failed"
+    try:
+        _fsync_directory_best_effort(temp_dir.parent)
+    except OSError as exc:
+        return False, f"dir_fsync_failed:{exc.errno}"
+    return True, None
+
+
 class _MigrationFileLock:
     """跨进程串行化数据库 open/migration/recovery 的短生命周期锁。"""
 
@@ -1208,6 +2508,43 @@ class _MigrationFileLock:
                     pass
         finally:
             os.close(descriptor)
+
+    def acquire_sync(self, *, poll_interval: float = 0.01) -> None:
+        """同步获取锁；供离线恢复命令等非 async 上下文使用。
+
+        与 ``acquire`` 不同，不依赖事件循环；以忙等待轮询。
+        """
+        if os.name == "nt":
+            import msvcrt
+            self._msvcrt = msvcrt
+        else:
+            try:
+                import fcntl
+            except ImportError as exc:
+                raise ThreadPersistenceError("CHECKPOINT_MIGRATION_LOCK_UNAVAILABLE") from exc
+            self._fcntl = fcntl
+        try:
+            self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            descriptor = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+            _restrict_owner_mode(descriptor)
+        except OSError as exc:
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_LOCK_UNAVAILABLE") from exc
+        self._descriptor = descriptor
+        try:
+            while True:
+                try:
+                    if self._msvcrt is not None:
+                        os.lseek(descriptor, 0, os.SEEK_SET)
+                        self._msvcrt.locking(descriptor, self._msvcrt.LK_NBLCK, 1)
+                    else:
+                        self._fcntl.flock(descriptor, self._fcntl.LOCK_EX | self._fcntl.LOCK_NB)
+                    return
+                except (BlockingIOError, PermissionError):
+                    import time
+                    time.sleep(poll_interval)
+        except BaseException:
+            self.release()
+            raise
 
 
 @dataclass(frozen=True, slots=True)
@@ -1491,6 +2828,7 @@ class ThreadPersistence:
             path: Path,
             project_fingerprint: str,
             operation_lock: asyncio.Lock | None = None,
+            migration_attempt_context: _MigrationAttemptContext | None = None,
     ) -> None:
         """保存已验证的连接和固定 project namespace。"""
         self._connection = connection
@@ -1501,6 +2839,11 @@ class ThreadPersistence:
         self._lock = operation_lock or checkpointer.lock
         if checkpointer.lock is not self._lock:
             checkpointer.lock = self._lock
+        # ZC-108：普通 parent open 为 None；child 必须携带匹配 context 才能
+        # 在 active guard 下执行迁移写入。
+        self._migration_attempt_context = migration_attempt_context
+        # ZC-108：child 在 BEGIN IMMEDIATE 后用此字段与 manifest source 比对。
+        self._migration_manifest_source: _MigrationDatabaseFingerprint | None = None
 
     @classmethod
     async def open(
@@ -1535,6 +2878,11 @@ class ThreadPersistence:
             # second check is the actual handoff boundary and must happen
             # before any recovery, SQLite connection, backup, or write.
             _assert_migration_path_available(path)
+            # ZC-108：锁后检查 active attempt manifest 和 durable poison。
+            # 锁前不根据 durable marker 做最终决策，避免看到 settled 与尚未
+            # 清除 poison 的中间状态后永远失去 housekeeping 机会。锁后检查
+            # 才是权威边界。
+            _check_migration_attempt_and_poison_sync(path)
             # Recovery 必须在 migration lock 仍由当前 opener 持有时完成；这里
             # 不把同步的 SQLite backup 丢到可被取消的后台线程，避免提前释放锁。
             cls._recover_interrupted_migration_sync(path)
@@ -3456,6 +4804,15 @@ class ThreadPersistence:
             # user_version=7，保证 backup/recovery 能逐字节证明源库没有被改写。
             pre_transcript_legacy = await self._is_pre_transcript_prompt_epoch_source()
             source_fingerprint = await self._database_fingerprint_async()
+            # ZC-108：child 在 BEGIN IMMEDIATE 后重新计算 source fingerprint 并与
+            # manifest 逐字段匹配；不匹配则不 backup、不 DDL。
+            if self._migration_manifest_source is not None:
+                if not _migration_fingerprint_matches(
+                        self._migration_manifest_source, source_fingerprint
+                ):
+                    raise ThreadPersistenceError(
+                        "CHECKPOINT_MIGRATION_SOURCE_FINGERPRINT_MISMATCH"
+                    )
             source_version = 6 if pre_transcript_legacy else source_fingerprint.user_version
             if source_version > _SCHEMA_VERSION:
                 raise ThreadPersistenceError(
@@ -4223,7 +5580,11 @@ class ThreadPersistence:
                 backup_path=migration_backup,
                 final_fingerprint=final_fingerprint,
             )
-            await self._clear_migration_state()
+            # ZC-108：child（_MIGRATION_CHILD_PROCESS_MODE）不再清除 migration
+            # state，由 parent 在 reaped 后统一封口。但 bootstrap（非 child 进程）
+            # 仍需清除 state，因为 bootstrap 不经过 child supervision 流程。
+            if not _MIGRATION_CHILD_PROCESS_MODE:
+                await self._clear_migration_state()
             if commit_error is not None:
                 if isinstance(commit_error, (asyncio.CancelledError, ThreadPersistenceError)):
                     raise commit_error
@@ -4259,7 +5620,13 @@ class ThreadPersistence:
                         migration_backup,
                         source_fingerprint,
                     )
-                    await self._clear_migration_state()
+                    # ZC-108：child 恢复 source 后写 restored_source，不清 state。
+                    # parent 在 reaped 后按 source/final/backup 事实统一收敛。
+                    await self._write_migration_state(
+                        status="restored_source",
+                        source_fingerprint=source_fingerprint,
+                        backup_path=migration_backup,
+                    )
                 except BaseException as restore_exc:
                     try:
                         self._mark_migration_restore_failed(restore_exc)
@@ -5036,7 +6403,11 @@ class ThreadPersistence:
             source_version: int,
             source_fingerprint: _MigrationDatabaseFingerprint | None = None,
     ) -> Path:
-        """在已持有 BEGIN IMMEDIATE 时生成并严格验证独立 SQLite backup。"""
+        """在已持有 BEGIN IMMEDIATE 时生成并严格验证独立 SQLite backup。
+
+        ZC-108：当存在 attempt context 时使用登记的 backup temp，并在使用
+        前后复核 identity。四个 crash temp 窗口通过 failpoint 覆盖。
+        """
         _migration_child_test_failure(
             "backup_failure",
             ThreadPersistenceError("CHECKPOINT_MIGRATION_BACKUP_FAILED"),
@@ -5045,12 +6416,33 @@ class ThreadPersistence:
             raise ThreadPersistenceError("CHECKPOINT_MIGRATION_BOUNDARY_REQUIRED")
         source = source_fingerprint or await self._database_fingerprint_async()
         backup_path = self._migration_backup_path(source_version)
-        temporary = backup_path.with_name(
-            f"{backup_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
-        )
+        # ZC-108：有 attempt context 时使用登记 temp，否则回退到随机 temp。
+        context = self._migration_attempt_context
+        if context is not None:
+            temporary = context.backup_temp
+            registered_identity = context.backup_temp_identity
+        else:
+            temporary = backup_path.with_name(
+                f"{backup_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+            )
+            registered_identity = None
         source_connection: sqlite3.Connection | None = None
         target: sqlite3.Connection | None = None
         try:
+            # ZC-108：使用登记 temp 前以 fd 复核 identity，ftruncate(0)、fsync。
+            if context is not None and registered_identity is not None:
+                fd = os.open(temporary, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+                try:
+                    fd_identity = _migration_file_identity_from_fd(fd)
+                    if not _migration_file_identity_matches(registered_identity, fd_identity):
+                        raise ThreadPersistenceError(
+                            "CHECKPOINT_MIGRATION_TEMP_IDENTITY_MISMATCH:backup"
+                        )
+                    os.ftruncate(fd, 0)
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+            _migration_child_pause_sync("backup_temp_created_before_copy")
             # Python sqlite3 cannot run backup from the same connection that
             # currently owns BEGIN IMMEDIATE: SQLite waits on its own write
             # transaction.  A second read connection observes the same
@@ -5062,6 +6454,7 @@ class ThreadPersistence:
             target.commit()
             target.close()
             target = None
+            _migration_child_pause_sync("backup_temp_copied_before_replace")
             if any(
                     temporary.with_name(temporary.name + suffix).exists()
                     for suffix in ("-wal", "-shm", "-journal")
@@ -5080,6 +6473,13 @@ class ThreadPersistence:
                 raise ThreadPersistenceError(
                     "CHECKPOINT_MIGRATION_BACKUP_VALIDATION_FAILED"
                 )
+            # ZC-108：SQLite close 后、os.replace 前再次 lstat 复核 identity。
+            if context is not None and registered_identity is not None:
+                pre_replace_identity = _migration_file_identity_from_path_lstat(temporary)
+                if not _migration_file_identity_matches(registered_identity, pre_replace_identity):
+                    raise ThreadPersistenceError(
+                        "CHECKPOINT_MIGRATION_TEMP_IDENTITY_MISMATCH:backup"
+                    )
             os.chmod(temporary, 0o600)
             _fsync_file_path(temporary)
             os.replace(temporary, backup_path)
@@ -5095,7 +6495,10 @@ class ThreadPersistence:
                 source_connection.close()
             if target is not None:
                 target.close()
-            temporary.unlink(missing_ok=True)
+            # ZC-108：登记 temp 不在 child 的 finally 中删除；parent 在 settle
+            # 时按 identity 统一清理。只有非登记的随机 temp 才在这里删除。
+            if context is None:
+                temporary.unlink(missing_ok=True)
 
     async def _is_pre_transcript_prompt_epoch_source(self) -> bool:
         """异步识别可按 v6 迁移的旧分支 v7 数据库，不修改原始版本号。"""
@@ -5131,16 +6534,29 @@ class ThreadPersistence:
             backup_path: Path,
             final_fingerprint: _MigrationDatabaseFingerprint | None = None,
     ) -> None:
-        """原子写入迁移状态；状态写失败时禁止继续启动或迁移。"""
+        """原子写入迁移状态；状态写失败时禁止继续启动或迁移。
+
+        ZC-108：state v2 包含 attempt_id，且 child 不再清除 state；parent
+        在 reaped、DB 收敛和 cleanup closable 后统一封口。
+        """
         if status == "committed" and _MIGRATION_CHILD_TEST_PHASE == "state_committed_failure":
             raise ThreadPersistenceError("CHECKPOINT_MIGRATION_STATE_WRITE_FAILED")
+        # 全新空库仍在 parent 内 bootstrap，并沿用无 attempt 的 v1 state；所有
+        # legacy child 写入必须是带 attempt_id 的 v2。
+        state_version = (
+            _MIGRATION_STATE_VERSION
+            if self._migration_attempt_context is not None
+            else _MIGRATION_STATE_VERSION_LEGACY
+        )
         payload: dict[str, object] = {
-            "version": _MIGRATION_STATE_VERSION,
+            "version": state_version,
             "status": status,
             "database": self._path.name,
             "backup": backup_path.name,
             "source": source_fingerprint.record(),
         }
+        if self._migration_attempt_context is not None:
+            payload["attempt_id"] = self._migration_attempt_context.attempt_id
         if final_fingerprint is not None:
             payload["final"] = final_fingerprint.record()
         try:
@@ -5149,28 +6565,14 @@ class ThreadPersistence:
             raise ThreadPersistenceError("CHECKPOINT_MIGRATION_STATE_WRITE_FAILED") from exc
 
     def _write_migration_state_sync(self, payload: Mapping[str, object]) -> None:
-        """以 fsync + 同目录 replace 持久化状态，避免半个 JSON。"""
+        """以 fsync + 同目录 replace 持久化状态，避免半个 JSON。
+
+        ZC-108：使用固定 staging basename 替代随机 mkstemp，避免 parent/child
+        SIGKILL 制造无界残留。state/poison staging 同样固定为每类最多一个。
+        """
         state_path = self._migration_state_path()
-        temporary: Path | None = None
-        try:
-            descriptor, temporary_name = tempfile.mkstemp(
-                prefix=f".{state_path.name}.",
-                suffix=".tmp",
-                dir=state_path.parent,
-            )
-            temporary = Path(temporary_name)
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                _restrict_owner_mode(handle.fileno())
-                json.dump(payload, handle, ensure_ascii=False, sort_keys=True, allow_nan=False)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, state_path)
-            temporary = None
-            _fsync_directory_best_effort(state_path.parent)
-        finally:
-            if temporary is not None:
-                temporary.unlink(missing_ok=True)
+        staging = _migration_state_staging_path(self._path)
+        _migration_atomic_write_json(state_path, staging, payload, fault_key="state")
 
     async def _clear_migration_state(self) -> None:
         """删除已封口 state；删除失败保持 fail closed，下一次可重试。"""
@@ -5208,12 +6610,25 @@ class ThreadPersistence:
             backup_path: Path,
             expected: _MigrationDatabaseFingerprint,
     ) -> None:
-        """关闭旧连接后原子替换完整快照，不让旧 WAL/SHM 继续挂到目标上。"""
+        """关闭旧连接后原子替换完整快照，不让旧 WAL/SHM 继续挂到目标上。
+
+        ZC-108：有 attempt context 时使用登记的 restore temp。
+        """
         self._validate_backup_file_sync(backup_path, expected)
         await self._connection.rollback()
         await self._connection.close()
         self._closed = True
-        self._restore_backup_path_sync(self._path, backup_path, expected)
+        registered_temp: Path | None = None
+        registered_identity: _MigrationFileIdentity | None = None
+        context = self._migration_attempt_context
+        if context is not None:
+            registered_temp = context.restore_temp
+            registered_identity = context.restore_temp_identity
+        self._restore_backup_path_sync(
+            self._path, backup_path, expected,
+            registered_temp=registered_temp,
+            registered_identity=registered_identity,
+        )
 
     def _validate_backup_file_sync(
             self,
@@ -5221,8 +6636,11 @@ class ThreadPersistence:
             expected: _MigrationDatabaseFingerprint,
     ) -> None:
         """验证固定 backup 槽仍是可独立恢复的原始快照。"""
-        if not backup_path.is_file():
-            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_BACKUP_UNAVAILABLE")
+        _validate_migration_owned_regular_path(
+            backup_path,
+            error_code="CHECKPOINT_MIGRATION_BACKUP_UNAVAILABLE",
+            require_private=True,
+        )
         if any(
                 backup_path.with_name(backup_path.name + suffix).exists()
                 for suffix in ("-wal", "-shm", "-journal")
@@ -5245,6 +6663,11 @@ class ThreadPersistence:
         """验证提交标记对应的最终库，不以 user_version 单独认定成功。"""
         if expected.user_version != _SCHEMA_VERSION or expected.integrity_check != "ok":
             raise ThreadPersistenceError("CHECKPOINT_MIGRATION_FINAL_VALIDATION_FAILED")
+        _validate_migration_owned_regular_path(
+            path,
+            error_code="CHECKPOINT_MIGRATION_FINAL_VALIDATION_FAILED",
+            require_private=False,
+        )
         connection = sqlite3.connect(path)
         try:
             actual = _migration_database_fingerprint_sync(connection)
@@ -5265,6 +6688,11 @@ class ThreadPersistence:
             expected: _MigrationDatabaseFingerprint,
     ) -> None:
         """验证可重试的当前 v6 主库仍满足 source contract。"""
+        _validate_migration_owned_regular_path(
+            path,
+            error_code="CHECKPOINT_MIGRATION_SOURCE_CHANGED",
+            require_private=False,
+        )
         connection = sqlite3.connect(path)
         try:
             actual = _migration_database_fingerprint_sync(connection)
@@ -5280,41 +6708,27 @@ class ThreadPersistence:
             *,
             preserve_recovery_state: bool = False,
     ) -> None:
-        """启动前处理上次崩溃留下的 migration state；失败则不创建正常连接。"""
+        """只恢复无 attempt guard 的 legacy v1 migration state。"""
         _assert_migration_path_available(path)
         state_path = path.with_name(path.name + _MIGRATION_STATE_SUFFIX)
-        if not state_path.exists():
-            return
         try:
-            raw = json.loads(state_path.read_text(encoding="utf-8"))
-            if not isinstance(raw, dict) or raw.get("version") != _MIGRATION_STATE_VERSION:
-                raise ValueError("migration state version is invalid")
-            if raw.get("database") != path.name:
-                raise ValueError("migration state database is invalid")
-            status = raw.get("status")
-            if status not in {
-                "migrating",
-                "committing",
-                "commit_unknown",
-                "committed",
-                "restore_failed",
-            }:
-                raise ValueError("migration state status is invalid")
-            source = _migration_fingerprint_from_record(raw.get("source"))
+            state = _parse_migration_state(
+                state_path,
+                expected_database=path.name,
+            )
+            if state is None:
+                return
+            # v2 state 只能由匹配的 active/settled attempt 收敛。open 已在进入
+            # 本函数前证明 manifest 不存在，因此不得把孤立 v2 降级成 legacy v1。
+            if state.version != _MIGRATION_STATE_VERSION_LEGACY:
+                raise ValueError("v2 migration state has no matching attempt")
+            status = state.status
+            source = state.source
             expected_backup = path.with_name(
                 f"{path.name}.pre-v{source.user_version}-migration.bak"
             )
-            if raw.get("backup") != expected_backup.name:
-                raise ValueError("migration state backup is invalid")
             backup_path = expected_backup
-            final_value = raw.get("final")
-            final = (
-                _migration_fingerprint_from_record(final_value)
-                if final_value is not None
-                else None
-            )
-            if status in {"committing", "commit_unknown", "committed"} and final is None:
-                raise ValueError("committed migration state has no final fingerprint")
+            final = state.final
 
             current: _MigrationDatabaseFingerprint | None = None
             if path.is_file():
@@ -5373,8 +6787,11 @@ class ThreadPersistence:
             expected: _MigrationDatabaseFingerprint,
     ) -> None:
         """无实例状态地验证启动恢复使用的 backup。"""
-        if not backup_path.is_file():
-            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_BACKUP_UNAVAILABLE")
+        _validate_migration_owned_regular_path(
+            backup_path,
+            error_code="CHECKPOINT_MIGRATION_BACKUP_UNAVAILABLE",
+            require_private=True,
+        )
         if any(
                 backup_path.with_name(backup_path.name + suffix).exists()
                 for suffix in ("-wal", "-shm", "-journal")
@@ -5394,22 +6811,50 @@ class ThreadPersistence:
             path: Path,
             backup_path: Path,
             expected: _MigrationDatabaseFingerprint,
+            *,
+            registered_temp: Path | None = None,
+            registered_identity: _MigrationFileIdentity | None = None,
     ) -> None:
-        """把 backup 恢复到新文件并原子替换，清除旧目标的所有 journal sidecar。"""
+        """把 backup 恢复到新文件并原子替换，清除旧目标的所有 journal sidecar。
+
+        ZC-108：当提供 ``registered_temp`` 和 ``registered_identity`` 时使用
+        登记的 restore temp 并在使用前后复核 identity。restore 两个 phase
+        使用同步 pause，不在同步函数内伪装 await。
+        """
         _migration_child_test_failure(
             "restore_failure",
             ThreadPersistenceError("CHECKPOINT_MIGRATION_RESTORE_VALIDATION_FAILED"),
         )
         ThreadPersistence._validate_backup_path_sync(backup_path, expected)
-        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.restore.tmp")
+        if registered_temp is not None:
+            temporary = registered_temp
+            use_registered = True
+        else:
+            temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.restore.tmp")
+            use_registered = False
         source = sqlite3.connect(backup_path)
         target: sqlite3.Connection | None = None
         try:
+            # ZC-108：使用登记 temp 前以 fd 复核 identity，ftruncate(0)、fsync。
+            if use_registered and registered_identity is not None:
+                fd = os.open(temporary, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+                try:
+                    fd_identity = _migration_file_identity_from_fd(fd)
+                    if not _migration_file_identity_matches(registered_identity, fd_identity):
+                        raise ThreadPersistenceError(
+                            "CHECKPOINT_MIGRATION_TEMP_IDENTITY_MISMATCH:restore"
+                        )
+                    os.ftruncate(fd, 0)
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+            _migration_child_pause_sync("restore_temp_created_before_copy")
             target = sqlite3.connect(temporary)
             source.backup(target)
             target.commit()
             target.close()
             target = None
+            _migration_child_pause_sync("restore_temp_copied_before_replace")
             for suffix in ("-wal", "-shm", "-journal"):
                 if temporary.with_name(temporary.name + suffix).exists():
                     raise ThreadPersistenceError(
@@ -5424,6 +6869,13 @@ class ThreadPersistence:
                 raise ThreadPersistenceError(
                     "CHECKPOINT_MIGRATION_RESTORE_VALIDATION_FAILED"
                 )
+            # ZC-108：SQLite close 后、os.replace 前再次 lstat 复核 identity。
+            if use_registered and registered_identity is not None:
+                pre_replace_identity = _migration_file_identity_from_path_lstat(temporary)
+                if not _migration_file_identity_matches(registered_identity, pre_replace_identity):
+                    raise ThreadPersistenceError(
+                        "CHECKPOINT_MIGRATION_TEMP_IDENTITY_MISMATCH:restore"
+                    )
             os.chmod(temporary, 0o600)
             _fsync_file_path(temporary)
             # The old target connection has been closed, so these exact sidecars
@@ -5441,7 +6893,9 @@ class ThreadPersistence:
             source.close()
             if target is not None:
                 target.close()
-            temporary.unlink(missing_ok=True)
+            # ZC-108：登记 temp 不在 finally 中删除；parent 在 settle 时统一清理。
+            if not use_registered:
+                temporary.unlink(missing_ok=True)
 
     @staticmethod
     def _mark_restore_state_sync(state_path: Path, error: BaseException) -> None:
@@ -5458,22 +6912,15 @@ class ThreadPersistence:
                 else "CHECKPOINT_MIGRATION_RESTORE_FAILED"
             )
             raw["error_type"] = type(error).__name__
-            directory = state_path.parent
-            descriptor, temporary_name = tempfile.mkstemp(
-                prefix=f".{state_path.name}.", suffix=".tmp", dir=directory
+            staging = state_path.with_name(
+                state_path.name + _MIGRATION_STATE_STAGING_SUFFIX
             )
-            temporary = Path(temporary_name)
-            try:
-                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                    _restrict_owner_mode(handle.fileno())
-                    json.dump(raw, handle, ensure_ascii=False, sort_keys=True, allow_nan=False)
-                    handle.write("\n")
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(temporary, state_path)
-                _fsync_directory_best_effort(directory)
-            finally:
-                temporary.unlink(missing_ok=True)
+            _migration_atomic_write_json(
+                state_path,
+                staging,
+                raw,
+                fault_key="state",
+            )
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             pass
 
@@ -6876,49 +8323,127 @@ def _legacy_migration_child_environment() -> dict[str, str]:
     return environment
 
 
-async def _wait_migration_child(process: subprocess.Popen[bytes], deadline: float) -> bool:
-    """轮询 child，避免在父事件循环中引入不可控等待线程。"""
+async def _wait_migration_child(
+        process: subprocess.Popen[bytes],
+        deadline: float,
+) -> tuple[bool, int | None, str | None]:
+    """有界观察 child；poll 失败时仍用 wait(timeout=0) 尝试取得退出证明。"""
     loop = asyncio.get_running_loop()
-    while process.poll() is None:
+    observation_error: str | None = None
+    while True:
+        returncode: int | None = None
+        try:
+            returncode = process.poll()
+        except (OSError, subprocess.SubprocessError):
+            observation_error = "poll_failed"
+            try:
+                returncode = process.wait(timeout=0)
+            except subprocess.TimeoutExpired:
+                returncode = None
+            except (OSError, subprocess.SubprocessError):
+                observation_error = "poll_wait_failed"
+        if returncode is not None:
+            return True, int(returncode), observation_error
         remaining = deadline - loop.time()
         if remaining <= 0:
-            return False
+            return False, None, observation_error
         await asyncio.sleep(min(0.01, remaining))
-    return True
 
 
-async def _terminate_and_reap_migration_child(
+async def _terminate_kill_reap_migration_child(
         process: subprocess.Popen[bytes],
-) -> None:
-    """先 terminate，再在固定上限内 kill，并确认没有遗留 child。"""
-    if process.poll() is not None:
-        return
+        ready_path: Path,
+        attempt_id: str,
+) -> _MigrationChildOutcome:
+    """先 terminate，再在固定上限内 kill，并确认 child 已退出。
+
+    ZC-108：所有 poll/wait/terminate/kill/reap 异常都归入 typed outcome。
+    ProcessLookupError 只说明信号发送目标不存在，不是 reap 证明。terminate
+    失败后仍可尝试 wait/poll；只要最终没有可靠 returncode 就是 exit_unknown。
+    """
+    pid = process.pid
+    loop = asyncio.get_running_loop()
+    completed, returncode, observation_error = await _wait_migration_child(
+        process, loop.time(),
+    )
+    if completed:
+        return _MigrationChildOutcome(
+            classification="exited_reaped",
+            returncode=returncode,
+            error_code=None,
+            failure_stage=observation_error or "already_exited",
+            pid=pid,
+            child_ready_seen=_migration_path_entry_exists(ready_path),
+        )
+    # terminate。
+    terminate_error: str | None = None
     try:
         process.terminate()
     except ProcessLookupError:
-        return
-    loop = asyncio.get_running_loop()
-    if await _wait_migration_child(
-            process,
-            loop.time() + _LEGACY_MIGRATION_CHILD_TERMINATE_GRACE_SECONDS,
-    ):
-        return
+        terminate_error = "terminate_process_missing"
+    except PermissionError:
+        terminate_error = "terminate_permission"
+    except OSError:
+        terminate_error = "terminate_failed"
+    completed, returncode, wait_error = await _wait_migration_child(
+        process,
+        loop.time() + _LEGACY_MIGRATION_CHILD_TERMINATE_GRACE_SECONDS,
+    )
+    if completed:
+        return _MigrationChildOutcome(
+            classification="exited_reaped",
+            returncode=returncode,
+            error_code=None,
+            failure_stage=wait_error or terminate_error or "terminate_reaped",
+            pid=pid,
+            child_ready_seen=_migration_path_entry_exists(ready_path),
+        )
+    # kill。
+    kill_error: str | None = None
     try:
         process.kill()
     except ProcessLookupError:
-        return
-    if not await _wait_migration_child(
-            process,
-            loop.time() + _LEGACY_MIGRATION_CHILD_TERMINATE_GRACE_SECONDS,
-    ):
-        raise ThreadPersistenceError("CHECKPOINT_MIGRATION_WORKER_REAP_FAILED")
+        kill_error = "kill_process_missing"
+    except PermissionError:
+        kill_error = "kill_permission"
+    except OSError:
+        kill_error = "kill_failed"
+    completed, returncode, final_wait_error = await _wait_migration_child(
+        process,
+        loop.time() + _LEGACY_MIGRATION_CHILD_TERMINATE_GRACE_SECONDS,
+    )
+    if completed:
+        return _MigrationChildOutcome(
+            classification="exited_reaped",
+            returncode=returncode,
+            error_code=None,
+            failure_stage=final_wait_error or kill_error or "kill_reaped",
+            pid=pid,
+            child_ready_seen=_migration_path_entry_exists(ready_path),
+        )
+    # 无法证明 child 已退出。
+    return _MigrationChildOutcome(
+        classification="exit_unknown",
+        returncode=None,
+        error_code="CHECKPOINT_MIGRATION_WORKER_EXIT_UNKNOWN",
+        failure_stage=final_wait_error or kill_error or wait_error or terminate_error or "reap_failed",
+        pid=pid,
+        child_ready_seen=_migration_path_entry_exists(ready_path),
+    )
 
 
-async def _run_legacy_migration_child_once(
+async def _supervise_migration_child(
         path: Path,
         project_fingerprint: str,
-) -> tuple[bool, bool, str | None]:
-    """运行一次可杀死的 child；返回 (正常退出, 是否超时, typed error)。"""
+        attempt_id: str,
+        temp_dir: Path,
+) -> _MigrationChildOutcome:
+    """spawn 并监督 migration child；返回 typed outcome。
+
+    ZC-108：timeout 不是独立事实。timeout 后成功 kill+reap 仍是 exited_reaped；
+    只有无法证明退出才是 exit_unknown。stdout 读取失败但 child 已 reaped
+    不得丢失 exit authority，只把 error code 降级为通用码。
+    """
     command = [
         sys.executable,
         "-m",
@@ -6927,6 +8452,10 @@ async def _run_legacy_migration_child_once(
         str(path.resolve()),
         "--project-fingerprint",
         project_fingerprint,
+        "--attempt-id",
+        attempt_id,
+        "--temp-dir",
+        str(temp_dir.resolve()),
     ]
     test_phase = _requested_migration_test_phase()
     if test_phase is not None:
@@ -6940,93 +8469,764 @@ async def _run_legacy_migration_child_once(
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         )
-    except OSError as exc:
-        raise ThreadPersistenceError(
-            "CHECKPOINT_MIGRATION_WORKER_START_FAILED"
-        ) from exc
+    except OSError:
+        return _MigrationChildOutcome(
+            classification="not_started",
+            returncode=None,
+            error_code="CHECKPOINT_MIGRATION_WORKER_START_FAILED",
+            failure_stage="spawn",
+            pid=None,
+            child_ready_seen=False,
+        )
+    ready_path = _migration_attempt_child_ready_path(temp_dir)
     try:
-        completed = await _wait_migration_child(
-            process,
-            asyncio.get_running_loop().time() + _LEGACY_MIGRATION_CHILD_DEADLINE_SECONDS,
-        )
+        deadline = asyncio.get_running_loop().time() + _LEGACY_MIGRATION_CHILD_DEADLINE_SECONDS
+        completed, returncode, wait_error = await _wait_migration_child(process, deadline)
         if not completed:
-            await _terminate_and_reap_migration_child(process)
-            return False, True, None
-        output = process.stdout.read(512) if process.stdout is not None else b""
-        error_code = output.decode("utf-8", errors="replace").splitlines()
-        return (
-            process.returncode == 0,
-            False,
-            error_code[0] if error_code and error_code[0].startswith("CHECKPOINT_") else None,
-        )
-    except BaseException:
-        cleanup = asyncio.create_task(_terminate_and_reap_migration_child(process))
+            # timeout：terminate/kill/reap 后按是否证明退出分类。
+            return await _terminate_kill_reap_migration_child(
+                process, ready_path, attempt_id,
+            )
+        # child 正常退出。
         try:
-            await asyncio.shield(cleanup)
-        except asyncio.CancelledError:
+            output = process.stdout.read(512) if process.stdout is not None else b""
+            error_lines = output.decode("utf-8", errors="replace").splitlines()
+            error_code = (
+                error_lines[0]
+                if error_lines and error_lines[0].startswith("CHECKPOINT_")
+                else None
+            )
+        except (OSError, ValueError):
+            # stdout 读取失败但 child 已 reaped，不丢失 exit authority。
+            error_code = "CHECKPOINT_MIGRATION_WORKER_FAILED"
+        return _MigrationChildOutcome(
+            classification="exited_reaped",
+            returncode=returncode,
+            error_code=error_code,
+            failure_stage=wait_error,
+            pid=process.pid,
+            child_ready_seen=_migration_path_entry_exists(ready_path),
+        )
+    except BaseException as supervisor_error:
+        # parent 取消时 shield 完整 supervisor 收尾。
+        cleanup = asyncio.create_task(
+            _terminate_kill_reap_migration_child(process, ready_path, attempt_id)
+        )
+        cancelled = isinstance(supervisor_error, asyncio.CancelledError)
+        while not cleanup.done():
             try:
                 await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                cancelled = True
+                continue
             except BaseException:
-                pass
-            raise
-        raise
+                break
+        # 返回 outcome（即使被取消），让调用方在 settle 后再重新抛取消。
+        try:
+            outcome = cleanup.result()
+        except BaseException:
+            outcome = _MigrationChildOutcome(
+                classification="exit_unknown",
+                returncode=None,
+                error_code="CHECKPOINT_MIGRATION_WORKER_EXIT_UNKNOWN",
+                failure_stage="supervisor_cleanup_failed",
+                pid=process.pid,
+                child_ready_seen=_migration_path_entry_exists(ready_path),
+            )
+        if not cancelled and outcome.classification == "exited_reaped":
+            outcome = _MigrationChildOutcome(
+                classification=outcome.classification,
+                returncode=outcome.returncode,
+                error_code="CHECKPOINT_MIGRATION_WORKER_FAILED",
+                failure_stage=outcome.failure_stage or "supervisor_failed",
+                pid=outcome.pid,
+                child_ready_seen=outcome.child_ready_seen,
+            )
+        if cancelled:
+            # 标记被取消，但不在这里 re-raise；调用方在 settle 后重新抛。
+            outcome = _MigrationChildOutcome(
+                classification=outcome.classification,
+                returncode=outcome.returncode,
+                error_code=outcome.error_code,
+                failure_stage="cancelled",
+                pid=outcome.pid,
+                child_ready_seen=outcome.child_ready_seen,
+            )
+        return outcome
     finally:
         if process.stdout is not None:
-            process.stdout.close()
+            try:
+                process.stdout.close()
+            except OSError:
+                pass
+
+
+def _settle_owned_migration_attempt_sync(
+        path: Path,
+        authority: _MigrationReapAuthority,
+        manifest: _MigrationAttemptManifest,
+        *,
+        cleanup_fault_prefix: str = "settle",
+) -> None:
+    """当前 owner 在 active guard 下按 DB 事实收敛。
+
+    ZC-108：只有 supervisor 在 Popen 的 poll/wait 已确定 returncode、child
+    已由当前进程 settle 后创建 authority。fresh owner 没有 authority，调用
+    在线恢复必须被拒绝。
+
+    1. state 不存在：当前主库必须严格等于 manifest source；否则失败关闭。
+    2. state v2 且 current == final：验证 final schema，保留 final。
+    3. state v2 且 current == source：验证 source schema 与 verified backup，保留 source。
+    4. current 既不是 final 也不是 source：验证 fixed backup 与 source，使用
+       登记的 restore temp 原子恢复，再验证主库等于 source。
+    5. state/attempt ID、source fingerprint、backup basename 任一不一致：失败关闭。
+    """
+    # 验证 authority 与 manifest 匹配。preparing 从未合法 spawn child。
+    if authority.attempt_id != manifest.attempt_id or authority.pid <= 0:
+        raise ThreadPersistenceError("CHECKPOINT_MIGRATION_AUTHORITY_MISMATCH")
+    if manifest.status not in {"prepared", "exit_unknown"}:
+        raise ThreadPersistenceError("CHECKPOINT_MIGRATION_ATTEMPT_NOT_OWNED")
+    temp_dir = _migration_attempt_dir_path(path, manifest.attempt_id)
+    try:
+        _validate_migration_attempt_directory(temp_dir, manifest.temp_dir_identity)
+    except (OSError, ValueError) as exc:
+        raise ThreadPersistenceError(
+            "CHECKPOINT_MIGRATION_ATTEMPT_DIR_IDENTITY_MISMATCH"
+        ) from exc
+    state_path = path.with_name(path.name + _MIGRATION_STATE_SUFFIX)
+    source = manifest.source
+    backup_path = path.with_name(
+        f"{path.name}.pre-v{source.user_version}-migration.bak"
+    )
+    # 读取当前主库 fingerprint。
+    current: _MigrationDatabaseFingerprint | None = None
+    if path.is_file():
+        try:
+            conn = sqlite3.connect(path)
+            try:
+                current = _migration_database_fingerprint_sync(conn)
+            finally:
+                conn.close()
+        except (OSError, sqlite3.Error):
+            current = None
+    try:
+        state = _parse_migration_state(
+            state_path,
+            expected_database=path.name,
+            expected_attempt_id=manifest.attempt_id,
+        )
+    except (OSError, ValueError) as exc:
+        raise ThreadPersistenceError("CHECKPOINT_MIGRATION_STATE_INVALID") from exc
+    if state is not None:
+        if state.version != _MIGRATION_STATE_VERSION:
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_STATE_INVALID")
+        if not _migration_fingerprint_matches(source, state.source):
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_STATE_SOURCE_MISMATCH")
+        if state.backup != backup_path.name:
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_STATE_INVALID")
+        if not authority.child_ready_seen:
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_CHILD_READY_INVALID")
+    if authority.child_ready_seen:
+        ready_path = _migration_attempt_child_ready_path(temp_dir)
+        try:
+            ready = _parse_migration_child_ready_marker(
+                ready_path,
+                expected_attempt_id=manifest.attempt_id,
+                expected_pid=authority.pid,
+            )
+        except (OSError, ValueError) as exc:
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_CHILD_READY_INVALID") from exc
+        if ready is None:
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_CHILD_READY_INVALID")
+    settled_result: str | None = None
+    settled_database: _MigrationDatabaseFingerprint | None = None
+    if state is None:
+        if current is None or not _migration_fingerprint_matches(source, current):
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_STATE_MISSING")
+        ThreadPersistence._validate_source_database_path_sync(path, source)
+        settled_result = "source"
+        settled_database = current
+    elif (
+            state.final is not None
+            and current is not None
+            and _migration_fingerprint_matches(state.final, current)
+    ):
+        # DB 已提交为 final。
+        ThreadPersistence._validate_final_database_path_sync(path, state.final)
+        settled_result = "final"
+        settled_database = state.final
+    elif current is not None and _migration_fingerprint_matches(source, current):
+        # DB 仍是 source（迁移未完成或已回滚）。
+        ThreadPersistence._validate_source_database_path_sync(path, source)
+        if backup_path.is_file():
+            ThreadPersistence._validate_backup_path_sync(backup_path, source)
+        settled_result = "source"
+        settled_database = current
+    else:
+        # 半迁移/损坏：从 verified backup 恢复。
+        ThreadPersistence._validate_backup_path_sync(backup_path, source)
+        ThreadPersistence._restore_backup_path_sync(
+            path, backup_path, source,
+            registered_temp=_migration_attempt_restore_temp_path(temp_dir),
+            registered_identity=manifest.restore_temp_identity,
+        )
+        ThreadPersistence._validate_source_database_path_sync(path, source)
+        settled_result = "source"
+        settled_database = source
+    # 清理登记 temp + child-ready。
+    cleanup_result = _migration_cleanup_attempt_temps(
+        temp_dir, manifest, unlink_fault_prefix=cleanup_fault_prefix,
+    )
+    if not cleanup_result.closable:
+        raise ThreadPersistenceError(
+            "CHECKPOINT_MIGRATION_CLEANUP_NOT_CLOSABLE"
+        )
+    # 删除空 attempt 目录并 fsync data_dir。
+    dir_ok, dir_detail = _migration_remove_empty_attempt_dir(temp_dir, cleanup_result)
+    if not dir_ok:
+        raise ThreadPersistenceError(
+            f"CHECKPOINT_MIGRATION_DIR_CLEANUP_FAILED:{dir_detail}"
+        )
+    # 固定 staging basename 也必须在当前 reaped owner 内收敛，否则下一次
+    # marker/state 写会被 O_EXCL 永久阻断。
+    for staging_path in (
+        _migration_attempt_staging_path(path),
+        _migration_state_staging_path(path),
+        _migration_poison_staging_path(path),
+    ):
+        _migration_unlink_strict_marker(staging_path)
+    # manifest 原子改为 settled。
+    manifest_path = _migration_attempt_manifest_path(path)
+    settled_payload = _migration_build_attempt_manifest_payload(
+        status="settled",
+        database=path.name,
+        attempt_id=manifest.attempt_id,
+        created_at_ms=manifest.created_at_ms,
+        source=source,
+        temp_dir_name=manifest.temp_dir_name,
+        temp_dir_identity=manifest.temp_dir_identity,
+        backup_temp_name=manifest.backup_temp_name,
+        backup_temp_identity=manifest.backup_temp_identity,
+        restore_temp_name=manifest.restore_temp_name,
+        restore_temp_identity=manifest.restore_temp_identity,
+        settled_result=settled_result,
+        settled_database=settled_database,
+        child_returncode=authority.returncode,
+        cleanup_summary={
+            "deleted": list(cleanup_result.deleted),
+            "resolved_absent": list(cleanup_result.resolved_absent),
+            "foreign_replacements": list(cleanup_result.foreign_replacements),
+        },
+    )
+    _migration_write_attempt_manifest(
+        path, manifest_path, settled_payload, old_status=manifest.status,
+    )
+    # 清 migration state 并 fsync data_dir。
+    _migration_unlink_strict_marker(state_path)
+    # 清 durable poison（如果存在）。
+    poison_path = _migration_poison_path(path)
+    _migration_unlink_strict_marker(poison_path)
+    # 清 process-local poison。
+    _clear_migration_poison(path)
+    # 删除 settled manifest 并 fsync data_dir。
+    _migration_unlink_strict_marker(manifest_path)
 
 
 async def _run_legacy_migration_child(
         path: Path,
         project_fingerprint: str,
 ) -> None:
-    """在父持有 migration lock 时运行并严格收敛一次 legacy migration。"""
-    _child_succeeded, timed_out, child_error_code = await _run_legacy_migration_child_once(
-        path,
-        project_fingerprint,
+    """在父持有 migration lock 时运行并严格收敛一次 legacy migration。
+
+    ZC-108：父进程持有 migration lock → 在 spawn 前发布 active attempt guard
+    → 准备并登记精确 temp 身份 → spawn child → child 在首次访问 SQLite 前发布
+    一次性 child-ready 事实 → 父进程得到 typed child outcome → 按 exited_reaped /
+    not_started / exit_unknown 收敛。
+    """
+    _assert_migration_file_identity_supported()
+    # 1. 计算完整 source fingerprint。
+    source_connection = sqlite3.connect(path)
+    try:
+        source_fingerprint = _migration_database_fingerprint_sync(source_connection)
+    finally:
+        source_connection.close()
+    attempt_id = uuid.uuid4().hex
+    created_at_ms = _migration_now_ms()
+    temp_dir = _migration_attempt_dir_path(path, attempt_id)
+    manifest_path = _migration_attempt_manifest_path(path)
+    # 2. 原子发布 status=preparing 的 manifest。
+    preparing_payload = _migration_build_attempt_manifest_payload(
+        status="preparing",
+        database=path.name,
+        attempt_id=attempt_id,
+        created_at_ms=created_at_ms,
+        source=source_fingerprint,
+        temp_dir_name=temp_dir.name,
+        temp_dir_identity=None,
+        backup_temp_name=_MIGRATION_ATTEMPT_TEMP_BACKUP_NAME,
+        backup_temp_identity=None,
+        restore_temp_name=_MIGRATION_ATTEMPT_TEMP_RESTORE_NAME,
+        restore_temp_identity=None,
+    )
+    _migration_write_attempt_manifest(
+        path, manifest_path, preparing_payload, old_status=None,
+    )
+    # 3. 创建私有 attempt 目录 + 2 个空 temp + 记录 identity。
+    try:
+        temp_dir.mkdir(mode=0o700)
+        backup_temp = _migration_attempt_backup_temp_path(temp_dir)
+        restore_temp = _migration_attempt_restore_temp_path(temp_dir)
+        for temp_path in (backup_temp, restore_temp):
+            fd = os.open(
+                temp_path,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            try:
+                _restrict_owner_mode(fd)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        temp_dir_stat = temp_dir.lstat()
+        if not stat.S_ISDIR(temp_dir_stat.st_mode):
+            raise ValueError("migration attempt path is not a directory")
+        temp_dir_identity = _migration_file_identity_from_stat(temp_dir_stat)
+        backup_identity = _migration_file_identity_from_path_lstat(backup_temp)
+        restore_identity = _migration_file_identity_from_path_lstat(restore_temp)
+        _fsync_directory_best_effort(temp_dir)
+    except BaseException:
+        # prepare 失败：尝试清理已创建的 temp 和目录，保持 preparing manifest
+        # 作为 active guard（fresh owner 会 fail closed）。
+        _settle_prepare_failure_sync(path, manifest_path, temp_dir)
+        raise
+    # 4. 原子更新 status=prepared。
+    prepared_payload = _migration_build_attempt_manifest_payload(
+        status="prepared",
+        database=path.name,
+        attempt_id=attempt_id,
+        created_at_ms=created_at_ms,
+        source=source_fingerprint,
+        temp_dir_name=temp_dir.name,
+        temp_dir_identity=temp_dir_identity,
+        backup_temp_name=_MIGRATION_ATTEMPT_TEMP_BACKUP_NAME,
+        backup_temp_identity=backup_identity,
+        restore_temp_name=_MIGRATION_ATTEMPT_TEMP_RESTORE_NAME,
+        restore_temp_identity=restore_identity,
     )
     try:
-        # Exit code is only a prompt to inspect facts; it never chooses
-        # restore/retry by itself.  This call runs after the child is fully
-        # reaped, so no late SQLite worker can race the recovery replacement.
-        ThreadPersistence._recover_interrupted_migration_sync(
-            path,
-            preserve_recovery_state=timed_out,
+        _migration_write_attempt_manifest(
+            path, manifest_path, prepared_payload, old_status="preparing",
         )
+    except BaseException:
+        _settle_prepare_failure_sync(path, manifest_path, temp_dir)
+        raise
+    # 5. spawn child 并监督。
+    outcome = await _supervise_migration_child(
+        path, project_fingerprint, attempt_id, temp_dir,
+    )
+    was_cancelled = outcome.failure_stage == "cancelled"
+    # 6. 按 outcome 收敛。
+    if outcome.classification == "not_started":
+        # 没有 child：清理 temp，封口为 settled(source)，再返回启动失败。
+        _settle_not_started_sync(
+            path, manifest_path, temp_dir, source_fingerprint, outcome,
+        )
+        raise ThreadPersistenceError(
+            outcome.error_code or "CHECKPOINT_MIGRATION_WORKER_START_FAILED"
+        )
+    if (
+            outcome.classification == "exited_reaped"
+            and (outcome.pid is None or outcome.returncode is None)
+    ):
+        outcome = _MigrationChildOutcome(
+            classification="exit_unknown",
+            returncode=None,
+            error_code="CHECKPOINT_MIGRATION_WORKER_EXIT_UNKNOWN",
+            failure_stage="reap_fact_incomplete",
+            pid=outcome.pid,
+            child_ready_seen=outcome.child_ready_seen,
+        )
+    if outcome.classification == "exited_reaped":
+        ready_path = _migration_attempt_child_ready_path(temp_dir)
+        child_ready_seen = False
+        if _migration_path_entry_exists(ready_path):
+            try:
+                child_ready_seen = _parse_migration_child_ready_marker(
+                    ready_path,
+                    expected_attempt_id=attempt_id,
+                    expected_pid=outcome.pid,
+                ) is not None
+            except (OSError, ValueError):
+                child_ready_seen = False
+        authority = _MigrationReapAuthority(
+            attempt_id=attempt_id,
+            pid=outcome.pid,
+            returncode=outcome.returncode,
+            child_ready_seen=child_ready_seen,
+        )
+        try:
+            owned_manifest = _parse_migration_attempt_manifest(
+                    manifest_path, expected_database=path.name,
+            )
+            if owned_manifest is None:
+                raise ThreadPersistenceError("CHECKPOINT_MIGRATION_ATTEMPT_MISSING")
+            _settle_owned_migration_attempt_sync(path, authority, owned_manifest)
+        except (OSError, ValueError, ThreadPersistenceError):
+            # child 已 reaped；active/settled manifest 是充分的 durable guard。
+            # process-local poison 只属于 exit_unknown，否则会阻止同进程进入
+            # settled housekeeping。
+            raise
+        # 验证最终 DB。
         source_version, has_prompt = _inspect_migration_source_sync(path)
         if source_version == _SCHEMA_VERSION and not has_prompt:
-            connection = sqlite3.connect(path)
+            conn = sqlite3.connect(path)
             try:
-                expected = _migration_database_fingerprint_sync(connection)
+                expected = _migration_database_fingerprint_sync(conn)
             finally:
-                connection.close()
+                conn.close()
             ThreadPersistence._validate_final_database_path_sync(path, expected)
-            _clear_migration_poison(path)
+            if was_cancelled:
+                raise asyncio.CancelledError()
             return
-    except BaseException:
-        if timed_out:
-            # Publish before returning to open's finally block, which releases
-            # the file lock.  Any waiter that passed the precheck must reject
-            # again after acquiring that same lock.
-            _publish_migration_poison(path)
-        raise
-
-    if timed_out:
-        _publish_migration_poison(path)
-        raise ThreadPersistenceError("CHECKPOINT_MIGRATION_WORKER_TIMEOUT")
-    raise ThreadPersistenceError(
-        child_error_code or "CHECKPOINT_MIGRATION_WORKER_FAILED"
+        # DB 不是 final：按 source 恢复后让 open 重试。
+        if was_cancelled:
+            raise asyncio.CancelledError()
+        raise ThreadPersistenceError(
+            outcome.error_code or "CHECKPOINT_MIGRATION_WORKER_FAILED"
+        )
+    # exit_unknown：process-local poison 必须先于任何可能失败的磁盘写。
+    _publish_migration_poison(path)
+    try:
+        active_manifest = _parse_migration_attempt_manifest(
+            manifest_path, expected_database=path.name,
+        )
+        if active_manifest is not None and active_manifest.status == "prepared":
+            exit_unknown_payload = _migration_build_attempt_manifest_payload(
+                status="exit_unknown",
+                database=path.name,
+                attempt_id=active_manifest.attempt_id,
+                created_at_ms=active_manifest.created_at_ms,
+                source=active_manifest.source,
+                temp_dir_name=active_manifest.temp_dir_name,
+                temp_dir_identity=active_manifest.temp_dir_identity,
+                backup_temp_name=active_manifest.backup_temp_name,
+                backup_temp_identity=active_manifest.backup_temp_identity,
+                restore_temp_name=active_manifest.restore_temp_name,
+                restore_temp_identity=active_manifest.restore_temp_identity,
+                last_error="CHECKPOINT_MIGRATION_WORKER_EXIT_UNKNOWN",
+            )
+            _migration_write_attempt_manifest(
+                path,
+                manifest_path,
+                exit_unknown_payload,
+                old_status="prepared",
+            )
+    except (OSError, ValueError):
+        # prepared manifest 本身仍是 durable active guard。
+        pass
+    poison_payload = _migration_build_poison_payload(
+        database=path.name,
+        attempt_id=attempt_id,
+        reason="CHECKPOINT_MIGRATION_WORKER_EXIT_UNKNOWN",
+        failure_stage=outcome.failure_stage,
+        created_at_ms=_migration_now_ms(),
     )
+    try:
+        _migration_write_poison(path, _migration_poison_path(path), poison_payload)
+    except OSError:
+        pass
+    if was_cancelled:
+        raise asyncio.CancelledError()
+    raise ThreadPersistenceError("CHECKPOINT_MIGRATION_WORKER_EXIT_UNKNOWN")
+
+
+def _settle_prepare_failure_sync(
+        path: Path,
+        manifest_path: Path,
+        temp_dir: Path,
+) -> None:
+    """prepare 阶段失败时清理已创建的 temp 和目录，保留 active guard。
+
+    preparing 状态下 Popen 从未发生；离线恢复可以利用这个协议不变量在用户
+    确认所有进程停止后，仅对 manifest 预先登记的精确 basename 做特殊收敛。
+    """
+    # 清理 temp 文件（如果存在）。
+    for name in (
+        _MIGRATION_ATTEMPT_TEMP_BACKUP_NAME,
+        _MIGRATION_ATTEMPT_TEMP_RESTORE_NAME,
+        _MIGRATION_CHILD_READY_NAME,
+    ):
+        temp_path = temp_dir / name
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    # 尝试删除空目录。
+    try:
+        temp_dir.rmdir()
+        _fsync_directory_best_effort(temp_dir.parent)
+    except OSError:
+        pass
+    # 保留 preparing manifest 作为 active guard。
+
+
+def _settle_not_started_sync(
+        path: Path,
+        manifest_path: Path,
+        temp_dir: Path,
+        source_fingerprint: _MigrationDatabaseFingerprint,
+        outcome: _MigrationChildOutcome,
+) -> None:
+    """not_started：证明没有 child，清理并封口 attempt，再返回启动失败。"""
+    manifest = _parse_migration_attempt_manifest(
+        manifest_path, expected_database=path.name,
+    )
+    if manifest is None:
+        return
+    cleanup_result = _migration_cleanup_attempt_temps(
+        temp_dir, manifest, unlink_fault_prefix="not_started",
+    )
+    if cleanup_result.closable:
+        dir_ok, _ = _migration_remove_empty_attempt_dir(temp_dir, cleanup_result)
+        if not dir_ok:
+            return
+        settled_payload = _migration_build_attempt_manifest_payload(
+            status="settled",
+            database=path.name,
+            attempt_id=manifest.attempt_id,
+            created_at_ms=manifest.created_at_ms,
+            source=source_fingerprint,
+            temp_dir_name=manifest.temp_dir_name,
+            temp_dir_identity=manifest.temp_dir_identity,
+            backup_temp_name=manifest.backup_temp_name,
+            backup_temp_identity=manifest.backup_temp_identity,
+            restore_temp_name=manifest.restore_temp_name,
+            restore_temp_identity=manifest.restore_temp_identity,
+            settled_result="source",
+            settled_database=source_fingerprint,
+            child_returncode=None,
+            cleanup_summary={
+                "deleted": list(cleanup_result.deleted),
+                "resolved_absent": list(cleanup_result.resolved_absent),
+            },
+        )
+        try:
+            _migration_write_attempt_manifest(
+                path, manifest_path, settled_payload, old_status="prepared",
+            )
+            # 清 state、poison、manifest。
+            state_path = path.with_name(path.name + _MIGRATION_STATE_SUFFIX)
+            _migration_unlink_strict_marker(state_path)
+            poison_path = _migration_poison_path(path)
+            _migration_unlink_strict_marker(poison_path)
+            _migration_unlink_strict_marker(manifest_path)
+            _clear_migration_poison(path)
+        except (OSError, ValueError):
+            pass
+
+
+def _check_migration_attempt_and_poison_sync(path: Path) -> None:
+    """锁后检查 active attempt manifest 和 durable poison。
+
+    ZC-108：fresh owner 取得 migration lock 后必须在任何 state recovery、
+    SQLite connect、backup、restore 之前失败关闭。
+
+    - settled：严格验证 settled_database，完成幂等 housekeeping。
+    - active：CHECKPOINT_MIGRATION_ATTEMPT_ACTIVE。
+    - corrupt：CHECKPOINT_MIGRATION_STATE_INVALID。
+    - poison 无可验证 settled attempt：CHECKPOINT_MIGRATION_RECOVERY_REQUIRED。
+    """
+    manifest_path = _migration_attempt_manifest_path(path)
+    poison_path = _migration_poison_path(path)
+    attempt_staging_path = _migration_attempt_staging_path(path)
+    # 首次 preparing 写在 replace 前崩溃时没有 child 能被合法 spawn。只有在
+    # canonical manifest 确认不存在时，fresh owner 才能严格删除这个固定 staging。
+    if (
+            not _migration_path_entry_exists(manifest_path)
+            and _migration_path_entry_exists(attempt_staging_path)
+    ):
+        try:
+            _migration_unlink_strict_marker(attempt_staging_path)
+        except (OSError, ValueError) as exc:
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_STATE_INVALID") from exc
+    manifest: _MigrationAttemptManifest | None = None
+    manifest_corrupt = False
+    try:
+        manifest = _parse_migration_attempt_manifest(
+            manifest_path, expected_database=path.name,
+        )
+    except (OSError, ValueError):
+        manifest_corrupt = True
+    if manifest_corrupt:
+        raise ThreadPersistenceError("CHECKPOINT_MIGRATION_STATE_INVALID")
+    if manifest is not None and manifest.is_active:
+        # active attempt 自身就是 durable fail-closed guard。
+        raise ThreadPersistenceError("CHECKPOINT_MIGRATION_ATTEMPT_ACTIVE")
+    if manifest is not None and manifest.is_settled:
+        # settled：验证主库仍匹配 settled_database 后做幂等 housekeeping。
+        try:
+            database_stat = path.lstat()
+            if not stat.S_ISREG(database_stat.st_mode):
+                raise ValueError("settled database is not a regular file")
+            if manifest.settled_database is None:
+                raise ValueError("settled database fingerprint is missing")
+            conn = sqlite3.connect(path)
+            try:
+                actual = _migration_database_fingerprint_sync(conn)
+            finally:
+                conn.close()
+            if not _migration_fingerprint_matches(manifest.settled_database, actual):
+                raise ThreadPersistenceError(
+                    "CHECKPOINT_MIGRATION_SETTLED_DATABASE_MISMATCH"
+                )
+            # 幂等清 staging、state、poison、manifest；任何一步失败都保留
+            # settled guard，不允许当前 open 越过未完成 housekeeping。
+            for marker_path in (
+                _migration_state_staging_path(path),
+                _migration_poison_staging_path(path),
+                attempt_staging_path,
+                path.with_name(path.name + _MIGRATION_STATE_SUFFIX),
+                poison_path,
+            ):
+                _migration_unlink_strict_marker(marker_path)
+        except ThreadPersistenceError:
+            raise
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_STATE_INVALID") from exc
+        _clear_migration_poison(path)
+        try:
+            _migration_unlink_strict_marker(manifest_path)
+        except (OSError, ValueError) as exc:
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_STATE_INVALID") from exc
+        return
+    # 全新空库的 parent bootstrap 仍使用无 attempt 的 v1 state。若它在固定
+    # staging 已完整写入后崩溃，先严格解析并提升这个最新事实；不得忽略一个
+    # 可能含 final fingerprint 的 committing state 而回滚已提交数据库。
+    state_path = path.with_name(path.name + _MIGRATION_STATE_SUFFIX)
+    state_staging_path = _migration_state_staging_path(path)
+    if _migration_path_entry_exists(state_staging_path):
+        try:
+            staged_state = _parse_migration_state(
+                state_staging_path,
+                expected_database=path.name,
+            )
+            if (
+                    staged_state is None
+                    or staged_state.version != _MIGRATION_STATE_VERSION_LEGACY
+            ):
+                raise ValueError("orphan state staging is not legacy v1")
+            os.replace(state_staging_path, state_path)
+            _fsync_directory_best_effort(path.parent)
+        except (OSError, ValueError) as exc:
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_STATE_INVALID") from exc
+    # 无 attempt manifest 或已清理。检查 durable poison。
+    poison: _MigrationPoisonMarker | None = None
+    try:
+        poison = _parse_migration_poison_marker(
+            poison_path, expected_database=path.name,
+        )
+    except (OSError, ValueError):
+        raise ThreadPersistenceError("CHECKPOINT_MIGRATION_STATE_INVALID")
+    if poison is not None:
+        # poison 无可验证 settled attempt：需要离线恢复。
+        raise ThreadPersistenceError("CHECKPOINT_MIGRATION_RECOVERY_REQUIRED")
+    # 新协议的 state/poison staging 不可能在缺少 attempt 时独立恢复。
+    if any(
+            _migration_path_entry_exists(staging_path)
+            for staging_path in (
+                _migration_poison_staging_path(path),
+            )
+    ):
+        raise ThreadPersistenceError("CHECKPOINT_MIGRATION_STATE_INVALID")
 
 
 async def run_legacy_migration_child(
         path: Path,
         project_fingerprint: str,
         test_phase: str | None = None,
+        attempt_id: str | None = None,
+        temp_dir: Path | None = None,
 ) -> None:
-    """migration_worker 入口；整个 legacy 事务只存在于 child 进程。"""
+    """migration_worker 入口；整个 legacy 事务只存在于 child 进程。
+
+    ZC-108：child 在首次访问 SQLite 前必须发布一次性 child-ready 事实。
+    ``attempt_id`` 和 ``temp_dir`` 由父进程在 prepared manifest 中登记，
+    child 解析 manifest 验证归属后才写 child-ready。
+    """
     global _MIGRATION_CHILD_PROCESS_MODE, _MIGRATION_CHILD_TEST_PHASE
     _MIGRATION_CHILD_PROCESS_MODE = True
     _MIGRATION_CHILD_TEST_PHASE = test_phase
+
+    # ZC-108：child-ready 成功 fsync 之前，child 禁止打开主库、backup 或任何
+    # SQLite 文件。child-ready 写入失败时 child 直接退出。
+    if attempt_id is None or temp_dir is None:
+        raise ThreadPersistenceError("CHECKPOINT_MIGRATION_ATTEMPT_REQUIRED")
+    _assert_migration_file_identity_supported()
+    attempt_context: _MigrationAttemptContext | None = None
+    if attempt_id is not None and temp_dir is not None:
+        manifest_path = _migration_attempt_manifest_path(path)
+        manifest = _parse_migration_attempt_manifest(
+            manifest_path, expected_database=path.name,
+        )
+        if manifest is None:
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_ATTEMPT_MISSING")
+        # late-start child 看到 parent 已发布 exit_unknown 时必须停在 SQLite 外。
+        if manifest.status != "prepared":
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_ATTEMPT_NOT_PREPARED")
+        if manifest.attempt_id != attempt_id:
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_ATTEMPT_ID_MISMATCH")
+        expected_temp_dir = _migration_attempt_dir_path(path, attempt_id)
+        if manifest.temp_dir_name != temp_dir.name or temp_dir != expected_temp_dir:
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_ATTEMPT_DIR_MISMATCH")
+        if manifest.temp_dir_identity is None:
+            raise ThreadPersistenceError("CHECKPOINT_MIGRATION_ATTEMPT_DIR_IDENTITY_MISSING")
+        try:
+            _validate_migration_attempt_directory(temp_dir, manifest.temp_dir_identity)
+        except (OSError, ValueError) as exc:
+            raise ThreadPersistenceError(
+                "CHECKPOINT_MIGRATION_ATTEMPT_DIR_IDENTITY_MISMATCH"
+            ) from exc
+        # 验证两个 temp 的 identity 与 manifest 登记一致。
+        backup_temp = _migration_attempt_backup_temp_path(temp_dir)
+        restore_temp = _migration_attempt_restore_temp_path(temp_dir)
+        for temp_name, temp_path, expected_identity in (
+            ("backup", backup_temp, manifest.backup_temp_identity),
+            ("restore", restore_temp, manifest.restore_temp_identity),
+        ):
+            if expected_identity is None:
+                raise ThreadPersistenceError(
+                    f"CHECKPOINT_MIGRATION_TEMP_IDENTITY_MISSING:{temp_name}"
+                )
+            if not _migration_path_entry_exists(temp_path):
+                raise ThreadPersistenceError(
+                    f"CHECKPOINT_MIGRATION_TEMP_MISSING:{temp_name}"
+                )
+            actual_identity = _migration_file_identity_from_path_lstat(temp_path)
+            if not _migration_file_identity_matches(expected_identity, actual_identity):
+                raise ThreadPersistenceError(
+                    f"CHECKPOINT_MIGRATION_TEMP_IDENTITY_MISMATCH:{temp_name}"
+                )
+        _migration_child_test_failure(
+            "child_ready_failure",
+            ThreadPersistenceError("CHECKPOINT_MIGRATION_CHILD_READY_FAILED"),
+        )
+        _migration_write_child_ready(
+            temp_dir,
+            attempt_id=attempt_id,
+            pid=os.getpid(),
+            process_birth_identity=_migration_process_birth_identity(),
+        )
+        attempt_context = _MigrationAttemptContext(
+            attempt_id=attempt_id,
+            database=path.name,
+            temp_dir=temp_dir,
+            backup_temp=backup_temp,
+            backup_temp_identity=manifest.backup_temp_identity,
+            restore_temp=restore_temp,
+            restore_temp_identity=manifest.restore_temp_identity,
+            source=manifest.source,
+        )
+
     connection = await aiosqlite.connect(path)
     connection.row_factory = aiosqlite.Row
     operation_lock = asyncio.Lock()
@@ -7041,8 +9241,26 @@ async def run_legacy_migration_child(
         path=path,
         project_fingerprint=project_fingerprint,
         operation_lock=operation_lock,
+        migration_attempt_context=attempt_context,
     )
     try:
+        # ZC-108：child 在 BEGIN IMMEDIATE 后重新计算 source fingerprint 并与
+        # manifest 逐字段匹配；不匹配则不 backup、不 DDL。
+        if attempt_context is not None:
+            manifest = _parse_migration_attempt_manifest(
+                _migration_attempt_manifest_path(path),
+                expected_database=path.name,
+            )
+            if (
+                    manifest is None
+                    or manifest.attempt_id != attempt_id
+                    or manifest.status != "prepared"
+                    or not _migration_fingerprint_matches(
+                        attempt_context.source, manifest.source
+                    )
+            ):
+                raise ThreadPersistenceError("CHECKPOINT_MIGRATION_ATTEMPT_INVALID")
+            persistence._migration_manifest_source = attempt_context.source
         await persistence._prepare()
         await _migration_child_pause_if_requested("after_commit_before_reply")
     finally:
