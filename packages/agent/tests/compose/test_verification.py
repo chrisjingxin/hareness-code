@@ -324,15 +324,21 @@ class _FakePool:
         return self.lease
 
 
+class _FailingPool:
+    async def acquire(self, _key: str, _settings, _workspace):
+        raise RuntimeError("sandbox unavailable")
+
+
 class _FakeLock:
     def __init__(self) -> None:
         self.write_count = 0
+        self.release_count = 0
 
     async def acquire_write(self) -> None:
         self.write_count += 1
 
     async def release_write(self) -> None:
-        pass
+        self.release_count += 1
 
 
 def _port(*, backend: Any, rules: list[Any] | None = None, lock: _FakeLock | None = None) -> tuple[ManagedVerificationPort, _FakeLease, _FakeLock]:
@@ -462,3 +468,67 @@ async def test_managed_port_backend_failure_and_timeout_are_not_pass() -> None:
             )),
             timeout=5,
         )
+
+
+@pytest.mark.asyncio
+async def test_managed_port_rejects_write_outside_workspace_before_approval(
+    tmp_path: Path,
+) -> None:
+    """验证命令不能借助审批写到工作区外。"""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    backend = _FakeBackend(
+        response=type("R", (), {"output": "", "exit_code": 0})()
+    )
+    lease = _FakeLease(backend, workspace_path=str(workspace))
+    lock = _FakeLock()
+    approvals: list[str] = []
+
+    async def approve(description: str) -> bool:
+        approvals.append(description)
+        return True
+
+    port = ManagedVerificationPort(
+        pool=_FakePool(lease),  # type: ignore[arg-type]
+        settings=type("S", (), {"sandbox_enabled": False})(),  # type: ignore[arg-type]
+        workspace=workspace,
+        rules_provider=lambda: [],
+        rwlock=lock,
+        now_ms=lambda: 7,
+    )
+    with pytest.raises(VerificationError, match="WORKSPACE_BOUNDARY_DENIED"):
+        await port.run(
+            VerificationRequest(
+                command="echo changed > ../outside.txt",
+                label="outside write",
+                resource_key="fp-1",
+                approve=approve,
+            )
+        )
+    assert approvals == []
+    assert backend.commands == []
+    assert lock.write_count == 0
+
+
+@pytest.mark.asyncio
+async def test_managed_port_releases_write_lock_when_resource_acquire_fails() -> None:
+    """执行资源获取失败不能覆盖原始错误或泄漏 Host 写锁。"""
+    lock = _FakeLock()
+    port = ManagedVerificationPort(
+        pool=_FailingPool(),  # type: ignore[arg-type]
+        settings=type("S", (), {"sandbox_enabled": False})(),  # type: ignore[arg-type]
+        workspace=Path("."),
+        rules_provider=lambda: [],
+        rwlock=lock,
+        now_ms=lambda: 7,
+    )
+    with pytest.raises(VerificationError, match="BACKEND_FAILED"):
+        await port.run(
+            VerificationRequest(
+                command="git status",
+                label="git status",
+                resource_key="fp-1",
+            )
+        )
+    assert lock.write_count == 1
+    assert lock.release_count == 1

@@ -2477,16 +2477,28 @@ class AgentHost:
         *,
         headless: bool = False,
         readonly: bool = False,
+        planning: bool = False,
     ) -> ResolvedAgentSpec | None:
         """返回按 profile key 缓存的主 Agent spec；Compose 复用同一可信 spec。
 
         - headless：stage 图关闭 ask_user，提问只能走 workflow typed 通道；
-        - readonly：Reviewer 只读能力视图。
+        - readonly：Reviewer 只读能力视图；
+        - planning：Understand/Plan 只读能力视图。
         两种派生 spec 都注册独立 profile key，让 AgentEnginePool 构建独立引擎。
         """
         spec = self._resolved_agent_specs.get(profile_key)
         if spec is None:
             return None
+        if planning:
+            from harness_agent.runtime.agent_spec import (
+                restrict_spec_to_read_only_stage,
+            )
+
+            restricted = restrict_spec_to_read_only_stage(spec)
+            self._resolved_agent_specs.setdefault(
+                restricted.runtime_profile.profile_key, restricted
+            )
+            return restricted
         if headless and not readonly:
             from harness_agent.runtime.agent_spec import (
                 restrict_spec_to_headless_stage,

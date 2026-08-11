@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, Protocol
 
@@ -33,6 +34,7 @@ STAGE_AGENT_TIMEOUT_SECONDS = 600.0
 
 # Reviewer 使用只读能力视图；作者 execution 不得兼任 Reviewer。
 REVIEWER_STAGES = frozenset({"requirement-reviewer", "code-reviewer"})
+PLANNING_STAGES = frozenset({"understand", "plan"})
 
 
 class StageRequest:
@@ -57,6 +59,7 @@ class StageRequest:
         self.profile_key = profile_key
         self.cancellation_token = cancellation_token
         self.timeout_seconds = timeout_seconds
+        self.invocation_id = uuid.uuid4().hex
 
 
 class StageResult:
@@ -141,6 +144,7 @@ class ManagedStageAgentPort:
             request.profile_key,
             headless=True,
             readonly=request.stage in REVIEWER_STAGES,
+            planning=request.stage in PLANNING_STAGES,
         )
         if spec is None:
             raise RuntimeError("COMPOSE_STAGE_SPEC_MISSING")
@@ -206,7 +210,7 @@ class ManagedStageAgentPort:
         from harness_agent.runtime.agent_delegation import DelegateAgent
 
         idempotency_key = hashlib.sha256(
-            f"{request.stage}:{request.parent_ref.execution_id}:{hashlib.sha256(request.task.encode('utf-8')).hexdigest()[:16]}".encode("utf-8")
+            f"{request.stage}:{request.parent_ref.execution_id}:{request.invocation_id}:{hashlib.sha256(request.task.encode('utf-8')).hexdigest()[:16]}".encode("utf-8")
         ).hexdigest()[:20]
         # stage 不能复用主 Agent 的 delegation policy：其 allowed_agents 只含
         # general-purpose/Plugin id，内置 stage id 会被 DELEGATION_TARGET_FORBIDDEN

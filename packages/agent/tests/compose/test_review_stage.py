@@ -229,6 +229,28 @@ async def test_optional_findings_do_not_block_completion(tmp_path: Path) -> None
     assert events[-1].type == "run.completed"
 
 
+async def test_fail_verdict_without_required_finding_never_completes(
+    tmp_path: Path,
+) -> None:
+    """Reviewer 明确 fail 时不能因 findings 为空而误判 completed。"""
+    events, stage_agent, interactions = await _run_compose(
+        tmp_path,
+        [
+            _understanding(),
+            _plan(),
+            _task_result(task_id="task-1"),
+            _reviewer(verdict="fail"),
+            _reviewer(verdict="fail"),
+        ],
+        [_evidence(exit_code=0)],
+        [{"answers": {"question-1": ["approve"]}}],
+    )
+    assert events[-1].type == "run.failed"
+    assert events[-1].payload["error"]["code"] == "COMPOSE_ARTIFACT_INVALID"
+    assert stage_agent.calls.count("requirement-reviewer") == 2
+    assert stage_agent.calls.count("code-reviewer") == 0
+
+
 async def test_required_finding_fixes_and_reloops_to_completion(tmp_path: Path) -> None:
     """Required finding 生成 fix task，重新 Build→Verify→Review 后完成。"""
     events, stage_agent, interactions = await _run_compose(
@@ -394,3 +416,12 @@ def test_restrict_spec_to_read_only_removes_all_writes_and_shell() -> None:
     assert restricted.enable_ask_user is False
     # 独立身份：能力视图指纹与主 spec 不同（profile key 由指纹派生）。
     assert restricted.tool_view_fingerprint != spec.tool_view_fingerprint
+
+    from harness_agent.runtime.agent_spec import restrict_spec_to_read_only_stage
+
+    planning = restrict_spec_to_read_only_stage(spec)
+    planning_names = {tool.name for tool in planning.tools}
+    assert planning.role == "stage"
+    assert planning.agent_id == "compose-planning"
+    assert "write_file" not in planning_names and "execute" not in planning_names
+    assert planning.enable_ask_user is False

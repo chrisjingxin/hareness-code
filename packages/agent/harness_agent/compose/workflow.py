@@ -525,6 +525,17 @@ class ComposeWorkflow:
             for finding in report.findings
             if finding.severity in (FindingSeverity.CRITICAL, FindingSeverity.REQUIRED)
         ]
+        if (
+            report.requirement_verdict != "pass"
+            or report.code_verdict != "pass"
+        ) and not required:
+            return await self._fail(
+                run,
+                port,
+                state,
+                "COMPOSE_ARTIFACT_INVALID",
+                "failed reviewer verdict requires a Critical or Required finding",
+            )
         report_row = make_artifact(
             ArtifactKind.REVIEW,
             run_id=run.ref.run_id,
@@ -647,6 +658,14 @@ class ComposeWorkflow:
                     "message": message[:2_000],
                     "location": str(finding.get("location", ""))[:500],
                 }
+            )
+        if verdict == "fail" and not any(
+            finding["severity"]
+            in {FindingSeverity.CRITICAL.value, FindingSeverity.REQUIRED.value}
+            for finding in findings
+        ):
+            raise ValueError(
+                f"{axis} reviewer fail verdict requires a Critical or Required finding"
             )
         return {"verdict": str(verdict), "findings": findings}
 

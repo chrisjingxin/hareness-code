@@ -108,6 +108,32 @@ def restrict_spec_to_read_only(spec: ResolvedAgentSpec) -> ResolvedAgentSpec:
     全部从能力视图剔除，作者 execution 不得兼任 Reviewer。返回的 spec
     拥有独立 profile key，由 Host 注册后经 AgentEnginePool 构建独立引擎。
     """
+    return _restrict_spec_to_read_only_role(
+        spec,
+        role="reviewer",
+        agent_id="compose-reviewer",
+        identity="reviewer-readonly",
+    )
+
+
+def restrict_spec_to_read_only_stage(spec: ResolvedAgentSpec) -> ResolvedAgentSpec:
+    """派生 Understand/Plan 只读 spec，确保方案批准前没有写副作用。"""
+    return _restrict_spec_to_read_only_role(
+        spec,
+        role="stage",
+        agent_id="compose-planning",
+        identity="planning-readonly",
+    )
+
+
+def _restrict_spec_to_read_only_role(
+    spec: ResolvedAgentSpec,
+    *,
+    role: str,
+    agent_id: str,
+    identity: str,
+) -> ResolvedAgentSpec:
+    """构造指定 Compose 角色的只读能力交集。"""
     from harness_agent.policy.capability_policy import EffectiveCapabilityView
 
     visible = set(spec.capability_view.tool_names)
@@ -124,9 +150,9 @@ def restrict_spec_to_read_only(spec: ResolvedAgentSpec) -> ResolvedAgentSpec:
     )
     return ResolvedAgentSpec(
         project_fingerprint=spec.project_fingerprint,
-        role="reviewer",
-        agent_id="compose-reviewer",
-        definition_fingerprint=sha256_text("builtin-agent:compose-reviewer:v1"),
+        role=role,
+        agent_id=agent_id,
+        definition_fingerprint=sha256_text(f"builtin-agent:{agent_id}:v1"),
         model_profile_id=spec.model_profile_id,
         model_settings=spec.model_settings,
         model_view=spec.model_view,
@@ -149,7 +175,7 @@ def restrict_spec_to_read_only(spec: ResolvedAgentSpec) -> ResolvedAgentSpec:
                     RUN_CONTEXT_SNAPSHOT_MIDDLEWARE_VERSION,
                     "context-window-v1",
                     "workspace-boundary-v1",
-                    "reviewer-readonly",
+                    identity,
                     "memory-off",
                     "skills-off",
                 )

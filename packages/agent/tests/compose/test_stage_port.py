@@ -143,7 +143,7 @@ async def test_managed_stage_port_runs_understand_through_real_delegator() -> No
     port = ManagedStageAgentPort(
         registry=registry,
         pool=pool,  # type: ignore[arg-type]
-        resolve_spec=lambda _key, *, headless=False, readonly=False: spec,  # type: ignore[arg-type]
+        resolve_spec=lambda _key, *, headless=False, readonly=False, planning=False: spec,  # type: ignore[arg-type]
         config_home=Path("."),
         workspace=Path("."),
     )
@@ -162,6 +162,81 @@ async def test_managed_stage_port_runs_understand_through_real_delegator() -> No
     assert "child-" in checkpoint_ns
 
 
+async def test_managed_stage_port_uses_readonly_planning_spec() -> None:
+    """Understand/Plan 请求只读 planning spec，Build 才使用可写 headless spec。"""
+    engine = _FakeEngine(
+        output='{"goal": "实现搜索", "acceptance": ["可排序"], "open_decisions": [], "change_kind": "feature"}'
+    )
+    pool = _FakePool(_FakeLease(engine))
+    registry, root = await _registry_with_root()
+    spec = _FakeSpec()
+    requests: list[tuple[bool, bool, bool]] = []
+
+    def resolve_spec(
+        _key: str,
+        *,
+        headless: bool = False,
+        readonly: bool = False,
+        planning: bool = False,
+    ) -> _FakeSpec:
+        requests.append((headless, readonly, planning))
+        return spec
+
+    port = ManagedStageAgentPort(
+        registry=registry,
+        pool=pool,  # type: ignore[arg-type]
+        resolve_spec=resolve_spec,
+        config_home=Path("."),
+        workspace=Path("."),
+    )
+    await port.run(
+        StageRequest(
+            stage="understand",
+            task="实现搜索功能",
+            parent_ref=root,
+            profile_key="stage-profile",
+            cancellation_token=RunCancellationToken(),
+        )
+    )
+    assert requests == [(True, False, True)]
+
+
+async def test_managed_stage_port_schema_retry_gets_fresh_execution() -> None:
+    """同一 stage/task 重试必须重新调用模型，而不是重启已终结 execution。"""
+    engine = _FakeEngine(output='{"goal": "实现搜索"}')
+    pool = _FakePool(_FakeLease(engine))
+    registry, root = await _registry_with_root()
+    spec = _FakeSpec()
+    port = ManagedStageAgentPort(
+        registry=registry,
+        pool=pool,  # type: ignore[arg-type]
+        resolve_spec=lambda _key, **_kwargs: spec,  # type: ignore[arg-type]
+        config_home=Path("."),
+        workspace=Path("."),
+    )
+
+    first = await port.run(
+        StageRequest(
+            stage="understand",
+            task="相同的有界 ContextPack",
+            parent_ref=root,
+            profile_key="stage-profile",
+            cancellation_token=RunCancellationToken(),
+        )
+    )
+    second = await port.run(
+        StageRequest(
+            stage="understand",
+            task="相同的有界 ContextPack",
+            parent_ref=root,
+            profile_key="stage-profile",
+            cancellation_token=RunCancellationToken(),
+        )
+    )
+    assert first.execution_id != second.execution_id
+    assert len(engine.calls) == 2
+
+
 async def test_managed_stage_port_rejects_stage_delegating_another_agent() -> None:
     """stage policy 只允许当前 stage id：委派其他 agent 必须被拒绝。"""
     engine = _FakeEngine(output="x")
@@ -172,7 +247,7 @@ async def test_managed_stage_port_rejects_stage_delegating_another_agent() -> No
     port = ManagedStageAgentPort(
         registry=registry,
         pool=pool,  # type: ignore[arg-type]
-        resolve_spec=lambda _key, *, headless=False, readonly=False: spec,  # type: ignore[arg-type]
+        resolve_spec=lambda _key, *, headless=False, readonly=False, planning=False: spec,  # type: ignore[arg-type]
         config_home=Path("."),
         workspace=Path("."),
     )

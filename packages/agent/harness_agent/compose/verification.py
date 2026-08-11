@@ -116,12 +116,23 @@ class ManagedVerificationPort:
         from harness_agent.policy.bash_parser import extract_segments
         from harness_agent.policy.permission_rules import evaluate_tool_rules
         from harness_agent.policy.safe_commands import is_safe_command
+        from harness_agent.policy.shell_access import evaluate_shell_file_access
 
         rules = self._rules_provider()
         effect = evaluate_tool_rules("execute", {"command": request.command}, rules)
         if effect == "deny":
             raise VerificationError(
                 "POLICY_DENIED", "verification command denied by policy"
+            )
+
+        file_access = evaluate_shell_file_access(
+            request.command,
+            workspace_root=str(self._workspace),
+        )
+        if file_access.get("outside_workspace"):
+            raise VerificationError(
+                "WORKSPACE_BOUNDARY_DENIED",
+                "verification command writes outside the workspace",
             )
 
         # 审批决策与 Agent execute 的 default 模式一致：allow 规则或安全
@@ -152,12 +163,19 @@ class ManagedVerificationPort:
         # 验证命令可能修改工作区，与 Agent 写工具一致：整个执行期间持有
         # Host 独占写锁，防止其他 Thread 的写操作与验证命令交错。
         await self._rwlock.acquire_write()
+        lease = None
         try:
-            lease = await self._pool.acquire(
-                request.resource_key,
-                self._settings,
-                self._workspace,
-            )
+            try:
+                lease = await self._pool.acquire(
+                    request.resource_key,
+                    self._settings,
+                    self._workspace,
+                )
+            except Exception as exc:
+                raise VerificationError(
+                    "BACKEND_FAILED",
+                    f"execution resource unavailable: {type(exc).__name__}",
+                ) from exc
             started_at_ms = self._now_ms()
             try:
                 backend = lease.value.backend
@@ -193,8 +211,11 @@ class ManagedVerificationPort:
                 )
             output = str(response.output or "")
         finally:
-            await lease.release()
-            await self._rwlock.release_write()
+            try:
+                if lease is not None:
+                    await lease.release()
+            finally:
+                await self._rwlock.release_write()
         finished_at_ms = self._now_ms()
         encoded = output.encode("utf-8")
         truncated = len(encoded) > MAX_OUTPUT_SUMMARY_CHARS * 4

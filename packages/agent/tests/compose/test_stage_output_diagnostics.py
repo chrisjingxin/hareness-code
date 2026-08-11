@@ -151,7 +151,7 @@ async def _run_compose_with_real_port(tmp_path: Path, engine: Any):
     stage_port = ManagedStageAgentPort(
         registry=registry,
         pool=_FakePool(engine),  # type: ignore[arg-type]
-        resolve_spec=lambda _key, *, headless=False, readonly=False: spec,  # type: ignore[arg-type]
+        resolve_spec=lambda _key, *, headless=False, readonly=False, planning=False: spec,  # type: ignore[arg-type]
         config_home=Path("."),
         workspace=Path("."),
     )
