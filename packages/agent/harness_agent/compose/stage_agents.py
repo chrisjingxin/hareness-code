@@ -84,7 +84,11 @@ class StageAgentPort(Protocol):
 
 
 def parse_structured_output(text: str) -> dict[str, Any]:
-    """从 stage Agent 的最后消息中解析严格 JSON；容忍 markdown 围栏。"""
+    """从 stage Agent 的最后消息中解析严格 JSON；容忍 markdown 围栏。
+
+    失败时抛出可读 ValueError（空输出 / 长度与期望形状），绝不把
+    json.loads 的裸解析器文本传播到 wire。
+    """
     content = str(text or "").strip()
     if content.startswith("```"):
         lines = content.splitlines()
@@ -93,7 +97,15 @@ def parse_structured_output(text: str) -> dict[str, Any]:
         if lines and lines[-1].strip() == "```":
             lines = lines[:-1]
         content = "\n".join(lines).strip()
-    parsed = json.loads(content)
+    if not content:
+        raise ValueError("stage 输出为空：模型没有产出 JSON 对象")
+    try:
+        parsed = json.loads(content)
+    except ValueError as exc:
+        raise ValueError(
+            f"stage 输出不是有效 JSON（输出长度 {len(content)} 字符，"
+            "期望单个 JSON 对象，不要附加解释文字）"
+        ) from exc
     if not isinstance(parsed, Mapping):
         raise ValueError("STAGE_OUTPUT_NOT_OBJECT")
     return dict(parsed)
