@@ -2475,23 +2475,37 @@ class AgentHost:
         self,
         profile_key: str,
         *,
+        headless: bool = False,
         readonly: bool = False,
     ) -> ResolvedAgentSpec | None:
         """返回按 profile key 缓存的主 Agent spec；Compose 复用同一可信 spec。
 
-        Reviewer 请求 readonly 时派生并注册只读能力视图 spec，独立 profile
-        key 让 AgentEnginePool 构建独立引擎。
+        - headless：stage 图关闭 ask_user，提问只能走 workflow typed 通道；
+        - readonly：Reviewer 只读能力视图。
+        两种派生 spec 都注册独立 profile key，让 AgentEnginePool 构建独立引擎。
         """
         spec = self._resolved_agent_specs.get(profile_key)
-        if spec is None or not readonly:
-            return spec
-        from harness_agent.runtime.agent_spec import restrict_spec_to_read_only
+        if spec is None:
+            return None
+        if headless and not readonly:
+            from harness_agent.runtime.agent_spec import (
+                restrict_spec_to_headless_stage,
+            )
 
-        restricted = restrict_spec_to_read_only(spec)
-        self._resolved_agent_specs.setdefault(
-            restricted.runtime_profile.profile_key, restricted
-        )
-        return restricted
+            derived = restrict_spec_to_headless_stage(spec)
+            self._resolved_agent_specs.setdefault(
+                derived.runtime_profile.profile_key, derived
+            )
+            return derived
+        if readonly:
+            from harness_agent.runtime.agent_spec import restrict_spec_to_read_only
+
+            restricted = restrict_spec_to_read_only(spec)
+            self._resolved_agent_specs.setdefault(
+                restricted.runtime_profile.profile_key, restricted
+            )
+            return restricted
+        return spec
 
     async def _plugin_delegation_targets(
         self,

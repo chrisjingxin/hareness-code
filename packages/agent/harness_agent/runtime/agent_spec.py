@@ -42,31 +42,79 @@ READ_ONLY_REVIEWER_TOOLS = frozenset(
         "glob",
         "grep",
         "lsp",
-        "tool_search",
-        "memory_search",
-        "task_output",
-        "web_search",
     }
 )
-"""Compose Reviewer 的能力交集：只读工具，不含任何写/Shell/委派/AskUser。"""
+"""Compose Reviewer 的能力交集：只读文件/代码工具，不含写/Shell/网络/委派。"""
 
 RUN_CONTEXT_SNAPSHOT_MIDDLEWARE_VERSION = "run-context-snapshot-v1"
 """当前生产 RunContextSnapshot middleware 的 Profile 身份版本。"""
+
+
+def restrict_spec_to_headless_stage(spec: ResolvedAgentSpec) -> ResolvedAgentSpec:
+    """派生 Compose stage spec：复用主 Agent 全部能力，但关闭交互提问。
+
+    Understand/Plan/Build 阶段只消费有界 ContextPack，产品决策走 workflow
+    的 typed question；stage graph 不注册 ask_user，避免提问绕过流程。
+    返回的 spec 拥有独立 profile key，由 Host 注册后经 AgentEnginePool
+    构建独立引擎。
+    """
+    return ResolvedAgentSpec(
+        project_fingerprint=spec.project_fingerprint,
+        role="stage",
+        agent_id="compose-stage",
+        definition_fingerprint=sha256_text("builtin-agent:compose-stage:v1"),
+        model_profile_id=spec.model_profile_id,
+        model_settings=spec.model_settings,
+        model_view=spec.model_view,
+        effective_policy=spec.effective_policy,
+        capability_view=spec.capability_view,
+        tools=spec.tools,
+        skill_registry=spec.skill_registry,
+        mcp_snapshot=spec.mcp_snapshot,
+        prompt=spec.prompt,
+        execution=spec.execution,
+        workspace=spec.workspace,
+        interactive=False,
+        tool_view_fingerprint=spec.tool_view_fingerprint,
+        skill_view_fingerprint=spec.skill_view_fingerprint,
+        middleware_fingerprint=sha256_text(
+            str(
+                (
+                    RUN_CONTEXT_SNAPSHOT_MIDDLEWARE_VERSION,
+                    "context-window-v1",
+                    "workspace-boundary-v1",
+                    "stage-headless",
+                    "memory-on",
+                    "skills-on",
+                )
+            )
+        ),
+        prompt_template_fingerprint=spec.prompt_template_fingerprint,
+        sandbox_config_fingerprint=spec.sandbox_config_fingerprint,
+        pinned=spec.pinned,
+        enable_memory=spec.enable_memory,
+        enable_skills=spec.enable_skills,
+        enable_ask_user=False,
+    )
 
 
 def restrict_spec_to_read_only(spec: ResolvedAgentSpec) -> ResolvedAgentSpec:
     """派生只读 Reviewer spec：同一模型/Policy，但能力交集为只读工具。
 
     Reviewer 复用主 Agent 的模型、有效 Policy 与 workspace，但 graph 只暴露
-    只读工具；filesystem_write/shell/mcp/skills 全部从能力视图剔除，作者
-    execution 不得兼任 Reviewer。返回的 spec 拥有独立 profile key，由 Host
-    注册后经 AgentEnginePool 构建独立引擎。
+    只读工具。工具集合必须取主 spec 的可见内置工具交集：内置工具在
+    create_harness_agent 内部注册，spec.tools 只携带 MCP 工具，因此这里
+    以 capability_view.tool_names 为准。filesystem_write/shell/mcp/skills
+    全部从能力视图剔除，作者 execution 不得兼任 Reviewer。返回的 spec
+    拥有独立 profile key，由 Host 注册后经 AgentEnginePool 构建独立引擎。
     """
     from harness_agent.policy.capability_policy import EffectiveCapabilityView
 
-    tools = tuple(tool for tool in spec.tools if tool.name in READ_ONLY_REVIEWER_TOOLS)
+    visible = set(spec.capability_view.tool_names)
+    names = tuple(sorted(READ_ONLY_REVIEWER_TOOLS & visible))
+    tools = tuple(tool for tool in spec.tools if tool.name in names)
     view = EffectiveCapabilityView(
-        tool_names=tuple(sorted(tool.name for tool in tools)),
+        tool_names=names,
         mcp_tool_names=(),
         skill_ids=(),
         filesystem_read=spec.capability_view.filesystem_read,

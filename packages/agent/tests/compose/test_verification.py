@@ -449,8 +449,8 @@ async def test_managed_port_backend_failure_and_timeout_are_not_pass() -> None:
         def execute(self, command: str, *, timeout: int | None = None):
             import time
 
-            time.sleep(1)  # 阻塞到超过 wait_for 超时
-            return type("R", (), {"output": "", "exit_code": 0})()
+            time.sleep(timeout or 1)  # 尊重 backend timeout：到点抛超时
+            raise TimeoutError(f"command timed out after {timeout}s")
 
     hanging_port, _, _ = _port(backend=_HangingBackend())
     with pytest.raises(VerificationError, match="VERIFICATION_TIMEOUT"):

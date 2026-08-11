@@ -485,11 +485,7 @@ class ComposeWorkflow:
             ],
         )
         value = result.value if isinstance(result.value, Mapping) else {}
-        return str(value.get("decision") or "") in {
-            "approve_once",
-            "approve_thread",
-            "approve_project",
-        }
+        return str(value.get("decision") or "") == "approve_once"
 
     async def _review(
         self,
@@ -812,7 +808,7 @@ class ComposeWorkflow:
         value = result.value if isinstance(result.value, Mapping) else {}
         decision = str(value.get("decision") or "")
         feedback = str(value.get("feedback") or "")
-        if decision in {"approve_once", "approve_thread", "approve_project"}:
+        if decision == "approve_once":
             return self._apply(
                 run, port, state, ComposeEvent.PLAN_APPROVE, tasks=plan.tasks
             )

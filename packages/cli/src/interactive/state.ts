@@ -5,6 +5,22 @@ import type { IdGenerator } from "./ports/id-generator"
 
 export type MessageRole = "user" | "assistant" | "system"
 
+/** 工作模式在 Run 受理时冻结；同一 Thread 相邻 Run 之间可在空闲时切换。 */
+export type WorkMode = "build" | "compose"
+
+export type ComposeStageId = "understand" | "plan" | "build" | "verify" | "review"
+
+/** compose.state 的有界完整 projection；revision 单调递增，迟到帧被拒绝。 */
+export type ComposeProjection = {
+  revision: number
+  stage: ComposeStageId
+  status: "running" | "waiting_user" | "blocked" | "completed" | "failed" | "cancelled"
+  stages: Array<{ id: ComposeStageId; status: string; attempts: number }>
+  tasks: Array<{ id: string; title: string; status: string }>
+  evidence: Array<{ label: string; status: string }>
+  blockedReason: string | null
+}
+
 export type ConversationMessage = {
   id: string
   role: MessageRole
@@ -104,10 +120,14 @@ export type InteractiveState = {
   runProgress: RunProgress | null
   lastRun?: RunSummary
   sequences: Record<string, number>
+  /** 当前 Thread 下一次 Run 的工作模式；Run 受理后冻结。 */
+  workMode: WorkMode
+  /** 当前 active Run 的 Compose 投影；仅接受 revision 更新的帧。 */
+  composeState: ComposeProjection | null
 }
 
 /** 创建无 thread 内容的初始状态；显式 null 进入空首页。 */
-export function createInitialState(threadId: string | null = null): InteractiveState {
+export function createInitialState(threadId: string | null = null, workMode: WorkMode = "build"): InteractiveState {
   return {
     currentThreadId: threadId,
     activeRun: null,
@@ -115,6 +135,67 @@ export function createInitialState(threadId: string | null = null): InteractiveS
     activity: { kind: threadId ? "idle" : "home" },
     runProgress: null,
     sequences: {},
+    workMode,
+    composeState: null,
+  }
+}
+
+/** 空闲时切换下一次 Run 的工作模式；busy 门禁由 feature/controller 负责。 */
+export function setWorkMode(state: InteractiveState, mode: WorkMode): InteractiveState {
+  if (state.workMode === mode) return state
+  return { ...state, workMode: mode }
+}
+
+/** 折叠一帧 compose.state projection；revision 不递增的迟到帧被拒绝。 */
+export function applyComposeState(state: InteractiveState, payload: unknown): InteractiveState {
+  const active = state.activeRun
+  if (!active) return state
+  const projection = parseComposeProjection(payload)
+  if (!projection) return state
+  const current = state.composeState
+  if (current !== null && projection.revision <= current.revision) return state
+  const activity: InteractiveActivity =
+    projection.status === "waiting_user"
+      ? { kind: "waiting-interaction" }
+      : { kind: "running" }
+  return { ...state, composeState: projection, activity }
+}
+
+const COMPOSE_STAGE_IDS: readonly ComposeStageId[] = ["understand", "plan", "build", "verify", "review"]
+const COMPOSE_STATUSES = new Set(["running", "waiting_user", "blocked", "completed", "failed", "cancelled"])
+
+function parseComposeProjection(value: unknown): ComposeProjection | null {
+  if (!value || typeof value !== "object") return null
+  const raw = value as Record<string, unknown>
+  if (!Number.isInteger(raw.revision) || (raw.revision as number) < 0) return null
+  if (typeof raw.stage !== "string" || !COMPOSE_STAGE_IDS.includes(raw.stage as ComposeStageId)) return null
+  if (typeof raw.status !== "string" || !COMPOSE_STATUSES.has(raw.status)) return null
+  if (!Array.isArray(raw.stages) || !Array.isArray(raw.tasks) || !Array.isArray(raw.evidence)) return null
+  const stages = raw.stages.map(item => {
+    const entry = item as Record<string, unknown>
+    if (typeof entry.id !== "string" || !COMPOSE_STAGE_IDS.includes(entry.id as ComposeStageId)) return null
+    if (typeof entry.status !== "string" || typeof entry.attempts !== "number") return null
+    return { id: entry.id as ComposeStageId, status: entry.status, attempts: entry.attempts }
+  })
+  const tasks = raw.tasks.map(item => {
+    const entry = item as Record<string, unknown>
+    if (typeof entry.id !== "string" || typeof entry.title !== "string" || typeof entry.status !== "string") return null
+    return { id: entry.id, title: entry.title, status: entry.status }
+  })
+  const evidence = raw.evidence.map(item => {
+    const entry = item as Record<string, unknown>
+    if (typeof entry.label !== "string" || typeof entry.status !== "string") return null
+    return { label: entry.label, status: entry.status }
+  })
+  if (stages.some(item => item === null) || tasks.some(item => item === null) || evidence.some(item => item === null)) return null
+  return {
+    revision: raw.revision as number,
+    stage: raw.stage as ComposeStageId,
+    status: raw.status as ComposeProjection["status"],
+    stages: stages as ComposeProjection["stages"],
+    tasks: tasks as ComposeProjection["tasks"],
+    evidence: evidence as ComposeProjection["evidence"],
+    blockedReason: typeof raw.blocked_reason === "string" ? raw.blocked_reason : null,
   }
 }
 

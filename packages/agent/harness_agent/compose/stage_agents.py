@@ -124,9 +124,10 @@ class ManagedStageAgentPort:
         self._workspace = workspace
 
     async def run(self, request: StageRequest) -> StageResult:
-        """解析可信 spec（Reviewer 用只读视图）、冻结 target 并执行。"""
+        """解析可信 spec（Reviewer 用只读视图，全部 stage 关闭 ask_user）。"""
         spec = self._resolve_spec(
             request.profile_key,
+            headless=True,
             readonly=request.stage in REVIEWER_STAGES,
         )
         if spec is None:
@@ -192,7 +193,7 @@ class ManagedStageAgentPort:
         from harness_agent.runtime.agent_delegation import DelegateAgent
 
         idempotency_key = hashlib.sha256(
-            f"{request.stage}:{request.parent_ref.execution_id}".encode("utf-8")
+            f"{request.stage}:{request.parent_ref.execution_id}:{hashlib.sha256(request.task.encode('utf-8')).hexdigest()[:16]}".encode("utf-8")
         ).hexdigest()[:20]
         command = DelegateAgent(
             parent_ref=request.parent_ref,

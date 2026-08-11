@@ -23,6 +23,34 @@ DEFAULT_VERIFY_TIMEOUT_SECONDS = 180.0
 MAX_OUTPUT_SUMMARY_CHARS = 2_000
 TIMEOUT_EXIT_CODE = 124
 
+_SECRET_PATTERNS = (
+    # key=value / key: value 形式的凭据赋值
+    r"(?i)(api[_-]?key|token|secret|password|passwd|authorization|access[_-]?key"
+    r"|private[_-]?key|client[_-]?secret)\s*[:=]\s*[^\s,;]+",
+    # PEM 私钥/证书块整体替换
+    r"-----BEGIN [A-Z ]+PRIVATE KEY-----.*?-----END [A-Z ]+PRIVATE KEY-----",
+    r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
+)
+
+
+def _redact_secrets(text: str) -> str:
+    """把常见凭据形态替换为占位符，避免验证输出摘要落盘敏感值。"""
+    import re
+
+    redacted = text
+    for pattern in _SECRET_PATTERNS:
+        redacted = re.sub(pattern, "[REDACTED]", redacted, flags=re.DOTALL)
+    return redacted
+
+
+def _working_dir_identity(workspace_path: str, workspace: Path) -> str:
+    """返回工作目录的有界身份：workspace 相对路径，绝不落盘绝对用户目录。"""
+    try:
+        relative = Path(workspace_path).resolve().relative_to(workspace.resolve())
+        return str(relative) or "."
+    except (ValueError, OSError):
+        return Path(workspace_path).name or workspace.name
+
 
 class VerificationError(RuntimeError):
     """验证执行边界的稳定错误；code 区分 deny/approval/backend/timeout。"""
@@ -121,7 +149,8 @@ class ManagedVerificationPort:
                     "VERIFICATION_DENIED", "verification command rejected by user"
                 )
 
-        # 验证命令可能修改工作区，与 Agent 写工具一致持有独占写锁。
+        # 验证命令可能修改工作区，与 Agent 写工具一致：整个执行期间持有
+        # Host 独占写锁，防止其他 Thread 的写操作与验证命令交错。
         await self._rwlock.acquire_write()
         try:
             lease = await self._pool.acquire(
@@ -129,46 +158,50 @@ class ManagedVerificationPort:
                 self._settings,
                 self._workspace,
             )
-        finally:
-            await self._rwlock.release_write()
-        started_at_ms = self._now_ms()
-        try:
+            started_at_ms = self._now_ms()
             try:
                 backend = lease.value.backend
+                # backend.execute 的 timeout 是终止进程的权威超时；外层
+                # wait_for 只作兜底，防止 backend 无视 timeout 时无限挂起。
                 response = await asyncio.wait_for(
                     asyncio.to_thread(
                         backend.execute,
                         request.command,
                         timeout=int(request.timeout_seconds),
                     ),
-                    timeout=request.timeout_seconds,
+                    timeout=request.timeout_seconds + 30.0,
                 )
             except TimeoutError:
                 raise VerificationError(
                     "VERIFICATION_TIMEOUT",
                     f"command timed out after {request.timeout_seconds:.0f}s",
                 ) from None
+            except Exception as exc:
+                if "timeout" in type(exc).__name__.lower():
+                    raise VerificationError(
+                        "VERIFICATION_TIMEOUT",
+                        f"command timed out after {request.timeout_seconds:.0f}s",
+                    ) from exc
+                raise VerificationError(
+                    "BACKEND_FAILED",
+                    f"execution backend failed: {type(exc).__name__}",
+                ) from exc
             exit_code = int(response.exit_code) if response.exit_code is not None else -1
-            output = str(response.output or "")
             if exit_code < 0 or exit_code > 255:
                 raise VerificationError(
                     "BACKEND_FAILED", "backend returned an invalid exit code"
                 )
-        except VerificationError:
-            raise
-        except Exception as exc:
-            raise VerificationError(
-                "BACKEND_FAILED", f"execution backend failed: {type(exc).__name__}"
-            ) from exc
+            output = str(response.output or "")
         finally:
             await lease.release()
+            await self._rwlock.release_write()
         finished_at_ms = self._now_ms()
         encoded = output.encode("utf-8")
         truncated = len(encoded) > MAX_OUTPUT_SUMMARY_CHARS * 4
-        summary = output[:MAX_OUTPUT_SUMMARY_CHARS]
+        summary = _redact_secrets(output[:MAX_OUTPUT_SUMMARY_CHARS])
         return VerificationEvidence(
             command=request.command,
-            working_dir=str(lease.value.workspace_path),
+            working_dir=_working_dir_identity(lease.value.workspace_path, self._workspace),
             started_at_ms=started_at_ms,
             finished_at_ms=finished_at_ms,
             exit_code=exit_code,
