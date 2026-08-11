@@ -209,7 +209,7 @@ async def test_happy_path_understands_plans_and_waits_at_gate(tmp_path: Path) ->
     assert types[0] == "run.started"
     assert events[0].payload["mode"] == "compose"
     assert types[-1] == "run.failed"
-    assert events[-1].payload["error"]["code"] == "COMPOSE_VERIFY_STAGE_PENDING"
+    assert events[-1].payload["error"]["code"] == "COMPOSE_VERIFICATION_UNAVAILABLE"
     assert types.count("run.completed") == 0
     assert types.count("run.failed") == 1
 
@@ -295,7 +295,7 @@ async def test_plan_revise_with_feedback_returns_to_plan(tmp_path: Path) -> None
     assert any(frame["status"] == "waiting_user" for frame in frames)
     assert frames[-1]["stage"] == "verify"
     assert events[-1].type == "run.failed"
-    assert events[-1].payload["error"]["code"] == "COMPOSE_VERIFY_STAGE_PENDING"
+    assert events[-1].payload["error"]["code"] == "COMPOSE_VERIFICATION_UNAVAILABLE"
 
 
 async def test_plan_reject_cancels_run_with_single_terminal(tmp_path: Path) -> None:
@@ -344,7 +344,7 @@ async def test_malformed_stage_output_is_treated_as_schema_invalid(tmp_path: Pat
     )
     assert stage_agent.calls == ["understand", "understand", "plan", "build", "build"]
     assert events[-1].type == "run.failed"
-    assert events[-1].payload["error"]["code"] == "COMPOSE_VERIFY_STAGE_PENDING"
+    assert events[-1].payload["error"]["code"] == "COMPOSE_VERIFICATION_UNAVAILABLE"
 
 
 async def test_plan_artifact_with_placeholder_is_rejected(tmp_path: Path) -> None:

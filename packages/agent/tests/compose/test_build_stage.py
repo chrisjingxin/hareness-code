@@ -211,7 +211,7 @@ async def test_build_runs_tasks_in_order_and_stops_at_verify_boundary(tmp_path: 
         {"id": "task-2", "title": "补充文档", "status": "passed"},
     ]
     assert events[-1].type == "run.failed"
-    assert events[-1].payload["error"]["code"] == "COMPOSE_VERIFY_STAGE_PENDING"
+    assert events[-1].payload["error"]["code"] == "COMPOSE_VERIFICATION_UNAVAILABLE"
 
 
 async def test_tdd_task_without_red_evidence_gets_debug_retry(tmp_path: Path) -> None:

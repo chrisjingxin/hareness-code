@@ -2442,6 +2442,15 @@ class AgentHost:
         except Exception:
             logger.exception("Compose services unavailable")
             return None
+        from harness_agent.compose.verification import ManagedVerificationPort
+        from harness_agent.policy.permission_rules import load_rules, merge_rules
+
+        def compose_rules() -> list[Any]:
+            """验证命令与 Agent 工具看到同一份规则（session + 持久化）。"""
+            persisted = load_rules(project_dir=self._workspace)
+            persisted["session"] = self._run_coordinator.session_rules
+            return merge_rules(persisted)
+
         return ComposeServices(
             stage_agent=ManagedStageAgentPort(
                 registry=self._run_coordinator.execution_registry,
@@ -2452,6 +2461,14 @@ class AgentHost:
             ),
             method_assets=load_method_assets(),
             workspace_root=str(self._workspace),
+            verification=ManagedVerificationPort(
+                pool=self._ensure_workspace_execution_resources(),
+                settings=config.execution,
+                workspace=self._workspace,
+                rules_provider=compose_rules,
+                rwlock=self._tool_concurrency_lock,
+                now_ms=lambda: int(time.time() * 1000),
+            ),
         )
 
     def _resolve_compose_stage_spec(self, profile_key: str) -> ResolvedAgentSpec | None:

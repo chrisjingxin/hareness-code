@@ -25,6 +25,9 @@ from harness_agent.compose.models import (
     ComposeRunState,
     ComposeRunStatus,
     ComposeStage,
+    ComposeTask,
+    EvidenceItem,
+    EvidenceStatus,
     PlanArtifact,
     TaskStatus,
     UnderstandingArtifact,
@@ -32,6 +35,12 @@ from harness_agent.compose.models import (
     validate_plan_artifact,
     validate_task_result_artifact,
     validate_understanding_artifact,
+    validate_verification_evidence,
+)
+from harness_agent.compose.verification import (
+    VerificationError,
+    VerificationPort,
+    VerificationRequest,
 )
 from harness_agent.compose.stage_agents import StageAgentPort, StageRequest
 from harness_agent.compose.state_machine import (
@@ -100,6 +109,7 @@ class ComposeServices:
     stage_agent: StageAgentPort
     method_assets: Mapping[str, str]
     workspace_root: str = ""
+    verification: Any = None
     now_ms: Callable[[], int] = field(
         default=lambda: int(time.time() * 1000)
     )
@@ -206,10 +216,12 @@ class ComposeWorkflow:
         if state.stage is ComposeStage.BUILD:
             return await self._build(run, port, state)
         if state.stage is ComposeStage.VERIFY:
-            # WP5 边界：Verify 由后续工作包实现。
+            return await self._verify(run, port, state)
+        if state.stage is ComposeStage.REVIEW:
+            # WP6 边界：独立 Review 由后续工作包实现。
             raise ComposeWorkflowError(
-                "COMPOSE_VERIFY_STAGE_PENDING",
-                "Verify stage lands in a later work package",
+                "COMPOSE_REVIEW_STAGE_PENDING",
+                "Review stage lands in a later work package",
             )
         raise ComposeWorkflowError(
             "COMPOSE_WORKFLOW_STATE_INVALID",
@@ -333,6 +345,152 @@ class ComposeWorkflow:
             )
             return False
         return True
+
+    async def _verify(
+        self,
+        run: Any,
+        port: Any,
+        state: ComposeRunState,
+    ) -> ComposeRunState:
+        """运行全部 required 命令；无 fresh pass evidence 不能进入 Review。"""
+        verification = self._services.verification
+        if verification is None:
+            raise ComposeWorkflowError(
+                "COMPOSE_VERIFICATION_UNAVAILABLE", "verification port missing"
+            )
+        plan = await self._load_plan(run, state)
+        commands: list[str] = []
+        for task in plan.tasks:
+            for command in task.verification_commands:
+                if command not in commands:
+                    commands.append(command)
+        profile = run.preparation.agent_engine_profile
+        resource_key = (
+            profile.sandbox_config_fingerprint
+            if profile is not None
+            else "compose-default"
+        )
+        items: list[EvidenceItem] = []
+        failed_command = ""
+        for index, command in enumerate(commands):
+            if port.is_cancelled(run):
+                raise asyncio.CancelledError
+            label = command[:200]
+            request = VerificationRequest(
+                command=command,
+                label=label,
+                resource_key=resource_key,
+                approve=lambda description, c=command: self._approve_verify(
+                    run, port, state, description, c
+                ),
+            )
+            try:
+                evidence = await verification.run(request)
+            except VerificationError as exc:
+                # 策略拒绝/用户拒绝/后端缺失不可修复：直接 blocked。
+                return self._apply(
+                    run,
+                    port,
+                    state,
+                    ComposeEvent.BLOCK,
+                    reason=f"验证命令被拒绝：{exc.code}",
+                )
+            validate_verification_evidence(
+                {
+                    "command": evidence.command,
+                    "working_dir": evidence.working_dir,
+                    "started_at_ms": evidence.started_at_ms,
+                    "finished_at_ms": evidence.finished_at_ms,
+                    "exit_code": evidence.exit_code,
+                    "output_digest": evidence.output_digest,
+                    "output_summary": evidence.output_summary,
+                    "truncated": evidence.truncated,
+                }
+            )
+            await self._store.save_artifact(
+                make_artifact(
+                    ArtifactKind.VERIFICATION,
+                    run_id=run.ref.run_id,
+                    source_execution_id=f"verify-{state.revision}",
+                    created_at_ms=self._services.now_ms(),
+                    payload={
+                        "command": evidence.command,
+                        "working_dir": evidence.working_dir,
+                        "started_at_ms": evidence.started_at_ms,
+                        "finished_at_ms": evidence.finished_at_ms,
+                        "exit_code": evidence.exit_code,
+                        "output_digest": evidence.output_digest,
+                        "output_summary": evidence.output_summary,
+                        "truncated": evidence.truncated,
+                    },
+                )
+            )
+            passed = evidence.exit_code == 0
+            items.append(
+                EvidenceItem(
+                    label=label,
+                    status=EvidenceStatus.PASSED if passed else EvidenceStatus.FAILED,
+                )
+            )
+            if not passed:
+                failed_command = command
+                break
+        if not failed_command:
+            return self._apply(
+                run,
+                port,
+                state,
+                ComposeEvent.VERIFY_PASS,
+                evidence_id=f"verify-{state.revision}",
+                evidence=tuple(items),
+            )
+        # 失败创建来源明确的 fix task；不能修改原 acceptance。
+        fix_task = ComposeTask(
+            id=f"fix-verify-{state.verify_fix_round + 1}",
+            title=f"修复验证失败：{failed_command[:60]}",
+            kind=ChangeKind.BUG,
+            acceptance=f"验证命令通过：{failed_command[:120]}",
+            verification_commands=(failed_command,),
+        )
+        return self._apply(
+            run,
+            port,
+            state,
+            ComposeEvent.VERIFY_FAIL,
+            evidence=tuple(items),
+            fix_tasks=(fix_task,),
+        )
+
+    async def _approve_verify(
+        self,
+        run: Any,
+        port: Any,
+        state: ComposeRunState,
+        description: str,
+        command: str,
+    ) -> bool:
+        """验证命令的审批弹窗；approve 语义与工具审批一致。"""
+        request_id = f"compose-verify-{state.revision}"
+        result = await port.request_approval(
+            run,
+            request_id=request_id,
+            interrupt_id=request_id,
+            description=description,
+            decisions=["approve_once", "reject"],
+            action_requests=[
+                {
+                    "name": "execute",
+                    "description": description,
+                    "args": {"command": command},
+                }
+            ],
+        )
+        value = result.value if isinstance(result.value, Mapping) else {}
+        return str(value.get("decision") or "") in {
+            "approve_once",
+            "approve_thread",
+            "approve_project",
+        }
 
     async def _understand(
         self,
