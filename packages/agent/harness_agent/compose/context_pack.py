@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 from harness_agent.compose.models import (
     ComposeStage,
+    PlanArtifact,
     UnderstandingArtifact,
 )
 
@@ -123,6 +124,62 @@ def build_plan_pack(
         out_of_scope=understanding.out_of_scope,
         change_kind=understanding.change_kind,
         feedback=feedback,
+        workspace_root=workspace_root,
+    )
+
+
+def build_review_pack(
+    *,
+    axis: str,
+    user_request: str,
+    revision: int,
+    method_asset: str,
+    understanding: UnderstandingArtifact,
+    plan: PlanArtifact,
+    task_results: tuple[Mapping[str, object], ...],
+    evidence: tuple[Mapping[str, object], ...],
+    workspace_root: str = "",
+) -> ContextPack:
+    """构造 Review 双轴之一的有界输入；只含 spec/diff/evidence 摘要。"""
+    sections = [
+        f"## 评审轴\n{axis}",
+        f"## 用户请求\n{_bounded(user_request, 'user_request')}",
+        f"## 已确认目标\n{_bounded(understanding.goal, 'goal')}",
+        f"## 验收标准\n{_bullets(understanding.acceptance, 'acceptance')}",
+        f"## 非范围\n{_bullets(understanding.out_of_scope, 'out_of_scope')}",
+        f"## 方案\n{_bounded(plan.solution, 'solution')}",
+    ]
+    task_lines = []
+    for task in plan.tasks:
+        task_lines.append(
+            f"- {task.id} {task.title}（{task.kind.value}）验收：{task.acceptance[:200]}"
+        )
+    sections.append("## Plan tasks\n" + "\n".join(task_lines))
+    if task_results:
+        result_lines = []
+        for result in task_results:
+            result_lines.append(
+                f"- {result.get('task_id')} 改动："
+                + "；".join(str(path) for path in result.get("changed_paths", ())[:10])
+                + f"；证据：{str(result.get('focused_test_evidence', ''))[:200]}"
+            )
+        sections.append("## Diff 摘要\n" + "\n".join(result_lines))
+    if evidence:
+        evidence_lines = [
+            f"- {item.get('command')} → exit {item.get('exit_code')} digest {str(item.get('output_digest', ''))[:16]}"
+            for item in evidence[:20]
+        ]
+        sections.append("## Verification evidence\n" + "\n".join(evidence_lines))
+    if workspace_root:
+        sections.append(f"## 仓库根目录\n{_bounded(workspace_root, 'workspace_root')}")
+    sections.append("## 方法\n" + method_asset)
+    return ContextPack(
+        stage=ComposeStage.REVIEW,
+        user_request=user_request,
+        method_asset="\n\n".join(sections),
+        revision=revision,
+        goal=understanding.goal,
+        acceptance=understanding.acceptance,
         workspace_root=workspace_root,
     )
 

@@ -71,6 +71,10 @@ def _task_result(*, task_id: str = "task-1", **overrides: Any) -> dict[str, Any]
     }
 
 
+def _reviewer() -> dict[str, Any]:
+    return {"verdict": "pass", "findings": []}
+
+
 def _evidence(*, command: str = "pytest -q tests/test_search.py", exit_code: int = 0) -> VerificationEvidence:
     return VerificationEvidence(
         command=command,
@@ -166,6 +170,7 @@ async def _run_compose(
             method_assets={
                 "understand": "u", "plan": "p", "build": "BUILD-METHOD",
                 "tdd": "TDD-METHOD", "debug": "DEBUG-METHOD",
+                "code-review": "REVIEW-METHOD",
             },
             workspace_root=str(project),
             verification=verification,
@@ -194,10 +199,13 @@ def _state_frames(events) -> list[dict[str, Any]]:
 
 
 async def test_verify_pass_reaches_review_boundary_with_evidence(tmp_path: Path) -> None:
-    """全部命令 fresh pass 后进入 Review 边界；evidence 进入 projection。"""
+    """全部命令 fresh pass 后进入 Review；evidence 进入 projection 并完成。"""
     events, stage_agent, verification, interactions = await _run_compose(
         tmp_path,
-        [_understanding(), _plan(), _task_result(task_id="task-1")],
+        [
+            _understanding(), _plan(), _task_result(task_id="task-1"),
+            _reviewer(), _reviewer(),
+        ],
         [_evidence(exit_code=0)],
         [{"decision": "approve_once"}],
     )
@@ -206,8 +214,7 @@ async def test_verify_pass_reaches_review_boundary_with_evidence(tmp_path: Path)
     assert frames[-1]["evidence"] == [
         {"label": "pytest -q tests/test_search.py", "status": "passed"}
     ]
-    assert events[-1].type == "run.failed"
-    assert events[-1].payload["error"]["code"] == "COMPOSE_REVIEW_STAGE_PENDING"
+    assert events[-1].type == "run.completed"
     assert [request.command for request in verification.requests] == [
         "pytest -q tests/test_search.py"
     ]
@@ -222,6 +229,8 @@ async def test_verify_fail_creates_fix_task_and_reloops(tmp_path: Path) -> None:
             _plan(),
             _task_result(task_id="task-1"),
             _task_result(task_id="fix-verify-1"),
+            _reviewer(),
+            _reviewer(),
         ],
         [_evidence(exit_code=1), _evidence(exit_code=0)],
         [{"decision": "approve_once"}],
@@ -233,8 +242,8 @@ async def test_verify_fail_creates_fix_task_and_reloops(tmp_path: Path) -> None:
     assert [task["id"] for task in frames[-1]["tasks"]] == ["task-1", "fix-verify-1"]
     assert frames[-1]["tasks"][1]["status"] == "passed"
     assert [frame["status"] for frame in frames].count("waiting_user") == 1
-    # 只执行了一个 fix 轮，没有跳到 Review。
-    assert events[-1].payload["error"]["code"] == "COMPOSE_REVIEW_STAGE_PENDING"
+    # 只执行了一个 fix 轮，双轴 Review 后完成。
+    assert events[-1].type == "run.completed"
 
 
 async def test_verify_fix_budget_exhausted_blocks(tmp_path: Path) -> None:

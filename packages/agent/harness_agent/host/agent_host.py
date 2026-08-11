@@ -2471,9 +2471,27 @@ class AgentHost:
             ),
         )
 
-    def _resolve_compose_stage_spec(self, profile_key: str) -> ResolvedAgentSpec | None:
-        """返回按 profile key 缓存的主 Agent spec；Compose 复用同一可信 spec。"""
-        return self._resolved_agent_specs.get(profile_key)
+    def _resolve_compose_stage_spec(
+        self,
+        profile_key: str,
+        *,
+        readonly: bool = False,
+    ) -> ResolvedAgentSpec | None:
+        """返回按 profile key 缓存的主 Agent spec；Compose 复用同一可信 spec。
+
+        Reviewer 请求 readonly 时派生并注册只读能力视图 spec，独立 profile
+        key 让 AgentEnginePool 构建独立引擎。
+        """
+        spec = self._resolved_agent_specs.get(profile_key)
+        if spec is None or not readonly:
+            return spec
+        from harness_agent.runtime.agent_spec import restrict_spec_to_read_only
+
+        restricted = restrict_spec_to_read_only(spec)
+        self._resolved_agent_specs.setdefault(
+            restricted.runtime_profile.profile_key, restricted
+        )
+        return restricted
 
     async def _plugin_delegation_targets(
         self,

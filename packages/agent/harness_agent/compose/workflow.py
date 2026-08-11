@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Callable, Mapping
 
 from harness_agent.compose.context_pack import (
     build_plan_pack,
+    build_review_pack,
     build_task_pack,
     build_understand_pack,
 )
@@ -28,11 +29,13 @@ from harness_agent.compose.models import (
     ComposeTask,
     EvidenceItem,
     EvidenceStatus,
+    FindingSeverity,
     PlanArtifact,
     TaskStatus,
     UnderstandingArtifact,
     make_artifact,
     validate_plan_artifact,
+    validate_review_report,
     validate_task_result_artifact,
     validate_understanding_artifact,
     validate_verification_evidence,
@@ -218,11 +221,7 @@ class ComposeWorkflow:
         if state.stage is ComposeStage.VERIFY:
             return await self._verify(run, port, state)
         if state.stage is ComposeStage.REVIEW:
-            # WP6 边界：独立 Review 由后续工作包实现。
-            raise ComposeWorkflowError(
-                "COMPOSE_REVIEW_STAGE_PENDING",
-                "Review stage lands in a later work package",
-            )
+            return await self._review(run, port, state)
         raise ComposeWorkflowError(
             "COMPOSE_WORKFLOW_STATE_INVALID",
             f"stage {state.stage.value} cannot be driven",
@@ -491,6 +490,208 @@ class ComposeWorkflow:
             "approve_thread",
             "approve_project",
         }
+
+    async def _review(
+        self,
+        run: Any,
+        port: Any,
+        state: ComposeRunState,
+    ) -> ComposeRunState:
+        """双轴独立 Review；Required finding 回到 Build→Verify→Review。"""
+        understanding = await self._load_understanding(run, state)
+        plan = await self._load_plan(run, state)
+        task_results = await self._load_task_results(run)
+        evidence = await self._load_verification_evidence(run)
+
+        requirement = await self._run_reviewer(
+            run, port, state, "requirement-reviewer", understanding, plan,
+            task_results, evidence,
+        )
+        code = await self._run_reviewer(
+            run, port, state, "code-reviewer", understanding, plan,
+            task_results, evidence,
+        )
+        report_payload = {
+            "requirement_verdict": requirement["verdict"],
+            "code_verdict": code["verdict"],
+            "findings": requirement["findings"] + code["findings"],
+        }
+        try:
+            report = validate_review_report(report_payload)
+        except ValueError as exc:
+            return self._fail(
+                run, port, state, "COMPOSE_ARTIFACT_INVALID", str(exc)
+            )
+        required = [
+            finding
+            for finding in report.findings
+            if finding.severity in (FindingSeverity.CRITICAL, FindingSeverity.REQUIRED)
+        ]
+        report_row = make_artifact(
+            ArtifactKind.REVIEW,
+            run_id=run.ref.run_id,
+            source_execution_id=f"review-{state.revision}",
+            created_at_ms=self._services.now_ms(),
+            payload={
+                "requirement_verdict": report.requirement_verdict,
+                "code_verdict": report.code_verdict,
+                "findings": [
+                    {
+                        "axis": finding.axis.value,
+                        "severity": finding.severity.value,
+                        "message": finding.message,
+                        "location": finding.location,
+                    }
+                    for finding in report.findings
+                ],
+            },
+        )
+        await self._store.save_artifact(report_row)
+        if required:
+            fix_tasks = tuple(
+                ComposeTask(
+                    id=f"fix-review-{state.review_fix_round + 1}-{index + 1}",
+                    title=f"修复评审发现：{finding.message[:60]}",
+                    kind=ChangeKind.BUG,
+                    acceptance=f"评审发现已修复：{finding.message[:120]}",
+                    verification_commands=tuple(
+                        command
+                        for task in plan.tasks
+                        for command in task.verification_commands
+                    ),
+                )
+                for index, finding in enumerate(required)
+            )
+            return self._apply(
+                run,
+                port,
+                state,
+                ComposeEvent.REVIEW_FAIL,
+                report_id=report_row.artifact_id,
+                fix_tasks=fix_tasks,
+            )
+        return self._apply(
+            run,
+            port,
+            state,
+            ComposeEvent.REVIEW_PASS,
+            report_id=report_row.artifact_id,
+        )
+
+    async def _run_reviewer(
+        self,
+        run: Any,
+        port: Any,
+        state: ComposeRunState,
+        stage: str,
+        understanding: UnderstandingArtifact,
+        plan: PlanArtifact,
+        task_results: tuple[dict[str, object], ...],
+        evidence: tuple[dict[str, object], ...],
+    ) -> dict[str, object]:
+        """运行一个 Reviewer；schema invalid 只结构化重试一次。"""
+        axis = "requirement" if stage == "requirement-reviewer" else "code"
+        schema_retries = 0
+        while True:
+            if port.is_cancelled(run):
+                raise asyncio.CancelledError
+            pack = build_review_pack(
+                axis=axis,
+                user_request=run.message,
+                revision=state.revision,
+                method_asset=self._method("code-review"),
+                understanding=understanding,
+                plan=plan,
+                task_results=task_results,
+                evidence=evidence,
+                workspace_root=self._services.workspace_root,
+            )
+            try:
+                result = await self._run_stage(run, stage, pack.render())
+                raw = result.output if isinstance(result.output, Mapping) else {}
+                return self._parse_reviewer_axis(raw, axis)
+            except ValueError as exc:
+                schema_retries += 1
+                if schema_retries > SCHEMA_INVALID_RETRY_ALLOWED:
+                    raise ComposeWorkflowError(
+                        "COMPOSE_ARTIFACT_INVALID", str(exc)
+                    ) from exc
+
+    def _parse_reviewer_axis(
+        self, raw: Mapping[str, object], axis: str
+    ) -> dict[str, object]:
+        """校验单个 Reviewer 的输出：verdict 白名单 + findings 结构。"""
+        verdict = raw.get("verdict")
+        if verdict not in {"pass", "fail"}:
+            raise ValueError(f"{axis} reviewer verdict must be pass or fail")
+        raw_findings = raw.get("findings", [])
+        if not isinstance(raw_findings, list):
+            raise ValueError("reviewer findings must be a list")
+        findings: list[dict[str, object]] = []
+        for finding in raw_findings:
+            if not isinstance(finding, Mapping):
+                raise ValueError("reviewer finding must be an object")
+            severity = finding.get("severity")
+            if severity not in {
+                FindingSeverity.CRITICAL.value,
+                FindingSeverity.REQUIRED.value,
+                FindingSeverity.OPTIONAL.value,
+                FindingSeverity.NIT.value,
+            }:
+                raise ValueError("finding severity must be known")
+            message = finding.get("message")
+            if not isinstance(message, str) or not message.strip():
+                raise ValueError("finding message must be non-empty")
+            findings.append(
+                {
+                    "axis": axis,
+                    "severity": severity,
+                    "message": message[:2_000],
+                    "location": str(finding.get("location", ""))[:500],
+                }
+            )
+        return {"verdict": str(verdict), "findings": findings}
+
+    async def _load_task_results(
+        self, run: Any
+    ) -> tuple[dict[str, object], ...]:
+        """读取全部 TaskResult artifact，供 Reviewer 消费有界 diff 摘要。"""
+        artifacts = await self._store.list_artifacts(run.ref.run_id)
+        results: list[dict[str, object]] = []
+        for row in artifacts:
+            if row.kind is not ArtifactKind.TASK_RESULT:
+                continue
+            payload = dict(row.payload)
+            results.append(
+                {
+                    "task_id": str(payload.get("task_id", "")),
+                    "changed_paths": payload.get("changed_paths", ()),
+                    "focused_test_evidence": str(
+                        payload.get("focused_test_evidence", "")
+                    ),
+                }
+            )
+        return tuple(results)
+
+    async def _load_verification_evidence(
+        self, run: Any
+    ) -> tuple[dict[str, object], ...]:
+        """读取全部 Verification artifact 摘要，供 Reviewer 核对证据。"""
+        artifacts = await self._store.list_artifacts(run.ref.run_id)
+        evidence: list[dict[str, object]] = []
+        for row in artifacts:
+            if row.kind is not ArtifactKind.VERIFICATION:
+                continue
+            payload = dict(row.payload)
+            evidence.append(
+                {
+                    "command": str(payload.get("command", "")),
+                    "exit_code": payload.get("exit_code", -1),
+                    "output_digest": str(payload.get("output_digest", "")),
+                    "output_summary": str(payload.get("output_summary", ""))[:300],
+                }
+            )
+        return tuple(evidence)
 
     async def _understand(
         self,

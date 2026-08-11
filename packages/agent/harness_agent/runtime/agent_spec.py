@@ -35,8 +35,85 @@ _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 BUILTIN_MAIN_DEFINITION_FINGERPRINT = sha256_text("builtin-agent:main:v1")
 """内置 main 的实现身份；它不是可由 Plugin 覆盖的 AgentDefinition。"""
 
+READ_ONLY_REVIEWER_TOOLS = frozenset(
+    {
+        "ls",
+        "read_file",
+        "glob",
+        "grep",
+        "lsp",
+        "tool_search",
+        "memory_search",
+        "task_output",
+        "web_search",
+    }
+)
+"""Compose Reviewer 的能力交集：只读工具，不含任何写/Shell/委派/AskUser。"""
+
 RUN_CONTEXT_SNAPSHOT_MIDDLEWARE_VERSION = "run-context-snapshot-v1"
 """当前生产 RunContextSnapshot middleware 的 Profile 身份版本。"""
+
+
+def restrict_spec_to_read_only(spec: ResolvedAgentSpec) -> ResolvedAgentSpec:
+    """派生只读 Reviewer spec：同一模型/Policy，但能力交集为只读工具。
+
+    Reviewer 复用主 Agent 的模型、有效 Policy 与 workspace，但 graph 只暴露
+    只读工具；filesystem_write/shell/mcp/skills 全部从能力视图剔除，作者
+    execution 不得兼任 Reviewer。返回的 spec 拥有独立 profile key，由 Host
+    注册后经 AgentEnginePool 构建独立引擎。
+    """
+    from harness_agent.policy.capability_policy import EffectiveCapabilityView
+
+    tools = tuple(tool for tool in spec.tools if tool.name in READ_ONLY_REVIEWER_TOOLS)
+    view = EffectiveCapabilityView(
+        tool_names=tuple(sorted(tool.name for tool in tools)),
+        mcp_tool_names=(),
+        skill_ids=(),
+        filesystem_read=spec.capability_view.filesystem_read,
+        filesystem_write=None,
+        shell_commands=None,
+        policy_fingerprint=spec.effective_policy.fingerprint,
+    )
+    return ResolvedAgentSpec(
+        project_fingerprint=spec.project_fingerprint,
+        role="reviewer",
+        agent_id="compose-reviewer",
+        definition_fingerprint=sha256_text("builtin-agent:compose-reviewer:v1"),
+        model_profile_id=spec.model_profile_id,
+        model_settings=spec.model_settings,
+        model_view=spec.model_view,
+        effective_policy=spec.effective_policy,
+        capability_view=view,
+        tools=tools,
+        skill_registry=spec.skill_registry,
+        mcp_snapshot=spec.mcp_snapshot,
+        prompt=spec.prompt,
+        execution=spec.execution,
+        workspace=spec.workspace,
+        interactive=False,
+        tool_view_fingerprint=view.fingerprint,
+        skill_view_fingerprint=sha256_text(
+            canonical_json({"view": view.fingerprint, "skills": "readonly-none"})
+        ),
+        middleware_fingerprint=sha256_text(
+            str(
+                (
+                    RUN_CONTEXT_SNAPSHOT_MIDDLEWARE_VERSION,
+                    "context-window-v1",
+                    "workspace-boundary-v1",
+                    "reviewer-readonly",
+                    "memory-off",
+                    "skills-off",
+                )
+            )
+        ),
+        prompt_template_fingerprint=spec.prompt_template_fingerprint,
+        sandbox_config_fingerprint=spec.sandbox_config_fingerprint,
+        pinned=spec.pinned,
+        enable_memory=False,
+        enable_skills=False,
+        enable_ask_user=False,
+    )
 
 
 def skill_catalog_fingerprint(

@@ -31,6 +31,9 @@ if TYPE_CHECKING:
 
 STAGE_AGENT_TIMEOUT_SECONDS = 600.0
 
+# Reviewer 使用只读能力视图；作者 execution 不得兼任 Reviewer。
+REVIEWER_STAGES = frozenset({"requirement-reviewer", "code-reviewer"})
+
 
 class StageRequest:
     """一次 stage Agent 调用的领域输入。"""
@@ -121,8 +124,11 @@ class ManagedStageAgentPort:
         self._workspace = workspace
 
     async def run(self, request: StageRequest) -> StageResult:
-        """解析可信 spec、冻结 target 并执行一次 Managed stage 调用。"""
-        spec = self._resolve_spec(request.profile_key)
+        """解析可信 spec（Reviewer 用只读视图）、冻结 target 并执行。"""
+        spec = self._resolve_spec(
+            request.profile_key,
+            readonly=request.stage in REVIEWER_STAGES,
+        )
         if spec is None:
             raise RuntimeError("COMPOSE_STAGE_SPEC_MISSING")
         profile = spec.runtime_profile
