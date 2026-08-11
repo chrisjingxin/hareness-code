@@ -137,7 +137,7 @@ def _serial_spec(
 def _serial_run() -> RunState:
     """构造串行审批测试用的最小 RunState。"""
     return RunState(
-        start=StartRun(thread_id="thread-serial", run_id="run-serial", message="执行"),
+        start=StartRun(mode="build", thread_id="thread-serial", run_id="run-serial", message="执行"),
         owner=ConnectionRef("owner"),
         persistence=None,
         preparation=RunPreparation(),

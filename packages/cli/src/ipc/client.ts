@@ -5,6 +5,7 @@ import {
   Method,
   assertEventEnvelope,
   type ApprovalMode,
+  type InteractionMode,
   assertJsonRpcMessage,
   isInteractionMethod,
   validateInteractionParams,
@@ -74,6 +75,7 @@ export type InteractionHandler = PeerRequestHandler
 
 export type StartRunInput = {
   message: string
+  mode: InteractionMode
   threadId?: string
   requestedSkill?: RequestedSkill
   modelSelection?: ThreadModelSelection
@@ -208,6 +210,7 @@ export class AgentClient {
     this.on("close", closeListener)
     const accepted = this.request(Method.RUN_START, {
       message: input.message,
+      mode: input.mode,
       thread_id: threadId,
       run_id: runId,
       requested_skill: input.requestedSkill,

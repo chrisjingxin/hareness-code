@@ -911,7 +911,7 @@ async def test_context_refresh_failure_happens_before_accept_run() -> None:
     )
     with pytest.raises(ContextRefreshError, match="CONTEXT_REFERENCE_CHANGED_DURING_READ"):
         await coordinator.start(
-            StartRun(thread_id="thread-refresh-failure", run_id="run-1", message="刷新"),
+            StartRun(mode="build", thread_id="thread-refresh-failure", run_id="run-1", message="刷新"),
             ConnectionRef("owner"),
         )
     assert persistence.accept_calls == 0

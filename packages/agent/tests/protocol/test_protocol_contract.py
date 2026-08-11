@@ -46,6 +46,7 @@ def test_python_validates_manual_compaction_params() -> None:
 def test_python_validates_thread_model_selection() -> None:
     parsed = RunStartParams.model_validate(
         {
+            "mode": "build",
             "message": "使用 pro",
             "thread_id": "thread-1",
             "run_id": "run-1",
@@ -56,6 +57,7 @@ def test_python_validates_thread_model_selection() -> None:
     with pytest.raises(ValidationError):
         RunStartParams.model_validate(
             {
+                "mode": "build",
                 "message": "x",
                 "thread_id": "thread-1",
                 "run_id": "run-1",
@@ -94,6 +96,77 @@ def test_python_accepts_run_progress_event() -> None:
             "payload": {"phase": "preparing", "elapsed_ms": 12},
         }
     )
+
+
+def test_python_requires_run_start_work_mode() -> None:
+    """run.start 必填 build|compose 工作模式，未知模式被拒绝。"""
+    base = {"message": "检查", "thread_id": "thread-1", "run_id": "run-1"}
+    with pytest.raises(ValidationError):
+        RunStartParams.model_validate(base)
+    with pytest.raises(ValidationError):
+        RunStartParams.model_validate({**base, "mode": "yolo"})
+    assert RunStartParams.model_validate({**base, "mode": "build"}).mode == "build"
+    assert RunStartParams.model_validate({**base, "mode": "compose"}).mode == "compose"
+
+
+def test_python_requires_run_started_work_mode() -> None:
+    """run.started 必须回传实际工作模式。"""
+    envelope = {
+        "event_id": "event-started",
+        "type": "run.started",
+        "thread_id": "thread-1",
+        "run_id": "run-1",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {"resumed": False},
+    }
+    with pytest.raises((ValidationError, ValueError)):
+        EventEnvelope.model_validate(envelope)
+    parsed = EventEnvelope.model_validate(
+        {**envelope, "payload": {"resumed": False, "mode": "compose"}}
+    )
+    assert parsed.payload["mode"] == "compose"
+
+
+def test_python_validates_compose_state_projection() -> None:
+    """compose.state 是带 revision 的完整有界 projection，未知字段和枚举被拒绝。"""
+    payload = {
+        "revision": 3,
+        "stage": "build",
+        "status": "running",
+        "stages": [{"id": "understand", "status": "passed", "attempts": 1}],
+        "tasks": [{"id": "task-1", "title": "实现搜索", "status": "running"}],
+        "evidence": [{"label": "pytest -q tests/foo", "status": "passed"}],
+    }
+    envelope = {
+        "event_id": "compose-state-event",
+        "type": "compose.state",
+        "thread_id": "thread-1",
+        "run_id": "run-1",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": payload,
+    }
+    parsed = EventEnvelope.model_validate(envelope)
+    assert parsed.payload["revision"] == 3
+    with pytest.raises((ValidationError, ValueError)):
+        EventEnvelope.model_validate({**envelope, "payload": {**payload, "extra": True}})
+    with pytest.raises((ValidationError, ValueError)):
+        EventEnvelope.model_validate({**envelope, "payload": {**payload, "stage": "deploy"}})
+    with pytest.raises((ValidationError, ValueError)):
+        EventEnvelope.model_validate({**envelope, "payload": {**payload, "revision": -1}})
+    with pytest.raises((ValidationError, ValueError)):
+        EventEnvelope.model_validate(
+            {
+                **envelope,
+                "payload": {
+                    **payload,
+                    "stages": [
+                        {"id": "understand", "status": "passed", "attempts": 1, "extra": True}
+                    ],
+                },
+            }
+        )
 
 
 def _validate(fixture: dict[str, Any]) -> None:

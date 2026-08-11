@@ -467,7 +467,7 @@ async def test_initialize_rejects_incompatible_major_and_pre_initialize_calls():
     server = AgentHost(allow_echo=True)
     frames: list[dict[str, Any]] = []
     server.send = lambda message: _append(frames, message)  # type: ignore[method-assign]
-    await server.dispatch(_request("run.start", {"message": "x"}, "run-early"))
+    await server.dispatch(_request("run.start", {"mode": "build", "message": "x"}, "run-early"))
     await server.dispatch(_request("initialize", _initialize_params(protocol={"major": 9, "min_minor": 0, "max_minor": 0}), "init-bad"))
     assert [frame["error"]["code"] for frame in frames] == [-32000, -32003]
 
@@ -614,7 +614,7 @@ executor = "fast"
     await server.dispatch(
         _request(
             "run.start",
-            {"message": "全新 Thread 必须使用 pro", "thread_id": "fresh-thread", "run_id": "fresh-run"},
+            {"mode": "build", "message": "全新 Thread 必须使用 pro", "thread_id": "fresh-thread", "run_id": "fresh-run"},
             "fresh-start",
         )
     )
@@ -684,7 +684,7 @@ async def test_project_configuration_failure_prevents_agent_factory_invocation(t
     assert result["startup_error"]["code"] == "CONFIGURATION_ERROR"
 
     await server.dispatch(
-        _request("run.start", {"message": "should not start", "thread_id": "project", "run_id": "blocked"}, "run-project")
+        _request("run.start", {"mode": "build", "message": "should not start", "thread_id": "project", "run_id": "blocked"}, "run-project")
     )
     await _wait_for(frames, lambda frame: frame.get("params", {}).get("type") == "run.failed")
     assert invoked is False
@@ -696,12 +696,32 @@ async def test_echo_run_response_precedes_ordered_terminal_events():
 
     server = AgentHost(allow_echo=True)
     frames = await _capture_server(server)
-    await server.dispatch(_request("run.start", {"message": "hello", "thread_id": "t", "run_id": "r"}, "run-1"))
+    await server.dispatch(_request("run.start", {"mode": "build", "message": "hello", "thread_id": "t", "run_id": "r"}, "run-1"))
     await _wait_for(frames, lambda frame: frame.get("params", {}).get("type") == "run.completed")
     run_frames = frames[1:]
     assert run_frames[0]["result"]["accepted"] is True
     assert _event_types(run_frames) == ["run.started", "run.progress", "content.delta", "run.completed"]
     assert [frame["params"]["sequence"] for frame in run_frames if frame.get("method") == "event"] == [1, 2, 3, 4]
+
+
+async def test_run_started_carries_frozen_work_mode():
+    """run.started 必须回传受理时冻结的工作模式。"""
+    from harness_agent.host.agent_host import AgentHost
+
+    server = AgentHost(allow_echo=True)
+    frames = await _capture_server(server)
+    await server.dispatch(_request(
+        "run.start",
+        {"mode": "compose", "message": "hello", "thread_id": "t", "run_id": "r"},
+        "compose-start",
+    ))
+    await _wait_for(frames, lambda frame: frame.get("params", {}).get("type") == "run.completed")
+    started = next(
+        frame["params"]
+        for frame in frames
+        if frame.get("method") == "event" and frame["params"]["type"] == "run.started"
+    )
+    assert started["payload"]["mode"] == "compose"
 
 
 async def test_run_started_emits_authoritative_primary_model_binding():
@@ -763,7 +783,7 @@ async def test_run_started_emits_authoritative_primary_model_binding():
         interaction_port=object(),  # type: ignore[arg-type]
     )
     execution = await coordinator.start(
-        StartRun(thread_id="thread-model", run_id="run-model", message="使用 pro"),
+        StartRun(mode="build", thread_id="thread-model", run_id="run-model", message="使用 pro"),
         ConnectionRef("owner"),
     )
     events = [event async for event in execution.events]
@@ -876,7 +896,7 @@ async def test_context_compact_rejects_active_run():
     server._owner_connection.initialized = True
     server._owner_connection.enabled_capabilities = {"context.manage"}
     server._run_coordinator._runs["thread"] = RunState(
-        start=StartRun(thread_id="thread", run_id="run", message="运行中"),
+        start=StartRun(mode="build", thread_id="thread", run_id="run", message="运行中"),
         owner=ConnectionRef(server._owner_connection.connection_id),
         persistence=None,
         preparation=RunPreparation(),
@@ -963,7 +983,7 @@ executor = "fast"
     server._run_coordinator._runtime_provider = no_runtime
     await server.dispatch(_request(
         "run.start",
-        {
+        {"mode": "build", 
             "message": "使用 pro",
             "thread_id": "thread-model",
             "run_id": "first",
@@ -1008,7 +1028,7 @@ executor = "fast"
 
     await server.dispatch(_request(
         "run.start",
-        {
+        {"mode": "build", 
             "message": "切换 fast",
             "thread_id": "thread-model",
             "run_id": "second",
@@ -1261,7 +1281,7 @@ async def test_skill_text_only_changes_skill_prompt_not_tools_or_effective_polic
 
     try:
         first = await server._prepare_run(
-            StartRun(
+            StartRun(mode="build", 
                 thread_id="policy-thread",
                 run_id="run-old",
                 message="审查",
@@ -1280,7 +1300,7 @@ async def test_skill_text_only_changes_skill_prompt_not_tools_or_effective_polic
 
         write_skill(second_body)
         second = await server._prepare_run(
-            StartRun(
+            StartRun(mode="build", 
                 thread_id="policy-thread",
                 run_id="run-new",
                 message="审查",
@@ -1902,7 +1922,7 @@ def test_stream_translation_prefers_normalized_content_blocks():
         tool_call_chunks=[],
     )
     run = RunState(
-        start=StartRun(thread_id="thread", run_id="run", message="你好"),
+        start=StartRun(mode="build", thread_id="thread", run_id="run", message="你好"),
         owner=ConnectionRef("owner"),
         persistence=None,
         preparation=RunPreparation(),
@@ -1926,7 +1946,7 @@ def test_tool_fragments_with_missing_ids_are_merged_by_index():
     )
 
     run = RunState(
-        start=StartRun(thread_id="thread", run_id="run", message="执行 pwd"),
+        start=StartRun(mode="build", thread_id="thread", run_id="run", message="执行 pwd"),
         owner=ConnectionRef("owner"),
         persistence=None,
         preparation=RunPreparation(),
@@ -1958,7 +1978,7 @@ def test_tool_stream_reuses_index_for_later_calls_without_overwriting_history():
     )
 
     run = RunState(
-        start=StartRun(thread_id="thread", run_id="run", message="连续执行两次"),
+        start=StartRun(mode="build", thread_id="thread", run_id="run", message="连续执行两次"),
         owner=ConnectionRef("owner"),
         persistence=None,
         preparation=RunPreparation(),
@@ -1999,9 +2019,9 @@ async def test_multiple_threads_run_concurrently_but_same_thread_is_rejected():
 
     server = AgentHost(agent=BlockingAgent())
     frames = await _capture_server(server)
-    await server.dispatch(_request("run.start", {"message": "a", "thread_id": "t1", "run_id": "r1"}, "start-1"))
-    await server.dispatch(_request("run.start", {"message": "b", "thread_id": "t2", "run_id": "r2"}, "start-2"))
-    await server.dispatch(_request("run.start", {"message": "c", "thread_id": "t1", "run_id": "r3"}, "start-3"))
+    await server.dispatch(_request("run.start", {"mode": "build", "message": "a", "thread_id": "t1", "run_id": "r1"}, "start-1"))
+    await server.dispatch(_request("run.start", {"mode": "build", "message": "b", "thread_id": "t2", "run_id": "r2"}, "start-2"))
+    await server.dispatch(_request("run.start", {"mode": "build", "message": "c", "thread_id": "t1", "run_id": "r3"}, "start-3"))
     assert any(frame.get("id") == "start-3" and frame.get("error", {}).get("code") == -32000 for frame in frames)
     await server.dispatch(_request("run.cancel", {"thread_id": "t1", "run_id": "r1"}, "cancel-1"))
     await server.dispatch(_request("run.cancel", {"thread_id": "t2", "run_id": "r2"}, "cancel-2"))
@@ -2028,7 +2048,7 @@ async def test_question_request_uses_standard_response_and_stable_question_id():
 
     server = AgentHost(agent=AskAgent())
     frames = await _capture_server(server)
-    await server.dispatch(_request("run.start", {"message": "开始", "thread_id": "t", "run_id": "r"}, "start"))
+    await server.dispatch(_request("run.start", {"mode": "build", "message": "开始", "thread_id": "t", "run_id": "r"}, "start"))
     interaction = await _wait_for(frames, lambda frame: frame.get("method") == "interaction.question")
     assert interaction["id"] == "ask-1"
     assert interaction["params"]["payload"]["questions"][0]["id"] == "question-1"
@@ -2056,7 +2076,7 @@ async def test_real_hitl_rejection_prevents_file_write():
         agent = create_harness_agent(model, cwd=workspace, enable_skills=False, enable_memory=False, enable_ask_user=False, approval_mode="default")
         server = AgentHost(agent=agent)
         frames = await _capture_server(server)
-        await server.dispatch(_request("run.start", {"message": "写入", "thread_id": "t", "run_id": "r"}, "start"))
+        await server.dispatch(_request("run.start", {"mode": "build", "message": "写入", "thread_id": "t", "run_id": "r"}, "start"))
         interaction = await _wait_for(frames, lambda frame: frame.get("method") == "interaction.approval")
         await server.dispatch({"jsonrpc": "2.0", "id": interaction["id"], "result": {"decision": "reject"}})
         await _wait_for(frames, lambda frame: frame.get("params", {}).get("type") == "run.completed")
@@ -2149,7 +2169,7 @@ async def test_approve_thread_delete_rule_skips_later_deletions_in_same_thread()
 
         # 第一次删除：弹窗审批，选择“本线程允许”后会话规则应落库。
         await server.dispatch(
-            _request("run.start", {"message": "删除 first.txt", "thread_id": "del-thread", "run_id": "del-run-1"}, "del-start-1")
+            _request("run.start", {"mode": "build", "message": "删除 first.txt", "thread_id": "del-thread", "run_id": "del-run-1"}, "del-start-1")
         )
         interaction = await _wait_for(frames, lambda frame: frame.get("method") == "interaction.approval")
         await server.dispatch({"jsonrpc": "2.0", "id": interaction["id"], "result": {"decision": "approve_thread"}})
@@ -2159,7 +2179,7 @@ async def test_approve_thread_delete_rule_skips_later_deletions_in_same_thread()
 
         # 第二次删除（不同文件）：项目级通配规则覆盖，自动放行不再弹窗。
         await server.dispatch(
-            _request("run.start", {"message": "删除 second.txt", "thread_id": "del-thread", "run_id": "del-run-2"}, "del-start-2")
+            _request("run.start", {"mode": "build", "message": "删除 second.txt", "thread_id": "del-thread", "run_id": "del-run-2"}, "del-start-2")
         )
         await _wait_for(frames, lambda frame: _event_count(frames, "run.completed") == 2)
         approvals = [frame for frame in frames if frame.get("method") == "interaction.approval"]
@@ -2208,7 +2228,7 @@ async def test_outside_write_is_rejected_without_approval():
         server = AgentHost(agent=agent)
         frames = await _capture_server(server)
         await server.dispatch(
-            _request("run.start", {"message": "越界写入", "thread_id": "outside", "run_id": "outside-run"}, "outside-start")
+            _request("run.start", {"mode": "build", "message": "越界写入", "thread_id": "outside", "run_id": "outside-run"}, "outside-start")
         )
         await _wait_for(frames, lambda frame: frame.get("params", {}).get("type") == "run.completed")
 
@@ -2259,7 +2279,7 @@ async def test_auto_edit_writes_without_interruption_but_shell_still_requires_ap
         write_server = AgentHost(agent=write_agent)
         write_frames = await _capture_server(write_server)
         await write_server.dispatch(
-            _request("run.start", {"message": "写入", "thread_id": "write", "run_id": "write-run"}, "write-start")
+            _request("run.start", {"mode": "build", "message": "写入", "thread_id": "write", "run_id": "write-run"}, "write-start")
         )
         await _wait_for(write_frames, lambda frame: frame.get("params", {}).get("type") == "run.completed")
         assert (Path(workspace) / "auto.txt").read_text(encoding="utf-8") == "written"
@@ -2288,7 +2308,7 @@ async def test_auto_edit_writes_without_interruption_but_shell_still_requires_ap
         shell_server = AgentHost(agent=shell_agent)
         shell_frames = await _capture_server(shell_server)
         await shell_server.dispatch(
-            _request("run.start", {"message": "执行", "thread_id": "shell", "run_id": "shell-run"}, "shell-start")
+            _request("run.start", {"mode": "build", "message": "执行", "thread_id": "shell", "run_id": "shell-run"}, "shell-start")
         )
         interaction = await _wait_for(shell_frames, lambda frame: frame.get("method") == "interaction.approval")
         assert interaction["method"] == "interaction.approval"
@@ -2340,7 +2360,7 @@ async def test_batch_tool_call_approval_restores_one_decision_per_hanging_call()
         server = AgentHost(agent=agent)
         frames = await _capture_server(server)
         await server.dispatch(
-            _request("run.start", {"message": "批量执行", "thread_id": "batch", "run_id": "batch-run"}, "batch-start")
+            _request("run.start", {"mode": "build", "message": "批量执行", "thread_id": "batch", "run_id": "batch-run"}, "batch-start")
         )
         # 串行审批：每个挂起调用各自弹窗，逐个应答 approve_once
         for index in range(3):
@@ -2407,7 +2427,7 @@ async def test_batch_write_thread_approval_auto_approves_same_batch_siblings():
         server = AgentHost(agent=agent, workspace=Path(workspace))
         frames = await _capture_server(server)
         await server.dispatch(
-            _request("run.start", {"message": "创建三个文件", "thread_id": "batch-write", "run_id": "batch-write-run"}, "batch-write-start")
+            _request("run.start", {"mode": "build", "message": "创建三个文件", "thread_id": "batch-write", "run_id": "batch-write-run"}, "batch-write-start")
         )
         interaction = await _wait_for(
             frames, lambda frame: frame.get("method") == "interaction.approval"
@@ -2466,7 +2486,7 @@ async def test_plan_mode_returns_tool_message_without_writing_or_requesting_appr
         server = AgentHost(agent=agent)
         frames = await _capture_server(server)
         await server.dispatch(
-            _request("run.start", {"message": "写入", "thread_id": "plan", "run_id": "plan-run"}, "plan-start")
+            _request("run.start", {"mode": "build", "message": "写入", "thread_id": "plan", "run_id": "plan-run"}, "plan-start")
         )
         await _wait_for(frames, lambda frame: frame.get("params", {}).get("type") == "run.completed")
 
@@ -2530,7 +2550,7 @@ api_key_env = "FAST_KEY"
     await server.dispatch(
         _request(
             "run.start",
-            {
+            {"mode": "build", 
                 "message": "覆盖为 yolo",
                 "thread_id": "thread-approval",
                 "run_id": "override-run",
@@ -2552,7 +2572,7 @@ api_key_env = "FAST_KEY"
     await server.dispatch(
         _request(
             "run.start",
-            {
+            {"mode": "build", 
                 "message": "回到配置默认",
                 "thread_id": "thread-approval",
                 "run_id": "default-run",
@@ -2642,7 +2662,7 @@ async def test_stdio_subprocess_end_to_end_echo_mode():
         }
         process = await asyncio.create_subprocess_exec(sys.executable, "-m", "harness_agent", stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env)
         assert process.stdin and process.stdout
-        process.stdin.write((json.dumps(_request("initialize", _initialize_params(), "init")) + "\n" + json.dumps(_request("run.start", {"message": "hello", "thread_id": "t", "run_id": "r"}, "start")) + "\n").encode())
+        process.stdin.write((json.dumps(_request("initialize", _initialize_params(), "init")) + "\n" + json.dumps(_request("run.start", {"mode": "build", "message": "hello", "thread_id": "t", "run_id": "r"}, "start")) + "\n").encode())
         await process.stdin.drain()
         frames: list[dict[str, Any]] = []
         while not any(frame.get("params", {}).get("type") == "run.completed" for frame in frames):

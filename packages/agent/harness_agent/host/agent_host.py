@@ -958,6 +958,7 @@ class AgentHost:
             thread_id=parsed.thread_id,
             run_id=parsed.run_id,
             message=message,
+            mode=parsed.mode,
             requested_skill=requested_skill,
             requested_primary_profile=(
                 parsed.model_selection.primary_profile

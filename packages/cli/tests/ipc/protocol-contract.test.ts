@@ -48,6 +48,55 @@ test("Browser CSP 禁止动态代码时仍可校验 initialize", () => {
   }
 })
 
+test("run.start 必填工作模式且拒绝未知模式", () => {
+  const base = { message: "检查", thread_id: "thread-1", run_id: "run-1" }
+  expect(() => validateOperationParams("run.start", base)).toThrow()
+  expect(() => validateOperationParams("run.start", { ...base, mode: "yolo" })).toThrow()
+  expect(() => validateOperationParams("run.start", { ...base, mode: "compose" })).not.toThrow()
+})
+
+test("run.started 回传实际工作模式", () => {
+  const envelope = (payload: Record<string, unknown>) => ({
+    event_id: "e-started",
+    type: "run.started",
+    thread_id: "t",
+    run_id: "r",
+    sequence: 1,
+    timestamp_ms: 1,
+    payload,
+  })
+  expect(() => assertEventEnvelope(envelope({ resumed: false }))).toThrow()
+  expect(() => assertEventEnvelope(envelope({ resumed: false, mode: "compose" }))).not.toThrow()
+})
+
+test("compose.state projection 严格有界且 revision 单调", () => {
+  const payload = {
+    revision: 3,
+    stage: "build",
+    status: "running",
+    stages: [{ id: "understand", status: "passed", attempts: 1 }],
+    tasks: [{ id: "task-1", title: "实现搜索", status: "running" }],
+    evidence: [{ label: "pytest -q tests/foo", status: "passed" }],
+  }
+  const envelope = (value: unknown) => ({
+    event_id: "e-compose",
+    type: "compose.state",
+    thread_id: "t",
+    run_id: "r",
+    sequence: 1,
+    timestamp_ms: 1,
+    payload: value,
+  })
+  expect(() => assertEventEnvelope(envelope(payload))).not.toThrow()
+  expect(() => assertEventEnvelope(envelope({ ...payload, extra: true }))).toThrow()
+  expect(() => assertEventEnvelope(envelope({ ...payload, stage: "deploy" }))).toThrow()
+  expect(() => assertEventEnvelope(envelope({ ...payload, revision: -1 }))).toThrow()
+  expect(() => assertEventEnvelope(envelope({
+    ...payload,
+    stages: [{ id: "understand", status: "passed", attempts: 1, extra: true }],
+  }))).toThrow()
+})
+
 function validate(fixture: Fixture): void {
   if (fixture.kind === "operation.params") {
     validateOperationParams(fixture.name as OperationName, fixture.value)

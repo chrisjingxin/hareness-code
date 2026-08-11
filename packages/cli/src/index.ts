@@ -156,7 +156,7 @@ export function validateInteractiveTerminal(stdinIsTty: boolean | undefined, std
 /** 无头模式下收集单次流式输出，并等待对应运行的终态事件。 */
 async function runTurn(client: AgentClient, message: string, threadId?: string): Promise<{ text: string; threadId: string; runId: string; usage: unknown }> {
   let text = ""
-  const run = client.startRun({ message, threadId })
+  const run = client.startRun({ message, mode: "build", threadId })
   await run.accepted
   for await (const event of run.events) {
     if (event.type === EventType.CONTENT_DELTA) text += event.payload.text

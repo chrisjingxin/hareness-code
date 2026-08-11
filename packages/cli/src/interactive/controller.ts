@@ -198,6 +198,8 @@ export class InteractiveControllerImpl implements InteractiveController {
 
     const message = resolution.kind === "escaped" ? resolution.message : value
     return this.runFeature.startRun(message, this.featureContext, {
+      // WP8 引入 Work Mode 状态后改读共享选择；当前 UI 唯一可用的工作模式是 Build。
+      mode: "build",
       requestedModelProfileId: this.modelFeature.requestedModelProfileId,
       armedSkill: this.skillFeature.armedSkill,
       onEvent: event => this.timelineFeature.processAgentEvent(event, this.featureContext),

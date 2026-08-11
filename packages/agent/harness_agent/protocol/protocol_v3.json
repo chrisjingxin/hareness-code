@@ -4,7 +4,7 @@
   "title": "Harness Agent Protocol v3",
   "x-harness": {
     "major": 3,
-    "minor": 3,
+    "minor": 4,
     "max_frame_bytes": 8388608,
     "max_tool_payload_bytes": 1048576,
     "operations": {
@@ -61,6 +61,7 @@
       "tool.delta": { "payload": "#/$defs/toolDeltaPayload" },
       "tool.completed": { "payload": "#/$defs/toolCompletedPayload" },
       "context.updated": { "payload": "#/$defs/contextPayload" },
+      "compose.state": { "payload": "#/$defs/composeStatePayload" },
       "interaction.resolved": { "payload": "#/$defs/interactionResolvedPayload" },
       "run.completed": { "payload": "#/$defs/runCompletedPayload" },
       "run.cancelled": { "payload": "#/$defs/runCancelledPayload" },
@@ -227,6 +228,10 @@
       "type": "string",
       "enum": ["plan", "default", "auto-edit", "auto", "yolo"]
     },
+    "interactionMode": {
+      "type": "string",
+      "enum": ["build", "compose"]
+    },
     "modelProfile": {
       "type": "object",
       "required": ["id", "model", "provider_label", "context_window_tokens", "capabilities", "is_default", "available", "source"],
@@ -254,8 +259,9 @@
     },
     "runStartParams": {
       "type": "object",
-      "required": ["message", "thread_id", "run_id"],
+      "required": ["mode", "message", "thread_id", "run_id"],
       "properties": {
+        "mode": { "$ref": "#/$defs/interactionMode" },
         "message": { "type": "string", "minLength": 1 },
         "thread_id": { "type": "string", "minLength": 1 },
         "run_id": { "type": "string", "minLength": 1 },
@@ -757,8 +763,9 @@
       "additionalProperties": false
     },
     "runStartedPayload": {
-      "type": "object", "required": ["resumed"],
+      "type": "object", "required": ["mode", "resumed"],
       "properties": {
+        "mode": { "$ref": "#/$defs/interactionMode" },
         "resumed": { "type": "boolean" }, "skills_snapshot_id": { "type": ["string", "null"] },
         "primary_model": { "$ref": "#/$defs/runPrimaryModelBinding" }, "runtime_profile_id": { "type": ["string", "null"] }
       },
@@ -819,6 +826,55 @@
         "dynamic_tokens": { "type": ["integer", "null"] }, "cache_status": { "type": ["string", "null"] },
         "cached_tokens": { "type": ["integer", "null"] }, "miss_reason": { "type": ["string", "null"] },
         "artifact_ids": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+    "composeStatePayload": {
+      "type": "object",
+      "required": ["revision", "stage", "status", "stages", "tasks", "evidence"],
+      "properties": {
+        "revision": { "type": "integer", "minimum": 0 },
+        "stage": { "enum": ["understand", "plan", "build", "verify", "review"] },
+        "status": { "enum": ["running", "waiting_user", "blocked", "completed", "failed", "cancelled"] },
+        "stages": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "status", "attempts"],
+            "properties": {
+              "id": { "enum": ["understand", "plan", "build", "verify", "review"] },
+              "status": { "enum": ["pending", "running", "waiting_user", "passed", "failed", "cancelled", "blocked"] },
+              "attempts": { "type": "integer", "minimum": 0 }
+            },
+            "additionalProperties": false
+          }
+        },
+        "tasks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "title", "status"],
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "title": { "type": "string", "minLength": 1 },
+              "status": { "enum": ["pending", "running", "passed", "failed", "cancelled"] }
+            },
+            "additionalProperties": false
+          }
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["label", "status"],
+            "properties": {
+              "label": { "type": "string", "minLength": 1 },
+              "status": { "enum": ["pending", "running", "passed", "failed", "cancelled"] }
+            },
+            "additionalProperties": false
+          }
+        },
+        "blocked_reason": { "type": ["string", "null"], "minLength": 1 }
       },
       "additionalProperties": false
     },

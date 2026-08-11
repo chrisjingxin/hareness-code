@@ -69,6 +69,7 @@
       "name": "run.start",
       "case": "valid",
       "value": {
+        "mode": "build",
         "message": "x",
         "thread_id": "x",
         "run_id": "x"
@@ -869,6 +870,7 @@
         "sequence": 1,
         "timestamp_ms": 1,
         "payload": {
+          "mode": "build",
           "resumed": false
         }
       }
@@ -1010,6 +1012,27 @@
         "payload": {
           "action": "x",
           "artifact_ids": []
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "compose.state",
+      "case": "valid",
+      "value": {
+        "event_id": "x",
+        "type": "compose.state",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "revision": 1,
+          "stage": "understand",
+          "status": "running",
+          "stages": [],
+          "tasks": [],
+          "evidence": []
         }
       }
     },
@@ -1343,6 +1366,7 @@
       "name": "run.start",
       "case": "extra_field",
       "value": {
+        "mode": "build",
         "message": "x",
         "thread_id": "x",
         "run_id": "x",
@@ -1354,6 +1378,7 @@
       "name": "run.start",
       "case": "missing_field",
       "value": {
+        "message": "x",
         "thread_id": "x",
         "run_id": "x"
       }
@@ -3005,6 +3030,7 @@
         "sequence": 1,
         "timestamp_ms": 1,
         "payload": {
+          "mode": "build",
           "resumed": false
         },
         "__extra": true
@@ -3021,6 +3047,7 @@
         "sequence": 1,
         "timestamp_ms": 1,
         "payload": {
+          "mode": "build",
           "resumed": false
         }
       }
@@ -3350,6 +3377,54 @@
         "payload": {
           "action": "x",
           "artifact_ids": []
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "compose.state",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "event",
+      "name": "compose.state",
+      "case": "extra_field",
+      "value": {
+        "event_id": "x",
+        "type": "compose.state",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "revision": 1,
+          "stage": "understand",
+          "status": "running",
+          "stages": [],
+          "tasks": [],
+          "evidence": []
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "event",
+      "name": "compose.state",
+      "case": "missing_field",
+      "value": {
+        "type": "compose.state",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "revision": 1,
+          "stage": "understand",
+          "status": "running",
+          "stages": [],
+          "tasks": [],
+          "evidence": []
         }
       }
     },
@@ -3539,6 +3614,7 @@
         "sequence": 1,
         "timestamp_ms": 1,
         "payload": {
+          "mode": "build",
           "resumed": false
         }
       }

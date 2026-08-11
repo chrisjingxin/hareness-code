@@ -11,10 +11,13 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mappin
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from harness_agent.policy.approval_mode import ApprovalMode
 from harness_agent.policy.bash_parser import extract_command_rule as _extract_command_rule
+
+# 工作模式在 Run 受理时冻结；Compose 是代码状态机驱动的研发流程，Build 保持现有直接协作。
+InteractionMode = Literal["build", "compose"]
 from harness_agent.policy.permission_rules import (
     PermissionRule,
     evaluate_tool_rules,
@@ -57,6 +60,7 @@ TOOL_STARTED = "tool.started"
 TOOL_DELTA = "tool.delta"
 TOOL_COMPLETED = "tool.completed"
 CONTEXT_UPDATED = "context.updated"
+COMPOSE_STATE = "compose.state"
 INTERACTION_RESOLVED = "interaction.resolved"
 RUN_COMPLETED = "run.completed"
 RUN_CANCELLED = "run.cancelled"
@@ -121,6 +125,7 @@ class StartRun:
     thread_id: str
     run_id: str
     message: str
+    mode: InteractionMode
     requested_skill: RequestedSkill | None = None
     requested_primary_profile: str | None = None
     requested_approval_mode: ApprovalMode | None = None
@@ -131,12 +136,13 @@ class StartRun:
         return RunRef(self.thread_id, self.run_id)
 
     def fingerprint(self) -> tuple[object, ...]:
-        """返回幂等判断所需的请求指纹。"""
+        """返回幂等判断所需的请求指纹；工作模式冻结在 Run 身份内。"""
         skill = self.requested_skill
         return (
             self.thread_id,
             self.run_id,
             self.message,
+            self.mode,
             skill.skill_id if skill else None,
             skill.args if skill else None,
             self.requested_primary_profile,
@@ -679,6 +685,7 @@ class RunCoordinator:
 
             started_payload: dict[str, object] = {
                 "resumed": False,
+                "mode": run.start.mode,
                 "skills_snapshot_id": run.preparation.skill_snapshot_id,
             }
             binding = run.preparation.execution_binding

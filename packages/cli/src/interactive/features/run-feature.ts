@@ -1,6 +1,6 @@
 /** Run Feature：管理 Run 的启动、取消、底层 Agent 订阅句柄与终态清理。 */
 
-import { EventType, type ApprovalMode, type ModelProfile, type RequestedSkill } from "@za38/protocol"
+import { EventType, type ApprovalMode, type InteractionMode, type ModelProfile, type RequestedSkill } from "@za38/protocol"
 import type { IntentOutcome, InteractiveAgentRun, SkillSummary } from "../ports"
 import { markCancelling, markRunFailed, startRun as startRunState } from "../state"
 import { nextApprovalMode, type InteractiveApprovalMode } from "../runtime"
@@ -60,6 +60,7 @@ export class RunFeature {
     value: string,
     ctx: FeatureContext,
     options: {
+      mode: InteractionMode
       requestedModelProfileId: string | null
       armedSkill: SkillSummary | undefined
       onEvent: (event: any) => void
@@ -80,6 +81,7 @@ export class RunFeature {
     try {
       const run = ctx.gateway.startRun({
         message: value,
+        mode: options.mode,
         threadId: currentThreadId ?? undefined,
         requestedSkill,
         modelSelection: options.requestedModelProfileId ? { primary_profile: options.requestedModelProfileId } : undefined,

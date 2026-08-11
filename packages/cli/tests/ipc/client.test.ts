@@ -2,6 +2,7 @@
 
 import { expect, test } from "bun:test"
 import { PassThrough } from "node:stream"
+import type { JsonRpcRequest } from "@za38/protocol"
 import { AgentClient, JsonRpcRemoteError } from "../../src/ipc/client"
 import { StdioRpcTransport } from "../../src/ipc/stdio-transport"
 
@@ -41,15 +42,40 @@ test("Peer 在 run.start 中携带显式 requested_skill", async () => {
   })
   const run = client.startRun({
     message: "检查",
+    mode: "build",
     threadId: "t",
     requestedSkill: { id: "project/review", args: "快速" },
   })
   await run.accepted
   expect(requests[0].params).toEqual({
     message: "检查",
+    mode: "build",
     thread_id: "t",
     run_id: run.ref.runId,
     requested_skill: { id: "project/review", args: "快速" },
+  })
+})
+
+test("Peer 在 run.start 中携带冻结的工作模式", async () => {
+  const { client, stdin, stdout } = peer()
+  const requests: JsonRpcRequest[] = []
+  stdin.on("data", data => {
+    const message = JSON.parse(data.toString()) as JsonRpcRequest
+    requests.push(message)
+    const params = message.params ?? {}
+    stdout.write(JSON.stringify({
+      jsonrpc: "2.0",
+      id: message.id,
+      result: { thread_id: params["thread_id"], run_id: params["run_id"], accepted: true },
+    }) + "\n")
+  })
+  const run = client.startRun({ message: "检查", threadId: "t", mode: "compose" })
+  await run.accepted
+  expect(requests[0].params).toEqual({
+    message: "检查",
+    thread_id: "t",
+    run_id: run.ref.runId,
+    mode: "compose",
   })
 })
 
@@ -67,6 +93,7 @@ test("AgentRun 使用原生 UUID 并携带 Thread 模型选择", async () => {
   })
   const run = client.startRun({
     message: "使用 pro",
+    mode: "build",
     threadId: "t",
     modelSelection: { primary_profile: "pro" },
   })
@@ -74,6 +101,7 @@ test("AgentRun 使用原生 UUID 并携带 Thread 模型选择", async () => {
   expect(run.ref.runId).toMatch(/^[0-9a-f-]{36}$/)
   expect(requests[0].params).toEqual({
     message: "使用 pro",
+    mode: "build",
     thread_id: "t",
     run_id: run.ref.runId,
     model_selection: { primary_profile: "pro" },
@@ -85,7 +113,7 @@ test("run.start 受理不设置会产生幽灵 Run 的本地超时", async () =>
   let request: any
   stdin.on("data", data => { request = JSON.parse(data.toString()) })
 
-  const run = client.startRun({ message: "等待受理", threadId: "thread-slow-start" })
+  const run = client.startRun({ message: "等待受理", mode: "build", threadId: "thread-slow-start" })
   await Bun.sleep(0)
   expect((client as any).pending.get(request.id).timeout).toBeUndefined()
 
