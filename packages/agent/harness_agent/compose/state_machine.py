@@ -25,6 +25,7 @@ from harness_agent.compose.models import (
 VERIFY_FIX_BUDGET = 2
 REVIEW_FIX_BUDGET = 2
 SCHEMA_INVALID_RETRY_ALLOWED = 1
+TASK_ATTEMPT_BUDGET = 2
 
 
 class ComposeEvent(str, Enum):
@@ -36,6 +37,7 @@ class ComposeEvent(str, Enum):
     PLAN_APPROVE = "plan_approve"
     PLAN_REVISE = "plan_revise"
     PLAN_CANCEL = "plan_cancel"
+    TASK_STARTED = "task_started"
     TASK_COMPLETE = "task_complete"
     TASK_FAIL = "task_fail"
     BUILD_COMPLETE = "build_complete"
@@ -179,6 +181,36 @@ def _task(state: ComposeRunState, task_id: str) -> ComposeTask:
         if task.id == task_id:
             return task
     raise ComposeTransitionError("COMPOSE_TASK_UNKNOWN", f"unknown task {task_id}")
+
+
+def _on_task_started(state: ComposeRunState, payload: Mapping[str, Any]) -> ComposeRunState:
+    """标记 task 进入执行；projection 据此展示当前 Build task。"""
+    if state.stage is not ComposeStage.BUILD or state.stages.get(ComposeStage.BUILD) is not StageState.RUNNING:
+        raise _illegal(state, ComposeEvent.TASK_STARTED)
+    task_id = payload.get("task_id")
+    if not isinstance(task_id, str):
+        raise ComposeTransitionError("COMPOSE_TASK_ID_MISSING", "task started requires task_id")
+    task = _task(state, task_id)
+    if task.status is TaskStatus.RUNNING or task.status is TaskStatus.PASSED:
+        raise _illegal(state, ComposeEvent.TASK_STARTED, f"task {task_id} already started")
+    by_id = {current.id: current for current in state.tasks}
+    for dependency in task.depends_on:
+        dependency_task = by_id.get(dependency)
+        if dependency_task is None or dependency_task.status is not TaskStatus.PASSED:
+            raise _illegal(
+                state,
+                ComposeEvent.TASK_STARTED,
+                f"task {task_id} depends on unfinished {dependency}",
+            )
+    next_state = _copy(state)
+    updated = list(next_state.tasks)
+    for index, current in enumerate(updated):
+        if current.id == task_id:
+            updated[index] = replace(current, status=TaskStatus.RUNNING)
+            break
+    next_state.tasks = tuple(updated)
+    next_state.revision += 1
+    return next_state
 
 
 def _on_task_complete(state: ComposeRunState, payload: Mapping[str, Any]) -> ComposeRunState:
@@ -408,6 +440,7 @@ _HANDLERS: dict[ComposeEvent, Any] = {
     ComposeEvent.PLAN_APPROVE: _on_plan_approve,
     ComposeEvent.PLAN_REVISE: _on_plan_revise,
     ComposeEvent.PLAN_CANCEL: _on_plan_cancel,
+    ComposeEvent.TASK_STARTED: _on_task_started,
     ComposeEvent.TASK_COMPLETE: _on_task_complete,
     ComposeEvent.TASK_FAIL: _on_task_fail,
     ComposeEvent.BUILD_COMPLETE: _on_build_complete,

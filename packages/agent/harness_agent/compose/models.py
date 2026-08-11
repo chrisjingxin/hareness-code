@@ -397,6 +397,7 @@ class TaskResultArtifact:
     task_id: str
     changed_paths: tuple[str, ...]
     focused_test_evidence: str
+    red_evidence: str = ""
     remaining_issue: str = ""
 
 
@@ -413,7 +414,12 @@ def validate_task_result_artifact(value: Mapping[str, object]) -> TaskResultArti
         task_id=task_id,
         changed_paths=tuple(_bounded_text(p, "changed_paths") for p in paths),
         focused_test_evidence=evidence,
-        remaining_issue=_bounded_text(value.get("remaining_issue", ""), "remaining_issue", allow_empty=True),
+        red_evidence=_bounded_text(
+            value.get("red_evidence", ""), "red_evidence", allow_empty=True
+        ),
+        remaining_issue=_bounded_text(
+            value.get("remaining_issue", ""), "remaining_issue", allow_empty=True
+        ),
     )
 
 

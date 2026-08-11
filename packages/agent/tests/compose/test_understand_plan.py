@@ -42,6 +42,17 @@ def _understanding(**overrides: Any) -> dict[str, Any]:
     }
 
 
+def _task_result(*, task_id: str = "task-1", **overrides: Any) -> dict[str, Any]:
+    return {
+        "task_id": task_id,
+        "changed_paths": ["src/search.py"],
+        "focused_test_evidence": "pytest -q tests/test_search.py 通过",
+        "red_evidence": "先写测试：test_search 失败（RED）",
+        "remaining_issue": "",
+        **overrides,
+    }
+
+
 def _plan(**overrides: Any) -> dict[str, Any]:
     return {
         "solution": "新增 search module",
@@ -140,7 +151,13 @@ async def _run_compose(
     async def compose_services() -> ComposeServices | None:
         return ComposeServices(
             stage_agent=stage_agent,
-            method_assets={"understand": "测试方法资产", "plan": "测试方法资产"},
+            method_assets={
+                "understand": "测试方法资产",
+                "plan": "测试方法资产",
+                "build": "BUILD-METHOD",
+                "tdd": "TDD-METHOD",
+                "debug": "DEBUG-METHOD",
+            },
             workspace_root=str(project),
             now_ms=lambda: next(now),
         )
@@ -180,19 +197,24 @@ async def test_happy_path_understands_plans_and_waits_at_gate(tmp_path: Path) ->
     """简单请求产出短 artifact、无访谈；批准后进入 Build 边界（WP4 停点）。"""
     events, stage_agent, interactions = await _run_compose(
         tmp_path,
-        [_understanding(), _plan()],
+        [
+            _understanding(),
+            _plan(),
+            _task_result(task_id="task-1"),
+            _task_result(task_id="task-2", red_evidence=""),
+        ],
         [{"decision": "approve_once"}],
     )
     types = [event.type for event in events]
     assert types[0] == "run.started"
     assert events[0].payload["mode"] == "compose"
     assert types[-1] == "run.failed"
-    assert events[-1].payload["error"]["code"] == "COMPOSE_BUILD_STAGE_PENDING"
+    assert events[-1].payload["error"]["code"] == "COMPOSE_VERIFY_STAGE_PENDING"
     assert types.count("run.completed") == 0
     assert types.count("run.failed") == 1
 
-    # 只有 understand/plan 两个 stage 调用，未批准前无任何 Builder 写入。
-    assert stage_agent.calls == ["understand", "plan"]
+    # 批准前只有 understand/plan；批准后才出现 Builder 写入。
+    assert stage_agent.calls == ["understand", "plan", "build", "build"]
     assert [request.type for request in interactions.requests] == ["approval"]
     assert interactions.requests[0].payload["decisions"] == [
         "approve_once",
@@ -218,8 +240,8 @@ async def test_happy_path_understands_plans_and_waits_at_gate(tmp_path: Path) ->
         "evidence": [],
         "blocked_reason": None,
     }
-    assert frames[-1]["stage"] == "build"
-    assert frames[-1]["tasks"][0] == {"id": "task-1", "title": "实现搜索", "status": "pending"}
+    assert frames[-1]["stage"] == "verify"
+    assert frames[-1]["tasks"][0] == {"id": "task-1", "title": "实现搜索", "status": "passed"}
     assert "goal" not in frames[-1] and "prompt" not in str(frames[-1])
 
 
@@ -231,6 +253,8 @@ async def test_open_decisions_are_asked_and_rebuilt_into_artifact(tmp_path: Path
             _understanding(open_decisions=["数据存储用 SQLite 还是 JSON 文件？"]),
             _understanding(),
             _plan(),
+            _task_result(task_id="task-1"),
+            _task_result(task_id="task-2", red_evidence=""),
         ],
         [
             {"answers": {"question-1": ["使用 SQLite"]}},
@@ -246,26 +270,32 @@ async def test_open_decisions_are_asked_and_rebuilt_into_artifact(tmp_path: Path
     frames = _state_frames(events)
     understand_attempts = [frame["stages"][0]["attempts"] for frame in frames]
     assert max(understand_attempts) == 1
-    assert stage_agent.calls == ["understand", "understand", "plan"]
+    assert stage_agent.calls == ["understand", "understand", "plan", "build", "build"]
 
 
 async def test_plan_revise_with_feedback_returns_to_plan(tmp_path: Path) -> None:
     """修改必须携带 feedback 并回到 Plan；修订后的方案再次进入门禁。"""
     events, stage_agent, interactions = await _run_compose(
         tmp_path,
-        [_understanding(), _plan(), _plan(solution="修订后的方案")],
+        [
+            _understanding(),
+            _plan(),
+            _plan(solution="修订后的方案"),
+            _task_result(task_id="task-1"),
+            _task_result(task_id="task-2", red_evidence=""),
+        ],
         [
             {"decision": "reject_with_feedback", "feedback": "增加端到端测试"},
             {"decision": "approve_once"},
         ],
     )
-    assert stage_agent.calls == ["understand", "plan", "plan"]
+    assert stage_agent.calls == ["understand", "plan", "plan", "build", "build"]
     assert "增加端到端测试" in stage_agent.tasks[2]
     frames = _state_frames(events)
     assert any(frame["status"] == "waiting_user" for frame in frames)
-    assert frames[-1]["stage"] == "build"
+    assert frames[-1]["stage"] == "verify"
     assert events[-1].type == "run.failed"
-    assert events[-1].payload["error"]["code"] == "COMPOSE_BUILD_STAGE_PENDING"
+    assert events[-1].payload["error"]["code"] == "COMPOSE_VERIFY_STAGE_PENDING"
 
 
 async def test_plan_reject_cancels_run_with_single_terminal(tmp_path: Path) -> None:
@@ -307,12 +337,14 @@ async def test_malformed_stage_output_is_treated_as_schema_invalid(tmp_path: Pat
             "这不是 JSON",
             _understanding(),
             _plan(),
+            _task_result(task_id="task-1"),
+            _task_result(task_id="task-2", red_evidence=""),
         ],
         [{"decision": "approve_once"}],
     )
-    assert stage_agent.calls == ["understand", "understand", "plan"]
+    assert stage_agent.calls == ["understand", "understand", "plan", "build", "build"]
     assert events[-1].type == "run.failed"
-    assert events[-1].payload["error"]["code"] == "COMPOSE_BUILD_STAGE_PENDING"
+    assert events[-1].payload["error"]["code"] == "COMPOSE_VERIFY_STAGE_PENDING"
 
 
 async def test_plan_artifact_with_placeholder_is_rejected(tmp_path: Path) -> None:

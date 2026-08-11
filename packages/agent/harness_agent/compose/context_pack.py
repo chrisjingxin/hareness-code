@@ -125,3 +125,40 @@ def build_plan_pack(
         feedback=feedback,
         workspace_root=workspace_root,
     )
+
+
+def build_task_pack(
+    *,
+    user_request: str,
+    revision: int,
+    method_asset: str,
+    task: ComposeTask,
+    understanding: UnderstandingArtifact,
+    relevant_pointers: tuple[str, ...],
+    workspace_root: str = "",
+    previous_failure: str = "",
+) -> ContextPack:
+    """构造 Build 单个 task 的有界输入；只注入当前 task 的 ContextPack。"""
+    task_lines = [
+        f"## 任务\n- id：{task.id}\n- title：{task.title}\n- kind：{task.kind.value}",
+        f"- acceptance：{task.acceptance}",
+    ]
+    if task.verification_commands:
+        task_lines.append(
+            "- verification_commands：" + "；".join(task.verification_commands)
+        )
+    if relevant_pointers:
+        task_lines.append("- relevant_pointers：" + "；".join(relevant_pointers[:10]))
+    if previous_failure:
+        task_lines.append(f"- 上次失败原因：{previous_failure}")
+    return ContextPack(
+        stage=ComposeStage.BUILD,
+        user_request=user_request,
+        method_asset=method_asset + "\n\n" + "\n\n".join(task_lines),
+        revision=revision,
+        goal=understanding.goal,
+        constraints=understanding.constraints,
+        acceptance=task.acceptance,
+        change_kind=task.kind.value,
+        workspace_root=workspace_root,
+    )

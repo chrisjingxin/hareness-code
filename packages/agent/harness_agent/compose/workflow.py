@@ -14,21 +14,29 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Mapping
 
-from harness_agent.compose.context_pack import build_plan_pack, build_understand_pack
+from harness_agent.compose.context_pack import (
+    build_plan_pack,
+    build_task_pack,
+    build_understand_pack,
+)
 from harness_agent.compose.models import (
     ArtifactKind,
+    ChangeKind,
     ComposeRunState,
     ComposeRunStatus,
     ComposeStage,
     PlanArtifact,
+    TaskStatus,
     UnderstandingArtifact,
     make_artifact,
     validate_plan_artifact,
+    validate_task_result_artifact,
     validate_understanding_artifact,
 )
 from harness_agent.compose.stage_agents import StageAgentPort, StageRequest
 from harness_agent.compose.state_machine import (
     SCHEMA_INVALID_RETRY_ALLOWED,
+    TASK_ATTEMPT_BUDGET,
     ComposeEvent,
     ComposeStateMachine,
 )
@@ -196,15 +204,135 @@ class ComposeWorkflow:
                 return await self._plan_gate(run, port, state)
             return await self._plan(run, port, state)
         if state.stage is ComposeStage.BUILD:
-            # WP4 tracer bullet 边界：Build 阶段由后续工作包实现。
+            return await self._build(run, port, state)
+        if state.stage is ComposeStage.VERIFY:
+            # WP5 边界：Verify 由后续工作包实现。
             raise ComposeWorkflowError(
-                "COMPOSE_BUILD_STAGE_PENDING",
-                "Build stage lands in a later work package",
+                "COMPOSE_VERIFY_STAGE_PENDING",
+                "Verify stage lands in a later work package",
             )
         raise ComposeWorkflowError(
             "COMPOSE_WORKFLOW_STATE_INVALID",
             f"stage {state.stage.value} cannot be driven",
         )
+
+    async def _build(
+        self,
+        run: Any,
+        port: Any,
+        state: ComposeRunState,
+    ) -> ComposeRunState:
+        """按依赖顺序执行 Plan task；每个 task 只拿到自己的 ContextPack。"""
+        while True:
+            task = self._next_pending_task(state)
+            if task is None:
+                return self._apply(run, port, state, ComposeEvent.BUILD_COMPLETE)
+            state = self._apply(
+                run, port, state, ComposeEvent.TASK_STARTED, task_id=task.id
+            )
+            failed = await self._execute_task(run, port, state, task)
+            if failed:
+                return self._apply(
+                    run, port, state, ComposeEvent.TASK_FAIL, task_id=task.id
+                )
+            state = self._apply(
+                run, port, state, ComposeEvent.TASK_COMPLETE, task_id=task.id
+            )
+
+    def _next_pending_task(self, state: ComposeRunState) -> ComposeTask | None:
+        """按 Plan 顺序返回第一个依赖已满足且未完成的任务。"""
+        by_id = {task.id: task for task in state.tasks}
+        for task in state.tasks:
+            if task.status in (TaskStatus.PASSED, TaskStatus.FAILED, TaskStatus.CANCELLED):
+                continue
+            if all(
+                by_id[dependency].status is TaskStatus.PASSED
+                for dependency in task.depends_on
+                if dependency in by_id
+            ):
+                return task
+        return None
+
+    async def _execute_task(
+        self,
+        run: Any,
+        port: Any,
+        state: ComposeRunState,
+        task: ComposeTask,
+    ) -> bool:
+        """执行一个 task；按 change_kind 选择 TDD/direct，失败注入 Debug。
+
+        返回 True 表示任务最终失败（attempt 耗尽），False 表示通过。
+        """
+        understanding = await self._load_understanding(run, state)
+        plan = await self._load_plan(run, state)
+        requires_tdd = task.kind in (ChangeKind.BEHAVIOR, ChangeKind.BUG, ChangeKind.REFACTOR)
+        previous_failure = ""
+        for attempt in range(1, TASK_ATTEMPT_BUDGET + 1):
+            if port.is_cancelled(run):
+                raise asyncio.CancelledError
+            use_debug = attempt > 1
+            method = self._method("build")
+            if requires_tdd:
+                method += "\n\n" + self._method("tdd")
+            if use_debug:
+                method += "\n\n" + self._method("debug")
+            pack = build_task_pack(
+                user_request=run.message,
+                revision=state.revision,
+                method_asset=method,
+                task=task,
+                understanding=understanding,
+                relevant_pointers=plan.relevant_pointers,
+                workspace_root=self._services.workspace_root,
+                previous_failure=previous_failure,
+            )
+            attempt_failed = False
+            schema_retries = 0
+            while True:
+                try:
+                    result = await self._run_stage(run, "build", pack.render())
+                    raw = result.output if isinstance(result.output, Mapping) else {}
+                    task_result = validate_task_result_artifact(raw)
+                    break
+                except ValueError:
+                    schema_retries += 1
+                    if schema_retries > SCHEMA_INVALID_RETRY_ALLOWED:
+                        attempt_failed = True
+                        previous_failure = "builder 输出不符合 TaskResultArtifact schema"
+                        break
+                    continue
+            if attempt_failed:
+                continue
+            if task_result.task_id != task.id:
+                attempt_failed = True
+                previous_failure = f"builder 返回了错误 task_id：{task_result.task_id}"
+                continue
+            if requires_tdd and not task_result.red_evidence.strip():
+                attempt_failed = True
+                previous_failure = "行为/Bug/refactor 任务缺少 RED evidence"
+                continue
+            if task_result.remaining_issue.strip():
+                attempt_failed = True
+                previous_failure = task_result.remaining_issue
+                continue
+            await self._store.save_artifact(
+                make_artifact(
+                    ArtifactKind.TASK_RESULT,
+                    run_id=run.ref.run_id,
+                    source_execution_id=result.execution_id,
+                    created_at_ms=self._services.now_ms(),
+                    payload={
+                        "task_id": task_result.task_id,
+                        "changed_paths": list(task_result.changed_paths),
+                        "focused_test_evidence": task_result.focused_test_evidence,
+                        "red_evidence": task_result.red_evidence,
+                        "remaining_issue": task_result.remaining_issue,
+                    },
+                )
+            )
+            return False
+        return True
 
     async def _understand(
         self,
