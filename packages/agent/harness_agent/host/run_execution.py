@@ -72,6 +72,10 @@ class RunLifecyclePort(Protocol):
 
     def is_cancelled(self, run: RunState) -> bool: ...
 
+    def mark_running(self, run: RunState) -> None: ...
+
+    def append_transcript(self, run: RunState, record: TranscriptAppend) -> None: ...
+
     async def resolve_runtime(self, run: RunState) -> RunRuntime: ...
 
     async def request_interaction(
@@ -148,7 +152,7 @@ class BuildRunAdapter:
             started_payload["primary_model"] = binding.protocol_primary_model()
             started_payload["runtime_profile_id"] = binding.runtime_profile_id
         port.emit(run, RUN_STARTED, started_payload)
-        run.status = "running"
+        port.mark_running(run)
         port.emit(run, RUN_PROGRESS, _run_progress_payload(run, "preparing"))
 
         loaded = run.preparation.requested_skill

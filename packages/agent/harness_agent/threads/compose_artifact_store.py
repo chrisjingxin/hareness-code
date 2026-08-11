@@ -65,74 +65,9 @@ class ComposeArtifactStore:
         self._connection = connection
         self._project_fingerprint = project_fingerprint
         self._lock = lock or asyncio.Lock()
-        self._ready = False
-
-    async def setup(self) -> None:
-        """幂等确保 Compose 表存在（migration 已创建时的兜底）。"""
-        async with self._lock:
-            if self._ready:
-                return
-            await self._connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS harness_compose_runs (
-                    project_fingerprint TEXT NOT NULL,
-                    thread_id TEXT NOT NULL,
-                    run_id TEXT NOT NULL,
-                    revision INTEGER NOT NULL,
-                    stage TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    stages_json TEXT NOT NULL,
-                    stage_attempts_json TEXT NOT NULL,
-                    schema_retry_used_json TEXT NOT NULL,
-                    tasks_json TEXT NOT NULL,
-                    evidence_json TEXT NOT NULL,
-                    understanding_artifact_id TEXT,
-                    plan_artifact_id TEXT,
-                    verification_evidence_id TEXT,
-                    review_report_id TEXT,
-                    verify_fix_round INTEGER NOT NULL,
-                    review_fix_round INTEGER NOT NULL,
-                    blocked_reason TEXT,
-                    terminal_count INTEGER NOT NULL DEFAULT 0,
-                    updated_at_ms INTEGER NOT NULL,
-                    PRIMARY KEY (project_fingerprint, run_id)
-                )
-                """
-            )
-            await self._connection.execute(
-                """
-                CREATE INDEX IF NOT EXISTS harness_compose_runs_thread_updated
-                    ON harness_compose_runs(project_fingerprint, thread_id, updated_at_ms DESC)
-                """
-            )
-            await self._connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS harness_compose_artifacts (
-                    project_fingerprint TEXT NOT NULL,
-                    run_id TEXT NOT NULL,
-                    artifact_id TEXT NOT NULL,
-                    kind TEXT NOT NULL,
-                    version INTEGER NOT NULL,
-                    source_execution_id TEXT NOT NULL,
-                    created_at_ms INTEGER NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    content_digest TEXT NOT NULL,
-                    PRIMARY KEY (project_fingerprint, run_id, artifact_id)
-                )
-                """
-            )
-            await self._connection.execute(
-                """
-                CREATE INDEX IF NOT EXISTS harness_compose_artifacts_run_created
-                    ON harness_compose_artifacts(project_fingerprint, run_id, created_at_ms)
-                """
-            )
-            await self._connection.commit()
-            self._ready = True
 
     async def save_run(self, state: ComposeRunState) -> None:
         """原子 upsert 一个 ComposeRun projection；终态只允许保存一次。"""
-        await self.setup()
         async with self._lock:
             try:
                 await self._connection.execute("BEGIN IMMEDIATE")
@@ -247,7 +182,6 @@ class ComposeArtifactStore:
 
     async def load_run(self, run_id: str) -> ComposeRunState | None:
         """按 run_id 恢复最近保存的完整状态；历史 running 不恢复为 active。"""
-        await self.setup()
         async with self._lock, self._connection.execute(
             """
             SELECT thread_id, revision, stage, status, stages_json, stage_attempts_json,
@@ -305,7 +239,6 @@ class ComposeArtifactStore:
 
     async def terminal_count(self, run_id: str) -> int:
         """返回该 Run 已保存的终态投影数量（正常应为 0 或 1）。"""
-        await self.setup()
         async with self._lock, self._connection.execute(
             """
             SELECT terminal_count
@@ -319,7 +252,6 @@ class ComposeArtifactStore:
 
     async def save_artifact(self, artifact: ComposeArtifact) -> None:
         """写入一个 ComposeArtifact；同 identity 重复写以最新为准。"""
-        await self.setup()
         async with self._lock:
             await self._connection.execute(
                 """
@@ -351,7 +283,6 @@ class ComposeArtifactStore:
 
     async def load_artifact(self, run_id: str, artifact_id: str) -> ComposeArtifact | None:
         """按 run/artifact identity 读取一个 artifact。"""
-        await self.setup()
         async with self._lock, self._connection.execute(
             """
             SELECT artifact_id, kind, version, source_execution_id, created_at_ms,
@@ -377,7 +308,6 @@ class ComposeArtifactStore:
 
     async def list_artifacts(self, run_id: str) -> tuple[ComposeArtifact, ...]:
         """列出 Run 的全部 artifact，按创建时间升序。"""
-        await self.setup()
         async with self._lock, self._connection.execute(
             """
             SELECT artifact_id, kind, version, source_execution_id, created_at_ms,

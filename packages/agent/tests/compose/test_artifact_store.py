@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import sqlite3
 from pathlib import Path
@@ -31,7 +32,15 @@ from harness_agent.compose.models import (
 )
 from harness_agent.compose.state_machine import ComposeEvent, ComposeStateMachine
 from harness_agent.threads.thread_persistence import ThreadPersistence, ThreadPersistenceError
+from harness_agent.threads.compose_artifact_store import ComposeArtifactStore
 import harness_agent.threads.thread_persistence as tp_module
+
+
+def test_compose_store_does_not_duplicate_canonical_schema_ddl() -> None:
+    """Compose 表只由 ThreadPersistence migration 创建，Store 不保留建表兜底。"""
+    source = inspect.getsource(ComposeArtifactStore)
+    assert "CREATE TABLE" not in source
+    assert "CREATE INDEX" not in source
 
 
 def _run_state(run_id: str = "run-1", *, terminal: bool = False) -> ComposeRunState:

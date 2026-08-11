@@ -193,7 +193,7 @@ class ComposeWorkflow:
                 "skills_snapshot_id": run.preparation.skill_snapshot_id,
             },
         )
-        run.status = "running"
+        port.mark_running(run)
         port.emit(run, RUN_PROGRESS, _progress_payload(run, "preparing"))
         self._emit_state(run, port, state)
         await self._store.save_run(state)
@@ -1030,7 +1030,8 @@ class ComposeWorkflow:
         summary = self._final_summary_text(state)
         if not summary:
             return
-        run.pending_transcript.append(
+        port.append_transcript(
+            run,
             TranscriptAppend(
                 thread_id=run.ref.thread_id,
                 record_id=f"run:{run.ref.run_id}:compose:summary",
@@ -1038,7 +1039,7 @@ class ComposeWorkflow:
                 content=summary,
                 run_id=run.ref.run_id,
                 execution_id=run.root_execution_ref.execution_id,
-            )
+            ),
         )
         await port.flush_transcript(run)
 

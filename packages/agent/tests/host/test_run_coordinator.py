@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from typing import Any
 
 import pytest
@@ -18,6 +19,15 @@ from harness_agent.host.run_coordinator import (
     RunState,
     StartRun,
 )
+
+
+def test_compose_workflow_only_mutates_run_lifecycle_through_port() -> None:
+    """Compose workflow 不直接修改 Host Run 状态或 Transcript 队列。"""
+    from harness_agent.compose.workflow import ComposeWorkflow
+
+    source = inspect.getsource(ComposeWorkflow)
+    assert "run.status =" not in source
+    assert "run.pending_transcript" not in source
 from harness_agent.host.run_execution import (
     MAX_TOOL_PAYLOAD_BYTES,
     _capture_transcript_message,

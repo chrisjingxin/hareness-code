@@ -419,6 +419,24 @@ class _CoordinatorLifecyclePort:
         """返回共享取消 token 与显式取消标记的并集。"""
         return run.cancel_requested or run.cancellation_token.cancelled
 
+    def mark_running(self, run: RunState) -> None:
+        """由 Coordinator 执行 accepted/interacting → running 状态迁移。"""
+        if run.status not in {"accepted", "interacting", "running"}:
+            raise RunError(
+                "ADAPTER_RUN_STATE_VIOLATION",
+                f"cannot mark run as running from {run.status}",
+            )
+        run.status = "running"
+
+    def append_transcript(self, run: RunState, record: TranscriptAppend) -> None:
+        """校验归属后把可见记录加入 Coordinator 管理的待写队列。"""
+        if record.thread_id != run.ref.thread_id or record.run_id != run.ref.run_id:
+            raise RunError(
+                "ADAPTER_TRANSCRIPT_IDENTITY_VIOLATION",
+                "transcript record does not belong to the active run",
+            )
+        run.pending_transcript.append(record)
+
     async def resolve_runtime(self, run: RunState) -> RunRuntime:
         """通过 coordinator 注入的 RuntimeProvider 解析本次执行资源。"""
         return await self._coordinator._runtime_provider(run)
@@ -1275,5 +1293,4 @@ def _generate_permission_rule(
     else:
         resource = "*"
     return [PermissionRule(tool=tool_name, resource=resource, effect="allow")]
-
 
