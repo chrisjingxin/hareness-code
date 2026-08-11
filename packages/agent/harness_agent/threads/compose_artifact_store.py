@@ -83,6 +83,7 @@ class ComposeArtifactStore:
                     status TEXT NOT NULL,
                     stages_json TEXT NOT NULL,
                     stage_attempts_json TEXT NOT NULL,
+                    schema_retry_used_json TEXT NOT NULL,
                     tasks_json TEXT NOT NULL,
                     evidence_json TEXT NOT NULL,
                     understanding_artifact_id TEXT,
@@ -133,7 +134,8 @@ class ComposeArtifactStore:
         """原子 upsert 一个 ComposeRun projection；终态只允许保存一次。"""
         await self.setup()
         async with self._lock:
-            async with self._connection.execute("BEGIN IMMEDIATE"):
+            try:
+                await self._connection.execute("BEGIN IMMEDIATE")
                 cursor = await self._connection.execute(
                     """
                     SELECT terminal_count
@@ -153,17 +155,23 @@ class ComposeArtifactStore:
                             "COMPOSE_TERMINAL_DUPLICATE",
                             f"run {state.run_id} already reached a terminal state",
                         )
+                elif existing_terminal:
+                    # 终态是不可逆审计事实：不允许用非终态覆盖已终态的行。
+                    raise ComposeStoreError(
+                        "COMPOSE_TERMINAL_OVERWRITE",
+                        f"run {state.run_id} terminal state cannot be overwritten",
+                    )
                 terminal_count = 1 if state.terminal else 0
                 await self._connection.execute(
                     """
                     INSERT INTO harness_compose_runs (
                         project_fingerprint, thread_id, run_id, revision, stage, status,
-                        stages_json, stage_attempts_json, tasks_json, evidence_json,
+                        stages_json, stage_attempts_json, schema_retry_used_json, tasks_json, evidence_json,
                         understanding_artifact_id, plan_artifact_id,
                         verification_evidence_id, review_report_id,
                         verify_fix_round, review_fix_round, blocked_reason,
                         terminal_count, updated_at_ms
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(project_fingerprint, run_id) DO UPDATE SET
                         thread_id = excluded.thread_id,
                         revision = excluded.revision,
@@ -171,6 +179,7 @@ class ComposeArtifactStore:
                         status = excluded.status,
                         stages_json = excluded.stages_json,
                         stage_attempts_json = excluded.stage_attempts_json,
+                        schema_retry_used_json = excluded.schema_retry_used_json,
                         tasks_json = excluded.tasks_json,
                         evidence_json = excluded.evidence_json,
                         understanding_artifact_id = excluded.understanding_artifact_id,
@@ -195,6 +204,9 @@ class ComposeArtifactStore:
                         ),
                         _canonical_json(
                             {stage.value: attempts for stage, attempts in state.stage_attempts.items()}
+                        ),
+                        _canonical_json(
+                            {stage.value: used for stage, used in state.schema_retry_used.items()}
                         ),
                         _canonical_json(
                             [
@@ -225,6 +237,13 @@ class ComposeArtifactStore:
                     ),
                 )
                 await self._connection.commit()
+            except BaseException:
+                # 拒绝/异常路径必须回滚，避免连接残留半开事务污染后续写。
+                try:
+                    await self._connection.rollback()
+                except Exception:
+                    pass
+                raise
 
     async def load_run(self, run_id: str) -> ComposeRunState | None:
         """按 run_id 恢复最近保存的完整状态；历史 running 不恢复为 active。"""
@@ -232,7 +251,7 @@ class ComposeArtifactStore:
         async with self._lock, self._connection.execute(
             """
             SELECT thread_id, revision, stage, status, stages_json, stage_attempts_json,
-                   tasks_json, evidence_json, understanding_artifact_id, plan_artifact_id,
+                   schema_retry_used_json, tasks_json, evidence_json, understanding_artifact_id, plan_artifact_id,
                    verification_evidence_id, review_report_id, verify_fix_round,
                    review_fix_round, blocked_reason
             FROM harness_compose_runs
@@ -251,6 +270,10 @@ class ComposeArtifactStore:
             _stage_from(stage): int(value)
             for stage, value in json.loads(str(row["stage_attempts_json"])).items()
         }
+        retry_used = {
+            _stage_from(stage): bool(value)
+            for stage, value in json.loads(str(row["schema_retry_used_json"])).items()
+        }
         tasks = tuple(_task_from(task) for task in json.loads(str(row["tasks_json"])))
         evidence = tuple(
             EvidenceItem(label=str(item["label"]), status=EvidenceStatus(str(item["status"])))
@@ -264,7 +287,7 @@ class ComposeArtifactStore:
             status=ComposeRunStatus(str(row["status"])),
             stages=stages,
             stage_attempts=attempts,
-            schema_retry_used={stage: False for stage in ComposeStage},
+            schema_retry_used=retry_used,
             understanding_artifact_id=(
                 str(row["understanding_artifact_id"]) if row["understanding_artifact_id"] is not None else None
             ),

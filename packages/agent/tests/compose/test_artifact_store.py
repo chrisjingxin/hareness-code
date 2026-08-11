@@ -278,6 +278,10 @@ async def test_terminal_save_is_unique_and_counted(tmp_path: Path) -> None:
     assert await store.terminal_count("run-term") == 1
     loaded = await store.load_run("run-term")
     assert loaded is not None and loaded.status.value == "cancelled"
+    # 非终态不允许覆盖已终态行（终态是不可逆审计事实）。
+    with pytest.raises(ComposeStoreError, match="COMPOSE_TERMINAL_OVERWRITE"):
+        await store.save_run(_run_state("run-term"))
+    assert await store.terminal_count("run-term") == 1
     await persistence.close()
 
 

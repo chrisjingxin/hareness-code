@@ -336,12 +336,16 @@ def validate_plan_artifact(value: Mapping[str, object]) -> PlanArtifact:
             raise ValueError("task id must be unique")
         task_ids.add(task_id)
         title = _bounded_text(raw.get("title"), "task.title")
+        if has_placeholder(title):
+            raise ValueError("task.title contains placeholder")
         kind = _bounded_text(raw.get("kind", "behavior"), "task.kind", allow_empty=True)
         if kind not in ChangeKind._value2member_map_:
             raise ValueError("task.kind must be a known change kind")
         acceptance = _bounded_text(raw.get("acceptance"), "task.acceptance")
         if len(acceptance) > MAX_ACCEPTANCE_CHARS:
             raise ValueError("task.acceptance exceeds limit")
+        if has_placeholder(acceptance):
+            raise ValueError("task.acceptance contains placeholder")
         depends_raw = raw.get("depends_on", [])
         if not isinstance(depends_raw, list) or any(not isinstance(d, str) or not d for d in depends_raw):
             raise ValueError("task.depends_on must be a list of ids")
@@ -553,7 +557,7 @@ def make_artifact(
             f"payload exceeds {MAX_ARTIFACT_PAYLOAD_BYTES} bytes",
         )
     artifact_id = hashlib.sha256(
-        f"{run_id}:{kind.value}:{created_at_ms}".encode("utf-8")
+        f"{run_id}:{kind.value}:{created_at_ms}:{hashlib.sha256(encoded).hexdigest()}".encode("utf-8")
     ).hexdigest()[:16]
     return ComposeArtifact(
         artifact_id=artifact_id,

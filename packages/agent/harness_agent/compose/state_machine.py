@@ -17,6 +17,7 @@ from harness_agent.compose.models import (
     ComposeStage,
     ComposeTask,
     EvidenceItem,
+    EvidenceStatus,
     StageState,
     TaskStatus,
 )
@@ -52,7 +53,7 @@ class ComposeTransitionError(RuntimeError):
 
     def __init__(self, code: str, message: str | None = None) -> None:
         self.code = code
-        super().__init__(message or code)
+        super().__init__(f"{code}: {message}" if message else code)
 
 
 def _illegal(state: ComposeRunState, event: ComposeEvent, detail: str = "") -> ComposeTransitionError:
@@ -169,7 +170,7 @@ def _task(state: ComposeRunState, task_id: str) -> ComposeTask:
 
 
 def _on_task_complete(state: ComposeRunState, payload: Mapping[str, Any]) -> ComposeRunState:
-    """单个 Build task 通过；只有全部通过后 BUILD_COMPLETE 才合法。"""
+    """单个 Build task 通过；依赖未通过或已通过的 task 不能再次完成。"""
     if state.stage is not ComposeStage.BUILD or state.stages.get(ComposeStage.BUILD) is not StageState.RUNNING:
         raise _illegal(state, ComposeEvent.TASK_COMPLETE)
     task_id = payload.get("task_id")
@@ -178,6 +179,15 @@ def _on_task_complete(state: ComposeRunState, payload: Mapping[str, Any]) -> Com
     task = _task(state, task_id)
     if task.status is TaskStatus.PASSED:
         raise _illegal(state, ComposeEvent.TASK_COMPLETE, f"task {task_id} already passed")
+    by_id = {current.id: current for current in state.tasks}
+    for dependency in task.depends_on:
+        dependency_task = by_id.get(dependency)
+        if dependency_task is None or dependency_task.status is not TaskStatus.PASSED:
+            raise _illegal(
+                state,
+                ComposeEvent.TASK_COMPLETE,
+                f"task {task_id} depends on unfinished {dependency}",
+            )
     next_state = _copy(state)
     updated = list(next_state.tasks)
     for index, current in enumerate(updated):
@@ -229,13 +239,21 @@ def _on_build_complete(state: ComposeRunState, payload: Mapping[str, Any]) -> Co
 
 
 def _on_verify_pass(state: ComposeRunState, payload: Mapping[str, Any]) -> ComposeRunState:
-    """全部 required command fresh pass；进入独立 Review。"""
+    """全部 required command fresh pass；缺 evidence 不能进入 Review。"""
     if state.stage is not ComposeStage.VERIFY or state.stages.get(ComposeStage.VERIFY) is not StageState.RUNNING:
         raise _illegal(state, ComposeEvent.VERIFY_PASS)
     evidence_id = payload.get("evidence_id")
     evidence = payload.get("evidence", ())
     if not isinstance(evidence_id, str) or not isinstance(evidence, (tuple, list)):
         raise ComposeTransitionError("COMPOSE_EVIDENCE_MISSING", "verify pass requires evidence")
+    if not evidence or any(
+        not isinstance(item, EvidenceItem) or item.status is not EvidenceStatus.PASSED
+        for item in evidence
+    ):
+        raise ComposeTransitionError(
+            "COMPOSE_EVIDENCE_NOT_PASSED",
+            "verify pass requires non-empty all-passed evidence",
+        )
     next_state = _copy(state)
     next_state.stages[ComposeStage.VERIFY] = StageState.PASSED
     next_state.verification_evidence_id = evidence_id
@@ -248,7 +266,7 @@ def _on_verify_pass(state: ComposeRunState, payload: Mapping[str, Any]) -> Compo
 
 
 def _on_verify_fail(state: ComposeRunState, payload: Mapping[str, Any]) -> ComposeRunState:
-    """Verify 失败：产生 fix round；预算耗尽后 blocked。"""
+    """Verify 失败：来源明确的 fix task 回到 Build；预算耗尽后 blocked。"""
     if state.stage is not ComposeStage.VERIFY or state.stages.get(ComposeStage.VERIFY) is not StageState.RUNNING:
         raise _illegal(state, ComposeEvent.VERIFY_FAIL)
     evidence = payload.get("evidence", ())
@@ -261,6 +279,23 @@ def _on_verify_fail(state: ComposeRunState, payload: Mapping[str, Any]) -> Compo
         next_state.status = ComposeRunStatus.BLOCKED
         next_state.blocked_reason = "verify fix budget exhausted"
     else:
+        fix_tasks = payload.get("fix_tasks")
+        if not isinstance(fix_tasks, (tuple, list)) or not all(
+            isinstance(task, ComposeTask) for task in fix_tasks
+        ):
+            raise ComposeTransitionError(
+                "COMPOSE_FIX_TASKS_MISSING",
+                "verify fail requires a fix task for the next build round",
+            )
+        existing_ids = {task.id for task in next_state.tasks}
+        for fix_task in fix_tasks:
+            if fix_task.id in existing_ids:
+                raise ComposeTransitionError(
+                    "COMPOSE_FIX_TASK_DUPLICATE",
+                    f"fix task {fix_task.id} already exists",
+                )
+        # 原任务保持 PASSED 事实；fix task 作为新的 pending 项进入 Build。
+        next_state.tasks = next_state.tasks + tuple(fix_tasks)
         next_state.stage = ComposeStage.BUILD
         next_state.stages[ComposeStage.BUILD] = StageState.RUNNING
         next_state.stage_attempts[ComposeStage.BUILD] += 1
@@ -285,7 +320,7 @@ def _on_review_pass(state: ComposeRunState, payload: Mapping[str, Any]) -> Compo
 
 
 def _on_review_fail(state: ComposeRunState, payload: Mapping[str, Any]) -> ComposeRunState:
-    """Review 存在 Required finding：回到 Build 修复；预算耗尽后 blocked。"""
+    """Review 存在 Required finding：来源明确的 fix task 回到 Build；预算耗尽后 blocked。"""
     if state.stage is not ComposeStage.REVIEW or state.stages.get(ComposeStage.REVIEW) is not StageState.RUNNING:
         raise _illegal(state, ComposeEvent.REVIEW_FAIL)
     report_id = payload.get("report_id")
@@ -298,6 +333,22 @@ def _on_review_fail(state: ComposeRunState, payload: Mapping[str, Any]) -> Compo
         next_state.status = ComposeRunStatus.BLOCKED
         next_state.blocked_reason = "review fix budget exhausted"
     else:
+        fix_tasks = payload.get("fix_tasks")
+        if not isinstance(fix_tasks, (tuple, list)) or not all(
+            isinstance(task, ComposeTask) for task in fix_tasks
+        ):
+            raise ComposeTransitionError(
+                "COMPOSE_FIX_TASKS_MISSING",
+                "review fail requires a fix task for the next build round",
+            )
+        existing_ids = {task.id for task in next_state.tasks}
+        for fix_task in fix_tasks:
+            if fix_task.id in existing_ids:
+                raise ComposeTransitionError(
+                    "COMPOSE_FIX_TASK_DUPLICATE",
+                    f"fix task {fix_task.id} already exists",
+                )
+        next_state.tasks = next_state.tasks + tuple(fix_tasks)
         next_state.stage = ComposeStage.BUILD
         next_state.stages[ComposeStage.BUILD] = StageState.RUNNING
         next_state.stage_attempts[ComposeStage.BUILD] += 1

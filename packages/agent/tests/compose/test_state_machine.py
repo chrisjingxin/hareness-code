@@ -131,16 +131,22 @@ def test_plan_revise_returns_to_plan_and_cancel_is_terminal() -> None:
 
 
 def test_verify_fail_rounds_then_blocks_after_budget() -> None:
-    """Verify 失败进入 Build 修复；超过 VERIFY_FIX_BUDGET 轮后 blocked。"""
+    """Verify 失败携带 fix task 回到 Build；超过 VERIFY_FIX_BUDGET 轮后 blocked。"""
     state = _enter_verify()
 
     for fix_round in range(1, VERIFY_FIX_BUDGET + 1):
+        fix = _task(f"fix-verify-{fix_round}")
         state = ComposeStateMachine.apply(
-            state, ComposeEvent.VERIFY_FAIL, evidence=(EvidenceItem("pytest -q", EvidenceStatus.FAILED),)
+            state,
+            ComposeEvent.VERIFY_FAIL,
+            evidence=(EvidenceItem("pytest -q", EvidenceStatus.FAILED),),
+            fix_tasks=(fix,),
         )
         assert state.status is ComposeRunStatus.RUNNING, f"round {fix_round} should fix"
         assert state.stage is ComposeStage.BUILD
         assert state.verify_fix_round == fix_round
+        assert fix.id in {task.id for task in state.tasks}
+        state = ComposeStateMachine.apply(state, ComposeEvent.TASK_COMPLETE, task_id=fix.id)
         state = ComposeStateMachine.apply(state, ComposeEvent.BUILD_COMPLETE)
 
     # 预算已用完：下一次失败必须 blocked。
@@ -153,32 +159,85 @@ def test_verify_fail_rounds_then_blocks_after_budget() -> None:
         ComposeStateMachine.apply(state, ComposeEvent.BUILD_COMPLETE)
 
 
-def test_review_fail_rounds_then_blocks_after_budget() -> None:
-    """Review 失败重新 Build→Verify→Review；超过 REVIEW_FIX_BUDGET 轮后 blocked。"""
-    state = _enter_review()
-
-    for fix_round in range(1, REVIEW_FIX_BUDGET + 1):
-        state = ComposeStateMachine.apply(state, ComposeEvent.REVIEW_FAIL, report_id="r")
-        assert state.status is ComposeRunStatus.RUNNING
-        assert state.stage is ComposeStage.BUILD
-        assert state.review_fix_round == fix_round
-        state = ComposeStateMachine.apply(state, ComposeEvent.BUILD_COMPLETE)
-        state = ComposeStateMachine.apply(
-            state, ComposeEvent.VERIFY_PASS, evidence_id="e", evidence=()
+def test_verify_fail_without_fix_task_is_rejected() -> None:
+    """Verify 失败必须携带来源明确的 fix task，不能空手回 Build。"""
+    state = _enter_verify()
+    with pytest.raises(ComposeTransitionError, match="COMPOSE_FIX_TASKS_MISSING"):
+        ComposeStateMachine.apply(
+            state, ComposeEvent.VERIFY_FAIL, evidence=(EvidenceItem("pytest -q", EvidenceStatus.FAILED),)
         )
-        state = ComposeStateMachine.apply(state, ComposeEvent.REVIEW_PASS, report_id="r")
-        assert state.status is ComposeRunStatus.COMPLETED
-        break  # 每轮修复后直接通过，验证不阻塞；预算路径单独验证
+    with pytest.raises(ComposeTransitionError, match="COMPOSE_FIX_TASK_DUPLICATE"):
+        ComposeStateMachine.apply(
+            state,
+            ComposeEvent.VERIFY_FAIL,
+            evidence=(EvidenceItem("pytest -q", EvidenceStatus.FAILED),),
+            fix_tasks=(_task("task-1"),),  # 与既有任务重复
+        )
+
+
+def test_verify_pass_requires_all_passed_evidence() -> None:
+    """无 fresh pass evidence 不能进入 Review。"""
+    state = _enter_verify()
+    with pytest.raises(ComposeTransitionError, match="COMPOSE_EVIDENCE_NOT_PASSED"):
+        ComposeStateMachine.apply(state, ComposeEvent.VERIFY_PASS, evidence_id="e", evidence=())
+    with pytest.raises(ComposeTransitionError, match="COMPOSE_EVIDENCE_NOT_PASSED"):
+        ComposeStateMachine.apply(
+            state,
+            ComposeEvent.VERIFY_PASS,
+            evidence_id="e",
+            evidence=(EvidenceItem("pytest -q", EvidenceStatus.FAILED),),
+        )
+
+
+def test_task_dependency_order_is_enforced() -> None:
+    """依赖未通过的 task 不能先完成。"""
+    state = _enter_build()  # task-2 depends on task-1
+    with pytest.raises(ComposeTransitionError, match="depends on unfinished"):
+        ComposeStateMachine.apply(state, ComposeEvent.TASK_COMPLETE, task_id="task-2")
+    state = ComposeStateMachine.apply(state, ComposeEvent.TASK_COMPLETE, task_id="task-1")
+    state = ComposeStateMachine.apply(state, ComposeEvent.TASK_COMPLETE, task_id="task-2")
+    assert all(task.status is TaskStatus.PASSED for task in state.tasks)
+
+
+def test_review_fail_rounds_then_blocks_after_budget() -> None:
+    """Review 失败携带 fix task 重新 Build→Verify→Review；预算耗尽后 blocked。"""
+    state = _enter_review()
+    fix = _task("fix-review-1")
+
+    # 一轮修复后通过：证明 fix task 流程完整可用。
+    state = ComposeStateMachine.apply(state, ComposeEvent.REVIEW_FAIL, report_id="r", fix_tasks=(fix,))
+    assert state.status is ComposeRunStatus.RUNNING
+    assert state.stage is ComposeStage.BUILD
+    assert state.review_fix_round == 1
+    state = ComposeStateMachine.apply(state, ComposeEvent.TASK_COMPLETE, task_id=fix.id)
+    state = ComposeStateMachine.apply(state, ComposeEvent.BUILD_COMPLETE)
+    state = ComposeStateMachine.apply(
+        state, ComposeEvent.VERIFY_PASS, evidence_id="e", evidence=(EvidenceItem("pytest -q", EvidenceStatus.PASSED),)
+    )
+    state = ComposeStateMachine.apply(state, ComposeEvent.REVIEW_PASS, report_id="r")
+    assert state.status is ComposeRunStatus.COMPLETED
 
     # 连续失败直到预算耗尽
     state = _enter_review()
-    for _ in range(REVIEW_FIX_BUDGET + 1):
-        state = ComposeStateMachine.apply(state, ComposeEvent.REVIEW_FAIL, report_id="r")
+    for round_index in range(REVIEW_FIX_BUDGET + 1):
+        state = ComposeStateMachine.apply(
+            state,
+            ComposeEvent.REVIEW_FAIL,
+            report_id="r",
+            fix_tasks=(ComposeTask(
+                id=f"fix-review-{round_index + 1}",
+                title="修复 finding",
+                kind="behavior",
+                acceptance="finding 已修复",
+                verification_commands=("pytest -q tests/fix.py",),
+            ),),
+        )
         if state.status is ComposeRunStatus.BLOCKED:
             break
+        state = ComposeStateMachine.apply(state, ComposeEvent.TASK_COMPLETE, task_id=f"fix-review-{round_index + 1}")
         state = ComposeStateMachine.apply(state, ComposeEvent.BUILD_COMPLETE)
         state = ComposeStateMachine.apply(
-            state, ComposeEvent.VERIFY_PASS, evidence_id="e", evidence=()
+            state, ComposeEvent.VERIFY_PASS, evidence_id="e", evidence=(EvidenceItem("pytest -q", EvidenceStatus.PASSED),)
         )
     assert state.status is ComposeRunStatus.BLOCKED
     assert "review" in (state.blocked_reason or "")
@@ -227,7 +286,10 @@ def test_illegal_transitions_are_rejected_with_stable_code() -> None:
 
     completed = ComposeStateMachine.apply(
         ComposeStateMachine.apply(
-            state, ComposeEvent.VERIFY_PASS, evidence_id="e", evidence=()
+            state,
+            ComposeEvent.VERIFY_PASS,
+            evidence_id="e",
+            evidence=(EvidenceItem("pytest -q", EvidenceStatus.PASSED),),
         ),
         ComposeEvent.REVIEW_PASS,
         report_id="r",
@@ -300,6 +362,9 @@ def _enter_review() -> ComposeRunState:
     """走到 Review running 的公共状态。"""
     state = _enter_verify()
     state = ComposeStateMachine.apply(
-        state, ComposeEvent.VERIFY_PASS, evidence_id="evidence-1", evidence=()
+        state,
+        ComposeEvent.VERIFY_PASS,
+        evidence_id="evidence-1",
+        evidence=(EvidenceItem("pytest -q", EvidenceStatus.PASSED),),
     )
     return state
