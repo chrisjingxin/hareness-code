@@ -190,3 +190,19 @@ async def test_document_store_rejects_invalid_root_slug_and_front_matter(
                 content="# 没有 front matter\n",
             )
         )
+
+
+async def test_make_compose_slug_is_stable_and_ascii_safe() -> None:
+    """slug 由目标文本决定：可读段优先，中文目标回退内容 hash，永不重复生成。"""
+    from harness_agent.compose.document_paths import make_compose_slug
+
+    assert make_compose_slug("Refactor Compose Mode!") == "refactor-compose-mode"
+    assert make_compose_slug("实现搜索功能") == make_compose_slug("实现搜索功能")
+    chinese_slug = make_compose_slug("实现搜索功能")
+    assert chinese_slug.startswith("work-")
+    assert " " not in chinese_slug and "/" not in chinese_slug
+    assert make_compose_slug("   ") == make_compose_slug("   ")
+    assert make_compose_slug("搜索") == make_compose_slug("搜索")
+    # 超长目标截断后仍满足固定 slug 形状。
+    long_slug = make_compose_slug("a" * 200 + " " + "b" * 200)
+    assert long_slug == "a" * 48

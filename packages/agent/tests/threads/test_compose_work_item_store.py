@@ -142,6 +142,28 @@ async def test_work_item_terminal_cas_allows_next_item_but_rejects_stale_update(
         await persistence.close()
 
 
+async def test_load_slugs_returns_all_used_slugs_for_thread(tmp_path: Path) -> None:
+    """load_slugs 返回 Thread 已占用 slug，供 Runtime 生成新项时解决冲突。"""
+    persistence = await _persistence(tmp_path)
+    try:
+        await _prepare_compose_thread(persistence)
+        store = persistence.compose_work_item_store()
+        assert await store.load_slugs("thread-compose") == frozenset()
+        first = await store.create(_create("work-1", slug="search"))
+        await store.terminalize(
+            TerminalizeComposeWorkItem(
+                work_item_id=first.work_item_id,
+                expected_revision=0,
+                status=ComposeWorkItemStatus.COMPLETED,
+                terminal_at_ms=1_700_000_000_050,
+            )
+        )
+        await store.create(_create("work-2", slug="search-2"))
+        assert await store.load_slugs("thread-compose") == frozenset({"search", "search-2"})
+    finally:
+        await persistence.close()
+
+
 async def test_run_binding_is_idempotent_but_cannot_change_work_item(
     tmp_path: Path,
 ) -> None:

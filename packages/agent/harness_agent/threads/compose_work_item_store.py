@@ -185,6 +185,26 @@ class ComposeWorkItemStore:
         except Exception as exc:
             raise ComposeWorkItemStoreError("COMPOSE_WORK_ITEM_READ_FAILED") from exc
 
+    async def load_slugs(self, thread_id: str) -> frozenset[str]:
+        """读取 Thread 已占用的 slug，供 Runtime 生成新 Work Item 时解决冲突。"""
+        if not thread_id:
+            return frozenset()
+        try:
+            async with self._lock:
+                cursor = await self._connection.execute(
+                    """
+                    SELECT slug
+                    FROM harness_compose_work_items
+                    WHERE project_fingerprint = ? AND thread_id = ?
+                    """,
+                    (self._project_fingerprint, thread_id),
+                )
+                rows = await cursor.fetchall()
+                await cursor.close()
+            return frozenset(str(row["slug"]) for row in rows)
+        except Exception as exc:
+            raise ComposeWorkItemStoreError("COMPOSE_WORK_ITEM_READ_FAILED") from exc
+
     async def create(self, command: CreateComposeWorkItem) -> ComposeWorkItem:
         """原子创建 active Work Item，并由数据库唯一约束兜底并发竞争。"""
         _validate_create(command)

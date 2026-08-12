@@ -1,0 +1,852 @@
+"""ComposeWorkItemEngine：跨 Run 的 Work Item 生命周期与 Turn 路由。
+
+Engine 是 deep module：对外只暴露 execute_turn / inspect / abandon，隐藏
+Work Item 定位、文档 reconcile、readiness 计算、意图澄清和 terminal CAS。
+Host/CLI 不直接调用 run_task_stage 之类的浅 interface。
+
+本模块不依赖 host：交互、side answer、分类与时间都通过 ComposeTurnPorts
+注入，便于 fake 覆盖；意图分类结果永远不能直接造成 abandon、覆盖或创建
+Work Item 的副作用——创建必须经过无未终结项 + 目标非空的确定性检查，
+abandon 必须经过调用方的 typed confirmation 与 revision CAS。
+"""
+
+from __future__ import annotations
+
+import time
+import uuid
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Protocol
+
+from harness_agent.compose.document_paths import make_compose_slug
+from harness_agent.compose.document_store import (
+    ComposeDocumentStore,
+    ComposeDocumentStoreError,
+)
+from harness_agent.compose.models import (
+    ComposeDocumentKind,
+    ComposeWorkItem,
+    ComposeWorkItemStatus,
+    ThreadMode,
+)
+from harness_agent.compose.readiness import (
+    ComposeReadiness,
+    ComposeReadinessResolver,
+    ConfirmationGroups,
+    DocumentReadinessFact,
+)
+from harness_agent.compose.turn_intent import (
+    TurnIntent,
+    TurnIntentClassifierPort,
+    TurnIntentContext,
+    TurnIntentKind,
+    TurnIntentResolver,
+    TurnIntentSource,
+)
+from harness_agent.threads.compose_work_item_store import (
+    BindRunToWorkItem,
+    ComposeWorkItemStore,
+    CreateComposeWorkItem,
+    TerminalizeComposeWorkItem,
+    UpsertComposeDocumentReference,
+)
+
+MAX_GOAL_CHARS = 400
+"""创建 Work Item 时保存的目标文本上限；超出截断，正文仍以 Transcript 为准。"""
+
+MAX_TITLE_CHARS = 80
+"""projection 标题展示上限；超长目标只显示摘要前缀。"""
+
+CONFIRMATION_KINDS = ("task", "spec", "plan")
+"""readiness 使用的三个 typed confirmation gate 名称。"""
+
+_DOCUMENT_ORDER = (
+    ComposeDocumentKind.TASK,
+    ComposeDocumentKind.SPEC,
+    ComposeDocumentKind.PLAN,
+    ComposeDocumentKind.TODO,
+    ComposeDocumentKind.REPORT,
+)
+
+
+class ComposeWorkItemEngineError(RuntimeError):
+    """Engine 层的稳定错误码；host adapter 负责映射为 RunError。"""
+
+    def __init__(self, code: str, message: str | None = None) -> None:
+        """保存可分支的错误码与可选的简短诊断。"""
+        self.code = code
+        super().__init__(f"{code}: {message}" if message else code)
+
+
+class ComposeTurnOutcome(str, Enum):
+    """一次 Turn 的收敛结果；Run 终态仍由 RunCoordinator 唯一决定。"""
+
+    WAITING_USER = "waiting_user"
+    BLOCKED = "blocked"
+    TURN_BUDGET = "turn_budget"
+    COMPLETED = "completed"
+
+
+@dataclass(frozen=True, slots=True)
+class ComposeTurnRequest:
+    """一次用户 Turn 的受理输入；run_id 是本次执行的稳定身份。"""
+
+    thread_id: str
+    run_id: str
+    message: str
+    explicit_intent: TurnIntent | None = None
+    cancelled: bool = False
+    amends_work_item_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TypedDecisionOption:
+    """typed decision 的一个固定选项。"""
+
+    value: str
+    label: str
+    description: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class TypedDecisionRequest:
+    """一次 typed decision 的完整请求；形状与 host request_question 对齐。"""
+
+    request_id: str
+    interrupt_id: str
+    question_id: str
+    header: str
+    body: str
+    options: tuple[TypedDecisionOption, ...]
+    allow_other: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class TypedDecisionResult:
+    """typed decision 的语言无关结果；expired 表示无法到达活跃客户端。"""
+
+    value: Mapping[str, object]
+    expired: bool = False
+
+
+class ComposeInteractionPort(Protocol):
+    """把 typed decision 交给用户并返回选择；不暴露 host Run 细节。"""
+
+    async def request_decision(self, request: TypedDecisionRequest) -> TypedDecisionResult: ...
+
+
+class SideAnswerPort(Protocol):
+    """/btw 式只读临时回答；实现方必须保证不写 Work Item、ledger 或主上下文。"""
+
+    async def answer(self, *, thread_id: str, question: str) -> str: ...
+
+
+@dataclass(slots=True)
+class ComposeTurnPorts:
+    """Engine 的全部外部依赖；测试使用 fake 注入，生产由 host 组装。"""
+
+    store: ComposeWorkItemStore
+    documents: ComposeDocumentStore
+    classifier: TurnIntentClassifierPort
+    interaction: ComposeInteractionPort
+    side_answer: SideAnswerPort | None = None
+    workspace_revision: Callable[[], str | None] | None = None
+    now_ms: Callable[[], int] | None = None
+    readiness: ComposeReadinessResolver = field(default_factory=ComposeReadinessResolver)
+
+
+@dataclass(frozen=True, slots=True)
+class ReadinessProjection:
+    """readiness 九个 predicate 的 wire 安全投影。"""
+
+    task_confirmed: bool
+    spec_confirmed: bool
+    plan_confirmed: bool
+    todo_executable: bool
+    implementation_current: bool
+    verification_fresh: bool
+    review_fresh: bool
+    report_current: bool
+    complete: bool
+
+    @classmethod
+    def from_readiness(cls, readiness: ComposeReadiness) -> "ReadinessProjection":
+        return cls(
+            task_confirmed=readiness.task_confirmed,
+            spec_confirmed=readiness.spec_confirmed,
+            plan_confirmed=readiness.plan_confirmed,
+            todo_executable=readiness.todo_executable,
+            implementation_current=readiness.implementation_current,
+            verification_fresh=readiness.verification_fresh,
+            review_fresh=readiness.review_fresh,
+            report_current=readiness.report_current,
+            complete=readiness.complete,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentStatusProjection:
+    """一份文档的展示状态；不暴露绝对路径或正文。"""
+
+    kind: str
+    present: bool
+    current_digest: str
+    confirmed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ComposeWorkItemProjection:
+    """Work Item 的非敏感完整投影；UI 只消费此形状。"""
+
+    thread_id: str
+    work_item_id: str
+    slug: str
+    title: str
+    revision: int
+    status: str
+    current_activity: str
+    pending_decision: str | None
+    blocked_reason: str | None
+    readiness: ReadinessProjection
+    documents: tuple[DocumentStatusProjection, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ComposeTurnResult:
+    """一次 execute_turn 的收敛结果；不携带 Prompt、Skill 或原始 Tool 输出。"""
+
+    work_item: ComposeWorkItemProjection | None
+    status: ComposeTurnOutcome
+    pending_decision: str | None
+    side_answer: str | None = None
+    intent: TurnIntent | None = None
+
+
+class ComposeWorkItemEngine:
+    """跨 Run 持续的 Work Item 生命周期 owner；不拥有 SQLite 连接或 graph。"""
+
+    def __init__(self, ports: ComposeTurnPorts) -> None:
+        self._ports = ports
+        self._resolver = TurnIntentResolver(ports.classifier)
+
+    async def execute_turn(self, request: ComposeTurnRequest) -> ComposeTurnResult:
+        """受理一次用户 Turn：路由意图、定位/创建 Work Item、投影 readiness。"""
+        thread_mode = await self._ports.store.load_thread_mode(request.thread_id)
+        if thread_mode is None:
+            raise ComposeWorkItemEngineError(
+                "COMPOSE_THREAD_MODE_MISSING",
+                "Thread 尚未受理有效 Run，无法进入 Compose 流程",
+            )
+        if thread_mode is not ThreadMode.COMPOSE:
+            raise ComposeWorkItemEngineError(
+                "THREAD_MODE_LOCKED",
+                "Thread 已锁定为 Build 模式，Compose 不能受理",
+            )
+        now = self._now_ms()
+        if request.cancelled:
+            # 取消只中断当前执行，Work Item 生命周期保持原样。
+            active = await self._ports.store.load_active(request.thread_id)
+            projection = (
+                await self._projection_for(active) if active is not None else None
+            )
+            return ComposeTurnResult(
+                projection,
+                ComposeTurnOutcome.WAITING_USER,
+                None,
+            )
+        active = await self._ports.store.load_active(request.thread_id)
+        intent = request.explicit_intent
+        if intent is None:
+            intent = await self._resolver.resolve(self._intent_context(request, active))
+        return await self._route(request, intent, active, now)
+
+    async def inspect(
+        self,
+        *,
+        thread_id: str,
+        work_item_id: str | None = None,
+    ) -> ComposeWorkItemProjection | None:
+        """只读投影当前 Work Item；不写文档引用、不创建 Run 绑定。"""
+        if work_item_id is not None:
+            item = await self._ports.store.load(work_item_id)
+        else:
+            item = await self._ports.store.load_active(thread_id)
+        if item is None or item.thread_id != thread_id:
+            return None
+        readiness, facts = await self._compute_readiness(item)
+        return self._projection(item, readiness, pending_decision=None, facts=facts)
+
+    async def abandon(
+        self,
+        *,
+        thread_id: str,
+        work_item_id: str,
+        expected_revision: int,
+        reason: str | None,
+    ) -> ComposeWorkItemProjection:
+        """以 revision CAS 终结 Work Item；调用方必须先完成 typed confirmation。
+
+        已写文档、代码、测试与 Artifact 全部保留，不自动回滚、不删除目录。
+        reason 只用于确认展示，不写入 ledger。
+        """
+        item = await self._ports.store.load(work_item_id)
+        if item is None:
+            raise ComposeWorkItemEngineError(
+                "COMPOSE_WORK_ITEM_NOT_FOUND",
+                "Work Item 不存在或已不在当前 project",
+            )
+        if item.thread_id != thread_id:
+            raise ComposeWorkItemEngineError(
+                "COMPOSE_WORK_ITEM_THREAD_MISMATCH",
+                "Work Item 不属于该 Thread",
+            )
+        terminalized = await self._ports.store.terminalize(
+            TerminalizeComposeWorkItem(
+                work_item_id=work_item_id,
+                expected_revision=expected_revision,
+                status=ComposeWorkItemStatus.ABANDONED,
+                terminal_at_ms=self._now_ms(),
+            )
+        )
+        readiness, facts = await self._compute_readiness(terminalized)
+        return self._projection(terminalized, readiness, pending_decision=None, facts=facts)
+
+    # ---------- 内部路由 ----------
+
+    async def _route(
+        self,
+        request: ComposeTurnRequest,
+        intent: TurnIntent,
+        active: ComposeWorkItem | None,
+        now: int,
+    ) -> ComposeTurnResult:
+        kind = intent.kind
+        if kind is TurnIntentKind.SIDE_QUESTION:
+            return await self._side_question(request, intent, active)
+        if kind is TurnIntentKind.START_NEW_WORK:
+            if active is not None:
+                return await self._clarify_new_work(request, active, now)
+            return await self._create_work_item(request, intent, now)
+        if kind in (TurnIntentKind.RESUME_CURRENT, TurnIntentKind.AMEND_CURRENT):
+            if active is None:
+                return await self._clarify_no_active(request, now)
+            return await self._attach(request, intent, active, now)
+        return await self._clarify_unclear(request, active, now)
+
+    async def _create_work_item(
+        self,
+        request: ComposeTurnRequest,
+        intent: TurnIntent,
+        now: int,
+    ) -> ComposeTurnResult:
+        goal = _bounded_goal(request.message)
+        if not goal:
+            # /new-work 空目标：进入等待新目标状态，不创建空 Work Item。
+            active = await self._ports.store.load_active(request.thread_id)
+            projection = (
+                await self._projection_for(active) if active is not None else None
+            )
+            return ComposeTurnResult(
+                projection,
+                ComposeTurnOutcome.WAITING_USER,
+                None,
+                intent=intent,
+            )
+        slug = await self._next_slug(request.thread_id, goal)
+        work_item_id = f"wi-{uuid.uuid4().hex}"
+        item = await self._ports.store.create(
+            CreateComposeWorkItem(
+                thread_id=request.thread_id,
+                work_item_id=work_item_id,
+                slug=slug,
+                goal=goal,
+                created_at_ms=now,
+                amends_work_item_id=request.amends_work_item_id,
+            )
+        )
+        await self._ports.store.bind_run(
+            BindRunToWorkItem(
+                thread_id=request.thread_id,
+                run_id=request.run_id,
+                work_item_id=work_item_id,
+                created_at_ms=now,
+            )
+        )
+        readiness, facts = await self._compute_readiness(item)
+        return ComposeTurnResult(
+            self._projection(item, readiness, pending_decision=None, facts=facts),
+            ComposeTurnOutcome.WAITING_USER,
+            None,
+            intent=intent,
+        )
+
+    async def _attach(
+        self,
+        request: ComposeTurnRequest,
+        intent: TurnIntent,
+        active: ComposeWorkItem,
+        now: int,
+    ) -> ComposeTurnResult:
+        """继续/修订当前 Work Item：固定 Run 绑定并重算 readiness。"""
+        await self._ports.store.bind_run(
+            BindRunToWorkItem(
+                thread_id=request.thread_id,
+                run_id=request.run_id,
+                work_item_id=active.work_item_id,
+                created_at_ms=now,
+            )
+        )
+        await self._reconcile_documents(active)
+        readiness, facts = await self._compute_readiness(active)
+        if intent.kind is TurnIntentKind.AMEND_CURRENT:
+            pending = f"amend:{readiness.next_action}"
+        else:
+            pending = None
+        outcome = (
+            ComposeTurnOutcome.BLOCKED
+            if active.status is ComposeWorkItemStatus.BLOCKED
+            else ComposeTurnOutcome.WAITING_USER
+        )
+        return ComposeTurnResult(
+            self._projection(active, readiness, pending_decision=pending, facts=facts),
+            outcome,
+            pending,
+            intent=intent,
+        )
+
+    async def _side_question(
+        self,
+        request: ComposeTurnRequest,
+        intent: TurnIntent,
+        active: ComposeWorkItem | None,
+    ) -> ComposeTurnResult:
+        """临时只读回答：不写 Work Item、不改变 readiness、不进后续 ContextPack。"""
+        if self._ports.side_answer is None:
+            raise ComposeWorkItemEngineError(
+                "COMPOSE_SIDE_ANSWER_UNAVAILABLE",
+                "临时问答能力未接入",
+            )
+        question = intent.detail or request.message
+        answer = await self._ports.side_answer.answer(
+            thread_id=request.thread_id,
+            question=question,
+        )
+        projection = (
+            await self._projection_for(active) if active is not None else None
+        )
+        return ComposeTurnResult(
+            projection,
+            ComposeTurnOutcome.WAITING_USER,
+            None,
+            side_answer=answer,
+            intent=intent,
+        )
+
+    async def _clarify_unclear(
+        self,
+        request: ComposeTurnRequest,
+        active: ComposeWorkItem | None,
+        now: int,
+    ) -> ComposeTurnResult:
+        """歧义/分类失败：让用户在四个语义中选择，不猜测执行。"""
+        body = "无法确定你的意图，请选择："
+        if active is not None:
+            body = f"当前目标：{_bounded_title(active.goal)}\n{body}"
+        decision = await self._typed_decision(
+            request,
+            question_id="intent-clarify",
+            header="请确认你的意图",
+            body=body,
+            options=(
+                TypedDecisionOption(
+                    "amend_current",
+                    "修改当前任务",
+                    "把本条消息作为对当前目标的修订输入",
+                ),
+                TypedDecisionOption(
+                    "start_new_work",
+                    "开始新任务",
+                    "结束当前目标并创建一个新的研发目标"
+                    if active is not None
+                    else "创建一个新的研发目标",
+                ),
+                TypedDecisionOption(
+                    "side_question",
+                    "临时提问",
+                    "只读回答，不进入任务记录与后续上下文",
+                ),
+                TypedDecisionOption("cancel", "取消", "不改变当前状态"),
+            ),
+        )
+        return await self._after_choice(request, decision, active, now)
+
+    async def _clarify_new_work(
+        self,
+        request: ComposeTurnRequest,
+        active: ComposeWorkItem,
+        now: int,
+    ) -> ComposeTurnResult:
+        """已有未终结项时新目标必须澄清：继续 / 放弃后新建 / 取消。"""
+        decision = await self._typed_decision(
+            request,
+            question_id="new-work-clarify",
+            header="已有进行中的研发目标",
+            body=(
+                f"当前目标：{_bounded_title(active.goal)}。"
+                "是否放弃当前目标并开始新任务？"
+            ),
+            options=(
+                TypedDecisionOption(
+                    "resume_current",
+                    "继续当前目标",
+                    "回到当前 Work Item 的下一步",
+                ),
+                TypedDecisionOption(
+                    "abandon_then_new",
+                    "放弃当前目标并新建",
+                    "终结当前项（文档保留）并创建新目标",
+                ),
+                TypedDecisionOption("cancel", "取消", "不改变当前状态"),
+            ),
+        )
+        value = self._choice_value(decision, "new-work-clarify")
+        if value == "resume_current":
+            return await self._attach(
+                request,
+                _explicit_intent(TurnIntentKind.RESUME_CURRENT),
+                active,
+                now,
+            )
+        if value == "abandon_then_new":
+            await self._ports.store.terminalize(
+                TerminalizeComposeWorkItem(
+                    work_item_id=active.work_item_id,
+                    expected_revision=active.revision,
+                    status=ComposeWorkItemStatus.ABANDONED,
+                    terminal_at_ms=now,
+                )
+            )
+            return await self._create_work_item(
+                request,
+                _explicit_intent(TurnIntentKind.START_NEW_WORK),
+                now,
+            )
+        return await self._noop_result(request, active)
+
+    async def _clarify_no_active(
+        self,
+        request: ComposeTurnRequest,
+        now: int,
+    ) -> ComposeTurnResult:
+        """没有未终结项时“继续/修订”无对象，必须让用户选择下一步。"""
+        decision = await self._typed_decision(
+            request,
+            question_id="no-active-clarify",
+            header="当前没有进行中的研发目标",
+            body="没有可继续的 Work Item，请选择下一步：",
+            options=(
+                TypedDecisionOption(
+                    "start_new_work",
+                    "开始新任务",
+                    "创建一个新的研发目标",
+                ),
+                TypedDecisionOption(
+                    "side_question",
+                    "临时提问",
+                    "只读回答，不进入任务记录",
+                ),
+                TypedDecisionOption("cancel", "取消", "不改变当前状态"),
+            ),
+        )
+        value = self._choice_value(decision, "no-active-clarify")
+        if value == "start_new_work":
+            return await self._create_work_item(
+                request,
+                _explicit_intent(TurnIntentKind.START_NEW_WORK),
+                now,
+            )
+        if value == "side_question":
+            return await self._side_question(
+                request,
+                _explicit_intent(TurnIntentKind.SIDE_QUESTION, request.message),
+                None,
+            )
+        return await self._noop_result(request, None)
+
+    async def _after_choice(
+        self,
+        request: ComposeTurnRequest,
+        decision: TypedDecisionResult,
+        active: ComposeWorkItem | None,
+        now: int,
+    ) -> ComposeTurnResult:
+        """把 unclear 澄清选择映射回受限意图并重新路由；未知值保持现状。"""
+        value = self._choice_value(decision, "intent-clarify")
+        if value == "cancel":
+            return await self._noop_result(request, active)
+        explicit = _explicit_intent_from_choice(value, detail=request.message)
+        if explicit is None:
+            # allow_other 自定义输入无法映射到固定语义，不猜测执行。
+            return await self._noop_result(request, active)
+        return await self._route(request, explicit, active, now)
+
+    async def _noop_result(
+        self,
+        request: ComposeTurnRequest,
+        active: ComposeWorkItem | None,
+    ) -> ComposeTurnResult:
+        projection = (
+            await self._projection_for(active) if active is not None else None
+        )
+        return ComposeTurnResult(
+            projection,
+            ComposeTurnOutcome.WAITING_USER,
+            None,
+        )
+
+    # ---------- 文档与 readiness ----------
+
+    async def _reconcile_documents(self, item: ComposeWorkItem) -> None:
+        """把工作空间当前 Markdown identity 同步到 SQLite 文档引用。"""
+        refs = {
+            ref.kind: ref
+            for ref in await self._ports.store.load_document_references(
+                item.work_item_id
+            )
+        }
+        for kind in ComposeDocumentKind:
+            snapshot = await self._inspect_optional(item, kind)
+            if snapshot is None:
+                continue
+            ref = refs.get(kind)
+            if (
+                ref is None
+                or ref.current_digest != snapshot.digest
+                or ref.relative_path != snapshot.relative_path
+            ):
+                await self._ports.store.upsert_document_reference(
+                    UpsertComposeDocumentReference(
+                        work_item_id=item.work_item_id,
+                        kind=kind,
+                        relative_path=snapshot.relative_path,
+                        content_digest=snapshot.digest,
+                        revision=snapshot.revision,
+                        updated_at_ms=self._now_ms(),
+                    )
+                )
+
+    async def _compute_readiness(
+        self,
+        item: ComposeWorkItem,
+    ) -> tuple[ComposeReadiness, dict[ComposeDocumentKind, DocumentReadinessFact]]:
+        """只读计算九项 readiness；缺失/畸形文档一律按未满足处理。"""
+        refs = {
+            ref.kind: ref
+            for ref in await self._ports.store.load_document_references(
+                item.work_item_id
+            )
+        }
+        facts: dict[ComposeDocumentKind, DocumentReadinessFact] = {}
+        for kind in ComposeDocumentKind:
+            snapshot = await self._inspect_optional(item, kind)
+            ref = refs.get(kind)
+            facts[kind] = DocumentReadinessFact(
+                kind=kind,
+                current_digest=snapshot.digest if snapshot is not None else "",
+                recorded_digest=ref.current_digest if ref is not None else "",
+            )
+        confirmations: dict[str, ConfirmationGroups] = {}
+        for kind_name in CONFIRMATION_KINDS:
+            confirmations[kind_name] = (
+                await self._ports.store.load_confirmation_groups(
+                    item.work_item_id,
+                    kind_name,
+                )
+            )
+        revision = (
+            self._ports.workspace_revision()
+            if self._ports.workspace_revision is not None
+            else None
+        )
+        readiness = self._ports.readiness.resolve(
+            facts,
+            confirmations,
+            workspace_revision=revision,
+        )
+        return readiness, facts
+
+    async def _inspect_optional(
+        self,
+        item: ComposeWorkItem,
+        kind: ComposeDocumentKind,
+    ):
+        """读取一份文档；缺失或 schema 无效按尚未满足处理，不阻断流程。"""
+        try:
+            return await self._ports.documents.inspect(
+                item.work_item_id,
+                item.slug,
+                kind,
+            )
+        except ComposeDocumentStoreError:
+            return None
+
+    async def _projection_for(
+        self,
+        item: ComposeWorkItem,
+    ) -> ComposeWorkItemProjection:
+        readiness, facts = await self._compute_readiness(item)
+        return self._projection(item, readiness, pending_decision=None, facts=facts)
+
+    def _projection(
+        self,
+        item: ComposeWorkItem,
+        readiness: ComposeReadiness,
+        *,
+        pending_decision: str | None,
+        facts: dict[ComposeDocumentKind, DocumentReadinessFact],
+    ) -> ComposeWorkItemProjection:
+        current_activity = (
+            item.status.value if item.terminal else readiness.next_action
+        )
+        return ComposeWorkItemProjection(
+            thread_id=item.thread_id,
+            work_item_id=item.work_item_id,
+            slug=item.slug,
+            title=_bounded_title(item.goal),
+            revision=item.revision,
+            status=item.status.value,
+            current_activity=current_activity,
+            pending_decision=pending_decision,
+            blocked_reason=None,
+            readiness=ReadinessProjection.from_readiness(readiness),
+            documents=tuple(
+                DocumentStatusProjection(
+                    kind=kind.value,
+                    present=bool(facts[kind].current_digest),
+                    current_digest=facts[kind].current_digest,
+                    confirmed=_document_confirmed(kind, readiness),
+                )
+                for kind in _DOCUMENT_ORDER
+            ),
+        )
+
+    # ---------- 交互辅助 ----------
+
+    async def _typed_decision(
+        self,
+        request: ComposeTurnRequest,
+        *,
+        question_id: str,
+        header: str,
+        body: str,
+        options: tuple[TypedDecisionOption, ...],
+    ) -> TypedDecisionResult:
+        interrupt_id = f"compose-{question_id}-{request.run_id}"
+        result = await self._ports.interaction.request_decision(
+            TypedDecisionRequest(
+                request_id=interrupt_id,
+                interrupt_id=interrupt_id,
+                question_id=question_id,
+                header=header,
+                body=body,
+                options=options,
+            )
+        )
+        if result.expired:
+            raise ComposeWorkItemEngineError(
+                "COMPOSE_INTERACTION_UNAVAILABLE",
+                "typed decision 过期或无法到达活跃客户端",
+            )
+        return result
+
+    def _choice_value(
+        self,
+        result: TypedDecisionResult,
+        question_id: str,
+    ) -> str:
+        """从 InteractionResult 的 answers 形状提取单选值；无答案返回空串。"""
+        answers = (
+            result.value.get("answers", {})
+            if isinstance(result.value, Mapping)
+            else {}
+        )
+        raw = answers.get(question_id, []) if isinstance(answers, Mapping) else []
+        items = raw if isinstance(raw, list) else []
+        return str(items[0]) if items else ""
+
+    async def _next_slug(self, thread_id: str, goal: str) -> str:
+        """生成稳定 slug 并解决同 Thread 冲突；数据库 UNIQUE 约束兜底。"""
+        base = make_compose_slug(goal)
+        existing = await self._ports.store.load_slugs(thread_id)
+        candidate = base
+        index = 2
+        while candidate in existing:
+            candidate = f"{base}-{index}"
+            index += 1
+        return candidate
+
+    def _intent_context(
+        self,
+        request: ComposeTurnRequest,
+        active: ComposeWorkItem | None,
+    ) -> TurnIntentContext:
+        return TurnIntentContext(
+            message=request.message,
+            goal_summary=active.goal if active is not None else "",
+            scope_summary="",
+            pending_decision=None,
+            current_activity=None,
+            has_active_work_item=active is not None,
+        )
+
+    def _now_ms(self) -> int:
+        return (
+            self._ports.now_ms()
+            if self._ports.now_ms is not None
+            else int(time.time() * 1000)
+        )
+
+
+def _bounded_goal(message: str) -> str:
+    """裁剪目标文本到有界长度；只按字符截断，不改变语义判断。"""
+    text = message.strip()
+    return text[:MAX_GOAL_CHARS] if len(text) > MAX_GOAL_CHARS else text
+
+
+def _bounded_title(goal: str) -> str:
+    """生成 projection 展示用的短标题；超过上限加省略号。"""
+    text = " ".join(goal.split())
+    if len(text) <= MAX_TITLE_CHARS:
+        return text
+    return text[:MAX_TITLE_CHARS] + "…"
+
+
+def _explicit_intent(
+    kind: TurnIntentKind,
+    detail: str = "",
+) -> TurnIntent:
+    """构造来自命令/UI/澄清选择的显式意图。"""
+    return TurnIntent(kind=kind, detail=detail, source=TurnIntentSource.EXPLICIT)
+
+
+def _explicit_intent_from_choice(value: str, *, detail: str) -> TurnIntent | None:
+    """把澄清选择值映射为受限意图；未知值返回 None 表示不能猜测。"""
+    try:
+        kind = TurnIntentKind(value)
+    except ValueError:
+        return None
+    if kind is TurnIntentKind.UNCLEAR:
+        return None
+    return _explicit_intent(kind, detail=detail)
+
+
+def _document_confirmed(kind: ComposeDocumentKind, readiness: ComposeReadiness) -> bool:
+    """一份文档是否被其 gate 确认；Plan/Todo 与 Report 使用联合语义。"""
+    if kind is ComposeDocumentKind.TASK:
+        return readiness.task_confirmed
+    if kind is ComposeDocumentKind.SPEC:
+        return readiness.spec_confirmed
+    if kind in (ComposeDocumentKind.PLAN, ComposeDocumentKind.TODO):
+        return readiness.plan_confirmed
+    return readiness.report_current
