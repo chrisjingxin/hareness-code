@@ -36,6 +36,59 @@ class _StreamingAgent:
         yield ((), "messages", (AIMessage(content="fixture response"), {}))
 
 
+@pytest.mark.asyncio
+async def test_cancelled_engine_run_lease_acquire_releases_engine_lease(tmp_path: Path) -> None:
+    """run lease 获取被取消时，Host 仍释放刚取得的 AgentEngine lease。"""
+    from harness_agent.host.run_coordinator import (
+        ConnectionRef,
+        RunPreparation,
+        RunState,
+        StartRun,
+    )
+
+    class _CancelledRunLease:
+        async def run(self) -> object:
+            raise asyncio.CancelledError
+
+    host = AgentHost(allow_echo=False, config_home=tmp_path / "home", workspace=tmp_path)
+    lease = _CancelledRunLease()
+    engine = type(
+        "Engine",
+        (),
+        {"profile_key": "profile-1", "profile": object(), "graph": object()},
+    )()
+    host._agent_engine_artifacts["profile-1"] = type(
+        "Artifacts", (), {"execution_context": object()}
+    )()
+    host._resolved_agent_specs["profile-1"] = object()
+    released: list[object] = []
+
+    async def acquire_engine(*_args: object, **_kwargs: object) -> tuple[object, object]:
+        return lease, engine
+
+    async def create_context(*_args: object, **_kwargs: object) -> object:
+        return object()
+
+    async def release_engine(value: object, **_kwargs: object) -> None:
+        released.append(value)
+
+    host._acquire_default_agent_engine = acquire_engine  # type: ignore[method-assign]
+    host._create_run_context = create_context  # type: ignore[method-assign]
+    host._release_agent_engine_lease = release_engine  # type: ignore[method-assign]
+    run = RunState(
+        start=StartRun(mode="build", thread_id="thread-cancel", run_id="run-cancel", message="取消"),
+        owner=ConnectionRef("owner"),
+        persistence=None,
+        preparation=RunPreparation(),
+    )
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await host._acquire_default_agent_engine_for_run(run)
+        assert released == [lease]
+    finally:
+        await host.close()
+
+
 def _request(method: str, params: dict[str, Any], request_id: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "method": method, "params": params, "id": request_id}
 

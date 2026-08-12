@@ -1,9 +1,10 @@
 """Run execution adapter seam：Build/Compose 共用的 Run 内执行契约。
 
 RunCoordinator 保持唯一拥有受理、owner、busy、取消、Interaction、sequence、
-Transcript、资源释放和终态；本模块的 adapter 只通过 RunLifecyclePort 与
-生命周期通信。adapter 不能分配 sequence、不能发终态事件、不能绕过共享
-取消 token，也不能在成功路径外自行结束 Run。
+Transcript 和终态；ManagedAgentExecutor 负责其已取得 runtime 的 release。
+本模块的 adapter 只通过 RunLifecyclePort 与生命周期通信。adapter 不能分配
+sequence、不能发终态事件、不能绕过共享取消 token，也不能在成功路径外自行结束
+Run。
 
 LangGraph stream 解释、Tool 关联与 Interaction resume 已收敛到
 ``runtime.execution_stream``；本模块只负责 Host 边界：Transcript、
@@ -29,8 +30,6 @@ from harness_agent.runtime.execution_stream import (
     CONTENT_DELTA,
     ExecutionSignal,
     ExecutionStreamError,
-    ExecutionStreamPorts,
-    ExecutionStreamRequest,
     MAX_TOOL_PAYLOAD_BYTES,
     REASONING_DELTA,
     RUN_PROGRESS,
@@ -42,13 +41,18 @@ from harness_agent.runtime.execution_stream import (
     bounded_json,
     content_text,
     ensure_model_round_for_assistant,
-    execute as execute_stream,
     extract_interaction,
     message_text,
     resolve_tool_result_id,
     resolve_tool_stream_id,
     translate_stream_event,
     truncate_text,
+)
+from harness_agent.runtime.managed_agent_executor import (
+    ManagedAgentExecutionError,
+    ManagedAgentExecutor,
+    ManagedAgentRequest,
+    ManagedAgentResult,
 )
 from harness_agent.threads.thread_persistence import TranscriptAppend
 
@@ -106,7 +110,8 @@ class RunLifecyclePort(Protocol):
     """RunCoordinator 暴露给 execution adapter 的最小受控能力。
 
     adapter 只能：发非终态 typed signal、请求 Interaction、刷新 Transcript、
-    读取取消状态、解析 Runtime。终态、sequence 和资源释放不在此接口内。
+    读取取消状态、解析 Runtime，并把 root execution start 交给 Managed
+    executor 的 callback。终态、sequence 和资源释放不在 adapter 接口内。
     """
 
     def emit(
@@ -124,6 +129,8 @@ class RunLifecyclePort(Protocol):
     def is_cancelled(self, run: RunState) -> bool: ...
 
     def mark_running(self, run: RunState) -> None: ...
+
+    async def start_execution(self, run: RunState) -> None: ...
 
     def append_transcript(self, run: RunState, record: TranscriptAppend) -> None: ...
 
@@ -191,9 +198,9 @@ class AdapterOutcome:
 class BuildRunAdapter:
     """Build 路径的执行 adapter。
 
-    负责 Skill loaded、Runtime resolution、根 Transcript 语义边界和
-    Run 完成前 flush。LangGraph tuple 解释全部委托给共享 execution stream
-    （passthrough）；本 adapter 只做 root provenance 投影与 Transcript。
+    负责 Skill loaded 与 root Transcript/Event 投影。runtime lease、LangGraph
+    输入、shared execution stream、Interaction resume 和 release 全部委托给
+    ManagedAgentExecutor；adapter 不再读取 graph 或管理 resume loop。
     """
 
     async def execute(self, run: RunState, port: RunLifecyclePort) -> None:
@@ -230,77 +237,40 @@ class BuildRunAdapter:
                 f"User request:\n{run.message}"
             )
 
-        run.runtime = await port.resolve_runtime(run)
-        if port.is_cancelled(run):
-            raise asyncio.CancelledError
-        if run.runtime.agent is None:
-            port.emit(run, CONTENT_DELTA, {"text": run.message})
-            _queue_assistant_transcript(run, run.message)
-        else:
-            resume: object | None = None
-            while True:
-                resume = await self._stream_agent(run, port, resume)
-                if resume is None:
-                    break
+        async def acquire_runtime():
+            """将 Host runtime provider 收敛到 Managed executor 的唯一入口。"""
+            return await port.resolve_runtime(run)
 
-        if run.persistence is not None:
-            _flush_assistant_transcript(run)
-            await port.flush_transcript(run)
-            await run.persistence.complete_run(run.ref.thread_id)
-        port.drain_context_updates(run)
+        async def start_execution(_execution_ref: str) -> None:
+            """由 executor 触发 root registry 进入 running，adapter 不接触 registry。"""
+            await port.start_execution(run)
 
-    async def _stream_agent(
-        self,
-        run: RunState,
-        port: RunLifecyclePort,
-        resume: object | None,
-    ) -> object | None:
-        """通过共享 execution stream 执行主 Agent 一个模型阶段。"""
-        from langchain_core.messages import HumanMessage
-        from langgraph.types import Command
-
-        runtime = run.runtime
-        if runtime is None or runtime.agent is None:
-            return None
-        port.emit(run, RUN_PROGRESS, _run_progress_payload(run, "model"))
-        if resume is not None and run.run_context is not None:
-            # Interaction resume is an explicit non-initial model phase.  The
-            # pressure middleware must not reinterpret the resume as a new
-            # idle top-level Run merely because the user took time to answer.
-            run.run_context.model_call_lifecycle.schedule("interaction_resume")
-        stream_input: Any = (
-            Command(resume=resume)
-            if resume is not None
-            else {"messages": [HumanMessage(content=run.message)]}
-        )
-        session = _stream_session_for(run)
-        ports = _BuildStreamPorts(run=run, port=port, session=session)
-        request = ExecutionStreamRequest(
-            agent=runtime.agent,
-            stream_input=stream_input,
-            graph_config=runtime.graph_config(run.ref.thread_id),
-            context=runtime.run_context,
-            content_visibility="passthrough",
-            session=session,
+        observer = _BuildStreamPorts(run=run, port=port)
+        skill_snapshot_id = run.preparation.skill_snapshot_id
+        request = ManagedAgentRequest(
+            execution_ref=run.root_execution_ref.execution_id,
+            parent_execution_ref=None,
+            run_id=run.ref.run_id,
+            input=run.message,
+            checkpoint_namespace=run.ref.thread_id,
+            output_policy="passthrough",
+            runtime_provider=acquire_runtime,
             is_cancelled=lambda: port.is_cancelled(run),
+            idempotency_key=f"run:{run.ref.run_id}",
+            execution_starter=start_execution,
+            agent_spec=run.preparation.execution_binding,
+            required_skill_snapshot_ids=(skill_snapshot_id,)
+            if isinstance(skill_snapshot_id, str) and skill_snapshot_id
+            else (),
+            usage=run.usage,
+            started_at=run.started_at,
         )
         try:
-            result = await execute_stream(request, ports)
-        except ExecutionStreamError as exc:
+            await ManagedAgentExecutor().execute(request, observer)
+        except ManagedAgentExecutionError as exc:
             if exc.code == "RUN_CANCELLED":
                 raise asyncio.CancelledError from exc
             raise _run_error(exc.code, exc.message) from exc
-        # 终态 usage 与 Coordinator 共享同一 dict 引用时已就地更新；再同步一次保底。
-        run.usage["input_tokens"] = max(
-            run.usage["input_tokens"], int(result.usage.get("input_tokens", 0) or 0)
-        )
-        run.usage["output_tokens"] = max(
-            run.usage["output_tokens"], int(result.usage.get("output_tokens", 0) or 0)
-        )
-        if result.resume is None:
-            _flush_assistant_transcript(run)
-            await port.flush_transcript(run)
-        return result.resume
 
 
 class _BuildStreamPorts:
@@ -311,11 +281,24 @@ class _BuildStreamPorts:
         *,
         run: RunState,
         port: RunLifecyclePort,
-        session: StreamSession,
     ) -> None:
         self._run = run
         self._port = port
-        self._session = session
+
+    def on_model_round(self) -> None:
+        """由 executor 在 initial/resume 回合开始时投影 Build 进度。"""
+        self._port.emit(self._run, RUN_PROGRESS, _run_progress_payload(self._run, "model"))
+
+    async def on_execution_complete(self, result: ManagedAgentResult) -> None:
+        """在 runtime release 前落盘 root Transcript，并完成 Build echo 投影。"""
+        if not result.used_agent:
+            self._port.emit(self._run, CONTENT_DELTA, {"text": result.final_content})
+            _queue_assistant_transcript(self._run, result.final_content)
+        if self._run.persistence is not None:
+            _flush_assistant_transcript(self._run)
+            await self._port.flush_transcript(self._run)
+            await self._run.persistence.complete_run(self._run.ref.thread_id)
+        self._port.drain_context_updates(self._run)
 
     def emit(self, signal: ExecutionSignal) -> None:
         self._port.emit(self._run, signal.type, dict(signal.payload))

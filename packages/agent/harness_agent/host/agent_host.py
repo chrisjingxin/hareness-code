@@ -2237,7 +2237,7 @@ class AgentHost:
             run.agent_engine_lease = lease
             run.agent_engine_profile_key = engine.profile_key
             return engine.graph
-        except Exception:
+        except BaseException:
             if lease is not None:
                 await self._release_agent_engine_lease(lease)
             raise

@@ -433,6 +433,15 @@ class _CoordinatorLifecyclePort:
             )
         run.status = "running"
 
+    async def start_execution(self, run: RunState) -> None:
+        """由 Managed executor 请求 root execution 的唯一 running 迁移。"""
+        try:
+            await self._coordinator._execution_registry.start(run.root_execution_ref)
+        except ExecutionRegistryError as exc:
+            if self.is_cancelled(run):
+                raise asyncio.CancelledError from exc
+            raise RunError("EXECUTION_START_FAILED", str(exc)) from exc
+
     def append_transcript(self, run: RunState, record: TranscriptAppend) -> None:
         """校验归属后把可见记录加入 Coordinator 管理的待写队列。"""
         if record.thread_id != run.ref.thread_id or record.run_id != run.ref.run_id:
@@ -836,13 +845,16 @@ class RunCoordinator:
                 self._finish(run, "cancelled", {"reason": "Cancelled by client"})
                 return
 
-            try:
-                await self._execution_registry.start(run.root_execution_ref)
-            except ExecutionRegistryError:
-                if run.cancel_requested or run.cancellation_token.cancelled:
-                    self._finish(run, "cancelled", {"reason": "Cancelled by client"})
-                    return
-                raise
+            # Build 的 root registry running 迁移属于 ManagedAgentExecutor；Compose
+            # 尚未迁移前保持原有 Coordinator 管理，避免两条路径双重 start。
+            if run.start.mode != "build":
+                try:
+                    await self._execution_registry.start(run.root_execution_ref)
+                except ExecutionRegistryError:
+                    if run.cancel_requested or run.cancellation_token.cancelled:
+                        self._finish(run, "cancelled", {"reason": "Cancelled by client"})
+                        return
+                    raise
 
             adapter = await self._adapter_for(run.start.mode)
             outcome = await adapter.execute(run, self._lifecycle_port)
@@ -1325,4 +1337,3 @@ def _generate_permission_rule(
     else:
         resource = "*"
     return [PermissionRule(tool=tool_name, resource=resource, effect="allow")]
-

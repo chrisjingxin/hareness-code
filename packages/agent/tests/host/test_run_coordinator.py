@@ -404,6 +404,18 @@ async def _noop_persistence():
     return None
 
 
+async def _noop_preparation() -> RunPreparation:
+    """为直接 adapter 测试提供不读取外部资源的准备结果。"""
+    return RunPreparation()
+
+
+async def _accept_direct_adapter_run(coordinator: RunCoordinator, run: RunState) -> None:
+    """模拟 Coordinator 已受理 root execution，供 adapter-only 测试使用。"""
+    binding = coordinator._root_execution_binding(run.start, run.preparation)
+    run.root_execution = binding
+    await coordinator.execution_registry.accept(binding)
+
+
 async def _noop_runtime(run):
     async def release() -> None:
         return None
@@ -1279,17 +1291,25 @@ async def test_subgraph_messages_are_not_flattened_into_root_transcript(tmp_path
             owner=ConnectionRef("owner"),
             persistence=store,
             preparation=RunPreparation(),
-            runtime=RunRuntime(
-                agent=RootAndSubgraphAgent(),
-                run_context=None,
-                graph_config=lambda thread_id: {"configurable": {"thread_id": thread_id}},
-                release=lambda: _noop_async(),
-            ),
         )
-        coordinator = _coordinator([])
-        await coordinator._execution_adapters["build"]._stream_agent(
-            run, coordinator._lifecycle_port, None
+        runtime = RunRuntime(
+            agent=RootAndSubgraphAgent(),
+            run_context=None,
+            graph_config=lambda thread_id: {"configurable": {"thread_id": thread_id}},
+            release=lambda: _noop_async(),
         )
+
+        async def runtime_provider(_run) -> RunRuntime:
+            return runtime
+
+        coordinator = RunCoordinator(
+            persistence_provider=_noop_persistence,
+            preparation_provider=lambda _command, _persistence: _noop_preparation(),
+            runtime_provider=runtime_provider,
+            interaction_port=_NoopInteraction(),
+        )
+        await _accept_direct_adapter_run(coordinator, run)
+        await coordinator._execution_adapters["build"].execute(run, coordinator._lifecycle_port)
 
         records = await store.load_transcript("thread-root")
         assert [record.kind for record in records] == ["user", "assistant", "tool"]
@@ -1374,18 +1394,26 @@ async def test_completed_tool_batch_is_readable_while_run_waits_for_next_model_s
         owner=ConnectionRef("owner"),
         persistence=store,
         preparation=RunPreparation(execution_binding=make_test_binding("thread-durable", "run-durable")),
-        runtime=RunRuntime(
-            agent=BlockingAgent(),
-            run_context=None,
-            graph_config=lambda thread_id: {"configurable": {"thread_id": thread_id}},
-            release=lambda: _noop_async(),
-        ),
     )
-    coordinator = _coordinator([])
+    runtime = RunRuntime(
+        agent=BlockingAgent(),
+        run_context=None,
+        graph_config=lambda thread_id: {"configurable": {"thread_id": thread_id}},
+        release=lambda: _noop_async(),
+    )
+
+    async def runtime_provider(_run) -> RunRuntime:
+        return runtime
+
+    coordinator = RunCoordinator(
+        persistence_provider=_noop_persistence,
+        preparation_provider=lambda _command, _persistence: _noop_preparation(),
+        runtime_provider=runtime_provider,
+        interaction_port=_NoopInteraction(),
+    )
+    await _accept_direct_adapter_run(coordinator, run)
     stream_task = asyncio.create_task(
-        coordinator._execution_adapters["build"]._stream_agent(
-            run, coordinator._lifecycle_port, None
-        )
+        coordinator._execution_adapters["build"].execute(run, coordinator._lifecycle_port)
     )
     try:
         await asyncio.wait_for(blocked.wait(), 5)
