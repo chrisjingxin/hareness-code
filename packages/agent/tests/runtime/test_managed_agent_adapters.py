@@ -48,3 +48,13 @@ def test_delegation_module_has_no_second_managed_engine_runner() -> None:
     source = inspect.getsource(agent_delegation)
 
     assert "def managed_engine_runner" not in source
+
+
+def test_compose_workflow_uses_role_registry_for_activity_scope() -> None:
+    """Workflow 的 Activity scope 同样只能来自固定 RoleBindingRegistry。"""
+    from harness_agent.compose.workflow import ComposeWorkflow
+
+    source = inspect.getsource(ComposeWorkflow._run_stage)
+
+    assert "compose_scope_stage(stage)" in source
+    assert 'stage in {"requirement-reviewer", "code-reviewer"}' not in source

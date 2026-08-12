@@ -49,6 +49,7 @@ from harness_agent.compose.verification import (
 from harness_agent.compose.stage_agents import (
     StageAgentPort,
     StageRequest,
+    compose_scope_stage,
     make_activity_scope,
     summarize_build,
     summarize_plan,
@@ -1248,18 +1249,10 @@ class ComposeWorkflow:
         把 capture_only stream 事件投影为带 child provenance 的 scoped Event。
         """
         profile = run.preparation.agent_engine_profile
-        compose_stage = (
-            "review"
-            if stage in {"requirement-reviewer", "code-reviewer"}
-            else stage if stage in {"understand", "plan", "build", "verify"} else "build"
-        )
-        stage_key = (
-            ComposeStage.REVIEW
-            if compose_stage == "review"
-            else ComposeStage(compose_stage)
-            if compose_stage in {s.value for s in ComposeStage}
-            else ComposeStage.BUILD
-        )
+        # Activity scope 与状态机 stage 都从固定内置 RoleBindingRegistry 解析；
+        # 不能让未知/Plugin role 静默降级为 build。
+        compose_stage = compose_scope_stage(stage)
+        stage_key = ComposeStage(compose_stage)
         resolved_attempt = (
             max(1, int(attempt))
             if attempt is not None
