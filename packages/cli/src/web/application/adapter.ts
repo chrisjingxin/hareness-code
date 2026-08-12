@@ -465,6 +465,11 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     const next = this.getInteractive()
     this.mergeWorkspacePreview()
     this.detectRunEnd(next)
+    if (previous.activity.kind !== "compacting" && next.activity.kind === "compacting") {
+      this.resetDraftState()
+      this.publishNow()
+      return
+    }
     // Interaction 变化（包含 requestId 变化）必须立即 flush：草稿原子重置与表单状态都依赖该通知。
     if (previous.interaction?.requestId !== next.interaction?.requestId) {
       this.interactionDraft = null
@@ -617,6 +622,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
 
   /** draft 变化：只有 `/` 前缀且未进入参数区、未转义时才打开命令菜单。 */
   private updateDraft(value: string): void {
+    if (this.getInteractive().activity.kind === "compacting") return
     this.draft = value
     this.composerErrorStr = null
     const query = value.trimStart()
@@ -626,12 +632,20 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     this.publishNow()
   }
 
+  /** 操作进入等待态时清除旧输入，避免已提交的 Slash 命令继续停留在 Composer。 */
+  private resetDraftState(): void {
+    this.draft = ""
+    this.commandMenuOpenFlag = false
+    this.commandMenuIndex = 0
+    this.composerErrorStr = null
+  }
+
   /** 把当前 draft 提交给共享 Core；从 Adapter 当前 draft 读取，不信任外部传入值。 */
   private async submit(): Promise<void> {
     const submittedDraft = this.draft
     const value = submittedDraft.trim()
     const interactive = this.getInteractive()
-    if (!value || this.composerSubmittingFlag || this.leavingFlag || interactive.connection.status !== "open" || Boolean(interactive.activeRun)) {
+    if (!value || this.composerSubmittingFlag || this.leavingFlag || interactive.connection.status !== "open" || Boolean(interactive.activeRun) || interactive.activity.kind === "compacting") {
       return
     }
     this.composerSubmittingFlag = true
@@ -665,6 +679,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
 
   /** 打开命令菜单并保留当前输入语义；与 TUI Adapter 行为保持一致。 */
   private openCommandMenu(): void {
+    if (this.getInteractive().activity.kind === "compacting") return
     const value = this.draft.trimStart()
     if (!value.startsWith("/") || value.slice(1).match(/\s/)) this.updateDraft("/")
     this.commandMenuOpenFlag = true
@@ -680,6 +695,11 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
 
   /** 命令/Skill 选中：按 menu item 类型分别处理，命令通过 command.execute 转发。 */
   private async selectCommandMenuItem(item: CommandMenuItem): Promise<void> {
+    if (this.getInteractive().activity.kind === "compacting") {
+      this.commandMenuOpenFlag = false
+      this.showTransientNotice("上下文正在压缩；完成前不能选择新命令或 Skill。")
+      return
+    }
     if (item.kind === "skill") {
       await this.client.submitIntent({ type: "skill.arm", skillId: item.skill.id })
       this.draft = ""

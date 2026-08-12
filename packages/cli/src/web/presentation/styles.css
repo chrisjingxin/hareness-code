@@ -241,7 +241,7 @@ button.meta-chip { cursor: pointer; }
 .status-dot { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: var(--subtle); }
 .status-dot-idle, .status-dot-home { background: var(--success); }
 .status-dot-running { background: var(--accent); }
-.status-dot-starting, .status-dot-waiting-interaction, .status-dot-cancelling { background: var(--warning); }
+.status-dot-compacting, .status-dot-starting, .status-dot-waiting-interaction, .status-dot-cancelling { background: var(--warning); }
 .status-dot-completed { background: var(--success); }
 .status-dot-cancelled { background: var(--muted); }
 .status-dot-failed { background: var(--danger); }

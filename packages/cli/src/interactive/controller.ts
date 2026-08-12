@@ -8,7 +8,7 @@ import type { AgentGateway, Clock, IdGenerator, IntentOutcome, InteractiveConfir
 import { createFallbackNoopGateway } from "./ports"
 import { cryptoIdGenerator, systemClock, systemScheduler } from "../infrastructure"
 import type { InteractiveRuntime } from "./runtime"
-import { appendNotice, clearThread, createInitialState, type InteractiveState } from "./state"
+import { appendNotice, clearThread, createInitialState, finishContextCompaction, startContextCompaction, type InteractiveState } from "./state"
 export class InteractiveControllerImpl implements InteractiveController {
   private readonly gateway: AgentGateway
   private readonly clock: Clock
@@ -76,7 +76,7 @@ export class InteractiveControllerImpl implements InteractiveController {
       if (this.closed) return
       this.connection = { status: "closed", message: error.message }
       this.interactionFeature.settlePendingInteraction(this.featureContext)
-      this.commit(current => appendNotice(current, `connection-closed: ${error.message}`))
+      this.commit(current => appendNotice(finishContextCompaction(current), `connection-closed: ${error.message}`))
     }) ?? (() => {})
 
     this.clearInteractionHandler = this.gateway.setInteractionHandler?.(request =>
@@ -99,6 +99,9 @@ export class InteractiveControllerImpl implements InteractiveController {
   }
   async dispatch(intent: InteractiveIntent): Promise<IntentOutcome> {
     if (this.closed) return { status: "rejected", code: "connection-closed", message: "Controller is closed" }
+    if (this.state.pendingOperation && blocksPendingOperation(intent)) {
+      return { status: "rejected", code: "busy", message: "上下文正在压缩；完成前不能执行该操作" }
+    }
 
     switch (intent.type) {
       case "input.submit":
@@ -239,11 +242,14 @@ export class InteractiveControllerImpl implements InteractiveController {
         await this.catalogFeature.refreshCatalog(result.target, this.featureContext, id => this.adoptThreadSelection(id))
         return { status: "accepted", effects: [{ type: "present", target: result.target, initialQuery: result.initialQuery }] }
       case "compact":
+        this.commit(startContextCompaction)
         try {
           const compacted = await this.gateway.compactContext(result.threadId)
           this.commit(current => appendNotice(current, contextCompactNotice(compacted)))
         } catch (error) {
           this.commit(current => appendNotice(current, `上下文压缩失败：${error instanceof Error ? error.message : String(error)}`))
+        } finally {
+          this.commit(finishContextCompaction)
         }
         return { status: "accepted" }
       case "mcp":
@@ -337,4 +343,13 @@ export function createInteractiveController(options: InteractiveControllerOption
 
 function publicCatalog<T>(catalog: { status: any; items: readonly T[]; message?: string }): LoadableCatalog<T> {
   return { status: catalog.status, items: catalog.items, message: catalog.message }
+}
+
+/** 压缩期间只允许只读刷新、运行取消和 Interaction 收尾；其余可变入口失败关闭。 */
+function blocksPendingOperation(intent: InteractiveIntent): boolean {
+  if (intent.type === "catalog.refresh" || intent.type === "run.cancel" || intent.type === "interaction.respond") return false
+  if (intent.type === "command.execute") {
+    return !["system.help", "system.status", "system.version", "system.quit"].includes(intent.commandId)
+  }
+  return true
 }

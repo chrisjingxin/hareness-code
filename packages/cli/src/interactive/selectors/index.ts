@@ -10,15 +10,16 @@ export function selectFeatureAvailability(snapshot: InteractiveSnapshot): Featur
   const capabilities = new Set<string>(snapshot.runtime.capabilities ?? [])
   const hasRun = snapshot.activeRun !== null
   const hasInteraction = snapshot.interaction !== null
+  const hasPendingOperation = snapshot.activity.kind === "compacting"
   const cancelling = snapshot.activity.kind === "cancelling"
 
   return {
-    canSubmit: snapshot.connection.status === "open",
+    canSubmit: snapshot.connection.status === "open" && !hasPendingOperation,
     canCancelRun: hasRun && !cancelling,
-    canOpenThread: !hasRun && !hasInteraction,
-    canToggleSkill: capabilities.has(CAPABILITY_GATE.toggleSkill) && !hasRun,
-    canManageMcp: capabilities.has(CAPABILITY_GATE.manageMcp) && !hasRun,
-    canChangeModel: capabilities.has(CAPABILITY_GATE.changeModel),
+    canOpenThread: !hasRun && !hasInteraction && !hasPendingOperation,
+    canToggleSkill: capabilities.has(CAPABILITY_GATE.toggleSkill) && !hasRun && !hasPendingOperation,
+    canManageMcp: capabilities.has(CAPABILITY_GATE.manageMcp) && !hasRun && !hasPendingOperation,
+    canChangeModel: capabilities.has(CAPABILITY_GATE.changeModel) && !hasPendingOperation,
     canOpenModelsPanel: capabilities.has(CAPABILITY_GATE.openModelsPanel),
     canOpenSkillsPanel: capabilities.has(CAPABILITY_GATE.openSkillsPanel),
     canOpenMcpPanel: capabilities.has(CAPABILITY_GATE.openMcpPanel),

@@ -81,6 +81,7 @@ export type RestoredThreadMessage = {
 export type InteractiveActivity =
   | { kind: "home" }
   | { kind: "idle" }
+  | { kind: "compacting" }
   | { kind: "starting" }
   | { kind: "running" }
   | { kind: "waiting-interaction" }
@@ -98,6 +99,7 @@ const defaultIdGenerator: IdGenerator = {
 export type InteractiveState = {
   currentThreadId: string | null
   activeRun: ActiveRun | null
+  pendingOperation: "context.compact" | null
   timeline: TimelineItem[]
   activity: InteractiveActivity
   /** 仅当前 Run 可见的事实进度，不进入 Timeline 或 Thread 历史。 */
@@ -111,6 +113,7 @@ export function createInitialState(threadId: string | null = null): InteractiveS
   return {
     currentThreadId: threadId,
     activeRun: null,
+    pendingOperation: null,
     timeline: [],
     activity: { kind: threadId ? "idle" : "home" },
     runProgress: null,
@@ -122,7 +125,27 @@ export function createInitialState(threadId: string | null = null): InteractiveS
 export function isHomeState(state: { activeRun: InteractiveState["activeRun"]; timeline: readonly TimelineItem[]; activity: InteractiveState["activity"] }): boolean {
   return !state.activeRun
     && state.timeline.length === 0
+    && state.activity.kind !== "compacting"
     && state.activity.kind !== "waiting-interaction"
+}
+
+/** 手动压缩不是 Agent Run，但会独占当前 Thread 的模型投影。 */
+export function startContextCompaction(state: InteractiveState): InteractiveState {
+  return {
+    ...state,
+    pendingOperation: "context.compact",
+    activity: { kind: "compacting" },
+  }
+}
+
+/** 只清理匹配的压缩操作；迟到结果不能覆盖其他生命周期状态。 */
+export function finishContextCompaction(state: InteractiveState): InteractiveState {
+  if (state.pendingOperation !== "context.compact") return state
+  return {
+    ...state,
+    pendingOperation: null,
+    activity: { kind: state.currentThreadId ? "idle" : "home" },
+  }
 }
 
 /** 在发送 run.start 前先登记 run。 */
@@ -186,6 +209,7 @@ export function restoreThread(threadId: string, messages: readonly RestoredThrea
   return {
     currentThreadId: threadId,
     activeRun: null,
+    pendingOperation: null,
     timeline,
     // 恢复已完成（timeline 已构建）：活动状态必须是 idle，不得停在 restoring。
     activity: { kind: "idle" },

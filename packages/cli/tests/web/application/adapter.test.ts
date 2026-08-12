@@ -240,6 +240,27 @@ test("rejected submit 保留 draft 并展示错误，不发送滚动意图", asy
   expect(adapter.getSnapshot().scrollRequest).toBeNull()
 })
 
+test("上下文压缩期间忽略草稿变化和提交", async () => {
+  const compacting = makeInteractive({ currentThreadId: "thread-1", activity: { kind: "compacting" } })
+  const { adapter, client } = makeAdapter(createFakeClient(compacting))
+  await adapter.dispatch({ type: "draft-change", value: "不能排队" })
+  await adapter.dispatch({ type: "submit" })
+  expect(adapter.getSnapshot().draft).toBe("")
+  expect(client.intents).toEqual([])
+})
+
+test("视图进入上下文压缩状态时清空已存在草稿和命令菜单", () => {
+  const client = createFakeClient(makeInteractive({ currentThreadId: "thread-1" }))
+  const { adapter } = makeAdapter(client)
+  adapter.dispatch({ type: "draft-change", value: "/compact" })
+  expect(adapter.getSnapshot().commandMenuOpen).toBe(true)
+
+  client.pushInteractive(snapshot => ({ ...snapshot, activity: { kind: "compacting" } }))
+
+  expect(adapter.getSnapshot().draft).toBe("")
+  expect(adapter.getSnapshot().commandMenuOpen).toBe(false)
+})
+
 test("slash input、`//`、未知命令都只转交 client，不在 adapter 解释", async () => {
   const { adapter, client } = makeAdapter()
   await adapter.dispatch({ type: "draft-change", value: "/help" })

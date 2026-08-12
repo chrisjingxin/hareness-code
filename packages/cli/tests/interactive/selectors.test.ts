@@ -77,6 +77,15 @@ test("FeatureAvailability：连接关闭禁止提交", () => {
   expect(availability.canSubmit).toBe(false)
 })
 
+test("FeatureAvailability：上下文压缩期间禁止提交和空闲态操作", () => {
+  const availability = selectFeatureAvailability(snapshot({ activity: { kind: "compacting" } }))
+  expect(availability.canSubmit).toBe(false)
+  expect(availability.canOpenThread).toBe(false)
+  expect(availability.canToggleSkill).toBe(false)
+  expect(availability.canManageMcp).toBe(false)
+  expect(availability.canChangeModel).toBe(false)
+})
+
 test("FeatureAvailability：缺少能力时对应面板不可用", () => {
   const availability = selectFeatureAvailability(snapshot({ runtime: { workspace: "/w", cliVersion: "0.1.0", modelConfigured: true, executionMode: "local", approvalMode: "default", capabilities: [Capability.THREADS_READ] } }))
   expect(availability.canOpenModelsPanel).toBe(false)

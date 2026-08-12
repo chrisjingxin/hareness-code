@@ -37,13 +37,17 @@ export function Composer(props: Pick<SharedViewProps, "interactive" | "terminalW
   commandMenuPlacement: "above" | "inline-below"
 }) {
   const active = Boolean(props.interactive.activeRun)
+  const compacting = props.interactive.activity.kind === "compacting"
+  const busy = active || compacting
   const awaitingQuestion = props.interactive.interaction?.type === "question"
   const options = props.commandOptions
   const placeholder = awaitingQuestion
     ? "输入你的回答后按 Enter"
-    : active
-      ? "正在执行；Esc 中断"
-      : "输入消息..（输入 / 唤起命令）"
+    : compacting
+      ? "正在压缩上下文…"
+      : active
+        ? "正在执行；Esc 中断"
+        : "输入消息..（输入 / 唤起命令）"
 
   const commandMenu = props.commandMenu.visible ? (
     <CommandMenu
@@ -67,7 +71,7 @@ export function Composer(props: Pick<SharedViewProps, "interactive" | "terminalW
       ) : null}
       <box
         border={isHome ? [] : ["left"]}
-        borderColor={active ? tuiTheme.primarySoft : tuiTheme.primary}
+        borderColor={busy ? tuiTheme.primarySoft : tuiTheme.primary}
         customBorderChars={PROMPT_BORDER}
       >
         <box backgroundColor={tuiTheme.composer} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={isHome ? 1 : 0} flexShrink={0} flexGrow={1}>
@@ -86,7 +90,7 @@ export function Composer(props: Pick<SharedViewProps, "interactive" | "terminalW
                 minHeight={1}
                 maxHeight={6}
                 keyBindings={COMPOSER_KEY_BINDINGS}
-                focused={(!active || awaitingQuestion) && !props.pickerVisible}
+                focused={(!busy || awaitingQuestion) && !props.pickerVisible}
                 onContentChange={() => props.onInput(props.inputRef.current?.plainText ?? "")}
                 onKeyDown={props.onComposerKeyDown}
                 onSubmit={props.onSubmit}
@@ -105,7 +109,7 @@ export function Composer(props: Pick<SharedViewProps, "interactive" | "terminalW
               minHeight={1}
               maxHeight={6}
               keyBindings={COMPOSER_KEY_BINDINGS}
-              focused={(!active || awaitingQuestion) && !props.pickerVisible}
+              focused={(!busy || awaitingQuestion) && !props.pickerVisible}
               onContentChange={() => props.onInput(props.inputRef.current?.plainText ?? "")}
               onKeyDown={props.onComposerKeyDown}
               onSubmit={props.onSubmit}
@@ -237,7 +241,7 @@ export function FooterRail(props: { interactive: SharedViewProps["interactive"];
         <text fg={tuiTheme.muted}>{workspace}</text>
         {showBranch ? <text fg={tuiTheme.muted}>:{branchLabel}</text> : null}
       </box>
-      {props.interactive.activeRun ? <BusyRunHint /> : props.thread ? <text fg={tuiTheme.muted}>↑↓ 历史 · PgUp/PgDn 滚动 · Ctrl+O 工具</text> : null}
+      {props.interactive.activity.kind === "compacting" ? <BusyContextOperationHint /> : props.interactive.activeRun ? <BusyRunHint /> : props.thread ? <text fg={tuiTheme.muted}>↑↓ 历史 · PgUp/PgDn 滚动 · Ctrl+O 工具</text> : null}
       <text fg={tuiTheme.subtle}>v{runtime.cliVersion}</text>
     </box>
   )
@@ -250,6 +254,17 @@ function BusyRunHint() {
     <box flexDirection="row" gap={1}>
       <text fg={tuiTheme.primary}>{frame}</text>
       <text fg={tuiTheme.muted}>PgUp/PgDn 滚动 · Esc 中断</text>
+    </box>
+  )
+}
+
+/** 手动压缩没有取消协议，底栏只展示等待语义。 */
+function BusyContextOperationHint() {
+  const frame = useSpinner(true, 80)
+  return (
+    <box flexDirection="row" gap={1}>
+      <text fg={tuiTheme.primary}>{frame}</text>
+      <text fg={tuiTheme.muted}>上下文压缩中 · 请稍候</text>
     </box>
   )
 }
@@ -294,7 +309,7 @@ function statusColor(kind: SharedViewProps["interactive"]["activity"]["kind"]): 
   if (kind === "completed") return tuiTheme.success
   if (kind === "cancelled") return tuiTheme.muted
   if (kind === "failed") return tuiTheme.danger
-  if (kind === "waiting-interaction") return tuiTheme.warning
+  if (kind === "waiting-interaction" || kind === "compacting") return tuiTheme.warning
   return tuiTheme.primary
 }
 

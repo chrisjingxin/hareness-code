@@ -190,6 +190,7 @@ class TuiAdapterImpl implements TuiAdapter {
     if (this.closed) return
     switch (intent.type) {
       case "draft-input":
+        if (this.controller.getSnapshot().activity.kind === "compacting") return
         this.updateDraft(intent.value)
         return
       case "submit":
@@ -255,6 +256,10 @@ class TuiAdapterImpl implements TuiAdapter {
 
   /** 把共享 snapshot 与表现状态一起发布为新快照。 */
   private publish(): void {
+    const interactive = this.controller.getSnapshot()
+    if (this.snapshot.interactive.activity.kind !== "compacting" && interactive.activity.kind === "compacting") {
+      this.resetDraftState()
+    }
     this.snapshot = this.buildSnapshot()
     for (const listener of [...this.listeners]) listener(this.snapshot)
   }
@@ -323,13 +328,18 @@ class TuiAdapterImpl implements TuiAdapter {
 
   /** 清空输入和命令菜单；不撤销已经选中的一次性 Skill。 */
   private clearDraft(): void {
+    this.resetDraftState()
+    this.publish()
+  }
+
+  /** 清除输入和命令菜单状态；操作进入等待态时也复用此路径。 */
+  private resetDraftState(): void {
     this.commandMenuDismissedValue = undefined
     this.promptHistoryCursor = undefined
     this.historyApplyValue = undefined
     this.draftCursor = undefined
     this.draft = ""
     this.commandMenu = { visible: false, selectedIndex: 0 }
-    this.publish()
   }
 
   /** 将历史项写入 snapshot，实际 textarea 文本由 React adapter 同步到 ref。 */
@@ -563,6 +573,11 @@ class TuiAdapterImpl implements TuiAdapter {
 
   /** 处理当前命令菜单选中项；领域命令仍按 canonical ID 执行。 */
   private async selectCommandMenu(): Promise<void> {
+    if (this.controller.getSnapshot().activity.kind === "compacting") {
+      this.commandMenu = { visible: false, selectedIndex: 0 }
+      this.showTransientNotice("上下文正在压缩；完成前不能选择新命令或 Skill。")
+      return
+    }
     const directCommand = parseSlashCommand(this.draft)
     if (directCommand && !directCommand.argument) {
       this.clearDraft()
@@ -575,6 +590,11 @@ class TuiAdapterImpl implements TuiAdapter {
 
   /** 处理鼠标或键盘选中的命令/Skill。 */
   private async selectCommandMenuItem(item: CommandMenuItem): Promise<void> {
+    if (this.controller.getSnapshot().activity.kind === "compacting") {
+      this.commandMenu = { visible: false, selectedIndex: 0 }
+      this.showTransientNotice("上下文正在压缩；完成前不能选择新命令或 Skill。")
+      return
+    }
     if (item.kind === "skill") {
       this.selectSkill(item.skill)
       return

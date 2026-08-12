@@ -10,6 +10,8 @@ export function activityLabel(kind: InteractiveActivity["kind"]): string {
       return "就绪"
     case "idle":
       return "就绪"
+    case "compacting":
+      return "正在压缩上下文"
     case "starting":
       return "正在思考"
     case "running":

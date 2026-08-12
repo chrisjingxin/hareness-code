@@ -33,9 +33,7 @@ export class CommandFeature {
         capabilities: new Set(ctx.baseRuntime.capabilities ?? builtinCommandCapabilities),
         hasThread: Boolean(ctx.getState().currentThreadId),
         activeRun: Boolean(ctx.getState().activeRun),
-        // 当前 Core 状态机没有独立的 pendingOperation（compact 为同步等待）；
-        // 保持 false 以兼容旧能力检查，未来引入异步压缩状态时再接入。
-        pendingOperation: false,
+        pendingOperation: Boolean(ctx.getState().pendingOperation),
         hasPendingInteraction,
       },
       threadId: ctx.getState().currentThreadId,
