@@ -13,6 +13,7 @@ from harness_agent.runtime.managed_agent_executor import (
     ManagedAgentExecutionError,
     ManagedAgentExecutor,
     ManagedAgentRequest,
+    acquire_pooled_agent_runtime,
 )
 
 
@@ -104,6 +105,52 @@ class _Observer:
         self.stream_events += 1
 
 
+class _PoolRunLease:
+    """记录每次 managed execution 的 run lease release。"""
+
+    def __init__(self, events: list[str]) -> None:
+        self._events = events
+
+    async def release(self) -> None:
+        """按 runtime 清理顺序记录 run lease。"""
+        self._events.append("run")
+
+
+class _PoolLease:
+    """提供 graph 与 Engine lease 的最小 fake。"""
+
+    def __init__(self, graph: object, events: list[str], *, cancel_on_run: bool = False) -> None:
+        self.engine = type("Engine", (), {"graph": graph})()
+        self._events = events
+        self._cancel_on_run = cancel_on_run
+
+    async def run(self) -> _PoolRunLease:
+        """创建 run lease，或模拟刚取得 engine lease 后的取消。"""
+        if self._cancel_on_run:
+            raise asyncio.CancelledError
+        return _PoolRunLease(self._events)
+
+    async def release(self) -> None:
+        """记录 Engine lease release。"""
+        self._events.append("engine")
+
+
+class _Pool:
+    """供 pooled runtime contract 使用的 AgentEnginePool fake。"""
+
+    def __init__(self, lease: _PoolLease, events: list[str]) -> None:
+        self._lease = lease
+        self._events = events
+
+    async def acquire(self, _profile: object) -> _PoolLease:
+        """返回预设 Engine lease。"""
+        return self._lease
+
+    async def finalize_draining(self, _profile_key: str) -> None:
+        """记录 release 后的 pool 排空检查。"""
+        self._events.append("finalize")
+
+
 def _request(
     runtime: _Runtime,
     *,
@@ -134,6 +181,47 @@ def _request(
         timeout_seconds=timeout_seconds,
         execution_starter=execution_starter,
     )
+
+
+@pytest.mark.asyncio
+async def test_pooled_runtime_hides_engine_graph_and_releases_run_then_engine() -> None:
+    """Pooled runtime 只向 executor 暴露 graph seam，并收敛两层 lease。"""
+    events: list[str] = []
+    graph = _FakeAgent([[("messages", (AIMessageChunk(content="完成"), {}))]])
+    pool = _Pool(_PoolLease(graph, events), events)
+    profile = type("Profile", (), {"profile_key": "profile-1"})()
+
+    runtime = await acquire_pooled_agent_runtime(
+        pool=pool,
+        profile=profile,
+        run_context=None,
+        graph_config=lambda namespace: {"configurable": {"thread_id": namespace}},
+    )
+    result = await ManagedAgentExecutor().execute(
+        _request(runtime), _Observer()
+    )
+
+    assert result.final_content == "完成"
+    assert events == ["run", "engine", "finalize"]
+    assert graph.calls[0]["config"] == {"configurable": {"thread_id": "thread-1"}}
+
+
+@pytest.mark.asyncio
+async def test_pooled_runtime_releases_engine_when_run_lease_acquire_is_cancelled() -> None:
+    """Engine lease 已取得但 run lease 被取消时也必须立即回收。"""
+    events: list[str] = []
+    pool = _Pool(_PoolLease(object(), events, cancel_on_run=True), events)
+    profile = type("Profile", (), {"profile_key": "profile-1"})()
+
+    with pytest.raises(asyncio.CancelledError):
+        await acquire_pooled_agent_runtime(
+            pool=pool,
+            profile=profile,
+            run_context=None,
+            graph_config=lambda _namespace: {},
+        )
+
+    assert events == ["engine", "finalize"]
 
 
 @pytest.mark.asyncio

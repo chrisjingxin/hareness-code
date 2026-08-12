@@ -266,6 +266,83 @@ class ManagedAgentExecutor:
         )
 
 
+@dataclass(slots=True)
+class _PooledAgentRuntime:
+    """由 executor module 持有的 AgentEnginePool lease 适配器。"""
+
+    agent: Any | None
+    run_context: object | None
+    graph_config: Callable[[str], Mapping[str, object]]
+    _release: Callable[[], Awaitable[None]]
+
+    async def release(self) -> None:
+        """按 run lease、engine lease、draining 检查顺序释放资源。"""
+        await self._release()
+
+
+async def acquire_pooled_agent_runtime(
+    *,
+    pool: Any,
+    profile: Any,
+    run_context: object | None,
+    graph_config: Callable[[str], Mapping[str, object]],
+) -> ManagedAgentRuntime:
+    """从 AgentEnginePool 获取一次运行时，并封装所有 lease 清理。
+
+    Plugin/Compose adapter 只能把这个 function 作为 request 的 runtime provider
+    交给 ``ManagedAgentExecutor`` 调用；只有本 module 读取 ``engine.graph``。
+    """
+    profile_key = getattr(profile, "profile_key", None)
+    if not isinstance(profile_key, str) or not profile_key:
+        raise ManagedAgentExecutionError("MANAGED_AGENT_PROFILE_INVALID")
+    lease: Any | None = None
+    run_lease: Any | None = None
+    try:
+        lease = await pool.acquire(profile)
+        run_lease = await lease.run()
+        graph = getattr(getattr(lease, "engine", None), "graph", None)
+        if graph is None:
+            raise ManagedAgentExecutionError("MANAGED_AGENT_GRAPH_UNAVAILABLE")
+
+        async def release() -> None:
+            """保证前一个 release 失败时仍继续释放下层资源。"""
+            await _release_pooled_leases(pool, profile_key, lease, run_lease)
+
+        return _PooledAgentRuntime(
+            agent=graph,
+            run_context=run_context,
+            graph_config=graph_config,
+            _release=release,
+        )
+    except BaseException:
+        try:
+            await _release_pooled_leases(pool, profile_key, lease, run_lease)
+        except Exception:
+            logger.exception(
+                "Unable to clean up pooled runtime after acquire failure profile=%s",
+                profile_key,
+            )
+        raise
+
+
+async def _release_pooled_leases(
+    pool: Any,
+    profile_key: str,
+    lease: Any | None,
+    run_lease: Any | None,
+) -> None:
+    """释放可选 run/engine lease，并始终执行 pool draining 收敛。"""
+    try:
+        if run_lease is not None:
+            await run_lease.release()
+    finally:
+        try:
+            if lease is not None:
+                await lease.release()
+        finally:
+            await pool.finalize_draining(profile_key)
+
+
 def _initial_stream_input(value: str | Mapping[str, object]) -> object:
     """将用户文本转换为 LangGraph 输入，结构化 ContextPack 原样交给 graph。"""
     if isinstance(value, str):
