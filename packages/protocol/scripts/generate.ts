@@ -123,6 +123,7 @@ export type AgentEventOf<T extends string, P> = {
   execution_id?: string
   parent_execution_id?: string | null
   agent_id?: string
+  compose_scope?: ComposeActivityScope
   payload: P
 }
 export type AgentEvent =

@@ -1038,6 +1038,23 @@
     },
     {
       "kind": "event",
+      "name": "compose.summary",
+      "case": "valid",
+      "value": {
+        "event_id": "x",
+        "type": "compose.summary",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "status": "passed",
+          "text": "x"
+        }
+      }
+    },
+    {
+      "kind": "event",
       "name": "interaction.resolved",
       "case": "valid",
       "value": {
@@ -3425,6 +3442,46 @@
           "stages": [],
           "tasks": [],
           "evidence": []
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "compose.summary",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "event",
+      "name": "compose.summary",
+      "case": "extra_field",
+      "value": {
+        "event_id": "x",
+        "type": "compose.summary",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "status": "passed",
+          "text": "x"
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "event",
+      "name": "compose.summary",
+      "case": "missing_field",
+      "value": {
+        "type": "compose.summary",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "status": "passed",
+          "text": "x"
         }
       }
     },
