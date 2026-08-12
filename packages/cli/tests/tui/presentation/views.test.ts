@@ -497,6 +497,62 @@ function viewProps(interactive: InteractiveSnapshot, terminalWidth: number, term
   }
 }
 
+test("Compose activity 分组标题与终态折叠摘要可见", async () => {
+  const run = { threadId: "thread-1", runId: "run-1" }
+  let state = startRun(createInitialState(), run, "实现搜索")
+  state = {
+    ...state,
+    workMode: "compose",
+    timeline: [
+      state.timeline[0]!,
+      {
+        type: "tool",
+        tool: {
+          id: "call-1",
+          runId: run.runId,
+          name: "read_file",
+          arguments: "",
+          output: "hidden-when-collapsed",
+          status: "completed",
+          executionId: "child-a",
+          activityId: "act-a",
+          agentId: "understand",
+        },
+      },
+      {
+        type: "compose-summary",
+        summary: {
+          id: "sum-a",
+          runId: run.runId,
+          status: "passed",
+          text: "理解完成：目标已确认",
+          executionId: "child-a",
+          activityId: "act-a",
+          agentId: "understand",
+          composeScope: { activityId: "act-a", stage: "understand", attempt: 1 },
+        },
+      },
+    ],
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(
+      createElement(ThreadView, viewProps(snapshotOf(state), 130, 40)),
+      { width: 130, height: 40 },
+    )
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("理解")
+    expect(frame).toContain("理解完成：目标已确认")
+    // 终态默认折叠：不暴露 tool 全文
+    expect(frame).not.toContain("hidden-when-collapsed")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
 test("Compose 投影渲染五阶段、任务与 blocked 摘要", async () => {
   const run = { threadId: "thread-1", runId: "run-1" }
   let state = startRun(createInitialState(), run, "实现搜索")

@@ -288,6 +288,106 @@ describe("Timeline", () => {
   })
 })
 
+test("Compose activity 分组：终态默认折叠，Enter 可展开", () => {
+  const interactive = makeInteractive({
+    currentThreadId: "thread-1",
+    activity: { kind: "running" },
+    timeline: [
+      {
+        type: "tool",
+        tool: {
+          id: "call-1",
+          runId: "run-1",
+          name: "read_file",
+          arguments: "",
+          output: "secret-body",
+          status: "completed",
+          executionId: "child-a",
+          activityId: "act-a",
+          agentId: "understand",
+        },
+      },
+      {
+        type: "compose-summary",
+        summary: {
+          id: "sum-a",
+          runId: "run-1",
+          status: "passed",
+          text: "理解完成：已识别目标",
+          executionId: "child-a",
+          activityId: "act-a",
+          agentId: "understand",
+          composeScope: { activityId: "act-a", stage: "understand", attempt: 1 },
+        },
+      },
+    ],
+  })
+  const handle = render(
+    <Timeline snapshot={makeSnapshot({ interactive })} dispatch={() => {}} />,
+  )
+  try {
+    const group = handle.container.querySelector(".timeline-activity-group")
+    expect(group).not.toBeNull()
+    const header = handle.container.querySelector(".timeline-activity-header") as HTMLButtonElement
+    expect(header.getAttribute("aria-expanded")).toBe("false")
+    expect(header.textContent).toContain("理解")
+    expect(handle.container.textContent).toContain("理解完成：已识别目标")
+    // 折叠时不渲染组内 Tool 卡
+    expect(handle.container.textContent).not.toContain("read_file")
+    act(() => {
+      header.click()
+    })
+    expect(handle.container.querySelector(".timeline-activity-header")?.getAttribute("aria-expanded")).toBe("true")
+    expect(handle.container.textContent).toContain("read_file")
+    // 再次点击折叠
+    act(() => {
+      header.click()
+    })
+    expect(handle.container.querySelector(".timeline-activity-header")?.getAttribute("aria-expanded")).toBe("false")
+    expect(handle.container.textContent).not.toContain("read_file")
+  } finally {
+    handle.unmount()
+  }
+})
+
+test("Compose 运行状态出现在 run-status-live 并带阶段信息", () => {
+  const interactive = makeInteractive({
+    currentThreadId: "thread-1",
+    activeRun: { threadId: "thread-1", runId: "run-1" },
+    activity: { kind: "running" },
+    runProgress: { phase: "model", elapsedMs: 18_000 },
+    composeState: {
+      revision: 2,
+      stage: "build",
+      status: "running",
+      stages: [
+        { id: "understand", status: "passed", attempts: 1 },
+        { id: "plan", status: "passed", attempts: 1 },
+        { id: "build", status: "running", attempts: 1 },
+        { id: "verify", status: "pending", attempts: 0 },
+        { id: "review", status: "pending", attempts: 0 },
+      ],
+      tasks: [{ id: "task-1", title: "实现搜索", status: "running" }],
+      evidence: [],
+      blockedReason: null,
+    },
+  })
+  const handle = render(
+    <Timeline snapshot={makeSnapshot({ interactive })} dispatch={() => {}} />,
+  )
+  try {
+    const live = handle.container.querySelector(".run-status-live")
+    expect(live?.textContent).toContain("Compose")
+    expect(live?.textContent).toContain("构建")
+    expect(live?.textContent).toContain("实现搜索")
+    expect(live?.textContent).toContain("Esc 取消")
+    // 五阶段条仍在，但位于 live status 附近（同容器内）
+    expect(handle.container.querySelector(".compose-progress")).not.toBeNull()
+  } finally {
+    handle.unmount()
+  }
+})
+
 test("Compose 进度面板渲染五阶段、当前任务与 blocked 摘要", async () => {
   const interactive = makeInteractive({
     timeline: [],

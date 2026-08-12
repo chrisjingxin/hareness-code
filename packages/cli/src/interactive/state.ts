@@ -21,12 +21,25 @@ export type ComposeProjection = {
   blockedReason: string | null
 }
 
+/** Compose activity 归属；Build 无 scope 时 execution/activity 视为 root。 */
+export type ComposeScopeMeta = {
+  activityId: string
+  stage: ComposeStageId
+  attempt: number
+  taskId?: string
+  taskTitle?: string
+}
+
 export type ConversationMessage = {
   id: string
   role: MessageRole
   content: string
   runId?: string
   streaming?: boolean
+  /** child/root execution 身份；缺省表示 root。 */
+  executionId?: string
+  activityId?: string
+  agentId?: string
 }
 
 export type ToolCard = {
@@ -36,6 +49,9 @@ export type ToolCard = {
   arguments: string
   output: string
   status: "running" | "completed" | "failed"
+  executionId?: string
+  activityId?: string
+  agentId?: string
 }
 
 export type InteractionCard = {
@@ -47,6 +63,22 @@ export type InteractionCard = {
   requests?: unknown
   question?: string
   options?: Array<{ name: string; value: string }>
+  executionId?: string
+  activityId?: string
+  agentId?: string
+  composeScope?: ComposeScopeMeta
+}
+
+/** Runtime 生成的阶段摘要；非 assistant 消息。 */
+export type ComposeSummaryCard = {
+  id: string
+  runId: string
+  status: "passed" | "failed" | "blocked" | "cancelled" | "truncated"
+  text: string
+  executionId?: string
+  activityId?: string
+  agentId?: string
+  composeScope?: ComposeScopeMeta
 }
 
 /**
@@ -57,6 +89,7 @@ export type TimelineItem =
   | { type: "tool"; tool: ToolCard }
   | { type: "reasoning"; reasoning: ReasoningCard }
   | { type: "interaction"; interaction: InteractionCard }
+  | { type: "compose-summary"; summary: ComposeSummaryCard }
 
 export type ActiveRun = {
   threadId: string
@@ -85,12 +118,42 @@ export type ReasoningCard = {
   runId: string
   text: string
   active: boolean
+  executionId?: string
+  activityId?: string
+  agentId?: string
+}
+
+/** 事件归组键：run + execution + activity（Build 无 scope 时后两者为 root）。 */
+type EventIdentity = {
+  runId: string
+  executionId: string
+  activityId: string
+  agentId?: string
+  composeScope?: ComposeScopeMeta
 }
 
 export type RestoredThreadMessage = {
   kind: "user" | "assistant" | "tool"
   content: string
   toolName?: string
+}
+
+/** Thread reopen 恢复的有界 Compose activity；不含 Reasoning/原始 Tool 正文。 */
+export type RestoredComposeActivity = {
+  runId: string
+  eventSequence: number
+  activityId: string
+  stage: ComposeStageId
+  attempt: number
+  kind: "summary" | "tool_terminal" | "truncation"
+  label: string
+  status: string
+  createdAtMs: number
+  taskId?: string
+  taskTitle?: string
+  executionId?: string
+  agentId?: string
+  boundedText?: string
 }
 
 /**
@@ -245,6 +308,7 @@ export function restoreThread(
   threadId: string,
   messages: readonly RestoredThreadMessage[],
   workMode: WorkMode = "build",
+  composeActivities: readonly RestoredComposeActivity[] = [],
 ): InteractiveState {
   const restoredRunId = `restored-${threadId}`
   const timeline: TimelineItem[] = messages.map((message, index) => {
@@ -273,6 +337,57 @@ export function restoreThread(
       },
     }
   })
+  // Activity 审计只进入 Timeline，不进入模型 context；按原顺序追加在 transcript 之后。
+  for (const [index, activity] of composeActivities.entries()) {
+    const runId = activity.runId || restoredRunId
+    const scope: ComposeScopeMeta = {
+      activityId: activity.activityId,
+      stage: activity.stage,
+      attempt: activity.attempt,
+      ...(activity.taskId ? { taskId: activity.taskId } : {}),
+      ...(activity.taskTitle ? { taskTitle: activity.taskTitle } : {}),
+    }
+    if (activity.kind === "tool_terminal") {
+      timeline.push({
+        type: "tool",
+        tool: {
+          id: `restored-activity-tool-${index + 1}`,
+          runId,
+          name: activity.label || "tool",
+          arguments: "",
+          output: activity.boundedText || "",
+          status: activity.status === "failed" || activity.status === "error" ? "failed" : "completed",
+          ...(activity.executionId ? { executionId: activity.executionId } : {}),
+          activityId: activity.activityId,
+          ...(activity.agentId ? { agentId: activity.agentId } : {}),
+        },
+      })
+      continue
+    }
+    if (activity.kind === "summary" || activity.kind === "truncation") {
+      const status =
+        activity.status === "passed"
+        || activity.status === "failed"
+        || activity.status === "blocked"
+        || activity.status === "cancelled"
+        || activity.status === "truncated"
+          ? activity.status
+          : "failed"
+      timeline.push({
+        type: "compose-summary",
+        summary: {
+          id: `restored-activity-summary-${index + 1}`,
+          runId,
+          status,
+          text: activity.boundedText || activity.label || activity.kind,
+          ...(activity.executionId ? { executionId: activity.executionId } : {}),
+          activityId: activity.activityId,
+          ...(activity.agentId ? { agentId: activity.agentId } : {}),
+          composeScope: scope,
+        },
+      })
+    }
+  }
   return {
     currentThreadId: threadId,
     activeRun: null,
@@ -295,20 +410,22 @@ export function applyInteractionRequest(state: InteractiveState, envelope: Inter
 
   const req = (envelope as unknown as { request?: Record<string, unknown> }).request ?? (envelope as unknown as Record<string, unknown>)
   const kind = (req.type ?? req.kind) as string | undefined
+  const interactionIdentity = resolveInteractionIdentity(envelope)
 
   if (kind === "approval") {
     const payload = req.payload && typeof req.payload === "object" ? req.payload as Record<string, unknown> : {}
     const description = typeof payload.description === "string"
       ? payload.description
       : (req.prompt ?? req.reason ?? "") as string
-    const card: InteractionCard = {
+    const card: InteractionCard = withScopeFields({
       id: envelope.request_id,
       runId: envelope.run_id,
       type: "approval",
       status: "pending",
       description,
       requests: req,
-    }
+    }, interactionIdentity)
+    if (interactionIdentity.composeScope) card.composeScope = interactionIdentity.composeScope
     const timeline = existingIndex >= 0
       ? state.timeline.map((item, index) => index === existingIndex ? { type: "interaction" as const, interaction: card } : item)
       : [...state.timeline, { type: "interaction" as const, interaction: card }]
@@ -320,16 +437,21 @@ export function applyInteractionRequest(state: InteractiveState, envelope: Inter
   }
 
   if (kind === "question") {
-    const questions = req.questions as Array<{ header?: string; question?: string; options?: Array<{ label: string; value: string }> }> | undefined
+    const questions = (
+      (req.payload && typeof req.payload === "object"
+        ? (req.payload as Record<string, unknown>).questions
+        : req.questions) as Array<{ header?: string; question?: string; options?: Array<{ label: string; value: string }> }> | undefined
+    )
     const firstQuestion = questions?.[0]
-    const card: InteractionCard = {
+    const card: InteractionCard = withScopeFields({
       id: envelope.request_id,
       runId: envelope.run_id,
       type: "question",
       status: "pending",
       question: firstQuestion?.header || firstQuestion?.question || "",
       options: firstQuestion?.options?.map(opt => ({ name: opt.label, value: opt.value })),
-    }
+    }, interactionIdentity)
+    if (interactionIdentity.composeScope) card.composeScope = interactionIdentity.composeScope
     const timeline = existingIndex >= 0
       ? state.timeline.map((item, index) => index === existingIndex ? { type: "interaction" as const, interaction: card } : item)
       : [...state.timeline, { type: "interaction" as const, interaction: card }]
@@ -341,6 +463,39 @@ export function applyInteractionRequest(state: InteractiveState, envelope: Inter
   }
 
   return state
+}
+
+function resolveInteractionIdentity(envelope: InteractionRequestEnvelope): EventIdentity {
+  const raw = envelope as unknown as Record<string, unknown>
+  const rawScope = raw.compose_scope
+  if (rawScope && typeof rawScope === "object") {
+    const scope = rawScope as Record<string, unknown>
+    const activityId = typeof scope.activity_id === "string" ? scope.activity_id : ""
+    const stage = typeof scope.stage === "string" ? scope.stage : ""
+    const attempt = typeof scope.attempt === "number" ? scope.attempt : 0
+    if (activityId && COMPOSE_STAGES.has(stage) && Number.isInteger(attempt) && attempt >= 1) {
+      const composeScope: ComposeScopeMeta = {
+        activityId,
+        stage: stage as ComposeStageId,
+        attempt,
+      }
+      if (typeof scope.task_id === "string" && scope.task_id) composeScope.taskId = scope.task_id
+      if (typeof scope.task_title === "string" && scope.task_title) composeScope.taskTitle = scope.task_title
+      return {
+        runId: envelope.run_id,
+        executionId: typeof raw.execution_id === "string" && raw.execution_id ? raw.execution_id : "root",
+        activityId,
+        agentId: typeof raw.agent_id === "string" && raw.agent_id ? raw.agent_id : undefined,
+        composeScope,
+      }
+    }
+  }
+  return {
+    runId: envelope.run_id,
+    executionId: typeof raw.execution_id === "string" && raw.execution_id ? raw.execution_id : "root",
+    activityId: "root",
+    agentId: typeof raw.agent_id === "string" && raw.agent_id ? raw.agent_id : undefined,
+  }
 }
 
 /** 标识用户正在请求取消当前运行。 */
@@ -391,6 +546,9 @@ export function applyAgentEvent(state: InteractiveState, event: EventEnvelope, i
   const next = acceptSequence(state, event.thread_id, event.run_id, event.sequence)
   if (!next) return state
   const runId = event.run_id
+  // 非法 compose_scope：sequence 已前进，丢弃内容且不污染其他 activity。
+  const identity = resolveEventIdentity(event)
+  if (identity === null) return next
 
   switch (event.type) {
     case EventType.RUN_STARTED: {
@@ -427,7 +585,7 @@ export function applyAgentEvent(state: InteractiveState, event: EventEnvelope, i
     case EventType.CONTENT_DELTA: {
       const payload = event.payload
       return typeof payload.text === "string"
-        ? { ...next, timeline: freezeReasoning(appendAssistantDelta(next.timeline, runId, payload.text, idGenerator), runId), activity: { kind: "running" } }
+        ? { ...next, timeline: freezeReasoning(appendAssistantDelta(next.timeline, identity, payload.text, idGenerator), identity), activity: { kind: "running" } }
         : next
     }
     case EventType.REASONING_DELTA: {
@@ -437,7 +595,7 @@ export function applyAgentEvent(state: InteractiveState, event: EventEnvelope, i
       return {
         ...next,
         activity: { kind: "running" },
-        timeline: appendReasoningDelta(next.timeline, runId, text, idGenerator),
+        timeline: appendReasoningDelta(next.timeline, identity, text, idGenerator),
       }
     }
     case EventType.TOOL_STARTED: {
@@ -445,18 +603,18 @@ export function applyAgentEvent(state: InteractiveState, event: EventEnvelope, i
       return {
         ...next,
         activity: { kind: "running" },
-        timeline: freezeReasoning(updateTool(next.timeline, {
+        timeline: freezeReasoning(updateTool(next.timeline, withScopeFields({
           id: stringValue(payload.tool_call_id, `tool-${runId}`),
           runId,
           name: stringValue(payload.name, "tool"),
           arguments: "",
           output: "",
           status: "running",
-        }), runId),
+        }, identity)), identity),
       }
     }
     case EventType.TOOL_DELTA:
-      return applyToolDelta(next, runId, event.payload)
+      return applyToolDelta(next, identity, event.payload)
     case EventType.TOOL_COMPLETED:
       {
         const payload = event.payload
@@ -464,14 +622,14 @@ export function applyAgentEvent(state: InteractiveState, event: EventEnvelope, i
         const toolId = stringValue(payload.tool_call_id, `tool-${runId}`)
         return {
           ...next,
-          timeline: updateTool(next.timeline, {
+          timeline: updateTool(next.timeline, withScopeFields({
             id: toolId,
             runId,
-            name: toolName(next.timeline, runId, toolId),
-            arguments: toolArguments(next.timeline, runId, toolId),
+            name: toolName(next.timeline, identity, toolId),
+            arguments: toolArguments(next.timeline, identity, toolId),
             output: stringValue(result.content, ""),
             status: result.is_error === true ? "failed" : "completed",
-          }),
+          }, identity)),
         }
       }
     case EventType.CONTEXT_UPDATED: {
@@ -484,6 +642,32 @@ export function applyAgentEvent(state: InteractiveState, event: EventEnvelope, i
     }
     case EventType.COMPOSE_STATE: {
       return applyComposeState(next, event.payload)
+    }
+    case EventType.COMPOSE_SUMMARY: {
+      const payload = event.payload
+      const status = payload.status
+      const text = typeof payload.text === "string" ? payload.text : ""
+      if (
+        (status !== "passed" && status !== "failed" && status !== "blocked" && status !== "cancelled")
+        || !text
+      ) {
+        return next
+      }
+      const summary = withScopeFields({
+        id: `compose-summary-${runId}-${event.sequence}`,
+        runId,
+        status,
+        text: text.slice(0, 1000),
+      }, identity) as ComposeSummaryCard
+      if (identity.composeScope) summary.composeScope = identity.composeScope
+      return {
+        ...next,
+        activity: { kind: "running" },
+        timeline: freezeReasoning([
+          ...next.timeline,
+          { type: "compose-summary", summary },
+        ], identity),
+      }
     }
     case EventType.INTERACTION_RESOLVED: {
       const payload = event.payload
@@ -579,10 +763,29 @@ function acceptSequence(state: InteractiveState, threadId: string, runId: string
   return nextState
 }
 
-function appendAssistantDelta(timeline: TimelineItem[], runId: string, text: string, idGenerator: IdGenerator = defaultIdGenerator): TimelineItem[] {
-  const index = timeline.findLastIndex(item => item.type === "message" && item.message.role === "assistant" && item.message.runId === runId)
+function appendAssistantDelta(
+  timeline: TimelineItem[],
+  identity: EventIdentity,
+  text: string,
+  idGenerator: IdGenerator = defaultIdGenerator,
+): TimelineItem[] {
+  const index = timeline.findLastIndex(item =>
+    item.type === "message"
+    && item.message.role === "assistant"
+    && item.message.runId === identity.runId
+    && scopeEquals(item.message, identity)
+  )
   if (index < 0) {
-    return [...timeline, { type: "message", message: { id: `assistant-${runId}-${idGenerator.uuid()}`, role: "assistant", content: text, runId, streaming: true } }]
+    return [...timeline, {
+      type: "message",
+      message: withScopeFields({
+        id: `assistant-${identity.runId}-${idGenerator.uuid()}`,
+        role: "assistant",
+        content: text,
+        runId: identity.runId,
+        streaming: true,
+      }, identity),
+    }]
   }
   const item = timeline[index]
   if (item?.type === "message" && index === timeline.length - 1) {
@@ -592,7 +795,16 @@ function appendAssistantDelta(timeline: TimelineItem[], runId: string, text: str
         : entry
     ))
   }
-  return [...timeline, { type: "message", message: { id: `assistant-${runId}-${idGenerator.uuid()}`, role: "assistant", content: text, runId, streaming: true } }]
+  return [...timeline, {
+    type: "message",
+    message: withScopeFields({
+      id: `assistant-${identity.runId}-${idGenerator.uuid()}`,
+      role: "assistant",
+      content: text,
+      runId: identity.runId,
+      streaming: true,
+    }, identity),
+  }]
 }
 
 function finishAssistant(timeline: TimelineItem[], runId: string, suffix = "", idGenerator: IdGenerator = defaultIdGenerator): TimelineItem[] {
@@ -623,40 +835,56 @@ function finishAssistant(timeline: TimelineItem[], runId: string, suffix = "", i
 }
 
 function updateTool(timeline: TimelineItem[], tool: ToolCard): TimelineItem[] {
-  const index = findToolIndex(timeline, tool.runId, tool.id)
+  const identity: EventIdentity = {
+    runId: tool.runId,
+    executionId: tool.executionId ?? "root",
+    activityId: tool.activityId ?? "root",
+    agentId: tool.agentId,
+  }
+  const index = findToolIndex(timeline, identity, tool.id)
   if (index < 0) return [...timeline, { type: "tool", tool }]
   return timeline.map((item, itemIndex) => (
     itemIndex === index && item.type === "tool" ? { ...item, tool: { ...item.tool, ...tool } } : item
   ))
 }
 
-function applyToolDelta(state: InteractiveState, runId: string, payload: Record<string, unknown>): InteractiveState {
-  const toolId = stringValue(payload.tool_call_id, `tool-${runId}`)
+function applyToolDelta(
+  state: InteractiveState,
+  identity: EventIdentity,
+  payload: Record<string, unknown>,
+): InteractiveState {
+  const toolId = stringValue(payload.tool_call_id, `tool-${identity.runId}`)
   let timeline = state.timeline
   if (typeof payload.arguments_delta === "string") {
-    timeline = updateToolStream(timeline, runId, toolId, "arguments", payload.arguments_delta)
+    timeline = updateToolStream(timeline, identity, toolId, "arguments", payload.arguments_delta)
   }
   if (typeof payload.output_delta === "string") {
-    timeline = updateToolStream(timeline, runId, toolId, "output", payload.output_delta)
+    timeline = updateToolStream(timeline, identity, toolId, "output", payload.output_delta)
   }
   return { ...state, timeline }
 }
 
-function updateToolStream(timeline: TimelineItem[], runId: string, toolId: string, field: "arguments" | "output", delta: string): TimelineItem[] {
-  const index = findToolIndex(timeline, runId, toolId)
+function updateToolStream(
+  timeline: TimelineItem[],
+  identity: EventIdentity,
+  toolId: string,
+  field: "arguments" | "output",
+  delta: string,
+): TimelineItem[] {
+  const index = findToolIndex(timeline, identity, toolId)
   if (index < 0) {
     return [
       ...timeline,
       {
         type: "tool",
-        tool: {
+        tool: withScopeFields({
           id: toolId,
-          runId,
+          runId: identity.runId,
           name: "tool",
           arguments: field === "arguments" ? delta : "",
           output: field === "output" ? delta : "",
           status: "running",
-        },
+        }, identity),
       },
     ]
   }
@@ -667,17 +895,32 @@ function updateToolStream(timeline: TimelineItem[], runId: string, toolId: strin
   ))
 }
 
-function findToolIndex(timeline: TimelineItem[], runId: string, toolId: string): number {
-  return timeline.findLastIndex(item => item.type === "tool" && item.tool.runId === runId && item.tool.id === toolId)
+function findToolIndex(timeline: TimelineItem[], identity: EventIdentity, toolId: string): number {
+  return timeline.findLastIndex(item =>
+    item.type === "tool"
+    && item.tool.runId === identity.runId
+    && item.tool.id === toolId
+    && scopeEquals(item.tool, identity)
+  )
 }
 
-function toolName(timeline: TimelineItem[], runId: string, toolId: string): string {
-  const item = timeline.find(entry => entry.type === "tool" && entry.tool.runId === runId && entry.tool.id === toolId)
+function toolName(timeline: TimelineItem[], identity: EventIdentity, toolId: string): string {
+  const item = timeline.find(entry =>
+    entry.type === "tool"
+    && entry.tool.runId === identity.runId
+    && entry.tool.id === toolId
+    && scopeEquals(entry.tool, identity)
+  )
   return item?.type === "tool" ? item.tool.name : "tool"
 }
 
-function toolArguments(timeline: TimelineItem[], runId: string, toolId: string): string {
-  const item = timeline.find(entry => entry.type === "tool" && entry.tool.runId === runId && entry.tool.id === toolId)
+function toolArguments(timeline: TimelineItem[], identity: EventIdentity, toolId: string): string {
+  const item = timeline.find(entry =>
+    entry.type === "tool"
+    && entry.tool.runId === identity.runId
+    && entry.tool.id === toolId
+    && scopeEquals(entry.tool, identity)
+  )
   return item?.type === "tool" ? item.tool.arguments : ""
 }
 
@@ -697,10 +940,28 @@ function payloadText(value: unknown): string {
   return typeof value === "string" ? value : ""
 }
 
-function appendReasoningDelta(timeline: TimelineItem[], runId: string, text: string, idGenerator: IdGenerator = defaultIdGenerator): TimelineItem[] {
-  const index = timeline.findLastIndex(item => item.type === "reasoning" && item.reasoning.runId === runId && item.reasoning.active)
+function appendReasoningDelta(
+  timeline: TimelineItem[],
+  identity: EventIdentity,
+  text: string,
+  idGenerator: IdGenerator = defaultIdGenerator,
+): TimelineItem[] {
+  const index = timeline.findLastIndex(item =>
+    item.type === "reasoning"
+    && item.reasoning.runId === identity.runId
+    && item.reasoning.active
+    && scopeEquals(item.reasoning, identity)
+  )
   if (index < 0) {
-    return [...timeline, { type: "reasoning", reasoning: { id: `reasoning-${runId}-${idGenerator.uuid()}`, runId, text, active: true } }]
+    return [...timeline, {
+      type: "reasoning",
+      reasoning: withScopeFields({
+        id: `reasoning-${identity.runId}-${idGenerator.uuid()}`,
+        runId: identity.runId,
+        text,
+        active: true,
+      }, identity),
+    }]
   }
   return timeline.map((entry, itemIndex) => (
     itemIndex === index && entry.type === "reasoning"
@@ -709,14 +970,87 @@ function appendReasoningDelta(timeline: TimelineItem[], runId: string, text: str
   ))
 }
 
-function freezeReasoning(timeline: TimelineItem[], runId: string): TimelineItem[] {
-  const index = timeline.findLastIndex(item => item.type === "reasoning" && item.reasoning.runId === runId && item.reasoning.active)
+function freezeReasoning(timeline: TimelineItem[], identityOrRunId: EventIdentity | string): TimelineItem[] {
+  if (typeof identityOrRunId === "string") {
+    const runId = identityOrRunId
+    const index = timeline.findLastIndex(item => item.type === "reasoning" && item.reasoning.runId === runId && item.reasoning.active)
+    if (index < 0) return timeline
+    return timeline.map((entry, itemIndex) => (
+      itemIndex === index && entry.type === "reasoning"
+        ? { ...entry, reasoning: { ...entry.reasoning, active: false } }
+        : entry
+    ))
+  }
+  const identity = identityOrRunId
+  const index = timeline.findLastIndex(item =>
+    item.type === "reasoning"
+    && item.reasoning.runId === identity.runId
+    && item.reasoning.active
+    && scopeEquals(item.reasoning, identity)
+  )
   if (index < 0) return timeline
   return timeline.map((entry, itemIndex) => (
     itemIndex === index && entry.type === "reasoning"
       ? { ...entry, reasoning: { ...entry.reasoning, active: false } }
       : entry
   ))
+}
+
+const COMPOSE_STAGES = new Set(["understand", "plan", "build", "verify", "review"])
+
+/**
+ * 解析事件归属；compose_scope 非法时返回 null（调用方丢弃内容、保留 sequence）。
+ * Build 无 scope 时 execution/activity 归一为 root。
+ */
+function resolveEventIdentity(event: EventEnvelope): EventIdentity | null {
+  const rawScope = (event as { compose_scope?: unknown }).compose_scope
+  if (rawScope !== undefined && rawScope !== null) {
+    if (!rawScope || typeof rawScope !== "object") return null
+    const scope = rawScope as Record<string, unknown>
+    const activityId = typeof scope.activity_id === "string" ? scope.activity_id : ""
+    const stage = typeof scope.stage === "string" ? scope.stage : ""
+    const attempt = typeof scope.attempt === "number" ? scope.attempt : 0
+    if (!activityId || !COMPOSE_STAGES.has(stage) || !Number.isInteger(attempt) || attempt < 1) {
+      return null
+    }
+    const composeScope: ComposeScopeMeta = {
+      activityId,
+      stage: stage as ComposeStageId,
+      attempt,
+    }
+    if (typeof scope.task_id === "string" && scope.task_id) composeScope.taskId = scope.task_id
+    if (typeof scope.task_title === "string" && scope.task_title) composeScope.taskTitle = scope.task_title
+    return {
+      runId: event.run_id,
+      executionId: typeof event.execution_id === "string" && event.execution_id ? event.execution_id : "root",
+      activityId,
+      agentId: typeof event.agent_id === "string" && event.agent_id ? event.agent_id : undefined,
+      composeScope,
+    }
+  }
+  return {
+    runId: event.run_id,
+    executionId: typeof event.execution_id === "string" && event.execution_id ? event.execution_id : "root",
+    activityId: "root",
+    agentId: typeof event.agent_id === "string" && event.agent_id ? event.agent_id : undefined,
+  }
+}
+
+function scopeEquals(
+  card: { executionId?: string; activityId?: string },
+  identity: EventIdentity,
+): boolean {
+  return (card.executionId ?? "root") === identity.executionId
+    && (card.activityId ?? "root") === identity.activityId
+}
+
+/** 仅在非 root 归属时写入字段，保持 Build 无 scope 快照形状不变。 */
+function withScopeFields<T extends object>(base: T, identity: EventIdentity): T {
+  const extra: Record<string, string> = {}
+  if (identity.executionId !== "root") extra.executionId = identity.executionId
+  if (identity.activityId !== "root") extra.activityId = identity.activityId
+  if (identity.agentId) extra.agentId = identity.agentId
+  return Object.keys(extra).length ? { ...base, ...extra } : base
 }
 
 function numberValue(value: unknown): number | undefined {

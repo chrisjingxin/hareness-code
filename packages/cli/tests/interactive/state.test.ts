@@ -26,6 +26,56 @@ test("恢复 thread 会原子替换时间线并清空旧运行状态", () => {
   expect(restored.timeline.map(item => item.type)).toEqual(["message", "message", "tool"])
 })
 
+test("恢复 compose activities 进入 Timeline 且不含 Reasoning 原始字段", () => {
+  const restored = restoreThread(
+    "thread-compose",
+    [{ kind: "user", content: "实现搜索" }],
+    "compose",
+    [
+      {
+        runId: "run-9",
+        eventSequence: 3,
+        activityId: "act-u1",
+        stage: "understand",
+        attempt: 1,
+        kind: "summary",
+        label: "understand",
+        status: "passed",
+        createdAtMs: 10,
+        boundedText: "目标：实现搜索",
+        agentId: "understand",
+        executionId: "child-1",
+      },
+      {
+        runId: "run-9",
+        eventSequence: 4,
+        activityId: "act-v1",
+        stage: "verify",
+        attempt: 1,
+        kind: "tool_terminal",
+        label: "execute",
+        status: "completed",
+        createdAtMs: 11,
+        boundedText: "3 passed",
+      },
+    ],
+  )
+  expect(restored.workMode).toBe("compose")
+  expect(restored.timeline.map(item => item.type)).toEqual(["message", "compose-summary", "tool"])
+  const summary = restored.timeline[1]
+  if (summary?.type === "compose-summary") {
+    expect(summary.summary.text).toBe("目标：实现搜索")
+    expect(summary.summary.activityId).toBe("act-u1")
+    expect(summary.summary.composeScope?.stage).toBe("understand")
+  }
+  const tool = restored.timeline[2]
+  if (tool?.type === "tool") {
+    expect(tool.tool.name).toBe("execute")
+    expect(tool.tool.output).toBe("3 passed")
+    expect(tool.tool.activityId).toBe("act-v1")
+  }
+})
+
 test("v3 事件按 sequence 更新消息、工具和终态", () => {
   let state = startRun(createInitialState(), run, "生成组件")
   state = applyAgentEvent(state, event("content.delta", 1, { text: "正在" }))
@@ -162,8 +212,174 @@ test("不同 run 中重复的 tool call ID 不会覆盖历史调用", () => {
   expect(tools(state).map(tool => tool.output)).toEqual(["first", "second"])
 })
 
+test("同 tool call ID 跨 execution/activity 不会互相覆盖", () => {
+  let state = startRun(createInitialState(), run, "compose 多 stage")
+  const scopeA = { activity_id: "act-a", stage: "understand", attempt: 1 }
+  const scopeB = { activity_id: "act-b", stage: "plan", attempt: 1 }
+  state = applyAgentEvent(state, scopedEvent("tool.started", 1, { tool_call_id: "call-1", name: "read_file" }, {
+    execution_id: "child-a",
+    agent_id: "understand",
+    compose_scope: scopeA,
+  }))
+  state = applyAgentEvent(state, scopedEvent("tool.completed", 2, {
+    tool_call_id: "call-1",
+    result: { content: "from-a", is_error: false },
+  }, {
+    execution_id: "child-a",
+    agent_id: "understand",
+    compose_scope: scopeA,
+  }))
+  state = applyAgentEvent(state, scopedEvent("tool.started", 3, { tool_call_id: "call-1", name: "read_file" }, {
+    execution_id: "child-b",
+    agent_id: "plan",
+    compose_scope: scopeB,
+  }))
+  state = applyAgentEvent(state, scopedEvent("tool.completed", 4, {
+    tool_call_id: "call-1",
+    result: { content: "from-b", is_error: false },
+  }, {
+    execution_id: "child-b",
+    agent_id: "plan",
+    compose_scope: scopeB,
+  }))
+  expect(tools(state)).toHaveLength(2)
+  expect(tools(state).map(tool => tool.output)).toEqual(["from-a", "from-b"])
+  expect(tools(state)[0]).toMatchObject({
+    id: "call-1",
+    executionId: "child-a",
+    activityId: "act-a",
+    agentId: "understand",
+  })
+  expect(tools(state)[1]).toMatchObject({
+    id: "call-1",
+    executionId: "child-b",
+    activityId: "act-b",
+    agentId: "plan",
+  })
+})
+
+test("非法 compose_scope 丢弃内容且不污染其他 activity", () => {
+  let state = startRun(createInitialState(), run, "compose")
+  const good = { activity_id: "act-good", stage: "understand", attempt: 1 }
+  state = applyAgentEvent(state, scopedEvent("tool.started", 1, { tool_call_id: "call-1", name: "read_file" }, {
+    execution_id: "child-good",
+    compose_scope: good,
+  }))
+  // 非法 stage：sequence 前进但 tool 不写入
+  state = applyAgentEvent(state, scopedEvent("tool.started", 2, { tool_call_id: "call-1", name: "execute" }, {
+    execution_id: "child-bad",
+    compose_scope: { activity_id: "act-bad", stage: "deploy", attempt: 1 },
+  }))
+  expect(tools(state)).toHaveLength(1)
+  expect(tools(state)[0]).toMatchObject({ name: "read_file", activityId: "act-good" })
+  // 后续合法帧仍可应用
+  state = applyAgentEvent(state, scopedEvent("tool.completed", 3, {
+    tool_call_id: "call-1",
+    result: { content: "ok", is_error: false },
+  }, {
+    execution_id: "child-good",
+    compose_scope: good,
+  }))
+  expect(tools(state)[0]?.status).toBe("completed")
+})
+
+test("compose.summary 进入非 assistant Timeline 摘要", () => {
+  let state = startRun(createInitialState(), run, "compose")
+  const scope = { activity_id: "act-u1", stage: "understand", attempt: 1 }
+  state = applyAgentEvent(state, scopedEvent("compose.summary", 1, {
+    status: "passed",
+    text: "目标：实现搜索",
+  }, {
+    execution_id: "child-u",
+    agent_id: "understand",
+    compose_scope: scope,
+  }))
+  const summaries = state.timeline.filter(item => item.type === "compose-summary")
+  expect(summaries).toHaveLength(1)
+  if (summaries[0]?.type === "compose-summary") {
+    expect(summaries[0].summary).toMatchObject({
+      status: "passed",
+      text: "目标：实现搜索",
+      executionId: "child-u",
+      activityId: "act-u1",
+      agentId: "understand",
+      composeScope: {
+        activityId: "act-u1",
+        stage: "understand",
+        attempt: 1,
+      },
+    })
+  }
+})
+
+test("scoped Interaction 保留 child provenance 与 activity", () => {
+  let state = startRun(createInitialState(), run, "compose")
+  state = applyInteractionRequest(state, {
+    request_id: "int-1",
+    type: "approval",
+    thread_id: run.threadId,
+    run_id: run.runId,
+    timeout_ms: 1000,
+    execution_id: "child-builder",
+    agent_id: "build",
+    compose_scope: { activity_id: "act-b1", stage: "build", attempt: 2, task_id: "t1" },
+    payload: {
+      interrupt_id: "int-1",
+      description: "run tests",
+      requests: { action_requests: [] },
+      decisions: ["approve_once", "reject"],
+    },
+  } as InteractionRequestEnvelope)
+  expect(interactions(state)[0]).toMatchObject({
+    id: "int-1",
+    type: "approval",
+    status: "pending",
+    executionId: "child-builder",
+    activityId: "act-b1",
+    agentId: "build",
+    composeScope: { activityId: "act-b1", stage: "build", attempt: 2, taskId: "t1" },
+  })
+  state = applyAgentEvent(state, event("interaction.resolved", 1, { request_id: "int-1", type: "approval" }))
+  expect(interactions(state)[0]?.status).toBe("resolved")
+})
+
+test("Build 无 scope 快照形状保持兼容", () => {
+  let state = startRun(createInitialState(), run, "检查目录")
+  state = applyAgentEvent(state, event("tool.started", 1, { tool_call_id: "call-1", name: "execute" }))
+  state = applyAgentEvent(state, event("tool.completed", 2, {
+    tool_call_id: "call-1",
+    result: { content: "ok", is_error: false },
+  }))
+  expect(tools(state)[0]).toEqual({
+    id: "call-1",
+    runId: "run-1",
+    name: "execute",
+    arguments: "",
+    output: "ok",
+    status: "completed",
+  })
+})
+
 function event(type: string, sequence: number, payload: Record<string, unknown>): EventEnvelope {
-  return { event_id: `event-${sequence}`, type, thread_id: run.threadId, run_id: run.runId, sequence, timestamp_ms: 1, payload }
+  return { event_id: `event-${sequence}`, type, thread_id: run.threadId, run_id: run.runId, sequence, timestamp_ms: 1, payload } as EventEnvelope
+}
+
+function scopedEvent(
+  type: string,
+  sequence: number,
+  payload: Record<string, unknown>,
+  meta: {
+    execution_id?: string
+    agent_id?: string
+    compose_scope?: Record<string, unknown>
+  },
+): EventEnvelope {
+  return {
+    ...event(type, sequence, payload),
+    ...(meta.execution_id ? { execution_id: meta.execution_id } : {}),
+    ...(meta.agent_id ? { agent_id: meta.agent_id } : {}),
+    ...(meta.compose_scope ? { compose_scope: meta.compose_scope } : {}),
+  } as EventEnvelope
 }
 
 function request(type: "approval" | "question", sequence: number, payload: Record<string, unknown>): InteractionRequestEnvelope {

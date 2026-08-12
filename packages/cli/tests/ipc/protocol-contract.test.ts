@@ -69,6 +69,69 @@ test("run.started 回传实际工作模式", () => {
   expect(() => assertEventEnvelope(envelope({ resumed: false, mode: "compose" }))).not.toThrow()
 })
 
+test("compose_scope 与 compose.summary 合法；非法 scope 与越界摘要被拒绝", () => {
+  const scope = {
+    activity_id: "act-understand-1",
+    stage: "understand",
+    attempt: 1,
+    task_id: "task-1",
+    task_title: "梳理需求",
+  }
+  const progress = (compose_scope?: Record<string, unknown>) => ({
+    event_id: "e-scope",
+    type: "run.progress",
+    thread_id: "t",
+    run_id: "r",
+    sequence: 1,
+    timestamp_ms: 1,
+    payload: { phase: "model", elapsed_ms: 10 },
+    ...(compose_scope ? { compose_scope } : {}),
+  })
+  expect(() => assertEventEnvelope(progress(scope))).not.toThrow()
+  expect(() => assertEventEnvelope(progress())).not.toThrow()
+  expect(() => assertEventEnvelope(progress({ activity_id: "", stage: "understand", attempt: 1 }))).toThrow()
+  expect(() => assertEventEnvelope(progress({ activity_id: "a1", stage: "deploy", attempt: 1 }))).toThrow()
+  expect(() => assertEventEnvelope(progress({ activity_id: "a1", stage: "plan", attempt: 0 }))).toThrow()
+  expect(() => assertEventEnvelope({
+    event_id: "e-sum",
+    type: "compose.summary",
+    thread_id: "t",
+    run_id: "r",
+    sequence: 1,
+    timestamp_ms: 1,
+    compose_scope: scope,
+    payload: { status: "passed", text: "阶段完成" },
+  })).not.toThrow()
+  expect(() => assertEventEnvelope({
+    event_id: "e-sum-long",
+    type: "compose.summary",
+    thread_id: "t",
+    run_id: "r",
+    sequence: 1,
+    timestamp_ms: 1,
+    compose_scope: scope,
+    payload: { status: "passed", text: "x".repeat(1001) },
+  })).toThrow()
+})
+
+test("scoped Interaction 可携带 execution provenance 与 compose_scope", () => {
+  expect(() => validateInteractionParams("interaction.approval", {
+    thread_id: "t",
+    run_id: "r",
+    timeout_ms: 30_000,
+    execution_id: "child-1",
+    parent_execution_id: "root-1",
+    agent_id: "builder",
+    compose_scope: { activity_id: "act-1", stage: "build", attempt: 2, task_id: "t1" },
+    payload: {
+      interrupt_id: "int-1",
+      description: "run tests",
+      requests: { action_requests: [] },
+      decisions: ["approve_once", "reject"],
+    },
+  })).not.toThrow()
+})
+
 test("compose.state projection 严格有界且 revision 单调", () => {
   const payload = {
     revision: 3,

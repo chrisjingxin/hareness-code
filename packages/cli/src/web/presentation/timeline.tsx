@@ -9,6 +9,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type KeyboardEvent,
   type ReactElement,
   type ReactNode,
 } from "react"
@@ -16,6 +17,15 @@ import { activityLabel, interactionStatusLabel, toolStatusLabel } from "../../pr
 import { progressPhaseLabel } from "../../presentation-shared/timeline-presenter"
 import { formatElapsed } from "../../presentation-shared/formatters"
 import { toolArgumentSummary } from "../../presentation-shared/tool-output-policy"
+import {
+  COMPOSE_STAGE_LABELS,
+  activityGroupSubtitle,
+  activityGroupTitle,
+  composeLiveStatusLine,
+  isGroupExpandedByDefault,
+  segmentTimeline,
+  type TimelineActivityGroup,
+} from "../../presentation-shared/timeline-activity-groups"
 
 import type {
   ComposeProjection,
@@ -111,6 +121,46 @@ export function Timeline({
     }
     return true
   })
+  const segments = segmentTimeline(visibleItems)
+  const [expandedActivities, setExpandedActivities] = useState<ReadonlySet<string>>(() => new Set())
+  const [collapsedActivities, setCollapsedActivities] = useState<ReadonlySet<string>>(() => new Set())
+
+  const isExpanded = useCallback((group: TimelineActivityGroup): boolean => {
+    if (expandedActivities.has(group.key)) return true
+    if (collapsedActivities.has(group.key)) return false
+    return isGroupExpandedByDefault(group)
+  }, [collapsedActivities, expandedActivities])
+
+  const toggleGroup = useCallback((group: TimelineActivityGroup) => {
+    const open = isExpanded(group)
+    if (open) {
+      setExpandedActivities(current => {
+        const next = new Set(current)
+        next.delete(group.key)
+        return next
+      })
+      setCollapsedActivities(current => new Set(current).add(group.key))
+    } else {
+      setCollapsedActivities(current => {
+        const next = new Set(current)
+        next.delete(group.key)
+        return next
+      })
+      setExpandedActivities(current => new Set(current).add(group.key))
+    }
+  }, [isExpanded])
+
+  const compose = snapshot.interactive.composeState
+  const currentTask = compose?.tasks.find(task => task.status === "running")
+  const phaseLabel = progressPhaseLabel(snapshot.interactive.runProgress?.phase ?? "preparing")
+  const liveLine = compose
+    ? `${composeLiveStatusLine({
+      stage: compose.stage,
+      taskTitle: currentTask?.title,
+      phaseLabel,
+      elapsedLabel: formatElapsed(elapsedMs),
+    })} · Esc 取消`
+    : `${phaseLabel} · 已运行 ${formatElapsed(elapsedMs)} · Esc 取消`
 
   return (
     <div
@@ -124,22 +174,38 @@ export function Timeline({
       {snapshot.interactive.currentThreadId !== null && visibleItems.length > 0 ? (
         <div className="timeline-header">THREAD · {timeline.length} 项记录</div>
       ) : null}
-      {renderComposeProgress(snapshot.interactive)}
       {visibleItems.length === 0 ? (
         <div className="timeline-empty" role="status">
           发送第一条消息后，这里会显示 Agent 的回答、工具调用与审批记录。
         </div>
       ) : (
-        visibleItems.map(item => (
-          <TimelineRow
-            key={timelineItemKey(item)}
-            item={item}
-            expandedTools={snapshot.expandedTools}
-            onToggleTool={handleToggleTool}
-          />
-        ))
+        segments.map(segment => {
+          if (segment.kind === "flat") {
+            return (
+              <TimelineRow
+                key={timelineItemKey(segment.item)}
+                item={segment.item}
+                expandedTools={snapshot.expandedTools}
+                onToggleTool={handleToggleTool}
+              />
+            )
+          }
+          const group = segment.group
+          const open = isExpanded(group)
+          return (
+            <ActivityGroup
+              key={group.key}
+              group={group}
+              expanded={open}
+              onToggle={() => toggleGroup(group)}
+              expandedTools={snapshot.expandedTools}
+              onToggleTool={handleToggleTool}
+            />
+          )
+        })
       )}
       <div className="live-interaction-slot" data-pending-request-id={pendingRequestId ?? undefined} />
+      {/* 当前阶段状态放在时间线活动区附近，避免长历史把进度顶出视口。 */}
       <div className="run-status-live" aria-live="polite">
         {activeRun ? (
           <div
@@ -149,15 +215,11 @@ export function Timeline({
             data-phase={snapshot.interactive.runProgress?.phase ?? "preparing"}
           >
             <Loader2 aria-hidden="true" focusable="false" className="run-progress-spinner spinning" />
-            <span>
-              {progressPhaseLabel(snapshot.interactive.runProgress?.phase ?? "preparing")}
-              {" · 已运行 "}
-              {formatElapsed(elapsedMs)}
-              {" · Esc 取消"}
-            </span>
+            <span>{liveLine}</span>
           </div>
         ) : activityLabel(snapshot.interactive.activity.kind)}
       </div>
+      {renderComposeProgress(snapshot.interactive)}
       {showScrollButton ? (
         <button
           type="button"
@@ -169,6 +231,57 @@ export function Timeline({
         </button>
       ) : null}
     </div>
+  )
+}
+
+/** Compose activity 分组：终态默认折叠，Enter/Space 切换，ARIA 暴露展开状态。 */
+function ActivityGroup({
+  group,
+  expanded,
+  onToggle,
+  expandedTools,
+  onToggleTool,
+}: {
+  group: TimelineActivityGroup
+  expanded: boolean
+  onToggle: () => void
+  expandedTools: ReadonlySet<string>
+  onToggleTool: (runId: string, toolId: string) => void
+}): ReactElement {
+  const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault()
+      onToggle()
+    }
+  }
+  return (
+    <section className="timeline-activity-group" data-terminal={group.terminal ? "true" : "false"}>
+      <button
+        type="button"
+        className="timeline-activity-header"
+        aria-expanded={expanded}
+        onClick={onToggle}
+        onKeyDown={onKeyDown}
+      >
+        <span className="timeline-activity-chevron" aria-hidden="true">{expanded ? "▼" : "▶"}</span>
+        <span className="timeline-activity-title">{activityGroupTitle(group)}</span>
+        <span className="timeline-activity-subtitle">{activityGroupSubtitle(group)}</span>
+      </button>
+      {expanded ? (
+        <div className="timeline-activity-body">
+          {group.items.map(item => (
+            <TimelineRow
+              key={timelineItemKey(item)}
+              item={item}
+              expandedTools={expandedTools}
+              onToggleTool={onToggleTool}
+            />
+          ))}
+        </div>
+      ) : group.summary ? (
+        <div className="timeline-activity-collapsed-summary">{group.summary.text}</div>
+      ) : null}
+    </section>
   )
 }
 
@@ -192,17 +305,19 @@ function firstLine(text: string): string {
   return line
 }
 
-/** 生成稳定的 React key：每种 timeline item 用其身份字段，跨 run 也不冲突。 */
+/** 生成稳定的 React key：每种 timeline item 用其身份字段，跨 run/activity 也不冲突。 */
 function timelineItemKey(item: TimelineItem): string {
   switch (item.type) {
     case "message":
       return `message:${item.message.id}`
     case "tool":
-      return `tool:${item.tool.runId}:${item.tool.id}`
+      return `tool:${item.tool.runId}:${item.tool.executionId ?? "root"}:${item.tool.activityId ?? "root"}:${item.tool.id}`
     case "reasoning":
       return `reasoning:${item.reasoning.id}`
     case "interaction":
       return `interaction:${item.interaction.runId}:${item.interaction.id}`
+    case "compose-summary":
+      return `compose-summary:${item.summary.id}`
   }
 }
 
@@ -245,6 +360,16 @@ function TimelineRowImpl({
   }
   if (item.type === "reasoning") {
     return <ReasoningRow reasoning={item.reasoning} />
+  }
+  if (item.type === "compose-summary") {
+    const stageKey = item.summary.composeScope?.stage
+    const stage = stageKey ? (COMPOSE_STAGE_LABELS[stageKey] ?? stageKey) : "compose"
+    return (
+      <div className="timeline-compose-summary" role="status">
+        <div className="compose-summary-header">{`阶段摘要 · ${stage} · ${item.summary.status}`}</div>
+        <div className="compose-summary-text">{item.summary.text}</div>
+      </div>
+    )
   }
   return (
     <div className="timeline-interaction">
@@ -495,13 +620,6 @@ function renderComposeProgress(interactive: InteractiveSnapshot): React.ReactNod
 
 /** Compose 五阶段/当前任务/evidence/blocked 的只读进度条。 */
 function ComposeProgress({ state }: { state: ComposeProjection }) {
-  const stageLabels: Record<string, string> = {
-    understand: "理解",
-    plan: "计划",
-    build: "构建",
-    verify: "验证",
-    review: "评审",
-  }
   const currentTask = state.tasks.find(task => task.status === "running" || task.status === "pending")
   const failedEvidence = state.evidence.find(item => item.status === "failed")
   return (
@@ -509,7 +627,7 @@ function ComposeProgress({ state }: { state: ComposeProjection }) {
       <div className="compose-stages">
         {state.stages.map(stage => (
           <span key={stage.id} className={`compose-stage compose-stage-${stage.status}`}>
-            {stageLabels[stage.id] ?? stage.id}
+            {COMPOSE_STAGE_LABELS[stage.id] ?? stage.id}
             {stage.status === "running" ? "…" : stage.status === "passed" ? "✓" : ""}
           </span>
         ))}
