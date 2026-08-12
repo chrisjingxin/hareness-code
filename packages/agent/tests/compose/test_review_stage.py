@@ -92,7 +92,7 @@ class _FakeStageAgent:
         self.calls: list[str] = []
         self.tasks: list[str] = []
 
-    async def run(self, request: StageRequest) -> StageResult:
+    async def run(self, request: StageRequest, observer=None) -> StageResult:
         self.calls.append(request.stage)
         self.tasks.append(request.task)
         item = self.script.pop(0)

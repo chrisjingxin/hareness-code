@@ -28,6 +28,7 @@ from harness_agent.host.run_execution import (
     RunLifecyclePort,
     _bounded_json,
 )
+from harness_agent.runtime.interactions import InteractionRequest, InteractionResult
 from harness_agent.policy.approval_mode import ApprovalMode
 from harness_agent.policy.bash_parser import extract_command_rule as _extract_command_rule
 
@@ -212,6 +213,7 @@ class AgentEvent:
     execution_id: str
     agent_id: str
     parent_execution_id: str | None = None
+    compose_scope: Mapping[str, object] | None = None
 
     def record(self) -> dict[str, object]:
         """转换成现有 v3 event notification 使用的字段。"""
@@ -228,30 +230,9 @@ class AgentEvent:
         }
         if self.parent_execution_id is not None:
             record["parent_execution_id"] = self.parent_execution_id
+        if self.compose_scope is not None:
+            record["compose_scope"] = dict(self.compose_scope)
         return record
-
-
-@dataclass(frozen=True, slots=True)
-class InteractionRequest:
-    """Agent 请求 owner 审批或回答问题。"""
-
-    request_id: str
-    type: str
-    payload: Mapping[str, object]
-    interrupt_id: str
-    questions: tuple[Mapping[str, object], ...] = ()
-    action_count: int = 1
-    # 服务端串行审批元数据（完整动作列表与安全/危险索引），仅存内存、
-    # 不进入 wire payload：协议 schema 对 payload 附加字段零容忍。
-    serial_context: Mapping[str, object] | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class InteractionResult:
-    """InteractionPort 返回的语言无关结果。"""
-
-    value: object
-    expired: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -344,6 +325,8 @@ class RunState:
     pending_approvals: list[dict[str, object]] = field(default_factory=list)
     # 标记是否因用户拒绝而终止同批后续工具
     batch_rejected: bool = False
+    # Build 共享 execution stream 的关联状态；跨 Interaction resume 复用。
+    stream_session: Any | None = None
 
     def __post_init__(self) -> None:
         """默认使用受理请求中的原始消息。"""
@@ -406,14 +389,36 @@ class _CoordinatorLifecyclePort:
     def __init__(self, coordinator: RunCoordinator) -> None:
         self._coordinator = coordinator
 
-    def emit(self, run: RunState, event_type: str, payload: Mapping[str, object]) -> None:
-        """发非终态事件；adapter 试图自己发终态会被拒绝。"""
+    def emit(
+        self,
+        run: RunState,
+        event_type: str,
+        payload: Mapping[str, object],
+        *,
+        execution_id: str | None = None,
+        parent_execution_id: str | None = None,
+        agent_id: str | None = None,
+        compose_scope: Mapping[str, object] | None = None,
+    ) -> None:
+        """发非终态事件；adapter 试图自己发终态会被拒绝。
+
+        root/child activity 共用 Run sequence；可选 provenance 与
+        compose_scope 只影响展示归属，不改变终态 owner。
+        """
         if event_type in self._TERMINAL_EVENTS:
             raise RunError(
                 "ADAPTER_TERMINAL_VIOLATION",
                 "Terminal events belong to the RunCoordinator",
             )
-        self._coordinator._emit(run, event_type, payload)
+        self._coordinator._emit(
+            run,
+            event_type,
+            payload,
+            execution_id=execution_id,
+            parent_execution_id=parent_execution_id,
+            agent_id=agent_id,
+            compose_scope=compose_scope,
+        )
 
     def is_cancelled(self, run: RunState) -> bool:
         """返回共享取消 token 与显式取消标记的并集。"""
@@ -454,6 +459,10 @@ class _CoordinatorLifecyclePort:
             run,
             INTERACTION_RESOLVED,
             {"request_id": spec.request_id, "type": spec.type},
+            execution_id=spec.execution_id,
+            parent_execution_id=spec.parent_execution_id,
+            agent_id=spec.agent_id,
+            compose_scope=spec.compose_scope,
         )
         return result
 
@@ -487,6 +496,10 @@ class _CoordinatorLifecyclePort:
         description: str,
         decisions: list[str],
         action_requests: list[dict[str, object]],
+        execution_id: str | None = None,
+        parent_execution_id: str | None = None,
+        agent_id: str | None = None,
+        compose_scope: Mapping[str, object] | None = None,
     ) -> InteractionResult:
         """构造 typed approval 并请求 owner 决策（workflow 只传纯数据）。"""
         spec = InteractionRequest(
@@ -500,6 +513,10 @@ class _CoordinatorLifecyclePort:
             },
             interrupt_id=interrupt_id,
             action_count=1,
+            execution_id=execution_id,
+            parent_execution_id=parent_execution_id,
+            agent_id=agent_id,
+            compose_scope=dict(compose_scope) if compose_scope is not None else None,
         )
         return await self.request_interaction(run, spec)
 
@@ -1000,10 +1017,15 @@ class RunCoordinator:
         payload: Mapping[str, object],
         *,
         terminal: bool = False,
+        execution_id: str | None = None,
+        parent_execution_id: str | None = None,
+        agent_id: str | None = None,
+        compose_scope: Mapping[str, object] | None = None,
     ) -> None:
         if run.terminal_event_emitted and not terminal:
             return
         run.sequence += 1
+        root = run.root_execution_ref
         run.events.put_nowait(
             AgentEvent(
                 event_id=str(uuid.uuid4()),
@@ -1013,13 +1035,19 @@ class RunCoordinator:
                 sequence=run.sequence,
                 timestamp_ms=int(time.time() * 1000),
                 payload=dict(payload),
-                execution_id=run.root_execution_ref.execution_id,
-                agent_id=(
+                execution_id=execution_id or root.execution_id,
+                agent_id=agent_id
+                or (
                     run.root_execution.agent_id
                     if run.root_execution is not None
                     else "main"
                 ),
-                parent_execution_id=run.root_execution_ref.parent_execution_id,
+                parent_execution_id=(
+                    parent_execution_id
+                    if parent_execution_id is not None
+                    else root.parent_execution_id
+                ),
+                compose_scope=dict(compose_scope) if compose_scope is not None else None,
             )
         )
 
@@ -1225,6 +1253,10 @@ class RunCoordinator:
                 run,
                 INTERACTION_RESOLVED,
                 {"request_id": spec.request_id, "type": spec.type},
+                execution_id=spec.execution_id,
+                parent_execution_id=spec.parent_execution_id,
+                agent_id=spec.agent_id,
+                compose_scope=spec.compose_scope,
             )
             response = result.value if isinstance(result.value, Mapping) else {}
             decision = str(response.get("decision") or "")

@@ -95,7 +95,7 @@ class _FakeStageAgent:
         self.script = list(script)
         self.calls: list[str] = []
 
-    async def run(self, request: StageRequest) -> StageResult:
+    async def run(self, request: StageRequest, observer=None) -> StageResult:
         self.calls.append(request.stage)
         item = self.script.pop(0)
         if not isinstance(item, dict):
@@ -139,13 +139,15 @@ async def _run_compose(
     stage_script: list[Any],
     verification_script: list[VerificationEvidence],
     interaction_responses: list[dict[str, Any]],
+    *,
+    stage_agent_cls: type = _FakeStageAgent,
 ):
     """构造真实 coordinator + 持久化 + fake 依赖并完整运行一次 Compose Run。"""
     home = tmp_path / "home"
     project = tmp_path / "project"
     project.mkdir()
     persistence = await ThreadPersistence.open(project=project, home=home)
-    stage_agent = _FakeStageAgent(stage_script)
+    stage_agent = stage_agent_cls(stage_script)
     verification = _FakeVerification(verification_script)
     interactions = _ScriptedInteraction(interaction_responses)
 
@@ -410,7 +412,7 @@ async def test_e2e_run_projection_persisted_with_single_terminal(tmp_path: Path)
 async def test_e2e_stage_infrastructure_failure_converges_stable_code(tmp_path: Path) -> None:
     """stage 执行基础设施失败收敛为 COMPOSE_STAGE_EXECUTION_FAILED，不泄漏原始异常。"""
     class _ExplodingAgent:
-        async def run(self, request: StageRequest) -> StageResult:
+        async def run(self, request: StageRequest, observer=None) -> StageResult:
             raise RuntimeError("engine exploded: secret detail")
 
     home = tmp_path / "home"
@@ -460,3 +462,226 @@ async def test_e2e_stage_infrastructure_failure_converges_stable_code(tmp_path: 
     assert events[-1].type == "run.failed"
     assert events[-1].payload["error"]["code"] == "COMPOSE_STAGE_EXECUTION_FAILED"
     assert "secret detail" not in str(events[-1].payload["error"])
+
+
+async def test_e2e_cancel_during_understand_keeps_completed_activity(tmp_path: Path) -> None:
+    """早期阶段取消：唯一 cancelled 终态，已完成阶段活动保留，无迟到事件。"""
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    persistence = await ThreadPersistence.open(project=project, home=home)
+    gate = asyncio.Event()
+
+    class _BlockingUnderstand:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def run(self, request: StageRequest, observer=None) -> StageResult:
+            self.calls.append(request.stage)
+            if request.stage == "understand":
+                await gate.wait()  # 模拟 Understand 长时间处理
+            return StageResult(
+                execution_id=f"exec-{len(self.calls)}",
+                agent_id=request.stage,
+                status="completed",
+                output=_understanding(),
+            )
+
+    stage_agent = _BlockingUnderstand()
+    interactions = _ScriptedInteraction([])
+
+    async def persistence_provider() -> ThreadPersistence:
+        return persistence
+
+    async def preparation_provider(_command, _persistence) -> RunPreparation:
+        return RunPreparation(execution_binding=make_test_binding("thread-1", "run-1"))
+
+    async def noop_runtime(_run) -> RunRuntime:
+        async def release() -> None:
+            return None
+
+        return RunRuntime(
+            agent=None,
+            run_context=None,
+            graph_config=lambda thread_id: {"configurable": {"thread_id": thread_id}},
+            release=release,
+        )
+
+    async def compose_services() -> ComposeServices | None:
+        return ComposeServices(
+            stage_agent=stage_agent,
+            method_assets={
+                "understand": "u", "plan": "p", "build": "BUILD-METHOD",
+                "tdd": "TDD-METHOD", "debug": "DEBUG-METHOD",
+                "code-review": "REVIEW-METHOD",
+            },
+            workspace_root=str(project),
+            verification=None,
+            now_ms=lambda: 42,
+        )
+
+    coordinator = RunCoordinator(
+        persistence_provider=persistence_provider,
+        preparation_provider=preparation_provider,
+        runtime_provider=noop_runtime,
+        interaction_port=interactions,
+        compose_services_provider=compose_services,
+    )
+    execution = await coordinator.start(
+        StartRun(thread_id="thread-1", run_id="run-1", message="实现搜索功能", mode="compose"),
+        ConnectionRef("owner"),
+    )
+    for _ in range(200):
+        if gate.is_set() or stage_agent.calls.count("understand") > 0:
+            break
+        await asyncio.sleep(0.01)
+    assert stage_agent.calls.count("understand") == 1
+    cancelled = await coordinator.cancel(execution.ref, ConnectionRef("owner"))
+    assert cancelled.cancelled is True
+    events = [event async for event in execution.events]
+    await coordinator.close()
+
+    # 唯一 cancelled 终态，之后没有迟到事件。
+    assert [event.type for event in events].count("run.cancelled") == 1
+    assert events[-1].type == "run.cancelled"
+    assert [event.type for event in events].count("run.completed") == 0
+    frames = [event.payload for event in events if event.type == "compose.state"]
+    assert frames[-1]["status"] == "cancelled"
+    assert frames[-1]["stage"] == "understand"
+
+    # 已完成阶段的活动保留（有界审计不随取消清空）。
+    store = persistence.compose_artifact_store()
+    persisted = await store.load_run("run-1")
+    assert persisted is not None and persisted.status.value == "cancelled"
+    assert await store.terminal_count("run-1") == 1
+    # Understand 未产出任何已校验结果：审计不伪造阶段摘要或 Tool 记录。
+    records = await persistence.compose_activity_store().list_for_run("run-1")
+    assert tuple(records) == ()
+    # 终态摘要进入 Transcript 但仅此一条，取消不产生迟到活动。
+    transcript = await persistence.load_transcript("thread-1")
+    assert [record.kind for record in transcript] == ["user", "assistant"]
+    assert "Compose cancelled" in transcript[-1].payload["content"]
+    await persistence.close()
+
+
+class _ToolEmittingAgent(_FakeStageAgent):
+    """Builder 阶段模拟 stream 工具事件，验证 Tool 终态进入 activity 审计。"""
+
+    async def run(self, request: StageRequest, observer=None) -> StageResult:
+        self.calls.append(request.stage)
+        item = self.script.pop(0)
+        if observer is not None:
+            observer.bind_execution(
+                execution_id=f"exec-{len(self.calls)}",
+                parent_execution_id="root-execution",
+                agent_id=request.stage,
+            )
+            observer.emit(
+                "tool.started",
+                {"tool_call_id": "call-1", "name": "execute"},
+            )
+            observer.emit(
+                "tool.completed",
+                {
+                    "tool_call_id": "call-1",
+                    "result": {
+                        "content": "cmd-output-marker",
+                        "is_error": False,
+                        "truncated": False,
+                        "original_bytes": 8,
+                    },
+                },
+            )
+            # 与 _StageStreamPorts 在 tool.completed 时的行为一致：有界终态入审计。
+            observer.record_tool_terminal(tool_name="execute", status="completed")
+        if not isinstance(item, dict):
+            raise ValueError("STAGE_OUTPUT_NOT_OBJECT")
+        return StageResult(
+            execution_id=f"exec-{len(self.calls)}",
+            agent_id=request.stage,
+            status="completed",
+            output=item,
+        )
+
+
+async def test_e2e_thread_reopen_restores_bounded_activities(tmp_path: Path) -> None:
+    """Thread reopen 恢复有界阶段/验证摘要，不恢复 artifact 或污染 Transcript。"""
+    events, _stage_agent, _verification, _interactions = await _run_compose(
+        tmp_path,
+        [
+            _understanding(),
+            _plan(),
+            _task_result(task_id="task-1"),
+            _reviewer("pass"),
+            _reviewer("pass"),
+        ],
+        [_evidence(exit_code=0)],
+        [{"answers": {"question-1": ["approve"]}}],
+    )
+    assert events[-1].type == "run.completed"
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    reopened = await ThreadPersistence.open(project=project, home=home)
+    try:
+        opened = await reopened.open_thread("thread-1")
+        activities = list(opened.compose_activities)
+        # 五阶段摘要 + verify tool terminal 按 Host sequence 恢复。
+        kinds = [(item["stage"], item["kind"]) for item in activities]
+        assert ("understand", "summary") in kinds
+        assert ("plan", "summary") in kinds
+        assert ("build", "summary") in kinds
+        assert ("verify", "summary") in kinds
+        assert ("verify", "tool_terminal") in kinds
+        assert ("review", "summary") in kinds
+        sequences = [int(item["event_sequence"]) for item in activities]
+        assert sequences == sorted(sequences)
+        # 有界审计：不包含 artifact JSON、diff 或完整 Tool 输出。
+        blob = "".join(str(item) for item in activities)
+        assert "diff --git" not in blob
+        assert '"acceptance"' not in blob
+        assert "思考" not in blob and "reasoning" not in blob.lower()
+        # 恢复数据不进入模型 context：Transcript 只有用户输入与最终 assistant 结果。
+        records = await reopened.load_transcript("thread-1")
+        assert [record.kind for record in records] == ["user", "assistant"]
+    finally:
+        await reopened.close()
+
+
+async def test_e2e_stage_tool_terminal_persisted_and_reopened(tmp_path: Path) -> None:
+    """Builder 工具终态进入有界审计，Thread reopen 可恢复且不带工具正文。"""
+    events, _stage_agent, _verification, _interactions = await _run_compose(
+        tmp_path,
+        [
+            _understanding(),
+            _plan(),
+            _task_result(task_id="task-1"),
+            _reviewer("pass"),
+            _reviewer("pass"),
+        ],
+        [_evidence(exit_code=0)],
+        [{"answers": {"question-1": ["approve"]}}],
+        stage_agent_cls=_ToolEmittingAgent,
+    )
+    assert events[-1].type == "run.completed"
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    reopened = await ThreadPersistence.open(project=project, home=home)
+    try:
+        opened = await reopened.open_thread("thread-1")
+        activities = list(opened.compose_activities)
+        build_terminals = [
+            item for item in activities
+            if item["stage"] == "build" and item["kind"] == "tool_terminal"
+        ]
+        assert len(build_terminals) == 1
+        terminal = build_terminals[0]
+        assert terminal["label"] == "execute"
+        assert terminal["status"] == "completed"
+        assert terminal["activity_id"]
+        assert terminal["attempt"] >= 1
+        # 工具正文（3 passed）与 artifact JSON 不落库。
+        blob = "".join(str(item) for item in activities)
+        assert "cmd-output-marker" not in blob
+        assert "remaining_issue" not in blob
+    finally:
+        await reopened.close()

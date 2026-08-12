@@ -42,7 +42,7 @@ from harness_agent.threads.context_projection import (
 )
 from harness_agent.threads.runtime_state import RuntimeStateError, RuntimeStateSnapshot
 
-_SCHEMA_VERSION = 12
+_SCHEMA_VERSION = 13
 _MAX_PREVIEW_CHARS = 160
 _MAX_INLINE_TOOL_BYTES = 64 * 1024
 _TRANSCRIPT_KINDS = ("user", "assistant", "tool", "context")
@@ -761,6 +761,7 @@ def _migration_validate_legacy_source_schema_sync(
     # 必须按已知扩展对象保留，而不是当成未知表拒绝。
     allowed_tables.add("harness_compose_runs")
     allowed_tables.add("harness_compose_artifacts")
+    allowed_tables.add("harness_compose_activities")
     if source_version >= 2:
         allowed_tables.add("harness_prompt_epochs")
     unknown = actual_tables - allowed_tables
@@ -1242,6 +1243,8 @@ class OpenThread:
     summary: ThreadSummary
     messages: tuple[ThreadMessage, ...]
     legacy_incomplete_history: bool = False
+    # Compose 有界 activity 审计；不进入模型 context，仅供 Timeline 恢复。
+    compose_activities: tuple[Mapping[str, object], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1658,6 +1661,34 @@ class ThreadPersistence:
             project_fingerprint=self._project_fingerprint,
             lock=self._lock,
         )
+
+    def compose_activity_store(self) -> "ComposeActivityStore":
+        """返回借用同一连接和事务锁的 Compose activity 审计存储。"""
+        self._ensure_open()
+        from harness_agent.threads.compose_activity_store import ComposeActivityStore
+
+        return ComposeActivityStore(
+            self._connection,
+            project_fingerprint=self._project_fingerprint,
+            lock=self._lock,
+        )
+
+    async def append_compose_activity(self, record: "ComposeActivityRecord") -> None:
+        """追加一条 Compose activity；失败抛 ThreadPersistenceError 供上层 fail closed。"""
+        self._ensure_open()
+        from harness_agent.threads.compose_activity_store import (
+            ComposeActivityRecord,
+            ComposeActivityStoreError,
+        )
+
+        if not isinstance(record, ComposeActivityRecord):
+            raise ThreadPersistenceError("COMPOSE_ACTIVITY_RECORD_INVALID")
+        try:
+            await self.compose_activity_store().append(record)
+        except ComposeActivityStoreError as exc:
+            raise ThreadPersistenceError(str(exc)) from exc
+        except (aiosqlite.Error, TypeError, ValueError) as exc:
+            raise ThreadPersistenceError(f"COMPOSE_ACTIVITY_WRITE_FAILED: {exc}") from exc
 
     def graph_config(self, thread_id: str) -> dict[str, dict[str, str]]:
         """构造 LangGraph 所需的 thread_id 和 project 隔离 checkpoint namespace。"""
@@ -3418,6 +3449,17 @@ class ThreadPersistence:
             history_incomplete = bool(
                 metadata_row and metadata_row["legacy_incomplete_history"]
             )
+            from harness_agent.threads.compose_activity_store import activity_record_to_wire
+
+            activities = ()
+            try:
+                activities = tuple(
+                    activity_record_to_wire(item)
+                    for item in await self.compose_activity_store().list_for_thread(thread_id)
+                )
+            except Exception:
+                # 旧库无 activity 表或读取失败时不影响 Transcript 恢复。
+                activities = ()
             return OpenThread(
                 summary=_summary(summary_row),
                 messages=tuple(
@@ -3428,6 +3470,7 @@ class ThreadPersistence:
                     if message is not None
                 ),
                 legacy_incomplete_history=history_incomplete,
+                compose_activities=activities,
             )
         except ThreadPersistenceError:
             raise
@@ -4182,6 +4225,9 @@ class ThreadPersistence:
             if version < 12:
                 await self._add_compose_tables()
                 version = 12
+            if version < 13:
+                await self._add_compose_activity_table()
+                version = 13
             await self._connection.execute(f"PRAGMA user_version={version}")
             final_fingerprint = await self._database_fingerprint_async()
             await self._validate_final_database_async(final_fingerprint)
@@ -4494,6 +4540,7 @@ class ThreadPersistence:
         allowed_tables.add("harness_team_runs")
         allowed_tables.add("harness_compose_runs")
         allowed_tables.add("harness_compose_artifacts")
+        allowed_tables.add("harness_compose_activities")
         if source_version >= 2:
             allowed_tables.add("harness_prompt_epochs")
         if actual_tables - allowed_tables:
@@ -4775,6 +4822,26 @@ class ThreadPersistence:
                     ),
                 ]
             )
+        if version >= 13:
+            required.append(
+                (
+                    "harness_compose_activities",
+                    (
+                        "project_fingerprint",
+                        "run_id",
+                        "event_sequence",
+                        "activity_id",
+                        "stage",
+                        "attempt",
+                        "kind",
+                        "label",
+                        "status",
+                        "created_at_ms",
+                        "encoded_bytes",
+                        "truncated_flag",
+                    ),
+                )
+            )
 
         for table_name, expected_columns in required:
             actual_columns = await self._table_columns_async(table_name)
@@ -4809,6 +4876,9 @@ class ThreadPersistence:
         if version >= 12:
             required_indexes.append("harness_compose_runs_thread_updated")
             required_indexes.append("harness_compose_artifacts_run_created")
+        if version >= 13:
+            required_indexes.append("harness_compose_activities_run_seq")
+            required_indexes.append("harness_compose_activities_thread_created")
         for index_name in required_indexes:
             cursor = await self._connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
@@ -5921,6 +5991,46 @@ class ThreadPersistence:
             """
             CREATE INDEX IF NOT EXISTS harness_compose_artifacts_run_created
                 ON harness_compose_artifacts(project_fingerprint, run_id, created_at_ms)
+            """
+        )
+
+    async def _add_compose_activity_table(self) -> None:
+        """v13：Compose 有界 activity 审计表；与 Transcript/context 隔离。"""
+        await self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS harness_compose_activities
+            (
+                project_fingerprint TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                event_sequence INTEGER NOT NULL,
+                activity_id TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                task_id TEXT,
+                task_title TEXT,
+                attempt INTEGER NOT NULL,
+                execution_id TEXT,
+                agent_id TEXT,
+                kind TEXT NOT NULL,
+                label TEXT NOT NULL,
+                status TEXT NOT NULL,
+                bounded_text TEXT,
+                created_at_ms INTEGER NOT NULL,
+                encoded_bytes INTEGER NOT NULL DEFAULT 0,
+                truncated_flag INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (project_fingerprint, run_id, event_sequence, activity_id, kind, label)
+            )
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS harness_compose_activities_run_seq
+                ON harness_compose_activities(project_fingerprint, run_id, event_sequence)
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS harness_compose_activities_thread_created
+                ON harness_compose_activities(project_fingerprint, created_at_ms)
             """
         )
 

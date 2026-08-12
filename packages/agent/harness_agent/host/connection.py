@@ -13,10 +13,9 @@ from jsonschema.exceptions import ValidationError
 from harness_agent.host.run_coordinator import (
     ConnectionRef,
     INTERACTION_TIMEOUT_MS,
-    InteractionRequest,
-    InteractionResult,
     RunRef,
 )
+from harness_agent.runtime.interactions import InteractionRequest, InteractionResult
 from harness_agent.protocol.generated import METHOD, PROTOCOL_MINOR, SERVER_CAPABILITIES
 
 if TYPE_CHECKING:
@@ -89,18 +88,29 @@ class ProtocolInteractionAdapter:
             else METHOD["INTERACTION_QUESTION"]
         )
         try:
+            params: dict[str, object] = {
+                "thread_id": run.thread_id,
+                "run_id": run.run_id,
+                "timeout_ms": INTERACTION_TIMEOUT_MS,
+                "payload": dict(interaction.payload),
+            }
+            # Compose child activity 归属：与 Event envelope 相同的可选 provenance 与
+            # scope，供 Interactive Core 把审批/问答卡归入对应 activity 分组。
+            if interaction.execution_id is not None:
+                params["execution_id"] = interaction.execution_id
+            if interaction.parent_execution_id is not None:
+                params["parent_execution_id"] = interaction.parent_execution_id
+            if interaction.agent_id is not None:
+                params["agent_id"] = interaction.agent_id
+            if interaction.compose_scope is not None:
+                params["compose_scope"] = dict(interaction.compose_scope)
             await self._host._send_to(
                 connection,
                 {
                     "jsonrpc": "2.0",
                     "method": method,
                     "id": interaction.request_id,
-                    "params": {
-                        "thread_id": run.thread_id,
-                        "run_id": run.run_id,
-                        "timeout_ms": INTERACTION_TIMEOUT_MS,
-                        "payload": dict(interaction.payload),
-                    },
+                    "params": params,
                 },
             )
             return InteractionResult(

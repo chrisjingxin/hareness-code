@@ -62,6 +62,7 @@
       "tool.completed": { "payload": "#/$defs/toolCompletedPayload" },
       "context.updated": { "payload": "#/$defs/contextPayload" },
       "compose.state": { "payload": "#/$defs/composeStatePayload" },
+      "compose.summary": { "payload": "#/$defs/composeSummaryPayload" },
       "interaction.resolved": { "payload": "#/$defs/interactionResolvedPayload" },
       "run.completed": { "payload": "#/$defs/runCompletedPayload" },
       "run.cancelled": { "payload": "#/$defs/runCancelledPayload" },
@@ -374,6 +375,27 @@
       },
       "additionalProperties": false
     },
+    "composeActivityRecord": {
+      "type": "object",
+      "required": ["run_id", "event_sequence", "activity_id", "stage", "attempt", "kind", "label", "status", "created_at_ms"],
+      "properties": {
+        "run_id": { "type": "string", "minLength": 1 },
+        "event_sequence": { "type": "integer", "minimum": 0 },
+        "activity_id": { "type": "string", "minLength": 1 },
+        "stage": { "enum": ["understand", "plan", "build", "verify", "review"] },
+        "task_id": { "type": "string", "minLength": 1 },
+        "task_title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "execution_id": { "type": "string", "minLength": 1 },
+        "agent_id": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["summary", "tool_terminal", "truncation"] },
+        "label": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "status": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "bounded_text": { "type": "string", "maxLength": 4096 },
+        "created_at_ms": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
     "threadMessage": {
       "type": "object", "required": ["kind", "content"],
       "properties": {
@@ -400,7 +422,12 @@
       "type": "object", "required": ["thread", "messages"],
       "properties": {
         "thread": { "$ref": "#/$defs/threadSummary" },
-        "messages": { "type": "array", "items": { "$ref": "#/$defs/threadMessage" } }
+        "messages": { "type": "array", "items": { "$ref": "#/$defs/threadMessage" } },
+        "compose_activities": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/composeActivityRecord" },
+          "default": []
+        }
       },
       "additionalProperties": false
     },
@@ -748,6 +775,18 @@
       },
       "additionalProperties": false
     },
+    "composeActivityScope": {
+      "type": "object",
+      "required": ["activity_id", "stage", "attempt"],
+      "properties": {
+        "activity_id": { "type": "string", "minLength": 1 },
+        "stage": { "enum": ["understand", "plan", "build", "verify", "review"] },
+        "task_id": { "type": "string", "minLength": 1 },
+        "task_title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "attempt": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
     "eventBase": {
       "type": "object",
       "required": ["event_id", "type", "thread_id", "run_id", "sequence", "timestamp_ms", "payload"],
@@ -758,6 +797,7 @@
         "execution_id": { "type": "string", "minLength": 1 },
         "parent_execution_id": { "type": ["string", "null"], "minLength": 1 },
         "agent_id": { "type": "string", "minLength": 1 },
+        "compose_scope": { "$ref": "#/$defs/composeActivityScope" },
         "payload": { "$ref": "#/$defs/jsonObject" }
       },
       "additionalProperties": false
@@ -826,6 +866,15 @@
         "dynamic_tokens": { "type": ["integer", "null"] }, "cache_status": { "type": ["string", "null"] },
         "cached_tokens": { "type": ["integer", "null"] }, "miss_reason": { "type": ["string", "null"] },
         "artifact_ids": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+    "composeSummaryPayload": {
+      "type": "object",
+      "required": ["status", "text"],
+      "properties": {
+        "status": { "enum": ["passed", "failed", "blocked", "cancelled"] },
+        "text": { "type": "string", "minLength": 1, "maxLength": 1000 }
       },
       "additionalProperties": false
     },
@@ -919,6 +968,10 @@
       "type": "object", "required": ["thread_id", "run_id", "timeout_ms", "payload"],
       "properties": {
         "thread_id": { "type": "string" }, "run_id": { "type": "string" }, "timeout_ms": { "type": "integer", "minimum": 1 },
+        "execution_id": { "type": "string", "minLength": 1 },
+        "parent_execution_id": { "type": ["string", "null"], "minLength": 1 },
+        "agent_id": { "type": "string", "minLength": 1 },
+        "compose_scope": { "$ref": "#/$defs/composeActivityScope" },
         "payload": {
           "type": "object", "required": ["interrupt_id", "description", "requests", "decisions"],
           "properties": {
@@ -957,6 +1010,10 @@
       "type": "object", "required": ["thread_id", "run_id", "timeout_ms", "payload"],
       "properties": {
         "thread_id": { "type": "string" }, "run_id": { "type": "string" }, "timeout_ms": { "type": "integer", "minimum": 1 },
+        "execution_id": { "type": "string", "minLength": 1 },
+        "parent_execution_id": { "type": ["string", "null"], "minLength": 1 },
+        "agent_id": { "type": "string", "minLength": 1 },
+        "compose_scope": { "$ref": "#/$defs/composeActivityScope" },
         "payload": {
           "type": "object", "required": ["interrupt_id", "questions"],
           "properties": {

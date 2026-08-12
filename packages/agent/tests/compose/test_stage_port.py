@@ -37,6 +37,11 @@ class _FakeEngine:
         self.calls.append({"messages": messages, "kwargs": kwargs})
         return {"messages": [AIMessage(content=self.output)]}
 
+    async def astream(self, stream_input: Any, **kwargs: Any):
+        """共享 execution stream 路径：产出与 ainvoke 等价的最终消息。"""
+        self.calls.append({"messages": stream_input, "kwargs": kwargs})
+        yield ("messages", (AIMessage(content=self.output), {}))
+
 
 class _FakeRunLease:
     def __init__(self) -> None:
@@ -235,6 +240,190 @@ async def test_managed_stage_port_schema_retry_gets_fresh_execution() -> None:
     )
     assert first.execution_id != second.execution_id
     assert len(engine.calls) == 2
+
+
+class _RecordingObserver:
+    """记录 bind/emit 的测试 observer。"""
+
+    def __init__(self) -> None:
+        self.execution_id: str | None = None
+        self.parent_execution_id: str | None = None
+        self.agent_id: str | None = None
+        self.events: list[tuple[str, dict[str, object]]] = []
+        self.tool_terminals: list[tuple[str, str]] = []
+
+    def bind_execution(
+        self,
+        *,
+        execution_id: str,
+        parent_execution_id: str | None,
+        agent_id: str,
+    ) -> None:
+        self.execution_id = execution_id
+        self.parent_execution_id = parent_execution_id
+        self.agent_id = agent_id
+
+    def emit(self, event_type: str, payload: dict[str, object]) -> None:
+        self.events.append((event_type, dict(payload)))
+
+    def record_tool_terminal(self, *, tool_name: str, status: str) -> None:
+        self.tool_terminals.append((tool_name, status))
+
+    async def interact(self, request: object) -> object:
+        raise AssertionError("test should not request interaction")
+
+
+class _StreamingEngine:
+    """产出公开 Reasoning + 正文 JSON，验证 capture_only 不发 content.delta。"""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    @property
+    def graph(self) -> Any:
+        return self
+
+    async def astream(self, stream_input: Any, **kwargs: Any):
+        from langchain_core.messages import AIMessageChunk
+
+        self.calls.append({"input": stream_input, "kwargs": kwargs})
+        yield (
+            "messages",
+            (
+                AIMessageChunk(
+                    content="",
+                    additional_kwargs={"reasoning_content": "公开思考"},
+                ),
+                {},
+            ),
+        )
+        yield (
+            "messages",
+            (
+                AIMessage(
+                    content='{"goal": "实现搜索", "acceptance": ["可排序"], "open_decisions": [], "change_kind": "feature"}'
+                ),
+                {},
+            ),
+        )
+
+
+async def test_managed_stage_port_capture_only_emits_reasoning_not_content() -> None:
+    """capture_only：公开 Reasoning 经 observer，content.delta 与 artifact JSON 不进 wire。"""
+    engine = _StreamingEngine()
+    pool = _FakePool(_FakeLease(engine))
+    registry, root = await _registry_with_root()
+    spec = _FakeSpec()
+    port = ManagedStageAgentPort(
+        registry=registry,
+        pool=pool,  # type: ignore[arg-type]
+        resolve_spec=lambda _key, **_kwargs: spec,  # type: ignore[arg-type]
+        config_home=Path("."),
+        workspace=Path("."),
+    )
+    observer = _RecordingObserver()
+    result = await port.run(
+        StageRequest(
+            stage="understand",
+            task="实现搜索功能",
+            parent_ref=root,
+            profile_key="stage-profile",
+            cancellation_token=RunCancellationToken(),
+        ),
+        observer,
+    )
+    assert result.output["goal"] == "实现搜索"
+    assert observer.execution_id is not None
+    assert observer.execution_id.startswith("child-")
+    assert observer.parent_execution_id == root.execution_id
+    assert observer.agent_id == "understand"
+    types = [event_type for event_type, _ in observer.events]
+    assert "run.progress" in types
+    assert "reasoning.delta" in types
+    assert "content.delta" not in types
+    assert all("实现搜索" not in str(payload) for _, payload in observer.events)
+    assert all('{"goal"' not in str(payload) for _, payload in observer.events)
+    checkpoint_ns = engine.calls[0]["kwargs"]["config"]["configurable"]["checkpoint_ns"]
+    assert "child-" in checkpoint_ns
+
+
+async def test_managed_stage_port_records_tool_terminal() -> None:
+    """Stage 工具终态经 observer 记录（名与状态），不携带参数/结果正文。"""
+    engine = _ToolStreamingEngine()
+    pool = _FakePool(_FakeLease(engine))
+    registry, root = await _registry_with_root()
+    spec = _FakeSpec()
+    port = ManagedStageAgentPort(
+        registry=registry,
+        pool=pool,  # type: ignore[arg-type]
+        resolve_spec=lambda _key, **_kwargs: spec,  # type: ignore[arg-type]
+        config_home=Path("."),
+        workspace=Path("."),
+    )
+    observer = _RecordingObserver()
+    result = await port.run(
+        StageRequest(
+            stage="build",
+            task="task-1",
+            parent_ref=root,
+            profile_key="stage-profile",
+            cancellation_token=RunCancellationToken(),
+        ),
+        observer,
+    )
+    assert result.output["task_id"] == "task-1"
+    # 工具名由 TOOL_STARTED 关联；终态只记录名与状态，正文不进入记录。
+    assert observer.tool_terminals == [("execute", "completed")]
+    assert all("cmd-output" not in text for _, text in observer.tool_terminals)
+    types = [event_type for event_type, _ in observer.events]
+    assert "tool.started" in types
+    assert "tool.completed" in types
+
+
+class _ToolStreamingEngine:
+    """产出工具调用 → 工具结果 → 最终 artifact 的流，验证 tool terminal 记录。"""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    @property
+    def graph(self) -> Any:
+        return self
+
+    async def astream(self, stream_input: Any, **kwargs: Any):
+        from langchain_core.messages import AIMessageChunk, ToolMessage
+
+        self.calls.append({"input": stream_input, "kwargs": kwargs})
+        yield (
+            "messages",
+            (
+                AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        {
+                            "name": "execute",
+                            "args": '{"command": "pytest -q"}',
+                            "index": 0,
+                            "id": "call-1",
+                        }
+                    ],
+                ),
+                {},
+            ),
+        )
+        yield (
+            "messages",
+            (ToolMessage(content="cmd-output", tool_call_id="call-1", name="execute"), {}),
+        )
+        yield (
+            "messages",
+            (
+                AIMessage(
+                    content='{"task_id": "task-1", "changed_paths": ["src/a.py"], "focused_test_evidence": "ok", "red_evidence": "ok", "remaining_issue": ""}'
+                ),
+                {},
+            ),
+        )
 
 
 async def test_managed_stage_port_rejects_stage_delegating_another_agent() -> None:

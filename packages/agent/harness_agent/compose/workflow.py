@@ -46,7 +46,17 @@ from harness_agent.compose.verification import (
     VerificationPort,
     VerificationRequest,
 )
-from harness_agent.compose.stage_agents import StageAgentPort, StageRequest
+from harness_agent.compose.stage_agents import (
+    StageAgentPort,
+    StageRequest,
+    make_activity_scope,
+    summarize_build,
+    summarize_plan,
+    summarize_review,
+    summarize_stage_failure,
+    summarize_understanding,
+    summarize_verify,
+)
 from harness_agent.compose.state_machine import (
     SCHEMA_INVALID_RETRY_ALLOWED,
     TASK_ATTEMPT_BUDGET,
@@ -54,6 +64,7 @@ from harness_agent.compose.state_machine import (
     ComposeStateMachine,
 )
 from harness_agent.protocol.generated import EVENT_TYPE
+from harness_agent.runtime.execution_stream import StreamInteractionRequest
 
 if TYPE_CHECKING:
     from harness_agent.threads.compose_artifact_store import ComposeArtifactStore
@@ -61,7 +72,10 @@ if TYPE_CHECKING:
 RUN_STARTED = EVENT_TYPE["RUN_STARTED"]
 RUN_PROGRESS = EVENT_TYPE["RUN_PROGRESS"]
 COMPOSE_STATE = EVENT_TYPE["COMPOSE_STATE"]
+COMPOSE_SUMMARY = EVENT_TYPE["COMPOSE_SUMMARY"]
 CONTENT_DELTA = EVENT_TYPE["CONTENT_DELTA"]
+TOOL_STARTED = EVENT_TYPE["TOOL_STARTED"]
+TOOL_COMPLETED = EVENT_TYPE["TOOL_COMPLETED"]
 
 
 class ComposeWorkflowError(RuntimeError):
@@ -206,11 +220,13 @@ class ComposeWorkflow:
                 if port.is_cancelled(run):
                     raise asyncio.CancelledError
                 state = await self._drive_stage(run, port, state)
+                await self._flush_activity_records(run)
         except asyncio.CancelledError:
             # 外部取消也必须先发布/持久化唯一 cancelled projection，不能只让
             # Coordinator 发 terminal event 而把 Compose 面板留在 running。
             if not state.terminal:
                 state = await self._apply(run, port, state, ComposeEvent.CANCEL)
+            await self._flush_activity_records(run)
             await self._record_final_summary(run, port, state)
             raise
         except ComposeWorkflowError:
@@ -218,8 +234,10 @@ class ComposeWorkflow:
             # 统一把当前阶段收敛为 failed，再交给 Host 映射稳定错误码。
             if not state.terminal:
                 state = await self._apply(run, port, state, ComposeEvent.FAIL)
+            await self._flush_activity_records(run)
             await self._record_final_summary(run, port, state)
             raise
+        await self._flush_activity_records(run)
         await self._record_final_summary(run, port, state)
         return self._outcome(state)
 
@@ -322,11 +340,27 @@ class ComposeWorkflow:
             schema_retries = 0
             while True:
                 try:
-                    result = await self._run_stage(run, "build", pack.render())
+                    result = await self._run_stage(
+                        run, port, state, "build", pack.render(),
+                        task_id=task.id,
+                        task_title=task.title,
+                        attempt=attempt,
+                    )
                     raw = result.output if isinstance(result.output, Mapping) else {}
                     task_result = validate_task_result_artifact(raw)
                     break
-                except ValueError:
+                except ValueError as exc:
+                    self._emit_stage_summary(
+                        run,
+                        port,
+                        stage="build",
+                        attempt=attempt,
+                        status="failed",
+                        text=summarize_stage_failure(str(exc)),
+                        execution_id=getattr(exc, "execution_id", None),
+                        compose_scope=getattr(exc, "compose_scope", None),
+                        agent_id="build",
+                    )
                     schema_retries += 1
                     if schema_retries > SCHEMA_INVALID_RETRY_ALLOWED:
                         attempt_failed = True
@@ -347,6 +381,17 @@ class ComposeWorkflow:
                 attempt_failed = True
                 previous_failure = task_result.remaining_issue
                 continue
+            self._emit_stage_summary(
+                run,
+                port,
+                stage="build",
+                attempt=attempt,
+                status="passed",
+                text=summarize_build(task_title=task.title, task_result=task_result),
+                execution_id=result.execution_id,
+                agent_id=result.agent_id,
+                compose_scope=getattr(result, "compose_scope", None),
+            )
             await self._store.save_artifact(
                 make_artifact(
                     ArtifactKind.TASK_RESULT,
@@ -393,21 +438,75 @@ class ComposeWorkflow:
         failed_command = ""
         evidence_anchor_id = ""
         source_execution_id = f"verify-{state.revision}"
+        passed_count = 0
+        blocked_count = 0
         for index, command in enumerate(commands):
             if port.is_cancelled(run):
                 raise asyncio.CancelledError
             label = command[:200]
+            attempt = index + 1
+            command_digest = hashlib.sha256(command.encode("utf-8")).hexdigest()[:12]
+            scope = make_activity_scope(
+                stage_agent_id="verify",
+                attempt=attempt,
+                invocation_id=f"{state.revision}-{command_digest}",
+                task_title=label,
+            )
+            tool_call_id = f"verify-{command_digest}"
+            # UI 将每条 Verify 命令投影为 scoped Tool；通过条件仍只读 fresh evidence。
+            port.emit(
+                run,
+                TOOL_STARTED,
+                {"tool_call_id": tool_call_id, "name": "execute"},
+                execution_id=run.root_execution_ref.execution_id,
+                agent_id="verify",
+                compose_scope=scope,
+            )
             request = VerificationRequest(
                 command=command,
                 label=label,
                 resource_key=resource_key,
-                approve=lambda description, c=command: self._approve_verify(
-                    run, port, state, description, c
+                approve=lambda description, c=command, s=scope: self._approve_verify(
+                    run, port, state, description, c, compose_scope=s
                 ),
             )
             try:
                 evidence = await verification.run(request)
             except VerificationError as exc:
+                blocked_count += 1
+                port.emit(
+                    run,
+                    TOOL_COMPLETED,
+                    {
+                        "tool_call_id": tool_call_id,
+                        "result": {
+                            "content": f"blocked: {exc.code}"[:500],
+                            "is_error": True,
+                            "truncated": False,
+                            "original_bytes": 0,
+                        },
+                    },
+                    execution_id=run.root_execution_ref.execution_id,
+                    agent_id="verify",
+                    compose_scope=scope,
+                )
+                self._emit_stage_summary(
+                    run,
+                    port,
+                    stage="verify",
+                    attempt=attempt,
+                    status="blocked",
+                    text=summarize_verify(
+                        commands=len(items) + 1,
+                        passed=passed_count,
+                        failed=0,
+                        blocked=blocked_count,
+                        failed_label=label,
+                    ),
+                    execution_id=run.root_execution_ref.execution_id,
+                    agent_id="verify",
+                    compose_scope=scope,
+                )
                 # 策略拒绝/用户拒绝/后端缺失不可修复：直接 blocked。
                 return await self._apply(
                     run,
@@ -447,11 +546,58 @@ class ComposeWorkflow:
             await self._store.save_artifact(evidence_row)
             evidence_anchor_id = evidence_row.artifact_id
             passed = evidence.exit_code == 0
+            if passed:
+                passed_count += 1
             items.append(
                 EvidenceItem(
                     label=label,
                     status=EvidenceStatus.PASSED if passed else EvidenceStatus.FAILED,
                 )
+            )
+            summary_text = str(evidence.output_summary or "")[:500]
+            port.emit(
+                run,
+                TOOL_COMPLETED,
+                {
+                    "tool_call_id": tool_call_id,
+                    "result": {
+                        "content": summary_text,
+                        "is_error": not passed,
+                        "truncated": bool(evidence.truncated),
+                        "original_bytes": len(summary_text.encode("utf-8")),
+                    },
+                },
+                execution_id=run.root_execution_ref.execution_id,
+                agent_id="verify",
+                compose_scope=scope,
+            )
+            self._queue_activity_record(
+                run,
+                kind="tool_terminal",
+                label="execute",
+                status="failed" if not passed else "completed",
+                bounded_text=summary_text,
+                compose_scope=scope,
+                execution_id=run.root_execution_ref.execution_id,
+                agent_id="verify",
+                event_sequence=int(getattr(run, "sequence", 0) or 0),
+            )
+            self._emit_stage_summary(
+                run,
+                port,
+                stage="verify",
+                attempt=attempt,
+                status="passed" if passed else "failed",
+                text=summarize_verify(
+                    commands=len(items),
+                    passed=passed_count,
+                    failed=0 if passed else 1,
+                    blocked=blocked_count,
+                    failed_label="" if passed else label,
+                ),
+                execution_id=run.root_execution_ref.execution_id,
+                agent_id="verify",
+                compose_scope=scope,
             )
             if not passed:
                 failed_command = command
@@ -489,6 +635,8 @@ class ComposeWorkflow:
         state: ComposeRunState,
         description: str,
         command: str,
+        *,
+        compose_scope: Mapping[str, object] | None = None,
     ) -> bool:
         """验证命令的审批弹窗；approve 语义与工具审批一致。"""
         command_digest = hashlib.sha256(command.encode("utf-8")).hexdigest()[:8]
@@ -502,10 +650,13 @@ class ComposeWorkflow:
             action_requests=[
                 {
                     "name": "execute",
-                    "description": description,
                     "args": {"command": command},
+                    "description": description,
                 }
             ],
+            execution_id=run.root_execution_ref.execution_id,
+            agent_id="verify",
+            compose_scope=compose_scope,
         )
         value = result.value if isinstance(result.value, Mapping) else {}
         return str(value.get("decision") or "") == "approve_once"
@@ -673,10 +824,51 @@ class ComposeWorkflow:
                 workspace_root=self._services.workspace_root,
             )
             try:
-                result = await self._run_stage(run, stage, pack.render())
+                result = await self._run_stage(
+                    run,
+                    port,
+                    state,
+                    stage,
+                    pack.render(),
+                    attempt=schema_retries + 1,
+                )
                 raw = result.output if isinstance(result.output, Mapping) else {}
-                return self._parse_reviewer_axis(raw, axis)
+                parsed = self._parse_reviewer_axis(raw, axis)
+                findings = parsed.get("findings", [])
+                self._emit_stage_summary(
+                    run,
+                    port,
+                    stage=stage,
+                    attempt=schema_retries + 1,
+                    status="passed" if parsed.get("verdict") == "pass" else "failed",
+                    text=summarize_review(
+                        requirement_verdict=(
+                            str(parsed.get("verdict"))
+                            if axis == "requirement"
+                            else "n/a"
+                        ),
+                        code_verdict=(
+                            str(parsed.get("verdict")) if axis == "code" else "n/a"
+                        ),
+                        findings=findings,
+                    ),
+                    execution_id=result.execution_id,
+                    agent_id=result.agent_id,
+                    compose_scope=getattr(result, "compose_scope", None),
+                )
+                return parsed
             except ValueError as exc:
+                self._emit_stage_summary(
+                    run,
+                    port,
+                    stage=stage,
+                    attempt=schema_retries + 1,
+                    status="failed",
+                    text=summarize_stage_failure(str(exc)),
+                    execution_id=getattr(exc, "execution_id", None),
+                    agent_id=stage,
+                    compose_scope=getattr(exc, "compose_scope", None),
+                )
                 schema_retries += 1
                 if schema_retries > SCHEMA_INVALID_RETRY_ALLOWED:
                     raise ComposeWorkflowError(
@@ -801,10 +993,22 @@ class ComposeWorkflow:
                 answers=self._pending_answers,
             )
             try:
-                result = await self._run_stage(run, "understand", pack.render())
+                result = await self._run_stage(
+                    run, port, state, "understand", pack.render()
+                )
                 raw = result.output if isinstance(result.output, Mapping) else {}
                 artifact = validate_understanding_artifact(raw)
             except ValueError as exc:
+                self._emit_stage_summary(
+                    run,
+                    port,
+                    stage="understand",
+                    attempt=state.stage_attempts.get(ComposeStage.UNDERSTAND, 1),
+                    execution_id=getattr(exc, "execution_id", None),
+                    status="failed",
+                    text=summarize_stage_failure(str(exc)),
+                    compose_scope=getattr(exc, "compose_scope", None),
+                )
                 schema_retries += 1
                 if schema_retries > SCHEMA_INVALID_RETRY_ALLOWED:
                     return await self._fail(
@@ -812,6 +1016,17 @@ class ComposeWorkflow:
                     )
                 state = await self._apply(run, port, state, ComposeEvent.STAGE_RETRY)
                 continue
+            self._emit_stage_summary(
+                run,
+                port,
+                stage="understand",
+                attempt=state.stage_attempts.get(ComposeStage.UNDERSTAND, 1),
+                execution_id=result.execution_id,
+                status="passed",
+                text=summarize_understanding(artifact),
+                agent_id=result.agent_id,
+                compose_scope=getattr(result, "compose_scope", None),
+            )
             if artifact.open_decisions:
                 self._pending_answers = await self._ask_questions(
                     run, port, state, artifact.open_decisions
@@ -854,10 +1069,20 @@ class ComposeWorkflow:
                 feedback=self._feedback,
             )
             try:
-                result = await self._run_stage(run, "plan", pack.render())
+                result = await self._run_stage(run, port, state, "plan", pack.render())
                 raw = result.output if isinstance(result.output, Mapping) else {}
                 plan = validate_plan_artifact(raw)
             except ValueError as exc:
+                self._emit_stage_summary(
+                    run,
+                    port,
+                    stage="plan",
+                    attempt=state.stage_attempts.get(ComposeStage.PLAN, 1),
+                    execution_id=getattr(exc, "execution_id", None),
+                    status="failed",
+                    text=summarize_stage_failure(str(exc)),
+                    compose_scope=getattr(exc, "compose_scope", None),
+                )
                 schema_retries += 1
                 if schema_retries > SCHEMA_INVALID_RETRY_ALLOWED:
                     return await self._fail(
@@ -865,6 +1090,17 @@ class ComposeWorkflow:
                     )
                 state = await self._apply(run, port, state, ComposeEvent.STAGE_RETRY)
                 continue
+            self._emit_stage_summary(
+                run,
+                port,
+                stage="plan",
+                attempt=state.stage_attempts.get(ComposeStage.PLAN, 1),
+                execution_id=result.execution_id,
+                status="passed",
+                text=summarize_plan(plan),
+                agent_id=result.agent_id,
+                compose_scope=getattr(result, "compose_scope", None),
+            )
             artifact_row = make_artifact(
                 ArtifactKind.PLAN,
                 run_id=run.ref.run_id,
@@ -995,21 +1231,79 @@ class ComposeWorkflow:
         return validate_plan_artifact(row.payload)
 
     async def _run_stage(
-        self, run: Any, stage: str, task: str
+        self,
+        run: Any,
+        port: Any,
+        state: ComposeRunState,
+        stage: str,
+        task: str,
+        *,
+        task_id: str | None = None,
+        task_title: str | None = None,
+        attempt: int | None = None,
     ) -> Any:
-        """启动一次 fresh Managed stage execution；基础设施失败收敛稳定错误码。"""
+        """启动一次 fresh Managed stage execution；基础设施失败收敛稳定错误码。
+
+        为每次 invocation 创建稳定 activity scope，并由 HostStageObserver
+        把 capture_only stream 事件投影为带 child provenance 的 scoped Event。
+        """
         profile = run.preparation.agent_engine_profile
+        compose_stage = (
+            "review"
+            if stage in {"requirement-reviewer", "code-reviewer"}
+            else stage if stage in {"understand", "plan", "build", "verify"} else "build"
+        )
+        stage_key = (
+            ComposeStage.REVIEW
+            if compose_stage == "review"
+            else ComposeStage(compose_stage)
+            if compose_stage in {s.value for s in ComposeStage}
+            else ComposeStage.BUILD
+        )
+        resolved_attempt = (
+            max(1, int(attempt))
+            if attempt is not None
+            else max(1, int(state.stage_attempts.get(stage_key, 1) or 1))
+        )
+        # invocation_id 在 StageRequest 内生成；先用临时 id 占位 activity，
+        # 真正 activity_id 在 request 创建后重写 scope。
+        request = StageRequest(
+            stage=stage,
+            task=task,
+            parent_ref=run.root_execution_ref,
+            profile_key=profile.profile_key if profile is not None else "",
+            cancellation_token=run.cancellation_token,
+        )
+        scope = make_activity_scope(
+            stage_agent_id=stage,
+            attempt=resolved_attempt,
+            invocation_id=request.invocation_id,
+            task_id=task_id,
+            task_title=task_title,
+        )
+        request.compose_scope = scope
+        observer = _HostStageObserver(
+            run=run,
+            port=port,
+            compose_scope=scope,
+            record_activity=lambda **kwargs: self._queue_activity_record(
+                run,
+                bounded_text=None,
+                compose_scope=scope,
+                event_sequence=int(getattr(run, "sequence", 0) or 0),
+                **kwargs,
+            ),
+        )
         try:
-            return await self._services.stage_agent.run(
-                StageRequest(
-                    stage=stage,
-                    task=task,
-                    parent_ref=run.root_execution_ref,
-                    profile_key=profile.profile_key if profile is not None else "",
-                    cancellation_token=run.cancellation_token,
-                )
-            )
-        except ValueError:
+            result = await self._services.stage_agent.run(request, observer)
+            # 供 compose.summary 复用同一 activity scope，避免 live/摘要分叉。
+            setattr(result, "compose_scope", scope)
+            return result
+        except ValueError as exc:
+            # 把最近 child provenance 挂到异常上，便于失败摘要带 scope。
+            if observer.execution_id is not None:
+                setattr(exc, "execution_id", observer.execution_id)
+            setattr(exc, "compose_scope", scope)
             # schema-invalid 结构化重试路径由各阶段循环处理。
             raise
         except ComposeWorkflowError:
@@ -1028,6 +1322,147 @@ class ComposeWorkflow:
             raise ComposeWorkflowError(
                 "COMPOSE_STAGE_EXECUTION_FAILED", detail
             ) from exc
+
+    def _emit_stage_summary(
+        self,
+        run: Any,
+        port: Any,
+        *,
+        stage: str,
+        attempt: int,
+        status: str,
+        text: str,
+        execution_id: str | None = None,
+        agent_id: str | None = None,
+        compose_scope: Mapping[str, object] | None = None,
+    ) -> None:
+        """发布 Runtime 生成的有界 compose.summary（非 assistant 消息）。"""
+        exec_id = execution_id or run.root_execution_ref.execution_id
+        agent = agent_id or stage
+        scope = (
+            dict(compose_scope)
+            if compose_scope is not None
+            else make_activity_scope(
+                stage_agent_id=stage,
+                attempt=attempt,
+                invocation_id=f"summary-{stage}-{attempt}",
+            )
+        )
+        port.emit(
+            run,
+            COMPOSE_SUMMARY,
+            {"status": status, "text": text[:1000]},
+            execution_id=exec_id,
+            parent_execution_id=run.root_execution_ref.execution_id,
+            agent_id=agent,
+            compose_scope=scope,
+        )
+        # 审计落盘失败 fail closed；不假装已保存。
+        self._queue_activity_record(
+            run,
+            kind="summary",
+            label=str(scope.get("stage") or stage),
+            status=status,
+            bounded_text=text[:1000],
+            compose_scope=scope,
+            execution_id=exec_id,
+            agent_id=agent,
+            event_sequence=int(getattr(run, "sequence", 0) or 0),
+        )
+
+    def _queue_activity_record(
+        self,
+        run: Any,
+        *,
+        kind: str,
+        label: str,
+        status: str,
+        bounded_text: str | None,
+        compose_scope: Mapping[str, object],
+        execution_id: str | None,
+        agent_id: str | None,
+        event_sequence: int,
+    ) -> None:
+        """把 activity 记录挂到 workflow 实例，由异步 flush 写入 store。
+
+        RunState 使用 slots，不能动态 setattr；因此用 workflow 侧缓冲。
+        """
+        if not hasattr(self, "_compose_activity_pending"):
+            self._compose_activity_pending: list[dict[str, object]] = []
+        self._compose_activity_pending.append(
+            {
+                "run_id": run.ref.run_id,
+                "kind": kind,
+                "label": label,
+                "status": status,
+                "bounded_text": bounded_text,
+                "compose_scope": dict(compose_scope),
+                "execution_id": execution_id,
+                "agent_id": agent_id,
+                "event_sequence": event_sequence,
+            }
+        )
+
+    async def _flush_activity_records(self, run: Any) -> None:
+        """将挂起的 activity 审计写入 store；失败 fail closed。"""
+        pending = getattr(self, "_compose_activity_pending", None) or []
+        if not pending:
+            return
+        self._compose_activity_pending = []
+        persistence = getattr(run, "persistence", None)
+        if persistence is None or not hasattr(persistence, "append_compose_activity"):
+            return
+        from harness_agent.threads.compose_activity_store import ComposeActivityRecord
+        import time as _time
+
+        for item in pending:
+            scope = item["compose_scope"]  # type: ignore[assignment]
+            if not isinstance(scope, Mapping):
+                continue
+            try:
+                await persistence.append_compose_activity(
+                    ComposeActivityRecord(
+                        run_id=str(item.get("run_id") or run.ref.run_id),
+                        event_sequence=int(item["event_sequence"]),  # type: ignore[arg-type]
+                        activity_id=str(scope.get("activity_id") or "unknown"),
+                        stage=str(scope.get("stage") or "build"),
+                        attempt=max(1, int(scope.get("attempt") or 1)),
+                        kind=str(item["kind"]),  # type: ignore[arg-type]
+                        label=str(item["label"])[:200],
+                        status=str(item["status"])[:64],
+                        created_at_ms=int(_time.time() * 1000),
+                        task_id=(
+                            str(scope["task_id"])
+                            if scope.get("task_id") is not None
+                            else None
+                        ),
+                        task_title=(
+                            str(scope["task_title"])[:200]
+                            if scope.get("task_title") is not None
+                            else None
+                        ),
+                        execution_id=(
+                            str(item["execution_id"])
+                            if item.get("execution_id") is not None
+                            else None
+                        ),
+                        agent_id=(
+                            str(item["agent_id"])
+                            if item.get("agent_id") is not None
+                            else None
+                        ),
+                        bounded_text=(
+                            str(item["bounded_text"])
+                            if item.get("bounded_text") is not None
+                            else None
+                        ),
+                    )
+                )
+            except Exception as exc:
+                raise ComposeWorkflowError(
+                    "COMPOSE_ACTIVITY_PERSIST_FAILED",
+                    type(exc).__name__,
+                ) from exc
 
     def _method(self, stage: str) -> str:
         """读取私有方法资产；缺失直接 fail closed。"""
@@ -1141,3 +1576,78 @@ class ComposeWorkflow:
             message=self._failure_message,
             retryable=False,
         )
+
+
+class _HostStageObserver:
+    """把 Stage stream signal 映射到 RunLifecyclePort 的 scoped Event / Interaction。"""
+
+    def __init__(
+        self,
+        *,
+        run: Any,
+        port: Any,
+        compose_scope: Mapping[str, object],
+        record_activity: Callable[..., None] | None = None,
+    ) -> None:
+        self._run = run
+        self._port = port
+        self._scope = dict(compose_scope)
+        self._record_activity = record_activity
+        self.execution_id: str | None = None
+        self.parent_execution_id: str | None = None
+        self.agent_id: str | None = None
+
+    def bind_execution(
+        self,
+        *,
+        execution_id: str,
+        parent_execution_id: str | None,
+        agent_id: str,
+    ) -> None:
+        self.execution_id = execution_id
+        self.parent_execution_id = parent_execution_id
+        self.agent_id = agent_id
+
+    def emit(self, event_type: str, payload: Mapping[str, object]) -> None:
+        self._port.emit(
+            self._run,
+            event_type,
+            dict(payload),
+            execution_id=self.execution_id,
+            parent_execution_id=self.parent_execution_id,
+            agent_id=self.agent_id,
+            compose_scope=self._scope,
+        )
+
+    def record_tool_terminal(self, *, tool_name: str, status: str) -> None:
+        """把 Stage 工具终态写入有界 activity 审计（不保存参数/结果正文）。"""
+        if self._record_activity is None:
+            return
+        self._record_activity(
+            kind="tool_terminal",
+            label=tool_name,
+            status=status,
+            execution_id=self.execution_id,
+            agent_id=self.agent_id,
+        )
+
+    async def interact(self, request: StreamInteractionRequest) -> object:
+        from harness_agent.runtime.interactions import InteractionRequest
+
+        host_spec = InteractionRequest(
+            request_id=request.request_id,
+            type=request.type,
+            payload=request.payload,
+            interrupt_id=request.interrupt_id,
+            questions=request.questions,
+            action_count=request.action_count,
+            serial_context=request.serial_context,
+            execution_id=self.execution_id,
+            parent_execution_id=self.parent_execution_id,
+            agent_id=self.agent_id,
+            compose_scope=self._scope,
+        )
+        if request.type == "approval":
+            return await self._port.collect_serial_approvals(self._run, host_spec)
+        result = await self._port.request_interaction(self._run, host_spec)
+        return result.value

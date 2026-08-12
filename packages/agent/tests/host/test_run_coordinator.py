@@ -140,6 +140,59 @@ async def test_run_coordinator_releases_runtime_and_completes_once() -> None:
     ) == ()
 
 
+@pytest.mark.asyncio
+async def test_lifecycle_port_assigns_shared_sequence_for_scoped_child_activity() -> None:
+    """root/child activity 共用 Run sequence；compose_scope 进入 wire record。"""
+    from harness_agent.host.run_execution import COMPOSE_SUMMARY, RUN_PROGRESS
+
+    coordinator = _coordinator([])
+    run = RunState(
+        start=StartRun(mode="compose", thread_id="thread-scope", run_id="run-scope", message="组合"),
+        owner=ConnectionRef("owner"),
+        persistence=None,
+        preparation=RunPreparation(
+            execution_binding=make_test_binding("thread-scope", "run-scope")
+        ),
+    )
+    run.root_execution = coordinator._root_execution_binding(run.start, run.preparation)
+    port = coordinator._lifecycle_port
+    scope = {
+        "activity_id": "act-understand-1",
+        "stage": "understand",
+        "attempt": 1,
+    }
+    port.emit(
+        run,
+        RUN_PROGRESS,
+        {"phase": "model", "elapsed_ms": 5},
+        execution_id="child-understand-1",
+        parent_execution_id=run.root_execution_ref.execution_id,
+        agent_id="understand",
+        compose_scope=scope,
+    )
+    port.emit(
+        run,
+        COMPOSE_SUMMARY,
+        {"status": "passed", "text": "理解完成"},
+        execution_id="child-understand-1",
+        parent_execution_id=run.root_execution_ref.execution_id,
+        agent_id="understand",
+        compose_scope=scope,
+    )
+    # 终态后迟到事件被拒绝（静默丢弃），sequence 不再前进。
+    run.terminal_event_emitted = True
+    port.emit(run, RUN_PROGRESS, {"phase": "model", "elapsed_ms": 9})
+
+    events = []
+    while not run.events.empty():
+        events.append(run.events.get_nowait())
+    assert [event.sequence for event in events] == [1, 2]
+    assert events[0].execution_id == "child-understand-1"
+    assert events[0].compose_scope == scope
+    assert events[0].record()["compose_scope"] == scope
+    assert events[1].type == COMPOSE_SUMMARY
+
+
 
 @pytest.mark.asyncio
 async def test_run_coordinator_limits_second_connection_run_without_multithread() -> None:

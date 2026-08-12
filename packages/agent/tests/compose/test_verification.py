@@ -95,7 +95,7 @@ class _FakeStageAgent:
         self.calls: list[str] = []
         self.tasks: list[str] = []
 
-    async def run(self, request: StageRequest) -> StageResult:
+    async def run(self, request: StageRequest, observer=None) -> StageResult:
         self.calls.append(request.stage)
         self.tasks.append(request.task)
         item = self.script.pop(0)
@@ -238,6 +238,23 @@ async def test_verify_pass_reaches_review_boundary_with_evidence(tmp_path: Path)
     assert anchor is not None
     assert anchor.artifact_id == stored_state.verification_evidence_id
     assert anchor.kind.value == "verification"
+    # Verify 命令投影为 scoped Tool + summary，且不替代 evidence 判定。
+    verify_tools = [
+        event for event in events
+        if event.type in {"tool.started", "tool.completed"}
+        and getattr(event, "compose_scope", None)
+        and event.compose_scope.get("stage") == "verify"
+    ]
+    assert any(event.type == "tool.started" for event in verify_tools)
+    assert any(event.type == "tool.completed" for event in verify_tools)
+    verify_summaries = [
+        event for event in events
+        if event.type == "compose.summary"
+        and event.compose_scope
+        and event.compose_scope.get("stage") == "verify"
+    ]
+    assert verify_summaries
+    assert verify_summaries[-1].payload["status"] == "passed"
 
 
 async def test_verify_fail_creates_fix_task_and_reloops(tmp_path: Path) -> None:

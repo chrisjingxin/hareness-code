@@ -236,10 +236,10 @@ async def test_fresh_database_has_compose_tables_at_current_schema(tmp_path: Pat
     project.mkdir()
     persistence = await ThreadPersistence.open(project=project, home=home)
     try:
-        assert tp_module._SCHEMA_VERSION == 12
+        assert tp_module._SCHEMA_VERSION >= 12
         connection = sqlite3.connect(persistence.database_path)
         try:
-            assert connection.execute("PRAGMA user_version").fetchone()[0] == 12
+            assert connection.execute("PRAGMA user_version").fetchone()[0] == tp_module._SCHEMA_VERSION
             tables = {
                 row[0]
                 for row in connection.execute(
@@ -248,6 +248,7 @@ async def test_fresh_database_has_compose_tables_at_current_schema(tmp_path: Pat
             }
             assert "harness_compose_runs" in tables
             assert "harness_compose_artifacts" in tables
+            assert "harness_compose_activities" in tables
         finally:
             connection.close()
     finally:
@@ -346,8 +347,8 @@ async def test_concurrent_run_writes_are_linearized(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_v11_database_migrates_to_v12_preserving_old_data(tmp_path: Path) -> None:
-    """旧库升级到 v12 保留既有 Thread 数据，并新建 Compose 表。"""
+async def test_v11_database_migrates_to_current_preserving_old_data(tmp_path: Path) -> None:
+    """旧库升级到当前 schema 保留既有 Thread 数据，并新建 Compose 表。"""
     home = tmp_path / "home"
     project = tmp_path / "project"
     project.mkdir()
@@ -358,6 +359,7 @@ async def test_v11_database_migrates_to_v12_preserving_old_data(tmp_path: Path) 
     # 把当前库人为降级成 v11：删除 Compose 表并把版本号改回 11。
     connection = sqlite3.connect(database)
     try:
+        connection.execute("DROP TABLE IF EXISTS harness_compose_activities")
         connection.execute("DROP TABLE harness_compose_artifacts")
         connection.execute("DROP TABLE harness_compose_runs")
         connection.execute(
@@ -375,9 +377,12 @@ async def test_v11_database_migrates_to_v12_preserving_old_data(tmp_path: Path) 
     try:
         connection = sqlite3.connect(database)
         try:
-            assert connection.execute("PRAGMA user_version").fetchone()[0] == 12
+            assert connection.execute("PRAGMA user_version").fetchone()[0] == tp_module._SCHEMA_VERSION
             assert connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='harness_compose_runs'"
+            ).fetchone() is not None
+            assert connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='harness_compose_activities'"
             ).fetchone() is not None
             assert connection.execute(
                 "SELECT first_message FROM harness_threads WHERE thread_id='old-thread'"

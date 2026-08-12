@@ -1551,6 +1551,7 @@ class AgentHost:
         return {
             "thread": _thread_summary_payload(opened.summary),
             "messages": [_thread_message_payload(message) for message in opened.messages],
+            "compose_activities": list(opened.compose_activities),
         }
 
     async def _handle_threads_watch(self, params: dict[str, Any], _id: str) -> dict[str, object]:

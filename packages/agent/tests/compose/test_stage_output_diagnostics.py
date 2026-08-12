@@ -36,6 +36,9 @@ class _EmptyFinalEngine:
     async def ainvoke(self, messages: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
         return {"messages": [AIMessage(content="")]}
 
+    async def astream(self, stream_input: Any, **kwargs: Any):
+        yield ("messages", (AIMessage(content=""), {}))
+
     @property
     def graph(self) -> "_EmptyFinalEngine":
         return self
@@ -202,6 +205,15 @@ class _ChattyFinalEngine:
 
     async def ainvoke(self, messages: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
         return {"messages": [AIMessage(content='好的，我来实现搜索功能：\n{"goal": "实现搜索"}')]}
+
+    async def astream(self, stream_input: Any, **kwargs: Any):
+        yield (
+            "messages",
+            (
+                AIMessage(content='好的，我来实现搜索功能：\n{"goal": "实现搜索"}'),
+                {},
+            ),
+        )
 
     @property
     def graph(self) -> "_ChattyFinalEngine":

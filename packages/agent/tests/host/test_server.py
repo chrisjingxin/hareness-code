@@ -2606,8 +2606,9 @@ api_key_env = "FAST_KEY"
 
 async def test_missing_interaction_capability_fails_closed_without_reverse_request():
     """无头客户端不声明交互能力时，服务端直接返回拒绝而不发送 request。"""
-    from harness_agent.host.run_coordinator import ConnectionRef, InteractionRequest, RunRef
+    from harness_agent.host.run_coordinator import ConnectionRef, RunRef
     from harness_agent.host.agent_host import AgentHost
+    from harness_agent.runtime.interactions import InteractionRequest
 
     server = AgentHost(allow_echo=True)
     frames: list[dict[str, Any]] = []
