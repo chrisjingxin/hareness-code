@@ -8,13 +8,20 @@ from pathlib import Path
 
 import pytest
 
-from harness_agent.compose.models import ComposeWorkItemStatus, ThreadMode
+from harness_agent.compose.models import (
+    ComposeDocumentKind,
+    ComposeWorkItemStatus,
+    ThreadMode,
+)
 from harness_agent.runtime.execution_binding import RunExecutionBinding
 from harness_agent.threads.compose_work_item_store import (
     BindRunToWorkItem,
+    ComposeDocumentReference,
     ComposeWorkItemStoreError,
     CreateComposeWorkItem,
+    RecordComposeConfirmation,
     TerminalizeComposeWorkItem,
+    UpsertComposeDocumentReference,
 )
 from harness_agent.threads.thread_persistence import (
     AcceptRun,
@@ -219,6 +226,99 @@ async def test_reopen_restores_active_work_item_from_sqlite_facts(tmp_path: Path
         await reopened.close()
 
 
+async def test_document_reference_and_confirmation_persist_only_digest_facts(
+    tmp_path: Path,
+) -> None:
+    """SQLite 只记录 Markdown 路径/摘要/版本/确认，不复制语义正文。"""
+    persistence = await _persistence(tmp_path)
+    try:
+        await _prepare_compose_thread(persistence)
+        store = persistence.compose_work_item_store()
+        await store.create(_create("work-1"))
+        first = await store.upsert_document_reference(
+            UpsertComposeDocumentReference(
+                work_item_id="work-1",
+                kind=ComposeDocumentKind.TASK,
+                relative_path="docs/compose/compose-store/task.md",
+                content_digest="a" * 64,
+                revision=1,
+                updated_at_ms=1_700_000_000_100,
+                lineage=("origin:work-1",),
+            )
+        )
+        assert first == ComposeDocumentReference(
+            work_item_id="work-1",
+            kind=ComposeDocumentKind.TASK,
+            relative_path="docs/compose/compose-store/task.md",
+            current_digest="a" * 64,
+            confirmed_digest=None,
+            revision=1,
+            updated_at_ms=1_700_000_000_100,
+            lineage=("origin:work-1",),
+        )
+
+        await store.record_confirmation(
+            RecordComposeConfirmation(
+                work_item_id="work-1",
+                confirmation_id="confirmation-task-1",
+                confirmation_kind="task",
+                document_digests=("a" * 64,),
+                confirmed_at_ms=1_700_000_000_200,
+            )
+        )
+        assert await store.load_confirmation_digests("work-1", "task") == frozenset(
+            {"a" * 64}
+        )
+        assert await store.load_confirmation_groups("work-1", "task") == (
+            frozenset({"a" * 64}),
+        )
+        assert (await store.load_document_references("work-1"))[0].confirmed_digest == "a" * 64
+
+        with pytest.raises(ComposeWorkItemStoreError, match="COMPOSE_CONFIRMATION_CONFLICT"):
+            await store.record_confirmation(
+                RecordComposeConfirmation(
+                    work_item_id="work-1",
+                    confirmation_id="confirmation-task-1",
+                    confirmation_kind="spec",
+                    document_digests=("a" * 64,),
+                    confirmed_at_ms=1_700_000_000_225,
+                )
+            )
+
+        with pytest.raises(
+            ComposeWorkItemStoreError,
+            match="COMPOSE_CONFIRMATION_DOCUMENT_STALE",
+        ):
+            await store.record_confirmation(
+                RecordComposeConfirmation(
+                    work_item_id="work-1",
+                    confirmation_id="confirmation-spec-1",
+                    confirmation_kind="spec",
+                    document_digests=("c" * 64,),
+                    confirmed_at_ms=1_700_000_000_250,
+                )
+            )
+        assert await store.load_confirmation_digests("work-1", "spec") == frozenset()
+
+        updated = await store.upsert_document_reference(
+            UpsertComposeDocumentReference(
+                work_item_id="work-1",
+                kind=ComposeDocumentKind.TASK,
+                relative_path="docs/compose/compose-store/task.md",
+                content_digest="b" * 64,
+                revision=2,
+                updated_at_ms=1_700_000_000_300,
+                lineage=("origin:work-1", "revision:2"),
+            )
+        )
+        assert updated.confirmed_digest is None
+        assert await store.load_confirmation_digests("work-1", "task") == frozenset(
+            {"a" * 64}
+        )
+    finally:
+        await persistence.close()
+
+
 async def test_v13_database_rebuilds_work_item_schema_without_old_compose_fallback(
     tmp_path: Path,
 ) -> None:
@@ -254,8 +354,102 @@ async def test_v13_database_rebuilds_work_item_schema_without_old_compose_fallba
         await rebuilt.close()
 
 
-async def test_v14_database_missing_work_item_table_is_rejected(tmp_path: Path) -> None:
-    """已标为 v14 却缺 Work Item 表时不能静默启动或回落旧 ComposeRun。"""
+async def test_v14_database_upgrades_document_reference_columns(tmp_path: Path) -> None:
+    """旧 v14 Work Item 数据库升级后补齐文档 revision/lineage 列。"""
+    persistence = await _persistence(tmp_path)
+    database = persistence.database_path
+    await persistence.close()
+
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            "ALTER TABLE harness_compose_work_item_documents DROP COLUMN current_revision"
+        )
+        connection.execute(
+            "ALTER TABLE harness_compose_work_item_documents DROP COLUMN lineage_json"
+        )
+        connection.execute("PRAGMA user_version=14")
+        connection.commit()
+    finally:
+        connection.close()
+
+    upgraded = await ThreadPersistence.open(project=tmp_path / "project", home=tmp_path / "home")
+    try:
+        cursor = await upgraded._connection.execute(
+            "PRAGMA table_info(harness_compose_work_item_documents)"
+        )
+        columns = {str(row[1]) for row in await cursor.fetchall()}
+        await cursor.close()
+        assert {"current_revision", "lineage_json"} <= columns
+    finally:
+        await upgraded.close()
+
+
+async def test_v15_database_upgrades_confirmation_groups_to_v16(tmp_path: Path) -> None:
+    """缺少 group identity 的旧确认仅保留审计，不能伪造新的 typed gate。"""
+    persistence = await _persistence(tmp_path)
+    database = persistence.database_path
+    project_fingerprint = persistence.project_fingerprint
+    await persistence.close()
+
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("DROP TABLE harness_compose_work_item_confirmations")
+        connection.execute(
+            """
+            CREATE TABLE harness_compose_work_item_confirmations
+            (
+                project_fingerprint TEXT NOT NULL,
+                work_item_id TEXT NOT NULL,
+                confirmation_kind TEXT NOT NULL,
+                document_digest TEXT NOT NULL,
+                confirmed_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (project_fingerprint, work_item_id, confirmation_kind, document_digest)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO harness_compose_work_item_confirmations (
+                project_fingerprint, work_item_id, confirmation_kind,
+                document_digest, confirmed_at_ms
+            ) VALUES (?, ?, 'plan', ?, ?)
+            """,
+            (project_fingerprint, "legacy-work", "a" * 64, 1_700_000_000_000),
+        )
+        connection.execute("PRAGMA user_version=15")
+        connection.commit()
+    finally:
+        connection.close()
+
+    upgraded = await ThreadPersistence.open(project=tmp_path / "project", home=tmp_path / "home")
+    try:
+        cursor = await upgraded._connection.execute(
+            "PRAGMA table_info(harness_compose_work_item_confirmations)"
+        )
+        columns = {str(row[1]) for row in await cursor.fetchall()}
+        await cursor.close()
+        assert {"confirmation_id", "decision"} <= columns
+        cursor = await upgraded._connection.execute(
+            """
+            SELECT confirmation_id, decision
+            FROM harness_compose_work_item_confirmations
+            WHERE project_fingerprint = ? AND work_item_id = ?
+            """,
+            (project_fingerprint, "legacy-work"),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        assert tuple(row) == ("legacy:plan", "legacy_unverified")
+        assert await upgraded.compose_work_item_store().load_confirmation_groups(
+            "legacy-work", "plan"
+        ) == ()
+    finally:
+        await upgraded.close()
+
+
+async def test_v16_database_missing_work_item_table_is_rejected(tmp_path: Path) -> None:
+    """已标为 v16 却缺 Work Item 表时不能静默启动或回落旧 ComposeRun。"""
     persistence = await _persistence(tmp_path)
     database = persistence.database_path
     await persistence.close()
@@ -271,7 +465,7 @@ async def test_v14_database_missing_work_item_table_is_rejected(tmp_path: Path) 
         await ThreadPersistence.open(project=tmp_path / "project", home=tmp_path / "home")
 
 
-async def test_v14_database_with_nonunique_active_index_is_rejected(tmp_path: Path) -> None:
+async def test_v16_database_with_nonunique_active_index_is_rejected(tmp_path: Path) -> None:
     """唯一 nonterminal 约束的索引被篡改后必须在 open 时 fail closed。"""
     persistence = await _persistence(tmp_path)
     database = persistence.database_path
@@ -297,10 +491,10 @@ async def test_v14_database_with_nonunique_active_index_is_rejected(tmp_path: Pa
         await ThreadPersistence.open(project=tmp_path / "project", home=tmp_path / "home")
 
 
-async def test_v14_database_missing_work_item_terminal_column_is_rejected(
+async def test_v16_database_missing_work_item_terminal_column_is_rejected(
     tmp_path: Path,
 ) -> None:
-    """已标为 v14 的 Work Item 表不能缺少 terminal 事实字段。"""
+    """已标为 v16 的 Work Item 表不能缺少 terminal 事实字段。"""
     persistence = await _persistence(tmp_path)
     database = persistence.database_path
     await persistence.close()

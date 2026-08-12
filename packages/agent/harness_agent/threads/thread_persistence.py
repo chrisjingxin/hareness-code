@@ -43,7 +43,7 @@ from harness_agent.threads.context_projection import (
 )
 from harness_agent.threads.runtime_state import RuntimeStateError, RuntimeStateSnapshot
 
-_SCHEMA_VERSION = 14
+_SCHEMA_VERSION = 16
 _MAX_PREVIEW_CHARS = 160
 _MAX_INLINE_TOOL_BYTES = 64 * 1024
 _TRANSCRIPT_KINDS = ("user", "assistant", "tool", "context")
@@ -4294,6 +4294,12 @@ class ThreadPersistence:
             if version < 14:
                 await self._add_compose_work_item_tables()
                 version = 14
+            if version < 15:
+                await self._add_compose_document_reference_columns()
+                version = 15
+            if version < 16:
+                await self._add_compose_confirmation_groups()
+                version = 16
             await self._connection.execute(f"PRAGMA user_version={version}")
             final_fingerprint = await self._database_fingerprint_async()
             await self._validate_final_database_async(final_fingerprint)
@@ -5017,6 +5023,20 @@ class ThreadPersistence:
                     ),
                 ]
             )
+        if version >= 15:
+            required.append(
+                (
+                    "harness_compose_work_item_documents",
+                    ("current_revision", "lineage_json"),
+                )
+            )
+        if version >= 16:
+            required.append(
+                (
+                    "harness_compose_work_item_confirmations",
+                    ("confirmation_id", "decision"),
+                )
+            )
 
         for table_name, expected_columns in required:
             actual_columns = await self._table_columns_async(table_name)
@@ -5062,6 +5082,8 @@ class ThreadPersistence:
                     "harness_compose_work_item_run_bindings_item",
                 ]
             )
+        if version >= 16:
+            required_indexes.append("harness_compose_work_item_confirmations_gate")
         for index_name in required_indexes:
             cursor = await self._connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
@@ -6329,6 +6351,8 @@ class ThreadPersistence:
                 relative_path TEXT NOT NULL,
                 current_digest TEXT,
                 confirmed_digest TEXT,
+                current_revision INTEGER NOT NULL DEFAULT 0,
+                lineage_json TEXT NOT NULL DEFAULT '[]',
                 updated_at_ms INTEGER NOT NULL,
                 PRIMARY KEY (project_fingerprint, work_item_id, document_kind)
             )
@@ -6340,11 +6364,24 @@ class ThreadPersistence:
             (
                 project_fingerprint TEXT NOT NULL,
                 work_item_id TEXT NOT NULL,
+                confirmation_id TEXT NOT NULL,
                 confirmation_kind TEXT NOT NULL,
                 document_digest TEXT NOT NULL,
+                decision TEXT NOT NULL,
                 confirmed_at_ms INTEGER NOT NULL,
-                PRIMARY KEY (project_fingerprint, work_item_id, confirmation_kind, document_digest)
+                PRIMARY KEY (
+                    project_fingerprint, work_item_id, confirmation_id, document_digest
+                )
             )
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS harness_compose_work_item_confirmations_gate
+                ON harness_compose_work_item_confirmations(
+                    project_fingerprint, work_item_id, confirmation_kind,
+                    confirmation_id, confirmed_at_ms
+                )
             """
         )
         await self._connection.execute(
@@ -6414,6 +6451,92 @@ class ThreadPersistence:
             CREATE INDEX IF NOT EXISTS harness_compose_work_item_run_bindings_item
                 ON harness_compose_work_item_run_bindings(
                     project_fingerprint, work_item_id, created_at_ms
+                )
+            """
+        )
+
+    async def _add_compose_document_reference_columns(self) -> None:
+        """v15 补齐文档 revision/lineage，旧摘要不复制为 Markdown 正文。"""
+        cursor = await self._connection.execute(
+            "PRAGMA table_info(harness_compose_work_item_documents)"
+        )
+        columns = {str(row[1]) for row in await cursor.fetchall()}
+        await cursor.close()
+        if "current_revision" not in columns:
+            await self._connection.execute(
+                """
+                ALTER TABLE harness_compose_work_item_documents
+                    ADD COLUMN current_revision INTEGER NOT NULL DEFAULT 0
+                """
+            )
+        if "lineage_json" not in columns:
+            await self._connection.execute(
+                """
+                ALTER TABLE harness_compose_work_item_documents
+                    ADD COLUMN lineage_json TEXT NOT NULL DEFAULT '[]'
+                """
+            )
+
+    async def _add_compose_confirmation_groups(self) -> None:
+        """v16 为每次 typed confirmation 固定 digest group，拒绝历史并集伪造门禁。"""
+        cursor = await self._connection.execute(
+            "PRAGMA table_info(harness_compose_work_item_confirmations)"
+        )
+        columns = {str(row[1]) for row in await cursor.fetchall()}
+        await cursor.close()
+        if {"confirmation_id", "decision"} <= columns:
+            await self._connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS harness_compose_work_item_confirmations_gate
+                    ON harness_compose_work_item_confirmations(
+                        project_fingerprint, work_item_id, confirmation_kind,
+                        confirmation_id, confirmed_at_ms
+                    )
+                """
+            )
+            return
+        await self._connection.execute(
+            """
+            CREATE TABLE harness_compose_work_item_confirmations_v16
+            (
+                project_fingerprint TEXT NOT NULL,
+                work_item_id TEXT NOT NULL,
+                confirmation_id TEXT NOT NULL,
+                confirmation_kind TEXT NOT NULL,
+                document_digest TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                confirmed_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (
+                    project_fingerprint, work_item_id, confirmation_id, document_digest
+                )
+            )
+            """
+        )
+        await self._connection.execute(
+            """
+            INSERT INTO harness_compose_work_item_confirmations_v16 (
+                project_fingerprint, work_item_id, confirmation_id,
+                confirmation_kind, document_digest, decision, confirmed_at_ms
+            )
+            SELECT project_fingerprint, work_item_id,
+                   'legacy:' || confirmation_kind,
+                   confirmation_kind, document_digest, 'legacy_unverified', confirmed_at_ms
+            FROM harness_compose_work_item_confirmations
+            """
+        )
+        await self._connection.execute("DROP TABLE harness_compose_work_item_confirmations")
+        await self._connection.execute(
+            """
+            ALTER TABLE harness_compose_work_item_confirmations_v16
+                RENAME TO harness_compose_work_item_confirmations
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE INDEX harness_compose_work_item_confirmations_gate
+                ON harness_compose_work_item_confirmations(
+                    project_fingerprint, work_item_id, confirmation_kind,
+                    confirmation_id, confirmed_at_ms
                 )
             """
         )

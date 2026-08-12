@@ -83,6 +83,16 @@ class ComposeWorkItemStatus(str, Enum):
         }
 
 
+class ComposeDocumentKind(str, Enum):
+    """Compose Work Item 固定维护的 Workspace Markdown 文档类型。"""
+
+    TASK = "task"
+    SPEC = "spec"
+    PLAN = "plan"
+    TODO = "todo"
+    REPORT = "report"
+
+
 class TaskStatus(str, Enum):
     """Plan task 的执行状态。"""
 
