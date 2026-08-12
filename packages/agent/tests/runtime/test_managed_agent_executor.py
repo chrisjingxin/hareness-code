@@ -10,6 +10,7 @@ from langchain_core.messages import AIMessageChunk
 
 from harness_agent.runtime.execution_stream import ExecutionSignal, StreamSession
 from harness_agent.runtime.managed_agent_executor import (
+    FailClosedManagedObserver,
     ManagedAgentExecutionError,
     ManagedAgentExecutor,
     ManagedAgentRequest,
@@ -222,6 +223,17 @@ async def test_pooled_runtime_releases_engine_when_run_lease_acquire_is_cancelle
         )
 
     assert events == ["engine", "finalize"]
+
+
+@pytest.mark.asyncio
+async def test_fail_closed_observer_rejects_unbound_interaction() -> None:
+    """无 UI/Interaction adapter 的 Plugin execution 不能静默自动批准。"""
+    observer = FailClosedManagedObserver()
+
+    with pytest.raises(ManagedAgentExecutionError) as error:
+        await observer.interact(object())
+
+    assert error.value.code == "MANAGED_AGENT_INTERACTION_UNAVAILABLE"
 
 
 @pytest.mark.asyncio

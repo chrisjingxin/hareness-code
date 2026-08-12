@@ -19,6 +19,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
+from harness_agent.compose.role_bindings import RoleBindingRegistry
 from harness_agent.runtime.agent_delegation import (
     AgentDelegator,
     DelegationTarget,
@@ -47,10 +48,6 @@ if TYPE_CHECKING:
     from harness_agent.runtime.agent_execution import AgentExecutionRegistry
 
 STAGE_AGENT_TIMEOUT_SECONDS = 600.0
-
-# Reviewer 使用只读能力视图；作者 execution 不得兼任 Reviewer。
-REVIEWER_STAGES = frozenset({"requirement-reviewer", "code-reviewer"})
-PLANNING_STAGES = frozenset({"understand", "plan"})
 
 
 class StageRequest:
@@ -163,12 +160,8 @@ def parse_structured_output(text: str) -> dict[str, Any]:
 
 
 def compose_scope_stage(stage_agent_id: str) -> str:
-    """把 stage Agent id 映射为协议 compose_scope.stage 枚举。"""
-    if stage_agent_id in REVIEWER_STAGES:
-        return "review"
-    if stage_agent_id in {"understand", "plan", "build", "verify"}:
-        return stage_agent_id
-    return "build"
+    """把固定内置 role 映射为协议 compose_scope.stage 枚举。"""
+    return RoleBindingRegistry().resolve(stage_agent_id).compose_stage
 
 
 def make_activity_scope(
@@ -310,18 +303,20 @@ class ManagedStageAgentPort:
         self._resolve_spec = resolve_spec
         self._config_home = config_home
         self._workspace = workspace
+        self._role_bindings = RoleBindingRegistry()
 
     async def run(
         self,
         request: StageRequest,
         observer: StageObserver | None = None,
     ) -> StageResult:
-        """解析可信 spec（Reviewer 用只读视图，全部 stage 关闭 ask_user）。"""
+        """解析固定内置 role 的可信 spec，未知 role 在触及 spec 前拒绝。"""
+        role = self._role_bindings.resolve(request.stage)
         spec = self._resolve_spec(
             request.profile_key,
-            headless=True,
-            readonly=request.stage in REVIEWER_STAGES,
-            planning=request.stage in PLANNING_STAGES,
+            headless=role.headless,
+            readonly=role.readonly,
+            planning=role.planning,
         )
         if spec is None:
             raise RuntimeError("COMPOSE_STAGE_SPEC_MISSING")
@@ -337,7 +332,7 @@ class ManagedStageAgentPort:
                 observer.bind_execution(
                     execution_id=child_ref.execution_id,
                     parent_execution_id=child_ref.parent_execution_id,
-                    agent_id=request.stage,
+                    agent_id=role.role_id,
                 )
             context_snapshot = ContextLifecycle(
                 spec.workspace,
@@ -414,10 +409,10 @@ class ManagedStageAgentPort:
             return {"final": str(result.final_content)}
 
         target = DelegationTarget(
-            agent_id=request.stage,
+            agent_id=role.role_id,
             mode=ExecutionMode.MANAGED,
             runner=invoke,
-            description=f"Compose {request.stage} stage",
+            description=f"Compose {role.role_id} stage",
             model=spec.model_view,
             policy_fingerprint=spec.effective_policy.fingerprint,
             engine_profile_key=profile.profile_key,
@@ -428,7 +423,7 @@ class ManagedStageAgentPort:
         from harness_agent.runtime.agent_delegation import DelegateAgent
 
         idempotency_key = hashlib.sha256(
-            f"{request.stage}:{request.parent_ref.execution_id}:{request.invocation_id}:{hashlib.sha256(request.task.encode('utf-8')).hexdigest()[:16]}".encode(
+            f"{role.role_id}:{request.parent_ref.execution_id}:{request.invocation_id}:{hashlib.sha256(request.task.encode('utf-8')).hexdigest()[:16]}".encode(
                 "utf-8"
             )
         ).hexdigest()[:20]
@@ -438,13 +433,13 @@ class ManagedStageAgentPort:
         # Agent 不能再委派），不扩大任何委派权限。
         stage_policy = DelegationPolicy(
             enabled=True,
-            allowed_agents=(request.stage,),
+            allowed_agents=(role.role_id,),
             max_depth=1,
             max_parallelism=1,
         )
         command = DelegateAgent(
             parent_ref=request.parent_ref,
-            target_agent_id=request.stage,
+            target_agent_id=role.role_id,
             task=request.task,
             idempotency_key=idempotency_key,
             delegation_policy=stage_policy,

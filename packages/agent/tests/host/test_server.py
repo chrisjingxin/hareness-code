@@ -374,9 +374,12 @@ api_key_env = "HARNESS_MANAGED_PLUGIN_TEST_KEY"
     class FakeGraph:
         """捕获 Managed child 传入的显式 RunContext。"""
 
-        async def ainvoke(self, *_args: Any, context: Any, **_kwargs: Any) -> dict[str, Any]:
+        async def astream(self, *_args: Any, context: Any, **_kwargs: Any):
+            """以流式事件模拟 Managed executor 的真实 Graph 调用。"""
+            from langchain_core.messages import AIMessage
+
             captured["context"] = context
-            return {"messages": [SimpleNamespace(content="PLUGIN_REVIEW_OK")]}
+            yield ("messages", (AIMessage(content="PLUGIN_REVIEW_OK"), {}))
 
     class FakeRunLease:
         async def release(self) -> None:

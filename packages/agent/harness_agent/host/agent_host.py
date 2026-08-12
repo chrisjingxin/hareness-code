@@ -2530,12 +2530,17 @@ class AgentHost:
         config = self._config
         if config is None or config.model_catalog is None:
             return ()
-        from langchain_core.messages import HumanMessage
-
         from harness_agent.runtime.agent_delegation import (
+            AgentDelegationError,
             DelegationTarget,
             child_execution_ref,
-            managed_engine_runner,
+        )
+        from harness_agent.runtime.managed_agent_executor import (
+            FailClosedManagedObserver,
+            ManagedAgentExecutionError,
+            ManagedAgentExecutor,
+            ManagedAgentRequest,
+            acquire_pooled_agent_runtime,
         )
 
         catalog = self._require_agent_catalog(config)
@@ -2577,12 +2582,12 @@ class AgentHost:
             await persistence.persist_agent_engine_profile(child_profile)
 
             async def invoke(
-                engine: AgentEngine,
                 command: Any,
                 *,
                 resolved: ResolvedAgentSpec = child_spec,
+                profile: AgentEngineProfile = child_profile,
             ) -> Mapping[str, Any]:
-                """在独立 checkpoint namespace 中运行 Plugin Agent。"""
+                """构造 capture_only request，并由统一 executor 运行 Plugin Agent。"""
                 child_ref = child_execution_ref(command)
                 context_snapshot = ContextLifecycle(
                     resolved.workspace,
@@ -2608,27 +2613,60 @@ class AgentHost:
                     cancellation_token=command.cancellation_token,
                     delegation_policy=resolved.effective_policy.delegation,
                 )
-                result = await engine.graph.ainvoke(
-                    {"messages": [HumanMessage(content=command.task)]},
-                    config={
-                        "configurable": {
-                            "thread_id": child_ref.thread_id,
-                            "checkpoint_ns": child_ref.checkpoint_namespace(
-                                resolved.project_fingerprint
-                            ),
-                        }
-                    },
-                    context=context,
+                checkpoint_namespace = child_ref.checkpoint_namespace(
+                    resolved.project_fingerprint
                 )
-                messages = result.get("messages", ()) if isinstance(result, Mapping) else ()
-                final = getattr(messages[-1], "content", "") if messages else ""
-                return {"final": str(final)}
+
+                async def acquire_runtime():
+                    """把 Plugin Profile 的 pool lease 收敛到 Managed executor。"""
+                    return await acquire_pooled_agent_runtime(
+                        pool=pool,
+                        profile=profile,
+                        run_context=context,
+                        graph_config=lambda namespace: {
+                            "configurable": {
+                                "thread_id": child_ref.thread_id,
+                                "checkpoint_ns": namespace,
+                            }
+                        },
+                    )
+
+                snapshot_id = getattr(resolved.skill_registry, "snapshot_id", None)
+                managed_request = ManagedAgentRequest(
+                    execution_ref=child_ref.execution_id,
+                    parent_execution_ref=child_ref.parent_execution_id,
+                    run_id=child_ref.run_id,
+                    input=command.task,
+                    checkpoint_namespace=checkpoint_namespace,
+                    output_policy="capture_only",
+                    runtime_provider=acquire_runtime,
+                    is_cancelled=lambda: command.cancellation_token.cancelled,
+                    idempotency_key=command.idempotency_key,
+                    agent_spec=resolved,
+                    interaction_policy=resolved.effective_policy,
+                    timeout_seconds=command.timeout_seconds,
+                    required_skill_snapshot_ids=(snapshot_id,)
+                    if isinstance(snapshot_id, str) and snapshot_id
+                    else (),
+                )
+                try:
+                    result = await ManagedAgentExecutor().execute(
+                        managed_request,
+                        FailClosedManagedObserver(),
+                    )
+                except ManagedAgentExecutionError as exc:
+                    if exc.code == "RUN_CANCELLED":
+                        raise asyncio.CancelledError from exc
+                    raise AgentDelegationError(
+                        "PLUGIN_AGENT_EXECUTION_FAILED", exc.code
+                    ) from exc
+                return {"final": result.final_content}
 
             targets.append(
                 DelegationTarget(
                     agent_id=definition.agent_id,
                     mode=ExecutionMode.MANAGED,
-                    runner=managed_engine_runner(pool, child_profile, invoke),
+                    runner=invoke,
                     description=definition.description or definition.purpose,
                     model=child_spec.model_view,
                     policy_fingerprint=child_spec.effective_policy.fingerprint,

@@ -67,6 +67,42 @@ class ManagedAgentObserver(ExecutionStreamPorts, Protocol):
         """在 runtime release 前持久化 adapter 的最终投影。"""
 
 
+class FailClosedManagedObserver:
+    """不向用户暴露 child stream 时使用的安全 observer。
+
+    Plugin Agent 的显式 task 入口当前不提供 child Interaction UI。该 observer
+    丢弃 capture_only 信号，但任何审批或提问都会 fail closed，绝不默认批准。
+    """
+
+    def on_model_round(self) -> None:
+        """无 child progress 投影时不产生额外 root event。"""
+        return None
+
+    async def on_execution_complete(self, _result: "ManagedAgentResult") -> None:
+        """Plugin adapter 直接读取 result，不需要额外持久化。"""
+        return None
+
+    def emit(self, _signal: object) -> None:
+        """capture_only child signal 不进入父 Agent 的公开事件流。"""
+        return None
+
+    async def interact(self, _request: object) -> object:
+        """拒绝未显式绑定的 child Interaction，避免绕过 Policy/审批界面。"""
+        raise ManagedAgentExecutionError("MANAGED_AGENT_INTERACTION_UNAVAILABLE")
+
+    async def observe_message(self, _chunk: object, _session: StreamSession) -> bool:
+        """Plugin child 不写 root Transcript；只返回最终结构化结果。"""
+        return False
+
+    async def after_tool_boundary(self) -> None:
+        """无 root Transcript 边界需要 flush。"""
+        return None
+
+    def on_stream_event(self) -> None:
+        """Plugin child 没有额外 context projection。"""
+        return None
+
+
 RuntimeProvider = Callable[[], Awaitable[ManagedAgentRuntime]]
 ExecutionStarter = Callable[[str], Awaitable[None]]
 

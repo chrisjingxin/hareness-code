@@ -206,6 +206,33 @@ async def test_managed_stage_port_uses_readonly_planning_spec() -> None:
     assert requests == [(True, False, True)]
 
 
+async def test_managed_stage_port_rejects_unbound_plugin_role_before_spec_resolution() -> None:
+    """Activity 只接受固定内置角色，不能把 Plugin ID 当作 stage 自动执行。"""
+    registry, root = await _registry_with_root()
+
+    def resolve_spec(*_args: Any, **_kwargs: Any) -> _FakeSpec:
+        raise AssertionError("unbound role must not resolve an Agent spec")
+
+    port = ManagedStageAgentPort(
+        registry=registry,
+        pool=_FakePool(_FakeLease(_FakeEngine(output="{}"))),  # type: ignore[arg-type]
+        resolve_spec=resolve_spec,
+        config_home=Path("."),
+        workspace=Path("."),
+    )
+
+    with pytest.raises(ValueError, match="COMPOSE_ROLE_NOT_FOUND"):
+        await port.run(
+            StageRequest(
+                stage="plugin-reviewer",
+                task="审查当前变更",
+                parent_ref=root,
+                profile_key="stage-profile",
+                cancellation_token=RunCancellationToken(),
+            )
+        )
+
+
 async def test_managed_stage_port_schema_retry_gets_fresh_execution() -> None:
     """同一 stage/task 重试必须重新调用模型，而不是重启已终结 execution。"""
     engine = _FakeEngine(output='{"goal": "实现搜索"}')
