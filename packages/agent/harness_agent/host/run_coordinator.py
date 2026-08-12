@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from harness_agent.compose.workflow import ComposeServices
+from harness_agent.compose.models import ThreadMode
 from harness_agent.host.run_execution import (
     AdapterOutcome,
     BuildRunAdapter,
@@ -650,11 +651,14 @@ class RunCoordinator:
                             message=command.message,
                             binding=binding,
                             context_snapshot=preparation.context_snapshot,
+                            mode=ThreadMode(command.mode),
                         )
                     )
                 except ThreadPersistenceError as exc:
                     if str(exc) == "RUN_EXECUTION_BINDING_CONFLICT":
                         raise RunError("RUN_ID_CONFLICT") from exc
+                    if str(exc) == "THREAD_MODE_LOCKED":
+                        raise RunError("THREAD_MODE_LOCKED") from exc
                     raise
                 if not acceptance.created:
                     await self._release_snapshot_reservation(preparation)

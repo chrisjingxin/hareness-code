@@ -58,6 +58,31 @@ class ComposeRunStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+class ThreadMode(str, Enum):
+    """Thread 首个有效 Run 冻结的工作模式。"""
+
+    BUILD = "build"
+    COMPOSE = "compose"
+
+
+class ComposeWorkItemStatus(str, Enum):
+    """跨 Run 持续的 Compose Work Item 生命周期状态。"""
+
+    ACTIVE = "active"
+    WAITING_USER = "waiting_user"
+    BLOCKED = "blocked"
+    COMPLETED = "completed"
+    ABANDONED = "abandoned"
+
+    @property
+    def terminal(self) -> bool:
+        """只有完成和放弃会释放同 Thread 的 active Work Item 槽位。"""
+        return self in {
+            ComposeWorkItemStatus.COMPLETED,
+            ComposeWorkItemStatus.ABANDONED,
+        }
+
+
 class TaskStatus(str, Enum):
     """Plan task 的执行状态。"""
 
@@ -121,6 +146,27 @@ class ComposeStoreError(RuntimeError):
     def __init__(self, code: str, message: str | None = None) -> None:
         self.code = code
         super().__init__(f"{code}: {message}" if message else code)
+
+
+@dataclass(frozen=True, slots=True)
+class ComposeWorkItem:
+    """Compose 长期研发目标的持久化投影；正文由后续 Markdown store 管理。"""
+
+    work_item_id: str
+    thread_id: str
+    slug: str
+    goal: str
+    status: ComposeWorkItemStatus
+    revision: int
+    created_at_ms: int
+    updated_at_ms: int
+    terminal_at_ms: int | None = None
+    amends_work_item_id: str | None = None
+
+    @property
+    def terminal(self) -> bool:
+        """返回 Work Item 是否不可再由普通 Turn 恢复执行。"""
+        return self.status.terminal
 
 
 @dataclass(frozen=True, slots=True)

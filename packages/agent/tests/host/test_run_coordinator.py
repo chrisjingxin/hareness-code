@@ -36,6 +36,7 @@ from harness_agent.host.run_execution import (
     _translate_stream_event,
 )
 from harness_agent.runtime.execution_binding import ExecutionRef
+from harness_agent.compose.models import ThreadMode
 from harness_agent.threads.thread_persistence import (
     ThreadPersistence,
     ThreadPersistenceError,
@@ -334,6 +335,59 @@ async def test_compose_adapter_stub_has_single_terminal() -> None:
     assert [event.type for event in events] == ["run.failed"]
     assert events[0].payload["error"]["code"] == "COMPOSE_ADAPTER_NOT_READY"
     await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_coordinator_persists_start_mode_as_thread_mode(tmp_path) -> None:
+    """真实 StartRun 必须把 mode 传入同一受理事务，不能默认为 build。"""
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    persistence = await ThreadPersistence.open(project=project, home=home)
+
+    async def prepare(command, _persistence) -> RunPreparation:
+        return RunPreparation(
+            execution_binding=make_test_binding(command.thread_id, command.run_id)
+        )
+
+    async def persistence_provider() -> ThreadPersistence:
+        return persistence
+
+    coordinator = RunCoordinator(
+        persistence_provider=persistence_provider,
+        preparation_provider=prepare,
+        runtime_provider=_noop_runtime,
+        interaction_port=_NoopInteraction(),
+    )
+    try:
+        execution = await coordinator.start(
+            StartRun(
+                mode="build",
+                thread_id="thread-mode",
+                run_id="run-build",
+                message="先以 Build 开始",
+            ),
+            ConnectionRef("owner"),
+        )
+        assert (await _events(execution))[-1].type == "run.completed"
+        assert (
+            await persistence.compose_work_item_store().load_thread_mode("thread-mode")
+        ) is ThreadMode.BUILD
+
+        with pytest.raises(RunError, match="THREAD_MODE_LOCKED") as locked:
+            await coordinator.start(
+                StartRun(
+                    mode="compose",
+                    thread_id="thread-mode",
+                    run_id="run-compose",
+                    message="不能切换模式",
+                ),
+                ConnectionRef("owner"),
+            )
+        assert locked.value.code == "THREAD_MODE_LOCKED"
+    finally:
+        await coordinator.close()
+        await persistence.close()
 
 
 @pytest.mark.asyncio
