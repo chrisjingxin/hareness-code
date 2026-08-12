@@ -1,0 +1,161 @@
+---
+id: HC-096
+title: 建立受控 Delegation 的 Inline/Managed 执行策略
+priority: P0
+status: 已完成
+owner: codex
+branch: master
+scope: 建立受控 delegate seam，让根 Agent 按 Agent ID 派发角色任务，并由系统在 Inline 与 Managed 两种策略间选择；只有需要独立图、隔离或恢复的子执行才进入 AgentEnginePool。
+acceptance: 内置 general-purpose 可走受控 Inline；需要独立模型、权限、并行或恢复的固定角色与 Plugin Agent 走 Managed；所有子执行均可审计、取消并释放其实际持有的资源。
+user_docs: docs/user/交互使用.md、docs/user/安全与沙箱.md、docs/user/模型配置.md
+developer_docs: docs/developer/architecture/架构总览.md、docs/developer/adr/0001-agent-domain-model.md
+test_evidence: cd packages/agent && .venv/bin/python -m pytest -q（545 passed, 1 skipped）；Delegation/Agent/Spec/Coordinator 局部回归 21 passed；真实 task→Inline child 集成测试通过
+references: docs/developer/adr/0001-agent-domain-model.md
+completed_at: 2026-07-30
+---
+
+## 背景
+
+当前 `create_harness_agent()` 把 Deep Agents 默认 `general-purpose` 子 Agent 直接编入根图。它拥有独立 middleware 栈，但不通过 Harness AgentEnginePool，也没有独立 AgentExecutionBinding。
+
+这不意味着必须把它改造成独立 Engine。内置、可信、短期、同步且可安全重算的 worker 默认保留
+Inline；独立模型、权限、并行、恢复、成本审计或 Plugin 边界的 Agent 才使用 Managed。
+
+目标架构要求派发一个角色时完成：
+
+```text
+target agent ID
+  → 解析 ResolvedAgentSpec
+  → 校验父级 delegation envelope
+  → 记录 AgentExecutionBinding
+  → 选择 Inline 或 Managed
+  → Managed 才 acquire AgentEnginePool + 独立 namespace
+  → Inline 调用已编译子图
+  → 返回结果并释放 lease
+```
+
+## 当前存在的问题
+
+### 1. Deep Agents 默认 task 绕过 Harness AgentEngine lifecycle
+
+子图随根图一起构建，不能独立命中、淘汰、诊断或定向失效。
+
+### 2. 子执行没有 Harness 领域身份
+
+当前无法稳定回答哪个 Agent 被派发、使用哪个模型和 Policy、谁是父 execution、是否已取消或恢复。
+
+### 3. 所有角色必须在根图构建时已知
+
+增加或修改一个角色需要重建根图。未来 Plugin Agent 和不同角色组合会导致整体图不断膨胀。
+
+### 4. delegation 安全边界尚未接通
+
+根 Agent 目前可以调用默认 task，但没有统一的 allowedAgents、maxDepth、maxParallelism 和父子 Policy 交集。
+
+## 为什么现在要修改
+
+- HC-091～HC-095 分别提供角色身份、Policy、execution state、Host 内工具锁和资源所有权。
+- 本任务是这些基础能力首次形成用户可感知多 Agent 行为的集成点。
+- 先支持固定受信角色，可以验证架构而不同时引入 Plugin 安装和 Agent Team。
+
+## 目标设计
+
+建立 Host 内部 `AgentDelegator` 或等价 deep module：
+
+```python
+class AgentDelegator:
+    async def execute(self, command: DelegateAgent) -> AgentResult: ...
+```
+
+`DelegateAgent` 只包含类型化领域输入：
+
+- parent run/execution ref；
+- target agent ID；
+- task；
+- 可选受限模型 override；
+- timeout/budget；
+- idempotency key。
+
+内部顺序：
+
+```text
+校验目标与 delegation 边界
+  → resolve AgentSpec
+  → accept child execution
+  → select Inline / Managed
+  → Inline 调用已编译子图；Managed acquire AgentEngine，工具执行复用 Host 共享锁
+  → invoke child graph
+  → translate result/terminal state
+  → release leases
+```
+
+可以继续向模型暴露 `task` 工具，但其 runnable 必须调用上述 seam，不得直接持有所有子图。
+
+## 实施步骤
+
+1. 定义最小 DelegateAgent、AgentResult、稳定错误和 cancellation contract。
+2. 接入 HC-093 的 child execution acceptance、父子关系、终态和取消传播。
+3. 接入 HC-092 的 delegation envelope 和 EffectivePolicy，校验 allowedAgents、maxDepth 与 maxParallelism。
+4. 让内置 `general-purpose` 通过 Inline adapter 执行，保留临时消息状态但不创建独立 Pool lease。
+5. 为需要不同模型、权限、并行、恢复或审计的固定角色实现 Managed adapter，复用 AgentEnginePool。
+6. 接入 HC-094 的 Host 共享工具锁与 HC-095 的资源租约；当前不假定已有 worktree/sandbox
+   resource lease，Inline 不得伪装成独立资源所有者。
+7. 让子 Agent 只返回结构化结果或最终消息，不把 private state 混入父 Agent。
+8. 增加 Inline/Managed 选择、相同角色复用、不同角色隔离、父取消、子失败、超时、池满、配置失效和恢复测试。
+
+## 范围
+
+- 支持内置、受信、固定定义的同步角色 delegation。
+- Managed 角色可以有独立模型、Prompt、Policy、Tool/Skill/MCP 视图；Inline 角色复用父图的静态资源。
+- 子 execution 受父 Run 生命周期管理。
+- 保留当前单根 Agent 使用方式；没有 delegation 时行为不变。
+
+## 非范围
+
+- 不扫描用户、项目或 Plugin Agent 目录。
+- 不实现长期后台 Agent、mailbox、peer-to-peer 消息或任务 DAG。
+- 不允许子 Agent 任意选择未授权模型或工具，也不允许 Plugin 配置强制使用 Inline。
+- 不承诺多个写 Agent 在同一工作区并行。
+
+## 验收清单
+
+- [x] Inline 与 Managed 的选择由系统规则决定，模型和 Plugin 不能自行放宽。
+- [x] 只读角色无法通过 Prompt、直接 tool call 或 delegation 获得写权限。
+- [x] 相同 Managed ResolvedAgentSpec 的子执行复用同一 AgentEngine 图；Inline 不创建独立 lease。
+- [x] 每次子执行在 AgentExecutionRegistry/RunExecutionBinding 中有完整父子、模型、Policy 和终态记录。
+- [x] 父取消、子超时和异常都会释放 Managed AgentEngine/workspace/resource lease。
+- [x] 修改一个 Managed 角色只失效该角色 AgentEngine，不重建无关角色图。
+- [x] 用户文档说明角色模型、权限和 delegation 行为。
+
+## 实现结果
+
+`AgentDelegator.execute()` 现在是唯一的受控派发 seam：
+
+```text
+target + task
+  → 校验 enabled / allowedAgents / maxDepth / maxParallelism
+  → 创建稳定 child execution
+  → 使用 Host 注册的 DelegationTarget 决定 Inline / Managed
+  → 执行并传播父取消 / timeout
+  → 写入 completed / failed / cancelled
+  → 释放实际取得的 run / Engine / resource lease
+```
+
+生产 `task` 工具已通过 contextvar 安全传入当前 `RunContext`，不能从工具参数伪造父 execution
+或 Policy。内置 `general-purpose` 使用 Inline 临时子图，父 `task` 持有 Host 写锁，子图不重复
+获取非重入锁。`managed_engine_runner()` 对固定角色和 Plugin Agent 复用 Profile 级 Pool 图，
+并在 `finally` 中释放 run lease、Engine lease 和 draining 资源。
+
+child binding 固定记录 parent、Agent ID、系统决定的模式、脱敏模型、Policy、definition、
+Engine Profile 和终态。当前 registry 随活动 Run 存在，根 Run 的持久幂等历史仍由现有
+RunExecutionBinding 保存；Managed 角色需要恢复时由其 adapter 使用 `ExecutionRef` 的独立
+checkpoint namespace。
+
+版本影响：无。生产路径直接替换 DeepAgents 默认 task 的绕过路径，不保留第二套派发入口。
+
+## 前置
+
+- HC-092
+- HC-093
+- HC-094
+- HC-095

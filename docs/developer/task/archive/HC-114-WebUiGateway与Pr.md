@@ -1,0 +1,135 @@
+---
+id: HC-114
+title: WebUiGateway 与 Presentation Handoff
+priority: P0
+status: 已完成
+owner: Antigravity
+branch: feat/zc-114-webui-gateway
+scope: 实现 PresentationCoordinator（tui-active/opening-web/web-active/returning-tui 状态机与表现层输入租约）、WebUiGateway（本地 UI 通道：状态发布、Intent 转发、revision 与租约门禁）、CLI 内部 UI 契约（state.replace/state.patch/intent/intent.outcome/handoff.state），Browser 改为 WebUiClient 消费共享 Core 视图并提交 intent；移除 Browser 的 AgentClient、attachment 认证、host.control acquire/release 与自建 Controller；删除基于 threadId 重建 TUI Controller 的恢复链与过渡重同步；UI token 短期单次绑定 Origin。
+acceptance: A-02~A-06 全部成立：Browser 源码不存在 AgentClient/authenticate/host.control/attachment token（架构测试）；TUI→Web→TUI 后 currentThreadId、Timeline、active Run、Interaction、Catalog、Selection 连续且 Controller 未重建；Handoff 只改变 Presentation owner，Host holder 始终为 owner（Host 侧 control lease 不再被 Web 触发）；非 owner 表现层只读；intent.outcome 与 requestId 一一对应，rejected 不丢草稿；UI 契约单测覆盖 schema/revision/未知消息/过大消息/重放/晚到更新；`bun run typecheck`、`bun run test`、`bun run project:check` 全绿。
+user_docs: docs/user/交互使用.md、docs/user/故障排查.md
+developer_docs: docs/developer/architecture/架构总览.md、docs/developer/architecture/adr/0002-project-host-multi-connection.md、docs/developer/architecture/adr/0003-single-interactive-core-dual-renderer.md
+test_evidence: 架构测试：grep -rn 'AgentClient|authenticate|host.control|attachment' packages/cli/src/web/ 无匹配；createInteractiveController 生产调用点仅 index.ts（tests/web/architecture.test.ts + tests/tui/architecture.test.ts 断言）；bun run typecheck 全绿；cd packages/cli && bun test 375 pass / 4 fail 均为预存 happy-dom 干扰（integration/server 单独运行全绿，与 HC-112 记录一致）；tests/presentation-coordinator 42 用例全绿（契约/状态机/网关）+ tests/web/integration.test.ts 真实 loopback WS + 真实 controller 端到端（token 认证→replace/handoff.state→ready→web-active→patch→intent outcome→return 收敛→错误 token 403）；bun run project:check 全绿；bun run test:py 599 pass（2 个 master 预存失败与本次无关）；code review（code-reviewer agent）REQUEST-CHANGES 已闭环：P0 ready 上报门（app.tsx createReadyGate + 回归测试）、P1 close 收敛楔住（coordinator cleanup 恢复守卫）、P2 超大帧 fail-closed、pending 结算、revision 文案、token TTL 起点、in-flight 死代码清理；manual Tabbit 浏览器抽查留待 HC-115 E2E fixture。补充回归修复（15eb3d0）：/web 命令能力门禁——HC-114 移除 HOST_ATTACH/HOST_CONTROL 后 host.web 的 capabilities 要求使其永远 availability 拒绝，已改为零能力要求（保留 requiresIdle），builtinCommandCapabilities/harness 同步移除 HOST_*，Web 端命令菜单过滤 host.web；验证 bun run build、bun test 376 pass / 4 预存干扰、project:check 全绿。
+references: docs/developer/task/HC-101-Thread规范记录与Plug.md、docs/developer/task/HC-102-实现单实例WebHandoff.md、docs/developer/task/HC-104-实现WebInteractiv.md、docs/developer/task/archive/HC-113-InteractiveCont.md
+completed_at: 2026-08-05
+---
+
+## 背景
+
+最终架构方案阶段 7（完成条件：TUI/Web 操作同一个 Interactive Core，Handoff 不迁移 Host control）与决策 D-02/D-03（Browser 通过 WebUiGateway 访问 Interactive Core；Handoff 改为 Presentation 输入权切换）。核心结论（方案首表）：**CLI 生命周期内只创建一个长期存在的 InteractiveController，TUI 与内置 Web UI 是同一 Interactive Core 的两个表现客户端；Handoff 只转移表现层输入权，不转移 Agent Host 控制权**。
+
+当前架构（HC-101/102/104 产物）与目标相反：
+
+```text
+当前：Browser ──WebSocket(attachment token)──> Python Agent Host（第二 Agent 客户端）
+      Browser 自建 AgentClient + initialize + host.control.acquire + 自建 InteractiveController（web/app.tsx:94-133）
+      TUI/CLI 侧 WebHandoffCoordinator 依赖 host.control.status 确认 holder（handoff-coordinator.ts:432-460）
+
+目标：Browser ──WebSocket(UI token)──> CLI WebUiGateway ──> 共享 InteractiveController（CLI 进程内）
+      Browser 只消费 state.replace/patch 视图，提交 intent；Host holder 始终是 owner
+```
+
+复用资产：`web/server.ts` 的 127.0.0.1 随机端口、Host/Origin/路径白名单、安全头与 CSP 基建；`web/connection-supervisor.ts` 的 lifecycle 状态机骨架；HC-110 的 IntentOutcome（intent.outcome 载荷）、HC-112 的 Selector（视图序列化）、HC-113 的 CLI 侧单一 Controller。
+
+## 当前存在的问题
+
+1. Browser 是第二个 Agent Host 客户端：可被 Host 拒绝、需要 attachment token 生命周期管理、违反 A-03。
+2. Handoff 通过 host.control acquire/release 转移 Host 控制权：Host 侧 ControlLease 状态机被每次 Web 接管搅动，与"Handoff 只切表现层"的目标冲突（A-04）。
+3. TUI/Web 各持一份 Controller 状态，往返必须靠"销毁重建 + threadId 恢复"（HC-113 已改 CLI 侧，本任务删除残余），无法满足 A-05 的连续性与 A-02（共享 Timeline reducer 是唯一投影）。
+4. Web 页面 bootstrap 携带 Agent endpoint/token/attachmentId（fragment），安全面大；UI token 不存在。
+
+## 为什么现在要修改
+
+- 阶段 7 是最终架构的收口：只有 Browser 停止直连 Host，D-02/D-03/A-02~A-06 才全部成立。
+- HC-101 的 ControlLease/attachment 语义保留（方案 15.1 非目标：不移除 Host 多 Connection 能力，服务未来独立客户端），本任务只是让内置 Web 不再使用它们。
+
+## 目标设计
+
+### 1. PresentationCoordinator（presentation-coordinator/coordinator.ts + state.ts，方案 §6.1/§6.2）
+
+```text
+tui-active ──/web──▶ opening-web ──browser ready + gateway authenticated──▶ web-active
+   ▲                                                                          │
+   └────────────── returning-tui ◀── return / close / timeout / CLI shutdown ──┘
+```
+
+```ts
+type PresentationOwner = "tui" | "web"
+type PresentationState =
+  | { phase: "tui-active" }
+  | { phase: "opening-web"; handoffId: string }
+  | { phase: "web-active"; handoffId: string }
+  | { phase: "returning-tui"; handoffId: string; reason: ReturnReason }
+```
+
+- 输入租约：同一时刻只有一个表现层可提交可变 intent；非 owner 可只读订阅但不可提交 Run/Interaction/Config/Skill/MCP 写操作。
+- Browser ready 前 Web 只读；web-active 后 TUI 输入锁定（WebTakeoverView 复用）；Browser 断开/刷新/归还/超时统一进入 returning-tui 收敛路径。
+- Host 侧不再参与：coordinator 不调用 host.control.status/acquire/release（HC-102 的轮询逻辑删除）。
+
+### 2. WebUiGateway 与 UI 契约（presentation-coordinator/web-ui-gateway.ts + contracts/，方案 §6.3）
+
+```ts
+type WebUiClientMessage =
+  | { type: "intent"; requestId: string; revision: number; intent: InteractiveIntent }
+  | { type: "presentation-intent"; intent: WebPresentationIntent }   // 主题/面板/焦点等本地动作，默认不进 Core
+
+type WebUiServerMessage =
+  | { type: "state.replace"; revision: number; state: WebUiState }
+  | { type: "state.patch"; revision: number; patch: WebUiPatch }
+  | { type: "intent.outcome"; requestId: string; outcome: IntentOutcome }
+  | { type: "handoff.state"; state: PresentationState }
+```
+
+- state.replace：首次连接或重同步（完整可序列化视图，来自 HC-112 Selector）；state.patch：运行期增量（高频 Timeline 分片 + 低频 Catalog 分片独立发布）。
+- revision：网关为每条消息附加单调 revision，Browser 丢弃晚到更新；intent 仅 web-active 且 revision 有效时受理。
+- intent.outcome 与 requestId 一一对应（HC-110 IntentOutcome 载荷）。
+- 契约独立版本化于 CLI 内部（presentation-coordinator/contracts/），不进入 packages/protocol。
+
+### 3. Browser 改造（web/app.tsx、application/adapter.ts、agent-transport.ts、connection-supervisor.ts、handoff-port.ts）
+
+- 删除：AgentClient 创建（app.tsx:95）、initialize（:100）、host.control.acquire（:110-113）/release（:128-131）、自建 runtime/controller（:115-117）、thread.open 恢复（:118-121）、agent-transport.ts（authenticate/WebSocketRpcTransport）、connection-supervisor 的 bindAgent、handoff-port 的 release()。
+- 新增：`WebUiClient`（WebSocket → gateway；UI token 认证）；`WebAdapter` 改为维护只读共享视图缓存（state.replace/patch）+ 本地状态（draft/theme/panel/drawer/focus/interactionDraft/toolExpansion）；共享业务动作包装为 intent{requestId,revision}；按 intent.outcome 决定清空 draft/关闭面板/保留输入；页面刷新/断线重连走 state.replace 重同步；handoff 结束进入只读等待。
+- 安全（方案 §6.4）：UI token 短期、单次、绑定 Origin；单 handoffId 只允许一个 active renderer；严格校验 Origin/Host/Path/消息类型/消息大小/revision；UI token 无 Agent Host capability；Web 页面不接收 Agent endpoint/attachmentId/token。
+
+### 4. TUI 侧收敛
+
+- 删除 HC-113 的过渡重同步（共享 Core 无陈旧问题）；WebAwareRoot 最终形态：tui-active 渲染 TUI，web-active/returning 渲染 WebTakeoverView，无重建、无恢复参数。
+- `web/handoff-coordinator.ts` 由 presentation-coordinator 取代（生命周期消息协议并入 UI 契约；server 的 lifecycle 路由改造为 gateway 路由）。
+
+### 5. 测试（方案 §13.1/§13.2）
+
+- UI 契约测试：schema、revision 单调、未知消息、过大消息、重放、晚到丢弃。
+- Coordinator 测试：opening/active/returning、重复窗口、断开、超时、CLI close（复用 HC-102 测试 harness 改造）。
+- Gateway 集成测试：真实 loopback WS（参照 tests/web/integration.test.ts 模式），FakeHost→真实 Controller。
+- 架构测试：Browser 源码无 AgentClient/authenticate/host.control/attachment token；createInteractiveController 仅 CLI 一处；Web presentation 无 dangerouslySetInnerHTML。
+- Adapter parity：同一 intent 序列 TUI/Web 同 outcome（HC-110 扩展）。
+
+## 实施步骤
+
+1. 新建 `presentation-coordinator/contracts/`（消息类型 + 版本号 + 校验函数）与 `state.ts`、`coordinator.ts`（状态机 + 输入租约 + 单 renderer 门禁）。
+2. 新建 `presentation-coordinator/web-ui-gateway.ts`：订阅 Controller → Selector 视图 → replace/patch 发布（revision 单调）；intent 受理门禁（phase=web-active + revision 有效）→ controller.dispatch → intent.outcome。
+3. 改造 `web/server.ts`：lifecycle 路由替换为 gateway WS 路由（沿用 Host/Origin/白名单/安全头/CSP）；UI token 生成/校验（短期单次绑定 Origin，替代 attachment fragment）。
+4. Browser 重写 bootstrap：WebUiClient 认证 + state.replace 首屏 + WebAdapter 视图缓存改造；删除 agent-transport/AgentClient/host.control 全链路。
+5. CLI 侧：presentation-coordinator 接入 index.ts（替代 createWebHandoffCoordinator）；TUI 删除过渡重同步与恢复参数；handoff-coordinator.ts 删除（或仅保留供测试对比的临时引用，验收后删除）。
+6. 文档：`架构总览.md` 新增"PresentationCoordinator 与 WebUiGateway"章节；ADR 0002 更新（内置 Web 不再使用 Host 控制租约，能力保留）；ADR 0003 更新验收状态；`docs/user/交互使用.md`、`故障排查.md` 按新流程更新（/web 行为、返回 TUI、断线重连）。
+7. 测试落地（上述第 5 节全部）；验证 typecheck/test（TS 全量）/project:check + 真实浏览器抽查（可借助 HC-115 的 E2E fixture 或 Tabbit 手动矩阵）；提交证据。
+
+## 范围
+
+- PresentationCoordinator、WebUiGateway、UI 契约、Browser 去 AgentClient、TUI 收敛、安全边界、文档与测试闭环。
+
+## 非范围
+
+- 不删除 Agent Host 的 ControlLease/attachment/多 Connection 能力（方案 15.1；HC-101 语义与协议保留）。
+- 不重写 Web 蓝色工作台视觉（HC-106 保留）；不引入 Harness Session 概念（A-12）。
+- 不把 UI 契约放入 packages/protocol；无版本变更（CLI 内部契约独立版本化）。
+
+## 验收清单
+
+- [ ] `grep -rn "AgentClient\|authenticate\|host.control\|attachment" packages/cli/src/web/` 生产代码无匹配（bootstrap-url/agent-transport 删除后）。
+- [ ] A-05 端到端：TUI 新建 Thread → /web → Browser 中发消息/执行 Tool/处理 approval → 返回 TUI → 同一 Timeline/Thread/Model/Skill/Selection 连续（自动化：gateway 集成测试 + HC-115 E2E；手动：Tabbit 抽查）。
+- [ ] Host 侧：整个 Web 接管期间 control lease 保持 owner（pytest host control 测试回归 + coordinator 不再调用 control.status）。
+- [ ] 非 owner 提交被拒：web-active 期间 TUI 输入锁；tui-active 期间 Browser intent 收到 handoff.state 且不被受理。
+- [ ] UI 契约测试覆盖未知消息/过大帧/乱序 revision/重放/晚到丢弃；intent.outcome 与 requestId 一一对应；rejected 保留草稿。
+- [ ] 断线重连：Browser 刷新后 state.replace 重同步，Timeline 完整。
+- [ ] `bun run typecheck`、`bun run test`、`bun run project:check` 全绿；证据与 OCR 结论写入本任务。

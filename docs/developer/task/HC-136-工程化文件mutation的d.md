@@ -1,0 +1,94 @@
+---
+id: HC-136
+title: 工程化文件 mutation 的 diff 审批与安全提交
+feature_area: Agent 文件读写可靠性
+parent_task: -
+decomposed_by: Codex
+priority: P0
+status: 已过时
+owner: Codex (Luna Max)
+branch: codex/zc-135-snapshot-file-contract
+reviewed_at: 2026-08-10
+review_due: -
+scope: 将 HC-135 已验证的 proposed content 接入统一 MutationService：生成有界精确 diff 供既有 Policy/Approval 使用，批准后再次比较 expected identity；本机用安全临时文件/同目录替换，远端用原生 CAS 或内部完整 exact replace，提交后重读实际内容；保留 BOM、CRLF/LF、末尾换行，并对不支持 CAS、混合/未知编码、提交冲突和保存钩子 drift 返回明确错误。
+acceptance: 用户批准的 diff 与 proposed content 一致；批准后文件变化返回 COMMIT_CONFLICT 且零覆盖；Host 内写调用线性化；Local adapter 不跟随符号链接、写失败不截断原文件，支持文本 BOM/换行 round-trip；Remote adapter 无 CAS 时返回 BACKEND_CAS_UNSUPPORTED，不盲写；commit 后 Snapshot 只基于重新读取的实际内容，保存钩子改变内容时返回 POST_WRITE_DRIFT；现有 Workspace/Capability/Approval/敏感路径/规则持久化全部生效。
+user_docs: docs/user/安全与沙箱.md、docs/user/故障排查.md
+developer_docs: docs/developer/spec/HC-131-统筹弱模型优先的文件读写可靠性.md、docs/developer/architecture/架构总览.md
+test_evidence: "2026-08-10：focused 238 passed；Agent 全量 pytest 完成（2 skipped）；project:check/typecheck 通过；bun run test 仅现有 Web bundle EISDIR 环境失败。"
+references: docs/developer/task/HC-131-统筹弱模型优先的文件读写可靠性.md、docs/developer/task/HC-135-切换Snapshot约束的ca.md、docs/developer/spec/HC-117-「本项目允许」生成的规则匹配不.md
+completed_at: -
+---
+
+> 2026-08-10 流程复核：本文件是同一功能内部的历史安全提交步骤，不再作为独立 Task。
+> 仍有效的范围、Todo 与证据已收回 [HC-131](HC-131-统筹弱模型优先的文件读写可靠性.md)；以下内容仅保留历史追溯。
+
+## 服务的用户结果
+
+Snapshot 校验通过后，真正落盘仍必须可审查、可比较、失败不截断，并在外部 IDE 或远端保存
+钩子介入时告诉模型实际发生了什么。
+
+## 实施步骤
+
+1. 建立单一 `FileMutationService`：接收 current/proposed content 与 metadata，不接受模型 tool
+   args 直接写盘；read/write/edit/delete adapter 统一调用。
+2. 生成稳定、有字节/行数上限的精确 diff、文件路径和增删统计；审批 payload 展示 proposed
+   diff，不只展示 Snapshot/行号。
+3. 复用 WorkspaceBoundary、Capability、Approval Mode、敏感路径、session/project rules；
+   Snapshot 校验失败不得进入审批，规则允许也不得跳过一致性检查。
+4. 用户批准后重新读取/比较 expected identity；变化返回 `COMMIT_CONFLICT`，旧批准失效。
+5. Local adapter 使用安全 canonical path、`O_NOFOLLOW` 或等价保护、同目录临时文件、flush
+   和原子 replace；异常时清理临时文件并保持原文件字节不变。
+6. Local text codec 记录并恢复 UTF-8 BOM、CRLF/LF 和末尾换行；混合换行、未知编码或无法
+   round-trip 的文本返回 `UNSUPPORTED_FILE_TYPE`，不猜测转换。
+7. Remote adapter 优先原生 CAS/version；否则用 backend exact full-content replace 证明
+   expected current。无法证明时返回 `BACKEND_CAS_UNSUPPORTED`。
+8. commit 后重新读取实际内容并生成 Snapshot；若保存钩子/remote 转换使实际内容不同于
+   proposed，返回成功加 `POST_WRITE_DRIFT` warning 和实际局部 diff。
+9. 为 read→approve、approve→commit、commit 后 drift、I/O 失败、磁盘满/权限错误、符号链接
+   替换和 Host 并发增加回归测试。
+
+## 保证边界
+
+- Harness 保证 Host 内所有写入线性化，并发现 commit 前已发生的外部变化。
+- 不宣称能阻止不遵守协作锁、恰好与最终 rename 同时发生的外部写入；用户文档必须说明
+  这个残余风险。
+- 单文件提交不等于跨文件事务。本任务不实现多文件 rollback。
+
+## 明确不修改
+
+- 不自动 formatter；它会在批准 diff 之外产生额外改动。
+- 不改变 JSON-RPC v3 或新增前端业务决策。
+- 不实现远端 provider 新 CAS API；缺能力时明确拒绝并建立后续 provider 任务。
+
+## 验收清单
+
+- [ ] 审批 diff、proposed content 和 commit expected identity 一致。
+- [ ] 批准后竞态、I/O 失败、symlink 和不支持 CAS 均不盲写/截断。
+- [ ] BOM、换行与 EOF 通过字节级 round-trip fixtures。
+- [ ] post-write Snapshot 来自实际重读，drift 可观察。
+- [ ] Workspace/Capability/Approval/规则持久化回归通过。
+- [ ] Local/Remote contract tests 和 Agent 全量测试通过。
+
+## 本次开发记录
+
+- 新增唯一的 `FileMutationService`：文件 contract 完成 Snapshot/唯一匹配校验后，才传入
+  current、proposed content 和内部 metadata；服务本身不接受模型 tool args。
+- HITL 审批描述展示与计划完全相同的、最多 200 行/16 KiB 的 unified diff。已批准计划按
+  Thread、tool call 和参数指纹一次性缓存；提交无论成功、冲突或 I/O 失败都会消费它。
+- create/edit/delete 都在批准后以计划的 expected identity 提交，外部变化返回
+  `COMMIT_CONFLICT`；提交后重新读取实际内容，保存钩子漂移返回 `POST_WRITE_DRIFT` 和实际 diff。
+- 审批准备只使用工作区路径的副本，避免改写原始 tool call；实际执行仍由
+  `WorkspaceBoundaryMiddleware` 统一完成路径转换和边界校验。
+
+## 验证证据
+
+- `cd packages/agent && .venv/bin/python -m pytest -q tests/tools/test_snapshot_file_contract.py tests/threads/test_text_backend.py tests/policy/test_approval_policy.py tests/policy/test_workspace_boundary.py tests/policy/test_concurrency.py tests/runtime/test_agent.py tests/host/test_approval_protocol.py tests/host/test_server.py`：`238 passed, 23 warnings`。
+- `cd packages/agent && .venv/bin/python -m pytest -q --disable-warnings`：全量完成，`2 skipped`；测试过程使用本机回环端口。
+- `bun run project:check`、`bun run typecheck`：通过。
+- `git diff --check`：通过；Git 输出既有 fsmonitor IPC 警告，不影响退出状态。
+- `bun run test`：`539 pass, 1 skip, 1 fail`。唯一失败为既有 `tests/web/bundle.test.ts` 环境问题：Bun 在该 worktree 读取 `node_modules/.bun` 的 React、React DOM、marked 依赖符号链接及 `packages/protocol/src/index.ts` 时返回 `EISDIR`；与本任务的 Python 文件 mutation 改动无关。
+
+## 定期复核记录
+
+- 2026-08-10（Codex）：从 HC-131 拆解；依赖 HC-135，下一次复核 2026-08-24。
+- 2026-08-10（Codex (Luna Max)）：实现 diff 审批、一次性 CAS 提交与 post-write drift；因工作区既有 Web bundle `EISDIR` 全量测试环境失败，任务保持进行中，待可复现的依赖布局修复后再完成。

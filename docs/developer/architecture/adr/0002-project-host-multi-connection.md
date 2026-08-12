@@ -14,7 +14,7 @@ Python Agent 将作为 TUI、无头 CLI、Web 和未来桌面端共享的后端�
 ```text
 TUI / CLI ── stdio JSONL ──┐
                            ├─ AgentHost ── Agent Core / shared resources
-Web ── CLI WebUiGateway ───┘   （ZC-114 起内置 Web 不直连 Host；Host WebSocket/attachment
+Web ── CLI WebUiGateway ───┘   （HC-114 起内置 Web 不直连 Host；Host WebSocket/attachment
                                 能力保留，服务未来独立客户端，方案 15.1 非目标不删除）
 ```
 
@@ -24,7 +24,7 @@ Web ── CLI WebUiGateway ───┘   （ZC-114 起内置 Web 不直连 Hos
 - 控制权转换与受控操作受理在同一把 `ControlLease` 锁内线性化；acquire 与 owner 的受控操作竞争时恰好一方被受理，不存在“先检查 holder 再受理”的 TOCTOU 窗口。
 - 只有 Run owner 可以响应 Interaction 或取消；其他 Connection 通过 `ThreadWatch` 观察完全相同的 Event。
 - `ThreadWatch` 仅能在 Thread 空闲时原子建立，返回持久化快照并登记未来 Event。
-- 内置 Web 不再直连 Python：Browser 通过 UI token 连接 CLI 进程内的 `WebUiGateway`，只消费共享 InteractiveController 的序列化视图；UI token 每个 handoff 只签发一个，绑定 handoffId、loopback Origin 与 60 秒 TTL，无任何 Agent Host capability（D-02/D-03，ZC-114）。Host 侧的 attachment/ControlLease 能力按原语义保留，服务未来独立客户端（方案 15.1 非目标不删除）。
+- 内置 Web 不再直连 Python：Browser 通过 UI token 连接 CLI 进程内的 `WebUiGateway`，只消费共享 InteractiveController 的序列化视图；UI token 每个 handoff 只签发一个，绑定 handoffId、loopback Origin 与 60 秒 TTL，无任何 Agent Host capability（D-02/D-03，HC-114）。Host 侧的 attachment/ControlLease 能力按原语义保留，服务未来独立客户端（方案 15.1 非目标不删除）。
 - owner 可按稳定 `attachment_id` 撤销未消费 token、认证中 socket 或已连接 Connection；撤销与自然断线共用同一收敛路径：先拒绝新 permit，再 fail closed Interaction、取消并等待 Run，最后恢复 owner holder。
 - 缺少 `run.multithread` 的 Connection 同时只能有一个 starting/active Run；同一 Connection 的第二个 Run 返回 `CONNECTION_RUN_BUSY`，同 Thread 并发仍返回 `THREAD_BUSY`。
 - Web 接管由 CLI `PresentationCoordinator` 管理单实例表现层输入权状态机（`tui-active → opening-web → web-active → returning-tui → tui-active`）。Handoff 只转移表现层输入权，Host `ControlLease` holder 始终为 owner（stdio Connection），Coordinator 任何阶段都不调用 `host.control.*`。TUI 是否锁定以 Coordinator 状态为准，不相信 Browser 自报；ready 超时、断开、刷新宽限到期、第二窗口、畸形帧和 CLI close 都进入同一 `returning-tui → tui-active` 收敛路径，无需轮询 owner。共享 InteractiveController 是 Thread/Timeline 的唯一事实来源，返回 TUI 不重建 Controller、不重拉历史。

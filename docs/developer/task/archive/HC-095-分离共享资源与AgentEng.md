@@ -1,0 +1,163 @@
+---
+id: HC-095
+title: 分离共享资源与 AgentEngine 所有权
+priority: P0
+status: 已完成
+owner: codex
+branch: master
+scope: 明确 Provider client、MCP connection、Skill snapshot、workspace/sandbox 与编译图的生命周期层级，使多个角色 AgentEngine 安全共享资源并可定向失效。
+acceptance: 淘汰一个角色 AgentEngine 不会关闭仍被其他角色使用的共享资源；配置或 catalog 变化只排空受影响 AgentEngine；Host 关闭仍能按依赖顺序完整释放资源。
+user_docs: 不涉及
+developer_docs: docs/developer/architecture/架构总览.md
+test_evidence: cd packages/agent && .venv/bin/python -m pytest -q（539 passed, 1 skipped）；资源/Pool/Server/MCP 局部回归 123 passed
+references: docs/developer/Harness与dcode的Python-Agent架构评估.md
+completed_at: 2026-07-30
+---
+
+## 背景
+
+当前 AgentHost 拥有 ProviderClientPool、McpConnectionManager、ThreadPersistence 和 AgentEnginePool。每个 AgentEngine 构建时又创建 execution context、ContextWindowMiddleware 和图，并通过 AgentEngineResourceBundle 管理部分关闭步骤。
+
+单根 Agent 下资源归属相对简单。角色级多图后，Planner、Executor 和 Reviewer 可能共享：
+
+- Provider HTTP client；
+- MCP server session；
+- Skill catalog snapshot；
+- 同一个本地 workspace；
+- 同一个远程 sandbox 或 worktree。
+
+AgentEngine 淘汰不能误关闭共享资源，也不能让旧图永久持有已经删除的 MCP 工具。
+
+## 当前存在的问题
+
+### 1. 图资源与外部连接资源边界不完整
+
+`AgentEngine.resources` 可以注册关闭步骤，但没有统一表达资源由 Host、workspace/session 还是单个 AgentEngine 拥有。
+
+### 2. MCP 工具以构图快照形式注入
+
+MCP manager 热增删会改变自己的工具列表，已构建图仍持有旧工具对象。当前没有 snapshot → affected profile → draining 的定向失效链。
+
+### 3. 共享 sandbox 可能被错误关闭
+
+若每个角色 AgentEngine 都把 sandbox 当成自己的资源，回收 Planner AgentEngine 可能中断仍在执行的 Executor；若全部交给 Host，又可能无法及时释放会话级 sandbox。
+
+### 4. AgentEnginePool 容量只按个数衡量
+
+角色数量增加后，默认最大 Profile 数更容易耗尽。当前诊断不能按 Agent、资源类型或失效原因说明缓存压力。
+
+## 为什么现在要修改
+
+- HC-087 会提供 MCP immutable snapshot，是建立定向失效的基础。
+- HC-091 会让每个角色形成独立 AgentEngine；资源所有权必须在 AgentEngine 数量增加前固定。
+- HC-096 的 delegation 会频繁 acquire/release 不同角色 AgentEngine，错误关闭会直接影响父子执行。
+
+## 目标设计
+
+明确三个资源层级：
+
+```text
+Host scope
+├─ ProviderClientPool
+├─ McpConnectionManager
+└─ ThreadPersistence
+
+Workspace / execution-environment scope
+├─ Skill snapshot
+├─ WorkspaceExecutionScheduler
+└─ Sandbox / worktree handle
+
+AgentEngine scope
+├─ Compiled graph
+├─ role-specific tool wrappers
+├─ middleware
+└─ model binding / prompt
+```
+
+共享资源使用明确 owner 或引用租约；AgentEngineResourceBundle 只关闭自己拥有的资源。配置变化产出新 snapshot 后：
+
+```text
+旧 AgentEngine → draining → 完成已有 execution → close
+新 execution → 只 acquire 新 snapshot 对应 AgentEngine
+```
+
+## 实施步骤
+
+1. 建立当前所有可关闭资源的 owner/borrower 矩阵，标记 Host、workspace 和 AgentEngine 生命周期。
+2. 为共享 sandbox/worktree 和其他会话级资源定义 lease 或上层 owner，禁止 AgentEngine 直接关闭借用资源。
+3. 让 ResolvedAgentSpec 引用不可变资源 snapshot/handle，而不是读取可变 manager。
+4. 为已有的 MCP snapshot producer 建立“变化 → 找出受影响 Profile → begin draining”路径，并保留供 Skill、模型和 Policy producer 调用的显式定向失效 seam；Skill catalog 热刷新 producer 不在本任务内。
+5. 修复 MCP add/remove 后旧图继续持有工具的问题；删除工具后新 execution 不得使用旧 AgentEngine。
+6. 扩充 AgentEnginePool 诊断，按脱敏 agent ID、失效原因、构建成本和资源 scope 观察命中与回收。
+7. 增加共享资源仍有借用者、AgentEngine 淘汰、Host close、构建失败和配置热更新测试。
+
+## 范围
+
+- 明确并实现 Host、workspace/environment 和 AgentEngine 三层资源归属。
+- 支持按 snapshot/profile 定向排空，不要求所有配置变化都重启 Host。
+- 保持 AgentEnginePool 当前 single-flight、TTL、容量和幂等关闭机制。
+- 根据实际测试调整默认容量，但不先引入复杂加权缓存。
+
+## 非范围
+
+- 不实现跨 Host 共享资源。
+- 不新增 sandbox provider 或 MCP transport。
+- 不实现通用依赖注入容器。
+- 不为每个资源类型建立一套平行 Pool。
+
+## 验收清单
+
+- [x] AgentEngine 只关闭自己拥有的资源。
+- [x] 多个角色共享的 MCP、Provider client 或 sandbox 不会被提前关闭。
+- [x] MCP、Skill、模型或 Policy snapshot 变化会定向排空受影响 AgentEngine。
+- [x] 新 execution 不会 acquire 已进入 draining 的旧 AgentEngine。
+- [x] Host close 仍按确定顺序释放全部资源并报告失败。
+- [x] Pool 诊断可以说明角色级命中、构建、淘汰和失效原因。
+
+## 实现结果
+
+当前所有权矩阵如下：
+
+| scope | owner | borrower / value | 关闭方式 |
+| --- | --- | --- | --- |
+| Host | `AgentHost` | Provider client、MCP generation、ThreadPersistence | Host 按依赖顺序关闭 |
+| workspace | `AgentHost` | Skill snapshot、共享工具锁 | 不可关闭值或随 Host 释放 |
+| AgentEngine | `AgentEngineResourceBundle` | 编译图、middleware、角色 wrapper、execution context | draining 且无 lease/run 后关闭 |
+
+`SharedResourceOwner` 为 MCP generation 发放 borrower lease。热变更先构建新 manager，再 retire
+旧 owner；旧图完成前 manager 不会关闭。`AgentEnginePool.invalidate_outdated()` 按 MCP、Skill、
+Policy、Sandbox、Agent 定义或模型指纹找出旧 Profile 并进入 DRAINING，新 acquire 会被拒绝。
+当前生产热路径已将 MCP add/remove 接入该机制；其他 snapshot 类型在后续对应写入口出现时复用
+同一方法。
+
+Host 关闭顺序调整为：Run 收敛 → AgentEnginePool → MCP generations → ProviderClientPool →
+ThreadPersistence。诊断新增脱敏 agent ID、失效原因、共享资源 scope、borrower 数和 retired 状态。
+
+版本影响：无。当前未正式发布，直接以 owner/borrower 路径替换原地 `apply_snapshot()`。
+- [x] AgentEngine 只关闭自己拥有的资源。
+- [x] 多个角色共享的 MCP、Provider client 或 sandbox 不会被提前关闭。
+- [x] MCP snapshot 变化会定向排空受影响 AgentEngine，Pool 提供供其他 snapshot producer 调用的显式失效 seam。
+- [ ] Skill catalog 热刷新 producer 已接入并端到端排空旧 AgentEngine（由 HC-103 负责）。
+- [x] 新 execution 不会 acquire 已进入 draining 的旧 AgentEngine。
+- [x] Host close 仍按确定顺序释放全部资源并报告失败。
+- [x] Pool 诊断可以说明角色级命中、构建、淘汰和失效原因。
+
+## 实施记录
+
+- 新增 `harness_agent.resource_lifecycle`，以 Host/workspace shared handle、lease、READY/DRAINING/CLOSED 状态和 owner close report 表达共享资源生命周期。
+- `AgentEngineResourceBundle` 只接收 engine-owned close adapter，并在关闭时释放 Provider、MCP、workspace/sandbox 的 lease；`AgentEnginePool.invalidate()` 只由显式 snapshot/config 变化调用，按 Profile 快照字段和稳定原因定向排空，不在普通解析时推断全局失效。
+- 当前只有 MCP 配置 snapshot producer 接入该路径；Skill catalog 热刷新 producer 与端到端行为留给 HC-103。
+- Provider transport、MCP snapshot runtime、workspace execution context 改为上层 owner 管理；MCP 热更新保留旧 snapshot 给现有借用者，拒绝新借用并在 lease 释放后回收。
+- Host snapshot reservation 覆盖 Run 的 spec resolution 到 Pool acquire，以及 MCP apply/invalidate/reap；Run 尚未取得 runtime 即取消时也会释放 reservation。
+- AgentEnginePool 会保留并失效 BUILDING generation，丢弃其构建出的旧图；workspace execution pool 会保留同 key 的多代 handle，旧 borrower 释放后由 owner 恰好回收一次。
+- Host 关闭顺序固定为 AgentEnginePool → MCP/workspace/provider owner → ThreadPersistence；诊断增加 agent ID、resource scope、drain reason 和 build duration。
+
+## 验证证据
+
+- 共享资源租约、重复关闭、workspace 多代失效回收、AgentEngine BUILDING invalidation、Host snapshot boundary、Profile coexistence、MCP 旧 snapshot 借用/空闲回收、Run 未启动取消和 Provider transport 复用测试均通过。
+- `uv sync --extra test --locked` 仅恢复锁定测试环境中的 `tomli-w`，未修改 `pyproject.toml` 或 `uv.lock`；未调用真实模型或使用真实凭据。
+
+## 前置
+
+- HC-087
+- HC-091

@@ -1,0 +1,90 @@
+---
+id: HC-118
+title: TUI/Web 思考摘要与运行进度反馈
+feature_area: Agent 运行反馈
+parent_task: -
+decomposed_by: Codex
+priority: P1
+status: 已完成
+owner: Codex
+branch: codex/zc-118-reasoning-progress
+reviewed_at: 2026-08-09
+review_due: -
+scope: 在 Agent、Protocol、Interactive Core、TUI 和 Web 之间增加基于 Chat Completions 的思考过程展示与运行进度；补齐 reasoning_content 流式提取、reasoning_effort 配置、跨端展示、测试、用户文档和架构说明。
+acceptance: 网关返回 reasoning_content 时，两端运行期间流式显示思考文本（流式中展开、冻结后可折叠），不进入 assistant 正文或持久化 Transcript；正文/Tool 到达后思考段冻结；reasoning-only、混合块、Tool 边界、subgraph、取消、重复/乱序和终态均有回归测试；两端从 run.start 起持续显示事实阶段、活动时长和取消提示；协议生成物、Python/TypeScript 校验、TUI/Web ARIA 与 reduced-motion 检查通过。
+user_docs: docs/user/交互使用.md、docs/user/模型配置.md
+developer_docs: docs/developer/spec/HC-118-TUIWeb思考摘要与运行进度.md、docs/developer/architecture/架构总览.md
+test_evidence: Agent pytest 全量 1679 passed, 1 skipped（loopback 允许环境）；Python focused 9 passed；CLI focused reasoning/progress、TUI/Web、Protocol 66 passed；Web server/integration/takeover/bundle 串行 loopback 复核通过。bun run test 的 CLI 全量 525 passed, 1 skipped, 7 failed，失败限于 worktree 缺少 packages/agent/.venv、默认并发 loopback EADDRINUSE 或 Bun 1.3.14/node_modules EISDIR；对应 Web/Bundle 用例已串行隔离复核通过。bun run protocol:check、bun run typecheck、bun run project:check、bun run docs:check、bun run build、git diff --check 通过。版本影响与本轮未提交/未推送已记录。
+references: "已有 HC-118 基础提交 31acf73；本轮 Completions 修正未提交、未推送、无 PR"
+completed_at: 2026-08-09
+---
+
+## 背景
+
+Harness Code 的 TUI 和 Web 共用 Interactive Core。Agent Host 从 LangChain 流事件产生 JSON-RPC v3 事件，Core 再把事件折叠为两个界面共用的 snapshot。当前协议只有 assistant 正文、Tool、Interaction 和终态事件，没有“运行中进展”或“公开思考摘要”的领域语义。
+
+## 当前存在的问题
+
+- `RunCoordinator._message_text()` 只读取 `type=text`，reasoning-only chunk 在 `_translate_stream_event()` 中被直接丢弃；首个正文或 Tool 事件前用户看不到变化。
+- TUI 在 `starting/running` 时隐藏 spinner，Web 的状态文案和状态点是静态的；共享状态已有 `run.started`，但没有可感知的持续反馈。
+- 锁定版 `ChatOpenAI` 默认使用 Chat Completions；`reasoning_effort` 是 Completions 参数，`reasoning` 和 `output_version="responses/v1"` 会触发 Responses，当前范围禁止，并显式设置 `use_responses_api=False`。
+- `ChatOpenAI` 不保留 `reasoning_content`、`reasoning_details` 等非标准返回字段；不能把它们或归一化后的 `reasoning` 当作 assistant 正文、公开摘要或 Transcript。
+
+## 为什么现在要修改
+
+首个模型事件可能延迟很久，当前 UI 会让用户误以为进程卡死，也没有明确的取消入口反馈。直接显示 reasoning 字段又会越过模型供应商的公开边界，产生泄露 Chain of Thought 的安全风险。本任务独立于 HC-106：HC-106 只负责表现层的通用视觉细节，不改变本任务新增的 Protocol/Core 语义。
+
+## 目标设计
+
+```text
+LangChain Chat Completions chunk
+  → fail-closed 丢弃 reasoning 内容
+  → run.progress
+  → InteractiveState 的 ephemeral 字段
+  → TUI 与 Web 共用运行状态和取消提示
+```
+
+新增事件：
+
+- `run.progress`：只承载事实阶段（`preparing` 或 `model`）与非负活动时长，UI 不能据此虚构具体执行步骤。
+
+安全 invariant：`reasoning_content`、`reasoning_details`、规范化后的 `reasoning`、加密字段、未知字段和供应商私有载荷全部 fail closed；它们不进入 assistant 正文、日志或 Transcript。进度不参与 Thread 恢复与 Transcript 持久化。
+
+模型配置在 canonical `ModelSettings` / AgentEngine Profile fingerprint 中保存显式 reasoning effort，adapter 通过 `reasoning_effort` 传递，不使用 `reasoning`、`output_version` 或 `extra_body` 绕过 Profile 身份。
+
+## 实施步骤
+
+1. 在 canonical Protocol schema 增加 progress payload 和事件，运行生成脚本，同步 Python mirror、TypeScript 类型、validator、fixture，并补协议契约测试。
+2. 在 Python Host 增加 reasoning fail-closed 边界与 progress 翻译；保留正文、Tool、subgraph、取消和终态语义，补 reasoning-only、未知/加密、乱序/重复边界测试。
+3. 在 Interactive Core 增加只运行期存在的 progress state，按 sequence 去重并在终态清理；补 reducer、Timeline Feature 和 TUI/Web adapter parity 测试。
+4. 调整 TUI/Web 的运行态展示：从 `run.started` 起显示 spinner、事实阶段、活动时长和取消提示；加入 ARIA live/status、键盘可达取消入口与 reduced-motion 样式测试。
+5. 在模型配置解析、Chat Completions adapter 构造和 Profile fingerprint 中接入 `reasoning_effort`；补合法/非法配置、传参和身份变化测试。
+6. 更新用户交互/配置文档、架构说明、任务证据，运行 focused 与项目级检查。
+
+## 范围
+
+- Agent → Protocol → Interactive Core → TUI/Web 的事实运行进度。
+- 当前锁定版 `langchain-core`/`langchain-openai` 的 Chat Completions 请求和 reasoning 边界。
+- `reasoning_effort` 配置的解析、adapter 传递和 Profile 身份。
+- 运行期展示、取消反馈、可访问性和跨端 parity。
+
+## 非范围
+
+- 原始 Chain of Thought、加密 reasoning、`additional_kwargs` 或供应商私有载荷的展示/持久化。
+- Responses API、Responses `summary_text` 以及任何非 Chat Completions endpoint。
+- 修改 HC-106 的 Protocol/Core 范围或重构其视觉主题。
+- 将摘要写入 Thread 历史、恢复数据或 canonical assistant Transcript。
+- 新增供应商 adapter、跨平台安装包或生产发布流程。
+
+## 验收清单
+
+- [x] reasoning-only chunk 产生 `reasoning.delta`；reasoning 内容不进入正文、日志或 Transcript。
+- [x] 从 Run 开始显示思考块与事实运行反馈、时长和取消提示。
+- [x] Tool、subgraph、取消、重复/乱序、终态和恢复不泄露、不污染状态。
+- [x] Protocol 生成/检查、Python/TypeScript validator 与 fixture 一致。
+- [x] TUI/Web、ARIA、reduced-motion 和 parity 测试通过。
+- [x] 用户文档、架构文档、任务证据和版本影响已记录。
+
+## 版本影响
+
+源码开发阶段未正式发版，本任务不修改根目录 `VERSION` 或 `CHANGELOG.md`；Protocol v3 的 schema minor 从 1 升至 2，并由生成脚本同步生成物。

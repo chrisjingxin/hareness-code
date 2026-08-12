@@ -107,4 +107,4 @@ CLI Mode selection
 
 ## 最终建议
 
-按 [ZC-138 Design](../designs/ZC-138.md) 作为一个完整功能实施，不拆成 Protocol/Agent/CLI 子 Task。Task 内按五个纵向步骤推进，每一步同时覆盖相关实现、focused tests 和可观察结果。V1 先交付单进程生命周期内可靠的 Compose；durable resume、Plugin specialist 自动选择、Plugin Mode、并行写任务和通用 Workflow SDK 明确留在非范围。
+按 [HC-138 Design](../spec/HC-138-建立BuildCompose双.md) 作为一个完整功能实施，不拆成 Protocol/Agent/CLI 子 Task。Task 内按五个纵向步骤推进，每一步同时覆盖相关实现、focused tests 和可观察结果。V1 先交付单进程生命周期内可靠的 Compose；durable resume、Plugin specialist 自动选择、Plugin Mode、并行写任务和通用 Workflow SDK 明确留在非范围。

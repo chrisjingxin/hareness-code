@@ -28,3 +28,6 @@ tmp/
 # 本地工具运行状态
 .omo/
 .reasonix/
+.trae/
+.codegraph/
+.rtk/

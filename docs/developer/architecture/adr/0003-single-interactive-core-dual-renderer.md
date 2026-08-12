@@ -5,7 +5,7 @@
 - **状态**：已通过 (Accepted) - 2026-08-04
 - **决议范围**：Harness CLI / TUI / Web 交互流、高亮引擎与表现层架构
 
-在 ZC-108 至 ZC-115 的演进中，针对交互 Core、TUI 渲染器与内置 Web UI 渲染器的能力边界与解耦方案做出以下终态决策。
+在 HC-108 至 HC-115 的演进中，针对交互 Core、TUI 渲染器与内置 Web UI 渲染器的能力边界与解耦方案做出以下终态决策。
 
 ## 决策表摘要 (D-01 ~ D-10)
 
@@ -27,7 +27,7 @@
 - `packages/cli/src/presentation-shared/`：跨端纯展示策略与语言目录，绝对零 React/OpenTUI/IPC/DOM 依赖。
 - `packages/cli/src/web/syntax/`：Web 高亮服务，使用 `shiki/core` fine-grained imports 打包，运行期零网络请求。
 
-## 验收状态（ZC-114 更新）
+## 验收状态（HC-114 更新）
 
 - **D-02 已落地**：Browser 通过 `WebUiClient`（`src/web/ui-client.ts`）经 UI token 连接 CLI 进程内 `WebUiGateway`（`src/presentation-coordinator/web-ui-gateway.ts`），只消费 `state.replace/state.patch` 视图与 `handoff.state`，提交 `intent{requestId,revision}` 并消费 `intent.outcome`；Browser 源码无 `AgentClient`/`authenticate`/`host.control`/attachment token（架构测试断言）。
 - **D-03 已落地**：`PresentationCoordinator`（`src/presentation-coordinator/coordinator.ts`）只管理表现层输入权状态机（`tui-active → opening-web → web-active → returning-tui → tui-active`），任何阶段不调用 `host.control.*`；Host `ControlLease` holder 始终为 owner。

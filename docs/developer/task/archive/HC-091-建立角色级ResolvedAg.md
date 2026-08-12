@@ -1,0 +1,129 @@
+---
+id: HC-091
+title: 建立角色级 ResolvedAgentSpec 与 AgentEngine 身份
+priority: P0
+status: 已完成
+owner: codex
+branch: codex/zc-091-resolved-agent-spec
+scope: 建立角色级 Agent 解析结果，让 AgentEngineProfile 和 AgentEngine builder 从同一个 ResolvedAgentSpec 获得模型、Prompt、Policy、工具、Skill、MCP 与执行环境。
+acceptance: 相同角色有效配置复用同一 AgentEngine；任一会改变角色执行行为的静态配置产生不同 AgentEngine；Team、Thread、Run 和任务内容不进入 AgentEngine 身份。
+user_docs: 不涉及
+developer_docs: docs/developer/architecture/架构总览.md、docs/developer/architecture/adr/0001-agent-domain-model.md、docs/developer/research/Harness与dcode的Python-Agent架构评估.md
+test_evidence: bun run test：TypeScript 113 passed/1 skipped；Python 503 passed/1 skipped。bun run typecheck 通过；bun run project:check 通过。
+references: docs/developer/architecture/adr/0001-agent-domain-model.md
+completed_at: 2026-07-30
+---
+
+## 背景
+
+当前 AgentEnginePool 已经支持按 `AgentEngineProfile` 复用多张 Deep Agents 图，并负责 single-flight 构建、租约、容量、空闲淘汰和关闭。
+
+但生产 Profile 仍由 `default_runtime_profile()` 按单根 Agent 构造：
+
+```text
+topology = single-agent
+model role = primary
+```
+
+`AgentHost._resolve_runtime_profile()` 计算 Profile 后，又把实际构图需要的 `Za38Config`、workspace、SkillRegistry 和 ModelSettings 另存到 `_runtime_build_specs`。Profile 身份和 builder 输入来自两条相邻但独立的计算路径。
+
+未来 Planner、Executor、Reviewer 使用不同模型、Prompt、工具和 Policy 时，AgentEngine 的复用粒度应当是一个已经解析完成的 Agent，而不是整个 Team 组合。
+
+## 当前存在的问题
+
+### 1. AgentEngine 身份仍表达整个单 Agent 拓扑
+
+`AgentEngineProfile` 的 `topology_id` 和 `model_roles` 可以表示一张包含多个角色的整体图。若直接把整个 Team 放入 Profile，Planner、Executor 或 Reviewer 任一变化都会产生一张全新组合图，无法单独复用未变化角色。
+
+### 2. Profile 与 builder 可能失配
+
+Profile 只保存指纹，builder 再从 `_runtime_build_specs` 读取原始对象。未来角色配置增加后，容易出现 Profile 已按只读 Planner 计算，但 builder 仍拿到全量工具或错误模型的情况。
+
+### 3. 缺少角色级 canonical 解析结果
+
+ADR 已定义 `ResolvedAgentSpec` 的职责，但生产代码尚无该对象。模型、Policy、Prompt、工具、Skill、MCP 和 sandbox 仍由多个调用方分别解析。
+
+### 4. Profile 使用全量目录而非实际能力视图
+
+当前 Tool、Skill 和 MCP 指纹主要表达整个可用 catalog。角色只能使用其中一个子集时，无关能力变化也可能让所有 AgentEngine 重建；反过来，角色子集变化如果未进入指纹，又可能错误复用旧图。
+
+## 为什么现在要修改
+
+- HC-086 和 HC-087 将分别提供类型化模型绑定与不可变 MCP snapshot，是角色解析的稳定输入。
+- 后续 Policy、delegation 和执行树都必须引用同一个解析结果，否则模型、权限和历史事实会再次分散。
+- 先固定角色级 AgentEngine 身份，可以避免动态 Agent 实现后再迁移 Pool key 和持久化记录。
+
+## 目标设计
+
+建立内部 `ResolvedAgentSpec`，名称可调整，但它必须是一次角色解析的唯一结果：
+
+```text
+内置 main 或受信 AgentDefinition
+  + 已解析 ModelProfile
+  + EffectiveExecutionPolicy
+  + Session capability snapshot
+  + Prompt / contract
+            ↓
+     ResolvedAgentSpec
+       ├─ agent_id
+       ├─ model
+       ├─ effective_policy
+       ├─ tools / skills / MCP tool view
+       ├─ prompt
+       ├─ execution backend descriptor
+       └─ runtime_profile
+```
+
+关键 invariant：
+
+- AgentEngineProfile 只能由 `ResolvedAgentSpec` 生成。
+- AgentEngine builder 必须消费同一个 `ResolvedAgentSpec`，不能重新解析配置。
+- Profile 包含所有会改变编译图行为的静态指纹。
+- Team 成员列表、父 Agent、Thread/Run ID、消息、任务正文、审批、取消和凭据不进入 Profile。
+- 内置 `main` 可以有内部定义，但不能因此变成可由项目文件覆盖的 Plugin Agent。
+
+## 实施步骤
+
+1. 建立“当前 Profile 字段 → 实际构图输入 → 未来角色字段”矩阵，删除没有行为含义的重复身份。
+2. 定义不可变 `ResolvedAgentSpec` 和最小 resolver interface；先只解析当前内置 `main`。
+3. 让模型绑定、MCP snapshot、Skill snapshot、执行配置和 Prompt 模板通过 resolver 汇合。
+4. 从 spec 生成角色级 AgentEngineProfile；为旧 Profile record 保留只读兼容。
+5. 让 AgentEnginePool builder 直接接收或按 key 取得同一个 spec，删除 Server 中平行拼装的 `_RuntimeBuildSpec` 语义。
+6. 增加 Profile 等价性测试：同配置同 key，模型、Policy、Prompt、工具/Skill/MCP 子集或 sandbox 任一变化都改变 key。
+7. 增加负向测试：Thread、Run、Team 组合、任务正文和凭据变化不能改变 key。
+
+## 范围
+
+- 建立角色级、类型化、不可变的 AgentEngine 构建输入。
+- 调整 AgentEngineProfile identity 与持久化版本，保持旧记录只读兼容。
+- 让当前固定主 Agent 先通过新 seam 构建，行为保持不变。
+- 为后续 AgentDefinition 接入保留 `agent_id` 和 definition fingerprint，不加载 Plugin。
+
+## 非范围
+
+- 不实现 Planner、Executor、Reviewer 或 Agent Team。
+- 不加载用户、项目或 Plugin Agent 定义。
+- 不实现角色 Tool Policy；只为 HC-092 提供类型化字段。
+- 不改变用户模型选择和现有 Run 行为。
+
+## 本次实现
+
+- 新增 `ResolvedAgentSpec`：内置 `main` 的模型、EffectiveExecutionPolicy、实际 MCP 工具、Skill snapshot、MCP snapshot、Prompt 和执行后端描述在一次解析中冻结。
+- AgentEngineProfile v2 从 spec 生成角色级身份，保留 v1 record 的只读读取；legacy Profile 不能进入 Pool 或重新写入 SQLite。
+- AgentHost 按 Profile key 保存并取回同一个 spec，builder、RunContext 和共享图不再读取平行的 `_AgentEngineBuildSpec`。
+- Profile 等价性测试覆盖静态能力变化、动态 Run 状态和凭据排除；未实现 Plugin Agent、Team、delegation 和新的协议字段。
+
+## 验收清单
+
+- [x] AgentEngineProfile 与 AgentEngine builder 只消费同一个 ResolvedAgentSpec。
+- [x] 相同角色有效配置跨 Thread 复用 AgentEngine。
+- [x] 不同角色、模型、Policy、Prompt、能力视图或 sandbox 不会错误共用 AgentEngine。
+- [x] Team 组合和单次执行状态不进入 Profile key。
+- [x] 旧 AgentEngineProfile record 可读取但不会伪装成新角色身份。
+- [x] Server 不再维护一套与 Profile 平行解析的角色构图规则。
+
+## 前置
+
+- HC-085
+- HC-086
+- HC-087
