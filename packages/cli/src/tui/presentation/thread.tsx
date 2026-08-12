@@ -25,6 +25,7 @@ export function ThreadView(props: SharedViewProps & { modelName?: string }) {
         onQuestion={props.onQuestion}
         modelName={props.modelName}
         transientNotice={props.transientNotice}
+        terminalWidth={props.terminalWidth}
       />
       {!blockingInteraction ? (
         <box flexShrink={0} paddingLeft={2} paddingRight={2}>

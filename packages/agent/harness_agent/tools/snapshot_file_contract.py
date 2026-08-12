@@ -193,6 +193,12 @@ class SnapshotFileToolContract:
         plan = self._prepare_mutation(request)
         return self._mutation_service.approval_description(plan)
 
+    def approval_details(self, tool_call: dict[str, Any], _state: Any, runtime: Any) -> Any:
+        """返回同一计划的短摘要与结构化展示，不从工具参数重算 diff。"""
+        request = type("ApprovalToolCallRequest", (), {"tool_call": tool_call, "runtime": runtime})()
+        plan = self._prepare_mutation(request)
+        return self._mutation_service.approval_details(plan)
+
     def _read_file(
         self, request: ToolCallRequest, args: dict[str, Any], tool_call_id: str
     ) -> ToolMessage:

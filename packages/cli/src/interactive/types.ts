@@ -1,6 +1,7 @@
 /** Interactive Core 的共享契约：intent、result、snapshot、catalog 与 Interaction DTO。 */
 
 import type {
+  FileDiffPresentation,
   McpAddParams,
   McpServerStatus,
   ModelProfile,
@@ -57,6 +58,7 @@ export type InteractiveInteraction =
       requestId: string
       description: string
       requests: unknown
+      presentation: FileDiffPresentation | null
       decisions: readonly ApprovalDecision[]
       deadlineAtMs: number
     }

@@ -69,6 +69,39 @@ def test_approval_response_rejects_invalid_decision() -> None:
         })
 
 
+def test_approval_file_diff_presentation_rejects_unknown_fields_and_oversize_text() -> None:
+    """file_diff tagged shape 严格校验额外字段与 Schema 字符上限。"""
+    payload = {
+        "interrupt_id": "int-diff",
+        "description": "文件变更需要审批",
+        "requests": None,
+        "decisions": ["approve_once", "reject"],
+        "presentation": {
+            "kind": "file_diff",
+            "operation": "edit",
+            "path": "/src/a.py",
+            "added_lines": 1,
+            "removed_lines": 1,
+            "truncated": False,
+            "unified_diff": "+new",
+            "unexpected": True,
+        },
+    }
+    with pytest.raises(ValidationError):
+        validate_interaction_params(
+            "interaction.approval",
+            {"thread_id": "thread", "run_id": "run", "timeout_ms": 1000, "payload": payload},
+        )
+
+    payload["presentation"].pop("unexpected")
+    payload["presentation"]["unified_diff"] = "x" * 16_385
+    with pytest.raises(ValidationError):
+        validate_interaction_params(
+            "interaction.approval",
+            {"thread_id": "thread", "run_id": "run", "timeout_ms": 1000, "payload": payload},
+        )
+
+
 def test_resume_value_question_maps_answers() -> None:
     """提问类交互的回复按问题序号映射为 answers。"""
     spec = InteractionRequest(
@@ -186,6 +219,68 @@ class TestSerialApprovals:
         assert run.batch_rejected is False
         assert run.pending_approvals == []
 
+    def test_file_approval_includes_registered_structured_presentation(self) -> None:
+        """Coordinator 只附带当前 Run 按相同工具参数登记的有界展示。"""
+        port = _ScriptedInteractionPort([{"decision": "approve_once"}])
+        coordinator = _coordinator_with_port(port)
+        action = {
+            "name": "edit_file",
+            "args": {"file_path": "/src/a.py", "old_string": "x", "new_string": "y"},
+            "description": "文件变更需要审批",
+        }
+        run = _serial_run()
+        presentation = {
+            "kind": "file_diff",
+            "operation": "edit",
+            "path": "/src/a.py",
+            "added_lines": 1,
+            "removed_lines": 1,
+            "truncated": False,
+            "unified_diff": "--- /src/a.py\n+++ /src/a.py\n@@ -1 +1 @@\n-x\n+y",
+        }
+        assert run.approval_presentations.remember(
+            "edit_file",
+            action["args"],
+            presentation,
+        )
+
+        result = self._collect(
+            coordinator,
+            run,
+            _serial_spec([action], [], [0]),
+        )
+
+        assert result["int-serial"]["decisions"] == [{"type": "approve"}]
+        assert port.requests[0].payload["presentation"] == presentation
+        _assert_approval_params_schema_compliant(port.requests[0])
+
+    def test_file_approval_does_not_reuse_presentation_for_changed_args(self) -> None:
+        """参数指纹不一致时展示缺失并回退通用审批，不串用旧 diff。"""
+        port = _ScriptedInteractionPort([{"decision": "reject"}])
+        coordinator = _coordinator_with_port(port)
+        run = _serial_run()
+        assert run.approval_presentations.remember(
+            "edit_file",
+            {"file_path": "/src/a.py", "new_string": "approved"},
+            {
+                "kind": "file_diff",
+                "operation": "edit",
+                "path": "/src/a.py",
+                "added_lines": 1,
+                "removed_lines": 1,
+                "truncated": False,
+                "unified_diff": "+approved",
+            },
+        )
+        action = {
+            "name": "edit_file",
+            "args": {"file_path": "/src/a.py", "new_string": "changed"},
+        }
+
+        self._collect(coordinator, run, _serial_spec([action], [], [0]))
+
+        assert "presentation" not in port.requests[0].payload
+
     def test_user_reject_cancels_remaining_batch(self) -> None:
         """UserReject 终止同批：剩余工具不再弹窗并收到取消原因。"""
         port = _ScriptedInteractionPort(
@@ -204,14 +299,14 @@ class TestSerialApprovals:
         assert decisions[1] == {"type": "reject"}
         assert decisions[2] == {
             "type": "reject",
-            "args": {"message": "cancelled due to earlier permission rejection"},
+            "message": "cancelled due to earlier permission rejection",
         }
         # 第三个工具没有弹窗
         assert len(port.requests) == 2
         assert run.batch_rejected is True
 
     def test_reject_with_feedback_carries_message(self) -> None:
-        """reject_with_feedback 的反馈写入当前工具 decision 的 args.message。"""
+        """reject_with_feedback 的反馈写入 LangChain RejectDecision.message。"""
         port = _ScriptedInteractionPort(
             [{"decision": "reject_with_feedback", "feedback": "危险操作"}]
         )
@@ -221,7 +316,7 @@ class TestSerialApprovals:
             coordinator, _serial_run(), _serial_spec(actions, [], [0])
         )
         assert result["int-serial"]["decisions"] == [
-            {"type": "reject", "args": {"message": "危险操作"}}
+            {"type": "reject", "message": "危险操作"}
         ]
 
     def test_approve_thread_auto_approves_matching_queued_tool(self) -> None:
@@ -257,7 +352,7 @@ class TestSerialApprovals:
         decisions = result["int-serial"]["decisions"]
         assert decisions[0] == {
             "type": "reject",
-            "args": {"message": "denied by policy rule"},
+            "message": "denied by policy rule",
         }
         assert decisions[1] == {"type": "approve"}
         # deny 不弹窗，只有第二个工具弹了窗

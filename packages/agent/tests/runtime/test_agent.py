@@ -133,8 +133,8 @@ async def test_auto_mode_preflight_uses_classifier_cache_end_to_end():
     assert any(isinstance(message, ToolMessage) for message in result["messages"])
 
 
-async def test_default_hitl_shows_prepared_file_diff_before_edit(tmp_path: Path):
-    """真实 Agent 图在审批前展示已固定的文件 diff，而不是仅展示模型参数。"""
+async def test_default_hitl_registers_prepared_file_diff_for_host_approval(tmp_path: Path):
+    """真实 Agent 图把已固定 diff 登记到当前 Run，而不在描述中复制源码。"""
     from langgraph.checkpoint.memory import MemorySaver
 
     from harness_agent.threads.snapshots import ThreadSnapshotStore
@@ -220,8 +220,18 @@ async def test_default_hitl_shows_prepared_file_diff_before_edit(tmp_path: Path)
     interrupt = result["__interrupt__"][0].value
     action = interrupt["action_requests"][0]
     assert action["args"]["file_path"] == "/approval.txt"
-    assert "-before" in action["description"]
-    assert "+approved" in action["description"]
+    assert action["description"] == "文件变更需要审批"
+    assert "-before" not in action["description"]
+    presentation = context.approval_presentations.lookup("edit_file", action["args"])
+    assert presentation is not None
+    assert presentation["kind"] == "file_diff"
+    assert presentation["unified_diff"] == contract.approval_details(
+        {"name": "edit_file", "id": "prepared-edit", "args": action["args"]},
+        None,
+        SimpleNamespace(context=context),
+    ).presentation["unified_diff"]
+    assert "-before" in presentation["unified_diff"]
+    assert "+approved" in presentation["unified_diff"]
 
 
 async def test_production_toolnode_attaches_bounded_lsp_diagnostics_after_write(tmp_path: Path):

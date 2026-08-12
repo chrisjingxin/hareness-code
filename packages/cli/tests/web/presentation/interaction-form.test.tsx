@@ -6,6 +6,7 @@ import { act, useState } from "react"
 import { createElement, type ReactElement } from "react"
 
 import { InteractionForm } from "../../../src/web/presentation/interaction-form"
+import { defaultDiffModeForWidth } from "../../../src/web/presentation/file-diff-approval"
 import type { ApprovalDecision, InteractiveQuestion } from "../../../src/interactive/types"
 import type { WebAdapterSnapshot, WebIntent } from "../../../src/web/application/adapter"
 import { makeInteractive, makeSnapshot } from "./fixtures"
@@ -81,6 +82,150 @@ const MULTI_QUESTION: InteractiveQuestion = {
 }
 
 describe("InteractionForm", () => {
+  test("file_diff 显示路径、统计、行号和截断警告，并可切换左右/行内", () => {
+    const intents: WebIntent[] = []
+    const interactive = makeInteractive({
+      interaction: {
+        type: "approval",
+        requestId: "diff-1",
+        description: "文件变更需要审批",
+        requests: [{ name: "edit_file", args: { file_path: "/src/a.ts" } }],
+        presentation: {
+          kind: "file_diff",
+          operation: "edit",
+          path: "/src/a.ts",
+          added_lines: 1,
+          removed_lines: 1,
+          truncated: true,
+          unified_diff: "--- /src/a.ts\n+++ /src/a.ts\n@@ -1 +1 @@\n-oldValue\n+newValue",
+        },
+        decisions: ["approve_once", "reject"],
+        deadlineAtMs: Date.now() + 60_000,
+      },
+    })
+    const handle = mountForm(makeSnapshot({ interactive }), intents)
+    try {
+      expect(handle.container.querySelector(".file-diff-path")?.textContent).toBe("/src/a.ts")
+      expect(handle.container.querySelector(".file-diff-stats")?.textContent).toContain("+1-1")
+      expect(handle.container.querySelector(".file-diff-truncated")?.textContent).toContain("批准仍会应用完整变更")
+      expect(handle.container.querySelector(".file-diff-request-details")?.hasAttribute("open")).toBe(false)
+      const inline = [...handle.container.querySelectorAll<HTMLButtonElement>(".file-diff-mode button")]
+        .find(button => button.textContent === "行内")
+      act(() => { inline?.click() })
+      expect(handle.container.querySelector(".file-diff-body")?.getAttribute("data-view")).toBe("unified")
+      expect(handle.container.querySelector(".diff-remove")?.textContent).toContain("oldValue")
+      expect(handle.container.querySelector(".diff-add")?.textContent).toContain("newValue")
+    } finally {
+      handle.unmount()
+    }
+  })
+
+  test("file_diff 切换展示模式后点击拒绝会立即提交", async () => {
+    const intents: WebIntent[] = []
+    const interactive = makeInteractive({
+      interaction: {
+        type: "approval",
+        requestId: "diff-reject",
+        description: "文件变更需要审批",
+        requests: [{ name: "edit_file", args: { file_path: "/src/a.ts" } }],
+        presentation: {
+          kind: "file_diff",
+          operation: "edit",
+          path: "/src/a.ts",
+          added_lines: 1,
+          removed_lines: 1,
+          truncated: false,
+          unified_diff: "--- /src/a.ts\n+++ /src/a.ts\n@@ -1 +1 @@\n-oldValue\n+newValue",
+        },
+        decisions: ["approve_once", "reject"],
+        deadlineAtMs: Date.now() + 60_000,
+      },
+    })
+    const handle = mountForm(makeSnapshot({ interactive }), intents)
+    try {
+      const inline = [...handle.container.querySelectorAll<HTMLButtonElement>(".file-diff-mode button")]
+        .find(button => button.textContent === "行内")
+      const reject = [...handle.container.querySelectorAll<HTMLButtonElement>(".approval-buttons button")]
+        .find(button => button.textContent === "拒绝")
+      await act(async () => {
+        inline?.click()
+        reject?.click()
+        await Promise.resolve()
+      })
+      expect(handle.container.querySelector(".file-diff-body")?.getAttribute("data-view")).toBe("unified")
+      const sent = intents.find(intent => intent.type === "interaction-submit")
+      expect(sent).toEqual({
+        type: "interaction-submit",
+        requestId: "diff-reject",
+        response: { kind: "approval", decision: "reject" },
+      })
+    } finally {
+      handle.unmount()
+    }
+  })
+
+  test("file_diff 畸形时显示有界原文，空文件显示明确提示", () => {
+    const base = {
+      type: "approval" as const,
+      requestId: "diff-fallback",
+      description: "文件变更需要审批",
+      requests: [],
+      decisions: ["approve_once" as const, "reject" as const],
+      deadlineAtMs: Date.now() + 60_000,
+    }
+    const malformed = mountForm(makeSnapshot({ interactive: makeInteractive({ interaction: {
+      ...base,
+      presentation: { kind: "file_diff", operation: "edit", path: "/a.ts", added_lines: 1, removed_lines: 1, truncated: false, unified_diff: "not a diff" },
+    } }) }), [])
+    try {
+      expect(malformed.container.querySelector(".file-diff-fallback")?.textContent).toContain("not a diff")
+    } finally {
+      malformed.unmount()
+    }
+
+    const empty = mountForm(makeSnapshot({ interactive: makeInteractive({ interaction: {
+      ...base,
+      requestId: "diff-empty",
+      presentation: { kind: "file_diff", operation: "write", path: "/empty.txt", added_lines: 0, removed_lines: 0, truncated: false, unified_diff: "" },
+    } }) }), [])
+    try {
+      expect(empty.container.querySelector(".file-diff-empty")?.textContent).toContain("创建空文件")
+    } finally {
+      empty.unmount()
+    }
+  })
+
+  test("file_diff 对删除操作显示独立语义和逻辑路径", () => {
+    const deletion = mountForm(makeSnapshot({ interactive: makeInteractive({ interaction: {
+      type: "approval",
+      requestId: "diff-delete",
+      description: "文件变更需要审批",
+      requests: [],
+      presentation: {
+        kind: "file_diff",
+        operation: "delete",
+        path: "/obsolete.ts",
+        added_lines: 0,
+        removed_lines: 1,
+        truncated: false,
+        unified_diff: "--- /obsolete.ts\n+++ /obsolete.ts\n@@ -1 +0,0 @@\n-export const obsolete = true",
+      },
+      decisions: ["approve_once", "reject"],
+      deadlineAtMs: Date.now() + 60_000,
+    } }) }), [])
+    try {
+      expect(deletion.container.querySelector(".file-diff-approval")?.getAttribute("aria-label")).toBe("删除文件 /obsolete.ts")
+      expect(deletion.container.querySelector(".file-diff-stats")?.textContent).toContain("+0-1")
+    } finally {
+      deletion.unmount()
+    }
+  })
+
+  test("file_diff 响应式默认断点为 760px", () => {
+    expect(defaultDiffModeForWidth(759)).toBe("unified")
+    expect(defaultDiffModeForWidth(760)).toBe("split")
+  })
+
   test("approval 仅显示服务端允许的决策；含 reject_with_feedback 时显示反馈输入", () => {
     const intents: WebIntent[] = []
     const interactive = makeInteractive({
@@ -89,6 +234,7 @@ describe("InteractionForm", () => {
         requestId: "r-1",
         description: "需要批准",
         requests: [{ tool: "write_file" }],
+        presentation: null,
         decisions: ["approve_once", "reject_with_feedback"],
         deadlineAtMs: Date.now() + 60_000,
       },
@@ -114,6 +260,7 @@ describe("InteractionForm", () => {
         requestId: "r-1",
         description: "写文件",
         requests: [{ tool: "write_file" }],
+        presentation: null,
         decisions: ["approve_once", "reject"],
         deadlineAtMs: Date.now() + 60_000,
       },
@@ -149,6 +296,7 @@ describe("InteractionForm", () => {
         requestId: "r-1",
         description: "读文件",
         requests: [{ tool: "read_file" }],
+        presentation: null,
         decisions: ["approve_once", "reject"],
         deadlineAtMs: Date.now() + 60_000,
       },

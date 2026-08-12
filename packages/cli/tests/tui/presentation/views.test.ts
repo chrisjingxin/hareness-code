@@ -11,6 +11,7 @@ import { HomeView } from "../../../src/tui/presentation/home"
 import { SkillPicker, ThreadPicker } from "../../../src/tui/presentation/pickers"
 import { tuiTheme } from "../../../src/tui/presentation/theme"
 import { ThreadView } from "../../../src/tui/presentation/thread"
+import { tuiDiffViewForWidth } from "../../../src/tui/presentation/timeline"
 
 const runtime = createInteractiveRuntime({
   protocol: { major: 3, minor: 0 },
@@ -246,6 +247,7 @@ test("审批作为内联时间线事件保留选项高度", async () => {
       requestId: "approval-1",
       description: "执行 shell 命令",
       requests: { action_requests: [{ name: "execute", args: { command: "pwd" } }] },
+      presentation: null,
       decisions: ["approve_once" as const, "approve_thread" as const, "approve_project" as const, "reject" as const, "reject_with_feedback" as const],
       deadlineAtMs: Date.now() + 5_000,
     },
@@ -267,6 +269,99 @@ test("审批作为内联时间线事件保留选项高度", async () => {
   } finally {
     await act(async () => { setup.renderer.destroy() })
   }
+})
+
+test("文件审批在窄终端用行内 Diff，宽终端用双栏且保留统计与警告", async () => {
+  const run = { threadId: "thread-diff", runId: "run-diff" }
+  const started = startRun(createInitialState(), run, "修改文件")
+  const state: InteractiveState = {
+    ...started,
+    activity: { kind: "waiting-interaction", label: "等待工具审批" },
+    timeline: [
+      started.timeline[0]!,
+      {
+        type: "interaction",
+        interaction: {
+          id: "approval-diff",
+          runId: run.runId,
+          type: "approval",
+          status: "pending",
+          description: "文件变更需要审批",
+          requests: {},
+        },
+      },
+    ],
+  }
+  const snapshot: InteractiveSnapshot = {
+    ...snapshotOf(state),
+    interaction: {
+      type: "approval",
+      requestId: "approval-diff",
+      description: "文件变更需要审批",
+      requests: {},
+      presentation: {
+        kind: "file_diff",
+        operation: "edit",
+        path: "/src/a.ts",
+        added_lines: 1,
+        removed_lines: 1,
+        truncated: true,
+        unified_diff: "--- /src/a.ts\n+++ /src/a.ts\n@@ -1,269 +1,269 @@\n-oldValue\n+newValue\n[diff 因行数或字节上限截断]",
+      },
+      decisions: ["approve_once", "reject"],
+      deadlineAtMs: Date.now() + 5_000,
+    },
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(ThreadView, viewProps(snapshot, 100, 34)), { width: 100, height: 34 })
+  })
+  try {
+    for (let attempt = 0; attempt < 10; attempt++) {
+      await act(async () => {
+        await Bun.sleep(20)
+        await setup.flush()
+      })
+      const frame = setup.captureCharFrame()
+      if (frame.includes("oldValue") && frame.includes("newValue")) break
+    }
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("编辑文件 · /src/a.ts · +1 / -1")
+    expect(frame).toContain("批准仍会应用完整变更")
+    expect(frame).toContain("oldValue")
+    expect(frame).toContain("newValue")
+    expect(frame).toContain("允许一次")
+    expect(frame).not.toContain("Error parsing diff")
+    const diffSpans = setup.captureSpans().lines.flatMap(line => line.spans)
+    expect(diffSpans.find(span => span.text.includes("oldValue"))?.bg.toInts()).toEqual(RGBA.fromHex(tuiTheme.diffRemovedBackground).toInts())
+    expect(diffSpans.find(span => span.text.includes("newValue"))?.bg.toInts()).toEqual(RGBA.fromHex(tuiTheme.diffAddedBackground).toInts())
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+
+  let wideSetup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    wideSetup = await testRender(createElement(ThreadView, viewProps(snapshot, 140, 34)), { width: 140, height: 34 })
+  })
+  try {
+    for (let attempt = 0; attempt < 10; attempt++) {
+      await act(async () => {
+        await Bun.sleep(20)
+        await wideSetup.flush()
+      })
+      if (wideSetup.captureCharFrame().split("\n").some(row => row.includes("oldValue") && row.includes("newValue"))) break
+    }
+    const rows = wideSetup.captureCharFrame().split("\n")
+    expect(rows.some(row => row.includes("oldValue") && row.includes("newValue"))).toBe(true)
+    expect(rows.join("\n")).not.toContain("Error parsing diff")
+  } finally {
+    await act(async () => { wideSetup.renderer.destroy() })
+  }
+})
+
+test("TUI Diff 内容宽度 120 列切换为双栏", () => {
+  expect(tuiDiffViewForWidth(119)).toBe("unified")
+  expect(tuiDiffViewForWidth(120)).toBe("split")
 })
 
 test("继续执行只作为历史事件之后的底部活动行", async () => {

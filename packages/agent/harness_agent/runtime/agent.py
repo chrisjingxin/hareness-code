@@ -1,6 +1,7 @@
 """za38 agent 内核：组装 DeepAgents 工具、中间件、Skill 和审批策略。"""
 from __future__ import annotations
 
+from collections.abc import Mapping
 from contextlib import contextmanager
 import logging
 from pathlib import Path
@@ -1005,8 +1006,9 @@ def create_harness_agent(
     else:
         mutation_preflight = None
 
+    contract_approval_details = getattr(file_tool_contract, "approval_details", None)
     contract_approval_description = getattr(file_tool_contract, "approval_description", None)
-    if callable(contract_approval_description):
+    if callable(contract_approval_details) or callable(contract_approval_description):
         def approval_description(tool_call: dict[str, Any], state: Any, runtime: Any) -> str:
             """为 HITL 描述复用 prepare 时的 canonical 路径，不改写用户原始参数。"""
             request = SimpleNamespace(tool_call=tool_call, runtime=runtime)
@@ -1017,6 +1019,22 @@ def create_harness_agent(
             )
             if prepared_request is None:
                 return "文件变更路径不在当前工作区内，不能审批。"
+            if callable(contract_approval_details):
+                details = contract_approval_details(
+                    prepared_request.tool_call,
+                    state,
+                    prepared_request.runtime,
+                )
+                raw_args = tool_call.get("args")
+                context = getattr(runtime, "context", None)
+                if isinstance(context, RunContext) and isinstance(raw_args, Mapping):
+                    context.approval_presentations.remember(
+                        str(tool_call.get("name") or ""),
+                        raw_args,
+                        details.presentation,
+                    )
+                return str(details.description)
+            assert callable(contract_approval_description)
             return contract_approval_description(
                 prepared_request.tool_call,
                 state,

@@ -99,7 +99,7 @@ test("FeatureAvailability：纯 capability 门在 run 期间保持 true（面板
 
 test("FeatureAvailability：挂起 Interaction 时禁止打开 Thread", () => {
   const availability = selectFeatureAvailability(snapshot({
-    interaction: { type: "approval", requestId: "a-1", description: "", requests: null, decisions: ["reject"], deadlineAtMs: 1 },
+    interaction: { type: "approval", requestId: "a-1", description: "", requests: null, presentation: null, decisions: ["reject"], deadlineAtMs: 1 },
   }))
   expect(availability.canOpenThread).toBe(false)
 })

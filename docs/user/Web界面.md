@@ -20,4 +20,17 @@ Web 工作台通过 `/web` 在浏览器中接管当前 Thread。它与 TUI 共�
 
 Web 控件使用统一的 compact、standard、field 尺寸和暖中性边界。必要的小号文字使用较深的 muted token，键盘聚焦显示蓝色 focus ring；运行、等待、失败和取消不只依赖颜色区分。
 
-Composer 的发送、取消、IME、Slash Command 和审批/问答行为见[交互使用](交互使用.md#web-工作台)。本轮视觉调整不修改 Protocol、Python AgentHost、RunCoordinator、InteractiveSnapshot 或 Web intent。
+Composer 的发送、取消、IME、Slash Command 和审批/问答行为见[交互使用](交互使用.md#web-工作台)。
+
+## 文件变更审批
+
+- `write_file`、`edit_file`、`delete_file` 的人工审批使用专用 Diff 卡，显示逻辑路径、操作和增删统计；
+  Web/TUI 使用 Codex 风格的低饱和酒红/墨绿色整行背景、行号色带，并保留 `-`/`+` 标记。
+- 可用宽度达到 760px 时默认左右对比，较窄时默认行内；当前审批内可用“左右 / 行内”手动切换。
+- 删除和新增同时使用背景色与 `-`/`+` 标记，old/new 行号始终可见；长行不会静默省略。
+- 支持的语言复用离线 Shiki Worker。未知语言、超限、超时或 Worker 故障只关闭语法高亮，不影响审批。
+- Diff 仍受 200 行、16 KiB 预览上限约束；截断提示位于审批按钮之前，批准对应完整拟议变更。
+- 工具参数默认折叠在“请求参数”中；非文件审批继续使用通用 description 和参数预览。
+- 普通“拒绝”点击后立即提交，批准仍需选择后点击“提交”确认；“拒绝并反馈”需填写反馈后提交。
+- 长 Diff 审批卡限制在工作区剩余高度内，审批卡自身显示滚动条；滚动 Diff 或审批卡不会把底部的
+  审批按钮和 Composer 推出视口。

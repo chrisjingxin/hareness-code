@@ -63,6 +63,14 @@ class MutationDiff:
 
 
 @dataclass(frozen=True, slots=True)
+class FileMutationApprovalDetails:
+    """同一 prepared plan 派生的人类摘要与结构化有界展示。"""
+
+    description: str
+    presentation: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
 class MutationChangedRange:
     """实际落盘版本相对提交前版本的 1-based 源行变化范围。"""
 
@@ -195,17 +203,35 @@ class FileMutationService:
 
     def approval_description(self, plan: PreparedFileMutation) -> str:
         """返回供既有 HITL payload 展示且不阻止批准的有界 diff 预览。"""
-        operation = {"write": "创建文件", "edit": "编辑文件", "delete": "删除文件"}[plan.metadata.operation]
-        diff_note = "（diff 预览因上限截断）" if plan.diff.truncated else ""
+        details = self.approval_details(plan)
+        operation = {"write": "创建文件", "edit": "编辑文件", "delete": "删除文件"}[
+            plan.metadata.operation
+        ]
+        diff_note = "（预览因上限截断）" if plan.diff.truncated else ""
         return "\n".join(
             (
-                "文件变更需要审批",
+                details.description,
                 f"操作：{operation}",
                 f"文件：{plan.metadata.path}",
                 f"变更：+{plan.diff.added_lines} / -{plan.diff.removed_lines} 行 {diff_note}".rstrip(),
                 "以下是拟议内容的有界 diff 预览；批准将提交本次调用已固定的完整拟议内容：",
                 plan.diff.text or "（空文件内容变更）",
             )
+        )
+
+    def approval_details(self, plan: PreparedFileMutation) -> FileMutationApprovalDetails:
+        """从同一批准计划生成短摘要和 Protocol 可消费的展示副本。"""
+        return FileMutationApprovalDetails(
+            description="文件变更需要审批",
+            presentation={
+                "kind": "file_diff",
+                "operation": plan.metadata.operation,
+                "path": plan.metadata.path,
+                "added_lines": plan.diff.added_lines,
+                "removed_lines": plan.diff.removed_lines,
+                "truncated": plan.diff.truncated,
+                "unified_diff": plan.diff.text,
+            },
         )
 
     def commit(self, plan: PreparedFileMutation) -> CommittedFileMutation:
@@ -474,6 +500,7 @@ def _diff_is_truncated(lines: list[str]) -> bool:
 __all__ = [
     "CommittedFileMutation",
     "FileMutationService",
+    "FileMutationApprovalDetails",
     "MutationChangedRange",
     "MAX_APPROVAL_DIFF_BYTES",
     "MAX_APPROVAL_DIFF_LINES",

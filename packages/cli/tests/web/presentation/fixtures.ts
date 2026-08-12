@@ -182,6 +182,7 @@ export function makeApproval(
     requestId,
     description,
     requests: [{ tool: "write_file" }],
+    presentation: null,
     decisions: (decisions ?? fallbackDecisions) as Extract<InteractiveInteraction, { type: "approval" }>["decisions"],
     deadlineAtMs: Date.now() + 60_000,
   }

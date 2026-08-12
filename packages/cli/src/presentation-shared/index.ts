@@ -2,6 +2,7 @@
 
 export * from "./language-catalog"
 export * from "./formatters"
+export * from "./file-diff"
 export * from "./semantic-tone"
 export * from "./tool-output-policy"
 export * from "./command-menu-policy"

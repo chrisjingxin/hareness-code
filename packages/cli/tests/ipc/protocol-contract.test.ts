@@ -48,6 +48,34 @@ test("Browser CSP 禁止动态代码时仍可校验 initialize", () => {
   }
 })
 
+test("interaction.approval 接受严格 file_diff presentation 并拒绝未知字段", () => {
+  const params = {
+    thread_id: "thread",
+    run_id: "run",
+    timeout_ms: 1_000,
+    payload: {
+      interrupt_id: "approval",
+      description: "文件变更需要审批",
+      requests: null,
+      decisions: ["approve_once", "reject"],
+      presentation: {
+        kind: "file_diff",
+        operation: "edit",
+        path: "/src/a.ts",
+        added_lines: 1,
+        removed_lines: 1,
+        truncated: false,
+        unified_diff: "+new",
+      },
+    },
+  }
+  expect(() => validateInteractionParams("interaction.approval", params)).not.toThrow()
+  expect(() => validateInteractionParams("interaction.approval", {
+    ...params,
+    payload: { ...params.payload, presentation: { ...params.payload.presentation, unknown: true } },
+  })).toThrow()
+})
+
 function validate(fixture: Fixture): void {
   if (fixture.kind === "operation.params") {
     validateOperationParams(fixture.name as OperationName, fixture.value)

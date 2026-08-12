@@ -974,6 +974,19 @@ def test_approval_diff_is_the_prepared_content_and_conflict_invalidates_approval
     assert "-before" in description
     assert "+approved" in description
     assert "\n\n+approved" not in description
+    details = contract.approval_details(edit_request.tool_call, None, edit_request.runtime)
+    assert "-before" not in details.description
+    assert details.presentation == {
+        "kind": "file_diff",
+        "operation": "edit",
+        "path": "/approval.txt",
+        "added_lines": 1,
+        "removed_lines": 1,
+        "truncated": False,
+        "unified_diff": details.presentation["unified_diff"],
+    }
+    assert "-before" in details.presentation["unified_diff"]
+    assert "+approved" in details.presentation["unified_diff"]
 
     target.write_text("external\n", encoding="utf-8")
     conflict = _payload(contract.dispatch(edit_request))

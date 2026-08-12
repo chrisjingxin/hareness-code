@@ -123,6 +123,7 @@ test("Approval 只展示服务端 decisions，并把反馈和提交转成 typed 
       requestId: "request-1",
       description: "执行写操作",
       requests: [{ tool: "write_file" }],
+      presentation: null,
       decisions: ["approve_once", "reject_with_feedback"],
       deadlineAtMs: Date.now() + 60_000,
     },
@@ -142,6 +143,11 @@ test("Approval 只展示服务端 decisions，并把反馈和提交转成 typed 
   const submit = [...container.querySelectorAll("button")].find(button => button.textContent?.includes("提交")) as HTMLButtonElement
   await act(async () => { submit.click() })
   expect(intents.some(intent => intent.type === "interaction-draft-change" && intent.patch.kind === "approval-decision")).toBe(true)
-  expect(intents.some(intent => intent.type === "interaction-submit" && intent.requestId === "request-1")).toBe(true)
+  const submitIntent = intents.find(intent => intent.type === "interaction-submit" && intent.requestId === "request-1")
+  expect(submitIntent).toBeDefined()
+  if (submitIntent?.type === "interaction-submit" && submitIntent.response.kind === "approval") {
+    expect(submitIntent.response.decision).toBe("reject_with_feedback")
+    expect(submitIntent.response.feedback).toBe("缺少必要说明")
+  }
   unmount()
 })

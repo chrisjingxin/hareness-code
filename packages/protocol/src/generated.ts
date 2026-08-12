@@ -2,7 +2,7 @@
 
 export const PROTOCOL_MAJOR = 3 as const
 export const PROTOCOL_MINOR = 3 as const
-export const PROTOCOL_SCHEMA_SHA256 = "8edf3a6e8e7b6ba65cc89865f2b3bbd4259716617bc136d9253227ea203ab8d9" as const
+export const PROTOCOL_SCHEMA_SHA256 = "8a89b7612ea6f9350d4dd564ff740d29d05ed1a9dda9792dce1a4d30ca3bd7e0" as const
 export const MAX_FRAME_BYTES = 8388608 as const
 export const MAX_TOOL_PAYLOAD_BYTES = 1048576 as const
 export const CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","plugins.list","plugins.inspect","plugins.validate","plugins.install","plugins.set_enabled","plugins.remove","agents.list","agents.inspect","teams.list","teams.inspect","teams.generate","teams.run","teams.cancel","mcp.status","mcp.add","mcp.remove","host.attachment.create","host.attachment.revoke","host.control.acquire","host.control.release","host.control.status"] as const
@@ -168,7 +168,8 @@ export type RunCancelledPayload = { "reason": string }
 export type RunFailure = { "code": string; "message": string; "retryable": boolean }
 export type RunFailedPayload = { "error": RunFailure }
 export type InteractionBase = { "thread_id": string; "run_id": string; "timeout_ms": number; "payload": JsonObject }
-export type ApprovalRequest = { "thread_id": string; "run_id": string; "timeout_ms": number; "payload": { "interrupt_id": string; "description": string; "requests": JsonValue; "decisions": Array<"approve_once" | "approve_thread" | "approve_project" | "reject" | "reject_with_feedback"> } }
+export type FileDiffPresentation = { "kind": "file_diff"; "operation": "write" | "edit" | "delete"; "path": string; "added_lines": number; "removed_lines": number; "truncated": boolean; "unified_diff": string }
+export type ApprovalRequest = { "thread_id": string; "run_id": string; "timeout_ms": number; "payload": { "interrupt_id": string; "description": string; "requests": JsonValue; "decisions": Array<"approve_once" | "approve_thread" | "approve_project" | "reject" | "reject_with_feedback">; "presentation"?: FileDiffPresentation } }
 export type ApprovalResponse = { "decision": "approve_once" | "approve_thread" | "approve_project" | "reject" | "reject_with_feedback"; "feedback"?: string }
 export type Question = { "id": string; "question": string; "header": string; "body": string; "options": Array<{ "label": string; "value": string; "description": string }>; "multi_select": boolean; "allow_other": boolean }
 export type QuestionRequest = { "thread_id": string; "run_id": string; "timeout_ms": number; "payload": { "interrupt_id": string; "questions": Array<Question> } }

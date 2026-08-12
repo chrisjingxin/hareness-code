@@ -24,6 +24,8 @@ export const tuiTheme = {
   success: "#22c55e",
   warning: "#eab308",
   danger: "#ef4444",
+  diffAddedBackground: "#1a4d1a",
+  diffRemovedBackground: "#4d1a1a",
   syntaxComment: "#858b99",
   syntaxKeyword: "#8da7ff",
   syntaxFunction: "#79c6ff",

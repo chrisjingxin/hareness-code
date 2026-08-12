@@ -2776,6 +2776,7 @@ class AgentHost:
             skill_registry=registry,
             delegation_policy=spec.effective_policy.delegation,
             snapshot_store=self._snapshot_store,
+            approval_presentations=run.approval_presentations,
         )
 
     async def _handle_peer_response(self, message: dict[str, Any]) -> None:
