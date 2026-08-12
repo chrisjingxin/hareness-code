@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+import threading
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
@@ -155,21 +156,27 @@ class ThreadSnapshotStore:
         self._identity_index: dict[tuple[str, str, str, str], str] = {}
         self._total_bytes = 0
         self._closed = False
+        # Host 的 AsyncRWLock 只协调工具语义；adispatch 会把并行只读调用送入
+        # 不同工作线程，因此 Store 必须独立线性化自己的多步内存状态。
+        self._state_lock = threading.Lock()
 
     @property
     def total_bytes(self) -> int:
         """返回当前 retained Snapshot 版本的字节预算占用。"""
-        return self._total_bytes
+        with self._state_lock:
+            return self._total_bytes
 
     @property
     def size(self) -> int:
         """返回当前 retained Snapshot 数量。"""
-        return len(self._records)
+        with self._state_lock:
+            return len(self._records)
 
     @property
     def closed(self) -> bool:
         """返回 store 是否已经释放。"""
-        return self._closed
+        with self._state_lock:
+            return self._closed
 
     def record_read(
         self,
@@ -189,7 +196,10 @@ class ThreadSnapshotStore:
         `/.harness` 是逻辑只读 route，调用方应把该次读取视为普通成功读取；
         本方法返回 `None` 而不是创建可用于后续写入的 Snapshot。
         """
-        self._ensure_open()
+        # 先保持既有错误优先级；候选计算结束后还会在提交临界区复核 close，
+        # 防止 Host close 与在途读取交错后重新插入记录。
+        with self._state_lock:
+            self._ensure_open_locked()
         if not thread_id or not isinstance(thread_id, str):
             raise SnapshotStoreError("SNAPSHOT_THREAD_INVALID", "Thread ID 不能为空")
         if not backend_id or not isinstance(backend_id, str):
@@ -205,46 +215,75 @@ class ThreadSnapshotStore:
             raise SnapshotStoreError("SNAPSHOT_CONTENT_INVALID", "Snapshot 只接受文本内容")
         if offset < 0 or (limit is not None and limit < 0):
             raise SnapshotStoreError("SNAPSHOT_RANGE_INVALID", "已读行范围必须是非负数")
-        now = self._clock()
-        self._expire(now)
         bytes_value = raw_bytes if raw_bytes is not None else content.encode(encoding)
         content_hash = hashlib.sha256(bytes_value).hexdigest()
         line_count = len(content.splitlines(keepends=True))
         end = line_count if limit is None else min(line_count, offset + limit)
         seen = merge_line_intervals(((min(offset, line_count), end),))
         identity = (thread_id, canonical_path, backend_id, content_hash)
-        existing_id = self._identity_index.get(identity)
-        if existing_id is not None and existing_id in self._records:
-            existing = self._records[existing_id]
-            updated = replace(
-                existing,
-                seen_lines=merge_line_intervals((*existing.seen_lines, *seen)),
-                last_used_at=now,
-            )
-            self._records[existing_id] = updated
-            return updated
+        byte_length = len(bytes_value)
+        line_ending = _line_ending(content)
+        has_final_newline = content.endswith(("\n", "\r"))
 
-        record = SnapshotRecord(
-            snapshot_id=f"snap_{secrets.token_urlsafe(18)}",
-            thread_id=thread_id,
-            path=canonical_path,
-            backend_id=backend_id,
-            content_hash=content_hash,
-            byte_length=len(bytes_value),
-            line_count=line_count,
-            encoding=encoding,
-            has_bom=has_bom,
-            line_ending=_line_ending(content),
-            has_final_newline=content.endswith(("\n", "\r")),
-            seen_lines=seen,
-            created_at=now,
-            last_used_at=now,
-        )
-        self._records[record.snapshot_id] = record
-        self._identity_index[identity] = record.snapshot_id
-        self._total_bytes += record.byte_length
-        self._evict(record.snapshot_id)
-        return record
+        # 常见的重复读取先在锁内直接复用，避免为已经存在的 identity
+        # 生成无用随机 ID；并发 miss 仍会在最终提交时再次复核。
+        with self._state_lock:
+            self._ensure_open_locked()
+            now = self._clock()
+            self._expire_locked(now)
+            existing_id = self._identity_index.get(identity)
+            if existing_id is not None and existing_id in self._records:
+                existing = self._records[existing_id]
+                updated = replace(
+                    existing,
+                    seen_lines=merge_line_intervals((*existing.seen_lines, *seen)),
+                    last_used_at=now,
+                )
+                self._records[existing_id] = updated
+                return updated
+
+        # ID 候选和文本元数据都在锁外准备；锁内只提交短期内存事务。
+        # 若不可猜测 ID 极低概率碰撞，释放锁后生成新候选再重试。
+        while True:
+            candidate_id = f"snap_{secrets.token_urlsafe(18)}"
+            with self._state_lock:
+                self._ensure_open_locked()
+                now = self._clock()
+                self._expire_locked(now)
+                existing_id = self._identity_index.get(identity)
+                if existing_id is not None and existing_id in self._records:
+                    existing = self._records[existing_id]
+                    updated = replace(
+                        existing,
+                        seen_lines=merge_line_intervals((*existing.seen_lines, *seen)),
+                        last_used_at=now,
+                    )
+                    self._records[existing_id] = updated
+                    return updated
+                if candidate_id in self._records:
+                    continue
+
+                record = SnapshotRecord(
+                    snapshot_id=candidate_id,
+                    thread_id=thread_id,
+                    path=canonical_path,
+                    backend_id=backend_id,
+                    content_hash=content_hash,
+                    byte_length=byte_length,
+                    line_count=line_count,
+                    encoding=encoding,
+                    has_bom=has_bom,
+                    line_ending=line_ending,
+                    has_final_newline=has_final_newline,
+                    seen_lines=seen,
+                    created_at=now,
+                    last_used_at=now,
+                )
+                self._records[record.snapshot_id] = record
+                self._identity_index[identity] = record.snapshot_id
+                self._total_bytes += record.byte_length
+                self._evict_locked(record.snapshot_id)
+                return record
 
     def resolve(
         self,
@@ -254,22 +293,25 @@ class ThreadSnapshotStore:
         backend_id: str,
     ) -> SnapshotRecord:
         """按句柄及完整作用域解析 Snapshot，任何不匹配都 fail closed。"""
-        self._ensure_open()
-        now = self._clock()
-        self._expire(now)
-        record = self._records.get(snapshot_id)
-        if record is None:
-            raise SnapshotExpiredError(snapshot_id)
+        with self._state_lock:
+            self._ensure_open_locked()
         canonical_path = canonical_snapshot_path(path)
-        if (
-            record.thread_id != thread_id
-            or record.path != canonical_path
-            or record.backend_id != backend_id
-        ):
-            raise SnapshotScopeMismatchError()
-        updated = replace(record, last_used_at=now)
-        self._records[snapshot_id] = updated
-        return updated
+        with self._state_lock:
+            self._ensure_open_locked()
+            now = self._clock()
+            self._expire_locked(now)
+            record = self._records.get(snapshot_id)
+            if record is None:
+                raise SnapshotExpiredError(snapshot_id)
+            if (
+                record.thread_id != thread_id
+                or record.path != canonical_path
+                or record.backend_id != backend_id
+            ):
+                raise SnapshotScopeMismatchError()
+            updated = replace(record, last_used_at=now)
+            self._records[snapshot_id] = updated
+            return updated
 
     def has_seen(
         self,
@@ -284,53 +326,62 @@ class ThreadSnapshotStore:
 
     def invalidate_path(self, thread_id: str, path: str, backend_id: str | None = None) -> int:
         """使一个 Thread 的路径版本失效，返回被删除的 Snapshot 数量。"""
-        self._ensure_open()
+        with self._state_lock:
+            self._ensure_open_locked()
         canonical_path = canonical_snapshot_path(path)
-        ids = [
-            record.snapshot_id
-            for record in self._records.values()
-            if record.thread_id == thread_id
-            and record.path == canonical_path
-            and (backend_id is None or record.backend_id == backend_id)
-        ]
-        for snapshot_id in ids:
-            self._remove(snapshot_id)
-        return len(ids)
+        with self._state_lock:
+            self._ensure_open_locked()
+            ids = [
+                record.snapshot_id
+                for record in self._records.values()
+                if record.thread_id == thread_id
+                and record.path == canonical_path
+                and (backend_id is None or record.backend_id == backend_id)
+            ]
+            for snapshot_id in ids:
+                self._remove_locked(snapshot_id)
+            return len(ids)
 
     def close_thread(self, thread_id: str) -> int:
         """释放一个 Thread 的所有内存 Snapshot，不触碰持久化 Thread 数据。"""
-        self._ensure_open()
-        ids = [record.snapshot_id for record in self._records.values() if record.thread_id == thread_id]
-        for snapshot_id in ids:
-            self._remove(snapshot_id)
-        return len(ids)
+        with self._state_lock:
+            self._ensure_open_locked()
+            ids = [
+                record.snapshot_id
+                for record in self._records.values()
+                if record.thread_id == thread_id
+            ]
+            for snapshot_id in ids:
+                self._remove_locked(snapshot_id)
+            return len(ids)
 
     def close(self) -> None:
         """释放 Host 级 store；重复调用保持幂等。"""
-        if self._closed:
-            return
-        self._records.clear()
-        self._identity_index.clear()
-        self._total_bytes = 0
-        self._closed = True
+        with self._state_lock:
+            if self._closed:
+                return
+            self._records.clear()
+            self._identity_index.clear()
+            self._total_bytes = 0
+            self._closed = True
 
-    def _ensure_open(self) -> None:
-        """拒绝在 Host close 后继续创建或解析句柄。"""
+    def _ensure_open_locked(self) -> None:
+        """在已持状态锁时拒绝 Host close 后的创建、解析或失效。"""
         if self._closed:
             raise SnapshotStoreError("SNAPSHOT_STORE_CLOSED")
 
-    def _expire(self, now: float) -> None:
-        """先按 TTL 移除旧版本，再让后续 LRU 规则保持确定。"""
+    def _expire_locked(self, now: float) -> None:
+        """在已持状态锁时按 TTL 移除旧版本。"""
         expired = [
             record.snapshot_id
             for record in self._records.values()
             if now - record.last_used_at >= self.ttl_seconds
         ]
         for snapshot_id in expired:
-            self._remove(snapshot_id)
+            self._remove_locked(snapshot_id)
 
-    def _evict(self, newest_id: str) -> None:
-        """按 path/version、总字节和总数量顺序执行确定性 LRU 淘汰。"""
+    def _evict_locked(self, newest_id: str) -> None:
+        """在已持状态锁时按 path/version、字节和数量执行 LRU。"""
         newest = self._records.get(newest_id)
         if newest is None:
             return
@@ -350,27 +401,54 @@ class ThreadSnapshotStore:
             ]
             if not candidates:
                 break
-            self._remove(min(candidates, key=lambda record: (record.last_used_at, record.created_at, record.snapshot_id)).snapshot_id)
+            self._remove_locked(
+                min(
+                    candidates,
+                    key=lambda record: (
+                        record.last_used_at,
+                        record.created_at,
+                        record.snapshot_id,
+                    ),
+                ).snapshot_id
+            )
 
         while self._total_bytes > self.max_total_bytes and len(self._records) > 1:
             candidates = [record for record in self._records.values() if record.snapshot_id != newest_id]
             if not candidates:
                 break
-            self._remove(min(candidates, key=lambda record: (record.last_used_at, record.created_at, record.snapshot_id)).snapshot_id)
+            self._remove_locked(
+                min(
+                    candidates,
+                    key=lambda record: (
+                        record.last_used_at,
+                        record.created_at,
+                        record.snapshot_id,
+                    ),
+                ).snapshot_id
+            )
 
         while len(self._records) > self.max_snapshots:
             candidates = [record for record in self._records.values() if record.snapshot_id != newest_id]
             if not candidates:
                 break
-            self._remove(min(candidates, key=lambda record: (record.last_used_at, record.created_at, record.snapshot_id)).snapshot_id)
+            self._remove_locked(
+                min(
+                    candidates,
+                    key=lambda record: (
+                        record.last_used_at,
+                        record.created_at,
+                        record.snapshot_id,
+                    ),
+                ).snapshot_id
+            )
 
         # 单个版本超过全局字节预算时也不能留下超预算状态；返回的 record
         # 仍可用于本次调用的结果，但后续 resolve 会稳定返回 expired。
         if self._total_bytes > self.max_total_bytes and newest_id in self._records:
-            self._remove(newest_id)
+            self._remove_locked(newest_id)
 
-    def _remove(self, snapshot_id: str) -> None:
-        """从记录、identity index 和字节计数中原子移除一个版本。"""
+    def _remove_locked(self, snapshot_id: str) -> None:
+        """在已持状态锁时同步移除记录、identity index 和字节计数。"""
         record = self._records.pop(snapshot_id, None)
         if record is None:
             return

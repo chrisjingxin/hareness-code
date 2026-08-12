@@ -49,7 +49,12 @@ class CanonicalEditFileSchema(BaseModel):
 
     file_path: str = Field(description="以 / 开头、相对于工作区根目录的已有文件路径。")
     snapshot_id: str = Field(description="由同一 Thread 的 read_file 返回的 Snapshot ID。")
-    old_string: str = Field(description="从已读内容复制的唯一原文本；不支持 replace_all。")
+    old_string: str = Field(
+        description=(
+            "从已读内容复制的唯一原文本；仅当 Snapshot 与当前文件都为空时可传空字符串"
+            "初始化空文件；不支持 replace_all。"
+        )
+    )
     new_string: str = Field(description="替换 old_string 的新文本；可为空以删除该文本。")
 
 
@@ -85,7 +90,10 @@ def create_file_tool_definitions() -> tuple[BaseTool, ...]:
         ("write_file", "只创建新的 UTF-8 文本文件；目标已存在时失败。", CanonicalWriteFileSchema),
         (
             "edit_file",
-            "先读取，再用同一 Thread Snapshot 将唯一 old_string 替换为 new_string。",
+            (
+                "先读取，再用同一 Thread Snapshot 将唯一 old_string 替换为 new_string；"
+                "已读空文件可用空 old_string 写入初始内容。"
+            ),
             CanonicalEditFileSchema,
         ),
         ("glob", "查找匹配 glob 的文件。", GlobSchema),

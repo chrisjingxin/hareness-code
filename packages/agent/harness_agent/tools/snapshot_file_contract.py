@@ -188,7 +188,7 @@ class SnapshotFileToolContract:
         return True
 
     def approval_description(self, tool_call: dict[str, Any], _state: Any, runtime: Any) -> str:
-        """把同一份已准备计划的精确有界 diff 交给既有 HITL 审批 payload。"""
+        """把同一份已准备计划的有界 diff 预览交给既有 HITL 审批 payload。"""
         request = type("ApprovalToolCallRequest", (), {"tool_call": tool_call, "runtime": runtime})()
         plan = self._prepare_mutation(request)
         return self._mutation_service.approval_description(plan)
@@ -543,8 +543,6 @@ class SnapshotFileToolContract:
         snapshot_id = _snapshot_id(args)
         old_string = _string_arg(args, "old_string")
         new_string = _string_arg(args, "new_string")
-        if not old_string:
-            raise FileToolContractError("INVALID_EDIT")
         _require_text_size(old_string)
         _require_text_size(new_string)
         thread_id = self._thread_id(request)
@@ -567,17 +565,25 @@ class SnapshotFileToolContract:
         self._require_current(record, current)
         old_source = _normalize_line_endings(old_string, current)
         new_source = _normalize_line_endings(new_string, current)
-        start = current.content.find(old_source)
-        if start < 0:
-            raise FileToolContractError("EXACT_MATCH_NOT_FOUND")
-        # str.count 只统计不重叠匹配；从首个起点的下一字符继续
-        # 搜索，才能把 `aaa` 中的两个 `aa` 正确判为歧义。
-        if current.content.find(old_source, start + 1) >= 0:
-            raise FileToolContractError("AMBIGUOUS_MATCH")
-        start_line, end_line = _source_line_range(current.content, start, old_source)
-        if not self._snapshot_store.has_seen(record, start_line, end_line):
-            raise FileToolContractError("UNREAD_RANGE")
-        proposed = current.content[:start] + new_source + current.content[start + len(old_source) :]
+        if not old_source:
+            # 空文档没有可登记的源行。只有 Snapshot 与当前完整 identity 都证明
+            # 文档仍为零行空文本时，空 old_string 才表示替换整个空文档；绝不
+            # 交给 str.find("") 猜测非空文件中的插入位置。
+            if record.line_count != 0 or current.content != "":
+                raise FileToolContractError("INVALID_EDIT")
+            proposed = new_source
+        else:
+            start = current.content.find(old_source)
+            if start < 0:
+                raise FileToolContractError("EXACT_MATCH_NOT_FOUND")
+            # str.count 只统计不重叠匹配；从首个起点的下一字符继续
+            # 搜索，才能把 `aaa` 中的两个 `aa` 正确判为歧义。
+            if current.content.find(old_source, start + 1) >= 0:
+                raise FileToolContractError("AMBIGUOUS_MATCH")
+            start_line, end_line = _source_line_range(current.content, start, old_source)
+            if not self._snapshot_store.has_seen(record, start_line, end_line):
+                raise FileToolContractError("UNREAD_RANGE")
+            proposed = current.content[:start] + new_source + current.content[start + len(old_source) :]
         if proposed == current.content:
             raise FileToolContractError("NO_CHANGES")
         _require_mutation_text_size(proposed)

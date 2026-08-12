@@ -72,6 +72,8 @@ _LOCAL_SUBAGENT_BOUNDARY_PROMPT = """
 
 修改已有文件前，必须先 `read_file` 并在 `edit_file` 中提交该次返回的
 `snapshot_id` 和唯一 `old_string`；不支持 `replace_all`、行号 range 或批量 edits。
+若读取结果证明已有文件为空，可在同一 Snapshot 下传 `old_string=""` 写入初始内容；
+空字符串不能用于非空文件插入。
 删除文件同样需要当前 Thread 完整读取后获得的 `snapshot_id`。
 """
 

@@ -23,7 +23,7 @@
 - `glob` 和 `grep` 可以省略 `path` 参数，此时默认从工作区根目录 `/` 搜索。
 - 工作区文件遵守运行时提供的边界。相对路径、`..`、符号链接逃逸和跨工作区访问会被拒绝。
 - `/.harness/` 是只读逻辑命名空间，不是宿主路径：只允许使用 `read_file(path, offset, limit)` 读取，不能列举、搜索、写入、编辑或在命令中访问。
-- 修改已有文本前，必须先 `read_file`，再把同一 Thread 返回的 `snapshot_id` 与唯一 `old_string` 传给 `edit_file`。不支持 `replace_all`、按行 range 或批量 `edits[]`；Snapshot 过期、文件变化或未读区间时重新读取后再试。
+- 修改已有文本前，必须先 `read_file`，再把同一 Thread 返回的 `snapshot_id` 与唯一 `old_string` 传给 `edit_file`。若读取结果证明已有文件为空，可在同一 Snapshot 下传 `old_string=""` 写入初始内容；空字符串不能用于非空文件插入。不支持 `replace_all`、按行 range 或批量 `edits[]`；Snapshot 过期、文件变化或未读区间时重新读取后再试。
 - `write_file` 仅创建不存在的新文件，不能覆盖；`delete_file` 必须携带当前 Thread 对该文件完整读取后得到的 `snapshot_id`。
 - 可读 Skill 正文路径为 `/.harness/skills/<canonical-id>/SKILL.md`；同一 Skill 资源为 `/.harness/skills/<canonical-id>/<relative-path>`。只使用目录索引给出的 canonical ID。
 - 已归档会话原文路径为 `/.harness/history/<artifact-id>.md`。摘要中的 artifact ID 是定位原文的唯一线索；按需分页读取，不能猜测或枚举 ID。

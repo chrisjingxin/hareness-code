@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -160,6 +161,443 @@ def test_read_returns_short_snapshot_and_edit_requires_seen_unique_text(tmp_path
     )
     assert continued["ok"] is True
     assert target.read_text(encoding="utf-8") == "first\nfinished\nthird\n"
+
+
+def test_empty_file_initialization_uses_current_snapshot_and_returns_editable_result(
+    tmp_path: Path,
+) -> None:
+    """空文档可被整体替换，结果 Snapshot 的可见行可继续普通编辑。"""
+    target = tmp_path / "empty.txt"
+    target.write_bytes(b"")
+    contract = _contract(tmp_path)
+    read = _payload(contract.dispatch(_request("read_file", {"file_path": "/empty.txt"})))
+
+    assert read["ok"] is True
+    assert read["line_count"] == 0
+    assert read["shown_lines"] == {"start_line": None, "end_line": None}
+    request = _request(
+        "edit_file",
+        {
+            "file_path": "/empty.txt",
+            "snapshot_id": read["snapshot_id"],
+            "old_string": "",
+            "new_string": "first\nsecond\n",
+        },
+        call_id="initialize-empty",
+    )
+    assert contract.approval_preflight(request) is True
+    description = contract.approval_description(request.tool_call, None, request.runtime)
+    assert "有界 diff 预览" in description
+    assert "+first" in description
+
+    initialized = _payload(contract.dispatch(request))
+
+    assert initialized["ok"] is True
+    assert initialized["changed_range"] == {
+        "start_line": 1,
+        "end_line": 2,
+        "added_lines": 2,
+        "removed_lines": 0,
+    }
+    assert initialized["shown_lines"] == {"start_line": 1, "end_line": 2}
+    assert target.read_text(encoding="utf-8") == "first\nsecond\n"
+
+    continued = _payload(
+        contract.dispatch(
+            _request(
+                "edit_file",
+                {
+                    "file_path": "/empty.txt",
+                    "snapshot_id": initialized["snapshot_id"],
+                    "old_string": "second\n",
+                    "new_string": "finished\n",
+                },
+                call_id="edit-initialized",
+            )
+        )
+    )
+    assert continued["ok"] is True
+    assert target.read_text(encoding="utf-8") == "first\nfinished\n"
+
+
+def test_empty_initialization_preserves_bom_mode_and_write_stays_create_only(
+    tmp_path: Path,
+) -> None:
+    """只含 BOM 的空文本仍走 edit CAS，并保留原文件 mode。"""
+    target = tmp_path / "bom-empty.txt"
+    target.write_bytes(b"\xef\xbb\xbf")
+    target.chmod(0o640)
+    original_mode = target.stat().st_mode & 0o777
+    contract = _contract(tmp_path)
+
+    exists = _payload(
+        contract.dispatch(
+            _request("write_file", {"file_path": "/bom-empty.txt", "content": "overwrite\n"})
+        )
+    )
+    assert exists["error"]["code"] == "FILE_ALREADY_EXISTS"
+    read = _payload(contract.dispatch(_request("read_file", {"file_path": "/bom-empty.txt"})))
+    initialized = _payload(
+        contract.dispatch(
+            _request(
+                "edit_file",
+                {
+                    "file_path": "/bom-empty.txt",
+                    "snapshot_id": read["snapshot_id"],
+                    "old_string": "",
+                    "new_string": "created\n",
+                },
+            )
+        )
+    )
+
+    assert initialized["ok"] is True
+    assert target.read_bytes() == b"\xef\xbb\xbfcreated\n"
+    assert target.stat().st_mode & 0o777 == original_mode
+
+
+def test_empty_old_string_rejects_nonempty_stale_cross_thread_noop_and_oversize(
+    tmp_path: Path,
+) -> None:
+    """空匹配不能成为一般插入；所有 Snapshot/大小失败都保持原字节。"""
+    nonempty = tmp_path / "nonempty.txt"
+    nonempty.write_text("existing\n", encoding="utf-8")
+    contract = _contract(tmp_path)
+    read_nonempty = _payload(
+        contract.dispatch(_request("read_file", {"file_path": "/nonempty.txt"}))
+    )
+    invalid = _payload(
+        contract.dispatch(
+            _request(
+                "edit_file",
+                {
+                    "file_path": "/nonempty.txt",
+                    "snapshot_id": read_nonempty["snapshot_id"],
+                    "old_string": "",
+                    "new_string": "prefix\n",
+                },
+            )
+        )
+    )
+    assert invalid["error"] == {
+        "code": "INVALID_EDIT",
+        "message": "空 old_string 只允许初始化当前 Snapshot 对应的空文件。",
+        "next_action": "从已读非空内容复制唯一的 old_string 后重试。",
+    }
+    assert nonempty.read_text(encoding="utf-8") == "existing\n"
+
+    stale_target = tmp_path / "stale-empty.txt"
+    stale_target.write_bytes(b"")
+    stale_read = _payload(
+        contract.dispatch(_request("read_file", {"file_path": "/stale-empty.txt"}))
+    )
+    stale_target.write_text("external\n", encoding="utf-8")
+    stale = _payload(
+        contract.dispatch(
+            _request(
+                "edit_file",
+                {
+                    "file_path": "/stale-empty.txt",
+                    "snapshot_id": stale_read["snapshot_id"],
+                    "old_string": "",
+                    "new_string": "approved\n",
+                },
+            )
+        )
+    )
+    assert stale["error"]["code"] == "STALE_FILE"
+    assert stale_target.read_text(encoding="utf-8") == "external\n"
+
+    cross_target = tmp_path / "cross-empty.txt"
+    cross_target.write_bytes(b"")
+    cross_read = _payload(
+        contract.dispatch(
+            _request("read_file", {"file_path": "/cross-empty.txt"}, thread_id="thread-a")
+        )
+    )
+    cross = _payload(
+        contract.dispatch(
+            _request(
+                "edit_file",
+                {
+                    "file_path": "/cross-empty.txt",
+                    "snapshot_id": cross_read["snapshot_id"],
+                    "old_string": "",
+                    "new_string": "cross\n",
+                },
+                thread_id="thread-b",
+            )
+        )
+    )
+    assert cross["error"]["code"] == "SNAPSHOT_SCOPE_MISMATCH"
+    assert cross_target.read_bytes() == b""
+
+    noop_target = tmp_path / "noop-empty.txt"
+    noop_target.write_bytes(b"")
+    noop_read = _payload(contract.dispatch(_request("read_file", {"file_path": "/noop-empty.txt"})))
+    noop = _payload(
+        contract.dispatch(
+            _request(
+                "edit_file",
+                {
+                    "file_path": "/noop-empty.txt",
+                    "snapshot_id": noop_read["snapshot_id"],
+                    "old_string": "",
+                    "new_string": "",
+                },
+            )
+        )
+    )
+    assert noop["error"]["code"] == "NO_CHANGES"
+
+    oversized_target = tmp_path / "oversized-empty.txt"
+    oversized_target.write_bytes(b"")
+    oversized_read = _payload(
+        contract.dispatch(_request("read_file", {"file_path": "/oversized-empty.txt"}))
+    )
+    oversized = _payload(
+        contract.dispatch(
+            _request(
+                "edit_file",
+                {
+                    "file_path": "/oversized-empty.txt",
+                    "snapshot_id": oversized_read["snapshot_id"],
+                    "old_string": "",
+                    "new_string": "x" * (64 * 1024 + 1),
+                },
+            )
+        )
+    )
+    assert oversized["error"]["code"] == "EDIT_TEXT_TOO_LARGE"
+    assert oversized_target.read_bytes() == b""
+
+
+def test_truncated_empty_initialization_diff_remains_approvable_and_fingerprint_bound(
+    tmp_path: Path,
+) -> None:
+    """审批只显示有界预览，但仍可批准且不能把批准套到改参内容。"""
+    target = tmp_path / "large-empty.txt"
+    target.write_bytes(b"")
+    contract = _contract(tmp_path)
+    read = _payload(contract.dispatch(_request("read_file", {"file_path": "/large-empty.txt"})))
+    initial_content = "".join(f"line-{index}\n" for index in range(240))
+    approved = _request(
+        "edit_file",
+        {
+            "file_path": "/large-empty.txt",
+            "snapshot_id": read["snapshot_id"],
+            "old_string": "",
+            "new_string": initial_content,
+        },
+        call_id="large-empty-approval",
+    )
+
+    assert contract.approval_preflight(approved) is True
+    description = contract.approval_description(approved.tool_call, None, approved.runtime)
+    assert "diff 预览因上限截断" in description
+    assert "[diff 因行数或字节上限截断]" in description
+    assert "批准将提交本次调用已固定的完整拟议内容" in description
+
+    committed = _payload(contract.dispatch(approved))
+    assert committed["ok"] is True
+    assert target.read_text(encoding="utf-8") == initial_content
+
+    bound_target = tmp_path / "bound-empty.txt"
+    bound_target.write_bytes(b"")
+    bound_read = _payload(
+        contract.dispatch(_request("read_file", {"file_path": "/bound-empty.txt"}))
+    )
+    bound = _request(
+        "edit_file",
+        {
+            "file_path": "/bound-empty.txt",
+            "snapshot_id": bound_read["snapshot_id"],
+            "old_string": "",
+            "new_string": initial_content,
+        },
+        call_id="bound-empty-approval",
+    )
+    assert contract.approval_preflight(bound) is True
+
+    changed = _request(
+        "edit_file",
+        {
+            "file_path": "/bound-empty.txt",
+            "snapshot_id": bound_read["snapshot_id"],
+            "old_string": "",
+            "new_string": "not-approved\n",
+        },
+        call_id="bound-empty-approval",
+    )
+    rejected = _payload(contract.dispatch(changed))
+    assert rejected["error"]["code"] == "COMMIT_CONFLICT"
+    replay = _payload(contract.dispatch(bound))
+    assert replay["error"]["code"] == "COMMIT_CONFLICT"
+    assert bound_target.read_bytes() == b""
+
+
+def test_empty_initialization_conflict_consumes_approval_and_drift_returns_actual_snapshot(
+    tmp_path: Path,
+) -> None:
+    """空初始化的旧批准不可重放，保存钩子结果只绑定实际版本。"""
+    from harness_agent.threads.text_backend import LocalTextMutationBackend
+
+    conflict_target = tmp_path / "conflict-empty.txt"
+    conflict_target.write_bytes(b"")
+    contract = _contract(tmp_path)
+    read = _payload(
+        contract.dispatch(_request("read_file", {"file_path": "/conflict-empty.txt"}))
+    )
+    request = _request(
+        "edit_file",
+        {
+            "file_path": "/conflict-empty.txt",
+            "snapshot_id": read["snapshot_id"],
+            "old_string": "",
+            "new_string": "approved\n",
+        },
+        call_id="empty-conflict",
+    )
+    assert contract.approval_preflight(request) is True
+    conflict_target.write_text("external\n", encoding="utf-8")
+    conflict = _payload(contract.dispatch(request))
+    assert conflict["error"]["code"] == "COMMIT_CONFLICT"
+    conflict_target.write_bytes(b"")
+    replay = _payload(contract.dispatch(request))
+    assert replay["error"]["code"] == "COMMIT_CONFLICT"
+    assert conflict_target.read_bytes() == b""
+
+    class DriftAfterInitializationBackend(LocalTextMutationBackend):
+        """模拟初始化提交后保存钩子立刻改写实际文件。"""
+
+        def compare_and_replace_text(self, path: str, expected: Any, proposed: str):
+            result = super().compare_and_replace_text(path, expected, proposed)
+            (tmp_path / path.lstrip("/")).write_text("formatted\n", encoding="utf-8")
+            return result
+
+    drift_target = tmp_path / "drift-empty.txt"
+    drift_target.write_bytes(b"")
+    drift_contract = _contract_with_backend(
+        tmp_path,
+        DriftAfterInitializationBackend(tmp_path),
+    )
+    drift_read = _payload(
+        drift_contract.dispatch(_request("read_file", {"file_path": "/drift-empty.txt"}))
+    )
+    drift = _payload(
+        drift_contract.dispatch(
+            _request(
+                "edit_file",
+                {
+                    "file_path": "/drift-empty.txt",
+                    "snapshot_id": drift_read["snapshot_id"],
+                    "old_string": "",
+                    "new_string": "approved\n",
+                },
+            )
+        )
+    )
+    assert drift["ok"] is True
+    assert drift["warning"]["code"] == "POST_WRITE_DRIFT"
+    assert "+approved" in drift["warning"]["proposed_diff"]
+    assert "+formatted" in drift["warning"]["actual_diff"]
+    actual = _payload(
+        drift_contract.dispatch(_request("read_file", {"file_path": "/drift-empty.txt"}))
+    )
+    assert actual["snapshot_id"] == drift["snapshot_id"]
+    assert actual["content"] == "1\tformatted"
+
+
+def test_empty_initialization_uses_remote_native_cas_and_rejects_read_only_provider(
+    tmp_path: Path,
+) -> None:
+    """远端初始化只调用原生 compare-and-replace，缺少 CAS 时零写入。"""
+    import hashlib
+
+    from harness_agent.threads.text_backend import (
+        ContentIdentity,
+        RemoteTextMutationBackend,
+        TextDocument,
+        TextMutationError,
+    )
+
+    class ReadOnlyProvider:
+        def __init__(self) -> None:
+            self.content = ""
+
+        def _document(self, path: str) -> TextDocument:
+            raw = self.content.encode("utf-8")
+            return TextDocument(
+                path=path,
+                content=self.content,
+                identity=ContentIdentity(
+                    digest=hashlib.sha256(raw).hexdigest(),
+                    byte_length=len(raw),
+                    line_ending="lf" if "\n" in self.content else "none",
+                    has_final_newline=self.content.endswith("\n"),
+                ),
+            )
+
+        def read_text_document(self, path: str) -> TextDocument:
+            return self._document(path)
+
+    class NativeCasProvider(ReadOnlyProvider):
+        def compare_and_replace_text(
+            self,
+            path: str,
+            expected: ContentIdentity,
+            proposed: str,
+        ) -> TextDocument:
+            if self._document(path).identity != expected:
+                raise TextMutationError("COMMIT_CONFLICT")
+            self.content = proposed
+            return self._document(path)
+
+    native_provider = NativeCasProvider()
+    native = _contract_with_backend(
+        tmp_path,
+        RemoteTextMutationBackend(native_provider, backend_id="remote-native"),
+    )
+    native_read = _payload(native.dispatch(_request("read_file", {"file_path": "/remote.txt"})))
+    native_result = _payload(
+        native.dispatch(
+            _request(
+                "edit_file",
+                {
+                    "file_path": "/remote.txt",
+                    "snapshot_id": native_read["snapshot_id"],
+                    "old_string": "",
+                    "new_string": "remote\n",
+                },
+            )
+        )
+    )
+    assert native_result["ok"] is True
+    assert native_provider.content == "remote\n"
+
+    read_only_provider = ReadOnlyProvider()
+    read_only = _contract_with_backend(
+        tmp_path,
+        RemoteTextMutationBackend(read_only_provider, backend_id="remote-read-only"),
+    )
+    read_only_read = _payload(
+        read_only.dispatch(_request("read_file", {"file_path": "/remote.txt"}))
+    )
+    unsupported = _payload(
+        read_only.dispatch(
+            _request(
+                "edit_file",
+                {
+                    "file_path": "/remote.txt",
+                    "snapshot_id": read_only_read["snapshot_id"],
+                    "old_string": "",
+                    "new_string": "must-not-write\n",
+                },
+            )
+        )
+    )
+    assert unsupported["error"]["code"] == "BACKEND_CAS_UNSUPPORTED"
+    assert read_only_provider.content == ""
 
 
 def test_edit_allows_unique_text_copied_from_middle_of_seen_line(tmp_path: Path) -> None:
@@ -737,6 +1175,69 @@ def test_async_diagnostics_distinguish_zero_timeout_and_unavailable(tmp_path: Pa
         )
     )
     assert unavailable_result["diagnostics"] == {"status": "unavailable"}
+
+
+def test_parallel_adispatch_reads_keep_backend_io_parallel_and_snapshot_scopes_consistent(
+    tmp_path: Path,
+) -> None:
+    """真实 to_thread 读取可重叠，Store 只在线性化元数据时短暂互斥。"""
+    from harness_agent.threads.snapshots import ThreadSnapshotStore
+    from harness_agent.threads.text_backend import LocalTextMutationBackend
+    from harness_agent.tools.snapshot_file_contract import create_snapshot_file_tool_contract
+
+    read_barrier = threading.Barrier(4)
+
+    class OverlapBackend(LocalTextMutationBackend):
+        """要求四次 backend read 同时到达，防止 Store 锁意外覆盖 I/O。"""
+
+        def read_text_document(self, path: str):
+            read_barrier.wait(timeout=2.0)
+            return super().read_text_document(path)
+
+    target = tmp_path / "parallel.txt"
+    target.write_text("first\nsecond\n", encoding="utf-8")
+    store = ThreadSnapshotStore()
+    backend = OverlapBackend(tmp_path)
+    contract = create_snapshot_file_tool_contract(
+        object(),
+        snapshot_store=store,
+        text_backend=backend,
+    )
+
+    async def read_in_parallel() -> list[dict[str, Any]]:
+        requests = [
+            _request(
+                "read_file",
+                {"file_path": "/parallel.txt", "offset": offset, "limit": 1},
+                thread_id=thread_id,
+                call_id=f"read-{thread_id}-{offset}",
+            )
+            for thread_id in ("thread-a", "thread-b")
+            for offset in (0, 1)
+        ]
+        return [
+            _payload(message)
+            for message in await asyncio.gather(
+                *(contract.adispatch(request) for request in requests)
+            )
+        ]
+
+    results = asyncio.run(read_in_parallel())
+
+    assert all(result["ok"] is True for result in results)
+    thread_a_id = results[0]["snapshot_id"]
+    thread_b_id = results[2]["snapshot_id"]
+    assert results[1]["snapshot_id"] == thread_a_id
+    assert results[3]["snapshot_id"] == thread_b_id
+    assert thread_a_id != thread_b_id
+    assert store.resolve(thread_a_id, "thread-a", "/parallel.txt", backend.backend_id).seen_lines == (
+        (0, 2),
+    )
+    assert store.resolve(thread_b_id, "thread-b", "/parallel.txt", backend.backend_id).seen_lines == (
+        (0, 2),
+    )
+    assert store.size == 2
+    assert store.total_bytes == 2 * len("first\nsecond\n".encode())
 
 
 def test_diagnostics_and_metrics_are_bounded_and_do_not_store_source_or_paths(

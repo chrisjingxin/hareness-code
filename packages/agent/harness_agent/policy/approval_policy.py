@@ -111,7 +111,8 @@ def interrupt_on_for_approval_mode(
         extra_interrupt_tools: 需要一并纳入审批的额外工具名（如 MCP 工具）。
             仅在 default、auto-edit 和 auto 模式下生效；plan 和 yolo 忽略。
         approval_descriptions: 每个工具可选的动态审批描述。文件 mutation 使用它展示
-            prepare 阶段固定的精确 diff，其他工具继续使用框架默认描述。
+            prepare 阶段生成的有界 diff 预览；完整拟议内容仍由一次性计划固定，其他工具
+            继续使用框架默认描述。
     """
     if approval_mode in {"plan", "yolo"}:
         return None

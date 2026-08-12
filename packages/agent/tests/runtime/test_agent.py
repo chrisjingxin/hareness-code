@@ -77,6 +77,16 @@ def test_default_tool_schema_exposes_only_canonical_snapshot_file_mutations():
     assert schemas["delete_file"] == {"file_path": "string", "snapshot_id": "string"}
 
 
+def test_main_and_inline_prompts_describe_the_same_restricted_empty_file_edit() -> None:
+    """主/子 Agent 都只允许用空 old_string 初始化已读空文件。"""
+    from harness_agent.runtime.agent import _LOCAL_SUBAGENT_BOUNDARY_PROMPT, _PROMPT_PATH
+
+    main_prompt = _PROMPT_PATH.read_text(encoding="utf-8")
+    for prompt in (main_prompt, _LOCAL_SUBAGENT_BOUNDARY_PROMPT):
+        assert 'old_string=""' in prompt
+        assert "空字符串不能用于非空文件插入" in prompt
+
+
 async def test_auto_mode_preflight_uses_classifier_cache_end_to_end():
     """接线回归：auto 模式分类器缓存 allow 命中时不弹窗，工具直接执行。
 

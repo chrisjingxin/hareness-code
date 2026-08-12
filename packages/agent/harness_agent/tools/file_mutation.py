@@ -54,7 +54,7 @@ class MutationMetadata:
 
 @dataclass(frozen=True, slots=True)
 class MutationDiff:
-    """审批和 post-write drift 共用的有界精确文本 diff。"""
+    """审批和 post-write drift 共用的有界文本 diff 预览。"""
 
     text: str
     added_lines: int
@@ -194,16 +194,16 @@ class FileMutationService:
         return plan
 
     def approval_description(self, plan: PreparedFileMutation) -> str:
-        """返回供既有 HITL payload 直接展示的有界、精确审批说明。"""
+        """返回供既有 HITL payload 展示且不阻止批准的有界 diff 预览。"""
         operation = {"write": "创建文件", "edit": "编辑文件", "delete": "删除文件"}[plan.metadata.operation]
-        diff_note = "（diff 因上限截断）" if plan.diff.truncated else ""
+        diff_note = "（diff 预览因上限截断）" if plan.diff.truncated else ""
         return "\n".join(
             (
                 "文件变更需要审批",
                 f"操作：{operation}",
                 f"文件：{plan.metadata.path}",
                 f"变更：+{plan.diff.added_lines} / -{plan.diff.removed_lines} 行 {diff_note}".rstrip(),
-                "以下 diff 与批准后唯一允许提交的拟议内容完全一致：",
+                "以下是拟议内容的有界 diff 预览；批准将提交本次调用已固定的完整拟议内容：",
                 plan.diff.text or "（空文件内容变更）",
             )
         )
