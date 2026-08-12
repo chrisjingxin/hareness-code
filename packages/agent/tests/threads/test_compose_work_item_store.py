@@ -201,6 +201,24 @@ async def test_concurrent_create_allows_exactly_one_nonterminal_work_item(
         await persistence.close()
 
 
+async def test_reopen_restores_active_work_item_from_sqlite_facts(tmp_path: Path) -> None:
+    """Host 重启后只读取 SQLite 事实即可确定当前 active Work Item。"""
+    persistence = await _persistence(tmp_path)
+    try:
+        await _prepare_compose_thread(persistence)
+        created = await persistence.compose_work_item_store().create(_create("work-1"))
+    finally:
+        await persistence.close()
+
+    reopened = await ThreadPersistence.open(project=tmp_path / "project", home=tmp_path / "home")
+    try:
+        store = reopened.compose_work_item_store()
+        assert await store.load_thread_mode("thread-compose") is ThreadMode.COMPOSE
+        assert await store.load_active("thread-compose") == created
+    finally:
+        await reopened.close()
+
+
 async def test_v13_database_rebuilds_work_item_schema_without_old_compose_fallback(
     tmp_path: Path,
 ) -> None:
