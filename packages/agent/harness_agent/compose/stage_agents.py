@@ -19,26 +19,26 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
-from langchain_core.messages import HumanMessage
-
 from harness_agent.runtime.agent_delegation import (
     AgentDelegator,
     DelegationTarget,
     child_execution_ref,
-    managed_engine_runner,
 )
 from harness_agent.runtime.execution_binding import ExecutionMode, ExecutionRef
 from harness_agent.runtime.execution_stream import (
     CONTENT_DELTA,
     ExecutionStreamError,
-    ExecutionStreamRequest,
-    ExecutionStreamResult,
     RUN_PROGRESS,
     StreamInteractionRequest,
     StreamSession,
     TOOL_COMPLETED,
     TOOL_STARTED,
-    execute as execute_stream,
+)
+from harness_agent.runtime.managed_agent_executor import (
+    ManagedAgentExecutionError,
+    ManagedAgentExecutor,
+    ManagedAgentRequest,
+    acquire_pooled_agent_runtime,
 )
 from harness_agent.runtime.run_context import RunCancellationToken, RunContext
 
@@ -328,8 +328,8 @@ class ManagedStageAgentPort:
         profile = spec.runtime_profile
         started_at = time.monotonic()
 
-        async def invoke(engine: Any, command: Any) -> Mapping[str, Any]:
-            """在独立 checkpoint namespace 中流式运行 stage Agent。"""
+        async def invoke(command: Any) -> Mapping[str, Any]:
+            """构造 structured request，交由统一 executor 运行 stage Agent。"""
             from harness_agent.threads.context_lifecycle import ContextLifecycle
 
             child_ref = child_execution_ref(command)
@@ -338,15 +338,6 @@ class ManagedStageAgentPort:
                     execution_id=child_ref.execution_id,
                     parent_execution_id=child_ref.parent_execution_id,
                     agent_id=request.stage,
-                )
-                observer.emit(
-                    RUN_PROGRESS,
-                    {
-                        "phase": "model",
-                        "elapsed_ms": max(
-                            0, round((time.monotonic() - started_at) * 1000)
-                        ),
-                    },
                 )
             context_snapshot = ContextLifecycle(
                 spec.workspace,
@@ -372,59 +363,60 @@ class ManagedStageAgentPort:
                 cancellation_token=command.cancellation_token,
                 delegation_policy=spec.effective_policy.delegation,
             )
-            graph = engine.graph
-            session = StreamSession(
+            checkpoint_namespace = child_ref.checkpoint_namespace(
+                spec.project_fingerprint
+            )
+
+            async def acquire_runtime():
+                """只把 pooled runtime provider 交给 executor，stage 不读取 graph。"""
+                return await acquire_pooled_agent_runtime(
+                    pool=self._pool,
+                    profile=profile,
+                    run_context=context,
+                    graph_config=lambda namespace: {
+                        "configurable": {
+                            "thread_id": child_ref.thread_id,
+                            "checkpoint_ns": namespace,
+                        }
+                    },
+                )
+
+            snapshot_id = getattr(spec.skill_registry, "snapshot_id", None)
+            managed_request = ManagedAgentRequest(
+                execution_ref=child_ref.execution_id,
+                parent_execution_ref=child_ref.parent_execution_id,
                 run_id=child_ref.run_id,
+                input=command.task,
+                checkpoint_namespace=checkpoint_namespace,
+                output_policy="structured",
+                runtime_provider=acquire_runtime,
+                is_cancelled=lambda: command.cancellation_token.cancelled,
+                idempotency_key=command.idempotency_key,
+                agent_spec=spec,
+                interaction_policy=spec.effective_policy,
+                timeout_seconds=command.timeout_seconds,
+                required_skill_snapshot_ids=(snapshot_id,)
+                if isinstance(snapshot_id, str) and snapshot_id
+                else (),
                 started_at=started_at,
             )
-            ports = _StageStreamPorts(observer)
-            graph_config = {
-                "configurable": {
-                    "thread_id": child_ref.thread_id,
-                    "checkpoint_ns": child_ref.checkpoint_namespace(
-                        spec.project_fingerprint
-                    ),
-                }
-            }
-            resume: object | None = None
-            final_content = ""
-            from langgraph.types import Command
-
-            while True:
-                if command.cancellation_token.cancelled:
-                    raise asyncio_cancelled()
-                stream_input: object = (
-                    Command(resume=resume)
-                    if resume is not None
-                    else {"messages": [HumanMessage(content=command.task)]}
+            try:
+                result = await ManagedAgentExecutor().execute(
+                    managed_request,
+                    _StageStreamPorts(observer, started_at=started_at),
                 )
-                try:
-                    result = await execute_stream(
-                        ExecutionStreamRequest(
-                            agent=graph,
-                            stream_input=stream_input,
-                            graph_config=graph_config,
-                            context=context,
-                            content_visibility="capture_only",
-                            session=session,
-                            is_cancelled=lambda: command.cancellation_token.cancelled,
-                        ),
-                        ports,
-                    )
-                except ExecutionStreamError as exc:
-                    if exc.code == "RUN_CANCELLED":
-                        raise asyncio_cancelled() from exc
-                    raise
-                final_content = result.final_content or final_content
-                if result.resume is None:
-                    break
-                resume = result.resume
-            return {"final": str(final_content)}
+            except ManagedAgentExecutionError as exc:
+                if exc.code == "RUN_CANCELLED":
+                    raise asyncio_cancelled() from exc
+                raise AgentDelegationError(
+                    "COMPOSE_STAGE_EXECUTION_FAILED", exc.code
+                ) from exc
+            return {"final": str(result.final_content)}
 
         target = DelegationTarget(
             agent_id=request.stage,
             mode=ExecutionMode.MANAGED,
-            runner=managed_engine_runner(self._pool, profile, invoke),
+            runner=invoke,
             description=f"Compose {request.stage} stage",
             model=spec.model_view,
             policy_fingerprint=spec.effective_policy.fingerprint,
@@ -479,10 +471,29 @@ def asyncio_cancelled() -> BaseException:
 class _StageStreamPorts:
     """把 stream signal 转给 StageObserver；不捕获根 Transcript。"""
 
-    def __init__(self, observer: StageObserver | None) -> None:
+    def __init__(self, observer: StageObserver | None, *, started_at: float) -> None:
         self._observer = observer
+        self._started_at = started_at
+        self._model_started = False
         # tool_call_id → 工具名；TOOL_COMPLETED 本身不带 name，用 started 事件关联。
         self._tool_names: dict[str, str] = {}
+
+    def on_model_round(self) -> None:
+        """保持原有 stage 只报告一次模型阶段开始的 event 语义。"""
+        if self._observer is None or self._model_started:
+            return
+        self._model_started = True
+        self._observer.emit(
+            RUN_PROGRESS,
+            {
+                "phase": "model",
+                "elapsed_ms": max(0, round((time.monotonic() - self._started_at) * 1000)),
+            },
+        )
+
+    async def on_execution_complete(self, _result: object) -> None:
+        """stage artifact 由 caller 解析；observer 不持久化 root Transcript。"""
+        return None
 
     def emit(self, signal: Any) -> None:
         # capture_only 本就不会发 content.delta；双保险丢弃正文事件。
