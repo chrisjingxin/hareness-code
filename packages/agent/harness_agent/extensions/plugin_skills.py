@@ -18,6 +18,12 @@ from typing import Any, Protocol
 
 import yaml
 
+from harness_agent.skills.builtin_catalog import (
+    BuiltinSkillBundle,
+    BuiltinSkillBundleError,
+    BuiltinSkillDefinition,
+)
+
 MAX_SKILL_FILE_BYTES = 64 * 1024
 MAX_RESOURCE_BYTES = 128 * 1024
 MAX_SKILLS = 512
@@ -92,6 +98,9 @@ class SkillRecord:
     package_digest: str | None
     dialect: str
     enabled: bool
+    work_modes: tuple[str, ...] = ("build", "compose")
+    activities: tuple[str, ...] = ()
+    reserved: bool = False
 
     def summary(self) -> dict[str, object]:
         """返回不泄露本机绝对路径的协议摘要。"""
@@ -107,6 +116,9 @@ class SkillRecord:
             "argument_hint": self.argument_hint,
             "requested_tools": list(self.requested_tools),
             "enabled": self.enabled,
+            "work_modes": list(self.work_modes),
+            "activities": list(self.activities),
+            "reserved": self.reserved,
         }
 
 
@@ -168,6 +180,9 @@ class SkillRegistry:
         self._plugin_sources = tuple(plugin_sources)
         self._plugin_diagnostics = tuple(plugin_diagnostics)
         self._state = self._read_state()
+        self._builtin_definitions: dict[str, BuiltinSkillDefinition] = {}
+        self._builtin_bundle_root: Path | None = None
+        self._builtin_shared_resources: dict[str, bytes] = {}
         self._snapshot_manifests: dict[str, bytes] = {}
         self._snapshot_resources: dict[str, dict[str, bytes]] = {}
         self._records, self.diagnostics = self._scan()
@@ -197,6 +212,15 @@ class SkillRegistry:
         view._plugin_sources = ()
         view._plugin_diagnostics = ()
         view._state = self._state
+        view._builtin_definitions = {
+            upstream_id: definition
+            for upstream_id, definition in self._builtin_definitions.items()
+            if definition.canonical_id in allowed
+        }
+        view._builtin_bundle_root = self._builtin_bundle_root
+        view._builtin_shared_resources = (
+            dict(self._builtin_shared_resources) if view._builtin_definitions else {}
+        )
         view._records = {
             skill_id: record
             for skill_id, record in self._records.items()
@@ -245,6 +269,36 @@ class SkillRegistry:
         if len(matches) > 1:
             raise SkillAmbiguousError(value, [record.skill_id for record in matches])
         return matches[0]
+
+    def resolve_builtin_required(
+        self,
+        upstream_id: str,
+        *,
+        work_mode: str,
+        activity: str,
+    ) -> SkillRecord:
+        """解析 Compose Activity 声明的 reserved builtin Skill，不接受同名回退。"""
+        definition = self._builtin_definitions.get(upstream_id)
+        if definition is None:
+            raise SkillError(f'Required builtin Skill "{upstream_id}" is not available')
+        record = self._records.get(definition.canonical_id)
+        if (
+            record is None
+            or not record.enabled
+            or record.source != "builtin"
+            or not record.reserved
+            or record.digest != definition.skill_digest
+        ):
+            raise SkillError(f'Required builtin Skill "{upstream_id}" is not available')
+        if work_mode not in record.work_modes:
+            raise SkillError(
+                f'Required builtin Skill "{upstream_id}" is not available in {work_mode} mode'
+            )
+        if activity not in record.activities:
+            raise SkillError(
+                f'Required builtin Skill "{upstream_id}" is not available for {activity}'
+            )
+        return record
 
     def resolve_virtual_id(self, value: str) -> str:
         """解析虚拟 ``/.harness`` 路径中的 Skill ID，并兼容唯一展平别名。
@@ -304,6 +358,8 @@ class SkillRegistry:
     def read_resource(self, value: str, relative_path: str) -> str:
         """从启动快照读取受限 UTF-8 参考文件。"""
         record = self.resolve(value)
+        if record.reserved:
+            return self._read_builtin_resource(record, relative_path)
         if not relative_path or Path(relative_path).is_absolute():
             raise SkillError("Skill resource path must be relative")
         normalized_path = relative_path.replace("\\", "/")
@@ -315,6 +371,36 @@ class SkillRegistry:
         raw_resource = self._snapshot_resources.get(record.skill_id, {}).get(normalized_path)
         if raw_resource is None:
             raise SkillError("Skill resource was not captured in snapshot")
+        return raw_resource.decode("utf-8")
+
+    def _read_builtin_resource(self, record: SkillRecord, relative_path: str) -> str:
+        """读取 manifest 固定的 builtin 私有或共享资源，不开放任意路径穿越。"""
+        if not relative_path:
+            raise SkillError("Skill resource path must be relative")
+        normalized_path = relative_path.replace("\\", "/")
+        requested_path = Path(normalized_path)
+        if requested_path.is_absolute():
+            raise SkillError("Skill resource path must be relative")
+        bundle_root = self._builtin_bundle_root
+        if bundle_root is None:
+            raise SkillError("builtin Skill bundle snapshot is unavailable")
+        candidate = (record.root / requested_path).resolve()
+        try:
+            bundle_relative = candidate.relative_to(bundle_root).as_posix()
+        except ValueError as exc:
+            raise SkillError("Skill resource path escapes builtin bundle") from exc
+        shared = self._builtin_shared_resources.get(bundle_relative)
+        if shared is not None:
+            return shared.decode("utf-8")
+        try:
+            own_relative = candidate.relative_to(record.root).as_posix()
+        except ValueError as exc:
+            raise SkillError("Skill resource is not declared by builtin manifest") from exc
+        if own_relative == "SKILL.md":
+            raise SkillError("SKILL.md is available only through the virtual read_file path")
+        raw_resource = self._snapshot_resources.get(record.skill_id, {}).get(own_relative)
+        if raw_resource is None:
+            raise SkillError("Skill resource is not declared by builtin manifest")
         return raw_resource.decode("utf-8")
 
     def set_enabled(self, skill_id: str, enabled: bool) -> dict[str, object]:
@@ -369,9 +455,8 @@ class SkillRegistry:
     def _scan(self) -> tuple[dict[str, SkillRecord], list[str]]:
         records: dict[str, SkillRecord] = {}
         diagnostics = list(self._plugin_diagnostics)
-        builtin = Path(__file__).parent / "built_in_skills"
+        self._scan_builtin_bundle(records, diagnostics)
         roots: list[tuple[str, str, Path]] = [
-            ("builtin", "builtin", builtin),
             ("user", "user", self.home / ".harness" / "skills"),
             ("user", "user", self.home / ".harness" / "skills" / "local"),
             ("project", "project", self.workspace / ".harness" / "skills"),
@@ -397,6 +482,75 @@ class SkillRegistry:
         ):
             self._scan_plugin_source(records, diagnostics, source)
         return dict(sorted(records.items())), diagnostics
+
+    def _scan_builtin_bundle(
+        self,
+        records: dict[str, SkillRecord],
+        diagnostics: list[str],
+    ) -> None:
+        """把经 manifest 校验的原版 bundle 作为不可遮蔽的 builtin 来源发布。"""
+        try:
+            bundle = BuiltinSkillBundle()
+        except BuiltinSkillBundleError as exc:
+            diagnostics.append(f"builtin: {exc}")
+            return
+        self._builtin_definitions = {
+            definition.upstream_id: definition for definition in bundle.definitions
+        }
+        self._builtin_bundle_root = bundle.root
+        self._builtin_shared_resources = {
+            resource.path: (bundle.root / resource.path).read_bytes()
+            for resource in bundle.resources
+        }
+        for definition in bundle.definitions:
+            if len(records) >= MAX_SKILLS:
+                diagnostics.append("skill catalog limit reached")
+                return
+            root = bundle.root / definition.directory
+            manifest = root / "SKILL.md"
+            try:
+                parsed = _parse_manifest(
+                    manifest,
+                    dialect="claude",
+                    name_hint=Path(definition.directory).name,
+                )
+                if parsed["name"] != Path(definition.directory).name:
+                    raise SkillError("front matter name must match builtin Skill directory")
+                digest = _file_digest(manifest)
+                if digest != definition.skill_digest:
+                    raise SkillError("builtin Skill manifest digest does not match bundle")
+                record = SkillRecord(
+                    skill_id=definition.canonical_id,
+                    kind="skill",
+                    name=Path(definition.directory).name,
+                    description=parsed["description"],
+                    source="builtin",
+                    version=parsed["version"] or definition.upstream_version,
+                    user_invocable=parsed["user_invocable"],
+                    model_invocable=parsed["model_invocable"],
+                    argument_hint=parsed["argument_hint"],
+                    requested_tools=parsed["requested_tools"],
+                    root=root.resolve(),
+                    manifest=manifest.resolve(),
+                    digest=digest,
+                    package_digest=None,
+                    dialect="claude",
+                    enabled=definition.canonical_id
+                    not in set(self._state.get("disabled", [])),
+                    work_modes=definition.work_modes,
+                    activities=definition.activities,
+                    reserved=True,
+                )
+                if record.skill_id in records:
+                    raise SkillError("duplicate builtin Skill canonical identity")
+                records[record.skill_id] = record
+                self._capture_snapshot(record, diagnostics)
+                bundle.verify()
+            except (OSError, SkillError, BuiltinSkillBundleError, yaml.YAMLError) as exc:
+                records.pop(definition.canonical_id, None)
+                self._snapshot_manifests.pop(definition.canonical_id, None)
+                self._snapshot_resources.pop(definition.canonical_id, None)
+                diagnostics.append(f"builtin:{definition.upstream_id}: {exc}")
 
     def _scan_root(
         self,
@@ -602,6 +756,9 @@ class SkillRegistry:
                 "digest": record.digest,
                 "package_digest": record.package_digest,
                 "enabled": record.enabled,
+                "work_modes": list(record.work_modes),
+                "activities": list(record.activities),
+                "reserved": record.reserved,
             }
             for record in self.records
         ]
