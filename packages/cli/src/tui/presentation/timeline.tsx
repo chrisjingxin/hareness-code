@@ -1,7 +1,7 @@
 /** Thread 消息、工具和 Interaction 的统一时间线。 */
 
 import { type ScrollBoxRenderable } from "@opentui/core"
-import { type RefObject, useState } from "react"
+import { type RefObject, useState, type ReactNode } from "react"
 
 import type { ConversationMessage, InteractionCard, ReasoningCard, TimelineItem, ToolCard } from "../../interactive/state"
 import type { InteractiveSnapshot } from "../../interactive/types"
@@ -112,18 +112,7 @@ function MessageBlock(props: { message: ConversationMessage }) {
     if (!props.message.content) return null
     return (
       <box flexDirection="column" marginTop={1} paddingLeft={3} paddingRight={3}>
-        <markdown
-          content={props.message.content || "…"}
-          syntaxStyle={markdownSyntax}
-          treeSitterClient={getCommonSyntaxClient()}
-          streaming={props.message.streaming ?? false}
-          fg={tuiTheme.text}
-          bg={tuiTheme.background}
-          conceal
-          concealCode={false}
-          internalBlockMode="top-level"
-          tableOptions={{ style: "columns", borders: false }}
-        />
+        {renderAssistantMarkdown(props.message.content || "…", props.message.streaming ?? false)}
       </box>
     )
   }
@@ -134,6 +123,31 @@ function MessageBlock(props: { message: ConversationMessage }) {
       <text content={props.message.content} fg={tuiTheme.muted} />
     </box>
   )
+}
+
+/** 普通 Agent 回复中的 diff fenced block 复用原生 DiffRenderable，保持与审批卡一致的红绿行面。 */
+function renderAssistantMarkdown(content: string, streaming: boolean): ReactNode {
+  const pattern = /```(?:diff|patch|udiff|unified-diff)\s*\n([\s\S]*?)```/gi
+  const nodes: ReactNode[] = []
+  let cursor = 0
+  let match: RegExpExecArray | null
+  let index = 0
+  while ((match = pattern.exec(content)) !== null) {
+    const before = content.slice(cursor, match.index)
+    if (before) nodes.push(<markdown key={`markdown-${index++}`} content={before} syntaxStyle={markdownSyntax} treeSitterClient={getCommonSyntaxClient()} streaming={streaming} fg={tuiTheme.text} bg={tuiTheme.background} conceal concealCode={false} internalBlockMode="top-level" tableOptions={{ style: "columns", borders: false }} />)
+    nodes.push(<DiffMessageBlock key={`diff-${index++}`} diff={match[1] ?? ""} />)
+    cursor = match.index + match[0].length
+  }
+  const after = content.slice(cursor)
+  if (nodes.length === 0) return <markdown content={content} syntaxStyle={markdownSyntax} treeSitterClient={getCommonSyntaxClient()} streaming={streaming} fg={tuiTheme.text} bg={tuiTheme.background} conceal concealCode={false} internalBlockMode="top-level" tableOptions={{ style: "columns", borders: false }} />
+  if (after) nodes.push(<markdown key={`markdown-${index}`} content={after} syntaxStyle={markdownSyntax} treeSitterClient={getCommonSyntaxClient()} streaming={streaming} fg={tuiTheme.text} bg={tuiTheme.background} conceal concealCode={false} internalBlockMode="top-level" tableOptions={{ style: "columns", borders: false }} />)
+  return nodes
+}
+
+function DiffMessageBlock(props: { diff: string }) {
+  const parsed = parseFileDiff(props.diff)
+  if (parsed.status === "invalid" || props.diff.trim() === "") return <text content={props.diff} fg={tuiTheme.text} />
+  return <diff width="100%" diff={diffTextForRenderer(props.diff)} view="unified" syncScroll showLineNumbers wrapMode="word" fg={tuiTheme.text} lineNumberFg={tuiTheme.muted} lineNumberBg={tuiTheme.toolSurface} addedBg={tuiTheme.diffAddedBackground} removedBg={tuiTheme.diffRemovedBackground} contextBg={tuiTheme.toolSurface} addedSignColor={tuiTheme.success} removedSignColor={tuiTheme.danger} addedLineNumberBg={tuiTheme.diffAddedBackground} removedLineNumberBg={tuiTheme.diffRemovedBackground} />
 }
 
 /** 渲染工具状态、折叠预览和可展开原始输出。 */

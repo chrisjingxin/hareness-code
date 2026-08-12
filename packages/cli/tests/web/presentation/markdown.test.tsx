@@ -45,6 +45,20 @@ describe("Markdown", () => {
     }
   })
 
+  test("Markdown 的 diff fenced block 使用增删行红绿背景", () => {
+    const handle = render(<Markdown text={'```diff\n-old()\n+new()\n same()\n```'} />)
+    try {
+      const lines = [...handle.container.querySelectorAll(".diff-code-line")]
+      expect(lines.map(line => line.className)).toEqual([
+        "diff-code-line diff-code-remove",
+        "diff-code-line diff-code-add",
+        "diff-code-line diff-code-context",
+      ])
+    } finally {
+      handle.unmount()
+    }
+  })
+
   test("raw HTML 作为 inert 文本出现，script 与 img 永远不进入 DOM", () => {
     const handle = render(
       <Markdown

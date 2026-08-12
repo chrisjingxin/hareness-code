@@ -999,6 +999,15 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   color: var(--text);
   word-break: normal;
 }
+.diff-code-line {
+  display: block;
+  min-width: max-content;
+  padding-inline: 10px;
+  margin-inline: -10px;
+}
+.diff-code-add { background: var(--diff-add-bg); }
+.diff-code-remove { background: var(--diff-remove-bg); }
+.diff-code-hunk { color: var(--accent); background: var(--surface-3); }
 
 /* 72ch 阅读宽度只约束纯文本段落；代码块/表格占满消息内容区，与工具卡同宽对齐。 */
 .markdown p,
