@@ -255,12 +255,12 @@ function isWorkspaceIntent(value: unknown): value is WorkspaceIntent {
   }
 }
 
-/** state.replace 的完整状态：七个分片全部必须存在（缺失视为畸形帧）。 */
+/** state.replace 的完整状态：八个分片全部必须存在（缺失视为畸形帧）。 */
 function isWebUiState(value: unknown): WebUiState | undefined {
   if (!isRecord(value)) return undefined
-  const slices = ["conversation", "interaction", "navigation", "command", "runtime", "workspaceTree", "workspacePreview"]
+  const slices = ["conversation", "interaction", "navigation", "command", "runtime", "workItem", "workspaceTree", "workspacePreview"]
   if (!exactFields(value, slices)) return undefined
-  if (!isRecord(value.conversation) || !isRecord(value.interaction) || !isRecord(value.navigation) || !isRecord(value.command) || !isRecord(value.runtime)) return undefined
+  if (!isRecord(value.conversation) || !isRecord(value.interaction) || !isRecord(value.navigation) || !isRecord(value.command) || !isRecord(value.runtime) || !isRecord(value.workItem)) return undefined
   if (!isWorkspaceTreeView(value.workspaceTree)) return undefined
   if (!isWorkspacePreviewView(value.workspacePreview)) return undefined
   return value as unknown as WebUiState
@@ -271,7 +271,7 @@ function isWebUiPatch(value: unknown): WebUiPatch | undefined {
   if (!isRecord(value)) return undefined
   const keys = Object.keys(value)
   if (keys.length === 0) return undefined
-  const allowed = new Set(["conversation", "interaction", "navigation", "command", "runtime", "workspaceTree", "workspacePreview"])
+  const allowed = new Set(["conversation", "interaction", "navigation", "command", "runtime", "workItem", "workspaceTree", "workspacePreview"])
   if (!keys.every(key => allowed.has(key))) return undefined
   for (const key of keys) {
     if (key === "workspaceTree") {

@@ -82,6 +82,8 @@ from harness_agent.protocol.generated import (
     SERVER_CAPABILITIES,
     ApprovalResponse,
     AgentsInspectParams,
+    ComposeAbandonParams,
+    ComposeInspectParams,
     ContextCompactParams,
     ConfigCommitParams,
     ConfigDetailsParams,
@@ -152,6 +154,16 @@ from harness_agent.threads.context_lifecycle import ContextLifecycle, ContextRef
 from harness_agent.threads.snapshots import ThreadSnapshotStore
 from harness_agent.threads.thread_persistence import ThreadPersistence, ThreadPersistenceError
 from harness_agent.tools.file_tool_metrics import FileToolMetrics
+from harness_agent.compose.stage_agents import ManagedStageAgentPort
+from harness_agent.compose.document_store import ComposeDocumentStore
+from harness_agent.compose.models import ThreadMode
+from harness_agent.compose.work_item_engine import (
+    ComposeTurnPorts,
+    ComposeWorkItemEngine,
+    ComposeWorkItemEngineError,
+    ComposeWorkItemProjection,
+)
+from harness_agent.threads.compose_work_item_store import ComposeWorkItemStoreError
 from harness_agent.extensions.providers.harness_gateway import ProviderClientPool
 from harness_agent.host.run_coordinator import (
     AgentEvent,
@@ -165,8 +177,8 @@ from harness_agent.host.run_coordinator import (
     RunRef,
     RequestedSkill,
     StartRun,
-    _bounded_json,
 )
+from harness_agent.host.run_execution import _bounded_json
 from harness_agent.runtime.team_coordinator import (
     TeamCoordinator,
     TeamDefinition,
@@ -194,6 +206,10 @@ STABLE_ERROR_CODES = {
     "HOST_OWNER_REQUIRED",
     "ATTACHMENT_EXPIRED",
     "INTERNAL_ERROR",
+    "THREAD_MODE_LOCKED",
+    "COMPOSE_WORK_ITEM_NOT_FOUND",
+    "COMPOSE_WORK_ITEM_THREAD_MISMATCH",
+    "COMPOSE_WORK_ITEM_REVISION_CONFLICT",
     *ERROR_CODES,
 }
 CONTROL_RPC_CODES = {
@@ -362,6 +378,7 @@ class AgentHost:
             context_updates_provider=self._take_context_updates,
             project_dir=self._workspace,
             workspace_root_registry=self._workspace_root_registry,
+            compose_services_provider=self._provide_compose_services,
         )
         self._handlers = {
             METHOD["INITIALIZE"]: self._handle_initialize,
@@ -406,6 +423,8 @@ class AgentHost:
             METHOD["HOST_CONTROL_ACQUIRE"]: self._handle_host_control_acquire,
             METHOD["HOST_CONTROL_RELEASE"]: self._handle_host_control_release,
             METHOD["HOST_CONTROL_STATUS"]: self._handle_host_control_status,
+            METHOD["COMPOSE_INSPECT"]: self._handle_compose_inspect,
+            METHOD["COMPOSE_ABANDON"]: self._handle_compose_abandon,
         }
         self._attachments = AttachmentManager(
             create_connection=self.create_connection,
@@ -968,6 +987,7 @@ class AgentHost:
             thread_id=parsed.thread_id,
             run_id=parsed.run_id,
             message=message,
+            mode=parsed.mode,
             requested_skill=requested_skill,
             requested_primary_profile=(
                 parsed.model_selection.primary_profile
@@ -1548,15 +1568,27 @@ class AgentHost:
         """读取当前 project 的一个 thread Transcript 历史，不以 checkpoint 兜底。"""
         self._require_threads_capability()
         parsed = ThreadsOpenParams.model_validate(params)
+        persistence = await self._ensure_thread_persistence()
         try:
-            opened = await (await self._ensure_thread_persistence()).open_thread(parsed.thread_id)
+            opened = await persistence.open_thread(parsed.thread_id)
         except ThreadPersistenceError as exc:
             if str(exc) in {"THREAD_NOT_FOUND", "THREAD_NOT_RECOVERABLE"}:
                 raise RpcError(-32004, str(exc)) from exc
             raise
+        thread_mode = await persistence.compose_work_item_store().load_thread_mode(parsed.thread_id)
+        work_item: dict[str, object] | None = None
+        if thread_mode is ThreadMode.COMPOSE:
+            projection = await self._compose_work_item_engine(persistence).inspect(
+                thread_id=parsed.thread_id
+            )
+            if projection is not None:
+                work_item = _compose_work_item_snapshot(projection)
         return {
             "thread": _thread_summary_payload(opened.summary),
             "messages": [_thread_message_payload(message) for message in opened.messages],
+            "compose_activities": list(opened.compose_activities),
+            "thread_mode": thread_mode.value if thread_mode is not None else None,
+            "work_item": work_item,
         }
 
     async def _handle_threads_watch(self, params: dict[str, Any], _id: str) -> dict[str, object]:
@@ -1574,6 +1606,70 @@ class AgentHost:
         removed = parsed.thread_id in watches
         watches.discard(parsed.thread_id)
         return {"removed": removed}
+
+    async def _handle_compose_inspect(self, params: dict[str, Any], _id: str) -> dict[str, object]:
+        """只读投影 Compose Thread 的当前 Work Item；不触发分类或 typed 交互。"""
+        self._require_threads_capability()
+        parsed = ComposeInspectParams.model_validate(params)
+        persistence = await self._ensure_thread_persistence()
+        await self._require_compose_thread(persistence, parsed.thread_id)
+        engine = self._compose_work_item_engine(persistence)
+        try:
+            projection = await engine.inspect(
+                thread_id=parsed.thread_id,
+                work_item_id=parsed.work_item_id,
+            )
+        except (ComposeWorkItemEngineError, ComposeWorkItemStoreError) as exc:
+            raise _compose_rpc_error(exc) from exc
+        return {
+            "work_item": _compose_work_item_snapshot(projection) if projection is not None else None,
+        }
+
+    async def _handle_compose_abandon(self, params: dict[str, Any], _id: str) -> dict[str, object]:
+        """以 revision CAS 终结 Compose Thread 的当前 Work Item。"""
+        self._require_threads_capability()
+        parsed = ComposeAbandonParams.model_validate(params)
+        persistence = await self._ensure_thread_persistence()
+        await self._require_compose_thread(persistence, parsed.thread_id)
+        engine = self._compose_work_item_engine(persistence)
+        try:
+            projection = await engine.abandon(
+                thread_id=parsed.thread_id,
+                work_item_id=parsed.work_item_id,
+                expected_revision=parsed.expected_revision,
+                reason=parsed.reason,
+            )
+        except (ComposeWorkItemEngineError, ComposeWorkItemStoreError) as exc:
+            raise _compose_rpc_error(exc) from exc
+        return {"work_item": _compose_work_item_snapshot(projection)}
+
+    def _compose_work_item_engine(self, persistence: ThreadPersistence) -> ComposeWorkItemEngine:
+        """组装只读 Compose Work Item engine；inspect/abandon 不触发 classifier/interaction。"""
+        return ComposeWorkItemEngine(
+            ComposeTurnPorts(
+                store=persistence.compose_work_item_store(),
+                documents=ComposeDocumentStore(self._workspace),
+                classifier=_UnavailableComposeClassifier(),
+                interaction=_UnavailableComposeInteraction(),
+            )
+        )
+
+    async def _require_compose_thread(self, persistence: ThreadPersistence, thread_id: str) -> None:
+        """Compose RPC 只能用于已冻结为 Compose 的 Thread。"""
+        thread_mode = await persistence.compose_work_item_store().load_thread_mode(thread_id)
+        if thread_mode is None:
+            raise RpcError(
+                -32004,
+                "THREAD_NOT_FOUND",
+                {"code": "THREAD_NOT_FOUND", "retryable": False},
+            )
+        if thread_mode is not ThreadMode.COMPOSE:
+            raise RpcError(
+                -32000,
+                "THREAD_MODE_LOCKED",
+                {"code": "THREAD_MODE_LOCKED", "retryable": False},
+            )
+
 
     def _prepare_requested_skill(
         self,
@@ -2242,7 +2338,7 @@ class AgentHost:
             run.agent_engine_lease = lease
             run.agent_engine_profile_key = engine.profile_key
             return engine.graph
-        except Exception:
+        except BaseException:
             if lease is not None:
                 await self._release_agent_engine_lease(lease)
             raise
@@ -2438,6 +2534,103 @@ class AgentHost:
             self._workspace_execution_resources = WorkspaceExecutionResourcePool()
         return self._workspace_execution_resources
 
+    async def _provide_compose_services(self, run: Any) -> EngineDriverServices | None:
+        """按 Run 上下文组装 Work Item engine 依赖；配置缺失时返回 None。"""
+        config = self._config
+        if config is None or config.model_catalog is None:
+            return None
+        try:
+            pool = self._ensure_agent_engine_pool(config)
+        except Exception:
+            logger.exception("Compose services unavailable")
+            return None
+        from harness_agent.compose.engine_services import EngineDriverServices
+        from harness_agent.compose.verification import ManagedVerificationPort
+        from harness_agent.policy.permission_rules import load_rules, merge_rules
+
+        def compose_rules() -> list[Any]:
+            """验证命令与 Agent 工具看到同一份规则（session + 持久化）。"""
+            persisted = load_rules(project_dir=self._workspace)
+            persisted["session"] = self._run_coordinator.session_rules
+            return merge_rules(persisted)
+
+        return EngineDriverServices(
+            stage_agent=ManagedStageAgentPort(
+                registry=self._run_coordinator.execution_registry,
+                pool=pool,
+                resolve_spec=self._resolve_compose_stage_spec,
+                config_home=self._config_home,
+                workspace=self._workspace,
+            ),
+            parent_ref=run.root_execution_ref,
+            workspace_root=str(self._workspace),
+            verification=ManagedVerificationPort(
+                pool=self._ensure_workspace_execution_resources(),
+                settings=config.execution,
+                workspace=self._workspace,
+                rules_provider=compose_rules,
+                rwlock=self._tool_concurrency_lock,
+                now_ms=lambda: int(time.time() * 1000),
+            ),
+            # 组装发生在 adapter 执行前，run.agent_engine_profile_key 尚未由
+            # runtime 获取填充；直接使用受理阶段解析出的 AgentEngineProfile key，
+            # 与 _resolved_agent_specs 的缓存键一致。
+            profile_key=(
+                run.resolved_agent_engine_profile.profile_key
+                if run.resolved_agent_engine_profile is not None
+                else (run.agent_engine_profile_key or "")
+            ),
+            cancellation_token=run.cancellation_token,
+        )
+
+    def _resolve_compose_stage_spec(
+        self,
+        profile_key: str,
+        *,
+        headless: bool = False,
+        readonly: bool = False,
+        planning: bool = False,
+    ) -> ResolvedAgentSpec | None:
+        """返回按 profile key 缓存的主 Agent spec；Compose 复用同一可信 spec。
+
+        - headless：stage 图关闭 ask_user，提问只能走 workflow typed 通道；
+        - readonly：Reviewer 只读能力视图；
+        - planning：Understand/Plan 只读能力视图。
+        两种派生 spec 都注册独立 profile key，让 AgentEnginePool 构建独立引擎。
+        """
+        spec = self._resolved_agent_specs.get(profile_key)
+        if spec is None:
+            return None
+        if planning:
+            from harness_agent.runtime.agent_spec import (
+                restrict_spec_to_read_only_stage,
+            )
+
+            restricted = restrict_spec_to_read_only_stage(spec)
+            self._resolved_agent_specs.setdefault(
+                restricted.runtime_profile.profile_key, restricted
+            )
+            return restricted
+        if headless and not readonly:
+            from harness_agent.runtime.agent_spec import (
+                restrict_spec_to_headless_stage,
+            )
+
+            derived = restrict_spec_to_headless_stage(spec)
+            self._resolved_agent_specs.setdefault(
+                derived.runtime_profile.profile_key, derived
+            )
+            return derived
+        if readonly:
+            from harness_agent.runtime.agent_spec import restrict_spec_to_read_only
+
+            restricted = restrict_spec_to_read_only(spec)
+            self._resolved_agent_specs.setdefault(
+                restricted.runtime_profile.profile_key, restricted
+            )
+            return restricted
+        return spec
+
     async def _plugin_delegation_targets(
         self,
         parent_spec: ResolvedAgentSpec,
@@ -2448,12 +2641,17 @@ class AgentHost:
         config = self._config
         if config is None or config.model_catalog is None:
             return ()
-        from langchain_core.messages import HumanMessage
-
         from harness_agent.runtime.agent_delegation import (
+            AgentDelegationError,
             DelegationTarget,
             child_execution_ref,
-            managed_engine_runner,
+        )
+        from harness_agent.runtime.managed_agent_executor import (
+            FailClosedManagedObserver,
+            ManagedAgentExecutionError,
+            ManagedAgentExecutor,
+            ManagedAgentRequest,
+            acquire_pooled_agent_runtime,
         )
 
         catalog = self._require_agent_catalog(config)
@@ -2495,12 +2693,12 @@ class AgentHost:
             await persistence.persist_agent_engine_profile(child_profile)
 
             async def invoke(
-                engine: AgentEngine,
                 command: Any,
                 *,
                 resolved: ResolvedAgentSpec = child_spec,
+                profile: AgentEngineProfile = child_profile,
             ) -> Mapping[str, Any]:
-                """在独立 checkpoint namespace 中运行 Plugin Agent。"""
+                """构造 capture_only request，并由统一 executor 运行 Plugin Agent。"""
                 child_ref = child_execution_ref(command)
                 context_snapshot = ContextLifecycle(
                     resolved.workspace,
@@ -2531,27 +2729,60 @@ class AgentHost:
                         else None
                     ),
                 )
-                result = await engine.graph.ainvoke(
-                    {"messages": [HumanMessage(content=command.task)]},
-                    config={
-                        "configurable": {
-                            "thread_id": child_ref.thread_id,
-                            "checkpoint_ns": child_ref.checkpoint_namespace(
-                                resolved.project_fingerprint
-                            ),
-                        }
-                    },
-                    context=context,
+                checkpoint_namespace = child_ref.checkpoint_namespace(
+                    resolved.project_fingerprint
                 )
-                messages = result.get("messages", ()) if isinstance(result, Mapping) else ()
-                final = getattr(messages[-1], "content", "") if messages else ""
-                return {"final": str(final)}
+
+                async def acquire_runtime():
+                    """把 Plugin Profile 的 pool lease 收敛到 Managed executor。"""
+                    return await acquire_pooled_agent_runtime(
+                        pool=pool,
+                        profile=profile,
+                        run_context=context,
+                        graph_config=lambda namespace: {
+                            "configurable": {
+                                "thread_id": child_ref.thread_id,
+                                "checkpoint_ns": namespace,
+                            }
+                        },
+                    )
+
+                snapshot_id = getattr(resolved.skill_registry, "snapshot_id", None)
+                managed_request = ManagedAgentRequest(
+                    execution_ref=child_ref.execution_id,
+                    parent_execution_ref=child_ref.parent_execution_id,
+                    run_id=child_ref.run_id,
+                    input=command.task,
+                    checkpoint_namespace=checkpoint_namespace,
+                    output_policy="capture_only",
+                    runtime_provider=acquire_runtime,
+                    is_cancelled=lambda: command.cancellation_token.cancelled,
+                    idempotency_key=command.idempotency_key,
+                    agent_spec=resolved,
+                    interaction_policy=resolved.effective_policy,
+                    timeout_seconds=command.timeout_seconds,
+                    required_skill_snapshot_ids=(snapshot_id,)
+                    if isinstance(snapshot_id, str) and snapshot_id
+                    else (),
+                )
+                try:
+                    result = await ManagedAgentExecutor().execute(
+                        managed_request,
+                        FailClosedManagedObserver(),
+                    )
+                except ManagedAgentExecutionError as exc:
+                    if exc.code == "RUN_CANCELLED":
+                        raise asyncio.CancelledError from exc
+                    raise AgentDelegationError(
+                        "PLUGIN_AGENT_EXECUTION_FAILED", exc.code
+                    ) from exc
+                return {"final": result.final_content}
 
             targets.append(
                 DelegationTarget(
                     agent_id=definition.agent_id,
                     mode=ExecutionMode.MANAGED,
-                    runner=managed_engine_runner(pool, child_profile, invoke),
+                    runner=invoke,
                     description=definition.description or definition.purpose,
                     model=child_spec.model_view,
                     policy_fingerprint=child_spec.effective_policy.fingerprint,
@@ -3131,3 +3362,38 @@ def _thread_message_payload(message: Any) -> dict[str, object]:
     if message.tool_name is not None:
         payload["tool_name"] = message.tool_name
     return payload
+
+
+def _compose_work_item_snapshot(projection: ComposeWorkItemProjection) -> dict[str, object]:
+    """把非敏感 Work Item 投影收敛为 wire 形状。"""
+    return {
+        "work_item_id": projection.work_item_id,
+        "slug": projection.slug,
+        "title": projection.title,
+        "revision": projection.revision,
+        "status": projection.status,
+        "current_activity": projection.current_activity,
+        "pending_decision": projection.pending_decision,
+        "blocked_reason": projection.blocked_reason,
+    }
+
+
+def _compose_rpc_error(
+    error: ComposeWorkItemEngineError | ComposeWorkItemStoreError,
+) -> RpcError:
+    """把 Compose 稳定错误码原样透传为 JSON-RPC 错误。"""
+    return RpcError(-32004, error.code, {"code": error.code, "retryable": False})
+
+
+class _UnavailableComposeClassifier:
+    """compose.inspect/abandon 只读路径不应触发的分类占位。"""
+
+    async def classify(self, context: Any) -> Mapping[str, object]:
+        raise ComposeWorkItemEngineError("COMPOSE_CLASSIFIER_UNAVAILABLE")
+
+
+class _UnavailableComposeInteraction:
+    """compose.inspect/abandon 只读路径不应触发的 typed decision 占位。"""
+
+    async def request_decision(self, request: Any) -> Any:
+        raise ComposeWorkItemEngineError("COMPOSE_INTERACTION_UNAVAILABLE")

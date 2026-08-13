@@ -12,11 +12,18 @@ export type CommandSource =
   | { type: "mcp"; server: string }
   | { type: "plugin"; id: string }
 
+/** 命令可见性依赖的 Work Mode；与 state.ts 的 WorkMode 结构兼容。 */
+export type WorkMode = "build" | "compose"
+
 /** 命令的运行状态约束；缺 capability 时隐藏，暂时不可执行时给出禁用原因。 */
 export type CommandRequirements = {
   capabilities?: readonly string[]
   requiresThread?: boolean
   requiresIdle?: boolean
+  /** 命令仅在这些 Work Mode 下可见；不包含当前 mode 时隐藏。 */
+  workModes?: readonly WorkMode[]
+  /** 命令要求当前是否存在进行中的 Work Item；与状态不符时禁用。 */
+  requiresActiveWorkItem?: boolean
 }
 
 /** 后续 Dispatcher 复用的最小安全元数据，不能由表现层自行扩大权限。 */
@@ -53,6 +60,8 @@ export type CommandContext = {
   activeRun: boolean
   pendingOperation: boolean
   hasPendingInteraction: boolean
+  workMode: WorkMode
+  hasActiveWorkItem: boolean
 }
 
 export type CommandAvailability =
@@ -138,8 +147,19 @@ export class CommandRegistry {
   availability(definition: CommandDefinition, context: CommandContext): CommandAvailability {
     const missing = definition.requirements?.capabilities?.find(capability => !context.capabilities.has(capability))
     if (missing) return { state: "hidden", reason: `当前客户端未协商 ${missing}` }
+    if (definition.requirements?.workModes && !definition.requirements.workModes.includes(context.workMode)) {
+      return { state: "hidden", reason: "当前模式不可用（COMMAND_MODE_UNAVAILABLE）" }
+    }
     if (definition.requirements?.requiresThread && !context.hasThread) {
       return { state: "disabled", reason: "当前没有可用 thread" }
+    }
+    if (definition.requirements?.requiresActiveWorkItem !== undefined && definition.requirements.requiresActiveWorkItem !== context.hasActiveWorkItem) {
+      return {
+        state: "disabled",
+        reason: definition.requirements.requiresActiveWorkItem
+          ? "当前没有进行中的 Work Item"
+          : "当前已有进行中的 Work Item",
+      }
     }
     if (definition.requirements?.requiresIdle && (context.activeRun || context.pendingOperation || context.hasPendingInteraction)) {
       return { state: "disabled", reason: "当前任务结束或交互完成后可用" }
@@ -190,6 +210,9 @@ export const builtinCommandDefinitions: readonly CommandDefinition[] = [
   { id: "teams.manage", name: "teams", description: "查看或控制 Agent Team", source: { type: "builtin" }, presentation: "viewer", argumentHint: "[show|status|generate|run|cancel] ...", suggested: true, requirements: { capabilities: [Capability.TEAMS_READ] } },
   { id: "mcp.manage", name: "mcp", description: "查看 MCP 服务器状态", source: { type: "builtin" }, presentation: "viewer", suggested: true },
   { id: "host.web", name: "web", description: "在浏览器中接管当前会话，可从空首页或当前 thread 启动", source: { type: "builtin" }, presentation: "action", suggested: true, requirements: { requiresIdle: true } },
+  { id: "compose.new-work", name: "new-work", description: "在 Compose 模式创建新的 Work Item", source: { type: "builtin" }, presentation: "action", requirements: { workModes: ["compose"], requiresActiveWorkItem: false } },
+  { id: "compose.abandon", name: "abandon", description: "放弃当前进行中的 Compose Work Item", source: { type: "builtin" }, presentation: "action", requirements: { workModes: ["compose"], requiresActiveWorkItem: true, requiresIdle: true }, safety: { confirmation: "always" } },
+  { id: "assist.btw", name: "btw", description: "向 Agent 提出一个与当前任务无关的问题", source: { type: "builtin" }, presentation: "action", argumentHint: "[question]", requirements: { workModes: ["build", "compose"] } },
 ]
 
 export const commandRegistry = new CommandRegistry(builtinCommandDefinitions)
@@ -235,6 +258,8 @@ export function defaultCommandContext(overrides: Partial<Omit<CommandContext, "c
     activeRun: overrides.activeRun ?? false,
     pendingOperation: overrides.pendingOperation ?? false,
     hasPendingInteraction: overrides.hasPendingInteraction ?? false,
+    workMode: overrides.workMode ?? "build",
+    hasActiveWorkItem: overrides.hasActiveWorkItem ?? false,
   }
 }
 

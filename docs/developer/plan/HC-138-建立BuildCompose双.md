@@ -1,0 +1,373 @@
+# HC-138 实施计划：Build / Compose 双工作模式
+
+关联任务：[HC-138](../task/HC-138-建立BuildCompose双.md)  
+设计依据：[HC-138 Design](../spec/HC-138-建立BuildCompose双.md)  
+调研依据：[Compose Mode 可行性调研](../research/Compose Mode 可行性调研.md)  
+执行清单：[HC-138 Todo](../todo/HC-138-建立BuildCompose双.md)
+
+## 文档职责
+
+- Task 定义用户结果、范围和整体验收，是范围事实源。
+- Design 定义 interface、状态、错误语义和 invariant，是设计事实源。
+- 本 Plan 只安排依赖顺序、文件边界和验证方式，不新增设计决策。
+- Todo 与本 Plan 的 10 个工作包一一对应，用于多个执行 Thread 接力和记录完成信号。
+- 若代码事实迫使修改 Protocol、数据形状、生命周期、权限或错误语义，停止对应工作包，先修订 Design、Plan 和 Todo。
+
+## 交付概览
+
+在不改变现有 Build 行为和权限的前提下，为每次 `run.start` 增加冻结的 `build|compose` 工作模式。Compose 复用同一个 Run 生命周期，由代码状态机依次完成 Understand、Plan、Build、Verify、Review，并以独立 artifact、真实命令 evidence 和 fresh Reviewer 决定能否完成。
+
+同一 Thread 在空闲状态可为下一次 Run 切换 Mode；active Run、pending Interaction、取消或压缩收敛期间不可切换。Mode 在 Run 受理时冻结，不能把执行中的 Build 原地转换为 Compose，也不能把 Compose 中途降级为 Build；需要接管时先取消或等待 blocked 终态，再启动新的 Build Run。
+
+## 已确认架构决策
+
+- `RunCoordinator` 继续唯一拥有受理、owner、取消、Interaction、sequence、Transcript、资源释放和终态。
+- 现有 Build stream 迁入 `BuildRunAdapter`，Compose 由同 interface 的 `ComposeRunAdapter` 执行。
+- Compose 方法资产是 Runtime 私有资源，不注册成第三种公共 Skill invocation。
+- Compose artifact 与 Transcript、LangGraph projection、Context compression artifact 分开存储。
+- Verification 只能复用 canonical execution backend 和现有 Policy/Approval/workspace/sandbox/concurrency 边界。
+- Requirement Reviewer 与 Code Reviewer 是两个独立、只读 Managed execution。
+- V1 不恢复 Host 重启前的 active Compose Run，不包含 Plugin Mode、通用 Workflow SDK、自动 commit/push/PR 或并行写任务。
+
+## 依赖图
+
+```text
+工作包 1：Protocol 与 Mode 契约
+  ├─→ 工作包 2：共享 Run adapter seam
+  ├─→ 工作包 8：Interactive Core Mode/Projection
+  └─→ 工作包 3：Compose 状态、Artifact 与持久化
+          └─→ 工作包 4：Understand → Plan → 用户确认
+                  └─→ 工作包 5：Build task 与 TDD/Debug
+                          └─→ 工作包 6：Verify evidence 与修复回路
+                                  └─→ 工作包 7：独立 Review 与完成判定
+
+工作包 4 的 projection 稳定后
+  └─→ 工作包 9：TUI/Web 双端交互
+
+工作包 1～9
+  └─→ 工作包 10：跨包 E2E、文档与完成证据
+```
+
+工作包 2 与工作包 3 在工作包 1 合并后可由不同执行 Thread 并行；工作包 8 也可基于固定 Protocol 和 fixture 并行。工作包 4～7 必须按状态机依赖顺序执行。工作包 9 必须等待 Core snapshot 与 `compose.state` projection 稳定。
+
+## 工作包 1：固定 Mode、Projection 与 Run 身份契约
+
+**说明：** 先修改 canonical JSON Schema，使 `run.start` 必填 `mode`，`run.started` 回传实际 Mode，并新增完整、有界、带 revision 的 `compose.state` event。Mode 必须参与 Run fingerprint，同一 `thread_id/run_id` 不能以不同 Mode 被幂等复用。
+
+**验收条件：**
+
+- [x] TypeScript、Python、fixture 和 validator 对 `build|compose`、`compose.state` 使用同一严格 schema，未知字段与未知枚举被拒绝。
+- [x] `run.start` 不保留缺省 Mode fallback；所有仓库内调用方和测试 fixture 一次迁移。
+- [x] 同一 Run 的 Mode 不匹配会得到稳定冲突错误，`run.started` 和后续 event identity 一致。
+
+**验证：**
+
+- [x] `bun run protocol:generate`
+- [x] `bun run protocol:check`
+- [x] `cd packages/agent && .venv/bin/python -m pytest -q tests/protocol/test_protocol_contract.py tests/host/test_server.py`
+- [x] `cd packages/cli && bun test tests/ipc/protocol-contract.test.ts tests/ipc/client.test.ts`
+
+**依赖：** 无。
+
+**可能修改：**
+
+- `packages/protocol/schema/v3.json`
+- `packages/protocol/fixtures/v3-contract.json`
+- `packages/protocol/src/generated.ts` 与 validators、Python vendored protocol（仅生成命令修改）
+- `packages/agent/harness_agent/host/agent_host.py`
+- `packages/cli/src/ipc/client.ts`
+- 相邻 Protocol/IPC/Host contract tests
+
+**预计范围：** M；手工修改集中在 schema、Host/Client adapter 和 contract tests，生成物不单独计为设计工作。
+
+## 工作包 2：抽出共享 Run execution adapter seam
+
+**说明：** 把 `RunCoordinator._execute()` 中现有 Build Agent stream 收敛到 `BuildRunAdapter`，建立最小的 Run lifecycle port 与 `ComposeRunAdapter` 空实现。迁移只改变内部边界，不改变 Build 的事件顺序、Transcript、审批、取消或终态。
+
+**验收条件：**
+
+- [x] Build 与 Compose adapter 都不能自行分配 sequence、写 Transcript 终态或绕过共享 cancellation token。
+- [x] 现有 Build Run 的 owner、busy、幂等、Interaction、stream、取消、资源释放和唯一终态行为无回归。
+- [x] adapter contract 可用 fake adapter 证明 malformed/duplicate terminal signal 被 coordinator 拒绝或归一化。
+
+**验证：**
+
+- [x] `cd packages/agent && .venv/bin/python -m pytest -q tests/host/test_run_coordinator.py tests/host/test_agent_host.py tests/host/test_approval_protocol.py`
+- [x] `cd packages/agent && .venv/bin/python -m pytest -q tests/test_resource_ownership.py tests/runtime/test_resource_lifecycle.py`
+
+**依赖：** 工作包 1。
+
+**可能修改：**
+
+- `packages/agent/harness_agent/host/run_coordinator.py`
+- `packages/agent/harness_agent/host/run_execution.py`（新增）
+- `packages/agent/harness_agent/host/agent_host.py`
+- `packages/agent/tests/host/test_run_coordinator.py`
+- `packages/agent/tests/host/test_agent_host.py`
+
+**预计范围：** M。
+
+## 工作包 3：建立 Compose 状态、Artifact 与持久化事实
+
+**说明：** 实现纯 `ComposeStateMachine`、严格 artifact model 和借用 ThreadPersistence 连接/锁的 `ComposeArtifactStore`。SQLite schema 升级必须走现有 migration backup、校验和恢复路径；V1 保存 artifact 与终态用于审计，但不会把历史 `running` 状态恢复成 active Run。
+
+**验收条件：**
+
+- [x] 合法/非法 transition、revision、stage attempt、schema-invalid retry、verify/review budget、cancel/blocked/failed/completed 都由纯状态机确定。
+- [x] Artifact 有 kind/version/source execution/digest/大小上限；Transcript、ContextArtifact 和 Compose 表没有双写正文。
+- [x] 数据库升级、失败恢复、too-new schema、并发写和旧数据库保留测试通过；`threads.open` 不暴露内部 artifact 正文。
+
+**验证：**
+
+- [x] `cd packages/agent && .venv/bin/python -m pytest -q tests/compose/test_state_machine.py tests/compose/test_artifact_store.py`
+- [x] `cd packages/agent && .venv/bin/python -m pytest -q tests/threads/test_thread_persistence.py`
+
+**依赖：** 工作包 1；与工作包 2 可在 contract 固定后并行。
+
+**可能修改：**
+
+- `packages/agent/harness_agent/compose/models.py`（新增）
+- `packages/agent/harness_agent/compose/state_machine.py`（新增）
+- `packages/agent/harness_agent/threads/compose_artifact_store.py`（新增）
+- `packages/agent/harness_agent/threads/thread_persistence.py`
+- `packages/agent/tests/compose/test_state_machine.py`、`test_artifact_store.py`（新增）
+
+**预计范围：** L；状态模型与存储必须作为同一 canonical artifact seam 验收，不拆成新的仓库 Task。
+
+## Checkpoint A：Foundation（工作包 1～3）
+
+- [x] Protocol 生成物与两端 contract 一致。
+- [x] Build adapter parity 全绿，Compose 尚未写文件也不会产生第二套 Run lifecycle。
+- [x] Compose 状态机和 SQLite migration 可以在 fake store 下独立验证。
+- [x] 由强模型复核 Protocol、Run seam、schema migration 和事实源边界后再进入工作包 4。
+
+## 工作包 4：打通 Understand → Plan → 用户确认 tracer bullet
+
+**说明：** 增加有界 ContextPack、understand/plan 私有方法资产和 StageAgentPort，启动 fresh Managed execution；可发现事实由 Agent 查询，真正产品决策使用 `interaction.question`，整体 Plan 使用“批准/修改/取消”门禁。此工作包不允许 Builder 写入代码。
+
+**验收条件：**
+
+- [x] 简单请求可产生短 UnderstandingArtifact，不机械访谈；真实 open decision 会暂停并在回答后重建 artifact。
+- [x] Plan artifact 无 placeholder、task DAG 无环、每项 acceptance/verification 非空；修改返回 Plan，取消产生唯一 cancelled 终态。
+- [x] 每次 transition 发布 revision 递增的完整 projection；stage execution schema invalid 只重试一次。
+
+**验证：**
+
+- [x] `cd packages/agent && .venv/bin/python -m pytest -q tests/compose/test_understand_plan.py`
+- [x] `cd packages/agent && .venv/bin/python -m pytest -q tests/host/test_approval_protocol.py tests/test_agent_delegation.py`
+
+**依赖：** 工作包 2、3。
+
+**可能修改：**
+
+- `packages/agent/harness_agent/compose/workflow.py`（新增）
+- `packages/agent/harness_agent/compose/context_pack.py`（新增）
+- `packages/agent/harness_agent/compose/stage_agents.py`（新增）
+- `packages/agent/harness_agent/compose/methods/understand.md`、`plan.md`（新增）
+- `packages/agent/tests/compose/test_understand_plan.py`（新增）
+
+**预计范围：** M。
+
+## 工作包 5：实现 Build task、TDD 与 Debug 选择
+
+**说明：** Plan 中的执行项按依赖顺序交给 fresh Builder execution。Runtime 根据结构化 `change_kind` 决定 direct 或 TDD；行为/Bug/refactor 必须记录 RED→GREEN evidence，失败后才注入 Debug 方法，并受 task attempt budget 限制。
+
+**验收条件：**
+
+- [x] Builder 只获得当前 task 的 ContextPack、frozen Run snapshot 和有效 Policy，不继承 previous stage conversation。
+- [x] 行为/Bug/refactor task 无 RED evidence 不能完成；文档、静态配置、纯样式允许 direct，不机械伪造测试。
+- [x] task 失败、取消、malformed result 和 attempt exhausted 都产生确定状态，不能由模型自行跳到 Verify。
+
+**验证：**
+
+- [x] `cd packages/agent && .venv/bin/python -m pytest -q tests/compose/test_build_stage.py`
+- [x] `cd packages/agent && .venv/bin/python -m pytest -q tests/runtime/test_agent_execution.py tests/test_agent_delegation.py`
+
+**依赖：** 工作包 4。
+
+**可能修改：**
+
+- `packages/agent/harness_agent/compose/workflow.py`
+- `packages/agent/harness_agent/compose/builder.py`（新增）
+- `packages/agent/harness_agent/compose/methods/build.md`、`tdd.md`、`debug.md`（新增）
+- `packages/agent/harness_agent/runtime/agent_execution.py`（仅缺失的通用 execution seam）
+- `packages/agent/tests/compose/test_build_stage.py`（新增）
+
+**预计范围：** M。
+
+## 工作包 6：实现安全 VerificationPort 与 fix loop
+
+**说明：** 为 Runtime 建立有界 verification command port，通过本次 Run 的 canonical execution context 执行命令，继续经过 Policy、Approval、workspace boundary、sandbox 和 Host 并发锁。每条 required command 生成 fresh `VerificationEvidence`，失败生成来源明确的 fix task 并回到 Build，最多两轮。
+
+**验收条件：**
+
+- [x] command、working directory identity、started/finished、exit code、超时、截断和 digest 均被记录；模型文本不能替代 evidence。
+- [x] local/remote sandbox、deny/approval、取消、超时和 backend failure 不旁路权限，也不在失败时回退到宿主机执行。
+- [x] 缺失或非零 evidence 不能进入 Review；两轮 fix 后仍失败进入 blocked 并保留完整摘要。
+
+**验证：**
+
+- [x] `cd packages/agent && .venv/bin/python -m pytest -q tests/compose/test_verification.py`
+- [x] `cd packages/agent && .venv/bin/python -m pytest -q tests/policy/test_approval_pipeline.py tests/policy/test_concurrency.py tests/policy/test_workspace_boundary.py`
+- [x] `cd packages/agent && .venv/bin/python -m pytest -q tests/runtime/test_execution_binding.py tests/runtime/test_resource_lifecycle.py`
+
+**依赖：** 工作包 5。
+
+**可能修改：**
+
+- `packages/agent/harness_agent/compose/verification.py`（新增）
+- `packages/agent/harness_agent/compose/workflow.py`
+- `packages/agent/harness_agent/compose/methods/verify.md`（新增）
+- `packages/agent/harness_agent/runtime/execution.py`（只增加 canonical backend adapter，不复制 backend）
+- `packages/agent/tests/compose/test_verification.py`（新增）
+
+**预计范围：** M；这是安全高风险工作包，必须独立 Review。
+
+## 工作包 7：实现双轴独立 Review 与唯一完成判定
+
+**说明：** 启动 Requirement Reviewer 和 Code Reviewer 两个 fresh、只读 Managed execution，分别检查 acceptance/scope 与 diff/架构/安全。Required finding 生成 fix task，重新经过 Build→Verify→Review，最多两轮；Optional/Nit 仅进入报告。
+
+**验收条件：**
+
+- [x] 两个 Reviewer 使用不同 execution identity，能力交集为只读，作者 execution 不能兼任 Reviewer。
+- [x] missing requirement、scope creep、architecture/security finding 会阻止完成；Optional/Nit 不阻断但保留在最终摘要。
+- [x] review fix 后必须重新 Verify 和两轴 Review；budget exhausted 进入 blocked，整个 Run 只有一个终态。
+
+**验证：**
+
+- [x] `cd packages/agent && .venv/bin/python -m pytest -q tests/compose/test_review_stage.py`
+- [x] `cd packages/agent && .venv/bin/python -m pytest -q tests/runtime/test_agent_execution.py tests/test_agent_delegation.py tests/test_resource_ownership.py`
+
+**依赖：** 工作包 6。
+
+**可能修改：**
+
+- `packages/agent/harness_agent/compose/review.py`（新增）
+- `packages/agent/harness_agent/compose/workflow.py`
+- `packages/agent/harness_agent/compose/methods/code-review.md`（新增）
+- `packages/agent/harness_agent/runtime/agent_spec.py`（只读内置 spec 能力视图）
+- `packages/agent/tests/compose/test_review_stage.py`（新增）
+
+**预计范围：** M。
+
+## Checkpoint B：完整 Agent Workflow（工作包 4～7）
+
+- [x] fake Stage Agent 可走通 Understand→Plan→Build→Verify→Review happy path。
+- [x] 问答、Plan 修改、Verify fix、Review fix、预算耗尽和取消均只有一个终态。
+- [x] Transcript、Compose artifact 与 LangGraph projection 没有职责重叠。
+- [x] 安全复核确认 Compose 未扩大 Shell、文件、网络、MCP、sandbox 或 delegation 权限。
+
+## 工作包 8：在 Interactive Core 建立 Work Mode 与 Compose projection
+
+**说明：** Work Mode 作为当前 Thread 的下一次 Run 选择进入共享 Core，默认 Build；同一 Thread 的连续 Run 可在空闲时切换。Core 发送 mode、消费 `compose.state`，同时以 event sequence 和 projection revision 拒绝迟到帧，并向 TUI/Web 暴露同一 snapshot/intent。
+
+**验收条件：**
+
+- [x] 空闲状态可切换，active Run、Interaction、取消/压缩收敛期间返回稳定 busy rejection；Run 开始后 Mode 冻结。
+- [x] Build/Compose Work Mode 与 Approval Mode 分字段保存，`Shift+Tab` 的 Approval cycle 不受影响。
+- [x] Core 只接受当前 active Run 且 revision 更新的 projection，terminal/thread reset 清理 workflow 状态，TUI/Web adapter parity 一致。
+
+**验证：**
+
+- [x] `cd packages/cli && bun test tests/interactive/run-feature.test.ts tests/interactive/state.test.ts tests/interactive/controller.test.ts`
+- [x] `cd packages/cli && bun test tests/interactive/adapter-parity.test.ts tests/ipc/client.test.ts`
+
+**依赖：** 工作包 1；可与工作包 2～7 并行使用 fixture，最终 projection 必须以工作包 4～7 为准。
+
+**可能修改：**
+
+- `packages/cli/src/interactive/types.ts`
+- `packages/cli/src/interactive/state.ts`
+- `packages/cli/src/interactive/features/run-feature.ts`
+- `packages/cli/src/interactive/controller.ts`
+- `packages/cli/src/interactive/ports/agent-gateway.ts`
+- 相邻 Interactive tests
+
+**预计范围：** M。
+
+## 工作包 9：交付 TUI/Web 双端 Mode、Plan 门禁与进度展示
+
+**说明：** 两个 renderer 只消费共享 snapshot：无浮层且空闲时 `Tab` 切 Build/Compose，有 Picker/Menu/Dialog 时保留现有候选选择，`Shift+Tab` 继续切 Approval。展示五阶段、当前 task、verification status、review verdict 和 blocked/terminal 摘要，不显示 artifact 正文或内部 Agent 配置。
+
+**验收条件：**
+
+- [x] TUI/Web 都能在同一 Thread 的 Run 之间切换 Mode，active/Interaction 时不可切；Work Mode 与 Approval Mode 标签同时清晰可见。
+- [x] Plan 支持批准/修改/取消，Compose progress 在窄终端、响应式 Web、键盘和 ARIA 下可用。
+- [x] 双端对同一 fixture 得到一致阶段/task/evidence/review 语义；菜单打开时 `Tab` 不误切 Mode。
+
+**验证：**
+
+- [x] `cd packages/cli && bun test tests/tui/application/shortcuts.test.ts tests/tui/app-interaction.test.ts tests/tui/presentation/views.test.ts`
+- [x] `cd packages/cli && bun test tests/web/application/adapter.test.ts tests/web/presentation/composer.test.tsx tests/web/presentation/timeline.test.tsx`
+- [x] `cd packages/cli && bun test tests/interactive/adapter-parity.test.ts tests/web/presentation/styles.test.ts`
+
+**依赖：** 工作包 4、8；完整 evidence/review 展示依赖工作包 6、7。
+
+**可能修改：**
+
+- `packages/cli/src/tui/application/shortcuts.ts`、`adapter.ts`
+- `packages/cli/src/tui/presentation/composer.tsx`、`timeline.tsx`
+- `packages/cli/src/web/application/adapter.ts`
+- `packages/cli/src/web/presentation/composer.tsx`、`timeline.tsx`
+- `packages/cli/src/presentation-shared/` 下的 Compose presenter（如形成双端重复时新增）
+- 相邻 TUI/Web tests
+
+**预计范围：** L；TUI/Web 可以由两个执行 Thread 在共享 snapshot 固定后并行，但必须在同一工作包内做 parity 验收，避免拆成独立产品 Task。
+
+## 工作包 10：闭环跨包 E2E、文档与完成证据
+
+**说明：** 使用 fake model 和 fake execution backend 覆盖完整 Compose 路径，更新用户交互/安全文档、架构总览和 ADR，并按仓库 Definition of Done 运行项目级检查。不得使用真实模型凭据或自动触发外部 commit/push/PR。
+
+**验收条件：**
+
+- [x] E2E 覆盖 happy path、真实决策、Plan revise、Build RED/GREEN、Verify fail→fix、Review finding→fix、retry exhausted、cancel 和 Build 回归。
+- [x] 用户文档明确 Mode 可在 Run 之间切换、active Run 冻结、Compose 不提权、V1 不支持 Host restart resume；架构/ADR 与实现一致。
+- [x] Task Todo、验收、测试证据、版本影响和复核日期闭环，强模型对照完整 diff、Design 与 evidence 复核通过。
+
+**验证：**
+
+- [x] `cd packages/agent && .venv/bin/python -m pytest -q tests/compose/test_e2e.py`
+- [x] `cd packages/cli && bun test tests/integration.test.ts tests/interactive tests/tui tests/web`
+- [x] `bun run test:web:e2e`
+- [x] `bun run build`
+- [x] `bun run typecheck`
+- [x] `bun run test`
+- [x] `bun run project:check`
+
+**依赖：** 工作包 1～9。
+
+**可能修改：**
+
+- `packages/agent/tests/compose/test_e2e.py`（新增）
+- `packages/cli/tests/integration.test.ts` 与必要的 Web E2E fixture/spec
+- `docs/user/交互使用.md`
+- `docs/user/安全与沙箱.md`
+- `docs/developer/architecture/架构总览.md`、`architecture/adr/0001-agent-domain-model.md`
+- `docs/developer/task/HC-138-建立BuildCompose双.md`
+
+**预计范围：** M；生产行为已在前置工作包完成，本包只做集成证据和文档闭环。
+
+## Checkpoint C：完成
+
+- [x] HC-138 Task 的全部可观察验收满足。
+- [x] Build 行为无回归，Compose happy/failure/cancel 路径均有 runtime evidence。
+- [x] Protocol、Python、Interactive Core、TUI/Web 和文档使用同一 Mode/状态语义。
+- [x] 安全、数据迁移、资源释放和唯一终态通过强模型 Review。
+- [x] `bun run build`、`bun run typecheck`、`bun run test`、`bun run project:check` 全部通过并写入 Task evidence。
+- [x] 用户复核后才能执行 `task:complete`；本 Plan 的完成不等于功能完成。
+
+## 风险与缓解
+
+| 风险 | 影响 | 缓解 |
+| --- | --- | --- |
+| RunCoordinator 继续膨胀或出现第二套 lifecycle | 高 | 工作包 2 先迁移 Build 并用 adapter contract 固定唯一 lifecycle owner。 |
+| SQLite schema migration 破坏既有 Thread 数据 | 高 | 工作包 3 复用现有 backup/recovery/fingerprint 验证，失败不开放数据库。 |
+| Verification 绕过权限或 remote sandbox 失败后落回本机 | 高 | 工作包 6 只适配 canonical execution context；deny、approval、cancel、fallback 都有回归测试。 |
+| Artifact、Transcript、LangGraph state 多重事实源 | 高 | Store 只写结构化 artifact；UI 只收 projection；Transcript 只保留用户消息和最终摘要。 |
+| Mode 与 Approval 被 UI 混为自动授权 | 中 | Core 分字段，双端同时显示；Tab/Shift+Tab 正交测试。 |
+| 简单任务的模型调用成本过高 | 中 | Understand 允许 `simple=true` 短 artifact，但 Verify 和双轴 Review 的跳过规则不得由模型自由决定。 |
+| 多执行 Thread 接力时重复改同一核心文件 | 中 | Todo 按工作包记录当前 owner/验证；工作包 4～7 串行，2/3/8 仅在 contract 固定后并行。 |
+
+## 开放项
+
+当前没有阻塞实施的产品决策。V1 默认 Work Mode 是当前 Interactive session 中“下一次 Run”的选择，Build 为初始值；是否跨应用重启持久化该选择不进入 HC-138。若实施时发现必须修改这一行为，先回到 Design 确认，不添加 fallback。

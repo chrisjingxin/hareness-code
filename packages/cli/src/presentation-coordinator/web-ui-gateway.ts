@@ -14,6 +14,7 @@ import {
   selectInteractionView,
   selectNavigationView,
   selectRuntimeView,
+  selectWorkItemView,
 } from "../interactive/selectors"
 import type { InteractiveController, InteractiveIntent, InteractiveSnapshot, IntentOutcome } from "../interactive/types"
 import type { DiagnosticLogger } from "../diagnostics/local-logger"
@@ -205,7 +206,7 @@ class WebUiGatewayImpl implements WebUiGateway {
     if (!sameSlice(previous.navigation, next.navigation)) changed.navigation = next.navigation
     if (!sameSlice(previous.command, next.command)) changed.command = next.command
     if (!sameSlice(previous.runtime, next.runtime)) changed.runtime = next.runtime
-    if (Object.keys(changed).length === 0) return
+    if (!sameSlice(previous.workItem, next.workItem)) changed.workItem = next.workItem
     this.revision += 1
     void this.send({ type: "state.patch", revision: this.revision, patch: changed as unknown as WebUiPatch })
   }
@@ -266,7 +267,7 @@ export function createWebUiGateway(options: WebUiGatewayOptions): WebUiGateway {
   return new WebUiGatewayImpl(options)
 }
 
-/** 把 Controller 与 Explorer 快照收敛为七个 Selector 分片的完整视图。 */
+/** 把 Controller 与 Explorer 快照收敛为八个 Selector 分片的完整视图。 */
 export function buildWebUiState(interactive: InteractiveSnapshot, workspace: WorkspaceSnapshot): WebUiState {
   return {
     conversation: selectConversationView(interactive),
@@ -274,6 +275,7 @@ export function buildWebUiState(interactive: InteractiveSnapshot, workspace: Wor
     navigation: selectNavigationView(interactive),
     command: selectCommandView(interactive),
     runtime: selectRuntimeView(interactive),
+    workItem: selectWorkItemView(interactive),
     workspaceTree: workspace.tree,
     workspacePreview: workspace.preview,
   }

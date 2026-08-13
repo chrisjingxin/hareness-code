@@ -83,7 +83,7 @@ export function dispatchSlashCommand(
   if (!definition) return notice(`未知命令：/${command.name}。输入 /help 查看可用命令。`)
 
   const availability = registry.availability(definition, context.commandContext)
-  if (availability.state === "hidden") return notice(`/${definition.name} 当前不可用。`)
+  if (availability.state === "hidden") return notice(availability.reason)
   if (availability.state === "disabled") return notice(`/${definition.name} 暂不可用：${availability.reason}。`)
 
   if (definition.source.type === "plugin" && definition.requestedSkillId) {

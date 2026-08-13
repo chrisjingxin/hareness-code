@@ -36,6 +36,59 @@ class _StreamingAgent:
         yield ((), "messages", (AIMessage(content="fixture response"), {}))
 
 
+@pytest.mark.asyncio
+async def test_cancelled_engine_run_lease_acquire_releases_engine_lease(tmp_path: Path) -> None:
+    """run lease 获取被取消时，Host 仍释放刚取得的 AgentEngine lease。"""
+    from harness_agent.host.run_coordinator import (
+        ConnectionRef,
+        RunPreparation,
+        RunState,
+        StartRun,
+    )
+
+    class _CancelledRunLease:
+        async def run(self) -> object:
+            raise asyncio.CancelledError
+
+    host = AgentHost(allow_echo=False, config_home=tmp_path / "home", workspace=tmp_path)
+    lease = _CancelledRunLease()
+    engine = type(
+        "Engine",
+        (),
+        {"profile_key": "profile-1", "profile": object(), "graph": object()},
+    )()
+    host._agent_engine_artifacts["profile-1"] = type(
+        "Artifacts", (), {"execution_context": object()}
+    )()
+    host._resolved_agent_specs["profile-1"] = object()
+    released: list[object] = []
+
+    async def acquire_engine(*_args: object, **_kwargs: object) -> tuple[object, object]:
+        return lease, engine
+
+    async def create_context(*_args: object, **_kwargs: object) -> object:
+        return object()
+
+    async def release_engine(value: object, **_kwargs: object) -> None:
+        released.append(value)
+
+    host._acquire_default_agent_engine = acquire_engine  # type: ignore[method-assign]
+    host._create_run_context = create_context  # type: ignore[method-assign]
+    host._release_agent_engine_lease = release_engine  # type: ignore[method-assign]
+    run = RunState(
+        start=StartRun(mode="build", thread_id="thread-cancel", run_id="run-cancel", message="取消"),
+        owner=ConnectionRef("owner"),
+        persistence=None,
+        preparation=RunPreparation(),
+    )
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await host._acquire_default_agent_engine_for_run(run)
+        assert released == [lease]
+    finally:
+        await host.close()
+
+
 def _request(method: str, params: dict[str, Any], request_id: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "method": method, "params": params, "id": request_id}
 
@@ -88,7 +141,7 @@ async def test_run_owner_and_observer_receive_identical_events(tmp_path: Path) -
         attached,
         _request(
             "run.start",
-            {"message": "hello", "thread_id": "thread-1", "run_id": "run-1"},
+            {"mode": "build", "message": "hello", "thread_id": "thread-1", "run_id": "run-1"},
             "start",
         ),
     )
@@ -178,7 +231,7 @@ async def test_stdio_owner_and_websocket_observer_share_context_updated_sequence
         await host.dispatch(
             _request(
                 "run.start",
-                {
+                {"mode": "build", 
                     "message": "transport continuity",
                     "thread_id": "thread-transport",
                     "run_id": "run-transport",
@@ -255,7 +308,7 @@ async def test_non_run_owner_cannot_cancel_through_holder_gate(tmp_path: Path) -
         attached,
         _request(
             "run.start",
-            {"message": "slow", "thread_id": "thread-1", "run_id": "run-1"},
+            {"mode": "build", "message": "slow", "thread_id": "thread-1", "run_id": "run-1"},
             "start",
         ),
     )
@@ -293,7 +346,7 @@ async def test_run_id_retry_is_idempotent_and_conflicting_content_is_rejected(
     await host.dispatch(
         _request(
             "run.start",
-            {"message": "same", "thread_id": "thread-1", "run_id": "run-1"},
+            {"mode": "build", "message": "same", "thread_id": "thread-1", "run_id": "run-1"},
             "retry",
         )
     )
@@ -301,7 +354,7 @@ async def test_run_id_retry_is_idempotent_and_conflicting_content_is_rejected(
     await host.dispatch(
         _request(
             "run.start",
-            {"message": "same", "thread_id": "thread-1", "run_id": "run-1"},
+            {"mode": "build", "message": "same", "thread_id": "thread-1", "run_id": "run-1"},
             "retry",
         )
     )
@@ -314,7 +367,7 @@ async def test_run_id_retry_is_idempotent_and_conflicting_content_is_rejected(
     await host.dispatch(
         _request(
             "run.start",
-            {"message": "different", "thread_id": "thread-1", "run_id": "run-1"},
+            {"mode": "build", "message": "different", "thread_id": "thread-1", "run_id": "run-1"},
             "conflict",
         )
     )
@@ -355,7 +408,7 @@ async def test_watch_rejects_active_thread_and_attached_disconnect_cancels_only_
         attached,
         _request(
             "run.start",
-            {"message": "slow", "thread_id": "thread-1", "run_id": "run-1"},
+            {"mode": "build", "message": "slow", "thread_id": "thread-1", "run_id": "run-1"},
             "start",
         ),
     )
@@ -371,7 +424,7 @@ async def test_watch_rejects_active_thread_and_attached_disconnect_cancels_only_
     await host.dispatch(
         _request(
             "run.start",
-            {"message": "again", "thread_id": "thread-1", "run_id": "run-2"},
+            {"mode": "build", "message": "again", "thread_id": "thread-1", "run_id": "run-2"},
             "owner-start",
         )
     )
@@ -469,7 +522,7 @@ async def test_attached_controlled_operation_without_acquire_is_rejected(
             json.dumps(
                 _request(
                     "run.start",
-                    {"message": "hello", "thread_id": "t", "run_id": "r"},
+                    {"mode": "build", "message": "hello", "thread_id": "t", "run_id": "r"},
                     "web-start",
                 )
             )
@@ -570,7 +623,7 @@ async def test_release_is_blocked_while_attached_run_is_active(tmp_path: Path) -
             json.dumps(
                 _request(
                     "run.start",
-                    {"message": "slow", "thread_id": "thread-1", "run_id": "run-1"},
+                    {"mode": "build", "message": "slow", "thread_id": "thread-1", "run_id": "run-1"},
                     "web-start",
                 )
             )
@@ -625,7 +678,7 @@ async def test_owner_revoke_connected_attachment_cancels_run_and_restores_owner(
         json.dumps(
             _request(
                 "run.start",
-                {"message": "slow", "thread_id": "thread-1", "run_id": "run-1"},
+                {"mode": "build", "message": "slow", "thread_id": "thread-1", "run_id": "run-1"},
                 "web-start",
             )
         )
@@ -754,7 +807,7 @@ async def test_attached_disconnect_cancels_run_and_restores_owner(
         json.dumps(
             _request(
                 "run.start",
-                {"message": "slow", "thread_id": "thread-1", "run_id": "run-1"},
+                {"mode": "build", "message": "slow", "thread_id": "thread-1", "run_id": "run-1"},
                 "web-start",
             )
         )
@@ -837,7 +890,7 @@ async def test_connection_run_busy_without_multithread(tmp_path: Path) -> None:
     await host.dispatch(
         _request(
             "run.start",
-            {"message": "first", "thread_id": "thread-1", "run_id": "run-1"},
+            {"mode": "build", "message": "first", "thread_id": "thread-1", "run_id": "run-1"},
             "start-1",
         )
     )
@@ -845,7 +898,7 @@ async def test_connection_run_busy_without_multithread(tmp_path: Path) -> None:
     await host.dispatch(
         _request(
             "run.start",
-            {"message": "second", "thread_id": "thread-2", "run_id": "run-2"},
+            {"mode": "build", "message": "second", "thread_id": "thread-2", "run_id": "run-2"},
             "start-2",
         )
     )
@@ -866,7 +919,7 @@ async def test_multithread_owner_can_run_parallel_threads(tmp_path: Path) -> Non
     await host.dispatch(
         _request(
             "run.start",
-            {"message": "first", "thread_id": "thread-1", "run_id": "run-1"},
+            {"mode": "build", "message": "first", "thread_id": "thread-1", "run_id": "run-1"},
             "start-1",
         )
     )
@@ -874,7 +927,7 @@ async def test_multithread_owner_can_run_parallel_threads(tmp_path: Path) -> Non
     await host.dispatch(
         _request(
             "run.start",
-            {"message": "second", "thread_id": "thread-2", "run_id": "run-2"},
+            {"mode": "build", "message": "second", "thread_id": "thread-2", "run_id": "run-2"},
             "start-2",
         )
     )
@@ -924,7 +977,7 @@ async def test_acquire_and_owner_run_start_race_has_single_winner(
             host.dispatch(
                 _request(
                     "run.start",
-                    {"message": "race", "thread_id": "t", "run_id": "race-run"},
+                    {"mode": "build", "message": "race", "thread_id": "t", "run_id": "race-run"},
                     "owner-start",
                 )
             )

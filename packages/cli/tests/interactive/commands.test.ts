@@ -4,6 +4,7 @@ import {
   CommandRegistry,
   commandMenuItemDescription,
   commandMenuItemLabel,
+  commandRegistry,
   createCommandRegistry,
   defaultCommandContext,
   findCommandMenuItems,
@@ -307,4 +308,47 @@ test("动态 Plugin Command 不能覆盖 builtin 名称或别名", () => {
     requested_skill_id: "plugin/local/bad/command/help",
     plugin_id: "local/bad",
   }])).toThrow("Command 名称或别名冲突")
+})
+
+test("Compose 命令按 Work Mode 与 Work Item 状态决定可见性与禁用原因", () => {
+  const newWork = commandRegistry.get("compose.new-work")!
+  const abandon = commandRegistry.get("compose.abandon")!
+  const btw = commandRegistry.get("assist.btw")!
+
+  // new-work：仅 Compose 可见；无 active Work Item 时可用，有则禁用。
+  expect(commandRegistry.availability(newWork, defaultCommandContext({ workMode: "build" }))).toEqual({
+    state: "hidden",
+    reason: "当前模式不可用（COMMAND_MODE_UNAVAILABLE）",
+  })
+  expect(commandRegistry.availability(newWork, defaultCommandContext({ workMode: "compose", hasActiveWorkItem: false }))).toEqual({ state: "available" })
+  expect(commandRegistry.availability(newWork, defaultCommandContext({ workMode: "compose", hasActiveWorkItem: true }))).toEqual({
+    state: "disabled",
+    reason: "当前已有进行中的 Work Item",
+  })
+
+  // abandon：仅 Compose 可见；有 active Work Item 且空闲时可用，无则禁用。
+  expect(commandRegistry.availability(abandon, defaultCommandContext({ workMode: "build", hasActiveWorkItem: true }))).toEqual({
+    state: "hidden",
+    reason: "当前模式不可用（COMMAND_MODE_UNAVAILABLE）",
+  })
+  expect(commandRegistry.availability(abandon, defaultCommandContext({ workMode: "compose", hasActiveWorkItem: false }))).toEqual({
+    state: "disabled",
+    reason: "当前没有进行中的 Work Item",
+  })
+  expect(commandRegistry.availability(abandon, defaultCommandContext({ workMode: "compose", hasActiveWorkItem: true }))).toEqual({ state: "available" })
+
+  // btw：Build/Compose 双模式可用。
+  expect(commandRegistry.availability(btw, defaultCommandContext({ workMode: "build" }))).toEqual({ state: "available" })
+  expect(commandRegistry.availability(btw, defaultCommandContext({ workMode: "compose" }))).toEqual({ state: "available" })
+})
+
+test("Compose-only 命令不出现在 Build 模式 Slash 菜单，Compose 模式下可见", () => {
+  const buildContext = defaultCommandContext({ workMode: "build" })
+  const composeContext = defaultCommandContext({ workMode: "compose" })
+  expect(findSlashCommands("/new-work", buildContext).map(item => item.name)).toEqual([])
+  expect(findSlashCommands("/abandon", buildContext).map(item => item.name)).toEqual([])
+  expect(findSlashCommands("/new-work", composeContext).map(item => item.name)).toEqual(["new-work"])
+  expect(findSlashCommands("/abandon", composeContext).map(item => item.name)).toEqual(["abandon"])
+  expect(findSlashCommands("/btw", buildContext).map(item => item.name)).toEqual(["btw"])
+  expect(findSlashCommands("/btw", composeContext).map(item => item.name)).toEqual(["btw"])
 })

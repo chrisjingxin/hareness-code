@@ -49,7 +49,9 @@
       "host.attachment.revoke": { "params": "#/$defs/hostAttachmentRevokeParams", "result": "#/$defs/hostAttachmentRevokeResult", "capability": "host.attach" },
       "host.control.acquire": { "params": "#/$defs/emptyParams", "result": "#/$defs/controlStatus", "capability": "host.control" },
       "host.control.release": { "params": "#/$defs/emptyParams", "result": "#/$defs/controlStatus", "capability": "host.control" },
-      "host.control.status": { "params": "#/$defs/emptyParams", "result": "#/$defs/controlStatus", "capability": "host.control" }
+      "host.control.status": { "params": "#/$defs/emptyParams", "result": "#/$defs/controlStatus", "capability": "host.control" },
+      "compose.inspect": { "params": "#/$defs/composeInspectParams", "result": "#/$defs/composeInspectResult", "capability": "threads.read" },
+      "compose.abandon": { "params": "#/$defs/composeAbandonParams", "result": "#/$defs/composeAbandonResult", "capability": "threads.read" }
     },
     "events": {
       "run.started": { "payload": "#/$defs/runStartedPayload" },
@@ -61,6 +63,10 @@
       "tool.delta": { "payload": "#/$defs/toolDeltaPayload" },
       "tool.completed": { "payload": "#/$defs/toolCompletedPayload" },
       "context.updated": { "payload": "#/$defs/contextPayload" },
+      "compose.state": { "payload": "#/$defs/composeStatePayload" },
+      "compose.summary": { "payload": "#/$defs/composeSummaryPayload" },
+      "compose.work_item": { "payload": "#/$defs/composeWorkItemPayload" },
+      "compose.activity": { "payload": "#/$defs/composeActivityPayload" },
       "interaction.resolved": { "payload": "#/$defs/interactionResolvedPayload" },
       "run.completed": { "payload": "#/$defs/runCompletedPayload" },
       "run.cancelled": { "payload": "#/$defs/runCancelledPayload" },
@@ -228,6 +234,10 @@
       "type": "string",
       "enum": ["plan", "default", "auto-edit", "auto", "yolo"]
     },
+    "interactionMode": {
+      "type": "string",
+      "enum": ["build", "compose"]
+    },
     "modelProfile": {
       "type": "object",
       "required": ["id", "model", "provider_label", "context_window_tokens", "capabilities", "is_default", "available", "source"],
@@ -255,8 +265,9 @@
     },
     "runStartParams": {
       "type": "object",
-      "required": ["message", "thread_id", "run_id"],
+      "required": ["mode", "message", "thread_id", "run_id"],
       "properties": {
+        "mode": { "$ref": "#/$defs/interactionMode" },
         "message": { "type": "string", "minLength": 1 },
         "thread_id": { "type": "string", "minLength": 1 },
         "run_id": { "type": "string", "minLength": 1 },
@@ -369,6 +380,27 @@
       },
       "additionalProperties": false
     },
+    "composeActivityRecord": {
+      "type": "object",
+      "required": ["run_id", "event_sequence", "activity_id", "stage", "attempt", "kind", "label", "status", "created_at_ms"],
+      "properties": {
+        "run_id": { "type": "string", "minLength": 1 },
+        "event_sequence": { "type": "integer", "minimum": 0 },
+        "activity_id": { "type": "string", "minLength": 1 },
+        "stage": { "enum": ["understand", "plan", "build", "verify", "review"] },
+        "task_id": { "type": "string", "minLength": 1 },
+        "task_title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "execution_id": { "type": "string", "minLength": 1 },
+        "agent_id": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["summary", "tool_terminal", "truncation"] },
+        "label": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "status": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "bounded_text": { "type": "string", "maxLength": 4096 },
+        "created_at_ms": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
     "threadMessage": {
       "type": "object", "required": ["kind", "content"],
       "properties": {
@@ -395,7 +427,14 @@
       "type": "object", "required": ["thread", "messages"],
       "properties": {
         "thread": { "$ref": "#/$defs/threadSummary" },
-        "messages": { "type": "array", "items": { "$ref": "#/$defs/threadMessage" } }
+        "messages": { "type": "array", "items": { "$ref": "#/$defs/threadMessage" } },
+        "compose_activities": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/composeActivityRecord" },
+          "default": []
+        },
+        "thread_mode": { "oneOf": [{ "$ref": "#/$defs/interactionMode" }, { "type": "null" }] },
+        "work_item": { "oneOf": [{ "$ref": "#/$defs/composeWorkItemSnapshot" }, { "type": "null" }] }
       },
       "additionalProperties": false
     },
@@ -743,6 +782,18 @@
       },
       "additionalProperties": false
     },
+    "composeActivityScope": {
+      "type": "object",
+      "required": ["activity_id", "stage", "attempt"],
+      "properties": {
+        "activity_id": { "type": "string", "minLength": 1 },
+        "stage": { "enum": ["understand", "plan", "build", "verify", "review"] },
+        "task_id": { "type": "string", "minLength": 1 },
+        "task_title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "attempt": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
     "eventBase": {
       "type": "object",
       "required": ["event_id", "type", "thread_id", "run_id", "sequence", "timestamp_ms", "payload"],
@@ -753,13 +804,15 @@
         "execution_id": { "type": "string", "minLength": 1 },
         "parent_execution_id": { "type": ["string", "null"], "minLength": 1 },
         "agent_id": { "type": "string", "minLength": 1 },
+        "compose_scope": { "$ref": "#/$defs/composeActivityScope" },
         "payload": { "$ref": "#/$defs/jsonObject" }
       },
       "additionalProperties": false
     },
     "runStartedPayload": {
-      "type": "object", "required": ["resumed"],
+      "type": "object", "required": ["mode", "resumed"],
       "properties": {
+        "mode": { "$ref": "#/$defs/interactionMode" },
         "resumed": { "type": "boolean" }, "skills_snapshot_id": { "type": ["string", "null"] },
         "primary_model": { "$ref": "#/$defs/runPrimaryModelBinding" }, "runtime_profile_id": { "type": ["string", "null"] }
       },
@@ -820,6 +873,153 @@
         "dynamic_tokens": { "type": ["integer", "null"] }, "cache_status": { "type": ["string", "null"] },
         "cached_tokens": { "type": ["integer", "null"] }, "miss_reason": { "type": ["string", "null"] },
         "artifact_ids": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+    "composeSummaryPayload": {
+      "type": "object",
+      "required": ["status", "text"],
+      "properties": {
+        "status": { "enum": ["passed", "failed", "blocked", "cancelled"] },
+        "text": { "type": "string", "minLength": 1, "maxLength": 1000 }
+      },
+      "additionalProperties": false
+    },
+    "composeStatePayload": {
+      "type": "object",
+      "required": ["revision", "stage", "status", "stages", "tasks", "evidence"],
+      "properties": {
+        "revision": { "type": "integer", "minimum": 0 },
+        "stage": { "enum": ["understand", "plan", "build", "verify", "review"] },
+        "status": { "enum": ["running", "waiting_user", "blocked", "completed", "failed", "cancelled"] },
+        "stages": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "status", "attempts"],
+            "properties": {
+              "id": { "enum": ["understand", "plan", "build", "verify", "review"] },
+              "status": { "enum": ["pending", "running", "waiting_user", "passed", "failed", "cancelled", "blocked"] },
+              "attempts": { "type": "integer", "minimum": 0 }
+            },
+            "additionalProperties": false
+          }
+        },
+        "tasks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "title", "status"],
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "title": { "type": "string", "minLength": 1 },
+              "status": { "enum": ["pending", "running", "passed", "failed", "cancelled"] }
+            },
+            "additionalProperties": false
+          }
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["label", "status"],
+            "properties": {
+              "label": { "type": "string", "minLength": 1 },
+              "status": { "enum": ["pending", "running", "passed", "failed", "cancelled"] }
+            },
+            "additionalProperties": false
+          }
+        },
+        "blocked_reason": { "type": ["string", "null"], "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "composeWorkItemSnapshot": {
+      "type": "object",
+      "required": ["work_item_id", "slug", "title", "revision", "status", "current_activity", "pending_decision", "blocked_reason"],
+      "properties": {
+        "work_item_id": { "type": "string", "minLength": 1 },
+        "slug": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "revision": { "type": "integer", "minimum": 0 },
+        "status": { "enum": ["active", "waiting_user", "blocked", "completed", "abandoned"] },
+        "current_activity": { "type": "string", "minLength": 1 },
+        "pending_decision": { "type": ["string", "null"] },
+        "blocked_reason": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "composeReadinessSnapshot": {
+      "type": "object",
+      "required": ["task_confirmed", "spec_confirmed", "plan_confirmed", "todo_executable", "implementation_current", "verification_fresh", "review_fresh", "report_current", "complete"],
+      "properties": {
+        "task_confirmed": { "type": "boolean" },
+        "spec_confirmed": { "type": "boolean" },
+        "plan_confirmed": { "type": "boolean" },
+        "todo_executable": { "type": "boolean" },
+        "implementation_current": { "type": "boolean" },
+        "verification_fresh": { "type": "boolean" },
+        "review_fresh": { "type": "boolean" },
+        "report_current": { "type": "boolean" },
+        "complete": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "composeInspectParams": {
+      "type": "object",
+      "required": ["thread_id"],
+      "properties": {
+        "thread_id": { "type": "string", "minLength": 1 },
+        "work_item_id": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "composeInspectResult": {
+      "type": "object",
+      "required": ["work_item"],
+      "properties": {
+        "work_item": { "oneOf": [{ "$ref": "#/$defs/composeWorkItemSnapshot" }, { "type": "null" }] }
+      },
+      "additionalProperties": false
+    },
+    "composeAbandonParams": {
+      "type": "object",
+      "required": ["thread_id", "work_item_id", "expected_revision"],
+      "properties": {
+        "thread_id": { "type": "string", "minLength": 1 },
+        "work_item_id": { "type": "string", "minLength": 1 },
+        "expected_revision": { "type": "integer", "minimum": 0 },
+        "reason": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "composeAbandonResult": {
+      "type": "object",
+      "required": ["work_item"],
+      "properties": {
+        "work_item": { "$ref": "#/$defs/composeWorkItemSnapshot" }
+      },
+      "additionalProperties": false
+    },
+    "composeWorkItemPayload": {
+      "type": "object",
+      "required": ["thread_id", "work_item"],
+      "properties": {
+        "thread_id": { "type": "string", "minLength": 1 },
+        "work_item": { "$ref": "#/$defs/composeWorkItemSnapshot" }
+      },
+      "additionalProperties": false
+    },
+    "composeActivityPayload": {
+      "type": "object",
+      "required": ["thread_id", "work_item_id", "activity_id", "kind", "status", "attempt"],
+      "properties": {
+        "thread_id": { "type": "string", "minLength": 1 },
+        "work_item_id": { "type": "string", "minLength": 1 },
+        "activity_id": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "minLength": 1 },
+        "status": { "type": "string", "minLength": 1 },
+        "attempt": { "type": "integer", "minimum": 1 }
       },
       "additionalProperties": false
     },
@@ -910,6 +1110,10 @@
       "type": "object", "required": ["thread_id", "run_id", "timeout_ms", "payload"],
       "properties": {
         "thread_id": { "type": "string" }, "run_id": { "type": "string" }, "timeout_ms": { "type": "integer", "minimum": 1 },
+        "execution_id": { "type": "string", "minLength": 1 },
+        "parent_execution_id": { "type": ["string", "null"], "minLength": 1 },
+        "agent_id": { "type": "string", "minLength": 1 },
+        "compose_scope": { "$ref": "#/$defs/composeActivityScope" },
         "payload": {
           "type": "object", "required": ["interrupt_id", "description", "requests", "decisions"],
           "properties": {
@@ -949,6 +1153,10 @@
       "type": "object", "required": ["thread_id", "run_id", "timeout_ms", "payload"],
       "properties": {
         "thread_id": { "type": "string" }, "run_id": { "type": "string" }, "timeout_ms": { "type": "integer", "minimum": 1 },
+        "execution_id": { "type": "string", "minLength": 1 },
+        "parent_execution_id": { "type": ["string", "null"], "minLength": 1 },
+        "agent_id": { "type": "string", "minLength": 1 },
+        "compose_scope": { "$ref": "#/$defs/composeActivityScope" },
         "payload": {
           "type": "object", "required": ["interrupt_id", "questions"],
           "properties": {

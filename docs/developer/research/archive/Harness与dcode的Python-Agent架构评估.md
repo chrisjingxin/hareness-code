@@ -5,7 +5,7 @@
 > Harness Code：`9dbc5deda02cee996ce3d19c4faf2fb4629e22ce`  
 > Deep Agents Code（下文简称 dcode）：`4338671aa1d9bd1fd70f20069aac5468697606bf`
 
-> 历史快照：本文中的任务排序和待办判断只对应上述评估提交；当前任务顺序以[架构重构计划](../../architecture/架构重构计划.md)和[任务看板](../../tasks/任务看板.md)为准。
+> 历史快照：本文中的任务排序和待办判断只对应上述评估提交；当前任务顺序以[架构重构计划](../../architecture/架构重构计划.md)和[任务看板](../../task/任务看板.md)为准。
 
 ## 结论先行
 
@@ -145,7 +145,7 @@ Harness 把“可以共用的 Agent 能力”定义为 AgentEngine。当前实�
 
 - “什么变化必须生成新 AgentEngine”变成关键正确性问题；
 - Profile 指纹漏字段时，旧能力会被错误复用；
-- AgentHost 仍需要协调配置、模型绑定、AgentEngine、ThreadPersistence 和运行生命周期；ZC-091 已把角色解析与构图输入收敛到 `ResolvedAgentSpec`，后续仍可继续拆出更深的领域 module。
+- AgentHost 仍需要协调配置、模型绑定、AgentEngine、ThreadPersistence 和运行生命周期；HC-091 已把角色解析与构图输入收敛到 `ResolvedAgentSpec`，后续仍可继续拆出更深的领域 module。
 
 dcode 选择每进程一张图。它用一个 `asyncio.Lock` 防止重复构建，并让动态模型 middleware 在调用时替换模型。[D-ServerGraph] [D-Model]
 
@@ -173,7 +173,7 @@ Harness 在 Run 开始前解析模型，优先级为：本次请求、最近一�
 2. 恢复和审计能回答“当时到底用了哪个模型”；
 3. 模型不可用或选择冲突时倾向明确失败，而不是悄悄改变行为。
 
-ZC-086 已将这套优先级、legacy 转换、脱敏和 Run binding 构造收进
+HC-086 已将这套优先级、legacy 转换、脱敏和 Run binding 构造收进
 `execution_binding.py` 的纯函数 interface。Server 只编排输入与输出，ThreadPersistence 只处理
 SQLite/JSON adapter，AgentEngine 和历史事实消费同一解析结果。[H-Task-086]
 
@@ -446,11 +446,11 @@ Harness 的耦合点较少，但其中一个涉及进程全局状态，故障影
    - 真正执行写操作时必须重新进入独占调度；
    - 用两个同时修改同一文件的回归测试证明执行顺序。
 
-3. **完成 ZC-085 的死代码清理**
+3. **完成 HC-085 的死代码清理**
    - 删除没有生产调用方的 Unicode security 和未接入 ToolBatch；
-   - Agent catalog 由 ZC-091/ZC-092 在真实角色 AgentEngine 与 Policy seam 上裁剪，避免先删除再重建同类领域类型。
+   - Agent catalog 由 HC-091/HC-092 在真实角色 AgentEngine 与 Policy seam 上裁剪，避免先删除再重建同类领域类型。
 
-4. **按 ZC-086、ZC-089 收口模型和 Run 生命周期**
+4. **按 HC-086、HC-089 收口模型和 Run 生命周期**
    - `server.py` 只做入口编排；
    - 模型解析、Run 状态转换和恢复规则进入各自领域模块；
    - 保留现有不可变 Run binding 语义。
@@ -530,8 +530,8 @@ Harness 当前的主要问题不是方向错误，而是**骨架已经较重，�
 
 - [H-Architecture]：[架构总览](../../architecture/架构总览.md)
 - [H-Refactor]：[架构重构计划](../../architecture/架构重构计划.md)
-- [H-Task-085]：[ZC-085 清理未接线框架](../../tasks/archive/ZC-085.md)
-- [H-Task-086]：[ZC-086 提取模型绑定领域服务](../../tasks/archive/ZC-086.md)
+- [H-Task-085]：[HC-085 清理未接线框架](../../task/archive/HC-085-清理确认废弃实现与重复代码.md)
+- [H-Task-086]：[HC-086 提取模型绑定领域服务](../../task/archive/HC-086-集中模型选择与Run执行绑定.md)
 - [H-Package]：[`packages/agent/pyproject.toml`](../../../../packages/agent/pyproject.toml)
 - [H-Agent]：[`harness_agent/runtime/agent.py`](../../../../packages/agent/harness_agent/runtime/agent.py)
 - [H-Server]：[`harness_agent/host/agent_host.py`](../../../../packages/agent/harness_agent/host/agent_host.py)
@@ -570,8 +570,8 @@ Harness 当前的主要问题不是方向错误，而是**骨架已经较重，�
 
 [H-Architecture]: ../../architecture/架构总览.md
 [H-Refactor]: ../../architecture/架构重构计划.md
-[H-Task-085]: ../../tasks/archive/ZC-085.md
-[H-Task-086]: ../../tasks/archive/ZC-086.md
+[H-Task-085]: ../../task/archive/HC-085.md
+[H-Task-086]: ../../task/archive/HC-086.md
 [H-Package]: ../../../../packages/agent/pyproject.toml
 [H-Agent]: ../../../../packages/agent/harness_agent/runtime/agent.py
 [H-Server]: ../../../../packages/agent/harness_agent/host/agent_host.py

@@ -44,6 +44,7 @@ const runtime = {
   selection: { requestedModelProfileId: null, actualModel: null, armedSkill: null },
   availability: { canCancelRun: false, canToggleSkill: false, canManageMcp: false, canChangeModel: false },
 }
+const workItem = { workItem: null, threadMode: null, modeLocked: false }
 const workspaceTree = {
   status: "ready",
   rows: [
@@ -68,7 +69,7 @@ const workspacePreview = {
   },
 }
 
-const fullState: WebUiState = { conversation, interaction, navigation, command, runtime, workspaceTree, workspacePreview }
+const fullState: WebUiState = { conversation, interaction, navigation, command, runtime, workItem, workspaceTree, workspacePreview }
 
 const clientMessages: WebUiClientMessage[] = [
   { type: "handoff.ready" },

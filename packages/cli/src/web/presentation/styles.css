@@ -455,6 +455,76 @@ button.meta-chip { cursor: pointer; }
 .streaming-cursor { display: inline-block; width: 6px; height: 1.1em; margin-left: 3px; vertical-align: -.15em; background: var(--accent); animation: cursor-blink 1s steps(2, start) infinite; }
 @keyframes cursor-blink { 50% { opacity: 0; } }
 .run-status-live { margin-top: auto; padding-top: 12px; color: var(--muted); font-size: 13px; }
+
+/* Compose activity 分组：renderer-local 折叠，不持业务状态 */
+.timeline-activity-group {
+  margin: 10px 0;
+  border: 1px solid var(--border, #e4e4e7);
+  border-radius: 10px;
+  background: var(--panel, #fafafa);
+  overflow: hidden;
+}
+.timeline-activity-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.timeline-activity-header:focus-visible {
+  outline: 2px solid var(--primary, #2563eb);
+  outline-offset: -2px;
+}
+.timeline-activity-chevron {
+  color: var(--muted, #71717a);
+  width: 1em;
+}
+.timeline-activity-title {
+  font-weight: 600;
+}
+.timeline-activity-subtitle {
+  color: var(--muted, #71717a);
+  font-size: 12px;
+  margin-left: auto;
+  max-width: 50%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.timeline-activity-body {
+  padding: 0 8px 8px;
+}
+.timeline-activity-collapsed-summary {
+  padding: 0 12px 10px;
+  color: var(--muted, #71717a);
+  font-size: 13px;
+}
+.timeline-compose-summary {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-left: 3px solid var(--primary, #2563eb);
+  background: color-mix(in srgb, var(--primary, #2563eb) 6%, transparent);
+}
+.compose-summary-header {
+  font-size: 12px;
+  color: var(--muted, #71717a);
+  margin-bottom: 4px;
+}
+.compose-progress {
+  margin-top: 8px;
+  padding: 8px 0 4px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .run-progress-spinner.spinning {
+    animation: none;
+  }
+}
 .run-progress { display: inline-flex; align-items: center; gap: 6px; }
 .run-progress-spinner { width: 14px; height: 14px; color: var(--accent); flex: 0 0 auto; }
 .live-interaction-slot { min-height: 0; }
@@ -1047,3 +1117,179 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .reasoning-toggle { margin-left: auto; padding: 2px 8px; border: 1px solid var(--line-strong); border-radius: var(--radius-control); background: transparent; color: var(--text-soft); font-size: 12px; cursor: pointer; }
 .reasoning-toggle:hover { border-color: var(--accent-border-strong); color: var(--text); }
 .reasoning-text { margin-top: 5px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-soft); font-size: 13px; }
+
+
+/* Work/Approval Mode 标签：同时可见，避免把 Compose 误解为自动授权 */
+.mode-chip {
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border, #3f3f46);
+  color: var(--muted, #a1a1aa);
+  white-space: nowrap;
+}
+.mode-chip-active {
+  color: var(--accent, #3b82f6);
+  border-color: var(--accent, #3b82f6);
+}
+
+
+/* Compose 进度：五阶段 chips + 当前任务 + blocked 摘要；只读、不暴露内部字段 */
+.compose-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border, #3f3f46);
+  font-size: 12px;
+}
+.compose-stages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+.compose-stage {
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border, #3f3f46);
+  color: var(--muted, #a1a1aa);
+}
+.compose-stage-passed,
+.compose-stage-completed {
+  color: #22c55e;
+  border-color: #22c55e55;
+}
+.compose-stage-running,
+.compose-stage-waiting_user {
+  color: #3b82f6;
+  border-color: #3b82f655;
+}
+.compose-stage-failed,
+.compose-stage-blocked,
+.compose-stage-cancelled {
+  color: #ef4444;
+  border-color: #ef444455;
+}
+.compose-revision {
+  margin-left: auto;
+  color: var(--muted, #a1a1aa);
+}
+.compose-task {
+  color: var(--text, #e4e4e7);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.compose-task-failed {
+  color: #ef4444;
+}
+.compose-blocked {
+  color: #ef4444;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- Work Item 展示条 ---------- */
+/* 持久 Work Item 投影 + 模式锁定指示器；只读横幅，顶部常驻、不随 timeline 滚动。 */
+.work-item-banner {
+  flex: 0 0 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+.work-item-mode {
+  align-self: flex-start;
+  min-width: 0;
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.work-item-mode-locked {
+  color: var(--accent);
+  border-color: var(--accent-border);
+}
+.work-item-mode-icon { width: 13px; height: 13px; flex: 0 0 auto; }
+.work-item-card {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.work-item-title {
+  min-width: 0;
+  font-weight: 650;
+  letter-spacing: -.01em;
+  overflow-wrap: anywhere;
+}
+.work-item-meta {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.work-item-status {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  color: var(--text-soft);
+}
+.work-item-status[data-status="blocked"],
+.work-item-status[data-status="waiting_user"] {
+  color: var(--warning-text);
+  border-color: var(--warning);
+}
+.work-item-status[data-status="completed"] {
+  color: var(--success-text);
+  border-color: var(--success);
+}
+.work-item-slug {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+}
+.work-item-revision { flex: 0 0 auto; }
+.work-item-activity {
+  min-width: 0;
+  color: var(--text-soft);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.work-item-pending {
+  min-width: 0;
+  color: var(--warning-text);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.work-item-blocked {
+  min-width: 0;
+  color: var(--danger-text);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.work-item-empty {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}

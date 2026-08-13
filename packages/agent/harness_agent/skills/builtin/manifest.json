@@ -1,0 +1,192 @@
+{
+  "format_version": 1,
+  "licenses": [
+    {
+      "id": "agent-skills-mit",
+      "path": "licenses/agent-skills-MIT.txt",
+      "sha256": "6f202f8bd568cd730dbb2b0d1f8e243bc74c2fa1f64dbce9b2c7ea08bd5c9fd7"
+    },
+    {
+      "id": "mattpocock-skills-mit",
+      "path": "licenses/mattpocock-skills-MIT.txt",
+      "sha256": "0e7ac423bf2c6e223b7c5b156f8cf72da49d748e56a1641402c31f22ad07dbb5"
+    }
+  ],
+  "resources": [
+    {
+      "path": "agent-skills/references/definition-of-done.md",
+      "sha256": "d1c75d2ae65d2c7a9cd01f93fa8de63e00e75f2fe5d08be224d576157054dcee"
+    },
+    {
+      "path": "agent-skills/references/performance-checklist.md",
+      "sha256": "628539583b7f515f84d0b8e4f4210ccdc0449afd31901149a078209f0769e654"
+    },
+    {
+      "path": "agent-skills/references/security-checklist.md",
+      "sha256": "a8bbff3b1ac9122985e98fbe9a8fa09cd8ad53b190bac7f8f0f63687900f7d7a"
+    },
+    {
+      "path": "agent-skills/references/testing-patterns.md",
+      "sha256": "f0bf05acd0edcadc27297ad5b74f104c8103ccfedba1a05cd6d6ae4af8364c56"
+    }
+  ],
+  "skills": [
+    {
+      "upstream_id": "agent-skills:code-review-and-quality",
+      "canonical_id": "builtin/code-review-and-quality",
+      "directory": "agent-skills/skills/code-review-and-quality",
+      "license_id": "agent-skills-mit",
+      "upstream": {
+        "url": "https://github.com/addyosmani/agent-skills",
+        "revision": "0.6.6",
+        "version": "0.6.6"
+      },
+      "work_modes": ["compose"],
+      "activities": ["review"],
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "8f3cabca581bbf7cb5f0add3f7454e7a4523f9d4353a6a4a217e6fa515309612"
+        }
+      ]
+    },
+    {
+      "upstream_id": "agent-skills:planning-and-task-breakdown",
+      "canonical_id": "builtin/planning-and-task-breakdown",
+      "directory": "agent-skills/skills/planning-and-task-breakdown",
+      "license_id": "agent-skills-mit",
+      "upstream": {
+        "url": "https://github.com/addyosmani/agent-skills",
+        "revision": "0.6.6",
+        "version": "0.6.6"
+      },
+      "work_modes": ["compose"],
+      "activities": ["plan"],
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "8384b6d485a0238b4deffc7807676c62f68bfd3e9e628aec9410e1052e271916"
+        }
+      ]
+    },
+    {
+      "upstream_id": "agent-skills:spec-driven-development",
+      "canonical_id": "builtin/spec-driven-development",
+      "directory": "agent-skills/skills/spec-driven-development",
+      "license_id": "agent-skills-mit",
+      "upstream": {
+        "url": "https://github.com/addyosmani/agent-skills",
+        "revision": "0.6.6",
+        "version": "0.6.6"
+      },
+      "work_modes": ["compose"],
+      "activities": ["spec"],
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "af5b873414a8b45b96b0d30d5297400f55eb3a56425161a088e470c14260a1e5"
+        }
+      ]
+    },
+    {
+      "upstream_id": "agent-skills:test-driven-development",
+      "canonical_id": "builtin/test-driven-development",
+      "directory": "agent-skills/skills/test-driven-development",
+      "license_id": "agent-skills-mit",
+      "upstream": {
+        "url": "https://github.com/addyosmani/agent-skills",
+        "revision": "0.6.6",
+        "version": "0.6.6"
+      },
+      "work_modes": ["compose"],
+      "activities": ["implement"],
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "440fb3c9b76f4f1b0b564dfbaec19d370beab0167a3e2ab048ce59c5a865ecef"
+        }
+      ]
+    },
+    {
+      "upstream_id": "mattpocock:codebase-design",
+      "canonical_id": "builtin/codebase-design",
+      "directory": "mattpocock-skills/skills/engineering/codebase-design",
+      "license_id": "mattpocock-skills-mit",
+      "upstream": {
+        "url": "https://github.com/mattpocock/skills",
+        "revision": "2ab958093e83e0ec752e6c1c5932da465bf23e0c",
+        "version": "1.1.0"
+      },
+      "work_modes": ["compose"],
+      "activities": ["spec"],
+      "files": [
+        {
+          "path": "DEEPENING.md",
+          "sha256": "125e6b77413ad2bc7cf7a772bc74336d580a50f9e797db2178ed133d62333d06"
+        },
+        {
+          "path": "DESIGN-IT-TWICE.md",
+          "sha256": "21c3264953bd30ee87b181a3ccaf0e70649f461e5ffd7dc654acee4ba1788b31"
+        },
+        {
+          "path": "SKILL.md",
+          "sha256": "a8d50abac5a4018f60e1d911d4b6f4e36454ca14d6c390c0695a578c7de65dad"
+        },
+        {
+          "path": "agents/openai.yaml",
+          "sha256": "edebc9e4fcfe102114012575eaa9600b9b5fd08c311664f389c36e7bc717740f"
+        }
+      ]
+    },
+    {
+      "upstream_id": "mattpocock:diagnosing-bugs",
+      "canonical_id": "builtin/diagnosing-bugs",
+      "directory": "mattpocock-skills/skills/engineering/diagnosing-bugs",
+      "license_id": "mattpocock-skills-mit",
+      "upstream": {
+        "url": "https://github.com/mattpocock/skills",
+        "revision": "2ab958093e83e0ec752e6c1c5932da465bf23e0c",
+        "version": "1.1.0"
+      },
+      "work_modes": ["compose"],
+      "activities": ["diagnose"],
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "7a0779480f323a66d109404646bcc1a14bf0232b45b3e3ea93b652a035718acb"
+        },
+        {
+          "path": "agents/openai.yaml",
+          "sha256": "3e430dbe4334a87597488c060cb3dc3786bb00c9182877d6f5ec41f62490e90b"
+        },
+        {
+          "path": "scripts/hitl-loop.template.sh",
+          "sha256": "b2932630950e5210075bcd6f850e5accf30c101c5367b29eac3a29b4dd8084c8"
+        }
+      ]
+    },
+    {
+      "upstream_id": "mattpocock:grill-me",
+      "canonical_id": "builtin/grill-me",
+      "directory": "mattpocock-skills/skills/productivity/grill-me",
+      "license_id": "mattpocock-skills-mit",
+      "upstream": {
+        "url": "https://github.com/mattpocock/skills",
+        "revision": "2ab958093e83e0ec752e6c1c5932da465bf23e0c",
+        "version": "1.1.0"
+      },
+      "work_modes": ["compose"],
+      "activities": ["task"],
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "6189dfceb7304a6e5558f75d87e68fa3bc7fcf7ba120e44f21f8a61fe01eba54"
+        },
+        {
+          "path": "agents/openai.yaml",
+          "sha256": "c061e39c3e0f9d865fb1b97556d485704af2a8a58f4b8221a8917a5c2074a32b"
+        }
+      ]
+    }
+  ]
+}

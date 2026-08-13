@@ -3,7 +3,7 @@
 export * from "./types"
 
 import type { InteractiveSnapshot } from "../types"
-import { CAPABILITY_GATE, type CommandView, type ConversationView, type FeatureAvailability, type InteractionView, type NavigationView, type RuntimeView } from "./types"
+import { CAPABILITY_GATE, type CommandView, type ConversationView, type FeatureAvailability, type InteractionView, type NavigationView, type RuntimeView, type WorkItemView } from "./types"
 
 /** 由 snapshot 推导全部展示可用性；与 commands.ts 的 availability 计算共享同一输入。 */
 export function selectFeatureAvailability(snapshot: InteractiveSnapshot): FeatureAvailability {
@@ -81,11 +81,22 @@ export function selectRuntimeView(snapshot: InteractiveSnapshot): RuntimeView {
     runtime: snapshot.runtime,
     connection: snapshot.connection,
     selection: snapshot.selection,
+    workMode: snapshot.workMode,
+    composeState: snapshot.composeState,
     availability: {
       canCancelRun: availability.canCancelRun,
       canToggleSkill: availability.canToggleSkill,
       canManageMcp: availability.canManageMcp,
       canChangeModel: availability.canChangeModel,
     },
+  }
+}
+
+/** Work Item 视图：持久投影与模式锁定；renderer 只消费此形状。 */
+export function selectWorkItemView(snapshot: InteractiveSnapshot): WorkItemView {
+  return {
+    workItem: snapshot.workItem,
+    threadMode: snapshot.threadMode,
+    modeLocked: snapshot.threadMode != null,
   }
 }

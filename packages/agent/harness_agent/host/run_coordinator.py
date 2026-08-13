@@ -7,14 +7,33 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
+from harness_agent.compose.models import ThreadMode
+from harness_agent.host.run_execution import (
+    AdapterOutcome,
+    BuildRunAdapter,
+    ComposeRunAdapter,
+    CONTEXT_UPDATED,
+    INTERACTION_RESOLVED,
+    MAX_TOOL_PAYLOAD_BYTES,
+    RUN_CANCELLED,
+    RUN_COMPLETED,
+    RUN_FAILED,
+    RunExecutionAdapter,
+    RunLifecyclePort,
+    _bounded_json,
+)
+from harness_agent.runtime.interactions import InteractionRequest, InteractionResult
 from harness_agent.policy.approval_mode import ApprovalMode
 from harness_agent.policy.bash_parser import extract_command_rule as _extract_command_rule
+
+# 工作模式在 Run 受理时冻结；Compose 是代码状态机驱动的研发流程，Build 保持现有直接协作。
+InteractionMode = Literal["build", "compose"]
 from harness_agent.policy.permission_rules import (
     PermissionRule,
     evaluate_tool_rules,
@@ -47,22 +66,7 @@ from harness_agent.threads.thread_persistence import (
 
 logger = logging.getLogger(__name__)
 
-MAX_TOOL_PAYLOAD_BYTES = 1 * 1024 * 1024
 INTERACTION_TIMEOUT_MS = 300_000
-
-RUN_STARTED = "run.started"
-RUN_PROGRESS = "run.progress"
-SKILL_LOADED = "skill.loaded"
-CONTENT_DELTA = "content.delta"
-REASONING_DELTA = "reasoning.delta"
-TOOL_STARTED = "tool.started"
-TOOL_DELTA = "tool.delta"
-TOOL_COMPLETED = "tool.completed"
-CONTEXT_UPDATED = "context.updated"
-INTERACTION_RESOLVED = "interaction.resolved"
-RUN_COMPLETED = "run.completed"
-RUN_CANCELLED = "run.cancelled"
-RUN_FAILED = "run.failed"
 
 
 class RunError(RuntimeError):
@@ -123,6 +127,7 @@ class StartRun:
     thread_id: str
     run_id: str
     message: str
+    mode: InteractionMode
     requested_skill: RequestedSkill | None = None
     requested_primary_profile: str | None = None
     requested_approval_mode: ApprovalMode | None = None
@@ -133,12 +138,13 @@ class StartRun:
         return RunRef(self.thread_id, self.run_id)
 
     def fingerprint(self) -> tuple[object, ...]:
-        """返回幂等判断所需的请求指纹。"""
+        """返回幂等判断所需的请求指纹；工作模式冻结在 Run 身份内。"""
         skill = self.requested_skill
         return (
             self.thread_id,
             self.run_id,
             self.message,
+            self.mode,
             skill.skill_id if skill else None,
             skill.args if skill else None,
             self.requested_primary_profile,
@@ -209,6 +215,7 @@ class AgentEvent:
     execution_id: str
     agent_id: str
     parent_execution_id: str | None = None
+    compose_scope: Mapping[str, object] | None = None
 
     def record(self) -> dict[str, object]:
         """转换成现有 v3 event notification 使用的字段。"""
@@ -225,30 +232,9 @@ class AgentEvent:
         }
         if self.parent_execution_id is not None:
             record["parent_execution_id"] = self.parent_execution_id
+        if self.compose_scope is not None:
+            record["compose_scope"] = dict(self.compose_scope)
         return record
-
-
-@dataclass(frozen=True, slots=True)
-class InteractionRequest:
-    """Agent 请求 owner 审批或回答问题。"""
-
-    request_id: str
-    type: str
-    payload: Mapping[str, object]
-    interrupt_id: str
-    questions: tuple[Mapping[str, object], ...] = ()
-    action_count: int = 1
-    # 服务端串行审批元数据（完整动作列表与安全/危险索引），仅存内存、
-    # 不进入 wire payload：协议 schema 对 payload 附加字段零容忍。
-    serial_context: Mapping[str, object] | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class InteractionResult:
-    """InteractionPort 返回的语言无关结果。"""
-
-    value: object
-    expired: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,6 +327,8 @@ class RunState:
     pending_approvals: list[dict[str, object]] = field(default_factory=list)
     # 标记是否因用户拒绝而终止同批后续工具
     batch_rejected: bool = False
+    # Build 共享 execution stream 的关联状态；跨 Interaction resume 复用。
+    stream_session: Any | None = None
     # 与实际 RunContext 共享；Coordinator 只读取展示，文件提交仍使用 prepared plan。
     approval_presentations: ApprovalPresentationStore = field(
         default_factory=ApprovalPresentationStore
@@ -395,6 +383,173 @@ RuntimeProvider = Callable[[RunState], Awaitable[RunRuntime]]
 ContextUpdatesProvider = Callable[[str], list[Any]]
 
 
+class _CoordinatorLifecyclePort:
+    """把 RunCoordinator 的受控能力暴露给 execution adapter 的最小 port。
+
+    adapter 只能发非终态事件、请求 Interaction、刷新 Transcript、读取取消
+    状态与解析 Runtime；sequence 分配、终态和资源释放仍只属于 coordinator。
+    """
+
+    _TERMINAL_EVENTS = frozenset({RUN_COMPLETED, RUN_CANCELLED, RUN_FAILED})
+
+    def __init__(self, coordinator: RunCoordinator) -> None:
+        self._coordinator = coordinator
+
+    def emit(
+        self,
+        run: RunState,
+        event_type: str,
+        payload: Mapping[str, object],
+        *,
+        execution_id: str | None = None,
+        parent_execution_id: str | None = None,
+        agent_id: str | None = None,
+        compose_scope: Mapping[str, object] | None = None,
+    ) -> None:
+        """发非终态事件；adapter 试图自己发终态会被拒绝。
+
+        root/child activity 共用 Run sequence；可选 provenance 与
+        compose_scope 只影响展示归属，不改变终态 owner。
+        """
+        if event_type in self._TERMINAL_EVENTS:
+            raise RunError(
+                "ADAPTER_TERMINAL_VIOLATION",
+                "Terminal events belong to the RunCoordinator",
+            )
+        self._coordinator._emit(
+            run,
+            event_type,
+            payload,
+            execution_id=execution_id,
+            parent_execution_id=parent_execution_id,
+            agent_id=agent_id,
+            compose_scope=compose_scope,
+        )
+
+    def is_cancelled(self, run: RunState) -> bool:
+        """返回共享取消 token 与显式取消标记的并集。"""
+        return run.cancel_requested or run.cancellation_token.cancelled
+
+    def mark_running(self, run: RunState) -> None:
+        """由 Coordinator 执行 accepted/interacting → running 状态迁移。"""
+        if run.status not in {"accepted", "interacting", "running"}:
+            raise RunError(
+                "ADAPTER_RUN_STATE_VIOLATION",
+                f"cannot mark run as running from {run.status}",
+            )
+        run.status = "running"
+
+    async def start_execution(self, run: RunState) -> None:
+        """由 Managed executor 请求 root execution 的唯一 running 迁移。"""
+        try:
+            await self._coordinator._execution_registry.start(run.root_execution_ref)
+        except ExecutionRegistryError as exc:
+            if self.is_cancelled(run):
+                raise asyncio.CancelledError from exc
+            raise RunError("EXECUTION_START_FAILED", str(exc)) from exc
+
+    def append_transcript(self, run: RunState, record: TranscriptAppend) -> None:
+        """校验归属后把可见记录加入 Coordinator 管理的待写队列。"""
+        if record.thread_id != run.ref.thread_id or record.run_id != run.ref.run_id:
+            raise RunError(
+                "ADAPTER_TRANSCRIPT_IDENTITY_VIOLATION",
+                "transcript record does not belong to the active run",
+            )
+        run.pending_transcript.append(record)
+
+    async def resolve_runtime(self, run: RunState) -> RunRuntime:
+        """通过 coordinator 注入的 RuntimeProvider 解析本次执行资源。"""
+        return await self._coordinator._runtime_provider(run)
+
+    async def request_interaction(
+        self, run: RunState, spec: InteractionRequest
+    ) -> InteractionResult:
+        """请求 owner 回答问题；状态迁移与 resolved 事件由 coordinator 拥有。"""
+        run.status = "interacting"
+        result = await self._coordinator._interaction_port.request(
+            run.owner, run.ref, spec
+        )
+        run.status = "running"
+        self._coordinator._emit(
+            run,
+            INTERACTION_RESOLVED,
+            {"request_id": spec.request_id, "type": spec.type},
+            execution_id=spec.execution_id,
+            parent_execution_id=spec.parent_execution_id,
+            agent_id=spec.agent_id,
+            compose_scope=spec.compose_scope,
+        )
+        return result
+
+    async def request_question(
+        self,
+        run: RunState,
+        *,
+        request_id: str,
+        interrupt_id: str,
+        questions: list[dict[str, object]],
+    ) -> InteractionResult:
+        """构造 typed question 并请求 owner 回答（workflow 只传纯数据）。"""
+        spec = InteractionRequest(
+            request_id=request_id,
+            type="question",
+            payload={"interrupt_id": interrupt_id, "questions": questions},
+            interrupt_id=interrupt_id,
+            questions=[
+                {"question": str(question.get("question", ""))}
+                for question in questions
+            ],
+        )
+        return await self.request_interaction(run, spec)
+
+    async def request_approval(
+        self,
+        run: RunState,
+        *,
+        request_id: str,
+        interrupt_id: str,
+        description: str,
+        decisions: list[str],
+        action_requests: list[dict[str, object]],
+        execution_id: str | None = None,
+        parent_execution_id: str | None = None,
+        agent_id: str | None = None,
+        compose_scope: Mapping[str, object] | None = None,
+    ) -> InteractionResult:
+        """构造 typed approval 并请求 owner 决策（workflow 只传纯数据）。"""
+        spec = InteractionRequest(
+            request_id=request_id,
+            type="approval",
+            payload={
+                "interrupt_id": interrupt_id,
+                "description": description,
+                "requests": {"action_requests": action_requests},
+                "decisions": decisions,
+            },
+            interrupt_id=interrupt_id,
+            action_count=1,
+            execution_id=execution_id,
+            parent_execution_id=parent_execution_id,
+            agent_id=agent_id,
+            compose_scope=dict(compose_scope) if compose_scope is not None else None,
+        )
+        return await self.request_interaction(run, spec)
+
+    async def collect_serial_approvals(
+        self, run: RunState, spec: InteractionRequest
+    ) -> dict[str, object]:
+        """把串行工具审批收集委托回 coordinator（规则状态属于 coordinator）。"""
+        return await self._coordinator._collect_serial_approvals(run, spec)
+
+    def drain_context_updates(self, run: RunState) -> None:
+        """把当前已到达的上下文压缩事实发布为 context.updated。"""
+        self._coordinator._drain_context_updates(run)
+
+    async def flush_transcript(self, run: RunState) -> None:
+        """原子追加当前已完成语义边界的 Transcript 批次。"""
+        await self._coordinator._flush_transcript(run)
+
+
 class RunCoordinator:
     """集中拥有 Run registry、执行任务、Interaction 和终态清理。"""
 
@@ -409,6 +564,9 @@ class RunCoordinator:
         execution_registry: AgentExecutionRegistry | None = None,
         project_dir: Path | None = None,
         workspace_root_registry: Any | None = None,
+        compose_services_provider: (
+            Callable[[RunState], Awaitable[Any | None]] | None
+        ) = None,
     ) -> None:
         """注入 Project 资源 adapter，保持外部 Run interface 与 Protocol 解耦。"""
         self._persistence_provider = persistence_provider
@@ -422,6 +580,12 @@ class RunCoordinator:
         self._workspace_root_registry = workspace_root_registry
         # approve_thread 的会话级规则只保存在内存，不落盘
         self._session_rules: list[PermissionRule] = []
+        # Build adapter 常驻；Compose adapter 首次使用时才按 provider 组装。
+        self._execution_adapters: dict[str, RunExecutionAdapter] = {
+            "build": BuildRunAdapter(),
+        }
+        self._compose_services_provider = compose_services_provider
+        self._lifecycle_port = _CoordinatorLifecyclePort(self)
         self._runs: dict[str, RunState] = {}
         self._starting_runs: dict[str, ConnectionRef] = {}
         # maintenance 中的 Thread 拒绝受理新 Run，避免 watch/compact 与执行互相踩踏
@@ -494,11 +658,14 @@ class RunCoordinator:
                             message=command.message,
                             binding=binding,
                             context_snapshot=preparation.context_snapshot,
+                            mode=ThreadMode(command.mode),
                         )
                     )
                 except ThreadPersistenceError as exc:
                     if str(exc) == "RUN_EXECUTION_BINDING_CONFLICT":
                         raise RunError("RUN_ID_CONFLICT") from exc
+                    if str(exc) == "THREAD_MODE_LOCKED":
+                        raise RunError("THREAD_MODE_LOCKED") from exc
                     raise
                 if not acceptance.created:
                     await self._release_snapshot_reservation(preparation)
@@ -671,80 +838,67 @@ class RunCoordinator:
                 self._runs.pop(run.ref.thread_id, None)
         run.events.put_nowait(None)
 
+    async def _adapter_for(self, run: RunState) -> RunExecutionAdapter:
+        """返回 Run 对应的执行 adapter；Compose 依赖按 Run 上下文组装。"""
+        if run.start.mode != "compose":
+            existing = self._execution_adapters.get(run.start.mode)
+            if existing is not None:
+                return existing
+            adapter: RunExecutionAdapter = BuildRunAdapter()
+            self._execution_adapters[run.start.mode] = adapter
+            return adapter
+        services = None
+        if self._compose_services_provider is not None:
+            services = await self._compose_services_provider(run)
+        return ComposeRunAdapter(services)
     async def _execute(self, run: RunState) -> None:
         try:
             if run.cancel_requested or run.cancellation_token.cancelled:
                 self._finish(run, "cancelled", {"reason": "Cancelled by client"})
                 return
 
-            try:
-                await self._execution_registry.start(run.root_execution_ref)
-            except ExecutionRegistryError:
-                if run.cancel_requested or run.cancellation_token.cancelled:
-                    self._finish(run, "cancelled", {"reason": "Cancelled by client"})
-                    return
-                raise
+            # Build 的 root registry running 迁移属于 ManagedAgentExecutor；Compose
+            # 尚未迁移前保持原有 Coordinator 管理，避免两条路径双重 start。
+            if run.start.mode != "build":
+                try:
+                    await self._execution_registry.start(run.root_execution_ref)
+                except ExecutionRegistryError:
+                    if run.cancel_requested or run.cancellation_token.cancelled:
+                        self._finish(run, "cancelled", {"reason": "Cancelled by client"})
+                        return
+                    raise
 
-            started_payload: dict[str, object] = {
-                "resumed": False,
-                "skills_snapshot_id": run.preparation.skill_snapshot_id,
-            }
-            binding = run.preparation.execution_binding
-            if binding is not None:
-                started_payload["primary_model"] = binding.protocol_primary_model()
-                started_payload["runtime_profile_id"] = binding.runtime_profile_id
-            self._emit(run, RUN_STARTED, started_payload)
-            run.status = "running"
-            self._emit(run, RUN_PROGRESS, _run_progress_payload(run, "preparing"))
-
-            loaded = run.preparation.requested_skill
-            if loaded is not None:
-                if loaded.snapshot_id != run.preparation.skill_snapshot_id:
-                    raise RunError("RUN_PREPARATION_REQUESTED_SKILL_SNAPSHOT_MISMATCH")
-                self._emit(
+            adapter = await self._adapter_for(run)
+            outcome = await adapter.execute(run, self._lifecycle_port)
+            if outcome is None or outcome.status == "completed":
+                self._finish(
                     run,
-                    SKILL_LOADED,
+                    "completed",
                     {
-                        "skill_id": loaded.record.skill_id,
-                        "source": loaded.record.source,
-                        "version": loaded.record.version,
-                        "snapshot_id": loaded.snapshot_id,
+                        "usage": run.usage,
+                        "duration_ms": round((time.monotonic() - run.started_at) * 1000),
+                        "finish_reason": "completed",
+                        "context": run.context_summary,
                     },
                 )
-                run.message = (
-                    f"The user explicitly selected Skill `{loaded.record.skill_id}`. "
-                    f"Read `/.harness/skills/{loaded.record.skill_id}/SKILL.md` with read_file before using it.\n\n"
-                    f"User request:\n{run.message}"
+            elif outcome.status == "cancelled":
+                self._finish(
+                    run,
+                    "cancelled",
+                    {"reason": outcome.message or "Cancelled"},
                 )
-
-            run.runtime = await self._runtime_provider(run)
-            if run.cancel_requested or run.cancellation_token.cancelled:
-                raise asyncio.CancelledError
-            if run.runtime.agent is None:
-                self._emit(run, CONTENT_DELTA, {"text": run.message})
-                _queue_assistant_transcript(run, run.message)
             else:
-                resume: object | None = None
-                while True:
-                    resume = await self._stream_agent(run, resume)
-                    if resume is None:
-                        break
-
-            if run.persistence is not None:
-                _flush_assistant_transcript(run)
-                await self._flush_transcript(run)
-                await run.persistence.complete_run(run.ref.thread_id)
-            self._drain_context_updates(run)
-            self._finish(
-                run,
-                "completed",
-                {
-                    "usage": run.usage,
-                    "duration_ms": round((time.monotonic() - run.started_at) * 1000),
-                    "finish_reason": "completed",
-                    "context": run.context_summary,
-                },
-            )
+                self._finish(
+                    run,
+                    "failed",
+                    {
+                        "error": {
+                            "code": outcome.code or "ADAPTER_FAILED",
+                            "message": outcome.message,
+                            "retryable": outcome.retryable,
+                        }
+                    },
+                )
         except asyncio.CancelledError:
             self._finish(run, "cancelled", {"reason": "Cancelled by client"})
         except AgentEnginePoolCapacityError as exc:
@@ -756,6 +910,19 @@ class RunCoordinator:
                         "code": "RUNTIME_POOL_CAPACITY_EXHAUSTED",
                         "message": str(exc),
                         "retryable": True,
+                    }
+                },
+            )
+        except RunError as exc:
+            # 执行路径的领域错误使用稳定错误码收敛，不让模型文本充当终态码。
+            self._finish(
+                run,
+                "failed",
+                {
+                    "error": {
+                        "code": exc.code,
+                        "message": str(exc),
+                        "retryable": exc.retryable,
                     }
                 },
             )
@@ -879,10 +1046,15 @@ class RunCoordinator:
         payload: Mapping[str, object],
         *,
         terminal: bool = False,
+        execution_id: str | None = None,
+        parent_execution_id: str | None = None,
+        agent_id: str | None = None,
+        compose_scope: Mapping[str, object] | None = None,
     ) -> None:
         if run.terminal_event_emitted and not terminal:
             return
         run.sequence += 1
+        root = run.root_execution_ref
         run.events.put_nowait(
             AgentEvent(
                 event_id=str(uuid.uuid4()),
@@ -892,13 +1064,19 @@ class RunCoordinator:
                 sequence=run.sequence,
                 timestamp_ms=int(time.time() * 1000),
                 payload=dict(payload),
-                execution_id=run.root_execution_ref.execution_id,
-                agent_id=(
+                execution_id=execution_id or root.execution_id,
+                agent_id=agent_id
+                or (
                     run.root_execution.agent_id
                     if run.root_execution is not None
                     else "main"
                 ),
-                parent_execution_id=run.root_execution_ref.parent_execution_id,
+                parent_execution_id=(
+                    parent_execution_id
+                    if parent_execution_id is not None
+                    else root.parent_execution_id
+                ),
+                compose_scope=dict(compose_scope) if compose_scope is not None else None,
             )
         )
 
@@ -953,91 +1131,12 @@ class RunCoordinator:
         except ExecutionRegistryError:
             logger.exception("Unable to settle execution tree for run %s", run.run_id)
 
-    async def _stream_agent(self, run: RunState, resume: object | None) -> object | None:
-        from langchain_core.messages import HumanMessage
-        from langgraph.types import Command
-
-        runtime = run.runtime
-        if runtime is None or runtime.agent is None:
-            return None
-        self._emit(run, RUN_PROGRESS, _run_progress_payload(run, "model"))
-        if resume is not None and run.run_context is not None:
-            # Interaction resume is an explicit non-initial model phase.  The
-            # pressure middleware must not reinterpret the resume as a new
-            # idle top-level Run merely because the user took time to answer.
-            run.run_context.model_call_lifecycle.schedule("interaction_resume")
-        stream_input: Any = (
-            Command(resume=resume)
-            if resume is not None
-            else {"messages": [HumanMessage(content=run.message)]}
-        )
-        stream_kwargs: dict[str, Any] = {
-            "config": runtime.graph_config(run.ref.thread_id),
-            "stream_mode": ["messages", "updates"],
-            "subgraphs": True,
-        }
-        if runtime.run_context is not None:
-            stream_kwargs["context"] = runtime.run_context
-        async for event in runtime.agent.astream(stream_input, **stream_kwargs):
-            self._drain_context_updates(run)
-            interaction, auto_resume = _extract_interaction(
-                event,
-                needs_user_decision=lambda name, args: self._is_directory_trust_pending(
-                    run, name, args
-                ),
-            )
-            if auto_resume is not None:
-                # 全部是并发安全工具，直接放行
-                return auto_resume
-            if interaction is not None:
-                if interaction.type == "approval":
-                    # 多工具串行审批：interrupt 只能整体 resume 一次，
-                    # 由本地循环逐个收集决策，最后一次提交完整 decisions。
-                    return await self._collect_serial_approvals(run, interaction)
-                run.status = "interacting"
-                result = await self._interaction_port.request(
-                    run.owner,
-                    run.ref,
-                    interaction,
-                )
-                run.status = "running"
-                self._emit(
-                    run,
-                    INTERACTION_RESOLVED,
-                    {"request_id": interaction.request_id, "type": interaction.type},
-                )
-                return _resume_value(interaction, result.value)
-            chunk = _message_stream_chunk(event)
-            if chunk is not None:
-                complete_tool = _capture_transcript_message(run, chunk)
-                if complete_tool:
-                    # ToolMessage 到达时，前置 assistant 与完整 tool 结果已经
-                    # 越过内存 pending 边界；后续模型阶段即使阻塞也不应延迟
-                    # 这一个幂等 typed lifecycle 批次的提交。
-                    await self._flush_transcript(run)
-            for event_type, payload in _translate_stream_event(event, run):
-                self._emit(run, event_type, payload)
-        _flush_assistant_transcript(run)
-        await self._flush_transcript(run)
-        _finish_model_round(run)
-        return None
-
     def _drain_context_updates(self, run: RunState) -> None:
         updates = self._context_updates_provider(run.ref.thread_id)
         for update in updates:
             payload = update.payload() if hasattr(update, "payload") else dict(update)
             run.context_summary = payload
             self._emit(run, CONTEXT_UPDATED, payload)
-
-    def _is_directory_trust_pending(
-        self,
-        run: RunState,
-        tool_name: str,
-        tool_args: Mapping[str, object],
-    ) -> bool:
-        """判断中断动作是否为目录信任审批，供 interrupt 分类禁止自动放行。"""
-        presentation = run.approval_presentations.lookup(tool_name, tool_args)
-        return bool(presentation and presentation.get("kind") == "directory_trust")
 
     def _record_approval_rule(
         self,
@@ -1292,6 +1391,10 @@ class RunCoordinator:
                 run,
                 INTERACTION_RESOLVED,
                 {"request_id": spec.request_id, "type": spec.type},
+                execution_id=spec.execution_id,
+                parent_execution_id=spec.parent_execution_id,
+                agent_id=spec.agent_id,
+                compose_scope=spec.compose_scope,
             )
             response = result.value if isinstance(result.value, Mapping) else {}
             decision = str(response.get("decision") or "")
@@ -1313,183 +1416,6 @@ class RunCoordinator:
 
         run.pending_approvals = []
         return {interrupt_id: {"decisions": decisions}}
-
-
-_CONCURRENCY_SAFE_TOOLS = frozenset({
-    "ls", "read_file", "glob", "grep", "web_search",
-    "lsp", "tool_search", "memory_search", "task_output",
-    "ask_user", "write_todos", "memory_save",
-    "enter_plan_mode", "exit_plan_mode",
-})
-
-
-def _is_concurrency_safe(tool_name: str) -> bool:
-    """并发安全工具无需审批，可直接并行执行。"""
-    return tool_name in _CONCURRENCY_SAFE_TOOLS
-
-
-def _extract_interaction(
-    event: tuple[Any, ...],
-    *,
-    needs_user_decision: Callable[[str, Mapping[str, object]], bool] | None = None,
-) -> tuple[InteractionRequest | None, dict[str, object] | None]:
-    """从 DeepAgents updates 流提取首个 AskUser 或 HITL interrupt。
-
-    返回 (InteractionRequest, None) 表示需要用户交互；
-    返回 (None, dict) 表示全部并发安全工具，自动放行，dict 为 resume 值；
-    返回 (None, None) 表示没有交互需要处理。
-
-    ``needs_user_decision`` 由调用方按当前 Run 的审批展示判定某个中断动作
-    是否必须交给用户决策（目录信任卡片）；命中时即使工具并发安全也不自动放行。
-    """
-    if len(event) == 3:
-        namespace, stream_mode, data = event
-        # Protocol v3 has no execution/provenance field for child graph
-        # updates.  A non-empty namespace is therefore never a root
-        # interaction request; treating it as one would surface a child
-        # interrupt as a root approval/question.
-        if namespace:
-            return None, None
-    elif len(event) == 2:
-        stream_mode, data = event
-    else:
-        return None, None
-    if stream_mode != "updates" or not isinstance(data, Mapping):
-        return None, None
-    interrupts = data.get("__interrupt__")
-    if not interrupts:
-        return None, None
-    interrupt = (interrupts if isinstance(interrupts, (list, tuple)) else [interrupts])[0]
-    value = getattr(interrupt, "value", interrupt)
-    interrupt_id = str(getattr(interrupt, "id", uuid.uuid4()))
-    if isinstance(value, Mapping) and value.get("type") == "ask_user":
-        raw_questions = value.get("questions")
-        questions = tuple(q for q in raw_questions or [] if isinstance(q, Mapping))
-        normalized = []
-        for index, question in enumerate(questions):
-            options = [
-                {
-                    "label": str(choice.get("value", "")),
-                    "value": str(choice.get("value", "")),
-                    "description": "",
-                }
-                for choice in question.get("choices", [])
-                if isinstance(choice, Mapping) and choice.get("value")
-            ]
-            normalized.append(
-                {
-                    "id": f"question-{index + 1}",
-                    "question": str(question.get("question", "Agent needs input")),
-                    "header": "",
-                    "body": "",
-                    "options": options,
-                    "multi_select": False,
-                    "allow_other": True,
-                }
-            )
-        return (
-            InteractionRequest(
-                request_id=interrupt_id,
-                type="question",
-                payload={"interrupt_id": interrupt_id, "questions": normalized},
-                interrupt_id=interrupt_id,
-                questions=questions,
-            ),
-            None,
-        )
-
-    # --- 审批分支：分离并发安全与非并发安全工具 ---
-    description = "A tool execution requires approval"
-    safe_indices: list[int] = []
-    unsafe_indices: list[int] = []
-    action_requests_list: list[dict[str, object]] = []
-    if isinstance(value, Mapping):
-        action_requests = value.get("action_requests", [])
-        if isinstance(action_requests, list) and action_requests:
-            action_requests_list = [r for r in action_requests if isinstance(r, Mapping)]
-            for i, request in enumerate(action_requests_list):
-                tool_name = str(request.get("name", ""))
-                raw_args = request.get("args")
-                args_map = raw_args if isinstance(raw_args, Mapping) else {}
-                # 只读工具进入 interrupt 的唯一原因是目录信任审批；此时若仍按
-                # 并发安全自动放行，信任卡片会被静默跳过且信任不会注册，执行层
-                # 只能硬拒绝。因此需要用户决策的动作一律视为 unsafe。
-                if _is_concurrency_safe(tool_name) and not (
-                    needs_user_decision is not None
-                    and needs_user_decision(tool_name, args_map)
-                ):
-                    safe_indices.append(i)
-                else:
-                    unsafe_indices.append(i)
-
-            # 全部是并发安全工具 → 直接放行，不产生审批交互
-            if not unsafe_indices:
-                total = len(action_requests_list)
-                decisions: list[dict[str, object]] = [{"type": "approve"}] * total
-                auto_resume = {interrupt_id: {"decisions": decisions}}
-                return None, auto_resume
-
-            # 只取第一个非并发安全工具的描述
-            first_unsafe_index = unsafe_indices[0]
-            first_request = action_requests_list[first_unsafe_index]
-            description = str(first_request.get("description", description))
-
-    # 构造首个 unsafe 工具的审批请求；串行元数据（完整动作列表与索引）
-    # 放入 serial_context 由 _collect_serial_approvals 消费，wire payload
-    # 只保留协议 schema 允许的四个字段，附加字段会触发客户端 schema 校验
-    # 失败并导致整次审批静默降级为 reject。
-    current_unsafe_index = unsafe_indices[0] if unsafe_indices else 0
-    current_action_requests = []
-    if action_requests_list:
-        # 预览包含所有 safe 工具与当前要审批的 unsafe 工具
-        for i in safe_indices:
-            current_action_requests.append(action_requests_list[i])
-        current_action_requests.append(action_requests_list[current_unsafe_index])
-
-    return (
-        InteractionRequest(
-            request_id=interrupt_id,
-            type="approval",
-            payload={
-                "interrupt_id": interrupt_id,
-                "description": description,
-                "requests": _bounded_json({"action_requests": current_action_requests}),
-                "decisions": [
-                    "approve_once",
-                    "approve_thread",
-                    "approve_project",
-                    "reject",
-                    "reject_with_feedback",
-                ],
-            },
-            interrupt_id=interrupt_id,
-            action_count=1,  # 每次只审批一个工具
-            serial_context={
-                "all_action_requests": action_requests_list,
-                "safe_indices": safe_indices,
-                "unsafe_indices": unsafe_indices,
-            },
-        ),
-        None,
-    )
-
-
-def _resume_value(spec: InteractionRequest, response: object) -> dict[str, object]:
-    """将语言无关的提问结果映射回 LangGraph interrupt resume 契约。
-
-    审批类交互的 resume 值由 ``_collect_serial_approvals`` 串行收集后直接
-    构造；本函数仅处理 ask_user 提问。
-    """
-    if not isinstance(response, dict):
-        response = {}
-    answers_by_id = response.get("answers", {})
-    answers: list[str] = []
-    if isinstance(answers_by_id, Mapping):
-        for index, _question in enumerate(spec.questions):
-            values = answers_by_id.get(f"question-{index + 1}", [])
-            answers.append(str(values[0]) if isinstance(values, list) and values else "")
-    status = "answered" if any(answers) else "cancelled"
-    return {spec.interrupt_id: {"status": status, "answers": answers}}
 
 
 def _generate_permission_rule(
@@ -1539,644 +1465,3 @@ def _generate_permission_rule(
     else:
         resource = "*"
     return [PermissionRule(tool=tool_name, resource=resource, effect="allow")]
-
-
-def _message_stream_chunk(event: tuple[Any, ...]) -> object | None:
-    """从 messages stream 取出原始消息块，供 wire 截断前的语义捕获使用。"""
-    if len(event) == 3:
-        namespace, stream_mode, data = event
-        # ``subgraphs=True`` uses a non-empty namespace for child graph
-        # messages.  ZC-101 only owns the linear root Transcript; those
-        # messages are explicitly suppressed at the v3 adapter boundary until
-        # a later execution/provenance projection can represent them safely.
-        if namespace:
-            return None
-    elif len(event) == 2:
-        stream_mode, data = event
-    else:
-        return None
-    if stream_mode != "messages" or not isinstance(data, tuple) or not data:
-        return None
-    return data[0]
-
-
-def _capture_transcript_message(run: RunState, chunk: object) -> bool:
-    """在 1 MiB wire 截断前收集完整助手/工具语义，不收集 delta 事件。"""
-    chunk_type = type(chunk).__name__
-    if chunk_type in {"AIMessage", "AIMessageChunk"}:
-        _ensure_model_round_for_assistant(run)
-        full_tool_calls = getattr(chunk, "tool_calls", None)
-        if chunk_type == "AIMessage" and isinstance(full_tool_calls, list) and full_tool_calls:
-            for index, tool_call in enumerate(full_tool_calls):
-                if not isinstance(tool_call, Mapping):
-                    continue
-                _capture_full_tool_call(run, tool_call, index=index, source_message=chunk)
-        else:
-            for tool_chunk in getattr(chunk, "tool_call_chunks", None) or []:
-                if not isinstance(tool_chunk, Mapping):
-                    continue
-                tool_id = _resolve_tool_stream_id(
-                    run, tool_chunk, source_message=chunk
-                )
-                name = tool_chunk.get("name")
-                if name:
-                    run.tool_names[tool_id] = str(name)
-                _merge_assistant_tool_call(
-                    run,
-                    tool_id,
-                    name=name,
-                    arguments=tool_chunk.get("args"),
-                    is_full=False,
-                    call_type=tool_chunk.get("type"),
-                )
-        text = _message_text(chunk)
-        if not text and not run.assistant_tool_calls:
-            return False
-        # Provider chunk IDs are optional and may change between deltas.  The
-        # stream/tool boundary, not an ID, defines one complete assistant turn.
-        if text:
-            run.assistant_buffer.append(text)
-        run.last_captured_message = chunk
-        return False
-    if chunk_type != "ToolMessage":
-        return False
-    _flush_assistant_transcript(run)
-    tool_id = _resolve_tool_result_id(run, chunk)
-    run.pending_transcript.append(
-        TranscriptAppend(
-            thread_id=run.ref.thread_id,
-            record_id=f"run:{run.ref.run_id}:tool:{tool_id}",
-            kind="tool",
-            content=_content_text(getattr(chunk, "content", None)),
-            run_id=run.ref.run_id,
-            execution_id=run.root_execution_ref.execution_id,
-            tool_call_id=tool_id,
-            tool_name=run.tool_names.get(
-                tool_id, str(getattr(chunk, "name", None) or "tool")
-            ),
-            tool_status=(
-                "error" if getattr(chunk, "status", None) == "error" else "success"
-            ),
-        )
-    )
-    return True
-
-
-def _queue_assistant_transcript(
-    run: RunState,
-    content: str,
-    tool_calls: tuple[Mapping[str, object], ...] = (),
-) -> None:
-    """将一个完整助手回答排入当前 Run 的原子提交批次。"""
-    if not content and not tool_calls:
-        return
-    run.assistant_turn_count += 1
-    run.pending_transcript.append(
-        TranscriptAppend(
-            thread_id=run.ref.thread_id,
-            record_id=f"run:{run.ref.run_id}:assistant:{run.assistant_turn_count}",
-            kind="assistant",
-            content=content,
-            run_id=run.ref.run_id,
-            execution_id=run.root_execution_ref.execution_id,
-            tool_calls=tool_calls,
-        )
-    )
-
-
-def _flush_assistant_transcript(run: RunState) -> None:
-    """结束一个模型消息边界；只把非空完整文本转成助手记录。"""
-    content = "".join(run.assistant_buffer)
-    tool_calls = _finalize_assistant_tool_calls(run)
-    if content or tool_calls:
-        _queue_assistant_transcript(run, content, tool_calls)
-    run.assistant_buffer.clear()
-
-
-def _capture_full_tool_call(
-    run: RunState,
-    tool_call: Mapping[str, object],
-    *,
-    index: int,
-    source_message: object | None = None,
-) -> None:
-    """捕获完整 AIMessage.tool_calls，不从 ToolMessage 反推参数。"""
-    raw_id = tool_call.get("id")
-    tool_id = _resolve_tool_stream_id(
-        run,
-        {
-            "index": tool_call.get("index", index),
-            "id": raw_id,
-            "name": tool_call.get("name"),
-            "args": tool_call.get("args", tool_call.get("arguments")),
-        },
-        source_message=source_message,
-    )
-    name = tool_call.get("name")
-    if name:
-        run.tool_names[tool_id] = str(name)
-    _merge_assistant_tool_call(
-        run,
-        tool_id,
-        name=name,
-        arguments=tool_call.get("args", tool_call.get("arguments")),
-        is_full=True,
-        call_type=tool_call.get("type"),
-    )
-
-
-def _merge_assistant_tool_call(
-    run: RunState,
-    tool_id: str,
-    *,
-    name: object,
-    arguments: object,
-    is_full: bool,
-    call_type: object,
-) -> None:
-    """在当前模型回合内按稳定调用 ID 合并参数分片。"""
-    entry = run.assistant_tool_calls.setdefault(
-        tool_id,
-        {
-            "id": tool_id,
-            "name": str(name or run.tool_names.get(tool_id) or "tool"),
-            "_argument_fragments": [],
-            "_argument_invalid": False,
-            "_full_arguments_present": False,
-        },
-    )
-    if name:
-        entry["name"] = str(name)
-    if call_type:
-        entry["type"] = str(call_type)
-    if is_full:
-        entry["_full_arguments_present"] = True
-        entry["_full_arguments"] = arguments
-        entry["_argument_fragments"] = []
-        return
-    if entry.get("_full_arguments_present") or arguments in (None, ""):
-        return
-    fragments = entry.setdefault("_argument_fragments", [])
-    if isinstance(arguments, str):
-        fragments.append(arguments)
-    else:
-        try:
-            fragments.append(_canonical_tool_argument(arguments))
-        except (TypeError, ValueError):
-            # Preserve an explicit invalid marker instead of coercing a
-            # provider object to a string that could be mistaken for JSON.
-            fragments.append(repr(arguments))
-            entry["_argument_invalid"] = True
-
-
-def _finalize_assistant_tool_calls(
-    run: RunState,
-) -> tuple[Mapping[str, object], ...]:
-    """将当前 assistant 的完整/分片参数定型为可恢复的 typed payload。"""
-    calls: list[Mapping[str, object]] = []
-    for entry in run.assistant_tool_calls.values():
-        call: dict[str, object] = {
-            "id": str(entry.get("id") or ""),
-            "name": str(entry.get("name") or "tool"),
-        }
-        if entry.get("type") is not None:
-            call["type"] = str(entry["type"])
-        if entry.get("_full_arguments_present"):
-            _set_tool_call_arguments(call, entry.get("_full_arguments"), partial=False)
-        else:
-            fragments = entry.get("_argument_fragments")
-            raw = "".join(str(fragment) for fragment in fragments or ())
-            _set_tool_call_arguments(
-                call,
-                raw if raw else None,
-                partial=not bool(entry.get("_argument_invalid")),
-            )
-        calls.append(call)
-    run.assistant_tool_calls.clear()
-    return tuple(calls)
-
-
-def _set_tool_call_arguments(
-    call: dict[str, object],
-    value: object,
-    *,
-    partial: bool,
-) -> None:
-    """保留参数对象、原文和显式校验状态，供后续恢复层 fail closed。"""
-    if value is None:
-        call["arguments_status"] = "unavailable"
-        return
-    if isinstance(value, str):
-        call["arguments_raw"] = value
-        if not value:
-            call["arguments_status"] = "unavailable"
-            return
-        try:
-            parsed = json.loads(value)
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            call["arguments_status"] = "partial" if partial else "invalid"
-            call["arguments_error"] = type(exc).__name__
-            return
-    else:
-        parsed = value
-    try:
-        encoded = _canonical_tool_argument(parsed)
-        normalized = json.loads(encoded)
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        if not isinstance(value, str):
-            call["arguments_raw"] = repr(value)
-        call["arguments_status"] = "invalid"
-        call["arguments_error"] = type(exc).__name__
-        return
-    call["arguments"] = normalized
-    call["arguments_json"] = encoded
-    call["arguments_status"] = "valid" if isinstance(normalized, Mapping) else "invalid"
-
-
-def _canonical_tool_argument(value: object) -> str:
-    """以稳定 JSON 编码工具参数，避免把 provider 对象直接写入 Transcript。"""
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
-
-
-def _translate_stream_event(
-    event: tuple[Any, ...], run: RunState
-) -> Iterable[tuple[str, dict[str, object]]]:
-    """把 LangChain message stream 转换为统一领域事件。"""
-    if len(event) == 3:
-        namespace, stream_mode, data = event
-        if namespace:
-            # ZC-101 keeps root canonical/tool-correlation state separate from
-            # child graph state.  Child messages may still be observed by a
-            # future execution/provenance projection, but dropping them here
-            # is safer than mutating root IDs while preserving a v3 wire shape.
-            return []
-    elif len(event) == 2:
-        stream_mode, data = event
-    else:
-        return []
-    if stream_mode != "messages" or not isinstance(data, tuple) or not data:
-        return []
-    chunk = data[0]
-    if type(chunk).__name__ in {"AIMessage", "AIMessageChunk"}:
-        _ensure_model_round_for_assistant(run)
-    _update_usage(run, getattr(chunk, "usage_metadata", None))
-    events: list[tuple[str, dict[str, object]]] = []
-    content = _message_text(chunk)
-    if content and type(chunk).__name__ != "ToolMessage":
-        events.append((CONTENT_DELTA, {"text": content}))
-    reasoning = _reasoning_text(chunk)
-    if reasoning:
-        # 供应商明确返回的思维内容（如 Chat Completions reasoning_content）。
-        # 只走运行期事件，绝不进入 assistant 正文或 Transcript。
-        events.append((REASONING_DELTA, {"text": reasoning}))
-    elif (
-        type(chunk).__name__ in {"AIMessage", "AIMessageChunk"}
-        and not content
-        and not getattr(chunk, "tool_call_chunks", None)
-        and _has_reasoning_block(chunk)
-    ):
-        # Translator 也可能被独立调用（例如恢复/测试 seam），此时仍需给
-        # reasoning-only chunk 一个事实进度事件，而不是依赖 _stream_agent。
-        events.append((RUN_PROGRESS, _run_progress_payload(run, "model")))
-    for tool_chunk in getattr(chunk, "tool_call_chunks", None) or []:
-        tool_id = _resolve_tool_stream_id(run, tool_chunk, source_message=chunk)
-        if tool_chunk.get("name") and tool_id not in run.started_tool_ids:
-            run.started_tool_ids.add(tool_id)
-            events.append((TOOL_STARTED, {"tool_call_id": tool_id, "name": str(tool_chunk["name"])}))
-        if tool_chunk.get("args"):
-            arguments = _truncate_text(str(tool_chunk["args"]))
-            events.append(
-                (
-                    TOOL_DELTA,
-                    {
-                        "tool_call_id": tool_id,
-                        "arguments_delta": arguments[0],
-                        "truncated": arguments[1],
-                        "original_bytes": arguments[2],
-                    },
-                )
-            )
-    if type(chunk).__name__ == "ToolMessage":
-        result = _truncate_text(_content_text(getattr(chunk, "content", None)))
-        if run.last_tool_result_chunk is chunk and run.last_tool_result_id:
-            tool_id = run.last_tool_result_id
-        else:
-            tool_id = _resolve_tool_result_id(run, chunk)
-        events.append(
-            (
-                TOOL_COMPLETED,
-                {
-                    "tool_call_id": tool_id,
-                    "result": {
-                        "content": result[0],
-                        "is_error": getattr(chunk, "status", None) == "error",
-                        "truncated": result[1],
-                        "original_bytes": result[2],
-                    },
-                },
-            )
-        )
-    return events
-
-
-def _resolve_tool_stream_id(
-    run: RunState,
-    chunk: Mapping[str, Any],
-    *,
-    source_message: object | None = None,
-) -> str:
-    """为当前模型回合的工具续片建立稳定且不会跨回合复用的 ID。"""
-    _ensure_model_round_for_assistant(run)
-    index = chunk.get("index")
-    raw_id = str(chunk.get("id") or "")
-    if raw_id:
-        tool_id = run.tool_stream_ids.get(f"id:{raw_id}")
-        if tool_id is None and index is not None:
-            # 某些 provider 先发无 ID 分片、后发带 ID 分片；同一 index
-            # 仍属于同一调用，不能因 ID 后出现而拆成两条记录。
-            tool_id = run.tool_stream_ids.get(f"index:{index}")
-        if tool_id is None:
-            tool_id = _allocate_tool_id(run, raw_id)
-        run.tool_result_ids[raw_id] = tool_id
-        run.tool_stream_ids[f"id:{raw_id}"] = tool_id
-        if index is not None:
-            run.tool_stream_ids[f"index:{index}"] = tool_id
-    else:
-        key = f"index:{index}" if index is not None else "current"
-        tool_id = run.tool_stream_ids.get(key)
-        if (
-            tool_id is not None
-            and index is None
-            and not raw_id
-            and chunk.get("name")
-            and run.tool_names.get(tool_id)
-            and source_message is not run.last_captured_message
-        ):
-            raise RunError(
-                "TOOL_CALL_ID_UNAVAILABLE",
-                "Multiple ID-less tool calls without index cannot be associated safely",
-            )
-        if tool_id is None:
-            tool_id = _allocate_tool_id(run)
-            run.tool_stream_ids[key] = tool_id
-    run.last_tool_id = tool_id
-    return tool_id
-
-
-def _resolve_tool_result_id(run: RunState, chunk: object) -> str:
-    """把 ToolMessage 归属到当前回合，无法可靠关联时明确失败。"""
-    if not run.model_round_active:
-        _start_model_round(run)
-    result_id = str(getattr(chunk, "tool_call_id", "") or "")
-    if result_id:
-        tool_id = run.tool_result_ids.get(result_id)
-        if tool_id is None:
-            tool_id = run.tool_stream_ids.get(f"id:{result_id}")
-        if tool_id is None:
-            candidates = _current_tool_candidates(run)
-            if len(candidates) == 1:
-                candidate = next(iter(candidates))
-                if _candidate_has_provider_id(run, candidate):
-                    raise RunError(
-                        "TOOL_CALL_ID_UNAVAILABLE",
-                        "Tool result ID does not match the known provider call ID",
-                    )
-                # The only safe late-binding case is an assistant chunk whose
-                # call had no provider ID at all. Bind the result ID to that
-                # existing internal call, without inventing a call when no
-                # assistant declaration was observed.
-                tool_id = candidate
-            elif len(candidates) > 1:
-                raise RunError(
-                    "TOOL_CALL_ID_UNAVAILABLE",
-                    "Tool result cannot be associated with parallel calls without stable IDs",
-                )
-            else:
-                raise RunError(
-                    "TOOL_CALL_ID_UNAVAILABLE",
-                    "Tool result has no preceding assistant tool call",
-                )
-            run.tool_result_ids[result_id] = tool_id
-            run.tool_stream_ids[f"id:{result_id}"] = tool_id
-        run.seen_tool_provider_ids.add(result_id)
-    else:
-        candidates = _current_tool_candidates(run)
-        if len(candidates) != 1:
-            raise RunError(
-                "TOOL_CALL_ID_UNAVAILABLE",
-                "Tool result has no stable ID and cannot be associated safely",
-            )
-        tool_id = next(iter(candidates))
-        if tool_id in run.completed_tool_ids:
-            raise RunError(
-                "TOOL_CALL_ID_UNAVAILABLE",
-                "Multiple ID-less tool results cannot be associated safely",
-            )
-    run.completed_tool_ids.add(tool_id)
-    run.model_round_has_tool_results = True
-    run.last_tool_id = tool_id
-    run.last_tool_result_id = tool_id
-    run.last_tool_result_chunk = chunk
-    return tool_id
-
-
-def _current_tool_candidates(run: RunState) -> set[str]:
-    """返回当前模型回合去重后的工具调用候选。"""
-    return set(run.tool_stream_ids.values())
-
-
-def _candidate_has_provider_id(run: RunState, tool_id: str) -> bool:
-    """判断候选是否已经由 assistant 明确声明过 provider tool-call ID。"""
-    return any(
-        key.startswith("id:") and candidate == tool_id
-        for key, candidate in run.tool_stream_ids.items()
-    )
-
-
-def _allocate_tool_id(run: RunState, preferred: str | None = None) -> str:
-    """分配 Run 内单调唯一 ID，稳定 provider ID 只在首次出现时直接复用。"""
-    run.tool_call_ordinal += 1
-    if preferred and preferred not in run.seen_tool_provider_ids:
-        candidate = preferred
-    else:
-        candidate = f"tool-{run.ref.run_id}-{run.tool_call_ordinal}"
-    while candidate in run.allocated_tool_ids:
-        run.tool_call_ordinal += 1
-        candidate = f"tool-{run.ref.run_id}-{run.tool_call_ordinal}"
-    run.allocated_tool_ids.add(candidate)
-    if preferred:
-        run.seen_tool_provider_ids.add(preferred)
-    return candidate
-
-
-def _start_model_round(run: RunState) -> None:
-    """清理只属于当前模型/工具回合的临时映射。"""
-    run.model_round_active = True
-    run.model_round_has_tool_results = False
-    run.tool_stream_ids.clear()
-    run.tool_result_ids.clear()
-    run.tool_names.clear()
-    run.started_tool_ids.clear()
-    run.completed_tool_ids.clear()
-    run.assistant_tool_calls.clear()
-    run.last_tool_id = None
-    run.last_tool_result_id = None
-    run.last_tool_result_chunk = None
-    run.last_captured_message = None
-
-
-def _ensure_model_round_for_assistant(run: RunState) -> None:
-    """模型在收到上一回合工具结果后开始新回合并重置临时索引。"""
-    if not run.model_round_active or run.model_round_has_tool_results:
-        _start_model_round(run)
-
-
-def _finish_model_round(run: RunState) -> None:
-    """流正常结束后丢弃回合映射，但保留 Run 级 ordinal 和去重事实。"""
-    run.model_round_active = False
-    run.model_round_has_tool_results = False
-    run.tool_stream_ids.clear()
-    run.tool_result_ids.clear()
-    run.tool_names.clear()
-    run.started_tool_ids.clear()
-    run.completed_tool_ids.clear()
-    run.assistant_tool_calls.clear()
-    run.last_tool_id = None
-    run.last_tool_result_id = None
-    run.last_tool_result_chunk = None
-    run.last_captured_message = None
-
-
-def _update_usage(run: RunState, usage: Any) -> None:
-    """合并流式 usage，避免分片计数回退。"""
-    if not isinstance(usage, Mapping):
-        return
-    run.usage["input_tokens"] = max(
-        run.usage["input_tokens"], int(usage.get("input_tokens", 0) or 0)
-    )
-    run.usage["output_tokens"] = max(
-        run.usage["output_tokens"], int(usage.get("output_tokens", 0) or 0)
-    )
-
-
-def _truncate_text(value: str) -> tuple[str, bool, int]:
-    """按 UTF-8 字节安全截断工具输出，并保留原始大小。"""
-    encoded = value.encode("utf-8")
-    if len(encoded) <= MAX_TOOL_PAYLOAD_BYTES:
-        return value, False, len(encoded)
-    clipped = encoded[:MAX_TOOL_PAYLOAD_BYTES].decode("utf-8", errors="ignore")
-    return clipped, True, len(encoded)
-
-
-def _content_text(content: object) -> str:
-    """提取 LangChain 内容字段中的文本。"""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "".join(
-            item if isinstance(item, str) else str(item.get("text", ""))
-            for item in content
-            if isinstance(item, (str, Mapping))
-        )
-    return "" if content is None else str(content)
-
-
-def _message_text(message: object) -> str:
-    """只读取显式 text block；不透明 content_blocks 不得回退成正文。"""
-    blocks = getattr(message, "content_blocks", None)
-    if isinstance(blocks, list):
-        return "".join(
-            block["text"]
-            for block in blocks
-            if isinstance(block, Mapping)
-            and block.get("type") == "text"
-            and isinstance(block.get("text"), str)
-        )
-    content = getattr(message, "content", None)
-    if isinstance(content, list):
-        return "".join(
-            item
-            if isinstance(item, str)
-            else item["text"]
-            for item in content
-            if isinstance(item, str)
-            or (
-                isinstance(item, Mapping)
-                and item.get("type") == "text"
-                and isinstance(item.get("text"), str)
-            )
-        )
-    return _content_text(content)
-
-
-def _reasoning_text(message: object) -> str:
-    """提取供应商明确返回的思维文本，只用于运行期 reasoning.delta。
-
-    优先读取 Chat Completions 的 ``additional_kwargs.reasoning_content``
-    （由 gateway 适配器在 raw SSE 解析时注入）；其次兼容 content blocks 中
-    ``type=reasoning`` 的 ``text``/``reasoning`` 字段。提取结果不会进入
-    assistant 正文、日志或 Transcript。
-    """
-    kwargs = getattr(message, "additional_kwargs", None)
-    if isinstance(kwargs, dict):
-        value = kwargs.get("reasoning_content")
-        if isinstance(value, str) and value:
-            return value
-    blocks = getattr(message, "content_blocks", None)
-    if not isinstance(blocks, list):
-        blocks = getattr(message, "content", None)
-    if not isinstance(blocks, list):
-        return ""
-    parts: list[str] = []
-    for block in blocks:
-        if not isinstance(block, Mapping) or block.get("type") != "reasoning":
-            continue
-        text = block.get("text")
-        if not isinstance(text, str) or not text:
-            text = block.get("reasoning")
-        if isinstance(text, str) and text:
-            parts.append(text)
-    return "".join(parts)
-
-
-def _has_reasoning_block(message: object) -> bool:
-    """判断消息是否包含 reasoning block，但不读取其私有内容。"""
-    blocks = getattr(message, "content_blocks", None)
-    return isinstance(blocks, list) and any(
-        isinstance(block, Mapping) and block.get("type") == "reasoning"
-        for block in blocks
-    )
-
-
-def _run_progress_payload(run: RunState, phase: str) -> dict[str, object]:
-    """生成只包含事实阶段和活动时长的运行进度 payload。"""
-    safe_phase = phase if phase in {"preparing", "model"} else "preparing"
-    return {
-        "phase": safe_phase,
-        "elapsed_ms": max(0, round((time.monotonic() - run.started_at) * 1000)),
-    }
-
-
-def _json_safe(value: object) -> object:
-    """确保中断详情可 JSON 编码，复杂对象降级为字符串。"""
-    try:
-        json.dumps(value)
-    except TypeError:
-        return str(value)
-    return value
-
-
-def _bounded_json(value: object) -> object:
-    """限制交互详情的 JSON 大小，避免工具参数撑爆 stdio。"""
-    safe = _json_safe(value)
-    encoded = json.dumps(safe, ensure_ascii=False).encode("utf-8")
-    if len(encoded) <= MAX_TOOL_PAYLOAD_BYTES:
-        return safe
-    preview = encoded[:MAX_TOOL_PAYLOAD_BYTES].decode("utf-8", errors="ignore")
-    return {"truncated": True, "original_bytes": len(encoded), "preview": preview}

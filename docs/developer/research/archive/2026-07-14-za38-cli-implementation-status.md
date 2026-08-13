@@ -3,7 +3,7 @@
 > 历史资料：本文冻结于 2026-07-16，仅用于追溯当时实现状态，不作为当前架构、路径或任务状态依据。
 >
 > 更新时间：2026-07-16
-> 当前结论：已交付“OpenTUI → Bun CLI → Python sidecar → OpenAI 兼容网关”的可运行纵向切片，包含真实 AskUser/HITL 恢复；**完整 v0.1 尚未完成**。本文只记录已交付能力与实施交接；未完成任务的唯一来源为 `docs/developer/tasks/`，生成看板见 `docs/developer/tasks/任务看板.md`。TUI 复用取舍见 `docs/developer/research/TUI复用审计.md`。
+> 当前结论：已交付“OpenTUI → Bun CLI → Python sidecar → OpenAI 兼容网关”的可运行纵向切片，包含真实 AskUser/HITL 恢复；**完整 v0.1 尚未完成**。本文只记录已交付能力与实施交接；未完成任务的唯一来源为 `docs/developer/task/`，生成看板见 `docs/developer/task/任务看板.md`。TUI 复用取舍见 `docs/developer/research/TUI复用审计.md`。
 
 ## 已实现
 
@@ -25,13 +25,13 @@
 - Agent 保留现有 deepagents 文件工具、todo、task、HITL、ask_user、压缩与 QuickJS 组装逻辑；交互模式的写/编辑/删除等高风险工具明确只允许“批准/拒绝”，不会再意外自动批准。
 - 修正 Memory/Skills middleware：仅对真实存在的 za38 原生路径启用，避免空环境启动失败。
 
-### 可选远端执行（ZC-008 进行中）
+### 可选远端执行（HC-008 进行中）
 
 - 执行方式调整为 Qwen Code 风格：默认 `tools.sandbox = false`，继续使用本机 backend，并在 TUI 显示“本机执行 · 未隔离”；`cwd` 只表示默认目录，不宣称为安全边界。
 - 新增 `--sandbox`、`HARNESS_SANDBOX=true`、`[tools].sandbox` 和 `approval_mode`。只有显式开启时才导入企业远端 `sandbox.factory`；provider 不存在、认证失败或启动失败都会终止该 run，绝不降级为本机 shell。
 - `RemoteSandboxSettings` 支持 provider、factory、逻辑工作目录与不含秘密的 `sandbox.params`。工厂必须返回 deepagents `SandboxBackendProtocol` 并负责工作区同步、网络白名单、认证和生命周期。
 - 远端模式动态提示逻辑工作目录，禁用会在 Python sidecar 执行的 memory、skills 与 `js_eval`；本机工具环境显式不继承模型 API Key 等父进程环境变量。
-- 未交付企业 provider 的具体 API、Docker、Podman、容器镜像、远端同步/回写和企业审计出口；这些依赖企业平台资料，`ZC-008` 保持进行中。
+- 未交付企业 provider 的具体 API、Docker、Podman、容器镜像、远端同步/回写和企业审计出口；这些依赖企业平台资料，`HC-008` 保持进行中。
 
 ### CLI 与测试
 
@@ -91,7 +91,7 @@ HARNESS_RUN_LOOPBACK_E2E=1 bun test tests/gateway.integration.test.ts
 
 ## 待领取任务迁移
 
-此前 P0/P1/P2 待办已迁移为独立任务文件，避免本交接文档与任务系统维护两份状态。领取、阻塞、验收与完成状态请查看 [开发任务看板](../../tasks/任务看板.md)，并按 [开发工作流](../../project/开发工作流.md) 执行。
+此前 P0/P1/P2 待办已迁移为独立任务文件，避免本交接文档与任务系统维护两份状态。领取、阻塞、验收与完成状态请查看 [开发任务看板](../../task/任务看板.md)，并按 [开发工作流](../../project/开发工作流.md) 执行。
 
 当前能力的用户说明位于 `docs/user/`，架构与协作说明位于 `docs/developer/`；`.agent/` 继续只服务于实施计划和上下文交接。
 

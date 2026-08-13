@@ -2,20 +2,20 @@
 
 export const PROTOCOL_MAJOR = 3 as const
 export const PROTOCOL_MINOR = 4 as const
-export const PROTOCOL_SCHEMA_SHA256 = "62de9496989bf2dcd6e0328756811c9bd2289e2c687b09b97c16bab3bf74731c" as const
+export const PROTOCOL_SCHEMA_SHA256 = "7048d1734dcb6ed955d37552760a7efa5a54ef83bfce6bf11c36f5808c94ed58" as const
 export const MAX_FRAME_BYTES = 8388608 as const
 export const MAX_TOOL_PAYLOAD_BYTES = 1048576 as const
-export const CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","plugins.list","plugins.inspect","plugins.validate","plugins.install","plugins.set_enabled","plugins.remove","agents.list","agents.inspect","teams.list","teams.inspect","teams.generate","teams.run","teams.cancel","mcp.status","mcp.add","mcp.remove","host.attachment.create","host.attachment.revoke","host.control.acquire","host.control.release","host.control.status"] as const
-export const EVENT_TYPES = ["run.started","run.progress","skill.loaded","content.delta","reasoning.delta","tool.started","tool.delta","tool.completed","context.updated","interaction.resolved","run.completed","run.cancelled","run.failed"] as const
+export const CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","plugins.list","plugins.inspect","plugins.validate","plugins.install","plugins.set_enabled","plugins.remove","agents.list","agents.inspect","teams.list","teams.inspect","teams.generate","teams.run","teams.cancel","mcp.status","mcp.add","mcp.remove","host.attachment.create","host.attachment.revoke","host.control.acquire","host.control.release","host.control.status","compose.inspect","compose.abandon"] as const
+export const EVENT_TYPES = ["run.started","run.progress","skill.loaded","content.delta","reasoning.delta","tool.started","tool.delta","tool.completed","context.updated","compose.state","compose.summary","compose.work_item","compose.activity","interaction.resolved","run.completed","run.cancelled","run.failed"] as const
 export const INTERACTION_METHODS = ["interaction.approval","interaction.question","interaction.directory_trust"] as const
 export const SERVER_CAPABILITIES = ["run.cancel","run.multithread","host.control","config.read","config.write","threads.read","context.manage","skills.read","skills.manage","mcp.read","mcp.manage","plugins.read","plugins.manage","agents.read","teams.read","teams.manage","models.read","models.select","host.attach"] as const
-export const OPERATION_CAPABILITIES = {"initialize":null,"run.start":null,"run.cancel":"run.cancel","context.compact":"context.manage","config.show":"config.read","config.path":"config.read","config.details":"config.write","config.preview":"config.write","config.commit":"config.write","threads.list":"threads.read","threads.open":"threads.read","threads.watch":"threads.read","threads.unwatch":"threads.read","models.list":"models.read","skills.list":"skills.read","skills.inspect":"skills.read","skills.set_enabled":"skills.manage","skills.install":"skills.manage","skills.update":"skills.manage","skills.remove":"skills.manage","skills.market.list":"skills.read","plugins.list":"plugins.read","plugins.inspect":"plugins.read","plugins.validate":"plugins.read","plugins.install":"plugins.manage","plugins.set_enabled":"plugins.manage","plugins.remove":"plugins.manage","agents.list":"agents.read","agents.inspect":"agents.read","teams.list":"teams.read","teams.inspect":"teams.read","teams.generate":"teams.manage","teams.run":"teams.manage","teams.cancel":"teams.manage","mcp.status":"mcp.read","mcp.add":"mcp.manage","mcp.remove":"mcp.manage","host.attachment.create":"host.attach","host.attachment.revoke":"host.attach","host.control.acquire":"host.control","host.control.release":"host.control","host.control.status":"host.control"} as const
+export const OPERATION_CAPABILITIES = {"initialize":null,"run.start":null,"run.cancel":"run.cancel","context.compact":"context.manage","config.show":"config.read","config.path":"config.read","config.details":"config.write","config.preview":"config.write","config.commit":"config.write","threads.list":"threads.read","threads.open":"threads.read","threads.watch":"threads.read","threads.unwatch":"threads.read","models.list":"models.read","skills.list":"skills.read","skills.inspect":"skills.read","skills.set_enabled":"skills.manage","skills.install":"skills.manage","skills.update":"skills.manage","skills.remove":"skills.manage","skills.market.list":"skills.read","plugins.list":"plugins.read","plugins.inspect":"plugins.read","plugins.validate":"plugins.read","plugins.install":"plugins.manage","plugins.set_enabled":"plugins.manage","plugins.remove":"plugins.manage","agents.list":"agents.read","agents.inspect":"agents.read","teams.list":"teams.read","teams.inspect":"teams.read","teams.generate":"teams.manage","teams.run":"teams.manage","teams.cancel":"teams.manage","mcp.status":"mcp.read","mcp.add":"mcp.manage","mcp.remove":"mcp.manage","host.attachment.create":"host.attach","host.attachment.revoke":"host.attach","host.control.acquire":"host.control","host.control.release":"host.control","host.control.status":"host.control","compose.inspect":"threads.read","compose.abandon":"threads.read"} as const
 export const CONTROLLED_OPERATIONS = ["run.start","run.cancel","context.compact","config.preview","config.commit","skills.set_enabled","skills.install","skills.update","skills.remove","mcp.add","mcp.remove"] as const
 export const INTERACTION_HANDLES = {"interaction.approval":"approval","interaction.question":"question","interaction.directory_trust":"directory_trust"} as const
 export const ERROR_CODES = {"CONTROL_NOT_HOLDER":{"jsonrpcCode":-32008,"retryable":true},"CONTROL_BUSY":{"jsonrpcCode":-32008,"retryable":true},"CONTROL_RELEASE_BLOCKED":{"jsonrpcCode":-32008,"retryable":true},"ATTACHMENT_NOT_FOUND":{"jsonrpcCode":-32009,"retryable":false},"ATTACHMENT_NOT_ACTIVE":{"jsonrpcCode":-32009,"retryable":false},"CONNECTION_RUN_BUSY":{"jsonrpcCode":-32000,"retryable":true}} as const
 export type ErrorCode = keyof typeof ERROR_CODES
 export const Capability = {"RUN_CANCEL":"run.cancel","RUN_MULTITHREAD":"run.multithread","HOST_CONTROL":"host.control","CONFIG_READ":"config.read","CONFIG_WRITE":"config.write","THREADS_READ":"threads.read","CONTEXT_MANAGE":"context.manage","SKILLS_READ":"skills.read","SKILLS_MANAGE":"skills.manage","MCP_READ":"mcp.read","MCP_MANAGE":"mcp.manage","PLUGINS_READ":"plugins.read","PLUGINS_MANAGE":"plugins.manage","AGENTS_READ":"agents.read","TEAMS_READ":"teams.read","TEAMS_MANAGE":"teams.manage","MODELS_READ":"models.read","MODELS_SELECT":"models.select","HOST_ATTACH":"host.attach"} as const
-export const EventType = {"RUN_STARTED":"run.started","RUN_PROGRESS":"run.progress","SKILL_LOADED":"skill.loaded","CONTENT_DELTA":"content.delta","REASONING_DELTA":"reasoning.delta","TOOL_STARTED":"tool.started","TOOL_DELTA":"tool.delta","TOOL_COMPLETED":"tool.completed","CONTEXT_UPDATED":"context.updated","INTERACTION_RESOLVED":"interaction.resolved","RUN_COMPLETED":"run.completed","RUN_CANCELLED":"run.cancelled","RUN_FAILED":"run.failed"} as const
+export const EventType = {"RUN_STARTED":"run.started","RUN_PROGRESS":"run.progress","SKILL_LOADED":"skill.loaded","CONTENT_DELTA":"content.delta","REASONING_DELTA":"reasoning.delta","TOOL_STARTED":"tool.started","TOOL_DELTA":"tool.delta","TOOL_COMPLETED":"tool.completed","CONTEXT_UPDATED":"context.updated","COMPOSE_STATE":"compose.state","COMPOSE_SUMMARY":"compose.summary","COMPOSE_WORK_ITEM":"compose.work_item","COMPOSE_ACTIVITY":"compose.activity","INTERACTION_RESOLVED":"interaction.resolved","RUN_COMPLETED":"run.completed","RUN_CANCELLED":"run.cancelled","RUN_FAILED":"run.failed"} as const
 
 export const Method = {
   INITIALIZE: "initialize",
@@ -60,6 +60,8 @@ export const Method = {
   HOST_CONTROL_ACQUIRE: "host.control.acquire",
   HOST_CONTROL_RELEASE: "host.control.release",
   HOST_CONTROL_STATUS: "host.control.status",
+  COMPOSE_INSPECT: "compose.inspect",
+  COMPOSE_ABANDON: "compose.abandon",
   EVENT: "event",
   INTERACTION_APPROVAL: "interaction.approval",
   INTERACTION_QUESTION: "interaction.question",
@@ -87,9 +89,10 @@ export type InitializeResult = { "protocol": { "major": 3; "minor": number }; "s
 export type RequestedSkill = { "id": string; "args"?: string }
 export type ThreadModelSelection = { "primary_profile": string }
 export type ApprovalMode = "plan" | "default" | "auto-edit" | "auto" | "yolo"
+export type InteractionMode = "build" | "compose"
 export type ModelProfile = { "id": string; "model": string; "provider_label": string; "context_window_tokens": number; "capabilities": Array<string>; "is_default": boolean; "available": boolean; "unavailable_reason"?: string | null; "source": string }
 export type RunPrimaryModelBinding = { "profile": ModelProfile; "source": string; "runtime_profile_id": string }
-export type RunStartParams = { "message": string; "thread_id": string; "run_id": string; "requested_skill"?: RequestedSkill; "model_selection"?: ThreadModelSelection; "approval_mode"?: ApprovalMode }
+export type RunStartParams = { "mode": InteractionMode; "message": string; "thread_id": string; "run_id": string; "requested_skill"?: RequestedSkill; "model_selection"?: ThreadModelSelection; "approval_mode"?: ApprovalMode }
 export type RunStartResult = { "thread_id": string; "run_id": string; "accepted": true }
 export type RunCancelParams = { "thread_id": string; "run_id": string }
 export type RunCancelResult = { "cancelled": boolean; "run_id": string }
@@ -105,11 +108,12 @@ export type ConfigPreviewResult = { "revision": string; "changes": Array<ConfigC
 export type ConfigCommitResult = ConfigPreviewResult
 export type ConfigPathResult = { "workspace": string; "paths": Array<string>; "explicit_path": string | null }
 export type ThreadSummary = { "thread_id": string; "created_at_ms": number; "updated_at_ms": number; "first_message": string; "latest_message": string; "message_count": number }
+export type ComposeActivityRecord = { "run_id": string; "event_sequence": number; "activity_id": string; "stage": "understand" | "plan" | "build" | "verify" | "review"; "task_id"?: string; "task_title"?: string; "attempt": number; "execution_id"?: string; "agent_id"?: string; "kind": "summary" | "tool_terminal" | "truncation"; "label": string; "status": string; "bounded_text"?: string; "created_at_ms": number }
 export type ThreadMessage = { "kind": "user" | "assistant" | "tool"; "content": string; "tool_name"?: string }
 export type ThreadsListParams = { "limit"?: number }
 export type ThreadsListResult = { "threads": Array<ThreadSummary> }
 export type ThreadsOpenParams = { "thread_id": string }
-export type ThreadsOpenResult = { "thread": ThreadSummary; "messages": Array<ThreadMessage> }
+export type ThreadsOpenResult = { "thread": ThreadSummary; "messages": Array<ThreadMessage>; "compose_activities"?: Array<ComposeActivityRecord>; "thread_mode"?: (InteractionMode) | (null); "work_item"?: (ComposeWorkItemSnapshot) | (null) }
 export type ThreadsUnwatchResult = { "removed": boolean }
 export type ThreadModelBinding = { "state": "bound" | "legacy" | "unbound"; "roles": Record<string, ModelProfile> }
 export type ModelsListParams = { "thread_id"?: string }
@@ -151,8 +155,9 @@ export type HostAttachmentRevokeParams = { "attachment_id": string }
 export type HostAttachmentRevokeResult = { "attachment_id": string; "revoked": true; "control": ControlStatus }
 export type ControlHolder = { "connection_id": string; "role": "owner" | "attached"; "attachment_id": string | null }
 export type ControlStatus = { "state": "owner" | "attached" | "revoking"; "holder": ControlHolder }
-export type EventBase = { "event_id": string; "type": string; "thread_id": string; "run_id": string; "sequence": number; "timestamp_ms": number; "execution_id"?: string; "parent_execution_id"?: string | null; "agent_id"?: string; "payload": JsonObject }
-export type RunStartedPayload = { "resumed": boolean; "skills_snapshot_id"?: string | null; "primary_model"?: RunPrimaryModelBinding; "runtime_profile_id"?: string | null }
+export type ComposeActivityScope = { "activity_id": string; "stage": "understand" | "plan" | "build" | "verify" | "review"; "task_id"?: string; "task_title"?: string; "attempt": number }
+export type EventBase = { "event_id": string; "type": string; "thread_id": string; "run_id": string; "sequence": number; "timestamp_ms": number; "execution_id"?: string; "parent_execution_id"?: string | null; "agent_id"?: string; "compose_scope"?: ComposeActivityScope; "payload": JsonObject }
+export type RunStartedPayload = { "mode": InteractionMode; "resumed": boolean; "skills_snapshot_id"?: string | null; "primary_model"?: RunPrimaryModelBinding; "runtime_profile_id"?: string | null }
 export type RunProgressPayload = { "phase": "preparing" | "model"; "elapsed_ms": number }
 export type SkillLoadedPayload = { "skill_id": string; "source": string; "version": string | null; "snapshot_id": string }
 export type ContentDeltaPayload = { "text": string }
@@ -162,6 +167,16 @@ export type ToolDeltaPayload = { "tool_call_id": string; "arguments_delta"?: str
 export type ToolResult = { "content": string; "is_error": boolean; "truncated": boolean; "original_bytes": number }
 export type ToolCompletedPayload = { "tool_call_id": string; "result": ToolResult }
 export type ContextPayload = { "action": string; "estimated_tokens"?: number | null; "input_cap_tokens"?: number | null; "context_window_tokens"?: number | null; "dynamic_tokens"?: number | null; "cache_status"?: string | null; "cached_tokens"?: number | null; "miss_reason"?: string | null; "artifact_ids": Array<string> }
+export type ComposeSummaryPayload = { "status": "passed" | "failed" | "blocked" | "cancelled"; "text": string }
+export type ComposeStatePayload = { "revision": number; "stage": "understand" | "plan" | "build" | "verify" | "review"; "status": "running" | "waiting_user" | "blocked" | "completed" | "failed" | "cancelled"; "stages": Array<{ "id": "understand" | "plan" | "build" | "verify" | "review"; "status": "pending" | "running" | "waiting_user" | "passed" | "failed" | "cancelled" | "blocked"; "attempts": number }>; "tasks": Array<{ "id": string; "title": string; "status": "pending" | "running" | "passed" | "failed" | "cancelled" }>; "evidence": Array<{ "label": string; "status": "pending" | "running" | "passed" | "failed" | "cancelled" }>; "blocked_reason"?: string | null }
+export type ComposeWorkItemSnapshot = { "work_item_id": string; "slug": string; "title": string; "revision": number; "status": "active" | "waiting_user" | "blocked" | "completed" | "abandoned"; "current_activity": string; "pending_decision": string | null; "blocked_reason": string | null }
+export type ComposeReadinessSnapshot = { "task_confirmed": boolean; "spec_confirmed": boolean; "plan_confirmed": boolean; "todo_executable": boolean; "implementation_current": boolean; "verification_fresh": boolean; "review_fresh": boolean; "report_current": boolean; "complete": boolean }
+export type ComposeInspectParams = { "thread_id": string; "work_item_id"?: string }
+export type ComposeInspectResult = { "work_item": (ComposeWorkItemSnapshot) | (null) }
+export type ComposeAbandonParams = { "thread_id": string; "work_item_id": string; "expected_revision": number; "reason"?: string }
+export type ComposeAbandonResult = { "work_item": ComposeWorkItemSnapshot }
+export type ComposeWorkItemPayload = { "thread_id": string; "work_item": ComposeWorkItemSnapshot }
+export type ComposeActivityPayload = { "thread_id": string; "work_item_id": string; "activity_id": string; "kind": string; "status": string; "attempt": number }
 export type InteractionResolvedPayload = { "request_id": string; "type": "approval" | "question" | "directory_trust" }
 export type Usage = { "input_tokens": number; "output_tokens": number }
 export type RunCompletedPayload = { "usage": Usage; "duration_ms": number; "finish_reason": string; "context": JsonObject }
@@ -173,10 +188,10 @@ export type FileDiffPresentation = { "kind": "file_diff"; "operation": "write" |
 export type DirectoryTrustDecision = "allow_session" | "deny"
 export type DirectoryTrustRequest = { "thread_id": string; "run_id": string; "timeout_ms": number; "payload": { "interrupt_id": string; "directory": string; "target_path": string; "tool_name": string; "access": "read" | "write"; "shadows_workspace": boolean; "decisions": Array<DirectoryTrustDecision> } }
 export type DirectoryTrustResponse = { "decision": DirectoryTrustDecision }
-export type ApprovalRequest = { "thread_id": string; "run_id": string; "timeout_ms": number; "payload": { "interrupt_id": string; "description": string; "requests": JsonValue; "decisions": Array<"approve_once" | "approve_thread" | "approve_project" | "reject" | "reject_with_feedback">; "presentation"?: FileDiffPresentation } }
+export type ApprovalRequest = { "thread_id": string; "run_id": string; "timeout_ms": number; "execution_id"?: string; "parent_execution_id"?: string | null; "agent_id"?: string; "compose_scope"?: ComposeActivityScope; "payload": { "interrupt_id": string; "description": string; "requests": JsonValue; "decisions": Array<"approve_once" | "approve_thread" | "approve_project" | "reject" | "reject_with_feedback">; "presentation"?: FileDiffPresentation } }
 export type ApprovalResponse = { "decision": "approve_once" | "approve_thread" | "approve_project" | "reject" | "reject_with_feedback"; "feedback"?: string }
 export type Question = { "id": string; "question": string; "header": string; "body": string; "options": Array<{ "label": string; "value": string; "description": string }>; "multi_select": boolean; "allow_other": boolean }
-export type QuestionRequest = { "thread_id": string; "run_id": string; "timeout_ms": number; "payload": { "interrupt_id": string; "questions": Array<Question> } }
+export type QuestionRequest = { "thread_id": string; "run_id": string; "timeout_ms": number; "execution_id"?: string; "parent_execution_id"?: string | null; "agent_id"?: string; "compose_scope"?: ComposeActivityScope; "payload": { "interrupt_id": string; "questions": Array<Question> } }
 export type QuestionResponse = { "answers": Record<string, Array<string>> }
 export type ProtocolErrorData = { "code": string; "retryable": boolean; "capability"?: string; "details"?: JsonValue }
 
@@ -259,6 +274,8 @@ export interface OperationMap {
   "host.control.acquire": { params: HostControlAcquireParams; result: HostControlAcquireResult }
   "host.control.release": { params: HostControlReleaseParams; result: HostControlReleaseResult }
   "host.control.status": { params: HostControlStatusParams; result: HostControlStatusResult }
+  "compose.inspect": { params: ComposeInspectParams; result: ComposeInspectResult }
+  "compose.abandon": { params: ComposeAbandonParams; result: ComposeAbandonResult }
 }
 export type OperationName = keyof OperationMap
 
@@ -272,6 +289,7 @@ export type AgentEventOf<T extends string, P> = {
   execution_id?: string
   parent_execution_id?: string | null
   agent_id?: string
+  compose_scope?: ComposeActivityScope
   payload: P
 }
 export type AgentEvent =
@@ -284,6 +302,10 @@ export type AgentEvent =
   | AgentEventOf<"tool.delta", ToolDeltaPayload>
   | AgentEventOf<"tool.completed", ToolCompletedPayload>
   | AgentEventOf<"context.updated", ContextPayload>
+  | AgentEventOf<"compose.state", ComposeStatePayload>
+  | AgentEventOf<"compose.summary", ComposeSummaryPayload>
+  | AgentEventOf<"compose.work_item", ComposeWorkItemPayload>
+  | AgentEventOf<"compose.activity", ComposeActivityPayload>
   | AgentEventOf<"interaction.resolved", InteractionResolvedPayload>
   | AgentEventOf<"run.completed", RunCompletedPayload>
   | AgentEventOf<"run.cancelled", RunCancelledPayload>

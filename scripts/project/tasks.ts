@@ -1,14 +1,31 @@
 /**
  * 任务源、状态流转和只读看板。
+ *
+ * 约定见 AGENTS.md：
+ * - 活动任务：docs/developer/task/HC-XXX-功能简介.md
+ * - 已完成归档：docs/developer/task/archive/
+ * - 看板：docs/developer/task/任务看板.md
  */
 
-import { readFile, readdir, writeFile } from "node:fs/promises"
+import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises"
 import { basename, dirname, extname, join, relative, resolve } from "node:path"
 
 const root = resolve(import.meta.dir, "../..")
 
+export const TASK_DIR = "docs/developer/task"
+export const TASK_ARCHIVE_DIR = `${TASK_DIR}/archive`
+export const TASK_BOARD_PATH = `${TASK_DIR}/任务看板.md`
+
+/** 任务 ID：HC-001 或历史 HC-098-legacy */
+export const TASK_ID_PATTERN = /^HC-\d{3,}(?:-legacy)?$/
+/** 引用扫描用：HC-001 / HC-098-legacy */
+export const TASK_ID_MATCH_GLOBAL = /\bHC-\d{3,}(?:-legacy)?\b/g
+
 export const TASK_STATUSES = ["待认领", "进行中", "阻塞", "待验收", "已完成", "已过时"] as const
 export const TASK_PRIORITIES = ["P0", "P1", "P2"] as const
+
+/** 功能简介最长 15 个 Unicode 字元（中文按字计）。 */
+export const TASK_BRIEF_MAX_CHARS = 15
 
 const REQUIRED_TASK_FIELDS = [
   "id",
@@ -71,6 +88,42 @@ export type TaskRecord = {
   body: string
 }
 
+/** 从 title 生成文件名用的功能简介（≤15 字，去掉路径不安全字符）。 */
+export function taskBriefFromTitle(title: string, maxChars = TASK_BRIEF_MAX_CHARS): string {
+  const cleaned = title
+    .normalize("NFKC")
+    .replace(/[/\\:*?"<>|]/g, "")
+    .replace(/\s+/g, "")
+    .trim()
+  if (!cleaned) throw new Error("任务 title 无法生成功能简介")
+  const brief = [...cleaned].slice(0, maxChars).join("")
+  if (!brief) throw new Error("任务 title 无法生成功能简介")
+  return brief
+}
+
+/** 规范任务文件名：HC-XXX-功能简介.md */
+export function taskFileName(id: string, title: string): string {
+  if (!TASK_ID_PATTERN.test(id)) throw new Error(`任务 id 必须形如 HC-001：${id}`)
+  return `${id}-${taskBriefFromTitle(title)}.md`
+}
+
+/** 解析活动/归档任务文件名；必须带功能简介。 */
+export function parseTaskFileName(fileName: string): { id: string, brief: string } {
+  const match = fileName.match(/^(HC-\d{3,}(?:-legacy)?)-(.+)\.md$/)
+  if (!match) {
+    throw new Error(`${fileName} 不符合 HC-XXX-功能简介.md 命名（必须含功能简介）`)
+  }
+  const id = match[1]
+  const brief = match[2]
+  if (![...brief].length || [...brief].length > TASK_BRIEF_MAX_CHARS) {
+    throw new Error(`${fileName} 的功能简介须为 1～${TASK_BRIEF_MAX_CHARS} 个字`)
+  }
+  if (/[/\\:*?"<>|]/.test(brief)) {
+    throw new Error(`${fileName} 的功能简介包含非法字符`)
+  }
+  return { id, brief }
+}
+
 /** 读取固定格式的任务 front matter，并保留任务正文供后续人工维护。 */
 export function parseTaskDocument(source: string, file: string): TaskRecord {
   const match = source.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/)
@@ -98,17 +151,31 @@ export function parseTaskDocument(source: string, file: string): TaskRecord {
   return { file, metadata, body: match[2] }
 }
 
-/** 校验任务状态机、认领信息和完成证据，阻止不完整事项进入看板。 */
+/** 校验任务状态机、认领信息、完成证据与文件命名。 */
 export function validateTask(task: TaskRecord): void {
   const { metadata } = task
-  if (!/^ZC-\d{3,}$/.test(metadata.id)) throw new Error(`${task.file} 的 id 必须形如 ZC-001`)
+  if (!TASK_ID_PATTERN.test(metadata.id)) {
+    throw new Error(`${task.file} 的 id 必须形如 HC-001 或 HC-001-legacy`)
+  }
+
+  const fileName = basename(task.file)
+  let parsed: { id: string, brief: string }
+  try {
+    parsed = parseTaskFileName(fileName)
+  } catch (error) {
+    throw new Error(`${task.file}：${error instanceof Error ? error.message : String(error)}`)
+  }
+  if (parsed.id !== metadata.id) {
+    throw new Error(`${task.file} 文件名中的 id（${parsed.id}）与 front matter id（${metadata.id}）不一致`)
+  }
+
   if (!TASK_PRIORITIES.includes(metadata.priority as typeof TASK_PRIORITIES[number])) {
     throw new Error(`${task.file} 的 priority 必须为 ${TASK_PRIORITIES.join("/")}`)
   }
   if (!TASK_STATUSES.includes(metadata.status as typeof TASK_STATUSES[number])) {
     throw new Error(`${task.file} 的 status 无效：${metadata.status}`)
   }
-  if (metadata.parent_task !== "-" && !/^ZC-\d{3,}$/.test(metadata.parent_task)) {
+  if (metadata.parent_task !== "-" && !TASK_ID_PATTERN.test(metadata.parent_task)) {
     throw new Error(`${task.file} 的 parent_task 必须为任务 ID 或 -`)
   }
   validateReviewDates(task)
@@ -141,14 +208,24 @@ export function renderTaskDocument(task: TaskRecord): string {
   return `---\n${frontMatter}\n---\n${task.body.trimEnd()}\n`
 }
 
-/** 从任务目录读取全部 Markdown 任务，并保证任务 ID 唯一。 */
+function isTaskCandidateFile(fileName: string): boolean {
+  // README / 任务看板不是任务源；其余 HC- 前缀 Markdown 都必须符合命名规范。
+  return fileName.startsWith("HC-") && fileName.endsWith(".md")
+}
+
+/** 从任务目录读取全部活动 Markdown 任务，并保证任务 ID 唯一。 */
 export async function loadTasks(projectRoot = root): Promise<TaskRecord[]> {
-  const directory = join(projectRoot, "docs/developer/tasks")
+  const directory = join(projectRoot, TASK_DIR)
   // 只加载任务目录根部的活动任务；archive 只保留审计记录，不应重新进入看板或认领流程。
-  const files = (await listMarkdownFiles(directory)).filter(file => /^ZC-\d{3,}\.md$/.test(basename(file)) && dirname(file) === directory)
+  const files = (await listMarkdownFiles(directory)).filter(
+    file => isTaskCandidateFile(basename(file)) && dirname(file) === directory,
+  )
   const tasks = await Promise.all(files.map(async file => parseTaskDocument(await readFile(file, "utf8"), relative(projectRoot, file))))
   const ids = new Set<string>()
   for (const task of tasks) {
+    if (task.metadata.status === "已完成") {
+      throw new Error(`${task.file} 状态为已完成，应位于 ${TASK_ARCHIVE_DIR}/，请移入归档后再同步`)
+    }
     validateTask(task)
     if (ids.has(task.metadata.id)) throw new Error(`任务 ID 重复：${task.metadata.id}`)
     ids.add(task.metadata.id)
@@ -173,7 +250,7 @@ export function renderTaskBoard(tasks: readonly TaskRecord[]): string {
     "<!-- 此文件由 `bun run tasks:sync` 生成，请勿手动编辑。 -->",
     "# 任务看板",
     "",
-    "活动任务文件位于 `docs/developer/tasks/`；已完成任务归档于 `docs/developer/tasks/archive/`，不进入看板。认领请使用 `bun run task:claim -- <ID> --owner <名称> --branch <分支>`；完成请使用 `bun run task:complete` 并提供测试证据。",
+    `活动任务文件位于 \`${TASK_DIR}/\`（命名 \`HC-XXX-功能简介.md\`）；已完成任务归档于 \`${TASK_ARCHIVE_DIR}/\`，不进入看板。流程：task → spec → plan → todo → implement → review。认领：\`bun run task:claim -- <ID> --owner <名称> --branch <分支>\`；完成：\`bun run task:complete\` 并提供测试证据。`,
     "",
     "| ID | 优先级 | 状态 | 标题 | 功能归属 | 责任人 | 分支 | 下次复核 | 文档影响 |",
     "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
@@ -185,14 +262,16 @@ export function renderTaskBoard(tasks: readonly TaskRecord[]): string {
 /** 同步任务看板文件，供提交前和任务状态变更后调用。 */
 export async function syncTasks(projectRoot = root): Promise<void> {
   const tasks = await loadTasks(projectRoot)
-  await writeFile(join(projectRoot, "docs/developer/tasks/任务看板.md"), renderTaskBoard(tasks), "utf8")
+  const boardPath = join(projectRoot, TASK_BOARD_PATH)
+  await mkdir(dirname(boardPath), { recursive: true })
+  await writeFile(boardPath, renderTaskBoard(tasks), "utf8")
 }
 
 /** 验证已提交的任务看板与任务源一致，防止生成文件过期。 */
 export async function checkTasks(projectRoot = root): Promise<void> {
   const tasks = await loadTasks(projectRoot)
   const expected = renderTaskBoard(tasks)
-  const board = await readFile(join(projectRoot, "docs/developer/tasks/任务看板.md"), "utf8")
+  const board = await readFile(join(projectRoot, TASK_BOARD_PATH), "utf8")
   if (board !== expected) throw new Error("任务看板已过期，请运行 bun run tasks:sync")
 }
 
@@ -210,7 +289,10 @@ export async function claimTask(projectRoot: string, id: string, owner: string, 
   await syncTasks(projectRoot)
 }
 
-/** 记录完成证据并关闭任务；文档影响由任务文件本身作为审计记录。 */
+/**
+ * 记录完成证据并关闭任务，随后移入 archive/。
+ * 文档影响由任务文件本身作为审计记录。
+ */
 export async function completeTask(projectRoot: string, id: string, evidence: string, references?: string): Promise<void> {
   if (!evidence.trim()) throw new Error("完成任务必须提供 --evidence 测试证据")
   const task = await findTask(projectRoot, id)
@@ -227,6 +309,7 @@ export async function completeTask(projectRoot: string, id: string, evidence: st
   task.metadata.reviewed_at = today()
   task.metadata.review_due = "-"
   await saveTask(projectRoot, task)
+  await archiveTaskFile(projectRoot, task)
   await syncTasks(projectRoot)
 }
 
@@ -237,16 +320,46 @@ async function findTask(projectRoot: string, id: string): Promise<TaskRecord> {
   return task
 }
 
+/** 将已完成任务文件移入归档目录，并从活动目录移除。 */
+async function archiveTaskFile(projectRoot: string, task: TaskRecord): Promise<void> {
+  const source = join(projectRoot, task.file)
+  const archiveDirectory = join(projectRoot, TASK_ARCHIVE_DIR)
+  await mkdir(archiveDirectory, { recursive: true })
+  const destination = join(archiveDirectory, basename(task.file))
+  await rename(source, destination)
+  task.file = relative(projectRoot, destination)
+}
+
 /** 读取归档任务 ID，使历史文档可以继续互相引用，但不参与活动任务流程。 */
 export async function loadArchivedTaskIds(projectRoot: string): Promise<Set<string>> {
-  const directory = join(projectRoot, "docs/developer/tasks/archive")
-  const files = (await listMarkdownFiles(directory)).filter(file => /^ZC-\d{3,}\.md$/.test(basename(file)))
+  const directory = join(projectRoot, TASK_ARCHIVE_DIR)
+  const files = (await listMarkdownFiles(directory)).filter(file => isTaskCandidateFile(basename(file)))
   const tasks = await Promise.all(files.map(async file => parseTaskDocument(await readFile(file, "utf8"), relative(projectRoot, file))))
-  tasks.forEach(validateTask)
+  for (const task of tasks) {
+    validateTask(task)
+  }
   return new Set(tasks.map(task => task.metadata.id))
 }
 
 async function saveTask(projectRoot: string, task: TaskRecord): Promise<void> {
+  const expectedName = taskFileName(task.metadata.id, task.metadata.title)
+  const currentName = basename(task.file)
+  const directory = dirname(join(projectRoot, task.file))
+  // title 变更时同步文件名，保持 HC-XXX-功能简介 与 title 一致。
+  if (currentName !== expectedName) {
+    const nextPath = join(directory, expectedName)
+    const previousPath = join(projectRoot, task.file)
+    await writeFile(nextPath, renderTaskDocument(task), "utf8")
+    if (previousPath !== nextPath) {
+      try {
+        await unlink(previousPath)
+      } catch (error) {
+        if (!isNotFound(error)) throw error
+      }
+    }
+    task.file = relative(projectRoot, nextPath)
+    return
+  }
   await writeFile(join(projectRoot, task.file), renderTaskDocument(task), "utf8")
 }
 

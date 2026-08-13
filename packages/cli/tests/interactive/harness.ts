@@ -69,7 +69,9 @@ export function manualScheduler() {
 }
 
 /** 内存 port：记录调用、可注入 Run 事件与 Interaction。 */
-function createPort() {
+function createPort(options: {
+  compactContextImpl?: InteractiveAgentPort["compactContext"]
+} = {}) {
   const calls: string[] = []
   const runHandles: Array<{ threadId: string; runId: string }> = []
   let protocolErrorListener: ((error: Error) => void) | undefined
@@ -89,10 +91,8 @@ function createPort() {
     diagnostics: [],
   }
   let setSkillEnabledImpl: (skillId: string, enabled: boolean) => Promise<Record<string, never>> = async () => ({})
-  let compactContextImpl: () => Promise<{ compacted: boolean; context: { action: string } }> = async () => ({
-    compacted: true,
-    context: { action: "manual_summary" },
-  })
+  let compactContextImpl: InteractiveAgentPort["compactContext"] = options.compactContextImpl
+    ?? (async () => ({ compacted: true, context: { action: "manual_summary" } }))
 
   const port: InteractiveAgentPort & {
     emitEvent: (event: EventEnvelope) => void
@@ -107,8 +107,8 @@ function createPort() {
     setThreadSelection: (next: string | null) => void
     setSkillsList: (next: { skills: ReturnType<typeof skill>[] }) => void
     setSkillEnabledImpl: (impl: (skillId: string, enabled: boolean) => Promise<Record<string, never>>) => void
-    setCompactContextImpl: (impl: () => Promise<{ compacted: boolean; context: { action: string } }>) => void
-    lastRunSelection: () => { message: string; threadId: string; runId: string; modelSelection?: { primary_profile: string }; requestedSkill?: { id: string; args?: string } } | undefined
+    setCompactContextImpl: (impl: InteractiveAgentPort["compactContext"]) => void
+    lastRunSelection: () => { message: string; threadId: string; runId: string; mode: "build" | "compose"; modelSelection?: { primary_profile: string }; requestedSkill?: { id: string; args?: string } } | undefined
   } = {
     onProtocolError(listener) {
       protocolErrorListener = listener
@@ -145,9 +145,9 @@ function createPort() {
       const run = runHandles.at(-1)!
       return { cancelled: true, run_id: run.runId }
     },
-    async compactContext() {
+    async compactContext(threadId) {
       calls.push("context.compact")
-      return compactContextImpl()
+      return compactContextImpl(threadId)
     },
     async configDetails() {
       calls.push("config.details")
@@ -250,6 +250,7 @@ function createPort() {
         message: runStates.get(keyOf(run))?.input.message ?? "",
         threadId: run.threadId,
         runId: run.runId,
+        mode: runStates.get(keyOf(run))?.input.mode ?? "build",
         modelSelection: runSelection(run),
         requestedSkill: runSkill(run),
         approvalMode: runStates.get(keyOf(run))?.input.approvalMode,
@@ -360,8 +361,9 @@ export function makeHarness(options: {
   holdConfigDetails?: boolean
   scheduler?: InteractiveScheduler
   capabilities?: Capability[]
+  compactContextImpl?: InteractiveAgentPort["compactContext"]
 } = {}) {
-  const portState = createPort()
+  const portState = createPort({ compactContextImpl: options.compactContextImpl })
   const runtimeOverride: InteractiveRuntime = options.capabilities
     ? { ...runtime, capabilities: options.capabilities }
     : runtime

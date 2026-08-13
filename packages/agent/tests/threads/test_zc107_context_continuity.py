@@ -122,7 +122,7 @@ async def test_run_start_uses_one_preparation_acceptance_and_projection_order() 
         interaction_port=_NoopInteraction(),
     )
     execution = await coordinator.start(
-        StartRun(thread_id="ordered", run_id="run-ordered", message="按固定顺序执行"),
+        StartRun(mode="build", thread_id="ordered", run_id="run-ordered", message="按固定顺序执行"),
         ConnectionRef("owner"),
     )
     _ = [event async for event in execution.events]
@@ -268,7 +268,7 @@ capabilities = ["tool-calling", "streaming"]
     await host.dispatch(
         request(
             "run.start",
-            {
+            {"mode": "build", 
                 "message": "第一轮请求",
                 "thread_id": "continuity-host",
                 "run_id": "run-1",
@@ -298,7 +298,7 @@ capabilities = ["tool-calling", "streaming"]
     await host.dispatch(
         request(
             "run.start",
-            {
+            {"mode": "build", 
                 "message": "第二轮请求",
                 "thread_id": "continuity-host",
                 "run_id": "run-2",
@@ -366,7 +366,7 @@ capabilities = ["tool-calling", "streaming"]
     await restarted.dispatch(
         request(
             "run.start",
-            {
+            {"mode": "build", 
                 "message": "重启后请求",
                 "thread_id": "continuity-host",
                 "run_id": "run-3",

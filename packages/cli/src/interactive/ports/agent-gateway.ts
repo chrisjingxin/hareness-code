@@ -6,6 +6,7 @@ import {
   type ConfigChange,
   type ContextCompactResult,
   type EventEnvelope,
+  type InteractionMode,
   type InteractionRequestEnvelope,
   type InteractionResponse,
   type McpAddParams,
@@ -42,6 +43,7 @@ export type InteractiveRunCompletion =
 /** 启动一次 Run 的输入参数类型；纯 TypeScript 描述，不依赖特定 IPC client。 */
 export type AgentGatewayStartRunInput = {
   readonly message: string
+  readonly mode: InteractionMode
   readonly threadId?: string
   readonly requestedSkill?: RequestedSkill
   readonly modelSelection?: ThreadModelSelection

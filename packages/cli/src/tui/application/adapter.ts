@@ -3,6 +3,7 @@
 import type { ModelProfile } from "@za38/protocol"
 
 import type { InteractiveController, InteractiveIntent, InteractiveResult, InteractiveSnapshot, IntentOutcome, PresentationEffect } from "../../interactive/types"
+import { selectWorkItemView, type WorkItemView } from "../../interactive/selectors"
 import { filterCommandMenuItems } from "../../presentation-shared/command-menu-policy"
 import { parseSlashCommand, resolveSlashCommand, type CommandMenuItem, type SkillMenuItem } from "../../interactive/commands"
 import type { ThreadSummary } from "@za38/protocol"
@@ -51,6 +52,8 @@ export type PickerSnapshot<T> = {
 /** TUI Adapter 发布的完整表现快照；领域事实来自 interactive。 */
 export type TuiAdapterSnapshot = {
   readonly interactive: InteractiveSnapshot
+  /** Work Item 投影与模式锁定；由 selectWorkItemView 从 interactive 派生。 */
+  readonly workItemView: WorkItemView
   readonly draft: string
   readonly draftCursor?: "start" | "end"
   readonly commandMenu: CommandMenuState
@@ -169,7 +172,14 @@ class TuiAdapterImpl implements TuiAdapter {
     this.openWeb = options.openWeb
     this.dispatchGate = options.dispatchGate
     this.snapshot = this.buildSnapshot()
-    this.unsubscribeInteractive = this.controller.subscribe(() => this.publish())
+    this.unsubscribeInteractive = this.controller.subscribe(interactive => {
+      const previousRequestId = this.snapshot.interactive.interaction?.requestId
+      const nextRequestId = interactive.interaction?.requestId
+      // 反向问答/审批会在 Run 进行中插入时间线；必须主动滚动，否则卡片落在
+      // 当前视口下方，用户只能看到旧的 spinner，直到 Interaction 超时。
+      if (nextRequestId && nextRequestId !== previousRequestId) this.scrollRequest += 1
+      this.publish()
+    })
 
     void this.historyStore.load().then(history => {
       if (!this.closed) this.promptHistory = history
@@ -278,6 +288,7 @@ class TuiAdapterImpl implements TuiAdapter {
     const models = interactive.catalogs.models
     return {
       interactive,
+      workItemView: selectWorkItemView(interactive),
       draft: this.draft,
       draftCursor: this.draftCursor,
       commandMenu: { ...this.commandMenu },
@@ -511,6 +522,11 @@ class TuiAdapterImpl implements TuiAdapter {
         return
       case "cycle-approval-mode": {
         const outcome = await this.routeDispatch({ type: "approval-mode.cycle" })
+        if (outcome.status === "rejected") this.showTransientNotice(outcome.message)
+        return
+      }
+      case "cycle-work-mode": {
+        const outcome = await this.routeDispatch({ type: "work-mode.cycle" })
         if (outcome.status === "rejected") this.showTransientNotice(outcome.message)
         return
       }

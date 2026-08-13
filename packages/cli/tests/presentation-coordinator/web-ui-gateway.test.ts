@@ -184,7 +184,7 @@ function lastSent(ch: FakeChannel): WebUiServerMessage {
 
 // ---- 首帧与分片发布 ---------------------------------------------------------
 
-test("connectRenderer：首帧 state.replace（revision 1、七个分片完整）+ handoff.state(opening-web)", async () => {
+test("connectRenderer：首帧 state.replace（revision 1、八个分片完整）+ handoff.state(opening-web)", async () => {
   const system = createSystem()
   await flush() // 等构造期的 catalog/thread 恢复发布先落定
   const { ch } = await connectRenderer(system)
@@ -192,7 +192,7 @@ test("connectRenderer：首帧 state.replace（revision 1、七个分片完整�
   const replace = ch.sent[0]
   expect(replace).toMatchObject({ type: "state.replace", revision: 1 })
   const state = (replace as Extract<WebUiServerMessage, { type: "state.replace" }>).state
-  expect(Object.keys(state)).toEqual(["conversation", "interaction", "navigation", "command", "runtime", "workspaceTree", "workspacePreview"])
+  expect(Object.keys(state)).toEqual(["conversation", "interaction", "navigation", "command", "runtime", "workItem", "workspaceTree", "workspacePreview"])
   for (const key of Object.keys(state)) {
     expect(typeof (state as Record<string, unknown>)[key]).toBe("object")
   }

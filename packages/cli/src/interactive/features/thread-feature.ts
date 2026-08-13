@@ -1,16 +1,31 @@
 /** Thread Feature：管理 Thread 列表拉取、恢复打开、generation 时代管理及避免迟到响应。 */
 
 import type { IntentOutcome } from "../ports"
-import { clearThread, restoreThread, type RestoredThreadMessage } from "../state"
+import {
+  applyThreadMode,
+  applyWorkItem,
+  clearThread,
+  restoreThread,
+  type ComposeStageId,
+  type RestoredComposeActivity,
+  type RestoredThreadMessage,
+} from "../state"
 import type { FeatureContext } from "./types"
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+const COMPOSE_STAGES = new Set(["understand", "plan", "build", "verify", "review"])
+
 /** 校验 canonical threads.open 返回结构；无效结果视为 not-found，防止非法数据进入 Timeline。 */
-function threadOpenResult(value: unknown): { threadId: string; messages: RestoredThreadMessage[] } {
-  if (!value || typeof value !== "object") throw new Error("Agent 返回的 thread 恢复结果无效")
+function threadOpenResult(value: unknown): {
+  threadId: string
+  messages: RestoredThreadMessage[]
+  composeActivities: RestoredComposeActivity[]
+  threadMode: unknown
+  workItem: unknown
+} {
   const record = value as Record<string, unknown>
   const thread = record.thread
   if (!thread || typeof thread !== "object" || !Array.isArray(record.messages)) {
@@ -34,7 +49,43 @@ function threadOpenResult(value: unknown): { threadId: string; messages: Restore
       toolName: typeof message.tool_name === "string" ? message.tool_name : undefined,
     })
   }
-  return { threadId, messages }
+  const composeActivities: RestoredComposeActivity[] = []
+  const rawActivities = Array.isArray(record.compose_activities) ? record.compose_activities : []
+  for (const item of rawActivities) {
+    if (!item || typeof item !== "object") continue
+    const activity = item as Record<string, unknown>
+    const stage = typeof activity.stage === "string" ? activity.stage : ""
+    const kind = activity.kind
+    if (!COMPOSE_STAGES.has(stage)) continue
+    if (kind !== "summary" && kind !== "tool_terminal" && kind !== "truncation") continue
+    if (typeof activity.run_id !== "string" || typeof activity.activity_id !== "string") continue
+    if (typeof activity.attempt !== "number" || activity.attempt < 1) continue
+    if (typeof activity.label !== "string" || typeof activity.status !== "string") continue
+    if (typeof activity.event_sequence !== "number" || typeof activity.created_at_ms !== "number") continue
+    composeActivities.push({
+      runId: activity.run_id,
+      eventSequence: activity.event_sequence,
+      activityId: activity.activity_id,
+      stage: stage as ComposeStageId,
+      attempt: activity.attempt,
+      kind,
+      label: activity.label,
+      status: activity.status,
+      createdAtMs: activity.created_at_ms,
+      taskId: typeof activity.task_id === "string" ? activity.task_id : undefined,
+      taskTitle: typeof activity.task_title === "string" ? activity.task_title : undefined,
+      executionId: typeof activity.execution_id === "string" ? activity.execution_id : undefined,
+      agentId: typeof activity.agent_id === "string" ? activity.agent_id : undefined,
+      boundedText: typeof activity.bounded_text === "string" ? activity.bounded_text : undefined,
+    })
+  }
+  return {
+    threadId,
+    messages,
+    composeActivities,
+    threadMode: record.thread_mode ?? null,
+    workItem: record.work_item ?? null,
+  }
 }
 
 export class ThreadFeature {
@@ -61,14 +112,22 @@ export class ThreadFeature {
     this.openingThread = true
     options.onBeforeOpen?.()
     const currentEpoch = ++this.threadEpoch
-
     try {
       const opened = threadOpenResult(await ctx.gateway.openThread(threadId))
       if (currentEpoch !== this.threadEpoch) {
         return { status: "rejected", code: "stale-interaction", message: "Stale thread open operation" }
       }
       this.openingThread = false
-      ctx.commit(() => restoreThread(opened.threadId, opened.messages))
+      ctx.commit(current => {
+        const restored = restoreThread(
+          opened.threadId,
+          opened.messages,
+          current.workMode,
+          opened.composeActivities,
+        )
+        const withMode = applyThreadMode(restored, opened.threadMode)
+        return opened.workItem != null ? applyWorkItem(withMode, opened.workItem) : withMode
+      })
       options.onSuccess?.()
       return { status: "accepted" }
     } catch (error) {
@@ -98,7 +157,12 @@ export class ThreadFeature {
       const opened = threadOpenResult(await ctx.gateway.openThread(initialThreadId))
       if (currentEpoch !== this.threadEpoch) return
       this.openingThread = false
-      ctx.commit(() => restoreThread(opened.threadId, opened.messages))
+      ctx.commit(current => restoreThread(
+        opened.threadId,
+        opened.messages,
+        current.workMode,
+        opened.composeActivities,
+      ))
       options.onSuccess?.()
     } catch {
       if (currentEpoch === this.threadEpoch) {

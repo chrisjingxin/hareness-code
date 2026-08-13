@@ -1,0 +1,93 @@
+---
+id: HC-105
+title: 建立 Web Browser E2E 与完成验收闭环
+feature_area: Web UI 工作台体验升级
+parent_task: HC-124
+decomposed_by: 历史未记录
+priority: P0
+status: 待认领
+owner: 未认领
+branch: -
+reviewed_at: 2026-08-09
+review_due: 2026-08-23
+scope: 按最终架构（HC-114 WebUiGateway）重定 Browser E2E scope：Playwright 无真实模型凭据自动验证 Web 主要工作流、生命周期矩阵、安全边界与多视口/双主题；本任务作为 HC-115 的交付物，完成证据并入 HC-115。
+acceptance: `test:web:e2e` 可重复运行（fake Agent，无真实凭据）：空首页首条消息、真实 DOM/IME 输入、发送/失败保留、代码高亮与降级、完整 Timeline、Interaction、取消、Thread/catalog/command parity；第二窗口、ready 超时、断线重连（state.replace 重同步）、active Run 关闭、CLI exit 均收敛；UI token 单次/Origin 绑定、错误 Origin/非白名单路径/畸形帧被拒；1440×900、1280×800、1024×768、390×844、320×720 与 200% zoom 的响应式矩阵通过，light/dark 关键基线截图稳定；`bun run build/typecheck/test/project:check` 与 E2E 全绿；证据写入 HC-115。
+user_docs: docs/user/交互使用.md、docs/user/故障排查.md
+developer_docs: docs/developer/architecture/架构总览.md、docs/developer/architecture/adr/0002-project-host-multi-connection.md
+test_evidence: -
+references: docs/developer/task/HC-112-Skill安全文件层与AGEN.md、docs/developer/task/archive/HC-113-InteractiveCont.md、docs/developer/task/archive/HC-114-WebUiGateway与Pr.md、docs/developer/task/HC-115-最终架构验收矩阵与Browse.md、docs/developer/task/HC-124-统筹WebUI工作台体验升级与.md
+completed_at: -
+---
+
+## 背景
+
+> 2026-08-05 由 HC-115 按最终架构重定 scope：原描述基于 Browser 直连 Agent attachment + host.control 转移的旧流程，HC-114 落地后已不成立。本节与后续章节均已更新为新流程。
+
+最终架构下 Browser 通过 `WebUiClient` 连接 CLI 进程内的 `WebUiGateway`：只消费 `state.replace/state.patch` 视图与 `handoff.state`，提交 `intent{requestId,revision}` 并按 `intent.outcome` 处理结果；UI token 绑定 handoffId/Origin/TTL，Host 控制权始终属于 owner。单测与 loopback 集成测试覆盖各 module，但不能证明真实浏览器下的 fragment 清理、刷新重连、窗口竞争、响应式布局与 TUI→Web→TUI 连续性。
+
+本任务建立专用 Browser E2E，不新增产品能力；它是 HC-108 至 HC-114 的集成验收门槛，不能用人工现场操作或 "build/test 通过" 替代。完成证据与 HC-115 验收矩阵合并记录。
+
+## 当前存在的问题
+
+- 仓库没有 Playwright 依赖、配置、E2E script 或浏览器 fixture。
+- 现有 gateway/integration 测试不覆盖真实浏览器下的 WebUiGateway 生命周期。
+- 共享 Core 的连续性承诺（A-05：TUI→Web→TUI 后 Thread/Timeline/Selection 连续、Controller 未重建）只有单元级间接证据，没有真实浏览器端到端验证。
+- 刷新重连、断线宽限、ready 超时、第二窗口等生命周期竞争只有内存级测试。
+- 没有双视口、显式双主题截图和键盘/ARIA 验收。
+
+## 为什么现在要修改
+
+该功能的主要风险位于 module 之间（Browser ↔ 网关 ↔ 共享 Controller）。没有真实浏览器测试，"已完成"无法提供可审计证据，也无法防止 lifecycle 改动再次锁死 TUI 或破坏连续性。
+
+## 目标设计
+
+建立无真实凭据的 E2E fixture：
+
+```text
+Playwright
+  → 测试专用 CLI 启动入口（HARNESS_ECHO_MODE=1 fake Agent，真实 Bun Web server）
+  → 页面经 UI token 连接 WebUiGateway
+  → 操作真实页面（发送/命令/审批/返回 TUI）
+  → 断言共享 Controller 状态（经 CLI 侧 seam 或再次 /web 观察）
+```
+
+fixture 必须保留真实 Protocol、Host、Controller、网关与页面代码；fake Agent 只提供确定的 Event/Interaction 流，不读取模型凭据。
+
+测试分层：
+
+- smoke/parity：空首页首条消息、DOM/IME 输入、发送与失败保留、代码高亮与降级、Interaction approval/question、取消、Thread/catalog/command parity；
+- lifecycle：第二窗口拒绝、ready 超时、断线重连（state.replace 重同步）、active Run 下关闭、CLI exit 收敛、返回 TUI 后状态连续且 Controller 未重建（A-01/A-04/A-05）；
+- security：UI token 单次/Origin 绑定、错误 Origin/路径、消息类型/大小/乱序 revision 拒绝、Web 页面无 Agent endpoint/token 泄漏；
+- visual-a11y：覆盖 1440×900、1280×800、1024×768、390×844、320×720 与 200% zoom；为 wide/narrow 的 light/dark 关键状态保留稳定基线截图，并验证键盘焦点、名称和状态。
+
+## 实施步骤
+
+1. 引入固定版本 Playwright 与独立 `test:web:e2e` script（根 package.json）；浏览器缓存方式写入开发工作流，不让普通 unit test 隐式联网。
+2. 建立测试专用 CLI 启动入口：`HARNESS_ECHO_MODE=1` + 测试 Web opener（把 URL 写入文件而非打开系统浏览器）+ PTY（`script`）驱动 TUI。
+3. 实现 smoke/parity → lifecycle → security → visual-a11y 四组用例；多视口响应式断言与 wide/narrow 双主题关键基线截图入库。
+4. 全量回归 `bun run build/typecheck/test/project:check` 与 `test:web:e2e`；证据写入 HC-115 与本任务。
+
+## 范围
+
+- Playwright 配置、fixture、E2E 用例与受控截图；共享 Controller 连续性断言。
+
+## 非范围
+
+- 不新增 Web 产品功能或重新设计共享 Controller（HC-108~114 已定）。
+- 不测试真实第三方模型、MCP server 或企业认证；不使用真实凭据。
+- 不把人工截图或一次性现场操作作为唯一证据。
+
+## 验收清单
+
+- [ ] `test:web:e2e` 可在干净环境中用 fake Agent 重复运行，不读取模型凭据。
+- [ ] 空状态首条消息、真实 DOM/IME 输入、发送与失败保留、代码高亮及降级、完整 Timeline、Interaction、取消、Thread/catalog/command parity 有真实浏览器覆盖。
+- [ ] 第二窗口、ready 超时、断线重连（state.replace 重同步）、active Run 标签页关闭和 CLI exit 均收敛；TUI→Web→TUI 后状态连续且 Controller 未重建。
+- [ ] UI token 单次/Origin 绑定；错误 Origin、重复 token 与非白名单静态路径被拒；页面无 Agent endpoint/token 泄漏。
+- [ ] 1440×900、1280×800、1024×768、390×844、320×720 与 200% zoom 均无页面根级横向溢出、重叠或不可达主要操作；列式 Conversation 不低于 640px，空间不足时 Sidebar/Dock 正确切换为 overlay/fullscreen。
+- [ ] wide/narrow 的 light/dark 关键状态截图稳定；reduced-motion 下不依赖动画表达状态，键盘路径可完成核心工作流。
+- [ ] `bun run build`、`bun run typecheck`、`bun run test`、`bun run project:check` 与 Browser E2E 全部通过。
+- [ ] 完成证据并入 HC-115（本任务作为 HC-115 交付物一并关闭）。
+
+## 定期复核记录
+
+- 2026-08-09（Codex）：任务仍有效，但视觉与响应式基线改为以 HC-124 及 HC-125～HC-130 的最终产物为输入；继续承担真实 Browser 双主题、多视口、主要工作流和安全边界验收，不再以 HC-106 的旧蓝色稿作为截图事实。下一次复核 2026-08-23。

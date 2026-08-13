@@ -11,8 +11,9 @@ import type {
   InteractiveSnapshot,
   RunSummary,
   TimelineItem,
+  WorkItemProjection,
+  WorkMode,
 } from "../types"
-
 /** 从 snapshot 推导的展示可用性；全布尔、可 JSON 序列化，presentation 不再直接判断协议 Capability。 */
 export type FeatureAvailability = {
   readonly canSubmit: boolean
@@ -81,10 +82,19 @@ export type RuntimeView = {
   readonly runtime: InteractiveRuntime
   readonly connection: InteractiveConnectionState
   readonly selection: InteractiveSnapshot["selection"]
+  readonly workMode: InteractiveSnapshot["workMode"]
+  readonly composeState: InteractiveSnapshot["composeState"]
   readonly availability: {
     readonly canCancelRun: boolean
     readonly canToggleSkill: boolean
     readonly canManageMcp: boolean
     readonly canChangeModel: boolean
   }
+}
+
+/** Work Item 投影与模式锁定的展示视图。 */
+export type WorkItemView = {
+  readonly workItem: WorkItemProjection | null
+  readonly threadMode: WorkMode | null
+  readonly modeLocked: boolean
 }

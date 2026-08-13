@@ -140,6 +140,16 @@ export function Composer(props: {
                 </span>
               ) : null}
               <span className="composer-hint">Enter 发送 · Shift+Enter 换行</span>
+              <span
+                className={`mode-chip${interactive.workMode === "compose" ? " mode-chip-active" : ""}`}
+                role="status"
+                title="工作模式：空闲时 Tab 切换"
+              >
+                {interactive.workMode === "compose" ? "Compose" : "Build"}
+              </span>
+              <span className="mode-chip" role="status" title="审批模式">
+                {interactive.runtime.approvalMode}
+              </span>
             </div>
             <div className="composer-rail-right">
               {activeRun ? (
@@ -296,6 +306,10 @@ export function resolveComposerKeyboardIntent(
   if ((input.metaKey || input.ctrlKey) && (input.key === "k" || input.key === "K")) {
     return { preventDefault: true, intent: { type: "command-menu-open" } }
   }
+  // 空闲无浮层且未输入时 Tab 切换 Work Mode；运行中/输入中保留默认行为。
+  if (input.key === "Tab" && !input.shiftKey && !input.activeRun && input.draft.trim().length === 0) {
+    return { preventDefault: true, intent: { type: "work-mode-cycle" } }
+  }
   return { preventDefault: false, intent: null }
 }
 
@@ -314,7 +328,7 @@ function resolveMenuKeyboardIntent(
     const next = selectedIndex - 1 < 0 ? items.length - 1 : selectedIndex - 1
     return { handled: true, intent: { type: "command-menu-hover", selectedIndex: next } }
   }
-  if (key === "Enter") {
+  if (key === "Enter" || key === "Tab") {
     const item = items[selectedIndex]
     return {
       handled: true,

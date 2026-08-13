@@ -54,6 +54,7 @@ export type ShortcutAction =
   | "clear-selected-skill"
   | "toggle-tool-details"
   | "cycle-approval-mode"
+  | "cycle-work-mode"
   | "scroll-line-up"
   | "scroll-line-down"
   | "scroll-page-up"
@@ -136,6 +137,11 @@ export function resolveShortcut(key: KeyLike, context: ShortcutContext): Shortcu
   if (key.ctrl && key.name === "o") return "toggle-tool-details"
   // Shift+Tab 循环切换审批模式；浮层打开时让位，避免选择器焦点下误切换。
   if (key.shift && key.name === "tab") return "cycle-approval-mode"
+  // 空闲且无浮层时 Tab 切换 Work Mode（Build/Compose）；输入草稿时保留
+  // 给 textarea 默认行为，运行中由 busy 门禁拒绝并给出稳定提示。
+  if (key.name === "tab" && !key.shift && !context.activeRun && !context.hasDraft) {
+    return "cycle-work-mode"
+  }
   if (key.ctrl && key.name === "d" && !context.activeRun && !context.hasDraft) return "exit"
   return "none"
 }

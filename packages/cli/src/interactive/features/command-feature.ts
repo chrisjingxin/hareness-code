@@ -35,6 +35,9 @@ export class CommandFeature {
         activeRun: Boolean(ctx.getState().activeRun),
         pendingOperation: Boolean(ctx.getState().pendingOperation),
         hasPendingInteraction,
+        workMode: ctx.getState().workMode,
+        // Work Item projection 尚未接入 CLI 状态（WP15 cutover）；接入前恒为 false。
+        hasActiveWorkItem: false,
       },
       threadId: ctx.getState().currentThreadId,
       runtimeStatus: runtimeStatusSummary(ctx.baseRuntime),

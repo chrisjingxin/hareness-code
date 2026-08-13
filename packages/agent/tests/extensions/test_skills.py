@@ -764,6 +764,7 @@ async def test_explicit_skill_run_emits_loaded_event_before_content(tmp_path: Pa
             "jsonrpc": "2.0",
             "method": "run.start",
             "params": {
+                "mode": "build",
                 "message": "检查变更",
                 "thread_id": "thread",
                 "run_id": "run",
@@ -804,7 +805,7 @@ async def test_next_run_preparation_uses_new_skill_snapshot_without_crossing_act
         workspace=workspace,
     )
     first = await server._prepare_run(
-        StartRun(
+        StartRun(mode="build", 
             thread_id="same-thread",
             run_id="run-old",
             message="检查",
@@ -814,7 +815,7 @@ async def test_next_run_preparation_uses_new_skill_snapshot_without_crossing_act
     )
     manifest.write_text(manifest.read_text(encoding="utf-8").replace("第一版正文", "第二版正文"), encoding="utf-8")
     second = await server._prepare_run(
-        StartRun(
+        StartRun(mode="build", 
             thread_id="same-thread",
             run_id="run-new",
             message="检查",
@@ -886,7 +887,7 @@ async def test_active_run_keeps_old_skill_preparation_until_next_same_thread_run
     server._run_coordinator._runtime_provider = blocked_runtime
 
     first_execution = await server._run_coordinator.start(
-        StartRun(
+        StartRun(mode="build", 
             thread_id="active-thread",
             run_id="run-old",
             message="旧请求",
@@ -906,7 +907,7 @@ async def test_active_run_keeps_old_skill_preparation_until_next_same_thread_run
     await first_events
 
     second_execution = await server._run_coordinator.start(
-        StartRun(
+        StartRun(mode="build", 
             thread_id="active-thread",
             run_id="run-new",
             message="新请求",

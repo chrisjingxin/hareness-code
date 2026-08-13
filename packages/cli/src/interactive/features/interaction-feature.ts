@@ -2,7 +2,7 @@
 
 import type { ApprovalResponse, DirectoryTrustResponse, InteractionRequestEnvelope, InteractionResponse } from "@za38/protocol"
 import type { Clock, IntentOutcome, InteractiveInteraction } from "../ports"
-import { appendNotice, applyInteractionRequest, clearPendingInteraction } from "../state"
+import { appendNotice, applyInteractionRequest, markInteractionResponded, markInteractionTimeout } from "../state"
 import type { FeatureContext } from "./types"
 
 export type PendingInteraction = {
@@ -57,7 +57,7 @@ export class InteractionFeature {
         timerId = ctx.scheduler.setTimeout(() => {
           if (this.pendingInteraction?.request.request_id !== request.request_id) return
           this.pendingInteraction = null
-          ctx.commit(current => clearPendingInteraction(current, request.request_id))
+          ctx.commit(current => markInteractionTimeout(current, request.request_id))
           resolve(this.buildFallbackInteractionResponse(request))
         }, timeoutMs)
       }
@@ -67,7 +67,7 @@ export class InteractionFeature {
 
       if (timeoutMs === 0) {
         this.pendingInteraction = null
-        ctx.commit(current => clearPendingInteraction(current, request.request_id))
+        ctx.commit(current => markInteractionTimeout(current, request.request_id))
         resolve(this.buildFallbackInteractionResponse(request))
       }
     })
@@ -149,7 +149,12 @@ export class InteractionFeature {
     this.pendingInteraction = null
     pending.timerId?.()
     pending.resolve(response)
-    ctx.commit(current => clearPendingInteraction(current, pending.request.request_id))
+    const status = response.type === "question"
+      ? "answered"
+      : response.decision === "reject" || response.decision === "reject_with_feedback"
+        ? "rejected"
+        : "approved"
+    ctx.commit(current => markInteractionResponded(current, pending.request.request_id, status))
   }
 
   /** 取消/超时/关闭时使用的 fail-closed 响应。 */

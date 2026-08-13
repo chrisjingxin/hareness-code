@@ -1,0 +1,250 @@
+# HC-101：Host 控制租约与可撤销 Web Attachment
+
+原始需求：[HC-101](../task/archive/HC-101-legacy-建立Host控制租约与可撤销W.md)  
+架构依据：[ADR 0002：Project-scoped Agent Host、多个 Connection 与单 Run owner](../architecture/adr/0002-project-host-multi-connection.md)
+
+## 通俗说明
+
+当前 TUI 和 Web 可以同时连接一个 Python `AgentHost`，但 Host 只知道某个 Run 属于哪个 Connection，不知道“当前应由 TUI 还是 Web 接受新操作”。因此两端可能同时发起 Run、修改配置或管理 Skill/MCP；Web 断线后，Host 也缺少一条完整路径来禁止新请求、取消旧 Run，再把控制权归还 TUI。
+
+本任务在 Host 内新增深模块 `ControlLease`。它是当前输入 holder 的唯一事实来源：会改变运行或配置状态的请求，都必须先经过该模块的原子授权。完成后，Host 可以确定地在 owner TUI 和一个 attached Web Connection 之间转移控制权，并能在 Web 超时、断线或被 owner 撤销时恢复 owner。
+
+```text
+请求
+  → Protocol Schema / capability 校验
+  → ControlLease 原子校验 holder 并登记 permit
+  → RunCoordinator 或配置、Skill、MCP handler
+  → 操作受理完成后释放 permit
+  → 响应
+```
+
+## 已确认现状
+
+- `AgentHost` 已维护 owner 与 attached `ProtocolConnection`，但 dispatcher 只校验 initialize 和 capability，没有 holder gate。
+- `RunCoordinator` 只保证同一 Thread 最多一个 active Run。`run.multithread` 已参与能力协商，但没有影响服务端受理。
+- Run 的模型解析、持久化受理和运行时准备会在 Coordinator 全局锁外执行；只在 handler 前检查 holder 会留下 TOCTOU 竞态。
+- `AttachmentManager` 只保存未消费 token。token 认证成功后不再有稳定 attachment 身份，owner 无法撤销正在认证或已连接的 WebSocket。
+- `close_connection()` 已能 fail closed pending Interaction，并通过 `RunCoordinator.owner_disconnected()` 取消该 Connection 的 Run；revoke 与自然断线应复用这条收敛路径。
+
+## 目标与关键 invariant
+
+- Host 启动后 holder 是 owner Connection。
+- 任一时刻最多一个 holder；只有由 owner 签发、已经认证且未撤销的 attached Connection 可以 acquire。
+- holder 变更与受控操作受理在同一把 `ControlLease` 锁内登记，形成唯一线性化顺序。
+- `ControlLease` 锁只保护内存状态和 permit 计数，不跨配置 I/O、Run 执行、取消、Interaction 等待或 WebSocket close 持有。
+- acquire 时，当前 owner 不得有正在受理的受控操作、starting/active Run 或未收敛 Interaction；同一 holder 重复 acquire 幂等成功。
+- release 只允许当前 attached holder，且该 Connection 没有 permit、starting/active Run 或未收敛 Interaction。
+- revoke 和断线先阻止新请求，再 fail closed Interaction、取消并等待 Run，最后恢复 owner；不得先解锁 TUI 再异步清理。
+- 只读查询不受 holder 限制，但仍经过原有 capability 和 Protocol Schema 校验。
+
+## Protocol interface
+
+Protocol v3 minor 从 `0` 升到 `1`，新增 capability `host.control`。仓库尚未正式发布，直接迁移双端生成物和调用方，不保留 v3.0 返回形状或别名。
+
+### Operation
+
+| Operation | Params | Result | 约束 |
+| --- | --- | --- | --- |
+| `host.control.acquire` | `{}` | `ControlStatus` | `host.control`；必须是有效 attached Connection |
+| `host.control.release` | `{}` | `ControlStatus` | `host.control`；必须是当前 attached holder |
+| `host.control.status` | `{}` | `ControlStatus` | `host.control`；只读 |
+| `host.attachment.revoke` | `{ attachment_id: string }` | `{ attachment_id, revoked: true, control }` | `host.attach`；必须是 owner |
+| `host.attachment.create` | `{ origin: string }` | 现有结果增加 `attachment_id` | `attachment_id` 是稳定的非凭据身份 |
+
+`ControlStatus` 固定为：
+
+```json
+{
+  "state": "owner | attached | revoking",
+  "holder": {
+    "connection_id": "string",
+    "role": "owner | attached",
+    "attachment_id": "string | null"
+  }
+}
+```
+
+Schema 的 operation metadata 增加 `controlled: true`，生成器同时产出 TypeScript 和 Python `CONTROLLED_OPERATIONS`。受控集合固定为：
+
+- `run.start`、`run.cancel`
+- `context.compact`
+- `config.preview`、`config.commit`
+- `skills.set_enabled`、`skills.install`、`skills.update`、`skills.remove`
+- `mcp.add`、`mcp.remove`
+
+`host.control.*` 是控制权转换 interface，不能再被 holder gate 拦截。`host.attachment.revoke` 是 owner 在非 holder 状态下的强制恢复通道，也不进入受控集合。`config.show/path/details`、Thread/Model/Skill/MCP 的只读查询继续只受 capability 限制。
+
+### 稳定错误语义
+
+| `data.code` | 触发条件 | `retryable` |
+| --- | --- | --- |
+| `CONTROL_NOT_HOLDER` | 非 holder 调用受控操作 | `true` |
+| `CONTROL_BUSY` | acquire 时 owner 有 permit、Run/Interaction，或已有其他 attached holder | `true` |
+| `CONTROL_RELEASE_BLOCKED` | 当前 holder 仍有未收敛工作 | `true` |
+| `ATTACHMENT_NOT_FOUND` | owner 撤销从未签发的 attachment ID | `false` |
+| `ATTACHMENT_NOT_ACTIVE` | 已过期、撤销或关闭的 attachment 尝试 acquire | `false` |
+| `CONNECTION_RUN_BUSY` | 缺少 `run.multithread` 时启动第二个 starting/active Run | `true` |
+
+控制权错误使用 JSON-RPC code `-32008`，attachment 错误使用 `-32009`，Connection Run busy 使用现有 busy 类 `-32000`。客户端以 `data.code` 作为稳定分支依据。
+
+## 模块与 seam
+
+### ControlLease
+
+新增 `packages/agent/harness_agent/host/control_lease.py`。它是纯进程内状态模块，不创建 WebSocket、Run 或 Protocol DTO。它对 `AgentHost` 提供小 interface：
+
+- 登记 owner 签发的 attachment，并在认证完成时绑定 `ConnectionRef`。
+- 为受控 operation 发放 async permit，在同一锁内校验 holder 并增加进行中计数。
+- 处理 acquire、release、开始 revoke/disconnect 与收敛完成，并返回不可变 `ControlStatus`。
+
+Run 和 Interaction 是现有进程内依赖，不为它们增加公开 port。`AgentHost` 在 acquire/release 时读取 `RunCoordinator` 的 Connection activity，以及 `ProtocolConnection.pending_requests` 的未收敛 Interaction 事实。测试从 `ControlLease` interface 断言结果，不读取其内部字典或锁。
+
+### AgentHost dispatcher
+
+dispatcher 的顺序固定为：
+
+```text
+信封校验 → initialize 校验 → Schema 校验 → capability 校验
+        → 若 operation 受控，取得 ControlLease permit
+        → handler 受理 → result 校验与响应 → 释放 permit
+```
+
+`run.start` 的 permit 保持到 `RunCoordinator.start()` 已登记 starting/active Run 并发送 accepted response，不保持到整个模型运行结束。这样 acquire 与 `run.start` 竞争时，先取得 `ControlLease` 锁的一方决定结果；Run 受理后由 Connection activity 继续阻止 release/acquire。
+
+holder 判断只能放在 dispatcher 和 `ControlLease`，不得在各业务 handler 中复制。revoke/disconnect 的自动取消直接调用 Coordinator，不伪造 `run.cancel` RPC。
+
+### AttachmentManager
+
+`AttachmentManager` 继续只拥有 loopback WebSocket transport，但记录改为以 `attachment_id` 为主键：
+
+```text
+issued → authenticating → connected → revoked / closed
+```
+
+- `attachment_id` 使用 UUID v4；token 继续使用 256-bit 安全随机值。ID 用于关联和撤销，不能用于认证。
+- 认证在 manager 锁内把记录从 issued 转为 authenticating，再建立 Connection；revoke 可以在任何状态把记录标记为 revoked 并关闭 socket。
+- 未消费 token、认证中的 socket 和已连接 Connection 共享幂等 close future，避免 revoke、自然断线和 Host close 重复清理。
+- 认证失败继续使用 WebSocket policy close，不向未认证客户端回显 token、内部状态或具体失败原因。
+
+### RunCoordinator
+
+`RunCoordinator.start()` 增加 `allow_multithread: bool`。这是 Connection 权限事实，不写入 `StartRun` 指纹或 Run 历史。
+
+- 在现有 registry 锁内，先处理同 Run ID 的幂等/冲突，再检查 Thread busy 与 Connection busy。
+- starting 记录从单纯的 `thread_id` 集合扩展为可查询 owner Connection 的记录，因此第一个 Run 在配置、持久化或模型解析阶段也会阻止同 Connection 的第二个 Run。
+- 有 `run.multithread` 时保留不同 Thread 并发；没有该 capability 时，同 Connection 的第二个 starting/active Run 返回 `CONNECTION_RUN_BUSY`。
+
+### Attached capability ceiling
+
+attachment 使用显式 allowlist，再与 owner 已协商能力取交集。允许的能力为：
+
+- `host.control`
+- `run.cancel`
+- `config.read`、`config.write`
+- `threads.read`、`context.manage`
+- `skills.read`、`skills.manage`
+- `mcp.read`、`mcp.manage`
+- `models.read`、`models.select`
+
+allowlist 显式排除 `host.attach` 与 `run.multithread`。新增 owner-only capability 不会因为出现在 `SERVER_CAPABILITIES` 中而自动泄露给 Web。attached initialize 的 `capabilities.available` 返回该 Connection 的实际 ceiling，`enabled` 是客户端请求与 ceiling 的交集。
+
+## Acquire、release 与撤销流程
+
+### Acquire
+
+```text
+attached 调用 host.control.acquire
+  → 校验 attachment 已认证且仍有效
+  → 在 ControlLease 锁内检查当前 holder
+  → 检查 owner permit、starting/active Run、pending Interaction
+  → 原子替换 holder
+  → 返回 attached ControlStatus
+```
+
+如果 owner 的受控请求先登记 permit，acquire 返回 `CONTROL_BUSY`；如果 acquire 先替换 holder，随后到达的 owner 受控请求返回 `CONTROL_NOT_HOLDER`。
+
+### Release
+
+```text
+attached holder 调用 host.control.release
+  → 在 ControlLease 锁内确认调用者仍是 holder
+  → 检查 permit、starting/active Run、pending Interaction
+  → 原子恢复 owner
+  → 返回 owner ControlStatus
+```
+
+release 不关闭 WebSocket；后续 HC-102 负责正常 Web session 的页面关闭与 attachment revoke。非 holder release 返回 `CONTROL_NOT_HOLDER`。
+
+### Revoke 或自然断线
+
+```text
+标记 attachment 为 revoking，拒绝新 permit
+  → AttachmentManager 使 token 失效并关闭 WebSocket
+  → AgentHost 标记 Connection closed，fail pending Interaction
+  → RunCoordinator.owner_disconnected 取消并等待所属 Run
+  → 移除 Connection
+  → ControlLease 恢复 owner
+  → revoke 返回 owner ControlStatus
+```
+
+未消费 token 没有 Connection 和 Run；revoke 使 token 失效后直接完成。自然断线跳过 owner RPC，但进入相同 Connection 收敛路径。Host owner EOF 仍关闭整个 Host，不执行局部 owner 恢复。
+
+## 实施步骤
+
+1. 修改 canonical `packages/protocol/schema/v3.json`：增加 operation、capability、`ControlStatus`、attachment ID、错误样例和 `controlled` metadata，将 minor 设为 `1`。扩展生成器产出 `CONTROLLED_OPERATIONS`，再生成全部 TS/Python 类型、Schema 副本与 fixture。
+2. 实现 `ControlLease` 和 interface 测试，先锁定 owner/attached 转移、permit 线性化、release 阻止与 revoking 语义，再接入 Host。
+3. 改造 `AttachmentManager` 的记录与认证流程，让 create 返回 `attachment_id`，让 revoke 覆盖 issued、authenticating 与 connected。
+4. 在 `AgentHost` 的 dispatcher seam 接入 `CONTROLLED_OPERATIONS` 和 permit；新增 control/revoke handler，把断线、Interaction fail closed、Run 取消和 holder 恢复收敛为单一路径。
+5. 扩展 `RunCoordinator` 的 starting 记录和 `allow_multithread` 检查，保证 Connection 限制与 Thread 限制在同一锁内判定。
+6. 迁移现有多 Connection 测试：attached 发起受控操作前必须 acquire；非 holder 回归统一断言控制权错误，不保留绕过 `ControlLease` 的兼容 helper。
+7. 更新架构总览和 ADR 0002，只记录已经实现的 Host holder invariant、attachment 撤销和单 Connection Run 语义，不提前描述 HC-102 的 TUI/Web 生命周期。
+
+## 测试与可观察验收
+
+### Protocol
+
+- 生成的 TypeScript 与 Python 包含新 operation、capability、wire type 和 `CONTROLLED_OPERATIONS`。
+- 共享 fixture 覆盖合法参数/结果、缺失字段、多余字段、类型错误和稳定错误 data。
+- 双端 contract 测试对同一 fixture 得出相同接受/拒绝结果。
+
+### ControlLease
+
+- 初始 status 的 holder 是 owner。
+- 有效 attached Connection 可以 acquire/release；非 holder 的所有受控 operation 返回 `CONTROL_NOT_HOLDER`。
+- acquire 与 owner `run.start` 通过 barrier 同时竞争时只有一方被受理，不存在“检查后换 holder”窗口。
+- permit、starting/active Run 和 pending Interaction 分别阻止 release，status 不会提前恢复 owner。
+- holder 重复 acquire、owner 对同一已知 attachment 重复 revoke，不产生第二次状态转换或清理。
+
+### Host 与 Attachment
+
+- owner 与 Web 不可能同时受理两个受控输入；非 holder 仍可调用已协商的只读查询。
+- owner 可以撤销未消费 token、认证中 socket 和已连接 Web；后两者的 socket 关闭且没有后台任务泄漏。
+- active Web Run 期间 revoke/断线产生唯一 `run.cancelled` 终态；只有 Run 与 Interaction 均收敛后 `host.control.status` 才返回 owner。
+- token 保持单次、60 秒过期与精确 Origin 绑定；认证失败不泄露凭据或内部状态。
+- attached 的 `available/enabled` 不包含 `host.attach` 和 `run.multithread`；客户端请求它们也不会提升 ceiling。
+
+### RunCoordinator
+
+- 有 `run.multithread` 的 owner 仍可在不同 Thread 并发 Run，同 Thread 继续返回 `THREAD_BUSY`。
+- 无 `run.multithread` 的 Connection 在第一个 Run 仍处于 starting 或 active 时，第二个不同 Thread Run 返回 `CONNECTION_RUN_BUSY`。
+- 现有同 Run ID 幂等重试、内容冲突、Run owner cancel 和唯一终态语义继续通过。
+
+### 验证命令
+
+```bash
+bun run protocol:generate
+bun run protocol:check
+cd packages/agent && .venv/bin/python -m pytest -q tests/host/test_control_lease.py tests/host/test_agent_host.py tests/host/test_run_coordinator.py tests/protocol/test_protocol_contract.py
+cd packages/cli && bun test tests/ipc/protocol-contract.test.ts
+bun run typecheck
+bun run test
+bun run project:check
+```
+
+## 非范围与交接
+
+- 不实现 Bun Web server、TUI 接管页、浏览器 lifecycle channel 或 React Web UI。
+- 不新增 daemon、远程认证、多用户、owner takeover、数据库表或控制权 event。
+- 不保留旧 attachment 返回形状、旧 handler 绕过路径或测试 wrapper。
+- HC-101 实现后，旧 Web 在 HC-102 接入 `host.control.acquire` 前只能读取，受控操作会被 Host 拒绝；本任务不为了过渡而自动 acquire 或在前端保留竞态判断。
+- 后续执行 Thread 必须同时读取[原始需求](../task/archive/HC-101-legacy-建立Host控制租约与可撤销W.md)与本方案，并保留当前工作区中 Web launcher/tests 的用户改动，不将它们纳入 HC-101。

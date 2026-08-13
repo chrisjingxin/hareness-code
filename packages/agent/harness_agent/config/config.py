@@ -10,6 +10,11 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal, Mapping
 
+from harness_agent.compose.document_paths import (
+    DEFAULT_COMPOSE_DOCS_DIR,
+    ComposeDocumentPathError,
+    normalize_compose_docs_dir,
+)
 from harness_agent.policy.approval_mode import (
     DEFAULT_APPROVAL_MODE,
     ApprovalMode,
@@ -284,6 +289,25 @@ class ToolSearchSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class ComposeSettings:
+    """Compose Workspace Markdown 的唯一可配置根目录。"""
+
+    docs_dir: str = DEFAULT_COMPOSE_DOCS_DIR
+
+    def __post_init__(self) -> None:
+        """在配置边界归一化路径，后续存储无需解释用户原始文本。"""
+        try:
+            normalized = normalize_compose_docs_dir(self.docs_dir)
+        except ComposeDocumentPathError as exc:
+            raise ConfigError("compose.docs_dir must be a normalized workspace-relative path") from exc
+        object.__setattr__(self, "docs_dir", normalized)
+
+    def redacted(self) -> dict[str, object]:
+        """返回不含工作区绝对路径的 Compose 配置摘要。"""
+        return {"docs_dir": self.docs_dir}
+
+
+@dataclass(frozen=True, slots=True)
 class Za38Config:
     """最终生效的 Harness v1 配置、来源路径和运行时摘要。"""
 
@@ -297,6 +321,7 @@ class Za38Config:
     mcp_servers: tuple[McpServerConfig, ...] = ()
     model_catalog: ModelCatalog | None = None
     tools: ToolSearchSettings = field(default_factory=ToolSearchSettings)
+    compose: ComposeSettings = field(default_factory=ComposeSettings)
 
     def require_model(self, profile_id: str | None = None) -> ModelSettings:
         """返回指定或默认模型；保留单 Profile 调用方的兼容入口。"""
@@ -337,6 +362,7 @@ class Za38Config:
                 {"name": s.name, "transport": s.transport} for s in self.mcp_servers
             ],
             "tools": self.tools.redacted(),
+            "compose": self.compose.redacted(),
         }
 
 
@@ -368,7 +394,16 @@ def load_config(
             (explicit_path, ConfigSource.EXPLICIT, _read_document(explicit_path, ConfigSource.EXPLICIT))
         )
 
-    models, approval_values, execution_values, agent_engine_pool_values, mcp_values, tools_values, sources = _merge_documents(documents)
+    (
+        models,
+        approval_values,
+        execution_values,
+        agent_engine_pool_values,
+        mcp_values,
+        tools_values,
+        compose_values,
+        sources,
+    ) = _merge_documents(documents)
     _apply_environment_overrides(models, approval_values, execution_values, environment, sources)
     _apply_cli_overrides(execution_values, environment, sources)
     model_catalog = _parse_model_catalog(models, sources["models"])
@@ -387,6 +422,7 @@ def load_config(
         sources=sources,
         model_catalog=model_catalog,
         tools=_parse_tools(tools_values),
+        compose=_parse_compose(compose_values),
     )
 
 
@@ -474,6 +510,7 @@ def _merge_documents(
     dict[str, object],
     dict[str, object],
     dict[str, object],
+    dict[str, object],
     dict[str, str],
 ]:
     """按用户到显式配置的顺序合并已验证字段，并记录最后贡献来源。"""
@@ -483,6 +520,7 @@ def _merge_documents(
     agent_engine_pool_values: dict[str, object] = {}
     mcp_values: dict[str, object] = {}
     tools_values: dict[str, object] = {}
+    compose_values: dict[str, object] = {}
     sources = {
         "models": "default",
         "approval": "default",
@@ -490,6 +528,7 @@ def _merge_documents(
         "runtime_pool": "default",
         "mcp": "default",
         "tools": "default",
+        "compose": "default",
     }
     for _, source, document in documents:
         if "models" in document:
@@ -510,7 +549,19 @@ def _merge_documents(
         if "tools" in document:
             tools_values = _merge_flat_values(tools_values, document["tools"])
             sources["tools"] = source.value
-    return models, approval_values, execution_values, agent_engine_pool_values, mcp_values, tools_values, sources
+        if "compose" in document:
+            compose_values = _merge_flat_values(compose_values, document["compose"])
+            sources["compose"] = source.value
+    return (
+        models,
+        approval_values,
+        execution_values,
+        agent_engine_pool_values,
+        mcp_values,
+        tools_values,
+        compose_values,
+        sources,
+    )
 
 
 def _merge_models(target: dict[str, object], value: object, source: str) -> None:
@@ -894,6 +945,17 @@ def _parse_tools(values: Mapping[str, object]) -> ToolSearchSettings:
     else:
         raise ConfigError("tools.tool_search_defer must be 'auto', true, or false")
     return ToolSearchSettings(defer=defer)
+
+
+def _parse_compose(values: Mapping[str, object]) -> ComposeSettings:
+    """解析 ``[compose]``；首版只允许覆盖工作空间内的文档根。"""
+    unknown = set(values) - {"docs_dir"}
+    if unknown:
+        raise ConfigError(f"[compose] contains unsupported fields: {', '.join(sorted(unknown))}")
+    docs_dir = values.get("docs_dir", DEFAULT_COMPOSE_DOCS_DIR)
+    if not isinstance(docs_dir, str):
+        raise ConfigError("compose.docs_dir must be a normalized workspace-relative path")
+    return ComposeSettings(docs_dir=docs_dir)
 
 
 def _sandbox_backend(value: object) -> str:

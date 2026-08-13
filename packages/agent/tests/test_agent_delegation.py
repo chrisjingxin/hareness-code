@@ -17,7 +17,7 @@ from harness_agent.runtime.agent_delegation import (
     AgentDelegator,
     DelegateAgent,
     DelegationTarget,
-    managed_engine_runner,
+    child_execution_ref,
 )
 from harness_agent.runtime.agent_execution import AgentExecutionRegistry
 from harness_agent.runtime.execution_binding import (
@@ -27,6 +27,12 @@ from harness_agent.runtime.execution_binding import (
     ExecutionStatus,
 )
 from harness_agent.runtime.run_context import RunCancellationToken
+from harness_agent.runtime.managed_agent_executor import (
+    FailClosedManagedObserver,
+    ManagedAgentExecutor,
+    ManagedAgentRequest,
+    acquire_pooled_agent_runtime,
+)
 
 
 class _ToolCallingModel(GenericFakeChatModel):
@@ -149,7 +155,7 @@ async def test_managed_runner_releases_lease_on_failure() -> None:
 
 
 async def test_managed_adapter_reuses_profile_engine_and_releases_each_run() -> None:
-    """相同 Managed ResolvedAgentSpec 使用同一 Pool 图，每次派发独立释放 run lease。"""
+    """相同 Managed spec 经 executor 复用 Pool 图，并释放每次 delegation lease。"""
     from dataclasses import replace
 
     from harness_agent.runtime.agent_engine import AgentEngine, AgentEnginePool
@@ -174,16 +180,49 @@ async def test_managed_adapter_reuses_profile_engine_and_releases_each_run() -> 
     )
     builds = 0
 
+    class _StreamingGraph:
+        async def astream(self, *_args, **_kwargs):
+            yield ("messages", (AIMessage(content="reviewed"), {}))
+
     def build(requested):
         nonlocal builds
         builds += 1
-        return AgentEngine(profile=requested, graph=object())
+        return AgentEngine(profile=requested, graph=_StreamingGraph())
 
     pool = AgentEnginePool(build)
 
-    async def invoke(engine, command):
-        assert engine.profile_key == profile.profile_key
-        return {"task": command.task}
+    async def invoke(command: DelegateAgent):
+        child_ref = child_execution_ref(command)
+
+        async def acquire_runtime():
+            return await acquire_pooled_agent_runtime(
+                pool=pool,
+                profile=profile,
+                run_context=None,
+                graph_config=lambda namespace: {
+                    "configurable": {
+                        "thread_id": child_ref.thread_id,
+                        "checkpoint_ns": namespace,
+                    }
+                },
+            )
+
+        result = await ManagedAgentExecutor().execute(
+            ManagedAgentRequest(
+                execution_ref=child_ref.execution_id,
+                parent_execution_ref=child_ref.parent_execution_id,
+                run_id=child_ref.run_id,
+                input=command.task,
+                checkpoint_namespace=child_ref.checkpoint_namespace(fingerprint),
+                output_policy="capture_only",
+                runtime_provider=acquire_runtime,
+                is_cancelled=lambda: command.cancellation_token.cancelled,
+                idempotency_key=command.idempotency_key,
+                timeout_seconds=command.timeout_seconds,
+            ),
+            FailClosedManagedObserver(),
+        )
+        return {"task": command.task, "final": result.final_content}
 
     delegator = AgentDelegator(
         registry,
@@ -191,7 +230,7 @@ async def test_managed_adapter_reuses_profile_engine_and_releases_each_run() -> 
             DelegationTarget(
                 agent_id="reviewer",
                 mode=ExecutionMode.MANAGED,
-                runner=managed_engine_runner(pool, profile, invoke),
+                runner=invoke,
                 engine_profile_key=profile.profile_key,
             ),
         ),

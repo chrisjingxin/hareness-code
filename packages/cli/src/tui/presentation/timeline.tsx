@@ -1,11 +1,11 @@
 /** Thread 消息、工具和 Interaction 的统一时间线。 */
 
-import { type ScrollBoxRenderable } from "@opentui/core"
-import { type RefObject, useState, type ReactNode } from "react"
+import { TextAttributes, type ScrollBoxRenderable } from "@opentui/core"
+import { type ReactNode, type RefObject, useMemo, useState } from "react"
 
 import type { FileDiffPresentation } from "@za38/protocol"
 
-import type { ConversationMessage, InteractionCard, ReasoningCard, TimelineItem, ToolCard } from "../../interactive/state"
+import type { ComposeProjection, ComposeSummaryCard, ConversationMessage, InteractionCard, ReasoningCard, TimelineItem, ToolCard } from "../../interactive/state"
 import type { InteractiveInteraction, InteractiveSnapshot } from "../../interactive/types"
 import { formatContext, formatDuration, formatElapsed, formatUsage } from "../../presentation-shared/formatters"
 import { diffTextForRenderer, parseFileDiff } from "../../presentation-shared/file-diff"
@@ -21,6 +21,15 @@ import {
   isApprovalDecision,
   isDirectoryTrustDecision,
 } from "../../presentation-shared/interaction-policy"
+import {
+  COMPOSE_STAGE_LABELS,
+  activityGroupSubtitle,
+  activityGroupTitle,
+  composeLiveStatusLine,
+  isGroupExpandedByDefault,
+  segmentTimeline,
+  type TimelineActivityGroup,
+} from "../../presentation-shared/timeline-activity-groups"
 import { activityLabel, interactionStatusLabel, progressPhaseLabel, toolStatusLabel } from "../../presentation-shared/timeline-presenter"
 import { collapseToolOutput } from "../../presentation-shared/tool-output-policy"
 import { getCommonSyntaxClient } from "../platform/syntax-parsers"
@@ -31,6 +40,51 @@ import type { ApprovalDecision, DirectoryTrustDecision } from "./types"
 
 /** 挂起中的目录信任交互卡片 DTO。 */
 type DirectoryTrustCard = Extract<InteractiveInteraction, { type: "directory_trust" }>
+
+function stageColor(status: string): string {
+  if (status === "passed" || status === "completed") return tuiTheme.success
+  if (status === "running" || status === "waiting_user") return tuiTheme.primary
+  if (status === "failed" || status === "blocked" || status === "cancelled") return tuiTheme.danger
+  return tuiTheme.muted
+}
+
+/** 活动投影优先；失败/完成后退回终态摘要快照，保证画面不空白。 */
+function renderComposeProgress(interactive: InteractiveSnapshot): React.ReactNode {
+  const live = interactive.composeState
+  if (live) return <ComposeProgress state={live} />
+  const summary = interactive.lastRun?.composeSummary
+  if (!summary) return null
+  return <ComposeProgress state={summary} />
+}
+
+/** Compose 运行进度：只显示五阶段、当前 task、evidence 与 blocked 摘要。 */
+function ComposeProgress(props: { state: ComposeProjection }) {
+  const state = props.state
+  const currentTask = state.tasks.find(task => task.status === "running" || task.status === "pending")
+  const runningEvidence = state.evidence.find(item => item.status === "running" || item.status === "failed")
+  return (
+    <box flexDirection="column" paddingBottom={1} paddingLeft={1} paddingRight={1}>
+      <box flexDirection="row" gap={1}>
+        {state.stages.map(stage => (
+          <text key={stage.id} fg={stageColor(stage.status)} attributes={stage.status === "running" ? TextAttributes.BOLD : undefined}>
+            {COMPOSE_STAGE_LABELS[stage.id] ?? stage.id}
+            {stage.status === "running" ? "*" : stage.status === "passed" ? "✓" : ""}
+          </text>
+        ))}
+        <text fg={tuiTheme.muted}>rev {state.revision}</text>
+      </box>
+      {currentTask ? (
+        <text fg={tuiTheme.text}>任务：{shorten(currentTask.title, 60)}</text>
+      ) : null}
+      {runningEvidence ? (
+        <text fg={stageColor(runningEvidence.status)}>验证：{shorten(runningEvidence.label, 60)}</text>
+      ) : null}
+      {state.blockedReason ? (
+        <text fg={tuiTheme.danger}>阻塞：{shorten(state.blockedReason, 80)}</text>
+      ) : null}
+    </box>
+  )
+}
 
 /** 使用 ScrollBox 渲染统一 timeline，并保留 sticky-scroll 行为。 */
 export function ConversationTimeline(props: {
@@ -46,24 +100,92 @@ export function ConversationTimeline(props: {
   transientNotice?: { id: string; message: string }
   terminalWidth: number
 }) {
+  const segments = useMemo(
+    () => segmentTimeline(props.interactive.timeline),
+    [props.interactive.timeline],
+  )
+  // 用户显式展开/折叠的 activity；缺省遵循 terminal 默认折叠。
+  const [expandedActivities, setExpandedActivities] = useState<ReadonlySet<string>>(() => new Set())
+  const [collapsedActivities, setCollapsedActivities] = useState<ReadonlySet<string>>(() => new Set())
+
+  const isExpanded = (group: TimelineActivityGroup): boolean => {
+    if (expandedActivities.has(group.key)) return true
+    if (collapsedActivities.has(group.key)) return false
+    return isGroupExpandedByDefault(group)
+  }
+
+  const toggleGroup = (group: TimelineActivityGroup) => {
+    const open = isExpanded(group)
+    if (open) {
+      setExpandedActivities(current => {
+        const next = new Set(current)
+        next.delete(group.key)
+        return next
+      })
+      setCollapsedActivities(current => new Set(current).add(group.key))
+    } else {
+      setCollapsedActivities(current => {
+        const next = new Set(current)
+        next.delete(group.key)
+        return next
+      })
+      setExpandedActivities(current => new Set(current).add(group.key))
+    }
+  }
+
   return (
     <scrollbox ref={props.scrollRef} stickyScroll stickyStart="bottom" flexGrow={1} minHeight={0} scrollAcceleration={createScrollAcceleration()} viewportOptions={{ paddingRight: 1 }}>
       <box height={1} />
-      {props.interactive.timeline.map(item => (
-        <TimelineRow
-          key={timelineItemKey(item)}
-          item={item}
-          interactive={props.interactive}
-          showToolDetails={props.showToolDetails}
-          expandedTools={props.expandedTools}
-          onToggleTool={props.onToggleTool}
-          onApproval={props.onApproval}
-          onDirectoryTrust={props.onDirectoryTrust}
-          onQuestion={props.onQuestion}
-          terminalWidth={props.terminalWidth}
-        />
-      ))}
+      {segments.map(segment => {
+        if (segment.kind === "flat") {
+          return (
+            <TimelineRow
+              key={timelineItemKey(segment.item)}
+              item={segment.item}
+              interactive={props.interactive}
+              showToolDetails={props.showToolDetails}
+              expandedTools={props.expandedTools}
+              onToggleTool={props.onToggleTool}
+              onApproval={props.onApproval}
+              onDirectoryTrust={props.onDirectoryTrust}
+              onQuestion={props.onQuestion}
+              terminalWidth={props.terminalWidth}
+            />
+          )
+        }
+        const group = segment.group
+        const open = isExpanded(group)
+        return (
+          <box key={group.key} marginTop={1} marginLeft={1} marginRight={1} flexDirection="column">
+            <box flexDirection="row" gap={1} onMouseUp={() => toggleGroup(group)}>
+              <text fg={tuiTheme.primary}>{open ? "▼" : "▶"}</text>
+              <text fg={tuiTheme.text} attributes={TextAttributes.BOLD}>{activityGroupTitle(group)}</text>
+              <text fg={tuiTheme.muted}>{activityGroupSubtitle(group)}</text>
+            </box>
+            {open ? group.items.map(item => (
+              <TimelineRow
+                key={timelineItemKey(item)}
+                item={item}
+                interactive={props.interactive}
+                showToolDetails={props.showToolDetails}
+                expandedTools={props.expandedTools}
+                onToggleTool={props.onToggleTool}
+                onApproval={props.onApproval}
+                onDirectoryTrust={props.onDirectoryTrust}
+                onQuestion={props.onQuestion}
+                terminalWidth={props.terminalWidth}
+              />
+            )) : group.summary ? (
+              <box paddingLeft={3}>
+                <text fg={tuiTheme.muted}>{group.summary.text}</text>
+              </box>
+            ) : null}
+          </box>
+        )
+      })}
+      {/* 当前阶段状态贴近执行区底部，长历史时不因插在顶部而滚出视口。 */}
       <TimelineActivity interactive={props.interactive} />
+      {renderComposeProgress(props.interactive)}
       <RunSummary interactive={props.interactive} modelName={props.modelName} />
       {props.transientNotice ? <TransientNotice key={props.transientNotice.id} message={props.transientNotice.message} /> : null}
       <box height={1} />
@@ -102,6 +224,9 @@ function TimelineRow(props: {
   if (props.item.type === "interaction") {
     return <InteractionRow interaction={props.item.interaction} activeInteraction={props.interactive.interaction} onApproval={props.onApproval} onDirectoryTrust={props.onDirectoryTrust} onQuestion={props.onQuestion} terminalWidth={props.terminalWidth} />
   }
+  if (props.item.type === "compose-summary") {
+    return <ComposeSummaryRow summary={props.item.summary} />
+  }
   const tool = props.item.tool
   const toolKey = toolTimelineKey(tool)
   return (
@@ -110,6 +235,19 @@ function TimelineRow(props: {
       expanded={props.showToolDetails || props.expandedTools.has(toolKey) || tool.status !== "completed"}
       onToggle={() => props.onToggleTool(toolKey)}
     />
+  )
+}
+
+/** 阶段 Runtime 摘要：非 assistant 文本，仅展示有界结果。 */
+function ComposeSummaryRow(props: { summary: ComposeSummaryCard }) {
+  const stage = props.summary.composeScope?.stage
+    ? (COMPOSE_STAGE_LABELS[props.summary.composeScope.stage] ?? props.summary.composeScope.stage)
+    : "compose"
+  return (
+    <box marginTop={1} marginLeft={2} marginRight={2}>
+      <text fg={tuiTheme.muted}>{`阶段摘要 · ${stage} · ${props.summary.status}`}</text>
+      <text content={props.summary.text} fg={tuiTheme.text} />
+    </box>
   )
 }
 
@@ -234,10 +372,20 @@ function TimelineActivity(props: { interactive: InteractiveSnapshot }) {
   const phase = interactive.runProgress
     ? progressPhaseLabel(interactive.runProgress.phase)
     : activityLabel(interactive.activity.kind)
+  const compose = interactive.composeState
+  const currentTask = compose?.tasks.find(task => task.status === "running")
+  const line = compose
+    ? `${composeLiveStatusLine({
+      stage: compose.stage,
+      taskTitle: currentTask?.title,
+      phaseLabel: phase,
+      elapsedLabel: formatElapsed(elapsed),
+    })} · Esc 取消`
+    : `${phase} · 已运行 ${formatElapsed(elapsed)} · Esc 取消`
   return (
     <box marginTop={1} paddingLeft={3} flexDirection="row" gap={1}>
       <text fg={tuiTheme.warning}>{frame}</text>
-      <text fg={tuiTheme.warning}>{phase} · 已运行 {formatElapsed(elapsed)} · Esc 取消</text>
+      <text fg={tuiTheme.warning}>{line}</text>
     </box>
   )
 }
@@ -451,11 +599,14 @@ function toolTimelineKey(tool: ToolCard): string {
   return ["tool", tool.runId, tool.id].join(":")
 }
 
-/** 为三类时间线事件提供不会跨 run 冲突的 React key。 */
+/** 为时间线事件提供不会跨 run/activity 冲突的 React key。 */
 function timelineItemKey(item: TimelineItem): string {
   if (item.type === "message") return ["message", item.message.id].join(":")
-  if (item.type === "tool") return toolTimelineKey(item.tool)
+  if (item.type === "tool") {
+    return ["tool", item.tool.runId, item.tool.executionId ?? "root", item.tool.activityId ?? "root", item.tool.id].join(":")
+  }
   if (item.type === "reasoning") return ["reasoning", item.reasoning.id].join(":")
+  if (item.type === "compose-summary") return ["compose-summary", item.summary.id].join(":")
   return ["interaction", item.interaction.runId, item.interaction.id].join(":")
 }
 

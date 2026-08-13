@@ -5,7 +5,7 @@
 import { readFile } from "node:fs/promises"
 import { dirname, join, relative, resolve, sep } from "node:path"
 
-import { listMarkdownFiles, loadArchivedTaskIds, loadTasks } from "./tasks"
+import { TASK_BOARD_PATH, TASK_DIR, TASK_ID_MATCH_GLOBAL, listMarkdownFiles, loadArchivedTaskIds, loadTasks } from "./tasks"
 
 const root = resolve(import.meta.dir, "../..")
 
@@ -20,9 +20,8 @@ export async function checkDocs(projectRoot = root): Promise<void> {
     "docs/developer/architecture/架构总览.md",
     "docs/developer/project/开发工作流.md",
     "docs/developer/project/变更检查清单.md",
-    "docs/developer/tasks/任务看板.md",
-    "docs/developer/architecture/adr/README.md",
-    "docs/developer/tasks/README.md",
+    TASK_BOARD_PATH,
+    `${TASK_DIR}/README.md`,
   ]
   for (const path of required) {
     try {
@@ -51,7 +50,7 @@ export async function checkDocs(projectRoot = root): Promise<void> {
 
     // 归档研究材料是历史快照，允许保留当时已经退出当前任务系统的编号；活动文档仍必须严格校验。
     if (!isHistoricalResearchDocument(projectRoot, document)) {
-      for (const id of content.match(/\bZC-\d{3,}\b/g) ?? []) {
+      for (const id of content.match(TASK_ID_MATCH_GLOBAL) ?? []) {
         if (!taskIds.has(id)) throw new Error(`${relative(projectRoot, document)} 引用了不存在的任务：${id}`)
       }
     }
@@ -69,8 +68,4 @@ function markdownLinks(content: string): string[] {
 
 function isExternalLink(value: string): boolean {
   return /^(?:https?:|mailto:|#)/i.test(value)
-}
-
-function isNotFound(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT"
 }

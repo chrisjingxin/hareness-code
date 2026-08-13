@@ -1,0 +1,151 @@
+---
+id: HC-144
+title: 为文件变更审批提供双栏与行内高亮 Diff
+feature_area: 文件变更审批体验
+parent_task: -
+decomposed_by: Codex
+priority: P1
+status: 已完成
+owner: Codex
+branch: master
+reviewed_at: 2026-08-12
+review_due: -
+scope: 把 write_file、edit_file、delete_file 的人工审批从纯文本说明升级为同一 PreparedFileMutation 派生的结构化有界 Diff；Web 宽屏默认左右对比、窄屏默认行内并允许切换，TUI 宽终端双栏、窄终端行内，双端均提供增删底色、行号和可用时的语法高亮，同时保留通用审批降级路径与现有授权语义。
+acceptance: 文件审批明确显示操作、逻辑路径、增删统计和截断状态；Web 在双栏/行内间切换且响应式不丢行，TUI 按可用宽度稳定选择双栏/行内；支持语言具有语法高亮，未知语言、高亮失败、畸形或缺失 presentation 均降级为可读纯文本；展示数据与批准后提交绑定同一 prepared plan，截断预览仍可批准且不能改变 Snapshot、Policy、一次性计划或 CAS 约束；非文件审批保持现状；Protocol/Python/Interactive/Web/TUI 测试、build、typecheck、project:check 通过。
+user_docs: docs/user/交互使用.md、docs/user/Web界面.md、docs/user/安全与沙箱.md
+developer_docs: docs/developer/spec/HC-144-文件审批高亮Diff.md、docs/developer/architecture/架构总览.md
+test_evidence: 修复拒绝并反馈恢复值：LangChain RejectDecision 使用顶层 message，feedback 不再被忽略；Agent approval focused 26 passed，Web presentation feedback payload 回归通过，git diff --check 通过。
+references: docs/developer/task/HC-131-统筹弱模型优先的文件读写可靠性.md、docs/developer/spec/HC-131-统筹弱模型优先的文件读写可靠性.md、docs/developer/task/HC-142-截断Diff失败关闭.md、docs/developer/task/HC-112-Skill安全文件层与AGEN.md
+completed_at: 2026-08-12
+---
+
+## 背景
+
+当前文件 mutation 的审批内容由 Agent 拼成一段纯文本 unified diff，TUI 和 Web 只把它当普通
+description 展示；两端还会用通用 JSON 预览显示工具参数。用户能看见变更，但没有稳定的双栏
+对齐、增删底色、行号、语法高亮或宽度自适应，较长 diff 也不易扫描。
+
+项目已有实现基础：Agent 的 `PreparedFileMutation` 已固定 current、proposed content、参数指纹
+和有界 diff；Web 已有 Shiki Worker；OpenTUI `DiffRenderable` 已支持 unified/split、行号和
+Tree-sitter。缺少的是从同一批准计划到 Protocol、Interactive Core 和两个 Renderer 的正式展示契约。
+
+HC-142 已记录当前产品决定：200 行、16 KiB 及终端视口只限制审批预览，截断时必须明确提示，
+但仍保留允许/拒绝选项。本任务只改善审查体验，不重新定义这项授权语义。
+
+## 用户结果
+
+```text
+文件 mutation 完成 prepare
+  → Agent 从同一计划生成有界 file_diff presentation
+  → Protocol 把 presentation 与审批决定一起交给 Interactive Core
+  → Web：宽屏左右对比 / 窄屏行内，可手动切换
+  → TUI：宽终端左右对比 / 窄终端行内
+  → 用户批准或拒绝
+  → 批准后仍只提交原 prepared plan
+```
+
+完整数据形状、降级路径、安全不变式和响应式规则见
+[HC-144 规格](../../spec/HC-144-文件审批高亮Diff.md)。
+
+## 实施计划
+
+1. 先建立端到端展示契约：让 `MutationDiff` 继续作为唯一有界 diff 来源，新增 Host 内短生命周期
+   presentation 传递 seam，并在 `interaction.approval.payload` 增加可选的 tagged `file_diff`；同步
+   Schema、生成类型、fixture、Python 提取和 TS IPC 校验，证明 wire 数据来自同一 prepared plan。
+2. 将可选 presentation 投影进 Interactive Core DTO，建立纯 unified-diff 解析/对齐 presenter；
+   对缺失、畸形、未知 kind 和空文件变更保留确定的纯文本/通用审批降级，不让渲染失败影响决策回写。
+3. 在 Web 审批表单实现 Diff card：显示路径、统计、截断 banner、行号与增删底色；宽屏默认 split、
+   窄屏默认 unified，并提供当前审批内的模式切换；复用现有 Shiki Worker，失败时原位降级纯文本。
+4. 在 TUI 审批区域接入 OpenTUI `DiffRenderable`：把终端可用宽度传到 Interaction renderer，宽度
+   足够时 split，否则 unified；复用离线 Tree-sitter 与主题，保证长行、滚动、选择和审批按键不回归。
+5. 用 create/edit/delete、多个 hunk、纯增/纯删、无末尾换行、空文件、截断、畸形 payload、未知语言、
+   高亮故障和窗口 resize 覆盖 Agent、Protocol、Interactive、Web/TUI；最后同步用户/架构文档并运行
+   双语言项目检查。
+
+## 执行 Todo
+
+- [x] 修改 `packages/protocol/schema/v3.json` 与 contract fixture，生成 TS/Python 类型；focused 协议测试确认可选 `file_diff` 合法、未知字段和越界形状被拒绝。
+- [x] 在 `packages/agent/harness_agent/tools/`、`runtime/` 与 `host/` 建立同一 prepared plan 的展示投影和有界短生命周期传递；Python focused tests 证明展示/提交内容一致、消费或缺失时安全降级。
+- [x] 扩展 `packages/cli/src/interactive/` 的 approval DTO，并在 `presentation-shared/` 增加纯解析、对齐和语言解析；单测覆盖多 hunk、no-newline、截断、空/畸形输入。
+- [x] 修改 Web `interaction-form`、Diff 组件和 CSS，复用 Shiki；React 测试覆盖 split/unified 切换、响应式默认值、截断 banner、ARIA 和高亮失败降级。
+- [x] 修改 TUI Timeline/Interaction 展示并复用 OpenTUI Diff renderer；测试覆盖宽/窄终端、行号、主题、纯文本降级及审批输入不回归。
+- [x] 修复大文件预览在 hunk 中途截断时 OpenTUI 因完整行数与可见行数不匹配而退回纯文本；回归直接断言无 parser error 且增删行具有红绿背景。
+- [x] 提高 TUI 增删行背景与普通代码面的视觉区分，并覆盖完整行号槽；回归验证增删内容和行号槽使用同一组高辨识度语义色。
+- [x] 更新 `docs/user/交互使用.md`、`docs/user/Web界面.md`、`docs/user/安全与沙箱.md` 与架构总览，明确预览截断仍可批准且授权对象是完整 prepared mutation。
+- [x] 运行 `bun run protocol:check`、Agent focused tests、CLI focused tests、`bun run build`、`bun run typecheck`、`bun run test`、`bun run project:check` 和 `git diff --check`，将实际证据与版本影响写回本任务。
+
+## 范围
+
+- 文件 mutation 审批展示数据、Host 内短生命周期传递及 JSON-RPC v3 可选字段。
+- Interactive Core 的只读 approval presentation DTO 与共享纯 presenter。
+- Web/TUI 待处理审批的 Diff UI、语法高亮、响应式布局与降级。
+- 相关协议、Python、TS、React/OpenTUI 测试及用户/架构文档。
+
+## 非范围
+
+- 不改变模型可见的 `write_file`、`edit_file`、`delete_file` schema。
+- 不改变 approval mode、敏感路径、规则持久化、Snapshot、一次性计划或 backend CAS 行为。
+- 不因 diff 截断或终端视口未展示全部内容而取消批准选项。
+- 不新增 diff artifact、分页、外部编辑器、整文件下载或跨文件合并视图。
+- 不把 diff 保存进 Transcript、SQLite、日志或已完成 Interaction 历史卡。
+- 不为该功能引入新的语法高亮或 Diff 第三方依赖。
+
+## 验收清单
+
+- [x] create/edit/delete 的待审批卡都显示逻辑路径、增删统计、行号、增删语义和明确截断状态。
+- [x] Web 宽屏默认左右对比、窄屏默认行内且可切换；TUI 宽终端双栏、窄终端行内，resize 后不崩溃、不丢可见行。
+- [x] 支持语言在双端具有语法高亮；未知语言、Worker/Tree-sitter 失败时保持完整可读的 diff 语义色。
+- [x] presentation 缺失或 diff 内容畸形时回退现有 description/requests 或有界原文；未知 kind 在 Protocol 边界被拒绝，审批不出现空白/卡死。
+- [x] 展示内容来自与 commit 相同的 prepared plan；改参、重放、stale 和 CAS 冲突仍按 HC-131 失败。
+- [x] 截断预览醒目标记且仍保留原审批选项；非文件审批和无头 fail-closed 行为不变。
+- [x] Protocol、Agent、Interactive、Web/TUI、build、typecheck、项目检查和文档证据闭环。
+
+## 定期复核记录
+
+- 2026-08-11（Codex）：依据当前 HC-131/HC-142 行为、JSON-RPC v3 approval payload、Web Shiki
+  与 OpenTUI Diff/Tree-sitter 能力建立单一完整功能任务；等待用户确认 Design 后认领实施，下一次
+  复核 2026-08-25。
+- 2026-08-11（Codex）：用户确认开始实施后完成 Protocol 展示契约、同一 prepared plan
+  投影、Run 内有界缓存、共享 diff parser、Web 双栏/行内卡与 TUI OpenTUI Diff。Agent focused
+  `75 passed`，CLI focused `41 passed`，`bun run build`、`bun run typecheck`、`bun run
+  project:check` 和 `git diff --check` 通过；本地浏览器验证 1100px 默认 split、680px
+  默认 unified 及手动切换，无 console warning/error。
+- 2026-08-11（Codex）：Agent 全量为 `1824 passed, 2 skipped, 1 failed`，唯一失败是既有
+  stdio 子进程测试的固定 2 秒超时，单独且沙箱外重跑仍超时。`bun run test` 中 CLI
+  `549 passed, 1 skipped`；4 个 loopback 用例因受限环境端口竞争失败，沙箱外单独重跑
+  `4 passed`；剩余是既有 `takeover-recovery.test.ts` 使用当前固定 Bun 1.2.19 不支持的
+  `test(name, options, fn)` 形状。这些均不经过本任务的 approval presentation 路径。
+- 2026-08-11（Codex）：为使本任务的 Web CSS 完成生产构建，修复了 Bun 1.2.19
+  在 `outdir` 模式下把 CSS output MIME 误报为 JavaScript 的构建兼容点，改为按 `.js/.css`
+  产物路径识别，真实 `bun run build` 通过。项目尚未正式发布，本任务不单独修改
+  `0.1.0` 版本号，变更归入下一次统一发布。
+- 2026-08-12（Codex）：用户实际验证发现大文件创建预览截断后，hunk header 仍保留
+  `+1,269`，OpenTUI 对只剩 200 行的展示文本严格校验失败，因而显示 `Error parsing diff`
+  并退回无色纯文本。现在 `diffTextForRenderer` 仅对 renderer 副本重算可见 old/new count，
+  不改变 Protocol 统计或批准内容。CLI focused `42 passed`；其中 TUI 回归直接校验
+  parser error 消失、删除行背景 `#32171a`、新增行背景 `#10271a`；`bun run typecheck`
+  和 `bun run build` 通过。
+- 2026-08-12（Codex）：用户进一步反馈旧背景值在实际终端中接近普通深灰，只能看见红绿
+  `-`/`+` 标记。将 TUI Diff 的增删内容区和行号槽统一改为 OpenTUI 默认且可在有限色阶终端
+  保持辨识度的深红 `#4d1a1a` / 深绿 `#1a4d1a`；主题测试新增与 `toolSurface` 的色差和红绿
+  色相断言。CLI focused `16 passed`（含 TUI Diff），`bun run typecheck`、`bun run build`、
+  `bun run project:check` 与 `git diff --check` 通过；未修改审批数据、提交语义或 CAS。
+- 2026-08-12（Codex）：用户反馈 Web Diff 仍比 Codex 参考图偏淡。根据参考图实际色值，将 Web
+  深色主题新增/删除面设为 `#1f3224` / `#3c1f1b`，行号槽设为 `#132116` / `#28130e`，左侧
+  色带和标记色设为 `#41c977` / `#f4413d`；浅色主题使用同色相的高辨识度浅底和色带。修复行号
+  自身背景覆盖父级 Diff 背景的问题，并为新增/删除行补充 Codex 风格左侧色带。Web focused
+  `16 passed`，`bun run typecheck` 和 `bun run build` 通过；未改变 approval payload 或授权语义。
+- 2026-08-12（Codex）：用户在 Web 文件审批中切换左右/行内后点击“拒绝”，页面看似无响应。
+  排查确认模式切换只改 Diff 组件本地布局，与 revision/requestId 无关；真实原因是“拒绝”按钮原本
+  只选择 decision，还需再点通用“提交”，动作式文案与两步行为不一致。普通拒绝现改为点击即发送
+  fail-closed `interaction.respond(reject)`；批准仍二次确认，拒绝并反馈仍填写后提交。新增精确回归
+  覆盖“切换模式 → 拒绝 → submit intent”，Web focused `17 passed`，`bun run typecheck`、
+  `bun run build` 与 `git diff --check` 通过。
+- 2026-08-12（Codex）：用户反馈长 Diff 审批卡超出 Web 工作区高度，页面根层固定且看不到滚动条，
+  导致底部审批动作与 Composer 被裁掉。将 `.interaction-dock` 改为可收缩 flex item，限制在视口剩余
+  高度内并启用独立纵向滚动、稳定滚动槽和 overscroll containment；新增 CSS contract 回归。Web/CSS
+  focused `29 passed`，`bun run typecheck`、`bun run build` 与 `git diff --check` 通过。
+- 2026-08-12（Codex）：用户反馈“拒绝并反馈”后的模型看不到反馈。确认 Web/IPC/Python 已传递
+  feedback，但 RunCoordinator 生成了 LangChain 不识别的嵌套 `args.message`；改为顶层
+  `RejectDecision.message`，并同步批量取消/策略拒绝消息。Agent approval focused `26 passed`，
+  Web presentation 回归断言提交 payload 含完整反馈，`git diff --check` 通过。

@@ -36,4 +36,4 @@ bun run dev -- --non-interactive --message "解释当前目录的项目结构"
 
 终端界面使用企业源的 `@opentui/core` / `@opentui/react` `0.4.3`、React `19.2.6` 和 `react-reconciler` `0.33.0`。企业引入 OpenTUI Core 时须同时镜像其目标平台 native optional packages；项目不再携带本地 Core 源码或自行构建的 FFI artifact。
 
-参与开发请从 [开发工作流](docs/developer/project/开发工作流.md) 开始；任务以 [任务看板](docs/developer/tasks/任务看板.md) 和任务源文件为准。
+参与开发请从 [开发工作流](docs/developer/project/开发工作流.md) 开始；任务以 [任务看板](docs/developer/task/任务看板.md) 和任务源文件为准。

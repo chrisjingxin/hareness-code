@@ -3,7 +3,7 @@
 日期：2026-07-27  
 状态：已接受
 
-当前关联任务：[ZC-092](../../tasks/ZC-092.md)
+当前关联任务：[HC-092](../../task/archive/HC-092-落实角色级Policy与能力视.md)
 
 ## 背景
 
@@ -241,7 +241,9 @@ spec。AgentEngineProfile 只能由该 spec 的静态视图生成，AgentEngine 
   生命周期、可切换 UI 或跨 Agent 的强复用，必须以新 ADR 从 AgentDefinition 中抽取。
 - `InstructionFragment`、JSON Schema：文件资产，由 AgentDefinition 引用，不独立参与执行
   选择。
-- `AgentWorkflow`：仍是可选未来模式，不作为 Thread、Model 或 Run 的前置语义。
+- `AgentWorkflow`：HC-138 起以 Compose 工作模式落地首个代码驱动 workflow：它是 Run 内部
+  的执行策略（`mode: compose`），不改变 Thread、Model 或 Run 的前置语义，也不注册为公共
+  Workflow SDK 或第三种 Skill invocation；阶段 Agent 复用 AgentDelegator 与既有 Policy。
 - `AgentTeam`：已作为独立 TeamCoordinator 的固定 DAG 模式存在，只引用 AgentDefinition，
   不改变 Thread、Model、Run 或 AgentEngine 的基础语义。
 - `Mailbox`：没有真实需求，当前明确不实现。
@@ -271,8 +273,9 @@ canonical model 和凭据脱敏边界。
 
 - ThreadExecutionSelection、每 Run 模型解析、RunExecutionBinding 和 AgentEngineProfile 选择必须由同一领域 module 协调，不得在 Server、TUI 和存储 adapter 中各自推断。
 - 内置主 Agent 继续由 Python 固定构建，不放入 Agent catalog。
-- Plugin Agent catalog、Agent 定向模型和固定 Team DAG 已接入；固定 Workflow、Mailbox、Team
-  产品协议/UI 和第二 Provider 仍是后续产品方向。
+- Plugin Agent catalog、Agent 定向模型和固定 Team DAG 已接入；Compose 工作模式（HC-138）
+  已作为首个代码驱动 Workflow 落地；Mailbox、Team 产品协议/UI 和第二 Provider 仍是后续
+  产品方向。
 - 在第二 Provider adapter 出现前不建立 Canonical Message port；出现真实的第二 adapter 时，必须先阻止 Provider 私有历史跨 adapter 泄漏。
 - `/model` 更新未来新 Thread 的配置默认时，不能修改既有 ThreadExecutionSelection 或历史 RunBinding。
 

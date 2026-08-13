@@ -55,6 +55,7 @@ class ConfigManifest:
         "approval": ConfigSection("approval", "implemented", ACTIVE_TOML_SOURCES),
         "execution": ConfigSection("execution", "implemented", ACTIVE_TOML_SOURCES),
         "runtime_pool": ConfigSection("runtime_pool", "implemented", ACTIVE_TOML_SOURCES),
+        "compose": ConfigSection("compose", "implemented", ACTIVE_TOML_SOURCES),
         "ui": ConfigSection("ui", "planned", frozenset()),
         "skills": ConfigSection("skills", "planned", frozenset()),
         "agents": ConfigSection("agents", "planned", frozenset()),

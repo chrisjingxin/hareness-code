@@ -394,7 +394,7 @@ def test_truncated_empty_initialization_diff_remains_approvable_and_fingerprint_
 
     assert contract.approval_preflight(approved) is True
     description = contract.approval_description(approved.tool_call, None, approved.runtime)
-    assert "diff 预览因上限截断" in description
+    assert "预览因上限截断" in description
     assert "[diff 因行数或字节上限截断]" in description
     assert "批准将提交本次调用已固定的完整拟议内容" in description
 

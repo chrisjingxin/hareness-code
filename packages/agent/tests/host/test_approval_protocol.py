@@ -14,16 +14,14 @@ from harness_agent.protocol.generated import ApprovalResponse
 from harness_agent.protocol.runtime import validate_interaction_params
 from harness_agent.host.run_coordinator import (
     ConnectionRef,
-    InteractionRequest,
-    InteractionResult,
     RunCoordinator,
     RunPreparation,
     RunState,
     StartRun,
-    _extract_interaction,
     _generate_permission_rule,
-    _resume_value,
 )
+from harness_agent.host.run_execution import _extract_interaction, _resume_value
+from harness_agent.runtime.interactions import InteractionRequest, InteractionResult
 
 
 def _assert_approval_params_schema_compliant(spec: InteractionRequest) -> None:
@@ -170,7 +168,7 @@ def _serial_spec(
 def _serial_run() -> RunState:
     """构造串行审批测试用的最小 RunState。"""
     return RunState(
-        start=StartRun(thread_id="thread-serial", run_id="run-serial", message="执行"),
+        start=StartRun(mode="build", thread_id="thread-serial", run_id="run-serial", message="执行"),
         owner=ConnectionRef("owner"),
         persistence=None,
         preparation=RunPreparation(),

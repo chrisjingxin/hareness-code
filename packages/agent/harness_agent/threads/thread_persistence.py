@@ -20,6 +20,7 @@ from typing import Any, AsyncIterator, Iterable, Literal, Mapping
 import aiosqlite
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
+from harness_agent.compose.models import ThreadMode
 from harness_agent.runtime.execution_binding import (
     ExecutionBindingError,
     LegacyModelBindings,
@@ -42,7 +43,7 @@ from harness_agent.threads.context_projection import (
 )
 from harness_agent.threads.runtime_state import RuntimeStateError, RuntimeStateSnapshot
 
-_SCHEMA_VERSION = 11
+_SCHEMA_VERSION = 16
 _MAX_PREVIEW_CHARS = 160
 _MAX_INLINE_TOOL_BYTES = 64 * 1024
 _TRANSCRIPT_KINDS = ("user", "assistant", "tool", "context")
@@ -822,6 +823,23 @@ def _migration_validate_legacy_source_schema_sync(
     # Team 状态表由 TeamStateStore 在较新的扩展分支中提前创建；它不改变
     # Thread schema 版本，但迁移时必须作为已知用户数据原样保留。
     allowed_tables.add("harness_team_runs")
+    # Compose 审计表由 v12 迁移创建；降级测试库或新版本库被误标旧版本时
+    # 必须按已知扩展对象保留，而不是当成未知表拒绝。
+    allowed_tables.add("harness_compose_runs")
+    allowed_tables.add("harness_compose_artifacts")
+    allowed_tables.add("harness_compose_activities")
+    allowed_tables.update(
+        {
+            "harness_thread_modes",
+            "harness_compose_work_items",
+            "harness_compose_work_item_documents",
+            "harness_compose_work_item_confirmations",
+            "harness_compose_work_item_activities",
+            "harness_compose_work_item_effects",
+            "harness_compose_work_item_evidence",
+            "harness_compose_work_item_run_bindings",
+        }
+    )
     if source_version >= 2:
         allowed_tables.add("harness_prompt_epochs")
     unknown = actual_tables - allowed_tables
@@ -2575,6 +2593,8 @@ class OpenThread:
     summary: ThreadSummary
     messages: tuple[ThreadMessage, ...]
     legacy_incomplete_history: bool = False
+    # Compose 有界 activity 审计；不进入模型 context，仅供 Timeline 恢复。
+    compose_activities: tuple[Mapping[str, object], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -2629,6 +2649,7 @@ class AcceptRun:
     message: str
     binding: RunExecutionBinding
     context_snapshot: RunContextSnapshot | None = None
+    mode: ThreadMode = ThreadMode.BUILD
 
 
 @dataclass(frozen=True, slots=True)
@@ -2992,6 +3013,56 @@ class ThreadPersistence:
             lock=self._lock,
         )
 
+    def compose_artifact_store(self) -> "ComposeArtifactStore":
+        """返回借用同一连接和事务锁的项目级 Compose artifact 存储。"""
+        self._ensure_open()
+        from harness_agent.threads.compose_artifact_store import ComposeArtifactStore
+
+        return ComposeArtifactStore(
+            self._connection,
+            project_fingerprint=self._project_fingerprint,
+            lock=self._lock,
+        )
+
+    def compose_activity_store(self) -> "ComposeActivityStore":
+        """返回借用同一连接和事务锁的 Compose activity 审计存储。"""
+        self._ensure_open()
+        from harness_agent.threads.compose_activity_store import ComposeActivityStore
+
+        return ComposeActivityStore(
+            self._connection,
+            project_fingerprint=self._project_fingerprint,
+            lock=self._lock,
+        )
+
+    def compose_work_item_store(self) -> "ComposeWorkItemStore":
+        """返回借用同一 SQLite 事务边界的 ComposeWorkItem 事实存储。"""
+        self._ensure_open()
+        from harness_agent.threads.compose_work_item_store import ComposeWorkItemStore
+
+        return ComposeWorkItemStore(
+            self._connection,
+            project_fingerprint=self._project_fingerprint,
+            lock=self._lock,
+        )
+
+    async def append_compose_activity(self, record: "ComposeActivityRecord") -> None:
+        """追加一条 Compose activity；失败抛 ThreadPersistenceError 供上层 fail closed。"""
+        self._ensure_open()
+        from harness_agent.threads.compose_activity_store import (
+            ComposeActivityRecord,
+            ComposeActivityStoreError,
+        )
+
+        if not isinstance(record, ComposeActivityRecord):
+            raise ThreadPersistenceError("COMPOSE_ACTIVITY_RECORD_INVALID")
+        try:
+            await self.compose_activity_store().append(record)
+        except ComposeActivityStoreError as exc:
+            raise ThreadPersistenceError(str(exc)) from exc
+        except (aiosqlite.Error, TypeError, ValueError) as exc:
+            raise ThreadPersistenceError(f"COMPOSE_ACTIVITY_WRITE_FAILED: {exc}") from exc
+
     def graph_config(self, thread_id: str) -> dict[str, dict[str, str]]:
         """构造 LangGraph 所需的 thread_id 和 project 隔离 checkpoint namespace。"""
         return {
@@ -3005,7 +3076,10 @@ class ThreadPersistence:
         """原子受理一个 Run，并提交或复用 Context snapshot、索引和绑定。"""
         return RunAcceptance(
             created=await self._record_run_start(
-                command.message, command.binding, command.context_snapshot
+                command.message,
+                command.binding,
+                command.context_snapshot,
+                command.mode,
             ),
             binding=command.binding,
         )
@@ -3015,12 +3089,15 @@ class ThreadPersistence:
             message: str,
             binding: RunExecutionBinding,
             context_snapshot: RunContextSnapshot | None = None,
+            mode: ThreadMode = ThreadMode.BUILD,
     ) -> bool:
         """原子登记 snapshot、binding、Thread 索引和用户记录。"""
         self._ensure_open()
         thread_id = binding.thread_id
         run_id = binding.run_id
         now = binding.created_at_ms
+        if not isinstance(mode, ThreadMode):
+            raise ThreadPersistenceError("THREAD_MODE_INVALID")
         if context_snapshot is not None:
             self._validate_context_snapshot(context_snapshot, binding)
         elif binding.context_snapshot_id is not None:
@@ -3049,6 +3126,7 @@ class ThreadPersistence:
                 existing = await cursor.fetchone()
                 await cursor.close()
                 if existing is not None:
+                    await self._freeze_thread_mode_in_transaction(thread_id, mode, now)
                     if (
                             str(existing["requested_selection"]) == encoded_selection
                             and str(existing["actual_primary_binding"]) == encoded_primary
@@ -3099,6 +3177,7 @@ class ThreadPersistence:
                         preview,
                     ),
                 )
+                await self._freeze_thread_mode_in_transaction(thread_id, mode, now)
                 await self._append_transcript_in_transaction(
                     TranscriptAppend(
                         thread_id=thread_id,
@@ -3147,6 +3226,36 @@ class ThreadPersistence:
                         f"RUN_EXECUTION_BINDING_WRITE_FAILED: {exc}"
                     ) from exc
                 raise
+
+    async def _freeze_thread_mode_in_transaction(
+            self,
+            thread_id: str,
+            mode: ThreadMode,
+            created_at_ms: int,
+    ) -> None:
+        """在 Run 受理事务内首次写入 mode，后续不同 mode 一律拒绝。"""
+        cursor = await self._connection.execute(
+            """
+            SELECT mode
+            FROM harness_thread_modes
+            WHERE project_fingerprint = ? AND thread_id = ?
+            """,
+            (self._project_fingerprint, thread_id),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is not None:
+            if str(row["mode"]) != mode.value:
+                raise ThreadPersistenceError("THREAD_MODE_LOCKED")
+            return
+        await self._connection.execute(
+            """
+            INSERT INTO harness_thread_modes (
+                project_fingerprint, thread_id, mode, created_at_ms
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (self._project_fingerprint, thread_id, mode.value, created_at_ms),
+        )
 
     def _validate_context_snapshot(
             self,
@@ -4751,6 +4860,17 @@ class ThreadPersistence:
             history_incomplete = bool(
                 metadata_row and metadata_row["legacy_incomplete_history"]
             )
+            from harness_agent.threads.compose_activity_store import activity_record_to_wire
+
+            activities = ()
+            try:
+                activities = tuple(
+                    activity_record_to_wire(item)
+                    for item in await self.compose_activity_store().list_for_thread(thread_id)
+                )
+            except Exception:
+                # 旧库无 activity 表或读取失败时不影响 Transcript 恢复。
+                activities = ()
             return OpenThread(
                 summary=_summary(summary_row),
                 messages=tuple(
@@ -4761,6 +4881,7 @@ class ThreadPersistence:
                     if message is not None
                 ),
                 legacy_incomplete_history=history_incomplete,
+                compose_activities=activities,
             )
         except ThreadPersistenceError:
             raise
@@ -5521,6 +5642,21 @@ class ThreadPersistence:
             if version < 11:
                 await self._add_context_runtime_state_column()
                 version = 11
+            if version < 12:
+                await self._add_compose_tables()
+                version = 12
+            if version < 13:
+                await self._add_compose_activity_table()
+                version = 13
+            if version < 14:
+                await self._add_compose_work_item_tables()
+                version = 14
+            if version < 15:
+                await self._add_compose_document_reference_columns()
+                version = 15
+            if version < 16:
+                await self._add_compose_confirmation_groups()
+                version = 16
             await self._connection.execute(f"PRAGMA user_version={version}")
             final_fingerprint = await self._database_fingerprint_async()
             await self._validate_final_database_async(final_fingerprint)
@@ -5841,6 +5977,21 @@ class ThreadPersistence:
         allowed_tables = set(required)
         # 见同步校验：Team 状态表是已知扩展对象，不参与 Thread schema 版本。
         allowed_tables.add("harness_team_runs")
+        allowed_tables.add("harness_compose_runs")
+        allowed_tables.add("harness_compose_artifacts")
+        allowed_tables.add("harness_compose_activities")
+        allowed_tables.update(
+            {
+                "harness_thread_modes",
+                "harness_compose_work_items",
+                "harness_compose_work_item_documents",
+                "harness_compose_work_item_confirmations",
+                "harness_compose_work_item_activities",
+                "harness_compose_work_item_effects",
+                "harness_compose_work_item_evidence",
+                "harness_compose_work_item_run_bindings",
+            }
+        )
         if source_version >= 2:
             allowed_tables.add("harness_prompt_epochs")
         if actual_tables - allowed_tables:
@@ -6086,6 +6237,173 @@ class ThreadPersistence:
             required.append(("harness_compression_checkpoints", ("commit_payload",)))
         if version >= 11:
             required.append(("harness_context_state", ("runtime_state",)))
+        if version >= 12:
+            required.extend(
+                [
+                    (
+                        "harness_compose_runs",
+                        (
+                            "project_fingerprint",
+                            "run_id",
+                            "revision",
+                            "stage",
+                            "status",
+                            "stages_json",
+                            "stage_attempts_json",
+                            "schema_retry_used_json",
+                            "tasks_json",
+                            "evidence_json",
+                            "terminal_count",
+                            "updated_at_ms",
+                        ),
+                    ),
+                    (
+                        "harness_compose_artifacts",
+                        (
+                            "project_fingerprint",
+                            "run_id",
+                            "artifact_id",
+                            "kind",
+                            "version",
+                            "source_execution_id",
+                            "created_at_ms",
+                            "payload_json",
+                            "content_digest",
+                        ),
+                    ),
+                ]
+            )
+        if version >= 13:
+            required.append(
+                (
+                    "harness_compose_activities",
+                    (
+                        "project_fingerprint",
+                        "run_id",
+                        "event_sequence",
+                        "activity_id",
+                        "stage",
+                        "attempt",
+                        "kind",
+                        "label",
+                        "status",
+                        "created_at_ms",
+                        "encoded_bytes",
+                        "truncated_flag",
+                    ),
+                )
+            )
+        if version >= 14:
+            required.extend(
+                [
+                    (
+                        "harness_thread_modes",
+                        ("project_fingerprint", "thread_id", "mode", "created_at_ms"),
+                    ),
+                    (
+                        "harness_compose_work_items",
+                        (
+                            "project_fingerprint",
+                            "work_item_id",
+                            "thread_id",
+                            "slug",
+                            "goal",
+                            "status",
+                            "revision",
+                            "amends_work_item_id",
+                            "created_at_ms",
+                            "updated_at_ms",
+                            "terminal_at_ms",
+                        ),
+                    ),
+                    (
+                        "harness_compose_work_item_documents",
+                        (
+                            "project_fingerprint",
+                            "work_item_id",
+                            "document_kind",
+                            "relative_path",
+                            "current_digest",
+                            "confirmed_digest",
+                            "updated_at_ms",
+                        ),
+                    ),
+                    (
+                        "harness_compose_work_item_confirmations",
+                        (
+                            "project_fingerprint",
+                            "work_item_id",
+                            "confirmation_kind",
+                            "document_digest",
+                            "confirmed_at_ms",
+                        ),
+                    ),
+                    (
+                        "harness_compose_work_item_activities",
+                        (
+                            "project_fingerprint",
+                            "activity_id",
+                            "work_item_id",
+                            "run_id",
+                            "kind",
+                            "status",
+                            "attempt",
+                            "started_at_ms",
+                            "finished_at_ms",
+                        ),
+                    ),
+                    (
+                        "harness_compose_work_item_effects",
+                        (
+                            "project_fingerprint",
+                            "effect_key",
+                            "work_item_id",
+                            "activity_id",
+                            "intent_json",
+                            "receipt_json",
+                            "status",
+                            "created_at_ms",
+                            "updated_at_ms",
+                        ),
+                    ),
+                    (
+                        "harness_compose_work_item_evidence",
+                        (
+                            "project_fingerprint",
+                            "evidence_id",
+                            "work_item_id",
+                            "evidence_kind",
+                            "content_digest",
+                            "payload_json",
+                            "created_at_ms",
+                        ),
+                    ),
+                    (
+                        "harness_compose_work_item_run_bindings",
+                        (
+                            "project_fingerprint",
+                            "thread_id",
+                            "run_id",
+                            "work_item_id",
+                            "created_at_ms",
+                        ),
+                    ),
+                ]
+            )
+        if version >= 15:
+            required.append(
+                (
+                    "harness_compose_work_item_documents",
+                    ("current_revision", "lineage_json"),
+                )
+            )
+        if version >= 16:
+            required.append(
+                (
+                    "harness_compose_work_item_confirmations",
+                    ("confirmation_id", "decision"),
+                )
+            )
 
         for table_name, expected_columns in required:
             actual_columns = await self._table_columns_async(table_name)
@@ -6117,6 +6435,22 @@ class ThreadPersistence:
             required_indexes.append("harness_run_context_snapshots_thread_created")
         if version >= 9:
             required_indexes.append("harness_compression_checkpoints_latest")
+        if version >= 12:
+            required_indexes.append("harness_compose_runs_thread_updated")
+            required_indexes.append("harness_compose_artifacts_run_created")
+        if version >= 13:
+            required_indexes.append("harness_compose_activities_run_seq")
+            required_indexes.append("harness_compose_activities_thread_created")
+        if version >= 14:
+            required_indexes.extend(
+                [
+                    "harness_compose_work_items_one_active",
+                    "harness_compose_work_items_thread_updated",
+                    "harness_compose_work_item_run_bindings_item",
+                ]
+            )
+        if version >= 16:
+            required_indexes.append("harness_compose_work_item_confirmations_gate")
         for index_name in required_indexes:
             cursor = await self._connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
@@ -6128,6 +6462,57 @@ class ThreadPersistence:
                 raise ThreadPersistenceError(
                     f"CHECKPOINT_MIGRATION_SOURCE_SCHEMA_INVALID:{index_name}"
                 )
+        if version >= 14:
+            await self._validate_work_item_active_index_async()
+
+    async def _validate_work_item_active_index_async(self) -> None:
+        """校验唯一 nonterminal 索引的语义，不能只因同名索引存在便放行。"""
+        cursor = await self._connection.execute(
+            "PRAGMA index_list(harness_compose_work_items)"
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        active_index = next(
+            (
+                row
+                for row in rows
+                if str(row[1]) == "harness_compose_work_items_one_active"
+            ),
+            None,
+        )
+        if active_index is None or int(active_index[2]) != 1 or int(active_index[4]) != 1:
+            raise ThreadPersistenceError(
+                "CHECKPOINT_MIGRATION_SOURCE_SCHEMA_INVALID:"
+                "harness_compose_work_items_one_active"
+            )
+        cursor = await self._connection.execute(
+            "PRAGMA index_info(harness_compose_work_items_one_active)"
+        )
+        columns = tuple(str(row[2]) for row in await cursor.fetchall())
+        await cursor.close()
+        if columns != ("project_fingerprint", "thread_id"):
+            raise ThreadPersistenceError(
+                "CHECKPOINT_MIGRATION_SOURCE_SCHEMA_INVALID:"
+                "harness_compose_work_items_one_active"
+            )
+        cursor = await self._connection.execute(
+            """
+            SELECT sql
+            FROM sqlite_master
+            WHERE type = 'index' AND name = 'harness_compose_work_items_one_active'
+            """
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        normalized_sql = _migration_normalize_sql(str(row["sql"])) if row else None
+        if (
+            normalized_sql is None
+            or "where status in ('active','waiting_user','blocked')" not in normalized_sql
+        ):
+            raise ThreadPersistenceError(
+                "CHECKPOINT_MIGRATION_SOURCE_SCHEMA_INVALID:"
+                "harness_compose_work_items_one_active"
+            )
 
     async def _validate_final_database_async(
             self,
@@ -7251,6 +7636,357 @@ class ThreadPersistence:
                     ADD COLUMN runtime_state TEXT NOT NULL DEFAULT '{}'
                 """
             )
+
+    async def _add_compose_tables(self) -> None:
+        """v12 为 Compose 工作模式增加只读审计表；正文不进 Transcript。"""
+        await self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS harness_compose_runs
+            (
+                project_fingerprint TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                stage TEXT NOT NULL,
+                status TEXT NOT NULL,
+                stages_json TEXT NOT NULL,
+                stage_attempts_json TEXT NOT NULL,
+                schema_retry_used_json TEXT NOT NULL,
+                tasks_json TEXT NOT NULL,
+                evidence_json TEXT NOT NULL,
+                understanding_artifact_id TEXT,
+                plan_artifact_id TEXT,
+                verification_evidence_id TEXT,
+                review_report_id TEXT,
+                verify_fix_round INTEGER NOT NULL,
+                review_fix_round INTEGER NOT NULL,
+                blocked_reason TEXT,
+                terminal_count INTEGER NOT NULL DEFAULT 0,
+                updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (project_fingerprint, run_id)
+            )
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS harness_compose_runs_thread_updated
+                ON harness_compose_runs(project_fingerprint, thread_id, updated_at_ms DESC)
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS harness_compose_artifacts
+            (
+                project_fingerprint TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                artifact_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                source_execution_id TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                payload_json TEXT NOT NULL,
+                content_digest TEXT NOT NULL,
+                PRIMARY KEY (project_fingerprint, run_id, artifact_id)
+            )
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS harness_compose_artifacts_run_created
+                ON harness_compose_artifacts(project_fingerprint, run_id, created_at_ms)
+            """
+        )
+
+    async def _add_compose_activity_table(self) -> None:
+        """v13：Compose 有界 activity 审计表；与 Transcript/context 隔离。"""
+        await self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS harness_compose_activities
+            (
+                project_fingerprint TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                event_sequence INTEGER NOT NULL,
+                activity_id TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                task_id TEXT,
+                task_title TEXT,
+                attempt INTEGER NOT NULL,
+                execution_id TEXT,
+                agent_id TEXT,
+                kind TEXT NOT NULL,
+                label TEXT NOT NULL,
+                status TEXT NOT NULL,
+                bounded_text TEXT,
+                created_at_ms INTEGER NOT NULL,
+                encoded_bytes INTEGER NOT NULL DEFAULT 0,
+                truncated_flag INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (project_fingerprint, run_id, event_sequence, activity_id, kind, label)
+            )
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS harness_compose_activities_run_seq
+                ON harness_compose_activities(project_fingerprint, run_id, event_sequence)
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS harness_compose_activities_thread_created
+                ON harness_compose_activities(project_fingerprint, created_at_ms)
+            """
+        )
+
+    async def _add_compose_work_item_tables(self) -> None:
+        """v14 建立 Work Item 事实表；不读取或迁移旧 ComposeRun 作为 fallback。"""
+        await self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS harness_thread_modes
+            (
+                project_fingerprint TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                mode TEXT NOT NULL CHECK (mode IN ('build', 'compose')),
+                created_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (project_fingerprint, thread_id)
+            )
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS harness_compose_work_items
+            (
+                project_fingerprint TEXT NOT NULL,
+                work_item_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                slug TEXT NOT NULL,
+                goal TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (
+                    status IN ('active', 'waiting_user', 'blocked', 'completed', 'abandoned')
+                ),
+                revision INTEGER NOT NULL,
+                amends_work_item_id TEXT,
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                terminal_at_ms INTEGER,
+                PRIMARY KEY (project_fingerprint, work_item_id),
+                UNIQUE (project_fingerprint, thread_id, slug)
+            )
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS harness_compose_work_items_one_active
+                ON harness_compose_work_items(project_fingerprint, thread_id)
+                WHERE status IN ('active', 'waiting_user', 'blocked')
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS harness_compose_work_items_thread_updated
+                ON harness_compose_work_items(
+                    project_fingerprint, thread_id, updated_at_ms DESC
+                )
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS harness_compose_work_item_documents
+            (
+                project_fingerprint TEXT NOT NULL,
+                work_item_id TEXT NOT NULL,
+                document_kind TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                current_digest TEXT,
+                confirmed_digest TEXT,
+                current_revision INTEGER NOT NULL DEFAULT 0,
+                lineage_json TEXT NOT NULL DEFAULT '[]',
+                updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (project_fingerprint, work_item_id, document_kind)
+            )
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS harness_compose_work_item_confirmations
+            (
+                project_fingerprint TEXT NOT NULL,
+                work_item_id TEXT NOT NULL,
+                confirmation_id TEXT NOT NULL,
+                confirmation_kind TEXT NOT NULL,
+                document_digest TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                confirmed_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (
+                    project_fingerprint, work_item_id, confirmation_id, document_digest
+                )
+            )
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS harness_compose_work_item_confirmations_gate
+                ON harness_compose_work_item_confirmations(
+                    project_fingerprint, work_item_id, confirmation_kind,
+                    confirmation_id, confirmed_at_ms
+                )
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS harness_compose_work_item_activities
+            (
+                project_fingerprint TEXT NOT NULL,
+                activity_id TEXT NOT NULL,
+                work_item_id TEXT NOT NULL,
+                run_id TEXT,
+                kind TEXT NOT NULL,
+                status TEXT NOT NULL,
+                attempt INTEGER NOT NULL,
+                started_at_ms INTEGER NOT NULL,
+                finished_at_ms INTEGER,
+                PRIMARY KEY (project_fingerprint, activity_id)
+            )
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS harness_compose_work_item_effects
+            (
+                project_fingerprint TEXT NOT NULL,
+                effect_key TEXT NOT NULL,
+                work_item_id TEXT NOT NULL,
+                activity_id TEXT,
+                intent_json TEXT NOT NULL,
+                receipt_json TEXT,
+                status TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (project_fingerprint, effect_key)
+            )
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS harness_compose_work_item_evidence
+            (
+                project_fingerprint TEXT NOT NULL,
+                evidence_id TEXT NOT NULL,
+                work_item_id TEXT NOT NULL,
+                evidence_kind TEXT NOT NULL,
+                content_digest TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (project_fingerprint, evidence_id)
+            )
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS harness_compose_work_item_run_bindings
+            (
+                project_fingerprint TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                work_item_id TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (project_fingerprint, thread_id, run_id)
+            )
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS harness_compose_work_item_run_bindings_item
+                ON harness_compose_work_item_run_bindings(
+                    project_fingerprint, work_item_id, created_at_ms
+                )
+            """
+        )
+
+    async def _add_compose_document_reference_columns(self) -> None:
+        """v15 补齐文档 revision/lineage，旧摘要不复制为 Markdown 正文。"""
+        cursor = await self._connection.execute(
+            "PRAGMA table_info(harness_compose_work_item_documents)"
+        )
+        columns = {str(row[1]) for row in await cursor.fetchall()}
+        await cursor.close()
+        if "current_revision" not in columns:
+            await self._connection.execute(
+                """
+                ALTER TABLE harness_compose_work_item_documents
+                    ADD COLUMN current_revision INTEGER NOT NULL DEFAULT 0
+                """
+            )
+        if "lineage_json" not in columns:
+            await self._connection.execute(
+                """
+                ALTER TABLE harness_compose_work_item_documents
+                    ADD COLUMN lineage_json TEXT NOT NULL DEFAULT '[]'
+                """
+            )
+
+    async def _add_compose_confirmation_groups(self) -> None:
+        """v16 为每次 typed confirmation 固定 digest group，拒绝历史并集伪造门禁。"""
+        cursor = await self._connection.execute(
+            "PRAGMA table_info(harness_compose_work_item_confirmations)"
+        )
+        columns = {str(row[1]) for row in await cursor.fetchall()}
+        await cursor.close()
+        if {"confirmation_id", "decision"} <= columns:
+            await self._connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS harness_compose_work_item_confirmations_gate
+                    ON harness_compose_work_item_confirmations(
+                        project_fingerprint, work_item_id, confirmation_kind,
+                        confirmation_id, confirmed_at_ms
+                    )
+                """
+            )
+            return
+        await self._connection.execute(
+            """
+            CREATE TABLE harness_compose_work_item_confirmations_v16
+            (
+                project_fingerprint TEXT NOT NULL,
+                work_item_id TEXT NOT NULL,
+                confirmation_id TEXT NOT NULL,
+                confirmation_kind TEXT NOT NULL,
+                document_digest TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                confirmed_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (
+                    project_fingerprint, work_item_id, confirmation_id, document_digest
+                )
+            )
+            """
+        )
+        await self._connection.execute(
+            """
+            INSERT INTO harness_compose_work_item_confirmations_v16 (
+                project_fingerprint, work_item_id, confirmation_id,
+                confirmation_kind, document_digest, decision, confirmed_at_ms
+            )
+            SELECT project_fingerprint, work_item_id,
+                   'legacy:' || confirmation_kind,
+                   confirmation_kind, document_digest, 'legacy_unverified', confirmed_at_ms
+            FROM harness_compose_work_item_confirmations
+            """
+        )
+        await self._connection.execute("DROP TABLE harness_compose_work_item_confirmations")
+        await self._connection.execute(
+            """
+            ALTER TABLE harness_compose_work_item_confirmations_v16
+                RENAME TO harness_compose_work_item_confirmations
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE INDEX harness_compose_work_item_confirmations_gate
+                ON harness_compose_work_item_confirmations(
+                    project_fingerprint, work_item_id, confirmation_kind,
+                    confirmation_id, confirmed_at_ms
+                )
+            """
+        )
 
     async def _add_context_snapshot_column(self) -> None:
         """为旧 Run binding 增加可为空的 snapshot 引用，兼容降级库。"""

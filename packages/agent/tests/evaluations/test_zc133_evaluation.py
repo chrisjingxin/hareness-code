@@ -89,7 +89,7 @@ def test_simulator_fail_closed_scenarios_do_not_write() -> None:
 
 
 def test_exact_string_replay_initializes_only_the_empty_document() -> None:
-    """ZC-138 空 fixture 可完成，非空文件的空匹配仍稳定拒绝。"""
+    """HC-141 空 fixture 可完成，非空文件的空匹配仍稳定拒绝。"""
     empty = next(item for item in fixture_catalog() if item.fixture_id == "empty-file-insert")
     simulator = InMemoryEditSimulator(empty)
     assert simulator.read(

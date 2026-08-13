@@ -60,7 +60,10 @@ export function Composer(props: Pick<SharedViewProps, "interactive" | "terminalW
   ) : null
 
   const isHome = props.variant === "home"
-  const modeBadgeLabel = props.interactive.runtime.approvalMode === "yolo" ? "Yolo" : "Build"
+  // Work Mode 与 Approval Mode 是两种正交选择；徽标同时展示，避免把
+  // Compose 误解为自动授权。
+  const workModeLabel = props.interactive.workMode === "compose" ? "Compose" : "Build"
+  const modeBadgeLabel = `${workModeLabel} · ${approvalModeLabel(props.interactive.runtime)}`
 
   return (
     <box position="relative" flexDirection="column" flexShrink={0}>
@@ -218,6 +221,9 @@ function RuntimeMeta(props: { interactive: SharedViewProps["interactive"]; varia
         <text fg={runtime.modelConfigured ? tuiTheme.text : tuiTheme.warning}>模型：{model}</text>
         <box flexDirection="row" gap={1}>
           {showApprovalHint ? <text fg={tuiTheme.subtle}>Shift+Tab</text> : null}
+          <text fg={props.interactive.workMode === "compose" ? tuiTheme.primary : tuiTheme.muted}>
+            {props.interactive.workMode === "compose" ? "Compose" : "Build"}
+          </text>
           <text fg={runtime.approvalMode === "yolo" ? tuiTheme.warning : tuiTheme.muted}>{approvalModeLabel(runtime)}</text>
         </box>
       </box>

@@ -48,6 +48,118 @@ test("Browser CSP 禁止动态代码时仍可校验 initialize", () => {
   }
 })
 
+test("run.start 必填工作模式且拒绝未知模式", () => {
+  const base = { message: "检查", thread_id: "thread-1", run_id: "run-1" }
+  expect(() => validateOperationParams("run.start", base)).toThrow()
+  expect(() => validateOperationParams("run.start", { ...base, mode: "yolo" })).toThrow()
+  expect(() => validateOperationParams("run.start", { ...base, mode: "compose" })).not.toThrow()
+})
+
+test("run.started 回传实际工作模式", () => {
+  const envelope = (payload: Record<string, unknown>) => ({
+    event_id: "e-started",
+    type: "run.started",
+    thread_id: "t",
+    run_id: "r",
+    sequence: 1,
+    timestamp_ms: 1,
+    payload,
+  })
+  expect(() => assertEventEnvelope(envelope({ resumed: false }))).toThrow()
+  expect(() => assertEventEnvelope(envelope({ resumed: false, mode: "compose" }))).not.toThrow()
+})
+
+test("compose_scope 与 compose.summary 合法；非法 scope 与越界摘要被拒绝", () => {
+  const scope = {
+    activity_id: "act-understand-1",
+    stage: "understand",
+    attempt: 1,
+    task_id: "task-1",
+    task_title: "梳理需求",
+  }
+  const progress = (compose_scope?: Record<string, unknown>) => ({
+    event_id: "e-scope",
+    type: "run.progress",
+    thread_id: "t",
+    run_id: "r",
+    sequence: 1,
+    timestamp_ms: 1,
+    payload: { phase: "model", elapsed_ms: 10 },
+    ...(compose_scope ? { compose_scope } : {}),
+  })
+  expect(() => assertEventEnvelope(progress(scope))).not.toThrow()
+  expect(() => assertEventEnvelope(progress())).not.toThrow()
+  expect(() => assertEventEnvelope(progress({ activity_id: "", stage: "understand", attempt: 1 }))).toThrow()
+  expect(() => assertEventEnvelope(progress({ activity_id: "a1", stage: "deploy", attempt: 1 }))).toThrow()
+  expect(() => assertEventEnvelope(progress({ activity_id: "a1", stage: "plan", attempt: 0 }))).toThrow()
+  expect(() => assertEventEnvelope({
+    event_id: "e-sum",
+    type: "compose.summary",
+    thread_id: "t",
+    run_id: "r",
+    sequence: 1,
+    timestamp_ms: 1,
+    compose_scope: scope,
+    payload: { status: "passed", text: "阶段完成" },
+  })).not.toThrow()
+  expect(() => assertEventEnvelope({
+    event_id: "e-sum-long",
+    type: "compose.summary",
+    thread_id: "t",
+    run_id: "r",
+    sequence: 1,
+    timestamp_ms: 1,
+    compose_scope: scope,
+    payload: { status: "passed", text: "x".repeat(1001) },
+  })).toThrow()
+})
+
+test("scoped Interaction 可携带 execution provenance 与 compose_scope", () => {
+  expect(() => validateInteractionParams("interaction.approval", {
+    thread_id: "t",
+    run_id: "r",
+    timeout_ms: 30_000,
+    execution_id: "child-1",
+    parent_execution_id: "root-1",
+    agent_id: "builder",
+    compose_scope: { activity_id: "act-1", stage: "build", attempt: 2, task_id: "t1" },
+    payload: {
+      interrupt_id: "int-1",
+      description: "run tests",
+      requests: { action_requests: [] },
+      decisions: ["approve_once", "reject"],
+    },
+  })).not.toThrow()
+})
+
+test("compose.state projection 严格有界且 revision 单调", () => {
+  const payload = {
+    revision: 3,
+    stage: "build",
+    status: "running",
+    stages: [{ id: "understand", status: "passed", attempts: 1 }],
+    tasks: [{ id: "task-1", title: "实现搜索", status: "running" }],
+    evidence: [{ label: "pytest -q tests/foo", status: "passed" }],
+  }
+  const envelope = (value: unknown) => ({
+    event_id: "e-compose",
+    type: "compose.state",
+    thread_id: "t",
+    run_id: "r",
+    sequence: 1,
+    timestamp_ms: 1,
+    payload: value,
+  })
+  expect(() => assertEventEnvelope(envelope(payload))).not.toThrow()
+  expect(() => assertEventEnvelope(envelope({ ...payload, extra: true }))).toThrow()
+  expect(() => assertEventEnvelope(envelope({ ...payload, stage: "deploy" }))).toThrow()
+  expect(() => assertEventEnvelope(envelope({ ...payload, revision: -1 }))).toThrow()
+  expect(() => assertEventEnvelope(envelope({
+    ...payload,
+    stages: [{ id: "understand", status: "passed", attempts: 1, extra: true }],
+  }))).toThrow()
+})
+
 test("interaction.approval 接受严格 file_diff presentation 并拒绝未知字段", () => {
   const params = {
     thread_id: "thread",

@@ -8,7 +8,7 @@ import type { AgentGateway, Clock, IdGenerator, IntentOutcome, InteractiveConfir
 import { createFallbackNoopGateway } from "./ports"
 import { cryptoIdGenerator, systemClock, systemScheduler } from "../infrastructure"
 import type { InteractiveRuntime } from "./runtime"
-import { appendNotice, clearThread, createInitialState, finishContextCompaction, startContextCompaction, type InteractiveState } from "./state"
+import { appendNotice, clearThread, createInitialState, finishContextCompaction, setWorkMode, startContextCompaction, type InteractiveState } from "./state"
 export class InteractiveControllerImpl implements InteractiveController {
   private readonly gateway: AgentGateway
   private readonly clock: Clock
@@ -24,6 +24,7 @@ export class InteractiveControllerImpl implements InteractiveController {
   private connection: InteractiveConnectionState = { status: "open" }
   private confirmation: InteractiveConfirmation | null = null
   private closed = false
+  private compactInFlight = false
 
   // 九大 Feature 子模块实作
   private readonly catalogFeature = new CatalogFeature()
@@ -168,6 +169,12 @@ export class InteractiveControllerImpl implements InteractiveController {
           return { status: "rejected", code: "busy", message: "任务运行中或存在待处理交互，暂不能切换审批模式" }
         }
         return this.runFeature.cycleApprovalMode(this.featureContext)
+      case "work-mode.cycle":
+        if (this.state.activeRun || this.hasPendingInteraction || this.state.activity.kind === "cancelling" || this.compactInFlight) {
+          return { status: "rejected", code: "busy", message: "任务运行中、上下文压缩中或存在待处理交互，暂不能切换工作模式" }
+        }
+        this.commit(current => setWorkMode(current, current.workMode === "build" ? "compose" : "build"))
+        return { status: "accepted" }
       case "run.cancel":
         return this.runFeature.cancelActiveRun(this.featureContext, () => this.interactionFeature.abandonPendingInteraction(this.featureContext))
 
@@ -201,6 +208,8 @@ export class InteractiveControllerImpl implements InteractiveController {
 
     const message = resolution.kind === "escaped" ? resolution.message : value
     return this.runFeature.startRun(message, this.featureContext, {
+      // 下一次 Run 的工作模式由共享状态决定，受理后冻结。
+      mode: this.state.workMode,
       requestedModelProfileId: this.modelFeature.requestedModelProfileId,
       armedSkill: this.skillFeature.armedSkill,
       onEvent: event => this.timelineFeature.processAgentEvent(event, this.featureContext),
@@ -242,6 +251,10 @@ export class InteractiveControllerImpl implements InteractiveController {
         await this.catalogFeature.refreshCatalog(result.target, this.featureContext, id => this.adoptThreadSelection(id))
         return { status: "accepted", effects: [{ type: "present", target: result.target, initialQuery: result.initialQuery }] }
       case "compact":
+        if (this.compactInFlight) {
+          return { status: "rejected", code: "busy", message: "上下文正在压缩，请等待当前操作完成" }
+        }
+        this.compactInFlight = true
         this.commit(startContextCompaction)
         try {
           const compacted = await this.gateway.compactContext(result.threadId)
@@ -249,6 +262,7 @@ export class InteractiveControllerImpl implements InteractiveController {
         } catch (error) {
           this.commit(current => appendNotice(current, `上下文压缩失败：${error instanceof Error ? error.message : String(error)}`))
         } finally {
+          this.compactInFlight = false
           this.commit(finishContextCompaction)
         }
         return { status: "accepted" }
@@ -333,6 +347,10 @@ export class InteractiveControllerImpl implements InteractiveController {
       catalogs: { threads: publicCatalog(this.catalogFeature.state.threads), models: publicCatalog(this.catalogFeature.state.models), skills: publicCatalog(this.catalogFeature.state.skills), mcp: publicCatalog(this.catalogFeature.state.mcp) },
       commands: this.commandFeature.buildCommandItems(this.catalogFeature.state.skills.items, this.featureContext, this.hasPendingInteraction),
       selection: { requestedModelProfileId: this.modelFeature.requestedModelProfileId, actualModel: this.modelFeature.actualModelProfile ?? null, armedSkill: this.skillFeature.armedSkill ?? null },
+      workMode: this.state.workMode,
+      composeState: this.state.composeState,
+      workItem: this.state.workItem,
+      threadMode: this.state.threadMode,
     }
   }
 }

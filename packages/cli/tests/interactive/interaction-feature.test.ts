@@ -24,6 +24,7 @@ test("approval 校验 decisions allowlist，reject_with_feedback 携带反馈", 
       response: { kind: "approval", decision: "reject_with_feedback", feedback: "理由不足" },
     })
     expect(await responsePromise).toMatchObject({ type: "approval", request_id: "approval-1", decision: "reject_with_feedback", feedback: "理由不足" })
+    expect(harness.controller.getSnapshot().timeline.find(item => item.type === "interaction")?.interaction.status).toBe("rejected")
   } finally {
     await harness.controller.close()
   }
@@ -99,6 +100,7 @@ test("question 完整 schema：多题、多选、other answer 与非法响应", 
       response: { kind: "question", answers: { scope: ["自由文本"], level: ["shallow", "deep"] } },
     })
     expect(await responsePromise).toMatchObject({ answers: { scope: ["自由文本"], level: ["shallow", "deep"] } })
+    expect(harness.controller.getSnapshot().timeline.find(item => item.type === "interaction")?.interaction.status).toBe("answered")
 
     // stale request ID 不产生 RPC：新的 Interaction 到达后仍保持 pending。
     const stalePromise = harness.port.sendInteraction(questionRequest(run.threadId, run.runId))
@@ -133,6 +135,7 @@ test("Interaction timeout 按 scheduler 收敛为 fail-closed 响应", async () 
     await flush()
     const snapshot = harness.controller.getSnapshot()
     expect(snapshot.interaction).toBeNull()
+    expect(snapshot.timeline.find(item => item.type === "interaction")?.interaction.status).toBe("cancelled")
     expect(await responsePromise).toMatchObject({ type: "approval", decision: "reject" })
   } finally {
     await harness.controller.close()

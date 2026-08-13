@@ -18,8 +18,6 @@ from langchain.tools.tool_node import ToolCallRequest
 
 from harness_agent.runtime.agent_catalog import DelegationPolicy
 from harness_agent.runtime.agent_execution import AgentExecutionRegistry, ExecutionRegistryError
-from harness_agent.runtime.agent_engine import AgentEngine, AgentEnginePool
-from harness_agent.runtime.agent_engine_profile import AgentEngineProfile
 from harness_agent.runtime.execution_binding import (
     AgentExecutionBinding,
     ExecutionMode,
@@ -63,12 +61,6 @@ class DelegateAgent:
 
 
 DelegationRunner = Callable[[DelegateAgent], Awaitable[Mapping[str, Any]]]
-ManagedInvocation = Callable[
-    [AgentEngine, DelegateAgent],
-    Awaitable[Mapping[str, Any]],
-]
-
-
 @dataclass(frozen=True, slots=True)
 class DelegationTarget:
     """由 Host 注册的可信 Agent target；执行模式不接受模型覆盖。"""
@@ -328,28 +320,6 @@ class AgentDelegator:
         if current.status is ExecutionStatus.PENDING and status is not ExecutionStatus.CANCELLED:
             await self._registry.start(ref)
         await self._registry.finalize(ref, status=status)
-
-
-def managed_engine_runner(
-    pool: AgentEnginePool,
-    profile: AgentEngineProfile,
-    invoke: ManagedInvocation,
-) -> DelegationRunner:
-    """创建 Managed adapter：复用 Profile 图并在所有终态释放 run/engine lease。"""
-    if not callable(invoke):
-        raise AgentDelegationError("DELEGATION_MANAGED_INVOKER_INVALID")
-
-    async def run(command: DelegateAgent) -> Mapping[str, Any]:
-        lease = await pool.acquire(profile)
-        run_lease = await lease.run()
-        try:
-            return await invoke(lease.engine, command)
-        finally:
-            await run_lease.release()
-            await lease.release()
-            await pool.finalize_draining(profile.profile_key)
-
-    return run
 
 
 def child_execution_ref(command: DelegateAgent) -> ExecutionRef:

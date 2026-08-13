@@ -1,0 +1,113 @@
+# HC-138 执行 Todo：Build / Compose 双工作模式
+
+关联任务：[HC-138](../task/HC-138-建立BuildCompose双.md)  
+设计依据：[HC-138 Design](../spec/HC-138-建立BuildCompose双.md)  
+实施顺序：[HC-138 Plan](../plan/HC-138-建立BuildCompose双.md)
+
+## 使用规则
+
+- 本文件只跟踪 HC-138 内部执行工作包，不创建新的 `ZC-*` Task。
+- 严格按 Plan 的依赖顺序执行；允许并行的只有 1 完成后的 2/3/8，以及共享 Core 固定后的 TUI/Web 实现。
+- 每个工作包必须同时完成生产改动、focused tests 和验收证据，不能先勾代码、以后补测试。
+- 若需要决定新的 Protocol、数据形状、生命周期、权限或错误语义，停止并先修订 Design/Plan/Todo。
+- 多 Thread 接力时在 `tmp/handoff.md` 记录当前工作包、未提交范围和已运行验证，不复制 Design 内容。
+
+## Phase A：Contract 与 Foundation
+
+### 工作包 1：Mode、Projection 与 Run 身份契约
+
+- [x] 修改 `packages/protocol/schema/v3.json`：`run.start.mode` 必填、`run.started.mode` 必填、新增严格 `compose.state` projection；Mode 加入 Run fingerprint。
+- [x] 运行 `bun run protocol:generate`，迁移全部 TS/Python/fixture/IPC/Host 调用方，不保留缺省 Mode fallback。
+- [x] 增加未知 mode、未知字段、revision、payload bound、同 Run 不同 Mode 冲突的 contract tests。
+- [x] 运行 `bun run protocol:check`、Python protocol/Host tests 和 TS IPC tests；预期生成物一致且 Build/Compose identity 均可验证。
+
+### 工作包 2：共享 Run execution adapter seam
+
+- [x] 新建最小 `RunExecutionAdapter` / lifecycle port，把现有 Build stream 迁入 `BuildRunAdapter`，Compose 先接入可测试空壳。
+- [x] 保持 `RunCoordinator` 唯一拥有 owner、busy、取消、Interaction、sequence、Transcript、资源释放和 terminal。
+- [x] 增加 fake adapter contract、malformed terminal、取消传播和 Build parity 回归。
+- [x] 运行 RunCoordinator、AgentHost、Approval 与资源生命周期 focused tests；预期现有 Build event ordering 和终态无变化。
+
+### 工作包 3：Compose 状态、Artifact 与持久化
+
+- [x] 实现纯状态机与严格 artifact model，覆盖合法/非法 transition、revision、attempt/budget 和所有终态。
+- [x] 增加 Compose SQLite store/table 和 schema migration，复用 ThreadPersistence 的 connection、lock、backup、fingerprint、restore 流程。
+- [x] 明确 Transcript/ContextArtifact/ComposeArtifact 隔离，限制 artifact 字段、条数、字节和 digest；历史 running 状态不恢复成 active Run。
+- [x] 运行 Compose state/store 与 ThreadPersistence 全量测试；预期旧数据保留、迁移失败可恢复、并发写无部分事实。
+
+### Checkpoint A
+
+- [x] `bun run protocol:check` 通过。
+- [x] Build adapter parity、Compose state/store 和数据库 migration tests 通过。
+- [x] 强模型复核 Protocol、Run seam、schema migration 和事实源边界，同意进入 Phase B。
+
+## Phase B：完整 Compose Agent Workflow
+
+### 工作包 4：Understand → Plan → 用户确认
+
+- [x] 实现 ContextPackBuilder、StageAgentPort、understand/plan 私有方法资产和 fresh Managed execution。
+- [x] 可发现事实由 Agent 查询；真实产品决策通过 question Interaction；Plan 支持批准、携 feedback 修改、取消。
+- [x] 校验 Understanding/Plan artifact、DAG、acceptance、verification 和一次 malformed schema retry；发布 revision 递增 projection。
+- [x] 运行 `tests/compose/test_understand_plan.py`、Interaction 和 delegation tests；预期未批准前无 Builder 写入。
+
+### 工作包 5：Build task、TDD 与 Debug
+
+- [x] 按 Plan task 依赖顺序启动 fresh Builder，只注入当前 ContextPack 和 frozen effective Policy。
+- [x] Runtime 按 `change_kind` 选择 direct/TDD；行为/Bug/refactor 记录 RED→GREEN，文档/配置/纯样式允许 direct。
+- [x] 失败后才注入 Debug，并对 malformed result、cancel、attempt exhausted 产生确定状态。
+- [x] 运行 `tests/compose/test_build_stage.py`、AgentExecution 和 delegation tests；预期模型不能自行进入 Verify。
+
+### 工作包 6：VerificationPort 与 verify-fix loop
+
+- [x] 通过 canonical execution context 实现有界命令执行，复用 Policy、Approval、workspace、sandbox 和 concurrency，不直接调用旁路 subprocess。
+- [x] 保存 command identity、时间、exit code、timeout、bounded output/digest；无 fresh exit-code 0 evidence 不通过。
+- [x] 实现 fail→来源明确的 fix task→Build→Verify，最多两轮；exhausted 进入 blocked。
+- [x] 运行 Compose verification、approval、concurrency、workspace、local/remote execution tests；预期 deny/cancel/timeout 无回退与提权。
+
+### 工作包 7：双轴 Review 与完成判定
+
+- [x] 增加 Requirement/Code 两个 fresh、只读 Managed Reviewer，分别消费有界 spec/diff/evidence ContextPack。
+- [x] 合并 typed ReviewReport；Required finding 进入 Build→Verify→Review，Optional/Nit 仅写入报告。
+- [x] review-fix 最多两轮；exhausted blocked，任一路径只产生一个 terminal event。
+- [x] 运行 `tests/compose/test_review_stage.py`、AgentExecution/delegation/resource tests；预期 Reviewer 无写入或权限扩大。
+
+### Checkpoint B
+
+- [x] fake Stage Agent happy path 完整通过。
+- [x] Understand question、Plan revise、Verify fix、Review fix、budget exhausted、cancel 各有确定回归测试。
+- [x] Transcript、Compose artifact、LangGraph projection 三种事实职责无双写。
+- [x] 安全 Review 确认 Compose 未扩大 Shell、文件、网络、MCP、sandbox 或 delegation 权限。
+
+## Phase C：Shared Core 与双端体验
+
+### 工作包 8：Interactive Core Work Mode 与 projection
+
+- [x] 增加 `build|compose` Work Mode state/intent，默认 Build；提交时携带 Mode，同一 Thread 空闲 Run 之间可切换。
+- [x] active Run、pending Interaction、取消/压缩收敛期间拒绝切换；Run 启动后冻结 Mode，Work Mode 与 Approval Mode 分字段。
+- [x] 消费 `compose.state`，同时按 active Run sequence 和 revision 拒绝迟到帧；terminal/thread reset 清理 projection。
+- [x] 运行 run-feature/state/controller/IPC/adapter-parity tests；预期 TUI/Web 使用同一 snapshot。
+
+### 工作包 9：TUI/Web Mode、Plan 门禁与进度
+
+- [x] TUI/Web 空闲无浮层时 `Tab` 切 Work Mode；Picker/Menu/Dialog 中 `Tab` 保留选择语义，`Shift+Tab` 只切 Approval。
+- [x] 双端实现 Plan 批准/修改/取消以及 stage/task/evidence/review/blocked/terminal 展示，不暴露内部 artifact/Prompt/spec。
+- [x] 覆盖窄终端、响应式 Web、键盘、ARIA 和双端 fixture parity；active/Interaction 时显示稳定 disabled 原因。
+- [x] 运行 TUI shortcuts/views、Web adapter/presentation/styles 和 adapter-parity tests；预期两端语义一致。
+
+## Phase D：集成与完成
+
+### 工作包 10：跨包 E2E、文档和 Task evidence
+
+- [x] 使用 fake model/backend 覆盖 happy、真实决策、Plan revise、RED/GREEN、Verify fix、Review fix、exhausted、cancel 和 Build 回归，不使用真实凭据。
+- [x] 更新用户交互/安全文档、架构总览和 ADR；明确 Mode 只在 Run 之间切换、active Run 冻结、Compose 不提权、V1 不恢复 Host 重启 Run。
+- [x] 运行 `bun run test:web:e2e`、`bun run build`、`bun run typecheck`、`bun run test`、`bun run project:check`，将命令与结果写入 HC-138 Task。
+- [ ] 强模型对照 Task、Design、Plan、Todo、完整 diff 与 evidence 做最终复核；记录版本影响和用户确认后再执行 `task:complete`。
+
+### Checkpoint C：Definition of Done
+
+- [x] HC-138 全部可观察验收满足，运行时行为而非仅类型检查证明通过。
+- [x] 新行为有 fail-before/pass-after 自动化测试，现有 Build 与跨包测试无回归。
+- [x] 无重复 lifecycle、死分支、调试输出、无关重构或公共兼容 fallback。
+- [x] 数据迁移、安全、资源释放、错误与取消路径已复核。
+- [x] 用户文档、架构文档、Task evidence、版本影响和任务看板闭环。
+- [ ] 用户已 Review 并批准完成。

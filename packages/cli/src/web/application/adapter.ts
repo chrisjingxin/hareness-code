@@ -152,6 +152,7 @@ export type WebIntent =
   | { type: "confirmation-resolve"; confirmationId: string; confirmed: boolean }
   | { type: "tool-toggle"; runId: string; toolId: string }
   | { type: "approval-mode-cycle" }
+  | { type: "work-mode-cycle" }
   | { type: "cancel-run" }
   | { type: "notice-dismiss" }
   | { type: "theme-set"; theme: WebTheme }
@@ -414,6 +415,9 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
       case "approval-mode-cycle":
         await this.executeCoreIntent({ type: "approval-mode.cycle" })
         return
+      case "work-mode-cycle":
+        await this.executeCoreIntent({ type: "work-mode.cycle" })
+        return
       case "cancel-run":
         await this.executeCoreIntent({ type: "run.cancel" })
         return
@@ -600,7 +604,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     }
   }
 
-  /** 从网关视图缓存重组 InteractiveSnapshot；五个 Selector 分片覆盖全部领域事实。 */
+  /** 从网关视图缓存重组 InteractiveSnapshot；六个 Selector 分片覆盖全部领域事实。 */
   private getInteractive(): InteractiveSnapshot {
     const view = this.client.getState()
     return {
@@ -617,6 +621,10 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
       runtime: view.runtime.runtime,
       connection: view.runtime.connection,
       selection: view.runtime.selection,
+      workMode: view.runtime.workMode,
+      composeState: view.runtime.composeState,
+      workItem: view.workItem.workItem,
+      threadMode: view.workItem.threadMode,
     }
   }
 

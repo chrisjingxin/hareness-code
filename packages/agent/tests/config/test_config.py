@@ -112,6 +112,39 @@ def test_config_precedence_and_redaction(tmp_path: Path):
     assert "secret" not in str(config.redacted({"EXPLICIT_KEY": "secret"}))
 
 
+def test_compose_docs_dir_is_workspace_relative_and_normalized(tmp_path: Path) -> None:
+    """Compose 文档根只能由可信配置覆盖，且不得携带路径穿越语义。"""
+    path = tmp_path / "compose.toml"
+    _write_config(path)
+    path.write_text(
+        path.read_text(encoding="utf-8")
+        + "\n[compose]\ndocs_dir = \"engineering/compose\"\n",
+        encoding="utf-8",
+    )
+
+    config = load_config(workspace=tmp_path / "workspace", home=tmp_path / "home", config_path=path)
+    assert config.compose.docs_dir == "engineering/compose"
+    assert config.redacted()["compose"] == {"docs_dir": "engineering/compose"}
+
+    for invalid in ("../compose", "/tmp/compose", ".harness/compose", "docs/../compose"):
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                'docs_dir = "engineering/compose"',
+                f'docs_dir = "{invalid}"',
+            ),
+            encoding="utf-8",
+        )
+        with pytest.raises(ConfigError, match="compose.docs_dir"):
+            load_config(workspace=tmp_path / "workspace", home=tmp_path / "home", config_path=path)
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                f'docs_dir = "{invalid}"',
+                'docs_dir = "engineering/compose"',
+            ),
+            encoding="utf-8",
+        )
+
+
 def test_user_toml_api_key_fallback_environment_precedence_and_redaction(tmp_path: Path):
     """非空环境变量始终优先，否则使用不可见的用户 TOML 降级值。"""
     home = tmp_path / "home"
@@ -428,6 +461,7 @@ def test_execution_defaults_to_local_and_redacts_security_summary(tmp_path: Path
         "runtime_pool": "default",
         "mcp": "default",
         "tools": "default",
+        "compose": "default",
     }
 
 

@@ -46,6 +46,7 @@ def test_python_validates_manual_compaction_params() -> None:
 def test_python_validates_thread_model_selection() -> None:
     parsed = RunStartParams.model_validate(
         {
+            "mode": "build",
             "message": "使用 pro",
             "thread_id": "thread-1",
             "run_id": "run-1",
@@ -56,6 +57,7 @@ def test_python_validates_thread_model_selection() -> None:
     with pytest.raises(ValidationError):
         RunStartParams.model_validate(
             {
+                "mode": "build",
                 "message": "x",
                 "thread_id": "thread-1",
                 "run_id": "run-1",
@@ -94,6 +96,209 @@ def test_python_accepts_run_progress_event() -> None:
             "payload": {"phase": "preparing", "elapsed_ms": 12},
         }
     )
+
+
+def test_python_requires_run_start_work_mode() -> None:
+    """run.start 必填 build|compose 工作模式，未知模式被拒绝。"""
+    base = {"message": "检查", "thread_id": "thread-1", "run_id": "run-1"}
+    with pytest.raises(ValidationError):
+        RunStartParams.model_validate(base)
+    with pytest.raises(ValidationError):
+        RunStartParams.model_validate({**base, "mode": "yolo"})
+    assert RunStartParams.model_validate({**base, "mode": "build"}).mode == "build"
+    assert RunStartParams.model_validate({**base, "mode": "compose"}).mode == "compose"
+
+
+def test_python_requires_run_started_work_mode() -> None:
+    """run.started 必须回传实际工作模式。"""
+    envelope = {
+        "event_id": "event-started",
+        "type": "run.started",
+        "thread_id": "thread-1",
+        "run_id": "run-1",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {"resumed": False},
+    }
+    with pytest.raises((ValidationError, ValueError)):
+        EventEnvelope.model_validate(envelope)
+    parsed = EventEnvelope.model_validate(
+        {**envelope, "payload": {"resumed": False, "mode": "compose"}}
+    )
+    assert parsed.payload["mode"] == "compose"
+
+
+def test_python_accepts_compose_scope_and_summary() -> None:
+    """compose_scope 与 compose.summary 为合法有界契约；Build 无 scope 仍可过。"""
+    scope = {
+        "activity_id": "act-understand-1",
+        "stage": "understand",
+        "attempt": 1,
+        "task_id": "task-1",
+        "task_title": "梳理需求",
+    }
+    EventEnvelope.model_validate(
+        {
+            "event_id": "e-scope",
+            "type": "run.progress",
+            "thread_id": "thread-1",
+            "run_id": "run-1",
+            "sequence": 1,
+            "timestamp_ms": 1,
+            "execution_id": "child-1",
+            "parent_execution_id": "root-1",
+            "agent_id": "understand",
+            "compose_scope": scope,
+            "payload": {"phase": "model", "elapsed_ms": 10},
+        }
+    )
+    EventEnvelope.model_validate(
+        {
+            "event_id": "e-summary",
+            "type": "compose.summary",
+            "thread_id": "thread-1",
+            "run_id": "run-1",
+            "sequence": 2,
+            "timestamp_ms": 2,
+            "compose_scope": scope,
+            "payload": {"status": "passed", "text": "已识别 2 个约束"},
+        }
+    )
+    # Build 事件无 compose_scope 仍是基线。
+    EventEnvelope.model_validate(
+        {
+            "event_id": "e-build",
+            "type": "content.delta",
+            "thread_id": "thread-1",
+            "run_id": "run-1",
+            "sequence": 1,
+            "timestamp_ms": 1,
+            "payload": {"text": "ok"},
+        }
+    )
+
+
+def test_python_rejects_illegal_compose_scope_and_summary() -> None:
+    """空 activity_id、非法 stage、非正 attempt、越界摘要均被拒绝。"""
+    base = {
+        "event_id": "e-bad",
+        "type": "run.progress",
+        "thread_id": "thread-1",
+        "run_id": "run-1",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {"phase": "model", "elapsed_ms": 1},
+    }
+    with pytest.raises((ValidationError, ValueError)):
+        EventEnvelope.model_validate(
+            {
+                **base,
+                "compose_scope": {"activity_id": "", "stage": "understand", "attempt": 1},
+            }
+        )
+    with pytest.raises((ValidationError, ValueError)):
+        EventEnvelope.model_validate(
+            {
+                **base,
+                "compose_scope": {
+                    "activity_id": "a1",
+                    "stage": "deploy",
+                    "attempt": 1,
+                },
+            }
+        )
+    with pytest.raises((ValidationError, ValueError)):
+        EventEnvelope.model_validate(
+            {
+                **base,
+                "compose_scope": {
+                    "activity_id": "a1",
+                    "stage": "plan",
+                    "attempt": 0,
+                },
+            }
+        )
+    with pytest.raises((ValidationError, ValueError)):
+        EventEnvelope.model_validate(
+            {
+                "event_id": "e-sum",
+                "type": "compose.summary",
+                "thread_id": "thread-1",
+                "run_id": "run-1",
+                "sequence": 1,
+                "timestamp_ms": 1,
+                "compose_scope": {
+                    "activity_id": "a1",
+                    "stage": "plan",
+                    "attempt": 1,
+                },
+                "payload": {"status": "passed", "text": "x" * 1001},
+            }
+        )
+
+
+def test_python_accepts_scoped_interaction_params() -> None:
+    """Interaction request 可携带与 Event 相同的 provenance 与 compose_scope。"""
+    scope = {"activity_id": "act-1", "stage": "build", "attempt": 2, "task_id": "t1"}
+    validate_interaction_params(
+        "interaction.approval",
+        {
+            "thread_id": "thread-1",
+            "run_id": "run-1",
+            "timeout_ms": 30_000,
+            "execution_id": "child-1",
+            "parent_execution_id": "root-1",
+            "agent_id": "builder",
+            "compose_scope": scope,
+            "payload": {
+                "interrupt_id": "int-1",
+                "description": "run tests",
+                "requests": {"action_requests": []},
+                "decisions": ["approve_once", "reject"],
+            },
+        },
+    )
+
+
+def test_python_validates_compose_state_projection() -> None:
+    """compose.state 是带 revision 的完整有界 projection，未知字段和枚举被拒绝。"""
+    payload = {
+        "revision": 3,
+        "stage": "build",
+        "status": "running",
+        "stages": [{"id": "understand", "status": "passed", "attempts": 1}],
+        "tasks": [{"id": "task-1", "title": "实现搜索", "status": "running"}],
+        "evidence": [{"label": "pytest -q tests/foo", "status": "passed"}],
+    }
+    envelope = {
+        "event_id": "compose-state-event",
+        "type": "compose.state",
+        "thread_id": "thread-1",
+        "run_id": "run-1",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": payload,
+    }
+    parsed = EventEnvelope.model_validate(envelope)
+    assert parsed.payload["revision"] == 3
+    with pytest.raises((ValidationError, ValueError)):
+        EventEnvelope.model_validate({**envelope, "payload": {**payload, "extra": True}})
+    with pytest.raises((ValidationError, ValueError)):
+        EventEnvelope.model_validate({**envelope, "payload": {**payload, "stage": "deploy"}})
+    with pytest.raises((ValidationError, ValueError)):
+        EventEnvelope.model_validate({**envelope, "payload": {**payload, "revision": -1}})
+    with pytest.raises((ValidationError, ValueError)):
+        EventEnvelope.model_validate(
+            {
+                **envelope,
+                "payload": {
+                    **payload,
+                    "stages": [
+                        {"id": "understand", "status": "passed", "attempts": 1, "extra": True}
+                    ],
+                },
+            }
+        )
 
 
 def _validate(fixture: dict[str, Any]) -> None:
