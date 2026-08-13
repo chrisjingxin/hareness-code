@@ -1108,3 +1108,106 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ---------- Work Item 展示条 ---------- */
+/* 持久 Work Item 投影 + 模式锁定指示器；只读横幅，顶部常驻、不随 timeline 滚动。 */
+.work-item-banner {
+  flex: 0 0 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+.work-item-mode {
+  align-self: flex-start;
+  min-width: 0;
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.work-item-mode-locked {
+  color: var(--accent);
+  border-color: var(--accent-border);
+}
+.work-item-mode-icon { width: 13px; height: 13px; flex: 0 0 auto; }
+.work-item-card {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.work-item-title {
+  min-width: 0;
+  font-weight: 650;
+  letter-spacing: -.01em;
+  overflow-wrap: anywhere;
+}
+.work-item-meta {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.work-item-status {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  color: var(--text-soft);
+}
+.work-item-status[data-status="blocked"],
+.work-item-status[data-status="waiting_user"] {
+  color: var(--warning-text);
+  border-color: var(--warning);
+}
+.work-item-status[data-status="completed"] {
+  color: var(--success-text);
+  border-color: var(--success);
+}
+.work-item-slug {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+}
+.work-item-revision { flex: 0 0 auto; }
+.work-item-activity {
+  min-width: 0;
+  color: var(--text-soft);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.work-item-pending {
+  min-width: 0;
+  color: var(--warning-text);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.work-item-blocked {
+  min-width: 0;
+  color: var(--danger-text);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.work-item-empty {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}

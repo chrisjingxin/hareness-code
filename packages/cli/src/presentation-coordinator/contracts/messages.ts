@@ -7,13 +7,13 @@
 
 import { MAX_FRAME_BYTES } from "@za38/protocol"
 
-import type { CommandView, ConversationView, InteractionView, NavigationView, RuntimeView } from "../../interactive/selectors"
+import type { CommandView, ConversationView, InteractionView, NavigationView, RuntimeView, WorkItemView } from "../../interactive/selectors"
 import type { InteractiveIntent, IntentOutcome } from "../../interactive/types"
 import type { WorkspaceIntent, WorkspaceOutcome, WorkspacePreviewState, WorkspaceTreeState } from "../../workspace/types"
 import type { PresentationState } from "../state"
 
 /** UI 契约版本：网关与 Browser 共享同一常量，消息形状变更时递增。 */
-export const UI_CONTRACT_VERSION = 3
+export const UI_CONTRACT_VERSION = 4
 
 /** 单帧上限与跨进程协议一致；replace 需承载完整 Timeline，因此不用旧 lifecycle 的 16 KiB。 */
 export const MAX_UI_FRAME_BYTES = MAX_FRAME_BYTES
@@ -28,7 +28,7 @@ export type WorkspaceTreeView = WorkspaceTreeState
 export type WorkspacePreviewView = WorkspacePreviewState
 
 /**
- * 首次连接 / 重同步的完整可序列化视图；七个分片恰好覆盖
+ * 首次连接 / 重同步的完整可序列化视图；八个分片恰好覆盖
  * InteractiveSnapshot 的领域事实与 WorkspaceExplorer 快照。
  */
 export type WebUiState = {
@@ -37,6 +37,7 @@ export type WebUiState = {
   readonly navigation: NavigationView
   readonly command: CommandView
   readonly runtime: RuntimeView
+  readonly workItem: WorkItemView
   readonly workspaceTree: WorkspaceTreeView
   readonly workspacePreview: WorkspacePreviewView
 }
@@ -48,6 +49,7 @@ export type WebUiPatch = {
   readonly navigation?: NavigationView
   readonly command?: CommandView
   readonly runtime?: RuntimeView
+  readonly workItem?: WorkItemView
   readonly workspaceTree?: WorkspaceTreeView
   readonly workspacePreview?: WorkspacePreviewView
 }

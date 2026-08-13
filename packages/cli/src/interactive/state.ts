@@ -21,6 +21,20 @@ export type ComposeProjection = {
   blockedReason: string | null
 }
 
+export type WorkItemStatus = "active" | "waiting_user" | "blocked" | "completed" | "abandoned"
+
+/** compose.work_item / threads.open 的 Work Item 非敏感投影；revision 单调递增。 */
+export type WorkItemProjection = {
+  workItemId: string
+  slug: string
+  title: string
+  revision: number
+  status: WorkItemStatus
+  currentActivity: string
+  pendingDecision: string | null
+  blockedReason: string | null
+}
+
 /** Compose activity 归属；Build 无 scope 时 execution/activity 视为 root。 */
 export type ComposeScopeMeta = {
   activityId: string
@@ -185,10 +199,13 @@ export type InteractiveState = {
   runProgress: RunProgress | null
   lastRun?: RunSummary
   sequences: Record<string, number>
+  composeState: ComposeProjection | null
+  /** 当前 Thread 持久化的 Work Item 投影；无未终结项或 Build Thread 为 null。 */
+  workItem: WorkItemProjection | null
+  /** Thread 首条有效消息后冻结的持久工作模式；未冻结为 null。 */
+  threadMode: WorkMode | null
   /** 当前 Thread 下一次 Run 的工作模式；Run 受理后冻结。 */
   workMode: WorkMode
-  /** 当前 active Run 的 Compose 投影；仅接受 revision 更新的帧。 */
-  composeState: ComposeProjection | null
 }
 
 /** 创建无 thread 内容的初始状态；显式 null 进入空首页。 */
@@ -202,13 +219,65 @@ export function createInitialState(threadId: string | null = null, workMode: Wor
     sequences: {},
     workMode,
     composeState: null,
+    workItem: null,
+    threadMode: null,
   }
 }
 
-/** 空闲时切换下一次 Run 的工作模式；busy 门禁由 feature/controller 负责。 */
+/** 空闲时切换下一次 Run 的工作模式；Thread 已冻结模式时切换被锁定。 */
 export function setWorkMode(state: InteractiveState, mode: WorkMode): InteractiveState {
   if (state.workMode === mode) return state
+  if (state.threadMode !== null && mode !== state.threadMode) return state
   return { ...state, workMode: mode }
+}
+
+/** 折叠一帧 compose.work_item 投影；revision 不递增的迟到帧被拒绝。 */
+export function applyWorkItem(state: InteractiveState, payload: unknown): InteractiveState {
+  const projection = parseWorkItemProjection(payload)
+  if (!projection) return state
+  const current = state.workItem
+  if (current !== null && projection.revision < current.revision) return state
+  return { ...state, workItem: projection }
+}
+
+/** 折叠 threads.open 携带的持久 Thread 模式；首条有效消息后不可变。 */
+export function applyThreadMode(state: InteractiveState, mode: unknown): InteractiveState {
+  if (mode !== "build" && mode !== "compose") return state
+  const next: InteractiveState = { ...state, threadMode: mode }
+  if (next.workMode !== mode) return { ...next, workMode: mode }
+  return next
+}
+
+const WORK_ITEM_STATUSES: Record<string, true> = {
+  active: true,
+  waiting_user: true,
+  blocked: true,
+  completed: true,
+  abandoned: true,
+}
+
+/** 解析 wire 形状的 Work Item 投影；非法字段 fail closed 为 null。 */
+export function parseWorkItemProjection(value: unknown): WorkItemProjection | null {
+  if (!value || typeof value !== "object") return null
+  const raw = value as Record<string, unknown>
+  if (
+    typeof raw.work_item_id !== "string" || !raw.work_item_id
+    || typeof raw.slug !== "string" || !raw.slug
+    || typeof raw.title !== "string"
+    || !Number.isInteger(raw.revision) || (raw.revision as number) < 0
+    || typeof raw.status !== "string" || !WORK_ITEM_STATUSES[raw.status]
+    || typeof raw.current_activity !== "string"
+  ) return null
+  return {
+    workItemId: raw.work_item_id,
+    slug: raw.slug,
+    title: raw.title,
+    revision: raw.revision as number,
+    status: raw.status as WorkItemStatus,
+    currentActivity: raw.current_activity,
+    pendingDecision: typeof raw.pending_decision === "string" ? raw.pending_decision : null,
+    blockedReason: typeof raw.blocked_reason === "string" ? raw.blocked_reason : null,
+  }
 }
 
 /** 折叠一帧 compose.state projection；revision 不递增的迟到帧被拒绝。 */
@@ -398,6 +467,8 @@ export function restoreThread(
     sequences: {},
     workMode,
     composeState: null,
+    workItem: null,
+    threadMode: null,
   }
 }
 
@@ -642,6 +713,9 @@ export function applyAgentEvent(state: InteractiveState, event: EventEnvelope, i
     }
     case EventType.COMPOSE_STATE: {
       return applyComposeState(next, event.payload)
+    }
+    case EventType.COMPOSE_WORK_ITEM: {
+      return applyWorkItem(next, event.payload)
     }
     case EventType.COMPOSE_SUMMARY: {
       const payload = event.payload

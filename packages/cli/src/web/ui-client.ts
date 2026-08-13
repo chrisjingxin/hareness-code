@@ -260,6 +260,7 @@ function mergePatch(state: WebUiState, patch: WebUiPatch): WebUiState {
     navigation: patch.navigation ?? state.navigation,
     command: patch.command ?? state.command,
     runtime: patch.runtime ?? state.runtime,
+    workItem: patch.workItem ?? state.workItem,
     workspaceTree: patch.workspaceTree ?? state.workspaceTree,
     workspacePreview: patch.workspacePreview ?? state.workspacePreview,
   }
@@ -272,6 +273,7 @@ function emptyState(): WebUiState {
     navigation: { catalogs: { threads: { status: "idle", items: [] }, models: { status: "idle", items: [] }, skills: { status: "idle", items: [] }, mcp: { status: "idle", items: [] } }, availability: { canOpenThread: false, canOpenModelsPanel: false, canOpenSkillsPanel: false, canOpenMcpPanel: false, hasSkillManage: false, hasMcpManage: false } },
     command: { commands: [], availability: { canSubmit: false } },
     runtime: { runtime: { workspace: "", cliVersion: "0.1.0", modelConfigured: false, executionMode: "local", approvalMode: "default", capabilities: [] }, connection: { status: "closed", message: "connecting" }, selection: { requestedModelProfileId: null, actualModel: null, armedSkill: null }, workMode: "build", composeState: null, availability: { canCancelRun: false, canToggleSkill: false, canManageMcp: false, canChangeModel: false } },
+    workItem: { workItem: null, threadMode: null, modeLocked: false },
     workspaceTree: { status: "idle", rows: [], selectedPath: null, limited: false },
     workspacePreview: { status: "idle" },
   }

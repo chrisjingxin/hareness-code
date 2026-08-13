@@ -3,6 +3,7 @@
 import type { ModelProfile } from "@za38/protocol"
 
 import type { InteractiveController, InteractiveIntent, InteractiveResult, InteractiveSnapshot, IntentOutcome, PresentationEffect } from "../../interactive/types"
+import { selectWorkItemView, type WorkItemView } from "../../interactive/selectors"
 import { filterCommandMenuItems } from "../../presentation-shared/command-menu-policy"
 import { parseSlashCommand, resolveSlashCommand, type CommandMenuItem, type SkillMenuItem } from "../../interactive/commands"
 import type { ThreadSummary } from "@za38/protocol"
@@ -49,6 +50,8 @@ export type PickerSnapshot<T> = {
 /** TUI Adapter 发布的完整表现快照；领域事实来自 interactive。 */
 export type TuiAdapterSnapshot = {
   readonly interactive: InteractiveSnapshot
+  /** Work Item 投影与模式锁定；由 selectWorkItemView 从 interactive 派生。 */
+  readonly workItemView: WorkItemView
   readonly draft: string
   readonly draftCursor?: "start" | "end"
   readonly commandMenu: CommandMenuState
@@ -267,6 +270,7 @@ class TuiAdapterImpl implements TuiAdapter {
     const models = interactive.catalogs.models
     return {
       interactive,
+      workItemView: selectWorkItemView(interactive),
       draft: this.draft,
       draftCursor: this.draftCursor,
       commandMenu: { ...this.commandMenu },

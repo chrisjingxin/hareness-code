@@ -87,6 +87,7 @@ test("open 后真实 loopback：页面 200；带 token 的 WS 收到 replace/han
     "navigation",
     "command",
     "runtime",
+    "workItem",
     "workspaceTree",
     "workspacePreview",
   ])

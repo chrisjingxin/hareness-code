@@ -344,6 +344,8 @@ export class InteractiveControllerImpl implements InteractiveController {
       selection: { requestedModelProfileId: this.modelFeature.requestedModelProfileId, actualModel: this.modelFeature.actualModelProfile ?? null, armedSkill: this.skillFeature.armedSkill ?? null },
       workMode: this.state.workMode,
       composeState: this.state.composeState,
+      workItem: this.state.workItem,
+      threadMode: this.state.threadMode,
     }
   }
 }

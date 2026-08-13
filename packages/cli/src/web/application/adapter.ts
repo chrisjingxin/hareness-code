@@ -599,7 +599,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     }
   }
 
-  /** 从网关视图缓存重组 InteractiveSnapshot；五个 Selector 分片覆盖全部领域事实。 */
+  /** 从网关视图缓存重组 InteractiveSnapshot；六个 Selector 分片覆盖全部领域事实。 */
   private getInteractive(): InteractiveSnapshot {
     const view = this.client.getState()
     return {
@@ -618,6 +618,8 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
       selection: view.runtime.selection,
       workMode: view.runtime.workMode,
       composeState: view.runtime.composeState,
+      workItem: view.workItem.workItem,
+      threadMode: view.workItem.threadMode,
     }
   }
 

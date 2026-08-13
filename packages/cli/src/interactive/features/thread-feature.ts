@@ -2,6 +2,8 @@
 
 import type { IntentOutcome } from "../ports"
 import {
+  applyThreadMode,
+  applyWorkItem,
   clearThread,
   restoreThread,
   type ComposeStageId,
@@ -21,8 +23,9 @@ function threadOpenResult(value: unknown): {
   threadId: string
   messages: RestoredThreadMessage[]
   composeActivities: RestoredComposeActivity[]
+  threadMode: unknown
+  workItem: unknown
 } {
-  if (!value || typeof value !== "object") throw new Error("Agent 返回的 thread 恢复结果无效")
   const record = value as Record<string, unknown>
   const thread = record.thread
   if (!thread || typeof thread !== "object" || !Array.isArray(record.messages)) {
@@ -76,7 +79,13 @@ function threadOpenResult(value: unknown): {
       boundedText: typeof activity.bounded_text === "string" ? activity.bounded_text : undefined,
     })
   }
-  return { threadId, messages, composeActivities }
+  return {
+    threadId,
+    messages,
+    composeActivities,
+    threadMode: record.thread_mode ?? null,
+    workItem: record.work_item ?? null,
+  }
 }
 
 export class ThreadFeature {
@@ -103,19 +112,22 @@ export class ThreadFeature {
     this.openingThread = true
     options.onBeforeOpen?.()
     const currentEpoch = ++this.threadEpoch
-
     try {
       const opened = threadOpenResult(await ctx.gateway.openThread(threadId))
       if (currentEpoch !== this.threadEpoch) {
         return { status: "rejected", code: "stale-interaction", message: "Stale thread open operation" }
       }
       this.openingThread = false
-      ctx.commit(current => restoreThread(
-        opened.threadId,
-        opened.messages,
-        current.workMode,
-        opened.composeActivities,
-      ))
+      ctx.commit(current => {
+        const restored = restoreThread(
+          opened.threadId,
+          opened.messages,
+          current.workMode,
+          opened.composeActivities,
+        )
+        const withMode = applyThreadMode(restored, opened.threadMode)
+        return opened.workItem != null ? applyWorkItem(withMode, opened.workItem) : withMode
+      })
       options.onSuccess?.()
       return { status: "accepted" }
     } catch (error) {

@@ -5,7 +5,7 @@ import { Activity, Cpu, Ellipsis, ShieldCheck, X } from "lucide-react"
 import { useCallback, useEffect, useRef } from "react"
 import { useSyncExternalStore } from "react"
 import { activityLabel, gitWorkspaceLabel, modelSelectionLabel } from "../../presentation-shared"
-import { selectNavigationView } from "../../interactive/selectors"
+import { selectNavigationView, selectWorkItemView } from "../../interactive/selectors"
 import { approvalModeLabel, workspaceLabel } from "../../interactive/runtime"
 import type { InteractiveSnapshot } from "../../interactive/types"
 import type { WebInteractiveAdapter, WebAdapterSnapshot, WebIntent, WebTheme } from "../application/adapter"
@@ -15,6 +15,7 @@ import { DialogHost } from "./dialog"
 import { InteractionForm } from "./interaction-form"
 import { WorkspaceSidebar } from "./workspace-sidebar/workspace-sidebar"
 import { Timeline } from "./timeline"
+import { WorkItemBanner } from "./work-item-view"
 
 /** 订阅 WebAdapterSnapshot 并转发 dispatch；页面唯一的状态来源。 */
 export function WebApp(props: {
@@ -36,6 +37,7 @@ export function WebApp(props: {
   const readOnly = !props.active || snapshot.leaving || connectionReadOnly
   const returnBlocked = Boolean(interactive.activeRun || interactive.interaction)
   const { availability } = selectNavigationView(interactive)
+  const workItemView = selectWorkItemView(interactive)
 
   const overflowTriggerRef = useRef<HTMLButtonElement | null>(null)
   const headerMenuRef = useRef<HTMLDivElement | null>(null)
@@ -181,6 +183,7 @@ export function WebApp(props: {
       <div className={`desktop-workspace${snapshot.contextDock.open ? " has-context-dock" : ""}`}>
         <WorkspaceSidebar snapshot={snapshot} dispatch={onIntent} disabled={readOnly} />
         <main className="conversation-column">
+          <WorkItemBanner view={workItemView} />
           <div className="timeline-scroll">
             <Timeline snapshot={snapshot} dispatch={onIntent} />
           </div>

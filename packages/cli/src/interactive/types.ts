@@ -9,10 +9,10 @@ import type {
 
 import type { CommandMenuItem, SkillMenuItem } from "./commands"
 import type { InteractiveRuntime } from "./runtime"
-import type { ComposeProjection, InteractiveActivity, ActiveRun, RunProgress, RunSummary, TimelineItem, WorkMode } from "./state"
+import type { ComposeProjection, InteractiveActivity, ActiveRun, RunProgress, RunSummary, TimelineItem, WorkItemProjection, WorkItemStatus, WorkMode } from "./state"
 import type { AgentGateway, Clock, IdGenerator, Scheduler } from "./ports"
 
-export type { ActiveRun, ComposeProjection, InteractiveActivity, InteractiveRuntime, RunProgress, RunSummary, TimelineItem, WorkMode }
+export type { ActiveRun, ComposeProjection, InteractiveActivity, InteractiveRuntime, RunProgress, RunSummary, TimelineItem, WorkItemProjection, WorkItemStatus, WorkMode }
 
 /** 审批决定类型，与协议 ApprovalResponse.decision 保持一致。 */
 export type ApprovalDecision = "approve_once" | "approve_thread" | "approve_project" | "reject" | "reject_with_feedback"
@@ -154,6 +154,10 @@ export type InteractiveSnapshot = {
   readonly workMode: WorkMode
   /** 当前 active Run 的 Compose 投影；null 表示非 Compose 或未开始。 */
   readonly composeState: ComposeProjection | null
+  /** 当前 Thread 的持久 Work Item 投影；null 表示无未终结项或 Build Thread。 */
+  readonly workItem: WorkItemProjection | null
+  /** Thread 首条有效消息后冻结的持久工作模式；未冻结为 null。 */
+  readonly threadMode: WorkMode | null
 }
 
 /** Interactive Core 的唯一业务入口；实现细节不泄漏 React、DOM 或 transport。 */
