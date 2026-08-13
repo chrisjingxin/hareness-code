@@ -64,6 +64,13 @@ from harness_agent.compose.activities.spec import (
     SpecGateActivityError,
     SpecGateOutcome,
 )
+from harness_agent.compose.activities.plan import (
+    PlanDriver,
+    PlanGateActivity,
+    PlanGateActivityError,
+    PlanGateOutcome,
+)
+
 MAX_GOAL_CHARS = 400
 """创建 Work Item 时保存的目标文本上限；超出截断，正文仍以 Transcript 为准。"""
 
@@ -168,6 +175,7 @@ class ComposeTurnPorts:
     readiness: ComposeReadinessResolver = field(default_factory=ComposeReadinessResolver)
     task_driver: GrillDriver | None = None
     spec_driver: SpecDriver | None = None
+    plan_driver: PlanDriver | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -457,6 +465,8 @@ class ComposeWorkItemEngine:
             return await self._run_task_gate(request, item, now)
         if not readiness.spec_confirmed:
             return await self._run_spec_gate(request, item, now)
+        if not readiness.plan_confirmed:
+            return await self._run_plan_gate(request, item, now)
         outcome = (
             ComposeTurnOutcome.BLOCKED
             if item.status is ComposeWorkItemStatus.BLOCKED
@@ -501,6 +511,23 @@ class ComposeWorkItemEngine:
             error_prefix="spec",
             activity_class=SpecGateActivity,
             abandoned_outcome=SpecGateOutcome.ABANDONED,
+        )
+
+    async def _run_plan_gate(
+        self,
+        request: ComposeTurnRequest,
+        item: ComposeWorkItem,
+        now: int,
+    ) -> ComposeTurnResult:
+        """执行 plan.md/todo.md 成对草稿与联合 typed gate。"""
+        return await self._run_gate(
+            request,
+            item,
+            now,
+            driver=self._ports.plan_driver,
+            error_prefix="plan",
+            activity_class=PlanGateActivity,
+            abandoned_outcome=PlanGateOutcome.ABANDONED,
         )
 
     async def _run_gate(
