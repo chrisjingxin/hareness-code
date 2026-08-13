@@ -17,7 +17,7 @@ import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Protocol
+from typing import Any, Protocol
 
 from harness_agent.compose.document_paths import make_compose_slug
 from harness_agent.compose.document_store import (
@@ -50,6 +50,13 @@ from harness_agent.threads.compose_work_item_store import (
     CreateComposeWorkItem,
     TerminalizeComposeWorkItem,
     UpsertComposeDocumentReference,
+)
+
+from harness_agent.compose.activities.task import (
+    GrillDriver,
+    TaskGateActivity,
+    TaskGateActivityError,
+    TaskGateOutcome,
 )
 
 MAX_GOAL_CHARS = 400
@@ -154,7 +161,7 @@ class ComposeTurnPorts:
     workspace_revision: Callable[[], str | None] | None = None
     now_ms: Callable[[], int] | None = None
     readiness: ComposeReadinessResolver = field(default_factory=ComposeReadinessResolver)
-
+    task_driver: GrillDriver | None = None
 
 @dataclass(frozen=True, slots=True)
 class ReadinessProjection:
@@ -374,6 +381,8 @@ class ComposeWorkItemEngine:
             )
         )
         readiness, facts = await self._compute_readiness(item)
+        if self._ports.task_driver is not None:
+            return await self._run_pipeline(request, item, now, readiness, facts)
         return ComposeTurnResult(
             self._projection(item, readiness, pending_decision=None, facts=facts),
             ComposeTurnOutcome.WAITING_USER,
@@ -401,18 +410,125 @@ class ComposeWorkItemEngine:
         readiness, facts = await self._compute_readiness(active)
         if intent.kind is TurnIntentKind.AMEND_CURRENT:
             pending = f"amend:{readiness.next_action}"
-        else:
-            pending = None
+            outcome = (
+                ComposeTurnOutcome.BLOCKED
+                if active.status is ComposeWorkItemStatus.BLOCKED
+                else ComposeTurnOutcome.WAITING_USER
+            )
+            return ComposeTurnResult(
+                self._projection(active, readiness, pending_decision=pending, facts=facts),
+                outcome,
+                pending,
+                intent=intent,
+            )
+        if self._ports.task_driver is not None:
+            return await self._run_pipeline(request, active, now, readiness, facts)
         outcome = (
             ComposeTurnOutcome.BLOCKED
             if active.status is ComposeWorkItemStatus.BLOCKED
             else ComposeTurnOutcome.WAITING_USER
         )
         return ComposeTurnResult(
-            self._projection(active, readiness, pending_decision=pending, facts=facts),
+            self._projection(active, readiness, pending_decision=None, facts=facts),
             outcome,
-            pending,
+            None,
             intent=intent,
+        )
+
+    # ---------- Activity 流水线 ----------
+
+    async def _run_pipeline(
+        self,
+        request: ComposeTurnRequest,
+        item: ComposeWorkItem,
+        now: int,
+        readiness: ComposeReadiness,
+        facts: dict[ComposeDocumentKind, DocumentReadinessFact],
+    ) -> ComposeTurnResult:
+        """按 readiness gate 顺序执行有界 Activity；WP8 先打通 Task gate。"""
+        if not readiness.task_confirmed:
+            return await self._run_task_gate(request, item, now)
+        outcome = (
+            ComposeTurnOutcome.BLOCKED
+            if item.status is ComposeWorkItemStatus.BLOCKED
+            else ComposeTurnOutcome.WAITING_USER
+        )
+        return ComposeTurnResult(
+            self._projection(item, readiness, pending_decision=None, facts=facts),
+            outcome,
+            None,
+            intent=_explicit_intent(TurnIntentKind.RESUME_CURRENT),
+        )
+
+    async def _run_task_gate(
+        self,
+        request: ComposeTurnRequest,
+        item: ComposeWorkItem,
+        now: int,
+    ) -> ComposeTurnResult:
+        """执行 grill 访谈与 Task typed gate；错误保持可恢复投影。"""
+        driver = self._ports.task_driver
+        if driver is None:
+            raise ComposeWorkItemEngineError(
+                "COMPOSE_ACTIVITY_UNAVAILABLE",
+                "Task gate 驱动未接入",
+            )
+        gate = TaskGateActivity(
+            store=self._ports.store,
+            documents=self._ports.documents,
+            interaction=self._ports.interaction,
+            driver=driver,
+            now_ms=self._ports.now_ms,
+        )
+        resume_intent = _explicit_intent(TurnIntentKind.RESUME_CURRENT)
+        try:
+            result = await gate.run(item, run_id=request.run_id)
+        except TaskGateActivityError as exc:
+            readiness, facts = await self._compute_readiness(item)
+            pending = f"task:{exc.code}"
+            return ComposeTurnResult(
+                self._projection(item, readiness, pending_decision=pending, facts=facts),
+                ComposeTurnOutcome.WAITING_USER,
+                pending,
+                intent=resume_intent,
+            )
+        if result.outcome is TaskGateOutcome.ABANDONED:
+            terminalized = await self._ports.store.terminalize(
+                TerminalizeComposeWorkItem(
+                    work_item_id=item.work_item_id,
+                    expected_revision=item.revision,
+                    status=ComposeWorkItemStatus.ABANDONED,
+                    terminal_at_ms=now,
+                )
+            )
+            readiness, facts = await self._compute_readiness(terminalized)
+            return ComposeTurnResult(
+                self._projection(
+                    terminalized, readiness, pending_decision=None, facts=facts
+                ),
+                ComposeTurnOutcome.WAITING_USER,
+                None,
+                intent=resume_intent,
+            )
+        updated = await self._ports.store.load(item.work_item_id)
+        if updated is None:
+            raise ComposeWorkItemEngineError(
+                "COMPOSE_WORK_ITEM_NOT_FOUND",
+                "Work Item 在 Activity 执行后丢失",
+            )
+        readiness, facts = await self._compute_readiness(updated)
+        outcome = (
+            ComposeTurnOutcome.BLOCKED
+            if updated.status is ComposeWorkItemStatus.BLOCKED
+            else ComposeTurnOutcome.WAITING_USER
+        )
+        return ComposeTurnResult(
+            self._projection(
+                updated, readiness, pending_decision=result.pending, facts=facts
+            ),
+            outcome,
+            result.pending,
+            intent=resume_intent,
         )
 
     async def _side_question(

@@ -33,18 +33,20 @@ _CONTENT_DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _CONFIRMATION_KIND = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 _CONFIRMATION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _CONFIRMATION_DECISIONS = frozenset({"confirmed", "approved"})
-_ACTIVITY_ID = _CONFIRMATION_ID
+_ACTIVITY_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _ACTIVITY_KIND = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 _EFFECT_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _EVIDENCE_ID = _CONFIRMATION_ID
-_EVIDENCE_KIND = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 _WORK_ITEM_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+_EVIDENCE_KIND = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 _RESTARTABLE_ACTIVITY_STATUSES = frozenset(
     {
         ComposeActivityStatus.INTERRUPTED,
         ComposeActivityStatus.RETRYABLE_FAILED,
         ComposeActivityStatus.FAILED,
         ComposeActivityStatus.CANCELLED,
+        ComposeActivityStatus.WAITING_USER,
+        ComposeActivityStatus.COMPLETED,
     }
 )
 _FINISHABLE_ACTIVITY_STATUSES = frozenset(
