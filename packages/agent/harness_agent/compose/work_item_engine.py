@@ -12,13 +12,13 @@ abandon 必须经过调用方的 typed confirmation 与 revision CAS。
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol
-
 from harness_agent.compose.document_paths import make_compose_slug
 from harness_agent.compose.document_store import (
     ComposeDocumentStore,
@@ -104,6 +104,9 @@ from harness_agent.compose.guard import (
 MAX_PIPELINE_STEPS = 8
 """批准实施后单个 Turn 内自动闭环的 Activity 步数上限。"""
 
+MAX_SLUG_ALLOCATION_ATTEMPTS = 8
+"""并发创建持续占用 slug 时的单 Turn 重试上限。"""
+
 MAX_GOAL_CHARS = 400
 """创建 Work Item 时保存的目标文本上限；超出截断，正文仍以 Transcript 为准。"""
 
@@ -135,6 +138,7 @@ class ComposeTurnOutcome(str, Enum):
     """一次 Turn 的收敛结果；Run 终态仍由 RunCoordinator 唯一决定。"""
 
     WAITING_USER = "waiting_user"
+    RETRYABLE_FAILED = "retryable_failed"
     BLOCKED = "blocked"
     TURN_BUDGET = "turn_budget"
     COMPLETED = "completed"
@@ -203,7 +207,7 @@ class ComposeTurnPorts:
     classifier: TurnIntentClassifierPort
     interaction: ComposeInteractionPort
     side_answer: SideAnswerPort | None = None
-    workspace_revision: Callable[[], str | None] | None = None
+    workspace_revision: Callable[[], Awaitable[str | None]] | None = None
     now_ms: Callable[[], int] | None = None
     readiness: ComposeReadinessResolver = field(default_factory=ComposeReadinessResolver)
     task_driver: GrillDriver | None = None
@@ -412,18 +416,31 @@ class ComposeWorkItemEngine:
                 None,
                 intent=intent,
             )
-        slug = await self._next_slug(request.thread_id, goal)
         work_item_id = f"wi-{uuid.uuid4().hex}"
-        item = await self._ports.store.create(
-            CreateComposeWorkItem(
-                thread_id=request.thread_id,
-                work_item_id=work_item_id,
-                slug=slug,
-                goal=goal,
-                created_at_ms=now,
-                amends_work_item_id=request.amends_work_item_id,
+        for _ in range(MAX_SLUG_ALLOCATION_ATTEMPTS):
+            slug = await self._next_slug(goal)
+            try:
+                item = await self._ports.store.create(
+                    CreateComposeWorkItem(
+                        thread_id=request.thread_id,
+                        work_item_id=work_item_id,
+                        slug=slug,
+                        goal=goal,
+                        created_at_ms=now,
+                        amends_work_item_id=request.amends_work_item_id,
+                    )
+                )
+                break
+            except ComposeWorkItemStoreError as exc:
+                # 不同 Thread 可并发计算出同一 candidate；store 在写事务内
+                # 拒绝碰撞，重新读取 project slug 后即可分配下一个目录。
+                if exc.code != "COMPOSE_WORK_ITEM_SLUG_CONFLICT":
+                    raise
+        else:
+            raise ComposeWorkItemEngineError(
+                "COMPOSE_WORK_ITEM_SLUG_ALLOCATION_FAILED",
+                "并发创建持续占用候选文档目录，请重试",
             )
-        )
         await self._ports.store.bind_run(
             BindRunToWorkItem(
                 thread_id=request.thread_id,
@@ -631,7 +648,7 @@ class ComposeWorkItemEngine:
             readiness, facts = await self._compute_readiness(item)
             return ComposeTurnResult(
                 self._projection(item, readiness, pending_decision=pending, facts=facts),
-                ComposeTurnOutcome.WAITING_USER,
+                ComposeTurnOutcome.RETRYABLE_FAILED,
                 pending,
                 intent=resume_intent,
             )
@@ -706,7 +723,7 @@ class ComposeWorkItemEngine:
             readiness, facts = await self._compute_readiness(item)
             return ComposeTurnResult(
                 self._projection(item, readiness, pending_decision=pending, facts=facts),
-                ComposeTurnOutcome.WAITING_USER,
+                ComposeTurnOutcome.RETRYABLE_FAILED,
                 pending,
                 intent=resume_intent,
             )
@@ -757,7 +774,7 @@ class ComposeWorkItemEngine:
             readiness, facts = await self._compute_readiness(item)
             return ComposeTurnResult(
                 self._projection(item, readiness, pending_decision=pending, facts=facts),
-                ComposeTurnOutcome.WAITING_USER,
+                ComposeTurnOutcome.RETRYABLE_FAILED,
                 pending,
                 intent=resume_intent,
             )
@@ -828,7 +845,7 @@ class ComposeWorkItemEngine:
             pending = f"report:{exc.code}"
             return ComposeTurnResult(
                 self._projection(item, readiness, pending_decision=pending, facts=facts),
-                ComposeTurnOutcome.WAITING_USER,
+                ComposeTurnOutcome.RETRYABLE_FAILED,
                 pending,
                 intent=resume_intent,
             )
@@ -854,7 +871,7 @@ class ComposeWorkItemEngine:
             pending = f"complete:{exc.code}"
             return ComposeTurnResult(
                 self._projection(item, readiness, pending_decision=pending, facts=facts),
-                ComposeTurnOutcome.WAITING_USER,
+                ComposeTurnOutcome.RETRYABLE_FAILED,
                 pending,
                 intent=_explicit_intent(TurnIntentKind.RESUME_CURRENT),
             )
@@ -936,11 +953,19 @@ class ComposeWorkItemEngine:
             result = await gate.run(item, run_id=request.run_id)
         except Exception as exc:
             code = getattr(exc, "code", None)
+            # 生产诊断：gate 失败只收敛为 pending，根因必须可见（限流/解析/网络）。
+            logging.getLogger(__name__).warning(
+                "Compose gate %s failed for %s: %r (cause: %r)",
+                error_prefix,
+                item.work_item_id,
+                exc,
+                exc.__cause__,
+            )
             pending = f"{error_prefix}:{code}" if code else f"{error_prefix}:failed"
             readiness, facts = await self._compute_readiness(item)
             return ComposeTurnResult(
                 self._projection(item, readiness, pending_decision=pending, facts=facts),
-                ComposeTurnOutcome.WAITING_USER,
+                ComposeTurnOutcome.RETRYABLE_FAILED,
                 pending,
                 intent=resume_intent,
             )
@@ -1233,7 +1258,7 @@ class ComposeWorkItemEngine:
                 )
             )
         revision = (
-            self._ports.workspace_revision()
+            await self._ports.workspace_revision()
             if self._ports.workspace_revision is not None
             else None
         )
@@ -1459,10 +1484,10 @@ class ComposeWorkItemEngine:
         items = raw if isinstance(raw, list) else []
         return str(items[0]) if items else ""
 
-    async def _next_slug(self, thread_id: str, goal: str) -> str:
-        """生成稳定 slug 并解决同 Thread 冲突；数据库 UNIQUE 约束兜底。"""
+    async def _next_slug(self, goal: str) -> str:
+        """生成稳定 slug，并在整个 project 范围解决文档目录冲突。"""
         base = make_compose_slug(goal)
-        existing = await self._ports.store.load_slugs(thread_id)
+        existing = await self._ports.store.load_slugs()
         candidate = base
         index = 2
         while candidate in existing:

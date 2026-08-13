@@ -42,7 +42,7 @@ from harness_agent.threads.compose_work_item_store import (
     UpsertComposeDocumentReference,
 )
 from harness_agent.threads.thread_persistence import AcceptRun, ThreadPersistence
-from tests.support.thread_fixtures import test_binding as make_test_binding
+from tests.support.thread_fixtures import async_return, test_binding as make_test_binding
 
 THREAD = "thread-implement"
 WORK_ITEM_ID = "wi-implement"
@@ -227,7 +227,7 @@ def _activity(store, documents, driver, *, diagnose=None, revision: str | None =
         store=store,
         documents=documents,
         driver=driver,
-        workspace_revision=(lambda: revision) if revision else None,
+        workspace_revision=async_return(revision) if revision else None,
         now_ms=lambda: NOW,
         diagnose=diagnose,
     )
@@ -281,7 +281,7 @@ async def test_turn_budget_pauses_and_resume_continues_from_checked_items(
             store=store,
             documents=documents,
             driver=driver2,
-            workspace_revision=lambda: REVISION,
+            workspace_revision=async_return(REVISION),
             now_ms=lambda: NOW,
             max_items_per_run=1,
         )

@@ -21,7 +21,12 @@ from harness_agent.compose.activities.task import (
     TaskInterviewContext,
 )
 from harness_agent.compose.document_store import ComposeDocumentStore
-from harness_agent.compose.models import ComposeActivityStatus, ComposeDocumentKind, ThreadMode
+from harness_agent.compose.models import (
+    ComposeActivityStatus,
+    ComposeDocumentKind,
+    ComposeWorkItemStatus,
+    ThreadMode,
+)
 from harness_agent.compose.turn_intent import (
     TurnIntent,
     TurnIntentKind,
@@ -448,6 +453,30 @@ async def test_engine_runs_task_gate_after_creation_and_confirms(tmp_path: Path)
         store = harness.persistence.compose_work_item_store()
         refs = await store.load_document_references(result.work_item.work_item_id)
         assert len(refs) == 1
+    finally:
+        await harness.close()
+
+
+async def test_engine_terminalizes_work_item_when_task_gate_is_abandoned(
+    tmp_path: Path,
+) -> None:
+    """Task gate 选择放弃后保留文档，并由 Engine 提交 abandoned 终态。"""
+    harness = _EngineHarness(tmp_path)
+    try:
+        driver = _FakeDriver(questions=[None])
+        interaction = _FakeInteraction({"task-gate": ["abandon"]})
+        await harness.open()
+        engine = harness.engine(interaction=interaction, driver=driver)
+
+        result = await engine.execute_turn(_turn("实现站内搜索", "run-1"))
+
+        assert result.work_item is not None
+        assert result.work_item.status == ComposeWorkItemStatus.ABANDONED.value
+        store = harness.persistence.compose_work_item_store()
+        abandoned = await store.load(result.work_item.work_item_id)
+        assert abandoned is not None
+        assert abandoned.status is ComposeWorkItemStatus.ABANDONED
+        assert (harness.workspace / "docs" / "compose" / result.work_item.slug / "task.md").is_file()
     finally:
         await harness.close()
 

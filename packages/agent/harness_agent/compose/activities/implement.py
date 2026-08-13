@@ -17,7 +17,7 @@ import hashlib
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Protocol
+from typing import Any, Awaitable, Callable, Protocol
 
 from harness_agent.compose.document_store import (
     ComposeDocumentSnapshot,
@@ -129,7 +129,7 @@ class ImplementActivity:
         store: ComposeWorkItemStore,
         documents: ComposeDocumentStore,
         driver: ImplementDriver,
-        workspace_revision: Callable[[], str | None] | None,
+        workspace_revision: Callable[[], Awaitable[str | None]] | None,
         now_ms: Callable[[], int | None] | None = None,
         diagnose: DiagnoseDriver | None = None,
         max_items_per_run: int = MAX_ITEMS_PER_RUN,
@@ -371,7 +371,7 @@ class ImplementActivity:
     ) -> None:
         """全部完成时写入绑定当前文档与 workspace revision 的总结证据。"""
         revision = (
-            self._workspace_revision()
+            await self._workspace_revision()
             if self._workspace_revision is not None
             else None
         )

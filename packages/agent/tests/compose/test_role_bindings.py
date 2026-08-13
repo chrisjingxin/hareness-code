@@ -13,15 +13,18 @@ def test_role_binding_registry_only_resolves_fixed_builtin_roles() -> None:
 
     assert registry.role_ids == frozenset(
         {
-            "understand",
-            "plan",
-            "build",
-            "verify",
-            "requirement-reviewer",
-            "code-reviewer",
+            "work-item-intent",
+            "work-item-grill",
+            "work-item-task",
+            "work-item-spec",
+            "work-item-plan",
+            "work-item-implement",
+            "work-item-review",
+            "work-item-report",
         }
     )
-    assert registry.resolve("understand").planning is True
-    assert registry.resolve("requirement-reviewer").readonly is True
+    assert registry.resolve("work-item-intent").planning is True
+    assert registry.resolve("work-item-review").readonly is True
+    assert registry.resolve("work-item-implement").readonly is False
     with pytest.raises(ValueError, match="COMPOSE_ROLE_NOT_FOUND"):
         registry.resolve("plugin-reviewer")

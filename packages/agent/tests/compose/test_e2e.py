@@ -47,7 +47,7 @@ from harness_agent.threads.compose_work_item_store import (
     TerminalizeComposeWorkItem,
 )
 from harness_agent.threads.thread_persistence import AcceptRun, ThreadPersistence
-from tests.support.thread_fixtures import test_binding as make_test_binding
+from tests.support.thread_fixtures import async_return, test_binding as make_test_binding
 
 THREAD = "thread-e2e"
 NOW = 1_700_000_000_000
@@ -181,7 +181,7 @@ class _Harness:
             classifier=classifier,
             interaction=interaction,
             side_answer=side,
-            workspace_revision=lambda: REVISION,
+            workspace_revision=async_return(REVISION),
             now_ms=lambda: NOW,
             task_driver=_InstantTaskDriver(),
             spec_driver=_InstantSpecDriver(),

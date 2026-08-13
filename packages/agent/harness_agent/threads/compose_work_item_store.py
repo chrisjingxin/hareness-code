@@ -311,19 +311,17 @@ class ComposeWorkItemStore:
         except Exception as exc:
             raise ComposeWorkItemStoreError("COMPOSE_WORK_ITEM_READ_FAILED") from exc
 
-    async def load_slugs(self, thread_id: str) -> frozenset[str]:
-        """读取 Thread 已占用的 slug，供 Runtime 生成新 Work Item 时解决冲突。"""
-        if not thread_id:
-            return frozenset()
+    async def load_slugs(self) -> frozenset[str]:
+        """读取当前 project 已占用的 slug，避免跨 Thread 共享文档目录。"""
         try:
             async with self._lock:
                 cursor = await self._connection.execute(
                     """
                     SELECT slug
                     FROM harness_compose_work_items
-                    WHERE project_fingerprint = ? AND thread_id = ?
+                    WHERE project_fingerprint = ?
                     """,
-                    (self._project_fingerprint, thread_id),
+                    (self._project_fingerprint,),
                 )
                 rows = await cursor.fetchall()
                 await cursor.close()
@@ -343,6 +341,21 @@ class ComposeWorkItemStore:
                 existing = await self._load_in_transaction(command.work_item_id)
                 if existing is not None:
                     raise ComposeWorkItemStoreError("COMPOSE_WORK_ITEM_ID_CONFLICT")
+                cursor = await self._connection.execute(
+                    """
+                    SELECT 1
+                    FROM harness_compose_work_items
+                    WHERE project_fingerprint = ? AND slug = ?
+                    LIMIT 1
+                    """,
+                    (self._project_fingerprint, command.slug),
+                )
+                slug_exists = await cursor.fetchone()
+                await cursor.close()
+                if slug_exists is not None:
+                    raise ComposeWorkItemStoreError(
+                        "COMPOSE_WORK_ITEM_SLUG_CONFLICT"
+                    )
                 await self._connection.execute(
                     """
                     INSERT INTO harness_compose_work_items (

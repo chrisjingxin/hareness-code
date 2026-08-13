@@ -465,6 +465,50 @@ test("串行审批竞态下第二个对话框回车仍可回写", async () => {
   }
 })
 
+test("运行中出现开放式问题时请求滚动到最新问答卡", async () => {
+  const { client, requests, writeServer, controller, adapter } = createSession()
+  try {
+    await adapter.dispatch({ type: "submit", value: "创建 jsondiff" })
+    const run = requests.at(-1)
+    expect(run).toBeDefined()
+    const scrollAfterSubmit = adapter.getSnapshot().scrollRequest
+
+    writeServer({
+      jsonrpc: "2.0",
+      id: "question-scroll-1",
+      method: "interaction.question",
+      params: {
+        thread_id: run!.threadId,
+        run_id: run!.runId,
+        timeout_ms: 300_000,
+        payload: {
+          interrupt_id: "question-scroll-1",
+          questions: [{
+            id: "task-interview",
+            question: "差异输出格式需要确定为哪种？",
+            header: "任务澄清",
+            body: "",
+            options: [],
+            multi_select: false,
+            allow_other: true,
+          }],
+        },
+      },
+    })
+    await Bun.sleep(0)
+
+    expect(adapter.getSnapshot().interactive.interaction).toMatchObject({
+      type: "question",
+      requestId: "question-scroll-1",
+    })
+    expect(adapter.getSnapshot().scrollRequest).toBeGreaterThan(scrollAfterSubmit)
+  } finally {
+    client.destroy()
+    await adapter.close()
+    await controller.close()
+  }
+})
+
 /** 与 run_coordinator 串行审批相同形状的 wire params。 */
 function approvalParams(run: { threadId: string; runId: string }, description: string) {
   return {

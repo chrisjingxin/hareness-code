@@ -32,7 +32,7 @@ from harness_agent.threads.compose_work_item_store import (
     UpsertComposeDocumentReference,
 )
 from harness_agent.threads.thread_persistence import AcceptRun, ThreadPersistence
-from tests.support.thread_fixtures import test_binding as make_test_binding
+from tests.support.thread_fixtures import async_return, test_binding as make_test_binding
 
 THREAD = "thread-verify"
 WORK_ITEM_ID = "wi-verify"
@@ -164,7 +164,7 @@ def _activity(store, documents, port):
         store=store,
         documents=documents,
         port=port,
-        workspace_revision=lambda: REVISION,
+        workspace_revision=async_return(REVISION),
         now_ms=lambda: NOW,
     )
 

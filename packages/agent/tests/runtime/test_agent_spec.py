@@ -16,6 +16,7 @@ from harness_agent.runtime.agent_engine_profile import (
 )
 from harness_agent.runtime.agent_spec import (
     RUN_CONTEXT_SNAPSHOT_MIDDLEWARE_VERSION,
+    restrict_spec_to_read_only_stage,
     resolve_builtin_main_agent_spec,
 )
 from harness_agent.policy.approval_mode import DEFAULT_APPROVAL_MODE
@@ -73,6 +74,25 @@ def _spec(tmp_path: Path, *, model_name: str = "fast-model", tools: tuple[object
         interactive=True,
         pinned=False,
     )
+
+
+def test_compose_planning_stage_is_read_only_and_bounded(tmp_path: Path) -> None:
+    """规划类 stage 只转换 ContextPack，不能转入任何工具循环。"""
+    main = _spec(tmp_path)
+
+    stage = restrict_spec_to_read_only_stage(main)
+
+    assert stage.capability_view.tool_names == ()
+    assert stage.capability_view.mcp_tool_names == ()
+    assert stage.tools == ()
+    assert stage.interactive is False
+    assert stage.enable_ask_user is False
+    assert stage.enable_memory is False
+    assert stage.enable_skills is False
+    assert stage.prompt.startswith("<compose_planning_stage>")
+    assert main.prompt not in stage.prompt
+    assert "不得调用任何工具" in stage.prompt
+    assert "严格遵守本次输入指定的输出格式" in stage.prompt
 
 
 def test_same_resolved_agent_spec_reuses_key_but_static_behavior_changes_do_not(tmp_path: Path) -> None:

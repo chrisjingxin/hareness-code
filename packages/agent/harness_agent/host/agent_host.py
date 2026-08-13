@@ -2562,7 +2562,14 @@ class AgentHost:
                 rwlock=self._tool_concurrency_lock,
                 now_ms=lambda: int(time.time() * 1000),
             ),
-            profile_key=run.agent_engine_profile_key or "",
+            # 组装发生在 adapter 执行前，run.agent_engine_profile_key 尚未由
+            # runtime 获取填充；直接使用受理阶段解析出的 AgentEngineProfile key，
+            # 与 _resolved_agent_specs 的缓存键一致。
+            profile_key=(
+                run.resolved_agent_engine_profile.profile_key
+                if run.resolved_agent_engine_profile is not None
+                else (run.agent_engine_profile_key or "")
+            ),
             cancellation_token=run.cancellation_token,
         )
 

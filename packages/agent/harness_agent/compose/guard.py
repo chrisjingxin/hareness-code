@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Awaitable, Callable, Mapping, Protocol
 
 from harness_agent.compose.document_store import (
     ComposeDocumentSnapshot,
@@ -82,7 +82,7 @@ class CompletionGuard:
         store: ComposeWorkItemStore,
         documents: ComposeDocumentStore,
         driver: ReportDriver | None,
-        workspace_revision: Callable[[], str | None] | None,
+        workspace_revision: Callable[[], Awaitable[str | None]] | None,
         now_ms: Callable[[], int | None] | None = None,
     ) -> None:
         self._store = store
@@ -107,7 +107,7 @@ class CompletionGuard:
         if self._driver is None:
             raise CompletionGuardError("COMPLETION_REPORT_DRIVER_MISSING")
         revision = (
-            self._workspace_revision()
+            await self._workspace_revision()
             if self._workspace_revision is not None
             else None
         )

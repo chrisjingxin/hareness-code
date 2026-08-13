@@ -519,7 +519,7 @@ export function applyInteractionRequest(state: InteractiveState, envelope: Inter
       runId: envelope.run_id,
       type: "question",
       status: "pending",
-      question: firstQuestion?.header || firstQuestion?.question || "",
+      question: firstQuestion?.question || firstQuestion?.header || "",
       options: firstQuestion?.options?.map(opt => ({ name: opt.label, value: opt.value })),
     }, interactionIdentity)
     if (interactionIdentity.composeScope) card.composeScope = interactionIdentity.composeScope
@@ -590,9 +590,13 @@ export function markInteractionTimeout(state: InteractiveState, requestId: strin
   return resolveInteractionState(state, requestId, "cancelled")
 }
 
-/** 清理与某个交互关联的排队状态。 */
-export function clearPendingInteraction(state: InteractiveState, requestId: string): InteractiveState {
-  return resolveInteractionState(state, requestId, "cancelled")
+/** 记录用户已完成的交互，避免在远端继续运行时把成功响应误显示为超时。 */
+export function markInteractionResponded(
+  state: InteractiveState,
+  requestId: string,
+  status: "approved" | "rejected" | "answered",
+): InteractiveState {
+  return resolveInteractionState(state, requestId, status)
 }
 
 /** 标记当前运行为失败。 */

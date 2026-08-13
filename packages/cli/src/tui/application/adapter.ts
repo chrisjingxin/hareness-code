@@ -169,7 +169,14 @@ class TuiAdapterImpl implements TuiAdapter {
     this.openWeb = options.openWeb
     this.dispatchGate = options.dispatchGate
     this.snapshot = this.buildSnapshot()
-    this.unsubscribeInteractive = this.controller.subscribe(() => this.publish())
+    this.unsubscribeInteractive = this.controller.subscribe(interactive => {
+      const previousRequestId = this.snapshot.interactive.interaction?.requestId
+      const nextRequestId = interactive.interaction?.requestId
+      // 反向问答/审批会在 Run 进行中插入时间线；必须主动滚动，否则卡片落在
+      // 当前视口下方，用户只能看到旧的 spinner，直到 Interaction 超时。
+      if (nextRequestId && nextRequestId !== previousRequestId) this.scrollRequest += 1
+      this.publish()
+    })
 
     void this.historyStore.load().then(history => {
       if (!this.closed) this.promptHistory = history

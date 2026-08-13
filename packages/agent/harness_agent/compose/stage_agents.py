@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from harness_agent.compose.role_bindings import RoleBindingRegistry
 from harness_agent.runtime.agent_delegation import (
+    AgentDelegationError,
     AgentDelegator,
     DelegationTarget,
     child_execution_ref,
@@ -78,7 +79,12 @@ class StageRequest:
 
 
 class StageResult:
-    """stage Agent 的结构化结果；output 是待校验的 artifact dict。"""
+    """stage Agent 的结构化结果；output 是待校验的 artifact dict。
+
+    ``raw_final`` 保留模型最后一轮的原始文本，供草稿类 driver 使用标记
+    分隔格式解析长 markdown 正文（JSON 对象 parse 失败时 output 为空 dict，
+    由 driver 的 schema 校验继续 fail closed）。
+    """
 
     def __init__(
         self,
@@ -87,12 +93,14 @@ class StageResult:
         agent_id: str,
         status: str,
         output: Mapping[str, Any],
+        raw_final: str = "",
     ) -> None:
         """保存 execution 身份与 artifact payload。"""
         self.execution_id = execution_id
         self.agent_id = agent_id
         self.status = status
         self.output = dict(output)
+        self.raw_final = raw_final
 
 
 class StageObserver(Protocol):
@@ -130,12 +138,12 @@ class StageAgentPort(Protocol):
         observer: StageObserver | None = None,
     ) -> StageResult: ...
 
-
 def parse_structured_output(text: str) -> dict[str, Any]:
     """从 stage Agent 的最后消息中解析严格 JSON；容忍 markdown 围栏。
 
-    失败时抛出可读 ValueError（空输出 / 长度与期望形状），绝不把
-    json.loads 的裸解析器文本传播到 wire。
+    企业弱模型常见的失败形态是 JSON 前后附加解释文字；此处先尝试严格解析，
+    失败后仅做一次有界回退：取第一个 ``{`` 到最后一个 ``}`` 的切片再解析。
+    回退不放松任何下游契约——每个 driver 仍对字段逐项做严格 schema 校验。
     """
     content = str(text or "").strip()
     if content.startswith("```"):
@@ -147,18 +155,36 @@ def parse_structured_output(text: str) -> dict[str, Any]:
         content = "\n".join(lines).strip()
     if not content:
         raise ValueError("stage 输出为空：模型没有产出 JSON 对象")
+    def _preview() -> str:
+        return content[:200].replace("\n", "\\n")
+
     try:
         parsed = json.loads(content)
-    except ValueError as exc:
-        raise ValueError(
-            f"stage 输出不是有效 JSON（输出长度 {len(content)} 字符，"
-            "期望单个 JSON 对象，不要附加解释文字）"
-        ) from exc
+    except ValueError as strict_error:
+        start = content.find("{")
+        end = content.rfind("}")
+        if start == -1 or end <= start:
+            raise ValueError(
+                "stage 输出不是有效 JSON（输出长度 "
+                f"{len(content)} 字符，期望单个 JSON 对象，不要附加解释文字）"
+                f"；输出预览：{_preview()}"
+            ) from strict_error
+        try:
+            parsed = json.loads(content[start : end + 1])
+        except ValueError as slice_error:
+            # 弱模型常把 markdown 正文中的换行写成原始控制字符（RFC 8259 允许
+            # 字符串内控制字符）；strict=False 只放宽这一处，不改变结构契约。
+            try:
+                parsed = json.loads(content[start : end + 1], strict=False)
+            except ValueError as lenient_error:
+                raise ValueError(
+                    "stage 输出切片后仍不是有效 JSON（输出长度 "
+                    f"{len(content)} 字符，期望单个 JSON 对象，不要附加解释文字）"
+                    f"；输出预览：{_preview()}"
+                ) from lenient_error
     if not isinstance(parsed, Mapping):
         raise ValueError("STAGE_OUTPUT_NOT_OBJECT")
     return dict(parsed)
-
-
 def compose_scope_stage(stage_agent_id: str) -> str:
     """把固定内置 role 映射为协议 compose_scope.stage 枚举。"""
     return RoleBindingRegistry().resolve(stage_agent_id).compose_stage
@@ -361,6 +387,12 @@ class ManagedStageAgentPort:
             checkpoint_namespace = child_ref.checkpoint_namespace(
                 spec.project_fingerprint
             )
+            # LangGraph 根图可能把 checkpoint_ns 归一化为空；仅靠 namespace
+            # 不能保证 fresh stage 隔离。把 child execution 身份同时编码进
+            # checkpoint thread_id，使 retry/相邻 stage 不会继承旧模型消息。
+            checkpoint_thread_id = ":".join(
+                (child_ref.thread_id, child_ref.run_id, child_ref.execution_id)
+            )
 
             async def acquire_runtime():
                 """只把 pooled runtime provider 交给 executor，stage 不读取 graph。"""
@@ -370,7 +402,7 @@ class ManagedStageAgentPort:
                     run_context=context,
                     graph_config=lambda namespace: {
                         "configurable": {
-                            "thread_id": child_ref.thread_id,
+                            "thread_id": checkpoint_thread_id,
                             "checkpoint_ns": namespace,
                         }
                     },
@@ -448,11 +480,18 @@ class ManagedStageAgentPort:
         )
         result = await delegator.execute(command)
         raw_final = str(result.output.get("final", ""))
+        try:
+            output = parse_structured_output(raw_final)
+        except ValueError:
+            # 草稿类 driver（raw 模式）自行解析标记分隔正文；JSON 类 driver
+            # 收到空 dict 后由字段 schema 校验 fail closed。
+            output = {}
         return StageResult(
             execution_id=result.ref.execution_id,
             agent_id=result.agent_id,
             status=result.status.value,
-            output=parse_structured_output(raw_final),
+            output=output,
+            raw_final=raw_final,
         )
 
 

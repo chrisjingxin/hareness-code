@@ -153,7 +153,7 @@ async def test_managed_stage_port_runs_understand_through_real_delegator() -> No
         workspace=Path("."),
     )
     result = await port.run(StageRequest(
-        stage="understand",
+        stage="work-item-task",
         task="实现搜索功能",
         parent_ref=root,
         profile_key="stage-profile",
@@ -196,7 +196,7 @@ async def test_managed_stage_port_uses_readonly_planning_spec() -> None:
     )
     await port.run(
         StageRequest(
-            stage="understand",
+            stage="work-item-task",
             task="实现搜索功能",
             parent_ref=root,
             profile_key="stage-profile",
@@ -249,7 +249,7 @@ async def test_managed_stage_port_schema_retry_gets_fresh_execution() -> None:
 
     first = await port.run(
         StageRequest(
-            stage="understand",
+            stage="work-item-task",
             task="相同的有界 ContextPack",
             parent_ref=root,
             profile_key="stage-profile",
@@ -258,7 +258,7 @@ async def test_managed_stage_port_schema_retry_gets_fresh_execution() -> None:
     )
     second = await port.run(
         StageRequest(
-            stage="understand",
+            stage="work-item-task",
             task="相同的有界 ContextPack",
             parent_ref=root,
             profile_key="stage-profile",
@@ -267,6 +267,15 @@ async def test_managed_stage_port_schema_retry_gets_fresh_execution() -> None:
     )
     assert first.execution_id != second.execution_id
     assert len(engine.calls) == 2
+    checkpoint_threads = [
+        call["kwargs"]["config"]["configurable"]["thread_id"]
+        for call in engine.calls
+    ]
+    assert checkpoint_threads[0] != checkpoint_threads[1]
+    assert all(
+        thread_id.startswith("thread-1:run-1:child-")
+        for thread_id in checkpoint_threads
+    )
 
 
 class _RecordingObserver:
@@ -351,7 +360,7 @@ async def test_managed_stage_port_capture_only_emits_reasoning_not_content() -> 
     observer = _RecordingObserver()
     result = await port.run(
         StageRequest(
-            stage="understand",
+            stage="work-item-task",
             task="实现搜索功能",
             parent_ref=root,
             profile_key="stage-profile",
@@ -363,7 +372,7 @@ async def test_managed_stage_port_capture_only_emits_reasoning_not_content() -> 
     assert observer.execution_id is not None
     assert observer.execution_id.startswith("child-")
     assert observer.parent_execution_id == root.execution_id
-    assert observer.agent_id == "understand"
+    assert observer.agent_id == "work-item-task"
     types = [event_type for event_type, _ in observer.events]
     assert "run.progress" in types
     assert "reasoning.delta" in types
@@ -390,7 +399,7 @@ async def test_managed_stage_port_uses_post_tool_final_message() -> None:
     observer = _RecordingObserver()
     result = await port.run(
         StageRequest(
-            stage="build",
+            stage="work-item-implement",
             task="task-1",
             parent_ref=root,
             profile_key="stage-profile",
@@ -481,7 +490,7 @@ async def test_managed_stage_port_rejects_stage_delegating_another_agent() -> No
         idempotency_key="stage-delegation-attempt",
         delegation_policy=DelegationPolicy(
             enabled=True,
-            allowed_agents=("understand",),
+            allowed_agents=("work-item-task",),
             max_depth=1,
             max_parallelism=1,
         ),

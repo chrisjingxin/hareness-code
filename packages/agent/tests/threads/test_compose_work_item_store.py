@@ -44,10 +44,15 @@ def _accept(thread_id: str, run_id: str, mode: ThreadMode) -> AcceptRun:
     return AcceptRun(message="实现 Compose Work Item", binding=binding, mode=mode)
 
 
-def _create(work_item_id: str, *, slug: str = "compose-store") -> CreateComposeWorkItem:
+def _create(
+    work_item_id: str,
+    *,
+    slug: str = "compose-store",
+    thread_id: str = "thread-compose",
+) -> CreateComposeWorkItem:
     """构造一个最小可恢复的 Work Item 创建命令。"""
     return CreateComposeWorkItem(
-        thread_id="thread-compose",
+        thread_id=thread_id,
         work_item_id=work_item_id,
         slug=slug,
         goal="将 Compose 持久化为 Work Item",
@@ -142,13 +147,13 @@ async def test_work_item_terminal_cas_allows_next_item_but_rejects_stale_update(
         await persistence.close()
 
 
-async def test_load_slugs_returns_all_used_slugs_for_thread(tmp_path: Path) -> None:
-    """load_slugs 返回 Thread 已占用 slug，供 Runtime 生成新项时解决冲突。"""
+async def test_load_slugs_returns_all_used_slugs_for_project(tmp_path: Path) -> None:
+    """load_slugs 返回整个 project 已占用 slug，避免跨 Thread 覆盖文档。"""
     persistence = await _persistence(tmp_path)
     try:
         await _prepare_compose_thread(persistence)
         store = persistence.compose_work_item_store()
-        assert await store.load_slugs("thread-compose") == frozenset()
+        assert await store.load_slugs() == frozenset()
         first = await store.create(_create("work-1", slug="search"))
         await store.terminalize(
             TerminalizeComposeWorkItem(
@@ -159,7 +164,39 @@ async def test_load_slugs_returns_all_used_slugs_for_thread(tmp_path: Path) -> N
             )
         )
         await store.create(_create("work-2", slug="search-2"))
-        assert await store.load_slugs("thread-compose") == frozenset({"search", "search-2"})
+        await persistence.accept_run(
+            _accept("thread-other", "run-other", ThreadMode.COMPOSE)
+        )
+        await store.create(
+            _create("work-3", slug="other-thread", thread_id="thread-other")
+        )
+        assert await store.load_slugs() == frozenset(
+            {"search", "search-2", "other-thread"}
+        )
+    finally:
+        await persistence.close()
+
+
+async def test_create_rejects_slug_already_used_by_another_thread(
+    tmp_path: Path,
+) -> None:
+    """同一 project 的两个 Thread 不能绑定到同一个文档目录。"""
+    persistence = await _persistence(tmp_path)
+    try:
+        await _prepare_compose_thread(persistence)
+        await persistence.accept_run(
+            _accept("thread-other", "run-other", ThreadMode.COMPOSE)
+        )
+        store = persistence.compose_work_item_store()
+        await store.create(_create("work-1", slug="shared"))
+
+        with pytest.raises(
+            ComposeWorkItemStoreError,
+            match="COMPOSE_WORK_ITEM_SLUG_CONFLICT",
+        ):
+            await store.create(
+                _create("work-2", slug="shared", thread_id="thread-other")
+            )
     finally:
         await persistence.close()
 

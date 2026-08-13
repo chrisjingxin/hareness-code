@@ -18,6 +18,7 @@ from harness_agent.compose.activities.plan import (
     PlanGateActivity,
     PlanGateActivityError,
     PlanGateOutcome,
+    _validate_plan_draft,
 )
 from harness_agent.compose.activities.spec import _render_document as render_spec
 from harness_agent.compose.activities.task import _render_document as render_task
@@ -322,16 +323,147 @@ async def test_placeholder_and_forbidden_todo_terms_fail_closed(tmp_path: Path) 
             PlanDraft(PLAN_BODY, "没有条目"),
         ]
         for draft in cases:
-            driver = _FakePlanDriver(drafts=[draft])
+            # 同一无效草稿重复返回：有界重试（1 + MAX_DRAFT_RETRIES 次）后
+            # 必须 fail closed，且重试上下文携带 previous_failure。
+            driver = _FakePlanDriver(drafts=[draft, draft, draft])
             interaction = _FakeInteraction({})
             with pytest.raises(PlanGateActivityError):
                 await _activity(store, documents, interaction, driver).run(
                     await _item(store), run_id="run-1"
                 )
+            assert driver.contexts[-1].previous_failure
         refs = await store.load_document_references(WORK_ITEM_ID)
         assert all(ref.kind not in (ComposeDocumentKind.PLAN, ComposeDocumentKind.TODO) for ref in refs)
     finally:
         await persistence.close()
+
+
+def test_canonical_todo_filename_is_not_a_placeholder() -> None:
+    """合法的 todo.md 文件名不能被大小写归一化误判为 TODO 占位符。"""
+    _validate_plan_draft(
+        PlanDraft(
+            plan_body="# 实施计划\n\n- 生成 `todo.md` 执行清单。",
+            todo_body=(
+                "# 执行清单\n\n"
+                "- [ ] 实现差异比较\n"
+                "  完成键路径级别的新增、删除和修改检测。\n"
+                "  验证=python -m pytest -q\n"
+            ),
+        )
+    )
+
+
+def test_nested_python_dict_in_validation_command_is_not_a_placeholder() -> None:
+    """验证命令中的合法嵌套字典以双右花括号结尾，不能被当作模板变量。"""
+    _validate_plan_draft(
+        PlanDraft(
+            plan_body="# 实施计划\n\n1. 实现递归比较。",
+            todo_body=(
+                "# 执行清单\n\n"
+                "- [ ] 实现递归比较\n"
+                "    动作：实现嵌套对象的键路径比较。\n"
+                "    验收：嵌套对象返回预期差异。\n"
+                "    验证=python -c 'assert diff({\"a\":{\"b\":1}})'\n"
+            ),
+        )
+    )
+
+
+def test_placeholder_term_in_explanatory_prose_is_not_a_placeholder() -> None:
+    """正文讨论占位符约束时不应仅因出现术语而停止整个 Plan。"""
+    _validate_plan_draft(
+        PlanDraft(
+            plan_body="# 实施计划\n\n交付文档不得留下 `TODO` 形式的空白项。",
+            todo_body=TODO_BODY,
+        )
+    )
+
+
+def test_template_expression_embedded_in_technical_prose_is_not_a_placeholder() -> None:
+    """命令或配置中的模板语法是技术内容，不应被全文搜索误判。"""
+    _validate_plan_draft(
+        PlanDraft(
+            plan_body=(
+                "# 实施计划\n\n"
+                "CI 使用 `${{ matrix.python-version }}` 选择 Python 版本。"
+            ),
+            todo_body=TODO_BODY,
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "plan_body",
+    ("# TODO: 补写计划", "# TBD", "待定", "- 待补充：验证命令", "{{ feature_name }}"),
+)
+def test_explicit_placeholder_structures_still_fail_closed(plan_body: str) -> None:
+    """独立占位行与完整模板表达式仍由 Plan gate 拒绝。"""
+    with pytest.raises(
+        PlanGateActivityError,
+        match="COMPOSE_PLAN_PLACEHOLDER_INVALID",
+    ):
+        _validate_plan_draft(PlanDraft(plan_body=plan_body, todo_body=TODO_BODY))
+
+
+async def test_invalid_draft_retries_with_failure_then_commits(tmp_path: Path) -> None:
+    """首稿含占位符：同 run 有界重试并回传拒绝原因，修正稿正常提交门禁。"""
+    persistence, store, documents = await _harness(tmp_path)
+    try:
+        await _confirm_upstream(store, documents)
+        driver = _FakePlanDriver(
+            drafts=[
+                PlanDraft("TODO: 占位", TODO_BODY),
+                PlanDraft(PLAN_BODY, TODO_BODY),
+            ]
+        )
+        interaction = _FakeInteraction({"plan-gate": ["confirm"]})
+        result = await _activity(store, documents, interaction, driver).run(
+            await _item(store), run_id="run-1"
+        )
+        assert result.outcome is PlanGateOutcome.CONFIRMED
+        assert len(driver.contexts) == 2
+        assert driver.contexts[1].previous_failure
+        assert all(
+            token not in driver.contexts[1].previous_failure
+            for token in ("TODO", "TBD", "待定", "待补充", "{{", "}}")
+        )
+        refs = await store.load_document_references(WORK_ITEM_ID)
+        assert any(ref.kind == ComposeDocumentKind.PLAN for ref in refs)
+        assert any(ref.kind == ComposeDocumentKind.TODO for ref in refs)
+    finally:
+        await persistence.close()
+
+
+async def test_parse_failure_retries_with_format_feedback(tmp_path: Path) -> None:
+    """弱模型 JSON 解析失败：同 run 有界重试并回传严格 JSON 要求。"""
+    persistence, store, documents = await _harness(tmp_path)
+    try:
+        await _confirm_upstream(store, documents)
+
+        class _FlakyDriver:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.contexts: list[PlanDraftContext] = []
+
+            async def draft_plan(self, context: PlanDraftContext) -> PlanDraft:
+                self.contexts.append(context)
+                self.calls += 1
+                if self.calls == 1:
+                    raise ValueError("stage 输出切片后仍不是有效 JSON")
+                return PlanDraft(PLAN_BODY, TODO_BODY)
+
+        driver = _FlakyDriver()
+        interaction = _FakeInteraction({"plan-gate": ["confirm"]})
+        result = await _activity(store, documents, interaction, driver).run(
+            await _item(store), run_id="run-1"
+        )
+        assert result.outcome is PlanGateOutcome.CONFIRMED
+        assert driver.calls == 2
+        assert driver.contexts[1].previous_failure
+        assert "JSON" in driver.contexts[1].previous_failure
+    finally:
+        await persistence.close()
+
 
 
 async def test_missing_spec_fails_closed(tmp_path: Path) -> None:

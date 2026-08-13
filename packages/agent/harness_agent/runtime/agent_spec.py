@@ -46,6 +46,18 @@ READ_ONLY_REVIEWER_TOOLS = frozenset(
 )
 """Compose Reviewer 的能力交集：只读文件/代码工具，不含写/Shell/网络/委派。"""
 
+COMPOSE_PLANNING_STAGE_TOOLS: frozenset[str] = frozenset()
+"""规划类 stage 只转换已提供的 ContextPack，不向模型暴露任何工具。"""
+
+COMPOSE_PLANNING_STAGE_PROMPT_SUFFIX = """
+<compose_planning_stage>
+你是 Compose 工作流中的有界转换 stage，不是负责实现用户目标的主 Agent。
+你只能根据本次输入生成要求的一个结果；不得调用任何工具，不得读取或修改工作区，
+不得自行进入编码、测试或后续 stage。严格遵守本次输入指定的输出格式，输出结果后立即停止。
+</compose_planning_stage>
+""".strip()
+"""规划类 stage 的系统级边界，防止弱模型把结构化任务误当成实现请求。"""
+
 RUN_CONTEXT_SNAPSHOT_MIDDLEWARE_VERSION = "run-context-snapshot-v1"
 """当前生产 RunContextSnapshot middleware 的 Profile 身份版本。"""
 
@@ -113,16 +125,19 @@ def restrict_spec_to_read_only(spec: ResolvedAgentSpec) -> ResolvedAgentSpec:
         role="reviewer",
         agent_id="compose-reviewer",
         identity="reviewer-readonly",
+        allowed_tools=READ_ONLY_REVIEWER_TOOLS,
     )
 
 
 def restrict_spec_to_read_only_stage(spec: ResolvedAgentSpec) -> ResolvedAgentSpec:
-    """派生 Understand/Plan 只读 spec，确保方案批准前没有写副作用。"""
+    """派生规划 stage spec，确保只完成无工具的有界结果转换。"""
     return _restrict_spec_to_read_only_role(
         spec,
         role="stage",
         agent_id="compose-planning",
-        identity="planning-readonly",
+        identity="planning-readonly-bounded",
+        allowed_tools=COMPOSE_PLANNING_STAGE_TOOLS,
+        prompt_suffix=COMPOSE_PLANNING_STAGE_PROMPT_SUFFIX,
     )
 
 
@@ -132,18 +147,20 @@ def _restrict_spec_to_read_only_role(
     role: str,
     agent_id: str,
     identity: str,
+    allowed_tools: frozenset[str],
+    prompt_suffix: str = "",
 ) -> ResolvedAgentSpec:
     """构造指定 Compose 角色的只读能力交集。"""
     from harness_agent.policy.capability_policy import EffectiveCapabilityView
 
     visible = set(spec.capability_view.tool_names)
-    names = tuple(sorted(READ_ONLY_REVIEWER_TOOLS & visible))
+    names = tuple(sorted(allowed_tools & visible))
     tools = tuple(tool for tool in spec.tools if tool.name in names)
     view = EffectiveCapabilityView(
         tool_names=names,
         mcp_tool_names=(),
         skill_ids=(),
-        filesystem_read=spec.capability_view.filesystem_read,
+        filesystem_read=(spec.capability_view.filesystem_read if names else None),
         filesystem_write=None,
         shell_commands=None,
         policy_fingerprint=spec.effective_policy.fingerprint,
@@ -161,7 +178,9 @@ def _restrict_spec_to_read_only_role(
         tools=tools,
         skill_registry=spec.skill_registry,
         mcp_snapshot=spec.mcp_snapshot,
-        prompt=spec.prompt,
+        # 规划 stage 不能继承主 Agent 的“主动解决用户任务”提示，否则弱模型会
+        # 把结构化转换输入误当成实现请求；Reviewer 无 suffix 时仍复用主提示。
+        prompt=prompt_suffix or spec.prompt,
         execution=spec.execution,
         workspace=spec.workspace,
         interactive=False,

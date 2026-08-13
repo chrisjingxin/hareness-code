@@ -13,6 +13,7 @@ Skill/Runtime 准备、以及把 stream signal 投影为 root Event。
 
 from __future__ import annotations
 
+import hashlib
 import asyncio
 import json
 import time
@@ -315,6 +316,54 @@ class _BuildStreamPorts:
         self._port.drain_context_updates(self._run)
 
 
+
+class _ComposeStageObserver:
+    """Compose Work Item stage 观察者：把 stage signal/Interaction 映射到 RunLifecyclePort。
+
+    与 Build 不同：stage 不捕获根 Transcript、不落盘上下文更新；Approval
+    走 collect_serial_approvals（auto-edit 下 Shell 等 HITL 工具仍需要 owner
+    决策），Question 通道由 headless spec 关闭，仅保留兜底映射。
+    """
+
+    def __init__(self, *, run: RunState, port: RunLifecyclePort) -> None:
+        self._run = run
+        self._port = port
+        self._execution_id: str | None = None
+        self._agent_id: str | None = None
+
+    def bind_execution(
+        self,
+        *,
+        execution_id: str,
+        parent_execution_id: str | None,
+        agent_id: str,
+    ) -> None:
+        """记录 child provenance，供后续事件投影归属。"""
+        self._execution_id = execution_id
+        self._agent_id = agent_id
+
+    def emit(self, event_type: str, payload: Mapping[str, object]) -> None:
+        """发送带 child provenance 的非终态事件。"""
+        self._port.emit(
+            self._run,
+            event_type,
+            dict(payload),
+            execution_id=self._execution_id,
+            agent_id=self._agent_id,
+        )
+
+    def record_tool_terminal(self, *, tool_name: str, status: str) -> None:
+        """Work Item 路径不持久化 Tool 终态记录；保留 seam 一致性。"""
+        return None
+
+    async def interact(self, request: StreamInteractionRequest) -> object:
+        """Approval 走串行审批通道；Question 兜底映射 owner 交互。"""
+        host_spec = _to_host_interaction(request)
+        if request.type == "approval":
+            return await self._port.collect_serial_approvals(self._run, host_spec)
+        result = await self._port.request_interaction(self._run, host_spec)
+        return result.value
+
 def _stream_session_for(run: RunState) -> StreamSession:
     """为 Build Run 取得跨 resume 复用的 stream session。
 
@@ -372,6 +421,9 @@ class ComposeRunAdapter:
                 "COMPOSE_PERSISTENCE_REQUIRED",
                 "Compose mode requires thread persistence",
             )
+        # services 按 Run 组装且只被本 adapter 消费；此处绑定当前 Run/Port，
+        # 让 stage 执行中的 Shell 审批等 Interaction 走 owner 交互通道。
+        self._services.stage_observer = _ComposeStageObserver(run=run, port=port)
         from harness_agent.compose.document_store import ComposeDocumentStore
         from harness_agent.compose.engine_services import (
             ManagedGrillDriver,
@@ -404,7 +456,7 @@ class ComposeRunAdapter:
                 plan_driver=ManagedPlanDriver(services),
                 implement_driver=ManagedImplementDriver(services),
                 verify_port=(
-                    _WorkItemVerificationPort(services.verification)
+                    _WorkItemVerificationPort(services.verification, run=run, port=port)
                     if services.verification is not None
                     else None
                 ),
@@ -436,6 +488,13 @@ class ComposeRunAdapter:
                 status="failed",
                 code="COMPOSE_WORK_ITEM_BLOCKED",
                 message=result.work_item.blocked_reason or "Work Item 需要用户处理",
+                retryable=True,
+            )
+        if result.status is ComposeTurnOutcome.RETRYABLE_FAILED:
+            return AdapterOutcome(
+                status="failed",
+                code="COMPOSE_ACTIVITY_RETRYABLE_FAILED",
+                message=result.pending_decision or "Compose Activity 执行失败，可重试",
                 retryable=True,
             )
         return None
@@ -486,10 +545,16 @@ class _HostTypedDecisionPort:
 
 
 class _WorkItemVerificationPort:
-    """把 canonical VerificationPort 适配为 Work Item verify 端口。"""
+    """把 canonical VerificationPort 适配为 Work Item verify 端口。
 
-    def __init__(self, verification: object) -> None:
+    非白名单验证命令必须经 RunLifecyclePort.request_approval 走 owner
+    审批通道；绝不静默放行或降级到其他执行器。
+    """
+
+    def __init__(self, verification: object, *, run: RunState, port: RunLifecyclePort) -> None:
         self._verification = verification
+        self._run = run
+        self._port = port
 
     async def run_command(self, command: str, *, work_item_id: str):
         """执行一条 required command 并返回 engine 期望的事实形状。"""
@@ -501,6 +566,7 @@ class _WorkItemVerificationPort:
                 command=command,
                 label=command[:80],
                 resource_key=f"compose:{work_item_id}",
+                approve=lambda description, c=command: self._approve(c, description),
             )
         )
         return VerificationCommandResult(
@@ -509,6 +575,27 @@ class _WorkItemVerificationPort:
             output_digest=evidence.output_digest,
             execution_id=f"verify:{evidence.finished_at_ms}",
         )
+
+    async def _approve(self, command: str, description: str) -> bool:
+        """把审批弹窗映射为 owner 决策；仅 approve_once 视为批准。"""
+        command_digest = hashlib.sha256(command.encode("utf-8")).hexdigest()[:8]
+        request_id = f"compose-verify-{command_digest}"
+        result = await self._port.request_approval(
+            self._run,
+            request_id=request_id,
+            interrupt_id=request_id,
+            description=description,
+            decisions=["approve_once", "reject"],
+            action_requests=[
+                {
+                    "name": "execute",
+                    "args": {"command": command},
+                    "description": description,
+                }
+            ],
+        )
+        value = result.value if isinstance(result.value, Mapping) else {}
+        return str(value.get("decision") or "") == "approve_once"
 
 
 def _work_item_wire(projection: object) -> dict[str, object]:

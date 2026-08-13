@@ -7,11 +7,16 @@ side answer 隔离、unclear 兜底、Esc/cancel 不终结、abandon CAS 与文�
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
 
+from harness_agent.compose.activities.implement import ImplementActivity
+from harness_agent.compose.activities.review import ReviewActivity
+from harness_agent.compose.activities.verify import VerifyActivity
 from harness_agent.compose.document_store import ComposeDocumentStore
+from harness_agent.compose.guard import CompletionGuard, CompletionGuardError
 from harness_agent.compose.models import (
     ComposeDocumentKind,
     ComposeWorkItemStatus,
@@ -37,7 +42,7 @@ from harness_agent.threads.compose_work_item_store import (
     TerminalizeComposeWorkItem,
 )
 from harness_agent.threads.thread_persistence import AcceptRun, ThreadPersistence
-from tests.support.thread_fixtures import test_binding as make_test_binding
+from tests.support.thread_fixtures import async_return, test_binding as make_test_binding
 
 THREAD = "thread-1"
 
@@ -129,7 +134,7 @@ class _Harness:
             classifier=classifier or _FakeClassifier([{"intent": "resume_current"}]),
             interaction=interaction or _FakeInteraction(),
             side_answer=side,
-            workspace_revision=(lambda: revision) if revision else None,
+            workspace_revision=async_return(revision) if revision else None,
             now_ms=lambda: 1_700_000_000_000,
         )
         return ComposeWorkItemEngine(ports)
@@ -215,6 +220,130 @@ async def test_completed_work_item_releases_slot_for_next_goal(tmp_path: Path) -
     assert result.work_item.work_item_id != first_id
     active = await store.load_active(THREAD)
     assert active is not None and active.work_item_id == result.work_item.work_item_id
+    await harness.persistence.close()
+
+
+async def test_new_work_item_slug_is_unique_across_threads(tmp_path: Path) -> None:
+    """同一 workspace 的不同 Thread 使用相同目标时分配不同文档目录。"""
+    harness = await _Harness(tmp_path).open()
+    await harness.persistence.accept_run(
+        AcceptRun(
+            message="受理",
+            binding=make_test_binding("thread-2", "run-0"),
+            mode=ThreadMode.COMPOSE,
+        )
+    )
+    engine = harness.engine(
+        classifier=_FakeClassifier(
+            [{"intent": "start_new_work"}, {"intent": "start_new_work"}]
+        )
+    )
+
+    first = await engine.execute_turn(_turn("实现搜索功能"))
+    second = await engine.execute_turn(
+        ComposeTurnRequest(
+            thread_id="thread-2",
+            run_id="run-1",
+            message="实现搜索功能",
+        )
+    )
+
+    assert first.work_item is not None
+    assert second.work_item is not None
+    assert second.work_item.slug == f"{first.work_item.slug}-2"
+    await harness.persistence.close()
+
+
+async def test_slug_allocation_stops_after_repeated_concurrent_conflicts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """持续并发冲突必须有界失败，不能让一次 Turn 永久自旋。"""
+    harness = await _Harness(tmp_path).open()
+    engine = harness.engine(
+        classifier=_FakeClassifier([{"intent": "start_new_work"}])
+    )
+    store = engine._ports.store  # noqa: SLF001 - 注入稳定并发冲突
+    attempts = 0
+
+    async def always_conflicts(command: object) -> object:
+        nonlocal attempts
+        attempts += 1
+        raise ComposeWorkItemStoreError("COMPOSE_WORK_ITEM_SLUG_CONFLICT")
+
+    monkeypatch.setattr(store, "create", always_conflicts)
+
+    with pytest.raises(
+        ComposeWorkItemEngineError,
+        match="COMPOSE_WORK_ITEM_SLUG_ALLOCATION_FAILED",
+    ):
+        await asyncio.wait_for(engine.execute_turn(_turn("实现搜索功能")), 0.2)
+    assert attempts > 1
+    await harness.persistence.close()
+
+
+@pytest.mark.parametrize(
+    "stage",
+    ("implement", "verify", "review", "report", "complete"),
+)
+async def test_internal_activity_errors_are_retryable_turn_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+) -> None:
+    """内部 Activity 异常不能伪装成正常等待用户的 completed Turn。"""
+    harness = await _Harness(tmp_path).open()
+    engine = harness.engine(
+        classifier=_FakeClassifier([{"intent": "start_new_work"}])
+    )
+    created = await engine.execute_turn(_turn("实现搜索功能"))
+    assert created.work_item is not None
+    item = await engine._ports.store.load(created.work_item.work_item_id)  # noqa: SLF001
+    assert item is not None
+
+    async def explode(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("boom")
+
+    if stage == "implement":
+        engine._ports.implement_driver = object()  # type: ignore[assignment]  # noqa: SLF001
+        engine._ports.workspace_revision = async_return("revision")  # noqa: SLF001
+        monkeypatch.setattr(ImplementActivity, "run", explode)
+        result = await engine._run_implement(_turn("继续"), item, 1_700_000_000_000)  # noqa: SLF001
+    elif stage == "verify":
+        engine._ports.verify_port = object()  # type: ignore[assignment]  # noqa: SLF001
+        monkeypatch.setattr(VerifyActivity, "run", explode)
+        result = await engine._run_verify(_turn("继续"), item, 1_700_000_000_000)  # noqa: SLF001
+    elif stage == "review":
+        engine._ports.review_driver = object()  # type: ignore[assignment]  # noqa: SLF001
+        monkeypatch.setattr(ReviewActivity, "run", explode)
+        result = await engine._run_review(_turn("继续"), item, 1_700_000_000_000)  # noqa: SLF001
+    else:
+        async def document_digests(*args: object) -> tuple[str, ...]:
+            return ("task", "spec", "plan", "todo")
+
+        async def evidence_digest(*args: object) -> str:
+            return "verification"
+
+        async def review_payload(*args: object) -> tuple[str, str]:
+            return ("requirements", "code")
+
+        engine._ports.report_driver = object()  # type: ignore[assignment]  # noqa: SLF001
+        monkeypatch.setattr(ComposeWorkItemEngine, "_four_document_digests", document_digests)
+        monkeypatch.setattr(ComposeWorkItemEngine, "_latest_evidence_digest", evidence_digest)
+        monkeypatch.setattr(ComposeWorkItemEngine, "_latest_review_payload", review_payload)
+
+        async def guard_error(*args: object, **kwargs: object) -> object:
+            raise CompletionGuardError("COMPOSE_TEST_FAILURE")
+
+        if stage == "report":
+            monkeypatch.setattr(CompletionGuard, "write_report", guard_error)
+            result = await engine._run_report(_turn("继续"), item, 1_700_000_000_000)  # noqa: SLF001
+        else:
+            monkeypatch.setattr(CompletionGuard, "complete", guard_error)
+            result = await engine._complete(item, 1_700_000_000_000)  # noqa: SLF001
+
+    assert result is not None
+    assert result.status is ComposeTurnOutcome.RETRYABLE_FAILED
     await harness.persistence.close()
 
 

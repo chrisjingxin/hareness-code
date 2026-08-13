@@ -81,7 +81,11 @@ class PlanDraftContext:
     spec_digest: str
     spec_body: str
     feedback: str = ""
+    previous_failure: str = ""
 
+
+MAX_DRAFT_RETRIES = 2
+"""同一 Activity run 内对校验失败草稿的有界重试次数；仍保持 fail closed。"""
 
 @dataclass(frozen=True, slots=True)
 class PlanDraft:
@@ -203,11 +207,48 @@ class PlanGateActivity:
         plan_snapshot = await self._read_snapshot(item, ComposeDocumentKind.PLAN)
         todo_snapshot = await self._read_snapshot(item, ComposeDocumentKind.TODO)
         feedback = ""
+        reject_reason = ""
+        retries = 0
         while True:
-            if plan_snapshot is None or todo_snapshot is None or feedback:
-                plan_snapshot, todo_snapshot = await self._propose_draft(
-                    item, task, spec, plan_snapshot, todo_snapshot, feedback
-                )
+            if plan_snapshot is None or todo_snapshot is None or feedback or reject_reason:
+                try:
+                    plan_snapshot, todo_snapshot = await self._propose_draft(
+                        item, task, spec, plan_snapshot, todo_snapshot, feedback, reject_reason
+                    )
+                except PlanGateActivityError as exc:
+                    code = str(exc)
+                    validation_retryable = code.startswith(
+                        (
+                            "COMPOSE_PLAN_DRAFT_INVALID",
+                            "COMPOSE_PLAN_TODO_INVALID",
+                            "COMPOSE_PLAN_PLACEHOLDER_INVALID",
+                        )
+                    )
+                    # 弱模型常见失败：长 JSON 结构损坏或字段缺失。区分解析/结构
+                    # 失败（ValueError / PLAN_DRAFT_SCHEMA_INVALID）与 429 等
+                    # provider 错误：前者同 turn 有界重试并回传格式要求；
+                    # provider 错误留给下一 turn resume（带退避）。
+                    parse_retryable = code.startswith(
+                        "COMPOSE_PLAN_EXECUTION_FAILED"
+                    ) and (
+                        isinstance(exc.__cause__, ValueError)
+                        or "PLAN_DRAFT_SCHEMA_INVALID" in str(exc.__cause__)
+                    )
+                    if not (validation_retryable or parse_retryable) or retries >= MAX_DRAFT_RETRIES:
+                        raise
+                    # 校验失败同 turn 有界重试，并把拒绝原因回传模型；
+                    # 任何一次重试都不得推进 gate，仍保持 fail closed。
+                    retries += 1
+                    reject_reason = (
+                        "上次草稿被拒绝：todo 每项必须是以「- [ ] 」开头的"
+                        "markdown 复选框行（标题后缩进写动作、验收），且每项必须"
+                        "包含一行「验证=<命令>」；"
+                        "两份正文必须是完成态文档，不得留下未填写项或模板变量；"
+                        "todo 每项不得包含“决定/评估/选择方案”；"
+                        "输出必须是标记对包裹的正文或单个 JSON 对象。"
+                    )
+                    continue
+                reject_reason = ""
             gate = await self._gate(item, activity_id, plan_snapshot, todo_snapshot)
             if gate.outcome is PlanGateOutcome.REVISE:
                 feedback = await self._collect_feedback(item, activity_id)
@@ -222,6 +263,7 @@ class PlanGateActivity:
         plan_snapshot: ComposeDocumentSnapshot | None,
         todo_snapshot: ComposeDocumentSnapshot | None,
         feedback: str,
+        previous_failure: str,
     ) -> tuple[ComposeDocumentSnapshot, ComposeDocumentSnapshot]:
         """让 driver 成对生成 plan/todo 并提交同一 revision。"""
         context = PlanDraftContext(
@@ -230,6 +272,7 @@ class PlanGateActivity:
             spec_digest=spec.digest,
             spec_body=spec.content,
             feedback=feedback,
+            previous_failure=previous_failure,
         )
         try:
             draft = await self._driver.draft_plan(context)

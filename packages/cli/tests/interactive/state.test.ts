@@ -2,7 +2,7 @@
 
 import { expect, test } from "bun:test"
 import type { EventEnvelope, InteractionRequestEnvelope } from "@za38/protocol"
-import { applyAgentEvent, applyInteractionRequest, applyComposeState, clearPendingInteraction, clearThread, createInitialState, isHomeState, restoreThread, setWorkMode, startRun, type InteractiveState } from "../../src/interactive/state"
+import { applyAgentEvent, applyInteractionRequest, applyComposeState, clearThread, createInitialState, isHomeState, markInteractionTimeout, restoreThread, setWorkMode, startRun, type InteractiveState } from "../../src/interactive/state"
 
 const run = { threadId: "thread-1", runId: "run-1" }
 
@@ -140,12 +140,17 @@ test("审批和稳定 question ID 通过时间线 request 进入状态", () => {
   state = applyInteractionRequest(state, request("approval", 1, { description: "写入源文件", requests: { action_requests: [] } }))
   expect(state.activity.kind).toBe("waiting-interaction")
   expect(interactions(state)[0]).toMatchObject({ id: "request-1", type: "approval", status: "pending" })
-  state = clearPendingInteraction(state, "request-1")
+  state = markInteractionTimeout(state, "request-1")
   expect(interactions(state)[0]).toMatchObject({ id: "request-1", status: "cancelled" })
   state = applyAgentEvent(state, event("interaction.resolved", 2, { request_id: "request-1", type: "approval" }))
-  state = applyInteractionRequest(state, request("question", 3, { questions: [{ id: "question-1", question: "选择目录", options: [{ label: "src", value: "src" }, { label: "tests", value: "tests" }] }] }))
+  state = applyInteractionRequest(state, request("question", 3, { questions: [{ id: "question-1", header: "任务澄清", question: "差异输出应使用哪种格式？", body: "请选择默认输出格式。", options: [{ label: "text", value: "text" }, { label: "json", value: "json" }] }] }))
   expect(state.activity.kind).toBe("waiting-interaction")
-  expect(interactions(state)[1]).toMatchObject({ id: "request-3", type: "question", status: "pending" })
+  expect(interactions(state)[1]).toMatchObject({
+    id: "request-3",
+    type: "question",
+    status: "pending",
+    question: "差异输出应使用哪种格式？",
+  })
 })
 
 test("重复和倒序事件被忽略，sequence 缺口产生诊断但继续应用", () => {

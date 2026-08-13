@@ -25,33 +25,47 @@ class ComposeRoleBinding:
 
 _BUILTIN_ROLE_BINDINGS: Final[Mapping[str, ComposeRoleBinding]] = MappingProxyType(
     {
-        "understand": ComposeRoleBinding(
-            role_id="understand",
+        # Work Item 流水线 stage 名与 engine_services._StageDriverBase._stage 对齐；
+        # 分类器与草稿阶段只读，Implement 复用主 Agent 全能力（无 ask_user），
+        # Reviewer 保持只读能力交集。
+        "work-item-intent": ComposeRoleBinding(
+            role_id="work-item-intent",
             compose_stage="understand",
             planning=True,
         ),
-        "plan": ComposeRoleBinding(
-            role_id="plan",
+        "work-item-grill": ComposeRoleBinding(
+            role_id="work-item-grill",
+            compose_stage="understand",
+            planning=True,
+        ),
+        "work-item-task": ComposeRoleBinding(
+            role_id="work-item-task",
+            compose_stage="understand",
+            planning=True,
+        ),
+        "work-item-spec": ComposeRoleBinding(
+            role_id="work-item-spec",
             compose_stage="plan",
             planning=True,
         ),
-        "build": ComposeRoleBinding(
-            role_id="build",
+        "work-item-plan": ComposeRoleBinding(
+            role_id="work-item-plan",
+            compose_stage="plan",
+            planning=True,
+        ),
+        "work-item-implement": ComposeRoleBinding(
+            role_id="work-item-implement",
             compose_stage="build",
         ),
-        "verify": ComposeRoleBinding(
-            role_id="verify",
-            compose_stage="verify",
-        ),
-        "requirement-reviewer": ComposeRoleBinding(
-            role_id="requirement-reviewer",
+        "work-item-review": ComposeRoleBinding(
+            role_id="work-item-review",
             compose_stage="review",
             readonly=True,
         ),
-        "code-reviewer": ComposeRoleBinding(
-            role_id="code-reviewer",
+        "work-item-report": ComposeRoleBinding(
+            role_id="work-item-report",
             compose_stage="review",
-            readonly=True,
+            planning=True,
         ),
     }
 )

@@ -57,7 +57,47 @@ class EngineDriverServices:
     verification: VerificationPort | None = None
     profile_key: str = ""
     cancellation_token: Any = None
+    stage_observer: Any | None = None
     now_ms: Callable[[], int] = field(default=lambda: int(time.time() * 1000))
+
+
+_BODY_START = "---BEGIN-BODY---"
+_BODY_END = "---END-BODY---"
+_PLAN_START = "---BEGIN-PLAN---"
+_PLAN_END = "---END-PLAN---"
+_TODO_START = "---BEGIN-TODO---"
+_TODO_END = "---END-TODO---"
+
+
+def _extract_between(text: str, start_marker: str, end_marker: str) -> str | None:
+    """提取标记对之间的正文；任一标记缺失返回 None（fail closed）。"""
+    start = text.find(start_marker)
+    if start == -1:
+        return None
+    body_start = start + len(start_marker)
+    end = text.find(end_marker, body_start)
+    if end == -1:
+        return None
+    body = text[body_start:end].strip()
+    return body or None
+
+
+def _parse_json_lenient(text: str) -> dict[str, Any]:
+    """尝试解析 JSON 对象（含 prose/控制字符回退）；失败返回空 dict。"""
+    try:
+        return parse_structured_output(text)
+    except ValueError:
+        return {}
+
+
+def _draft_body(raw_text: str, *, json_field: str) -> str | None:
+    """标记分隔优先，JSON 对象字段兜底；两者都失败返回 None。"""
+    body = _extract_between(raw_text, _BODY_START, _BODY_END)
+    if body is not None:
+        return body
+    parsed = _parse_json_lenient(raw_text)
+    body = parsed.get(json_field)
+    return body if isinstance(body, str) and body.strip() else None
 
 
 class _StageDriverBase:
@@ -76,16 +116,24 @@ class _StageDriverBase:
             timeout_seconds=_STAGE_TIMEOUT_SECONDS,
         )
 
-    async def _run(self, *, stage: str, task: str) -> tuple[Mapping[str, Any], str]:
+    async def _run(
+        self,
+        *,
+        stage: str,
+        task: str,
+        raw: bool = False,
+    ) -> tuple[Mapping[str, Any], str]:
         result = await self._services.stage_agent.run(
-            self._request(stage=stage, task=task)
+            self._request(stage=stage, task=task),
+            self._services.stage_observer,
         )
+        if raw:
+            return {"raw": result.raw_final}, result.execution_id
         output = parse_structured_output(json.dumps(result.output, ensure_ascii=False))
         return output, result.execution_id
 
     def _stage(self, name: str) -> str:
         return f"work-item-{name}"
-
 
 class ManagedTurnIntentClassifier:
     """生产 TurnIntentResolver 分类器：小上下文结构化输出。"""
@@ -146,12 +194,13 @@ class ManagedGrillDriver:
         answered = "\n".join(f"- 问: {q}\n- 答: {a}" for q, a in context.answers)
         task = (
             "根据目标与已确认决策生成研发任务文档正文（不含 front matter）。"
-            '只输出 JSON：{"body": "<Markdown 正文>"}。\n'
+            "正文直接写在标记对之间，不要用 JSON 包裹、不要转义换行或引号：\n"
+            f"{_BODY_START}\n<Markdown 正文>\n{_BODY_END}\n"
             f"目标：{context.goal}\n已确认决策：{answered or '无'}"
         )
-        output, _ = await self._base._run(stage=self._base._stage("task"), task=task)
-        body = output.get("body")
-        if not isinstance(body, str) or not body.strip():
+        output, _ = await self._base._run(stage=self._base._stage("task"), task=task, raw=True)
+        body = _draft_body(str(output.get("raw", "")), json_field="body")
+        if body is None:
             raise EngineServicesError("TASK_DRAFT_SCHEMA_INVALID")
         return body
 
@@ -167,12 +216,13 @@ class ManagedSpecDriver:
         task = (
             "根据已确认任务生成行为规格正文（不含 front matter）：公开 interface、状态、"
             "错误语义、关键 invariant、安全边界与可观察验收。禁止复制 Task 代替行为规格。"
-            '只输出 JSON：{"body": "<Markdown 正文>"}。\n'
+            "正文直接写在标记对之间，不要用 JSON 包裹、不要转义换行或引号：\n"
+            f"{_BODY_START}\n<Markdown 正文>\n{_BODY_END}\n"
             f"目标：{context.goal}\n任务摘要：{context.task_body[:8000]}{feedback}"
         )
-        output, _ = await self._base._run(stage=self._base._stage("spec"), task=task)
-        body = output.get("body")
-        if not isinstance(body, str) or not body.strip():
+        output, _ = await self._base._run(stage=self._base._stage("spec"), task=task, raw=True)
+        body = _draft_body(str(output.get("raw", "")), json_field="body")
+        if body is None:
             raise EngineServicesError("SPEC_DRAFT_SCHEMA_INVALID")
         return body
 
@@ -180,27 +230,39 @@ class ManagedSpecDriver:
 class ManagedPlanDriver:
     """生产 plan 驱动：成对生成 plan/todo 正文。"""
 
+
     def __init__(self, services: EngineDriverServices) -> None:
         self._base = _StageDriverBase(services)
 
     async def draft_plan(self, context: PlanDraftContext) -> PlanDraft:
         feedback = f"\n用户修改反馈：{context.feedback}" if context.feedback else ""
+        failure = (
+            f"\n上次草稿被拒绝，必须修正：{context.previous_failure}"
+            if context.previous_failure
+            else ""
+        )
         task = (
             "根据已确认规格生成实施计划与执行清单两份正文（均不含 front matter）。"
-            "todo 每项必须包含动作、验收与 focused 验证命令，不得包含"
-            "『决定/评估/选择方案』类实施期设计项。"
-            '只输出 JSON：{"plan_body": "<Markdown>", "todo_body": "<Markdown>"}。\n'
-            f"目标：{context.goal}\n规格摘要：{context.spec_body[:8000]}{feedback}"
+            "todo 每项必须是以「- [ ] 」开头的 markdown 复选框行，后面跟该项标题，"
+            "标题下一行缩进写动作与验收；每项还必须包含恰好一行以「验证=」开头的"
+            "focused 验证命令（例如：验证=cd jsondiff && python -m pytest tests/test_diff.py -q）；"
+            "不得包含『决定/评估/选择方案』类实施期设计项；两份正文都不得留下"
+            "未填写项或模板变量，也不要解释、复述这些格式限制。正文直接写在"
+            "标记对之间，不要用 JSON 包裹、"
+            "不要转义换行或引号：\n"
+            f"{_PLAN_START}\n<plan.md 正文>\n{_PLAN_END}\n"
+            f"{_TODO_START}\n<todo.md 正文>\n{_TODO_END}\n"
+            f"目标：{context.goal}\n规格摘要：{context.spec_body[:8000]}{feedback}{failure}"
         )
-        output, _ = await self._base._run(stage=self._base._stage("plan"), task=task)
-        plan_body = output.get("plan_body")
-        todo_body = output.get("todo_body")
-        if (
-            not isinstance(plan_body, str)
-            or not plan_body.strip()
-            or not isinstance(todo_body, str)
-            or not todo_body.strip()
-        ):
+        output, _ = await self._base._run(stage=self._base._stage("plan"), task=task, raw=True)
+        raw_text = str(output.get("raw", ""))
+        plan_body = _extract_between(raw_text, _PLAN_START, _PLAN_END)
+        todo_body = _extract_between(raw_text, _TODO_START, _TODO_END)
+        if plan_body is None or todo_body is None:
+            parsed = _parse_json_lenient(raw_text)
+            plan_body = parsed.get("plan_body") if isinstance(parsed.get("plan_body"), str) else None
+            todo_body = parsed.get("todo_body") if isinstance(parsed.get("todo_body"), str) else None
+        if plan_body is None or todo_body is None:
             raise EngineServicesError("PLAN_DRAFT_SCHEMA_INVALID")
         return PlanDraft(plan_body=plan_body, todo_body=todo_body)
 
@@ -302,13 +364,14 @@ class ManagedReportDriver:
         task = (
             "根据验证与双轴评审摘要生成完成报告正文（不含 front matter）。"
             "必须引用当前文档、验证与评审 digest，不遮蔽任何失败。"
-            '只输出 JSON：{"body": "<Markdown 正文>"}。\n'
+            "正文直接写在标记对之间，不要用 JSON 包裹、不要转义换行或引号：\n"
+            f"{_BODY_START}\n<Markdown 正文>\n{_BODY_END}\n"
             f"目标：{context.goal}\n验证 digest：{context.verification_digest}\n"
             f"Requirement Review：{context.requirement_review_digest}\n"
             f"Code Review：{context.code_review_digest}"
         )
-        output, _ = await self._base._run(stage=self._base._stage("report"), task=task)
-        body = output.get("body")
-        if not isinstance(body, str) or not body.strip():
+        output, _ = await self._base._run(stage=self._base._stage("report"), task=task, raw=True)
+        body = _extract_between(str(output.get("raw", "")), _BODY_START, _BODY_END)
+        if body is None:
             raise EngineServicesError("REPORT_SCHEMA_INVALID")
         return body

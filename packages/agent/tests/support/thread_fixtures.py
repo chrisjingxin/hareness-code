@@ -73,3 +73,12 @@ async def accept_thread(
             binding=test_binding(thread_id, run_id or f"fixture-{thread_id}-{message}"),
         )
     )
+
+
+def async_return(value: object):
+    """构造返回固定值的 async 可调用；用于 workspace_revision 异步端口 fake。"""
+
+    async def _return() -> object:
+        return value
+
+    return _return

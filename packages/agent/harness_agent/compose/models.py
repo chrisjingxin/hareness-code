@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Mapping
@@ -22,7 +23,18 @@ MAX_COMMANDS_PER_TASK = 20
 MAX_FINDINGS = 50
 MAX_CHANGED_PATHS = 200
 
-_PLACEHOLDER_PATTERNS = ("{{", "}}", "TODO", "TBD", "待补充", "待定")
+_PLACEHOLDER_LINE_PATTERN = re.compile(
+    r"^\s*(?:(?:#{1,6}|[-*+]|\d+[.)])\s+)?"
+    r"(?:\[[ xX]\]\s+)?(?:TODO|TBD|待补充|待定)"
+    r"\s*(?:(?:[:：—-])\s*.*)?$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_TEMPLATE_PLACEHOLDER_PATTERN = re.compile(
+    r"^\s*(?:(?:#{1,6}|[-*+]|\d+[.)])\s+)?"
+    r"(?:[^{}\n]{1,40}[:：=]\s*)?"
+    r"\{\{\s*[^{}\n]*\s*\}\}\s*$",
+    re.MULTILINE,
+)
 
 
 class ComposeStage(str, Enum):
@@ -353,9 +365,13 @@ def _bounded_strings(value: object, field_name: str, *, max_items: int = 32) -> 
 
 
 def has_placeholder(text: str) -> bool:
-    """检测方案中的模板/TODO 占位符；有占位符的 Plan 不能通过门禁。"""
-    upper = text.upper()
-    return any(pattern in upper for pattern in _PLACEHOLDER_PATTERNS)
+    """只检测结构化占位行或完整模板表达式，避免误伤正文与代码。"""
+    # 占位符是文档结构而非任意子串：`todo.md`、说明文字，以及 Python/JSON
+    # 嵌套字典结尾的 `}}` 都是合法内容；独立占位行与完整模板变量仍 fail closed。
+    return bool(
+        _PLACEHOLDER_LINE_PATTERN.search(text)
+        or _TEMPLATE_PLACEHOLDER_PATTERN.search(text)
+    )
 
 
 # ---------- Understanding ----------

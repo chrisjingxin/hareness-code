@@ -1,10 +1,10 @@
 """ComposeRunAdapter 生产接线回归测试（WP15 后修复）。
 
 覆盖 adapter 经真实 ThreadPersistence 驱动 ComposeWorkItemEngine 的一个完整
-Turn：意图分类走 stage seam、Work Item 创建、compose.work_item 事件发射、
-WAITING_USER 收敛为 None（默认 completed 终态）。此前
-`result.outcome` 字段名笔误在任何 Turn 都会抛 AttributeError，本测试把该
-路径锁进契约。
+Turn：意图分类走 stage seam、Work Item 创建、compose.work_item 事件发射，
+并证明 Task Activity 的可重试失败不会被默认收敛成 completed。此前
+`result.outcome` 字段名笔误在任何 Turn 都会抛 AttributeError，本测试同时
+锁住 adapter 的生产接线与失败终态。
 """
 
 from __future__ import annotations
@@ -105,8 +105,10 @@ class _FakeRun:
         return ExecutionRef.root(THREAD, "run-1")
 
 
-async def test_adapter_turn_creates_work_item_and_emits_projection(tmp_path: Path) -> None:
-    """一个 Compose Turn 走完 engine 且不抛字段笔误类 AttributeError。"""
+async def test_adapter_surfaces_retryable_task_failure_as_failed_outcome(
+    tmp_path: Path,
+) -> None:
+    """Task Activity 可重试失败不能被 coordinator 默认显示为 completed。"""
     project = tmp_path / "project"
     project.mkdir()
     persistence = await ThreadPersistence.open(project=project, home=tmp_path / "home")
@@ -130,7 +132,10 @@ async def test_adapter_turn_creates_work_item_and_emits_projection(tmp_path: Pat
         adapter = ComposeRunAdapter(services)
         port = _FakePort()
         outcome = await adapter.execute(_FakeRun(persistence), port)  # type: ignore[arg-type]
-        assert outcome is None
+        assert outcome is not None
+        assert outcome.status == "failed"
+        assert outcome.code == "COMPOSE_ACTIVITY_RETRYABLE_FAILED"
+        assert outcome.retryable is True
         # Work Item 已创建并绑定 Run。
         store = persistence.compose_work_item_store()
         active = await store.load_active(THREAD)

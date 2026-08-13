@@ -14,7 +14,7 @@ import re
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Protocol
+from typing import Any, Awaitable, Callable, Protocol
 
 from harness_agent.compose.document_store import (
     ComposeDocumentSnapshot,
@@ -96,7 +96,7 @@ class VerifyActivity:
         store: ComposeWorkItemStore,
         documents: ComposeDocumentStore,
         port: VerificationPort,
-        workspace_revision: Callable[[], str | None] | None,
+        workspace_revision: Callable[[], Awaitable[str | None]] | None,
         now_ms: Callable[[], int | None] | None = None,
     ) -> None:
         self._store = store
@@ -239,7 +239,7 @@ class VerifyActivity:
     async def _record_verification_evidence(self, item: ComposeWorkItem) -> None:
         """全部命令通过后写入绑定文档与 workspace revision 的总结证据。"""
         revision = (
-            self._workspace_revision()
+            await self._workspace_revision()
             if self._workspace_revision is not None
             else None
         )
