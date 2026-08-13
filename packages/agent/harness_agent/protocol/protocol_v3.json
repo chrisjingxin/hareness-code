@@ -49,7 +49,9 @@
       "host.attachment.revoke": { "params": "#/$defs/hostAttachmentRevokeParams", "result": "#/$defs/hostAttachmentRevokeResult", "capability": "host.attach" },
       "host.control.acquire": { "params": "#/$defs/emptyParams", "result": "#/$defs/controlStatus", "capability": "host.control" },
       "host.control.release": { "params": "#/$defs/emptyParams", "result": "#/$defs/controlStatus", "capability": "host.control" },
-      "host.control.status": { "params": "#/$defs/emptyParams", "result": "#/$defs/controlStatus", "capability": "host.control" }
+      "host.control.status": { "params": "#/$defs/emptyParams", "result": "#/$defs/controlStatus", "capability": "host.control" },
+      "compose.inspect": { "params": "#/$defs/composeInspectParams", "result": "#/$defs/composeInspectResult", "capability": "threads.read" },
+      "compose.abandon": { "params": "#/$defs/composeAbandonParams", "result": "#/$defs/composeAbandonResult", "capability": "threads.read" }
     },
     "events": {
       "run.started": { "payload": "#/$defs/runStartedPayload" },
@@ -63,6 +65,8 @@
       "context.updated": { "payload": "#/$defs/contextPayload" },
       "compose.state": { "payload": "#/$defs/composeStatePayload" },
       "compose.summary": { "payload": "#/$defs/composeSummaryPayload" },
+      "compose.work_item": { "payload": "#/$defs/composeWorkItemPayload" },
+      "compose.activity": { "payload": "#/$defs/composeActivityPayload" },
       "interaction.resolved": { "payload": "#/$defs/interactionResolvedPayload" },
       "run.completed": { "payload": "#/$defs/runCompletedPayload" },
       "run.cancelled": { "payload": "#/$defs/runCancelledPayload" },
@@ -427,7 +431,9 @@
           "type": "array",
           "items": { "$ref": "#/$defs/composeActivityRecord" },
           "default": []
-        }
+        },
+        "thread_mode": { "oneOf": [{ "$ref": "#/$defs/interactionMode" }, { "type": "null" }] },
+        "work_item": { "oneOf": [{ "$ref": "#/$defs/composeWorkItemSnapshot" }, { "type": "null" }] }
       },
       "additionalProperties": false
     },
@@ -924,6 +930,95 @@
           }
         },
         "blocked_reason": { "type": ["string", "null"], "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "composeWorkItemSnapshot": {
+      "type": "object",
+      "required": ["work_item_id", "slug", "title", "revision", "status", "current_activity", "pending_decision", "blocked_reason"],
+      "properties": {
+        "work_item_id": { "type": "string", "minLength": 1 },
+        "slug": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "revision": { "type": "integer", "minimum": 0 },
+        "status": { "enum": ["active", "waiting_user", "blocked", "completed", "abandoned"] },
+        "current_activity": { "type": "string", "minLength": 1 },
+        "pending_decision": { "type": ["string", "null"] },
+        "blocked_reason": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "composeReadinessSnapshot": {
+      "type": "object",
+      "required": ["task_confirmed", "spec_confirmed", "plan_confirmed", "todo_executable", "implementation_current", "verification_fresh", "review_fresh", "report_current", "complete"],
+      "properties": {
+        "task_confirmed": { "type": "boolean" },
+        "spec_confirmed": { "type": "boolean" },
+        "plan_confirmed": { "type": "boolean" },
+        "todo_executable": { "type": "boolean" },
+        "implementation_current": { "type": "boolean" },
+        "verification_fresh": { "type": "boolean" },
+        "review_fresh": { "type": "boolean" },
+        "report_current": { "type": "boolean" },
+        "complete": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "composeInspectParams": {
+      "type": "object",
+      "required": ["thread_id"],
+      "properties": {
+        "thread_id": { "type": "string", "minLength": 1 },
+        "work_item_id": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "composeInspectResult": {
+      "type": "object",
+      "required": ["work_item"],
+      "properties": {
+        "work_item": { "oneOf": [{ "$ref": "#/$defs/composeWorkItemSnapshot" }, { "type": "null" }] }
+      },
+      "additionalProperties": false
+    },
+    "composeAbandonParams": {
+      "type": "object",
+      "required": ["thread_id", "work_item_id", "expected_revision"],
+      "properties": {
+        "thread_id": { "type": "string", "minLength": 1 },
+        "work_item_id": { "type": "string", "minLength": 1 },
+        "expected_revision": { "type": "integer", "minimum": 0 },
+        "reason": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "composeAbandonResult": {
+      "type": "object",
+      "required": ["work_item"],
+      "properties": {
+        "work_item": { "$ref": "#/$defs/composeWorkItemSnapshot" }
+      },
+      "additionalProperties": false
+    },
+    "composeWorkItemPayload": {
+      "type": "object",
+      "required": ["thread_id", "work_item"],
+      "properties": {
+        "thread_id": { "type": "string", "minLength": 1 },
+        "work_item": { "$ref": "#/$defs/composeWorkItemSnapshot" }
+      },
+      "additionalProperties": false
+    },
+    "composeActivityPayload": {
+      "type": "object",
+      "required": ["thread_id", "work_item_id", "activity_id", "kind", "status", "attempt"],
+      "properties": {
+        "thread_id": { "type": "string", "minLength": 1 },
+        "work_item_id": { "type": "string", "minLength": 1 },
+        "activity_id": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "minLength": 1 },
+        "status": { "type": "string", "minLength": 1 },
+        "attempt": { "type": "integer", "minimum": 1 }
       },
       "additionalProperties": false
     },

@@ -859,6 +859,58 @@
       }
     },
     {
+      "kind": "operation.params",
+      "name": "compose.inspect",
+      "case": "valid",
+      "value": {
+        "thread_id": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "compose.inspect",
+      "case": "valid",
+      "value": {
+        "work_item": {
+          "work_item_id": "x",
+          "slug": "x",
+          "title": "x",
+          "revision": 1,
+          "status": "active",
+          "current_activity": "x",
+          "pending_decision": "x",
+          "blocked_reason": "x"
+        }
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "compose.abandon",
+      "case": "valid",
+      "value": {
+        "thread_id": "x",
+        "work_item_id": "x",
+        "expected_revision": 1
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "compose.abandon",
+      "case": "valid",
+      "value": {
+        "work_item": {
+          "work_item_id": "x",
+          "slug": "x",
+          "title": "x",
+          "revision": 1,
+          "status": "active",
+          "current_activity": "x",
+          "pending_decision": "x",
+          "blocked_reason": "x"
+        }
+      }
+    },
+    {
       "kind": "event",
       "name": "run.started",
       "case": "valid",
@@ -1050,6 +1102,53 @@
         "payload": {
           "status": "passed",
           "text": "x"
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "compose.work_item",
+      "case": "valid",
+      "value": {
+        "event_id": "x",
+        "type": "compose.work_item",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "thread_id": "x",
+          "work_item": {
+            "work_item_id": "x",
+            "slug": "x",
+            "title": "x",
+            "revision": 1,
+            "status": "active",
+            "current_activity": "x",
+            "pending_decision": "x",
+            "blocked_reason": "x"
+          }
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "compose.activity",
+      "case": "valid",
+      "value": {
+        "event_id": "x",
+        "type": "compose.activity",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "thread_id": "x",
+          "work_item_id": "x",
+          "activity_id": "x",
+          "kind": "x",
+          "status": "x",
+          "attempt": 1
         }
       }
     },
@@ -3030,6 +3129,113 @@
       }
     },
     {
+      "kind": "operation.params",
+      "name": "compose.inspect",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "compose.inspect",
+      "case": "extra_field",
+      "value": {
+        "thread_id": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "compose.inspect",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "compose.inspect",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "compose.inspect",
+      "case": "extra_field",
+      "value": {
+        "work_item": {
+          "work_item_id": "x",
+          "slug": "x",
+          "title": "x",
+          "revision": 1,
+          "status": "active",
+          "current_activity": "x",
+          "pending_decision": "x",
+          "blocked_reason": "x"
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "compose.inspect",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
+      "kind": "operation.params",
+      "name": "compose.abandon",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "compose.abandon",
+      "case": "extra_field",
+      "value": {
+        "thread_id": "x",
+        "work_item_id": "x",
+        "expected_revision": 1,
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "compose.abandon",
+      "case": "missing_field",
+      "value": {
+        "work_item_id": "x",
+        "expected_revision": 1
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "compose.abandon",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "compose.abandon",
+      "case": "extra_field",
+      "value": {
+        "work_item": {
+          "work_item_id": "x",
+          "slug": "x",
+          "title": "x",
+          "revision": 1,
+          "status": "active",
+          "current_activity": "x",
+          "pending_decision": "x",
+          "blocked_reason": "x"
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "compose.abandon",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
       "kind": "event",
       "name": "run.started",
       "case": "wrong_type",
@@ -3482,6 +3688,112 @@
         "payload": {
           "status": "passed",
           "text": "x"
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "compose.work_item",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "event",
+      "name": "compose.work_item",
+      "case": "extra_field",
+      "value": {
+        "event_id": "x",
+        "type": "compose.work_item",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "thread_id": "x",
+          "work_item": {
+            "work_item_id": "x",
+            "slug": "x",
+            "title": "x",
+            "revision": 1,
+            "status": "active",
+            "current_activity": "x",
+            "pending_decision": "x",
+            "blocked_reason": "x"
+          }
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "event",
+      "name": "compose.work_item",
+      "case": "missing_field",
+      "value": {
+        "type": "compose.work_item",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "thread_id": "x",
+          "work_item": {
+            "work_item_id": "x",
+            "slug": "x",
+            "title": "x",
+            "revision": 1,
+            "status": "active",
+            "current_activity": "x",
+            "pending_decision": "x",
+            "blocked_reason": "x"
+          }
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "compose.activity",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "event",
+      "name": "compose.activity",
+      "case": "extra_field",
+      "value": {
+        "event_id": "x",
+        "type": "compose.activity",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "thread_id": "x",
+          "work_item_id": "x",
+          "activity_id": "x",
+          "kind": "x",
+          "status": "x",
+          "attempt": 1
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "event",
+      "name": "compose.activity",
+      "case": "missing_field",
+      "value": {
+        "type": "compose.activity",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "thread_id": "x",
+          "work_item_id": "x",
+          "activity_id": "x",
+          "kind": "x",
+          "status": "x",
+          "attempt": 1
         }
       }
     },

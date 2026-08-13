@@ -24,3 +24,21 @@ test("compact/status/version/help/web 命令语义确定", async () => {
   }
 })
 
+test("Compose-only 命令在 Build 模式手输返回本地错误且不进入模型", async () => {
+  const harness = makeHarness()
+  try {
+    const newWork = await harness.controller.dispatch({ type: "input.submit", value: "/new-work" })
+    expect(newWork).toEqual({ status: "accepted" })
+    expect(notices(harness.controller.getSnapshot())).toContain("COMMAND_MODE_UNAVAILABLE")
+
+    const abandon = await harness.controller.dispatch({ type: "input.submit", value: "/abandon" })
+    expect(abandon).toEqual({ status: "accepted" })
+    expect(notices(harness.controller.getSnapshot())).toContain("COMMAND_MODE_UNAVAILABLE")
+
+    // 手输命令未触发 run.start，也未提交任何 prompt 给模型。
+    expect(harness.calls).not.toContain("run.start")
+  } finally {
+    await harness.controller.close()
+  }
+})
+
