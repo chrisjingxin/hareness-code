@@ -26,6 +26,7 @@ from harness_agent.compose.document_store import (
 )
 from harness_agent.compose.models import (
     ComposeDocumentKind,
+    ComposeEffectStatus,
     ComposeWorkItem,
     ComposeWorkItemStatus,
     ThreadMode,
@@ -33,8 +34,11 @@ from harness_agent.compose.models import (
 from harness_agent.compose.readiness import (
     ComposeReadiness,
     ComposeReadinessResolver,
+    CompletionReadinessFact,
     ConfirmationGroups,
     DocumentReadinessFact,
+    ReportReadinessFact,
+    ReviewFreshnessFact,
     WorkspaceFreshnessFact,
 )
 from harness_agent.compose.turn_intent import (
@@ -79,6 +83,26 @@ from harness_agent.compose.activities.implement import (
     ImplementDriver,
     ImplementItemOutcome,
 )
+from harness_agent.compose.activities.verify import (
+    VerificationPort,
+    VerifyActivity,
+    VerifyActivityError,
+    VerifyOutcome,
+)
+from harness_agent.compose.activities.review import (
+    ReviewActivity,
+    ReviewActivityError,
+    ReviewDriver,
+    ReviewOutcome,
+)
+from harness_agent.compose.guard import (
+    CompletionGuard,
+    CompletionGuardError,
+    ReportDriver,
+)
+
+MAX_PIPELINE_STEPS = 8
+"""批准实施后单个 Turn 内自动闭环的 Activity 步数上限。"""
 
 MAX_GOAL_CHARS = 400
 """创建 Work Item 时保存的目标文本上限；超出截断，正文仍以 Transcript 为准。"""
@@ -186,6 +210,10 @@ class ComposeTurnPorts:
     spec_driver: SpecDriver | None = None
     plan_driver: PlanDriver | None = None
     implement_driver: ImplementDriver | None = None
+    verify_port: VerificationPort | None = None
+    review_driver: ReviewDriver | None = None
+    report_driver: ReportDriver | None = None
+
 
 @dataclass(frozen=True, slots=True)
 class ReadinessProjection:
@@ -469,22 +497,46 @@ class ComposeWorkItemEngine:
         readiness: ComposeReadiness,
         facts: dict[ComposeDocumentKind, DocumentReadinessFact],
     ) -> ComposeTurnResult:
-        """按 readiness gate 顺序执行有界 Activity；门禁逐一纵向打通。"""
+        """按 readiness gate 顺序执行有界 Activity；批准实施后自动闭环。"""
         if not readiness.task_confirmed:
             return await self._run_task_gate(request, item, now)
         if not readiness.spec_confirmed:
             return await self._run_spec_gate(request, item, now)
         if not readiness.plan_confirmed:
             return await self._run_plan_gate(request, item, now)
-        if not readiness.implementation_current:
-            return await self._run_implement(request, item, now)
+        current = item
+        steps = 0
+        while steps < MAX_PIPELINE_STEPS:
+            readiness, facts = await self._compute_readiness(current)
+            if not readiness.implementation_current:
+                outcome = await self._run_implement(request, current, now)
+            elif not readiness.verification_fresh:
+                outcome = await self._run_verify(request, current, now)
+            elif not readiness.review_fresh:
+                outcome = await self._run_review(request, current, now)
+            elif not readiness.report_current:
+                outcome = await self._run_report(request, current, now)
+            elif readiness.complete and not current.terminal:
+                return await self._complete(current, now)
+            else:
+                break
+            if outcome is not None:
+                return outcome
+            current = await self._ports.store.load(current.work_item_id)
+            if current is None:
+                raise ComposeWorkItemEngineError(
+                    "COMPOSE_WORK_ITEM_NOT_FOUND",
+                    "Work Item 在 Activity 执行后丢失",
+                )
+            steps += 1
+        readiness, facts = await self._compute_readiness(current)
         outcome = (
             ComposeTurnOutcome.BLOCKED
-            if item.status is ComposeWorkItemStatus.BLOCKED
+            if current.status is ComposeWorkItemStatus.BLOCKED
             else ComposeTurnOutcome.WAITING_USER
         )
         return ComposeTurnResult(
-            self._projection(item, readiness, pending_decision=None, facts=facts),
+            self._projection(current, readiness, pending_decision=None, facts=facts),
             outcome,
             None,
             intent=_explicit_intent(TurnIntentKind.RESUME_CURRENT),
@@ -607,6 +659,9 @@ class ComposeWorkItemEngine:
                 "COMPOSE_WORK_ITEM_NOT_FOUND",
                 "Work Item 在 Activity 执行后丢失",
             )
+        if result.pending is None:
+            # 全部完成且无 pending：流水线自动进入下一 Activity。
+            return None
         readiness, facts = await self._compute_readiness(updated)
         outcome = (
             ComposeTurnOutcome.BLOCKED
@@ -620,6 +675,236 @@ class ComposeWorkItemEngine:
             outcome,
             result.pending,
             intent=resume_intent,
+        )
+
+    async def _run_verify(
+        self,
+        request: ComposeTurnRequest,
+        item: ComposeWorkItem,
+        now: int,
+    ) -> ComposeTurnResult | None:
+        """执行 Verify Activity；失败修复 Todo 后回到 Implement 自动闭环。"""
+        port = self._ports.verify_port
+        if port is None:
+            raise ComposeWorkItemEngineError(
+                "COMPOSE_ACTIVITY_UNAVAILABLE",
+                "verify 端口未接入",
+            )
+        activity = VerifyActivity(
+            store=self._ports.store,
+            documents=self._ports.documents,
+            port=port,
+            workspace_revision=self._ports.workspace_revision,
+            now_ms=self._ports.now_ms,
+        )
+        resume_intent = _explicit_intent(TurnIntentKind.RESUME_CURRENT)
+        try:
+            result = await activity.run(item, run_id=request.run_id)
+        except Exception as exc:
+            code = getattr(exc, "code", None)
+            pending = f"verify:{code}" if code else "verify:failed"
+            readiness, facts = await self._compute_readiness(item)
+            return ComposeTurnResult(
+                self._projection(item, readiness, pending_decision=pending, facts=facts),
+                ComposeTurnOutcome.WAITING_USER,
+                pending,
+                intent=resume_intent,
+            )
+        if result.outcome is VerifyOutcome.FAILED:
+            updated = await self._ports.store.load(item.work_item_id)
+            if updated is None:
+                raise ComposeWorkItemEngineError(
+                    "COMPOSE_WORK_ITEM_NOT_FOUND",
+                    "Work Item 在 Activity 执行后丢失",
+                )
+            readiness, facts = await self._compute_readiness(updated)
+            return ComposeTurnResult(
+                self._projection(
+                    updated, readiness, pending_decision=result.pending, facts=facts
+                ),
+                ComposeTurnOutcome.WAITING_USER,
+                result.pending,
+                intent=resume_intent,
+            )
+        return None
+
+    async def _run_review(
+        self,
+        request: ComposeTurnRequest,
+        item: ComposeWorkItem,
+        now: int,
+    ) -> ComposeTurnResult | None:
+        """执行双轴只读 Review；Required finding 回到 Implement 自动闭环。"""
+        driver = self._ports.review_driver
+        if driver is None:
+            raise ComposeWorkItemEngineError(
+                "COMPOSE_ACTIVITY_UNAVAILABLE",
+                "review 驱动未接入",
+            )
+        activity = ReviewActivity(
+            store=self._ports.store,
+            documents=self._ports.documents,
+            driver=driver,
+            workspace_revision=self._ports.workspace_revision,
+            now_ms=self._ports.now_ms,
+        )
+        resume_intent = _explicit_intent(TurnIntentKind.RESUME_CURRENT)
+        try:
+            result = await activity.run(item, run_id=request.run_id)
+        except Exception as exc:
+            code = getattr(exc, "code", None)
+            pending = f"review:{code}" if code else "review:failed"
+            readiness, facts = await self._compute_readiness(item)
+            return ComposeTurnResult(
+                self._projection(item, readiness, pending_decision=pending, facts=facts),
+                ComposeTurnOutcome.WAITING_USER,
+                pending,
+                intent=resume_intent,
+            )
+        if result.outcome is ReviewOutcome.FINDINGS:
+            updated = await self._ports.store.load(item.work_item_id)
+            if updated is None:
+                raise ComposeWorkItemEngineError(
+                    "COMPOSE_WORK_ITEM_NOT_FOUND",
+                    "Work Item 在 Activity 执行后丢失",
+                )
+            readiness, facts = await self._compute_readiness(updated)
+            return ComposeTurnResult(
+                self._projection(
+                    updated, readiness, pending_decision=result.pending, facts=facts
+                ),
+                ComposeTurnOutcome.WAITING_USER,
+                result.pending,
+                intent=resume_intent,
+            )
+        return None
+
+    async def _run_report(
+        self,
+        request: ComposeTurnRequest,
+        item: ComposeWorkItem,
+        now: int,
+    ) -> ComposeTurnResult | None:
+        """生成 report.md 与引用证据；完成后 Guard Kernel 走 complete CAS。"""
+        driver = self._ports.report_driver
+        if driver is None:
+            raise ComposeWorkItemEngineError(
+                "COMPOSE_ACTIVITY_UNAVAILABLE",
+                "report 驱动未接入",
+            )
+        guard = CompletionGuard(
+            store=self._ports.store,
+            documents=self._ports.documents,
+            driver=driver,
+            workspace_revision=self._ports.workspace_revision,
+            now_ms=self._ports.now_ms,
+        )
+        resume_intent = _explicit_intent(TurnIntentKind.RESUME_CURRENT)
+        digests = await self._four_document_digests(item)
+        verification_digest = await self._latest_evidence_digest(item, "verification")
+        review_payload = await self._latest_review_payload(item)
+        if verification_digest is None or review_payload is None:
+            readiness, facts = await self._compute_readiness(item)
+            pending = "report:COMPOSE_REPORT_INPUTS_MISSING"
+            return ComposeTurnResult(
+                self._projection(item, readiness, pending_decision=pending, facts=facts),
+                ComposeTurnOutcome.WAITING_USER,
+                pending,
+                intent=resume_intent,
+            )
+        try:
+            await guard.write_report(
+                item,
+                task_digest=digests[0],
+                spec_digest=digests[1],
+                plan_digest=digests[2],
+                todo_digest=digests[3],
+                verification_digest=verification_digest,
+                requirement_review_digest=review_payload[0],
+                code_review_digest=review_payload[1],
+            )
+        except CompletionGuardError as exc:
+            readiness, facts = await self._compute_readiness(item)
+            pending = f"report:{exc.code}"
+            return ComposeTurnResult(
+                self._projection(item, readiness, pending_decision=pending, facts=facts),
+                ComposeTurnOutcome.WAITING_USER,
+                pending,
+                intent=resume_intent,
+            )
+        return None
+
+    async def _complete(
+        self,
+        item: ComposeWorkItem,
+        now: int,
+    ) -> ComposeTurnResult:
+        """Guard Kernel 终态：revision CAS 提交 completed。"""
+        guard = CompletionGuard(
+            store=self._ports.store,
+            documents=self._ports.documents,
+            driver=self._ports.report_driver,
+            workspace_revision=self._ports.workspace_revision,
+            now_ms=self._ports.now_ms,
+        )
+        try:
+            completed = await guard.complete(item, now_ms=now)
+        except CompletionGuardError as exc:
+            readiness, facts = await self._compute_readiness(item)
+            pending = f"complete:{exc.code}"
+            return ComposeTurnResult(
+                self._projection(item, readiness, pending_decision=pending, facts=facts),
+                ComposeTurnOutcome.WAITING_USER,
+                pending,
+                intent=_explicit_intent(TurnIntentKind.RESUME_CURRENT),
+            )
+        readiness, facts = await self._compute_readiness(completed)
+        return ComposeTurnResult(
+            self._projection(completed, readiness, pending_decision=None, facts=facts),
+            ComposeTurnOutcome.COMPLETED,
+            None,
+            intent=_explicit_intent(TurnIntentKind.RESUME_CURRENT),
+        )
+
+    async def _four_document_digests(self, item: ComposeWorkItem) -> tuple[str, ...]:
+        """读取 Task/Spec/Plan/Todo 四份当前文档 digest。"""
+        digests: list[str] = []
+        for kind in (
+            ComposeDocumentKind.TASK,
+            ComposeDocumentKind.SPEC,
+            ComposeDocumentKind.PLAN,
+            ComposeDocumentKind.TODO,
+        ):
+            snapshot = await self._inspect_optional(item, kind)
+            if snapshot is None:
+                raise ComposeWorkItemEngineError(
+                    "COMPOSE_DOCUMENT_MISSING",
+                    "完成流程缺少必要文档",
+                )
+            digests.append(snapshot.digest)
+        return tuple(digests)
+
+    async def _latest_evidence_digest(self, item: ComposeWorkItem, kind: str) -> str | None:
+        """读取某类证据的最新 content digest。"""
+        try:
+            records = await self._ports.store.load_evidence(item.work_item_id, kind)
+        except ComposeWorkItemStoreError:
+            return None
+        return records[-1].content_digest if records else None
+
+    async def _latest_review_payload(self, item: ComposeWorkItem):
+        """读取最新 review 证据的双轴 digest 引用。"""
+        try:
+            records = await self._ports.store.load_evidence(
+                item.work_item_id, "review"
+            )
+        except ComposeWorkItemStoreError:
+            return None
+        if not records:
+            return None
+        return (
+            str(records[-1].content_digest),
+            str(records[-1].content_digest),
         )
 
     async def _run_gate(
@@ -953,20 +1238,30 @@ class ComposeWorkItemEngine:
             else None
         )
         implementation = await self._implementation_fact(item)
+        verification = await self._verification_fact(item)
+        review = await self._review_fact(item)
+        report = await self._report_fact(item)
+        completion = await self._completion_fact(item)
         readiness = self._ports.readiness.resolve(
             facts,
             confirmations,
             workspace_revision=revision,
             implementation=implementation,
+            verification=verification,
+            review=review,
+            report=report,
+            completion=completion,
         )
         return readiness, facts
 
-    async def _implementation_fact(self, item: ComposeWorkItem):
-        """把最新 implementation 证据还原为 resolver 可消费的新鲜度事实。"""
+    async def _verification_fact(self, item: ComposeWorkItem):
+        """把最新 verification 证据还原为 resolver 可消费的新鲜度事实。"""
+        return await self._workspace_fact(item, "verification")
+
+    async def _workspace_fact(self, item: ComposeWorkItem, kind: str):
+        """implementation/verification 共用：最新 passed 证据 → freshness 事实。"""
         try:
-            records = await self._ports.store.load_evidence(
-                item.work_item_id, "implementation"
-            )
+            records = await self._ports.store.load_evidence(item.work_item_id, kind)
         except ComposeWorkItemStoreError:
             return None
         if not records:
@@ -983,6 +1278,87 @@ class ComposeWorkItemEngine:
             )
         except (KeyError, TypeError, ValueError):
             return None
+
+    async def _review_fact(self, item: ComposeWorkItem):
+        """把最新 review 证据还原为双轴新鲜度事实；任一轴缺失即 None。"""
+        try:
+            records = await self._ports.store.load_evidence(
+                item.work_item_id, "review"
+            )
+        except ComposeWorkItemStoreError:
+            return None
+        if not records:
+            return None
+        payload = records[-1].payload
+        try:
+            digests = frozenset(str(digest) for digest in payload["document_digests"])
+            requirement = payload["requirement"]
+            code = payload["code"]
+            revision = str(payload["workspace_revision"])
+            return ReviewFreshnessFact(
+                requirement=WorkspaceFreshnessFact(
+                    workspace_revision=revision,
+                    document_digests=digests,
+                    evidence_digest=records[-1].content_digest,
+                    execution_id=str(requirement["execution_id"]),
+                    passed=bool(requirement.get("passed", True)),
+                ),
+                code=WorkspaceFreshnessFact(
+                    workspace_revision=revision,
+                    document_digests=digests,
+                    evidence_digest=records[-1].content_digest,
+                    execution_id=str(code["execution_id"]),
+                    passed=bool(code.get("passed", True)),
+                ),
+                no_required_findings=bool(payload.get("no_required_findings", True)),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    async def _report_fact(self, item: ComposeWorkItem):
+        """把最新 report 证据还原为 ReportReadinessFact。"""
+        try:
+            records = await self._ports.store.load_evidence(
+                item.work_item_id, "report"
+            )
+        except ComposeWorkItemStoreError:
+            return None
+        if not records:
+            return None
+        payload = records[-1].payload
+        try:
+            return ReportReadinessFact(
+                document_digest=str(payload["document_digest"]),
+                source_digests=frozenset(
+                    str(digest) for digest in payload["source_digests"]
+                ),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    async def _completion_fact(self, item: ComposeWorkItem):
+        """Guard Kernel 前置事实：存在 pending/unknown effect 时不能完成。"""
+        try:
+            effects = await self._ports.store.load_effects(item.work_item_id)
+        except ComposeWorkItemStoreError:
+            return CompletionReadinessFact(
+                no_pending_effects=False,
+                no_unknown_effects=False,
+            )
+        from harness_agent.compose.models import ComposeEffectStatus
+
+        return CompletionReadinessFact(
+            no_pending_effects=not any(
+                effect.status is ComposeEffectStatus.INTENT for effect in effects
+            ),
+            no_unknown_effects=not any(
+                effect.status is ComposeEffectStatus.UNKNOWN for effect in effects
+            ),
+        )
+
+    async def _implementation_fact(self, item: ComposeWorkItem):
+        """把最新 implementation 证据还原为 resolver 可消费的新鲜度事实。"""
+        return await self._workspace_fact(item, "implementation")
 
     async def _inspect_optional(
         self,

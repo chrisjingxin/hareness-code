@@ -195,7 +195,7 @@ class ComposeReadinessResolver:
             confirmations.get("spec", ()),
         )
         plan_confirmed = spec_confirmed and _confirmed_group(
-            (plan, todo),
+            (plan,),
             confirmations.get("plan", ()),
         )
         source_digests = _current_document_digests(documents, _IMPLEMENTATION_DOCUMENTS)

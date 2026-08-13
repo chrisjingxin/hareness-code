@@ -5,7 +5,7 @@ from __future__ import annotations
 from harness_agent.compose.models import ComposeDocumentKind
 
 
-def _documents(*, task_digest: str = "task-v1") -> dict[ComposeDocumentKind, object]:
+def _documents(*, task_digest: str = "task-v1", todo_digest: str = "todo-v1") -> dict[ComposeDocumentKind, object]:
     """构造当前文件摘要与 SQLite ref 一致的最小文档事实。"""
     from harness_agent.compose.readiness import DocumentReadinessFact
 
@@ -27,8 +27,8 @@ def _documents(*, task_digest: str = "task-v1") -> dict[ComposeDocumentKind, obj
         ),
         ComposeDocumentKind.TODO: DocumentReadinessFact(
             kind=ComposeDocumentKind.TODO,
-            current_digest="todo-v1",
-            recorded_digest="todo-v1",
+            current_digest=todo_digest,
+            recorded_digest=todo_digest,
         ),
     }
 
@@ -213,3 +213,27 @@ def test_readiness_invalidates_implementation_verification_review_and_report_on_
     assert not stale.report_current
     assert not stale.complete
     assert stale.next_action == "implement"
+
+
+def test_readiness_todo_checkmark_evolution_does_not_retrigger_plan_gate() -> None:
+    """todo 勾选是计划的预期演进：plan_confirmed 不变，执行证据按新 digest 失效。"""
+    from harness_agent.compose.readiness import (
+        ComposeReadinessResolver,
+        DocumentReadinessFact,
+    )
+
+    documents = _documents(todo_digest="todo-v2")
+    readiness = ComposeReadinessResolver().resolve(
+        documents,
+        {
+            "task": (frozenset({"task-v1"}),),
+            "spec": (frozenset({"task-v1", "spec-v1"}),),
+            "plan": (frozenset({"plan-v1", "todo-v1"}),),
+        },
+    )
+
+    assert readiness.task_confirmed
+    assert readiness.spec_confirmed
+    assert readiness.plan_confirmed
+    assert readiness.todo_executable
+    assert readiness.next_action == "implement"
