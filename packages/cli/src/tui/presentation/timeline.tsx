@@ -1,11 +1,13 @@
 /** Thread 消息、工具和 Interaction 的统一时间线。 */
 
 import { TextAttributes, type ScrollBoxRenderable } from "@opentui/core"
-import { type RefObject, useMemo, useState } from "react"
+import { type ReactNode, type RefObject, useMemo, useState } from "react"
 
 import type { ComposeProjection, ComposeSummaryCard, ConversationMessage, InteractionCard, ReasoningCard, TimelineItem, ToolCard } from "../../interactive/state"
 import type { InteractiveSnapshot } from "../../interactive/types"
 import { formatContext, formatDuration, formatElapsed, formatUsage } from "../../presentation-shared/formatters"
+import { diffTextForRenderer, parseFileDiff } from "../../presentation-shared/file-diff"
+import { resolveLanguageForPath } from "../../presentation-shared/language-catalog"
 import { APPROVAL_DECISION_ORDER, approvalDecisionDescription, approvalDecisionLabel, isApprovalDecision } from "../../presentation-shared/interaction-policy"
 import {
   COMPOSE_STAGE_LABELS,
@@ -80,6 +82,7 @@ export function ConversationTimeline(props: {
   onQuestion: (answer: string) => void
   modelName?: string
   transientNotice?: { id: string; message: string }
+  terminalWidth: number
 }) {
   const segments = useMemo(
     () => segmentTimeline(props.interactive.timeline),
@@ -129,6 +132,7 @@ export function ConversationTimeline(props: {
               onToggleTool={props.onToggleTool}
               onApproval={props.onApproval}
               onQuestion={props.onQuestion}
+              terminalWidth={props.terminalWidth}
             />
           )
         }
@@ -151,6 +155,7 @@ export function ConversationTimeline(props: {
                 onToggleTool={props.onToggleTool}
                 onApproval={props.onApproval}
                 onQuestion={props.onQuestion}
+                terminalWidth={props.terminalWidth}
               />
             )) : group.summary ? (
               <box paddingLeft={3}>
@@ -193,11 +198,12 @@ function TimelineRow(props: {
   onToggleTool: (toolId: string) => void
   onApproval: (decision: ApprovalDecision) => void
   onQuestion: (answer: string) => void
+  terminalWidth: number
 }) {
   if (props.item.type === "message") return <MessageBlock message={props.item.message} />
   if (props.item.type === "reasoning") return <ReasoningRow reasoning={props.item.reasoning} />
   if (props.item.type === "interaction") {
-    return <InteractionRow interaction={props.item.interaction} activeInteraction={props.interactive.interaction} onApproval={props.onApproval} onQuestion={props.onQuestion} />
+    return <InteractionRow interaction={props.item.interaction} activeInteraction={props.interactive.interaction} onApproval={props.onApproval} onQuestion={props.onQuestion} terminalWidth={props.terminalWidth} />
   }
   if (props.item.type === "compose-summary") {
     return <ComposeSummaryRow summary={props.item.summary} />
@@ -243,18 +249,7 @@ function MessageBlock(props: { message: ConversationMessage }) {
     if (!props.message.content) return null
     return (
       <box flexDirection="column" marginTop={1} paddingLeft={3} paddingRight={3}>
-        <markdown
-          content={props.message.content || "…"}
-          syntaxStyle={markdownSyntax}
-          treeSitterClient={getCommonSyntaxClient()}
-          streaming={props.message.streaming ?? false}
-          fg={tuiTheme.text}
-          bg={tuiTheme.background}
-          conceal
-          concealCode={false}
-          internalBlockMode="top-level"
-          tableOptions={{ style: "columns", borders: false }}
-        />
+        {renderAssistantMarkdown(props.message.content || "…", props.message.streaming ?? false)}
       </box>
     )
   }
@@ -265,6 +260,31 @@ function MessageBlock(props: { message: ConversationMessage }) {
       <text content={props.message.content} fg={tuiTheme.muted} />
     </box>
   )
+}
+
+/** 普通 Agent 回复中的 diff fenced block 复用原生 DiffRenderable，保持与审批卡一致的红绿行面。 */
+function renderAssistantMarkdown(content: string, streaming: boolean): ReactNode {
+  const pattern = /```(?:diff|patch|udiff|unified-diff)\s*\n([\s\S]*?)```/gi
+  const nodes: ReactNode[] = []
+  let cursor = 0
+  let match: RegExpExecArray | null
+  let index = 0
+  while ((match = pattern.exec(content)) !== null) {
+    const before = content.slice(cursor, match.index)
+    if (before) nodes.push(<markdown key={`markdown-${index++}`} content={before} syntaxStyle={markdownSyntax} treeSitterClient={getCommonSyntaxClient()} streaming={streaming} fg={tuiTheme.text} bg={tuiTheme.background} conceal concealCode={false} internalBlockMode="top-level" tableOptions={{ style: "columns", borders: false }} />)
+    nodes.push(<DiffMessageBlock key={`diff-${index++}`} diff={match[1] ?? ""} />)
+    cursor = match.index + match[0].length
+  }
+  const after = content.slice(cursor)
+  if (nodes.length === 0) return <markdown content={content} syntaxStyle={markdownSyntax} treeSitterClient={getCommonSyntaxClient()} streaming={streaming} fg={tuiTheme.text} bg={tuiTheme.background} conceal concealCode={false} internalBlockMode="top-level" tableOptions={{ style: "columns", borders: false }} />
+  if (after) nodes.push(<markdown key={`markdown-${index}`} content={after} syntaxStyle={markdownSyntax} treeSitterClient={getCommonSyntaxClient()} streaming={streaming} fg={tuiTheme.text} bg={tuiTheme.background} conceal concealCode={false} internalBlockMode="top-level" tableOptions={{ style: "columns", borders: false }} />)
+  return nodes
+}
+
+function DiffMessageBlock(props: { diff: string }) {
+  const parsed = parseFileDiff(props.diff)
+  if (parsed.status === "invalid" || props.diff.trim() === "") return <text content={props.diff} fg={tuiTheme.text} />
+  return <diff width="100%" diff={diffTextForRenderer(props.diff)} view="unified" syncScroll showLineNumbers wrapMode="word" fg={tuiTheme.text} lineNumberFg={tuiTheme.muted} lineNumberBg={tuiTheme.toolSurface} addedBg={tuiTheme.diffAddedBackground} removedBg={tuiTheme.diffRemovedBackground} contextBg={tuiTheme.toolSurface} addedSignColor={tuiTheme.success} removedSignColor={tuiTheme.danger} addedLineNumberBg={tuiTheme.diffAddedBackground} removedLineNumberBg={tuiTheme.diffRemovedBackground} />
 }
 
 /** 渲染工具状态、折叠预览和可展开原始输出。 */
@@ -378,6 +398,7 @@ function InteractionRow(props: {
   activeInteraction?: InteractiveSnapshot["interaction"]
   onApproval: (decision: ApprovalDecision) => void
   onQuestion: (answer: string) => void
+  terminalWidth: number
 }) {
   const { interaction } = props
   const pending = interaction.status === "pending"
@@ -397,7 +418,9 @@ function InteractionRow(props: {
         </box>
         {approval ? <>
           {interaction.description ? <text content={interaction.description} fg={tuiTheme.text} /> : null}
-          <ApprovalRequestPreview requests={interaction.requests} />
+          {pending && props.activeInteraction?.type === "approval" && props.activeInteraction.presentation
+            ? <FileDiffApprovalPreview presentation={props.activeInteraction.presentation} terminalWidth={props.terminalWidth} />
+            : <ApprovalRequestPreview requests={interaction.requests} />}
         </> : interaction.question ? <text content={interaction.question} fg={tuiTheme.text} /> : null}
         {pending && approval ? (
           <>
@@ -433,6 +456,63 @@ function InteractionRow(props: {
         {pending && !approval && !interaction.options?.length ? <text fg={tuiTheme.muted}>等待回答</text> : null}
         {!pending ? <text fg={interactionStatusColor(interaction.status)}>{interactionStatusLabel(interaction.status)}</text> : null}
       </box>
+    </box>
+  )
+}
+
+/** 终端审批内容达到 120 列时使用双栏，否则使用行内 Diff。 */
+export function tuiDiffViewForWidth(contentWidth: number): "split" | "unified" {
+  return contentWidth >= 120 ? "split" : "unified"
+}
+
+/** 使用 OpenTUI 原生 Diff renderer 展示同一 prepared plan 的有界预览。 */
+function FileDiffApprovalPreview(props: {
+  presentation: NonNullable<Extract<InteractiveSnapshot["interaction"], { type: "approval" }>["presentation"]>
+  terminalWidth: number
+}) {
+  const { presentation } = props
+  const contentWidth = Math.max(1, props.terminalWidth - 10)
+  const view = tuiDiffViewForWidth(contentWidth)
+  const language = resolveLanguageForPath(presentation.path).tuiParser
+  const parsed = parseFileDiff(presentation.unified_diff)
+  const operation = presentation.operation === "write" ? "创建文件" : presentation.operation === "delete" ? "删除文件" : "编辑文件"
+  const summary = `${operation} · ${presentation.path} · +${presentation.added_lines} / -${presentation.removed_lines}`
+  return (
+    <box flexDirection="column" marginTop={1}>
+      <text content={summary} fg={tuiTheme.text} />
+      {presentation.truncated ? (
+        <text content="预览已按 200 行或 16 KiB 上限截断；批准仍会应用完整变更。" fg={tuiTheme.warning} />
+      ) : null}
+      {presentation.unified_diff === "" ? (
+        <text content="创建空文件（没有可显示的内容行）" fg={tuiTheme.muted} />
+      ) : parsed.status === "invalid" ? (
+        <>
+          <text content="无法解析结构化 Diff，以下按纯文本展示。" fg={tuiTheme.warning} />
+          <text content={presentation.unified_diff} fg={tuiTheme.text} />
+        </>
+      ) : (
+        <diff
+          width="100%"
+          diff={diffTextForRenderer(presentation.unified_diff)}
+          view={view}
+          syncScroll
+          filetype={language === "plaintext" ? undefined : language}
+          syntaxStyle={markdownSyntax}
+          treeSitterClient={getCommonSyntaxClient()}
+          showLineNumbers
+          wrapMode="word"
+          fg={tuiTheme.text}
+          lineNumberFg={tuiTheme.muted}
+          lineNumberBg={tuiTheme.toolSurface}
+          addedBg={tuiTheme.diffAddedBackground}
+          removedBg={tuiTheme.diffRemovedBackground}
+          contextBg={tuiTheme.toolSurface}
+          addedSignColor={tuiTheme.success}
+          removedSignColor={tuiTheme.danger}
+          addedLineNumberBg={tuiTheme.diffAddedBackground}
+          removedLineNumberBg={tuiTheme.diffRemovedBackground}
+        />
+      )}
     </box>
   )
 }

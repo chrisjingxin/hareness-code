@@ -30,6 +30,40 @@ test("approval 校验 decisions allowlist，reject_with_feedback 携带反馈", 
   }
 })
 
+test("approval 把 file_diff presentation 原样投影到共享 DTO", async () => {
+  const harness = makeHarness()
+  try {
+    await harness.controller.dispatch({ type: "input.submit", value: "审批 diff" })
+    const run = harness.runHandles.at(-1)!
+    const request = approvalRequest(run.threadId, run.runId)
+    if (request.type !== "approval") throw new Error("expected approval")
+    request.payload.presentation = {
+      kind: "file_diff",
+      operation: "edit",
+      path: "/src/a.ts",
+      added_lines: 1,
+      removed_lines: 1,
+      truncated: false,
+      unified_diff: "--- /src/a.ts\n+++ /src/a.ts\n@@ -1 +1 @@\n-old\n+new",
+    }
+    const responsePromise = harness.port.sendInteraction(request)
+
+    const interaction = harness.controller.getSnapshot().interaction
+    expect(interaction?.type).toBe("approval")
+    if (interaction?.type !== "approval") throw new Error("expected approval dto")
+    expect(interaction.presentation).toEqual(request.payload.presentation)
+
+    await harness.controller.dispatch({
+      type: "interaction.respond",
+      requestId: interaction.requestId,
+      response: { kind: "approval", decision: "reject" },
+    })
+    await responsePromise
+  } finally {
+    await harness.controller.close()
+  }
+})
+
 test("question 完整 schema：多题、多选、other answer 与非法响应", async () => {
   const harness = makeHarness()
   try {

@@ -55,6 +55,7 @@ from harness_agent.runtime.execution_binding import (
     RunExecutionBinding,
 )
 from harness_agent.runtime.run_context import RunCancellationToken, RunContext
+from harness_agent.runtime.approval_presentation import ApprovalPresentationStore
 from harness_agent.extensions.skills import LoadedSkill
 from harness_agent.threads.thread_persistence import (
     AcceptRun,
@@ -327,6 +328,10 @@ class RunState:
     batch_rejected: bool = False
     # Build 共享 execution stream 的关联状态；跨 Interaction resume 复用。
     stream_session: Any | None = None
+    # 与实际 RunContext 共享；Coordinator 只读取展示，文件提交仍使用 prepared plan。
+    approval_presentations: ApprovalPresentationStore = field(
+        default_factory=ApprovalPresentationStore
+    )
 
     def __post_init__(self) -> None:
         """默认使用受理请求中的原始消息。"""
@@ -952,6 +957,7 @@ class RunCoordinator:
                     )
             await self._settle_root_execution(run)
             await self._release_runtime(run)
+            run.approval_presentations.clear()
             async with self._lock:
                 if self._runs.get(run.ref.thread_id) is run:
                     self._runs.pop(run.ref.thread_id, None)
@@ -1219,7 +1225,7 @@ class RunCoordinator:
 
             # UserReject 已终止同批：剩余工具直接收到取消 reject，不再弹窗
             if run.batch_rejected:
-                decisions[index] = {"type": "reject", "args": {"message": cancel_message}}
+                decisions[index] = {"type": "reject", "message": cancel_message}
                 continue
 
             # 规则已明确裁决的排队工具不弹窗：
@@ -1228,7 +1234,7 @@ class RunCoordinator:
             if effect == "deny":
                 decisions[index] = {
                     "type": "reject",
-                    "args": {"message": "denied by policy rule"},
+                    "message": "denied by policy rule",
                 }
                 continue
             if effect == "allow":
@@ -1238,27 +1244,31 @@ class RunCoordinator:
             base_description = str(
                 action_map.get("description") or "A tool execution requires approval"
             )
-            # 序号并入 description 展示；payload 严格保持 schema 四字段
+            # 序号并入 description；可选 presentation 只承载同一计划的只读展示。
             description = (
                 f"（第 {position + 1}/{total_unsafe} 个待审批操作）{base_description}"
                 if total_unsafe > 1
                 else base_description
             )
+            payload: dict[str, object] = {
+                "interrupt_id": interrupt_id,
+                "description": description,
+                "requests": _bounded_json({"action_requests": [dict(action_map)]}),
+                "decisions": [
+                    "approve_once",
+                    "approve_thread",
+                    "approve_project",
+                    "reject",
+                    "reject_with_feedback",
+                ],
+            }
+            presentation = run.approval_presentations.lookup(tool_name, tool_args)
+            if presentation is not None:
+                payload["presentation"] = presentation
             spec = InteractionRequest(
                 request_id=first_spec.request_id if position == 0 else f"{interrupt_id}-{position}",
                 type="approval",
-                payload={
-                    "interrupt_id": interrupt_id,
-                    "description": description,
-                    "requests": _bounded_json({"action_requests": [dict(action_map)]}),
-                    "decisions": [
-                        "approve_once",
-                        "approve_thread",
-                        "approve_project",
-                        "reject",
-                        "reject_with_feedback",
-                    ],
-                },
+                payload=payload,
                 interrupt_id=interrupt_id,
                 action_count=1,
             )
@@ -1282,7 +1292,9 @@ class RunCoordinator:
             if decision in {"approve_once", "approve_thread", "approve_project"}:
                 decisions[index] = {"type": "approve"}
             elif decision == "reject_with_feedback" and feedback:
-                decisions[index] = {"type": "reject", "args": {"message": feedback}}
+                # LangChain HITL 的 RejectDecision 使用顶层 message；嵌套在
+                # args 中会被中间件忽略，模型只能看到默认拒绝提示。
+                decisions[index] = {"type": "reject", "message": feedback}
                 run.batch_rejected = True
             else:
                 decisions[index] = {"type": "reject"}

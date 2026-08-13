@@ -139,3 +139,12 @@ export function resolveLanguage(languageOrAlias?: string | null): LanguageCatalo
   const normalized = languageOrAlias.trim().toLowerCase()
   return aliasMap.get(normalized) ?? PLAINTEXT_ENTRY
 }
+
+/** 从逻辑文件路径的最后一个扩展名推导语言；目录名中的点不会误判。 */
+export function resolveLanguageForPath(path?: string | null): LanguageCatalogEntry {
+  if (!path) return PLAINTEXT_ENTRY
+  const name = path.replaceAll("\\", "/").split("/").at(-1) ?? ""
+  const dot = name.lastIndexOf(".")
+  if (dot <= 0 || dot === name.length - 1) return PLAINTEXT_ENTRY
+  return resolveLanguage(name.slice(dot + 1))
+}

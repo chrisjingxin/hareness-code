@@ -34,8 +34,9 @@ export function Composer(props: {
   const { snapshot, dispatch, disabled } = props
   const interactive = snapshot.interactive
   const activeRun = Boolean(interactive.activeRun)
+  const compacting = interactive.activity.kind === "compacting"
   const connectionOpen = interactive.connection.status === "open"
-  const composedDisabled = Boolean(disabled) || snapshot.leaving || !connectionOpen || snapshot.composerSubmitting
+  const composedDisabled = Boolean(disabled) || snapshot.leaving || !connectionOpen || snapshot.composerSubmitting || compacting
 
   const draft = snapshot.draft
   const armedSkill = interactive.selection.armedSkill
@@ -353,6 +354,7 @@ function estimateRows(draft: string): number {
 function placeholderFor(snapshot: WebAdapterSnapshot, activeRun: boolean): string {
   if (snapshot.leaving) return "正在归还或退出，输入已锁定"
   if (snapshot.interactive.connection.status !== "open") return "等待连接…"
+  if (snapshot.interactive.activity.kind === "compacting") return "正在压缩上下文…"
   if (activeRun) return "正在执行；Esc 可中断"
   return "输入消息…（输入 / 唤起命令）"
 }
@@ -360,5 +362,6 @@ function placeholderFor(snapshot: WebAdapterSnapshot, activeRun: boolean): strin
 function disabledReason(snapshot: WebAdapterSnapshot, propDisabled: boolean): string {
   if (propDisabled) return "接管尚未完成，请稍候"
   if (snapshot.leaving) return "正在归还控制权"
+  if (snapshot.interactive.activity.kind === "compacting") return "上下文压缩中，请稍候"
   return "连接尚未就绪"
 }

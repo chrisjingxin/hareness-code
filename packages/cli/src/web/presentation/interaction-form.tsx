@@ -7,6 +7,7 @@ import { Check, Loader2 } from "lucide-react"
 import type { ApprovalDecision, InteractiveInteraction, InteractiveQuestion } from "../../interactive/types"
 import { QUESTION_OTHER_VALUE, approvalDecisionLabel, isApprovalDecision } from "../../presentation-shared/interaction-policy"
 import type { WebAdapterSnapshot, WebIntent } from "../application/adapter"
+import { FileDiffApproval } from "./file-diff-approval"
 
 /** 把 approval 的 requests（unknown 载荷）安全收敛为 mono 预览 JSON；空或不可序列化时返回 null。 */
 function requestPreview(requests: unknown): string | null {
@@ -70,14 +71,27 @@ function ApprovalForm(props: {
   const buttonsDisabled = submitting || disabled || expired
   const preview = requestPreview(interaction.requests)
 
-  const handleDecision = (next: ApprovalDecision) => {
+  const submitApproval = async (next: ApprovalDecision, nextFeedback = "") => {
+    setSubmitting(true)
+    const response: { kind: "approval"; decision: ApprovalDecision; feedback?: string } = { kind: "approval", decision: next }
+    if (next === "reject_with_feedback" && nextFeedback.length > 0) response.feedback = nextFeedback
+    try {
+      await dispatch({ type: "interaction-submit", requestId: interaction.requestId, response })
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  const handleDecision = async (next: ApprovalDecision) => {
     if (buttonsDisabled) return
     setDecision(next)
-    dispatch({
+    await dispatch({
       type: "interaction-draft-change",
       requestId: interaction.requestId,
       patch: { kind: "approval-decision", value: next },
     })
+    // 拒绝是 fail-closed 安全动作，点击即生效；批准仍保留二次提交，避免误触写入。
+    if (next === "reject") await submitApproval(next)
   }
 
   const handleFeedback = (value: string) => {
@@ -94,14 +108,7 @@ function ApprovalForm(props: {
     if (buttonsDisabled) return
     if (!decision) return
     if (decision === "reject_with_feedback" && feedback.trim().length === 0) return
-    setSubmitting(true)
-    const response: { kind: "approval"; decision: ApprovalDecision; feedback?: string } = { kind: "approval", decision }
-    if (decision === "reject_with_feedback" && feedback.length > 0) response.feedback = feedback
-    try {
-      await dispatch({ type: "interaction-submit", requestId: interaction.requestId, response })
-    } finally {
-      setSubmitting(false)
-    }
+    await submitApproval(decision, feedback)
   }
 
   return (
@@ -111,7 +118,9 @@ function ApprovalForm(props: {
         <Deadline deadlineAtMs={interaction.deadlineAtMs} />
       </header>
       {interaction.description ? <p className="interaction-description">{interaction.description}</p> : null}
-      {preview ? <pre className="approval-request-preview">{preview}</pre> : null}
+      {interaction.presentation
+        ? <FileDiffApproval presentation={interaction.presentation} requests={interaction.requests} />
+        : preview ? <pre className="approval-request-preview">{preview}</pre> : null}
       <div className="approval-buttons" role="group" aria-label="审批选项">
         {interaction.decisions.filter(isApprovalDecision).map(item => (
           <button
@@ -120,7 +129,7 @@ function ApprovalForm(props: {
             className={decisionButtonClass(item, decision)}
             aria-pressed={decision === item}
             disabled={buttonsDisabled}
-            onClick={() => handleDecision(item)}
+            onClick={() => { void handleDecision(item) }}
           >
             {approvalDecisionLabel(item)}
           </button>

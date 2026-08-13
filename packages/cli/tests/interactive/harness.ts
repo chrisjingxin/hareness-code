@@ -91,6 +91,8 @@ function createPort(options: {
     diagnostics: [],
   }
   let setSkillEnabledImpl: (skillId: string, enabled: boolean) => Promise<Record<string, never>> = async () => ({})
+  let compactContextImpl: InteractiveAgentPort["compactContext"] = options.compactContextImpl
+    ?? (async () => ({ compacted: true, context: { action: "manual_summary" } }))
 
   const port: InteractiveAgentPort & {
     emitEvent: (event: EventEnvelope) => void
@@ -105,6 +107,7 @@ function createPort(options: {
     setThreadSelection: (next: string | null) => void
     setSkillsList: (next: { skills: ReturnType<typeof skill>[] }) => void
     setSkillEnabledImpl: (impl: (skillId: string, enabled: boolean) => Promise<Record<string, never>>) => void
+    setCompactContextImpl: (impl: InteractiveAgentPort["compactContext"]) => void
     lastRunSelection: () => { message: string; threadId: string; runId: string; mode: "build" | "compose"; modelSelection?: { primary_profile: string }; requestedSkill?: { id: string; args?: string } } | undefined
   } = {
     onProtocolError(listener) {
@@ -144,8 +147,7 @@ function createPort(options: {
     },
     async compactContext(threadId) {
       calls.push("context.compact")
-      return options.compactContextImpl?.(threadId)
-        ?? { compacted: true, context: { action: "manual_summary" } }
+      return compactContextImpl(threadId)
     },
     async configDetails() {
       calls.push("config.details")
@@ -237,6 +239,9 @@ function createPort(options: {
     },
     setSkillEnabledImpl(impl) {
       setSkillEnabledImpl = impl
+    },
+    setCompactContextImpl(impl) {
+      compactContextImpl = impl
     },
     lastRunSelection() {
       const run = runHandles.at(-1)

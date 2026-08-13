@@ -245,7 +245,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
         terminalHeight={terminal.height}
         searchRef={skillSearchRef}
         restoreFocusRef={inputRef}
-        shouldRestoreFocus={!interactive.activeRun}
+        shouldRestoreFocus={!interactive.activeRun && interactive.activity.kind !== "compacting"}
         onSearch={query => { void adapter.dispatch({ type: "picker-search", picker: "skills", query }) }}
         onSelect={skill => { void adapter.dispatch({ type: "picker-select-skill", skill }) }}
         onHover={selectedIndex => { void adapter.dispatch({ type: "picker-hover", picker: "skills", selectedIndex }) }}
@@ -261,7 +261,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
         terminalHeight={terminal.height}
         searchRef={threadSearchRef}
         restoreFocusRef={inputRef}
-        shouldRestoreFocus={!interactive.activeRun}
+        shouldRestoreFocus={!interactive.activeRun && interactive.activity.kind !== "compacting"}
         onSearch={query => { void adapter.dispatch({ type: "picker-search", picker: "threads", query }) }}
         onSelect={thread => { void adapter.dispatch({ type: "picker-select-thread", thread }) }}
         onHover={selectedIndex => { void adapter.dispatch({ type: "picker-hover", picker: "threads", selectedIndex }) }}
@@ -277,7 +277,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
         terminalHeight={terminal.height}
         searchRef={modelSearchRef}
         restoreFocusRef={inputRef}
-        shouldRestoreFocus={!interactive.activeRun}        searchId="model-search"
+        shouldRestoreFocus={!interactive.activeRun && interactive.activity.kind !== "compacting"}        searchId="model-search"
         title={interactive.currentThreadId ? "选择当前 Thread 下一次运行的模型" : "选择下一次新 Thread 运行的模型"}
         searchPlaceholder="按 Profile、模型或 Provider 搜索"
         emptyMessage="没有匹配的模型 Profile"
@@ -297,7 +297,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
         terminalWidth={terminal.width}
         terminalHeight={terminal.height}
         restoreFocusRef={inputRef}
-        shouldRestoreFocus={!interactive.activeRun}
+        shouldRestoreFocus={!interactive.activeRun && interactive.activity.kind !== "compacting"}
         onConfirm={() => { void adapter.dispatch({ type: "dialog-resolve", kind: "command", confirmed: true }) }}
         onCancel={() => { void adapter.dispatch({ type: "dialog-resolve", kind: "command", confirmed: false }) }}      />
       <DialogShell
@@ -307,7 +307,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
         terminalWidth={terminal.width}
         terminalHeight={terminal.height}
         restoreFocusRef={inputRef}
-        shouldRestoreFocus={!interactive.activeRun}        confirmLabel="新建 Thread"
+        shouldRestoreFocus={!interactive.activeRun && interactive.activity.kind !== "compacting"}        confirmLabel="新建 Thread"
         cancelLabel="保留当前 Thread"
         onConfirm={() => { void adapter.dispatch({ type: "dialog-resolve", kind: "model-binding", confirmed: true }) }}
         onCancel={() => { void adapter.dispatch({ type: "dialog-resolve", kind: "model-binding", confirmed: false }) }}

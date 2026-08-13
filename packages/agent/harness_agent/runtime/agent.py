@@ -1,6 +1,7 @@
 """za38 agent 内核：组装 DeepAgents 工具、中间件、Skill 和审批策略。"""
 from __future__ import annotations
 
+from collections.abc import Mapping
 from contextlib import contextmanager
 import logging
 from pathlib import Path
@@ -72,6 +73,8 @@ _LOCAL_SUBAGENT_BOUNDARY_PROMPT = """
 
 修改已有文件前，必须先 `read_file` 并在 `edit_file` 中提交该次返回的
 `snapshot_id` 和唯一 `old_string`；不支持 `replace_all`、行号 range 或批量 edits。
+若读取结果证明已有文件为空，可在同一 Snapshot 下传 `old_string=""` 写入初始内容；
+空字符串不能用于非空文件插入。
 删除文件同样需要当前 Thread 完整读取后获得的 `snapshot_id`。
 """
 
@@ -1003,8 +1006,9 @@ def create_harness_agent(
     else:
         mutation_preflight = None
 
+    contract_approval_details = getattr(file_tool_contract, "approval_details", None)
     contract_approval_description = getattr(file_tool_contract, "approval_description", None)
-    if callable(contract_approval_description):
+    if callable(contract_approval_details) or callable(contract_approval_description):
         def approval_description(tool_call: dict[str, Any], state: Any, runtime: Any) -> str:
             """为 HITL 描述复用 prepare 时的 canonical 路径，不改写用户原始参数。"""
             request = SimpleNamespace(tool_call=tool_call, runtime=runtime)
@@ -1015,6 +1019,22 @@ def create_harness_agent(
             )
             if prepared_request is None:
                 return "文件变更路径不在当前工作区内，不能审批。"
+            if callable(contract_approval_details):
+                details = contract_approval_details(
+                    prepared_request.tool_call,
+                    state,
+                    prepared_request.runtime,
+                )
+                raw_args = tool_call.get("args")
+                context = getattr(runtime, "context", None)
+                if isinstance(context, RunContext) and isinstance(raw_args, Mapping):
+                    context.approval_presentations.remember(
+                        str(tool_call.get("name") or ""),
+                        raw_args,
+                        details.presentation,
+                    )
+                return str(details.description)
+            assert callable(contract_approval_description)
             return contract_approval_description(
                 prepared_request.tool_call,
                 state,

@@ -1059,6 +1059,20 @@
       },
       "additionalProperties": false
     },
+    "fileDiffPresentation": {
+      "type": "object",
+      "required": ["kind", "operation", "path", "added_lines", "removed_lines", "truncated", "unified_diff"],
+      "properties": {
+        "kind": { "const": "file_diff" },
+        "operation": { "enum": ["write", "edit", "delete"] },
+        "path": { "type": "string", "minLength": 1 },
+        "added_lines": { "type": "integer", "minimum": 0 },
+        "removed_lines": { "type": "integer", "minimum": 0 },
+        "truncated": { "type": "boolean" },
+        "unified_diff": { "type": "string", "maxLength": 16384 }
+      },
+      "additionalProperties": false
+    },
     "approvalRequest": {
       "type": "object", "required": ["thread_id", "run_id", "timeout_ms", "payload"],
       "properties": {
@@ -1072,7 +1086,8 @@
           "properties": {
             "interrupt_id": { "type": "string" }, "description": { "type": "string" },
             "requests": { "$ref": "#/$defs/jsonValue" },
-            "decisions": { "type": "array", "items": { "enum": ["approve_once", "approve_thread", "approve_project", "reject", "reject_with_feedback"] } }
+            "decisions": { "type": "array", "items": { "enum": ["approve_once", "approve_thread", "approve_project", "reject", "reject_with_feedback"] } },
+            "presentation": { "$ref": "#/$defs/fileDiffPresentation" }
           },
           "additionalProperties": false
         }

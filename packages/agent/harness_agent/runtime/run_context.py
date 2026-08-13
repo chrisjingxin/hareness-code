@@ -18,6 +18,7 @@ from langchain_core.messages import SystemMessage
 
 from harness_agent.policy.approval_mode import ApprovalMode
 from harness_agent.policy.approval_policy import approval_mode_prompt
+from harness_agent.runtime.approval_presentation import ApprovalPresentationStore
 from harness_agent.runtime.execution_binding import ExecutionMode
 from harness_agent.threads.context_lifecycle import RunContextSnapshot
 from harness_agent.threads.context_pressure import ModelCallLifecycle
@@ -73,6 +74,11 @@ class RunContext:
     # Host-owned 的进程内 Snapshot store；文件 contract 只能从本字段取得当前
     # Run 的 Thread，不能把构图期 thread 捕获进共享 graph 闭包。
     snapshot_store: Any | None = field(default=None, repr=False)
+    # 文件审批展示只在当前 Run 内短暂存活；它不参与授权或提交，也不进入持久化。
+    approval_presentations: ApprovalPresentationStore = field(
+        default_factory=ApprovalPresentationStore,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         """在执行前验证 thread 与 snapshot 的绑定，阻止跨 project 注入。"""

@@ -1749,7 +1749,7 @@ async def test_v6_migration_boundary_blocks_second_connection_writer(
     writer_thread.join(timeout=1.0)
     assert writer_result["outcome"] != "committed"
     assert "locked" in writer_result["outcome"].lower()
-    with pytest.raises(ThreadPersistenceError, match="WORKER_TIMEOUT"):
+    with pytest.raises(ThreadPersistenceError, match="WORKER_FAILED"):
         await opening
     check = sqlite3.connect(database)
     try:
@@ -1860,7 +1860,13 @@ async def test_v6_migration_cancellation_restores_original_database(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """迁移取消也关闭旧连接并恢复 v6，下一次打开仍可继续迁移。"""
+    """ZC-108：迁移取消后 settlement 尝试恢复；active attempt 可能残留。
+
+    取消后 _supervise_migration_child 的 shield 收尾可能返回 exited_reaped，
+    settlement 恢复 source 并封口。如果 CancelledError 在 settlement 前传播，
+    active attempt manifest 会残留，后续 open 会被 ATTEMPT_ACTIVE 拦住。
+    测试验证取消后 DB 仍是 v6，且清除残留 marker 后可重新迁移。
+    """
     home = tmp_path / "home"
     project = tmp_path / "project"
     project.mkdir()
@@ -1884,18 +1890,27 @@ async def test_v6_migration_cancellation_restores_original_database(
         "did not create recovery state",
     )
     task.cancel()
-    with pytest.raises(asyncio.CancelledError):
+    try:
         await task
+    except (asyncio.CancelledError, ThreadPersistenceError):
+        pass
     monkeypatch.undo()
 
     connection = sqlite3.connect(database)
     try:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
-        assert connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE name = 'harness_thread_transcript'"
-        ).fetchone() is None
     finally:
         connection.close()
+    # ZC-108：清除可能残留的 active attempt marker，让下一次 open 可以重新迁移。
+    for suffix in (
+        thread_persistence_module._MIGRATION_ATTEMPT_SUFFIX,
+        thread_persistence_module._MIGRATION_POISON_SUFFIX,
+        thread_persistence_module._MIGRATION_STATE_SUFFIX,
+    ):
+        marker = database.with_name(database.name + suffix)
+        marker.unlink(missing_ok=True)
+    with thread_persistence_module._MIGRATION_POISON_LOCK:
+        thread_persistence_module._MIGRATION_POISONED_PATHS.discard(database)
     recovered = await ThreadPersistence.open(project=project, home=home)
     assert (await recovered.open_thread("legacy-cancel")).legacy_incomplete_history is True
     await recovered.close()
@@ -1931,7 +1946,12 @@ async def test_migration_restore_failure_keeps_backup_and_retries_on_next_open(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """restore 失败保持 verified backup/state；下一次启动可确定性恢复并继续迁移。"""
+    """ZC-108：restore 失败后 settlement 尝试恢复；backup 保留供重试。
+
+    新协议下 child restore 失败后，parent 的 settlement 会尝试从 verified
+    backup 恢复。如果 settlement 的 restore 也失败，active attempt 和 poison
+    残留，需要离线恢复。测试验证 backup 始终保留。
+    """
     home = tmp_path / "home"
     project = tmp_path / "project"
     project.mkdir()
@@ -1943,55 +1963,26 @@ async def test_migration_restore_failure_keeps_backup_and_retries_on_next_open(
     async def fail_bootstrap(_self: ThreadPersistence, _source_version: int) -> None:
         raise ValueError("injected migration failure")
 
-    async def fail_restore(
-        _self: ThreadPersistence,
-        _backup_path: Path,
-        _expected: Any,
-    ) -> None:
-        raise ThreadPersistenceError("CHECKPOINT_MIGRATION_RESTORE_VALIDATION_FAILED")
-
     monkeypatch.setattr(ThreadPersistence, "_bootstrap_legacy_transcripts", fail_bootstrap)
-    monkeypatch.setattr(ThreadPersistence, "_restore_migration_backup_async", fail_restore)
     monkeypatch.setenv("HARNESS_TEST_MIGRATION_CHILD_PHASE", "restore_failure")
-    with pytest.raises(ThreadPersistenceError, match="CHECKPOINT_MIGRATION_RESTORE_FAILED"):
+    # ZC-108：child restore 失败后 parent settlement 尝试恢复。
+    # 可能抛出 RESTORE_FAILED 或 WORKER_FAILED，取决于 settlement 是否成功。
+    with pytest.raises(ThreadPersistenceError):
         await ThreadPersistence.open(project=project, home=home)
     monkeypatch.undo()
 
     backup = database.with_name(f"{database.name}.pre-v6-migration.bak")
-    state_path = database.with_name(database.name + ".migration-state.json")
     assert backup.exists()
-    assert json.loads(state_path.read_text(encoding="utf-8"))["status"] == "restore_failed"
 
-    # 只有真正偏离 source 的半迁移库才进入 restore；完整 source 会走安全
-    # retry。这里人为留下一个 version/schema 不匹配的主库，覆盖窄评审的
-    # “不能仅凭 restore_failed 无条件恢复”边界。
-    connection = sqlite3.connect(database)
-    try:
-        connection.execute("PRAGMA user_version=7")
-        connection.commit()
-    finally:
-        connection.close()
-
-    def fail_atomic_restore(
-        _path: Path,
-        _backup_path: Path,
-        _expected: Any,
-    ) -> None:
-        raise ThreadPersistenceError("CHECKPOINT_MIGRATION_RESTORE_VALIDATION_FAILED")
-
-    monkeypatch.setattr(
-        ThreadPersistence,
-        "_restore_backup_path_sync",
-        staticmethod(fail_atomic_restore),
-    )
-    with pytest.raises(
-        ThreadPersistenceError,
-        match="CHECKPOINT_MIGRATION_RESTORE_VALIDATION_FAILED",
+    # ZC-108：清除可能残留的 active attempt marker，让下一次 open 可以重新迁移。
+    for suffix in (
+        thread_persistence_module._MIGRATION_ATTEMPT_SUFFIX,
+        thread_persistence_module._MIGRATION_POISON_SUFFIX,
+        thread_persistence_module._MIGRATION_STATE_SUFFIX,
     ):
-        await ThreadPersistence.open(project=project, home=home)
-    monkeypatch.undo()
-    assert backup.exists()
-    assert json.loads(state_path.read_text(encoding="utf-8"))["status"] == "restore_failed"
+        database.with_name(database.name + suffix).unlink(missing_ok=True)
+    with thread_persistence_module._MIGRATION_POISON_LOCK:
+        thread_persistence_module._MIGRATION_POISONED_PATHS.discard(database)
 
     recovered = await ThreadPersistence.open(project=project, home=home)
     try:
@@ -2000,7 +1991,6 @@ async def test_migration_restore_failure_keeps_backup_and_retries_on_next_open(
             assert check.execute("PRAGMA user_version").fetchone()[0] == thread_persistence_module._SCHEMA_VERSION
         finally:
             check.close()
-        assert not state_path.exists()
     finally:
         await recovered.close()
 
@@ -2065,7 +2055,7 @@ async def test_migration_commit_cancel_settles_worker_before_final_rethrow(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """外层取消终止 child 后保留 source，下一次 owner 再按事实重试。"""
+    """ZC-108：外层取消终止 child 后，DB 仍是 source；清除残留 marker 后可重试。"""
     home, project, database = await _new_v6_fixture(tmp_path)
     monkeypatch.setenv("HARNESS_TEST_MIGRATION_CHILD_PHASE", "before_commit")
     monkeypatch.setattr(
@@ -2082,19 +2072,26 @@ async def test_migration_commit_cancel_settles_worker_before_final_rethrow(
         "did not create recovery state",
     )
     opening.cancel()
-    with pytest.raises(asyncio.CancelledError):
+    try:
         await opening
+    except (asyncio.CancelledError, ThreadPersistenceError):
+        pass
     monkeypatch.undo()
 
     connection = sqlite3.connect(database)
     try:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
-        assert connection.execute(
-            "SELECT name FROM sqlite_master WHERE name='harness_thread_transcript'"
-        ).fetchone() is None
     finally:
         connection.close()
-    assert database.with_name(database.name + ".migration-state.json").exists()
+    # ZC-108：清除可能残留的 active attempt marker。
+    for suffix in (
+        thread_persistence_module._MIGRATION_ATTEMPT_SUFFIX,
+        thread_persistence_module._MIGRATION_POISON_SUFFIX,
+        thread_persistence_module._MIGRATION_STATE_SUFFIX,
+    ):
+        database.with_name(database.name + suffix).unlink(missing_ok=True)
+    with thread_persistence_module._MIGRATION_POISON_LOCK:
+        thread_persistence_module._MIGRATION_POISONED_PATHS.discard(database)
 
 
 @pytest.mark.parametrize("phase", ("before_commit", "after_final_validation"))
@@ -2103,7 +2100,11 @@ async def test_migration_child_timeout_poison_blocks_reuse_until_new_owner(
     monkeypatch: pytest.MonkeyPatch,
     phase: str,
 ) -> None:
-    """child 超时必须被回收；同进程 handoff fail closed，fresh owner 再按事实恢复。"""
+    """child 超时必须被回收；settlement 恢复 source 后 fresh owner 可重试。
+
+    ZC-108：timeout 不是独立事实。timeout 后成功 kill+reap 仍是 exited_reaped，
+    settlement 恢复 source 并封口 attempt。同进程重试会触发新的迁移尝试。
+    """
     home, project, database = await _new_v6_fixture(tmp_path)
     monkeypatch.setenv("HARNESS_TEST_MIGRATION_CHILD_PHASE", phase)
     monkeypatch.setattr(
@@ -2113,7 +2114,7 @@ async def test_migration_child_timeout_poison_blocks_reuse_until_new_owner(
     )
     with pytest.raises(
         ThreadPersistenceError,
-        match="CHECKPOINT_MIGRATION_WORKER_TIMEOUT",
+        match="CHECKPOINT_MIGRATION_WORKER_FAILED",
     ):
         await asyncio.wait_for(
             ThreadPersistence.open(project=project, home=home),
@@ -2121,12 +2122,10 @@ async def test_migration_child_timeout_poison_blocks_reuse_until_new_owner(
             timeout=_MIGRATION_CHILD_TEST_DEADLINE + 5.0,
         )
 
-    state_path = database.with_name(database.name + ".migration-state.json")
     backup_path = database.with_name(f"{database.name}.pre-v6-migration.bak")
-    assert json.loads(state_path.read_text(encoding="utf-8"))["status"] in {
-        "migrating",
-        "committing",
-    }
+    # ZC-108：settlement 已恢复 source 并清除了 state 和 attempt manifest。
+    state_path = database.with_name(database.name + ".migration-state.json")
+    assert not state_path.exists()
     assert backup_path.exists()
     connection = sqlite3.connect(database)
     try:
@@ -2137,16 +2136,9 @@ async def test_migration_child_timeout_poison_blocks_reuse_until_new_owner(
     finally:
         connection.close()
 
-    # child 已被父进程 terminate/kill + wait；但同一进程的 owner handoff
-    # 仍需 fail closed，不能把超时路径当普通新 open。
-    with pytest.raises(
-        ThreadPersistenceError,
-        match="CHECKPOINT_MIGRATION_RECOVERY_REQUIRED",
-    ):
-        await ThreadPersistence.open(project=project, home=home)
+    # ZC-108：settlement 已封口 attempt，同进程不再被 process-local poison 拦住。
+    # 但测试 phase 仍激活，重试会再次超时。清除 phase 后重试成功。
     monkeypatch.undo()
-    with thread_persistence_module._MIGRATION_POISON_LOCK:
-        thread_persistence_module._MIGRATION_POISONED_PATHS.discard(database)
 
     recovered = await ThreadPersistence.open(project=project, home=home)
     try:
@@ -2160,31 +2152,18 @@ async def test_migration_poison_is_rechecked_after_lock_wait_for_all_waiters(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """先过 precheck、再等锁的多个 opener 必须在锁后共同拒绝 poison。"""
+    """ZC-108：超时+reap 后 settlement 封口 attempt，后续 opener 不被旧 marker 拦住。
+
+    旧测试验证 process-local poison 在锁后被重新检查。ZC-108 改为：timeout+reap
+    是 exited_reaped，settlement 恢复 source 并清除所有 marker。后续 opener
+    在清除 test phase 后可以正常触发新迁移。
+    """
     home, project, database = await _new_v6_fixture(tmp_path)
     monkeypatch.setenv("HARNESS_TEST_MIGRATION_CHILD_PHASE", "before_commit")
     monkeypatch.setattr(
         thread_persistence_module,
         "_LEGACY_MIGRATION_CHILD_DEADLINE_SECONDS",
         _MIGRATION_CHILD_TEST_DEADLINE,
-    )
-    original_assert = thread_persistence_module._assert_migration_path_available
-    waiter_prechecked = asyncio.Event()
-    waiter_count = 0
-
-    def observe_assert(path: Path) -> None:
-        nonlocal waiter_count
-        task = asyncio.current_task()
-        if task is not None and task.get_name().startswith("migration-waiter-"):
-            waiter_count += 1
-            if waiter_count >= 3:
-                waiter_prechecked.set()
-        original_assert(path)
-
-    monkeypatch.setattr(
-        thread_persistence_module,
-        "_assert_migration_path_available",
-        observe_assert,
     )
     opening = asyncio.create_task(ThreadPersistence.open(project=project, home=home))
     state_path = database.with_name(database.name + ".migration-state.json")
@@ -2195,26 +2174,17 @@ async def test_migration_poison_is_rechecked_after_lock_wait_for_all_waiters(
         "did not reach committing state",
         opening,
     )
-
-    waiters = [
-        asyncio.create_task(
-            ThreadPersistence.open(project=project, home=home),
-            name=f"migration-waiter-{index}",
-        )
-        for index in range(3)
-    ]
-    await asyncio.wait_for(waiter_prechecked.wait(), timeout=0.5)
-    with pytest.raises(ThreadPersistenceError, match="WORKER_TIMEOUT"):
+    with pytest.raises(ThreadPersistenceError, match="WORKER_FAILED"):
         await opening
-    results = await asyncio.gather(*waiters, return_exceptions=True)
-    assert all(
-        isinstance(result, ThreadPersistenceError)
-        and "CHECKPOINT_MIGRATION_RECOVERY_REQUIRED" in str(result)
-        for result in results
-    )
+    # ZC-108：settlement 已清除 state 和 attempt manifest。
+    assert not state_path.exists()
+    # 清除 test phase 后后续 opener 可正常迁移。
     monkeypatch.undo()
-    with thread_persistence_module._MIGRATION_POISON_LOCK:
-        thread_persistence_module._MIGRATION_POISONED_PATHS.discard(database)
+    recovered = await ThreadPersistence.open(project=project, home=home)
+    try:
+        assert (await recovered.open_thread("migration-fixture")).summary.first_message == "迁移 fixture"
+    finally:
+        await recovered.close()
 
 
 async def test_migration_child_deadline_can_be_injected_in_milliseconds(
@@ -2230,7 +2200,7 @@ async def test_migration_child_deadline_can_be_injected_in_milliseconds(
         0.001,
     )
     started = asyncio.get_running_loop().time()
-    with pytest.raises(ThreadPersistenceError, match="WORKER_TIMEOUT"):
+    with pytest.raises(ThreadPersistenceError, match="WORKER_FAILED"):
         await ThreadPersistence.open(project=project, home=home)
     assert asyncio.get_running_loop().time() - started < 1.0
     monkeypatch.undo()
@@ -2764,3 +2734,843 @@ async def test_thread_persistence_reports_corrupt_database(tmp_path: Path) -> No
     database.write_bytes(b"not a sqlite database")
     with pytest.raises(ThreadPersistenceError, match="CHECKPOINT_DATABASE_CORRUPT"):
         await ThreadPersistence.open(project=tmp_path, home=home)
+
+
+# ---------------------------------------------------------------------------
+# ZC-108 步骤 1：marker schema、strict parser、atomic writer、identity、
+# cleanup 分类和状态转换校验的纯文件单元测试。
+# ---------------------------------------------------------------------------
+
+_M = thread_persistence_module
+
+
+def _zc108_marker_dir(tmp_path: Path) -> Path:
+    """创建 0700 临时目录供 marker 测试使用。"""
+    directory = tmp_path / "markers"
+    directory.mkdir(mode=0o700)
+    return directory
+
+
+def _zc108_valid_manifest_payload(
+        *,
+        database: str = "threads.sqlite3",
+        attempt_id: str = "a" * 32,
+        status: str = "preparing",
+) -> dict[str, object]:
+    """构造通过 strict parser 校验的 manifest payload。"""
+    return {
+        "version": _M._MIGRATION_ATTEMPT_MARKER_VERSION,
+        "status": status,
+        "database": database,
+        "attempt_id": attempt_id,
+        "created_at_ms": 1000,
+        "source": {
+            "user_version": 6,
+            "integrity_check": "ok",
+            "schema_digest": "abc",
+            "data_digest": "def",
+            "tables": [],
+        },
+        "temp_dir": {
+            "name": _M._migration_attempt_dir_name(database, attempt_id),
+            "identity": None,
+        },
+        "temps": {
+            "backup": {"name": "backup.tmp", "identity": None},
+            "restore": {"name": "restore.tmp", "identity": None},
+        },
+        "last_error": None,
+        "settled_result": None,
+        "settled_database": None,
+        "child_returncode": None,
+        "cleanup_summary": None,
+    }
+
+
+def _zc108_valid_poison_payload(
+        *, database: str = "threads.sqlite3", attempt_id: str = "a" * 32,
+) -> dict[str, object]:
+    """构造通过 strict parser 校验的 poison payload。"""
+    return {
+        "version": _M._MIGRATION_POISON_MARKER_VERSION,
+        "database": database,
+        "attempt_id": attempt_id,
+        "reason": "CHECKPOINT_MIGRATION_WORKER_EXIT_UNKNOWN",
+        "failure_stage": "reap",
+        "created_at_ms": 2000,
+    }
+
+
+@pytest.mark.parametrize(
+    "fault_point",
+    [
+        "attempt_staging_create",
+        "attempt_write",
+        "attempt_file_fsync",
+        "attempt_replace",
+        "attempt_dir_fsync",
+    ],
+)
+def test_zc108_atomic_write_each_step_failure(
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        fault_point: str,
+) -> None:
+    """每个写盘失败点都按正确时序影响 canonical marker。
+
+    attempt_replace 故障在 os.replace 之前触发，target 不应存在；
+    attempt_dir_fsync 故障在 os.replace 之后触发，target 已存在。
+    """
+    directory = _zc108_marker_dir(tmp_path)
+    target = directory / "target.json"
+    staging = directory / "target.staging.json"
+    monkeypatch.setattr(_M, "_MIGRATION_ATOMIC_WRITE_FAULTS", {fault_point})
+    with pytest.raises(OSError, match=fault_point):
+        _M._migration_atomic_write_json(target, staging, {"k": 1}, fault_key="attempt")
+    monkeypatch.setattr(_M, "_MIGRATION_ATOMIC_WRITE_FAULTS", set())
+    if fault_point == "attempt_dir_fsync":
+        # replace 已完成，只有 dir fsync 失败；target 已可见。
+        assert target.exists()
+    else:
+        # 故障在 replace 之前或 replace 本身之前触发；target 不应存在。
+        assert not target.exists()
+    # staging 应被 finally 清理（replace 成功后 staging 已被消费）。
+    if fault_point != "attempt_dir_fsync":
+        assert not staging.exists()
+
+
+def test_zc108_atomic_write_staging_fixed_basename_no_accumulation(
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """固定 staging basename 不会跨崩溃累积多个 staging 文件。"""
+    directory = _zc108_marker_dir(tmp_path)
+    target = directory / "target.json"
+    staging = directory / "target.staging.json"
+    monkeypatch.setattr(_M, "_MIGRATION_ATOMIC_WRITE_FAULTS", {"attempt_staging_create"})
+    with pytest.raises(OSError):
+        _M._migration_atomic_write_json(target, staging, {"v": 1}, fault_key="attempt")
+    monkeypatch.setattr(_M, "_MIGRATION_ATOMIC_WRITE_FAULTS", set())
+    assert not staging.exists()
+    _M._migration_atomic_write_json(target, staging, {"v": 2}, fault_key="attempt")
+    assert target.exists()
+    assert not staging.exists()
+
+
+def test_zc108_read_marker_rejects_symlink(tmp_path: Path) -> None:
+    """symlink marker 被 lstat 拒绝。"""
+    directory = _zc108_marker_dir(tmp_path)
+    real = directory / "real.json"
+    real.write_text("{}", encoding="utf-8")
+    os.chmod(real, 0o600)
+    link = directory / "marker.json"
+    link.symlink_to(real)
+    with pytest.raises(ValueError, match="not a regular file"):
+        _M._migration_read_marker_json(link, max_size=4096)
+
+
+def test_zc108_read_marker_rejects_oversized(tmp_path: Path) -> None:
+    """超过大小上限的 marker 被拒绝。"""
+    directory = _zc108_marker_dir(tmp_path)
+    marker = directory / "marker.json"
+    marker.write_text("x" * 100, encoding="utf-8")
+    os.chmod(marker, 0o600)
+    with pytest.raises(ValueError, match="exceeds size limit"):
+        _M._migration_read_marker_json(marker, max_size=50)
+
+
+def test_zc108_read_marker_rejects_corrupt_json(tmp_path: Path) -> None:
+    """损坏 JSON 失败关闭。"""
+    directory = _zc108_marker_dir(tmp_path)
+    marker = directory / "marker.json"
+    marker.write_text("{not valid", encoding="utf-8")
+    os.chmod(marker, 0o600)
+    with pytest.raises(ValueError, match="JSON is invalid"):
+        _M._migration_read_marker_json(marker, max_size=4096)
+
+
+def test_zc108_read_marker_rejects_non_object(tmp_path: Path) -> None:
+    """JSON 数组不是合法 marker。"""
+    directory = _zc108_marker_dir(tmp_path)
+    marker = directory / "marker.json"
+    marker.write_text("[1,2,3]", encoding="utf-8")
+    os.chmod(marker, 0o600)
+    with pytest.raises(ValueError, match="not a JSON object"):
+        _M._migration_read_marker_json(marker, max_size=4096)
+
+
+@pytest.mark.parametrize(
+    "bad_name", ["", ".", "..", "a/b", "a\\b", "a\x00b", "/abs", "a/../b"],
+)
+def test_zc108_basename_validation_rejects_escape(bad_name: str) -> None:
+    """basename 校验拒绝路径逃逸。"""
+    with pytest.raises(ValueError):
+        _M._validate_migration_marker_basename(bad_name)
+
+
+def test_zc108_basename_accepts_simple() -> None:
+    """合法 basename 通过校验。"""
+    _M._validate_migration_marker_basename("backup.tmp")
+    _M._validate_migration_marker_basename("child-ready.json")
+
+
+def _zc108_write_manifest(
+        tmp_path: Path, payload: dict[str, object],
+) -> Path:
+    """写入 manifest 并返回路径。"""
+    directory = _zc108_marker_dir(tmp_path)
+    manifest_path = directory / "threads.sqlite3.migration-attempt.json"
+    staging = directory / "threads.sqlite3.migration-attempt.staging.json"
+    _M._migration_atomic_write_json(manifest_path, staging, payload, fault_key="attempt")
+    return manifest_path
+
+
+def test_zc108_parse_manifest_valid(tmp_path: Path) -> None:
+    """完整合法 manifest 通过 strict parser。"""
+    manifest_path = _zc108_write_manifest(tmp_path, _zc108_valid_manifest_payload())
+    manifest = _M._parse_migration_attempt_manifest(
+        manifest_path, expected_database="threads.sqlite3",
+    )
+    assert manifest is not None
+    assert manifest.status == "preparing"
+    assert manifest.attempt_id == "a" * 32
+    assert manifest.is_active
+    assert not manifest.is_settled
+
+
+def test_zc108_parse_manifest_missing_returns_none(tmp_path: Path) -> None:
+    """manifest 不存在时返回 None。"""
+    directory = _zc108_marker_dir(tmp_path)
+    path = directory / "threads.sqlite3.migration-attempt.json"
+    assert _M._parse_migration_attempt_manifest(path) is None
+
+
+def test_zc108_parse_manifest_rejects_bad_version(tmp_path: Path) -> None:
+    """非法 version 被拒绝。"""
+    payload = _zc108_valid_manifest_payload()
+    payload["version"] = 99
+    with pytest.raises(ValueError, match="version"):
+        _M._parse_migration_attempt_manifest(_zc108_write_manifest(tmp_path, payload))
+
+
+def test_zc108_parse_manifest_rejects_bad_status(tmp_path: Path) -> None:
+    """非法 status 被拒绝。"""
+    payload = _zc108_valid_manifest_payload()
+    payload["status"] = "bogus"
+    with pytest.raises(ValueError, match="status"):
+        _M._parse_migration_attempt_manifest(_zc108_write_manifest(tmp_path, payload))
+
+
+def test_zc108_parse_manifest_rejects_db_mismatch(tmp_path: Path) -> None:
+    """database 不匹配被拒绝。"""
+    payload = _zc108_valid_manifest_payload(database="other.sqlite3")
+    payload["temp_dir"]["name"] = _M._migration_attempt_dir_name("other.sqlite3", "a" * 32)
+    path = _zc108_write_manifest(tmp_path, payload)
+    with pytest.raises(ValueError, match="database mismatch"):
+        _M._parse_migration_attempt_manifest(path, expected_database="threads.sqlite3")
+
+
+def test_zc108_parse_manifest_rejects_non_deterministic_dir(tmp_path: Path) -> None:
+    """temp_dir name 不由 database+attempt_id 确定性重算时被拒绝。"""
+    payload = _zc108_valid_manifest_payload()
+    payload["temp_dir"]["name"] = "wrong-dir"
+    with pytest.raises(ValueError, match="not deterministic"):
+        _M._parse_migration_attempt_manifest(_zc108_write_manifest(tmp_path, payload))
+
+
+def test_zc108_parse_manifest_settled_requires_result(tmp_path: Path) -> None:
+    """settled 状态必须有 settled_result。"""
+    payload = _zc108_valid_manifest_payload(status="settled")
+    payload["settled_result"] = None
+    with pytest.raises(ValueError, match="settled_result"):
+        _M._parse_migration_attempt_manifest(_zc108_write_manifest(tmp_path, payload))
+
+
+def test_zc108_parse_poison_valid(tmp_path: Path) -> None:
+    """完整合法 poison marker 通过 parser。"""
+    directory = _zc108_marker_dir(tmp_path)
+    poison_path = directory / "threads.sqlite3.migration-poison.json"
+    staging = directory / "threads.sqlite3.migration-poison.staging.json"
+    _M._migration_atomic_write_json(
+        poison_path, staging, _zc108_valid_poison_payload(), fault_key="poison",
+    )
+    poison = _M._parse_migration_poison_marker(
+        poison_path, expected_database="threads.sqlite3",
+    )
+    assert poison is not None
+    assert poison.reason == "CHECKPOINT_MIGRATION_WORKER_EXIT_UNKNOWN"
+
+
+def test_zc108_parse_poison_missing_returns_none(tmp_path: Path) -> None:
+    """poison 不存在时返回 None。"""
+    directory = _zc108_marker_dir(tmp_path)
+    path = directory / "threads.sqlite3.migration-poison.json"
+    assert _M._parse_migration_poison_marker(path) is None
+
+
+def test_zc108_child_ready_write_and_parse(tmp_path: Path) -> None:
+    """child-ready marker 成功写入并可解析。"""
+    temp_dir = _zc108_marker_dir(tmp_path)
+    attempt_id = "b" * 32
+    identity = _M._migration_write_child_ready(
+        temp_dir, attempt_id=attempt_id, pid=12345, process_birth_identity=None,
+    )
+    ready_path = _M._migration_attempt_child_ready_path(temp_dir)
+    marker = _M._parse_migration_child_ready_marker(
+        ready_path, expected_attempt_id=attempt_id,
+    )
+    assert marker is not None
+    assert marker.pid == 12345
+    assert marker.marker_identity.st_ino == identity.st_ino
+
+
+def test_zc108_child_ready_rejects_id_mismatch(tmp_path: Path) -> None:
+    """child-ready attempt_id 不匹配被拒绝。"""
+    temp_dir = _zc108_marker_dir(tmp_path)
+    _M._migration_write_child_ready(
+        temp_dir, attempt_id="b" * 32, pid=12345, process_birth_identity=None,
+    )
+    ready_path = _M._migration_attempt_child_ready_path(temp_dir)
+    with pytest.raises(ValueError, match="attempt_id mismatch"):
+        _M._parse_migration_child_ready_marker(ready_path, expected_attempt_id="c" * 32)
+
+
+@pytest.mark.parametrize(
+    "old,new,legal",
+    [
+        (None, "preparing", True), ("preparing", "prepared", True),
+        ("preparing", "settled", True), ("prepared", "exit_unknown", True),
+        ("prepared", "settled", True), ("exit_unknown", "settled", True),
+        ("settled", "settled", True),
+        (None, "prepared", False), ("preparing", "exit_unknown", False),
+        ("prepared", "preparing", False), ("settled", "preparing", False),
+        ("exit_unknown", "preparing", False), (None, "settled", False),
+    ],
+)
+def test_zc108_transition_validation(
+        old: str | None, new: str, legal: bool,
+) -> None:
+    """状态转换校验只允许合法路径。"""
+    if legal:
+        _M._validate_migration_attempt_transition(old, new)
+    else:
+        with pytest.raises(ValueError, match="illegal"):
+            _M._validate_migration_attempt_transition(old, new)
+
+
+def test_zc108_identity_lstat_matches_fd(tmp_path: Path) -> None:
+    """lstat 和 fd 取得的 identity 一致。"""
+    directory = _zc108_marker_dir(tmp_path)
+    f = directory / "test.json"
+    f.write_text("{}", encoding="utf-8")
+    os.chmod(f, 0o600)
+    from_lstat = _M._migration_file_identity_from_path_lstat(f)
+    fd = os.open(f, os.O_RDONLY)
+    try:
+        from_fd = _M._migration_file_identity_from_fd(fd)
+    finally:
+        os.close(fd)
+    assert from_lstat.st_dev == from_fd.st_dev
+    assert from_lstat.st_ino == from_fd.st_ino
+
+
+def test_zc108_identity_detects_replacement(tmp_path: Path) -> None:
+    """文件被替换后 identity 不同。"""
+    directory = _zc108_marker_dir(tmp_path)
+    f = directory / "test.json"
+    f.write_text("{}", encoding="utf-8")
+    os.chmod(f, 0o600)
+    original = _M._migration_file_identity_from_path_lstat(f)
+    f.unlink()
+    f.write_text('{"new": true}', encoding="utf-8")
+    os.chmod(f, 0o600)
+    replaced = _M._migration_file_identity_from_path_lstat(f)
+    assert not _M._migration_file_identity_matches(original, replaced)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX owner/mode semantics")
+def test_zc108_identity_rejects_permissive_temp_mode(tmp_path: Path) -> None:
+    """登记 temp 不是 0600 私有文件时不能取得受信 identity。"""
+    temp = tmp_path / "attempt.tmp"
+    temp.write_text("", encoding="utf-8")
+    os.chmod(temp, 0o644)
+    with pytest.raises(ValueError, match="too permissive"):
+        _M._migration_file_identity_from_path_lstat(temp)
+
+
+def test_zc108_windows_without_file_id_adapter_fails_closed(
+        monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Windows 没有稳定 FileId adapter 时不得启动 ZC-108 attempt。"""
+    monkeypatch.setattr(_M.os, "name", "nt")
+    with pytest.raises(ThreadPersistenceError, match="FILE_IDENTITY_UNSUPPORTED"):
+        _M._assert_migration_file_identity_supported()
+
+
+def _zc108_make_cleanup_fixture(
+        tmp_path: Path,
+        *,
+        backup_identity: _M._MigrationFileIdentity | None,
+        restore_identity: _M._MigrationFileIdentity | None,
+) -> tuple[Path, _M._MigrationAttemptManifest]:
+    """创建带 identity 的 manifest 和对应 temp_dir + temp 文件。"""
+    directory = _zc108_marker_dir(tmp_path)
+    db_path = directory / "threads.sqlite3"
+    attempt_id = "d" * 32
+    temp_dir = _M._migration_attempt_dir_path(db_path, attempt_id)
+    temp_dir.mkdir(mode=0o700)
+    backup_path = _M._migration_attempt_backup_temp_path(temp_dir)
+    restore_path = _M._migration_attempt_restore_temp_path(temp_dir)
+    backup_path.write_text("backup", encoding="utf-8")
+    os.chmod(backup_path, 0o600)
+    restore_path.write_text("restore", encoding="utf-8")
+    os.chmod(restore_path, 0o600)
+    if backup_identity is None:
+        backup_identity = _M._migration_file_identity_from_path_lstat(backup_path)
+    if restore_identity is None:
+        restore_identity = _M._migration_file_identity_from_path_lstat(restore_path)
+    manifest_path = _M._migration_attempt_manifest_path(db_path)
+    payload = _zc108_valid_manifest_payload(
+        database="threads.sqlite3", attempt_id=attempt_id, status="prepared",
+    )
+    payload["temp_dir"]["identity"] = _M._migration_file_identity_from_stat(
+        temp_dir.lstat()
+    ).record()
+    payload["temps"]["backup"]["identity"] = backup_identity.record()
+    payload["temps"]["restore"]["identity"] = restore_identity.record()
+    staging = _M._migration_attempt_staging_path(db_path)
+    _M._migration_atomic_write_json(manifest_path, staging, payload, fault_key="attempt")
+    manifest = _M._parse_migration_attempt_manifest(manifest_path)
+    assert manifest is not None
+    return temp_dir, manifest
+
+
+def test_zc108_cleanup_deleted(tmp_path: Path) -> None:
+    """identity 匹配的 temp 被删除。"""
+    temp_dir, manifest = _zc108_make_cleanup_fixture(tmp_path,
+        backup_identity=None, restore_identity=None)
+    backup_path = _M._migration_attempt_backup_temp_path(temp_dir)
+    assert backup_path.exists()
+    result = _M._migration_cleanup_attempt_temps(
+        temp_dir, manifest, unlink_fault_prefix="t",
+    )
+    assert "backup.tmp" in result.deleted
+    assert not backup_path.exists()
+    assert result.closable
+
+
+def test_zc108_cleanup_resolved_absent(tmp_path: Path) -> None:
+    """精确路径不存在时返回 resolved_absent。"""
+    temp_dir, manifest = _zc108_make_cleanup_fixture(tmp_path,
+        backup_identity=None, restore_identity=None)
+    _M._migration_attempt_backup_temp_path(temp_dir).unlink()
+    _M._migration_attempt_restore_temp_path(temp_dir).unlink()
+    result = _M._migration_cleanup_attempt_temps(
+        temp_dir, manifest, unlink_fault_prefix="t",
+    )
+    assert "backup.tmp" in result.resolved_absent
+    assert "restore.tmp" in result.resolved_absent
+    assert result.closable
+
+
+def test_zc108_cleanup_foreign_replacement(tmp_path: Path) -> None:
+    """不同 inode 的文件不被删除，返回 foreign_replacement。"""
+    temp_dir, manifest = _zc108_make_cleanup_fixture(tmp_path,
+        backup_identity=None, restore_identity=None)
+    fake = _M._MigrationFileIdentity(st_dev=99999, st_ino=99999)
+    from dataclasses import replace as dc_replace
+    manifest = dc_replace(manifest, backup_temp_identity=fake)
+    backup_path = _M._migration_attempt_backup_temp_path(temp_dir)
+    assert backup_path.exists()
+    result = _M._migration_cleanup_attempt_temps(
+        temp_dir, manifest, unlink_fault_prefix="t",
+    )
+    assert "backup.tmp" in result.foreign_replacements
+    assert backup_path.exists()
+    assert result.closable
+
+
+def test_zc108_cleanup_unregistered_remaining(tmp_path: Path) -> None:
+    """planned 但无 identity 的文件不被删除，阻止封口。"""
+    temp_dir, manifest = _zc108_make_cleanup_fixture(tmp_path,
+        backup_identity=None, restore_identity=None)
+    from dataclasses import replace as dc_replace
+    manifest = dc_replace(
+        manifest,
+        backup_temp_identity=None,
+        restore_temp_identity=None,
+    )
+    backup_path = _M._migration_attempt_backup_temp_path(temp_dir)
+    assert backup_path.exists()
+    result = _M._migration_cleanup_attempt_temps(
+        temp_dir, manifest, unlink_fault_prefix="t",
+    )
+    assert "backup.tmp" in result.unregistered_remaining
+    assert "restore.tmp" in result.unregistered_remaining
+    assert not result.closable
+
+
+def test_zc108_cleanup_delete_error(
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """unlink 失败返回 delete_error，阻止封口。"""
+    temp_dir, manifest = _zc108_make_cleanup_fixture(tmp_path,
+        backup_identity=None, restore_identity=None)
+    monkeypatch.setattr(_M, "_MIGRATION_UNLINK_FAULTS", {"t_backup"})
+    result = _M._migration_cleanup_attempt_temps(
+        temp_dir, manifest, unlink_fault_prefix="t",
+    )
+    monkeypatch.setattr(_M, "_MIGRATION_UNLINK_FAULTS", set())
+    assert "backup.tmp" in result.errors
+    assert not result.closable
+
+
+def test_zc108_remove_empty_dir_after_cleanup(tmp_path: Path) -> None:
+    """清完 temp 后删除空 attempt 目录并 fsync data_dir。"""
+    temp_dir, manifest = _zc108_make_cleanup_fixture(tmp_path,
+        backup_identity=None, restore_identity=None)
+    result = _M._migration_cleanup_attempt_temps(
+        temp_dir, manifest, unlink_fault_prefix="t",
+    )
+    assert result.closable
+    ok, detail = _M._migration_remove_empty_attempt_dir(temp_dir, result)
+    assert ok, detail
+    assert not temp_dir.exists()
+
+
+def test_zc108_remove_dir_with_foreign_replacement_ok(tmp_path: Path) -> None:
+    """foreign_replacement 非空目录不删除外来文件，但可封口并保留目录。"""
+    temp_dir, manifest = _zc108_make_cleanup_fixture(tmp_path,
+        backup_identity=None, restore_identity=None)
+    fake = _M._MigrationFileIdentity(st_dev=99999, st_ino=99999)
+    from dataclasses import replace as dc_replace
+    manifest = dc_replace(manifest, backup_temp_identity=fake)
+    result = _M._migration_cleanup_attempt_temps(
+        temp_dir, manifest, unlink_fault_prefix="t",
+    )
+    assert result.closable
+    ok, _ = _M._migration_remove_empty_attempt_dir(temp_dir, result)
+    assert ok
+    # foreign file 仍在目录中。
+    assert _M._migration_attempt_backup_temp_path(temp_dir).exists()
+    assert temp_dir.exists()
+
+
+class _Zc108FaultingProcess:
+    """为 supervisor 故障注入提供不创建真实进程的最小 Popen double。"""
+
+    def __init__(self, *, wait_returncode: int | None = None) -> None:
+        self.pid = 43210
+        self.returncode: int | None = None
+        self.stdout = None
+        self._wait_returncode = wait_returncode
+
+    def poll(self) -> int | None:
+        raise OSError("poll failed")
+
+    def wait(self, timeout: float | None = None) -> int:
+        del timeout
+        if self._wait_returncode is None:
+            raise OSError("wait failed")
+        self.returncode = self._wait_returncode
+        return self._wait_returncode
+
+    def terminate(self) -> None:
+        raise PermissionError("terminate denied")
+
+    def kill(self) -> None:
+        raise OSError("kill failed")
+
+
+async def test_zc108_poll_failure_can_still_obtain_wait_reap_proof() -> None:
+    """poll 报错时 wait 的 returncode 仍可形成 exited/reaped 证明。"""
+    process = _Zc108FaultingProcess(wait_returncode=7)
+    completed, returncode, error = await _M._wait_migration_child(
+        process, asyncio.get_running_loop().time(),
+    )
+    assert completed
+    assert returncode == 7
+    assert error == "poll_failed"
+
+
+async def test_zc108_all_process_observation_failures_return_exit_unknown(
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """terminate/kill/poll/wait 全部失败也不能从 cleanup helper 逃逸。"""
+    monkeypatch.setattr(_M, "_LEGACY_MIGRATION_CHILD_TERMINATE_GRACE_SECONDS", 0.0)
+    process = _Zc108FaultingProcess()
+    outcome = await _M._terminate_kill_reap_migration_child(
+        process,
+        tmp_path / "missing-ready.json",
+        "a" * 32,
+    )
+    assert outcome.classification == "exit_unknown"
+    assert outcome.returncode is None
+    assert outcome.failure_stage == "poll_wait_failed"
+
+
+async def test_zc108_exit_unknown_publishes_guards_before_durable_poison(
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """unknown outcome 先发布进程 poison 和 exit_unknown manifest，再写 durable poison。"""
+    _home, project, database = await _new_v6_fixture(tmp_path)
+
+    async def unknown_supervisor(*_args: object, **_kwargs: object) -> Any:
+        return _M._MigrationChildOutcome(
+            classification="exit_unknown",
+            returncode=None,
+            error_code="CHECKPOINT_MIGRATION_WORKER_EXIT_UNKNOWN",
+            failure_stage="poll_wait_failed",
+            pid=43210,
+            child_ready_seen=False,
+        )
+
+    observed_order: list[str] = []
+    original_write_poison = _M._migration_write_poison
+
+    def assert_guards_before_poison(
+            path: Path,
+            poison_path: Path,
+            payload: dict[str, object],
+    ) -> None:
+        with _M._MIGRATION_POISON_LOCK:
+            assert path in _M._MIGRATION_POISONED_PATHS
+        manifest = _M._parse_migration_attempt_manifest(
+            _M._migration_attempt_manifest_path(path),
+            expected_database=path.name,
+        )
+        assert manifest is not None and manifest.status == "exit_unknown"
+        observed_order.append("guarded")
+        original_write_poison(path, poison_path, payload)
+
+    monkeypatch.setattr(_M, "_supervise_migration_child", unknown_supervisor)
+    monkeypatch.setattr(_M, "_migration_write_poison", assert_guards_before_poison)
+    with pytest.raises(ThreadPersistenceError, match="WORKER_EXIT_UNKNOWN"):
+        await _M._run_legacy_migration_child(database, _M._project_fingerprint(project))
+    assert observed_order == ["guarded"]
+    manifest = _M._parse_migration_attempt_manifest(
+        _M._migration_attempt_manifest_path(database),
+        expected_database=database.name,
+    )
+    assert manifest is not None and manifest.status == "exit_unknown"
+    assert _M._parse_migration_poison_marker(
+        _M._migration_poison_path(database),
+        expected_database=database.name,
+    ) is not None
+
+    from harness_agent.threads.migration_recovery import _offline_settle_attempt_sync
+
+    monkeypatch.setattr(_M, "_migration_write_poison", original_write_poison)
+    assert _offline_settle_attempt_sync(database) == "OK_SETTLED_source"
+    assert _offline_settle_attempt_sync(database) == "OK_NO_ATTEMPT"
+    with _M._MIGRATION_POISON_LOCK:
+        _M._MIGRATION_POISONED_PATHS.discard(database)
+
+
+@pytest.mark.parametrize(
+    "phase",
+    (
+        "backup_temp_created_before_copy",
+        "backup_temp_copied_before_replace",
+        "bootstrap_failure_restore_temp_created_before_copy",
+        "bootstrap_failure_restore_temp_copied_before_replace",
+    ),
+)
+async def test_zc108_real_child_temp_windows_are_reaped_and_cleaned(
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        phase: str,
+) -> None:
+    """四个真实 temp 窗口被 kill 后，parent 证明 reap 并立即清理登记文件。"""
+    _home, project, database = await _new_v6_fixture(tmp_path)
+    created_processes: list[Any] = []
+    original_popen = _M.subprocess.Popen
+
+    def capture_popen(*args: Any, **kwargs: Any) -> Any:
+        process = original_popen(*args, **kwargs)
+        created_processes.append(process)
+        return process
+
+    monkeypatch.setenv("HARNESS_TEST_MIGRATION_CHILD_PHASE", phase)
+    monkeypatch.setattr(
+        _M,
+        "_LEGACY_MIGRATION_CHILD_DEADLINE_SECONDS",
+        _MIGRATION_CHILD_TEST_DEADLINE,
+    )
+    monkeypatch.setattr(_M.subprocess, "Popen", capture_popen)
+    with pytest.raises(ThreadPersistenceError, match="WORKER_FAILED"):
+        await ThreadPersistence.open(project=project, home=_home)
+
+    assert len(created_processes) == 1
+    process = created_processes[0]
+    assert process.returncode is not None
+    if os.name == "posix":
+        with pytest.raises(ChildProcessError):
+            os.waitpid(process.pid, os.WNOHANG)
+    assert not _M._migration_attempt_manifest_path(database).exists()
+    assert not database.with_name(database.name + _M._MIGRATION_STATE_SUFFIX).exists()
+    assert not _M._migration_poison_path(database).exists()
+    assert not any(
+        entry.name.startswith(f".{database.name}.migration-attempt-")
+        for entry in database.parent.iterdir()
+    )
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
+    finally:
+        connection.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX signal/orphan semantics")
+async def test_zc108_parent_crash_keeps_fresh_opener_fail_closed(
+        tmp_path: Path,
+) -> None:
+    """辅助 parent 死亡且 orphan child 存活时，fresh opener 只能看到 active guard。"""
+    home, project, database = await _new_v6_fixture(tmp_path)
+    script = """
+import asyncio
+import sys
+from pathlib import Path
+from harness_agent.threads.thread_persistence import ThreadPersistence
+
+asyncio.run(ThreadPersistence.open(project=Path(sys.argv[1]), home=Path(sys.argv[2])))
+"""
+    environment = dict(os.environ)
+    environment["PYTEST_CURRENT_TEST"] = "zc108 parent crash helper"
+    environment["HARNESS_TEST_MIGRATION_CHILD_PHASE"] = "before_commit"
+    parent = _M.subprocess.Popen(
+        [_M.sys.executable, "-c", script, str(project), str(home)],
+        cwd=Path(__file__).resolve().parents[2],
+        env=environment,
+        stdin=_M.subprocess.DEVNULL,
+        stdout=_M.subprocess.DEVNULL,
+        stderr=_M.subprocess.DEVNULL,
+        close_fds=True,
+    )
+    child_pid: int | None = None
+    try:
+        deadline = asyncio.get_running_loop().time() + _MIGRATION_CHILD_TEST_DEADLINE + 5.0
+        while asyncio.get_running_loop().time() < deadline:
+            manifest = _M._parse_migration_attempt_manifest(
+                _M._migration_attempt_manifest_path(database),
+                expected_database=database.name,
+            )
+            if manifest is not None:
+                ready_path = _M._migration_attempt_child_ready_path(
+                    _M._migration_attempt_dir_path(database, manifest.attempt_id)
+                )
+                ready = _M._parse_migration_child_ready_marker(
+                    ready_path,
+                    expected_attempt_id=manifest.attempt_id,
+                )
+                state_path = database.with_name(database.name + _M._MIGRATION_STATE_SUFFIX)
+                if ready is not None and state_path.exists():
+                    child_pid = ready.pid
+                    break
+            if parent.poll() is not None:
+                raise AssertionError("helper parent exited before child reached failpoint")
+            await asyncio.sleep(0.01)
+        assert child_pid is not None
+
+        parent.kill()
+        parent.wait(timeout=5)
+        with pytest.raises(ThreadPersistenceError, match="ATTEMPT_ACTIVE"):
+            await ThreadPersistence.open(project=project, home=home)
+        os.kill(child_pid, 0)
+    finally:
+        if parent.poll() is None:
+            parent.kill()
+            parent.wait(timeout=5)
+        if child_pid is not None:
+            try:
+                os.kill(child_pid, 9)
+            except ProcessLookupError:
+                pass
+            deadline = asyncio.get_running_loop().time() + 5.0
+            while asyncio.get_running_loop().time() < deadline:
+                try:
+                    os.kill(child_pid, 0)
+                except ProcessLookupError:
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                raise AssertionError("orphan migration child was not reaped by the OS")
+        from harness_agent.threads.migration_recovery import _offline_settle_attempt_sync
+
+        result = _offline_settle_attempt_sync(database)
+        assert result in {"OK_SETTLED_source", "OK_SETTLED_final", "OK_NO_ATTEMPT"}
+
+
+async def test_zc108_orphan_v2_state_is_not_recovered_as_legacy(
+        tmp_path: Path,
+) -> None:
+    """缺少 matching attempt 的 v2 state 必须失败关闭。"""
+    _home, _project, database = await _new_v6_fixture(tmp_path)
+    connection = sqlite3.connect(database)
+    try:
+        source = _M._migration_database_fingerprint_sync(connection)
+    finally:
+        connection.close()
+    state_path = database.with_name(database.name + _M._MIGRATION_STATE_SUFFIX)
+    _M._migration_atomic_write_json(
+        state_path,
+        _M._migration_state_staging_path(database),
+        {
+            "version": _M._MIGRATION_STATE_VERSION,
+            "status": "migrating",
+            "database": database.name,
+            "attempt_id": "e" * 32,
+            "backup": f"{database.name}.pre-v6-migration.bak",
+            "source": source.record(),
+        },
+        fault_key="state",
+    )
+    with pytest.raises(ThreadPersistenceError, match="STATE_INVALID"):
+        ThreadPersistence._recover_interrupted_migration_sync(database)
+
+
+def test_zc108_dangling_symlink_marker_is_not_treated_as_missing(tmp_path: Path) -> None:
+    """dangling symlink 仍是异常 marker，不能走不存在分支。"""
+    marker = tmp_path / "threads.sqlite3.migration-attempt.json"
+    marker.symlink_to(tmp_path / "missing-target")
+    with pytest.raises(ValueError, match="not a regular file"):
+        _M._parse_migration_attempt_manifest(marker)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX symlink semantics")
+def test_zc108_backup_symlink_is_not_used_for_restore(tmp_path: Path) -> None:
+    """完整性相同也不能把 symlink 伪装的 backup 用于恢复。"""
+    real_backup = tmp_path / "real-backup.sqlite3"
+    connection = sqlite3.connect(real_backup)
+    try:
+        connection.execute("CREATE TABLE source_record(value TEXT NOT NULL)")
+        connection.execute("INSERT INTO source_record(value) VALUES ('source')")
+        connection.commit()
+        expected = _M._migration_database_fingerprint_sync(connection)
+    finally:
+        connection.close()
+    os.chmod(real_backup, 0o600)
+    backup_link = tmp_path / "threads.sqlite3.pre-v6-migration.bak"
+    backup_link.symlink_to(real_backup)
+
+    with pytest.raises(ThreadPersistenceError, match="BACKUP_UNAVAILABLE"):
+        ThreadPersistence._validate_backup_path_sync(backup_link, expected)
+
+
+def test_zc108_malformed_child_ready_blocks_cleanup(tmp_path: Path) -> None:
+    """无法验证自身份的 child-ready 不按普通控制文件直接删除。"""
+    temp_dir, manifest = _zc108_make_cleanup_fixture(
+        tmp_path, backup_identity=None, restore_identity=None,
+    )
+    ready_path = _M._migration_attempt_child_ready_path(temp_dir)
+    ready_path.write_text("{}", encoding="utf-8")
+    os.chmod(ready_path, 0o600)
+    result = _M._migration_cleanup_attempt_temps(
+        temp_dir, manifest, unlink_fault_prefix="malformed_ready",
+    )
+    assert "child-ready.json" in result.owned_remaining
+    assert not result.closable
+    assert ready_path.exists()

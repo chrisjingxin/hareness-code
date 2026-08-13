@@ -2,7 +2,7 @@
 
 import { expect, test } from "bun:test"
 import type { EventEnvelope, InteractionRequestEnvelope } from "@za38/protocol"
-import { applyAgentEvent, applyInteractionRequest, applyComposeState, clearThread, createInitialState, isHomeState, markInteractionTimeout, restoreThread, setWorkMode, startRun, type InteractiveState } from "../../src/interactive/state"
+import { applyAgentEvent, applyComposeState, applyInteractionRequest, clearThread, createInitialState, finishContextCompaction, isHomeState, markInteractionTimeout, restoreThread, setWorkMode, startContextCompaction, startRun, type InteractiveState } from "../../src/interactive/state"
 
 const run = { threadId: "thread-1", runId: "run-1" }
 
@@ -10,6 +10,17 @@ test("初始状态和清空后的状态进入首页", () => {
   const initial = createInitialState()
   expect(isHomeState(initial)).toBeTrue()
   expect(isHomeState(clearThread(startRun(initial, run, "生成组件")))).toBeTrue()
+})
+
+test("手动压缩使用独立 pending 状态并在终态恢复空闲", () => {
+  const compacting = startContextCompaction(createInitialState("thread-compact"))
+  expect(compacting.activeRun).toBeNull()
+  expect(compacting.pendingOperation).toBe("context.compact")
+  expect(compacting.activity.kind).toBe("compacting")
+
+  const idle = finishContextCompaction(compacting)
+  expect(idle.pendingOperation).toBeNull()
+  expect(idle.activity.kind).toBe("idle")
 })
 
 test("恢复 thread 会原子替换时间线并清空旧运行状态", () => {

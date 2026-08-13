@@ -7,7 +7,7 @@ from harness_agent.protocol.runtime import event_model, schema_model
 
 PROTOCOL_MAJOR = 3
 PROTOCOL_MINOR = 4
-PROTOCOL_SCHEMA_SHA256 = "15538344854d2a009b5ddb7584df2384dc11b9f76ba4506cf37f7eb383def4b9"
+PROTOCOL_SCHEMA_SHA256 = "4e8fa73106c74a9ec6937dcffc315bef05c9e9de1fb25c99eb43aa211cf93a3a"
 MAX_FRAME_BYTES = 8388608
 MAX_TOOL_PAYLOAD_BYTES = 1048576
 CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","plugins.list","plugins.inspect","plugins.validate","plugins.install","plugins.set_enabled","plugins.remove","agents.list","agents.inspect","teams.list","teams.inspect","teams.generate","teams.run","teams.cancel","mcp.status","mcp.add","mcp.remove","host.attachment.create","host.attachment.revoke","host.control.acquire","host.control.release","host.control.status","compose.inspect","compose.abandon"]
@@ -571,6 +571,15 @@ class InteractionBaseWire(TypedDict):
     run_id: str
     timeout_ms: int
     payload: JsonObjectWire
+
+class FileDiffPresentationWire(TypedDict):
+    kind: Literal["file_diff"]
+    operation: Literal["write", "edit", "delete"]
+    path: str
+    added_lines: int
+    removed_lines: int
+    truncated: bool
+    unified_diff: str
 
 class ApprovalRequestWire(TypedDict):
     thread_id: str

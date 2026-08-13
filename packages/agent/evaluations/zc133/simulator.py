@@ -213,23 +213,38 @@ class InMemoryEditSimulator:
 
         old_text = args.get("old_string")
         new_text = args.get("new_string")
-        if not isinstance(old_text, str) or not isinstance(new_text, str) or not old_text:
+        snapshot_id = args.get("snapshot_id")
+        if (
+            not isinstance(snapshot_id, str)
+            or not isinstance(old_text, str)
+            or not isinstance(new_text, str)
+        ):
             return _failure("INVALID_TOOL_ARGS", self.current_content, schema_valid=False)
-        if self.baseline_content is None:
-            return _failure("SNAPSHOT_REQUIRED", self.current_content)
-        if thread_id != self.baseline_thread_id:
+        snapshot = self.snapshot
+        if snapshot is None:
+            return _failure("SNAPSHOT_EXPIRED", self.current_content)
+        if (
+            snapshot_id != snapshot.snapshot_id
+            or thread_id != snapshot.thread_id
+            or args.get("file_path") != snapshot.path
+        ):
             return _failure("SNAPSHOT_SCOPE_MISMATCH", self.current_content)
-        if self.current_content != self.baseline_content:
+        if content_hash(self.current_content) != snapshot.content_hash:
             return _failure("STALE_FILE", self.current_content)
-        if self.baseline_read_content is None:
+        if self.baseline_content is None or self.baseline_read_content is None:
             return _failure("SNAPSHOT_REQUIRED", self.current_content)
-        if old_text not in self.baseline_read_content:
-            if old_text in self.current_content:
-                return _failure("UNREAD_RANGE", self.current_content)
-            return _failure("OLD_TEXT_NOT_FOUND", self.current_content)
-        if self.baseline_read_content.count(old_text) != 1:
-            return _failure("AMBIGUOUS_MATCH", self.current_content)
-        proposed = self.baseline_content.replace(old_text, new_text, 1)
+        if not old_text:
+            if self.baseline_content != "":
+                return _failure("INVALID_EDIT", self.current_content)
+            proposed = new_text
+        else:
+            if old_text not in self.baseline_read_content:
+                if old_text in self.current_content:
+                    return _failure("UNREAD_RANGE", self.current_content)
+                return _failure("OLD_TEXT_NOT_FOUND", self.current_content)
+            if self.baseline_read_content.count(old_text) != 1:
+                return _failure("AMBIGUOUS_MATCH", self.current_content)
+            proposed = self.baseline_content.replace(old_text, new_text, 1)
         if proposed == self.current_content:
             return _failure("NO_CHANGES", self.current_content)
         if commit_content is not None:

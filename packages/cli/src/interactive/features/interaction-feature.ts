@@ -164,6 +164,7 @@ export class InteractionFeature {
         requestId: request.request_id,
         description: request.payload.description,
         requests: request.payload.requests,
+        presentation: request.payload.presentation ?? null,
         decisions: request.payload.decisions,
         deadlineAtMs,
       }

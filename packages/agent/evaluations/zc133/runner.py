@@ -217,6 +217,7 @@ def _exact_call(fixture: EvaluationFixture, operation: FixtureOperation, index: 
         "name": "edit_file",
         "args": {
             "file_path": fixture.call_path,
+            "snapshot_id": f"snap-{fixture.fixture_id}",
             "old_string": old_text,
             "new_string": new_text,
         },
@@ -337,14 +338,8 @@ def _attempt(
     error_codes = [outcome.code for outcome in outcomes if outcome.code is not None]
     expected_final = fixture.expected_content
     if fixture.scenario == "expected_error":
-        exact_can_bypass_snapshot_expiry = (
-            fixture.expected_error == "SNAPSHOT_EXPIRED" and spec.family == "exact-string"
-        )
-        if exact_can_bypass_snapshot_expiry:
-            completed = final_content == expected_final and bool(outcomes) and outcomes[-1].ok
-        else:
-            expected_final = fixture.external_before_commit or fixture.external_after_read or fixture.source
-            completed = any(outcome.code == fixture.expected_error for outcome in outcomes)
+        expected_final = fixture.external_before_commit or fixture.external_after_read or fixture.source
+        completed = any(outcome.code == fixture.expected_error for outcome in outcomes)
     else:
         completed = final_content == expected_final and bool(outcomes) and outcomes[-1].ok
     partial_write = any(
@@ -607,11 +602,17 @@ def _model_prompt(fixture: EvaluationFixture, spec: CandidateSpec) -> str:
         contract = json.dumps(
             {
                 "tool": "edit_file",
-                "args": {"file_path": path, "old_string": "...", "new_string": "..."},
+                "args": {
+                    "file_path": path,
+                    "snapshot_id": snapshot_id,
+                    "old_string": "...",
+                    "new_string": "...",
+                },
             },
             ensure_ascii=False,
             separators=(",", ":"),
         )
+        syntax_note = "已读文件为空时，使用空 old_string 写入初始内容；非空文件不能使用空匹配。"
     elif spec.family == "snapshot-single":
         contract = json.dumps(
             {
@@ -636,7 +637,8 @@ def _model_prompt(fixture: EvaluationFixture, spec: CandidateSpec) -> str:
             ensure_ascii=False,
             separators=(",", ":"),
         )
-    contract += f" {syntax_note}" if spec.family != "exact-string" else ""
+        syntax_note = ""
+    contract += f" {syntax_note}" if syntax_note else ""
     return (
         "你正在参加 Harness Code 文件编辑接口评测。只处理下面的合成 fixture，不要猜测其他文件。"
         f"任务：{_operation_instruction(fixture)}（场景：{fixture.description}）\n候选契约：{contract}\n"

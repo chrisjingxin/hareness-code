@@ -23,6 +23,7 @@ export function CodeBlock(props: {
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const catalogEntry = resolveLanguage(language)
+  const diffBlock = isDiffCodeBlock(language, displayCode)
   const displayLanguage = catalogEntry.canonical !== "plaintext" ? catalogEntry.canonical : (language || "文本")
   const highlightLanguage = catalogEntry.canonical === "plaintext" ? null : catalogEntry.canonical
 
@@ -81,7 +82,9 @@ export function CodeBlock(props: {
       </div>
       <div className="code-block-body">
         <pre className="code-block-pre">
-          <code data-language={language || undefined}>{highlighted ? renderSpans(displayCode, highlight.spans!) : displayCode}</code>
+          <code data-language={language || undefined} className={diffBlock ? "diff-code" : undefined}>
+            {diffBlock ? renderDiffCode(displayCode) : highlighted ? renderSpans(displayCode, highlight.spans!) : displayCode}
+          </code>
         </pre>
       </div>
       <span className="sr-only" role="status" aria-live="polite">
@@ -89,6 +92,27 @@ export function CodeBlock(props: {
       </span>
     </div>
   )
+}
+
+/** Diff/patch fenced blocks use line backgrounds so additions and removals are scannable. */
+function isDiffCodeBlock(language: string, code: string): boolean {
+  const normalized = language.trim().toLowerCase()
+  if (["diff", "patch", "udiff", "unified-diff"].includes(normalized)) return true
+  return /^(?:diff --git |@@ .* @@|\+\+\+ |--- )/m.test(code)
+}
+
+function renderDiffCode(code: string): React.ReactNode {
+  const lines = code.replaceAll("\r\n", "\n").split("\n")
+  return lines.map((line, index) => {
+    const kind = line.startsWith("+") && !line.startsWith("+++")
+      ? "add"
+      : line.startsWith("-") && !line.startsWith("---")
+        ? "remove"
+        : line.startsWith("@@")
+          ? "hunk"
+          : "context"
+    return <span key={`${index}-${line}`} className={`diff-code-line diff-code-${kind}`}>{line}{index < lines.length - 1 ? "\n" : null}</span>
+  })
 }
 
 /** 将 UTF-8 字节范围精确转换为 UTF-16 字符范围并输出带 Class 的 React 节点组。 */

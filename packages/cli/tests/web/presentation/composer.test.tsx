@@ -128,6 +128,21 @@ describe("Composer", () => {
     }
   })
 
+  test("上下文压缩期间禁用输入和发送并显示等待原因", () => {
+    const interactive = makeInteractive({ activity: { kind: "compacting" } })
+    const handle = mountComposer(makeSnapshot({ draft: "保留的草稿", interactive }), [])
+    try {
+      const textarea = handle.container.querySelector<HTMLTextAreaElement>(".composer-textarea")
+      const send = handle.container.querySelector<HTMLButtonElement>(".send-button")
+      expect(textarea?.disabled).toBe(true)
+      expect(textarea?.placeholder).toBe("正在压缩上下文…")
+      expect(send?.disabled).toBe(true)
+      expect(handle.container.textContent).toContain("上下文压缩中，请稍候")
+    } finally {
+      handle.unmount()
+    }
+  })
+
   test("armed Skill 显示 chip 名称；点击清除 dispatch skill-clear", () => {
     const interactive = makeInteractive({
       selection: {

@@ -16,6 +16,7 @@ import type {
   Scheduler,
 } from "../../src/interactive/ports"
 import { InteractiveControllerImpl } from "../../src/interactive/controller"
+import { flush, makeHarness } from "./harness"
 
 function createMockGateway(): AgentGateway {
   return {
@@ -152,5 +153,42 @@ describe("Adapter Parity (TUI vs Web)", () => {
     await tuiAdapter.close()
     await webAdapter.close()
     await controller.close()
+  })
+
+  test("TUI 提交 /compact 后立即清空 Composer，并由 compacting 状态显示等待提示", async () => {
+    const harness = makeHarness()
+    let releaseCompact = () => undefined
+    const compactGate = new Promise<void>(resolve => { releaseCompact = resolve })
+    harness.port.setCompactContextImpl(async () => {
+      await compactGate
+      return { compacted: true, context: { action: "manual_summary" } }
+    })
+    const adapter = createTuiAdapter({
+      controller: harness.controller,
+      promptHistoryStore: { load: async () => [], append: async () => {} },
+      onRequestExit: () => undefined,
+    })
+
+    try {
+      await harness.controller.dispatch({ type: "input.submit", value: "建立 Thread" })
+      const run = harness.runHandles.at(-1)!
+      harness.port.completeRun(run.threadId, run.runId)
+      await flush()
+
+      await adapter.dispatch({ type: "draft-input", value: "/compact" })
+      const pending = adapter.dispatch({ type: "submit", value: "/compact" })
+      await flush()
+
+      expect(adapter.getSnapshot().draft).toBe("")
+      expect(adapter.getSnapshot().commandMenu.visible).toBe(false)
+      expect(adapter.getSnapshot().interactive.activity.kind).toBe("compacting")
+
+      releaseCompact()
+      await pending
+    } finally {
+      releaseCompact()
+      await adapter.close()
+      await harness.controller.close()
+    }
   })
 })

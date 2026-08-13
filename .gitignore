@@ -24,10 +24,12 @@ Thumbs.db
 # 临时交接记录与本地排障产物
 tmp/
 
-
 # 本地工具运行状态
 .omo/
 .reasonix/
 .trae/
 .codegraph/
 .rtk/
+
+# WorkBuddy 本地数据（技能、记忆等，不入库）
+.workbuddy/

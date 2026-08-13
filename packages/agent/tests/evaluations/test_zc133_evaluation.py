@@ -88,6 +88,72 @@ def test_simulator_fail_closed_scenarios_do_not_write() -> None:
     assert overlap_attempt.partial_write is False
 
 
+def test_exact_string_replay_initializes_only_the_empty_document() -> None:
+    """HC-141 空 fixture 可完成，非空文件的空匹配仍稳定拒绝。"""
+    empty = next(item for item in fixture_catalog() if item.fixture_id == "empty-file-insert")
+    simulator = InMemoryEditSimulator(empty)
+    assert simulator.read(
+        thread_id=empty.thread_id,
+        path=empty.path,
+        start_line=empty.read_start,
+        end_line=empty.read_end,
+    ) is not None
+    replay_call = build_replay_calls(empty, CANDIDATE_SPECS[0])[0]
+    assert replay_call["args"]["snapshot_id"] == f"snap-{empty.fixture_id}"
+    initialized = simulator.execute(
+        "exact-string",
+        replay_call,
+        thread_id=empty.call_thread_id,
+    )
+    assert initialized.ok is True
+    assert initialized.content == "created\n"
+
+    nonempty = next(item for item in fixture_catalog() if item.fixture_id == "replace-single-line")
+    simulator = InMemoryEditSimulator(nonempty)
+    assert simulator.read(
+        thread_id=nonempty.thread_id,
+        path=nonempty.path,
+        start_line=nonempty.read_start,
+        end_line=nonempty.read_end,
+    ) is not None
+    rejected = simulator.execute(
+        "exact-string",
+        {
+            "name": "edit_file",
+            "args": {
+                "file_path": nonempty.path,
+                "snapshot_id": f"snap-{nonempty.fixture_id}",
+                "old_string": "",
+                "new_string": "prefix\n",
+            },
+        },
+        thread_id=nonempty.call_thread_id,
+    )
+    assert rejected.code == "INVALID_EDIT"
+    assert rejected.writes == 0
+    assert rejected.content == nonempty.source
+
+
+def test_exact_string_simulator_requires_the_production_snapshot_argument() -> None:
+    """评测不能把生产 schema 会拒绝的无 Snapshot 调用计为成功。"""
+    fixture = next(item for item in fixture_catalog() if item.fixture_id == "replace-single-line")
+    simulator = InMemoryEditSimulator(fixture)
+    assert simulator.read(
+        thread_id=fixture.thread_id,
+        path=fixture.path,
+        start_line=fixture.read_start,
+        end_line=fixture.read_end,
+    ) is not None
+    call = build_replay_calls(fixture, CANDIDATE_SPECS[0])[0]
+    call["args"].pop("snapshot_id")
+
+    rejected = simulator.execute("exact-string", call, thread_id=fixture.call_thread_id)
+
+    assert rejected.code == "INVALID_TOOL_ARGS"
+    assert rejected.schema_valid is False
+    assert rejected.writes == 0
+
+
 def test_mock_replay_counts_silent_corruption_as_veto() -> None:
     """模拟弱模型错选合法行号时，Snapshot 候选被一票否决而不进入生产。"""
 

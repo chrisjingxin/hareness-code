@@ -81,6 +81,14 @@ test("桌面三栏布局与文件预览样式存在：desktop-workspace / contex
   expect(css).toContain(".file-tree")
 })
 
+test("待处理审批 Dock 在视口内独立纵向滚动，不遮挡 Composer 和审批操作", () => {
+  const block = css.slice(css.indexOf(".interaction-dock {"), css.indexOf(".interaction-dock .interaction-card"))
+  expect(block).toContain("min-height: 0")
+  expect(block).toContain("max-height: calc(100% - var(--control-field) - 32px)")
+  expect(block).toContain("overflow-y: auto")
+  expect(block).toContain("scrollbar-gutter: stable")
+})
+
 test("桌面化清理：移动端抽屉、workspace-header 与窄屏断点样式已删除", () => {
   expect(css).not.toContain("sidebar-drawer")
   expect(css).not.toContain("drawer-scrim")
@@ -101,7 +109,7 @@ test("历史双轨 class 已删除：同一组件不再保留旧 class 规则", 
 test("状态圆点语义色：就绪/完成=绿，运行中=蓝，思考/等待/取消中=黄，失败=红，已取消=灰", () => {
   expect(css).toContain(".status-dot-idle, .status-dot-home { background: var(--success); }")
   expect(css).toContain(".status-dot-running { background: var(--accent); }")
-  expect(css).toContain(".status-dot-starting, .status-dot-waiting-interaction, .status-dot-cancelling { background: var(--warning); }")
+  expect(css).toContain(".status-dot-compacting, .status-dot-starting, .status-dot-waiting-interaction, .status-dot-cancelling { background: var(--warning); }")
   expect(css).toContain(".status-dot-failed { background: var(--danger); }")
   expect(css).toContain(".status-dot-cancelled { background: var(--muted); }")
 })

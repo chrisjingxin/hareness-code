@@ -191,6 +191,7 @@ def error_message(code: str) -> str:
         "PATH_SYMLINK_UNSUPPORTED": "文件路径不能包含符号链接。",
         "EXACT_MATCH_NOT_FOUND": "已读原文本不再存在。",
         "AMBIGUOUS_MATCH": "old_string 在文件中不是唯一匹配。",
+        "INVALID_EDIT": "空 old_string 只允许初始化当前 Snapshot 对应的空文件。",
         "VIRTUAL_READONLY": "虚拟文件只允许读取。",
         "FILE_TOOL_SCHEMA_INVALID": "文件工具参数不属于当前 canonical schema。",
     }
@@ -207,6 +208,8 @@ def next_action(code: str) -> str:
         return "先读取现有文件，再使用 edit_file。"
     if code in {"EXACT_MATCH_NOT_FOUND", "AMBIGUOUS_MATCH"}:
         return "重新读取目标区间并提交唯一的 old_string。"
+    if code == "INVALID_EDIT":
+        return "从已读非空内容复制唯一的 old_string 后重试。"
     if code == "BACKEND_CAS_UNSUPPORTED":
         return "切换到支持安全文本 mutation 的执行模式。"
     return "检查参数后重试。"
