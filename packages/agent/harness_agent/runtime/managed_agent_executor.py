@@ -30,6 +30,30 @@ logger = logging.getLogger(__name__)
 ManagedOutputPolicy = Literal["passthrough", "capture_only", "structured"]
 
 
+class ProviderRetryPolicy(Protocol):
+    """provider 错误的可选有界重试策略；无策略时保持原有错误直通。"""
+
+    def should_retry(self, attempt: int, error: BaseException) -> bool: ...
+
+    def retry_delay_seconds(self, error: BaseException) -> float: ...
+
+
+_RATE_LIMIT_CODES = frozenset(
+    {"RATE_LIMITED", "PROVIDER_RATE_LIMITED", "429", "THROTTLED"}
+)
+
+
+def is_provider_rate_limited(error: BaseException) -> bool:
+    """判断异常是否携带稳定 provider 限流事实。"""
+    code = getattr(error, "code", None)
+    if isinstance(code, str) and code.upper() in _RATE_LIMIT_CODES:
+        return True
+    if getattr(error, "status_code", None) == 429:
+        return True
+    message = str(error)
+    return "429" in message or "rate limit" in message.lower()
+
+
 class ManagedAgentExecutionError(RuntimeError):
     """Managed executor 对外暴露的稳定执行错误。"""
 
@@ -133,6 +157,7 @@ class ManagedAgentRequest:
     required_skill_snapshot_ids: tuple[str, ...] = ()
     usage: dict[str, int] | None = None
     started_at: float = field(default_factory=time.monotonic)
+    provider_retry: ProviderRetryPolicy | None = None
 
     def __post_init__(self) -> None:
         """在取得昂贵 runtime 前拒绝不完整的执行事实。"""
@@ -251,16 +276,13 @@ class ManagedAgentExecutor:
                 if resume is not None
                 else _initial_stream_input(request.input)
             )
-            try:
-                stream_result = await self._execute_stream_round(
-                    request,
-                    observer,
-                    runtime,
-                    session,
-                    stream_input,
-                )
-            except ExecutionStreamError as exc:
-                raise ManagedAgentExecutionError(exc.code, exc.message) from exc
+            stream_result = await self._execute_round_with_retry(
+                request,
+                observer,
+                runtime,
+                session,
+                stream_input,
+            )
             if stream_result.resume is None:
                 result = ManagedAgentResult(
                     final_content=stream_result.final_content,
@@ -273,6 +295,65 @@ class ManagedAgentExecutor:
                 await observer.on_execution_complete(result)
                 return result
             resume = stream_result.resume
+
+    async def _execute_round_with_retry(
+        self,
+        request: ManagedAgentRequest,
+        observer: ManagedAgentObserver,
+        runtime: ManagedAgentRuntime,
+        session: StreamSession,
+        stream_input: object,
+    ):
+        """在 provider 预算内重试 stream round；无策略时保持原有错误直通。"""
+        attempt = 1
+        while True:
+            try:
+                return await self._execute_stream_round(
+                    request,
+                    observer,
+                    runtime,
+                    session,
+                    stream_input,
+                )
+            except asyncio.CancelledError:
+                raise
+            except ExecutionStreamError as exc:
+                if (
+                    request.provider_retry is not None
+                    and request.provider_retry.should_retry(attempt, exc)
+                ):
+                    attempt += 1
+                    await self._retry_sleep(request, request.provider_retry, exc)
+                    continue
+                raise ManagedAgentExecutionError(exc.code, exc.message) from exc
+            except Exception as exc:  # noqa: BLE001 - retry 边界需要判定任何错误
+                if (
+                    request.provider_retry is not None
+                    and request.provider_retry.should_retry(attempt, exc)
+                ):
+                    attempt += 1
+                    await self._retry_sleep(request, request.provider_retry, exc)
+                    continue
+                if is_provider_rate_limited(exc):
+                    raise ManagedAgentExecutionError(
+                        "PROVIDER_RATE_LIMITED",
+                        "Provider rate limit budget exhausted",
+                    ) from exc
+                raise
+
+    async def _retry_sleep(
+        self,
+        request: ManagedAgentRequest,
+        policy: ProviderRetryPolicy,
+        error: BaseException,
+    ) -> None:
+        """按策略延迟并在醒来后复核取消；取消语义不被重试吞掉。"""
+        await asyncio.sleep(policy.retry_delay_seconds(error))
+        if request.is_cancelled():
+            raise ManagedAgentExecutionError(
+                "RUN_CANCELLED",
+                "Run was cancelled during provider retry",
+            )
 
     async def _execute_stream_round(
         self,

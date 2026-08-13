@@ -8,7 +8,7 @@ DeepAgents 0.6.8 的 ``FilesystemMiddleware`` 是受保护的构图脚手架，�
 from __future__ import annotations
 
 import inspect
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Protocol, runtime_checkable
 
 from langchain.agents.middleware.types import (
@@ -21,6 +21,16 @@ from langchain.tools.tool_node import ToolCallRequest
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import BaseTool
 
+from harness_agent.compose.recovery import (
+    EffectVerification,
+    ToolEffectPolicy,
+    VerificationOutcome,
+)
+from harness_agent.threads.text_backend import (
+    TextDocument,
+    TextMutationBackend,
+    TextMutationError,
+)
 from harness_agent.tools.file_tool_catalog import (
     BUILTIN_FILE_TOOL_NAMES,
     HARNESS_FILE_TOOL_NAMES,
@@ -177,10 +187,95 @@ def _error_code(exc: Exception) -> str:
     return str(code) if isinstance(code, str) and code else "FILE_TOOL_EXECUTION_FAILED"
 
 
+def make_file_effect_receipt(document: TextDocument, *, backend_id: str) -> dict[str, object]:
+    """以真实重读 Snapshot 构造文件 effect receipt；不接受模型自述内容。"""
+    return {
+        "backend_id": backend_id,
+        "path": document.path,
+        "digest": document.identity.digest,
+        "byte_length": document.identity.byte_length,
+    }
+
+
+class FileMutationEffectVerifier:
+    """文件 effect 的真实对账 seam：重读字节证明执行/未执行/漂移。"""
+
+    def __init__(self, backend: TextMutationBackend) -> None:
+        self._backend = backend
+
+    def classify(self, intent: Mapping[str, object]) -> ToolEffectPolicy:
+        """write/create/delete 可以确定性对账；其他工具不由本 verifier 处理。"""
+        if intent.get("tool") in {"write", "create", "delete"}:
+            return ToolEffectPolicy.RECONCILABLE
+        return ToolEffectPolicy.UNKNOWN
+
+    def verify(self, intent: Mapping[str, object]) -> EffectVerification:
+        """用当前磁盘字节与 intent 中的 base/expected digest 对账。"""
+        tool = intent.get("tool")
+        path = intent.get("path")
+        if not isinstance(tool, str) or not isinstance(path, str):
+            return EffectVerification(VerificationOutcome.UNKNOWN)
+        if tool == "delete":
+            return self._verify_delete(intent, path)
+        try:
+            current = self._backend.read_text_document(path)
+        except TextMutationError as exc:
+            if exc.code == "FILE_NOT_FOUND":
+                if tool == "create":
+                    return EffectVerification(VerificationOutcome.NOT_EXECUTED)
+                return EffectVerification(VerificationOutcome.UNKNOWN)
+            return EffectVerification(VerificationOutcome.UNKNOWN)
+        expected_digest = intent.get("expected_digest")
+        expected_length = intent.get("expected_byte_length")
+        if (
+            isinstance(expected_digest, str)
+            and current.identity.digest == expected_digest
+            and current.identity.byte_length == expected_length
+        ):
+            receipt = make_file_effect_receipt(
+                current,
+                backend_id=self._backend.backend_id,
+            )
+            return EffectVerification(VerificationOutcome.EXECUTED, receipt)
+        base_digest = intent.get("base_digest")
+        if isinstance(base_digest, str) and current.identity.digest == base_digest:
+            return EffectVerification(VerificationOutcome.NOT_EXECUTED)
+        return EffectVerification(VerificationOutcome.UNKNOWN)
+
+    def _verify_delete(
+        self,
+        intent: Mapping[str, object],
+        path: str,
+    ) -> EffectVerification:
+        """删除的对账：文件消失证明已执行；仍在 base digest 证明未执行。"""
+        base_digest = intent.get("base_digest")
+        try:
+            current = self._backend.read_text_document(path)
+        except TextMutationError as exc:
+            if exc.code == "FILE_NOT_FOUND":
+                if isinstance(base_digest, str) and base_digest:
+                    return EffectVerification(
+                        VerificationOutcome.EXECUTED,
+                        {
+                            "backend_id": self._backend.backend_id,
+                            "path": path,
+                            "deleted": True,
+                            "digest": base_digest,
+                        },
+                    )
+                return EffectVerification(VerificationOutcome.UNKNOWN)
+            return EffectVerification(VerificationOutcome.UNKNOWN)
+        if isinstance(base_digest, str) and current.identity.digest == base_digest:
+            return EffectVerification(VerificationOutcome.NOT_EXECUTED)
+        return EffectVerification(VerificationOutcome.UNKNOWN)
+
+
 __all__ = [
     "BUILTIN_FILE_TOOL_NAMES",
+    "FileMutationEffectVerifier",
     "FileToolContract",
     "FileToolContractError",
     "HARNESS_FILE_TOOL_NAMES",
     "HarnessFileToolsMiddleware",
+    "make_file_effect_receipt",
 ]

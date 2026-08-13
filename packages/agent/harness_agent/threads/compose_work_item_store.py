@@ -17,7 +17,13 @@ from pathlib import PurePosixPath
 from typing import Any, AsyncIterator
 
 from harness_agent.compose.models import (
+    MAX_ARTIFACT_PAYLOAD_BYTES,
+    ComposeActivity,
+    ComposeActivityStatus,
     ComposeDocumentKind,
+    ComposeEffect,
+    ComposeEffectStatus,
+    ComposeEvidence,
     ComposeWorkItem,
     ComposeWorkItemStatus,
     ThreadMode,
@@ -27,6 +33,44 @@ _CONTENT_DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _CONFIRMATION_KIND = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 _CONFIRMATION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _CONFIRMATION_DECISIONS = frozenset({"confirmed", "approved"})
+_ACTIVITY_ID = _CONFIRMATION_ID
+_ACTIVITY_KIND = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
+_EFFECT_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+_EVIDENCE_ID = _CONFIRMATION_ID
+_EVIDENCE_KIND = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
+_WORK_ITEM_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+_RESTARTABLE_ACTIVITY_STATUSES = frozenset(
+    {
+        ComposeActivityStatus.INTERRUPTED,
+        ComposeActivityStatus.RETRYABLE_FAILED,
+        ComposeActivityStatus.FAILED,
+        ComposeActivityStatus.CANCELLED,
+    }
+)
+_FINISHABLE_ACTIVITY_STATUSES = frozenset(
+    {
+        ComposeActivityStatus.RUNNING,
+        ComposeActivityStatus.WAITING_USER,
+    }
+)
+_FINISH_TARGET_STATUSES = frozenset(
+    {
+        ComposeActivityStatus.COMPLETED,
+        ComposeActivityStatus.FAILED,
+        ComposeActivityStatus.CANCELLED,
+        ComposeActivityStatus.WAITING_USER,
+        ComposeActivityStatus.BLOCKED,
+        ComposeActivityStatus.INTERRUPTED,
+        ComposeActivityStatus.RETRYABLE_FAILED,
+    }
+)
+_NONTERMINAL_WORK_ITEM_STATUSES = frozenset(
+    {
+        ComposeWorkItemStatus.ACTIVE,
+        ComposeWorkItemStatus.WAITING_USER,
+        ComposeWorkItemStatus.BLOCKED,
+    }
+)
 
 class ComposeWorkItemStoreError(RuntimeError):
     """Work Item 存储层的稳定错误码；调用方不得根据 SQLite 原文分支。"""
@@ -105,6 +149,86 @@ class RecordComposeConfirmation:
     document_digests: tuple[str, ...]
     confirmed_at_ms: int
     decision: str = "confirmed"
+
+
+@dataclass(frozen=True, slots=True)
+class StartComposeActivity:
+    """开始一次有界 Activity 执行；同一 activity_id 只能 start 一次。"""
+
+    activity_id: str
+    work_item_id: str
+    run_id: str | None
+    kind: str
+    started_at_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class RestartComposeActivity:
+    """从可恢复状态重启 Activity；attempt 递增并重新绑定 run。"""
+
+    activity_id: str
+    run_id: str | None
+    started_at_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class FinishComposeActivity:
+    """以 CAS 收敛 Activity；当前必须是 running 或 waiting_user。"""
+
+    activity_id: str
+    status: ComposeActivityStatus
+    finished_at_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class RecordComposeEffectIntent:
+    """在外部副作用执行前原子写入 intent；相同 key 幂等。"""
+
+    effect_key: str
+    work_item_id: str
+    activity_id: str | None
+    intent: dict[str, object]
+    created_at_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class RecordComposeEffectReceipt:
+    """以真实对账结果确认 effect；不同 receipt 冲突拒绝。"""
+
+    effect_key: str
+    receipt: dict[str, object]
+    updated_at_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class MarkComposeEffectUnknown:
+    """把结果无法证明的 intent 标记为 unknown，等待用户决策。"""
+
+    effect_key: str
+    reason: str
+    updated_at_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class RecordComposeEvidence:
+    """写入一条 verification/review 证据事实；identity 幂等。"""
+
+    evidence_id: str
+    work_item_id: str
+    evidence_kind: str
+    content_digest: str
+    payload: dict[str, object]
+    created_at_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class SetComposeWorkItemStatus:
+    """在未终结状态间以 revision CAS 迁移 Work Item 状态。"""
+
+    work_item_id: str
+    expected_revision: int
+    status: ComposeWorkItemStatus
+    updated_at_ms: int
 
 
 class ComposeWorkItemStore:
@@ -614,6 +738,556 @@ class ComposeWorkItemStore:
         except Exception as exc:
             raise ComposeWorkItemStoreError("COMPOSE_CONFIRMATION_READ_FAILED") from exc
 
+    # ---------- Activity 事实 ----------
+
+    async def start_activity(self, command: StartComposeActivity) -> ComposeActivity:
+        """原子开始一次 Activity；同一 activity_id 只能存在一行。"""
+        _validate_activity_start(command)
+        try:
+            async with self._transaction():
+                if await self._load_in_transaction(command.work_item_id) is None:
+                    raise ComposeWorkItemStoreError("COMPOSE_WORK_ITEM_NOT_FOUND")
+                existing = await self._load_activity_in_transaction(command.activity_id)
+                if existing is not None:
+                    raise ComposeWorkItemStoreError("COMPOSE_ACTIVITY_ID_CONFLICT")
+                await self._connection.execute(
+                    """
+                    INSERT INTO harness_compose_work_item_activities (
+                        project_fingerprint, activity_id, work_item_id, run_id, kind,
+                        status, attempt, started_at_ms, finished_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, 'running', 1, ?, NULL)
+                    """,
+                    (
+                        self._project_fingerprint,
+                        command.activity_id,
+                        command.work_item_id,
+                        command.run_id,
+                        command.kind,
+                        command.started_at_ms,
+                    ),
+                )
+                row = await self._load_activity_in_transaction(command.activity_id)
+                if row is None:
+                    raise ComposeWorkItemStoreError("COMPOSE_ACTIVITY_WRITE_FAILED")
+                return _activity_from_row(row)
+        except ComposeWorkItemStoreError:
+            raise
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise ComposeWorkItemStoreError("COMPOSE_ACTIVITY_WRITE_FAILED") from exc
+
+    async def restart_activity(
+        self,
+        command: RestartComposeActivity,
+    ) -> ComposeActivity:
+        """从可恢复状态重启 Activity：attempt 递增、重新绑定 run。"""
+        _validate_activity_restart(command)
+        try:
+            async with self._transaction():
+                row = await self._load_activity_in_transaction(command.activity_id)
+                if row is None:
+                    raise ComposeWorkItemStoreError("COMPOSE_ACTIVITY_NOT_FOUND")
+                activity = _activity_from_row(row)
+                if activity.status not in _RESTARTABLE_ACTIVITY_STATUSES:
+                    raise ComposeWorkItemStoreError("COMPOSE_ACTIVITY_RESTART_INVALID")
+                await self._connection.execute(
+                    """
+                    UPDATE harness_compose_work_item_activities
+                    SET status = 'running', attempt = attempt + 1,
+                        run_id = ?, started_at_ms = ?, finished_at_ms = NULL
+                    WHERE project_fingerprint = ? AND activity_id = ?
+                    """,
+                    (
+                        command.run_id,
+                        command.started_at_ms,
+                        self._project_fingerprint,
+                        command.activity_id,
+                    ),
+                )
+                updated = await self._load_activity_in_transaction(command.activity_id)
+                if updated is None:
+                    raise ComposeWorkItemStoreError("COMPOSE_ACTIVITY_WRITE_FAILED")
+                return _activity_from_row(updated)
+        except ComposeWorkItemStoreError:
+            raise
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise ComposeWorkItemStoreError("COMPOSE_ACTIVITY_WRITE_FAILED") from exc
+
+    async def finish_activity(self, command: FinishComposeActivity) -> ComposeActivity:
+        """以 CAS 收敛 Activity；已终结或 running 之外的状态不能覆盖。"""
+        _validate_activity_finish(command)
+        try:
+            async with self._transaction():
+                row = await self._load_activity_in_transaction(command.activity_id)
+                if row is None:
+                    raise ComposeWorkItemStoreError("COMPOSE_ACTIVITY_NOT_FOUND")
+                activity = _activity_from_row(row)
+                if activity.status not in _FINISHABLE_ACTIVITY_STATUSES:
+                    raise ComposeWorkItemStoreError("COMPOSE_ACTIVITY_STATUS_CONFLICT")
+                await self._connection.execute(
+                    """
+                    UPDATE harness_compose_work_item_activities
+                    SET status = ?, finished_at_ms = ?
+                    WHERE project_fingerprint = ? AND activity_id = ?
+                    """,
+                    (
+                        command.status.value,
+                        command.finished_at_ms,
+                        self._project_fingerprint,
+                        command.activity_id,
+                    ),
+                )
+                updated = await self._load_activity_in_transaction(command.activity_id)
+                if updated is None:
+                    raise ComposeWorkItemStoreError("COMPOSE_ACTIVITY_WRITE_FAILED")
+                return _activity_from_row(updated)
+        except ComposeWorkItemStoreError:
+            raise
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise ComposeWorkItemStoreError("COMPOSE_ACTIVITY_WRITE_FAILED") from exc
+
+    async def load_activity(self, activity_id: str) -> ComposeActivity | None:
+        """按稳定 identity 读取 Activity 投影。"""
+        if not activity_id:
+            return None
+        try:
+            async with self._lock:
+                row = await self._load_activity_in_transaction(activity_id)
+            return _activity_from_row(row) if row is not None else None
+        except ComposeWorkItemStoreError:
+            raise
+        except Exception as exc:
+            raise ComposeWorkItemStoreError("COMPOSE_ACTIVITY_READ_FAILED") from exc
+
+    async def load_activities(
+        self,
+        work_item_id: str,
+    ) -> tuple[ComposeActivity, ...]:
+        """按开始时间读取一个 Work Item 的全部 Activity 事实。"""
+        if not work_item_id:
+            return ()
+        try:
+            async with self._lock:
+                cursor = await self._connection.execute(
+                    """
+                    SELECT activity_id, work_item_id, run_id, kind, status, attempt,
+                           started_at_ms, finished_at_ms
+                    FROM harness_compose_work_item_activities
+                    WHERE project_fingerprint = ? AND work_item_id = ?
+                    ORDER BY started_at_ms, activity_id
+                    """,
+                    (self._project_fingerprint, work_item_id),
+                )
+                rows = await cursor.fetchall()
+                await cursor.close()
+            return tuple(_activity_from_row(row) for row in rows)
+        except ComposeWorkItemStoreError:
+            raise
+        except Exception as exc:
+            raise ComposeWorkItemStoreError("COMPOSE_ACTIVITY_READ_FAILED") from exc
+
+    async def mark_running_activities_interrupted(self, now_ms: int) -> int:
+        """启动恢复扫描：把遗留 running Activity 全部收敛为 interrupted。"""
+        if now_ms <= 0:
+            raise ComposeWorkItemStoreError("COMPOSE_ACTIVITY_SCAN_INVALID")
+        try:
+            async with self._transaction():
+                cursor = await self._connection.execute(
+                    """
+                    UPDATE harness_compose_work_item_activities
+                    SET status = 'interrupted', finished_at_ms = ?
+                    WHERE project_fingerprint = ? AND status = 'running'
+                    """,
+                    (now_ms, self._project_fingerprint),
+                )
+                count = cursor.rowcount
+                await cursor.close()
+                return int(count)
+        except ComposeWorkItemStoreError:
+            raise
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise ComposeWorkItemStoreError("COMPOSE_ACTIVITY_WRITE_FAILED") from exc
+
+    # ---------- Effect 事实 ----------
+
+    async def record_effect_intent(
+        self,
+        command: RecordComposeEffectIntent,
+    ) -> ComposeEffect:
+        """副作用执行前原子写 intent；相同 key 重试幂等返回已有行。"""
+        _validate_effect_intent(command)
+        try:
+            async with self._transaction():
+                if await self._load_in_transaction(command.work_item_id) is None:
+                    raise ComposeWorkItemStoreError("COMPOSE_WORK_ITEM_NOT_FOUND")
+                existing = await self._load_effect_in_transaction(command.effect_key)
+                if existing is not None:
+                    effect = _effect_from_row(existing)
+                    if effect.work_item_id != command.work_item_id:
+                        raise ComposeWorkItemStoreError("COMPOSE_EFFECT_INTENT_CONFLICT")
+                    return effect
+                intent_json = _dump_payload(command.intent, "COMPOSE_EFFECT_INTENT_INVALID")
+                await self._connection.execute(
+                    """
+                    INSERT INTO harness_compose_work_item_effects (
+                        project_fingerprint, effect_key, work_item_id, activity_id,
+                        intent_json, receipt_json, status, created_at_ms, updated_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, NULL, 'intent', ?, ?)
+                    """,
+                    (
+                        self._project_fingerprint,
+                        command.effect_key,
+                        command.work_item_id,
+                        command.activity_id,
+                        intent_json,
+                        command.created_at_ms,
+                        command.created_at_ms,
+                    ),
+                )
+                row = await self._load_effect_in_transaction(command.effect_key)
+                if row is None:
+                    raise ComposeWorkItemStoreError("COMPOSE_EFFECT_WRITE_FAILED")
+                return _effect_from_row(row)
+        except ComposeWorkItemStoreError:
+            raise
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise ComposeWorkItemStoreError("COMPOSE_EFFECT_WRITE_FAILED") from exc
+
+    async def record_effect_receipt(
+        self,
+        command: RecordComposeEffectReceipt,
+    ) -> ComposeEffect:
+        """以真实对账结果确认 effect；相同 receipt 幂等，不同 receipt 拒绝。"""
+        _validate_effect_receipt(command)
+        try:
+            async with self._transaction():
+                row = await self._load_effect_in_transaction(command.effect_key)
+                if row is None:
+                    raise ComposeWorkItemStoreError("COMPOSE_EFFECT_NOT_FOUND")
+                effect = _effect_from_row(row)
+                if effect.status is ComposeEffectStatus.CONFIRMED:
+                    if effect.receipt == command.receipt:
+                        return effect
+                    raise ComposeWorkItemStoreError("COMPOSE_EFFECT_RECEIPT_CONFLICT")
+                if effect.status is ComposeEffectStatus.UNKNOWN:
+                    raise ComposeWorkItemStoreError("COMPOSE_EFFECT_OUTCOME_UNKNOWN")
+                receipt_json = _dump_payload(command.receipt, "COMPOSE_EFFECT_RECEIPT_INVALID")
+                await self._connection.execute(
+                    """
+                    UPDATE harness_compose_work_item_effects
+                    SET receipt_json = ?, status = 'confirmed', updated_at_ms = ?
+                    WHERE project_fingerprint = ? AND effect_key = ?
+                      AND status = 'intent'
+                    """,
+                    (
+                        receipt_json,
+                        command.updated_at_ms,
+                        self._project_fingerprint,
+                        command.effect_key,
+                    ),
+                )
+                updated = await self._load_effect_in_transaction(command.effect_key)
+                if updated is None:
+                    raise ComposeWorkItemStoreError("COMPOSE_EFFECT_WRITE_FAILED")
+                return _effect_from_row(updated)
+        except ComposeWorkItemStoreError:
+            raise
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise ComposeWorkItemStoreError("COMPOSE_EFFECT_WRITE_FAILED") from exc
+
+    async def mark_effect_unknown(
+        self,
+        command: MarkComposeEffectUnknown,
+    ) -> ComposeEffect:
+        """结果无法证明的 intent 迁移为 unknown；已确认效果不可逆转。"""
+        _validate_effect_unknown(command)
+        try:
+            async with self._transaction():
+                row = await self._load_effect_in_transaction(command.effect_key)
+                if row is None:
+                    raise ComposeWorkItemStoreError("COMPOSE_EFFECT_NOT_FOUND")
+                effect = _effect_from_row(row)
+                if effect.status is not ComposeEffectStatus.INTENT:
+                    raise ComposeWorkItemStoreError("COMPOSE_EFFECT_OUTCOME_UNKNOWN")
+                await self._connection.execute(
+                    """
+                    UPDATE harness_compose_work_item_effects
+                    SET status = 'unknown', updated_at_ms = ?
+                    WHERE project_fingerprint = ? AND effect_key = ?
+                      AND status = 'intent'
+                    """,
+                    (
+                        command.updated_at_ms,
+                        self._project_fingerprint,
+                        command.effect_key,
+                    ),
+                )
+                updated = await self._load_effect_in_transaction(command.effect_key)
+                if updated is None:
+                    raise ComposeWorkItemStoreError("COMPOSE_EFFECT_WRITE_FAILED")
+                return _effect_from_row(updated)
+        except ComposeWorkItemStoreError:
+            raise
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise ComposeWorkItemStoreError("COMPOSE_EFFECT_WRITE_FAILED") from exc
+
+    async def load_effect(self, effect_key: str) -> ComposeEffect | None:
+        """按稳定 effect key 读取 ledger 事实。"""
+        if not effect_key:
+            return None
+        try:
+            async with self._lock:
+                row = await self._load_effect_in_transaction(effect_key)
+            return _effect_from_row(row) if row is not None else None
+        except ComposeWorkItemStoreError:
+            raise
+        except Exception as exc:
+            raise ComposeWorkItemStoreError("COMPOSE_EFFECT_READ_FAILED") from exc
+
+    async def load_effects(self, work_item_id: str) -> tuple[ComposeEffect, ...]:
+        """按创建时间读取一个 Work Item 的全部 effect 事实。"""
+        if not work_item_id:
+            return ()
+        try:
+            async with self._lock:
+                cursor = await self._connection.execute(
+                    """
+                    SELECT effect_key, work_item_id, activity_id, intent_json,
+                           receipt_json, status, created_at_ms, updated_at_ms
+                    FROM harness_compose_work_item_effects
+                    WHERE project_fingerprint = ? AND work_item_id = ?
+                    ORDER BY created_at_ms, effect_key
+                    """,
+                    (self._project_fingerprint, work_item_id),
+                )
+                rows = await cursor.fetchall()
+                await cursor.close()
+            return tuple(_effect_from_row(row) for row in rows)
+        except ComposeWorkItemStoreError:
+            raise
+        except Exception as exc:
+            raise ComposeWorkItemStoreError("COMPOSE_EFFECT_READ_FAILED") from exc
+
+    async def load_torn_effects(self) -> tuple[ComposeEffect, ...]:
+        """枚举全部 intent 无 receipt 的撕裂效果，供启动扫描对账。"""
+        try:
+            async with self._lock:
+                cursor = await self._connection.execute(
+                    """
+                    SELECT effect_key, work_item_id, activity_id, intent_json,
+                           receipt_json, status, created_at_ms, updated_at_ms
+                    FROM harness_compose_work_item_effects
+                    WHERE project_fingerprint = ? AND receipt_json IS NULL
+                      AND status = 'intent'
+                    ORDER BY created_at_ms, effect_key
+                    """,
+                    (self._project_fingerprint,),
+                )
+                rows = await cursor.fetchall()
+                await cursor.close()
+            return tuple(_effect_from_row(row) for row in rows)
+        except ComposeWorkItemStoreError:
+            raise
+        except Exception as exc:
+            raise ComposeWorkItemStoreError("COMPOSE_EFFECT_READ_FAILED") from exc
+
+    # ---------- Evidence 事实 ----------
+
+    async def record_evidence(self, command: RecordComposeEvidence) -> ComposeEvidence:
+        """写入证据事实；identity 幂等，冲突 payload 拒绝。"""
+        _validate_evidence(command)
+        try:
+            async with self._transaction():
+                if await self._load_in_transaction(command.work_item_id) is None:
+                    raise ComposeWorkItemStoreError("COMPOSE_WORK_ITEM_NOT_FOUND")
+                existing = await self._load_evidence_in_transaction(command.evidence_id)
+                if existing is not None:
+                    evidence = _evidence_from_row(existing)
+                    if (
+                        evidence.work_item_id != command.work_item_id
+                        or evidence.evidence_kind != command.evidence_kind
+                        or evidence.content_digest != command.content_digest
+                        or evidence.payload != command.payload
+                    ):
+                        raise ComposeWorkItemStoreError("COMPOSE_EVIDENCE_CONFLICT")
+                    return evidence
+                payload_json = _dump_payload(command.payload, "COMPOSE_EVIDENCE_INVALID")
+                await self._connection.execute(
+                    """
+                    INSERT INTO harness_compose_work_item_evidence (
+                        project_fingerprint, evidence_id, work_item_id, evidence_kind,
+                        content_digest, payload_json, created_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        self._project_fingerprint,
+                        command.evidence_id,
+                        command.work_item_id,
+                        command.evidence_kind,
+                        command.content_digest,
+                        payload_json,
+                        command.created_at_ms,
+                    ),
+                )
+                row = await self._load_evidence_in_transaction(command.evidence_id)
+                if row is None:
+                    raise ComposeWorkItemStoreError("COMPOSE_EVIDENCE_WRITE_FAILED")
+                return _evidence_from_row(row)
+        except ComposeWorkItemStoreError:
+            raise
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise ComposeWorkItemStoreError("COMPOSE_EVIDENCE_WRITE_FAILED") from exc
+
+    async def load_evidence(
+        self,
+        work_item_id: str,
+        evidence_kind: str | None = None,
+    ) -> tuple[ComposeEvidence, ...]:
+        """按 kind 读取证据；不指定时返回全部。"""
+        if not work_item_id:
+            return ()
+        if evidence_kind is not None and not _EVIDENCE_KIND.fullmatch(evidence_kind):
+            return ()
+        try:
+            async with self._lock:
+                if evidence_kind is None:
+                    cursor = await self._connection.execute(
+                        """
+                        SELECT evidence_id, work_item_id, evidence_kind, content_digest,
+                               payload_json, created_at_ms
+                        FROM harness_compose_work_item_evidence
+                        WHERE project_fingerprint = ? AND work_item_id = ?
+                        ORDER BY created_at_ms, evidence_id
+                        """,
+                        (self._project_fingerprint, work_item_id),
+                    )
+                else:
+                    cursor = await self._connection.execute(
+                        """
+                        SELECT evidence_id, work_item_id, evidence_kind, content_digest,
+                               payload_json, created_at_ms
+                        FROM harness_compose_work_item_evidence
+                        WHERE project_fingerprint = ? AND work_item_id = ?
+                          AND evidence_kind = ?
+                        ORDER BY created_at_ms, evidence_id
+                        """,
+                        (self._project_fingerprint, work_item_id, evidence_kind),
+                    )
+                rows = await cursor.fetchall()
+                await cursor.close()
+            return tuple(_evidence_from_row(row) for row in rows)
+        except ComposeWorkItemStoreError:
+            raise
+        except Exception as exc:
+            raise ComposeWorkItemStoreError("COMPOSE_EVIDENCE_READ_FAILED") from exc
+
+    # ---------- Work Item 状态 CAS ----------
+
+    async def set_status(self, command: SetComposeWorkItemStatus) -> ComposeWorkItem:
+        """在未终结状态间以 revision CAS 迁移；terminal 不经过此方法。"""
+        _validate_status(command)
+        try:
+            async with self._transaction():
+                current = await self._load_in_transaction(command.work_item_id)
+                if current is None:
+                    raise ComposeWorkItemStoreError("COMPOSE_WORK_ITEM_NOT_FOUND")
+                item = _work_item_from_row(current)
+                if item.revision != command.expected_revision:
+                    raise ComposeWorkItemStoreError("COMPOSE_WORK_ITEM_REVISION_CONFLICT")
+                if item.terminal:
+                    raise ComposeWorkItemStoreError("COMPOSE_WORK_ITEM_TERMINAL")
+                cursor = await self._connection.execute(
+                    """
+                    UPDATE harness_compose_work_items
+                    SET status = ?, revision = revision + 1, updated_at_ms = ?
+                    WHERE project_fingerprint = ?
+                      AND work_item_id = ?
+                      AND revision = ?
+                      AND status IN ('active', 'waiting_user', 'blocked')
+                    """,
+                    (
+                        command.status.value,
+                        command.updated_at_ms,
+                        self._project_fingerprint,
+                        command.work_item_id,
+                        command.expected_revision,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    await cursor.close()
+                    raise ComposeWorkItemStoreError("COMPOSE_WORK_ITEM_REVISION_CONFLICT")
+                await cursor.close()
+                updated = await self._load_in_transaction(command.work_item_id)
+                if updated is None:
+                    raise ComposeWorkItemStoreError("COMPOSE_WORK_ITEM_WRITE_FAILED")
+                return _work_item_from_row(updated)
+        except ComposeWorkItemStoreError:
+            raise
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise ComposeWorkItemStoreError("COMPOSE_WORK_ITEM_WRITE_FAILED") from exc
+
+    async def _load_activity_in_transaction(self, activity_id: str) -> Any | None:
+        """在调用方持锁时读取一行 Activity 事实。"""
+        cursor = await self._connection.execute(
+            """
+            SELECT activity_id, work_item_id, run_id, kind, status, attempt,
+                   started_at_ms, finished_at_ms
+            FROM harness_compose_work_item_activities
+            WHERE project_fingerprint = ? AND activity_id = ?
+            """,
+            (self._project_fingerprint, activity_id),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return row
+
+    async def _load_effect_in_transaction(self, effect_key: str) -> Any | None:
+        """在调用方持锁时读取一行 effect 事实。"""
+        cursor = await self._connection.execute(
+            """
+            SELECT effect_key, work_item_id, activity_id, intent_json,
+                   receipt_json, status, created_at_ms, updated_at_ms
+            FROM harness_compose_work_item_effects
+            WHERE project_fingerprint = ? AND effect_key = ?
+            """,
+            (self._project_fingerprint, effect_key),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return row
+
+    async def _load_evidence_in_transaction(self, evidence_id: str) -> Any | None:
+        """在调用方持锁时读取一行 evidence 事实。"""
+        cursor = await self._connection.execute(
+            """
+            SELECT evidence_id, work_item_id, evidence_kind, content_digest,
+                   payload_json, created_at_ms
+            FROM harness_compose_work_item_evidence
+            WHERE project_fingerprint = ? AND evidence_id = ?
+            """,
+            (self._project_fingerprint, evidence_id),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return row
+
     async def _require_compose_thread_in_transaction(self, thread_id: str) -> None:
         """只允许已冻结为 Compose 的 Thread 创建 Work Item。"""
         cursor = await self._connection.execute(
@@ -900,3 +1574,229 @@ def _validate_confirmation(command: RecordComposeConfirmation) -> None:
         or command.decision not in _CONFIRMATION_DECISIONS
     ):
         raise ComposeWorkItemStoreError("COMPOSE_CONFIRMATION_INVALID")
+
+
+def _activity_from_row(row: Any) -> ComposeActivity:
+    """把受信 SQLite 行还原为严格 Activity 模型；非法 enum 拒绝。"""
+    try:
+        return ComposeActivity(
+            activity_id=str(row["activity_id"]),
+            work_item_id=str(row["work_item_id"]),
+            run_id=str(row["run_id"]) if row["run_id"] is not None else None,
+            kind=str(row["kind"]),
+            status=ComposeActivityStatus(str(row["status"])),
+            attempt=int(row["attempt"]),
+            started_at_ms=int(row["started_at_ms"]),
+            finished_at_ms=(
+                int(row["finished_at_ms"])
+                if row["finished_at_ms"] is not None
+                else None
+            ),
+        )
+    except (ValueError, KeyError, TypeError) as exc:
+        raise ComposeWorkItemStoreError("COMPOSE_ACTIVITY_RECORD_INVALID") from exc
+
+
+def _effect_from_row(row: Any) -> ComposeEffect:
+    """把受信 SQLite 行还原为严格 Effect 模型；JSON 损坏 fail closed。"""
+    try:
+        intent = _load_payload(row["intent_json"], "COMPOSE_EFFECT_RECORD_INVALID")
+        receipt_json = row["receipt_json"]
+        receipt = (
+            _load_payload(receipt_json, "COMPOSE_EFFECT_RECORD_INVALID")
+            if receipt_json is not None
+            else None
+        )
+        return ComposeEffect(
+            effect_key=str(row["effect_key"]),
+            work_item_id=str(row["work_item_id"]),
+            activity_id=str(row["activity_id"]) if row["activity_id"] is not None else None,
+            intent=intent,
+            receipt=receipt,
+            status=ComposeEffectStatus(str(row["status"])),
+            created_at_ms=int(row["created_at_ms"]),
+            updated_at_ms=int(row["updated_at_ms"]),
+        )
+    except ComposeWorkItemStoreError:
+        raise
+    except (ValueError, KeyError, TypeError) as exc:
+        raise ComposeWorkItemStoreError("COMPOSE_EFFECT_RECORD_INVALID") from exc
+
+
+def _evidence_from_row(row: Any) -> ComposeEvidence:
+    """把受信 SQLite 行还原为严格 Evidence 模型。"""
+    try:
+        payload = _load_payload(row["payload_json"], "COMPOSE_EVIDENCE_RECORD_INVALID")
+        return ComposeEvidence(
+            evidence_id=str(row["evidence_id"]),
+            work_item_id=str(row["work_item_id"]),
+            evidence_kind=str(row["evidence_kind"]),
+            content_digest=str(row["content_digest"]),
+            payload=payload,
+            created_at_ms=int(row["created_at_ms"]),
+        )
+    except ComposeWorkItemStoreError:
+        raise
+    except (ValueError, KeyError, TypeError) as exc:
+        raise ComposeWorkItemStoreError("COMPOSE_EVIDENCE_RECORD_INVALID") from exc
+
+
+def _dump_payload(payload: dict[str, object], error_code: str) -> str:
+    """把有界 JSON payload 紧凑序列化；超限或不可序列化直接拒绝。"""
+    try:
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ComposeWorkItemStoreError(error_code) from exc
+    if len(encoded.encode("utf-8")) > MAX_ARTIFACT_PAYLOAD_BYTES:
+        raise ComposeWorkItemStoreError(error_code)
+    return encoded
+
+
+def _load_payload(raw: object, error_code: str) -> dict[str, object]:
+    """解析 ledger JSON；只接受对象形状，拒绝数组或标量伪装。"""
+    try:
+        value = json.loads(str(raw))
+    except (TypeError, ValueError) as exc:
+        raise ComposeWorkItemStoreError(error_code) from exc
+    if not isinstance(value, dict):
+        raise ComposeWorkItemStoreError(error_code)
+    return value
+
+
+def _validate_activity_start(command: StartComposeActivity) -> None:
+    """Activity 必须携带完整、格式稳定且可排序的身份与时间。"""
+    if (
+        not command.work_item_id
+        or not isinstance(command.activity_id, str)
+        or _ACTIVITY_ID.fullmatch(command.activity_id) is None
+        or not isinstance(command.kind, str)
+        or _ACTIVITY_KIND.fullmatch(command.kind) is None
+        or (
+            command.run_id is not None
+            and (not isinstance(command.run_id, str) or not command.run_id)
+        )
+        or not isinstance(command.started_at_ms, int)
+        or isinstance(command.started_at_ms, bool)
+        or command.started_at_ms <= 0
+    ):
+        raise ComposeWorkItemStoreError("COMPOSE_ACTIVITY_START_INVALID")
+
+
+def _validate_activity_restart(command: RestartComposeActivity) -> None:
+    """restart 必须提供完整 identity 与新的开始时间。"""
+    if (
+        not isinstance(command.activity_id, str)
+        or _ACTIVITY_ID.fullmatch(command.activity_id) is None
+        or (
+            command.run_id is not None
+            and (not isinstance(command.run_id, str) or not command.run_id)
+        )
+        or not isinstance(command.started_at_ms, int)
+        or isinstance(command.started_at_ms, bool)
+        or command.started_at_ms <= 0
+    ):
+        raise ComposeWorkItemStoreError("COMPOSE_ACTIVITY_RESTART_INVALID")
+
+
+def _validate_activity_finish(command: FinishComposeActivity) -> None:
+    """finish 目标必须是受控枚举，时间必须有效。"""
+    if (
+        not isinstance(command.activity_id, str)
+        or _ACTIVITY_ID.fullmatch(command.activity_id) is None
+        or not isinstance(command.status, ComposeActivityStatus)
+        or command.status not in _FINISH_TARGET_STATUSES
+        or not isinstance(command.finished_at_ms, int)
+        or isinstance(command.finished_at_ms, bool)
+        or command.finished_at_ms <= 0
+    ):
+        raise ComposeWorkItemStoreError("COMPOSE_ACTIVITY_FINISH_INVALID")
+
+
+def _validate_effect_intent(command: RecordComposeEffectIntent) -> None:
+    """intent 必须绑定 Work Item、有效 key 与可序列化 JSON。"""
+    if (
+        not command.work_item_id
+        or not isinstance(command.effect_key, str)
+        or _EFFECT_KEY.fullmatch(command.effect_key) is None
+        or (
+            command.activity_id is not None
+            and (
+                not isinstance(command.activity_id, str)
+                or _ACTIVITY_ID.fullmatch(command.activity_id) is None
+            )
+        )
+        or not isinstance(command.intent, dict)
+        or not command.intent
+        or not isinstance(command.created_at_ms, int)
+        or isinstance(command.created_at_ms, bool)
+        or command.created_at_ms <= 0
+    ):
+        raise ComposeWorkItemStoreError("COMPOSE_EFFECT_INTENT_INVALID")
+
+
+def _validate_effect_receipt(command: RecordComposeEffectReceipt) -> None:
+    """receipt 必须是非空 JSON 与有效时间。"""
+    if (
+        not isinstance(command.effect_key, str)
+        or _EFFECT_KEY.fullmatch(command.effect_key) is None
+        or not isinstance(command.receipt, dict)
+        or not command.receipt
+        or not isinstance(command.updated_at_ms, int)
+        or isinstance(command.updated_at_ms, bool)
+        or command.updated_at_ms <= 0
+    ):
+        raise ComposeWorkItemStoreError("COMPOSE_EFFECT_RECEIPT_INVALID")
+
+
+def _validate_effect_unknown(command: MarkComposeEffectUnknown) -> None:
+    """unknown 标记必须携带非空 reason 与有效时间。"""
+    if (
+        not isinstance(command.effect_key, str)
+        or _EFFECT_KEY.fullmatch(command.effect_key) is None
+        or not isinstance(command.reason, str)
+        or not command.reason
+        or not isinstance(command.updated_at_ms, int)
+        or isinstance(command.updated_at_ms, bool)
+        or command.updated_at_ms <= 0
+    ):
+        raise ComposeWorkItemStoreError("COMPOSE_EFFECT_UNKNOWN_INVALID")
+
+
+def _validate_evidence(command: RecordComposeEvidence) -> None:
+    """evidence 必须携带完整 identity、SHA-256 digest 与 payload。"""
+    if (
+        not command.work_item_id
+        or not isinstance(command.evidence_id, str)
+        or _EVIDENCE_ID.fullmatch(command.evidence_id) is None
+        or not isinstance(command.evidence_kind, str)
+        or _EVIDENCE_KIND.fullmatch(command.evidence_kind) is None
+        or not isinstance(command.content_digest, str)
+        or _CONTENT_DIGEST.fullmatch(command.content_digest) is None
+        or not isinstance(command.payload, dict)
+        or not isinstance(command.created_at_ms, int)
+        or isinstance(command.created_at_ms, bool)
+        or command.created_at_ms <= 0
+    ):
+        raise ComposeWorkItemStoreError("COMPOSE_EVIDENCE_INVALID")
+
+
+def _validate_status(command: SetComposeWorkItemStatus) -> None:
+    """状态 CAS 只接受未终结状态；terminal 必须走 terminalize。"""
+    if (
+        not isinstance(command.work_item_id, str)
+        or _WORK_ITEM_ID.fullmatch(command.work_item_id) is None
+        or not isinstance(command.expected_revision, int)
+        or isinstance(command.expected_revision, bool)
+        or command.expected_revision < 0
+        or not isinstance(command.status, ComposeWorkItemStatus)
+        or command.status not in _NONTERMINAL_WORK_ITEM_STATUSES
+        or not isinstance(command.updated_at_ms, int)
+        or isinstance(command.updated_at_ms, bool)
+        or command.updated_at_ms <= 0
+    ):
+        raise ComposeWorkItemStoreError("COMPOSE_WORK_ITEM_STATUS_INVALID")

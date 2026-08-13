@@ -93,6 +93,69 @@ class ComposeDocumentKind(str, Enum):
     REPORT = "report"
 
 
+
+class ComposeActivityStatus(str, Enum):
+    """Work Item 内一次有界 Activity 的可恢复执行状态。"""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    WAITING_USER = "waiting_user"
+    RETRYABLE_FAILED = "retryable_failed"
+    INTERRUPTED = "interrupted"
+    BLOCKED = "blocked"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class ComposeEffectStatus(str, Enum):
+    """一次外部副作用的 ledger 状态；receipt 只能来自真实对账。"""
+
+    INTENT = "intent"
+    CONFIRMED = "confirmed"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class ComposeActivity:
+    """Activity 的执行事实投影；attempt 表示同一 identity 的恢复轮次。"""
+
+    activity_id: str
+    work_item_id: str
+    run_id: str | None
+    kind: str
+    status: ComposeActivityStatus
+    attempt: int
+    started_at_ms: int
+    finished_at_ms: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class ComposeEffect:
+    """EffectIntent/Receipt 的 ledger 事实；intent 与 receipt 均为有界 JSON。"""
+
+    effect_key: str
+    work_item_id: str
+    activity_id: str | None
+    intent: Mapping[str, object]
+    receipt: Mapping[str, object] | None
+    status: ComposeEffectStatus
+    created_at_ms: int
+    updated_at_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class ComposeEvidence:
+    """Verification/Review 证据事实；content_digest 绑定产出摘要。"""
+
+    evidence_id: str
+    work_item_id: str
+    evidence_kind: str
+    content_digest: str
+    payload: Mapping[str, object]
+    created_at_ms: int
+
+
 class TaskStatus(str, Enum):
     """Plan task 的执行状态。"""
 
