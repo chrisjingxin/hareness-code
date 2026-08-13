@@ -154,7 +154,6 @@ from harness_agent.threads.snapshots import ThreadSnapshotStore
 from harness_agent.threads.thread_persistence import ThreadPersistence, ThreadPersistenceError
 from harness_agent.tools.file_tool_metrics import FileToolMetrics
 from harness_agent.compose.stage_agents import ManagedStageAgentPort
-from harness_agent.compose.workflow import ComposeServices, load_method_assets
 from harness_agent.compose.document_store import ComposeDocumentStore
 from harness_agent.compose.models import ThreadMode
 from harness_agent.compose.work_item_engine import (
@@ -2525,8 +2524,8 @@ class AgentHost:
             self._workspace_execution_resources = WorkspaceExecutionResourcePool()
         return self._workspace_execution_resources
 
-    async def _provide_compose_services(self) -> ComposeServices | None:
-        """按需组装 Compose workflow 依赖；配置缺失时返回 None（保持空壳）。"""
+    async def _provide_compose_services(self, run: Any) -> EngineDriverServices | None:
+        """按 Run 上下文组装 Work Item engine 依赖；配置缺失时返回 None。"""
         config = self._config
         if config is None or config.model_catalog is None:
             return None
@@ -2535,6 +2534,7 @@ class AgentHost:
         except Exception:
             logger.exception("Compose services unavailable")
             return None
+        from harness_agent.compose.engine_services import EngineDriverServices
         from harness_agent.compose.verification import ManagedVerificationPort
         from harness_agent.policy.permission_rules import load_rules, merge_rules
 
@@ -2544,7 +2544,7 @@ class AgentHost:
             persisted["session"] = self._run_coordinator.session_rules
             return merge_rules(persisted)
 
-        return ComposeServices(
+        return EngineDriverServices(
             stage_agent=ManagedStageAgentPort(
                 registry=self._run_coordinator.execution_registry,
                 pool=pool,
@@ -2552,7 +2552,7 @@ class AgentHost:
                 config_home=self._config_home,
                 workspace=self._workspace,
             ),
-            method_assets=load_method_assets(),
+            parent_ref=run.root_execution_ref,
             workspace_root=str(self._workspace),
             verification=ManagedVerificationPort(
                 pool=self._ensure_workspace_execution_resources(),
@@ -2562,6 +2562,8 @@ class AgentHost:
                 rwlock=self._tool_concurrency_lock,
                 now_ms=lambda: int(time.time() * 1000),
             ),
+            profile_key=run.agent_engine_profile_key or "",
+            cancellation_token=run.cancellation_token,
         )
 
     def _resolve_compose_stage_spec(

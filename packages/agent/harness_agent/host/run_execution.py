@@ -20,12 +20,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
-from harness_agent.compose.workflow import (
-    ComposeOutcome,
-    ComposeServices,
-    ComposeWorkflow,
-    ComposeWorkflowError,
-)
+from harness_agent.compose.engine_services import EngineDriverServices
 from harness_agent.runtime.execution_stream import (
     CONTENT_DELTA,
     ExecutionSignal,
@@ -350,16 +345,16 @@ def _to_host_interaction(request: StreamInteractionRequest) -> InteractionReques
 
 
 class ComposeRunAdapter:
-    """Compose 工作模式的执行 adapter；由 ComposeWorkflow 驱动五阶段。
+    """Compose 工作模式的执行 adapter；由 ComposeWorkItemEngine 驱动 Work Item 流程。
 
-    Compose workflow 位于 harness_agent.compose（不反向依赖 host）；
-    本 adapter 负责 host 边界：把 ComposeWorkflowError 映射为 RunError，
-    把 ComposeOutcome 映射为 coordinator 可收敛的 AdapterOutcome。
-    未注入 ComposeServices 时保持稳定失败空壳。
+    本 adapter 负责 host 边界：组装生产 ComposeTurnPorts、把 typed decision
+    映射到 RunLifecyclePort.request_question、把 engine 结果映射为
+    coordinator 可收敛的 AdapterOutcome 与 compose.work_item 事件。
+    未注入 EngineDriverServices 时保持稳定失败空壳。
     """
 
-    def __init__(self, services: ComposeServices | None = None) -> None:
-        """保存 Host 提供的 workflow 依赖（可为空壳）。"""
+    def __init__(self, services: EngineDriverServices | None = None) -> None:
+        """保存 Host 提供的 engine 依赖（可为空壳）。"""
         self._services = services
 
     async def execute(
@@ -367,7 +362,7 @@ class ComposeRunAdapter:
         run: RunState,
         port: RunLifecyclePort,
     ) -> AdapterOutcome | None:
-        """执行 Compose workflow 直到唯一终态提议；终态仍归 coordinator。"""
+        """执行一次 Work Item Turn 直到收敛；终态仍归 coordinator。"""
         if self._services is None:
             raise _run_error(
                 "COMPOSE_ADAPTER_NOT_READY", "Compose mode is not available yet"
@@ -377,26 +372,157 @@ class ComposeRunAdapter:
                 "COMPOSE_PERSISTENCE_REQUIRED",
                 "Compose mode requires thread persistence",
             )
-        from harness_agent.compose.state_machine import ComposeStateMachine
+        from harness_agent.compose.document_store import ComposeDocumentStore
+        from harness_agent.compose.engine_services import (
+            ManagedGrillDriver,
+            ManagedImplementDriver,
+            ManagedPlanDriver,
+            ManagedReportDriver,
+            ManagedReviewDriver,
+            ManagedSpecDriver,
+            ManagedTurnIntentClassifier,
+        )
+        from harness_agent.compose.work_item_engine import (
+            ComposeTurnOutcome,
+            ComposeTurnPorts,
+            ComposeTurnRequest,
+            ComposeWorkItemEngine,
+            ComposeWorkItemEngineError,
+        )
 
-        store = run.persistence.compose_artifact_store()
-        workflow = ComposeWorkflow(services=self._services, store=store)
-        state = ComposeStateMachine.initial(run.ref.thread_id, run.ref.run_id)
+        services = self._services
+        engine = ComposeWorkItemEngine(
+            ComposeTurnPorts(
+                store=run.persistence.compose_work_item_store(),
+                documents=ComposeDocumentStore(services.workspace_root),
+                classifier=ManagedTurnIntentClassifier(services),
+                interaction=_HostTypedDecisionPort(run, port),
+                workspace_revision=self._workspace_revision,
+                now_ms=services.now_ms,
+                task_driver=ManagedGrillDriver(services),
+                spec_driver=ManagedSpecDriver(services),
+                plan_driver=ManagedPlanDriver(services),
+                implement_driver=ManagedImplementDriver(services),
+                verify_port=(
+                    _WorkItemVerificationPort(services.verification)
+                    if services.verification is not None
+                    else None
+                ),
+                review_driver=ManagedReviewDriver(services),
+                report_driver=ManagedReportDriver(services),
+            )
+        )
+        request = ComposeTurnRequest(
+            thread_id=run.ref.thread_id,
+            run_id=run.ref.run_id,
+            message=run.message,
+            cancelled=port.is_cancelled(run),
+        )
         try:
-            outcome = await workflow.run(run, port, state)
-        except ComposeWorkflowError as exc:
+            result = await engine.execute_turn(request)
+        except ComposeWorkItemEngineError as exc:
             raise _run_error(exc.code, str(exc)) from exc
-        return _adapter_outcome(outcome)
+        if result.work_item is not None:
+            port.emit(
+                run,
+                "compose.work_item",
+                {
+                    "thread_id": run.ref.thread_id,
+                    "work_item": _work_item_wire(result.work_item),
+                },
+            )
+        if result.outcome is ComposeTurnOutcome.BLOCKED:
+            return AdapterOutcome(
+                status="failed",
+                code="COMPOSE_WORK_ITEM_BLOCKED",
+                message=result.work_item.blocked_reason or "Work Item 需要用户处理",
+                retryable=True,
+            )
+        return None
+
+    async def _workspace_revision(self) -> str | None:
+        """把当前 workspace 的 Git HEAD 作为证据新鲜度 revision。"""
+        services = self._services
+        if services is None or services.verification is None:
+            return None
+        return await services.verification.workspace_revision("compose-work-item")
 
 
-def _adapter_outcome(outcome: ComposeOutcome) -> AdapterOutcome:
-    """把 compose-owned 终态提议映射为 adapter 提议。"""
-    return AdapterOutcome(
-        status=outcome.status,
-        code=outcome.code,
-        message=outcome.message,
-        retryable=outcome.retryable,
-    )
+class _HostTypedDecisionPort:
+    """把引擎 typed decision 映射到 host 的 typed question 通道。"""
+
+    def __init__(self, run: RunState, port: RunLifecyclePort) -> None:
+        self._run = run
+        self._port = port
+
+    async def request_decision(self, request: object):
+        """单个 typed question；回答形状与引擎 TypedDecisionResult 一致。"""
+        from harness_agent.compose.work_item_engine import TypedDecisionResult
+
+        result = await self._port.request_question(
+            self._run,
+            request_id=request.request_id,
+            interrupt_id=request.interrupt_id,
+            questions=[
+                {
+                    "id": request.question_id,
+                    "question": request.body,
+                    "header": request.header,
+                    "body": "",
+                    "options": [
+                        {
+                            "label": option.label,
+                            "value": option.value,
+                            "description": option.description,
+                        }
+                        for option in request.options
+                    ],
+                    "multi_select": False,
+                    "allow_other": request.allow_other,
+                }
+            ],
+        )
+        return TypedDecisionResult(result.value, expired=result.expired)
+
+
+class _WorkItemVerificationPort:
+    """把 canonical VerificationPort 适配为 Work Item verify 端口。"""
+
+    def __init__(self, verification: object) -> None:
+        self._verification = verification
+
+    async def run_command(self, command: str, *, work_item_id: str):
+        """执行一条 required command 并返回 engine 期望的事实形状。"""
+        from harness_agent.compose.activities.verify import VerificationCommandResult
+        from harness_agent.compose.verification import VerificationRequest
+
+        evidence = await self._verification.run(
+            VerificationRequest(
+                command=command,
+                label=command[:80],
+                resource_key=f"compose:{work_item_id}",
+            )
+        )
+        return VerificationCommandResult(
+            command=command,
+            exit_code=evidence.exit_code,
+            output_digest=evidence.output_digest,
+            execution_id=f"verify:{evidence.finished_at_ms}",
+        )
+
+
+def _work_item_wire(projection: object) -> dict[str, object]:
+    """把引擎 projection 转换为 compose.work_item 事件 payload。"""
+    return {
+        "work_item_id": projection.work_item_id,
+        "slug": projection.slug,
+        "title": projection.title,
+        "revision": projection.revision,
+        "status": projection.status,
+        "current_activity": projection.current_activity,
+        "pending_decision": projection.pending_decision,
+        "blocked_reason": projection.blocked_reason,
+    }
 
 
 def _capture_transcript_on_session(

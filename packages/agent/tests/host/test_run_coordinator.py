@@ -21,11 +21,11 @@ from harness_agent.host.run_coordinator import (
 )
 
 
-def test_compose_workflow_only_mutates_run_lifecycle_through_port() -> None:
-    """Compose workflow 不直接修改 Host Run 状态或 Transcript 队列。"""
-    from harness_agent.compose.workflow import ComposeWorkflow
+def test_compose_engine_only_mutates_run_lifecycle_through_port() -> None:
+    """Compose engine 不直接修改 Host Run 状态或 Transcript 队列。"""
+    from harness_agent.compose.work_item_engine import ComposeWorkItemEngine
 
-    source = inspect.getsource(ComposeWorkflow)
+    source = inspect.getsource(ComposeWorkItemEngine)
     assert "run.status =" not in source
     assert "run.pending_transcript" not in source
 from harness_agent.host.run_execution import (

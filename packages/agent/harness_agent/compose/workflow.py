@@ -1142,14 +1142,27 @@ class ComposeWorkflow:
                     "header": "整体方案确认",
                     "body": "",
                     "options": [
-                        {"label": "批准", "value": "approve"},
-                        {"label": "取消", "value": "cancel"},
+                        {
+                            "label": "批准",
+                            "value": "approve",
+                            "description": "按当前方案继续进入构建阶段",
+                        },
+                        {
+                            "label": "取消",
+                            "value": "cancel",
+                            "description": "终止本次 Compose 执行",
+                        },
                     ],
                     "multi_select": False,
                     "allow_other": True,
                 }
             ],
         )
+        if result.expired:
+            raise ComposeWorkflowError(
+                "COMPOSE_INTERACTION_UNAVAILABLE",
+                "Plan confirmation expired or could not reach the active client",
+            )
         value = result.value if isinstance(result.value, Mapping) else {}
         answers_by_id = value.get("answers", {})
         raw = (
@@ -1168,7 +1181,10 @@ class ComposeWorkflow:
             # 其它输入即修改意见（必须携带 feedback 才能回到 Plan）。
             self._feedback = answer
             return await self._apply(run, port, state, ComposeEvent.PLAN_REVISE)
-        return await self._apply(run, port, state, ComposeEvent.PLAN_CANCEL)
+        raise ComposeWorkflowError(
+            "COMPOSE_INTERACTION_UNAVAILABLE",
+            "Plan confirmation returned no answer",
+        )
 
     async def _ask_questions(
         self,
@@ -1197,6 +1213,11 @@ class ComposeWorkflow:
             interrupt_id=interrupt_id,
             questions=questions,
         )
+        if result.expired:
+            raise ComposeWorkflowError(
+                "COMPOSE_INTERACTION_UNAVAILABLE",
+                "Understanding questions expired or could not reach the active client",
+            )
         answers_by_id = result.value.get("answers", {}) if isinstance(result.value, Mapping) else {}
         answers: list[tuple[str, str]] = []
         for index, decision in enumerate(decisions):

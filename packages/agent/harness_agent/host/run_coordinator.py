@@ -13,7 +13,6 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from harness_agent.compose.workflow import ComposeServices
 from harness_agent.compose.models import ThreadMode
 from harness_agent.host.run_execution import (
     AdapterOutcome,
@@ -559,7 +558,7 @@ class RunCoordinator:
         execution_registry: AgentExecutionRegistry | None = None,
         project_dir: Path | None = None,
         compose_services_provider: (
-            Callable[[], Awaitable[ComposeServices | None]] | None
+            Callable[[RunState], Awaitable[Any | None]] | None
         ) = None,
     ) -> None:
         """注入 Project 资源 adapter，保持外部 Run interface 与 Protocol 解耦。"""
@@ -831,18 +830,19 @@ class RunCoordinator:
                 self._runs.pop(run.ref.thread_id, None)
         run.events.put_nowait(None)
 
-    async def _adapter_for(self, mode: InteractionMode) -> RunExecutionAdapter:
-        """返回 mode 对应的执行 adapter；Compose 首次使用时按 provider 组装。"""
-        existing = self._execution_adapters.get(mode)
-        if existing is not None:
-            return existing
+    async def _adapter_for(self, run: RunState) -> RunExecutionAdapter:
+        """返回 Run 对应的执行 adapter；Compose 依赖按 Run 上下文组装。"""
+        if run.start.mode != "compose":
+            existing = self._execution_adapters.get(run.start.mode)
+            if existing is not None:
+                return existing
+            adapter: RunExecutionAdapter = BuildRunAdapter()
+            self._execution_adapters[run.start.mode] = adapter
+            return adapter
         services = None
         if self._compose_services_provider is not None:
-            services = await self._compose_services_provider()
-        adapter: RunExecutionAdapter = ComposeRunAdapter(services)
-        self._execution_adapters[mode] = adapter
-        return adapter
-
+            services = await self._compose_services_provider(run)
+        return ComposeRunAdapter(services)
     async def _execute(self, run: RunState) -> None:
         try:
             if run.cancel_requested or run.cancellation_token.cancelled:
@@ -860,7 +860,7 @@ class RunCoordinator:
                         return
                     raise
 
-            adapter = await self._adapter_for(run.start.mode)
+            adapter = await self._adapter_for(run)
             outcome = await adapter.execute(run, self._lifecycle_port)
             if outcome is None or outcome.status == "completed":
                 self._finish(

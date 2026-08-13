@@ -374,8 +374,8 @@ async def test_managed_stage_port_capture_only_emits_reasoning_not_content() -> 
     assert "child-" in checkpoint_ns
 
 
-async def test_managed_stage_port_records_tool_terminal() -> None:
-    """Stage 工具终态经 observer 记录（名与状态），不携带参数/结果正文。"""
+async def test_managed_stage_port_uses_post_tool_final_message() -> None:
+    """Tool 前说明不污染最终 artifact，且 Tool 终态仍被 observer 记录。"""
     engine = _ToolStreamingEngine()
     pool = _FakePool(_FakeLease(engine))
     registry, root = await _registry_with_root()
@@ -408,7 +408,7 @@ async def test_managed_stage_port_records_tool_terminal() -> None:
 
 
 class _ToolStreamingEngine:
-    """产出工具调用 → 工具结果 → 最终 artifact 的流，验证 tool terminal 记录。"""
+    """产出调用前说明 → 工具结果 → 最终 artifact，复现跨模型回合正文污染。"""
 
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
@@ -425,7 +425,7 @@ class _ToolStreamingEngine:
             "messages",
             (
                 AIMessageChunk(
-                    content="",
+                    content="我先运行测试确认当前状态。",
                     tool_call_chunks=[
                         {
                             "name": "execute",

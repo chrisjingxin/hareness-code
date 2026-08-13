@@ -1,4 +1,8 @@
-"""Compose 工作模式：状态机、artifact 模型与有界校验。"""
+"""Compose 工作模式：Work Item 领域模型与有界校验。
+
+HC-138 固定五阶段实现已从生产路径删除；models.py 保留的旧 ComposeRun 模型
+仅为用户要求保留的 workflow.py 文件提供导入，不再作为生产事实源。
+"""
 
 from harness_agent.compose.models import (
     ArtifactKind,
@@ -28,41 +32,27 @@ from harness_agent.compose.models import (
     validate_understanding_artifact,
     validate_verification_evidence,
 )
-from harness_agent.compose.state_machine import (
-    ComposeEvent,
-    ComposeStateMachine,
-    ComposeTransitionError,
-    REVIEW_FIX_BUDGET,
-    SCHEMA_INVALID_RETRY_ALLOWED,
-    VERIFY_FIX_BUDGET,
-)
 
 __all__ = [
     "ArtifactKind",
     "ChangeKind",
     "ComposeArtifact",
-    "ComposeEvent",
     "ComposeRunState",
     "ComposeRunStatus",
     "ComposeStage",
-    "ComposeStateMachine",
     "ComposeStoreError",
     "ComposeTask",
-    "ComposeTransitionError",
     "EvidenceItem",
     "EvidenceStatus",
     "FindingSeverity",
     "PlanArtifact",
-    "REVIEW_FIX_BUDGET",
     "ReviewAxis",
     "ReviewFinding",
     "ReviewReport",
-    "SCHEMA_INVALID_RETRY_ALLOWED",
     "StageState",
     "TaskResultArtifact",
     "TaskStatus",
     "UnderstandingArtifact",
-    "VERIFY_FIX_BUDGET",
     "VerificationEvidence",
     "make_artifact",
     "validate_plan_artifact",

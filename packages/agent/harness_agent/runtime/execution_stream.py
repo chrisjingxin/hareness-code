@@ -74,6 +74,8 @@ class StreamSession:
     last_captured_message: object | None = None
     model_round_active: bool = False
     model_round_has_tool_results: bool = False
+    # 只保留当前（也就是最终）模型回合的正文。Tool 前的说明已经通过
+    # content.delta 展示，但不能与 Tool 后的最终 artifact/回答拼接。
     content_parts: list[str] = field(default_factory=list)
 
 
@@ -609,9 +611,10 @@ def allocate_tool_id(session: StreamSession, preferred: str | None = None) -> st
 
 
 def start_model_round(session: StreamSession) -> None:
-    """清理只属于当前模型/工具回合的临时映射。"""
+    """开始新模型回合，并清理上一回合的正文与 Tool 临时状态。"""
     session.model_round_active = True
     session.model_round_has_tool_results = False
+    session.content_parts.clear()
     session.tool_stream_ids.clear()
     session.tool_result_ids.clear()
     session.tool_names.clear()

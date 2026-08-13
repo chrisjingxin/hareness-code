@@ -177,6 +177,37 @@ class ManagedVerificationPort:
             finally:
                 await self._rwlock.release_read()
 
+
+    async def workspace_revision(self, resource_key: str) -> str | None:
+        """经 canonical backend 捕获当前 workspace 的 Git HEAD；非 Git 工作区返回 None。"""
+        if not resource_key:
+            raise ValueError("VERIFICATION_RESOURCE_KEY_INVALID")
+        await self._rwlock.acquire_read()
+        lease = None
+        try:
+            try:
+                lease = await self._pool.acquire(
+                    resource_key,
+                    self._settings,
+                    self._workspace,
+                )
+            except Exception:
+                return None
+            backend = lease.value.backend
+            head = await self._execute_readonly_git(
+                backend,
+                "git rev-parse HEAD",
+            )
+            return head.strip() or None
+        except VerificationError:
+            return None
+        finally:
+            try:
+                if lease is not None:
+                    await lease.release()
+            finally:
+                await self._rwlock.release_read()
+
     async def _execute_readonly_git(self, backend: Any, command: str) -> str:
         """执行固定只读 Git 命令；失败时不向 Reviewer 提供伪造空 diff。"""
         try:

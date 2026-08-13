@@ -1,12 +1,19 @@
-"""Compose Understand → Plan → 用户确认 tracer bullet 测试。
+"""Compose Understand → Plan → 用户确认 tracer bullet 测试（HC-138）。
 
-使用 fake StageAgent 与 scripted Interaction 走真实 RunCoordinator：
-验证 fresh stage execution、artifact 校验/重试、question 回写、
-批准/修改/取消门禁、revision 递增 projection 与唯一终态。
+HC-140 已把生产 Compose 入口切换到 ComposeWorkItemEngine；本文件的
+HC-138 固定五阶段 tracer 不再走生产路径，按用户保留 workflow.py 的
+决定保留原文但跳过执行。Work Item 流程的等价覆盖见
+tests/compose/test_task_gate.py 与 tests/compose/test_completion.py。
 """
 
 from __future__ import annotations
 
+import pytest
+
+pytest.skip(
+    "HC-138 固定五阶段路径已从生产移除；等价覆盖在 Work Item 测试",
+    allow_module_level=True,
+)
 import json
 from pathlib import Path
 from typing import Any
@@ -17,6 +24,7 @@ from harness_agent.compose.models import ComposeTask, PlanArtifact, Understandin
 from harness_agent.compose.stage_agents import StageRequest, StageResult
 from harness_agent.compose.state_machine import ComposeStateMachine
 from harness_agent.compose.workflow import ComposeServices
+from harness_agent.protocol.runtime import validate_interaction_params
 from harness_agent.host.run_coordinator import (
     ConnectionRef,
     InteractionResult,
@@ -112,6 +120,8 @@ class _ScriptedInteraction:
     async def request(self, _owner, _run, interaction) -> InteractionResult:
         self.requests.append(interaction)
         response = self.responses.pop(0)
+        if response.get("__expired__") is True:
+            return InteractionResult(response.get("value", {"answers": {}}), expired=True)
         return InteractionResult(response)
 
 
@@ -217,9 +227,18 @@ async def test_happy_path_understands_plans_and_waits_at_gate(tmp_path: Path) ->
     assert stage_agent.calls == ["understand", "plan", "build", "build"]
     assert [request.type for request in interactions.requests] == ["question"]
     assert interactions.requests[0].payload["questions"][0]["options"] == [
-        {"label": "批准", "value": "approve"},
-        {"label": "取消", "value": "cancel"},
+        {"label": "批准", "value": "approve", "description": "按当前方案继续进入构建阶段"},
+        {"label": "取消", "value": "cancel", "description": "终止本次 Compose 执行"},
     ]
+    validate_interaction_params(
+        "interaction.question",
+        {
+            "thread_id": "thread-1",
+            "run_id": "run-1",
+            "timeout_ms": 300_000,
+            "payload": dict(interactions.requests[0].payload),
+        },
+    )
 
     frames = _state_frames(events)
     revisions = [frame["revision"] for frame in frames]
@@ -309,6 +328,39 @@ async def test_plan_reject_cancels_run_with_single_terminal(tmp_path: Path) -> N
     assert frames[-1]["status"] == "cancelled"
     assert frames[-1]["stage"] == "plan"
     assert [event.type for event in events].count("run.cancelled") == 1
+
+
+async def test_expired_plan_interaction_fails_without_claiming_user_cancelled(
+    tmp_path: Path,
+) -> None:
+    """协议失败、断线或超时不会被伪装成用户主动取消。"""
+    events, _stage_agent, _interactions = await _run_compose(
+        tmp_path,
+        [_understanding(), _plan()],
+        [{"__expired__": True, "value": {"answers": {}}}],
+    )
+
+    assert events[-1].type == "run.failed"
+    assert events[-1].payload["error"]["code"] == "COMPOSE_INTERACTION_UNAVAILABLE"
+    assert all(event.type != "run.cancelled" for event in events)
+    frames = _state_frames(events)
+    assert frames[-1]["status"] == "failed"
+    assert frames[-1]["stage"] == "plan"
+
+
+async def test_empty_plan_interaction_fails_without_claiming_user_cancelled(
+    tmp_path: Path,
+) -> None:
+    """客户端收敛产生的空回答同样不能冒充用户主动取消。"""
+    events, _stage_agent, _interactions = await _run_compose(
+        tmp_path,
+        [_understanding(), _plan()],
+        [{"answers": {}}],
+    )
+
+    assert events[-1].type == "run.failed"
+    assert events[-1].payload["error"]["code"] == "COMPOSE_INTERACTION_UNAVAILABLE"
+    assert all(event.type != "run.cancelled" for event in events)
 
 
 async def test_schema_invalid_retries_once_then_fails(tmp_path: Path) -> None:

@@ -5,19 +5,21 @@ feature_area: Agent 工作模式与结构化研发流程
 parent_task: -
 decomposed_by: Codex
 priority: P1
-status: 进行中
+status: 已过时
 owner: Codex
 branch: codex/zc-138-build-compose
-reviewed_at: 2026-08-11
-review_due: 2026-08-25
+reviewed_at: 2026-08-12
+review_due: -
 scope: 在保留现有 Build 行为的同时增加 Compose Mode；由共享 Run 生命周期内的 Compose execution adapter 依次完成 Understand、Plan、Build、Verify、Review，以结构化 artifact、真实 verification evidence、独立 Reviewer 和有界修复循环驱动阶段，并在 TUI/Web 提供一致的 Mode 切换、计划确认、进度和终态展示。
 acceptance: 空闲时 Tab 可切 Build/Compose、Shift+Tab 仍只切审批模式；Build 无行为回归；Compose 只在真实决策和整体 Plan 处等待用户，其余阶段自动推进；所有阶段由代码状态机和严格 artifact 驱动，Verify 无 fresh exit-code evidence 不得通过，Requirement/Code Review 来自独立 execution；失败/取消/超限唯一收敛且不提权；Protocol、Python、Interactive Core、TUI/Web、fake-model E2E、build/typecheck/test/project:check 与用户/架构文档闭环。
 user_docs: docs/user/交互使用.md、docs/user/安全与沙箱.md
 developer_docs: docs/developer/spec/HC-138-建立BuildCompose双.md、docs/developer/research/Compose Mode 可行性调研.md、docs/developer/plan/HC-138-建立BuildCompose双.md、docs/developer/todo/HC-138-建立BuildCompose双.md、docs/developer/architecture/架构总览.md、docs/developer/architecture/adr/0001-agent-domain-model.md
 test_evidence: 见正文「实施证据」小节
-references: docs/developer/spec/HC-138-建立BuildCompose双.md、docs/developer/research/Compose Mode 可行性调研.md、docs/developer/plan/HC-138-建立BuildCompose双.md、docs/developer/todo/HC-138-建立BuildCompose双.md、docs/developer/architecture/adr/0001-agent-domain-model.md
+references: HC-140（替代任务）、docs/developer/spec/HC-138-建立BuildCompose双.md、docs/developer/research/Compose Mode 可行性调研.md、docs/developer/plan/HC-138-建立BuildCompose双.md、docs/developer/todo/HC-138-建立BuildCompose双.md、docs/developer/architecture/adr/0001-agent-domain-model.md
 completed_at: 待用户确认后由 task:complete 填写
 ---
+
+> **已过时：** 本任务记录固定 `Understand → Plan → Build → Verify → Review` ComposeRun 的首次实现。后续调研确认其以 `run_id` 作为流程身份，导致每个新 Turn 都重新 Understand，且 Compose Stage 与 Plugin Agent 仍存在分叉执行入口。目标设计与后续实施由 [HC-140 重构组合工作模式](HC-140-重构组合工作模式.md) 及其 [Spec](../spec/HC-140-重构组合工作模式.md) 替代；本文与原 Spec/Plan/Todo 保留为历史，不再继续实施或验收。
 
 ## 背景
 
