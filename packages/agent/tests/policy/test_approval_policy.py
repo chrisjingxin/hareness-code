@@ -26,18 +26,24 @@ _ALL_HITL_TOOLS = {
     "write_file",
     "edit_file",
     "delete_file",
+    "ls",
+    "read_file",
+    "glob",
+    "grep",
     "task",
     "web_fetch",
     "monitor",
     "task_stop",
 }
+_PLAN_DIRECTORY_TRUST_TOOLS = {"ls", "read_file", "glob", "grep", "lsp"}
 
 
 def test_hitl_mapping_keeps_compaction_outside_all_approval_modes():
-    """默认和自动编辑只拦截真实外部副作用，压缩始终由内核自动维护。"""
+    """默认和自动编辑拦截副作用与目录信任只读通道；压缩始终自动。"""
     default = interrupt_on_for_approval_mode("default")
     auto_edit = interrupt_on_for_approval_mode("auto-edit")
     auto = interrupt_on_for_approval_mode("auto")
+    plan = interrupt_on_for_approval_mode("plan")
 
     assert default is not None
     assert set(default) == _ALL_HITL_TOOLS
@@ -48,7 +54,9 @@ def test_hitl_mapping_keeps_compaction_outside_all_approval_modes():
     assert auto is not None
     # auto 模式集合与 default 相同：编辑类工具需要经过四层过滤器判断。
     assert set(auto) == _ALL_HITL_TOOLS
-    assert interrupt_on_for_approval_mode("plan") is None
+    # plan 仅为目录信任开启只读 HITL；写入仍由 PlanModeMiddleware 硬拒绝。
+    assert plan is not None
+    assert set(plan) == _PLAN_DIRECTORY_TRUST_TOOLS
     assert interrupt_on_for_approval_mode("yolo") is None
     assert "compact_conversation" not in default
     assert "compact_conversation" not in auto_edit
@@ -111,8 +119,10 @@ def test_extra_interrupt_tools_merged_in_default_and_auto_edit():
     assert auto is not None
     assert set(auto) == _ALL_HITL_TOOLS | mcp_tools
 
-    # plan 和 yolo 即使传入额外工具也不产生拦截配置
-    assert interrupt_on_for_approval_mode("plan", extra_interrupt_tools=mcp_tools) is None
+    # plan 忽略额外工具，仍只保留目录信任只读集合；yolo 不创建 HITL
+    plan = interrupt_on_for_approval_mode("plan", extra_interrupt_tools=mcp_tools)
+    assert plan is not None
+    assert set(plan) == _PLAN_DIRECTORY_TRUST_TOOLS
     assert interrupt_on_for_approval_mode("yolo", extra_interrupt_tools=mcp_tools) is None
 
 
@@ -162,15 +172,33 @@ def _make_preflight(
     rules: list[PermissionRule] | None = None,
     original: Callable[[Any], bool] | None = None,
     classifier: SafetyClassifier | None = None,
+    directory_trust_check: Callable[[Any], bool] | None = None,
 ) -> Callable[[Any], bool]:
     """构造指定审批模式和规则集合下的组合预检。"""
     from harness_agent.runtime.agent import _make_approval_preflight
 
     preflight = _make_approval_preflight(
-        mode, original, lambda: rules or [], str(workspace), classifier
+        mode,
+        original,
+        lambda: rules or [],
+        str(workspace),
+        classifier,
+        directory_trust_check=directory_trust_check,
     )
     assert preflight is not None
     return preflight
+
+
+def _boundary_preflight(workspace: Path) -> tuple[Callable[[Any], bool], Callable[[Any], bool]]:
+    """返回真实边界中间件的 allows_approval 与 directory_trust_check。"""
+    from harness_agent.policy.workspace_boundary import WorkspaceBoundaryMiddleware
+    from harness_agent.policy.workspace_roots import WorkspaceRootRegistry
+
+    registry = WorkspaceRootRegistry(workspace, load_persisted=False)
+    middleware = WorkspaceBoundaryMiddleware(registry)
+    return middleware.allows_approval, (
+        lambda request: middleware.needs_directory_trust(request) is not None
+    )
 
 
 class TestApprovalPreflight:
@@ -260,40 +288,74 @@ class TestApprovalPreflight:
         request = _make_request("execute", {"command": "rm -rf /"})
         assert preflight(request) is False
 
-    def test_boundary_rejection_skips_dialog(self, tmp_path: Path):
-        """边界预检拒绝（越界读取）时不产生假审批。"""
-        preflight = _make_preflight(tmp_path, "default", original=lambda _request: False)
-        request = _make_request("read_file", {"file_path": "/outside.md"})
+    def test_in_workspace_read_skips_dialog(self, tmp_path: Path):
+        """工作区内读取不弹窗。"""
+        allows, trust_check = _boundary_preflight(tmp_path)
+        preflight = _make_preflight(
+            tmp_path, "default", original=allows, directory_trust_check=trust_check
+        )
+        request = _make_request("read_file", {"file_path": "/README.md"})
         assert preflight(request) is False
 
     @staticmethod
-    def _outside_file(tmp_path: Path) -> str:
-        """返回一个真实越界的 OS 绝对路径，跨平台安全。"""
-        return str(tmp_path.parent / "outside.md")
+    def _outside_dir(tmp_path: Path) -> Path:
+        """创建真实可信任的工作区外目录。"""
+        outside = tmp_path.parent / f"zc142-outside-{tmp_path.name}"
+        outside.mkdir(exist_ok=True)
+        (outside / "file.md").write_text("x", encoding="utf-8")
+        return outside
 
-    def test_default_outside_write_skips_dialog(self, tmp_path: Path):
-        """越界写入在审批前被边界拒绝，不产生无法执行的弹窗。"""
-        preflight = _make_preflight(tmp_path, "default", original=lambda _request: False)
-        request = _make_request("write_file", {"file_path": self._outside_file(tmp_path)})
-        assert preflight(request) is False
+    def test_default_outside_read_asks_directory_trust(self, tmp_path: Path):
+        """default 模式访问可信任外部路径时弹出目录信任卡片。"""
+        outside = self._outside_dir(tmp_path)
+        allows, trust_check = _boundary_preflight(tmp_path)
+        preflight = _make_preflight(
+            tmp_path, "default", original=allows, directory_trust_check=trust_check
+        )
+        request = _make_request("read_file", {"file_path": str(outside / "file.md")})
+        assert preflight(request) is True
 
-    def test_auto_outside_write_skips_dialog(self, tmp_path: Path):
-        """AUTO 不把越界工具调用交给分类器或审批。"""
-        preflight = _make_preflight(tmp_path, "auto", original=lambda _request: False)
-        request = _make_request("write_file", {"file_path": self._outside_file(tmp_path)})
-        assert preflight(request) is False
+    def test_default_outside_write_asks_directory_trust(self, tmp_path: Path):
+        """default 模式外部写入同样先走目录信任审批。"""
+        outside = self._outside_dir(tmp_path)
+        allows, trust_check = _boundary_preflight(tmp_path)
+        preflight = _make_preflight(
+            tmp_path, "default", original=allows, directory_trust_check=trust_check
+        )
+        request = _make_request("write_file", {"file_path": str(outside / "new.md")})
+        assert preflight(request) is True
 
-    @pytest.mark.parametrize("tool_name", ["write_file", "edit_file"])
-    def test_auto_edit_outside_write_skips_dialog(self, tmp_path: Path, tool_name: str):
-        """auto-edit 也不扩展路径能力，越界调用直接拒绝。"""
-        preflight = _make_preflight(tmp_path, "auto-edit", original=lambda _request: False)
-        request = _make_request(tool_name, {"file_path": self._outside_file(tmp_path)})
-        assert preflight(request) is False
+    def test_auto_and_auto_edit_outside_ask_directory_trust(self, tmp_path: Path):
+        """auto / auto-edit 对可信任外部路径也弹目录信任，不交给分类器。"""
+        outside = self._outside_dir(tmp_path)
+        allows, trust_check = _boundary_preflight(tmp_path)
+        for mode in ("auto", "auto-edit"):
+            preflight = _make_preflight(
+                tmp_path, mode, original=allows, directory_trust_check=trust_check
+            )
+            request = _make_request("write_file", {"file_path": str(outside / "new.md")})
+            assert preflight(request) is True
 
-    def test_outside_read_still_skips_dialog(self, tmp_path: Path):
-        """越界读取在任何非 plan 模式下仍不产生审批弹窗（执行层硬拒绝）。"""
-        preflight = _make_preflight(tmp_path, "auto-edit", original=lambda _request: False)
-        request = _make_request("read_file", {"file_path": self._outside_file(tmp_path)})
+    def test_plan_outside_read_asks_directory_trust(self, tmp_path: Path):
+        """plan 模式外部读弹出目录信任卡片。"""
+        outside = self._outside_dir(tmp_path)
+        allows, trust_check = _boundary_preflight(tmp_path)
+        preflight = _make_preflight(
+            tmp_path, "plan", original=allows, directory_trust_check=trust_check
+        )
+        request = _make_request("read_file", {"file_path": str(outside / "file.md")})
+        assert preflight(request) is True
+
+    def test_illegal_system_path_skips_dialog(self, tmp_path: Path):
+        """不可注册的系统目录硬拒绝，不弹窗。"""
+        allows, trust_check = _boundary_preflight(tmp_path)
+        preflight = _make_preflight(
+            tmp_path, "default", original=allows, directory_trust_check=trust_check
+        )
+        import sys
+
+        illegal = r"C:\Windows\System32\drivers" if sys.platform == "win32" else "/etc/passwd"
+        request = _make_request("read_file", {"file_path": illegal})
         assert preflight(request) is False
 
 

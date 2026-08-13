@@ -5,11 +5,12 @@ import type { RefObject } from "react"
 
 import type { CommandMenuItem, SkillMenuItem } from "../../interactive/commands"
 import type { InteractiveSnapshot } from "../../interactive/types"
-import type { ApprovalDecision, CommandMenuState } from "../application/adapter"
+import type { ApprovalDecision, CommandMenuState, DirectoryTrustDecision } from "../application/adapter"
 
 export type {
   ApprovalDecision,
   CommandMenuState,
+  DirectoryTrustDecision,
   ThreadPickerItem,
 } from "../application/adapter"
 
@@ -36,5 +37,6 @@ export type SharedViewProps = {
   expandedTools: ReadonlySet<string>
   onToggleTool: (toolId: string) => void
   onApproval: (decision: ApprovalDecision) => void
+  onDirectoryTrust: (decision: DirectoryTrustDecision) => void
   onQuestion: (answer: string) => void
 }

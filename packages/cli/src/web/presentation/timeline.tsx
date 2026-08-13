@@ -440,7 +440,7 @@ function InteractionCardImpl({ interaction }: { interaction: InteractionCard }):
     >
       <div className="interaction-card-header">
         <span className="interaction-card-type">
-          {interaction.type === "approval" ? "审批" : "询问"}
+          {interaction.type === "approval" ? "审批" : interaction.type === "directory_trust" ? "目录信任" : "询问"}
         </span>
         <span className={`interaction-card-status interaction-status-${label.tone}`}>
           {label.text}

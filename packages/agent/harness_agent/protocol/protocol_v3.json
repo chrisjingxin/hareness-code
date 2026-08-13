@@ -4,7 +4,7 @@
   "title": "Harness Agent Protocol v3",
   "x-harness": {
     "major": 3,
-    "minor": 3,
+    "minor": 4,
     "max_frame_bytes": 8388608,
     "max_tool_payload_bytes": 1048576,
     "operations": {
@@ -68,7 +68,8 @@
     },
     "interactions": {
       "interaction.approval": { "params": "#/$defs/approvalRequest", "result": "#/$defs/approvalResponse", "handle": "approval" },
-      "interaction.question": { "params": "#/$defs/questionRequest", "result": "#/$defs/questionResponse", "handle": "question" }
+      "interaction.question": { "params": "#/$defs/questionRequest", "result": "#/$defs/questionResponse", "handle": "question" },
+      "interaction.directory_trust": { "params": "#/$defs/directoryTrustRequest", "result": "#/$defs/directoryTrustResponse", "handle": "directory_trust" }
     },
     "capabilities": [
       "run.cancel", "run.multithread", "host.control", "config.read", "config.write", "threads.read",
@@ -134,7 +135,7 @@
       "required": ["requests", "handles"],
       "properties": {
         "requests": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
-        "handles": { "type": "array", "items": { "enum": ["approval", "question"] }, "uniqueItems": true }
+        "handles": { "type": "array", "items": { "enum": ["approval", "question", "directory_trust"] }, "uniqueItems": true }
       },
       "additionalProperties": false
     },
@@ -180,7 +181,7 @@
           "properties": {
             "available": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
             "enabled": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
-            "handles": { "type": "array", "items": { "enum": ["approval", "question"] }, "uniqueItems": true }
+            "handles": { "type": "array", "items": { "enum": ["approval", "question", "directory_trust"] }, "uniqueItems": true }
           },
           "additionalProperties": false
         },
@@ -824,7 +825,7 @@
     },
     "interactionResolvedPayload": {
       "type": "object", "required": ["request_id", "type"],
-      "properties": { "request_id": { "type": "string" }, "type": { "enum": ["approval", "question"] } },
+      "properties": { "request_id": { "type": "string" }, "type": { "enum": ["approval", "question", "directory_trust"] } },
       "additionalProperties": false
     },
     "usage": {
@@ -870,6 +871,38 @@
         "removed_lines": { "type": "integer", "minimum": 0 },
         "truncated": { "type": "boolean" },
         "unified_diff": { "type": "string", "maxLength": 16384 }
+      },
+      "additionalProperties": false
+    },
+    "directoryTrustDecision": {
+      "type": "string",
+      "enum": ["allow_session", "deny"]
+    },
+    "directoryTrustRequest": {
+      "type": "object", "required": ["thread_id", "run_id", "timeout_ms", "payload"],
+      "properties": {
+        "thread_id": { "type": "string" }, "run_id": { "type": "string" }, "timeout_ms": { "type": "integer", "minimum": 1 },
+        "payload": {
+          "type": "object",
+          "required": ["interrupt_id", "directory", "target_path", "tool_name", "access", "shadows_workspace", "decisions"],
+          "properties": {
+            "interrupt_id": { "type": "string" },
+            "directory": { "type": "string", "minLength": 1 },
+            "target_path": { "type": "string", "minLength": 1 },
+            "tool_name": { "type": "string", "minLength": 1 },
+            "access": { "enum": ["read", "write"] },
+            "shadows_workspace": { "type": "boolean" },
+            "decisions": { "type": "array", "items": { "$ref": "#/$defs/directoryTrustDecision" } }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "directoryTrustResponse": {
+      "type": "object", "required": ["decision"],
+      "properties": {
+        "decision": { "$ref": "#/$defs/directoryTrustDecision" }
       },
       "additionalProperties": false
     },

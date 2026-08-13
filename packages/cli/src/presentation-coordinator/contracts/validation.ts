@@ -221,6 +221,11 @@ function isInteractionResponse(value: unknown): boolean {
     }
     return true
   }
+  if (value.kind === "directory_trust") {
+    return exactFields(value, ["kind", "decision"])
+      && typeof value.decision === "string"
+      && value.decision.length <= 64
+  }
   return false
 }
 

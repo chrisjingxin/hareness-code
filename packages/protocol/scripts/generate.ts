@@ -398,6 +398,7 @@ ${aliases}
 EventEnvelope = event_model()
 ApprovalResponse = schema_model("#/$defs/approvalResponse", name="ApprovalResponse")
 QuestionResponse = schema_model("#/$defs/questionResponse", name="QuestionResponse")
+DirectoryTrustResponse = schema_model("#/$defs/directoryTrustResponse", name="DirectoryTrustResponse")
 `
 }
 

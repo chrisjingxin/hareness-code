@@ -1,12 +1,20 @@
-/** Interaction 表单：approval 按钮与 question 全量答案。 */
+/** Interaction 表单：approval 按钮、directory_trust 信任选项与 question 全量答案。 */
 /** @jsxImportSource react */
 
 import { useEffect, useState } from "react"
 import { Check, Loader2 } from "lucide-react"
 
-import type { ApprovalDecision, InteractiveInteraction, InteractiveQuestion } from "../../interactive/types"
-import { QUESTION_OTHER_VALUE, approvalDecisionLabel, isApprovalDecision } from "../../presentation-shared/interaction-policy"
+import type { ApprovalDecision, DirectoryTrustDecision, InteractiveInteraction, InteractiveQuestion } from "../../interactive/types"
+import {
+  QUESTION_OTHER_VALUE,
+  approvalDecisionLabel,
+  directoryTrustDecisionDescription,
+  directoryTrustDecisionLabel,
+  isApprovalDecision,
+  isDirectoryTrustDecision,
+} from "../../presentation-shared/interaction-policy"
 import type { WebAdapterSnapshot, WebIntent } from "../application/adapter"
+import { DirectoryTrustApproval } from "./directory-trust-approval"
 import { FileDiffApproval } from "./file-diff-approval"
 
 /** 把 approval 的 requests（unknown 载荷）安全收敛为 mono 预览 JSON；空或不可序列化时返回 null。 */
@@ -23,7 +31,7 @@ function requestPreview(requests: unknown): string | null {
 const DEADLINE_TICK_MS = 1000
 
 /**
- * 渲染 snapshot.interactive.interaction 对应的 approval / question 表单。
+ * 渲染 snapshot.interactive.interaction 对应的 approval / directory_trust / question 表单。
  *
  * - adapter 已按 requestId 原子重置 interactionDraft；本组件不持有跨请求的本地答案。
  * - 每次 render 都从 snapshot.interactionDraft 派生当前值，避免提交过期答案。
@@ -41,7 +49,9 @@ export function InteractionForm(props: {
     <section className="interaction-card" aria-label="待处理请求">
       {interaction.type === "approval"
         ? <ApprovalForm interaction={interaction} snapshot={props.snapshot} dispatch={props.dispatch} disabled={props.disabled === true} />
-        : <QuestionForm interaction={interaction} snapshot={props.snapshot} dispatch={props.dispatch} disabled={props.disabled === true} />}
+        : interaction.type === "directory_trust"
+          ? <DirectoryTrustForm interaction={interaction} dispatch={props.dispatch} disabled={props.disabled === true} />
+          : <QuestionForm interaction={interaction} snapshot={props.snapshot} dispatch={props.dispatch} disabled={props.disabled === true} />}
     </section>
   )
 }
@@ -111,15 +121,18 @@ function ApprovalForm(props: {
     await submitApproval(decision, feedback)
   }
 
+  const presentation = interaction.presentation
+  const title = "需要批准"
+
   return (
     <div className="approval-form">
       <header className="interaction-header">
-        <h3 className="interaction-title">需要批准</h3>
+        <h3 className="interaction-title">{title}</h3>
         <Deadline deadlineAtMs={interaction.deadlineAtMs} />
       </header>
       {interaction.description ? <p className="interaction-description">{interaction.description}</p> : null}
-      {interaction.presentation
-        ? <FileDiffApproval presentation={interaction.presentation} requests={interaction.requests} />
+      {presentation
+        ? <FileDiffApproval presentation={presentation} requests={interaction.requests} />
         : preview ? <pre className="approval-request-preview">{preview}</pre> : null}
       <div className="approval-buttons" role="group" aria-label="审批选项">
         {interaction.decisions.filter(isApprovalDecision).map(item => (
@@ -159,6 +172,58 @@ function ApprovalForm(props: {
           {submitting ? <Loader2 aria-hidden="true" className="interaction-submit-spinner" /> : <Check aria-hidden="true" />}
           <span>提交</span>
         </button>
+      </div>
+    </div>
+  )
+}
+
+/** 目录信任表单：Claude 式独立卡片，点击选项即回写决策。 */
+function DirectoryTrustForm(props: {
+  interaction: Extract<InteractiveInteraction, { type: "directory_trust" }>
+  dispatch: (intent: WebIntent) => void | Promise<void>
+  disabled: boolean
+}): React.ReactElement {
+  const { interaction, dispatch, disabled } = props
+  const [submitting, setSubmitting] = useState(false)
+  const expired = isExpired(interaction.deadlineAtMs)
+  const buttonsDisabled = submitting || disabled || expired
+
+  const submit = async (decision: DirectoryTrustDecision) => {
+    if (buttonsDisabled) return
+    setSubmitting(true)
+    try {
+      await dispatch({
+        type: "interaction-submit",
+        requestId: interaction.requestId,
+        response: { kind: "directory_trust", decision },
+      })
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="approval-form directory-trust-form">
+      <header className="interaction-header">
+        <h3 className="interaction-title">目录信任</h3>
+        <Deadline deadlineAtMs={interaction.deadlineAtMs} />
+      </header>
+      <p className="interaction-description">是否将此目录加入白名单？</p>
+      <DirectoryTrustApproval interaction={interaction} />
+      <div className="approval-buttons" role="group" aria-label="目录信任选项">
+        {interaction.decisions.filter(isDirectoryTrustDecision).map(item => (
+          <button
+            type="button"
+            key={item}
+            className={item === "deny" ? "approval-button approval-button-negative" : "approval-button approval-button-positive"}
+            disabled={buttonsDisabled}
+            onClick={() => { void submit(item) }}
+          >
+            {submitting ? <Loader2 aria-hidden="true" className="interaction-submit-spinner" /> : null}
+            <span>{directoryTrustDecisionLabel(item)}</span>
+            <span className="approval-button-description">{directoryTrustDecisionDescription(item)}</span>
+          </button>
+        ))}
       </div>
     </div>
   )

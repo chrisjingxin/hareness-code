@@ -10,6 +10,7 @@ export function ThreadView(props: SharedViewProps & { modelName?: string }) {
   const interaction = props.interactive.interaction
   const blockingInteraction = Boolean(
     interaction?.type === "approval"
+    || interaction?.type === "directory_trust"
     || (interaction?.type === "question" && interaction.questions[0]?.options.length),
   )
 
@@ -22,6 +23,7 @@ export function ThreadView(props: SharedViewProps & { modelName?: string }) {
         expandedTools={props.expandedTools}
         onToggleTool={props.onToggleTool}
         onApproval={props.onApproval}
+        onDirectoryTrust={props.onDirectoryTrust}
         onQuestion={props.onQuestion}
         modelName={props.modelName}
         transientNotice={props.transientNotice}

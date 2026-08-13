@@ -3,19 +3,34 @@
 import { type ScrollBoxRenderable } from "@opentui/core"
 import { type RefObject, useState, type ReactNode } from "react"
 
+import type { FileDiffPresentation } from "@za38/protocol"
+
 import type { ConversationMessage, InteractionCard, ReasoningCard, TimelineItem, ToolCard } from "../../interactive/state"
-import type { InteractiveSnapshot } from "../../interactive/types"
+import type { InteractiveInteraction, InteractiveSnapshot } from "../../interactive/types"
 import { formatContext, formatDuration, formatElapsed, formatUsage } from "../../presentation-shared/formatters"
 import { diffTextForRenderer, parseFileDiff } from "../../presentation-shared/file-diff"
 import { resolveLanguageForPath } from "../../presentation-shared/language-catalog"
-import { APPROVAL_DECISION_ORDER, approvalDecisionDescription, approvalDecisionLabel, isApprovalDecision } from "../../presentation-shared/interaction-policy"
+import {
+  APPROVAL_DECISION_ORDER,
+  DIRECTORY_TRUST_DECISION_ORDER,
+  approvalDecisionDescription,
+  approvalDecisionLabel,
+  approvalPresentationKind,
+  directoryTrustDecisionDescription,
+  directoryTrustDecisionLabel,
+  isApprovalDecision,
+  isDirectoryTrustDecision,
+} from "../../presentation-shared/interaction-policy"
 import { activityLabel, interactionStatusLabel, progressPhaseLabel, toolStatusLabel } from "../../presentation-shared/timeline-presenter"
 import { collapseToolOutput } from "../../presentation-shared/tool-output-policy"
 import { getCommonSyntaxClient } from "../platform/syntax-parsers"
 import { PROMPT_BORDER, useRunElapsed, useSpinner } from "./composer"
 import { createScrollAcceleration } from "./scroll.js"
 import { markdownSyntax, tuiTheme } from "./theme"
-import type { ApprovalDecision } from "./types"
+import type { ApprovalDecision, DirectoryTrustDecision } from "./types"
+
+/** 挂起中的目录信任交互卡片 DTO。 */
+type DirectoryTrustCard = Extract<InteractiveInteraction, { type: "directory_trust" }>
 
 /** 使用 ScrollBox 渲染统一 timeline，并保留 sticky-scroll 行为。 */
 export function ConversationTimeline(props: {
@@ -25,6 +40,7 @@ export function ConversationTimeline(props: {
   expandedTools: ReadonlySet<string>
   onToggleTool: (toolId: string) => void
   onApproval: (decision: ApprovalDecision) => void
+  onDirectoryTrust: (decision: DirectoryTrustDecision) => void
   onQuestion: (answer: string) => void
   modelName?: string
   transientNotice?: { id: string; message: string }
@@ -42,6 +58,7 @@ export function ConversationTimeline(props: {
           expandedTools={props.expandedTools}
           onToggleTool={props.onToggleTool}
           onApproval={props.onApproval}
+          onDirectoryTrust={props.onDirectoryTrust}
           onQuestion={props.onQuestion}
           terminalWidth={props.terminalWidth}
         />
@@ -76,13 +93,14 @@ function TimelineRow(props: {
   expandedTools: ReadonlySet<string>
   onToggleTool: (toolId: string) => void
   onApproval: (decision: ApprovalDecision) => void
+  onDirectoryTrust: (decision: DirectoryTrustDecision) => void
   onQuestion: (answer: string) => void
   terminalWidth: number
 }) {
   if (props.item.type === "message") return <MessageBlock message={props.item.message} />
   if (props.item.type === "reasoning") return <ReasoningRow reasoning={props.item.reasoning} />
   if (props.item.type === "interaction") {
-    return <InteractionRow interaction={props.item.interaction} activeInteraction={props.interactive.interaction} onApproval={props.onApproval} onQuestion={props.onQuestion} terminalWidth={props.terminalWidth} />
+    return <InteractionRow interaction={props.item.interaction} activeInteraction={props.interactive.interaction} onApproval={props.onApproval} onDirectoryTrust={props.onDirectoryTrust} onQuestion={props.onQuestion} terminalWidth={props.terminalWidth} />
   }
   const tool = props.item.tool
   const toolKey = toolTimelineKey(tool)
@@ -245,36 +263,78 @@ function RunSummary(props: { interactive: InteractiveSnapshot; modelName?: strin
   )
 }
 
-/** 审批和问答是不可脱离时间线的阻塞事件，完成后保留用户处理结果。 */
+/** 审批、目录信任和问答是不可脱离时间线的阻塞事件，完成后保留用户处理结果。 */
 function InteractionRow(props: {
   interaction: InteractionCard
   activeInteraction?: InteractiveSnapshot["interaction"]
   onApproval: (decision: ApprovalDecision) => void
+  onDirectoryTrust: (decision: DirectoryTrustDecision) => void
   onQuestion: (answer: string) => void
   terminalWidth: number
 }) {
   const { interaction } = props
   const pending = interaction.status === "pending"
   const approval = interaction.type === "approval"
-  const tone = approval ? tuiTheme.warning : tuiTheme.primary
+  const trust = interaction.type === "directory_trust"
+  const tone = approval || trust ? tuiTheme.warning : tuiTheme.primary
+  const presentationKind = props.activeInteraction?.type === "approval"
+    ? approvalPresentationKind(props.activeInteraction.presentation)
+    : undefined
+  const title = trust ? "目录信任" : approval ? "需要审批" : "Agent 需要你的回答"
+  const activeTrust = trust && props.activeInteraction?.type === "directory_trust" ? props.activeInteraction : null
+  const allowedTrustDecisions = activeTrust ? activeTrust.decisions : DIRECTORY_TRUST_DECISION_ORDER
+  const trustOptions = allowedTrustDecisions
+    .filter(isDirectoryTrustDecision)
+    .map(decision => ({
+      name: directoryTrustDecisionLabel(decision),
+      description: directoryTrustDecisionDescription(decision),
+      value: decision,
+    }))
   const allowedDecisions = props.activeInteraction?.type === "approval" ? props.activeInteraction.decisions : APPROVAL_DECISION_ORDER
   const decisionOptions = allowedDecisions
     .filter(isApprovalDecision)
-    .map(decision => ({ name: approvalDecisionLabel(decision), description: approvalDecisionDescription(decision), value: decision }))
+    .map(decision => ({
+      name: approvalDecisionLabel(decision),
+      description: approvalDecisionDescription(decision),
+      value: decision,
+    }))
 
   return (
     <box marginTop={1} marginLeft={2} marginRight={2} border={["left"]} borderColor={tone} customBorderChars={PROMPT_BORDER}>
       <box backgroundColor={tuiTheme.toolSurface} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
         <box flexDirection="row" gap={1}>
-          <text fg={tone}>{approval ? "△" : "?"}</text>
-          <text fg={tuiTheme.text}><strong>{approval ? "需要审批" : "Agent 需要你的回答"}</strong></text>
+          <text fg={tone}>{approval || trust ? "△" : "?"}</text>
+          <text fg={tuiTheme.text}><strong>{title}</strong></text>
         </box>
-        {approval ? <>
+        {trust ? <>
+          {interaction.description ? <text content={interaction.description} fg={tuiTheme.text} /> : null}
+          {activeTrust ? <DirectoryTrustPreview trust={activeTrust} /> : null}
+        </> : approval ? <>
           {interaction.description ? <text content={interaction.description} fg={tuiTheme.text} /> : null}
           {pending && props.activeInteraction?.type === "approval" && props.activeInteraction.presentation
-            ? <FileDiffApprovalPreview presentation={props.activeInteraction.presentation} terminalWidth={props.terminalWidth} />
+            ? presentationKind === "file_diff"
+              ? <FileDiffApprovalPreview presentation={props.activeInteraction.presentation as FileDiffPresentation} terminalWidth={props.terminalWidth} />
+              : <ApprovalRequestPreview requests={interaction.requests} />
             : <ApprovalRequestPreview requests={interaction.requests} />}
         </> : interaction.question ? <text content={interaction.question} fg={tuiTheme.text} /> : null}
+        {pending && trust ? (
+          <>
+            <select
+              focused
+              height={Math.max(2, Math.min(10, allowedTrustDecisions.length * 2))}
+              showDescription
+              wrapSelection
+              options={trustOptions}
+              onSelect={(_, option) => {
+                const value = option?.value
+                if (isDirectoryTrustDecision(value)) {
+                  props.onDirectoryTrust(value)
+                }
+              }}
+            />
+            <text fg={tuiTheme.muted}>↑↓ 选择 · Enter 确认</text>
+          </>
+        ) : null}
         {pending && approval ? (
           <>
             <select
@@ -293,7 +353,7 @@ function InteractionRow(props: {
             <text fg={tuiTheme.muted}>↑↓ 选择 · Enter 确认</text>
           </>
         ) : null}
-        {pending && !approval && interaction.options?.length ? (
+        {pending && !approval && !trust && interaction.options?.length ? (
           <>
             <select
               focused
@@ -306,7 +366,7 @@ function InteractionRow(props: {
             <text fg={tuiTheme.muted}>↑↓ 选择 · Enter 确认</text>
           </>
         ) : null}
-        {pending && !approval && !interaction.options?.length ? <text fg={tuiTheme.muted}>等待回答</text> : null}
+        {pending && !approval && !trust && !interaction.options?.length ? <text fg={tuiTheme.muted}>等待回答</text> : null}
         {!pending ? <text fg={interactionStatusColor(interaction.status)}>{interactionStatusLabel(interaction.status)}</text> : null}
       </box>
     </box>
@@ -318,9 +378,25 @@ export function tuiDiffViewForWidth(contentWidth: number): "split" | "unified" {
   return contentWidth >= 120 ? "split" : "unified"
 }
 
+/** 展示目录信任交互的关键路径信息。 */
+function DirectoryTrustPreview(props: { trust: DirectoryTrustCard }) {
+  const trust = props.trust
+  const access = trust.access === "write" ? "写入" : "读取"
+  return (
+    <box flexDirection="column" marginTop={1}>
+      <text content={`工具：${trust.toolName}（${access}）`} fg={tuiTheme.text} />
+      <text content={`目标路径：${trust.targetPath}`} fg={tuiTheme.text} />
+      <text content={`待信任目录：${trust.directory}`} fg={tuiTheme.warning} />
+      {trust.shadowsWorkspace ? (
+        <text content="注意：该目录会遮蔽主工作区内的同名路径。" fg={tuiTheme.warning} />
+      ) : null}
+    </box>
+  )
+}
+
 /** 使用 OpenTUI 原生 Diff renderer 展示同一 prepared plan 的有界预览。 */
 function FileDiffApprovalPreview(props: {
-  presentation: NonNullable<Extract<InteractiveSnapshot["interaction"], { type: "approval" }>["presentation"]>
+  presentation: FileDiffPresentation
   terminalWidth: number
 }) {
   const { presentation } = props

@@ -1,6 +1,6 @@
 /** Interaction Feature：管理审批/问答 Interaction 卡片、定时超时与响应校验。 */
 
-import type { ApprovalResponse, InteractionRequestEnvelope, InteractionResponse } from "@za38/protocol"
+import type { ApprovalResponse, DirectoryTrustResponse, InteractionRequestEnvelope, InteractionResponse } from "@za38/protocol"
 import type { Clock, IntentOutcome, InteractiveInteraction } from "../ports"
 import { appendNotice, applyInteractionRequest, clearPendingInteraction } from "../state"
 import type { FeatureContext } from "./types"
@@ -15,6 +15,7 @@ export type PendingInteraction = {
 export type ClientInteractionResponse =
   | { request_id: string; kind: "approval"; decision: ApprovalResponse["decision"]; feedback?: string }
   | { request_id: string; kind: "question"; answers: Record<string, string[]> }
+  | { request_id: string; kind: "directory_trust"; decision: DirectoryTrustResponse["decision"] }
 
 export class InteractionFeature {
   pendingInteraction: PendingInteraction | null = null
@@ -98,6 +99,18 @@ export class InteractionFeature {
       return { status: "accepted" }
     }
 
+    if (pending.request.type === "directory_trust") {
+      if (response.kind !== "directory_trust") {
+        return { status: "rejected", code: "invalid-argument", message: "响应类型与请求不匹配" }
+      }
+      if (!pending.request.payload.decisions.includes(response.decision)) {
+        ctx.commit(current => appendNotice(current, "不支持的目录信任决定，已忽略。"))
+        return { status: "rejected", code: "invalid-argument", message: "Unsupported directory trust decision" }
+      }
+      this.resolvePending(pending, { request_id: requestId, type: "directory_trust", decision: response.decision }, ctx)
+      return { status: "accepted" }
+    }
+
     if (response.kind !== "question") {
       return { status: "rejected", code: "invalid-argument", message: "响应类型与请求不匹配" }
     }
@@ -141,9 +154,13 @@ export class InteractionFeature {
 
   /** 取消/超时/关闭时使用的 fail-closed 响应。 */
   private buildFallbackInteractionResponse(request: InteractionRequestEnvelope): InteractionResponse {
-    return request.type === "approval"
-      ? { request_id: request.request_id, type: "approval", decision: "reject" }
-      : { request_id: request.request_id, type: "question", answers: {} }
+    if (request.type === "approval") {
+      return { request_id: request.request_id, type: "approval", decision: "reject" }
+    }
+    if (request.type === "directory_trust") {
+      return { request_id: request.request_id, type: "directory_trust", decision: "deny" }
+    }
+    return { request_id: request.request_id, type: "question", answers: {} }
   }
 
   /** 把 pending Interaction 转成共享 DTO；deadline 由注入 clock 计算。 */
@@ -161,6 +178,21 @@ export class InteractionFeature {
         requests: request.payload.requests,
         presentation: request.payload.presentation ?? null,
         decisions: request.payload.decisions,
+        deadlineAtMs,
+      }
+    }
+
+    if (request.type === "directory_trust") {
+      const payload = request.payload
+      return {
+        type: "directory_trust",
+        requestId: request.request_id,
+        directory: payload.directory,
+        targetPath: payload.target_path,
+        toolName: payload.tool_name,
+        access: payload.access,
+        shadowsWorkspace: payload.shadows_workspace,
+        decisions: payload.decisions,
         deadlineAtMs,
       }
     }

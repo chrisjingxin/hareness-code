@@ -538,10 +538,15 @@ export class AgentClient {
     this.inboundRequests.add(id)
     try {
       const validated = validateInteractionParams(method, params)
+      const interactionType = method === Method.INTERACTION_APPROVAL
+        ? "approval" as const
+        : method === Method.INTERACTION_DIRECTORY_TRUST
+          ? "directory_trust" as const
+          : "question" as const
       const request = {
         ...validated,
         request_id: id,
-        type: method === Method.INTERACTION_APPROVAL ? "approval" as const : "question" as const,
+        type: interactionType,
       } as InteractionRequestEnvelope
       if (!this.requestHandler) throw new Error("Client has no interaction request handler")
       const result = await this.requestHandler(request)
@@ -549,7 +554,9 @@ export class AgentClient {
       if (result.request_id !== id || result.type !== request.type) throw new Error("Interaction response does not match request")
       const wireResult = result.type === "approval"
         ? { decision: result.decision, feedback: result.feedback }
-        : { answers: result.answers }
+        : result.type === "directory_trust"
+          ? { decision: result.decision }
+          : { answers: result.answers }
       validateInteractionResult(method as InteractionMethod, wireResult)
       this.inboundRequests.delete(id)
       await this.send({ jsonrpc: "2.0", id, result: wireResult })

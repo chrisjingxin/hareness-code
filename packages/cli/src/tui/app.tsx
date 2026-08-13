@@ -11,6 +11,7 @@ import type { InteractiveRuntime } from "../interactive/runtime"
 import {
   createTuiAdapter,
   type ApprovalDecision,
+  type DirectoryTrustDecision,
   type TuiAdapter,
   type TuiAdapterOptions,
   type TuiAdapterSnapshot,
@@ -228,6 +229,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
     expandedTools: snapshot.expandedTools,
     onToggleTool: (toolId: string) => { void adapter.dispatch({ type: "tool-toggle", toolId }) },
     onApproval: (decision: ApprovalDecision) => { void adapter.dispatch({ type: "approval", decision }) },
+    onDirectoryTrust: (decision: DirectoryTrustDecision) => { void adapter.dispatch({ type: "directory-trust", decision }) },
     onQuestion: (answer: string) => { void adapter.dispatch({ type: "question", answer }) },
   }
 

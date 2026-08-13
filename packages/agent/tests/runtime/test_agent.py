@@ -145,7 +145,9 @@ async def test_default_hitl_registers_prepared_file_diff_for_host_approval(tmp_p
     from harness_agent.threads.context_lifecycle import prepare_embedded_context_snapshot
 
     target = tmp_path / "approval.txt"
-    target.write_text("before\n", encoding="utf-8")
+    # 显式写入 LF 字节：Windows 的 write_text 会把 \n 翻成 \r\n，
+    # 导致与下方固定以 LF 记录的 snapshot identity 不一致。
+    target.write_bytes(b"before\n")
     backend = LocalTextMutationBackend(tmp_path)
     document = backend.read_text_document("/approval.txt")
     snapshots = ThreadSnapshotStore()
@@ -319,8 +321,8 @@ def test_execution_context_prompt_marks_local_and_remote_boundaries():
     )
 
     assert "本机工作目录是：`/tmp/work`" in local
-    assert "文件工具只允许访问" in local
-    assert "不能通过审批绕过" in local
+    assert "主工作区内必须使用以 `/` 开头的虚拟路径" in local
+    assert "工作区外文件时使用真实绝对路径" in local
     assert "corp` 远端沙箱" in remote
     assert "`/workspace`" in remote
     # 审批模式事实不再写入稳定边界文本，改由每次 Run 动态追加。

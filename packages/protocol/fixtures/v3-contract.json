@@ -1135,6 +1135,33 @@
       }
     },
     {
+      "kind": "interaction.params",
+      "name": "interaction.directory_trust",
+      "case": "valid",
+      "value": {
+        "thread_id": "x",
+        "run_id": "x",
+        "timeout_ms": 1,
+        "payload": {
+          "interrupt_id": "x",
+          "directory": "x",
+          "target_path": "x",
+          "tool_name": "x",
+          "access": "read",
+          "shadows_workspace": false,
+          "decisions": []
+        }
+      }
+    },
+    {
+      "kind": "interaction.result",
+      "name": "interaction.directory_trust",
+      "case": "valid",
+      "value": {
+        "decision": "allow_session"
+      }
+    },
+    {
       "kind": "error",
       "name": "ProtocolErrorData",
       "case": "valid",
@@ -3654,6 +3681,71 @@
     {
       "kind": "interaction.result",
       "name": "interaction.question",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
+      "kind": "interaction.params",
+      "name": "interaction.directory_trust",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "interaction.params",
+      "name": "interaction.directory_trust",
+      "case": "extra_field",
+      "value": {
+        "thread_id": "x",
+        "run_id": "x",
+        "timeout_ms": 1,
+        "payload": {
+          "interrupt_id": "x",
+          "directory": "x",
+          "target_path": "x",
+          "tool_name": "x",
+          "access": "read",
+          "shadows_workspace": false,
+          "decisions": []
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "interaction.params",
+      "name": "interaction.directory_trust",
+      "case": "missing_field",
+      "value": {
+        "run_id": "x",
+        "timeout_ms": 1,
+        "payload": {
+          "interrupt_id": "x",
+          "directory": "x",
+          "target_path": "x",
+          "tool_name": "x",
+          "access": "read",
+          "shadows_workspace": false,
+          "decisions": []
+        }
+      }
+    },
+    {
+      "kind": "interaction.result",
+      "name": "interaction.directory_trust",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "interaction.result",
+      "name": "interaction.directory_trust",
+      "case": "extra_field",
+      "value": {
+        "decision": "allow_session",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "interaction.result",
+      "name": "interaction.directory_trust",
       "case": "missing_field",
       "value": {}
     },
