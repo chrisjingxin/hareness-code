@@ -35,6 +35,7 @@ from harness_agent.compose.readiness import (
     ComposeReadinessResolver,
     ConfirmationGroups,
     DocumentReadinessFact,
+    WorkspaceFreshnessFact,
 )
 from harness_agent.compose.turn_intent import (
     TurnIntent,
@@ -47,11 +48,12 @@ from harness_agent.compose.turn_intent import (
 from harness_agent.threads.compose_work_item_store import (
     BindRunToWorkItem,
     ComposeWorkItemStore,
+    ComposeWorkItemStoreError,
     CreateComposeWorkItem,
+    SetComposeWorkItemStatus,
     TerminalizeComposeWorkItem,
     UpsertComposeDocumentReference,
 )
-
 from harness_agent.compose.activities.task import (
     GrillDriver,
     TaskGateActivity,
@@ -69,6 +71,13 @@ from harness_agent.compose.activities.plan import (
     PlanGateActivity,
     PlanGateActivityError,
     PlanGateOutcome,
+)
+
+from harness_agent.compose.activities.implement import (
+    ImplementActivity,
+    ImplementActivityError,
+    ImplementDriver,
+    ImplementItemOutcome,
 )
 
 MAX_GOAL_CHARS = 400
@@ -176,7 +185,7 @@ class ComposeTurnPorts:
     task_driver: GrillDriver | None = None
     spec_driver: SpecDriver | None = None
     plan_driver: PlanDriver | None = None
-
+    implement_driver: ImplementDriver | None = None
 
 @dataclass(frozen=True, slots=True)
 class ReadinessProjection:
@@ -467,6 +476,8 @@ class ComposeWorkItemEngine:
             return await self._run_spec_gate(request, item, now)
         if not readiness.plan_confirmed:
             return await self._run_plan_gate(request, item, now)
+        if not readiness.implementation_current:
+            return await self._run_implement(request, item, now)
         outcome = (
             ComposeTurnOutcome.BLOCKED
             if item.status is ComposeWorkItemStatus.BLOCKED
@@ -528,6 +539,87 @@ class ComposeWorkItemEngine:
             error_prefix="plan",
             activity_class=PlanGateActivity,
             abandoned_outcome=PlanGateOutcome.ABANDONED,
+        )
+
+    async def _run_implement(
+        self,
+        request: ComposeTurnRequest,
+        item: ComposeWorkItem,
+        now: int,
+    ) -> ComposeTurnResult:
+        """执行 TDD Implement Activity；错误与 blocked 保持可恢复投影。"""
+        driver = self._ports.implement_driver
+        if driver is None:
+            raise ComposeWorkItemEngineError(
+                "COMPOSE_ACTIVITY_UNAVAILABLE",
+                "implement 驱动未接入",
+            )
+        if self._ports.workspace_revision is None:
+            readiness, facts = await self._compute_readiness(item)
+            pending = "implement:COMPOSE_IMPLEMENT_WORKSPACE_REVISION_MISSING"
+            return ComposeTurnResult(
+                self._projection(item, readiness, pending_decision=pending, facts=facts),
+                ComposeTurnOutcome.WAITING_USER,
+                pending,
+                intent=_explicit_intent(TurnIntentKind.RESUME_CURRENT),
+            )
+        activity = ImplementActivity(
+            store=self._ports.store,
+            documents=self._ports.documents,
+            driver=driver,
+            workspace_revision=self._ports.workspace_revision,
+            now_ms=self._ports.now_ms,
+        )
+        resume_intent = _explicit_intent(TurnIntentKind.RESUME_CURRENT)
+        try:
+            result = await activity.run(item, run_id=request.run_id)
+        except Exception as exc:
+            code = getattr(exc, "code", None)
+            pending = f"implement:{code}" if code else "implement:failed"
+            readiness, facts = await self._compute_readiness(item)
+            return ComposeTurnResult(
+                self._projection(item, readiness, pending_decision=pending, facts=facts),
+                ComposeTurnOutcome.WAITING_USER,
+                pending,
+                intent=resume_intent,
+            )
+        if result.outcome is ImplementItemOutcome.BLOCKED:
+            blocked = await self._ports.store.set_status(
+                SetComposeWorkItemStatus(
+                    work_item_id=item.work_item_id,
+                    expected_revision=item.revision,
+                    status=ComposeWorkItemStatus.BLOCKED,
+                    updated_at_ms=now,
+                )
+            )
+            readiness, facts = await self._compute_readiness(blocked)
+            return ComposeTurnResult(
+                self._projection(
+                    blocked, readiness, pending_decision=result.pending, facts=facts
+                ),
+                ComposeTurnOutcome.BLOCKED,
+                result.pending,
+                intent=resume_intent,
+            )
+        updated = await self._ports.store.load(item.work_item_id)
+        if updated is None:
+            raise ComposeWorkItemEngineError(
+                "COMPOSE_WORK_ITEM_NOT_FOUND",
+                "Work Item 在 Activity 执行后丢失",
+            )
+        readiness, facts = await self._compute_readiness(updated)
+        outcome = (
+            ComposeTurnOutcome.BLOCKED
+            if updated.status is ComposeWorkItemStatus.BLOCKED
+            else ComposeTurnOutcome.WAITING_USER
+        )
+        return ComposeTurnResult(
+            self._projection(
+                updated, readiness, pending_decision=result.pending, facts=facts
+            ),
+            outcome,
+            result.pending,
+            intent=resume_intent,
         )
 
     async def _run_gate(
@@ -860,12 +952,37 @@ class ComposeWorkItemEngine:
             if self._ports.workspace_revision is not None
             else None
         )
+        implementation = await self._implementation_fact(item)
         readiness = self._ports.readiness.resolve(
             facts,
             confirmations,
             workspace_revision=revision,
+            implementation=implementation,
         )
         return readiness, facts
+
+    async def _implementation_fact(self, item: ComposeWorkItem):
+        """把最新 implementation 证据还原为 resolver 可消费的新鲜度事实。"""
+        try:
+            records = await self._ports.store.load_evidence(
+                item.work_item_id, "implementation"
+            )
+        except ComposeWorkItemStoreError:
+            return None
+        if not records:
+            return None
+        payload = records[-1].payload
+        try:
+            digests = frozenset(str(digest) for digest in payload["document_digests"])
+            return WorkspaceFreshnessFact(
+                workspace_revision=str(payload["workspace_revision"]),
+                document_digests=digests,
+                evidence_digest=records[-1].content_digest,
+                execution_id=str(payload["execution_id"]),
+                passed=bool(payload.get("passed", True)),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
 
     async def _inspect_optional(
         self,
