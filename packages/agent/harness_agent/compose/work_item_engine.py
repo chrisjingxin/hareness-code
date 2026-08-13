@@ -58,7 +58,12 @@ from harness_agent.compose.activities.task import (
     TaskGateActivityError,
     TaskGateOutcome,
 )
-
+from harness_agent.compose.activities.spec import (
+    SpecDriver,
+    SpecGateActivity,
+    SpecGateActivityError,
+    SpecGateOutcome,
+)
 MAX_GOAL_CHARS = 400
 """创建 Work Item 时保存的目标文本上限；超出截断，正文仍以 Transcript 为准。"""
 
@@ -162,6 +167,8 @@ class ComposeTurnPorts:
     now_ms: Callable[[], int] | None = None
     readiness: ComposeReadinessResolver = field(default_factory=ComposeReadinessResolver)
     task_driver: GrillDriver | None = None
+    spec_driver: SpecDriver | None = None
+
 
 @dataclass(frozen=True, slots=True)
 class ReadinessProjection:
@@ -445,9 +452,11 @@ class ComposeWorkItemEngine:
         readiness: ComposeReadiness,
         facts: dict[ComposeDocumentKind, DocumentReadinessFact],
     ) -> ComposeTurnResult:
-        """按 readiness gate 顺序执行有界 Activity；WP8 先打通 Task gate。"""
+        """按 readiness gate 顺序执行有界 Activity；门禁逐一纵向打通。"""
         if not readiness.task_confirmed:
             return await self._run_task_gate(request, item, now)
+        if not readiness.spec_confirmed:
+            return await self._run_spec_gate(request, item, now)
         outcome = (
             ComposeTurnOutcome.BLOCKED
             if item.status is ComposeWorkItemStatus.BLOCKED
@@ -467,13 +476,51 @@ class ComposeWorkItemEngine:
         now: int,
     ) -> ComposeTurnResult:
         """执行 grill 访谈与 Task typed gate；错误保持可恢复投影。"""
-        driver = self._ports.task_driver
+        return await self._run_gate(
+            request,
+            item,
+            now,
+            driver=self._ports.task_driver,
+            error_prefix="task",
+            activity_class=TaskGateActivity,
+            abandoned_outcome=TaskGateOutcome.ABANDONED,
+        )
+
+    async def _run_spec_gate(
+        self,
+        request: ComposeTurnRequest,
+        item: ComposeWorkItem,
+        now: int,
+    ) -> ComposeTurnResult:
+        """执行 spec.md 草稿与 typed gate；错误保持可恢复投影。"""
+        return await self._run_gate(
+            request,
+            item,
+            now,
+            driver=self._ports.spec_driver,
+            error_prefix="spec",
+            activity_class=SpecGateActivity,
+            abandoned_outcome=SpecGateOutcome.ABANDONED,
+        )
+
+    async def _run_gate(
+        self,
+        request: ComposeTurnRequest,
+        item: ComposeWorkItem,
+        now: int,
+        *,
+        driver: Any,
+        error_prefix: str,
+        activity_class: Any,
+        abandoned_outcome: Any,
+    ) -> ComposeTurnResult:
+        """通用门禁执行：Activity ledger 与 abandoned CAS 语义统一。"""
         if driver is None:
             raise ComposeWorkItemEngineError(
                 "COMPOSE_ACTIVITY_UNAVAILABLE",
-                "Task gate 驱动未接入",
+                f"{error_prefix} gate 驱动未接入",
             )
-        gate = TaskGateActivity(
+        gate = activity_class(
             store=self._ports.store,
             documents=self._ports.documents,
             interaction=self._ports.interaction,
@@ -483,16 +530,17 @@ class ComposeWorkItemEngine:
         resume_intent = _explicit_intent(TurnIntentKind.RESUME_CURRENT)
         try:
             result = await gate.run(item, run_id=request.run_id)
-        except TaskGateActivityError as exc:
+        except Exception as exc:
+            code = getattr(exc, "code", None)
+            pending = f"{error_prefix}:{code}" if code else f"{error_prefix}:failed"
             readiness, facts = await self._compute_readiness(item)
-            pending = f"task:{exc.code}"
             return ComposeTurnResult(
                 self._projection(item, readiness, pending_decision=pending, facts=facts),
                 ComposeTurnOutcome.WAITING_USER,
                 pending,
                 intent=resume_intent,
             )
-        if result.outcome is TaskGateOutcome.ABANDONED:
+        if result.outcome is abandoned_outcome:
             terminalized = await self._ports.store.terminalize(
                 TerminalizeComposeWorkItem(
                     work_item_id=item.work_item_id,
