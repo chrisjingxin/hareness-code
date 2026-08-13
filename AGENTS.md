@@ -66,12 +66,14 @@ docs/developer/research/140-斜杠命令补全.md
 
 - 把 Spec 转为有依赖顺序的实现步骤：改什么、为什么、如何验证。
 - 按真实依赖排序，不按 `cli/protocol/agent` 水平分层硬凑步骤；一次行为变更需跨层时保留在同一步，形成可验证的纵向结果。
+- **必须标出可演示停点**：用户能在终端或界面上看到阶段性变化的位置（例如新颜色已生效、一种新组件已能画出来）。停点按真实可见效果切，不是「所有步骤做完」。
 - 生成使用 `agent-skills:planning-and-task-breakdown`。
 - Plan 不新增范围；范围变更必须先回写 Task/Spec。
 
 #### `todo/` — 执行清单（Plan 确认后）
 
 - Plan 的可勾选执行项；每项含明确动作与完成信号（改哪些相邻行为、跑哪条 focused test、期望观察到什么）。
+- 每个可演示停点在 Todo 里单独成节，并写明用户怎么看（例如 `bun run dev` 后观察什么）。
 - 文档命名与 Spec/Plan 一致。
 - 与 Plan 一并使用 `agent-skills:planning-and-task-breakdown` 产出。
 - 一个 Todo 项应能在不中途发明新设计的情况下完成；若仍写着「决定 / 评估 / 选择方案」，说明 Spec/Plan 未完成，不得进入实现。
@@ -120,7 +122,7 @@ review：  agent-skills:code-review-and-quality
 | **spec** | `docs/developer/spec/HC-XXX-….md` | 行为规格、interface、错误语义、invariant | `agent-skills:spec-driven-development` + `mattpocock:codebase-design` |
 | **plan** | `docs/developer/plan/HC-XXX-….md` | 依赖有序的实现步骤与验证方式 | `agent-skills:planning-and-task-breakdown` |
 | **todo** | `docs/developer/todo/HC-XXX-….md` | 可逐项执行的 checkbox 清单 | `agent-skills:planning-and-task-breakdown` |
-| **implement** | 代码与测试 | 只实现已确认 Todo；TDD；更新 Todo 勾选与证据 | `agent-skills:test-driven-development` |
+| **implement** | 代码与测试 | 只实现已确认 Todo；TDD；做到可演示停点即停，更新勾选与证据 | `agent-skills:test-driven-development` |
 | **review** | 复核结论写回 Task | 对照 Task/Spec/验收检视 diff、测试与文档 | `agent-skills:code-review-and-quality` |
 
 合并代码或解决冲突时使用 `mattpocock:resolving-merge-conflicts`。
@@ -133,6 +135,7 @@ review：  agent-skills:code-review-and-quality
 4. **一个完整功能 = 一个 Task = 同名 Spec/Plan/Todo**。不为并行、缩短 context 或区分代码层而拆成多套文档树；功能过大时在同一编号下分阶段 Plan/Todo，由多个执行 Thread 接力。
 5. **仅当**工作项关联性弱、各自具备独立用户价值、独立验收、独立上线且互不使对方处于不可用中间态时，才拆成多个平级 Task（各自完整走 task→…→review）。
 6. Task 完成后：补齐测试与文档证据 → 更新状态 → 移入 `task/archive/` → 同步任务看板 → 检视并更新相关 `architecture/` 文档。
+7. **实现按停点交付，禁止一次做完所有 Todo**：执行 Agent 一次只推进到下一个可演示停点（Plan 检查点，或一个用户已经能看见效果的工作包）。勾选本段 Todo、写明怎么查看、更新 `tmp/handoff.md` 后必须停下等用户看过；未经用户要求不得继续下一段。不得为了「把清单清完」连做整份 Todo。
 
 ### 文档表达要求
 
@@ -162,7 +165,7 @@ Task / Spec / Plan / Todo 必须让不熟悉当前实现的人也能直接检视
 3. 确认当前所处阶段（task/spec/plan/todo/implement/review），只做该阶段工作，使用该阶段强制 Skill。
 4. 按变更归属选择包：界面和进程管理改 `cli`，跨进程契约改 `protocol`，Agent 与执行逻辑改 `agent`。
 5. 修改前先找到邻近实现与现有测试；协议或生命周期变更必须同时验证 TypeScript 和 Python 两端。
-6. 实现阶段使用最小相关测试快速反馈（TDD）；交付前再执行本文定义的项目级检查。
+6. 实现阶段使用最小相关测试快速反馈（TDD）。到达 Plan 的可演示停点后停止，向用户说明如何查看阶段性成果（例如 `bun run dev` 后看哪一块）；未经用户要求不得继续后续工作包。整任务交付前再执行本文定义的项目级检查。
 7. 任务完成后检视 `docs/developer/architecture/`：大功能新建或对已有文档增量更新。
 
 ## 项目结构与模块职责
@@ -261,9 +264,9 @@ completed_at: -
 ## 模型分工
 
 - **强模型**：grill-me 需求确认、Spec/Plan/Todo 产出、跨包/Protocol/生命周期决策、复杂排障、code review。
-- **快速模型**：按已确认 Todo 做实现、focused tests、机械迁移、文档同步与证据记录。
+- **快速模型**：按已确认 Todo 做实现、focused tests、机械迁移、文档同步与证据记录。一次只做一个可演示停点；做完即停，等用户看过再接力下一段。
 - 快速模型不得改变范围与公开契约；阻塞时停在 Todo/Task 记录点，交回强模型修订 Spec/Plan。
-- 多个执行 Thread 可接力同一编号的 Task/Spec/Plan/Todo；Thread 数不等于 Task 数。
+- 多个执行 Thread 可接力同一编号的 Task/Spec/Plan/Todo；Thread 数不等于 Task 数。一次执行不等于做完整份 Todo。
 
 ### 推荐 Skill 总表
 

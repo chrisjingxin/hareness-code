@@ -35,3 +35,15 @@ export function approvalDecisionDescription(decision: ApprovalDecision): string 
 export function isApprovalDecision(value: unknown): value is ApprovalDecision {
   return typeof value === "string" && (APPROVAL_DECISION_ORDER as readonly string[]).includes(value)
 }
+
+/** TUI 先答首题；后续题补占位，避免多题 ask_user 因缺答被 Controller 卡住。 */
+export function completeQuestionAnswers(
+  questions: readonly { id: string }[],
+  firstAnswer: string,
+): Record<string, string[]> {
+  const answers: Record<string, string[]> = {}
+  for (const [index, question] of questions.entries()) {
+    answers[question.id] = [index === 0 ? firstAnswer : "(no answer)"]
+  }
+  return answers
+}

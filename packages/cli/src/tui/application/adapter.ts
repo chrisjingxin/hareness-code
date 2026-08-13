@@ -5,6 +5,7 @@ import type { ModelProfile } from "@za38/protocol"
 import type { InteractiveController, InteractiveIntent, InteractiveResult, InteractiveSnapshot, IntentOutcome, PresentationEffect } from "../../interactive/types"
 import { selectWorkItemView, type WorkItemView } from "../../interactive/selectors"
 import { filterCommandMenuItems } from "../../presentation-shared/command-menu-policy"
+import { completeQuestionAnswers } from "../../presentation-shared/interaction-policy"
 import { parseSlashCommand, resolveSlashCommand, type CommandMenuItem, type SkillMenuItem } from "../../interactive/commands"
 import type { ThreadSummary } from "@za38/protocol"
 import {
@@ -377,7 +378,7 @@ class TuiAdapterImpl implements TuiAdapter {
         const outcome = await this.routeDispatch({
           type: "interaction.respond",
           requestId: interactive.interaction.requestId,
-          response: { kind: "question", answers: { [firstQuestion.id]: [input] } },
+          response: { kind: "question", answers: completeQuestionAnswers(interactive.interaction.questions, input) },
         })
         if (outcome.status === "accepted") {
           this.clearDraft()
@@ -779,7 +780,7 @@ class TuiAdapterImpl implements TuiAdapter {
     await this.routeDispatch({
       type: "interaction.respond",
       requestId: question.requestId,
-      response: { kind: "question", answers: { [firstQuestion.id]: [answer] } },
+      response: { kind: "question", answers: completeQuestionAnswers(question.questions, answer) },
     })
   }
 

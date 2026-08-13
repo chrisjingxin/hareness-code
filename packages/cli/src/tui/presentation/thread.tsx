@@ -1,42 +1,47 @@
 /** Harness Code 的 Thread 主视图。 */
 
-import { selectWorkItemView } from "../../interactive/selectors"
-import { Composer, FooterRail, ThreadRuntimeLine } from "./composer"
+import { ApprovalDock, QuestionDock, bottomAreaKind } from "./bottom-area"
+import { InputBar, FooterRail, ThreadRuntimeLine } from "./input-bar"
 import { ConversationTimeline } from "./timeline"
 import { tuiTheme } from "./theme"
 import type { SharedViewProps } from "./types"
-import { WorkItemView } from "./work-item-view"
 
-/** thread 流全宽渲染，工具和审批事件以左轨形成明确的操作时间线。 */
+/** thread 流全宽渲染；底部互斥为输入栏 / 审批 Dock / 问答 Dock。Compose 与 Build 同一套骨架，不挂阶段顶栏。 */
 export function ThreadView(props: SharedViewProps & { modelName?: string }) {
   const interaction = props.interactive.interaction
-  const workItemView = selectWorkItemView(props.interactive)
-  const blockingInteraction = Boolean(
-    interaction?.type === "approval"
-    || (interaction?.type === "question" && interaction.questions[0]?.options.length),
-  )
+  const slot = bottomAreaKind(interaction)
 
   return (
     <box flexDirection="column" flexGrow={1} minHeight={0} backgroundColor={tuiTheme.background}>
-      {workItemView.workItem != null || workItemView.threadMode != null ? (
-        <WorkItemView view={workItemView} />
-      ) : null}
       <ConversationTimeline
         interactive={props.interactive}
         scrollRef={props.conversationScrollRef}
         showToolDetails={props.showToolDetails}
         expandedTools={props.expandedTools}
         onToggleTool={props.onToggleTool}
-        onApproval={props.onApproval}
-        onQuestion={props.onQuestion}
         modelName={props.modelName}
         transientNotice={props.transientNotice}
         terminalWidth={props.terminalWidth}
       />
-      {!blockingInteraction ? (
+      {slot === "approval" && interaction?.type === "approval" ? (
+        <ApprovalDock
+          interaction={interaction}
+          workMode={props.interactive.workMode}
+          terminalWidth={props.terminalWidth}
+          onApproval={props.onApproval}
+        />
+      ) : null}
+      {slot === "question" && interaction?.type === "question" ? (
+        <QuestionDock
+          interaction={interaction}
+          workMode={props.interactive.workMode}
+          onQuestion={props.onQuestion}
+        />
+      ) : null}
+      {slot === "input" ? (
         <box flexShrink={0} paddingLeft={2} paddingRight={2}>
           <ThreadRuntimeLine interactive={props.interactive} />
-          <Composer {...props} variant="thread" commandMenuPlacement="above" />
+          <InputBar {...props} variant="thread" commandMenuPlacement="above" />
         </box>
       ) : null}
       <FooterRail interactive={props.interactive} terminalWidth={props.terminalWidth} thread />

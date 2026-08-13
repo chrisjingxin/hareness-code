@@ -124,6 +124,7 @@ export class ThreadFeature {
           opened.messages,
           current.workMode,
           opened.composeActivities,
+          opened.threadMode === "build" || opened.threadMode === "compose" ? opened.threadMode : null,
         )
         const withMode = applyThreadMode(restored, opened.threadMode)
         return opened.workItem != null ? applyWorkItem(withMode, opened.workItem) : withMode
@@ -162,6 +163,7 @@ export class ThreadFeature {
         opened.messages,
         current.workMode,
         opened.composeActivities,
+        opened.threadMode === "build" || opened.threadMode === "compose" ? opened.threadMode : null,
       ))
       options.onSuccess?.()
     } catch {

@@ -25,6 +25,7 @@ export function SkillPicker(props: {
   onSelect: (skill: SkillMenuItem) => void
   onHover: (index: number) => void
   onClose: () => void
+  workMode?: "build" | "compose"
 }) {
   return (
     <SearchPicker
@@ -32,6 +33,7 @@ export function SkillPicker(props: {
       loading={props.loading}
       error={props.error}
       items={props.skills}
+      workMode={props.workMode}
       query={props.query}
       selectedIndex={props.selectedIndex}
       terminalWidth={props.terminalWidth}
@@ -71,6 +73,7 @@ export function ThreadPicker(props: {
   onSelect: (thread: ThreadPickerItem) => void
   onHover: (index: number) => void
   onClose: () => void
+  workMode?: "build" | "compose"
 }) {
   return (
     <SearchPicker
@@ -78,6 +81,7 @@ export function ThreadPicker(props: {
       loading={props.loading}
       error={props.error}
       items={props.threads}
+      workMode={props.workMode}
       query={props.query}
       selectedIndex={props.selectedIndex}
       terminalWidth={props.terminalWidth}

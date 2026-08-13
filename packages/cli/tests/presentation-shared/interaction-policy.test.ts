@@ -6,6 +6,7 @@ import {
   QUESTION_OTHER_VALUE,
   approvalDecisionDescription,
   approvalDecisionLabel,
+  completeQuestionAnswers,
 } from "../../src/presentation-shared/interaction-policy"
 
 test("approval 选项顺序稳定：先批准类、再拒绝类", () => {
@@ -28,4 +29,14 @@ test("approval 选项描述可读且不与标签重复", () => {
 
 test("question 其他选项占位值与 agent 端约定一致", () => {
   expect(QUESTION_OTHER_VALUE).toBe("__other__")
+})
+
+test("首题回答会补齐后续问题，避免多题 ask_user 被校验卡住", () => {
+  expect(completeQuestionAnswers(
+    [{ id: "question-1" }, { id: "question-2" }],
+    "基础语法示例（变量、循环、方法、面向对象）",
+  )).toEqual({
+    "question-1": ["基础语法示例（变量、循环、方法、面向对象）"],
+    "question-2": ["(no answer)"],
+  })
 })

@@ -3,12 +3,12 @@
 import { TextAttributes, type ScrollBoxRenderable } from "@opentui/core"
 import { type ReactNode, type RefObject, useMemo, useState } from "react"
 
-import type { ComposeProjection, ComposeSummaryCard, ConversationMessage, InteractionCard, ReasoningCard, TimelineItem, ToolCard } from "../../interactive/state"
+import type { ComposeProjection, ComposeSummaryCard, ConversationMessage, InteractionCard, ReasoningCard, TimelineItem } from "../../interactive/state"
 import type { InteractiveSnapshot } from "../../interactive/types"
 import { formatContext, formatDuration, formatElapsed, formatUsage } from "../../presentation-shared/formatters"
 import { diffTextForRenderer, parseFileDiff } from "../../presentation-shared/file-diff"
 import { resolveLanguageForPath } from "../../presentation-shared/language-catalog"
-import { APPROVAL_DECISION_ORDER, approvalDecisionDescription, approvalDecisionLabel, isApprovalDecision } from "../../presentation-shared/interaction-policy"
+
 import {
   COMPOSE_STAGE_LABELS,
   activityGroupSubtitle,
@@ -18,13 +18,14 @@ import {
   segmentTimeline,
   type TimelineActivityGroup,
 } from "../../presentation-shared/timeline-activity-groups"
-import { activityLabel, interactionStatusLabel, progressPhaseLabel, toolStatusLabel } from "../../presentation-shared/timeline-presenter"
-import { collapseToolOutput } from "../../presentation-shared/tool-output-policy"
+import { activityLabel, interactionStatusLabel, progressPhaseLabel } from "../../presentation-shared/timeline-presenter"
+import { nextThinkingExpanded, thinkingVisibleBody } from "../../presentation-shared/paint-budget"
 import { getCommonSyntaxClient } from "../platform/syntax-parsers"
-import { PROMPT_BORDER, useRunElapsed, useSpinner } from "./composer"
+import { useRunElapsed, useSpinner } from "./input-bar"
+import { ToolRenderer } from "./tools/renderers"
 import { createScrollAcceleration } from "./scroll.js"
-import { markdownSyntax, tuiTheme } from "./theme"
-import type { ApprovalDecision } from "./types"
+import { markdownSyntax, tuiTheme, userMessageAccent } from "./theme"
+
 
 function stageColor(status: string): string {
   if (status === "passed" || status === "completed") return tuiTheme.success
@@ -40,6 +41,12 @@ function renderComposeProgress(interactive: InteractiveSnapshot): React.ReactNod
   const summary = interactive.lastRun?.composeSummary
   if (!summary) return null
   return <ComposeProgress state={summary} />
+}
+
+/** 窄行截断 Compose 进度文案，避免任务/证据标题撑破时间线。 */
+function shorten(value: string, limit: number): string {
+  if (value.length <= limit) return value
+  return `${value.slice(0, Math.max(0, limit - 1))}…`
 }
 
 /** Compose 运行进度：只显示五阶段、当前 task、evidence 与 blocked 摘要。 */
@@ -78,8 +85,6 @@ export function ConversationTimeline(props: {
   showToolDetails: boolean
   expandedTools: ReadonlySet<string>
   onToggleTool: (toolId: string) => void
-  onApproval: (decision: ApprovalDecision) => void
-  onQuestion: (answer: string) => void
   modelName?: string
   transientNotice?: { id: string; message: string }
   terminalWidth: number
@@ -88,6 +93,7 @@ export function ConversationTimeline(props: {
     () => segmentTimeline(props.interactive.timeline),
     [props.interactive.timeline],
   )
+  const pendingRequestId = props.interactive.interaction?.requestId ?? null
   // 用户显式展开/折叠的 activity；缺省遵循 terminal 默认折叠。
   const [expandedActivities, setExpandedActivities] = useState<ReadonlySet<string>>(() => new Set())
   const [collapsedActivities, setCollapsedActivities] = useState<ReadonlySet<string>>(() => new Set())
@@ -122,6 +128,7 @@ export function ConversationTimeline(props: {
       <box height={1} />
       {segments.map(segment => {
         if (segment.kind === "flat") {
+          if (isPendingLiveInteraction(segment.item, pendingRequestId)) return null
           return (
             <TimelineRow
               key={timelineItemKey(segment.item)}
@@ -130,8 +137,6 @@ export function ConversationTimeline(props: {
               showToolDetails={props.showToolDetails}
               expandedTools={props.expandedTools}
               onToggleTool={props.onToggleTool}
-              onApproval={props.onApproval}
-              onQuestion={props.onQuestion}
               terminalWidth={props.terminalWidth}
             />
           )
@@ -145,7 +150,7 @@ export function ConversationTimeline(props: {
               <text fg={tuiTheme.text} attributes={TextAttributes.BOLD}>{activityGroupTitle(group)}</text>
               <text fg={tuiTheme.muted}>{activityGroupSubtitle(group)}</text>
             </box>
-            {open ? group.items.map(item => (
+            {open ? group.items.filter(item => !isPendingLiveInteraction(item, pendingRequestId)).map(item => (
               <TimelineRow
                 key={timelineItemKey(item)}
                 item={item}
@@ -153,8 +158,6 @@ export function ConversationTimeline(props: {
                 showToolDetails={props.showToolDetails}
                 expandedTools={props.expandedTools}
                 onToggleTool={props.onToggleTool}
-                onApproval={props.onApproval}
-                onQuestion={props.onQuestion}
                 terminalWidth={props.terminalWidth}
               />
             )) : group.summary ? (
@@ -168,7 +171,8 @@ export function ConversationTimeline(props: {
       {/* 当前阶段状态贴近执行区底部，长历史时不因插在顶部而滚出视口。 */}
       <TimelineActivity interactive={props.interactive} />
       {renderComposeProgress(props.interactive)}
-      <RunSummary interactive={props.interactive} modelName={props.modelName} />
+      <ErrorBlock interactive={props.interactive} />
+      <RunFooter interactive={props.interactive} modelName={props.modelName} />
       {props.transientNotice ? <TransientNotice key={props.transientNotice.id} message={props.transientNotice.message} /> : null}
       <box height={1} />
     </scrollbox>
@@ -190,33 +194,30 @@ function TransientNotice(props: { message: string }) {
  * 否则工具卡片会被错误地堆到所有回答文本之后。
  */
 /** 根据统一 timeline item 类型选择消息或工具渲染器。 */
+function isPendingLiveInteraction(item: TimelineItem, pendingRequestId: string | null): boolean {
+  return pendingRequestId !== null
+    && item.type === "interaction"
+    && item.interaction.id === pendingRequestId
+    && item.interaction.status === "pending"
+}
+
 function TimelineRow(props: {
   item: TimelineItem
   interactive: InteractiveSnapshot
   showToolDetails: boolean
   expandedTools: ReadonlySet<string>
   onToggleTool: (toolId: string) => void
-  onApproval: (decision: ApprovalDecision) => void
-  onQuestion: (answer: string) => void
   terminalWidth: number
 }) {
   if (props.item.type === "message") return <MessageBlock message={props.item.message} />
   if (props.item.type === "reasoning") return <ReasoningRow reasoning={props.item.reasoning} />
   if (props.item.type === "interaction") {
-    return <InteractionRow interaction={props.item.interaction} activeInteraction={props.interactive.interaction} onApproval={props.onApproval} onQuestion={props.onQuestion} terminalWidth={props.terminalWidth} />
+    return <InteractionRow interaction={props.item.interaction} />
   }
   if (props.item.type === "compose-summary") {
     return <ComposeSummaryRow summary={props.item.summary} />
   }
-  const tool = props.item.tool
-  const toolKey = toolTimelineKey(tool)
-  return (
-    <ToolRow
-      tool={tool}
-      expanded={props.showToolDetails || props.expandedTools.has(toolKey) || tool.status !== "completed"}
-      onToggle={() => props.onToggleTool(toolKey)}
-    />
-  )
+  return <ToolRenderer tool={props.item.tool} terminalWidth={props.terminalWidth} />
 }
 
 /** 阶段 Runtime 摘要：非 assistant 文本，仅展示有界结果。 */
@@ -236,10 +237,9 @@ function ComposeSummaryRow(props: { summary: ComposeSummaryCard }) {
 function MessageBlock(props: { message: ConversationMessage }) {
   if (props.message.role === "user") {
     return (
-      <box marginTop={1} marginLeft={2} marginRight={2} border={["left"]} borderColor={tuiTheme.primary} customBorderChars={PROMPT_BORDER}>
-        <box backgroundColor={tuiTheme.panel} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
-          <text content={props.message.content} fg={tuiTheme.text} />
-        </box>
+      <box marginTop={1} paddingLeft={2} paddingRight={2} flexDirection="row" gap={1}>
+        <text fg={userMessageAccent(props.message.workMode)}>▌</text>
+        <text content={props.message.content} fg={tuiTheme.text} />
       </box>
     )
   }
@@ -254,10 +254,17 @@ function MessageBlock(props: { message: ConversationMessage }) {
     )
   }
 
+  return <SystemEvent content={props.message.content} />
+}
+
+/** 压缩、中断、Skill 加载等系统事件：一行 muted，不走工具/错误块。 */
+function SystemEvent(props: { content: string }) {
+  const loaded = props.content.match(/^skill-loaded:\s*(.+)$/)
+  const text = loaded ? `已加载 Skill ${loaded[1]}` : props.content
   return (
     <box marginTop={1} paddingLeft={3} paddingRight={3} flexDirection="row" gap={1}>
       <text fg={tuiTheme.subtle}>·</text>
-      <text content={props.message.content} fg={tuiTheme.muted} />
+      <text content={text} fg={tuiTheme.muted} />
     </box>
   )
 }
@@ -287,54 +294,26 @@ function DiffMessageBlock(props: { diff: string }) {
   return <diff width="100%" diff={diffTextForRenderer(props.diff)} view="unified" syncScroll showLineNumbers wrapMode="word" fg={tuiTheme.text} lineNumberFg={tuiTheme.muted} lineNumberBg={tuiTheme.toolSurface} addedBg={tuiTheme.diffAddedBackground} removedBg={tuiTheme.diffRemovedBackground} contextBg={tuiTheme.toolSurface} addedSignColor={tuiTheme.success} removedSignColor={tuiTheme.danger} addedLineNumberBg={tuiTheme.diffAddedBackground} removedLineNumberBg={tuiTheme.diffRemovedBackground} />
 }
 
-/** 渲染工具状态、折叠预览和可展开原始输出。 */
-function ToolRow(props: { tool: ToolCard; expanded: boolean; onToggle: () => void }) {
-  const tone = props.tool.status === "failed" ? tuiTheme.danger : props.tool.status === "completed" ? tuiTheme.success : tuiTheme.primary
-  const marker = props.tool.status === "failed" ? "×" : props.tool.status === "completed" ? "✓" : "◌"
-  const label = toolStatusLabel(props.tool.status)
-  const collapsed = collapseToolOutput(props.tool.output, 4, 360)
-  const output = props.expanded ? props.tool.output : collapsed.output
-  const argumentsPreview = collapseToolOutput(props.tool.arguments, 1, 240).output
-
-  return (
-    <box marginTop={1} marginLeft={3} marginRight={3} border={["left"]} borderColor={tone} customBorderChars={PROMPT_BORDER}>
-      <box backgroundColor={tuiTheme.toolSurface} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1} onMouseUp={props.onToggle}>
-        <box flexDirection="row" justifyContent="space-between" gap={2}>
-          <box flexDirection="row" gap={1} flexShrink={1}>
-            <text fg={tone}>{marker}</text>
-            <text fg={tuiTheme.text}>{props.tool.name}</text>
-            <text fg={tuiTheme.muted}>{label}</text>
-          </box>
-          {collapsed.overflow ? <text fg={tuiTheme.subtle}>{props.expanded ? "收起结果" : "展开结果"}</text> : null}
-        </box>
-        {argumentsPreview ? (
-          <box paddingTop={1} flexDirection="row" gap={1}>
-            <text fg={tuiTheme.subtle}>›</text>
-            <text content={argumentsPreview} fg={tuiTheme.subtle} />
-          </box>
-        ) : null}
-        {output ? <text content={output} fg={tuiTheme.muted} /> : null}
-      </box>
-    </box>
-  )
-}
-
-/** 时间线中的思考条目：流式中显示 spinner+全文，冻结后折叠为可展开摘要头。 */
+/** 时间线中的思考条目：标记与正文分列，正文与 Thinking 左对齐。 */
 function ReasoningRow(props: { reasoning: ReasoningCard }) {
   const { reasoning } = props
   const [expanded, setExpanded] = useState(false)
   const frame = useSpinner(reasoning.active, 80)
   const firstLine = reasoning.text.split("\n")[0] ?? ""
-  const showFull = expanded || reasoning.active
+  const paintState = reasoning.active ? "live" : expanded ? "expanded" : "collapsed"
+  const body = thinkingVisibleBody(reasoning.text, paintState)
+  const marker = reasoning.active ? frame : expanded ? "-" : "+"
   return (
-    <box marginTop={1} marginLeft={3} marginRight={3} border={["left"]} borderColor={tuiTheme.primarySoft} customBorderChars={PROMPT_BORDER}>
-      <box backgroundColor={tuiTheme.toolSurface} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1} onMouseUp={() => setExpanded(current => !current)}>
+    <box marginTop={1} paddingLeft={3} paddingRight={3} flexDirection="row" gap={2} onMouseUp={() => setExpanded(current => nextThinkingExpanded(reasoning.active, current))}>
+      <text fg={tuiTheme.thinking}>{marker}</text>
+      <box flexDirection="column" flexShrink={1}>
         <box flexDirection="row" gap={1}>
-          {reasoning.active ? <text fg={tuiTheme.warning}>{frame}</text> : <text fg={tuiTheme.primary}>◆</text>}
-          <text fg={tuiTheme.primary}>{reasoning.active ? "思考中" : "思考"}</text>
-          {reasoning.active ? null : <text fg={tuiTheme.muted}>{expanded ? "收起" : "展开"}</text>}
+          <text fg={tuiTheme.thinking}>Thinking</text>
+          {reasoning.active ? null : <text fg={tuiTheme.subtle}>{expanded ? "收起" : "展开"}</text>}
         </box>
-        {showFull ? <text content={reasoning.text} fg={tuiTheme.muted} /> : <text content={firstLine} fg={tuiTheme.muted} />}
+        {paintState === "collapsed" && firstLine ? <text content={firstLine} fg={tuiTheme.muted} /> : null}
+        {body.text ? <text content={body.text} fg={tuiTheme.muted} /> : null}
+        {body.overflow && paintState !== "collapsed" ? <text fg={tuiTheme.subtle}>还有 {body.hiddenLines} 行</text> : null}
       </box>
     </box>
   )
@@ -371,91 +350,54 @@ function TimelineActivity(props: { interactive: InteractiveSnapshot }) {
   )
 }
 
-/** 显示运行终态、耗时和 token 用量摘要。 */
-function RunSummary(props: { interactive: InteractiveSnapshot; modelName?: string }) {
+/** 仅 Run / 连接级失败；工具失败留在对应 Tool 组件。 */
+function ErrorBlock(props: { interactive: InteractiveSnapshot }) {
+  const { interactive } = props
+  const connection = interactive.connection
+  if (connection.status === "protocol-error" || connection.status === "closed") {
+    return (
+      <box marginTop={1} paddingLeft={3} paddingRight={3} flexDirection="column">
+        <text fg={tuiTheme.danger}>运行失败</text>
+        <text content={connection.message} fg={tuiTheme.muted} />
+      </box>
+    )
+  }
+  if (interactive.lastRun?.outcome !== "failed" && interactive.activity.kind !== "failed") return null
+  return (
+    <box marginTop={1} paddingLeft={3} paddingRight={3} flexDirection="column">
+      <text fg={tuiTheme.danger}>运行失败</text>
+    </box>
+  )
+}
+
+/** 一轮结束后一行 muted：模型 · 耗时 · 用量。失败改走 ErrorBlock。 */
+function RunFooter(props: { interactive: InteractiveSnapshot; modelName?: string }) {
   const summary = props.interactive.lastRun
-  if (!summary) return null
+  if (!summary || summary.outcome === "failed") return null
   const duration = formatDuration(summary.durationMs)
   const usage = formatUsage(summary.usage)
   const context = summary.context?.estimatedTokens && summary.context.inputCapTokens
     ? `ctx ${formatContext(summary.context.estimatedTokens, summary.context.inputCapTokens)}`
     : undefined
-  const outcome = summary.outcome === "completed" ? "已完成" : summary.outcome === "cancelled" ? "已取消" : "失败"
-  const color = summary.outcome === "completed" ? tuiTheme.success : summary.outcome === "cancelled" ? tuiTheme.muted : tuiTheme.danger
+  const outcome = summary.outcome === "cancelled" ? "已取消" : "已完成"
   const parts = [outcome, props.modelName, duration, usage, context].filter((part): part is string => Boolean(part))
 
   return (
     <box marginTop={1} paddingLeft={3} flexDirection="row" gap={1}>
-      <text fg={color}>●</text>
       <text fg={tuiTheme.muted}>{parts.join(" · ")}</text>
     </box>
   )
 }
 
-/** 审批和问答是不可脱离时间线的阻塞事件，完成后保留用户处理结果。 */
-function InteractionRow(props: {
-  interaction: InteractionCard
-  activeInteraction?: InteractiveSnapshot["interaction"]
-  onApproval: (decision: ApprovalDecision) => void
-  onQuestion: (answer: string) => void
-  terminalWidth: number
-}) {
+/** 已完成的审批/问答只留一行结果；pending 由底部 Dock 处理。 */
+function InteractionRow(props: { interaction: InteractionCard }) {
   const { interaction } = props
-  const pending = interaction.status === "pending"
-  const approval = interaction.type === "approval"
-  const tone = approval ? tuiTheme.warning : tuiTheme.primary
-  const allowedDecisions = props.activeInteraction?.type === "approval" ? props.activeInteraction.decisions : APPROVAL_DECISION_ORDER
-  const decisionOptions = allowedDecisions
-    .filter(isApprovalDecision)
-    .map(decision => ({ name: approvalDecisionLabel(decision), description: approvalDecisionDescription(decision), value: decision }))
-
+  if (interaction.status === "pending") return null
   return (
-    <box marginTop={1} marginLeft={2} marginRight={2} border={["left"]} borderColor={tone} customBorderChars={PROMPT_BORDER}>
-      <box backgroundColor={tuiTheme.toolSurface} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
-        <box flexDirection="row" gap={1}>
-          <text fg={tone}>{approval ? "△" : "?"}</text>
-          <text fg={tuiTheme.text}><strong>{approval ? "需要审批" : "Agent 需要你的回答"}</strong></text>
-        </box>
-        {approval ? <>
-          {interaction.description ? <text content={interaction.description} fg={tuiTheme.text} /> : null}
-          {pending && props.activeInteraction?.type === "approval" && props.activeInteraction.presentation
-            ? <FileDiffApprovalPreview presentation={props.activeInteraction.presentation} terminalWidth={props.terminalWidth} />
-            : <ApprovalRequestPreview requests={interaction.requests} />}
-        </> : interaction.question ? <text content={interaction.question} fg={tuiTheme.text} /> : null}
-        {pending && approval ? (
-          <>
-            <select
-              focused
-              height={Math.max(2, Math.min(10, allowedDecisions.length * 2))}
-              showDescription
-              wrapSelection
-              options={decisionOptions}
-              onSelect={(_, option) => {
-                const value = option?.value
-                if (value === "approve_once" || value === "approve_thread" || value === "approve_project" || value === "reject" || value === "reject_with_feedback") {
-                  props.onApproval(value)
-                }
-              }}
-            />
-            <text fg={tuiTheme.muted}>↑↓ 选择 · Enter 确认</text>
-          </>
-        ) : null}
-        {pending && !approval && interaction.options?.length ? (
-          <>
-            <select
-              focused
-              height={Math.max(2, Math.min(6, interaction.options.length * 2))}
-              showDescription
-              wrapSelection
-              options={interaction.options.map(option => ({ ...option, description: option.name }))}
-              onSelect={(_, option) => { if (typeof option?.value === "string") props.onQuestion(option.value) }}
-            />
-            <text fg={tuiTheme.muted}>↑↓ 选择 · Enter 确认</text>
-          </>
-        ) : null}
-        {pending && !approval && !interaction.options?.length ? <text fg={tuiTheme.muted}>等待回答</text> : null}
-        {!pending ? <text fg={interactionStatusColor(interaction.status)}>{interactionStatusLabel(interaction.status)}</text> : null}
-      </box>
+    <box marginTop={1} paddingLeft={3} paddingRight={3} flexDirection="row" gap={1}>
+      <text fg={interactionStatusColor(interaction.status)}>{interaction.type === "approval" ? "△" : "?"}</text>
+      <text fg={tuiTheme.muted}>{interactionStatusLabel(interaction.status)}</text>
+      {interaction.description ? <text content={interaction.description} fg={tuiTheme.subtle} /> : null}
     </box>
   )
 }
@@ -463,63 +405,6 @@ function InteractionRow(props: {
 /** 终端审批内容达到 120 列时使用双栏，否则使用行内 Diff。 */
 export function tuiDiffViewForWidth(contentWidth: number): "split" | "unified" {
   return contentWidth >= 120 ? "split" : "unified"
-}
-
-/** 使用 OpenTUI 原生 Diff renderer 展示同一 prepared plan 的有界预览。 */
-function FileDiffApprovalPreview(props: {
-  presentation: NonNullable<Extract<InteractiveSnapshot["interaction"], { type: "approval" }>["presentation"]>
-  terminalWidth: number
-}) {
-  const { presentation } = props
-  const contentWidth = Math.max(1, props.terminalWidth - 10)
-  const view = tuiDiffViewForWidth(contentWidth)
-  const language = resolveLanguageForPath(presentation.path).tuiParser
-  const parsed = parseFileDiff(presentation.unified_diff)
-  const operation = presentation.operation === "write" ? "创建文件" : presentation.operation === "delete" ? "删除文件" : "编辑文件"
-  const summary = `${operation} · ${presentation.path} · +${presentation.added_lines} / -${presentation.removed_lines}`
-  return (
-    <box flexDirection="column" marginTop={1}>
-      <text content={summary} fg={tuiTheme.text} />
-      {presentation.truncated ? (
-        <text content="预览已按 200 行或 16 KiB 上限截断；批准仍会应用完整变更。" fg={tuiTheme.warning} />
-      ) : null}
-      {presentation.unified_diff === "" ? (
-        <text content="创建空文件（没有可显示的内容行）" fg={tuiTheme.muted} />
-      ) : parsed.status === "invalid" ? (
-        <>
-          <text content="无法解析结构化 Diff，以下按纯文本展示。" fg={tuiTheme.warning} />
-          <text content={presentation.unified_diff} fg={tuiTheme.text} />
-        </>
-      ) : (
-        <diff
-          width="100%"
-          diff={diffTextForRenderer(presentation.unified_diff)}
-          view={view}
-          syncScroll
-          filetype={language === "plaintext" ? undefined : language}
-          syntaxStyle={markdownSyntax}
-          treeSitterClient={getCommonSyntaxClient()}
-          showLineNumbers
-          wrapMode="word"
-          fg={tuiTheme.text}
-          lineNumberFg={tuiTheme.muted}
-          lineNumberBg={tuiTheme.toolSurface}
-          addedBg={tuiTheme.diffAddedBackground}
-          removedBg={tuiTheme.diffRemovedBackground}
-          contextBg={tuiTheme.toolSurface}
-          addedSignColor={tuiTheme.success}
-          removedSignColor={tuiTheme.danger}
-          addedLineNumberBg={tuiTheme.diffAddedBackground}
-          removedLineNumberBg={tuiTheme.diffRemovedBackground}
-        />
-      )}
-    </box>
-  )
-}
-
-/** 为同一 run 重复出现的 provider tool ID 生成稳定的渲染和展开键。 */
-function toolTimelineKey(tool: ToolCard): string {
-  return ["tool", tool.runId, tool.id].join(":")
 }
 
 /** 为时间线事件提供不会跨 run/activity 冲突的 React key。 */
@@ -537,43 +422,4 @@ function timelineItemKey(item: TimelineItem): string {
 function interactionStatusColor(status: InteractionCard["status"]): string {
   if (status === "rejected" || status === "cancelled") return tuiTheme.warning
   return tuiTheme.success
-}
-
-
-/** 将审批请求中的动作摘要交给工具面板显示。 */
-function ApprovalRequestPreview(props: { requests: unknown }) {
-  const preview = approvalPreview(props.requests)
-  return preview ? <text content={preview} fg={tuiTheme.muted} /> : null
-}
-
-/** 从不可信审批 payload 中提取有限长度的安全预览。 */
-function approvalPreview(requests: unknown): string | undefined {
-  if (!requests || typeof requests !== "object") return undefined
-  const actions = (requests as Record<string, unknown>).action_requests
-  if (!Array.isArray(actions) || actions.length === 0) return undefined
-  return actions.slice(0, 2).flatMap(action => {
-    if (!action || typeof action !== "object") return []
-    const record = action as Record<string, unknown>
-    const name = typeof record.name === "string" ? record.name : "tool"
-    const args = safePreview(record.args)
-    return [`${name}${args ? ` · ${args}` : ""}`]
-  }).join("\n")
-}
-
-
-/** 按字符数截断普通预览文本。 */
-function shorten(value: string, limit: number): string {
-  if (value.length <= limit) return value
-  return `${value.slice(0, Math.max(0, limit - 1))}…`
-}
-
-
-/** 安全序列化工具参数，避免循环引用破坏整个 TUI。 */
-function safePreview(value: unknown): string | undefined {
-  if (value === undefined) return undefined
-  try {
-    return shorten(JSON.stringify(value), 120)
-  } catch {
-    return "参数不可序列化"
-  }
 }

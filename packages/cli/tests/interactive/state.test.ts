@@ -411,6 +411,47 @@ function composeEvent(sequence: number, payload: Record<string, unknown>) {
   return event("compose.state", sequence, payload)
 }
 
+test("用户消息在 startRun 写入当时 workMode，切换会话 Mode 不回写旧消息", () => {
+  let state = startRun(createInitialState(), run, "先 Build")
+  const first = messages(state)[0]
+  expect(first).toMatchObject({ role: "user", content: "先 Build", workMode: "build" })
+
+  state = setWorkMode({ ...state, activeRun: null, activity: { kind: "idle" } }, "compose")
+  expect(messages(state)[0]?.workMode).toBe("build")
+
+  state = startRun(state, { threadId: "thread-1", runId: "run-2" }, "再 Compose")
+  expect(messages(state).map(item => item.workMode)).toEqual(["build", "compose"])
+})
+
+test("run.started 只给尚未带 Mode 的本 Run 用户消息补 mode", () => {
+  let state = startRun(createInitialState(), run, "补 Mode")
+  const timeline = state.timeline.map(item => {
+    if (item.type !== "message" || item.message.role !== "user") return item
+    const { workMode: _ignored, ...message } = item.message
+    return { type: "message" as const, message }
+  })
+  state = applyAgentEvent({ ...state, timeline }, event("run.started", 1, { mode: "compose", resumed: false }))
+  expect(messages(state)[0]?.workMode).toBe("compose")
+})
+
+test("恢复 Thread 时缺 workMode 的用户消息用 threadMode，否则 build；缺字段不抛错", () => {
+  const withoutMode = restoreThread("restored-thread", [
+    { kind: "user", content: "历史请求" },
+    { kind: "assistant", content: "历史回答" },
+  ])
+  expect(messages(withoutMode)[0]).toMatchObject({ role: "user", content: "历史请求", workMode: "build" })
+  expect(messages(withoutMode)[1]?.workMode).toBeUndefined()
+
+  const composeLocked = restoreThread(
+    "compose-thread",
+    [{ kind: "user", content: "Compose 历史" }],
+    "build",
+    [],
+    "compose",
+  )
+  expect(messages(composeLocked)[0]?.workMode).toBe("compose")
+})
+
 test("workMode 默认 build，可在空闲时切换并跨 Run 保留", () => {
   const initial = createInitialState()
   expect(initial.workMode).toBe("build")

@@ -117,7 +117,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
   }, [scrollToBottom, snapshot.scrollRequest])
 
   /** textarea 只负责光标边界和滚动 ref，历史业务交给 Adapter。 */
-  const handleComposerKeyDown = useCallback((key: KeyEvent) => {
+  const handleInputBarKeyDown = useCallback((key: KeyEvent) => {
     if (
       snapshot.commandMenu.visible
       || snapshot.commandDialog
@@ -215,7 +215,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
     conversationScrollRef,
     value: snapshot.draft,
     onInput: (value: string) => { void adapter.dispatch({ type: "draft-input", value }) },
-    onComposerKeyDown: handleComposerKeyDown,
+    onInputBarKeyDown: handleInputBarKeyDown,
     onSubmit: () => { void adapter.dispatch({ type: "submit", value: inputRef.current?.plainText ?? snapshot.draft }) },
     commandMenu: snapshot.commandMenu,
     commandOptions: snapshot.commandOptions,
@@ -249,7 +249,9 @@ export function Za38Tui(options: RenderedTuiOptions) {
         onSearch={query => { void adapter.dispatch({ type: "picker-search", picker: "skills", query }) }}
         onSelect={skill => { void adapter.dispatch({ type: "picker-select-skill", skill }) }}
         onHover={selectedIndex => { void adapter.dispatch({ type: "picker-hover", picker: "skills", selectedIndex }) }}
-        onClose={() => { void adapter.dispatch({ type: "picker-close", picker: "skills" }) }}      />
+        onClose={() => { void adapter.dispatch({ type: "picker-close", picker: "skills" }) }}
+        workMode={interactive.workMode}
+      />
       <ThreadPicker
         visible={snapshot.threads.visible}
         loading={snapshot.threads.loading}
@@ -265,7 +267,9 @@ export function Za38Tui(options: RenderedTuiOptions) {
         onSearch={query => { void adapter.dispatch({ type: "picker-search", picker: "threads", query }) }}
         onSelect={thread => { void adapter.dispatch({ type: "picker-select-thread", thread }) }}
         onHover={selectedIndex => { void adapter.dispatch({ type: "picker-hover", picker: "threads", selectedIndex }) }}
-        onClose={() => { void adapter.dispatch({ type: "picker-close", picker: "threads" }) }}      />
+        onClose={() => { void adapter.dispatch({ type: "picker-close", picker: "threads" }) }}
+        workMode={interactive.workMode}
+      />
       <SearchPicker<ModelProfile>
         visible={snapshot.models.visible}
         loading={snapshot.models.loading}
@@ -289,6 +293,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
         onSelect={model => { void adapter.dispatch({ type: "picker-select-model", model }) }}
         onHover={selectedIndex => { void adapter.dispatch({ type: "picker-hover", picker: "models", selectedIndex }) }}
         onClose={() => { void adapter.dispatch({ type: "picker-close", picker: "models" }) }}
+        workMode={interactive.workMode}
       />
       <DialogShell
         visible={snapshot.commandDialog?.kind === "confirm-new-thread"}

@@ -3,7 +3,7 @@
 import { RGBA, type OptimizedBuffer, type TextareaRenderable } from "@opentui/core"
 import { useEffect, useRef, type ReactNode, type RefObject } from "react"
 
-import { tuiTheme } from "./theme"
+import { modeAccent, tuiTheme } from "./theme"
 import { createScrollAcceleration } from "./scroll.js"
 
 /** SearchPicker 行渲染器可使用的稳定布局数据，未来 Model Picker 不需要重写终端尺寸逻辑。 */
@@ -33,6 +33,8 @@ export type SearchPickerProps<T> = {
   loadingMessage?: string
   /** 领域 Picker 可选的底部说明；用于表达选择后的持久化语义。 */
   footer?: ReactNode
+  /** 选中行与光标走当前 Mode；缺省按 Build。 */
+  workMode?: "build" | "compose"
   itemKey: (item: T) => string
   renderItem: (item: T, context: SearchPickerRenderContext) => ReactNode
   onSearch: (query: string) => void
@@ -78,6 +80,7 @@ export function SearchPicker<T>(props: SearchPickerProps<T>) {
     return () => clearTimeout(timer)
   }, [props.restoreFocusRef, props.searchRef, props.shouldRestoreFocus, props.visible])
   if (!props.visible) return null
+  const accent = modeAccent(props.workMode ?? "build")
 
   return (
     <OverlayShell terminalWidth={props.terminalWidth} terminalHeight={props.terminalHeight} placement="picker">
@@ -91,7 +94,7 @@ export function SearchPicker<T>(props: SearchPickerProps<T>) {
           return (
             <box
               key={props.itemKey(item)}
-              backgroundColor={selected ? tuiTheme.pickerActive : tuiTheme.menu}
+              backgroundColor={selected ? accent : tuiTheme.menu}
               height={1}
               paddingLeft={3}
               paddingRight={3}
@@ -122,7 +125,7 @@ export function SearchPicker<T>(props: SearchPickerProps<T>) {
                   focusedTextColor={tuiTheme.text}
                   backgroundColor={tuiTheme.menu}
                   focusedBackgroundColor={tuiTheme.menu}
-                  cursorColor={tuiTheme.primary}
+                  cursorColor={accent}
                   minHeight={1}
                   maxHeight={1}
                   keyBindings={PICKER_SEARCH_KEY_BINDINGS}

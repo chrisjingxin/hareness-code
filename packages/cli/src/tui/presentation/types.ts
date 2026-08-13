@@ -23,7 +23,7 @@ export type SharedViewProps = {
   conversationScrollRef: RefObject<ScrollBoxRenderable | null>
   value: string
   onInput: (value: string) => void
-  onComposerKeyDown: (event: KeyEvent) => void
+  onInputBarKeyDown: (event: KeyEvent) => void
   onSubmit: () => void
   commandMenu: CommandMenuState
   commandOptions: readonly CommandMenuItem[]

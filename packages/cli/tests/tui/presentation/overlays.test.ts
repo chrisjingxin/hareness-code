@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test"
-import { type TextareaRenderable } from "@opentui/core"
+import { RGBA, type TextareaRenderable } from "@opentui/core"
 import { testRender } from "@opentui/react/test-utils"
 import { act, createElement, createRef } from "react"
 
 import { DialogShell, SearchPicker } from "../../../src/tui/presentation/overlays"
+import { modeAccent, tuiTheme } from "../../../src/tui/presentation/theme"
 
 type PickerItem = {
   id: string
@@ -124,6 +125,42 @@ test("DialogShell 使用统一确认布局，并允许紧邻动作插入自定�
     expect(frame).toContain("可由 /compact 复用的额外内容")
     expect(frame).toContain("Enter 确认")
     expect(frame).toContain("Esc 取消")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("SearchPicker 选中行使用当前 Mode 色，而不是固定金", async () => {
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(SearchPicker<PickerItem>, {
+      visible: true,
+      loading: false,
+      items,
+      query: "",
+      selectedIndex: 1,
+      workMode: "compose",
+      terminalWidth: 100,
+      terminalHeight: 30,
+      searchRef: createRef<TextareaRenderable>(),
+      searchId: "mode-search",
+      title: "Models",
+      searchPlaceholder: "搜索模型...",
+      emptyMessage: "没有匹配的模型",
+      itemKey: item => item.id,
+      renderItem: item => createElement("text", null, item.label),
+      onSearch: () => undefined,
+      onSelect: () => undefined,
+      onHover: () => undefined,
+      onClose: () => undefined,
+    }), { width: 100, height: 30 })
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const spans = setup.captureSpans().lines.flatMap(line => line.spans)
+    const selected = spans.find(span => span.text.includes("Model B"))
+    expect(selected?.bg.toInts()).toEqual(RGBA.fromHex(modeAccent("compose")).toInts())
+    expect(RGBA.fromHex(tuiTheme.pickerActive).toInts()).not.toEqual(RGBA.fromHex(modeAccent("compose")).toInts())
   } finally {
     await act(async () => { setup.renderer.destroy() })
   }

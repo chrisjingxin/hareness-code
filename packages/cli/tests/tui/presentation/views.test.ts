@@ -5,11 +5,11 @@ import { act, createElement, createRef } from "react"
 
 import type { InteractiveSnapshot } from "../../../src/interactive/types"
 import { createInteractiveRuntime } from "../../../src/interactive/runtime"
-import { createInitialState, startContextCompaction, startRun, type InteractiveState } from "../../../src/interactive/state"
+import { createInitialState, restoreThread, setWorkMode, startContextCompaction, startRun, type InteractiveState } from "../../../src/interactive/state"
 import { registerCommonSyntaxParsers } from "../../../src/tui/platform/syntax-parsers"
 import { HomeView } from "../../../src/tui/presentation/home"
 import { SkillPicker, ThreadPicker } from "../../../src/tui/presentation/pickers"
-import { tuiTheme } from "../../../src/tui/presentation/theme"
+import { tuiTheme, userMessageAccent } from "../../../src/tui/presentation/theme"
 import { ThreadView } from "../../../src/tui/presentation/thread"
 import { tuiDiffViewForWidth } from "../../../src/tui/presentation/timeline"
 
@@ -51,6 +51,8 @@ function snapshotOf(state: InteractiveState): InteractiveSnapshot {
     },
     workMode: state.workMode,
     composeState: state.composeState,
+    workItem: state.workItem ?? null,
+    threadMode: state.threadMode ?? null,
     selection: {
       requestedModelProfileId: null,
       actualModel: null,
@@ -77,6 +79,25 @@ test("紧凑首页保留品牌、输入框和真实底栏信息", async () => {
     expect(frame).toContain("Build")
     expect(frame).toContain("tab modes")
     expect(frame).not.toContain("未隔离")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("首页 Compose 模式输入栏显示 Compose 文案，Logo 仍是品牌字标", async () => {
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(
+      createElement(HomeView, viewProps(snapshotOf(setWorkMode(createInitialState(), "compose")), 80, 24)),
+      { width: 80, height: 24 },
+    )
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("HARNESS CODE")
+    expect(frame).toContain("Compose")
+    expect(frame).not.toContain("Build ·")
   } finally {
     await act(async () => { setup.renderer.destroy() })
   }
@@ -141,6 +162,28 @@ test("首页模型靠左、模式提示靠右，且不重复显示品牌", async
   }
 })
 
+test("用户消息用短竖条渲染，Build 条在会话切到 Compose 后仍显示 ▌", async () => {
+  const run = { threadId: "thread-1", runId: "run-1" }
+  let state = startRun(createInitialState(), run, "帮我重构输入栏")
+  state = setWorkMode({ ...state, activeRun: null, activity: { kind: "idle" } }, "compose")
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(
+      createElement(ThreadView, viewProps(snapshotOf(state), 130, 40)),
+      { width: 130, height: 40 },
+    )
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("▌")
+    expect(frame).toContain("帮我重构输入栏")
+    expect(userMessageAccent(state.timeline[0] && state.timeline[0].type === "message" ? state.timeline[0].message.workMode : undefined)).toBe("#EAB308")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
 test("thread 渲染显示工具卡片和底部 composer", async () => {
   const run = { threadId: "thread-1", runId: "run-1" }
   let state = startRun(createInitialState(), run, "读取文件")
@@ -165,6 +208,231 @@ test("thread 渲染显示工具卡片和底部 composer", async () => {
     const frame = setup.captureCharFrame()
     expect(frame).toContain("read_file")
     expect(frame).toContain("Harness Code")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("write_file 进行中未拼完参数时只显示 Preparing write，不出现 JSON", async () => {
+  const run = { threadId: "thread-write", runId: "run-write" }
+  const started = startRun(createInitialState(), run, "写示例")
+  const state: InteractiveState = {
+    ...started,
+    timeline: [
+      started.timeline[0]!,
+      {
+        type: "tool",
+        tool: {
+          id: "t-write",
+          runId: run.runId,
+          name: "write_file",
+          arguments: "{\"file_path\":\"",
+          output: "",
+          status: "running",
+        },
+      },
+    ],
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(ThreadView, viewProps(snapshotOf(state), 130, 40)), { width: 130, height: 40 })
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("Preparing write")
+    expect(frame).not.toContain("file_path")
+    expect(frame).not.toContain("{\"")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("write_file 展示路径和高亮正文，不把转义 JSON 参数铺开", async () => {
+  const run = { threadId: "thread-write", runId: "run-write" }
+  const started = startRun(createInitialState(), run, "写示例")
+  const content = "print('hello')\nprint('world')\n"
+  const state: InteractiveState = {
+    ...started,
+    timeline: [
+      started.timeline[0]!,
+      {
+        type: "tool",
+        tool: {
+          id: "t-write",
+          runId: run.runId,
+          name: "write_file",
+          arguments: JSON.stringify({ file_path: "/examples/python/jsondiff_usage.py", content }),
+          output: "",
+          status: "completed",
+        },
+      },
+    ],
+    activeRun: null,
+    activity: { kind: "completed", label: "已完成" },
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(ThreadView, viewProps(snapshotOf(state), 130, 40)), { width: 130, height: 40 })
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("jsondiff_usage.py")
+    expect(frame).toContain("print('hello')")
+    expect(frame).not.toContain("file_path")
+    expect(frame).not.toContain("\\n")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("write_file 默认只显示前 12 行并提示还可展开", async () => {
+  const run = { threadId: "thread-write", runId: "run-write" }
+  const started = startRun(createInitialState(), run, "写长文件")
+  const content = Array.from({ length: 30 }, (_, index) => `line_${index + 1}`).join("\n")
+  const state: InteractiveState = {
+    ...started,
+    timeline: [
+      started.timeline[0]!,
+      {
+        type: "tool",
+        tool: {
+          id: "t-write",
+          runId: run.runId,
+          name: "write_file",
+          arguments: JSON.stringify({ file_path: "src/long.py", content }),
+          output: "",
+          status: "completed",
+        },
+      },
+    ],
+    activeRun: null,
+    activity: { kind: "completed", label: "已完成" },
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(ThreadView, viewProps(snapshotOf(state), 130, 40)), { width: 130, height: 40 })
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("line_1")
+    expect(frame).toContain("展开")
+    expect(frame).toContain("还有 18 行")
+    expect(frame).not.toContain("line_30")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("edit_file 用 old/new 显示高亮 Diff，不铺 JSON 参数或结果", async () => {
+  const run = { threadId: "thread-edit", runId: "run-edit" }
+  const started = startRun(createInitialState(), run, "改分类")
+  const state: InteractiveState = {
+    ...started,
+    timeline: [
+      started.timeline[0]!,
+      {
+        type: "tool",
+        tool: {
+          id: "t-edit",
+          runId: run.runId,
+          name: "edit_file",
+          arguments: JSON.stringify({
+            file_path: "/file-organizer.py",
+            snapshot_id: "snap-1",
+            old_string: "    '.pptx': 'documents',",
+            new_string: "    '.pptx': 'media',",
+          }),
+          output: JSON.stringify({ ok: true, path: "/file-organizer.py", replaced: 1 }),
+          status: "completed",
+        },
+      },
+    ],
+    activeRun: null,
+    activity: { kind: "completed", label: "已完成" },
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(ThreadView, viewProps(snapshotOf(state), 130, 40)), { width: 130, height: 40 })
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("file-organizer.py")
+    expect(frame).toContain("documents")
+    expect(frame).toContain("media")
+    expect(frame).not.toContain("snapshot_id")
+    expect(frame).not.toContain("old_string")
+    expect(frame).not.toContain("\"ok\":true")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("恢复 Thread 的 edit_file 不显示 Preparing，用结果窗口高亮而不是 JSON", async () => {
+  const state = restoreThread("restored-thread", [
+    { kind: "user", content: "改分类" },
+    {
+      kind: "tool",
+      toolName: "edit_file",
+      content: JSON.stringify({
+        ok: true,
+        path: "/file-organizer.py",
+        snapshot_id: "snap-1",
+        content: "    '.csv': 'documents',\n",
+      }),
+    },
+  ])
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(ThreadView, viewProps(snapshotOf(state), 130, 40)), { width: 130, height: 40 })
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("file-organizer.py")
+    expect(frame).toContain("documents")
+    expect(frame).not.toContain("Preparing edit")
+    expect(frame).not.toContain("snapshot_id")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("四种工具分流：读文件一行、命令有界块、可解析 diff、未知工具仍能画", async () => {
+  const run = { threadId: "thread-tools", runId: "run-tools" }
+  const started = startRun(createInitialState(), run, "改代码")
+  const longOutput = Array.from({ length: 20 }, (_, index) => `OUT${index + 1}`).join("\n")
+  const state: InteractiveState = {
+    ...started,
+    timeline: [
+      started.timeline[0]!,
+      { type: "tool", tool: { id: "t-read", runId: run.runId, name: "read_file", arguments: "{\"file_path\":\"src/app.ts\"}", output: "ok", status: "completed" } },
+      { type: "tool", tool: { id: "t-exec", runId: run.runId, name: "execute", arguments: "{\"command\":\"bun test\"}", output: longOutput, status: "completed" } },
+      { type: "tool", tool: { id: "t-edit", runId: run.runId, name: "edit_file", arguments: "{\"file_path\":\"src/app.ts\"}", output: "--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1 @@\n-old\n+new\n", status: "completed" } },
+      { type: "tool", tool: { id: "t-task", runId: run.runId, name: "task", arguments: "{\"prompt\":\"explore\"}", output: "done", status: "completed" } },
+    ],
+    activeRun: null,
+    activity: { kind: "completed", label: "已完成" },
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(ThreadView, viewProps(snapshotOf(state), 130, 40)), { width: 130, height: 40 })
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("read_file")
+    expect(frame).toContain("src/app.ts")
+    expect(frame).toContain("execute")
+    expect(frame).toContain("OUT1")
+    expect(frame).toContain("还有 8 行")
+    expect(frame).not.toContain("OUT20")
+    expect(frame).toContain("edit_file")
+    expect(frame).toContain("task")
+    expect(frame).not.toContain("Unsupported")
   } finally {
     await act(async () => { setup.renderer.destroy() })
   }
@@ -236,6 +504,237 @@ test("thread 通过原生 Markdown renderer 隐藏标题和代码围栏标记", 
     expect(frame).toContain("重点内容")
     expect(frame).toContain("public class Demo {}")
     expect(frame).not.toContain("## 示例标题")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("审批 pending 时底部是 Dock，输入栏失焦且时间线没有审批选择器", async () => {
+  const run = { threadId: "thread-1", runId: "run-1" }
+  const started = startRun(createInitialState(), run, "写入文件")
+  const state: InteractiveState = {
+    ...started,
+    activity: { kind: "waiting-interaction", label: "等待工具审批" },
+    timeline: [
+      started.timeline[0]!,
+      {
+        type: "interaction",
+        interaction: {
+          id: "approval-1",
+          runId: run.runId,
+          type: "approval",
+          status: "pending",
+          description: "执行 shell 命令",
+        },
+      },
+    ],
+  }
+  const snapshot = {
+    ...snapshotOf(state),
+    interaction: {
+      type: "approval" as const,
+      requestId: "approval-1",
+      description: "执行 shell 命令",
+      requests: {},
+      presentation: null,
+      decisions: ["approve_once" as const, "reject" as const],
+      deadlineAtMs: Date.now() + 5_000,
+    },
+  }
+  const inputRef = createRef<TextareaRenderable>()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(ThreadView, { ...viewProps(snapshot, 100, 28), inputRef }), { width: 100, height: 28 })
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("需要审批")
+    expect(frame).toContain("允许一次")
+    expect(frame).not.toContain("输入消息")
+    expect(frame).not.toContain("等待中")
+    expect(inputRef.current?.focused ?? false).toBeFalse()
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("审批决定后 Dock 消失、结果行存在、焦点回输入栏", async () => {
+  const run = { threadId: "thread-1", runId: "run-1" }
+  const started = startRun(createInitialState(), run, "写入文件")
+  const state: InteractiveState = {
+    ...started,
+    activeRun: null,
+    activity: { kind: "idle", label: "就绪" },
+    timeline: [
+      started.timeline[0]!,
+      {
+        type: "interaction",
+        interaction: {
+          id: "approval-1",
+          runId: run.runId,
+          type: "approval",
+          status: "approved",
+          description: "执行 shell 命令",
+        },
+      },
+    ],
+  }
+  const inputRef = createRef<TextareaRenderable>()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(ThreadView, { ...viewProps(snapshotOf(state), 100, 28), inputRef }), { width: 100, height: 28 })
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).not.toContain("需要审批")
+    expect(frame).not.toContain("允许一次")
+    expect(frame).toContain("已允许")
+    expect(frame).toContain("输入消息")
+    expect(inputRef.current?.focused ?? false).toBeTrue()
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("带选项的问答 pending 时底部是 QuestionDock，输入栏不出现", async () => {
+  const run = { threadId: "thread-1", runId: "run-1" }
+  const started = startRun(createInitialState(), run, "选格式")
+  const state: InteractiveState = {
+    ...started,
+    activity: { kind: "waiting-interaction", label: "等待回答" },
+    timeline: [
+      started.timeline[0]!,
+      {
+        type: "interaction",
+        interaction: {
+          id: "question-1",
+          runId: run.runId,
+          type: "question",
+          status: "pending",
+          description: "选一个输出格式",
+        },
+      },
+    ],
+  }
+  const snapshot = {
+    ...snapshotOf(state),
+    interaction: {
+      type: "question" as const,
+      requestId: "question-1",
+      questions: [{
+        id: "fmt",
+        question: "选一个输出格式",
+        header: "",
+        body: "",
+        options: [
+          { label: "JSON", value: "json", description: "" },
+          { label: "YAML", value: "yaml", description: "" },
+        ],
+        multiSelect: false,
+        allowOther: false,
+      }],
+      deadlineAtMs: Date.now() + 5_000,
+    },
+  }
+  const inputRef = createRef<TextareaRenderable>()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(ThreadView, { ...viewProps(snapshot, 100, 28), inputRef }), { width: 100, height: 28 })
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("Agent 需要你的回答")
+    expect(frame).toContain("选一个输出格式")
+    expect(frame).toContain("JSON")
+    expect(frame).not.toContain("输入消息")
+    expect(inputRef.current?.focused ?? false).toBeFalse()
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("ask_user 式多题单选显示 QuestionDock 选项，时间线不铺 JSON", async () => {
+  const run = { threadId: "thread-1", runId: "run-1" }
+  const started = startRun(createInitialState(), run, "写一个 Java 示例")
+  const argumentsText = JSON.stringify({
+    questions: [
+      {
+        question: "你想要什么类型的 Java 示例？",
+        type: "multiple_choice",
+        choices: [
+          { value: "基础语法示例（变量、循环、方法、面向对象）" },
+          { value: "集合与常用 API（List/Map/Stream）" },
+        ],
+      },
+      { question: "示例的用途或目标是什么？（可选，自由填写）", type: "text", required: false },
+    ],
+  })
+  const state: InteractiveState = {
+    ...started,
+    activity: { kind: "waiting-interaction", label: "等待回答" },
+    timeline: [
+      started.timeline[0]!,
+      {
+        type: "tool",
+        tool: {
+          id: "t-ask",
+          runId: run.runId,
+          name: "ask_user",
+          arguments: argumentsText,
+          output: "",
+          status: "running",
+        },
+      },
+    ],
+  }
+  const snapshot = {
+    ...snapshotOf(state),
+    interaction: {
+      type: "question" as const,
+      requestId: "ask-1",
+      questions: [
+        {
+          id: "question-1",
+          question: "你想要什么类型的 Java 示例？",
+          header: "",
+          body: "",
+          options: [
+            { label: "基础语法示例（变量、循环、方法、面向对象）", value: "基础语法示例（变量、循环、方法、面向对象）", description: "" },
+            { label: "集合与常用 API（List/Map/Stream）", value: "集合与常用 API（List/Map/Stream）", description: "" },
+          ],
+          multiSelect: false,
+          allowOther: true,
+        },
+        {
+          id: "question-2",
+          question: "示例的用途或目标是什么？（可选，自由填写）",
+          header: "",
+          body: "",
+          options: [],
+          multiSelect: false,
+          allowOther: true,
+        },
+      ],
+      deadlineAtMs: Date.now() + 5_000,
+    },
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(ThreadView, viewProps(snapshot, 120, 32)), { width: 120, height: 32 })
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("Agent 需要你的回答")
+    expect(frame).toContain("你想要什么类型的 Java 示例？")
+    expect(frame).toContain("基础语法示例")
+    expect(frame).toContain("其他")
+    expect(frame).not.toContain("multiple_choice")
+    expect(frame).not.toContain("\"questions\"")
+    expect(frame).not.toContain("输入消息")
   } finally {
     await act(async () => { setup.renderer.destroy() })
   }
@@ -454,8 +953,36 @@ test("TUI 时间线交错显示思考中条目与思考文本", async () => {
   try {
     await act(async () => { await setup.flush() })
     const frame = setup.captureCharFrame()
-    expect(frame).toContain("思考中")
+    expect(frame).toContain("Thinking")
     expect(frame).toContain("正在检查代码路径")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("超长思考进行中只显示最后 12 行和剩余行数", async () => {
+  const run = { threadId: "thread-reasoning", runId: "run-reasoning" }
+  const started = startRun(createInitialState(), run, "检查")
+  const text = Array.from({ length: 80 }, (_, index) => `T${String(index + 1).padStart(2, "0")}`).join("\n")
+  const state: InteractiveState = {
+    ...started,
+    timeline: [
+      ...started.timeline,
+      { type: "reasoning", reasoning: { id: "r-long", runId: run.runId, text, active: true } },
+    ],
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(ThreadView, viewProps(snapshotOf(state), 100, 40)), { width: 100, height: 40 })
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("Thinking")
+    expect(frame).toContain("T80")
+    expect(frame).toContain("还有 68 行")
+    expect(frame).not.toContain("T01")
+    expect(frame).not.toContain("T68")
   } finally {
     await act(async () => { setup.renderer.destroy() })
   }
@@ -478,7 +1005,7 @@ test("TUI 思考段冻结后显示折叠头与展开提示", async () => {
   try {
     await act(async () => { await setup.flush() })
     const frame = setup.captureCharFrame()
-    expect(frame).toContain("思考")
+    expect(frame).toContain("Thinking")
     expect(frame).toContain("展开")
     expect(frame).toContain("第一行思考")
   } finally {
@@ -597,7 +1124,7 @@ function viewProps(interactive: InteractiveSnapshot, terminalWidth: number, term
     conversationScrollRef: createRef<ScrollBoxRenderable>(),
     value: "",
     onInput: () => undefined,
-    onComposerKeyDown: () => undefined,
+    onInputBarKeyDown: () => undefined,
     onSubmit: () => undefined,
     commandMenu: { visible: false, selectedIndex: 0 },
     commandOptions: [],
@@ -749,6 +1276,157 @@ test("Compose 失败后仍渲染冻结的终态阶段面板", async () => {
     const frame = setup.captureCharFrame()
     expect(frame).toContain("理解")
     expect(frame).toContain("验证")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("Compose 有 Work Item 时对话页不再出现阶段顶栏", async () => {
+  const run = { threadId: "thread-1", runId: "run-1" }
+  const started = startRun(createInitialState(null, "compose"), run, "写搜索")
+  const state: InteractiveState = {
+    ...started,
+    threadMode: "compose",
+    workItem: {
+      workItemId: "wi-search",
+      slug: "feature-search",
+      title: "实现搜索索引顶栏",
+      revision: 3,
+      status: "active",
+      currentActivity: "编写搜索索引",
+      pendingDecision: null,
+      blockedReason: null,
+    },
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(ThreadView, viewProps(snapshotOf(state), 100, 28)), { width: 100, height: 28 })
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("写搜索")
+    expect(frame).not.toContain("实现搜索索引顶栏")
+    expect(frame).not.toContain("feature-search")
+    expect(frame).not.toContain("已锁定")
+    expect(frame).not.toContain("活动：编写搜索索引")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("skill.loaded 以系统事件一行展示，不铺原始键名", async () => {
+  const run = { threadId: "thread-1", runId: "run-1" }
+  const started = startRun(createInitialState(), run, "用 skill")
+  const state: InteractiveState = {
+    ...started,
+    timeline: [
+      started.timeline[0]!,
+      {
+        type: "message",
+        message: {
+          id: "skill-1",
+          role: "system",
+          content: "skill-loaded: project/review",
+          runId: run.runId,
+        },
+      },
+    ],
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(ThreadView, viewProps(snapshotOf(state), 100, 24)), { width: 100, height: 24 })
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("已加载 Skill")
+    expect(frame).toContain("project/review")
+    expect(frame).not.toContain("skill-loaded:")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("Run 级失败走 ErrorBlock，工具失败留在工具行", async () => {
+  const run = { threadId: "thread-1", runId: "run-1" }
+  const started = startRun(createInitialState(), run, "跑测试")
+  const failedTool: InteractiveState = {
+    ...started,
+    activity: { kind: "running", label: "正在运行" },
+    timeline: [
+      started.timeline[0]!,
+      {
+        type: "tool",
+        tool: {
+          id: "t-exec",
+          runId: run.runId,
+          name: "execute",
+          arguments: "{\"command\":\"false\"}",
+          output: "command failed",
+          status: "failed",
+        },
+      },
+    ],
+  }
+  let toolSetup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    toolSetup = await testRender(createElement(ThreadView, viewProps(snapshotOf(failedTool), 100, 24)), { width: 100, height: 24 })
+  })
+  try {
+    await act(async () => { await toolSetup.flush() })
+    const frame = toolSetup.captureCharFrame()
+    expect(frame).toContain("execute")
+    expect(frame).toContain("command failed")
+    expect(frame).not.toContain("运行失败")
+  } finally {
+    await act(async () => { toolSetup.renderer.destroy() })
+  }
+
+  const failedRun: InteractiveState = {
+    ...started,
+    activeRun: null,
+    activity: { kind: "failed", label: "模型不可用" },
+    lastRun: { runId: run.runId, outcome: "failed", durationMs: 1_200 },
+  }
+  let runSetup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    runSetup = await testRender(createElement(ThreadView, viewProps(snapshotOf(failedRun), 100, 24)), { width: 100, height: 24 })
+  })
+  try {
+    await act(async () => { await runSetup.flush() })
+    const frame = runSetup.captureCharFrame()
+    expect(frame).toContain("运行失败")
+  } finally {
+    await act(async () => { runSetup.renderer.destroy() })
+  }
+})
+
+test("一轮结束后 RunFooter 是一行 muted 摘要", async () => {
+  const run = { threadId: "thread-1", runId: "run-1" }
+  const started = startRun(createInitialState(), run, "问好")
+  const state: InteractiveState = {
+    ...started,
+    activeRun: null,
+    activity: { kind: "completed", label: "已完成" },
+    lastRun: {
+      runId: run.runId,
+      outcome: "completed",
+      durationMs: 2_400,
+      usage: { inputTokens: 120, outputTokens: 40 },
+    },
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(ThreadView, { ...viewProps(snapshotOf(state), 100, 24), modelName: "enterprise-model" }), { width: 100, height: 24 })
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("enterprise-model")
+    expect(frame).toContain("2.4s")
+    expect(frame).toContain("120 in")
+    expect(frame).toContain("40 out")
   } finally {
     await act(async () => { setup.renderer.destroy() })
   }

@@ -1,31 +1,37 @@
-/** Harness Code 终端主题：暖黑画布、蓝色品牌强调、暖橙选择态和离线语法 scope。 */
+/** Harness Code 终端主题：Mode 金/紫、Semantic 色与离线语法 scope。 */
 
 import { SyntaxStyle } from "@opentui/core"
 
-/** 暖黑画布与 za38 蓝色强调；代码语义色仅用于帮助阅读模型输出。 */
+/** Logo 仍用品牌蓝；Mode 身份只走 modeAccent，不得用 primary 冒充当前 Mode。 */
 export const tuiTheme = {
-  background: "#090a0c",
-  overlay: "#0b0c0f",
-  panel: "#121316",
-  composer: "#18181b",
-  toolSurface: "#141518",
-  menu: "#16181d",
-  element: "#17191d",
-  border: "#282b32",
-  borderActive: "#3b82f6",
-  text: "#f4f4f5",
-  muted: "#808898",
-  subtle: "#52525b",
+  modeBuild: "#EAB308",
+  modeCompose: "#A9A5D4",
+  thinking: "#7EB6C9",
+  background: "#0B0C0E",
+  surface: "#15171A",
+  surfaceElevated: "#1B1D21",
+  overlay: "#1B1D21",
+  panel: "#15171A",
+  toolSurface: "#15171A",
+  menu: "#1B1D21",
+  element: "#15171A",
+  border: "#2A2D33",
+  borderActive: "#EAB308",
+  text: "#E8E9EC",
+  muted: "#A0A4AE",
+  subtle: "#676C76",
   primary: "#3b82f6",
   primarySoft: "#1d4ed8",
-  pickerActive: "#eab308",
+  pickerActive: "#EAB308",
   star: "#3f3f46",
   trail: "#60a5fa",
-  success: "#22c55e",
-  warning: "#eab308",
-  danger: "#ef4444",
-  diffAddedBackground: "#1a4d1a",
-  diffRemovedBackground: "#4d1a1a",
+  success: "#7FA37A",
+  warning: "#C88758",
+  danger: "#C56F6F",
+  diffAdd: "#6F9A72",
+  diffRemove: "#B96A6A",
+  diffAddedBackground: "#155815",
+  diffRemovedBackground: "#581515",
   syntaxComment: "#858b99",
   syntaxKeyword: "#8da7ff",
   syntaxFunction: "#79c6ff",
@@ -70,3 +76,13 @@ export const markdownSyntax = SyntaxStyle.fromTheme([
   { scope: ["markup.link.label", "label"], style: { foreground: tuiTheme.trail, underline: true } },
   { scope: ["conceal"], style: { foreground: tuiTheme.subtle } },
 ])
+
+/** 当前 Run / 输入栏身份色；Build 与 Compose 等权。 */
+export function modeAccent(mode: "build" | "compose"): string {
+  return mode === "compose" ? tuiTheme.modeCompose : tuiTheme.modeBuild
+}
+
+/** 用户消息竖条颜色只看该条 Mode；缺字段按 Build，不读当前会话。 */
+export function userMessageAccent(workMode: "build" | "compose" | undefined): string {
+  return modeAccent(workMode ?? "build")
+}

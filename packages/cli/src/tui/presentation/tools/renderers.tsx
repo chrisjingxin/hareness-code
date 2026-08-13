@@ -1,0 +1,327 @@
+/** 四种工具 Renderer：inline / block / diff / generic。 */
+
+import { useState } from "react"
+
+import type { ToolCard } from "../../../interactive/state"
+import { boundVisibleText, TOOL_PREVIEW_BUDGET, writeFileVisibleBody } from "../../../presentation-shared/paint-budget"
+import { diffTextForRenderer, parseFileDiff } from "../../../presentation-shared/file-diff"
+import { resolveLanguageForPath } from "../../../presentation-shared/language-catalog"
+import { toolArgumentSummary } from "../../../presentation-shared/tool-output-policy"
+import { getCommonSyntaxClient } from "../../platform/syntax-parsers"
+import { useSpinner } from "../input-bar"
+import { markdownSyntax, tuiTheme } from "../theme"
+import { parseFileMutationArgs, parseToolResultPreview, shortMutationPath, unifiedDiffFromReplacement } from "./file-mutation-args"
+import { canonicalizeToolName, resolveToolRenderer } from "./registry"
+
+function diffViewForWidth(contentWidth: number): "split" | "unified" {
+  return contentWidth >= 120 ? "split" : "unified"
+}
+
+/** 按工具名选择 Renderer；未知走 generic。 */
+export function ToolRenderer(props: {
+  tool: ToolCard
+  terminalWidth: number
+}) {
+  const kind = resolveToolRenderer(props.tool.name)
+  const name = canonicalizeToolName(props.tool.name)
+  if (name === "write" || name === "write_file") return <WriteTool tool={props.tool} />
+  if (name === "edit" || name === "edit_file") return <EditTool tool={props.tool} terminalWidth={props.terminalWidth} />
+  if (name === "ask_user") return <AskUserTool tool={props.tool} />
+  if (kind === "inline") return <InlineTool tool={props.tool} />
+  if (kind === "block") return <BlockTool tool={props.tool} />
+  if (kind === "diff") return <DiffTool tool={props.tool} terminalWidth={props.terminalWidth} />
+  return <GenericTool tool={props.tool} />
+}
+
+function InlineTool(props: { tool: ToolCard }) {
+  const running = props.tool.status === "running"
+  const failed = props.tool.status === "failed"
+  const frame = useSpinner(running, 80)
+  const summary = toolArgumentSummary(props.tool.arguments)
+  const tone = failed ? tuiTheme.danger : running ? tuiTheme.thinking : tuiTheme.muted
+  return (
+    <box marginTop={1} paddingLeft={3} paddingRight={3} flexDirection="row" gap={1}>
+      <text fg={tone}>{running ? frame : failed ? "×" : "→"}</text>
+      <text fg={tuiTheme.text}>{props.tool.name}</text>
+      {summary ? <text fg={tuiTheme.muted}>{summary}</text> : null}
+    </box>
+  )
+}
+
+function BlockTool(props: { tool: ToolCard }) {
+  const running = props.tool.status === "running"
+  const failed = props.tool.status === "failed"
+  const frame = useSpinner(running, 80)
+  const preview = boundVisibleText(props.tool.output, TOOL_PREVIEW_BUDGET)
+  const tone = failed ? tuiTheme.danger : running ? tuiTheme.thinking : tuiTheme.success
+  return (
+    <box marginTop={1} marginLeft={3} marginRight={3} backgroundColor={tuiTheme.surface} paddingLeft={1} paddingRight={1} paddingTop={1} paddingBottom={1} flexDirection="column">
+      <box flexDirection="row" gap={1}>
+        <text fg={tone}>{running ? frame : failed ? "×" : "✓"}</text>
+        <text fg={tuiTheme.text}>{props.tool.name}</text>
+      </box>
+      {preview.text ? <text content={preview.text} fg={tuiTheme.muted} /> : null}
+      {preview.overflow ? <text fg={tuiTheme.subtle}>还有 {preview.hiddenLines} 行</text> : null}
+    </box>
+  )
+}
+
+function DiffTool(props: { tool: ToolCard; terminalWidth: number }) {
+  const failed = props.tool.status === "failed"
+  const running = props.tool.status === "running"
+  const frame = useSpinner(running, 80)
+  const mutation = parseFileMutationArgs(props.tool.arguments)
+  const parsed = parseFileDiff(props.tool.output)
+  const tone = failed ? tuiTheme.danger : running ? tuiTheme.thinking : tuiTheme.muted
+  const hasDiff = parsed.status === "parsed" && props.tool.output.trim() !== ""
+  if (hasDiff) {
+    const view = diffViewForWidth(Math.max(1, props.terminalWidth - 10))
+    const pathLabel = mutation.path ? shortMutationPath(mutation.path) : toolArgumentSummary(props.tool.arguments)
+    return (
+      <box marginTop={1} paddingLeft={3} paddingRight={3} flexDirection="column">
+        <box flexDirection="row" gap={1}>
+          <text fg={tone}>{running ? frame : failed ? "×" : "±"}</text>
+          <text fg={tuiTheme.text}>{props.tool.name}</text>
+          {pathLabel ? <text fg={tuiTheme.muted}>{pathLabel}</text> : null}
+        </box>
+        <diff
+          width="100%"
+          diff={diffTextForRenderer(props.tool.output)}
+          view={view}
+          syncScroll
+          showLineNumbers
+          wrapMode="word"
+          fg={tuiTheme.text}
+          lineNumberFg={tuiTheme.muted}
+          lineNumberBg={tuiTheme.toolSurface}
+          addedBg={tuiTheme.diffAddedBackground}
+          removedBg={tuiTheme.diffRemovedBackground}
+          contextBg={tuiTheme.toolSurface}
+          addedSignColor={tuiTheme.diffAdd}
+          removedSignColor={tuiTheme.diffRemove}
+          addedLineNumberBg={tuiTheme.diffAddedBackground}
+          removedLineNumberBg={tuiTheme.diffRemovedBackground}
+          syntaxStyle={markdownSyntax}
+          treeSitterClient={getCommonSyntaxClient()}
+        />
+      </box>
+    )
+  }
+  if (mutation.content !== null) {
+    return <WriteFilePreview tool={props.tool} path={mutation.path} content={mutation.content} />
+  }
+  return <GenericTool tool={props.tool} />
+}
+
+/** edit_file 专用：用 old/new 生成 Diff，绝不铺 JSON 参数或结果。 */
+function EditTool(props: { tool: ToolCard; terminalWidth: number }) {
+  const mutation = parseFileMutationArgs(props.tool.arguments)
+  const result = parseToolResultPreview(props.tool.output)
+  const running = props.tool.status === "running"
+  const failed = props.tool.status === "failed"
+  const frame = useSpinner(running, 80)
+  const outputDiff = parseFileDiff(props.tool.output)
+  const hasOutputDiff = outputDiff.status === "parsed" && props.tool.output.trim() !== ""
+  if (mutation.oldString !== null && mutation.newString !== null) {
+    const path = mutation.path ?? "file"
+    const unified = unifiedDiffFromReplacement(path, mutation.oldString, mutation.newString)
+    const view = diffViewForWidth(Math.max(1, props.terminalWidth - 10))
+    const language = resolveLanguageForPath(mutation.path).tuiParser
+    const tone = failed ? tuiTheme.danger : running ? tuiTheme.thinking : tuiTheme.success
+    return (
+      <box
+        marginTop={1}
+        marginLeft={3}
+        marginRight={3}
+        backgroundColor={tuiTheme.surface}
+        paddingLeft={1}
+        paddingRight={1}
+        paddingTop={1}
+        paddingBottom={1}
+        flexDirection="column"
+      >
+        <box flexDirection="row" gap={1}>
+          <text fg={tone}>{running ? frame : failed ? "×" : "←"}</text>
+          <text fg={tuiTheme.text}>{running ? "Editing" : "Edit"}</text>
+          <text fg={tuiTheme.muted}>{shortMutationPath(path)}</text>
+        </box>
+        <diff
+          width="100%"
+          diff={diffTextForRenderer(unified)}
+          view={view}
+          syncScroll
+          showLineNumbers
+          wrapMode="word"
+          filetype={language === "plaintext" ? undefined : language}
+          fg={tuiTheme.text}
+          lineNumberFg={tuiTheme.muted}
+          lineNumberBg={tuiTheme.toolSurface}
+          addedBg={tuiTheme.diffAddedBackground}
+          removedBg={tuiTheme.diffRemovedBackground}
+          contextBg={tuiTheme.toolSurface}
+          addedSignColor={tuiTheme.diffAdd}
+          removedSignColor={tuiTheme.diffRemove}
+          addedLineNumberBg={tuiTheme.diffAddedBackground}
+          removedLineNumberBg={tuiTheme.diffRemovedBackground}
+          syntaxStyle={markdownSyntax}
+          treeSitterClient={getCommonSyntaxClient()}
+        />
+      </box>
+    )
+  }
+  if (hasOutputDiff) {
+    return <DiffTool tool={props.tool} terminalWidth={props.terminalWidth} />
+  }
+  const previewPath = mutation.path ?? result.path
+  const previewContent = result.content
+  if (previewContent !== null) {
+    return <WriteFilePreview tool={props.tool} path={previewPath} content={previewContent} title={running ? "Editing" : "Edit"} />
+  }
+  if (running) {
+    return (
+      <box marginTop={1} paddingLeft={3} paddingRight={3} flexDirection="row" gap={1}>
+        <text fg={tuiTheme.thinking}>{frame}</text>
+        <text fg={tuiTheme.thinking}>Preparing edit</text>
+        {previewPath ? <text fg={tuiTheme.muted}>{shortMutationPath(previewPath)}</text> : null}
+      </box>
+    )
+  }
+  return (
+    <box marginTop={1} paddingLeft={3} paddingRight={3} flexDirection="row" gap={1}>
+      <text fg={failed ? tuiTheme.danger : tuiTheme.success}>{failed ? "×" : "←"}</text>
+      <text fg={tuiTheme.text}>Edit</text>
+      {previewPath ? <text fg={tuiTheme.muted}>{shortMutationPath(previewPath)}</text> : null}
+    </box>
+  )
+}
+
+/** write_file 专用：准备中只提示 Preparing write，有正文就高亮，绝不铺 JSON。 */
+function WriteTool(props: { tool: ToolCard }) {
+  const mutation = parseFileMutationArgs(props.tool.arguments)
+  const result = parseToolResultPreview(props.tool.output)
+  const path = mutation.path ?? result.path
+  const content = mutation.content ?? result.content
+  if (content !== null) {
+    return <WriteFilePreview tool={props.tool} path={path} content={content} />
+  }
+  const running = props.tool.status === "running"
+  const failed = props.tool.status === "failed"
+  const frame = useSpinner(running, 80)
+  if (running) {
+    return (
+      <box marginTop={1} paddingLeft={3} paddingRight={3} flexDirection="row" gap={1}>
+        <text fg={tuiTheme.thinking}>{frame}</text>
+        <text fg={tuiTheme.thinking}>Preparing write</text>
+        {path ? <text fg={tuiTheme.muted}>{shortMutationPath(path)}</text> : null}
+      </box>
+    )
+  }
+  return (
+    <box marginTop={1} paddingLeft={3} paddingRight={3} flexDirection="row" gap={1}>
+      <text fg={failed ? tuiTheme.danger : tuiTheme.success}>{failed ? "×" : "←"}</text>
+      <text fg={tuiTheme.text}>Wrote</text>
+      {path ? <text fg={tuiTheme.muted}>{shortMutationPath(path)}</text> : null}
+    </box>
+  )
+}
+
+/** write_file：按路径高亮正文，不展示转义 JSON。 */
+function WriteFilePreview(props: { tool: ToolCard; path: string | null; content: string; title?: string }) {
+  const running = props.tool.status === "running"
+  const failed = props.tool.status === "failed"
+  const frame = useSpinner(running, 80)
+  const [expanded, setExpanded] = useState(false)
+  const preview = writeFileVisibleBody(props.content, expanded)
+  const language = resolveLanguageForPath(props.path).tuiParser
+  const tone = failed ? tuiTheme.danger : running ? tuiTheme.thinking : tuiTheme.success
+  const canToggle = preview.overflow || expanded
+  return (
+    <box
+      marginTop={1}
+      marginLeft={3}
+      marginRight={3}
+      backgroundColor={tuiTheme.surface}
+      paddingLeft={1}
+      paddingRight={1}
+      paddingTop={1}
+      paddingBottom={1}
+      flexDirection="column"
+    >
+      <box flexDirection="row" gap={1} onMouseUp={canToggle ? () => setExpanded(current => !current) : undefined}>
+        <text fg={tone}>{running ? frame : failed ? "×" : "←"}</text>
+        <text fg={tuiTheme.text}>{props.title ?? (running ? "Writing" : "Wrote")}</text>
+        <text fg={tuiTheme.muted}>{props.path ? shortMutationPath(props.path) : props.tool.name}</text>
+        {canToggle ? <text fg={tuiTheme.subtle}>{expanded ? "收起" : "展开"}</text> : null}
+      </box>
+      {preview.text ? (
+        <line-number fg={tuiTheme.muted} minWidth={3} paddingRight={1}>
+          <code
+            content={preview.text}
+            filetype={language === "plaintext" ? undefined : language}
+            syntaxStyle={markdownSyntax}
+            treeSitterClient={getCommonSyntaxClient()}
+            conceal={false}
+            fg={tuiTheme.text}
+          />
+        </line-number>
+      ) : (
+        <text fg={tuiTheme.muted}>创建空文件</text>
+      )}
+      {preview.overflow ? <text fg={tuiTheme.subtle}>还有 {preview.hiddenLines} 行</text> : null}
+    </box>
+  )
+}
+
+/** 从 ask_user 参数抽出问题标题，禁止把 JSON 铺开。 */
+function askUserQuestionTitles(argumentsText: string): string[] {
+  try {
+    const parsed = JSON.parse(argumentsText) as { questions?: unknown }
+    const questions = Array.isArray(parsed.questions) ? parsed.questions : []
+    return questions.flatMap(item => {
+      if (!item || typeof item !== "object") return []
+      const question = (item as { question?: unknown }).question
+      return typeof question === "string" && question.trim() ? [question.trim()] : []
+    })
+  } catch {
+    return []
+  }
+}
+
+/** ask_user 进行中只显示问题标题；选项由底部 Dock 承接。 */
+function AskUserTool(props: { tool: ToolCard }) {
+  const running = props.tool.status === "running"
+  const failed = props.tool.status === "failed"
+  const frame = useSpinner(running, 80)
+  const titles = askUserQuestionTitles(props.tool.arguments)
+  const tone = failed ? tuiTheme.danger : running ? tuiTheme.thinking : tuiTheme.muted
+  return (
+    <box marginTop={1} paddingLeft={3} paddingRight={3} flexDirection="column">
+      <box flexDirection="row" gap={1}>
+        <text fg={tone}>{running ? frame : failed ? "×" : "?"}</text>
+        <text fg={tuiTheme.text}>ask_user</text>
+        {titles.length > 1 ? <text fg={tuiTheme.muted}>{titles.length} 个问题</text> : null}
+      </box>
+      {titles[0] ? <text content={titles[0]} fg={tuiTheme.muted} /> : null}
+    </box>
+  )
+}
+
+function GenericTool(props: { tool: ToolCard }) {
+  const running = props.tool.status === "running"
+  const failed = props.tool.status === "failed"
+  const frame = useSpinner(running, 80)
+  const input = boundVisibleText(props.tool.arguments, TOOL_PREVIEW_BUDGET)
+  const output = boundVisibleText(props.tool.output, TOOL_PREVIEW_BUDGET)
+  const tone = failed ? tuiTheme.danger : running ? tuiTheme.thinking : tuiTheme.muted
+  return (
+    <box marginTop={1} paddingLeft={3} paddingRight={3} flexDirection="column">
+      <box flexDirection="row" gap={1}>
+        <text fg={tone}>{running ? frame : failed ? "×" : "◇"}</text>
+        <text fg={tuiTheme.text}>{props.tool.name}</text>
+      </box>
+      {input.text ? <text content={input.text} fg={tuiTheme.subtle} /> : null}
+      {output.text ? <text content={output.text} fg={tuiTheme.muted} /> : null}
+      {output.overflow ? <text fg={tuiTheme.subtle}>还有 {output.hiddenLines} 行</text> : null}
+    </box>
+  )
+}

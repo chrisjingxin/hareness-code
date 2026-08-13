@@ -1,4 +1,4 @@
-/** Composer、运行状态与底栏视图。 */
+/** 输入栏、运行状态与底栏视图。不要叫 Composer，以免和 Compose 模式混淆。 */
 
 import { TextAttributes } from "@opentui/core"
 import { useEffect, useState } from "react"
@@ -12,11 +12,11 @@ import {
   approvalModeLabel,
   workspaceLabel,
 } from "../../interactive/runtime"
-import { tuiTheme } from "./theme"
 import { activityLabel, gitWorkspaceLabel, modelSelectionLabel } from "../../presentation-shared"
+import { modeAccent, tuiTheme } from "./theme"
 import type { SharedViewProps } from "./types"
 
-/** thread composer 上方的实时模型和运行状态行。 */
+/** thread 输入栏上方的实时模型和运行状态行。 */
 export function ThreadRuntimeLine(props: { interactive: SharedViewProps["interactive"] }) {
   const runtime = props.interactive.runtime
   const status = activityLabel(props.interactive.activity.kind)
@@ -31,8 +31,8 @@ export function ThreadRuntimeLine(props: { interactive: SharedViewProps["interac
   )
 }
 
-/** 渲染统一左轨 composer、命令菜单和运行时元信息。 */
-export function Composer(props: Pick<SharedViewProps, "interactive" | "terminalWidth" | "inputRef" | "value" | "onInput" | "onComposerKeyDown" | "onSubmit" | "commandMenu" | "commandOptions" | "onSelectCommand" | "onHoverCommand" | "selectedSkill" | "pickerVisible" | "onClearSelectedSkill"> & {
+/** 渲染底部输入栏、命令菜单和运行时元信息。 */
+export function InputBar(props: Pick<SharedViewProps, "interactive" | "terminalWidth" | "inputRef" | "value" | "onInput" | "onInputBarKeyDown" | "onSubmit" | "commandMenu" | "commandOptions" | "onSelectCommand" | "onHoverCommand" | "selectedSkill" | "pickerVisible" | "onClearSelectedSkill"> & {
   variant: "home" | "thread"
   commandMenuPlacement: "above" | "inline-below"
 }) {
@@ -41,6 +41,7 @@ export function Composer(props: Pick<SharedViewProps, "interactive" | "terminalW
   const busy = active || compacting
   const awaitingQuestion = props.interactive.interaction?.type === "question"
   const options = props.commandOptions
+  const accent = modeAccent(props.interactive.workMode)
   const placeholder = awaitingQuestion
     ? "输入你的回答后按 Enter"
     : compacting
@@ -56,6 +57,7 @@ export function Composer(props: Pick<SharedViewProps, "interactive" | "terminalW
       onSelect={props.onSelectCommand}
       onHover={props.onHoverCommand}
       placement={props.commandMenuPlacement}
+      accent={accent}
     />
   ) : null
 
@@ -74,28 +76,28 @@ export function Composer(props: Pick<SharedViewProps, "interactive" | "terminalW
       ) : null}
       <box
         border={isHome ? [] : ["left"]}
-        borderColor={busy ? tuiTheme.primarySoft : tuiTheme.primary}
+        borderColor={busy ? tuiTheme.subtle : accent}
         customBorderChars={PROMPT_BORDER}
       >
-        <box backgroundColor={tuiTheme.composer} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={isHome ? 1 : 0} flexShrink={0} flexGrow={1}>
+        <box backgroundColor={tuiTheme.surface} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={isHome ? 1 : 0} flexShrink={0} flexGrow={1}>
           {isHome ? (
             <box flexDirection="row" gap={2} alignItems="flex-start">
-              <text fg={tuiTheme.warning} attributes={TextAttributes.BOLD}>{modeBadgeLabel}</text>
+              <text fg={accent} attributes={TextAttributes.BOLD}>{modeBadgeLabel}</text>
               <textarea
                 ref={props.inputRef}
                 placeholder={placeholder}
                 placeholderColor={tuiTheme.muted}
                 textColor={tuiTheme.text}
                 focusedTextColor={tuiTheme.text}
-                backgroundColor={tuiTheme.composer}
-                focusedBackgroundColor={tuiTheme.composer}
-                cursorColor={tuiTheme.primary}
+                backgroundColor={tuiTheme.surface}
+                focusedBackgroundColor={tuiTheme.surface}
+                cursorColor={accent}
                 minHeight={1}
                 maxHeight={6}
-                keyBindings={COMPOSER_KEY_BINDINGS}
+                keyBindings={INPUT_BAR_KEY_BINDINGS}
                 focused={(!busy || awaitingQuestion) && !props.pickerVisible}
                 onContentChange={() => props.onInput(props.inputRef.current?.plainText ?? "")}
-                onKeyDown={props.onComposerKeyDown}
+                onKeyDown={props.onInputBarKeyDown}
                 onSubmit={props.onSubmit}
               />
             </box>
@@ -106,27 +108,27 @@ export function Composer(props: Pick<SharedViewProps, "interactive" | "terminalW
               placeholderColor={tuiTheme.muted}
               textColor={tuiTheme.text}
               focusedTextColor={tuiTheme.text}
-              backgroundColor={tuiTheme.composer}
-              focusedBackgroundColor={tuiTheme.composer}
-              cursorColor={tuiTheme.primary}
+              backgroundColor={tuiTheme.surface}
+              focusedBackgroundColor={tuiTheme.surface}
+              cursorColor={accent}
               minHeight={1}
               maxHeight={6}
-              keyBindings={COMPOSER_KEY_BINDINGS}
+              keyBindings={INPUT_BAR_KEY_BINDINGS}
               focused={(!busy || awaitingQuestion) && !props.pickerVisible}
               onContentChange={() => props.onInput(props.inputRef.current?.plainText ?? "")}
-              onKeyDown={props.onComposerKeyDown}
+              onKeyDown={props.onInputBarKeyDown}
               onSubmit={props.onSubmit}
             />
           )}
           {props.selectedSkill ? (
             <box paddingTop={1} flexDirection="row" gap={1}>
-              <text fg={tuiTheme.primary}>Skill</text>
+              <text fg={accent}>Skill</text>
               <text fg={tuiTheme.text}>{props.selectedSkill.id}</text>
               <text fg={tuiTheme.muted}>{props.selectedSkill.argumentHint ?? "下一条消息使用"}</text>
               <text fg={tuiTheme.muted} onMouseUp={props.onClearSelectedSkill}>×</text>
             </box>
           ) : null}
-          <RuntimeMeta interactive={props.interactive} variant={props.variant} terminalWidth={props.terminalWidth} />
+          <RuntimeMeta interactive={props.interactive} variant={props.variant} terminalWidth={props.terminalWidth} accent={accent} />
         </box>
       </box>
       {commandMenu && props.commandMenuPlacement === "inline-below" ? commandMenu : null}
@@ -141,13 +143,14 @@ function CommandMenu(props: {
   onSelect: (command: CommandMenuItem) => void
   onHover: (index: number) => void
   placement: "above" | "inline-below"
+  accent: string
 }) {
   return (
     <box
       marginTop={props.placement === "inline-below" ? 1 : 0}
       marginBottom={props.placement === "above" ? 1 : 0}
       border={["left"]}
-      borderColor={tuiTheme.borderActive}
+      borderColor={props.accent}
       customBorderChars={PROMPT_BORDER}
     >
       <box backgroundColor={tuiTheme.menu} paddingTop={1} paddingBottom={1}>
@@ -157,7 +160,7 @@ function CommandMenu(props: {
           return (
             <box
               key={item.kind === "command" ? item.command.name : item.skill.id}
-              backgroundColor={selected && !disabled ? tuiTheme.primarySoft : tuiTheme.menu}
+              backgroundColor={selected && !disabled ? tuiTheme.surfaceElevated : tuiTheme.menu}
               paddingLeft={2}
               paddingRight={2}
               flexDirection="row"
@@ -165,7 +168,7 @@ function CommandMenu(props: {
               onMouseOver={() => props.onHover(index)}
               onMouseUp={() => props.onSelect(item)}
             >
-              <text fg={disabled ? tuiTheme.muted : selected ? tuiTheme.text : tuiTheme.primary}>{commandMenuItemLabel(item)}</text>
+              <text fg={disabled ? tuiTheme.muted : selected ? props.accent : tuiTheme.text}>{commandMenuItemLabel(item)}</text>
               <text fg={disabled ? tuiTheme.subtle : selected ? tuiTheme.text : tuiTheme.muted}>{shorten(commandMenuItemDescription(item), 54)}</text>
             </box>
           )
@@ -179,10 +182,9 @@ function CommandMenu(props: {
   )
 }
 
-
-/** 渲染输入框下方的配置摘要，只展示当前 Thread 的模型选择。 */
-function RuntimeMeta(props: { interactive: SharedViewProps["interactive"]; variant: "home" | "thread"; terminalWidth: number }) {
-  // 首页 composer 最大宽度固定为 75 列；thread 则以可用终端宽度估算。模型字段
+/** 渲染输入栏下方的配置摘要，只展示当前 Thread 的模型选择。 */
+function RuntimeMeta(props: { interactive: SharedViewProps["interactive"]; variant: "home" | "thread"; terminalWidth: number; accent: string }) {
+  // 首页输入栏最大宽度固定为 75 列；thread 则以可用终端宽度估算。模型字段
   // 是唯一可能来自企业配置的长文本，因此只截断它，审批模式始终保持可见。
   const runtime = props.interactive.runtime
   const contentWidth = props.variant === "home"
@@ -221,7 +223,7 @@ function RuntimeMeta(props: { interactive: SharedViewProps["interactive"]; varia
         <text fg={runtime.modelConfigured ? tuiTheme.text : tuiTheme.warning}>模型：{model}</text>
         <box flexDirection="row" gap={1}>
           {showApprovalHint ? <text fg={tuiTheme.subtle}>Shift+Tab</text> : null}
-          <text fg={props.interactive.workMode === "compose" ? tuiTheme.primary : tuiTheme.muted}>
+          <text fg={props.accent}>
             {props.interactive.workMode === "compose" ? "Compose" : "Build"}
           </text>
           <text fg={runtime.approvalMode === "yolo" ? tuiTheme.warning : tuiTheme.muted}>{approvalModeLabel(runtime)}</text>
@@ -258,7 +260,7 @@ function BusyRunHint() {
   const frame = useSpinner(true, 80)
   return (
     <box flexDirection="row" gap={1}>
-      <text fg={tuiTheme.primary}>{frame}</text>
+      <text fg={tuiTheme.warning}>{frame}</text>
       <text fg={tuiTheme.muted}>PgUp/PgDn 滚动 · Esc 中断</text>
     </box>
   )
@@ -269,12 +271,11 @@ function BusyContextOperationHint() {
   const frame = useSpinner(true, 80)
   return (
     <box flexDirection="row" gap={1}>
-      <text fg={tuiTheme.primary}>{frame}</text>
+      <text fg={tuiTheme.warning}>{frame}</text>
       <text fg={tuiTheme.muted}>上下文压缩中 · 请稍候</text>
     </box>
   )
 }
-
 
 /** 管理 spinner 定时器，并在组件卸载时清理。 */
 export function useSpinner(active: boolean, interval: number): string {
@@ -304,7 +305,7 @@ export function useRunElapsed(active: boolean, baseElapsedMs: number | undefined
   return elapsed
 }
 
-/** 按字符数截断 composer 内的长文案。 */
+/** 按字符数截断输入栏内的长文案。 */
 function shorten(value: string, limit: number): string {
   if (value.length <= limit) return value
   return `${value.slice(0, Math.max(0, limit - 1))}…`
@@ -339,7 +340,7 @@ const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", 
  * Textarea 默认把 Enter 绑定为换行，和 Coding Agent 的终端习惯不符。
  * 覆盖同一按键后 Enter 用于发送，仍为需要多行提示词的用户保留 Shift+Enter。
  */
-const COMPOSER_KEY_BINDINGS: Array<{ name: string; shift?: boolean; action: "submit" | "newline" }> = [
+const INPUT_BAR_KEY_BINDINGS: Array<{ name: string; shift?: boolean; action: "submit" | "newline" }> = [
   { name: "return", action: "submit" },
   { name: "kpenter", action: "submit" },
   { name: "linefeed", action: "submit" },

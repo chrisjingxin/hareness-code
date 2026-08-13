@@ -1,7 +1,7 @@
 /** Harness Code 的沉浸式首页视图。 */
 
 import { supportsHomeDecoration } from "../../interactive/runtime"
-import { Composer, FooterRail } from "./composer"
+import { InputBar, FooterRail } from "./input-bar"
 import { HarnessCodeLogo } from "./harness-logo"
 import { StarryBackground } from "./starry-background"
 import { tuiTheme } from "./theme"
@@ -22,10 +22,10 @@ export function HomeView(props: SharedViewProps) {
       <box flexDirection="column" flexGrow={1} alignItems="center" paddingLeft={2} paddingRight={2} zIndex={1}>
         <box flexGrow={1} minHeight={0} />
         <HarnessCodeLogo compact={compact} />
-        {/* 菜单绝对定位在 composer 上方；此处保留同等高度以避免覆盖字标。 */}
+        {/* 菜单绝对定位在输入栏上方；此处保留同等高度以避免覆盖字标。 */}
         <box height={compact ? 1 : Math.max(2, commandRows + 1)} minHeight={0} flexShrink={1} />
         <box width="100%" maxWidth={75} flexShrink={0}>
-          <Composer {...props} variant="home" commandMenuPlacement={compact ? "inline-below" : "above"} />
+          <InputBar {...props} variant="home" commandMenuPlacement={compact ? "inline-below" : "above"} />
         </box>
         {props.transientNotice ? (
           <box width="100%" maxWidth={75} paddingTop={1} flexShrink={0}>

@@ -50,6 +50,8 @@ export type ConversationMessage = {
   content: string
   runId?: string
   streaming?: boolean
+  /** 该条用户消息所属 Run 的工作模式；缺省由恢复路径补 threadMode 或 build。 */
+  workMode?: WorkMode
   /** child/root execution 身份；缺省表示 root。 */
   executionId?: string
   activityId?: string
@@ -374,7 +376,7 @@ export function startRun(state: InteractiveState, run: ActiveRun, prompt: string
     runProgress: { phase: "preparing", elapsedMs: 0 },
     timeline: [
       ...state.timeline,
-      { type: "message", message: { id: `user-${run.runId}`, role: "user", content: prompt, runId: run.runId } },
+      { type: "message", message: { id: `user-${run.runId}`, role: "user", content: prompt, runId: run.runId, workMode: state.workMode } },
     ],
   }
 }
@@ -401,6 +403,7 @@ export function restoreThread(
   messages: readonly RestoredThreadMessage[],
   workMode: WorkMode = "build",
   composeActivities: readonly RestoredComposeActivity[] = [],
+  threadMode: WorkMode | null = null,
 ): InteractiveState {
   const restoredRunId = `restored-${threadId}`
   const timeline: TimelineItem[] = messages.map((message, index) => {
@@ -426,6 +429,7 @@ export function restoreThread(
         content: message.content,
         runId: restoredRunId,
         streaming: false,
+        ...(message.kind === "user" ? { workMode: threadMode ?? "build" } : {}),
       },
     }
   })
@@ -492,7 +496,7 @@ export function restoreThread(
     workMode,
     composeState: null,
     workItem: null,
-    threadMode: null,
+    threadMode,
   }
 }
 
@@ -651,7 +655,21 @@ export function applyAgentEvent(state: InteractiveState, event: EventEnvelope, i
 
   switch (event.type) {
     case EventType.RUN_STARTED: {
-      return { ...next, activity: { kind: "running" }, runProgress: next.runProgress ?? { phase: "preparing", elapsedMs: 0 } }
+      const startedMode = event.payload.mode
+      const mode: WorkMode | undefined = startedMode === "build" || startedMode === "compose" ? startedMode : undefined
+      return {
+        ...next,
+        activity: { kind: "running" },
+        runProgress: next.runProgress ?? { phase: "preparing", elapsedMs: 0 },
+        timeline: mode
+          ? next.timeline.map(item => {
+              if (item.type !== "message" || item.message.role !== "user" || item.message.runId !== runId || item.message.workMode) {
+                return item
+              }
+              return { ...item, message: { ...item.message, workMode: mode } }
+            })
+          : next.timeline,
+      }
     }
     case EventType.RUN_PROGRESS: {
       const payload = event.payload
