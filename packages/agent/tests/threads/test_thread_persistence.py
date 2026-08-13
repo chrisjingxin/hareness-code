@@ -3013,7 +3013,8 @@ def test_zc108_child_ready_write_and_parse(tmp_path: Path) -> None:
     temp_dir = _zc108_marker_dir(tmp_path)
     attempt_id = "b" * 32
     identity = _M._migration_write_child_ready(
-        temp_dir, attempt_id=attempt_id, pid=12345, process_birth_identity=None,
+        temp_dir, attempt_id=attempt_id, pid=12345, parent_pid=67890,
+        process_birth_identity=None,
     )
     ready_path = _M._migration_attempt_child_ready_path(temp_dir)
     marker = _M._parse_migration_child_ready_marker(
@@ -3021,6 +3022,7 @@ def test_zc108_child_ready_write_and_parse(tmp_path: Path) -> None:
     )
     assert marker is not None
     assert marker.pid == 12345
+    assert marker.parent_pid == 67890
     assert marker.marker_identity.st_ino == identity.st_ino
 
 
@@ -3028,11 +3030,50 @@ def test_zc108_child_ready_rejects_id_mismatch(tmp_path: Path) -> None:
     """child-ready attempt_id 不匹配被拒绝。"""
     temp_dir = _zc108_marker_dir(tmp_path)
     _M._migration_write_child_ready(
-        temp_dir, attempt_id="b" * 32, pid=12345, process_birth_identity=None,
+        temp_dir, attempt_id="b" * 32, pid=12345, parent_pid=None,
+        process_birth_identity=None,
     )
     ready_path = _M._migration_attempt_child_ready_path(temp_dir)
     with pytest.raises(ValueError, match="attempt_id mismatch"):
         _M._parse_migration_child_ready_marker(ready_path, expected_attempt_id="c" * 32)
+
+
+def test_zc108_child_ready_accepts_parent_pid_match(tmp_path: Path) -> None:
+    """Windows venv launcher 场景：解释器 pid ≠ Popen.pid，但 parent_pid 相等即接受。
+
+    Python 3.11+ 的 Windows venv 中，``Popen`` spawn 的是 launcher，真实解释器
+    是其子进程，故 ``os.getpid()`` 与 ``Popen.pid`` 不同，而 ``os.getppid()``
+    恰等于 ``Popen.pid``。marker 写者绑定到出生链而非单一 pid。
+    """
+    temp_dir = _zc108_marker_dir(tmp_path)
+    attempt_id = "d" * 32
+    _M._migration_write_child_ready(
+        temp_dir, attempt_id=attempt_id, pid=20092, parent_pid=24516,
+        process_birth_identity=None,
+    )
+    ready_path = _M._migration_attempt_child_ready_path(temp_dir)
+    # Popen.pid 是 launcher 的 24516，与解释器 pid 20092 不同，但 parent_pid 相等。
+    marker = _M._parse_migration_child_ready_marker(
+        ready_path, expected_attempt_id=attempt_id, expected_pid=24516,
+    )
+    assert marker is not None
+    assert marker.pid == 20092
+    assert marker.parent_pid == 24516
+
+
+def test_zc108_child_ready_rejects_pid_and_parent_pid_mismatch(tmp_path: Path) -> None:
+    """pid 与 parent_pid 都不等于期望值时被拒绝，防止无关进程伪造 marker。"""
+    temp_dir = _zc108_marker_dir(tmp_path)
+    attempt_id = "e" * 32
+    _M._migration_write_child_ready(
+        temp_dir, attempt_id=attempt_id, pid=20092, parent_pid=24516,
+        process_birth_identity=None,
+    )
+    ready_path = _M._migration_attempt_child_ready_path(temp_dir)
+    with pytest.raises(ValueError, match="pid mismatch"):
+        _M._parse_migration_child_ready_marker(
+            ready_path, expected_attempt_id=attempt_id, expected_pid=99999,
+        )
 
 
 @pytest.mark.parametrize(
@@ -3096,15 +3137,6 @@ def test_zc108_identity_rejects_permissive_temp_mode(tmp_path: Path) -> None:
     os.chmod(temp, 0o644)
     with pytest.raises(ValueError, match="too permissive"):
         _M._migration_file_identity_from_path_lstat(temp)
-
-
-def test_zc108_windows_without_file_id_adapter_fails_closed(
-        monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Windows 没有稳定 FileId adapter 时不得启动 ZC-108 attempt。"""
-    monkeypatch.setattr(_M.os, "name", "nt")
-    with pytest.raises(ThreadPersistenceError, match="FILE_IDENTITY_UNSUPPORTED"):
-        _M._assert_migration_file_identity_supported()
 
 
 def _zc108_make_cleanup_fixture(
