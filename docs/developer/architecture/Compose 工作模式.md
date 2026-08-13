@@ -1,6 +1,6 @@
 # Compose 工作模式架构（Work Item 模型）
 
-关联任务：[HC-140](../task/HC-140-重构组合工作模式.md) 及对应 [Spec](../spec/HC-140-重构组合工作模式.md)。
+关联任务：[HC-140](../task/archive/HC-140-重构组合工作模式.md) 及对应 [Spec](../spec/HC-140-重构组合工作模式.md)。
 
 ## 定位
 
