@@ -431,7 +431,7 @@ class ComposeRunAdapter:
                     "work_item": _work_item_wire(result.work_item),
                 },
             )
-        if result.outcome is ComposeTurnOutcome.BLOCKED:
+        if result.status is ComposeTurnOutcome.BLOCKED:
             return AdapterOutcome(
                 status="failed",
                 code="COMPOSE_WORK_ITEM_BLOCKED",
