@@ -2,7 +2,7 @@
 
 import { useState } from "react"
 
-import type { ToolCard } from "../../../interactive/state"
+import type { TimelineItem, ToolCard } from "../../../interactive/state"
 import { boundVisibleText, TOOL_PREVIEW_BUDGET, writeFileVisibleBody } from "../../../presentation-shared/paint-budget"
 import { diffTextForRenderer, parseFileDiff } from "../../../presentation-shared/file-diff"
 import { resolveLanguageForPath } from "../../../presentation-shared/language-catalog"
@@ -12,6 +12,7 @@ import { useSpinner } from "../input-bar"
 import { markdownSyntax, tuiTheme } from "../theme"
 import { parseFileMutationArgs, parseToolResultPreview, shortMutationPath, unifiedDiffFromReplacement } from "./file-mutation-args"
 import { canonicalizeToolName, resolveToolRenderer } from "./registry"
+import { currentTodo, parseWriteTodos, todoMarker, todoProgressLabel, type TodoItem } from "./write-todos"
 
 function diffViewForWidth(contentWidth: number): "split" | "unified" {
   return contentWidth >= 120 ? "split" : "unified"
@@ -21,12 +22,14 @@ function diffViewForWidth(contentWidth: number): "split" | "unified" {
 export function ToolRenderer(props: {
   tool: ToolCard
   terminalWidth: number
+  todoDetail?: boolean
 }) {
   const kind = resolveToolRenderer(props.tool.name)
   const name = canonicalizeToolName(props.tool.name)
   if (name === "write" || name === "write_file") return <WriteTool tool={props.tool} />
   if (name === "edit" || name === "edit_file") return <EditTool tool={props.tool} terminalWidth={props.terminalWidth} />
   if (name === "ask_user") return <AskUserTool tool={props.tool} />
+  if (name === "write_todos") return <TodoTool tool={props.tool} detail={props.todoDetail !== false} />
   if (kind === "inline") return <InlineTool tool={props.tool} />
   if (kind === "block") return <BlockTool tool={props.tool} />
   if (kind === "diff") return <DiffTool tool={props.tool} terminalWidth={props.terminalWidth} />
@@ -268,6 +271,102 @@ function WriteFilePreview(props: { tool: ToolCard; path: string | null; content:
         <text fg={tuiTheme.muted}>创建空文件</text>
       )}
       {preview.overflow ? <text fg={tuiTheme.subtle}>还有 {preview.hiddenLines} 行</text> : null}
+    </box>
+  )
+}
+
+/** write_todos：完整清单或一行摘要，绝不铺 JSON。 */
+function TodoTool(props: { tool: ToolCard; detail: boolean }) {
+  const items = todosForTool(props.tool)
+  if (!items.length) return <GenericTool tool={props.tool} />
+  if (!props.detail) return <TodoSummary items={items} running={props.tool.status === "running"} failed={props.tool.status === "failed"} />
+  return <TodoPanel items={items} />
+}
+
+/** 时间线里最后一次 write_todos 的工具 id。 */
+export function latestWriteTodosId(timeline: readonly TimelineItem[]): string | null {
+  for (let index = timeline.length - 1; index >= 0; index -= 1) {
+    const item = timeline[index]
+    if (item.type !== "tool") continue
+    if (canonicalizeToolName(item.tool.name) !== "write_todos") continue
+    if (todosForTool(item.tool).length) return item.tool.id
+  }
+  return null
+}
+
+/** 运行中且该次 write_todos 后面还有内容时，才把完整清单钉到底部，避免双份。 */
+export function shouldPinTodos(timeline: readonly TimelineItem[], activeRun: boolean): boolean {
+  if (!activeRun) return false
+  const latestId = latestWriteTodosId(timeline)
+  if (!latestId) return false
+  const index = timeline.findIndex(item => item.type === "tool" && item.tool.id === latestId)
+  if (index < 0) return false
+  return timeline.slice(index + 1).some(item => item.type !== "message" || item.message.role !== "user")
+}
+
+/** 从工具参数或结果抽出当前清单。 */
+export function todosForTool(tool: ToolCard): TodoItem[] {
+  const fromArgs = parseWriteTodos(tool.arguments)
+  return fromArgs.length ? fromArgs : parseWriteTodos(tool.output)
+}
+
+/** 时间线里最后一次 write_todos 的清单，供运行中跟踪条使用。 */
+export function latestTodos(timeline: readonly TimelineItem[]): TodoItem[] {
+  for (let index = timeline.length - 1; index >= 0; index -= 1) {
+    const item = timeline[index]
+    if (item.type !== "tool") continue
+    if (canonicalizeToolName(item.tool.name) !== "write_todos") continue
+    const items = todosForTool(item.tool)
+    if (items.length) return items
+  }
+  return []
+}
+
+function TodoSummary(props: { items: readonly TodoItem[]; running: boolean; failed: boolean }) {
+  const frame = useSpinner(props.running, 80)
+  const tone = props.failed ? tuiTheme.danger : props.running ? tuiTheme.thinking : tuiTheme.muted
+  const current = currentTodo(props.items)
+  return (
+    <box marginTop={1} paddingLeft={3} paddingRight={3} flexDirection="row" gap={1}>
+      <text fg={tone}>{props.running ? frame : "·"}</text>
+      <text fg={tuiTheme.muted}>TODO</text>
+      <text fg={tuiTheme.subtle}>{todoProgressLabel(props.items)}</text>
+      {current ? <text content={current.content} fg={tuiTheme.muted} /> : null}
+    </box>
+  )
+}
+
+/** 完整清单：一块 surface，标题 + 进度 + 对齐的状态列。 */
+export function TodoPanel(props: { items: readonly TodoItem[] }) {
+  return (
+    <box
+      marginTop={1}
+      marginLeft={3}
+      marginRight={3}
+      backgroundColor={tuiTheme.surface}
+      paddingLeft={1}
+      paddingRight={1}
+      paddingTop={1}
+      paddingBottom={1}
+      flexDirection="column"
+    >
+      <box flexDirection="row" gap={2} justifyContent="space-between">
+        <text fg={tuiTheme.text}>TODO</text>
+        <text fg={tuiTheme.subtle}>{todoProgressLabel(props.items)}</text>
+      </box>
+      {props.items.map((item, index) => {
+        const active = item.status === "in_progress"
+        const done = item.status === "completed"
+        const mark = todoMarker(item.status)
+        const markColor = active ? tuiTheme.thinking : done ? tuiTheme.success : tuiTheme.subtle
+        const textColor = active ? tuiTheme.text : done ? tuiTheme.subtle : tuiTheme.muted
+        return (
+          <box key={`${index}:${item.content}`} flexDirection="row" gap={1}>
+            <text fg={markColor}>{mark}</text>
+            <text content={item.content} fg={textColor} />
+          </box>
+        )
+      })}
     </box>
   )
 }

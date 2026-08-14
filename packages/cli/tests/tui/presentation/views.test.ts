@@ -401,6 +401,65 @@ test("恢复 Thread 的 edit_file 不显示 Preparing，用结果窗口高亮而
   }
 })
 
+test("write_todos 显示清单而不是 JSON，运行中底部跟踪当前进度", async () => {
+  const run = { threadId: "thread-todo", runId: "run-todo" }
+  const started = startRun(createInitialState(), run, "做 jsondiff")
+  const argumentsText = JSON.stringify({
+    todos: [
+      { content: "实现核心 diff 模块 jsondiff/diff.py", status: "in_progress" },
+      { content: "实现 CLI jsondiff/cli.py", status: "pending" },
+      { content: "编写 pytest 测试", status: "pending" },
+    ],
+  })
+  const state: InteractiveState = {
+    ...started,
+    timeline: [
+      started.timeline[0]!,
+      {
+        type: "tool",
+        tool: {
+          id: "t-todos",
+          runId: run.runId,
+          name: "write_todos",
+          arguments: argumentsText,
+          output: "Updated todo list to [{'content': '实现核心 diff 模块 jsondiff/diff.py', 'status': 'in_progress'}]",
+          status: "completed",
+        },
+      },
+      {
+        type: "tool",
+        tool: {
+          id: "t-read",
+          runId: run.runId,
+          name: "read_file",
+          arguments: "{\"file_path\":\"README.md\"}",
+          output: "ok",
+          status: "running",
+        },
+      },
+    ],
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(ThreadView, viewProps(snapshotOf(state), 120, 36)), { width: 120, height: 36 })
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("实现核心 diff 模块")
+    expect(frame).toContain("实现 CLI")
+    expect(frame).toContain("TODO")
+    expect(frame).not.toContain("\"todos\"")
+    expect(frame).not.toContain("in_progress")
+    expect(frame.split("实现 CLI").length - 1).toBe(1)
+    const panelAt = frame.lastIndexOf("TODO")
+    const readAt = frame.indexOf("read_file")
+    expect(panelAt).toBeGreaterThan(readAt)
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
 test("四种工具分流：读文件一行、命令有界块、可解析 diff、未知工具仍能画", async () => {
   const run = { threadId: "thread-tools", runId: "run-tools" }
   const started = startRun(createInitialState(), run, "改代码")

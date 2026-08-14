@@ -20,7 +20,7 @@ import { activityLabel, interactionStatusLabel, progressPhaseLabel } from "../..
 import { nextThinkingExpanded, thinkingVisibleBody } from "../../presentation-shared/paint-budget"
 import { getCommonSyntaxClient } from "../platform/syntax-parsers"
 import { useRunElapsed, useSpinner } from "./input-bar"
-import { ToolRenderer } from "./tools/renderers"
+import { latestTodos, latestWriteTodosId, shouldPinTodos, TodoPanel, ToolRenderer } from "./tools/renderers"
 import { createScrollAcceleration } from "./scroll.js"
 import { markdownSyntax, tuiTheme, userMessageAccent } from "./theme"
 
@@ -91,6 +91,8 @@ export function ConversationTimeline(props: {
     [props.interactive.timeline],
   )
   const pendingRequestId = props.interactive.interaction?.requestId ?? null
+  const pinTodos = shouldPinTodos(props.interactive.timeline, Boolean(props.interactive.activeRun))
+  const latestTodoId = latestWriteTodosId(props.interactive.timeline)
   // 用户显式展开/折叠的 activity；缺省遵循 terminal 默认折叠。
   const [expandedActivities, setExpandedActivities] = useState<ReadonlySet<string>>(() => new Set())
   const [collapsedActivities, setCollapsedActivities] = useState<ReadonlySet<string>>(() => new Set())
@@ -135,6 +137,7 @@ export function ConversationTimeline(props: {
               expandedTools={props.expandedTools}
               onToggleTool={props.onToggleTool}
               terminalWidth={props.terminalWidth}
+              todoDetail={!pinTodos && latestTodoId !== null && segment.item.type === "tool" && segment.item.tool.id === latestTodoId}
             />
           )
         }
@@ -156,6 +159,7 @@ export function ConversationTimeline(props: {
                 expandedTools={props.expandedTools}
                 onToggleTool={props.onToggleTool}
                 terminalWidth={props.terminalWidth}
+                todoDetail={!pinTodos && latestTodoId !== null && item.type === "tool" && item.tool.id === latestTodoId}
               />
             )) : group.summary ? (
               <box paddingLeft={3}>
@@ -167,6 +171,7 @@ export function ConversationTimeline(props: {
       })}
       {/* 当前阶段状态贴近执行区底部，长历史时不因插在顶部而滚出视口。 */}
       <TimelineActivity interactive={props.interactive} />
+      {pinTodos ? <TodoPanel items={latestTodos(props.interactive.timeline)} /> : null}
       {renderComposeProgress(props.interactive)}
       <ErrorBlock interactive={props.interactive} />
       <RunFooter interactive={props.interactive} modelName={props.modelName} />
@@ -205,6 +210,7 @@ function TimelineRow(props: {
   expandedTools: ReadonlySet<string>
   onToggleTool: (toolId: string) => void
   terminalWidth: number
+  todoDetail?: boolean
 }) {
   if (props.item.type === "message") return <MessageBlock message={props.item.message} />
   if (props.item.type === "reasoning") return <ReasoningRow reasoning={props.item.reasoning} />
@@ -214,7 +220,7 @@ function TimelineRow(props: {
   if (props.item.type === "compose-summary") {
     return <ComposeSummaryRow summary={props.item.summary} />
   }
-  return <ToolRenderer tool={props.item.tool} terminalWidth={props.terminalWidth} />
+  return <ToolRenderer tool={props.item.tool} terminalWidth={props.terminalWidth} todoDetail={props.todoDetail} />
 }
 
 /** 阶段 Runtime 摘要：非 assistant 文本，仅展示有界结果。 */
