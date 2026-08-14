@@ -10,6 +10,15 @@ from typing import Mapping
 
 from harness_agent.extensions.mcp import DEFAULT_CONNECT_TIMEOUT_SECONDS, McpServerConfig
 from harness_agent.plugins.common import read_json_object, safe_package_path
+from harness_agent.plugins.mcp_schema import (
+    replace_plugin_placeholders,
+    resolve_portable_cwd,
+    validate_http_headers,
+    validate_http_url,
+    validate_mcp_document,
+    validate_mcp_server,
+    validate_stdio_command,
+)
 from harness_agent.plugins.model import ExtensionCatalogSnapshot, InstalledPlugin, PluginError
 from harness_agent.plugins.store import PluginStore
 
@@ -44,11 +53,7 @@ def load_plugin_mcp_servers(
             root = store.package_path(plugin)
             data = store.data_path(plugin)
             _prepare_data_path(data)
-            loaded = (
-                _load_portable(plugin, root, data)
-                if plugin.format in {"agent-plugins-1.0", "hybrid"}
-                else _load_claude(plugin, root, data, workspace)
-            )
+            loaded = _load_plugin_mcp(plugin, root, data, workspace)
             diagnostics.extend(
                 f"plugin:{plugin.plugin_id}: {diagnostic}"
                 for diagnostic in loaded.diagnostics
@@ -70,6 +75,51 @@ def load_plugin_mcp_servers(
     )
 
 
+def _load_plugin_mcp(
+    plugin: InstalledPlugin,
+    root: Path,
+    data: Path,
+    workspace: Path,
+) -> PluginMcpLoadResult:
+    """按格式分别加载 MCP，避免 hybrid 把私有语义送入 portable schema。"""
+    if plugin.format == "agent-plugins-1.0":
+        return _load_portable(plugin, root, data)
+    if plugin.format == "claude-code":
+        return _load_claude(plugin, root, data, workspace)
+
+    # Hybrid 的两个 manifest 共享身份和 catalog，但各自保留配置语义：
+    # portable mcp.json 走 1.0 closed schema，Claude `.mcp.json` 仍支持既有字段。
+    # 任一 manifest 的顶层致命错误只隔离该侧，不连带丢弃另一侧的有效 server。
+    loaded: list[PluginMcpLoadResult] = []
+    if (root / "mcp.json").is_file():
+        try:
+            loaded.append(_load_portable(plugin, root, data))
+        except PluginError as exc:
+            loaded.append(
+                PluginMcpLoadResult(
+                    servers=(),
+                    diagnostics=(f"portable mcp.json: {exc.code}: {exc}",),
+                )
+            )
+    if (
+        (root / ".mcp.json").is_file()
+        or (root / ".claude-plugin" / "plugin.json").is_file()
+    ):
+        try:
+            loaded.append(_load_claude(plugin, root, data, workspace))
+        except PluginError as exc:
+            loaded.append(
+                PluginMcpLoadResult(
+                    servers=(),
+                    diagnostics=(f"claude MCP: {exc.code}: {exc}",),
+                )
+            )
+    return PluginMcpLoadResult(
+        servers=tuple(server for result in loaded for server in result.servers),
+        diagnostics=tuple(diagnostic for result in loaded for diagnostic in result.diagnostics),
+    )
+
+
 def _load_portable(
     plugin: InstalledPlugin,
     root: Path,
@@ -80,13 +130,13 @@ def _load_portable(
     raw_servers = document.get("mcpServers")
     if not isinstance(raw_servers, Mapping):
         raise PluginError("PLUGIN_MCP_INVALID", "mcpServers 必须是 object")
+    validation = validate_mcp_document(document, root=root)
     result: list[McpServerConfig] = []
-    diagnostics: list[str] = []
-    replacements = {
-        "PLUGIN_ROOT": str(root),
-        "PLUGIN_DATA": str(data),
-    }
-    for name, raw in sorted(raw_servers.items()):
+    diagnostics: list[str] = [*validation.invalid, *validation.unsupported]
+    valid_names = {server.name for server in validation.servers}
+    for name, raw in sorted(raw_servers.items(), key=lambda item: str(item[0])):
+        if name not in valid_names:
+            continue
         try:
             if not isinstance(name, str) or not isinstance(raw, Mapping):
                 raise PluginError("PLUGIN_MCP_INVALID", "MCP server 定义无效")
@@ -96,8 +146,9 @@ def _load_portable(
                     name,
                     raw,
                     root=root,
-                    replacements=replacements,
+                    replacements={},
                     portable=True,
+                    data=data,
                 )
             )
         except PluginError as exc:
@@ -174,8 +225,13 @@ def _server_config(
     root: Path,
     replacements: Mapping[str, str],
     portable: bool,
+    data: Path | None = None,
 ) -> McpServerConfig:
     """转换一个 MCP server，并限制路径变量与进程环境。"""
+    if portable:
+        if data is None:
+            raise PluginError("PLUGIN_DATA_INVALID", "portable MCP 缺少 Plugin data 根目录")
+        return _portable_server_config(plugin, server_name, raw, root=root, data=data)
     name = _namespaced_server_name(plugin, server_name)
     transport = raw.get("type")
     if transport is None:
@@ -269,6 +325,60 @@ def _server_config(
         source=f"plugin:{plugin.plugin_id}",
         source_fingerprint=plugin.package_digest,
         inherit_environment=False,
+    )
+
+
+def _portable_server_config(
+    plugin: InstalledPlugin,
+    server_name: str,
+    raw: Mapping[str, object],
+    *,
+    root: Path,
+    data: Path,
+) -> McpServerConfig:
+    """把已通过 canonical schema 的 portable server 转为 runtime 值。"""
+    validate_mcp_server(server_name, raw, root=root)
+    name = _namespaced_server_name(plugin, server_name)
+    transport = raw["type"]
+    if transport == "stdio":
+        command = validate_stdio_command(raw["command"], root=root)
+        if command.startswith("./"):
+            command = _checked_executable(safe_package_path(root, command, require_exists=True))
+        args = _string_list(raw.get("args", []), f"{server_name}.args")
+        env = _string_map(raw.get("env", {}), f"{server_name}.env")
+        return McpServerConfig(
+            name=name,
+            transport="stdio",
+            command=command,
+            args=tuple(
+                replace_plugin_placeholders(value, root=root, data=data) for value in args
+            ),
+            env={
+                key: replace_plugin_placeholders(value, root=root, data=data)
+                for key, value in env.items()
+            },
+            timeout_seconds=DEFAULT_CONNECT_TIMEOUT_SECONDS,
+            cwd=str(resolve_portable_cwd(raw.get("cwd"), root=root, data=data)),
+            source=f"plugin:{plugin.plugin_id}",
+            source_fingerprint=plugin.package_digest,
+            inherit_environment=False,
+            plugin_root=str(root.resolve()),
+            plugin_data=str(data.resolve()),
+        )
+
+    url = validate_http_url(raw["url"], field=f"{server_name}.url")
+    headers = validate_http_headers(raw.get("headers", {}), field=f"{server_name}.headers")
+    return McpServerConfig(
+        name=name,
+        transport="http" if transport == "streamable-http" else "sse",
+        url=url,
+        headers=headers,
+        timeout_seconds=DEFAULT_CONNECT_TIMEOUT_SECONDS,
+        source=f"plugin:{plugin.plugin_id}",
+        source_fingerprint=plugin.package_digest,
+        inherit_environment=False,
+        plugin_root=str(root.resolve()),
+        plugin_data=str(data.resolve()),
     )
 
 

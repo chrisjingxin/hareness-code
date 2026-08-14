@@ -21,6 +21,8 @@ export type WebAssetsManifest = {
   readonly syntaxWorkerScript: string
 }
 
+let sourceBundlePromise: Promise<WebAssets> | undefined
+
 /** 根据当前 bundle 模块所在目录解析 source 与 dist 两种运行形态的资源位置。 */
 export function resolveWebBundleLocations(moduleDir: string): {
   builtDirectories: readonly string[]
@@ -54,6 +56,17 @@ export async function browserBundle(): Promise<WebAssets> {
 }
 
 async function buildSourceBundle(sourceEntrypoint: string): Promise<WebAssets> {
+  if (sourceBundlePromise) return sourceBundlePromise
+  sourceBundlePromise = buildSourceBundleOnce(sourceEntrypoint)
+  try {
+    return await sourceBundlePromise
+  } catch (error) {
+    sourceBundlePromise = undefined
+    throw error
+  }
+}
+
+async function buildSourceBundleOnce(sourceEntrypoint: string): Promise<WebAssets> {
   const workerEntrypoint = resolve(import.meta.dir, "syntax/worker.ts")
   const appResult = await Bun.build({
     entrypoints: [sourceEntrypoint],

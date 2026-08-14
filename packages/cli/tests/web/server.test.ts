@@ -148,6 +148,7 @@ test("客户端帧原样投递给 coordinator；二进制不解析；超大帧�
     headers: { origin },
   })
   await waitFor(() => attachCalls.length === 1)
+  await waitFor(() => socket.readyState === WebSocket.OPEN)
   const iterator = attachCalls[0].channel.messages[Symbol.asyncIterator]()
   socket.send(JSON.stringify({ type: "handoff.ready" }))
   const first = await Promise.race([iterator.next(), sleep(500)])

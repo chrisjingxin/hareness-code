@@ -48,6 +48,7 @@ class PluginManager:
         """绑定用户级 PluginStore。"""
         self.store = PluginStore(home=home)
 
+
     def validate(
         self,
         source: Path | str,
@@ -147,6 +148,11 @@ class PluginManager:
             nonlocal updated
             plugin = _find_plugin(current, plugin_id)
             if enabled:
+                if not any(component.effective for component in plugin.components):
+                    raise PluginError(
+                        "PLUGIN_NO_EFFECTIVE_COMPONENT",
+                        "Plugin 没有可生效的 Harness 组件，无法启用",
+                    )
                 if capability_fingerprint != plugin.capability_fingerprint:
                     raise PluginError(
                         "PLUGIN_CAPABILITY_CONFIRMATION_REQUIRED",
@@ -394,6 +400,7 @@ class PluginManager:
             plugin
             for plugin in state.plugins
             if plugin.enabled
+            and plugin.can_enable
             and plugin.trusted_capability_fingerprint == plugin.capability_fingerprint
         )
         return ExtensionCatalogSnapshot(

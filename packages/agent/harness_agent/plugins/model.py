@@ -11,6 +11,11 @@ from typing import Literal
 PluginFormat = Literal["agent-plugins-1.0", "claude-code", "hybrid"]
 PluginComponentStatus = Literal["supported", "adapted", "unsupported", "invalid"]
 
+# 组件报告没有单独增加 issue 字段；这些前缀只用于从现有 diagnostics
+# 区分“有可运行条目但同类存在坏条目/不支持条目”的局部降级。
+_COMPONENT_INVALID_DIAGNOSTIC_PREFIX = "PLUGIN_COMPONENT_INVALID:"
+_COMPONENT_UNSUPPORTED_DIAGNOSTIC_PREFIX = "PLUGIN_COMPONENT_UNSUPPORTED:"
+
 
 class PluginError(ValueError):
     """Plugin 来源、格式、存储或状态变更不满足安全约束时抛出。"""
@@ -63,22 +68,15 @@ class PluginDescriptor:
 
     @property
     def can_enable(self) -> bool:
-        """manifest 有效且至少有一个非 invalid 组件时允许启用，坏组件单独隔离。"""
-        return not self.components or any(
-            component.status != "invalid" for component in self.components
+        """只有存在 effective 组件且聚合状态不是 invalid 时才允许启用。"""
+        return any(component.effective for component in self.components) and (
+            self.compatibility != "invalid"
         )
 
     @property
     def compatibility(self) -> str:
-        """汇总组件状态，同时避免把尚未接入运行快照的组件称为已生效。"""
-        statuses = {component.status for component in self.components}
-        if "invalid" in statuses:
-            return "invalid"
-        if "unsupported" in statuses:
-            return "partial"
-        if "adapted" in statuses:
-            return "recognized"
-        return "ready"
+        """按 effective 能力和局部诊断汇总 Plugin 兼容状态。"""
+        return _aggregate_compatibility(self.components)
 
     def to_dict(self) -> dict[str, object]:
         """返回不含来源根目录的校验摘要。"""
@@ -233,3 +231,83 @@ def _sha256(value: object) -> str:
     """对 canonical JSON 计算 SHA-256。"""
     content = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _aggregate_compatibility(
+    components: tuple[PluginComponentReport, ...],
+) -> str:
+    """统一 Descriptor/InstalledPlugin 的 compatibility 聚合。"""
+    has_effective = any(component.effective for component in components)
+    has_invalid = any(
+        component.status == "invalid"
+        or _has_component_diagnostic(component, _COMPONENT_INVALID_DIAGNOSTIC_PREFIX)
+        for component in components
+    )
+    has_unsupported = any(
+        component.status == "unsupported"
+        or _has_component_diagnostic(component, _COMPONENT_UNSUPPORTED_DIAGNOSTIC_PREFIX)
+        for component in components
+    )
+
+    if not has_effective:
+        # 没有 Harness 可运行能力时，纯识别/不支持仍是 recognized；
+        # 组件格式已明确损坏才汇总为 invalid。两者都不能启用。
+        return "invalid" if has_invalid else "recognized"
+    if has_invalid or has_unsupported:
+        return "partial"
+    if any(component.status == "adapted" for component in components):
+        return "recognized"
+    return "ready"
+
+
+def _has_component_diagnostic(component: PluginComponentReport, prefix: str) -> bool:
+    """判断现有 diagnostics 是否记录了局部组件问题。"""
+    return any(diagnostic.startswith(prefix) for diagnostic in component.diagnostics)
+
+
+def merge_component_reports(
+    current: PluginComponentReport,
+    incoming: PluginComponentReport,
+) -> PluginComponentReport:
+    """合并同类报告并保留仍可运行的条目。"""
+    reports = (current, incoming)
+    effective = any(report.effective for report in reports)
+    statuses = {report.status for report in reports}
+    if effective:
+        status: PluginComponentStatus = (
+            "adapted"
+            if "adapted" in statuses
+            else "supported"
+            if "supported" in statuses
+            else "unsupported"
+            if "unsupported" in statuses
+            else "invalid"
+        )
+    else:
+        status = (
+            "invalid"
+            if "invalid" in statuses
+            else "unsupported"
+            if "unsupported" in statuses
+            else "adapted"
+            if "adapted" in statuses
+            else "supported"
+        )
+    diagnostics = list(dict.fromkeys((*current.diagnostics, *incoming.diagnostics)))
+    if "invalid" in statuses and not any(
+        item.startswith(_COMPONENT_INVALID_DIAGNOSTIC_PREFIX) for item in diagnostics
+    ):
+        diagnostics.append(f"{_COMPONENT_INVALID_DIAGNOSTIC_PREFIX} 同类组件存在无效条目")
+    if "unsupported" in statuses and not any(
+        item.startswith(_COMPONENT_UNSUPPORTED_DIAGNOSTIC_PREFIX) for item in diagnostics
+    ):
+        diagnostics.append(f"{_COMPONENT_UNSUPPORTED_DIAGNOSTIC_PREFIX} 同类组件存在未支持条目")
+    return PluginComponentReport(
+        kind=incoming.kind,
+        status=status,
+        count=current.count + incoming.count,
+        sources=tuple(sorted(set(current.sources) | set(incoming.sources))),
+        capabilities=tuple(sorted(set(current.capabilities) | set(incoming.capabilities))),
+        diagnostics=tuple(diagnostics),
+        effective=effective,
+    )

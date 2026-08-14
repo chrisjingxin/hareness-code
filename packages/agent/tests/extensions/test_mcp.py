@@ -271,6 +271,74 @@ class TestMcpConnectionManager:
         assert connection["env"]["PLUGIN_MODE"] == "safe"
         assert "HARNESS_TEST_SECRET" not in connection["env"]
 
+    def test_plugin_stdio_keeps_unknown_placeholders_and_forces_reserved_env(self, tmp_path):
+        """Plugin MCP 只接受 adapter 已替换的保留变量，其余值保持字面值。"""
+        root = tmp_path / "root"
+        data = tmp_path / "data"
+        config = McpServerConfig(
+            name="plugin__source__name__server",
+            transport="stdio",
+            command="offline-fixture-server",
+            args=("${HOST_ENV}", "${PLUGIN_ROOT}/manifest.json"),
+            env={"${ENV_KEY}": "${HOST_ENV}", "PLUGIN_ROOT": "forged-root"},
+            source="plugin:source/name",
+            inherit_environment=False,
+            plugin_root=str(root),
+            plugin_data=str(data),
+        )
+        connection = McpConnectionManager([config])._build_single_connection(config)
+        assert connection is not None
+        assert connection["command"] == "offline-fixture-server"
+        assert connection["args"] == ["${HOST_ENV}", "${PLUGIN_ROOT}/manifest.json"]
+        assert connection["env"]["${ENV_KEY}"] == "${HOST_ENV}"
+        assert connection["env"]["PLUGIN_ROOT"] == str(root)
+        assert connection["env"]["PLUGIN_DATA"] == str(data)
+
+    @pytest.mark.asyncio
+    async def test_plugin_http_disables_redirect_following(self, tmp_path):
+        """Plugin HTTP/SSE headers 不会随自动跨 origin redirect 转发。"""
+        config = McpServerConfig(
+            name="plugin__source__name__http",
+            transport="http",
+            url="https://example.test/mcp",
+            headers={"Authorization": "Bearer secret"},
+            source="plugin:source/name",
+            inherit_environment=False,
+            plugin_root=str(tmp_path / "root"),
+            plugin_data=str(tmp_path / "data"),
+        )
+        connection = McpConnectionManager([config])._build_single_connection(config)
+        assert connection is not None
+        client = connection["httpx_client_factory"](headers=connection["headers"])
+        try:
+            assert client.follow_redirects is False
+            assert client.headers["Authorization"] == "Bearer secret"
+        finally:
+            await client.aclose()
+
+    @pytest.mark.parametrize("transport", ("http", "sse"))
+    @pytest.mark.asyncio
+    async def test_claude_plugin_http_disables_redirect_following(self, transport):
+        """Claude `.mcp.json` 的 Plugin header 也不能随 redirect 转发。"""
+        config = McpServerConfig(
+            name=f"plugin__source__claude__{transport}",
+            transport=transport,
+            url="https://example.test/mcp",
+            headers={"Authorization": "Bearer secret"},
+            source="plugin:source/claude",
+            inherit_environment=False,
+            timeout_seconds=7.0,
+        )
+        connection = McpConnectionManager([config])._build_single_connection(config)
+        assert connection is not None
+        client = connection["httpx_client_factory"](headers=connection["headers"])
+        try:
+            assert client.follow_redirects is False
+            assert client.headers["Authorization"] == "Bearer secret"
+            assert config.timeout_seconds == 7.0
+        finally:
+            await client.aclose()
+
     def test_build_connections_http(self):
         configs = [
             McpServerConfig(
@@ -361,6 +429,35 @@ class TestMcpServerStatuses:
         assert statuses[0]["status"] == "failed"
         assert statuses[0]["error"] == "boom"
         assert statuses[0]["tool_names"] == []
+
+    @pytest.mark.asyncio
+    async def test_one_server_failure_does_not_isolate_siblings(self):
+        """单个启动/认证失败只标记对应 server，其他 server 仍加载工具。"""
+        configs = [
+            McpServerConfig(name="good", transport="stdio", command="cmd-good"),
+            McpServerConfig(name="bad", transport="stdio", command="cmd-bad"),
+        ]
+        mgr = _manager(configs)
+        tool = MagicMock()
+        tool.name = "good_search"
+
+        async def get_tools(*, server_name=None):
+            if server_name == "bad":
+                raise PermissionError("auth failed")
+            return [tool]
+
+        mock_client = MagicMock()
+        mock_client.get_tools = AsyncMock(side_effect=get_tools)
+        with patch(
+            "langchain_mcp_adapters.client.MultiServerMCPClient", return_value=mock_client
+        ):
+            await mgr.connect_all()
+
+        statuses = {item["name"]: item for item in mgr.get_server_statuses()}
+        assert statuses["good"]["status"] == "connected"
+        assert statuses["good"]["tool_names"] == ["good_search"]
+        assert statuses["bad"]["status"] == "failed"
+        assert statuses["bad"]["error"] == "auth failed"
 
     @pytest.mark.asyncio
     async def test_skipped_env_vars(self, monkeypatch):

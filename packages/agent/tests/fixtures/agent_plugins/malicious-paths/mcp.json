@@ -1,0 +1,25 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "path-escape": {
+      "type": "stdio",
+      "command": "../bin/server",
+      "cwd": "data"
+    },
+    "reserved-env": {
+      "type": "stdio",
+      "command": "offline-fixture-server",
+      "env": {
+        "PLUGIN_ROOT": "forged-root"
+      }
+    },
+    "unknown-placeholder": {
+      "type": "stdio",
+      "command": "offline-fixture-server",
+      "args": ["${HOST_ENV}"],
+      "env": {
+        "VISIBLE": "${HOST_ENV}"
+      }
+    }
+  }
+}
