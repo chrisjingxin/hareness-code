@@ -105,10 +105,32 @@ class ExtRootBackendRouter:
         backend, key = self._backend_for(path)
         return backend.glob(pattern, path=key)
 
-    def execute(self, command: str) -> Any:
+    def execute(self, command: str, *, timeout: int | None = None) -> Any:
         """Shell 执行始终落在主根。"""
-        return self._default.execute(command)
+        if hasattr(self._default, "execute"):
+            if timeout is not None:
+                return self._default.execute(command, timeout=timeout)
+            return self._default.execute(command)
+        raise NotImplementedError("Default backend does not support execute")
+
+    async def aexecute(self, command: str, *, timeout: int | None = None) -> Any:
+        """异步 Shell 执行始终落在主根。"""
+        if hasattr(self._default, "aexecute"):
+            if timeout is not None:
+                return await self._default.aexecute(command, timeout=timeout)
+            return await self._default.aexecute(command)
+        if hasattr(self._default, "execute"):
+            if timeout is not None:
+                return self._default.execute(command, timeout=timeout)
+            return self._default.execute(command)
+        raise NotImplementedError("Default backend does not support aexecute")
 
     def __getattr__(self, name: str) -> Any:
         """其余属性委托给 default backend。"""
         return getattr(self._default, name)
+
+
+from deepagents.backends.protocol import SandboxBackendProtocol  # noqa: E402
+
+SandboxBackendProtocol.register(ExtRootBackendRouter)
+

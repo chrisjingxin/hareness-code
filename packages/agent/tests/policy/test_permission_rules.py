@@ -312,3 +312,21 @@ def test_save_rule_session_scope_does_not_write(tmp_path: Path):
     save_rule(rule, scope="session", project_dir=tmp_path)
 
     assert not (tmp_path / ".harness").exists()
+
+
+def test_save_rule_deduplicates_identical_rules(tmp_path: Path):
+    """多次写入相同规则时自动去重，不产生重复条目。"""
+    rule = PermissionRule(tool="write_file", resource="*", effect="allow")
+    save_rule(rule, scope="project", project_dir=tmp_path)
+    save_rule(rule, scope="project", project_dir=tmp_path)
+    save_rule(rule, scope="project", project_dir=tmp_path)
+
+    bash_rule = PermissionRule(tool="execute", resource="python3:*", effect="allow")
+    save_rule(bash_rule, scope="project", project_dir=tmp_path)
+    save_rule(bash_rule, scope="project", project_dir=tmp_path)
+
+    data = json.loads(
+        (tmp_path / ".harness" / "settings.json").read_text(encoding="utf-8")
+    )
+    assert data["permissions"] == ["Write", "Bash(python3:*)"]
+

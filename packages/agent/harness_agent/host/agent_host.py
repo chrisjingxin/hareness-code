@@ -2872,9 +2872,11 @@ class AgentHost:
                 return merge_rules(persisted)
 
             approval_mode = spec.effective_policy.approval_mode or spec.execution.approval_mode
-            classifier = None
-            if approval_mode == "auto" and spec.execution.approval_classifier:
-                classifier = self._build_approval_classifier(spec.execution.approval_classifier)
+            classifier = self._resolve_approval_classifier(
+                approval_mode,
+                spec.execution.approval_classifier,
+                model,
+            )
 
             graph = create_harness_agent(
                 model,
@@ -2981,6 +2983,24 @@ class AgentHost:
         )
         model = create_openai_compatible_model(classifier_settings)
         return SafetyClassifier(model)
+
+    def _resolve_approval_classifier(
+        self,
+        approval_mode: str,
+        classifier_profile_id: str | None,
+        model: Any,
+    ) -> Any:
+        """为 AUTO 模式解析 LLM 安全分类器；未配专用 profile 或 profile 不可用时回退到主模型。"""
+        if approval_mode != "auto":
+            return None
+        classifier = None
+        if classifier_profile_id:
+            classifier = self._build_approval_classifier(classifier_profile_id)
+        if classifier is None and model is not None:
+            from harness_agent.policy.classifier import SafetyClassifier
+
+            classifier = SafetyClassifier(model)
+        return classifier
 
     async def _create_run_context(
         self,

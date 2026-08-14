@@ -268,6 +268,30 @@ class TestApprovalPreflight:
         )
         assert preflight(request) is True
 
+    def test_auto_edit_safe_command_skips_dialog(self, tmp_path: Path):
+        """auto-edit 模式 + execute 只读安全命令：L3.1 白名单自动放行不弹窗。"""
+        preflight = _make_preflight(tmp_path, "auto-edit")
+        request = _make_request("execute", {"command": "git status"})
+        assert preflight(request) is False
+        request = _make_request("execute", {"command": "ls"})
+        assert preflight(request) is False
+
+    def test_auto_edit_in_workspace_delete_runs_without_dialog(self, tmp_path: Path):
+        """auto-edit 模式 + 工作区内非敏感文件删除：自动放行不弹窗。"""
+        preflight = _make_preflight(tmp_path, "auto-edit")
+        request = _make_request(
+            "delete_file", {"file_path": str(tmp_path / "temp.txt")}
+        )
+        assert preflight(request) is False
+
+    def test_auto_edit_sensitive_delete_still_asks(self, tmp_path: Path):
+        """auto-edit 模式 + 敏感路径删除：仍必须弹窗确认。"""
+        preflight = _make_preflight(tmp_path, "auto-edit")
+        request = _make_request(
+            "delete_file", {"file_path": str(tmp_path / ".git" / "config")}
+        )
+        assert preflight(request) is True
+
     def test_auto_in_workspace_edit_allowed_by_f1(self, tmp_path: Path):
         """auto 模式 + 工作区内非敏感编辑：F1 快速通道自动放行。"""
         preflight = _make_preflight(tmp_path, "auto")
@@ -276,10 +300,18 @@ class TestApprovalPreflight:
         )
         assert preflight(request) is False
 
-    def test_auto_ordinary_command_falls_back_to_dialog(self, tmp_path: Path):
-        """auto 模式 + execute 普通命令：F4 回退弹窗人工审批。"""
+    def test_auto_safe_command_skips_dialog(self, tmp_path: Path):
+        """auto 模式 + execute 只读安全命令：L3.1 白名单自动放行不弹窗。"""
         preflight = _make_preflight(tmp_path, "auto")
         request = _make_request("execute", {"command": "ls"})
+        assert preflight(request) is False
+        request = _make_request("execute", {"command": "git status"})
+        assert preflight(request) is False
+
+    def test_auto_ordinary_command_falls_back_to_dialog(self, tmp_path: Path):
+        """auto 模式 + execute 非安全普通命令：F4 回退弹窗人工审批。"""
+        preflight = _make_preflight(tmp_path, "auto")
+        request = _make_request("execute", {"command": "python deploy.py"})
         assert preflight(request) is True
 
     def test_auto_destructive_command_skips_dialog(self, tmp_path: Path):

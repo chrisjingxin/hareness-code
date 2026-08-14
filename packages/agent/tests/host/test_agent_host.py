@@ -1077,6 +1077,59 @@ class TestBuildApprovalClassifier:
         assert AgentHost._build_approval_classifier(self._fake_host(None), "small-fast") is None
 
 
+class TestAutoModeClassifierAssembly:
+    """AUTO 模式下分类器的组装策略（HC-146）：未配 classifier 时默认使用当前主模型。"""
+
+    def test_auto_mode_without_classifier_profile_defaults_to_main_model(self):
+        """未指定 approval.classifier 时，auto 模式默认使用当前 Run 主模型构造 SafetyClassifier。"""
+        from harness_agent.policy.classifier import SafetyClassifier
+
+        mock_model = object()
+        host = AgentHost(allow_echo=False)
+
+        classifier = host._resolve_approval_classifier("auto", None, mock_model)
+
+        assert isinstance(classifier, SafetyClassifier)
+        assert classifier._model is mock_model
+
+    def test_auto_mode_with_dedicated_profile_prefers_profile(self):
+        """配置了专用 classifier profile 时优先使用专用 profile，不误用主模型。"""
+        from harness_agent.policy.classifier import SafetyClassifier
+
+        main_model = object()
+        dedicated_model = object()
+        dedicated_classifier = SafetyClassifier(dedicated_model)  # type: ignore[arg-type]
+
+        host = AgentHost(allow_echo=False)
+        host._build_approval_classifier = lambda _id: dedicated_classifier  # type: ignore[method-assign]
+
+        classifier = host._resolve_approval_classifier("auto", "dedicated-profile", main_model)
+
+        assert classifier is dedicated_classifier
+
+    def test_auto_mode_with_invalid_profile_falls_back_to_main_model(self):
+        """配置了专用 profile 但 profile 不可用时优雅回退到当前主模型。"""
+        from harness_agent.policy.classifier import SafetyClassifier
+
+        main_model = object()
+        host = AgentHost(allow_echo=False)
+        host._build_approval_classifier = lambda _id: None  # type: ignore[method-assign]
+
+        classifier = host._resolve_approval_classifier("auto", "invalid-profile", main_model)
+
+        assert isinstance(classifier, SafetyClassifier)
+        assert classifier._model is main_model
+
+    def test_non_auto_mode_returns_none(self):
+        """非 auto 模式（如 default, auto-edit, plan）不构建分类器。"""
+        main_model = object()
+        host = AgentHost(allow_echo=False)
+
+        assert host._resolve_approval_classifier("default", None, main_model) is None
+        assert host._resolve_approval_classifier("auto-edit", None, main_model) is None
+        assert host._resolve_approval_classifier("plan", None, main_model) is None
+
+
 
 async def _append(frames: list[dict[str, Any]], message: dict[str, Any]) -> None:
     frames.append(message)

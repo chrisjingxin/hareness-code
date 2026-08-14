@@ -52,14 +52,103 @@ _ARG_NODE_TYPES: frozenset[str] = frozenset({
 })
 
 # ---------------------------------------------------------------------------
-# 规则生成：词分类与裸根禁令（ZC-117 决策 3/4/5）
+# 规则生成：词分类、解释器支持、已知子命令表与裸根禁令（ZC-117 / HC-146）
 # ---------------------------------------------------------------------------
 
 _SUBCOMMAND_WORD_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 _WIN_FLAG_RE = re.compile(r"^/[A-Za-z][A-Za-z0-9]{0,7}$")
 _FORWARDING_SUBCOMMANDS: frozenset[str] = frozenset({"run", "exec", "x", "dlx"})
+_COMPOSITE_SUBCOMMANDS: frozenset[str] = frozenset({
+    "compose", "container", "image", "network", "volume", "system", "context", "plugin",
+})
 
-# 不得单独成规则的根命令：裸根前缀匹配会过度放行（如 rm → rm -rf /）。
+# 解释器根命令：允许生成裸根/子命令前缀规则（HC-146 决策 2）。
+INTERPRETER_ROOTS: frozenset[str] = frozenset({
+    "python",
+    "python3",
+    "pytest",
+    "node",
+    "bun",
+    "deno",
+    "ruby",
+    "perl",
+    "php",
+    "bash",
+    "sh",
+    "zsh",
+    "powershell",
+    "pwsh",
+    "cmd",
+})
+
+# 已知子命令表（对齐成熟规范，用于区分真实子命令与普通文件/路径参数）。
+KNOWN_SUBCOMMANDS: dict[str, frozenset[str]] = {
+    "git": frozenset({
+        "add", "am", "archive", "bisect", "branch", "bundle", "checkout",
+        "cherry-pick", "citool", "clean", "clone", "commit", "describe",
+        "diff", "fetch", "format-patch", "gc", "grep", "gui", "init",
+        "log", "merge", "mv", "notes", "pull", "push", "range-diff",
+        "rebase", "reset", "restore", "revert", "rm", "shortlog", "show",
+        "stash", "status", "submodule", "switch", "tag", "worktree",
+    }),
+    "npm": frozenset({
+        "access", "adduser", "audit", "bugs", "cache", "ci", "completion",
+        "config", "dedupe", "deprecate", "diff", "dist-tag", "docs", "doctor",
+        "edit", "exec", "explain", "explore", "find-dupes", "fund", "get",
+        "help", "hook", "init", "install", "install-ci-test", "install-test",
+        "link", "ll", "login", "logout", "ls", "org", "outdated", "owner",
+        "pack", "ping", "pkg", "prefix", "profile", "prune", "publish",
+        "rebuild", "repo", "restart", "root", "run", "run-script", "search",
+        "set", "shrinkwrap", "star", "stars", "start", "stop", "team",
+        "test", "token", "uninstall", "unpublish", "unstar", "update",
+        "version", "view", "whoami",
+    }),
+    "yarn": frozenset({
+        "add", "audit", "autoclean", "bin", "cache", "config", "create",
+        "dedupe", "generate-lock-entry", "global", "help", "import", "info",
+        "init", "install", "licenses", "link", "list", "lockfile", "node",
+        "outdated", "pack", "policies", "publish", "remove", "run", "set",
+        "tag", "test", "unlink", "unplug", "upgrade", "upgrade-interactive",
+        "version", "versions", "why", "workspace", "workspaces",
+    }),
+    "pnpm": frozenset({
+        "add", "audit", "config", "create", "dlx", "doctor", "env", "exec",
+        "fetch", "import", "init", "install", "install-test", "licenses",
+        "link", "list", "outdated", "pack", "patch", "patch-commit",
+        "patch-remove", "prune", "publish", "rebuild", "remove", "root",
+        "run", "setup", "start", "store", "test", "unlink", "update", "why",
+    }),
+    "bun": frozenset({
+        "add", "build", "create", "dev", "install", "link", "pm", "remove",
+        "run", "test", "unlink", "update", "upgrade", "x",
+    }),
+    "cargo": frozenset({
+        "build", "check", "clean", "doc", "new", "init", "add", "remove",
+        "run", "test", "bench", "update", "search", "publish", "install", "uninstall",
+    }),
+    "docker": frozenset({
+        "build", "compose", "container", "context", "exec", "image", "images",
+        "info", "inspect", "logs", "network", "node", "plugin", "port", "ps",
+        "pull", "push", "restart", "rm", "rmi", "run", "service", "start",
+        "stop", "system", "tag", "top", "version", "volume", "wait",
+    }),
+    "kubectl": frozenset({
+        "annotate", "api-resources", "api-versions", "apply", "attach", "auth",
+        "autoscale", "certificate", "cluster-info", "completion", "config",
+        "cordon", "cp", "create", "delete", "describe", "diff", "drain",
+        "edit", "exec", "explain", "expose", "get", "kustomize", "label",
+        "logs", "patch", "plugin", "port-forward", "proxy", "replace",
+        "rollout", "run", "scale", "set", "taint", "top", "uncordon",
+        "version", "wait",
+    }),
+    "go": frozenset({
+        "build", "clean", "doc", "env", "bug", "fix", "fmt", "generate",
+        "get", "install", "list", "mod", "work", "run", "test", "tool",
+        "version", "vet",
+    }),
+}
+
+# 不得单独成规则的高危根命令：裸根前缀匹配会过度放行（如 rm → rm -rf /）。
 BARE_ROOT_FORBIDDEN: frozenset[str] = frozenset({
     "rm",
     "del",
@@ -80,20 +169,6 @@ BARE_ROOT_FORBIDDEN: frozenset[str] = frozenset({
     "wget",
     "ssh",
     "scp",
-    "python",
-    "python3",
-    "node",
-    "bun",
-    "deno",
-    "ruby",
-    "perl",
-    "php",
-    "bash",
-    "sh",
-    "zsh",
-    "powershell",
-    "pwsh",
-    "cmd",
     "docker",
 })
 
@@ -627,15 +702,20 @@ def _tokenize_command_for_rule(command: str, platform: str) -> list[str]:
 
 
 def extract_command_rule(command: str, *, platform: str | None = None) -> str:
-    """基于词分类提取纯前缀规则字符串，用于「本项目允许」持久化。
+    """基于词分类与已知子命令表提取纯前缀规则字符串，用于「本项目允许」持久化。
 
-    规则生成逻辑（ZC-117 决策 3/5）：
-    - 不再追加 ``" *"``，输出纯前缀，供 ``matches_command_prefix`` 匹配
-    - 命令根始终保留；遇到开关或操作数即停止
-    - 第一个子命令词无条件保留；第二个及以后仅当其后紧跟开关时保留
-    - ``run``/``exec``/``x``/``dlx`` 转发特例：其后那个词必须保留
-    - 最多保留 3 个词（命令根 + 2 层子命令）
-    - 若最终只剩裸根且根命令在 :data:`BARE_ROOT_FORBIDDEN` 中，返回空串（不生成规则）
+    规则生成逻辑（ZC-117 / HC-146）：
+    - 输出纯前缀，供 ``matches_command_prefix`` 匹配
+    - 命令根始终保留
+    - 解释器命令（``python``/``node``/``bun`` 等）允许生成裸根或子命令前缀规则
+    - 若命令根在 :data:`KNOWN_SUBCOMMANDS` 中：
+      - 第一个参数属于已知子命令时保留（如 ``git commit``、``npm install``）
+      - 若子命令为 ``run``/``exec``/``x``/``dlx`` 转发类，保留其后一个脚本名称（如 ``npm run build``）
+      - 若子命令为 ``compose`` 等组合类，保留其后一个动作（如 ``docker compose up``）
+      - 第二个及以后的子命令词仅当其后紧跟开关时保留（如 ``kubectl get pods -o`` → ``kubectl get``）
+    - 若命令根不在 :data:`KNOWN_SUBCOMMANDS` 中（如 ``ls``、``cat``、``echo``、``mkdir``、``dir`` 等）：
+      - 其后参数视为操作数/路径并丢弃，仅保留根命令（如 ``ls packages`` → ``ls``）
+    - 若最终只剩裸根且根命令在 :data:`BARE_ROOT_FORBIDDEN` 中（如 ``rm``、``curl``、``docker`` 等），返回空串（不生成规则）
 
     Args:
         command: 命令字符串（通常已 strip_wrappers）。
@@ -655,36 +735,28 @@ def extract_command_rule(command: str, *, platform: str | None = None) -> str:
 
     root = tokens[0]
     kept: list[str] = [root]
-    subcommand_count = 0
-    i = 1
-    while i < len(tokens) and len(kept) < 3:
-        token = tokens[i]
-        if _is_flag_token(token, host) or _is_operand_token(token, host):
-            break
-        # 子命令词
-        if subcommand_count == 0:
-            kept.append(token)
-            subcommand_count += 1
-            # 转发执行特例：run/exec 后必须再保留一个词（若存在且非开关）
-            if token in _FORWARDING_SUBCOMMANDS and i + 1 < len(tokens):
-                nxt = tokens[i + 1]
-                if not _is_flag_token(nxt, host) and len(kept) < 3:
+
+    known_subs = KNOWN_SUBCOMMANDS.get(root)
+    if known_subs and len(tokens) > 1:
+        first_arg = tokens[1]
+        if not _is_flag_token(first_arg, host) and first_arg in known_subs:
+            kept.append(first_arg)
+            # 转发执行特例：run/exec/x/dlx 后必须再保留一个词（若存在且非开关）
+            if first_arg in _FORWARDING_SUBCOMMANDS and len(tokens) > 2:
+                nxt = tokens[2]
+                if not _is_flag_token(nxt, host) and not _is_operand_token(nxt, host):
                     kept.append(nxt)
-                    subcommand_count += 1
-                    i += 2
-                    continue
-            i += 1
-            continue
-        # 第二个及以后的子命令词：仅当其后紧跟开关时保留
-        next_is_flag = (
-            i + 1 < len(tokens) and _is_flag_token(tokens[i + 1], host)
-        )
-        if next_is_flag:
-            kept.append(token)
-            subcommand_count += 1
-            i += 1
-            continue
-        break
+            # 组合类子命令特例：docker compose up 等
+            elif first_arg in _COMPOSITE_SUBCOMMANDS and len(tokens) > 2:
+                nxt = tokens[2]
+                if not _is_flag_token(nxt, host) and not _is_operand_token(nxt, host):
+                    kept.append(nxt)
+            # 第二个及以后的子命令词：仅当其后紧跟开关时保留
+            elif len(tokens) > 2:
+                nxt = tokens[2]
+                next_is_flag = len(tokens) > 3 and _is_flag_token(tokens[3], host)
+                if next_is_flag and not _is_flag_token(nxt, host) and not _is_operand_token(nxt, host):
+                    kept.append(nxt)
 
     if len(kept) == 1 and root in BARE_ROOT_FORBIDDEN:
         return ""

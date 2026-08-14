@@ -573,11 +573,11 @@ def evaluate_permission(
     if is_read_only(tool_name):
         return "allow"
 
-    # L3.1: Shell 安全命令白名单（default 模式下自动放行只读安全的命令）
+    # L3.1: Shell 安全命令白名单（非 plan 模式下自动放行只读安全的命令）
     # 仅对 execute 工具生效，且需要检查安全底线。
     # 链式命令必须逐段判定：任一段不在白名单内则整体不走快速放行，
     # 防止 "git status && rm -rf /" 这类危险命令借首段白名单逃逸。
-    if tool_name == "execute" and approval_mode == "default":
+    if tool_name == "execute" and approval_mode != "plan":
         command = str(tool_args.get("command", "")).strip()
         if command:
             segments = extract_segments(command)

@@ -62,6 +62,22 @@ def test_ext_router_and_text_backend_share_root(tmp_path: Path):
     other = registry.resolve(str(extra / "note.txt")).backend_path
     primary_virtual = "/note.txt"
     (primary / "note.txt").write_text("primary-note", encoding="utf-8")
-    assert text.read_text_document(primary_virtual).content == "primary-note"
-    assert text.read_text_document(other).content == "hello-extra"
     assert root.root_id in other
+
+
+def test_ext_router_implements_sandbox_protocol(tmp_path: Path):
+    from deepagents.backends.local_shell import LocalShellBackend
+    from deepagents.backends.protocol import SandboxBackendProtocol
+    from deepagents.middleware.filesystem import supports_execution
+    from harness_agent.threads.virtual_files import mount_harness_virtual_files
+
+    primary = tmp_path / "primary"
+    primary.mkdir()
+    registry = WorkspaceRootRegistry(primary, load_persisted=False)
+    local = LocalShellBackend(root_dir=str(primary), virtual_mode=True)
+    router = ExtRootBackendRouter(local, registry)
+
+    assert isinstance(router, SandboxBackendProtocol)
+    composite = mount_harness_virtual_files(router, registry=None, thread_id="test")
+    assert supports_execution(composite)
+

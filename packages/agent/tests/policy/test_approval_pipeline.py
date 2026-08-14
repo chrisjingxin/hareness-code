@@ -70,9 +70,31 @@ class TestModePermissionTable:
             "edit_file", {"file_path": "/tmp/a.txt"}, "auto-edit"
         )
         assert result == "allow"
-        # EXECUTE 工具在 auto-edit 模式下仍为 ask
-        result = evaluate_permission("execute", {"command": "ls"}, "auto-edit")
+        # DELETE 工具在 auto-edit 模式下对普通文件为 allow
+        result = evaluate_permission(
+            "delete_file", {"file_path": "/tmp/a.txt"}, "auto-edit"
+        )
+        assert result == "allow"
+        # DELETE 工具在 auto-edit 模式下对敏感路径仍为 ask
+        result = evaluate_permission(
+            "delete_file", {"file_path": "/home/user/.git/config"}, "auto-edit"
+        )
         assert result == "ask"
+        # EXECUTE 工具若是安全只读命令在 auto-edit 模式下自动放行（L3.1）
+        result = evaluate_permission("execute", {"command": "ls"}, "auto-edit")
+        assert result == "allow"
+        result = evaluate_permission("execute", {"command": "git status"}, "auto-edit")
+        assert result == "allow"
+        # 非安全只读命令在 auto-edit 模式下仍为 ask
+        result = evaluate_permission("execute", {"command": "npm install"}, "auto-edit")
+        assert result == "ask"
+
+    def test_safe_shell_commands_allowed_in_auto_mode(self) -> None:
+        # EXECUTE 工具若是安全只读命令在 auto 模式下通过 L3.1 自动放行
+        result = evaluate_permission("execute", {"command": "git status"}, "auto")
+        assert result == "allow"
+        result = evaluate_permission("execute", {"command": "ls"}, "auto")
+        assert result == "allow"
 
     def test_mode_permission_table_yolo(self) -> None:
         # EXECUTE 工具在 yolo 模式下为 allow

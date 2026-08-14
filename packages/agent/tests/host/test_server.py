@@ -2309,7 +2309,7 @@ async def test_auto_edit_writes_without_interruption_but_shell_still_requires_ap
                 AIMessage(
                     content="",
                     tool_calls=[
-                        {"name": "execute", "args": {"command": "pwd"}, "id": "call-shell"}
+                        {"name": "execute", "args": {"command": "touch next.txt"}, "id": "call-shell"}
                     ],
                 ),
                 AIMessage(content="命令被拒绝"),

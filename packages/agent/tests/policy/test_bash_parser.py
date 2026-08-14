@@ -364,36 +364,60 @@ class TestExtractCommandRule:
         """第二个子命令词无后续开关时丢弃。"""
         assert extract_command_rule("kubectl get pods") == "kubectl get"
 
-    def test_bare_root_forbidden_rm(self):
-        """rm foo.txt 不生成裸根规则。"""
-        assert extract_command_rule("rm foo.txt") == ""
+    def test_interpreter_roots_generate_rules(self):
+        """解释器命令生成裸根/子命令规则，支持跨文件复用（HC-146）。"""
+        assert extract_command_rule("python script.py") == "python"
+        assert extract_command_rule("python -m pytest tests/foo.py") == "python"
+        assert extract_command_rule("python3 main.py") == "python3"
+        assert extract_command_rule("node index.js") == "node"
+        assert extract_command_rule("bun test tests/foo.test.ts") == "bun test"
+        assert extract_command_rule("pytest tests/foo.py") == "pytest"
 
-    def test_bare_root_forbidden_python(self):
-        """python script.py 不生成裸根规则。"""
-        assert extract_command_rule("python script.py") == ""
+    def test_non_subcommand_tool_drops_operands(self):
+        """无子命令的标准命令丢弃路径/操作数参数，生成根规则（HC-146）。"""
+        assert extract_command_rule("ls packages") == "ls"
+        assert extract_command_rule("ls docs") == "ls"
+        assert extract_command_rule("cat packages/agent/README.md") == "cat"
+        assert extract_command_rule("echo hello") == "echo"
+        assert extract_command_rule("mkdir -p src/components") == "mkdir"
+
+    def test_bare_root_forbidden_dangerous_roots(self):
+        """危险根命令只剩裸根时不生成规则。"""
+        assert extract_command_rule("rm foo.txt") == ""
+        assert extract_command_rule("del C:\\test.txt", platform="win32") == ""
+        assert extract_command_rule("curl https://example.com") == ""
+        assert extract_command_rule("wget https://example.com") == ""
+        assert extract_command_rule("ssh user@host") == ""
 
     def test_self_match_closed_loop(self):
-        """生成的规则必须能前缀匹配原命令（自匹配闭环）。"""
+        """生成的规则必须能前缀匹配原命令与同类命令（自匹配闭环）。"""
         from harness_agent.policy.bash_matcher import matches_command_prefix
 
         cases = [
-            "whoami",
-            "git status",
-            "git status --porcelain",
-            "git commit -m x",
-            "npm install express",
-            "npm run build",
-            "docker compose up -d",
-            "ls -la",
-            'dir "C:\\Users\\PC\\Desktop"',
-            "kubectl get pods",
-            "cargo build --release",
+            ("whoami", "whoami"),
+            ("git status", "git status --short"),
+            ("git status --porcelain", "git status"),
+            ("git commit -m x", "git commit --amend"),
+            ("npm install express", "npm install lodash"),
+            ("npm run build", "npm run build"),
+            ("docker compose up -d", "docker compose up"),
+            ("ls -la", "ls docs"),
+            ("ls packages", "ls docs"),
+            ('dir "C:\\Users\\PC\\Desktop"', 'dir "C:\\Users"'),
+            ("kubectl get pods", "kubectl get nodes"),
+            ("cargo build --release", "cargo build"),
+            ("python -m pytest tests/test_a.py", "python -m pytest tests/test_b.py"),
+            ("node server.js", "node app.js"),
+            ("bun test a.test.ts", "bun test b.test.ts"),
         ]
-        for cmd in cases:
+        for cmd, future_cmd in cases:
             rule = extract_command_rule(cmd, platform="win32")
             assert rule, f"unexpected empty rule for {cmd!r}"
             assert matches_command_prefix(rule, cmd), (
-                f"rule {rule!r} does not match command {cmd!r}"
+                f"rule {rule!r} does not match original command {cmd!r}"
+            )
+            assert matches_command_prefix(rule, future_cmd), (
+                f"rule {rule!r} does not match future command {future_cmd!r}"
             )
 
 

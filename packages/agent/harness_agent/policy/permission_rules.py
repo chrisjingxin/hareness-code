@@ -396,7 +396,12 @@ def save_rule(
     if not isinstance(permissions, list):
         permissions = []
 
-    permissions.append(serialize_rule(rule))
+    serialized = serialize_rule(rule)
+    if serialized in permissions:
+        # 规则已存在，幂等跳过写盘
+        return
+
+    permissions.append(serialized)
     data["permissions"] = permissions
 
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -86,7 +86,7 @@ def test_non_read_only_tools_return_false(tool_name: str):
         # DELETE
         (ToolKind.DELETE, "plan", "deny"),
         (ToolKind.DELETE, "default", "ask"),
-        (ToolKind.DELETE, "auto-edit", "ask"),
+        (ToolKind.DELETE, "auto-edit", "allow"),
         (ToolKind.DELETE, "yolo", "allow"),
         # EXECUTE
         (ToolKind.EXECUTE, "plan", "deny"),

@@ -71,7 +71,7 @@ KIND_MODE_PERMISSION: dict[ToolKind, dict[str, str]] = {
     ToolKind.DELETE: {
         "plan": "deny",
         "default": "ask",
-        "auto-edit": "ask",
+        "auto-edit": "allow",
         "auto": "filter",
         "yolo": "allow",
     },

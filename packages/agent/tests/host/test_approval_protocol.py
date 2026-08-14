@@ -558,7 +558,7 @@ def test_generate_permission_rule_chained_command_produces_per_segment_rules() -
         {"command": 'echo hello > a.txt && dir /b "C:\\tmp"'},
     )
     resources = [r.resource for r in rules]
-    assert "echo hello" in resources
+    assert "echo" in resources
     assert "dir" in resources
     assert len(resources) == len(set(resources))
 

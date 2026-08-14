@@ -587,10 +587,10 @@ def _make_approval_preflight(
                     return True
             return False
 
-        # L3.1：Shell 安全命令白名单（default 模式下自动放行只读安全的命令）。
+        # L3.1：Shell 安全命令白名单（非 plan 模式下自动放行只读安全的命令）。
         # 预检阶段直接跳过审批弹窗，与 evaluate_permission 的 L3.1 逻辑保持一致。
         # 链式命令逐段判定：任一段不在白名单内则不跳过审批。
-        if tool_name == "execute" and approval_mode == "default":
+        if tool_name == "execute" and approval_mode != "plan":
             command = str(tool_args.get("command", "")).strip()
             if command:
                 segments = extract_segments(command)
@@ -619,10 +619,10 @@ def _make_approval_preflight(
         if effect == "ask" or sensitive:
             return True
 
-        # auto-edit：工作区内非敏感编辑自动执行；越界调用已由边界预检拒绝。
+        # auto-edit：工作区内非敏感编辑与删除自动执行；越界调用已由边界预检拒绝。
         if (
             approval_mode == "auto-edit"
-            and get_tool_kind(tool_name) is ToolKind.EDIT
+            and get_tool_kind(tool_name) in (ToolKind.EDIT, ToolKind.DELETE)
         ):
             return False
 
