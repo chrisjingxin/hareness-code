@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import os
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from harness_agent.plugins.manager import PluginManager
-from harness_agent.plugins.model import PluginError
+from harness_agent.plugins.claude import _merge_reports
+from harness_agent.plugins.model import PluginComponentReport, PluginDescriptor, PluginError
 from harness_agent.plugins.store import package_digest
 
 
@@ -66,6 +68,176 @@ def _portable_plugin(root: Path) -> None:
     agent.write_text("id: reviewer\n", encoding="utf-8")
 
 
+def _descriptor_with_components(
+    components: tuple[PluginComponentReport, ...],
+) -> PluginDescriptor:
+    """构造只关注聚合语义的 PluginDescriptor。"""
+    return PluginDescriptor(
+        name="semantic-plugin",
+        version="1.0.0",
+        description=None,
+        format="agent-plugins-1.0",
+        manifest="plugin.json",
+        package_digest="d" * 64,
+        capability_fingerprint="f" * 64,
+        components=components,
+    )
+
+
+def _component(
+    status: str,
+    *,
+    effective: bool,
+    diagnostics: tuple[str, ...] = (),
+) -> PluginComponentReport:
+    """构造聚合测试用的组件报告。"""
+    return PluginComponentReport(
+        kind=f"component-{status}-{effective}",
+        status=status,  # type: ignore[arg-type]
+        count=1 if effective else 0,
+        diagnostics=diagnostics,
+        effective=effective,
+    )
+
+
+@pytest.mark.parametrize(
+    ("components", "compatibility", "can_enable"),
+    (
+        ((), "recognized", False),
+        ((_component("unsupported", effective=False),), "recognized", False),
+        ((_component("invalid", effective=False),), "invalid", False),
+        ((_component("supported", effective=True),), "ready", True),
+        ((_component("adapted", effective=True),), "recognized", True),
+        (
+            (
+                _component("invalid", effective=False),
+                _component("supported", effective=True),
+            ),
+            "partial",
+            True,
+        ),
+        (
+            (
+                _component("unsupported", effective=False),
+                _component("supported", effective=True),
+            ),
+            "partial",
+            True,
+        ),
+        (
+            (
+                _component(
+                    "supported",
+                    effective=True,
+                    diagnostics=("PLUGIN_COMPONENT_INVALID: broken entry",),
+                ),
+            ),
+            "partial",
+            True,
+        ),
+    ),
+)
+def test_plugin_descriptor_aggregates_compatibility_and_enable_gate(
+    components: tuple[PluginComponentReport, ...],
+    compatibility: str,
+    can_enable: bool,
+) -> None:
+    """聚合状态和启用条件保持一致，并隔离有效组件与局部坏条目。"""
+    descriptor = _descriptor_with_components(components)
+    assert descriptor.compatibility == compatibility
+    assert descriptor.can_enable is can_enable
+    assert not (descriptor.compatibility == "invalid" and descriptor.can_enable)
+
+
+def test_claude_component_merge_preserves_effective_files_and_reports_bad_entries() -> None:
+    """Claude 同类路径合并不因坏路径丢失有效文件，也不依赖已删除的状态排序表。"""
+    merged = _merge_reports(
+        [
+            PluginComponentReport(
+                kind="commands",
+                status="supported",
+                count=1,
+                sources=("commands/review.md",),
+                effective=True,
+            ),
+            PluginComponentReport(
+                kind="commands",
+                status="invalid",
+                count=0,
+                diagnostics=("PLUGIN_COMPONENT_INVALID: commands/missing: 路径不存在",),
+            ),
+        ]
+    )
+
+    assert len(merged) == 1
+    report = merged[0]
+    assert report.status == "supported"
+    assert report.count == 1
+    assert report.effective is True
+    assert report.sources == ("commands/review.md",)
+    assert report.diagnostics == (
+        "PLUGIN_COMPONENT_INVALID: commands/missing: 路径不存在",
+    )
+    descriptor = _descriptor_with_components(tuple(merged))
+    assert descriptor.compatibility == "partial"
+    assert descriptor.can_enable is True
+
+
+def test_installed_plugin_reuses_descriptor_semantics(tmp_path: Path) -> None:
+    """registry 安装记录重建 Descriptor 后仍使用同一聚合结果。"""
+    source = tmp_path / "partial-plugin"
+    source.mkdir()
+    _portable_plugin(source)
+    broken_skill = source / "skills" / "broken" / "SKILL.md"
+    _write_skill(broken_skill)
+    broken_skill.write_text(
+        broken_skill.read_text(encoding="utf-8").replace("name: review", "name: other"),
+        encoding="utf-8",
+    )
+    manager = PluginManager(home=tmp_path / "home")
+
+    installed = manager.install(source)["plugin"]
+    assert isinstance(installed, dict)
+    assert installed["compatibility"] == "partial"
+    assert installed["can_enable"] is True
+
+    record = manager.store.read_registry().plugins[0]
+    assert record.compatibility == "partial"
+    assert record.can_enable is True
+
+
+def test_zero_effective_plugin_install_is_disabled_and_enable_has_stable_error(
+    tmp_path: Path,
+) -> None:
+    """空 portable 包可以安装，但没有 effective 组件时启用失败关闭。"""
+    source = tmp_path / "empty-plugin"
+    source.mkdir()
+    _write_json(
+        source / "plugin.json",
+        {
+            "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+            "name": "empty-plugin",
+            "version": "1.0.0",
+        },
+    )
+    manager = PluginManager(home=tmp_path / "home")
+
+    validation = manager.validate(source)["plugin"]
+    assert isinstance(validation, dict)
+    assert validation["compatibility"] == "recognized"
+    assert validation["can_enable"] is False
+
+    installed = manager.install(source)["plugin"]
+    assert isinstance(installed, dict)
+    with pytest.raises(PluginError) as rejected:
+        manager.set_enabled(
+            str(installed["id"]),
+            enabled=True,
+            capability_fingerprint=str(installed["capability_fingerprint"]),
+        )
+    assert rejected.value.code == "PLUGIN_NO_EFFECTIVE_COMPONENT"
+
+
 def test_portable_install_is_disabled_and_enable_requires_current_fingerprint(
     tmp_path: Path,
 ) -> None:
@@ -108,6 +280,100 @@ def test_portable_install_is_disabled_and_enable_requires_current_fingerprint(
     assert enabled_plugin["enabled"] is True
     assert enabled_plugin["trusted"] is True
     assert manager.catalog().plugins[0].plugin_id == plugin_id
+
+
+@pytest.mark.parametrize("source_kind", ("directory", "zip"))
+def test_plugin_management_lifecycle_covers_directory_and_zip_sources(
+    tmp_path: Path,
+    source_kind: str,
+) -> None:
+    """目录和 ZIP 经过同一管理入口，状态只在下一 Host 快照边界生效。"""
+    source = tmp_path / "lifecycle-plugin"
+    source.mkdir()
+    _portable_plugin(source)
+    executable = source / "bin" / "check"
+    executable.parent.mkdir(parents=True, exist_ok=True)
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+
+    package = source
+    if source_kind == "zip":
+        package = tmp_path / "lifecycle-plugin.zip"
+        with zipfile.ZipFile(package, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for path in sorted(source.rglob("*")):
+                if path.is_file():
+                    archive.write(path, (Path(source.name) / path.relative_to(source)).as_posix())
+
+    manager = PluginManager(home=tmp_path / f"home-{source_kind}")
+    validated = manager.validate(package)
+    assert validated["will_install_enabled"] is False
+    assert manager.list()["plugins"] == []
+
+    installed = manager.install(package)["plugin"]
+    assert isinstance(installed, dict)
+    plugin_id = str(installed["id"])
+    fingerprint = str(installed["capability_fingerprint"])
+    assert installed["enabled"] is False
+    assert manager.inspect(plugin_id)["plugin"]["id"] == plugin_id  # type: ignore[index]
+    assert manager.list()["catalog"]["count"] == 0  # type: ignore[index]
+
+    with pytest.raises(PluginError) as wrong_fingerprint:
+        manager.set_enabled(
+            plugin_id,
+            enabled=True,
+            capability_fingerprint="0" * 64,
+        )
+    assert wrong_fingerprint.value.code == "PLUGIN_CAPABILITY_CONFIRMATION_REQUIRED"
+
+    enabled = manager.set_enabled(
+        plugin_id,
+        enabled=True,
+        capability_fingerprint=fingerprint,
+    )
+    assert enabled["effective_on"] == "next_host"
+    assert enabled["catalog"]["count"] == 1  # type: ignore[index]
+    assert manager.list(include_disabled=False)["plugins"]  # type: ignore[index]
+
+    disabled = manager.set_enabled(plugin_id, enabled=False)
+    assert disabled["effective_on"] == "next_host"
+    assert disabled["catalog"]["count"] == 0  # type: ignore[index]
+    assert manager.list(include_disabled=False)["plugins"] == []
+
+    removed = manager.remove(plugin_id)
+    assert removed["removed"] is True
+    assert manager.list()["plugins"] == []
+
+
+def test_catalog_excludes_legacy_enabled_plugin_without_effective_components(
+    tmp_path: Path,
+) -> None:
+    """旧记录即使仍标记 enabled/trusted，也不能绕过当前运行目录门禁。"""
+    source = tmp_path / "legacy-enabled"
+    source.mkdir()
+    _portable_plugin(source)
+    manager = PluginManager(home=tmp_path / "home")
+    installed = manager.install(source)["plugin"]
+    assert isinstance(installed, dict)
+    plugin_id = str(installed["id"])
+    fingerprint = str(installed["capability_fingerprint"])
+    manager.set_enabled(
+        plugin_id,
+        enabled=True,
+        capability_fingerprint=fingerprint,
+    )
+    assert [plugin.plugin_id for plugin in manager.catalog().plugins] == [plugin_id]
+
+    manager.store.mutate_registry(
+        lambda state: tuple(
+            replace(plugin, components=()) if plugin.plugin_id == plugin_id else plugin
+            for plugin in state.plugins
+        )
+    )
+    legacy = manager.store.read_registry().plugins[0]
+    assert legacy.enabled is True
+    assert legacy.trusted_capability_fingerprint == fingerprint
+    assert legacy.can_enable is False
+    assert manager.catalog().plugins == ()
 
 
 def test_plugin_summaries_do_not_expose_source_or_store_paths(tmp_path: Path) -> None:
@@ -605,6 +871,170 @@ def test_enabled_claude_skill_and_inline_mcp_are_adapted_without_repacking(
     assert mcp.servers[0].cwd == str(workspace)
 
 
+def test_hybrid_keeps_portable_and_claude_mcp_semantics_separate(
+    tmp_path: Path,
+) -> None:
+    """双 manifest 各自使用自己的 MCP schema 和运行字段。"""
+    source = tmp_path / "hybrid-mcp"
+    source.mkdir()
+    _write_json(
+        source / "plugin.json",
+        {
+            "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+            "name": "hybrid-mcp",
+            "version": "1.0.0",
+        },
+    )
+    _write_json(
+        source / ".claude-plugin" / "plugin.json",
+        {"name": "hybrid-mcp", "version": "1.0.0"},
+    )
+    _write_json(
+        source / "mcp.json",
+        {
+            "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+            "mcpServers": {
+                "portable": {
+                    "type": "stdio",
+                    "command": "python3",
+                    "args": [],
+                }
+            },
+        },
+    )
+    _write_json(
+        source / ".mcp.json",
+        {
+            "mcpServers": {
+                "claude": {
+                    "type": "stdio",
+                    "command": "python3",
+                    "args": [],
+                    "timeout": 7,
+                }
+            }
+        },
+    )
+    manager = PluginManager(home=tmp_path / "home")
+    installed = manager.install(source)["plugin"]
+    assert isinstance(installed, dict)
+    manager.set_enabled(
+        str(installed["id"]),
+        enabled=True,
+        capability_fingerprint=str(installed["capability_fingerprint"]),
+    )
+
+    result = manager.mcp_servers(manager.catalog(), workspace=tmp_path / "workspace")
+    assert result.diagnostics == ()
+    assert {server.name.rsplit("__", 1)[-1] for server in result.servers} == {
+        "portable",
+        "claude",
+    }
+    by_name = {server.name.rsplit("__", 1)[-1]: server for server in result.servers}
+    assert by_name["portable"].timeout_seconds == 30
+    assert by_name["claude"].timeout_seconds == 7
+
+
+def test_hybrid_fatal_portable_mcp_isolated_from_claude_servers(
+    tmp_path: Path,
+) -> None:
+    """portable mcp.json 顶层致命错误只隔离该 manifest，Claude server 继续。"""
+    source = tmp_path / "hybrid-mcp-fatal-portable"
+    source.mkdir()
+    _write_json(
+        source / "plugin.json",
+        {
+            "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+            "name": "hybrid-mcp-fatal-portable",
+            "version": "1.0.0",
+        },
+    )
+    _write_json(
+        source / ".claude-plugin" / "plugin.json",
+        {"name": "hybrid-mcp-fatal-portable", "version": "1.0.0"},
+    )
+    # unknown 顶层字段触发 portable closed schema 的致命错误。
+    _write_json(
+        source / "mcp.json",
+        {
+            "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+            "mcpServers": {},
+            "timeout": 15,
+        },
+    )
+    _write_json(
+        source / ".mcp.json",
+        {
+            "mcpServers": {
+                "claude": {"type": "stdio", "command": "python3", "args": []}
+            }
+        },
+    )
+    manager = PluginManager(home=tmp_path / "home")
+    installed = manager.install(source)["plugin"]
+    assert isinstance(installed, dict)
+    manager.set_enabled(
+        str(installed["id"]),
+        enabled=True,
+        capability_fingerprint=str(installed["capability_fingerprint"]),
+    )
+
+    result = manager.mcp_servers(manager.catalog(), workspace=tmp_path / "workspace")
+    assert {server.name.rsplit("__", 1)[-1] for server in result.servers} == {"claude"}
+    assert len(result.diagnostics) == 1
+    assert "portable mcp.json" in result.diagnostics[0]
+    assert "PLUGIN_MCP_INVALID" in result.diagnostics[0]
+
+
+def test_hybrid_fatal_claude_mcp_isolated_from_portable_servers(
+    tmp_path: Path,
+) -> None:
+    """Claude `.mcp.json` 根节点致命错误只隔离该 manifest，portable server 继续。"""
+    source = tmp_path / "hybrid-mcp-fatal-claude"
+    source.mkdir()
+    _write_json(
+        source / "plugin.json",
+        {
+            "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+            "name": "hybrid-mcp-fatal-claude",
+            "version": "1.0.0",
+        },
+    )
+    _write_json(
+        source / ".claude-plugin" / "plugin.json",
+        {"name": "hybrid-mcp-fatal-claude", "version": "1.0.0"},
+    )
+    _write_json(
+        source / "mcp.json",
+        {
+            "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+            "mcpServers": {
+                "portable": {
+                    "type": "stdio",
+                    "command": "python3",
+                    "args": [],
+                }
+            },
+        },
+    )
+    # 根节点不是 servers mapping，Claude 侧按组件隔离处理。
+    _write_json(source / ".mcp.json", {"mcpServers": "not-a-mapping"})
+    manager = PluginManager(home=tmp_path / "home")
+    installed = manager.install(source)["plugin"]
+    assert isinstance(installed, dict)
+    manager.set_enabled(
+        str(installed["id"]),
+        enabled=True,
+        capability_fingerprint=str(installed["capability_fingerprint"]),
+    )
+
+    result = manager.mcp_servers(manager.catalog(), workspace=tmp_path / "workspace")
+    assert {server.name.rsplit("__", 1)[-1] for server in result.servers} == {"portable"}
+    assert len(result.diagnostics) == 1
+    assert "claude MCP" in result.diagnostics[0]
+    assert "PLUGIN_MCP_INVALID" in result.diagnostics[0]
+
+
 def test_claude_and_portable_commands_become_user_only_command_records(
     tmp_path: Path,
 ) -> None:
@@ -806,3 +1236,19 @@ def test_corrupt_registry_fails_closed(tmp_path: Path) -> None:
     with pytest.raises(PluginError) as rejected:
         manager.list()
     assert rejected.value.code == "PLUGIN_REGISTRY_INVALID"
+
+
+def test_legacy_registry_version_fails_closed(tmp_path: Path) -> None:
+    """旧 registry 版本不能被当作当前 registry 读取或覆盖。"""
+    home = tmp_path / "home"
+    registry = home / ".harness" / "plugins" / "registry.json"
+    registry.parent.mkdir(parents=True)
+    legacy = json.dumps({"version": 1, "revision": 0, "plugins": []}, sort_keys=True)
+    registry.write_text(legacy, encoding="utf-8")
+    manager = PluginManager(home=home)
+
+    with pytest.raises(PluginError) as rejected:
+        manager.list()
+
+    assert rejected.value.code == "PLUGIN_REGISTRY_INVALID"
+    assert registry.read_text(encoding="utf-8") == legacy

@@ -187,6 +187,52 @@ test("interaction.approval 接受严格 file_diff presentation 并拒绝未知�
     payload: { ...params.payload, presentation: { ...params.payload.presentation, unknown: true } },
   })).toThrow()
 })
+
+test("interaction.directory_trust 校验独立请求/响应，approval 不再承载目录信任", () => {
+  const params = {
+    thread_id: "thread",
+    run_id: "run",
+    timeout_ms: 1_000,
+    payload: {
+      interrupt_id: "trust",
+      directory: "D:/data",
+      target_path: "D:/data/app.toml",
+      tool_name: "read_file",
+      access: "read",
+      shadows_workspace: false,
+      decisions: ["allow_session", "deny"],
+    },
+  }
+  expect(() => validateInteractionParams("interaction.directory_trust", params)).not.toThrow()
+  expect(() => validateInteractionResult("interaction.directory_trust", { decision: "allow_session" })).not.toThrow()
+  expect(() => validateInteractionResult("interaction.directory_trust", { decision: "approve_thread" })).toThrow()
+  expect(() => validateInteractionResult("interaction.directory_trust", { decision: "allow_once" })).toThrow()
+  expect(() => validateInteractionParams("interaction.directory_trust", {
+    ...params,
+    payload: { ...params.payload, directory: "" },
+  })).toThrow()
+  // approval presentation 仅保留 file_diff，旧 directory_trust presentation 被拒绝
+  expect(() => validateInteractionParams("interaction.approval", {
+    thread_id: "thread",
+    run_id: "run",
+    timeout_ms: 1_000,
+    payload: {
+      interrupt_id: "approval",
+      description: "需要信任目录",
+      requests: null,
+      decisions: ["approve_once", "reject"],
+      presentation: {
+        kind: "directory_trust",
+        directory: "D:/data",
+        target_path: "D:/data/app.toml",
+        tool_name: "read_file",
+        access: "read",
+        shadows_workspace: false,
+      },
+    },
+  })).toThrow()
+})
+
 function validate(fixture: Fixture): void {
   if (fixture.kind === "operation.params") {
     validateOperationParams(fixture.name as OperationName, fixture.value)

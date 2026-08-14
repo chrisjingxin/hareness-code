@@ -32,18 +32,53 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _DEFAULT_HITL_TOOLS = frozenset(
-    {"execute", *FILESYSTEM_WRITE_TOOL_NAMES, "task", "web_fetch", "monitor", "task_stop"}
+    {
+        "execute",
+        *FILESYSTEM_WRITE_TOOL_NAMES,
+        "ls",
+        "read_file",
+        "glob",
+        "grep",
+        "task",
+        "web_fetch",
+        "monitor",
+        "task_stop",
+    }
 )
 # auto-edit 模式下编辑类工具必须纳入 HITL 集合：敏感路径（如 .git/config）的
 # 编辑仍需由预检弹窗确认；工作区内非敏感编辑由预检自动放行，不会真正弹窗。
+# 只读工具纳入是为了工作区外目录信任审批；工作区内读取由预检直接放行。
 _AUTO_EDIT_HITL_TOOLS = frozenset(
-    {"execute", *FILESYSTEM_WRITE_TOOL_NAMES, "task", "web_fetch", "monitor", "task_stop"}
+    {
+        "execute",
+        *FILESYSTEM_WRITE_TOOL_NAMES,
+        "ls",
+        "read_file",
+        "glob",
+        "grep",
+        "task",
+        "web_fetch",
+        "monitor",
+        "task_stop",
+    }
 )
 # auto 模式下编辑类工具同样必须纳入 HITL 集合：让编辑类调用经过四层过滤器
 # 判断——F1 快速通道自动放行，敏感路径与 F4 回退仍走弹窗审批。
 _AUTO_HITL_TOOLS = frozenset(
-    {"execute", *FILESYSTEM_WRITE_TOOL_NAMES, "task", "web_fetch", "monitor", "task_stop"}
+    {
+        "execute",
+        *FILESYSTEM_WRITE_TOOL_NAMES,
+        "ls",
+        "read_file",
+        "glob",
+        "grep",
+        "task",
+        "web_fetch",
+        "monitor",
+        "task_stop",
+    }
 )
+_PLAN_DIRECTORY_TRUST_TOOLS = frozenset({"ls", "read_file", "glob", "grep", "lsp"})
 _PLAN_ALLOWED_TOOLS = frozenset(
     {
         "ls",
@@ -104,25 +139,27 @@ def interrupt_on_for_approval_mode(
 ) -> dict[str, Any] | None:
     """返回应由 HumanInTheLoopMiddleware 拦截的工具集合。
 
-    计划模式的拒绝由 ``PlanModeMiddleware`` 完成，YOLO 则只关闭 Harness
-    的人工确认；工作区、Shell 和远端 provider 等硬策略不在这里放宽。
+    计划模式仅为只读工具开启目录信任审批通道，写入仍由 ``PlanModeMiddleware``
+    硬拒绝。YOLO 不创建 HITL，外部路径由边界中间件自动授予 session 根。
 
     Args:
         extra_interrupt_tools: 需要一并纳入审批的额外工具名（如 MCP 工具）。
-            仅在 default、auto-edit 和 auto 模式下生效；plan 和 yolo 忽略。
+            在 default、auto-edit、auto 和 plan（只读）模式下生效；yolo 忽略。
         approval_descriptions: 每个工具可选的动态审批描述。文件 mutation 使用它展示
             prepare 阶段生成的有界 diff 预览；完整拟议内容仍由一次性计划固定，其他工具
             继续使用框架默认描述。
     """
-    if approval_mode in {"plan", "yolo"}:
+    if approval_mode == "yolo":
         return None
-    if approval_mode == "default":
+    if approval_mode == "plan":
+        tool_names = _PLAN_DIRECTORY_TRUST_TOOLS
+    elif approval_mode == "default":
         tool_names = _DEFAULT_HITL_TOOLS
     elif approval_mode == "auto-edit":
         tool_names = _AUTO_EDIT_HITL_TOOLS
     else:  # auto 模式
         tool_names = _AUTO_HITL_TOOLS
-    if extra_interrupt_tools:
+    if extra_interrupt_tools and approval_mode != "plan":
         tool_names = tool_names | extra_interrupt_tools
     from langchain.agents.middleware.human_in_the_loop import InterruptOnConfig
 
@@ -131,7 +168,8 @@ def interrupt_on_for_approval_mode(
         approval = InterruptOnConfig(allowed_decisions=["approve", "reject"])
         if preflight is not None:
             # HumanInTheLoopMiddleware 在实际 ToolNode 之前暂停。把与执行守卫
-            # 共用的预检挂在 `when`，越界文件调用就不会产生无法批准的假审批。
+            # 共用的预检挂在 `when`：非法路径不弹窗；可信任外部路径弹目录信任卡片；
+            # 工作区内读取不弹窗。
             approval["when"] = preflight
         if approval_descriptions is not None and (description := approval_descriptions.get(name)):
             approval["description"] = description

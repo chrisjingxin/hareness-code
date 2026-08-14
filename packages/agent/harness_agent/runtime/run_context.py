@@ -79,6 +79,8 @@ class RunContext:
         default_factory=ApprovalPresentationStore,
         repr=False,
     )
+    # 额外工作目录 registry：可变、按引用共享，不进入执行资源池 fingerprint。
+    workspace_root_registry: Any | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         """在执行前验证 thread 与 snapshot 的绑定，阻止跨 project 注入。"""
@@ -136,8 +138,36 @@ class RunContextSnapshotMiddleware(AgentMiddleware):
         base_prompt = _system_message_text(request.system_message)
         prompt = _without_legacy_approval_mode_section(context.context_snapshot.system_prompt)
         prompt = f"{prompt}{approval_mode_prompt(context.approval_mode)}"
+        # 已信任额外根是会话内可变事实，必须在模型调用边界动态追加。
+        extra_roots = _extra_roots_prompt(request.runtime)
+        if extra_roots:
+            prompt = f"{prompt}{extra_roots}"
         system_prompt = f"{prompt}\n\n{base_prompt}" if base_prompt else prompt
         return await handler(request.override(system_message=SystemMessage(content=system_prompt)))
+
+
+def _extra_roots_prompt(runtime: object) -> str:
+    """从 RunContext / Host 侧 registry 生成已信任额外根提示；缺失时返回空串。"""
+    try:
+        context = require_run_context(runtime)
+    except Exception:  # noqa: BLE001
+        return ""
+    registry = getattr(context, "workspace_root_registry", None)
+    if registry is None:
+        registry = getattr(getattr(runtime, "context", None), "workspace_root_registry", None)
+    if registry is None or not hasattr(registry, "display_extra_roots"):
+        return ""
+    roots = registry.display_extra_roots()
+    if not roots:
+        return ""
+    lines = "\n".join(f"- `{path}`" for path in roots)
+    return f"""
+
+## 已信任的额外工作目录
+
+以下目录已获用户授权，可使用真实绝对路径访问，与主工作区等价：
+{lines}
+"""
 
 
 def _without_legacy_approval_mode_section(prompt: str) -> str:

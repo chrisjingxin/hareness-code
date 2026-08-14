@@ -19,6 +19,8 @@ import type { ShortcutAction } from "./shortcuts"
 
 export type ApprovalDecision = "approve_once" | "approve_thread" | "approve_project" | "reject" | "reject_with_feedback"
 
+export type DirectoryTrustDecision = "allow_session" | "deny"
+
 export type CommandMenuState = {
   visible: boolean
   selectedIndex: number
@@ -98,6 +100,7 @@ export type TuiIntent =
   | { type: "dialog-resolve"; kind: "command" | "model-binding"; confirmed: boolean }
   | { type: "clear-selected-skill" }
   | { type: "approval"; decision: ApprovalDecision }
+  | { type: "directory-trust"; decision: DirectoryTrustDecision }
   | { type: "question"; answer: string }
   | { type: "tool-toggle"; toolId: string }
 
@@ -249,6 +252,9 @@ class TuiAdapterImpl implements TuiAdapter {
         return
       case "approval":
         await this.respondApproval(intent.decision)
+        return
+      case "directory-trust":
+        await this.respondDirectoryTrust(intent.decision)
         return
       case "question":
         await this.respondQuestion(intent.answer)
@@ -767,6 +773,18 @@ class TuiAdapterImpl implements TuiAdapter {
       type: "interaction.respond",
       requestId: approval.requestId,
       response: { kind: "approval", decision },
+    })
+  }
+
+  /** 回写目录信任决定；共享 Controller 校验 decision 集合并组装 wire response。 */
+  private async respondDirectoryTrust(decision: DirectoryTrustDecision): Promise<void> {
+    const interactive = this.controller.getSnapshot()
+    const trust = interactive.interaction
+    if (!trust || trust.type !== "directory_trust") return
+    await this.routeDispatch({
+      type: "interaction.respond",
+      requestId: trust.requestId,
+      response: { kind: "directory_trust", decision },
     })
   }
 

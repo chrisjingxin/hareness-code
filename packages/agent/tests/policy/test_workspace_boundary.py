@@ -49,12 +49,24 @@ def test_path_policy_rejects_relative_and_parent_paths(tmp_path: Path, candidate
         WorkspacePathPolicy(tmp_path).validate_direct_path(candidate, tool_name="write_file")
 
 
-def test_path_policy_rejects_windows_drive_path_format(tmp_path: Path):
-    """文件工具不接受宿主盘符路径，只接受统一的 `/` 虚拟路径。"""
-    with pytest.raises(ValueError):
-        WorkspacePathPolicy(tmp_path).validate_direct_path(
-            "D:\\code\\file.py", tool_name="read_file"
-        )
+def test_path_policy_rejects_windows_drive_path_until_trusted(tmp_path: Path):
+    """未信任的盘符路径不能直接 validate，须先走信任流程。"""
+    if sys.platform != "win32":
+        pytest.skip("仅 Windows")
+    from harness_agent.policy.workspace_roots import ExternalPathNotTrusted
+
+    outside = tmp_path.parent / f"zc142-pol-{tmp_path.name}"
+    outside.mkdir(exist_ok=True)
+    target = outside / "file.py"
+    target.write_text("x", encoding="utf-8")
+    try:
+        with pytest.raises(ExternalPathNotTrusted):
+            WorkspacePathPolicy(tmp_path).validate_direct_path(
+                str(target), tool_name="read_file"
+            )
+    finally:
+        target.unlink(missing_ok=True)
+        outside.rmdir()
 
 
 @pytest.mark.parametrize("candidate", ["\\\\server\\share\\file", "//server/share/file"])
@@ -169,8 +181,8 @@ def test_middleware_preflight_matches_the_execution_boundary(tmp_path: Path):
 
 
 @pytest.mark.parametrize("tool_name", ["read_file", "ls", "glob", "grep"])
-def test_middleware_still_rejects_non_virtual_reads(tmp_path: Path, tool_name: str):
-    """非虚拟读取与搜索在任何审批模式下都保持硬拒绝。"""
+def test_middleware_still_rejects_relative_reads(tmp_path: Path, tool_name: str):
+    """相对路径读取与搜索保持硬拒绝。"""
     args_map: dict[str, dict[str, str]] = {
         "read_file": {"file_path": "relative.txt"},
         "ls": {"path": "relative"},
@@ -191,6 +203,61 @@ def test_middleware_still_rejects_non_virtual_reads(tmp_path: Path, tool_name: s
     result = middleware.wrap_tool_call(request, handler)
     assert invoked is False
     assert result.status == "error"
+
+
+def test_middleware_allows_approval_for_trustable_external_path(tmp_path: Path):
+    """可信任的外部绝对路径应让 allows_approval 返回 True，并暴露 trust candidate。"""
+    outside = tmp_path.parent / f"zc142-mid-{tmp_path.name}"
+    outside.mkdir(exist_ok=True)
+    target = outside / "app.toml"
+    target.write_text("x", encoding="utf-8")
+    try:
+        middleware = WorkspaceBoundaryMiddleware(tmp_path)
+        request = SimpleNamespace(
+            tool_call={
+                "name": "read_file",
+                "id": "ext",
+                "args": {"file_path": str(target)},
+            }
+        )
+        assert middleware.allows_approval(request) is True
+        candidate = middleware.needs_directory_trust(request)
+        assert candidate is not None
+        assert candidate.directory == outside.resolve() or str(candidate.directory).lower() == str(outside.resolve()).lower()
+
+        # 未信任时执行层仍拒绝（非 auto_trust）
+        result = middleware.wrap_tool_call(request, lambda _r: object())
+        assert result.status == "error"
+        assert "信任" in str(result.content) or "工作区" in str(result.content)
+
+        # yolo / auto_trust 自动授予后可执行
+        trusted = WorkspaceBoundaryMiddleware(tmp_path, auto_trust_session=True)
+        invoked = False
+
+        def handler(req: object) -> object:
+            nonlocal invoked
+            invoked = True
+            assert req.tool_call["args"]["file_path"].startswith("/@ext/")
+            return SimpleNamespace(status="ok")
+
+        result = trusted.wrap_tool_call(request, handler)
+        assert invoked is True
+        assert result.status == "ok"
+    finally:
+        target.unlink(missing_ok=True)
+        outside.rmdir()
+
+
+def test_middleware_rejects_untrustable_system_path(tmp_path: Path):
+    """不可注册的系统目录即使是绝对路径也硬拒绝，不进入审批。"""
+    middleware = WorkspaceBoundaryMiddleware(tmp_path)
+    # 使用文件系统根下的路径；Windows 用盘符根会被 DirectoryNotTrustable
+    system_path = str(Path(tmp_path.anchor))
+    request = SimpleNamespace(
+        tool_call={"name": "read_file", "id": "sys", "args": {"file_path": system_path}}
+    )
+    assert middleware.allows_approval(request) is False
+    assert middleware.needs_directory_trust(request) is None
 
 
 async def test_async_middleware_rejection_does_not_call_handler(tmp_path: Path):

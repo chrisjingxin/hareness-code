@@ -15,7 +15,10 @@ import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    pass
 
 from harness_agent.threads.snapshots import VIRTUAL_READ_ONLY_ROOT
 
@@ -139,10 +142,23 @@ def _encode_content(content: str, *, expected: ContentIdentity | None = None) ->
 class LocalTextMutationBackend:
     """基于安全虚拟路径、临时文件和同目录 rename 的本机 adapter。"""
 
-    def __init__(self, root: str | Path, *, backend_id: str | None = None) -> None:
-        """绑定一个工作区根；外部调用只传 `/` 开头的 backend 路径。"""
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        backend_id: str | None = None,
+        registry: Any | None = None,
+    ) -> None:
+        """绑定一个工作区根；外部调用只传 `/` 开头的 backend 路径。
+
+        Args:
+            root: 主工作区根。
+            backend_id: 可选稳定 identity。
+            registry: 可选 ``WorkspaceRootRegistry``；提供时支持 ``/@ext/<id>/`` 路径。
+        """
         self._root = Path(root).resolve(strict=False)
         self._backend_id = backend_id or f"local:{self._root}"
+        self._registry = registry
         self._locks: dict[str, threading.RLock] = {}
         self._locks_guard = threading.Lock()
 
@@ -248,13 +264,30 @@ class LocalTextMutationBackend:
             raise TextMutationError("PATH_INVALID", "backend 路径不能包含遍历段")
         if normalized == VIRTUAL_READ_ONLY_ROOT or normalized.startswith(f"{VIRTUAL_READ_ONLY_ROOT}/"):
             raise TextMutationError("VIRTUAL_READONLY", "/.harness 是只读虚拟路径")
-        target = (self._root / normalized.lstrip("/")).resolve(strict=False)
+
+        root = self._root
+        relative_parts = PurePosixPath(normalized.lstrip("/")).parts
+        if self._registry is not None and normalized.startswith("/@ext/"):
+            from harness_agent.threads.multi_root_backend import split_ext_backend_path
+
+            split = split_ext_backend_path(normalized)
+            if split is None:
+                raise TextMutationError("PATH_INVALID", "扩展工作区路径无效")
+            root_id, inner = split
+            workspace_root = self._registry.get_root(root_id)
+            if workspace_root is None:
+                raise TextMutationError("PATH_OUTSIDE_WORKSPACE", f"未知的扩展工作区根：{root_id}")
+            root = workspace_root.path
+            relative_parts = PurePosixPath(inner.lstrip("/")).parts
+            normalized = inner
+
+        target = (root / PurePosixPath(*relative_parts)).resolve(strict=False) if relative_parts else root.resolve(strict=False)
         try:
-            target.relative_to(self._root)
+            target.relative_to(root)
         except ValueError as exc:
             raise TextMutationError("PATH_OUTSIDE_WORKSPACE", "目标路径越过工作区") from exc
-        current = self._root
-        for part in PurePosixPath(normalized.lstrip("/")).parts:
+        current = root
+        for part in relative_parts:
             current /= part
             if current.is_symlink():
                 raise TextMutationError("PATH_SYMLINK_UNSUPPORTED", "文件路径不能经过符号链接")

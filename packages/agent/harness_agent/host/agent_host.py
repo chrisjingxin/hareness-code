@@ -30,6 +30,7 @@ from harness_agent.host.connection import (
     ProtocolConnection,
     ProtocolInteractionAdapter,
     RpcError,
+    interaction_method,
 )
 from harness_agent.runtime.agent_engine import (
     AgentEngine,
@@ -297,6 +298,14 @@ class AgentHost:
         # ponytail: Host 固定绑定一个 workspace，先用一把锁覆盖跨 Profile 图；
         # worktree/sandbox 有稳定资源身份或吞吐证明不足时再按资源拆分。
         self._tool_concurrency_lock = AsyncRWLock()
+        from harness_agent.policy.workspace_roots import WorkspaceRootRegistry
+
+        # 额外工作目录 registry：内容可变，不进入执行资源池 fingerprint。
+        self._workspace_root_registry = WorkspaceRootRegistry(
+            self._workspace,
+            project_dir=self._workspace,
+            load_persisted=True,
+        )
         self._config_path = config_path or os.environ.get("HARNESS_AGENT_CONFIG_PATH")
         self._connection_role = connection_role
         self._config_home = config_home
@@ -368,6 +377,7 @@ class AgentHost:
             interaction_port=ProtocolInteractionAdapter(self),
             context_updates_provider=self._take_context_updates,
             project_dir=self._workspace,
+            workspace_root_registry=self._workspace_root_registry,
             compose_services_provider=self._provide_compose_services,
         )
         self._handlers = {
@@ -2713,6 +2723,11 @@ class AgentHost:
                     execution_mode=ExecutionMode.MANAGED,
                     cancellation_token=command.cancellation_token,
                     delegation_policy=resolved.effective_policy.delegation,
+                    workspace_root_registry=(
+                        self._workspace_root_registry.readonly_view()
+                        if self._workspace_root_registry is not None
+                        else None
+                    ),
                 )
                 checkpoint_namespace = child_ref.checkpoint_namespace(
                     resolved.project_fingerprint
@@ -2888,6 +2903,7 @@ class AgentHost:
                 delegation_model=spec.model_view,
                 delegation_targets=delegation_targets,
                 plugin_runtime=self._plugin_runtime_manager,
+                workspace_root_registry=self._workspace_root_registry,
                 rules_provider=_get_current_rules,
                 defer_tools=(
                     self._config.tools.defer if self._config is not None else "auto"
@@ -3008,6 +3024,7 @@ class AgentHost:
             delegation_policy=spec.effective_policy.delegation,
             snapshot_store=self._snapshot_store,
             approval_presentations=run.approval_presentations,
+            workspace_root_registry=self._workspace_root_registry,
         )
 
     async def _handle_peer_response(self, message: dict[str, Any]) -> None:
@@ -3037,12 +3054,7 @@ class AgentHost:
             spec = connection.interaction_specs.get(request_id)
             if spec is None:
                 raise ValueError("Unknown interaction request")
-            method = (
-                METHOD["INTERACTION_APPROVAL"]
-                if spec.type == "approval"
-                else METHOD["INTERACTION_QUESTION"]
-            )
-            validate_interaction_result(method, result)
+            validate_interaction_result(interaction_method(spec.type), result)
             parsed = dict(result) if isinstance(result, dict) else result
         except (ValidationError, ValueError) as exc:
             future.set_exception(RpcError(-32602, f"Invalid interaction response: {exc}"))

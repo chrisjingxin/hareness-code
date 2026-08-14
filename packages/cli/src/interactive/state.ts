@@ -73,7 +73,7 @@ export type ToolCard = {
 export type InteractionCard = {
   id: string
   runId: string
-  type: "approval" | "question"
+  type: "approval" | "question" | "directory_trust"
   status: "pending" | "approved" | "rejected" | "answered" | "resolved" | "cancelled"
   description?: string
   requests?: unknown
@@ -525,6 +525,27 @@ export function applyInteractionRequest(state: InteractiveState, envelope: Inter
       requests: req,
     }, interactionIdentity)
     if (interactionIdentity.composeScope) card.composeScope = interactionIdentity.composeScope
+    const timeline = existingIndex >= 0
+      ? state.timeline.map((item, index) => index === existingIndex ? { type: "interaction" as const, interaction: card } : item)
+      : [...state.timeline, { type: "interaction" as const, interaction: card }]
+    return {
+      ...state,
+      activity: { kind: "waiting-interaction" },
+      timeline,
+    }
+  }
+
+  if (kind === "directory_trust") {
+    const payload = req.payload && typeof req.payload === "object" ? req.payload as Record<string, unknown> : {}
+    const directory = typeof payload.directory === "string" ? payload.directory : ""
+    const card: InteractionCard = {
+      id: envelope.request_id,
+      runId: envelope.run_id,
+      type: "directory_trust",
+      status: "pending",
+      description: directory ? `是否将此目录加入白名单？${directory}` : "是否将此目录加入白名单？",
+      requests: req,
+    }
     const timeline = existingIndex >= 0
       ? state.timeline.map((item, index) => index === existingIndex ? { type: "interaction" as const, interaction: card } : item)
       : [...state.timeline, { type: "interaction" as const, interaction: card }]

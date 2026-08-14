@@ -11,6 +11,8 @@ import {
   type AgentEvent,
   type ApprovalRequest,
   type ApprovalResponse,
+  type DirectoryTrustRequest,
+  type DirectoryTrustResponse,
   type InitializeParams,
   type InteractionMap,
   type InteractionMethod,
@@ -24,10 +26,12 @@ import {
 export type InteractionRequestEnvelope =
   | ({ request_id: string; type: "approval" } & ApprovalRequest)
   | ({ request_id: string; type: "question" } & QuestionRequest)
+  | ({ request_id: string; type: "directory_trust" } & DirectoryTrustRequest)
 
 export type InteractionResponse =
   | ({ request_id: string; type: "approval" } & ApprovalResponse)
   | ({ request_id: string; type: "question" } & QuestionResponse)
+  | ({ request_id: string; type: "directory_trust" } & DirectoryTrustResponse)
 
 type ContractEntry = { params?: string; result?: string; payload?: string }
 type ContractMetadata = {

@@ -67,6 +67,8 @@ class McpServerConfig:
     source: str = "config"
     source_fingerprint: str | None = None
     inherit_environment: bool = True
+    plugin_root: str | None = None
+    plugin_data: str | None = None
 
     def __post_init__(self) -> None:
         """冻结嵌套映射，避免快照建立后仍被调用方修改。"""
@@ -236,6 +238,40 @@ def expand_env_vars(value: str) -> str | None:
         )
         return None
     return result
+
+
+def _server_status(
+    config: McpServerConfig,
+    status: str,
+    *,
+    error: str | None = None,
+) -> dict[str, object]:
+    """构造不含连接对象的单 server 状态记录。"""
+    result: dict[str, object] = {
+        "name": config.name,
+        "transport": config.transport,
+        "source": config.source,
+        "status": status,
+    }
+    if error is not None:
+        result["error"] = error
+    return result
+
+
+def _create_plugin_http_client(
+    headers: dict[str, str] | None = None,
+    timeout: Any | None = None,
+    auth: Any | None = None,
+) -> Any:
+    """为 Plugin HTTP/SSE 禁用自动 redirect，避免认证 header 跨 origin 传播。"""
+    import httpx
+
+    return httpx.AsyncClient(
+        headers=headers,
+        timeout=timeout,
+        auth=auth,
+        follow_redirects=False,
+    )
 
 
 def mcp_config_fingerprint(configs: list[McpServerConfig]) -> str:
@@ -606,49 +642,46 @@ class McpConnectionManager:
             runtime.connected = True
             return
 
+        config_by_name = {config.name: config for config in configs if config.name in connections}
         try:
             runtime.client = MultiServerMCPClient(connections, tool_name_prefix=True)
-            runtime.tools = await asyncio.wait_for(
-                runtime.client.get_tools(),
-                timeout=max(c.timeout_seconds for c in configs),
-            )
-            runtime.connected = True
-            # 标记所有成功连接的服务器
-            for name in connections:
-                runtime.server_statuses[name] = {
-                    "name": name,
-                    "transport": next(c.transport for c in configs if c.name == name),
-                    "source": next(c.source for c in configs if c.name == name),
-                    "status": "connected",
-                }
-            logger.info(
-                "MCP connected: %d server(s), %d tool(s) loaded",
-                len(connections), len(runtime.tools),
-            )
-        except asyncio.TimeoutError:
-            logger.warning("MCP connection timed out; continuing without MCP tools")
-            runtime.tools = []
-            runtime.connected = True
-            for name in connections:
-                runtime.server_statuses[name] = {
-                    "name": name,
-                    "transport": next(c.transport for c in configs if c.name == name),
-                    "source": next(c.source for c in configs if c.name == name),
-                    "status": "failed",
-                    "error": "connection timed out",
-                }
         except Exception as exc:
-            logger.warning("MCP connection failed: %s; continuing without MCP tools", exc)
+            logger.warning("MCP client construction failed: %s; continuing", exc)
             runtime.tools = []
             runtime.connected = True
-            for name in connections:
-                runtime.server_statuses[name] = {
-                    "name": name,
-                    "transport": next(c.transport for c in configs if c.name == name),
-                    "source": next(c.source for c in configs if c.name == name),
-                    "status": "failed",
-                    "error": str(exc),
-                }
+            for name, config in config_by_name.items():
+                runtime.server_statuses[name] = _server_status(config, "failed", error=str(exc))
+            return
+
+        runtime.tools = []
+        seen_tool_names: set[str] = set()
+        for name, config in config_by_name.items():
+            try:
+                server_tools = await asyncio.wait_for(
+                    runtime.client.get_tools(server_name=name),
+                    timeout=config.timeout_seconds,
+                )
+                for tool in server_tools:
+                    tool_name = getattr(tool, "name", None)
+                    if isinstance(tool_name, str) and tool_name in seen_tool_names:
+                        continue
+                    if isinstance(tool_name, str):
+                        seen_tool_names.add(tool_name)
+                    runtime.tools.append(tool)
+                runtime.server_statuses[name] = _server_status(config, "connected")
+            except asyncio.TimeoutError:
+                logger.warning("MCP server %r connection timed out; continuing", name)
+                runtime.server_statuses[name] = _server_status(
+                    config, "failed", error="connection timed out"
+                )
+            except Exception as exc:
+                logger.warning("MCP server %r connection failed: %s; continuing", name, exc)
+                runtime.server_statuses[name] = _server_status(config, "failed", error=str(exc))
+        runtime.connected = True
+        logger.info(
+            "MCP connection attempts complete: %d server(s), %d tool(s) loaded",
+            len(connections), len(runtime.tools),
+        )
 
     async def close_all(self) -> None:
         """由 Host owner 关闭所有 snapshot connection，不被单个引擎调用。"""
@@ -669,7 +702,8 @@ class McpConnectionManager:
     def _build_connections(self) -> dict[str, Any]:
         """将 McpServerConfig 列表转换为 MultiServerMCPClient 的 connections 字典。
 
-        环境变量在此时展开；缺失变量的服务器被跳过。
+        用户 MCP 在此时展开环境变量；portable Plugin MCP 已在 adapter 中完成
+        保留 placeholder 替换，运行时保持其余字段字面值。
         """
         runtime = self._current_resource.value
         connections: dict[str, Any] = {}
@@ -690,27 +724,34 @@ class McpConnectionManager:
 
     def _build_single_connection(self, config: McpServerConfig) -> dict[str, Any] | None:
         """构建单个服务器的连接参数；环境变量缺失时返回 None。"""
+        is_portable_plugin = config.plugin_root is not None
+        is_plugin_source = config.source.startswith("plugin:")
         if config.transport == "stdio":
-            command = expand_env_vars(config.command or "")
-            if command is None:
-                logger.warning("MCP server %r: missing env vars in command; skipping", config.name)
-                return None
-            args = []
-            for arg in config.args:
-                expanded = expand_env_vars(arg)
-                if expanded is None:
-                    logger.warning("MCP server %r: missing env vars in args; skipping", config.name)
+            if is_portable_plugin:
+                command = config.command or ""
+                args = list(config.args)
+                env = dict(config.env)
+            else:
+                command = expand_env_vars(config.command or "")
+                if command is None:
+                    logger.warning("MCP server %r: missing env vars in command; skipping", config.name)
                     return None
-                args.append(expanded)
-            env = {}
-            for key, value in config.env.items():
-                expanded = expand_env_vars(value)
-                if expanded is None:
-                    logger.warning(
-                        "MCP server %r: missing env var for %s; skipping", config.name, key
-                    )
-                    return None
-                env[key] = expanded
+                args = []
+                for arg in config.args:
+                    expanded = expand_env_vars(arg)
+                    if expanded is None:
+                        logger.warning("MCP server %r: missing env vars in args; skipping", config.name)
+                        return None
+                    args.append(expanded)
+                env = {}
+                for key, value in config.env.items():
+                    expanded = expand_env_vars(value)
+                    if expanded is None:
+                        logger.warning(
+                            "MCP server %r: missing env var for %s; skipping", config.name, key
+                        )
+                        return None
+                    env[key] = expanded
             if config.inherit_environment:
                 process_env = env or None
             else:
@@ -721,6 +762,11 @@ class McpConnectionManager:
                     if (value := os.environ.get(key))
                 }
                 process_env.update(env)
+            if is_portable_plugin and config.plugin_root and config.plugin_data:
+                if process_env is None:
+                    process_env = {}
+                process_env["PLUGIN_ROOT"] = config.plugin_root
+                process_env["PLUGIN_DATA"] = config.plugin_data
             connection: dict[str, Any] = {
                 "transport": "stdio",
                 "command": command,
@@ -728,27 +774,34 @@ class McpConnectionManager:
                 "env": process_env or None,
             }
             if config.cwd is not None:
-                cwd = expand_env_vars(config.cwd)
-                if cwd is None:
-                    logger.warning("MCP server %r: missing env vars in cwd; skipping", config.name)
-                    return None
-                connection["cwd"] = cwd
+                if is_portable_plugin:
+                    connection["cwd"] = config.cwd
+                else:
+                    cwd = expand_env_vars(config.cwd)
+                    if cwd is None:
+                        logger.warning("MCP server %r: missing env vars in cwd; skipping", config.name)
+                        return None
+                    connection["cwd"] = cwd
             return connection
 
         # http / sse
-        url = expand_env_vars(config.url or "")
-        if url is None:
-            logger.warning("MCP server %r: missing env vars in url; skipping", config.name)
-            return None
-        headers = {}
-        for key, value in config.headers.items():
-            expanded = expand_env_vars(value)
-            if expanded is None:
-                logger.warning(
-                    "MCP server %r: missing env var in header %s; skipping", config.name, key
-                )
+        if is_portable_plugin:
+            url = config.url or ""
+            headers = dict(config.headers)
+        else:
+            url = expand_env_vars(config.url or "")
+            if url is None:
+                logger.warning("MCP server %r: missing env vars in url; skipping", config.name)
                 return None
-            headers[key] = expanded
+            headers = {}
+            for key, value in config.headers.items():
+                expanded = expand_env_vars(value)
+                if expanded is None:
+                    logger.warning(
+                        "MCP server %r: missing env var in header %s; skipping", config.name, key
+                    )
+                    return None
+                headers[key] = expanded
 
         # langchain-mcp-adapters 0.2.x 使用 "streamable_http" 作为 HTTP 传输键
         transport_key = "streamable_http" if config.transport == "http" else "sse"
@@ -758,4 +811,9 @@ class McpConnectionManager:
         }
         if headers:
             conn["headers"] = headers
+        # Claude `.mcp.json` 与 portable `mcp.json` 保留各自的 placeholder、
+        # environment 和 timeout 语义；但两者都是已安装 Plugin 的 header 来源，
+        # 都不能让凭据随跨源 redirect 自动转发。
+        if is_portable_plugin or is_plugin_source:
+            conn["httpx_client_factory"] = _create_plugin_http_client
         return conn

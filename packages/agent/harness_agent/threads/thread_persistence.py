@@ -1083,10 +1083,11 @@ def _migration_fingerprint_matches(
 
 @dataclass(frozen=True, slots=True)
 class _MigrationFileIdentity:
-    """跨进程文件身份证明；POSIX 使用 st_dev+st_ino。
+    """跨进程文件身份证明；使用 os.stat 的 st_dev+st_ino。
 
-    Windows 必须使用稳定 FileId adapter；当前实现只在 POSIX 验证，Windows
-    identity cleanup 作为阻塞项交回验收方。
+    POSIX 上是设备号+inode。Windows 上 CPython 通过
+    GetFileInformationByHandle 返回卷序列号与 64 位文件索引，
+    在同一卷内跨进程稳定，可直接复用同一身份结构。
     """
 
     st_dev: int
@@ -1095,14 +1096,6 @@ class _MigrationFileIdentity:
     def record(self) -> dict[str, object]:
         """返回可写入 marker 的不含路径身份结构。"""
         return {"st_dev": self.st_dev, "st_ino": self.st_ino}
-
-
-def _assert_migration_file_identity_supported() -> None:
-    """拒绝在没有稳定文件身份适配器的平台启动 ZC-108 attempt。"""
-    if os.name == "nt":
-        raise ThreadPersistenceError(
-            "CHECKPOINT_MIGRATION_FILE_IDENTITY_UNSUPPORTED"
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1227,6 +1220,7 @@ class _MigrationChildReadyMarker:
     version: int
     attempt_id: str
     pid: int
+    parent_pid: int | None
     process_birth_identity: str | None
     marker_identity: _MigrationFileIdentity
 
@@ -1933,7 +1927,23 @@ def _parse_migration_child_ready_marker(
         raise ValueError("child-ready marker attempt_id mismatch")
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         raise ValueError("child-ready marker pid is invalid")
-    if expected_pid is not None and pid != expected_pid:
+    parent_pid = raw.get("parent_pid")
+    if parent_pid is not None and (
+            not isinstance(parent_pid, int)
+            or isinstance(parent_pid, bool)
+            or parent_pid <= 0
+    ):
+        raise ValueError("child-ready marker parent_pid is invalid")
+    # ZC-108（Windows）：Python 3.11+ 的 venv launcher 会在 Popen 之下再 spawn
+    # 真实解释器，此时 Popen.pid 是 launcher 的 pid，解释器 os.getpid() 与之不同，
+    # 但解释器 os.getppid() 恰等于 Popen.pid。因此 marker 写者只要是我们 spawn
+    # 的进程本身（POSIX：pid 相等）或其直接子进程（Windows launcher：parent_pid
+    # 相等）都视为同一出生链。attempt_id + marker_identity 仍是主要防伪造边界。
+    if (
+            expected_pid is not None
+            and pid != expected_pid
+            and parent_pid != expected_pid
+    ):
         raise ValueError("child-ready marker pid mismatch")
     if process_birth_identity is not None and not isinstance(process_birth_identity, str):
         raise ValueError("child-ready marker process_birth_identity is invalid")
@@ -1947,6 +1957,7 @@ def _parse_migration_child_ready_marker(
         version=version,
         attempt_id=attempt_id,
         pid=pid,
+        parent_pid=parent_pid,
         process_birth_identity=process_birth_identity,
         marker_identity=marker_identity,
     )
@@ -2211,13 +2222,15 @@ def _migration_write_child_ready(
         *,
         attempt_id: str,
         pid: int,
+        parent_pid: int | None,
         process_birth_identity: str | None,
 ) -> _MigrationFileIdentity:
     """child 在首次访问 SQLite 前发布一次性 child-ready 事实。
 
     使用 O_CREAT|O_EXCL|O_NOFOLLOW 创建 0600 文件，通过 fstat 取得自身
     identity，写入 payload 后 fsync 文件和 attempt 目录。任一步失败 child
-    直接退出，不访问 SQLite。
+    直接退出，不访问 SQLite。``parent_pid`` 记录写者的父进程 pid，用于在
+    Windows venv launcher 场景下把解释器绑定到 Popen spawn 的进程。
     """
     ready_path = _migration_attempt_child_ready_path(temp_dir)
     staging = _migration_attempt_child_ready_staging_path(temp_dir)
@@ -2236,6 +2249,7 @@ def _migration_write_child_ready(
             "version": _MIGRATION_CHILD_READY_MARKER_VERSION,
             "attempt_id": attempt_id,
             "pid": pid,
+            "parent_pid": parent_pid,
             "process_birth_identity": process_birth_identity,
             "marker_identity": marker_identity.record(),
         }
@@ -9479,7 +9493,6 @@ async def _run_legacy_migration_child(
     一次性 child-ready 事实 → 父进程得到 typed child outcome → 按 exited_reaped /
     not_started / exit_unknown 收敛。
     """
-    _assert_migration_file_identity_supported()
     # 1. 计算完整 source fingerprint。
     source_connection = sqlite3.connect(path)
     try:
@@ -9897,7 +9910,6 @@ async def run_legacy_migration_child(
     # SQLite 文件。child-ready 写入失败时 child 直接退出。
     if attempt_id is None or temp_dir is None:
         raise ThreadPersistenceError("CHECKPOINT_MIGRATION_ATTEMPT_REQUIRED")
-    _assert_migration_file_identity_supported()
     attempt_context: _MigrationAttemptContext | None = None
     if attempt_id is not None and temp_dir is not None:
         manifest_path = _migration_attempt_manifest_path(path)
@@ -9950,6 +9962,7 @@ async def run_legacy_migration_child(
             temp_dir,
             attempt_id=attempt_id,
             pid=os.getpid(),
+            parent_pid=os.getppid(),
             process_birth_identity=_migration_process_birth_identity(),
         )
         attempt_context = _MigrationAttemptContext(

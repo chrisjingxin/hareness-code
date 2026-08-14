@@ -25,6 +25,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def interaction_method(interaction_type: str) -> str:
+    """把类型化 Interaction 映射为协议反向请求方法名。"""
+    if interaction_type == "question":
+        return METHOD["INTERACTION_QUESTION"]
+    if interaction_type == "directory_trust":
+        return METHOD["INTERACTION_DIRECTORY_TRUST"]
+    return METHOD["INTERACTION_APPROVAL"]
+
+
 class RpcError(Exception):
     """可安全返回给客户端的预期 JSON-RPC 错误。"""
 
@@ -82,11 +91,7 @@ class ProtocolInteractionAdapter:
         future: asyncio.Future[object] = asyncio.get_running_loop().create_future()
         connection.pending_requests[interaction.request_id] = future
         connection.interaction_specs[interaction.request_id] = interaction
-        method = (
-            METHOD["INTERACTION_APPROVAL"]
-            if interaction.type == "approval"
-            else METHOD["INTERACTION_QUESTION"]
-        )
+        method = interaction_method(interaction.type)
         try:
             params: dict[str, object] = {
                 "thread_id": run.thread_id,
@@ -126,4 +131,8 @@ class ProtocolInteractionAdapter:
     @staticmethod
     def _default_value(interaction: InteractionRequest) -> dict[str, object]:
         """返回 LangGraph 可接受的安全默认交互结果。"""
-        return {"decision": "reject"} if interaction.type == "approval" else {"answers": {}}
+        if interaction.type == "approval":
+            return {"decision": "reject"}
+        if interaction.type == "directory_trust":
+            return {"decision": "deny"}
+        return {"answers": {}}

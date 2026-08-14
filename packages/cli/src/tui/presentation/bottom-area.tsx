@@ -6,26 +6,31 @@ import { useRef, useState } from "react"
 import type { InteractiveSnapshot } from "../../interactive/types"
 import {
   APPROVAL_DECISION_ORDER,
+  DIRECTORY_TRUST_DECISION_ORDER,
   QUESTION_OTHER_VALUE,
   approvalDecisionDescription,
   approvalDecisionLabel,
+  directoryTrustDecisionDescription,
+  directoryTrustDecisionLabel,
   isApprovalDecision,
+  isDirectoryTrustDecision,
 } from "../../presentation-shared/interaction-policy"
 import { diffTextForRenderer, parseFileDiff } from "../../presentation-shared/file-diff"
 import { resolveLanguageForPath } from "../../presentation-shared/language-catalog"
 import { getCommonSyntaxClient } from "../platform/syntax-parsers"
 import { modeAccent, markdownSyntax, tuiTheme } from "./theme"
-import type { ApprovalDecision } from "./types"
+import type { ApprovalDecision, DirectoryTrustDecision } from "./types"
 
 function tuiDiffViewForWidth(contentWidth: number): "split" | "unified" {
   return contentWidth >= 120 ? "split" : "unified"
 }
 
-export type BottomAreaKind = "input" | "approval" | "question"
+export type BottomAreaKind = "input" | "approval" | "directory_trust" | "question"
 
 /** 底部同时只出现一个可聚焦面。无选项或多选仍走输入栏；ask_user 单选即使允许其他项也走 Dock。 */
 export function bottomAreaKind(interaction: InteractiveSnapshot["interaction"]): BottomAreaKind {
   if (interaction?.type === "approval") return "approval"
+  if (interaction?.type === "directory_trust") return "directory_trust"
   if (interaction?.type !== "question") return "input"
   const question = interaction.questions[0]
   if (!question?.options.length || question.multiSelect) return "input"
@@ -74,6 +79,58 @@ export function ApprovalDock(props: {
           const value = option?.value
           if (value === "approve_once" || value === "approve_thread" || value === "approve_project" || value === "reject" || value === "reject_with_feedback") {
             props.onApproval(value)
+          }
+        }}
+      />
+      <text fg={tuiTheme.muted}>↑↓ 选择 · Enter 确认</text>
+    </box>
+  )
+}
+
+/** 目录信任 Dock：选项在底部确认。 */
+export function DirectoryTrustDock(props: {
+  interaction: Extract<InteractiveSnapshot["interaction"], { type: "directory_trust" }>
+  workMode: InteractiveSnapshot["workMode"]
+  onDirectoryTrust: (decision: DirectoryTrustDecision) => void
+}) {
+  const accent = modeAccent(props.workMode)
+  const allowed = props.interaction.decisions.filter(isDirectoryTrustDecision)
+  const options = (allowed.length ? allowed : DIRECTORY_TRUST_DECISION_ORDER).map(decision => ({
+    name: directoryTrustDecisionLabel(decision),
+    description: directoryTrustDecisionDescription(decision),
+    value: decision,
+  }))
+  const access = props.interaction.access === "write" ? "写入" : "读取"
+  return (
+    <box
+      flexShrink={0}
+      marginLeft={2}
+      marginRight={2}
+      marginBottom={1}
+      backgroundColor={tuiTheme.surfaceElevated}
+      paddingLeft={2}
+      paddingRight={2}
+      paddingTop={1}
+      paddingBottom={1}
+      flexDirection="column"
+    >
+      <text fg={accent}>目录信任</text>
+      <text content={`工具：${props.interaction.toolName}（${access}）`} fg={tuiTheme.text} />
+      <text content={`目标路径：${props.interaction.targetPath}`} fg={tuiTheme.text} />
+      <text content={`待信任目录：${props.interaction.directory}`} fg={tuiTheme.warning} />
+      {props.interaction.shadowsWorkspace ? (
+        <text content="注意：该目录会遮蔽主工作区内的同名路径。" fg={tuiTheme.warning} />
+      ) : null}
+      <select
+        focused
+        height={Math.max(2, Math.min(6, options.length * 2))}
+        showDescription
+        wrapSelection
+        options={options}
+        onSelect={(_, option) => {
+          const value = option?.value
+          if (isDirectoryTrustDecision(value)) {
+            props.onDirectoryTrust(value)
           }
         }}
       />

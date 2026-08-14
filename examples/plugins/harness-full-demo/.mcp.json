@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "demo-tools": {
+      "type": "stdio",
+      "command": "python3",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/scripts/demo_mcp.py"
+      ],
+      "timeout": 15
+    }
+  }
+}

@@ -2,16 +2,16 @@
 
 export const PROTOCOL_MAJOR = 3 as const
 export const PROTOCOL_MINOR = 4 as const
-export const PROTOCOL_SCHEMA_SHA256 = "4e8fa73106c74a9ec6937dcffc315bef05c9e9de1fb25c99eb43aa211cf93a3a" as const
+export const PROTOCOL_SCHEMA_SHA256 = "7048d1734dcb6ed955d37552760a7efa5a54ef83bfce6bf11c36f5808c94ed58" as const
 export const MAX_FRAME_BYTES = 8388608 as const
 export const MAX_TOOL_PAYLOAD_BYTES = 1048576 as const
 export const CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","plugins.list","plugins.inspect","plugins.validate","plugins.install","plugins.set_enabled","plugins.remove","agents.list","agents.inspect","teams.list","teams.inspect","teams.generate","teams.run","teams.cancel","mcp.status","mcp.add","mcp.remove","host.attachment.create","host.attachment.revoke","host.control.acquire","host.control.release","host.control.status","compose.inspect","compose.abandon"] as const
 export const EVENT_TYPES = ["run.started","run.progress","skill.loaded","content.delta","reasoning.delta","tool.started","tool.delta","tool.completed","context.updated","compose.state","compose.summary","compose.work_item","compose.activity","interaction.resolved","run.completed","run.cancelled","run.failed"] as const
-export const INTERACTION_METHODS = ["interaction.approval","interaction.question"] as const
+export const INTERACTION_METHODS = ["interaction.approval","interaction.question","interaction.directory_trust"] as const
 export const SERVER_CAPABILITIES = ["run.cancel","run.multithread","host.control","config.read","config.write","threads.read","context.manage","skills.read","skills.manage","mcp.read","mcp.manage","plugins.read","plugins.manage","agents.read","teams.read","teams.manage","models.read","models.select","host.attach"] as const
 export const OPERATION_CAPABILITIES = {"initialize":null,"run.start":null,"run.cancel":"run.cancel","context.compact":"context.manage","config.show":"config.read","config.path":"config.read","config.details":"config.write","config.preview":"config.write","config.commit":"config.write","threads.list":"threads.read","threads.open":"threads.read","threads.watch":"threads.read","threads.unwatch":"threads.read","models.list":"models.read","skills.list":"skills.read","skills.inspect":"skills.read","skills.set_enabled":"skills.manage","skills.install":"skills.manage","skills.update":"skills.manage","skills.remove":"skills.manage","skills.market.list":"skills.read","plugins.list":"plugins.read","plugins.inspect":"plugins.read","plugins.validate":"plugins.read","plugins.install":"plugins.manage","plugins.set_enabled":"plugins.manage","plugins.remove":"plugins.manage","agents.list":"agents.read","agents.inspect":"agents.read","teams.list":"teams.read","teams.inspect":"teams.read","teams.generate":"teams.manage","teams.run":"teams.manage","teams.cancel":"teams.manage","mcp.status":"mcp.read","mcp.add":"mcp.manage","mcp.remove":"mcp.manage","host.attachment.create":"host.attach","host.attachment.revoke":"host.attach","host.control.acquire":"host.control","host.control.release":"host.control","host.control.status":"host.control","compose.inspect":"threads.read","compose.abandon":"threads.read"} as const
 export const CONTROLLED_OPERATIONS = ["run.start","run.cancel","context.compact","config.preview","config.commit","skills.set_enabled","skills.install","skills.update","skills.remove","mcp.add","mcp.remove"] as const
-export const INTERACTION_HANDLES = {"interaction.approval":"approval","interaction.question":"question"} as const
+export const INTERACTION_HANDLES = {"interaction.approval":"approval","interaction.question":"question","interaction.directory_trust":"directory_trust"} as const
 export const ERROR_CODES = {"CONTROL_NOT_HOLDER":{"jsonrpcCode":-32008,"retryable":true},"CONTROL_BUSY":{"jsonrpcCode":-32008,"retryable":true},"CONTROL_RELEASE_BLOCKED":{"jsonrpcCode":-32008,"retryable":true},"ATTACHMENT_NOT_FOUND":{"jsonrpcCode":-32009,"retryable":false},"ATTACHMENT_NOT_ACTIVE":{"jsonrpcCode":-32009,"retryable":false},"CONNECTION_RUN_BUSY":{"jsonrpcCode":-32000,"retryable":true}} as const
 export type ErrorCode = keyof typeof ERROR_CODES
 export const Capability = {"RUN_CANCEL":"run.cancel","RUN_MULTITHREAD":"run.multithread","HOST_CONTROL":"host.control","CONFIG_READ":"config.read","CONFIG_WRITE":"config.write","THREADS_READ":"threads.read","CONTEXT_MANAGE":"context.manage","SKILLS_READ":"skills.read","SKILLS_MANAGE":"skills.manage","MCP_READ":"mcp.read","MCP_MANAGE":"mcp.manage","PLUGINS_READ":"plugins.read","PLUGINS_MANAGE":"plugins.manage","AGENTS_READ":"agents.read","TEAMS_READ":"teams.read","TEAMS_MANAGE":"teams.manage","MODELS_READ":"models.read","MODELS_SELECT":"models.select","HOST_ATTACH":"host.attach"} as const
@@ -65,6 +65,7 @@ export const Method = {
   EVENT: "event",
   INTERACTION_APPROVAL: "interaction.approval",
   INTERACTION_QUESTION: "interaction.question",
+  INTERACTION_DIRECTORY_TRUST: "interaction.directory_trust",
 } as const
 
 export const PROTOCOL_VERSION = { major: PROTOCOL_MAJOR, minor: PROTOCOL_MINOR } as const
@@ -82,9 +83,9 @@ export type AgentCommand = { "id": string; "name": string; "description": string
 export type EmptyParams = {  }
 export type ProtocolRange = { "major": 3; "min_minor": number; "max_minor": number }
 export type ClientInfo = { "name": string; "version": string; "kind": string }
-export type ClientCapabilities = { "requests": Array<string>; "handles": Array<"approval" | "question"> }
+export type ClientCapabilities = { "requests": Array<string>; "handles": Array<"approval" | "question" | "directory_trust"> }
 export type InitializeParams = { "protocol": ProtocolRange; "client": ClientInfo; "capabilities": ClientCapabilities }
-export type InitializeResult = { "protocol": { "major": 3; "minor": number }; "server": { "name": string; "version": string }; "connection": { "id": string; "role": "owner" | "attached"; "project": { "id": string; "label": string } }; "capabilities": { "available": Array<string>; "enabled": Array<string>; "handles": Array<"approval" | "question"> }; "agent_commands": Array<AgentCommand>; "skills_snapshot": { "id": string; "count": number }; "skill_diagnostics": Array<string>; "limits": { "max_frame_bytes": number; "max_tool_payload_bytes": number }; "config_summary": (JsonObject) | (null); "startup_error": ({ "code": string; "message": string }) | (null) }
+export type InitializeResult = { "protocol": { "major": 3; "minor": number }; "server": { "name": string; "version": string }; "connection": { "id": string; "role": "owner" | "attached"; "project": { "id": string; "label": string } }; "capabilities": { "available": Array<string>; "enabled": Array<string>; "handles": Array<"approval" | "question" | "directory_trust"> }; "agent_commands": Array<AgentCommand>; "skills_snapshot": { "id": string; "count": number }; "skill_diagnostics": Array<string>; "limits": { "max_frame_bytes": number; "max_tool_payload_bytes": number }; "config_summary": (JsonObject) | (null); "startup_error": ({ "code": string; "message": string }) | (null) }
 export type RequestedSkill = { "id": string; "args"?: string }
 export type ThreadModelSelection = { "primary_profile": string }
 export type ApprovalMode = "plan" | "default" | "auto-edit" | "auto" | "yolo"
@@ -176,7 +177,7 @@ export type ComposeAbandonParams = { "thread_id": string; "work_item_id": string
 export type ComposeAbandonResult = { "work_item": ComposeWorkItemSnapshot }
 export type ComposeWorkItemPayload = { "thread_id": string; "work_item": ComposeWorkItemSnapshot }
 export type ComposeActivityPayload = { "thread_id": string; "work_item_id": string; "activity_id": string; "kind": string; "status": string; "attempt": number }
-export type InteractionResolvedPayload = { "request_id": string; "type": "approval" | "question" }
+export type InteractionResolvedPayload = { "request_id": string; "type": "approval" | "question" | "directory_trust" }
 export type Usage = { "input_tokens": number; "output_tokens": number }
 export type RunCompletedPayload = { "usage": Usage; "duration_ms": number; "finish_reason": string; "context": JsonObject }
 export type RunCancelledPayload = { "reason": string }
@@ -184,6 +185,9 @@ export type RunFailure = { "code": string; "message": string; "retryable": boole
 export type RunFailedPayload = { "error": RunFailure }
 export type InteractionBase = { "thread_id": string; "run_id": string; "timeout_ms": number; "payload": JsonObject }
 export type FileDiffPresentation = { "kind": "file_diff"; "operation": "write" | "edit" | "delete"; "path": string; "added_lines": number; "removed_lines": number; "truncated": boolean; "unified_diff": string }
+export type DirectoryTrustDecision = "allow_session" | "deny"
+export type DirectoryTrustRequest = { "thread_id": string; "run_id": string; "timeout_ms": number; "payload": { "interrupt_id": string; "directory": string; "target_path": string; "tool_name": string; "access": "read" | "write"; "shadows_workspace": boolean; "decisions": Array<DirectoryTrustDecision> } }
+export type DirectoryTrustResponse = { "decision": DirectoryTrustDecision }
 export type ApprovalRequest = { "thread_id": string; "run_id": string; "timeout_ms": number; "execution_id"?: string; "parent_execution_id"?: string | null; "agent_id"?: string; "compose_scope"?: ComposeActivityScope; "payload": { "interrupt_id": string; "description": string; "requests": JsonValue; "decisions": Array<"approve_once" | "approve_thread" | "approve_project" | "reject" | "reject_with_feedback">; "presentation"?: FileDiffPresentation } }
 export type ApprovalResponse = { "decision": "approve_once" | "approve_thread" | "approve_project" | "reject" | "reject_with_feedback"; "feedback"?: string }
 export type Question = { "id": string; "question": string; "header": string; "body": string; "options": Array<{ "label": string; "value": string; "description": string }>; "multi_select": boolean; "allow_other": boolean }
@@ -311,6 +315,7 @@ export type EventEnvelope = AgentEvent
 export interface InteractionMap {
   "interaction.approval": { params: ApprovalRequest; result: ApprovalResponse }
   "interaction.question": { params: QuestionRequest; result: QuestionResponse }
+  "interaction.directory_trust": { params: DirectoryTrustRequest; result: DirectoryTrustResponse }
 }
 export type InteractionMethod = keyof InteractionMap
 export type InteractionRequest = {

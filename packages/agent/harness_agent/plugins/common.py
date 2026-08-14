@@ -14,6 +14,7 @@ from harness_agent.plugins.model import PluginError
 
 MAX_MANIFEST_BYTES = 256 * 1024
 PLUGIN_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+PORTABLE_PLUGIN_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$")
 VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 _FRONTMATTER_RE = re.compile(
     r"\A---\r?\n(?P<header>.*?)\r?\n---(?:\r?\n|\Z)(?P<body>.*)\Z",
@@ -120,6 +121,10 @@ def validate_skill_manifests(
     for directory in sorted(entry for entry in skills_root.iterdir() if entry.is_dir()):
         manifest = directory / "SKILL.md"
         if not manifest.is_file() or manifest.is_symlink():
+            if manifest.exists() or manifest.is_symlink():
+                diagnostics.append(
+                    f"{manifest.relative_to(root).as_posix()}: SKILL.md 必须是普通文件"
+                )
             continue
         try:
             content = manifest.read_text(encoding="utf-8")
@@ -156,6 +161,23 @@ def require_plugin_name(value: object, *, field: str = "name") -> str:
     """校验统一的 kebab-case Plugin 名称。"""
     if not isinstance(value, str) or not PLUGIN_NAME_RE.fullmatch(value):
         raise PluginError("PLUGIN_NAME_INVALID", "Plugin name 必须是 kebab-case", field=field)
+    return value
+
+
+def require_portable_plugin_name(value: object, *, field: str = "name") -> str:
+    """校验 Agent Plugins 规范的 portable Plugin 名称。"""
+    if (
+        not isinstance(value, str)
+        or not 1 <= len(value) <= 64
+        or "--" in value
+        or ".." in value
+        or not PORTABLE_PLUGIN_NAME_RE.fullmatch(value)
+    ):
+        raise PluginError(
+            "PLUGIN_NAME_INVALID",
+            "Plugin name 必须是 1-64 个字符、以字母数字开头结尾且不含连续连字符或句点",
+            field=field,
+        )
     return value
 
 

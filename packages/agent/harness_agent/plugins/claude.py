@@ -23,6 +23,7 @@ from harness_agent.plugins.model import (
     PluginDescriptor,
     PluginError,
     capability_fingerprint,
+    merge_component_reports,
 )
 
 
@@ -99,6 +100,7 @@ def load_claude_plugin(
     package_digest: str,
     name_hint: str,
     include_portable_components: bool = True,
+    include_claude_mcp: bool = True,
 ) -> PluginDescriptor:
     """解析当前 Claude manifest/default layout，并生成逐组件兼容报告。"""
     manifest: Mapping[str, object] = {}
@@ -124,6 +126,10 @@ def load_claude_plugin(
     components: list[PluginComponentReport] = []
     if include_portable_components:
         components.extend(_skills_reports(root, manifest))
+        components.extend(_mcp_reports(root, manifest))
+    elif include_claude_mcp:
+        # Hybrid 仍需登记 Claude 私有 `.mcp.json`；这里只跳过可能重复的
+        # portable `skills/` 和 Agent Plugins `mcp.json`。
         components.extend(_mcp_reports(root, manifest))
     components.extend(_path_component_reports(root, manifest))
     components.extend(_structured_component_reports(root, manifest))
@@ -220,7 +226,10 @@ def _skills_reports(
                 count=len(set(manifests)),
                 sources=relative_sources(root, set(manifests)),
                 capabilities=("prompt:skill",),
-                diagnostics=tuple(errors) or ("Claude Skill 已适配到 Harness 启动期 Skill 快照",),
+                diagnostics=(
+                    tuple(f"PLUGIN_COMPONENT_INVALID: {error}" for error in errors)
+                    or ("Claude Skill 已适配到 Harness 启动期 Skill 快照",)
+                ),
                 effective=bool(manifests),
             )
         )
@@ -257,12 +266,15 @@ def _mcp_reports(
         reports.append(
             PluginComponentReport(
                 kind="mcp",
-                status="invalid" if errors else "supported",
+                status="supported" if count else "invalid",
                 count=count,
                 sources=tuple(sorted(set(sources))),
                 capabilities=("process:mcp", "network:mcp"),
-                diagnostics=tuple(errors) or ("Claude MCP 已适配到 Harness 启动期 MCP 快照",),
-                effective=not errors,
+                diagnostics=(
+                    tuple(f"PLUGIN_COMPONENT_INVALID: {error}" for error in errors)
+                    or ("Claude MCP 已适配到 Harness 启动期 MCP 快照",)
+                ),
+                effective=count > 0,
             )
         )
     return reports
@@ -293,23 +305,25 @@ def _path_component_reports(
             except PluginError as exc:
                 errors.append(f"{relative}: {exc.code}: {exc}")
         if files or errors:
+            if files:
+                # 有效条目仍可进入运行快照；坏路径只通过诊断把整体降级为 partial。
+                status = "supported" if kind in {"commands", "agents"} else "unsupported"
+            else:
+                status = "invalid" if errors else "unsupported"
             reports.append(
                 PluginComponentReport(
                     kind=kind,
-                    status=(
-                        "invalid"
-                        if errors and not files
-                        else "supported"
-                        if kind in {"commands", "agents"}
-                        else "unsupported"
-                    ),
+                    status=status,
                     count=len(set(files)),
                     sources=relative_sources(root, set(files)),
                     capabilities=capabilities,
-                    diagnostics=tuple(errors) or (
-                        ("Claude Command/Agent 已接入 Harness 启动快照",)
-                        if kind in {"commands", "agents"}
-                        else ("Claude 组件已识别，但 Harness 当前尚未执行",)
+                    diagnostics=(
+                        tuple(f"PLUGIN_COMPONENT_INVALID: {error}" for error in errors)
+                        or (
+                            ("Claude Command/Agent 已接入 Harness 启动快照",)
+                            if kind in {"commands", "agents"}
+                            else ("Claude 组件已识别，但 Harness 当前尚未执行",)
+                        )
                     ),
                     effective=kind in {"commands", "agents"} and bool(files),
                 )
@@ -456,9 +470,11 @@ def _json_or_inline_report(
         else "invalid"
     )
     diagnostics = [
-        *errors,
+        *(f"PLUGIN_COMPONENT_INVALID: {error}" for error in errors),
         *(
-            [f"{unsupported} 个 Claude {kind} 子项尚未支持"]
+            [
+                f"PLUGIN_COMPONENT_UNSUPPORTED: {unsupported} 个 Claude {kind} 子项尚未支持"
+            ]
             if unsupported
             else []
         ),
@@ -520,7 +536,7 @@ def _optional_paths_report(
         if kind == "monitors" and count
         else "unsupported"
     )
-    diagnostics = list(errors)
+    diagnostics = [f"PLUGIN_COMPONENT_INVALID: {error}" for error in errors]
     if unsupported:
         diagnostics.append(f"{unsupported} 个 Claude monitor 子项尚未支持")
     if kind == "monitors" and count:
@@ -698,20 +714,10 @@ def _dedupe(values: list[str]) -> tuple[str, ...]:
 def _merge_reports(reports: list[PluginComponentReport]) -> tuple[PluginComponentReport, ...]:
     """合并同类默认路径和 manifest 路径的报告。"""
     merged: dict[str, PluginComponentReport] = {}
-    status_rank = {"supported": 0, "adapted": 1, "unsupported": 2, "invalid": 3}
     for report in reports:
         current = merged.get(report.kind)
         if current is None:
             merged[report.kind] = report
             continue
-        status = max((current.status, report.status), key=lambda value: status_rank[value])
-        merged[report.kind] = PluginComponentReport(
-            kind=report.kind,
-            status=status,
-            count=current.count + report.count,
-            sources=tuple(sorted(set(current.sources) | set(report.sources))),
-            capabilities=tuple(sorted(set(current.capabilities) | set(report.capabilities))),
-            diagnostics=tuple(dict.fromkeys((*current.diagnostics, *report.diagnostics))),
-            effective=current.effective or report.effective,
-        )
+        merged[report.kind] = merge_component_reports(current, report)
     return tuple(merged.values())

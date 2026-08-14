@@ -30,8 +30,8 @@ MAX_PACKAGE_FILES = 2_048
 MAX_PACKAGE_DEPTH = 24
 MAX_RELATIVE_PATH_BYTES = 512
 MAX_ZIP_COMPRESSION_RATIO = 200
-REGISTRY_VERSION = 1
-_SAFE_SEGMENT_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
+REGISTRY_VERSION = 2
+_SAFE_SEGMENT_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{0,127}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,32 +211,27 @@ class PluginStore:
 
     def _read_registry_unlocked(self) -> PluginRegistryState:
         """不加锁读取；写事务必须通过 mutate_registry 调用。"""
-        try:
-            content = self.registry_path.read_text(encoding="utf-8")
-        except FileNotFoundError:
+        content = self._read_registry_bytes_unlocked()
+        if content is None:
             return PluginRegistryState(revision=0, plugins=())
-        except (OSError, UnicodeDecodeError) as exc:
-            raise PluginError("PLUGIN_REGISTRY_READ_FAILED", "无法读取 Plugin registry") from exc
         try:
             document = json.loads(content)
-        except json.JSONDecodeError as exc:
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise PluginError("PLUGIN_REGISTRY_INVALID", "Plugin registry 不是有效 JSON") from exc
-        if (
-            not isinstance(document, dict)
-            or document.get("version") != REGISTRY_VERSION
-            or not isinstance(document.get("revision"), int)
-            or isinstance(document.get("revision"), bool)
-            or document["revision"] < 0
-            or not isinstance(document.get("plugins"), list)
-        ):
-            raise PluginError("PLUGIN_REGISTRY_INVALID", "Plugin registry 版本或结构无效")
         try:
-            plugins = tuple(_installed_from_record(item) for item in document["plugins"])
+            return _registry_state_from_document(document, expected_version=REGISTRY_VERSION)
         except (KeyError, TypeError, ValueError) as exc:
-            raise PluginError("PLUGIN_REGISTRY_INVALID", "Plugin registry 记录无效") from exc
-        if len({plugin.plugin_id for plugin in plugins}) != len(plugins):
-            raise PluginError("PLUGIN_REGISTRY_INVALID", "Plugin registry 包含重复 ID")
-        return PluginRegistryState(revision=document["revision"], plugins=plugins)
+            raise PluginError("PLUGIN_REGISTRY_INVALID", "Plugin registry 版本或结构无效") from exc
+
+    def _read_registry_bytes_unlocked(self) -> bytes | None:
+        """读取 registry 原始字节；不存在时返回 None，其他错误 fail closed。"""
+        try:
+            content = self.registry_path.read_bytes()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise PluginError("PLUGIN_REGISTRY_READ_FAILED", "无法读取 Plugin registry") from exc
+        return content
 
     @contextmanager
     def _exclusive_lock(self) -> Iterator[None]:
@@ -280,10 +275,48 @@ class PluginStore:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, self.registry_path)
+            _fsync_directory(self.root)
         except OSError as exc:
             raise PluginError("PLUGIN_REGISTRY_WRITE_FAILED", "无法原子写入 Plugin registry") from exc
         finally:
             temporary.unlink(missing_ok=True)
+
+
+def _fsync_directory(directory: Path) -> None:
+    """把同目录 rename 刷到磁盘；Windows 依赖文件系统日志语义。"""
+    if os.name == "nt":
+        return
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _registry_state_from_document(
+    document: object,
+    *,
+    expected_version: int,
+) -> PluginRegistryState:
+    """严格解码指定版本 registry，不因旧数据放宽正常读取门禁。"""
+    if (
+        not isinstance(document, dict)
+        or document.get("version") != expected_version
+        or not isinstance(document.get("revision"), int)
+        or isinstance(document.get("revision"), bool)
+        or document["revision"] < 0
+        or not isinstance(document.get("plugins"), list)
+    ):
+        raise ValueError("registry version or structure is invalid")
+    plugins = tuple(_installed_from_record(item) for item in document["plugins"])
+    _ensure_unique_plugin_ids(plugins)
+    return PluginRegistryState(revision=document["revision"], plugins=plugins)
+
+
+def _ensure_unique_plugin_ids(plugins: tuple[InstalledPlugin, ...]) -> None:
+    """拒绝重复身份，防止并发写入隐式覆盖记录。"""
+    if len({plugin.plugin_id for plugin in plugins}) != len(plugins):
+        raise PluginError("PLUGIN_REGISTRY_INVALID", "Plugin registry 包含重复 ID")
 
 
 def package_digest(root: Path) -> str:

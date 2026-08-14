@@ -377,6 +377,60 @@ class TestSerialApprovals:
         # 第二个工具命中 src/** 但属敏感路径，仍需弹窗
         assert len(port.requests) == 2
 
+    def test_directory_trust_session_grant_skips_second_prompt_same_batch(
+        self, tmp_path: Path
+    ) -> None:
+        """首个调用选本会话信任后，同批同目录后续调用自动放行且选项首选 session。"""
+        from harness_agent.policy.workspace_roots import WorkspaceRootRegistry
+
+        outside = tmp_path.parent / f"zc142-batch-{tmp_path.name}"
+        outside.mkdir(exist_ok=True)
+        registry = WorkspaceRootRegistry(tmp_path, project_dir=tmp_path, load_persisted=False)
+        port = _ScriptedInteractionPort([{"decision": "allow_session"}])
+        coordinator = _coordinator_with_port(port, project_dir=tmp_path)
+        coordinator._workspace_root_registry = registry
+        actions = [
+            {"name": "ls", "args": {"path": str(outside)}},
+            {"name": "read_file", "args": {"file_path": str(outside / "a.txt")}},
+        ]
+        run = _serial_run()
+        assert run.approval_presentations.remember(
+            "ls",
+            actions[0]["args"],
+            {
+                "kind": "directory_trust",
+                "directory": str(outside),
+                "target_path": str(outside),
+                "tool_name": "ls",
+                "access": "read",
+                "shadows_workspace": False,
+            },
+        )
+        assert run.approval_presentations.remember(
+            "read_file",
+            actions[1]["args"],
+            {
+                "kind": "directory_trust",
+                "directory": str(outside),
+                "target_path": str(outside / "a.txt"),
+                "tool_name": "read_file",
+                "access": "read",
+                "shadows_workspace": False,
+            },
+        )
+
+        result = self._collect(coordinator, run, _serial_spec(actions, [], [0, 1]))
+
+        assert result["int-serial"]["decisions"] == [
+            {"type": "approve"},
+            {"type": "approve"},
+        ]
+        # 第二个调用因目录已信任而免弹；只弹了一次且仅允许/拒绝两个选项
+        assert len(port.requests) == 1
+        assert port.requests[0].type == "directory_trust"
+        assert port.requests[0].payload["decisions"] == ["allow_session", "deny"]
+        assert run.batch_rejected is False
+
 
 class _FakeInterrupt:
     """模拟 LangGraph interrupt 对象，携带 value 与 id。"""
@@ -443,6 +497,37 @@ def test_extract_interaction_all_safe_tools_auto_resume() -> None:
     }
 
 
+def test_extract_interaction_directory_trust_not_auto_resumed() -> None:
+    """需要目录信任的只读工具不得按并发安全自动放行。
+
+    回归：ZC-142 把只读工具纳入 HITL 后，它们进入 interrupt 的唯一原因是
+    需要目录信任决策；此前 _CONCURRENCY_SAFE_TOOLS 会将其自动 approve，
+    信任卡片被静默跳过且信任不会注册，执行层只能硬拒绝，用户看不到弹窗。
+    """
+    spec, auto_resume = _extract_interaction(
+        (
+            "updates",
+            {
+                "__interrupt__": [
+                    _FakeInterrupt({
+                        "action_requests": [
+                            {"name": "ls", "args": {"path": "C:/Users/PC/Desktop/x"}},
+                            {"name": "glob", "args": {"pattern": "*.py"}},
+                        ]
+                    })
+                ]
+            },
+        ),
+        needs_user_decision=lambda name, args: name == "ls",
+    )
+    assert auto_resume is None
+    assert spec is not None
+    assert spec.serial_context is not None
+    assert spec.serial_context["unsafe_indices"] == [0]
+    assert spec.serial_context["safe_indices"] == [1]
+    _assert_approval_params_schema_compliant(spec)
+
+
 def test_generate_permission_rule_execute_uses_command_prefix() -> None:
     """execute 工具按词分类生成纯前缀规则。"""
     rules = _generate_permission_rule("execute", {"command": "git commit -m 'x'"})
@@ -484,7 +569,11 @@ def test_generate_permission_rule_rm_produces_no_bare_root() -> None:
     assert rules == []
 
 
-def _coordinator(project_dir: Path | None = None) -> RunCoordinator:
+def _coordinator(
+    project_dir: Path | None = None,
+    *,
+    workspace_root_registry: object | None = None,
+) -> RunCoordinator:
     """构造只用于规则记录测试的最小 RunCoordinator。"""
 
     async def no_persistence() -> None:
@@ -502,6 +591,7 @@ def _coordinator(project_dir: Path | None = None) -> RunCoordinator:
         runtime_provider=no_runtime,  # type: ignore[arg-type]
         interaction_port=object(),  # type: ignore[arg-type]
         project_dir=project_dir,
+        workspace_root_registry=workspace_root_registry,
     )
 
 
@@ -546,6 +636,62 @@ def test_other_decisions_do_not_record_rules() -> None:
             "execute", {"command": "git status"}, decision
         )
     assert coordinator.session_rules == []
+
+
+def test_directory_trust_allow_session_registers_session_root(tmp_path: Path) -> None:
+    """directory_trust + allow_session 注册会话额外根，不写 PermissionRule。"""
+    from harness_agent.policy.workspace_roots import WorkspaceRootRegistry, normalize_host_path
+
+    outside = tmp_path.parent / f"zc142-trust-session-{tmp_path.name}"
+    outside.mkdir(exist_ok=True)
+    registry = WorkspaceRootRegistry(tmp_path, project_dir=tmp_path, load_persisted=False)
+    coordinator = _coordinator(project_dir=tmp_path, workspace_root_registry=registry)
+    presentation = {
+        "kind": "directory_trust",
+        "directory": str(outside),
+        "target_path": str(outside / "a.toml"),
+        "tool_name": "read_file",
+        "access": "read",
+        "shadows_workspace": False,
+    }
+    coordinator._record_directory_trust(
+        "allow_session", presentation, run_id="run-1"
+    )
+    assert coordinator.session_rules == []
+    resolved = registry.resolve(str(outside / "a.toml"))
+    assert resolved.root.scope == "session"
+    assert normalize_host_path(outside) == resolved.root.path
+    settings = tmp_path / ".harness" / "settings.json"
+    assert not settings.is_file()
+
+
+def test_directory_trust_already_granted_skips_repeat_prompt(tmp_path: Path) -> None:
+    """session/project 信任后同目录排队调用免弹；once 与未信任不免弹。"""
+    from harness_agent.policy.workspace_roots import WorkspaceRootRegistry
+
+    outside = tmp_path.parent / f"zc142-trust-skip-{tmp_path.name}"
+    outside.mkdir(exist_ok=True)
+    target = outside / "a.toml"
+    target.write_text("x", encoding="utf-8")
+    registry = WorkspaceRootRegistry(tmp_path, project_dir=tmp_path, load_persisted=False)
+    coordinator = _coordinator(project_dir=tmp_path, workspace_root_registry=registry)
+    presentation = {
+        "kind": "directory_trust",
+        "directory": str(outside),
+        "target_path": str(target),
+        "tool_name": "read_file",
+        "access": "read",
+        "shadows_workspace": False,
+    }
+    # 未信任：必须弹窗
+    assert coordinator._directory_trust_already_granted(presentation, run_id="run-1") is False
+    # once 单次消费，不能作为后续排队调用的免弹依据
+    registry.trust(outside, "once", run_id="run-1")
+    assert coordinator._directory_trust_already_granted(presentation, run_id="run-1") is False
+    registry.consume_once(outside, run_id="run-1")
+    # session 信任稳定有效：同目录后续调用免弹
+    registry.trust(outside, "session")
+    assert coordinator._directory_trust_already_granted(presentation, run_id="run-1") is True
 
 
 def test_generate_permission_rule_top_level_file_uses_tool_wildcard() -> None:

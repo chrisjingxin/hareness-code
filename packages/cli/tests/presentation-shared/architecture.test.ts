@@ -2,7 +2,7 @@
 
 import { expect, test } from "bun:test"
 import { readdir, readFile } from "node:fs/promises"
-import { resolve } from "node:path"
+import { basename, resolve } from "node:path"
 
 const sharedSrcDir = resolve(import.meta.dir, "../../src/presentation-shared")
 
@@ -15,7 +15,7 @@ async function getSourceFiles(directory: string): Promise<string[]> {
 
 test("presentation-shared/ 存在全部 7 个共享策略模块", async () => {
   const files = await getSourceFiles(sharedSrcDir)
-  const names = files.map(path => path.split("/").at(-1))
+  const names = files.map(path => basename(path))
   for (const module of [
     "language-catalog.ts",
     "formatters.ts",

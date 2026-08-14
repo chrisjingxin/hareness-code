@@ -31,7 +31,6 @@ function createFakeExplorer(): WorkspaceExplorer {
 
 test(
   "web-active 帧丢失后页面看门狗重载并恢复 active",
-  { timeout: 40_000 },
   async () => {
     const { controller } = makeHarness({ initialThreadId: "thread-1" })
     let gateway!: WebUiGateway
@@ -84,4 +83,5 @@ test(
       await coordinator.close()
     }
   },
+  { timeout: 40_000 },
 )

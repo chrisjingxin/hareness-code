@@ -111,6 +111,8 @@ class ExecutionStreamRequest:
     content_visibility: ContentVisibility
     session: StreamSession
     is_cancelled: Callable[[], bool]
+    # 目录信任等必须用户决策的中断判定钩子；None 时并发安全工具自动放行。
+    needs_user_decision: Callable[[str, Mapping[str, object]], bool] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,7 +198,9 @@ async def execute(
         if request.is_cancelled():
             raise ExecutionStreamError("RUN_CANCELLED", "Run was cancelled during stream")
 
-        interaction, auto_resume = extract_interaction(event)
+        interaction, auto_resume = extract_interaction(
+            event, needs_user_decision=request.needs_user_decision
+        )
         if auto_resume is not None:
             # Interaction resume 前不清理 model round：下一阶段 astream
             # 仍可能依赖尚未结束的关联状态，与历史 Build 行为一致。
@@ -254,12 +258,17 @@ def is_concurrency_safe(tool_name: str) -> bool:
 
 def extract_interaction(
     event: tuple[Any, ...],
+    *,
+    needs_user_decision: Callable[[str, Mapping[str, object]], bool] | None = None,
 ) -> tuple[StreamInteractionRequest | None, dict[str, object] | None]:
     """从 DeepAgents updates 流提取首个 AskUser 或 HITL interrupt。
 
     返回 (request, None) 表示需要用户交互；
     返回 (None, dict) 表示全部并发安全工具，自动放行；
     返回 (None, None) 表示没有交互需要处理。
+
+    ``needs_user_decision`` 由调用方按当前 Run 的审批展示判定某个中断动作
+    是否必须交给用户决策（目录信任卡片）；命中时即使工具并发安全也不自动放行。
     """
     if len(event) == 3:
         namespace, stream_mode, data = event
@@ -324,7 +333,15 @@ def extract_interaction(
             action_requests_list = [r for r in action_requests if isinstance(r, Mapping)]
             for i, request in enumerate(action_requests_list):
                 tool_name = str(request.get("name", ""))
-                if is_concurrency_safe(tool_name):
+                raw_args = request.get("args")
+                args_map = raw_args if isinstance(raw_args, Mapping) else {}
+                # 只读工具进入 interrupt 的唯一原因是目录信任审批；此时若仍按
+                # 并发安全自动放行，信任卡片会被静默跳过且信任不会注册，执行层
+                # 只能硬拒绝。因此需要用户决策的动作一律视为 unsafe。
+                if is_concurrency_safe(tool_name) and not (
+                    needs_user_decision is not None
+                    and needs_user_decision(tool_name, args_map)
+                ):
                     safe_indices.append(i)
                 else:
                     unsafe_indices.append(i)

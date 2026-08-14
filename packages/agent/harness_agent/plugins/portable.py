@@ -6,16 +6,14 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from harness_agent.plugins.common import (
-    PLUGIN_NAME_RE,
-    VERSION_RE,
     list_regular_files,
-    optional_string,
     read_json_object,
     relative_sources,
-    require_plugin_name,
+    require_portable_plugin_name,
     safe_package_path,
     validate_skill_manifests,
 )
+from harness_agent.plugins.mcp_schema import MCP_SCHEMA_ID, validate_mcp_document
 from harness_agent.plugins.model import (
     PluginComponentReport,
     PluginDescriptor,
@@ -25,7 +23,6 @@ from harness_agent.plugins.model import (
 
 
 PLUGIN_SCHEMA_ID = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
-MCP_SCHEMA_ID = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json"
 HARNESS_EXTENSION_NAMESPACE = "com.za38.harness"
 _KNOWN_MANIFEST_FIELDS = {
     "$schema",
@@ -68,11 +65,9 @@ def load_portable_plugin(root: Path, *, package_digest: str) -> PluginDescriptor
             "plugin.json 未声明受支持的 Agent Plugins 1.0 schema",
             field="$schema",
         )
-    name = require_plugin_name(manifest.get("name"))
-    version = optional_string(manifest.get("version"), "version")
-    if version is not None and not VERSION_RE.fullmatch(version):
-        raise PluginError("PLUGIN_VERSION_INVALID", "Plugin version 格式无效", field="version")
-    description = optional_string(manifest.get("description"), "description")
+    name = require_portable_plugin_name(manifest.get("name"))
+    version = _manifest_string(manifest, "version")
+    description = _manifest_string(manifest, "description")
     _validate_metadata(manifest)
     diagnostics = tuple(
         f"plugin.json: 未识别的顶层字段 {field}"
@@ -86,11 +81,14 @@ def load_portable_plugin(root: Path, *, package_digest: str) -> PluginDescriptor
         components.append(
             PluginComponentReport(
                 kind="skills",
-                status="supported" if manifests else "invalid",
+                status="supported" if manifests or not errors else "invalid",
                 count=len(manifests),
                 sources=relative_sources(root, manifests),
                 capabilities=("prompt:skill",),
-                diagnostics=errors or ("已接入 Harness 启动期 Skill 快照",),
+                diagnostics=(
+                    tuple(f"PLUGIN_COMPONENT_INVALID: {error}" for error in errors)
+                    or ("已接入 Harness 启动期 Skill 快照",)
+                ),
                 effective=bool(manifests),
             )
         )
@@ -100,7 +98,7 @@ def load_portable_plugin(root: Path, *, package_digest: str) -> PluginDescriptor
         components.append(_validate_mcp(root))
 
     extensions = manifest.get("extensions")
-    if extensions is not None and not isinstance(extensions, Mapping):
+    if "extensions" in manifest and not isinstance(extensions, Mapping):
         diagnostics += ("plugin.json: extensions 不是 object，已忽略所有 client extension",)
     elif isinstance(extensions, Mapping):
         harness_extension = extensions.get(HARNESS_EXTENSION_NAMESPACE)
@@ -134,66 +132,78 @@ def load_portable_plugin(root: Path, *, package_digest: str) -> PluginDescriptor
 def _validate_metadata(manifest: Mapping[str, Any]) -> None:
     """校验会被核心展示的 portable metadata 类型。"""
     author = manifest.get("author")
-    if author is not None and not isinstance(author, Mapping):
+    if "author" in manifest and not isinstance(author, Mapping):
         raise PluginError("PLUGIN_MANIFEST_FIELD_INVALID", "author 必须是 object", field="author")
+    if isinstance(author, Mapping):
+        if any(field not in {"name", "email", "url"} for field in author):
+            raise PluginError(
+                "PLUGIN_MANIFEST_FIELD_INVALID",
+                "author 只允许 name、email、url 字段",
+                field="author",
+            )
+        if any(not isinstance(value, str) for value in author.values()):
+            raise PluginError(
+                "PLUGIN_MANIFEST_FIELD_INVALID",
+                "author 的字段值必须是字符串",
+                field="author",
+            )
     keywords = manifest.get("keywords")
-    if keywords is not None and (
+    if "keywords" in manifest and (
         not isinstance(keywords, list) or not all(isinstance(item, str) for item in keywords)
     ):
         raise PluginError("PLUGIN_MANIFEST_FIELD_INVALID", "keywords 必须是字符串数组", field="keywords")
     for field in ("homepage", "repository", "license"):
-        optional_string(manifest.get(field), field)
+        _manifest_string(manifest, field)
+
+
+def _manifest_string(manifest: Mapping[str, Any], field: str) -> str | None:
+    """按 portable schema 只校验 metadata 的 JSON string 类型。"""
+    if field not in manifest:
+        return None
+    value = manifest[field]
+    if not isinstance(value, str):
+        raise PluginError(
+            "PLUGIN_MANIFEST_FIELD_INVALID",
+            f"{field} 必须是字符串",
+            field=field,
+        )
+    return value
 
 
 def _validate_mcp(root: Path) -> PluginComponentReport:
-    """离线校验 Agent Plugins MCP 顶层结构和 transport 请求。"""
+    """离线校验 MCP closed schema，并隔离单条 invalid/unsupported。"""
     try:
         document = read_json_object(root, "mcp.json")
-        if document.get("$schema") != MCP_SCHEMA_ID:
-            raise PluginError("PLUGIN_MCP_SCHEMA_UNSUPPORTED", "mcp.json schema 与 Plugin 版本不一致")
-        raw_servers = document.get("mcpServers")
-        if not isinstance(raw_servers, Mapping):
-            raise PluginError("PLUGIN_MCP_INVALID", "mcpServers 必须是 object")
+        validation = validate_mcp_document(document, root=root)
         transports: set[str] = set()
-        valid_count = 0
-        errors: list[str] = []
-        for name, raw in raw_servers.items():
-            try:
-                if not isinstance(name, str) or not PLUGIN_NAME_RE.fullmatch(name):
-                    raise PluginError("PLUGIN_MCP_INVALID", "MCP server name 必须是 kebab-case")
-                if not isinstance(raw, Mapping):
-                    raise PluginError("PLUGIN_MCP_INVALID", f"MCP server {name} 必须是 object")
-                transport = raw.get("type")
-                if transport not in {"stdio", "streamable-http", "sse"}:
-                    raise PluginError("PLUGIN_MCP_INVALID", f"MCP server {name} transport 不受支持")
-                if transport == "stdio":
-                    if not isinstance(raw.get("command"), str) or not str(raw["command"]).strip():
-                        raise PluginError("PLUGIN_MCP_INVALID", f"MCP server {name} 缺少 command")
-                    _require_string_list(raw.get("args", []), f"{name}.args")
-                    _require_string_map(raw.get("env", {}), f"{name}.env")
-                    if raw.get("cwd") is not None and not isinstance(raw.get("cwd"), str):
-                        raise PluginError("PLUGIN_MCP_INVALID", f"MCP server {name}.cwd 必须是字符串")
-                else:
-                    if not isinstance(raw.get("url"), str) or not str(raw["url"]).strip():
-                        raise PluginError("PLUGIN_MCP_INVALID", f"MCP server {name} 缺少 url")
-                    _require_string_map(raw.get("headers", {}), f"{name}.headers")
-                transports.add(str(transport))
-                valid_count += 1
-            except PluginError as exc:
-                errors.append(f"{name}: {exc}")
+        for server in validation.servers:
+            transports.add(server.transport)
         capabilities = []
         if "stdio" in transports:
             capabilities.append("process:mcp")
         if transports & {"streamable-http", "sse"}:
             capabilities.append("network:mcp")
+        diagnostics = tuple(
+            f"PLUGIN_COMPONENT_INVALID: {error}" for error in validation.invalid
+        ) + tuple(
+            f"PLUGIN_COMPONENT_UNSUPPORTED: {error}" for error in validation.unsupported
+        )
+        if validation.servers:
+            status = "supported"
+        elif validation.invalid:
+            status = "invalid"
+        elif validation.unsupported:
+            status = "unsupported"
+        else:
+            status = "supported"
         return PluginComponentReport(
             kind="mcp",
-            status="supported" if valid_count else "invalid",
-            count=valid_count,
+            status=status,
+            count=len(validation.servers),
             sources=("mcp.json",),
             capabilities=tuple(capabilities),
-            diagnostics=tuple(errors) or ("已接入 Harness 启动期 MCP 快照",),
-            effective=valid_count > 0,
+            diagnostics=diagnostics or ("已接入 Harness 启动期 MCP 快照",),
+            effective=bool(validation.servers),
         )
     except PluginError as exc:
         return PluginComponentReport(
@@ -248,7 +258,8 @@ def _load_harness_extension(
                         if kind in {"commands", "agents", "policies", "teams"}
                         else ("格式已识别，但当前运行时尚未接入此组件",)
                     ),
-                    effective=kind in {"commands", "agents", "policies", "teams"},
+                    effective=kind in {"commands", "agents", "policies", "teams"}
+                    and bool(files),
                 )
             )
         except PluginError as exc:
@@ -272,17 +283,3 @@ def _harness_capabilities(kind: str) -> tuple[str, ...]:
         "teams": ("coordination:team",),
         "hooks": ("process:hook",),
     }.get(kind, ())
-
-
-def _require_string_list(value: object, field: str) -> None:
-    """校验 MCP 字符串数组。"""
-    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-        raise PluginError("PLUGIN_MCP_INVALID", f"{field} 必须是字符串数组")
-
-
-def _require_string_map(value: object, field: str) -> None:
-    """校验 MCP 字符串映射。"""
-    if not isinstance(value, Mapping) or not all(
-        isinstance(key, str) and isinstance(item, str) for key, item in value.items()
-    ):
-        raise PluginError("PLUGIN_MCP_INVALID", f"{field} 必须是字符串映射")

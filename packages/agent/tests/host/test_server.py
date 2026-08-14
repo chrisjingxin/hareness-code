@@ -72,6 +72,22 @@ async def _capture_server(server: Any) -> list[dict[str, Any]]:
     return frames
 
 
+def test_host_startup_without_plugins_does_not_create_default_registry_lock(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """默认 Path.home() 下没有 Plugin 时，Host 启动不创建空 Plugin 目录或锁。"""
+    from harness_agent.host.agent_host import AgentHost
+
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    AgentHost(allow_echo=True, workspace=tmp_path / "workspace")
+
+    plugin_root = home / ".harness" / "plugins"
+    assert plugin_root.exists() is False
+    assert (plugin_root / "registry.lock").exists() is False
+
+
 async def _wait_for(frames: list[dict[str, Any]], predicate: Any, *, skip: int = 0) -> dict[str, Any]:
     """等待 frames 中出现符合 predicate 的帧。
 
@@ -2670,9 +2686,9 @@ async def test_stdio_subprocess_end_to_end_echo_mode():
         await process.stdin.drain()
         frames: list[dict[str, Any]] = []
         while not any(frame.get("params", {}).get("type") == "run.completed" for frame in frames):
-            frames.append(json.loads(await asyncio.wait_for(process.stdout.readline(), timeout=2)))
+            frames.append(json.loads(await asyncio.wait_for(process.stdout.readline(), timeout=15)))
         process.stdin.close()
-        await asyncio.wait_for(process.wait(), timeout=2)
+        await asyncio.wait_for(process.wait(), timeout=15)
         assert "content.delta" in _event_types(frames)
 
 

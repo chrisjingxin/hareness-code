@@ -19,7 +19,6 @@ from typing import Sequence
 from harness_agent.threads.thread_persistence import (
     ThreadPersistence,
     ThreadPersistenceError,
-    _assert_migration_file_identity_supported,
     _fsync_directory_best_effort,
     _migration_attempt_dir_path,
     _migration_attempt_manifest_path,
@@ -128,7 +127,6 @@ def _offline_settle_attempt_sync(path: Path) -> str:
         return "OK_SETTLED_HOUSEKEEPING"
     if not manifest.is_active:
         return "CHECKPOINT_MIGRATION_STATE_INVALID"
-    _assert_migration_file_identity_supported()
     temp_dir = _migration_attempt_dir_path(path, manifest.attempt_id)
     source = manifest.source
     backup_path = path.with_name(

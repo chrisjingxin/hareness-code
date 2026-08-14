@@ -1,0 +1,18 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "alloydb",
+  "version": "0.2.0",
+  "description": "Minimal offline shape for the AlloyDB plugin",
+  "author": {
+    "name": "Google Cloud"
+  },
+  "license": "Apache-2.0",
+  "extensions": {
+    "com.google.gemini-cli": {
+      "fixture": "static-shape"
+    },
+    "com.google.cloud": {
+      "product": "alloydb"
+    }
+  }
+}

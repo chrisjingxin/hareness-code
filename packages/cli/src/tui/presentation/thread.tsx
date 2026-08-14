@@ -1,12 +1,12 @@
 /** Harness Code 的 Thread 主视图。 */
 
-import { ApprovalDock, QuestionDock, bottomAreaKind } from "./bottom-area"
+import { ApprovalDock, DirectoryTrustDock, QuestionDock, bottomAreaKind } from "./bottom-area"
 import { InputBar, FooterRail, ThreadRuntimeLine } from "./input-bar"
 import { ConversationTimeline } from "./timeline"
 import { tuiTheme } from "./theme"
 import type { SharedViewProps } from "./types"
 
-/** thread 流全宽渲染；底部互斥为输入栏 / 审批 Dock / 问答 Dock。Compose 与 Build 同一套骨架，不挂阶段顶栏。 */
+/** thread 流全宽渲染；底部互斥为输入栏 / 审批 Dock / 目录信任 Dock / 问答 Dock。Compose 与 Build 同一套骨架，不挂阶段顶栏。 */
 export function ThreadView(props: SharedViewProps & { modelName?: string }) {
   const interaction = props.interactive.interaction
   const slot = bottomAreaKind(interaction)
@@ -29,6 +29,13 @@ export function ThreadView(props: SharedViewProps & { modelName?: string }) {
           workMode={props.interactive.workMode}
           terminalWidth={props.terminalWidth}
           onApproval={props.onApproval}
+        />
+      ) : null}
+      {slot === "directory_trust" && interaction?.type === "directory_trust" ? (
+        <DirectoryTrustDock
+          interaction={interaction}
+          workMode={props.interactive.workMode}
+          onDirectoryTrust={props.onDirectoryTrust}
         />
       ) : null}
       {slot === "question" && interaction?.type === "question" ? (

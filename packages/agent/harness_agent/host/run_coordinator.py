@@ -42,6 +42,7 @@ from harness_agent.policy.permission_rules import (
     save_rule,
 )
 from harness_agent.policy.sensitive_paths import requires_safety_check
+from harness_agent.policy.workspace_roots import ExternalPathNotTrusted
 from harness_agent.runtime.agent_execution import AgentExecutionRegistry, ExecutionRegistryError
 from harness_agent.runtime.agent_engine import AgentEnginePoolCapacityError
 from harness_agent.runtime.agent_engine_profile import AgentEngineProfile
@@ -562,6 +563,7 @@ class RunCoordinator:
         context_updates_provider: ContextUpdatesProvider | None = None,
         execution_registry: AgentExecutionRegistry | None = None,
         project_dir: Path | None = None,
+        workspace_root_registry: Any | None = None,
         compose_services_provider: (
             Callable[[RunState], Awaitable[Any | None]] | None
         ) = None,
@@ -575,6 +577,7 @@ class RunCoordinator:
         self._execution_registry = execution_registry or AgentExecutionRegistry()
         # approve_project 的规则持久化到该目录的 project 层 settings.json
         self._project_dir = project_dir
+        self._workspace_root_registry = workspace_root_registry
         # approve_thread 的会话级规则只保存在内存，不落盘
         self._session_rules: list[PermissionRule] = []
         # Build adapter 常驻；Compose adapter 首次使用时才按 provider 组装。
@@ -1031,6 +1034,10 @@ class RunCoordinator:
         run.terminal_event_emitted = True
         self._emit(run, event_type, payload, terminal=True)
         run.completion = completion
+        if self._workspace_root_registry is not None:
+            clear = getattr(self._workspace_root_registry, "clear_once_for_run", None)
+            if callable(clear):
+                clear(run.ref.run_id)
 
     def _emit(
         self,
@@ -1124,7 +1131,6 @@ class RunCoordinator:
         except ExecutionRegistryError:
             logger.exception("Unable to settle execution tree for run %s", run.run_id)
 
-
     def _drain_context_updates(self, run: RunState) -> None:
         updates = self._context_updates_provider(run.ref.thread_id)
         for update in updates:
@@ -1133,12 +1139,15 @@ class RunCoordinator:
             self._emit(run, CONTEXT_UPDATED, payload)
 
     def _record_approval_rule(
-        self, tool_name: str, tool_args: Mapping[str, object], decision: str
+        self,
+        tool_name: str,
+        tool_args: Mapping[str, object],
+        decision: str,
     ) -> None:
-        """单个工具调用审批通过后按决策范围记录或持久化 allow 权限规则。
+        """单个工具调用审批通过后按决策范围记录规则。
 
-        - approve_thread：规则只保存在会话内存列表，进程结束即失效；
-        - approve_project：规则持久化到 project 层 settings.json。
+        approve_thread 写入会话内存规则，approve_project 持久化到 project 层
+        settings.json；目录信任由独立交互类型处理，不经过这里。
         """
         if decision not in {"approve_thread", "approve_project"} or not tool_name:
             return
@@ -1153,6 +1162,54 @@ class RunCoordinator:
                     scope="project",
                     project_dir=self._project_dir,
                 )
+
+    def _record_directory_trust(
+        self,
+        decision: str,
+        presentation: Mapping[str, object],
+        *,
+        run_id: str | None,
+    ) -> None:
+        """把目录信任交互结果落到 WorkspaceRootRegistry。"""
+        if self._workspace_root_registry is None:
+            return
+        if decision != "allow_session":
+            return
+        directory = presentation.get("directory")
+        if not isinstance(directory, str) or not directory:
+            return
+        try:
+            self._workspace_root_registry.trust(
+                directory,
+                "session",
+                run_id=run_id,
+                persist=False,
+            )
+        except Exception as exc:  # noqa: BLE001 — 信任失败不应阻断已批准的 resume 路径
+            logger.warning("目录信任注册失败: %s", exc)
+
+    def _directory_trust_already_granted(
+        self,
+        presentation: Mapping[str, object],
+        *,
+        run_id: str | None,
+    ) -> bool:
+        """目标路径是否已被稳定作用域（session/project）信任。
+
+        once 授权按调用单次消费，不能作为后续排队调用的免弹依据；
+        解析失败一律视为未信任，回退到正常弹窗流程。
+        """
+        registry = self._workspace_root_registry
+        if registry is None:
+            return False
+        target = str(presentation.get("target_path") or presentation.get("directory") or "")
+        if not target:
+            return False
+        try:
+            resolved = registry.resolve(target, run_id=run_id)
+        except (ValueError, ExternalPathNotTrusted):
+            return False
+        return resolved.root.scope != "once"
 
     def _evaluate_queued_rule(self, tool_name: str, tool_args: dict[str, object]) -> str | None:
         """合并会话与持久化规则评估排队中的工具调用。
@@ -1241,6 +1298,62 @@ class RunCoordinator:
                 decisions[index] = {"type": "approve"}
                 continue
 
+            presentation = run.approval_presentations.lookup(tool_name, tool_args)
+            request_id = (
+                first_spec.request_id if position == 0 else f"{interrupt_id}-{position}"
+            )
+
+            # 目录信任是独立交互类型：专用卡片与决策枚举，不复用审批五决策。
+            if presentation is not None and presentation.get("kind") == "directory_trust":
+                # 同批前序调用可能刚注册了 session/project 信任；此时目标路径已
+                # 可信，直接放行，避免同一目录在同一次审批批次内反复弹窗。
+                if self._directory_trust_already_granted(presentation, run_id=run.ref.run_id):
+                    decisions[index] = {"type": "approve"}
+                    run.pending_approvals = run.pending_approvals[1:]
+                    continue
+                trust_payload: dict[str, object] = {
+                    "interrupt_id": interrupt_id,
+                    "directory": str(presentation.get("directory") or ""),
+                    "target_path": str(presentation.get("target_path") or ""),
+                    "tool_name": str(presentation.get("tool_name") or tool_name),
+                    "access": presentation.get("access") or "read",
+                    "shadows_workspace": bool(presentation.get("shadows_workspace")),
+                    # 目录信任只保留"允许（本会话信任）/ 拒绝"两个选项。
+                    "decisions": ["allow_session", "deny"],
+                }
+                spec = InteractionRequest(
+                    request_id=request_id,
+                    type="directory_trust",
+                    payload=trust_payload,
+                    interrupt_id=interrupt_id,
+                    action_count=1,
+                )
+                run.status = "interacting"
+                result = await self._interaction_port.request(run.owner, run.ref, spec)
+                run.status = "running"
+                self._emit(
+                    run,
+                    INTERACTION_RESOLVED,
+                    {"request_id": spec.request_id, "type": spec.type},
+                )
+                response = result.value if isinstance(result.value, Mapping) else {}
+                decision = str(response.get("decision") or "")
+                self._record_directory_trust(decision, presentation, run_id=run.ref.run_id)
+                if decision == "allow_session":
+                    decisions[index] = {"type": "approve"}
+                else:
+                    decisions[index] = {
+                        "type": "reject",
+                        "message": (
+                            "The user denied directory trust for "
+                            f"{trust_payload['directory']}. STOP what you are doing "
+                            "and wait for the user to tell you how to proceed."
+                        ),
+                    }
+                    run.batch_rejected = True
+                run.pending_approvals = run.pending_approvals[1:]
+                continue
+
             base_description = str(
                 action_map.get("description") or "A tool execution requires approval"
             )
@@ -1262,11 +1375,10 @@ class RunCoordinator:
                     "reject_with_feedback",
                 ],
             }
-            presentation = run.approval_presentations.lookup(tool_name, tool_args)
             if presentation is not None:
                 payload["presentation"] = presentation
             spec = InteractionRequest(
-                request_id=first_spec.request_id if position == 0 else f"{interrupt_id}-{position}",
+                request_id=request_id,
                 type="approval",
                 payload=payload,
                 interrupt_id=interrupt_id,

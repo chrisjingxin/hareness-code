@@ -158,6 +158,8 @@ class ManagedAgentRequest:
     usage: dict[str, int] | None = None
     started_at: float = field(default_factory=time.monotonic)
     provider_retry: ProviderRetryPolicy | None = None
+    # 目录信任等必须用户决策的中断判定钩子；透传给 shared execution stream。
+    needs_user_decision: Callable[[str, Mapping[str, object]], bool] | None = None
 
     def __post_init__(self) -> None:
         """在取得昂贵 runtime 前拒绝不完整的执行事实。"""
@@ -378,6 +380,7 @@ class ManagedAgentExecutor:
                 content_visibility=visibility,
                 session=session,
                 is_cancelled=request.is_cancelled,
+                needs_user_decision=request.needs_user_decision,
             ),
             observer,
         )

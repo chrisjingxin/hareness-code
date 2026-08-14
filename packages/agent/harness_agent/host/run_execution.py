@@ -17,7 +17,7 @@ import hashlib
 import asyncio
 import json
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
@@ -243,6 +243,14 @@ class BuildRunAdapter:
 
         observer = _BuildStreamPorts(run=run, port=port)
         skill_snapshot_id = run.preparation.skill_snapshot_id
+
+        def needs_user_decision(
+            tool_name: str, tool_args: Mapping[str, object]
+        ) -> bool:
+            """中断动作若携带目录信任审批，禁止按并发安全自动放行。"""
+            presentation = run.approval_presentations.lookup(tool_name, tool_args)
+            return bool(presentation and presentation.get("kind") == "directory_trust")
+
         request = ManagedAgentRequest(
             execution_ref=run.root_execution_ref.execution_id,
             parent_execution_ref=None,
@@ -260,6 +268,7 @@ class BuildRunAdapter:
             else (),
             usage=run.usage,
             started_at=run.started_at,
+            needs_user_decision=needs_user_decision,
         )
         try:
             await ManagedAgentExecutor().execute(request, observer)
@@ -907,9 +916,13 @@ def _translate_stream_event(
 
 def _extract_interaction(
     event: tuple[Any, ...],
+    *,
+    needs_user_decision: Callable[[str, Mapping[str, object]], bool] | None = None,
 ) -> tuple[Any, dict[str, object] | None]:
     """测试兼容：返回 Host InteractionRequest 或 None。"""
-    request, auto = extract_interaction(event)
+    request, auto = extract_interaction(
+        event, needs_user_decision=needs_user_decision
+    )
     if request is None:
         return None, auto
     return _to_host_interaction(request), auto

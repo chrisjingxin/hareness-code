@@ -1,0 +1,5 @@
+{
+  "name": "gemini-private-spanner",
+  "version": "0.3.4",
+  "description": "Native Gemini client manifest shape"
+}

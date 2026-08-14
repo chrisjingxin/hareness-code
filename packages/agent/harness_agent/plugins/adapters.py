@@ -15,6 +15,7 @@ from harness_agent.plugins.model import (
     PluginDescriptor,
     PluginError,
     capability_fingerprint,
+    merge_component_reports,
 )
 from harness_agent.plugins.portable import is_portable_plugin, load_portable_plugin
 
@@ -87,21 +88,7 @@ def _merge_hybrid(
         if current is None:
             reports[component.kind] = component
             continue
-        reports[component.kind] = PluginComponentReport(
-            kind=component.kind,
-            status="invalid"
-            if "invalid" in {current.status, component.status}
-            else "unsupported"
-            if "unsupported" in {current.status, component.status}
-            else "adapted"
-            if "adapted" in {current.status, component.status}
-            else "supported",
-            count=current.count + component.count,
-            sources=tuple(sorted(set(current.sources) | set(component.sources))),
-            capabilities=tuple(sorted(set(current.capabilities) | set(component.capabilities))),
-            diagnostics=tuple(dict.fromkeys((*current.diagnostics, *component.diagnostics))),
-            effective=current.effective or component.effective,
-        )
+        reports[component.kind] = merge_component_reports(current, component)
     components = tuple(sorted(reports.values(), key=lambda item: item.kind))
     return PluginDescriptor(
         name=portable.name,

@@ -1,6 +1,7 @@
 /** Interactive Core 的共享契约：intent、result、snapshot、catalog 与 Interaction DTO。 */
 
 import type {
+  DirectoryTrustDecision,
   FileDiffPresentation,
   McpAddParams,
   McpServerStatus,
@@ -17,6 +18,9 @@ export type { ActiveRun, ComposeProjection, InteractiveActivity, InteractiveRunt
 
 /** 审批决定类型，与协议 ApprovalResponse.decision 保持一致。 */
 export type ApprovalDecision = "approve_once" | "approve_thread" | "approve_project" | "reject" | "reject_with_feedback"
+
+/** 目录信任决定类型，与协议 DirectoryTrustResponse.decision 保持一致。 */
+export type { DirectoryTrustDecision }
 
 /** Skill catalog 项：与 Slash 菜单共用的最小领域视图。 */
 export type SkillSummary = SkillMenuItem
@@ -68,11 +72,23 @@ export type InteractiveInteraction =
       questions: readonly InteractiveQuestion[]
       deadlineAtMs: number
     }
+  | {
+      type: "directory_trust"
+      requestId: string
+      directory: string
+      targetPath: string
+      toolName: string
+      access: "read" | "write"
+      shadowsWorkspace: boolean
+      decisions: readonly DirectoryTrustDecision[]
+      deadlineAtMs: number
+    }
 
 /** adapter 提交的答案；request_id 由 Controller 用当前 request 组装。 */
 export type InteractiveResponse =
   | { kind: "approval"; decision: ApprovalDecision; feedback?: string }
   | { kind: "question"; answers: Record<string, string[]> }
+  | { kind: "directory_trust"; decision: DirectoryTrustDecision }
 
 /** 破坏性操作的稳定确认；adapter 通过 confirmation.resolve 回写。 */
 export type InteractiveConfirmation = {

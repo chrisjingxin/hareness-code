@@ -7,8 +7,6 @@ import type { ComposeProjection, ComposeSummaryCard, ConversationMessage, Intera
 import type { InteractiveSnapshot } from "../../interactive/types"
 import { formatContext, formatDuration, formatElapsed, formatUsage } from "../../presentation-shared/formatters"
 import { diffTextForRenderer, parseFileDiff } from "../../presentation-shared/file-diff"
-import { resolveLanguageForPath } from "../../presentation-shared/language-catalog"
-
 import {
   COMPOSE_STAGE_LABELS,
   activityGroupSubtitle,
@@ -25,7 +23,6 @@ import { useRunElapsed, useSpinner } from "./input-bar"
 import { ToolRenderer } from "./tools/renderers"
 import { createScrollAcceleration } from "./scroll.js"
 import { markdownSyntax, tuiTheme, userMessageAccent } from "./theme"
-
 
 function stageColor(status: string): string {
   if (status === "passed" || status === "completed") return tuiTheme.success
@@ -395,7 +392,7 @@ function InteractionRow(props: { interaction: InteractionCard }) {
   if (interaction.status === "pending") return null
   return (
     <box marginTop={1} paddingLeft={3} paddingRight={3} flexDirection="row" gap={1}>
-      <text fg={interactionStatusColor(interaction.status)}>{interaction.type === "approval" ? "△" : "?"}</text>
+      <text fg={interactionStatusColor(interaction.status)}>{interaction.type === "approval" ? "△" : interaction.type === "directory_trust" ? "△" : "?"}</text>
       <text fg={tuiTheme.muted}>{interactionStatusLabel(interaction.status)}</text>
       {interaction.description ? <text content={interaction.description} fg={tuiTheme.subtle} /> : null}
     </box>
