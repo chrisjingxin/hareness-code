@@ -14,13 +14,7 @@ scope: 只改 TUI 视觉系统与渲染架构。对话记录按类型拆成独�
 acceptance: 用户在 TUI 中能区分 Build/Compose 的 Mode 身份且互不等权染色整页；工具不再共用一张卡；审批/提问时底部输入框换成 Dock，对话区只留事后结果；思考进行中强制展开但只画最后 12 行，点开最多约 40 行，长内容不再把终端画死；Compose 不再单独占一块阶段顶栏；Web 外观与现有工作流不变；TUI focused 测试、typecheck、build 通过。
 user_docs: docs/user/交互使用.md
 developer_docs: docs/developer/spec/HC-145-TUI视觉与渲染重构.md、docs/developer/plan/HC-145-TUI视觉与渲染重构.md、docs/developer/todo/HC-145-TUI视觉与渲染重构.md、docs/developer/architecture/TUI表现层.md
-test_evidence: |
-  2026-08-13 WP7：
-  bun run typecheck → @za38/cli typecheck exit 0
-  cd packages/cli && bun test tests/tui → 140 pass, 0 fail
-  bun run project:check → protocol:check + project:check exit 0
-  git diff --check → 无空白错误
-  无版本号变更（当前未发版，未跑 version:set）
+test_evidence: 2026-08-13 WP7：bun run typecheck exit 0；cd packages/cli && bun test tests/tui → 140 pass；bun run project:check exit 0；git diff --check 无空白错误；无版本号变更
 references: docs/developer/architecture/adr/0003-single-interactive-core-dual-renderer.md、docs/developer/task/archive/HC-118-TUIWeb思考摘要与运行进度.md、docs/developer/task/archive/HC-140-重构组合工作模式.md、docs/developer/project/新功能候选.md
 completed_at: -
 ---
