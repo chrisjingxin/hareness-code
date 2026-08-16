@@ -153,6 +153,7 @@ test("首页模型靠左、模式提示靠右，且不重复显示品牌", async
     const lines = setup.captureCharFrame().split("\n")
     const runtimeLine = lines.find(line => line.includes("deepseek-v4-flash"))
 
+    expect(runtimeLine).toContain("default")
     expect(runtimeLine).toContain("shift+enter new line")
     expect(runtimeLine).toContain("tab modes")
     expect(runtimeLine).not.toContain("Harness Code")

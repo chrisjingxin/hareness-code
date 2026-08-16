@@ -930,3 +930,45 @@ async def test_active_run_keeps_old_skill_preparation_until_next_same_thread_run
 async def _collect_events(execution: Any) -> list[Any]:
     """收集一次 Run 的终态事件，便于并发快照测试等待真实完成。"""
     return [event async for event in execution.events]
+
+
+def test_registry_list_filters_builtin_by_default(tmp_path: Path):
+    """list() 默认过滤 builtin 来源，显式 include_builtin=True 时保留，且 resolve 保持可用。"""
+    from harness_agent.extensions.skills import SkillRegistry
+
+    workspace = tmp_path / "workspace"
+    home = tmp_path / "home"
+    _write_skill(workspace / ".harness" / "skills", "my-tool", "项目工具说明")
+
+    registry = SkillRegistry(workspace, home=home)
+    # 模拟注入一个 builtin 记录
+    from harness_agent.extensions.skills import SkillRecord
+    builtin_rec = SkillRecord(
+        skill_id="builtin/spec-driven-development",
+        name="spec-driven-development",
+        description="内部工作流规范驱动",
+        source="builtin",
+        version=None,
+        user_invocable=True,
+        argument_hint=None,
+        root=workspace,
+        root_identity=workspace.stat(),
+        manifest=workspace / "SKILL.md",
+        digest="testdigest",
+        enabled=True,
+    )
+    registry._records["builtin/spec-driven-development"] = builtin_rec
+
+    # 1. 默认 list() 仅包含 project / user 项，不包含 builtin
+    listed = registry.list()
+    assert any(item["id"] == "project/my-tool" for item in listed)
+    assert not any(item["id"] == "builtin/spec-driven-development" for item in listed)
+
+    # 2. 显式 include_builtin=True 时包含
+    all_listed = registry.list(include_builtin=True)
+    assert any(item["id"] == "builtin/spec-driven-development" for item in all_listed)
+
+    # 3. resolve 依然能直接定位 builtin 项
+    resolved = registry.resolve("builtin/spec-driven-development")
+    assert resolved.skill_id == "builtin/spec-driven-development"
+

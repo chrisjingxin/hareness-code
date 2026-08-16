@@ -234,12 +234,18 @@ class SkillRegistry:
                 return False
         return True
 
-    def list(self, *, include_disabled: bool = True) -> list[dict[str, object]]:
-        """列出当前快照中的 Skill 元数据。"""
+    def list(
+        self,
+        *,
+        include_disabled: bool = True,
+        include_builtin: bool = False,
+    ) -> list[dict[str, object]]:
+        """列出当前快照中的 Skill 元数据。默认隐藏内置工作流 Skill。"""
         return [
             record.summary()
             for record in self.records
-            if include_disabled or record.enabled
+            if (include_disabled or record.enabled)
+            and (include_builtin or record.source != "builtin")
         ]
 
     def inspect(self, skill_id: str) -> dict[str, object]:

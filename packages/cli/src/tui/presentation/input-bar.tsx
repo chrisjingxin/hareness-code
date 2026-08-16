@@ -230,7 +230,7 @@ function RuntimeMeta(props: { interactive: SharedViewProps["interactive"]; varia
             <text fg={runtime.approvalMode === "yolo" ? tuiTheme.warning : tuiTheme.muted}>{approvalModeLabel(runtime)}</text>
           </box>
           <box flexDirection="row" gap={2}>
-            <text fg={tuiTheme.subtle}>shift+tab <span fg={tuiTheme.subtle}>approval</span></text>
+            <text fg={tuiTheme.subtle}>shift+enter <span fg={tuiTheme.subtle}>new line</span></text>
             <text fg={tuiTheme.subtle}>tab <span fg={tuiTheme.subtle}>modes</span></text>
           </box>
         </box>
