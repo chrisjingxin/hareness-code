@@ -71,12 +71,8 @@ export function InputBar(props: Pick<SharedViewProps, "interactive" | "terminalW
   ) : null
 
   const isHome = props.variant === "home"
-  // Work Mode 与 Approval Mode 是两种正交选择；徽标同时展示，避免把
-  // Compose 误解为自动授权。
   const workModeLabel = props.interactive.workMode === "compose" ? "Compose" : "Build"
-  const modeBadgeLabel = isShell
-    ? "Shell"
-    : `${workModeLabel} · ${approvalModeLabel(props.interactive.runtime)}`
+  const modeBadgeLabel = isShell ? "Shell" : workModeLabel
   const badgeColor = isShell ? tuiTheme.modeShell : accent
 
   return (
@@ -104,7 +100,7 @@ export function InputBar(props: Pick<SharedViewProps, "interactive" | "terminalW
                 backgroundColor={tuiTheme.surface}
                 focusedBackgroundColor={tuiTheme.surface}
                 cursorColor={accent}
-                minHeight={1}
+                minHeight={2}
                 maxHeight={6}
                 keyBindings={INPUT_BAR_KEY_BINDINGS}
                 focused={(!busy || awaitingQuestion) && !props.pickerVisible}
@@ -196,17 +192,6 @@ function CommandMenu(props: {
 
 /** 渲染输入栏下方的配置摘要，只展示当前 Thread 的模型选择。 */
 function RuntimeMeta(props: { interactive: SharedViewProps["interactive"]; variant: "home" | "thread"; terminalWidth: number; accent: string; inputMode?: "chat" | "shell" }) {
-  if (props.inputMode === "shell") {
-    return (
-      <box flexDirection="column" paddingTop={1} paddingBottom={props.variant === "thread" ? 1 : 0}>
-        <box width="100%" flexDirection="row" justifyContent="space-between" gap={2}>
-          <text fg={tuiTheme.modeShell}><b>Shell</b></text>
-          <text fg={tuiTheme.subtle}>Esc / Backspace 退出 Shell 模式</text>
-        </box>
-      </box>
-    )
-  }
-
   // 首页输入栏最大宽度固定为 75 列；thread 则以可用终端宽度估算。模型字段
   // 是唯一可能来自企业配置的长文本，因此只截断它，审批模式始终保持可见。
   const runtime = props.interactive.runtime
@@ -224,13 +209,28 @@ function RuntimeMeta(props: { interactive: SharedViewProps["interactive"]; varia
     ? shorten(`配置需要处理：${runtime.startupError}`, contentWidth)
     : undefined
 
+  if (props.inputMode === "shell") {
+    return (
+      <box flexDirection="column" paddingTop={1} paddingBottom={props.variant === "thread" ? 1 : 0}>
+        <box width="100%" flexDirection="row" justifyContent="space-between" gap={2}>
+          <text fg={runtime.modelConfigured ? tuiTheme.muted : tuiTheme.warning}>{model}</text>
+          <text fg={tuiTheme.subtle}>Esc / Backspace 退出 Shell 模式</text>
+        </box>
+      </box>
+    )
+  }
+
   if (props.variant === "home") {
     return (
       <box flexDirection="column" paddingTop={1}>
         <box width="100%" flexDirection="row" justifyContent="space-between" gap={2}>
-          <text fg={runtime.modelConfigured ? tuiTheme.muted : tuiTheme.warning}>{model}</text>
+          <box flexDirection="row" gap={1}>
+            <text fg={runtime.modelConfigured ? tuiTheme.muted : tuiTheme.warning}>{model}</text>
+            <text fg={tuiTheme.muted}>·</text>
+            <text fg={runtime.approvalMode === "yolo" ? tuiTheme.warning : tuiTheme.muted}>{approvalModeLabel(runtime)}</text>
+          </box>
           <box flexDirection="row" gap={2}>
-            <text fg={tuiTheme.subtle}>shift+enter <span fg={tuiTheme.subtle}>new line</span></text>
+            <text fg={tuiTheme.subtle}>shift+tab <span fg={tuiTheme.subtle}>approval</span></text>
             <text fg={tuiTheme.subtle}>tab <span fg={tuiTheme.subtle}>modes</span></text>
           </box>
         </box>
