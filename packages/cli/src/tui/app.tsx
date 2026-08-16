@@ -25,6 +25,7 @@ import { HomeView } from "./presentation/home"
 import { DialogShell, SearchPicker, type SearchPickerRenderContext } from "./presentation/overlays"
 import { SkillPicker, ThreadPicker } from "./presentation/pickers"
 import { BtwModal } from "./presentation/btw-modal"
+import { Sidebar, computeSidebarVisibility } from "./presentation/sidebar"
 import { ToastContainer } from "./presentation/toast"
 import { tuiTheme } from "./presentation/theme"
 import { ThreadView } from "./presentation/thread"
@@ -37,11 +38,13 @@ import {
   type PresentationState,
 } from "../presentation-coordinator"
 import type { AgentGateway } from "../interactive/ports"
+import type { WorkspaceExplorer } from "../workspace/types"
 
 /** 正式 TUI 的启动参数；Controller 由 CLI Composition Root 创建并注入。 */
 export type TuiOptions = {
   controller: InteractiveController
   gateway?: AgentGateway
+  workspaceExplorer?: WorkspaceExplorer
   resume?: boolean
   promptHistoryFile?: string
   onRequestExit: () => void
@@ -121,6 +124,24 @@ export function Za38Tui(options: RenderedTuiOptions) {
     scrollToBottom()
   }, [scrollToBottom, snapshot.scrollRequest])
 
+  const mcpAutoRefreshedRef = useRef(false)
+  useEffect(() => {
+    // 首次进入聊天会话且侧边栏显示时，自动同步已在后台连接完毕的 MCP 服务器状态
+    if (!isHomeState(interactive) && !mcpAutoRefreshedRef.current) {
+      mcpAutoRefreshedRef.current = true
+      void options.controller.dispatch({ type: "catalog.refresh", catalog: "mcp" })
+    }
+  }, [interactive, options.controller])
+
+  const fileTreeRefreshedRef = useRef(false)
+  useEffect(() => {
+    // 首次进入聊天会话且侧边栏显示时，确保工作区文件树触发刷新
+    if (!isHomeState(interactive) && !fileTreeRefreshedRef.current) {
+      fileTreeRefreshedRef.current = true
+      void options.workspaceExplorer?.dispatch({ type: "workspace.refresh" })
+    }
+  }, [interactive, options.workspaceExplorer])
+
   /** textarea 只负责光标边界和滚动 ref，历史业务交给 Adapter。 */
   const handleInputBarKeyDown = useCallback((key: KeyEvent) => {
     if (
@@ -181,6 +202,67 @@ export function Za38Tui(options: RenderedTuiOptions) {
 
   /** 全局快捷键只负责识别动作；具体状态转换由 Adapter 处理。 */
   useKeyboard(key => {
+    const isHome = isHomeState(interactive)
+    const sidebarVisibility = computeSidebarVisibility(snapshot.sidebar, terminal.width, isHome)
+
+    if (sidebarVisibility.visible) {
+      if (key.name === "escape" || key.name === "tab") {
+        key.preventDefault()
+        void adapter.dispatch({ type: "sidebar-toggle", target: "hide" })
+        return
+      }
+      if (key.sequence === "[" || key.sequence === "1") {
+        key.preventDefault()
+        void adapter.dispatch({ type: "sidebar-tab-switch", tab: "files" })
+        return
+      }
+      if (key.sequence === "]" || key.sequence === "2") {
+        key.preventDefault()
+        void adapter.dispatch({ type: "sidebar-tab-switch", tab: "status" })
+        return
+      }
+      if (key.sequence === "@") {
+        key.preventDefault()
+        const current = snapshot.sidebar.fileTree.rows[snapshot.sidebar.fileTree.selectedIndex]
+        if (current && current.kind !== "directory") {
+          void adapter.dispatch({ type: "file-preview-insert-ref", path: current.path })
+        }
+        return
+      }
+      if (key.name === "up" || key.name === "k") {
+        key.preventDefault()
+        void adapter.dispatch({ type: "file-tree-navigate", direction: "up" })
+        return
+      }
+      if (key.name === "down" || key.name === "j") {
+        key.preventDefault()
+        void adapter.dispatch({ type: "file-tree-navigate", direction: "down" })
+        return
+      }
+      if (key.name === "left" || key.name === "h") {
+        key.preventDefault()
+        void adapter.dispatch({ type: "file-tree-navigate", direction: "parent" })
+        return
+      }
+      if (key.name === "right" || key.name === "l") {
+        key.preventDefault()
+        void adapter.dispatch({ type: "file-tree-navigate", direction: "child" })
+        return
+      }
+      if (key.name === "return" || key.name === "space") {
+        key.preventDefault()
+        const current = snapshot.sidebar.fileTree.rows[snapshot.sidebar.fileTree.selectedIndex]
+        if (current) {
+          if (current.kind === "directory") {
+            void adapter.dispatch({ type: "file-tree-toggle-expand", path: current.path })
+          } else {
+            void adapter.dispatch({ type: "file-tree-preview", path: current.path })
+          }
+        }
+        return
+      }
+    }
+
     const action = resolveShortcut(key, {
       commandDialogVisible: Boolean(snapshot.commandDialog || snapshot.modelBindingDialog),
       btwModalVisible: snapshot.btw.visible,
@@ -212,6 +294,8 @@ export function Za38Tui(options: RenderedTuiOptions) {
     void adapter.dispatch({ type: "shortcut", action })
   })
 
+  const isHome = isHomeState(interactive)
+  const sidebarVisibility = computeSidebarVisibility(snapshot.sidebar, terminal.width, isHome)
   const viewProps = {
     interactive,
     transientNotice: snapshot.transientNotice,
@@ -236,12 +320,37 @@ export function Za38Tui(options: RenderedTuiOptions) {
     onApproval: (decision: ApprovalDecision) => { void adapter.dispatch({ type: "approval", decision }) },
     onDirectoryTrust: (decision: DirectoryTrustDecision) => { void adapter.dispatch({ type: "directory-trust", decision }) },
     onQuestion: (answer: string) => { void adapter.dispatch({ type: "question", answer }) },
+    sidebarVisible: sidebarVisibility.visible,
+    onToggleSidebar: () => {
+      void adapter.dispatch({
+        type: "sidebar-toggle",
+        target: sidebarVisibility.visible ? "hide" : "show",
+      })
+    },
     modelName: displayedModelName(interactive),
   }
 
   return (
-    <box width="100%" height="100%" flexDirection="column">
-      {isHomeState(interactive) ? <HomeView {...viewProps} /> : <ThreadView {...viewProps} />}
+    <box width="100%" height="100%" flexDirection="row">
+      <box flexGrow={1} height="100%" flexDirection="column">
+        {isHome ? <HomeView {...viewProps} /> : <ThreadView {...viewProps} />}
+      </box>
+      {sidebarVisibility.visible ? (
+        <Sidebar
+          sidebar={snapshot.sidebar}
+          interactive={interactive}
+          terminalWidth={terminal.width}
+          terminalHeight={terminal.height}
+          isHome={isHome}
+          onToggle={() => { void adapter.dispatch({ type: "sidebar-toggle", target: "hide" }) }}
+          onSwitchTab={tab => { void adapter.dispatch({ type: "sidebar-tab-switch", tab }) }}
+          onSelectFileTreeNode={index => { void adapter.dispatch({ type: "file-tree-select", index }) }}
+          onToggleFileTreeExpand={path => { void adapter.dispatch({ type: "file-tree-toggle-expand", path }) }}
+          onOpenFile={path => { void adapter.dispatch({ type: "file-tree-preview", path }) }}
+          onInsertRef={path => { void adapter.dispatch({ type: "file-preview-insert-ref", path }) }}
+          onClosePreview={() => { void adapter.dispatch({ type: "file-preview-close" }) }}
+        />
+      ) : null}
       <SkillPicker
         visible={snapshot.skills.visible}
         loading={snapshot.skills.loading}
@@ -356,6 +465,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
   const adapter = createTuiAdapter({
     controller: options.controller,
     gateway: options.gateway,
+    workspaceExplorer: options.workspaceExplorer,
     promptHistoryFile: options.promptHistoryFile,
     resume: options.resume,
     onRequestExit: options.onRequestExit,

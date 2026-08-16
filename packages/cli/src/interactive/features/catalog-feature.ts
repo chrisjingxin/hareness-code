@@ -51,11 +51,9 @@ export class CatalogFeature {
     this.closed = true
   }
 
-  /** 重置某项或者全量 Catalog 为 idle 状态。 */
+  /** 重置某项或者全量 Catalog 为 idle 状态。Skills 与 MCP 属于全局配置，跨 Thread 保持不变。 */
   reset(options: { models?: readonly ModelProfile[] } = {}, ctx: FeatureContext): void {
     this.state.threads = { status: "idle", items: [], epoch: this.state.threads.epoch }
-    this.state.skills = { status: "idle", items: this.state.skills.items, epoch: this.state.skills.epoch }
-    this.state.mcp = { status: "idle", items: [], epoch: this.state.mcp.epoch }
     if (options.models) {
       this.state.models = { status: "ready", items: options.models, epoch: this.state.models.epoch }
     } else {

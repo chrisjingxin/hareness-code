@@ -118,6 +118,19 @@ class WorkspaceExplorerImpl implements WorkspaceExplorer {
       return
     }
 
+    // 极速探测：若本地根目录为空（0 项），直接毫秒级置为 ready，避免外部 git 扫描超时
+    try {
+      const topLevel = await listDirectory(this.root, "")
+      if (topLevel.rows.length === 0) {
+        if (this.closed || generation !== this.treeGeneration) return
+        this.tree = { status: "ready", rows: [], selectedPath: null, limited: false }
+        this.publish()
+        return
+      }
+    } catch {
+      // 忽略探测异常，继续正常分支
+    }
+
     const git = await loadGitTree(this.workspace)
     if (this.closed || generation !== this.treeGeneration) return
     if (git !== null) {

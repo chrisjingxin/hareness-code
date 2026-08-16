@@ -51,7 +51,13 @@ export function ThreadView(props: SharedViewProps & { modelName?: string }) {
           <InputBar {...props} variant="thread" commandMenuPlacement="above" />
         </box>
       ) : null}
-      <FooterRail interactive={props.interactive} terminalWidth={props.terminalWidth} thread />
+      <FooterRail
+        interactive={props.interactive}
+        terminalWidth={props.terminalWidth}
+        thread
+        sidebarVisible={props.sidebarVisible}
+        onToggleSidebar={props.onToggleSidebar}
+      />
     </box>
   )
 }

@@ -75,6 +75,33 @@ export type ToastItem = {
   readonly durationMs: number
 }
 
+import type {
+  WorkspaceExplorer,
+  WorkspaceTreeRow,
+  WorkspaceTreeState,
+  WorkspacePreviewState,
+} from "../../workspace/types"
+
+export type SidebarTab = "files" | "status"
+
+export type SidebarFileTreeState = {
+  status: "idle" | "loading" | "ready" | "error"
+  rows: readonly WorkspaceTreeRow[]
+  selectedIndex: number
+  selectedPath: string | null
+  limited: boolean
+  message?: string
+}
+
+export type SidebarState = {
+  mode: "auto" | "show" | "hide"
+  drawerOpen: boolean
+  focus: "chat" | "sidebar"
+  activeTab: SidebarTab
+  fileTree: SidebarFileTreeState
+  preview: WorkspacePreviewState | null
+}
+
 /** TUI Adapter 发布的完整表现快照；领域事实来自 interactive。 */
 export type TuiAdapterSnapshot = {
   readonly interactive: InteractiveSnapshot
@@ -88,6 +115,7 @@ export type TuiAdapterSnapshot = {
   readonly skills: PickerSnapshot<SkillMenuItem>
   readonly threads: PickerSnapshot<ThreadPickerItem>
   readonly models: PickerSnapshot<ModelProfile>
+  readonly sidebar: SidebarState
   readonly commandDialog?: {
     readonly kind: "confirm-new-thread"
     readonly title: string
@@ -132,6 +160,16 @@ export type TuiIntent =
   | { type: "tool-toggle"; toolId: string }
   | { type: "btw-close" }
   | { type: "btw-copy" }
+  | { type: "sidebar-toggle"; target?: "show" | "hide" }
+  | { type: "sidebar-focus-switch" }
+  | { type: "sidebar-tab-switch"; tab?: SidebarTab }
+  | { type: "file-tree-select"; index: number }
+  | { type: "file-tree-toggle-expand"; path: string }
+  | { type: "file-tree-navigate"; direction: "up" | "down" | "parent" | "child" }
+  | { type: "file-tree-preview"; path: string }
+  | { type: "file-preview-close" }
+  | { type: "file-preview-scroll"; delta: number }
+  | { type: "file-preview-insert-ref"; path: string }
 
 /** TUI Adapter 的最小 external interface；终端动作与共享 Controller 解耦。 */
 import type { PromptHistoryStore } from "../../interactive/ports"
@@ -150,6 +188,7 @@ export interface TuiAdapter {
 export type TuiAdapterOptions = {
   controller: InteractiveController
   gateway?: AgentGateway
+  workspaceExplorer?: WorkspaceExplorer
   promptHistoryFile?: string
   promptHistoryStore?: PromptHistoryStore
   resume?: boolean
@@ -172,12 +211,14 @@ type InternalPicker<T> = {
 class TuiAdapterImpl implements TuiAdapter {
   private readonly controller: InteractiveController
   private readonly gateway: AgentGateway
+  private readonly workspaceExplorer?: WorkspaceExplorer
   private readonly promptHistoryFile: string | undefined
   private readonly onRequestExit: () => void
   private readonly openWeb?: (threadId: string | null) => Promise<void>
   private readonly dispatchGate: ((intent: InteractiveIntent) => Promise<IntentOutcome>) | undefined
   private readonly listeners = new Set<(snapshot: TuiAdapterSnapshot) => void>()
   private readonly unsubscribeInteractive: () => void
+  private readonly unsubscribeWorkspaceExplorer?: () => void
 
   private snapshot: TuiAdapterSnapshot
   private draft = ""
@@ -190,6 +231,20 @@ class TuiAdapterImpl implements TuiAdapter {
   private btwState: BtwState = { visible: false, question: "", status: "loading" }
   private toasts: ToastItem[] = []
   private toastTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  private sidebarState: SidebarState = {
+    mode: "auto",
+    drawerOpen: false,
+    focus: "chat",
+    activeTab: "files",
+    fileTree: {
+      status: "idle",
+      rows: [],
+      selectedIndex: 0,
+      selectedPath: null,
+      limited: false,
+    },
+    preview: null,
+  }
   private promptHistory: string[] = []
   private promptHistoryCursor: PromptHistoryCursor | undefined
   private historyApplyValue: string | undefined
@@ -204,11 +259,48 @@ class TuiAdapterImpl implements TuiAdapter {
   constructor(options: TuiAdapterOptions) {
     this.controller = options.controller
     this.gateway = options.gateway ?? options.controller.getGateway?.() ?? createFallbackNoopGateway()
+    this.workspaceExplorer = options.workspaceExplorer
     this.promptHistoryFile = options.promptHistoryFile
     this.historyStore = options.promptHistoryStore ?? new FilePromptHistoryStore(options.promptHistoryFile)
     this.onRequestExit = options.onRequestExit
     this.openWeb = options.openWeb
     this.dispatchGate = options.dispatchGate
+
+    if (this.workspaceExplorer) {
+      const initSnapshot = this.workspaceExplorer.getSnapshot()
+      this.sidebarState = {
+        ...this.sidebarState,
+        fileTree: {
+          status: initSnapshot.tree.status,
+          rows: initSnapshot.tree.rows,
+          selectedIndex: 0,
+          selectedPath: initSnapshot.tree.rows[0]?.path ?? null,
+          limited: initSnapshot.tree.limited,
+          message: initSnapshot.tree.message,
+        },
+        preview: initSnapshot.preview.status !== "idle" ? initSnapshot.preview : null,
+      }
+      this.unsubscribeWorkspaceExplorer = this.workspaceExplorer.subscribe(snapshot => {
+        const prevIndex = this.sidebarState.fileTree.selectedIndex
+        const rows = snapshot.tree.rows
+        const safeIndex = rows.length > 0 ? Math.min(prevIndex, rows.length - 1) : 0
+        this.sidebarState = {
+          ...this.sidebarState,
+          fileTree: {
+            status: snapshot.tree.status,
+            rows: snapshot.tree.rows,
+            selectedIndex: safeIndex,
+            selectedPath: rows[safeIndex]?.path ?? null,
+            limited: snapshot.tree.limited,
+            message: snapshot.tree.message,
+          },
+          preview: snapshot.preview.status !== "idle" ? snapshot.preview : null,
+        }
+        this.publish()
+      })
+      void this.workspaceExplorer.dispatch({ type: "workspace.load" })
+    }
+
     this.snapshot = this.buildSnapshot()
     this.unsubscribeInteractive = this.controller.subscribe(interactive => {
       const previousRequestId = this.snapshot.interactive.interaction?.requestId
@@ -305,7 +397,149 @@ class TuiAdapterImpl implements TuiAdapter {
       case "btw-copy":
         await this.copyBtwAnswer()
         return
+      case "sidebar-toggle":
+        this.toggleSidebar(intent.target)
+        return
+      case "sidebar-focus-switch":
+        this.switchSidebarFocus()
+        return
+      case "sidebar-tab-switch":
+        this.switchSidebarTab(intent.tab)
+        return
+      case "file-tree-select":
+        this.selectFileTreeNode(intent.index)
+        return
+      case "file-tree-toggle-expand":
+        await this.toggleFileTreeExpand(intent.path)
+        return
+      case "file-tree-navigate":
+        await this.navigateFileTree(intent.direction)
+        return
+      case "file-tree-preview":
+        this.openFilePreview(intent.path)
+        return
+      case "file-preview-close":
+        this.closeFilePreview()
+        return
+      case "file-preview-scroll":
+        this.scrollFilePreview(intent.delta)
+        return
+      case "file-preview-insert-ref":
+        this.insertFileRefToDraft(intent.path)
+        return
     }
+  }
+
+  private toggleSidebar(target?: "show" | "hide"): void {
+    if (target === "show") {
+      this.sidebarState = { ...this.sidebarState, mode: "show", drawerOpen: true }
+    } else if (target === "hide") {
+      this.sidebarState = { ...this.sidebarState, mode: "hide", drawerOpen: false }
+    } else {
+      const isHidden = this.sidebarState.mode === "hide"
+      this.sidebarState = isHidden
+        ? { ...this.sidebarState, mode: "show", drawerOpen: true }
+        : { ...this.sidebarState, mode: "hide", drawerOpen: false }
+    }
+    this.publish()
+  }
+
+  private switchSidebarFocus(): void {
+    const nextFocus = this.sidebarState.focus === "chat" ? "sidebar" : "chat"
+    this.sidebarState = { ...this.sidebarState, focus: nextFocus }
+    this.publish()
+  }
+
+  private switchSidebarTab(tab?: SidebarTab): void {
+    const nextTab = tab ?? (this.sidebarState.activeTab === "files" ? "status" : "files")
+    this.sidebarState = { ...this.sidebarState, activeTab: nextTab }
+    this.publish()
+  }
+
+  private selectFileTreeNode(index: number): void {
+    const rows = this.sidebarState.fileTree.rows
+    if (index < 0 || index >= rows.length) return
+    const selectedRow = rows[index]
+    this.sidebarState = {
+      ...this.sidebarState,
+      fileTree: {
+        ...this.sidebarState.fileTree,
+        selectedIndex: index,
+        selectedPath: selectedRow?.path ?? null,
+      },
+    }
+    this.publish()
+
+    if (selectedRow && selectedRow.kind !== "directory") {
+      this.openFilePreview(selectedRow.path)
+    } else {
+      this.closeFilePreview()
+    }
+  }
+
+  private async toggleFileTreeExpand(path: string): Promise<void> {
+    if (this.workspaceExplorer) {
+      await this.workspaceExplorer.dispatch({ type: "workspace.toggle-directory", path })
+    }
+  }
+
+  private async navigateFileTree(direction: "up" | "down" | "parent" | "child"): Promise<void> {
+    const { rows, selectedIndex } = this.sidebarState.fileTree
+    if (!rows.length) return
+
+    if (direction === "up") {
+      const nextIndex = Math.max(0, selectedIndex - 1)
+      this.selectFileTreeNode(nextIndex)
+    } else if (direction === "down") {
+      const nextIndex = Math.min(rows.length - 1, selectedIndex + 1)
+      this.selectFileTreeNode(nextIndex)
+    } else if (direction === "parent") {
+      const current = rows[selectedIndex]
+      if (!current) return
+      if (current.kind === "directory" && current.expanded) {
+        await this.toggleFileTreeExpand(current.path)
+      } else if (current.depth > 0) {
+        for (let i = selectedIndex - 1; i >= 0; i--) {
+          if (rows[i].depth < current.depth && rows[i].kind === "directory") {
+            this.selectFileTreeNode(i)
+            break
+          }
+        }
+      }
+    } else if (direction === "child") {
+      const current = rows[selectedIndex]
+      if (!current) return
+      if (current.kind === "directory") {
+        if (!current.expanded) {
+          await this.toggleFileTreeExpand(current.path)
+        } else if (selectedIndex + 1 < rows.length && rows[selectedIndex + 1].depth > current.depth) {
+          this.selectFileTreeNode(selectedIndex + 1)
+        }
+      }
+    }
+  }
+
+  private openFilePreview(path: string): void {
+    if (this.workspaceExplorer) {
+      void this.workspaceExplorer.dispatch({ type: "workspace.preview-file", path })
+    }
+  }
+
+  private closeFilePreview(): void {
+    this.sidebarState = { ...this.sidebarState, preview: null }
+    this.publish()
+  }
+
+  private scrollFilePreview(delta: number): void {
+    // 阶段四浮层内滚动
+  }
+
+  private insertFileRefToDraft(path: string): void {
+    const ref = `@${path}`
+    const nextDraft = this.draft ? `${this.draft.trimEnd()} ${ref}` : ref
+    this.updateDraft(nextDraft)
+    this.sidebarState = { ...this.sidebarState, focus: "chat", drawerOpen: false, mode: "hide", preview: null }
+    this.publish()
   }
 
   /** 关闭 Adapter 自己的订阅与所有未完成的定时器；共享 Controller 由宿主负责关闭。 */
@@ -317,6 +551,7 @@ class TuiAdapterImpl implements TuiAdapter {
     }
     this.toastTimers.clear()
     this.unsubscribeInteractive()
+    this.unsubscribeWorkspaceExplorer?.()
   }
 
   /** 把共享 snapshot 与表现状态一起发布为新快照。 */
@@ -346,6 +581,7 @@ class TuiAdapterImpl implements TuiAdapter {
       skills: this.pickerSnapshot(this.skillPicker, filterSkills(skills.items, this.skillPicker.query), skills.status === "loading", skills.status === "error" ? skills.message : undefined),
       threads: this.pickerSnapshot(this.threadPicker, filterThreads(threadItems(threads.items), this.threadPicker.query), threads.status === "loading", threads.status === "error" ? threads.message : undefined),
       models: this.pickerSnapshot(this.modelPicker, filterModels(models.items, this.modelPicker.query), models.status === "loading", models.status === "error" ? models.message : undefined),
+      sidebar: { ...this.sidebarState },
       btw: { ...this.btwState },
       toasts: [...this.toasts],
       commandDialog: this.commandDialog(interactive),

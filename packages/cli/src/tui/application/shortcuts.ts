@@ -56,6 +56,7 @@ export type ShortcutAction =
   | "exit"
   | "clear-selected-skill"
   | "toggle-tool-details"
+  | "toggle-sidebar"
   | "cycle-approval-mode"
   | "cycle-work-mode"
   | "scroll-line-up"
@@ -133,6 +134,9 @@ export function resolveShortcut(key: KeyLike, context: ShortcutContext): Shortcu
     const scrollAction = resolveScrollShortcut(key)
     if (scrollAction !== "none") return scrollAction
   }
+
+  // Ctrl+B 或 F2 切换侧边栏开/关或呼出抽屉
+  if ((key.ctrl && key.name === "b") || key.name === "f2") return "toggle-sidebar"
 
   if (key.ctrl && key.name === "p") return "command-open"
   // 方向键必须留给 textarea：它需要依据真实光标边界决定回填历史还是滚动 thread。

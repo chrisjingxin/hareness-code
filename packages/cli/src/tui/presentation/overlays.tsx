@@ -245,8 +245,8 @@ export function OverlayShell(props: {
   )
 }
 
-/** 选择器与 Dialog 共用的背景层，避免半透明 Box 覆盖中文宽字符。 */
-function OverlayBackdrop() {
+/** 选择器、Dialog 与抽屉共用的背景层，使用颜色矩阵压暗，避免半透明 Box 覆盖破坏中文宽字符与底层文字。 */
+export function OverlayBackdrop() {
   return (
     <box
       position="absolute"

@@ -236,7 +236,13 @@ function RuntimeMeta(props: { interactive: SharedViewProps["interactive"]; varia
 }
 
 /** 渲染工作区、Git 分支、运行快捷键和 CLI 版本底栏。 */
-export function FooterRail(props: { interactive: SharedViewProps["interactive"]; terminalWidth: number; thread?: boolean }) {
+export function FooterRail(props: {
+  interactive: SharedViewProps["interactive"]
+  terminalWidth: number
+  thread?: boolean
+  sidebarVisible?: boolean
+  onToggleSidebar?: () => void
+}) {
   const runtime = props.interactive.runtime
   const branchLabel = gitWorkspaceLabel(runtime.gitWorkspace)
   const showFullPath = props.terminalWidth >= 108
@@ -250,7 +256,16 @@ export function FooterRail(props: { interactive: SharedViewProps["interactive"];
         {showBranch ? <text fg={tuiTheme.muted}>:{branchLabel}</text> : null}
       </box>
       {props.interactive.activity.kind === "compacting" ? <BusyContextOperationHint /> : props.interactive.activeRun ? <BusyRunHint /> : props.thread ? <text fg={tuiTheme.muted}>↑↓ 历史 · PgUp/PgDn 滚动 · Ctrl+O 工具</text> : null}
-      <text fg={tuiTheme.subtle}>v{runtime.cliVersion}</text>
+      <box flexDirection="row" gap={1} alignItems="center">
+        {props.thread && props.onToggleSidebar ? (
+          <box onMouseUp={props.onToggleSidebar}>
+            <text fg={props.sidebarVisible ? tuiTheme.primary : tuiTheme.muted}>
+              {props.sidebarVisible ? "[◨ 侧栏]" : "[◧ 侧栏]"}
+            </text>
+          </box>
+        ) : null}
+        <text fg={tuiTheme.subtle}>v{runtime.cliVersion}</text>
+      </box>
     </box>
   )
 }

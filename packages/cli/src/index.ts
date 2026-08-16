@@ -240,6 +240,7 @@ async function execute(command: Command): Promise<void> {
       await runTui({
         controller,
         gateway,
+        workspaceExplorer,
         resume: command.resume,
         onRequestExit: () => undefined,
         webHandoff: presentationCoordinator,

@@ -73,7 +73,28 @@ item.type
 
 Build 与 Compose 共用这一套组件。差别是 Mode 身份和背后的执行，不是两套 Presentation。
 
-对话页不再挂 Compose 阶段顶栏。顶栏、Sidebar、子对话钻取、Skill 专用卡、Plugin 专用 Renderer 记在 [新功能候选](../project/新功能候选.md)，以后各自拆 Task。
+## 侧边栏与文件树预览（Sidebar & File Preview）
+
+HC-149 在 TUI 右侧引入了响应式侧边栏与代码快速预览浮层：
+
+- **响应式断点**：
+  - 宽屏（>120 列）：常驻右侧分栏（40 列），主时间线视口宽度自动扣减 `terminalWidth - 40`；
+  - 窄屏（≤120 列）：默认收起，按 `Ctrl+B` 或 `F2` 唤出全屏半透明遮罩抽屉。
+  - 首页（Home）：不展示侧边栏，仅在聊天会话中展示。
+- **状态小部件组合**：
+  - `CwdWidget`：工作区路径与 `$HOME` 简写展示；
+  - `ContextWidget`：Token 消耗进度、窗口利用率、实时 TPS 与累计花费；
+  - `McpWidget`：MCP 服务运行态圆点与错误提示；
+  - `ModifiedFilesWidget`：当前会话修改文件列表与 `+N`/`-M` diff 行数；
+  - `FileTreeWidget`：复用 `WorkspaceExplorer` 领域引擎（支持 `.gitignore`、Git 全量树 `visibleTreeRows` 折叠展开与非 Git 懒加载）。
+- **代码快速预览浮层（FilePreviewModal）**：
+  - 在文件树中按 `Enter`（或鼠标点击）弹出自适应居中代码浮层；
+  - 展示语言、行数、格式化大小、带行号代码正文；
+  - 按 `@` 键一键将 `@path/to/file` 插入主输入框并关闭浮层；
+  - 针对 >1MB 大文件与二进制提供安全提示。
+- **双模焦点导航**：
+  - 按 `Tab` / `Ctrl+B` 可在输入框与文件树之间无缝切换焦点；
+  - 侧边栏获焦时支持 `↑`/`↓`/`←`/`→`/`Enter`/`Space`/`@` 全键盘操作。
 
 ## 落地路径
 
@@ -83,11 +104,13 @@ Build 与 Compose 共用这一套组件。差别是 Mode 身份和背后的执�
 | 绘制限额 | `packages/cli/src/presentation-shared/paint-budget.ts`（`boundVisibleText`） |
 | 输入栏 | `packages/cli/src/tui/presentation/input-bar.tsx`（无 `Composer` 标识符） |
 | 底部 Dock | `packages/cli/src/tui/presentation/bottom-area.tsx` |
+| 侧边栏与小部件 | `packages/cli/src/tui/presentation/sidebar.tsx` 及 `sidebar/` |
+| 文件预览浮层 | `packages/cli/src/tui/presentation/file-preview-modal.tsx` |
 | 工具分流 | `packages/cli/src/tui/presentation/tools/registry.ts` 与 `renderers.tsx` |
-| 对话页 | `packages/cli/src/tui/presentation/thread.tsx`：时间线 + BottomArea + 底栏；不挂 `WorkItemView` |
+| 对话页 | `packages/cli/src/tui/presentation/thread.tsx`：时间线 + BottomArea + 底栏 + Sidebar |
 
 `work-item-view.tsx` 源文件保留作后续任务原料，对话页不得再挂载。Overlay / Picker 仍是现有 `SearchPicker` / `DialogShell`，选中色跟当前 Mode。
 
 ## 目录约定
 
-主题 token 仍只有一处事实源。工具 Renderer 已拆到 `presentation/tools/`；时间线其余类型组件仍可按职责继续下沉，不必为拆文件而拆。
+主题 token 仍只有一处事实源。工具 Renderer 已拆到 `presentation/tools/`；侧边栏小部件位于 `presentation/sidebar/`；时间线其余类型组件仍可按职责继续下沉，不必为拆文件而拆。

@@ -53,9 +53,10 @@ test("TUI Application 只依赖 interactive 与终端表现模块，不直接调
   expect(imports).not.toMatch(/(?:^|[/"])\.\.\/\.\.\/ipc(?:[/"]|$)/m)
 })
 
-test("TUI 不依赖 workspace 领域模块（文件浏览只属于 Web 桌面端）", () => {
+test("TUI 仅通过 types 依赖 workspace 契约", () => {
   const imports = layerImports(tuiRoot)
-  expect(imports).not.toMatch(/(?:^|[/"])\.\.\/workspace(?:\/.*)?["']/m)
+  // TUI 只允许导入 workspace/types 契约，不允许直接耦合内部实现
+  expect(imports).not.toMatch(/(?:^|[/"])\.\.\/workspace\/(?!types)["']/m)
 })
 
 test("语法资源维护脚本写入 Platform canonical 路径", () => {

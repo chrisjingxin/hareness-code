@@ -39,4 +39,6 @@ export type SharedViewProps = {
   onApproval: (decision: ApprovalDecision) => void
   onDirectoryTrust: (decision: DirectoryTrustDecision) => void
   onQuestion: (answer: string) => void
+  sidebarVisible?: boolean
+  onToggleSidebar?: () => void
 }
