@@ -7,7 +7,7 @@ from harness_agent.protocol.runtime import event_model, schema_model
 
 PROTOCOL_MAJOR = 3
 PROTOCOL_MINOR = 4
-PROTOCOL_SCHEMA_SHA256 = "401e25045114b43e00f6933ca07fc43fb35c7c1e47cfa51825e76a7568523675"
+PROTOCOL_SCHEMA_SHA256 = "389aeed1f77480ae8b178381d4dbb477c9e0b75fbe7884e28efddaf948b54cad"
 MAX_FRAME_BYTES = 8388608
 MAX_TOOL_PAYLOAD_BYTES = 1048576
 CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","threads.side_question","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","plugins.list","plugins.inspect","plugins.validate","plugins.install","plugins.set_enabled","plugins.remove","agents.list","agents.inspect","teams.list","teams.inspect","teams.generate","teams.run","teams.cancel","mcp.status","mcp.add","mcp.remove","host.attachment.create","host.attachment.revoke","host.control.acquire","host.control.release","host.control.status","compose.inspect","compose.abandon"]
@@ -79,7 +79,7 @@ class ThreadModelSelectionWire(TypedDict):
 
 ApprovalModeWire: TypeAlias = Literal["plan", "default", "auto-edit", "auto", "yolo"]
 
-InteractionModeWire: TypeAlias = Literal["build", "compose"]
+InteractionModeWire: TypeAlias = Literal["build", "compose", "direct_shell"]
 
 class ModelProfileWire(TypedDict):
     id: str

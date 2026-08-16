@@ -109,7 +109,7 @@ export class InteractiveControllerImpl implements InteractiveController {
 
     switch (intent.type) {
       case "input.submit":
-        return this.handleSubmit(intent.value)
+        return this.handleSubmit(intent.value, intent.mode)
 
       case "command.execute":
         return this.commandFeature.executeSlashCommand({ id: intent.commandId, name: intent.commandId, argument: intent.argument }, this.featureContext, {
@@ -195,7 +195,7 @@ export class InteractiveControllerImpl implements InteractiveController {
     this.catalogFeature.close()
     this.listeners.clear()
   }
-  private async handleSubmit(rawValue: string): Promise<IntentOutcome> {
+  private async handleSubmit(rawValue: string, modeOverride?: "build" | "compose" | "direct_shell"): Promise<IntentOutcome> {
     const value = rawValue.trim()
     if (!value) return { status: "rejected", code: "invalid-argument", message: "Empty submit value" }
 
@@ -211,8 +211,8 @@ export class InteractiveControllerImpl implements InteractiveController {
 
     const message = resolution.kind === "escaped" ? resolution.message : value
     return this.runFeature.startRun(message, this.featureContext, {
-      // 下一次 Run 的工作模式由共享状态决定，受理后冻结。
-      mode: this.state.workMode,
+      // 下一次 Run 的工作模式由共享状态或 direct_shell 显式指定决定，受理后冻结。
+      mode: modeOverride ?? this.state.workMode,
       requestedModelProfileId: this.modelFeature.requestedModelProfileId,
       armedSkill: this.skillFeature.armedSkill,
       onEvent: event => this.timelineFeature.processAgentEvent(event, this.featureContext),

@@ -6,6 +6,7 @@ import { SyntaxStyle } from "@opentui/core"
 export const tuiTheme = {
   modeBuild: "#EAB308",
   modeCompose: "#A9A5D4",
+  modeShell: "#56B6C2",
   thinking: "#7EB6C9",
   background: "#0B0C0E",
   surface: "#15171A",

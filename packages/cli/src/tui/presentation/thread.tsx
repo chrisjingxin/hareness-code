@@ -47,7 +47,7 @@ export function ThreadView(props: SharedViewProps & { modelName?: string }) {
       ) : null}
       {slot === "input" ? (
         <box flexShrink={0} paddingLeft={2} paddingRight={2}>
-          <ThreadRuntimeLine interactive={props.interactive} />
+          <ThreadRuntimeLine interactive={props.interactive} inputMode={props.inputMode} />
           <InputBar {...props} variant="thread" commandMenuPlacement="above" />
         </box>
       ) : null}

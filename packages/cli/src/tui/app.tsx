@@ -158,6 +158,29 @@ export function Za38Tui(options: RenderedTuiOptions) {
 
     const atStart = input.cursorOffset === 0
     const atEnd = input.cursorOffset === input.plainText.length
+
+    // 输入框为空时键入 ! 瞬间进入 Shell 模式（阻止 ! 写入输入框）
+    if (input.plainText === "" && currentSnapshot.inputMode === "chat" && (key.sequence === "!" || key.name === "!")) {
+      key.preventDefault()
+      void adapter.dispatch({ type: "input-mode-change", mode: "shell" })
+      return
+    }
+
+    // Shell 模式下 Esc 退出 Shell 模式
+    if (currentSnapshot.inputMode === "shell" && key.name === "escape") {
+      key.preventDefault()
+      void adapter.dispatch({ type: "input-mode-change", mode: "chat" })
+      syncInputBuffer("", undefined)
+      return
+    }
+
+    // Shell 模式下当输入为空时按 Backspace 退出 Shell 模式
+    if (currentSnapshot.inputMode === "shell" && key.name === "backspace" && input.plainText === "") {
+      key.preventDefault()
+      void adapter.dispatch({ type: "input-mode-change", mode: "chat" })
+      return
+    }
+
     if (key.name === "up" && (atStart || currentSnapshot.draftCursor === "start")) {
       void adapter.dispatch({ type: "history", direction: "previous" })
       const next = adapter.getSnapshot()
@@ -276,9 +299,14 @@ export function Za38Tui(options: RenderedTuiOptions) {
       commandOptionCount: snapshot.commandOptions.length,
       activeRun: Boolean(interactive.activeRun),
       hasDraft: Boolean(snapshot.draft),
+      inputMode: snapshot.inputMode,
     })
     if (action === "none") return
     key.preventDefault()
+
+    if (action === "exit-shell-mode") {
+      syncInputBuffer("", undefined)
+    }
 
     const scrollIntent: ScrollIntent | undefined = action === "scroll-line-up" ? "line-up"
       : action === "scroll-line-down" ? "line-down"
@@ -321,6 +349,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
     onDirectoryTrust: (decision: DirectoryTrustDecision) => { void adapter.dispatch({ type: "directory-trust", decision }) },
     onQuestion: (answer: string) => { void adapter.dispatch({ type: "question", answer }) },
     sidebarVisible: sidebarVisibility.visible,
+    inputMode: snapshot.inputMode,
     onToggleSidebar: () => {
       void adapter.dispatch({
         type: "sidebar-toggle",

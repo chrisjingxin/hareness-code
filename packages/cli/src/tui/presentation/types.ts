@@ -41,4 +41,5 @@ export type SharedViewProps = {
   onQuestion: (answer: string) => void
   sidebarVisible?: boolean
   onToggleSidebar?: () => void
+  inputMode?: "chat" | "shell"
 }

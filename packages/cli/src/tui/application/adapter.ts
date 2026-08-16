@@ -133,6 +133,7 @@ export type TuiAdapterSnapshot = {
   readonly expandedTools: ReadonlySet<string>
   readonly btw: BtwState
   readonly toasts: readonly ToastItem[]
+  readonly inputMode: "chat" | "shell"
   /** 递增后由 React adapter 滚动到最新内容。 */
   readonly scrollRequest: number
 }
@@ -140,6 +141,7 @@ export type TuiAdapterSnapshot = {
 /** React、快捷键和鼠标只能通过这些语义意图驱动 Adapter。 */
 export type TuiIntent =
   | { type: "draft-input"; value: string }
+  | { type: "input-mode-change"; mode: "chat" | "shell" }
   | { type: "submit"; value: string }
   | { type: "history"; direction: "previous" | "next" }
   | { type: "execute-command"; commandId: string; argument?: string }
@@ -223,6 +225,7 @@ class TuiAdapterImpl implements TuiAdapter {
   private snapshot: TuiAdapterSnapshot
   private draft = ""
   private draftCursor: "start" | "end" | undefined
+  private inputMode: "chat" | "shell" = "chat"
   private commandMenu: CommandMenuState = { visible: false, selectedIndex: 0 }
   private commandMenuDismissedValue: string | undefined
   private skillPicker: InternalPicker<SkillMenuItem> = emptyPicker()
@@ -335,6 +338,10 @@ class TuiAdapterImpl implements TuiAdapter {
       case "draft-input":
         if (this.controller.getSnapshot().activity.kind === "compacting") return
         this.updateDraft(intent.value)
+        return
+      case "input-mode-change":
+        this.inputMode = intent.mode
+        this.publish()
         return
       case "submit":
         await this.submit(intent.value)
@@ -584,6 +591,7 @@ class TuiAdapterImpl implements TuiAdapter {
       sidebar: { ...this.sidebarState },
       btw: { ...this.btwState },
       toasts: [...this.toasts],
+      inputMode: this.inputMode,
       commandDialog: this.commandDialog(interactive),
       modelBindingDialog: this.modelBindingDialog(interactive),
       transientNotice: this.transientNotice,
@@ -681,7 +689,11 @@ class TuiAdapterImpl implements TuiAdapter {
       }
     }
 
-    const outcome = await this.routeDispatch({ type: "input.submit", value: rawValue })
+    const mode = this.inputMode === "shell" ? "direct_shell" : undefined
+    if (this.inputMode === "shell") {
+      this.inputMode = "chat"
+    }
+    const outcome = await this.routeDispatch({ type: "input.submit", value: rawValue, mode })
     if (outcome.status === "accepted") {
       this.clearDraft()
       const previousHistory = this.promptHistory
@@ -930,6 +942,11 @@ class TuiAdapterImpl implements TuiAdapter {
       }
       case "clear-selected-skill":
         await this.routeDispatch({ type: "skill.clear" })
+        return
+      case "exit-shell-mode":
+        this.inputMode = "chat"
+        this.resetDraftState()
+        this.publish()
         return
       case "exit":
         this.onRequestExit()

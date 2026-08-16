@@ -16,6 +16,8 @@ from __future__ import annotations
 import hashlib
 import asyncio
 import json
+import os
+import signal
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -90,6 +92,7 @@ __all__ = [
     "AdapterOutcome",
     "BuildRunAdapter",
     "ComposeRunAdapter",
+    "DirectShellRunAdapter",
     "RunExecutionAdapter",
     "RunLifecyclePort",
 ]
@@ -276,6 +279,146 @@ class BuildRunAdapter:
             if exc.code == "RUN_CANCELLED":
                 raise asyncio.CancelledError from exc
             raise _run_error(exc.code, exc.message) from exc
+
+
+class DirectShellRunAdapter:
+    """Direct Shell 执行 adapter：在本地工作区直接执行非交互式 Shell，不经过模型。"""
+
+    async def execute(self, run: RunState, port: RunLifecyclePort) -> None:
+        started_payload: dict[str, object] = {
+            "resumed": False,
+            "mode": run.start.mode,
+        }
+        port.emit(run, RUN_STARTED, started_payload)
+        port.mark_running(run)
+
+        command = run.message.strip()
+        tool_call_id = f"call_shell_{run.ref.run_id[:8]}"
+
+        port.emit(
+            run,
+            TOOL_STARTED,
+            {
+                "tool_call_id": tool_call_id,
+                "name": "shell",
+            },
+        )
+
+        if not command:
+            output = "Error: Command must be a non-empty string."
+            port.emit(
+                run,
+                TOOL_COMPLETED,
+                {
+                    "tool_call_id": tool_call_id,
+                    "result": {
+                        "content": output,
+                        "is_error": True,
+                        "truncated": False,
+                        "original_bytes": len(output.encode("utf-8")),
+                    },
+                },
+            )
+            return
+
+        workspace = os.getcwd()
+        binding = run.preparation.execution_binding
+        if binding is not None and getattr(binding, "workspace_path", None):
+            workspace = binding.workspace_path
+
+        process = await asyncio.create_subprocess_shell(
+            command,
+            cwd=workspace,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=os.name != "nt",
+        )
+
+        timeout = 120
+        stdout_bytes = b""
+        stderr_bytes = b""
+        timed_out = False
+
+        try:
+            async def run_process() -> None:
+                nonlocal stdout_bytes, stderr_bytes
+                stdout_bytes, stderr_bytes = await process.communicate()
+
+            task = asyncio.create_task(run_process())
+            start_time = asyncio.get_running_loop().time()
+            while not task.done():
+                if port.is_cancelled(run):
+                    if os.name != "nt":
+                        try:
+                            os.killpg(process.pid, signal.SIGTERM)
+                        except ProcessLookupError:
+                            pass
+                    else:
+                        process.terminate()
+                    task.cancel()
+                    raise asyncio.CancelledError()
+                if asyncio.get_running_loop().time() - start_time > timeout:
+                    timed_out = True
+                    if os.name != "nt":
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    else:
+                        process.kill()
+                    task.cancel()
+                    break
+                await asyncio.sleep(0.05)
+        except asyncio.CancelledError:
+            if os.name != "nt":
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            else:
+                process.kill()
+            raise
+
+        if timed_out:
+            output = f"Error: Command timed out after {timeout} seconds."
+            exit_code = 124
+            truncated = False
+        else:
+            parts: list[str] = []
+            if stdout_bytes:
+                parts.append(stdout_bytes.decode("utf-8", errors="replace"))
+            if stderr_bytes:
+                parts.extend(
+                    f"[stderr] {line}"
+                    for line in stderr_bytes.decode("utf-8", errors="replace").rstrip().split("\n")
+                    if line
+                )
+            output = "\n".join(parts) if parts else "<no output>"
+            exit_code = process.returncode if process.returncode is not None else 0
+            if exit_code != 0:
+                output = f"{output.rstrip()}\n\nExit code: {exit_code}"
+
+            encoded = output.encode("utf-8")
+            if len(encoded) > 100_000:
+                output = encoded[:100_000].decode("utf-8", errors="ignore") + "\n\n... Output truncated at 100000 bytes."
+                truncated = True
+            else:
+                truncated = False
+
+        port.emit(
+            run,
+            TOOL_COMPLETED,
+            {
+                "tool_call_id": tool_call_id,
+                "result": {
+                    "content": output,
+                    "is_error": exit_code != 0,
+                    "truncated": truncated,
+                    "original_bytes": len(output.encode("utf-8")),
+                },
+            },
+        )
 
 
 class _BuildStreamPorts:

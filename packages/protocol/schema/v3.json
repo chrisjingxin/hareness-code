@@ -237,7 +237,7 @@
     },
     "interactionMode": {
       "type": "string",
-      "enum": ["build", "compose"]
+      "enum": ["build", "compose", "direct_shell"]
     },
     "modelProfile": {
       "type": "object",

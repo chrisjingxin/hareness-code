@@ -22,10 +22,12 @@ export type ShortcutContext = {
   commandOptionCount: number
   activeRun: boolean
   hasDraft: boolean
+  inputMode?: "chat" | "shell"
 }
 
 export type ShortcutAction =
   | "none"
+  | "exit-shell-mode"
   | "confirm-command-dialog"
   | "cancel-command-dialog"
   | "close-btw-modal"
@@ -144,6 +146,7 @@ export function resolveShortcut(key: KeyLike, context: ShortcutContext): Shortcu
     if (context.hasDraft) return "clear-draft"
     return context.activeRun ? "cancel-run" : "exit"
   }
+  if (key.name === "escape" && context.inputMode === "shell") return "exit-shell-mode"
   if (key.name === "escape" && context.activeRun) return "cancel-run"
   if (key.name === "escape" && !context.hasDraft) return "clear-selected-skill"
   if (key.ctrl && key.name === "o") return "toggle-tool-details"

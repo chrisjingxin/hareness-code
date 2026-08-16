@@ -18,6 +18,7 @@ from harness_agent.host.run_execution import (
     AdapterOutcome,
     BuildRunAdapter,
     ComposeRunAdapter,
+    DirectShellRunAdapter,
     CONTEXT_UPDATED,
     INTERACTION_RESOLVED,
     MAX_TOOL_PAYLOAD_BYTES,
@@ -33,7 +34,7 @@ from harness_agent.policy.approval_mode import ApprovalMode
 from harness_agent.policy.bash_parser import extract_command_rule as _extract_command_rule
 
 # 工作模式在 Run 受理时冻结；Compose 是代码状态机驱动的研发流程，Build 保持现有直接协作。
-InteractionMode = Literal["build", "compose"]
+InteractionMode = Literal["build", "compose", "direct_shell"]
 from harness_agent.policy.permission_rules import (
     PermissionRule,
     evaluate_tool_rules,
@@ -653,12 +654,19 @@ class RunCoordinator:
                 if binding is None:
                     raise RunError("RUN_MODEL_BINDING_UNAVAILABLE")
                 try:
+                    if command.mode == "direct_shell":
+                        loader = getattr(persistence, "load_thread_mode", None)
+                        existing_mode = await loader(command.ref.thread_id) if loader else None
+                        run_thread_mode = existing_mode or ThreadMode.BUILD
+                    else:
+                        run_thread_mode = ThreadMode(command.mode)
+
                     acceptance = await persistence.accept_run(
                         AcceptRun(
                             message=command.message,
                             binding=binding,
                             context_snapshot=preparation.context_snapshot,
-                            mode=ThreadMode(command.mode),
+                            mode=run_thread_mode,
                         )
                     )
                 except ThreadPersistenceError as exc:
@@ -840,6 +848,13 @@ class RunCoordinator:
 
     async def _adapter_for(self, run: RunState) -> RunExecutionAdapter:
         """返回 Run 对应的执行 adapter；Compose 依赖按 Run 上下文组装。"""
+        if run.start.mode == "direct_shell":
+            existing = self._execution_adapters.get(run.start.mode)
+            if existing is not None:
+                return existing
+            adapter: RunExecutionAdapter = DirectShellRunAdapter()
+            self._execution_adapters[run.start.mode] = adapter
+            return adapter
         if run.start.mode != "compose":
             existing = self._execution_adapters.get(run.start.mode)
             if existing is not None:

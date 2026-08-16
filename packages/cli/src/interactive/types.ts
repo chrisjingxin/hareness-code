@@ -129,7 +129,7 @@ export type InteractiveResult = PresentationEffect
 
 /** 表现层唯一的输入入口；不携带选中行、DOM event 或 OpenTUI key。 */
 export type InteractiveIntent =
-  | { type: "input.submit"; value: string }
+  | { type: "input.submit"; value: string; mode?: "build" | "compose" | "direct_shell" }
   | { type: "command.execute"; commandId: string; argument?: string }
   | { type: "run.cancel" }
   | { type: "catalog.refresh"; catalog: "threads" | "models" | "skills" | "mcp" }

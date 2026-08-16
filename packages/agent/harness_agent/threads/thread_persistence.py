@@ -3086,6 +3086,27 @@ class ThreadPersistence:
             }
         }
 
+    async def load_thread_mode(self, thread_id: str) -> ThreadMode | None:
+        """读取指定 Thread 的冻结工作模式，未冻结或不存在返回 None。"""
+        self._ensure_open()
+        async with self._lock:
+            cursor = await self._connection.execute(
+                """
+                SELECT mode
+                FROM harness_thread_modes
+                WHERE project_fingerprint = ? AND thread_id = ?
+                """,
+                (self._project_fingerprint, thread_id),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            if row is None or not row["mode"]:
+                return None
+            try:
+                return ThreadMode(str(row["mode"]))
+            except ValueError:
+                return None
+
     async def accept_run(self, command: AcceptRun) -> RunAcceptance:
         """原子受理一个 Run，并提交或复用 Context snapshot、索引和绑定。"""
         return RunAcceptance(

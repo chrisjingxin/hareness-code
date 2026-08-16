@@ -2,7 +2,7 @@
 
 export const PROTOCOL_MAJOR = 3 as const
 export const PROTOCOL_MINOR = 4 as const
-export const PROTOCOL_SCHEMA_SHA256 = "401e25045114b43e00f6933ca07fc43fb35c7c1e47cfa51825e76a7568523675" as const
+export const PROTOCOL_SCHEMA_SHA256 = "389aeed1f77480ae8b178381d4dbb477c9e0b75fbe7884e28efddaf948b54cad" as const
 export const MAX_FRAME_BYTES = 8388608 as const
 export const MAX_TOOL_PAYLOAD_BYTES = 1048576 as const
 export const CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","threads.side_question","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","plugins.list","plugins.inspect","plugins.validate","plugins.install","plugins.set_enabled","plugins.remove","agents.list","agents.inspect","teams.list","teams.inspect","teams.generate","teams.run","teams.cancel","mcp.status","mcp.add","mcp.remove","host.attachment.create","host.attachment.revoke","host.control.acquire","host.control.release","host.control.status","compose.inspect","compose.abandon"] as const
@@ -90,7 +90,7 @@ export type InitializeResult = { "protocol": { "major": 3; "minor": number }; "s
 export type RequestedSkill = { "id": string; "args"?: string }
 export type ThreadModelSelection = { "primary_profile": string }
 export type ApprovalMode = "plan" | "default" | "auto-edit" | "auto" | "yolo"
-export type InteractionMode = "build" | "compose"
+export type InteractionMode = "build" | "compose" | "direct_shell"
 export type ModelProfile = { "id": string; "model": string; "provider_label": string; "context_window_tokens": number; "capabilities": Array<string>; "is_default": boolean; "available": boolean; "unavailable_reason"?: string | null; "source": string }
 export type RunPrimaryModelBinding = { "profile": ModelProfile; "source": string; "runtime_profile_id": string }
 export type RunStartParams = { "mode": InteractionMode; "message": string; "thread_id": string; "run_id": string; "requested_skill"?: RequestedSkill; "model_selection"?: ThreadModelSelection; "approval_mode"?: ApprovalMode }

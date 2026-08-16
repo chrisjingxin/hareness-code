@@ -17,22 +17,28 @@ import { modeAccent, tuiTheme } from "./theme"
 import type { SharedViewProps } from "./types"
 
 /** thread 输入栏上方的实时模型和运行状态行。 */
-export function ThreadRuntimeLine(props: { interactive: SharedViewProps["interactive"] }) {
+export function ThreadRuntimeLine(props: { interactive: SharedViewProps["interactive"]; inputMode?: "chat" | "shell" }) {
   const runtime = props.interactive.runtime
   const status = activityLabel(props.interactive.activity.kind)
+  const isShell = props.inputMode === "shell"
+
   return (
     <box flexDirection="row" gap={1} paddingBottom={1}>
-      <text fg={statusColor(props.interactive.activity.kind)}>□</text>
+      <text fg={isShell ? tuiTheme.modeShell : statusColor(props.interactive.activity.kind)}>□</text>
       <text fg={tuiTheme.primary}>Harness Code</text>
       <text fg={tuiTheme.muted}>·</text>
-      <text fg={runtime.modelConfigured ? tuiTheme.text : tuiTheme.warning}>模型 {modelSelectionLabel(props.interactive)}</text>
+      {isShell ? (
+        <text fg={tuiTheme.modeShell}><b>Shell</b></text>
+      ) : (
+        <text fg={runtime.modelConfigured ? tuiTheme.text : tuiTheme.warning}>模型 {modelSelectionLabel(props.interactive)}</text>
+      )}
       <text fg={tuiTheme.muted}>· {status}</text>
     </box>
   )
 }
 
 /** 渲染底部输入栏、命令菜单和运行时元信息。 */
-export function InputBar(props: Pick<SharedViewProps, "interactive" | "terminalWidth" | "inputRef" | "value" | "onInput" | "onInputBarKeyDown" | "onSubmit" | "commandMenu" | "commandOptions" | "onSelectCommand" | "onHoverCommand" | "selectedSkill" | "pickerVisible" | "onClearSelectedSkill"> & {
+export function InputBar(props: Pick<SharedViewProps, "interactive" | "terminalWidth" | "inputRef" | "value" | "onInput" | "onInputBarKeyDown" | "onSubmit" | "commandMenu" | "commandOptions" | "onSelectCommand" | "onHoverCommand" | "selectedSkill" | "pickerVisible" | "onClearSelectedSkill" | "inputMode"> & {
   variant: "home" | "thread"
   commandMenuPlacement: "above" | "inline-below"
 }) {
@@ -41,6 +47,7 @@ export function InputBar(props: Pick<SharedViewProps, "interactive" | "terminalW
   const busy = active || compacting
   const awaitingQuestion = props.interactive.interaction?.type === "question"
   const options = props.commandOptions
+  const isShell = props.inputMode === "shell"
   const accent = modeAccent(props.interactive.workMode)
   const placeholder = awaitingQuestion
     ? "输入你的回答后按 Enter"
@@ -48,7 +55,9 @@ export function InputBar(props: Pick<SharedViewProps, "interactive" | "terminalW
       ? "正在压缩上下文…"
       : active
         ? "正在执行；Esc 中断"
-        : "输入消息..（输入 / 唤起命令）"
+        : isShell
+          ? "输入 Shell 指令（如 git status, ls -la）..."
+          : "输入消息..（输入 / 唤起命令，输入 ! 进入 Shell 模式）"
 
   const commandMenu = props.commandMenu.visible ? (
     <CommandMenu
@@ -65,7 +74,10 @@ export function InputBar(props: Pick<SharedViewProps, "interactive" | "terminalW
   // Work Mode 与 Approval Mode 是两种正交选择；徽标同时展示，避免把
   // Compose 误解为自动授权。
   const workModeLabel = props.interactive.workMode === "compose" ? "Compose" : "Build"
-  const modeBadgeLabel = `${workModeLabel} · ${approvalModeLabel(props.interactive.runtime)}`
+  const modeBadgeLabel = isShell
+    ? "Shell"
+    : `${workModeLabel} · ${approvalModeLabel(props.interactive.runtime)}`
+  const badgeColor = isShell ? tuiTheme.modeShell : accent
 
   return (
     <box position="relative" flexDirection="column" flexShrink={0}>
@@ -82,7 +94,7 @@ export function InputBar(props: Pick<SharedViewProps, "interactive" | "terminalW
         <box backgroundColor={tuiTheme.surface} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={isHome ? 1 : 0} flexShrink={0} flexGrow={1}>
           {isHome ? (
             <box flexDirection="row" gap={2} alignItems="flex-start">
-              <text fg={accent} attributes={TextAttributes.BOLD}>{modeBadgeLabel}</text>
+              <text fg={badgeColor} attributes={TextAttributes.BOLD}>{modeBadgeLabel}</text>
               <textarea
                 ref={props.inputRef}
                 placeholder={placeholder}
@@ -128,7 +140,7 @@ export function InputBar(props: Pick<SharedViewProps, "interactive" | "terminalW
               <text fg={tuiTheme.muted} onMouseUp={props.onClearSelectedSkill}>×</text>
             </box>
           ) : null}
-          <RuntimeMeta interactive={props.interactive} variant={props.variant} terminalWidth={props.terminalWidth} accent={accent} />
+          <RuntimeMeta interactive={props.interactive} variant={props.variant} terminalWidth={props.terminalWidth} accent={accent} inputMode={props.inputMode} />
         </box>
       </box>
       {commandMenu && props.commandMenuPlacement === "inline-below" ? commandMenu : null}
@@ -183,7 +195,18 @@ function CommandMenu(props: {
 }
 
 /** 渲染输入栏下方的配置摘要，只展示当前 Thread 的模型选择。 */
-function RuntimeMeta(props: { interactive: SharedViewProps["interactive"]; variant: "home" | "thread"; terminalWidth: number; accent: string }) {
+function RuntimeMeta(props: { interactive: SharedViewProps["interactive"]; variant: "home" | "thread"; terminalWidth: number; accent: string; inputMode?: "chat" | "shell" }) {
+  if (props.inputMode === "shell") {
+    return (
+      <box flexDirection="column" paddingTop={1} paddingBottom={props.variant === "thread" ? 1 : 0}>
+        <box width="100%" flexDirection="row" justifyContent="space-between" gap={2}>
+          <text fg={tuiTheme.modeShell}><b>Shell</b></text>
+          <text fg={tuiTheme.subtle}>Esc / Backspace 退出 Shell 模式</text>
+        </box>
+      </box>
+    )
+  }
+
   // 首页输入栏最大宽度固定为 75 列；thread 则以可用终端宽度估算。模型字段
   // 是唯一可能来自企业配置的长文本，因此只截断它，审批模式始终保持可见。
   const runtime = props.interactive.runtime
