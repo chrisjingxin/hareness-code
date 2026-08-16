@@ -109,6 +109,7 @@ from harness_agent.protocol.generated import (
     TeamsRunParams,
     ThreadsListParams,
     ThreadsOpenParams,
+    ThreadsSideQuestionParams,
 )
 from harness_agent.protocol.runtime import (
     validate_interaction_result,
@@ -395,6 +396,7 @@ class AgentHost:
             METHOD["THREADS_OPEN"]: self._handle_threads_open,
             METHOD["THREADS_WATCH"]: self._handle_threads_watch,
             METHOD["THREADS_UNWATCH"]: self._handle_threads_unwatch,
+            METHOD["THREADS_SIDE_QUESTION"]: self._handle_threads_side_question,
             METHOD["SKILLS_LIST"]: self._handle_skills_list,
             METHOD["SKILLS_INSPECT"]: self._handle_skills_inspect,
             METHOD["SKILLS_SET_ENABLED"]: self._handle_skills_set_enabled,
@@ -1606,6 +1608,84 @@ class AgentHost:
         removed = parsed.thread_id in watches
         watches.discard(parsed.thread_id)
         return {"removed": removed}
+
+    async def _handle_threads_side_question(self, params: dict[str, Any], _id: str) -> dict[str, object]:
+        """执行轻量只读单轮问答（/btw），基于当前 Thread 历史快照，0 工具，不写存储。"""
+        if CAPABILITY["THREADS_READ"] not in self._connection_capabilities():
+            raise RpcError(
+                -32002,
+                "CAPABILITY_REQUIRED",
+                {"code": "CAPABILITY_REQUIRED", "retryable": False, "capability": "threads.read"},
+            )
+        parsed = ThreadsSideQuestionParams.model_validate(params)
+        if self._allow_echo:
+            return {
+                "reply_text": f"echo: {parsed.question}",
+                "model_profile_id": parsed.model_profile_id or "echo",
+            }
+
+        persistence = await self._ensure_thread_persistence()
+        history_text_blocks: list[str] = []
+        try:
+            opened = await persistence.open_thread(parsed.thread_id)
+            for msg in opened.messages:
+                if msg.role in ("user", "assistant") and msg.content:
+                    history_text_blocks.append(f"{msg.role.upper()}: {msg.content}")
+        except Exception:
+            pass
+
+        self._load_config()
+        if self._config is None:
+            raise ConfigError(self._startup_error or "MODEL_CONFIGURATION_REQUIRED")
+
+        model_profile_id = parsed.model_profile_id
+        if model_profile_id is None:
+            try:
+                persisted = await persistence.load_run_state(parsed.thread_id)
+                if persisted.latest_run is not None:
+                    model_profile_id = persisted.latest_run.requested_selection.profile_id
+            except Exception:
+                pass
+
+        if model_profile_id is None and self._config.model_catalog is not None:
+            model_profile_id = self._config.model_catalog.default_profile
+
+        model_settings = self._config.require_model(model_profile_id)
+
+        history_context = "\n\n".join(history_text_blocks)
+        system_reminder = (
+            "<btw>\n"
+            "This is an ephemeral side question for the current interactive session.\n"
+            "Answer briefly and directly using the conversation context already provided.\n"
+            "NEVER use tools.\n"
+            "NEVER ask follow-up questions.\n"
+            "</btw>"
+        )
+
+        prompt_parts = [system_reminder]
+        if history_context:
+            prompt_parts.append(f"Conversation Context:\n{history_context}")
+        prompt_parts.append(f"Question:\n{parsed.question}")
+        full_prompt = "\n\n".join(prompt_parts)
+
+        from harness_agent.extensions.providers.harness_gateway import create_openai_compatible_model
+        from langchain_core.messages import HumanMessage
+
+        provider_lease = await self._provider_client_pool.acquire(model_settings)
+        try:
+            model = create_openai_compatible_model(
+                model_settings,
+                async_client=provider_lease.value,
+            )
+            response = await model.ainvoke([HumanMessage(content=full_prompt)])
+            reply_text = response.content if isinstance(response.content, str) else str(response.content)
+        finally:
+            await provider_lease.release()
+
+        return {
+            "reply_text": reply_text.strip(),
+            "model_profile_id": model_profile_id or "default",
+        }
 
     async def _handle_compose_inspect(self, params: dict[str, Any], _id: str) -> dict[str, object]:
         """只读投影 Compose Thread 的当前 Work Item；不触发分类或 typed 交互。"""
@@ -2874,7 +2954,7 @@ class AgentHost:
             approval_mode = spec.effective_policy.approval_mode or spec.execution.approval_mode
             classifier = self._resolve_approval_classifier(
                 approval_mode,
-                spec.execution.approval_classifier,
+                getattr(spec.execution, "approval_classifier", None),
                 model,
             )
 

@@ -106,6 +106,7 @@ export type InteractiveMcpInput = McpAddParams
 export type PresentationEffect =
   | { type: "present"; target: "threads" | "models" | "skills"; initialQuery?: string }
   | { type: "request-handoff"; threadId: string | null }
+  | { type: "side-question"; question: string; threadId: string | null }
   | { type: "request-exit" }
 
 /** 拒绝原因分类：涵盖从繁忙、缺少能力到通信与校验错误的稳定错误码。 */
@@ -182,6 +183,8 @@ export type InteractiveSnapshot = {
 export interface InteractiveController {
   /** 同步返回最近一次发布的不可变 snapshot。 */
   getSnapshot(): InteractiveSnapshot
+  /** 获取当前绑定的 AgentGateway。 */
+  getGateway?(): AgentGateway
   /** 订阅 snapshot 发布；listener 在回调中取消订阅不影响当前发布。 */
   subscribe(listener: (snapshot: InteractiveSnapshot) => void): () => void
   /** 执行一个 intent 及其必要的 Agent effect；返回确定性 IntentOutcome。 */

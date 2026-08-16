@@ -291,6 +291,23 @@
     },
     {
       "kind": "operation.params",
+      "name": "threads.side_question",
+      "case": "valid",
+      "value": {
+        "thread_id": "x",
+        "question": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.side_question",
+      "case": "valid",
+      "value": {
+        "reply_text": "x"
+      }
+    },
+    {
+      "kind": "operation.params",
       "name": "models.list",
       "case": "valid",
       "value": {}
@@ -2015,6 +2032,51 @@
     {
       "kind": "operation.result",
       "name": "threads.unwatch",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.side_question",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.side_question",
+      "case": "extra_field",
+      "value": {
+        "thread_id": "x",
+        "question": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.side_question",
+      "case": "missing_field",
+      "value": {
+        "question": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.side_question",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.side_question",
+      "case": "extra_field",
+      "value": {
+        "reply_text": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.side_question",
       "case": "missing_field",
       "value": {}
     },

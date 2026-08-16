@@ -21,6 +21,7 @@
       "threads.open": { "params": "#/$defs/threadsOpenParams", "result": "#/$defs/threadsOpenResult", "capability": "threads.read" },
       "threads.watch": { "params": "#/$defs/threadsOpenParams", "result": "#/$defs/threadsOpenResult", "capability": "threads.read" },
       "threads.unwatch": { "params": "#/$defs/threadsOpenParams", "result": "#/$defs/threadsUnwatchResult", "capability": "threads.read" },
+      "threads.side_question": { "params": "#/$defs/threadsSideQuestionParams", "result": "#/$defs/threadsSideQuestionResult", "capability": "threads.read" },
       "models.list": { "params": "#/$defs/modelsListParams", "result": "#/$defs/modelsListResult", "capability": "models.read" },
       "skills.list": { "params": "#/$defs/skillsListParams", "result": "#/$defs/skillsListResult", "capability": "skills.read" },
       "skills.inspect": { "params": "#/$defs/skillsInspectParams", "result": "#/$defs/jsonObject", "capability": "skills.read" },
@@ -441,6 +442,23 @@
     "threadsUnwatchResult": {
       "type": "object", "required": ["removed"],
       "properties": { "removed": { "type": "boolean" } },
+      "additionalProperties": false
+    },
+    "threadsSideQuestionParams": {
+      "type": "object", "required": ["thread_id", "question"],
+      "properties": {
+        "thread_id": { "type": "string", "minLength": 1 },
+        "question": { "type": "string", "minLength": 1 },
+        "model_profile_id": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "threadsSideQuestionResult": {
+      "type": "object", "required": ["reply_text"],
+      "properties": {
+        "reply_text": { "type": "string" },
+        "model_profile_id": { "type": "string" }
+      },
       "additionalProperties": false
     },
     "threadModelBinding": {

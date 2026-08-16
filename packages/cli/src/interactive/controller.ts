@@ -94,6 +94,9 @@ export class InteractiveControllerImpl implements InteractiveController {
   getSnapshot(): InteractiveSnapshot {
     return this.snapshot
   }
+  getGateway(): AgentGateway {
+    return this.gateway
+  }
   subscribe(listener: (snapshot: InteractiveSnapshot) => void): () => void {
     this.listeners.add(listener)
     return () => { this.listeners.delete(listener) }
@@ -271,6 +274,8 @@ export class InteractiveControllerImpl implements InteractiveController {
         return { status: "accepted" }
       case "request-handoff":
         return { status: "accepted", effects: [{ type: "request-handoff", threadId: result.threadId }] }
+      case "side-question":
+        return { status: "accepted", effects: [{ type: "side-question", question: result.question, threadId: result.threadId }] }
       default:
         return { status: "accepted" }
     }

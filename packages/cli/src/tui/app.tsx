@@ -24,6 +24,8 @@ import { TuiErrorBoundary } from "./presentation/error-boundary"
 import { HomeView } from "./presentation/home"
 import { DialogShell, SearchPicker, type SearchPickerRenderContext } from "./presentation/overlays"
 import { SkillPicker, ThreadPicker } from "./presentation/pickers"
+import { BtwModal } from "./presentation/btw-modal"
+import { ToastContainer } from "./presentation/toast"
 import { tuiTheme } from "./presentation/theme"
 import { ThreadView } from "./presentation/thread"
 import { WebTakeoverView } from "./presentation/web-takeover"
@@ -34,10 +36,12 @@ import {
   type PresentationCoordinator,
   type PresentationState,
 } from "../presentation-coordinator"
+import type { AgentGateway } from "../interactive/ports"
 
 /** 正式 TUI 的启动参数；Controller 由 CLI Composition Root 创建并注入。 */
 export type TuiOptions = {
   controller: InteractiveController
+  gateway?: AgentGateway
   resume?: boolean
   promptHistoryFile?: string
   onRequestExit: () => void
@@ -152,7 +156,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
       const scrollAction = key.name === "up" ? "line-up" : key.name === "down" ? "line-down" : undefined
       if (scrollAction && scrollConversation(scrollAction)) key.preventDefault()
     }
-  }, [adapter, snapshot.commandDialog, snapshot.commandMenu.visible, snapshot.modelBindingDialog, snapshot.models.visible, snapshot.skills.visible, interactive, snapshot.threads.visible, syncInputBuffer])
+  }, [adapter, snapshot.commandDialog, snapshot.commandMenu.visible, snapshot.modelBindingDialog, snapshot.models.visible, snapshot.skills.visible, interactive, snapshot.threads.visible, syncInputBuffer, snapshot.btw.visible])
 
   /** 通过 ref 滚动当前时间线；不把终端尺寸或 OpenTUI 对象带入 Adapter。 */
   function scrollConversation(intent: ScrollIntent): boolean {
@@ -179,6 +183,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
   useKeyboard(key => {
     const action = resolveShortcut(key, {
       commandDialogVisible: Boolean(snapshot.commandDialog || snapshot.modelBindingDialog),
+      btwModalVisible: snapshot.btw.visible,
       skillPickerVisible: snapshot.skills.visible,
       skillOptionCount: snapshot.skills.items.length,
       threadPickerVisible: snapshot.threads.visible,
@@ -223,7 +228,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
     onSelectCommand: (item: CommandMenuItem) => { void adapter.dispatch({ type: "command-menu-select", item }) },
     onHoverCommand: (selectedIndex: number) => { void adapter.dispatch({ type: "command-menu-hover", selectedIndex }) },
     selectedSkill: snapshot.selectedSkill,
-    pickerVisible: Boolean(snapshot.commandDialog || snapshot.modelBindingDialog) || snapshot.skills.visible || snapshot.threads.visible || snapshot.models.visible,
+    pickerVisible: Boolean(snapshot.commandDialog || snapshot.modelBindingDialog) || snapshot.skills.visible || snapshot.threads.visible || snapshot.models.visible || snapshot.btw.visible,
     onClearSelectedSkill: () => { void adapter.dispatch({ type: "clear-selected-skill" }) },
     showToolDetails: snapshot.showToolDetails,
     expandedTools: snapshot.expandedTools,
@@ -231,11 +236,12 @@ export function Za38Tui(options: RenderedTuiOptions) {
     onApproval: (decision: ApprovalDecision) => { void adapter.dispatch({ type: "approval", decision }) },
     onDirectoryTrust: (decision: DirectoryTrustDecision) => { void adapter.dispatch({ type: "directory-trust", decision }) },
     onQuestion: (answer: string) => { void adapter.dispatch({ type: "question", answer }) },
+    modelName: displayedModelName(interactive),
   }
 
   return (
-    <box position="relative" flexGrow={1}>
-      {isHomeState(interactive) ? <HomeView {...viewProps} /> : <ThreadView {...viewProps} modelName={displayedModelName(interactive)} />}
+    <box width="100%" height="100%" flexDirection="column">
+      {isHomeState(interactive) ? <HomeView {...viewProps} /> : <ThreadView {...viewProps} />}
       <SkillPicker
         visible={snapshot.skills.visible}
         loading={snapshot.skills.loading}
@@ -319,6 +325,21 @@ export function Za38Tui(options: RenderedTuiOptions) {
         onConfirm={() => { void adapter.dispatch({ type: "dialog-resolve", kind: "model-binding", confirmed: true }) }}
         onCancel={() => { void adapter.dispatch({ type: "dialog-resolve", kind: "model-binding", confirmed: false }) }}
       />
+      <BtwModal
+        visible={snapshot.btw.visible}
+        question={snapshot.btw.question}
+        answer={snapshot.btw.answer}
+        modelProfileId={snapshot.btw.modelProfileId}
+        status={snapshot.btw.status}
+        error={snapshot.btw.error}
+        copied={snapshot.btw.copied}
+        workMode={interactive.workMode}
+        terminalWidth={terminal.width}
+        terminalHeight={terminal.height}
+        onClose={() => { void adapter.dispatch({ type: "btw-close" }) }}
+        onCopy={() => { void adapter.dispatch({ type: "btw-copy" }) }}
+      />
+      <ToastContainer toasts={snapshot.toasts} terminalWidth={terminal.width} />
     </box>
   )
 }
@@ -334,6 +355,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
   // Adapter 在 CLI 层创建一次：handoff 往返复用同一实例，本地表现状态跨会话保留。
   const adapter = createTuiAdapter({
     controller: options.controller,
+    gateway: options.gateway,
     promptHistoryFile: options.promptHistoryFile,
     resume: options.resume,
     onRequestExit: options.onRequestExit,

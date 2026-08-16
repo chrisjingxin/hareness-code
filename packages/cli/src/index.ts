@@ -205,8 +205,9 @@ async function execute(command: Command): Promise<void> {
     let controller: InteractiveController | undefined
     try {
       // CLI Composition Root：全生命周期唯一 Controller，TUI/Web 共用（D-01）。
+      const gateway = new AgentClientGateway(agent.client)
       controller = createInteractiveController({
-        gateway: new AgentClientGateway(agent.client),
+        gateway,
         runtime: agent.runtime,
       })
       if (!command.nonInteractive) {
@@ -238,6 +239,7 @@ async function execute(command: Command): Promise<void> {
       }
       await runTui({
         controller,
+        gateway,
         resume: command.resume,
         onRequestExit: () => undefined,
         webHandoff: presentationCoordinator,

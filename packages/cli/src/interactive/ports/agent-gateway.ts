@@ -21,6 +21,8 @@ import {
   type ThreadModelSelection,
   type ThreadsListResult,
   type ThreadsOpenResult,
+  type ThreadsSideQuestionParams,
+  type ThreadsSideQuestionResult,
 } from "@za38/protocol"
 
 /** AgentGateway 稳定错误：将底层的网络/RPC 远程异常收敛为 Core 统一可识别的错误。 */
@@ -96,6 +98,8 @@ export interface AgentGateway {
   listSkills(includeDisabled: boolean): Promise<SkillsListResult>
   /** 设置 Skill 启用状态。 */
   setSkillEnabled(skillId: string, enabled: boolean): Promise<SkillsSetEnabledResult>
+  /** 执行临时只读单轮问答（/btw），0 工具，不写存储。 */
+  sideQuestion(params: ThreadsSideQuestionParams): Promise<ThreadsSideQuestionResult>
 }
 
 export function createFallbackNoopGateway(): AgentGateway {
@@ -115,6 +119,7 @@ export function createFallbackNoopGateway(): AgentGateway {
     async listModels() { return { profiles: [] } },
     async listSkills() { return { snapshot: { id: "empty", count: 0 }, skills: [], diagnostics: [] } },
     async setSkillEnabled() { return {} },
+    async sideQuestion(params) { return { reply_text: `echo: ${params.question}`, model_profile_id: params.model_profile_id ?? "echo" } },
     async mcpStatus() { return { servers: [], total_tools: 0 } },
     async mcpAdd() { return { added: false, connected: false, tool_names: [] } },
     async mcpRemove() { return { removed: false } },

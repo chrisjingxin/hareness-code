@@ -50,6 +50,8 @@ import {
   type ThreadModelSelection,
   type ThreadsListResult,
   type ThreadsOpenResult,
+  type ThreadsSideQuestionParams,
+  type ThreadsSideQuestionResult,
   type TeamDefinition,
   type TeamsCancelResult,
   type TeamsGenerateParams,
@@ -330,6 +332,11 @@ export class AgentClient {
   /** 打开当前 project 的既有 thread，并返回可以重新构造时间线的消息。 */
   openThread(threadId: string): Promise<ThreadsOpenResult> {
     return this.request(Method.THREADS_OPEN, { thread_id: threadId })
+  }
+
+  /** 执行临时只读单轮问答（/btw），0 工具，不写存储。 */
+  sideQuestion(params: ThreadsSideQuestionParams): Promise<ThreadsSideQuestionResult> {
+    return this.request(Method.THREADS_SIDE_QUESTION, params)
   }
 
   /** 查询所有已配置 MCP 服务器的运行时连接状态和工具列表。 */

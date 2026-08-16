@@ -30,6 +30,8 @@ tmp/
 .trae/
 .codegraph/
 .rtk/
+.agents/
 
 # WorkBuddy 本地数据（技能、记忆等，不入库）
 .workbuddy/
+

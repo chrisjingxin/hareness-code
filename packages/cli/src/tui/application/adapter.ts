@@ -8,6 +8,8 @@ import { filterCommandMenuItems } from "../../presentation-shared/command-menu-p
 import { completeQuestionAnswers } from "../../presentation-shared/interaction-policy"
 import { parseSlashCommand, resolveSlashCommand, type CommandMenuItem, type SkillMenuItem } from "../../interactive/commands"
 import type { ThreadSummary } from "@za38/protocol"
+import { createFallbackNoopGateway, type AgentGateway } from "../../interactive/ports"
+import { copyToClipboard } from "../platform/clipboard"
 import {
   loadPromptHistory,
   movePromptHistory,
@@ -16,6 +18,17 @@ import {
   type PromptHistoryCursor,
 } from "./prompt-history"
 import type { ShortcutAction } from "./shortcuts"
+
+/** BTW 临时问答状态。 */
+export type BtwState = {
+  visible: boolean
+  question: string
+  answer?: string
+  modelProfileId?: string
+  status: "loading" | "ready" | "error"
+  error?: string
+  copied?: boolean
+}
 
 export type ApprovalDecision = "approve_once" | "approve_thread" | "approve_project" | "reject" | "reject_with_feedback"
 
@@ -50,6 +63,18 @@ export type PickerSnapshot<T> = {
   readonly items: readonly T[]
 }
 
+/** 气泡通知语义类型。 */
+export type ToastVariant = "info" | "success" | "warning" | "error"
+
+/** 单条气泡通知条目。 */
+export type ToastItem = {
+  readonly id: string
+  readonly message: string
+  readonly variant: ToastVariant
+  readonly createdAtMs: number
+  readonly durationMs: number
+}
+
 /** TUI Adapter 发布的完整表现快照；领域事实来自 interactive。 */
 export type TuiAdapterSnapshot = {
   readonly interactive: InteractiveSnapshot
@@ -78,6 +103,8 @@ export type TuiAdapterSnapshot = {
   }
   readonly showToolDetails: boolean
   readonly expandedTools: ReadonlySet<string>
+  readonly btw: BtwState
+  readonly toasts: readonly ToastItem[]
   /** 递增后由 React adapter 滚动到最新内容。 */
   readonly scrollRequest: number
 }
@@ -103,6 +130,8 @@ export type TuiIntent =
   | { type: "directory-trust"; decision: DirectoryTrustDecision }
   | { type: "question"; answer: string }
   | { type: "tool-toggle"; toolId: string }
+  | { type: "btw-close" }
+  | { type: "btw-copy" }
 
 /** TUI Adapter 的最小 external interface；终端动作与共享 Controller 解耦。 */
 import type { PromptHistoryStore } from "../../interactive/ports"
@@ -113,11 +142,14 @@ export interface TuiAdapter {
   subscribe(listener: (snapshot: TuiAdapterSnapshot) => void): () => void
   dispatch(intent: TuiIntent): Promise<void>
   close(): Promise<void>
+  /** 在右上角展示轻量气泡通知（默认 3000ms 自动淡出，队列最多保留 3 条）。 */
+  showToast(message: string, variant?: ToastVariant, durationMs?: number): void
 }
 
 /** 创建 TUI Adapter；一次 TUI 挂载对应一个 Adapter 与共享 Controller。 */
 export type TuiAdapterOptions = {
   controller: InteractiveController
+  gateway?: AgentGateway
   promptHistoryFile?: string
   promptHistoryStore?: PromptHistoryStore
   resume?: boolean
@@ -139,6 +171,7 @@ type InternalPicker<T> = {
 /** TUI Adapter 的具体实现；所有可变表现状态都集中在这个 module 内。 */
 class TuiAdapterImpl implements TuiAdapter {
   private readonly controller: InteractiveController
+  private readonly gateway: AgentGateway
   private readonly promptHistoryFile: string | undefined
   private readonly onRequestExit: () => void
   private readonly openWeb?: (threadId: string | null) => Promise<void>
@@ -154,6 +187,9 @@ class TuiAdapterImpl implements TuiAdapter {
   private skillPicker: InternalPicker<SkillMenuItem> = emptyPicker()
   private threadPicker: InternalPicker<ThreadPickerItem> = emptyPicker()
   private modelPicker: InternalPicker<ModelProfile> = emptyPicker()
+  private btwState: BtwState = { visible: false, question: "", status: "loading" }
+  private toasts: ToastItem[] = []
+  private toastTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private promptHistory: string[] = []
   private promptHistoryCursor: PromptHistoryCursor | undefined
   private historyApplyValue: string | undefined
@@ -167,6 +203,7 @@ class TuiAdapterImpl implements TuiAdapter {
 
   constructor(options: TuiAdapterOptions) {
     this.controller = options.controller
+    this.gateway = options.gateway ?? options.controller.getGateway?.() ?? createFallbackNoopGateway()
     this.promptHistoryFile = options.promptHistoryFile
     this.historyStore = options.promptHistoryStore ?? new FilePromptHistoryStore(options.promptHistoryFile)
     this.onRequestExit = options.onRequestExit
@@ -261,13 +298,24 @@ class TuiAdapterImpl implements TuiAdapter {
         return
       case "tool-toggle":
         this.toggleTool(intent.toolId)
+        return
+      case "btw-close":
+        this.closeBtw()
+        return
+      case "btw-copy":
+        await this.copyBtwAnswer()
+        return
     }
   }
 
-  /** 关闭 Adapter 自己的订阅；共享 Controller 由宿主负责关闭。 */
+  /** 关闭 Adapter 自己的订阅与所有未完成的定时器；共享 Controller 由宿主负责关闭。 */
   async close(): Promise<void> {
     if (this.closed) return
     this.closed = true
+    for (const timer of this.toastTimers.values()) {
+      clearTimeout(timer)
+    }
+    this.toastTimers.clear()
     this.unsubscribeInteractive()
   }
 
@@ -298,6 +346,8 @@ class TuiAdapterImpl implements TuiAdapter {
       skills: this.pickerSnapshot(this.skillPicker, filterSkills(skills.items, this.skillPicker.query), skills.status === "loading", skills.status === "error" ? skills.message : undefined),
       threads: this.pickerSnapshot(this.threadPicker, filterThreads(threadItems(threads.items), this.threadPicker.query), threads.status === "loading", threads.status === "error" ? threads.message : undefined),
       models: this.pickerSnapshot(this.modelPicker, filterModels(models.items, this.modelPicker.query), models.status === "loading", models.status === "error" ? models.message : undefined),
+      btw: { ...this.btwState },
+      toasts: [...this.toasts],
       commandDialog: this.commandDialog(interactive),
       modelBindingDialog: this.modelBindingDialog(interactive),
       transientNotice: this.transientNotice,
@@ -455,7 +505,112 @@ class TuiAdapterImpl implements TuiAdapter {
         case "request-exit":
           this.onRequestExit()
           break
+        case "side-question":
+          this.openBtw(effect.question, effect.threadId)
+          break
       }
+    }
+  }
+
+  /** 打开 BTW 临时问答浮层并异步请求 Agent 端问答结果。 */
+  private openBtw(question: string, threadId: string | null): void {
+    this.btwState = {
+      visible: true,
+      question,
+      status: "loading",
+      copied: false,
+    }
+    this.publish()
+
+    void (async () => {
+      try {
+        const result = await this.gateway.sideQuestion({
+          thread_id: threadId ?? "default",
+          question,
+        })
+        if (this.btwState.visible && this.btwState.question === question) {
+          this.btwState = {
+            visible: true,
+            question,
+            answer: result.reply_text,
+            modelProfileId: result.model_profile_id,
+            status: "ready",
+            copied: false,
+          }
+          this.publish()
+        }
+      } catch (error) {
+        if (this.btwState.visible && this.btwState.question === question) {
+          this.btwState = {
+            visible: true,
+            question,
+            error: errorMessage(error),
+            status: "error",
+            copied: false,
+          }
+          this.publish()
+        }
+      }
+    })()
+  }
+
+  /** 关闭 BTW 临时问答浮层。 */
+  private closeBtw(): void {
+    this.btwState = { visible: false, question: "", status: "loading", copied: false }
+    this.publish()
+  }
+
+  /** 将 BTW 回答复制到系统剪贴板并在右上角展示气泡通知。 */
+  private async copyBtwAnswer(): Promise<void> {
+    if (this.btwState.answer) {
+      const ok = await copyToClipboard(this.btwState.answer)
+      if (ok) {
+        this.showToast("已复制到系统剪贴板", "success")
+      } else {
+        this.showToast("复制到系统剪贴板失败", "error")
+      }
+    }
+  }
+
+  /** 在右上角展示轻量气泡通知（默认 3000ms 自动淡出，队列最多保留 3 条）。 */
+  showToast(message: string, variant: ToastVariant = "info", durationMs = 3000): void {
+    const id = crypto.randomUUID()
+    const item: ToastItem = {
+      id,
+      message,
+      variant,
+      createdAtMs: Date.now(),
+      durationMs,
+    }
+    while (this.toasts.length >= 3) {
+      const oldest = this.toasts.shift()
+      if (oldest) {
+        const timer = this.toastTimers.get(oldest.id)
+        if (timer) {
+          clearTimeout(timer)
+          this.toastTimers.delete(oldest.id)
+        }
+      }
+    }
+    this.toasts.push(item)
+    const timer = setTimeout(() => {
+      this.dismissToast(id)
+    }, durationMs)
+    this.toastTimers.set(id, timer)
+    this.publish()
+  }
+
+  /** 从队列中显式销毁指定通知。 */
+  private dismissToast(id: string): void {
+    const timer = this.toastTimers.get(id)
+    if (timer) {
+      clearTimeout(timer)
+      this.toastTimers.delete(id)
+    }
+    const idx = this.toasts.findIndex(t => t.id === id)
+    if (idx !== -1) {
+      this.toasts.splice(idx, 1)
+      this.publish()
     }
   }
 
@@ -478,6 +633,12 @@ class TuiAdapterImpl implements TuiAdapter {
       case "thread-block":
       case "model-block":
       case "skill-block":
+        return
+      case "close-btw-modal":
+        this.closeBtw()
+        return
+      case "copy-btw-answer":
+        await this.copyBtwAnswer()
         return
       case "confirm-command-dialog":
         await this.resolveDialog(this.snapshot.modelBindingDialog ? "model-binding" : "command", true)

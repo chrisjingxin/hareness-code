@@ -213,7 +213,7 @@ export function DialogShell(props: DialogShellProps) {
 }
 
 /** 浮层公共外壳：背景只调暗已渲染内容，面板维持原始前景色和可读性。 */
-function OverlayShell(props: {
+export function OverlayShell(props: {
   terminalWidth: number
   terminalHeight: number
   placement: "picker" | "dialog"

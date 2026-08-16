@@ -15,6 +15,8 @@ import type {
   SkillsSetEnabledResult,
   ThreadsListResult,
   ThreadsOpenResult,
+  ThreadsSideQuestionParams,
+  ThreadsSideQuestionResult,
 } from "@za38/protocol"
 
 import { AgentClient, JsonRpcRemoteError } from "../ipc/client"
@@ -109,6 +111,14 @@ export class AgentClientGateway implements AgentGateway {
   async openThread(threadId: string): Promise<ThreadsOpenResult> {
     try {
       return await this.client.openThread(threadId)
+    } catch (error) {
+      throw this.wrapError(error)
+    }
+  }
+
+  async sideQuestion(params: ThreadsSideQuestionParams): Promise<ThreadsSideQuestionResult> {
+    try {
+      return await this.client.sideQuestion(params)
     } catch (error) {
       throw this.wrapError(error)
     }

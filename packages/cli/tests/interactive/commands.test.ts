@@ -352,3 +352,46 @@ test("Compose-only 命令不出现在 Build 模式 Slash 菜单，Compose 模式
   expect(findSlashCommands("/btw", buildContext).map(item => item.name)).toEqual(["btw"])
   expect(findSlashCommands("/btw", composeContext).map(item => item.name)).toEqual(["btw"])
 })
+
+test("/btw 命令分发：无参返回用法提示，有参返回 side-question 语义结构", () => {
+  const base = {
+    commandContext: defaultCommandContext({ workMode: "build" }),
+    threadId: "thread-btw-1",
+    runtimeStatus: "idle",
+    versionSummary: "0.1.0",
+    idGenerator: { generate: () => "id-1" },
+  }
+
+  const btwEmpty = { id: "assist.btw", name: "btw" }
+  expect(dispatchSlashCommand(btwEmpty, base)).toEqual({
+    type: "notice",
+    message: "用法：/btw <你的问题>",
+  })
+
+  const btwWhitespace = { id: "assist.btw", name: "btw", argument: "   " }
+  expect(dispatchSlashCommand(btwWhitespace, base)).toEqual({
+    type: "notice",
+    message: "用法：/btw <你的问题>",
+  })
+
+  const btwWithQuestion = { id: "assist.btw", name: "btw", argument: "什么是 AST 抽象语法树？" }
+  expect(dispatchSlashCommand(btwWithQuestion, base)).toEqual({
+    type: "side-question",
+    question: "什么是 AST 抽象语法树？",
+    threadId: "thread-btw-1",
+  })
+
+  const composeBase = {
+    commandContext: defaultCommandContext({ workMode: "compose" }),
+    threadId: "thread-compose-1",
+    runtimeStatus: "idle",
+    versionSummary: "0.1.0",
+    idGenerator: { generate: () => "id-1" },
+  }
+  expect(dispatchSlashCommand(btwWithQuestion, composeBase)).toEqual({
+    type: "side-question",
+    question: "什么是 AST 抽象语法树？",
+    threadId: "thread-compose-1",
+  })
+})
+

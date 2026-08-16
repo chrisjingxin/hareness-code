@@ -50,6 +50,7 @@ export type CommandResult =
   | { type: "mcp"; argument?: string }
   | { type: "request-handoff"; threadId: string | null }
   | { type: "submit-prompt"; prompt: string; requestedSkill?: RequestedSkill }
+  | { type: "side-question"; question: string; threadId: string | null }
   | CommandRpcResult
 
 /** Dispatcher 所需的最小状态快照；展示文案由调用方在进入 Handler 前生成。 */
@@ -139,6 +140,11 @@ const builtinHandlers: Readonly<Record<string, CommandHandler>> = {
   "host.web": context => context.command.argument
     ? notice("/web 不接受参数。")
     : { type: "request-handoff", threadId: context.threadId },
+  "assist.btw": context => {
+    const question = context.command.argument?.trim()
+    if (!question) return notice("用法：/btw <你的问题>")
+    return { type: "side-question", question, threadId: context.threadId }
+  },
 }
 
 /** 把 `/teams` 子命令映射成类型化 RPC；客户端不能提交任意 TeamDefinition。 */
