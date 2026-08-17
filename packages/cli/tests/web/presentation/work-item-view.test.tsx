@@ -38,12 +38,23 @@ function textOf(handle: RenderHandle): string {
 }
 
 describe("WorkItemBanner", () => {
-  test("workItem 为 null 时渲染空态与 Tab 切换提示", () => {
+  test("workItem 为 null 时不渲染任何内容（模式指示与空态已并入 Composer rail）", () => {
     const handle = mount(makeView())
     try {
+      expect(handle.container.querySelector(".work-item-banner")).toBeNull()
+      expect(textOf(handle)).not.toContain("当前无进行中的工作项")
+      expect(textOf(handle)).not.toContain("Tab 切换工作模式")
+    } finally {
+      handle.unmount()
+    }
+  })
+
+  test("有 workItem 时只渲染工作项卡，不再有模式 pill", () => {
+    const handle = mount(makeView({ workItem: makeWorkItem(), threadMode: "compose", modeLocked: true }))
+    try {
       const text = textOf(handle)
-      expect(text).toContain("当前无进行中的工作项")
-      expect(text).toContain("Tab 切换工作模式")
+      expect(text).toContain("实现登录认证")
+      expect(handle.container.querySelector(".work-item-mode")).toBeNull()
     } finally {
       handle.unmount()
     }
@@ -97,26 +108,6 @@ describe("WorkItemBanner", () => {
       expect(textOf(abandoned)).toContain("已放弃")
     } finally {
       abandoned.unmount()
-    }
-  })
-
-  test("threadMode=compose 时模式指示器显示 Compose 且无 Tab 提示", () => {
-    const handle = mount(makeView({ threadMode: "compose", modeLocked: true }))
-    try {
-      const text = textOf(handle)
-      expect(text).toContain("Compose")
-      expect(text).not.toContain("Tab")
-    } finally {
-      handle.unmount()
-    }
-  })
-
-  test("threadMode=null 时显示 Tab 切换提示", () => {
-    const handle = mount(makeView({ threadMode: null, modeLocked: false }))
-    try {
-      expect(textOf(handle)).toContain("Tab 切换工作模式")
-    } finally {
-      handle.unmount()
     }
   })
 

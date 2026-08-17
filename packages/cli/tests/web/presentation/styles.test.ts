@@ -9,6 +9,66 @@ test("styles.css 不包含颜色型系统主题覆盖（prefers-color-scheme）"
   expect(css).not.toContain("prefers-color-scheme")
 })
 
+test("semantic token 在 light/dark 各只定义一次，禁止尾部重定义块赢级联", () => {
+  expect(css.split('.web-shell[data-theme="light"]').length - 1).toBe(1)
+  expect(css.split('.web-shell[data-theme="dark"]').length - 1).toBe(1)
+  // 浅色 token 值以 HC-124 设计表为准；prototype 调色板不得残留。
+  expect(css).toContain("--bg: #f7f6f3")
+  expect(css).toContain("--accent: #15803d")
+  expect(css).not.toContain("#6675e8")
+  expect(css).not.toContain("#f5f7fb")
+})
+
+test("组件层无硬编码色：颜色只出现在 light/dark token 定义块与 var() 回退中", () => {
+  // 摘除两个主题 token 定义块（从 light 选择器到 dark 块结束）。
+  const lightStart = css.indexOf('.web-shell[data-theme="light"]')
+  const darkStart = css.indexOf('.web-shell[data-theme="dark"]')
+  const darkEnd = css.indexOf("}", darkStart)
+  const componentLayer = css.slice(0, lightStart) + css.slice(darkEnd + 1)
+  // var() 回退色（如 var(--bg, #f7f6f3)）是 boot 期合法用法，先摘除再断言。
+  const withoutVarFallbacks = componentLayer.replace(/var\([^)]*\)/g, "")
+  expect(withoutVarFallbacks).not.toMatch(/#[0-9a-fA-F]{3,8}\b/)
+})
+
+test("头像与按钮不使用 linear-gradient，强调色走 --accent/--action 平面语义", () => {
+  expect(css).not.toContain("linear-gradient")
+})
+
+test("取消按钮不使用主行动填充：danger 描边 + 透明底（绿色填充是「执行」语义）", () => {
+  expect(css).toContain(".cancel-button { background: transparent; border-color: var(--danger); color: var(--danger-text); }")
+  const afterSendFill = css.slice(css.lastIndexOf(".send-button { background: var(--action)"))
+  expect(afterSendFill).not.toMatch(/\.send-button, \.cancel-button[^}]*background: var\(--action\)/)
+})
+
+test("扁平化：原型层的卡片阴影与漂移圆角已清除", () => {
+  // 原型层签名阴影色（rgba(39, 53, 87, …)）不得残留；阴影只经 --shadow/--shadow-float token。
+  expect(css).not.toMatch(/rgba\(39, 53, 87/)
+  expect(css).not.toMatch(/rgba\(80, 102, 180/)
+  expect(css).not.toMatch(/rgba\(102, 117, 232/)
+  // 组件圆角只允许 token、4px 小圆角、50% 或 999px 胶囊；8~16px 的漂移值禁止出现。
+  expect(css).not.toMatch(/border-radius:\s*(8|9|10|11|12|13|14|15|16)px/)
+})
+
+test("扁平化：消息与 Agent 分组不是卡片（无 border/background/box-shadow 卡片三件套）", () => {
+  expect(css).not.toMatch(/\.timeline-message\s*\{[^}]*box-shadow/)
+  expect(css).not.toMatch(/\.timeline-agent-group\s*\{[^}]*box-shadow/)
+  expect(css).not.toMatch(/\.timeline-agent-group\s*\{[^}]*background/)
+})
+
+test("扁平化：侧栏是单一容器，无线程/文件孤岛卡", () => {
+  expect(css).not.toContain("Soft card alignment")
+  expect(css).not.toMatch(/\.workspace-sidebar-thread-panel,\s*\n?\.workspace-sidebar-files\s*\{[^}]*box-shadow/)
+  // Thread/Files 分隔槽：透明命中区 + 居中 1px 分隔线，hover/拖动走强调色
+  expect(css).toContain(".vertical-resize-handle { flex: 0 0 9px")
+  expect(css).toContain(".vertical-resize-handle::after")
+  expect(css).toContain(".vertical-resize-handle:hover::after, .vertical-resize-handle.is-dragging::after { background: var(--accent-border-strong); }")
+})
+
+test("Work Item 横幅只保留工作项卡：模式指示与空态已并入 Composer rail", () => {
+  expect(css).not.toContain(".work-item-mode")
+  expect(css).not.toContain(".work-item-empty")
+})
+
 test("light/dark 主题通过 .web-shell[data-theme] 选择器挂载，且使用 ZC-124 semantic token", () => {
   expect(css).toContain('.web-shell[data-theme="light"]')
   expect(css).toContain('.web-shell[data-theme="dark"]')
@@ -21,12 +81,12 @@ test("light/dark 主题通过 .web-shell[data-theme] 选择器挂载，且使用
   }
   expect(lightBlock).toContain("--surface-2: #f2f1ec")
   expect(lightBlock).toContain("--line: #e1e0da")
-  expect(lightBlock).toContain("--accent: #2563eb")
-  expect(lightBlock).toContain("--action: #181715")
+  expect(lightBlock).toContain("--accent: #15803d")
+  expect(lightBlock).toContain("--action: #15803d")
   expect(darkBlock).toContain("--surface-2: #23211d")
   expect(darkBlock).toContain("--line: #38352f")
-  expect(darkBlock).toContain("--accent: #60a5fa")
-  expect(darkBlock).toContain("--action: #f3f1ea")
+  expect(darkBlock).toContain("--accent: #4ade80")
+  expect(darkBlock).toContain("--action: #4ade80")
   const rootBlock = css.slice(css.indexOf(":root {"), css.indexOf("* {"))
   expect(rootBlock).not.toContain("--bg")
   expect(css).not.toContain("--accent-strong")
@@ -90,7 +150,6 @@ test("截图几何契约：左中固定 16px，右 Dock 不改变中栏起点", 
   expect(geometry).toContain("width: 100%;\n  max-width: none;\n  margin-inline: 0;")
   expect(geometry).toContain("overflow: clip")
   expect(geometry).toContain(".workspace-sidebar { gap: 0; }")
-  expect(geometry).toContain("flex: 0 0 16px")
   expect(geometry).toContain("padding: 12px 14px 14px")
   expect(geometry).toContain(".context-dock-code-scroll")
   expect(geometry).toContain("overflow: hidden")

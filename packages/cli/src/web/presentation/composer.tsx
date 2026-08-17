@@ -2,7 +2,7 @@
 /** @jsxImportSource react */
 
 import { useEffect, useRef, useState } from "react"
-import { AlertTriangle, AtSign, ChevronDown, Loader2, Paperclip, Send, Slash, Square, Wrench, X } from "lucide-react"
+import { AlertTriangle, AtSign, ChevronDown, Loader2, Lock, Paperclip, Send, Slash, Square, Wrench, X } from "lucide-react"
 
 import {
   commandMenuItemDescription,
@@ -19,7 +19,8 @@ const COMPOSER_MIN_ROWS = 1
 const CHARS_PER_ROW = 48
 
 /**
- * Web Composer：textarea + 底部 action rail（Skill chip / 键盘提示 / 发送-取消）。
+ * Web Composer：textarea + 底部 action rail（Skill chip / 工作模式与审批模式 chip / 键盘提示 / 发送-取消）。
+ * 工作模式 chip 是界面唯一模式展示：未锁定提示 Tab 切换，锁定显示锁图标与冻结模式。
  *
  * - 受控输入：textarea 的值始终从 snapshot.draft 读取，onChange 派发 draft-change。
  * - 自动增长：按字符数估算行数，clamp 到 [1, 8]；Esc/Ctrl+K 走对应意图。
@@ -37,6 +38,11 @@ export function Composer(props: {
   const compacting = interactive.activity.kind === "compacting"
   const connectionOpen = interactive.connection.status === "open"
   const composedDisabled = Boolean(disabled) || snapshot.leaving || !connectionOpen || snapshot.composerSubmitting || compacting
+  // 工作模式 chip 是 rail 中唯一模式展示：Thread 冻结（threadMode 非空）时锁定为冻结模式，
+  // 否则跟随当前 workMode 并在 title 提示 Tab 可切换。
+  const workModeLocked = interactive.threadMode !== null
+  const displayedWorkMode = workModeLocked ? interactive.threadMode : interactive.workMode
+  const workModeLabel = displayedWorkMode === "compose" ? "Compose" : "Build"
 
   const draft = snapshot.draft
   const armedSkill = interactive.selection.armedSkill
@@ -149,11 +155,12 @@ export function Composer(props: {
               ) : null}
               <span className="composer-hint">Enter 发送 · Shift+Enter 换行</span>
               <span
-                className={`mode-chip${interactive.workMode === "compose" ? " mode-chip-active" : ""}`}
+                className={`mode-chip${displayedWorkMode === "compose" ? " mode-chip-active" : ""}`}
                 role="status"
-                title="工作模式：空闲时 Tab 切换"
+                title={workModeLocked ? `工作模式已锁定为 ${workModeLabel}，Thread 内不可切换` : "工作模式：空闲时 Tab 切换"}
               >
-                {interactive.workMode === "compose" ? "Compose" : "Build"}
+                {workModeLocked ? <Lock aria-hidden="true" /> : null}
+                {workModeLabel}
               </span>
               <span className="mode-chip" role="status" title="审批模式">
                 {interactive.runtime.approvalMode}

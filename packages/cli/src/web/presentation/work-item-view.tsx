@@ -1,7 +1,6 @@
-/** Web Work Item 展示：持久 Work Item 投影 + 模式锁定指示器；只读、不持业务状态。 */
+/** Web Work Item 展示：持久 Work Item 投影卡片；只读、不持业务状态。 */
 /** @jsxImportSource react */
 
-import { Lock } from "lucide-react"
 import type { ReactElement } from "react"
 import type { WorkItemView } from "../../interactive/selectors"
 import type { WorkItemProjection, WorkItemStatus } from "../../interactive/state"
@@ -16,35 +15,17 @@ const WORK_ITEM_STATUS_LABELS: Record<WorkItemStatus, string> = {
 }
 
 /**
- * Work Item 展示条：顶部为模式指示器（Thread 冻结时锁定、否则提示 Tab 切换），
- * 下方为当前 Work Item 卡片或无 Work Item 时的空态。纯展示，不派生任何业务状态。
+ * Work Item 展示条：仅在存在进行中 Work Item 时渲染卡片；
+ * 无 Work Item 时不渲染任何内容——模式指示与空态提示已并入 Composer rail，
+ * 避免用「什么都没有」的横幅抢占对话列顶部。
  */
-export function WorkItemBanner({ view }: { view: WorkItemView }): ReactElement {
+export function WorkItemBanner({ view }: { view: WorkItemView }): ReactElement | null {
+  if (!view.workItem) {
+    return null
+  }
   return (
     <section className="work-item-banner" aria-label="工作项状态">
-      {view.modeLocked ? (
-        <span
-          className="work-item-mode work-item-mode-locked"
-          role="status"
-          title="Thread 工作模式已锁定，无法切换"
-        >
-          <Lock aria-hidden="true" className="work-item-mode-icon" />
-          <span>{view.threadMode === "compose" ? "Compose" : "Build"}</span>
-        </span>
-      ) : (
-        <span
-          className="work-item-mode"
-          role="status"
-          title="空闲时按 Tab 切换工作模式"
-        >
-          Tab 切换工作模式
-        </span>
-      )}
-      {view.workItem ? (
-        <WorkItemCard item={view.workItem} />
-      ) : (
-        <div className="work-item-empty" role="status">当前无进行中的工作项</div>
-      )}
+      <WorkItemCard item={view.workItem} />
     </section>
   )
 }

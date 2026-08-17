@@ -83,6 +83,27 @@ describe("Composer", () => {
     }
   })
 
+  test("工作模式 chip 是 rail 中唯一模式展示：未锁定提示 Tab 切换，锁定显示锁图标", () => {
+    const unlocked = mountComposer(makeSnapshot({ interactive: makeInteractive({ workMode: "build", threadMode: null }) }), [])
+    try {
+      const chip = unlocked.container.querySelector<HTMLElement>(".mode-chip")
+      expect(chip?.textContent).toBe("Build")
+      expect(chip?.title).toContain("Tab")
+      expect(chip?.querySelector("svg")).toBeNull()
+    } finally {
+      unlocked.unmount()
+    }
+    const locked = mountComposer(makeSnapshot({ interactive: makeInteractive({ workMode: "compose", threadMode: "compose" }) }), [])
+    try {
+      const chip = locked.container.querySelector<HTMLElement>(".mode-chip")
+      expect(chip?.textContent).toContain("Compose")
+      expect(chip?.title).toContain("锁定")
+      expect(chip?.querySelector("svg")).not.toBeNull()
+    } finally {
+      locked.unmount()
+    }
+  })
+
   test("IME、Enter、Shift+Enter 与命令菜单走同一键盘状态机", () => {
     const base = {
       shiftKey: false,

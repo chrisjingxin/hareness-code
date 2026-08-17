@@ -23,7 +23,7 @@
   → 运行、失败、审批和新输出通过克制动效解释状态变化
 ```
 
-本方案保留当前暖单色的质感，但用蓝色承担 selected、focus、active run 和 link，建立清晰而不过度装饰的开发者工作台。
+本方案保留当前暖单色的质感，但用绿色承担 selected、focus、active run 和 link（2026-08-17 与用户确认的绿色主题方向），建立清晰而不过度装饰的开发者工作台。
 
 ## 已确认现状与证据
 
@@ -185,7 +185,7 @@ dock-open(narrow)
 
 ### 色彩方向
 
-采用“暖中性 + 冷蓝强调”，蓝色稀缺使用：
+采用“暖中性 + 绿色强调”，绿色稀缺使用（2026-08-17 与用户确认：以参考设计稿的绿色主题为准，取代原冷蓝方向；画布保持暖中性）：
 
 | 角色 | Light | Dark | 用途 |
 | --- | --- | --- | --- |
@@ -199,10 +199,10 @@ dock-open(narrow)
 | `--text-soft` | `#4e4b44` | `#d0ccc2` | 正文次级 |
 | `--muted` | `#65635e` | `#aaa69c` | 必要辅助文字 |
 | `--subtle` | `#8d8981` | `#77736b` | disabled/装饰，非必要正文 |
-| `--accent` | `#2563eb` | `#60a5fa` | selected、active、focus |
-| `--accent-hover` | `#1d4ed8` | `#93c5fd` | hover/link |
-| `--accent-soft` | `rgba(37,99,235,.08)` | `rgba(96,165,250,.12)` | selected surface |
-| `--action` | `#181715` | `#f3f1ea` | 发送/主要确认 |
+| `--accent` | `#15803d` | `#4ade80` | selected、active、focus |
+| `--accent-hover` | `#166534` | `#86efac` | hover/link |
+| `--accent-soft` | `rgba(21,128,61,.08)` | `rgba(74,222,128,.12)` | selected surface |
+| `--action` | `#15803d` | `#4ade80` | 发送/主要确认（绿色填充，2026-08-17 确认） |
 | `--success` | `#397047` | `#8fc39a` | 成功 |
 | `--warning` | `#966600` | `#ddb76d` | 等待/警告 |
 | `--danger` | `#a43733` | `#e6a49f` | 失败/取消 |
@@ -210,10 +210,11 @@ dock-open(narrow)
 语义规则：
 
 - 新建 Thread 使用 secondary/quiet，不占 `--action`。
-- Send 与当前 Interaction 的唯一批准动作可以使用 `--action`。
+- Send 与当前 Interaction 的唯一批准动作使用 `--action`（与 `--accent` 同绿色，保持全站单一强调色）。
 - active Thread、selected Model、focus ring 和 running status 使用 `--accent`。
+- `--accent` 与 `--success` 同属绿色系：运行中与已完成只靠颜色不可区分，运行中必须叠加文字/动画等形态差异（见「Run 状态」）。
 - completed Tool 默认使用 muted check，只有摘要或用户主动展开后显示完整状态。
-- focus ring 固定 2px accent + 2px offset，不能使用与黑色按钮相同的炭黑 outline。
+- focus ring 固定 2px accent + 2px offset，不能使用与按钮填充相同的实色 outline。
 
 ### 排版
 
