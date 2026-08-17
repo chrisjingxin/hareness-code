@@ -64,6 +64,8 @@ export function Timeline({
   const lastScrollRequestRef = useRef<WebScrollRequest>(null)
   const [showScrollButton, setShowScrollButton] = useState(false)
   const activeRun = snapshot.interactive.activeRun
+  // home/idle 即「就绪」：就绪即沉默，底部状态区留白；其余活动标签（失败/取消/压缩等瞬态）照常展示。
+  const idleActivity = snapshot.interactive.activity.kind === "home" || snapshot.interactive.activity.kind === "idle"
   const baseElapsedMs = snapshot.interactive.runProgress?.elapsedMs
   const elapsedMs = useLiveElapsed(Boolean(activeRun), baseElapsedMs)
 
@@ -234,7 +236,7 @@ export function Timeline({
             <Loader2 aria-hidden="true" focusable="false" className="run-progress-spinner spinning" />
             <span>{liveLine}</span>
           </div>
-        ) : activityLabel(snapshot.interactive.activity.kind)}
+        ) : idleActivity ? null : activityLabel(snapshot.interactive.activity.kind)}
       </div>
       {renderComposeProgress(snapshot.interactive)}
       {showScrollButton ? (

@@ -2,9 +2,10 @@
 /** @jsxImportSource react */
 
 import { useMemo, useRef, useState } from "react"
-import { File as FileIcon, FileSymlink, Folder } from "lucide-react"
+import { FileSymlink, Folder } from "lucide-react"
 
 import type { WebAdapterSnapshot, WebIntent } from "../../application/adapter"
+import { FileTypeIcon } from "./file-type-icon"
 
 /** 每层缩进宽度。 */
 const INDENT_PX = 12
@@ -152,7 +153,7 @@ export function FileTree({
             ) : row.kind === "symlink" ? (
               <FileSymlink aria-hidden="true" size={14} className="file-row-icon" />
             ) : (
-              <FileIcon aria-hidden="true" size={14} className="file-row-icon" />
+              <FileTypeIcon name={row.name} />
             )}
             <span className="file-row-name">{row.name}</span>
             {row.loading ? <span className="file-row-loading">…</span> : null}

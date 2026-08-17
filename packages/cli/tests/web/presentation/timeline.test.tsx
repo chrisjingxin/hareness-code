@@ -266,6 +266,27 @@ describe("Timeline", () => {
     }
   })
 
+  test("空闲（home/idle）时 run-status-live 不渲染「就绪」：就绪即沉默，瞬态标签照常", () => {
+    const idle = render(
+      <Timeline snapshot={makeSnapshot({ interactive: makeInteractive({ activity: { kind: "idle", label: "就绪" } }) })} dispatch={() => {}} />,
+    )
+    try {
+      const live = idle.container.querySelector(".run-status-live")
+      expect(live?.getAttribute("aria-live")).toBe("polite")
+      expect(live?.textContent).toBe("")
+    } finally {
+      idle.unmount()
+    }
+    const failed = render(
+      <Timeline snapshot={makeSnapshot({ interactive: makeInteractive({ activity: { kind: "failed", label: "运行失败" } }) })} dispatch={() => {}} />,
+    )
+    try {
+      expect(failed.container.querySelector(".run-status-live")?.textContent).toBe("运行失败")
+    } finally {
+      failed.unmount()
+    }
+  })
+
   test("运行期间显示事实阶段、活动时长和取消提示", () => {
     const interactive = makeInteractive({
       activeRun: { threadId: "thread-1", runId: "run-1" },

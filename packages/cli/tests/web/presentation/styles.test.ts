@@ -55,6 +55,30 @@ test("扁平化：消息与 Agent 分组不是卡片（无 border/background/box
   expect(css).not.toMatch(/\.timeline-agent-group\s*\{[^}]*background/)
 })
 
+test("空态文案在 timeline 可视区垂直水平双居中（容器 flex column，margin auto）", () => {
+  expect(css).toContain(".timeline-empty { margin: auto;")
+  expect(css).not.toContain("13vh")
+})
+
+test("文件类型图标颜色只经 --file-* token，light/dark 双主题定义；选中行不强制变绿", () => {
+  const lightBlock = css.slice(css.indexOf('.web-shell[data-theme="light"]'), css.indexOf('.web-shell[data-theme="dark"]'))
+  const darkBlock = css.slice(css.indexOf('.web-shell[data-theme="dark"]'))
+  for (const token of ["--file-ts", "--file-js", "--file-code", "--file-style", "--file-config", "--file-image"]) {
+    expect(lightBlock).toContain(token)
+    expect(darkBlock).toContain(token)
+  }
+  for (const type of ["ts", "js", "code", "style", "doc", "config", "image", "default"]) {
+    expect(css).toContain(`.file-row-icon-${type} { color: var(`)
+  }
+  // 选中行的图标不再强制 accent 色：类型色在选中态保留
+  expect(css).not.toContain(".file-row.is-selected .file-row-icon")
+})
+
+test("文件行图标带 1px 光学下沉：与文字光学中心对齐", () => {
+  const iconBlock = css.slice(css.indexOf(".file-row-icon {"), css.indexOf(".file-row-icon-ts"))
+  expect(iconBlock).toContain("top: 1px")
+})
+
 test("扁平化：侧栏是单一容器，无线程/文件孤岛卡", () => {
   expect(css).not.toContain("Soft card alignment")
   expect(css).not.toMatch(/\.workspace-sidebar-thread-panel,\s*\n?\.workspace-sidebar-files\s*\{[^}]*box-shadow/)

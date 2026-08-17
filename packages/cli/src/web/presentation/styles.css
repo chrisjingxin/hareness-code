@@ -80,6 +80,13 @@ pre, code { font-family: "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Co
   --diff-remove-stripe: #e94945;
   --diff-add-sign: #218c4e;
   --diff-remove-sign: #c93430;
+  /* 文件类型图标色：取自语法色板；装饰性图标，不参与文字对比度验收。 */
+  --file-ts: #1f6c9f;
+  --file-js: #8a5a1f;
+  --file-code: #3a5e36;
+  --file-style: #6e4f7e;
+  --file-config: #2f5d6e;
+  --file-image: #9f2f2d;
   --shadow: 0 1px 1px rgba(17, 16, 14, .02), 0 10px 30px rgba(17, 16, 14, .05);
   --shadow-float: 0 2px 10px rgba(17, 16, 14, .05);
 
@@ -146,6 +153,13 @@ pre, code { font-family: "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Co
   --diff-remove-stripe: #f4413d;
   --diff-add-sign: #41c977;
   --diff-remove-sign: #f4413d;
+  /* 文件类型图标色：dark 语法色板的柔彩映射。 */
+  --file-ts: #a8c9e8;
+  --file-js: #e0c28a;
+  --file-code: #a6cdac;
+  --file-style: #cdb8e0;
+  --file-config: #a6c6cc;
+  --file-image: #e5b0ae;
   --shadow: 0 1px 1px rgba(0, 0, 0, .18), 0 10px 30px rgba(0, 0, 0, .34);
   --shadow-float: 0 2px 10px rgba(0, 0, 0, .28);
 
@@ -351,8 +365,17 @@ button.meta-chip { cursor: pointer; }
 .file-row.is-selected { background: var(--accent-soft); color: var(--accent-hover); }
 .file-row.is-focused { outline: 1px solid var(--accent-border); outline-offset: -1px; }
 .file-row-arrow { width: 14px; flex: 0 0 14px; color: var(--muted); font-size: 11px; text-align: center; }
-.file-row-icon { flex: 0 0 14px; color: var(--muted); }
-.file-row.is-selected .file-row-icon { color: var(--accent-hover); }
+/* 图标相对行盒几何中心下沉 1px：与 15px/1.6 文字的光学中心对齐（对照页实测 0/1/2px 取 1px）。 */
+.file-row-icon { flex: 0 0 14px; position: relative; top: 1px; color: var(--muted); }
+/* 文件类型色：选中行也保留类型色，选中态由背景与左轨表达。 */
+.file-row-icon-ts { color: var(--file-ts); }
+.file-row-icon-js { color: var(--file-js); }
+.file-row-icon-code { color: var(--file-code); }
+.file-row-icon-style { color: var(--file-style); }
+.file-row-icon-doc { color: var(--muted); }
+.file-row-icon-config { color: var(--file-config); }
+.file-row-icon-image { color: var(--file-image); }
+.file-row-icon-default { color: var(--muted); }
 .file-row-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .file-row-loading { color: var(--muted); }
 .file-tree-status { margin: 8px 6px; color: var(--muted); font-size: 13px; }
@@ -431,7 +454,7 @@ button.meta-chip { cursor: pointer; }
   flex-direction: column;
 }
 .timeline-header { padding: 2px 0 12px; color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: .08em; }
-.timeline-empty { margin: 13vh auto 0; max-width: 520px; color: var(--muted); text-align: center; }
+.timeline-empty { margin: auto; max-width: 520px; color: var(--muted); text-align: center; }
 
 /* 消息结构：author 标签在上，avatar 与内容左对齐成一行，与工具卡 37px 缩进对齐。 */
 .timeline-message { display: grid; gap: 6px; margin: 0 0 20px; min-width: 0; }
