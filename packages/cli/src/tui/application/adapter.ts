@@ -301,10 +301,16 @@ class TuiAdapterImpl implements TuiAdapter {
         }
         this.publish()
       })
-      void this.workspaceExplorer.dispatch({ type: "workspace.load" })
     }
 
     this.snapshot = this.buildSnapshot()
+    if (this.workspaceExplorer) {
+      // 首次加载必须在 snapshot 初始化之后触发：Explorer 的 refreshTree 会在首个 await
+      // 之前同步 publish loading，上面的订阅随之调用 this.publish()；若此时尚未给
+      // this.snapshot 赋值，publish 读取 this.snapshot.interactive 抛 TypeError，
+      // 异常回传进 Explorer 的 refreshTree，导致文件树永远停在 loading。
+      void this.workspaceExplorer.dispatch({ type: "workspace.load" })
+    }
     this.unsubscribeInteractive = this.controller.subscribe(interactive => {
       const previousRequestId = this.snapshot.interactive.interaction?.requestId
       const nextRequestId = interactive.interaction?.requestId
