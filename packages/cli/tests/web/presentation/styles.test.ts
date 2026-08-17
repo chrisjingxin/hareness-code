@@ -79,6 +79,10 @@ test("文件行图标带 1px 光学下沉：与文字光学中心对齐", () => 
   expect(iconBlock).toContain("top: 1px")
 })
 
+test("选中 Thread 只用浅绿背景表达：无左侧 inset 色轨", () => {
+  expect(css).not.toContain("inset 2px 0 0 var(--accent)")
+})
+
 test("扁平化：侧栏是单一容器，无线程/文件孤岛卡", () => {
   expect(css).not.toContain("Soft card alignment")
   expect(css).not.toMatch(/\.workspace-sidebar-thread-panel,\s*\n?\.workspace-sidebar-files\s*\{[^}]*box-shadow/)
@@ -165,10 +169,16 @@ test("桌面三栏布局与文件预览样式存在：desktop-workspace / contex
   expect(css).toContain(".file-tree")
 })
 
-test("截图几何契约：左中固定 16px，右 Dock 不改变中栏起点", () => {
+test("截图几何契约：侧栏与 Dock 贴边全高，中栏悬浮呼吸；右 Dock 不改变中栏起点", () => {
   const geometry = css.slice(css.indexOf("Screenshot geometry contract"))
   expect(geometry).toContain("--workspace-gap: 16px")
-  expect(geometry).toContain("--workspace-padding-inline: 20px")
+  // 面板贴紧窗口左右缘与顶栏下缘：容器外边距归零，呼吸感由中栏内边距表达
+  expect(geometry).toContain("--workspace-padding-inline: 0")
+  expect(geometry).toContain("--conversation-padding-block-start: 16px")
+  expect(geometry).toContain("--conversation-padding-block-end: 20px")
+  // 贴边面板：无圆角，只留面向中栏的 1px 分隔线
+  expect(geometry).toContain("border: 0;\n  border-right: 1px solid var(--line);\n  border-radius: 0;")
+  expect(geometry).toContain("border: 0;\n  border-left: 1px solid var(--line);\n  border-radius: 0;")
   expect(geometry).toContain("grid-template-columns: var(--sidebar-width) minmax(0, 1fr)")
   expect(geometry).toContain("grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--dock-width)")
   expect(geometry).toContain("width: 100%;\n  max-width: none;\n  margin-inline: 0;")

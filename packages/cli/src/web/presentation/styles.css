@@ -367,7 +367,7 @@ button.meta-chip { cursor: pointer; }
 .file-row-arrow { width: 14px; flex: 0 0 14px; color: var(--muted); font-size: 11px; text-align: center; }
 /* 图标相对行盒几何中心下沉 1px：与 15px/1.6 文字的光学中心对齐（对照页实测 0/1/2px 取 1px）。 */
 .file-row-icon { flex: 0 0 14px; position: relative; top: 1px; color: var(--muted); }
-/* 文件类型色：选中行也保留类型色，选中态由背景与左轨表达。 */
+/* 文件类型色：选中行也保留类型色，选中态由背景表达。 */
 .file-row-icon-ts { color: var(--file-ts); }
 .file-row-icon-js { color: var(--file-js); }
 .file-row-icon-code { color: var(--file-code); }
@@ -1380,9 +1380,11 @@ button.topbar-segment { cursor: pointer; }
 .web-shell {
   --brand-width: 240px;
   --workspace-gap: 16px;
-  --workspace-padding-inline: 20px;
-  --workspace-padding-block-start: 16px;
-  --workspace-padding-block-end: 20px;
+  /* 贴边布局（2026-08-17 与用户确认）：侧栏/Dock 贴紧窗口左右缘与顶栏下缘并延伸到底，
+     容器外边距归零；柔和感由中栏内容块的上下呼吸内边距与浅绿选中态表达。 */
+  --workspace-padding-inline: 0;
+  --conversation-padding-block-start: 16px;
+  --conversation-padding-block-end: 20px;
   --dock-width: 354px;
 }
 .desktop-workspace,
@@ -1391,18 +1393,19 @@ button.topbar-segment { cursor: pointer; }
   overflow: clip;
   column-gap: var(--workspace-gap);
   row-gap: var(--workspace-gap);
-  padding: var(--workspace-padding-block-start) var(--workspace-padding-inline) var(--workspace-padding-block-end);
+  padding: 0 var(--workspace-padding-inline);
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
 }
 .desktop-workspace.has-context-dock {
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--dock-width);
 }
 
-/* ---------- 侧栏：单一平面容器 + 上下分区，非孤岛卡 ---------- */
+/* ---------- 侧栏：单一平面容器 + 上下分区；贴左边与顶栏下缘，只留面向中栏的分隔线 ---------- */
 .workspace-sidebar { gap: 0; }
 .workspace-sidebar {
-  border: 1px solid var(--line);
-  border-radius: var(--radius-surface);
+  border: 0;
+  border-right: 1px solid var(--line);
+  border-radius: 0;
   background: var(--surface);
   box-shadow: none;
   overflow: hidden;
@@ -1448,8 +1451,8 @@ button.topbar-segment { cursor: pointer; }
 .thread-item-title { grid-column: 2; grid-row: 1; min-width: 0; font-size: 13px; font-weight: 500; line-height: 1.35; }
 .thread-item-summary { grid-column: 2; grid-row: 2; min-width: 0; color: var(--muted); font-size: 12px; font-weight: 400; line-height: 1.35; }
 .thread-item-meta { grid-column: 3; grid-row: 1; align-self: start; margin-left: 8px; color: var(--muted); font-size: 11px; line-height: 1.35; white-space: nowrap; }
-/* active Thread：accent-soft 底 + 2px 左轨（inset 线不是投影阴影）。 */
-.thread-item[data-active="true"] { border-color: transparent; background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
+/* active Thread：仅 accent-soft 浅绿底（2026-08-17 与用户确认去掉左侧 inset 色轨）。 */
+.thread-item[data-active="true"] { border-color: transparent; background: var(--accent-soft); }
 .thread-item[data-active="true"] .thread-item-icon { color: var(--accent); }
 .thread-item[data-active="true"] .thread-item-summary { color: var(--accent-hover); }
 .file-explorer { border-top: 0; }
@@ -1463,7 +1466,12 @@ button.topbar-segment { cursor: pointer; }
 .file-row.is-selected { background: var(--accent-soft); color: var(--accent-hover); }
 
 /* ---------- 会话列与消息流：扁平阅读流，消息不是卡片 ---------- */
-.conversation-column { background: transparent; --conversation-content-width: 100%; }
+.conversation-column {
+  background: transparent;
+  --conversation-content-width: 100%;
+  /* 中栏内容块的呼吸感：上面板贴边后，对话列上下保留内边距。 */
+  padding: var(--conversation-padding-block-start) 0 var(--conversation-padding-block-end);
+}
 .timeline,
 .interaction-dock,
 .composer-inner {
@@ -1551,8 +1559,9 @@ button.topbar-segment { cursor: pointer; }
   min-height: 0;
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-surface);
+  border: 0;
+  border-left: 1px solid var(--line);
+  border-radius: 0;
   background: var(--surface);
   box-shadow: none;
   overflow: hidden;
