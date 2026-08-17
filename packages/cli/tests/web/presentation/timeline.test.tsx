@@ -201,6 +201,52 @@ describe("Timeline", () => {
     }
   })
 
+  test("Agent 后续的工具调用收进同一个消息气泡，并保留工具卡交互", () => {
+    const interactive = makeInteractive({
+      timeline: [
+        message({ id: "a1", role: "assistant", content: "我先读取文件。" }),
+        toolItem({ id: "t1", name: "read_file" }),
+        toolItem({ id: "t2", name: "write_file" }),
+        message({ id: "a2", role: "assistant", content: "文件已处理。" }),
+      ],
+    })
+    const handle = render(
+      <Timeline snapshot={makeSnapshot({ interactive })} dispatch={() => {}} />,
+    )
+    try {
+      const groups = handle.container.querySelectorAll(".timeline-agent-group")
+      expect(groups).toHaveLength(1)
+      expect(groups[0]?.querySelectorAll(".tool-card")).toHaveLength(2)
+      expect(groups[0]?.querySelector(".tool-card")?.parentElement?.classList.contains("timeline-tool")).toBe(true)
+    } finally {
+      handle.unmount()
+    }
+  })
+
+  test("Agent 前置的工具调用也收进同一个消息气泡，并保持顺序", () => {
+    const interactive = makeInteractive({
+      timeline: [
+        toolItem({ id: "t1", name: "memory_save" }),
+        message({ id: "a1", role: "assistant", content: "已经记住了。" }),
+      ],
+    })
+    const handle = render(
+      <Timeline snapshot={makeSnapshot({ interactive })} dispatch={() => {}} />,
+    )
+    try {
+      const group = handle.container.querySelector(".timeline-agent-group")
+      expect(group).not.toBeNull()
+      expect(group?.querySelector(".timeline-agent-group-header .message-author")?.textContent).toBe("Agent")
+      expect(group?.querySelectorAll(".tool-card")).toHaveLength(1)
+      expect(group?.querySelectorAll(".timeline-message")).toHaveLength(1)
+      expect(group?.firstElementChild?.classList.contains("timeline-agent-group-header")).toBe(true)
+      expect(group?.querySelector(".timeline-agent-group-header + .timeline-tool")).not.toBeNull()
+      expect(group?.lastElementChild?.classList.contains("timeline-message")).toBe(true)
+    } finally {
+      handle.unmount()
+    }
+  })
+
   test("Timeline 容器是 role=log 且 aria-relevant=additions；run-status-live 是 aria-live=polite", () => {
     const interactive = makeInteractive({
       activity: { kind: "running", label: "正在思考" },
@@ -264,7 +310,7 @@ describe("Timeline", () => {
     }
   })
 
-  test("思考段冻结后折叠为标题与展开按钮", () => {
+  test("思考结束后不显示思考框", () => {
     const interactive = makeInteractive({
       activeRun: { threadId: "thread-1", runId: "run-1" },
       activity: { kind: "running" },
@@ -276,12 +322,8 @@ describe("Timeline", () => {
       <Timeline snapshot={makeSnapshot({ interactive })} dispatch={() => {}} />,
     )
     try {
-      const reasoning = handle.container.querySelector(".reasoning")
-      expect(reasoning?.getAttribute("data-active")).toBe("false")
-      expect(reasoning?.textContent).toContain("思考")
-      expect(reasoning?.querySelector(".reasoning-toggle")?.textContent).toBe("展开")
-      expect(reasoning?.textContent).toContain("第一行思考")
-      expect(reasoning?.textContent).not.toContain("后续细节")
+      expect(handle.container.querySelector(".reasoning")).toBeNull()
+      expect(handle.container.querySelector(".agent-thinking-card")).toBeNull()
     } finally {
       handle.unmount()
     }

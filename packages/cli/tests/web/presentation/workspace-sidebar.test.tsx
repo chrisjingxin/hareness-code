@@ -49,7 +49,9 @@ describe("WorkspaceSidebar", () => {
       expect(sidebar).not.toBeNull()
       const items = handle.container.querySelectorAll<HTMLButtonElement>(".thread-item")
       expect(items.length).toBe(2)
+      expect(handle.container.querySelectorAll(".thread-item-icon").length).toBe(2)
       expect(items[0]?.textContent).toContain("你好")
+      expect(items[0]?.querySelector(".thread-item-summary")?.textContent).toBe("已完成")
       expect(handle.container.textContent).not.toContain("thread-1")
       expect(handle.container.querySelector(".file-explorer")).not.toBeNull()
       expect(handle.container.querySelector(".file-tree")).not.toBeNull()
@@ -81,6 +83,8 @@ describe("WorkspaceSidebar", () => {
       expect(inactive?.disabled).toBe(true)
       const active = items.find(button => button.getAttribute("data-active") === "true")
       expect(active?.disabled).toBe(false)
+      expect(active?.querySelector(".thread-item-summary")?.textContent).toBe("正在处理当前变更")
+      expect(inactive?.querySelector(".thread-item-summary")?.textContent).toBe("已完成")
     } finally {
       handle.unmount()
     }
@@ -111,7 +115,7 @@ describe("WorkspaceSidebar", () => {
     try {
       const search = handle.container.querySelector<HTMLInputElement>(".sidebar-search input")
       expect(search).not.toBeNull()
-      expect(search?.getAttribute("placeholder")).toBe("搜索 Thread…")
+      expect(search?.getAttribute("placeholder")).toBe("搜索线程...")
       const items = handle.container.querySelectorAll<HTMLButtonElement>(".thread-item")
       expect(items.length).toBe(2)
       expect(handle.container.querySelector(".file-explorer")).not.toBeNull()

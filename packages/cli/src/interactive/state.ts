@@ -49,6 +49,8 @@ export type ConversationMessage = {
   role: MessageRole
   content: string
   runId?: string
+  /** 消息首次进入 Timeline 的墙钟时间；历史协议未提供时保持缺省。 */
+  createdAtMs?: number
   streaming?: boolean
   /** 该条用户消息所属 Run 的工作模式；缺省由恢复路径补 threadMode 或 build。 */
   workMode?: WorkMode
@@ -152,6 +154,7 @@ export type RestoredThreadMessage = {
   kind: "user" | "assistant" | "tool"
   content: string
   toolName?: string
+  createdAtMs?: number
 }
 
 /** Thread reopen 恢复的有界 Compose activity；不含 Reasoning/原始 Tool 正文。 */
@@ -366,7 +369,9 @@ export function finishContextCompaction(state: InteractiveState): InteractiveSta
 }
 
 /** 在发送 run.start 前先登记 run。 */
-export function startRun(state: InteractiveState, run: ActiveRun, prompt: string): InteractiveState {
+export function startRun(state: InteractiveState, run: ActiveRun, prompt: string, createdAtMs?: number): InteractiveState {
+  const userMessage: ConversationMessage = { id: `user-${run.runId}`, role: "user", content: prompt, runId: run.runId }
+  if (createdAtMs !== undefined) userMessage.createdAtMs = createdAtMs
   return {
     ...state,
     currentThreadId: run.threadId,
@@ -376,7 +381,7 @@ export function startRun(state: InteractiveState, run: ActiveRun, prompt: string
     runProgress: { phase: "preparing", elapsedMs: 0 },
     timeline: [
       ...state.timeline,
-      { type: "message", message: { id: `user-${run.runId}`, role: "user", content: prompt, runId: run.runId, workMode: state.workMode } },
+      { type: "message", message: { ...userMessage, workMode: state.workMode } },
     ],
   }
 }
@@ -421,17 +426,16 @@ export function restoreThread(
         },
       }
     }
-    return {
-      type: "message",
-      message: {
-        id,
-        role: message.kind,
-        content: message.content,
-        runId: restoredRunId,
-        streaming: false,
-        ...(message.kind === "user" ? { workMode: threadMode ?? "build" } : {}),
-      },
+    const restoredMessage: ConversationMessage = {
+      id,
+      role: message.kind,
+      content: message.content,
+      runId: restoredRunId,
+      streaming: false,
     }
+    if (message.createdAtMs !== undefined) restoredMessage.createdAtMs = message.createdAtMs
+    if (message.kind === "user") restoredMessage.workMode = threadMode ?? "build"
+    return { type: "message", message: restoredMessage }
   })
   // Activity 审计只进入 Timeline，不进入模型 context；按原顺序追加在 transcript 之后。
   for (const [index, activity] of composeActivities.entries()) {
@@ -723,7 +727,7 @@ export function applyAgentEvent(state: InteractiveState, event: EventEnvelope, i
     case EventType.CONTENT_DELTA: {
       const payload = event.payload
       return typeof payload.text === "string"
-        ? { ...next, timeline: freezeReasoning(appendAssistantDelta(next.timeline, identity, payload.text, idGenerator), identity), activity: { kind: "running" } }
+        ? { ...next, timeline: freezeReasoning(appendAssistantDelta(next.timeline, identity, payload.text, idGenerator, event.timestamp_ms), identity), activity: { kind: "running" } }
         : next
     }
     case EventType.REASONING_DELTA: {
@@ -909,6 +913,7 @@ function appendAssistantDelta(
   identity: EventIdentity,
   text: string,
   idGenerator: IdGenerator = defaultIdGenerator,
+  createdAtMs?: number,
 ): TimelineItem[] {
   const index = timeline.findLastIndex(item =>
     item.type === "message"
@@ -917,16 +922,15 @@ function appendAssistantDelta(
     && scopeEquals(item.message, identity)
   )
   if (index < 0) {
-    return [...timeline, {
-      type: "message",
-      message: withScopeFields({
-        id: `assistant-${identity.runId}-${idGenerator.uuid()}`,
-        role: "assistant",
-        content: text,
-        runId: identity.runId,
-        streaming: true,
-      }, identity),
-    }]
+    const message: ConversationMessage = withScopeFields({
+      id: `assistant-${identity.runId}-${idGenerator.uuid()}`,
+      role: "assistant",
+      content: text,
+      runId: identity.runId,
+      streaming: true,
+    }, identity)
+    if (createdAtMs !== undefined) message.createdAtMs = createdAtMs
+    return [...timeline, { type: "message", message }]
   }
   const item = timeline[index]
   if (item?.type === "message" && index === timeline.length - 1) {
@@ -936,16 +940,15 @@ function appendAssistantDelta(
         : entry
     ))
   }
-  return [...timeline, {
-    type: "message",
-    message: withScopeFields({
-      id: `assistant-${identity.runId}-${idGenerator.uuid()}`,
-      role: "assistant",
-      content: text,
-      runId: identity.runId,
-      streaming: true,
-    }, identity),
-  }]
+  const message: ConversationMessage = withScopeFields({
+    id: `assistant-${identity.runId}-${idGenerator.uuid()}`,
+    role: "assistant",
+    content: text,
+    runId: identity.runId,
+    streaming: true,
+  }, identity)
+  if (createdAtMs !== undefined) message.createdAtMs = createdAtMs
+  return [...timeline, { type: "message", message }]
 }
 
 function finishAssistant(timeline: TimelineItem[], runId: string, suffix = "", idGenerator: IdGenerator = defaultIdGenerator): TimelineItem[] {

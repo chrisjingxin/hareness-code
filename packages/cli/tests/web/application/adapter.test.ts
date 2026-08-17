@@ -213,8 +213,8 @@ test("初始 snapshot：interactive 由五个分片重组，workspace 分片来�
   const snapshot = adapter.getSnapshot()
   expect(snapshot.interactive.currentThreadId).toBe("t-1")
   expect(snapshot.workspaceTree.status).toBe("idle")
-  expect(snapshot.workspaceSidebar).toEqual({ threadRatio: 0.38, selectedPath: null, widthPx: 280 })
-  expect(snapshot.contextDock).toMatchObject({ open: false, activePanel: "code", widthPx: 560 })
+  expect(snapshot.workspaceSidebar).toEqual({ threadRatio: 0.45, selectedPath: null, widthPx: 296 })
+  expect(snapshot.contextDock).toMatchObject({ open: false, activePanel: "code", widthPx: 354 })
   expect(snapshot.contextDock.code).toEqual({ tabs: [], activePath: null, previews: {}, previewErrors: {} })
   expect(snapshot.expandedTools).toBeInstanceOf(Set)
 })
@@ -329,12 +329,12 @@ test("dock-close：关闭但保留 activePanel，重新打开恢复上次面板"
   expect(adapter.getSnapshot().contextDock.activePanel).toBe("code")
 })
 
-test("dock-width-change：夹取 400-760", async () => {
+test("dock-width-change：夹取 330-760", async () => {
   const { adapter } = makeAdapter()
   await adapter.dispatch({ type: "dock-width-change", widthPx: 9999 })
   expect(adapter.getSnapshot().contextDock.widthPx).toBe(760)
   await adapter.dispatch({ type: "dock-width-change", widthPx: 10 })
-  expect(adapter.getSnapshot().contextDock.widthPx).toBe(400)
+  expect(adapter.getSnapshot().contextDock.widthPx).toBe(330)
   await adapter.dispatch({ type: "dock-width-change", widthPx: 600 })
   expect(adapter.getSnapshot().contextDock.widthPx).toBe(600)
 })
@@ -826,6 +826,12 @@ test("approval-mode-cycle 转发共享 Core 的 approval-mode.cycle", async () =
   const { adapter, client } = makeAdapter()
   await adapter.dispatch({ type: "approval-mode-cycle" })
   expect(client.intents).toContainEqual({ type: "approval-mode.cycle" })
+})
+
+test("approval-mode-select 转发共享 Core 的 approval-mode.set", async () => {
+  const { adapter, client } = makeAdapter()
+  await adapter.dispatch({ type: "approval-mode-select", mode: "auto-edit" })
+  expect(client.intents).toContainEqual({ type: "approval-mode.set", mode: "auto-edit" })
 })
 
 test("createDefaultFrameScheduler 包装宿主 rAF，避免 detached 调用 Illegal invocation", async () => {

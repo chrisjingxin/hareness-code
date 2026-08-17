@@ -81,6 +81,21 @@ test("桌面三栏布局与文件预览样式存在：desktop-workspace / contex
   expect(css).toContain(".file-tree")
 })
 
+test("截图几何契约：左中固定 16px，右 Dock 不改变中栏起点", () => {
+  const geometry = css.slice(css.indexOf("Screenshot geometry contract"))
+  expect(geometry).toContain("--workspace-gap: 16px")
+  expect(geometry).toContain("--workspace-padding-inline: 20px")
+  expect(geometry).toContain("grid-template-columns: var(--sidebar-width) minmax(0, 1fr)")
+  expect(geometry).toContain("grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--dock-width)")
+  expect(geometry).toContain("width: 100%;\n  max-width: none;\n  margin-inline: 0;")
+  expect(geometry).toContain("overflow: clip")
+  expect(geometry).toContain(".workspace-sidebar { gap: 0; }")
+  expect(geometry).toContain("flex: 0 0 16px")
+  expect(geometry).toContain("padding: 12px 14px 14px")
+  expect(geometry).toContain(".context-dock-code-scroll")
+  expect(geometry).toContain("overflow: hidden")
+})
+
 test("待处理审批 Dock 在视口内独立纵向滚动，不遮挡 Composer 和审批操作", () => {
   const block = css.slice(css.indexOf(".interaction-dock {"), css.indexOf(".interaction-dock .interaction-card"))
   expect(block).toContain("min-height: 0")

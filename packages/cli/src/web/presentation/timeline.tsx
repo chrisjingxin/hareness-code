@@ -1,7 +1,7 @@
 /** Web Timeline：消息、Tool 卡和已完成 Interaction 卡的统一时间线，并托管滚动行为。 */
 /** @jsxImportSource react */
 
-import { AlertTriangle, Check, ChevronDown, Loader2 } from "lucide-react"
+import { AlertTriangle, Check, ChevronDown, Loader2, MessageCircle, Sparkles } from "lucide-react"
 import {
   memo,
   useCallback,
@@ -116,6 +116,7 @@ export function Timeline({
 
   const visibleItems = timeline.filter(item => {
     if (isPendingLive(item, pendingRequestId)) return false
+    if (item.type === "reasoning" && !item.reasoning.active) return false
     if (item.type === "message" && item.message.role === "assistant" && !item.message.streaming && !item.message.content.trim()) {
       return false
     }
@@ -162,6 +163,45 @@ export function Timeline({
     })} · Esc 取消`
     : `${phaseLabel} · 已运行 ${formatElapsed(elapsedMs)} · Esc 取消`
 
+  // Compose 分段器会把无 scope 的 Build 条目拆成多个 flat segment；先恢复连续 flat 条目，
+  // 再交给 Agent 分组渲染，保证 Build 与 Compose 两条路径都能共享同一套气泡结构。
+  const renderedSegments: ReactNode[] = []
+  let flatItems: TimelineItem[] = []
+  const flushFlatItems = () => {
+    for (const items of groupTimelineItems(flatItems)) {
+      const first = items[0]
+      if (!first) continue
+      renderedSegments.push(
+        <TimelineGroup
+          key={timelineItemKey(first)}
+          items={items}
+          expandedTools={snapshot.expandedTools}
+          onToggleTool={handleToggleTool}
+        />,
+      )
+    }
+    flatItems = []
+  }
+  for (const segment of segments) {
+    if (segment.kind === "flat") {
+      flatItems.push(segment.item)
+      continue
+    }
+    flushFlatItems()
+    const group = segment.group
+    renderedSegments.push(
+      <ActivityGroup
+        key={group.key}
+        group={group}
+        expanded={isExpanded(group)}
+        onToggle={() => toggleGroup(group)}
+        expandedTools={snapshot.expandedTools}
+        onToggleTool={handleToggleTool}
+      />,
+    )
+  }
+  flushFlatItems()
+
   return (
     <div
       ref={containerRef}
@@ -179,30 +219,7 @@ export function Timeline({
           发送第一条消息后，这里会显示 Agent 的回答、工具调用与审批记录。
         </div>
       ) : (
-        segments.map(segment => {
-          if (segment.kind === "flat") {
-            return (
-              <TimelineRow
-                key={timelineItemKey(segment.item)}
-                item={segment.item}
-                expandedTools={snapshot.expandedTools}
-                onToggleTool={handleToggleTool}
-              />
-            )
-          }
-          const group = segment.group
-          const open = isExpanded(group)
-          return (
-            <ActivityGroup
-              key={group.key}
-              group={group}
-              expanded={open}
-              onToggle={() => toggleGroup(group)}
-              expandedTools={snapshot.expandedTools}
-              onToggleTool={handleToggleTool}
-            />
-          )
-        })
+        renderedSegments
       )}
       <div className="live-interaction-slot" data-pending-request-id={pendingRequestId ?? undefined} />
       {/* 当前阶段状态放在时间线活动区附近，避免长历史把进度顶出视口。 */}
@@ -269,10 +286,10 @@ function ActivityGroup({
       </button>
       {expanded ? (
         <div className="timeline-activity-body">
-          {group.items.map(item => (
-            <TimelineRow
-              key={timelineItemKey(item)}
-              item={item}
+          {groupTimelineItems(group.items).map(items => (
+            <TimelineGroup
+              key={timelineItemKey(items[0] as TimelineItem)}
+              items={items}
               expandedTools={expandedTools}
               onToggleTool={onToggleTool}
             />
@@ -331,25 +348,138 @@ function isPendingLive(item: TimelineItem, pendingRequestId: string | null): boo
   )
 }
 
+/** 将 Agent 回复前后的 reasoning 及连续 tool 记录收进同一个消息气泡，并保持协议顺序。 */
+function groupTimelineItems(items: TimelineItem[]): TimelineItem[][] {
+  const groups: TimelineItem[][] = []
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index]
+    if (!isAssistantMessage(item) && !isAgentContinuation(item)) {
+      groups.push([item])
+      continue
+    }
+    const group: TimelineItem[] = [item]
+    let hasAssistant = isAssistantMessage(item)
+    while (index + 1 < items.length) {
+      const next = items[index + 1]
+      if (!next) break
+      if (isAssistantMessage(next)) {
+        if (hasAssistant) break
+        hasAssistant = true
+      } else if (!isAgentContinuation(next)) {
+        break
+      }
+      index += 1
+      group.push(next)
+    }
+    groups.push(group)
+  }
+  return groups
+}
+
+function isAssistantMessage(item: TimelineItem): item is Extract<TimelineItem, { type: "message" }> {
+  return item.type === "message" && item.message.role === "assistant"
+}
+
+function isAgentContinuation(item: TimelineItem): boolean {
+  return item.type === "reasoning" || item.type === "tool"
+}
+
+function TimelineGroup({
+  items,
+  expandedTools,
+  onToggleTool,
+}: {
+  items: TimelineItem[]
+  expandedTools: ReadonlySet<string>
+  onToggleTool: (runId: string, toolId: string) => void
+}): ReactElement {
+  const assistantIndex = items.findIndex(isAssistantMessage)
+  const reasoningItems = items.filter((item): item is Extract<TimelineItem, { type: "reasoning" }> => item.type === "reasoning")
+  if (assistantIndex < 0) {
+    const toolItems = items.filter((item): item is Extract<TimelineItem, { type: "tool" }> => item.type === "tool")
+    if (toolItems.length === 0 && reasoningItems.length === 0 && items.length === 1) {
+      const item = items[0]
+      if (item) return <TimelineRow item={item} expandedTools={expandedTools} onToggleTool={onToggleTool} />
+    }
+    if (toolItems.length > 0) {
+      return (
+        <div className="timeline-agent-group" data-tool-grouped="true">
+          <AgentGroupHeader />
+          {items.map(item => {
+            if (item.type === "reasoning") {
+              return <ReasoningRow key={timelineItemKey(item)} reasoning={item.reasoning} />
+            }
+            return (
+              <TimelineRow
+                key={timelineItemKey(item)}
+                item={item}
+                expandedTools={expandedTools}
+                onToggleTool={onToggleTool}
+              />
+            )
+          })}
+        </div>
+      )
+    }
+    return <AgentThinkingBubble reasoning={reasoningItems.map(item => item.reasoning)} />
+  }
+
+  const assistant = items[assistantIndex]
+  if (!assistant || assistant.type !== "message") return <></>
+  if (items.length === 1) return <TimelineRow item={assistant} expandedTools={expandedTools} onToggleTool={onToggleTool} />
+
+  return (
+    <div className="timeline-agent-group" data-tool-grouped="true">
+      <AgentGroupHeader message={assistant.message} />
+      {items.map(item => {
+        if (item.type === "reasoning") {
+          return <ReasoningRow key={timelineItemKey(item)} reasoning={item.reasoning} />
+        }
+        if (item.type === "message" && item.message.role === "assistant") {
+          return (
+            <TimelineRow
+              key={timelineItemKey(item)}
+              item={item}
+              expandedTools={expandedTools}
+              onToggleTool={onToggleTool}
+              grouped
+            />
+          )
+        }
+        return (
+          <TimelineRow
+            key={timelineItemKey(item)}
+            item={item}
+            expandedTools={expandedTools}
+            onToggleTool={onToggleTool}
+          />
+        )
+      })}
+    </div>
+  )
+}
+
 /** 顶层分派：根据 item 类型选 memo 包装；流式 Assistant 不 memo 以接收 in-place 更新。 */
 function TimelineRowImpl({
   item,
   expandedTools,
   onToggleTool,
+  grouped = false,
 }: {
   item: TimelineItem
   expandedTools: ReadonlySet<string>
   onToggleTool: (runId: string, toolId: string) => void
+  grouped?: boolean
 }): ReactElement {
   if (item.type === "message") {
     if (item.message.role === "assistant" && item.message.streaming === true) {
-      return <StreamingAssistantBubble message={item.message} />
+      return <StreamingAssistantBubble message={item.message} showHeader={!grouped} />
     }
-    return <MemoMessageBubble message={item.message} />
+    return <MemoMessageBubble message={item.message} showHeader={!grouped} />
   }
   if (item.type === "tool") {
     return (
-      <div className="timeline-tool">
+      <div className="timeline-tool tool-step">
         <MemoToolCard
           tool={item.tool}
           expanded={expandedTools.has(toolKey(item.tool.runId, item.tool.id))}
@@ -372,19 +502,51 @@ function TimelineRowImpl({
     )
   }
   return (
-    <div className="timeline-interaction">
+    <div className="timeline-interaction approval-history-card">
       <MemoInteractionCard interaction={item.interaction} />
     </div>
   )
 }
 
-/** 时间线中的思考条目：流式中显示全文，冻结后折叠为可展开标题行。 */
+function AgentGroupHeader({ message }: { message?: ConversationMessage }): ReactElement {
+  return (
+    <div className="timeline-agent-group-header agent-message-card">
+      <AgentMessageHeader timestampMs={message?.createdAtMs} />
+    </div>
+  )
+}
+
+function AgentMessageHeader({ timestampMs }: { timestampMs?: number }): ReactElement {
+  return (
+    <div className="message-head">
+      <span className="message-avatar avatar-assistant" aria-hidden="true"><Sparkles size={16} strokeWidth={1.8} /></span>
+      <span className="message-author-group">
+        <span className="message-author">Agent</span>
+        <MessageTimestamp timestampMs={timestampMs} />
+      </span>
+    </div>
+  )
+}
+
+/** Agent 尚未输出正文时也使用同一类模型气泡承载思考内容。 */
+function AgentThinkingBubble({ reasoning }: { reasoning: ReasoningCard[] }): ReactElement {
+  return (
+    <div className="timeline-message message-assistant agent-message-card agent-thinking-card" data-streaming="true">
+      <AgentMessageHeader />
+      <div className="message-body">
+        {reasoning.map(item => <ReasoningRow key={item.id} reasoning={item} />)}
+      </div>
+    </div>
+  )
+}
+
+/** 时间线中的思考条目：进行中显示全文，完成后由 Timeline 过滤掉。 */
 function ReasoningRow({ reasoning }: { reasoning: ReasoningCard }): ReactElement {
   const [expanded, setExpanded] = useState(false)
   const first = firstLine(reasoning.text)
   const showFull = expanded || reasoning.active
   return (
-    <div className="reasoning" role="status" aria-live="polite" data-active={reasoning.active}>
+    <div className="reasoning reasoning-card" role="status" aria-live="polite" data-active={reasoning.active}>
       <div className="reasoning-header" onClick={() => setExpanded(current => !current)}>
         {reasoning.active ? (
           <Loader2 aria-hidden="true" focusable="false" className="run-progress-spinner spinning" />
@@ -407,14 +569,17 @@ const TimelineRow = memo(TimelineRowImpl)
 TimelineRow.displayName = "TimelineRow"
 
 /** 流式 Assistant 消息：内容随时 in-place 更新；不 memo 才能接收每帧变更。 */
-function StreamingAssistantBubble({ message }: { message: ConversationMessage }): ReactElement {
+function StreamingAssistantBubble({
+  message,
+  showHeader,
+}: {
+  message: ConversationMessage
+  showHeader: boolean
+}): ReactElement {
   return (
-    <div className="timeline-message message-assistant" data-streaming="true">
-      <div className="message-head">
-        <span className="message-author">Harness</span>
-      </div>
+    <div className="timeline-message message-assistant agent-message-card" data-streaming="true">
+      {showHeader ? <AgentMessageHeader timestampMs={message.createdAtMs} /> : null}
       <div className="message-body">
-        <span className="message-avatar avatar-assistant" aria-hidden="true">H</span>
         <div className="message-content">
           {message.content.length > 0 ? <Markdown text={message.content} /> : null}
           <span className="streaming-cursor" aria-hidden="true" />
@@ -425,15 +590,18 @@ function StreamingAssistantBubble({ message }: { message: ConversationMessage })
 }
 
 /** 用户、Assistant（已结束）和系统消息；统一左对齐阅读流，角色由 avatar 标识。 */
-function MessageBubbleImpl({ message }: { message: ConversationMessage }): ReactElement {
+function MessageBubbleImpl({
+  message,
+  showHeader,
+}: {
+  message: ConversationMessage
+  showHeader: boolean
+}): ReactElement {
   if (message.role === "assistant") {
     return (
-      <div className="timeline-message message-assistant" data-streaming={message.streaming ? "true" : undefined}>
-        <div className="message-head">
-          <span className="message-author">Harness</span>
-        </div>
+      <div className="timeline-message message-assistant agent-message-card" data-streaming={message.streaming ? "true" : undefined}>
+        {showHeader ? <AgentMessageHeader timestampMs={message.createdAtMs} /> : null}
         <div className="message-body">
-          <span className="message-avatar avatar-assistant" aria-hidden="true">H</span>
           <div className="message-content">
             {message.content.length > 0 ? <Markdown text={message.content} /> : null}
           </div>
@@ -449,17 +617,32 @@ function MessageBubbleImpl({ message }: { message: ConversationMessage }): React
     )
   }
   return (
-    <div className="timeline-message message-user">
+    <div className="timeline-message message-user user-message-card">
       <div className="message-head">
-        <span className="message-author">你</span>
+        <span className="message-avatar avatar-user" aria-hidden="true"><MessageCircle size={16} strokeWidth={1.8} /></span>
+        <span className="message-author-group">
+          <span className="message-author">用户</span>
+          <MessageTimestamp timestampMs={message.createdAtMs} />
+        </span>
       </div>
       <div className="message-body">
-        <span className="message-avatar avatar-user" aria-hidden="true">U</span>
         <div className="message-content">
           {message.content}
         </div>
       </div>
     </div>
+  )
+}
+
+/** 将消息首次进入时间线的毫秒时间戳显示为本地时区的小时和分钟。 */
+function MessageTimestamp({ timestampMs }: { timestampMs?: number }): ReactElement | null {
+  if (typeof timestampMs !== "number" || !Number.isFinite(timestampMs)) return null
+  const date = new Date(timestampMs)
+  if (Number.isNaN(date.getTime())) return null
+  return (
+    <time className="message-time" dateTime={date.toISOString()}>
+      {date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}
+    </time>
   )
 }
 

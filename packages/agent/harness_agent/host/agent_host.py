@@ -3461,6 +3461,8 @@ def _thread_message_payload(message: Any) -> dict[str, object]:
     payload: dict[str, object] = {"kind": message.kind, "content": message.content}
     if message.tool_name is not None:
         payload["tool_name"] = message.tool_name
+    if message.created_at_ms is not None:
+        payload["created_at_ms"] = message.created_at_ms
     return payload
 
 

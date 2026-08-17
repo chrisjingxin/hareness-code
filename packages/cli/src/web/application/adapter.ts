@@ -1,6 +1,6 @@
 /** Web Interactive Adapter：只拥有浏览器表现状态，通过 WebUiClient 消费共享 Core 视图并提交 intent。 */
 
-import type { ApprovalDecision, InteractiveIntent, InteractiveMcpInput, IntentOutcome, InteractiveSnapshot, InteractiveResponse } from "../../interactive/types"
+import type { ApprovalDecision, InteractiveApprovalMode, InteractiveIntent, InteractiveMcpInput, IntentOutcome, InteractiveSnapshot, InteractiveResponse } from "../../interactive/types"
 import type { CommandMenuItem } from "../../interactive/commands"
 import type { PresentationState, WorkspacePreviewView, WorkspaceTreeView } from "../../presentation-coordinator"
 import { filterCommandMenuItems } from "../../presentation-shared"
@@ -153,6 +153,7 @@ export type WebIntent =
   | { type: "tool-toggle"; runId: string; toolId: string }
   | { type: "approval-mode-cycle" }
   | { type: "work-mode-cycle" }
+  | { type: "approval-mode-select"; mode: InteractiveApprovalMode }
   | { type: "cancel-run" }
   | { type: "notice-dismiss" }
   | { type: "theme-set"; theme: WebTheme }
@@ -205,14 +206,14 @@ type ContextDockState = {
 
 /** 文件 Tab 上限：超出后淘汰最久未使用的非当前 tab。 */
 const MAX_FILE_TABS = 12
-const DOCK_WIDTH_MIN = 400
+const DOCK_WIDTH_MIN = 330
 const DOCK_WIDTH_MAX = 760
-const DOCK_WIDTH_INITIAL = 560
-/** 左侧侧栏宽度（顶栏品牌列同步）：保证分隔竖线上下连续对齐。 */
+const DOCK_WIDTH_INITIAL = 354
+/** 左侧侧栏宽度：控制三栏工作区的第一列，并可由用户拖动调整。 */
 const SIDEBAR_WIDTH_MIN = 220
 const SIDEBAR_WIDTH_MAX = 480
-const SIDEBAR_WIDTH_INITIAL = 280
-const THREAD_RATIO_INITIAL = 0.38
+const SIDEBAR_WIDTH_INITIAL = 296
+const THREAD_RATIO_INITIAL = 0.45
 /** Thread 分区比例夹取区间：下限保证 Files 可见，上限保证 Thread 可见（CSS 另有 px 级 min）。 */
 const THREAD_RATIO_MIN = 0.2
 const THREAD_RATIO_MAX = 0.8
@@ -417,6 +418,9 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
         return
       case "work-mode-cycle":
         await this.executeCoreIntent({ type: "work-mode.cycle" })
+        return
+      case "approval-mode-select":
+        await this.executeCoreIntent({ type: "approval-mode.set", mode: intent.mode })
         return
       case "cancel-run":
         await this.executeCoreIntent({ type: "run.cancel" })

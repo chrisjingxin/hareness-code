@@ -2,7 +2,7 @@
 /** @jsxImportSource react */
 
 import { useEffect, useRef, useState } from "react"
-import { AlertTriangle, ChevronDown, Loader2, Send, Square, Wrench, X } from "lucide-react"
+import { AlertTriangle, AtSign, ChevronDown, Loader2, Paperclip, Send, Slash, Square, Wrench, X } from "lucide-react"
 
 import {
   commandMenuItemDescription,
@@ -108,6 +108,9 @@ export function Composer(props: {
           />
         ) : null}
         <div className="composer-box">
+          <div className="composer-tabs" aria-hidden="true">
+            <span className="composer-tab is-active">聊天</span>
+          </div>
           <textarea
             ref={textareaRef}
             className="composer-textarea"
@@ -123,6 +126,11 @@ export function Composer(props: {
           />
           <div className="composer-rail">
             <div className="composer-rail-left">
+              <span className="composer-decoration-icons" aria-hidden="true">
+                <Paperclip />
+                <AtSign />
+                <Slash />
+              </span>
               {armedSkill ? (
                 <span className="skill-chip" role="status">
                   <Wrench aria-hidden="true" className="skill-chip-icon" />

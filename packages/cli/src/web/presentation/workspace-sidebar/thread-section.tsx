@@ -2,7 +2,7 @@
 /** @jsxImportSource react */
 
 import { useState } from "react"
-import { Search } from "lucide-react"
+import { MessagesSquare, Search } from "lucide-react"
 
 import type { ThreadSummary } from "@za38/protocol"
 
@@ -33,20 +33,20 @@ export function ThreadSection({
           <input
             type="search"
             value={query}
-            placeholder="搜索 Thread…"
+            placeholder="搜索线程..."
             aria-label="搜索 Thread"
             onChange={event => setQuery(event.currentTarget.value)}
             disabled={disabled}
           />
         </label>
       </div>
-      <div className="sidebar-section-label">最近 Thread</div>
       <ThreadList
         items={items}
         status={threads.status}
         error={threads.status === "error" ? threads.message : null}
         currentThreadId={interactive.currentThreadId}
         busy={busy}
+        interaction={interactive.interaction}
         busyReason={busyReason}
         disabled={disabled}
         dispatch={dispatch}
@@ -61,6 +61,7 @@ function ThreadList({
   error,
   currentThreadId,
   busy,
+  interaction,
   busyReason,
   disabled,
   dispatch,
@@ -70,6 +71,7 @@ function ThreadList({
   error: string | null
   currentThreadId: string | null
   busy: boolean
+  interaction: WebAdapterSnapshot["interactive"]["interaction"]
   busyReason: string | null
   disabled: boolean
   dispatch: (intent: WebIntent) => void
@@ -112,17 +114,30 @@ function ThreadList({
               title={itemDisabled ? (disabled ? "接管尚未完成或连接不可用" : busyReason ?? undefined) : undefined}
               onClick={() => dispatch({ type: "thread-select", threadId: item.thread_id })}
             >
+              <span className="thread-item-icon" aria-hidden="true">
+                <MessagesSquare size={18} strokeWidth={1.7} />
+              </span>
               <span className="thread-item-title">{item.first_message || item.latest_message || "（无标题）"}</span>
-              {item.latest_message && item.latest_message !== item.first_message ? (
-                <span className="thread-item-summary">{item.latest_message}</span>
-              ) : null}
-              <span className="thread-item-meta">{`${formatUpdated(item.updated_at_ms)} · ${item.message_count} 条消息`}</span>
+              <span className="thread-item-summary">{threadSubtitle(item, currentThreadId, busy, interaction)}</span>
+              <span className="thread-item-meta">{formatUpdated(item.updated_at_ms)}</span>
             </button>
           </li>
         )
       })}
     </ul>
   )
+}
+
+/** ThreadSummary 没有历史状态字段；只对当前可观测的运行/审批展示进行中，其余显示设计稿文案。 */
+function threadSubtitle(
+  item: ThreadSummary,
+  currentThreadId: string | null,
+  busy: boolean,
+  interaction: WebAdapterSnapshot["interactive"]["interaction"],
+): string {
+  if (item.thread_id !== currentThreadId || !busy) return "已完成"
+  if (interaction?.type === "approval") return "正在审查文件变更"
+  return "正在处理当前变更"
 }
 
 /** 轻量级本地过滤：搜索词在 ThreadSection 内部维护，不再经 Adapter 往返。 */
@@ -140,10 +155,16 @@ function filterThreads(
 
 /** 把更新时间折叠成短标签，与 TUI Picker 的展示口径保持一致。 */
 function formatUpdated(updatedAtMs: number): string {
-  const elapsedMinutes = Math.max(0, Math.floor((Date.now() - updatedAtMs) / 60_000))
-  if (elapsedMinutes < 1) return "刚刚"
-  if (elapsedMinutes < 60) return `${elapsedMinutes} 分钟前`
-  const elapsedHours = Math.floor(elapsedMinutes / 60)
-  if (elapsedHours < 24) return `${elapsedHours} 小时前`
-  return `${Math.floor(elapsedHours / 24)} 天前`
+  const updated = new Date(updatedAtMs)
+  const now = new Date()
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+  const startOfUpdatedDay = new Date(updated.getFullYear(), updated.getMonth(), updated.getDate()).getTime()
+  const dayDelta = Math.floor((startOfToday - startOfUpdatedDay) / 86_400_000)
+  if (dayDelta === 0) {
+    return updated.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })
+  }
+  if (dayDelta === 1) return "昨天"
+  if (dayDelta > 1 && dayDelta < 7) return `${dayDelta} 天前`
+  if (dayDelta >= 7 && dayDelta < 14) return "1 周前"
+  return updated.toLocaleDateString([], { month: "numeric", day: "numeric" })
 }

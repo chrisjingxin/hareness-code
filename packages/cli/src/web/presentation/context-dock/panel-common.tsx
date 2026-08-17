@@ -6,12 +6,12 @@ import { RefreshCw, Search } from "lucide-react"
 import type { FeatureAvailability } from "../../../interactive/selectors"
 import type { ContextDockPanel } from "../../application/adapter"
 
-/** Dock 主 tab：Code 与 Status 恒可见；Help 只从顶栏更多菜单打开不占 tab。 */
-export type DockTab = "code" | "models" | "skills" | "mcp" | "status"
+/** Dock 主 tab：设计稿中的所有面板均在同一组标签内切换。 */
+export type DockTab = "code" | "models" | "skills" | "mcp" | "status" | "help"
 
-export const DOCK_TABS: readonly DockTab[] = ["code", "models", "skills", "mcp", "status"]
+export const DOCK_TABS: readonly DockTab[] = ["code", "models", "skills", "mcp", "status", "help"]
 
-/** 主 tab 可见性：只显示 capability 允许的 tab；Code/Status 恒可见。 */
+/** 主 tab 可见性：只显示 capability 允许的 tab；Code/Status/Help 恒可见。 */
 export function tabVisible(tab: DockTab, availability: Pick<FeatureAvailability, "canOpenModelsPanel" | "canOpenSkillsPanel" | "canOpenMcpPanel">): boolean {
   switch (tab) {
     case "models": return availability.canOpenModelsPanel
@@ -19,17 +19,18 @@ export function tabVisible(tab: DockTab, availability: Pick<FeatureAvailability,
     case "mcp": return availability.canOpenMcpPanel
     case "code":
     case "status": return true
+    case "help": return true
   }
 }
 
 /** 主 tab 与 Help 面板的展示标签。 */
 export function tabLabel(tab: ContextDockPanel): string {
   switch (tab) {
-    case "code": return "Code"
-    case "models": return "Model"
-    case "skills": return "Skills"
+    case "code": return "代码"
+    case "models": return "模型"
+    case "skills": return "技能"
     case "mcp": return "MCP"
-    case "status": return "Status"
+    case "status": return "状态"
     case "help": return "帮助"
   }
 }

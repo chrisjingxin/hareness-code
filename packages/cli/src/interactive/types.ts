@@ -14,7 +14,9 @@ import type { InteractiveRuntime } from "./runtime"
 import type { ComposeProjection, InteractiveActivity, ActiveRun, RunProgress, RunSummary, TimelineItem, WorkItemProjection, WorkItemStatus, WorkMode } from "./state"
 import type { AgentGateway, Clock, IdGenerator, Scheduler } from "./ports"
 
-export type { ActiveRun, ComposeProjection, InteractiveActivity, InteractiveRuntime, RunProgress, RunSummary, TimelineItem, WorkItemProjection, WorkItemStatus, WorkMode }
+import type { InteractiveApprovalMode } from "./runtime"
+
+export type { ActiveRun, ComposeProjection, InteractiveActivity, InteractiveApprovalMode, InteractiveRuntime, RunProgress, RunSummary, TimelineItem, WorkItemProjection, WorkItemStatus, WorkMode }
 
 /** 审批决定类型，与协议 ApprovalResponse.decision 保持一致。 */
 export type ApprovalDecision = "approve_once" | "approve_thread" | "approve_project" | "reject" | "reject_with_feedback"
@@ -144,6 +146,7 @@ export type InteractiveIntent =
   | { type: "confirmation.resolve"; confirmationId: string; confirmed: boolean }
   | { type: "approval-mode.cycle" }
   | { type: "work-mode.cycle" }
+  | { type: "approval-mode.set"; mode: InteractiveApprovalMode }
 
 /** 两个 adapter 都需要的领域事实；不包含终端尺寸、DOM、颜色或组件状态。 */
 export type InteractiveSnapshot = {

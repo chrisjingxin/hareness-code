@@ -178,6 +178,11 @@ export class InteractiveControllerImpl implements InteractiveController {
         }
         this.commit(current => setWorkMode(current, current.workMode === "build" ? "compose" : "build"))
         return { status: "accepted" }
+      case "approval-mode.set":
+        if (this.state.activeRun || this.hasPendingInteraction) {
+          return { status: "rejected", code: "busy", message: "任务运行中或存在待处理交互，暂不能切换审批模式" }
+        }
+        return this.runFeature.setApprovalMode(intent.mode, this.featureContext)
       case "run.cancel":
         return this.runFeature.cancelActiveRun(this.featureContext, () => this.interactionFeature.abandonPendingInteraction(this.featureContext))
 

@@ -26,8 +26,8 @@ test("手动压缩使用独立 pending 状态并在终态恢复空闲", () => {
 test("恢复 thread 会原子替换时间线并清空旧运行状态", () => {
   const active = startRun(createInitialState(), run, "旧 thread 消息")
   const restored = restoreThread("restored-thread", [
-    { kind: "user", content: "此前请求" },
-    { kind: "assistant", content: "此前回答" },
+    { kind: "user", content: "此前请求", createdAtMs: 1_706_000_000_000 },
+    { kind: "assistant", content: "此前回答", createdAtMs: 1_706_000_001_000 },
     { kind: "tool", content: "此前工具结果", toolName: "execute" },
   ])
   expect(active.activeRun).toBeDefined()
@@ -35,6 +35,7 @@ test("恢复 thread 会原子替换时间线并清空旧运行状态", () => {
   expect(restored.activeRun).toBeNull()
   expect(restored.sequences).toEqual({})
   expect(restored.timeline.map(item => item.type)).toEqual(["message", "message", "tool"])
+  expect(messages(restored).map(message => message.createdAtMs)).toEqual([1_706_000_000_000, 1_706_000_001_000])
 })
 
 test("恢复 compose activities 进入 Timeline 且不含 Reasoning 原始字段", () => {

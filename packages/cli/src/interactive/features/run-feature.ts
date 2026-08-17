@@ -56,6 +56,12 @@ export class RunFeature {
     return { status: "accepted" }
   }
 
+  setApprovalMode(mode: InteractiveApprovalMode, ctx: FeatureContext): IntentOutcome {
+    this.approvalModeOverride = mode
+    ctx.publish()
+    return { status: "accepted" }
+  }
+
   async startRun(
     value: string,
     ctx: FeatureContext,
@@ -79,6 +85,7 @@ export class RunFeature {
     }
 
     try {
+      const startedAtMs = ctx.clock.now()
       const run = ctx.gateway.startRun({
         message: value,
         mode: options.mode,
@@ -89,7 +96,7 @@ export class RunFeature {
       })
 
       this.activeRunHandle = run
-      ctx.commit(current => startRunState(current, run.ref, value))
+      ctx.commit(current => startRunState(current, run.ref, value, startedAtMs))
 
       // accepted 被拒绝：当前 Run 立即收敛为 failed，不残留 activeRun。
       void run.accepted.catch(error => {

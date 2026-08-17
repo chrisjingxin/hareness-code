@@ -6,7 +6,7 @@ import { act } from "react"
 
 import { WebApp } from "../../../src/web/presentation/web-app"
 import type { WebAdapterSnapshot, WebIntent, WebInteractiveAdapter } from "../../../src/web/application/adapter"
-import { makeInteractive, makeRuntime, makeSnapshot } from "./fixtures"
+import { makeInteractive, makeSnapshot } from "./fixtures"
 import { registerTestDom, render, type RenderHandle } from "./render"
 
 const unregisterTestDom = registerTestDom()
@@ -62,9 +62,7 @@ describe("WebApp", () => {
       expect(opening?.getAttribute("data-theme")).toBe("light")
       const handoff = handle.container.querySelector(".handoff-banner")
       expect(handoff?.textContent).toContain("等待 CLI 确认控制权")
-      const statusChips = handle.container.querySelectorAll(".topbar-meta .meta-chip")
-      const statusChip = statusChips[statusChips.length - 1]
-      expect(statusChip?.textContent).toContain("正在接管")
+      expect(handle.container.querySelector(".meta-chip-run")).toBeNull()
       const composer = handle.container.querySelector<HTMLTextAreaElement>(".composer-textarea")
       expect(composer?.disabled).toBe(true)
       expect(adapter.intentLog.length).toBe(0)
@@ -87,33 +85,25 @@ describe("WebApp", () => {
     }
   })
 
-  test("Run 状态使用 Topbar 最高状态层级，仍保留文字和状态图标语义", () => {
+  test("Run 状态不再渲染顶栏活动状态入口", () => {
     const { handle } = mountWebApp(true, makeSnapshot({
       interactive: makeInteractive({ activity: { kind: "running" }, activeRun: { threadId: "t1", runId: "r1" } }),
     }))
     try {
-      const runChip = handle.container.querySelector<HTMLButtonElement>(".meta-chip-run")
-      expect(runChip).not.toBeNull()
-      expect(runChip?.textContent).toContain("正在运行")
-      expect(runChip?.querySelector(".status-dot-running")).not.toBeNull()
-      expect(handle.container.querySelectorAll(".topbar-meta .meta-chip-run")).toHaveLength(1)
+      expect(handle.container.querySelector(".meta-chip-run")).toBeNull()
     } finally {
       handle.unmount()
     }
   })
 
-  test("project-meta 展示 Git 分支状态", () => {
-    const { handle } = mountWebApp(
-      true,
-      makeSnapshot({
-        interactive: makeInteractive({
-          runtime: makeRuntime({ gitWorkspace: { kind: "branch", branch: "main", root: "/workspace" } }),
-        }),
-      }),
-    )
+  test("顶栏只读展示工作区，并移除分支与活动状态入口", () => {
+    const { handle } = mountWebApp(true, makeSnapshot())
     try {
-      const meta = handle.container.querySelector(".project-meta")
-      expect(meta?.textContent).toBe("main")
+      expect(handle.container.querySelector(".brand-name")?.textContent).toBe("Harness Code")
+      expect(handle.container.querySelector(".topbar-project .project-name")?.textContent).toBe("workspace")
+      expect(handle.container.querySelector(".topbar-project .topbar-segment-chevron")).toBeNull()
+      expect(handle.container.querySelector(".topbar-branch")).toBeNull()
+      expect(handle.container.querySelector(".meta-chip-run")).toBeNull()
     } finally {
       handle.unmount()
     }
@@ -149,7 +139,7 @@ describe("WebApp", () => {
     }
   })
 
-  test("header menu 提供审批模式切换：展示当前模式并派发 approval-mode-cycle", () => {
+  test("header menu 提供审批模式选择入口", () => {
     const { adapter, handle } = mountWebApp(true, makeSnapshot())
     try {
       act(() => {
@@ -161,9 +151,43 @@ describe("WebApp", () => {
         .find(item => item.textContent?.includes("审批模式"))
       expect(approvalItem?.textContent).toContain("default")
       act(() => { approvalItem?.click() })
-      expect(adapter.intentLog).toContainEqual({ type: "approval-mode-cycle" })
+      expect(adapter.intentLog).toContainEqual({ type: "header-menu-toggle", open: false })
+      expect(handle.container.querySelector(".approval-mode-menu")).not.toBeNull()
     } finally {
       handle.unmount()
+    }
+  })
+
+  test("顶栏审批模式控件打开下拉并直接选择模式，忙碌时禁用", () => {
+    const { adapter, handle } = mountWebApp(true, makeSnapshot())
+    try {
+      const control = handle.container.querySelector<HTMLButtonElement>(".topbar-approval-mode")
+      expect(control).not.toBeNull()
+      expect(control?.textContent).toContain("default")
+      expect(control?.getAttribute("aria-label")).toBe("选择审批模式，当前：default")
+      expect(control?.title).toContain("plan、default、auto-edit、auto、yolo")
+      expect(control?.getAttribute("aria-haspopup")).toBe("menu")
+      expect(control?.getAttribute("aria-expanded")).toBe("false")
+      expect(control?.disabled).toBe(false)
+
+      act(() => { control?.click() })
+      expect(control?.getAttribute("aria-expanded")).toBe("true")
+      const options = Array.from(handle.container.querySelectorAll<HTMLButtonElement>(".approval-mode-option"))
+      expect(options.map(option => option.textContent?.replace("✓", "").trim())).toEqual(["plan", "default", "auto-edit", "auto", "yolo"])
+
+      const autoOption = options.find(option => option.textContent?.includes("auto") && !option.textContent?.includes("auto-edit"))
+      act(() => { autoOption?.click() })
+      expect(adapter.intentLog).toContainEqual({ type: "approval-mode-select", mode: "auto" })
+    } finally {
+      handle.unmount()
+    }
+
+    const busy = makeInteractive({ activeRun: { threadId: "t1", runId: "r1" } })
+    const busyMount = mountWebApp(true, makeSnapshot({ interactive: busy }))
+    try {
+      expect(busyMount.handle.container.querySelector<HTMLButtonElement>(".topbar-approval-mode")?.disabled).toBe(true)
+    } finally {
+      busyMount.handle.unmount()
     }
   })
 

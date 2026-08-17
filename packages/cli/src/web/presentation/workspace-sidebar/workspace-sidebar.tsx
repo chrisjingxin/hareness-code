@@ -11,6 +11,8 @@ import { FileExplorer } from "./file-explorer"
 /** 垂直分隔条高度；Thread 分区高度 = (100% - 分隔条) * threadRatio。 */
 const RESIZE_HANDLE_PX = 5
 const THREAD_MIN_PX = 160
+// Thread 标题栏及其上下留白占用的卡片额外高度。
+const THREAD_PANEL_EXTRA_PX = 56
 const FILES_MIN_PX = 220
 
 /**
@@ -31,25 +33,30 @@ export function WorkspaceSidebar({
   return (
     <aside className="workspace-sidebar" aria-label="工作区导航">
       <SidebarResizeHandle widthPx={snapshot.workspaceSidebar.widthPx} dispatch={dispatch} disabled={disabled} />
-      <button
-        type="button"
-        className="new-thread-button button-secondary"
-        onClick={() => dispatch({ type: "thread-new" })}
-        disabled={disabled || busy || snapshot.threadNewSubmitting}
-        aria-disabled={disabled || busy || snapshot.threadNewSubmitting}
-        title={disabled ? "接管尚未完成或连接不可用" : busy ? "当前任务结束后可用" : snapshot.threadNewSubmitting ? "正在新建…" : "新建 Thread"}
-      >
-        <Plus aria-hidden="true" size={14} />
-        <span>新建 Thread</span>
-      </button>
       <div
-        className="workspace-sidebar-thread"
+        className="workspace-sidebar-thread-panel"
         style={{
           height: `calc((100% - ${RESIZE_HANDLE_PX}px) * ${snapshot.workspaceSidebar.threadRatio})`,
-          minHeight: THREAD_MIN_PX,
+          minHeight: THREAD_MIN_PX + THREAD_PANEL_EXTRA_PX,
         }}
       >
-        <ThreadSection snapshot={snapshot} dispatch={dispatch} disabled={disabled} />
+        <div className="thread-panel-header">
+          <span className="thread-panel-title">线程</span>
+          <button
+            type="button"
+            className="new-thread-button button-secondary"
+            onClick={() => dispatch({ type: "thread-new" })}
+            disabled={disabled || busy || snapshot.threadNewSubmitting}
+            aria-label="新建 Thread"
+            aria-disabled={disabled || busy || snapshot.threadNewSubmitting}
+            title={disabled ? "接管尚未完成或连接不可用" : busy ? "当前任务结束后可用" : snapshot.threadNewSubmitting ? "正在新建…" : "新建 Thread"}
+          >
+            <Plus aria-hidden="true" size={17} strokeWidth={1.8} />
+          </button>
+        </div>
+        <div className="workspace-sidebar-thread">
+          <ThreadSection snapshot={snapshot} dispatch={dispatch} disabled={disabled} />
+        </div>
       </div>
       <VerticalResizeHandle threadRatio={snapshot.workspaceSidebar.threadRatio} dispatch={dispatch} disabled={disabled} />
       <div className="workspace-sidebar-files" style={{ minHeight: FILES_MIN_PX }}>

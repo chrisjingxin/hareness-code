@@ -37,6 +37,32 @@ describe("ContextDock", () => {
     }
   })
 
+  test("Code 面板与主 tab 共用一个 Dock，并填满剩余高度", () => {
+    const intents: WebIntent[] = []
+    const handle = mountDock(dockSnapshot("code", {
+      contextDock: {
+        open: true,
+        activePanel: "code",
+        widthPx: 560,
+        code: {
+          tabs: [{ path: "src/example.ts", name: "example.ts", language: "typescript" }],
+          activePath: "src/example.ts",
+          previews: {},
+          previewErrors: {},
+        },
+      },
+    }), intents)
+    try {
+      expect(handle.container.querySelector(".context-dock-code-scroll")).not.toBeNull()
+      expect(handle.container.querySelector(".context-dock-stack")).toBeNull()
+      expect(handle.container.querySelector(".context-dock-status-card")).toBeNull()
+      expect(handle.container.querySelector(".context-dock-model-card")).toBeNull()
+      expect(handle.container.querySelector(".context-dock-code-footer")).toBeNull()
+    } finally {
+      handle.unmount()
+    }
+  })
+
   test("activePanel=models 列出 Profile 并 dispatch model-select", () => {
     const intents: WebIntent[] = []
     const interactive = makeInteractive({
@@ -206,9 +232,9 @@ describe("ContextDock", () => {
       expect(header?.querySelector(".panel-close")).not.toBeNull()
       expect(handle.container.querySelectorAll(".context-dock-header")).toHaveLength(1)
       const tabs = Array.from(handle.container.querySelectorAll<HTMLButtonElement>('[role="tab"]'))
-      expect(tabs.length).toBe(5) // Code|Model|Skills|MCP|Status
-      const modelTab = tabs.find(tab => tab.textContent === "Model")
-      const codeTab = tabs.find(tab => tab.textContent === "Code")
+      expect(tabs.length).toBe(6) // 代码|模型|技能|MCP|状态|帮助
+      const modelTab = tabs.find(tab => tab.textContent === "模型")
+      const codeTab = tabs.find(tab => tab.textContent === "代码")
       expect(modelTab?.getAttribute("aria-selected")).toBe("true")
       expect(codeTab?.getAttribute("aria-selected")).toBe("false")
       act(() => { codeTab?.click() })
@@ -232,13 +258,13 @@ describe("ContextDock", () => {
       expect(intents).toContainEqual({ type: "dock-panel-select", panel: "models" })
       act(() => { tablist?.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true, cancelable: true })) })
       expect(document.activeElement).toBe(tabs[tabs.length - 1])
-      expect(intents).toContainEqual({ type: "dock-panel-select", panel: "status" })
+      expect(intents).toContainEqual({ type: "dock-panel-select", panel: "help" })
     } finally {
       handle.unmount()
     }
   })
 
-  test("主 tab 受 capability 过滤：无 MODELS_READ/SKILLS_READ/MCP_READ 时只显示 Code + Status", () => {
+  test("主 tab 受 capability 过滤：无 MODELS_READ/SKILLS_READ/MCP_READ 时只显示代码 + 状态 + 帮助", () => {
     const intents: WebIntent[] = []
     const interactive = makeInteractive({
       runtime: makeRuntime({ capabilities: ["status.read"] }),
@@ -246,20 +272,20 @@ describe("ContextDock", () => {
     const handle = mountDock(dockSnapshot("status", { interactive }), intents)
     try {
       const tabs = Array.from(handle.container.querySelectorAll<HTMLButtonElement>('[role="tab"]'))
-      expect(tabs.map(tab => tab.textContent)).toEqual(["Code", "Status"])
+      expect(tabs.map(tab => tab.textContent)).toEqual(["代码", "状态", "帮助"])
     } finally {
       handle.unmount()
     }
   })
 
-  test("activePanel=help 时标题为「帮助」且不渲染主 tab；内容列出命令", () => {
+  test("activePanel=help 时帮助 tab 选中；内容列出命令", () => {
     const intents: WebIntent[] = []
     const interactive = makeInteractive({ commands: [] })
     const handle = mountDock(dockSnapshot("help", { interactive }), intents)
     try {
-      const title = handle.container.querySelector(".context-dock-title")
-      expect(title?.textContent).toBe("帮助")
-      expect(handle.container.querySelector('[role="tablist"]')).toBeNull()
+      const helpTab = handle.container.querySelector<HTMLButtonElement>('[role="tab"][data-panel="help"]')
+      expect(helpTab?.getAttribute("aria-selected")).toBe("true")
+      expect(handle.container.querySelector('[role="tablist"]')).not.toBeNull()
       expect(handle.container.querySelector(".help-view")).not.toBeNull()
     } finally {
       handle.unmount()

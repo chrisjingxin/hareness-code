@@ -56,9 +56,11 @@ async def test_thread_rpc_requires_capability_and_only_lists_current_project(tmp
     }]
 
     await server.dispatch(_request("threads.open", {"thread_id": "thread-1"}, "open"))
-    assert frames[-1]["result"]["messages"] == [
-        {"kind": "user", "content": "恢复这个 thread"}
-    ]
+    messages = frames[-1]["result"]["messages"]
+    assert len(messages) == 1
+    assert messages[0]["kind"] == "user"
+    assert messages[0]["content"] == "恢复这个 thread"
+    assert isinstance(messages[0]["created_at_ms"], int)
     await server.close()
 
 

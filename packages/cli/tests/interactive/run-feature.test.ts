@@ -23,6 +23,20 @@ test("approval-mode.cycle 循环切换审批模式，并传递给下一次 Run",
   }
 })
 
+test("approval-mode.set 直接选择审批模式，并传递给下一次 Run", async () => {
+  const harness = makeHarness()
+  try {
+    const outcome = await harness.controller.dispatch({ type: "approval-mode.set", mode: "yolo" })
+    expect(outcome).toEqual({ status: "accepted" })
+    expect(harness.controller.getSnapshot().runtime.approvalMode).toBe("yolo")
+
+    await harness.controller.dispatch({ type: "input.submit", value: "使用指定模式" })
+    expect(harness.port.lastRunSelection()).toMatchObject({ message: "使用指定模式", approvalMode: "yolo" })
+  } finally {
+    await harness.controller.close()
+  }
+})
+
 test("普通输入启动 Run，流式内容与终态更新 Timeline", async () => {
   const harness = makeHarness()
   try {
@@ -113,9 +127,6 @@ test("connection close 禁止新 Run 并收敛 Interaction", async () => {
     await harness.controller.close()
   }
 })
-
-
-
 test("work-mode.cycle 空闲时切换 Build/Compose 并传给下一次 Run", async () => {
   const harness = makeHarness()
   try {

@@ -405,7 +405,8 @@
     "threadMessage": {
       "type": "object", "required": ["kind", "content"],
       "properties": {
-        "kind": { "enum": ["user", "assistant", "tool"] }, "content": { "type": "string" }, "tool_name": { "type": "string" }
+        "kind": { "enum": ["user", "assistant", "tool"] }, "content": { "type": "string" }, "tool_name": { "type": "string" },
+        "created_at_ms": { "type": "integer", "minimum": 0 }
       },
       "additionalProperties": false
     },

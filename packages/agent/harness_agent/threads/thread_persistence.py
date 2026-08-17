@@ -2598,6 +2598,7 @@ class ThreadMessage:
     kind: Literal["user", "assistant", "tool"]
     content: str
     tool_name: str | None = None
+    created_at_ms: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -8616,7 +8617,12 @@ def _thread_message_from_transcript(record: TranscriptRecord) -> ThreadMessage |
            and raw_tool_name
         else None
     )
-    return ThreadMessage(kind=record.kind, content=content, tool_name=tool_name)  # type: ignore[arg-type]
+    return ThreadMessage(
+        kind=record.kind,
+        content=content,
+        tool_name=tool_name,
+        created_at_ms=record.created_at_ms,
+    )  # type: ignore[arg-type]
 
 
 def _checkpoint_messages(checkpoint: Mapping[str, Any] | Any) -> list[Any] | None:

@@ -100,6 +100,7 @@ const clientMessages: WebUiClientMessage[] = [
   },
   { type: "interactive.intent", requestId: "r-14", revision: 1, intent: { type: "confirmation.resolve", confirmationId: "clear-thread", confirmed: false } },
   { type: "interactive.intent", requestId: "r-15", revision: 1, intent: { type: "approval-mode.cycle" } },
+  { type: "interactive.intent", requestId: "r-16", revision: 1, intent: { type: "approval-mode.set", mode: "auto-edit" } },
   { type: "workspace.intent", requestId: "w-1", revision: 1, intent: { type: "workspace.load" } },
   { type: "workspace.intent", requestId: "w-2", revision: 1, intent: { type: "workspace.refresh" } },
   { type: "workspace.intent", requestId: "w-3", revision: 1, intent: { type: "workspace.toggle-directory", path: "src" } },
@@ -236,8 +237,10 @@ test("interactive.intent：各 type 的最小字段校验", () => {
   // confirmation.resolve confirmed 非 boolean
   expect(parseClientFrame(frame({ type: "confirmation.resolve", confirmationId: "clear-thread", confirmed: "yes" }))).toBeUndefined()
   expect(parseClientFrame(frame({ type: "confirmation.resolve", confirmed: true }))).toBeUndefined()
-  // approval-mode.cycle / skill.clear 带多余字段
+  // approval-mode.cycle / approval-mode.set / skill.clear 带多余字段
   expect(parseClientFrame(frame({ type: "approval-mode.cycle", extra: 1 }))).toBeUndefined()
+  expect(parseClientFrame(frame({ type: "approval-mode.set", mode: "auto", extra: 1 }))).toBeUndefined()
+  expect(parseClientFrame(frame({ type: "approval-mode.set", mode: "unsupported" }))).toBeUndefined()
   expect(parseClientFrame(frame({ type: "skill.clear", extra: 1 }))).toBeUndefined()
 })
 

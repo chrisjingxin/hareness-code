@@ -7,6 +7,7 @@
  */
 
 import type { IntentOutcome, InteractiveIntent } from "../../interactive/types"
+import { APPROVAL_MODE_CYCLE } from "../../interactive/runtime"
 import type { WorkspaceIntent, WorkspaceOutcome } from "../../workspace/types"
 import { MAX_REQUEST_ID_LENGTH, MAX_UI_FRAME_BYTES, type WebUiClientMessage, type WebUiPatch, type WebUiServerMessage, type WebUiState } from "./messages"
 import type { PresentationState, ReturnReason } from "../state"
@@ -139,6 +140,7 @@ const INTENT_TYPES = new Set([
   "interaction.respond",
   "confirmation.resolve",
   "approval-mode.cycle",
+  "approval-mode.set",
 ])
 
 function isInteractiveIntent(value: unknown): value is InteractiveIntent {
@@ -189,6 +191,8 @@ function isInteractiveIntent(value: unknown): value is InteractiveIntent {
         && isBoolean(value.confirmed)
     case "approval-mode.cycle":
       return exactFields(value, ["type"])
+    case "approval-mode.set":
+      return exactFields(value, ["type", "mode"]) && APPROVAL_MODE_CYCLE.some(mode => mode === value.mode)
     default:
       return false
   }

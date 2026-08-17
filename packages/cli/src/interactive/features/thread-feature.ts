@@ -47,6 +47,9 @@ function threadOpenResult(value: unknown): {
       kind: message.kind,
       content: message.content,
       toolName: typeof message.tool_name === "string" ? message.tool_name : undefined,
+      createdAtMs: typeof message.created_at_ms === "number" && Number.isSafeInteger(message.created_at_ms) && message.created_at_ms > 0
+        ? message.created_at_ms
+        : undefined,
     })
   }
   const composeActivities: RestoredComposeActivity[] = []

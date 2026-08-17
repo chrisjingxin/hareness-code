@@ -2,7 +2,7 @@
 
 export const PROTOCOL_MAJOR = 3 as const
 export const PROTOCOL_MINOR = 4 as const
-export const PROTOCOL_SCHEMA_SHA256 = "389aeed1f77480ae8b178381d4dbb477c9e0b75fbe7884e28efddaf948b54cad" as const
+export const PROTOCOL_SCHEMA_SHA256 = "511e3a858b742128c3d7a1267c152c49977769e0525cf7f30fe2106153d09e63" as const
 export const MAX_FRAME_BYTES = 8388608 as const
 export const MAX_TOOL_PAYLOAD_BYTES = 1048576 as const
 export const CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","threads.side_question","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","plugins.list","plugins.inspect","plugins.validate","plugins.install","plugins.set_enabled","plugins.remove","agents.list","agents.inspect","teams.list","teams.inspect","teams.generate","teams.run","teams.cancel","mcp.status","mcp.add","mcp.remove","host.attachment.create","host.attachment.revoke","host.control.acquire","host.control.release","host.control.status","compose.inspect","compose.abandon"] as const
@@ -110,7 +110,7 @@ export type ConfigCommitResult = ConfigPreviewResult
 export type ConfigPathResult = { "workspace": string; "paths": Array<string>; "explicit_path": string | null }
 export type ThreadSummary = { "thread_id": string; "created_at_ms": number; "updated_at_ms": number; "first_message": string; "latest_message": string; "message_count": number }
 export type ComposeActivityRecord = { "run_id": string; "event_sequence": number; "activity_id": string; "stage": "understand" | "plan" | "build" | "verify" | "review"; "task_id"?: string; "task_title"?: string; "attempt": number; "execution_id"?: string; "agent_id"?: string; "kind": "summary" | "tool_terminal" | "truncation"; "label": string; "status": string; "bounded_text"?: string; "created_at_ms": number }
-export type ThreadMessage = { "kind": "user" | "assistant" | "tool"; "content": string; "tool_name"?: string }
+export type ThreadMessage = { "kind": "user" | "assistant" | "tool"; "content": string; "tool_name"?: string; "created_at_ms"?: number }
 export type ThreadsListParams = { "limit"?: number }
 export type ThreadsListResult = { "threads": Array<ThreadSummary> }
 export type ThreadsOpenParams = { "thread_id": string }

@@ -1,11 +1,11 @@
-/** Context Dock：右侧常驻面板；主 tab 与关闭动作共用一层 header，Help 仍从顶栏菜单打开。 */
+/** Context Dock：右侧常驻面板；所有面板共用同一层主 tab，代码预览填满剩余高度。 */
 /** @jsxImportSource react */
 
 import { useEffect, useRef, useState } from "react"
 import { X } from "lucide-react"
 
 import { selectNavigationView } from "../../../interactive/selectors"
-import type { WebAdapterSnapshot, WebIntent } from "../../application/adapter"
+import type { ContextDockPanel, WebAdapterSnapshot, WebIntent } from "../../application/adapter"
 import { CodePanel } from "./code/code-panel"
 import { HelpPanel } from "./help-panel"
 import { McpPanel } from "./mcp-panel"
@@ -14,7 +14,7 @@ import { SkillsPanel } from "./skills-panel"
 import { StatusPanel } from "./status-panel"
 import { DOCK_TABS, tabLabel, tabVisible } from "./panel-common"
 
-/** Dock 关闭时不渲染；打开时按 activePanel 渲染面板 body，左缘可拖动调宽。 */
+/** Dock 关闭时不渲染；所有面板共享同一组主 tab 和内容区域。 */
 export function ContextDock({
   snapshot,
   dispatch,
@@ -30,44 +30,58 @@ export function ContextDock({
   const busy = Boolean(interactive.activeRun) || Boolean(interactive.interaction)
   const busyReason = busy ? "当前任务结束后可用" : null
   const { availability } = selectNavigationView(interactive)
-  const isMainTab = activePanel !== "help"
+  const header = (
+    <header className="context-dock-header">
+      <div className="context-dock-tabs" role="tablist" aria-label="Context Dock 面板" onKeyDown={event => handleTabListKeyDown(event, dispatch)}>
+        {DOCK_TABS.filter(tab => tabVisible(tab, availability)).map(tab => (
+          <button
+            type="button"
+            key={tab}
+            role="tab"
+            id={`dock-tab-${tab}`}
+            aria-selected={activePanel === tab}
+            aria-controls="context-dock-panel"
+            data-panel={tab}
+            className={activePanel === tab ? "dock-tab is-selected" : "dock-tab"}
+            disabled={disabled}
+            onClick={() => dispatch({ type: "dock-panel-select", panel: tab })}
+          >
+            {tabLabel(tab)}
+          </button>
+        ))}
+      </div>
+      <button
+        type="button"
+        className="icon-button panel-close"
+        onClick={() => dispatch({ type: "dock-close" })}
+        disabled={disabled}
+        aria-label="关闭 Dock"
+      >
+        <X aria-hidden="true" />
+      </button>
+    </header>
+  )
 
   return (
-    <aside className="context-dock" style={{ width: widthPx }} aria-label="Context Dock">
+    <aside
+      className="context-dock"
+      data-active-panel={activePanel}
+      style={{ "--dock-width": `${widthPx}px` } as React.CSSProperties}
+      aria-label="Context Dock"
+    >
       <DockResizeHandle widthPx={widthPx} dispatch={dispatch} disabled={disabled} />
-      <header className="context-dock-header">
-        {isMainTab ? (
-          <div className="context-dock-tabs" role="tablist" aria-label="Context Dock 面板" onKeyDown={event => handleTabListKeyDown(event, dispatch)}>
-            {DOCK_TABS.filter(tab => tabVisible(tab, availability)).map(tab => (
-              <button
-                type="button"
-                key={tab}
-                role="tab"
-                id={`dock-tab-${tab}`}
-                aria-selected={activePanel === tab}
-                aria-controls="context-dock-panel"
-                data-panel={tab}
-                className={activePanel === tab ? "dock-tab is-selected" : "dock-tab"}
-                disabled={disabled}
-                onClick={() => dispatch({ type: "dock-panel-select", panel: tab })}
-              >
-                {tabLabel(tab)}
-              </button>
-            ))}
+      {header}
+      <div
+        className={`context-dock-body${activePanel === "code" ? " context-dock-code-body" : ""}`}
+        id="context-dock-panel"
+        role="tabpanel"
+        aria-labelledby={`dock-tab-${activePanel}`}
+      >
+        {activePanel === "code" ? (
+          <div className="context-dock-code-scroll">
+            <CodePanel snapshot={snapshot} dispatch={dispatch} disabled={disabled} />
           </div>
-        ) : <h2 className="context-dock-title">帮助</h2>}
-        <button
-          type="button"
-          className="icon-button panel-close"
-          onClick={() => dispatch({ type: "dock-close" })}
-          disabled={disabled}
-          aria-label="关闭 Dock"
-        >
-          <X aria-hidden="true" />
-        </button>
-      </header>
-      <div className="context-dock-body" id="context-dock-panel" role="tabpanel">
-        {activePanel === "code" ? <CodePanel snapshot={snapshot} dispatch={dispatch} disabled={disabled} /> : null}
+        ) : null}
         {activePanel === "models" ? <ModelsPanel snapshot={snapshot} busyReason={busyReason} disabled={disabled} dispatch={dispatch} /> : null}
         {activePanel === "skills" ? <SkillsPanel snapshot={snapshot} dispatch={dispatch} disabled={disabled} /> : null}
         {activePanel === "mcp" ? <McpPanel snapshot={snapshot} dispatch={dispatch} disabled={disabled} /> : null}
@@ -92,11 +106,11 @@ function handleTabListKeyDown(event: React.KeyboardEvent<HTMLDivElement>, dispat
   event.preventDefault()
   const next = tabs[nextIndex]
   next?.focus()
-  const nextPanel = next?.dataset.panel as "code" | "models" | "skills" | "mcp" | "status" | undefined
+  const nextPanel = next?.dataset.panel as ContextDockPanel | undefined
   if (nextPanel) dispatch({ type: "dock-panel-select", panel: nextPanel })
 }
 
-/** Dock 左缘拖动条：宽度 = 起始宽度 - 水平位移，dispatch dock-width-change（Adapter 夹取 400-760）。 */
+/** Dock 左缘拖动条：宽度 = 起始宽度 - 水平位移，dispatch dock-width-change（Adapter 夹取 330-760）。 */
 function DockResizeHandle({
   widthPx,
   dispatch,

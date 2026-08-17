@@ -7,7 +7,7 @@ from harness_agent.protocol.runtime import event_model, schema_model
 
 PROTOCOL_MAJOR = 3
 PROTOCOL_MINOR = 4
-PROTOCOL_SCHEMA_SHA256 = "389aeed1f77480ae8b178381d4dbb477c9e0b75fbe7884e28efddaf948b54cad"
+PROTOCOL_SCHEMA_SHA256 = "511e3a858b742128c3d7a1267c152c49977769e0525cf7f30fe2106153d09e63"
 MAX_FRAME_BYTES = 8388608
 MAX_TOOL_PAYLOAD_BYTES = 1048576
 CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","threads.side_question","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","plugins.list","plugins.inspect","plugins.validate","plugins.install","plugins.set_enabled","plugins.remove","agents.list","agents.inspect","teams.list","teams.inspect","teams.generate","teams.run","teams.cancel","mcp.status","mcp.add","mcp.remove","host.attachment.create","host.attachment.revoke","host.control.acquire","host.control.release","host.control.status","compose.inspect","compose.abandon"]
@@ -195,6 +195,7 @@ class ThreadMessageWire(TypedDict):
     kind: Literal["user", "assistant", "tool"]
     content: str
     tool_name: NotRequired[str]
+    created_at_ms: NotRequired[int]
 
 class ThreadsListParamsWire(TypedDict):
     limit: NotRequired[int]

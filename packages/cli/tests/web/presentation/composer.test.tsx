@@ -63,6 +63,16 @@ const DISABLED_COMMAND: CommandMenuItem = {
 }
 
 describe("Composer", () => {
+  test("不显示没有独立交互的指令 Tab；Slash 命令仍由输入菜单提供", () => {
+    const handle = mountComposer(makeSnapshot(), [])
+    try {
+      expect(handle.container.querySelector(".composer-tab")?.textContent).toBe("聊天")
+      expect(handle.container.textContent).not.toContain("指令")
+    } finally {
+      handle.unmount()
+    }
+  })
+
   test("textarea 跟随 snapshot.draft；受控输入由 Adapter 的 draft-change 路径承载", () => {
     const handle = mountComposer(makeSnapshot({ draft: "初始" }), [])
     try {
