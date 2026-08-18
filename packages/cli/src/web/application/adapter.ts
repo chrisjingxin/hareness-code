@@ -87,6 +87,8 @@ export type WebAdapterSnapshot = {
   readonly workspaceSidebar: {
     /** Thread 分区占侧栏高度的比例；Files 分区 = 1 - ratio。 */
     readonly threadRatio: number
+    /** 用户是否拖过 Thread/Files 分隔条；未拖动时分区高度随内容自适应（比例仅作上限），避免默认截断。 */
+    readonly threadRatioCustomized: boolean
     /** 文件树当前选中行；null 表示无选中。 */
     readonly selectedPath: string | null
     /** 侧栏宽度（px）；顶栏品牌列与侧栏共用，保证竖线连续对齐。 */
@@ -244,6 +246,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     code: { tabs: [], activePath: null, previews: {}, previewErrors: {} },
   }
   private threadRatio = THREAD_RATIO_INITIAL
+  private threadRatioCustomized = false
   private sidebarWidthPx = SIDEBAR_WIDTH_INITIAL
   private workspaceSelectedPath: string | null = null
   private theme: WebTheme = "light"
@@ -337,6 +340,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
         return
       case "sidebar-thread-ratio-change":
         this.threadRatio = clamp(intent.ratio, THREAD_RATIO_MIN, THREAD_RATIO_MAX)
+        this.threadRatioCustomized = true
         this.schedulePublish()
         return
       case "sidebar-width-change":
@@ -593,7 +597,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
         },
       },
       workspaceTree: this.client.getState().workspaceTree,
-      workspaceSidebar: { threadRatio: this.threadRatio, selectedPath: this.workspaceSelectedPath, widthPx: this.sidebarWidthPx },
+      workspaceSidebar: { threadRatio: this.threadRatio, threadRatioCustomized: this.threadRatioCustomized, selectedPath: this.workspaceSelectedPath, widthPx: this.sidebarWidthPx },
       panelSearch: freezePanelState(this.panelState),
       expandedTools: new Set(this.expandedTools),
       interactionDraft: this.interactionDraft ? cloneInteractionDraft(this.interactionDraft) : null,

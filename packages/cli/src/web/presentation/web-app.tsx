@@ -1,7 +1,7 @@
 /** Web React 工作台：组合桌面三栏布局与可访问性，不拥有 Agent 或命令业务状态。 */
 /** @jsxImportSource react */
 
-import { Bot, ChevronDown, CircleDot, Ellipsis, Shield, ShieldCheck, Terminal, X } from "lucide-react"
+import { Bot, ChevronDown, CircleDot, Ellipsis, Moon, Shield, ShieldCheck, Sun, Terminal, X } from "lucide-react"
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useSyncExternalStore } from "react"
 import { modelSelectionLabel } from "../../presentation-shared"
@@ -184,13 +184,13 @@ export function WebApp(props: {
             </div>
           </div>
           <div className="topbar-meta">
+            {/* 模型段点击是展开右侧 Dock 面板而非下拉菜单：不渲染 chevron，避免错误的下拉暗示。 */}
             <button type="button" className="meta-chip topbar-segment topbar-model" hidden={!availability.canOpenModelsPanel} disabled={readOnly} onClick={() => { onIntent({ type: "dock-open", panel: "models" }) }} title="模型设置">
               <Bot aria-hidden="true" size={15} />
               <span className="topbar-field-copy">
                 <span className="topbar-segment-label">模型</span>
                 <span className="meta-chip-value">{modelLabel(interactive)}</span>
               </span>
-              <ChevronDown aria-hidden="true" className="topbar-segment-chevron" size={14} />
             </button>
             <div ref={approvalModeControlRef} className="topbar-approval-mode-control">
               <button
@@ -234,7 +234,17 @@ export function WebApp(props: {
             </div>
           </div>
           <div className="topbar-actions">
-            <button type="button" className="button button-secondary return-button" disabled={!props.active || snapshot.leaving || returnBlocked} title={returnBlocked ? "当前任务结束或交互完成后可返回 TUI" : "归还控制权并恢复 TUI"} onClick={() => { onIntent({ type: "return-to-tui" }) }}><Terminal aria-hidden="true" size={15} />返回 TUI</button>
+            <button type="button" className="button return-button" disabled={!props.active || snapshot.leaving || returnBlocked} title={returnBlocked ? "当前任务结束或交互完成后可返回 TUI" : "归还控制权并恢复 TUI"} onClick={() => { onIntent({ type: "return-to-tui" }) }}><Terminal aria-hidden="true" size={15} />返回 TUI</button>
+            {/* 主题切换提到顶栏：单图标按钮表达下一动作（light 显示 Moon/切深色，dark 显示 Sun/切浅色），不再占用菜单项。 */}
+            <button
+              type="button"
+              className="icon-button theme-toggle"
+              aria-label={snapshot.theme === "light" ? "切换到深色主题" : "切换到浅色主题"}
+              title={snapshot.theme === "light" ? "切换到深色主题" : "切换到浅色主题"}
+              onClick={() => { onIntent({ type: "theme-set", theme: nextTheme(snapshot.theme) }) }}
+            >
+              {snapshot.theme === "light" ? <Moon aria-hidden="true" size={16} /> : <Sun aria-hidden="true" size={16} />}
+            </button>
             <button
               type="button"
               ref={overflowTriggerRef}
@@ -248,15 +258,6 @@ export function WebApp(props: {
             </button>
             {snapshot.headerMenuOpen ? (
               <div ref={headerMenuRef} className="header-menu" role="menu" aria-label="更多操作" onKeyDown={handleHeaderMenuKeyDown}>
-                <button type="button" role="menuitem" className="header-menu-item" onClick={() => { onIntent({ type: "theme-set", theme: nextTheme(snapshot.theme) }) }}>
-                  {snapshot.theme === "light" ? "使用深色主题" : "使用浅色主题"}
-                </button>
-                <button type="button" role="menuitem" className="header-menu-item" disabled={readOnly || returnBlocked} onClick={() => {
-                  setApprovalModeMenuOpen(true)
-                  void onIntent({ type: "header-menu-toggle", open: false })
-                }}>
-                  选择审批模式（当前：{approvalModeLabel(interactive.runtime)}）
-                </button>
                 <button type="button" role="menuitem" className="header-menu-item" onClick={() => { onIntent({ type: "dock-open", panel: "help" }) }}>帮助</button>
                 <button type="button" role="menuitem" className="header-menu-item" disabled={!props.active || snapshot.leaving} onClick={() => { onIntent({ type: "exit-harness" }) }}>退出 Harness</button>
               </div>
@@ -290,7 +291,7 @@ export function WebApp(props: {
   )
 }
 
-/** 主题切换的下一状态：浅色 ↔ 深色，菜单文案始终表达下一动作。 */
+/** 主题切换的下一状态：浅色 ↔ 深色；顶栏图标按钮的 icon 与 aria-label 始终表达下一动作。 */
 function nextTheme(theme: WebTheme): WebTheme {
   return theme === "light" ? "dark" : "light"
 }

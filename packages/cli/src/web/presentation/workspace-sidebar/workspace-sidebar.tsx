@@ -8,8 +8,10 @@ import type { WebAdapterSnapshot, WebIntent } from "../../application/adapter"
 import { ThreadSection } from "./thread-section"
 import { FileExplorer } from "./file-explorer"
 
-/** 垂直分隔条高度；Thread 分区高度 = (100% - 分隔条) * threadRatio。 */
+/** 垂直分隔条高度；拖动后 Thread 分区高度 = (100% - 分隔条) * threadRatio，未拖动时该式仅作 max-height 上限。 */
 const RESIZE_HANDLE_PX = 5
+// 自适应上限向内收 15px：避免视口高度变化时分区下缘恰好落在某行中间、露出半行（2026-08-18 用户实测截屏）。
+const THREAD_ADAPTIVE_INSET_PX = 15
 const THREAD_MIN_PX = 160
 // Thread 标题栏及其上下留白占用的卡片额外高度。
 const THREAD_PANEL_EXTRA_PX = 56
@@ -30,13 +32,20 @@ export function WorkspaceSidebar({
   disabled?: boolean
 }): React.ReactElement {
   const busy = Boolean(snapshot.interactive.activeRun) || Boolean(snapshot.interactive.interaction)
+  const sidebar = snapshot.workspaceSidebar
+  // 未拖过分隔条：高度随 Thread 内容自适应（比例仅作上限），短列表不再被截成半行；
+  // 用户拖动后按显式比例固定高度，拖动语义不变。
+  const threadPanelGeometry: React.CSSProperties = sidebar.threadRatioCustomized
+    ? { height: `calc((100% - ${RESIZE_HANDLE_PX}px) * ${sidebar.threadRatio})` }
+    : { maxHeight: `calc((100% - ${RESIZE_HANDLE_PX}px) * ${sidebar.threadRatio} - ${THREAD_ADAPTIVE_INSET_PX}px)` }
   return (
     <aside className="workspace-sidebar" aria-label="工作区导航">
-      <SidebarResizeHandle widthPx={snapshot.workspaceSidebar.widthPx} dispatch={dispatch} disabled={disabled} />
+      <SidebarResizeHandle widthPx={sidebar.widthPx} dispatch={dispatch} disabled={disabled} />
       <div
         className="workspace-sidebar-thread-panel"
+        data-thread-panel-geometry={sidebar.threadRatioCustomized ? "fixed" : "adaptive"}
         style={{
-          height: `calc((100% - ${RESIZE_HANDLE_PX}px) * ${snapshot.workspaceSidebar.threadRatio})`,
+          ...threadPanelGeometry,
           minHeight: THREAD_MIN_PX + THREAD_PANEL_EXTRA_PX,
         }}
       >
@@ -58,7 +67,7 @@ export function WorkspaceSidebar({
           <ThreadSection snapshot={snapshot} dispatch={dispatch} disabled={disabled} />
         </div>
       </div>
-      <VerticalResizeHandle threadRatio={snapshot.workspaceSidebar.threadRatio} dispatch={dispatch} disabled={disabled} />
+      <VerticalResizeHandle threadRatio={sidebar.threadRatio} dispatch={dispatch} disabled={disabled} />
       <div className="workspace-sidebar-files" style={{ minHeight: FILES_MIN_PX }}>
         <FileExplorer snapshot={snapshot} dispatch={dispatch} disabled={disabled} />
       </div>

@@ -263,8 +263,9 @@ button.meta-chip { cursor: pointer; }
 .status-dot-failed { background: var(--danger); }
 
 .topbar-actions { position: relative; display: flex; align-items: center; gap: 6px; flex: 0 0 auto; min-width: 0; }
-/* “返回 TUI”保持紧凑次按钮，不与 Run 状态争夺注意力。 */
-.topbar-actions .return-button { min-height: var(--control-compact); padding: 0 10px; font-size: 13px; font-weight: 500; border-radius: var(--radius-control); white-space: nowrap; }
+/* “返回 TUI”用 ghost 形态融入扁平顶栏：无边框透明底，hover 浮现浅绿底；不与 Run 状态争夺注意力。 */
+.topbar-actions .return-button { min-height: var(--control-compact); padding: 0 10px; border-color: transparent; background: transparent; color: var(--text-soft); font-size: 13px; font-weight: 500; border-radius: var(--radius-control); white-space: nowrap; }
+.topbar-actions .return-button:hover:not(:disabled) { border-color: transparent; background: var(--accent-soft); color: var(--accent-hover); }
 
 /* ---------- Header overflow menu ---------- */
 .header-menu {
@@ -456,7 +457,8 @@ button.meta-chip { cursor: pointer; }
   flex-direction: column;
 }
 .timeline-header { padding: 2px 0 12px; color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: .08em; }
-.timeline-empty { margin: auto; max-width: 520px; color: var(--muted); text-align: center; }
+/* 空态文案：双居中基础上再向下 48px（用户实测偏上）；装饰性文本用 subtle，比 muted 更淡。 */
+.timeline-empty { margin: auto; max-width: 520px; color: var(--subtle); text-align: center; transform: translateY(48px); }
 
 /* 消息结构：author 标签在上，avatar 与内容左对齐成一行，与工具卡 37px 缩进对齐。 */
 .timeline-message { display: grid; gap: 6px; margin: 0 0 20px; min-width: 0; }
@@ -764,7 +766,7 @@ button.meta-chip { cursor: pointer; }
    避免矮窗口下把 composer-bar 撑高导致输入框底部被 conversation-column 裁剪。 */
 .composer-inner { position: relative; width: min(880px, calc(100% - 48px)); margin: 0 auto; padding: 12px 0 14px; }
 .composer-box { border: 1px solid var(--line-strong); border-radius: var(--radius-surface); background: var(--surface); }
-/* 聚焦态不再把边框染成炭黑（用户反馈的黑框）；光标与边框本身即焦点指示。 */
+/* 聚焦反馈：整卡 focus-within 描边变 --accent（见尾部 Composer 节），textarea 自身不画 outline。 */
 .composer-textarea {
   width: 100%;
   min-width: 0;
@@ -1409,6 +1411,8 @@ button.topbar-segment { cursor: pointer; }
   /* 贴边布局（2026-08-17 与用户确认）：侧栏/Dock 贴紧窗口左右缘与顶栏下缘并延伸到底，
      容器外边距归零；柔和感由中栏内容块的上下呼吸内边距与浅绿选中态表达。 */
   --workspace-padding-inline: 0;
+  /* 无 Dock 时中栏右缘与窗口的留白；Dock 打开时归零（Dock 自身贴右缘）。 */
+  --workspace-padding-end: 20px;
   --conversation-padding-block-start: 16px;
   --conversation-padding-block-end: 20px;
   --dock-width: 354px;
@@ -1420,10 +1424,12 @@ button.topbar-segment { cursor: pointer; }
   column-gap: var(--workspace-gap);
   row-gap: var(--workspace-gap);
   padding: 0 var(--workspace-padding-inline);
+  padding-right: var(--workspace-padding-end);
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
 }
 .desktop-workspace.has-context-dock {
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--dock-width);
+  padding-right: 0;
 }
 
 /* ---------- 侧栏：单一平面容器 + 上下分区；贴左边与顶栏下缘，只留面向中栏的分隔线 ---------- */
@@ -1529,6 +1535,8 @@ button.topbar-segment { cursor: pointer; }
 .message-body { display: block; width: 100%; padding: 2px 0 0 34px; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
 .message-user .message-content,
 .message-assistant .message-content { border: 0; box-shadow: none; }
+/* 用户消息是纯文本 div：与 AI markdown 正文同字号行高（14px/1.7），不再继承基础 15px/1.6（2026-08-17 用户确认对齐方向）。 */
+.message-user .message-content { font-size: 14px; line-height: 1.7; }
 .message-system { margin: 0 0 13px; padding: 0; background: transparent; color: var(--muted); font-size: 12px; }
 
 /* Agent 回复与其连续工具调用在时间线上成组；扁平流下只靠间距与缩进表达，不是气泡。 */
@@ -1570,6 +1578,9 @@ button.topbar-segment { cursor: pointer; }
 .composer-tab.is-active { color: var(--accent-hover); font-weight: 650; }
 .composer-tab.is-active::after { content: ""; position: absolute; inset-inline: 0; bottom: -1px; height: 2px; border-radius: 2px; background: var(--accent); }
 .composer-textarea { min-height: 52px; padding: 12px 16px 6px; font-size: 14px; }
+/* 聚焦反馈给整卡：全局 textarea:focus-visible 绿框包在全宽 textarea 上会渲染成 tab 下/输入区下两条错位绿线（2026-08-17 用户截图反馈）。 */
+.composer-textarea:focus-visible { outline: 0; }
+.composer-box:focus-within { border-color: var(--accent); }
 .composer-rail { padding: 6px 12px 11px; }
 .composer-rail-left { gap: 9px; }
 .composer-decoration-icons { display: inline-flex; align-items: center; gap: 10px; color: var(--subtle); }

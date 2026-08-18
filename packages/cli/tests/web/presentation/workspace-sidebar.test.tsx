@@ -124,6 +124,34 @@ describe("WorkspaceSidebar", () => {
     }
   })
 
+  test("未拖动分隔条时 Thread 分区高度随内容自适应（比例为上限）；拖动后按显式比例固定", () => {
+    const intents: WebIntent[] = []
+    // 默认（未自定义）：不定高，max-height 取比例上限——短 Thread 列表不再被截成半行。
+    const adaptive = mountSidebar(makeSnapshot(), intents)
+    try {
+      const panel = adaptive.container.querySelector<HTMLElement>(".workspace-sidebar-thread-panel")
+      expect(panel?.getAttribute("data-thread-panel-geometry")).toBe("adaptive")
+      expect(panel?.style.height).toBe("")
+      expect(panel?.style.maxHeight).toContain("* 0.38")
+      // 上限内缩 15px：分区下缘不落在某行中间露出半行。
+      expect(panel?.style.maxHeight).toContain("- 15px")
+    } finally {
+      adaptive.unmount()
+    }
+    // 用户拖过分隔条后：按显式比例固定高度，拖动语义不变。
+    // happy-dom 会丢弃 height 上的 calc 乘法值（真实浏览器正常），分支由 data 属性与 maxHeight 佐证。
+    const customized = mountSidebar(makeSnapshot({
+      workspaceSidebar: { threadRatio: 0.5, threadRatioCustomized: true, selectedPath: null, widthPx: 280 },
+    }), intents)
+    try {
+      const panel = customized.container.querySelector<HTMLElement>(".workspace-sidebar-thread-panel")
+      expect(panel?.getAttribute("data-thread-panel-geometry")).toBe("fixed")
+      expect(panel?.style.maxHeight).toBe("")
+    } finally {
+      customized.unmount()
+    }
+  })
+
   test("垂直分隔条拖动 dispatch sidebar-thread-ratio-change（向下拖动增大比例）", () => {
     const intents: WebIntent[] = []
     const handle = mountSidebar(makeSnapshot(), intents)

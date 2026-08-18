@@ -55,9 +55,12 @@ test("扁平化：消息与 Agent 分组不是卡片（无 border/background/box
   expect(css).not.toMatch(/\.timeline-agent-group\s*\{[^}]*background/)
 })
 
-test("空态文案在 timeline 可视区垂直水平双居中（容器 flex column，margin auto）", () => {
+test("空态文案在 timeline 可视区垂直水平双居中（容器 flex column，margin auto），向下 48px 偏移且用 subtle 淡色", () => {
   expect(css).toContain(".timeline-empty { margin: auto;")
   expect(css).not.toContain("13vh")
+  // 2026-08-18 用户实测：居中位置偏上、颜色偏重——向下 48px、muted 改 subtle。
+  expect(css).toContain("transform: translateY(48px)")
+  expect(css).toContain(".timeline-empty { margin: auto; max-width: 520px; color: var(--subtle);")
 })
 
 test("文件类型图标颜色只经 --file-* token，light/dark 双主题定义；选中行不强制变绿", () => {
@@ -176,6 +179,10 @@ test("截图几何契约：侧栏与 Dock 贴边全高，中栏悬浮呼吸；�
   expect(geometry).toContain("--workspace-padding-inline: 0")
   expect(geometry).toContain("--conversation-padding-block-start: 16px")
   expect(geometry).toContain("--conversation-padding-block-end: 20px")
+  // 无 Dock 时中栏右缘保留外边距；Dock 打开时归零（Dock 贴右缘）
+  expect(geometry).toContain("--workspace-padding-end: 20px")
+  expect(geometry).toContain("padding-right: var(--workspace-padding-end)")
+  expect(geometry).toContain("padding-right: 0")
   // 贴边面板：无圆角，只留面向中栏的 1px 分隔线
   expect(geometry).toContain("border: 0;\n  border-right: 1px solid var(--line);\n  border-radius: 0;")
   expect(geometry).toContain("border: 0;\n  border-left: 1px solid var(--line);\n  border-radius: 0;")
@@ -254,4 +261,15 @@ test("行号列保持逐行垂直排列：.line-numbers 必须 white-space: pre�
   expect(block).toContain("white-space: pre")
   // 与代码侧同字号同行高，保证行号与代码行一一对齐。
   expect(block).toContain("line-height: 1.6")
+})
+
+test("用户消息与 AI 正文同字号同行高：14px/1.7（对齐 markdown 正文规格，2026-08-17 用户确认）", () => {
+  // 用户消息是纯文本 div，曾继承基础 15px/1.6；AI 消息走 .markdown（14px/1.7），两者不一致是 token 统一遗留。
+  expect(css).toContain(".message-user .message-content { font-size: 14px; line-height: 1.7; }")
+})
+
+test("Composer 聚焦反馈走整卡描边：textarea 不挂全局 focus outline，整卡 focus-within 变 accent", () => {
+  // 全局 textarea:focus-visible 绿框曾包在全宽 textarea 上，渲染成 tab 下/输入区下两条错位绿线（用户截图反馈）。
+  expect(css).toContain(".composer-textarea:focus-visible { outline: 0; }")
+  expect(css).toContain(".composer-box:focus-within { border-color: var(--accent); }")
 })

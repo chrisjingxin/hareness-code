@@ -109,6 +109,17 @@ describe("WebApp", () => {
     }
   })
 
+  test("模型段不带下拉 chevron（点击是展开右侧 Dock 而非菜单）；审批模式保留下拉指示", () => {
+    const { handle } = mountWebApp(true, makeSnapshot())
+    try {
+      // 断言转成 boolean：toBeNull 失败时会序列化整个 SVG 节点，输出过大导致测试超时。
+      expect(handle.container.querySelector(".topbar-model .topbar-segment-chevron") === null).toBe(true)
+      expect(handle.container.querySelector(".topbar-approval-mode .topbar-segment-chevron") !== null).toBe(true)
+    } finally {
+      handle.unmount()
+    }
+  })
+
   test("active Run 时「返回 TUI」按钮被禁用并展示 reason", () => {
     const interactive = makeInteractive({
       activeRun: { threadId: "t1", runId: "r1" },
@@ -139,20 +150,14 @@ describe("WebApp", () => {
     }
   })
 
-  test("header menu 提供审批模式选择入口", () => {
+  test("header menu 不再提供主题与审批模式入口（均已在顶栏）：只保留帮助与退出", () => {
     const { adapter, handle } = mountWebApp(true, makeSnapshot())
     try {
       act(() => {
         adapter.emit(makeSnapshot({ headerMenuOpen: true }))
       })
-      const menu = handle.container.querySelector(".header-menu")
-      expect(menu).not.toBeNull()
-      const approvalItem = Array.from(handle.container.querySelectorAll<HTMLButtonElement>(".header-menu-item"))
-        .find(item => item.textContent?.includes("审批模式"))
-      expect(approvalItem?.textContent).toContain("default")
-      act(() => { approvalItem?.click() })
-      expect(adapter.intentLog).toContainEqual({ type: "header-menu-toggle", open: false })
-      expect(handle.container.querySelector(".approval-mode-menu")).not.toBeNull()
+      const items = Array.from(handle.container.querySelectorAll<HTMLButtonElement>(".header-menu-item"))
+      expect(items.map(item => item.textContent)).toEqual(["帮助", "退出 Harness"])
     } finally {
       handle.unmount()
     }
@@ -227,7 +232,7 @@ describe("WebApp", () => {
     }
   })
 
-  test("overflow trigger 具备 aria-haspopup/aria-expanded；打开菜单后主题项文案表达下一动作", () => {
+  test("主题切换在顶栏图标按钮：icon 与 aria-label 表达下一动作；overflow trigger 具备 aria-haspopup/aria-expanded", () => {
     const adapter = createFakeAdapter(makeSnapshot())
     const handle = render(<WebApp adapter={adapter} active={true} />)
     try {
@@ -236,21 +241,22 @@ describe("WebApp", () => {
       expect(trigger?.getAttribute("aria-expanded")).toBe("false")
       expect(handle.container.querySelector(".header-menu")).toBeNull()
 
-      act(() => { trigger?.click() })
-      expect(adapter.intentLog).toContainEqual({ type: "header-menu-toggle", open: true })
+      // light → 展示 Moon（点击切深色）；dark → 展示 Sun（点击切浅色）。
+      const toggle = handle.container.querySelector<HTMLButtonElement>(".theme-toggle")
+      expect(toggle?.getAttribute("aria-label")).toBe("切换到深色主题")
+      expect(toggle?.querySelector("svg.lucide-moon")).not.toBeNull()
+
+      act(() => { toggle?.click() })
+      expect(adapter.intentLog).toContainEqual({ type: "theme-set", theme: "dark" })
 
       act(() => {
-        adapter.emit(makeSnapshot({ headerMenuOpen: true }))
+        adapter.emit(makeSnapshot({ theme: "dark" }))
       })
-      const menu = handle.container.querySelector(".header-menu")
-      expect(menu).not.toBeNull()
-      expect(trigger?.getAttribute("aria-expanded")).toBe("true")
-      const themeItem = Array.from(handle.container.querySelectorAll<HTMLButtonElement>(".header-menu-item"))
-        .find(item => item.textContent?.includes("主题"))
-      expect(themeItem?.textContent).toBe("使用深色主题")
+      expect(toggle?.getAttribute("aria-label")).toBe("切换到浅色主题")
+      expect(toggle?.querySelector("svg.lucide-sun")).not.toBeNull()
 
-      act(() => { themeItem?.click() })
-      expect(adapter.intentLog).toContainEqual({ type: "theme-set", theme: "dark" })
+      act(() => { trigger?.click() })
+      expect(adapter.intentLog).toContainEqual({ type: "header-menu-toggle", open: true })
     } finally {
       handle.unmount()
     }

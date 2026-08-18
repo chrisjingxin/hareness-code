@@ -213,7 +213,7 @@ test("初始 snapshot：interactive 由五个分片重组，workspace 分片来�
   const snapshot = adapter.getSnapshot()
   expect(snapshot.interactive.currentThreadId).toBe("t-1")
   expect(snapshot.workspaceTree.status).toBe("idle")
-  expect(snapshot.workspaceSidebar).toEqual({ threadRatio: 0.45, selectedPath: null, widthPx: 296 })
+  expect(snapshot.workspaceSidebar).toEqual({ threadRatio: 0.45, threadRatioCustomized: false, selectedPath: null, widthPx: 296 })
   expect(snapshot.contextDock).toMatchObject({ open: false, activePanel: "code", widthPx: 354 })
   expect(snapshot.contextDock.code).toEqual({ tabs: [], activePath: null, previews: {}, previewErrors: {} })
   expect(snapshot.expandedTools).toBeInstanceOf(Set)
@@ -341,8 +341,11 @@ test("dock-width-change：夹取 330-760", async () => {
 
 test("sidebar-thread-ratio-change：夹取比例并写入 workspaceSidebar", async () => {
   const { adapter } = makeAdapter()
+  expect(adapter.getSnapshot().workspaceSidebar.threadRatioCustomized).toBe(false)
   await adapter.dispatch({ type: "sidebar-thread-ratio-change", ratio: 0.99 })
   expect(adapter.getSnapshot().workspaceSidebar.threadRatio).toBe(0.8)
+  // 拖动过分隔条后标记 customized：分区从内容自适应切到显式比例固定高度。
+  expect(adapter.getSnapshot().workspaceSidebar.threadRatioCustomized).toBe(true)
   await adapter.dispatch({ type: "sidebar-thread-ratio-change", ratio: 0.01 })
   expect(adapter.getSnapshot().workspaceSidebar.threadRatio).toBe(0.2)
   await adapter.dispatch({ type: "sidebar-thread-ratio-change", ratio: 0.5 })
