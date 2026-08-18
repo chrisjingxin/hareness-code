@@ -260,6 +260,8 @@ describe("WebApp", () => {
     const handle = render(<WebApp adapter={adapter} active={true} />)
     try {
       expect(handle.container.querySelector(".context-dock")).not.toBeNull()
+      expect(handle.container.querySelector(".context-dock")?.getAttribute("aria-hidden")).toBeNull()
+      expect(handle.container.querySelector(".context-dock")?.hasAttribute("inert")).toBe(false)
       expect(handle.container.querySelector(".desktop-workspace")?.classList.contains("has-context-dock")).toBe(true)
       const composer = handle.container.querySelector<HTMLTextAreaElement>(".composer-textarea")
       expect(composer).not.toBeNull() // Conversation 永不被文件预览替换
@@ -268,11 +270,14 @@ describe("WebApp", () => {
     }
   })
 
-  test("Dock 关闭时 .context-dock 不渲染，workspace 恢复两列", () => {
+  test("Dock 关闭时 .context-dock 保持挂载但 inert/aria-hidden（平移过渡载体），workspace 不带 has-context-dock", () => {
     const adapter = createFakeAdapter(makeSnapshot())
     const handle = render(<WebApp adapter={adapter} active={true} />)
     try {
-      expect(handle.container.querySelector(".context-dock")).toBeNull()
+      const dock = handle.container.querySelector(".context-dock")
+      expect(dock).not.toBeNull() // 保持挂载：开关平移过渡的载体，视觉隐藏由 CSS visibility 表达
+      expect(dock?.getAttribute("aria-hidden")).toBe("true")
+      expect(dock?.hasAttribute("inert")).toBe(true)
       expect(handle.container.querySelector(".desktop-workspace")?.classList.contains("has-context-dock")).toBe(false)
     } finally {
       handle.unmount()

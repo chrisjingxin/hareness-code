@@ -185,28 +185,70 @@ test("桌面三栏布局与文件预览样式存在：desktop-workspace / contex
   expect(css).toContain(".file-tree")
 })
 
-test("截图几何契约：侧栏与 Dock 贴边全高，中栏悬浮呼吸；右 Dock 不改变中栏起点", () => {
+test("截图几何契约：内容列固定居中（≤880px）；关闭态按 Dock 默认宽预留，打开态按实际宽", () => {
   const geometry = css.slice(css.indexOf("Screenshot geometry contract"))
   expect(geometry).toContain("--workspace-gap: 16px")
-  // 面板贴紧窗口左右缘与顶栏下缘：容器外边距归零，呼吸感由中栏内边距表达
-  expect(geometry).toContain("--workspace-padding-inline: 0")
   expect(geometry).toContain("--conversation-padding-block-start: 16px")
   expect(geometry).toContain("--conversation-padding-block-end: 20px")
-  // 无 Dock 时中栏右缘保留外边距；Dock 打开时归零（Dock 贴右缘）
-  expect(geometry).toContain("--workspace-padding-end: 20px")
-  expect(geometry).toContain("padding-right: var(--workspace-padding-end)")
-  expect(geometry).toContain("padding-right: 0")
-  // 贴边面板：无圆角，只留面向中栏的 1px 分隔线
+  // 内容列宽度 = min(880px, 视口 − 侧栏 − 预留 Dock 宽 − 间距)，随视口与侧栏/Dock 宽度联动
+  expect(geometry).toContain("--conversation-content-max-width: 880px")
+  expect(geometry).toContain("--conversation-content-width: min(var(--conversation-content-max-width), calc(100vw - var(--sidebar-width) - var(--dock-width-reserved) - 2 * var(--workspace-gap)))")
+  // 预留宽度：Dock 关闭时用默认宽（拖宽后关闭，内容列恢复默认）；打开时用实际宽
+  expect(geometry).toContain("--dock-width-default: 354px")
+  expect(geometry).toContain("--dock-width-reserved: var(--dock-width-default);")
+  expect(geometry).toContain(".desktop-workspace.has-context-dock {\n  --dock-width-reserved: var(--dock-width);\n  grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--dock-width);\n}")
+  // 第三轨常驻：关闭时 0px、打开时 var(--dock-width)；轨数一致才能做轨宽过渡（平移）
+  expect(geometry).toContain("grid-template-columns: var(--sidebar-width) minmax(0, 1fr) 0px")
+  expect(geometry).toContain("grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--dock-width)")
+  // 横幅/消息流/审批卡/输入框共用同一居中内容列
+  expect(geometry).toContain(".work-item-banner,\n.timeline-scroll,\n.interaction-dock,\n.composer-inner {")
+  expect(geometry).toContain("max-width: var(--conversation-content-width);\n  margin-inline: auto;")
+  // Dock 关闭时本体不可见但保持挂载（平移过渡的载体）；inert/aria-hidden 由 TSX 表达
+  expect(geometry).toContain(".desktop-workspace:not(.has-context-dock) .context-dock { visibility: hidden; }")
+  // 旧契约已废弃：不再有 20px 右外边距 token，不再撑满内容列
+  expect(geometry).not.toContain("--workspace-padding-end")
+  expect(geometry).not.toContain("max-width: none;\n  margin-inline: 0;")
+  // 保留：贴边面板无圆角，只留面向中栏的 1px 分隔线
   expect(geometry).toContain("border: 0;\n  border-right: 1px solid var(--line);\n  border-radius: 0;")
   expect(geometry).toContain("border: 0;\n  border-left: 1px solid var(--line);\n  border-radius: 0;")
-  expect(geometry).toContain("grid-template-columns: var(--sidebar-width) minmax(0, 1fr)")
-  expect(geometry).toContain("grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--dock-width)")
-  expect(geometry).toContain("width: 100%;\n  max-width: none;\n  margin-inline: 0;")
   expect(geometry).toContain("overflow: clip")
   expect(geometry).toContain(".workspace-sidebar { gap: 0; }")
   expect(geometry).toContain("padding: 12px 14px 14px")
   expect(geometry).toContain(".context-dock-code-scroll")
   expect(geometry).toContain("overflow: hidden")
+})
+
+test("Dock 开关平移过渡：轨宽 200ms 过渡 + 拖动分隔条豁免 + Dock 本体延迟隐藏", () => {
+  const motion = css.slice(css.indexOf("prefers-reduced-motion: no-preference"))
+  expect(motion).toContain(".desktop-workspace { transition: grid-template-columns 200ms ease; }")
+  // 拖动侧栏/Dock 分隔条持续改写轨宽，必须禁用过渡，否则拖拽被惯性拖慢
+  expect(motion).toContain(".desktop-workspace:has(.is-dragging) { transition: none; }")
+  // 关闭方向保持可见到平移结束，打开方向立即可见
+  expect(motion).toContain(".context-dock { transition: visibility 200ms; }")
+  // 内容列宽度随预留宽度同步过渡（Dock 拖宽后开关时不跳变）；拖动分隔条时同样豁免
+  expect(motion).toContain(".work-item-banner, .timeline-scroll, .interaction-dock, .composer-inner { transition: max-width 200ms ease; }")
+  expect(motion).toContain(".desktop-workspace:has(.is-dragging) .work-item-banner,\n  .desktop-workspace:has(.is-dragging) .timeline-scroll,\n  .desktop-workspace:has(.is-dragging) .interaction-dock,\n  .desktop-workspace:has(.is-dragging) .composer-inner { transition: none; }")
+})
+
+test("时间线滚动条隐藏：滚动行为保留，内容列右缘不出现可见滚动条", () => {
+  const base = css.slice(css.indexOf(".timeline-scroll {"), css.indexOf(".timeline {"))
+  expect(base).toContain("scrollbar-width: none")
+  expect(base).not.toContain("scrollbar-width: thin")
+  expect(css).toContain(".timeline-scroll::-webkit-scrollbar { display: none; }")
+  // 不再参与共享 webkit 滚动条样式分组
+  expect(css).not.toContain(".timeline-scroll::-webkit-scrollbar-thumb")
+  expect(css).not.toContain(".timeline-scroll::-webkit-scrollbar-track")
+})
+
+test("窄屏（≤900px）内容列恢复满宽；审批卡独立宽度已并入统一内容列", () => {
+  const narrow = css.slice(css.indexOf("@media (max-width: 900px)"))
+  // 内容列宽度公式在窄屏会算出极小值，必须重置
+  expect(narrow).toContain(".work-item-banner, .timeline-scroll, .interaction-dock, .composer-inner { max-width: none; }")
+  // 紧凑审批卡/Diff 放宽的独立宽度规则已删除，几何由内容列统一表达
+  expect(css).not.toContain(".interaction-dock:has(.file-diff-approval)")
+  expect(css).not.toContain("width: min(560px, calc(100% - 48px))")
+  expect(css).not.toContain("width: min(760px, calc(100% - 48px))")
+  expect(css).not.toContain("width: min(880px, calc(100% - 48px))")
 })
 
 test("待处理审批 Dock 在视口内独立纵向滚动，不遮挡 Composer 和审批操作", () => {

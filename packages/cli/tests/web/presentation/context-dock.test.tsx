@@ -27,11 +27,14 @@ function dockSnapshot(activePanel: ContextDockPanel, overrides: Partial<WebAdapt
 }
 
 describe("ContextDock", () => {
-  test("dock 关闭时不渲染任何内容", () => {
+  test("dock 关闭时保持挂载但 inert + aria-hidden（开关平移过渡的载体）", () => {
     const intents: WebIntent[] = []
     const handle = mountDock(makeSnapshot(), intents)
     try {
-      expect(handle.container.querySelector(".context-dock")).toBeNull()
+      const dock = handle.container.querySelector(".context-dock")
+      expect(dock).not.toBeNull()
+      expect(dock?.getAttribute("aria-hidden")).toBe("true")
+      expect(dock?.hasAttribute("inert")).toBe(true)
     } finally {
       handle.unmount()
     }

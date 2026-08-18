@@ -175,6 +175,7 @@ function makeAdapter(
   client = createFakeClient(),
   scheduler = createManualScheduler(),
   timer = createManualTimer(),
+  viewportWidthPx = 1600,
 ): {
   adapter: WebInteractiveAdapter
   client: ReturnType<typeof createFakeClient>
@@ -186,6 +187,7 @@ function makeAdapter(
     frameScheduler: scheduler,
     setTimeoutFn: timer.setTimeoutFn,
     clearTimeoutFn: timer.clearTimeoutFn,
+    viewportWidth: () => viewportWidthPx,
   })
   return { adapter, client, scheduler, timer }
 }
@@ -369,6 +371,38 @@ test("sidebar-width-change：夹取 220-480 并写入 workspaceSidebar.widthPx",
   expect(adapter.getSnapshot().workspaceSidebar.widthPx).toBe(220)
   await adapter.dispatch({ type: "sidebar-width-change", widthPx: 320 })
   expect(adapter.getSnapshot().workspaceSidebar.widthPx).toBe(320)
+})
+
+test("dock-width-change：按视口动态夹取，保证内容列 ≥480px", async () => {
+  // 1280 − 296（默认侧栏）− 2×16（间距）− 480（内容列下限）= 472
+  const { adapter } = makeAdapter(createFakeClient(), createManualScheduler(), createManualTimer(), 1280)
+  await adapter.dispatch({ type: "dock-width-change", widthPx: 9999 })
+  expect(adapter.getSnapshot().contextDock.widthPx).toBe(472)
+  await adapter.dispatch({ type: "dock-width-change", widthPx: 400 })
+  expect(adapter.getSnapshot().contextDock.widthPx).toBe(400)
+})
+
+test("sidebar-width-change：按视口动态夹取，无论 Dock 开关都预留 Dock 当前宽度", async () => {
+  // Dock 默认关闭也要预留：1280 − 354（默认 Dock）− 2×16 − 480 = 414
+  const { adapter } = makeAdapter(createFakeClient(), createManualScheduler(), createManualTimer(), 1280)
+  await adapter.dispatch({ type: "sidebar-width-change", widthPx: 9999 })
+  expect(adapter.getSnapshot().workspaceSidebar.widthPx).toBe(414)
+})
+
+test("拖拽动态夹取：视口过窄算出的上限低于静态最小值时退回最小值", async () => {
+  // 900 − 296 − 32 − 480 = 92 < 330 → 退回 DOCK_WIDTH_MIN，窄窗下不再保证内容列下限（与现状一致）
+  const { adapter } = makeAdapter(createFakeClient(), createManualScheduler(), createManualTimer(), 900)
+  await adapter.dispatch({ type: "dock-width-change", widthPx: 500 })
+  expect(adapter.getSnapshot().contextDock.widthPx).toBe(330)
+})
+
+test("Dock 拖宽后在关闭/打开间保持宽度（关闭态内容列恢复默认由 CSS 预留宽度机制表达）", async () => {
+  const { adapter } = makeAdapter()
+  await adapter.dispatch({ type: "dock-width-change", widthPx: 600 })
+  await adapter.dispatch({ type: "dock-close" })
+  expect(adapter.getSnapshot().contextDock.widthPx).toBe(600)
+  await adapter.dispatch({ type: "dock-open", panel: "code" })
+  expect(adapter.getSnapshot().contextDock.widthPx).toBe(600)
 })
 
 test("panel search 写入 panelSearch；仅本地表现状态，不触发 client", async () => {

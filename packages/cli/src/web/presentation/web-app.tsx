@@ -179,7 +179,8 @@ export function WebApp(props: {
           </div>
           <Composer snapshot={snapshot} dispatch={onIntent} disabled={readOnly} />
         </main>
-        {snapshot.contextDock.open ? <ContextDock snapshot={snapshot} dispatch={onIntent} disabled={readOnly} /> : null}
+        {/* Context Dock 常驻渲染：关闭时 inert + aria-hidden + CSS visibility 隐藏，开关才有平移过渡的载体。 */}
+        <ContextDock snapshot={snapshot} dispatch={onIntent} disabled={readOnly} />
       </div>
 
       <DialogHost snapshot={snapshot} dispatch={onIntent} disabled={readOnly} />

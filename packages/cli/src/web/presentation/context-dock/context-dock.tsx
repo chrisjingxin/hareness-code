@@ -14,7 +14,7 @@ import { SkillsPanel } from "./skills-panel"
 import { StatusPanel } from "./status-panel"
 import { DOCK_TABS, tabLabel, tabVisible } from "./panel-common"
 
-/** Dock 关闭时不渲染；所有面板共享同一组主 tab 和内容区域。 */
+/** 关闭时保持挂载（inert + aria-hidden，CSS visibility 隐藏），供开关平移过渡；所有面板共享同一组主 tab 和内容区域。 */
 export function ContextDock({
   snapshot,
   dispatch,
@@ -25,7 +25,6 @@ export function ContextDock({
   disabled?: boolean
 }): React.ReactElement {
   const { open, activePanel, widthPx } = snapshot.contextDock
-  if (!open) return <></>
   const interactive = snapshot.interactive
   const busy = Boolean(interactive.activeRun) || Boolean(interactive.interaction)
   const busyReason = busy ? "当前任务结束后可用" : null
@@ -66,8 +65,9 @@ export function ContextDock({
     <aside
       className="context-dock"
       data-active-panel={activePanel}
-      style={{ "--dock-width": `${widthPx}px` } as React.CSSProperties}
       aria-label="Context Dock"
+      aria-hidden={open ? undefined : true}
+      inert={!open}
     >
       <DockResizeHandle widthPx={widthPx} dispatch={dispatch} disabled={disabled} />
       {header}

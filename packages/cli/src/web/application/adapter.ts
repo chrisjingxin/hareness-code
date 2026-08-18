@@ -178,6 +178,13 @@ export type WebAdapterOptions = {
   /** run 结束自动刷新的延迟定时器；测试注入手动实现。 */
   setTimeoutFn?: (callback: () => void, ms: number) => unknown
   clearTimeoutFn?: (handle: unknown) => void
+  /** 视口宽度来源：侧栏/Dock 拖拽动态夹取的输入；默认读 window.innerWidth，测试注入固定值。 */
+  viewportWidth?: () => number
+}
+
+/** 默认视口宽度：浏览器读 window.innerWidth；无 DOM 环境（单测未注入时）退回 1600。 */
+function defaultViewportWidth(): number {
+  return typeof window === "undefined" ? 1600 : window.innerWidth
 }
 
 /** Web Interactive Adapter：与 TUI Adapter 形状一致，便于 interface 测试。 */
@@ -216,6 +223,10 @@ const DOCK_WIDTH_INITIAL = 354
 const SIDEBAR_WIDTH_MIN = 220
 const SIDEBAR_WIDTH_MAX = 480
 const SIDEBAR_WIDTH_INITIAL = 296
+/** 拖拽夹取的内容列下限：侧栏/Dock 拖拽都不能把中栏内容列压到该值以下（视口太窄时退回静态最小值）。 */
+const CONVERSATION_CONTENT_MIN = 480
+/** 三栏工作区列间距，与 styles.css 的 --workspace-gap 保持一致。 */
+const WORKSPACE_GAP_PX = 16
 const THREAD_RATIO_INITIAL = 0.45
 /** Thread 分区比例夹取区间：下限保证 Files 可见，上限保证 Thread 可见（CSS 另有 px 级 min）。 */
 const THREAD_RATIO_MIN = 0.2
@@ -229,6 +240,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
   private readonly frameScheduler: WebFrameScheduler
   private readonly setTimeoutFn: (callback: () => void, ms: number) => unknown
   private readonly clearTimeoutFn: (handle: unknown) => void
+  private readonly viewportWidthFn: () => number
   private readonly listeners = new Set<(snapshot: WebAdapterSnapshot) => void>()
   private readonly unsubscribeState: () => void
   private readonly unsubscribeHandoff: () => void
@@ -272,6 +284,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     this.frameScheduler = options.frameScheduler ?? createDefaultFrameScheduler()
     this.setTimeoutFn = options.setTimeoutFn ?? ((callback, ms) => setTimeout(callback, ms))
     this.clearTimeoutFn = options.clearTimeoutFn ?? (handle => clearTimeout(handle as ReturnType<typeof setTimeout>))
+    this.viewportWidthFn = options.viewportWidth ?? defaultViewportWidth
     this.snapshot = this.buildSnapshot()
     this.unsubscribeState = this.client.subscribeState(() => this.onViewUpdate())
     this.unsubscribeHandoff = this.client.subscribeHandoff(state => this.onHandoffState(state))
@@ -294,6 +307,21 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
    * 同步刷新内部 snapshot 缓存；保持 getSnapshot() 永远返回最新数据，
    * 但 listener 通知仍走 publishNow / schedulePublish 的批处理。
    */
+  /**
+   * Dock 拖拽动态上限：视口 − 当前侧栏 − 双侧间距 − 内容列下限；
+   * Dock 关闭时内容列也按 Dock 宽度预留居中，所以打开/关闭状态共用同一上限。
+   */
+  private dockWidthMax(): number {
+    const available = this.viewportWidthFn() - this.sidebarWidthPx - 2 * WORKSPACE_GAP_PX - CONVERSATION_CONTENT_MIN
+    return Math.max(DOCK_WIDTH_MIN, Math.min(DOCK_WIDTH_MAX, available))
+  }
+
+  /** 侧栏拖拽动态上限：无论 Dock 开关都预留 Dock 当前宽度（理由同上）。 */
+  private sidebarWidthMax(): number {
+    const available = this.viewportWidthFn() - this.contextDock.widthPx - 2 * WORKSPACE_GAP_PX - CONVERSATION_CONTENT_MIN
+    return Math.max(SIDEBAR_WIDTH_MIN, Math.min(SIDEBAR_WIDTH_MAX, available))
+  }
+
   private refreshSnapshot(): void {
     if (this.closed) return
     this.snapshot = this.buildSnapshot()
@@ -336,7 +364,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
         this.closeDock()
         return
       case "dock-width-change":
-        this.contextDock = { ...this.contextDock, widthPx: clamp(intent.widthPx, DOCK_WIDTH_MIN, DOCK_WIDTH_MAX) }
+        this.contextDock = { ...this.contextDock, widthPx: clamp(intent.widthPx, DOCK_WIDTH_MIN, this.dockWidthMax()) }
         this.schedulePublish()
         return
       case "sidebar-thread-ratio-change":
@@ -345,7 +373,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
         this.schedulePublish()
         return
       case "sidebar-width-change":
-        this.sidebarWidthPx = clamp(intent.widthPx, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX)
+        this.sidebarWidthPx = clamp(intent.widthPx, SIDEBAR_WIDTH_MIN, this.sidebarWidthMax())
         this.schedulePublish()
         return
       case "panel-search":

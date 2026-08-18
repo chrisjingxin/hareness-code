@@ -416,10 +416,11 @@ pre, code { font-family: "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Co
 .sidebar-status-error p { margin: 0 0 8px; }
 
 /* ---------- Timeline ---------- */
-.timeline-scroll { min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+/* 隐藏时间线滚动条（2026-08-18 用户确认）：滚动行为不变，内容列右缘不出现可见滚动条。 */
+.timeline-scroll { min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; }
+.timeline-scroll::-webkit-scrollbar { display: none; }
 .timeline {
-  width: min(880px, calc(100% - 48px));
-  margin: 0 auto;
+  /* 宽度与居中由 Screenshot geometry contract 的统一内容列规则（.timeline-scroll）表达。 */
   padding: 24px 0 36px;
   min-height: 100%;
   display: flex;
@@ -596,9 +597,8 @@ pre, code { font-family: "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Co
   min-width: 0;
   min-height: 0;
   flex: 0 1 auto;
-  width: min(560px, calc(100% - 48px));
+  /* 宽度与居中由 Screenshot geometry contract 的统一内容列规则表达（含 Diff 审批不再单独放宽）。 */
   max-height: calc(100% - var(--control-field) - 32px);
-  margin: 0 auto;
   padding: 0 0 8px;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -606,8 +606,6 @@ pre, code { font-family: "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Co
   scrollbar-width: thin;
   scrollbar-color: var(--line-strong) transparent;
 }
-/* 含 Diff 对比的审批放宽到 760px，给左右视图留列宽；其余审批/问答/信任保持窄卡。 */
-.interaction-dock:has(.file-diff-approval) { width: min(760px, calc(100% - 48px)); }
 .interaction-dock .interaction-card { border-left-width: 3px; }
 /* align-content: start：阻止 grid 默认 stretch 把容器多余高度分摊到各行。 */
 .approval-form, .question-form { display: grid; gap: 8px; align-content: start; padding: 10px 12px; }
@@ -733,7 +731,8 @@ pre, code { font-family: "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Co
 .composer-bar { flex: 0 0 auto; background: var(--composer-bg); border-top: 1px solid var(--line); }
 /* 定位上下文：命令菜单浮层相对 form 向上弹出，不占 flow 高度，
    避免矮窗口下把 composer-bar 撑高导致输入框底部被 conversation-column 裁剪。 */
-.composer-inner { position: relative; width: min(880px, calc(100% - 48px)); margin: 0 auto; padding: 12px 0 14px; }
+/* 宽度与居中由 Screenshot geometry contract 的统一内容列规则表达。 */
+.composer-inner { position: relative; padding: 12px 0 14px; }
 .composer-box { border: 1px solid var(--line-strong); border-radius: var(--radius-surface); background: var(--surface); }
 /* 聚焦反馈：整卡 focus-within 描边变 --accent（见尾部 Composer 节），textarea 自身不画 outline。 */
 .composer-textarea {
@@ -1015,6 +1014,19 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   .interaction-card:hover { box-shadow: var(--shadow-float); }
   .tool-row-chevron { transition: transform 140ms ease, opacity 140ms ease; }
   .code-block-copy { transition: opacity 140ms ease; }
+  /* Dock 开关平移：第三轨 0px ↔ var(--dock-width) 过渡，内容列宽度不变、整体平移；
+     拖动分隔条（is-dragging）持续改写轨宽，必须禁用过渡，否则拖拽被惯性拖慢。 */
+  .desktop-workspace { transition: grid-template-columns 200ms ease; }
+  .desktop-workspace:has(.is-dragging) { transition: none; }
+  /* 关闭方向保持可见到平移结束，打开方向立即可见。 */
+  .context-dock { transition: visibility 200ms; }
+  /* 内容列宽度随预留宽度过渡：Dock 拖宽后开关时宽度平滑变化、不跳变；
+     拖动分隔条（is-dragging）期间禁用，避免拖拽被惯性拖慢。 */
+  .work-item-banner, .timeline-scroll, .interaction-dock, .composer-inner { transition: max-width 200ms ease; }
+  .desktop-workspace:has(.is-dragging) .work-item-banner,
+  .desktop-workspace:has(.is-dragging) .timeline-scroll,
+  .desktop-workspace:has(.is-dragging) .interaction-dock,
+  .desktop-workspace:has(.is-dragging) .composer-inner { transition: none; }
 }
 
 /* ---------- 语法着色与 CodeBlock ---------- */
@@ -1117,20 +1129,17 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   inline-size: fit-content;
 }
 
-/* 主滚动区细滚动条：与暖单色细边框一致 */
-.timeline-scroll::-webkit-scrollbar,
+/* 主滚动区细滚动条：与暖单色细边框一致（时间线除外：滚动条隐藏，见上方 .timeline-scroll） */
 .sidebar-list::-webkit-scrollbar,
 .context-dock-body::-webkit-scrollbar,
 .file-tree::-webkit-scrollbar,
 .file-tabs::-webkit-scrollbar,
 .file-code-view::-webkit-scrollbar { width: 8px; height: 8px; }
-.timeline-scroll::-webkit-scrollbar-thumb,
 .sidebar-list::-webkit-scrollbar-thumb,
 .context-dock-body::-webkit-scrollbar-thumb,
 .file-tree::-webkit-scrollbar-thumb,
 .file-tabs::-webkit-scrollbar-thumb,
 .file-code-view::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 4px; border: 2px solid transparent; background-clip: content-box; }
-.timeline-scroll::-webkit-scrollbar-track,
 .sidebar-list::-webkit-scrollbar-track,
 .context-dock-body::-webkit-scrollbar-track,
 .file-tree::-webkit-scrollbar-track,
@@ -1295,35 +1304,48 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 
 /* ============================================================
    Screenshot geometry contract
-   左栏和中栏的起点由同一个固定 gap 决定；右侧 Dock 开关只改变中栏可用宽度，
-   不再通过 max-width + margin:auto 把中间内容重新居中。
+   中栏内容列（横幅/消息流/审批卡/输入框）固定居中，宽度封顶 880px。
+   预留宽度语义：Dock 打开时按 Dock 实际宽度、关闭时按 Dock 默认宽度——
+   拖宽 Dock 后关闭，内容列恢复默认宽度；重新打开仍保持拖宽后的宽度。
+   开关与拖拽随轨宽/内容列宽度过渡，整体平移不跳变
+   （2026-08-18 与用户确认，取代 2026-08-17「不重新居中」的旧约定）。
    ============================================================ */
 .web-shell {
   --brand-width: 240px;
   --workspace-gap: 16px;
-  /* 贴边布局（2026-08-17 与用户确认）：侧栏/Dock 贴紧窗口左右缘与顶栏下缘并延伸到底，
-     容器外边距归零；柔和感由中栏内容块的上下呼吸内边距与浅绿选中态表达。 */
-  --workspace-padding-inline: 0;
-  /* 无 Dock 时中栏右缘与窗口的留白；Dock 打开时归零（Dock 自身贴右缘）。 */
-  --workspace-padding-end: 20px;
+  /* 贴边布局：侧栏/Dock 贴紧窗口左右缘与顶栏下缘并延伸到底，容器外边距归零；
+     柔和感由中栏内容块的上下呼吸内边距与浅绿选中态表达。 */
   --conversation-padding-block-start: 16px;
   --conversation-padding-block-end: 20px;
   --dock-width: 354px;
+  /* Dock 默认宽度：内容列在 Dock 关闭态按它预留（拖宽的宽度只在 Dock 打开时生效）。 */
+  --dock-width-default: 354px;
+  /* 内容列宽度上限：超过后不再变宽，纯居中。 */
+  --conversation-content-max-width: 880px;
 }
 .desktop-workspace,
 .desktop-workspace.has-context-dock {
+  /* 预留宽度默认取 Dock 默认宽，打开时由 .has-context-dock 覆盖为实际宽。
+     必须定义在本层而非 .web-shell：自定义属性在声明处完成 var() 替换，
+     只有与覆盖同层，覆盖才能影响公式结果。 */
+  --dock-width-reserved: var(--dock-width-default);
+  /* 内容列实际宽度 = 视口 − 侧栏 − 预留 Dock 宽 − 双侧间距（封顶 880px）。 */
+  --conversation-content-width: min(var(--conversation-content-max-width), calc(100vw - var(--sidebar-width) - var(--dock-width-reserved) - 2 * var(--workspace-gap)));
   min-width: 0;
   overflow: clip;
   column-gap: var(--workspace-gap);
   row-gap: var(--workspace-gap);
-  padding: 0 var(--workspace-padding-inline);
-  padding-right: var(--workspace-padding-end);
-  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  padding: 0;
+  /* 第三轨常驻（关闭时 0px）：轨数一致轨宽才能过渡，Dock 开关才表现为平移。 */
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr) 0px;
 }
 .desktop-workspace.has-context-dock {
+  --dock-width-reserved: var(--dock-width);
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--dock-width);
-  padding-right: 0;
 }
+/* Dock 关闭时本体不可见但保持挂载（平移过渡的载体）；焦点与语义屏蔽由 TSX 的
+   inert + aria-hidden 表达，visibility 在过渡里延迟到平移结束才生效。 */
+.desktop-workspace:not(.has-context-dock) .context-dock { visibility: hidden; }
 
 /* ---------- 侧栏：单一平面容器 + 上下分区；贴左边与顶栏下缘，只留面向中栏的分隔线 ---------- */
 .workspace-sidebar { gap: 0; }
@@ -1397,16 +1419,18 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 /* ---------- 会话列与消息流：扁平阅读流，消息不是卡片 ---------- */
 .conversation-column {
   background: transparent;
-  --conversation-content-width: 100%;
   /* 中栏内容块的呼吸感：上面板贴边后，对话列上下保留内边距。 */
   padding: var(--conversation-padding-block-start) 0 var(--conversation-padding-block-end);
 }
-.timeline,
+/* 中栏四类内容共用同一居中内容列：宽度由 --conversation-content-width 锚定，
+   Dock 开关时列宽不变，仅随中栏可用宽度整体平移。 */
+.work-item-banner,
+.timeline-scroll,
 .interaction-dock,
 .composer-inner {
   width: 100%;
-  max-width: none;
-  margin-inline: 0;
+  max-width: var(--conversation-content-width);
+  margin-inline: auto;
 }
 .timeline { padding: 0 0 14px; }
 .timeline-header { display: none; }
@@ -1612,6 +1636,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   .brand { min-width: 0; padding-inline: 12px; }
   .desktop-workspace, .desktop-workspace.has-context-dock { grid-template-columns: minmax(0, 1fr); column-gap: 8px; padding-inline: 10px; }
   .workspace-sidebar, .context-dock { display: none; }
+  /* 内容列宽度公式在窄屏会算出极小值，恢复满宽。 */
+  .work-item-banner, .timeline-scroll, .interaction-dock, .composer-inner { max-width: none; }
   .brand-online, .brand-version { display: none; }
   .topbar-actions { padding-inline-end: 10px; }
 }
