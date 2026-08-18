@@ -1,13 +1,10 @@
 /** Web React 工作台：组合桌面三栏布局与可访问性，不拥有 Agent 或命令业务状态。 */
 /** @jsxImportSource react */
 
-import { Bot, ChevronDown, CircleDot, Ellipsis, Moon, Shield, ShieldCheck, Sun, Terminal, X } from "lucide-react"
-import { useCallback, useEffect, useRef, useState } from "react"
+import { CircleDot, Ellipsis, Moon, Shield, Sun, Terminal, X } from "lucide-react"
+import { useCallback, useEffect, useRef } from "react"
 import { useSyncExternalStore } from "react"
-import { modelSelectionLabel } from "../../presentation-shared"
-import { selectNavigationView, selectWorkItemView } from "../../interactive/selectors"
-import { APPROVAL_MODE_CYCLE, approvalModeLabel, workspaceLabel } from "../../interactive/runtime"
-import type { InteractiveSnapshot } from "../../interactive/types"
+import { selectWorkItemView } from "../../interactive/selectors"
 import type { WebInteractiveAdapter, WebAdapterSnapshot, WebIntent, WebTheme } from "../application/adapter"
 import { Composer } from "./composer"
 import { ContextDock } from "./context-dock/context-dock"
@@ -36,15 +33,11 @@ export function WebApp(props: {
   const connectionReadOnly = interactive.connection.status !== "open"
   const readOnly = !props.active || snapshot.leaving || connectionReadOnly
   const returnBlocked = Boolean(interactive.activeRun || interactive.interaction)
-  const { availability } = selectNavigationView(interactive)
   const workItemView = selectWorkItemView(interactive)
 
   const overflowTriggerRef = useRef<HTMLButtonElement | null>(null)
   const headerMenuRef = useRef<HTMLDivElement | null>(null)
-  const approvalModeControlRef = useRef<HTMLDivElement | null>(null)
-  const approvalModeMenuRef = useRef<HTMLDivElement | null>(null)
   const wasHeaderMenuOpenRef = useRef(false)
-  const [approvalModeMenuOpen, setApprovalModeMenuOpen] = useState(false)
 
   // 打开 header menu 后焦点进入第一项；关闭后焦点返回 overflow trigger。
   useEffect(() => {
@@ -55,12 +48,6 @@ export function WebApp(props: {
     }
     wasHeaderMenuOpenRef.current = snapshot.headerMenuOpen
   }, [snapshot.headerMenuOpen])
-
-  // 打开审批模式菜单后把焦点放到当前选项，键盘用户可以直接上下选择。
-  useEffect(() => {
-    if (!approvalModeMenuOpen) return
-    approvalModeMenuRef.current?.querySelector<HTMLElement>('[role="menuitemradio"][aria-checked="true"]')?.focus()
-  }, [approvalModeMenuOpen])
 
   // 点击菜单外任意位置关闭 header menu。
   useEffect(() => {
@@ -74,44 +61,9 @@ export function WebApp(props: {
     return () => document.removeEventListener("pointerdown", onPointerDown)
   }, [snapshot.headerMenuOpen, onIntent])
 
-  // 点击审批模式菜单外任意位置关闭菜单。
-  useEffect(() => {
-    if (!approvalModeMenuOpen) return
-    const onPointerDown = (event: MouseEvent) => {
-      if (!approvalModeControlRef.current?.contains(event.target as Node)) setApprovalModeMenuOpen(false)
-    }
-    document.addEventListener("pointerdown", onPointerDown)
-    return () => document.removeEventListener("pointerdown", onPointerDown)
-  }, [approvalModeMenuOpen])
-
-  useEffect(() => {
-    if (readOnly || returnBlocked) setApprovalModeMenuOpen(false)
-  }, [readOnly, returnBlocked])
-
   /** Overflow 菜单按 APG menu 习惯在可用项间循环移动焦点。 */
   const handleHeaderMenuKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)'))
-    if (items.length === 0) return
-    const currentIndex = Math.max(0, items.indexOf(document.activeElement as HTMLButtonElement))
-    let nextIndex: number | null = null
-    if (event.key === "ArrowDown") nextIndex = (currentIndex + 1) % items.length
-    if (event.key === "ArrowUp") nextIndex = (currentIndex - 1 + items.length) % items.length
-    if (event.key === "Home") nextIndex = 0
-    if (event.key === "End") nextIndex = items.length - 1
-    if (nextIndex === null) return
-    event.preventDefault()
-    items[nextIndex]?.focus()
-  }
-
-  /** 审批模式菜单按 APG menuitemradio 习惯在可用项间移动焦点。 */
-  const handleApprovalModeMenuKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]:not(:disabled)'))
-    if (event.key === "Escape") {
-      event.preventDefault()
-      setApprovalModeMenuOpen(false)
-      approvalModeControlRef.current?.querySelector<HTMLButtonElement>(".topbar-approval-mode")?.focus()
-      return
-    }
     if (items.length === 0) return
     const currentIndex = Math.max(0, items.indexOf(document.activeElement as HTMLButtonElement))
     let nextIndex: number | null = null
@@ -132,16 +84,15 @@ export function WebApp(props: {
         return
       }
       if (event.key !== "Escape") return
-      // Escape 关闭顺序固定：确认 Dialog → 命令菜单 → 审批模式菜单 → header overflow 菜单 → Context Dock → 取消 Run。
+      // Composer rail 下拉等内层浮层已 preventDefault 并自行关闭，这里不重复处理。
+      if (event.defaultPrevented) return
+      // Escape 关闭顺序固定：确认 Dialog → 命令菜单 → header overflow 菜单 → Context Dock → 取消 Run。
       if (interactive.confirmation) {
         // DialogHost 自己注册了 Escape handler；这里不再重复派发一次 resolve。
         return
       } else if (snapshot.commandMenuOpen) {
         event.preventDefault()
         onIntent({ type: "command-menu-close" })
-      } else if (approvalModeMenuOpen) {
-        event.preventDefault()
-        setApprovalModeMenuOpen(false)
       } else if (snapshot.headerMenuOpen) {
         event.preventDefault()
         onIntent({ type: "header-menu-toggle", open: false })
@@ -155,7 +106,7 @@ export function WebApp(props: {
     }
     window.addEventListener("keydown", onKeyDown)
     return () => window.removeEventListener("keydown", onKeyDown)
-  }, [approvalModeMenuOpen, interactive.activeRun, interactive.confirmation, onIntent, readOnly, snapshot.commandMenuOpen, snapshot.contextDock.open, snapshot.headerMenuOpen])
+  }, [interactive.activeRun, interactive.confirmation, onIntent, readOnly, snapshot.commandMenuOpen, snapshot.contextDock.open, snapshot.headerMenuOpen])
 
   return (
     <div
@@ -177,62 +128,7 @@ export function WebApp(props: {
           <span className="brand-online"><CircleDot aria-hidden="true" size={11} />在线</span>
         </div>
         <div className="topbar-main">
-          <div className="topbar-segment topbar-project">
-            <div className="topbar-field-copy topbar-project-copy">
-              <span className="topbar-segment-label">工作区</span>
-              <span className="project-name">{workspaceLabel(interactive.runtime.workspace)}</span>
-            </div>
-          </div>
-          <div className="topbar-meta">
-            {/* 模型段点击是展开右侧 Dock 面板而非下拉菜单：不渲染 chevron，避免错误的下拉暗示。 */}
-            <button type="button" className="meta-chip topbar-segment topbar-model" hidden={!availability.canOpenModelsPanel} disabled={readOnly} onClick={() => { onIntent({ type: "dock-open", panel: "models" }) }} title="模型设置">
-              <Bot aria-hidden="true" size={15} />
-              <span className="topbar-field-copy">
-                <span className="topbar-segment-label">模型</span>
-                <span className="meta-chip-value">{modelLabel(interactive)}</span>
-              </span>
-            </button>
-            <div ref={approvalModeControlRef} className="topbar-approval-mode-control">
-              <button
-                type="button"
-                className="meta-chip topbar-segment topbar-approval-mode"
-                disabled={readOnly || returnBlocked}
-                title={`选择审批模式（${APPROVAL_MODE_CYCLE.join("、")}）`}
-                aria-label={`选择审批模式，当前：${approvalModeLabel(interactive.runtime)}`}
-                aria-haspopup="menu"
-                aria-expanded={approvalModeMenuOpen}
-                aria-controls="approval-mode-menu"
-                onClick={() => { setApprovalModeMenuOpen(open => !open) }}
-              >
-                <ShieldCheck aria-hidden="true" size={16} />
-                <span className="topbar-field-copy">
-                  <span className="topbar-segment-label">审批模式</span>
-                  <span className="meta-chip-value">{approvalModeLabel(interactive.runtime)}</span>
-                </span>
-                <ChevronDown aria-hidden="true" className="topbar-segment-chevron" size={14} />
-              </button>
-              {approvalModeMenuOpen ? (
-                <div ref={approvalModeMenuRef} id="approval-mode-menu" className="approval-mode-menu" role="menu" aria-label="选择审批模式" onKeyDown={handleApprovalModeMenuKeyDown}>
-                  {APPROVAL_MODE_CYCLE.map(mode => (
-                    <button
-                      key={mode}
-                      type="button"
-                      role="menuitemradio"
-                      className="approval-mode-option"
-                      aria-checked={approvalModeLabel(interactive.runtime) === mode}
-                      onClick={() => {
-                        setApprovalModeMenuOpen(false)
-                        void onIntent({ type: "approval-mode-select", mode })
-                      }}
-                    >
-                      <span>{mode}</span>
-                      {approvalModeLabel(interactive.runtime) === mode ? <span aria-hidden="true">✓</span> : null}
-                    </button>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-          </div>
+          {/* 顶栏中段不放控件：工作区标识已迁入侧栏文件分区标题，模型/审批下沉 Composer rail。 */}
           <div className="topbar-actions">
             <button type="button" className="button return-button" disabled={!props.active || snapshot.leaving || returnBlocked} title={returnBlocked ? "当前任务结束或交互完成后可返回 TUI" : "归还控制权并恢复 TUI"} onClick={() => { onIntent({ type: "return-to-tui" }) }}><Terminal aria-hidden="true" size={15} />返回 TUI</button>
             {/* 主题切换提到顶栏：单图标按钮表达下一动作（light 显示 Moon/切深色，dark 显示 Sun/切浅色），不再占用菜单项。 */}
@@ -294,9 +190,4 @@ export function WebApp(props: {
 /** 主题切换的下一状态：浅色 ↔ 深色；顶栏图标按钮的 icon 与 aria-label 始终表达下一动作。 */
 function nextTheme(theme: WebTheme): WebTheme {
   return theme === "light" ? "dark" : "light"
-}
-
-function modelLabel(snapshot: InteractiveSnapshot): string {
-  // 与 TUI 共用同一展示策略：选择优先，回退握手运行时。
-  return modelSelectionLabel(snapshot)
 }

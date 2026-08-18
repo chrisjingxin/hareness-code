@@ -1,14 +1,17 @@
-/** Web Composer：textarea 自动增长、Skill chip、命令菜单、发送/取消按钮。 */
+/** Web Composer：textarea 自动增长、Skill chip、命令菜单、rail 状态控件（审批/模型下拉）、发送/取消按钮。 */
 /** @jsxImportSource react */
 
 import { useEffect, useRef, useState } from "react"
-import { AlertTriangle, AtSign, ChevronDown, Loader2, Lock, Paperclip, Send, Slash, Square, Wrench, X } from "lucide-react"
+import { AlertTriangle, Bot, ChevronDown, Loader2, Lock, Send, ShieldCheck, Square, Wrench, X } from "lucide-react"
 
 import {
   commandMenuItemDescription,
   commandMenuItemLabel,
   type CommandMenuItem,
 } from "../../interactive/commands"
+import { APPROVAL_MODE_CYCLE, approvalModeLabel } from "../../interactive/runtime"
+import { selectNavigationView } from "../../interactive/selectors"
+import { modelSelectionLabel } from "../../presentation-shared"
 import type { WebAdapterSnapshot, WebIntent } from "../application/adapter"
 
 /** Composer 自动增长行数上限；超过后由 CSS 控制内部滚动。 */
@@ -19,7 +22,8 @@ const COMPOSER_MIN_ROWS = 1
 const CHARS_PER_ROW = 48
 
 /**
- * Web Composer：textarea + 底部 action rail（Skill chip / 工作模式与审批模式 chip / 键盘提示 / 发送-取消）。
+ * Web Composer：textarea + 底部 action rail（左：审批模式下拉 + 工作模式 chip + Skill chip；右：模型下拉 + 发送/取消）。
+ * 审批/模型下拉替代原顶栏 chip 与只读 mode-chip：显示当前值，点击就地切换（参考 DSH rail 布局，2026-08-18 与用户确认）。
  * 工作模式 chip 是界面唯一模式展示：未锁定提示 Tab 切换，锁定显示锁图标与冻结模式。
  *
  * - 受控输入：textarea 的值始终从 snapshot.draft 读取，onChange 派发 draft-change。
@@ -43,6 +47,92 @@ export function Composer(props: {
   const workModeLocked = interactive.threadMode !== null
   const displayedWorkMode = workModeLocked ? interactive.threadMode : interactive.workMode
   const workModeLabel = displayedWorkMode === "compose" ? "Compose" : "Build"
+
+  // Rail 下拉：审批模式（运行时/交互中锁定，与原顶栏语义一致）与模型（目录与 Dock Models 面板同源）。
+  const { availability } = selectNavigationView(interactive)
+  const modelsCatalog = interactive.catalogs.models
+  const modelSelectedId = interactive.selection.requestedModelProfileId ?? interactive.selection.actualModel?.id ?? null
+  const approvalDisabled = composedDisabled || activeRun || Boolean(interactive.interaction)
+  const [approvalMenuOpen, setApprovalMenuOpen] = useState(false)
+  const [modelMenuOpen, setModelMenuOpen] = useState(false)
+  const approvalControlRef = useRef<HTMLDivElement | null>(null)
+  const approvalMenuRef = useRef<HTMLDivElement | null>(null)
+  const modelControlRef = useRef<HTMLDivElement | null>(null)
+  const modelMenuRef = useRef<HTMLDivElement | null>(null)
+
+  // 打开下拉后焦点进入当前选项（无当前项则第一个可用项），键盘用户直接上下选择。
+  useEffect(() => {
+    if (!approvalMenuOpen) return
+    approvalMenuRef.current?.querySelector<HTMLElement>('[role="menuitemradio"][aria-checked="true"]')?.focus()
+  }, [approvalMenuOpen])
+
+  useEffect(() => {
+    if (!modelMenuOpen) return
+    const current = modelMenuRef.current?.querySelector<HTMLElement>('[role="menuitemradio"][aria-checked="true"]')
+    const fallback = modelMenuRef.current?.querySelector<HTMLElement>('[role="menuitemradio"]:not(:disabled), [role="menuitem"]:not(:disabled)')
+    ;(current ?? fallback)?.focus()
+  }, [modelMenuOpen])
+
+  // 点击菜单外任意位置关闭下拉。
+  useEffect(() => {
+    if (!approvalMenuOpen) return
+    const onPointerDown = (event: MouseEvent) => {
+      if (!approvalControlRef.current?.contains(event.target as Node)) setApprovalMenuOpen(false)
+    }
+    document.addEventListener("pointerdown", onPointerDown)
+    return () => document.removeEventListener("pointerdown", onPointerDown)
+  }, [approvalMenuOpen])
+
+  useEffect(() => {
+    if (!modelMenuOpen) return
+    const onPointerDown = (event: MouseEvent) => {
+      if (!modelControlRef.current?.contains(event.target as Node)) setModelMenuOpen(false)
+    }
+    document.addEventListener("pointerdown", onPointerDown)
+    return () => document.removeEventListener("pointerdown", onPointerDown)
+  }, [modelMenuOpen])
+
+  // 只读/锁定时收起下拉。
+  useEffect(() => {
+    if (composedDisabled) {
+      setApprovalMenuOpen(false)
+      setModelMenuOpen(false)
+    }
+  }, [composedDisabled])
+
+  /** 打开/关闭模型下拉；打开时请求刷新 models 目录（不开 Dock）。 */
+  const toggleModelMenu = () => {
+    const next = !modelMenuOpen
+    setModelMenuOpen(next)
+    if (next) dispatch({ type: "models-catalog-refresh" })
+  }
+
+  /** 两个下拉共用 APG 习惯：方向键在可用项间循环，Escape 关闭并焦点回到触发按钮。 */
+  const handleRailMenuKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault()
+      event.stopPropagation()
+      const inModelMenu = modelMenuRef.current?.contains(event.currentTarget) ?? false
+      setApprovalMenuOpen(false)
+      setModelMenuOpen(false)
+      const trigger = inModelMenu
+        ? modelControlRef.current?.querySelector<HTMLButtonElement>(".rail-chip")
+        : approvalControlRef.current?.querySelector<HTMLButtonElement>(".rail-chip")
+      trigger?.focus()
+      return
+    }
+    const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]:not(:disabled), [role="menuitem"]:not(:disabled)'))
+    if (items.length === 0) return
+    const currentIndex = Math.max(0, items.indexOf(document.activeElement as HTMLButtonElement))
+    let nextIndex: number | null = null
+    if (event.key === "ArrowDown") nextIndex = (currentIndex + 1) % items.length
+    if (event.key === "ArrowUp") nextIndex = (currentIndex - 1 + items.length) % items.length
+    if (event.key === "Home") nextIndex = 0
+    if (event.key === "End") nextIndex = items.length - 1
+    if (nextIndex === null) return
+    event.preventDefault()
+    items[nextIndex]?.focus()
+  }
 
   const draft = snapshot.draft
   const armedSkill = interactive.selection.armedSkill
@@ -132,10 +222,51 @@ export function Composer(props: {
           />
           <div className="composer-rail">
             <div className="composer-rail-left">
-              <span className="composer-decoration-icons" aria-hidden="true">
-                <Paperclip />
-                <AtSign />
-                <Slash />
+              {/* 审批模式下拉：rail 左端的状态切换控件，替代原只读 mode-chip。 */}
+              <div ref={approvalControlRef} className="composer-rail-control">
+                <button
+                  type="button"
+                  className="rail-chip composer-approval"
+                  disabled={approvalDisabled}
+                  title={`选择审批模式（${APPROVAL_MODE_CYCLE.join("、")}）`}
+                  aria-label={`选择审批模式，当前：${approvalModeLabel(interactive.runtime)}`}
+                  aria-haspopup="menu"
+                  aria-expanded={approvalMenuOpen}
+                  aria-controls="composer-approval-menu"
+                  onClick={() => { setApprovalMenuOpen(open => !open) }}
+                >
+                  <ShieldCheck aria-hidden="true" size={15} />
+                  <span className="rail-chip-label">{approvalModeLabel(interactive.runtime)}</span>
+                  <ChevronDown aria-hidden="true" className="rail-chip-chevron" size={13} />
+                </button>
+                {approvalMenuOpen ? (
+                  <div ref={approvalMenuRef} id="composer-approval-menu" className="composer-menu composer-menu-start" role="menu" aria-label="选择审批模式" onKeyDown={handleRailMenuKeyDown}>
+                    {APPROVAL_MODE_CYCLE.map(mode => (
+                      <button
+                        key={mode}
+                        type="button"
+                        role="menuitemradio"
+                        className="composer-menu-option"
+                        aria-checked={approvalModeLabel(interactive.runtime) === mode}
+                        onClick={() => {
+                          setApprovalMenuOpen(false)
+                          void dispatch({ type: "approval-mode-select", mode })
+                        }}
+                      >
+                        <span>{mode}</span>
+                        {approvalModeLabel(interactive.runtime) === mode ? <span aria-hidden="true">✓</span> : null}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+              <span
+                className={`mode-chip${displayedWorkMode === "compose" ? " mode-chip-active" : ""}`}
+                role="status"
+                title={workModeLocked ? `工作模式已锁定为 ${workModeLabel}，Thread 内不可切换` : "工作模式：空闲时 Tab 切换"}
+              >
+                {workModeLocked ? <Lock aria-hidden="true" /> : null}
+                {workModeLabel}
               </span>
               {armedSkill ? (
                 <span className="skill-chip" role="status">
@@ -153,20 +284,76 @@ export function Composer(props: {
                   </button>
                 </span>
               ) : null}
-              <span className="composer-hint">Enter 发送 · Shift+Enter 换行</span>
-              <span
-                className={`mode-chip${displayedWorkMode === "compose" ? " mode-chip-active" : ""}`}
-                role="status"
-                title={workModeLocked ? `工作模式已锁定为 ${workModeLabel}，Thread 内不可切换` : "工作模式：空闲时 Tab 切换"}
-              >
-                {workModeLocked ? <Lock aria-hidden="true" /> : null}
-                {workModeLabel}
-              </span>
-              <span className="mode-chip" role="status" title="审批模式">
-                {interactive.runtime.approvalMode}
-              </span>
             </div>
             <div className="composer-rail-right">
+              {/* 模型下拉：发送键旁的就地切换（参考 DSH）；管理仍由 Dock Models 面板承担。 */}
+              {availability.canOpenModelsPanel ? (
+                <div ref={modelControlRef} className="composer-rail-control">
+                  <button
+                    type="button"
+                    className="rail-chip composer-model"
+                    disabled={composedDisabled}
+                    title="选择模型"
+                    aria-label={`选择模型，当前：${modelSelectionLabel(interactive)}`}
+                    aria-haspopup="menu"
+                    aria-expanded={modelMenuOpen}
+                    aria-controls="composer-model-menu"
+                    onClick={toggleModelMenu}
+                  >
+                    <Bot aria-hidden="true" size={15} />
+                    <span className="rail-chip-label">{modelSelectionLabel(interactive)}</span>
+                    <ChevronDown aria-hidden="true" className="rail-chip-chevron" size={13} />
+                  </button>
+                  {modelMenuOpen ? (
+                    <div ref={modelMenuRef} id="composer-model-menu" className="composer-menu composer-menu-end" role="menu" aria-label="选择模型" onKeyDown={handleRailMenuKeyDown}>
+                      {modelsCatalog.status === "loading" && modelsCatalog.items.length === 0 ? (
+                        <p className="composer-menu-status">正在读取 Model…</p>
+                      ) : modelsCatalog.status === "error" && modelsCatalog.items.length === 0 ? (
+                        <p className="composer-menu-status">{modelsCatalog.message || "读取 Model 失败"}</p>
+                      ) : modelsCatalog.items.length === 0 ? (
+                        <p className="composer-menu-status">暂无可用模型</p>
+                      ) : (
+                        modelsCatalog.items.map(profile => {
+                          const isCurrent = profile.id === modelSelectedId
+                          const optionDisabled = composedDisabled || activeRun || !profile.available
+                          return (
+                            <button
+                              key={profile.id}
+                              type="button"
+                              role="menuitemradio"
+                              className="composer-menu-option model-option"
+                              aria-checked={isCurrent}
+                              disabled={optionDisabled}
+                              title={!profile.available ? (profile.unavailable_reason ?? "当前不可用") : undefined}
+                              onClick={() => {
+                                setModelMenuOpen(false)
+                                void dispatch({ type: "model-select", profileId: profile.id })
+                              }}
+                            >
+                              <span className="model-option-copy">
+                                <span className="model-option-id">{profile.id}</span>
+                                <span className="model-option-sub">{profile.provider_label} · {profile.model}</span>
+                              </span>
+                              {isCurrent ? <span aria-hidden="true" className="model-option-check">✓</span> : null}
+                            </button>
+                          )
+                        })
+                      )}
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className="composer-menu-option composer-menu-manage"
+                        onClick={() => {
+                          setModelMenuOpen(false)
+                          dispatch({ type: "dock-open", panel: "models" })
+                        }}
+                      >
+                        管理模型…
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
               {activeRun ? (
                 <button
                   type="button"

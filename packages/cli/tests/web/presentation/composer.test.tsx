@@ -11,7 +11,8 @@ import type {
   SkillMenuItem,
 } from "../../../src/interactive/commands"
 import type { WebAdapterSnapshot, WebIntent } from "../../../src/web/application/adapter"
-import { makeInteractive, makeSnapshot, makeSkill } from "./fixtures"
+import type { ModelProfile } from "../../../src/interactive/types"
+import { makeCatalog, makeInteractive, makeSnapshot, makeSkill } from "./fixtures"
 import { registerTestDom, render, type RenderHandle } from "./render"
 
 const unregisterTestDom = registerTestDom()
@@ -101,6 +102,122 @@ describe("Composer", () => {
       expect(chip?.querySelector("svg")).not.toBeNull()
     } finally {
       locked.unmount()
+    }
+  })
+
+  test("rail 布局：左=审批下拉+工作模式 chip，右=模型下拉+发送；装饰图标与键盘提示已移除", () => {
+    const handle = mountComposer(makeSnapshot(), [])
+    try {
+      const left = handle.container.querySelector(".composer-rail-left")
+      const right = handle.container.querySelector(".composer-rail-right")
+      // 左栏第一个是审批下拉，工作模式 chip 跟在旁边。
+      expect(left?.querySelector(".composer-approval") !== null).toBe(true)
+      expect(left?.querySelector(".mode-chip")?.textContent).toBe("Build")
+      expect(left?.firstElementChild?.classList.contains("composer-rail-control")).toBe(true)
+      // 右栏模型下拉在发送键旁。
+      expect(right?.querySelector(".composer-model") !== null).toBe(true)
+      expect(right?.querySelector(".send-button") !== null).toBe(true)
+      // 装饰图标、键盘提示与只读审批 mode-chip 已移除。
+      expect(handle.container.querySelector(".composer-decoration-icons") === null).toBe(true)
+      expect(handle.container.querySelector(".composer-hint") === null).toBe(true)
+      expect(handle.container.querySelectorAll(".mode-chip").length).toBe(1)
+    } finally {
+      handle.unmount()
+    }
+  })
+
+  test("审批模式下拉：列出全部模式、选择派发 approval-mode-select，忙碌时禁用", () => {
+    const intents: WebIntent[] = []
+    const handle = mountComposer(makeSnapshot(), intents)
+    try {
+      const control = handle.container.querySelector<HTMLButtonElement>(".composer-approval")
+      expect(control).not.toBeNull()
+      expect(control?.getAttribute("aria-label")).toBe("选择审批模式，当前：default")
+      expect(control?.getAttribute("aria-haspopup")).toBe("menu")
+      expect(control?.getAttribute("aria-expanded")).toBe("false")
+      expect(control?.disabled).toBe(false)
+
+      act(() => { control?.click() })
+      expect(control?.getAttribute("aria-expanded")).toBe("true")
+      const options = Array.from(handle.container.querySelectorAll<HTMLButtonElement>(".composer-menu-option"))
+      expect(options.map(option => option.textContent?.replace("✓", "").trim())).toEqual(["plan", "default", "auto-edit", "auto", "yolo"])
+
+      const autoOption = options.find(option => option.textContent?.includes("auto") && !option.textContent?.includes("auto-edit"))
+      act(() => { autoOption?.click() })
+      expect(intents).toContainEqual({ type: "approval-mode-select", mode: "auto" })
+      expect(handle.container.querySelector(".composer-menu") === null).toBe(true)
+    } finally {
+      handle.unmount()
+    }
+
+    const busy = makeInteractive({ activeRun: { threadId: "t1", runId: "r1" } })
+    const busyHandle = mountComposer(makeSnapshot({ interactive: busy }), [])
+    try {
+      expect(busyHandle.container.querySelector<HTMLButtonElement>(".composer-approval")?.disabled).toBe(true)
+    } finally {
+      busyHandle.unmount()
+    }
+  })
+
+  test("模型下拉：打开刷新目录、列出模型、选择派发 model-select，管理入口开 Dock", () => {
+    const profiles: ModelProfile[] = [
+      { id: "fast", model: "k3-fast", provider_label: "DeepSeek", context_window_tokens: 128000, capabilities: [], is_default: true, available: true, source: "config" },
+      { id: "pro", model: "k3-pro", provider_label: "DeepSeek", context_window_tokens: 128000, capabilities: [], is_default: false, available: false, unavailable_reason: "缺少 API Key", source: "config" },
+    ]
+    const interactive = makeInteractive({
+      catalogs: { ...makeInteractive().catalogs, models: makeCatalog<ModelProfile>(profiles) },
+      selection: { requestedModelProfileId: "fast", actualModel: null, armedSkill: null },
+    })
+    const intents: WebIntent[] = []
+    const handle = mountComposer(makeSnapshot({ interactive }), intents)
+    try {
+      const control = handle.container.querySelector<HTMLButtonElement>(".composer-model")
+      expect(control).not.toBeNull()
+      expect(control?.getAttribute("aria-haspopup")).toBe("menu")
+      expect(control?.getAttribute("aria-expanded")).toBe("false")
+
+      // 打开菜单：请求刷新 models 目录，但不打开 Dock。
+      act(() => { control?.click() })
+      expect(control?.getAttribute("aria-expanded")).toBe("true")
+      expect(intents).toContainEqual({ type: "models-catalog-refresh" })
+      expect(intents.some(intent => intent.type === "dock-open")).toBe(false)
+
+      const options = Array.from(handle.container.querySelectorAll<HTMLButtonElement>(".model-option"))
+      expect(options.length).toBe(2)
+      // 当前选中项带 aria-checked；不可用项禁用并提示原因。
+      expect(options[0]?.getAttribute("aria-checked")).toBe("true")
+      expect(options[0]?.textContent).toContain("fast")
+      expect(options[0]?.textContent).toContain("DeepSeek · k3-fast")
+      expect(options[1]?.getAttribute("aria-checked")).toBe("false")
+      expect(options[1]?.disabled).toBe(true)
+      expect(options[1]?.title).toBe("缺少 API Key")
+
+      // 选择可用模型：派发 model-select 并关闭菜单。
+      act(() => { options[0]?.click() })
+      expect(intents).toContainEqual({ type: "model-select", profileId: "fast" })
+      expect(handle.container.querySelector(".composer-menu") === null).toBe(true)
+
+      // 管理入口：打开 Dock models 面板并关闭菜单。
+      act(() => { control?.click() })
+      const manage = handle.container.querySelector<HTMLButtonElement>(".composer-menu-manage")
+      expect(manage?.textContent).toContain("管理模型")
+      act(() => { manage?.click() })
+      expect(intents).toContainEqual({ type: "dock-open", panel: "models" })
+      expect(handle.container.querySelector(".composer-menu") === null).toBe(true)
+    } finally {
+      handle.unmount()
+    }
+  })
+
+  test("模型目录为空时下拉显示空态，管理入口仍可用", () => {
+    const handle = mountComposer(makeSnapshot(), [])
+    try {
+      const control = handle.container.querySelector<HTMLButtonElement>(".composer-model")
+      act(() => { control?.click() })
+      expect(handle.container.querySelector(".composer-menu .composer-menu-status")?.textContent ?? "").toContain("暂无可用模型")
+      expect(handle.container.querySelector(".composer-menu-manage") !== null).toBe(true)
+    } finally {
+      handle.unmount()
     }
   })
 

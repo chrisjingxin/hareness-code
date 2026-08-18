@@ -306,6 +306,15 @@ test("dock-open：打开并切到指定面板；models 触发 catalog.refresh", 
   expect(client.intents.some(intent => intent.type === "catalog.refresh" && intent.catalog === "models")).toBe(true)
 })
 
+test("models-catalog-refresh：仅刷新 models 目录，不改变 Dock 开合与当前面板", async () => {
+  const { adapter, client } = makeAdapter()
+  await adapter.dispatch({ type: "models-catalog-refresh" })
+  expect(client.intents).toContainEqual({ type: "catalog.refresh", catalog: "models" })
+  const snapshot = adapter.getSnapshot()
+  expect(snapshot.contextDock.open).toBe(false)
+  expect(snapshot.contextDock.activePanel).toBe("code")
+})
+
 test("dock-panel-select：已开时仅切面板；skills/mcp 触发 catalog.refresh，code/status/help 不触发", async () => {
   const { adapter, client } = makeAdapter()
   await adapter.dispatch({ type: "dock-open", panel: "status" })

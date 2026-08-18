@@ -229,7 +229,7 @@ test("桌面化清理：移动端抽屉、workspace-header 与窄屏断点样式
 })
 
 test("历史双轨 class 已删除：同一组件不再保留旧 class 规则", () => {
-  for (const legacy of [".message-bubble", ".composer-wrap", ".status-pill", ".thread-sidebar", ".utility-panel", ".topbar-status", ".mobile-thread-bar", ".sidebar-action", ".sidebar-disabled-reason"]) {
+  for (const legacy of [".message-bubble", ".composer-wrap", ".status-pill", ".thread-sidebar", ".utility-panel", ".topbar-status", ".mobile-thread-bar", ".sidebar-action", ".sidebar-disabled-reason", ".topbar-meta", ".topbar-model", ".topbar-approval", ".topbar-segment", ".topbar-project", ".project-name", ".meta-chip", ".approval-mode-menu", ".approval-mode-option", ".composer-decoration-icons", ".composer-hint"]) {
     expect(css).not.toContain(legacy)
   }
 })
@@ -246,7 +246,8 @@ test("外围 chrome 层级：新建 Thread 为 secondary，Run status 使用 acc
   const newThreadBlock = css.slice(css.indexOf(".new-thread-button {"), css.indexOf(".sidebar-toolbar"))
   expect(newThreadBlock).toContain("background: var(--surface)")
   expect(newThreadBlock).not.toContain("var(--action)")
-  expect(css).toContain(".meta-chip-run {")
+  // Run status 顶栏 chip 已随顶栏精简移除（HC-125）；accent-soft 层级由选中态等保留。
+  expect(css).not.toContain(".meta-chip-run")
   expect(css).toContain("background: var(--accent-soft)")
   expect(css).toContain("outline: 2px solid var(--accent); outline-offset: 2px")
 })
@@ -274,6 +275,39 @@ test("行号列保持逐行垂直排列：.line-numbers 必须 white-space: pre�
   expect(block).toContain("white-space: pre")
   // 与代码侧同字号同行高，保证行号与代码行一一对齐。
   expect(block).toContain("line-height: 1.6")
+})
+
+test("侧栏文件分区标题即工作区名：纯文字无图标，与线程分区标题同规格，名称可省略", () => {
+  // 无图标规则（与线程分区标题形态一致）。
+  expect(css).not.toMatch(/\.file-explorer-title\s+svg/)
+  // 与线程分区标题同字号字重（14px/700）。
+  expect(css).toMatch(/\.file-explorer-title\s*\{[^}]*font-size:\s*14px;\s*font-weight:\s*700/)
+  expect(css).toMatch(/\.thread-panel-title\s*\{[^}]*font-size:\s*14px;\s*font-weight:\s*700/)
+  expect(css).toMatch(/\.file-explorer-title-text\s*\{[^}]*text-overflow:\s*ellipsis/)
+})
+
+test("Rail 容器不裁剪下拉菜单：rail 三段均不声明 overflow", () => {
+  for (const sel of [".composer-rail-left", ".composer-rail-right"]) {
+    const block = css.match(new RegExp(`${sel.replace(".", "\\.")}\\s*\\{[^}]*\\}`, "g"))
+    expect(block).not.toBeNull()
+    for (const rule of block ?? []) expect(rule).not.toContain("overflow")
+  }
+  // rail 本体只允许 padding 几何覆盖，不得引入 overflow。
+  const railBlocks = css.match(/\.composer-rail\s*\{[^}]*\}/g) ?? []
+  for (const rule of railBlocks) expect(rule).not.toContain("overflow")
+})
+
+test("Rail chip 字号与灰度对齐 DSH 参考：14px + muted，hover/展开才加深", () => {
+  expect(css).toMatch(/\.rail-chip\s*\{[^}]*font-size:\s*14px/)
+  expect(css).toMatch(/\.rail-chip\s*\{[^}]*color:\s*var\(--muted\)/)
+  expect(css).toMatch(/\.rail-chip:hover:not\(:disabled\),\s*\.rail-chip\[aria-expanded="true"\]\s*\{[^}]*color:\s*var\(--text\)/)
+})
+
+test("Rail 下拉菜单向上弹出且守 overlay 纪律：shadow + line-strong 描边 + surface 圆角", () => {
+  expect(css).toMatch(/\.composer-menu\s*\{[^}]*bottom:\s*calc\(100% \+ 6px\)/)
+  expect(css).toMatch(/\.composer-menu\s*\{[^}]*box-shadow:\s*var\(--shadow\)/)
+  expect(css).toMatch(/\.composer-menu\s*\{[^}]*border:\s*1px solid var\(--line-strong\)/)
+  expect(css).toMatch(/\.composer-menu\s*\{[^}]*border-radius:\s*var\(--radius-surface\)/)
 })
 
 test("用户消息与 AI 正文同字号同行高：14px/1.7（对齐 markdown 正文规格，2026-08-17 用户确认）", () => {

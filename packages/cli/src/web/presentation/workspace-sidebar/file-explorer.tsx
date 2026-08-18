@@ -1,8 +1,9 @@
-/** Files 分区：标题 + 刷新按钮 + 文件树（本版设计无文件过滤）。 */
+/** Files 分区：工作区名标题 + 刷新按钮 + 文件树（本版设计无文件过滤）。 */
 /** @jsxImportSource react */
 
 import { MoreHorizontal, RefreshCw } from "lucide-react"
 
+import { workspaceLabel } from "../../../interactive/runtime"
 import type { WebAdapterSnapshot, WebIntent } from "../../application/adapter"
 import { FileTree } from "./file-tree"
 
@@ -16,10 +17,14 @@ export function FileExplorer({
   dispatch: (intent: WebIntent) => void
   disabled?: boolean
 }): React.ReactElement {
+  const workspace = snapshot.interactive.runtime.workspace
   return (
     <section className="file-explorer" aria-label="文件列表">
       <div className="file-explorer-header">
-        <span className="file-explorer-title">文件</span>
+        {/* 分区标题即工作区名（自顶栏迁入，2026-08-18 与用户确认）：与线程分区标题同为纯文字规格，悬停可见完整路径。 */}
+        <span className="file-explorer-title" title={workspace}>
+          <span className="file-explorer-title-text">{workspaceLabel(workspace)}</span>
+        </span>
         <span className="file-explorer-actions">
           <button
             type="button"

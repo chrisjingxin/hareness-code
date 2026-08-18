@@ -96,25 +96,17 @@ describe("WebApp", () => {
     }
   })
 
-  test("顶栏只读展示工作区，并移除分支与活动状态入口", () => {
+  test("顶栏中段不放任何控件：工作区标识已迁侧栏，模型/审批已下沉 Composer rail", () => {
     const { handle } = mountWebApp(true, makeSnapshot())
     try {
       expect(handle.container.querySelector(".brand-name")?.textContent).toBe("Harness Code")
-      expect(handle.container.querySelector(".topbar-project .project-name")?.textContent).toBe("workspace")
-      expect(handle.container.querySelector(".topbar-project .topbar-segment-chevron")).toBeNull()
+      const main = handle.container.querySelector(".topbar-main")
+      expect(main?.querySelector(".topbar-project") === null).toBe(true)
+      expect(main?.querySelector(".topbar-model") === null).toBe(true)
+      expect(main?.querySelector(".topbar-approval-mode") === null).toBe(true)
+      expect(main?.querySelector(".topbar-meta") === null).toBe(true)
       expect(handle.container.querySelector(".topbar-branch")).toBeNull()
       expect(handle.container.querySelector(".meta-chip-run")).toBeNull()
-    } finally {
-      handle.unmount()
-    }
-  })
-
-  test("模型段不带下拉 chevron（点击是展开右侧 Dock 而非菜单）；审批模式保留下拉指示", () => {
-    const { handle } = mountWebApp(true, makeSnapshot())
-    try {
-      // 断言转成 boolean：toBeNull 失败时会序列化整个 SVG 节点，输出过大导致测试超时。
-      expect(handle.container.querySelector(".topbar-model .topbar-segment-chevron") === null).toBe(true)
-      expect(handle.container.querySelector(".topbar-approval-mode .topbar-segment-chevron") !== null).toBe(true)
     } finally {
       handle.unmount()
     }
@@ -160,39 +152,6 @@ describe("WebApp", () => {
       expect(items.map(item => item.textContent)).toEqual(["帮助", "退出 Harness"])
     } finally {
       handle.unmount()
-    }
-  })
-
-  test("顶栏审批模式控件打开下拉并直接选择模式，忙碌时禁用", () => {
-    const { adapter, handle } = mountWebApp(true, makeSnapshot())
-    try {
-      const control = handle.container.querySelector<HTMLButtonElement>(".topbar-approval-mode")
-      expect(control).not.toBeNull()
-      expect(control?.textContent).toContain("default")
-      expect(control?.getAttribute("aria-label")).toBe("选择审批模式，当前：default")
-      expect(control?.title).toContain("plan、default、auto-edit、auto、yolo")
-      expect(control?.getAttribute("aria-haspopup")).toBe("menu")
-      expect(control?.getAttribute("aria-expanded")).toBe("false")
-      expect(control?.disabled).toBe(false)
-
-      act(() => { control?.click() })
-      expect(control?.getAttribute("aria-expanded")).toBe("true")
-      const options = Array.from(handle.container.querySelectorAll<HTMLButtonElement>(".approval-mode-option"))
-      expect(options.map(option => option.textContent?.replace("✓", "").trim())).toEqual(["plan", "default", "auto-edit", "auto", "yolo"])
-
-      const autoOption = options.find(option => option.textContent?.includes("auto") && !option.textContent?.includes("auto-edit"))
-      act(() => { autoOption?.click() })
-      expect(adapter.intentLog).toContainEqual({ type: "approval-mode-select", mode: "auto" })
-    } finally {
-      handle.unmount()
-    }
-
-    const busy = makeInteractive({ activeRun: { threadId: "t1", runId: "r1" } })
-    const busyMount = mountWebApp(true, makeSnapshot({ interactive: busy }))
-    try {
-      expect(busyMount.handle.container.querySelector<HTMLButtonElement>(".topbar-approval-mode")?.disabled).toBe(true)
-    } finally {
-      busyMount.handle.unmount()
     }
   })
 

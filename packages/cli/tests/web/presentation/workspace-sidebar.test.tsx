@@ -193,6 +193,21 @@ describe("WorkspaceSidebar", () => {
     }
   })
 
+  test("Files 分区标题即工作区名：纯文字标题（与线程分区同规格），title 提示完整路径", () => {
+    const handle = mountSidebar(makeSnapshot(), [])
+    try {
+      const title = handle.container.querySelector(".file-explorer-title")
+      expect(title?.querySelector(".file-explorer-title-text")?.textContent).toBe("workspace")
+      // 不带图标：与线程分区标题形态一致。
+      expect(title?.querySelector("svg") === null).toBe(true)
+      expect(title?.getAttribute("title")).toBe("/workspace")
+      // 「文件」固定文案已移除，标题直接表达工作区。
+      expect(title?.textContent).not.toContain("文件")
+    } finally {
+      handle.unmount()
+    }
+  })
+
   test("Files 分区渲染文件树行；目录行点击 dispatch workspace-directory-toggle", () => {
     const intents: WebIntent[] = []
     const workspaceTree = {

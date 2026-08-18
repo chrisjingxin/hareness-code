@@ -138,6 +138,7 @@ export type WebIntent =
   | { type: "thread-new" }
   | { type: "thread-refresh" }
   | { type: "model-select"; profileId: string }
+  | { type: "models-catalog-refresh" }
   | { type: "skill-arm"; skillId: string }
   | { type: "skill-clear" }
   | { type: "skill-set-enabled"; skillId: string; enabled: boolean }
@@ -361,6 +362,10 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
         return
       case "model-select":
         await this.selectModel(intent.profileId)
+        return
+      case "models-catalog-refresh":
+        // 顶栏模型下拉打开时刷新目录；只拉数据，不改变 Dock 开合与当前面板。
+        await this.client.submitIntent({ type: "catalog.refresh", catalog: "models" })
         return
       case "skill-arm":
         await this.executeCoreIntent({ type: "skill.arm", skillId: intent.skillId })
