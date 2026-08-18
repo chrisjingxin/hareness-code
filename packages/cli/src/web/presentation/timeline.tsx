@@ -1,7 +1,28 @@
 /** Web Timeline：消息、Tool 卡和已完成 Interaction 卡的统一时间线，并托管滚动行为。 */
 /** @jsxImportSource react */
 
-import { AlertTriangle, Check, ChevronDown, Loader2, MessageCircle, Sparkles } from "lucide-react"
+import {
+  AlertTriangle,
+  Bot,
+  Brain,
+  Check,
+  ChevronDown,
+  Code2,
+  FilePenLine,
+  FileText,
+  FolderOpen,
+  Globe,
+  ListTodo,
+  Loader2,
+  MessageCircle,
+  MessageCircleQuestion,
+  Search,
+  Sparkles,
+  Terminal,
+  Trash2,
+  Wrench,
+  type LucideIcon,
+} from "lucide-react"
 import {
   memo,
   useCallback,
@@ -16,7 +37,7 @@ import {
 import { activityLabel, interactionStatusLabel, toolStatusLabel } from "../../presentation-shared/timeline-presenter"
 import { progressPhaseLabel } from "../../presentation-shared/timeline-presenter"
 import { formatElapsed } from "../../presentation-shared/formatters"
-import { toolArgumentSummary } from "../../presentation-shared/tool-output-policy"
+import { toolDisplay, toolPrimaryArgument, type ToolIconName } from "../../presentation-shared/tool-display-policy"
 import {
   COMPOSE_STAGE_LABELS,
   activityGroupSubtitle,
@@ -651,11 +672,29 @@ function MessageTimestamp({ timestampMs }: { timestampMs?: number }): ReactEleme
 const MemoMessageBubble = memo(MessageBubbleImpl)
 MemoMessageBubble.displayName = "MessageBubble"
 
+/** 工具图标语义名 → lucide 组件的 Web 端映射；图标语义本身定义在 presentation-shared。 */
+const TOOL_ICONS: Record<ToolIconName, LucideIcon> = {
+  "file-read": FileText,
+  "file-write": FilePenLine,
+  "file-delete": Trash2,
+  folder: FolderOpen,
+  search: Search,
+  terminal: Terminal,
+  globe: Globe,
+  brain: Brain,
+  code: Code2,
+  plan: ListTodo,
+  agents: Bot,
+  question: MessageCircleQuestion,
+  wrench: Wrench,
+}
+
 /**
- * Tool 卡：默认折叠展示名称/状态/参数摘要；展开后显示参数与输出。
+ * Tool 行：默认折叠为融入阅读流的单行（图标 + 动词标签 + 主参数 + 状态图标）；
+ * 展开后在引导竖线内先显示输出，参数降级为次级折叠块。
  *
  * Tool 详情使用 `<pre class="tool-details-pre">` 并自带滚动；外部样式需设置
- * max-height 与 overflow 才能让长输出在卡片内独立滚动而不是撑破时间线。
+ * max-height 与 overflow 才能让长输出在详情区内独立滚动而不是撑破时间线。
  */
 function ToolCardImpl({
   tool,
@@ -666,40 +705,43 @@ function ToolCardImpl({
   expanded: boolean
   onToggle: (runId: string, toolId: string) => void
 }): ReactElement {
-  const summary = toolArgumentSummary(tool.arguments)
+  const display = toolDisplay(tool.name)
+  const primary = toolPrimaryArgument(tool.name, tool.arguments)
+  const Icon = TOOL_ICONS[display.icon]
   return (
-    <div className={`tool-card tool-card-${tool.status}`} data-tool-id={tool.id}>
+    <div className={`tool-row tool-row-${tool.status}`} data-tool-id={tool.id} data-tone={display.tone}>
       <button
         type="button"
-        className="tool-card-header"
+        className="tool-row-header"
         aria-expanded={expanded}
         onClick={() => onToggle(tool.runId, tool.id)}
       >
-        <span className="tool-card-name">{tool.name}</span>
-        {summary ? <span className="tool-card-args">{summary}</span> : null}
-        <span className="tool-card-status">{renderToolStatus(tool.status)}</span>
+        <Icon aria-hidden="true" focusable="false" className="tool-row-icon" />
+        <span className="tool-row-label" title={tool.name}>{display.label}</span>
+        {primary ? <span className="tool-row-args">{primary}</span> : null}
+        {renderToolStatus(tool.status)}
         <ChevronDown
           aria-hidden="true"
           focusable="false"
-          className={expanded ? "tool-card-chevron expanded" : "tool-card-chevron"}
+          className={expanded ? "tool-row-chevron expanded" : "tool-row-chevron"}
         />
       </button>
       {expanded ? (
-        <div className="tool-details">
-          {tool.arguments ? (
-            <section className="tool-details-section">
-              <h4 className="tool-details-title">参数</h4>
-              <pre className="tool-details-pre">{tool.arguments}</pre>
-            </section>
-          ) : null}
+        <div className="tool-row-details">
           {tool.output ? (
-            <section className="tool-details-section">
-              <h4 className="tool-details-title">输出</h4>
+            <section className="tool-row-section">
+              <h4 className="tool-row-title">输出</h4>
               <pre className="tool-details-pre">{tool.output}</pre>
             </section>
           ) : null}
+          {tool.arguments ? (
+            <details className="tool-row-arguments">
+              <summary className="tool-row-title tool-row-arguments-summary">参数</summary>
+              <pre className="tool-details-pre">{tool.arguments}</pre>
+            </details>
+          ) : null}
           {!tool.arguments && !tool.output ? (
-            <p className="tool-details-empty">该调用尚无可显示内容。</p>
+            <p className="tool-row-empty">该调用尚无可显示内容。</p>
           ) : null}
         </div>
       ) : null}
@@ -716,29 +758,29 @@ const MemoToolCard = memo(ToolCardImpl, (previous, next) => {
 })
 MemoToolCard.displayName = "ToolCard"
 
-/** Tool 状态标签：使用 lucide 图标而不是 Unicode，保持视觉一致。 */
+/**
+ * Tool 状态：纯图标语义（旋转/对勾/告警），中文状态文案挂在 aria-label 与 tooltip 上；
+ * 状态区分不依赖颜色——形状与动画本身即可分辨，成功不再占用文字位。
+ */
 function renderToolStatus(status: ToolCard["status"]): ReactNode {
   const label = toolStatusLabel(status)
   if (status === "running") {
     return (
-      <span className="tool-status-running">
+      <span className="tool-row-status tool-status-running" role="img" aria-label={label} title={label}>
         <Loader2 aria-hidden="true" focusable="false" className="tool-status-icon spinning" />
-        {label}
       </span>
     )
   }
   if (status === "failed") {
     return (
-      <span className="tool-status-failed">
+      <span className="tool-row-status tool-status-failed" role="img" aria-label={label} title={label}>
         <AlertTriangle aria-hidden="true" focusable="false" className="tool-status-icon" />
-        {label}
       </span>
     )
   }
   return (
-    <span className="tool-status-completed">
+    <span className="tool-row-status tool-status-completed" role="img" aria-label={label} title={label}>
       <Check aria-hidden="true" focusable="false" className="tool-status-icon" />
-      {label}
     </span>
   )
 }

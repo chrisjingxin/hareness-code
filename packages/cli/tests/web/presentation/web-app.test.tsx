@@ -203,7 +203,7 @@ describe("WebApp", () => {
     })
     const { adapter, handle } = mountWebApp(true, makeSnapshot({ interactive }))
     try {
-      const header = handle.container.querySelector<HTMLButtonElement>(".tool-card-header")
+      const header = handle.container.querySelector<HTMLButtonElement>(".tool-row-header")
       expect(header).not.toBeNull()
       act(() => { header?.click() })
       expect(adapter.intentLog).toContainEqual({ type: "tool-toggle", runId: "run-1", toolId: "t1" })

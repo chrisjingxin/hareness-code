@@ -68,11 +68,11 @@ describe("Timeline", () => {
     try {
       const messages = handle.container.querySelectorAll(".timeline-message")
       expect(messages.length).toBe(2)
-      expect(handle.container.querySelector(".tool-card")).not.toBeNull()
+      expect(handle.container.querySelector(".tool-row")).not.toBeNull()
       expect(handle.container.querySelector(".interaction-card")).not.toBeNull()
       expect(handle.container.textContent).toContain("你好")
       expect(handle.container.textContent).toContain("我很好")
-      expect(handle.container.textContent).toContain("read_file")
+      expect(handle.container.textContent).toContain("读取文件")
     } finally {
       handle.unmount()
     }
@@ -89,14 +89,45 @@ describe("Timeline", () => {
       <Timeline snapshot={makeSnapshot({ interactive })} dispatch={intent => intents.push(intent)} />,
     )
     try {
-      const card = handle.container.querySelector<HTMLDivElement>(".tool-card")
+      const card = handle.container.querySelector<HTMLDivElement>(".tool-row")
       expect(card).not.toBeNull()
-      expect(card?.querySelector(".tool-card-name")?.textContent).toBe("read_file")
-      expect(card?.querySelector(".tool-details")).toBeNull()
-      const header = card?.querySelector<HTMLButtonElement>(".tool-card-header")
+      expect(card?.querySelector(".tool-row-label")?.textContent).toBe("读取文件")
+      expect(card?.querySelector(".tool-row-details")).toBeNull()
+      const header = card?.querySelector<HTMLButtonElement>(".tool-row-header")
       expect(header?.getAttribute("aria-expanded")).toBe("false")
       act(() => { header?.click() })
       expect(intents).toEqual([{ type: "tool-toggle", runId: "run-1", toolId: "t1" }])
+    } finally {
+      handle.unmount()
+    }
+  })
+
+  test("Tool 行展示动词标签、主参数与副作用基调；原始工具名挂 tooltip", () => {
+    const interactive = makeInteractive({
+      timeline: [
+        toolItem({ id: "t1", name: "execute", arguments: "{\"command\":\"bun test\"}", status: "failed" }),
+        toolItem({ id: "t2", name: "mcp__docs__search", arguments: "{\"q\":\"x\"}", status: "completed" }),
+      ],
+    })
+    const handle = render(
+      <Timeline snapshot={makeSnapshot({ interactive })} dispatch={() => {}} />,
+    )
+    try {
+      const rows = handle.container.querySelectorAll<HTMLDivElement>(".tool-row")
+      expect(rows).toHaveLength(2)
+      // 已知工具：动词标签 + 主参数 + write 基调 + 失败行标记。
+      const first = rows[0]!
+      expect(first.getAttribute("data-tone")).toBe("write")
+      expect(first.classList.contains("tool-row-failed")).toBe(true)
+      expect(first.querySelector(".tool-row-label")?.textContent).toBe("执行命令")
+      expect(first.querySelector(".tool-row-label")?.getAttribute("title")).toBe("execute")
+      expect(first.querySelector(".tool-row-args")?.textContent).toBe("bun test")
+      expect(first.querySelector(".tool-row-status")?.getAttribute("aria-label")).toBe("失败")
+      // 未知 MCP 工具：回退为原始名 + neutral 基调；完成态 aria-label 可读。
+      const second = rows[1]!
+      expect(second.getAttribute("data-tone")).toBe("neutral")
+      expect(second.querySelector(".tool-row-label")?.textContent).toBe("mcp__docs__search")
+      expect(second.querySelector(".tool-row-status")?.getAttribute("aria-label")).toBe("已完成")
     } finally {
       handle.unmount()
     }
@@ -125,7 +156,7 @@ describe("Timeline", () => {
       return <Timeline snapshot={snapshot} dispatch={dispatch} />
     }
     const handle = render(<Harness />)
-    const headers = (): NodeListOf<HTMLButtonElement> => handle.container.querySelectorAll<HTMLButtonElement>(".tool-card-header")
+    const headers = (): NodeListOf<HTMLButtonElement> => handle.container.querySelectorAll<HTMLButtonElement>(".tool-row-header")
     const clickAt = (index: number): void => {
       act(() => { headers()[index]?.click() })
     }
@@ -168,14 +199,15 @@ describe("Timeline", () => {
     }
     const handle = render(<Harness />)
     try {
-      const header = handle.container.querySelector<HTMLButtonElement>(".tool-card-header")
+      const header = handle.container.querySelector<HTMLButtonElement>(".tool-row-header")
       act(() => { header?.click() })
-      const details = handle.container.querySelector(".tool-details")
+      const details = handle.container.querySelector(".tool-row-details")
       expect(details).not.toBeNull()
       const pres = details?.querySelectorAll("pre.tool-details-pre")
       expect(pres?.length).toBe(2)
-      expect(pres?.[0]?.textContent).toBe("{\"cmd\":\"ls\"}")
-      expect(pres?.[1]?.textContent).toBe("a.txt")
+      // 展开详情输出优先，参数降级为次级折叠块。
+      expect(pres?.[0]?.textContent).toBe("a.txt")
+      expect(pres?.[1]?.textContent).toBe("{\"cmd\":\"ls\"}")
     } finally {
       handle.unmount()
     }
@@ -192,7 +224,7 @@ describe("Timeline", () => {
       <Timeline snapshot={makeSnapshot({ interactive })} dispatch={() => {}} />,
     )
     try {
-      const cards = handle.container.querySelectorAll(".tool-card")
+      const cards = handle.container.querySelectorAll(".tool-row")
       expect(cards.length).toBe(2)
       expect(cards[0]?.getAttribute("data-tool-id")).toBe("t1")
       expect(cards[1]?.getAttribute("data-tool-id")).toBe("t2")
@@ -216,8 +248,8 @@ describe("Timeline", () => {
     try {
       const groups = handle.container.querySelectorAll(".timeline-agent-group")
       expect(groups).toHaveLength(1)
-      expect(groups[0]?.querySelectorAll(".tool-card")).toHaveLength(2)
-      expect(groups[0]?.querySelector(".tool-card")?.parentElement?.classList.contains("timeline-tool")).toBe(true)
+      expect(groups[0]?.querySelectorAll(".tool-row")).toHaveLength(2)
+      expect(groups[0]?.querySelector(".tool-row")?.parentElement?.classList.contains("timeline-tool")).toBe(true)
     } finally {
       handle.unmount()
     }
@@ -237,7 +269,7 @@ describe("Timeline", () => {
       const group = handle.container.querySelector(".timeline-agent-group")
       expect(group).not.toBeNull()
       expect(group?.querySelector(".timeline-agent-group-header .message-author")?.textContent).toBe("Agent")
-      expect(group?.querySelectorAll(".tool-card")).toHaveLength(1)
+      expect(group?.querySelectorAll(".tool-row")).toHaveLength(1)
       expect(group?.querySelectorAll(".timeline-message")).toHaveLength(1)
       expect(group?.firstElementChild?.classList.contains("timeline-agent-group-header")).toBe(true)
       expect(group?.querySelector(".timeline-agent-group-header + .timeline-tool")).not.toBeNull()
@@ -395,19 +427,19 @@ test("Compose activity 分组：终态默认折叠，Enter 可展开", () => {
     expect(header.getAttribute("aria-expanded")).toBe("false")
     expect(header.textContent).toContain("理解")
     expect(handle.container.textContent).toContain("理解完成：已识别目标")
-    // 折叠时不渲染组内 Tool 卡
-    expect(handle.container.textContent).not.toContain("read_file")
+    // 折叠时不渲染组内 Tool 行
+    expect(handle.container.textContent).not.toContain("读取文件")
     act(() => {
       header.click()
     })
     expect(handle.container.querySelector(".timeline-activity-header")?.getAttribute("aria-expanded")).toBe("true")
-    expect(handle.container.textContent).toContain("read_file")
+    expect(handle.container.textContent).toContain("读取文件")
     // 再次点击折叠
     act(() => {
       header.click()
     })
     expect(handle.container.querySelector(".timeline-activity-header")?.getAttribute("aria-expanded")).toBe("false")
-    expect(handle.container.textContent).not.toContain("read_file")
+    expect(handle.container.textContent).not.toContain("读取文件")
   } finally {
     handle.unmount()
   }
