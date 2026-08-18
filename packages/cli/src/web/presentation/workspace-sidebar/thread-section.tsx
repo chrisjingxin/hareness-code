@@ -2,11 +2,9 @@
 /** @jsxImportSource react */
 
 import { useState } from "react"
-import { Search } from "lucide-react"
+import { MessageCircle, Search } from "lucide-react"
 
 import type { ThreadSummary } from "@za38/protocol"
-
-import { CommentOutlined } from "../icons/comment-outlined"
 
 import type { WebAdapterSnapshot, WebIntent } from "../../application/adapter"
 
@@ -117,7 +115,7 @@ function ThreadList({
               onClick={() => dispatch({ type: "thread-select", threadId: item.thread_id })}
             >
               <span className="thread-item-icon" aria-hidden="true">
-                <CommentOutlined size={18} />
+                <MessageCircle size={15} strokeWidth={1.8} />
               </span>
               <span className="thread-item-title">{item.first_message || item.latest_message || "（无标题）"}</span>
               <span className="thread-item-summary">{threadSubtitle(item, currentThreadId, busy, interaction)}</span>

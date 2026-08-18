@@ -2,7 +2,7 @@
 /** @jsxImportSource react */
 
 import { useMemo, useRef, useState } from "react"
-import { FileSymlink, Folder } from "lucide-react"
+import { ChevronDown, ChevronRight, FileSymlink, Folder } from "lucide-react"
 
 import type { WebAdapterSnapshot, WebIntent } from "../../application/adapter"
 import { FileTypeIcon } from "./file-type-icon"
@@ -146,7 +146,9 @@ export function FileTree({
             onClick={disabled ? undefined : () => handleRowClick(index, row)}
           >
             <span className="file-row-arrow" aria-hidden="true">
-              {row.kind === "directory" ? (row.expanded ? "▾" : "▸") : ""}
+              {row.kind === "directory"
+                ? (row.expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />)
+                : null}
             </span>
             {row.kind === "directory" ? (
               <Folder aria-hidden="true" size={14} className="file-row-icon" />

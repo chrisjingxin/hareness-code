@@ -362,14 +362,16 @@ button.meta-chip { cursor: pointer; }
   cursor: pointer;
   color: var(--text-soft);
   font-size: 13px;
+  /* 行高独立于全局 1.6：箭头/图标/文件名三个槽位都按同一轴线 flex 居中，不靠手动偏移。 */
+  line-height: 1.4;
   white-space: nowrap;
 }
 .file-row:hover:not(.is-selected) { background: var(--surface-2); }
 .file-row.is-selected { background: var(--accent-soft); color: var(--accent-hover); }
 .file-row.is-focused { outline: 1px solid var(--accent-border); outline-offset: -1px; }
-.file-row-arrow { width: 14px; flex: 0 0 14px; color: var(--muted); font-size: 11px; text-align: center; }
-/* 图标相对行盒几何中心下沉 1px：与 15px/1.6 文字的光学中心对齐（对照页实测 0/1/2px 取 1px）。 */
-.file-row-icon { flex: 0 0 14px; position: relative; top: 1px; color: var(--muted); }
+/* 箭头槽：lucide chevron 与文件图标同一路径渲染，flex 居中保证三种元素同轴。 */
+.file-row-arrow { width: 14px; flex: 0 0 14px; display: inline-flex; align-items: center; justify-content: center; color: var(--muted); }
+.file-row-icon { flex: 0 0 14px; color: var(--muted); }
 /* 文件类型色：选中行也保留类型色，选中态由背景表达。 */
 .file-row-icon-ts { color: var(--file-ts); }
 .file-row-icon-js { color: var(--file-js); }
@@ -1045,6 +1047,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   .interaction-card { transition: box-shadow 200ms ease; }
   .interaction-card:hover { box-shadow: var(--shadow-float); }
   .tool-row-chevron { transition: transform 140ms ease, opacity 140ms ease; }
+  .code-block-copy { transition: opacity 140ms ease; }
 }
 
 /* ---------- 语法着色与 CodeBlock ---------- */
@@ -1061,11 +1064,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .syntax-attribute { color: var(--syntax-attribute); }
 .syntax-constant { color: var(--syntax-constant); }
 
+/* CodeBlock 外壳：与工具输出同层的暖色内嵌面板，无窗格式双调头带；
+   语言标签是安静的小字 caption，复制按钮 hover/聚焦才现身。 */
 .code-block {
-  margin: 14px 0;
+  margin: 12px 0;
   border: 1px solid var(--line);
   border-radius: var(--radius-surface);
-  background: var(--surface);
+  background: var(--surface-2);
   overflow: hidden;
 }
 .code-block-header {
@@ -1073,16 +1078,15 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 4px 8px;
-  background: var(--surface-3);
-  border-bottom: 1px solid var(--line);
-  font-size: 12px;
-  color: var(--muted);
+  padding: 2px 6px 0 10px;
+  font-size: 11px;
+  color: var(--subtle);
 }
 .code-block-lang {
-  font-weight: 600;
+  font-family: "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  font-weight: 500;
   text-transform: lowercase;
-  letter-spacing: .02em;
+  letter-spacing: .04em;
 }
 .code-block-loading-hint {
   font-weight: normal;
@@ -1099,21 +1103,25 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   padding: 0;
   border-radius: var(--radius-control);
   color: var(--muted);
+  opacity: 0;
 }
+.code-block:hover .code-block-copy,
+.code-block:focus-within .code-block-copy,
+.code-block-copy:focus-visible { opacity: 1; }
 .code-block-copy svg { width: 14px; height: 14px; }
 .code-block-copy:hover {
   background: var(--accent-soft);
   color: var(--accent-hover);
 }
 .code-block-body {
-  padding: 14px;
+  padding: 6px 12px 10px;
   overflow-x: auto;
 }
 .code-block-pre {
   margin: 0;
   white-space: pre;
-  font-size: 15px;
-  line-height: 1.6;
+  font-size: 13px;
+  line-height: 1.55;
 }
 .code-block-pre code {
   padding: 0;
@@ -1479,7 +1487,9 @@ button.topbar-segment { cursor: pointer; }
   padding: 8px 9px;
   border-radius: var(--radius-surface);
 }
-.thread-item-icon { grid-column: 1; grid-row: 1 / span 2; width: 22px; height: 22px; display: grid; place-items: center; align-self: start; margin-top: 2px; color: var(--muted); }
+/* 图标槽与标题行等高（13px × 1.35）：图标光学中心精确落在标题行中轴，
+   不再用 margin-top 手调；两行文本块场景下对齐首行，与文件树单行行的读法一致。 */
+.thread-item-icon { grid-column: 1; grid-row: 1 / span 2; width: 22px; height: calc(13px * 1.35); display: grid; place-items: center; align-self: start; color: var(--muted); }
 .thread-item-title { grid-column: 2; grid-row: 1; min-width: 0; font-size: 13px; font-weight: 500; line-height: 1.35; }
 .thread-item-summary { grid-column: 2; grid-row: 2; min-width: 0; color: var(--muted); font-size: 12px; font-weight: 400; line-height: 1.35; }
 .thread-item-meta { grid-column: 3; grid-row: 1; align-self: start; margin-left: 8px; color: var(--muted); font-size: 11px; line-height: 1.35; white-space: nowrap; }

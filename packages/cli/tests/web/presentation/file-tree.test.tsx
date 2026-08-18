@@ -49,7 +49,8 @@ describe("FileTree", () => {
     try {
       const rows = handle.container.querySelectorAll<HTMLElement>(".file-row")
       expect(rows.length).toBe(3)
-      expect(rows[0]!.textContent).toContain("▾") // 展开箭头
+      // 展开箭头：lucide chevron（SVG），与文件图标同轴对齐
+      expect(rows[0]!.querySelector(".file-row-arrow svg")).not.toBeNull()
       expect(rows[0]!.getAttribute("aria-expanded")).toBe("true")
       expect(rows[0]!.getAttribute("aria-level")).toBe("1")
       const indented = rows[1]!.style.paddingInlineStart

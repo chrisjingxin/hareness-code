@@ -77,13 +77,26 @@ test("文件类型图标颜色只经 --file-* token，light/dark 双主题定义
   expect(css).not.toContain(".file-row.is-selected .file-row-icon")
 })
 
-test("文件行图标带 1px 光学下沉：与文字光学中心对齐", () => {
+test("文件行箭头/图标/文字同轴 flex 居中：无手动 top 偏移", () => {
   const iconBlock = css.slice(css.indexOf(".file-row-icon {"), css.indexOf(".file-row-icon-ts"))
-  expect(iconBlock).toContain("top: 1px")
+  expect(iconBlock).not.toContain("top:")
+  expect(iconBlock).not.toContain("position: relative")
+  // 箭头槽是 flex 居中的 lucide chevron 容器，不再是文本字形。
+  expect(css).toContain(".file-row-arrow { width: 14px; flex: 0 0 14px; display: inline-flex; align-items: center; justify-content: center;")
+  // 行高独立于全局 1.6，三个槽位共用同一轴线。
+  const rowBlock = css.slice(css.indexOf(".file-row {"), css.indexOf(".file-row:hover"))
+  expect(rowBlock).toContain("line-height: 1.4")
 })
 
 test("选中 Thread 只用浅绿背景表达：无左侧 inset 色轨", () => {
   expect(css).not.toContain("inset 2px 0 0 var(--accent)")
+})
+
+test("Thread 图标槽与标题行等高对齐首行中轴：无 margin-top 手调", () => {
+  const iconBlock = css.slice(css.indexOf(".thread-item-icon {"), css.indexOf("/* active Thread"))
+  expect(iconBlock).toContain("height: calc(13px * 1.35)")
+  expect(iconBlock).toContain("align-self: start")
+  expect(iconBlock).not.toContain("margin-top")
 })
 
 test("扁平化：侧栏是单一容器，无线程/文件孤岛卡", () => {
