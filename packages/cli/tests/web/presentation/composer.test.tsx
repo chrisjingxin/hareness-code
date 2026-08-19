@@ -276,6 +276,24 @@ describe("Composer", () => {
     }
   })
 
+  test("取消按钮为设计稿停止形态：实心圆角方块图标（2026-08-18 用户设计稿）", () => {
+    const interactive = makeInteractive({
+      activeRun: { threadId: "t1", runId: "r1" },
+    })
+    const handle = mountComposer(makeSnapshot({ draft: "x", interactive }), [])
+    try {
+      const cancel = handle.container.querySelector<HTMLButtonElement>(".cancel-button")
+      const icon = cancel?.querySelector("svg.cancel-stop-icon")
+      expect(icon === null).toBe(false)
+      const rect = icon?.querySelector("rect")
+      expect(rect?.getAttribute("fill")).toBe("currentColor")
+      expect(rect?.getAttribute("rx")).toBe("3.5")
+      expect(rect?.getAttribute("width")).toBe("14")
+    } finally {
+      handle.unmount()
+    }
+  })
+
   test("上下文压缩期间禁用输入和发送并显示等待原因", () => {
     const interactive = makeInteractive({ activity: { kind: "compacting" } })
     const handle = mountComposer(makeSnapshot({ draft: "保留的草稿", interactive }), [])

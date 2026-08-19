@@ -2,7 +2,7 @@
 /** @jsxImportSource react */
 
 import { useEffect, useRef, useState } from "react"
-import { AlertTriangle, Bot, ChevronDown, Loader2, Lock, Send, ShieldCheck, Square, Wrench, X } from "lucide-react"
+import { AlertTriangle, Bot, ChevronDown, Loader2, Lock, Send, ShieldCheck, Wrench, X } from "lucide-react"
 
 import {
   commandMenuItemDescription,
@@ -363,7 +363,10 @@ export function Composer(props: {
                   onClick={() => dispatch({ type: "cancel-run" })}
                   disabled={snapshot.leaving}
                 >
-                  <Square aria-hidden="true" />
+                  {/* 设计稿停止形态：实心圆角方块（2026-08-18 用户设计稿），非 lucide 描边 Square。 */}
+                  <svg aria-hidden="true" className="cancel-stop-icon" viewBox="0 0 24 24">
+                    <rect x="5" y="5" width="14" height="14" rx="3.5" fill="currentColor" />
+                  </svg>
                 </button>
               ) : (
                 <button

@@ -35,7 +35,7 @@ test("头像与按钮不使用 linear-gradient，强调色走 --accent/--action 
 })
 
 test("取消按钮不使用主行动填充：danger 描边 + 透明底（绿色填充是「执行」语义）", () => {
-  expect(css).toContain(".cancel-button { background: transparent; border-color: var(--danger); color: var(--danger-text); }")
+  expect(css).toContain(".cancel-button { background: transparent; border-color: var(--danger-vivid); color: var(--danger-vivid); }")
   const afterSendFill = css.slice(css.lastIndexOf(".send-button { background: var(--action)"))
   expect(afterSendFill).not.toMatch(/\.send-button, \.cancel-button[^}]*background: var\(--action\)/)
 })
@@ -361,4 +361,80 @@ test("Composer 聚焦反馈走整卡描边：textarea 不挂全局 focus outline
   // 全局 textarea:focus-visible 绿框曾包在全宽 textarea 上，渲染成 tab 下/输入区下两条错位绿线（用户截图反馈）。
   expect(css).toContain(".composer-textarea:focus-visible { outline: 0; }")
   expect(css).toContain(".composer-box:focus-within { border-color: var(--accent); }")
+})
+
+test("Tool 折叠态 chevron 常驻可见：不再 hover 才显现（2026-08-18 与用户确认可发现性）", () => {
+  expect(css).not.toMatch(/\.tool-row-chevron\s*\{[^}]*opacity:\s*0/)
+  expect(css).not.toContain(".tool-row-header:hover .tool-row-chevron")
+  expect(css).toContain(".tool-row-chevron.expanded { transform: rotate(180deg); }")
+})
+
+test("Tool 失败状态带文字徽章样式（完成/运行不占文字位）", () => {
+  expect(css).toMatch(/\.tool-status-failed\s*\{[^}]*display:\s*inline-flex/)
+  expect(css).toContain(".tool-status-text {")
+})
+
+test("Tool 展开详情卡片化：输出/参数同级卡片 + 头部条 + 复制与展开全部（2026-08-18 设计确认）", () => {
+  // 卡片：1px line 边框 + surface 圆角 + tool-output-bg 底，阴影纪律不破（无 box-shadow）。
+  expect(css).toMatch(/\.tool-detail-card\s*\{[^}]*border:\s*1px solid var\(--line\)/)
+  expect(css).toMatch(/\.tool-detail-card\s*\{[^}]*border-radius:\s*var\(--radius-surface\)/)
+  expect(css).toMatch(/\.tool-detail-card\s*\{[^}]*background:\s*var\(--tool-output-bg\)/)
+  expect(css).not.toMatch(/\.tool-detail-card\s*\{[^}]*box-shadow/)
+  // 头部条：标题 + 行数统计 + 复制按钮。
+  expect(css).toContain(".tool-detail-header {")
+  expect(css).toContain(".tool-detail-title {")
+  expect(css).toContain(".tool-detail-meta {")
+  expect(css).toContain(".tool-detail-copy {")
+  // 折叠阈值由组件 data-clamped 表达：钳制限高 280px，展开后 560px 内滚。
+  expect(css).toMatch(/\.tool-detail-body\[data-clamped="true"\]\s*\{[^}]*max-height:\s*280px/)
+  expect(css).toMatch(/\.tool-detail-body\[data-clamped="false"\]\s*\{[^}]*max-height:\s*560px/)
+  expect(css).toContain(".tool-detail-expand {")
+  // 参数卡片 chevron 随 details[open] 旋转。
+  expect(css).toContain(".tool-detail-arguments[open] .tool-detail-chevron { transform: rotate(180deg); }")
+})
+
+test("Tool 结构化渲染样式：file-content 行号 gutter、path-list 行、grep 分组（2026-08-18 轮 2）", () => {
+  // 三类结构化内容共用等宽 12.5px/1.65 规格。
+  expect(css).toMatch(/\.tool-file-lines,\s*\.tool-path-list,\s*\.tool-grep-matches\s*\{[^}]*font-size:\s*12\.5px/)
+  // file-content：元信息行 + 行号 gutter（右对齐、subtle、不可选中）。
+  expect(css).toContain(".tool-file-meta {")
+  expect(css).toMatch(/\.tool-file-lineno\s*\{[^}]*text-align:\s*right/)
+  expect(css).toMatch(/\.tool-file-lineno\s*\{[^}]*user-select:\s*none/)
+  // path-list：行内图标 + 路径文本。
+  expect(css).toMatch(/\.tool-path-row\s*\{[^}]*display:\s*flex/)
+  expect(css).toContain(".tool-path-text {")
+  // grep：分组路径头加粗，匹配行带行号列。
+  expect(css).toContain(".tool-grep-group {")
+  expect(css).toMatch(/\.tool-grep-path\s*\{[^}]*font-weight:\s*600/)
+  expect(css).toContain(".tool-grep-lineno {")
+  // 类型图标色复用侧栏 --file-* token 体系，不在 tool 区新增颜色规则。
+  expect(css).not.toMatch(/\.tool-path-row\s+svg\s*\{[^}]*color/)
+})
+
+test("取消按钮按设计稿：surface 圆角 + 实心圆角方块可见 14px + 鲜亮 --danger-vivid（2026-08-18 用户实测纠正）", () => {
+  expect(css).toContain(".cancel-button { border-radius: var(--radius-surface); }")
+  // 可见方块 = 24px 盒 × 14/24 rect = 14px ≈ 按钮的 39%（设计稿 43%，实心形更大一档读感）。
+  expect(css).toMatch(/\.cancel-button\s+\.cancel-stop-icon\s*\{[^}]*width:\s*24px/)
+  expect(css).toMatch(/\.cancel-button\s+\.cancel-stop-icon\s*\{[^}]*height:\s*24px/)
+  // 鲜亮红走新增 --danger-vivid token（light/dark 各定义一次），描边与图标同色。
+  expect(css).toContain("--danger-vivid:")
+  expect(css).toMatch(/\.cancel-button\s*\{[^}]*border-color:\s*var\(--danger-vivid\)/)
+  expect(css).toMatch(/\.cancel-button\s*\{[^}]*color:\s*var\(--danger-vivid\)/)
+  expect(css).toMatch(/\.cancel-button\s+\.cancel-stop-icon\s*\{[^}]*color:\s*var\(--danger-vivid\)/)
+})
+
+test("回到底部按钮双态：中性找路 / 有新输出 accent 强调（2026-08-18 用户反馈语义）", () => {
+  expect(css).toMatch(/\.scroll-to-bottom\s*\{[^}]*color:\s*var\(--text-soft\)/)
+  expect(css).toMatch(/\.scroll-to-bottom\[data-new="true"\]\s*\{[^}]*color:\s*var\(--accent-hover\)/)
+})
+
+test("Tool diff 视图复用 --diff-* token：红绿行与符号列不引新色（2026-08-18 轮 3）", () => {
+  expect(css).toMatch(/\.tool-diff-row\[data-type="add"\]\s*\{[^}]*background:\s*var\(--diff-add-bg\)/)
+  expect(css).toMatch(/\.tool-diff-row\[data-type="remove"\]\s*\{[^}]*background:\s*var\(--diff-remove-bg\)/)
+  expect(css).toMatch(/\.tool-diff-row\[data-type="add"\]\s+\.tool-diff-sign\s*\{[^}]*color:\s*var\(--diff-add-sign\)/)
+  expect(css).toMatch(/\.tool-diff-row\[data-type="remove"\]\s+\.tool-diff-sign\s*\{[^}]*color:\s*var\(--diff-remove-sign\)/)
+  expect(css).toContain(".tool-diff-meta {")
+  // 终端块：命令行与输出分区，等宽规格一致。
+  expect(css).toMatch(/\.tool-terminal-cmd\s*\{[^}]*font-weight:\s*600/)
+  expect(css).toContain(".tool-terminal-line {")
 })

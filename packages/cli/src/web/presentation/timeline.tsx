@@ -8,8 +8,10 @@ import {
   Check,
   ChevronDown,
   Code2,
+  Copy,
   FilePenLine,
   FileText,
+  Folder,
   FolderOpen,
   Globe,
   ListTodo,
@@ -38,6 +40,8 @@ import { activityLabel, interactionStatusLabel, toolStatusLabel } from "../../pr
 import { progressPhaseLabel } from "../../presentation-shared/timeline-presenter"
 import { formatElapsed } from "../../presentation-shared/formatters"
 import { toolDisplay, toolPrimaryArgument, type ToolIconName } from "../../presentation-shared/tool-display-policy"
+import { prettifyJson, toolOutputView, type ToolOutputView } from "../../presentation-shared/tool-output-render"
+import { FileTypeIcon } from "./workspace-sidebar/file-type-icon"
 import {
   COMPOSE_STAGE_LABELS,
   activityGroupSubtitle,
@@ -84,28 +88,48 @@ export function Timeline({
   const isNearBottomRef = useRef<boolean>(true)
   const lastScrollRequestRef = useRef<WebScrollRequest>(null)
   const [showScrollButton, setShowScrollButton] = useState(false)
+  /** 上滚期间是否有新内容到达：决定按钮是「有新输出」强调态还是中性「回到底部」。 */
+  const [hasNewOutput, setHasNewOutput] = useState(false)
   const activeRun = snapshot.interactive.activeRun
   // home/idle 即「就绪」：就绪即沉默，底部状态区留白；其余活动标签（失败/取消/压缩等瞬态）照常展示。
   const idleActivity = snapshot.interactive.activity.kind === "home" || snapshot.interactive.activity.kind === "idle"
   const baseElapsedMs = snapshot.interactive.runProgress?.elapsedMs
   const elapsedMs = useLiveElapsed(Boolean(activeRun), baseElapsedMs)
 
-  /** 把容器滚到底部；调用方负责在调用后维护 near-bottom 状态。 */
-  const scrollContainerToBottom = useCallback(() => {
+  /**
+   * 真正的滚动容器是父级 .timeline-scroll（overflow-y: auto）；.timeline 是不滚动的内容层。
+   * 独立渲染（无滚动父级）时回退到自身，保证测试与嵌入场景行为一致。
+   */
+  const resolveScroller = useCallback((): HTMLElement | null => {
     const el = containerRef.current
-    if (!el) return
-    el.scrollTop = el.scrollHeight
+    if (!el) return null
+    return (el.closest(".timeline-scroll") as HTMLElement | null) ?? el
   }, [])
 
-  /** 处理滚动事件：维护 near-bottom ref 与按钮可见性，避免滚动过程触发额外渲染。 */
-  const handleScroll = useCallback(() => {
-    const el = containerRef.current
-    if (!el) return
-    const distance = el.scrollHeight - el.scrollTop - el.clientHeight
-    const near = distance <= BOTTOM_THRESHOLD_PX
-    isNearBottomRef.current = near
-    setShowScrollButton(prev => (prev === !near ? prev : !near))
-  }, [])
+  /** 把滚动容器滚到底部；调用方负责在调用后维护 near-bottom 状态。 */
+  const scrollContainerToBottom = useCallback(() => {
+    const scroller = resolveScroller()
+    if (!scroller) return
+    scroller.scrollTop = scroller.scrollHeight
+  }, [resolveScroller])
+
+  /**
+   * 滚动事件必须挂在滚动容器上（React onScroll 不冒泡父级滚动）：
+   * 维护 near-bottom ref 与「回到底部」按钮可见性，避免滚动过程触发额外渲染。
+   */
+  useEffect(() => {
+    const scroller = resolveScroller()
+    if (!scroller) return
+    const onScroll = (): void => {
+      const distance = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight
+      const near = distance <= BOTTOM_THRESHOLD_PX
+      isNearBottomRef.current = near
+      if (near) setHasNewOutput(false)
+      setShowScrollButton(prev => (prev === !near ? prev : !near))
+    }
+    scroller.addEventListener("scroll", onScroll, { passive: true })
+    return () => scroller.removeEventListener("scroll", onScroll)
+  }, [resolveScroller])
 
   /** Adapter 显式声明滚动意图时无条件跳到底部；空 → 非空转换都触发。 */
   useEffect(() => {
@@ -115,17 +139,23 @@ export function Timeline({
     if (next === null) return
     scrollContainerToBottom()
     isNearBottomRef.current = true
+    setHasNewOutput(false)
     setShowScrollButton(false)
   }, [snapshot.scrollRequest, scrollContainerToBottom])
 
-  /** 时间线内容变化时，若用户原本就在底部则继续跟随；否则保持位置并显示按钮。 */
+  /** 时间线内容变化时，若用户原本就在底部则继续跟随；否则保持位置并把按钮升级为「有新输出」。 */
   useLayoutEffect(() => {
-    if (isNearBottomRef.current) scrollContainerToBottom()
+    if (isNearBottomRef.current) {
+      scrollContainerToBottom()
+    } else {
+      setHasNewOutput(true)
+    }
   }, [timeline, scrollContainerToBottom])
 
   const handleScrollToBottom = useCallback(() => {
     scrollContainerToBottom()
     isNearBottomRef.current = true
+    setHasNewOutput(false)
     setShowScrollButton(false)
   }, [scrollContainerToBottom])
 
@@ -146,6 +176,9 @@ export function Timeline({
     return true
   })
   const segments = segmentTimeline(visibleItems)
+  /** 流式光标只挂在最后一项（生成位置）；运行中历史文本段后面已有工具/新段时不再闪烁。 */
+  const lastVisible = visibleItems[visibleItems.length - 1]
+  const liveKey = lastVisible ? timelineItemKey(lastVisible) : null
   const [expandedActivities, setExpandedActivities] = useState<ReadonlySet<string>>(() => new Set())
   const [collapsedActivities, setCollapsedActivities] = useState<ReadonlySet<string>>(() => new Set())
 
@@ -200,6 +233,7 @@ export function Timeline({
           items={items}
           expandedTools={snapshot.expandedTools}
           onToggleTool={handleToggleTool}
+          liveKey={liveKey}
         />,
       )
     }
@@ -220,6 +254,7 @@ export function Timeline({
         onToggle={() => toggleGroup(group)}
         expandedTools={snapshot.expandedTools}
         onToggleTool={handleToggleTool}
+        liveKey={liveKey}
       />,
     )
   }
@@ -232,7 +267,6 @@ export function Timeline({
       role="log"
       aria-relevant="additions"
       aria-label="对话与工具时间线"
-      onScroll={handleScroll}
     >
       {snapshot.interactive.currentThreadId !== null && visibleItems.length > 0 ? (
         <div className="timeline-header">THREAD · {timeline.length} 项记录</div>
@@ -264,10 +298,11 @@ export function Timeline({
         <button
           type="button"
           className="scroll-to-bottom"
+          data-new={hasNewOutput}
           onClick={handleScrollToBottom}
-          aria-label="跳到最新输出"
+          aria-label={hasNewOutput ? "跳到最新输出" : "回到底部"}
         >
-          有新输出
+          {hasNewOutput ? "有新输出" : "回到底部"}
         </button>
       ) : null}
     </div>
@@ -281,12 +316,14 @@ function ActivityGroup({
   onToggle,
   expandedTools,
   onToggleTool,
+  liveKey,
 }: {
   group: TimelineActivityGroup
   expanded: boolean
   onToggle: () => void
   expandedTools: ReadonlySet<string>
   onToggleTool: (runId: string, toolId: string) => void
+  liveKey: string | null
 }): ReactElement {
   const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
     if (event.key === "Enter" || event.key === " ") {
@@ -315,6 +352,7 @@ function ActivityGroup({
               items={items}
               expandedTools={expandedTools}
               onToggleTool={onToggleTool}
+              liveKey={liveKey}
             />
           ))}
         </div>
@@ -411,10 +449,12 @@ function TimelineGroup({
   items,
   expandedTools,
   onToggleTool,
+  liveKey,
 }: {
   items: TimelineItem[]
   expandedTools: ReadonlySet<string>
   onToggleTool: (runId: string, toolId: string) => void
+  liveKey: string | null
 }): ReactElement {
   const assistantIndex = items.findIndex(isAssistantMessage)
   const reasoningItems = items.filter((item): item is Extract<TimelineItem, { type: "reasoning" }> => item.type === "reasoning")
@@ -422,7 +462,7 @@ function TimelineGroup({
     const toolItems = items.filter((item): item is Extract<TimelineItem, { type: "tool" }> => item.type === "tool")
     if (toolItems.length === 0 && reasoningItems.length === 0 && items.length === 1) {
       const item = items[0]
-      if (item) return <TimelineRow item={item} expandedTools={expandedTools} onToggleTool={onToggleTool} />
+      if (item) return <TimelineRow item={item} expandedTools={expandedTools} onToggleTool={onToggleTool} liveKey={liveKey} />
     }
     if (toolItems.length > 0) {
       return (
@@ -449,7 +489,7 @@ function TimelineGroup({
 
   const assistant = items[assistantIndex]
   if (!assistant || assistant.type !== "message") return <></>
-  if (items.length === 1) return <TimelineRow item={assistant} expandedTools={expandedTools} onToggleTool={onToggleTool} />
+  if (items.length === 1) return <TimelineRow item={assistant} expandedTools={expandedTools} onToggleTool={onToggleTool} liveKey={liveKey} />
 
   return (
     <div className="timeline-agent-group" data-tool-grouped="true">
@@ -475,6 +515,7 @@ function TimelineGroup({
             item={item}
             expandedTools={expandedTools}
             onToggleTool={onToggleTool}
+            liveKey={liveKey}
           />
         )
       })}
@@ -488,15 +529,17 @@ function TimelineRowImpl({
   expandedTools,
   onToggleTool,
   grouped = false,
+  liveKey = null,
 }: {
   item: TimelineItem
   expandedTools: ReadonlySet<string>
   onToggleTool: (runId: string, toolId: string) => void
   grouped?: boolean
+  liveKey?: string | null
 }): ReactElement {
   if (item.type === "message") {
     if (item.message.role === "assistant" && item.message.streaming === true) {
-      return <StreamingAssistantBubble message={item.message} showHeader={!grouped} />
+      return <StreamingAssistantBubble message={item.message} showHeader={!grouped} showCursor={timelineItemKey(item) === liveKey} />
     }
     return <MemoMessageBubble message={item.message} showHeader={!grouped} />
   }
@@ -595,9 +638,12 @@ TimelineRow.displayName = "TimelineRow"
 function StreamingAssistantBubble({
   message,
   showHeader,
+  showCursor,
 }: {
   message: ConversationMessage
   showHeader: boolean
+  /** 流式光标只挂在时间线最后一项（生成位置）；后续已有工具/新段的历史段不再闪烁。 */
+  showCursor: boolean
 }): ReactElement {
   return (
     <div className="timeline-message message-assistant agent-message-card" data-streaming="true">
@@ -605,7 +651,7 @@ function StreamingAssistantBubble({
       <div className="message-body">
         <div className="message-content">
           {message.content.length > 0 ? <Markdown text={message.content} /> : null}
-          <span className="streaming-cursor" aria-hidden="true" />
+          {showCursor ? <span className="streaming-cursor" aria-hidden="true" /> : null}
         </div>
       </div>
     </div>
@@ -690,11 +736,12 @@ const TOOL_ICONS: Record<ToolIconName, LucideIcon> = {
 }
 
 /**
- * Tool 行：默认折叠为融入阅读流的单行（图标 + 动词标签 + 主参数 + 状态图标）；
- * 展开后在引导竖线内先显示输出，参数降级为次级折叠块。
+ * Tool 行：默认折叠为融入阅读流的单行（图标 + 动词标签 + 主参数 + 状态 + 常驻 chevron）；
+ * 展开后在引导竖线内以同级卡片展示输出与参数（2026-08-18 与用户确认的结构化方向）。
  *
- * Tool 详情使用 `<pre class="tool-details-pre">` 并自带滚动；外部样式需设置
- * max-height 与 overflow 才能让长输出在详情区内独立滚动而不是撑破时间线。
+ * 输出卡片：头部条（标题 + 行数 + 复制）+ 内容体；超过折叠阈值时钳制限高并给
+ * 「展开全部/收起」就地切换。内容体的 max-height/overflow 由 data-clamped 样式表达，
+ * 长输出在详情区内独立滚动而不是撑破时间线。
  */
 function ToolCardImpl({
   tool,
@@ -728,24 +775,168 @@ function ToolCardImpl({
       </button>
       {expanded ? (
         <div className="tool-row-details">
-          {tool.output ? (
-            <section className="tool-row-section">
-              <h4 className="tool-row-title">输出</h4>
-              <pre className="tool-details-pre">{tool.output}</pre>
-            </section>
-          ) : null}
-          {tool.arguments ? (
-            <details className="tool-row-arguments">
-              <summary className="tool-row-title tool-row-arguments-summary">参数</summary>
-              <pre className="tool-details-pre">{tool.arguments}</pre>
-            </details>
-          ) : null}
+          {tool.output ? <ToolOutputSection toolName={tool.name} output={tool.output} argumentsText={tool.arguments} /> : null}
+          {tool.arguments ? <ToolArgumentsSection arguments={tool.arguments} /> : null}
           {!tool.arguments && !tool.output ? (
             <p className="tool-row-empty">该调用尚无可显示内容。</p>
           ) : null}
         </div>
       ) : null}
     </div>
+  )
+}
+
+/** 输出卡片：按渲染模型分派（结构化/JSON 美化/纯文本）；超阈值钳制 + 就地展开；复制成功短暂反馈对勾。 */
+function ToolOutputSection({ toolName, output, argumentsText }: { toolName: string; output: string; argumentsText: string }): ReactElement {
+  const view = toolOutputView(toolName, output, argumentsText)
+  const [expanded, setExpanded] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const copyOutput = (): void => {
+    const write = navigator.clipboard?.writeText(view.text) ?? Promise.resolve()
+    void write.then(() => {
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1200)
+    }).catch(() => {})
+  }
+  return (
+    <section className="tool-detail-card" data-section="output">
+      <header className="tool-detail-header">
+        <span className="tool-detail-title">输出</span>
+        <span className="tool-detail-meta">{view.metaLabel}</span>
+        <button
+          type="button"
+          className={copied ? "tool-detail-copy copied" : "tool-detail-copy"}
+          aria-label="复制输出"
+          title="复制输出"
+          onClick={copyOutput}
+        >
+          {copied
+            ? <Check aria-hidden="true" focusable="false" className="tool-detail-copy-icon" />
+            : <Copy aria-hidden="true" focusable="false" className="tool-detail-copy-icon" />}
+        </button>
+      </header>
+      <div className="tool-detail-body" data-clamped={view.collapsible && !expanded}>
+        <ToolOutputBody view={view} />
+      </div>
+      {view.collapsible ? (
+        <button
+          type="button"
+          className="tool-detail-expand"
+          onClick={() => setExpanded(previous => !previous)}
+        >
+          {expanded ? "收起" : "展开全部"}
+        </button>
+      ) : null}
+    </section>
+  )
+}
+
+/** 输出内容体：结构化种类各走专属布局，text/json 走通用 pre。 */
+function ToolOutputBody({ view }: { view: ToolOutputView }): ReactElement {
+  if (view.kind === "file-content" && view.fileContent) {
+    const file = view.fileContent
+    return (
+      <>
+        <div className="tool-file-meta">
+          {file.path} · 第 {file.shownStart}–{file.shownEnd} 行 / 共 {file.totalLines} 行{file.truncated ? " · 已截断" : ""}
+        </div>
+        <div className="tool-file-lines">
+          {file.lines.map((line, index) => (
+            <div className="tool-file-line" key={index}>
+              <span className="tool-file-lineno">{line.number ?? ""}</span>
+              <span className="tool-file-text">{line.text}</span>
+            </div>
+          ))}
+        </div>
+      </>
+    )
+  }
+  if (view.kind === "path-list" && view.pathList) {
+    return (
+      <div className="tool-path-list">
+        {view.pathList.entries.map((entry, index) => (
+          <div className="tool-path-row" key={index}>
+            <ToolPathIcon entry={entry} />
+            <span className="tool-path-text">{entry}</span>
+          </div>
+        ))}
+      </div>
+    )
+  }
+  if (view.kind === "diff" && view.diff) {
+    const diff = view.diff
+    return (
+      <>
+        {diff.path ? <div className="tool-diff-meta">{diff.path}</div> : null}
+        <div className="tool-diff-rows">
+          {diff.rows.map((row, index) => (
+            <div className="tool-diff-row" data-type={row.type} key={index}>
+              <span className="tool-diff-sign">{row.type === "add" ? "+" : row.type === "remove" ? "−" : " "}</span>
+              <span className="tool-diff-text">{row.text}</span>
+            </div>
+          ))}
+        </div>
+      </>
+    )
+  }
+  if (view.kind === "terminal" && view.terminal) {
+    const terminal = view.terminal
+    return (
+      <div className="tool-terminal">
+        {terminal.command !== null ? <div className="tool-terminal-cmd">$ {terminal.command}</div> : null}
+        {terminal.lines.map((line, index) => (
+          <div className="tool-terminal-line" key={index}>{line}</div>
+        ))}
+        {terminal.truncated ? <div className="tool-terminal-truncated">输出因大小限制被截断</div> : null}
+      </div>
+    )
+  }
+  if (view.kind === "grep-matches" && view.grepMatches) {
+    return (
+      <div className="tool-grep-matches">
+        {view.grepMatches.groups.map((group, index) => (
+          <div className="tool-grep-group" key={index}>
+            <div className="tool-grep-path">
+              <ToolPathIcon entry={group.path} />
+              {group.path}
+            </div>
+            {group.matches.map((match, matchIndex) => (
+              <div className="tool-grep-line" key={matchIndex}>
+                <span className="tool-grep-lineno">{match.line ?? ""}</span>
+                <span className="tool-grep-text">
+                  {match.count !== undefined ? `${match.count} 处匹配` : match.text}
+                </span>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+    )
+  }
+  return <pre className="tool-details-pre">{view.text}</pre>
+}
+
+/** 路径行图标：目录（尾斜杠）用 Folder，文件复用侧栏类型图标着色体系。 */
+function ToolPathIcon({ entry }: { entry: string }): ReactElement {
+  if (entry.endsWith("/")) {
+    return <Folder aria-hidden="true" focusable="false" size={13} className="file-row-icon" />
+  }
+  const name = entry.split("/").filter(Boolean).pop() ?? entry
+  return <FileTypeIcon name={name} size={13} />
+}
+
+/** 参数卡片：与输出同级的 details 折叠卡，内容美化 JSON（非法 JSON 回退原文）。 */
+function ToolArgumentsSection({ arguments: argumentsText }: { arguments: string }): ReactElement {
+  return (
+    <details className="tool-detail-card tool-detail-arguments" data-section="arguments">
+      <summary className="tool-detail-header tool-detail-arguments-summary">
+        <span className="tool-detail-title">参数</span>
+        <ChevronDown aria-hidden="true" focusable="false" className="tool-detail-chevron" />
+      </summary>
+      <div className="tool-detail-body" data-clamped="false">
+        <pre className="tool-details-pre">{prettifyJson(argumentsText) ?? argumentsText}</pre>
+      </div>
+    </details>
   )
 }
 
@@ -772,9 +963,11 @@ function renderToolStatus(status: ToolCard["status"]): ReactNode {
     )
   }
   if (status === "failed") {
+    // 失败带文字徽章：扫读时间线时不依赖整行底色与图标形状也能立刻定位（2026-08-18 与用户确认）。
     return (
-      <span className="tool-row-status tool-status-failed" role="img" aria-label={label} title={label}>
+      <span className="tool-row-status tool-status-failed" aria-label={label} title={label}>
         <AlertTriangle aria-hidden="true" focusable="false" className="tool-status-icon" />
+        <span className="tool-status-text">{label}</span>
       </span>
     )
   }
