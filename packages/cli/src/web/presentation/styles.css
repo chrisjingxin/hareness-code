@@ -1187,12 +1187,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .diff-code-remove { background: var(--diff-remove-bg); }
 .diff-code-hunk { color: var(--accent); background: var(--surface-3); }
 
-/* 72ch 阅读宽度只约束纯文本段落；代码块/表格占满消息内容区，与工具卡同宽对齐。 */
-.markdown p,
-.markdown li,
-.markdown blockquote {
-  max-inline-size: 72ch;
-}
+/* Markdown 正文不叠加阅读宽度；段落/列表/引用与 Composer 共用完整内容列。 */
 .message-user .message-content {
   inline-size: fit-content;
 }
@@ -1354,7 +1349,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .topbar-main { min-width: 0; overflow: visible; }
 .topbar-actions { margin-inline-start: auto; position: relative; z-index: 101; padding: 0 20px 0 14px; gap: 8px; }
 .brand { position: relative; gap: 8px; padding-inline: 20px; border-right: 0; }
-.brand-mark { width: 22px; height: 22px; flex-basis: 22px; border: 0; border-radius: 0; background: transparent; color: var(--text); box-shadow: none; }
+.brand-mark { width: 22px; height: 22px; flex-basis: 22px; border: 0; border-radius: 0; background: transparent; color: var(--text); box-shadow: none; transform: translateY(-1px); }
 .harness-brand-logo { display: block; width: 22px; height: 22px; overflow: visible; }
 .harness-logo-ink-start { stop-color: var(--brand-logo-ink-start); }
 .harness-logo-ink-mid { stop-color: var(--brand-logo-ink-mid); }

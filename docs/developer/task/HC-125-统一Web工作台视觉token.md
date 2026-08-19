@@ -109,6 +109,9 @@ semantic token
 - 2026-08-18（Composer 停止按钮按用户设计稿改版）：原 lucide 描边 Square + 5px 圆角被用户点名「有点丑」，按设计稿改为——圆角升至 `--radius-surface`（7px，设计稿大圆角在 36px 按钮上的 token 内最近似），图标改为内联 SVG **实心圆角方块**（`<rect rx="2.5" fill="currentColor">`，15px ≈ 设计稿 43% 占比），描边/文字仍走 danger token、hover 8% 红底与中断语义不变；设计稿的柔和投影违反「阴影只给 overlay/menu/dialog」纪律未引入。发送按钮保持 5px 绿填充不变。TDD 先红后绿（composer +1 图标断言、styles 契约 +1）；静态复现页加发送/取消对照区 1440 宽 light/dark 截图实测。验证：presentation+application+presentation-shared 345 pass、typecheck 通过。
 - 2026-08-18（停止按钮比例与颜色修正，用户实测纠正）：① 比例——上一版图标可见方块只有 6px（SVG 盒 15px × rect 10/24 viewBox，放大截图误判了比例）；修正为 rect 14×14 rx 3.5 + 盒 24px，getBoundingClientRect 实测可见 **14px / 34px 按钮 = 0.41**（设计稿 0.43），不再目测验收。② 颜色——`--danger`（light `#a43733`）是文字对比度取向的深红，设计稿为鲜红；新增 `--danger-vivid` token（light `#e5484d` / dark `#f07068`），只给停止按钮等图形化中断动作（文字继续用 --danger 保对比度），描边/图标/hover 底色全部切到 vivid。旧「danger 描边」契约相应修订。验证：presentation+application+presentation-shared 345 pass、typecheck 通过；复现页实测两主题图标/描边均为 `#e5484d`（dark `#f07068`）。
 
+- 2026-08-19（Web Header 品牌对齐，用户截图反馈）：确认 `.brand` 已用 flex 几何居中，偏差来自 22px Harness SVG 曲线的可见重心低于标题文字；只对 `.brand-mark` 增加 `translateY(-1px)` 光学校正，不改顶栏高度、标题字号或在线状态布局。CSS 契约测试先红后绿；`styles.test.ts` 47 pass。真实页面复核未完成：当前 sandbox 禁止预览服务绑定 loopback，且浏览器安全策略拒绝 `file://` 复现页。
+- 2026-08-19（Agent 正文与 Composer 宽度对齐，用户截图反馈）：外层 `.timeline-scroll` 与 `.composer-inner` 本已共用同一 `--conversation-content-width`，实际短一截是 Markdown 段落、列表项和引用又被 `max-inline-size: 72ch` 二次限宽。删除该阅读宽度上限，让 Agent 纯文本使用完整消息内容列；代码块/表格局部滚动和用户气泡 `fit-content` 保持不变。CSS 契约测试先红后绿；`styles.test.ts` 47 pass。
+
 ## 2026-08-09 执行证据
 
 - 可观察变化：Run 状态成为 Topbar 最高状态层级；新建 Thread 使用 secondary chrome；当前 Thread 使用蓝色轻背景和左侧轨道；Context Dock 的标题、tab 与关闭入口收敛到同一层 header；light/dark 使用 HC-124 暖中性色与稀缺蓝色 token。

@@ -145,6 +145,11 @@ test("品牌标志在深色主题把墨色轨迹切为暖白，绿色轨迹保�
   expect(css).toContain(".harness-logo-ink-start { stop-color: var(--brand-logo-ink-start); }")
 })
 
+test("品牌标志相对文字上移 1px，校正 SVG 曲线偏下的视觉重心", () => {
+  const brandMarkBlock = css.slice(css.lastIndexOf(".brand-mark {"), css.indexOf(".harness-brand-logo"))
+  expect(brandMarkBlock).toContain("transform: translateY(-1px)")
+})
+
 test("可访问性辅助 token 存在：action/link/success/warning/danger 文字与按钮色", () => {
   for (const token of ["--action-text", "--link-text", "--success-text", "--warning-text", "--danger-text"]) {
     expect(css).toContain(token)
@@ -165,14 +170,13 @@ test("紧凑/标准/字段三档尺寸与桌面命中目标保持为 token contr
   expect(css).toContain(".send-button, .cancel-button { width: var(--control-standard); height: var(--control-standard);")
 })
 
-test("CodeBlock 独占一层 surface，prose/表格/代码各自维持局部滚动", () => {
+test("Agent 正文与 Composer 共用完整内容列，表格/代码各自维持局部滚动", () => {
   expect(css).toContain(".code-block {")
   expect(css).toContain(".code-block-body {")
   expect(css).toContain("overflow-x: auto")
   expect(css).not.toContain(".markdown-code {")
-  // 72ch 阅读宽度只约束纯文本段落；代码块/表格不受其收窄，与工具卡同宽。
-  expect(css).toContain(".markdown p,")
-  expect(css).toContain("max-inline-size: 72ch")
+  // 正文不再叠加 72ch 阅读宽度；段落/列表/引用与外层消息、Composer 共用同一右边界。
+  expect(css).not.toContain("max-inline-size: 72ch")
   expect(css).not.toContain("max-inline-size: min(72ch, 100%)")
 })
 
