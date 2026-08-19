@@ -145,7 +145,12 @@ def test_registry_uses_reserved_builtin_identity_and_manifest_mode_visibility(
     )
 
     assert required.skill_id == "builtin/grill-me"
-    assert registry.load(required.skill_id).body == "Run a `/grilling` session."
+    assert registry.load(required.skill_id).body == (
+        "Run a `/grilling` session.\n"
+        "\n"
+        "When you need to ask the user a question, you MUST call the `ask_user` tool.\n"
+        "Never end your turn with only a natural-language question."
+    )
     assert registry.resolve("project/grill-me").skill_id == "project/grill-me"
     with pytest.raises(SkillError, match="not available"):
         registry.resolve_builtin_required(
