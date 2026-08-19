@@ -828,6 +828,8 @@ def _migration_validate_legacy_source_schema_sync(
     allowed_tables.add("harness_compose_runs")
     allowed_tables.add("harness_compose_artifacts")
     allowed_tables.add("harness_compose_activities")
+    # Compose 会话表由 v17 迁移创建；同属 Compose 扩展对象，随版本升级持续保留。
+    allowed_tables.add("harness_compose_sessions")
     allowed_tables.update(
         {
             "harness_thread_modes",
@@ -6030,6 +6032,8 @@ class ThreadPersistence:
         allowed_tables.add("harness_compose_runs")
         allowed_tables.add("harness_compose_artifacts")
         allowed_tables.add("harness_compose_activities")
+        # Compose 会话表由 v17 迁移创建；同属 Compose 扩展对象，随版本升级持续保留。
+        allowed_tables.add("harness_compose_sessions")
         allowed_tables.update(
             {
                 "harness_thread_modes",
