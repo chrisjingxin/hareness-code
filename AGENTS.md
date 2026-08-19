@@ -54,6 +54,7 @@ docs/developer/research/140-斜杠命令补全.md
 - 状态维护在 Task front matter，并由 `docs/developer/task/任务看板.md` 汇总整体状态。
 - **已完成**的 Task 移入 `docs/developer/task/archive/`，不再出现在活动看板中；不得删除以抹掉历史。
 - 生成 Task 前必须使用 `mattpocock:grill-me` 做需求确认，把歧义问透后再落盘。
+- 简单需求不生成 Task，直接走「功能开发流程」的快速通道。
 
 #### `spec/` — 规格（Task 确认后）
 
@@ -96,7 +97,11 @@ docs/developer/research/140-斜杠命令补全.md
 
 - 开发工作流、变更检查清单、新功能候选、依赖清单等与「单个功能交付物」无关的工程文档。
 
-## 功能开发流程（强制）
+## 功能开发流程（双轨）
+
+按需求体量分两条路径：复杂功能走完整文档链；简单需求走快速通道（见下文），不写过程文档、直接实现。
+
+### 复杂功能：完整流程
 
 一个功能从需求到合并固定经过：
 
@@ -127,6 +132,28 @@ review：  agent-skills:code-review-and-quality
 
 合并代码或解决冲突时使用 `mattpocock:resolving-merge-conflicts`。
 
+### 简单需求：快速通道
+
+改动有限、不触碰契约的需求不生成 Task/Spec/Plan/Todo，需求确认后直接实现：
+
+```text
+需求确认（对话内）→ implement（TDD）→ 验证 → 提交
+```
+
+**判据（全部满足才可走快速通道，任一不满足回完整流程）**：
+
+- 单包内改动：不触碰跨进程协议、SQLite schema、公开 interface、生命周期或数据形状；
+- 改动面小：生产源码改动不超过 3 个文件（测试与文档不计）；
+- 需求明确：对话内已无未决歧义，不需要方案权衡或竞品调研；
+- 不改变用户可感知的行为边界（交互流程、错误语义、兼容策略）。
+
+**规则**：
+
+- 不写过程文档、不更新任务看板、不做停点交付；一次完成并交付。
+- 质量底线不变：行为变更先写最小失败测试（TDD，规模随改动缩放）；相关 focused tests 与包级检查必须通过；用户可感知变更更新 `docs/user/`；提交沿用 Conventional Commit 并保持按包聚焦。
+- **越界即回退**：实现中发现实际改动超出判据（动了协议/schema/跨包、需求膨胀、出现未决设计问题）→ 立即停下，回完整流程补 Task/Spec/Plan/Todo，不得在快速通道里硬做完。
+- 快速通道原则上不产生架构文档更新义务；若确实触动了架构边界，视为越界，回完整流程。
+
 ### 流程不变量
 
 1. **顺序不可跳**：没有确认的 Task 不写 Spec；没有确认的 Spec 不写 Plan/Todo；没有 Todo 不进入大规模实现。
@@ -136,6 +163,7 @@ review：  agent-skills:code-review-and-quality
 5. **仅当**工作项关联性弱、各自具备独立用户价值、独立验收、独立上线且互不使对方处于不可用中间态时，才拆成多个平级 Task（各自完整走 task→…→review）。
 6. Task 完成后：补齐测试与文档证据 → 更新状态 → 移入 `task/archive/` → 同步任务看板 → 检视并更新相关 `architecture/` 文档。
 7. **实现按停点交付，禁止一次做完所有 Todo**：执行 Agent 一次只推进到下一个可演示停点（Plan 检查点，或一个用户已经能看见效果的工作包）。勾选本段 Todo、写明怎么查看、更新 `tmp/handoff.md` 后必须停下等用户看过；未经用户要求不得继续下一段。不得为了「把清单清完」连做整份 Todo。
+8. **快速通道豁免的是过程文档与停点，不是质量底线**：简单需求判据与规则见「简单需求：快速通道」。测试、验证、提交规范与「越界即回退」在任何路径下都不可豁免；判据不满足时不得以快速通道名义绕过完整流程。
 
 ### 文档表达要求
 
@@ -156,16 +184,16 @@ Task / Spec / Plan / Todo 必须让不熟悉当前实现的人也能直接检视
 
 ## Agent 开工顺序
 
-1. 读取 `README.md`、`docs/developer/architecture/架构总览.md`，以及当前功能对应的：
+1. 先按「功能开发流程」判据判定需求体量：简单需求直接进入实现，不读取 task/spec/plan/todo；复杂功能先读取 `README.md`、`docs/developer/architecture/架构总览.md`，以及当前功能对应的：
    - `docs/developer/task/HC-XXX-….md`
    - `docs/developer/spec/HC-XXX-….md`
    - `docs/developer/plan/HC-XXX-….md`
    - `docs/developer/todo/HC-XXX-….md`
 2. 运行 `git status --short`，识别并保留用户已有改动；不得为清理工作区而回滚无关文件。
-3. 确认当前所处阶段（task/spec/plan/todo/implement/review），只做该阶段工作，使用该阶段强制 Skill。
+3. 确认当前所处阶段（task/spec/plan/todo/implement/review；快速通道需求无阶段概念），只做该阶段工作，使用该阶段强制 Skill。
 4. 按变更归属选择包：界面和进程管理改 `cli`，跨进程契约改 `protocol`，Agent 与执行逻辑改 `agent`。
 5. 修改前先找到邻近实现与现有测试；协议或生命周期变更必须同时验证 TypeScript 和 Python 两端。
-6. 实现阶段使用最小相关测试快速反馈（TDD）。到达 Plan 的可演示停点后停止，向用户说明如何查看阶段性成果（例如 `bun run dev` 后看哪一块）；未经用户要求不得继续后续工作包。整任务交付前再执行本文定义的项目级检查。
+6. 实现阶段使用最小相关测试快速反馈（TDD）。复杂功能到达 Plan 的可演示停点后停止，向用户说明如何查看阶段性成果（例如 `bun run dev` 后看哪一块）；未经用户要求不得继续后续工作包。快速通道需求可一次完成。整任务交付前再执行本文定义的项目级检查。
 7. 任务完成后检视 `docs/developer/architecture/`：大功能新建或对已有文档增量更新。
 
 ## 项目结构与模块职责
@@ -264,7 +292,7 @@ completed_at: -
 ## 模型分工
 
 - **强模型**：grill-me 需求确认、Spec/Plan/Todo 产出、跨包/Protocol/生命周期决策、复杂排障、code review。
-- **快速模型**：按已确认 Todo 做实现、focused tests、机械迁移、文档同步与证据记录。一次只做一个可演示停点；做完即停，等用户看过再接力下一段。
+- **快速模型**：按已确认 Todo 做实现、focused tests、机械迁移、文档同步与证据记录。复杂功能一次只做一个可演示停点；做完即停，等用户看过再接力下一段。简单需求（快速通道）可一次完成。
 - 快速模型不得改变范围与公开契约；阻塞时停在 Todo/Task 记录点，交回强模型修订 Spec/Plan。
 - 多个执行 Thread 可接力同一编号的 Task/Spec/Plan/Todo；Thread 数不等于 Task 数。一次执行不等于做完整份 Todo。
 
@@ -321,4 +349,4 @@ PR 必须说明影响层、行为变化、已运行测试、对应 `HC-XXX` 编�
 - 目录与脚本已迁到本规范：`tasks/` → `task/`，`designs/` → `spec/`，任务 ID 前缀 `ZC-` → `HC-`，文件名带功能简介。
 - 已完成任务位于 `docs/developer/task/archive/`；活动看板由 `bun run tasks:sync` 生成。
 - `docs/developer/architecture/adr/` 仅作历史资料；新架构结论写入对应大功能架构 MD。
-- 新功能一律按 task → spec → plan → todo → implement → review 推进，不再在 Task 正文内嵌 Plan/Todo。
+- 新功能一律按「功能开发流程」双轨推进（复杂功能 task → spec → plan → todo → implement → review；简单需求走快速通道），不再在 Task 正文内嵌 Plan/Todo。
