@@ -265,6 +265,7 @@ Codex sandbox 内依赖 loopback 监听、进程枚举或其他被禁宿主能�
 - 不得手写绕过检查去改看板语义以规避 `tasks:check`；认领、完成后应运行项目提供的 task 同步/完成命令。
 - 状态建议：`待认领`、`进行中`、`阻塞`、`待验收`、`已完成`、`已过时`。
 - `owner` / `branch` 表示当前认领者与实施分支，通过 `bun run task:claim` 写入；未认领固定 `owner: 未认领`、`branch: -`。
+- 新功能分支统一命名为 `feat_hc_XXX_功能简介`（下划线分隔，`XXX` 与 Task 编号一致，功能简介可截短），例如 `feat_hc_155_重做Compose流程`；认领时通过 `task:claim` 登记，一个分支对应一个 Task。
 - **已完成** Task：证据与引用写全后移入 `docs/developer/task/archive/`，并从活动看板消失。
 - **已过时** Task：在正文说明替代 Task/Spec，保留文件作历史，不删除。
 
