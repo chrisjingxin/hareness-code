@@ -8,7 +8,9 @@ import {
   approvalDecisionDescription,
   approvalDecisionLabel,
   approvalPresentationKind,
-  completeQuestionAnswers,
+  MAX_ASK_USER_QUESTIONS,
+  answersByQuestionId,
+  recordAskUserAnswer,
   directoryTrustDecisionDescription,
   directoryTrustDecisionLabel,
   isDirectoryTrustDecision,
@@ -52,12 +54,19 @@ test("question 其他选项占位值与 agent 端约定一致", () => {
   expect(QUESTION_OTHER_VALUE).toBe("__other__")
 })
 
-test("首题回答会补齐后续问题，避免多题 ask_user 被校验卡住", () => {
-  expect(completeQuestionAnswers(
-    [{ id: "question-1" }, { id: "question-2" }],
-    "基础语法示例（变量、循环、方法、面向对象）",
-  )).toEqual({
-    "question-1": ["基础语法示例（变量、循环、方法、面向对象）"],
-    "question-2": ["(no answer)"],
+test("多题必须收齐每题答案，不得给未答题填占位", () => {
+  const questions = [{ id: "question-1" }, { id: "question-2" }]
+  const first = recordAskUserAnswer(questions, {}, "question-1", "基础语法示例")
+  expect(first.done).toBe(false)
+  expect(first.collected).toEqual({ "question-1": "基础语法示例" })
+  const second = recordAskUserAnswer(questions, first.collected, "question-2", "给同事看")
+  expect(second.done).toBe(true)
+  expect(answersByQuestionId(questions, second.collected)).toEqual({
+    "question-1": ["基础语法示例"],
+    "question-2": ["给同事看"],
   })
+})
+
+test("ask_user 一次最多 5 题", () => {
+  expect(MAX_ASK_USER_QUESTIONS).toBe(5)
 })

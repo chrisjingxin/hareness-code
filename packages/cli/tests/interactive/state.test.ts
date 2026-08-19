@@ -409,7 +409,28 @@ function interactions(state: InteractiveState) { return state.timeline.flatMap(i
 
 
 function composeEvent(sequence: number, payload: Record<string, unknown>) {
-  return event("compose.state", sequence, payload)
+  return event("compose.progress", sequence, payload)
+}
+
+function grillProgress(revision: number, waiting: string = "ask_user"): Record<string, unknown> {
+  return {
+    thread_id: "thread-1",
+    slug: "jsondiff",
+    complexity: "simple",
+    status: waiting === "none" ? "active" : "waiting_user",
+    current_stage: "grill",
+    waiting,
+    stages: [
+      { id: "requirement", state: "current" },
+      { id: "spec", state: "pending" },
+      { id: "plan", state: "pending" },
+      { id: "implement", state: "pending" },
+      { id: "review", state: "pending" },
+    ],
+    documents: [],
+    fix_rounds: 0,
+    revision,
+  }
 }
 
 test("用户消息在 startRun 写入当时 workMode，切换会话 Mode 不回写旧消息", () => {
@@ -465,62 +486,27 @@ test("workMode 默认 build，可在空闲时切换并跨 Run 保留", () => {
   expect(started.workMode).toBe("compose")
 })
 
-test("compose.state 折叠为 projection，waiting_user 进入等待交互", () => {
+test("compose.progress 折叠为 projection，waiting 进入等待交互", () => {
   let state = startRun(createInitialState(), run, "实现搜索")
-  const projection = {
-    revision: 2,
-    stage: "plan",
-    status: "waiting_user",
-    stages: [
-      { id: "understand", status: "passed", attempts: 1 },
-      { id: "plan", status: "passed", attempts: 1 },
-      { id: "build", status: "pending", attempts: 0 },
-      { id: "verify", status: "pending", attempts: 0 },
-      { id: "review", status: "pending", attempts: 0 },
-    ],
-    tasks: [{ id: "task-1", title: "实现搜索", status: "pending" }],
-    evidence: [],
-    blocked_reason: null,
-  }
+  const projection = grillProgress(2)
   state = applyAgentEvent(state, composeEvent(1, projection))
-  expect(state.composeState).toEqual({
-    revision: 2,
-    stage: "plan",
-    status: "waiting_user",
-    stages: projection.stages,
-    tasks: projection.tasks,
-    evidence: projection.evidence,
-    blockedReason: null,
-  })
+  expect(state.composeState?.currentStage).toBe("grill")
+  expect(state.composeState?.slug).toBe("jsondiff")
   expect(state.activity.kind).toBe("waiting-interaction")
   expect(state.composeState?.revision).toBe(2)
 })
 
-test("compose.state 迟到帧（revision 不递增）被拒绝", () => {
+test("compose.progress 迟到帧（revision 不递增）被拒绝", () => {
   let state = startRun(createInitialState(), run, "实现搜索")
-  const base = {
-    revision: 1,
-    stage: "understand",
-    status: "running",
-    stages: [
-      { id: "understand", status: "running", attempts: 1 },
-      { id: "plan", status: "pending", attempts: 0 },
-      { id: "build", status: "pending", attempts: 0 },
-      { id: "verify", status: "pending", attempts: 0 },
-      { id: "review", status: "pending", attempts: 0 },
-    ],
-    tasks: [],
-    evidence: [],
-    blocked_reason: null,
-  }
+  const base = grillProgress(1)
   state = applyAgentEvent(state, composeEvent(1, base))
   const stale = applyAgentEvent(state, composeEvent(2, base))
   expect(stale.composeState?.revision).toBe(1)
 })
 
-test("畸形 compose.state 被拒绝且不改变状态", () => {
+test("畸形 compose.progress 被拒绝且不改变状态", () => {
   const state = startRun(createInitialState(), run, "实现搜索")
-  const malformed = applyAgentEvent(state, composeEvent(1, { revision: -1, stage: "deploy", status: "running", stages: [], tasks: [], evidence: [] }))
+  const malformed = applyAgentEvent(state, composeEvent(1, { revision: -1, current_stage: "deploy" }))
   expect(malformed.composeState).toBeNull()
   const nonObject = applyComposeState(state, "not-an-object")
   expect(nonObject.composeState).toBeNull()
@@ -528,17 +514,7 @@ test("畸形 compose.state 被拒绝且不改变状态", () => {
 
 test("终态清理 compose projection", () => {
   let state = startRun(createInitialState(), run, "实现搜索")
-  state = applyAgentEvent(state, composeEvent(1, {
-    revision: 1, stage: "understand", status: "running",
-    stages: [
-      { id: "understand", status: "running", attempts: 1 },
-      { id: "plan", status: "pending", attempts: 0 },
-      { id: "build", status: "pending", attempts: 0 },
-      { id: "verify", status: "pending", attempts: 0 },
-      { id: "review", status: "pending", attempts: 0 },
-    ],
-    tasks: [], evidence: [], blocked_reason: null,
-  }))
+  state = applyAgentEvent(state, composeEvent(1, grillProgress(1)))
   expect(state.composeState).not.toBeNull()
   state = applyAgentEvent(state, event("run.completed", 2, { duration_ms: 10, usage: { input_tokens: 1, output_tokens: 1 } }))
   expect(state.composeState).toBeNull()

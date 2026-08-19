@@ -180,7 +180,7 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "6189dfceb7304a6e5558f75d87e68fa3bc7fcf7ba120e44f21f8a61fe01eba54"
+          "sha256": "3aa8060cce9173cddadbbbf16787c7aa080327d4d532698fd838f5f259ceb5eb"
         },
         {
           "path": "agents/openai.yaml",

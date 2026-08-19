@@ -26,7 +26,10 @@ from harness_agent.tools._ask_user_types import AskUserRequest, Question
 logger = logging.getLogger(__name__)
 
 
-ASK_USER_TOOL_DESCRIPTION = """Ask the user one or more questions when you need clarification or input before proceeding.
+MAX_ASK_USER_QUESTIONS = 5
+"""一次 ask_user 最多几题；再多用户无法一次答完。"""
+
+ASK_USER_TOOL_DESCRIPTION = """Ask the user one or more related questions when you need clarification or input before proceeding.
 
 Each question can be either:
 - "text": Free-form text response from the user
@@ -35,6 +38,8 @@ Each question can be either:
 For multiple choice questions, provide a list of choices. The user can pick one or type a custom answer via the "Other" option.
 
 By default all questions are required. Set "required" to false for optional questions that the user can skip. Do not include "(required)", "(optional)", "- optional", or similar annotations in the question text — the UI renders that separately based on the "required" field.
+
+You may group a few closely related decisions into one call so the user answers them together. At most 5 questions per call. Never dump a long questionnaire (10+ questions). Unrelated topics belong in a later call.
 
 Use this tool when:
 - You need clarification on ambiguous requirements
@@ -56,7 +61,8 @@ When using `ask_user`:
 - Be concise and specific with your questions
 - Use multiple choice when there are clear options to choose from
 - Use text input when you need free-form responses
-- Group related questions into a single ask_user call rather than making multiple calls
+- Closely related decisions may go in one ask_user call (at most 5 questions)
+- Do not ask a long list of questions in one call
 - Never ask questions you can answer yourself from the available context"""  # noqa: E501
 
 
@@ -71,6 +77,12 @@ def _validate_questions(questions: list[Question]) -> None:
     """
     if not questions:
         msg = "ask_user requires at least one question"
+        raise ValueError(msg)
+    if len(questions) > MAX_ASK_USER_QUESTIONS:
+        msg = (
+            f"ask_user accepts at most {MAX_ASK_USER_QUESTIONS} questions "
+            "in one call; split unrelated topics"
+        )
         raise ValueError(msg)
 
     for q in questions:

@@ -1,18 +1,20 @@
 /** Harness Code 的 Thread 主视图。 */
 
 import { ApprovalDock, DirectoryTrustDock, QuestionDock, bottomAreaKind } from "./bottom-area"
+import { ComposeProgressBar } from "./compose-progress-bar"
 import { InputBar, FooterRail, ThreadRuntimeLine } from "./input-bar"
 import { ConversationTimeline } from "./timeline"
 import { tuiTheme } from "./theme"
 import type { SharedViewProps } from "./types"
 
-/** thread 流全宽渲染；底部互斥为输入栏 / 审批 Dock / 目录信任 Dock / 问答 Dock。Compose 与 Build 同一套骨架，不挂阶段顶栏。 */
+/** thread 流全宽渲染；Compose 进度钉在时间线上方，不随滚动移动。 */
 export function ThreadView(props: SharedViewProps & { modelName?: string }) {
   const interaction = props.interactive.interaction
   const slot = bottomAreaKind(interaction)
 
   return (
     <box flexDirection="column" flexGrow={1} minHeight={0} backgroundColor={tuiTheme.background}>
+      <ComposeProgressBar interactive={props.interactive} />
       <ConversationTimeline
         interactive={props.interactive}
         scrollRef={props.conversationScrollRef}
@@ -40,6 +42,7 @@ export function ThreadView(props: SharedViewProps & { modelName?: string }) {
       ) : null}
       {slot === "question" && interaction?.type === "question" ? (
         <QuestionDock
+          key={interaction.requestId}
           interaction={interaction}
           workMode={props.interactive.workMode}
           onQuestion={props.onQuestion}

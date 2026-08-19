@@ -16,6 +16,7 @@ from harness_agent.threads.context_projection import (
     CompressionCheckpointDraft,
     ContextProjectionError,
     ContextProjector,
+    tail_user_exclude_id,
 )
 from harness_agent.threads.prompting import HISTORY_REWRITE_VERSION
 from harness_agent.threads.thread_persistence import (
@@ -28,6 +29,15 @@ from harness_agent.threads.thread_persistence import (
     TranscriptAppend,
 )
 from tests.support.thread_fixtures import accept_thread
+
+
+def test_tail_user_exclude_id_only_when_user_record_is_last() -> None:
+    """同一 Run 二次拉 Runtime 时，用户消息已不是末条，不得再排除。"""
+    user = type("Rec", (), {"record_id": "run:run-1:user"})()
+    tool = type("Rec", (), {"record_id": "run:run-1:tool:1"})()
+    assert tail_user_exclude_id((user,), "run-1") == "run:run-1:user"
+    assert tail_user_exclude_id((user, tool), "run-1") is None
+    assert tail_user_exclude_id((), "run-1") is None
 
 
 async def _store(tmp_path, name: str = "project") -> ThreadPersistence:

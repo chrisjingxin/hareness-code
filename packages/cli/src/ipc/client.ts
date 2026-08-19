@@ -438,6 +438,11 @@ export class AgentClient {
     return this.request(Method.MODELS_LIST, { thread_id: threadId })
   }
 
+  /** 废弃当前 Compose 薄进度。 */
+  abandonCompose(threadId: string, reason?: string): Promise<{ progress: unknown }> {
+    return this.request(Method.COMPOSE_ABANDON, { thread_id: threadId, reason })
+  }
+
   /** 签发一个绑定 loopback Origin 的一次性 Web attachment。 */
   createAttachment(origin: string): Promise<HostAttachmentCreateResult> {
     return this.request(Method.HOST_ATTACHMENT_CREATE, { origin })

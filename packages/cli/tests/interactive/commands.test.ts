@@ -63,6 +63,36 @@ test("Dispatcher 仅按稳定 ID 返回 semantic operation，并统一处理兼�
   expect(dispatchSlashCommand(compact, base)).toEqual({ type: "compact", threadId: "thread-1" })
 })
 
+test("Compose /new-work 与 /abandon 按目标有无返回 submit 或确认", () => {
+  const base = {
+    commandContext: defaultCommandContext({ workMode: "compose", hasThread: true, hasActiveWorkItem: true }),
+    threadId: "thread-1",
+    runtimeStatus: "运行摘要",
+    versionSummary: "za38-cli 0.1.0 · JSON-RPC v3",
+  }
+  const newWork = parseSlashCommand("/new-work 写 HTTP 服务")
+  const emptyNewWork = parseSlashCommand("/new-work")
+  const abandon = parseSlashCommand("/abandon")
+  const abandonWithGoal = parseSlashCommand("/abandon 写服务")
+  if (!newWork || !emptyNewWork || !abandon || !abandonWithGoal) throw new Error("expected compose commands")
+  expect(dispatchSlashCommand(newWork, base)).toEqual({
+    type: "submit-prompt",
+    prompt: "/new-work 写 HTTP 服务",
+  })
+  expect(dispatchSlashCommand(emptyNewWork, base)).toMatchObject({
+    type: "notice",
+    message: expect.stringContaining("开新需求请带目标"),
+  })
+  expect(dispatchSlashCommand(abandon, base)).toMatchObject({
+    type: "request-confirmation",
+    confirmationId: "compose-abandon",
+  })
+  expect(dispatchSlashCommand(abandonWithGoal, base)).toMatchObject({
+    type: "notice",
+    message: expect.stringContaining("/new-work"),
+  })
+})
+
 test("Agent 与 Team 命令只生成受控目录和固定参数 RPC", () => {
   const base = {
     commandContext: defaultCommandContext({
@@ -315,27 +345,21 @@ test("Compose 命令按 Work Mode 与 Work Item 状态决定可见性与禁用�
   const abandon = commandRegistry.get("compose.abandon")!
   const btw = commandRegistry.get("assist.btw")!
 
-  // new-work：仅 Compose 可见；无 active Work Item 时可用，有则禁用。
   expect(commandRegistry.availability(newWork, defaultCommandContext({ workMode: "build" }))).toEqual({
     state: "hidden",
     reason: "当前模式不可用（COMMAND_MODE_UNAVAILABLE）",
   })
-  expect(commandRegistry.availability(newWork, defaultCommandContext({ workMode: "compose", hasActiveWorkItem: false }))).toEqual({ state: "available" })
-  expect(commandRegistry.availability(newWork, defaultCommandContext({ workMode: "compose", hasActiveWorkItem: true }))).toEqual({
-    state: "disabled",
-    reason: "当前已有进行中的 Work Item",
-  })
+  expect(commandRegistry.availability(newWork, defaultCommandContext({ workMode: "compose", hasThread: true }))).toEqual({ state: "available" })
 
-  // abandon：仅 Compose 可见；有 active Work Item 且空闲时可用，无则禁用。
-  expect(commandRegistry.availability(abandon, defaultCommandContext({ workMode: "build", hasActiveWorkItem: true }))).toEqual({
+  expect(commandRegistry.availability(abandon, defaultCommandContext({ workMode: "build", hasActiveWorkItem: true, hasThread: true }))).toEqual({
     state: "hidden",
     reason: "当前模式不可用（COMMAND_MODE_UNAVAILABLE）",
   })
-  expect(commandRegistry.availability(abandon, defaultCommandContext({ workMode: "compose", hasActiveWorkItem: false }))).toEqual({
+  expect(commandRegistry.availability(abandon, defaultCommandContext({ workMode: "compose", hasActiveWorkItem: false, hasThread: true }))).toEqual({
     state: "disabled",
-    reason: "当前没有进行中的 Work Item",
+    reason: "当前没有进行中的 Compose 需求",
   })
-  expect(commandRegistry.availability(abandon, defaultCommandContext({ workMode: "compose", hasActiveWorkItem: true }))).toEqual({ state: "available" })
+  expect(commandRegistry.availability(abandon, defaultCommandContext({ workMode: "compose", hasActiveWorkItem: true, hasThread: true }))).toEqual({ state: "available" })
 
   // btw：Build/Compose 双模式可用。
   expect(commandRegistry.availability(btw, defaultCommandContext({ workMode: "build" }))).toEqual({ state: "available" })

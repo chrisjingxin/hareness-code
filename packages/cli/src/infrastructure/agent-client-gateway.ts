@@ -76,6 +76,14 @@ export class AgentClientGateway implements AgentGateway {
     }
   }
 
+  async abandonCompose(threadId: string, reason?: string): Promise<{ progress: unknown }> {
+    try {
+      return await this.client.abandonCompose(threadId, reason)
+    } catch (error) {
+      throw this.wrapError(error)
+    }
+  }
+
   async configDetails(): Promise<{ revision: string; fields: readonly unknown[]; immutable_fields: readonly unknown[] }> {
     try {
       return await this.client.configDetails()

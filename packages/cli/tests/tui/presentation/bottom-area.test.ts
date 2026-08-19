@@ -35,13 +35,13 @@ test("单选且无其他项的问答走 QuestionDock", () => {
   })).toBe("question")
 })
 
-test("开放式问答仍走输入栏，沿用现有文本 Intent", () => {
+test("开放式问答也走 QuestionDock，不再只改输入栏占位", () => {
   expect(bottomAreaKind({
     type: "question",
     requestId: "q2",
     questions: [{
       id: "open",
-      question: "说明一下？",
+      question: "要分析哪个本地 .txt 文件？",
       header: "",
       body: "",
       options: [],
@@ -49,10 +49,10 @@ test("开放式问答仍走输入栏，沿用现有文本 Intent", () => {
       allowOther: true,
     }],
     deadlineAtMs: 1,
-  })).toBe("input")
+  })).toBe("question")
 })
 
-test("多选问答仍走输入栏，沿用现有文本 Intent", () => {
+test("多选问答也走 QuestionDock", () => {
   expect(bottomAreaKind({
     type: "question",
     requestId: "q3",
@@ -66,7 +66,35 @@ test("多选问答仍走输入栏，沿用现有文本 Intent", () => {
       allowOther: false,
     }],
     deadlineAtMs: 1,
-  })).toBe("input")
+  })).toBe("question")
+})
+
+test("多题相关问答走 QuestionDock，即使第一题是文本", () => {
+  expect(bottomAreaKind({
+    type: "question",
+    requestId: "q-multi",
+    questions: [
+      {
+        id: "question-1",
+        question: "输入路径怎么给？",
+        header: "",
+        body: "",
+        options: [],
+        multiSelect: false,
+        allowOther: true,
+      },
+      {
+        id: "question-2",
+        question: "语言？",
+        header: "",
+        body: "",
+        options: [{ label: "Python 3", value: "Python 3", description: "" }],
+        multiSelect: false,
+        allowOther: true,
+      },
+    ],
+    deadlineAtMs: 1,
+  })).toBe("question")
 })
 
 test("ask_user 式单选即使允许其他项也走 QuestionDock", () => {

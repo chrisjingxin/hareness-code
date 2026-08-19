@@ -59,6 +59,10 @@ pre, code { font-family: "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Co
   /* 鲜亮 danger：只给停止按钮等图形化中断动作（文字仍用 --danger 保证对比度）。 */
   --danger-vivid: #e5484d;
   --danger-soft: rgba(164, 55, 51, .07);
+  /* Compose 工作流步骤条专属色：当前步骤强调底/字与等待提示（暖中性画布上的点缀紫）。 */
+  --compose-current-bg: #A9A5D4;
+  --compose-current-fg: #0B0C0E;
+  --compose-wait: #6B6699;
   --chrome: var(--surface);
   --tool-output-bg: var(--surface-2);
   --tool-output-text: var(--text-soft);
@@ -134,6 +138,10 @@ pre, code { font-family: "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Co
   --danger: #e6a49f;
   --danger-vivid: #f07068;
   --danger-soft: rgba(230, 164, 159, .10);
+  /* Compose 工作流步骤条专属色：当前步骤强调底/字与等待提示（沿用浅色值，紫系在暗底同样成立）。 */
+  --compose-current-bg: #A9A5D4;
+  --compose-current-fg: #0B0C0E;
+  --compose-wait: #6B6699;
   --chrome: var(--surface);
   --tool-output-bg: var(--surface-3);
   --tool-output-text: var(--text-soft);
@@ -422,10 +430,13 @@ pre, code { font-family: "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Co
 /* 隐藏时间线滚动条（2026-08-18 用户确认）：滚动行为不变，内容列右缘不出现可见滚动条。 */
 .timeline-scroll { min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; }
 .timeline-scroll::-webkit-scrollbar { display: none; }
+.timeline-column { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .timeline {
   /* 宽度与居中由 Screenshot geometry contract 的统一内容列规则（.timeline-scroll）表达。 */
   padding: 24px 0 36px;
-  min-height: 100%;
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
 }
@@ -517,10 +528,6 @@ pre, code { font-family: "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Co
   font-size: 12px;
   color: var(--muted);
   margin-bottom: 4px;
-}
-.compose-progress {
-  margin-top: 8px;
-  padding: 8px 0 4px;
 }
 @media (prefers-reduced-motion: reduce) {
   .run-progress-spinner.spinning {
@@ -1230,43 +1237,77 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 }
 
 
-/* Compose 进度：五阶段 chips + 当前任务 + blocked 摘要；只读、不暴露内部字段 */
+/* Compose 进度：钉在时间线上方的稳定步骤条 */
 .compose-progress {
+  flex-shrink: 0;
   display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 8px 12px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 16px;
   border-bottom: 1px solid var(--line);
+  background: var(--surface);
   font-size: 12px;
+  letter-spacing: 0.02em;
 }
 .compose-stages {
   display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
+  flex-wrap: nowrap;
+  gap: 0;
   align-items: center;
+  min-width: 0;
 }
-.compose-stage {
-  padding: 1px 6px;
+.compose-stage-wrap {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.compose-track {
+  width: 16px;
+  height: 2px;
+  margin: 0 4px;
+  border-radius: 1px;
+  background: var(--line-strong, #334155);
+}
+.compose-track-filled {
+  background: var(--success, #7FA37A);
+}
+.compose-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.5em;
+  height: 22px;
+  padding: 0 8px;
   border-radius: 4px;
-  border: 1px solid var(--line);
-  color: var(--muted);
+  color: var(--subtle);
+  white-space: nowrap;
 }
-.compose-stage-passed,
-.compose-stage-completed {
+.compose-chip-done {
   color: var(--success);
-  border-color: color-mix(in srgb, var(--success) 35%, transparent);
 }
-.compose-stage-running,
-.compose-stage-waiting_user {
-  color: var(--accent);
-  border-color: var(--accent-border);
+.compose-chip-current {
+  background: var(--compose-current-bg);
+  color: var(--compose-current-fg);
+  font-weight: 650;
 }
-.compose-stage-failed,
-.compose-stage-blocked,
-.compose-stage-cancelled {
-  color: var(--danger);
-  border-color: color-mix(in srgb, var(--danger) 35%, transparent);
+.compose-chip-failed {
+  background: var(--danger);
+  /* 填充底上的文字用系统 on-fill token（浅色白字、暗色深字），保证两套主题对比度。 */
+  color: var(--accent-text);
+  font-weight: 650;
 }
+.compose-chip-skipped,
+.compose-chip-pending {
+  color: var(--subtle, #8d8981);
+}
+.compose-hint {
+  flex-shrink: 0;
+  color: var(--muted, #A0A4AE);
+}
+.compose-hint-wait { color: var(--compose-wait); }
+.compose-hint-failed { color: var(--danger, #C56F6F); }
+.compose-hint-live { color: var(--muted, #A0A4AE); }
 .compose-revision {
   margin-left: auto;
   color: var(--muted);

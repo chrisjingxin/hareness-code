@@ -186,29 +186,26 @@ test("上下文压缩收敛期间 work-mode.cycle 被拒绝（busy）", async ()
   }
 })
 
-test("compose.state 事件经 controller 折叠进 snapshot", async () => {
+test("compose.progress 事件经 controller 折叠进 snapshot", async () => {
   const harness = makeHarness()
   try {
     await harness.controller.dispatch({ type: "input.submit", value: "实现搜索" })
     const run = harness.runHandles.at(-1)!
-    harness.port.emitEvent(terminalEvent(EventType.COMPOSE_STATE, run.threadId, run.runId, 1, {
+    harness.port.emitEvent(terminalEvent(EventType.COMPOSE_PROGRESS, run.threadId, run.runId, 1, {
+      thread_id: run.threadId,
+      slug: "jsondiff",
+      complexity: "simple",
+      status: "active",
+      current_stage: "grill",
+      waiting: "ask_user",
+      stages: [{ id: "requirement", state: "current" }],
+      documents: [],
+      fix_rounds: 0,
       revision: 1,
-      stage: "understand",
-      status: "running",
-      stages: [
-        { id: "understand", status: "running", attempts: 1 },
-        { id: "plan", status: "pending", attempts: 0 },
-        { id: "build", status: "pending", attempts: 0 },
-        { id: "verify", status: "pending", attempts: 0 },
-        { id: "review", status: "pending", attempts: 0 },
-      ],
-      tasks: [],
-      evidence: [],
-      blocked_reason: null,
     }))
     await flush()
     const snapshot = harness.controller.getSnapshot()
-    expect(snapshot.composeState?.stage).toBe("understand")
+    expect(snapshot.composeState?.currentStage).toBe("grill")
     expect(snapshot.composeState?.revision).toBe(1)
     harness.port.completeRun(run.threadId, run.runId)
     await flush()
@@ -229,31 +226,27 @@ test("Compose 失败前 TUI 保留用户消息与进度投影，失败后显示�
       resumed: false, mode: "compose", skills_snapshot_id: null,
     }))
     // 进度帧 rev 0/1/2（understand 两次 schema retry 后失败）
-    const frame = (revision: number, status: string) => ({
+    const frame = (revision: number, waiting: string) => ({
+      thread_id: run.threadId,
+      slug: "jsondiff",
+      complexity: "simple",
+      status: "active",
+      current_stage: "grill",
+      waiting,
+      stages: [{ id: "requirement", state: revision === 2 ? "failed" : "current" }],
+      documents: [],
+      fix_rounds: 0,
       revision,
-      stage: "understand",
-      status,
-      stages: [
-        { id: "understand", status: revision === 2 ? "failed" : "running", attempts: revision === 0 ? 1 : 2 },
-        { id: "plan", status: "pending", attempts: 0 },
-        { id: "build", status: "pending", attempts: 0 },
-        { id: "verify", status: "pending", attempts: 0 },
-        { id: "review", status: "pending", attempts: 0 },
-      ],
-      tasks: [],
-      evidence: [],
-      blocked_reason: null,
     })
-    harness.port.emitEvent(terminalEvent(EventType.COMPOSE_STATE, run.threadId, run.runId, 3, frame(0, "running")))
+    harness.port.emitEvent(terminalEvent(EventType.COMPOSE_PROGRESS, run.threadId, run.runId, 3, frame(0, "none")))
     await flush()
     let snapshot = harness.controller.getSnapshot()
-    // 错误出现前：用户消息 + 进度投影都在。
     expect(snapshot.timeline.some(item => item.type === "message" && item.message.role === "user")).toBeTrue()
     expect(snapshot.composeState?.revision).toBe(0)
     expect(snapshot.activity.kind).toBe("running")
 
-    harness.port.emitEvent(terminalEvent(EventType.COMPOSE_STATE, run.threadId, run.runId, 4, frame(1, "running")))
-    harness.port.emitEvent(terminalEvent(EventType.COMPOSE_STATE, run.threadId, run.runId, 5, frame(2, "failed")))
+    harness.port.emitEvent(terminalEvent(EventType.COMPOSE_PROGRESS, run.threadId, run.runId, 4, frame(1, "none")))
+    harness.port.emitEvent(terminalEvent(EventType.COMPOSE_PROGRESS, run.threadId, run.runId, 5, frame(2, "none")))
     harness.port.emitEvent(terminalEvent(EventType.RUN_FAILED, run.threadId, run.runId, 6, {
       error: { code: "COMPOSE_ARTIFACT_INVALID", message: "stage 输出为空：模型没有产出 JSON 对象", retryable: false },
     }))
@@ -262,9 +255,8 @@ test("Compose 失败前 TUI 保留用户消息与进度投影，失败后显示�
     expect(snapshot.lastRun?.outcome).toBe("failed")
     expect(snapshot.composeState).toBeNull()
     // 失败后仍保留最后一份完整投影：用户能看见哪个阶段失败。
-    expect(snapshot.lastRun?.composeSummary?.stage).toBe("understand")
-    expect(snapshot.lastRun?.composeSummary?.status).toBe("failed")
-    expect(snapshot.lastRun?.composeSummary?.stages[0]).toEqual({ id: "understand", status: "failed", attempts: 2 })
+    expect(snapshot.lastRun?.composeSummary?.currentStage).toBe("grill")
+    expect(snapshot.lastRun?.composeSummary?.stages[0]).toEqual({ id: "requirement", state: "failed" })
     const text = snapshot.timeline.map(item => item.type === "message" ? item.message.content : "").join("")
     expect(text).toContain("stage 输出为空")
   } finally {

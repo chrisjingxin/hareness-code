@@ -5,7 +5,7 @@ import type { ModelProfile } from "@za38/protocol"
 import type { InteractiveController, InteractiveIntent, InteractiveResult, InteractiveSnapshot, IntentOutcome, PresentationEffect } from "../../interactive/types"
 import { selectWorkItemView, type WorkItemView } from "../../interactive/selectors"
 import { filterCommandMenuItems } from "../../presentation-shared/command-menu-policy"
-import { completeQuestionAnswers } from "../../presentation-shared/interaction-policy"
+import { answersByQuestionId } from "../../presentation-shared/interaction-policy"
 import { parseSlashCommand, resolveSlashCommand, type CommandMenuItem, type SkillMenuItem } from "../../interactive/commands"
 import type { ThreadSummary } from "@za38/protocol"
 import { createFallbackNoopGateway, type AgentGateway } from "../../interactive/ports"
@@ -158,7 +158,7 @@ export type TuiIntent =
   | { type: "clear-selected-skill" }
   | { type: "approval"; decision: ApprovalDecision }
   | { type: "directory-trust"; decision: DirectoryTrustDecision }
-  | { type: "question"; answer: string }
+  | { type: "question"; answers: Record<string, string[]> }
   | { type: "tool-toggle"; toolId: string }
   | { type: "btw-close" }
   | { type: "btw-copy" }
@@ -399,7 +399,7 @@ class TuiAdapterImpl implements TuiAdapter {
         await this.respondDirectoryTrust(intent.decision)
         return
       case "question":
-        await this.respondQuestion(intent.answer)
+        await this.respondQuestion(intent.answers)
         return
       case "tool-toggle":
         this.toggleTool(intent.toolId)
@@ -680,11 +680,11 @@ class TuiAdapterImpl implements TuiAdapter {
     const interactive = this.controller.getSnapshot()
     if (interactive.interaction?.type === "question") {
       const firstQuestion = interactive.interaction.questions[0]
-      if (firstQuestion) {
+      if (firstQuestion && interactive.interaction.questions.length === 1) {
         const outcome = await this.routeDispatch({
           type: "interaction.respond",
           requestId: interactive.interaction.requestId,
-          response: { kind: "question", answers: completeQuestionAnswers(interactive.interaction.questions, input) },
+          response: { kind: "question", answers: answersByQuestionId(interactive.interaction.questions, { [firstQuestion.id]: input }) },
         })
         if (outcome.status === "accepted") {
           this.clearDraft()
@@ -1208,17 +1208,16 @@ class TuiAdapterImpl implements TuiAdapter {
     })
   }
 
-  /** 回写当前问题答案；TUI 仍按首题回答，完整多题由共享 Controller 校验。 */
-  private async respondQuestion(answer: string): Promise<void> {
+  /** 回写本轮全部问题答案；缺题由共享 Controller 校验拒绝。 */
+  private async respondQuestion(answers: Record<string, string[]>): Promise<void> {
     const interactive = this.controller.getSnapshot()
     const question = interactive.interaction
     if (!question || question.type !== "question") return
-    const firstQuestion = question.questions[0]
-    if (!firstQuestion) return
+    if (!question.questions[0]) return
     await this.routeDispatch({
       type: "interaction.respond",
       requestId: question.requestId,
-      response: { kind: "question", answers: completeQuestionAnswers(question.questions, answer) },
+      response: { kind: "question", answers },
     })
   }
 

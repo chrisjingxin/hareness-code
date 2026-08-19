@@ -149,6 +149,10 @@ function createPort(options: {
       calls.push("context.compact")
       return compactContextImpl(threadId)
     },
+    async abandonCompose(threadId) {
+      calls.push("compose.abandon")
+      return { progress: { thread_id: threadId, status: "abandoned" } }
+    },
     async configDetails() {
       calls.push("config.details")
       return { revision: "r1", fields: [{ path: "models.default_profile", value: "fast", source: "user", editable: true, unavailable_reason: null, applies_to: "new-thread" }], immutable_fields: [] }

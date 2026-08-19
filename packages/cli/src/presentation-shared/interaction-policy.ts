@@ -57,14 +57,30 @@ export function directoryTrustDecisionDescription(decision: DirectoryTrustDecisi
 export function isApprovalDecision(value: unknown): value is ApprovalDecision {
   return typeof value === "string" && (APPROVAL_DECISION_ORDER as readonly string[]).includes(value)
 }
-/** TUI 先答首题；后续题补占位，避免多题 ask_user 因缺答被 Controller 卡住。 */
-export function completeQuestionAnswers(
+/** 与 ask_user 工具上限一致：一次最多 5 道相关题。 */
+export const MAX_ASK_USER_QUESTIONS = 5
+
+/** 记下当前题的回答；全部收齐后才算完成，不得给未答题填占位。 */
+export function recordAskUserAnswer(
   questions: readonly { id: string }[],
-  firstAnswer: string,
+  collected: Readonly<Record<string, string>>,
+  questionId: string,
+  answer: string,
+): { collected: Record<string, string>; done: boolean } {
+  const next = { ...collected, [questionId]: answer.trim() }
+  const done = questions.length > 0 && questions.every(question => Boolean(next[question.id]))
+  return { collected: next, done }
+}
+
+/** 把已收齐的逐题答案编成 Interaction 需要的 answers map。 */
+export function answersByQuestionId(
+  questions: readonly { id: string }[],
+  collected: Readonly<Record<string, string>>,
 ): Record<string, string[]> {
   const answers: Record<string, string[]> = {}
-  for (const [index, question] of questions.entries()) {
-    answers[question.id] = [index === 0 ? firstAnswer : "(no answer)"]
+  for (const question of questions) {
+    const value = collected[question.id]
+    if (value) answers[question.id] = [value]
   }
   return answers
 }

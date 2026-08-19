@@ -347,7 +347,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
     onToggleTool: (toolId: string) => { void adapter.dispatch({ type: "tool-toggle", toolId }) },
     onApproval: (decision: ApprovalDecision) => { void adapter.dispatch({ type: "approval", decision }) },
     onDirectoryTrust: (decision: DirectoryTrustDecision) => { void adapter.dispatch({ type: "directory-trust", decision }) },
-    onQuestion: (answer: string) => { void adapter.dispatch({ type: "question", answer }) },
+    onQuestion: (answers: Record<string, string[]>) => { void adapter.dispatch({ type: "question", answers }) },
     sidebarVisible: sidebarVisibility.visible,
     inputMode: snapshot.inputMode,
     onToggleSidebar: () => {

@@ -260,19 +260,25 @@ def test_python_accepts_scoped_interaction_params() -> None:
     )
 
 
-def test_python_validates_compose_state_projection() -> None:
-    """compose.state 是带 revision 的完整有界 projection，未知字段和枚举被拒绝。"""
+def test_python_validates_compose_progress_projection() -> None:
+    """compose.progress 是带 revision 的完整有界 projection，未知字段和枚举被拒绝。"""
     payload = {
+        "thread_id": "thread-1",
+        "slug": "jsondiff",
+        "complexity": "simple",
+        "status": "active",
+        "current_stage": "grill",
+        "waiting": "ask_user",
+        "stages": [{"id": "requirement", "state": "current"}],
+        "documents": [
+            {"kind": "task", "path": "docs/compose/jsondiff/task.md", "confirmed": False}
+        ],
+        "fix_rounds": 0,
         "revision": 3,
-        "stage": "build",
-        "status": "running",
-        "stages": [{"id": "understand", "status": "passed", "attempts": 1}],
-        "tasks": [{"id": "task-1", "title": "实现搜索", "status": "running"}],
-        "evidence": [{"label": "pytest -q tests/foo", "status": "passed"}],
     }
     envelope = {
-        "event_id": "compose-state-event",
-        "type": "compose.state",
+        "event_id": "compose-progress-event",
+        "type": "compose.progress",
         "thread_id": "thread-1",
         "run_id": "run-1",
         "sequence": 1,
@@ -284,7 +290,9 @@ def test_python_validates_compose_state_projection() -> None:
     with pytest.raises((ValidationError, ValueError)):
         EventEnvelope.model_validate({**envelope, "payload": {**payload, "extra": True}})
     with pytest.raises((ValidationError, ValueError)):
-        EventEnvelope.model_validate({**envelope, "payload": {**payload, "stage": "deploy"}})
+        EventEnvelope.model_validate(
+            {**envelope, "payload": {**payload, "current_stage": "deploy"}}
+        )
     with pytest.raises((ValidationError, ValueError)):
         EventEnvelope.model_validate({**envelope, "payload": {**payload, "revision": -1}})
     with pytest.raises((ValidationError, ValueError)):
@@ -294,7 +302,7 @@ def test_python_validates_compose_state_projection() -> None:
                 "payload": {
                     **payload,
                     "stages": [
-                        {"id": "understand", "status": "passed", "attempts": 1, "extra": True}
+                        {"id": "requirement", "state": "current", "extra": True}
                     ],
                 },
             }

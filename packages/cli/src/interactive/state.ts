@@ -8,17 +8,21 @@ export type MessageRole = "user" | "assistant" | "system"
 /** 工作模式在 Run 受理时冻结；同一 Thread 相邻 Run 之间可在空闲时切换。 */
 export type WorkMode = "build" | "compose"
 
-export type ComposeStageId = "understand" | "plan" | "build" | "verify" | "review"
+export type ComposeStageId = "grill" | "task" | "spec" | "plan" | "implement" | "review"
+export type ComposeUiStageId = "requirement" | "spec" | "plan" | "implement" | "review"
 
-/** compose.state 的有界完整 projection；revision 单调递增，迟到帧被拒绝。 */
+/** compose.progress 的有界投影；revision 单调递增，迟到帧被拒绝。 */
 export type ComposeProjection = {
+  threadId: string
+  slug: string
+  complexity: "simple" | "complex"
+  status: "active" | "waiting_user" | "verifying" | "completed" | "abandoned"
+  currentStage: ComposeStageId
+  waiting: "none" | "task_confirm" | "spec_confirm" | "plan_confirm" | "review_confirm" | "ask_user" | "implement_choice"
+  stages: Array<{ id: ComposeUiStageId; state: "pending" | "current" | "confirmed" | "skipped" | "failed" }>
+  documents: Array<{ kind: "task" | "spec" | "plan" | "todo" | "review"; path: string; confirmed: boolean }>
+  fixRounds: number
   revision: number
-  stage: ComposeStageId
-  status: "running" | "waiting_user" | "blocked" | "completed" | "failed" | "cancelled"
-  stages: Array<{ id: ComposeStageId; status: string; attempts: number }>
-  tasks: Array<{ id: string; title: string; status: string }>
-  evidence: Array<{ label: string; status: string }>
-  blockedReason: string | null
 }
 
 export type WorkItemStatus = "active" | "waiting_user" | "blocked" | "completed" | "abandoned"
@@ -288,56 +292,64 @@ export function parseWorkItemProjection(value: unknown): WorkItemProjection | nu
   }
 }
 
-/** 折叠一帧 compose.state projection；revision 不递增的迟到帧被拒绝。 */
+/** 折叠一帧 compose.progress；revision 不递增的迟到帧被拒绝。 */
 export function applyComposeState(state: InteractiveState, payload: unknown): InteractiveState {
-  const active = state.activeRun
-  if (!active) return state
   const projection = parseComposeProjection(payload)
   if (!projection) return state
   const current = state.composeState
   if (current !== null && projection.revision <= current.revision) return state
   const activity: InteractiveActivity =
-    projection.status === "waiting_user"
+    projection.status === "waiting_user" || projection.waiting !== "none"
       ? { kind: "waiting-interaction" }
       : { kind: "running" }
   return { ...state, composeState: projection, activity }
 }
 
-const COMPOSE_STAGE_IDS: readonly ComposeStageId[] = ["understand", "plan", "build", "verify", "review"]
-const COMPOSE_STATUSES = new Set(["running", "waiting_user", "blocked", "completed", "failed", "cancelled"])
+const COMPOSE_STAGE_IDS: readonly ComposeStageId[] = ["grill", "task", "spec", "plan", "implement", "review"]
+const COMPOSE_UI_STAGE_IDS: readonly ComposeUiStageId[] = ["requirement", "spec", "plan", "implement", "review"]
+const COMPOSE_STATUSES = new Set(["active", "waiting_user", "verifying", "completed", "abandoned"])
+const COMPOSE_WAITING = new Set(["none", "task_confirm", "spec_confirm", "plan_confirm", "review_confirm", "ask_user", "implement_choice"])
+const COMPOSE_UI_STATES = new Set(["pending", "current", "confirmed", "skipped", "failed"])
 
 function parseComposeProjection(value: unknown): ComposeProjection | null {
   if (!value || typeof value !== "object") return null
   const raw = value as Record<string, unknown>
   if (!Number.isInteger(raw.revision) || (raw.revision as number) < 0) return null
-  if (typeof raw.stage !== "string" || !COMPOSE_STAGE_IDS.includes(raw.stage as ComposeStageId)) return null
+  if (typeof raw.thread_id !== "string" || !raw.thread_id) return null
+  if (typeof raw.slug !== "string" || !raw.slug) return null
+  if (raw.complexity !== "simple" && raw.complexity !== "complex") return null
+  if (typeof raw.current_stage !== "string" || !COMPOSE_STAGE_IDS.includes(raw.current_stage as ComposeStageId)) return null
   if (typeof raw.status !== "string" || !COMPOSE_STATUSES.has(raw.status)) return null
-  if (!Array.isArray(raw.stages) || !Array.isArray(raw.tasks) || !Array.isArray(raw.evidence)) return null
+  if (typeof raw.waiting !== "string" || !COMPOSE_WAITING.has(raw.waiting)) return null
+  if (!Array.isArray(raw.stages) || !Array.isArray(raw.documents)) return null
+  if (!Number.isInteger(raw.fix_rounds) || (raw.fix_rounds as number) < 0) return null
   const stages = raw.stages.map(item => {
     const entry = item as Record<string, unknown>
-    if (typeof entry.id !== "string" || !COMPOSE_STAGE_IDS.includes(entry.id as ComposeStageId)) return null
-    if (typeof entry.status !== "string" || typeof entry.attempts !== "number") return null
-    return { id: entry.id as ComposeStageId, status: entry.status, attempts: entry.attempts }
+    if (typeof entry.id !== "string" || !COMPOSE_UI_STAGE_IDS.includes(entry.id as ComposeUiStageId)) return null
+    if (typeof entry.state !== "string" || !COMPOSE_UI_STATES.has(entry.state)) return null
+    return { id: entry.id as ComposeUiStageId, state: entry.state as ComposeProjection["stages"][number]["state"] }
   })
-  const tasks = raw.tasks.map(item => {
+  const documents = raw.documents.map(item => {
     const entry = item as Record<string, unknown>
-    if (typeof entry.id !== "string" || typeof entry.title !== "string" || typeof entry.status !== "string") return null
-    return { id: entry.id, title: entry.title, status: entry.status }
+    if (
+      (entry.kind !== "task" && entry.kind !== "spec" && entry.kind !== "plan" && entry.kind !== "todo" && entry.kind !== "review")
+      || typeof entry.path !== "string"
+      || typeof entry.confirmed !== "boolean"
+    ) return null
+    return { kind: entry.kind, path: entry.path, confirmed: entry.confirmed }
   })
-  const evidence = raw.evidence.map(item => {
-    const entry = item as Record<string, unknown>
-    if (typeof entry.label !== "string" || typeof entry.status !== "string") return null
-    return { label: entry.label, status: entry.status }
-  })
-  if (stages.some(item => item === null) || tasks.some(item => item === null) || evidence.some(item => item === null)) return null
+  if (stages.some(item => item === null) || documents.some(item => item === null)) return null
   return {
-    revision: raw.revision as number,
-    stage: raw.stage as ComposeStageId,
+    threadId: raw.thread_id,
+    slug: raw.slug,
+    complexity: raw.complexity,
     status: raw.status as ComposeProjection["status"],
+    currentStage: raw.current_stage as ComposeStageId,
+    waiting: raw.waiting as ComposeProjection["waiting"],
     stages: stages as ComposeProjection["stages"],
-    tasks: tasks as ComposeProjection["tasks"],
-    evidence: evidence as ComposeProjection["evidence"],
-    blockedReason: typeof raw.blocked_reason === "string" ? raw.blocked_reason : null,
+    documents: documents as ComposeProjection["documents"],
+    fixRounds: raw.fix_rounds as number,
+    revision: raw.revision as number,
   }
 }
 
@@ -782,11 +794,8 @@ export function applyAgentEvent(state: InteractiveState, event: EventEnvelope, i
         timeline: appendNotice(next, contextNotice(payload), idGenerator).timeline,
       }
     }
-    case EventType.COMPOSE_STATE: {
+    case EventType.COMPOSE_PROGRESS: {
       return applyComposeState(next, event.payload)
-    }
-    case EventType.COMPOSE_WORK_ITEM: {
-      return applyWorkItem(next, event.payload)
     }
     case EventType.COMPOSE_SUMMARY: {
       const payload = event.payload

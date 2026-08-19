@@ -58,6 +58,9 @@ function createMockGateway(): AgentGateway {
     async compactContext() {
       return { archivedMessagesCount: 0 }
     },
+    async abandonCompose() {
+      return { progress: null }
+    },
     abandonInteraction() {},
     onProtocolError() {
       return () => {}

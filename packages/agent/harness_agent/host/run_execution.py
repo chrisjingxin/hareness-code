@@ -545,25 +545,46 @@ def _to_host_interaction(request: StreamInteractionRequest) -> InteractionReques
     )
 
 
-class ComposeRunAdapter:
-    """Compose 工作模式的执行 adapter；由 ComposeWorkItemEngine 驱动 Work Item 流程。
+def _artifact_confirm_copy(artifact: str) -> tuple[str, str]:
+    """按产出物生成确认门禁的标题与问句。"""
+    copies = {
+        "task": (
+            "确认需求",
+            "需求文档 task.md 已写好。这份产出是否符合预期？确认后进入规格阶段。",
+        ),
+        "spec": (
+            "确认规格",
+            "规格文档 spec.md 已写好。这份产出是否符合预期？确认后进入计划阶段。",
+        ),
+        "plan": (
+            "确认计划",
+            "计划文档 plan.md（及 todo.md）已写好。这份产出是否符合预期？确认后开始实现。",
+        ),
+        "review": (
+            "确认检视",
+            "检视文档 review.md 已写好。这份检视是否可接受？确认后结束；按意见改会退回实现。",
+        ),
+    }
+    return copies.get(
+        artifact,
+        ("确认产出", "当前阶段产出是否符合预期？确认后进入下一阶段。"),
+    )
 
-    本 adapter 负责 host 边界：组装生产 ComposeTurnPorts、把 typed decision
-    映射到 RunLifecyclePort.request_question、把 engine 结果映射为
-    coordinator 可收敛的 AdapterOutcome 与 compose.work_item 事件。
-    未注入 EngineDriverServices 时保持稳定失败空壳。
-    """
+
+class ComposeRunAdapter:
+    """Compose 工作模式：ComposeSession 管进度，主 Agent 在对话里 Grill。"""
 
     def __init__(self, services: EngineDriverServices | None = None) -> None:
-        """保存 Host 提供的 engine 依赖（可为空壳）。"""
+        """保存 Host 提供的 workspace 等依赖。"""
         self._services = services
+        self._root_started = False
 
     async def execute(
         self,
         run: RunState,
         port: RunLifecyclePort,
     ) -> AdapterOutcome | None:
-        """执行一次 Work Item Turn 直到收敛；终态仍归 coordinator。"""
+        """执行一次 Session Turn，并在 Grill 阶段流式跑主 Agent。"""
         if self._services is None:
             raise _run_error(
                 "COMPOSE_ADAPTER_NOT_READY", "Compose mode is not available yet"
@@ -573,83 +594,212 @@ class ComposeRunAdapter:
                 "COMPOSE_PERSISTENCE_REQUIRED",
                 "Compose mode requires thread persistence",
             )
-        # services 按 Run 组装且只被本 adapter 消费；此处绑定当前 Run/Port，
-        # 让 stage 执行中的 Shell 审批等 Interaction 走 owner 交互通道。
-        self._services.stage_observer = _ComposeStageObserver(run=run, port=port)
-        from harness_agent.compose.document_store import ComposeDocumentStore
-        from harness_agent.compose.engine_services import (
-            ManagedGrillDriver,
-            ManagedImplementDriver,
-            ManagedPlanDriver,
-            ManagedReportDriver,
-            ManagedReviewDriver,
-            ManagedSpecDriver,
-            ManagedTurnIntentClassifier,
-        )
-        from harness_agent.compose.work_item_engine import (
-            ComposeTurnOutcome,
-            ComposeTurnPorts,
+        from harness_agent.compose.session import (
+            COMPOSE_SYSTEM_PROMPT,
+            ComposeSession,
+            ComposeSessionError,
+            ComposeSessionPorts,
             ComposeTurnRequest,
-            ComposeWorkItemEngine,
-            ComposeWorkItemEngineError,
         )
 
-        services = self._services
-        engine = ComposeWorkItemEngine(
-            ComposeTurnPorts(
-                store=run.persistence.compose_work_item_store(),
-                documents=ComposeDocumentStore(services.workspace_root),
-                classifier=ManagedTurnIntentClassifier(services),
-                interaction=_HostTypedDecisionPort(run, port),
-                workspace_revision=self._workspace_revision,
-                now_ms=services.now_ms,
-                task_driver=ManagedGrillDriver(services),
-                spec_driver=ManagedSpecDriver(services),
-                plan_driver=ManagedPlanDriver(services),
-                implement_driver=ManagedImplementDriver(services),
-                verify_port=(
-                    _WorkItemVerificationPort(services.verification, run=run, port=port)
-                    if services.verification is not None
-                    else None
+        user_message = run.message
+
+        async def run_stage(stage: str, slug: str) -> None:
+            run.message = (
+                f"{COMPOSE_SYSTEM_PROMPT}\n"
+                f"当前套件目录：docs/compose/{slug}/\n"
+                f"当前阶段：{stage}。提问必须调用 ask_user。"
+                "用户若要求推进或进入下一阶段，立刻停止提问。\n\n"
+                f"用户消息：\n{user_message}"
+            )
+            if getattr(run, "preparation", None) is None:
+                return
+            await self._stream_main_agent(run, port, stage=stage)
+
+        async def run_grill(request: ComposeTurnRequest, slug: str) -> None:
+            del request
+            await run_stage("需求访谈，问完即停，不要反复盘问", slug)
+
+        async def run_spec(request: ComposeTurnRequest, slug: str) -> None:
+            del request
+            await run_stage("根据已确认 Task 写 spec.md，然后停止", slug)
+
+        async def run_plan(request: ComposeTurnRequest, slug: str) -> None:
+            del request
+            await run_stage("根据已确认文档写 plan.md 和 todo.md，然后停止", slug)
+
+        async def run_implement(request: ComposeTurnRequest, slug: str) -> None:
+            del request
+            from harness_agent.compose.session import build_implement_prompt
+
+            run.message = build_implement_prompt(self._services.workspace_root, slug)
+            if getattr(run, "preparation", None) is None:
+                return
+            await self._stream_main_agent(
+                run,
+                port,
+                stage="implement",
+                checkpoint_namespace=f"{run.ref.thread_id}:compose-implement:{slug}",
+            )
+
+        async def run_review(request: ComposeTurnRequest, slug: str) -> None:
+            del request
+            from harness_agent.compose.session import build_review_prompt
+
+            run.message = build_review_prompt(self._services.workspace_root, slug)
+            if getattr(run, "preparation", None) is None:
+                return
+            await self._stream_main_agent(
+                run,
+                port,
+                stage="review",
+                checkpoint_namespace=f"{run.ref.thread_id}:compose-review:{slug}",
+            )
+
+        async def request_stage_confirm(record: object, artifact: str) -> bool:
+            del record
+            if getattr(run, "preparation", None) is None:
+                return False
+            header, question = _artifact_confirm_copy(artifact)
+            result = await port.request_question(
+                run,
+                request_id=f"compose-stage-confirm-{run.ref.run_id}",
+                interrupt_id=f"compose-stage-confirm-{run.ref.run_id}",
+                questions=[
+                    {
+                        "id": "stage-confirm",
+                        "question": question,
+                        "header": header,
+                        "body": "",
+                        "options": [
+                            {
+                                "label": "确认，符合预期",
+                                "value": "proceed",
+                                "description": "写入确认并进入下一阶段",
+                            },
+                            {
+                                "label": "按意见改" if artifact == "review" else "我要改",
+                                "value": "revise",
+                                "description": (
+                                    "不结束，带着 review.md 退回实现"
+                                    if artifact == "review"
+                                    else "先不确认，按修改点继续改这份产出"
+                                ),
+                            },
+                        ],
+                        "multi_select": False,
+                        "allow_other": False,
+                    }
+                ],
+            )
+            answers = result.value.get("answers") if hasattr(result, "value") else None
+            if isinstance(answers, dict):
+                chosen = answers.get("stage-confirm") or next(iter(answers.values()), None)
+                if isinstance(chosen, list):
+                    chosen = chosen[0] if chosen else ""
+                return str(chosen) in {
+                    "proceed",
+                    "确认",
+                    "确认，符合预期",
+                    "确认，进入下一阶段",
+                }
+            return False
+
+        session = ComposeSession(
+            ComposeSessionPorts(
+                store=run.persistence.compose_progress_store(),
+                workspace=self._services.workspace_root,
+                run_grill=run_grill,
+                run_spec=run_spec,
+                run_plan=run_plan,
+                run_implement=run_implement,
+                run_review=run_review,
+                request_stage_confirm=request_stage_confirm,
+                on_progress=lambda progress: port.emit(
+                    run, "compose.progress", dict(progress)
                 ),
-                review_driver=ManagedReviewDriver(services),
-                report_driver=ManagedReportDriver(services),
             )
         )
         request = ComposeTurnRequest(
             thread_id=run.ref.thread_id,
             run_id=run.ref.run_id,
-            message=run.message,
+            message=user_message,
             cancelled=port.is_cancelled(run),
         )
         try:
-            result = await engine.execute_turn(request)
-        except ComposeWorkItemEngineError as exc:
+            result = await session.execute_turn(request)
+        except ComposeSessionError as exc:
             raise _run_error(exc.code, str(exc)) from exc
-        if result.work_item is not None:
-            port.emit(
-                run,
-                "compose.work_item",
-                {
-                    "thread_id": run.ref.thread_id,
-                    "work_item": _work_item_wire(result.work_item),
-                },
-            )
-        if result.status is ComposeTurnOutcome.BLOCKED:
-            return AdapterOutcome(
-                status="failed",
-                code="COMPOSE_WORK_ITEM_BLOCKED",
-                message=result.work_item.blocked_reason or "Work Item 需要用户处理",
-                retryable=True,
-            )
-        if result.status is ComposeTurnOutcome.RETRYABLE_FAILED:
-            return AdapterOutcome(
-                status="failed",
-                code="COMPOSE_ACTIVITY_RETRYABLE_FAILED",
-                message=result.pending_decision or "Compose Activity 执行失败，可重试",
-                retryable=True,
-            )
+        if result.progress is not None:
+            port.emit(run, "compose.progress", dict(result.progress))
         return None
+
+    async def _stream_main_agent(
+        self,
+        run: RunState,
+        port: RunLifecyclePort,
+        *,
+        stage: str = "grill",
+        checkpoint_namespace: str | None = None,
+    ) -> None:
+        """复用 Build 的 Managed 执行入口；同一 Run 内后续阶段不得再 start root。"""
+        started_payload: dict[str, object] = {
+            "resumed": False,
+            "mode": run.start.mode,
+            "skills_snapshot_id": run.preparation.skill_snapshot_id,
+        }
+        binding = run.preparation.execution_binding
+        if binding is not None:
+            started_payload["primary_model"] = binding.protocol_primary_model()
+            started_payload["runtime_profile_id"] = binding.runtime_profile_id
+        if not self._root_started:
+            port.emit(run, RUN_STARTED, started_payload)
+            port.mark_running(run)
+            port.emit(run, RUN_PROGRESS, _run_progress_payload(run, "preparing"))
+
+        async def acquire_runtime():
+            return await port.resolve_runtime(run)
+
+        async def start_execution(_execution_ref: str) -> None:
+            if self._root_started:
+                return
+            await port.start_execution(run)
+            self._root_started = True
+
+        observer = _BuildStreamPorts(run=run, port=port)
+        skill_snapshot_id = run.preparation.skill_snapshot_id
+
+        def needs_user_decision(
+            tool_name: str, tool_args: Mapping[str, object]
+        ) -> bool:
+            presentation = run.approval_presentations.lookup(tool_name, tool_args)
+            return bool(presentation and presentation.get("kind") == "directory_trust")
+
+        request = ManagedAgentRequest(
+            execution_ref=run.root_execution_ref.execution_id,
+            parent_execution_ref=None,
+            run_id=run.ref.run_id,
+            input=run.message,
+            checkpoint_namespace=checkpoint_namespace or run.ref.thread_id,
+            output_policy="passthrough",
+            runtime_provider=acquire_runtime,
+            is_cancelled=lambda: port.is_cancelled(run),
+            idempotency_key=f"run:{run.ref.run_id}:{stage}",
+            execution_starter=start_execution,
+            agent_spec=run.preparation.execution_binding,
+            required_skill_snapshot_ids=(skill_snapshot_id,)
+            if isinstance(skill_snapshot_id, str) and skill_snapshot_id
+            else (),
+            usage=run.usage,
+            started_at=run.started_at,
+            needs_user_decision=needs_user_decision,
+        )
+        try:
+            await ManagedAgentExecutor().execute(request, observer)
+        except ManagedAgentExecutionError as exc:
+            if exc.code == "RUN_CANCELLED":
+                raise asyncio.CancelledError from exc
+            raise _run_error(exc.code, exc.message) from exc
 
     async def _workspace_revision(self) -> str | None:
         """把当前 workspace 的 Git HEAD 作为证据新鲜度 revision。"""
@@ -657,111 +807,6 @@ class ComposeRunAdapter:
         if services is None or services.verification is None:
             return None
         return await services.verification.workspace_revision("compose-work-item")
-
-
-class _HostTypedDecisionPort:
-    """把引擎 typed decision 映射到 host 的 typed question 通道。"""
-
-    def __init__(self, run: RunState, port: RunLifecyclePort) -> None:
-        self._run = run
-        self._port = port
-
-    async def request_decision(self, request: object):
-        """单个 typed question；回答形状与引擎 TypedDecisionResult 一致。"""
-        from harness_agent.compose.work_item_engine import TypedDecisionResult
-
-        result = await self._port.request_question(
-            self._run,
-            request_id=request.request_id,
-            interrupt_id=request.interrupt_id,
-            questions=[
-                {
-                    "id": request.question_id,
-                    "question": request.body,
-                    "header": request.header,
-                    "body": "",
-                    "options": [
-                        {
-                            "label": option.label,
-                            "value": option.value,
-                            "description": option.description,
-                        }
-                        for option in request.options
-                    ],
-                    "multi_select": False,
-                    "allow_other": request.allow_other,
-                }
-            ],
-        )
-        return TypedDecisionResult(result.value, expired=result.expired)
-
-
-class _WorkItemVerificationPort:
-    """把 canonical VerificationPort 适配为 Work Item verify 端口。
-
-    非白名单验证命令必须经 RunLifecyclePort.request_approval 走 owner
-    审批通道；绝不静默放行或降级到其他执行器。
-    """
-
-    def __init__(self, verification: object, *, run: RunState, port: RunLifecyclePort) -> None:
-        self._verification = verification
-        self._run = run
-        self._port = port
-
-    async def run_command(self, command: str, *, work_item_id: str):
-        """执行一条 required command 并返回 engine 期望的事实形状。"""
-        from harness_agent.compose.activities.verify import VerificationCommandResult
-        from harness_agent.compose.verification import VerificationRequest
-
-        evidence = await self._verification.run(
-            VerificationRequest(
-                command=command,
-                label=command[:80],
-                resource_key=f"compose:{work_item_id}",
-                approve=lambda description, c=command: self._approve(c, description),
-            )
-        )
-        return VerificationCommandResult(
-            command=command,
-            exit_code=evidence.exit_code,
-            output_digest=evidence.output_digest,
-            execution_id=f"verify:{evidence.finished_at_ms}",
-        )
-
-    async def _approve(self, command: str, description: str) -> bool:
-        """把审批弹窗映射为 owner 决策；仅 approve_once 视为批准。"""
-        command_digest = hashlib.sha256(command.encode("utf-8")).hexdigest()[:8]
-        request_id = f"compose-verify-{command_digest}"
-        result = await self._port.request_approval(
-            self._run,
-            request_id=request_id,
-            interrupt_id=request_id,
-            description=description,
-            decisions=["approve_once", "reject"],
-            action_requests=[
-                {
-                    "name": "execute",
-                    "args": {"command": command},
-                    "description": description,
-                }
-            ],
-        )
-        value = result.value if isinstance(result.value, Mapping) else {}
-        return str(value.get("decision") or "") == "approve_once"
-
-
-def _work_item_wire(projection: object) -> dict[str, object]:
-    """把引擎 projection 转换为 compose.work_item 事件 payload。"""
-    return {
-        "work_item_id": projection.work_item_id,
-        "slug": projection.slug,
-        "title": projection.title,
-        "revision": projection.revision,
-        "status": projection.status,
-        "current_activity": projection.current_activity,
-        "pending_decision": projection.pending_decision,
-        "blocked_reason": projection.blocked_reason,
-    }
 
 
 def _capture_transcript_on_session(

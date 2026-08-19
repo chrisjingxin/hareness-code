@@ -157,8 +157,8 @@ export class CommandRegistry {
       return {
         state: "disabled",
         reason: definition.requirements.requiresActiveWorkItem
-          ? "当前没有进行中的 Work Item"
-          : "当前已有进行中的 Work Item",
+          ? "当前没有进行中的 Compose 需求"
+          : "当前已有进行中的 Compose 需求",
       }
     }
     if (definition.requirements?.requiresIdle && (context.activeRun || context.pendingOperation || context.hasPendingInteraction)) {
@@ -210,8 +210,8 @@ export const builtinCommandDefinitions: readonly CommandDefinition[] = [
   { id: "teams.manage", name: "teams", description: "查看或控制 Agent Team", source: { type: "builtin" }, presentation: "viewer", argumentHint: "[show|status|generate|run|cancel] ...", suggested: true, requirements: { capabilities: [Capability.TEAMS_READ] } },
   { id: "mcp.manage", name: "mcp", description: "查看 MCP 服务器状态", source: { type: "builtin" }, presentation: "viewer", suggested: true },
   { id: "host.web", name: "web", description: "在浏览器中接管当前会话，可从空首页或当前 thread 启动", source: { type: "builtin" }, presentation: "action", suggested: true, requirements: { requiresIdle: true } },
-  { id: "compose.new-work", name: "new-work", description: "在 Compose 模式创建新的 Work Item", source: { type: "builtin" }, presentation: "action", requirements: { workModes: ["compose"], requiresActiveWorkItem: false } },
-  { id: "compose.abandon", name: "abandon", description: "放弃当前进行中的 Compose Work Item", source: { type: "builtin" }, presentation: "action", requirements: { workModes: ["compose"], requiresActiveWorkItem: true, requiresIdle: true }, safety: { confirmation: "always" } },
+  { id: "compose.new-work", name: "new-work", description: "放下当前 Compose 需求并立刻访谈新目标", source: { type: "builtin" }, presentation: "action", argumentHint: "<目标>", requirements: { workModes: ["compose"], requiresThread: true } },
+  { id: "compose.abandon", name: "abandon", description: "废弃当前 Compose 需求并回到空闲", source: { type: "builtin" }, presentation: "action", requirements: { workModes: ["compose"], requiresThread: true, requiresActiveWorkItem: true }, safety: { confirmation: "always" } },
   { id: "assist.btw", name: "btw", description: "向 Agent 提出一个与当前任务无关的问题", source: { type: "builtin" }, presentation: "action", argumentHint: "[question]", requirements: { workModes: ["build", "compose"] } },
 ]
 

@@ -1,13 +1,12 @@
-# Compose 工作模式架构（Work Item 模型）
+# Compose 工作模式架构
 
-关联任务：[HC-140](../task/archive/HC-140-重构组合工作模式.md) 及对应 [Spec](../spec/HC-140-重构组合工作模式.md)。
+关联任务：[HC-155](../task/HC-155-重做Compose流程.md) 及对应 [Spec](../spec/HC-155-重做Compose流程.md)。HC-140 Work Item 引擎为历史实现。
 
 ## 定位
 
-Compose 从「一个用户消息触发一次固定五阶段 ComposeRun」重构为「一个 Compose Thread 顺序承载多个持久
-ComposeWorkItem」。Work Item 跨 Turn、Run 与 Host 重启持续；Markdown 保存需求与研发产物正文，SQLite 保存执行
-事实；UI 上的阶段只是 readiness gate 的投影，不是第二份状态。HC-138 的固定五阶段状态机与旧
-`harness_compose_runs/artifacts` 表是历史实现，不作为恢复 fallback。
+Compose 是与 Build 平级的工作模式。进度靠 `docs/compose/<slug>/` 文档加确认 digest，不靠 Work Item 账本。
+用户看见一条主对话：Grill / Spec / Plan 在本 Run 流式进行；实现与检视用同一 Thread 的 fresh execution。
+UI 五段：需求 → 规格 → 计划 → 实现 → 检视。阶段由 Runtime 从文档与确认派生，模型不能自己跳阶段。
 
 ## 事实边界（单一事实源）
 
@@ -31,15 +30,12 @@ plan.md digest 为准（批准时 Plan+Todo 双 digest 联合审计），勾选�
 ```text
 run.start(mode=compose)
   → RunCoordinator 受理
-  → ComposeRunAdapter.execute_turn
-  → ComposeWorkItemEngine.execute_turn
-      1. 解析 Thread mode / active Work Item / 显式命令 / Interaction reply / 确定继续词
-      2. TurnIntentResolver（仅自然语言歧义，五分类，无 Tool，误判收敛澄清）
-      3. 载入或创建 Work Item；Run binding
-      4. 重算文档 digest 与九项 readiness
-      5. 门禁顺序：Task gate → Spec gate → Plan/Todo gate（typed Interaction）
-      6. 批准实施后同 Turn 自动闭环：Implement → Verify → Review → Report → Guard complete（有界步数）
-      7. 收敛 waiting_user | blocked | turn_budget | completed
+  → ComposeRunAdapter
+  → ComposeSession.execute_turn
+      1. /abandon、/new-work 命令优先
+      2. 按文档 + 确认派生阶段（无分类器）
+      3. Grill/Spec/Plan 走主 Agent；实现与检视走 fresh execution
+      4. 产出物就绪后 ask_user 确认；确认后同一轮进入下一阶段
 ```
 
 readiness 顺序：`task_confirmed → spec_confirmed → plan_confirmed → todo_executable → implementation_current →

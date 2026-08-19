@@ -847,19 +847,22 @@ test("Compose 运行状态出现在 run-status-live 并带阶段信息", () => {
     activity: { kind: "running" },
     runProgress: { phase: "model", elapsedMs: 18_000 },
     composeState: {
-      revision: 2,
-      stage: "build",
-      status: "running",
+      threadId: "thread-1",
+      slug: "search",
+      complexity: "simple",
+      status: "active",
+      currentStage: "implement",
+      waiting: "none",
       stages: [
-        { id: "understand", status: "passed", attempts: 1 },
-        { id: "plan", status: "passed", attempts: 1 },
-        { id: "build", status: "running", attempts: 1 },
-        { id: "verify", status: "pending", attempts: 0 },
-        { id: "review", status: "pending", attempts: 0 },
+        { id: "requirement", state: "confirmed" },
+        { id: "spec", state: "skipped" },
+        { id: "plan", state: "confirmed" },
+        { id: "implement", state: "current" },
+        { id: "review", state: "pending" },
       ],
-      tasks: [{ id: "task-1", title: "实现搜索", status: "running" }],
-      evidence: [],
-      blockedReason: null,
+      documents: [],
+      fixRounds: 0,
+      revision: 2,
     },
   })
   const handle = render(
@@ -868,8 +871,7 @@ test("Compose 运行状态出现在 run-status-live 并带阶段信息", () => {
   try {
     const live = handle.container.querySelector(".run-status-live")
     expect(live?.textContent).toContain("Compose")
-    expect(live?.textContent).toContain("构建")
-    expect(live?.textContent).toContain("实现搜索")
+    expect(live?.textContent).toContain("实现")
     expect(live?.textContent).toContain("Esc 取消")
     // 五阶段条仍在，但位于 live status 附近（同容器内）
     expect(handle.container.querySelector(".compose-progress")).not.toBeNull()
@@ -882,34 +884,43 @@ test("Compose 进度面板渲染五阶段、当前任务与 blocked 摘要", asy
   const interactive = makeInteractive({
     timeline: [],
     composeState: {
-      revision: 5,
-      stage: "verify",
-      status: "running",
+      threadId: "thread-1",
+      slug: "search",
+      complexity: "simple",
+      status: "waiting_user",
+      currentStage: "implement",
+      waiting: "ask_user",
       stages: [
-        { id: "understand", status: "passed", attempts: 1 },
-        { id: "plan", status: "passed", attempts: 1 },
-        { id: "build", status: "passed", attempts: 1 },
-        { id: "verify", status: "running", attempts: 1 },
-        { id: "review", status: "pending", attempts: 0 },
+        { id: "requirement", state: "confirmed" },
+        { id: "spec", state: "skipped" },
+        { id: "plan", state: "confirmed" },
+        { id: "implement", state: "failed" },
+        { id: "review", state: "pending" },
       ],
-      tasks: [
-        { id: "task-1", title: "实现搜索", status: "passed" },
-        { id: "task-2", title: "补充文档", status: "pending" },
-      ],
-      evidence: [{ label: "pytest -q tests/test_search.py", status: "failed" }],
-      blockedReason: null,
+      documents: [],
+      fixRounds: 0,
+      revision: 5,
     },
   })
   const handle = render(createElement(Timeline, { snapshot: makeSnapshot({ interactive }), dispatch: () => {} }))
   try {
+    const column = handle.container.querySelector(".timeline-column")
     const progress = handle.container.querySelector(".compose-progress")
+    const timeline = handle.container.querySelector(".timeline")
     expect(progress).not.toBeNull()
+    expect(column?.firstElementChild).toBe(progress)
+    expect(timeline?.contains(progress)).toBeFalse()
     const text = progress?.textContent ?? ""
-    expect(text).toContain("理解")
-    expect(text).toContain("验证")
-    expect(text).toContain("补充文档")
-    expect(text).toContain("pytest -q")
-    expect(text).toContain("rev 5")
+    expect(text).toContain("需求")
+    expect(text).toContain("规格")
+    expect(text).toContain("计划")
+    expect(text).toContain("实现")
+    expect(text).toContain("检视")
+    expect(text).toContain("失败")
+    expect(text).not.toContain("✓")
+    expect(text).not.toContain("▸")
+    expect(progress?.querySelector(".compose-chip-failed")).not.toBeNull()
+    expect(progress?.querySelector(".compose-track-filled")).not.toBeNull()
   } finally {
     handle.unmount()
   }
@@ -919,26 +930,29 @@ test("Compose blocked 投影展示阻塞原因", async () => {
   const interactive = makeInteractive({
     timeline: [],
     composeState: {
-      revision: 7,
-      stage: "verify",
-      status: "blocked",
+      threadId: "thread-1",
+      slug: "search",
+      complexity: "simple",
+      status: "waiting_user",
+      currentStage: "review",
+      waiting: "review_confirm",
       stages: [
-        { id: "understand", status: "passed", attempts: 1 },
-        { id: "plan", status: "passed", attempts: 1 },
-        { id: "build", status: "passed", attempts: 1 },
-        { id: "verify", status: "blocked", attempts: 3 },
-        { id: "review", status: "pending", attempts: 0 },
+        { id: "requirement", state: "confirmed" },
+        { id: "spec", state: "skipped" },
+        { id: "plan", state: "confirmed" },
+        { id: "implement", state: "confirmed" },
+        { id: "review", state: "current" },
       ],
-      tasks: [],
-      evidence: [],
-      blockedReason: "verify fix budget exhausted",
+      documents: [],
+      fixRounds: 0,
+      revision: 7,
     },
   })
   const handle = render(createElement(Timeline, { snapshot: makeSnapshot({ interactive }), dispatch: () => {} }))
   try {
     const text = handle.container.querySelector(".compose-progress")?.textContent ?? ""
-    expect(text).toContain("阻塞")
-    expect(text).toContain("verify fix budget exhausted")
+    expect(text).toContain("检视")
+    expect(text).toContain("等你确认")
   } finally {
     handle.unmount()
   }
@@ -952,28 +966,31 @@ test("Compose 失败后 Web 渲染冻结的终态阶段面板", async () => {
       runId: "run-1",
       outcome: "failed",
       composeSummary: {
-        revision: 2,
-        stage: "understand",
-        status: "failed",
+        threadId: "thread-1",
+        slug: "search",
+        complexity: "simple",
+        status: "waiting_user",
+        currentStage: "implement",
+        waiting: "none",
         stages: [
-          { id: "understand", status: "failed", attempts: 2 },
-          { id: "plan", status: "pending", attempts: 0 },
-          { id: "build", status: "pending", attempts: 0 },
-          { id: "verify", status: "pending", attempts: 0 },
-          { id: "review", status: "pending", attempts: 0 },
+          { id: "requirement", state: "confirmed" },
+          { id: "spec", state: "skipped" },
+          { id: "plan", state: "confirmed" },
+          { id: "implement", state: "failed" },
+          { id: "review", state: "pending" },
         ],
-        tasks: [],
-        evidence: [],
-        blockedReason: null,
+        documents: [],
+        fixRounds: 0,
+        revision: 2,
       },
     },
   })
   const handle = render(createElement(Timeline, { snapshot: makeSnapshot({ interactive }), dispatch: () => {} }))
   try {
     const text = handle.container.querySelector(".compose-progress")?.textContent ?? ""
-    expect(text).toContain("理解")
-    expect(text).toContain("验证")
-    expect(text).toContain("rev 2")
+    expect(text).toContain("需求")
+    expect(text).toContain("检视")
+    expect(text).toContain("失败")
   } finally {
     handle.unmount()
   }

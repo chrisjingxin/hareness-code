@@ -132,18 +132,22 @@ test("scoped Interaction 可携带 execution provenance 与 compose_scope", () =
   })).not.toThrow()
 })
 
-test("compose.state projection 严格有界且 revision 单调", () => {
+test("compose.progress projection 严格有界且 revision 单调", () => {
   const payload = {
+    thread_id: "t",
+    slug: "jsondiff",
+    complexity: "simple",
+    status: "active",
+    current_stage: "grill",
+    waiting: "ask_user",
+    stages: [{ id: "requirement", state: "current" }],
+    documents: [{ kind: "task", path: "docs/compose/jsondiff/task.md", confirmed: false }],
+    fix_rounds: 0,
     revision: 3,
-    stage: "build",
-    status: "running",
-    stages: [{ id: "understand", status: "passed", attempts: 1 }],
-    tasks: [{ id: "task-1", title: "实现搜索", status: "running" }],
-    evidence: [{ label: "pytest -q tests/foo", status: "passed" }],
   }
   const envelope = (value: unknown) => ({
     event_id: "e-compose",
-    type: "compose.state",
+    type: "compose.progress",
     thread_id: "t",
     run_id: "r",
     sequence: 1,
@@ -152,11 +156,11 @@ test("compose.state projection 严格有界且 revision 单调", () => {
   })
   expect(() => assertEventEnvelope(envelope(payload))).not.toThrow()
   expect(() => assertEventEnvelope(envelope({ ...payload, extra: true }))).toThrow()
-  expect(() => assertEventEnvelope(envelope({ ...payload, stage: "deploy" }))).toThrow()
+  expect(() => assertEventEnvelope(envelope({ ...payload, current_stage: "deploy" }))).toThrow()
   expect(() => assertEventEnvelope(envelope({ ...payload, revision: -1 }))).toThrow()
   expect(() => assertEventEnvelope(envelope({
     ...payload,
-    stages: [{ id: "understand", status: "passed", attempts: 1, extra: true }],
+    stages: [{ id: "requirement", state: "current", extra: true }],
   }))).toThrow()
 })
 

@@ -8,12 +8,14 @@ import {
   APPROVAL_DECISION_ORDER,
   DIRECTORY_TRUST_DECISION_ORDER,
   QUESTION_OTHER_VALUE,
+  answersByQuestionId,
   approvalDecisionDescription,
   approvalDecisionLabel,
   directoryTrustDecisionDescription,
   directoryTrustDecisionLabel,
   isApprovalDecision,
   isDirectoryTrustDecision,
+  recordAskUserAnswer,
 } from "../../presentation-shared/interaction-policy"
 import { diffTextForRenderer, parseFileDiff } from "../../presentation-shared/file-diff"
 import { resolveLanguageForPath } from "../../presentation-shared/language-catalog"
@@ -27,14 +29,12 @@ function tuiDiffViewForWidth(contentWidth: number): "split" | "unified" {
 
 export type BottomAreaKind = "input" | "approval" | "directory_trust" | "question"
 
-/** 底部同时只出现一个可聚焦面。无选项或多选仍走输入栏；ask_user 单选即使允许其他项也走 Dock。 */
+/** 底部同时只出现一个可聚焦面。所有 ask_user 提问都走问答 Dock，不再把文本题藏进输入栏。 */
 export function bottomAreaKind(interaction: InteractiveSnapshot["interaction"]): BottomAreaKind {
   if (interaction?.type === "approval") return "approval"
   if (interaction?.type === "directory_trust") return "directory_trust"
-  if (interaction?.type !== "question") return "input"
-  const question = interaction.questions[0]
-  if (!question?.options.length || question.multiSelect) return "input"
-  return "question"
+  if (interaction?.type === "question") return "question"
+  return "input"
 }
 
 /** 审批 Dock：选项与文件 Diff 预览，焦点在底部。 */
@@ -139,16 +139,21 @@ export function DirectoryTrustDock(props: {
   )
 }
 
-/** 问答 Dock：单选选项在底部确认。 */
+/** 问答 Dock：相关多题在底部逐题作答，全部答完再一次提交。 */
 export function QuestionDock(props: {
   interaction: Extract<InteractiveSnapshot["interaction"], { type: "question" }>
   workMode: InteractiveSnapshot["workMode"]
-  onQuestion: (answer: string) => void
+  onQuestion: (answers: Record<string, string[]>) => void
 }) {
   const accent = modeAccent(props.workMode)
-  const question = props.interaction.questions[0]
+  const questions = props.interaction.questions
+  const [index, setIndex] = useState(0)
+  const [collected, setCollected] = useState<Record<string, string>>({})
   const [awaitingOther, setAwaitingOther] = useState(false)
   const otherRef = useRef<TextareaRenderable | null>(null)
+  const currentIndex = Math.min(index, Math.max(0, questions.length - 1))
+  const question = questions[currentIndex]
+  const isChoice = Boolean(question?.options.length) && !question?.multiSelect
   const options = (question?.options ?? []).map(option => ({
     name: option.label,
     description: option.description || option.label,
@@ -161,6 +166,19 @@ export function QuestionDock(props: {
       value: QUESTION_OTHER_VALUE,
     })
   }
+
+  const accept = (answer: string) => {
+    if (!question) return
+    const next = recordAskUserAnswer(questions, collected, question.id, answer)
+    if (!next.done) {
+      setCollected(next.collected)
+      setIndex(currentIndex + 1)
+      setAwaitingOther(false)
+      return
+    }
+    props.onQuestion(answersByQuestionId(questions, next.collected))
+  }
+
   return (
     <box
       flexShrink={0}
@@ -174,14 +192,17 @@ export function QuestionDock(props: {
       paddingBottom={1}
       flexDirection="column"
     >
-      <text fg={accent}>Agent 需要你的回答</text>
+      <text fg={accent}>
+        {questions.length > 1 ? `Agent 需要你的回答 · ${currentIndex + 1}/${questions.length}` : "Agent 需要你的回答"}
+      </text>
       {question?.question ? <text content={question.question} fg={tuiTheme.text} /> : null}
-      {awaitingOther ? (
+      {!isChoice || awaitingOther ? (
         <>
           <textarea
+            key={`${question?.id ?? "q"}-text`}
             ref={otherRef}
             focused
-            placeholder="输入其他答案后按 Enter"
+            placeholder={isChoice ? "输入其他答案后按 Enter" : "输入回答后按 Enter"}
             placeholderColor={tuiTheme.muted}
             textColor={tuiTheme.text}
             focusedTextColor={tuiTheme.text}
@@ -192,14 +213,15 @@ export function QuestionDock(props: {
             maxHeight={4}
             onSubmit={() => {
               const value = otherRef.current?.plainText.trim() ?? ""
-              if (value) props.onQuestion(value)
+              if (value) accept(value)
             }}
           />
-          <text fg={tuiTheme.muted}>输入自定义回答后按 Enter</text>
+          <text fg={tuiTheme.muted}>输入后按 Enter{questions.length > 1 && currentIndex + 1 < questions.length ? "，继续下一题" : ""}</text>
         </>
       ) : (
         <>
           <select
+            key={question?.id ?? "q"}
             focused
             height={Math.max(2, Math.min(8, Math.max(1, options.length) * 2))}
             showDescription
@@ -211,7 +233,7 @@ export function QuestionDock(props: {
                 setAwaitingOther(true)
                 return
               }
-              props.onQuestion(option.value)
+              accept(option.value)
             }}
           />
           <text fg={tuiTheme.muted}>{question?.allowOther ? "↑↓ 选择 · Enter 确认 · 选「其他」可自定义" : "↑↓ 选择 · Enter 确认"}</text>

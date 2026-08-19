@@ -15,7 +15,7 @@ import {
   type SkillMenuItem,
 } from "../commands"
 import type { IntentOutcome } from "../ports"
-import { appendNotice } from "../state"
+import { appendNotice, type ComposeProjection } from "../state"
 import { runtimeStatusSummary } from "../runtime"
 import type { FeatureContext } from "./types"
 
@@ -36,8 +36,7 @@ export class CommandFeature {
         pendingOperation: Boolean(ctx.getState().pendingOperation),
         hasPendingInteraction,
         workMode: ctx.getState().workMode,
-        // Work Item projection 尚未接入 CLI 状态（WP15 cutover）；接入前恒为 false。
-        hasActiveWorkItem: false,
+        hasActiveWorkItem: hasActiveComposeSession(ctx.getState().composeState),
       },
       threadId: ctx.getState().currentThreadId,
       runtimeStatus: runtimeStatusSummary(ctx.baseRuntime),
@@ -89,4 +88,8 @@ export class CommandFeature {
   unknownNotice(resolution: Extract<ReturnType<typeof resolveSlashCommand>, { kind: "unknown" }>): string {
     return unknownCommandNotice(resolution)
   }
+}
+
+function hasActiveComposeSession(progress: ComposeProjection | null | undefined): boolean {
+  return Boolean(progress && progress.status !== "completed" && progress.status !== "abandoned")
 }

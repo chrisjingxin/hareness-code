@@ -31,6 +31,14 @@ class ContextProjectionError(RuntimeError):
     """投影数据损坏、越界或无法保持工具原子组时失败关闭。"""
 
 
+def tail_user_exclude_id(records: Sequence[Any], run_id: str) -> str | None:
+    """仅当本 Run 用户消息仍是 Transcript 末条时才排除，供二次拉 Runtime 使用。"""
+    candidate = f"run:{run_id}:user"
+    if records and getattr(records[-1], "record_id", None) == candidate:
+        return candidate
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class CompressionCheckpoint:
     """一份可审计的模型投影版本，不是 LangGraph checkpoint。"""

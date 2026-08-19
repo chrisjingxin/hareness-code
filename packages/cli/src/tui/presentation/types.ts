@@ -38,7 +38,7 @@ export type SharedViewProps = {
   onToggleTool: (toolId: string) => void
   onApproval: (decision: ApprovalDecision) => void
   onDirectoryTrust: (decision: DirectoryTrustDecision) => void
-  onQuestion: (answer: string) => void
+  onQuestion: (answers: Record<string, string[]>) => void
   sidebarVisible?: boolean
   onToggleSidebar?: () => void
   inputMode?: "chat" | "shell"

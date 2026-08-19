@@ -3,7 +3,7 @@
 import { TextAttributes, type ScrollBoxRenderable } from "@opentui/core"
 import { type ReactNode, type RefObject, useMemo, useState } from "react"
 
-import type { ComposeProjection, ComposeSummaryCard, ConversationMessage, InteractionCard, ReasoningCard, TimelineItem } from "../../interactive/state"
+import type { ComposeSummaryCard, ConversationMessage, InteractionCard, ReasoningCard, TimelineItem } from "../../interactive/state"
 import type { InteractiveSnapshot } from "../../interactive/types"
 import { formatContext, formatDuration, formatElapsed, formatUsage } from "../../presentation-shared/formatters"
 import { diffTextForRenderer, parseFileDiff } from "../../presentation-shared/file-diff"
@@ -23,57 +23,6 @@ import { useRunElapsed, useSpinner } from "./input-bar"
 import { latestTodos, latestWriteTodosId, shouldPinTodos, TodoPanel, ToolRenderer } from "./tools/renderers"
 import { createScrollAcceleration } from "./scroll.js"
 import { markdownSyntax, tuiTheme, userMessageAccent } from "./theme"
-
-function stageColor(status: string): string {
-  if (status === "passed" || status === "completed") return tuiTheme.success
-  if (status === "running" || status === "waiting_user") return tuiTheme.primary
-  if (status === "failed" || status === "blocked" || status === "cancelled") return tuiTheme.danger
-  return tuiTheme.muted
-}
-
-/** 活动投影优先；失败/完成后退回终态摘要快照，保证画面不空白。 */
-function renderComposeProgress(interactive: InteractiveSnapshot): React.ReactNode {
-  const live = interactive.composeState
-  if (live) return <ComposeProgress state={live} />
-  const summary = interactive.lastRun?.composeSummary
-  if (!summary) return null
-  return <ComposeProgress state={summary} />
-}
-
-/** 窄行截断 Compose 进度文案，避免任务/证据标题撑破时间线。 */
-function shorten(value: string, limit: number): string {
-  if (value.length <= limit) return value
-  return `${value.slice(0, Math.max(0, limit - 1))}…`
-}
-
-/** Compose 运行进度：只显示五阶段、当前 task、evidence 与 blocked 摘要。 */
-function ComposeProgress(props: { state: ComposeProjection }) {
-  const state = props.state
-  const currentTask = state.tasks.find(task => task.status === "running" || task.status === "pending")
-  const runningEvidence = state.evidence.find(item => item.status === "running" || item.status === "failed")
-  return (
-    <box flexDirection="column" paddingBottom={1} paddingLeft={1} paddingRight={1}>
-      <box flexDirection="row" gap={1}>
-        {state.stages.map(stage => (
-          <text key={stage.id} fg={stageColor(stage.status)} attributes={stage.status === "running" ? TextAttributes.BOLD : undefined}>
-            {COMPOSE_STAGE_LABELS[stage.id] ?? stage.id}
-            {stage.status === "running" ? "*" : stage.status === "passed" ? "✓" : ""}
-          </text>
-        ))}
-        <text fg={tuiTheme.muted}>rev {state.revision}</text>
-      </box>
-      {currentTask ? (
-        <text fg={tuiTheme.text}>任务：{shorten(currentTask.title, 60)}</text>
-      ) : null}
-      {runningEvidence ? (
-        <text fg={stageColor(runningEvidence.status)}>验证：{shorten(runningEvidence.label, 60)}</text>
-      ) : null}
-      {state.blockedReason ? (
-        <text fg={tuiTheme.danger}>阻塞：{shorten(state.blockedReason, 80)}</text>
-      ) : null}
-    </box>
-  )
-}
 
 /** 使用 ScrollBox 渲染统一 timeline，并保留 sticky-scroll 行为。 */
 export function ConversationTimeline(props: {
@@ -172,7 +121,6 @@ export function ConversationTimeline(props: {
       {/* 当前阶段状态贴近执行区底部，长历史时不因插在顶部而滚出视口。 */}
       <TimelineActivity interactive={props.interactive} />
       {pinTodos ? <TodoPanel items={latestTodos(props.interactive.timeline)} /> : null}
-      {renderComposeProgress(props.interactive)}
       <ErrorBlock interactive={props.interactive} />
       <RunFooter interactive={props.interactive} modelName={props.modelName} />
       {props.transientNotice ? <TransientNotice key={props.transientNotice.id} message={props.transientNotice.message} /> : null}
@@ -336,11 +284,10 @@ function TimelineActivity(props: { interactive: InteractiveSnapshot }) {
     ? progressPhaseLabel(interactive.runProgress.phase)
     : activityLabel(interactive.activity.kind)
   const compose = interactive.composeState
-  const currentTask = compose?.tasks.find(task => task.status === "running")
   const line = compose
     ? `${composeLiveStatusLine({
-      stage: compose.stage,
-      taskTitle: currentTask?.title,
+      stage: compose.currentStage,
+      taskTitle: null,
       phaseLabel: phase,
       elapsedLabel: formatElapsed(elapsed),
     })} · Esc 取消`

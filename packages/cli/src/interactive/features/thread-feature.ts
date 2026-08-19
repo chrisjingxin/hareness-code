@@ -87,7 +87,7 @@ function threadOpenResult(value: unknown): {
     messages,
     composeActivities,
     threadMode: record.thread_mode ?? null,
-    workItem: record.work_item ?? null,
+    workItem: null,
   }
 }
 

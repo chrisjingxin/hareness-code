@@ -872,9 +872,10 @@ class RunCoordinator:
                 self._finish(run, "cancelled", {"reason": "Cancelled by client"})
                 return
 
-            # Build 的 root registry running 迁移属于 ManagedAgentExecutor；Compose
-            # 尚未迁移前保持原有 Coordinator 管理，避免两条路径双重 start。
-            if run.start.mode != "build":
+            # Build / Compose 的 root running 迁移属于 ManagedAgentExecutor。
+            # Coordinator 再 start 一次会从 running→running，报
+            # EXECUTION_STATE_TRANSITION_INVALID。direct_shell 仍由 Coordinator 启动。
+            if run.start.mode not in {"build", "compose"}:
                 try:
                     await self._execution_registry.start(run.root_execution_ref)
                 except ExecutionRegistryError:

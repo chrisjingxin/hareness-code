@@ -145,6 +145,25 @@ const builtinHandlers: Readonly<Record<string, CommandHandler>> = {
     if (!question) return notice("用法：/btw <你的问题>")
     return { type: "side-question", question, threadId: context.threadId }
   },
+  "compose.new-work": context => {
+    const goal = context.command.argument?.trim()
+    if (!goal) return notice("开新需求请带目标，例如 /new-work 写 HTTP 服务。只要停用请用 /abandon。")
+    return { type: "submit-prompt", prompt: `/new-work ${goal}` }
+  },
+  "compose.abandon": context => {
+    if (context.command.argument?.trim()) {
+      return notice("换题请用 /new-work <目标>。")
+    }
+    if (!context.threadId) return notice("当前没有可用 thread。")
+    return {
+      type: "request-confirmation",
+      confirmationId: "compose-abandon",
+      title: "废弃当前 Compose 需求？",
+      message: "文档和已改代码会留在磁盘，进度回到空闲。",
+      confirmLabel: "废弃",
+      cancelLabel: "继续当前需求",
+    }
+  },
 }
 
 /** 把 `/teams` 子命令映射成类型化 RPC；客户端不能提交任意 TeamDefinition。 */

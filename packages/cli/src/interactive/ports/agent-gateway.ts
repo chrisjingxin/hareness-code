@@ -98,6 +98,8 @@ export interface AgentGateway {
   listSkills(includeDisabled: boolean): Promise<SkillsListResult>
   /** 设置 Skill 启用状态。 */
   setSkillEnabled(skillId: string, enabled: boolean): Promise<SkillsSetEnabledResult>
+  /** 废弃当前 Compose 薄进度；文档保留。 */
+  abandonCompose(threadId: string, reason?: string): Promise<{ progress: unknown }>
   /** 执行临时只读单轮问答（/btw），0 工具，不写存储。 */
   sideQuestion(params: ThreadsSideQuestionParams): Promise<ThreadsSideQuestionResult>
 }
@@ -127,6 +129,7 @@ export function createFallbackNoopGateway(): AgentGateway {
     async previewConfig() { return { revision: "0", changes: [], applies_to: [] } },
     async commitConfig() { return { revision: "0", changes: [], applies_to: [] } },
     async compactContext() { return { compacted: true, context: { action: "manual_summary" } } },
+    async abandonCompose() { return { progress: null } },
     abandonInteraction() {},
     onProtocolError() { return () => {} },
     onClose() { return () => {} },

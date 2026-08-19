@@ -4,7 +4,7 @@
   "title": "Harness Agent Protocol v3",
   "x-harness": {
     "major": 3,
-    "minor": 4,
+    "minor": 5,
     "max_frame_bytes": 8388608,
     "max_tool_payload_bytes": 1048576,
     "operations": {
@@ -64,10 +64,8 @@
       "tool.delta": { "payload": "#/$defs/toolDeltaPayload" },
       "tool.completed": { "payload": "#/$defs/toolCompletedPayload" },
       "context.updated": { "payload": "#/$defs/contextPayload" },
-      "compose.state": { "payload": "#/$defs/composeStatePayload" },
+      "compose.progress": { "payload": "#/$defs/composeProgress" },
       "compose.summary": { "payload": "#/$defs/composeSummaryPayload" },
-      "compose.work_item": { "payload": "#/$defs/composeWorkItemPayload" },
-      "compose.activity": { "payload": "#/$defs/composeActivityPayload" },
       "interaction.resolved": { "payload": "#/$defs/interactionResolvedPayload" },
       "run.completed": { "payload": "#/$defs/runCompletedPayload" },
       "run.cancelled": { "payload": "#/$defs/runCancelledPayload" },
@@ -90,7 +88,10 @@
       "CONTROL_RELEASE_BLOCKED": { "jsonrpc_code": -32008, "retryable": true },
       "ATTACHMENT_NOT_FOUND": { "jsonrpc_code": -32009, "retryable": false },
       "ATTACHMENT_NOT_ACTIVE": { "jsonrpc_code": -32009, "retryable": false },
-      "CONNECTION_RUN_BUSY": { "jsonrpc_code": -32000, "retryable": true }
+      "CONNECTION_RUN_BUSY": { "jsonrpc_code": -32000, "retryable": true },
+      "COMPOSE_NOTHING_TO_ABANDON": { "jsonrpc_code": -32004, "retryable": false },
+      "COMPOSE_NEW_WORK_GOAL_REQUIRED": { "jsonrpc_code": -32004, "retryable": false },
+      "COMPOSE_ABANDON_TAKES_NO_GOAL": { "jsonrpc_code": -32004, "retryable": false }
     }
   },
   "$defs": {
@@ -388,7 +389,7 @@
         "run_id": { "type": "string", "minLength": 1 },
         "event_sequence": { "type": "integer", "minimum": 0 },
         "activity_id": { "type": "string", "minLength": 1 },
-        "stage": { "enum": ["understand", "plan", "build", "verify", "review"] },
+        "stage": { "enum": ["grill", "task", "spec", "plan", "implement", "verify"] },
         "task_id": { "type": "string", "minLength": 1 },
         "task_title": { "type": "string", "minLength": 1, "maxLength": 200 },
         "attempt": { "type": "integer", "minimum": 1 },
@@ -430,13 +431,8 @@
       "properties": {
         "thread": { "$ref": "#/$defs/threadSummary" },
         "messages": { "type": "array", "items": { "$ref": "#/$defs/threadMessage" } },
-        "compose_activities": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/composeActivityRecord" },
-          "default": []
-        },
         "thread_mode": { "oneOf": [{ "$ref": "#/$defs/interactionMode" }, { "type": "null" }] },
-        "work_item": { "oneOf": [{ "$ref": "#/$defs/composeWorkItemSnapshot" }, { "type": "null" }] }
+        "compose_progress": { "oneOf": [{ "$ref": "#/$defs/composeProgress" }, { "type": "null" }] }
       },
       "additionalProperties": false
     },
@@ -806,7 +802,7 @@
       "required": ["activity_id", "stage", "attempt"],
       "properties": {
         "activity_id": { "type": "string", "minLength": 1 },
-        "stage": { "enum": ["understand", "plan", "build", "verify", "review"] },
+        "stage": { "enum": ["grill", "task", "spec", "plan", "implement", "verify", "understand", "build", "review"] },
         "task_id": { "type": "string", "minLength": 1 },
         "task_title": { "type": "string", "minLength": 1, "maxLength": 200 },
         "attempt": { "type": "integer", "minimum": 1 }
@@ -904,83 +900,59 @@
       },
       "additionalProperties": false
     },
-    "composeStatePayload": {
+    "composeUiStageId": {
+      "enum": ["requirement", "spec", "plan", "implement", "review"]
+    },
+    "composeProgress": {
       "type": "object",
-      "required": ["revision", "stage", "status", "stages", "tasks", "evidence"],
+      "required": [
+        "thread_id",
+        "slug",
+        "complexity",
+        "status",
+        "current_stage",
+        "waiting",
+        "stages",
+        "documents",
+        "fix_rounds",
+        "revision"
+      ],
       "properties": {
-        "revision": { "type": "integer", "minimum": 0 },
-        "stage": { "enum": ["understand", "plan", "build", "verify", "review"] },
-        "status": { "enum": ["running", "waiting_user", "blocked", "completed", "failed", "cancelled"] },
+        "thread_id": { "type": "string", "minLength": 1 },
+        "slug": { "type": "string", "minLength": 1 },
+        "complexity": { "enum": ["simple", "complex"] },
+        "status": { "enum": ["active", "waiting_user", "verifying", "completed", "abandoned"] },
+        "current_stage": { "enum": ["grill", "task", "spec", "plan", "implement", "review"] },
+        "waiting": {
+          "enum": ["none", "task_confirm", "spec_confirm", "plan_confirm", "review_confirm", "ask_user", "implement_choice"]
+        },
         "stages": {
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["id", "status", "attempts"],
+            "required": ["id", "state"],
             "properties": {
-              "id": { "enum": ["understand", "plan", "build", "verify", "review"] },
-              "status": { "enum": ["pending", "running", "waiting_user", "passed", "failed", "cancelled", "blocked"] },
-              "attempts": { "type": "integer", "minimum": 0 }
+              "id": { "$ref": "#/$defs/composeUiStageId" },
+              "state": { "enum": ["pending", "current", "confirmed", "skipped", "failed"] }
             },
             "additionalProperties": false
           }
         },
-        "tasks": {
+        "documents": {
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["id", "title", "status"],
+            "required": ["kind", "path", "confirmed"],
             "properties": {
-              "id": { "type": "string", "minLength": 1 },
-              "title": { "type": "string", "minLength": 1 },
-              "status": { "enum": ["pending", "running", "passed", "failed", "cancelled"] }
+              "kind": { "enum": ["task", "spec", "plan", "todo", "review"] },
+              "path": { "type": "string", "minLength": 1 },
+              "confirmed": { "type": "boolean" }
             },
             "additionalProperties": false
           }
         },
-        "evidence": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "required": ["label", "status"],
-            "properties": {
-              "label": { "type": "string", "minLength": 1 },
-              "status": { "enum": ["pending", "running", "passed", "failed", "cancelled"] }
-            },
-            "additionalProperties": false
-          }
-        },
-        "blocked_reason": { "type": ["string", "null"], "minLength": 1 }
-      },
-      "additionalProperties": false
-    },
-    "composeWorkItemSnapshot": {
-      "type": "object",
-      "required": ["work_item_id", "slug", "title", "revision", "status", "current_activity", "pending_decision", "blocked_reason"],
-      "properties": {
-        "work_item_id": { "type": "string", "minLength": 1 },
-        "slug": { "type": "string", "minLength": 1 },
-        "title": { "type": "string", "minLength": 1 },
-        "revision": { "type": "integer", "minimum": 0 },
-        "status": { "enum": ["active", "waiting_user", "blocked", "completed", "abandoned"] },
-        "current_activity": { "type": "string", "minLength": 1 },
-        "pending_decision": { "type": ["string", "null"] },
-        "blocked_reason": { "type": ["string", "null"] }
-      },
-      "additionalProperties": false
-    },
-    "composeReadinessSnapshot": {
-      "type": "object",
-      "required": ["task_confirmed", "spec_confirmed", "plan_confirmed", "todo_executable", "implementation_current", "verification_fresh", "review_fresh", "report_current", "complete"],
-      "properties": {
-        "task_confirmed": { "type": "boolean" },
-        "spec_confirmed": { "type": "boolean" },
-        "plan_confirmed": { "type": "boolean" },
-        "todo_executable": { "type": "boolean" },
-        "implementation_current": { "type": "boolean" },
-        "verification_fresh": { "type": "boolean" },
-        "review_fresh": { "type": "boolean" },
-        "report_current": { "type": "boolean" },
-        "complete": { "type": "boolean" }
+        "fix_rounds": { "type": "integer", "minimum": 0, "maximum": 2 },
+        "revision": { "type": "integer", "minimum": 0 }
       },
       "additionalProperties": false
     },
@@ -988,57 +960,32 @@
       "type": "object",
       "required": ["thread_id"],
       "properties": {
-        "thread_id": { "type": "string", "minLength": 1 },
-        "work_item_id": { "type": "string", "minLength": 1 }
+        "thread_id": { "type": "string", "minLength": 1 }
       },
       "additionalProperties": false
     },
     "composeInspectResult": {
       "type": "object",
-      "required": ["work_item"],
+      "required": ["progress"],
       "properties": {
-        "work_item": { "oneOf": [{ "$ref": "#/$defs/composeWorkItemSnapshot" }, { "type": "null" }] }
+        "progress": { "oneOf": [{ "$ref": "#/$defs/composeProgress" }, { "type": "null" }] }
       },
       "additionalProperties": false
     },
     "composeAbandonParams": {
       "type": "object",
-      "required": ["thread_id", "work_item_id", "expected_revision"],
+      "required": ["thread_id"],
       "properties": {
         "thread_id": { "type": "string", "minLength": 1 },
-        "work_item_id": { "type": "string", "minLength": 1 },
-        "expected_revision": { "type": "integer", "minimum": 0 },
         "reason": { "type": "string" }
       },
       "additionalProperties": false
     },
     "composeAbandonResult": {
       "type": "object",
-      "required": ["work_item"],
+      "required": ["progress"],
       "properties": {
-        "work_item": { "$ref": "#/$defs/composeWorkItemSnapshot" }
-      },
-      "additionalProperties": false
-    },
-    "composeWorkItemPayload": {
-      "type": "object",
-      "required": ["thread_id", "work_item"],
-      "properties": {
-        "thread_id": { "type": "string", "minLength": 1 },
-        "work_item": { "$ref": "#/$defs/composeWorkItemSnapshot" }
-      },
-      "additionalProperties": false
-    },
-    "composeActivityPayload": {
-      "type": "object",
-      "required": ["thread_id", "work_item_id", "activity_id", "kind", "status", "attempt"],
-      "properties": {
-        "thread_id": { "type": "string", "minLength": 1 },
-        "work_item_id": { "type": "string", "minLength": 1 },
-        "activity_id": { "type": "string", "minLength": 1 },
-        "kind": { "type": "string", "minLength": 1 },
-        "status": { "type": "string", "minLength": 1 },
-        "attempt": { "type": "integer", "minimum": 1 }
+        "progress": { "$ref": "#/$defs/composeProgress" }
       },
       "additionalProperties": false
     },

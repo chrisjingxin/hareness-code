@@ -281,6 +281,19 @@ export class InteractiveControllerImpl implements InteractiveController {
         return { status: "accepted", effects: [{ type: "request-handoff", threadId: result.threadId }] }
       case "side-question":
         return { status: "accepted", effects: [{ type: "side-question", question: result.question, threadId: result.threadId }] }
+      case "submit-prompt":
+        return this.runFeature.startRun(result.prompt, this.featureContext, {
+          mode: this.state.workMode,
+          requestedModelProfileId: this.modelFeature.requestedModelProfileId,
+          armedSkill: this.skillFeature.armedSkill,
+          onEvent: event => this.timelineFeature.processAgentEvent(event, this.featureContext),
+          onRunFinish: (actualModel?: ModelProfile) => {
+            if (actualModel) this.modelFeature.actualModelProfile = actualModel
+            this.refreshModelSelection()
+            void this.catalogFeature.refreshThreadCatalog(this.featureContext)
+          },
+          onAbandonInteraction: () => this.interactionFeature.abandonPendingInteraction(this.featureContext),
+        })
       default:
         return { status: "accepted" }
     }
@@ -303,6 +316,19 @@ export class InteractiveControllerImpl implements InteractiveController {
       this.beginNewThread()
     } else if (confirmationId === "model-binding") {
       this.resetThreadState(clearThread(this.state))
+    } else if (confirmationId === "compose-abandon") {
+      const threadId = this.state.currentThreadId
+      if (!threadId) {
+        this.commit(current => appendNotice(current, "当前没有可用 thread。"))
+        return { status: "accepted" }
+      }
+      try {
+        await this.gateway.abandonCompose(threadId)
+        this.commit(current => ({ ...current, composeState: null }))
+        this.commit(current => appendNotice(current, "已废弃当前 Compose 需求。文档仍保留。"))
+      } catch (error) {
+        this.commit(current => appendNotice(current, `废弃失败：${error instanceof Error ? error.message : String(error)}`))
+      }
     }
     return { status: "accepted" }
   }

@@ -1,4 +1,4 @@
-# HC-138 Build / Compose 双工作模式设计
+ # HC-138 Build / Compose 双工作模式设计
 
 关联任务：[HC-138](../task/HC-138-建立BuildCompose双.md)  
 调研依据：[Compose Mode 可行性调研](../research/Compose Mode 可行性调研.md)  

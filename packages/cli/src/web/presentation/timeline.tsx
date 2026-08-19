@@ -51,6 +51,12 @@ import {
   segmentTimeline,
   type TimelineActivityGroup,
 } from "../../presentation-shared/timeline-activity-groups"
+import {
+  composeStepperHint,
+  composeStepperSegments,
+  composeStepperTrackFilled,
+  resolveComposeProgress,
+} from "../../presentation-shared/compose-progress-bar"
 
 import type {
   ComposeProjection,
@@ -60,7 +66,6 @@ import type {
   TimelineItem,
   ToolCard,
 } from "../../interactive/state"
-import type { InteractiveSnapshot } from "../../interactive/types"
 import type { WebAdapterSnapshot, WebIntent, WebScrollRequest } from "../application/adapter"
 import { toolKey } from "../application/adapter"
 import { Markdown } from "./markdown"
@@ -208,12 +213,11 @@ export function Timeline({
   }, [isExpanded])
 
   const compose = snapshot.interactive.composeState
-  const currentTask = compose?.tasks.find(task => task.status === "running")
   const phaseLabel = progressPhaseLabel(snapshot.interactive.runProgress?.phase ?? "preparing")
   const liveLine = compose
     ? `${composeLiveStatusLine({
-      stage: compose.stage,
-      taskTitle: currentTask?.title,
+      stage: compose.currentStage,
+      taskTitle: null,
       phaseLabel,
       elapsedLabel: formatElapsed(elapsedMs),
     })} · Esc 取消`
@@ -260,7 +264,11 @@ export function Timeline({
   }
   flushFlatItems()
 
+  const composeProgress = resolveComposeProgress(snapshot.interactive)
+
   return (
+    <div className="timeline-column">
+    {composeProgress ? <ComposeProgress state={composeProgress} /> : null}
     <div
       ref={containerRef}
       className="timeline"
@@ -279,7 +287,6 @@ export function Timeline({
         renderedSegments
       )}
       <div className="live-interaction-slot" data-pending-request-id={pendingRequestId ?? undefined} />
-      {/* 当前阶段状态放在时间线活动区附近，避免长历史把进度顶出视口。 */}
       <div className="run-status-live" aria-live="polite">
         {activeRun ? (
           <div
@@ -293,7 +300,6 @@ export function Timeline({
           </div>
         ) : idleActivity ? null : activityLabel(snapshot.interactive.activity.kind)}
       </div>
-      {renderComposeProgress(snapshot.interactive)}
       {showScrollButton ? (
         <button
           type="button"
@@ -305,6 +311,7 @@ export function Timeline({
           {hasNewOutput ? "有新输出" : "回到底部"}
         </button>
       ) : null}
+    </div>
     </div>
   )
 }
@@ -1029,33 +1036,36 @@ function interactionTerminalLabel(interaction: InteractionCard): {
 }
 
 
-/** 活动投影优先；失败/完成后退回终态摘要快照，保证画面不空白。 */
-function renderComposeProgress(interactive: InteractiveSnapshot): React.ReactNode {
-  const live = interactive.composeState
-  if (live) return <ComposeProgress state={live} />
-  const summary = interactive.lastRun?.composeSummary
-  if (!summary) return null
-  return <ComposeProgress state={summary} />
-}
-
-/** Compose 五阶段/当前任务/evidence/blocked 的只读进度条。 */
+/** Compose 固定步骤条：等宽 chip + 轨道，状态只出现在右侧 hint。 */
 function ComposeProgress({ state }: { state: ComposeProjection }) {
-  const currentTask = state.tasks.find(task => task.status === "running" || task.status === "pending")
-  const failedEvidence = state.evidence.find(item => item.status === "failed")
+  const segments = composeStepperSegments(state)
+  const hint = composeStepperHint(state)
+  const hintKind = hint === "失败" ? "failed" : hint === "等你确认" ? "wait" : "live"
   return (
     <div className="compose-progress" role="status" aria-label="Compose 工作流进度">
       <div className="compose-stages">
-        {state.stages.map(stage => (
-          <span key={stage.id} className={`compose-stage compose-stage-${stage.status}`}>
-            {COMPOSE_STAGE_LABELS[stage.id] ?? stage.id}
-            {stage.status === "running" ? "…" : stage.status === "passed" ? "✓" : ""}
-          </span>
-        ))}
-        <span className="compose-revision">rev {state.revision}</span>
+        {segments.map((segment, index) => {
+          const previous = segments[index - 1]
+          const filled = previous ? composeStepperTrackFilled(previous.mark) : false
+          return (
+            <span key={segment.id} className="compose-stage-wrap">
+              {index > 0 ? (
+                <span
+                  className={`compose-track${filled ? " compose-track-filled" : ""}`}
+                  aria-hidden="true"
+                />
+              ) : null}
+              <span
+                className={`compose-chip compose-chip-${segment.mark}`}
+                aria-current={segment.mark === "current" ? "step" : undefined}
+              >
+                {segment.label}
+              </span>
+            </span>
+          )
+        })}
       </div>
-      {currentTask ? <div className="compose-task">任务：{currentTask.title}</div> : null}
-      {failedEvidence ? <div className="compose-task compose-task-failed">验证：{failedEvidence.label}</div> : null}
-      {state.blockedReason ? <div className="compose-blocked">阻塞：{state.blockedReason}</div> : null}
+      {hint ? <span className={`compose-hint compose-hint-${hintKind}`}>{hint}</span> : null}
     </div>
   )
 }

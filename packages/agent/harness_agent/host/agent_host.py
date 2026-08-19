@@ -158,13 +158,11 @@ from harness_agent.tools.file_tool_metrics import FileToolMetrics
 from harness_agent.compose.stage_agents import ManagedStageAgentPort
 from harness_agent.compose.document_store import ComposeDocumentStore
 from harness_agent.compose.models import ThreadMode
-from harness_agent.compose.work_item_engine import (
-    ComposeTurnPorts,
-    ComposeWorkItemEngine,
-    ComposeWorkItemEngineError,
-    ComposeWorkItemProjection,
+from harness_agent.compose.session import (
+    ComposeSession,
+    ComposeSessionError,
+    ComposeSessionPorts,
 )
-from harness_agent.threads.compose_work_item_store import ComposeWorkItemStoreError
 from harness_agent.extensions.providers.harness_gateway import ProviderClientPool
 from harness_agent.host.run_coordinator import (
     AgentEvent,
@@ -1159,13 +1157,17 @@ class AgentHost:
             and agent is not None
             and callable(getattr(agent, "aupdate_state", None))
         ):
-            from harness_agent.threads.context_projection import ContextProjector
+            from harness_agent.threads.context_projection import (
+                ContextProjector,
+                tail_user_exclude_id,
+            )
 
             try:
                 projector = ContextProjector(persistence)
+                records = await persistence.load_transcript(run.thread_id)
                 projection = await projector.project(
                     run.thread_id,
-                    exclude_record_id=f"run:{run.run_id}:user",
+                    exclude_record_id=tail_user_exclude_id(records, run.run_id),
                 )
                 await projector.sync_cache(agent, run.thread_id, projection=projection)
             except BaseException:
@@ -1577,20 +1579,17 @@ class AgentHost:
             if str(exc) in {"THREAD_NOT_FOUND", "THREAD_NOT_RECOVERABLE"}:
                 raise RpcError(-32004, str(exc)) from exc
             raise
-        thread_mode = await persistence.compose_work_item_store().load_thread_mode(parsed.thread_id)
-        work_item: dict[str, object] | None = None
+        thread_mode = await persistence.compose_progress_store().load_thread_mode(parsed.thread_id)
+        progress: dict[str, object] | None = None
         if thread_mode is ThreadMode.COMPOSE:
-            projection = await self._compose_work_item_engine(persistence).inspect(
+            progress = await self._compose_session(persistence).inspect(
                 thread_id=parsed.thread_id
             )
-            if projection is not None:
-                work_item = _compose_work_item_snapshot(projection)
         return {
             "thread": _thread_summary_payload(opened.summary),
             "messages": [_thread_message_payload(message) for message in opened.messages],
-            "compose_activities": list(opened.compose_activities),
             "thread_mode": thread_mode.value if thread_mode is not None else None,
-            "work_item": work_item,
+            "compose_progress": progress,
         }
 
     async def _handle_threads_watch(self, params: dict[str, Any], _id: str) -> dict[str, object]:
@@ -1693,50 +1692,45 @@ class AgentHost:
         parsed = ComposeInspectParams.model_validate(params)
         persistence = await self._ensure_thread_persistence()
         await self._require_compose_thread(persistence, parsed.thread_id)
-        engine = self._compose_work_item_engine(persistence)
         try:
-            projection = await engine.inspect(
+            projection = await self._compose_session(persistence).inspect(
                 thread_id=parsed.thread_id,
-                work_item_id=parsed.work_item_id,
             )
-        except (ComposeWorkItemEngineError, ComposeWorkItemStoreError) as exc:
+        except ComposeSessionError as exc:
             raise _compose_rpc_error(exc) from exc
-        return {
-            "work_item": _compose_work_item_snapshot(projection) if projection is not None else None,
-        }
+        return {"progress": projection}
 
     async def _handle_compose_abandon(self, params: dict[str, Any], _id: str) -> dict[str, object]:
-        """以 revision CAS 终结 Compose Thread 的当前 Work Item。"""
+        """废弃当前薄进度；文档保留。"""
         self._require_threads_capability()
         parsed = ComposeAbandonParams.model_validate(params)
         persistence = await self._ensure_thread_persistence()
         await self._require_compose_thread(persistence, parsed.thread_id)
-        engine = self._compose_work_item_engine(persistence)
         try:
-            projection = await engine.abandon(
+            projection = await self._compose_session(persistence).abandon(
                 thread_id=parsed.thread_id,
-                work_item_id=parsed.work_item_id,
-                expected_revision=parsed.expected_revision,
                 reason=parsed.reason,
             )
-        except (ComposeWorkItemEngineError, ComposeWorkItemStoreError) as exc:
+        except ComposeSessionError as exc:
             raise _compose_rpc_error(exc) from exc
-        return {"work_item": _compose_work_item_snapshot(projection)}
+        return {"progress": projection}
 
-    def _compose_work_item_engine(self, persistence: ThreadPersistence) -> ComposeWorkItemEngine:
-        """组装只读 Compose Work Item engine；inspect/abandon 不触发 classifier/interaction。"""
-        return ComposeWorkItemEngine(
-            ComposeTurnPorts(
-                store=persistence.compose_work_item_store(),
-                documents=ComposeDocumentStore(self._workspace),
-                classifier=_UnavailableComposeClassifier(),
-                interaction=_UnavailableComposeInteraction(),
+    def _compose_session(self, persistence: ThreadPersistence) -> ComposeSession:
+        """只读 Session；inspect/abandon 不跑 Grill。"""
+        async def _noop_grill(request: object, slug: str) -> None:
+            del request, slug
+
+        return ComposeSession(
+            ComposeSessionPorts(
+                store=persistence.compose_progress_store(),
+                workspace=self._workspace,
+                run_grill=_noop_grill,
             )
         )
 
     async def _require_compose_thread(self, persistence: ThreadPersistence, thread_id: str) -> None:
         """Compose RPC 只能用于已冻结为 Compose 的 Thread。"""
-        thread_mode = await persistence.compose_work_item_store().load_thread_mode(thread_id)
+        thread_mode = await persistence.compose_progress_store().load_thread_mode(thread_id)
         if thread_mode is None:
             raise RpcError(
                 -32004,
@@ -3466,36 +3460,6 @@ def _thread_message_payload(message: Any) -> dict[str, object]:
     return payload
 
 
-def _compose_work_item_snapshot(projection: ComposeWorkItemProjection) -> dict[str, object]:
-    """把非敏感 Work Item 投影收敛为 wire 形状。"""
-    return {
-        "work_item_id": projection.work_item_id,
-        "slug": projection.slug,
-        "title": projection.title,
-        "revision": projection.revision,
-        "status": projection.status,
-        "current_activity": projection.current_activity,
-        "pending_decision": projection.pending_decision,
-        "blocked_reason": projection.blocked_reason,
-    }
-
-
-def _compose_rpc_error(
-    error: ComposeWorkItemEngineError | ComposeWorkItemStoreError,
-) -> RpcError:
+def _compose_rpc_error(error: ComposeSessionError) -> RpcError:
     """把 Compose 稳定错误码原样透传为 JSON-RPC 错误。"""
     return RpcError(-32004, error.code, {"code": error.code, "retryable": False})
-
-
-class _UnavailableComposeClassifier:
-    """compose.inspect/abandon 只读路径不应触发的分类占位。"""
-
-    async def classify(self, context: Any) -> Mapping[str, object]:
-        raise ComposeWorkItemEngineError("COMPOSE_CLASSIFIER_UNAVAILABLE")
-
-
-class _UnavailableComposeInteraction:
-    """compose.inspect/abandon 只读路径不应触发的 typed decision 占位。"""
-
-    async def request_decision(self, request: Any) -> Any:
-        raise ComposeWorkItemEngineError("COMPOSE_INTERACTION_UNAVAILABLE")

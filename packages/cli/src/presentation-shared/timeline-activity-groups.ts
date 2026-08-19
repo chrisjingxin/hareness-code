@@ -7,12 +7,17 @@ import type {
   TimelineItem,
 } from "../interactive/state"
 
-export const COMPOSE_STAGE_LABELS: Record<ComposeStageId, string> = {
-  understand: "理解",
+export const COMPOSE_STAGE_LABELS: Record<string, string> = {
+  grill: "需求",
+  task: "需求",
+  spec: "规格",
   plan: "计划",
-  build: "构建",
+  implement: "实现",
   verify: "验证",
-  review: "评审",
+  requirement: "需求",
+  understand: "理解",
+  build: "构建",
+  review: "检视",
 }
 
 /** 时间线条目上的可选 Compose 归属字段。 */

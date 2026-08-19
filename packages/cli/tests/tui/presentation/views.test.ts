@@ -716,6 +716,43 @@ test("带选项的问答 pending 时底部是 QuestionDock，输入栏不出现"
   }
 })
 
+test("开放式 ask_user 也弹出 QuestionDock，不把问题藏进输入栏占位", async () => {
+  const run = { threadId: "thread-1", runId: "run-1" }
+  const started = startRun(createInitialState(), run, "分析文本")
+  const snapshot = {
+    ...snapshotOf(started),
+    interaction: {
+      type: "question" as const,
+      requestId: "ask-txt",
+      questions: [{
+        id: "question-1",
+        question: "要分析哪个本地 .txt 文件？",
+        header: "",
+        body: "",
+        options: [],
+        multiSelect: false,
+        allowOther: true,
+      }],
+      deadlineAtMs: Date.now() + 5_000,
+    },
+  }
+  const inputRef = createRef<TextareaRenderable>()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(ThreadView, { ...viewProps(snapshot, 100, 28), inputRef }), { width: 100, height: 28 })
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("Agent 需要你的回答")
+    expect(frame).toContain("要分析哪个本地 .txt 文件？")
+    expect(frame).toContain("输入回答后按 Enter")
+    expect(frame).not.toContain("输入消息")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
 test("ask_user 式多题单选显示 QuestionDock 选项，时间线不铺 JSON", async () => {
   const run = { threadId: "thread-1", runId: "run-1" }
   const started = startRun(createInitialState(), run, "写一个 Java 示例")
@@ -788,8 +825,9 @@ test("ask_user 式多题单选显示 QuestionDock 选项，时间线不铺 JSON"
   try {
     await act(async () => { await setup.flush() })
     const frame = setup.captureCharFrame()
-    expect(frame).toContain("Agent 需要你的回答")
+    expect(frame).toContain("Agent 需要你的回答 · 1/2")
     expect(frame).toContain("你想要什么类型的 Java 示例？")
+    expect(frame).not.toContain("示例的用途或目标是什么")
     expect(frame).toContain("基础语法示例")
     expect(frame).toContain("其他")
     expect(frame).not.toContain("multiple_choice")
@@ -1262,19 +1300,22 @@ test("Compose 投影渲染五阶段、任务与 blocked 摘要", async () => {
   state = {
     ...state,
     composeState: {
-      revision: 5,
-      stage: "verify",
-      status: "blocked",
+      threadId: "thread-1",
+      slug: "search",
+      complexity: "simple",
+      status: "waiting_user",
+      currentStage: "implement",
+      waiting: "ask_user",
       stages: [
-        { id: "understand", status: "passed", attempts: 1 },
-        { id: "plan", status: "passed", attempts: 1 },
-        { id: "build", status: "passed", attempts: 1 },
-        { id: "verify", status: "blocked", attempts: 3 },
-        { id: "review", status: "pending", attempts: 0 },
+        { id: "requirement", state: "confirmed" },
+        { id: "spec", state: "skipped" },
+        { id: "plan", state: "confirmed" },
+        { id: "implement", state: "failed" },
+        { id: "review", state: "pending" },
       ],
-      tasks: [{ id: "task-1", title: "实现搜索", status: "passed" }],
-      evidence: [{ label: "pytest -q tests/test_search.py", status: "failed" }],
-      blockedReason: "verify fix budget exhausted",
+      documents: [],
+      fixRounds: 0,
+      revision: 5,
     },
   }
   let setup: Awaited<ReturnType<typeof testRender>>
@@ -1287,10 +1328,75 @@ test("Compose 投影渲染五阶段、任务与 blocked 摘要", async () => {
   try {
     await act(async () => { await setup.flush() })
     const frame = setup.captureCharFrame()
-    expect(frame).toContain("理解")
-    expect(frame).toContain("验证")
-    expect(frame).toContain("阻塞")
-    expect(frame).toContain("verify fix budget exhausted")
+    expect(frame).toContain("需求")
+    expect(frame).toContain("规格")
+    expect(frame).toContain("计划")
+    expect(frame).toContain("实现")
+    expect(frame).toContain("检视")
+    expect(frame).toContain("失败")
+    expect(frame).not.toContain("实现 · 失败")
+    expect(frame).not.toContain("✓")
+    expect(frame).not.toContain("▸")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("Compose 进度钉在时间线上方，长对话滚动时仍占首行", async () => {
+  const run = { threadId: "thread-1", runId: "run-1" }
+  let state = startRun(createInitialState(), run, "实现搜索")
+  const history: InteractiveState["timeline"] = [state.timeline[0]!]
+  for (let index = 0; index < 24; index += 1) {
+    history.push({
+      type: "message",
+      message: { id: `user-${index}`, role: "user", content: `用户补充 ${index}：把进度条顶出视口的长历史` },
+    })
+    history.push({
+      type: "message",
+      message: { id: `assistant-${index}`, role: "assistant", content: `助手回复 ${index}` },
+    })
+  }
+  state = {
+    ...state,
+    timeline: history,
+    composeState: {
+      threadId: "thread-1",
+      slug: "search",
+      complexity: "simple",
+      status: "waiting_user",
+      currentStage: "plan",
+      waiting: "plan_confirm",
+      stages: [
+        { id: "requirement", state: "confirmed" },
+        { id: "spec", state: "skipped" },
+        { id: "plan", state: "current" },
+        { id: "implement", state: "pending" },
+        { id: "review", state: "pending" },
+      ],
+      documents: [],
+      fixRounds: 0,
+      revision: 2,
+    },
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(
+      createElement(ThreadView, viewProps(snapshotOf(state), 100, 20)),
+      { width: 100, height: 20 },
+    )
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const lines = setup.captureCharFrame().split("\n")
+    expect(lines[0] ?? "").not.toContain("需求")
+    const head = lines.slice(0, 4).join("\n")
+    expect(head).toContain("需求")
+    expect(head).toContain("规格")
+    expect(head).toContain("计划")
+    expect(head).toContain("实现")
+    expect(head).toContain("检视")
+    expect(head).toContain("等你确认")
+    expect(head).not.toContain("用户补充")
   } finally {
     await act(async () => { setup.renderer.destroy() })
   }
@@ -1308,19 +1414,22 @@ test("Compose 失败后仍渲染冻结的终态阶段面板", async () => {
       runId: run.runId,
       outcome: "failed",
       composeSummary: {
-        revision: 2,
-        stage: "understand",
-        status: "failed",
+        threadId: "thread-1",
+        slug: "search",
+        complexity: "simple",
+        status: "waiting_user",
+        currentStage: "implement",
+        waiting: "none",
         stages: [
-          { id: "understand", status: "failed", attempts: 2 },
-          { id: "plan", status: "pending", attempts: 0 },
-          { id: "build", status: "pending", attempts: 0 },
-          { id: "verify", status: "pending", attempts: 0 },
-          { id: "review", status: "pending", attempts: 0 },
+          { id: "requirement", state: "confirmed" },
+          { id: "spec", state: "skipped" },
+          { id: "plan", state: "confirmed" },
+          { id: "implement", state: "failed" },
+          { id: "review", state: "pending" },
         ],
-        tasks: [],
-        evidence: [],
-        blockedReason: null,
+        documents: [],
+        fixRounds: 0,
+        revision: 2,
       },
     },
   }
@@ -1334,8 +1443,8 @@ test("Compose 失败后仍渲染冻结的终态阶段面板", async () => {
   try {
     await act(async () => { await setup.flush() })
     const frame = setup.captureCharFrame()
-    expect(frame).toContain("理解")
-    expect(frame).toContain("验证")
+    expect(frame).toContain("需求")
+    expect(frame).toContain("检视")
   } finally {
     await act(async () => { setup.renderer.destroy() })
   }

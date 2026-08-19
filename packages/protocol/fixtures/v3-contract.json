@@ -888,15 +888,17 @@
       "name": "compose.inspect",
       "case": "valid",
       "value": {
-        "work_item": {
-          "work_item_id": "x",
+        "progress": {
+          "thread_id": "x",
           "slug": "x",
-          "title": "x",
-          "revision": 1,
+          "complexity": "simple",
           "status": "active",
-          "current_activity": "x",
-          "pending_decision": "x",
-          "blocked_reason": "x"
+          "current_stage": "grill",
+          "waiting": "none",
+          "stages": [],
+          "documents": [],
+          "fix_rounds": 1,
+          "revision": 1
         }
       }
     },
@@ -905,9 +907,7 @@
       "name": "compose.abandon",
       "case": "valid",
       "value": {
-        "thread_id": "x",
-        "work_item_id": "x",
-        "expected_revision": 1
+        "thread_id": "x"
       }
     },
     {
@@ -915,15 +915,17 @@
       "name": "compose.abandon",
       "case": "valid",
       "value": {
-        "work_item": {
-          "work_item_id": "x",
+        "progress": {
+          "thread_id": "x",
           "slug": "x",
-          "title": "x",
-          "revision": 1,
+          "complexity": "simple",
           "status": "active",
-          "current_activity": "x",
-          "pending_decision": "x",
-          "blocked_reason": "x"
+          "current_stage": "grill",
+          "waiting": "none",
+          "stages": [],
+          "documents": [],
+          "fix_rounds": 1,
+          "revision": 1
         }
       }
     },
@@ -1086,22 +1088,26 @@
     },
     {
       "kind": "event",
-      "name": "compose.state",
+      "name": "compose.progress",
       "case": "valid",
       "value": {
         "event_id": "x",
-        "type": "compose.state",
+        "type": "compose.progress",
         "thread_id": "x",
         "run_id": "x",
         "sequence": 1,
         "timestamp_ms": 1,
         "payload": {
-          "revision": 1,
-          "stage": "understand",
-          "status": "running",
+          "thread_id": "x",
+          "slug": "x",
+          "complexity": "simple",
+          "status": "active",
+          "current_stage": "grill",
+          "waiting": "none",
           "stages": [],
-          "tasks": [],
-          "evidence": []
+          "documents": [],
+          "fix_rounds": 1,
+          "revision": 1
         }
       }
     },
@@ -1119,53 +1125,6 @@
         "payload": {
           "status": "passed",
           "text": "x"
-        }
-      }
-    },
-    {
-      "kind": "event",
-      "name": "compose.work_item",
-      "case": "valid",
-      "value": {
-        "event_id": "x",
-        "type": "compose.work_item",
-        "thread_id": "x",
-        "run_id": "x",
-        "sequence": 1,
-        "timestamp_ms": 1,
-        "payload": {
-          "thread_id": "x",
-          "work_item": {
-            "work_item_id": "x",
-            "slug": "x",
-            "title": "x",
-            "revision": 1,
-            "status": "active",
-            "current_activity": "x",
-            "pending_decision": "x",
-            "blocked_reason": "x"
-          }
-        }
-      }
-    },
-    {
-      "kind": "event",
-      "name": "compose.activity",
-      "case": "valid",
-      "value": {
-        "event_id": "x",
-        "type": "compose.activity",
-        "thread_id": "x",
-        "run_id": "x",
-        "sequence": 1,
-        "timestamp_ms": 1,
-        "payload": {
-          "thread_id": "x",
-          "work_item_id": "x",
-          "activity_id": "x",
-          "kind": "x",
-          "status": "x",
-          "attempt": 1
         }
       }
     },
@@ -1378,6 +1337,33 @@
       "value": {
         "code": "CONNECTION_RUN_BUSY",
         "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "name": "COMPOSE_NOTHING_TO_ABANDON",
+      "case": "valid",
+      "value": {
+        "code": "COMPOSE_NOTHING_TO_ABANDON",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "COMPOSE_NEW_WORK_GOAL_REQUIRED",
+      "case": "valid",
+      "value": {
+        "code": "COMPOSE_NEW_WORK_GOAL_REQUIRED",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "COMPOSE_ABANDON_TAKES_NO_GOAL",
+      "case": "valid",
+      "value": {
+        "code": "COMPOSE_ABANDON_TAKES_NO_GOAL",
+        "retryable": false
       }
     }
   ],
@@ -3249,15 +3235,17 @@
       "name": "compose.inspect",
       "case": "extra_field",
       "value": {
-        "work_item": {
-          "work_item_id": "x",
+        "progress": {
+          "thread_id": "x",
           "slug": "x",
-          "title": "x",
-          "revision": 1,
+          "complexity": "simple",
           "status": "active",
-          "current_activity": "x",
-          "pending_decision": "x",
-          "blocked_reason": "x"
+          "current_stage": "grill",
+          "waiting": "none",
+          "stages": [],
+          "documents": [],
+          "fix_rounds": 1,
+          "revision": 1
         },
         "__extra": true
       }
@@ -3280,8 +3268,6 @@
       "case": "extra_field",
       "value": {
         "thread_id": "x",
-        "work_item_id": "x",
-        "expected_revision": 1,
         "__extra": true
       }
     },
@@ -3289,10 +3275,7 @@
       "kind": "operation.params",
       "name": "compose.abandon",
       "case": "missing_field",
-      "value": {
-        "work_item_id": "x",
-        "expected_revision": 1
-      }
+      "value": {}
     },
     {
       "kind": "operation.result",
@@ -3305,15 +3288,17 @@
       "name": "compose.abandon",
       "case": "extra_field",
       "value": {
-        "work_item": {
-          "work_item_id": "x",
+        "progress": {
+          "thread_id": "x",
           "slug": "x",
-          "title": "x",
-          "revision": 1,
+          "complexity": "simple",
           "status": "active",
-          "current_activity": "x",
-          "pending_decision": "x",
-          "blocked_reason": "x"
+          "current_stage": "grill",
+          "waiting": "none",
+          "stages": [],
+          "documents": [],
+          "fix_rounds": 1,
+          "revision": 1
         },
         "__extra": true
       }
@@ -3694,49 +3679,57 @@
     },
     {
       "kind": "event",
-      "name": "compose.state",
+      "name": "compose.progress",
       "case": "wrong_type",
       "value": null
     },
     {
       "kind": "event",
-      "name": "compose.state",
+      "name": "compose.progress",
       "case": "extra_field",
       "value": {
         "event_id": "x",
-        "type": "compose.state",
+        "type": "compose.progress",
         "thread_id": "x",
         "run_id": "x",
         "sequence": 1,
         "timestamp_ms": 1,
         "payload": {
-          "revision": 1,
-          "stage": "understand",
-          "status": "running",
+          "thread_id": "x",
+          "slug": "x",
+          "complexity": "simple",
+          "status": "active",
+          "current_stage": "grill",
+          "waiting": "none",
           "stages": [],
-          "tasks": [],
-          "evidence": []
+          "documents": [],
+          "fix_rounds": 1,
+          "revision": 1
         },
         "__extra": true
       }
     },
     {
       "kind": "event",
-      "name": "compose.state",
+      "name": "compose.progress",
       "case": "missing_field",
       "value": {
-        "type": "compose.state",
+        "type": "compose.progress",
         "thread_id": "x",
         "run_id": "x",
         "sequence": 1,
         "timestamp_ms": 1,
         "payload": {
-          "revision": 1,
-          "stage": "understand",
-          "status": "running",
+          "thread_id": "x",
+          "slug": "x",
+          "complexity": "simple",
+          "status": "active",
+          "current_stage": "grill",
+          "waiting": "none",
           "stages": [],
-          "tasks": [],
-          "evidence": []
+          "documents": [],
+          "fix_rounds": 1,
+          "revision": 1
         }
       }
     },
@@ -3777,112 +3770,6 @@
         "payload": {
           "status": "passed",
           "text": "x"
-        }
-      }
-    },
-    {
-      "kind": "event",
-      "name": "compose.work_item",
-      "case": "wrong_type",
-      "value": null
-    },
-    {
-      "kind": "event",
-      "name": "compose.work_item",
-      "case": "extra_field",
-      "value": {
-        "event_id": "x",
-        "type": "compose.work_item",
-        "thread_id": "x",
-        "run_id": "x",
-        "sequence": 1,
-        "timestamp_ms": 1,
-        "payload": {
-          "thread_id": "x",
-          "work_item": {
-            "work_item_id": "x",
-            "slug": "x",
-            "title": "x",
-            "revision": 1,
-            "status": "active",
-            "current_activity": "x",
-            "pending_decision": "x",
-            "blocked_reason": "x"
-          }
-        },
-        "__extra": true
-      }
-    },
-    {
-      "kind": "event",
-      "name": "compose.work_item",
-      "case": "missing_field",
-      "value": {
-        "type": "compose.work_item",
-        "thread_id": "x",
-        "run_id": "x",
-        "sequence": 1,
-        "timestamp_ms": 1,
-        "payload": {
-          "thread_id": "x",
-          "work_item": {
-            "work_item_id": "x",
-            "slug": "x",
-            "title": "x",
-            "revision": 1,
-            "status": "active",
-            "current_activity": "x",
-            "pending_decision": "x",
-            "blocked_reason": "x"
-          }
-        }
-      }
-    },
-    {
-      "kind": "event",
-      "name": "compose.activity",
-      "case": "wrong_type",
-      "value": null
-    },
-    {
-      "kind": "event",
-      "name": "compose.activity",
-      "case": "extra_field",
-      "value": {
-        "event_id": "x",
-        "type": "compose.activity",
-        "thread_id": "x",
-        "run_id": "x",
-        "sequence": 1,
-        "timestamp_ms": 1,
-        "payload": {
-          "thread_id": "x",
-          "work_item_id": "x",
-          "activity_id": "x",
-          "kind": "x",
-          "status": "x",
-          "attempt": 1
-        },
-        "__extra": true
-      }
-    },
-    {
-      "kind": "event",
-      "name": "compose.activity",
-      "case": "missing_field",
-      "value": {
-        "type": "compose.activity",
-        "thread_id": "x",
-        "run_id": "x",
-        "sequence": 1,
-        "timestamp_ms": 1,
-        "payload": {
-          "thread_id": "x",
-          "work_item_id": "x",
-          "activity_id": "x",
-          "kind": "x",
-          "status": "x",
-          "attempt": 1
         }
       }
     },
@@ -4313,6 +4200,24 @@
     {
       "kind": "error",
       "name": "CONNECTION_RUN_BUSY",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "COMPOSE_NOTHING_TO_ABANDON",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "COMPOSE_NEW_WORK_GOAL_REQUIRED",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "COMPOSE_ABANDON_TAKES_NO_GOAL",
       "case": "wrong_type",
       "value": null
     }

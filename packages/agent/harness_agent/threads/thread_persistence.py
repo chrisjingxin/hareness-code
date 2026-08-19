@@ -43,7 +43,7 @@ from harness_agent.threads.context_projection import (
 )
 from harness_agent.threads.runtime_state import RuntimeStateError, RuntimeStateSnapshot
 
-_SCHEMA_VERSION = 16
+_SCHEMA_VERSION = 17
 _MAX_PREVIEW_CHARS = 160
 _MAX_INLINE_TOOL_BYTES = 64 * 1024
 _TRANSCRIPT_KINDS = ("user", "assistant", "tool", "context")
@@ -3061,6 +3061,17 @@ class ThreadPersistence:
             lock=self._lock,
         )
 
+    def compose_progress_store(self) -> "ComposeProgressStore":
+        """返回 Compose 薄进度存储。"""
+        self._ensure_open()
+        from harness_agent.threads.compose_progress_store import ComposeProgressStore
+
+        return ComposeProgressStore(
+            self._connection,
+            project_fingerprint=self._project_fingerprint,
+            lock=self._lock,
+        )
+
     async def append_compose_activity(self, record: "ComposeActivityRecord") -> None:
         """追加一条 Compose activity；失败抛 ThreadPersistenceError 供上层 fail closed。"""
         self._ensure_open()
@@ -5693,6 +5704,9 @@ class ThreadPersistence:
             if version < 16:
                 await self._add_compose_confirmation_groups()
                 version = 16
+            if version < 17:
+                await self._add_compose_session_table()
+                version = 17
             await self._connection.execute(f"PRAGMA user_version={version}")
             final_fingerprint = await self._database_fingerprint_async()
             await self._validate_final_database_async(final_fingerprint)
@@ -6326,6 +6340,25 @@ class ThreadPersistence:
                         "created_at_ms",
                         "encoded_bytes",
                         "truncated_flag",
+                    ),
+                )
+            )
+        if version >= 17:
+            required.append(
+                (
+                    "harness_compose_sessions",
+                    (
+                        "project_fingerprint",
+                        "thread_id",
+                        "slug",
+                        "complexity",
+                        "task_confirmed_digest",
+                        "spec_confirmed_digest",
+                        "plan_confirmed_digest",
+                        "fix_rounds",
+                        "status",
+                        "revision",
+                        "updated_at_ms",
                     ),
                 )
             )
@@ -8021,6 +8054,30 @@ class ThreadPersistence:
                     project_fingerprint, work_item_id, confirmation_kind,
                     confirmation_id, confirmed_at_ms
                 )
+            """
+        )
+
+    async def _add_compose_session_table(self) -> None:
+        """v17：Compose 薄进度表；不迁移 Work Item 行。"""
+        await self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS harness_compose_sessions
+            (
+                project_fingerprint TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                slug TEXT NOT NULL,
+                complexity TEXT NOT NULL CHECK (complexity IN ('simple', 'complex')),
+                task_confirmed_digest TEXT,
+                spec_confirmed_digest TEXT,
+                plan_confirmed_digest TEXT,
+                fix_rounds INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL CHECK (
+                    status IN ('active', 'waiting_user', 'verifying', 'completed', 'abandoned')
+                ),
+                revision INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (project_fingerprint, thread_id)
+            )
             """
         )
 
