@@ -109,6 +109,7 @@ const clientMessages: WebUiClientMessage[] = [
 ]
 
 const serverMessages: WebUiServerMessage[] = [
+  { type: "handoff.token", token: "next-token" },
   { type: "state.replace", revision: 1, state: fullState },
   { type: "state.patch", revision: 2, patch: { runtime } },
   { type: "state.patch", revision: 3, patch: { workspaceTree } },
@@ -171,6 +172,13 @@ test("缺少/多余字段拒绝（exactFields）", () => {
   // 服务端帧同理
   expect(parseServerFrame(JSON.stringify({ type: "state.replace", revision: 1, state: fullState, extra: 1 }))).toBeUndefined()
   expect(parseServerFrame(JSON.stringify({ type: "handoff.state" }))).toBeUndefined()
+  expect(parseServerFrame(JSON.stringify({ type: "handoff.token", token: "next", extra: 1 }))).toBeUndefined()
+})
+
+test("handoff.token：空 token、超长 token 与非字符串拒绝", () => {
+  expect(parseServerFrame(JSON.stringify({ type: "handoff.token", token: "" }))).toBeUndefined()
+  expect(parseServerFrame(JSON.stringify({ type: "handoff.token", token: "x".repeat(129) }))).toBeUndefined()
+  expect(parseServerFrame(JSON.stringify({ type: "handoff.token", token: 42 }))).toBeUndefined()
 })
 
 test("requestId：空 / 超长拒绝", () => {

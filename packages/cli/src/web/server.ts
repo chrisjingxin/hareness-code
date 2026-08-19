@@ -9,9 +9,9 @@ export type WebServerOptions = {
   getAssets: () => Promise<WebAssets>
   isActiveHandoff: (handoffId: string) => boolean
   /** 升级请求携带的 UI token 校验；通过后该连接获得渲染资格。 */
-  consumeUiToken: (handoffId: string, token: string, origin: string) => boolean
+  validateUiToken: (handoffId: string, token: string, origin: string) => boolean
   /** 把已完成升级的渲染 channel 交给 Coordinator；生命周期与业务帧由上层处理。 */
-  attachRenderer: (handoffId: string, channel: GatewayChannel) => Promise<void>
+  attachRenderer: (handoffId: string, presentedToken: string, channel: GatewayChannel) => Promise<void>
 }
 
 export type WebServer = {
@@ -21,7 +21,7 @@ export type WebServer = {
   stop(): Promise<void>
 }
 
-type BunWebSocketData = { handoffId: string }
+type BunWebSocketData = { handoffId: string; presentedToken: string }
 type BunServerWebSocket = import("bun").ServerWebSocket<BunWebSocketData>
 
 const COMMON_HEADERS = {
@@ -96,15 +96,15 @@ export function createWebServer(options: WebServerOptions): WebServer {
     if (request.headers.get("origin") !== origin()) {
       return new Response("Forbidden", { status: 403 })
     }
-    // UI token 从升级 URL 的查询参数读取（fragment 无法送达服务端）；token 绑定
-    // handoffId、Origin 与 TTL，页面 fragment 中的 token 在创建 WebSocket 前已被剥离。
-    // 本 server 只服务 127.0.0.1、无访问日志，token 单次 URL 使用——禁止为该 server
+    // UI token 从升级 URL 的查询参数读取（fragment 无法送达服务端）；bootstrap token
+    // 绑定 handoffId、Origin 与 TTL，接管后使用每次成功连接都轮换的单次重连 token。
+    // 本 server 只服务 127.0.0.1、无访问日志——禁止为该 server
     // 开启访问日志或接入代理，否则 token 会以明文出现在日志中。
     const token = url.searchParams.get("ui")
-    if (!token || !options.consumeUiToken(match.handoffId, token, origin())) {
+    if (!token || !options.validateUiToken(match.handoffId, token, origin())) {
       return new Response("Forbidden", { status: 403 })
     }
-    if (!server.upgrade(request, { data: { handoffId: match.handoffId } })) {
+    if (!server.upgrade(request, { data: { handoffId: match.handoffId, presentedToken: token } })) {
       return new Response("Upgrade Failed", { status: 500 })
     }
     return undefined
@@ -140,7 +140,7 @@ export function createWebServer(options: WebServerOptions): WebServer {
             // 活性探测：关闭/关闭中的连接视为失效，供 attachRenderer 替换接管。
             isOpen: () => ws.readyState === 1,
           }
-          void options.attachRenderer(ws.data.handoffId, channel)
+          void options.attachRenderer(ws.data.handoffId, ws.data.presentedToken, channel)
         },
         message(ws: BunServerWebSocket, raw: string | Uint8Array) {
           // 帧形状/大小校验统一由网关执行：超限帧按协议违规走 notifyInvalidMessage

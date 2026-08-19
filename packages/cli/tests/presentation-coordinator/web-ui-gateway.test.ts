@@ -148,7 +148,7 @@ function createSystem(options: { controller?: InteractiveController; explorer?: 
     server,
     openBrowser: async url => { openedUrls.push(url) },
     dispatch: intent => controller.dispatch(intent),
-    onRendererConnected: channel => gateway.connectRenderer(channel),
+    onRendererConnected: (channel, reconnectToken) => gateway.connectRenderer(channel, reconnectToken),
     readyTimeoutMs: 65_000,
     reconnectGraceMs: 10_000,
     uiTokenTtlMs: 60_000,
@@ -163,8 +163,9 @@ async function connectRenderer(system: TestSystem) {
   await system.coordinator.open()
   const opening = system.coordinator.getSnapshot()
   if (opening.phase !== "opening-web") throw new Error("expected opening-web")
+  const token = new URL(system.openedUrls.at(-1)!).hash.slice("#ui=".length)
   const ch = createFakeChannel()
-  await system.coordinator.attachRenderer(opening.handoffId, ch.channel)
+  await system.coordinator.attachRenderer(opening.handoffId, token, ch.channel)
   await flush()
   return { handoffId: opening.handoffId, ch }
 }
@@ -184,19 +185,20 @@ function lastSent(ch: FakeChannel): WebUiServerMessage {
 
 // ---- 首帧与分片发布 ---------------------------------------------------------
 
-test("connectRenderer：首帧 state.replace（revision 1、八个分片完整）+ handoff.state(opening-web)", async () => {
+test("connectRenderer：先轮换 token，再发送完整 replace 与 opening-web 状态", async () => {
   const system = createSystem()
   await flush() // 等构造期的 catalog/thread 恢复发布先落定
   const { ch } = await connectRenderer(system)
 
-  const replace = ch.sent[0]
+  expect(ch.sent[0]).toMatchObject({ type: "handoff.token" })
+  const replace = ch.sent[1]
   expect(replace).toMatchObject({ type: "state.replace", revision: 1 })
   const state = (replace as Extract<WebUiServerMessage, { type: "state.replace" }>).state
   expect(Object.keys(state)).toEqual(["conversation", "interaction", "navigation", "command", "runtime", "workItem", "workspaceTree", "workspacePreview"])
   for (const key of Object.keys(state)) {
     expect(typeof (state as Record<string, unknown>)[key]).toBe("object")
   }
-  expect(ch.sent[1]).toMatchObject({ type: "handoff.state", state: { phase: "opening-web" } })
+  expect(ch.sent[2]).toMatchObject({ type: "handoff.state", state: { phase: "opening-web" } })
 })
 
 test("controller publish → state.patch：只含变化分片且 revision 单调递增", async () => {

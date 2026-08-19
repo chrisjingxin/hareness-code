@@ -8,13 +8,13 @@ import type { GatewayChannel } from "../../src/presentation-coordinator"
 
 type Harness = {
   server: WebServer
-  attachCalls: Array<{ handoffId: string; channel: GatewayChannel }>
+  attachCalls: Array<{ handoffId: string; presentedToken: string; channel: GatewayChannel }>
   activeHandoffs: Set<string>
   validTokens: Set<string>
 }
 
 function createHarness(): Harness {
-  const attachCalls: Array<{ handoffId: string; channel: GatewayChannel }> = []
+  const attachCalls: Array<{ handoffId: string; presentedToken: string; channel: GatewayChannel }> = []
   const activeHandoffs = new Set<string>()
   const validTokens = new Set<string>()
   const server = createWebServer({
@@ -25,9 +25,9 @@ function createHarness(): Harness {
       syntaxWorkerScript: "console.log('syntax worker')",
     }),
     isActiveHandoff: handoffId => activeHandoffs.has(handoffId),
-    consumeUiToken: (_handoffId, token, _origin) => validTokens.has(token),
-    attachRenderer: async (handoffId, channel) => {
-      attachCalls.push({ handoffId, channel })
+    validateUiToken: (_handoffId, token, _origin) => validTokens.has(token),
+    attachRenderer: async (handoffId, presentedToken, channel) => {
+      attachCalls.push({ handoffId, presentedToken, channel })
       await channel.send({ type: "handoff.state", state: { phase: "opening-web", handoffId } })
     },
   })
@@ -131,6 +131,7 @@ test("错误 Host 被拒绝；/ui upgrade 校验 Origin 与 UI token 并投递 h
   socket.onmessage = event => messages.push(JSON.parse(String(event.data)))
   await waitFor(() => attachCalls.length === 1)
   expect(attachCalls[0].handoffId).toBe("handoff-1")
+  expect(attachCalls[0].presentedToken).toBe("token-1")
   await waitFor(() => messages.length >= 1)
   expect(messages[0]).toEqual({ type: "handoff.state", state: { phase: "opening-web", handoffId: "handoff-1" } })
   socket.close()

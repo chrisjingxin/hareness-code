@@ -218,16 +218,16 @@ async function execute(command: Command): Promise<void> {
           getAssets: browserBundle,
           isActiveHandoff: handoffId =>
             presentationCoordinator !== undefined && presentationCoordinator.isHandoffActive(handoffId),
-          consumeUiToken: (id, token, origin) =>
-            presentationCoordinator!.consumeUiToken(id, token, origin),
-          attachRenderer: (id, channel) =>
-            presentationCoordinator!.attachRenderer(id, channel),
+          validateUiToken: (id, token, origin) =>
+            presentationCoordinator!.validateUiToken(id, token, origin),
+          attachRenderer: (id, token, channel) =>
+            presentationCoordinator!.attachRenderer(id, token, channel),
         })
         presentationCoordinator = createPresentationCoordinator({
           server,
           openBrowser: createSystemBrowserOpener(),
           dispatch: intent => controller!.dispatch(intent),
-          onRendererConnected: channel => webUiGateway!.connectRenderer(channel),
+          onRendererConnected: (channel, reconnectToken) => webUiGateway!.connectRenderer(channel, reconnectToken),
           diagnostics,
         })
         webUiGateway = createWebUiGateway({

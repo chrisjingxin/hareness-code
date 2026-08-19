@@ -9,7 +9,7 @@
 import type { IntentOutcome, InteractiveIntent } from "../../interactive/types"
 import { APPROVAL_MODE_CYCLE } from "../../interactive/runtime"
 import type { WorkspaceIntent, WorkspaceOutcome } from "../../workspace/types"
-import { MAX_REQUEST_ID_LENGTH, MAX_UI_FRAME_BYTES, type WebUiClientMessage, type WebUiPatch, type WebUiServerMessage, type WebUiState } from "./messages"
+import { MAX_REQUEST_ID_LENGTH, MAX_UI_FRAME_BYTES, MAX_UI_TOKEN_LENGTH, type WebUiClientMessage, type WebUiPatch, type WebUiServerMessage, type WebUiState } from "./messages"
 import type { PresentationState, ReturnReason } from "../state"
 
 const textEncoder = new TextEncoder()
@@ -52,6 +52,11 @@ export function parseServerFrame(value: unknown): WebUiServerMessage | undefined
   if (parsed === undefined) return undefined
   if (!isRecord(parsed)) return undefined
   const type = parsed.type
+  if (type === "handoff.token") {
+    if (!exactFields(parsed, ["type", "token"])) return undefined
+    if (!isNonEmptyString(parsed.token, MAX_UI_TOKEN_LENGTH)) return undefined
+    return { type: "handoff.token", token: parsed.token }
+  }
   if (type === "state.replace") {
     if (!exactFields(parsed, ["type", "revision", "state"])) return undefined
     if (!isNonNegativeInt(parsed.revision)) return undefined

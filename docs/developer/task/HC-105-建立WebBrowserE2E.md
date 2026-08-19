@@ -23,7 +23,7 @@ completed_at: -
 
 > 2026-08-05 由 HC-115 按最终架构重定 scope：原描述基于 Browser 直连 Agent attachment + host.control 转移的旧流程，HC-114 落地后已不成立。本节与后续章节均已更新为新流程。
 
-最终架构下 Browser 通过 `WebUiClient` 连接 CLI 进程内的 `WebUiGateway`：只消费 `state.replace/state.patch` 视图与 `handoff.state`，提交 `intent{requestId,revision}` 并按 `intent.outcome` 处理结果；UI token 绑定 handoffId/Origin/TTL，Host 控制权始终属于 owner。单测与 loopback 集成测试覆盖各 module，但不能证明真实浏览器下的 fragment 清理、刷新重连、窗口竞争、响应式布局与 TUI→Web→TUI 连续性。
+最终架构下 Browser 通过 `WebUiClient` 连接 CLI 进程内的 `WebUiGateway`：只消费 `state.replace/state.patch` 视图与 `handoff.state`，提交 `intent{requestId,revision}` 并按 `intent.outcome` 处理结果；首次 bootstrap token 绑定 handoffId/Origin/TTL，接管后使用每次成功连接即轮换的 handoff-scoped 单次重连 token，Host 控制权始终属于 owner。单测与 loopback 集成测试覆盖各 module，但不能证明真实浏览器下的 fragment 清理、刷新重连、窗口竞争、响应式布局与 TUI→Web→TUI 连续性。
 
 本任务建立专用 Browser E2E，不新增产品能力；它是 HC-108 至 HC-114 的集成验收门槛，不能用人工现场操作或 "build/test 通过" 替代。完成证据与 HC-115 验收矩阵合并记录。
 

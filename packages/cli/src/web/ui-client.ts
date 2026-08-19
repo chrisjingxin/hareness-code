@@ -3,7 +3,8 @@
  *
  * 职责：UI token 认证、state.replace/patch 视图缓存、interactive/workspace
  * 双域 intent 提交与 requestId 关联的 outcome 回传、handoff 状态订阅。
- * 凭据只存在于连接建立时的 URL 查询参数，永不进入 React props 或日志。
+ * bootstrap 凭据只来自首次 URL；轮换重连 token 只进入当前标签页 sessionStorage，
+ * 二者都不进入 React props 或日志。
  */
 
 import type { InteractiveIntent, IntentOutcome } from "../interactive/types"
@@ -32,6 +33,7 @@ export type WebUiClientOptions = {
   socket: UiSocket
   onState?: (state: WebUiState) => void
   onClosed?: (reason: WebUiCloseReason) => void
+  onReconnectToken?: (token: string) => void
 }
 
 export interface WebUiClient {
@@ -61,6 +63,7 @@ class WebUiClientImpl implements WebUiClient {
   private readonly socket: UiSocket
   private readonly onState: ((state: WebUiState) => void) | undefined
   private readonly onClosed: ((reason: WebUiCloseReason) => void) | undefined
+  private readonly onReconnectToken: ((token: string) => void) | undefined
   private readonly handoffListeners = new Set<(state: PresentationState) => void>()
   private readonly stateListeners = new Set<(state: WebUiState) => void>()
 
@@ -78,6 +81,7 @@ class WebUiClientImpl implements WebUiClient {
     this.socket = options.socket
     this.onState = options.onState
     this.onClosed = options.onClosed
+    this.onReconnectToken = options.onReconnectToken
     // 连接期间 state 必已收到 replace；构造时的空态只用于防御。
     this.state = emptyState()
     this.socket.addEventListener("message", this.onMessage)
@@ -166,6 +170,9 @@ class WebUiClientImpl implements WebUiClient {
     const message = parseServerFrame(raw)
     if (message === undefined) return
     switch (message.type) {
+      case "handoff.token":
+        this.onReconnectToken?.(message.token)
+        return
       case "state.replace":
         this.lastRevision = message.revision
         this.state = message.state
@@ -250,6 +257,15 @@ export function readUiToken(handoffId: string): string | undefined {
     return token
   }
   return undefined
+}
+
+/** 保存服务端轮换后的单次重连 token；只进入当前标签页的 sessionStorage。 */
+export function storeUiToken(handoffId: string, token: string): void {
+  try {
+    window.sessionStorage.setItem(`harness-ui-token:${handoffId}`, token)
+  } catch {
+    // sessionStorage 不可用时当前连接仍可工作，只是不支持刷新重连。
+  }
 }
 
 /** 合并 patch 到完整视图；只覆盖存在的分片。 */

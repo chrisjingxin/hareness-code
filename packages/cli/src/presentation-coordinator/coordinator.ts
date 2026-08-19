@@ -64,12 +64,12 @@ export type PresentationCoordinatorOptions = {
   /** 共享 InteractiveController.dispatch 的注入点；tuiDispatch 经此执行。 */
   dispatch: (intent: InteractiveIntent) => Promise<IntentOutcome>
   /** 已认证渲染 channel 的交接点；由 CLI Composition Root 接 WebUiGateway.connectRenderer。 */
-  onRendererConnected: (channel: GatewayChannel) => void
+  onRendererConnected: (channel: GatewayChannel, reconnectToken: string) => void
   /** Browser 从打开到 ready 的最大等待；超时进入 returning-tui。 */
   readyTimeoutMs?: number
   /** Web-active 断线后等待同页重连的宽限；到期才收敛到 TUI。 */
   reconnectGraceMs?: number
-  /** UI token 有效期；期内同页刷新可重连（单 renderer 门禁保证同时只有一个活跃连接）。 */
+  /** 首次 URL 中 bootstrap token 的有效期；renderer 接受后改用 handoff-scoped 轮换 token。 */
   uiTokenTtlMs?: number
   scheduler?: PresentationScheduler
   diagnostics?: DiagnosticLogger
@@ -84,10 +84,10 @@ export interface PresentationCoordinator {
   tuiDispatch(intent: InteractiveIntent): Promise<IntentOutcome>
   /** 当前 handoff 是否仍对外提供页面/升级路径。 */
   isHandoffActive(handoffId: string): boolean
-  /** 校验并消费一次升级请求携带的 UI token；单 renderer 门禁在 attachRenderer 执行。 */
-  consumeUiToken(handoffId: string, token: string, origin: string): boolean
-  /** 处理一个已完成升级的渲染 channel；生命周期由本模块判定，业务帧交给网关。 */
-  attachRenderer(handoffId: string, channel: GatewayChannel): Promise<void>
+  /** WebSocket upgrade 前只读校验 token；真正消费与轮换在 renderer 被接受时完成。 */
+  validateUiToken(handoffId: string, token: string, origin: string): boolean
+  /** 接受 renderer 后原子消费 presentedToken、轮换下一枚单次重连 token并交给网关。 */
+  attachRenderer(handoffId: string, presentedToken: string, channel: GatewayChannel): Promise<void>
   /** 渲染 channel 结束（浏览器断开/关闭）；opening 直接收敛，web-active 先进入重连宽限。 */
   notifyRendererDisconnected(reason?: ReturnReason): void
   /** 渲染帧畸形/未知：协议违规，fail-closed 收敛。 */
@@ -110,7 +110,7 @@ class PresentationCoordinatorImpl implements PresentationCoordinator {
   private readonly server: PresentationServer
   private readonly openBrowser: WebBrowserOpener
   private readonly dispatchIntent: (intent: InteractiveIntent) => Promise<IntentOutcome>
-  private readonly onRendererConnected: (channel: GatewayChannel) => void
+  private readonly onRendererConnected: (channel: GatewayChannel, reconnectToken: string) => void
   private readonly readyTimeoutMs: number
   private readonly reconnectGraceMs: number
   private readonly uiTokenTtlMs: number
@@ -122,6 +122,7 @@ class PresentationCoordinatorImpl implements PresentationCoordinator {
   private handoffId: string | null = null
   private uiToken: string | undefined
   private uiTokenExpiresAt = 0
+  private bootstrapTokenPending = false
   private primary: GatewayChannel | undefined
   private readyTimer: { clear(): void } | undefined
   private reconnectTimer: { clear(): void } | undefined
@@ -158,6 +159,7 @@ class PresentationCoordinatorImpl implements PresentationCoordinator {
     this.handoffId = randomBytes(TOKEN_LENGTH_BYTES).toString("base64url")
     this.uiToken = randomBytes(TOKEN_LENGTH_BYTES).toString("base64url")
     this.uiTokenExpiresAt = 0
+    this.bootstrapTokenPending = true
     this.state = { phase: "opening-web", handoffId: this.handoffId }
     this.exitHandlerPending = false
     this.diagnostics?.info("web.handoff.opening")
@@ -198,22 +200,21 @@ class PresentationCoordinatorImpl implements PresentationCoordinator {
   }
 
   /**
-   * 校验一次升级请求的 UI token。token 绑定 handoffId、loopback Origin 与 TTL；
-   * 同一 token 在期内允许同页重连（刷新/瞬断），单 renderer 门禁保证任意时刻
-   * 只有一个活跃渲染连接，第二个并发连接会被 attachRenderer 拒绝。
+   * 只读校验升级请求。首次 URL 的 bootstrap token 受 TTL 约束；renderer 被接受后
+   * 换发 handoff-scoped 单次重连 token，其寿命由 handoff 决定、每次成功连接立即轮换。
    */
-  consumeUiToken(handoffId: string, token: string, origin: string): boolean {
+  validateUiToken(handoffId: string, token: string, origin: string): boolean {
     if (this.closed) return false
     if (this.handoffId !== handoffId) return false
     if (this.state.phase !== "opening-web" && this.state.phase !== "web-active") return false
     if (this.uiToken === undefined || token !== this.uiToken) return false
-    if (this.scheduler.now() > this.uiTokenExpiresAt) return false
+    if (this.bootstrapTokenPending && this.scheduler.now() > this.uiTokenExpiresAt) return false
     if (origin !== this.server.origin) return false
     return true
   }
 
-  /** 处理一个已完成 upgrade 的渲染 channel；生命周期判定失败时直接 shutdown。 */
-  async attachRenderer(handoffId: string, channel: GatewayChannel): Promise<void> {
+  /** 处理一个已完成 upgrade 的渲染 channel；生命周期或凭据判定失败时直接 shutdown。 */
+  async attachRenderer(handoffId: string, presentedToken: string, channel: GatewayChannel): Promise<void> {
     if (this.closed || this.handoffId !== handoffId || this.state.phase === "tui-active") {
       await channel.send({ type: "handoff.state", state: this.state })
       await channel.close(1008, "invalid-handoff")
@@ -237,11 +238,22 @@ class PresentationCoordinatorImpl implements PresentationCoordinator {
       this.primary = undefined
       void stale.close(1001, "superseded")
     }
+    // upgrade 校验与 open 回调之间可能发生并发连接；接受前必须再次校验并在同一
+    // 事件循环 turn 内轮换，确保旧 token 只能成功建立一个 renderer。
+    if (!this.validateUiToken(handoffId, presentedToken, this.server.origin)) {
+      await channel.send({ type: "handoff.state", state: this.state })
+      await channel.close(1008, "invalid-token")
+      return
+    }
+    const reconnectToken = randomBytes(TOKEN_LENGTH_BYTES).toString("base64url")
+    this.uiToken = reconnectToken
+    this.uiTokenExpiresAt = 0
+    this.bootstrapTokenPending = false
     this.primary = channel
     this.reconnectTimer?.clear()
     this.reconnectTimer = undefined
     this.diagnostics?.info("web.renderer.accepted")
-    this.onRendererConnected(channel)
+    this.onRendererConnected(channel, reconnectToken)
   }
 
   /** 渲染 channel 结束：opening 阶段直接收敛；web-active 先给同页重连宽限。 */
@@ -348,6 +360,7 @@ class PresentationCoordinatorImpl implements PresentationCoordinator {
       this.handoffId = null
       this.uiToken = undefined
       this.uiTokenExpiresAt = 0
+      this.bootstrapTokenPending = false
       this.primary = undefined
       this.state = { phase: "tui-active" }
       this.publish()

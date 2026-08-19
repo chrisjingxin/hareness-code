@@ -78,6 +78,7 @@ function createCoordinator(options: {
   const { server, record } = createFakeServer()
   const openedUrls: string[] = []
   const connectedChannels: GatewayChannel[] = []
+  const reconnectTokens: string[] = []
   const dispatchCalls: InteractiveIntent[] = []
   const dispatch = options.dispatch ?? (async (intent: InteractiveIntent) => {
     dispatchCalls.push(intent)
@@ -87,13 +88,16 @@ function createCoordinator(options: {
     server,
     openBrowser: async url => { openedUrls.push(url) },
     dispatch,
-    onRendererConnected: channel => { connectedChannels.push(channel) },
+    onRendererConnected: (channel, reconnectToken) => {
+      connectedChannels.push(channel)
+      reconnectTokens.push(reconnectToken)
+    },
     readyTimeoutMs: options.readyTimeoutMs ?? 65_000,
     reconnectGraceMs: options.reconnectGraceMs ?? 10_000,
     uiTokenTtlMs: options.uiTokenTtlMs ?? 60_000,
     scheduler: manual.scheduler,
   })
-  return { coordinator, manual, server, record, openedUrls, connectedChannels, dispatchCalls }
+  return { coordinator, manual, server, record, openedUrls, connectedChannels, reconnectTokens, dispatchCalls }
 }
 
 async function openAndExtract(coordinator: PresentationCoordinator, openedUrls: string[]) {
@@ -137,14 +141,14 @@ test("token 校验：正确 token/Origin 通过；错误 token、错误 Origin�
   const { handoffId, token } = await openAndExtract(c.coordinator, c.openedUrls)
   const origin = c.server.origin
 
-  expect(c.coordinator.consumeUiToken(handoffId, token, origin)).toBe(true)
-  expect(c.coordinator.consumeUiToken(handoffId, "wrong-token", origin)).toBe(false)
-  expect(c.coordinator.consumeUiToken(handoffId, token, "http://evil.example")).toBe(false)
-  expect(c.coordinator.consumeUiToken("other-handoff", token, origin)).toBe(false)
+  expect(c.coordinator.validateUiToken(handoffId, token, origin)).toBe(true)
+  expect(c.coordinator.validateUiToken(handoffId, "wrong-token", origin)).toBe(false)
+  expect(c.coordinator.validateUiToken(handoffId, token, "http://evil.example")).toBe(false)
+  expect(c.coordinator.validateUiToken("other-handoff", token, origin)).toBe(false)
 
   // TTL 60s：过期后即使 token/Origin 正确也拒绝
   c.manual.advance(60_001)
-  expect(c.coordinator.consumeUiToken(handoffId, token, origin)).toBe(false)
+  expect(c.coordinator.validateUiToken(handoffId, token, origin)).toBe(false)
 })
 
 test("token 校验：web-active 阶段有效；收敛回 tui-active 后拒绝", async () => {
@@ -152,14 +156,16 @@ test("token 校验：web-active 阶段有效；收敛回 tui-active 后拒绝", 
   const { handoffId, token } = await openAndExtract(c.coordinator, c.openedUrls)
   const origin = c.server.origin
   const ch = createFakeChannel()
-  await c.coordinator.attachRenderer(handoffId, ch.channel)
+  await c.coordinator.attachRenderer(handoffId, token, ch.channel)
   c.coordinator.requestReady()
+  c.manual.advance(60_001)
   expect(c.coordinator.getSnapshot().phase).toBe("web-active")
-  expect(c.coordinator.consumeUiToken(handoffId, token, origin)).toBe(true)
+  expect(c.coordinator.validateUiToken(handoffId, token, origin)).toBe(false)
+  expect(c.coordinator.validateUiToken(handoffId, c.reconnectTokens[0]!, origin)).toBe(true)
 
   c.coordinator.requestReturn()
   expect(c.coordinator.getSnapshot().phase).toBe("tui-active")
-  expect(c.coordinator.consumeUiToken(handoffId, token, origin)).toBe(false)
+  expect(c.coordinator.validateUiToken(handoffId, c.reconnectTokens[0]!, origin)).toBe(false)
 })
 
 // ---- renderer 门禁 ---------------------------------------------------------
@@ -170,28 +176,31 @@ test("attachRenderer：合法 channel 交接给 onRendererConnected；第二个�
   const ch1 = createFakeChannel()
   const ch2 = createFakeChannel()
 
-  await c.coordinator.attachRenderer(handoffId, ch1.channel)
+  await c.coordinator.attachRenderer(handoffId, token, ch1.channel)
   expect(c.connectedChannels).toEqual([ch1.channel])
 
-  await c.coordinator.attachRenderer(handoffId, ch2.channel)
+  await c.coordinator.attachRenderer(handoffId, c.reconnectTokens[0]!, ch2.channel)
   expect(ch2.sent).toEqual([{ type: "handoff.state", state: { phase: "opening-web", handoffId } }])
   expect(ch2.closed).toEqual([{ code: 1008, reason: "already-open" }])
   expect(c.connectedChannels).toHaveLength(1)
-  // token 不因已有连接而失效：门禁在 attachRenderer 层，同页重连仍可换 channel
-  expect(c.coordinator.consumeUiToken(handoffId, token, c.server.origin)).toBe(true)
+  // 第二窗口拒绝发生在轮换前，当前重连 token 仍留给主页面刷新。
+  expect(c.coordinator.validateUiToken(handoffId, c.reconnectTokens[0]!, c.server.origin)).toBe(true)
 })
 
 test("attachRenderer：web-active 时失效主连接可被同 handoff 新连接替换接管", async () => {
   const c = createCoordinator()
-  const { handoffId } = await openAndExtract(c.coordinator, c.openedUrls)
+  const { handoffId, token } = await openAndExtract(c.coordinator, c.openedUrls)
   const ch1 = createFakeChannel()
-  await c.coordinator.attachRenderer(handoffId, ch1.channel)
+  await c.coordinator.attachRenderer(handoffId, token, ch1.channel)
   c.coordinator.requestReady()
   expect(c.coordinator.getSnapshot().phase).toBe("web-active")
+  const reconnectToken = c.reconnectTokens[0]!
+  c.manual.advance(60_001)
+  expect(c.coordinator.validateUiToken(handoffId, reconnectToken, c.server.origin)).toBe(true)
 
   // 活跃主连接：第二窗口仍被拒绝（单窗口 invariant 不回归）。
   const chLive = createFakeChannel()
-  await c.coordinator.attachRenderer(handoffId, chLive.channel)
+  await c.coordinator.attachRenderer(handoffId, reconnectToken, chLive.channel)
   expect(chLive.closed).toEqual([{ code: 1008, reason: "already-open" }])
   expect(c.connectedChannels).toHaveLength(1)
 
@@ -199,17 +208,19 @@ test("attachRenderer：web-active 时失效主连接可被同 handoff 新连接�
   // primary 仍指向已关闭的连接）：新连接替换接管，旧连接被收敛关闭。
   ;(ch1.channel as GatewayChannel & { isOpen?: () => boolean }).isOpen = () => false
   const ch2 = createFakeChannel()
-  await c.coordinator.attachRenderer(handoffId, ch2.channel)
+  await c.coordinator.attachRenderer(handoffId, reconnectToken, ch2.channel)
   expect(ch1.closed).toContainEqual({ code: 1001, reason: "superseded" })
   expect(ch2.closed).toHaveLength(0)
   expect(c.connectedChannels).toEqual([ch1.channel, ch2.channel])
+  expect(c.coordinator.validateUiToken(handoffId, reconnectToken, c.server.origin)).toBe(false)
+  expect(c.coordinator.validateUiToken(handoffId, c.reconnectTokens[1]!, c.server.origin)).toBe(true)
 })
 
 test("attachRenderer：错误 handoffId 拒绝（invalid-handoff）", async () => {
   const c = createCoordinator()
-  const { handoffId } = await openAndExtract(c.coordinator, c.openedUrls)
+  const { handoffId, token } = await openAndExtract(c.coordinator, c.openedUrls)
   const wrong = createFakeChannel()
-  await c.coordinator.attachRenderer("nope", wrong.channel)
+  await c.coordinator.attachRenderer("nope", token, wrong.channel)
   expect(wrong.sent).toEqual([{ type: "handoff.state", state: { phase: "opening-web", handoffId } }])
   expect(wrong.closed).toEqual([{ code: 1008, reason: "invalid-handoff" }])
   expect(c.connectedChannels).toHaveLength(0)
@@ -217,9 +228,9 @@ test("attachRenderer：错误 handoffId 拒绝（invalid-handoff）", async () =
 
 test("attachRenderer：returning-tui 过渡态拒绝（returning）", async () => {
   const c = createCoordinator()
-  const { handoffId } = await openAndExtract(c.coordinator, c.openedUrls)
+  const { handoffId, token } = await openAndExtract(c.coordinator, c.openedUrls)
   const ch = createFakeChannel()
-  await c.coordinator.attachRenderer(handoffId, ch.channel)
+  await c.coordinator.attachRenderer(handoffId, token, ch.channel)
   c.coordinator.requestReady()
 
   const late = createFakeChannel()
@@ -227,7 +238,7 @@ test("attachRenderer：returning-tui 过渡态拒绝（returning）", async () =
   const lateClosed: Array<{ code: number; reason: string }>[] = []
   const unsub = c.coordinator.subscribe(state => {
     if (state.phase === "returning-tui") {
-      void c.coordinator.attachRenderer(handoffId, late.channel).then(() => {
+      void c.coordinator.attachRenderer(handoffId, c.reconnectTokens[0]!, late.channel).then(() => {
         lateSent.push([...late.sent])
         lateClosed.push([...late.closed])
       })
@@ -246,9 +257,9 @@ test("attachRenderer：returning-tui 过渡态拒绝（returning）", async () =
 test("requestReady：opening-web → web-active 并通知订阅者", async () => {
   const c = createCoordinator()
   const states = statesOf(c.coordinator)
-  const { handoffId } = await openAndExtract(c.coordinator, c.openedUrls)
+  const { handoffId, token } = await openAndExtract(c.coordinator, c.openedUrls)
   const ch = createFakeChannel()
-  await c.coordinator.attachRenderer(handoffId, ch.channel)
+  await c.coordinator.attachRenderer(handoffId, token, ch.channel)
 
   c.coordinator.requestReady()
   expect(c.coordinator.getSnapshot()).toEqual({ phase: "web-active", handoffId })
@@ -257,9 +268,9 @@ test("requestReady：opening-web → web-active 并通知订阅者", async () =>
 
 test("requestReady 在非 opening-web 阶段视为协议违规 → fail-closed 收敛", async () => {
   const c = createCoordinator()
-  const { handoffId } = await openAndExtract(c.coordinator, c.openedUrls)
+  const { handoffId, token } = await openAndExtract(c.coordinator, c.openedUrls)
   const ch = createFakeChannel()
-  await c.coordinator.attachRenderer(handoffId, ch.channel)
+  await c.coordinator.attachRenderer(handoffId, token, ch.channel)
   c.coordinator.requestReady()
 
   c.coordinator.requestReady()
@@ -269,9 +280,9 @@ test("requestReady 在非 opening-web 阶段视为协议违规 → fail-closed �
 test("requestReturn：returning-tui（returned）→ tui-active", async () => {
   const c = createCoordinator()
   const states = statesOf(c.coordinator)
-  const { handoffId } = await openAndExtract(c.coordinator, c.openedUrls)
+  const { handoffId, token } = await openAndExtract(c.coordinator, c.openedUrls)
   const ch = createFakeChannel()
-  await c.coordinator.attachRenderer(handoffId, ch.channel)
+  await c.coordinator.attachRenderer(handoffId, token, ch.channel)
   c.coordinator.requestReady()
 
   c.coordinator.requestReturn()
@@ -285,9 +296,9 @@ test("requestExit：returning-tui（exit-requested）→ tui-active 并触发 ex
   const states = statesOf(c.coordinator)
   let exitCalls = 0
   c.coordinator.registerExitHandler(() => { exitCalls += 1 })
-  const { handoffId } = await openAndExtract(c.coordinator, c.openedUrls)
+  const { handoffId, token } = await openAndExtract(c.coordinator, c.openedUrls)
   const ch = createFakeChannel()
-  await c.coordinator.attachRenderer(handoffId, ch.channel)
+  await c.coordinator.attachRenderer(handoffId, token, ch.channel)
   c.coordinator.requestReady()
 
   c.coordinator.requestExit()
@@ -299,7 +310,7 @@ test("requestExit：returning-tui（exit-requested）→ tui-active 并触发 ex
 test("ready-timeout：ready 定时器到期 → returning-tui（ready-timeout）→ tui-active", async () => {
   const c = createCoordinator()
   const states = statesOf(c.coordinator)
-  const { handoffId } = await openAndExtract(c.coordinator, c.openedUrls)
+  const { handoffId, token } = await openAndExtract(c.coordinator, c.openedUrls)
   expect(c.manual.timers.length).toBe(1) // open() 已 arm ready 定时器
 
   c.manual.advance(65_000)
@@ -313,10 +324,10 @@ test("ready-timeout：ready 定时器到期 → returning-tui（ready-timeout）
 test("web-active 断开：宽限期内重连保持 web-active；宽限期到期才收敛", async () => {
   const c = createCoordinator()
   const states = statesOf(c.coordinator)
-  const { handoffId } = await openAndExtract(c.coordinator, c.openedUrls)
+  const { handoffId, token } = await openAndExtract(c.coordinator, c.openedUrls)
   const ch1 = createFakeChannel()
   const ch2 = createFakeChannel()
-  await c.coordinator.attachRenderer(handoffId, ch1.channel)
+  await c.coordinator.attachRenderer(handoffId, token, ch1.channel)
   c.coordinator.requestReady()
 
   c.coordinator.notifyRendererDisconnected()
@@ -324,7 +335,7 @@ test("web-active 断开：宽限期内重连保持 web-active；宽限期到期�
   expect(c.manual.timers.some(timer => timer.active)).toBe(true) // 宽限定时器已 arm
 
   // 宽限期内同页重连：换 primary 并清除宽限定时器
-  await c.coordinator.attachRenderer(handoffId, ch2.channel)
+  await c.coordinator.attachRenderer(handoffId, c.reconnectTokens[0]!, ch2.channel)
   expect(c.connectedChannels).toHaveLength(2)
   expect(c.coordinator.getSnapshot().phase).toBe("web-active")
   expect(c.manual.timers.every(timer => !timer.active)).toBe(true)
@@ -346,9 +357,9 @@ test("opening-web 阶段断开 → 立即收敛（无宽限期）", async () => 
 test("notifyInvalidMessage：畸形帧协议违规 → fail-closed 收敛", async () => {
   const c = createCoordinator()
   const states = statesOf(c.coordinator)
-  const { handoffId } = await openAndExtract(c.coordinator, c.openedUrls)
+  const { handoffId, token } = await openAndExtract(c.coordinator, c.openedUrls)
   const ch = createFakeChannel()
-  await c.coordinator.attachRenderer(handoffId, ch.channel)
+  await c.coordinator.attachRenderer(handoffId, token, ch.channel)
   c.coordinator.requestReady()
 
   c.coordinator.notifyInvalidMessage()
@@ -364,9 +375,9 @@ test("tuiDispatch：tui-active 受理；web-active 拒绝 busy；不进入 dispa
   expect(outcome).toEqual({ status: "accepted" })
   expect(c.dispatchCalls).toEqual([{ type: "run.cancel" }])
 
-  const { handoffId } = await openAndExtract(c.coordinator, c.openedUrls)
+  const { handoffId, token } = await openAndExtract(c.coordinator, c.openedUrls)
   const ch = createFakeChannel()
-  await c.coordinator.attachRenderer(handoffId, ch.channel)
+  await c.coordinator.attachRenderer(handoffId, token, ch.channel)
   c.coordinator.requestReady()
 
   const busy = await c.coordinator.tuiDispatch({ type: "run.cancel" })
@@ -381,13 +392,13 @@ test("close()：停止 server、幂等、不触发 exit handler、token 失效",
   c.coordinator.registerExitHandler(() => { exitCalls += 1 })
   const { handoffId, token } = await openAndExtract(c.coordinator, c.openedUrls)
   const ch = createFakeChannel()
-  await c.coordinator.attachRenderer(handoffId, ch.channel)
+  await c.coordinator.attachRenderer(handoffId, token, ch.channel)
   c.coordinator.requestReady()
 
   await c.coordinator.close()
   expect(c.record.stopCalls).toBe(1)
   expect(exitCalls).toBe(0)
-  expect(c.coordinator.consumeUiToken(handoffId, token, c.server.origin)).toBe(false)
+  expect(c.coordinator.validateUiToken(handoffId, token, c.server.origin)).toBe(false)
 
   await c.coordinator.close()
   expect(c.record.stopCalls).toBe(1)

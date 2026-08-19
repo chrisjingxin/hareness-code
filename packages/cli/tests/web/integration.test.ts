@@ -40,14 +40,14 @@ test("open 后真实 loopback：页面 200；带 token 的 WS 收到 replace/han
     html: "<!doctype html><title>web</title>",
     getAssets: async () => ({ script: "console.log('app')", style: "body{}", syntaxWorkerScript: "" }),
     isActiveHandoff: handoffId => coordinator.isHandoffActive(handoffId),
-    consumeUiToken: (handoffId, token, origin) => coordinator.consumeUiToken(handoffId, token, origin),
-    attachRenderer: (handoffId, channel) => coordinator.attachRenderer(handoffId, channel),
+    validateUiToken: (handoffId, token, origin) => coordinator.validateUiToken(handoffId, token, origin),
+    attachRenderer: (handoffId, token, channel) => coordinator.attachRenderer(handoffId, token, channel),
   })
   const coordinator = createPresentationCoordinator({
     server,
     openBrowser: async url => { openedUrl = url },
     dispatch: intent => controller.dispatch(intent),
-    onRendererConnected: channel => gateway.connectRenderer(channel),
+    onRendererConnected: (channel, reconnectToken) => gateway.connectRenderer(channel, reconnectToken),
   })
   gateway = createWebUiGateway({ coordinator, controller, workspaceExplorer: createFakeExplorer() })
 
@@ -78,10 +78,11 @@ test("open 后真实 loopback：页面 200；带 token 的 WS 收到 replace/han
   socket.onmessage = event => messages.push(JSON.parse(String(event.data)))
   socket.onclose = event => { closeCodes.push(event.code) }
 
-  // 首帧：state.replace（revision 1）+ handoff.state(opening-web)
+  // 首帧：轮换 token + state.replace（revision 1）+ handoff.state(opening-web)
   await waitFor(() => messages.some(message => message.type === "state.replace" && message.revision === 1))
-  expect(messages[0]).toMatchObject({ type: "state.replace", revision: 1 })
-  expect(Object.keys((messages[0] as Extract<WebUiServerMessage, { type: "state.replace" }>).state)).toEqual([
+  expect(messages[0]).toMatchObject({ type: "handoff.token" })
+  expect(messages[1]).toMatchObject({ type: "state.replace", revision: 1 })
+  expect(Object.keys((messages[1] as Extract<WebUiServerMessage, { type: "state.replace" }>).state)).toEqual([
     "conversation",
     "interaction",
     "navigation",
@@ -91,7 +92,7 @@ test("open 后真实 loopback：页面 200；带 token 的 WS 收到 replace/han
     "workspaceTree",
     "workspacePreview",
   ])
-  expect(messages[1]).toMatchObject({ type: "handoff.state", state: { phase: "opening-web" } })
+  expect(messages[2]).toMatchObject({ type: "handoff.state", state: { phase: "opening-web" } })
 
   // ready → web-active
   socket.send(JSON.stringify({ type: "handoff.ready" }))

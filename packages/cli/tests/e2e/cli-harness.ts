@@ -26,7 +26,7 @@ export type CliHarness = {
 
 const e2eDir = fileURLToPath(new URL(".", import.meta.url))
 const cliDir = resolve(e2eDir, "../..")
-const repoRoot = resolve(cliDir, "../../..")
+const repoRoot = resolve(cliDir, "../..")
 const ptyBridge = resolve(repoRoot, "scripts/e2e-pty.py")
 const agentDir = resolve(repoRoot, "packages/agent")
 const agentPython = resolve(agentDir, ".venv/bin/python")
@@ -39,7 +39,7 @@ export async function startCli(extraEnv: Record<string, string> = {}): Promise<C
 
   const child = spawn(
     agentPython,
-    [ptyBridge, "--", process.execPath, "run", "src/index.ts"],
+    [ptyBridge, "--", "bun", "run", "src/index.ts"],
     {
       cwd: cliDir,
       env: {

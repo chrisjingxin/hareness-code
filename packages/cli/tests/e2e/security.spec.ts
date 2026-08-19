@@ -45,7 +45,7 @@ test("归还 TUI 后旧 UI token 失效：重连被拒", async ({ page }) => {
 
     await page.click(".return-button")
     await expect(page.locator(".web-static-state.closed")).toBeVisible({ timeout: 15_000 })
-    // 会话回到 tui-active：旧 token 不再被 consumeUiToken 受理。
+    // 会话回到 tui-active：旧 token 不再被 validateUiToken 受理。
     const state = await probeSocket(uiSocketUrl(cli.url), new URL(cli.url).origin)
     expect(state).toBe("refused")
   } finally {

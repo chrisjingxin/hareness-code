@@ -13,13 +13,16 @@ import type { WorkspaceIntent, WorkspaceOutcome, WorkspacePreviewState, Workspac
 import type { PresentationState } from "../state"
 
 /** UI 契约版本：网关与 Browser 共享同一常量，消息形状变更时递增。 */
-export const UI_CONTRACT_VERSION = 4
+export const UI_CONTRACT_VERSION = 5
 
 /** 单帧上限与跨进程协议一致；replace 需承载完整 Timeline，因此不用旧 lifecycle 的 16 KiB。 */
 export const MAX_UI_FRAME_BYTES = MAX_FRAME_BYTES
 
 /** requestId 是浏览器本地生成的稳定关联标识，长度上限用于防御畸形帧。 */
 export const MAX_REQUEST_ID_LENGTH = 128
+
+/** 重连 token 是 32-byte base64url；上限只用于拒绝畸形 Browser 帧。 */
+export const MAX_UI_TOKEN_LENGTH = 128
 
 /** 工作区文件树视图：复用 WorkspaceExplorer 领域形状，网关只做透传。 */
 export type WorkspaceTreeView = WorkspaceTreeState
@@ -67,6 +70,7 @@ export type WebUiClientMessage =
 
 /** 网关（CLI）→ Browser 消息：状态发布、按 domain 的 intent 结果与接管状态。 */
 export type WebUiServerMessage =
+  | { type: "handoff.token"; token: string }
   | { type: "state.replace"; revision: number; state: WebUiState }
   | { type: "state.patch"; revision: number; patch: WebUiPatch }
   | { type: "intent.outcome"; requestId: string; domain: "interactive"; outcome: IntentOutcome }

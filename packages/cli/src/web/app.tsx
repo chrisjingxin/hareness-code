@@ -8,7 +8,7 @@ import { createWebInteractiveAdapter, type WebInteractiveAdapter } from "./appli
 import { PresentationErrorBoundary } from "./presentation/error-boundary"
 import { WebApp } from "./presentation/web-app"
 import { closeHighlightService } from "./syntax/highlight-service"
-import { createWebUiClient, readUiToken, type WebUiClient } from "./ui-client"
+import { createWebUiClient, readUiToken, storeUiToken, type WebUiClient } from "./ui-client"
 import type { PresentationState } from "../presentation-coordinator"
 import "./presentation/styles.css"
 
@@ -65,14 +65,15 @@ export async function bootstrapWebApp(): Promise<void> {
       void closeGate("本次 Web 接管已结束。请返回 TUI 后重新执行 /web。")
       void reason
     },
+    onReconnectToken: nextToken => storeUiToken(handoffId, nextToken),
   })
 
   // 接管确认看门狗：页面停留在 opening-web 超过宽限期时整页重载重连同一 handoff。
   // 覆盖两类单帧丢失：a) 页面已发 ready 但 web-active 帧被浏览器冻结/休眠/扩展
   // 干扰丢弃（服务端已 active，重连后网关首帧直接下发 web-active 恢复可写）；
   // b) 首帧不完整、ready 从未发出（服务端仍在 opening-web，旧连接关闭会让
-  // Coordinator 立即收敛回 TUI，重连被拒后显示脱敏引导）。UI token 在 sessionStorage
-  // 且 TTL 60s 内可复用，重载窗口远小于 TTL；限制重载次数防止服务端异常时死循环。
+  // Coordinator 立即收敛回 TUI，重连被拒后显示脱敏引导）。当前单次重连 token
+  // 已在 sessionStorage；限制重载次数防止服务端异常时死循环。
   const takeoverConfirmMs = 5_000
   const maxReloads = 3
   const reloadKey = `harness-takeover-reloads:${handoffId}`

@@ -63,9 +63,10 @@ test("两轮接管往返后 Controller/Adapter identity 不变，TUI 按阶段�
   }
   const server = new FakeServer()
   let attached: GatewayChannel | undefined
+  let openedUrl = ""
   const coordinator: PresentationCoordinator = createPresentationCoordinator({
     server,
-    openBrowser: async () => undefined,
+    openBrowser: async url => { openedUrl = url },
     dispatch: intent => controller.dispatch(intent),
     onRendererConnected: channel => { attached = channel },
   })
@@ -108,7 +109,8 @@ test("两轮接管往返后 Controller/Adapter identity 不变，TUI 按阶段�
     await act(async () => {
       const snapshot = coordinator!.getSnapshot()
       if (snapshot.phase !== "opening-web") throw new Error("expected opening-web")
-      await coordinator!.attachRenderer(snapshot.handoffId, channel)
+      const token = new URL(openedUrl).hash.slice("#ui=".length)
+      await coordinator!.attachRenderer(snapshot.handoffId, token, channel)
       coordinator!.requestReady()
       await setup.flush()
     })
@@ -144,7 +146,8 @@ test("两轮接管往返后 Controller/Adapter identity 不变，TUI 按阶段�
     await act(async () => {
       const snapshot = coordinator!.getSnapshot()
       if (snapshot.phase !== "opening-web") throw new Error("expected opening-web")
-      await coordinator!.attachRenderer(snapshot.handoffId, second)
+      const token = new URL(openedUrl).hash.slice("#ui=".length)
+      await coordinator!.attachRenderer(snapshot.handoffId, token, second)
       coordinator!.requestReady()
       await setup.flush()
     })

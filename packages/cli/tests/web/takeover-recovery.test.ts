@@ -42,12 +42,12 @@ test(
         html: webHtml,
         getAssets: browserBundle,
         isActiveHandoff: handoffId => coordinator.isHandoffActive(handoffId),
-        consumeUiToken: (handoffId, token, origin) => coordinator.consumeUiToken(handoffId, token, origin),
-        attachRenderer: (handoffId, channel) => coordinator.attachRenderer(handoffId, channel),
+        validateUiToken: (handoffId, token, origin) => coordinator.validateUiToken(handoffId, token, origin),
+        attachRenderer: (handoffId, token, channel) => coordinator.attachRenderer(handoffId, token, channel),
       }),
       openBrowser: async url => { openedUrl = url },
       dispatch: intent => controller.dispatch(intent),
-      onRendererConnected: channel => gateway.connectRenderer(channel),
+      onRendererConnected: (channel, reconnectToken) => gateway.connectRenderer(channel, reconnectToken),
     })
 
     // 包装 subscribe：吞掉第一次 web-active 发布（在网关构造前生效），
@@ -78,6 +78,48 @@ test(
       // 看门狗（5s 宽限）整页重载 → 重连 → 网关首帧直接下发 web-active → 恢复可写。
       await page.waitForSelector('.web-shell[data-active="true"]', { timeout: 20_000 })
       expect(dropped.count).toBe(1)
+    } finally {
+      await browser.close()
+      await coordinator.close()
+    }
+  },
+  { timeout: 40_000 },
+)
+
+test(
+  "Web 长时间保持 active 后刷新仍轮换凭据并恢复",
+  async () => {
+    const { controller } = makeHarness({ initialThreadId: "thread-1" })
+    let gateway!: WebUiGateway
+    let openedUrl = ""
+    const coordinator = createPresentationCoordinator({
+      server: createWebServer({
+        html: webHtml,
+        getAssets: browserBundle,
+        isActiveHandoff: handoffId => coordinator.isHandoffActive(handoffId),
+        validateUiToken: (handoffId, token, origin) => coordinator.validateUiToken(handoffId, token, origin),
+        attachRenderer: (handoffId, token, channel) => coordinator.attachRenderer(handoffId, token, channel),
+      }),
+      openBrowser: async url => { openedUrl = url },
+      dispatch: intent => controller.dispatch(intent),
+      onRendererConnected: (channel, reconnectToken) => gateway.connectRenderer(channel, reconnectToken),
+      uiTokenTtlMs: 2_000,
+      reconnectGraceMs: 300,
+    })
+    gateway = createWebUiGateway({ coordinator, controller, workspaceExplorer: createFakeExplorer() })
+    await coordinator.open()
+
+    const browser = await chromium.launch({ headless: true })
+    const page = await browser.newPage()
+    try {
+      await page.goto(openedUrl, { waitUntil: "load", timeout: 15_000 })
+      await page.waitForSelector('.web-shell[data-active="true"]', { timeout: 15_000 })
+
+      // bootstrap token 已过期，但首个 renderer 应已获得 handoff-scoped 单次重连 token。
+      await new Promise(resolve => setTimeout(resolve, 2_100))
+      await page.reload({ waitUntil: "load", timeout: 15_000 })
+      await page.waitForSelector('.web-shell[data-active="true"]', { timeout: 15_000 })
+      expect(coordinator.getSnapshot().phase).toBe("web-active")
     } finally {
       await browser.close()
       await coordinator.close()

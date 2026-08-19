@@ -37,7 +37,7 @@ export type WebUiGatewayOptions = {
 
 export interface WebUiGateway {
   /** 接管一个已完成认证的渲染 channel：发送首帧 replace 与 handoff.state，并开始消费。 */
-  connectRenderer(channel: GatewayChannel): void
+  connectRenderer(channel: GatewayChannel, reconnectToken: string): void
   close(): Promise<void>
 }
 
@@ -67,11 +67,12 @@ class WebUiGatewayImpl implements WebUiGateway {
     this.unsubscribeExplorer = this.workspaceExplorer.subscribe(() => this.onExplorerPublish())
   }
 
-  connectRenderer(channel: GatewayChannel): void {
+  connectRenderer(channel: GatewayChannel, reconnectToken: string): void {
     this.channel = channel
     this.revision = BASE_REVISION
     this.lastState = buildWebUiState(this.controller.getSnapshot(), this.workspaceExplorer.getSnapshot())
     this.diagnostics?.info("web.gateway.connected")
+    void this.send({ type: "handoff.token", token: reconnectToken })
     void this.send({ type: "state.replace", revision: this.revision, state: this.lastState })
     void this.send({ type: "handoff.state", state: this.coordinator.getSnapshot() })
     void this.consume(channel)
