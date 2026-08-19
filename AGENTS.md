@@ -182,6 +182,10 @@ Task / Spec / Plan / Todo 必须让不熟悉当前实现的人也能直接检视
 推荐：模型选择只计算一次，运行、历史记录和界面都使用这同一个结果；实现上由 ResolvedExecutionBinding 保存该结果。
 ```
 
+## 代码导航（CodeGraph）
+
+仓库根目录已建立 CodeGraph 索引（`.codegraph/`，含符号、调用边与依赖关系的 SQLite 图）。需要理解、定位或修改代码时，**优先用 CodeGraph 而不是 grep/read 逐文件翻**：调用 `codegraph_explore`（MCP 工具）或 `codegraph explore`（shell），一次调用返回相关符号的逐行源码、调用路径（含动态派发跳转）与影响面，比手动探索少一个数量级的 token。仅在索引不覆盖的场景回退到 read/grep：配置、文档、以及响应中标注「已编辑待重新索引」的文件。不要重复 CodeGraph 已完成的工作（解析、追踪、读源）。
+
 ## Agent 开工顺序
 
 1. 先按「功能开发流程」判据判定需求体量：简单需求直接进入实现，不读取 task/spec/plan/todo；复杂功能先读取 `README.md`、`docs/developer/architecture/架构总览.md`，以及当前功能对应的：
