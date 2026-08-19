@@ -112,6 +112,20 @@ describe("WebApp", () => {
     }
   })
 
+  test("顶栏品牌使用 Harness 交织标志，不再显示通用 Shield 图标", () => {
+    const { handle } = mountWebApp(true, makeSnapshot())
+    try {
+      const mark = handle.container.querySelector(".brand-mark")
+      const logo = mark?.querySelector("svg.harness-brand-logo")
+      expect(logo).not.toBeNull()
+      expect(logo?.getAttribute("viewBox")).toBe("0 0 110 110")
+      expect(logo?.querySelectorAll("path").length).toBe(4)
+      expect(mark?.querySelector("svg.lucide-shield")).toBeNull()
+    } finally {
+      handle.unmount()
+    }
+  })
+
   test("active Run 时「返回 TUI」按钮被禁用并展示 reason", () => {
     const interactive = makeInteractive({
       activeRun: { threadId: "t1", runId: "r1" },

@@ -94,6 +94,9 @@ pre, code { font-family: "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Co
   --file-style: #6e4f7e;
   --file-config: #2f5d6e;
   --file-image: #9f2f2d;
+  --brand-logo-ink-start: #15201f;
+  --brand-logo-ink-mid: #111918;
+  --brand-logo-ink-end: #1b2725;
   --shadow: 0 1px 1px rgba(17, 16, 14, .02), 0 10px 30px rgba(17, 16, 14, .05);
   --shadow-float: 0 2px 10px rgba(17, 16, 14, .05);
 
@@ -173,6 +176,9 @@ pre, code { font-family: "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Co
   --file-style: #cdb8e0;
   --file-config: #a6c6cc;
   --file-image: #e5b0ae;
+  --brand-logo-ink-start: #f3f1ea;
+  --brand-logo-ink-mid: #e8e5dc;
+  --brand-logo-ink-end: #fffdf7;
   --shadow: 0 1px 1px rgba(0, 0, 0, .18), 0 10px 30px rgba(0, 0, 0, .34);
   --shadow-float: 0 2px 10px rgba(0, 0, 0, .28);
 
@@ -1349,6 +1355,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .topbar-actions { margin-inline-start: auto; position: relative; z-index: 101; padding: 0 20px 0 14px; gap: 8px; }
 .brand { position: relative; gap: 8px; padding-inline: 20px; border-right: 0; }
 .brand-mark { width: 22px; height: 22px; flex-basis: 22px; border: 0; border-radius: 0; background: transparent; color: var(--text); box-shadow: none; }
+.harness-brand-logo { display: block; width: 22px; height: 22px; overflow: visible; }
+.harness-logo-ink-start { stop-color: var(--brand-logo-ink-start); }
+.harness-logo-ink-mid { stop-color: var(--brand-logo-ink-mid); }
+.harness-logo-ink-end { stop-color: var(--brand-logo-ink-end); }
 .brand-copy { display: block; line-height: 1.15; }
 .brand-version { display: none; }
 .brand-name { font-family: inherit; font-size: 14px; font-weight: 650; letter-spacing: 0; }

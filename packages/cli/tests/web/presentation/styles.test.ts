@@ -136,6 +136,15 @@ test("light/dark 主题通过 .web-shell[data-theme] 选择器挂载，且使用
   expect(css).not.toContain("--accent-strong")
 })
 
+test("品牌标志在深色主题把墨色轨迹切为暖白，绿色轨迹保持品牌色", () => {
+  const lightBlock = css.slice(css.indexOf('.web-shell[data-theme="light"]'), css.indexOf('.web-shell[data-theme="dark"]'))
+  const darkBlock = css.slice(css.indexOf('.web-shell[data-theme="dark"]'), css.indexOf("/* ---------- Shell 与静态视图 ----------"))
+  expect(lightBlock).toContain("--brand-logo-ink-start: #15201f")
+  expect(darkBlock).toContain("--brand-logo-ink-start: #f3f1ea")
+  expect(darkBlock).toContain("--brand-logo-ink-end: #fffdf7")
+  expect(css).toContain(".harness-logo-ink-start { stop-color: var(--brand-logo-ink-start); }")
+})
+
 test("可访问性辅助 token 存在：action/link/success/warning/danger 文字与按钮色", () => {
   for (const token of ["--action-text", "--link-text", "--success-text", "--warning-text", "--danger-text"]) {
     expect(css).toContain(token)

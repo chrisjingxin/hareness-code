@@ -1,11 +1,12 @@
 /** Web React 工作台：组合桌面三栏布局与可访问性，不拥有 Agent 或命令业务状态。 */
 /** @jsxImportSource react */
 
-import { CircleDot, Ellipsis, Moon, Shield, Sun, Terminal, X } from "lucide-react"
+import { CircleDot, Ellipsis, Moon, Sun, Terminal, X } from "lucide-react"
 import { useCallback, useEffect, useRef } from "react"
 import { useSyncExternalStore } from "react"
 import { selectWorkItemView } from "../../interactive/selectors"
 import type { WebInteractiveAdapter, WebAdapterSnapshot, WebIntent, WebTheme } from "../application/adapter"
+import { HarnessBrandLogo } from "./brand-logo"
 import { Composer } from "./composer"
 import { ContextDock } from "./context-dock/context-dock"
 import { DialogHost } from "./dialog"
@@ -120,7 +121,7 @@ export function WebApp(props: {
     >
       <header className="topbar">
         <div className="brand">
-          <span className="brand-mark" aria-hidden="true"><Shield size={20} strokeWidth={1.9} /></span>
+          <span className="brand-mark" aria-hidden="true"><HarnessBrandLogo /></span>
           <span className="brand-copy">
             <span className="brand-name">Harness Code</span>
             <span className="brand-version">{interactive.runtime.cliVersion}</span>
