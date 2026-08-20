@@ -1,7 +1,7 @@
 /** OpenTUI 表现 adapter：把终端输入映射为 TuiIntent，并渲染 Adapter snapshot。 */
 
-import { createCliRenderer, type KeyEvent, type ScrollBoxRenderable, type TextareaRenderable } from "@opentui/core"
-import { createRoot, useKeyboard, useTerminalDimensions } from "@opentui/react"
+import { createCliRenderer, MouseButton, type KeyEvent, type ScrollBoxRenderable, type TextareaRenderable } from "@opentui/core"
+import { createRoot, useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react"
 import { useCallback, useEffect, useRef, useSyncExternalStore, type ReactNode } from "react"
 import type { ModelProfile } from "@za38/protocol"
 
@@ -25,11 +25,13 @@ import { HomeView } from "./presentation/home"
 import { DialogShell, SearchPicker, type SearchPickerRenderContext } from "./presentation/overlays"
 import { SkillPicker, ThreadPicker } from "./presentation/pickers"
 import { BtwModal } from "./presentation/btw-modal"
+import { copyCurrentSelection, shouldAttemptSelectionCopy } from "./presentation/selection-copy"
 import { Sidebar, computeSidebarVisibility } from "./presentation/sidebar"
 import { ToastContainer } from "./presentation/toast"
 import { tuiTheme } from "./presentation/theme"
 import { ThreadView } from "./presentation/thread"
 import { WebTakeoverView } from "./presentation/web-takeover"
+import { copyToClipboard } from "./platform/clipboard"
 import { registerCommonSyntaxParsers, shutdownCommonSyntaxClient } from "./platform/syntax-parsers"
 import { win32InstallVtInputGuard } from "./platform/terminal-win32"
 import {
@@ -91,6 +93,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
   const skillSearchRef = useRef<TextareaRenderable | null>(null)
   const threadSearchRef = useRef<TextareaRenderable | null>(null)
   const modelSearchRef = useRef<TextareaRenderable | null>(null)
+  const renderer = useRenderer()
   const terminal = useTerminalDimensions()
   const lastScrollRequestRef = useRef(snapshot.scrollRequest)
 
@@ -142,6 +145,22 @@ export function Za38Tui(options: RenderedTuiOptions) {
     }
   }, [interactive, options.workspaceExplorer])
 
+  /** 将 renderer 内部选区收敛为纯复制 module，避免渲染状态进入 Adapter 或 IPC。 */
+  const copySelectedText = useCallback(() => copyCurrentSelection({
+    getSelectedText: () => renderer.getSelection()?.getSelectedText(),
+    clearSelection: () => renderer.clearSelection(),
+    writeClipboard: copyToClipboard,
+    showToast: (message, variant) => adapter.showToast(message, variant),
+  }), [adapter, renderer])
+
+  /** 根层统一处理普通内容的选区复制；空选区由纯 module 无副作用地忽略。 */
+  const handleSelectionMouseUp = useCallback((event: { button: number }) => {
+    if (event.button !== MouseButton.LEFT && event.button !== MouseButton.RIGHT) return
+    if (!shouldAttemptSelectionCopy(process.platform, { type: "mouse-up", button: event.button })) return
+    const copying = copySelectedText()
+    if (copying) void copying
+  }, [copySelectedText])
+
   /** textarea 只负责光标边界和滚动 ref，历史业务交给 Adapter。 */
   const handleInputBarKeyDown = useCallback((key: KeyEvent) => {
     if (
@@ -180,6 +199,23 @@ export function Za38Tui(options: RenderedTuiOptions) {
       void adapter.dispatch({ type: "input-mode-change", mode: "chat" })
       return
     }
+
+    // 存在草稿时 Ctrl+C 立即同步清空输入框与底层原生缓冲区
+    if (key.ctrl && key.name === "c" && (input.plainText !== "" || currentSnapshot.draft !== "")) {
+      if (shouldAttemptSelectionCopy(process.platform, { type: "key-down", name: key.name, ctrl: key.ctrl })) {
+        const copying = copySelectedText()
+        if (copying) {
+          key.preventDefault()
+          void copying
+          return
+        }
+      }
+      key.preventDefault()
+      syncInputBuffer("", undefined)
+      void adapter.dispatch({ type: "shortcut", action: "clear-draft" })
+      return
+    }
+
 
     if (key.name === "up" && (atStart || currentSnapshot.draftCursor === "start")) {
       void adapter.dispatch({ type: "history", direction: "previous" })
@@ -225,6 +261,15 @@ export function Za38Tui(options: RenderedTuiOptions) {
 
   /** 全局快捷键只负责识别动作；具体状态转换由 Adapter 处理。 */
   useKeyboard(key => {
+    if (shouldAttemptSelectionCopy(process.platform, { type: "key-down", name: key.name, ctrl: key.ctrl })) {
+      const copying = copySelectedText()
+      if (copying) {
+        key.preventDefault()
+        void copying
+        return
+      }
+    }
+
     const isHome = isHomeState(interactive)
     const sidebarVisibility = computeSidebarVisibility(snapshot.sidebar, terminal.width, isHome)
 
@@ -304,7 +349,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
     if (action === "none") return
     key.preventDefault()
 
-    if (action === "exit-shell-mode") {
+    if (action === "clear-draft" || action === "exit-shell-mode") {
       syncInputBuffer("", undefined)
     }
 
@@ -360,7 +405,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
   }
 
   return (
-    <box width="100%" height="100%" flexDirection="row">
+    <box width="100%" height="100%" flexDirection="row" onMouseUp={handleSelectionMouseUp}>
       <box flexGrow={1} height="100%" flexDirection="column">
         {isHome ? <HomeView {...viewProps} /> : <ThreadView {...viewProps} />}
       </box>
@@ -378,6 +423,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
           onOpenFile={path => { void adapter.dispatch({ type: "file-tree-preview", path }) }}
           onInsertRef={path => { void adapter.dispatch({ type: "file-preview-insert-ref", path }) }}
           onClosePreview={() => { void adapter.dispatch({ type: "file-preview-close" }) }}
+          onSelectionMouseUp={handleSelectionMouseUp}
         />
       ) : null}
       <SkillPicker

@@ -96,6 +96,22 @@ HC-149 在 TUI 右侧引入了响应式侧边栏与代码快速预览浮层：
   - 按 `Tab` / `Ctrl+B` 可在输入框与文件树之间无缝切换焦点；
   - 侧边栏获焦时支持 `↑`/`↓`/`←`/`→`/`Enter`/`Space`/`@` 全键盘操作。
 
+## 文本选中复制（Selection Copy）
+
+HC-156 在 TUI 表现层落地了文本选区复制与即时反馈链路：
+
+- **分层边界**：完全属于 TUI 表现层，不修改 JSON-RPC Protocol、Python Agent、Thread 持久化或 Timeline 数据。
+- **组成结构**：
+  - `OpenTUI CliRenderer`：管理终端光标选区（`getSelection()` / `clearSelection()`）；
+  - `selection-copy.ts` 纯逻辑模块：接收平台与输入事件，决策是否触发复制，执行选区清除、调用剪贴板并触发 Toast；
+  - `copyToClipboard()`：调用系统剪贴板原生工具；
+  - `TuiAdapter.showToast()`：推送右上角轻量气泡通知。
+- **跨平台与事件冒泡**：
+  - 非 Windows（macOS/Linux）：左键鼠标松开自动复制非空选区；
+  - Windows：有选区时优先响应 `Ctrl+C` 或右键松开复制选区；无选区时不拦截现有快捷键（清空输入/取消运行/退出）；
+  - 根层统一监听处理，抽屉等阻断冒泡的覆盖层在内部转发后停止冒泡，弹窗（如 `/btw`）通过选区起点判断避免拖选误触发按钮动作。
+
+
 ## 落地路径
 
 | 职责 | 位置 |

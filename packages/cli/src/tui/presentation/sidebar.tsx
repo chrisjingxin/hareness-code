@@ -178,6 +178,7 @@ export type SidebarProps = {
   onOpenFile?: (path: string) => void
   onInsertRef?: (path: string) => void
   onClosePreview?: () => void
+  onSelectionMouseUp?: (event: { button: number }) => void
   children?: ReactNode
 }
 
@@ -218,7 +219,10 @@ export function Sidebar(props: SidebarProps) {
       <box
         flexDirection="row"
         height="100%"
-        onMouseUp={e => e.stopPropagation?.()}
+        onMouseUp={e => {
+          props.onSelectionMouseUp?.(e)
+          e.stopPropagation?.()
+        }}
       >
         {/* 左侧 Master 抽屉：Tab 切换与文件树/状态 */}
         <box

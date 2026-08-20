@@ -1,5 +1,7 @@
 /** BTW 临时问答浮层弹窗组件（OpenTUI）。 */
 
+import type { MouseEvent } from "@opentui/core"
+import { useRenderer } from "@opentui/react"
 import type { ReactNode } from "react"
 import { modeAccent, tuiTheme } from "./theme"
 import { OverlayShell } from "./overlays"
@@ -22,10 +24,22 @@ export type BtwModalProps = {
   onCopy: () => void
 }
 
+/** 区分真实文本拖选与普通点击，避免选区复制和 BTW 回答复制重复执行。 */
+export function handleBtwCopyMouseUp(
+  event: Pick<MouseEvent, "stopPropagation">,
+  hasTextDragSelection: boolean,
+  onCopy: () => void,
+): void {
+  if (hasTextDragSelection) return
+  event.stopPropagation()
+  onCopy()
+}
+
 /**
  * 临时问答浮层：展示问题与轻量回复，不污染历史 Timeline，按 Esc/Enter 关闭，支持点击或快捷键复制回答。
  */
 export function BtwModal(props: BtwModalProps): ReactNode {
+  const renderer = useRenderer()
   if (!props.visible) return null
   const accent = modeAccent(props.workMode ?? "build")
 
@@ -87,7 +101,11 @@ export function BtwModal(props: BtwModalProps): ReactNode {
                 backgroundColor={accent}
                 paddingLeft={2}
                 paddingRight={2}
-                onMouseUp={props.onCopy}
+                onMouseUp={event => {
+                  // OpenTUI 会为普通点击创建初始 selection，isDragging 不能区分拖选；仅已移动的选区 isStart 为 false。
+                  const hasTextDragSelection = renderer.getSelection()?.isStart === false
+                  handleBtwCopyMouseUp(event, hasTextDragSelection, props.onCopy)
+                }}
               >
                 <text fg={tuiTheme.background}>
                   <strong>复制</strong>

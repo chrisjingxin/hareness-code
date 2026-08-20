@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test"
+import { expect, spyOn, test } from "bun:test"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -13,6 +13,8 @@ import { createInteractiveController } from "../../src/interactive/controller"
 import { AgentClientGateway } from "../../src/infrastructure/agent-client-gateway"
 import { createTuiAdapter } from "../../src/tui/application/adapter"
 import type { InteractiveRuntime } from "../../src/interactive/runtime"
+import * as clipboard from "../../src/tui/platform/clipboard"
+import * as selectionCopy from "../../src/tui/presentation/selection-copy"
 
 const runtime: InteractiveRuntime = {
   workspace: "/workspace/harness-code",
@@ -23,6 +25,115 @@ const runtime: InteractiveRuntime = {
   executionMode: "local",
   approvalMode: "default",
 }
+
+test("根 TUI 在 mouse-up 时复制 renderer 的非空选区并显示 Toast", async () => {
+  const { client, controller, adapter } = createSession()
+  const copy = spyOn(clipboard, "copyToClipboard").mockResolvedValue(true)
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        controller,
+        adapter,
+        onRequestExit: () => undefined,
+      }), { width: 100, height: 28, useMouse: true })
+    })
+    await act(async () => { await setup.flush() })
+
+    const selectionRenderer = setup.renderer as unknown as {
+      getSelection(): { getSelectedText(): string } | null
+      clearSelection(): void
+    }
+    let clearCount = 0
+    selectionRenderer.getSelection = () => ({ getSelectedText: () => "根层选区文本" })
+    selectionRenderer.clearSelection = () => { clearCount += 1 }
+
+    await act(async () => {
+      await setup.mockMouse.click(0, 0)
+      await setup.flush()
+    })
+
+    expect(copy).toHaveBeenCalledWith("根层选区文本")
+    expect(clearCount).toBe(1)
+    expect(adapter.getSnapshot().toasts.some(toast => (
+      toast.message === "已复制到剪贴板" && toast.variant === "success"
+    ))).toBe(true)
+  } finally {
+    copy.mockRestore()
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+    await adapter.close()
+    await controller.close()
+  }
+})
+
+test("选区复制路径没有选区时不吞掉 Ctrl+C 的既有清空输入语义", async () => {
+  const { client, controller, adapter } = createSession()
+  const shouldAttempt = spyOn(selectionCopy, "shouldAttemptSelectionCopy").mockImplementation((_platform, input) => (
+    input.type === "key-down" && input.name === "c" && input.ctrl
+  ))
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        controller,
+        adapter,
+        onRequestExit: () => undefined,
+      }), { width: 100, height: 28 })
+    })
+    await act(async () => {
+      await setup.mockInput.typeText("待清空的输入")
+      await setup.flush()
+    })
+    expect(adapter.getSnapshot().draft).toBe("待清空的输入")
+
+    await act(async () => {
+      setup.mockInput.pressCtrlC()
+      await setup.flush()
+    })
+    expect(adapter.getSnapshot().draft).toBe("")
+    expect(setup.captureCharFrame()).not.toContain("待清空的输入")
+  } finally {
+    shouldAttempt.mockRestore()
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+    await adapter.close()
+    await controller.close()
+  }
+})
+
+test("在输入框中按 Ctrl+C 即时同步清空原生 textarea 缓冲区与 Adapter draft", async () => {
+  const { client, controller, adapter } = createSession()
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        controller,
+        adapter,
+        onRequestExit: () => undefined,
+      }), { width: 100, height: 28 })
+    })
+    await act(async () => {
+      await setup.mockInput.typeText("输入框测试文本")
+      await setup.flush()
+    })
+    expect(adapter.getSnapshot().draft).toBe("输入框测试文本")
+    expect(setup.captureCharFrame()).toContain("输入框测试文本")
+
+    await act(async () => {
+      setup.mockInput.pressCtrlC()
+      await setup.flush()
+    })
+    expect(adapter.getSnapshot().draft).toBe("")
+    expect(setup.captureCharFrame()).not.toContain("输入框测试文本")
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+    await adapter.close()
+    await controller.close()
+  }
+})
+
 
 test("真实 textarea 在光标边界用上下键回填历史，而不是被全局快捷键截获", async () => {
   const historyHome = await mkdtemp(join(tmpdir(), "za38-tui-history-"))
