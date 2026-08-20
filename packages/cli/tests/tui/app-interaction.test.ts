@@ -3,15 +3,17 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { PassThrough } from "node:stream"
+import * as openTuiCore from "@opentui/core"
+import * as openTuiReact from "@opentui/react"
 import { testRender } from "@opentui/react/test-utils"
-import { act, createElement } from "react"
+import { act, createElement, type ReactElement, type ReactNode } from "react"
 
 import { AgentClient } from "../../src/ipc/client"
 import { StdioRpcTransport } from "../../src/ipc/stdio-transport"
-import { Za38Tui } from "../../src/tui/app"
+import { runTui, TUI_RENDERER_OPTIONS, Za38Tui, type RenderedTuiOptions } from "../../src/tui/app"
 import { createInteractiveController } from "../../src/interactive/controller"
 import { AgentClientGateway } from "../../src/infrastructure/agent-client-gateway"
-import { createTuiAdapter } from "../../src/tui/application/adapter"
+import { createTuiAdapter, type TuiAdapter } from "../../src/tui/application/adapter"
 import type { InteractiveRuntime } from "../../src/interactive/runtime"
 import * as clipboard from "../../src/tui/platform/clipboard"
 import * as selectionCopy from "../../src/tui/presentation/selection-copy"
@@ -24,6 +26,57 @@ const runtime: InteractiveRuntime = {
   modelName: "enterprise-model",
   executionMode: "local",
   approvalMode: "default",
+}
+
+test("runTui 在空输入 Ctrl+C 后关闭 renderer", async () => {
+  await expectRunTuiCloses(adapter => adapter.dispatch({ type: "shortcut", action: "exit" }))
+})
+
+test("runTui 在 /quit 后关闭 renderer", async () => {
+  await expectRunTuiCloses(adapter => adapter.dispatch({ type: "submit", value: "/quit" }))
+})
+
+async function expectRunTuiCloses(trigger: (adapter: TuiAdapter) => Promise<void>): Promise<void> {
+  const { client, controller, adapter: fixtureAdapter } = createSession()
+  let rendered: ReactElement | null = null
+  let renderedOptions: RenderedTuiOptions | undefined
+  let destroyCount = 0
+  let unmountCount = 0
+  const renderer = { destroy: () => { destroyCount += 1 } }
+  const root = {
+    render: (node: ReactNode) => { rendered = node as ReactElement },
+    unmount: () => { unmountCount += 1 },
+  }
+  const createRenderer = spyOn(openTuiCore, "createCliRenderer").mockResolvedValue(renderer as never)
+  const createReactRoot = spyOn(openTuiReact, "createRoot").mockReturnValue(root as never)
+  let running: Promise<void> | undefined
+  try {
+    running = runTui({ controller })
+    for (let attempt = 0; attempt < 10 && rendered === null; attempt += 1) {
+      await Promise.resolve()
+    }
+    expect(rendered).not.toBeNull()
+    const boundary = rendered as ReactElement<{ children: ReactElement<RenderedTuiOptions> }>
+    renderedOptions = boundary.props.children.props
+
+    await trigger(renderedOptions.adapter)
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(unmountCount).toBe(1)
+    expect(destroyCount).toBe(1)
+    await running
+  } finally {
+    if (destroyCount === 0) {
+      renderedOptions?.onRequestExit()
+      if (running) await running
+    }
+    createReactRoot.mockRestore()
+    createRenderer.mockRestore()
+    client.destroy()
+    await fixtureAdapter.close()
+    await controller.close()
+  }
 }
 
 test("根 TUI 在 mouse-up 时复制 renderer 的非空选区并显示 Toast", async () => {
@@ -67,8 +120,9 @@ test("根 TUI 在 mouse-up 时复制 renderer 的非空选区并显示 Toast", a
   }
 })
 
-test("选区复制路径没有选区时不吞掉 Ctrl+C 的既有清空输入语义", async () => {
-  const { client, controller, adapter } = createSession()
+test("无选区时首次 Ctrl+C 清空草稿并保持 TUI，第二次才请求退出", async () => {
+  let exitCount = 0
+  const { client, controller, adapter } = createSession(false, () => { exitCount += 1 })
   const shouldAttempt = spyOn(selectionCopy, "shouldAttemptSelectionCopy").mockImplementation((_platform, input) => (
     input.type === "key-down" && input.name === "c" && input.ctrl
   ))
@@ -79,7 +133,7 @@ test("选区复制路径没有选区时不吞掉 Ctrl+C 的既有清空输入语
         controller,
         adapter,
         onRequestExit: () => undefined,
-      }), { width: 100, height: 28 })
+      }), { ...TUI_RENDERER_OPTIONS, width: 100, height: 28 })
     })
     await act(async () => {
       await setup.mockInput.typeText("待清空的输入")
@@ -93,6 +147,14 @@ test("选区复制路径没有选区时不吞掉 Ctrl+C 的既有清空输入语
     })
     expect(adapter.getSnapshot().draft).toBe("")
     expect(setup.captureCharFrame()).not.toContain("待清空的输入")
+    expect(setup.renderer.isDestroyed).toBe(false)
+    expect(exitCount).toBe(0)
+
+    await act(async () => {
+      setup.mockInput.pressCtrlC()
+      await setup.flush()
+    })
+    expect(exitCount).toBe(1)
   } finally {
     shouldAttempt.mockRestore()
     if (setup!) await act(async () => { setup.renderer.destroy() })
@@ -111,7 +173,7 @@ test("在输入框中按 Ctrl+C 即时同步清空原生 textarea 缓冲区与 A
         controller,
         adapter,
         onRequestExit: () => undefined,
-      }), { width: 100, height: 28 })
+      }), { ...TUI_RENDERER_OPTIONS, width: 100, height: 28 })
     })
     await act(async () => {
       await setup.mockInput.typeText("输入框测试文本")
@@ -663,7 +725,7 @@ async function sendAndFinish(
 }
 
 /** Composition 语义测试辅助：AgentClient → Controller → TUI Adapter（镜像 index.ts 组合路径）。 */
-function createSession(resume = false) {
+function createSession(resume = false, onRequestExit: () => void = () => undefined) {
   const { client, requests, approvals, writeServer } = createMockClient()
   const controller = createInteractiveController({
     gateway: new AgentClientGateway(client),
@@ -672,7 +734,7 @@ function createSession(resume = false) {
   const adapter = createTuiAdapter({
     controller,
     resume,
-    onRequestExit: () => undefined,
+    onRequestExit,
   })
   return { client, requests, approvals, writeServer, controller, adapter }
 }

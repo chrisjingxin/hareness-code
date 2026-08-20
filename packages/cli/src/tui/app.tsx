@@ -1,6 +1,6 @@
 /** OpenTUI 表现 adapter：把终端输入映射为 TuiIntent，并渲染 Adapter snapshot。 */
 
-import { createCliRenderer, MouseButton, type KeyEvent, type ScrollBoxRenderable, type TextareaRenderable } from "@opentui/core"
+import { createCliRenderer, MouseButton, type CliRendererConfig, type KeyEvent, type ScrollBoxRenderable, type TextareaRenderable } from "@opentui/core"
 import { createRoot, useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react"
 import { useCallback, useEffect, useRef, useSyncExternalStore, type ReactNode } from "react"
 import type { ModelProfile } from "@za38/protocol"
@@ -49,13 +49,26 @@ export type TuiOptions = {
   workspaceExplorer?: WorkspaceExplorer
   resume?: boolean
   promptHistoryFile?: string
-  onRequestExit: () => void
   openWeb?: (threadId: string | null) => Promise<void>
   webHandoff?: PresentationCoordinator
 }
 
 /** runTui 渲染树内部使用的完整选项：adapter 由 runTui 创建一次并注入，跨 handoff 复用。 */
-export type RenderedTuiOptions = TuiOptions & { adapter: TuiAdapter }
+export type RenderedTuiOptions = TuiOptions & { adapter: TuiAdapter; onRequestExit: () => void }
+
+/** Harness 接管 Ctrl+C 的清空、取消与退出语义，renderer 不得自行销毁。 */
+export const TUI_RENDERER_OPTIONS = {
+  exitOnCtrlC: false,
+  externalOutputMode: "passthrough",
+  targetFps: 60,
+  maxFps: 60,
+  gatherStats: false,
+  clearOnShutdown: true,
+  useKittyKeyboard: {},
+  autoFocus: false,
+  openConsoleOnError: false,
+  useMouse: true,
+} as const satisfies CliRendererConfig
 
 /** 根层接管切换：Web 持有输入权时卸载 TUI 渲染，归还后复用同一 Controller/Adapter。 */
 export function WebAwareRoot(options: RenderedTuiOptions) {
@@ -536,39 +549,13 @@ function displayedModelName(snapshot: InteractiveSnapshot): string | undefined {
 /** 创建 OpenTUI renderer、挂载错误边界；退出时将控制权交回 CLI 关闭 Python sidecar。 */
 export async function runTui(options: TuiOptions): Promise<void> {
   registerCommonSyntaxParsers()
-  // Adapter 在 CLI 层创建一次：handoff 往返复用同一实例，本地表现状态跨会话保留。
-  const adapter = createTuiAdapter({
-    controller: options.controller,
-    gateway: options.gateway,
-    workspaceExplorer: options.workspaceExplorer,
-    promptHistoryFile: options.promptHistoryFile,
-    resume: options.resume,
-    onRequestExit: options.onRequestExit,
-    openWeb: options.openWeb,
-    dispatchGate: options.webHandoff ? (intent) => options.webHandoff!.tuiDispatch(intent) : undefined,
-  })
-  const renderedOptions: RenderedTuiOptions = { ...options, adapter }
-  const renderer = await createCliRenderer({
-    externalOutputMode: "passthrough",
-    targetFps: 60,
-    maxFps: 60,
-    gatherStats: false,
-    clearOnShutdown: true,
-    useKittyKeyboard: {},
-    autoFocus: false,
-    openConsoleOnError: false,
-    useMouse: true,
-  })
+  const renderer = await createCliRenderer(TUI_RENDERER_OPTIONS)
   const uninstallVtGuard = win32InstallVtInputGuard()
   const root = createRoot(renderer)
-  // closeRef 让 coordinator 退出 handler 与 React 子树共享同一 close 路径，
-  // 注册先于 render，避免 Browser 在挂载前发来 exit.requested 漏掉 handler。
-  const closeRef: { current: (() => void) | null } = { current: null }
-  const unregisterExit = options.webHandoff?.registerExitHandler(() => {
-    closeRef.current?.()
-  })
   await new Promise<void>(resolve => {
     let closed = false
+    let adapter: TuiAdapter
+    let unregisterExit: (() => void) | undefined
     const close = () => {
       if (closed) return
       closed = true
@@ -581,10 +568,23 @@ export async function runTui(options: TuiOptions): Promise<void> {
         resolve()
       })
     }
-    closeRef.current = close
+    // Adapter 在 CLI 层创建一次：handoff 往返复用同一实例，本地表现状态跨会话保留。
+    // 快捷键、Slash Command、错误边界与 Web 退出必须共享此处唯一关闭路径。
+    adapter = createTuiAdapter({
+      controller: options.controller,
+      gateway: options.gateway,
+      workspaceExplorer: options.workspaceExplorer,
+      promptHistoryFile: options.promptHistoryFile,
+      resume: options.resume,
+      onRequestExit: close,
+      openWeb: options.openWeb,
+      dispatchGate: options.webHandoff ? (intent) => options.webHandoff!.tuiDispatch(intent) : undefined,
+    })
+    unregisterExit = options.webHandoff?.registerExitHandler(close)
+    const renderedOptions: RenderedTuiOptions = { ...options, adapter, onRequestExit: close }
     root.render(
       <TuiErrorBoundary onRequestExit={close}>
-        <WebAwareRoot {...renderedOptions} onRequestExit={close} />
+        <WebAwareRoot {...renderedOptions} />
       </TuiErrorBoundary>,
     )
   })

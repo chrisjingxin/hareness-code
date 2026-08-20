@@ -242,7 +242,6 @@ async function execute(command: Command): Promise<void> {
         gateway,
         workspaceExplorer,
         resume: command.resume,
-        onRequestExit: () => undefined,
         webHandoff: presentationCoordinator,
         openWeb: () => presentationCoordinator!.open(),
       })
