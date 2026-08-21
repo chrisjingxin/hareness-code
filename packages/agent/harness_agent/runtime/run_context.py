@@ -81,6 +81,8 @@ class RunContext:
     )
     # 额外工作目录 registry：可变、按引用共享，不进入执行资源池 fingerprint。
     workspace_root_registry: Any | None = field(default=None, repr=False)
+    # Host-owned 的进程内 deferred 工具 reveal 存储；按 thread_id 隔离已激活的低频/MCP 工具。
+    deferred_tool_store: Any | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         """在执行前验证 thread 与 snapshot 的绑定，阻止跨 project 注入。"""

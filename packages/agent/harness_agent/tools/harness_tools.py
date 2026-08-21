@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from typing import Any
 
 from langchain_core.tools import StructuredTool
@@ -50,7 +50,6 @@ def create_harness_tools(
     lsp_manager: Any | None = None,
     mcp_tools: Sequence[Any] | None = None,
     deferred_builtin_names: frozenset[str] | None = None,
-    reveal: Callable[[Sequence[str]], None] | None = None,
 ) -> list[StructuredTool]:
     """创建所有 Harness 扩展工具的 BaseTool 实例列表。
 
@@ -64,8 +63,6 @@ def create_harness_tools(
             工具也进入 ``tool_search`` 候选（is_mcp=False 走内置权重），
             便于模型在延迟加载模式下发现它们。None 时保持 Phase 1 语义
             （候选仅 MCP 工具）。
-        reveal: 搜索结果命中后回调（如 ``DeferredToolMiddleware.reveal``）；
-            命中工具在下一轮模型请求中可见。None 时仅返回结果不做 reveal。
 
     Returns:
         可直接传入 create_deep_agent(tools=...) 的工具列表。
@@ -165,12 +162,7 @@ def create_harness_tools(
                 "is_mcp": False,
                 "input_schema": _tool_input_schema(tool),
             })
-        result = _tool_search_impl(query, available_tools=candidates or None)
-        if reveal is not None:
-            hit_names = [item["name"] for item in result.get("results", ())]
-            if hit_names:
-                reveal(hit_names)
-        return json.dumps(result, ensure_ascii=False)
+        return json.dumps(_tool_search_impl(query, available_tools=candidates or None), ensure_ascii=False)
 
     tools.append(StructuredTool.from_function(
         func=_tool_search,

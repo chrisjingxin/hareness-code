@@ -152,6 +152,7 @@ from harness_agent.runtime.resource_ownership import (
     SharedResourceOwner,
 )
 from harness_agent.threads.context_lifecycle import ContextLifecycle, ContextRefreshError
+from harness_agent.threads.deferred_store import ThreadDeferredToolStore
 from harness_agent.threads.snapshots import ThreadSnapshotStore
 from harness_agent.threads.thread_persistence import ThreadPersistence, ThreadPersistenceError
 from harness_agent.tools.file_tool_metrics import FileToolMetrics
@@ -335,6 +336,8 @@ class AgentHost:
         self._thread_persistence: ThreadPersistence | None = None
         # Snapshot 只存在于 Host 进程内；不复用 SQLite，也不跨 Host/进程恢复。
         self._snapshot_store = ThreadSnapshotStore()
+        # Deferred 工具 reveal 状态按 Thread 隔离存储于 Host 生命周期内。
+        self._deferred_tool_store = ThreadDeferredToolStore()
         # 文件工具指标同样只保留在 Host；它不携带任何源码、路径或 Snapshot 句柄。
         self._file_tool_metrics = FileToolMetrics()
         self._agent_engine_pool: AgentEnginePool | None = None
@@ -3117,6 +3120,7 @@ class AgentHost:
             skill_registry=registry,
             delegation_policy=spec.effective_policy.delegation,
             snapshot_store=self._snapshot_store,
+            deferred_tool_store=self._deferred_tool_store,
             approval_presentations=run.approval_presentations,
             workspace_root_registry=self._workspace_root_registry,
         )

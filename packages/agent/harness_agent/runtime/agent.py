@@ -952,7 +952,6 @@ def create_harness_agent(
             if defer_middleware is not None
             else None
         ),
-        reveal=defer_middleware.reveal if defer_middleware is not None else None,
     )
     all_tools.extend(harness_tool_list)
     # DeepAgents 没有 delete_file builtin；只把 contract 的非 builtin

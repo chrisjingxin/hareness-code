@@ -807,3 +807,93 @@ async def test_defer_hidden_tools_not_searchable_in_capability_view():
     assert [item["name"] for item in visible["results"]] == ["lsp"]
     # 摘要不列出被隐藏工具。
     assert not any("web_search" in content for content in model.system_contents)
+
+
+async def test_defer_tools_isolated_across_multiple_threads():
+    """验证同一共享图在多 Thread 运行下，deferred 工具 reveal 严格按 Thread 隔离（HC-160）。"""
+    from langchain_core.tools import StructuredTool
+
+    from harness_agent.runtime.agent import create_harness_agent
+
+    class RecordingModel(ToolCallingFakeChatModel):
+        bindings: list[list[str]] = Field(default_factory=list)
+
+        def bind_tools(
+            self,
+            tools: Sequence[Any],
+            *,
+            tool_choice: str | None = None,
+            **kwargs: Any,
+        ) -> Runnable:
+            self.bindings.append(
+                sorted(getattr(t, "name", str(t)) for t in tools)
+            )
+            return self
+
+    def _mcp(name: str, description: str) -> StructuredTool:
+        def _impl(x: str) -> str:
+            return f"{name} handled {x}"
+
+        return StructuredTool.from_function(
+            func=_impl,
+            name=name,
+            description=description,
+        )
+
+    # 1. 创建共享图
+    mcp_tools = [_mcp("server_a_tool", "A 工具"), _mcp("server_b_tool", "B 工具")]
+
+    # 预置消息：Thread A 搜索并调用 server_a_tool；Thread B 仅说 done
+    messages_a = [
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "tool_search", "args": {"query": "server_a"}, "id": "t1"}],
+        ),
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "server_a_tool", "args": {"x": "hi"}, "id": "t2"}],
+        ),
+        AIMessage(content="done_a"),
+    ]
+    messages_b = [AIMessage(content="done_b")]
+
+    all_messages = iter([*messages_a, *messages_b])
+
+    model = RecordingModel(messages=all_messages)
+    model.profile = {"max_input_tokens": 200000}
+
+    agent = create_harness_agent(
+        model,
+        tools=mcp_tools,
+        enable_skills=False,
+        enable_memory=False,
+        enable_ask_user=False,
+        defer_tools=True,
+    )
+
+    # 运行 Thread A
+    await agent.ainvoke(
+        {"messages": []},
+        config={"configurable": {"thread_id": "thread-A"}},
+    )
+
+    # Thread A 第 1 轮不含 server_a_tool，第 2 轮包含 server_a_tool
+    assert "server_a_tool" not in model.bindings[0]
+    assert "server_a_tool" in model.bindings[1]
+
+    # 记录当前已绑定的轮次数
+    rounds_before_b = len(model.bindings)
+
+    # 运行 Thread B（同一个 agent 实例）
+    await agent.ainvoke(
+        {"messages": []},
+        config={"configurable": {"thread_id": "thread-B"}},
+    )
+
+    # 验证 Thread B 的模型绑定中绝不包含 Thread A reveal 的 server_a_tool！
+    thread_b_binding = model.bindings[rounds_before_b]
+    assert "server_a_tool" not in thread_b_binding
+    assert "server_b_tool" not in thread_b_binding
+    assert "lsp" not in thread_b_binding
+    assert "tool_search" in thread_b_binding
+
