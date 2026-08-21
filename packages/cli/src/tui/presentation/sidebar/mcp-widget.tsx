@@ -38,26 +38,23 @@ export function McpWidget(props: McpWidgetProps) {
 
   return (
     <box flexDirection="column" paddingTop={1} paddingBottom={1} border={["bottom"]} borderColor={tuiTheme.border}>
-      <box flexDirection="row" justifyContent="space-between">
-        <text fg={tuiTheme.subtle}>
-          <b>MCP 服务</b>
-        </text>
-        <text fg={tuiTheme.muted}>
-          {items.length ? `${connectedCount}/${items.length}` : "0/0"}
-        </text>
-      </box>
+      <text fg={tuiTheme.primary}>
+        <b>MCP 服务</b>
+      </text>
       {items.length === 0 ? (
-        <text fg={tuiTheme.subtle}>无配置的 MCP 服务</text>
+        <box paddingTop={1}>
+          <text fg={tuiTheme.subtle}>0/0 · 无配置的 MCP 服务</text>
+        </box>
       ) : (
-        <box flexDirection="column" paddingTop={0}>
+        <box flexDirection="column" paddingTop={1}>
+          <text fg={tuiTheme.text}>{connectedCount}/{items.length} 已连接</text>
+          <box flexDirection="row" flexWrap="wrap" gap={2} paddingTop={1}>
           {items.slice(0, 5).map(server => {
             const { dot, color } = mcpStatusDot(server.status)
             return (
-              <box key={server.name} flexDirection="row" justifyContent="space-between">
-                <box flexDirection="row" gap={1}>
-                  <text fg={color}>{dot}</text>
-                  <text fg={tuiTheme.text}>{server.name}</text>
-                </box>
+              <box key={server.name} flexDirection="row" gap={1}>
+                <text fg={color}>{dot}</text>
+                <text fg={tuiTheme.text}>{server.name}</text>
                 <text fg={color}>{mcpStatusLabel(server.status)}</text>
               </box>
             )
@@ -65,6 +62,7 @@ export function McpWidget(props: McpWidgetProps) {
           {items.length > 5 ? (
             <text fg={tuiTheme.subtle}>+{items.length - 5} 更多…</text>
           ) : null}
+          </box>
         </box>
       )}
     </box>

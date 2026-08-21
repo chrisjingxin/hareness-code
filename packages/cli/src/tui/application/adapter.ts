@@ -81,6 +81,7 @@ import type {
   WorkspaceTreeState,
   WorkspacePreviewState,
 } from "../../workspace/types"
+import type { GitChangedFile } from "../../interactive/runtime"
 
 export type SidebarTab = "files" | "status"
 
@@ -98,6 +99,8 @@ export type SidebarState = {
   drawerOpen: boolean
   focus: "chat" | "sidebar"
   activeTab: SidebarTab
+  /** Git 工作树当前变更列表；undefined 表示非 Git、探测失败或尚未完成。 */
+  workspaceChangedFiles?: readonly GitChangedFile[]
   fileTree: SidebarFileTreeState
   preview: WorkspacePreviewState | null
 }
@@ -196,6 +199,8 @@ export type TuiAdapterOptions = {
   resume?: boolean
   onRequestExit: () => void
   openWeb?: (threadId: string | null) => Promise<void>
+  /** 只读 Git 工作树变更列表；不注入时状态页不展示工作区变更。 */
+  workspaceChangeProbe?: () => Promise<readonly GitChangedFile[] | null>
   /** 输入租约门禁：注入 Coordinator 的 tuiDispatch 后，仅 tui-active 阶段受理可变 intent。 */
   dispatchGate?: (intent: InteractiveIntent) => Promise<IntentOutcome>
 }
@@ -217,6 +222,7 @@ class TuiAdapterImpl implements TuiAdapter {
   private readonly promptHistoryFile: string | undefined
   private readonly onRequestExit: () => void
   private readonly openWeb?: (threadId: string | null) => Promise<void>
+  private readonly workspaceChangeProbe?: () => Promise<readonly GitChangedFile[] | null>
   private readonly dispatchGate: ((intent: InteractiveIntent) => Promise<IntentOutcome>) | undefined
   private readonly listeners = new Set<(snapshot: TuiAdapterSnapshot) => void>()
   private readonly unsubscribeInteractive: () => void
@@ -254,6 +260,7 @@ class TuiAdapterImpl implements TuiAdapter {
   private showToolDetails = false
   private expandedTools: ReadonlySet<string> = new Set()
   private scrollRequest = 0
+  private workspaceChangeGeneration = 0
   private transientNotice: TuiAdapterSnapshot["transientNotice"]
   private closed = false
 
@@ -267,6 +274,7 @@ class TuiAdapterImpl implements TuiAdapter {
     this.historyStore = options.promptHistoryStore ?? new FilePromptHistoryStore(options.promptHistoryFile)
     this.onRequestExit = options.onRequestExit
     this.openWeb = options.openWeb
+    this.workspaceChangeProbe = options.workspaceChangeProbe
     this.dispatchGate = options.dispatchGate
 
     if (this.workspaceExplorer) {
@@ -304,6 +312,7 @@ class TuiAdapterImpl implements TuiAdapter {
     }
 
     this.snapshot = this.buildSnapshot()
+    void this.refreshWorkspaceChanges()
     if (this.workspaceExplorer) {
       // 首次加载必须在 snapshot 初始化之后触发：Explorer 的 refreshTree 会在首个 await
       // 之前同步 publish loading，上面的订阅随之调用 this.publish()；若此时尚未给
@@ -312,12 +321,14 @@ class TuiAdapterImpl implements TuiAdapter {
       void this.workspaceExplorer.dispatch({ type: "workspace.load" })
     }
     this.unsubscribeInteractive = this.controller.subscribe(interactive => {
+      const previousActiveRun = this.snapshot.interactive.activeRun
       const previousRequestId = this.snapshot.interactive.interaction?.requestId
       const nextRequestId = interactive.interaction?.requestId
       // 反向问答/审批会在 Run 进行中插入时间线；必须主动滚动，否则卡片落在
       // 当前视口下方，用户只能看到旧的 spinner，直到 Interaction 超时。
       if (nextRequestId && nextRequestId !== previousRequestId) this.scrollRequest += 1
       this.publish()
+      if (previousActiveRun && !interactive.activeRun) void this.refreshWorkspaceChanges()
     })
 
     void this.historyStore.load().then(history => {
@@ -457,6 +468,24 @@ class TuiAdapterImpl implements TuiAdapter {
     this.publish()
   }
 
+  /** 启动与每次 Run 结束后刷新 Git 工作树变更列表；generation 防止旧探测覆盖新结果。 */
+  private async refreshWorkspaceChanges(): Promise<void> {
+    if (!this.workspaceChangeProbe) return
+    const generation = ++this.workspaceChangeGeneration
+    let files: readonly GitChangedFile[] | null
+    try {
+      files = await this.workspaceChangeProbe()
+    } catch {
+      files = null
+    }
+    if (this.closed || generation !== this.workspaceChangeGeneration) return
+    this.sidebarState = {
+      ...this.sidebarState,
+      workspaceChangedFiles: files ?? undefined,
+    }
+    this.publish()
+  }
+
   private switchSidebarFocus(): void {
     const nextFocus = this.sidebarState.focus === "chat" ? "sidebar" : "chat"
     this.sidebarState = { ...this.sidebarState, focus: nextFocus }
@@ -467,6 +496,7 @@ class TuiAdapterImpl implements TuiAdapter {
     const nextTab = tab ?? (this.sidebarState.activeTab === "files" ? "status" : "files")
     this.sidebarState = { ...this.sidebarState, activeTab: nextTab }
     this.publish()
+    if (nextTab === "status") void this.refreshWorkspaceChanges()
   }
 
   private selectFileTreeNode(index: number): void {

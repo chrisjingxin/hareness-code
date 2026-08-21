@@ -174,7 +174,7 @@ test("CodePreviewPane 组件不同状态渲染契约", () => {
 import { Sidebar } from "../../../src/tui/presentation/sidebar"
 import { mock } from "bun:test"
 
-test("Sidebar 抽屉区域在 mouse-up 时转发 onSelectionMouseUp 并调用 stopPropagation 避免冒泡到 backdrop 或根层", () => {
+test("Sidebar 面板区域在 mouse-up 时转发 onSelectionMouseUp 并阻止冒泡到根层", () => {
   const onToggle = mock(() => {})
   const onSelectionMouseUp = mock((_event: { button: number }) => {})
   const stopPropagation = mock(() => {})
@@ -195,17 +195,15 @@ test("Sidebar 抽屉区域在 mouse-up 时转发 onSelectionMouseUp 并调用 st
   })
 
   expect(sidebarElement).not.toBeNull()
-  // 查找内部抽屉 box（第二个子元素）的 onMouseUp handler
-  const drawerBox = (sidebarElement as any).props.children[1]
-  expect(drawerBox).toBeDefined()
-  expect(typeof drawerBox.props.onMouseUp).toBe("function")
+  // 120 列使用新版停靠布局，返回值本身就是右侧面板。
+  const panelBox = sidebarElement as any
+  expect(typeof panelBox.props.onMouseUp).toBe("function")
 
   const fakeEvent = { button: 0, stopPropagation }
-  drawerBox.props.onMouseUp(fakeEvent)
+  panelBox.props.onMouseUp(fakeEvent)
 
   expect(onSelectionMouseUp).toHaveBeenCalledTimes(1)
   expect(onSelectionMouseUp).toHaveBeenCalledWith(fakeEvent)
   expect(stopPropagation).toHaveBeenCalledTimes(1)
   expect(onToggle).not.toHaveBeenCalled()
 })
-

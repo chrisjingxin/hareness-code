@@ -32,22 +32,16 @@ export function CwdWidget(props: CwdWidgetProps) {
 
   return (
     <box flexDirection="column" paddingTop={1} paddingBottom={1} border={["bottom"]} borderColor={tuiTheme.border}>
-      <box flexDirection="row" justifyContent="space-between" paddingBottom={0}>
-        <text fg={tuiTheme.subtle}>
-          <b>工作目录</b>
-        </text>
-        {branch ? (
-          <text fg={tuiTheme.muted}>
-            ⎇ {branch}
-          </text>
-        ) : null}
+      <text fg={tuiTheme.primary}>
+        <b>工作目录</b>
+      </text>
+      <box flexDirection="row" gap={1} paddingTop={1}>
+        <text fg={tuiTheme.success}>●</text>
+        <text fg={tuiTheme.text}>{basename}</text>
       </box>
-      <text fg={tuiTheme.text}>
-        <b>{basename}</b>
-      </text>
-      <text fg={tuiTheme.muted}>
-        {displayPath}
-      </text>
+      <box paddingLeft={2}>
+        <text fg={tuiTheme.muted}>{branch ?? displayPath}</text>
+      </box>
     </box>
   )
 }

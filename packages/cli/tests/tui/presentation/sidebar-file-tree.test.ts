@@ -5,8 +5,17 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createTuiAdapter } from "../../../src/tui/application/adapter"
+import { fileTypeBadge } from "../../../src/tui/presentation/sidebar/file-tree-widget"
 import { createWorkspaceExplorer } from "../../../src/workspace/explorer"
 import type { WorkspaceExplorer, WorkspaceSnapshot, WorkspaceIntent } from "../../../src/workspace/types"
+
+test("fileTypeBadge 使用 Windows 稳定的短文字标签", () => {
+  expect(fileTypeBadge("sidebar.tsx", "file")).toBe("TSX")
+  expect(fileTypeBadge("README.md", "file")).toBe("MD")
+  expect(fileTypeBadge("Dockerfile", "file")).toBe("FILE")
+  expect(fileTypeBadge("src", "directory")).toBe(null)
+  expect(fileTypeBadge("latest", "symlink")).toBe("LINK")
+})
 
 /** 等待条件成立的轻量轮询；超时即失败。 */
 async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {

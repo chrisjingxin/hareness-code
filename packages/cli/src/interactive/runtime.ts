@@ -17,6 +17,15 @@ export type GitWorkspaceState =
   | { kind: "not-repository" }
   | { kind: "unavailable"; message: string }
 
+/** Git porcelain 变更的稳定展示形状；不把 XY 细节泄漏到表现层。 */
+export type GitChangedFile = {
+  readonly path: string
+  readonly status: "modified" | "added" | "deleted" | "renamed" | "copied" | "untracked" | "conflicted"
+  /** 相对 HEAD 的新增/删除行数；null 表示二进制文件或统计不可用。 */
+  readonly addedLines: number | null
+  readonly removedLines: number | null
+}
+
 export type InteractiveRuntime = {
   workspace: string
   gitWorkspace?: GitWorkspaceState

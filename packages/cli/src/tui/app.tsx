@@ -41,6 +41,7 @@ import {
 } from "../presentation-coordinator"
 import type { AgentGateway } from "../interactive/ports"
 import type { WorkspaceExplorer } from "../workspace/types"
+import { detectGitChangedFiles } from "../infrastructure/git-workspace"
 
 /** 正式 TUI 的启动参数；Controller 由 CLI Composition Root 创建并注入。 */
 export type TuiOptions = {
@@ -103,6 +104,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
 
   const inputRef = useRef<TextareaRenderable | null>(null)
   const conversationScrollRef = useRef<ScrollBoxRenderable | null>(null)
+  const statusScrollRef = useRef<ScrollBoxRenderable | null>(null)
   const skillSearchRef = useRef<TextareaRenderable | null>(null)
   const threadSearchRef = useRef<TextareaRenderable | null>(null)
   const modelSearchRef = useRef<TextareaRenderable | null>(null)
@@ -302,7 +304,27 @@ export function Za38Tui(options: RenderedTuiOptions) {
         void adapter.dispatch({ type: "sidebar-tab-switch", tab: "status" })
         return
       }
-      if (key.sequence === "@") {
+      if (snapshot.sidebar.activeTab === "status") {
+        const statusScroll = statusScrollRef.current
+        const lineDelta = key.name === "up" || key.name === "k" ? -1
+          : key.name === "down" || key.name === "j" ? 1
+            : undefined
+        const pageDelta = key.name === "pageup" ? -1 : key.name === "pagedown" ? 1 : undefined
+        if (lineDelta !== undefined || pageDelta !== undefined || key.name === "home" || key.name === "end") {
+          key.preventDefault()
+          if (statusScroll && !statusScroll.isDestroyed) {
+            if (key.name === "home") statusScroll.scrollTo(0)
+            else if (key.name === "end") statusScroll.scrollTo(statusScroll.scrollHeight)
+            else if (pageDelta !== undefined) {
+              statusScroll.scrollBy(pageDelta * Math.max(1, Math.floor(statusScroll.height / 2)))
+            } else if (lineDelta !== undefined) {
+              statusScroll.scrollBy(lineDelta)
+            }
+          }
+          return
+        }
+      }
+      if (snapshot.sidebar.activeTab === "files" && key.sequence === "@") {
         key.preventDefault()
         const current = snapshot.sidebar.fileTree.rows[snapshot.sidebar.fileTree.selectedIndex]
         if (current && current.kind !== "directory") {
@@ -310,27 +332,27 @@ export function Za38Tui(options: RenderedTuiOptions) {
         }
         return
       }
-      if (key.name === "up" || key.name === "k") {
+      if (snapshot.sidebar.activeTab === "files" && (key.name === "up" || key.name === "k")) {
         key.preventDefault()
         void adapter.dispatch({ type: "file-tree-navigate", direction: "up" })
         return
       }
-      if (key.name === "down" || key.name === "j") {
+      if (snapshot.sidebar.activeTab === "files" && (key.name === "down" || key.name === "j")) {
         key.preventDefault()
         void adapter.dispatch({ type: "file-tree-navigate", direction: "down" })
         return
       }
-      if (key.name === "left" || key.name === "h") {
+      if (snapshot.sidebar.activeTab === "files" && (key.name === "left" || key.name === "h")) {
         key.preventDefault()
         void adapter.dispatch({ type: "file-tree-navigate", direction: "parent" })
         return
       }
-      if (key.name === "right" || key.name === "l") {
+      if (snapshot.sidebar.activeTab === "files" && (key.name === "right" || key.name === "l")) {
         key.preventDefault()
         void adapter.dispatch({ type: "file-tree-navigate", direction: "child" })
         return
       }
-      if (key.name === "return" || key.name === "space") {
+      if (snapshot.sidebar.activeTab === "files" && (key.name === "return" || key.name === "space")) {
         key.preventDefault()
         const current = snapshot.sidebar.fileTree.rows[snapshot.sidebar.fileTree.selectedIndex]
         if (current) {
@@ -437,6 +459,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
           onInsertRef={path => { void adapter.dispatch({ type: "file-preview-insert-ref", path }) }}
           onClosePreview={() => { void adapter.dispatch({ type: "file-preview-close" }) }}
           onSelectionMouseUp={handleSelectionMouseUp}
+          statusScrollRef={statusScrollRef}
         />
       ) : null}
       <SkillPicker
@@ -549,6 +572,10 @@ function displayedModelName(snapshot: InteractiveSnapshot): string | undefined {
 /** 创建 OpenTUI renderer、挂载错误边界；退出时将控制权交回 CLI 关闭 Python sidecar。 */
 export async function runTui(options: TuiOptions): Promise<void> {
   registerCommonSyntaxParsers()
+  const gitWorkspace = options.controller.getSnapshot().runtime.gitWorkspace
+  const gitRoot = gitWorkspace?.kind === "branch" || gitWorkspace?.kind === "detached"
+    ? gitWorkspace.root
+    : undefined
   const renderer = await createCliRenderer(TUI_RENDERER_OPTIONS)
   const uninstallVtGuard = win32InstallVtInputGuard()
   const root = createRoot(renderer)
@@ -578,6 +605,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
       resume: options.resume,
       onRequestExit: close,
       openWeb: options.openWeb,
+      workspaceChangeProbe: gitRoot ? () => detectGitChangedFiles(gitRoot) : undefined,
       dispatchGate: options.webHandoff ? (intent) => options.webHandoff!.tuiDispatch(intent) : undefined,
     })
     unregisterExit = options.webHandoff?.registerExitHandler(close)

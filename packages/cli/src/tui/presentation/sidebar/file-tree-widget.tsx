@@ -36,10 +36,18 @@ function hasCollapsedAncestor(filePath: string, collapsed: ReadonlySet<string>):
   return false
 }
 
-import { getFileIconInfo } from "./file-icons"
+/** 文件类型使用短文字而非 Emoji，避免 Windows 字体的双宽与缺字问题。 */
+export function fileTypeBadge(name: string, kind: WorkspaceTreeRow["kind"]): string | null {
+  if (kind === "directory") return null
+  if (kind === "symlink") return "LINK"
+  const dotIndex = name.lastIndexOf(".")
+  if (dotIndex < 0 || dotIndex === name.length - 1) return "FILE"
+  const extension = name.slice(dotIndex + 1).toUpperCase()
+  return extension.length <= 4 ? extension : extension.slice(0, 4)
+}
 
 export function FileTreeWidget(props: FileTreeWidgetProps) {
-  const { fileTree, focused } = props
+  const { fileTree } = props
   const { status, rows, selectedIndex, limited, message } = fileTree
   const visible = visibleTreeRows(rows)
 
@@ -61,29 +69,29 @@ export function FileTreeWidget(props: FileTreeWidgetProps) {
       ) : rows.length === 0 ? (
         <text fg={tuiTheme.subtle}>工作区为空</text>
       ) : (
-        <scrollbox flexGrow={1} flexDirection="column" overflow="hidden">
+        <scrollbox flexGrow={1} contentOptions={{ flexDirection: "column" }} overflow="hidden">
           {visible.map((row, index) => {
             const isSelected = index === selectedIndex
-            const iconInfo = getFileIconInfo(row.name, row.kind, row.expanded)
+            const badge = fileTypeBadge(row.name, row.kind)
             const indent = "  ".repeat(row.depth)
             const collapseArrow = row.kind === "directory"
               ? (row.loading ? "… " : row.expanded ? "▾ " : "▸ ")
               : "  "
 
-            const textColor = isSelected && focused
-              ? tuiTheme.primary
-              : (row.kind === "directory" ? iconInfo.color : tuiTheme.text)
-            const iconColor = isSelected && focused ? tuiTheme.primary : iconInfo.color
-            const arrowColor = isSelected && focused
-              ? tuiTheme.primary
-              : (row.kind === "directory" ? iconInfo.color : tuiTheme.subtle)
+            const textColor = isSelected
+              ? tuiTheme.background
+              : (row.kind === "directory" ? tuiTheme.warning : tuiTheme.text)
+            const arrowColor = isSelected
+              ? tuiTheme.background
+              : (row.kind === "directory" ? tuiTheme.warning : tuiTheme.subtle)
 
             return (
               <box
                 key={row.path}
                 flexDirection="row"
                 alignItems="center"
-                backgroundColor={isSelected && focused ? tuiTheme.surfaceElevated : undefined}
+                justifyContent="space-between"
+                backgroundColor={isSelected ? tuiTheme.pickerActive : undefined}
                 onMouseUp={() => {
                   props.onSelectIndex(index)
                   if (row.kind === "directory") {
@@ -93,16 +101,15 @@ export function FileTreeWidget(props: FileTreeWidgetProps) {
                   }
                 }}
               >
-                <text>
-                  <span fg={isSelected && focused ? tuiTheme.primary : tuiTheme.subtle}>
-                    {isSelected && focused ? "› " : "  "}
-                  </span>
+                <text flexShrink={1}>
                   <span fg={arrowColor}>{indent}{collapseArrow}</span>
-                  <span fg={iconColor}>{iconInfo.icon}</span>
                   <span fg={textColor}>
                     {row.kind === "directory" ? <b>{row.name}</b> : row.name}
                   </span>
                 </text>
+                {badge ? (
+                  <text fg={isSelected ? tuiTheme.background : tuiTheme.muted}>{badge}</text>
+                ) : null}
               </box>
             )
           })}

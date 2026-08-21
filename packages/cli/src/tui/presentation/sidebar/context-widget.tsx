@@ -23,9 +23,11 @@ export function formatTokenCount(tokens: number): string {
 /** 渲染字符进度条。 */
 export function renderProgressBar(percentage: number, width = 16): string {
   const safePercentage = Math.max(0, Math.min(100, percentage))
-  const filledCount = Math.round((safePercentage / 100) * width)
+  const filledCount = safePercentage > 0
+    ? Math.max(1, Math.round((safePercentage / 100) * width))
+    : 0
   const emptyCount = Math.max(0, width - filledCount)
-  return "█".repeat(filledCount) + "░".repeat(emptyCount)
+  return "▮".repeat(filledCount) + "─".repeat(emptyCount)
 }
 
 /** 计算实时/单轮每秒输出 Token 数（TPS）。 */
@@ -68,44 +70,38 @@ export function ContextWidget(props: ContextWidgetProps) {
   const tps = calculateTps(outputTokens, lastRun?.durationMs)
   const modelName = modelSelectionLabel(props.interactive)
 
-  const barWidth = 20
+  const barWidth = 16
   const safePercentage = Math.max(0, Math.min(100, usagePercentage))
-  const filledCount = Math.round((safePercentage / 100) * barWidth)
+  const filledCount = safePercentage > 0
+    ? Math.max(1, Math.round((safePercentage / 100) * barWidth))
+    : 0
   const emptyCount = Math.max(0, barWidth - filledCount)
 
   return (
     <box flexDirection="column" paddingTop={1} paddingBottom={1} border={["bottom"]} borderColor={tuiTheme.border}>
-      <box flexDirection="row" justifyContent="space-between">
-        <text fg={tuiTheme.subtle}>
-          <b>上下文</b>
-        </text>
-        <text fg={tuiTheme.muted}>
-          {modelName ? `${modelName}` : ""}
-        </text>
+      <text fg={tuiTheme.primary}>
+        <b>上下文</b>
+      </text>
+      <box flexDirection="row" justifyContent="space-between" paddingTop={1}>
+        <text fg={tuiTheme.text}>{modelName || "未绑定模型"}</text>
+        {tps ? <text fg={tuiTheme.subtle}>{tps} tok/s</text> : null}
       </box>
-      <box flexDirection="row" justifyContent="space-between" paddingTop={0}>
+      <box flexDirection="row" justifyContent="space-between" alignItems="center">
         <text fg={tuiTheme.text}>
           {formatTokenCount(totalTokens)} / {formatTokenCount(contextCap)}
-          {isEstimated ? <span fg={tuiTheme.subtle}> (估算)</span> : null}
         </text>
         <text fg={usagePercentage > 85 ? tuiTheme.warning : tuiTheme.muted}>
           {usagePercentage.toFixed(1)}%
         </text>
-      </box>
-      <box paddingTop={0} flexDirection="row" justifyContent="space-between" alignItems="center">
         <text>
           <span fg={usagePercentage > 85 ? tuiTheme.warning : tuiTheme.primary}>
-            {"█".repeat(filledCount)}
+            {"▮".repeat(filledCount)}
           </span>
-          <span fg={tuiTheme.panel}>
-            {"░".repeat(emptyCount)}
+          <span fg={tuiTheme.muted}>
+            {"─".repeat(emptyCount)}
           </span>
         </text>
-        {tps ? (
-          <text fg={tuiTheme.subtle}>
-            {tps} tok/s
-          </text>
-        ) : null}
+        {isEstimated ? <text fg={tuiTheme.subtle}>估算</text> : null}
       </box>
     </box>
   )

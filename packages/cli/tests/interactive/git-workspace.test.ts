@@ -2,11 +2,11 @@
 
 import { expect, test } from "bun:test"
 import { execFileSync } from "node:child_process"
-import { mkdtempSync, realpathSync, rmSync } from "node:fs"
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { detectGitWorkspace } from "../../src/infrastructure/git-workspace"
+import { detectGitChangedFiles, detectGitWorkspace } from "../../src/infrastructure/git-workspace"
 
 /** 在临时目录里执行 git；测试进程本身运行在 git 仓库内，git 必然存在。 */
 function runGit(cwd: string, args: string[]): void {
@@ -61,4 +61,29 @@ test("不存在的目录返回 unavailable", async () => {
   rmSync(missing, { recursive: true, force: true })
   const state = await detectGitWorkspace(missing)
   expect(state.kind).toBe("unavailable")
+})
+
+test("Git 变更列表包含路径与状态，非 Git 返回 null", async () => {
+  const dir = initRepository("za38-git-changes-")
+  const plainDir = mkdtempSync(join(tmpdir(), "za38-git-changes-plain-"))
+  try {
+    writeFileSync(join(dir, "tracked.txt"), "before\n")
+    writeFileSync(join(dir, "renamed-before.txt"), "rename\n")
+    runGit(dir, ["add", "tracked.txt", "renamed-before.txt"])
+    runGit(dir, ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "tracked"])
+    writeFileSync(join(dir, "tracked.txt"), "after\n")
+    writeFileSync(join(dir, "untracked.txt"), "new\n")
+    runGit(dir, ["mv", "renamed-before.txt", "renamed-after.txt"])
+    writeFileSync(join(dir, "renamed-after.txt"), "rename\nadded\n")
+
+    expect(await detectGitChangedFiles(dir)).toEqual([
+      { path: "renamed-after.txt", status: "renamed", addedLines: 1, removedLines: 0 },
+      { path: "tracked.txt", status: "modified", addedLines: 1, removedLines: 1 },
+      { path: "untracked.txt", status: "untracked", addedLines: 1, removedLines: 0 },
+    ])
+    expect(await detectGitChangedFiles(plainDir)).toBeNull()
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+    rmSync(plainDir, { recursive: true, force: true })
+  }
 })
