@@ -223,7 +223,7 @@ test("edit/write 失败（ok 非 true）或缺参数时不伪造 diff，回退 f
   expect(toolOutputView("edit_file", EDIT_OUTPUT, "{broken").kind).toBe("file-content")
 })
 
-// ---------- execute / monitor → terminal ----------
+// ---------- execute → terminal ----------
 
 test("execute 输出解析为 terminal：命令行、exit code 与尾部标记剥离", () => {
   const output = "hello world\n[Command succeeded with exit code 0]"
@@ -247,10 +247,9 @@ test("execute 非零退出码与截断标记", () => {
   expect(view.metaLabel).toBe("exit 2")
 })
 
-test("execute 无标记输出仍是 terminal（exitCode null），monitor 同型", () => {
+test("execute 无标记输出仍是 terminal（exitCode null）", () => {
   const view = toolOutputView("execute", "partial output")
   expect(view.kind).toBe("terminal")
   expect(view.terminal?.exitCode).toBeNull()
   expect(view.metaLabel).toBe("1 行")
-  expect(toolOutputView("monitor", "{\"success\":true}", JSON.stringify({ command: "x" })).kind).toBe("json")
 })

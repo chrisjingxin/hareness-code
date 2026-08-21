@@ -45,3 +45,10 @@ test("主参数收敛为单行并按 maxChars 截断", () => {
   expect(result).toBe(`${longPath.slice(0, 39)}…`)
   expect(toolPrimaryArgument("execute", "{\"command\":\"echo  a\\n b\"}")).toBe("echo a b")
 })
+
+
+test("已下线假工具不再登记展示目录", () => {
+  expect(toolDisplay("monitor").known).toBe(false)
+  expect(toolDisplay("task_output").known).toBe(false)
+  expect(toolDisplay("task_stop").known).toBe(false)
+})

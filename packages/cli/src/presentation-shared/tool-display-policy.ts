@@ -56,7 +56,6 @@ const TOOL_DISPLAY_SPECS: Record<string, ToolDisplaySpec> = {
   grep: { label: "查找内容", icon: "search", tone: "read", primaryArguments: ["pattern", "path"] },
   lsp: { label: "代码洞察", icon: "code", tone: "read", primaryArguments: ["action", "file_path"] },
   execute: { label: "执行命令", icon: "terminal", tone: "write", primaryArguments: ["command"] },
-  monitor: { label: "后台监控", icon: "terminal", tone: "write", primaryArguments: ["command"] },
   web_search: { label: "联网搜索", icon: "globe", tone: "read", primaryArguments: ["query"] },
   web_fetch: { label: "抓取网页", icon: "globe", tone: "read", primaryArguments: ["url"] },
   memory_save: { label: "保存记忆", icon: "brain", tone: "write", primaryArguments: ["key"] },
