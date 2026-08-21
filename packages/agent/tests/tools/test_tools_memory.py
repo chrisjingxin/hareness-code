@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from harness_agent.tools.tools_mode import BackgroundTaskManager, PlanModeState
+from harness_agent.tools.tools_mode import PlanModeState
 from harness_agent.tools.tools_memory import _sanitize_key, memory_save, memory_search
 
 
@@ -39,40 +39,6 @@ def test_plan_mode_exit_without_enter():
     result = state.exit()
     assert result["success"] is False
     assert "当前不在计划模式中" in result["error"]
-
-
-# ---------- BackgroundTaskManager ----------
-
-
-def test_background_task_lifecycle():
-    mgr = BackgroundTaskManager()
-    task_id = mgr.register("npm run dev")
-    assert task_id == "task-1"
-
-    output = mgr.get_output(task_id)
-    assert output["success"] is True
-    assert output["status"] == "running"
-
-    stop_result = mgr.stop(task_id)
-    assert stop_result["success"] is True
-
-    output = mgr.get_output(task_id)
-    assert output["status"] == "stopped"
-
-    tasks = mgr.list_tasks()
-    assert len(tasks) == 1
-    assert tasks[0]["task_id"] == task_id
-
-
-def test_background_task_not_found():
-    mgr = BackgroundTaskManager()
-    result = mgr.get_output("task-999")
-    assert result["success"] is False
-    assert "不存在" in result["error"]
-
-    result = mgr.stop("task-999")
-    assert result["success"] is False
-    assert "不存在" in result["error"]
 
 
 # ---------- memory ----------

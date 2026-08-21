@@ -28,7 +28,6 @@ TOOL_KIND_MAP: dict[str, ToolKind] = {
     "lsp": ToolKind.READ,
     "tool_search": ToolKind.READ,
     "memory_search": ToolKind.READ,
-    "task_output": ToolKind.READ,
     # EDIT
     "write_file": ToolKind.EDIT,
     "edit_file": ToolKind.EDIT,
@@ -36,8 +35,6 @@ TOOL_KIND_MAP: dict[str, ToolKind] = {
     "delete_file": ToolKind.DELETE,
     # EXECUTE
     "execute": ToolKind.EXECUTE,
-    "monitor": ToolKind.EXECUTE,
-    "task_stop": ToolKind.EXECUTE,
     # AGENT
     "task": ToolKind.AGENT,
     # INTERACT

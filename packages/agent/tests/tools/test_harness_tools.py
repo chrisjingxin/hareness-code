@@ -107,7 +107,7 @@ def test_tool_search_includes_deferred_builtin_and_reveals():
     revealed: list[str] = []
     tools = create_harness_tools(
         "/tmp",
-        deferred_builtin_names=frozenset({"lsp", "monitor"}),
+        deferred_builtin_names=frozenset({"lsp", "web_search"}),
         reveal=revealed.extend,
     )
     search = _tool_search_instance(tools)
@@ -144,3 +144,10 @@ def test_tool_search_deferred_names_off_by_default():
     result = json.loads(search.invoke({"query": "语言服务"}))
 
     assert result["results"] == []
+
+
+def test_tools_exclude_removed_background_tools():
+    """已下线假工具面：monitor/task_output/task_stop 不得注册为模型工具。"""
+    tools = create_harness_tools("/tmp")
+    names = {tool.name for tool in tools}
+    assert names.isdisjoint({"monitor", "task_output", "task_stop"})

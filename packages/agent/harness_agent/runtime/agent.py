@@ -89,9 +89,6 @@ _BUILTIN_TOOL_SHAPES = (
     {"name": "tool_search", "parameters": {"query": "string"}},
     {"name": "enter_plan_mode", "parameters": {}},
     {"name": "exit_plan_mode", "parameters": {}},
-    {"name": "task_output", "parameters": {"task_id": "string"}},
-    {"name": "task_stop", "parameters": {"task_id": "string"}},
-    {"name": "monitor", "parameters": {"command": "string", "interval": "integer"}},
     {"name": "memory_search", "parameters": {"query": "string"}},
     {"name": "memory_save", "parameters": {"key": "string", "content": "string"}},
 )
@@ -577,7 +574,7 @@ def _make_approval_preflight(
         if effect == "allow":
             if sensitive:
                 return True
-            if tool_name in {"execute", "monitor"}:
+            if tool_name == "execute":
                 command = str(tool_args.get("command", "")).strip()
                 if command and allow_remainder_triggers_floor(command, rules):
                     logger.info(
@@ -627,14 +624,14 @@ def _make_approval_preflight(
             return False
 
         # default：进入 HITL 集合的工具默认弹窗。
-        if rules and tool_name in {"execute", "monitor"}:
+        if rules and tool_name == "execute":
             command = str(tool_args.get("command", "")).strip()
             if command:
                 allow_resources = [
                     rule.resource
                     for rule in rules
                     if rule.effect == "allow"
-                    and rule.tool in {tool_name, "*", "execute", "monitor"}
+                    and rule.tool in {tool_name, "*", "execute"}
                 ]
                 if allow_resources:
                     logger.debug(

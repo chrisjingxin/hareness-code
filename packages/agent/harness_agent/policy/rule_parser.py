@@ -32,7 +32,6 @@ _TOOL_NAME_MAP: dict[str, str] = {
     "LS": "ls",
     "Agent": "task",
     "Task": "task",
-    "KillShell": "task_stop",
     "MCP": "mcp_tool",
     "NotebookRead": "read_file",
     "NotebookEdit": "edit_file",
@@ -52,7 +51,6 @@ _TOOL_NAME_REVERSE: dict[str, str] = {
     "glob": "Glob",
     "ls": "LS",
     "task": "Agent",
-    "task_stop": "KillShell",
     "mcp_tool": "MCP",
     "tool_search": "ToolSearch",
 }

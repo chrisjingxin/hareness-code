@@ -27,7 +27,7 @@ def _tool(name: str) -> StructuredTool:
 
 
 RESIDENT = {"read_file", "tool_search"}
-DEFERRED = {"lsp", "monitor"}
+DEFERRED = {"lsp", "web_search"}
 MCP = {"server_a_tool", "server_b_tool"}
 
 
@@ -111,5 +111,6 @@ def test_resident_and_deferred_lists_match_design():
     assert not (RESIDENT_TOOL_NAMES & DEFERRED_BUILTIN_TOOL_NAMES)
     assert "tool_search" in RESIDENT_TOOL_NAMES
     assert "apply_patch" not in RESIDENT_TOOL_NAMES | DEFERRED_BUILTIN_TOOL_NAMES
-    assert {"lsp", "monitor", "task_output", "task_stop", "web_search", "web_fetch",
+    assert {"lsp", "web_search", "web_fetch",
             "memory_save", "memory_search"} <= DEFERRED_BUILTIN_TOOL_NAMES
+    assert {"monitor", "task_output", "task_stop"}.isdisjoint(DEFERRED_BUILTIN_TOOL_NAMES)

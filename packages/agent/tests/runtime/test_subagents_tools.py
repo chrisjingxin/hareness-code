@@ -20,6 +20,11 @@ def test_full_inheritance():
     assert "apply_patch" not in result
 
 
+def test_background_tools_are_gone_from_all_tool_names():
+    """后台任务假工具已下线：全量工具集不再包含。"""
+    assert "monitor" not in ALL_TOOL_NAMES
+    assert "task_output" not in ALL_TOOL_NAMES
+    assert "task_stop" not in ALL_TOOL_NAMES
 def test_whitelist():
     """tools 指定时仅保留列出的工具。"""
     result = filter_tools_for_agent(tools=["read_file", "grep", "glob"])

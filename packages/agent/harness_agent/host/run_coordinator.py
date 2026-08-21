@@ -1448,7 +1448,7 @@ def _generate_permission_rule(
     file_path = str(tool_args.get("file_path") or "").strip()
     url = str(tool_args.get("url") or "").strip()
 
-    if tool_name in {"execute", "monitor"} and command:
+    if tool_name == "execute" and command:
         rules: list[PermissionRule] = []
         seen: set[str] = set()
         for raw_segment in extract_segments(command):

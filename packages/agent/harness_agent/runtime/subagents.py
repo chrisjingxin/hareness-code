@@ -341,8 +341,8 @@ ALL_TOOL_NAMES: frozenset[str] = frozenset({
     "execute", "write_todos", "task",
     "web_search", "web_fetch",
     "tool_search", "memory_save", "memory_search",
-    "enter_plan_mode", "exit_plan_mode", "task_output", "task_stop",
-    "monitor", "ask_user",
+    "enter_plan_mode", "exit_plan_mode",
+    "ask_user",
 })
 """当前项目注册的全部工具名称集合。"""
 

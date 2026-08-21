@@ -116,7 +116,6 @@ class TestExtractResource:
 
     def test_extract_resource_execute(self) -> None:
         assert extract_tool_resource("execute", {"command": "npm run build"}) == "npm run build"
-        assert extract_tool_resource("monitor", {"command": "top"}) == "top"
 
     def test_extract_resource_file(self) -> None:
         assert extract_tool_resource("write_file", {"file_path": "/src/main.py"}) == "/src/main.py"

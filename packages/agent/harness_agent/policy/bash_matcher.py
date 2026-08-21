@@ -227,7 +227,7 @@ def remainder_after_command_prefix(command: str, prefix: str) -> str | None:
 def find_matching_allow_resource(
     segment: str,
     rules: list[PermissionRule],
-    tool_names: frozenset[str] = frozenset({"execute", "monitor", "*"}),
+    tool_names: frozenset[str] = frozenset({"execute", "*"}),
 ) -> str | None:
     """返回命中该命令段的第一条 allow 规则的 resource；无匹配返回 ``None``。"""
     segment = segment.strip()

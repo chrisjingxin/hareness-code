@@ -694,7 +694,7 @@ async def test_defer_tools_hides_then_reveals_on_search():
     assert any(m.type == "tool" and m.name == "server_a_tool" for m in messages)
     assert any("以下工具默认未加载" in content for content in system_contents)
     assert any(
-        "lsp" in content and "monitor" in content and "web_search" in content
+        "lsp" in content and "web_search" in content
         for content in system_contents
     )
 

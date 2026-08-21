@@ -2,7 +2,7 @@
 
 模型绑定每轮由 langchain 动态执行 ``bind_tools(final_tools)``
 （factory.py），本中间件在 ``wrap_model_call`` 中把本轮可见工具收敛为
-**常驻 ∪ 已 reveal**：低频工具（D8 名单：lsp/monitor/task_output/task_stop/
+**常驻 ∪ 已 reveal**：低频工具（D8 名单：lsp/
 web_search/web_fetch/memory_save/memory_search）与 MCP 工具初始不绑定模型，
 模型经 ``tool_search`` 命中后 ``reveal``，下一轮请求自动包含其 schema。
 
@@ -96,9 +96,6 @@ RESIDENT_TOOL_NAMES: frozenset[str] = frozenset({
 # D8 deferred 名单：低频/场景特定内置工具，经 tool_search 发现后 reveal。
 DEFERRED_BUILTIN_TOOL_NAMES: frozenset[str] = frozenset({
     "lsp",
-    "monitor",
-    "task_output",
-    "task_stop",
     "web_search",
     "web_fetch",
     "memory_save",

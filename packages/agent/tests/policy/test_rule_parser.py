@@ -107,19 +107,13 @@ class TestParseRuleToolMapping:
 
 
 class TestParseRuleLegacyAliases:
-    """过渡期旧工具名别名：Task→task、Write→write_file、KillShell→task_stop。"""
+    """过渡期旧工具名别名：Task→task、Write→write_file。"""
 
     def test_legacy_task_maps_to_task(self):
         """旧别名 Task 映射到内部 task（与 Agent 相同）。"""
         rule = parse_rule("Task(sub_agent_prompt)")
         assert rule.tool == "task"
         assert rule.resource == "sub_agent_prompt"
-
-    def test_legacy_killshell_maps_to_task_stop(self):
-        """旧别名 KillShell 映射到内部 task_stop。"""
-        rule = parse_rule("KillShell")
-        assert rule.tool == "task_stop"
-        assert rule.resource == "*"
 
     def test_legacy_write_maps_to_write_file(self):
         """Write 在映射表中已规范化为 write_file（非旧别名，但确认映射正确）。"""
@@ -311,7 +305,6 @@ class TestSerializeRuleReverseMapping:
             ("glob", "Glob"),
             ("ls", "LS"),
             ("task", "Agent"),
-            ("task_stop", "KillShell"),
             ("mcp_tool", "MCP"),
             ("tool_search", "ToolSearch"),
         ],

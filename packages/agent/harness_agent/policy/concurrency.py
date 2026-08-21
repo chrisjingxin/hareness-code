@@ -17,7 +17,7 @@ import shlex
 
 _READ_ONLY_TOOLS = frozenset({
     "ls", "read_file", "glob", "grep",
-    "web_search", "lsp", "tool_search", "memory_search", "task_output",
+    "web_search", "lsp", "tool_search", "memory_search",
 })
 """始终可并行的只读工具。"""
 

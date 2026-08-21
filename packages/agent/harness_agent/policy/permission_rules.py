@@ -108,7 +108,7 @@ def evaluate_rules(
 # ---------------------------------------------------------------------------
 
 # 执行 Shell 命令的工具：规则 resource 按命令语义匹配（拆段、词边界）
-_SHELL_TOOLS: frozenset[str] = frozenset({"execute", "monitor"})
+_SHELL_TOOLS: frozenset[str] = frozenset({"execute"})
 # 文件类工具：规则 resource 按目标路径通配匹配
 _FILE_TOOLS: frozenset[str] = frozenset(
     {"write_file", "edit_file", "delete_file"}
@@ -118,7 +118,7 @@ _FILE_TOOLS: frozenset[str] = frozenset(
 def extract_tool_resource(tool_name: str, tool_args: dict[str, Any]) -> str:
     """从工具参数中提取用于规则匹配的资源标识。
 
-    - execute/monitor：command 参数；
+    - execute：command 参数；
     - 文件类工具：file_path 参数（反斜杠归一化为 POSIX 风格，保证
       Windows 路径也能匹配 ``src/**`` 这类规则）；
     - web_fetch：url 参数；

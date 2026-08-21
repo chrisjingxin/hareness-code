@@ -26,13 +26,13 @@ from harness_agent.tools.file_tool_catalog import (
 )
 
 
-SHELL_TOOLS = frozenset({"execute", "monitor"})
+SHELL_TOOLS = frozenset({"execute"})
 """会启动本机或远端命令的工具。"""
 
 NETWORK_TOOLS = frozenset({"web_search", "web_fetch"})
 """会访问网络的 Harness 工具。"""
 
-DELEGATION_TOOLS = frozenset({"task", "task_output", "task_stop"})
+DELEGATION_TOOLS = frozenset({"task"})
 """会创建或控制子 Agent execution 的工具。"""
 
 BUILTIN_TOOL_NAMES = frozenset(

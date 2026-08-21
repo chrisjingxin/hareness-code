@@ -245,7 +245,7 @@ async def execute(
 
 _CONCURRENCY_SAFE_TOOLS = frozenset({
     "ls", "read_file", "glob", "grep", "web_search",
-    "lsp", "tool_search", "memory_search", "task_output",
+    "lsp", "tool_search", "memory_search",
     "ask_user", "write_todos", "memory_save",
     "enter_plan_mode", "exit_plan_mode",
 })

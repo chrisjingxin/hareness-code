@@ -41,8 +41,6 @@ _DEFAULT_HITL_TOOLS = frozenset(
         "grep",
         "task",
         "web_fetch",
-        "monitor",
-        "task_stop",
     }
 )
 # auto-edit 模式下编辑类工具必须纳入 HITL 集合：敏感路径（如 .git/config）的
@@ -58,8 +56,6 @@ _AUTO_EDIT_HITL_TOOLS = frozenset(
         "grep",
         "task",
         "web_fetch",
-        "monitor",
-        "task_stop",
     }
 )
 # auto 模式下编辑类工具同样必须纳入 HITL 集合：让编辑类调用经过四层过滤器
@@ -74,8 +70,6 @@ _AUTO_HITL_TOOLS = frozenset(
         "grep",
         "task",
         "web_fetch",
-        "monitor",
-        "task_stop",
     }
 )
 _PLAN_DIRECTORY_TRUST_TOOLS = frozenset({"ls", "read_file", "glob", "grep", "lsp"})
@@ -92,7 +86,6 @@ _PLAN_ALLOWED_TOOLS = frozenset(
         "lsp",
         "tool_search",
         "memory_search",
-        "task_output",
         "enter_plan_mode",
         "exit_plan_mode",
     }
@@ -599,7 +592,7 @@ def evaluate_permission(
         effect = evaluate_tool_rules(tool_name, tool_args, rules)
         if effect == "allow":
             # Shell：按规则前缀的剩余部分复核安全底线（ZC-117 约束 B）
-            if tool_name in {"execute", "monitor"}:
+            if tool_name == "execute":
                 from harness_agent.policy.bash_matcher import allow_remainder_triggers_floor
 
                 command = str(tool_args.get("command", "")).strip()

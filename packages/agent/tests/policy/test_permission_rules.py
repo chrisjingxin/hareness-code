@@ -129,11 +129,6 @@ class TestEvaluateToolRules:
             == "deny"
         )
 
-    def test_monitor_rule_applies_to_execute(self):
-        """execute/monitor 都执行 Shell，两者规则互相适用。"""
-        rules = [PermissionRule(tool="monitor", resource="npm test", effect="allow")]
-        assert evaluate_tool_rules("execute", {"command": "npm test"}, rules) == "allow"
-
     def test_file_rule_glob_match(self):
         """文件工具按路径通配匹配，目录外不命中。"""
         rules = [PermissionRule(tool="edit_file", resource="src/utils/**", effect="allow")]
