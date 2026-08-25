@@ -60,7 +60,8 @@ class ManagedAgentExecutionError(RuntimeError):
     def __init__(self, code: str, message: str | None = None) -> None:
         """保存调用方可映射到产品错误码的稳定 code。"""
         self.code = code
-        super().__init__(message or code)
+        self.message = message or code
+        super().__init__(self.message)
 
 
 class ManagedAgentRuntime(Protocol):

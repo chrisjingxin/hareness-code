@@ -195,7 +195,15 @@ api_key_env = "HARNESS_AGENT_TEAM_TEST_KEY"
 
     await server.dispatch(_request("agents.list", {}, "agents-list"))
     agents = frames[-1]["result"]
-    assert [agent["id"] for agent in agents["agents"]] == ["lead", "worker-a", "worker-b"]
+    assert [agent["id"] for agent in agents["agents"]] == [
+        "general-purpose",
+        "explore",
+        "lead",
+        "worker-a",
+        "worker-b",
+    ]
+    assert agents["agents"][0]["kind"] == "builtin"
+    assert agents["agents"][2]["kind"] == "plugin"
     assert str(tmp_path) not in str(agents)
 
     await server.dispatch(

@@ -10,6 +10,7 @@ import { CodePanel } from "./code/code-panel"
 import { HelpPanel } from "./help-panel"
 import { McpPanel } from "./mcp-panel"
 import { ModelsPanel } from "./models-panel"
+import { AgentsPanel } from "./agents-panel"
 import { SkillsPanel } from "./skills-panel"
 import { StatusPanel } from "./status-panel"
 import { DOCK_TABS, tabLabel, tabVisible } from "./panel-common"
@@ -85,6 +86,7 @@ export function ContextDock({
         {activePanel === "models" ? <ModelsPanel snapshot={snapshot} busyReason={busyReason} disabled={disabled} dispatch={dispatch} /> : null}
         {activePanel === "skills" ? <SkillsPanel snapshot={snapshot} dispatch={dispatch} disabled={disabled} /> : null}
         {activePanel === "mcp" ? <McpPanel snapshot={snapshot} dispatch={dispatch} disabled={disabled} /> : null}
+        {activePanel === "agents" ? <AgentsPanel snapshot={snapshot} dispatch={dispatch} disabled={disabled} /> : null}
         {activePanel === "status" ? <StatusPanel snapshot={snapshot} /> : null}
         {activePanel === "help" ? <HelpPanel snapshot={snapshot} /> : null}
       </div>

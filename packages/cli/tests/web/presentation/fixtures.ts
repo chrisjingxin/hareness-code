@@ -4,6 +4,7 @@ import type {
   CommandMenuItem,
 } from "../../../src/interactive/commands"
 import type {
+  AgentSummary,
   InteractiveSnapshot,
   InteractiveConfirmation,
   InteractiveInteraction,
@@ -34,6 +35,7 @@ export function makeRuntime(overrides: Partial<InteractiveRuntime> = {}): Intera
       "models.select",
       "skills.read",
       "mcp.read",
+      "agents.read",
     ],
     ...overrides,
   }
@@ -73,8 +75,10 @@ export function makeInteractive(
       models: makeCatalog<ModelProfile>([]),
       skills: makeCatalog<SkillSummary>([]),
       mcp: makeCatalog<McpServerSummary>([]),
+      agents: makeCatalog<AgentSummary>([]),
     },
     selection: { requestedModelProfileId: null, actualModel: null, armedSkill: null },
+    childTimelineExecutionId: null,
     ...overrides,
   }
 }
@@ -86,6 +90,7 @@ export function makeSnapshot(overrides: Partial<WebAdapterSnapshot> = {}): WebAd
     models: { query: "", submitting: false, error: null },
     skills: { query: "", submitting: false, error: null },
     mcp: { query: "", submitting: false, error: null },
+    agents: { query: "", submitting: false, error: null },
     status: { query: "", submitting: false, error: null },
     help: { query: "", submitting: false, error: null },
   }
@@ -155,6 +160,25 @@ export function makeSkill(overrides: Partial<SkillSummary> = {}): SkillSummary {
     source: "builtin",
     enabled: true,
     userInvocable: true,
+    ...overrides,
+  }
+}
+
+/** 单个可派发 Agent 摘要。 */
+export function makeAgent(overrides: Partial<AgentSummary> = {}): AgentSummary {
+  return {
+    id: "explore",
+    description: "只读探索子代理",
+    purpose: "explore",
+    model_profile_id: "inherit",
+    execution_policy_id: "inherit",
+    requested_skills: [],
+    requested_mcp_servers: [],
+    max_turns: null,
+    source: "builtin",
+    fingerprint: "explore-fingerprint",
+    kind: "builtin",
+    tools: ["ls", "read_file", "glob", "grep", "lsp"],
     ...overrides,
   }
 }

@@ -27,6 +27,18 @@ function tuiDiffViewForWidth(contentWidth: number): "split" | "unified" {
   return contentWidth >= 120 ? "split" : "unified"
 }
 
+function approvalDockTitle(interaction: Extract<InteractiveSnapshot["interaction"], { type: "approval" }>): string {
+  return interaction.agentId && interaction.agentId !== "main"
+    ? `子代理 ${interaction.agentId} 需要审批`
+    : "需要审批"
+}
+
+function directoryTrustDockTitle(interaction: Extract<InteractiveSnapshot["interaction"], { type: "directory_trust" }>): string {
+  return interaction.agentId && interaction.agentId !== "main"
+    ? `子代理 ${interaction.agentId} 需要目录信任`
+    : "目录信任"
+}
+
 export type BottomAreaKind = "input" | "approval" | "directory_trust" | "question"
 
 /** 底部同时只出现一个可聚焦面。所有 ask_user 提问都走问答 Dock，不再把文本题藏进输入栏。 */
@@ -64,7 +76,7 @@ export function ApprovalDock(props: {
       paddingBottom={1}
       flexDirection="column"
     >
-      <text fg={accent}>需要审批</text>
+      <text fg={accent}>{approvalDockTitle(props.interaction)}</text>
       {props.interaction.description ? <text content={props.interaction.description} fg={tuiTheme.text} /> : null}
       {props.interaction.presentation
         ? <FileDiffApprovalPreview presentation={props.interaction.presentation} terminalWidth={props.terminalWidth} />
@@ -114,7 +126,7 @@ export function DirectoryTrustDock(props: {
       paddingBottom={1}
       flexDirection="column"
     >
-      <text fg={accent}>目录信任</text>
+      <text fg={accent}>{directoryTrustDockTitle(props.interaction)}</text>
       <text content={`工具：${props.interaction.toolName}（${access}）`} fg={tuiTheme.text} />
       <text content={`目标路径：${props.interaction.targetPath}`} fg={tuiTheme.text} />
       <text content={`待信任目录：${props.interaction.directory}`} fg={tuiTheme.warning} />

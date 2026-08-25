@@ -1,9 +1,10 @@
 /** TUI Interactive Adapter：只拥有终端表现状态，把用户动作映射为 InteractiveIntent。 */
 
-import type { ModelProfile } from "@za38/protocol"
+import type { AgentSummary, ModelProfile } from "@za38/protocol"
 
 import type { InteractiveController, InteractiveIntent, InteractiveResult, InteractiveSnapshot, IntentOutcome, PresentationEffect } from "../../interactive/types"
 import { selectWorkItemView, type WorkItemView } from "../../interactive/selectors"
+import { filterAgents } from "../../presentation-shared/agent-catalog"
 import { filterCommandMenuItems } from "../../presentation-shared/command-menu-policy"
 import { answersByQuestionId } from "../../presentation-shared/interaction-policy"
 import { parseSlashCommand, resolveSlashCommand, type CommandMenuItem, type SkillMenuItem } from "../../interactive/commands"
@@ -49,8 +50,8 @@ export type ThreadPickerItem = {
   messageCount: number
 }
 
-/** 三类业务选择器共用的稳定标识。 */
-export type PickerKind = "skills" | "threads" | "models"
+/** 四类业务选择器共用的稳定标识。Agent 浮层只浏览，不切换当前 Agent。 */
+export type PickerKind = "skills" | "threads" | "models" | "agents"
 
 /** 选择器向 React 暴露的只读快照；items 已按 query 过滤。 */
 export type PickerSnapshot<T> = {
@@ -118,6 +119,7 @@ export type TuiAdapterSnapshot = {
   readonly skills: PickerSnapshot<SkillMenuItem>
   readonly threads: PickerSnapshot<ThreadPickerItem>
   readonly models: PickerSnapshot<ModelProfile>
+  readonly agents: PickerSnapshot<AgentSummary>
   readonly sidebar: SidebarState
   readonly commandDialog?: {
     readonly kind: "confirm-new-thread"
@@ -175,6 +177,8 @@ export type TuiIntent =
   | { type: "file-preview-close" }
   | { type: "file-preview-scroll"; delta: number }
   | { type: "file-preview-insert-ref"; path: string }
+  | { type: "child-timeline-open"; executionId: string }
+  | { type: "child-timeline-leave" }
 
 /** TUI Adapter 的最小 external interface；终端动作与共享 Controller 解耦。 */
 import type { PromptHistoryStore } from "../../interactive/ports"
@@ -237,6 +241,7 @@ class TuiAdapterImpl implements TuiAdapter {
   private skillPicker: InternalPicker<SkillMenuItem> = emptyPicker()
   private threadPicker: InternalPicker<ThreadPickerItem> = emptyPicker()
   private modelPicker: InternalPicker<ModelProfile> = emptyPicker()
+  private agentPicker: InternalPicker<AgentSummary> = emptyPicker()
   private btwState: BtwState = { visible: false, question: "", status: "loading" }
   private toasts: ToastItem[] = []
   private toastTimers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -451,6 +456,12 @@ class TuiAdapterImpl implements TuiAdapter {
       case "file-preview-insert-ref":
         this.insertFileRefToDraft(intent.path)
         return
+      case "child-timeline-open":
+        await this.routeDispatch({ type: "child-timeline.open", executionId: intent.executionId })
+        return
+      case "child-timeline-leave":
+        await this.routeDispatch({ type: "child-timeline.leave" })
+        return
     }
   }
 
@@ -624,6 +635,7 @@ class TuiAdapterImpl implements TuiAdapter {
       skills: this.pickerSnapshot(this.skillPicker, filterSkills(skills.items, this.skillPicker.query), skills.status === "loading", skills.status === "error" ? skills.message : undefined),
       threads: this.pickerSnapshot(this.threadPicker, filterThreads(threadItems(threads.items), this.threadPicker.query), threads.status === "loading", threads.status === "error" ? threads.message : undefined),
       models: this.pickerSnapshot(this.modelPicker, filterModels(models.items, this.modelPicker.query), models.status === "loading", models.status === "error" ? models.message : undefined),
+      agents: this.pickerSnapshot(this.agentPicker, filterAgents(interactive.catalogs.agents.items, this.agentPicker.query), interactive.catalogs.agents.status === "loading", interactive.catalogs.agents.status === "error" ? interactive.catalogs.agents.message : undefined),
       sidebar: { ...this.sidebarState },
       btw: { ...this.btwState },
       toasts: [...this.toasts],
@@ -772,6 +784,7 @@ class TuiAdapterImpl implements TuiAdapter {
         case "present":
           if (effect.target === "threads") this.openThreadPicker()
           else if (effect.target === "models") this.openModelPicker(effect.initialQuery)
+          else if (effect.target === "agents") this.openAgentPicker()
           else this.openSkillPicker()
           break
         case "request-handoff":
@@ -924,6 +937,9 @@ class TuiAdapterImpl implements TuiAdapter {
       case "copy-btw-answer":
         await this.copyBtwAnswer()
         return
+      case "leave-child-timeline":
+        await this.routeDispatch({ type: "child-timeline.leave" })
+        return
       case "confirm-command-dialog":
         await this.resolveDialog(this.snapshot.modelBindingDialog ? "model-binding" : "command", true)
         return
@@ -1022,6 +1038,19 @@ class TuiAdapterImpl implements TuiAdapter {
         return
       case "model-select":
         if (!this.modelPicker.loading) await this.selectVisibleModel()
+        return
+      case "close-agent-picker":
+        this.closePicker("agents")
+        return
+      case "agent-previous":
+        this.movePicker("agents", -1)
+        return
+      case "agent-next":
+        this.movePicker("agents", 1)
+        return
+      case "agent-select":
+        this.closePicker("agents")
+        return
     }
   }
 
@@ -1111,12 +1140,20 @@ class TuiAdapterImpl implements TuiAdapter {
     void this.routeDispatch({ type: "catalog.refresh", catalog: "models" })
   }
 
+  /** 打开只读 Agent 浏览浮层；选中不切换当前 Agent。 */
+  private openAgentPicker(): void {
+    this.agentPicker = { ...this.agentPicker, visible: true, loading: false, query: "", selectedIndex: 0, error: undefined }
+    this.publish()
+    void this.routeDispatch({ type: "catalog.refresh", catalog: "agents" })
+  }
+
   /** 关闭 Picker；保存默认模型期间不允许通过 Esc 打断事务。 */
   private closePicker(picker: PickerKind): void {
     if (picker === "models" && this.modelPicker.syncingDefault) return
     if (picker === "skills") this.skillPicker = { ...this.skillPicker, visible: false, loading: false, error: undefined }
     if (picker === "threads") this.threadPicker = { ...this.threadPicker, visible: false, loading: false, error: undefined }
     if (picker === "models") this.modelPicker = { ...this.modelPicker, visible: false, loading: false, error: undefined, syncingDefault: undefined }
+    if (picker === "agents") this.agentPicker = { ...this.agentPicker, visible: false, loading: false, error: undefined }
     this.publish()
   }
 
@@ -1126,6 +1163,7 @@ class TuiAdapterImpl implements TuiAdapter {
     if (picker === "skills") this.skillPicker = { ...this.skillPicker, ...value }
     if (picker === "threads") this.threadPicker = { ...this.threadPicker, ...value }
     if (picker === "models") this.modelPicker = { ...this.modelPicker, ...value }
+    if (picker === "agents") this.agentPicker = { ...this.agentPicker, ...value }
     this.publish()
   }
 
@@ -1134,6 +1172,7 @@ class TuiAdapterImpl implements TuiAdapter {
     if (picker === "skills") this.skillPicker = { ...this.skillPicker, selectedIndex }
     if (picker === "threads") this.threadPicker = { ...this.threadPicker, selectedIndex }
     if (picker === "models") this.modelPicker = { ...this.modelPicker, selectedIndex }
+    if (picker === "agents") this.agentPicker = { ...this.agentPicker, selectedIndex }
     this.publish()
   }
 
@@ -1144,8 +1183,16 @@ class TuiAdapterImpl implements TuiAdapter {
       ? filterSkills(interactive.catalogs.skills.items, this.skillPicker.query)
       : picker === "threads"
         ? filterThreads(threadItems(interactive.catalogs.threads.items), this.threadPicker.query)
-        : filterModels(interactive.catalogs.models.items, this.modelPicker.query)
-    const current = picker === "skills" ? this.skillPicker : picker === "threads" ? this.threadPicker : this.modelPicker
+        : picker === "models"
+          ? filterModels(interactive.catalogs.models.items, this.modelPicker.query)
+          : filterAgents(interactive.catalogs.agents.items, this.agentPicker.query)
+    const current = picker === "skills"
+      ? this.skillPicker
+      : picker === "threads"
+        ? this.threadPicker
+        : picker === "models"
+          ? this.modelPicker
+          : this.agentPicker
     this.updatePickerIndex(picker, items.length ? (current.selectedIndex + direction + items.length) % items.length : 0)
   }
 

@@ -178,61 +178,6 @@ def default_prompt_template_fingerprint() -> str:
     return sha256_text(_load_system_prompt())
 
 
-def _create_default_subagents(
-    *,
-    workspace: str | Path | Any | None,
-    approval_mode: ApprovalMode,
-    capability_view: EffectiveCapabilityView | None = None,
-    file_tool_contract: Any | None = None,
-) -> list[dict[str, Any]]:
-    """创建继承计划模式和本机工作区边界的默认子 Agent 规格。"""
-    from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
-
-    middleware: list[Any] = []
-    if approval_mode == "plan":
-        middleware.append(PlanModeMiddleware())
-    if workspace is not None:
-        from harness_agent.policy.workspace_boundary import WorkspaceBoundaryMiddleware
-        from harness_agent.policy.workspace_roots import WorkspaceRootRegistry
-
-        # 子 Agent 共享只读根集合，不能发起信任审批。
-        if isinstance(workspace, WorkspaceRootRegistry):
-            bound = workspace.readonly_view()
-        else:
-            bound = workspace
-        middleware.append(
-            WorkspaceBoundaryMiddleware(bound, allow_trust_prompt=False)
-        )
-    if file_tool_contract is not None:
-        from harness_agent.tools.file_tools import HarnessFileToolsMiddleware
-
-        # DeepAgents 的 declarative subagent 有独立的 FilesystemMiddleware；
-        # 同一个注入 contract 必须在该独立栈中再次接管，不能只依赖主图。
-        middleware.append(HarnessFileToolsMiddleware(file_tool_contract))
-    if capability_view is not None:
-        from harness_agent.policy.capability_policy import CapabilityPolicyMiddleware
-
-        middleware.insert(
-            0,
-            CapabilityPolicyMiddleware(capability_view),
-        )
-
-    # deepagents 的 general-purpose 子 Agent 有独立 middleware 栈；计划模式和
-    # 本机工作区边界都必须在此重新注册，不能只依赖主 Agent 的配置。
-    # 并发锁不在此注入：父 task 已持有 Host 写锁直到子图返回，复用同一把非重入锁
-    # 会死锁；细粒度 delegation 由 ZC-096 接管后再单独设计。
-    return [
-        {
-            **GENERAL_PURPOSE_SUBAGENT,
-            "system_prompt": (
-                f"{GENERAL_PURPOSE_SUBAGENT['system_prompt']}"
-                f"{_LOCAL_SUBAGENT_BOUNDARY_PROMPT}"
-            ),
-            "middleware": middleware,
-        }
-    ]
-
-
 def _create_controlled_inline_subagents(
     *,
     model: BaseChatModel,
@@ -247,92 +192,167 @@ def _create_controlled_inline_subagents(
     concurrency_lock: AsyncRWLock | None = None,
     plugin_middleware: Any | None = None,
     file_tool_contract: Any | None = None,
+    rules_provider: Callable[[], list[PermissionRule]] | None = None,
 ) -> tuple[list[dict[str, Any]], Any]:
     """创建内置 Inline worker，并合并 Host 注册的 Managed Plugin target。"""
     from deepagents.middleware.filesystem import FilesystemMiddleware
-    from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
     from langchain.agents import create_agent
     from langchain.agents.middleware import TodoListMiddleware
     from langchain_core.messages import HumanMessage
     from langchain_core.runnables import RunnableLambda
 
+    from harness_agent.policy.capability_policy import CapabilityPolicyMiddleware
     from harness_agent.runtime.agent_delegation import (
         AgentDelegationError,
         AgentDelegator,
         DelegateAgent,
         DelegationContextMiddleware,
         DelegationTarget,
+        child_execution_ref,
         current_delegation_call,
     )
+    from harness_agent.runtime.builtin_agents import (
+        BUILTIN_AGENTS,
+        resolve_builtin_child_view,
+        resolve_child_approval_mode,
+    )
+    from harness_agent.runtime.child_approval import (
+        ChildHitlMiddleware,
+        bind_child_command,
+        reset_child_command,
+    )
     from harness_agent.runtime.execution_binding import ExecutionMode, ExecutionRef
-
-    child_middleware: list[Any] = [
-        TodoListMiddleware(),
-        FilesystemMiddleware(backend=backend),
-    ]
-    if capability_view is not None:
-        from harness_agent.policy.capability_policy import CapabilityPolicyMiddleware
-
-        child_middleware.append(
-            CapabilityPolicyMiddleware(capability_view)
-        )
-    if plugin_middleware is not None:
-        child_middleware.append(plugin_middleware)
-    if approval_mode == "plan":
-        child_middleware.append(PlanModeMiddleware())
-    if workspace is not None:
-        from harness_agent.policy.workspace_boundary import WorkspaceBoundaryMiddleware
-        from harness_agent.policy.workspace_roots import WorkspaceRootRegistry
-
-        bound = (
-            workspace.readonly_view()
-            if isinstance(workspace, WorkspaceRootRegistry)
-            else workspace
-        )
-        child_middleware.append(
-            WorkspaceBoundaryMiddleware(bound, allow_trust_prompt=False)
-        )
     from harness_agent.policy.concurrency import AsyncRWLock as RuntimeAsyncRWLock
     from harness_agent.policy.concurrency_guard import ConcurrencyGuardMiddleware
 
-    child_middleware.append(
-        ConcurrencyGuardMiddleware(concurrency_lock or RuntimeAsyncRWLock())
-    )
-    if file_tool_contract is not None:
-        from harness_agent.tools.file_tools import HarnessFileToolsMiddleware
+    available_names = frozenset(
+        str(getattr(tool, "name", ""))
+        for tool in tools
+        if str(getattr(tool, "name", ""))
+    ) | frozenset(capability_view.tool_names)
 
-        # Inline child 与 declarative child 使用同一 contract；middleware 实例
-        # 分别属于各自 graph，但不会产生第二套文件执行逻辑。放在并发守卫之后，
-        # 让 Harness dispatch 仍然受父图的读写锁覆盖。
-        child_middleware.append(HarnessFileToolsMiddleware(file_tool_contract))
+    def build_inline_graph(agent_id: str, *, include_plugin: bool) -> Any:
+        """按角色能力视图与 child 审批模式编译独立 Inline 子图。"""
+        record = next(item for item in BUILTIN_AGENTS if item.agent_id == agent_id)
+        child_view = resolve_builtin_child_view(
+            agent_id=agent_id,
+            parent=capability_view,
+            available_tool_names=available_names,
+        )
+        child_mode = resolve_child_approval_mode(approval_mode, agent_id)
+        child_tools = [
+            tool
+            for tool in tools
+            if child_view.allows_tool(str(getattr(tool, "name", "")))
+        ]
+        child_middleware: list[Any] = []
+        if rules_provider is not None:
+            child_middleware.append(DenyRulesMiddleware(rules_provider))
+        child_middleware.extend(
+            [
+                TodoListMiddleware(),
+                FilesystemMiddleware(backend=backend),
+                CapabilityPolicyMiddleware(child_view),
+            ]
+        )
+        if include_plugin and plugin_middleware is not None:
+            child_middleware.append(plugin_middleware)
+        if child_mode == "plan":
+            child_middleware.append(PlanModeMiddleware())
+        workspace_guard = None
+        if workspace is not None:
+            from harness_agent.policy.workspace_boundary import WorkspaceBoundaryMiddleware
+            from harness_agent.policy.workspace_roots import WorkspaceRootRegistry
 
-    child_graph = create_agent(
-        model,
-        tools=list(tools),
-        middleware=child_middleware,
-        system_prompt=(
-            f"{GENERAL_PURPOSE_SUBAGENT['system_prompt']}"
-            f"{_LOCAL_SUBAGENT_BOUNDARY_PROMPT if workspace is not None else ''}"
-        ),
-        name="general-purpose-inline",
-    )
+            bound = (
+                workspace.readonly_view()
+                if isinstance(workspace, WorkspaceRootRegistry)
+                else workspace
+            )
+            workspace_guard = WorkspaceBoundaryMiddleware(
+                bound,
+                allow_trust_prompt=agent_id == "general-purpose",
+            )
+            if agent_id == "general-purpose" and child_mode != "yolo":
+                child_middleware.append(
+                    ChildHitlMiddleware(
+                        agent_id=agent_id,
+                        approval_mode=child_mode,
+                        rules_provider=rules_provider,
+                        workspace_guard=workspace_guard,
+                    )
+                )
+            child_middleware.append(workspace_guard)
+        elif agent_id == "general-purpose" and child_mode != "yolo":
+            child_middleware.append(
+                ChildHitlMiddleware(
+                    agent_id=agent_id,
+                    approval_mode=child_mode,
+                    rules_provider=rules_provider,
+                )
+            )
+        child_middleware.append(
+            ConcurrencyGuardMiddleware(concurrency_lock or RuntimeAsyncRWLock())
+        )
+        if file_tool_contract is not None:
+            from harness_agent.tools.file_tools import HarnessFileToolsMiddleware
 
-    async def run_inline(command: DelegateAgent) -> dict[str, Any]:
-        """执行临时子图；具体工具通过 Host 共享锁协调读写。"""
-        return await child_graph.ainvoke(
-            {"messages": [HumanMessage(content=command.task)]},
+            child_middleware.append(HarnessFileToolsMiddleware(file_tool_contract))
+        prompt = record.prompt
+        if workspace is not None:
+            prompt = f"{prompt}{_LOCAL_SUBAGENT_BOUNDARY_PROMPT}"
+        prompt = f"{prompt}{approval_mode_prompt(child_mode)}"
+        return create_agent(
+            model,
+            tools=child_tools,
+            middleware=child_middleware,
+            system_prompt=prompt,
+            name=f"{agent_id}-inline",
         )
 
-    targets = (
+    graphs = {
+        "general-purpose": build_inline_graph("general-purpose", include_plugin=True),
+        "explore": build_inline_graph("explore", include_plugin=False),
+    }
+
+    def make_runner(agent_id: str) -> Any:
+        """绑定一个角色子图，避免闭包覆盖。"""
+        graph = graphs[agent_id]
+
+        async def run_inline(command: DelegateAgent) -> dict[str, Any]:
+            """流式执行子图：过程事件带 child 身份进 Interactive Core，不闷跑。"""
+            from harness_agent.runtime.child_stream import stream_inline_child
+
+            token = bind_child_command(command)
+            try:
+                parent = current_delegation_call().run_context
+                return await stream_inline_child(
+                    graph=graph,
+                    parent=parent,
+                    child_ref=child_execution_ref(command),
+                    agent_id=agent_id,
+                    task=command.task,
+                    cancelled=lambda: command.cancellation_token.cancelled,
+                )
+            finally:
+                reset_child_command(token)
+
+        return run_inline
+
+    builtin_targets = tuple(
         DelegationTarget(
-            agent_id="general-purpose",
+            agent_id=record.agent_id,
             mode=ExecutionMode.INLINE,
-            runner=run_inline,
-            description=GENERAL_PURPOSE_SUBAGENT["description"],
+            runner=make_runner(record.agent_id),
+            description=record.description,
             model=model_view,
             policy_fingerprint=capability_view.policy_fingerprint,
-            definition_fingerprint=sha256_text("builtin-agent:general-purpose:inline:v1"),
-        ),
+            definition_fingerprint=record.fingerprint,
+        )
+        for record in BUILTIN_AGENTS
+    )
+    targets = (
+        *builtin_targets,
         *tuple(managed_targets),
     )
     delegator = AgentDelegator(
@@ -384,19 +404,12 @@ def _create_controlled_inline_subagents(
 
     subagents = [
         {
-            "name": "general-purpose",
-            "description": GENERAL_PURPOSE_SUBAGENT["description"],
-            "runnable": controlled_runnable("general-purpose"),
-        }
-    ]
-    subagents.extend(
-        {
             "name": target.agent_id,
             "description": target.description or f"Plugin Agent: {target.agent_id}",
             "runnable": controlled_runnable(target.agent_id),
         }
-        for target in managed_targets
-    )
+        for target in targets
+    ]
     return subagents, DelegationContextMiddleware()
 
 
@@ -519,6 +532,7 @@ def _make_approval_preflight(
     classifier: SafetyClassifier | None = None,
     mutation_preflight: Callable[[ToolCallRequest], bool] | None = None,
     directory_trust_check: Callable[[ToolCallRequest], bool] | None = None,
+    explore_task_readonly: bool = False,
 ) -> Callable[[ToolCallRequest], bool] | None:
     """构造审批模式感知的 HITL 组合预检，返回 True 弹窗、False 自动执行。
 
@@ -534,6 +548,11 @@ def _make_approval_preflight(
         tool_args = tool_call.get("args") or {}
         if not isinstance(tool_args, dict):
             tool_args = {}
+
+        if tool_name == "task":
+            target = str(tool_args.get("subagent_type") or tool_args.get("agent") or "")
+            if target == "explore":
+                return not explore_task_readonly
 
         # 可信任的外部路径：弹目录信任卡片（须先于非法路径短路，避免误吞）。
         if directory_trust_check is not None and directory_trust_check(request):
@@ -994,20 +1013,6 @@ def create_harness_agent(
             allow_trust_prompt=True,
         )
         agent_middleware.append(workspace_guard)
-        subagents = _create_default_subagents(
-            workspace=workspace_root_registry or local_workspace,
-            approval_mode=approval_mode,
-            capability_view=capability_view,
-            file_tool_contract=file_tool_contract,
-        )
-    elif approval_mode == "plan":
-        # 远端 backend 同样需要计划模式守卫；其余模式由 provider 和 HITL 处理。
-        subagents = _create_default_subagents(
-            workspace=None,
-            approval_mode=approval_mode,
-            capability_view=capability_view,
-            file_tool_contract=file_tool_contract,
-        )
     if (
         execution_registry is not None
         and capability_view is not None
@@ -1026,6 +1031,7 @@ def create_harness_agent(
             concurrency_lock=concurrency_lock,
             plugin_middleware=getattr(plugin_runtime, "middleware", None),
             file_tool_contract=file_tool_contract,
+            rules_provider=rules_provider,
         )
         agent_middleware.append(delegation_middleware)
 
@@ -1116,6 +1122,27 @@ def create_harness_agent(
     else:
         approval_description = None
 
+    from harness_agent.runtime.builtin_agents import (
+        explore_view_is_readonly,
+        resolve_builtin_child_view,
+    )
+    from harness_agent.runtime.child_approval import task_dispatch_description
+
+    explore_readonly = False
+    if capability_view is not None:
+        explore_readonly = explore_view_is_readonly(
+            resolve_builtin_child_view(
+                agent_id="explore",
+                parent=capability_view,
+                available_tool_names=frozenset(
+                    str(getattr(tool, "name", ""))
+                    for tool in (tools or ())
+                    if str(getattr(tool, "name", ""))
+                )
+                | frozenset(capability_view.tool_names),
+            )
+        )
+
     composite_preflight = _make_approval_preflight(
         approval_mode,
         workspace_guard.allows_approval if workspace_guard is not None else None,
@@ -1128,8 +1155,21 @@ def create_harness_agent(
             if workspace_guard is not None
             else None
         ),
+        explore_task_readonly=explore_readonly,
     )
     _directory_trust_tools = ("ls", "read_file", "glob", "grep", "write_file", "edit_file", "delete_file")
+
+    def task_approval_description(tool_call: dict[str, Any], _state: Any, _runtime: Any) -> str:
+        """派出 task 的审批文案：GP 写明可改文件、命令仍问。"""
+        raw_args = tool_call.get("args") or {}
+        args = raw_args if isinstance(raw_args, dict) else {}
+        return task_dispatch_description(args)
+
+    descriptions: dict[str, Any] = {"task": task_approval_description}
+    if callable(approval_description):
+        for name in _directory_trust_tools:
+            descriptions[name] = approval_description
+
     interrupt_on = interrupt_on_for_approval_mode(
         approval_mode,
         preflight=composite_preflight,
@@ -1138,11 +1178,7 @@ def create_harness_agent(
             if tools and mcp_server_info
             else None
         ),
-        approval_descriptions=(
-            {name: approval_description for name in _directory_trust_tools}
-            if callable(approval_description)
-            else None
-        ),
+        approval_descriptions=descriptions,
     )
 
     # 5b. ConcurrencyGuardMiddleware（并发读写锁守卫）。HITL 在 ToolNode 执行

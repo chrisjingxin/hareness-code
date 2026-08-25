@@ -23,7 +23,7 @@ import { resolveShortcut, type ScrollIntent } from "./application/shortcuts"
 import { TuiErrorBoundary } from "./presentation/error-boundary"
 import { HomeView } from "./presentation/home"
 import { DialogShell, SearchPicker, type SearchPickerRenderContext } from "./presentation/overlays"
-import { SkillPicker, ThreadPicker } from "./presentation/pickers"
+import { AgentPicker, SkillPicker, ThreadPicker } from "./presentation/pickers"
 import { BtwModal } from "./presentation/btw-modal"
 import { copyCurrentSelection, shouldAttemptSelectionCopy } from "./presentation/selection-copy"
 import { Sidebar, computeSidebarVisibility } from "./presentation/sidebar"
@@ -108,6 +108,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
   const skillSearchRef = useRef<TextareaRenderable | null>(null)
   const threadSearchRef = useRef<TextareaRenderable | null>(null)
   const modelSearchRef = useRef<TextareaRenderable | null>(null)
+  const agentSearchRef = useRef<TextareaRenderable | null>(null)
   const renderer = useRenderer()
   const terminal = useTerminalDimensions()
   const lastScrollRequestRef = useRef(snapshot.scrollRequest)
@@ -251,7 +252,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
       const scrollAction = key.name === "up" ? "line-up" : key.name === "down" ? "line-down" : undefined
       if (scrollAction && scrollConversation(scrollAction)) key.preventDefault()
     }
-  }, [adapter, snapshot.commandDialog, snapshot.commandMenu.visible, snapshot.modelBindingDialog, snapshot.models.visible, snapshot.skills.visible, interactive, snapshot.threads.visible, syncInputBuffer, snapshot.btw.visible])
+  }, [adapter, snapshot.commandDialog, snapshot.commandMenu.visible, snapshot.modelBindingDialog, snapshot.models.visible, snapshot.skills.visible, snapshot.agents.visible, interactive, snapshot.threads.visible, syncInputBuffer, snapshot.btw.visible])
 
   /** 通过 ref 滚动当前时间线；不把终端尺寸或 OpenTUI 对象带入 Adapter。 */
   function scrollConversation(intent: ScrollIntent): boolean {
@@ -375,11 +376,14 @@ export function Za38Tui(options: RenderedTuiOptions) {
       threadOptionCount: snapshot.threads.items.length,
       modelPickerVisible: snapshot.models.visible,
       modelOptionCount: snapshot.models.items.length,
+      agentPickerVisible: snapshot.agents.visible,
+      agentOptionCount: snapshot.agents.items.length,
       commandMenuVisible: snapshot.commandMenu.visible,
       commandOptionCount: snapshot.commandOptions.length,
       activeRun: Boolean(interactive.activeRun),
       hasDraft: Boolean(snapshot.draft),
       inputMode: snapshot.inputMode,
+      childTimelineActive: Boolean(interactive.childTimelineExecutionId),
     })
     if (action === "none") return
     key.preventDefault()
@@ -420,7 +424,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
     onSelectCommand: (item: CommandMenuItem) => { void adapter.dispatch({ type: "command-menu-select", item }) },
     onHoverCommand: (selectedIndex: number) => { void adapter.dispatch({ type: "command-menu-hover", selectedIndex }) },
     selectedSkill: snapshot.selectedSkill,
-    pickerVisible: Boolean(snapshot.commandDialog || snapshot.modelBindingDialog) || snapshot.skills.visible || snapshot.threads.visible || snapshot.models.visible || snapshot.btw.visible,
+    pickerVisible: Boolean(snapshot.commandDialog || snapshot.modelBindingDialog) || snapshot.skills.visible || snapshot.threads.visible || snapshot.models.visible || snapshot.agents.visible || snapshot.btw.visible,
     onClearSelectedSkill: () => { void adapter.dispatch({ type: "clear-selected-skill" }) },
     showToolDetails: snapshot.showToolDetails,
     expandedTools: snapshot.expandedTools,
@@ -428,6 +432,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
     onApproval: (decision: ApprovalDecision) => { void adapter.dispatch({ type: "approval", decision }) },
     onDirectoryTrust: (decision: DirectoryTrustDecision) => { void adapter.dispatch({ type: "directory-trust", decision }) },
     onQuestion: (answers: Record<string, string[]>) => { void adapter.dispatch({ type: "question", answers }) },
+    onOpenChildTimeline: (executionId: string) => { void adapter.dispatch({ type: "child-timeline-open", executionId }) },
     sidebarVisible: sidebarVisibility.visible,
     inputMode: snapshot.inputMode,
     onToggleSidebar: () => {
@@ -521,6 +526,24 @@ export function Za38Tui(options: RenderedTuiOptions) {
         onSelect={model => { void adapter.dispatch({ type: "picker-select-model", model }) }}
         onHover={selectedIndex => { void adapter.dispatch({ type: "picker-hover", picker: "models", selectedIndex }) }}
         onClose={() => { void adapter.dispatch({ type: "picker-close", picker: "models" }) }}
+        workMode={interactive.workMode}
+      />
+      <AgentPicker
+        visible={snapshot.agents.visible}
+        loading={snapshot.agents.loading}
+        error={snapshot.agents.error}
+        agents={snapshot.agents.items}
+        query={snapshot.agents.query}
+        selectedIndex={snapshot.agents.selectedIndex}
+        terminalWidth={terminal.width}
+        terminalHeight={terminal.height}
+        searchRef={agentSearchRef}
+        restoreFocusRef={inputRef}
+        shouldRestoreFocus={!interactive.activeRun && interactive.activity.kind !== "compacting"}
+        onSearch={query => { void adapter.dispatch({ type: "picker-search", picker: "agents", query }) }}
+        onSelect={() => { void adapter.dispatch({ type: "picker-close", picker: "agents" }) }}
+        onHover={selectedIndex => { void adapter.dispatch({ type: "picker-hover", picker: "agents", selectedIndex }) }}
+        onClose={() => { void adapter.dispatch({ type: "picker-close", picker: "agents" }) }}
         workMode={interactive.workMode}
       />
       <DialogShell

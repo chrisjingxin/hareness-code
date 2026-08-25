@@ -1,6 +1,6 @@
-# HC-156 修复 Web 刷新回退实施计划
+# HC-157 修复 Web 刷新回退实施计划
 
-关联 [Task](../task/HC-156-修复Web刷新回退.md) 与 [Spec](../spec/HC-156-修复Web刷新回退.md)。
+关联 [Task](../task/HC-157-修复Web刷新回退.md) 与 [Spec](../spec/HC-157-修复Web刷新回退.md)。
 
 ## 可演示停点：长时间停留后刷新仍在 Web
 

@@ -72,6 +72,7 @@ test("Sidebar 组件集成渲染状态页小部件", async () => {
           { name: "filesystem", status: "failed" },
         ],
       },
+      agents: { status: "ready", items: [] },
     },
     selection: {
       requestedModelProfileId: null,

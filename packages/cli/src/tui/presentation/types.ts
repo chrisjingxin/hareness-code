@@ -39,6 +39,7 @@ export type SharedViewProps = {
   onApproval: (decision: ApprovalDecision) => void
   onDirectoryTrust: (decision: DirectoryTrustDecision) => void
   onQuestion: (answers: Record<string, string[]>) => void
+  onOpenChildTimeline?: (executionId: string) => void
   sidebarVisible?: boolean
   onToggleSidebar?: () => void
   inputMode?: "chat" | "shell"

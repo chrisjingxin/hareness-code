@@ -12,9 +12,10 @@ export function selectFeatureAvailability(snapshot: InteractiveSnapshot): Featur
   const hasInteraction = snapshot.interaction !== null
   const hasPendingOperation = snapshot.activity.kind === "compacting"
   const cancelling = snapshot.activity.kind === "cancelling"
+  const isChildTimeline = Boolean(snapshot.childTimelineExecutionId)
 
   return {
-    canSubmit: snapshot.connection.status === "open" && !hasPendingOperation,
+    canSubmit: snapshot.connection.status === "open" && !hasPendingOperation && !isChildTimeline,
     canCancelRun: hasRun && !cancelling,
     canOpenThread: !hasRun && !hasInteraction && !hasPendingOperation,
     canToggleSkill: capabilities.has(CAPABILITY_GATE.toggleSkill) && !hasRun && !hasPendingOperation,
@@ -23,6 +24,7 @@ export function selectFeatureAvailability(snapshot: InteractiveSnapshot): Featur
     canOpenModelsPanel: capabilities.has(CAPABILITY_GATE.openModelsPanel),
     canOpenSkillsPanel: capabilities.has(CAPABILITY_GATE.openSkillsPanel),
     canOpenMcpPanel: capabilities.has(CAPABILITY_GATE.openMcpPanel),
+    canOpenAgentsPanel: capabilities.has(CAPABILITY_GATE.openAgentsPanel),
     hasSkillManage: capabilities.has(CAPABILITY_GATE.toggleSkill),
     hasMcpManage: capabilities.has(CAPABILITY_GATE.manageMcp),
   }
@@ -37,6 +39,7 @@ export function selectConversationView(snapshot: InteractiveSnapshot): Conversat
     timeline: snapshot.timeline,
     runProgress: snapshot.runProgress,
     lastRun: snapshot.lastRun,
+    childTimelineExecutionId: snapshot.childTimelineExecutionId,
   }
 }
 
@@ -58,6 +61,7 @@ export function selectNavigationView(snapshot: InteractiveSnapshot): NavigationV
       canOpenModelsPanel: availability.canOpenModelsPanel,
       canOpenSkillsPanel: availability.canOpenSkillsPanel,
       canOpenMcpPanel: availability.canOpenMcpPanel,
+      canOpenAgentsPanel: availability.canOpenAgentsPanel,
       hasSkillManage: availability.hasSkillManage,
       hasMcpManage: availability.hasMcpManage,
     },

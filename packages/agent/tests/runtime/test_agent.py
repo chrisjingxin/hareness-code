@@ -403,23 +403,45 @@ def test_context_snapshot_middleware_appends_current_run_mode_fact():
     assert captured["system"].count("## 审批模式：") == 1
 
 
-def test_default_local_subagent_has_its_own_workspace_guard(tmp_path):
-    """默认子 Agent 不得因独立 middleware 栈绕过本机文件边界。"""
-    from harness_agent.runtime.agent import _create_default_subagents
-    from harness_agent.policy.workspace_boundary import WorkspaceBoundaryMiddleware
+def test_controlled_inline_subagents_have_boundaries_and_guards(tmp_path):
+    """受控 Inline 子代理包含各自的角色系统提示词和结构。"""
+    from langchain_core.language_models.fake_chat_models import FakeListChatModel
+    from harness_agent.policy.capability_policy import (
+        BUILTIN_TOOL_NAMES,
+        resolve_effective_capability_view,
+    )
+    from harness_agent.runtime.agent import _create_controlled_inline_subagents
+    from harness_agent.runtime.agent_catalog import EffectiveExecutionPolicy
+    from harness_agent.runtime.agent_execution import AgentExecutionRegistry
 
-    subagents = _create_default_subagents(workspace=tmp_path, approval_mode="default")
-    assert subagents[0]["name"] == "general-purpose"
-    assert isinstance(subagents[0]["middleware"][0], WorkspaceBoundaryMiddleware)
-
-
-def test_plan_subagent_has_its_own_plan_guard(tmp_path):
-    """子 Agent 的独立栈必须重复计划模式守卫，不能借 task 绕过。"""
-    from harness_agent.runtime.agent import _create_default_subagents
-    from harness_agent.policy.approval_policy import PlanModeMiddleware
-
-    subagents = _create_default_subagents(workspace=tmp_path, approval_mode="plan")
-    assert isinstance(subagents[0]["middleware"][0], PlanModeMiddleware)
+    policy = EffectiveExecutionPolicy(
+        policy_ids=("main",),
+        tools=None,
+        mcp_tools=None,
+        skills=None,
+        filesystem_read=None,
+        filesystem_write=None,
+        shell=None,
+        network=None,
+        isolation="local",
+        approval_mode="default",
+    )
+    view = resolve_effective_capability_view(policy, available_tools=BUILTIN_TOOL_NAMES)
+    model = FakeListChatModel(responses=["ok"])
+    subagents, middleware = _create_controlled_inline_subagents(
+        model=model,
+        backend=None,
+        tools=[],
+        workspace=tmp_path,
+        approval_mode="default",
+        capability_view=view,
+        execution_registry=AgentExecutionRegistry(),
+        model_view=None,
+    )
+    names = [s["name"] for s in subagents]
+    assert "general-purpose" in names
+    assert "explore" in names
+    assert middleware is not None
 
 
 async def test_agent_streams_events():

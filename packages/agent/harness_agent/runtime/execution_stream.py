@@ -65,6 +65,9 @@ class StreamSession:
     tool_names: dict[str, str] = field(default_factory=dict)
     started_tool_ids: set[str] = field(default_factory=set)
     completed_tool_ids: set[str] = field(default_factory=set)
+    # 同一 ToolMessage 可能同时出现在 messages 与 updates；wire/Transcript
+    # 只允许观察一次。tool ID 在 execution 内唯一，因此不随模型回合清空。
+    emitted_tool_result_ids: set[str] = field(default_factory=set)
     seen_tool_provider_ids: set[str] = field(default_factory=set)
     allocated_tool_ids: set[str] = field(default_factory=set)
     tool_call_ordinal: int = 0
@@ -185,8 +188,15 @@ async def execute(
         raise ExecutionStreamError("RUN_CANCELLED", "Run was cancelled before stream")
 
     session = request.session
+    stream_config = dict(request.graph_config)
+    expected_execution_id = str(getattr(request.context, "execution_id", "") or "")
+    if expected_execution_id:
+        raw_metadata = stream_config.get("metadata")
+        metadata = dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
+        metadata["harness_execution_id"] = expected_execution_id
+        stream_config["metadata"] = metadata
     stream_kwargs: dict[str, Any] = {
-        "config": dict(request.graph_config),
+        "config": stream_config,
         "stream_mode": ["messages", "updates"],
         "subgraphs": True,
     }
@@ -222,8 +232,8 @@ async def execute(
                 resume=resume,
             )
 
-        chunk = message_stream_chunk(event)
-        if chunk is not None:
+        chunk = message_stream_chunk(event, execution_id=expected_execution_id)
+        if chunk is not None and not _tool_result_was_emitted(session, chunk):
             complete_tool = await ports.observe_message(chunk, session)
             if complete_tool:
                 await ports.after_tool_boundary()
@@ -232,6 +242,7 @@ async def execute(
             event,
             session,
             content_visibility=request.content_visibility,
+            execution_id=expected_execution_id,
         ):
             ports.emit(signal)
 
@@ -405,7 +416,31 @@ def resume_value(spec: StreamInteractionRequest, response: object) -> dict[str, 
     return {spec.interrupt_id: {"status": status, "answers": answers}}
 
 
-def message_stream_chunk(event: tuple[Any, ...]) -> object | None:
+def _extract_tool_messages(data: object) -> list[object]:
+    """从 updates 模式的节点字典中提取 ToolMessage。"""
+    messages: list[object] = []
+    if isinstance(data, dict):
+        for val in data.values():
+            if isinstance(val, dict) and "messages" in val:
+                msgs = val["messages"]
+                if isinstance(msgs, list):
+                    messages.extend(
+                        m for m in msgs
+                        if type(m).__name__ == "ToolMessage" or getattr(m, "type", "") == "tool"
+                    )
+            elif isinstance(val, list):
+                messages.extend(
+                    m for m in val
+                    if type(m).__name__ == "ToolMessage" or getattr(m, "type", "") == "tool"
+                )
+    return messages
+
+
+def message_stream_chunk(
+    event: tuple[Any, ...],
+    *,
+    execution_id: str = "",
+) -> object | None:
     """从 messages stream 取出原始消息块。"""
     if len(event) == 3:
         namespace, stream_mode, data = event
@@ -415,7 +450,12 @@ def message_stream_chunk(event: tuple[Any, ...]) -> object | None:
         stream_mode, data = event
     else:
         return None
+    if stream_mode == "updates":
+        tool_msgs = _extract_tool_messages(data)
+        return tool_msgs[0] if tool_msgs else None
     if stream_mode != "messages" or not isinstance(data, tuple) or not data:
+        return None
+    if not _message_event_matches_execution(data, execution_id):
         return None
     return data[0]
 
@@ -425,6 +465,7 @@ def translate_stream_event(
     session: StreamSession,
     *,
     content_visibility: ContentVisibility = "passthrough",
+    execution_id: str = "",
 ) -> Iterable[ExecutionSignal]:
     """把 LangChain message stream 转换为统一领域信号。"""
     if len(event) == 3:
@@ -435,7 +476,36 @@ def translate_stream_event(
         stream_mode, data = event
     else:
         return []
+    if stream_mode == "updates":
+        tool_msgs = _extract_tool_messages(data)
+        events: list[ExecutionSignal] = []
+        for chunk in tool_msgs:
+            result = truncate_text(content_text(getattr(chunk, "content", None)))
+            if session.last_tool_result_chunk is chunk and session.last_tool_result_id:
+                tool_id = session.last_tool_result_id
+            else:
+                tool_id = resolve_tool_result_id(session, chunk)
+            if tool_id in session.emitted_tool_result_ids:
+                continue
+            session.emitted_tool_result_ids.add(tool_id)
+            events.append(
+                ExecutionSignal(
+                    TOOL_COMPLETED,
+                    {
+                        "tool_call_id": tool_id,
+                        "result": {
+                            "content": result[0],
+                            "is_error": getattr(chunk, "status", None) == "error",
+                            "truncated": result[1],
+                            "original_bytes": result[2],
+                        },
+                    },
+                )
+            )
+        return events
     if stream_mode != "messages" or not isinstance(data, tuple) or not data:
+        return []
+    if not _message_event_matches_execution(data, execution_id):
         return []
     chunk = data[0]
     if type(chunk).__name__ in {"AIMessage", "AIMessageChunk"}:
@@ -486,21 +556,42 @@ def translate_stream_event(
             tool_id = session.last_tool_result_id
         else:
             tool_id = resolve_tool_result_id(session, chunk)
-        events.append(
-            ExecutionSignal(
-                TOOL_COMPLETED,
-                {
-                    "tool_call_id": tool_id,
-                    "result": {
-                        "content": result[0],
-                        "is_error": getattr(chunk, "status", None) == "error",
-                        "truncated": result[1],
-                        "original_bytes": result[2],
+        if tool_id not in session.emitted_tool_result_ids:
+            session.emitted_tool_result_ids.add(tool_id)
+            events.append(
+                ExecutionSignal(
+                    TOOL_COMPLETED,
+                    {
+                        "tool_call_id": tool_id,
+                        "result": {
+                            "content": result[0],
+                            "is_error": getattr(chunk, "status", None) == "error",
+                            "truncated": result[1],
+                            "original_bytes": result[2],
+                        },
                     },
-                },
+                )
             )
-        )
     return events
+
+
+def _message_event_matches_execution(data: tuple[Any, ...], execution_id: str) -> bool:
+    """拒绝嵌套 graph 泄漏到外层 callback stream 的跨 execution 消息。"""
+    if not execution_id or len(data) < 2 or not isinstance(data[1], Mapping):
+        return True
+    actual = data[1].get("harness_execution_id")
+    return not isinstance(actual, str) or not actual or actual == execution_id
+
+
+def _tool_result_was_emitted(session: StreamSession, chunk: object) -> bool:
+    """判断 ToolMessage 是否已从另一种 stream mode 投影过。"""
+    if type(chunk).__name__ != "ToolMessage":
+        return False
+    if session.last_tool_result_chunk is chunk and session.last_tool_result_id:
+        return session.last_tool_result_id in session.emitted_tool_result_ids
+    provider_id = str(getattr(chunk, "tool_call_id", "") or "")
+    tool_id = session.tool_result_ids.get(provider_id) if provider_id else None
+    return tool_id in session.emitted_tool_result_ids if tool_id else False
 
 
 def resolve_tool_stream_id(
@@ -523,6 +614,7 @@ def resolve_tool_stream_id(
         session.tool_stream_ids[f"id:{raw_id}"] = tool_id
         if index is not None:
             session.tool_stream_ids[f"index:{index}"] = tool_id
+        session.tool_stream_ids["current"] = tool_id
     else:
         key = f"index:{index}" if index is not None else "current"
         tool_id = session.tool_stream_ids.get(key)

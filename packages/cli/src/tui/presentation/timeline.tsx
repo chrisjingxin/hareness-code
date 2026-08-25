@@ -31,6 +31,7 @@ export function ConversationTimeline(props: {
   showToolDetails: boolean
   expandedTools: ReadonlySet<string>
   onToggleTool: (toolId: string) => void
+  onOpenChildTimeline?: (executionId: string) => void
   modelName?: string
   transientNotice?: { id: string; message: string }
   terminalWidth: number
@@ -85,6 +86,7 @@ export function ConversationTimeline(props: {
               showToolDetails={props.showToolDetails}
               expandedTools={props.expandedTools}
               onToggleTool={props.onToggleTool}
+              onOpenChildTimeline={props.onOpenChildTimeline}
               terminalWidth={props.terminalWidth}
               todoDetail={!pinTodos && latestTodoId !== null && segment.item.type === "tool" && segment.item.tool.id === latestTodoId}
             />
@@ -107,6 +109,7 @@ export function ConversationTimeline(props: {
                 showToolDetails={props.showToolDetails}
                 expandedTools={props.expandedTools}
                 onToggleTool={props.onToggleTool}
+                onOpenChildTimeline={props.onOpenChildTimeline}
                 terminalWidth={props.terminalWidth}
                 todoDetail={!pinTodos && latestTodoId !== null && item.type === "tool" && item.tool.id === latestTodoId}
               />
@@ -157,6 +160,7 @@ function TimelineRow(props: {
   showToolDetails: boolean
   expandedTools: ReadonlySet<string>
   onToggleTool: (toolId: string) => void
+  onOpenChildTimeline?: (executionId: string) => void
   terminalWidth: number
   todoDetail?: boolean
 }) {
@@ -168,7 +172,14 @@ function TimelineRow(props: {
   if (props.item.type === "compose-summary") {
     return <ComposeSummaryRow summary={props.item.summary} />
   }
-  return <ToolRenderer tool={props.item.tool} terminalWidth={props.terminalWidth} todoDetail={props.todoDetail} />
+  return (
+    <ToolRenderer
+      tool={props.item.tool}
+      terminalWidth={props.terminalWidth}
+      todoDetail={props.todoDetail}
+      onOpenChildTimeline={props.onOpenChildTimeline}
+    />
+  )
 }
 
 /** 阶段 Runtime 摘要：非 assistant 文本，仅展示有界结果。 */
@@ -284,14 +295,17 @@ function TimelineActivity(props: { interactive: InteractiveSnapshot }) {
     ? progressPhaseLabel(interactive.runProgress.phase)
     : activityLabel(interactive.activity.kind)
   const compose = interactive.composeState
-  const line = compose
-    ? `${composeLiveStatusLine({
-      stage: compose.currentStage,
-      taskTitle: null,
-      phaseLabel: phase,
-      elapsedLabel: formatElapsed(elapsed),
-    })} · Esc 取消`
-    : `${phase} · 已运行 ${formatElapsed(elapsed)} · Esc 取消`
+  const isChild = Boolean(interactive.childTimelineExecutionId)
+  const line = isChild
+    ? `${phase} · 已运行 ${formatElapsed(elapsed)}`
+    : compose
+      ? `${composeLiveStatusLine({
+        stage: compose.currentStage,
+        taskTitle: null,
+        phaseLabel: phase,
+        elapsedLabel: formatElapsed(elapsed),
+      })} · Esc 取消`
+      : `${phase} · 已运行 ${formatElapsed(elapsed)} · Esc 取消`
   return (
     <box marginTop={1} paddingLeft={3} flexDirection="row" gap={1}>
       <text fg={tuiTheme.warning}>{frame}</text>

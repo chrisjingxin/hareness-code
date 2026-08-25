@@ -39,6 +39,15 @@ import {
 import { activityLabel, interactionStatusLabel, toolStatusLabel } from "../../presentation-shared/timeline-presenter"
 import { progressPhaseLabel } from "../../presentation-shared/timeline-presenter"
 import { formatElapsed } from "../../presentation-shared/formatters"
+import {
+  hasTaskDispatchView,
+  parseTaskDispatch,
+  TASK_DISPATCH_RESULT_LABEL,
+  TASK_DISPATCH_TASK_LABEL,
+  taskDispatchLabel,
+  taskDispatchPrimaryLine,
+  type TaskDispatchView,
+} from "../../presentation-shared/task-dispatch"
 import { toolDisplay, toolPrimaryArgument, type ToolIconName } from "../../presentation-shared/tool-display-policy"
 import { prettifyJson, toolOutputView, type ToolOutputView } from "../../presentation-shared/tool-output-render"
 import { FileTypeIcon } from "./workspace-sidebar/file-type-icon"
@@ -172,6 +181,13 @@ export function Timeline({
     [dispatch],
   )
 
+  const handleOpenChildTimeline = useCallback(
+    (executionId: string) => {
+      void dispatch({ type: "child-timeline-open", executionId })
+    },
+    [dispatch],
+  )
+
   const visibleItems = timeline.filter(item => {
     if (isPendingLive(item, pendingRequestId)) return false
     if (item.type === "reasoning" && !item.reasoning.active) return false
@@ -237,6 +253,7 @@ export function Timeline({
           items={items}
           expandedTools={snapshot.expandedTools}
           onToggleTool={handleToggleTool}
+          onOpenChildTimeline={handleOpenChildTimeline}
           liveKey={liveKey}
         />,
       )
@@ -258,6 +275,7 @@ export function Timeline({
         onToggle={() => toggleGroup(group)}
         expandedTools={snapshot.expandedTools}
         onToggleTool={handleToggleTool}
+        onOpenChildTimeline={handleOpenChildTimeline}
         liveKey={liveKey}
       />,
     )
@@ -276,6 +294,18 @@ export function Timeline({
       aria-relevant="additions"
       aria-label="对话与工具时间线"
     >
+      {snapshot.interactive.childTimelineExecutionId ? (
+        <div className="child-timeline-banner" role="region" aria-label="子代理时间线">
+          <span className="child-timeline-title">子代理时间线（只读）</span>
+          <button
+            type="button"
+            className="child-timeline-back-btn"
+            onClick={() => dispatch({ type: "child-timeline-leave" })}
+          >
+            返回主对话
+          </button>
+        </div>
+      ) : null}
       {snapshot.interactive.currentThreadId !== null && visibleItems.length > 0 ? (
         <div className="timeline-header">THREAD · {timeline.length} 项记录</div>
       ) : null}
@@ -323,6 +353,7 @@ function ActivityGroup({
   onToggle,
   expandedTools,
   onToggleTool,
+  onOpenChildTimeline,
   liveKey,
 }: {
   group: TimelineActivityGroup
@@ -330,6 +361,7 @@ function ActivityGroup({
   onToggle: () => void
   expandedTools: ReadonlySet<string>
   onToggleTool: (runId: string, toolId: string) => void
+  onOpenChildTimeline?: (executionId: string) => void
   liveKey: string | null
 }): ReactElement {
   const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
@@ -359,6 +391,7 @@ function ActivityGroup({
               items={items}
               expandedTools={expandedTools}
               onToggleTool={onToggleTool}
+              onOpenChildTimeline={onOpenChildTimeline}
               liveKey={liveKey}
             />
           ))}
@@ -456,11 +489,13 @@ function TimelineGroup({
   items,
   expandedTools,
   onToggleTool,
+  onOpenChildTimeline,
   liveKey,
 }: {
   items: TimelineItem[]
   expandedTools: ReadonlySet<string>
   onToggleTool: (runId: string, toolId: string) => void
+  onOpenChildTimeline?: (executionId: string) => void
   liveKey: string | null
 }): ReactElement {
   const assistantIndex = items.findIndex(isAssistantMessage)
@@ -469,7 +504,7 @@ function TimelineGroup({
     const toolItems = items.filter((item): item is Extract<TimelineItem, { type: "tool" }> => item.type === "tool")
     if (toolItems.length === 0 && reasoningItems.length === 0 && items.length === 1) {
       const item = items[0]
-      if (item) return <TimelineRow item={item} expandedTools={expandedTools} onToggleTool={onToggleTool} liveKey={liveKey} />
+      if (item) return <TimelineRow item={item} expandedTools={expandedTools} onToggleTool={onToggleTool} onOpenChildTimeline={onOpenChildTimeline} liveKey={liveKey} />
     }
     if (toolItems.length > 0) {
       return (
@@ -485,6 +520,7 @@ function TimelineGroup({
                 item={item}
                 expandedTools={expandedTools}
                 onToggleTool={onToggleTool}
+                onOpenChildTimeline={onOpenChildTimeline}
               />
             )
           })}
@@ -496,7 +532,7 @@ function TimelineGroup({
 
   const assistant = items[assistantIndex]
   if (!assistant || assistant.type !== "message") return <></>
-  if (items.length === 1) return <TimelineRow item={assistant} expandedTools={expandedTools} onToggleTool={onToggleTool} liveKey={liveKey} />
+  if (items.length === 1) return <TimelineRow item={assistant} expandedTools={expandedTools} onToggleTool={onToggleTool} onOpenChildTimeline={onOpenChildTimeline} liveKey={liveKey} />
 
   return (
     <div className="timeline-agent-group" data-tool-grouped="true">
@@ -512,6 +548,7 @@ function TimelineGroup({
               item={item}
               expandedTools={expandedTools}
               onToggleTool={onToggleTool}
+              onOpenChildTimeline={onOpenChildTimeline}
               grouped
             />
           )
@@ -522,6 +559,7 @@ function TimelineGroup({
             item={item}
             expandedTools={expandedTools}
             onToggleTool={onToggleTool}
+            onOpenChildTimeline={onOpenChildTimeline}
             liveKey={liveKey}
           />
         )
@@ -535,12 +573,14 @@ function TimelineRowImpl({
   item,
   expandedTools,
   onToggleTool,
+  onOpenChildTimeline,
   grouped = false,
   liveKey = null,
 }: {
   item: TimelineItem
   expandedTools: ReadonlySet<string>
   onToggleTool: (runId: string, toolId: string) => void
+  onOpenChildTimeline?: (executionId: string) => void
   grouped?: boolean
   liveKey?: string | null
 }): ReactElement {
@@ -557,6 +597,7 @@ function TimelineRowImpl({
           tool={item.tool}
           expanded={expandedTools.has(toolKey(item.tool.runId, item.tool.id))}
           onToggle={onToggleTool}
+          onOpenChildTimeline={onOpenChildTimeline}
         />
       </div>
     )
@@ -754,13 +795,20 @@ function ToolCardImpl({
   tool,
   expanded,
   onToggle,
+  onOpenChildTimeline,
 }: {
   tool: ToolCard
   expanded: boolean
   onToggle: (runId: string, toolId: string) => void
+  onOpenChildTimeline?: (executionId: string) => void
 }): ReactElement {
   const display = toolDisplay(tool.name)
-  const primary = toolPrimaryArgument(tool.name, tool.arguments)
+  const dispatch = tool.name === "task" ? parseTaskDispatch(tool.arguments) : null
+  const friendlyDispatch = dispatch !== null && hasTaskDispatchView(dispatch)
+  const label = friendlyDispatch ? taskDispatchLabel(dispatch) : display.label
+  const primary = friendlyDispatch
+    ? taskDispatchPrimaryLine(dispatch)
+    : toolPrimaryArgument(tool.name, tool.arguments)
   const Icon = TOOL_ICONS[display.icon]
   return (
     <div className={`tool-row tool-row-${tool.status}`} data-tool-id={tool.id} data-tone={display.tone}>
@@ -771,7 +819,7 @@ function ToolCardImpl({
         onClick={() => onToggle(tool.runId, tool.id)}
       >
         <Icon aria-hidden="true" focusable="false" className="tool-row-icon" />
-        <span className="tool-row-label" title={tool.name}>{display.label}</span>
+        <span className="tool-row-label" title={tool.name}>{label}</span>
         {primary ? <span className="tool-row-args">{primary}</span> : null}
         {renderToolStatus(tool.status)}
         <ChevronDown
@@ -782,14 +830,77 @@ function ToolCardImpl({
       </button>
       {expanded ? (
         <div className="tool-row-details">
-          {tool.output ? <ToolOutputSection toolName={tool.name} output={tool.output} argumentsText={tool.arguments} /> : null}
-          {tool.arguments ? <ToolArgumentsSection arguments={tool.arguments} /> : null}
+          {friendlyDispatch ? (
+            <TaskDispatchSection
+              view={dispatch}
+              output={tool.output}
+              childExecutionId={tool.childExecutionId}
+              onOpenChildTimeline={onOpenChildTimeline}
+            />
+          ) : null}
+          {tool.output && !friendlyDispatch ? <ToolOutputSection toolName={tool.name} output={tool.output} argumentsText={tool.arguments} /> : null}
+          {tool.arguments && !friendlyDispatch ? <ToolArgumentsSection arguments={tool.arguments} /> : null}
           {!tool.arguments && !tool.output ? (
             <p className="tool-row-empty">该调用尚无可显示内容。</p>
           ) : null}
         </div>
       ) : null}
     </div>
+  )
+}
+
+/** task 展开详情：子代理 / 任务 / 结论分区；结论走 Markdown，代替 JSON 参数卡。 */
+function TaskDispatchSection({
+  view,
+  output,
+  childExecutionId,
+  onOpenChildTimeline,
+}: {
+  view: TaskDispatchView
+  output: string
+  childExecutionId?: string
+  onOpenChildTimeline?: (executionId: string) => void
+}): ReactElement {
+  const result = output.trim()
+  return (
+    <section className="tool-detail-card" data-section="dispatch">
+      <header className="tool-detail-header">
+        <span className="tool-detail-title">派出</span>
+      </header>
+      <div className="tool-detail-body" data-clamped="false">
+        {view.agentId ? (
+          <div className="tool-dispatch-field">
+            <span className="tool-dispatch-key">子代理</span>
+            <span className="tool-dispatch-value">{view.agentId}</span>
+          </div>
+        ) : null}
+        {view.description ? (
+          <div className="tool-dispatch-field">
+            <span className="tool-dispatch-key">{TASK_DISPATCH_TASK_LABEL}</span>
+            <span className="tool-dispatch-value">{view.description}</span>
+          </div>
+        ) : null}
+        {childExecutionId && onOpenChildTimeline ? (
+          <div className="tool-dispatch-field tool-dispatch-child-action">
+            <button
+              type="button"
+              className="child-timeline-open-btn btn-link"
+              onClick={() => onOpenChildTimeline(childExecutionId)}
+            >
+              进入子时间线
+            </button>
+          </div>
+        ) : null}
+        {result ? (
+          <div className="tool-dispatch-field tool-dispatch-result">
+            <span className="tool-dispatch-key">{TASK_DISPATCH_RESULT_LABEL}</span>
+            <div className="tool-dispatch-value tool-dispatch-markdown">
+              <Markdown text={result} />
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </section>
   )
 }
 

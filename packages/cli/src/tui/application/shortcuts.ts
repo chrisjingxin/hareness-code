@@ -18,11 +18,14 @@ export type ShortcutContext = {
   threadOptionCount?: number
   modelPickerVisible?: boolean
   modelOptionCount?: number
+  agentPickerVisible?: boolean
+  agentOptionCount?: number
   commandMenuVisible: boolean
   commandOptionCount: number
   activeRun: boolean
   hasDraft: boolean
   inputMode?: "chat" | "shell"
+  childTimelineActive?: boolean
 }
 
 export type ShortcutAction =
@@ -32,6 +35,7 @@ export type ShortcutAction =
   | "cancel-command-dialog"
   | "close-btw-modal"
   | "copy-btw-answer"
+  | "leave-child-timeline"
   | "close-command-menu"
   | "command-previous"
   | "command-next"
@@ -52,6 +56,11 @@ export type ShortcutAction =
   | "model-next"
   | "model-select"
   | "model-block"
+  | "close-agent-picker"
+  | "agent-previous"
+  | "agent-next"
+  | "agent-select"
+  | "agent-block"
   | "command-open"
   | "clear-draft"
   | "cancel-run"
@@ -113,6 +122,14 @@ export function resolveShortcut(key: KeyLike, context: ShortcutContext): Shortcu
       return (context.modelOptionCount ?? 0) > 0 ? "model-select" : "model-block"
     }
   }
+  if (context.agentPickerVisible) {
+    if (key.name === "escape") return "close-agent-picker"
+    if (key.name === "up" || (key.ctrl && key.name === "p")) return "agent-previous"
+    if (key.name === "down" || (key.ctrl && key.name === "n")) return "agent-next"
+    if (key.name === "return" || key.name === "kpenter" || key.name === "tab") {
+      return (context.agentOptionCount ?? 0) > 0 ? "agent-select" : "agent-block"
+    }
+  }
   if (context.skillPickerVisible) {
     if (key.name === "escape") return "close-skill-picker"
     if (key.name === "up" || (key.ctrl && key.name === "p")) return "skill-previous"
@@ -132,7 +149,7 @@ export function resolveShortcut(key: KeyLike, context: ShortcutContext): Shortcu
 
   // 滚动键全局生效（含正在输入或运行中），与 opencode 的 session.global 对齐；
   // 浮层打开时让位给选择器，避免在背后滚动历史。
-  if (!context.commandMenuVisible && !context.skillPickerVisible && !context.threadPickerVisible && !context.modelPickerVisible) {
+  if (!context.commandMenuVisible && !context.skillPickerVisible && !context.threadPickerVisible && !context.modelPickerVisible && !context.agentPickerVisible) {
     const scrollAction = resolveScrollShortcut(key)
     if (scrollAction !== "none") return scrollAction
   }
@@ -145,6 +162,9 @@ export function resolveShortcut(key: KeyLike, context: ShortcutContext): Shortcu
   if (key.ctrl && key.name === "c") {
     if (context.hasDraft) return "clear-draft"
     return context.activeRun ? "cancel-run" : "exit"
+  }
+  if ((key.name === "escape" || key.name === "backspace" || key.name === "delete") && context.childTimelineActive) {
+    return "leave-child-timeline"
   }
   if (key.name === "escape" && context.inputMode === "shell") return "exit-shell-mode"
   if (key.name === "escape" && context.activeRun) return "cancel-run"

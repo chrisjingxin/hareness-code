@@ -6,7 +6,7 @@ import { act } from "react"
 
 import { ContextDock } from "../../../src/web/presentation/context-dock/context-dock"
 import type { ContextDockPanel, WebAdapterSnapshot, WebIntent } from "../../../src/web/application/adapter"
-import { makeCatalog, makeInteractive, makeMcp, makeModel, makeRuntime, makeSkill, makeSnapshot } from "./fixtures"
+import { makeAgent, makeCatalog, makeInteractive, makeMcp, makeModel, makeRuntime, makeSkill, makeSnapshot } from "./fixtures"
 import { registerTestDom, render, type RenderHandle } from "./render"
 
 const unregisterTestDom = registerTestDom()
@@ -171,6 +171,34 @@ describe("ContextDock", () => {
     }
   })
 
+  test("activePanel=agents 列出可派发 Agent，点击不发出 arm/select intent", () => {
+    const intents: WebIntent[] = []
+    const interactive = makeInteractive({
+      catalogs: {
+        ...makeInteractive().catalogs,
+        agents: makeCatalog([
+          makeAgent({ id: "general-purpose", tools: [], description: "通用子代理" }),
+          makeAgent({ id: "explore" }),
+        ]),
+      },
+    })
+    const handle = mountDock(dockSnapshot("agents", { interactive }), intents)
+    try {
+      const text = handle.container.textContent ?? ""
+      expect(text).toContain("general-purpose")
+      expect(text).toContain("explore")
+      expect(text).toContain("内置")
+      expect(text).toContain("研究、搜索和把事情做完")
+      expect(text).toContain("只读搜索代码，找出文件和结构")
+      expect(text).not.toContain("glob")
+      expect(text).not.toContain("继承父能力")
+      expect(handle.container.querySelectorAll("button.panel-item").length).toBe(0)
+      expect(intents).toEqual([])
+    } finally {
+      handle.unmount()
+    }
+  })
+
   test("activePanel=status 只读展示 runtime 与连接信息；内部不出现业务操作按钮", () => {
     const intents: WebIntent[] = []
     const interactive = makeInteractive({
@@ -235,7 +263,7 @@ describe("ContextDock", () => {
       expect(header?.querySelector(".panel-close")).not.toBeNull()
       expect(handle.container.querySelectorAll(".context-dock-header")).toHaveLength(1)
       const tabs = Array.from(handle.container.querySelectorAll<HTMLButtonElement>('[role="tab"]'))
-      expect(tabs.length).toBe(6) // 代码|模型|技能|MCP|状态|帮助
+      expect(tabs.length).toBe(7) // 代码|模型|技能|MCP|Agent|状态|帮助
       const modelTab = tabs.find(tab => tab.textContent === "模型")
       const codeTab = tabs.find(tab => tab.textContent === "代码")
       expect(modelTab?.getAttribute("aria-selected")).toBe("true")

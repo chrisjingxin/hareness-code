@@ -11,16 +11,33 @@ import type { SharedViewProps } from "./types"
 export function ThreadView(props: SharedViewProps & { modelName?: string }) {
   const interaction = props.interactive.interaction
   const slot = bottomAreaKind(interaction)
+  const isChild = Boolean(props.interactive.childTimelineExecutionId)
 
   return (
     <box flexDirection="column" flexGrow={1} minHeight={0} backgroundColor={tuiTheme.background}>
-      <ComposeProgressBar interactive={props.interactive} />
+      {isChild ? (
+        <box
+          paddingLeft={2}
+          paddingRight={2}
+          paddingTop={1}
+          paddingBottom={1}
+          backgroundColor={tuiTheme.surface}
+          flexDirection="row"
+          gap={2}
+        >
+          <text fg={tuiTheme.primary}>子代理时间线</text>
+          <text fg={tuiTheme.muted}>按 Backspace 或 Esc 返回主对话</text>
+        </box>
+      ) : (
+        <ComposeProgressBar interactive={props.interactive} />
+      )}
       <ConversationTimeline
         interactive={props.interactive}
         scrollRef={props.conversationScrollRef}
         showToolDetails={props.showToolDetails}
         expandedTools={props.expandedTools}
         onToggleTool={props.onToggleTool}
+        onOpenChildTimeline={props.onOpenChildTimeline}
         modelName={props.modelName}
         transientNotice={props.transientNotice}
         terminalWidth={props.terminalWidth}
@@ -48,7 +65,7 @@ export function ThreadView(props: SharedViewProps & { modelName?: string }) {
           onQuestion={props.onQuestion}
         />
       ) : null}
-      {slot === "input" ? (
+      {slot === "input" && !isChild ? (
         <box flexShrink={0} paddingLeft={2} paddingRight={2}>
           <ThreadRuntimeLine interactive={props.interactive} inputMode={props.inputMode} />
           <InputBar {...props} variant="thread" commandMenuPlacement="above" />

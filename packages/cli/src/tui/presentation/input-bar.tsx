@@ -278,7 +278,18 @@ export function FooterRail(props: {
         <text fg={tuiTheme.muted}>{workspace}</text>
         {showBranch ? <text fg={tuiTheme.muted}>:{branchLabel}</text> : null}
       </box>
-      {props.interactive.activity.kind === "compacting" ? <BusyContextOperationHint /> : props.interactive.activeRun ? <BusyRunHint /> : props.thread ? <text fg={tuiTheme.muted}>↑↓ 历史 · PgUp/PgDn 滚动 · Ctrl+O 工具</text> : null}
+      {props.interactive.activity.kind === "compacting" ? (
+        <BusyContextOperationHint />
+      ) : props.interactive.childTimelineExecutionId ? (
+        <box flexDirection="row" gap={1}>
+          {props.interactive.activeRun ? <text fg={tuiTheme.warning}>{useSpinner(true, 80)}</text> : null}
+          <text fg={tuiTheme.muted}>PgUp/PgDn 滚动 · Backspace/Esc 返回主对话</text>
+        </box>
+      ) : props.interactive.activeRun ? (
+        <BusyRunHint />
+      ) : props.thread ? (
+        <text fg={tuiTheme.muted}>↑↓ 历史 · PgUp/PgDn 滚动 · Ctrl+O 工具</text>
+      ) : null}
       <box flexDirection="row" gap={1} alignItems="center">
         {props.thread && props.onToggleSidebar ? (
           <box onMouseUp={props.onToggleSidebar}>

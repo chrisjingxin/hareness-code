@@ -39,6 +39,30 @@ function createMockGateway(): AgentGateway {
       return { skills: [] }
     },
     async setSkillEnabled() {},
+    async listAgents() {
+      return { snapshot_id: "empty", agents: [], diagnostics: [] }
+    },
+    async listTeams() {
+      return { teams: [], diagnostics: [] }
+    },
+    async inspectTeam() {
+      return {}
+    },
+    async generateTeam(params) {
+      return {
+        id: params.id,
+        description: null,
+        max_parallelism: params.max_parallelism ?? 4,
+        failure_policy: "fail-fast" as const,
+        tasks: [],
+      }
+    },
+    async runTeam(params) {
+      return { team_id: params.team_id, run_id: params.run_id, accepted: true as const }
+    },
+    async cancelTeam(runId) {
+      return { run_id: runId, cancelled: false }
+    },
     async listMcpServers() {
       return { servers: [] }
     },

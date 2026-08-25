@@ -404,6 +404,12 @@ test("Tool 展开详情卡片化：输出/参数同级卡片 + 头部条 + 复�
   expect(css).toContain(".tool-detail-expand {")
   // 参数卡片 chevron 随 details[open] 旋转。
   expect(css).toContain(".tool-detail-arguments[open] .tool-detail-chevron { transform: rotate(180deg); }")
+  // task 派出结构化字段走 semantic token，不铺 JSON。
+  expect(css).toContain(".tool-dispatch-field {")
+  expect(css).toContain(".tool-dispatch-key {")
+  expect(css).toMatch(/\.tool-dispatch-key\s*\{[^}]*color:\s*var\(--text\)/)
+  expect(css).toContain(".tool-dispatch-value {")
+  expect(css).toMatch(/\.tool-dispatch-result\s*\{[^}]*border-top:\s*1px solid var\(--line\)/)
 })
 
 test("Tool 结构化渲染样式：file-content 行号 gutter、path-list 行、grep 分组（2026-08-18 轮 2）", () => {

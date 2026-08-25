@@ -447,6 +447,49 @@ pre, code { font-family: "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Co
   flex-direction: column;
 }
 .timeline-header { padding: 2px 0 12px; color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: .08em; }
+
+.child-timeline-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  margin-bottom: 12px;
+  border-radius: var(--radius-surface);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+}
+.child-timeline-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+}
+.child-timeline-back-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: var(--radius-control);
+  background: var(--chrome);
+  border: 1px solid var(--line);
+  color: var(--text);
+  cursor: pointer;
+}
+.child-timeline-back-btn:hover {
+  background: var(--surface-3);
+}
+.child-timeline-open-btn {
+  margin-top: 4px;
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: var(--radius-control);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  color: var(--accent-hover);
+  cursor: pointer;
+}
+.child-timeline-open-btn:hover {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
 /* 空态文案：双居中基础上再向下 48px（用户实测偏上）；装饰性文本用 subtle，比 muted 更淡。 */
 .timeline-empty { margin: auto; max-width: 520px; color: var(--subtle); text-align: center; transform: translateY(48px); }
 
@@ -567,6 +610,13 @@ pre, code { font-family: "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Co
 .tool-row-chevron.expanded { transform: rotate(180deg); }
 /* 展开详情：引导竖线内输出/参数两张同级卡片（2026-08-18 结构化方向，与用户确认）。 */
 .tool-row-details { display: grid; gap: 8px; margin: 4px 0 6px 15px; padding: 0 4px 8px 10px; border-left: 2px solid var(--line); }
+.tool-dispatch-field { display: flex; gap: 10px; align-items: flex-start; padding: 0 10px 8px; }
+.tool-dispatch-key { flex: 0 0 3.5em; color: var(--text); font-size: 12px; font-weight: 600; }
+.tool-dispatch-value { min-width: 0; color: var(--text-soft); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tool-dispatch-result { align-items: flex-start; padding-top: 4px; border-top: 1px solid var(--line); margin-top: 2px; padding-bottom: 10px; }
+.tool-dispatch-markdown { white-space: normal; }
+.tool-dispatch-markdown.markdown,
+.tool-dispatch-markdown .markdown { font-size: 13px; line-height: 1.65; }
 .tool-detail-card { min-width: 0; border: 1px solid var(--line); border-radius: var(--radius-surface); background: var(--tool-output-bg); }
 .tool-detail-header { display: flex; align-items: center; gap: 8px; padding: 6px 10px; }
 .tool-detail-title { color: var(--text-soft); font-size: 12px; font-weight: 600; }

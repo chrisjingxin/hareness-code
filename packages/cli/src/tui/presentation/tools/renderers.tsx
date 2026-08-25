@@ -3,9 +3,16 @@
 import { useState } from "react"
 
 import type { TimelineItem, ToolCard } from "../../../interactive/state"
-import { boundVisibleText, TOOL_PREVIEW_BUDGET, writeFileVisibleBody } from "../../../presentation-shared/paint-budget"
+import { boundVisibleText, TOOL_PREVIEW_BUDGET, WRITE_FILE_EXPANDED_BUDGET, writeFileVisibleBody } from "../../../presentation-shared/paint-budget"
 import { diffTextForRenderer, parseFileDiff } from "../../../presentation-shared/file-diff"
 import { resolveLanguageForPath } from "../../../presentation-shared/language-catalog"
+import {
+  hasTaskDispatchView,
+  parseTaskDispatch,
+  TASK_DISPATCH_RESULT_LABEL,
+  TASK_DISPATCH_TASK_LABEL,
+  taskDispatchLabel,
+} from "../../../presentation-shared/task-dispatch"
 import { toolArgumentSummary } from "../../../presentation-shared/tool-output-policy"
 import { getCommonSyntaxClient } from "../../platform/syntax-parsers"
 import { useSpinner } from "../input-bar"
@@ -23,6 +30,7 @@ export function ToolRenderer(props: {
   tool: ToolCard
   terminalWidth: number
   todoDetail?: boolean
+  onOpenChildTimeline?: (executionId: string) => void
 }) {
   const kind = resolveToolRenderer(props.tool.name)
   const name = canonicalizeToolName(props.tool.name)
@@ -30,6 +38,7 @@ export function ToolRenderer(props: {
   if (name === "edit" || name === "edit_file") return <EditTool tool={props.tool} terminalWidth={props.terminalWidth} />
   if (name === "ask_user") return <AskUserTool tool={props.tool} />
   if (name === "write_todos") return <TodoTool tool={props.tool} detail={props.todoDetail !== false} />
+  if (name === "task") return <TaskTool tool={props.tool} onOpenChildTimeline={props.onOpenChildTimeline} />
   if (kind === "inline") return <InlineTool tool={props.tool} />
   if (kind === "block") return <BlockTool tool={props.tool} />
   if (kind === "diff") return <DiffTool tool={props.tool} terminalWidth={props.terminalWidth} />
@@ -367,6 +376,78 @@ export function TodoPanel(props: { items: readonly TodoItem[] }) {
           </box>
         )
       })}
+    </box>
+  )
+}
+
+/** task：标题是派出对象；任务与结论分区用正文色；结论可点开展开剩余行。 */
+function TaskTool(props: { tool: ToolCard; onOpenChildTimeline?: (executionId: string) => void }) {
+  const view = parseTaskDispatch(props.tool.arguments)
+  if (!hasTaskDispatchView(view)) return <GenericTool tool={props.tool} />
+  const running = props.tool.status === "running"
+  const failed = props.tool.status === "failed"
+  const frame = useSpinner(running, 80)
+  const tone = failed ? tuiTheme.danger : running ? tuiTheme.thinking : tuiTheme.success
+  const [expanded, setExpanded] = useState(false)
+  const output = boundVisibleText(
+    props.tool.output,
+    expanded ? WRITE_FILE_EXPANDED_BUDGET : TOOL_PREVIEW_BUDGET,
+  )
+  const canToggle = output.overflow || expanded
+  const toggleExpanded = (): void => setExpanded(current => !current)
+  const childId = props.tool.childExecutionId
+  return (
+    <box
+      marginTop={1}
+      marginLeft={3}
+      marginRight={3}
+      backgroundColor={tuiTheme.surface}
+      paddingLeft={1}
+      paddingRight={1}
+      paddingTop={1}
+      paddingBottom={1}
+      flexDirection="column"
+    >
+      <box flexDirection="row" gap={1}>
+        <text fg={tone}>{running ? frame : failed ? "×" : "→"}</text>
+        <text fg={tuiTheme.text}>{taskDispatchLabel(view)}</text>
+        {childId ? (
+          <text fg={tuiTheme.primary} onMouseUp={() => props.onOpenChildTimeline?.(childId)}>
+            进入子时间线
+          </text>
+        ) : null}
+      </box>
+      {view.description ? (
+        <>
+          <text fg={tuiTheme.text}>{TASK_DISPATCH_TASK_LABEL}</text>
+          <text content={view.description} fg={tuiTheme.text} />
+        </>
+      ) : null}
+      {output.text ? (
+        <>
+          <box flexDirection="row" gap={1} onMouseUp={canToggle ? toggleExpanded : undefined}>
+            <text fg={tuiTheme.text}>{TASK_DISPATCH_RESULT_LABEL}</text>
+            {canToggle ? <text fg={tuiTheme.muted}>{expanded ? "收起" : "展开"}</text> : null}
+          </box>
+          <markdown
+            content={output.text}
+            syntaxStyle={markdownSyntax}
+            treeSitterClient={getCommonSyntaxClient()}
+            streaming={false}
+            fg={tuiTheme.text}
+            bg={tuiTheme.surface}
+            conceal
+            concealCode={false}
+            internalBlockMode="top-level"
+            tableOptions={{ style: "columns", borders: false }}
+          />
+          {output.overflow ? (
+            <box onMouseUp={toggleExpanded}>
+              <text fg={tuiTheme.muted}>还有 {output.hiddenLines} 行</text>
+            </box>
+          ) : null}
+        </>
+      ) : null}
     </box>
   )
 }

@@ -8,8 +8,8 @@ priority: P0
 status: 进行中
 owner: Codex (Luna Max)
 branch: codex/zc-124-web-ui-upgrade
-reviewed_at: 2026-08-09
-review_due: 2026-08-23
+reviewed_at: 2026-08-24
+review_due: 2026-09-07
 scope: 以当前 React DOM Web 工作台为基础，统一视觉语言、响应式布局、Timeline/Tool、Run/Composer/Interaction、可访问性和功能性动效，并协调 HC-125～HC-130 与既有 Browser E2E/最终架构验收形成一个可观察的用户结果。
 acceptance: HC-125～HC-130 全部完成或有依据地标记过时；HC-105 的双主题多视口 Browser E2E 与 HC-115 最终验收覆盖新设计；1440×900、1280×800、1024×768、390×844、320px 和 200% zoom 下核心对话、运行状态、审批与 Composer 均可达；用户/开发文档、测试证据和版本影响闭环。
 user_docs: docs/user/交互使用.md、docs/user/Web界面.md

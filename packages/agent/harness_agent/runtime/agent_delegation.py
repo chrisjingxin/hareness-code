@@ -25,6 +25,7 @@ from harness_agent.runtime.execution_binding import (
     ExecutionStatus,
     SafeModelProfile,
 )
+from harness_agent.runtime.execution_stream import TOOL_DELTA
 from harness_agent.runtime.run_context import RunCancellationToken
 
 
@@ -169,6 +170,10 @@ class DelegationContextMiddleware(AgentMiddleware):
         )
 
 
+MAX_PARENT_CHILD_PARALLELISM: int = 4
+"""每个父 execution 同时运行的子代理最大硬上限。"""
+
+
 class AgentDelegator:
     """验证 delegation envelope 并执行已注册 Inline/Managed target。"""
 
@@ -178,12 +183,13 @@ class AgentDelegator:
         *,
         targets: tuple[DelegationTarget, ...],
     ) -> None:
-        """冻结 target 目录并初始化父 execution 并发计数。"""
+        """冻结 target 目录并初始化父 execution 并发与排队状态。"""
         if len({target.agent_id for target in targets}) != len(targets):
             raise AgentDelegationError("DELEGATION_TARGET_DUPLICATE")
         self._registry = registry
         self._targets = {target.agent_id: target for target in targets}
         self._active_by_parent: dict[str, int] = {}
+        self._waiters_by_parent: dict[str, list[asyncio.Future[None]]] = {}
         self._completed: dict[str, tuple[tuple[object, ...], AgentResult]] = {}
         self._lock = asyncio.Lock()
 
@@ -208,11 +214,22 @@ class AgentDelegator:
                 if completed[0] != fingerprint:
                     raise AgentDelegationError("DELEGATION_IDEMPOTENCY_CONFLICT")
                 return completed[1]
-            active = self._active_by_parent.get(command.parent_ref.execution_id, 0)
-            limit = command.delegation_policy.max_parallelism
-            if limit is not None and active >= limit:
-                raise AgentDelegationError("DELEGATION_PARALLELISM_EXCEEDED")
-            self._active_by_parent[command.parent_ref.execution_id] = active + 1
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + command.timeout_seconds
+        policy_limit = command.delegation_policy.max_parallelism
+        effective_limit = (
+            min(MAX_PARENT_CHILD_PARALLELISM, policy_limit)
+            if policy_limit is not None
+            else MAX_PARENT_CHILD_PARALLELISM
+        )
+
+        await self._acquire_slot(
+            command.parent_ref.execution_id,
+            effective_limit,
+            command.cancellation_token,
+            deadline,
+        )
 
         ref = child_execution_ref(command)
         binding = AgentExecutionBinding(
@@ -226,9 +243,19 @@ class AgentDelegator:
             definition_fingerprint=target.definition_fingerprint,
         )
         try:
+            if command.cancellation_token.cancelled:
+                raise asyncio.CancelledError
+            remaining_timeout = max(0.0, deadline - loop.time())
+            if remaining_timeout <= 0:
+                raise TimeoutError
             await self._registry.accept(binding)
             await self._registry.start(ref)
-            output = await self._run_with_cancellation(target.runner, command)
+            self._emit_child_binding(command, ref, target)
+            output = await self._run_with_cancellation(
+                target.runner,
+                command,
+                remaining_timeout,
+            )
             await self._registry.finalize(ref, status=ExecutionStatus.COMPLETED)
             result = AgentResult(
                 ref=ref,
@@ -256,12 +283,70 @@ class AgentDelegator:
                 type(exc).__name__,
             ) from exc
         finally:
+            await self._release_slot(command.parent_ref.execution_id)
+
+    async def _acquire_slot(
+        self,
+        parent_execution_id: str,
+        limit: int,
+        cancellation_token: RunCancellationToken,
+        deadline: float,
+    ) -> None:
+        """获取并发槽位；超额时入队等待，支持取消与排队超时退出。"""
+        if cancellation_token.cancelled:
+            raise asyncio.CancelledError
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[None] | None = None
+        async with self._lock:
+            active = self._active_by_parent.get(parent_execution_id, 0)
+            if active < limit:
+                self._active_by_parent[parent_execution_id] = active + 1
+                return
+            future = loop.create_future()
+            self._waiters_by_parent.setdefault(parent_execution_id, []).append(future)
+
+        cancel_task = asyncio.create_task(cancellation_token.wait())
+        timeout_seconds = max(0.0, deadline - loop.time())
+        try:
+            done, _ = await asyncio.wait(
+                {future, cancel_task},
+                timeout=timeout_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if future in done:
+                return
             async with self._lock:
-                active = self._active_by_parent.get(command.parent_ref.execution_id, 0)
-                if active <= 1:
-                    self._active_by_parent.pop(command.parent_ref.execution_id, None)
-                else:
-                    self._active_by_parent[command.parent_ref.execution_id] = active - 1
+                waiters = self._waiters_by_parent.get(parent_execution_id, [])
+                if future in waiters:
+                    waiters.remove(future)
+                elif future.done():
+                    self._release_slot_locked(parent_execution_id)
+            if cancel_task in done:
+                raise asyncio.CancelledError
+            raise AgentDelegationError("DELEGATION_TIMEOUT")
+        finally:
+            cancel_task.cancel()
+            await asyncio.gather(cancel_task, return_exceptions=True)
+
+    async def _release_slot(self, parent_execution_id: str) -> None:
+        """释放并发槽位并唤醒等待队列中的下一个任务。"""
+        async with self._lock:
+            self._release_slot_locked(parent_execution_id)
+
+    def _release_slot_locked(self, parent_execution_id: str) -> None:
+        """锁内执行槽位释放或交接。"""
+        waiters = self._waiters_by_parent.get(parent_execution_id, [])
+        while waiters:
+            next_waiter = waiters.pop(0)
+            if not next_waiter.done():
+                next_waiter.set_result(None)
+                return
+        active = self._active_by_parent.get(parent_execution_id, 0)
+        if active <= 1:
+            self._active_by_parent.pop(parent_execution_id, None)
+            self._waiters_by_parent.pop(parent_execution_id, None)
+        else:
+            self._active_by_parent[parent_execution_id] = active - 1
 
     def _validate_policy(self, command: DelegateAgent, parent_depth: int) -> None:
         """验证目标、深度和显式 enabled；所有缺失上限只表示该层不新增限制。"""
@@ -276,14 +361,47 @@ class AgentDelegator:
         if policy.max_depth is not None and parent_depth + 1 > policy.max_depth:
             raise AgentDelegationError("DELEGATION_DEPTH_EXCEEDED")
 
+    def _emit_child_binding(
+        self,
+        command: DelegateAgent,
+        ref: ExecutionRef,
+        target: DelegationTarget,
+    ) -> None:
+        """child 创建成功后，向父 task 的 tool.delta 写入一对一绑定字段。
+
+        只在受控 task handler 内（存在 delegation call context）生效；
+        测试或非 UI 路径没有父上下文时静默跳过，派出卡保持不可进入。
+        """
+        try:
+            call = current_delegation_call()
+        except AgentDelegationError:
+            return
+        port = getattr(call.run_context, "event_port", None)
+        if not callable(port):
+            return
+        port(
+            TOOL_DELTA,
+            {
+                "tool_call_id": call.tool_call_id,
+                "child_execution_id": ref.execution_id,
+                "child_agent_id": target.agent_id,
+            },
+            None,
+            None,
+            None,
+        )
+
     async def _run_with_cancellation(
         self,
         runner: DelegationRunner,
         command: DelegateAgent,
+        timeout_seconds: float,
     ) -> Mapping[str, Any]:
         """让父取消、timeout 和 runner 终态竞争，并始终回收内部 Task。"""
         if command.cancellation_token.cancelled:
             raise asyncio.CancelledError
+        if timeout_seconds <= 0:
+            raise TimeoutError
         runner_task = asyncio.create_task(
             runner(command),
             name=f"harness-delegation-{command.target_agent_id}",
@@ -292,7 +410,7 @@ class AgentDelegator:
         try:
             done, _ = await asyncio.wait(
                 {runner_task, cancel_task},
-                timeout=command.timeout_seconds,
+                timeout=timeout_seconds,
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if not done:

@@ -1,6 +1,7 @@
 /** Interactive Core 的共享契约：intent、result、snapshot、catalog 与 Interaction DTO。 */
 
 import type {
+  AgentSummary,
   DirectoryTrustDecision,
   FileDiffPresentation,
   McpAddParams,
@@ -16,7 +17,7 @@ import type { AgentGateway, Clock, IdGenerator, Scheduler } from "./ports"
 
 import type { InteractiveApprovalMode } from "./runtime"
 
-export type { ActiveRun, ComposeProjection, InteractiveActivity, InteractiveApprovalMode, InteractiveRuntime, RunProgress, RunSummary, TimelineItem, WorkItemProjection, WorkItemStatus, WorkMode }
+export type { ActiveRun, AgentSummary, ComposeProjection, InteractiveActivity, InteractiveApprovalMode, InteractiveRuntime, RunProgress, RunSummary, TimelineItem, WorkItemProjection, WorkItemStatus, WorkMode }
 
 /** 审批决定类型，与协议 ApprovalResponse.decision 保持一致。 */
 export type ApprovalDecision = "approve_once" | "approve_thread" | "approve_project" | "reject" | "reject_with_feedback"
@@ -67,12 +68,14 @@ export type InteractiveInteraction =
       presentation: FileDiffPresentation | null
       decisions: readonly ApprovalDecision[]
       deadlineAtMs: number
+      agentId?: string
     }
   | {
       type: "question"
       requestId: string
       questions: readonly InteractiveQuestion[]
       deadlineAtMs: number
+      agentId?: string
     }
   | {
       type: "directory_trust"
@@ -84,6 +87,7 @@ export type InteractiveInteraction =
       shadowsWorkspace: boolean
       decisions: readonly DirectoryTrustDecision[]
       deadlineAtMs: number
+      agentId?: string
     }
 
 /** adapter 提交的答案；request_id 由 Controller 用当前 request 组装。 */
@@ -106,7 +110,7 @@ export type InteractiveMcpInput = McpAddParams
 
 /** 表现层必须由宿主完成的依赖副作用。 */
 export type PresentationEffect =
-  | { type: "present"; target: "threads" | "models" | "skills"; initialQuery?: string }
+  | { type: "present"; target: "threads" | "models" | "skills" | "agents"; initialQuery?: string }
   | { type: "request-handoff"; threadId: string | null }
   | { type: "side-question"; question: string; threadId: string | null }
   | { type: "request-exit" }
@@ -134,7 +138,7 @@ export type InteractiveIntent =
   | { type: "input.submit"; value: string; mode?: "build" | "compose" | "direct_shell" }
   | { type: "command.execute"; commandId: string; argument?: string }
   | { type: "run.cancel" }
-  | { type: "catalog.refresh"; catalog: "threads" | "models" | "skills" | "mcp" }
+  | { type: "catalog.refresh"; catalog: "threads" | "models" | "skills" | "mcp" | "agents" }
   | { type: "thread.open"; threadId: string }
   | { type: "model.select"; profileId: string }
   | { type: "skill.arm"; skillId: string }
@@ -147,6 +151,8 @@ export type InteractiveIntent =
   | { type: "approval-mode.cycle" }
   | { type: "work-mode.cycle" }
   | { type: "approval-mode.set"; mode: InteractiveApprovalMode }
+  | { type: "child-timeline.open"; executionId: string }
+  | { type: "child-timeline.leave" }
 
 /** 两个 adapter 都需要的领域事实；不包含终端尺寸、DOM、颜色或组件状态。 */
 export type InteractiveSnapshot = {
@@ -166,6 +172,7 @@ export type InteractiveSnapshot = {
     readonly models: LoadableCatalog<ModelProfile>
     readonly skills: LoadableCatalog<SkillSummary>
     readonly mcp: LoadableCatalog<McpServerSummary>
+    readonly agents: LoadableCatalog<AgentSummary>
   }
   readonly selection: {
     readonly requestedModelProfileId: string | null
@@ -180,6 +187,8 @@ export type InteractiveSnapshot = {
   readonly workItem: WorkItemProjection | null
   /** Thread 首条有效消息后冻结的持久工作模式；未冻结为 null。 */
   readonly threadMode: WorkMode | null
+  /** 正在查看的 child execution；null 表示父时间线。 */
+  readonly childTimelineExecutionId: string | null
 }
 
 /** Interactive Core 的唯一业务入口；实现细节不泄漏 React、DOM 或 transport。 */

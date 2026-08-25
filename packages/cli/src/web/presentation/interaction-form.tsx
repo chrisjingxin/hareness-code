@@ -122,7 +122,9 @@ function ApprovalForm(props: {
   }
 
   const presentation = interaction.presentation
-  const title = "需要批准"
+  const title = interaction.agentId && interaction.agentId !== "main"
+    ? `子代理 ${interaction.agentId} 需要审批`
+    : "需要批准"
 
   return (
     <div className="approval-form">
@@ -205,7 +207,11 @@ function DirectoryTrustForm(props: {
   return (
     <div className="approval-form directory-trust-form">
       <header className="interaction-header">
-        <h3 className="interaction-title">目录信任</h3>
+        <h3 className="interaction-title">{
+          interaction.agentId && interaction.agentId !== "main"
+            ? `子代理 ${interaction.agentId} 需要目录信任`
+            : "目录信任"
+        }</h3>
         <Deadline deadlineAtMs={interaction.deadlineAtMs} />
       </header>
       <p className="interaction-description">是否将此目录加入白名单？</p>

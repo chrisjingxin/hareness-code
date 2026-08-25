@@ -14,6 +14,7 @@ test("catalog 单项失败只影响对应 catalog", async () => {
     expect(snapshot.catalogs.threads.status).toBe("error")
     expect(snapshot.catalogs.skills.status).toBe("ready")
     expect(snapshot.catalogs.models.status).toBe("idle")
+    expect(snapshot.catalogs.agents.status).toBe("idle")
     expect(snapshot.currentThreadId).toBeNull()
   } finally {
     await harness.controller.close()

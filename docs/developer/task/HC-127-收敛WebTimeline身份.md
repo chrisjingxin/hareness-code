@@ -8,8 +8,8 @@ priority: P1
 status: 待认领
 owner: 未认领
 branch: -
-reviewed_at: 2026-08-09
-review_due: 2026-08-23
+reviewed_at: 2026-08-24
+review_due: 2026-09-07
 scope: 在不改变 canonical Timeline 数据的前提下，删除重复角色 avatar，统一 User/Assistant/System 阅读边，并把同一 Run 的连续 Tool 纯投影为可展开 Activity Group，降低长会话噪声且保持 running/failed/Interaction 可见。
 acceptance: User/Assistant 各只有一种清晰身份表达；短 User surface 随内容收敛；同一 Run 连续 completed Tool 可折叠为数量摘要，running/failed 始终显式；Message/Interaction/不同 Run 正确断组；展开状态稳定、历史顺序与原文不变、异常数据降级逐项渲染；Timeline tests、Markdown/Tool 回归、build、typecheck 通过。
 user_docs: docs/user/Web界面.md

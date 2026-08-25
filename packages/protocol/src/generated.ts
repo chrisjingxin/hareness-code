@@ -1,8 +1,8 @@
 /** 此文件由 packages/protocol/schema/v3.json 生成，请勿手工修改。 */
 
 export const PROTOCOL_MAJOR = 3 as const
-export const PROTOCOL_MINOR = 5 as const
-export const PROTOCOL_SCHEMA_SHA256 = "0c4364fcce17587711393e91319475a577a953bc193079e185d5cec74bd2d444" as const
+export const PROTOCOL_MINOR = 6 as const
+export const PROTOCOL_SCHEMA_SHA256 = "472cb373a88cfdb24bd553e51c808ff9b605214222903436c307abf6e9f008ae" as const
 export const MAX_FRAME_BYTES = 8388608 as const
 export const MAX_TOOL_PAYLOAD_BYTES = 1048576 as const
 export const CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","threads.side_question","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","plugins.list","plugins.inspect","plugins.validate","plugins.install","plugins.set_enabled","plugins.remove","agents.list","agents.inspect","teams.list","teams.inspect","teams.generate","teams.run","teams.cancel","mcp.status","mcp.add","mcp.remove","host.attachment.create","host.attachment.revoke","host.control.acquire","host.control.release","host.control.status","compose.inspect","compose.abandon"] as const
@@ -132,7 +132,7 @@ export type PluginsInspectParams = { "id": string }
 export type PluginsSourceParams = { "source": string; "format"?: "auto" | "agent-plugins-1.0" | "claude-code" }
 export type PluginsSetEnabledParams = { "id": string; "enabled": boolean; "capability_fingerprint"?: string }
 export type PluginsRemoveParams = { "id": string; "purge_data"?: boolean }
-export type AgentSummary = { "id": string; "description": string | null; "purpose": string; "model_profile_id": string; "execution_policy_id": string; "requested_skills": Array<string>; "requested_mcp_servers": Array<string>; "max_turns": number | null; "source": string; "fingerprint": string }
+export type AgentSummary = { "id": string; "description": string | null; "purpose": string; "model_profile_id": string; "execution_policy_id": string; "requested_skills": Array<string>; "requested_mcp_servers": Array<string>; "max_turns": number | null; "source": string; "fingerprint": string; "kind": "builtin" | "plugin"; "tools": Array<string> }
 export type AgentsListResult = { "snapshot_id": string; "agents": Array<AgentSummary>; "diagnostics": Array<string> }
 export type AgentsInspectParams = { "id": string }
 export type TeamTaskDefinition = { "id": string; "agent_id": string; "depends_on": Array<string>; "access": "read" | "write"; "timeout_seconds": number }
@@ -166,7 +166,7 @@ export type SkillLoadedPayload = { "skill_id": string; "source": string; "versio
 export type ContentDeltaPayload = { "text": string }
 export type ReasoningDeltaPayload = { "text": string }
 export type ToolStartedPayload = { "tool_call_id": string; "name": string }
-export type ToolDeltaPayload = { "tool_call_id": string; "arguments_delta"?: string; "output_delta"?: string; "truncated"?: boolean; "original_bytes"?: number }
+export type ToolDeltaPayload = { "tool_call_id": string; "arguments_delta"?: string; "output_delta"?: string; "truncated"?: boolean; "original_bytes"?: number; "child_execution_id"?: string; "child_agent_id"?: string }
 export type ToolResult = { "content": string; "is_error": boolean; "truncated": boolean; "original_bytes": number }
 export type ToolCompletedPayload = { "tool_call_id": string; "result": ToolResult }
 export type ContextPayload = { "action": string; "estimated_tokens"?: number | null; "input_cap_tokens"?: number | null; "context_window_tokens"?: number | null; "dynamic_tokens"?: number | null; "cache_status"?: string | null; "cached_tokens"?: number | null; "miss_reason"?: string | null; "artifact_ids": Array<string> }
@@ -186,7 +186,7 @@ export type RunFailedPayload = { "error": RunFailure }
 export type InteractionBase = { "thread_id": string; "run_id": string; "timeout_ms": number; "payload": JsonObject }
 export type FileDiffPresentation = { "kind": "file_diff"; "operation": "write" | "edit" | "delete"; "path": string; "added_lines": number; "removed_lines": number; "truncated": boolean; "unified_diff": string }
 export type DirectoryTrustDecision = "allow_session" | "deny"
-export type DirectoryTrustRequest = { "thread_id": string; "run_id": string; "timeout_ms": number; "payload": { "interrupt_id": string; "directory": string; "target_path": string; "tool_name": string; "access": "read" | "write"; "shadows_workspace": boolean; "decisions": Array<DirectoryTrustDecision> } }
+export type DirectoryTrustRequest = { "thread_id": string; "run_id": string; "timeout_ms": number; "execution_id"?: string; "parent_execution_id"?: string | null; "agent_id"?: string; "compose_scope"?: ComposeActivityScope; "payload": { "interrupt_id": string; "directory": string; "target_path": string; "tool_name": string; "access": "read" | "write"; "shadows_workspace": boolean; "decisions": Array<DirectoryTrustDecision> } }
 export type DirectoryTrustResponse = { "decision": DirectoryTrustDecision }
 export type ApprovalRequest = { "thread_id": string; "run_id": string; "timeout_ms": number; "execution_id"?: string; "parent_execution_id"?: string | null; "agent_id"?: string; "compose_scope"?: ComposeActivityScope; "payload": { "interrupt_id": string; "description": string; "requests": JsonValue; "decisions": Array<"approve_once" | "approve_thread" | "approve_project" | "reject" | "reject_with_feedback">; "presentation"?: FileDiffPresentation } }
 export type ApprovalResponse = { "decision": "approve_once" | "approve_thread" | "approve_project" | "reject" | "reject_with_feedback"; "feedback"?: string }

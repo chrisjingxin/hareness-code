@@ -1,6 +1,7 @@
 /** AgentClientGateway 基础设施：将通信传输层的 AgentClient 适配为 Core 依赖的 AgentGateway 接口，并集中收敛错误映射。 */
 
 import type {
+  AgentsListResult,
   ConfigChange,
   ContextCompactResult,
   InteractionRequestEnvelope,
@@ -13,6 +14,14 @@ import type {
   RunCancelResult,
   SkillsListResult,
   SkillsSetEnabledResult,
+  TeamDefinition,
+  TeamsCancelResult,
+  TeamsGenerateParams,
+  TeamsInspectParams,
+  TeamsInspectResult,
+  TeamsListResult,
+  TeamsRunParams,
+  TeamsRunResult,
   ThreadsListResult,
   ThreadsOpenResult,
   ThreadsSideQuestionParams,
@@ -175,6 +184,54 @@ export class AgentClientGateway implements AgentGateway {
   async setSkillEnabled(skillId: string, enabled: boolean): Promise<SkillsSetEnabledResult> {
     try {
       return await this.client.request("skills.set_enabled", { id: skillId, enabled })
+    } catch (error) {
+      throw this.wrapError(error)
+    }
+  }
+
+  async listAgents(): Promise<AgentsListResult> {
+    try {
+      return await this.client.listAgents()
+    } catch (error) {
+      throw this.wrapError(error)
+    }
+  }
+
+  async listTeams(): Promise<TeamsListResult> {
+    try {
+      return await this.client.listTeams()
+    } catch (error) {
+      throw this.wrapError(error)
+    }
+  }
+
+  async inspectTeam(kind: TeamsInspectParams["kind"], id: string): Promise<TeamsInspectResult> {
+    try {
+      return await this.client.inspectTeam(kind, id)
+    } catch (error) {
+      throw this.wrapError(error)
+    }
+  }
+
+  async generateTeam(params: TeamsGenerateParams): Promise<TeamDefinition> {
+    try {
+      return await this.client.generateTeam(params)
+    } catch (error) {
+      throw this.wrapError(error)
+    }
+  }
+
+  async runTeam(params: TeamsRunParams): Promise<TeamsRunResult> {
+    try {
+      return await this.client.runTeam(params)
+    } catch (error) {
+      throw this.wrapError(error)
+    }
+  }
+
+  async cancelTeam(runId: string): Promise<TeamsCancelResult> {
+    try {
+      return await this.client.cancelTeam(runId)
     } catch (error) {
       throw this.wrapError(error)
     }

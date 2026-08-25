@@ -1,8 +1,8 @@
 """Agent 与 ExecutionPolicy 的受限静态目录。
 
-本模块只建立由 Plugin loader 显式传入的启动期只读快照，不构建 AgentEngine，也不读取用户或
-项目目录。Python 内置主 Agent 不使用本目录；Plugin Managed delegation 只能从已校验 catalog
-取定义，不能将仓库文件、Prompt 或权限配置直接传入执行层。
+本模块建立 Host 启动期只读 Dispatch Catalog：内置角色先写入，再合并已启用 Plugin。
+不构建 AgentEngine，也不读取用户或项目 `.harness/agents` 目录。Plugin Managed
+delegation 只能从已校验 Plugin 定义取资产。
 """
 
 from __future__ import annotations
@@ -17,6 +17,11 @@ from typing import Any, Mapping
 
 import yaml
 from harness_agent.config.config import ConfigError, ModelCatalog
+from harness_agent.runtime.builtin_agents import (
+    BUILTIN_AGENTS,
+    BUILTIN_AGENTS_BY_ID,
+    BuiltinAgentRecord,
+)
 from harness_agent.threads.prompting import canonical_json
 
 
@@ -26,7 +31,7 @@ MAX_CATALOG_FILE_BYTES = 64 * 1024
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _TOOL_IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 _ISOLATION_MODES = frozenset({"local", "remote", "worktree", "container"})
-_RESERVED_AGENT_IDS = frozenset({"main", "general-purpose"})
+_RESERVED_AGENT_IDS = frozenset({"main", "general-purpose", "explore"})
 _APPROVAL_RANK = {
     "never": 0,
     "yolo": 0,
@@ -200,6 +205,7 @@ class AgentDefinition:
     requested_skills: tuple[str, ...] = ()
     requested_mcp_servers: tuple[str, ...] = ()
     max_turns: int | None = None
+    declared_tools: tuple[str, ...] = ()
 
     @property
     def fingerprint(self) -> str:
@@ -236,6 +242,8 @@ class AgentDefinition:
             "max_turns": self.max_turns,
             "source": self.source,
             "fingerprint": self.fingerprint,
+            "kind": "plugin",
+            "tools": list(self.declared_tools),
         }
 
 
@@ -376,6 +384,10 @@ class AgentCatalog:
         self.diagnostics = tuple(diagnostics)
         self.snapshot_id = _fingerprint(
             {
+                "builtins": [
+                    {"id": record.agent_id, "fingerprint": record.fingerprint}
+                    for record in BUILTIN_AGENTS
+                ],
                 "agents": [
                     {"id": record.agent_id, "source": record.source, "fingerprint": record.fingerprint}
                     for record in self.agents
@@ -402,15 +414,20 @@ class AgentCatalog:
         return {"id": self.snapshot_id, "agents": len(self.agents), "policies": len(self.policies)}
 
     def list_agents(self) -> list[dict[str, object]]:
-        """列出未来后端/TUI 所需的安全 Agent 摘要。"""
-        return [agent.summary() for agent in self.agents]
+        """列出 builtin 在前、再按 ID 排序的 Plugin 摘要。"""
+        return [record.summary() for record in BUILTIN_AGENTS] + [
+            agent.summary() for agent in self.agents
+        ]
 
     def list_policies(self) -> list[dict[str, object]]:
         """列出未来后端/TUI 所需的安全 Policy 摘要。"""
         return [policy.summary() for policy in self.policies]
 
-    def require_agent(self, agent_id: str) -> AgentDefinition:
-        """按 ID 读取已验证 Agent，未知定义 fail closed。"""
+    def require_agent(self, agent_id: str) -> AgentDefinition | BuiltinAgentRecord:
+        """按 ID 读取 builtin 或 Plugin Agent，未知定义 fail closed。"""
+        builtin = BUILTIN_AGENTS_BY_ID.get(agent_id)
+        if builtin is not None:
+            return builtin
         agent = self._agents.get(agent_id)
         if agent is None:
             raise AgentCatalogError(f"AGENT_NOT_FOUND: {agent_id}")
@@ -795,6 +812,12 @@ def _parse_agent(
         requested_skills=requested_skills,
         requested_mcp_servers=requested_mcp,
         max_turns=max_turns,
+        declared_tools=(
+            policies[policy_id].tools.allow
+            if policies[policy_id].tools is not None
+            and policies[policy_id].tools.allow is not None
+            else ()
+        ),
     )
 
 
@@ -910,6 +933,7 @@ def _parse_claude_agent(
         execution_policy_id=policy_id,
         requested_skills=skills,
         max_turns=max_turns,
+        declared_tools=tuple(sorted(allowed)) if tools_declared else (),
     )
     return agent, policy
 

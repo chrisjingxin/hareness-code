@@ -8,8 +8,8 @@ priority: P1
 status: 待认领
 owner: 未认领
 branch: -
-reviewed_at: 2026-08-09
-review_due: 2026-08-23
+reviewed_at: 2026-08-24
+review_due: 2026-09-07
 scope: 对完成结构整改后的 Web 工作台执行跨组件可访问性收敛，补齐 skip link、Tab/焦点顺序、overlay focus trap/restore、键盘可调 separator、窄屏 44px target、双主题对比度、ARIA 状态和 live region 策略。
 acceptance: 键盘可从页面入口跳到 Timeline/Composer并完成 Thread/文件/Dock/命令/Interaction 主要流程；Sidebar/Dock/Thread 分隔条支持 Arrow、Shift+Arrow、Home/End 和复位，暴露 aria value；overlay 正确 trap/restore，column 不声明 modal；窄屏主要目标≥44px；双主题必要文字/图标对比度达标；axe 或等价自动检查无高优先级问题，手工键盘矩阵有证据。
 user_docs: docs/user/Web界面.md、docs/user/交互使用.md

@@ -8,8 +8,8 @@ priority: P0
 status: 待认领
 owner: 未认领
 branch: -
-reviewed_at: 2026-08-09
-review_due: 2026-08-23
+reviewed_at: 2026-08-24
+review_due: 2026-09-07
 scope: 移除 1280px 固定最小宽度，建立 wide/compact/narrow 三档 viewport 状态和 Sidebar/Context Dock column、overlay、drawer/fullscreen 行为，保证 Conversation 与 Composer 在窄屏、缩放和面板切换时始终可达。
 acceptance: 1440×900 列式 Conversation 不低于 640px；1280×800/1024×768 打开 Dock 时使用 overlay 且不挤压 Conversation；390×844、320×720 与 200% zoom 无根横向滚动，Sidebar/Dock 互斥且 Composer、取消、审批可达；viewport 切换不触发业务 RPC、不丢 draft/scroll/active Run；focused tests、build、typecheck 通过。
 user_docs: docs/user/Web界面.md、docs/user/交互使用.md

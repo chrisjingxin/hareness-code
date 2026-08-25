@@ -190,6 +190,7 @@ test("Peer 通过类型化 Agent 与 Team 接口传递受控目录和运行参�
         id: "lead", description: null, purpose: "lead", model_profile_id: "fast",
         execution_policy_id: "read", requested_skills: [], requested_mcp_servers: [],
         max_turns: null, source: "plugin:test", fingerprint: "fingerprint",
+        kind: "plugin", tools: [],
       },
       "teams.list": { teams: [], diagnostics: [] },
       "teams.inspect": {},

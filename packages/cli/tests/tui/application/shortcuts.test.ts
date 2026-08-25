@@ -45,6 +45,14 @@ test("thread 恢复选择器优先消费导航、选择与关闭键", () => {
   expect(resolveShortcut({ name: "escape", ctrl: false }, picker)).toBe("close-thread-picker")
 })
 
+test("Agent 浏览浮层优先消费导航与关闭键，Enter 只关闭不切换 Agent", () => {
+  const picker = { ...idle, agentPickerVisible: true, agentOptionCount: 2, skillPickerVisible: true }
+  expect(resolveShortcut({ name: "down", ctrl: false }, picker)).toBe("agent-next")
+  expect(resolveShortcut({ name: "return", ctrl: false }, picker)).toBe("agent-select")
+  expect(resolveShortcut({ name: "escape", ctrl: false }, picker)).toBe("close-agent-picker")
+  expect(resolveShortcut({ name: "return", ctrl: false }, { ...picker, agentOptionCount: 0 })).toBe("agent-block")
+})
+
 test("模型选择器复用 Picker 导航，并优先于其他浮层和滚动", () => {
   const picker = { ...idle, modelPickerVisible: true, modelOptionCount: 2, skillPickerVisible: true }
   expect(resolveShortcut({ name: "down", ctrl: false }, picker)).toBe("model-next")
@@ -98,4 +106,10 @@ test("浮层打开时 Tab 保留选择语义，不切换 Work Mode", () => {
   expect(resolveShortcut({ name: "tab", ctrl: false }, menu)).toBe("command-select")
   const picker = { ...idle, skillPickerVisible: true, skillOptionCount: 2, commandMenuVisible: true }
   expect(resolveShortcut({ name: "tab", ctrl: false }, picker)).toBe("skill-select")
+})
+
+test("子时间线中 Esc 返回主对话，不触发取消运行", () => {
+  const child = { ...idle, childTimelineActive: true, activeRun: true }
+  expect(resolveShortcut({ name: "escape", ctrl: false }, child)).toBe("leave-child-timeline")
+  expect(resolveShortcut({ name: "escape", ctrl: false }, { ...child, commandMenuVisible: true })).toBe("close-command-menu")
 })

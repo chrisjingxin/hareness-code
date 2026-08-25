@@ -8,8 +8,8 @@ priority: P2
 status: 待认领
 owner: 未认领
 branch: -
-reviewed_at: 2026-08-09
-review_due: 2026-08-23
+reviewed_at: 2026-08-24
+review_due: 2026-09-07
 scope: 在稳定 Web UI 结构上统一 hover/menu/drawer/Tool/new-output/Run 状态动效，完整支持 reduced-motion，并用 500/1000 item 与 streaming 场景测量 render、Markdown/高亮和滚动成本，仅在证据表明需要时实施 windowing 或局部优化。
 acceptance: 动效时长、easing 和允许属性符合 HC-124；历史恢复不批量播放、新输出不抢用户滚动、Tool 展开保持 scroll anchor；reduced-motion 取消位移/呼吸/smooth scroll但状态仍清楚；500/1000 item + streaming 有可复现 Profiler/Browser trace 证据和结论；如无瓶颈不引入 windowing，如有则最小优化并覆盖回归；focused tests、Browser 检查、build、typecheck 通过。
 user_docs: docs/user/Web界面.md

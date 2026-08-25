@@ -110,11 +110,7 @@ test("Agent 与 Team 命令只生成受控目录和固定参数 RPC", () => {
   const status = parseSlashCommand("/teams status team-run-1")
   if (!agents || !generate || !run || !status) throw new Error("expected Agent/Team commands")
 
-  expect(dispatchSlashCommand(agents, base)).toMatchObject({
-    type: "rpc",
-    method: "agents.list",
-    params: {},
-  })
+  expect(dispatchSlashCommand(agents, base)).toEqual({ type: "present", target: "agents" })
   expect(dispatchSlashCommand(generate, base)).toMatchObject({
     type: "rpc",
     method: "teams.generate",

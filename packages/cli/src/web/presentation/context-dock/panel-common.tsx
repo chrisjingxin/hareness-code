@@ -7,16 +7,17 @@ import type { FeatureAvailability } from "../../../interactive/selectors"
 import type { ContextDockPanel } from "../../application/adapter"
 
 /** Dock 主 tab：设计稿中的所有面板均在同一组标签内切换。 */
-export type DockTab = "code" | "models" | "skills" | "mcp" | "status" | "help"
+export type DockTab = "code" | "models" | "skills" | "mcp" | "agents" | "status" | "help"
 
-export const DOCK_TABS: readonly DockTab[] = ["code", "models", "skills", "mcp", "status", "help"]
+export const DOCK_TABS: readonly DockTab[] = ["code", "models", "skills", "mcp", "agents", "status", "help"]
 
 /** 主 tab 可见性：只显示 capability 允许的 tab；Code/Status/Help 恒可见。 */
-export function tabVisible(tab: DockTab, availability: Pick<FeatureAvailability, "canOpenModelsPanel" | "canOpenSkillsPanel" | "canOpenMcpPanel">): boolean {
+export function tabVisible(tab: DockTab, availability: Pick<FeatureAvailability, "canOpenModelsPanel" | "canOpenSkillsPanel" | "canOpenMcpPanel" | "canOpenAgentsPanel">): boolean {
   switch (tab) {
     case "models": return availability.canOpenModelsPanel
     case "skills": return availability.canOpenSkillsPanel
     case "mcp": return availability.canOpenMcpPanel
+    case "agents": return availability.canOpenAgentsPanel
     case "code":
     case "status": return true
     case "help": return true
@@ -30,6 +31,7 @@ export function tabLabel(tab: ContextDockPanel): string {
     case "models": return "模型"
     case "skills": return "技能"
     case "mcp": return "MCP"
+    case "agents": return "Agent"
     case "status": return "状态"
     case "help": return "帮助"
   }

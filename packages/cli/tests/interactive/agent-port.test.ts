@@ -51,6 +51,37 @@ test("setSkillEnabled 转发为 skills.set_enabled，参数 { id, enabled }", as
   })
 })
 
+test("listAgents 转发为 agents.list", async () => {
+  const { gateway, nextRequest } = setupPeer(({ message, stdout }) => {
+    stdout.write(JSON.stringify({
+      jsonrpc: "2.0",
+      id: message.id,
+      result: {
+        snapshot_id: "snap-builtin-1",
+        agents: [{
+          id: "explore",
+          description: "只读探索子代理",
+          purpose: "explore",
+          model_profile_id: "inherit",
+          execution_policy_id: "inherit",
+          requested_skills: [],
+          requested_mcp_servers: [],
+          max_turns: null,
+          source: "builtin",
+          fingerprint: "explore-fingerprint",
+          kind: "builtin",
+          tools: ["ls"],
+        }],
+        diagnostics: [],
+      },
+    }) + "\n")
+  })
+  const captured = nextRequest()
+  const result = await gateway.listAgents()
+  expect(result.agents.map(agent => agent.id)).toEqual(["explore"])
+  expect(await captured).toMatchObject({ method: "agents.list", params: {} })
+})
+
 test("setSkillEnabled 失败时将 JsonRpcRemoteError 转换为 AgentGatewayError 稳定错误", async () => {
   const { gateway } = setupPeer(({ message, stdout }) => {
     stdout.write(JSON.stringify({

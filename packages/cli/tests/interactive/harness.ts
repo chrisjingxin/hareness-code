@@ -29,6 +29,9 @@ export const runtime: InteractiveRuntime = {
     Capability.CONFIG_WRITE,
     Capability.MCP_READ,
     Capability.MCP_MANAGE,
+    Capability.AGENTS_READ,
+    Capability.TEAMS_READ,
+    Capability.TEAMS_MANAGE,
   ],
 }
 
@@ -93,6 +96,26 @@ function createPort(options: {
   let setSkillEnabledImpl: (skillId: string, enabled: boolean) => Promise<Record<string, never>> = async () => ({})
   let compactContextImpl: InteractiveAgentPort["compactContext"] = options.compactContextImpl
     ?? (async () => ({ compacted: true, context: { action: "manual_summary" } }))
+  let listAgentsImpl: InteractiveAgentPort["listAgents"] = async () => ({
+    snapshot_id: "snap-builtin-1",
+    agents: [
+      agentSummary({
+        id: "general-purpose",
+        kind: "builtin",
+        tools: [],
+        description: "通用子代理，继承父能力并排除委派/提问/模式切换/记忆写入",
+        purpose: "general-purpose",
+      }),
+      agentSummary({
+        id: "explore",
+        kind: "builtin",
+        tools: ["ls", "read_file", "glob", "grep", "lsp"],
+        description: "只读探索子代理",
+        purpose: "explore",
+      }),
+    ],
+    diagnostics: [],
+  })
 
   const port: InteractiveAgentPort & {
     emitEvent: (event: EventEnvelope) => void
@@ -108,6 +131,7 @@ function createPort(options: {
     setSkillsList: (next: { skills: ReturnType<typeof skill>[] }) => void
     setSkillEnabledImpl: (impl: (skillId: string, enabled: boolean) => Promise<Record<string, never>>) => void
     setCompactContextImpl: (impl: InteractiveAgentPort["compactContext"]) => void
+    setListAgentsImpl: (impl: InteractiveAgentPort["listAgents"]) => void
     lastRunSelection: () => { message: string; threadId: string; runId: string; mode: "build" | "compose"; modelSelection?: { primary_profile: string }; requestedSkill?: { id: string; args?: string } } | undefined
   } = {
     onProtocolError(listener) {
@@ -200,6 +224,36 @@ function createPort(options: {
       calls.push(`skills.set_enabled(${skillId},${enabled})`)
       return setSkillEnabledImpl(skillId, enabled)
     },
+    async listAgents() {
+      calls.push("agents.list")
+      return listAgentsImpl()
+    },
+    async listTeams() {
+      calls.push("teams.list")
+      return { teams: [], diagnostics: [] }
+    },
+    async inspectTeam(kind, id) {
+      calls.push(`teams.inspect(${kind},${id})`)
+      return {}
+    },
+    async generateTeam(params) {
+      calls.push("teams.generate")
+      return {
+        id: params.id,
+        description: null,
+        max_parallelism: params.max_parallelism ?? 4,
+        failure_policy: "fail-fast" as const,
+        tasks: [],
+      }
+    },
+    async runTeam(params) {
+      calls.push("teams.run")
+      return { team_id: params.team_id, run_id: params.run_id, accepted: true as const }
+    },
+    async cancelTeam(runId) {
+      calls.push("teams.cancel")
+      return { run_id: runId, cancelled: false }
+    },
     emitEvent(event) {
       const run = runHandles.at(-1)
       if (run && event.thread_id === run.threadId && event.run_id === run.runId) {
@@ -246,6 +300,9 @@ function createPort(options: {
     },
     setCompactContextImpl(impl) {
       compactContextImpl = impl
+    },
+    setListAgentsImpl(impl) {
+      listAgentsImpl = impl
     },
     lastRunSelection() {
       const run = runHandles.at(-1)
@@ -397,6 +454,29 @@ export function threadSummary(threadId: string, message: string) {
 
 export function skill(id: string, enabled: boolean) {
   return { id, name: id.split("/").at(-1)!, description: `描述 ${id}`, source: "user", enabled, user_invocable: true, argument_hint: "下一条消息使用" }
+}
+
+function agentSummary(input: {
+  id: string
+  kind: "builtin" | "plugin"
+  tools: string[]
+  description: string
+  purpose: string
+}) {
+  return {
+    id: input.id,
+    description: input.description,
+    purpose: input.purpose,
+    model_profile_id: "inherit",
+    execution_policy_id: "inherit",
+    requested_skills: [],
+    requested_mcp_servers: [],
+    max_turns: null,
+    source: input.kind,
+    fingerprint: `${input.id}-fingerprint`,
+    kind: input.kind,
+    tools: input.tools,
+  }
 }
 
 export function terminalEvent(type: string, threadId: string, runId: string, sequence: number, payload: Record<string, unknown>): EventEnvelope {

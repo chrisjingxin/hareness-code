@@ -74,6 +74,9 @@ export type ToolCard = {
   executionId?: string
   activityId?: string
   agentId?: string
+  /** 父 task 派出绑定的 child execution；有值后派出卡可进入子时间线。 */
+  childExecutionId?: string
+  childAgentId?: string
 }
 
 export type InteractionCard = {
@@ -217,6 +220,8 @@ export type InteractiveState = {
   threadMode: WorkMode | null
   /** 当前 Thread 下一次 Run 的工作模式；Run 受理后冻结。 */
   workMode: WorkMode
+  /** 正在查看的 child execution；null 表示父时间线。 */
+  childTimelineExecutionId: string | null
 }
 
 /** 创建无 thread 内容的初始状态；显式 null 进入空首页。 */
@@ -233,7 +238,21 @@ export function createInitialState(threadId: string | null = null, workMode: Wor
     composeState: null,
     workItem: null,
     threadMode: null,
+    childTimelineExecutionId: null,
   }
+}
+
+/** 进入某一个 child 的只读时间线。未知 id 仍记录，由视图显示空态。 */
+export function openChildTimeline(state: InteractiveState, executionId: string): InteractiveState {
+  const id = executionId.trim()
+  if (!id) return state
+  return { ...state, childTimelineExecutionId: id }
+}
+
+/** 回到父时间线。 */
+export function leaveChildTimeline(state: InteractiveState): InteractiveState {
+  if (state.childTimelineExecutionId === null) return state
+  return { ...state, childTimelineExecutionId: null }
 }
 
 /** 空闲时切换下一次 Run 的工作模式；Thread 已冻结模式时切换被锁定。 */
@@ -513,6 +532,7 @@ export function restoreThread(
     composeState: null,
     workItem: null,
     threadMode,
+    childTimelineExecutionId: null,
   }
 }
 
@@ -1014,7 +1034,28 @@ function applyToolDelta(
   if (typeof payload.output_delta === "string") {
     timeline = updateToolStream(timeline, identity, toolId, "output", payload.output_delta)
   }
+  const childExecutionId = typeof payload.child_execution_id === "string" ? payload.child_execution_id.trim() : ""
+  const childAgentId = typeof payload.child_agent_id === "string" ? payload.child_agent_id.trim() : ""
+  if (childExecutionId) {
+    timeline = bindChildExecution(timeline, identity, toolId, childExecutionId, childAgentId || undefined)
+  }
   return { ...state, timeline }
+}
+
+function bindChildExecution(
+  timeline: TimelineItem[],
+  identity: EventIdentity,
+  toolId: string,
+  childExecutionId: string,
+  childAgentId: string | undefined,
+): TimelineItem[] {
+  const index = findToolIndex(timeline, identity, toolId)
+  if (index < 0) return timeline
+  return timeline.map((item, itemIndex) => (
+    itemIndex === index && item.type === "tool"
+      ? { ...item, tool: { ...item.tool, childExecutionId, ...(childAgentId ? { childAgentId } : {}) } }
+      : item
+  ))
 }
 
 function updateToolStream(

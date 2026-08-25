@@ -39,6 +39,7 @@ function snapshot(overrides: Partial<InteractiveSnapshot> = {}): InteractiveSnap
       models: { status: "ready", items: [] },
       skills: { status: "ready", items: [] },
       mcp: { status: "ready", items: [] },
+      agents: { status: "ready", items: [] },
     },
     selection: { requestedModelProfileId: null, actualModel: null, armedSkill: null },
   }
@@ -65,6 +66,7 @@ function adapterSnapshot(interactive: InteractiveSnapshot, overrides: Partial<We
       models: { query: "", submitting: false, error: null },
       skills: { query: "", submitting: false, error: null },
       mcp: { query: "", submitting: false, error: null },
+      agents: { query: "", submitting: false, error: null },
       status: { query: "", submitting: false, error: null },
       help: { query: "", submitting: false, error: null },
     },

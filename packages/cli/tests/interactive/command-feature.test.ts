@@ -1,5 +1,43 @@
 import { expect, test } from "bun:test"
-import { makeHarness, flush, notices } from "./harness"
+import { Capability } from "@za38/protocol"
+import { makeHarness, flush, notices, runtime } from "./harness"
+
+test("/agents 打开浏览目录，不把长文写进时间线", async () => {
+  const harness = makeHarness({
+    capabilities: [...(runtime.capabilities ?? []), Capability.AGENTS_READ],
+  })
+  try {
+    const outcome = await harness.controller.dispatch({ type: "input.submit", value: "/agents" })
+    expect(outcome).toEqual({ status: "accepted", effects: [{ type: "present", target: "agents" }] })
+    expect(notices(harness.controller.getSnapshot())).not.toContain("general-purpose")
+    const catalog = harness.controller.getSnapshot().catalogs.agents
+    expect(catalog.status).toBe("ready")
+    expect(catalog.items.map(agent => agent.id)).toEqual(["general-purpose", "explore"])
+    expect(harness.calls).toContain("agents.list")
+  } finally {
+    await harness.controller.close()
+  }
+})
+
+test("/agents 查询失败时 catalog 进入 error，浮层仍可打开", async () => {
+  const harness = makeHarness({
+    capabilities: [...(runtime.capabilities ?? []), Capability.AGENTS_READ],
+  })
+  harness.port.setListAgentsImpl(async () => {
+    throw new Error("catalog unavailable")
+  })
+  try {
+    const outcome = await harness.controller.dispatch({ type: "input.submit", value: "/agents" })
+    expect(outcome).toEqual({ status: "accepted", effects: [{ type: "present", target: "agents" }] })
+    const catalog = harness.controller.getSnapshot().catalogs.agents
+    expect(catalog.status).toBe("error")
+    expect(catalog.message).toContain("catalog unavailable")
+    expect(notices(harness.controller.getSnapshot())).not.toContain("Agent 查询失败")
+  } finally {
+    await harness.controller.close()
+  }
+})
+
 
 test("compact/status/version/help/web 命令语义确定", async () => {
   const harness = makeHarness()

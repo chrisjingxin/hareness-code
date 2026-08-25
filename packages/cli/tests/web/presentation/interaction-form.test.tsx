@@ -120,6 +120,27 @@ describe("InteractionForm", () => {
     }
   })
 
+  test("child 审批标题使用子代理名称", () => {
+    const interactive = makeInteractive({
+      interaction: {
+        type: "approval",
+        requestId: "child-1",
+        description: "执行 shell 命令",
+        requests: [],
+        presentation: null,
+        decisions: ["approve_once", "reject"],
+        deadlineAtMs: Date.now() + 60_000,
+        agentId: "general-purpose",
+      },
+    })
+    const handle = mountForm(makeSnapshot({ interactive }), [])
+    try {
+      expect(handle.container.querySelector(".interaction-title")?.textContent).toBe("子代理 general-purpose 需要审批")
+    } finally {
+      handle.unmount()
+    }
+  })
+
   test("file_diff 切换展示模式后点击拒绝会立即提交", async () => {
     const intents: WebIntent[] = []
     const interactive = makeInteractive({

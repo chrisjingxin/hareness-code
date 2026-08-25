@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -12,6 +13,7 @@ from harness_agent.runtime.execution_stream import (
     REASONING_DELTA,
     TOOL_COMPLETED,
     TOOL_STARTED,
+    ExecutionStreamError,
     ExecutionSignal,
     ExecutionStreamRequest,
     StreamSession,
@@ -58,6 +60,77 @@ class _FakeAgent:
         self.calls.append({"input": stream_input, **kwargs})
         for event in self.events:
             yield event
+
+
+@pytest.mark.asyncio
+async def test_cancelled_root_stream_ignores_partial_child_tool_call() -> None:
+    """取消前泄漏的 child 半截参数不得进入 root observer 并毒化下一轮投影。"""
+    cancelled = False
+
+    class CancellingAgent:
+        async def astream(self, _stream_input: object, **kwargs: Any):
+            nonlocal cancelled
+            root_execution_id = kwargs["config"]["metadata"][
+                "harness_execution_id"
+            ]
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(
+                        content="",
+                        tool_call_chunks=[
+                            {
+                                "index": 0,
+                                "id": "task-call",
+                                "name": "task",
+                                "args": '{"description":"查代码","subagent_type":"explore"}',
+                            }
+                        ],
+                    ),
+                    {"harness_execution_id": root_execution_id},
+                ),
+            )
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(
+                        content="",
+                        tool_call_chunks=[
+                            {
+                                "index": 0,
+                                "id": "child-call",
+                                "name": "read_file",
+                                "args": '{"file_path":',
+                            }
+                        ],
+                    ),
+                    {"harness_execution_id": "child-explore"},
+                ),
+            )
+            cancelled = True
+            yield ("updates", {})
+
+    ports = _RecordingPorts()
+    with pytest.raises(ExecutionStreamError) as caught:
+        await execute(
+            ExecutionStreamRequest(
+                agent=CancellingAgent(),
+                stream_input={"messages": []},
+                graph_config={"configurable": {"thread_id": "t-cancel"}},
+                context=SimpleNamespace(execution_id="root-cancel"),
+                content_visibility="passthrough",
+                session=StreamSession(run_id="run-cancel"),
+                is_cancelled=lambda: cancelled,
+            ),
+            ports,
+        )
+
+    assert caught.value.code == "RUN_CANCELLED"
+    assert [signal.payload.get("tool_call_id") for signal in ports.signals] == [
+        "task-call",
+        "task-call",
+    ]
+    assert len(ports.messages) == 1
 
 
 @pytest.mark.asyncio

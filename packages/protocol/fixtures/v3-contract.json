@@ -542,7 +542,9 @@
         "requested_mcp_servers": [],
         "max_turns": 1,
         "source": "x",
-        "fingerprint": "x"
+        "fingerprint": "x",
+        "kind": "builtin",
+        "tools": []
       }
     },
     {
@@ -2545,6 +2547,8 @@
         "max_turns": 1,
         "source": "x",
         "fingerprint": "x",
+        "kind": "builtin",
+        "tools": [],
         "__extra": true
       }
     },
@@ -2561,7 +2565,9 @@
         "requested_mcp_servers": [],
         "max_turns": 1,
         "source": "x",
-        "fingerprint": "x"
+        "fingerprint": "x",
+        "kind": "builtin",
+        "tools": []
       }
     },
     {

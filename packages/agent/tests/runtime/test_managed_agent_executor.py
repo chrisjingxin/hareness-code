@@ -184,6 +184,18 @@ def _request(
     )
 
 
+def test_managed_agent_execution_error_exposes_stable_message() -> None:
+    """Host 转换 managed 错误时可直接读取原始信息。"""
+    error = ManagedAgentExecutionError(
+        "TOOL_CALL_ID_UNAVAILABLE",
+        "Tool result cannot be associated safely",
+    )
+
+    assert error.code == "TOOL_CALL_ID_UNAVAILABLE"
+    assert error.message == "Tool result cannot be associated safely"
+    assert str(error) == error.message
+
+
 @pytest.mark.asyncio
 async def test_pooled_runtime_hides_engine_graph_and_releases_run_then_engine() -> None:
     """Pooled runtime 只向 executor 暴露 graph seam，并收敛两层 lease。"""

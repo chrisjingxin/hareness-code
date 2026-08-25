@@ -142,6 +142,44 @@ test("Interaction timeout 按 scheduler 收敛为 fail-closed 响应", async () 
   }
 })
 
+test("新 Interaction 入队，不替换正在回答的 ask_user", async () => {
+  const harness = makeHarness()
+  try {
+    await harness.controller.dispatch({ type: "input.submit", value: "提问后审批" })
+    const run = harness.runHandles.at(-1)!
+    const questionPromise = harness.port.sendInteraction(questionRequest(run.threadId, run.runId))
+    expect(harness.controller.getSnapshot().interaction?.type).toBe("question")
+    expect(harness.controller.getSnapshot().interaction?.requestId).toBe("question-1")
+
+    const childApproval = approvalRequest(run.threadId, run.runId)
+    childApproval.request_id = "child-approval-1"
+    if (childApproval.type === "approval") childApproval.agent_id = "general-purpose"
+    const approvalPromise = harness.port.sendInteraction(childApproval)
+    await flush()
+    expect(harness.controller.getSnapshot().interaction?.type).toBe("question")
+    expect(harness.controller.getSnapshot().interaction?.requestId).toBe("question-1")
+
+    await harness.controller.dispatch({
+      type: "interaction.respond",
+      requestId: "question-1",
+      response: { kind: "question", answers: { scope: ["src"], level: ["shallow"] } },
+    })
+    await questionPromise
+    expect(harness.controller.getSnapshot().interaction?.type).toBe("approval")
+    expect(harness.controller.getSnapshot().interaction?.requestId).toBe("child-approval-1")
+    expect(harness.controller.getSnapshot().interaction?.agentId).toBe("general-purpose")
+
+    await harness.controller.dispatch({
+      type: "interaction.respond",
+      requestId: "child-approval-1",
+      response: { kind: "approval", decision: "reject" },
+    })
+    await expect(approvalPromise).resolves.toMatchObject({ type: "approval", decision: "reject" })
+  } finally {
+    await harness.controller.close()
+  }
+})
+
 test("timeout_ms=0 的 Interaction 立即收敛，不残留 pending 状态", async () => {
   const harness = makeHarness()
   try {

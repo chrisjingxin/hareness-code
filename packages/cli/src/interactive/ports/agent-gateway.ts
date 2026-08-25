@@ -2,6 +2,7 @@
 
 import {
   EventType,
+  type AgentsListResult,
   type ApprovalMode,
   type ConfigChange,
   type ContextCompactResult,
@@ -18,6 +19,14 @@ import {
   type RunCancelResult,
   type SkillsListResult,
   type SkillsSetEnabledResult,
+  type TeamDefinition,
+  type TeamsCancelResult,
+  type TeamsGenerateParams,
+  type TeamsInspectParams,
+  type TeamsInspectResult,
+  type TeamsListResult,
+  type TeamsRunParams,
+  type TeamsRunResult,
   type ThreadModelSelection,
   type ThreadsListResult,
   type ThreadsOpenResult,
@@ -98,6 +107,18 @@ export interface AgentGateway {
   listSkills(includeDisabled: boolean): Promise<SkillsListResult>
   /** 设置 Skill 启用状态。 */
   setSkillEnabled(skillId: string, enabled: boolean): Promise<SkillsSetEnabledResult>
+  /** 列出可派发 Agent 摘要（内置 + Plugin）。 */
+  listAgents(): Promise<AgentsListResult>
+  /** 列出固定 Team 与已确认的生成预览。 */
+  listTeams(): Promise<TeamsListResult>
+  /** 查看 Team 定义或可恢复 Run。 */
+  inspectTeam(kind: TeamsInspectParams["kind"], id: string): Promise<TeamsInspectResult>
+  /** 从已验证 Agent ID 生成 fanout Team 预览。 */
+  generateTeam(params: TeamsGenerateParams): Promise<TeamDefinition>
+  /** 异步启动一个固定 Team。 */
+  runTeam(params: TeamsRunParams): Promise<TeamsRunResult>
+  /** 请求取消当前 Host 中活动的 Team Run。 */
+  cancelTeam(runId: string): Promise<TeamsCancelResult>
   /** 废弃当前 Compose 薄进度；文档保留。 */
   abandonCompose(threadId: string, reason?: string): Promise<{ progress: unknown }>
   /** 执行临时只读单轮问答（/btw），0 工具，不写存储。 */
@@ -121,6 +142,20 @@ export function createFallbackNoopGateway(): AgentGateway {
     async listModels() { return { profiles: [] } },
     async listSkills() { return { snapshot: { id: "empty", count: 0 }, skills: [], diagnostics: [] } },
     async setSkillEnabled() { return {} },
+    async listAgents() { return { snapshot_id: "empty", agents: [], diagnostics: [] } },
+    async listTeams() { return { teams: [], diagnostics: [] } },
+    async inspectTeam() { return {} },
+    async generateTeam(params) {
+      return {
+        id: params.id,
+        description: null,
+        max_parallelism: params.max_parallelism ?? 4,
+        failure_policy: "fail-fast",
+        tasks: [],
+      }
+    },
+    async runTeam(params) { return { team_id: params.team_id, run_id: params.run_id, accepted: true } },
+    async cancelTeam(runId) { return { run_id: runId, cancelled: false } },
     async sideQuestion(params) { return { reply_text: `echo: ${params.question}`, model_profile_id: params.model_profile_id ?? "echo" } },
     async mcpStatus() { return { servers: [], total_tools: 0 } },
     async mcpAdd() { return { added: false, connected: false, tool_names: [] } },

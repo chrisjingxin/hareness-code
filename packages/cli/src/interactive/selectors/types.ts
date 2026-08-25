@@ -25,6 +25,7 @@ export type FeatureAvailability = {
   readonly canOpenModelsPanel: boolean
   readonly canOpenSkillsPanel: boolean
   readonly canOpenMcpPanel: boolean
+  readonly canOpenAgentsPanel: boolean
   /** 纯 capability 门：是否具备对应协议能力；不折叠 busy 状态，面板在 run 期间保持可见仅禁用。 */
   readonly hasSkillManage: boolean
   readonly hasMcpManage: boolean
@@ -38,6 +39,7 @@ export const CAPABILITY_GATE = {
   openModelsPanel: "models.read",
   openSkillsPanel: "skills.read",
   openMcpPanel: "mcp.read",
+  openAgentsPanel: "agents.read",
 } as const
 
 /** 对话视图：时间线与当前运行状态；是 UI 契约中高频发布的 conversation 分片。 */
@@ -48,6 +50,7 @@ export type ConversationView = {
   readonly timeline: readonly TimelineItem[]
   readonly runProgress: InteractiveSnapshot["runProgress"]
   readonly lastRun: RunSummary | null
+  readonly childTimelineExecutionId: string | null
 }
 
 /** 交互视图：挂起 Interaction 与破坏性确认；UI 契约 interaction 分片。 */
@@ -64,6 +67,7 @@ export type NavigationView = {
     readonly canOpenModelsPanel: boolean
     readonly canOpenSkillsPanel: boolean
     readonly canOpenMcpPanel: boolean
+    readonly canOpenAgentsPanel: boolean
     readonly hasSkillManage: boolean
     readonly hasMcpManage: boolean
   }

@@ -1,9 +1,12 @@
-/** Skill 与 Thread 选择器的领域行视图。 */
+/** Skill、Thread 与只读 Agent 选择器的领域行视图。 */
 
 import { type TextareaRenderable } from "@opentui/core"
 import { type ReactNode, type RefObject } from "react"
 
+import type { AgentSummary } from "@za38/protocol"
+
 import type { SkillMenuItem } from "../../interactive/commands"
+import { agentBrowsePurpose, agentKindLabel } from "../../presentation-shared/agent-catalog"
 import { SearchPicker, type SearchPickerRenderContext } from "./overlays"
 import { tuiTheme } from "./theme"
 import type { ThreadPickerItem } from "./types"
@@ -48,6 +51,55 @@ export function SkillPicker(props: {
       loadingMessage="正在读取 Skill catalog…"
       itemKey={skill => skill.id}
       renderItem={(skill, context) => skillPickerRow(skill, context)}
+      onSearch={props.onSearch}
+      onSelect={props.onSelect}
+      onHover={props.onHover}
+      onClose={props.onClose}
+    />
+  )
+}
+
+/** 只读 Agent 浏览浮层；Enter/点击关闭，不切换当前 Agent。 */
+export function AgentPicker(props: {
+  visible: boolean
+  loading: boolean
+  error?: string
+  agents: readonly AgentSummary[]
+  query: string
+  selectedIndex: number
+  terminalWidth: number
+  terminalHeight: number
+  searchRef: RefObject<TextareaRenderable | null>
+  restoreFocusRef?: RefObject<TextareaRenderable | null>
+  shouldRestoreFocus?: boolean
+  onSearch: (query: string) => void
+  onSelect: (agent: AgentSummary) => void
+  onHover: (index: number) => void
+  onClose: () => void
+  workMode?: "build" | "compose"
+}) {
+  return (
+    <SearchPicker
+      visible={props.visible}
+      loading={props.loading}
+      error={props.error}
+      items={props.agents}
+      workMode={props.workMode}
+      query={props.query}
+      selectedIndex={props.selectedIndex}
+      terminalWidth={props.terminalWidth}
+      terminalHeight={props.terminalHeight}
+      searchRef={props.searchRef}
+      restoreFocusRef={props.restoreFocusRef}
+      shouldRestoreFocus={props.shouldRestoreFocus}
+      searchId="agent-search"
+      title="可派发 Agent"
+      searchPlaceholder="搜索 Agent..."
+      emptyMessage="当前没有可派发的 Agent"
+      loadingMessage="正在读取 Agent 目录…"
+      footer="只读浏览 · Esc 关闭 · 派出请在对话里让主 Agent 使用 task"
+      itemKey={agent => agent.id}
+      renderItem={(agent, context) => agentPickerRow(agent, context)}
       onSearch={props.onSearch}
       onSelect={props.onSelect}
       onHover={props.onHover}
@@ -113,6 +165,20 @@ function skillPickerRow(skill: SkillMenuItem, context: SearchPickerRenderContext
     <>
       <text width={idWidth} fg={context.selected ? tuiTheme.background : tuiTheme.primary} wrapMode="none" overflow="hidden">{shorten(skill.id, idWidth)}</text>
       {!context.compact ? <text flexGrow={1} fg={context.selected ? tuiTheme.background : tuiTheme.muted} wrapMode="none" overflow="hidden">{shorten(skill.description, Math.max(18, context.width - idWidth - 10))}</text> : null}
+    </>
+  )
+}
+
+/** Agent 行：id + 来源/用途；不展示工具名单。 */
+function agentPickerRow(agent: AgentSummary, context: SearchPickerRenderContext): ReactNode {
+  const idWidth = context.compact
+    ? Math.max(18, context.width - 6)
+    : Math.max(22, Math.min(28, Math.floor(context.width * 0.28)))
+  const meta = `${agentKindLabel(agent.kind)} · ${agentBrowsePurpose(agent)}`
+  return (
+    <>
+      <text width={idWidth} fg={context.selected ? tuiTheme.background : tuiTheme.primary} wrapMode="none" overflow="hidden">{shorten(agent.id, idWidth)}</text>
+      {!context.compact ? <text flexGrow={1} fg={context.selected ? tuiTheme.background : tuiTheme.muted} wrapMode="none" overflow="hidden">{shorten(meta, Math.max(18, context.width - idWidth - 10))}</text> : null}
     </>
   )
 }

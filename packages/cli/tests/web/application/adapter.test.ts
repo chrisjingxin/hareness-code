@@ -567,6 +567,16 @@ test("workspace-refresh / workspace-preview-refresh：直接转发 workspace int
 
 // ---- 交互与生命周期 ----------------------------------------------------------
 
+test("present result：agents → dock-open agents 面板", async () => {
+  const { adapter, client } = makeAdapter()
+  client.nextOutcome = { status: "accepted", effects: [{ type: "present", target: "agents" }] }
+  await adapter.dispatch({ type: "draft-change", value: "/agents" })
+  await adapter.dispatch({ type: "submit" })
+  expect(adapter.getSnapshot().contextDock.open).toBe(true)
+  expect(adapter.getSnapshot().contextDock.activePanel).toBe("agents")
+  expect(client.intents.some(intent => intent.type === "catalog.refresh" && intent.catalog === "agents")).toBe(true)
+})
+
 test("present result：models/skills → dock-open；threads 忽略", async () => {
   const { adapter, client } = makeAdapter()
   client.nextOutcome = { status: "accepted", effects: [{ type: "present", target: "models" }] }
@@ -983,6 +993,15 @@ test("run 结束刷新：无打开文件时只刷新树与 threads；close 后�
   await adapter.close()
   client.pushInteractive(snapshot => ({ ...snapshot, activeRun: null }))
   expect(timer.pending()).toBe(false)
+})
+
+test("child-timeline-open 与 child-timeline-leave 透传给 client", async () => {
+  const { adapter, client } = makeAdapter()
+  await adapter.dispatch({ type: "child-timeline-open", executionId: "child-abc" })
+  expect(client.intents).toContainEqual({ type: "child-timeline.open", executionId: "child-abc" })
+
+  await adapter.dispatch({ type: "child-timeline-leave" })
+  expect(client.intents).toContainEqual({ type: "child-timeline.leave" })
 })
 
 test("close 幂等：第二次 close 不抛错、不再调用 frameScheduler.cancel 之外的操作", async () => {

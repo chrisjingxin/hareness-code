@@ -80,6 +80,7 @@ function createDummyController(): any {
         models: { status: "ready", items: [] },
         skills: { status: "ready", items: [] },
         mcp: { status: "ready", items: [] },
+        agents: { status: "ready", items: [] },
       },
       selection: { requestedModelProfileId: null, actualModel: null, armedSkill: null },
       workMode: "build",

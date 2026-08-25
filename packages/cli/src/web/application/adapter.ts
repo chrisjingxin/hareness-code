@@ -15,7 +15,7 @@ export type WebFrameScheduler = {
 }
 
 /** Context Dock 语义面板标识；Code 面板承载文件预览，Help 只从顶栏更多菜单打开。 */
-export type ContextDockPanel = "code" | "models" | "skills" | "mcp" | "status" | "help"
+export type ContextDockPanel = "code" | "models" | "skills" | "mcp" | "agents" | "status" | "help"
 
 /** 文件 Tab：路径 + 展示名 + canonical 语言 id（未知为 null）。 */
 export type WorkspaceFileTab = {
@@ -161,6 +161,8 @@ export type WebIntent =
   | { type: "notice-dismiss" }
   | { type: "theme-set"; theme: WebTheme }
   | { type: "header-menu-toggle"; open: boolean }
+  | { type: "child-timeline-open"; executionId: string }
+  | { type: "child-timeline-leave" }
   | { type: "return-to-tui" }
   | { type: "exit-harness" }
 
@@ -475,6 +477,12 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
       case "return-to-tui":
         await this.returnToTui()
         return
+      case "child-timeline-open":
+        await this.dispatchInteractive({ type: "child-timeline.open", executionId: intent.executionId })
+        return
+      case "child-timeline-leave":
+        await this.dispatchInteractive({ type: "child-timeline.leave" })
+        return
       case "exit-harness":
         await this.exitHarness()
     }
@@ -666,6 +674,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
       composeState: view.runtime.composeState,
       workItem: view.workItem.workItem,
       threadMode: view.workItem.threadMode,
+      childTimelineExecutionId: view.conversation.childTimelineExecutionId,
     }
   }
 
@@ -789,9 +798,9 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     this.refreshDockCatalog(panel)
   }
 
-  /** Code/Status/Help 没有可刷新的 catalog；models/skills/mcp 复用旧 openPanel 的刷新语义。 */
+  /** Code/Status/Help 没有可刷新的 catalog；models/skills/mcp/agents 打开时刷新。 */
   private refreshDockCatalog(panel: ContextDockPanel): void {
-    if (panel === "models" || panel === "skills" || panel === "mcp") {
+    if (panel === "models" || panel === "skills" || panel === "mcp" || panel === "agents") {
       void this.client.submitIntent({ type: "catalog.refresh", catalog: panel })
     }
   }
@@ -1099,6 +1108,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
         case "present":
           if (effect.target === "models") this.dockOpen("models")
           else if (effect.target === "skills") this.dockOpen("skills")
+          else if (effect.target === "agents") this.dockOpen("agents")
           // threads：Thread 常驻左侧栏，无对应 Dock 面板可开。
           break
         case "request-handoff":
@@ -1241,12 +1251,13 @@ function createEmptyPanelState(): Record<ContextDockPanel, PanelState> {
     models: { query: "", submitting: false, error: null },
     skills: { query: "", submitting: false, error: null },
     mcp: { query: "", submitting: false, error: null },
+    agents: { query: "", submitting: false, error: null },
     status: { query: "", submitting: false, error: null },
     help: { query: "", submitting: false, error: null },
   }
 }
 
-const PANEL_SLOTS: readonly ContextDockPanel[] = ["code", "models", "skills", "mcp", "status", "help"]
+const PANEL_SLOTS: readonly ContextDockPanel[] = ["code", "models", "skills", "mcp", "agents", "status", "help"]
 
 function freezePanelState(state: Record<ContextDockPanel, PanelState>): Readonly<Record<ContextDockPanel, WebPanelSearchState>> {
   const frozen: Record<ContextDockPanel, WebPanelSearchState> = {} as Record<ContextDockPanel, WebPanelSearchState>

@@ -2,7 +2,6 @@
 
 import {
   Capability,
-  type AgentsListResult,
   type RequestedSkill,
   type TeamDefinition,
   type TeamsListResult,
@@ -19,7 +18,7 @@ import {
 import type { IdGenerator } from "./ports/id-generator"
 
 /** 命令选择器目标；与 InteractiveResult.present 的 target 保持一致。 */
-export type CommandPickerTarget = "skills" | "threads" | "models"
+export type CommandPickerTarget = "skills" | "threads" | "models" | "agents"
 
 /** Handler 的唯一输出协议。它不返回 RPC method 字符串、success/error closure、
  * React callback 或 TUI local action；Controller 解释这些语义并完成所有 Agent effect。 */
@@ -129,12 +128,7 @@ const builtinHandlers: Readonly<Record<string, CommandHandler>> = {
   "skills.open": () => ({ type: "present", target: "skills" }),
   "agents.list": context => context.command.argument
     ? notice("/agents 不接受参数。")
-    : teamRpc(
-        "agents.list",
-        {},
-        formatAgents,
-        "Agent 查询失败",
-      ),
+    : { type: "present", target: "agents" },
   "teams.manage": handleTeamsCommand,
   "mcp.manage": context => ({ type: "mcp", argument: context.command.argument }),
   "host.web": context => context.command.argument
@@ -265,18 +259,6 @@ function teamRpc(
     onSuccess: value => notice(format(value)),
     onError: error => notice(`${errorPrefix}：${errorMessage(error)}`),
   }
-}
-
-function formatAgents(value: unknown): string {
-  const result = value as AgentsListResult
-  if (!result.agents.length) return "当前没有可派发的 Plugin Agent。"
-  return [
-    `Plugin Agents（snapshot ${result.snapshot_id.slice(0, 12)}）：`,
-    ...result.agents.map(agent =>
-      `- ${agent.id} · ${agent.description ?? agent.purpose} · model=${agent.model_profile_id}`,
-    ),
-    ...(result.diagnostics.length ? [`诊断：${result.diagnostics.join("；")}`] : []),
-  ].join("\n")
 }
 
 function formatTeams(value: unknown): string {

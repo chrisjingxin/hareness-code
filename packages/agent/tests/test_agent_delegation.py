@@ -7,7 +7,8 @@ import json
 
 import pytest
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.outputs import ChatGenerationChunk
 from langchain_core.runnables import Runnable
 from pydantic import Field
 
@@ -48,6 +49,19 @@ class _ToolCallingModel(GenericFakeChatModel):
         """记录主、子 Agent 的实际消息，验证文件 Snapshot 的公开 Thread scope。"""
         self.received.append(list(messages))
         return super()._generate(messages, *args, **kwargs)
+
+    async def _astream(self, messages: list[BaseMessage], stop=None, run_manager=None, **kwargs):
+        """离线流式：整条消息作为一个 chunk，保留完整 tool_calls。"""
+        self.received.append(list(messages))
+        message = next(self.messages)
+        message_ = AIMessage(content=message) if isinstance(message, str) else message
+        chunk = AIMessageChunk(
+            content=message_.content,
+            tool_calls=message_.tool_calls,
+            id=message_.id,
+        )
+        chunk.chunk_position = "last"
+        yield ChatGenerationChunk(message=chunk)
 
 
 async def _registry() -> tuple[AgentExecutionRegistry, ExecutionRef]:
@@ -556,3 +570,263 @@ async def test_production_task_exposes_host_registered_plugin_target(tmp_path) -
     child = next(item for item in executions if item.agent_id == "reviewer")
     assert child.mode is ExecutionMode.MANAGED
     assert child.status is ExecutionStatus.COMPLETED
+
+
+async def test_delegation_queues_when_parallelism_limit_reached() -> None:
+    """并发超额时排队等待，前面的任务完成后按序执行，而非直接抛错。"""
+    registry, root = await _registry()
+    started: list[str] = []
+    release_first = asyncio.Event()
+
+    async def runner(command: DelegateAgent):
+        started.append(command.task)
+        if command.task == "task-1":
+            await release_first.wait()
+        return {"task": command.task}
+
+    delegator = AgentDelegator(
+        registry,
+        targets=(
+            DelegationTarget(
+                agent_id="general-purpose",
+                mode=ExecutionMode.INLINE,
+                runner=runner,
+            ),
+        ),
+    )
+    cmd1 = DelegateAgent(
+        parent_ref=root,
+        target_agent_id="general-purpose",
+        task="task-1",
+        idempotency_key="call-1",
+        delegation_policy=DelegationPolicy(
+            enabled=True,
+            allowed_agents=("general-purpose",),
+            max_depth=1,
+            max_parallelism=1,
+        ),
+        cancellation_token=RunCancellationToken(),
+        timeout_seconds=5.0,
+    )
+    cmd2 = DelegateAgent(
+        parent_ref=root,
+        target_agent_id="general-purpose",
+        task="task-2",
+        idempotency_key="call-2",
+        delegation_policy=DelegationPolicy(
+            enabled=True,
+            allowed_agents=("general-purpose",),
+            max_depth=1,
+            max_parallelism=1,
+        ),
+        cancellation_token=RunCancellationToken(),
+        timeout_seconds=5.0,
+    )
+
+    t1 = asyncio.create_task(delegator.execute(cmd1))
+    await asyncio.sleep(0.01)
+    assert started == ["task-1"]
+
+    t2 = asyncio.create_task(delegator.execute(cmd2))
+    await asyncio.sleep(0.01)
+    # cmd2 应该在排队中，未启动
+    assert started == ["task-1"]
+
+    release_first.set()
+    r1, r2 = await asyncio.gather(t1, t2)
+    assert r1.status is ExecutionStatus.COMPLETED
+    assert r2.status is ExecutionStatus.COMPLETED
+    assert started == ["task-1", "task-2"]
+
+
+async def test_delegation_cancellation_while_queued_does_not_start_child() -> None:
+    """排队中的 child 在父 Run 取消时不启动，直接退出并释放排队槽位。"""
+    registry, root = await _registry()
+    started: list[str] = []
+    block_first = asyncio.Event()
+
+    async def runner(command: DelegateAgent):
+        started.append(command.task)
+        await block_first.wait()
+        return {}
+
+    delegator = AgentDelegator(
+        registry,
+        targets=(
+            DelegationTarget(
+                agent_id="general-purpose",
+                mode=ExecutionMode.INLINE,
+                runner=runner,
+            ),
+        ),
+    )
+    token = RunCancellationToken()
+    cmd1 = DelegateAgent(
+        parent_ref=root,
+        target_agent_id="general-purpose",
+        task="task-1",
+        idempotency_key="call-1",
+        delegation_policy=DelegationPolicy(
+            enabled=True,
+            allowed_agents=("general-purpose",),
+            max_depth=1,
+            max_parallelism=1,
+        ),
+        cancellation_token=token,
+        timeout_seconds=5.0,
+    )
+    cmd2 = DelegateAgent(
+        parent_ref=root,
+        target_agent_id="general-purpose",
+        task="task-2",
+        idempotency_key="call-2",
+        delegation_policy=DelegationPolicy(
+            enabled=True,
+            allowed_agents=("general-purpose",),
+            max_depth=1,
+            max_parallelism=1,
+        ),
+        cancellation_token=token,
+        timeout_seconds=5.0,
+    )
+
+    t1 = asyncio.create_task(delegator.execute(cmd1))
+    await asyncio.sleep(0.01)
+    t2 = asyncio.create_task(delegator.execute(cmd2))
+    await asyncio.sleep(0.01)
+
+    # 取消父 token
+    token.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await t2
+
+    with pytest.raises(asyncio.CancelledError):
+        await t1
+
+    # task-2 从未启动
+    assert started == ["task-1"]
+    children = await registry.list(root)
+    # 只有 root 和 task-1 在 registry 里
+    assert len(children) == 2
+    assert children[1].ref == child_execution_ref(cmd1)
+    assert children[1].status is ExecutionStatus.CANCELLED
+
+
+async def test_delegation_timeout_while_queued_raises_timeout_error() -> None:
+    """排队超时的 child 抛出 DELEGATION_TIMEOUT，不启动执行。"""
+    registry, root = await _registry()
+    started: list[str] = []
+    block_first = asyncio.Event()
+
+    async def runner(command: DelegateAgent):
+        started.append(command.task)
+        await block_first.wait()
+        return {}
+
+    delegator = AgentDelegator(
+        registry,
+        targets=(
+            DelegationTarget(
+                agent_id="general-purpose",
+                mode=ExecutionMode.INLINE,
+                runner=runner,
+            ),
+        ),
+    )
+    cmd1 = DelegateAgent(
+        parent_ref=root,
+        target_agent_id="general-purpose",
+        task="task-1",
+        idempotency_key="call-1",
+        delegation_policy=DelegationPolicy(
+            enabled=True,
+            allowed_agents=("general-purpose",),
+            max_depth=1,
+            max_parallelism=1,
+        ),
+        cancellation_token=RunCancellationToken(),
+        timeout_seconds=5.0,
+    )
+    cmd2 = DelegateAgent(
+        parent_ref=root,
+        target_agent_id="general-purpose",
+        task="task-2",
+        idempotency_key="call-2",
+        delegation_policy=DelegationPolicy(
+            enabled=True,
+            allowed_agents=("general-purpose",),
+            max_depth=1,
+            max_parallelism=1,
+        ),
+        cancellation_token=RunCancellationToken(),
+        timeout_seconds=0.05,
+    )
+
+    t1 = asyncio.create_task(delegator.execute(cmd1))
+    await asyncio.sleep(0.01)
+    with pytest.raises(AgentDelegationError) as caught:
+        await delegator.execute(cmd2)
+    assert caught.value.code == "DELEGATION_TIMEOUT"
+    assert started == ["task-1"]
+
+    block_first.set()
+    await t1
+
+
+async def test_delegation_hard_limit_of_four_enforced_even_if_policy_higher() -> None:
+    """即使 Policy 设置更大并发，硬上限仍为 4。"""
+    registry, root = await _registry()
+    active_count = 0
+    max_observed_active = 0
+    release_all = asyncio.Event()
+
+    async def runner(command: DelegateAgent):
+        nonlocal active_count, max_observed_active
+        active_count += 1
+        max_observed_active = max(max_observed_active, active_count)
+        await release_all.wait()
+        active_count -= 1
+        return {}
+
+    delegator = AgentDelegator(
+        registry,
+        targets=(
+            DelegationTarget(
+                agent_id="general-purpose",
+                mode=ExecutionMode.INLINE,
+                runner=runner,
+            ),
+        ),
+    )
+    policy = DelegationPolicy(
+        enabled=True,
+        allowed_agents=("general-purpose",),
+        max_depth=1,
+        max_parallelism=10,  # 试图设置 10
+    )
+    tasks = [
+        asyncio.create_task(
+            delegator.execute(
+                DelegateAgent(
+                    parent_ref=root,
+                    target_agent_id="general-purpose",
+                    task=f"task-{i}",
+                    idempotency_key=f"call-{i}",
+                    delegation_policy=policy,
+                    cancellation_token=RunCancellationToken(),
+                    timeout_seconds=5.0,
+                )
+            )
+        )
+        for i in range(6)
+    ]
+    await asyncio.sleep(0.02)
+    assert max_observed_active == 4
+    assert active_count == 4
+
+    release_all.set()
+    results = await asyncio.gather(*tasks)
+    assert len(results) == 6
+    assert all(r.status is ExecutionStatus.COMPLETED for r in results)
+

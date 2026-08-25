@@ -1,14 +1,15 @@
 /** Interactive Core 薄协调器：只做 intent 路由、listener 管理、snapshot 组装与 Feature 生命周期编排；具体业务逻辑在 features/ 下按 Feature 拆分。 */
 
 import type { Capability, ModelProfile } from "@za38/protocol"
-import { contextCompactNotice, type CommandResult, dispatchSlashCommand } from "./command-dispatcher"
+import { contextCompactNotice, type CommandResult, type CommandRpcMethod, dispatchSlashCommand } from "./command-dispatcher"
 import { builtinCommandCapabilities } from "./commands"
 import { CatalogFeature, CommandFeature, InteractionFeature, McpFeature, ModelFeature, RunFeature, SkillFeature, ThreadFeature, TimelineFeature, type FeatureContext } from "./features"
 import type { AgentGateway, Clock, IdGenerator, IntentOutcome, InteractiveConfirmation, InteractiveConnectionState, InteractiveController, InteractiveControllerOptions, InteractiveIntent, InteractiveSnapshot, LoadableCatalog, Scheduler } from "./ports"
 import { createFallbackNoopGateway } from "./ports"
 import { cryptoIdGenerator, systemClock, systemScheduler } from "../infrastructure"
 import type { InteractiveRuntime } from "./runtime"
-import { appendNotice, clearThread, createInitialState, finishContextCompaction, setWorkMode, startContextCompaction, type InteractiveState } from "./state"
+import { appendNotice, clearThread, createInitialState, finishContextCompaction, leaveChildTimeline, openChildTimeline, setWorkMode, startContextCompaction, type InteractiveState } from "./state"
+import { scopeTimeline } from "../presentation-shared/timeline-scope"
 export class InteractiveControllerImpl implements InteractiveController {
   private readonly gateway: AgentGateway
   private readonly clock: Clock
@@ -109,7 +110,16 @@ export class InteractiveControllerImpl implements InteractiveController {
 
     switch (intent.type) {
       case "input.submit":
+        if (this.state.childTimelineExecutionId) {
+          return { status: "rejected", code: "busy", message: "子代理时间线只读，返回主对话后再发送" }
+        }
         return this.handleSubmit(intent.value, intent.mode)
+      case "child-timeline.open":
+        this.commit(current => openChildTimeline(current, intent.executionId))
+        return { status: "accepted" }
+      case "child-timeline.leave":
+        this.commit(leaveChildTimeline)
+        return { status: "accepted" }
 
       case "command.execute":
         return this.commandFeature.executeSlashCommand({ id: intent.commandId, name: intent.commandId, argument: intent.argument }, this.featureContext, {
@@ -294,8 +304,53 @@ export class InteractiveControllerImpl implements InteractiveController {
           },
           onAbandonInteraction: () => this.interactionFeature.abandonPendingInteraction(this.featureContext),
         })
+      case "rpc":
+        try {
+          const value = await this.invokeCommandRpc(result.method, result.params)
+          return this.applyCommandResult(result.onSuccess(value))
+        } catch (error) {
+          return this.applyCommandResult(result.onError(error))
+        }
       default:
         return { status: "accepted" }
+    }
+  }
+  /** 把 Slash 命令产出的 RPC 方法名映射到 Gateway 的类型化调用。 */
+  private invokeCommandRpc(method: CommandRpcMethod, params: Record<string, unknown>): Promise<unknown> {
+    switch (method) {
+      case "agents.list":
+        return this.gateway.listAgents()
+      case "teams.list":
+        return this.gateway.listTeams()
+      case "teams.inspect": {
+        const kind = params.kind
+        const id = params.id
+        if ((kind !== "definition" && kind !== "run") || typeof id !== "string" || !id) {
+          return Promise.reject(new Error("Team 详情参数无效"))
+        }
+        return this.gateway.inspectTeam(kind, id)
+      }
+      case "teams.generate":
+        return this.gateway.generateTeam({
+          id: String(params.id ?? ""),
+          lead_agent_id: String(params.lead_agent_id ?? ""),
+          worker_agent_ids: Array.isArray(params.worker_agent_ids)
+            ? params.worker_agent_ids.map(value => String(value))
+            : [],
+          ...(typeof params.max_parallelism === "number" ? { max_parallelism: params.max_parallelism } : {}),
+        })
+      case "teams.run":
+        return this.gateway.runTeam({
+          team_id: String(params.team_id ?? ""),
+          request: String(params.request ?? ""),
+          thread_id: String(params.thread_id ?? ""),
+          run_id: String(params.run_id ?? ""),
+        })
+      case "teams.cancel":
+        if (typeof params.run_id !== "string" || !params.run_id) {
+          return Promise.reject(new Error("Team 取消参数无效"))
+        }
+        return this.gateway.cancelTeam(params.run_id)
     }
   }
   private async resolveConfirmation(confirmationId: string, confirmed: boolean): Promise<IntentOutcome> {
@@ -373,14 +428,15 @@ export class InteractiveControllerImpl implements InteractiveController {
       currentThreadId: this.state.currentThreadId,
       activity: this.state.activity,
       activeRun: this.state.activeRun,
-      timeline: this.state.timeline,
+      timeline: [...scopeTimeline(this.state.timeline, this.state.childTimelineExecutionId ?? "root")],
+      childTimelineExecutionId: this.state.childTimelineExecutionId,
       runProgress: this.state.runProgress,
       interaction: this.interactionFeature.interactionDto(this.interactionFeature.pendingInteraction, this.clock),
       confirmation: this.confirmation,
       lastRun: this.state.lastRun ?? null,
       runtime: { ...this.baseRuntime, approvalMode: this.runFeature.currentApprovalMode(this.baseRuntime.approvalMode), modelProfileId: this.modelFeature.requestedModelProfileId ?? undefined },
       connection: this.connection,
-      catalogs: { threads: publicCatalog(this.catalogFeature.state.threads), models: publicCatalog(this.catalogFeature.state.models), skills: publicCatalog(this.catalogFeature.state.skills), mcp: publicCatalog(this.catalogFeature.state.mcp) },
+      catalogs: { threads: publicCatalog(this.catalogFeature.state.threads), models: publicCatalog(this.catalogFeature.state.models), skills: publicCatalog(this.catalogFeature.state.skills), mcp: publicCatalog(this.catalogFeature.state.mcp), agents: publicCatalog(this.catalogFeature.state.agents) },
       commands: this.commandFeature.buildCommandItems(this.catalogFeature.state.skills.items, this.featureContext, this.hasPendingInteraction),
       selection: { requestedModelProfileId: this.modelFeature.requestedModelProfileId, actualModel: this.modelFeature.actualModelProfile ?? null, armedSkill: this.skillFeature.armedSkill ?? null },
       workMode: this.state.workMode,

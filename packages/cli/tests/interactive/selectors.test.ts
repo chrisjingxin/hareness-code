@@ -20,6 +20,7 @@ const CAPS = [
   Capability.SKILLS_MANAGE,
   Capability.MCP_READ,
   Capability.MCP_MANAGE,
+  Capability.AGENTS_READ,
 ]
 
 function snapshot(overrides: Partial<InteractiveSnapshot> = {}): InteractiveSnapshot {
@@ -40,8 +41,14 @@ function snapshot(overrides: Partial<InteractiveSnapshot> = {}): InteractiveSnap
       models: { status: "idle", items: [] as readonly ModelProfile[] },
       skills: { status: "idle", items: [] },
       mcp: { status: "idle", items: [] },
+      agents: { status: "idle", items: [] },
     },
     selection: { requestedModelProfileId: null, actualModel: null, armedSkill: null },
+    workMode: "build",
+    composeState: null,
+    workItem: null,
+    threadMode: null,
+    childTimelineExecutionId: null,
     ...overrides,
   }
 }
@@ -57,6 +64,7 @@ test("FeatureAvailability：空闲且能力齐全时全部可用", () => {
   expect(availability.canOpenModelsPanel).toBe(true)
   expect(availability.canOpenSkillsPanel).toBe(true)
   expect(availability.canOpenMcpPanel).toBe(true)
+  expect(availability.canOpenAgentsPanel).toBe(true)
 })
 
 test("FeatureAvailability：活动 Run 期间禁止切换 Thread 与变更 Skill/MCP，允许取消", () => {
@@ -91,6 +99,7 @@ test("FeatureAvailability：缺少能力时对应面板不可用", () => {
   expect(availability.canOpenModelsPanel).toBe(false)
   expect(availability.canOpenSkillsPanel).toBe(false)
   expect(availability.canOpenMcpPanel).toBe(false)
+  expect(availability.canOpenAgentsPanel).toBe(false)
   expect(availability.canChangeModel).toBe(false)
   expect(availability.canToggleSkill).toBe(false)
   expect(availability.canManageMcp).toBe(false)

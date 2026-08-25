@@ -6,8 +6,8 @@ from typing import Any, Literal, NotRequired, TypeAlias, TypedDict
 from harness_agent.protocol.runtime import event_model, schema_model
 
 PROTOCOL_MAJOR = 3
-PROTOCOL_MINOR = 5
-PROTOCOL_SCHEMA_SHA256 = "0c4364fcce17587711393e91319475a577a953bc193079e185d5cec74bd2d444"
+PROTOCOL_MINOR = 6
+PROTOCOL_SCHEMA_SHA256 = "472cb373a88cfdb24bd553e51c808ff9b605214222903436c307abf6e9f008ae"
 MAX_FRAME_BYTES = 8388608
 MAX_TOOL_PAYLOAD_BYTES = 1048576
 CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","threads.side_question","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","plugins.list","plugins.inspect","plugins.validate","plugins.install","plugins.set_enabled","plugins.remove","agents.list","agents.inspect","teams.list","teams.inspect","teams.generate","teams.run","teams.cancel","mcp.status","mcp.add","mcp.remove","host.attachment.create","host.attachment.revoke","host.control.acquire","host.control.release","host.control.status","compose.inspect","compose.abandon"]
@@ -290,6 +290,8 @@ class AgentSummaryWire(TypedDict):
     max_turns: int | None
     source: str
     fingerprint: str
+    kind: Literal["builtin", "plugin"]
+    tools: list[str]
 
 class AgentsListResultWire(TypedDict):
     snapshot_id: str
@@ -466,6 +468,8 @@ class ToolDeltaPayloadWire(TypedDict):
     output_delta: NotRequired[str]
     truncated: NotRequired[bool]
     original_bytes: NotRequired[int]
+    child_execution_id: NotRequired[str]
+    child_agent_id: NotRequired[str]
 
 class ToolResultWire(TypedDict):
     content: str
@@ -565,6 +569,10 @@ class DirectoryTrustRequestWire(TypedDict):
     thread_id: str
     run_id: str
     timeout_ms: int
+    execution_id: NotRequired[str]
+    parent_execution_id: NotRequired[str | None]
+    agent_id: NotRequired[str]
+    compose_scope: NotRequired[ComposeActivityScopeWire]
     payload: dict[str, Any]
 
 class DirectoryTrustResponseWire(TypedDict):

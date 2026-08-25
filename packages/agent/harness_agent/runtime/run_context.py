@@ -11,7 +11,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Mapping
-from typing import TYPE_CHECKING, Mapping
+from typing import TYPE_CHECKING
 
 from langchain.agents.middleware.types import AgentMiddleware, ExtendedModelResponse, ModelRequest, ModelResponse
 from langchain_core.messages import SystemMessage
@@ -83,6 +83,17 @@ class RunContext:
     workspace_root_registry: Any | None = field(default=None, repr=False)
     # Host-owned 的进程内 deferred 工具 reveal 存储；按 thread_id 隔离已激活的低频/MCP 工具。
     deferred_tool_store: Any | None = field(default=None, repr=False)
+    # child HITL 把 Interaction 交给 Host 的回调；None 时询问 fail closed。
+    interaction_port: Callable[[Any], Awaitable[Any]] | None = field(default=None, repr=False)
+    # child 过程事件转发到 Host 的回调；None 时 child 过程不对外可见。
+    event_port: (
+        Callable[
+            [str, Mapping[str, object], str | None, str | None, str | None], None
+        ]
+        | None
+    ) = field(default=None, repr=False)
+    # 把 approve_thread / approve_project 记入父 Run 同一套 rule store。
+    record_approval: Callable[[str, dict[str, Any], str], None] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         """在执行前验证 thread 与 snapshot 的绑定，阻止跨 project 注入。"""

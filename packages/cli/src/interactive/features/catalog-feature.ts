@@ -1,4 +1,4 @@
-import type { McpServerStatus, ModelProfile, ThreadSummary } from "@za38/protocol"
+import type { AgentSummary, McpServerStatus, ModelProfile, ThreadSummary } from "@za38/protocol"
 import type { LoadableCatalog, SkillSummary } from "../ports"
 import type { SkillMenuItem } from "../commands"
 import type { FeatureContext } from "./types"
@@ -22,7 +22,7 @@ export function sortThreadsByRecency(threads: readonly ThreadSummary[]): ThreadS
   return threads.slice().sort((a, b) => b.updated_at_ms - a.updated_at_ms)
 }
 
-export type CatalogKey = "threads" | "models" | "skills" | "mcp"
+export type CatalogKey = "threads" | "models" | "skills" | "mcp" | "agents"
 
 export type InternalCatalog<T> = LoadableCatalog<T> & { epoch: number }
 
@@ -31,6 +31,7 @@ export type CatalogState = {
   models: InternalCatalog<ModelProfile>
   skills: InternalCatalog<SkillMenuItem>
   mcp: InternalCatalog<McpServerStatus>
+  agents: InternalCatalog<AgentSummary>
 }
 
 function errorMessage(error: unknown): string {
@@ -43,6 +44,7 @@ export class CatalogFeature {
     models: { status: "idle", items: [], epoch: 0 },
     skills: { status: "idle", items: [], epoch: 0 },
     mcp: { status: "idle", items: [], epoch: 0 },
+    agents: { status: "idle", items: [], epoch: 0 },
   }
 
   private closed = false
@@ -51,7 +53,7 @@ export class CatalogFeature {
     this.closed = true
   }
 
-  /** 重置某项或者全量 Catalog 为 idle 状态。Skills 与 MCP 属于全局配置，跨 Thread 保持不变。 */
+  /** 重置某项或者全量 Catalog 为 idle 状态。Skills、MCP 与 Agents 属于全局配置，跨 Thread 保持不变。 */
   reset(options: { models?: readonly ModelProfile[] } = {}, ctx: FeatureContext): void {
     this.state.threads = { status: "idle", items: [], epoch: this.state.threads.epoch }
     if (options.models) {
@@ -67,6 +69,7 @@ export class CatalogFeature {
     if (key === "threads") await this.refreshThreadCatalog(ctx)
     else if (key === "models") await this.refreshModelCatalog(ctx, onModelSelection)
     else if (key === "skills") await this.refreshSkillCatalog(ctx)
+    else if (key === "agents") await this.refreshAgentCatalog(ctx)
     else await this.refreshMcpCatalog(ctx)
   }
 
@@ -124,6 +127,23 @@ export class CatalogFeature {
     } catch (error) {
       if (this.closed || epoch !== this.state.skills.epoch) return
       this.state.skills = { status: "error", items: this.state.skills.items, message: errorMessage(error), epoch }
+      ctx.publish()
+    }
+  }
+
+  /** 读取可派发 Agent catalog（内置 + Plugin）；失败只影响本 catalog。 */
+  async refreshAgentCatalog(ctx: FeatureContext): Promise<void> {
+    const epoch = ++this.state.agents.epoch
+    this.state.agents = { status: "loading", items: this.state.agents.items, epoch }
+    ctx.publish()
+    try {
+      const result = await ctx.gateway.listAgents()
+      if (this.closed || epoch !== this.state.agents.epoch) return
+      this.state.agents = { status: "ready", items: result.agents, epoch }
+      ctx.publish()
+    } catch (error) {
+      if (this.closed || epoch !== this.state.agents.epoch) return
+      this.state.agents = { status: "error", items: this.state.agents.items, message: errorMessage(error), epoch }
       ctx.publish()
     }
   }

@@ -19,19 +19,24 @@ export type ClientInteractionResponse =
 
 export class InteractionFeature {
   pendingInteraction: PendingInteraction | null = null
+  private readonly queuedInteractions: PendingInteraction[] = []
 
   close(ctx: FeatureContext): void {
     this.settlePendingInteraction(ctx)
   }
 
-  /** 终态事件、连接关闭、Controller 关闭或 Thread 重置时 abandon 并 fail-closed 收敛。 */
+  /** 终态事件、连接关闭、Controller 关闭或 Thread 重置时 abandon 并 fail-closed 收敛整条队列。 */
   settlePendingInteraction(ctx: FeatureContext): void {
-    const pending = this.pendingInteraction
-    if (!pending) return
+    const pending = [this.pendingInteraction, ...this.queuedInteractions].filter(
+      (item): item is PendingInteraction => item !== null,
+    )
     this.pendingInteraction = null
-    pending.timerId?.()
-    ctx.gateway.abandonInteraction(pending.request.request_id)
-    pending.resolve(this.buildFallbackInteractionResponse(pending.request))
+    this.queuedInteractions.length = 0
+    for (const item of pending) {
+      item.timerId?.()
+      ctx.gateway.abandonInteraction(item.request.request_id)
+      item.resolve(this.buildFallbackInteractionResponse(item.request))
+    }
   }
 
   /** Run 取消或终态时收敛未完成 Interaction；与 settle 语义一致。 */
@@ -45,32 +50,58 @@ export class InteractionFeature {
       throw new Error("Interaction 请求不在当前 active run 内")
     }
 
-    // 新请求替换旧 pending：旧请求 abandon + fail-closed，避免悬挂 RPC。
-    this.settlePendingInteraction(ctx)
-    ctx.commit(current => applyInteractionRequest(current, request))
-
     return new Promise<InteractionResponse>(resolve => {
       let timerId: (() => void) | undefined
       const timeoutMs = request.timeout_ms ?? 300_000
+      const item: PendingInteraction = { request, resolve, timerId }
 
       if (timeoutMs > 0 && Number.isFinite(timeoutMs)) {
         timerId = ctx.scheduler.setTimeout(() => {
-          if (this.pendingInteraction?.request.request_id !== request.request_id) return
-          this.pendingInteraction = null
-          ctx.commit(current => markInteractionTimeout(current, request.request_id))
-          resolve(this.buildFallbackInteractionResponse(request))
+          this.expireInteraction(request.request_id, ctx)
         }, timeoutMs)
+        item.timerId = timerId
       }
 
-      this.pendingInteraction = { request, resolve, timerId }
-      ctx.publish()
+      if (this.pendingInteraction) {
+        this.queuedInteractions.push(item)
+      } else {
+        this.activateInteraction(item, ctx)
+      }
 
       if (timeoutMs === 0) {
-        this.pendingInteraction = null
-        ctx.commit(current => markInteractionTimeout(current, request.request_id))
-        resolve(this.buildFallbackInteractionResponse(request))
+        this.expireInteraction(request.request_id, ctx)
       }
     })
+  }
+
+  private activateInteraction(item: PendingInteraction, ctx: FeatureContext): void {
+    this.pendingInteraction = item
+    ctx.commit(current => applyInteractionRequest(current, item.request))
+    ctx.publish()
+  }
+
+  private expireInteraction(requestId: string, ctx: FeatureContext): void {
+    if (this.pendingInteraction?.request.request_id === requestId) {
+      const pending = this.pendingInteraction
+      this.pendingInteraction = null
+      pending.timerId?.()
+      ctx.commit(current => markInteractionTimeout(current, requestId))
+      pending.resolve(this.buildFallbackInteractionResponse(pending.request))
+      this.promoteQueuedInteraction(ctx)
+      return
+    }
+    const index = this.queuedInteractions.findIndex(item => item.request.request_id === requestId)
+    if (index < 0) return
+    const [queued] = this.queuedInteractions.splice(index, 1)
+    if (!queued) return
+    queued.timerId?.()
+    queued.resolve(this.buildFallbackInteractionResponse(queued.request))
+  }
+
+  private promoteQueuedInteraction(ctx: FeatureContext): void {
+    const next = this.queuedInteractions.shift()
+    if (!next) return
+    this.activateInteraction(next, ctx)
   }
 
   /** 校验并回写用户响应；非法 decision/answer 不产生 RPC，只输出本地提示。 */
@@ -96,6 +127,7 @@ export class InteractionFeature {
         ? { request_id: requestId, type: "approval", decision: "reject_with_feedback", feedback: response.feedback ?? "" }
         : { request_id: requestId, type: "approval", decision: response.decision }
       this.resolvePending(pending, resolved, ctx)
+      this.promoteQueuedInteraction(ctx)
       return { status: "accepted" }
     }
 
@@ -108,6 +140,7 @@ export class InteractionFeature {
         return { status: "rejected", code: "invalid-argument", message: "Unsupported directory trust decision" }
       }
       this.resolvePending(pending, { request_id: requestId, type: "directory_trust", decision: response.decision }, ctx)
+      this.promoteQueuedInteraction(ctx)
       return { status: "accepted" }
     }
 
@@ -120,6 +153,7 @@ export class InteractionFeature {
       return { status: "rejected", code: "invalid-argument", message: violation }
     }
     this.resolvePending(pending, { request_id: requestId, type: "question", answers: response.answers }, ctx)
+    this.promoteQueuedInteraction(ctx)
     return { status: "accepted" }
   }
 
@@ -175,6 +209,7 @@ export class InteractionFeature {
     const timeoutMs = request.timeout_ms ?? 300_000
     const deadlineAtMs = clock.now() + timeoutMs
 
+    const agentId = typeof request.agent_id === "string" && request.agent_id ? request.agent_id : undefined
     if (request.type === "approval") {
       return {
         type: "approval",
@@ -184,6 +219,7 @@ export class InteractionFeature {
         presentation: request.payload.presentation ?? null,
         decisions: request.payload.decisions,
         deadlineAtMs,
+        ...(agentId ? { agentId } : {}),
       }
     }
 
@@ -199,6 +235,7 @@ export class InteractionFeature {
         shadowsWorkspace: payload.shadows_workspace,
         decisions: payload.decisions,
         deadlineAtMs,
+        ...(agentId ? { agentId } : {}),
       }
     }
 
@@ -219,6 +256,7 @@ export class InteractionFeature {
         allowOther: question.allow_other,
       })),
       deadlineAtMs,
+      ...(agentId ? { agentId } : {}),
     }
   }
 }

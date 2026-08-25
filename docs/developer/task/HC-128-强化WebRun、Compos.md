@@ -8,8 +8,8 @@ priority: P1
 status: 待认领
 owner: 未认领
 branch: -
-reviewed_at: 2026-08-09
-review_due: 2026-08-23
+reviewed_at: 2026-08-24
+review_due: 2026-09-07
 scope: 让当前 Run 状态和下一步可执行动作成为工作台核心层级，统一 Topbar/Composer 状态、空 Thread quick prompt、active Run 草稿与取消、pending approval/question 的信息和决策顺序，同时保持既有业务 intent 与安全门禁。
 acceptance: Topbar 与 Composer 上方分别表达全局 Run 和当前动作且不编造进度；active Run 可继续编辑草稿但不能重复提交，取消始终可达；三个 quick prompt 只填充 draft 不自动运行；pending Interaction 不在 Timeline 重复，主/次决策层级、焦点和失败保留正确；IME、Slash、readonly/leaving/connection error 回归通过。
 user_docs: docs/user/交互使用.md、docs/user/Web界面.md

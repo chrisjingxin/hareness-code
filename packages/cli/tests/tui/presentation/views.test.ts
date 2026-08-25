@@ -6,6 +6,7 @@ import { act, createElement, createRef } from "react"
 import type { InteractiveSnapshot } from "../../../src/interactive/types"
 import { createInteractiveRuntime } from "../../../src/interactive/runtime"
 import { createInitialState, restoreThread, setWorkMode, startContextCompaction, startRun, type InteractiveState } from "../../../src/interactive/state"
+import { scopeTimeline } from "../../../src/presentation-shared/timeline-scope"
 import { registerCommonSyntaxParsers } from "../../../src/tui/platform/syntax-parsers"
 import { HomeView } from "../../../src/tui/presentation/home"
 import { SkillPicker, ThreadPicker } from "../../../src/tui/presentation/pickers"
@@ -48,11 +49,13 @@ function snapshotOf(state: InteractiveState): InteractiveSnapshot {
       models: { status: "idle", items: [] },
       skills: { status: "idle", items: [] },
       mcp: { status: "idle", items: [] },
+      agents: { status: "idle", items: [] },
     },
     workMode: state.workMode,
     composeState: state.composeState,
     workItem: state.workItem ?? null,
     threadMode: state.threadMode ?? null,
+    childTimelineExecutionId: state.childTimelineExecutionId ?? null,
     selection: {
       requestedModelProfileId: null,
       actualModel: null,
@@ -461,6 +464,177 @@ test("write_todos 显示清单而不是 JSON，运行中底部跟踪当前进度
   }
 })
 
+test("task 派出显示角色和任务，不铺 JSON", async () => {
+  const run = { threadId: "thread-task", runId: "run-task" }
+  const started = startRun(createInitialState(), run, "查压缩实现")
+  const argumentsText = JSON.stringify({
+    description: "查找 harness-code 项目中与代码上下文压缩相关的实现",
+    subagent_type: "general-purpose",
+  })
+  const state: InteractiveState = {
+    ...started,
+    timeline: [
+      started.timeline[0]!,
+      {
+        type: "tool",
+        tool: {
+          id: "t-task",
+          runId: run.runId,
+          name: "task",
+          arguments: argumentsText,
+          output: "",
+          status: "running",
+        },
+      },
+    ],
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(ThreadView, viewProps(snapshotOf(state), 120, 36)), { width: 120, height: 36 })
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("派出 general-purpose")
+    expect(frame).toContain("任务")
+    expect(frame).toContain("查找 harness-code 项目中与代码上下文压缩相关的实现")
+    expect(frame).not.toContain("结论")
+    expect(frame).not.toContain("subagent_type")
+    expect(frame).not.toContain("\"description\"")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("task 结论按 Markdown 渲染，任务与结论分区", async () => {
+  registerCommonSyntaxParsers()
+  const run = { threadId: "thread-task-md", runId: "run-task-md" }
+  const started = startRun(createInitialState(), run, "验证写入")
+  const argumentsText = JSON.stringify({
+    description: "在沙箱执行一条可写 shell 命令",
+    subagent_type: "general-purpose",
+  })
+  const state: InteractiveState = {
+    ...started,
+    activeRun: null,
+    activity: { kind: "completed", label: "已完成" },
+    timeline: [
+      started.timeline[0]!,
+      {
+        type: "tool",
+        tool: {
+          id: "t-task",
+          runId: run.runId,
+          name: "task",
+          arguments: argumentsText,
+          output: "- **命令是否成功**: 未执行成功（被拒绝）\n- **exit code**: 无",
+          status: "completed",
+        },
+      },
+    ],
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(ThreadView, viewProps(snapshotOf(state), 120, 40)), { width: 120, height: 40 })
+  })
+  try {
+    let frame = setup.captureCharFrame()
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (frame.includes("命令是否成功") && !frame.includes("**命令是否成功**")) break
+      await act(async () => {
+        await Bun.sleep(25)
+        await setup.flush()
+      })
+      frame = setup.captureCharFrame()
+    }
+    expect(frame).toContain("派出 general-purpose")
+    expect(frame).toContain("任务")
+    expect(frame).toContain("在沙箱执行一条可写 shell 命令")
+    expect(frame).toContain("结论")
+    expect(frame).toContain("命令是否成功")
+    expect(frame).toContain("未执行成功")
+    expect(frame).not.toContain("**命令是否成功**")
+    expect(frame).not.toContain("subagent_type")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("task 长结论默认折叠，点击展开后显示剩余行", async () => {
+  registerCommonSyntaxParsers()
+  const run = { threadId: "thread-task-expand", runId: "run-task-expand" }
+  const started = startRun(createInitialState(), run, "看长报告")
+  const output = Array.from({ length: 17 }, (_, index) => `RESULT-${String(index + 1).padStart(2, "0")}`).join("\n")
+  const state: InteractiveState = {
+    ...started,
+    activeRun: null,
+    activity: { kind: "completed", label: "已完成" },
+    timeline: [
+      started.timeline[0]!,
+      {
+        type: "tool",
+        tool: {
+          id: "t-task",
+          runId: run.runId,
+          name: "task",
+          arguments: JSON.stringify({
+            description: "验证结论折叠",
+            subagent_type: "general-purpose",
+          }),
+          output,
+          status: "completed",
+        },
+      },
+    ],
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(ThreadView, viewProps(snapshotOf(state), 120, 40)), { width: 120, height: 40, useMouse: true })
+  })
+  try {
+    let frame = setup.captureCharFrame()
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (frame.includes("RESULT-01") && frame.includes("还有 5 行")) break
+      await act(async () => {
+        await Bun.sleep(25)
+        await setup.flush()
+      })
+      frame = setup.captureCharFrame()
+    }
+    expect(frame).toContain("结论")
+    expect(frame).toContain("展开")
+    expect(frame).toContain("还有 5 行")
+    expect(frame).toContain("RESULT-01")
+    expect(frame).not.toContain("RESULT-17")
+
+    const lines = frame.split("\n")
+    const buttonY = lines.findIndex(line => line.includes("还有 5 行"))
+    const spans = buttonY < 0 ? [] : setup.captureSpans().lines[buttonY]!.spans
+    const buttonSpanIndex = spans.findIndex(span => span.text.includes("还有 5 行"))
+    const buttonX = spans.slice(0, buttonSpanIndex).reduce((offset, span) => offset + span.width, 0)
+    if (buttonSpanIndex < 0 || buttonY < 0) throw new Error("未找到结论剩余行提示")
+
+    await act(async () => {
+      await setup.mockMouse.click(buttonX, buttonY)
+      await setup.flush()
+    })
+    frame = setup.captureCharFrame()
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (frame.includes("RESULT-17") && frame.includes("收起")) break
+      await act(async () => {
+        await Bun.sleep(25)
+        await setup.flush()
+      })
+      frame = setup.captureCharFrame()
+    }
+    expect(frame).toContain("收起")
+    expect(frame).toContain("RESULT-17")
+    expect(frame).not.toContain("还有 5 行")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
 test("四种工具分流：读文件一行、命令有界块、可解析 diff、未知工具仍能画", async () => {
   const run = { threadId: "thread-tools", runId: "run-tools" }
   const started = startRun(createInitialState(), run, "改代码")
@@ -491,7 +665,7 @@ test("四种工具分流：读文件一行、命令有界块、可解析 diff、
     expect(frame).toContain("还有 8 行")
     expect(frame).not.toContain("OUT20")
     expect(frame).toContain("edit_file")
-    expect(frame).toContain("task")
+    expect(frame).toContain("派出")
     expect(frame).not.toContain("Unsupported")
   } finally {
     await act(async () => { setup.renderer.destroy() })
@@ -1333,9 +1507,9 @@ test("Compose 投影渲染五阶段、任务与 blocked 摘要", async () => {
     expect(frame).toContain("计划")
     expect(frame).toContain("实现")
     expect(frame).toContain("检视")
-    expect(frame).toContain("失败")
+    expect(frame).toContain("✕")
+    expect(frame).toContain("✓")
     expect(frame).not.toContain("实现 · 失败")
-    expect(frame).not.toContain("✓")
     expect(frame).not.toContain("▸")
   } finally {
     await act(async () => { setup.renderer.destroy() })
@@ -1395,7 +1569,7 @@ test("Compose 进度钉在时间线上方，长对话滚动时仍占首行", asy
     expect(head).toContain("计划")
     expect(head).toContain("实现")
     expect(head).toContain("检视")
-    expect(head).toContain("等你确认")
+    expect(head).toContain("●")
     expect(head).not.toContain("用户补充")
   } finally {
     await act(async () => { setup.renderer.destroy() })
@@ -1596,6 +1770,127 @@ test("一轮结束后 RunFooter 是一行 muted 摘要", async () => {
     expect(frame).toContain("2.4s")
     expect(frame).toContain("120 in")
     expect(frame).toContain("40 out")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+/** HC-162：派出卡与子时间线共用一套父/子过滤视图。 */
+function childTimelineState(): InteractiveState {
+  const run = { threadId: "thread-child", runId: "run-child" }
+  const started = startRun(createInitialState(), run, "派子代理查一下")
+  return {
+    ...started,
+    activeRun: null,
+    activity: { kind: "completed", label: "已完成" },
+    timeline: [
+      started.timeline[0]!,
+      {
+        type: "tool",
+        tool: {
+          id: "task-1",
+          runId: run.runId,
+          executionId: "root",
+          name: "task",
+          arguments: JSON.stringify({ description: "查 src 下定义", subagent_type: "general-purpose" }),
+          output: "查到了",
+          status: "completed",
+          childExecutionId: "child-abc",
+          childAgentId: "general-purpose",
+        },
+      },
+      {
+        type: "tool",
+        tool: { id: "child-tool-1", runId: run.runId, executionId: "child-abc", agentId: "general-purpose", name: "read_file", arguments: "{\"file_path\":\"src/app.ts\"}", output: "ok", status: "completed" },
+      },
+      {
+        type: "message",
+        message: { id: "assistant-1", role: "assistant", content: "父级总结", streaming: false },
+      },
+    ],
+  }
+}
+
+test("父视图过滤 child 过程：只有派出卡，没有子代理工具", async () => {
+  const state = childTimelineState()
+  const interactive: InteractiveSnapshot = {
+    ...snapshotOf(state),
+    childTimelineExecutionId: null,
+    timeline: [...scopeTimeline(state.timeline, "root")],
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(ThreadView, viewProps(interactive, 120, 40)), { width: 120, height: 40 })
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("派出 general-purpose")
+    expect(frame).toContain("父级总结")
+    expect(frame).not.toContain("read_file")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("子视图只渲染该 execution，头部有返回提示，composer 关闭", async () => {
+  const state = childTimelineState()
+  const interactive: InteractiveSnapshot = {
+    ...snapshotOf(state),
+    childTimelineExecutionId: "child-abc",
+    timeline: [...scopeTimeline(state.timeline, "child-abc")],
+  }
+  const opened: string[] = []
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(
+      createElement(ThreadView, { ...viewProps(interactive, 120, 40), onOpenChildTimeline: id => { opened.push(id) } }),
+      { width: 120, height: 40 },
+    )
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("子代理时间线")
+    expect(frame).toContain("Esc")
+    expect(frame).toContain("read_file")
+    expect(frame).not.toContain("派出 general-purpose")
+    expect(frame).not.toContain("父级总结")
+    expect(frame).not.toContain("输入消息")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("点派出卡进入对应子时间线", async () => {
+  const state = childTimelineState()
+  const interactive: InteractiveSnapshot = {
+    ...snapshotOf(state),
+    childTimelineExecutionId: null,
+    timeline: [...scopeTimeline(state.timeline, "root")],
+  }
+  const opened: string[] = []
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(
+      createElement(ThreadView, { ...viewProps(interactive, 120, 40), onOpenChildTimeline: id => { opened.push(id) } }),
+      { width: 120, height: 40, useMouse: true },
+    )
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    const lines = frame.split("\n")
+    const hintY = lines.findIndex(line => line.includes("进入子时间线"))
+    if (hintY < 0) throw new Error("派出卡未显示进入子时间线入口")
+    const spans = setup.captureSpans().lines[hintY]!.spans
+    const spanIndex = spans.findIndex(span => span.text.includes("进入子时间线"))
+    const hintX = spans.slice(0, spanIndex).reduce((offset, span) => offset + span.width, 0)
+    await act(async () => {
+      await setup.mockMouse.click(hintX, hintY)
+      await setup.flush()
+    })
+    expect(opened).toEqual(["child-abc"])
   } finally {
     await act(async () => { setup.renderer.destroy() })
   }

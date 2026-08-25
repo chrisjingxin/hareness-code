@@ -49,6 +49,7 @@ BUILTIN_TOOL_NAMES = frozenset(
         "exit_plan_mode",
         "memory_search",
         "memory_save",
+        "lsp",
     }
 )
 """当前 DeepAgents 与 Harness 共同提供的稳定内置工具名。"""

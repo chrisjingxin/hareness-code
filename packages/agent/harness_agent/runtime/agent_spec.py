@@ -383,7 +383,11 @@ def resolve_builtin_main_agent_spec(
         approval_mode=str(execution.approval_mode),
         delegation=DelegationPolicy(
             enabled=True,
-            allowed_agents=("general-purpose", *tuple(sorted(set(delegation_agent_ids)))),
+            allowed_agents=(
+                "general-purpose",
+                "explore",
+                *tuple(sorted(set(delegation_agent_ids))),
+            ),
             max_depth=1,
             max_parallelism=4,
         ),

@@ -8,8 +8,8 @@ priority: P0
 status: 待验收
 owner: Codex
 branch: codex/zc-106
-reviewed_at: 2026-08-09
-review_due: 2026-08-23
+reviewed_at: 2026-08-24
+review_due: 2026-09-07
 scope: 在保持 HC-104 Interactive Adapter 分层、HC-106 双主题和 Handoff 安全边界不变的前提下，修复真实浏览器中 Thread Composer 无法输入和发送的问题，复用离线 Tree-sitter 资产为 Web Markdown fenced code 提供安全高亮，并按确认的 HTML 设计稿收敛 Timeline、按钮、布局、排版和可访问性。
 acceptance: Tabbit 中可连续输入中文、英文、换行和 IME 文本并通过按钮或键盘发送；Web 对支持语言的 fenced code 显示离线语法高亮且失败时保留纯文本；1440×900 与 390×844 的 light/dark 页面符合 HC-107 组件和几何规范，无角色溢出、空消息占位、根横向滚动或不可达主要操作。
 user_docs: docs/user/交互使用.md

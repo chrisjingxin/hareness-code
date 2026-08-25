@@ -169,6 +169,81 @@ describe("Timeline", () => {
     }
   })
 
+  test("task 折叠行显示派出对象与任务，不含 JSON 键", () => {
+    const interactive = makeInteractive({
+      timeline: [
+        toolItem({
+          id: "t-task",
+          name: "task",
+          arguments: JSON.stringify({
+            description: "查找代码压缩实现",
+            subagent_type: "general-purpose",
+          }),
+          status: "running",
+        }),
+      ],
+    })
+    const handle = render(
+      <Timeline snapshot={makeSnapshot({ interactive })} dispatch={() => {}} />,
+    )
+    try {
+      const row = handle.container.querySelector<HTMLDivElement>(".tool-row")
+      expect(row?.querySelector(".tool-row-label")?.textContent).toBe("派出 general-purpose")
+      expect(row?.querySelector(".tool-row-label")?.getAttribute("title")).toBe("task")
+      expect(row?.querySelector(".tool-row-args")?.textContent).toBe("查找代码压缩实现")
+      expect(row?.textContent).not.toContain("subagent_type")
+      expect(row?.textContent).not.toContain("\"description\"")
+    } finally {
+      handle.unmount()
+    }
+  })
+
+  test("task 展开后用结构化字段代替 JSON 参数", () => {
+    const interactive = makeInteractive({
+      timeline: [
+        toolItem({
+          id: "t-task",
+          name: "task",
+          arguments: JSON.stringify({
+            description: "查找代码压缩实现",
+            subagent_type: "explore",
+          }),
+          output: "- **命令是否成功**: 未执行成功",
+        }),
+      ],
+    })
+    const Harness = (): ReactElement => {
+      const [snapshot, setSnapshot] = useState<WebAdapterSnapshot>(() => makeSnapshot({ interactive }))
+      const dispatch = (intent: WebIntent): void => {
+        if (intent.type === "tool-toggle") {
+          setSnapshot(prev => ({
+            ...prev,
+            expandedTools: new Set(prev.expandedTools).add(toolKey(intent.runId, intent.toolId)),
+          }))
+        }
+      }
+      return <Timeline snapshot={snapshot} dispatch={dispatch} />
+    }
+    const handle = render(<Harness />)
+    try {
+      const header = handle.container.querySelector<HTMLButtonElement>(".tool-row-header")
+      act(() => { header?.click() })
+      const dispatchCard = handle.container.querySelector(".tool-detail-card[data-section=\"dispatch\"]")
+      expect(dispatchCard === null).toBe(false)
+      expect(dispatchCard?.textContent).toContain("explore")
+      expect(dispatchCard?.textContent).toContain("任务")
+      expect(dispatchCard?.textContent).toContain("查找代码压缩实现")
+      expect(dispatchCard?.textContent).toContain("结论")
+      expect(dispatchCard?.querySelector("strong")?.textContent).toBe("命令是否成功")
+      expect(dispatchCard?.textContent).toContain("未执行成功")
+      expect(dispatchCard?.textContent).not.toContain("**命令是否成功**")
+      expect(handle.container.querySelector("details.tool-detail-card[data-section=\"arguments\"]")).toBeNull()
+      expect(handle.container.querySelector(".tool-detail-card[data-section=\"output\"]")).toBeNull()
+    } finally {
+      handle.unmount()
+    }
+  })
+
   test("Tool 行展示动词标签、主参数与副作用基调；原始工具名挂 tooltip", () => {
     const interactive = makeInteractive({
       timeline: [
@@ -991,6 +1066,73 @@ test("Compose 失败后 Web 渲染冻结的终态阶段面板", async () => {
     expect(text).toContain("需求")
     expect(text).toContain("检视")
     expect(text).toContain("失败")
+  } finally {
+    handle.unmount()
+  }
+})
+
+test("子时间线模式渲染只读顶栏与返回主对话按钮", () => {
+  const interactive = makeInteractive({
+    childTimelineExecutionId: "child-123",
+    timeline: [toolItem({ id: "t1", name: "read_file" })],
+  })
+  const intents: WebIntent[] = []
+  const handle = render(
+    <Timeline snapshot={makeSnapshot({ interactive })} dispatch={intent => intents.push(intent)} />,
+  )
+  try {
+    const banner = handle.container.querySelector(".child-timeline-banner")
+    expect(banner).not.toBeNull()
+    expect(banner?.textContent).toContain("子代理时间线（只读）")
+    const backBtn = banner?.querySelector<HTMLButtonElement>(".child-timeline-back-btn")
+    expect(backBtn).not.toBeNull()
+    act(() => { backBtn?.click() })
+    expect(intents).toEqual([{ type: "child-timeline-leave" }])
+  } finally {
+    handle.unmount()
+  }
+})
+
+test("task 派出卡展开后展示进入子时间线按钮并可点击", () => {
+  const interactive = makeInteractive({
+    timeline: [
+      {
+        type: "tool",
+        tool: {
+          id: "t-task",
+          runId: "run-1",
+          name: "task",
+          arguments: JSON.stringify({ description: "查定义", subagent_type: "general-purpose" }),
+          output: "ok",
+          status: "completed",
+          childExecutionId: "child-abc",
+          childAgentId: "general-purpose",
+        },
+      },
+    ],
+  })
+  const intents: WebIntent[] = []
+  const Harness = (): ReactElement => {
+    const [snapshot, setSnapshot] = useState<WebAdapterSnapshot>(() => makeSnapshot({ interactive }))
+    const dispatch = (intent: WebIntent): void => {
+      intents.push(intent)
+      if (intent.type === "tool-toggle") {
+        setSnapshot(prev => ({
+          ...prev,
+          expandedTools: new Set(prev.expandedTools).add(toolKey(intent.runId, intent.toolId)),
+        }))
+      }
+    }
+    return <Timeline snapshot={snapshot} dispatch={dispatch} />
+  }
+  const handle = render(<Harness />)
+  try {
+    act(() => { handle.container.querySelector<HTMLButtonElement>(".tool-row-header")?.click() })
+    const btn = handle.container.querySelector<HTMLButtonElement>(".child-timeline-open-btn")
+    expect(btn).not.toBeNull()
+    expect(btn?.textContent).toContain("进入子时间线")
+    act(() => { btn?.click() })
+    expect(intents).toContainEqual({ type: "child-timeline-open", executionId: "child-abc" })
   } finally {
     handle.unmount()
   }

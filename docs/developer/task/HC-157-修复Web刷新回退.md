@@ -1,5 +1,5 @@
 ---
-id: HC-156
+id: HC-157
 title: 修复Web刷新回退
 feature_area: Web UI 工作台体验升级
 parent_task: -
@@ -13,7 +13,7 @@ review_due: 2026-09-02
 scope: 修复 Web 接管超过首次 UI token TTL 后刷新认证失败并返回 TUI；采用 handoff-scoped 单次重连 token 轮换，修正真实 Browser E2E 启动夹具并补充超时刷新回归。
 acceptance: 首次 URL token 仍受 60 秒 TTL 约束；renderer 接受后旧 token 失效并获得仅当前 handoff 有效的单次重连 token；任意停留时长后在 10 秒宽限内刷新可恢复完整 Web 视图；每次成功重连轮换 token；第二窗口拒绝不消耗主页面 token；focused、typecheck、project checks 与真实 CLI Browser 刷新 E2E 通过。
 user_docs: docs/user/故障排查.md
-developer_docs: docs/developer/spec/HC-156-修复Web刷新回退.md、docs/developer/architecture/架构总览.md、docs/developer/architecture/adr/0002-project-host-multi-connection.md
+developer_docs: docs/developer/spec/HC-157-修复Web刷新回退.md、docs/developer/architecture/架构总览.md、docs/developer/architecture/adr/0002-project-host-multi-connection.md
 test_evidence: "修复前真实 Browser 回归 1 pass/1 fail（TTL 后刷新超时）；修复后 Coordinator/契约/Gateway/TUI 50 pass，真实 Browser/loopback 6 pass，真实 CLI+Playwright 刷新 1 pass；完整 lifecycle E2E 中第二窗口与刷新 2 pass，退出收敛 1 fail，退出用例隔离复跑仍在 20 秒超时。typecheck、build、project:check、git diff --check 通过。CLI 项目脚本 829 pass/1 skip/2 fail，两项均为无代码交集的 Compose TUI 既有文案断言，隔离复跑 36 pass/2 fail。"
 references: docs/developer/task/HC-105-建立WebBrowserE2E.md、docs/developer/task/archive/HC-114-WebUiGateway与Pr.md
 completed_at: -

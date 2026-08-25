@@ -604,6 +604,26 @@ class RunCoordinator:
         """返回本会话内审批产生的内存权限规则。"""
         return self._session_rules
 
+    def emit_run_event(
+        self,
+        run: RunState,
+        event_type: str,
+        payload: Mapping[str, object],
+        *,
+        execution_id: str | None = None,
+        parent_execution_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> None:
+        """child 过程事件复用父 Run 的 sequence 与展示信封；终态仍只属于 coordinator。"""
+        self._lifecycle_port.emit(
+            run,
+            event_type,
+            payload,
+            execution_id=execution_id,
+            parent_execution_id=parent_execution_id,
+            agent_id=agent_id,
+        )
+
     async def start(
         self,
         command: StartRun,

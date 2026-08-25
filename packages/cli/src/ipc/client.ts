@@ -398,7 +398,7 @@ export class AgentClient {
     return this.request(Method.PLUGINS_REMOVE, { id, purge_data: purgeData })
   }
 
-  /** 列出启动期固定的 Plugin Agent 摘要。 */
+  /** 列出启动期固定的可派发 Agent 摘要（内置 + Plugin）。 */
   listAgents(): Promise<AgentsListResult> {
     return this.request(Method.AGENTS_LIST, {})
   }

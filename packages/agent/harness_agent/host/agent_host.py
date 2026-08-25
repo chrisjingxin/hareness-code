@@ -2037,7 +2037,7 @@ class AgentHost:
         params: dict[str, Any],
         _id: str,
     ) -> dict[str, object]:
-        """列出当前启动快照中可派发的 Plugin Agent，不返回 Prompt 正文。"""
+        """列出当前启动快照中可派发的内置与 Plugin Agent，不返回 Prompt 正文。"""
         self._reject_params(params, set(), "agents.list")
         catalog = self._agent_catalog_for_control_plane()
         return {
@@ -3098,6 +3098,33 @@ class AgentHost:
             raise RuntimeError("RUN_CONTEXT_SKILL_SNAPSHOT_MISMATCH")
         from harness_agent.threads.context_pressure import ModelCallLifecycle
 
+        adapter = ProtocolInteractionAdapter(self)
+
+        async def interaction_port(spec: Any) -> Any:
+            """child HITL 复用 owner Connection 的 reverse Interaction。"""
+            return await adapter.request(run.owner, run.ref, spec)
+
+        def event_port(
+            event_type: str,
+            payload: Mapping[str, object],
+            execution_id: str | None,
+            parent_execution_id: str | None,
+            agent_id: str | None,
+        ) -> None:
+            """child 过程事件走父 Run 同一 sequence，信封带 child 身份。"""
+            self._run_coordinator.emit_run_event(
+                run,
+                event_type,
+                dict(payload),
+                execution_id=execution_id,
+                parent_execution_id=parent_execution_id,
+                agent_id=agent_id,
+            )
+
+        def record_approval(tool_name: str, tool_args: dict[str, Any], decision: str) -> None:
+            """把 child 审批决定记入父 Run 同一套 session/project 规则。"""
+            self._run_coordinator._record_approval_rule(tool_name, tool_args, decision)
+
         return RunContext(
             thread_id=run.thread_id,
             run_id=run.run_id,
@@ -3123,6 +3150,9 @@ class AgentHost:
             deferred_tool_store=self._deferred_tool_store,
             approval_presentations=run.approval_presentations,
             workspace_root_registry=self._workspace_root_registry,
+            interaction_port=interaction_port,
+            event_port=event_port,
+            record_approval=record_approval,
         )
 
     async def _handle_peer_response(self, message: dict[str, Any]) -> None:
