@@ -153,7 +153,11 @@ from harness_agent.runtime.resource_ownership import (
     SharedResourceLease,
     SharedResourceOwner,
 )
-from harness_agent.threads.context_lifecycle import ContextLifecycle, ContextRefreshError
+from harness_agent.threads.context_lifecycle import (
+    ContextBlock,
+    ContextLifecycle,
+    ContextRefreshError,
+)
 from harness_agent.threads.deferred_store import ThreadDeferredToolStore
 from harness_agent.threads.snapshots import ThreadSnapshotStore
 from harness_agent.threads.thread_persistence import ThreadPersistence, ThreadPersistenceError
@@ -327,6 +331,7 @@ class AgentHost:
         self._plugin_catalog_snapshot: ExtensionCatalogSnapshot | None = None
         self._plugin_skill_sources: tuple[PluginSkillSource, ...] = ()
         self._plugin_agent_sources: tuple[PluginAgentSource, ...] = ()
+        self._plugin_context_blocks_by_source: dict[str, tuple[ContextBlock, ...]] = {}
         self._plugin_team_definitions: tuple[TeamDefinition, ...] = ()
         self._generated_team_definitions: dict[str, TeamDefinition] = {}
         self._active_team_tasks: dict[str, asyncio.Task[None]] = {}
@@ -944,6 +949,7 @@ class AgentHost:
                 "handles": sorted(handles),
             },
             "agent_commands": registry.agent_commands(),
+            "static_command_preview": self._plugin_manager.static_preview()["commands"],
             "skills_snapshot": registry.snapshot(),
             "skill_diagnostics": registry.diagnostics[:20],
             "limits": {
@@ -1181,6 +1187,11 @@ class AgentHost:
             ).prepare(
                 thread_id=command.thread_id,
                 spec=spec,
+                stable_reference_blocks=tuple(
+                    block
+                    for blocks in self._plugin_context_blocks_by_source.values()
+                    for block in blocks
+                ),
             )
             idle_duration_ms = await self._top_level_idle_duration_ms(
                 persistence, command.thread_id
@@ -1454,10 +1465,18 @@ class AgentHost:
         async with self._mcp_state_lock:
             manager = self._mcp_manager
             if manager is None:
-                return {"servers": [], "total_tools": 0}
+                return {
+                    "servers": [],
+                    "total_tools": 0,
+                    "static_preview": self._plugin_manager.static_preview()["mcp"],
+                }
             statuses = manager.get_server_statuses()
         total_tools = sum(len(s.get("tool_names", [])) for s in statuses)
-        return {"servers": statuses, "total_tools": total_tools}
+        return {
+            "servers": statuses,
+            "total_tools": total_tools,
+            "static_preview": self._plugin_manager.static_preview()["mcp"],
+        }
 
     async def _handle_mcp_add(self, params: dict[str, Any], _id: str) -> dict[str, Any]:
         """通过 ConfigChangeService 添加 MCP 服务器并尝试热连接。"""
@@ -1921,6 +1940,9 @@ class AgentHost:
             self._plugin_catalog_snapshot = catalog
             self._plugin_skill_sources = skill_result.sources
             self._plugin_agent_sources = agent_result.sources
+            self._plugin_context_blocks_by_source = self._plugin_manager.context_blocks_by_source(
+                catalog
+            )
             self._plugin_team_definitions = team_result.teams
             self._plugin_runtime_catalog = runtime_catalog
             self._plugin_runtime_manager = PluginRuntimeManager(runtime_catalog)
@@ -1998,6 +2020,7 @@ class AgentHost:
         return {
             "snapshot": registry.snapshot(),
             "skills": registry.list(include_disabled=include_disabled),
+            "static_preview": self._plugin_manager.static_preview()["skills"],
             "diagnostics": registry.diagnostics[:20],
         }
 
@@ -2135,6 +2158,7 @@ class AgentHost:
         return {
             "snapshot_id": catalog.snapshot_id,
             "agents": catalog.list_agents(),
+            "static_preview": self._plugin_manager.static_preview()["agents"],
             "diagnostics": [*self._plugin_diagnostics, *catalog.diagnostics],
         }
 
@@ -2870,8 +2894,15 @@ class AgentHost:
                 *,
                 resolved: ResolvedAgentSpec = child_spec,
                 profile: AgentEngineProfile = child_profile,
+                plugin_source: str = definition.source,
             ) -> Mapping[str, Any]:
                 """构造 capture_only request，并由统一 executor 运行 Plugin Agent。"""
+                from harness_agent.plugins.runtime import (
+                    SubagentStopController,
+                    SubagentStopError,
+                    SubagentStopRequest,
+                )
+
                 child_ref = child_execution_ref(command)
                 parent_log = None
                 try:
@@ -2894,6 +2925,10 @@ class AgentHost:
                 ).prepare(
                     thread_id=child_ref.thread_id,
                     spec=resolved,
+                    stable_reference_blocks=self._plugin_context_blocks_by_source.get(
+                        plugin_source,
+                        (),
+                    ),
                 )
                 context = RunContext(
                     thread_id=child_ref.thread_id,
@@ -2937,6 +2972,84 @@ class AgentHost:
                     )
 
                 snapshot_id = getattr(resolved.skill_registry, "snapshot_id", None)
+                hook_source_id = (
+                    plugin_source.removeprefix("plugin:")
+                    if plugin_source.startswith("plugin:")
+                    else ""
+                )
+                hook_runtime = self._plugin_runtime_manager
+                matched_hook_failure = next(
+                    (
+                        failure
+                        for failure in self._plugin_runtime_catalog.hook_failures
+                        if failure.event == "SubagentStop"
+                        and failure.matches(resolved.agent_id)
+                        and (failure.source_id or failure.plugin_id) == hook_source_id
+                    ),
+                    None,
+                )
+                has_subagent_stop = bool(
+                    matched_hook_failure is not None
+                    or (
+                        hook_runtime is not None
+                        and any(
+                            definition.event == "SubagentStop"
+                            and definition.matches(resolved.agent_id)
+                            and (definition.source_id or definition.plugin_id)
+                            == hook_source_id
+                            for definition in self._plugin_runtime_catalog.hooks
+                        )
+                    )
+                )
+                async def unavailable_hook_runner(
+                    *_args: object,
+                    **_kwargs: object,
+                ) -> tuple[object, ...]:
+                    """构造失败时的占位 runner；failure_code 会先行终止 gate。"""
+                    return ()
+
+                stop_controller = (
+                    SubagentStopController(
+                        hook_runner=(
+                            hook_runtime.hooks.run
+                            if hook_runtime is not None
+                            else unavailable_hook_runner
+                        ),
+                        interaction_port=lambda interaction: self._run_coordinator.request_child_interaction(
+                            RunRef(child_ref.thread_id, child_ref.run_id),
+                            interaction,
+                        ),
+                        failure_code=(
+                            matched_hook_failure.code
+                            if matched_hook_failure is not None
+                            else None
+                        ),
+                    )
+                    if has_subagent_stop
+                    else None
+                )
+
+                async def final_output_gate(final: Any) -> Any:
+                    """在同一 child checkpoint 前运行 Qwen SubagentStop。"""
+                    if stop_controller is None:
+                        from harness_agent.runtime.managed_agent_executor import (
+                            FinalOutputGateDecision,
+                        )
+
+                        return FinalOutputGateDecision(action="allow")
+                    stop_request = SubagentStopRequest(
+                        plugin_id=hook_source_id,
+                        agent_id=resolved.agent_id,
+                        agent_type="qwen-code",
+                        last_output=final.final_content,
+                        workspace="/.harness/workspace",
+                        stop_hook_active=stop_controller.block_count > 0,
+                        execution_id=child_ref.execution_id,
+                        parent_execution_id=child_ref.parent_execution_id,
+                        checkpoint_namespace=checkpoint_namespace,
+                    )
+                    return await stop_controller.evaluate(stop_request)
+
                 managed_request = ManagedAgentRequest(
                     execution_ref=child_ref.execution_id,
                     parent_execution_ref=child_ref.parent_execution_id,
@@ -2954,6 +3067,7 @@ class AgentHost:
                     if isinstance(snapshot_id, str) and snapshot_id
                     else (),
                     diagnostic_log=child_log,
+                    final_output_gate=final_output_gate if stop_controller is not None else None,
                 )
                 try:
                     result = await ManagedAgentExecutor().execute(
@@ -2966,6 +3080,10 @@ class AgentHost:
                     raise AgentDelegationError(
                         "PLUGIN_AGENT_EXECUTION_FAILED", exc.code
                     ) from exc
+                except SubagentStopError as exc:
+                    if command.cancellation_token.cancelled:
+                        raise asyncio.CancelledError from exc
+                    raise AgentDelegationError(exc.code) from exc
                 return {"final": result.final_content}
 
             targets.append(

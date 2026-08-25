@@ -232,10 +232,10 @@ function optionValue(args: string[], name: string): string | undefined {
 }
 
 /** 限制 Plugin Adapter 选择，未知值在启动 sidecar 前失败。 */
-function pluginFormat(args: string[]): "auto" | "agent-plugins-1.0" | "claude-code" {
+function pluginFormat(args: string[]): "auto" | "agent-plugins-1.0" | "claude-code" | "qwen-code" {
   const value = optionValue(args, "--format") ?? "auto"
-  if (value === "auto" || value === "agent-plugins-1.0" || value === "claude-code") return value
-  throw new Error("--format only supports auto, agent-plugins-1.0 or claude-code")
+  if (value === "auto" || value === "agent-plugins-1.0" || value === "claude-code" || value === "qwen-code") return value
+  throw new Error("--format only supports auto, agent-plugins-1.0, claude-code or qwen-code")
 }
 
 /** 解析 Qwen 风格 sandbox 开关；当前只支持企业远端 provider。 */

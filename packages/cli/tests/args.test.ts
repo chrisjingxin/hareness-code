@@ -90,6 +90,10 @@ test("parses Plugin validation, install, trust and removal commands", () => {
   })
   expect(() => parseArgs(["plugins", "enable", "local-source/review"], "/work")).toThrow("capability-fingerprint")
   expect(() => parseArgs(["plugins", "install", "./review", "--format", "gemini"], "/work")).toThrow("only supports")
+  expect(parseArgs(["plugins", "validate", "./za38-extension", "--format", "qwen-code"], "/work")).toMatchObject({
+    kind: "plugins.validate",
+    params: { source: "./za38-extension", format: "qwen-code" },
+  })
 })
 
 test("requires a prompt for non-interactive mode", () => {

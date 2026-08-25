@@ -7,7 +7,7 @@ from harness_agent.protocol.runtime import event_model, schema_model
 
 PROTOCOL_MAJOR = 3
 PROTOCOL_MINOR = 7
-PROTOCOL_SCHEMA_SHA256 = "b642db63271028ca147384ebe9e1c3be2c67eee82a9f1aa51040d15b4f67d6f4"
+PROTOCOL_SCHEMA_SHA256 = "159056cd0c45a27e73a1570f9c4de3170d44d11813330cc50c69b19dee2fa2af"
 MAX_FRAME_BYTES = 8388608
 MAX_TOOL_PAYLOAD_BYTES = 1048576
 CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","threads.side_question","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","plugins.list","plugins.inspect","plugins.validate","plugins.install","plugins.set_enabled","plugins.remove","agents.list","agents.inspect","teams.list","teams.inspect","teams.generate","teams.run","teams.cancel","mcp.status","mcp.add","mcp.remove","host.attachment.create","host.attachment.revoke","host.control.acquire","host.control.release","host.control.status","compose.inspect","compose.abandon"]
@@ -64,6 +64,7 @@ class InitializeResultWire(TypedDict):
     connection: dict[str, Any]
     capabilities: dict[str, Any]
     agent_commands: list[AgentCommandWire]
+    static_command_preview: NotRequired[JsonObjectArrayWire]
     skills_snapshot: dict[str, Any]
     skill_diagnostics: list[str]
     limits: dict[str, Any]
@@ -265,6 +266,7 @@ class SkillsMarketListParamsWire(TypedDict):
 class SkillsListResultWire(TypedDict):
     snapshot: JsonObjectWire
     skills: JsonObjectArrayWire
+    static_preview: NotRequired[JsonObjectArrayWire]
     diagnostics: list[str]
 
 class PluginsListParamsWire(TypedDict):
@@ -275,7 +277,7 @@ class PluginsInspectParamsWire(TypedDict):
 
 class PluginsSourceParamsWire(TypedDict):
     source: str
-    format: NotRequired[Literal["auto", "agent-plugins-1.0", "claude-code"]]
+    format: NotRequired[Literal["auto", "agent-plugins-1.0", "claude-code", "qwen-code"]]
 
 class PluginsSetEnabledParamsWire(TypedDict):
     id: str
@@ -295,6 +297,9 @@ class AgentSummaryWire(TypedDict):
     requested_skills: list[str]
     requested_mcp_servers: list[str]
     max_turns: int | None
+    color: str | None
+    approval_mode: str | None
+    permission_mode: str | None
     source: str
     fingerprint: str
     kind: Literal["builtin", "plugin"]
@@ -303,6 +308,7 @@ class AgentSummaryWire(TypedDict):
 class AgentsListResultWire(TypedDict):
     snapshot_id: str
     agents: list[AgentSummaryWire]
+    static_preview: NotRequired[JsonObjectArrayWire]
     diagnostics: list[str]
 
 class AgentsInspectParamsWire(TypedDict):
@@ -380,6 +386,7 @@ class McpServerStatusWire(TypedDict):
 
 class McpStatusResultWire(TypedDict):
     servers: list[McpServerStatusWire]
+    static_preview: NotRequired[JsonObjectArrayWire]
     total_tools: int
 
 McpAddParamsWire: TypeAlias = dict[str, Any] | dict[str, Any]

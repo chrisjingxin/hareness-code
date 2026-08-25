@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -20,6 +21,13 @@ _FRONTMATTER_RE = re.compile(
     r"\A---\r?\n(?P<header>.*?)\r?\n---(?:\r?\n|\Z)(?P<body>.*)\Z",
     re.DOTALL,
 )
+
+# Hook 的结构限制属于 Adapter 与 canonical runtime 的共同安全契约；放在
+# 共用纯校验 seam，避免安装报告与运行时各自维护一套容易漂移的边界。
+HOOK_MAX_MATCHER_LENGTH = 512
+HOOK_MAX_COMMAND_LENGTH = 32_768
+HOOK_MAX_TIMEOUT_SECONDS = 600
+HOOK_SUPPORTED_SHELLS = frozenset({"bash", "powershell"})
 
 
 def read_json_object(root: Path, relative: str) -> dict[str, Any]:
@@ -126,35 +134,56 @@ def validate_skill_manifests(
                     f"{manifest.relative_to(root).as_posix()}: SKILL.md 必须是普通文件"
                 )
             continue
-        try:
-            content = manifest.read_text(encoding="utf-8")
-            if len(content.encode("utf-8")) > MAX_MANIFEST_BYTES:
-                raise ValueError("SKILL.md 超过大小上限")
-            match = _FRONTMATTER_RE.match(content)
-            if match is None:
-                raise ValueError("缺少 YAML front matter")
-            header = yaml.safe_load(match.group("header"))
-            if not isinstance(header, Mapping):
-                raise ValueError("front matter 必须是 object")
-            name = header.get("name")
-            if require_name and (not isinstance(name, str) or not PLUGIN_NAME_RE.fullmatch(name)):
-                raise ValueError("name 必须是 kebab-case")
-            if name is not None and (
-                not isinstance(name, str) or not PLUGIN_NAME_RE.fullmatch(name)
-            ):
-                raise ValueError("name 必须是 kebab-case")
-            if isinstance(name, str) and name != directory.name:
-                raise ValueError("name 必须与 Skill 目录名一致")
-            description = header.get("description")
-            if not isinstance(description, str) or not description.strip():
-                raise ValueError("description 必须是非空字符串")
-            if not match.group("body").strip():
-                raise ValueError("正文不能为空")
+        error = validate_skill_manifest_file(
+            root,
+            manifest,
+            require_name=require_name,
+            expected_directory_name=directory.name,
+        )
+        if error is None:
             manifests.append(manifest)
-        except (OSError, UnicodeDecodeError, yaml.YAMLError, ValueError) as exc:
+        else:
             label = manifest.relative_to(root).as_posix()
-            diagnostics.append(f"{label}: {exc}")
+            diagnostics.append(f"{label}: {error}")
     return tuple(manifests), tuple(diagnostics)
+
+
+def validate_skill_manifest_file(
+    root: Path,
+    manifest: Path,
+    *,
+    require_name: bool,
+    expected_directory_name: str | None = None,
+) -> str | None:
+    """校验单个 Skill 文件，供目录扫描和显式文件路径共用。"""
+    try:
+        content = manifest.read_text(encoding="utf-8")
+        if len(content.encode("utf-8")) > MAX_MANIFEST_BYTES:
+            raise ValueError("SKILL.md 超过大小上限")
+        match = _FRONTMATTER_RE.match(content)
+        if match is None:
+            raise ValueError("缺少 YAML front matter")
+        header = yaml.safe_load(match.group("header"))
+        if not isinstance(header, Mapping):
+            raise ValueError("front matter 必须是 object")
+        name = header.get("name")
+        if require_name and (not isinstance(name, str) or not PLUGIN_NAME_RE.fullmatch(name)):
+            raise ValueError("name 必须是 kebab-case")
+        if name is not None and (
+            not isinstance(name, str) or not PLUGIN_NAME_RE.fullmatch(name)
+        ):
+            raise ValueError("name 必须是 kebab-case")
+        if expected_directory_name is not None and isinstance(name, str):
+            if name != expected_directory_name:
+                raise ValueError("name 必须与 Skill 目录名一致")
+        description = header.get("description")
+        if not isinstance(description, str) or not description.strip():
+            raise ValueError("description 必须是非空字符串")
+        if not match.group("body").strip():
+            raise ValueError("正文不能为空")
+    except (OSError, UnicodeDecodeError, yaml.YAMLError, ValueError) as exc:
+        return str(exc)
+    return None
 
 
 def require_plugin_name(value: object, *, field: str = "name") -> str:
@@ -188,3 +217,73 @@ def optional_string(value: object, field: str) -> str | None:
     if not isinstance(value, str) or not value.strip():
         raise PluginError("PLUGIN_MANIFEST_FIELD_INVALID", f"{field} 必须是非空字符串", field=field)
     return value.strip()
+
+
+def validate_hook_matcher(value: object) -> str | None:
+    """校验 Hook matcher，使静态报告与 runtime 使用同一正则边界。"""
+    if not isinstance(value, str) or len(value) > HOOK_MAX_MATCHER_LENGTH:
+        return "PLUGIN_HOOK_MATCHER_INVALID"
+    if value == "*":
+        return None
+    try:
+        re.compile(value)
+    except re.error:
+        return "PLUGIN_HOOK_MATCHER_INVALID"
+    return None
+
+
+def validate_command_hook_handler(
+    value: object,
+    *,
+    event: str,
+    qwen: bool,
+) -> str | None:
+    """校验 command Hook 的可构造形状；Qwen 未支持字段明确 fail-closed。"""
+    if not isinstance(value, Mapping):
+        return "PLUGIN_HOOK_HANDLER_INVALID"
+    if value.get("type") != "command":
+        return "PLUGIN_HOOK_TYPE_UNSUPPORTED"
+    command = value.get("command")
+    if not isinstance(command, str) or not command.strip():
+        return "PLUGIN_HOOK_COMMAND_INVALID"
+    if len(command) > HOOK_MAX_COMMAND_LENGTH:
+        return "PLUGIN_HOOK_COMMAND_INVALID"
+
+    if qwen and "args" in value:
+        # Qwen Extension schema 本阶段没有 args 的受控执行语义；不能沿用
+        # Claude 的 shell/exec 形态并把字段静默丢掉。
+        return "PLUGIN_HOOK_ARGS_UNSUPPORTED"
+    args = value.get("args")
+    if not qwen and args is not None and (
+        not isinstance(args, list) or not all(isinstance(item, str) for item in args)
+    ):
+        return "PLUGIN_HOOK_ARGS_INVALID"
+
+    if qwen and "env" in value:
+        return "PLUGIN_HOOK_ENV_UNSUPPORTED"
+
+    timeout = value.get("timeout", 60)
+    if (
+        not isinstance(timeout, (int, float))
+        or isinstance(timeout, bool)
+        or timeout <= 0
+        or timeout > HOOK_MAX_TIMEOUT_SECONDS
+    ):
+        return "PLUGIN_HOOK_TIMEOUT_INVALID"
+
+    asynchronous = value.get("async", False)
+    if not isinstance(asynchronous, bool):
+        return "PLUGIN_HOOK_ASYNC_INVALID"
+    if qwen and event == "SubagentStop" and asynchronous:
+        return "PLUGIN_HOOK_SUBAGENT_STOP_ASYNC_UNSUPPORTED"
+    if event == "PreToolUse" and asynchronous:
+        return "PLUGIN_HOOK_PRE_ASYNC_UNSUPPORTED"
+
+    shell = value.get("shell")
+    if shell is not None and (
+        not isinstance(shell, str) or shell not in HOOK_SUPPORTED_SHELLS
+    ):
+        return "PLUGIN_HOOK_SHELL_INVALID"
+    if shell == "powershell" and os.name != "nt":
+        return "PLUGIN_HOOK_SHELL_UNAVAILABLE"
+    return None

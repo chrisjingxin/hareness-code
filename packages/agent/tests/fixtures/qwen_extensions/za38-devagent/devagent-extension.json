@@ -1,0 +1,29 @@
+{
+  "name": "ZA38.03_CLI_EXTENSION",
+  "version": "0.2.0",
+  "contextFileName": "DEVAGENT.md",
+  "commands": "commands",
+  "skills": "skills",
+  "agents": "agents",
+  "mcpServers": {
+    "za38.03_code_index": {
+      "command": "node",
+      "args": ["${extensionPath}${/}mcp${/}context-server.mjs"]
+    }
+  },
+  "settings": [],
+  "hooks": {
+    "SubagentStop": [
+      {
+        "matcher": "^za38-(frontend|backend|java)-executor$",
+        "hooks": [
+          {
+            "type": "command",
+            "name": "za38-git-commit-gate",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/za38-git-commit-gate.mjs\""
+          }
+        ]
+      }
+    ]
+  }
+}

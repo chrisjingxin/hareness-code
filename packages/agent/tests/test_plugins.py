@@ -344,6 +344,124 @@ def test_plugin_management_lifecycle_covers_directory_and_zip_sources(
     assert manager.list()["plugins"] == []
 
 
+def test_static_preview_only_projects_non_effective_qwen_resources(
+    tmp_path: Path,
+) -> None:
+    """静态 preview 只展示尚未接入运行时的 Qwen 资源，不复制既有格式。"""
+    manager = PluginManager(home=tmp_path / "home")
+
+    portable = tmp_path / "portable-preview"
+    portable.mkdir()
+    _portable_plugin(portable)
+    portable_installed = manager.install(portable)["plugin"]
+    assert isinstance(portable_installed, dict)
+    assert manager.static_preview() == {
+        "commands": [],
+        "skills": [],
+        "agents": [],
+        "mcp": [],
+    }
+
+    manager.set_enabled(
+        str(portable_installed["id"]),
+        enabled=True,
+        capability_fingerprint=str(portable_installed["capability_fingerprint"]),
+    )
+    assert manager.catalog().plugins[0].plugin_id == portable_installed["id"]
+    assert manager.static_preview() == {
+        "commands": [],
+        "skills": [],
+        "agents": [],
+        "mcp": [],
+    }
+
+    claude = tmp_path / "claude-preview"
+    claude.mkdir()
+    _write_json(
+        claude / ".claude-plugin" / "plugin.json",
+        {"name": "claude-preview", "version": "1.0.0"},
+    )
+    _write_skill(claude / "skills" / "review" / "SKILL.md", include_name=False)
+    claude_installed = manager.install(claude)["plugin"]
+    assert isinstance(claude_installed, dict)
+    assert claude_installed["format"] == "claude-code"
+
+    hybrid = tmp_path / "hybrid-preview"
+    hybrid.mkdir()
+    _portable_plugin(hybrid)
+    _write_json(
+        hybrid / ".claude-plugin" / "plugin.json",
+        {"name": "secure-review", "version": "1.0.0"},
+    )
+    hybrid_installed = manager.install(hybrid)["plugin"]
+    assert isinstance(hybrid_installed, dict)
+    assert hybrid_installed["format"] == "hybrid"
+
+    assert manager.static_preview() == {
+        "commands": [],
+        "skills": [],
+        "agents": [],
+        "mcp": [],
+    }
+
+
+def test_static_preview_hides_qwen_when_an_effective_component_exists(
+    tmp_path: Path,
+) -> None:
+    """未来 Qwen 组件接入运行时后不应再与 static preview 重复。"""
+    from dataclasses import replace
+
+    qwen = tmp_path / "qwen-effective"
+    qwen.mkdir()
+    _write_json(qwen / "qwen-extension.json", {"name": "qwen-effective"})
+    (qwen / "commands").mkdir()
+    (qwen / "commands" / "review.md").write_text(
+        "---\ndescription: Review\n---\nReview the change.\n",
+        encoding="utf-8",
+    )
+    manager = PluginManager(home=tmp_path / "home")
+    installed = manager.install(qwen)["plugin"]
+    assert isinstance(installed, dict)
+    assert manager.static_preview()["commands"]
+
+    state = manager.store.read_registry()
+    plugin = state.plugins[0]
+    effective_components = tuple(
+        replace(
+            component,
+            status="supported",
+            effective=True,
+            count=max(component.count, 1),
+        )
+        for component in plugin.components
+    )
+    assert all(
+        isinstance(component, PluginComponentReport)
+        for component in effective_components
+    )
+    manager.store.mutate_registry(
+        lambda current: tuple(
+            replace(
+                item,
+                components=effective_components,
+                enabled=True,
+                trusted_capability_fingerprint=item.capability_fingerprint,
+            )
+            if item.plugin_id == plugin.plugin_id
+            else item
+            for item in current.plugins
+        )
+    )
+
+    assert manager.catalog().plugins[0].plugin_id == plugin.plugin_id
+    assert manager.static_preview() == {
+        "commands": [],
+        "skills": [],
+        "agents": [],
+        "mcp": [],
+    }
+
+
 def test_catalog_excludes_legacy_enabled_plugin_without_effective_components(
     tmp_path: Path,
 ) -> None:

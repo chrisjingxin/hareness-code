@@ -382,6 +382,69 @@ api_key_env = "HARNESS_AGENT_TEAM_TEST_KEY"
     await server.close()
 
 
+async def test_qwen_agent_list_dispatch_accepts_visible_agent_fields(
+    tmp_path: Path,
+) -> None:
+    """Qwen Agent 的 color/权限模式字段必须通过真实 Host dispatch 契约。"""
+    from harness_agent.host.agent_host import AgentHost
+
+    home = tmp_path / "home"
+    config_path = home / ".harness" / "config.toml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        '''[config]
+version = 1
+
+[models]
+default_profile = "fast"
+
+[models.profiles.fast]
+model = "offline-model"
+base_url = "https://gateway.example/v1"
+''',
+        encoding="utf-8",
+    )
+    fixture = Path(__file__).parents[1] / "fixtures" / "qwen_extensions" / "za38-devagent"
+    server = AgentHost(
+        allow_echo=True,
+        config_home=home,
+        workspace=tmp_path / "workspace",
+    )
+    installed = server._plugin_manager.install(fixture)["plugin"]
+    assert isinstance(installed, dict)
+    server._plugin_manager.set_enabled(
+        str(installed["id"]),
+        enabled=True,
+        capability_fingerprint=str(installed["capability_fingerprint"]),
+    )
+    frames: list[dict[str, Any]] = []
+
+    async def capture(message: dict[str, Any]) -> None:
+        frames.append(message)
+
+    server.send = capture
+    try:
+        await server.dispatch(_request("initialize", _initialize_params(), "qwen-init"))
+        await server.dispatch(_request("agents.list", {}, "qwen-agents-list"))
+    finally:
+        await server.close()
+
+    result = frames[-1].get("result")
+    assert isinstance(result, dict), frames[-1]
+    assert [agent["id"] for agent in result["agents"]] == [
+        "za38-backend-executor",
+        "za38-frontend-executor",
+        "za38-java-executor",
+    ]
+    assert {agent["color"] for agent in result["agents"]} == {
+        "green",
+        "cyan",
+        "orange",
+    }
+    assert {agent["approval_mode"] for agent in result["agents"]} == {"auto-edit"}
+    assert all(agent["permission_mode"] is None for agent in result["agents"])
+
+
 async def test_managed_plugin_child_passes_skill_snapshot_to_run_context(
     tmp_path: Path,
     monkeypatch: Any,
@@ -3036,7 +3099,11 @@ async def test_mcp_status_no_config(tmp_path: Path):
     server = AgentHost(allow_echo=True, config_home=tmp_path / "home")
     frames = await _capture_server(server)
     await server.dispatch(_request("mcp.status", {}, "mcp-status"))
-    assert frames[-1]["result"] == {"servers": [], "total_tools": 0}
+    assert frames[-1]["result"] == {
+        "servers": [],
+        "total_tools": 0,
+        "static_preview": [],
+    }
 
 
 async def test_mcp_status_accepts_plugin_source_and_keeps_transport_alive(tmp_path: Path):
@@ -3086,7 +3153,11 @@ async def test_invalid_handler_result_returns_error_without_closing_dispatch_loo
 
     server._handlers["mcp.status"] = original
     await server.dispatch(_request("mcp.status", {}, "mcp-status-after-invalid"))
-    assert frames[-1]["result"] == {"servers": [], "total_tools": 0}
+    assert frames[-1]["result"] == {
+        "servers": [],
+        "total_tools": 0,
+        "static_preview": [],
+    }
 
 
 async def test_mcp_status_not_initialized():

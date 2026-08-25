@@ -146,6 +146,43 @@ ExecutionStarter = Callable[[str], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
+class ManagedFinalOutput:
+    """终态 gate 可见的有界 child 输出与执行 provenance。"""
+
+    execution_ref: str
+    parent_execution_ref: str | None
+    run_id: str
+    final_content: str
+
+
+@dataclass(frozen=True, slots=True)
+class FinalOutputGateDecision:
+    """终态 gate 对同一 Managed execution 的安全裁决。"""
+
+    action: Literal["allow", "continue"]
+    continuation_prompt: str = ""
+    skip_once: bool = False
+
+    def __post_init__(self) -> None:
+        """只接受 allow/continue，且继续动作必须提供下一回合输入。"""
+        if self.action not in {"allow", "continue"}:
+            raise ValueError("MANAGED_FINAL_GATE_ACTION_INVALID")
+        if not isinstance(self.skip_once, bool):
+            raise ValueError("MANAGED_FINAL_GATE_SKIP_INVALID")
+        if self.action == "continue" and not self.continuation_prompt.strip():
+            raise ValueError("MANAGED_FINAL_GATE_PROMPT_REQUIRED")
+        if self.action == "continue" and self.skip_once:
+            raise ValueError("MANAGED_FINAL_GATE_SKIP_INVALID")
+        if self.action == "allow" and self.continuation_prompt:
+            raise ValueError("MANAGED_FINAL_GATE_PROMPT_UNEXPECTED")
+
+
+FinalOutputGate = Callable[
+    [ManagedFinalOutput], Awaitable[FinalOutputGateDecision]
+]
+
+
+@dataclass(frozen=True, slots=True)
 class ManagedAgentRequest:
     """一次 managed 执行的冻结输入，不允许在运行中重新解析。
 
@@ -177,6 +214,9 @@ class ManagedAgentRequest:
     model_profile_id: str = "default"
     # 目录信任等必须用户决策的中断判定钩子；透传给 shared execution stream。
     needs_user_decision: Callable[[str, Mapping[str, object]], bool] | None = None
+    # Managed child 的最终输出提交前门禁；continue 只在同一 runtime/checkpoint
+    # 内开始下一模型回合，不创建新的 DelegationTarget 或 execution。
+    final_output_gate: FinalOutputGate | None = None
 
     def __post_init__(self) -> None:
         """在取得昂贵 runtime 前拒绝不完整的执行事实。"""
@@ -198,6 +238,8 @@ class ManagedAgentRequest:
             raise ValueError("MANAGED_AGENT_TIMEOUT_INVALID")
         if self.execution_starter is not None and not callable(self.execution_starter):
             raise ValueError("MANAGED_AGENT_EXECUTION_STARTER_INVALID")
+        if self.final_output_gate is not None and not callable(self.final_output_gate):
+            raise ValueError("MANAGED_AGENT_FINAL_GATE_INVALID")
         if not all(
             isinstance(snapshot_id, str) and snapshot_id
             for snapshot_id in self.required_skill_snapshot_ids
@@ -342,16 +384,13 @@ class ManagedAgentExecutor:
 
         resume: object | None = None
         model_round = 0
+        stream_input: object = _initial_stream_input(request.input)
         while True:
             model_round += 1
             observer.on_model_round()
             if resume is not None:
                 _schedule_interaction_resume(runtime.run_context)
-            stream_input = (
-                Command(resume=resume)
-                if resume is not None
-                else _initial_stream_input(request.input)
-            )
+                stream_input = Command(resume=resume)
             stream_result = await self._execute_round_with_retry(
                 request,
                 observer,
@@ -361,6 +400,28 @@ class ManagedAgentExecutor:
                 model_round,
             )
             if stream_result.resume is None:
+                if request.final_output_gate is not None:
+                    gate_decision = await request.final_output_gate(
+                        ManagedFinalOutput(
+                            execution_ref=request.execution_ref,
+                            parent_execution_ref=request.parent_execution_ref,
+                            run_id=request.run_id,
+                            final_content=stream_result.final_content,
+                        )
+                    )
+                    if not isinstance(gate_decision, FinalOutputGateDecision):
+                        raise ManagedAgentExecutionError(
+                            "MANAGED_AGENT_FINAL_GATE_INVALID"
+                        )
+                    if gate_decision.action == "continue":
+                        # execution_stream 会在下一回合开始时清理本回合正文；
+                        # 这里先清理，防止 fake/无正文模型把上一轮结果带回父端。
+                        session.content_parts.clear()
+                        stream_input = _initial_stream_input(
+                            gate_decision.continuation_prompt
+                        )
+                        resume = None
+                        continue
                 result = ManagedAgentResult(
                     final_content=stream_result.final_content,
                     usage=dict(stream_result.usage),

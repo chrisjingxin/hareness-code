@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 
-PluginFormat = Literal["agent-plugins-1.0", "claude-code", "hybrid"]
+PluginFormat = Literal["agent-plugins-1.0", "claude-code", "qwen-code", "hybrid"]
 PluginComponentStatus = Literal["supported", "adapted", "unsupported", "invalid"]
 
 # 组件报告没有单独增加 issue 字段；这些前缀只用于从现有 diagnostics

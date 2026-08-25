@@ -31,7 +31,7 @@ MAX_PACKAGE_DEPTH = 24
 MAX_RELATIVE_PATH_BYTES = 512
 MAX_ZIP_COMPRESSION_RATIO = 200
 REGISTRY_VERSION = 2
-_SAFE_SEGMENT_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{0,127}$")
+_SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -561,7 +561,7 @@ def _installed_from_record(value: object) -> InstalledPlugin:
         ),
         installed_at_ms=_required_int(value, "installed_at_ms"),
     )
-    if plugin.format not in {"agent-plugins-1.0", "claude-code", "hybrid"}:
+    if plugin.format not in {"agent-plugins-1.0", "claude-code", "qwen-code", "hybrid"}:
         raise ValueError("invalid format")
     _require_safe_segment(plugin.source_id, "source_id")
     _require_safe_segment(plugin.name, "name")

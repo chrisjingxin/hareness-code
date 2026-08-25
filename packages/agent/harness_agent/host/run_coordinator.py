@@ -30,7 +30,11 @@ from harness_agent.host.run_execution import (
     RunLifecyclePort,
     _bounded_json,
 )
-from harness_agent.runtime.interactions import InteractionRequest, InteractionResult
+from harness_agent.runtime.interactions import (
+    ChildInteractionRegistry,
+    InteractionRequest,
+    InteractionResult,
+)
 from harness_agent.policy.approval_mode import ApprovalMode
 from harness_agent.policy.bash_parser import extract_command_rule as _extract_command_rule
 
@@ -729,6 +733,7 @@ class RunCoordinator:
         self._clock = clock
         self._lifecycle_port = _CoordinatorLifecyclePort(self)
         self._runs: dict[str, RunState] = {}
+        self._child_interactions = ChildInteractionRegistry()
         self._starting_runs: dict[str, ConnectionRef] = {}
         # maintenance 中的 Thread 拒绝受理新 Run，避免 watch/compact 与执行互相踩踏
         self._maintenance_threads: set[str] = set()
@@ -739,6 +744,11 @@ class RunCoordinator:
     def execution_registry(self) -> AgentExecutionRegistry:
         """返回供未来 DelegationDispatcher 复用的执行树 seam。"""
         return self._execution_registry
+
+    @property
+    def child_interactions(self) -> ChildInteractionRegistry:
+        """返回本 Coordinator 的 child Interaction 登记表。"""
+        return self._child_interactions
 
     @property
     def session_rules(self) -> list[PermissionRule]:
@@ -974,6 +984,7 @@ class RunCoordinator:
 
         active.cancel_requested = True
         active.cancellation_token.cancel()
+        self._child_interactions.cancel_run(run.run_id)
         await self._execution_registry.cancel_run(active.root_execution_ref)
         task = active.task
         if task is not None and not task.done() and active.status != "accepted":
@@ -982,9 +993,51 @@ class RunCoordinator:
 
     async def owner_disconnected(self, connection: ConnectionRef) -> None:
         """取消指定 owner 拥有的 Run；其他 Connection 的 Run 不受影响。"""
+        async with self._lock:
+            run_ids = tuple(
+                active.ref.run_id
+                for active in self._runs.values()
+                if active.owner == connection and active.completion is None
+            )
+        for run_id in run_ids:
+            self._child_interactions.cancel_run(run_id)
         await self._cancel_runs(
             lambda run: run.owner == connection and run.completion is None
         )
+
+    async def request_child_interaction(
+        self,
+        run: RunRef,
+        interaction: InteractionRequest,
+    ) -> InteractionResult:
+        """把 child 门禁交给同一 owner channel，并保留原 checkpoint 归属。"""
+        active = await self._lookup(run)
+        if (
+            active.completion is not None
+            or active.cancel_requested
+            or interaction.execution_id is None
+            or interaction.agent_id is None
+        ):
+            return InteractionResult({}, expired=True)
+        checkpoint_namespace = ""
+        if interaction.serial_context is not None:
+            raw_namespace = interaction.serial_context.get("checkpoint_namespace")
+            if isinstance(raw_namespace, str):
+                checkpoint_namespace = raw_namespace
+        if not checkpoint_namespace:
+            return InteractionResult({}, expired=True)
+        self._child_interactions.register(
+            request_id=interaction.request_id,
+            run_id=run.run_id,
+            execution_id=interaction.execution_id,
+            parent_execution_id=interaction.parent_execution_id,
+            agent_id=interaction.agent_id,
+            checkpoint_namespace=checkpoint_namespace,
+        )
+        try:
+            return await self._lifecycle_port.request_interaction(active, interaction)
+        finally:
+            self._child_interactions.resolve(interaction.request_id)
 
     async def close(self) -> None:
         """停止所有 Run，并在关闭持久化和 AgentEngine 前完成清理。"""
@@ -996,6 +1049,7 @@ class RunCoordinator:
         for run in runs:
             run.cancel_requested = True
             run.cancellation_token.cancel()
+            self._child_interactions.cancel_run(run.ref.run_id)
             await self._execution_registry.cancel_run(run.root_execution_ref)
             if run.task is not None and not run.task.done():
                 run.task.cancel()
@@ -1097,6 +1151,7 @@ class RunCoordinator:
 
     async def _force_cancel(self, run: RunState) -> None:
         """补偿任务尚未取得首个时间片时的取消，避免 Run 永久悬挂。"""
+        self._child_interactions.cancel_run(run.ref.run_id)
         if run.completion is None:
             self._finish(run, "cancelled", {"reason": "Cancelled by client"})
         await self._settle_root_execution(run)
@@ -1224,6 +1279,7 @@ class RunCoordinator:
                 },
             )
         finally:
+            self._child_interactions.cancel_run(run.ref.run_id)
             # 已收到终态的 ToolMessage 或已经结束的助手消息属于规范事实；
             # 取消/失败只丢弃仍停留在 assistant_buffer 中的半条流。
             if run.persistence is not None and run.status != "completed":

@@ -66,6 +66,7 @@ class PluginAgentSource:
             "harness",
             "agent-plugins-1.0",
             "claude-code",
+            "qwen-code",
             "hybrid",
         }:
             raise AgentCatalogError("plugin format is unsupported")
@@ -206,6 +207,9 @@ class AgentDefinition:
     requested_mcp_servers: tuple[str, ...] = ()
     max_turns: int | None = None
     declared_tools: tuple[str, ...] = ()
+    color: str | None = None
+    approval_mode: str | None = None
+    permission_mode: str | None = None
 
     @property
     def fingerprint(self) -> str:
@@ -226,6 +230,10 @@ class AgentDefinition:
                 "skills": list(self.requested_skills),
                 "mcp_servers": list(self.requested_mcp_servers),
                 "max_turns": self.max_turns,
+                "tools": list(self.declared_tools),
+                "color": self.color,
+                "approval_mode": self.approval_mode,
+                "permission_mode": self.permission_mode,
             }
         )
 
@@ -240,6 +248,10 @@ class AgentDefinition:
             "requested_skills": list(self.requested_skills),
             "requested_mcp_servers": list(self.requested_mcp_servers),
             "max_turns": self.max_turns,
+            "tools": list(self.declared_tools),
+            "color": self.color,
+            "approval_mode": self.approval_mode,
+            "permission_mode": self.permission_mode,
             "source": self.source,
             "fingerprint": self.fingerprint,
             "kind": "plugin",
@@ -323,9 +335,27 @@ class AgentCatalog:
             agent_files = (
                 source.agent_files
                 if source.agent_files
-                else tuple(_structured_files(root / "agents", include_markdown=source.format == "claude-code"))
+                else tuple(
+                    _structured_files(
+                        root / "agents",
+                        include_markdown=source.format in {"claude-code", "qwen-code"},
+                    )
+                )
             )
-            if source.format in {"claude-code", "hybrid"}:
+            if source.format == "qwen-code":
+                loaded_agents, derived_policies = self._load_qwen_agents(
+                    root,
+                    agent_files,
+                    label,
+                    diagnostics,
+                )
+                for policy_id, policy in derived_policies.items():
+                    if policy_id in policies:
+                        diagnostics.append(f'{label} policy "{policy_id}": duplicate Policy ignored')
+                        continue
+                    policies[policy_id] = policy
+                    accepted_policies[policy_id] = policy
+            elif source.format in {"claude-code", "hybrid"}:
                 claude_files = (
                     agent_files
                     if source.format == "claude-code"
@@ -510,6 +540,32 @@ class AgentCatalog:
             path = _inside_root(root, candidate)
             try:
                 agent, policy = _parse_claude_agent(
+                    path,
+                    source=source,
+                    model_catalog=self._model_catalog,
+                )
+                if agent.agent_id in agents:
+                    raise AgentCatalogError("duplicate Agent ID")
+                agents[agent.agent_id] = agent
+                policies[policy.policy_id] = policy
+            except (AgentCatalogError, ConfigError, OSError, yaml.YAMLError) as exc:
+                diagnostics.append(_diagnostic(source, "agent", path.name, exc))
+        return agents, policies
+
+    def _load_qwen_agents(
+        self,
+        root: Path,
+        files: tuple[Path, ...],
+        source: str,
+        diagnostics: list[str],
+    ) -> tuple[dict[str, AgentDefinition], dict[str, ExecutionPolicyDefinition]]:
+        """把 Qwen Subagent Markdown 转为同一 canonical Agent/Policy 类型。"""
+        agents: dict[str, AgentDefinition] = {}
+        policies: dict[str, ExecutionPolicyDefinition] = {}
+        for candidate in files:
+            path = _inside_root(root, candidate)
+            try:
+                agent, policy = _parse_qwen_agent(
                     path,
                     source=source,
                     model_catalog=self._model_catalog,
@@ -830,6 +886,249 @@ _CLAUDE_TOOL_MAP = {
     "Bash": "execute",
     "Agent": "task",
 }
+
+_QWEN_TOOL_MAP = {
+    **{value: value for value in ("read_file", "glob", "grep", "write_file", "edit_file", "execute", "task")},
+    **_CLAUDE_TOOL_MAP,
+    "ReadFile": "read_file",
+    "WriteFile": "write_file",
+    "Shell": "execute",
+    "Agent": "task",
+}
+_QWEN_APPROVAL_MODES = frozenset({"default", "plan", "auto-edit", "yolo"})
+# Qwen 的 agent-frontmatter-schema.ts 为 permissionMode 使用另一组枚举；
+# 这里先映射到 Harness 的 canonical 权限请求，再交给父/Host Policy 求交集。
+_QWEN_PERMISSION_MODE_MAP = {
+    "default": "default",
+    "plan": "plan",
+    "acceptEdits": "auto-edit",
+    "auto": "auto-edit",
+    "dontAsk": "default",
+}
+_QWEN_AGENT_FIELDS = {
+    "name",
+    "description",
+    "tools",
+    "disallowedTools",
+    "model",
+    "runConfig",
+    "color",
+    "approvalMode",
+    # DevAgent/Claude 转换可能保留该字段；它按 Qwen 源枚举独立映射为
+    # canonical 请求，永远不能直接授予父 Agent 未拥有的能力。
+    "permissionMode",
+}
+
+
+def validate_qwen_agent_file(path: Path) -> None:
+    """在 Plugin validate/install 阶段复用 Qwen Markdown 的严格静态校验。"""
+    _read_qwen_agent_document(path)
+
+
+def _read_qwen_agent_document(path: Path) -> tuple[dict[str, object], str, str]:
+    """读取 Qwen Subagent front matter 和正文，拒绝未覆盖的字段语义。"""
+    if path.suffix.lower() != ".md":
+        raise AgentCatalogError("Qwen Agent must be Markdown")
+    content = _read_limited_text(path)
+    match = re.match(r"\A---\s*\n(?P<header>.*?)\n---\s*(?:\n|\Z)", content, re.DOTALL)
+    if match is None:
+        raise AgentCatalogError("Qwen Agent is missing YAML front matter")
+    raw = yaml.safe_load(match.group("header"))
+    if not isinstance(raw, Mapping):
+        raise AgentCatalogError("Qwen Agent front matter must be an object")
+    if not all(isinstance(key, str) for key in raw):
+        raise AgentCatalogError("Qwen Agent front matter keys must be strings")
+    _reject_unknown(raw, _QWEN_AGENT_FIELDS, "qwen.agent")
+    body = content[match.end() :].strip()
+    if not body:
+        raise AgentCatalogError("Qwen Agent prompt must not be empty")
+    _qwen_required_text(raw.get("name"), "qwen.agent.name")
+    _qwen_required_text(raw.get("description"), "qwen.agent.description")
+    if "color" in raw:
+        _qwen_required_text(raw["color"], "qwen.agent.color")
+    if "approvalMode" in raw:
+        _qwen_approval_mode(raw["approvalMode"], "qwen.agent.approvalMode")
+    if "permissionMode" in raw:
+        _qwen_permission_mode(raw["permissionMode"], "qwen.agent.permissionMode")
+    if "approvalMode" in raw and "permissionMode" in raw:
+        approval = _qwen_approval_mode(raw["approvalMode"], "qwen.agent.approvalMode")
+        permission = _qwen_permission_mode(raw["permissionMode"], "qwen.agent.permissionMode")
+        if approval != permission:
+            raise AgentCatalogError("qwen.agent approvalMode and permissionMode conflict")
+    if "tools" in raw:
+        _map_qwen_tools(raw["tools"], "qwen.agent.tools", allow_string=False)
+    if "disallowedTools" in raw:
+        _map_qwen_tools(raw["disallowedTools"], "qwen.agent.disallowedTools", allow_string=True)
+    if "model" in raw:
+        model = raw["model"]
+        if model is not None and not isinstance(model, str):
+            raise AgentCatalogError("qwen.agent.model must be a string")
+    if "runConfig" in raw:
+        _parse_qwen_run_config(raw["runConfig"])
+    return dict(raw), body, content
+
+
+def _parse_qwen_agent(
+    path: Path,
+    *,
+    source: str,
+    model_catalog: ModelCatalog,
+) -> tuple[AgentDefinition, ExecutionPolicyDefinition]:
+    """将 Qwen Agent Markdown 转为 canonical AgentDefinition 与受限 Policy。"""
+    raw, body, content = _read_qwen_agent_document(path)
+    agent_id = _qwen_agent_identifier(raw.get("name"))
+    if agent_id in _RESERVED_AGENT_IDS:
+        raise AgentCatalogError("qwen.agent.name is reserved by Harness")
+    description = _qwen_required_text(raw.get("description"), "qwen.agent.description")
+    model_profile_id = _parse_qwen_model(raw.get("model"), model_catalog)
+    approval_mode = (
+        _qwen_approval_mode(raw["approvalMode"], "qwen.agent.approvalMode")
+        if "approvalMode" in raw
+        else None
+    )
+    permission_mode = (
+        _qwen_permission_mode(raw["permissionMode"], "qwen.agent.permissionMode")
+        if "permissionMode" in raw
+        else None
+    )
+    requested_mode = permission_mode or approval_mode
+    allowed = (
+        _map_qwen_tools(raw["tools"], "qwen.agent.tools", allow_string=False)
+        if "tools" in raw
+        else set()
+    )
+    denied = (
+        _map_qwen_tools(raw["disallowedTools"], "qwen.agent.disallowedTools", allow_string=True)
+        if "disallowedTools" in raw
+        else set()
+    )
+    # Qwen omits tools to inherit its host tool registry.  A Plugin Agent is
+    # an untrusted capability request in Harness, so the adapter narrows that
+    # omission to the canonical read-only set instead of inheriting writes,
+    # Shell, MCP or delegation by accident.
+    if not allowed:
+        allowed = set(FILE_READ_TOOL_NAMES)
+    policy_id = f"{agent_id}-qwen"
+    policy = ExecutionPolicyDefinition(
+        policy_id=policy_id,
+        source=source,
+        tools=StringRule(allow=tuple(sorted(allowed)), deny=tuple(sorted(denied))),
+        mcp_tools=StringRule(allow=()),
+        filesystem_read=("**/*",) if allowed & FILE_READ_TOOL_NAMES else (),
+        filesystem_write=("**/*",) if allowed & FILE_WRITE_TOOL_NAMES else (),
+        shell=ShellPolicy(enabled="execute" in allowed),
+        network=NetworkPolicy(enabled=False),
+        approval_mode=requested_mode,
+        delegation=DelegationPolicy(
+            enabled="task" in allowed,
+            allowed_agents=None,
+            max_depth=1,
+            max_parallelism=1,
+        ),
+    )
+    instructions = CatalogAsset(
+        name=path.name,
+        path=path.resolve(),
+        digest=_digest(content.encode()),
+    )
+    agent = AgentDefinition(
+        agent_id=agent_id,
+        description=description,
+        purpose=description,
+        source=source,
+        instructions=instructions,
+        prompt=body,
+        instruction_fragments=(),
+        input_contract=None,
+        output_contract=None,
+        success_criteria=(),
+        model_profile_id=model_profile_id,
+        execution_policy_id=policy_id,
+        max_turns=_parse_qwen_run_config(raw.get("runConfig")),
+        color=(
+            _qwen_required_text(raw["color"], "qwen.agent.color")
+            if "color" in raw
+            else None
+        ),
+        approval_mode=approval_mode,
+        permission_mode=permission_mode,
+    )
+    return agent, policy
+
+
+def _qwen_required_text(value: object, field: str) -> str:
+    """读取 Qwen 必填/展示字段，拒绝类型转换造成的静默语义变化。"""
+    if not isinstance(value, str) or not value.strip():
+        raise AgentCatalogError(f"{field} must be a non-empty string")
+    return value.strip()
+
+
+def _qwen_agent_identifier(value: object) -> str:
+    """将 Qwen 允许的显示名收敛为 Harness 可安全派发的 kebab-case ID。"""
+    text = _qwen_required_text(value, "qwen.agent.name")
+    normalized = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return _identifier(normalized, "qwen.agent.name")
+
+
+def _qwen_approval_mode(value: object, field: str) -> str:
+    """按 Qwen ApprovalMode 枚举读取权限请求，不接受 bypass 类模式。"""
+    if not isinstance(value, str) or value not in _QWEN_APPROVAL_MODES:
+        raise AgentCatalogError(f"{field} is unsupported")
+    return value
+
+
+def _qwen_permission_mode(value: object, field: str) -> str:
+    """按 Qwen permissionMode 源枚举映射 canonical 权限请求并拒绝 bypass。"""
+    if not isinstance(value, str) or value not in _QWEN_PERMISSION_MODE_MAP:
+        raise AgentCatalogError(f"{field} is unsupported")
+    return _QWEN_PERMISSION_MODE_MAP[value]
+
+
+def _parse_qwen_model(value: object, catalog: ModelCatalog) -> str:
+    """解析 Qwen model selector；无法映射的模型不猜测父配置。"""
+    if value is None or value == "inherit":
+        return "inherit"
+    if not isinstance(value, str) or not value:
+        raise AgentCatalogError("qwen.agent.model must be a non-empty string")
+    if value in catalog.profiles:
+        return value
+    if value in {"sonnet", "opus", "haiku", "flash", "pro"}:
+        return "inherit"
+    catalog.require_profile(value)
+    return value
+
+
+def _parse_qwen_run_config(value: object) -> int | None:
+    """读取 Qwen runConfig 中 Harness 能证明的 max-turns 子集。"""
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise AgentCatalogError("qwen.agent.runConfig must be an object")
+    _reject_unknown(value, {"max_turns", "maxTurns"}, "qwen.agent.runConfig")
+    if "max_turns" in value and "maxTurns" in value:
+        raise AgentCatalogError("qwen.agent.runConfig contains duplicate max turns")
+    return _positive_int(
+        value.get("max_turns", value.get("maxTurns")),
+        "qwen.agent.runConfig.max_turns",
+    )
+
+
+def _map_qwen_tools(value: object, field: str, *, allow_string: bool) -> set[str]:
+    """把 Qwen 工具名映射到 Harness canonical 名称，未知工具 fail closed。"""
+    if allow_string and isinstance(value, str):
+        values = [value]
+    elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+        values = list(value)
+    else:
+        expected = "string or string array" if allow_string else "string array"
+        raise AgentCatalogError(f"{field} must be a {expected}")
+    mapped: set[str] = set()
+    for item in values:
+        name = item.strip()
+        if not name or name not in _QWEN_TOOL_MAP:
+            raise AgentCatalogError(f"{field} contains an unsupported tool")
+        mapped.add(_QWEN_TOOL_MAP[name])
+    return mapped
 
 
 def _parse_claude_agent(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,6 +14,10 @@ from harness_agent.plugins.model import (
     InstalledPlugin,
     PluginError,
     catalog_snapshot_id,
+)
+from harness_agent.plugins.resources import (
+    PluginResourceSnapshot,
+    build_plugin_resource_snapshot,
 )
 from harness_agent.plugins.store import PluginRegistryState, PluginStore
 
@@ -102,6 +107,10 @@ class PluginManager:
                 trusted_capability_fingerprint=None,
                 installed_at_ms=int(time.time() * 1000),
             )
+            resource_snapshot = build_plugin_resource_snapshot(
+                installed,
+                store=self.store,
+            )
 
             def _replace(current: PluginRegistryState) -> tuple[InstalledPlugin, ...]:
                 return (
@@ -113,6 +122,7 @@ class PluginManager:
             return {
                 "revision": state.revision,
                 "plugin": installed.to_dict(),
+                "resource_snapshot": resource_snapshot.to_dict(),
                 "effective_on": "next_host_after_enable",
             }
 
@@ -126,13 +136,77 @@ class PluginManager:
             "revision": state.revision,
             "plugins": [plugin.to_dict() for plugin in plugins],
             "catalog": self._catalog_from_state(state).to_dict(),
+            "resource_snapshots": [
+                snapshot.to_dict()
+                for snapshot in self.resource_snapshots(include_disabled=include_disabled)
+            ],
+            "static_preview": self.static_preview(include_disabled=include_disabled),
         }
 
     def inspect(self, plugin_id: str) -> dict[str, object]:
         """查看单个 Plugin 的兼容性与 trust 状态。"""
         state = self.store.read_registry()
         plugin = _find_plugin(state, plugin_id)
-        return {"revision": state.revision, "plugin": plugin.to_dict()}
+        return {
+            "revision": state.revision,
+            "plugin": plugin.to_dict(),
+            "resource_snapshot": self.resource_snapshot(plugin_id).to_dict(),
+        }
+
+    def resource_snapshot(self, plugin_id: str) -> PluginResourceSnapshot:
+        """读取已安装 Plugin 的静态资源快照，不要求启用且不进入运行时。"""
+        plugin = _find_plugin(self.store.read_registry(), plugin_id)
+        return build_plugin_resource_snapshot(plugin, store=self.store)
+
+    def resource_snapshots(
+        self,
+        *,
+        include_disabled: bool = True,
+    ) -> tuple[PluginResourceSnapshot, ...]:
+        """按 registry 顺序返回已安装 Plugin 的脱敏资源快照。"""
+        state = self.store.read_registry()
+        return tuple(
+            self.resource_snapshot(plugin.plugin_id)
+            for plugin in state.plugins
+            if include_disabled or plugin.enabled
+        )
+
+    def static_preview(
+        self,
+        *,
+        include_disabled: bool = True,
+    ) -> dict[str, list[dict[str, object]]]:
+        """为尚未接入运行时的 Qwen 组件提供 disabled/static/non-runnable 预览。"""
+        preview: dict[str, list[dict[str, object]]] = {
+            "commands": [],
+            "skills": [],
+            "agents": [],
+            "mcp": [],
+        }
+        state = self.store.read_registry()
+        for plugin in state.plugins:
+            if not include_disabled and not plugin.enabled:
+                continue
+            if plugin.format != "qwen-code":
+                continue
+            snapshot = self.resource_snapshot(plugin.plugin_id)
+            snapshot_preview = snapshot.static_preview()
+            trusted_enabled = (
+                plugin.enabled
+                and plugin.trusted_capability_fingerprint == plugin.capability_fingerprint
+            )
+            effective_kinds = (
+                {component.kind for component in plugin.components if component.effective}
+                if trusted_enabled
+                else set()
+            )
+            for kind in preview:
+                if kind in effective_kinds:
+                    continue
+                preview[kind].extend(snapshot_preview[kind])
+        for items in preview.values():
+            items.sort(key=lambda item: str(item["id"]))
+        return preview
 
     def set_enabled(
         self,
@@ -318,7 +392,11 @@ class PluginManager:
                 if agent_files:
                     sources.append(
                         PluginAgentSource(
-                            plugin_id=plugin.name,
+                            plugin_id=(
+                                _agent_source_id(plugin)
+                                if plugin.format == "qwen-code"
+                                else plugin.name
+                            ),
                             root=root,
                             format=plugin.format,
                             agent_files=tuple(sorted(set(agent_files))),
@@ -333,6 +411,51 @@ class PluginManager:
             sources=tuple(sources),
             diagnostics=tuple(diagnostics),
         )
+
+    def context_blocks_by_source(
+        self,
+        catalog: ExtensionCatalogSnapshot | None = None,
+    ) -> dict[str, tuple["ContextBlock", ...]]:
+        """从 enabled+trusted Qwen 资源快照读取 canonical 稳定参考块。"""
+        from harness_agent.threads.context_lifecycle import (
+            ContextAuthority,
+            ContextBlock,
+            ContextStability,
+        )
+
+        result: dict[str, tuple[ContextBlock, ...]] = {}
+        for plugin in (catalog or self.catalog()).plugins:
+            if plugin.format != "qwen-code":
+                continue
+            self.store.verify_installed(plugin)
+            snapshot = build_plugin_resource_snapshot(plugin, store=self.store)
+            source = f"plugin:{_agent_source_id(plugin)}"
+            blocks: list[ContextBlock] = []
+            for index, asset in enumerate(
+                asset for asset in snapshot.resources if asset.kind == "contexts"
+            ):
+                blocks.append(
+                    ContextBlock(
+                        key=f"plugin.context.{_agent_source_id(plugin)}.{index:04d}",
+                        authority=ContextAuthority.REFERENCE,
+                        stability=ContextStability.STABLE,
+                        content=(
+                            f"来源: {asset.virtual_path}\n"
+                            + snapshot.read_text(asset.virtual_path)
+                        ),
+                    )
+                )
+            if blocks:
+                result[source] = tuple(blocks)
+        return result
+
+    def context_blocks(
+        self,
+        catalog: ExtensionCatalogSnapshot | None = None,
+    ) -> tuple["ContextBlock", ...]:
+        """返回当前 trusted Plugin 的稳定参考块，供主 Agent 快照使用。"""
+        by_source = self.context_blocks_by_source(catalog)
+        return tuple(block for blocks in by_source.values() for block in blocks)
 
     def team_definitions(
         self,
@@ -374,7 +497,7 @@ class PluginManager:
         *,
         workspace: Path,
     ) -> "PluginRuntimeCatalog":
-        """从同一启动快照构造 Claude Hook/LSP/Monitor 运行目录。"""
+        """从同一启动快照构造 Claude/Qwen Hook 与 LSP/Monitor 运行目录。"""
         from harness_agent.plugins.runtime import load_plugin_runtime_catalog
 
         return load_plugin_runtime_catalog(
@@ -418,3 +541,12 @@ def _find_plugin(state: PluginRegistryState, plugin_id: str) -> InstalledPlugin:
         if plugin.plugin_id == plugin_id:
             return plugin
     raise PluginError("PLUGIN_NOT_FOUND", f'Plugin "{plugin_id}" 不存在')
+
+
+def _agent_source_id(plugin: InstalledPlugin) -> str:
+    """将可含大写、句点或斜杠的 Plugin 身份收敛为 catalog 安全 ID。"""
+    raw = f"{plugin.source_id}-{plugin.name}-{plugin.package_digest[:12]}".lower()
+    normalized = re.sub(r"[^a-z0-9]+", "-", raw).strip("-")
+    if not normalized or not normalized[0].isalpha():
+        normalized = f"plugin-{normalized}"
+    return normalized[:64].rstrip("-")

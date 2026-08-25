@@ -18,9 +18,13 @@ from harness_agent.plugins.model import (
     merge_component_reports,
 )
 from harness_agent.plugins.portable import is_portable_plugin, load_portable_plugin
+from harness_agent.plugins.qwen import (
+    load_qwen_plugin,
+    qwen_manifest_paths,
+)
 
 
-RequestedPluginFormat = Literal["auto", "agent-plugins-1.0", "claude-code"]
+RequestedPluginFormat = Literal["auto", "agent-plugins-1.0", "claude-code", "qwen-code"]
 
 
 def load_plugin_descriptor(
@@ -31,8 +35,33 @@ def load_plugin_descriptor(
     requested_format: RequestedPluginFormat = "auto",
 ) -> PluginDescriptor:
     """选择唯一 Adapter；双 manifest 包以 portable 为 core、Claude 为补充。"""
+    qwen_manifests = qwen_manifest_paths(root)
+    qwen = bool(qwen_manifests)
     portable = is_portable_plugin(root)
     claude = has_explicit_claude_manifest(root)
+    portable_manifest = (root / "plugin.json").exists() or (root / "plugin.json").is_symlink()
+    if len(qwen_manifests) > 1:
+        raise PluginError(
+            "PLUGIN_FORMAT_CONFLICT",
+            "qwen-extension.json 与 devagent-extension.json 不能同时存在",
+        )
+    if qwen and (portable_manifest or claude):
+        raise PluginError(
+            "PLUGIN_FORMAT_CONFLICT",
+            "Qwen/DevAgent 清单不能与 portable 或 Claude manifest 共存",
+        )
+    if requested_format == "qwen-code":
+        if not qwen:
+            raise PluginError(
+                "PLUGIN_FORMAT_MISMATCH",
+                "显式 qwen-code 要求唯一的 Qwen/DevAgent Extension 清单",
+            )
+        return load_qwen_plugin(root, package_digest=package_digest)
+    if qwen and requested_format != "auto":
+        raise PluginError(
+            "PLUGIN_FORMAT_MISMATCH",
+            f"显式 {requested_format} 与 Qwen/DevAgent Extension 清单不匹配",
+        )
     if requested_format == "agent-plugins-1.0":
         if not portable:
             raise PluginError("PLUGIN_FORMAT_MISMATCH", "来源不是 Agent Plugins 1.0 包")
@@ -43,6 +72,8 @@ def load_plugin_descriptor(
             package_digest=package_digest,
             name_hint=name_hint,
         )
+    if qwen:
+        return load_qwen_plugin(root, package_digest=package_digest)
     if portable and claude:
         base = load_portable_plugin(root, package_digest=package_digest)
         supplement = load_claude_plugin(
