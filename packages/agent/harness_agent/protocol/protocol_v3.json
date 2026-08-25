@@ -1000,7 +1000,11 @@
     },
     "usage": {
       "type": "object", "required": ["input_tokens", "output_tokens"],
-      "properties": { "input_tokens": { "type": "integer", "minimum": 0 }, "output_tokens": { "type": "integer", "minimum": 0 } },
+      "properties": {
+        "input_tokens": { "type": "integer", "minimum": 0 },
+        "output_tokens": { "type": "integer", "minimum": 0 },
+        "cached_tokens": { "type": "integer", "minimum": 0 }
+      },
       "additionalProperties": false
     },
     "runCompletedPayload": {

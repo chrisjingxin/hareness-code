@@ -2,7 +2,7 @@
 
 import { expect, test } from "bun:test"
 import { formatWorkspacePath } from "../../../src/tui/presentation/sidebar/cwd-widget"
-import { formatTokenCount, renderProgressBar, calculateTps } from "../../../src/tui/presentation/sidebar/context-widget"
+import { formatTokenCount, renderProgressBar, calculateTps, calculateCacheHitRate } from "../../../src/tui/presentation/sidebar/context-widget"
 
 test("formatWorkspacePath: 缩写 $HOME 路径并提取工作区名称", () => {
   const home = process.env.HOME || "/Users/testuser"
@@ -31,6 +31,11 @@ test("Context 统计辅助函数: Token 格式化、进度条与 TPS 计算", ()
   expect(calculateTps(100, 2000)).toBe("50.0")
   expect(calculateTps(0, 2000)).toBe(null)
   expect(calculateTps(100, 0)).toBe(null)
+
+  expect(calculateCacheHitRate(800, 1000)).toBe(80.0)
+  expect(calculateCacheHitRate(0, 1000)).toBe(0)
+  expect(calculateCacheHitRate(undefined, 1000)).toBe(null)
+  expect(calculateCacheHitRate(800, 0)).toBe(null)
 })
 
 test("Sidebar 组件集成渲染状态页小部件", async () => {

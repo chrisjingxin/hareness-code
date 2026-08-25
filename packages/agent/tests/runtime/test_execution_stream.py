@@ -318,3 +318,30 @@ def test_child_namespace_interrupt_is_ignored_at_root() -> None:
     )
     assert request is None
     assert auto is None
+
+
+def test_update_usage_with_openai_and_langchain_cached_tokens() -> None:
+    """update_usage 正确提取 OpenAI prompt_tokens_details 与 LangChain usage_metadata 中的 cached_tokens。"""
+    session = StreamSession(run_id="run-usage")
+
+    # 1. 模拟 LangChain input_token_details.cache_read
+    chunk_lc = AIMessageChunk(content="hi")
+    setattr(chunk_lc, "usage_metadata", {
+        "input_tokens": 1000,
+        "output_tokens": 100,
+        "input_token_details": {"cache_read": 800},
+    })
+    translate_stream_event(("messages", (chunk_lc, {})), session, content_visibility="passthrough")
+    assert session.usage == {"input_tokens": 1000, "output_tokens": 100, "cached_tokens": 800}
+
+    # 2. 模拟 OpenAI response_metadata.token_usage.prompt_tokens_details.cached_tokens
+    chunk_oai = AIMessageChunk(content="there")
+    setattr(chunk_oai, "response_metadata", {
+        "token_usage": {
+            "prompt_tokens": 1200,
+            "completion_tokens": 150,
+            "prompt_tokens_details": {"cached_tokens": 950},
+        }
+    })
+    translate_stream_event(("messages", (chunk_oai, {})), session, content_visibility="passthrough")
+    assert session.usage == {"input_tokens": 1200, "output_tokens": 150, "cached_tokens": 950}

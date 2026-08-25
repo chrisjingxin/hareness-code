@@ -37,6 +37,12 @@ export function calculateTps(outputTokens?: number, durationMs?: number): string
   return (outputTokens / seconds).toFixed(1)
 }
 
+/** 计算 Prefix Cache 命中率百分比（0-100）。若无 inputTokens 或 cachedTokens 返回 null。 */
+export function calculateCacheHitRate(cachedTokens?: number, inputTokens?: number): number | null {
+  if (cachedTokens === undefined || cachedTokens === null || !inputTokens || inputTokens <= 0) return null
+  return Math.min(100, Math.max(0, (cachedTokens / inputTokens) * 100))
+}
+
 /** 粗略估算历史时间线消息与工具输出占用的 Token 数量。 */
 export function estimateTimelineTokens(timeline: readonly TimelineItem[]): number {
   let chars = 0
@@ -77,6 +83,10 @@ export function ContextWidget(props: ContextWidgetProps) {
     : 0
   const emptyCount = Math.max(0, barWidth - filledCount)
 
+  const cachedTokens = lastRun?.usage?.cachedTokens
+  const cacheHitRate = calculateCacheHitRate(cachedTokens, inputTokens)
+  const showCacheHitRate = props.interactive.runtime?.showCacheHitRate === true
+
   return (
     <box flexDirection="column" paddingTop={1} paddingBottom={1} border={["bottom"]} borderColor={tuiTheme.border}>
       <text fg={tuiTheme.primary}>
@@ -86,23 +96,39 @@ export function ContextWidget(props: ContextWidgetProps) {
         <text fg={tuiTheme.text}>{modelName || "未绑定模型"}</text>
         {tps ? <text fg={tuiTheme.subtle}>{tps} tok/s</text> : null}
       </box>
-      <box flexDirection="row" justifyContent="space-between" alignItems="center">
-        <text fg={tuiTheme.text}>
-          {formatTokenCount(totalTokens)} / {formatTokenCount(contextCap)}
-        </text>
-        <text fg={usagePercentage > 85 ? tuiTheme.warning : tuiTheme.muted}>
-          {usagePercentage.toFixed(1)}%
-        </text>
-        <text>
-          <span fg={usagePercentage > 85 ? tuiTheme.warning : tuiTheme.primary}>
-            {"▮".repeat(filledCount)}
-          </span>
-          <span fg={tuiTheme.muted}>
-            {"─".repeat(emptyCount)}
-          </span>
-        </text>
-        {isEstimated ? <text fg={tuiTheme.subtle}>估算</text> : null}
+      <box flexDirection="row" justifyContent="space-between" alignItems="center" paddingTop={0}>
+        <box flexDirection="row" gap={1} alignItems="center">
+          <text fg={tuiTheme.subtle}>窗口占用</text>
+          <text fg={tuiTheme.text}>
+            {formatTokenCount(totalTokens)} / {formatTokenCount(contextCap)}
+          </text>
+          {isEstimated ? <text fg={tuiTheme.subtle}>(估算)</text> : null}
+        </box>
+        <box flexDirection="row" alignItems="center" gap={1}>
+          <text fg={usagePercentage > 85 ? tuiTheme.warning : tuiTheme.muted}>
+            {usagePercentage.toFixed(1)}%
+          </text>
+          <text>
+            <span fg={usagePercentage > 85 ? tuiTheme.warning : tuiTheme.primary}>
+              {"▮".repeat(filledCount)}
+            </span>
+            <span fg={tuiTheme.muted}>
+              {"─".repeat(emptyCount)}
+            </span>
+          </text>
+        </box>
       </box>
+      {showCacheHitRate ? (
+        <box flexDirection="row" justifyContent="space-between" alignItems="center" paddingTop={0}>
+          <text fg={tuiTheme.subtle}>缓存命中</text>
+          <text fg={cacheHitRate !== null && cacheHitRate > 0 ? tuiTheme.primary : tuiTheme.muted}>
+            {cacheHitRate !== null ? `${cacheHitRate.toFixed(1)}%` : "-"}
+            {cachedTokens !== undefined && cachedTokens > 0 ? (
+              <span fg={tuiTheme.subtle}> ({formatTokenCount(cachedTokens)})</span>
+            ) : ""}
+          </text>
+        </box>
+      ) : null}
     </box>
   )
 }

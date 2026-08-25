@@ -44,6 +44,8 @@ export type InteractiveRuntime = {
   /** Host 启动快照中的 Plugin Command；只含展示信息和 requested Skill ID。 */
   agentCommands?: readonly AgentCommand[]
   mcpSummary?: string
+  /** 是否在侧栏展示 Prefix Cache 命中率（由 config.toml [ui] 驱动）。 */
+  showCacheHitRate?: boolean
 }
 
 /** 将握手结果收敛为界面可安全显示的运行摘要，避免把配置原样暴露给组件。 */
@@ -56,6 +58,7 @@ export function createInteractiveRuntime(
   const model = config && isRecord(config.model) ? config.model : undefined
   const security = config && isRecord(config.security) ? config.security : undefined
   const mcpServers = config && Array.isArray(config.mcp_servers) ? config.mcp_servers : undefined
+  const ui = config && isRecord(config.ui) ? config.ui : undefined
   return {
     workspace: stringValue(config?.workspace, cwd),
     gitWorkspace: options.gitWorkspace,
@@ -70,6 +73,7 @@ export function createInteractiveRuntime(
     capabilities: [...new Set(result.capabilities.enabled)],
     agentCommands: [...result.agent_commands],
     mcpSummary: mcpServers && mcpServers.length > 0 ? `${mcpServers.length} 个服务器` : undefined,
+    showCacheHitRate: ui?.show_cache_hit_rate === true,
   }
 }
 

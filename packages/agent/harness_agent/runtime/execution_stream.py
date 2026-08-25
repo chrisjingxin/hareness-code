@@ -510,7 +510,7 @@ def translate_stream_event(
     chunk = data[0]
     if type(chunk).__name__ in {"AIMessage", "AIMessageChunk"}:
         ensure_model_round_for_assistant(session)
-    update_usage(session, getattr(chunk, "usage_metadata", None))
+    update_usage(session, getattr(chunk, "usage_metadata", None), chunk=chunk)
     events: list[ExecutionSignal] = []
     content = message_text(chunk)
     if content and type(chunk).__name__ != "ToolMessage":
@@ -756,16 +756,58 @@ def finish_model_round(session: StreamSession) -> None:
     session.last_captured_message = None
 
 
-def update_usage(session: StreamSession, usage: Any) -> None:
-    """合并流式 usage，避免分片计数回退。"""
+def _extract_cached_tokens(usage: Mapping[str, Any], chunk: Any = None) -> int:
+    """提取 cached_tokens，兼容 LangChain usage_metadata、OpenAI prompt_tokens_details 及 response_metadata。"""
+    if "cached_tokens" in usage:
+        val = usage.get("cached_tokens")
+        if val is not None:
+            return int(val or 0)
+    input_details = usage.get("input_token_details")
+    if isinstance(input_details, Mapping):
+        cache_read = input_details.get("cache_read") or input_details.get("cached_tokens")
+        if cache_read is not None:
+            return int(cache_read or 0)
+    prompt_details = usage.get("prompt_tokens_details")
+    if isinstance(prompt_details, Mapping):
+        cached = prompt_details.get("cached_tokens")
+        if cached is not None:
+            return int(cached or 0)
+    if chunk is not None:
+        response_meta = getattr(chunk, "response_metadata", None)
+        if isinstance(response_meta, Mapping):
+            token_usage = response_meta.get("token_usage") or response_meta.get("usage")
+            if isinstance(token_usage, Mapping):
+                p_details = token_usage.get("prompt_tokens_details")
+                if isinstance(p_details, Mapping) and "cached_tokens" in p_details:
+                    return int(p_details.get("cached_tokens", 0) or 0)
+                if "cached_tokens" in token_usage:
+                    return int(token_usage.get("cached_tokens", 0) or 0)
+    return 0
+
+
+def update_usage(session: StreamSession, usage: Any, chunk: Any = None) -> None:
+    """合并流式 usage，避免分片计数回退，并提取 prefix cache 统计。"""
+    if not isinstance(usage, Mapping) and chunk is not None:
+        response_meta = getattr(chunk, "response_metadata", None)
+        if isinstance(response_meta, Mapping):
+            token_usage = response_meta.get("token_usage") or response_meta.get("usage")
+            if isinstance(token_usage, Mapping):
+                usage = token_usage
     if not isinstance(usage, Mapping):
         return
     session.usage["input_tokens"] = max(
-        session.usage["input_tokens"], int(usage.get("input_tokens", 0) or 0)
+        session.usage.get("input_tokens", 0),
+        int(usage.get("input_tokens", 0) or usage.get("prompt_tokens", 0) or 0),
     )
     session.usage["output_tokens"] = max(
-        session.usage["output_tokens"], int(usage.get("output_tokens", 0) or 0)
+        session.usage.get("output_tokens", 0),
+        int(usage.get("output_tokens", 0) or usage.get("completion_tokens", 0) or 0),
     )
+    cached_tokens = _extract_cached_tokens(usage, chunk)
+    if cached_tokens > 0:
+        session.usage["cached_tokens"] = max(
+            session.usage.get("cached_tokens", 0), cached_tokens
+        )
 
 
 def truncate_text(value: str) -> tuple[str, bool, int]:

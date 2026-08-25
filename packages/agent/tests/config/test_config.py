@@ -354,11 +354,12 @@ def test_manifest_rejects_literal_authentication_headers(tmp_path: Path):
 
 def test_manifest_exposes_all_planned_configuration_sections():
     """模板中的所有计划中区段都必须由唯一 Manifest 明确拒绝。"""
-    for name in ("ui", "skills", "agents", "telemetry", "updates", "hooks", "extensions", "plugins", "policy"):
+    for name in ("skills", "agents", "telemetry", "updates", "hooks", "extensions", "plugins", "policy"):
         section = ConfigManifest.SECTIONS[name]
         assert section.status == "planned"
-    # mcp 已激活为 implemented
+    # mcp 与 ui 已激活为 implemented
     assert ConfigManifest.SECTIONS["mcp"].status == "implemented"
+    assert ConfigManifest.SECTIONS["ui"].status == "implemented"
 
 
 def test_multiple_profiles_build_catalog_with_roles_and_safe_picker_summary(tmp_path: Path):
@@ -462,6 +463,7 @@ def test_execution_defaults_to_local_and_redacts_security_summary(tmp_path: Path
         "mcp": "default",
         "tools": "default",
         "compose": "default",
+        "ui": "default",
     }
 
 
@@ -610,6 +612,57 @@ def test_openai_compatible_adapter_is_constructed_without_network(monkeypatch: p
     assert model.model_name == "enterprise-model"
     assert model.openai_api_key is not None
     assert model.openai_api_key.get_secret_value() == "toml-key"
+
+
+def test_ui_settings_parsed_and_redacted(tmp_path: Path):
+    """[ui] 区段支持 show_cache_hit_rate 配置并在 redacted 中返回。"""
+    path = tmp_path / "ui.toml"
+    _write_config(path)
+    path.write_text(
+        path.read_text(encoding="utf-8")
+        + """
+
+[ui]
+show_cache_hit_rate = true
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(workspace=tmp_path, home=tmp_path / "home", config_path=path)
+    assert config.ui.show_cache_hit_rate is True
+    assert config.redacted()["ui"] == {"show_cache_hit_rate": True}
+    assert config.redacted()["sources"]["ui"] == "explicit"
+
+
+def test_ui_settings_rejects_invalid_type_and_unknown_fields(tmp_path: Path):
+    """[ui] 拒绝非布尔值与未知字段。"""
+    path = tmp_path / "ui-invalid.toml"
+    _write_config(path)
+    path.write_text(
+        path.read_text(encoding="utf-8")
+        + """
+
+[ui]
+show_cache_hit_rate = "yes"
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="ui.show_cache_hit_rate must be a boolean"):
+        load_config(workspace=tmp_path, home=tmp_path / "home", config_path=path)
+
+    path_unknown = tmp_path / "ui-unknown.toml"
+    _write_config(path_unknown)
+    path_unknown.write_text(
+        path_unknown.read_text(encoding="utf-8")
+        + """
+
+[ui]
+unknown_field = 123
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match=r"\[ui\] contains unsupported fields: unknown_field"):
+        load_config(workspace=tmp_path, home=tmp_path / "home", config_path=path_unknown)
 
 
 def test_reasoning_profile_is_parsed_and_forwarded_as_chat_completions_configuration(

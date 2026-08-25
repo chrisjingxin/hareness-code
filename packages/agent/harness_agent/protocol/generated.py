@@ -7,7 +7,7 @@ from harness_agent.protocol.runtime import event_model, schema_model
 
 PROTOCOL_MAJOR = 3
 PROTOCOL_MINOR = 6
-PROTOCOL_SCHEMA_SHA256 = "472cb373a88cfdb24bd553e51c808ff9b605214222903436c307abf6e9f008ae"
+PROTOCOL_SCHEMA_SHA256 = "b969213e467db6c28de58321b4f24c09d8281eac336d8c98a11fb10ef2170601"
 MAX_FRAME_BYTES = 8388608
 MAX_TOOL_PAYLOAD_BYTES = 1048576
 CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","threads.side_question","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","plugins.list","plugins.inspect","plugins.validate","plugins.install","plugins.set_enabled","plugins.remove","agents.list","agents.inspect","teams.list","teams.inspect","teams.generate","teams.run","teams.cancel","mcp.status","mcp.add","mcp.remove","host.attachment.create","host.attachment.revoke","host.control.acquire","host.control.release","host.control.status","compose.inspect","compose.abandon"]
@@ -530,6 +530,7 @@ class InteractionResolvedPayloadWire(TypedDict):
 class UsageWire(TypedDict):
     input_tokens: int
     output_tokens: int
+    cached_tokens: NotRequired[int]
 
 class RunCompletedPayloadWire(TypedDict):
     usage: UsageWire

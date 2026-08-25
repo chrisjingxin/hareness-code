@@ -308,6 +308,17 @@ class ComposeSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class UiSettings:
+    """UI 与终端呈现配置。"""
+
+    show_cache_hit_rate: bool = False
+
+    def redacted(self) -> dict[str, object]:
+        """返回不含敏感信息的 UI 配置摘要。"""
+        return {"show_cache_hit_rate": self.show_cache_hit_rate}
+
+
+@dataclass(frozen=True, slots=True)
 class Za38Config:
     """最终生效的 Harness v1 配置、来源路径和运行时摘要。"""
 
@@ -322,6 +333,7 @@ class Za38Config:
     model_catalog: ModelCatalog | None = None
     tools: ToolSearchSettings = field(default_factory=ToolSearchSettings)
     compose: ComposeSettings = field(default_factory=ComposeSettings)
+    ui: UiSettings = field(default_factory=UiSettings)
 
     def require_model(self, profile_id: str | None = None) -> ModelSettings:
         """返回指定或默认模型；保留单 Profile 调用方的兼容入口。"""
@@ -363,6 +375,7 @@ class Za38Config:
             ],
             "tools": self.tools.redacted(),
             "compose": self.compose.redacted(),
+            "ui": self.ui.redacted(),
         }
 
 
@@ -402,6 +415,7 @@ def load_config(
         mcp_values,
         tools_values,
         compose_values,
+        ui_values,
         sources,
     ) = _merge_documents(documents)
     _apply_environment_overrides(models, approval_values, execution_values, environment, sources)
@@ -423,6 +437,7 @@ def load_config(
         model_catalog=model_catalog,
         tools=_parse_tools(tools_values),
         compose=_parse_compose(compose_values),
+        ui=_parse_ui(ui_values),
     )
 
 
@@ -521,6 +536,7 @@ def _merge_documents(
     mcp_values: dict[str, object] = {}
     tools_values: dict[str, object] = {}
     compose_values: dict[str, object] = {}
+    ui_values: dict[str, object] = {}
     sources = {
         "models": "default",
         "approval": "default",
@@ -529,6 +545,7 @@ def _merge_documents(
         "mcp": "default",
         "tools": "default",
         "compose": "default",
+        "ui": "default",
     }
     for _, source, document in documents:
         if "models" in document:
@@ -552,6 +569,9 @@ def _merge_documents(
         if "compose" in document:
             compose_values = _merge_flat_values(compose_values, document["compose"])
             sources["compose"] = source.value
+        if "ui" in document:
+            ui_values = _merge_flat_values(ui_values, document["ui"])
+            sources["ui"] = source.value
     return (
         models,
         approval_values,
@@ -560,6 +580,7 @@ def _merge_documents(
         mcp_values,
         tools_values,
         compose_values,
+        ui_values,
         sources,
     )
 
@@ -956,6 +977,17 @@ def _parse_compose(values: Mapping[str, object]) -> ComposeSettings:
     if not isinstance(docs_dir, str):
         raise ConfigError("compose.docs_dir must be a normalized workspace-relative path")
     return ComposeSettings(docs_dir=docs_dir)
+
+
+def _parse_ui(values: Mapping[str, object]) -> UiSettings:
+    """解析 ``[ui]`` 配置。"""
+    unknown = set(values) - {"show_cache_hit_rate"}
+    if unknown:
+        raise ConfigError(f"[ui] contains unsupported fields: {', '.join(sorted(unknown))}")
+    raw_show_cache = values.get("show_cache_hit_rate", False)
+    if not isinstance(raw_show_cache, bool):
+        raise ConfigError("ui.show_cache_hit_rate must be a boolean")
+    return UiSettings(show_cache_hit_rate=raw_show_cache)
 
 
 def _sandbox_backend(value: object) -> str:

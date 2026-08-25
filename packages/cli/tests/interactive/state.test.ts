@@ -377,6 +377,25 @@ test("Build 无 scope 快照形状保持兼容", () => {
   })
 })
 
+test("run.completed 正确解析并保留 usage.cached_tokens 到 lastRun", () => {
+  let state = startRun(createInitialState(), run, "执行任务")
+  state = applyAgentEvent(state, event("run.completed", 1, {
+    duration_ms: 1200,
+    finish_reason: "completed",
+    usage: {
+      input_tokens: 1500,
+      output_tokens: 200,
+      cached_tokens: 1200,
+    },
+    context: { action: "run", estimated_tokens: 1500, input_cap_tokens: 128000 },
+  }))
+  expect(state.lastRun?.usage).toEqual({
+    inputTokens: 1500,
+    outputTokens: 200,
+    cachedTokens: 1200,
+  })
+})
+
 function event(type: string, sequence: number, payload: Record<string, unknown>): EventEnvelope {
   return { event_id: `event-${sequence}`, type, thread_id: run.threadId, run_id: run.runId, sequence, timestamp_ms: 1, payload } as EventEnvelope
 }

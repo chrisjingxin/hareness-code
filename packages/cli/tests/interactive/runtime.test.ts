@@ -41,6 +41,7 @@ test("从脱敏初始化结果提取可展示的运行上下文", () => {
     capabilities: [],
     agentCommands: [],
     mcpSummary: undefined,
+    showCacheHitRate: false,
   })
   expect(workspaceLabel(runtime.workspace)).toBe("za38-cli")
   expect(executionStatusLabel(runtime)).toBe("远端沙箱 · corp")
@@ -118,4 +119,24 @@ test("/status 仅显示当前 Thread 的模型选择", () => {
   expect(summary).toContain("模型    pro · pro-model")
   expect(summary).not.toContain("当前 Thread")
   expect(summary).not.toContain("后续新 Thread")
+})
+
+test("从 config_summary.ui 正确提取 showCacheHitRate 配置", () => {
+  const runtimeWithUi = createInteractiveRuntime({
+    protocol: { major: 3, minor: 0 },
+    server: { name: "za38-agent", version: "0.1.0" },
+    connection: { id: "test", role: "owner", project: { id: "project", label: "za38-cli" } },
+    capabilities: { available: [], enabled: [], handles: [] },
+    agent_commands: [],
+    skills_snapshot: { id: "snapshot", count: 0 },
+    skill_diagnostics: [],
+    limits: { max_frame_bytes: 8388608, max_tool_payload_bytes: 1048576 },
+    config_summary: {
+      workspace: "/work/za38-cli",
+      ui: { show_cache_hit_rate: true },
+    },
+    startup_error: null,
+  }, "/fallback")
+
+  expect(runtimeWithUi.showCacheHitRate).toBeTrue()
 })

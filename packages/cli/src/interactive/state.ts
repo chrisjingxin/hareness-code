@@ -125,7 +125,7 @@ export type RunSummary = {
   runId: string
   outcome: "completed" | "cancelled" | "failed"
   durationMs?: number
-  usage?: { inputTokens: number; outputTokens: number }
+  usage?: { inputTokens: number; outputTokens: number; cachedTokens?: number }
   context?: { action: string; estimatedTokens?: number; inputCapTokens?: number }
   /** Compose Run 的终态快照：完整 projection，供 Timeline 结果摘要（失败/取消后仍可见）。 */
   composeSummary?: ComposeProjection
@@ -1255,12 +1255,13 @@ function objectRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : {}
 }
 
-function usageValue(value: unknown): { inputTokens: number; outputTokens: number } | undefined {
+function usageValue(value: unknown): { inputTokens: number; outputTokens: number; cachedTokens?: number } | undefined {
   const record = objectRecord(value)
   const inputTokens = numberValue(record.input_tokens)
   const outputTokens = numberValue(record.output_tokens)
+  const cachedTokens = numberValue(record.cached_tokens)
   if (inputTokens !== undefined && outputTokens !== undefined) {
-    return { inputTokens, outputTokens }
+    return { inputTokens, outputTokens, ...(cachedTokens !== undefined ? { cachedTokens } : {}) }
   }
   return undefined
 }
