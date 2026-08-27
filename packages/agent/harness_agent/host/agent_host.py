@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 from jsonschema.exceptions import ValidationError
 
 from harness_agent import __version__
+from harness_agent.diagnostic_log.runtime import DiagnosticLog
 from harness_agent.host.attachments import AttachmentManager
 from harness_agent.host.control_lease import (
     ActivityFacts,
@@ -40,7 +41,7 @@ from harness_agent.runtime.agent_engine import (
     AgentEnginePoolCapacityError,
     AgentEngineResourceBundle,
 )
-from harness_agent.config.config import ConfigError, Za38Config, load_config
+from harness_agent.config.config import ConfigError, DiagnosticsSettings, Za38Config, load_config
 from harness_agent.policy.approval_mode import ApprovalMode
 from harness_agent.policy.concurrency import AsyncRWLock
 from harness_agent.policy.permission_rules import PermissionRule
@@ -111,6 +112,7 @@ from harness_agent.protocol.generated import (
     ThreadsOpenParams,
     ThreadsSideQuestionParams,
 )
+from harness_agent.threads.thread_persistence import workspace_fingerprint
 from harness_agent.protocol.runtime import (
     validate_interaction_result,
     validate_operation_params,
@@ -276,6 +278,7 @@ class AgentHost:
         config_path: str | None = None,
         connection_id: str | None = None,
         connection_role: str = "owner",
+        diagnostic_log: DiagnosticLog | None = None,
     ) -> None:
         """初始化运行表、反向请求表、发送锁和方法分发表。
 
@@ -295,6 +298,7 @@ class AgentHost:
         self._agent_engine_snapshot_lock = asyncio.Lock()
         self._run_event_tasks: set[asyncio.Task[None]] = set()
         self._workspace = (workspace or Path.cwd()).resolve()
+        self._diagnostic_log = diagnostic_log
         # ponytail: Host 固定绑定一个 workspace，先用一把锁覆盖跨 Profile 图；
         # worktree/sandbox 有稳定资源身份或吞吐证明不足时再按资源拆分。
         self._tool_concurrency_lock = AsyncRWLock()
@@ -815,6 +819,7 @@ class AgentHost:
 
     async def _handle_initialize(self, params: dict[str, Any], _id: str) -> dict[str, Any]:
         """协商 v3 minor、请求能力和可处理 Interaction。"""
+        started_at = time.monotonic()
         connection = self._current_connection()
         protocol = params.get("protocol")
         if not isinstance(protocol, dict) or protocol.get("major") != PROTOCOL_MAJOR:
@@ -859,12 +864,12 @@ class AgentHost:
         connection.interaction_handles = handles
         connection.enabled_capabilities = enabled
         connection.initialized = True
-        project_id = "echo"
+        project_id = workspace_fingerprint(self._workspace)
         # 仅在客户端明确请求 thread 读取能力时打开用户级 SQLite；插件/Skill
         # 管理命令不应因本地历史库权限或迁移状态而无法启动。
         if CAPABILITY["THREADS_READ"] in enabled and self._thread_persistence_enabled():
             project_id = (await self._ensure_thread_persistence()).project_fingerprint
-        return {
+        result = {
             "protocol": {"major": PROTOCOL_MAJOR, "minor": negotiated_minor},
             "server": {"name": "za38-agent", "version": __version__},
             "connection": {
@@ -891,6 +896,17 @@ class AgentHost:
                 "max_frame_bytes": MAX_FRAME_BYTES,
                 "max_tool_payload_bytes": MAX_TOOL_PAYLOAD_BYTES,
             },
+            "diagnostics": (
+                self._config.diagnostics.redacted()
+                if self._config is not None
+                else DiagnosticsSettings(
+                    level=(
+                        os.environ["HARNESS_LOG_LEVEL"]
+                        if os.environ.get("HARNESS_LOG_LEVEL") in {"debug", "info", "warn", "error"}
+                        else "info"
+                    )
+                ).redacted()
+            ),
             "config_summary": self._config.redacted() if self._config else None,
             "startup_error": (
                 {"code": "CONFIGURATION_ERROR", "message": self._startup_error}
@@ -898,6 +914,16 @@ class AgentHost:
                 else None
             ),
         }
+        if self._diagnostic_log is not None:
+            self._diagnostic_log.info(
+                "ipc.initialize.completed",
+                {
+                    "side": "server",
+                    "duration_ms": max(0, round((time.monotonic() - started_at) * 1000)),
+                    "protocol_minor": negotiated_minor,
+                },
+            )
+        return result
 
     async def _connect_mcp_servers(self) -> None:
         """根据配置建立 MCP 服务器连接并构建初始 snapshot；失败不阻止启动。"""

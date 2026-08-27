@@ -82,6 +82,16 @@ CONFIG_FIELD_DEFINITIONS: tuple[ConfigFieldDefinition, ...] = (
     ConfigFieldDefinition("runtime_pool.idle_ttl_seconds", "runtime_pool", int, "restart"),
     ConfigFieldDefinition("runtime_pool.close_timeout_seconds", "runtime_pool", int, "restart"),
     ConfigFieldDefinition("runtime_pool.pin_default_profile", "runtime_pool", bool, "restart"),
+    ConfigFieldDefinition(
+        "diagnostics.level",
+        "diagnostics",
+        str,
+        "restart",
+        frozenset({"debug", "info", "warn", "error"}),
+    ),
+    ConfigFieldDefinition("diagnostics.retention_days", "diagnostics", int, "restart"),
+    ConfigFieldDefinition("diagnostics.max_total_mib", "diagnostics", int, "restart"),
+    ConfigFieldDefinition("diagnostics.max_file_mib", "diagnostics", int, "restart"),
 )
 
 _FIELD_BY_PATH = {field.path: field for field in CONFIG_FIELD_DEFINITIONS}
@@ -655,6 +665,14 @@ class ConfigChangeService:
             return config.agent_engine_pool.close_timeout_seconds
         if path == "runtime_pool.pin_default_profile":
             return config.agent_engine_pool.pin_default_profile
+        if path == "diagnostics.level":
+            return config.diagnostics.level
+        if path == "diagnostics.retention_days":
+            return config.diagnostics.retention_days
+        if path == "diagnostics.max_total_mib":
+            return config.diagnostics.max_total_mib
+        if path == "diagnostics.max_file_mib":
+            return config.diagnostics.max_file_mib
         raise AssertionError(f"未知的配置字段：{path}")  # pragma: no cover - 静态白名单不变量。
 
     @contextmanager

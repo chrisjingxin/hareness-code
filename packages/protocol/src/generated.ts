@@ -1,8 +1,8 @@
 /** 此文件由 packages/protocol/schema/v3.json 生成，请勿手工修改。 */
 
 export const PROTOCOL_MAJOR = 3 as const
-export const PROTOCOL_MINOR = 6 as const
-export const PROTOCOL_SCHEMA_SHA256 = "b969213e467db6c28de58321b4f24c09d8281eac336d8c98a11fb10ef2170601" as const
+export const PROTOCOL_MINOR = 7 as const
+export const PROTOCOL_SCHEMA_SHA256 = "b642db63271028ca147384ebe9e1c3be2c67eee82a9f1aa51040d15b4f67d6f4" as const
 export const MAX_FRAME_BYTES = 8388608 as const
 export const MAX_TOOL_PAYLOAD_BYTES = 1048576 as const
 export const CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","threads.side_question","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","plugins.list","plugins.inspect","plugins.validate","plugins.install","plugins.set_enabled","plugins.remove","agents.list","agents.inspect","teams.list","teams.inspect","teams.generate","teams.run","teams.cancel","mcp.status","mcp.add","mcp.remove","host.attachment.create","host.attachment.revoke","host.control.acquire","host.control.release","host.control.status","compose.inspect","compose.abandon"] as const
@@ -86,7 +86,8 @@ export type ProtocolRange = { "major": 3; "min_minor": number; "max_minor": numb
 export type ClientInfo = { "name": string; "version": string; "kind": string }
 export type ClientCapabilities = { "requests": Array<string>; "handles": Array<"approval" | "question" | "directory_trust"> }
 export type InitializeParams = { "protocol": ProtocolRange; "client": ClientInfo; "capabilities": ClientCapabilities }
-export type InitializeResult = { "protocol": { "major": 3; "minor": number }; "server": { "name": string; "version": string }; "connection": { "id": string; "role": "owner" | "attached"; "project": { "id": string; "label": string } }; "capabilities": { "available": Array<string>; "enabled": Array<string>; "handles": Array<"approval" | "question" | "directory_trust"> }; "agent_commands": Array<AgentCommand>; "skills_snapshot": { "id": string; "count": number }; "skill_diagnostics": Array<string>; "limits": { "max_frame_bytes": number; "max_tool_payload_bytes": number }; "config_summary": (JsonObject) | (null); "startup_error": ({ "code": string; "message": string }) | (null) }
+export type InitializeResult = { "protocol": { "major": 3; "minor": number }; "server": { "name": string; "version": string }; "connection": { "id": string; "role": "owner" | "attached"; "project": { "id": string; "label": string } }; "capabilities": { "available": Array<string>; "enabled": Array<string>; "handles": Array<"approval" | "question" | "directory_trust"> }; "agent_commands": Array<AgentCommand>; "skills_snapshot": { "id": string; "count": number }; "skill_diagnostics": Array<string>; "limits": { "max_frame_bytes": number; "max_tool_payload_bytes": number }; "diagnostics": EffectiveDiagnostics; "config_summary": (JsonObject) | (null); "startup_error": ({ "code": string; "message": string }) | (null) }
+export type EffectiveDiagnostics = { "level": "debug" | "info" | "warn" | "error"; "retention_days": number; "max_total_mib": number; "max_file_mib": number }
 export type RequestedSkill = { "id": string; "args"?: string }
 export type ThreadModelSelection = { "primary_profile": string }
 export type ApprovalMode = "plan" | "default" | "auto-edit" | "auto" | "yolo"

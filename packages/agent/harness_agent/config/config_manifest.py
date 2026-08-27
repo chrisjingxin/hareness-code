@@ -57,6 +57,7 @@ class ConfigManifest:
         "runtime_pool": ConfigSection("runtime_pool", "implemented", ACTIVE_TOML_SOURCES),
         "compose": ConfigSection("compose", "implemented", ACTIVE_TOML_SOURCES),
         "ui": ConfigSection("ui", "implemented", ACTIVE_TOML_SOURCES),
+        "diagnostics": ConfigSection("diagnostics", "implemented", ACTIVE_TOML_SOURCES),
         "skills": ConfigSection("skills", "planned", frozenset()),
         "agents": ConfigSection("agents", "planned", frozenset()),
         "mcp": ConfigSection("mcp", "implemented", ACTIVE_TOML_SOURCES),

@@ -319,6 +319,25 @@ class UiSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class DiagnosticsSettings:
+    """本地诊断日志的有效配置；远程 telemetry 不属于此对象。"""
+
+    level: Literal["debug", "info", "warn", "error"] = "info"
+    retention_days: int = 14
+    max_total_mib: int = 200
+    max_file_mib: int = 16
+
+    def redacted(self) -> dict[str, object]:
+        """返回可安全经 initialize 下发给 CLI 的完整有效值。"""
+        return {
+            "level": self.level,
+            "retention_days": self.retention_days,
+            "max_total_mib": self.max_total_mib,
+            "max_file_mib": self.max_file_mib,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class Za38Config:
     """最终生效的 Harness v1 配置、来源路径和运行时摘要。"""
 
@@ -334,6 +353,7 @@ class Za38Config:
     tools: ToolSearchSettings = field(default_factory=ToolSearchSettings)
     compose: ComposeSettings = field(default_factory=ComposeSettings)
     ui: UiSettings = field(default_factory=UiSettings)
+    diagnostics: DiagnosticsSettings = field(default_factory=DiagnosticsSettings)
 
     def require_model(self, profile_id: str | None = None) -> ModelSettings:
         """返回指定或默认模型；保留单 Profile 调用方的兼容入口。"""
@@ -376,6 +396,7 @@ class Za38Config:
             "tools": self.tools.redacted(),
             "compose": self.compose.redacted(),
             "ui": self.ui.redacted(),
+            "diagnostics": self.diagnostics.redacted(),
         }
 
 
@@ -416,9 +437,17 @@ def load_config(
         tools_values,
         compose_values,
         ui_values,
+        diagnostics_values,
         sources,
     ) = _merge_documents(documents)
-    _apply_environment_overrides(models, approval_values, execution_values, environment, sources)
+    _apply_environment_overrides(
+        models,
+        approval_values,
+        execution_values,
+        diagnostics_values,
+        environment,
+        sources,
+    )
     _apply_cli_overrides(execution_values, environment, sources)
     model_catalog = _parse_model_catalog(models, sources["models"])
     model_profile = model_catalog.default_profile if model_catalog else None
@@ -438,6 +467,7 @@ def load_config(
         tools=_parse_tools(tools_values),
         compose=_parse_compose(compose_values),
         ui=_parse_ui(ui_values),
+        diagnostics=_parse_diagnostics(diagnostics_values),
     )
 
 
@@ -526,6 +556,7 @@ def _merge_documents(
     dict[str, object],
     dict[str, object],
     dict[str, object],
+    dict[str, object],
     dict[str, str],
 ]:
     """按用户到显式配置的顺序合并已验证字段，并记录最后贡献来源。"""
@@ -537,6 +568,7 @@ def _merge_documents(
     tools_values: dict[str, object] = {}
     compose_values: dict[str, object] = {}
     ui_values: dict[str, object] = {}
+    diagnostics_values: dict[str, object] = {}
     sources = {
         "models": "default",
         "approval": "default",
@@ -546,6 +578,7 @@ def _merge_documents(
         "tools": "default",
         "compose": "default",
         "ui": "default",
+        "diagnostics": "default",
     }
     for _, source, document in documents:
         if "models" in document:
@@ -572,6 +605,9 @@ def _merge_documents(
         if "ui" in document:
             ui_values = _merge_flat_values(ui_values, document["ui"])
             sources["ui"] = source.value
+        if "diagnostics" in document:
+            diagnostics_values = _merge_flat_values(diagnostics_values, document["diagnostics"])
+            sources["diagnostics"] = source.value
     return (
         models,
         approval_values,
@@ -581,6 +617,7 @@ def _merge_documents(
         tools_values,
         compose_values,
         ui_values,
+        diagnostics_values,
         sources,
     )
 
@@ -689,6 +726,7 @@ def _apply_environment_overrides(
     models: dict[str, object],
     approval_values: dict[str, object],
     execution_values: dict[str, object],
+    diagnostics_values: dict[str, object],
     environ: Mapping[str, str],
     sources: dict[str, str],
 ) -> None:
@@ -718,6 +756,9 @@ def _apply_environment_overrides(
         sources["models"] = ConfigSource.ENVIRONMENT.value
     if "HARNESS_APPROVAL_MODE" in environ:
         approval_values["mode"] = environ["HARNESS_APPROVAL_MODE"]
+    if "HARNESS_LOG_LEVEL" in environ:
+        diagnostics_values["level"] = environ["HARNESS_LOG_LEVEL"]
+        sources["diagnostics"] = ConfigSource.ENVIRONMENT.value
         sources["approval"] = ConfigSource.ENVIRONMENT.value
     if "HARNESS_SANDBOX" in environ:
         execution_values["backend"] = _sandbox_backend(environ["HARNESS_SANDBOX"])
@@ -988,6 +1029,27 @@ def _parse_ui(values: Mapping[str, object]) -> UiSettings:
     if not isinstance(raw_show_cache, bool):
         raise ConfigError("ui.show_cache_hit_rate must be a boolean")
     return UiSettings(show_cache_hit_rate=raw_show_cache)
+
+
+def _parse_diagnostics(values: Mapping[str, object]) -> DiagnosticsSettings:
+    """解析严格有界的 ``[diagnostics]`` 本地日志配置。"""
+    unknown = set(values) - {"level", "retention_days", "max_total_mib", "max_file_mib"}
+    if unknown:
+        raise ConfigError(f"[diagnostics] contains unsupported fields: {', '.join(sorted(unknown))}")
+    level = values.get("level", "info")
+    if level not in {"debug", "info", "warn", "error"}:
+        raise ConfigError("diagnostics.level must be debug, info, warn, or error")
+    retention_days = _integer(values.get("retention_days", 14), "diagnostics.retention_days", minimum=1, maximum=365)
+    max_total_mib = _integer(values.get("max_total_mib", 200), "diagnostics.max_total_mib", minimum=16, maximum=4096)
+    max_file_mib = _integer(values.get("max_file_mib", 16), "diagnostics.max_file_mib", minimum=1, maximum=256)
+    if max_file_mib > max_total_mib:
+        raise ConfigError("diagnostics.max_file_mib must be <= diagnostics.max_total_mib")
+    return DiagnosticsSettings(
+        level=level,
+        retention_days=retention_days,
+        max_total_mib=max_total_mib,
+        max_file_mib=max_file_mib,
+    )
 
 
 def _sandbox_backend(value: object) -> str:

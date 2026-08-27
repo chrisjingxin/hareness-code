@@ -1,0 +1,3719 @@
+[
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "logging.started",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "effective_level": "debug",
+        "max_queue_records": 1,
+        "max_queue_bytes": 1,
+        "reserved_queue_records": 1,
+        "reserved_queue_bytes": 1,
+        "max_file_bytes": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "logging.started",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "effective_level": "debug",
+        "max_queue_records": 1,
+        "max_queue_bytes": 1,
+        "reserved_queue_records": 1,
+        "reserved_queue_bytes": 1,
+        "max_file_bytes": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "logging.started",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "effective_level": "debug",
+        "max_queue_records": 1,
+        "max_queue_bytes": 1,
+        "reserved_queue_records": 1,
+        "reserved_queue_bytes": 1,
+        "max_file_bytes": 1,
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "logging.started",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "max_queue_records": 1,
+        "max_queue_bytes": 1,
+        "reserved_queue_records": 1,
+        "reserved_queue_bytes": 1,
+        "max_file_bytes": 1
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "logging.reconfigured",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "previous_level": "debug",
+        "effective_level": "debug",
+        "source": "default"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "logging.reconfigured",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "previous_level": "debug",
+        "effective_level": "debug",
+        "source": "default"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "logging.reconfigured",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "previous_level": "debug",
+        "effective_level": "debug",
+        "source": "default",
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "logging.reconfigured",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "effective_level": "debug",
+        "source": "default"
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "logging.dropped",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "debug_count": 1,
+        "info_count": 1,
+        "warn_count": 1,
+        "error_count": 1,
+        "invalid_count": 1,
+        "oversize_count": 1,
+        "reason": "queue_full"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "logging.dropped",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "debug_count": 1,
+        "info_count": 1,
+        "warn_count": 1,
+        "error_count": 1,
+        "invalid_count": 1,
+        "oversize_count": 1,
+        "reason": "queue_full"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "logging.dropped",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "debug_count": 1,
+        "info_count": 1,
+        "warn_count": 1,
+        "error_count": 1,
+        "invalid_count": 1,
+        "oversize_count": 1,
+        "reason": "queue_full",
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "logging.dropped",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "info_count": 1,
+        "warn_count": 1,
+        "error_count": 1,
+        "invalid_count": 1,
+        "oversize_count": 1,
+        "reason": "queue_full"
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "logging.contract_violation",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "invalid_level_count": 1,
+        "invalid_event_count": 1,
+        "invalid_field_count": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "logging.contract_violation",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "invalid_level_count": 1,
+        "invalid_event_count": 1,
+        "invalid_field_count": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "logging.contract_violation",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "invalid_level_count": 1,
+        "invalid_event_count": 1,
+        "invalid_field_count": 1,
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "logging.contract_violation",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "invalid_event_count": 1,
+        "invalid_field_count": 1
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "error",
+      "event": "logging.writer_failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "logging.writer_failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "error",
+      "event": "logging.writer_failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x",
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "error",
+      "event": "logging.writer_failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "logging.stopped",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "flush_outcome": "completed",
+        "queued_count": 1,
+        "written_count": 1,
+        "dropped_count": 1,
+        "duration_ms": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "logging.stopped",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "flush_outcome": "completed",
+        "queued_count": 1,
+        "written_count": 1,
+        "dropped_count": 1,
+        "duration_ms": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "logging.stopped",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "flush_outcome": "completed",
+        "queued_count": 1,
+        "written_count": 1,
+        "dropped_count": 1,
+        "duration_ms": 1,
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "logging.stopped",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "queued_count": 1,
+        "written_count": 1,
+        "dropped_count": 1,
+        "duration_ms": 1
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "process.started",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "command_kind": "x",
+        "runtime_version": "x",
+        "platform": "x",
+        "arch": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "process.started",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "command_kind": "x",
+        "runtime_version": "x",
+        "platform": "x",
+        "arch": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "process.started",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "command_kind": "x",
+        "runtime_version": "x",
+        "platform": "x",
+        "arch": "x",
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "process.started",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "runtime_version": "x",
+        "platform": "x",
+        "arch": "x"
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "process.stopped",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "outcome": "completed",
+        "exit_code": 1,
+        "duration_ms": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "process.stopped",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "outcome": "completed",
+        "exit_code": 1,
+        "duration_ms": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "process.stopped",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "outcome": "completed",
+        "exit_code": 1,
+        "duration_ms": 1,
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "process.stopped",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "exit_code": 1,
+        "duration_ms": 1
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "sidecar.stderr_observed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "bytes": 1,
+        "lines": 1,
+        "truncated": false
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "sidecar.stderr_observed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "bytes": 1,
+        "lines": 1,
+        "truncated": false
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "sidecar.stderr_observed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "bytes": 1,
+        "lines": 1,
+        "truncated": false,
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "sidecar.stderr_observed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "lines": 1,
+        "truncated": false
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "ipc.initialize.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "side": "client",
+        "duration_ms": 1,
+        "protocol_minor": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "ipc.initialize.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "side": "client",
+        "duration_ms": 1,
+        "protocol_minor": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "ipc.initialize.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "side": "client",
+        "duration_ms": 1,
+        "protocol_minor": 1,
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "ipc.initialize.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "duration_ms": 1,
+        "protocol_minor": 1
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "ipc.request.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "side": "client",
+        "method": "x",
+        "duration_ms": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "ipc.request.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "side": "client",
+        "method": "x",
+        "duration_ms": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "ipc.request.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "side": "client",
+        "method": "x",
+        "duration_ms": 1,
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "ipc.request.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "method": "x",
+        "duration_ms": 1
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "ipc.request.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "side": "client",
+        "method": "x",
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "ipc.request.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "side": "client",
+        "method": "x",
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "ipc.request.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "side": "client",
+        "method": "x",
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x",
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "ipc.request.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "method": "x",
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "ipc.transport.closed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "side": "client",
+        "outcome": "completed",
+        "pending_requests": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "ipc.transport.closed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "side": "client",
+        "outcome": "completed",
+        "pending_requests": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "ipc.transport.closed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "side": "client",
+        "outcome": "completed",
+        "pending_requests": 1,
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "ipc.transport.closed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "outcome": "completed",
+        "pending_requests": 1
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "run.started",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "mode": "build",
+        "resumed": false,
+        "approval_mode": "x",
+        "model_profile_id": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "run.started",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "mode": "build",
+        "resumed": false,
+        "approval_mode": "x",
+        "model_profile_id": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "run.started",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "mode": "build",
+        "resumed": false,
+        "approval_mode": "x",
+        "model_profile_id": "x",
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "run.started",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "resumed": false,
+        "approval_mode": "x",
+        "model_profile_id": "x"
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "run.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "outcome": "completed",
+        "duration_ms": 1,
+        "active_ms": 1,
+        "interaction_wait_ms": 1,
+        "retry_wait_ms": 1,
+        "first_visible_activity_ms": 1,
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "cached_input_tokens": 1
+        }
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "run.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "outcome": "completed",
+        "duration_ms": 1,
+        "active_ms": 1,
+        "interaction_wait_ms": 1,
+        "retry_wait_ms": 1,
+        "first_visible_activity_ms": 1,
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "cached_input_tokens": 1
+        }
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "run.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "outcome": "completed",
+        "duration_ms": 1,
+        "active_ms": 1,
+        "interaction_wait_ms": 1,
+        "retry_wait_ms": 1,
+        "first_visible_activity_ms": 1,
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "cached_input_tokens": 1
+        },
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "run.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "duration_ms": 1,
+        "active_ms": 1,
+        "interaction_wait_ms": 1,
+        "retry_wait_ms": 1,
+        "first_visible_activity_ms": 1,
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "cached_input_tokens": 1
+        }
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "run.cancelled",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "cancellation_source": "x",
+        "duration_ms": 1,
+        "active_ms": 1,
+        "interaction_wait_ms": 1,
+        "retry_wait_ms": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "run.cancelled",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "cancellation_source": "x",
+        "duration_ms": 1,
+        "active_ms": 1,
+        "interaction_wait_ms": 1,
+        "retry_wait_ms": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "run.cancelled",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "cancellation_source": "x",
+        "duration_ms": 1,
+        "active_ms": 1,
+        "interaction_wait_ms": 1,
+        "retry_wait_ms": 1,
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "run.cancelled",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "duration_ms": 1,
+        "active_ms": 1,
+        "interaction_wait_ms": 1,
+        "retry_wait_ms": 1
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "error",
+      "event": "run.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "duration_ms": 1,
+        "active_ms": 1,
+        "interaction_wait_ms": 1,
+        "retry_wait_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "run.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "duration_ms": 1,
+        "active_ms": 1,
+        "interaction_wait_ms": 1,
+        "retry_wait_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "error",
+      "event": "run.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "duration_ms": 1,
+        "active_ms": 1,
+        "interaction_wait_ms": 1,
+        "retry_wait_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x",
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "error",
+      "event": "run.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "active_ms": 1,
+        "interaction_wait_ms": 1,
+        "retry_wait_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "runtime.acquire.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "source": "new",
+        "queue_ms": 1,
+        "build_ms": 1,
+        "duration_ms": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "runtime.acquire.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "source": "new",
+        "queue_ms": 1,
+        "build_ms": 1,
+        "duration_ms": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "runtime.acquire.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "source": "new",
+        "queue_ms": 1,
+        "build_ms": 1,
+        "duration_ms": 1,
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "runtime.acquire.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "queue_ms": 1,
+        "build_ms": 1,
+        "duration_ms": 1
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "error",
+      "event": "runtime.acquire.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "runtime.acquire.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "error",
+      "event": "runtime.acquire.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x",
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "error",
+      "event": "runtime.acquire.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "runtime.released",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "outcome": "released",
+        "duration_ms": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "error",
+      "event": "runtime.released",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "outcome": "released",
+        "duration_ms": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "runtime.released",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "outcome": "released",
+        "duration_ms": 1,
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "runtime.released",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "duration_ms": 1
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "runtime.pool_snapshot",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "active_count": 1,
+        "idle_count": 1,
+        "waiter_count": 1,
+        "eviction_count": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "runtime.pool_snapshot",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "active_count": 1,
+        "idle_count": 1,
+        "waiter_count": 1,
+        "eviction_count": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "runtime.pool_snapshot",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "active_count": 1,
+        "idle_count": 1,
+        "waiter_count": 1,
+        "eviction_count": 1,
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "runtime.pool_snapshot",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "idle_count": 1,
+        "waiter_count": 1,
+        "eviction_count": 1
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "context.build.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "duration_ms": 1,
+        "message_count": 1,
+        "estimated_tokens": 1,
+        "cache_status": "hit"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "context.build.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "duration_ms": 1,
+        "message_count": 1,
+        "estimated_tokens": 1,
+        "cache_status": "hit"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "context.build.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "duration_ms": 1,
+        "message_count": 1,
+        "estimated_tokens": 1,
+        "cache_status": "hit",
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "context.build.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "message_count": 1,
+        "estimated_tokens": 1,
+        "cache_status": "hit"
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "error",
+      "event": "context.build.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "context.build.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "error",
+      "event": "context.build.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x",
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "error",
+      "event": "context.build.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "context.compaction.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "duration_ms": 1,
+        "before_estimated_tokens": 1,
+        "after_estimated_tokens": 1,
+        "artifact_count": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "context.compaction.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "duration_ms": 1,
+        "before_estimated_tokens": 1,
+        "after_estimated_tokens": 1,
+        "artifact_count": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "context.compaction.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "duration_ms": 1,
+        "before_estimated_tokens": 1,
+        "after_estimated_tokens": 1,
+        "artifact_count": 1,
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "context.compaction.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "before_estimated_tokens": 1,
+        "after_estimated_tokens": 1,
+        "artifact_count": 1
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "model.started",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "model_round": 1,
+        "provider_attempt": 1,
+        "profile_id": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "model.started",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "model_round": 1,
+        "provider_attempt": 1,
+        "profile_id": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "model.started",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "model_round": 1,
+        "provider_attempt": 1,
+        "profile_id": "x",
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "model.started",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "provider_attempt": 1,
+        "profile_id": "x"
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "model.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "model_round": 1,
+        "provider_attempt": 1,
+        "duration_ms": 1,
+        "provider_first_chunk_ms": 1,
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "cached_input_tokens": 1
+        },
+        "finish_reason": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "model.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "model_round": 1,
+        "provider_attempt": 1,
+        "duration_ms": 1,
+        "provider_first_chunk_ms": 1,
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "cached_input_tokens": 1
+        },
+        "finish_reason": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "model.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "model_round": 1,
+        "provider_attempt": 1,
+        "duration_ms": 1,
+        "provider_first_chunk_ms": 1,
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "cached_input_tokens": 1
+        },
+        "finish_reason": "x",
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "model.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "provider_attempt": 1,
+        "duration_ms": 1,
+        "provider_first_chunk_ms": 1,
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "cached_input_tokens": 1
+        },
+        "finish_reason": "x"
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "model.retry_scheduled",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "model_round": 1,
+        "provider_attempt": 1,
+        "retry_wait_ms": 1,
+        "reason_code": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "model.retry_scheduled",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "model_round": 1,
+        "provider_attempt": 1,
+        "retry_wait_ms": 1,
+        "reason_code": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "model.retry_scheduled",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "model_round": 1,
+        "provider_attempt": 1,
+        "retry_wait_ms": 1,
+        "reason_code": "x",
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "model.retry_scheduled",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "provider_attempt": 1,
+        "retry_wait_ms": 1,
+        "reason_code": "x"
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "model.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "model_round": 1,
+        "provider_attempt": 1,
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "model.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "model_round": 1,
+        "provider_attempt": 1,
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "model.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "model_round": 1,
+        "provider_attempt": 1,
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x",
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "model.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "provider_attempt": 1,
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "interaction.started",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "kind": "x",
+        "source": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "interaction.started",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "kind": "x",
+        "source": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "interaction.started",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "kind": "x",
+        "source": "x",
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "interaction.started",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "source": "x"
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "interaction.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "kind": "x",
+        "outcome": "x",
+        "wait_ms": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "interaction.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "kind": "x",
+        "outcome": "x",
+        "wait_ms": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "interaction.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "kind": "x",
+        "outcome": "x",
+        "wait_ms": 1,
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "interaction.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "outcome": "x",
+        "wait_ms": 1
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "tool.started",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "tool_name": "x",
+        "tool_kind": "x",
+        "model_round": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "tool.started",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "tool_name": "x",
+        "tool_kind": "x",
+        "model_round": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "tool.started",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "tool_name": "x",
+        "tool_kind": "x",
+        "model_round": 1,
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "tool.started",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "tool_kind": "x",
+        "model_round": 1
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "tool.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "tool_name": "x",
+        "tool_kind": "x",
+        "outcome": "x",
+        "duration_ms": 1,
+        "result_bytes": 1,
+        "truncated": false
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "tool.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "tool_name": "x",
+        "tool_kind": "x",
+        "outcome": "x",
+        "duration_ms": 1,
+        "result_bytes": 1,
+        "truncated": false
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "tool.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "tool_name": "x",
+        "tool_kind": "x",
+        "outcome": "x",
+        "duration_ms": 1,
+        "result_bytes": 1,
+        "truncated": false,
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "tool.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "tool_kind": "x",
+        "outcome": "x",
+        "duration_ms": 1,
+        "result_bytes": 1,
+        "truncated": false
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "tool.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "tool_name": "x",
+        "tool_kind": "x",
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "tool.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "tool_name": "x",
+        "tool_kind": "x",
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "tool.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "tool_name": "x",
+        "tool_kind": "x",
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x",
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "tool.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "tool_kind": "x",
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "mcp.connection.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "server_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transport": "x",
+        "duration_ms": 1,
+        "tool_count": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "mcp.connection.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "server_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transport": "x",
+        "duration_ms": 1,
+        "tool_count": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "mcp.connection.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "server_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transport": "x",
+        "duration_ms": 1,
+        "tool_count": 1,
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "mcp.connection.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "transport": "x",
+        "duration_ms": 1,
+        "tool_count": 1
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "mcp.connection.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "server_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transport": "x",
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "mcp.connection.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "server_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transport": "x",
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "mcp.connection.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "server_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transport": "x",
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x",
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "mcp.connection.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "transport": "x",
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "mcp.connection.closed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "server_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "outcome": "x",
+        "duration_ms": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "mcp.connection.closed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "server_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "outcome": "x",
+        "duration_ms": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "mcp.connection.closed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "server_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "outcome": "x",
+        "duration_ms": 1,
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "mcp.connection.closed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "outcome": "x",
+        "duration_ms": 1
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "persistence.operation.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "operation": "x",
+        "duration_ms": 1,
+        "row_count": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "persistence.operation.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "operation": "x",
+        "duration_ms": 1,
+        "row_count": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "persistence.operation.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "operation": "x",
+        "duration_ms": 1,
+        "row_count": 1,
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "persistence.operation.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "duration_ms": 1,
+        "row_count": 1
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "error",
+      "event": "persistence.operation.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "operation": "x",
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "persistence.operation.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "operation": "x",
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "error",
+      "event": "persistence.operation.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "operation": "x",
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x",
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "error",
+      "event": "persistence.operation.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "presentation.handoff.opening",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {}
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "presentation.handoff.opening",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {}
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "presentation.handoff.opening",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "presentation.renderer.accepted",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {}
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "presentation.renderer.accepted",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {}
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "presentation.renderer.accepted",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "presentation.handoff.active",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {}
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "presentation.handoff.active",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {}
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "presentation.handoff.active",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "presentation.handoff.returning",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "reason": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "presentation.handoff.returning",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "reason": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "presentation.handoff.returning",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "reason": "x",
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "presentation.handoff.returning",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {}
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "presentation.gateway.connected",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {}
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "presentation.gateway.connected",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {}
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "presentation.gateway.connected",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "event.unknown",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {},
+      "extra": true
+    }
+  }
+]

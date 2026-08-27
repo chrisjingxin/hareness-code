@@ -4,7 +4,7 @@
   "title": "Harness Agent Protocol v3",
   "x-harness": {
     "major": 3,
-    "minor": 6,
+    "minor": 7,
     "max_frame_bytes": 8388608,
     "max_tool_payload_bytes": 1048576,
     "operations": {
@@ -159,7 +159,7 @@
     },
     "initializeResult": {
       "type": "object",
-      "required": ["protocol", "server", "connection", "capabilities", "agent_commands", "skills_snapshot", "skill_diagnostics", "limits", "config_summary", "startup_error"],
+      "required": ["protocol", "server", "connection", "capabilities", "agent_commands", "skills_snapshot", "skill_diagnostics", "limits", "diagnostics", "config_summary", "startup_error"],
       "properties": {
         "protocol": {
           "type": "object", "required": ["major", "minor"],
@@ -208,6 +208,7 @@
           },
           "additionalProperties": false
         },
+        "diagnostics": { "$ref": "#/$defs/effectiveDiagnostics" },
         "config_summary": { "oneOf": [{ "$ref": "#/$defs/jsonObject" }, { "type": "null" }] },
         "startup_error": {
           "oneOf": [
@@ -219,6 +220,17 @@
             { "type": "null" }
           ]
         }
+      },
+      "additionalProperties": false
+    },
+    "effectiveDiagnostics": {
+      "type": "object",
+      "required": ["level", "retention_days", "max_total_mib", "max_file_mib"],
+      "properties": {
+        "level": { "enum": ["debug", "info", "warn", "error"] },
+        "retention_days": { "type": "integer", "minimum": 1, "maximum": 365 },
+        "max_total_mib": { "type": "integer", "minimum": 16, "maximum": 4096 },
+        "max_file_mib": { "type": "integer", "minimum": 1, "maximum": 256 }
       },
       "additionalProperties": false
     },

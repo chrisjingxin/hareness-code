@@ -5,13 +5,14 @@
   "type": "module",
   "main": "src/index.ts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./diagnostic-log": "./diagnostic-log/src/index.ts"
   },
   "dependencies": {
     "ajv": "8.17.1"
   },
   "scripts": {
-    "generate": "bun run scripts/generate.ts",
-    "check": "bun run scripts/generate.ts --check"
+    "generate": "bun run scripts/generate.ts && bun run diagnostic-log/scripts/generate.ts",
+    "check": "bun run scripts/generate.ts --check && bun run diagnostic-log/scripts/generate.ts --check"
   }
 }

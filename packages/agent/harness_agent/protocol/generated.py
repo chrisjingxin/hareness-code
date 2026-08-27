@@ -6,8 +6,8 @@ from typing import Any, Literal, NotRequired, TypeAlias, TypedDict
 from harness_agent.protocol.runtime import event_model, schema_model
 
 PROTOCOL_MAJOR = 3
-PROTOCOL_MINOR = 6
-PROTOCOL_SCHEMA_SHA256 = "b969213e467db6c28de58321b4f24c09d8281eac336d8c98a11fb10ef2170601"
+PROTOCOL_MINOR = 7
+PROTOCOL_SCHEMA_SHA256 = "b642db63271028ca147384ebe9e1c3be2c67eee82a9f1aa51040d15b4f67d6f4"
 MAX_FRAME_BYTES = 8388608
 MAX_TOOL_PAYLOAD_BYTES = 1048576
 CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","threads.side_question","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","plugins.list","plugins.inspect","plugins.validate","plugins.install","plugins.set_enabled","plugins.remove","agents.list","agents.inspect","teams.list","teams.inspect","teams.generate","teams.run","teams.cancel","mcp.status","mcp.add","mcp.remove","host.attachment.create","host.attachment.revoke","host.control.acquire","host.control.release","host.control.status","compose.inspect","compose.abandon"]
@@ -67,8 +67,15 @@ class InitializeResultWire(TypedDict):
     skills_snapshot: dict[str, Any]
     skill_diagnostics: list[str]
     limits: dict[str, Any]
+    diagnostics: EffectiveDiagnosticsWire
     config_summary: JsonObjectWire | None
     startup_error: dict[str, Any] | None
+
+class EffectiveDiagnosticsWire(TypedDict):
+    level: Literal["debug", "info", "warn", "error"]
+    retention_days: int
+    max_total_mib: int
+    max_file_mib: int
 
 class RequestedSkillWire(TypedDict):
     id: str

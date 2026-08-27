@@ -464,6 +464,7 @@ def test_execution_defaults_to_local_and_redacts_security_summary(tmp_path: Path
         "tools": "default",
         "compose": "default",
         "ui": "default",
+        "diagnostics": "default",
     }
 
 

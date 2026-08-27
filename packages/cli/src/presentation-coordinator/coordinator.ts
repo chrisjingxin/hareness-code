@@ -12,8 +12,8 @@
 
 import { randomBytes } from "node:crypto"
 
+import type { DiagnosticLog } from "../diagnostic-log/runtime"
 import type { InteractiveIntent, IntentOutcome } from "../interactive/types"
-import type { DiagnosticLogger } from "../diagnostics/local-logger"
 import type { WebUiServerMessage } from "./contracts"
 import { isHandoffPhase, type PresentationState, type ReturnReason } from "./state"
 
@@ -72,7 +72,7 @@ export type PresentationCoordinatorOptions = {
   /** 首次 URL 中 bootstrap token 的有效期；renderer 接受后改用 handoff-scoped 轮换 token。 */
   uiTokenTtlMs?: number
   scheduler?: PresentationScheduler
-  diagnostics?: DiagnosticLogger
+  diagnostics?: DiagnosticLog
 }
 
 export interface PresentationCoordinator {
@@ -115,7 +115,7 @@ class PresentationCoordinatorImpl implements PresentationCoordinator {
   private readonly reconnectGraceMs: number
   private readonly uiTokenTtlMs: number
   private readonly scheduler: PresentationScheduler
-  private readonly diagnostics: DiagnosticLogger | undefined
+  private readonly diagnostics: DiagnosticLog | undefined
   private readonly listeners = new Set<(state: PresentationState) => void>()
 
   private state: PresentationState = { phase: "tui-active" }
@@ -162,7 +162,7 @@ class PresentationCoordinatorImpl implements PresentationCoordinator {
     this.bootstrapTokenPending = true
     this.state = { phase: "opening-web", handoffId: this.handoffId }
     this.exitHandlerPending = false
-    this.diagnostics?.info("web.handoff.opening")
+    this.diagnostics?.info("presentation.handoff.opening", {})
     this.publish()
     try {
       await this.server.start()
@@ -250,9 +250,9 @@ class PresentationCoordinatorImpl implements PresentationCoordinator {
     this.uiTokenExpiresAt = 0
     this.bootstrapTokenPending = false
     this.primary = channel
+    this.diagnostics?.info("presentation.renderer.accepted", {})
     this.reconnectTimer?.clear()
     this.reconnectTimer = undefined
-    this.diagnostics?.info("web.renderer.accepted")
     this.onRendererConnected(channel, reconnectToken)
   }
 
@@ -288,7 +288,7 @@ class PresentationCoordinatorImpl implements PresentationCoordinator {
     this.readyTimer?.clear()
     this.readyTimer = undefined
     this.state = { phase: "web-active", handoffId: this.state.handoffId }
-    this.diagnostics?.info("web.handoff.active")
+    this.diagnostics?.info("presentation.handoff.active", {})
     this.publish()
   }
 
@@ -345,13 +345,13 @@ class PresentationCoordinatorImpl implements PresentationCoordinator {
   }
 
   private async performCleanup(reason: ReturnReason, error?: unknown): Promise<void> {
-    this.diagnostics?.info("web.handoff.returning", { reason })
     this.readyTimer?.clear()
     this.readyTimer = undefined
     this.reconnectTimer?.clear()
     this.reconnectTimer = undefined
     if (isHandoffPhase(this.state)) {
       this.state = { phase: "returning-tui", handoffId: this.state.handoffId, reason }
+      this.diagnostics?.info("presentation.handoff.returning", { reason })
       this.publish()
     }
     if (this.state.phase === "returning-tui") {

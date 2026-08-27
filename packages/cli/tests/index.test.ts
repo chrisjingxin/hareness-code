@@ -1,7 +1,8 @@
 /** CLI 启动层测试：验证工作区错误能在启动 Python 前得到清晰诊断。 */
 import { expect, test } from "bun:test"
+import { createHash } from "node:crypto"
 import { readFileSync } from "node:fs"
-import { mkdtemp, readFile, writeFile } from "node:fs/promises"
+import { mkdtemp, readFile, realpath, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 import { tmpdir } from "node:os"
 
@@ -11,6 +12,7 @@ import {
   resolveAgentRuntimeLocations,
   validateInteractiveTerminal,
   validateWorkspace,
+  workspaceFingerprint,
 } from "../src/index"
 import { parseArgs } from "../src/args"
 
@@ -38,6 +40,19 @@ test("工作区必须是目录", async () => {
   const file = resolve(root, "file.txt")
   await writeFile(file, "not a directory")
   expect(() => validateWorkspace(file)).toThrow("Workspace is not a directory")
+})
+
+test("CLI workspace fingerprint 使用平台真实路径且不暴露路径", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "za38-fingerprint-test-"))
+  expect(await workspaceFingerprint(root)).toBe(
+    createHash("sha256").update(await realpath(root)).digest("hex"),
+  )
+})
+
+test("生产日志路径不再使用同步文件写入或旧 debug 目录", () => {
+  const source = readFileSync(resolve(import.meta.dir, "../src/diagnostic-log/runtime/index.ts"), "utf8")
+  expect(source).not.toContain("writeSync")
+  expect(source).not.toContain('.harness", "debug')
 })
 
 test("交互界面拒绝经过管道或任务复用器启动", () => {

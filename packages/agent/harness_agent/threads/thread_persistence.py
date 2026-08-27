@@ -2925,7 +2925,7 @@ class ThreadPersistence:
             # 不把同步的 SQLite backup 丢到可被取消的后台线程，避免提前释放锁。
             cls._recover_interrupted_migration_sync(path)
             _assert_migration_path_available(path)
-            project_fingerprint = _project_fingerprint(project)
+            project_fingerprint = workspace_fingerprint(project)
             source_version, has_legacy_prompt_epoch = _inspect_migration_source_sync(path)
             if has_legacy_prompt_epoch and not _is_supported_legacy_prompt_epoch_source(
                     source_version
@@ -8299,7 +8299,7 @@ class ThreadPersistence:
         return _replay_delta_messages(history)
 
 
-def _project_fingerprint(project: Path) -> str:
+def workspace_fingerprint(project: Path) -> str:
     """从规范化 project 路径生成不可逆 namespace，禁止原始路径进入数据库。"""
     return hashlib.sha256(str(project.expanduser().resolve()).encode("utf-8")).hexdigest()
 

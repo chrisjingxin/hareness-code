@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -119,6 +120,58 @@ async def test_initialize_negotiates_v3_and_capabilities(tmp_path: Path):
     assert "run.multithread" in result["capabilities"]["enabled"]
     assert result["limits"]["max_frame_bytes"] == 8 * 1024 * 1024
     assert result["config_summary"]["security"]["mode"] == "local"
+    assert result["diagnostics"] == {
+        "level": "info",
+        "retention_days": 14,
+        "max_total_mib": 200,
+        "max_file_mib": 16,
+    }
+
+
+async def test_initialize_returns_real_project_fingerprint_without_opening_sqlite(tmp_path: Path):
+    """管理命令不启用 threads.read 时也返回真实 workspace 身份，且不打开 SQLite。"""
+    from harness_agent.host.agent_host import AgentHost
+
+    workspace = (tmp_path / "workspace").resolve()
+    server = AgentHost(allow_echo=True, config_home=tmp_path / "home", workspace=workspace)
+
+    async def reject_persistence() -> object:
+        raise AssertionError("initialize must not open Thread SQLite")
+
+    server._ensure_thread_persistence = reject_persistence  # type: ignore[method-assign]
+    frames: list[dict[str, Any]] = []
+
+    async def capture(message: dict[str, Any]) -> None:
+        frames.append(message)
+
+    server.send = capture
+    await server.dispatch(_request("initialize", _initialize_params(capabilities=[]), "init-management"))
+    assert frames[0]["result"]["connection"]["project"]["id"] == hashlib.sha256(
+        str(workspace).encode("utf-8")
+    ).hexdigest()
+
+
+async def test_initialize_records_server_side_diagnostic_event(tmp_path: Path) -> None:
+    """Host 在真实 initialize owner 处记录 server 耗时，不从 stdout frame 反推。"""
+    from harness_agent.host.agent_host import AgentHost
+
+    events: list[tuple[str, dict[str, object]]] = []
+
+    class CapturingLog:
+        def info(self, event: str, fields: dict[str, object]) -> None:
+            events.append((event, fields))
+
+    server = AgentHost(
+        allow_echo=True,
+        config_home=tmp_path / "home",
+        workspace=tmp_path / "workspace",
+        diagnostic_log=CapturingLog(),  # type: ignore[arg-type]
+    )
+    await _capture_server(server)
+    event, fields = next(item for item in events if item[0] == "ipc.initialize.completed")
+    assert event == "ipc.initialize.completed"
+    assert fields["side"] == "server"
+    assert isinstance(fields["duration_ms"], int)
 
 
 async def test_agent_and_team_control_plane_uses_fixed_catalog(

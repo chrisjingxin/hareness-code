@@ -3381,7 +3381,7 @@ async def test_zc108_exit_unknown_publishes_guards_before_durable_poison(
     monkeypatch.setattr(_M, "_supervise_migration_child", unknown_supervisor)
     monkeypatch.setattr(_M, "_migration_write_poison", assert_guards_before_poison)
     with pytest.raises(ThreadPersistenceError, match="WORKER_EXIT_UNKNOWN"):
-        await _M._run_legacy_migration_child(database, _M._project_fingerprint(project))
+        await _M._run_legacy_migration_child(database, _M.workspace_fingerprint(project))
     assert observed_order == ["guarded"]
     manifest = _M._parse_migration_attempt_manifest(
         _M._migration_attempt_manifest_path(database),

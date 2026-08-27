@@ -57,6 +57,12 @@
           "max_frame_bytes": 1,
           "max_tool_payload_bytes": 1
         },
+        "diagnostics": {
+          "level": "debug",
+          "retention_days": 1,
+          "max_total_mib": 16,
+          "max_file_mib": 1
+        },
         "config_summary": {},
         "startup_error": {
           "code": "x",
@@ -1456,6 +1462,12 @@
           "max_frame_bytes": 1,
           "max_tool_payload_bytes": 1
         },
+        "diagnostics": {
+          "level": "debug",
+          "retention_days": 1,
+          "max_total_mib": 16,
+          "max_file_mib": 1
+        },
         "config_summary": {},
         "startup_error": {
           "code": "x",
@@ -1495,6 +1507,12 @@
         "limits": {
           "max_frame_bytes": 1,
           "max_tool_payload_bytes": 1
+        },
+        "diagnostics": {
+          "level": "debug",
+          "retention_days": 1,
+          "max_total_mib": 16,
+          "max_file_mib": 1
         },
         "config_summary": {},
         "startup_error": {

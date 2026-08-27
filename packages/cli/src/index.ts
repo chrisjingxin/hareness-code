@@ -1,12 +1,15 @@
 #!/usr/bin/env bun
 /** za38 CLI 启动层：管理 Python sidecar 生命周期并选择 TUI 或无头执行模式。 */
 import { spawn } from "node:child_process"
+import { createHash } from "node:crypto"
+import { once } from "node:events"
 import { existsSync, statSync } from "node:fs"
+import { realpath } from "node:fs/promises"
 import { delimiter, resolve } from "node:path"
 import { Capability, EventType, PROTOCOL_VERSION, isClientMethod } from "@za38/protocol"
 
 import { parseArgs, type Command } from "./args"
-import { createDiagnosticLogger } from "./diagnostics/local-logger"
+import { createDiagnosticLog, defaultProcessFields, type DiagnosticLog } from "./diagnostic-log/runtime"
 import { AgentClient, JsonRpcRemoteError } from "./ipc/client"
 import { StdioRpcTransport } from "./ipc/stdio-transport"
 import { runTui } from "./tui/app"
@@ -31,6 +34,7 @@ import { createWebServer } from "./web/server"
 type RunningAgent = {
   client: AgentClient
   runtime: InteractiveRuntime
+  log: DiagnosticLog
   stop: () => Promise<void>
 }
 
@@ -68,6 +72,15 @@ export function clientInteractionHandles(command: Command): Array<"approval" | "
 /** 启动 Python sidecar、完成 initialize 握手，并返回可关闭的运行句柄。 */
 async function startAgent(command: Command): Promise<RunningAgent> {
   validateWorkspace(command.cwd)
+  const startedAtMs = Date.now()
+  const startedAt = performance.now()
+  const projectFingerprint = await workspaceFingerprint(command.cwd)
+  const { log, lifecycle } = createDiagnosticLog({
+    component: "cli",
+    projectFingerprint,
+    startedAtMs,
+  })
+  log.info("process.started", defaultProcessFields(command.kind))
   const locations = resolveAgentRuntimeLocations(import.meta.dir)
   // Windows 上 .venv 布局是 Scripts/python.exe，Unix 是 bin/python；两者都探测后再降级到 PATH。
   const python = process.env.HARNESS_AGENT_PYTHON
@@ -84,38 +97,106 @@ async function startAgent(command: Command): Promise<RunningAgent> {
     env: {
       ...process.env,
       ...sandboxEnvironment,
+      HARNESS_COMMAND_KIND: command.kind,
       ...(command.configPath ? { HARNESS_AGENT_CONFIG_PATH: command.configPath } : {}),
       PYTHONPATH: process.env.PYTHONPATH ? `${sourceAgent}${delimiter}${process.env.PYTHONPATH}` : sourceAgent,
     },
     stdio: ["pipe", "pipe", "pipe"],
   })
-  if (!child.stdin || !child.stdout || !child.stderr) throw new Error("Unable to create agent stdio pipes")
-  let stderr = ""
-  child.stderr.on("data", chunk => { stderr += chunk.toString("utf-8") })
+  if (!child.stdin || !child.stdout || !child.stderr) {
+    log.error("process.stopped", {
+      outcome: "failed",
+      exit_code: child.exitCode,
+      duration_ms: Math.max(0, Math.round(performance.now() - startedAt)),
+    })
+    child.kill()
+    await lifecycle.close()
+    throw new Error("Unable to create agent stdio pipes")
+  }
+  let stderrBytes = 0
+  let stderrLines = 0
+  let stderrTruncated = false
+  child.stderr.on("data", chunk => {
+    const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    stderrBytes = Math.min(stderrBytes + value.byteLength, 256 * 1024)
+    stderrLines = Math.min(stderrLines + value.reduce((count, byte) => count + Number(byte === 10), 0), 10_000)
+    stderrTruncated ||= stderrBytes === 256 * 1024 || stderrLines === 10_000
+  })
   const client = new AgentClient(new StdioRpcTransport(child.stdin, child.stdout))
   child.on("exit", code => {
-    if (code && code !== 0) client.emit("agentExit", new Error(stderr || `Agent exited with code ${code}`))
+    if (code && code !== 0) client.emit("agentExit", new Error(`Agent exited with code ${code}`))
   })
-  const requested = clientCapabilities(command)
-  const initialized = await client.initialize({
-    protocol: { major: PROTOCOL_VERSION.major, min_minor: 0, max_minor: PROTOCOL_VERSION.minor },
-    client: { name: "harness-cli", version: CLI_VERSION, kind: command.kind === "run" && !command.nonInteractive ? "tui" : "cli" },
-    capabilities: {
-      requests: requested,
-      handles: clientInteractionHandles(command),
-    },
-  })
-  return {
-    client,
-    runtime: createInteractiveRuntime(initialized, command.cwd, {
+  try {
+    const requested = clientCapabilities(command)
+    const initialized = await client.initialize({
+      protocol: { major: PROTOCOL_VERSION.major, min_minor: 0, max_minor: PROTOCOL_VERSION.minor },
+      client: { name: "harness-cli", version: CLI_VERSION, kind: command.kind === "run" && !command.nonInteractive ? "tui" : "cli" },
+      capabilities: {
+        requests: requested,
+        handles: clientInteractionHandles(command),
+      },
+    })
+    log.info("ipc.initialize.completed", {
+      side: "client",
+      duration_ms: Math.max(0, Math.round(performance.now() - startedAt)),
+      protocol_minor: initialized.protocol.minor,
+    })
+    lifecycle.reconfigure({
+      level: initialized.diagnostics.level,
+      retentionDays: initialized.diagnostics.retention_days,
+      maxTotalBytes: initialized.diagnostics.max_total_mib * 1024 * 1024,
+      maxFileBytes: initialized.diagnostics.max_file_mib * 1024 * 1024,
+    })
+    const runtime = createInteractiveRuntime(initialized, command.cwd, {
       gitWorkspace: await detectGitWorkspace(command.cwd),
       cliVersion: CLI_VERSION,
-    }),
-    stop: async () => {
-      client.destroy()
-      child.kill()
-    },
+    })
+    let stopped = false
+    return {
+      client,
+      runtime,
+      log,
+      stop: async () => {
+        if (stopped) return
+        stopped = true
+        if (stderrBytes > 0) log.warn("sidecar.stderr_observed", {
+          bytes: stderrBytes,
+          lines: stderrLines,
+          truncated: stderrTruncated,
+        })
+        log.info("process.stopped", {
+          outcome: "completed",
+          exit_code: 0,
+          duration_ms: Math.max(0, Math.round(performance.now() - startedAt)),
+        })
+        await client.close()
+        if (child.exitCode === null && child.signalCode === null) {
+          await Promise.race([
+            once(child, "exit"),
+            new Promise(resolve => setTimeout(resolve, 2_000)),
+          ])
+        }
+        if (child.exitCode === null && child.signalCode === null) child.kill()
+        await lifecycle.close()
+      },
+    }
+  } catch (error) {
+    log.error("process.stopped", {
+      outcome: "failed",
+      exit_code: child.exitCode,
+      duration_ms: Math.max(0, Math.round(performance.now() - startedAt)),
+    })
+    await client.close().catch(() => undefined)
+    if (child.exitCode === null && child.signalCode === null) child.kill()
+    await lifecycle.close()
+    throw error
   }
+}
+
+/** 使用平台真实路径 API 生成与 Python 一致的 workspace 不可逆身份。 */
+export async function workspaceFingerprint(workspace: string): Promise<string> {
+  const canonical = await realpath(workspace)
+  return createHash("sha256").update(canonical, "utf8").digest("hex")
 }
 
 /** 在启动子进程前校验工作区，避免把无效 cwd 误报为 Python 可执行文件不存在。 */
@@ -195,10 +276,6 @@ async function execute(command: Command): Promise<void> {
       return
     }
 
-    const diagnostics = createDiagnosticLogger()
-    diagnostics.info("cli.interactive.started", {
-      log_level: diagnostics.isDebug ? "debug" : "info",
-    })
     let presentationCoordinator: PresentationCoordinator | undefined
     let webUiGateway: WebUiGateway | undefined
     let workspaceExplorer: WorkspaceExplorer | undefined
@@ -228,13 +305,13 @@ async function execute(command: Command): Promise<void> {
           openBrowser: createSystemBrowserOpener(),
           dispatch: intent => controller!.dispatch(intent),
           onRendererConnected: (channel, reconnectToken) => webUiGateway!.connectRenderer(channel, reconnectToken),
-          diagnostics,
+          diagnostics: agent.log,
         })
         webUiGateway = createWebUiGateway({
           coordinator: presentationCoordinator,
           controller,
           workspaceExplorer,
-          diagnostics,
+          diagnostics: agent.log,
         })
       }
       await runTui({
@@ -246,13 +323,11 @@ async function execute(command: Command): Promise<void> {
         openWeb: () => presentationCoordinator!.open(),
       })
     } finally {
-      // 关闭顺序：Web 通道 → WorkspaceExplorer → Coordinator → Controller → diagnostics → agent.stop（外层 finally）。
+      // 关闭顺序：Web 通道 → WorkspaceExplorer → Coordinator → Controller → agent.stop（外层 finally）。
       await webUiGateway?.close()
       await workspaceExplorer?.close()
       await presentationCoordinator?.close()
       await controller?.close()
-      diagnostics.info("cli.interactive.stopped")
-      diagnostics.close()
     }
   } finally {
     await agent.stop()
