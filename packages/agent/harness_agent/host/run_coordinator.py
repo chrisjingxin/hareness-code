@@ -158,10 +158,13 @@ def _interval_union_ms(intervals: list[tuple[float, float]]) -> int:
 
 def _diagnostic_usage(usage: Mapping[str, int]) -> dict[str, int | None]:
     """把未知 usage 保留为 null，不伪造成 0。"""
+    cached = usage.get("cached_input_tokens")
+    if cached is None:
+        cached = usage.get("cached_tokens")
     return {
         "input_tokens": usage.get("input_tokens"),
         "output_tokens": usage.get("output_tokens"),
-        "cached_input_tokens": usage.get("cached_input_tokens"),
+        "cached_input_tokens": cached,
     }
 
 

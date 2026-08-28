@@ -596,11 +596,22 @@ def _usage_delta(
     after: Mapping[str, int],
 ) -> dict[str, int | None]:
     result: dict[str, int | None] = {}
-    for key in ("input_tokens", "output_tokens", "cached_input_tokens"):
-        if key not in after:
+    for key, aliases in (
+        ("input_tokens", ("input_tokens",)),
+        ("output_tokens", ("output_tokens",)),
+        ("cached_input_tokens", ("cached_input_tokens", "cached_tokens")),
+    ):
+        found_key = next((k for k in aliases if k in after), None)
+        if found_key is None:
             result[key] = None
             continue
-        delta = max(0, int(after[key]) - int(before.get(key, 0)))
+        after_val = int(after[found_key])
+        before_val = 0
+        for k in aliases:
+            if k in before:
+                before_val = int(before[k])
+                break
+        delta = max(0, after_val - before_val)
         result[key] = delta if delta > 0 else None
     return result
 
