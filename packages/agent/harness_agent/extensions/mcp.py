@@ -39,6 +39,9 @@ DEFAULT_CONNECT_TIMEOUT_SECONDS = 30
 DEFAULT_TOOL_TIMEOUT_SECONDS = 60
 """MCP 工具调用超时（秒）。"""
 
+_MAX_PARALLEL_CONNECTIONS = 4
+"""同时建立的 MCP 连接上限，避免一次拉起过多子进程或网络会话。"""
+
 TransportType = Literal["stdio", "http", "sse"]
 """支持的 MCP 传输类型。"""
 
@@ -439,6 +442,17 @@ class _McpRuntime:
     server_statuses: dict[str, dict[str, object]] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class _McpConnectionAttempt:
+    """单个 MCP 服务器连接结果，供并发完成后按配置顺序归并。"""
+
+    started: float
+    completed: float
+    tools: tuple[Any, ...] = ()
+    error: BaseException | None = None
+    summary_code: str | None = None
+
+
 class McpConnectionManager:
     """管理所有 MCP 服务器的连接生命周期和工具加载。
 
@@ -692,47 +706,98 @@ class McpConnectionManager:
                 self._log_connection_failed(config, started=time.monotonic(), error=exc, summary_code="MCP_CLIENT_FAILED")
             return
 
+        connection_items = list(config_by_name.items())
+        limiter = asyncio.Semaphore(_MAX_PARALLEL_CONNECTIONS)
+        attempts = await asyncio.gather(*(
+            self._load_server_tools(runtime.client, name, config, limiter)
+            for name, config in connection_items
+        ))
+
+        # gather 保留输入顺序；连接可以乱序完成，但工具优先级和去重结果必须稳定。
         runtime.tools = []
         seen_tool_names: set[str] = set()
-        for name, config in config_by_name.items():
-            started = time.monotonic()
-            try:
-                server_tools = await asyncio.wait_for(
-                    runtime.client.get_tools(server_name=name),
-                    timeout=config.timeout_seconds,
-                )
-                loaded = 0
-                for tool in server_tools:
-                    tool_name = getattr(tool, "name", None)
-                    if isinstance(tool_name, str) and tool_name in seen_tool_names:
-                        continue
-                    if isinstance(tool_name, str):
-                        seen_tool_names.add(tool_name)
-                    _mark_mcp_tool(tool, name)
-                    runtime.tools.append(tool)
-                    loaded += 1
-                runtime.server_statuses[name] = _server_status(config, "connected")
-                self._connected_at[name] = started
-                self._log_connection_completed(config, started=started, tool_count=loaded)
-            except asyncio.TimeoutError as exc:
-                logger.warning("MCP server %r connection timed out; continuing", name)
+        for (name, config), attempt in zip(connection_items, attempts, strict=True):
+            if attempt.error is not None:
+                if attempt.summary_code == "MCP_CONNECT_TIMEOUT":
+                    logger.warning("MCP server %r connection timed out; continuing", name)
+                    error_message = "connection timed out"
+                else:
+                    logger.warning(
+                        "MCP server %r connection failed: %s; continuing",
+                        name,
+                        attempt.error,
+                    )
+                    error_message = str(attempt.error)
                 runtime.server_statuses[name] = _server_status(
-                    config, "failed", error="connection timed out"
+                    config, "failed", error=error_message
                 )
                 self._log_connection_failed(
-                    config, started=started, error=exc, summary_code="MCP_CONNECT_TIMEOUT"
+                    config,
+                    started=attempt.started,
+                    completed_at=attempt.completed,
+                    error=attempt.error,
+                    summary_code=attempt.summary_code or "MCP_CONNECT_FAILED",
                 )
-            except Exception as exc:
-                logger.warning("MCP server %r connection failed: %s; continuing", name, exc)
-                runtime.server_statuses[name] = _server_status(config, "failed", error=str(exc))
-                self._log_connection_failed(
-                    config, started=started, error=exc, summary_code="MCP_CONNECT_FAILED"
-                )
+                continue
+
+            loaded = 0
+            for tool in attempt.tools:
+                tool_name = getattr(tool, "name", None)
+                if isinstance(tool_name, str) and tool_name in seen_tool_names:
+                    continue
+                if isinstance(tool_name, str):
+                    seen_tool_names.add(tool_name)
+                _mark_mcp_tool(tool, name)
+                runtime.tools.append(tool)
+                loaded += 1
+            runtime.server_statuses[name] = _server_status(config, "connected")
+            self._connected_at[name] = attempt.started
+            self._log_connection_completed(
+                config,
+                started=attempt.started,
+                completed_at=attempt.completed,
+                tool_count=loaded,
+            )
         runtime.connected = True
         logger.info(
             "MCP connection attempts complete: %d server(s), %d tool(s) loaded",
             len(connections), len(runtime.tools),
         )
+
+    async def _load_server_tools(
+        self,
+        client: Any,
+        name: str,
+        config: McpServerConfig,
+        limiter: asyncio.Semaphore,
+    ) -> _McpConnectionAttempt:
+        """在并发上限内加载单个服务器工具，并保留独立超时和错误。"""
+        async with limiter:
+            started = time.monotonic()
+            try:
+                tools = await asyncio.wait_for(
+                    client.get_tools(server_name=name),
+                    timeout=config.timeout_seconds,
+                )
+                return _McpConnectionAttempt(
+                    started=started,
+                    completed=time.monotonic(),
+                    tools=tuple(tools),
+                )
+            except asyncio.TimeoutError as exc:
+                return _McpConnectionAttempt(
+                    started=started,
+                    completed=time.monotonic(),
+                    error=exc,
+                    summary_code="MCP_CONNECT_TIMEOUT",
+                )
+            except Exception as exc:
+                return _McpConnectionAttempt(
+                    started=started,
+                    completed=time.monotonic(),
+                    error=exc,
+                    summary_code="MCP_CONNECT_FAILED",
+                )
 
     async def close_all(self) -> None:
         """由 Host owner 关闭所有 snapshot connection，不被单个引擎调用。"""
@@ -777,15 +842,17 @@ class McpConnectionManager:
         config: McpServerConfig,
         *,
         started: float,
+        completed_at: float | None = None,
         tool_count: int,
     ) -> None:
+        finished = time.monotonic() if completed_at is None else completed_at
         self._diagnostic_log.info(
             "mcp.connection.completed",
             {
                 "server_name": config.name,
                 "server_fingerprint": mcp_server_fingerprint(config),
                 "transport": config.transport,
-                "duration_ms": max(0, round((time.monotonic() - started) * 1000)),
+                "duration_ms": max(0, round((finished - started) * 1000)),
                 "tool_count": tool_count,
             },
         )
@@ -795,16 +862,18 @@ class McpConnectionManager:
         config: McpServerConfig,
         *,
         started: float,
+        completed_at: float | None = None,
         error: BaseException,
         summary_code: str,
     ) -> None:
+        finished = time.monotonic() if completed_at is None else completed_at
         self._diagnostic_log.warn(
             "mcp.connection.failed",
             {
                 "server_name": config.name,
                 "server_fingerprint": mcp_server_fingerprint(config),
                 "transport": config.transport,
-                "duration_ms": max(0, round((time.monotonic() - started) * 1000)),
+                "duration_ms": max(0, round((finished - started) * 1000)),
                 "failure_stage": "connect",
                 "error_type": type(error).__name__,
                 "summary_code": summary_code,

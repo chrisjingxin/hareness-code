@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -234,6 +235,82 @@ class TestMcpConnectionManager:
         await mgr.connect_all()
         assert mgr.connected
         assert mgr.get_tools() == []
+
+    @pytest.mark.asyncio
+    async def test_connects_servers_concurrently_and_keeps_config_order(self):
+        """服务器并行连接，但工具仍按配置顺序稳定合并。"""
+        configs = [
+            McpServerConfig(name="alpha", transport="stdio", command="cmd-alpha"),
+            McpServerConfig(name="beta", transport="stdio", command="cmd-beta"),
+        ]
+        mgr = _manager(configs)
+        both_started = asyncio.Event()
+        beta_finished = asyncio.Event()
+        started: list[str] = []
+
+        tool_alpha = MagicMock()
+        tool_alpha.name = "alpha_search"
+        tool_beta = MagicMock()
+        tool_beta.name = "beta_query"
+
+        async def get_tools(*, server_name: str):
+            started.append(server_name)
+            if len(started) == 2:
+                both_started.set()
+            await both_started.wait()
+            if server_name == "alpha":
+                await beta_finished.wait()
+                return [tool_alpha]
+            beta_finished.set()
+            return [tool_beta]
+
+        mock_client = MagicMock()
+        mock_client.get_tools = AsyncMock(side_effect=get_tools)
+        with patch(
+            "langchain_mcp_adapters.client.MultiServerMCPClient", return_value=mock_client
+        ):
+            await asyncio.wait_for(mgr.connect_all(), timeout=0.5)
+
+        assert mgr.get_tool_names() == ["alpha_search", "beta_query"]
+
+    @pytest.mark.asyncio
+    async def test_limits_parallel_server_connections_to_four(self):
+        """大量 MCP 配置只允许四个连接同时占用启动资源。"""
+        configs = [
+            McpServerConfig(name=f"server-{index}", transport="stdio", command="cmd")
+            for index in range(5)
+        ]
+        mgr = _manager(configs)
+        four_started = asyncio.Event()
+        release = asyncio.Event()
+        active = 0
+        peak = 0
+
+        async def get_tools(*, server_name: str):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            if active == 4:
+                four_started.set()
+            try:
+                await release.wait()
+                return []
+            finally:
+                active -= 1
+
+        mock_client = MagicMock()
+        mock_client.get_tools = AsyncMock(side_effect=get_tools)
+        with patch(
+            "langchain_mcp_adapters.client.MultiServerMCPClient", return_value=mock_client
+        ):
+            connect_task = asyncio.create_task(mgr.connect_all())
+            try:
+                await asyncio.wait_for(four_started.wait(), timeout=0.5)
+            finally:
+                release.set()
+                await connect_task
+
+        assert peak == 4
 
     @pytest.mark.asyncio
     async def test_close_all_safe_when_not_connected(self):
