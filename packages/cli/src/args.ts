@@ -4,6 +4,19 @@ export type Command =
   | { kind: "run"; message?: string; nonInteractive: boolean; json: boolean; cwd: string; configPath?: string; resume: boolean; sandbox?: "remote" | false }
   | { kind: "config.show" | "config.path"; cwd: string; configPath?: string; params?: Record<string, unknown> }
   | { kind: SkillCommandKind | PluginCommandKind; cwd: string; configPath?: string; params: Record<string, unknown> }
+  | {
+      kind: "logs"
+      cwd: string
+      json: boolean
+      flat: boolean
+      limit: number
+      thread?: string
+      run?: string
+      level?: "debug" | "info" | "warn" | "error"
+      event?: string
+      component?: "cli" | "agent"
+      cursor?: string
+    }
 
 export type SkillCommandKind =
   | "skills.list"
@@ -34,6 +47,7 @@ export function parseArgs(argv: string[], cwd = process.cwd()): Command {
   }
   if (command === "skills") return parseSkillsCommand(args.slice(1), cwd)
   if (command === "plugins") return parsePluginsCommand(args.slice(1), cwd)
+  if (command === "logs") return parseLogsCommand(args.slice(1), cwd)
 
   const configPath = optionValue(args, "--config")
   const cwdValue = optionValue(args, "--cwd")
@@ -233,4 +247,67 @@ function sandboxOption(args: string[]): "remote" | false | undefined {
   if (["true", "remote"].includes(value)) return "remote"
   if (["false", "off"].includes(value)) return false
   throw new Error("--sandbox only supports remote or false")
+}
+
+/** 解析 logs 离线查询命令；必须在 startAgent 之前短路，且不接受 --config。 */
+function parseLogsCommand(args: string[], cwd: string): Command {
+  // 显式拒绝 --config，logs 是纯离线不读配置
+  if (hasOption(args, "--config") || hasOption(args, "-c")) {
+    // 注意：-c 是 continue 的旧别名，这里对 logs 也拒绝任何 config
+    throw new Error("harness logs does not accept --config")
+  }
+  const workspace = optionValue(args, "--cwd") ?? cwd
+  const json = hasOption(args, "--json")
+  const flat = hasOption(args, "--flat")
+  const limitStr = optionValue(args, "--limit")
+  let limit = limitStr ? Number(limitStr) : undefined
+  const thread = optionValue(args, "--thread")
+  const run = optionValue(args, "--run")
+  const levelRaw = optionValue(args, "--level")
+  const event = optionValue(args, "--event")
+  const componentRaw = optionValue(args, "--component")
+  const cursor = optionValue(args, "--cursor")
+
+  if (thread && run) throw new Error("THREAD_RUN_CONFLICT: --thread and --run are mutually exclusive")
+  if (flat && !thread && !run) throw new Error("--flat requires --thread or --run")
+  if (flat && json) throw new Error("--flat and --json are mutually exclusive")
+  if (cursor && !thread && !run) throw new Error("--cursor requires --thread or --run")
+  if (cursor && !flat && !json) throw new Error("--cursor requires --flat or --json")
+
+  if (limitStr !== undefined) {
+    if (!Number.isInteger(limit) || (limit as number) < 1 || (limit as number) > 1000) {
+      throw new Error("--limit must be integer 1..1000")
+    }
+  }
+  const allowedLevels = ["debug", "info", "warn", "error"] as const
+  let level: "debug" | "info" | "warn" | "error" | undefined
+  if (levelRaw) {
+    if (!(allowedLevels as readonly string[]).includes(levelRaw)) {
+      throw new Error("--level must be one of debug|info|warn|error")
+    }
+    level = levelRaw as any
+  }
+  if (componentRaw && componentRaw !== "cli" && componentRaw !== "agent") {
+    throw new Error("--component must be cli or agent")
+  }
+  const component = componentRaw as "cli" | "agent" | undefined
+
+  // 默认列表 20 个 Thread；选择 Thread/Run 时每页 200 条事件。
+  if (limit === undefined) {
+    limit = thread || run ? 200 : 20
+  }
+
+  return {
+    kind: "logs",
+    cwd: workspace,
+    json,
+    flat,
+    limit,
+    thread,
+    run,
+    level,
+    event,
+    component,
+    cursor,
+  }
 }

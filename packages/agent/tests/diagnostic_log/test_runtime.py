@@ -212,6 +212,27 @@ async def test_slow_writer_close_is_bounded_and_log_call_never_awaits(tmp_path) 
     event.set()
 
 
+def test_business_code_calls_log_info_even_when_logger_is_missing_or_raises() -> None:
+    """业务只写 log.info；None 与内部异常都不能传回调用方。"""
+    from harness_agent.diagnostic_log.runtime import ensure_log
+
+    ensure_log(None).info("process.started", _process_fields())
+
+    class _Boom:
+        def child(self, _context):
+            return self
+
+        def info(self, _event, _fields) -> None:
+            raise RuntimeError("diagnostic unavailable")
+
+    ensure_log(_Boom()).child({"run_id": "run-1"}).info("run.started", {
+        "mode": "build",
+        "resumed": False,
+        "approval_mode": "default",
+        "model_profile_id": "default",
+    })
+
+
 def test_partial_write_adapter_writes_the_complete_record() -> None:
     from harness_agent.diagnostic_log.runtime import _write_all
 

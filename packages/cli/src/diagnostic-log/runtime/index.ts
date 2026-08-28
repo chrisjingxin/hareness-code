@@ -59,6 +59,28 @@ export interface DiagnosticLog {
   error<E extends EventsForLevel<"error">>(event: E, fields: DiagnosticFieldsMap[E]): void
 }
 
+const noopDiagnosticLog: DiagnosticLog = {
+  child() { return noopDiagnosticLog },
+  debug() {},
+  info() {},
+  warn() {},
+  error() {},
+}
+
+/** 业务模块拿到的 logger：永不为空，info/warn/error/debug 不抛。 */
+export function ensureDiagnosticLog(log?: DiagnosticLog): DiagnosticLog {
+  if (!log) return noopDiagnosticLog
+  return {
+    child(context) {
+      try { return ensureDiagnosticLog(log.child(context)) } catch { return noopDiagnosticLog }
+    },
+    debug(event, fields) { try { log.debug(event, fields) } catch { /* observer */ } },
+    info(event, fields) { try { log.info(event, fields) } catch { /* observer */ } },
+    warn(event, fields) { try { log.warn(event, fields) } catch { /* observer */ } },
+    error(event, fields) { try { log.error(event, fields) } catch { /* observer */ } },
+  }
+}
+
 export type DiagnosticSnapshot = {
   queuedRecords: number
   queuedBytes: number
@@ -92,6 +114,7 @@ type MutableState = {
   reportedContractViolations: number
   disabled: boolean
   closing: boolean
+  writerFailedReported: boolean
 }
 
 /** 创建普通业务 logger 与仅供 composition root 持有的生命周期 controller。 */
@@ -113,6 +136,7 @@ export function createDiagnosticLog(options: DiagnosticRuntimeOptions): { log: D
     reportedContractViolations: 0,
     disabled: false,
     closing: false,
+    writerFailedReported: false,
   }
   const queue = new BoundedQueue(queueLimits, state)
   const writer: DiagnosticWriter = options.writer ?? new SegmentWriter({
@@ -179,10 +203,25 @@ export function createDiagnosticLog(options: DiagnosticRuntimeOptions): { log: D
       for (const record of records) await writer.append(record.encoded, record.bytes)
       state.written += records.length
       await writeAggregateEvents()
-    } catch {
+    } catch (error) {
       state.disabled = true
+      await reportWriterFailed(error)
       await writer.abort()
     }
+  }
+
+  async function reportWriterFailed(error: unknown): Promise<void> {
+    if (state.writerFailedReported) return
+    state.writerFailedReported = true
+    const encoded = internalRecord("error", "logging.writer_failed", {
+      failure_stage: "append",
+      error_type: error instanceof Error ? error.constructor.name : "Error",
+      summary_code: "WRITE_FAILED",
+    })
+    if (encoded) {
+      try { await writer.append(encoded, Buffer.byteLength(encoded)) } catch { /* already failed */ }
+    }
+    try { process.stderr.write("HARNESS_DIAGNOSTIC_WRITER_FAILED\n") } catch { /* observer */ }
   }
 
   async function writeAggregateEvents(): Promise<void> {

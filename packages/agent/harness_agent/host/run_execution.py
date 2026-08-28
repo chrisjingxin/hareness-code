@@ -272,6 +272,13 @@ class BuildRunAdapter:
             usage=run.usage,
             started_at=run.started_at,
             needs_user_decision=needs_user_decision,
+            diagnostic_log=getattr(run, "diagnostic_log", None),
+            timing=getattr(run, "timing", None),
+            model_profile_id=(
+                run.execution_binding.actual_primary.profile_id
+                if getattr(run, "execution_binding", None) is not None
+                else getattr(getattr(run, "start", None), "requested_primary_profile", None) or "default"
+            ),
         )
         try:
             await ManagedAgentExecutor().execute(request, observer)
@@ -793,6 +800,13 @@ class ComposeRunAdapter:
             usage=run.usage,
             started_at=run.started_at,
             needs_user_decision=needs_user_decision,
+            diagnostic_log=getattr(run, "diagnostic_log", None),
+            timing=getattr(run, "timing", None),
+            model_profile_id=(
+                run.execution_binding.actual_primary.profile_id
+                if getattr(run, "execution_binding", None) is not None
+                else getattr(getattr(run, "start", None), "requested_primary_profile", None) or "default"
+            ),
         )
         try:
             await ManagedAgentExecutor().execute(request, observer)

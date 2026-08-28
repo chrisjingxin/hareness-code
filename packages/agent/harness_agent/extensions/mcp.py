@@ -12,12 +12,14 @@ import logging
 import math
 import os
 import re
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Literal
 from urllib.parse import parse_qsl, urlsplit
 
+from harness_agent.diagnostic_log.runtime import ensure_log
 from harness_agent.runtime.resource_lifecycle import (
     ResourceScope,
     ResourceState,
@@ -274,6 +276,35 @@ def _create_plugin_http_client(
     )
 
 
+def mcp_server_fingerprint(config: McpServerConfig) -> str:
+    """MCP server canonical id 的不可逆 hash，不含 URL、command、args、header 或 env。"""
+    from harness_agent.runtime.agent_engine_profile import component_fingerprint
+
+    return component_fingerprint(
+        {
+            "name": config.name,
+            "transport": config.transport,
+            "source": config.source,
+        }
+    )
+
+
+def _mark_mcp_tool(tool: Any, server_name: str) -> None:
+    """给 MCP 工具打上类型与配置名诊断标记；失败不影响工具本身。"""
+    try:
+        object.__setattr__(tool, "_harness_tool_kind", "mcp")
+        object.__setattr__(tool, "_harness_mcp_server_name", server_name)
+    except Exception:
+        try:
+            tool._harness_tool_kind = "mcp"
+            tool._harness_mcp_server_name = server_name
+        except Exception:
+            metadata = getattr(tool, "metadata", None)
+            if isinstance(metadata, dict):
+                metadata["harness_tool_kind"] = "mcp"
+                metadata["harness_mcp_server_name"] = server_name
+
+
 def mcp_config_fingerprint(configs: list[McpServerConfig]) -> str:
     """计算 MCP 配置的脱敏 SHA-256 指纹。
 
@@ -415,13 +446,20 @@ class McpConnectionManager:
     将 MCP 工具转换为 LangChain BaseTool 供 Agent 使用。
     """
 
-    def __init__(self, snapshot: McpConfigSnapshot | Sequence[McpServerConfig]) -> None:
+    def __init__(
+        self,
+        snapshot: McpConfigSnapshot | Sequence[McpServerConfig],
+        *,
+        diagnostic_log: Any | None = None,
+    ) -> None:
         """保存初始快照，并把每个连接快照置于 Host owner 之下。"""
         if not isinstance(snapshot, McpConfigSnapshot):
             snapshot = build_mcp_snapshot(snapshot, revision="legacy")
         self._resources: dict[str, list[SharedResourceHandle[_McpRuntime]]] = {}
         self._current_resource = self._create_resource(snapshot)
         self._resources[snapshot.digest] = [self._current_resource]
+        self._diagnostic_log = ensure_log(diagnostic_log)
+        self._connected_at: dict[str, float] = {}
 
     @property
     def snapshot(self) -> McpConfigSnapshot:
@@ -651,32 +689,45 @@ class McpConnectionManager:
             runtime.connected = True
             for name, config in config_by_name.items():
                 runtime.server_statuses[name] = _server_status(config, "failed", error=str(exc))
+                self._log_connection_failed(config, started=time.monotonic(), error=exc, summary_code="MCP_CLIENT_FAILED")
             return
 
         runtime.tools = []
         seen_tool_names: set[str] = set()
         for name, config in config_by_name.items():
+            started = time.monotonic()
             try:
                 server_tools = await asyncio.wait_for(
                     runtime.client.get_tools(server_name=name),
                     timeout=config.timeout_seconds,
                 )
+                loaded = 0
                 for tool in server_tools:
                     tool_name = getattr(tool, "name", None)
                     if isinstance(tool_name, str) and tool_name in seen_tool_names:
                         continue
                     if isinstance(tool_name, str):
                         seen_tool_names.add(tool_name)
+                    _mark_mcp_tool(tool, name)
                     runtime.tools.append(tool)
+                    loaded += 1
                 runtime.server_statuses[name] = _server_status(config, "connected")
-            except asyncio.TimeoutError:
+                self._connected_at[name] = started
+                self._log_connection_completed(config, started=started, tool_count=loaded)
+            except asyncio.TimeoutError as exc:
                 logger.warning("MCP server %r connection timed out; continuing", name)
                 runtime.server_statuses[name] = _server_status(
                     config, "failed", error="connection timed out"
                 )
+                self._log_connection_failed(
+                    config, started=started, error=exc, summary_code="MCP_CONNECT_TIMEOUT"
+                )
             except Exception as exc:
                 logger.warning("MCP server %r connection failed: %s; continuing", name, exc)
                 runtime.server_statuses[name] = _server_status(config, "failed", error=str(exc))
+                self._log_connection_failed(
+                    config, started=started, error=exc, summary_code="MCP_CONNECT_FAILED"
+                )
         runtime.connected = True
         logger.info(
             "MCP connection attempts complete: %d server(s), %d tool(s) loaded",
@@ -690,6 +741,28 @@ class McpConnectionManager:
             for candidates in self._resources.values()
             for resource in candidates
         ]
+        if resources:
+            try:
+                runtime = self._current_resource.value
+            except Exception:
+                runtime = None
+            if runtime is not None:
+                for config in runtime.snapshot.servers:
+                    started = self._connected_at.pop(config.name, None)
+                    duration_ms = (
+                        max(0, round((time.monotonic() - started) * 1000))
+                        if started is not None
+                        else 0
+                    )
+                    self._diagnostic_log.info(
+                        "mcp.connection.closed",
+                        {
+                            "server_name": config.name,
+                            "server_fingerprint": mcp_server_fingerprint(config),
+                            "outcome": "closed",
+                            "duration_ms": duration_ms,
+                        },
+                    )
         self._resources = {}
         for resource in resources:
             await resource.begin_draining(reason="host_shutdown")
@@ -698,6 +771,46 @@ class McpConnectionManager:
             except Exception:
                 await resource.close(force=True)
         logger.info("MCP connections closed")
+
+    def _log_connection_completed(
+        self,
+        config: McpServerConfig,
+        *,
+        started: float,
+        tool_count: int,
+    ) -> None:
+        self._diagnostic_log.info(
+            "mcp.connection.completed",
+            {
+                "server_name": config.name,
+                "server_fingerprint": mcp_server_fingerprint(config),
+                "transport": config.transport,
+                "duration_ms": max(0, round((time.monotonic() - started) * 1000)),
+                "tool_count": tool_count,
+            },
+        )
+
+    def _log_connection_failed(
+        self,
+        config: McpServerConfig,
+        *,
+        started: float,
+        error: BaseException,
+        summary_code: str,
+    ) -> None:
+        self._diagnostic_log.warn(
+            "mcp.connection.failed",
+            {
+                "server_name": config.name,
+                "server_fingerprint": mcp_server_fingerprint(config),
+                "transport": config.transport,
+                "duration_ms": max(0, round((time.monotonic() - started) * 1000)),
+                "failure_stage": "connect",
+                "error_type": type(error).__name__,
+                "summary_code": summary_code,
+                "retryable": summary_code == "MCP_CONNECT_TIMEOUT",
+            },
+        )
 
     def _build_connections(self) -> dict[str, Any]:
         """将 McpServerConfig 列表转换为 MultiServerMCPClient 的 connections 字典。

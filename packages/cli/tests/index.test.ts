@@ -55,6 +55,13 @@ test("生产日志路径不再使用同步文件写入或旧 debug 目录", () =
   expect(source).not.toContain('.harness", "debug')
 })
 
+test("sidecar stderr 使用有界 drain，不拼接原文", () => {
+  const source = readFileSync(resolve(import.meta.dir, "../src/index.ts"), "utf8")
+  expect(source).toContain("SidecarStderrDrain")
+  expect(source).not.toContain("stderr += ")
+  expect(source).not.toContain("stderrChunks")
+})
+
 test("交互界面拒绝经过管道或任务复用器启动", () => {
   expect(() => validateInteractiveTerminal(undefined, true)).toThrow("requires a real terminal")
   expect(() => validateInteractiveTerminal(true, false)).toThrow("requires a real terminal")
@@ -109,4 +116,22 @@ test("Plugin CLI 按操作声明最小读写能力", () => {
   expect(clientCapabilities(validation)).not.toContain("plugins.manage")
   expect(clientCapabilities(install)).toContain("plugins.read")
   expect(clientCapabilities(install)).toContain("plugins.manage")
+})
+
+test("harness logs 命令路由在 startAgent 之前，不创建 sidecar、不调用 spawn", () => {
+  const logsCmd = parseArgs(["logs", "--run", "r1"])
+  expect(logsCmd.kind).toBe("logs")
+
+  // 源码证据：execute 中 logs 处理在 startAgent 调用之前，保证 spawn=0
+  const src = readFileSync(resolve(import.meta.dir, "../src/index.ts"), "utf8")
+  const startAgentIdx = src.indexOf("const agent = await startAgent(")
+  const logsCheckIdx = src.indexOf('command.kind === "logs"')
+  expect(logsCheckIdx).toBeGreaterThan(-1)
+  expect(logsCheckIdx).toBeLessThan(startAgentIdx)
+
+  const querySource = readFileSync(resolve(import.meta.dir, "../src/diagnostic-log/query.ts"), "utf8")
+  expect(querySource).not.toContain("child_process")
+  expect(querySource).not.toContain("Bun.spawn")
+  expect(querySource).not.toContain("Database")
+  expect(querySource).not.toContain("sqlite")
 })

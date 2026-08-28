@@ -8,6 +8,16 @@ from types import SimpleNamespace
 import pytest
 
 
+class _RecordingLog:
+    """只记录虚拟 Skill 读取事件。"""
+
+    def __init__(self) -> None:
+        self.records: list[tuple[str, dict[str, object]]] = []
+
+    def info(self, event: str, fields: dict[str, object]) -> None:
+        self.records.append((event, dict(fields)))
+
+
 def _write_skill(root: Path) -> None:
     """创建带辅助资源的合法项目 Skill。"""
     directory = root / "review"
@@ -56,6 +66,42 @@ async def test_virtual_files_read_skills_and_thread_scoped_history(tmp_path: Pat
     other = HarnessVirtualBackend(registry=registry, thread_id="thread-b", thread_persistence=store)
     assert (await other.aread(f"/.harness/history/{artifact.artifact_id}.md")).error
     await store.close()
+
+
+async def test_virtual_skill_success_logs_identity_without_content(tmp_path: Path) -> None:
+    """正文与资源成功分页后记 identity；失败读取不伪造成功事件。"""
+    from harness_agent.extensions.skills import SkillRegistry
+    from harness_agent.threads.virtual_files import HarnessVirtualBackend
+
+    workspace = tmp_path / "workspace"
+    _write_skill(workspace / ".harness" / "skills")
+    registry = SkillRegistry(workspace, home=tmp_path / "home")
+    log = _RecordingLog()
+    backend = HarnessVirtualBackend(
+        registry=registry,
+        thread_id="thread-a",
+        diagnostic_log=log,
+    )
+
+    assert (await backend.aread(
+        "/.harness/skills/project/review/SKILL.md", offset=1, limit=1
+    )).file_data
+    assert (await backend.aread(
+        "/.harness/skills/project/review/reference.txt"
+    )).file_data
+    assert (await backend.aread(
+        "/.harness/skills/project/missing/SKILL.md"
+    )).error
+    assert backend.read(
+        "/.harness/skills/project/review/SKILL.md", offset=-1
+    ).error
+
+    assert log.records == [
+        ("skill.read", {"skill_id": "project/review", "kind": "body"}),
+        ("skill.read", {"skill_id": "project/review", "kind": "resource"}),
+    ]
+    assert "第一行" not in repr(log.records)
+    assert "参考一" not in repr(log.records)
 
 
 async def test_virtual_skill_reads_are_isolated_between_old_and_new_snapshots(

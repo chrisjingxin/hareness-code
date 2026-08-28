@@ -637,6 +637,43 @@ async def test_v8_migration_keeps_legacy_projection_auditable_but_syncs_transcri
     await migrated.close()
 
 
+class _RecordingContextLog:
+    def __init__(self) -> None:
+        self.records: list[tuple[str, str, dict[str, object]]] = []
+
+    def info(self, event, fields) -> None:
+        self.records.append(("info", event, dict(fields)))
+
+    def error(self, event, fields) -> None:
+        self.records.append(("error", event, dict(fields)))
+
+    def warn(self, event, fields) -> None:
+        self.records.append(("warn", event, dict(fields)))
+
+    def debug(self, event, fields) -> None:
+        self.records.append(("debug", event, dict(fields)))
+
+
+@pytest.mark.asyncio
+async def test_context_project_logs_counts_without_message_body(tmp_path) -> None:
+    """Context 投影只记 duration/count/tokens，不含消息正文。"""
+    store = await _store(tmp_path)
+    log = _RecordingContextLog()
+    store.bind_diagnostic_log(log)
+    canary = "CANARY_HC163_CONTEXT_BODY"
+    await accept_thread(store, "thread", canary, run_id="run-1")
+
+    projection = await ContextProjector(store).project("thread")
+
+    events = [event for _, event, _ in log.records]
+    assert "context.build.completed" in events
+    completed = next(fields for _, event, fields in log.records if event == "context.build.completed")
+    assert completed["message_count"] == len(projection.messages)
+    assert completed["cache_status"] in {"hit", "miss"}
+    assert canary not in repr(log.records)
+    await store.close()
+
+
 async def test_checkpoint_failure_rolls_back_artifact_and_state(tmp_path):
     """检查点写入失败时同一事务的 Artifact 与状态不得半提交。"""
     store = await _store(tmp_path)

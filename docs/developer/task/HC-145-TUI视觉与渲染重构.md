@@ -8,8 +8,8 @@ priority: P1
 status: 进行中
 owner: Grok
 branch: feat/hc-145-tui-visual
-reviewed_at: 2026-08-13
-review_due: 2026-08-27
+reviewed_at: 2026-08-28
+review_due: 2026-09-11
 scope: 只改 TUI 视觉系统与渲染架构。对话记录按类型拆成独立组件，工具按名字分流到 Inline/Block/Diff/Generic，审批和问答改到底部 Dock，思考与长输出做有界绘制。Web UI、Protocol、Agent、Sidebar 和新产品面不在范围。
 acceptance: 用户在 TUI 中能区分 Build/Compose 的 Mode 身份且互不等权染色整页；工具不再共用一张卡；审批/提问时底部输入框换成 Dock，对话区只留事后结果；思考进行中强制展开但只画最后 12 行，点开最多约 40 行，长内容不再把终端画死；Compose 不再单独占一块阶段顶栏；Web 外观与现有工作流不变；TUI focused 测试、typecheck、build 通过。
 user_docs: docs/user/交互使用.md

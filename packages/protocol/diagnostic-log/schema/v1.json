@@ -30,6 +30,15 @@
       "context.build.completed": { "levels": ["info"], "fields": "#/$defs/contextBuildCompletedFields" },
       "context.build.failed": { "levels": ["error"], "fields": "#/$defs/durationErrorFields" },
       "context.compaction.completed": { "levels": ["info"], "fields": "#/$defs/contextCompactionFields" },
+      "context.compaction.failed": { "levels": ["error"], "fields": "#/$defs/contextCompactionFailedFields" },
+      "catalog.bound": { "levels": ["info"], "fields": "#/$defs/catalogBoundFields" },
+      "skill.read": { "levels": ["info"], "fields": "#/$defs/skillReadFields" },
+      "hook.started": { "levels": ["debug", "info"], "fields": "#/$defs/hookStartedFields" },
+      "hook.completed": { "levels": ["info"], "fields": "#/$defs/hookCompletedFields" },
+      "hook.failed": { "levels": ["warn", "error"], "fields": "#/$defs/hookFailedFields" },
+      "execution.started": { "levels": ["info"], "fields": "#/$defs/executionStartedFields" },
+      "execution.completed": { "levels": ["info"], "fields": "#/$defs/executionCompletedFields" },
+      "execution.failed": { "levels": ["warn", "error"], "fields": "#/$defs/executionFailedFields" },
       "model.started": { "levels": ["debug", "info"], "fields": "#/$defs/modelStartedFields" },
       "model.completed": { "levels": ["info"], "fields": "#/$defs/modelCompletedFields" },
       "model.retry_scheduled": { "levels": ["debug", "warn"], "fields": "#/$defs/modelRetryFields" },
@@ -211,8 +220,57 @@
     },
     "contextCompactionFields": {
       "type": "object", "additionalProperties": false,
-      "required": ["duration_ms", "before_estimated_tokens", "after_estimated_tokens", "artifact_count"],
-      "properties": { "duration_ms": { "$ref": "#/$defs/nonNegativeInt" }, "before_estimated_tokens": { "$ref": "#/$defs/nonNegativeInt" }, "after_estimated_tokens": { "$ref": "#/$defs/nonNegativeInt" }, "artifact_count": { "$ref": "#/$defs/nonNegativeInt" } }
+      "required": ["trigger", "action", "duration_ms", "before_estimated_tokens", "after_estimated_tokens", "artifact_count"],
+      "properties": { "trigger": { "enum": ["auto", "manual", "overflow"] }, "action": { "$ref": "#/$defs/safeName" }, "duration_ms": { "$ref": "#/$defs/nonNegativeInt" }, "before_estimated_tokens": { "$ref": "#/$defs/nonNegativeInt" }, "after_estimated_tokens": { "$ref": "#/$defs/nonNegativeInt" }, "artifact_count": { "$ref": "#/$defs/nonNegativeInt" } }
+    },
+    "contextCompactionFailedFields": {
+      "type": "object", "additionalProperties": false,
+      "required": ["trigger", "action", "duration_ms", "failure_stage", "error_type", "summary_code"],
+      "properties": { "trigger": { "enum": ["auto", "manual", "overflow"] }, "action": { "$ref": "#/$defs/safeName" }, "duration_ms": { "$ref": "#/$defs/nonNegativeInt" }, "failure_stage": { "$ref": "#/$defs/safeName" }, "error_code": { "$ref": "#/$defs/safeName" }, "error_type": { "$ref": "#/$defs/safeName" }, "retryable": { "type": "boolean" }, "summary_code": { "$ref": "#/$defs/safeName" } }
+    },
+    "boundedSafeNames": {
+      "type": "array", "maxItems": 32, "uniqueItems": true,
+      "items": { "$ref": "#/$defs/safeName" }
+    },
+    "catalogBoundFields": {
+      "type": "object", "additionalProperties": false,
+      "required": ["skill_count", "mcp_count", "plugin_count"],
+      "properties": { "skill_count": { "$ref": "#/$defs/nonNegativeInt" }, "mcp_count": { "$ref": "#/$defs/nonNegativeInt" }, "plugin_count": { "$ref": "#/$defs/nonNegativeInt" }, "skill_ids": { "$ref": "#/$defs/boundedSafeNames" }, "mcp_ids": { "$ref": "#/$defs/boundedSafeNames" }, "plugin_ids": { "$ref": "#/$defs/boundedSafeNames" } }
+    },
+    "skillReadFields": {
+      "type": "object", "additionalProperties": false,
+      "required": ["skill_id", "kind"],
+      "properties": { "skill_id": { "$ref": "#/$defs/safeName" }, "kind": { "enum": ["body", "resource"] }, "model_round": { "type": "integer", "minimum": 1 } }
+    },
+    "hookStartedFields": {
+      "type": "object", "additionalProperties": false,
+      "required": ["plugin_id", "hook_event", "tool_name"],
+      "properties": { "plugin_id": { "$ref": "#/$defs/safeName" }, "hook_event": { "enum": ["PreToolUse", "PostToolUse", "PostToolUseFailure"] }, "tool_name": { "$ref": "#/$defs/safeName" }, "model_round": { "type": "integer", "minimum": 1 } }
+    },
+    "hookCompletedFields": {
+      "type": "object", "additionalProperties": false,
+      "required": ["plugin_id", "hook_event", "tool_name", "outcome", "duration_ms"],
+      "properties": { "plugin_id": { "$ref": "#/$defs/safeName" }, "hook_event": { "enum": ["PreToolUse", "PostToolUse", "PostToolUseFailure"] }, "tool_name": { "$ref": "#/$defs/safeName" }, "outcome": { "enum": ["allow", "deny", "ok"] }, "duration_ms": { "$ref": "#/$defs/nonNegativeInt" }, "model_round": { "type": "integer", "minimum": 1 } }
+    },
+    "hookFailedFields": {
+      "type": "object", "additionalProperties": false,
+      "required": ["plugin_id", "hook_event", "tool_name", "duration_ms", "failure_stage", "error_type", "summary_code"],
+      "properties": { "plugin_id": { "$ref": "#/$defs/safeName" }, "hook_event": { "enum": ["PreToolUse", "PostToolUse", "PostToolUseFailure"] }, "tool_name": { "$ref": "#/$defs/safeName" }, "duration_ms": { "$ref": "#/$defs/nonNegativeInt" }, "failure_stage": { "$ref": "#/$defs/safeName" }, "error_code": { "$ref": "#/$defs/safeName" }, "error_type": { "$ref": "#/$defs/safeName" }, "retryable": { "type": "boolean" }, "summary_code": { "$ref": "#/$defs/safeName" }, "model_round": { "type": "integer", "minimum": 1 } }
+    },
+    "executionStartedFields": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "agent_id"],
+      "properties": { "kind": { "enum": ["root", "child", "compose_stage"] }, "agent_id": { "$ref": "#/$defs/safeName" } }
+    },
+    "executionCompletedFields": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "agent_id", "outcome", "duration_ms"],
+      "properties": { "kind": { "enum": ["root", "child", "compose_stage"] }, "agent_id": { "$ref": "#/$defs/safeName" }, "outcome": { "$ref": "#/$defs/safeName" }, "duration_ms": { "$ref": "#/$defs/nonNegativeInt" } }
+    },
+    "executionFailedFields": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "agent_id", "duration_ms", "failure_stage", "error_type", "summary_code"],
+      "properties": { "kind": { "enum": ["root", "child", "compose_stage"] }, "agent_id": { "$ref": "#/$defs/safeName" }, "duration_ms": { "$ref": "#/$defs/nonNegativeInt" }, "failure_stage": { "$ref": "#/$defs/safeName" }, "error_code": { "$ref": "#/$defs/safeName" }, "error_type": { "$ref": "#/$defs/safeName" }, "retryable": { "type": "boolean" }, "summary_code": { "$ref": "#/$defs/safeName" } }
     },
     "modelStartedFields": {
       "type": "object", "additionalProperties": false,
@@ -247,32 +305,35 @@
     "toolStartedFields": {
       "type": "object", "additionalProperties": false,
       "required": ["tool_name", "tool_kind", "model_round"],
-      "properties": { "tool_name": { "$ref": "#/$defs/safeName" }, "tool_kind": { "$ref": "#/$defs/safeName" }, "model_round": { "type": "integer", "minimum": 1 } }
+      "properties": { "tool_name": { "$ref": "#/$defs/safeName" }, "tool_kind": { "$ref": "#/$defs/safeName" }, "server_name": { "$ref": "#/$defs/safeName" }, "model_round": { "type": "integer", "minimum": 1 } },
+      "allOf": [{ "if": { "properties": { "tool_kind": { "const": "mcp" } }, "required": ["tool_kind"] }, "then": { "properties": { "server_name": true }, "required": ["server_name"] } }]
     },
     "toolCompletedFields": {
       "type": "object", "additionalProperties": false,
       "required": ["tool_name", "tool_kind", "outcome", "duration_ms", "result_bytes", "truncated"],
-      "properties": { "tool_name": { "$ref": "#/$defs/safeName" }, "tool_kind": { "$ref": "#/$defs/safeName" }, "outcome": { "$ref": "#/$defs/safeName" }, "duration_ms": { "$ref": "#/$defs/nonNegativeInt" }, "result_bytes": { "$ref": "#/$defs/nonNegativeInt" }, "truncated": { "type": "boolean" } }
+      "properties": { "tool_name": { "$ref": "#/$defs/safeName" }, "tool_kind": { "$ref": "#/$defs/safeName" }, "server_name": { "$ref": "#/$defs/safeName" }, "outcome": { "$ref": "#/$defs/safeName" }, "duration_ms": { "$ref": "#/$defs/nonNegativeInt" }, "result_bytes": { "$ref": "#/$defs/nonNegativeInt" }, "truncated": { "type": "boolean" } },
+      "allOf": [{ "if": { "properties": { "tool_kind": { "const": "mcp" } }, "required": ["tool_kind"] }, "then": { "properties": { "server_name": true }, "required": ["server_name"] } }]
     },
     "toolFailedFields": {
       "type": "object", "additionalProperties": false,
       "required": ["tool_name", "tool_kind", "duration_ms", "failure_stage", "error_type", "summary_code"],
-      "properties": { "tool_name": { "$ref": "#/$defs/safeName" }, "tool_kind": { "$ref": "#/$defs/safeName" }, "duration_ms": { "$ref": "#/$defs/nonNegativeInt" }, "failure_stage": { "$ref": "#/$defs/safeName" }, "error_code": { "$ref": "#/$defs/safeName" }, "error_type": { "$ref": "#/$defs/safeName" }, "retryable": { "type": "boolean" }, "summary_code": { "$ref": "#/$defs/safeName" } }
+      "properties": { "tool_name": { "$ref": "#/$defs/safeName" }, "tool_kind": { "$ref": "#/$defs/safeName" }, "server_name": { "$ref": "#/$defs/safeName" }, "duration_ms": { "$ref": "#/$defs/nonNegativeInt" }, "failure_stage": { "$ref": "#/$defs/safeName" }, "error_code": { "$ref": "#/$defs/safeName" }, "error_type": { "$ref": "#/$defs/safeName" }, "retryable": { "type": "boolean" }, "summary_code": { "$ref": "#/$defs/safeName" } },
+      "allOf": [{ "if": { "properties": { "tool_kind": { "const": "mcp" } }, "required": ["tool_kind"] }, "then": { "properties": { "server_name": true }, "required": ["server_name"] } }]
     },
     "mcpCompletedFields": {
       "type": "object", "additionalProperties": false,
-      "required": ["server_fingerprint", "transport", "duration_ms", "tool_count"],
-      "properties": { "server_fingerprint": { "$ref": "#/$defs/fingerprint" }, "transport": { "$ref": "#/$defs/safeName" }, "duration_ms": { "$ref": "#/$defs/nonNegativeInt" }, "tool_count": { "$ref": "#/$defs/nonNegativeInt" } }
+      "required": ["server_name", "server_fingerprint", "transport", "duration_ms", "tool_count"],
+      "properties": { "server_name": { "$ref": "#/$defs/safeName" }, "server_fingerprint": { "$ref": "#/$defs/fingerprint" }, "transport": { "$ref": "#/$defs/safeName" }, "duration_ms": { "$ref": "#/$defs/nonNegativeInt" }, "tool_count": { "$ref": "#/$defs/nonNegativeInt" } }
     },
     "mcpFailedFields": {
       "type": "object", "additionalProperties": false,
-      "required": ["server_fingerprint", "transport", "duration_ms", "failure_stage", "error_type", "summary_code"],
-      "properties": { "server_fingerprint": { "$ref": "#/$defs/fingerprint" }, "transport": { "$ref": "#/$defs/safeName" }, "duration_ms": { "$ref": "#/$defs/nonNegativeInt" }, "failure_stage": { "$ref": "#/$defs/safeName" }, "error_code": { "$ref": "#/$defs/safeName" }, "error_type": { "$ref": "#/$defs/safeName" }, "retryable": { "type": "boolean" }, "summary_code": { "$ref": "#/$defs/safeName" } }
+      "required": ["server_name", "server_fingerprint", "transport", "duration_ms", "failure_stage", "error_type", "summary_code"],
+      "properties": { "server_name": { "$ref": "#/$defs/safeName" }, "server_fingerprint": { "$ref": "#/$defs/fingerprint" }, "transport": { "$ref": "#/$defs/safeName" }, "duration_ms": { "$ref": "#/$defs/nonNegativeInt" }, "failure_stage": { "$ref": "#/$defs/safeName" }, "error_code": { "$ref": "#/$defs/safeName" }, "error_type": { "$ref": "#/$defs/safeName" }, "retryable": { "type": "boolean" }, "summary_code": { "$ref": "#/$defs/safeName" } }
     },
     "mcpClosedFields": {
       "type": "object", "additionalProperties": false,
-      "required": ["server_fingerprint", "outcome", "duration_ms"],
-      "properties": { "server_fingerprint": { "$ref": "#/$defs/fingerprint" }, "outcome": { "$ref": "#/$defs/safeName" }, "duration_ms": { "$ref": "#/$defs/nonNegativeInt" } }
+      "required": ["server_name", "server_fingerprint", "outcome", "duration_ms"],
+      "properties": { "server_name": { "$ref": "#/$defs/safeName" }, "server_fingerprint": { "$ref": "#/$defs/fingerprint" }, "outcome": { "$ref": "#/$defs/safeName" }, "duration_ms": { "$ref": "#/$defs/nonNegativeInt" } }
     },
     "persistenceCompletedFields": {
       "type": "object", "additionalProperties": false,
@@ -289,10 +350,54 @@
       "required": ["reason"],
       "properties": { "reason": { "$ref": "#/$defs/safeName" } }
     },
+    "queryFilters": {
+      "type": "object", "additionalProperties": false,
+      "required": ["minimum_level", "event", "component"],
+      "properties": { "minimum_level": { "$ref": "#/$defs/level" }, "event": { "type": ["string", "null"], "minLength": 1, "maxLength": 120 }, "component": { "type": ["string", "null"], "enum": ["cli", "agent", null] } }
+    },
+    "queryRunItem": {
+      "type": "object", "additionalProperties": false,
+      "required": ["run_id"],
+      "properties": { "run_id": { "$ref": "#/$defs/safeName" }, "mode": { "enum": ["build", "compose"] }, "outcome": { "$ref": "#/$defs/safeName" }, "duration_ms": { "$ref": "#/$defs/nonNegativeInt" } }
+    },
+    "queryThreadItem": {
+      "type": "object", "additionalProperties": false,
+      "required": ["thread_id", "last_activity_ms", "run_count"],
+      "properties": { "thread_id": { "$ref": "#/$defs/safeName" }, "last_activity_ms": { "$ref": "#/$defs/nonNegativeInt" }, "run_count": { "$ref": "#/$defs/nonNegativeInt" }, "latest_mode": { "enum": ["build", "compose"] }, "latest_outcome": { "$ref": "#/$defs/safeName" }, "latest_duration_ms": { "$ref": "#/$defs/nonNegativeInt" } }
+    },
+    "queryThreadSummary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["run_count", "runs"],
+      "properties": { "run_count": { "$ref": "#/$defs/nonNegativeInt" }, "outcome": { "$ref": "#/$defs/safeName" }, "runs": { "type": "array", "maxItems": 1000, "items": { "$ref": "#/$defs/queryRunItem" } } }
+    },
+    "queryRunSummary": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "outcome": { "$ref": "#/$defs/safeName" }, "duration_ms": { "$ref": "#/$defs/nonNegativeInt" }, "active_ms": { "$ref": "#/$defs/nonNegativeInt" }, "interaction_wait_ms": { "$ref": "#/$defs/nonNegativeInt" }, "retry_wait_ms": { "$ref": "#/$defs/nonNegativeInt" }, "first_visible_activity_ms": { "$ref": "#/$defs/nullableNonNegativeInt" } }
+    },
+    "queryDiagnostics": {
+      "type": "object", "additionalProperties": false,
+      "required": ["malformed_count", "invalid_count", "unsupported_schema_count", "partial_line_count", "orphan_active_count", "orphan_active_bytes"],
+      "properties": { "malformed_count": { "$ref": "#/$defs/nonNegativeInt" }, "invalid_count": { "$ref": "#/$defs/nonNegativeInt" }, "unsupported_schema_count": { "$ref": "#/$defs/nonNegativeInt" }, "partial_line_count": { "$ref": "#/$defs/nonNegativeInt" }, "orphan_active_count": { "$ref": "#/$defs/nonNegativeInt" }, "orphan_active_bytes": { "$ref": "#/$defs/nonNegativeInt" } }
+    },
     "queryResult": {
       "type": "object", "additionalProperties": false,
-      "required": ["schema_version", "kind", "records", "truncated"],
-      "properties": { "schema_version": { "const": 1 }, "kind": { "enum": ["list", "run"] }, "records": { "type": "array", "items": { "$ref": "#/$defs/record" } }, "truncated": { "type": "boolean" }, "next_cursor": { "type": ["string", "null"], "maxLength": 16384 } }
+      "required": ["query_schema_version", "project_fingerprint", "filters", "events", "matched_count", "returned_count", "truncated", "next_cursor", "diagnostics"],
+      "properties": {
+        "query_schema_version": { "const": 1 },
+        "project_fingerprint": { "$ref": "#/$defs/fingerprint" },
+        "thread_id": { "$ref": "#/$defs/safeName" },
+        "run_id": { "$ref": "#/$defs/safeName" },
+        "filters": { "$ref": "#/$defs/queryFilters" },
+        "summary": { "oneOf": [{ "$ref": "#/$defs/queryThreadSummary" }, { "$ref": "#/$defs/queryRunSummary" }] },
+        "threads": { "type": "array", "maxItems": 1000, "items": { "$ref": "#/$defs/queryThreadItem" } },
+        "events": { "type": "array", "maxItems": 1000, "items": { "$ref": "#/$defs/record" } },
+        "matched_count": { "$ref": "#/$defs/nonNegativeInt" },
+        "returned_count": { "$ref": "#/$defs/nonNegativeInt" },
+        "truncated": { "type": "boolean" },
+        "next_cursor": { "type": ["string", "null"], "maxLength": 16384 },
+        "diagnostics": { "$ref": "#/$defs/queryDiagnostics" }
+      },
+      "not": { "type": "object", "properties": { "thread_id": true, "run_id": true }, "required": ["thread_id", "run_id"] }
     }
   }
 }

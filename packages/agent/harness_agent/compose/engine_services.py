@@ -58,6 +58,7 @@ class EngineDriverServices:
     profile_key: str = ""
     cancellation_token: Any = None
     stage_observer: Any | None = None
+    diagnostic_log: Any = None
     now_ms: Callable[[], int] = field(default=lambda: int(time.time() * 1000))
 
 
@@ -114,6 +115,7 @@ class _StageDriverBase:
             profile_key=self._services.profile_key,
             cancellation_token=self._services.cancellation_token,
             timeout_seconds=_STAGE_TIMEOUT_SECONDS,
+            diagnostic_log=self._services.diagnostic_log,
         )
 
     async def _run(

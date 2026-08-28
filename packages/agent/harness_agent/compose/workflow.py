@@ -1288,6 +1288,7 @@ class ComposeWorkflow:
             parent_ref=run.root_execution_ref,
             profile_key=profile.profile_key if profile is not None else "",
             cancellation_token=run.cancellation_token,
+            diagnostic_log=getattr(run, "diagnostic_log", None),
         )
         scope = make_activity_scope(
             stage_agent_id=stage,

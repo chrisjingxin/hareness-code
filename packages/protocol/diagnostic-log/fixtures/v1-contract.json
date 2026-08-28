@@ -2074,6 +2074,8 @@
       },
       "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "fields": {
+        "trigger": "auto",
+        "action": "x",
         "duration_ms": 1,
         "before_estimated_tokens": 1,
         "after_estimated_tokens": 1,
@@ -2096,6 +2098,8 @@
       },
       "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "fields": {
+        "trigger": "auto",
+        "action": "x",
         "duration_ms": 1,
         "before_estimated_tokens": 1,
         "after_estimated_tokens": 1,
@@ -2118,6 +2122,8 @@
       },
       "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "fields": {
+        "trigger": "auto",
+        "action": "x",
         "duration_ms": 1,
         "before_estimated_tokens": 1,
         "after_estimated_tokens": 1,
@@ -2141,9 +2147,811 @@
       },
       "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "fields": {
+        "action": "x",
+        "duration_ms": 1,
         "before_estimated_tokens": 1,
         "after_estimated_tokens": 1,
         "artifact_count": 1
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "error",
+      "event": "context.compaction.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "trigger": "auto",
+        "action": "x",
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "context.compaction.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "trigger": "auto",
+        "action": "x",
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "error",
+      "event": "context.compaction.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "trigger": "auto",
+        "action": "x",
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x",
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "error",
+      "event": "context.compaction.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "action": "x",
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "catalog.bound",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "skill_count": 1,
+        "mcp_count": 1,
+        "plugin_count": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "catalog.bound",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "skill_count": 1,
+        "mcp_count": 1,
+        "plugin_count": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "catalog.bound",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "skill_count": 1,
+        "mcp_count": 1,
+        "plugin_count": 1,
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "catalog.bound",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "mcp_count": 1,
+        "plugin_count": 1
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "skill.read",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "skill_id": "x",
+        "kind": "body"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "skill.read",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "skill_id": "x",
+        "kind": "body"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "skill.read",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "skill_id": "x",
+        "kind": "body",
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "skill.read",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "kind": "body"
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "hook.started",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "plugin_id": "x",
+        "hook_event": "PreToolUse",
+        "tool_name": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "hook.started",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "plugin_id": "x",
+        "hook_event": "PreToolUse",
+        "tool_name": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "hook.started",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "plugin_id": "x",
+        "hook_event": "PreToolUse",
+        "tool_name": "x",
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "hook.started",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "hook_event": "PreToolUse",
+        "tool_name": "x"
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "hook.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "plugin_id": "x",
+        "hook_event": "PreToolUse",
+        "tool_name": "x",
+        "outcome": "allow",
+        "duration_ms": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "hook.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "plugin_id": "x",
+        "hook_event": "PreToolUse",
+        "tool_name": "x",
+        "outcome": "allow",
+        "duration_ms": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "hook.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "plugin_id": "x",
+        "hook_event": "PreToolUse",
+        "tool_name": "x",
+        "outcome": "allow",
+        "duration_ms": 1,
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "hook.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "hook_event": "PreToolUse",
+        "tool_name": "x",
+        "outcome": "allow",
+        "duration_ms": 1
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "hook.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "plugin_id": "x",
+        "hook_event": "PreToolUse",
+        "tool_name": "x",
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "hook.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "plugin_id": "x",
+        "hook_event": "PreToolUse",
+        "tool_name": "x",
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "hook.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "plugin_id": "x",
+        "hook_event": "PreToolUse",
+        "tool_name": "x",
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x",
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "hook.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "hook_event": "PreToolUse",
+        "tool_name": "x",
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "execution.started",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "kind": "root",
+        "agent_id": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "execution.started",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "kind": "root",
+        "agent_id": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "execution.started",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "kind": "root",
+        "agent_id": "x",
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "execution.started",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "agent_id": "x"
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "execution.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "kind": "root",
+        "agent_id": "x",
+        "outcome": "x",
+        "duration_ms": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "execution.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "kind": "root",
+        "agent_id": "x",
+        "outcome": "x",
+        "duration_ms": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "execution.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "kind": "root",
+        "agent_id": "x",
+        "outcome": "x",
+        "duration_ms": 1,
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "execution.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "agent_id": "x",
+        "outcome": "x",
+        "duration_ms": 1
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "execution.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "kind": "root",
+        "agent_id": "x",
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "execution.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "kind": "root",
+        "agent_id": "x",
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "execution.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "kind": "root",
+        "agent_id": "x",
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x",
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "execution.failed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "agent_id": "x",
+        "duration_ms": 1,
+        "failure_stage": "x",
+        "error_type": "x",
+        "summary_code": "x"
       }
     }
   },
@@ -2982,6 +3790,7 @@
       },
       "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "fields": {
+        "server_name": "x",
         "server_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "transport": "x",
         "duration_ms": 1,
@@ -3004,6 +3813,7 @@
       },
       "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "fields": {
+        "server_name": "x",
         "server_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "transport": "x",
         "duration_ms": 1,
@@ -3026,6 +3836,7 @@
       },
       "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "fields": {
+        "server_name": "x",
         "server_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "transport": "x",
         "duration_ms": 1,
@@ -3049,6 +3860,7 @@
       },
       "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "fields": {
+        "server_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "transport": "x",
         "duration_ms": 1,
         "tool_count": 1
@@ -3070,6 +3882,7 @@
       },
       "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "fields": {
+        "server_name": "x",
         "server_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "transport": "x",
         "duration_ms": 1,
@@ -3094,6 +3907,7 @@
       },
       "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "fields": {
+        "server_name": "x",
         "server_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "transport": "x",
         "duration_ms": 1,
@@ -3118,6 +3932,7 @@
       },
       "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "fields": {
+        "server_name": "x",
         "server_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "transport": "x",
         "duration_ms": 1,
@@ -3143,6 +3958,7 @@
       },
       "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "fields": {
+        "server_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "transport": "x",
         "duration_ms": 1,
         "failure_stage": "x",
@@ -3166,6 +3982,7 @@
       },
       "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "fields": {
+        "server_name": "x",
         "server_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "outcome": "x",
         "duration_ms": 1
@@ -3187,6 +4004,7 @@
       },
       "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "fields": {
+        "server_name": "x",
         "server_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "outcome": "x",
         "duration_ms": 1
@@ -3208,6 +4026,7 @@
       },
       "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "fields": {
+        "server_name": "x",
         "server_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "outcome": "x",
         "duration_ms": 1,
@@ -3230,6 +4049,7 @@
       },
       "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "fields": {
+        "server_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "outcome": "x",
         "duration_ms": 1
       }

@@ -24,6 +24,7 @@ from harness_agent.runtime.execution_stream import (
     StreamSession,
     execute as execute_stream,
 )
+from harness_agent.diagnostic_log.runtime import DiagnosticLog, ensure_log
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,18 @@ class ProviderRetryPolicy(Protocol):
     def should_retry(self, attempt: int, error: BaseException) -> bool: ...
 
     def retry_delay_seconds(self, error: BaseException) -> float: ...
+
+
+class ManagedTimingPort(Protocol):
+    """把 executor 的主动区间和 retry 等待汇入 Run 时间账本。"""
+
+    def begin_active(self) -> float: ...
+
+    def end_active(self, started_at: float) -> None: ...
+
+    def begin_wait(self) -> float: ...
+
+    def end_retry_wait(self, started_at: float) -> None: ...
 
 
 _RATE_LIMIT_CODES = frozenset(
@@ -159,6 +172,9 @@ class ManagedAgentRequest:
     usage: dict[str, int] | None = None
     started_at: float = field(default_factory=time.monotonic)
     provider_retry: ProviderRetryPolicy | None = None
+    diagnostic_log: DiagnosticLog | None = None
+    timing: ManagedTimingPort | None = None
+    model_profile_id: str = "default"
     # 目录信任等必须用户决策的中断判定钩子；透传给 shared execution stream。
     needs_user_decision: Callable[[str, Mapping[str, object]], bool] | None = None
 
@@ -187,6 +203,9 @@ class ManagedAgentRequest:
             for snapshot_id in self.required_skill_snapshot_ids
         ):
             raise ValueError("MANAGED_AGENT_REQUIRED_SKILL_SNAPSHOT_INVALID")
+        object.__setattr__(self, "diagnostic_log", ensure_log(self.diagnostic_log))
+        if not isinstance(self.model_profile_id, str) or not self.model_profile_id:
+            raise ValueError("MANAGED_AGENT_MODEL_PROFILE_INVALID")
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +221,16 @@ class ManagedAgentResult:
 class ManagedAgentExecutor:
     """统一拥有 Agent runtime、shared stream 与 Interaction resume loop。"""
 
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        """注入 monotonic clock/sleep，使 attempt 与 retry 计时可确定测试。"""
+        self._clock = clock
+        self._sleep = sleep
+
     async def execute(
         self,
         request: ManagedAgentRequest,
@@ -215,7 +244,33 @@ class ManagedAgentExecutor:
                 nonlocal runtime
                 if request.execution_starter is not None:
                     await request.execution_starter(request.execution_ref)
-                runtime = await request.runtime_provider()
+                acquire_started = self._clock()
+                active_started = (
+                    request.timing.begin_active() if request.timing is not None else None
+                )
+                try:
+                    runtime = await request.runtime_provider()
+                except BaseException as exc:
+                    request.diagnostic_log.error(
+                        "runtime.acquire.failed",
+                        {
+                            "duration_ms": _duration_ms(self._clock, acquire_started),
+                            **_error_fields(exc, "runtime_acquire", "runtime_acquire_failed"),
+                        },
+                    )
+                    raise
+                finally:
+                    if request.timing is not None and active_started is not None:
+                        request.timing.end_active(active_started)
+                request.diagnostic_log.info(
+                    "runtime.acquire.completed",
+                    {
+                        "source": getattr(runtime, "acquire_source", "reused"),
+                        "queue_ms": max(0, int(getattr(runtime, "queue_ms", 0))),
+                        "build_ms": max(0, int(getattr(runtime, "build_ms", 0))),
+                        "duration_ms": _duration_ms(self._clock, acquire_started),
+                    },
+                )
                 return await self._execute_with_runtime(request, observer, runtime)
 
             if request.timeout_seconds is None:
@@ -230,6 +285,7 @@ class ManagedAgentExecutor:
                 ) from exc
         finally:
             if runtime is not None:
+                release_started = self._clock()
                 try:
                     await runtime.release()
                 except asyncio.CancelledError:
@@ -242,6 +298,21 @@ class ManagedAgentExecutor:
                     logger.exception(
                         "Unable to release managed runtime for execution %s",
                         request.execution_ref,
+                    )
+                    request.diagnostic_log.warn(
+                        "runtime.released",
+                        {
+                            "outcome": "failed",
+                            "duration_ms": _duration_ms(self._clock, release_started),
+                        },
+                    )
+                else:
+                    request.diagnostic_log.info(
+                        "runtime.released",
+                        {
+                            "outcome": "released",
+                            "duration_ms": _duration_ms(self._clock, release_started),
+                        },
                     )
 
     async def _execute_with_runtime(
@@ -270,7 +341,9 @@ class ManagedAgentExecutor:
             session.usage = request.usage
 
         resume: object | None = None
+        model_round = 0
         while True:
+            model_round += 1
             observer.on_model_round()
             if resume is not None:
                 _schedule_interaction_resume(runtime.run_context)
@@ -285,6 +358,7 @@ class ManagedAgentExecutor:
                 runtime,
                 session,
                 stream_input,
+                model_round,
             )
             if stream_result.resume is None:
                 result = ManagedAgentResult(
@@ -306,36 +380,100 @@ class ManagedAgentExecutor:
         runtime: ManagedAgentRuntime,
         session: StreamSession,
         stream_input: object,
+        model_round: int,
     ):
         """在 provider 预算内重试 stream round；无策略时保持原有错误直通。"""
         attempt = 1
         while True:
+            attempt_started = self._clock()
+            first_chunk_at: float | None = None
+            usage_before = dict(session.usage)
+            active_started = (
+                request.timing.begin_active() if request.timing is not None else None
+            )
+            request.diagnostic_log.info(
+                "model.started",
+                {
+                    "model_round": model_round,
+                    "provider_attempt": attempt,
+                    "profile_id": request.model_profile_id,
+                },
+            )
+
+            def mark_first_chunk() -> None:
+                nonlocal first_chunk_at
+                if first_chunk_at is None:
+                    first_chunk_at = self._clock()
+
             try:
-                return await self._execute_stream_round(
+                result = await self._execute_stream_round(
                     request,
                     observer,
                     runtime,
                     session,
                     stream_input,
+                    mark_first_chunk,
                 )
+                request.diagnostic_log.info(
+                    "model.completed",
+                    {
+                        "model_round": model_round,
+                        "provider_attempt": attempt,
+                        "duration_ms": _duration_ms(self._clock, attempt_started),
+                        "provider_first_chunk_ms": (
+                            None
+                            if first_chunk_at is None
+                            else max(0, round((first_chunk_at - attempt_started) * 1000))
+                        ),
+                        "usage": _usage_delta(usage_before, session.usage),
+                        "finish_reason": (
+                            "interaction" if result.resume is not None else "completed"
+                        ),
+                    },
+                )
+                return result
             except asyncio.CancelledError:
                 raise
             except ExecutionStreamError as exc:
+                _log_model_failure(
+                    request,
+                    model_round,
+                    attempt,
+                    _duration_ms(self._clock, attempt_started),
+                    exc,
+                )
                 if (
                     request.provider_retry is not None
                     and request.provider_retry.should_retry(attempt, exc)
                 ):
+                    if request.timing is not None and active_started is not None:
+                        request.timing.end_active(active_started)
+                        active_started = None
+                    await self._retry_sleep(
+                        request, request.provider_retry, exc, model_round, attempt
+                    )
                     attempt += 1
-                    await self._retry_sleep(request, request.provider_retry, exc)
                     continue
                 raise ManagedAgentExecutionError(exc.code, exc.message) from exc
             except Exception as exc:  # noqa: BLE001 - retry 边界需要判定任何错误
+                _log_model_failure(
+                    request,
+                    model_round,
+                    attempt,
+                    _duration_ms(self._clock, attempt_started),
+                    exc,
+                )
                 if (
                     request.provider_retry is not None
                     and request.provider_retry.should_retry(attempt, exc)
                 ):
+                    if request.timing is not None and active_started is not None:
+                        request.timing.end_active(active_started)
+                        active_started = None
+                    await self._retry_sleep(
+                        request, request.provider_retry, exc, model_round, attempt
+                    )
                     attempt += 1
-                    await self._retry_sleep(request, request.provider_retry, exc)
                     continue
                 if is_provider_rate_limited(exc):
                     raise ManagedAgentExecutionError(
@@ -343,15 +481,37 @@ class ManagedAgentExecutor:
                         "Provider rate limit budget exhausted",
                     ) from exc
                 raise
+            finally:
+                if request.timing is not None and active_started is not None:
+                    request.timing.end_active(active_started)
 
     async def _retry_sleep(
         self,
         request: ManagedAgentRequest,
         policy: ProviderRetryPolicy,
         error: BaseException,
+        model_round: int,
+        provider_attempt: int,
     ) -> None:
         """按策略延迟并在醒来后复核取消；取消语义不被重试吞掉。"""
-        await asyncio.sleep(policy.retry_delay_seconds(error))
+        delay = max(0.0, policy.retry_delay_seconds(error))
+        request.diagnostic_log.warn(
+            "model.retry_scheduled",
+            {
+                "model_round": model_round,
+                "provider_attempt": provider_attempt,
+                "retry_wait_ms": round(delay * 1000),
+                "reason_code": _error_code(error),
+            },
+        )
+        wait_started = (
+            request.timing.begin_wait() if request.timing is not None else None
+        )
+        try:
+            await self._sleep(delay)
+        finally:
+            if request.timing is not None and wait_started is not None:
+                request.timing.end_retry_wait(wait_started)
         if request.is_cancelled():
             raise ManagedAgentExecutionError(
                 "RUN_CANCELLED",
@@ -365,6 +525,7 @@ class ManagedAgentExecutor:
         runtime: ManagedAgentRuntime,
         session: StreamSession,
         stream_input: object,
+        on_provider_activity: Callable[[], None],
     ):
         """执行一个 initial/resume stream round；structured 复用静默正文策略。"""
         visibility = (
@@ -382,9 +543,66 @@ class ManagedAgentExecutor:
                 session=session,
                 is_cancelled=request.is_cancelled,
                 needs_user_decision=request.needs_user_decision,
+                on_provider_activity=on_provider_activity,
             ),
             observer,
         )
+
+
+def _duration_ms(clock: Callable[[], float], started_at: float) -> int:
+    return max(0, round((clock() - started_at) * 1000))
+
+
+def _error_code(error: BaseException) -> str:
+    code = getattr(error, "code", None)
+    return str(code) if isinstance(code, str) and code else type(error).__name__
+
+
+def _error_fields(
+    error: BaseException,
+    failure_stage: str,
+    summary_code: str,
+) -> dict[str, object]:
+    return {
+        "failure_stage": failure_stage,
+        "error_code": _error_code(error),
+        "error_type": type(error).__name__,
+        "retryable": False,
+        "summary_code": summary_code,
+    }
+
+
+def _log_model_failure(
+    request: ManagedAgentRequest,
+    model_round: int,
+    provider_attempt: int,
+    duration_ms: int,
+    error: BaseException,
+) -> None:
+    fields = {
+        "model_round": model_round,
+        "provider_attempt": provider_attempt,
+        "duration_ms": duration_ms,
+        **_error_fields(error, "provider_attempt", "model_attempt_failed"),
+    }
+    if request.provider_retry is not None:
+        request.diagnostic_log.warn("model.failed", fields)
+        return
+    request.diagnostic_log.error("model.failed", fields)
+
+
+def _usage_delta(
+    before: Mapping[str, int],
+    after: Mapping[str, int],
+) -> dict[str, int | None]:
+    result: dict[str, int | None] = {}
+    for key in ("input_tokens", "output_tokens", "cached_input_tokens"):
+        if key not in after:
+            result[key] = None
+            continue
+        delta = max(0, int(after[key]) - int(before.get(key, 0)))
+        result[key] = delta if delta > 0 else None
+    return result
 
 
 @dataclass(slots=True)

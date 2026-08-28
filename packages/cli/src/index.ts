@@ -10,6 +10,8 @@ import { Capability, EventType, PROTOCOL_VERSION, isClientMethod } from "@za38/p
 
 import { parseArgs, type Command } from "./args"
 import { createDiagnosticLog, defaultProcessFields, type DiagnosticLog } from "./diagnostic-log/runtime"
+import { SidecarStderrDrain } from "./diagnostic-log/runtime/stderr-drain"
+import { runLogsQuery } from "./diagnostic-log/query"
 import { AgentClient, JsonRpcRemoteError } from "./ipc/client"
 import { StdioRpcTransport } from "./ipc/stdio-transport"
 import { runTui } from "./tui/app"
@@ -70,7 +72,7 @@ export function clientInteractionHandles(command: Command): Array<"approval" | "
 }
 
 /** 启动 Python sidecar、完成 initialize 握手，并返回可关闭的运行句柄。 */
-async function startAgent(command: Command): Promise<RunningAgent> {
+async function startAgent(command: Exclude<Command, { kind: "logs" }>): Promise<RunningAgent> {
   validateWorkspace(command.cwd)
   const startedAtMs = Date.now()
   const startedAt = performance.now()
@@ -113,16 +115,11 @@ async function startAgent(command: Command): Promise<RunningAgent> {
     await lifecycle.close()
     throw new Error("Unable to create agent stdio pipes")
   }
-  let stderrBytes = 0
-  let stderrLines = 0
-  let stderrTruncated = false
+  const stderrDrain = new SidecarStderrDrain()
   child.stderr.on("data", chunk => {
-    const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
-    stderrBytes = Math.min(stderrBytes + value.byteLength, 256 * 1024)
-    stderrLines = Math.min(stderrLines + value.reduce((count, byte) => count + Number(byte === 10), 0), 10_000)
-    stderrTruncated ||= stderrBytes === 256 * 1024 || stderrLines === 10_000
+    stderrDrain.push(chunk)
   })
-  const client = new AgentClient(new StdioRpcTransport(child.stdin, child.stdout))
+  const client = new AgentClient(new StdioRpcTransport(child.stdin, child.stdout), log)
   child.on("exit", code => {
     if (code && code !== 0) client.emit("agentExit", new Error(`Agent exited with code ${code}`))
   })
@@ -159,10 +156,11 @@ async function startAgent(command: Command): Promise<RunningAgent> {
       stop: async () => {
         if (stopped) return
         stopped = true
-        if (stderrBytes > 0) log.warn("sidecar.stderr_observed", {
-          bytes: stderrBytes,
-          lines: stderrLines,
-          truncated: stderrTruncated,
+        const stderr = stderrDrain.snapshot()
+        if (stderr.bytes > 0) log.warn("sidecar.stderr_observed", {
+          bytes: stderr.bytes,
+          lines: stderr.lines,
+          truncated: stderr.truncated,
         })
         log.info("process.stopped", {
           outcome: "completed",
@@ -258,6 +256,11 @@ async function runTurn(client: AgentClient, message: string, threadId?: string):
 
 /** 根据解析后的命令选择配置查询、无头执行或交互式 TUI。 */
 async function execute(command: Command): Promise<void> {
+  if (command.kind === "logs") {
+    // 完全离线短路：不创建 logger、不启动 sidecar、不打开 SQLite
+    await runLogsQuery(command)
+    return
+  }
   if (command.kind === "run" && !command.nonInteractive) {
     validateInteractiveTerminal(process.stdin.isTTY, process.stdout.isTTY)
   }
@@ -337,7 +340,7 @@ async function execute(command: Command): Promise<void> {
 /** CLI 主入口：处理帮助/版本短路逻辑后执行用户命令。 */
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   if (argv.includes("--help") || argv.includes("-h")) {
-    console.log("Usage: harness [--resume] [-n TEXT] [--json] [--config PATH] [--cwd PATH] [--sandbox[=remote|false]] | harness skills <...> | harness plugins <list|inspect|validate|install|enable|disable|remove>")
+    console.log("Usage: harness [--resume] [-n TEXT] [--json] [--config PATH] [--cwd PATH] [--sandbox[=remote|false]] | harness logs [--thread ID | --run ID] [--level L] [--event E] [--component C] [--limit N] [--cursor T] [--json] | harness skills <...> | harness plugins <...>")
     return
   }
   if (argv.includes("--version") || argv.includes("-v")) {

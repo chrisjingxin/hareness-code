@@ -161,6 +161,32 @@ test("WARN/ERROR 使用保留 lane 并在普通容量满时淘汰 DEBUG/INFO", a
   }
 })
 
+test("writer 失败后 disabled，固定 stderr 最多一次，且不递归 dropped", async () => {
+  const writes: string[] = []
+  const originalWrite = process.stderr.write.bind(process.stderr)
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    writes.push(String(chunk))
+    return true
+  }) as typeof process.stderr.write
+  const writer = {
+    append: async () => { throw new Error("disk full") },
+    close: async () => undefined,
+    abort: async () => undefined,
+  }
+  try {
+    const { log, lifecycle } = createDiagnosticLog({ ...options("unused"), writer })
+    log.info("process.started", processFields())
+    log.info("process.started", processFields())
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(lifecycle.snapshot().disabled).toBe(true)
+    await lifecycle.close()
+    expect(writes.filter(item => item.includes("HARNESS_DIAGNOSTIC_WRITER_FAILED"))).toHaveLength(1)
+    expect(writes.join("")).not.toContain("disk full")
+  } finally {
+    process.stderr.write = originalWrite
+  }
+})
+
 test("契约错误不抛给业务路径，只累计 contract violation", async () => {
   const root = await mkdtemp(join(tmpdir(), "harness-diagnostic-ts-"))
   try {

@@ -821,7 +821,9 @@ def create_harness_agent(
     else:
         prompt = None
 
-    agent_middleware: list[Any] = []
+    from harness_agent.diagnostic_log.middleware import DiagnosticToolMiddleware
+
+    agent_middleware: list[Any] = [DiagnosticToolMiddleware()]
     if rules_provider is not None:
         # deny 规则必须最先执行：命中即硬拒绝，任何审批模式（包括 yolo）不可覆盖。
         agent_middleware.append(DenyRulesMiddleware(rules_provider))

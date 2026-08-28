@@ -211,10 +211,12 @@ class ModelCallLifecycle:
 
     next_call_type: ModelCallType = "top_level_initial"
     idle_duration_ms: int | None = None
+    model_round: int = 0
     _first_model_call: bool = True
 
     def begin(self) -> tuple[ModelCallType, int | None]:
         """消费一个调用阶段；只有首个顶层调用可以携带 idle 值。"""
+        self.model_round += 1
         call_type = self.next_call_type
         idle_duration = (
             self.idle_duration_ms

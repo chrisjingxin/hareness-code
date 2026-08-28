@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from harness_agent.diagnostic_log.runtime import ensure_log
 from harness_agent.runtime.agent_engine_profile import AgentEngineProfile
 from harness_agent.runtime.resource_lifecycle import ResourceScope, SharedResourceLease
 from harness_agent.runtime.resource_ownership import ResourceAccess
@@ -688,6 +689,7 @@ class AgentEnginePool:
         max_profiles: int = 8,
         idle_ttl_seconds: float = 1_800,
         close_timeout_seconds: float = 15,
+        diagnostic_log: Any | None = None,
     ) -> None:
         """保存工厂与 Pool 策略；只淘汰无租约、无 run 的未固定 AgentEngine。"""
         if not callable(builder):
@@ -725,6 +727,7 @@ class AgentEnginePool:
         self._close_failures = 0
         self._close_duration_ms_total = 0.0
         self._recent_events: list[AgentEnginePoolEvent] = []
+        self._diagnostic_log = ensure_log(diagnostic_log)
 
     async def acquire(self, profile: AgentEngineProfile) -> AgentEngineLease:
         """按 Profile 获取共享 AgentEngine 租约，并对同 Key 首建执行 single-flight。"""
@@ -793,7 +796,35 @@ class AgentEnginePool:
                 continue
             if engine is None:
                 continue
-            return await engine.acquire_lease()
+            lease = await engine.acquire_lease()
+            self._emit_pool_snapshot()
+            return lease
+
+    def _emit_pool_snapshot(self) -> None:
+        """把有界计数投影到 DEBUG，不含 profile、路径或业务数据。"""
+        try:
+            idle_count = 0
+            active_count = 0
+            for entry in tuple(self._entries.values()):
+                if entry.state == AgentEngineState.IDLE:
+                    idle_count += 1
+                elif entry.state in {
+                    AgentEngineState.ACTIVE,
+                    AgentEngineState.READY,
+                    AgentEngineState.BUILDING,
+                }:
+                    active_count += 1
+            self._diagnostic_log.debug(
+                "runtime.pool_snapshot",
+                {
+                    "active_count": active_count,
+                    "idle_count": idle_count,
+                    "waiter_count": 0,
+                    "eviction_count": sum(self._eviction_reasons.values()),
+                },
+            )
+        except Exception:
+            return
 
     async def size(self) -> int:
         """返回包括 BUILDING/DRAINING 在内的 Pool 条目数，供诊断与测试使用。"""

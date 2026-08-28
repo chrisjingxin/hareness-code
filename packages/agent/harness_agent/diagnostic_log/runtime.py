@@ -26,6 +26,107 @@ _LEVEL_ORDER: dict[str, int] = {"debug": 0, "info": 1, "warn": 2, "error": 3}
 _CLOSED_FILE = re.compile(r"^(cli|agent)-\d+-\d+-\d{4}\.jsonl$")
 _ACTIVE_FILE = re.compile(r"^(cli|agent)-\d+-\d+-\d{4}\.active\.jsonl$")
 _DATE_DIRECTORY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_SAFE_NAME = re.compile(r"^[A-Za-z0-9._:/-]{1,120}$")
+
+
+def safe_context_value(value: object) -> str | None:
+    """返回可通过 envelope 白名单的安全身份，否则省略该字段。"""
+    if isinstance(value, str) and _SAFE_NAME.fullmatch(value):
+        return value
+    return None
+
+
+class _NullDiagnosticLog:
+    """无 logger 时的业务入口：child/info 都是空操作。"""
+
+    def child(self, _context: Mapping[str, object]) -> "_NullDiagnosticLog":
+        return self
+
+    def debug(self, _event: str, _fields: Mapping[str, object]) -> None:
+        return None
+
+    def info(self, _event: str, _fields: Mapping[str, object]) -> None:
+        return None
+
+    def warn(self, _event: str, _fields: Mapping[str, object]) -> None:
+        return None
+
+    def error(self, _event: str, _fields: Mapping[str, object]) -> None:
+        return None
+
+
+NULL_LOG = _NullDiagnosticLog()
+
+
+class _GuardedLog:
+    """把任意 duck-typed logger 收成不抛异常的业务入口。"""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def child(self, context: Mapping[str, object]) -> "_GuardedLog":
+        nested = getattr(self._inner, "child", None)
+        if callable(nested):
+            try:
+                return _GuardedLog(nested(context))
+            except Exception:
+                return self
+        return self
+
+    def debug(self, event: str, fields: Mapping[str, object]) -> None:
+        self._emit("debug", event, fields)
+
+    def info(self, event: str, fields: Mapping[str, object]) -> None:
+        self._emit("info", event, fields)
+
+    def warn(self, event: str, fields: Mapping[str, object]) -> None:
+        self._emit("warn", event, fields)
+
+    def error(self, event: str, fields: Mapping[str, object]) -> None:
+        self._emit("error", event, fields)
+
+    def _emit(self, level: str, event: str, fields: Mapping[str, object]) -> None:
+        try:
+            getattr(self._inner, level)(event, fields)
+        except Exception:
+            return
+
+
+def ensure_log(log: Any | None = None) -> Any:
+    """业务模块拿到的 logger：永不为 None，info/warn/error/debug 不抛。"""
+    if log is None:
+        return NULL_LOG
+    if isinstance(log, (DiagnosticLog, _NullDiagnosticLog, _GuardedLog)):
+        return log
+    return _GuardedLog(log)
+
+
+def bind_execution_log(
+    log: Any | None,
+    *,
+    thread_id: str | None = None,
+    run_id: str | None = None,
+    execution_id: str | None = None,
+    parent_execution_id: str | None = None,
+    agent_id: str | None = None,
+    activity_id: str | None = None,
+) -> Any:
+    """把已有 execution 身份绑到 child logger；非法值省略，不抛回业务路径。"""
+    context: dict[str, object] = {}
+    for key, value in (
+        ("thread_id", thread_id),
+        ("run_id", run_id),
+        ("execution_id", execution_id),
+        ("parent_execution_id", parent_execution_id),
+        ("agent_id", agent_id),
+        ("activity_id", activity_id),
+    ):
+        if isinstance(value, str):
+            safe = safe_context_value(value)
+            if safe is not None:
+                context[key] = safe
+    bound = ensure_log(log)
+    return bound.child(context) if context else bound
 
 
 @dataclass(frozen=True)
@@ -57,16 +158,22 @@ class DiagnosticLog:
         return DiagnosticLog(self._runtime, {**self._context, **context})
 
     def debug(self, event: str, fields: Mapping[str, object]) -> None:
-        self._runtime.emit(self._context, "debug", event, fields)
+        self._emit("debug", event, fields)
 
     def info(self, event: str, fields: Mapping[str, object]) -> None:
-        self._runtime.emit(self._context, "info", event, fields)
+        self._emit("info", event, fields)
 
     def warn(self, event: str, fields: Mapping[str, object]) -> None:
-        self._runtime.emit(self._context, "warn", event, fields)
+        self._emit("warn", event, fields)
 
     def error(self, event: str, fields: Mapping[str, object]) -> None:
-        self._runtime.emit(self._context, "error", event, fields)
+        self._emit("error", event, fields)
+
+    def _emit(self, level: DiagnosticLevel, event: str, fields: Mapping[str, object]) -> None:
+        try:
+            self._runtime.emit(self._context, level, event, fields)
+        except Exception:
+            return
 
 
 class DiagnosticLifecycle:
@@ -164,6 +271,7 @@ class _Runtime:
         self.closing = False
         self.started = start_worker
         self._drain_task: asyncio.Task[None] | None = None
+        self._writer_failed_reported = False
 
     def emit(self, context: Mapping[str, object], level: DiagnosticLevel, event: str, fields: Mapping[str, object]) -> None:
         if self.closing or self.disabled or _LEVEL_ORDER[level] < _LEVEL_ORDER[self.settings.level]:
@@ -288,8 +396,9 @@ class _Runtime:
                     await self.writer.append(record.encoded)
                 self.written += len(records)
                 await self._write_aggregate_events()
-        except Exception:
+        except Exception as exc:
             self.disabled = True
+            await self._report_writer_failed(exc)
             await self.writer.abort()
 
     async def _write_aggregate_events(self) -> None:
@@ -329,6 +438,31 @@ class _Runtime:
             if encoded is not None:
                 await self.writer.append(encoded)
             self.reported_contract_violations = self.contract_violations
+
+    async def _report_writer_failed(self, error: BaseException) -> None:
+        """writer 不可恢复时最多记一条事件和一条固定 stderr，不递归入队。"""
+        if self._writer_failed_reported:
+            return
+        self._writer_failed_reported = True
+        encoded = self._internal_record(
+            "error",
+            "logging.writer_failed",
+            {
+                "failure_stage": "append",
+                "error_type": type(error).__name__,
+                "summary_code": "WRITE_FAILED",
+            },
+        )
+        if encoded is not None:
+            try:
+                await self.writer.append(encoded)
+            except Exception:
+                pass
+        try:
+            sys.stderr.write("HARNESS_DIAGNOSTIC_WRITER_FAILED\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
 
     def _internal_record(self, level: DiagnosticLevel, event: str, fields: dict[str, object]) -> bytes | None:
         sequence = self.next_sequence

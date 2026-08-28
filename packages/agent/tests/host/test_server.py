@@ -158,7 +158,16 @@ async def test_initialize_records_server_side_diagnostic_event(tmp_path: Path) -
     events: list[tuple[str, dict[str, object]]] = []
 
     class CapturingLog:
+        def child(self, _context: dict[str, object]) -> "CapturingLog":
+            return self
+
         def info(self, event: str, fields: dict[str, object]) -> None:
+            events.append((event, fields))
+
+        def warn(self, event: str, fields: dict[str, object]) -> None:
+            events.append((event, fields))
+
+        def error(self, event: str, fields: dict[str, object]) -> None:
             events.append((event, fields))
 
     server = AgentHost(
@@ -172,6 +181,9 @@ async def test_initialize_records_server_side_diagnostic_event(tmp_path: Path) -
     assert event == "ipc.initialize.completed"
     assert fields["side"] == "server"
     assert isinstance(fields["duration_ms"], int)
+    request = next(item for item in events if item[0] == "ipc.request.completed")
+    assert request[1]["side"] == "server"
+    assert request[1]["method"] == "initialize"
 
 
 async def test_agent_and_team_control_plane_uses_fixed_catalog(

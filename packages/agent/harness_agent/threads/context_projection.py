@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Mapping, Sequence
 
@@ -15,6 +16,9 @@ from langchain_core.messages import (
     RemoveMessage,
     ToolMessage,
 )
+
+from harness_agent.diagnostic_log.runtime import ensure_log
+from harness_agent.threads.prompting import estimate_tokens
 
 if TYPE_CHECKING:
     from harness_agent.threads.thread_persistence import ThreadPersistence, TranscriptRecord
@@ -29,6 +33,18 @@ _ARTIFACT_REFERENCE_PATTERN = re.compile(
 
 class ContextProjectionError(RuntimeError):
     """投影数据损坏、越界或无法保持工具原子组时失败关闭。"""
+
+
+def _projected_tokens(messages: Sequence[BaseMessage]) -> int:
+    """估算投影 token，只用于诊断计数，不把正文写入日志。"""
+    total = 0
+    for message in messages:
+        content = getattr(message, "content", "")
+        if isinstance(content, str):
+            total += estimate_tokens(content)
+        else:
+            total += 8
+    return total
 
 
 def tail_user_exclude_id(records: Sequence[Any], run_id: str) -> str | None:
@@ -98,6 +114,43 @@ class ContextProjector:
         exclude_record_id: str | None = None,
     ) -> ModelProjection:
         """加载 latest-valid checkpoint，追加 tail 并校验工具原子组。"""
+        started = time.monotonic()
+        log = ensure_log(getattr(self._persistence, "diagnostic_log", None))
+        try:
+            projection = await self._project_unchecked(
+                thread_id, exclude_record_id=exclude_record_id
+            )
+        except Exception as exc:
+            log.error(
+                "context.build.failed",
+                {
+                    "duration_ms": max(0, round((time.monotonic() - started) * 1000)),
+                    "failure_stage": "context_build",
+                    "error_code": "context_build_failed",
+                    "error_type": type(exc).__name__,
+                    "retryable": False,
+                    "summary_code": "context_build_failed",
+                },
+            )
+            raise
+        log.info(
+            "context.build.completed",
+            {
+                "duration_ms": max(0, round((time.monotonic() - started) * 1000)),
+                "message_count": len(projection.messages),
+                "estimated_tokens": _projected_tokens(projection.messages),
+                "cache_status": "hit" if projection.checkpoint is not None else "miss",
+            },
+        )
+        return projection
+
+    async def _project_unchecked(
+        self,
+        thread_id: str,
+        *,
+        exclude_record_id: str | None = None,
+    ) -> ModelProjection:
+        """执行投影；由 project() 负责计时和诊断事件。"""
         records = await self._persistence.load_transcript(thread_id)
         if exclude_record_id is not None:
             if not records or records[-1].record_id != exclude_record_id:

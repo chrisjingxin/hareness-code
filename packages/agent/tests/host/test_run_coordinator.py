@@ -17,8 +17,10 @@ from harness_agent.host.run_coordinator import (
     RunPreparation,
     RunRuntime,
     RunState,
+    RunTimingLedger,
     StartRun,
 )
+from harness_agent.runtime.interactions import InteractionRequest
 
 
 def test_compose_engine_only_mutates_run_lifecycle_through_port() -> None:
@@ -80,6 +82,286 @@ def _coordinator(releases: list[str]) -> RunCoordinator:
 
 async def _events(execution) -> list:
     return [event async for event in execution.events]
+
+
+class _FakeClock:
+    """可手动推进的 monotonic clock，避免时序测试依赖真实等待。"""
+
+    def __init__(self) -> None:
+        self.value = 10.0
+
+    def __call__(self) -> float:
+        return self.value
+
+    def advance_ms(self, milliseconds: int) -> None:
+        self.value += milliseconds / 1000
+
+
+class _RecordingDiagnosticLog:
+    """记录结构化日志调用，同时模拟 child context 合并。"""
+
+    def __init__(self, records=None, context=None) -> None:
+        self.records = records if records is not None else []
+        self.context = dict(context or {})
+
+    def child(self, context):
+        return _RecordingDiagnosticLog(self.records, {**self.context, **context})
+
+    def info(self, event, fields) -> None:
+        self.records.append(("info", event, self.context, dict(fields)))
+
+    def warn(self, event, fields) -> None:
+        self.records.append(("warn", event, self.context, dict(fields)))
+
+    def error(self, event, fields) -> None:
+        self.records.append(("error", event, self.context, dict(fields)))
+
+    def debug(self, event, fields) -> None:
+        self.records.append(("debug", event, self.context, dict(fields)))
+
+
+def test_run_timing_ledger_unions_active_intervals_and_separates_waits() -> None:
+    """并发 active 区间只计并集，Interaction/retry 等待独立累计。"""
+    clock = _FakeClock()
+    ledger = RunTimingLedger(clock=clock, started_at=clock())
+
+    first = ledger.begin_active()
+    clock.advance_ms(10)
+    second = ledger.begin_active()
+    clock.advance_ms(10)
+    ledger.end_active(first)
+    clock.advance_ms(10)
+    ledger.end_active(second)
+    interaction = ledger.begin_wait()
+    clock.advance_ms(7)
+    ledger.end_interaction_wait(interaction)
+    retry = ledger.begin_wait()
+    clock.advance_ms(5)
+    ledger.end_retry_wait(retry)
+    ledger.mark_first_visible()
+
+    assert ledger.snapshot() == {
+        "duration_ms": 42,
+        "active_ms": 30,
+        "interaction_wait_ms": 7,
+        "retry_wait_ms": 5,
+        "first_visible_activity_ms": 42,
+    }
+
+
+@pytest.mark.asyncio
+async def test_run_coordinator_emits_one_diagnostic_terminal_with_timing() -> None:
+    """Run 日志带稳定关联身份、唯一终态和 monotonic 时间账本。"""
+    clock = _FakeClock()
+    log = _RecordingDiagnosticLog()
+
+    async def runtime_provider(run) -> RunRuntime:
+        clock.advance_ms(12)
+
+        async def release() -> None:
+            return None
+
+        return RunRuntime(
+            agent=None,
+            run_context=None,
+            graph_config=lambda thread_id: {"configurable": {"thread_id": thread_id}},
+            release=release,
+        )
+
+    coordinator = RunCoordinator(
+        persistence_provider=_noop_persistence,
+        preparation_provider=lambda _command, _persistence: _noop_preparation(),
+        runtime_provider=runtime_provider,
+        interaction_port=_NoopInteraction(),
+        diagnostic_log=log,
+        clock=clock,
+    )
+    execution = await coordinator.start(
+        StartRun(mode="build", thread_id="thread", run_id="run-1", message="hello"),
+        ConnectionRef("owner"),
+    )
+
+    await _events(execution)
+
+    run_records = [record for record in log.records if record[1].startswith("run.")]
+    assert [record[1] for record in run_records] == ["run.started", "run.completed"]
+    assert run_records[0][2] == {
+        "thread_id": "thread",
+        "run_id": "run-1",
+        "execution_id": "root-run-1",
+        "agent_id": "main",
+    }
+    terminal = run_records[1][3]
+    assert terminal["duration_ms"] == 12
+    assert terminal["active_ms"] == 12
+    assert terminal["interaction_wait_ms"] == 0
+    assert terminal["retry_wait_ms"] == 0
+    assert terminal["usage"] == {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_input_tokens": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_run_acceptance_logs_bounded_catalog_projection() -> None:
+    """Run 受理记录实际目录计数；超过 32 个 ID 时不写有界列表。"""
+    log = _RecordingDiagnosticLog()
+
+    async def prepare(_command, _persistence) -> RunPreparation:
+        return RunPreparation(
+            catalog_skill_ids=tuple(f"skill-{index}" for index in range(33)),
+            catalog_mcp_ids=("filesystem",),
+            catalog_plugin_ids=("review-plugin",),
+        )
+
+    coordinator = RunCoordinator(
+        persistence_provider=_noop_persistence,
+        preparation_provider=prepare,
+        runtime_provider=_noop_runtime,
+        interaction_port=_NoopInteraction(),
+        diagnostic_log=log,
+    )
+    execution = await coordinator.start(
+        StartRun(mode="build", thread_id="thread", run_id="run-catalog", message="hello"),
+        ConnectionRef("owner"),
+    )
+    await _events(execution)
+
+    record = next(record for record in log.records if record[1] == "catalog.bound")
+    assert record[2]["execution_id"] == "root-run-catalog"
+    assert record[3] == {
+        "skill_count": 33,
+        "mcp_count": 1,
+        "plugin_count": 1,
+        "mcp_ids": ["filesystem"],
+        "plugin_ids": ["review-plugin"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_run_duration_starts_after_preparation_when_run_is_accepted() -> None:
+    """Run 总耗时从受理完成起算，不把受理前准备静默计入 Run。"""
+    clock = _FakeClock()
+    log = _RecordingDiagnosticLog()
+
+    async def prepare(_command, _persistence) -> RunPreparation:
+        clock.advance_ms(7000)
+        return RunPreparation()
+
+    async def runtime_provider(run) -> RunRuntime:
+        clock.advance_ms(12)
+
+        async def release() -> None:
+            return None
+
+        return RunRuntime(
+            agent=None,
+            run_context=None,
+            graph_config=lambda thread_id: {"configurable": {"thread_id": thread_id}},
+            release=release,
+        )
+
+    coordinator = RunCoordinator(
+        persistence_provider=_noop_persistence,
+        preparation_provider=prepare,
+        runtime_provider=runtime_provider,
+        interaction_port=_NoopInteraction(),
+        diagnostic_log=log,
+        clock=clock,
+    )
+
+    execution = await coordinator.start(
+        StartRun(mode="build", thread_id="thread", run_id="run-prepared", message="hello"),
+        ConnectionRef("owner"),
+    )
+    await _events(execution)
+
+    terminal = next(record for record in log.records if record[1] == "run.completed")
+    assert terminal[3]["duration_ms"] == 12
+
+
+@pytest.mark.asyncio
+async def test_run_diagnostic_failure_does_not_change_terminal() -> None:
+    """日志 adapter 抛错时 Run 仍按原语义成功并只产生一个业务终态。"""
+
+    class _FailingLog(_RecordingDiagnosticLog):
+        def child(self, context):
+            return self
+
+        def info(self, event, fields) -> None:
+            raise RuntimeError("diagnostic unavailable")
+
+    coordinator = RunCoordinator(
+        persistence_provider=_noop_persistence,
+        preparation_provider=lambda _command, _persistence: _noop_preparation(),
+        runtime_provider=_noop_runtime,
+        interaction_port=_NoopInteraction(),
+        diagnostic_log=_FailingLog(),
+    )
+    execution = await coordinator.start(
+        StartRun(mode="build", thread_id="thread", run_id="run-log-fail", message="hello"),
+        ConnectionRef("owner"),
+    )
+
+    events = await _events(execution)
+
+    assert [event.type for event in events][-1] == "run.completed"
+
+
+@pytest.mark.asyncio
+async def test_request_interaction_logs_wait_and_omits_payload() -> None:
+    """Interaction 等待单独累计，日志不含 payload 或 canary。"""
+    clock = _FakeClock()
+    log = _RecordingDiagnosticLog()
+
+    class _SlowInteraction:
+        async def request(self, _owner, _run, _interaction) -> InteractionResult:
+            clock.advance_ms(15)
+            return InteractionResult({"decision": "approve"})
+
+    coordinator = RunCoordinator(
+        persistence_provider=_noop_persistence,
+        preparation_provider=lambda _command, _persistence: _noop_preparation(),
+        runtime_provider=_noop_runtime,
+        interaction_port=_SlowInteraction(),
+        diagnostic_log=log,
+        clock=clock,
+    )
+    run = RunState(
+        start=StartRun(mode="build", thread_id="thread", run_id="run-int", message="hello"),
+        owner=ConnectionRef("owner"),
+        persistence=None,
+        preparation=RunPreparation(),
+        started_at=clock(),
+        timing=RunTimingLedger(clock=clock, started_at=clock()),
+        diagnostic_log=log.child({"thread_id": "thread", "run_id": "run-int"}),
+    )
+
+    result = await coordinator._lifecycle_port.request_interaction(
+        run,
+        InteractionRequest(
+            request_id="approval-1",
+            type="approval",
+            payload={"secret": "CANARY_HC163_INTERACTION"},
+            interrupt_id="i-1",
+        ),
+    )
+
+    assert result.value == {"decision": "approve"}
+    interaction = [record for record in log.records if record[1].startswith("interaction.")]
+    assert [record[1] for record in interaction] == [
+        "interaction.started",
+        "interaction.completed",
+    ]
+    completed = interaction[1][3]
+    assert completed["kind"] == "approval"
+    assert completed["outcome"] == "approve"
+    assert completed["wait_ms"] == 15
+    assert run.timing is not None
+    assert run.timing.snapshot()["interaction_wait_ms"] == 15
+    assert run.timing.snapshot()["active_ms"] == 0
+    assert "CANARY_HC163_INTERACTION" not in repr(log.records)
 
 
 @pytest.mark.asyncio

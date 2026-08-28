@@ -49,9 +49,20 @@ class _Lifecycle:
 class _Runtime:
     """将 Agent、checkpoint 配置和 lease release 聚合为测试 runtime。"""
 
-    def __init__(self, agent: object | None, *, context: object | None = None) -> None:
+    def __init__(
+        self,
+        agent: object | None,
+        *,
+        context: object | None = None,
+        acquire_source: str = "reused",
+        queue_ms: int = 0,
+        build_ms: int = 0,
+    ) -> None:
         self.agent = agent
         self.run_context = context
+        self.acquire_source = acquire_source
+        self.queue_ms = queue_ms
+        self.build_ms = build_ms
         self.checkpoint_namespaces: list[str] = []
         self.release_calls = 0
 
@@ -160,6 +171,8 @@ def _request(
     usage: dict[str, int] | None = None,
     timeout_seconds: float | None = None,
     execution_starter=None,
+    diagnostic_log=None,
+    timing=None,
 ) -> ManagedAgentRequest:
     """创建包含稳定 execution/checkpoint/idempotency 事实的请求。"""
 
@@ -181,7 +194,127 @@ def _request(
         usage=usage,
         timeout_seconds=timeout_seconds,
         execution_starter=execution_starter,
+        diagnostic_log=diagnostic_log,
+        timing=timing,
+        model_profile_id="profile-main",
     )
+
+
+class _FakeClock:
+    """Managed executor 计时测试使用的 monotonic clock。"""
+
+    def __init__(self) -> None:
+        self.value = 1.0
+
+    def __call__(self) -> float:
+        return self.value
+
+    def advance_ms(self, milliseconds: int) -> None:
+        self.value += milliseconds / 1000
+
+
+class _RecordingLog:
+    """记录 executor 发出的结构化 Diagnostic Event。"""
+
+    def __init__(self) -> None:
+        self.records: list[tuple[str, str, dict[str, object]]] = []
+
+    def info(self, event: str, fields: dict[str, object]) -> None:
+        self.records.append(("info", event, dict(fields)))
+
+    def warn(self, event: str, fields: dict[str, object]) -> None:
+        self.records.append(("warn", event, dict(fields)))
+
+    def error(self, event: str, fields: dict[str, object]) -> None:
+        self.records.append(("error", event, dict(fields)))
+
+    def debug(self, event: str, fields: dict[str, object]) -> None:
+        self.records.append(("debug", event, dict(fields)))
+
+
+class _Timing:
+    """只记录 retry 等待累计的最小 timing port。"""
+
+    def __init__(self, clock: _FakeClock) -> None:
+        self.clock = clock
+        self.retry_wait_ms = 0
+
+    def begin_active(self) -> float:
+        return self.clock()
+
+    def end_active(self, _started_at: float) -> None:
+        return None
+
+    def begin_wait(self) -> float:
+        return self.clock()
+
+    def end_retry_wait(self, started_at: float) -> None:
+        self.retry_wait_ms += round((self.clock() - started_at) * 1000)
+
+
+@pytest.mark.asyncio
+async def test_executor_logs_runtime_model_attempts_retry_and_nullable_usage() -> None:
+    """每个 provider attempt 独立成对，retry 等待不计入 attempt duration。"""
+
+    class _ProviderFailure(RuntimeError):
+        code = "PROVIDER_BUSY"
+
+    class _RetryOnce:
+        def should_retry(self, attempt: int, _error: BaseException) -> bool:
+            return attempt == 1
+
+        def retry_delay_seconds(self, _error: BaseException) -> float:
+            return 0.02
+
+    clock = _FakeClock()
+
+    async def sleep(seconds: float) -> None:
+        clock.advance_ms(round(seconds * 1000))
+
+    runtime = _Runtime(
+        _FakeAgent(
+            [
+                _ProviderFailure("CANARY_EXCEPTION_MESSAGE"),
+                [("updates", {"heartbeat": True})],
+            ]
+        ),
+        acquire_source="new",
+        build_ms=4,
+    )
+    log = _RecordingLog()
+    timing = _Timing(clock)
+    request = _request(runtime, diagnostic_log=log, timing=timing)
+    object.__setattr__(request, "provider_retry", _RetryOnce())
+
+    result = await ManagedAgentExecutor(clock=clock, sleep=sleep).execute(
+        request,
+        _Observer(),
+    )
+
+    assert result.used_agent is True
+    assert [event for _, event, _ in log.records] == [
+        "runtime.acquire.completed",
+        "model.started",
+        "model.failed",
+        "model.retry_scheduled",
+        "model.started",
+        "model.completed",
+        "runtime.released",
+    ]
+    attempts = [fields for _, event, fields in log.records if event == "model.started"]
+    assert [(item["model_round"], item["provider_attempt"]) for item in attempts] == [
+        (1, 1),
+        (1, 2),
+    ]
+    completed = next(fields for _, event, fields in log.records if event == "model.completed")
+    assert completed["provider_first_chunk_ms"] is None
+    assert completed["usage"] == {
+        "input_tokens": None,
+        "output_tokens": None,
+        "cached_input_tokens": None,
+    }
+    assert timing.retry_wait_ms == 20
+    assert "CANARY_EXCEPTION_MESSAGE" not in repr(log.records)
 
 
 def test_managed_agent_execution_error_exposes_stable_message() -> None:

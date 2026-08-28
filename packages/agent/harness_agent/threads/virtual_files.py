@@ -22,6 +22,7 @@ from deepagents.backends.protocol import (
 )
 
 from harness_agent.extensions.skills import SkillError, SkillRegistry
+from harness_agent.diagnostic_log.runtime import ensure_log
 from harness_agent.runtime.run_context import require_run_context
 
 if TYPE_CHECKING:
@@ -44,6 +45,7 @@ class HarnessVirtualBackend:
         thread_persistence: "ThreadPersistence | None" = None,
         expected_snapshot_id: str | None = None,
         require_snapshot_id: bool = False,
+        diagnostic_log: Any | None = None,
     ) -> None:
         """绑定一个 Run 的 Skill snapshot 和当前 project/thread 的归档读取器。"""
         self._registry = registry
@@ -51,16 +53,25 @@ class HarnessVirtualBackend:
         self._thread_persistence = thread_persistence
         self._expected_snapshot_id = expected_snapshot_id
         self._require_snapshot_id = require_snapshot_id
+        self._diagnostic_log = ensure_log(diagnostic_log)
         self._history_cache: dict[str, str] = {}
 
     def read(self, file_path: str, offset: int = 0, limit: int = 2_000) -> ReadResult:
         """同步读取 Skill；SQLite 历史只允许异步工具链读取以免阻塞事件循环。"""
         try:
             path = self._validated_path(file_path)
-            content = self._read_skill(path) if path.parts[0] == "skills" else self._history_cache.get(path.stem)
+            skill_identity: tuple[str, str] | None = None
+            if path.parts[0] == "skills":
+                content, skill_id, kind = self._read_skill(path)
+                skill_identity = (skill_id, kind)
+            else:
+                content = self._history_cache.get(path.stem)
             if content is None:
                 return ReadResult(error="history artifact is unavailable in synchronous mode")
-            return self._page(content, offset, limit)
+            result = self._page(content, offset, limit)
+            if skill_identity is not None:
+                self._log_skill_read(*skill_identity)
+            return result
         except (SkillError, ValueError) as exc:
             return ReadResult(error=str(exc))
 
@@ -68,8 +79,10 @@ class HarnessVirtualBackend:
         """异步读取虚拟文件，并只从已绑定 thread 的 SQLite 行恢复历史正文。"""
         try:
             path = self._validated_path(file_path)
+            skill_identity: tuple[str, str] | None = None
             if path.parts[0] == "skills":
-                content = self._read_skill(path)
+                content, skill_id, kind = self._read_skill(path)
+                skill_identity = (skill_id, kind)
             else:
                 artifact_id = path.stem
                 content = self._history_cache.get(artifact_id)
@@ -80,7 +93,10 @@ class HarnessVirtualBackend:
                         self._history_cache[artifact_id] = content
                 if content is None:
                     return ReadResult(error="history artifact was not found for the current thread")
-            return self._page(content, offset, limit)
+            result = self._page(content, offset, limit)
+            if skill_identity is not None:
+                self._log_skill_read(*skill_identity)
+            return result
         except (SkillError, ValueError) as exc:
             return ReadResult(error=str(exc))
 
@@ -161,7 +177,7 @@ class HarnessVirtualBackend:
             raise ValueError("skill path must include a canonical skill ID and file name")
         return path
 
-    def _read_skill(self, path: PurePosixPath) -> str:
+    def _read_skill(self, path: PurePosixPath) -> tuple[str, str, str]:
         """从当前 Run 的 Skill snapshot 安全读取正文或资源，绝不泄露根目录。"""
         if self._registry is None:
             raise SkillError("RunContext Skill snapshot is unavailable")
@@ -175,7 +191,7 @@ class HarnessVirtualBackend:
         if path.name == "SKILL.md":
             skill_id = "/".join(path.parts[1:-1])
             virtual_id = self._registry.resolve_virtual_id(skill_id)
-            return self._registry.load(virtual_id).body
+            return self._registry.load(virtual_id).body, virtual_id, "body"
         # canonical ID 可以包含多个路径段。按最长前缀解析，避免 Plugin ID 被固定两段截断。
         for boundary in range(len(path.parts) - 1, 1, -1):
             skill_id = "/".join(path.parts[1:boundary])
@@ -186,8 +202,15 @@ class HarnessVirtualBackend:
             relative = "/".join(path.parts[boundary:])
             if not relative:
                 raise ValueError("skill resource path is required")
-            return self._registry.read_resource(virtual_id, relative)
+            return self._registry.read_resource(virtual_id, relative), virtual_id, "resource"
         raise ValueError("unknown canonical Skill ID")
+
+    def _log_skill_read(self, skill_id: str, kind: str) -> None:
+        """成功完成分页后只记录 Skill 身份与读取类型，不记录正文或路径。"""
+        self._diagnostic_log.info(
+            "skill.read",
+            {"skill_id": skill_id, "kind": kind},
+        )
 
     @staticmethod
     def _page(content: str, offset: int, limit: int) -> ReadResult:
@@ -208,6 +231,7 @@ def mount_harness_virtual_files(
     thread_persistence: "ThreadPersistence | None" = None,
     expected_snapshot_id: str | None = None,
     require_snapshot_id: bool = False,
+    diagnostic_log: Any | None = None,
 ) -> CompositeBackend:
     """把虚拟只读后端挂在真实 backend 之前，文件工具仍使用统一 ``read_file``。"""
     return CompositeBackend(
@@ -219,6 +243,7 @@ def mount_harness_virtual_files(
                 thread_persistence=thread_persistence,
                 expected_snapshot_id=expected_snapshot_id,
                 require_snapshot_id=require_snapshot_id,
+                diagnostic_log=diagnostic_log,
             )
         },
     )
@@ -249,6 +274,7 @@ def run_scoped_virtual_backend_factory(
                 snapshot.skill_snapshot_id if snapshot is not None else None
             ),
             require_snapshot_id=True,
+            diagnostic_log=context.diagnostic_log,
         )
 
     return backend_for_run

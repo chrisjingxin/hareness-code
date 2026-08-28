@@ -24,6 +24,7 @@ from langchain.agents.middleware.types import AgentMiddleware, ModelRequest, Mod
 from langchain.tools.tool_node import ToolCallRequest
 from langchain_core.messages import SystemMessage, ToolMessage
 
+from harness_agent.diagnostic_log.runtime import ensure_log
 from harness_agent.plugins.common import read_json_object, safe_package_path
 from harness_agent.plugins.model import (
     ExtensionCatalogSnapshot,
@@ -601,17 +602,24 @@ class HookRunner:
         *,
         tool_name: str,
         payload: Mapping[str, object],
+        diagnostic_log: Any | None = None,
     ) -> tuple[HookResult, ...]:
         """按目录顺序运行匹配 Hook；异步 Post Hook 不阻塞工具返回。"""
         if self._closed:
             return ()
         claude_name = _HARNESS_TO_CLAUDE_TOOL.get(tool_name, tool_name)
+        log = ensure_log(diagnostic_log)
         results: list[HookResult] = []
         for definition in self._definitions:
             if definition.event != event or not definition.matches(claude_name):
                 continue
             task = asyncio.create_task(
-                self._invoke(definition, payload),
+                self._invoke(
+                    definition,
+                    payload,
+                    tool_name=tool_name,
+                    diagnostic_log=log,
+                ),
                 name=f"harness-hook-{definition.plugin_id}-{event}",
             )
             if definition.asynchronous:
@@ -625,15 +633,34 @@ class HookRunner:
         self,
         definition: HookDefinition,
         payload: Mapping[str, object],
+        *,
+        tool_name: str,
+        diagnostic_log: Any,
     ) -> HookResult:
         """启动一个最小环境进程，并对 stdin/stdout/stderr 施加硬上限。"""
+        started_at = time.monotonic()
+        common = {
+            "plugin_id": definition.plugin_id,
+            "hook_event": definition.event,
+            "tool_name": tool_name,
+        }
+        diagnostic_log.info("hook.started", common)
         encoded = json.dumps(
             dict(payload),
             ensure_ascii=False,
             separators=(",", ":"),
         ).encode("utf-8")
         if len(encoded) > _MAX_DOCUMENT_BYTES:
-            return HookResult(2, stderr="Hook input exceeded the limit", truncated=True)
+            result = HookResult(2, stderr="Hook input exceeded the limit", truncated=True)
+            self._log_hook_failed(
+                diagnostic_log,
+                common,
+                started_at,
+                failure_stage="input_validation",
+                error_type="HookInputTooLarge",
+                summary_code="HOOK_INPUT_TOO_LARGE",
+            )
+            return result
         env = _plugin_environment(
             definition.root,
             definition.data,
@@ -675,7 +702,16 @@ class HookRunner:
                     start_new_session=os.name != "nt",
                 )
         except OSError as exc:
-            return HookResult(2, stderr=f"Hook process failed: {type(exc).__name__}")
+            result = HookResult(2, stderr=f"Hook process failed: {type(exc).__name__}")
+            self._log_hook_failed(
+                diagnostic_log,
+                common,
+                started_at,
+                failure_stage="process_start",
+                error_type=type(exc).__name__,
+                summary_code="HOOK_PROCESS_START_FAILED",
+            )
+            return result
         try:
             stdout, stderr, truncated = await _communicate_bounded(
                 process,
@@ -684,10 +720,27 @@ class HookRunner:
             )
         except asyncio.CancelledError:
             await _terminate_process(process)
+            self._log_hook_failed(
+                diagnostic_log,
+                common,
+                started_at,
+                failure_stage="execution",
+                error_type="CancelledError",
+                summary_code="HOOK_CANCELLED",
+            )
             raise
         except TimeoutError:
             await _terminate_process(process)
-            return HookResult(2, stderr="Hook timed out", timed_out=True)
+            result = HookResult(2, stderr="Hook timed out", timed_out=True)
+            self._log_hook_failed(
+                diagnostic_log,
+                common,
+                started_at,
+                failure_stage="execution",
+                error_type="TimeoutError",
+                summary_code="HOOK_TIMEOUT",
+            )
+            return result
         stdout_text = stdout.decode("utf-8", errors="replace")
         stderr_text = stderr.decode("utf-8", errors="replace")
         document: Mapping[str, object] = {}
@@ -698,18 +751,92 @@ class HookRunner:
                     raise ValueError
                 document = dict(parsed)
             except (json.JSONDecodeError, ValueError):
-                return HookResult(
+                result = HookResult(
                     2,
                     stdout=stdout_text,
                     stderr="Hook returned invalid JSON",
                     truncated=truncated,
                 )
-        return HookResult(
+                self._log_hook_failed(
+                    diagnostic_log,
+                    common,
+                    started_at,
+                    failure_stage="output_validation",
+                    error_type="HookOutputInvalid",
+                    summary_code="HOOK_OUTPUT_INVALID",
+                )
+                return result
+        result = HookResult(
             int(process.returncode or 0),
             stdout=stdout_text,
             stderr=stderr_text,
             document=document,
             truncated=truncated,
+        )
+        if result.truncated:
+            self._log_hook_failed(
+                diagnostic_log,
+                common,
+                started_at,
+                failure_stage="output_read",
+                error_type="HookOutputTruncated",
+                summary_code="HOOK_OUTPUT_TOO_LARGE",
+            )
+        elif result.exit_code not in {0, 2}:
+            self._log_hook_failed(
+                diagnostic_log,
+                common,
+                started_at,
+                failure_stage="execution",
+                error_type="HookExitNonzero",
+                summary_code="HOOK_EXIT_NONZERO",
+            )
+        else:
+            blocked, _reason = result.blocks_pre_tool
+            outcome = (
+                "deny"
+                if definition.event == "PreToolUse" and blocked
+                else "allow"
+                if definition.event == "PreToolUse"
+                else "ok"
+            )
+            diagnostic_log.info(
+                "hook.completed",
+                {
+                    **common,
+                    "outcome": outcome,
+                    "duration_ms": self._duration_ms(started_at),
+                },
+            )
+        return result
+
+    @staticmethod
+    def _duration_ms(started_at: float) -> int:
+        """返回 Hook 单次执行的非负 monotonic 耗时。"""
+        return max(0, int((time.monotonic() - started_at) * 1000))
+
+    @classmethod
+    def _log_hook_failed(
+        cls,
+        diagnostic_log: Any,
+        common: Mapping[str, object],
+        started_at: float,
+        *,
+        failure_stage: str,
+        error_type: str,
+        summary_code: str,
+    ) -> None:
+        """记录稳定失败分类，不复制 Hook 输入、stdout、stderr 或异常文本。"""
+        diagnostic_log.warn(
+            "hook.failed",
+            {
+                **common,
+                "duration_ms": cls._duration_ms(started_at),
+                "failure_stage": failure_stage,
+                "error_type": error_type,
+                "retryable": False,
+                "summary_code": summary_code,
+            },
         )
 
     async def aclose(self) -> None:
@@ -1194,10 +1321,16 @@ class PluginRuntimeMiddleware(AgentMiddleware):
             "tool_input": dict(args),
             "tool_use_id": tool_call_id,
         }
+        diagnostic_log = getattr(
+            getattr(request.runtime, "context", None),
+            "diagnostic_log",
+            None,
+        )
         pre_results = await self._hooks.run(
             "PreToolUse",
             tool_name=tool_name,
             payload={**common, "hook_event_name": "PreToolUse"},
+            diagnostic_log=diagnostic_log,
         )
         for result in pre_results:
             blocked, reason = result.blocks_pre_tool
@@ -1221,6 +1354,7 @@ class PluginRuntimeMiddleware(AgentMiddleware):
                     "error": type(exc).__name__,
                     "duration_ms": int((time.monotonic() - started) * 1000),
                 },
+                diagnostic_log=diagnostic_log,
             )
             raise
         await self._hooks.run(
@@ -1232,6 +1366,7 @@ class PluginRuntimeMiddleware(AgentMiddleware):
                 "tool_response": _bounded_tool_response(response),
                 "duration_ms": int((time.monotonic() - started) * 1000),
             },
+            diagnostic_log=diagnostic_log,
         )
         return response
 

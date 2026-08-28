@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from harness_agent.compose.models import ThreadMode
+from harness_agent.diagnostic_log.runtime import DiagnosticLog, ensure_log, safe_context_value
 from harness_agent.host.run_execution import (
     AdapterOutcome,
     BuildRunAdapter,
@@ -68,6 +69,114 @@ from harness_agent.threads.thread_persistence import (
 logger = logging.getLogger(__name__)
 
 INTERACTION_TIMEOUT_MS = 300_000
+_VISIBLE_RUN_EVENTS = frozenset(
+    {
+        "content.delta",
+        "reasoning.delta",
+        "tool.started",
+        "tool.completed",
+        "interaction.requested",
+    }
+)
+
+
+@dataclass(slots=True)
+class RunTimingLedger:
+    """用 monotonic clock 汇总 Run wall、active 与等待时间。"""
+
+    clock: Callable[[], float] = time.monotonic
+    started_at: float | None = None
+    active_intervals: list[tuple[float, float]] = field(default_factory=list)
+    interaction_wait_seconds: float = 0.0
+    retry_wait_seconds: float = 0.0
+    first_visible_at: float | None = None
+
+    def __post_init__(self) -> None:
+        """未显式提供起点时，使用同一注入 clock 初始化。"""
+        if self.started_at is None:
+            self.started_at = self.clock()
+
+    def begin_active(self) -> float:
+        """返回一段主动工作的 monotonic 起点。"""
+        return self.clock()
+
+    def end_active(self, started_at: float) -> None:
+        """记录一段已完成的主动工作，允许多个区间互相重叠。"""
+        self.active_intervals.append((started_at, max(started_at, self.clock())))
+
+    def begin_wait(self) -> float:
+        """返回 Interaction 或 retry 等待的 monotonic 起点。"""
+        return self.clock()
+
+    def end_interaction_wait(self, started_at: float) -> None:
+        """累计用户 Interaction 等待，不计入主动执行。"""
+        self.interaction_wait_seconds += max(0.0, self.clock() - started_at)
+
+    def end_retry_wait(self, started_at: float) -> None:
+        """累计 provider retry backoff，不计入模型 attempt。"""
+        self.retry_wait_seconds += max(0.0, self.clock() - started_at)
+
+    def mark_first_visible(self) -> None:
+        """只保存首个用户可见活动时间。"""
+        if self.first_visible_at is None:
+            self.first_visible_at = self.clock()
+
+    def snapshot(self) -> dict[str, int | None]:
+        """返回非负毫秒值；active 使用全部区间的并集。"""
+        now = self.clock()
+        started_at = self.started_at if self.started_at is not None else now
+        first_visible_ms = (
+            None
+            if self.first_visible_at is None
+            else max(0, round((self.first_visible_at - started_at) * 1000))
+        )
+        return {
+            "duration_ms": max(0, round((now - started_at) * 1000)),
+            "active_ms": _interval_union_ms(self.active_intervals),
+            "interaction_wait_ms": max(0, round(self.interaction_wait_seconds * 1000)),
+            "retry_wait_ms": max(0, round(self.retry_wait_seconds * 1000)),
+            "first_visible_activity_ms": first_visible_ms,
+        }
+
+
+def _interval_union_ms(intervals: list[tuple[float, float]]) -> int:
+    """合并重叠 monotonic 区间，避免并发 child 重复计时。"""
+    if not intervals:
+        return 0
+    ordered = sorted(intervals)
+    total = 0.0
+    current_start, current_end = ordered[0]
+    for start, end in ordered[1:]:
+        if start <= current_end:
+            current_end = max(current_end, end)
+            continue
+        total += current_end - current_start
+        current_start, current_end = start, end
+    total += current_end - current_start
+    return max(0, round(total * 1000))
+
+
+def _diagnostic_usage(usage: Mapping[str, int]) -> dict[str, int | None]:
+    """把未知 usage 保留为 null，不伪造成 0。"""
+    return {
+        "input_tokens": usage.get("input_tokens"),
+        "output_tokens": usage.get("output_tokens"),
+        "cached_input_tokens": usage.get("cached_input_tokens"),
+    }
+
+
+def _interaction_outcome(result: InteractionResult) -> str:
+    """把 Interaction 结果投影为契约安全 outcome，不记录 payload。"""
+    if result.expired:
+        return "expired"
+    value = result.value
+    if isinstance(value, Mapping):
+        decision = value.get("decision")
+        if isinstance(decision, str):
+            return safe_context_value(decision) or "resolved"
+        if "answers" in value:
+            return "answered"
+    return "resolved"
 
 
 class RunError(RuntimeError):
@@ -165,6 +274,10 @@ class RunPreparation:
     requested_skill: LoadedSkill | None = None
     context_snapshot: RunContextSnapshot | None = None
     idle_duration_ms: int | None = None
+    # 仅携带当前 Run 实际绑定的安全目录身份；受理日志由 Coordinator 统一投影。
+    catalog_skill_ids: tuple[str, ...] = ()
+    catalog_mcp_ids: tuple[str, ...] = ()
+    catalog_plugin_ids: tuple[str, ...] = ()
     # Default AgentHost may hold this reservation from spec resolution until the
     # corresponding AgentEngine lease is acquired.  It is intentionally opaque
     # here so the coordinator does not own the runtime snapshot protocol.
@@ -312,6 +425,8 @@ class RunState:
     assistant_turn_count: int = 0
     pending_transcript: list[TranscriptAppend] = field(default_factory=list)
     started_at: float = field(default_factory=time.monotonic)
+    timing: RunTimingLedger | None = None
+    diagnostic_log: DiagnosticLog | None = None
     context_summary: dict[str, object] = field(default_factory=dict)
     cancellation_token: RunCancellationToken = field(default_factory=RunCancellationToken)
     run_context: RunContext | None = None
@@ -339,6 +454,9 @@ class RunState:
         """默认使用受理请求中的原始消息。"""
         if not self.message:
             self.message = self.start.message
+        if self.timing is None:
+            self.timing = RunTimingLedger(started_at=self.started_at)
+        self.diagnostic_log = ensure_log(self.diagnostic_log)
 
     @property
     def ref(self) -> RunRef:
@@ -467,9 +585,25 @@ class _CoordinatorLifecyclePort:
     ) -> InteractionResult:
         """请求 owner 回答问题；状态迁移与 resolved 事件由 coordinator 拥有。"""
         run.status = "interacting"
-        result = await self._coordinator._interaction_port.request(
-            run.owner, run.ref, spec
-        )
+        kind = safe_context_value(spec.type) or "interaction"
+        run.diagnostic_log.info("interaction.started", {"kind": kind, "source": "host"})
+        wait_started = run.timing.begin_wait() if run.timing is not None else None
+        try:
+            result = await self._coordinator._interaction_port.request(
+                run.owner, run.ref, spec
+            )
+        finally:
+            if run.timing is not None and wait_started is not None:
+                run.timing.end_interaction_wait(wait_started)
+        wait_ms = 0
+        if run.timing is not None and wait_started is not None:
+            wait_ms = max(0, round((run.timing.clock() - wait_started) * 1000))
+        outcome = _interaction_outcome(result)
+        completed = {"kind": kind, "outcome": outcome, "wait_ms": wait_ms}
+        if result.expired or outcome in {"reject", "deny", "expired"}:
+            run.diagnostic_log.warn("interaction.completed", completed)
+        else:
+            run.diagnostic_log.info("interaction.completed", completed)
         run.status = "running"
         self._coordinator._emit(
             run,
@@ -568,6 +702,8 @@ class RunCoordinator:
         compose_services_provider: (
             Callable[[RunState], Awaitable[Any | None]] | None
         ) = None,
+        diagnostic_log: DiagnosticLog | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         """注入 Project 资源 adapter，保持外部 Run interface 与 Protocol 解耦。"""
         self._persistence_provider = persistence_provider
@@ -586,6 +722,8 @@ class RunCoordinator:
             "build": BuildRunAdapter(),
         }
         self._compose_services_provider = compose_services_provider
+        self._diagnostic_log = ensure_log(diagnostic_log)
+        self._clock = clock
         self._lifecycle_port = _CoordinatorLifecyclePort(self)
         self._runs: dict[str, RunState] = {}
         self._starting_runs: dict[str, ConnectionRef] = {}
@@ -622,6 +760,92 @@ class RunCoordinator:
             execution_id=execution_id,
             parent_execution_id=parent_execution_id,
             agent_id=agent_id,
+        )
+
+    def _log_run_started(self, run: RunState) -> None:
+        """在 Run owner 处记录受理事实；日志异常不得改变受理结果。"""
+        binding = run.preparation.execution_binding
+        profile_id = (
+            binding.actual_primary.profile_id
+            if binding is not None
+            else run.start.requested_primary_profile or "default"
+        )
+        run.diagnostic_log.info(
+            "run.started",
+            {
+                "mode": run.start.mode,
+                "resumed": bool(run.preparation.idle_duration_ms is not None),
+                "approval_mode": run.start.requested_approval_mode or "default",
+                "model_profile_id": profile_id,
+            },
+        )
+        catalog_fields: dict[str, object] = {}
+        for kind, identifiers in (
+            ("skill", run.preparation.catalog_skill_ids),
+            ("mcp", run.preparation.catalog_mcp_ids),
+            ("plugin", run.preparation.catalog_plugin_ids),
+        ):
+            catalog_fields[f"{kind}_count"] = len(identifiers)
+            safe_ids = [
+                safe
+                for identifier in identifiers
+                if (safe := safe_context_value(identifier)) is not None
+            ]
+            # 契约要求超过 32 个时只保留 count；非法目录名同样不进入日志。
+            if len(identifiers) <= 32 and len(safe_ids) == len(identifiers):
+                catalog_fields[f"{kind}_ids"] = safe_ids
+        run.diagnostic_log.info("catalog.bound", catalog_fields)
+
+    def _log_run_terminal(
+        self,
+        run: RunState,
+        status: str,
+        payload: Mapping[str, object],
+    ) -> None:
+        """按唯一业务终态生成不含异常正文的安全诊断事件。"""
+        assert run.timing is not None
+        timing = run.timing.snapshot()
+        common = {
+            "duration_ms": int(timing["duration_ms"] or 0),
+            "active_ms": int(timing["active_ms"] or 0),
+            "interaction_wait_ms": int(timing["interaction_wait_ms"] or 0),
+            "retry_wait_ms": int(timing["retry_wait_ms"] or 0),
+        }
+        if status == "completed":
+            run.diagnostic_log.info(
+                "run.completed",
+                {
+                    **common,
+                    "outcome": "completed",
+                    "first_visible_activity_ms": timing["first_visible_activity_ms"],
+                    "usage": _diagnostic_usage(run.usage),
+                },
+            )
+            return
+        if status == "cancelled":
+            run.diagnostic_log.warn(
+                "run.cancelled",
+                {
+                    **common,
+                    "cancellation_source": (
+                        "client" if run.cancel_requested else "execution"
+                    ),
+                },
+            )
+            return
+        raw_error = payload.get("error")
+        error = raw_error if isinstance(raw_error, Mapping) else {}
+        error_code = str(error.get("code") or "RUN_FAILED")
+        run.diagnostic_log.error(
+            "run.failed",
+            {
+                **common,
+                "failure_stage": "run_execution",
+                "error_code": error_code,
+                "error_type": error_code,
+                "retryable": bool(error.get("retryable")),
+                "summary_code": "run_failed",
+            },
         )
 
     async def start(
@@ -700,6 +924,8 @@ class RunCoordinator:
                     reservation_transferred = True
                     return self._accepted_without_events(command.ref, owner)
 
+            # preparation/persistence 仍属于受理过程；Run wall time 从真正受理完成后起算。
+            accepted_at = self._clock()
             root_execution = self._root_execution_binding(command, preparation)
             run = RunState(
                 start=command,
@@ -707,7 +933,18 @@ class RunCoordinator:
                 persistence=persistence,
                 preparation=preparation,
                 root_execution=root_execution,
+                started_at=accepted_at,
+                timing=RunTimingLedger(clock=self._clock, started_at=accepted_at),
+                diagnostic_log=self._diagnostic_log.child(
+                    {
+                        "thread_id": command.thread_id,
+                        "run_id": command.run_id,
+                        "execution_id": root_execution.ref.execution_id,
+                        "agent_id": root_execution.agent_id,
+                    }
+                ),
             )
+            self._log_run_started(run)
             await self._execution_registry.accept(root_execution)
             async with self._lock:
                 self._runs[command.thread_id] = run
@@ -905,14 +1142,22 @@ class RunCoordinator:
                     raise
 
             adapter = await self._adapter_for(run)
-            outcome = await adapter.execute(run, self._lifecycle_port)
+            assert run.timing is not None
+            if run.start.mode == "direct_shell":
+                active_started = run.timing.begin_active()
+                try:
+                    outcome = await adapter.execute(run, self._lifecycle_port)
+                finally:
+                    run.timing.end_active(active_started)
+            else:
+                outcome = await adapter.execute(run, self._lifecycle_port)
             if outcome is None or outcome.status == "completed":
                 self._finish(
                     run,
                     "completed",
                     {
                         "usage": run.usage,
-                        "duration_ms": round((time.monotonic() - run.started_at) * 1000),
+                        "duration_ms": run.timing.snapshot()["duration_ms"],
                         "finish_reason": "completed",
                         "context": run.context_summary,
                     },
@@ -1036,7 +1281,8 @@ class RunCoordinator:
         if run.completion is not None:
             return
         run.status = status
-        duration_ms = round((time.monotonic() - run.started_at) * 1000)
+        assert run.timing is not None
+        duration_ms = int(run.timing.snapshot()["duration_ms"] or 0)
         if status == "completed":
             completion = RunCompletion(
                 status=status,
@@ -1070,6 +1316,7 @@ class RunCoordinator:
         run.terminal_event_emitted = True
         self._emit(run, event_type, payload, terminal=True)
         run.completion = completion
+        self._log_run_terminal(run, status, payload)
         if self._workspace_root_registry is not None:
             clear = getattr(self._workspace_root_registry, "clear_once_for_run", None)
             if callable(clear):
@@ -1089,6 +1336,8 @@ class RunCoordinator:
     ) -> None:
         if run.terminal_event_emitted and not terminal:
             return
+        if not terminal and event_type in _VISIBLE_RUN_EVENTS and run.timing is not None:
+            run.timing.mark_first_visible()
         run.sequence += 1
         root = run.root_execution_ref
         run.events.put_nowait(

@@ -340,6 +340,54 @@ async def test_auto_micro_after_measure_does_not_call_summary_or_create_full_che
 
 
 @pytest.mark.asyncio
+async def test_compaction_logs_token_counts_without_summary_body(tmp_path: Path) -> None:
+    """成功压缩只记 before/after tokens 与 artifact 数，不含摘要正文。"""
+    store = await _store(tmp_path)
+    await _tool_thread(store, "auto-micro-log")
+    projection = await ContextProjector(store).project("auto-micro-log")
+    log = _RecordingCompactionLog()
+    store.bind_diagnostic_log(log)
+    service = ContextCompactor(
+        CountingModel(responses=[]),
+        context_window_tokens=16_384,
+        thread_persistence=store,
+    )
+
+    result = await service.compress(
+        _request("auto-micro-log", projection, "auto", estimated=8_000)
+    )
+
+    assert result.outcome == "compressed"
+    completed = next(
+        fields for _, event, fields in log.records if event == "context.compaction.completed"
+    )
+    assert completed["before_estimated_tokens"] == 8_000
+    assert completed["after_estimated_tokens"] == result.estimated_tokens
+    assert isinstance(completed["artifact_count"], int)
+    assert completed["trigger"] == "auto"
+    assert completed["action"] == result.action
+    assert SUMMARY not in repr(log.records)
+    await store.close()
+
+
+class _RecordingCompactionLog:
+    def __init__(self) -> None:
+        self.records: list[tuple[str, str, dict[str, object]]] = []
+
+    def info(self, event, fields) -> None:
+        self.records.append(("info", event, dict(fields)))
+
+    def error(self, event, fields) -> None:
+        self.records.append(("error", event, dict(fields)))
+
+    def warn(self, event, fields) -> None:
+        self.records.append(("warn", event, dict(fields)))
+
+    def debug(self, event, fields) -> None:
+        self.records.append(("debug", event, dict(fields)))
+
+
+@pytest.mark.asyncio
 async def test_auto_micro_full_commits_only_final_full_checkpoint(tmp_path: Path) -> None:
     """micro 后仍超过 full 时只在同一事务提交最终 full。"""
     store = await _store(tmp_path)
@@ -534,6 +582,8 @@ async def test_invalid_summary_keeps_previous_valid_projection_without_partial_r
     store = await _store(tmp_path)
     await _long_thread(store, "invalid-summary")
     projection = await ContextProjector(store).project("invalid-summary")
+    log = _RecordingCompactionLog()
+    store.bind_diagnostic_log(log)
     service = ContextCompactor(
         CountingModel(responses=[AIMessage(content="")]),
         context_window_tokens=16_384,
@@ -545,6 +595,12 @@ async def test_invalid_summary_keeps_previous_valid_projection_without_partial_r
     assert result.outcome == "failed"
     assert result.reason == "summary_empty"
     assert result.projected_messages == projection.messages
+    failed = next(
+        fields for _, event, fields in log.records if event == "context.compaction.failed"
+    )
+    assert failed["trigger"] == "manual"
+    assert failed["action"] == "manual_failed"
+    assert failed["summary_code"] == "summary_empty"
     async with store._lock:
         for table in (
             "harness_context_artifacts",

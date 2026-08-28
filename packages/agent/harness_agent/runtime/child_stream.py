@@ -14,6 +14,7 @@ child 内的审批（ChildHitlMiddleware）与目录信任仍走 Host Interactio
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
@@ -30,6 +31,7 @@ from harness_agent.runtime.execution_stream import (
     StreamSession,
     execute,
 )
+from harness_agent.diagnostic_log.runtime import bind_execution_log, ensure_log
 from harness_agent.runtime.run_context import RunContext
 
 
@@ -82,7 +84,19 @@ def child_context_for(parent: RunContext, *, child_ref: ExecutionRef, agent_id: 
         snapshot_store=parent.snapshot_store,
         approval_presentations=parent.approval_presentations,
         workspace_root_registry=parent.workspace_root_registry,
+        deferred_tool_store=parent.deferred_tool_store,
+        interaction_port=parent.interaction_port,
+        event_port=parent.event_port,
+        record_approval=parent.record_approval,
         model_call_lifecycle=parent.model_call_lifecycle,
+        diagnostic_log=bind_execution_log(
+            getattr(parent, "diagnostic_log", None),
+            thread_id=parent.thread_id,
+            run_id=parent.run_id,
+            execution_id=child_ref.execution_id,
+            parent_execution_id=child_ref.parent_execution_id,
+            agent_id=agent_id,
+        ),
     )
 
 
@@ -103,6 +117,10 @@ async def stream_inline_child(
     """
     event_port = getattr(parent, "event_port", None)
     child_context = child_context_for(parent, child_ref=child_ref, agent_id=agent_id)
+    diagnostic_log = ensure_log(child_context.diagnostic_log)
+    started_at = time.monotonic()
+    lifecycle_fields = {"kind": "child", "agent_id": agent_id}
+    diagnostic_log.info("execution.started", lifecycle_fields)
 
     def emit(event_type: str, payload: Mapping[str, object]) -> None:
         if callable(event_port):
@@ -119,26 +137,72 @@ async def stream_inline_child(
     stream_input: object = {"messages": [HumanMessage(content=task)]}
     resume: object | None = None
     final_content = ""
-    while True:
-        if resume is not None:
-            stream_input = Command(resume=resume)
-        request = ExecutionStreamRequest(
-            agent=graph,
-            stream_input=stream_input,
-            graph_config={"configurable": {"thread_id": child_ref.thread_id}},
-            context=child_context,
-            content_visibility="passthrough",
-            session=session,
-            is_cancelled=cancelled,
-        )
-        try:
+    try:
+        while True:
+            if resume is not None:
+                stream_input = Command(resume=resume)
+            request = ExecutionStreamRequest(
+                agent=graph,
+                stream_input=stream_input,
+                graph_config={"configurable": {"thread_id": child_ref.thread_id}},
+                context=child_context,
+                content_visibility="passthrough",
+                session=session,
+                is_cancelled=cancelled,
+            )
             result = await execute(request, ports)
-        except ExecutionStreamError as exc:
-            if exc.code == "RUN_CANCELLED":
-                raise asyncio.CancelledError from exc
-            raise
-        final_content = result.final_content or final_content
-        if result.resume is None:
-            break
-        resume = result.resume
+            final_content = result.final_content or final_content
+            if result.resume is None:
+                break
+            resume = result.resume
+    except asyncio.CancelledError:
+        diagnostic_log.warn(
+            "execution.failed",
+            {
+                **lifecycle_fields,
+                "duration_ms": max(0, int((time.monotonic() - started_at) * 1000)),
+                "failure_stage": "execution_stream",
+                "error_type": "CancelledError",
+                "retryable": False,
+                "summary_code": "CHILD_EXECUTION_CANCELLED",
+            },
+        )
+        raise
+    except ExecutionStreamError as exc:
+        diagnostic_log.warn(
+            "execution.failed",
+            {
+                **lifecycle_fields,
+                "duration_ms": max(0, int((time.monotonic() - started_at) * 1000)),
+                "failure_stage": "execution_stream",
+                "error_code": exc.code,
+                "error_type": "ExecutionStreamError",
+                "retryable": False,
+                "summary_code": "CHILD_EXECUTION_FAILED",
+            },
+        )
+        if exc.code == "RUN_CANCELLED":
+            raise asyncio.CancelledError from exc
+        raise
+    except Exception as exc:
+        diagnostic_log.warn(
+            "execution.failed",
+            {
+                **lifecycle_fields,
+                "duration_ms": max(0, int((time.monotonic() - started_at) * 1000)),
+                "failure_stage": "execution_stream",
+                "error_type": type(exc).__name__,
+                "retryable": False,
+                "summary_code": "CHILD_EXECUTION_FAILED",
+            },
+        )
+        raise
+    diagnostic_log.info(
+        "execution.completed",
+        {
+            **lifecycle_fields,
+            "outcome": "completed",
+            "duration_ms": max(0, int((time.monotonic() - started_at) * 1000)),
+        },
+    )
     return {"messages": [AIMessage(content=final_content)]}

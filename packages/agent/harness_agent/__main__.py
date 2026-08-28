@@ -10,6 +10,7 @@ from harness_agent.diagnostic_log.runtime import (
     create_diagnostic_log,
     default_process_fields,
 )
+from harness_agent.diagnostic_log.stdlib import install_harness_stdlib_handler
 from harness_agent.host.agent_host import AgentHost
 from harness_agent.threads.thread_persistence import workspace_fingerprint
 
@@ -42,6 +43,7 @@ async def _run() -> None:
     )
     command_kind = os.environ.get("HARNESS_COMMAND_KIND", "agent")
     log.info("process.started", default_process_fields(command_kind))
+    install_harness_stdlib_handler(log)
     server = AgentHost(
         workspace=workspace,
         config_path=config_path,

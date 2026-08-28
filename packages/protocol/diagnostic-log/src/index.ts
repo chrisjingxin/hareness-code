@@ -6,6 +6,7 @@ import {
   DIAGNOSTIC_EVENT_LEVELS,
   MAX_DIAGNOSTIC_RECORD_BYTES,
   type DiagnosticEvent,
+  type DiagnosticQueryResult,
   type DiagnosticRecord,
 } from "./generated"
 
@@ -26,6 +27,11 @@ export function assertDiagnosticRecord(value: unknown): asserts value is Diagnos
   assertSafeValue(record.fields)
   const bytes = Buffer.byteLength(`${JSON.stringify(value)}\n`, "utf8")
   if (bytes > MAX_DIAGNOSTIC_RECORD_BYTES) throw new Error(`Diagnostic record 超过 ${MAX_DIAGNOSTIC_RECORD_BYTES} bytes`)
+}
+
+/** 校验离线查询 JSON v1；查询输出不得绕过 canonical schema。 */
+export function assertDiagnosticQueryResult(value: unknown): asserts value is DiagnosticQueryResult {
+  validate("queryResult", value, "Diagnostic query result")
 }
 
 function validate(key: string, value: unknown, label: string): void {

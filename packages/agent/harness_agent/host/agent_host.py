@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 from jsonschema.exceptions import ValidationError
 
 from harness_agent import __version__
-from harness_agent.diagnostic_log.runtime import DiagnosticLog
+from harness_agent.diagnostic_log.runtime import DiagnosticLog, ensure_log, safe_context_value
 from harness_agent.host.attachments import AttachmentManager
 from harness_agent.host.control_lease import (
     ActivityFacts,
@@ -298,7 +298,7 @@ class AgentHost:
         self._agent_engine_snapshot_lock = asyncio.Lock()
         self._run_event_tasks: set[asyncio.Task[None]] = set()
         self._workspace = (workspace or Path.cwd()).resolve()
-        self._diagnostic_log = diagnostic_log
+        self._diagnostic_log = ensure_log(diagnostic_log)
         # ponytail: Host 固定绑定一个 workspace，先用一把锁覆盖跨 Profile 图；
         # worktree/sandbox 有稳定资源身份或吞吐证明不足时再按资源拆分。
         self._tool_concurrency_lock = AsyncRWLock()
@@ -385,6 +385,7 @@ class AgentHost:
             project_dir=self._workspace,
             workspace_root_registry=self._workspace_root_registry,
             compose_services_provider=self._provide_compose_services,
+            diagnostic_log=diagnostic_log,
         )
         self._handlers = {
             METHOD["INITIALIZE"]: self._handle_initialize,
@@ -493,6 +494,7 @@ class AgentHost:
 
     async def close(self) -> None:
         """关闭 Host 及其持有的运行时资源；可重复调用。"""
+        was_running = self._running
         self._running = False
         await self._run_coordinator.close()
         for token in self._active_team_tokens.values():
@@ -506,6 +508,9 @@ class AgentHost:
         self._active_team_tokens.clear()
         if self._run_event_tasks:
             await asyncio.gather(*tuple(self._run_event_tasks), return_exceptions=True)
+        pending_requests = sum(
+            len(connection.pending_requests) for connection in self._connections.values()
+        )
         for connection in list(self._connections.values()):
             connection.closed = True
             self._fail_connection_requests(
@@ -540,6 +545,15 @@ class AgentHost:
             self._workspace_execution_resources = None
         await self._provider_client_pool.aclose()
         self._snapshot_store.close()
+        if was_running:
+            self._diagnostic_log.info(
+                "ipc.transport.closed",
+                {
+                    "side": "server",
+                    "outcome": "completed",
+                    "pending_requests": pending_requests,
+                },
+            )
         await self._close_thread_persistence()
 
     async def close_connection(self, connection: ProtocolConnection) -> None:
@@ -638,7 +652,10 @@ class AgentHost:
         handler = self._handlers.get(method)
         if handler is None:
             await self.send_error(request_id, -32601, f"Method not found: {method}")
+            self._log_ipc_request(method, request_id, time.monotonic(), success=False)
             return
+        started_at = time.monotonic()
+        ipc_ok = False
         try:
             if method == METHOD["INITIALIZE"]:
                 protocol = params.get("protocol")
@@ -675,6 +692,7 @@ class AgentHost:
                     await self.send_error(request_id, -32603, "Invalid handler result")
                     return
                 await self.send_response(request_id, result)
+            ipc_ok = True
         except ValidationError as exc:
             await self.send_error(
                 request_id,
@@ -748,6 +766,8 @@ class AgentHost:
         except Exception as exc:  # pragma: no cover - 最后的协议隔离层。
             logger.exception("Unhandled JSON-RPC handler error for %s", method)
             await self.send_error(request_id, -32603, f"{type(exc).__name__}: {exc}")
+        finally:
+            self._log_ipc_request(method, request_id, started_at, success=ipc_ok)
 
     async def send(self, message: dict[str, Any]) -> None:
         """向 owner stdio 写出单帧；测试也通过替换此 seam 捕获输出。"""
@@ -786,6 +806,40 @@ class AgentHost:
         if connection.sender is None:
             raise RpcError(-32603, "Connection has no transport")
         await connection.sender(message)
+
+    def _log_ipc_request(
+        self,
+        method: str,
+        request_id: str,
+        started_at: float,
+        *,
+        success: bool,
+    ) -> None:
+        """记录 server 侧 IPC 请求终态；不含 raw frame 或错误原文。"""
+        duration_ms = max(0, round((time.monotonic() - started_at) * 1000))
+        log = self._diagnostic_log
+        rpc_id = safe_context_value(request_id)
+        if rpc_id is not None:
+            log = log.child({"rpc_request_id": rpc_id})
+        safe_method = safe_context_value(method) or "unknown_method"
+        if success:
+            log.info(
+                "ipc.request.completed",
+                {"side": "server", "method": safe_method, "duration_ms": duration_ms},
+            )
+            return
+        log.error(
+            "ipc.request.failed",
+            {
+                "side": "server",
+                "method": safe_method,
+                "duration_ms": duration_ms,
+                "failure_stage": "handler",
+                "error_type": "RpcError",
+                "retryable": False,
+                "summary_code": "ipc_request_failed",
+            },
+        )
 
     async def send_response(self, request_id: str, result: Any) -> None:
         """发送 JSON-RPC 成功响应。"""
@@ -914,15 +968,14 @@ class AgentHost:
                 else None
             ),
         }
-        if self._diagnostic_log is not None:
-            self._diagnostic_log.info(
-                "ipc.initialize.completed",
-                {
-                    "side": "server",
-                    "duration_ms": max(0, round((time.monotonic() - started_at) * 1000)),
-                    "protocol_minor": negotiated_minor,
-                },
-            )
+        self._diagnostic_log.info(
+            "ipc.initialize.completed",
+            {
+                "side": "server",
+                "duration_ms": max(0, round((time.monotonic() - started_at) * 1000)),
+                "protocol_minor": negotiated_minor,
+            },
+        )
         return result
 
     async def _connect_mcp_servers(self) -> None:
@@ -946,7 +999,7 @@ class AgentHost:
         调用方必须持有 `_mcp_state_lock`，从而保证新 spec 不会同时绑定旧 manager
         和新 snapshot。
         """
-        manager = McpConnectionManager(snapshot)
+        manager = McpConnectionManager(snapshot, diagnostic_log=self._diagnostic_log)
         await manager.connect_all()
         owner = SharedResourceOwner(
             manager,
@@ -1085,6 +1138,7 @@ class AgentHost:
                     skill_snapshot_id=registry.snapshot_id,
                     skill_registry=registry,
                     requested_skill=self._prepare_requested_skill(command, registry),
+                    catalog_skill_ids=tuple(record.skill_id for record in registry.records),
                 )
             finally:
                 await reservation.release()
@@ -1147,6 +1201,18 @@ class AgentHost:
                 requested_skill=requested_skill,
                 context_snapshot=context_snapshot,
                 idle_duration_ms=idle_duration_ms,
+                catalog_skill_ids=tuple(
+                    record.skill_id for record in effective_registry.records
+                ),
+                catalog_mcp_ids=tuple(server.name for server in spec.mcp_snapshot.servers),
+                catalog_plugin_ids=tuple(
+                    plugin.plugin_id
+                    for plugin in (
+                        self._plugin_catalog_snapshot.plugins
+                        if self._plugin_catalog_snapshot is not None
+                        else ()
+                    )
+                ),
                 snapshot_reservation=reservation,
             )
         except BaseException:
@@ -2626,6 +2692,7 @@ class AgentHost:
                 max_profiles=settings.max_profiles,
                 idle_ttl_seconds=settings.idle_ttl_seconds,
                 close_timeout_seconds=settings.close_timeout_seconds,
+                diagnostic_log=self._diagnostic_log,
             )
         return self._agent_engine_pool
 
@@ -2684,6 +2751,7 @@ class AgentHost:
                 else (run.agent_engine_profile_key or "")
             ),
             cancellation_token=run.cancellation_token,
+            diagnostic_log=getattr(run, "diagnostic_log", None),
         )
 
     def _resolve_compose_stage_spec(
@@ -2744,10 +2812,12 @@ class AgentHost:
         config = self._config
         if config is None or config.model_catalog is None:
             return ()
+        from harness_agent.diagnostic_log.runtime import bind_execution_log
         from harness_agent.runtime.agent_delegation import (
             AgentDelegationError,
             DelegationTarget,
             child_execution_ref,
+            current_delegation_call,
         )
         from harness_agent.runtime.managed_agent_executor import (
             FailClosedManagedObserver,
@@ -2803,6 +2873,21 @@ class AgentHost:
             ) -> Mapping[str, Any]:
                 """构造 capture_only request，并由统一 executor 运行 Plugin Agent。"""
                 child_ref = child_execution_ref(command)
+                parent_log = None
+                try:
+                    parent_log = getattr(
+                        current_delegation_call().run_context, "diagnostic_log", None
+                    )
+                except AgentDelegationError:
+                    parent_log = None
+                child_log = bind_execution_log(
+                    parent_log,
+                    thread_id=child_ref.thread_id,
+                    run_id=child_ref.run_id,
+                    execution_id=child_ref.execution_id,
+                    parent_execution_id=child_ref.parent_execution_id,
+                    agent_id=resolved.agent_id,
+                )
                 context_snapshot = ContextLifecycle(
                     resolved.workspace,
                     home=self._config_home,
@@ -2831,6 +2916,7 @@ class AgentHost:
                         if self._workspace_root_registry is not None
                         else None
                     ),
+                    diagnostic_log=child_log,
                 )
                 checkpoint_namespace = child_ref.checkpoint_namespace(
                     resolved.project_fingerprint
@@ -2867,6 +2953,7 @@ class AgentHost:
                     required_skill_snapshot_ids=(snapshot_id,)
                     if isinstance(snapshot_id, str) and snapshot_id
                     else (),
+                    diagnostic_log=child_log,
                 )
                 try:
                     result = await ManagedAgentExecutor().execute(
@@ -3179,6 +3266,7 @@ class AgentHost:
             interaction_port=interaction_port,
             event_port=event_port,
             record_approval=record_approval,
+            diagnostic_log=run.diagnostic_log,
         )
 
     async def _handle_peer_response(self, message: dict[str, Any]) -> None:
@@ -3400,6 +3488,7 @@ class AgentHost:
                 project=self._workspace,
                 home=self._config_home,
             )
+            self._thread_persistence.bind_diagnostic_log(self._diagnostic_log)
         return self._thread_persistence
 
     async def _close_thread_persistence(self) -> None:

@@ -95,3 +95,80 @@ test("parses Plugin validation, install, trust and removal commands", () => {
 test("requires a prompt for non-interactive mode", () => {
   expect(() => parseArgs(["--non-interactive"])).toThrow("requires a value")
 })
+
+test("parses harness logs list and --run forms with filters, limit, cursor, --cwd", () => {
+  expect(parseArgs(["logs"], "/work")).toEqual({
+    kind: "logs",
+    cwd: "/work",
+    json: false,
+    flat: false,
+    limit: 20,
+    thread: undefined,
+    run: undefined,
+    level: undefined,
+    event: undefined,
+    component: undefined,
+    cursor: undefined,
+  })
+
+  expect(parseArgs(["logs", "--run", "abc123def", "--level", "warn", "--component", "agent", "--limit", "50", "--json", "--cwd", "/proj"], "/work")).toEqual({
+    kind: "logs",
+    cwd: "/proj",
+    json: true,
+    flat: false,
+    limit: 50,
+    thread: undefined,
+    run: "abc123def",
+    level: "warn",
+    event: undefined,
+    component: "agent",
+    cursor: undefined,
+  })
+
+  expect(parseArgs(["logs", "--run", "abc123def", "--flat", "--event", "tool", "--cursor", "eyJ2IjoxfQ"], "/work")).toMatchObject({
+    kind: "logs",
+    limit: 200,
+    run: "abc123def",
+    flat: true,
+    event: "tool",
+    cursor: "eyJ2IjoxfQ",
+  })
+  expect(() => parseArgs(["logs", "--cursor", "eyJ2IjoxfQ"])).toThrow("--cursor requires --thread or --run")
+  expect(() => parseArgs(["logs", "--run", "abc", "--cursor", "eyJ2IjoxfQ"])).toThrow("--cursor requires --flat or --json")
+  expect(() => parseArgs(["logs", "--flat"])).toThrow("--flat requires --thread or --run")
+  expect(() => parseArgs(["logs", "--run", "abc", "--flat", "--json"])).toThrow("--flat and --json are mutually exclusive")
+
+  // limit 边界
+  expect(() => parseArgs(["logs", "--limit", "0"])).toThrow("--limit must be integer 1..1000")
+  expect(() => parseArgs(["logs", "--limit", "1001"])).toThrow("--limit must be integer 1..1000")
+  expect(() => parseArgs(["logs", "--level", "trace"])).toThrow("--level must be one of")
+  expect(() => parseArgs(["logs", "--component", "sidecar"])).toThrow("--component must be cli or agent")
+
+  // 不接受 config
+  expect(() => parseArgs(["logs", "--config", "/x.toml"])).toThrow("does not accept --config")
+})
+
+test("parses logs --thread and rejects conflicting or missing selectors", () => {
+  expect(parseArgs(["logs", "--thread", "thread-prefix"], "/work")).toMatchObject({
+    kind: "logs",
+    thread: "thread-prefix",
+    run: undefined,
+    flat: false,
+    limit: 200,
+  })
+  expect(() => parseArgs(["logs", "--thread"])).toThrow("--thread requires a value")
+  expect(() => parseArgs(["logs", "--run"])).toThrow("--run requires a value")
+  expect(() => parseArgs([
+    "logs",
+    "--thread",
+    "thread-prefix",
+    "--run",
+    "run-prefix",
+  ])).toThrow("THREAD_RUN_CONFLICT")
+})
+
+test("logs 命令使用 --cwd 覆盖工作区", () => {
+  const c = parseArgs(["logs", "--cwd", "/other"], "/work")
+  expect(c.kind).toBe("logs")
+  expect((c as any).cwd).toBe("/other")
+})

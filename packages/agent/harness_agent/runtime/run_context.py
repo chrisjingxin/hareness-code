@@ -94,6 +94,8 @@ class RunContext:
     ) = field(default=None, repr=False)
     # 把 approve_thread / approve_project 记入父 Run 同一套 rule store。
     record_approval: Callable[[str, dict[str, Any], str], None] | None = field(default=None, repr=False)
+    # 当前 Run 的 Diagnostic Log；共享图在调用时读取，不在构图期捕获。
+    diagnostic_log: Any | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         """在执行前验证 thread 与 snapshot 的绑定，阻止跨 project 注入。"""

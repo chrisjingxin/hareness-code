@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import re
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Awaitable, Callable, Literal, Mapping, Sequence
 
@@ -24,6 +25,7 @@ from harness_agent.threads.context_projection import (
     encode_projected_messages,
     validate_atomic_message_groups,
 )
+from harness_agent.diagnostic_log.runtime import ensure_log, safe_context_value
 from harness_agent.threads.prompting import HISTORY_REWRITE_VERSION, canonical_json, estimate_tokens, input_cap_tokens
 from harness_agent.threads.runtime_state import (
     RuntimeExecutionPolicy,
@@ -165,9 +167,15 @@ class ContextCompactor:
 
     async def compress(self, request: CompressionRequest) -> CompressionResult:
         """按 trigger 统一执行完整压缩闭环，并在失败时保持旧投影。"""
+        self._compress_started = time.monotonic()
+        self._compress_before_tokens = (
+            request.estimated_tokens or _messages_tokens(request.projection.messages)
+        )
         try:
             self._validate_request(request)
         except Exception as exc:
+            reason = _safe_diagnostic_reason(exc)
+            self._log_failed(request, f"{request.trigger}_failed", reason)
             return CompressionResult(
                 outcome="failed",
                 trigger=request.trigger,
@@ -175,7 +183,7 @@ class ContextCompactor:
                 projected_messages=request.projection.messages,
                 estimated_tokens=request.estimated_tokens or 0,
                 input_cap_tokens=self._input_cap,
-                reason=_safe_diagnostic_reason(exc),
+                reason=reason,
             )
         messages = list(request.projection.messages)
         before_tokens = request.estimated_tokens or _messages_tokens(messages)
@@ -312,6 +320,11 @@ class ContextCompactor:
                 )
             except Exception as state_exc:
                 # 存储故障不能覆盖原始投影，也不能把部分事务误报成成功。
+                reason = (
+                    f"{_safe_diagnostic_reason(exc)};"
+                    f"failure_state:{_safe_diagnostic_reason(state_exc)}"
+                )
+                self._log_failed(request, f"{request.trigger}_failed", reason)
                 return CompressionResult(
                     outcome="failed",
                     trigger=request.trigger,
@@ -320,10 +333,7 @@ class ContextCompactor:
                     estimated_tokens=before_tokens,
                     input_cap_tokens=self._input_cap,
                     state=previous_state,
-                    reason=(
-                        f"{_safe_diagnostic_reason(exc)};"
-                        f"failure_state:{_safe_diagnostic_reason(state_exc)}"
-                    ),
+                    reason=reason,
                 )
 
     async def _full_compress(
@@ -546,7 +556,7 @@ class ContextCompactor:
         new_artifact_ids = tuple(
             artifact.artifact_id for artifact in committed.artifacts
         )
-        return CompressionResult(
+        result = CompressionResult(
             outcome="compressed",
             trigger=request.trigger,
             action=action,
@@ -557,6 +567,20 @@ class ContextCompactor:
             checkpoint=checkpoint,
             state=committed.state,
         )
+        started = getattr(self, "_compress_started", time.monotonic())
+        before_tokens = int(getattr(self, "_compress_before_tokens", estimated_tokens) or 0)
+        ensure_log(getattr(self._persistence, "diagnostic_log", None)).info(
+            "context.compaction.completed",
+            {
+                "trigger": request.trigger,
+                "action": action,
+                "duration_ms": max(0, round((time.monotonic() - started) * 1000)),
+                "before_estimated_tokens": before_tokens,
+                "after_estimated_tokens": estimated_tokens,
+                "artifact_count": len(new_artifact_ids),
+            },
+        )
+        return result
 
     async def _success_state(
         self,
@@ -632,15 +656,38 @@ class ContextCompactor:
             await self._persistence.commit_context(
                 CommitContextRewrite(thread_id=request.thread_id, state=state)
             )
+        action = f"{request.trigger}_failed"
+        self._log_failed(request, action, reason)
         return CompressionResult(
             outcome="failed",
             trigger=request.trigger,
-            action=f"{request.trigger}_failed",
+            action=action,
             projected_messages=request.projection.messages,
             estimated_tokens=estimated_tokens,
             input_cap_tokens=self._input_cap,
             state=state,
             reason=reason,
+        )
+
+    def _log_failed(
+        self,
+        request: CompressionRequest,
+        action: str,
+        reason: str,
+    ) -> None:
+        """记录压缩失败的稳定分类；不写摘要、异常原文或消息正文。"""
+        started = getattr(self, "_compress_started", time.monotonic())
+        summary_code = safe_context_value(reason) or "compaction_failed"
+        ensure_log(getattr(self._persistence, "diagnostic_log", None)).error(
+            "context.compaction.failed",
+            {
+                "trigger": request.trigger,
+                "action": action,
+                "duration_ms": max(0, round((time.monotonic() - started) * 1000)),
+                "failure_stage": "compress",
+                "error_type": "CompressionError",
+                "summary_code": summary_code,
+            },
         )
 
     def _skipped(

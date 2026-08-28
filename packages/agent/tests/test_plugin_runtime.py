@@ -14,6 +14,22 @@ from harness_agent.plugins.manager import PluginManager
 from harness_agent.plugins.runtime import HookRunner, PluginRuntimeManager
 
 
+class _RecordingDiagnosticLog:
+    """记录 Hook 事件，不接收进程输出正文。"""
+
+    def __init__(self) -> None:
+        self.records: list[tuple[str, str, dict[str, object]]] = []
+
+    def info(self, event: str, fields: dict[str, object]) -> None:
+        self.records.append(("info", event, dict(fields)))
+
+    def warn(self, event: str, fields: dict[str, object]) -> None:
+        self.records.append(("warn", event, dict(fields)))
+
+    def error(self, event: str, fields: dict[str, object]) -> None:
+        self.records.append(("error", event, dict(fields)))
+
+
 def _write_json(path: Path, value: object) -> None:
     """写入测试 JSON。"""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -265,6 +281,62 @@ async def test_hook_runner_exit_two_blocks_and_nonblocking_error_continues(
     assert isinstance(response, ToolMessage)
     assert response.status == "error"
     assert called is False
+    await runner.aclose()
+
+
+async def test_hook_runner_logs_terminals_without_process_output(tmp_path: Path) -> None:
+    """Hook 的拒绝属于完成，坏 JSON 属于失败，日志不复制 stdout/stderr。"""
+    from harness_agent.plugins.runtime import HookDefinition
+
+    definitions = (
+        HookDefinition(
+            plugin_id="guard",
+            event="PreToolUse",
+            matcher="Bash",
+            command="printf '%s' '{\"hookSpecificOutput\":{\"permissionDecision\":\"deny\"}}'",
+            args=None,
+            timeout_seconds=5,
+            asynchronous=False,
+            shell=None,
+            root=tmp_path,
+            data=tmp_path,
+            workspace=tmp_path,
+        ),
+        HookDefinition(
+            plugin_id="broken",
+            event="PreToolUse",
+            matcher="Bash",
+            command="printf 'CANARY_HC163_INVALID_JSON'",
+            args=None,
+            timeout_seconds=5,
+            asynchronous=False,
+            shell=None,
+            root=tmp_path,
+            data=tmp_path,
+            workspace=tmp_path,
+        ),
+    )
+    log = _RecordingDiagnosticLog()
+    runner = HookRunner(definitions)
+
+    results = await runner.run(
+        "PreToolUse",
+        tool_name="execute",
+        payload={"tool_input": {"command": "anything"}},
+        diagnostic_log=log,
+    )
+
+    assert len(results) == 2
+    assert [record[1] for record in log.records] == [
+        "hook.started",
+        "hook.completed",
+        "hook.started",
+        "hook.failed",
+    ]
+    assert log.records[1][2]["outcome"] == "deny"
+    assert log.records[3][2]["summary_code"] == "HOOK_OUTPUT_INVALID"
+    assert all(record[2]["tool_name"] == "execute" for record in log.records)
+    assert "CANARY_HC163_INVALID_JSON" not in repr(log.records)
     await runner.aclose()
 
 

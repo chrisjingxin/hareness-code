@@ -350,6 +350,31 @@ test("Peer 只忽略已超时 ID 的迟到响应并继续报告真正未知 ID",
   expect(errors[0]?.message).toBe("Unknown JSON-RPC response id: never-sent")
 })
 
+test("Peer 在请求终态记录 client IPC 诊断且不含协议原文", async () => {
+  const records: Array<{ level: string, event: string, fields: Record<string, unknown> }> = []
+  const log = {
+    child() { return this },
+    debug(event: string, fields: Record<string, unknown>) { records.push({ level: "debug", event, fields }) },
+    info(event: string, fields: Record<string, unknown>) { records.push({ level: "info", event, fields }) },
+    warn(event: string, fields: Record<string, unknown>) { records.push({ level: "warn", event, fields }) },
+    error(event: string, fields: Record<string, unknown>) { records.push({ level: "error", event, fields }) },
+  }
+  const stdout = new PassThrough()
+  const stdin = new PassThrough()
+  const client = new AgentClient(new StdioRpcTransport(stdin, stdout), log as any)
+  stdin.on("data", data => {
+    const message = JSON.parse(data.toString())
+    stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {} }) + "\n")
+  })
+  await client.request("config.show", {})
+  await client.close()
+  const completed = records.find(item => item.event === "ipc.request.completed")
+  expect(completed?.fields).toMatchObject({ side: "client", method: "config.show" })
+  const closed = records.find(item => item.event === "ipc.transport.closed")
+  expect(closed?.fields).toMatchObject({ side: "client", outcome: "completed" })
+  expect(JSON.stringify(records)).not.toContain("jsonrpc")
+})
+
 function peer(limit?: number) {
   const stdout = new PassThrough()
   const stdin = new PassThrough()

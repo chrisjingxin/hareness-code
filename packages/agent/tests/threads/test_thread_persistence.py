@@ -3606,3 +3606,81 @@ def test_zc108_malformed_child_ready_blocks_cleanup(tmp_path: Path) -> None:
     assert "child-ready.json" in result.owned_remaining
     assert not result.closable
     assert ready_path.exists()
+
+
+class _RecordingPersistenceLog:
+    def __init__(self) -> None:
+        self.records: list[tuple[str, str, dict[str, object]]] = []
+
+    def info(self, event, fields) -> None:
+        self.records.append(("info", event, dict(fields)))
+
+    def error(self, event, fields) -> None:
+        self.records.append(("error", event, dict(fields)))
+
+    def warn(self, event, fields) -> None:
+        self.records.append(("warn", event, dict(fields)))
+
+    def debug(self, event, fields) -> None:
+        self.records.append(("debug", event, dict(fields)))
+
+
+@pytest.mark.asyncio
+async def test_public_persistence_operations_log_without_sql_or_body(tmp_path: Path) -> None:
+    """公开领域操作记录 operation/duration/count，不含 SQL、bind 或 Transcript 正文。"""
+    project = tmp_path / "project"
+    project.mkdir()
+    store = await ThreadPersistence.open(project=project, home=tmp_path / "home")
+    log = _RecordingPersistenceLog()
+    store.bind_diagnostic_log(log)
+    canary = "CANARY_HC163_TRANSCRIPT_BODY"
+
+    await accept_thread(store, "thread", canary, run_id="run-1")
+    await store.append_transcript(
+        TranscriptAppend(
+            thread_id="thread",
+            record_id="assistant-1",
+            kind="assistant",
+            content=canary,
+            run_id="run-1",
+        )
+    )
+    await store.complete_run("thread")
+
+    operations = [fields["operation"] for _, event, fields in log.records if event.startswith("persistence.")]
+    assert "accept_run" in operations
+    assert "append_transcript" in operations
+    assert "complete_run" in operations
+    assert canary not in repr(log.records)
+    assert "INSERT" not in repr(log.records)
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_persistence_log_failure_does_not_roll_back_transcript(tmp_path: Path) -> None:
+    """日志 adapter 抛错时 Transcript 仍提交。"""
+    project = tmp_path / "project"
+    project.mkdir()
+    store = await ThreadPersistence.open(project=project, home=tmp_path / "home")
+    await accept_thread(store, "thread", "hello", run_id="run-1")
+
+    class _Boom:
+        def info(self, event, fields) -> None:
+            raise RuntimeError("diagnostic unavailable")
+
+        def error(self, event, fields) -> None:
+            raise RuntimeError("diagnostic unavailable")
+
+    store.bind_diagnostic_log(_Boom())
+    await store.append_transcript(
+        TranscriptAppend(
+            thread_id="thread",
+            record_id="assistant-1",
+            kind="assistant",
+            content="visible",
+            run_id="run-1",
+        )
+    )
+    records = await store.load_transcript("thread")
+    assert any(record.kind == "assistant" for record in records)
+    await store.close()

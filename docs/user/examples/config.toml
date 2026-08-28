@@ -72,6 +72,19 @@ close_timeout_seconds = 15
 # true 时默认 Profile 不参与 LRU/TTL 淘汰；只建议固定的单项目交互环境使用。
 pin_default_profile = false
 
+# 本地结构化诊断日志配置。
+# 环境变量 HARNESS_LOG_LEVEL 可临时覆盖 level；重启 sidecar 生效。
+[diagnostics]
+# 日志级别：可选 "debug" | "info" | "warn" | "error"，默认为 "info"
+level = "info"
+# 历史日志保留天数（默认 14 天）
+retention_days = 14
+# 日志目录总容量上限（单位 MiB，默认 200）
+max_total_mib = 200
+# 单个日志文件分片容量上限（单位 MiB，默认 16，不得大于 max_total_mib）
+max_file_mib = 16
+
+
 # 未实现：企业远端 Sandbox Provider。
 # 将 backend 改为 "remote" 前，必须先由企业提供并验证 factory。
 # [execution.remote]

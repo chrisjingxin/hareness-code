@@ -21,6 +21,7 @@ import aiosqlite
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from harness_agent.compose.models import ThreadMode
+from harness_agent.diagnostic_log.runtime import ensure_log, safe_context_value
 from harness_agent.runtime.execution_binding import (
     ExecutionBindingError,
     LegacyModelBindings,
@@ -2882,6 +2883,52 @@ class ThreadPersistence:
         self._migration_attempt_context = migration_attempt_context
         # ZC-108：child 在 BEGIN IMMEDIATE 后用此字段与 manifest source 比对。
         self._migration_manifest_source: _MigrationDatabaseFingerprint | None = None
+        self._diagnostic_log = ensure_log(None)
+
+    def bind_diagnostic_log(self, log: Any | None) -> None:
+        """把进程级 Diagnostic Log 绑到公开领域操作；不影响 SQLite 事务。"""
+        self._diagnostic_log = ensure_log(log)
+
+    @property
+    def diagnostic_log(self) -> Any:
+        """供 Context 等相邻 owner 复用同一 logger，不另建通道。"""
+        return self._diagnostic_log
+
+    def _log_operation(
+        self,
+        operation: str,
+        started: float,
+        row_count: int | None,
+        error: BaseException | None = None,
+    ) -> None:
+        """记录公开持久化操作的耗时；日志失败不得改变 commit/rollback。"""
+        duration_ms = max(0, round((time.monotonic() - started) * 1000))
+        log = self._diagnostic_log
+        if error is None:
+            log.info(
+                "persistence.operation.completed",
+                {
+                    "operation": operation,
+                    "duration_ms": duration_ms,
+                    "row_count": row_count,
+                },
+            )
+            return
+        raw = str(error).split(":", 1)[0]
+        error_code = safe_context_value(raw) or "persistence_failed"
+        error_type = safe_context_value(type(error).__name__) or "Error"
+        log.error(
+            "persistence.operation.failed",
+            {
+                "operation": operation,
+                "duration_ms": duration_ms,
+                "failure_stage": "persistence",
+                "error_code": error_code,
+                "error_type": error_type,
+                "retryable": False,
+                "summary_code": "persistence_failed",
+            },
+        )
 
     @classmethod
     async def open(
@@ -3123,15 +3170,22 @@ class ThreadPersistence:
 
     async def accept_run(self, command: AcceptRun) -> RunAcceptance:
         """原子受理一个 Run，并提交或复用 Context snapshot、索引和绑定。"""
-        return RunAcceptance(
-            created=await self._record_run_start(
-                command.message,
-                command.binding,
-                command.context_snapshot,
-                command.mode,
-            ),
-            binding=command.binding,
-        )
+        started = time.monotonic()
+        try:
+            acceptance = RunAcceptance(
+                created=await self._record_run_start(
+                    command.message,
+                    command.binding,
+                    command.context_snapshot,
+                    command.mode,
+                ),
+                binding=command.binding,
+            )
+        except Exception as exc:
+            self._log_operation("accept_run", started, None, exc)
+            raise
+        self._log_operation("accept_run", started, 1)
+        return acceptance
 
     async def _record_run_start(
             self,
@@ -3465,8 +3519,10 @@ class ThreadPersistence:
             self, commands: tuple[TranscriptAppend, ...]
     ) -> tuple[TranscriptRecord, ...]:
         """在一个事务中追加同一 Thread 的记录，失败时全部回滚。"""
+        started = time.monotonic()
         self._ensure_open()
         if not commands:
+            self._log_operation("append_transcript", started, 0)
             return ()
         thread_id = commands[0].thread_id
         if any(command.thread_id != thread_id for command in commands):
@@ -3485,12 +3541,15 @@ class ThreadPersistence:
                     records_list.append(await self._append_transcript_in_transaction(command))
                 await self._refresh_thread_index_in_transaction(thread_id, _now_ms())
                 await self._connection.commit()
-                return tuple(records_list)
+                records = tuple(records_list)
+                self._log_operation("append_transcript", started, len(records))
+                return records
             except BaseException as exc:
                 try:
                     await self._connection.rollback()
                 except aiosqlite.Error:
                     pass
+                self._log_operation("append_transcript", started, None, exc)
                 if isinstance(exc, ThreadPersistenceError) or isinstance(
                         exc, asyncio.CancelledError
                 ):
@@ -3909,6 +3968,7 @@ class ThreadPersistence:
 
     async def complete_run(self, thread_id: str) -> None:
         """在 Run 终态刷新活动时间；消息数量由 Transcript 追加事务维护。"""
+        started = time.monotonic()
         self._ensure_open()
         try:
             async with self._lock:
@@ -3923,7 +3983,10 @@ class ThreadPersistence:
                 )
                 await self._connection.commit()
         except aiosqlite.Error as exc:
-            raise ThreadPersistenceError(f"CHECKPOINT_INDEX_REFRESH_FAILED: {exc}") from exc
+            error = ThreadPersistenceError(f"CHECKPOINT_INDEX_REFRESH_FAILED: {exc}")
+            self._log_operation("complete_run", started, None, error)
+            raise error from exc
+        self._log_operation("complete_run", started, 1)
 
     async def load_context(self, thread_id: str) -> ContextSnapshot:
         """读取 LangGraph 缓存和 Context 状态，仅供诊断与兼容测试。"""
@@ -4195,6 +4258,7 @@ class ThreadPersistence:
 
     async def commit_context(self, command: CommitContextRewrite) -> ContextCommit:
         """原子提交 Artifact、摘要、状态和模型投影检查点。"""
+        started = time.monotonic()
         self._ensure_open()
         checkpoint_draft = command.checkpoint
         artifacts: list[ContextArtifact] = []
@@ -4570,6 +4634,7 @@ class ThreadPersistence:
                 await self._connection.rollback()
             except aiosqlite.Error:
                 pass
+            self._log_operation("commit_context", started, None, exc)
             if isinstance(exc, asyncio.CancelledError):
                 raise
             if isinstance(exc, ThreadPersistenceError):
@@ -4583,6 +4648,7 @@ class ThreadPersistence:
                     f"CONTEXT_REWRITE_WRITE_FAILED: {exc}"
                 ) from exc
             raise
+        self._log_operation("commit_context", started, len(artifacts))
         return ContextCommit(tuple(artifacts), summary, command.state, checkpoint)
 
     async def _context_commit_result_in_transaction(

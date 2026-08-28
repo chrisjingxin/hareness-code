@@ -53,6 +53,7 @@ export const DIAGNOSTIC_EVENTS = ${JSON.stringify(Object.keys(meta.events))} as 
 export type DiagnosticEvent = keyof DiagnosticFieldsMap
 export type DiagnosticLevel = "debug" | "info" | "warn" | "error"
 export type DiagnosticComponent = "cli" | "agent"
+export type DiagnosticQueryResult = ${renderType(root, root.$defs.queryResult)}
 export interface DiagnosticFieldsMap {
 ${fields}
 }
@@ -88,7 +89,10 @@ function renderValidators(root: Schema, meta: Metadata): string {
   ajv.addKeyword("x-harness-diagnostic")
   const rootId = root.$id as string
   ajv.addSchema(root, rootId)
-  const validators: Record<string, string> = { record: `${rootId}#/$defs/record` }
+  const validators: Record<string, string> = {
+    record: `${rootId}#/$defs/record`,
+    queryResult: `${rootId}#/$defs/queryResult`,
+  }
   for (const [event, entry] of Object.entries(meta.events)) validators[`fields:${event}`] = `${rootId}${entry.fields}`
   const exportsByKey = Object.fromEntries(Object.entries(validators).map(([key, schemaId], index) => {
     const exportName = `validateDiagnostic${index}`
@@ -180,6 +184,7 @@ function resolveRef(root: Schema, ref: string): Schema {
 
 function renderType(root: Schema, input: Schema): string {
   if (input.$ref) return renderType(root, resolveRef(root, input.$ref))
+  if (input.oneOf) return input.oneOf.map((child: Schema) => renderType(root, child)).join(" | ")
   if (input.const !== undefined) return JSON.stringify(input.const)
   if (input.enum) return input.enum.map(JSON.stringify).join(" | ")
   if (Array.isArray(input.type)) return input.type.map((type: string) => renderType(root, { ...input, type })).join(" | ")

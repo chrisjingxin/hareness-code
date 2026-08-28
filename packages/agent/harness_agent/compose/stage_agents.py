@@ -11,6 +11,7 @@ StageObserver 投影，artifact 正文只进入 StageResult 供 Runtime 校验�
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
@@ -20,6 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from harness_agent.compose.role_bindings import RoleBindingRegistry
+from harness_agent.diagnostic_log.runtime import bind_execution_log
 from harness_agent.runtime.agent_delegation import (
     AgentDelegationError,
     AgentDelegator,
@@ -64,6 +66,7 @@ class StageRequest:
         cancellation_token: RunCancellationToken,
         timeout_seconds: float = STAGE_AGENT_TIMEOUT_SECONDS,
         compose_scope: Mapping[str, object] | None = None,
+        diagnostic_log: Any | None = None,
     ) -> None:
         """保存 stage 身份、有界任务文本、父 execution 与可选 activity scope。"""
         if not stage or not task.strip():
@@ -76,6 +79,7 @@ class StageRequest:
         self.timeout_seconds = timeout_seconds
         self.invocation_id = uuid.uuid4().hex
         self.compose_scope = dict(compose_scope) if compose_scope is not None else None
+        self.diagnostic_log = diagnostic_log
 
 
 class StageResult:
@@ -360,6 +364,19 @@ class ManagedStageAgentPort:
                     parent_execution_id=child_ref.parent_execution_id,
                     agent_id=role.role_id,
                 )
+            activity_id = None
+            if isinstance(request.compose_scope, Mapping):
+                raw_activity = request.compose_scope.get("activity_id")
+                activity_id = raw_activity if isinstance(raw_activity, str) else None
+            stage_log = bind_execution_log(
+                request.diagnostic_log,
+                thread_id=child_ref.thread_id,
+                run_id=child_ref.run_id,
+                execution_id=child_ref.execution_id,
+                parent_execution_id=child_ref.parent_execution_id,
+                agent_id=spec.agent_id,
+                activity_id=activity_id,
+            )
             context_snapshot = ContextLifecycle(
                 spec.workspace,
                 home=self._config_home,
@@ -383,6 +400,7 @@ class ManagedStageAgentPort:
                 execution_mode=ExecutionMode.MANAGED,
                 cancellation_token=command.cancellation_token,
                 delegation_policy=spec.effective_policy.delegation,
+                diagnostic_log=stage_log,
             )
             checkpoint_namespace = child_ref.checkpoint_namespace(
                 spec.project_fingerprint
@@ -426,6 +444,7 @@ class ManagedStageAgentPort:
                 if isinstance(snapshot_id, str) and snapshot_id
                 else (),
                 started_at=started_at,
+                diagnostic_log=stage_log,
             )
             try:
                 result = await ManagedAgentExecutor().execute(
@@ -478,7 +497,72 @@ class ManagedStageAgentPort:
             cancellation_token=request.cancellation_token,
             timeout_seconds=request.timeout_seconds,
         )
-        result = await delegator.execute(command)
+        execution_ref = child_execution_ref(command)
+        activity_id = None
+        if isinstance(request.compose_scope, Mapping):
+            raw_activity = request.compose_scope.get("activity_id")
+            activity_id = raw_activity if isinstance(raw_activity, str) else None
+        lifecycle_log = bind_execution_log(
+            request.diagnostic_log,
+            thread_id=execution_ref.thread_id,
+            run_id=execution_ref.run_id,
+            execution_id=execution_ref.execution_id,
+            parent_execution_id=execution_ref.parent_execution_id,
+            agent_id=role.role_id,
+            activity_id=activity_id,
+        )
+        lifecycle_fields = {"kind": "compose_stage", "agent_id": role.role_id}
+        lifecycle_log.info("execution.started", lifecycle_fields)
+        try:
+            result = await delegator.execute(command)
+        except asyncio.CancelledError:
+            lifecycle_log.warn(
+                "execution.failed",
+                {
+                    **lifecycle_fields,
+                    "duration_ms": max(0, int((time.monotonic() - started_at) * 1000)),
+                    "failure_stage": "stage_execution",
+                    "error_type": "CancelledError",
+                    "retryable": False,
+                    "summary_code": "COMPOSE_STAGE_CANCELLED",
+                },
+            )
+            raise
+        except AgentDelegationError as exc:
+            lifecycle_log.warn(
+                "execution.failed",
+                {
+                    **lifecycle_fields,
+                    "duration_ms": max(0, int((time.monotonic() - started_at) * 1000)),
+                    "failure_stage": "stage_execution",
+                    "error_code": exc.code,
+                    "error_type": "AgentDelegationError",
+                    "retryable": False,
+                    "summary_code": "COMPOSE_STAGE_EXECUTION_FAILED",
+                },
+            )
+            raise
+        except Exception as exc:
+            lifecycle_log.warn(
+                "execution.failed",
+                {
+                    **lifecycle_fields,
+                    "duration_ms": max(0, int((time.monotonic() - started_at) * 1000)),
+                    "failure_stage": "stage_execution",
+                    "error_type": type(exc).__name__,
+                    "retryable": False,
+                    "summary_code": "COMPOSE_STAGE_EXECUTION_FAILED",
+                },
+            )
+            raise
+        lifecycle_log.info(
+            "execution.completed",
+            {
+                **lifecycle_fields,
+                "outcome": result.status.value,
+                "duration_ms": max(0, int((time.monotonic() - started_at) * 1000)),
+            },
+        )
         raw_final = str(result.output.get("final", ""))
         try:
             output = parse_structured_output(raw_final)

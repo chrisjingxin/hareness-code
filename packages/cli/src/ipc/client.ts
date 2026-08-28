@@ -61,6 +61,7 @@ import {
   type TeamsRunParams,
   type TeamsRunResult,
 } from "@za38/protocol"
+import { ensureDiagnosticLog, type DiagnosticLog } from "../diagnostic-log/runtime"
 import { AsyncQueue, type RpcTransport } from "./transport"
 
 export type { RpcTransport } from "./transport"
@@ -127,7 +128,13 @@ export class AgentClient {
   private requestHandler: PeerRequestHandler | undefined
   private initializedInfo: InitializeResult | undefined
 
-  constructor(private readonly transport: RpcTransport) {
+  private readonly log: DiagnosticLog
+
+  constructor(
+    private readonly transport: RpcTransport,
+    diagnosticLog?: DiagnosticLog,
+  ) {
+    this.log = ensureDiagnosticLog(diagnosticLog)
     void this.consumeMessages()
   }
 
@@ -282,18 +289,32 @@ export class AgentClient {
     if (this.closed) return Promise.reject(new Error("Agent connection is closed"))
     validateOperationParams(method, params)
     const id = `req-${this.nextId++}`
+    const started = performance.now()
     return new Promise((resolve, reject) => {
       const timeout = timeoutMs > 0
         ? setTimeout(() => {
             this.pending.delete(id)
             this.rememberTimedOutRequest(id)
+            this.logIpcRequest(method, started, false, "timeout")
             reject(new Error(`Timed out waiting for ${method}`))
           }, timeoutMs)
         : undefined
-      this.pending.set(id, { method, resolve: value => resolve(value as OperationMap[M]["result"]), reject, timeout })
+      this.pending.set(id, {
+        method,
+        resolve: value => {
+          this.logIpcRequest(method, started, true)
+          resolve(value as OperationMap[M]["result"])
+        },
+        reject: error => {
+          this.logIpcRequest(method, started, false, error)
+          reject(error)
+        },
+        timeout,
+      })
       void this.send({ jsonrpc: "2.0", method, params, id }).catch(error => {
         this.pending.delete(id)
         if (timeout) clearTimeout(timeout)
+        this.logIpcRequest(method, started, false, error)
         reject(error)
       })
     }) as Promise<OperationMap[M]["result"]>
@@ -595,6 +616,7 @@ export class AgentClient {
   /** 只执行一次关闭流程，清理定时器并结束全部等待请求。 */
   private closeTransport(error: Error): void {
     if (this.closed) return
+    const pendingRequests = this.pending.size
     this.closed = true
     this.inboundRequests.clear()
     this.timedOutRequestIds.clear()
@@ -603,8 +625,39 @@ export class AgentClient {
       if (pending.timeout) clearTimeout(pending.timeout)
       pending.reject(error)
     }
+    this.log.info("ipc.transport.closed", {
+      side: "client",
+      outcome: error.message.includes("closed") ? "completed" : "failed",
+      pending_requests: pendingRequests,
+    })
     this.emit("close", error)
     this.listeners.clear()
+  }
+
+  private logIpcRequest(method: string, started: number, success: boolean, error?: unknown): void {
+    const durationMs = Math.max(0, Math.round(performance.now() - started))
+    if (success) {
+      this.log.info("ipc.request.completed", {
+        side: "client",
+        method,
+        duration_ms: durationMs,
+      })
+      return
+    }
+    const summary = error === "timeout"
+      ? "timeout"
+      : error instanceof JsonRpcRemoteError
+        ? "remote_error"
+        : "transport_error"
+    this.log.error("ipc.request.failed", {
+      side: "client",
+      method,
+      duration_ms: durationMs,
+      failure_stage: "transport",
+      error_type: error instanceof JsonRpcRemoteError ? "JsonRpcRemoteError" : "Error",
+      retryable: false,
+      summary_code: summary,
+    })
   }
 }
 

@@ -116,6 +116,8 @@ class ExecutionStreamRequest:
     is_cancelled: Callable[[], bool]
     # 目录信任等必须用户决策的中断判定钩子；None 时并发安全工具自动放行。
     needs_user_decision: Callable[[str, Mapping[str, object]], bool] | None = None
+    # 首个可投影 assistant/reasoning/tool 信号才算 provider 有效首包；心跳不算。
+    on_provider_activity: Callable[[], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,12 +240,17 @@ async def execute(
             if complete_tool:
                 await ports.after_tool_boundary()
 
-        for signal in translate_stream_event(
-            event,
-            session,
-            content_visibility=request.content_visibility,
-            execution_id=expected_execution_id,
-        ):
+        signals = tuple(
+            translate_stream_event(
+                event,
+                session,
+                content_visibility=request.content_visibility,
+                execution_id=expected_execution_id,
+            )
+        )
+        if signals and request.on_provider_activity is not None:
+            request.on_provider_activity()
+        for signal in signals:
             ports.emit(signal)
 
     finish_model_round(session)
