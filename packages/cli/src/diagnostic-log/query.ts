@@ -1240,8 +1240,27 @@ function flatFilterSummary(query: LogsQuery): string {
   ].join(" · ")
 }
 
+function formatLocalTimestamp(timestampMs: number): string {
+  const date = new Date(timestampMs)
+  const Y = date.getFullYear()
+  const M = String(date.getMonth() + 1).padStart(2, "0")
+  const D = String(date.getDate()).padStart(2, "0")
+  const h = String(date.getHours()).padStart(2, "0")
+  const m = String(date.getMinutes()).padStart(2, "0")
+  return `${Y}-${M}-${D} ${h}:${m}`
+}
+
+function formatLocalTimeOnly(timestampMs: number): string {
+  const date = new Date(timestampMs)
+  const h = String(date.getHours()).padStart(2, "0")
+  const m = String(date.getMinutes()).padStart(2, "0")
+  const s = String(date.getSeconds()).padStart(2, "0")
+  const ms = String(date.getMilliseconds()).padStart(3, "0")
+  return `${h}:${m}:${s}.${ms}`
+}
+
 function flatTime(timestampMs: number): string {
-  return new Date(timestampMs).toISOString().slice(11, 23)
+  return formatLocalTimeOnly(timestampMs)
 }
 
 function renderLogsFlat(result: LogsQueryResult, query: LogsQuery, columns: number, fmt: ReturnType<typeof createFormatter>): string {
@@ -1319,19 +1338,19 @@ export function renderLogsHuman(
         { value: fmt.bold("THREAD"), width: 12 },
         { value: fmt.bold("次数"), width: 4, align: "right" },
         { value: fmt.bold("模式"), width: 4 },
-        { value: fmt.bold("结果"), width: 4 },
+        { value: fmt.bold("结果"), width: 6 },
         { value: fmt.bold("耗时"), width: 8, align: "right" },
       ]))
     }
     for (const thread of threads) {
-      const timestamp = new Date(thread.last_activity_ms).toISOString().replace("T", " ").slice(0, 16)
+      const timestamp = formatLocalTimestamp(thread.last_activity_ms)
       if (columns >= 60) {
         lines.push(tableRow([
           { value: fmt.gray(timestamp), width: 16 },
           { value: prefix(thread.thread_id), width: 12 },
           { value: thread.run_count, width: 4, align: "right" },
           { value: fmt.mode(thread.latest_mode), width: 4 },
-          { value: fmt.status(thread.latest_outcome), width: 4 },
+          { value: fmt.status(thread.latest_outcome), width: 6 },
           { value: fmt.duration(thread.latest_duration_ms), width: 8, align: "right" },
         ]))
       } else {
