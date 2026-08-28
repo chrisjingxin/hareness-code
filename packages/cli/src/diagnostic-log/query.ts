@@ -1105,7 +1105,7 @@ function slowLines(events: DiagnosticRecord[], runId: string | undefined, column
   const items = events
     .filter(record => (!runId || record.run_id === runId || (!record.run_id && PROCESS_EVENTS.has(record.event))))
     .filter(record => !record.event.startsWith("logging.") && !record.event.startsWith("process."))
-    .filter(record => !record.event.startsWith("run.") && record.event !== "runtime.released")
+    .filter(record => !record.event.startsWith("run.") && record.event !== "runtime.released" && record.event !== "mcp.connection.closed")
     .map(record => ({ record, value: fields(record).duration_ms }))
     .filter((item): item is { record: DiagnosticRecord; value: number } => typeof item.value === "number" && item.value > 0)
     .filter(item => eventLabel(item.record) !== "步骤")
