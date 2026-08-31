@@ -1,3 +1,8 @@
+---
+name: za38-index
+description: Index fixture command.
+---
+
 # /za38-index
 
 Index fixture.

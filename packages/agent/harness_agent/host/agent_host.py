@@ -7,14 +7,16 @@ import inspect
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from jsonschema.exceptions import ValidationError
@@ -42,6 +44,15 @@ from harness_agent.runtime.agent_engine import (
     AgentEngineResourceBundle,
 )
 from harness_agent.config.config import ConfigError, DiagnosticsSettings, Za38Config, load_config
+from harness_agent.config.settings import (
+    CredentialBackend,
+    SettingBinding,
+    SettingsError,
+    SettingsResolver,
+    SettingsSnapshot,
+    SettingsStore,
+    create_platform_credential_backend,
+)
 from harness_agent.policy.approval_mode import ApprovalMode
 from harness_agent.policy.concurrency import AsyncRWLock
 from harness_agent.policy.permission_rules import PermissionRule
@@ -80,9 +91,11 @@ from harness_agent.protocol.generated import (
     EVENT_TYPE,
     METHOD,
     OPERATION_CAPABILITIES,
+    OPERATION_MIN_MINOR,
     SERVER_CAPABILITIES,
     ApprovalResponse,
     AgentsInspectParams,
+    CommandsBindParams,
     ComposeAbandonParams,
     ComposeInspectParams,
     ContextCompactParams,
@@ -104,6 +117,9 @@ from harness_agent.protocol.generated import (
     QuestionResponse,
     RunCancelParams,
     RunStartParams,
+    SettingsListParams,
+    SettingsRemoveParams,
+    SettingsSetParams,
     TeamsCancelParams,
     TeamsGenerateParams,
     TeamsInspectParams,
@@ -132,6 +148,7 @@ from harness_agent.plugins import (
     PluginRuntimeManager,
 )
 from harness_agent.plugins.model import ExtensionCatalogSnapshot, catalog_snapshot_id
+from harness_agent.plugins.runtime import HookRuntimeFailure
 from harness_agent.runtime.agent_spec import (
     ResolvedAgentSpec,
     resolve_builtin_main_agent_spec,
@@ -146,6 +163,7 @@ from harness_agent.extensions.mcp import (
     McpServerConfig,
     build_mcp_snapshot,
 )
+
 from harness_agent.runtime.run_context import RunCancellationToken, RunContext
 from harness_agent.runtime.agent_engine_profile import AgentEngineProfile
 from harness_agent.runtime.resource_ownership import (
@@ -239,6 +257,47 @@ ATTACHMENT_CAPABILITY_ALLOWLIST = frozenset(
 )
 
 
+def _parse_raw_command_invocation(raw_invocation: str) -> tuple[str, str] | None:
+    """提取 Slash 的名称和规范化参数；不改写原始调用字符串。"""
+    value = raw_invocation.lstrip()
+    if not value.startswith("/") or value.startswith("//"):
+        return None
+    match = re.fullmatch(r"/([^\s/]+)([\s\S]*)", value)
+    if match is None:
+        return None
+    return match.group(1), match.group(2).strip()
+
+
+def _validate_command_invocation(
+    command: StartRun,
+    requested: RequestedSkill,
+    record: Any,
+    *,
+    resolved_command_name: str | None,
+) -> None:
+    """校验 CLI 已提交的 exact binding，不在 Host 重算 UI 命令表。"""
+    if not requested.raw_invocation or not requested.command_name:
+        raise SkillError("COMMAND_INVOCATION_CONTRACT_REQUIRED")
+    if not resolved_command_name:
+        raise SkillError("COMMAND_INVOCATION_BINDING_REQUIRED")
+    if requested.raw_invocation != command.message:
+        raise SkillError("COMMAND_INVOCATION_RAW_MISMATCH")
+    parsed = _parse_raw_command_invocation(requested.raw_invocation)
+    if parsed is None:
+        raise SkillError("COMMAND_INVOCATION_INVALID")
+    raw_name, raw_args = parsed
+    if (
+        getattr(record, "skill_id", None) != requested.skill_id
+        or getattr(record, "kind", None) != "command"
+        or requested.command_name.casefold() != raw_name.casefold()
+        or requested.command_name.casefold() != resolved_command_name.casefold()
+        or raw_name.casefold() != resolved_command_name.casefold()
+    ):
+        raise SkillError("COMMAND_INVOCATION_IDENTITY_MISMATCH")
+    if requested.args.strip() != raw_args:
+        raise SkillError("COMMAND_INVOCATION_ARGS_MISMATCH")
+
+
 @dataclass(slots=True)
 class _AgentEngineArtifacts:
     """AgentEngine 图之外的共享 middleware 与执行上下文，由同一 AgentEngine 负责释放。"""
@@ -279,6 +338,9 @@ class AgentHost:
         config_home: Path | None = None,
         config_change_policy: ManagedConfigPolicy | None = None,
         workspace: Path | None = None,
+        settings_backend: CredentialBackend | None = None,
+        settings_workspace_roots: Sequence[Path | str] | None = None,
+        settings_policy_version: str = "settings-policy-v1",
         config_path: str | None = None,
         connection_id: str | None = None,
         connection_role: str = "owner",
@@ -301,7 +363,10 @@ class AgentHost:
         self._agent_build_lock = asyncio.Lock()
         self._agent_engine_snapshot_lock = asyncio.Lock()
         self._run_event_tasks: set[asyncio.Task[None]] = set()
-        self._workspace = (workspace or Path.cwd()).resolve()
+        # 运行工具继续使用 canonical realpath；Settings binding 另外保留用户
+        # 选择的 lexical workspace path，以便 symlink 切换不能复用旧 credential。
+        self._settings_workspace = (workspace or Path.cwd()).expanduser().absolute()
+        self._workspace = self._settings_workspace.resolve()
         self._diagnostic_log = ensure_log(diagnostic_log)
         # ponytail: Host 固定绑定一个 workspace，先用一把锁覆盖跨 Profile 图；
         # worktree/sandbox 有稳定资源身份或吞吐证明不足时再按资源拆分。
@@ -313,6 +378,16 @@ class AgentHost:
             self._workspace,
             project_dir=self._workspace,
             load_persisted=True,
+        )
+        # 在 Host 启动时冻结只读 roots/policy 输入；Settings store 不再自行扫描
+        # 可变 registry，Run/generation 期间也不会因外部授权变化而漂移。
+        frozen_settings_roots = tuple(
+            Path(item).expanduser().absolute()
+            for item in (
+                settings_workspace_roots
+                if settings_workspace_roots is not None
+                else tuple(root.path for root in self._workspace_root_registry.roots())
+            )
         )
         self._config_path = config_path or os.environ.get("HARNESS_AGENT_CONFIG_PATH")
         self._connection_role = connection_role
@@ -337,10 +412,42 @@ class AgentHost:
         self._active_team_tasks: dict[str, asyncio.Task[None]] = {}
         self._active_team_tokens: dict[str, RunCancellationToken] = {}
         self._plugin_mcp_servers: tuple[McpServerConfig, ...] = ()
+        # Settings overlay 只在当前 Host/generation 现场应用；保留不含 secret
+        # 的 immutable component base，刷新失败时可以精确移除旧 overlay。
+        self._base_plugin_mcp_servers: tuple[McpServerConfig, ...] = ()
+        self._base_plugin_runtime_catalog = PluginRuntimeCatalog()
+        self._mcp_diagnostics: tuple[str, ...] = ()
         self._plugin_runtime_catalog = PluginRuntimeCatalog()
         self._plugin_runtime_manager: PluginRuntimeManager | None = None
         self._plugin_runtime_start_lock = asyncio.Lock()
         self._plugin_diagnostics: tuple[str, ...] = ()
+        # Settings backend 由平台适配器或离线 fake 提供；平台适配器只延迟加载，
+        # 不在 Host 构造时读取凭据。不可证明能力时仍 fail closed，不回退 shell。
+        resolved_settings_home = (self._config_home or Path.home()).expanduser().resolve()
+        effective_settings_backend = settings_backend or create_platform_credential_backend(
+            metadata_root=resolved_settings_home / ".harness" / "settings" / "v1",
+        )
+        self._settings_user_store = SettingsStore(
+            home=self._config_home,
+            backend=effective_settings_backend,
+            workspace_roots=frozen_settings_roots,
+            policy_version=settings_policy_version,
+        )
+        self._settings_workspace_store = SettingsStore(
+            home=self._config_home,
+            workspace=self._settings_workspace,
+            backend=effective_settings_backend,
+            workspace_roots=frozen_settings_roots,
+            policy_version=settings_policy_version,
+        )
+        self._settings_resolver = SettingsResolver(
+            user=self._settings_user_store,
+            workspace=self._settings_workspace_store,
+        )
+        self._settings_bindings: tuple[SettingBinding, ...] = ()
+        self._settings_diagnostics: tuple[str, ...] = ()
+        self._settings_blocked_plugin_ids: frozenset[str] = frozenset()
+        self._settings_snapshot = SettingsSnapshot.not_loaded()
         self._agent_catalog: AgentCatalog | None = None
         self._thread_persistence: ThreadPersistence | None = None
         # Snapshot 只存在于 Host 进程内；不复用 SQLite，也不跨 Host/进程恢复。
@@ -394,6 +501,7 @@ class AgentHost:
         )
         self._handlers = {
             METHOD["INITIALIZE"]: self._handle_initialize,
+            METHOD["COMMANDS_BIND"]: self._handle_commands_bind,
             METHOD["RUN_START"]: self._handle_run_start,
             METHOD["RUN_CANCEL"]: self._handle_run_cancel,
             METHOD["CONTEXT_COMPACT"]: self._handle_context_compact,
@@ -402,6 +510,9 @@ class AgentHost:
             METHOD["CONFIG_DETAILS"]: self._handle_config_details,
             METHOD["CONFIG_PREVIEW"]: self._handle_config_preview,
             METHOD["CONFIG_COMMIT"]: self._handle_config_commit,
+            METHOD["SETTINGS_LIST"]: self._handle_settings_list,
+            METHOD["SETTINGS_SET"]: self._handle_settings_set,
+            METHOD["SETTINGS_REMOVE"]: self._handle_settings_remove,
             METHOD["MODELS_LIST"]: self._handle_models_list,
             METHOD["THREADS_LIST"]: self._handle_threads_list,
             METHOD["THREADS_OPEN"]: self._handle_threads_open,
@@ -502,6 +613,10 @@ class AgentHost:
         was_running = self._running
         self._running = False
         await self._run_coordinator.close()
+        # SettingsSnapshot 属于 Host/generation；Run terminal 不会释放它，只有
+        # Host close（或未来 generation replacement）才结束其生命周期。
+        self._clear_settings_overlays()
+        self._settings_snapshot.release()
         for token in self._active_team_tokens.values():
             token.cancel()
         if self._active_team_tasks:
@@ -674,13 +789,41 @@ class AgentHost:
                             "details": {"supported_major": PROTOCOL_MAJOR},
                         },
                     )
+            required_minor = OPERATION_MIN_MINOR.get(method)
+            if (
+                required_minor is not None
+                and connection.protocol_minor < required_minor
+            ):
+                error_code = (
+                    "SETTINGS_PROTOCOL_MINOR_REQUIRED"
+                    if method.startswith("settings.")
+                    else "PROTOCOL_MINOR_REQUIRED"
+                )
+                raise RpcError(
+                    -32003,
+                    error_code,
+                    {
+                        "code": error_code,
+                        "retryable": False,
+                        "details": {
+                            "method": method,
+                            "required_minor": required_minor,
+                            "negotiated_minor": connection.protocol_minor,
+                        },
+                    },
+                )
             validate_operation_params(method, params)
             required_capability = OPERATION_CAPABILITIES.get(method)
             if required_capability and required_capability not in self._connection_capabilities(connection):
+                error_code = (
+                    "SETTINGS_CAPABILITY_REQUIRED"
+                    if method.startswith("settings.")
+                    else "CAPABILITY_REQUIRED"
+                )
                 raise RpcError(
                     -32002,
-                    "CAPABILITY_REQUIRED",
-                    {"code": "CAPABILITY_REQUIRED", "retryable": False, "capability": required_capability},
+                    error_code,
+                    {"code": error_code, "retryable": False, "capability": required_capability},
                 )
             if method in CONTROLLED_OPERATIONS:
                 async with self._control_lease.permit(connection.connection_id):
@@ -699,6 +842,16 @@ class AgentHost:
                 await self.send_response(request_id, result)
             ipc_ok = True
         except ValidationError as exc:
+            settings_value_error = _settings_value_schema_error(method, params, exc)
+            if settings_value_error is not None:
+                settings_error = SettingsError(settings_value_error, field="value")
+                await self.send_error(
+                    request_id,
+                    int(ERROR_CODES[settings_value_error]["jsonrpc_code"]),
+                    settings_value_error,
+                    settings_error.redacted_data(),
+                )
+                return
             await self.send_error(
                 request_id,
                 -32602,
@@ -713,7 +866,13 @@ class AgentHost:
                 },
             )
         except (SkillError, CatalogSkillError) as exc:
-            await self.send_error(request_id, -32602, str(exc))
+            message = str(exc)
+            data = (
+                {"code": message, "retryable": False}
+                if message.startswith(("COMMAND_INVOCATION_", "PLUGIN_COMMAND_"))
+                else None
+            )
+            await self.send_error(request_id, -32602, message, data)
         except PluginError as exc:
             details = {"field": exc.field} if exc.field is not None else None
             await self.send_error(
@@ -910,6 +1069,7 @@ class AgentHost:
                     await reservation.release()
                 self._skill_registry = self._build_skill_registry()
                 self._load_config()
+                self._refresh_settings_snapshot()
                 # MCP 连接不阻塞 initialize 响应；后台建立连接
                 self._mcp_connect_task = asyncio.ensure_future(self._connect_mcp_servers())
                 self._resources_ready = True
@@ -984,6 +1144,69 @@ class AgentHost:
         )
         return result
 
+    async def _handle_commands_bind(
+        self,
+        params: dict[str, Any],
+        _id: str,
+    ) -> dict[str, object]:
+        """登记 CLI 对本次 Host snapshot 得出的唯一 command 名称映射。"""
+        connection = self._current_connection()
+        if connection.command_binding_snapshot_id is not None:
+            raise RpcError(
+                -32602,
+                "COMMAND_BINDING_ALREADY_SET",
+                {"code": "COMMAND_BINDING_ALREADY_SET", "retryable": False},
+            )
+        parsed = CommandsBindParams.model_validate(params)
+        registry = self._require_skills()
+        if parsed.snapshot_id != registry.snapshot_id:
+            raise RpcError(
+                -32602,
+                "COMMAND_BINDING_SNAPSHOT_MISMATCH",
+                {"code": "COMMAND_BINDING_SNAPSHOT_MISMATCH", "retryable": False},
+            )
+
+        expected_ids = {
+            str(command["id"])
+            for command in registry.agent_commands()
+            if isinstance(command, dict) and isinstance(command.get("id"), str)
+        }
+        bound: dict[str, str] = {}
+        names: set[str] = set()
+        for binding in parsed.bindings:
+            command_id = str(binding.id)
+            command_name = str(binding.name)
+            folded_name = command_name.casefold()
+            if command_id in bound:
+                raise RpcError(
+                    -32602,
+                    "COMMAND_BINDING_DUPLICATE_ID",
+                    {"code": "COMMAND_BINDING_DUPLICATE_ID", "retryable": False},
+                )
+            if folded_name in names:
+                raise RpcError(
+                    -32602,
+                    "COMMAND_BINDING_DUPLICATE_NAME",
+                    {"code": "COMMAND_BINDING_DUPLICATE_NAME", "retryable": False},
+                )
+            if command_id not in expected_ids:
+                raise RpcError(
+                    -32602,
+                    "COMMAND_BINDING_UNKNOWN_ID",
+                    {"code": "COMMAND_BINDING_UNKNOWN_ID", "retryable": False},
+                )
+            bound[command_id] = command_name
+            names.add(folded_name)
+        if set(bound) != expected_ids:
+            raise RpcError(
+                -32602,
+                "COMMAND_BINDING_SET_MISMATCH",
+                {"code": "COMMAND_BINDING_SET_MISMATCH", "retryable": False},
+            )
+        connection.command_binding_snapshot_id = parsed.snapshot_id
+        connection.command_bindings = MappingProxyType(bound)
+        return {"snapshot_id": parsed.snapshot_id, "accepted": True}
+
     async def _connect_mcp_servers(self) -> None:
         """根据配置建立 MCP 服务器连接并构建初始 snapshot；失败不阻止启动。"""
         async with self._mcp_state_lock:
@@ -1057,8 +1280,8 @@ class AgentHost:
     async def _handle_run_start(self, params: dict[str, Any], request_id: str) -> None:
         """把协议输入转换成 StartRun，并让 Coordinator 先完成受理再启动事件流。"""
         parsed = RunStartParams.model_validate(params)
-        message = parsed.message.strip()
-        if not message:
+        message = parsed.message
+        if not message.strip():
             raise RpcError(-32602, "message must be non-empty")
         if (
             parsed.model_selection is not None
@@ -1067,16 +1290,26 @@ class AgentHost:
             raise RpcError(-32002, "MODELS_SELECT_CAPABILITY_REQUIRED")
 
         requested_skill = (
-            RequestedSkill(parsed.requested_skill.id, parsed.requested_skill.args or "")
+            RequestedSkill(
+                parsed.requested_skill.id,
+                parsed.requested_skill.args or "",
+                parsed.requested_skill.raw_invocation,
+                parsed.requested_skill.command_name,
+            )
             if parsed.requested_skill is not None
             else None
         )
+        connection = self._current_connection()
         command = StartRun(
             thread_id=parsed.thread_id,
             run_id=parsed.run_id,
             message=message,
             mode=parsed.mode,
             requested_skill=requested_skill,
+            connection_id=connection.connection_id,
+            command_binding_snapshot_id=connection.command_binding_snapshot_id,
+            command_bindings=connection.command_bindings,
+            protocol_minor=connection.protocol_minor,
             requested_primary_profile=(
                 parsed.model_selection.primary_profile
                 if parsed.model_selection is not None
@@ -1087,7 +1320,7 @@ class AgentHost:
         try:
             execution = await self._run_coordinator.start(
                 command,
-                ConnectionRef(self._current_connection().connection_id),
+                ConnectionRef(connection.connection_id),
                 allow_multithread=(
                     CAPABILITY["RUN_MULTITHREAD"] in self._connection_capabilities()
                 ),
@@ -1253,7 +1486,12 @@ class AgentHost:
             agent = await self._ensure_agent()
 
         async def release() -> None:
-            await self._release_run_agent_engine(run)
+            try:
+                await self._release_run_agent_engine(run)
+            finally:
+                plugin_runtime = self._plugin_runtime_manager
+                if plugin_runtime is not None and run.run_context is not None:
+                    plugin_runtime.clear_run_context(run.run_context)
 
         if agent is None and not self._allow_echo:
             raise ConfigError(self._startup_error or "Agent is not configured")
@@ -1465,18 +1703,24 @@ class AgentHost:
         async with self._mcp_state_lock:
             manager = self._mcp_manager
             if manager is None:
-                return {
+                result = {
                     "servers": [],
                     "total_tools": 0,
                     "static_preview": self._plugin_manager.static_preview()["mcp"],
                 }
+                if self._mcp_diagnostics:
+                    result["diagnostics"] = list(self._mcp_diagnostics)
+                return result
             statuses = manager.get_server_statuses()
         total_tools = sum(len(s.get("tool_names", [])) for s in statuses)
-        return {
+        result = {
             "servers": statuses,
             "total_tools": total_tools,
             "static_preview": self._plugin_manager.static_preview()["mcp"],
         }
+        if self._mcp_diagnostics:
+            result["diagnostics"] = list(self._mcp_diagnostics)
+        return result
 
     async def _handle_mcp_add(self, params: dict[str, Any], _id: str) -> dict[str, Any]:
         """通过 ConfigChangeService 添加 MCP 服务器并尝试热连接。"""
@@ -1871,7 +2115,33 @@ class AgentHost:
         record = registry.resolve(requested.skill_id)
         if not record.user_invocable:
             raise SkillError(f'Skill "{record.skill_id}" is not user-invocable')
+        if record.kind == "command":
+            if command.protocol_minor < PROTOCOL_MINOR:
+                raise SkillError("PLUGIN_COMMAND_PROTOCOL_MINOR_REQUIRED")
+            _validate_command_invocation(
+                command,
+                requested,
+                record,
+                resolved_command_name=self._resolved_command_name_for_run(
+                    command,
+                    record.skill_id,
+                ),
+            )
         return registry.load(record.skill_id, requested.args)
+
+    def _resolved_command_name_for_run(self, command: StartRun, skill_id: str) -> str:
+        """读取 run.start 时冻结的本连接、当前 snapshot CLI exact 名称。"""
+        if not command.command_binding_snapshot_id or command.command_bindings is None:
+            raise SkillError("COMMAND_INVOCATION_BINDING_REQUIRED")
+        registry = self._skill_registry
+        if registry is None:
+            raise SkillError("COMMAND_INVOCATION_BINDING_REQUIRED")
+        if command.command_binding_snapshot_id != registry.snapshot_id:
+            raise SkillError("COMMAND_INVOCATION_BINDING_STALE")
+        resolved_name = command.command_bindings.get(skill_id)
+        if not resolved_name:
+            raise SkillError("COMMAND_INVOCATION_BINDING_REQUIRED")
+        return resolved_name
 
     async def _refresh_skill_catalog_locked(self) -> SkillRegistry:
         """在 Host snapshot reservation 内刷新并定向排空旧 Skill Profile。"""
@@ -1926,16 +2196,22 @@ class AgentHost:
                     plugins=(),
                 )
                 diagnostics.append(f"plugin:catalog: {exc.code}: {exc}")
+            settings_result = self._plugin_manager.setting_bindings(catalog)
+            self._settings_bindings = settings_result.bindings
+            self._settings_diagnostics = settings_result.diagnostics
+            self._settings_blocked_plugin_ids = frozenset(settings_result.blocked_plugin_ids)
             skill_result = self._plugin_manager.skill_sources(catalog)
             agent_result = self._plugin_manager.agent_sources(catalog)
             team_result = self._plugin_manager.team_definitions(catalog)
             runtime_catalog = self._plugin_manager.runtime_catalog(
                 catalog,
                 workspace=self._workspace,
+                blocked_plugin_ids=settings_result.blocked_plugin_ids,
             )
             mcp_result = self._plugin_manager.mcp_servers(
                 catalog,
                 workspace=self._workspace,
+                blocked_plugin_ids=settings_result.blocked_plugin_ids,
             )
             self._plugin_catalog_snapshot = catalog
             self._plugin_skill_sources = skill_result.sources
@@ -1945,11 +2221,15 @@ class AgentHost:
             )
             self._plugin_team_definitions = team_result.teams
             self._plugin_runtime_catalog = runtime_catalog
+            self._base_plugin_runtime_catalog = runtime_catalog
             self._plugin_runtime_manager = PluginRuntimeManager(runtime_catalog)
-            self._plugin_mcp_servers = mcp_result.servers
+            self._base_plugin_mcp_servers = mcp_result.servers
+            self._plugin_mcp_servers = self._base_plugin_mcp_servers
+            self._mcp_diagnostics = mcp_result.diagnostics
             diagnostics.extend(skill_result.diagnostics)
             diagnostics.extend(agent_result.diagnostics)
             diagnostics.extend(team_result.diagnostics)
+            diagnostics.extend(settings_result.diagnostics)
             diagnostics.extend(runtime_catalog.diagnostics)
             diagnostics.extend(mcp_result.diagnostics)
             self._plugin_diagnostics = tuple(diagnostics)
@@ -2023,6 +2303,347 @@ class AgentHost:
             "static_preview": self._plugin_manager.static_preview()["skills"],
             "diagnostics": registry.diagnostics[:20],
         }
+
+    def _refresh_settings_snapshot(self) -> None:
+        """在 Host/generation 边界解析 Settings；失败时只阻断子进程注入。"""
+        try:
+            result = self._plugin_manager.setting_bindings(self._plugin_catalog_snapshot)
+            self._settings_bindings = result.bindings
+            self._settings_diagnostics = result.diagnostics
+            self._settings_blocked_plugin_ids = frozenset(result.blocked_plugin_ids)
+            snapshot = self._settings_resolver.resolve(self._settings_bindings)
+            self._settings_diagnostics = tuple(
+                dict.fromkeys((*self._settings_diagnostics, *snapshot.diagnostics))
+            )
+            self._settings_blocked_plugin_ids = frozenset(
+                {*self._settings_blocked_plugin_ids, *snapshot.blocked_plugin_ids}
+            )
+            previous = self._settings_snapshot
+            self._settings_snapshot = snapshot
+            previous.release()
+            self._block_settings_consumers()
+            self._apply_settings_snapshot_to_children()
+        except SettingsError as exc:
+            self._settings_diagnostics = (*self._settings_diagnostics, exc.code)
+            self._settings_blocked_plugin_ids = frozenset(
+                {*self._settings_blocked_plugin_ids, *(binding.plugin_id for binding in self._settings_bindings)}
+            )
+            previous = self._settings_snapshot
+            self._settings_snapshot = SettingsSnapshot.not_loaded()
+            previous.release()
+            self._block_settings_consumers()
+            self._apply_settings_snapshot_to_children()
+
+    def _block_settings_consumers(self) -> None:
+        """当 Settings declaration/backend 不可验证时撤销相关 executable consumers。"""
+        blocked = self._settings_blocked_plugin_ids
+        retained_mcp: list[McpServerConfig] = []
+        blocked_mcp: set[str] = set()
+        # 过滤必须基于不含 Settings overlay 的 base；否则 backend 失败后
+        # 以当前 server 反向保存会把旧 generation 的 secret 再带回新环境。
+        source_servers = self._base_plugin_mcp_servers
+        for server in source_servers:
+            if server.source.startswith("plugin:") and server.source.removeprefix("plugin:") in blocked:
+                blocked_mcp.add(server.source.removeprefix("plugin:"))
+                continue
+            retained_mcp.append(server)
+        self._plugin_mcp_servers = tuple(retained_mcp)
+        if blocked_mcp:
+            self._mcp_diagnostics = tuple(
+                dict.fromkeys(
+                    (
+                        *self._mcp_diagnostics,
+                        *(f"plugin:{plugin_id}: SETTINGS_CONSUMER_BLOCKED" for plugin_id in sorted(blocked_mcp)),
+                    )
+                )
+            )
+
+        catalog = self._base_plugin_runtime_catalog
+        retained_hooks = tuple(item for item in catalog.hooks if item.plugin_id not in blocked)
+        retained_lsp = tuple(item for item in catalog.lsp_servers if item.plugin_id not in blocked)
+        retained_monitors = tuple(item for item in catalog.monitors if item.plugin_id not in blocked)
+        retained_failures = tuple(item for item in catalog.hook_failures if item.plugin_id not in blocked)
+        blocked_hook_plugins = {
+            item.plugin_id
+            for item in catalog.hooks
+            if item.plugin_id in blocked
+        }
+        blocked_hook_plugins.update(
+            item.plugin_id
+            for item in catalog.hook_failures
+            if item.plugin_id in blocked
+        )
+        if blocked_hook_plugins:
+            retained_failures += tuple(
+                HookRuntimeFailure(
+                    plugin_id=plugin_id,
+                    source_id=None,
+                    event="SubagentStop",
+                    matcher="*",
+                    code="SETTINGS_CONSUMER_BLOCKED",
+                )
+                for plugin_id in sorted(blocked_hook_plugins)
+            )
+        filtered_catalog = replace(
+            catalog,
+            hooks=retained_hooks,
+            lsp_servers=retained_lsp,
+            monitors=retained_monitors,
+            hook_failures=retained_failures,
+            diagnostics=tuple(
+                dict.fromkeys(
+                    (
+                        *catalog.diagnostics,
+                        *(f"plugin:{plugin_id}: SETTINGS_CONSUMER_BLOCKED" for plugin_id in sorted(blocked)),
+                    )
+                )
+            ),
+        )
+        if filtered_catalog != self._plugin_runtime_catalog:
+            self._plugin_runtime_catalog = filtered_catalog
+            # initialize 期间 runtime manager 尚未启动；刷新期间若已有 manager，
+            # 先清空旧 overlay，再换成同一 base 的新过滤结果。这样 stale→healthy
+            # 的下一次 generation 不会继续沿用被阻断的旧 catalog。
+            previous_manager = self._plugin_runtime_manager
+            if previous_manager is not None:
+                previous_manager.clear_settings_environment()
+            self._plugin_runtime_manager = PluginRuntimeManager(self._plugin_runtime_catalog)
+
+    def _settings_environment_by_plugin(self) -> dict[str, dict[str, str]]:
+        """从当前 Host/generation snapshot 构造按 Plugin 分组的 child-only overlay。"""
+        if self._settings_snapshot.state != "loaded":
+            return {}
+        result: dict[str, dict[str, str]] = {}
+        for binding in self._settings_bindings:
+            if binding.plugin_id in self._settings_blocked_plugin_ids:
+                continue
+            value = self._settings_snapshot.value_for(binding.setting_id)
+            if value is None:
+                continue
+            result.setdefault(binding.plugin_id, {})[binding.env_var] = value
+        return result
+
+    def _apply_settings_snapshot_to_children(self) -> None:
+        """把 Settings 只绑定到 Qwen MCP/Hook/LSP，不改变 Host 全局环境。"""
+        values_by_plugin = self._settings_environment_by_plugin()
+        runtime_manager = self._plugin_runtime_manager
+        if runtime_manager is not None:
+            runtime_manager.set_settings_environment(values_by_plugin)
+        self._restore_mcp_setting_overlays()
+        self._plugin_mcp_servers = tuple(
+            replace(
+                server,
+                env={
+                    **dict(server.env),
+                    **values_by_plugin.get(
+                        server.source.removeprefix("plugin:"),
+                        {},
+                    ),
+                },
+            )
+            if server.source.startswith("plugin:")
+            else server
+            for server in self._base_plugin_mcp_servers
+            if not (
+                server.source.startswith("plugin:")
+                and server.source.removeprefix("plugin:")
+                in self._settings_blocked_plugin_ids
+            )
+        )
+
+    def _clear_settings_overlays(self) -> None:
+        """清理 Host/generation child overlay，并恢复不含 secret 的 MCP base。"""
+        runtime_manager = self._plugin_runtime_manager
+        if runtime_manager is not None:
+            runtime_manager.clear_settings_environment()
+        self._restore_mcp_setting_overlays()
+        self._plugin_mcp_servers = self._base_plugin_mcp_servers
+
+    def _restore_mcp_setting_overlays(self) -> None:
+        """恢复当前及仍可被外部引用的 MCP snapshot 到 immutable base env。
+
+        Settings overlay 只属于 Host/generation 的 child execution。MCP generation
+        替换后，旧 snapshot 可能仍被 lease、owner 或测试/诊断调用方引用；只清理
+        `_plugin_mcp_servers` 会把旧对象中的 secret 留到 Host close。这里沿所有
+        Host 持有的 snapshot/owner seam 收集配置对象，并按 `(source, name)` 找回
+        不含 secret 的 base；找不到 base 时采用空 env 的 fail-closed 结果。
+        """
+        base_by_key = {
+            (server.source, server.name): server
+            for server in self._base_plugin_mcp_servers
+        }
+        servers: list[McpServerConfig] = []
+        seen: set[int] = set()
+
+        def add_servers(server_values: object) -> None:
+            """只读取已持有的 snapshot，不枚举外部配置或 credential store。"""
+            if server_values is None:
+                return
+            for server in server_values:
+                if not isinstance(server, McpServerConfig) or id(server) in seen:
+                    continue
+                seen.add(id(server))
+                servers.append(server)
+
+        add_servers(self._plugin_mcp_servers)
+        if self._mcp_snapshot is not None:
+            add_servers(self._mcp_snapshot.servers)
+        if self._mcp_manager is not None:
+            try:
+                add_servers(self._mcp_manager.snapshot.servers)
+            except (AttributeError, RuntimeError):
+                pass
+        owners = [
+            *self._retired_mcp_owners,
+            *([self._mcp_owner] if self._mcp_owner is not None else []),
+        ]
+        for owner in owners:
+            resource = getattr(owner, "resource", None)
+            if resource is not None:
+                try:
+                    add_servers(resource.snapshot.servers)
+                except (AttributeError, RuntimeError):
+                    pass
+
+        for server in servers:
+            base = base_by_key.get((server.source, server.name))
+            if base is None and not server.source.startswith("plugin:"):
+                continue
+            object.__setattr__(
+                server,
+                "env",
+                MappingProxyType(dict(base.env)) if base is not None else MappingProxyType({}),
+            )
+
+    def _settings_binding_for_params(self, parsed: Any) -> SettingBinding:
+        """按完整 immutable identity 选择当前 catalog 的唯一 declaration。"""
+        for binding in self._settings_bindings:
+            if (
+                binding.plugin_id == parsed.plugin_id
+                and binding.package_digest == parsed.package_digest
+                and binding.declaration_digest == parsed.declaration_digest
+                and binding.setting_key == parsed.setting_key
+                and binding.env_var == parsed.env_var
+            ):
+                return binding
+        raise SettingsError("SETTINGS_DECLARATION_STALE", field="declaration_digest")
+
+    def _settings_store_for_scope(self, scope: str) -> SettingsStore:
+        """选择当前 Host 已绑定的 user/workspace metadata store。"""
+        if scope == "user":
+            return self._settings_user_store
+        if scope == "workspace":
+            return self._settings_workspace_store
+        raise SettingsError("SETTINGS_SCOPE_INVALID", field="scope")
+
+    def _settings_rpc_error(self, exc: SettingsError) -> RpcError:
+        """把 Settings 领域错误映射为稳定 JSON-RPC code/data，绝不携带 value。"""
+        entry = ERROR_CODES.get(exc.code)
+        rpc_code = int(entry["jsonrpc_code"]) if entry is not None else -32602
+        return RpcError(rpc_code, exc.code, exc.redacted_data())
+
+    async def _handle_settings_list(
+        self,
+        params: dict[str, Any],
+        _id: str,
+    ) -> dict[str, object]:
+        """返回 live store 与当前 Host snapshot 的脱敏 Settings summary。"""
+        try:
+            parsed = SettingsListParams.model_validate(params)
+            self._require_skills()
+            # 管理读取沿用 initialize 时冻结的 catalog/generation binding；不在
+            # list 中重新扫描插件，避免 list 与当前运行 snapshot 发生串线。
+            result = self._settings_store_for_scope(parsed.scope).list(
+                scope=parsed.scope,
+                declarations=self._settings_bindings,
+                snapshot=self._settings_snapshot,
+            )
+            return result
+        except SettingsError as exc:
+            raise self._settings_rpc_error(exc) from exc
+
+    async def _handle_settings_set(
+        self,
+        params: dict[str, Any],
+        _id: str,
+    ) -> dict[str, object]:
+        """以 Host 校验的 declaration 写入 credential，结果只对 next Host 生效。"""
+        try:
+            parsed = SettingsSetParams.model_validate(params)
+            self._require_skills()
+            binding = self._settings_binding_for_params(parsed)
+            store = self._settings_store_for_scope(parsed.scope)
+            mutation = store.set(
+                scope=parsed.scope,
+                plugin_id=binding.plugin_id,
+                package_digest=binding.package_digest,
+                declaration_digest=binding.declaration_digest,
+                setting_key=binding.setting_key,
+                env_var=binding.env_var,
+                value=parsed.value,
+                expected_store_revision=parsed.expected_store_revision,
+                name=binding.declaration.name,
+                description=binding.declaration.description,
+                sensitive=binding.declaration.sensitive,
+                required=False,
+                consumer_scope="extension-wide",
+            )
+            listing = store.list(
+                scope=parsed.scope,
+                declarations=self._settings_bindings,
+                snapshot=self._settings_snapshot,
+            )
+            summary = next(
+                item for item in listing["settings"]
+                if isinstance(item, dict) and item.get("setting_id") == binding.setting_id
+            )
+            mutation["store_revision"] = listing["store_revision"]
+            mutation["runtime_snapshot"] = listing["runtime_snapshot"]
+            mutation["summary"] = summary
+            mutation["diagnostics"] = list(self._settings_diagnostics)
+            return mutation
+        except SettingsError as exc:
+            raise self._settings_rpc_error(exc) from exc
+
+    async def _handle_settings_remove(
+        self,
+        params: dict[str, Any],
+        _id: str,
+    ) -> dict[str, object]:
+        """按 exact identity 写 tombstone 并删除精确 credential account。"""
+        try:
+            parsed = SettingsRemoveParams.model_validate(params)
+            self._require_skills()
+            binding = self._settings_binding_for_params(parsed)
+            store = self._settings_store_for_scope(parsed.scope)
+            mutation = store.remove(
+                scope=parsed.scope,
+                plugin_id=binding.plugin_id,
+                package_digest=binding.package_digest,
+                declaration_digest=binding.declaration_digest,
+                setting_key=binding.setting_key,
+                env_var=binding.env_var,
+                expected_store_revision=parsed.expected_store_revision,
+                name=binding.declaration.name,
+                description=binding.declaration.description,
+                sensitive=binding.declaration.sensitive,
+            )
+            listing = store.list(
+                scope=parsed.scope,
+                declarations=self._settings_bindings,
+                snapshot=self._settings_snapshot,
+            )
+            summary = next(
+                item for item in listing["settings"]
+                if isinstance(item, dict) and item.get("setting_id") == binding.setting_id
+            )
+            mutation["store_revision"] = listing["store_revision"]
+            mutation["runtime_snapshot"] = listing["runtime_snapshot"]
+            mutation["summary"] = summary
+            mutation["diagnostics"] = list(self._settings_diagnostics)
+            return mutation
+        except SettingsError as exc:
+            raise self._settings_rpc_error(exc) from exc
 
     async def _handle_skills_inspect(self, params: dict[str, Any], _id: str) -> dict[str, Any]:
         """返回一个 Skill 的安全元数据。"""
@@ -2143,9 +2764,93 @@ class AgentHost:
         params: dict[str, Any],
         _id: str,
     ) -> dict[str, object]:
-        """移除安装记录；只有 purge_data=true 时清除持久数据。"""
+        """先按当前 Plugin identity 清理 Settings，再移除安装记录。"""
         parsed = PluginsRemoveParams.model_validate(params)
-        return self._plugin_manager.remove(parsed.id, purge_data=parsed.purge_data)
+        try:
+            return self._plugin_manager.remove(
+                parsed.id,
+                purge_data=parsed.purge_data,
+                settings_cleanup=self._uninstall_plugin_settings,
+            )
+        except SettingsError as exc:
+            raise self._settings_rpc_error(exc) from exc
+
+    def _uninstall_plugin_settings(
+        self,
+        plugin: Any,
+        plugin_registry_revision: int,
+    ) -> dict[str, object]:
+        """以 Plugin registry revision/package identity 绑定 Settings uninstall。"""
+        # 卸载是管理面动作，必须按 registry 中的安装记录解析声明；停用或
+        # trust 失效只应阻止 runtime，不能让已有 credential 逃过 purge。
+        settings_result = self._plugin_manager.setting_bindings_for_uninstall(plugin)
+        bindings = tuple(
+            binding
+            for binding in settings_result.bindings
+            if binding.plugin_id == plugin.plugin_id
+        )
+        if not bindings and not settings_result.diagnostics:
+            return {
+                "operation": "uninstall",
+                "plugin_id": plugin.plugin_id,
+                "package_digest": plugin.package_digest,
+                "plugin_registry_revision": plugin_registry_revision,
+                "store_revision": self._settings_user_store.list(scope="user")["store_revision"],
+                "removed": [],
+                "partial": [],
+                "diagnostics": list(settings_result.diagnostics),
+            }
+        if not self._settings_user_store._backend_is_available():  # noqa: SLF001 - same domain boundary
+            raise SettingsError("SETTINGS_BACKEND_UNAVAILABLE", field="backend")
+        user_binding = self._settings_user_store.user_binding_digest
+        user_index = self._settings_user_store._read_index("user", user_binding)  # noqa: SLF001
+        if user_index is None:
+            return {
+                "operation": "uninstall",
+                "plugin_id": plugin.plugin_id,
+                "package_digest": plugin.package_digest,
+                "plugin_registry_revision": plugin_registry_revision,
+                "store_revision": 0,
+                "removed": [],
+                "partial": [],
+                "diagnostics": [],
+            }
+        try:
+            result = self._settings_user_store.uninstall_plugin(
+                plugin_id=plugin.plugin_id,
+                package_digest=plugin.package_digest,
+                expected_store_revision=user_index.revision,
+                workspace_stores={
+                    self._settings_workspace_store.workspace_binding_digest:
+                    self._settings_workspace_store,
+                },
+            )
+        except SettingsError as exc:
+            if exc.code == "SETTINGS_RECORD_NOT_FOUND":
+                return {
+                    "operation": "uninstall",
+                    "plugin_id": plugin.plugin_id,
+                    "package_digest": plugin.package_digest,
+                    "plugin_registry_revision": plugin_registry_revision,
+                    "store_revision": user_index.revision,
+                    "removed": [],
+                    "partial": [],
+                    "diagnostics": [],
+                }
+            raise
+        result["plugin_id"] = plugin.plugin_id
+        result["package_digest"] = plugin.package_digest
+        result["plugin_registry_revision"] = plugin_registry_revision
+        if settings_result.diagnostics:
+            result["diagnostics"] = list(
+                dict.fromkeys(
+                    (
+                        *result.get("diagnostics", []),
+                        *settings_result.diagnostics,
+                    )
+                )
+            )
+        return result
 
     async def _handle_agents_list(
         self,
@@ -2956,6 +3661,7 @@ class AgentHost:
                 checkpoint_namespace = child_ref.checkpoint_namespace(
                     resolved.project_fingerprint
                 )
+                hook_runtime = self._plugin_runtime_manager
 
                 async def acquire_runtime():
                     """把 Plugin Profile 的 pool lease 收敛到 Managed executor。"""
@@ -2969,6 +3675,13 @@ class AgentHost:
                                 "checkpoint_ns": namespace,
                             }
                         },
+                        on_release=(
+                            (
+                                lambda: hook_runtime.clear_execution_context(context)
+                            )
+                            if hook_runtime is not None
+                            else None
+                        ),
                     )
 
                 snapshot_id = getattr(resolved.skill_registry, "snapshot_id", None)
@@ -2977,7 +3690,6 @@ class AgentHost:
                     if plugin_source.startswith("plugin:")
                     else ""
                 )
-                hook_runtime = self._plugin_runtime_manager
                 matched_hook_failure = next(
                     (
                         failure
@@ -3703,6 +4415,28 @@ def _protocol_error_data(message: str, data: object | None) -> dict[str, object]
     if details is not None:
         result["details"] = _bounded_json(details)
     return result
+
+
+def _settings_value_schema_error(
+    method: str,
+    params: Mapping[str, object],
+    error: ValidationError,
+) -> str | None:
+    """把 settings value 的 schema 失败映射到共享 validator 的稳定错误。"""
+    if method != METHOD["SETTINGS_SET"] or tuple(error.absolute_path) != ("value",):
+        return None
+    value = params.get("value")
+    if error.validator == "maxLength":
+        return "SETTINGS_VALUE_TOO_LARGE"
+    if isinstance(value, str):
+        try:
+            if len(value.encode("utf-8")) > 65_536:
+                return "SETTINGS_VALUE_TOO_LARGE"
+        except UnicodeEncodeError:
+            return "SETTINGS_VALUE_INVALID"
+    if error.validator in {"pattern", "type"}:
+        return "SETTINGS_VALUE_INVALID"
+    return None
 
 
 def _thread_summary_payload(summary: Any) -> dict[str, object]:

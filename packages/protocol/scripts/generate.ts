@@ -7,7 +7,7 @@ import Ajv2020 from "ajv/dist/2020"
 import standaloneCode from "ajv/dist/standalone"
 
 type Schema = Record<string, any>
-type ContractEntry = { params?: string; result?: string; payload?: string; capability?: string; handle?: string; controlled?: boolean }
+type ContractEntry = { params?: string; result?: string; payload?: string; capability?: string; handle?: string; controlled?: boolean; min_minor?: number }
 type Metadata = {
   major: number
   minor: number
@@ -85,6 +85,7 @@ export const EVENT_TYPES = ${JSON.stringify(Object.keys(meta.events))} as const
 export const INTERACTION_METHODS = ${JSON.stringify(Object.keys(meta.interactions))} as const
 export const SERVER_CAPABILITIES = ${JSON.stringify(meta.capabilities)} as const
 export const OPERATION_CAPABILITIES = ${JSON.stringify(Object.fromEntries(Object.entries(meta.operations).map(([name, entry]) => [name, entry.capability ?? null])))} as const
+export const OPERATION_MIN_MINOR = ${JSON.stringify(Object.fromEntries(Object.entries(meta.operations).filter(([, entry]) => entry.min_minor !== undefined).map(([name, entry]) => [name, entry.min_minor])))} as const
 export const CONTROLLED_OPERATIONS = ${JSON.stringify(Object.entries(meta.operations).filter(([, entry]) => entry.controlled).map(([name]) => name))} as const
 export const INTERACTION_HANDLES = ${JSON.stringify(Object.fromEntries(Object.entries(meta.interactions).map(([name, entry]) => [name, entry.handle])))} as const
 export const ERROR_CODES = ${JSON.stringify(Object.fromEntries(Object.entries(meta.error_codes).map(([name, entry]) => [name, { jsonrpcCode: entry.jsonrpc_code, retryable: entry.retryable }])))} as const
@@ -310,6 +311,7 @@ function sample(root: Schema, input: Schema): unknown {
   if (definition.default !== undefined) return definition.default
   if (definition.oneOf) return sample(root, definition.oneOf[0])
   if (definition.anyOf) return sample(root, definition.anyOf[0])
+  if (definition.pattern === "^[0-9a-f]{64}$") return "a".repeat(64)
   const type = Array.isArray(definition.type)
     ? definition.type.find((value: string) => value !== "null") ?? "null"
     : definition.type
@@ -383,6 +385,7 @@ EVENT_TYPES = ${pythonLiteral(Object.keys(meta.events))}
 INTERACTION_METHODS = ${pythonLiteral(Object.keys(meta.interactions))}
 SERVER_CAPABILITIES = ${pythonLiteral(meta.capabilities)}
 OPERATION_CAPABILITIES = ${pythonLiteral(Object.fromEntries(operations.map(([name, entry]) => [name, entry.capability ?? null])))}
+OPERATION_MIN_MINOR = ${pythonLiteral(Object.fromEntries(operations.filter(([, entry]) => entry.min_minor !== undefined).map(([name, entry]) => [name, entry.min_minor])))}
 CONTROLLED_OPERATIONS = ${pythonLiteral(Object.entries(meta.operations).filter(([, entry]) => entry.controlled).map(([name]) => name))}
 INTERACTION_HANDLES = ${pythonLiteral(Object.fromEntries(Object.entries(meta.interactions).map(([name, entry]) => [name, entry.handle])))}
 ERROR_CODES = ${pythonLiteral(Object.fromEntries(Object.entries(meta.error_codes).map(([name, entry]) => [name, { "jsonrpc_code": entry.jsonrpc_code, "retryable": entry.retryable }])))}

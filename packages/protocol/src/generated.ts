@@ -2,23 +2,25 @@
 
 export const PROTOCOL_MAJOR = 3 as const
 export const PROTOCOL_MINOR = 7 as const
-export const PROTOCOL_SCHEMA_SHA256 = "159056cd0c45a27e73a1570f9c4de3170d44d11813330cc50c69b19dee2fa2af" as const
+export const PROTOCOL_SCHEMA_SHA256 = "6561ae87b23c0ee952f8be282e34ea2200d34d354b1694f82e9a5519f156369e" as const
 export const MAX_FRAME_BYTES = 8388608 as const
 export const MAX_TOOL_PAYLOAD_BYTES = 1048576 as const
-export const CLIENT_METHODS = ["initialize","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","threads.list","threads.open","threads.watch","threads.unwatch","threads.side_question","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","plugins.list","plugins.inspect","plugins.validate","plugins.install","plugins.set_enabled","plugins.remove","agents.list","agents.inspect","teams.list","teams.inspect","teams.generate","teams.run","teams.cancel","mcp.status","mcp.add","mcp.remove","host.attachment.create","host.attachment.revoke","host.control.acquire","host.control.release","host.control.status","compose.inspect","compose.abandon"] as const
+export const CLIENT_METHODS = ["initialize","commands.bind","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","settings.list","settings.set","settings.remove","threads.list","threads.open","threads.watch","threads.unwatch","threads.side_question","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","plugins.list","plugins.inspect","plugins.validate","plugins.install","plugins.set_enabled","plugins.remove","agents.list","agents.inspect","teams.list","teams.inspect","teams.generate","teams.run","teams.cancel","mcp.status","mcp.add","mcp.remove","host.attachment.create","host.attachment.revoke","host.control.acquire","host.control.release","host.control.status","compose.inspect","compose.abandon"] as const
 export const EVENT_TYPES = ["run.started","run.progress","skill.loaded","content.delta","reasoning.delta","tool.started","tool.delta","tool.completed","context.updated","compose.progress","compose.summary","interaction.resolved","run.completed","run.cancelled","run.failed"] as const
 export const INTERACTION_METHODS = ["interaction.approval","interaction.question","interaction.directory_trust"] as const
-export const SERVER_CAPABILITIES = ["run.cancel","run.multithread","host.control","config.read","config.write","threads.read","context.manage","skills.read","skills.manage","mcp.read","mcp.manage","plugins.read","plugins.manage","agents.read","teams.read","teams.manage","models.read","models.select","host.attach"] as const
-export const OPERATION_CAPABILITIES = {"initialize":null,"run.start":null,"run.cancel":"run.cancel","context.compact":"context.manage","config.show":"config.read","config.path":"config.read","config.details":"config.write","config.preview":"config.write","config.commit":"config.write","threads.list":"threads.read","threads.open":"threads.read","threads.watch":"threads.read","threads.unwatch":"threads.read","threads.side_question":"threads.read","models.list":"models.read","skills.list":"skills.read","skills.inspect":"skills.read","skills.set_enabled":"skills.manage","skills.install":"skills.manage","skills.update":"skills.manage","skills.remove":"skills.manage","skills.market.list":"skills.read","plugins.list":"plugins.read","plugins.inspect":"plugins.read","plugins.validate":"plugins.read","plugins.install":"plugins.manage","plugins.set_enabled":"plugins.manage","plugins.remove":"plugins.manage","agents.list":"agents.read","agents.inspect":"agents.read","teams.list":"teams.read","teams.inspect":"teams.read","teams.generate":"teams.manage","teams.run":"teams.manage","teams.cancel":"teams.manage","mcp.status":"mcp.read","mcp.add":"mcp.manage","mcp.remove":"mcp.manage","host.attachment.create":"host.attach","host.attachment.revoke":"host.attach","host.control.acquire":"host.control","host.control.release":"host.control","host.control.status":"host.control","compose.inspect":"threads.read","compose.abandon":"threads.read"} as const
-export const CONTROLLED_OPERATIONS = ["run.start","run.cancel","context.compact","config.preview","config.commit","skills.set_enabled","skills.install","skills.update","skills.remove","mcp.add","mcp.remove"] as const
+export const SERVER_CAPABILITIES = ["run.cancel","run.multithread","host.control","config.read","config.write","threads.read","context.manage","skills.read","skills.manage","mcp.read","mcp.manage","plugins.read","plugins.manage","agents.read","teams.read","teams.manage","models.read","models.select","host.attach","settings.read","settings.manage"] as const
+export const OPERATION_CAPABILITIES = {"initialize":null,"commands.bind":null,"run.start":null,"run.cancel":"run.cancel","context.compact":"context.manage","config.show":"config.read","config.path":"config.read","config.details":"config.write","config.preview":"config.write","config.commit":"config.write","settings.list":"settings.read","settings.set":"settings.manage","settings.remove":"settings.manage","threads.list":"threads.read","threads.open":"threads.read","threads.watch":"threads.read","threads.unwatch":"threads.read","threads.side_question":"threads.read","models.list":"models.read","skills.list":"skills.read","skills.inspect":"skills.read","skills.set_enabled":"skills.manage","skills.install":"skills.manage","skills.update":"skills.manage","skills.remove":"skills.manage","skills.market.list":"skills.read","plugins.list":"plugins.read","plugins.inspect":"plugins.read","plugins.validate":"plugins.read","plugins.install":"plugins.manage","plugins.set_enabled":"plugins.manage","plugins.remove":"plugins.manage","agents.list":"agents.read","agents.inspect":"agents.read","teams.list":"teams.read","teams.inspect":"teams.read","teams.generate":"teams.manage","teams.run":"teams.manage","teams.cancel":"teams.manage","mcp.status":"mcp.read","mcp.add":"mcp.manage","mcp.remove":"mcp.manage","host.attachment.create":"host.attach","host.attachment.revoke":"host.attach","host.control.acquire":"host.control","host.control.release":"host.control","host.control.status":"host.control","compose.inspect":"threads.read","compose.abandon":"threads.read"} as const
+export const OPERATION_MIN_MINOR = {"commands.bind":6,"settings.list":7,"settings.set":7,"settings.remove":7} as const
+export const CONTROLLED_OPERATIONS = ["run.start","run.cancel","context.compact","config.preview","config.commit","settings.set","settings.remove","skills.set_enabled","skills.install","skills.update","skills.remove","mcp.add","mcp.remove"] as const
 export const INTERACTION_HANDLES = {"interaction.approval":"approval","interaction.question":"question","interaction.directory_trust":"directory_trust"} as const
-export const ERROR_CODES = {"CONTROL_NOT_HOLDER":{"jsonrpcCode":-32008,"retryable":true},"CONTROL_BUSY":{"jsonrpcCode":-32008,"retryable":true},"CONTROL_RELEASE_BLOCKED":{"jsonrpcCode":-32008,"retryable":true},"ATTACHMENT_NOT_FOUND":{"jsonrpcCode":-32009,"retryable":false},"ATTACHMENT_NOT_ACTIVE":{"jsonrpcCode":-32009,"retryable":false},"CONNECTION_RUN_BUSY":{"jsonrpcCode":-32000,"retryable":true},"COMPOSE_NOTHING_TO_ABANDON":{"jsonrpcCode":-32004,"retryable":false},"COMPOSE_NEW_WORK_GOAL_REQUIRED":{"jsonrpcCode":-32004,"retryable":false},"COMPOSE_ABANDON_TAKES_NO_GOAL":{"jsonrpcCode":-32004,"retryable":false}} as const
+export const ERROR_CODES = {"CONTROL_NOT_HOLDER":{"jsonrpcCode":-32008,"retryable":true},"CONTROL_BUSY":{"jsonrpcCode":-32008,"retryable":true},"CONTROL_RELEASE_BLOCKED":{"jsonrpcCode":-32008,"retryable":true},"ATTACHMENT_NOT_FOUND":{"jsonrpcCode":-32009,"retryable":false},"ATTACHMENT_NOT_ACTIVE":{"jsonrpcCode":-32009,"retryable":false},"CONNECTION_RUN_BUSY":{"jsonrpcCode":-32000,"retryable":true},"COMPOSE_NOTHING_TO_ABANDON":{"jsonrpcCode":-32004,"retryable":false},"COMPOSE_NEW_WORK_GOAL_REQUIRED":{"jsonrpcCode":-32004,"retryable":false},"COMPOSE_ABANDON_TAKES_NO_GOAL":{"jsonrpcCode":-32004,"retryable":false},"PROTOCOL_MINOR_REQUIRED":{"jsonrpcCode":-32003,"retryable":false},"SETTINGS_PROTOCOL_MINOR_REQUIRED":{"jsonrpcCode":-32003,"retryable":false},"SETTINGS_CAPABILITY_REQUIRED":{"jsonrpcCode":-32002,"retryable":false},"SETTINGS_SCOPE_INVALID":{"jsonrpcCode":-32602,"retryable":false},"SETTINGS_WORKSPACE_SCOPE_REQUIRED":{"jsonrpcCode":-32602,"retryable":false},"SETTINGS_INPUT_NONINTERACTIVE":{"jsonrpcCode":-32602,"retryable":false},"SETTINGS_STORAGE_UNAVAILABLE":{"jsonrpcCode":-32010,"retryable":true},"SETTINGS_BACKEND_UNAVAILABLE":{"jsonrpcCode":-32010,"retryable":true},"SETTINGS_RECORD_NOT_FOUND":{"jsonrpcCode":-32602,"retryable":false},"SETTINGS_RECORD_STALE":{"jsonrpcCode":-32602,"retryable":false},"SETTINGS_DECLARATION_STALE":{"jsonrpcCode":-32602,"retryable":false},"SETTINGS_DECLARATION_INVALID":{"jsonrpcCode":-32602,"retryable":false},"SETTINGS_DECLARATION_AMBIGUOUS":{"jsonrpcCode":-32602,"retryable":false},"SETTINGS_ENV_FORBIDDEN":{"jsonrpcCode":-32602,"retryable":false},"SETTINGS_VALUE_INVALID":{"jsonrpcCode":-32602,"retryable":false},"SETTINGS_VALUE_TOO_LARGE":{"jsonrpcCode":-32602,"retryable":false},"SETTINGS_STORE_REVISION_CONFLICT":{"jsonrpcCode":-32000,"retryable":true},"SETTINGS_OPERATION_IN_PROGRESS":{"jsonrpcCode":-32000,"retryable":true},"SETTINGS_CLEANUP_PENDING":{"jsonrpcCode":-32010,"retryable":true},"SETTINGS_UNINSTALL_PARTIAL":{"jsonrpcCode":-32010,"retryable":true},"SETTINGS_UNINSTALL_CONFLICT":{"jsonrpcCode":-32000,"retryable":true}} as const
 export type ErrorCode = keyof typeof ERROR_CODES
-export const Capability = {"RUN_CANCEL":"run.cancel","RUN_MULTITHREAD":"run.multithread","HOST_CONTROL":"host.control","CONFIG_READ":"config.read","CONFIG_WRITE":"config.write","THREADS_READ":"threads.read","CONTEXT_MANAGE":"context.manage","SKILLS_READ":"skills.read","SKILLS_MANAGE":"skills.manage","MCP_READ":"mcp.read","MCP_MANAGE":"mcp.manage","PLUGINS_READ":"plugins.read","PLUGINS_MANAGE":"plugins.manage","AGENTS_READ":"agents.read","TEAMS_READ":"teams.read","TEAMS_MANAGE":"teams.manage","MODELS_READ":"models.read","MODELS_SELECT":"models.select","HOST_ATTACH":"host.attach"} as const
+export const Capability = {"RUN_CANCEL":"run.cancel","RUN_MULTITHREAD":"run.multithread","HOST_CONTROL":"host.control","CONFIG_READ":"config.read","CONFIG_WRITE":"config.write","THREADS_READ":"threads.read","CONTEXT_MANAGE":"context.manage","SKILLS_READ":"skills.read","SKILLS_MANAGE":"skills.manage","MCP_READ":"mcp.read","MCP_MANAGE":"mcp.manage","PLUGINS_READ":"plugins.read","PLUGINS_MANAGE":"plugins.manage","AGENTS_READ":"agents.read","TEAMS_READ":"teams.read","TEAMS_MANAGE":"teams.manage","MODELS_READ":"models.read","MODELS_SELECT":"models.select","HOST_ATTACH":"host.attach","SETTINGS_READ":"settings.read","SETTINGS_MANAGE":"settings.manage"} as const
 export const EventType = {"RUN_STARTED":"run.started","RUN_PROGRESS":"run.progress","SKILL_LOADED":"skill.loaded","CONTENT_DELTA":"content.delta","REASONING_DELTA":"reasoning.delta","TOOL_STARTED":"tool.started","TOOL_DELTA":"tool.delta","TOOL_COMPLETED":"tool.completed","CONTEXT_UPDATED":"context.updated","COMPOSE_PROGRESS":"compose.progress","COMPOSE_SUMMARY":"compose.summary","INTERACTION_RESOLVED":"interaction.resolved","RUN_COMPLETED":"run.completed","RUN_CANCELLED":"run.cancelled","RUN_FAILED":"run.failed"} as const
 
 export const Method = {
   INITIALIZE: "initialize",
+  COMMANDS_BIND: "commands.bind",
   RUN_START: "run.start",
   RUN_CANCEL: "run.cancel",
   CONTEXT_COMPACT: "context.compact",
@@ -27,6 +29,9 @@ export const Method = {
   CONFIG_DETAILS: "config.details",
   CONFIG_PREVIEW: "config.preview",
   CONFIG_COMMIT: "config.commit",
+  SETTINGS_LIST: "settings.list",
+  SETTINGS_SET: "settings.set",
+  SETTINGS_REMOVE: "settings.remove",
   THREADS_LIST: "threads.list",
   THREADS_OPEN: "threads.open",
   THREADS_WATCH: "threads.watch",
@@ -81,6 +86,9 @@ export type JsonValue = null | boolean | number | string | JsonValue[] | { [key:
 export type JsonObject = Record<string, JsonValue>
 export type JsonObjectArray = Array<JsonObject>
 export type AgentCommand = { "id": string; "name": string; "description": string; "argument_hint": string | null; "requested_skill_id": string; "plugin_id": string }
+export type CommandBinding = { "id": string; "name": string }
+export type CommandBindingsParams = { "snapshot_id": string; "bindings": Array<CommandBinding> }
+export type CommandBindingsResult = { "snapshot_id": string; "accepted": true }
 export type EmptyParams = {  }
 export type ProtocolRange = { "major": 3; "min_minor": number; "max_minor": number }
 export type ClientInfo = { "name": string; "version": string; "kind": string }
@@ -88,7 +96,7 @@ export type ClientCapabilities = { "requests": Array<string>; "handles": Array<"
 export type InitializeParams = { "protocol": ProtocolRange; "client": ClientInfo; "capabilities": ClientCapabilities }
 export type InitializeResult = { "protocol": { "major": 3; "minor": number }; "server": { "name": string; "version": string }; "connection": { "id": string; "role": "owner" | "attached"; "project": { "id": string; "label": string } }; "capabilities": { "available": Array<string>; "enabled": Array<string>; "handles": Array<"approval" | "question" | "directory_trust"> }; "agent_commands": Array<AgentCommand>; "static_command_preview"?: JsonObjectArray; "skills_snapshot": { "id": string; "count": number }; "skill_diagnostics": Array<string>; "limits": { "max_frame_bytes": number; "max_tool_payload_bytes": number }; "diagnostics": EffectiveDiagnostics; "config_summary": (JsonObject) | (null); "startup_error": ({ "code": string; "message": string }) | (null) }
 export type EffectiveDiagnostics = { "level": "debug" | "info" | "warn" | "error"; "retention_days": number; "max_total_mib": number; "max_file_mib": number }
-export type RequestedSkill = { "id": string; "args"?: string }
+export type RequestedSkill = { "id": string; "args"?: string; "raw_invocation"?: string; "command_name"?: string }
 export type ThreadModelSelection = { "primary_profile": string }
 export type ApprovalMode = "plan" | "default" | "auto-edit" | "auto" | "yolo"
 export type InteractionMode = "build" | "compose" | "direct_shell"
@@ -108,6 +116,16 @@ export type ConfigChangeResult = { "path": string; "before": JsonValue; "after":
 export type ConfigDetailsResult = { "revision": string; "fields": Array<ConfigFieldDetail>; "immutable_fields": Array<{ "path": string; "reason": string }> }
 export type ConfigPreviewResult = { "revision": string; "changes": Array<ConfigChangeResult>; "applies_to": Array<"new-thread" | "restart"> }
 export type ConfigCommitResult = ConfigPreviewResult
+export type SettingsScope = "user" | "workspace"
+export type SettingsRuntimeSnapshot = { "state": "loaded" | "not_loaded"; "revision": number | null; "generation": string | null }
+export type SettingsPendingSummary = { "operation": "set" | "remove" | "uninstall" | "migrate"; "state": "pending" | "cleanup_pending" | "tombstoned" | "partial_retryable" | "migrating"; "retryable": boolean }
+export type SettingsSummary = { "setting_id": string; "plugin_id": string; "package_digest": string; "declaration_digest": string; "scope": SettingsScope; "scope_binding_digest": string; "source": "qwen-extension"; "name": string; "description": string; "env_var": string; "sensitive": boolean; "required": false; "consumer_scope": "extension-wide"; "store_state": "configured" | "absent" | "stale" | "pending" | "tombstoned" | "partial" | "blocked"; "runtime_state": "loaded" | "not_loaded" | "pending_restart" | "absent" | "stale"; "pending_operation": (SettingsPendingSummary) | (null); "diagnostic": string | null }
+export type SettingsListParams = { "scope": SettingsScope }
+export type SettingsListResult = { "scope": SettingsScope; "store_revision": number; "runtime_snapshot": SettingsRuntimeSnapshot; "settings": Array<SettingsSummary> }
+export type SettingsIdentity = { "scope": SettingsScope; "plugin_id": string; "package_digest": string; "declaration_digest": string; "setting_key": string; "env_var": string }
+export type SettingsSetParams = { "scope": SettingsScope; "plugin_id": string; "package_digest": string; "declaration_digest": string; "setting_key": string; "env_var": string; "value": string; "expected_store_revision": number }
+export type SettingsRemoveParams = { "scope": SettingsScope; "plugin_id": string; "package_digest": string; "declaration_digest": string; "setting_key": string; "env_var": string; "expected_store_revision": number }
+export type SettingsMutationResult = { "operation": "set" | "remove"; "scope": SettingsScope; "store_revision": number; "runtime_snapshot": SettingsRuntimeSnapshot; "summary": SettingsSummary; "applies_to": "next_host"; "diagnostics": Array<string> }
 export type ConfigPathResult = { "workspace": string; "paths": Array<string>; "explicit_path": string | null }
 export type ThreadSummary = { "thread_id": string; "created_at_ms": number; "updated_at_ms": number; "first_message": string; "latest_message": string; "message_count": number }
 export type ComposeActivityRecord = { "run_id": string; "event_sequence": number; "activity_id": string; "stage": "grill" | "task" | "spec" | "plan" | "implement" | "verify"; "task_id"?: string; "task_title"?: string; "attempt": number; "execution_id"?: string; "agent_id"?: string; "kind": "summary" | "tool_terminal" | "truncation"; "label": string; "status": string; "bounded_text"?: string; "created_at_ms": number }
@@ -148,7 +166,7 @@ export type TeamsRunResult = { "team_id": string; "run_id": string; "accepted": 
 export type TeamsCancelParams = { "run_id": string }
 export type TeamsCancelResult = { "run_id": string; "cancelled": boolean }
 export type McpServerStatus = { "name": string; "transport": "stdio" | "http" | "sse"; "source"?: string; "status": "connected" | "failed" | "skipped"; "error"?: string; "tool_names": Array<string> }
-export type McpStatusResult = { "servers": Array<McpServerStatus>; "static_preview"?: JsonObjectArray; "total_tools": number }
+export type McpStatusResult = { "servers": Array<McpServerStatus>; "static_preview"?: JsonObjectArray; "total_tools": number; "diagnostics"?: Array<string> }
 export type McpAddParams = ({ "name": string; "transport": "stdio"; "command": string; "args"?: Array<string>; "env"?: Record<string, string> }) | ({ "name": string; "transport": "http" | "sse"; "url": string; "headers"?: Record<string, string> })
 export type McpAddResult = { "added": boolean; "connected": boolean; "tool_names": Array<string>; "error"?: string | null }
 export type McpRemoveParams = { "name": string }
@@ -161,9 +179,11 @@ export type ControlHolder = { "connection_id": string; "role": "owner" | "attach
 export type ControlStatus = { "state": "owner" | "attached" | "revoking"; "holder": ControlHolder }
 export type ComposeActivityScope = { "activity_id": string; "stage": "grill" | "task" | "spec" | "plan" | "implement" | "verify" | "understand" | "build" | "review"; "task_id"?: string; "task_title"?: string; "attempt": number }
 export type EventBase = { "event_id": string; "type": string; "thread_id": string; "run_id": string; "sequence": number; "timestamp_ms": number; "execution_id"?: string; "parent_execution_id"?: string | null; "agent_id"?: string; "compose_scope"?: ComposeActivityScope; "payload": JsonObject }
-export type RunStartedPayload = { "mode": InteractionMode; "resumed": boolean; "skills_snapshot_id"?: string | null; "primary_model"?: RunPrimaryModelBinding; "runtime_profile_id"?: string | null }
+export type CommandProvenance = { "plugin_id": string; "package_digest": string; "command_id": string; "snapshot_id": string }
+export type SkillProvenance = { "plugin_id": string; "package_digest": string; "command_id": string | null; "snapshot_id": string }
+export type RunStartedPayload = { "mode": InteractionMode; "resumed": boolean; "skills_snapshot_id"?: string | null; "primary_model"?: RunPrimaryModelBinding; "runtime_profile_id"?: string | null; "command_provenance"?: CommandProvenance }
 export type RunProgressPayload = { "phase": "preparing" | "model"; "elapsed_ms": number }
-export type SkillLoadedPayload = { "skill_id": string; "source": string; "version": string | null; "snapshot_id": string }
+export type SkillLoadedPayload = { "skill_id": string; "source": string; "version": string | null; "snapshot_id": string; "provenance"?: SkillProvenance }
 export type ContentDeltaPayload = { "text": string }
 export type ReasoningDeltaPayload = { "text": string }
 export type ToolStartedPayload = { "tool_call_id": string; "name": string }
@@ -196,10 +216,14 @@ export type QuestionRequest = { "thread_id": string; "run_id": string; "timeout_
 export type QuestionResponse = { "answers": Record<string, Array<string>> }
 export type ProtocolErrorData = { "code": string; "retryable": boolean; "capability"?: string; "details"?: JsonValue }
 
+export type CommandsBindParams = CommandBindingsParams
+export type CommandsBindResult = CommandBindingsResult
 export type ConfigShowParams = EmptyParams
 export type ConfigShowResult = JsonObject
 export type ConfigPathParams = EmptyParams
 export type ConfigDetailsParams = EmptyParams
+export type SettingsSetResult = SettingsMutationResult
+export type SettingsRemoveResult = SettingsMutationResult
 export type ThreadsWatchParams = ThreadsOpenParams
 export type ThreadsWatchResult = ThreadsOpenResult
 export type ThreadsUnwatchParams = ThreadsOpenParams
@@ -234,6 +258,7 @@ export type HostControlStatusResult = ControlStatus
 
 export interface OperationMap {
   "initialize": { params: InitializeParams; result: InitializeResult }
+  "commands.bind": { params: CommandsBindParams; result: CommandsBindResult }
   "run.start": { params: RunStartParams; result: RunStartResult }
   "run.cancel": { params: RunCancelParams; result: RunCancelResult }
   "context.compact": { params: ContextCompactParams; result: ContextCompactResult }
@@ -242,6 +267,9 @@ export interface OperationMap {
   "config.details": { params: ConfigDetailsParams; result: ConfigDetailsResult }
   "config.preview": { params: ConfigPreviewParams; result: ConfigPreviewResult }
   "config.commit": { params: ConfigCommitParams; result: ConfigCommitResult }
+  "settings.list": { params: SettingsListParams; result: SettingsListResult }
+  "settings.set": { params: SettingsSetParams; result: SettingsSetResult }
+  "settings.remove": { params: SettingsRemoveParams; result: SettingsRemoveResult }
   "threads.list": { params: ThreadsListParams; result: ThreadsListResult }
   "threads.open": { params: ThreadsOpenParams; result: ThreadsOpenResult }
   "threads.watch": { params: ThreadsWatchParams; result: ThreadsWatchResult }

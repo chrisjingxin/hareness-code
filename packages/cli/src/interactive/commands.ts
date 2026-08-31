@@ -69,11 +69,13 @@ export type CommandAvailability =
   | { state: "disabled"; reason: string }
   | { state: "hidden"; reason: string }
 
-/** 解析成功后只携带 canonical 名称和原始参数；不让别名进入执行分支。 */
+/** 解析成功后携带 canonical 名称、规范化参数和受保护的 Plugin 原文。 */
 export type SlashCommand = {
   id: string
   name: string
   argument?: string
+  /** Plugin Command 必须把用户实际输入一路交给 Host，不能由 canonical 名称重建。 */
+  rawInvocation?: string
 }
 
 export type SlashCommandResolution =
@@ -218,20 +220,45 @@ export const builtinCommandDefinitions: readonly CommandDefinition[] = [
 export const commandRegistry = new CommandRegistry(builtinCommandDefinitions)
 
 /** 把 Host 已校验的 Plugin Command 摘要合并进单一 Registry；正文从不进入 CLI。 */
-export function createCommandRegistry(agentCommands: readonly AgentCommand[] = []): CommandRegistry {
-  const pluginDefinitions = agentCommands.map((command): CommandDefinition => ({
-    id: command.id,
-    name: command.name,
-    description: command.description,
-    source: { type: "plugin", id: command.plugin_id },
-    presentation: "action",
-    argumentHint: command.argument_hint ?? undefined,
-    suggested: true,
-    requirements: { capabilities: [Capability.SKILLS_READ], requiresIdle: true },
-    safety: { confirmation: "never" },
-    requestedSkillId: command.requested_skill_id,
-  }))
-  return new CommandRegistry([...builtinCommandDefinitions, ...pluginDefinitions])
+export function createCommandRegistry(
+  agentCommands: readonly AgentCommand[] = [],
+  baseDefinitions: readonly CommandDefinition[] = builtinCommandDefinitions,
+): CommandRegistry {
+  const reservedNames = new Set(
+    baseDefinitions.flatMap(definition => [definition.name, ...(definition.aliases ?? [])])
+      .map(normalizeCommandName),
+  )
+  const usedIds = new Set<string>()
+  const pluginDefinitions = [...agentCommands]
+    .sort((left, right) => left.id.localeCompare(right.id))
+    .map((command): CommandDefinition => {
+      if (usedIds.has(command.id)) throw new Error(`重复的 Command id：${command.id}`)
+      usedIds.add(command.id)
+      let name = command.name
+      if (!name.startsWith("plugin:") && reservedNames.has(normalizeCommandName(name))) {
+        const extension = safeExtensionName(command.plugin_id)
+        name = `${extension}.${name}`
+        let suffix = 1
+        while (reservedNames.has(normalizeCommandName(name))) {
+          name = `${extension}.${command.name}.${suffix}`
+          suffix += 1
+        }
+      }
+      reservedNames.add(normalizeCommandName(name))
+      return {
+        id: command.id,
+        name,
+        description: command.description,
+        source: { type: "plugin", id: command.plugin_id },
+        presentation: "action",
+        argumentHint: command.argument_hint ?? undefined,
+        suggested: true,
+        requirements: { capabilities: [Capability.SKILLS_READ], requiresIdle: true },
+        safety: { confirmation: "never" },
+        requestedSkillId: command.requested_skill_id,
+      }
+    })
+  return new CommandRegistry([...baseDefinitions, ...pluginDefinitions])
 }
 
 /** 兼容既有帮助渲染器；内容仍完全由 Registry 生成。 */
@@ -330,7 +357,15 @@ export function resolveSlashCommand(input: string, registry = commandRegistry): 
   const definition = registry.resolveName(rawName)
   if (!definition) return { kind: "unknown", name: rawName, suggestions: registry.suggest(rawName) }
   const argument = rawArgument.trimStart() || undefined
-  return { kind: "command", command: { id: definition.id, name: definition.name, argument } }
+  return {
+    kind: "command",
+    command: {
+      id: definition.id,
+      name: definition.name,
+      argument,
+      ...(definition.source.type === "plugin" ? { rawInvocation: input } : {}),
+    },
+  }
 }
 
 /** 保留旧调用点的成功解析 API；未知命令必须使用 resolveSlashCommand 区分。 */
@@ -357,6 +392,12 @@ function shouldShowInMenu(definition: CommandDefinition, needle: string): boolea
 /** 名称只允许按不区分大小写匹配；不对参数或用户消息执行这种归一化。 */
 function normalizeCommandName(value: string): string {
   return value.trim().toLowerCase()
+}
+
+/** 冲突回退只使用 Host 提供的 Plugin 身份，不把正文或 store 路径带入 CLI。 */
+function safeExtensionName(pluginId: string): string {
+  const segment = pluginId.split("/").filter(Boolean).at(-1) ?? "plugin"
+  return segment.replace(/[^A-Za-z0-9._-]+/g, "-") || "plugin"
 }
 
 /** 小型无依赖编辑距离实现，命令数量很小，优先保持建议结果可预测。 */

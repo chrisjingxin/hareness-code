@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
+import sys
 import zipfile
 from dataclasses import replace
 from pathlib import Path
@@ -14,9 +16,14 @@ import pytest
 
 from harness_agent.config.config import ExecutionSettings, ModelCatalog, ModelProfile, ModelSettings
 from harness_agent.extensions.mcp import build_mcp_snapshot
+from harness_agent.extensions.plugin_skills import (
+    SkillError as PluginSkillError,
+    SkillRegistry as PluginSkillRegistry,
+)
 from harness_agent.extensions.skills import SkillRegistry
 from harness_agent.plugins.manager import PluginManager
-from harness_agent.plugins.model import PluginComponentReport, PluginError
+from harness_agent.plugins.model import PluginError, capability_fingerprint
+from harness_agent.protocol.generated import EventEnvelope
 from harness_agent.runtime.agent_catalog import (
     AgentCatalog,
     DelegationPolicy,
@@ -35,6 +42,7 @@ from harness_agent.threads.context_lifecycle import (
 
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "qwen_extensions" / "za38-devagent"
+REAL_ZA38_EXTENSION = Path("/Users/beichen/Desktop/大模型/za38-cli-extension")
 
 
 def _copy_fixture(tmp_path: Path) -> Path:
@@ -109,12 +117,12 @@ def test_clean_za38_fixture_is_detected_as_qwen_with_static_inventory(
     assert components["contexts"]["effective"] is True
     assert components["hooks"]["status"] == "adapted"
     assert components["hooks"]["effective"] is True
-    assert components["commands"]["status"] == "unsupported"
-    assert components["commands"]["effective"] is False
-    assert components["skills"]["status"] == "unsupported"
-    assert components["skills"]["effective"] is False
-    assert components["mcp"]["status"] == "unsupported"
-    assert components["mcp"]["effective"] is False
+    assert components["commands"]["status"] == "adapted"
+    assert components["commands"]["effective"] is True
+    assert components["skills"]["status"] == "adapted"
+    assert components["skills"]["effective"] is True
+    assert components["mcp"]["status"] == "adapted"
+    assert components["mcp"]["effective"] is True
     assert components["contexts"]["sources"] == ["DEVAGENT.md"]
     assert components["hooks"]["capabilities"] == ["process:hook"]
     assert isinstance(summary["capability_fingerprint"], str)
@@ -145,6 +153,132 @@ def test_trusted_qwen_subagent_stop_enters_canonical_runtime_catalog(
     assert runtime_catalog.hooks[0].matcher == "^za38-(frontend|backend|java)-executor$"
     assert runtime_catalog.hooks[0].source_id
     assert runtime_catalog.diagnostics == ()
+
+
+async def test_qwen_unsupported_lsp_and_monitor_reports_cannot_enter_runtime(
+    tmp_path: Path,
+) -> None:
+    """有效 Agent/Context/Hook 不能让 Qwen unsupported LSP/Monitor 借道运行。"""
+    source = _copy_fixture(tmp_path)
+    manifest = _manifest(source)
+    spawn_counter = tmp_path / "fake-spawn-count.txt"
+    spawn_counter.write_text("0", encoding="utf-8")
+    fake_spawn = source / "scripts" / "fake-spawn.py"
+    fake_spawn.parent.mkdir(parents=True, exist_ok=True)
+    fake_spawn.write_text(
+        "from pathlib import Path\n"
+        f"counter = Path({str(spawn_counter)!r})\n"
+        "counter.write_text(str(int(counter.read_text()) + 1), encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    manifest["lspServers"] = {
+        "malicious": {
+            "transport": "socket",
+            "command": sys.executable,
+            "args": ["${extensionPath}/scripts/fake-spawn.py"],
+            "extensionToLanguage": {".evil": "evil"},
+        }
+    }
+    manifest["monitors"] = "monitors/monitors.json"
+    (source / "monitors").mkdir()
+    (source / "monitors" / "monitors.json").write_text(
+        json.dumps(
+            [
+                {
+                    "name": "malicious",
+                    "command": (
+                        f"{json.dumps(sys.executable)} "
+                        f"{json.dumps('${extensionPath}/scripts/fake-spawn.py')}"
+                    ),
+                }
+            ],
+        ),
+        encoding="utf-8",
+    )
+    _write_manifest(source, "devagent-extension.json", manifest)
+
+    manager = PluginManager(home=tmp_path / "home")
+    installed = manager.install(source)["plugin"]
+    assert isinstance(installed, dict)
+    manager.set_enabled(
+        str(installed["id"]),
+        enabled=True,
+        capability_fingerprint=str(installed["capability_fingerprint"]),
+    )
+
+    catalog = manager.catalog()
+    qwen = catalog.plugins[0]
+    assert any(
+        component.kind == "agents" and component.effective
+        for component in qwen.components
+    )
+    assert any(
+        component.kind == "contexts" and component.effective
+        for component in qwen.components
+    )
+    assert any(
+        component.kind == "hooks" and component.effective
+        for component in qwen.components
+    )
+    assert qwen.components and {
+        component.kind
+        for component in qwen.components
+        if component.kind in {"lsp", "monitors"}
+    } == {"lsp", "monitors"}
+    assert all(
+        (
+            component.kind == "monitors"
+            and component.status == "unsupported"
+            and not component.effective
+        )
+        or (
+            component.kind == "lsp"
+            and component.status == "unsupported"
+            and not component.effective
+        )
+        for component in qwen.components
+        if component.kind in {"lsp", "monitors"}
+    )
+
+    runtime_catalog = manager.runtime_catalog(
+        catalog,
+        workspace=tmp_path / "workspace",
+    )
+
+    assert len(runtime_catalog.hooks) == 1
+    assert runtime_catalog.lsp_servers == ()
+    assert runtime_catalog.monitors == ()
+    assert any(
+        "PLUGIN_RUNTIME_COMPONENT_BLOCKED" in diagnostic
+        and "kind=lsp" in diagnostic
+        for diagnostic in runtime_catalog.diagnostics
+    )
+    assert any(
+        "PLUGIN_RUNTIME_COMPONENT_BLOCKED" in diagnostic
+        and "kind=monitors" in diagnostic
+        for diagnostic in runtime_catalog.diagnostics
+    )
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "malicious.evil").write_text("x", encoding="utf-8")
+    from harness_agent.plugins.runtime import PluginRuntimeManager
+
+    runtime = PluginRuntimeManager(runtime_catalog)
+    try:
+        await runtime.start()
+        lsp_result = await runtime.lsp.query(
+            "definition",
+            "malicious.evil",
+            1,
+            1,
+            str(workspace),
+        )
+        assert lsp_result["results"] == []
+        await asyncio.sleep(0.05)
+    finally:
+        await runtime.aclose()
+    assert spawn_counter.read_text(encoding="utf-8") == "0"
 
 
 @pytest.mark.parametrize(
@@ -201,8 +335,22 @@ def test_qwen_invalid_or_out_of_scope_hooks_never_enter_runtime(
     summary = manager.validate(source)["plugin"]
     assert isinstance(summary, dict)
     component = _components(summary)["hooks"]
-    assert component["status"] == "invalid"
-    assert component["effective"] is False
+    if "PostToolUse" in hooks:
+        assert component["status"] == "adapted"
+        assert component["effective"] is True
+    elif any(
+        isinstance(group, dict)
+        and any(
+            isinstance(handler, dict) and handler.get("command") == 123
+            for handler in group.get("hooks", [])
+        )
+        for group in hooks["SubagentStop"]
+    ):
+        assert component["status"] == "adapted"
+        assert component["effective"] is True
+    else:
+        assert component["status"] == "invalid"
+        assert component["effective"] is False
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
     assert installed["can_enable"] is True
@@ -217,11 +365,18 @@ def test_qwen_invalid_or_out_of_scope_hooks_never_enter_runtime(
         workspace=tmp_path / "workspace",
     )
 
-    assert runtime_catalog.hooks == ()
-    assert any(
-        "PLUGIN_QWEN_HOOK_COMPONENT_DISABLED" in diagnostic
-        for diagnostic in runtime_catalog.diagnostics
-    )
+    if component["effective"] is True:
+        assert len(runtime_catalog.hooks) == 1
+        if "PostToolUse" in hooks:
+            assert runtime_catalog.hooks[0].event == "PostToolUse"
+        else:
+            assert runtime_catalog.hook_failures
+    else:
+        assert runtime_catalog.hooks == ()
+        assert any(
+            "PLUGIN_QWEN_HOOK_COMPONENT_DISABLED" in diagnostic
+            for diagnostic in runtime_catalog.diagnostics
+        )
 
 
 def test_qwen_runtime_hook_definition_rejects_async_subagent_stop(
@@ -260,7 +415,7 @@ def test_qwen_runtime_hook_definition_rejects_async_subagent_stop(
         ("matcher", "x" * 513, "matcher"),
         ("command", "x" * 32_769, "command"),
         ("timeout", True, "timeout"),
-        ("timeout", 601, "timeout"),
+        ("timeout", 600_001, "timeout"),
         ("shell", "fish", "shell"),
         ("args", 123, "args"),
         ("env", {"TOKEN": "must-not-run"}, "env"),
@@ -316,30 +471,37 @@ def test_qwen_hook_report_matches_canonical_runtime_validation(
         capability_fingerprint=str(installed["capability_fingerprint"]),
     )
 
-    def stale_hook_report(current: object) -> tuple[object, ...]:
+    def reauthorized_hook_report(current: object) -> tuple[object, ...]:
         assert hasattr(current, "plugins")
-        return tuple(
-            replace(
-                plugin,
-                components=tuple(
-                    replace(
-                        item,
-                        status="adapted",
-                        effective=True,
-                        capabilities=("process:hook",),
-                        diagnostics=("stale report",),
-                    )
-                    if plugin.plugin_id == plugin_id and item.kind == "hooks"
-                    else item
-                    for item in plugin.components
-                ),
+        updated: list[object] = []
+        for plugin in current.plugins:  # type: ignore[attr-defined]
+            if plugin.plugin_id != plugin_id:
+                updated.append(plugin)
+                continue
+            components = tuple(
+                replace(
+                    item,
+                    status="adapted",
+                    effective=True,
+                    capabilities=("process:hook",),
+                    diagnostics=("re-authorized report",),
+                )
+                if item.kind == "hooks"
+                else item
+                for item in plugin.components
             )
-            if plugin.plugin_id == plugin_id
-            else plugin
-            for plugin in current.plugins  # type: ignore[attr-defined]
-        )
+            fingerprint = capability_fingerprint(components)
+            updated.append(
+                replace(
+                    plugin,
+                    components=components,
+                    capability_fingerprint=fingerprint,
+                    trusted_capability_fingerprint=fingerprint,
+                )
+            )
+        return tuple(updated)
 
-    manager.store.mutate_registry(stale_hook_report)  # type: ignore[arg-type]
+    manager.store.mutate_registry(reauthorized_hook_report)  # type: ignore[arg-type]
     runtime_catalog = manager.runtime_catalog(
         manager.catalog(),
         workspace=tmp_path / "workspace",
@@ -350,6 +512,94 @@ def test_qwen_hook_report_matches_canonical_runtime_validation(
         diagnostic.upper() in item.upper()
         for item in runtime_catalog.diagnostics
     )
+
+
+@pytest.mark.parametrize(
+    ("timeout", "expected_status", "expected_seconds"),
+    (
+        (10_000, "adapted", 10.0),
+        (600_000, "adapted", 600.0),
+        (None, "adapted", 60.0),
+        (0, "invalid", None),
+        (-1, "invalid", None),
+        (True, "invalid", None),
+        ("10000", "invalid", None),
+        (600_001, "invalid", None),
+    ),
+)
+def test_qwen_hook_timeout_is_milliseconds_at_adapter_and_runtime_boundary(
+    tmp_path: Path,
+    timeout: object,
+    expected_status: str,
+    expected_seconds: float | None,
+) -> None:
+    """Qwen command Hook 的 timeout 按毫秒适配，canonical HookDefinition 按秒运行。"""
+    source = _copy_fixture(tmp_path)
+    manifest = _manifest(source)
+    handler: dict[str, object] = {
+        "type": "command",
+        "command": "node scripts/za38-git-commit-gate.mjs",
+    }
+    if timeout is not None:
+        handler["timeout"] = timeout
+    manifest["hooks"] = {
+        "SubagentStop": [
+            {"matcher": "^za38-frontend-executor$", "hooks": [handler]},
+        ]
+    }
+    (source / "devagent-extension.json").write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+
+    manager = PluginManager(home=tmp_path / "home")
+    summary = manager.validate(source)["plugin"]
+    assert isinstance(summary, dict)
+    component = _components(summary)["hooks"]
+    assert component["status"] == expected_status
+    assert component["effective"] is (expected_status == "adapted")
+
+    if expected_seconds is None:
+        return
+
+    installed = manager.install(source)["plugin"]
+    assert isinstance(installed, dict)
+    manager.set_enabled(
+        str(installed["id"]),
+        enabled=True,
+        capability_fingerprint=str(installed["capability_fingerprint"]),
+    )
+    runtime_catalog = manager.runtime_catalog(
+        manager.catalog(),
+        workspace=tmp_path / "workspace",
+    )
+    assert len(runtime_catalog.hooks) == 1
+    assert runtime_catalog.hooks[0].timeout_seconds == expected_seconds
+
+
+@pytest.mark.parametrize(
+    ("qwen", "timeout", "valid"),
+    (
+        (True, 10_000, True),
+        (False, 10_000, False),
+        (False, 600, True),
+        (False, 601, False),
+    ),
+)
+def test_command_hook_timeout_validation_remains_format_specific(
+    qwen: bool,
+    timeout: object,
+    valid: bool,
+) -> None:
+    """Qwen 使用毫秒边界，Claude/portable 继续使用既有秒边界。"""
+    from harness_agent.plugins.common import validate_command_hook_handler
+
+    error = validate_command_hook_handler(
+        {"type": "command", "command": "node gate.mjs", "timeout": timeout},
+        event="SubagentStop",
+        qwen=qwen,
+    )
+    assert (error is None) is valid
 
 
 def test_qwen_stale_adapted_hook_runtime_failure_is_observable_and_fail_closed(
@@ -419,9 +669,9 @@ def test_qwen_stale_adapted_hook_runtime_failure_is_observable_and_fail_closed(
     assert runtime_catalog.hooks == ()
     assert runtime_catalog.hook_failures
     assert any(
-        "PLUGIN_HOOK_MATCHER_INVALID" in diagnostic
+        "COMPONENT_FINGERPRINT_DRIFT" in diagnostic
         for diagnostic in runtime_catalog.diagnostics
-    )
+    ), runtime_catalog.diagnostics
 
 
 def test_qwen_context_uses_default_qwen_md_for_missing_or_empty_array(
@@ -666,10 +916,10 @@ def test_qwen_resource_snapshot_resolves_known_placeholders_only(
     manifest = _manifest(source)
     server = manifest["mcpServers"]["za38.03_code_index"]
     server["args"] = [
-        "<extensionPath>/scripts/za38-index.mjs",
+        "${extensionPath}/scripts/za38-index.mjs",
         "${extensionPath}/scripts/za38-git-commit-gate.mjs",
         "${extensionPath}${/}mcp${/}context-server.mjs",
-        "${CLAUDE_PLUGIN_ROOT}/scripts/za38-index.mjs",
+        "${extensionPath}${pathSeparator}scripts${pathSeparator}za38-index.mjs",
     ]
     (source / "devagent-extension.json").write_text(
         json.dumps(manifest),
@@ -717,11 +967,11 @@ def test_qwen_untrusted_process_assets_are_static_only(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("argument", "error_code"),
     (
-        ("--file=${extensionPath}/../outside.mjs", "PLUGIN_RESOURCE_PATH_INVALID"),
-        ("--file=prefix/${extensionPath}/scripts/za38-index.mjs", "PLUGIN_RESOURCE_PATH_INVALID"),
-        ("--file=${UNKNOWN_ROOT}/scripts/za38-index.mjs", "PLUGIN_RESOURCE_PLACEHOLDER_INVALID"),
-        ("--file=<extensionPath>/scripts/missing.mjs", "PLUGIN_RESOURCE_TARGET_MISSING"),
-        ("--file=/tmp/outside.mjs", "PLUGIN_RESOURCE_PATH_INVALID"),
+        ("--file=${extensionPath}/../outside.mjs", "PLUGIN_MCP_PATH_INVALID"),
+        ("--file=prefix/${extensionPath}/scripts/za38-index.mjs", "PLUGIN_MCP_PATH_INVALID"),
+        ("--file=${UNKNOWN_ROOT}/scripts/za38-index.mjs", "PLUGIN_MCP_PLACEHOLDER_INVALID"),
+        ("--file=<extensionPath>/scripts/missing.mjs", "PLUGIN_MCP_PLACEHOLDER_INVALID"),
+        ("--file=/tmp/outside.mjs", "PLUGIN_MCP_PATH_INVALID"),
     ),
 )
 def test_qwen_embedded_placeholder_paths_fail_closed(
@@ -739,9 +989,12 @@ def test_qwen_embedded_placeholder_paths_fail_closed(
         encoding="utf-8",
     )
 
-    with pytest.raises(PluginError) as rejected:
-        PluginManager(home=tmp_path / "home").install(source)
-    assert rejected.value.code == error_code
+    summary = PluginManager(home=tmp_path / "home").install(source)["plugin"]
+    assert isinstance(summary, dict)
+    component = _components(summary)["mcp"]
+    assert component["effective"] is False
+    assert component["status"] == "invalid"
+    assert any(error_code in diagnostic for diagnostic in component["diagnostics"])
 
 
 def test_qwen_static_preview_lists_are_disabled_and_non_runnable(
@@ -785,6 +1038,930 @@ def test_qwen_static_preview_lists_are_disabled_and_non_runnable(
     listed = manager.list()
     assert listed["static_preview"] == preview
     assert str(tmp_path) not in json.dumps(listed, ensure_ascii=False)
+
+
+def test_qwen_commands_and_skills_use_canonical_dialects_and_dedupe_preview(
+    tmp_path: Path,
+) -> None:
+    """trusted Qwen Commands/Skills 进入 canonical registry，effective 条目从 preview 去重。"""
+    source = _copy_fixture(tmp_path)
+    manager = PluginManager(home=tmp_path / "home")
+    installed = manager.install(source)["plugin"]
+    assert isinstance(installed, dict)
+    manager.set_enabled(
+        str(installed["id"]),
+        enabled=True,
+        capability_fingerprint=str(installed["capability_fingerprint"]),
+    )
+
+    catalog = manager.catalog()
+    result = manager.skill_sources(catalog)
+    assert result.diagnostics == ()
+    registry = PluginSkillRegistry(
+        tmp_path / "workspace",
+        home=tmp_path / "home",
+        plugin_sources=result.sources,
+        plugin_diagnostics=result.diagnostics,
+    )
+
+    commands = registry.agent_commands()
+    assert {item["name"] for item in commands} == {
+        "za38-index",
+        "za38-init",
+        "za38-sdd",
+    }
+    assert all(item["name"] != "plugin:local:ZA38.03_CLI_EXTENSION:za38-sdd" for item in commands)
+    command_records = [
+        record for record in registry.records if record.kind == "command"
+    ]
+    assert {record.dialect for record in command_records} == {"qwen-command"}
+    assert all(record.name in {"za38-index", "za38-init", "za38-sdd"} for record in command_records)
+    skill = registry.resolve("za38-framework")
+    assert skill.kind == "skill"
+    assert skill.dialect == "qwen-skill"
+    assert registry.read_resource(skill.skill_id, "references/root-guide.md").startswith(
+        "ZA38 offline root reference"
+    )
+
+    preview = manager.static_preview()
+    assert preview["commands"] == []
+    assert preview["skills"] == []
+
+
+def test_qwen_skill_resource_closure_excludes_origin_material_without_diagnostics(
+    tmp_path: Path,
+) -> None:
+    """Skill 只捕获顶层运行时 references，开发原始素材不可见且不产生诊断。"""
+    source = _copy_fixture(tmp_path)
+    origin = source / "references" / "origin"
+    origin.mkdir(parents=True)
+    (origin / "sentinel.png").write_bytes(b"ORIGIN_SENTINEL")
+    (origin / "oversized.png").write_bytes(b"ORIGIN_OVERSIZED_SENTINEL")
+
+    manager = PluginManager(home=tmp_path / "home")
+    installed = manager.install(source)["plugin"]
+    assert isinstance(installed, dict)
+    manager.set_enabled(
+        str(installed["id"]),
+        enabled=True,
+        capability_fingerprint=str(installed["capability_fingerprint"]),
+    )
+
+    installed_record = manager.store.read_registry().plugins[0]
+    package = manager.store.package_path(installed_record)
+    # Store 保留净化后的完整安装源；runtime snapshot 再按组件声明收紧闭包。
+    assert (package / "references/origin/sentinel.png").read_bytes() == b"ORIGIN_SENTINEL"
+    assert (package / "references/origin/oversized.png").read_bytes() == (
+        b"ORIGIN_OVERSIZED_SENTINEL"
+    )
+
+    result = manager.skill_sources(manager.catalog())
+    assert result.diagnostics == ()
+    registry = PluginSkillRegistry(
+        tmp_path / "workspace",
+        home=tmp_path / "home",
+        plugin_sources=result.sources,
+        plugin_diagnostics=result.diagnostics,
+    )
+    skill = registry.resolve("za38-framework")
+    assert registry.read_resource(skill.skill_id, "references/root-guide.md").startswith(
+        "ZA38 offline root reference"
+    )
+    with pytest.raises(PluginSkillError, match="not captured"):
+        registry.read_resource(skill.skill_id, "references/origin/sentinel.png")
+
+    snapshot = manager.resource_snapshot(str(installed["id"]))
+    serialized = json.dumps(snapshot.to_dict(), ensure_ascii=False)
+    assert "ORIGIN_SENTINEL" not in serialized
+    assert "ORIGIN_OVERSIZED_SENTINEL" not in serialized
+    assert all("references/origin/" not in asset.source for asset in snapshot.resources)
+
+
+@pytest.mark.skipif(
+    not REAL_ZA38_EXTENSION.is_dir(),
+    reason="本机没有只读 ZA38 extension fixture",
+)
+def test_real_za38_extension_install_ignores_checkout_metadata_and_exposes_four_items(
+    tmp_path: Path,
+) -> None:
+    """真实 checkout 只读安装后提供三 Command 和一个 Skill，不触碰本地秘密。"""
+    manager = PluginManager(home=tmp_path / "home")
+    installed = manager.install(REAL_ZA38_EXTENSION)["plugin"]
+    assert isinstance(installed, dict)
+    installed_components = _components(installed)
+    assert installed_components["hooks"]["status"] == "adapted"
+    assert installed_components["hooks"]["effective"] is True
+    assert installed.get("compatibility") == "recognized"
+    manager.set_enabled(
+        str(installed["id"]),
+        enabled=True,
+        capability_fingerprint=str(installed["capability_fingerprint"]),
+    )
+
+    catalog = manager.catalog()
+    result = manager.skill_sources(catalog)
+    registry = PluginSkillRegistry(
+        tmp_path / "workspace",
+        home=tmp_path / "home",
+        plugin_sources=result.sources,
+        plugin_diagnostics=result.diagnostics,
+    )
+    assert result.diagnostics == ()
+    assert {item["name"] for item in registry.agent_commands()} == {
+        "za38-index",
+        "za38-init",
+        "za38-sdd",
+    }
+    assert {
+        record.name
+        for record in registry.records
+        if record.kind == "skill" and record.source != "builtin"
+    } == {
+        "za38-framework"
+    }
+    assert manager.static_preview()["commands"] == []
+    assert manager.static_preview()["skills"] == []
+
+    record = manager.store.read_registry().plugins[0]
+    package = manager.store.package_path(record)
+    assert not any(
+        part in {".git", ".env.dev", ".env.prd", ".env.st", ".env.uat", ".npmrc"}
+        for path in package.rglob("*")
+        for part in path.relative_to(package).parts
+    )
+    public_outputs = json.dumps(
+        {
+            "list": manager.list(),
+            "snapshot": manager.resource_snapshot(record.plugin_id).to_dict(),
+            "diagnostics": result.diagnostics,
+            "catalog": catalog.to_dict(),
+        },
+        ensure_ascii=False,
+    )
+    assert str(REAL_ZA38_EXTENSION) not in public_outputs
+    assert ".env.dev" not in public_outputs
+    assert ".env.prd" not in public_outputs
+    assert ".env.st" not in public_outputs
+    assert ".env.uat" not in public_outputs
+    assert ".npmrc" not in public_outputs
+    assert all(
+        "references/origin/" not in asset.source
+        for asset in manager.resource_snapshot(record.plugin_id).resources
+    )
+    origin_store_entries = tuple(
+        path
+        for path in package.rglob("*")
+        if "references/origin" in path.relative_to(package).as_posix()
+    )
+    assert origin_store_entries
+    # PluginStore 故意把 package 设为只读；恢复临时 home 的权限只为让
+    # pytest 在测试结束时清理 fixture，不改变被测 store 的运行语义。
+    for path in sorted(
+        (tmp_path / "home").rglob("*"),
+        key=lambda item: len(item.parts),
+        reverse=True,
+    ):
+        path.chmod(0o700 if path.is_dir() else 0o600)
+    (tmp_path / "home").chmod(0o700)
+
+
+async def test_qwen_command_host_run_keeps_raw_invocation_and_projects_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Host 离线 Run 只把 snapshot 展开正文交给 fake Agent，并保留原调用。"""
+    from harness_agent.host.agent_host import AgentHost
+
+    class RecordingAgent:
+        """不访问模型或网络，只记录 ManagedAgentExecutor 的一次输入。"""
+
+        def __init__(self) -> None:
+            self.inputs: list[object] = []
+
+        async def astream(self, stream_input: object, **_kwargs: Any):
+            self.inputs.append(stream_input)
+            yield (
+                "messages",
+                (SimpleNamespace(content="done", usage_metadata=None, tool_call_chunks=[]), {}),
+            )
+
+    home = tmp_path / "home"
+    config_path = home / ".harness" / "config.toml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        """[config]
+version = 1
+
+[models]
+default_profile = "fast"
+
+[models.profiles.fast]
+model = "offline-model"
+base_url = "https://offline.invalid/v1"
+api_key_env = "HARNESS_PHASE1_FAKE_KEY"
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HARNESS_PHASE1_FAKE_KEY", "offline-test-key")
+    workspace = tmp_path / "workspace"
+    fake = RecordingAgent()
+    server = AgentHost(agent=fake, config_home=home, workspace=workspace)
+    server._thread_persistence_enabled = lambda: True  # type: ignore[method-assign]
+
+    async def offline_mcp() -> None:
+        """测试不得连接 fixture MCP 或创建外部进程。"""
+
+    server._ensure_mcp_connected = offline_mcp  # type: ignore[method-assign]
+    server._connect_mcp_servers = offline_mcp  # type: ignore[method-assign]
+    frames: list[dict[str, Any]] = []
+
+    async def capture(message: dict[str, Any]) -> None:
+        frames.append(message)
+
+    server.send = capture
+    installed = server._plugin_manager.install(_copy_fixture(tmp_path))["plugin"]
+    assert isinstance(installed, dict)
+    server._plugin_manager.set_enabled(
+        str(installed["id"]),
+        enabled=True,
+        capability_fingerprint=str(installed["capability_fingerprint"]),
+    )
+    try:
+        initialize_params = {
+                "protocol": {"major": 3, "min_minor": 0, "max_minor": 7},
+            "client": {"name": "test", "version": "0.1.0", "kind": "test"},
+            "capabilities": {
+                "requests": ["run.multithread", "skills.read", "threads.read"],
+                "handles": [],
+            },
+        }
+        await server.dispatch(
+            {
+                "jsonrpc": "2.0",
+                "method": "initialize",
+                "params": initialize_params,
+                "id": "phase1-init",
+            }
+        )
+        initialized = next(frame["result"] for frame in frames if frame.get("id") == "phase1-init")
+        command = next(
+            item for item in initialized["agent_commands"] if item["name"] == "za38-sdd"
+        )
+        await server.dispatch(
+            {
+                "jsonrpc": "2.0",
+                "method": "commands.bind",
+                "params": {
+                    "snapshot_id": initialized["skills_snapshot"]["id"],
+                    "bindings": [
+                        {"id": item["id"], "name": item["name"]}
+                        for item in initialized["agent_commands"]
+                    ],
+                },
+                "id": "phase1-command-bind",
+            }
+        )
+        binding = next(frame for frame in frames if frame.get("id") == "phase1-command-bind")
+        assert binding["result"] == {
+            "snapshot_id": initialized["skills_snapshot"]["id"],
+            "accepted": True,
+        }
+        raw_invocation = "/ZA38-SDD   创建登录功能  "
+        await server.dispatch(
+            {
+                "jsonrpc": "2.0",
+                "method": "run.start",
+                "params": {
+                    "mode": "build",
+                    "message": raw_invocation,
+                    "thread_id": "phase1-thread",
+                    "run_id": "phase1-run",
+                    "requested_skill": {
+                        "id": command["requested_skill_id"],
+                        "args": "创建登录功能",
+                        "raw_invocation": raw_invocation,
+                        "command_name": "za38-sdd",
+                    },
+                },
+                "id": "phase1-run-start",
+            }
+        )
+        for _ in range(200):
+            if any(
+                frame.get("params", {}).get("type") == "run.completed"
+                for frame in frames
+            ):
+                break
+            await asyncio.sleep(0.01)
+        assert any(
+            frame.get("params", {}).get("type") == "run.completed"
+            for frame in frames
+        ), frames
+        # 这里直接校验 Host 真实 BuildRunAdapter 发出的每一帧，而不是手工
+        # 构造一个相似 payload；schema 漏声明 provenance 时应在此处先失败。
+        for frame in frames:
+            if frame.get("method") == "event":
+                EventEnvelope.model_validate(frame["params"])
+        assert len(fake.inputs) == 1
+        assert fake.inputs[0]["messages"][0].content == (
+            "# /za38-sdd\n\nSDD fixture.\n\n创建登录功能"
+        )
+        loaded = next(
+            frame["params"]
+            for frame in frames
+            if frame.get("method") == "event"
+            and frame["params"]["type"] == "skill.loaded"
+        )
+        started = next(
+            frame["params"]
+            for frame in frames
+            if frame.get("method") == "event"
+            and frame["params"]["type"] == "run.started"
+        )
+        expected_provenance = {
+            "plugin_id": str(installed["id"]),
+            "package_digest": installed["package_digest"],
+            "command_id": command["id"],
+            "snapshot_id": initialized["skills_snapshot"]["id"],
+        }
+        assert started["payload"]["command_provenance"] == expected_provenance
+        assert loaded["payload"]["provenance"] == expected_provenance
+        assert set(started["payload"]["command_provenance"]) == {
+            "plugin_id",
+            "package_digest",
+            "command_id",
+            "snapshot_id",
+        }
+        assert set(loaded["payload"]["provenance"]) == {
+            "plugin_id",
+            "package_digest",
+            "command_id",
+            "snapshot_id",
+        }
+        serialized_events = json.dumps(
+            [frame["params"] for frame in frames if frame.get("method") == "event"],
+            ensure_ascii=False,
+        )
+        assert str(home) not in serialized_events
+        assert str(workspace) not in serialized_events
+        assert "SDD fixture." not in json.dumps(expected_provenance)
+        assert loaded["payload"]["provenance"]["package_digest"] == installed["package_digest"]
+        assert loaded["payload"]["provenance"]["command_id"] == command["id"]
+        records = await server._thread_persistence.load_transcript("phase1-thread")
+        assert records[0].kind == "user"
+        assert records[0].payload["content"] == raw_invocation
+
+        fake.inputs.clear()
+        frames.clear()
+        await server.dispatch(
+            {
+                "jsonrpc": "2.0",
+                "method": "run.start",
+                "params": {
+                    "mode": "build",
+                    "message": "/help dangerous-goal",
+                    "thread_id": "phase1-mismatch-thread",
+                    "run_id": "phase1-mismatch-run",
+                    "requested_skill": {
+                        "id": command["requested_skill_id"],
+                        "args": "dangerous-goal",
+                        "raw_invocation": "/help dangerous-goal",
+                        "command_name": "help",
+                    },
+                },
+                "id": "phase1-mismatch-start",
+            }
+        )
+        error = next(frame for frame in frames if frame.get("id") == "phase1-mismatch-start")
+        assert error["error"]["message"] == "COMMAND_INVOCATION_IDENTITY_MISMATCH"
+        assert error["error"]["data"] == {
+            "code": "COMMAND_INVOCATION_IDENTITY_MISMATCH",
+            "retryable": False,
+        }
+        assert len(fake.inputs) == 0
+        assert await server._thread_persistence.load_transcript("phase1-mismatch-thread") == ()
+    finally:
+        await server.close()
+
+
+async def test_old_minor_rejects_plugin_command_before_emitting_v37_provenance(
+    tmp_path: Path,
+) -> None:
+    """v3.6 连接不能收到 v3.7 Plugin Command provenance 事件。"""
+    from harness_agent.host.agent_host import AgentHost
+
+    class FakeAgent:
+        async def astream(self, _stream_input: object, **_kwargs: Any):
+            yield ("messages", (SimpleNamespace(content="unused"), {}))
+
+    server = AgentHost(
+        agent=FakeAgent(),
+        allow_echo=True,
+        config_home=tmp_path / "home",
+        workspace=tmp_path / "workspace",
+    )
+    frames: list[dict[str, Any]] = []
+
+    async def capture(message: dict[str, Any]) -> None:
+        frames.append(message)
+
+    server.send = capture
+    installed = server._plugin_manager.install(_copy_fixture(tmp_path))["plugin"]
+    assert isinstance(installed, dict)
+    server._plugin_manager.set_enabled(
+        str(installed["id"]),
+        enabled=True,
+        capability_fingerprint=str(installed["capability_fingerprint"]),
+    )
+    try:
+        await server.dispatch(
+            {
+                "jsonrpc": "2.0",
+                "method": "initialize",
+                "params": {
+                    "protocol": {"major": 3, "min_minor": 0, "max_minor": 6},
+                    "client": {"name": "old-cli", "version": "0.1.0", "kind": "test"},
+                    "capabilities": {"requests": ["run.multithread", "skills.read"], "handles": []},
+                },
+                "id": "old-init",
+            }
+        )
+        initialized = next(frame["result"] for frame in frames if frame.get("id") == "old-init")
+        command = next(item for item in initialized["agent_commands"] if item["name"] == "za38-sdd")
+        await server.dispatch(
+            {
+                "jsonrpc": "2.0",
+                "method": "commands.bind",
+                "params": {
+                    "snapshot_id": initialized["skills_snapshot"]["id"],
+                    "bindings": [
+                        {"id": item["id"], "name": item["name"]}
+                        for item in initialized["agent_commands"]
+                    ],
+                },
+                "id": "old-bind",
+            }
+        )
+        await server.dispatch(
+            {
+                "jsonrpc": "2.0",
+                "method": "run.start",
+                "params": {
+                    "mode": "build",
+                    "message": "/za38-sdd",
+                    "thread_id": "old-thread",
+                    "run_id": "old-run",
+                    "requested_skill": {
+                        "id": command["requested_skill_id"],
+                        "args": "",
+                        "raw_invocation": "/za38-sdd",
+                        "command_name": "za38-sdd",
+                    },
+                },
+                "id": "old-run-start",
+            }
+        )
+        response = next(frame for frame in frames if frame.get("id") == "old-run-start")
+        assert response["error"]["message"] == "PLUGIN_COMMAND_PROTOCOL_MINOR_REQUIRED"
+        assert response["error"]["data"] == {
+            "code": "PLUGIN_COMMAND_PROTOCOL_MINOR_REQUIRED",
+            "retryable": False,
+        }
+        assert not any(frame.get("method") == "event" for frame in frames)
+    finally:
+        await server.close()
+
+
+def test_host_accepts_cli_resolved_command_name_without_builtin_table() -> None:
+    """Host 只验证 CLI 的单一解析结果，不复制未来 builtin/alias 规则。"""
+    from harness_agent.host.agent_host import _validate_command_invocation
+    from harness_agent.host.run_coordinator import RequestedSkill, StartRun
+
+    command_id = "plugin/local/future/command/preview"
+
+    class SnapshotRegistry:
+        """只提供 Host snapshot 的 stable command record，不提供 UI 命令表。"""
+
+        def resolve(self, skill_id: str) -> SimpleNamespace:
+            assert skill_id == command_id
+            return SimpleNamespace(
+                skill_id=skill_id,
+                kind="command",
+                name="preview",
+                source="plugin:local/future",
+                dialect="qwen-command",
+            )
+
+    raw = "/future.preview   args  "
+    requested = RequestedSkill(
+        command_id,
+        "args",
+        raw,
+        "future.preview",
+    )
+    command = StartRun(
+        thread_id="future-command-thread",
+        run_id="future-command-run",
+        message=raw,
+        mode="build",
+        requested_skill=requested,
+    )
+
+    record = SnapshotRegistry().resolve(command_id)
+    _validate_command_invocation(
+        command,
+        requested,
+        record,
+        resolved_command_name="future.preview",
+    )
+
+
+@pytest.mark.parametrize(
+    ("record_name", "source", "raw_name", "resolved_name", "expected"),
+    (
+        ("za38-sdd", "plugin:local/ZA38", "za38-sdd", "za38-sdd", True),
+        ("tools:check", "plugin:local/tools", "tools:check", "tools:check", True),
+        ("za38-sdd", "plugin:local/ZA38", "ZA38.za38-sdd", "ZA38.za38-sdd", True),
+        ("za38-sdd", "plugin:local/ZA38", "ZA38.za38-sdd.1", "ZA38.za38-sdd.1", True),
+        ("za38-sdd", "plugin:local/ZA38", "help", "za38-sdd", False),
+        ("za38-sdd", "plugin:local/ZA38", "other.za38-sdd", "ZA38.za38-sdd", False),
+    ),
+)
+def test_host_exact_command_binding_matches_cli_resolution(
+    record_name: str,
+    source: str,
+    raw_name: str,
+    resolved_name: str,
+    expected: bool,
+) -> None:
+    """Host 只接受 CLI 已选中的 exact name，不根据 record 形状推断候选。"""
+    from harness_agent.host.agent_host import _validate_command_invocation
+    from harness_agent.host.run_coordinator import RequestedSkill, StartRun
+
+    command_id = "plugin/local/ZA38/command/za38-sdd"
+    raw = f"/{raw_name} dangerous-goal"
+    requested = RequestedSkill(command_id, "dangerous-goal", raw, resolved_name)
+    command = StartRun(
+        thread_id="record-binding-thread",
+        run_id="record-binding-run",
+        message=raw,
+        mode="build",
+        requested_skill=requested,
+    )
+    record = SimpleNamespace(
+        skill_id=command_id,
+        kind="command",
+        name=record_name,
+        source=source,
+        dialect="qwen-command",
+    )
+
+    if expected:
+        _validate_command_invocation(
+            command,
+            requested,
+            record,
+            resolved_command_name=resolved_name,
+        )
+    else:
+        with pytest.raises(PluginSkillError, match="COMMAND_INVOCATION_IDENTITY_MISMATCH"):
+            _validate_command_invocation(
+                command,
+                requested,
+                record,
+                resolved_command_name=resolved_name,
+            )
+
+
+def test_host_rejects_unselected_plugin_natural_name_when_cli_binding_uses_fallback() -> None:
+    """Host 必须使用 CLI 的 exact binding，不能把未选中的自然名当作已解析命令。"""
+    from harness_agent.host.agent_host import _validate_command_invocation
+    from harness_agent.host.run_coordinator import RequestedSkill, StartRun
+
+    command_id = "plugin/local/bad/command/help"
+    record = SimpleNamespace(
+        skill_id=command_id,
+        kind="command",
+        name="help",
+        source="plugin:local/bad",
+        dialect="qwen-command",
+    )
+    rejected_raw = "/help dangerous-goal"
+    rejected = StartRun(
+        thread_id="exact-command-binding-thread",
+        run_id="exact-command-binding-rejected",
+        message=rejected_raw,
+        mode="build",
+        requested_skill=RequestedSkill(
+            command_id,
+            "dangerous-goal",
+            rejected_raw,
+            "help",
+        ),
+    )
+
+    with pytest.raises(PluginSkillError, match="COMMAND_INVOCATION_IDENTITY_MISMATCH"):
+        _validate_command_invocation(
+            rejected,
+            rejected.requested_skill,
+            record,
+            resolved_command_name="bad.help",
+        )
+
+    accepted_raw = "/bad.help dangerous-goal"
+    accepted = replace(
+        rejected,
+        run_id="exact-command-binding-accepted",
+        message=accepted_raw,
+        requested_skill=RequestedSkill(
+            command_id,
+            "dangerous-goal",
+            accepted_raw,
+            "bad.help",
+        ),
+    )
+    _validate_command_invocation(
+        accepted,
+        accepted.requested_skill,
+        record,
+        resolved_command_name="bad.help",
+    )
+
+
+@pytest.mark.asyncio
+async def test_host_uses_immutable_cli_fallback_binding_for_plugin_help() -> None:
+    """同一 snapshot 的 /bad.help 可运行，未被 CLI 选中的 /help 必须拒绝。"""
+    from harness_agent.host.agent_host import AgentHost, _validate_command_invocation
+    from harness_agent.host.run_coordinator import RequestedSkill, StartRun
+
+    command_id = "plugin/local/bad/command/help"
+
+    class SnapshotRegistry:
+        snapshot_id = "snapshot-command-binding"
+
+        @staticmethod
+        def agent_commands() -> list[dict[str, object]]:
+            return [
+                {
+                    "id": command_id,
+                    "name": "help",
+                    "description": "bad",
+                    "argument_hint": None,
+                    "requested_skill_id": command_id,
+                    "plugin_id": "local/bad",
+                }
+            ]
+
+    server = AgentHost(allow_echo=True)
+    server._skill_registry = SnapshotRegistry()  # type: ignore[assignment]
+    record = SimpleNamespace(
+        skill_id=command_id,
+        kind="command",
+        name="help",
+        source="plugin:local/bad",
+        dialect="qwen-command",
+    )
+    try:
+        result = await server._handle_commands_bind(
+            {
+                "snapshot_id": "snapshot-command-binding",
+                "bindings": [{"id": command_id, "name": "bad.help"}],
+            },
+            "bind-help",
+        )
+        assert result == {
+            "snapshot_id": "snapshot-command-binding",
+            "accepted": True,
+        }
+        exact_name = server._owner_connection.command_bindings[command_id]
+
+        accepted_raw = "/bad.help dangerous-goal"
+        accepted = StartRun(
+            thread_id="binding-help-thread",
+            run_id="binding-help-run",
+            message=accepted_raw,
+            mode="build",
+            requested_skill=RequestedSkill(
+                command_id,
+                "dangerous-goal",
+                accepted_raw,
+                "bad.help",
+            ),
+        )
+        _validate_command_invocation(
+            accepted,
+            accepted.requested_skill,
+            record,
+            resolved_command_name=exact_name,
+        )
+
+        rejected_raw = "/help dangerous-goal"
+        rejected = replace(
+            accepted,
+            run_id="binding-help-rejected",
+            message=rejected_raw,
+            requested_skill=RequestedSkill(
+                command_id,
+                "dangerous-goal",
+                rejected_raw,
+                "help",
+            ),
+        )
+        with pytest.raises(PluginSkillError, match="COMMAND_INVOCATION_IDENTITY_MISMATCH"):
+            _validate_command_invocation(
+                rejected,
+                rejected.requested_skill,
+                record,
+                resolved_command_name=exact_name,
+            )
+    finally:
+        await server.close()
+
+
+def test_qwen_bad_markdown_entries_are_isolated_and_remain_non_runnable_preview(
+    tmp_path: Path,
+) -> None:
+    """坏 UTF-8、unsupported expansion 和坏 front matter 不扩大有效条目。"""
+    source = _copy_fixture(tmp_path)
+    (source / "commands" / "bad-encoding.md").write_bytes(b"\xff\xfe")
+    (source / "commands" / "bad-expansion.md").write_text(
+        "---\ndescription: bad\n---\n\nRun !{rm -rf /} and @{secret}.\n",
+        encoding="utf-8",
+    )
+    bad_skill = source / "skills" / "bad-skill"
+    bad_skill.mkdir(parents=True)
+    (bad_skill / "SKILL.md").write_text(
+        "---\nname: bad-skill\ndescription: bad\n---\n\n!{shell}\n",
+        encoding="utf-8",
+    )
+
+    manager = PluginManager(home=tmp_path / "home")
+    summary = manager.validate(source)["plugin"]
+    assert isinstance(summary, dict)
+    components = _components(summary)
+    assert components["commands"]["status"] == "adapted"
+    assert components["commands"]["effective"] is True
+    assert components["commands"]["count"] == 3
+    assert components["skills"]["status"] == "adapted"
+    assert components["skills"]["effective"] is True
+    assert components["skills"]["count"] == 1
+    assert any("bad-encoding.md" in item for item in components["commands"]["diagnostics"])
+    assert any("bad-expansion.md" in item for item in components["commands"]["diagnostics"])
+    assert any("bad-skill/SKILL.md" in item for item in components["skills"]["diagnostics"])
+
+    installed = manager.install(source)["plugin"]
+    assert isinstance(installed, dict)
+    manager.set_enabled(
+        str(installed["id"]),
+        enabled=True,
+        capability_fingerprint=str(installed["capability_fingerprint"]),
+    )
+    result = manager.skill_sources(manager.catalog())
+    registry = PluginSkillRegistry(
+        tmp_path / "workspace",
+        home=tmp_path / "home",
+        plugin_sources=result.sources,
+        plugin_diagnostics=result.diagnostics,
+    )
+    assert {record.name for record in registry.records if record.kind == "command"} == {
+        "za38-index",
+        "za38-init",
+        "za38-sdd",
+    }
+    preview = manager.static_preview()
+    assert {item["name"] for item in preview["commands"]} == {
+        "bad-encoding",
+        "bad-expansion",
+    }
+    assert all(item["runnable"] is False for item in preview["commands"])
+    assert [item["name"] for item in preview["skills"]] == ["bad-skill"]
+    assert preview["skills"][0]["runnable"] is False
+
+
+def test_qwen_markdown_path_symlink_and_size_boundaries_fail_closed_per_entry(
+    tmp_path: Path,
+) -> None:
+    """路径越界、symlink 和超大 Markdown 不升级有效 component。"""
+    source = _copy_fixture(tmp_path)
+    (source / "commands" / "oversized.md").write_text(
+        "---\nname: oversized\ndescription: too large\n---\n\n"
+        + ("x" * (64 * 1024)),
+        encoding="utf-8",
+    )
+    try:
+        (source / "commands" / "linked.md").symlink_to(
+            source / "commands" / "za38-sdd.md"
+        )
+    except OSError:
+        pytest.skip("当前测试宿主不允许创建 symlink")
+    manager = PluginManager(home=tmp_path / "symlink-home")
+    with pytest.raises(PluginError) as symlink_error:
+        manager.validate(source)
+    assert symlink_error.value.code == "PLUGIN_SYMLINK_REJECTED"
+    (source / "commands" / "linked.md").unlink()
+    manifest = _manifest(source)
+    manifest["commands"] = ["commands", "../outside"]
+    _write_manifest(source, "devagent-extension.json", manifest)
+
+    manager = PluginManager(home=tmp_path / "home")
+    summary = manager.validate(source)["plugin"]
+    assert isinstance(summary, dict)
+    commands = _components(summary)["commands"]
+    assert commands["status"] == "adapted"
+    assert commands["effective"] is True
+    assert commands["count"] == 3
+    diagnostics = "\n".join(commands["diagnostics"])
+    assert "QWEN_MARKDOWN_TOO_LARGE" in diagnostics
+    assert "PLUGIN_COMPONENT_PATH_INVALID" in diagnostics
+
+    installed = manager.install(source)["plugin"]
+    assert isinstance(installed, dict)
+    manager.set_enabled(
+        str(installed["id"]),
+        enabled=True,
+        capability_fingerprint=str(installed["capability_fingerprint"]),
+    )
+    result = manager.skill_sources(manager.catalog())
+    registry = PluginSkillRegistry(
+        tmp_path / "workspace",
+        home=tmp_path / "home",
+        plugin_sources=result.sources,
+    )
+    assert {record.name for record in registry.records if record.kind == "command"} == {
+        "za38-index",
+        "za38-init",
+        "za38-sdd",
+    }
+
+
+def test_qwen_command_expands_args_once_from_immutable_skill_snapshot(
+    tmp_path: Path,
+) -> None:
+    """Command 正文只做一次纯文本 {{args}} 替换，参数过大 fail closed。"""
+    source = _copy_fixture(tmp_path)
+    (source / "commands" / "za38-sdd.md").write_text(
+        "---\ndescription: SDD\nargument-hint: <goal>\n---\n\nCreate: {{args}}\n",
+        encoding="utf-8",
+    )
+    manager = PluginManager(home=tmp_path / "home")
+    installed = manager.install(source)["plugin"]
+    assert isinstance(installed, dict)
+    manager.set_enabled(
+        str(installed["id"]),
+        enabled=True,
+        capability_fingerprint=str(installed["capability_fingerprint"]),
+    )
+    result = manager.skill_sources(manager.catalog())
+    registry = PluginSkillRegistry(
+        tmp_path / "workspace",
+        home=tmp_path / "home",
+        plugin_sources=result.sources,
+    )
+    command = registry.resolve("za38-sdd")
+    loaded = registry.load(command.skill_id, "创建登录功能")
+    assert loaded.rendered_body() == "Create: 创建登录功能"
+
+    # 模拟运行期间重新安装：旧 Registry 仍只读本次 Run 已捕获的正文，
+    # 下一次 Registry 才能看到新的 package digest 和正文。
+    (source / "commands" / "za38-sdd.md").write_text(
+        "---\ndescription: replaced\nargument-hint: <goal>\n---\n\nReplaced: {{args}}\n",
+        encoding="utf-8",
+    )
+    replacement = manager.install(source)["plugin"]
+    assert isinstance(replacement, dict)
+    assert replacement["package_digest"] != installed["package_digest"]
+    assert registry.load(command.skill_id, "创建登录功能").rendered_body() == (
+        "Create: 创建登录功能"
+    )
+    with pytest.raises(PluginSkillError, match="COMMAND_ARGUMENT_TOO_LARGE"):
+        registry.load(command.skill_id, "x" * 100_000)
+
+
+@pytest.mark.parametrize("manifest_name", ("qwen-extension.json", "devagent-extension.json"))
+def test_qwen_default_commands_and_skills_are_effective_for_both_manifest_dialects(
+    tmp_path: Path,
+    manifest_name: str,
+) -> None:
+    """两种 Qwen family 清单省略目录字段时都扫描实际根目录并接入 runtime。"""
+    source = _copy_fixture(tmp_path)
+    if manifest_name == "qwen-extension.json":
+        (source / "qwen-extension.json").write_text(
+            (source / "devagent-extension.json").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        (source / "devagent-extension.json").unlink()
+    value = json.loads((source / manifest_name).read_text(encoding="utf-8"))
+    value.pop("commands", None)
+    value.pop("skills", None)
+    (source / manifest_name).write_text(json.dumps(value), encoding="utf-8")
+
+    summary = PluginManager(home=tmp_path / "home").validate(source)["plugin"]
+    assert isinstance(summary, dict)
+    components = _components(summary)
+    assert components["commands"]["status"] == "adapted"
+    assert components["commands"]["count"] == 3
+    assert components["skills"]["status"] == "adapted"
+    assert components["skills"]["count"] == 1
 
 
 async def test_qwen_static_preview_is_exposed_by_host_component_lists(
@@ -885,12 +2062,20 @@ async def test_enabled_qwen_host_lists_effective_agents_and_keeps_other_previews
     agents = await server._handle_agents_list({}, "agents")
     mcp = await server._handle_mcp_status({}, "mcp")
 
-    assert len(initialized["static_command_preview"]) == 3
-    assert len(skills["static_preview"]) == 1
-    assert len(agents["agents"]) == 3
+    assert len(initialized["static_command_preview"]) == 0
+    assert len(skills["static_preview"]) == 0
+    assert {
+        agent["id"]
+        for agent in agents["agents"]
+        if agent["id"].startswith("za38-")
+    } == {
+        "za38-backend-executor",
+        "za38-frontend-executor",
+        "za38-java-executor",
+    }
     assert agents["static_preview"] == []
     assert mcp["servers"] == []
-    assert len(mcp["static_preview"]) == 1
+    assert len(mcp["static_preview"]) == 0
     assert all(
         item["disabled"] is True
         and item["static"] is True
@@ -1059,7 +2244,10 @@ def test_qwen_manifest_uses_default_component_directories(tmp_path: Path) -> Non
     (source / "commands").mkdir(parents=True)
     (source / "skills" / "default-skill").mkdir(parents=True)
     (source / "agents").mkdir()
-    (source / "commands" / "default.md").write_text("# default\n", encoding="utf-8")
+    (source / "commands" / "default.md").write_text(
+        "---\nname: default\ndescription: Default command.\n---\n\n# default\n",
+        encoding="utf-8",
+    )
     (source / "skills" / "default-skill" / "SKILL.md").write_text(
         "---\nname: default-skill\ndescription: Default skill.\n---\n\nBody.\n",
         encoding="utf-8",
@@ -1102,6 +2290,57 @@ def test_qwen_manifest_uses_default_component_directories(tmp_path: Path) -> Non
     with pytest.raises(PluginError) as ambiguous:
         PluginManager(home=tmp_path / "third-home").validate(skills_only)
     assert ambiguous.value.code == "PLUGIN_FORMAT_AMBIGUOUS"
+
+
+@pytest.mark.parametrize("manifest_name", ("qwen-extension.json", "devagent-extension.json"))
+def test_qwen_default_component_report_missing_has_stable_diagnostics(
+    tmp_path: Path,
+    manifest_name: str,
+) -> None:
+    """两个 Qwen manifest 名称都必须识别默认根目录的缺报告声明。"""
+    source = _copy_fixture(tmp_path)
+    if manifest_name == "qwen-extension.json":
+        (source / "devagent-extension.json").rename(source / manifest_name)
+    manifest_path = source / manifest_name
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("commands", None)
+    manifest.pop("skills", None)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    manager = PluginManager(home=tmp_path / "home")
+    installed = manager.install(source, format="qwen-code")["plugin"]
+    assert isinstance(installed, dict)
+    plugin_id = str(installed["id"])
+    plugin = manager.store.read_registry().plugins[0]
+    reports = tuple(
+        component
+        for component in plugin.components
+        if component.kind not in {"commands", "skills"}
+    )
+    fingerprint = capability_fingerprint(reports)
+    manager.store.mutate_registry(
+        lambda current: tuple(
+            replace(
+                item,
+                components=reports,
+                capability_fingerprint=fingerprint,
+                trusted_capability_fingerprint=fingerprint,
+                enabled=True,
+            )
+            if item.plugin_id == plugin_id
+            else item
+            for item in current.plugins
+        )
+    )
+
+    result = manager.skill_sources(manager.catalog())
+
+    assert result.sources == ()
+    for kind in ("commands", "skills"):
+        assert any(
+            f"kind={kind}; reason=COMPONENT_REPORT_MISSING" in diagnostic
+            for diagnostic in result.diagnostics
+        ), result.diagnostics
 
 
 def test_qwen_install_persists_record_and_requires_explicit_runtime_enable(
@@ -1280,7 +2519,7 @@ def test_qwen_direct_skill_file_uses_frontmatter_validation(tmp_path: Path) -> N
     assert any("front matter" in item for item in component["diagnostics"])
 
 
-def test_qwen_nonempty_settings_and_out_of_scope_fields_are_unsupported(
+def test_qwen_invalid_settings_and_out_of_scope_fields_are_reported(
     tmp_path: Path,
 ) -> None:
     """settings、channels、themes、workflows 等字段必须显式进入报告。"""
@@ -1300,7 +2539,9 @@ def test_qwen_nonempty_settings_and_out_of_scope_fields_are_unsupported(
     summary = PluginManager(home=tmp_path / "home").validate(source)["plugin"]
     assert isinstance(summary, dict)
     components = _components(summary)
-    assert components["settings"]["status"] == "unsupported"
+    assert components["settings"]["status"] == "invalid"
+    assert components["settings"]["effective"] is False
+    assert any("SETTINGS_DECLARATION_INVALID" in item for item in components["settings"]["diagnostics"])
     for field in ("channels", "themes", "workflows", "unsupported"):
         assert components[field]["status"] == "unsupported"
     assert any("futureField" in item for item in summary["diagnostics"])
@@ -1366,10 +2607,10 @@ def test_qwen_agents_enter_canonical_catalog_after_trust_and_enable(
 
     preview = manager.static_preview()
     assert {kind: len(items) for kind, items in preview.items()} == {
-        "commands": 3,
-        "skills": 1,
+        "commands": 0,
+        "skills": 0,
         "agents": 0,
-        "mcp": 1,
+        "mcp": 0,
     }
 
 
@@ -1507,30 +2748,37 @@ async def test_host_injects_qwen_context_once_and_gates_same_child_for_plugin_ag
     if runtime_failure:
         plugin_id = str(installed["id"])
 
-        def stale_hook_report(current: object) -> tuple[object, ...]:
+        def reauthorized_hook_report(current: object) -> tuple[object, ...]:
             assert hasattr(current, "plugins")
-            return tuple(
-                replace(
-                    plugin,
-                    components=tuple(
-                        replace(
-                            component,
-                            status="adapted",
-                            effective=True,
-                            capabilities=("process:hook",),
-                            diagnostics=("stale report",),
-                        )
-                        if plugin.plugin_id == plugin_id and component.kind == "hooks"
-                        else component
-                        for component in plugin.components
-                    ),
+            updated: list[object] = []
+            for plugin in current.plugins:  # type: ignore[attr-defined]
+                if plugin.plugin_id != plugin_id:
+                    updated.append(plugin)
+                    continue
+                components = tuple(
+                    replace(
+                        component,
+                        status="adapted",
+                        effective=True,
+                        capabilities=("process:hook",),
+                        diagnostics=("re-authorized report",),
+                    )
+                    if component.kind == "hooks"
+                    else component
+                    for component in plugin.components
                 )
-                if plugin.plugin_id == plugin_id
-                else plugin
-                for plugin in current.plugins  # type: ignore[attr-defined]
-            )
+                fingerprint = capability_fingerprint(components)
+                updated.append(
+                    replace(
+                        plugin,
+                        components=components,
+                        capability_fingerprint=fingerprint,
+                        trusted_capability_fingerprint=fingerprint,
+                    )
+                )
+            return tuple(updated)
 
-        server._plugin_manager.store.mutate_registry(stale_hook_report)  # type: ignore[arg-type]
+        server._plugin_manager.store.mutate_registry(reauthorized_hook_report)  # type: ignore[arg-type]
     registry = server._build_skill_registry()
     from harness_agent.plugins.runtime import HookResult
     from harness_agent.runtime.interactions import InteractionResult
@@ -1680,6 +2928,7 @@ async def test_host_injects_qwen_context_once_and_gates_same_child_for_plugin_ag
         effective_policy=main_policy,
         tools=(),
         skill_registry=registry,
+        mcp_snapshot=build_mcp_snapshot([], "missing"),
         execution=ExecutionSettings(),
         workspace=workspace,
         enable_memory=False,

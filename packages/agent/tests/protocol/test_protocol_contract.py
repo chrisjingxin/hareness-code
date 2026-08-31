@@ -43,6 +43,22 @@ def test_python_validates_manual_compaction_params() -> None:
         ContextCompactParams.model_validate({"thread_id": "", "unknown": True})
 
 
+def test_settings_schema_rejects_nul_before_host_dispatch() -> None:
+    """Protocol 与 Host 必须共享 NUL 拒绝边界。"""
+    params = {
+        "scope": "user",
+        "plugin_id": "plugin/local/settings",
+        "package_digest": "a" * 64,
+        "declaration_digest": "b" * 64,
+        "setting_key": "ZA38_TOKEN",
+        "env_var": "ZA38_TOKEN",
+        "value": "bad\x00value",
+        "expected_store_revision": 0,
+    }
+    with pytest.raises(ValidationError):
+        validate_operation_params("settings.set", params)
+
+
 def test_python_validates_thread_model_selection() -> None:
     parsed = RunStartParams.model_validate(
         {

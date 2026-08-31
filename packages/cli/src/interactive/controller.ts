@@ -62,7 +62,10 @@ export class InteractiveControllerImpl implements InteractiveController {
     const defaultRuntime: InteractiveRuntime = { workspace: "", cliVersion: "0.1.0", modelConfigured: false, executionMode: "local", approvalMode: "default", capabilities: builtinCommandCapabilities }
     const rawRuntime = options.baseRuntime ?? options.runtime ?? defaultRuntime
     this.baseRuntime = { ...defaultRuntime, ...rawRuntime, capabilities: rawRuntime.capabilities ?? builtinCommandCapabilities }
-    this.commandFeature = new CommandFeature(this.baseRuntime.agentCommands)
+    this.commandFeature = new CommandFeature(
+      this.baseRuntime.agentCommands,
+      this.baseRuntime.commandRegistry,
+    )
     this.clock = options.clock ?? systemClock
     this.scheduler = options.scheduler ?? systemScheduler
     this.idGenerator = options.idGenerator ?? cryptoIdGenerator
@@ -216,7 +219,11 @@ export class InteractiveControllerImpl implements InteractiveController {
 
     const resolution = this.commandFeature.resolveInputSlashCommand(rawValue)
     if (resolution.kind === "command") {
-      const result = dispatchSlashCommand(resolution.command, this.commandFeature.commandDispatchContext(this.featureContext, Boolean(this.interactionFeature.pendingInteraction)))
+      const result = dispatchSlashCommand(
+        resolution.command,
+        this.commandFeature.commandDispatchContext(this.featureContext, Boolean(this.interactionFeature.pendingInteraction)),
+        this.commandFeature.commandRegistry,
+      )
       return this.applyCommandResult(result)
     }
     if (resolution.kind === "unknown") {
@@ -296,6 +303,7 @@ export class InteractiveControllerImpl implements InteractiveController {
           mode: this.state.workMode,
           requestedModelProfileId: this.modelFeature.requestedModelProfileId,
           armedSkill: this.skillFeature.armedSkill,
+          requestedSkill: result.requestedSkill,
           onEvent: event => this.timelineFeature.processAgentEvent(event, this.featureContext),
           onRunFinish: (actualModel?: ModelProfile) => {
             if (actualModel) this.modelFeature.actualModelProfile = actualModel

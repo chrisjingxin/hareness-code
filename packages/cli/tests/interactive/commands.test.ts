@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 
 import {
   CommandRegistry,
+  builtinCommandDefinitions,
   commandMenuItemDescription,
   commandMenuItemLabel,
   commandRegistry,
@@ -307,10 +308,12 @@ test("Host Plugin Command 合并进同一 Registry，并提交 requested Skill �
     versionSummary: "version",
   }, registry)).toEqual({
     type: "submit-prompt",
-    prompt: "src/auth.ts  --strict",
+    prompt: "/plugin:local:review-tools:audit src/auth.ts  --strict",
     requestedSkill: {
       id: "plugin/local/review-tools/command/audit",
       args: "src/auth.ts  --strict",
+      raw_invocation: "/plugin:local:review-tools:audit src/auth.ts  --strict",
+      command_name: "plugin:local:review-tools:audit",
     },
   })
   const help = parseSlashCommand("/help", registry)
@@ -325,15 +328,140 @@ test("Host Plugin Command 合并进同一 Registry，并提交 requested Skill �
   })
 })
 
-test("动态 Plugin Command 不能覆盖 builtin 名称或别名", () => {
-  expect(() => createCommandRegistry([{
+test("Plugin Slash Command 保留精确 raw invocation，并单独规范化 args", () => {
+  const registry = createCommandRegistry([{
+    id: "plugin/local/ZA38/command/za38-sdd",
+    name: "za38-sdd",
+    description: "SDD",
+    argument_hint: "<goal>",
+    requested_skill_id: "plugin/local/ZA38/command/za38-sdd",
+    plugin_id: "local/ZA38",
+  }])
+  const rawInvocation = "/ZA38-SDD   创建登录功能  "
+  const command = resolveSlashCommand(rawInvocation, registry)
+  expect(command).toMatchObject({
+    kind: "command",
+    command: {
+      id: "plugin/local/ZA38/command/za38-sdd",
+      name: "za38-sdd",
+      rawInvocation,
+      argument: "创建登录功能  ",
+    },
+  })
+  if (command.kind !== "command") throw new Error("expected Plugin command")
+  expect(dispatchSlashCommand(command.command, {
+    commandContext: defaultCommandContext({ capabilities: ["skills.read"] }),
+    runtimeStatus: "status",
+    versionSummary: "version",
+  }, registry)).toEqual({
+    type: "submit-prompt",
+    prompt: rawInvocation,
+    requestedSkill: {
+      id: "plugin/local/ZA38/command/za38-sdd",
+      args: "创建登录功能",
+      raw_invocation: rawInvocation,
+      command_name: "za38-sdd",
+    },
+  })
+})
+
+test("Qwen 自然命令与内置冲突时稳定回退为 extension.command", () => {
+  const registry = createCommandRegistry([{
     id: "plugin/local/bad/command/help",
     name: "help",
     description: "bad",
     argument_hint: null,
     requested_skill_id: "plugin/local/bad/command/help",
     plugin_id: "local/bad",
-  }])).toThrow("Command 名称或别名冲突")
+  }])
+  expect(registry.get("plugin/local/bad/command/help")?.name).toBe("bad.help")
+  expect(parseSlashCommand("/bad.help", registry)).toMatchObject({
+    id: "plugin/local/bad/command/help",
+    name: "bad.help",
+  })
+  expect(parseSlashCommand("/help", registry)).toMatchObject({
+    id: "system.help",
+    name: "help",
+  })
+})
+
+test("未来 builtin/alias 变化由同一 CLI Registry 解析，Host 不复制当前 builtin 表", () => {
+  const plugin = {
+    id: "plugin/local/future/command/preview",
+    name: "preview",
+    description: "future collision",
+    argument_hint: null,
+    requested_skill_id: "plugin/local/future/command/preview",
+    plugin_id: "local/future",
+  }
+  const futureBuiltin = {
+    id: "future.preview",
+    name: "preview",
+    aliases: ["pre"],
+    description: "future builtin",
+    source: { type: "builtin" as const },
+    presentation: "viewer" as const,
+  }
+  const registry = createCommandRegistry(
+    [plugin],
+    [...builtinCommandDefinitions, futureBuiltin],
+  )
+  const command = parseSlashCommand("/future.preview   args  ", registry)
+  if (!command) throw new Error("expected future collision command")
+  expect(command).toMatchObject({
+    id: plugin.id,
+    name: "future.preview",
+  })
+  expect(dispatchSlashCommand(command, {
+    commandContext: defaultCommandContext({ capabilities: ["skills.read"] }),
+    runtimeStatus: "status",
+    versionSummary: "version",
+  }, registry)).toMatchObject({
+    type: "submit-prompt",
+    requestedSkill: {
+      id: plugin.id,
+      command_name: "future.preview",
+      args: "args",
+    },
+  })
+})
+
+test("Qwen 三个自然命令、嵌套命令和冲突回退不依赖加载顺序", () => {
+  const commands = [
+    {
+      id: "plugin/local/ZA38.03_CLI_EXTENSION/command/za38-sdd",
+      name: "za38-sdd",
+      description: "SDD",
+      argument_hint: "<goal>",
+      requested_skill_id: "plugin/local/ZA38.03_CLI_EXTENSION/command/za38-sdd",
+      plugin_id: "local/ZA38.03_CLI_EXTENSION",
+    },
+    {
+      id: "plugin/local/alpha/command/help",
+      name: "help",
+      description: "alpha help",
+      argument_hint: null,
+      requested_skill_id: "plugin/local/alpha/command/help",
+      plugin_id: "local/alpha",
+    },
+    {
+      id: "plugin/local/tools/command/check",
+      name: "tools:check",
+      description: "nested",
+      argument_hint: null,
+      requested_skill_id: "plugin/local/tools/command/check",
+      plugin_id: "local/tools",
+    },
+  ] as const
+  const first = createCommandRegistry(commands)
+  const second = createCommandRegistry([...commands].reverse())
+  expect(first.definitions.map(item => [item.id, item.name])).toEqual(
+    second.definitions.map(item => [item.id, item.name]),
+  )
+  expect(findSlashCommands("/za38", defaultCommandContext({ capabilities: ["skills.read"] }), first)
+    .map(item => item.name)).toEqual(["za38-sdd"])
+  expect(parseSlashCommand("/tools:check", first)?.id).toBe("plugin/local/tools/command/check")
+  expect(first.get("plugin/local/alpha/command/help")?.name).toBe("alpha.help")
 })
 
 test("Compose 命令按 Work Mode 与 Work Item 状态决定可见性与禁用原因", () => {
@@ -414,4 +542,3 @@ test("/btw 命令分发：无参返回用法提示，有参返回 side-question 
     threadId: "thread-compose-1",
   })
 })
-

@@ -72,6 +72,24 @@
     },
     {
       "kind": "operation.params",
+      "name": "commands.bind",
+      "case": "valid",
+      "value": {
+        "snapshot_id": "x",
+        "bindings": []
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "commands.bind",
+      "case": "valid",
+      "value": {
+        "snapshot_id": "x",
+        "accepted": true
+      }
+    },
+    {
+      "kind": "operation.params",
       "name": "run.start",
       "case": "valid",
       "value": {
@@ -215,6 +233,138 @@
         "revision": "x",
         "changes": [],
         "applies_to": []
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "settings.list",
+      "case": "valid",
+      "value": {
+        "scope": "user"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "settings.list",
+      "case": "valid",
+      "value": {
+        "scope": "user",
+        "store_revision": 1,
+        "runtime_snapshot": {
+          "state": "loaded",
+          "revision": 1,
+          "generation": "x"
+        },
+        "settings": []
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "settings.set",
+      "case": "valid",
+      "value": {
+        "scope": "user",
+        "plugin_id": "x",
+        "package_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "declaration_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "setting_key": "x",
+        "env_var": "x",
+        "value": "x",
+        "expected_store_revision": 1
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "settings.set",
+      "case": "valid",
+      "value": {
+        "operation": "set",
+        "scope": "user",
+        "store_revision": 1,
+        "runtime_snapshot": {
+          "state": "loaded",
+          "revision": 1,
+          "generation": "x"
+        },
+        "summary": {
+          "setting_id": "x",
+          "plugin_id": "x",
+          "package_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "declaration_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "scope": "user",
+          "scope_binding_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "source": "qwen-extension",
+          "name": "x",
+          "description": "x",
+          "env_var": "x",
+          "sensitive": false,
+          "required": false,
+          "consumer_scope": "extension-wide",
+          "store_state": "configured",
+          "runtime_state": "loaded",
+          "pending_operation": {
+            "operation": "set",
+            "state": "pending",
+            "retryable": false
+          },
+          "diagnostic": "x"
+        },
+        "applies_to": "next_host",
+        "diagnostics": []
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "settings.remove",
+      "case": "valid",
+      "value": {
+        "scope": "user",
+        "plugin_id": "x",
+        "package_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "declaration_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "setting_key": "x",
+        "env_var": "x",
+        "expected_store_revision": 1
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "settings.remove",
+      "case": "valid",
+      "value": {
+        "operation": "set",
+        "scope": "user",
+        "store_revision": 1,
+        "runtime_snapshot": {
+          "state": "loaded",
+          "revision": 1,
+          "generation": "x"
+        },
+        "summary": {
+          "setting_id": "x",
+          "plugin_id": "x",
+          "package_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "declaration_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "scope": "user",
+          "scope_binding_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "source": "qwen-extension",
+          "name": "x",
+          "description": "x",
+          "env_var": "x",
+          "sensitive": false,
+          "required": false,
+          "consumer_scope": "extension-wide",
+          "store_state": "configured",
+          "runtime_state": "loaded",
+          "pending_operation": {
+            "operation": "set",
+            "state": "pending",
+            "retryable": false
+          },
+          "diagnostic": "x"
+        },
+        "applies_to": "next_host",
+        "diagnostics": []
       }
     },
     {
@@ -1376,6 +1526,195 @@
         "code": "COMPOSE_ABANDON_TAKES_NO_GOAL",
         "retryable": false
       }
+    },
+    {
+      "kind": "error",
+      "name": "PROTOCOL_MINOR_REQUIRED",
+      "case": "valid",
+      "value": {
+        "code": "PROTOCOL_MINOR_REQUIRED",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_PROTOCOL_MINOR_REQUIRED",
+      "case": "valid",
+      "value": {
+        "code": "SETTINGS_PROTOCOL_MINOR_REQUIRED",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_CAPABILITY_REQUIRED",
+      "case": "valid",
+      "value": {
+        "code": "SETTINGS_CAPABILITY_REQUIRED",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_SCOPE_INVALID",
+      "case": "valid",
+      "value": {
+        "code": "SETTINGS_SCOPE_INVALID",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_WORKSPACE_SCOPE_REQUIRED",
+      "case": "valid",
+      "value": {
+        "code": "SETTINGS_WORKSPACE_SCOPE_REQUIRED",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_INPUT_NONINTERACTIVE",
+      "case": "valid",
+      "value": {
+        "code": "SETTINGS_INPUT_NONINTERACTIVE",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_STORAGE_UNAVAILABLE",
+      "case": "valid",
+      "value": {
+        "code": "SETTINGS_STORAGE_UNAVAILABLE",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_BACKEND_UNAVAILABLE",
+      "case": "valid",
+      "value": {
+        "code": "SETTINGS_BACKEND_UNAVAILABLE",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_RECORD_NOT_FOUND",
+      "case": "valid",
+      "value": {
+        "code": "SETTINGS_RECORD_NOT_FOUND",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_RECORD_STALE",
+      "case": "valid",
+      "value": {
+        "code": "SETTINGS_RECORD_STALE",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_DECLARATION_STALE",
+      "case": "valid",
+      "value": {
+        "code": "SETTINGS_DECLARATION_STALE",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_DECLARATION_INVALID",
+      "case": "valid",
+      "value": {
+        "code": "SETTINGS_DECLARATION_INVALID",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_DECLARATION_AMBIGUOUS",
+      "case": "valid",
+      "value": {
+        "code": "SETTINGS_DECLARATION_AMBIGUOUS",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_ENV_FORBIDDEN",
+      "case": "valid",
+      "value": {
+        "code": "SETTINGS_ENV_FORBIDDEN",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_VALUE_INVALID",
+      "case": "valid",
+      "value": {
+        "code": "SETTINGS_VALUE_INVALID",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_VALUE_TOO_LARGE",
+      "case": "valid",
+      "value": {
+        "code": "SETTINGS_VALUE_TOO_LARGE",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_STORE_REVISION_CONFLICT",
+      "case": "valid",
+      "value": {
+        "code": "SETTINGS_STORE_REVISION_CONFLICT",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_OPERATION_IN_PROGRESS",
+      "case": "valid",
+      "value": {
+        "code": "SETTINGS_OPERATION_IN_PROGRESS",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_CLEANUP_PENDING",
+      "case": "valid",
+      "value": {
+        "code": "SETTINGS_CLEANUP_PENDING",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_UNINSTALL_PARTIAL",
+      "case": "valid",
+      "value": {
+        "code": "SETTINGS_UNINSTALL_PARTIAL",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_UNINSTALL_CONFLICT",
+      "case": "valid",
+      "value": {
+        "code": "SETTINGS_UNINSTALL_CONFLICT",
+        "retryable": true
+      }
     }
   ],
   "invalid": [
@@ -1522,6 +1861,54 @@
           "code": "x",
           "message": "x"
         }
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "commands.bind",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "commands.bind",
+      "case": "extra_field",
+      "value": {
+        "snapshot_id": "x",
+        "bindings": [],
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "commands.bind",
+      "case": "missing_field",
+      "value": {
+        "bindings": []
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "commands.bind",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "commands.bind",
+      "case": "extra_field",
+      "value": {
+        "snapshot_id": "x",
+        "accepted": true,
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "commands.bind",
+      "case": "missing_field",
+      "value": {
+        "accepted": true
       }
     },
     {
@@ -1862,6 +2249,305 @@
       "name": "config.commit",
       "case": "wrong_type",
       "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "settings.list",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "settings.list",
+      "case": "extra_field",
+      "value": {
+        "scope": "user",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "settings.list",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "settings.list",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "settings.list",
+      "case": "extra_field",
+      "value": {
+        "scope": "user",
+        "store_revision": 1,
+        "runtime_snapshot": {
+          "state": "loaded",
+          "revision": 1,
+          "generation": "x"
+        },
+        "settings": [],
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "settings.list",
+      "case": "missing_field",
+      "value": {
+        "store_revision": 1,
+        "runtime_snapshot": {
+          "state": "loaded",
+          "revision": 1,
+          "generation": "x"
+        },
+        "settings": []
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "settings.set",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "settings.set",
+      "case": "extra_field",
+      "value": {
+        "scope": "user",
+        "plugin_id": "x",
+        "package_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "declaration_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "setting_key": "x",
+        "env_var": "x",
+        "value": "x",
+        "expected_store_revision": 1,
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "settings.set",
+      "case": "missing_field",
+      "value": {
+        "plugin_id": "x",
+        "package_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "declaration_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "setting_key": "x",
+        "env_var": "x",
+        "value": "x",
+        "expected_store_revision": 1
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "settings.set",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "settings.set",
+      "case": "extra_field",
+      "value": {
+        "operation": "set",
+        "scope": "user",
+        "store_revision": 1,
+        "runtime_snapshot": {
+          "state": "loaded",
+          "revision": 1,
+          "generation": "x"
+        },
+        "summary": {
+          "setting_id": "x",
+          "plugin_id": "x",
+          "package_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "declaration_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "scope": "user",
+          "scope_binding_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "source": "qwen-extension",
+          "name": "x",
+          "description": "x",
+          "env_var": "x",
+          "sensitive": false,
+          "required": false,
+          "consumer_scope": "extension-wide",
+          "store_state": "configured",
+          "runtime_state": "loaded",
+          "pending_operation": {
+            "operation": "set",
+            "state": "pending",
+            "retryable": false
+          },
+          "diagnostic": "x"
+        },
+        "applies_to": "next_host",
+        "diagnostics": [],
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "settings.set",
+      "case": "missing_field",
+      "value": {
+        "scope": "user",
+        "store_revision": 1,
+        "runtime_snapshot": {
+          "state": "loaded",
+          "revision": 1,
+          "generation": "x"
+        },
+        "summary": {
+          "setting_id": "x",
+          "plugin_id": "x",
+          "package_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "declaration_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "scope": "user",
+          "scope_binding_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "source": "qwen-extension",
+          "name": "x",
+          "description": "x",
+          "env_var": "x",
+          "sensitive": false,
+          "required": false,
+          "consumer_scope": "extension-wide",
+          "store_state": "configured",
+          "runtime_state": "loaded",
+          "pending_operation": {
+            "operation": "set",
+            "state": "pending",
+            "retryable": false
+          },
+          "diagnostic": "x"
+        },
+        "applies_to": "next_host",
+        "diagnostics": []
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "settings.remove",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "settings.remove",
+      "case": "extra_field",
+      "value": {
+        "scope": "user",
+        "plugin_id": "x",
+        "package_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "declaration_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "setting_key": "x",
+        "env_var": "x",
+        "expected_store_revision": 1,
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "settings.remove",
+      "case": "missing_field",
+      "value": {
+        "plugin_id": "x",
+        "package_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "declaration_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "setting_key": "x",
+        "env_var": "x",
+        "expected_store_revision": 1
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "settings.remove",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "settings.remove",
+      "case": "extra_field",
+      "value": {
+        "operation": "set",
+        "scope": "user",
+        "store_revision": 1,
+        "runtime_snapshot": {
+          "state": "loaded",
+          "revision": 1,
+          "generation": "x"
+        },
+        "summary": {
+          "setting_id": "x",
+          "plugin_id": "x",
+          "package_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "declaration_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "scope": "user",
+          "scope_binding_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "source": "qwen-extension",
+          "name": "x",
+          "description": "x",
+          "env_var": "x",
+          "sensitive": false,
+          "required": false,
+          "consumer_scope": "extension-wide",
+          "store_state": "configured",
+          "runtime_state": "loaded",
+          "pending_operation": {
+            "operation": "set",
+            "state": "pending",
+            "retryable": false
+          },
+          "diagnostic": "x"
+        },
+        "applies_to": "next_host",
+        "diagnostics": [],
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "settings.remove",
+      "case": "missing_field",
+      "value": {
+        "scope": "user",
+        "store_revision": 1,
+        "runtime_snapshot": {
+          "state": "loaded",
+          "revision": 1,
+          "generation": "x"
+        },
+        "summary": {
+          "setting_id": "x",
+          "plugin_id": "x",
+          "package_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "declaration_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "scope": "user",
+          "scope_binding_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "source": "qwen-extension",
+          "name": "x",
+          "description": "x",
+          "env_var": "x",
+          "sensitive": false,
+          "required": false,
+          "consumer_scope": "extension-wide",
+          "store_state": "configured",
+          "runtime_state": "loaded",
+          "pending_operation": {
+            "operation": "set",
+            "state": "pending",
+            "retryable": false
+          },
+          "diagnostic": "x"
+        },
+        "applies_to": "next_host",
+        "diagnostics": []
+      }
     },
     {
       "kind": "operation.params",
@@ -4251,6 +4937,132 @@
     {
       "kind": "error",
       "name": "COMPOSE_ABANDON_TAKES_NO_GOAL",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "PROTOCOL_MINOR_REQUIRED",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_PROTOCOL_MINOR_REQUIRED",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_CAPABILITY_REQUIRED",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_SCOPE_INVALID",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_WORKSPACE_SCOPE_REQUIRED",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_INPUT_NONINTERACTIVE",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_STORAGE_UNAVAILABLE",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_BACKEND_UNAVAILABLE",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_RECORD_NOT_FOUND",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_RECORD_STALE",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_DECLARATION_STALE",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_DECLARATION_INVALID",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_DECLARATION_AMBIGUOUS",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_ENV_FORBIDDEN",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_VALUE_INVALID",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_VALUE_TOO_LARGE",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_STORE_REVISION_CONFLICT",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_OPERATION_IN_PROGRESS",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_CLEANUP_PENDING",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_UNINSTALL_PARTIAL",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "SETTINGS_UNINSTALL_CONFLICT",
       "case": "wrong_type",
       "value": null
     }

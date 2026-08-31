@@ -22,11 +22,21 @@ _FRONTMATTER_RE = re.compile(
     re.DOTALL,
 )
 
+# Qwen Markdown Command/Skill 使用同一份有界文本解析；Adapter 与
+# SkillRegistry 都经过这里，避免安装报告和 Run snapshot 各自解释 YAML。
+QWEN_MARKDOWN_MAX_BYTES = 64 * 1024
+QWEN_COMMAND_ARGUMENT_MAX_BYTES = 16 * 1024
+QWEN_COMMAND_NAME_RE = re.compile(r"^[a-z0-9]+(?:[-:][a-z0-9]+)*$")
+QWEN_UNSUPPORTED_EXPANSION_RE = re.compile(r"(?:!\{|@\{)")
+
 # Hook 的结构限制属于 Adapter 与 canonical runtime 的共同安全契约；放在
 # 共用纯校验 seam，避免安装报告与运行时各自维护一套容易漂移的边界。
 HOOK_MAX_MATCHER_LENGTH = 512
 HOOK_MAX_COMMAND_LENGTH = 32_768
 HOOK_MAX_TIMEOUT_SECONDS = 600
+HOOK_DEFAULT_TIMEOUT_SECONDS = 60
+QWEN_HOOK_DEFAULT_TIMEOUT_MILLISECONDS = 60_000
+QWEN_HOOK_MAX_TIMEOUT_MILLISECONDS = HOOK_MAX_TIMEOUT_SECONDS * 1000
 HOOK_SUPPORTED_SHELLS = frozenset({"bash", "powershell"})
 
 
@@ -186,6 +196,127 @@ def validate_skill_manifest_file(
     return None
 
 
+def parse_qwen_markdown(
+    path: Path,
+    *,
+    name_hint: str | None = None,
+    kind: str,
+) -> dict[str, object]:
+    """解析 Qwen Markdown 的安全 front matter 与正文，不执行任何展开。"""
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("QWEN_MARKDOWN_PATH_INVALID")
+        raw = path.read_bytes()
+        if len(raw) > QWEN_MARKDOWN_MAX_BYTES:
+            raise ValueError("QWEN_MARKDOWN_TOO_LARGE")
+        content = raw.decode("utf-8")
+        match = _FRONTMATTER_RE.match(content)
+        if match is None:
+            raise ValueError("QWEN_MARKDOWN_FRONTMATTER_INVALID")
+        header = yaml.safe_load(match.group("header"))
+        if not isinstance(header, Mapping):
+            raise ValueError("QWEN_MARKDOWN_FRONTMATTER_INVALID")
+        allowed = {
+            "name",
+            "description",
+            "version",
+            "argument_hint",
+            "argument-hint",
+            "user_invocable",
+            "user-invocable",
+            "disable-model-invocation",
+            "allowed-tools",
+        }
+        unknown = set(header) - allowed
+        if unknown:
+            raise ValueError(
+                "QWEN_MARKDOWN_FRONTMATTER_FIELD_UNSUPPORTED:"
+                + ",".join(sorted(str(item) for item in unknown))
+            )
+        declared_name = header.get("name")
+        name = declared_name if declared_name is not None else name_hint
+        if not isinstance(name, str):
+            raise ValueError("QWEN_MARKDOWN_NAME_INVALID")
+        name_pattern = QWEN_COMMAND_NAME_RE if kind == "command" else PLUGIN_NAME_RE
+        if not name_pattern.fullmatch(name):
+            raise ValueError("QWEN_MARKDOWN_NAME_INVALID")
+        if name_hint is not None and name != name_hint:
+            # Qwen 的 front matter 通常只写文件名，而 Registry 对嵌套目录
+            # 使用完整 ``parent:child`` stable name；两者相同时才绑定到
+            # Adapter 传入的不可变来源。
+            if not (
+                kind == "command"
+                and declared_name == name_hint.rsplit(":", 1)[-1]
+            ):
+                raise ValueError("QWEN_MARKDOWN_NAME_MISMATCH")
+            name = name_hint
+        description = header.get("description")
+        if not isinstance(description, str) or not description.strip():
+            raise ValueError("QWEN_MARKDOWN_DESCRIPTION_INVALID")
+        version = header.get("version")
+        if version is not None and (not isinstance(version, str) or not version.strip()):
+            raise ValueError("QWEN_MARKDOWN_VERSION_INVALID")
+        if "argument_hint" in header and "argument-hint" in header:
+            if header["argument_hint"] != header["argument-hint"]:
+                raise ValueError("QWEN_MARKDOWN_ARGUMENT_HINT_CONFLICT")
+        argument_hint = header.get("argument_hint", header.get("argument-hint"))
+        if argument_hint is not None and not isinstance(argument_hint, str):
+            raise ValueError("QWEN_MARKDOWN_ARGUMENT_HINT_INVALID")
+        if argument_hint is not None and len(argument_hint.encode("utf-8")) > 512:
+            raise ValueError("QWEN_MARKDOWN_ARGUMENT_HINT_TOO_LARGE")
+        body = match.group("body").strip()
+        if not body:
+            raise ValueError("QWEN_MARKDOWN_BODY_EMPTY")
+        if QWEN_UNSUPPORTED_EXPANSION_RE.search(body):
+            raise ValueError("QWEN_MARKDOWN_EXPANSION_UNSUPPORTED")
+        disabled_model = header.get("disable-model-invocation", False)
+        if not isinstance(disabled_model, bool):
+            raise ValueError("QWEN_MARKDOWN_MODEL_INVOCATION_INVALID")
+        user_invocable = header.get("user_invocable", header.get("user-invocable", True))
+        if not isinstance(user_invocable, bool):
+            raise ValueError("QWEN_MARKDOWN_USER_INVOCATION_INVALID")
+        if kind == "command":
+            if user_invocable is not True:
+                raise ValueError("QWEN_COMMAND_USER_INVOCATION_REQUIRED")
+        allowed_tools = header.get("allowed-tools", ())
+        if isinstance(allowed_tools, str):
+            requested_tools = tuple(
+                item for item in re.split(r"[\s,]+", allowed_tools.strip()) if item
+            )
+        elif isinstance(allowed_tools, list) and all(
+            isinstance(item, str) and item.strip() for item in allowed_tools
+        ):
+            requested_tools = tuple(item.strip() for item in allowed_tools)
+        elif allowed_tools in (None, ()):
+            requested_tools = ()
+        else:
+            raise ValueError("QWEN_MARKDOWN_ALLOWED_TOOLS_INVALID")
+        if kind == "skill":
+            read_only_tools = frozenset({"read_file", "list_directory"})
+            unsupported_tools = sorted(set(requested_tools) - read_only_tools)
+            if unsupported_tools:
+                raise ValueError(
+                    "QWEN_SKILL_TOOLS_UNSUPPORTED:" + ",".join(unsupported_tools)
+                )
+        elif requested_tools:
+            raise ValueError("QWEN_COMMAND_TOOLS_UNSUPPORTED")
+        return {
+            "name": name,
+            "description": " ".join(description.split()),
+            "version": version.strip() if isinstance(version, str) else None,
+            "argument_hint": argument_hint,
+            "requested_tools": requested_tools,
+            "user_invocable": user_invocable,
+            "model_invocable": not disabled_model,
+            "body": body,
+            "header": dict(header),
+        }
+    except (OSError, UnicodeDecodeError, yaml.YAMLError, ValueError) as exc:
+        if isinstance(exc, ValueError) and str(exc).startswith("QWEN_"):
+            raise
+        raise ValueError("QWEN_MARKDOWN_INVALID") from exc
+
+
 def require_plugin_name(value: object, *, field: str = "name") -> str:
     """校验统一的 kebab-case Plugin 名称。"""
     if not isinstance(value, str) or not PLUGIN_NAME_RE.fullmatch(value):
@@ -232,6 +363,19 @@ def validate_hook_matcher(value: object) -> str | None:
     return None
 
 
+def normalize_hook_timeout_seconds(value: object, *, qwen: bool) -> float | None:
+    """把格式原生 timeout 转成 canonical 秒；Qwen 输入单位是毫秒。"""
+    maximum = QWEN_HOOK_MAX_TIMEOUT_MILLISECONDS if qwen else HOOK_MAX_TIMEOUT_SECONDS
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or value <= 0
+        or value > maximum
+    ):
+        return None
+    return float(value) / 1000 if qwen else float(value)
+
+
 def validate_command_hook_handler(
     value: object,
     *,
@@ -262,13 +406,13 @@ def validate_command_hook_handler(
     if qwen and "env" in value:
         return "PLUGIN_HOOK_ENV_UNSUPPORTED"
 
-    timeout = value.get("timeout", 60)
-    if (
-        not isinstance(timeout, (int, float))
-        or isinstance(timeout, bool)
-        or timeout <= 0
-        or timeout > HOOK_MAX_TIMEOUT_SECONDS
-    ):
+    timeout = value.get(
+        "timeout",
+        QWEN_HOOK_DEFAULT_TIMEOUT_MILLISECONDS
+        if qwen
+        else HOOK_DEFAULT_TIMEOUT_SECONDS,
+    )
+    if normalize_hook_timeout_seconds(timeout, qwen=qwen) is None:
         return "PLUGIN_HOOK_TIMEOUT_INVALID"
 
     asynchronous = value.get("async", False)

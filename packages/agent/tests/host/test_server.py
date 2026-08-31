@@ -11,6 +11,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
+import pytest
+
+
 def _request(method: str, params: dict[str, Any], request_id: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "method": method, "params": params, "id": request_id}
 
@@ -184,6 +187,132 @@ async def test_initialize_records_server_side_diagnostic_event(tmp_path: Path) -
     request = next(item for item in events if item[0] == "ipc.request.completed")
     assert request[1]["side"] == "server"
     assert request[1]["method"] == "initialize"
+
+
+async def test_v6_commands_bind_is_available_after_minor_negotiation(tmp_path: Path):
+    """协商到 v6 后，当前 snapshot 可以完成一次空 command binding。"""
+    from harness_agent.host.agent_host import AgentHost
+
+    server = AgentHost(allow_echo=True, config_home=tmp_path / "home")
+    frames: list[dict[str, Any]] = []
+
+    async def capture(message: dict[str, Any]) -> None:
+        frames.append(message)
+
+    server.send = capture
+    await server.dispatch(
+        _request(
+            "initialize",
+            _initialize_params(protocol={"major": 3, "min_minor": 0, "max_minor": 6}),
+            "init-v6",
+        )
+    )
+    initialized = next(frame["result"] for frame in frames if frame.get("id") == "init-v6")
+    assert initialized["protocol"] == {"major": 3, "minor": 6}
+
+    await server.dispatch(
+        _request(
+            "commands.bind",
+            {"snapshot_id": initialized["skills_snapshot"]["id"], "bindings": []},
+            "bind-v6",
+        )
+    )
+    binding = next(frame for frame in frames if frame.get("id") == "bind-v6")
+    assert binding["result"] == {
+        "snapshot_id": initialized["skills_snapshot"]["id"],
+        "accepted": True,
+    }
+
+
+async def test_v5_commands_bind_is_rejected_before_handler_dispatch(tmp_path: Path):
+    """旧 minor 连接不能把 v6-only commands.bind 交给业务 handler。"""
+    from harness_agent.host.agent_host import AgentHost
+    from harness_agent.protocol.generated import METHOD
+
+    server = AgentHost(allow_echo=True, config_home=tmp_path / "home")
+    frames: list[dict[str, Any]] = []
+    handler_called = False
+
+    async def capture(message: dict[str, Any]) -> None:
+        frames.append(message)
+
+    async def unexpected_handler(_params: dict[str, Any], _request_id: str) -> dict[str, object]:
+        nonlocal handler_called
+        handler_called = True
+        return {"snapshot_id": "unexpected", "accepted": True}
+
+    server.send = capture
+    await server.dispatch(
+        _request(
+            "initialize",
+            _initialize_params(protocol={"major": 3, "min_minor": 0, "max_minor": 5}),
+            "init-v5",
+        )
+    )
+    initialized = next(frame["result"] for frame in frames if frame.get("id") == "init-v5")
+    assert initialized["protocol"] == {"major": 3, "minor": 5}
+    server._handlers[METHOD["COMMANDS_BIND"]] = unexpected_handler
+
+    await server.dispatch(
+        _request(
+            "commands.bind",
+            {"snapshot_id": initialized["skills_snapshot"]["id"], "bindings": []},
+            "bind-v5",
+        )
+    )
+    error = next(frame for frame in frames if frame.get("id") == "bind-v5")
+    assert handler_called is False
+    assert error["error"]["message"] == "PROTOCOL_MINOR_REQUIRED"
+    assert error["error"]["data"] == {
+        "code": "PROTOCOL_MINOR_REQUIRED",
+        "retryable": False,
+        "details": {
+            "method": "commands.bind",
+            "required_minor": 6,
+            "negotiated_minor": 5,
+        },
+    }
+
+
+async def test_v5_negotiation_keeps_ordinary_run_available_without_plugin_commands(
+    tmp_path: Path,
+):
+    """旧 minor 只禁用 v6 binding，不影响没有 Plugin Command 的普通 run。"""
+    from harness_agent.host.agent_host import AgentHost
+
+    server = AgentHost(allow_echo=True, config_home=tmp_path / "home")
+    frames: list[dict[str, Any]] = []
+
+    async def capture(message: dict[str, Any]) -> None:
+        frames.append(message)
+
+    server.send = capture
+    await server.dispatch(
+        _request(
+            "initialize",
+            _initialize_params(protocol={"major": 3, "min_minor": 0, "max_minor": 5}),
+            "init-v5-ordinary",
+        )
+    )
+    await server.dispatch(
+        _request(
+            "run.start",
+            {
+                "mode": "build",
+                "message": "ordinary run",
+                "thread_id": "v5-ordinary-thread",
+                "run_id": "v5-ordinary-run",
+            },
+            "run-v5-ordinary",
+        )
+    )
+    accepted = next(frame for frame in frames if frame.get("id") == "run-v5-ordinary")
+    assert accepted["result"] == {
+        "thread_id": "v5-ordinary-thread",
+        "run_id": "v5-ordinary-run",
+        "accepted": True,
+    }
+    await server.close()
 
 
 async def test_agent_and_team_control_plane_uses_fixed_catalog(
@@ -2959,6 +3088,115 @@ async def test_plugin_rpc_validates_installs_trusts_and_removes_local_package(
     )
     assert frames[-1]["result"]["removed"] is True
     assert frames[-1]["result"]["data_retained"] is True
+
+
+@pytest.mark.parametrize("purge_data", [False, True], ids=["retain-plugin-data", "purge-plugin-data"])
+async def test_plugins_remove_always_uninstalls_settings_before_registry_remove(
+    tmp_path: Path,
+    purge_data: bool,
+) -> None:
+    """Settings 总在卸载时清理，Plugin data 是否删除由 purge_data 独立决定。"""
+    from harness_agent.config.settings import FakeCredentialBackend
+    from harness_agent.host.agent_host import AgentHost
+    from harness_agent.plugins.manager import PluginManager
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True)
+    source = workspace / "settings-plugin"
+    source.mkdir()
+    (source / "qwen-extension.json").write_text(
+        json.dumps(
+            {
+                "name": "settings-plugin",
+                "version": "1.0.0",
+                "settings": [
+                    {
+                        "name": "Offline token",
+                        "description": "fake only",
+                        "envVar": "DEMO_TOKEN",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    backend = FakeCredentialBackend()
+    manager = PluginManager(home=tmp_path / "home")
+    installed = manager.install(source)["plugin"]
+    manager.set_enabled(
+        installed["id"],
+        enabled=True,
+        capability_fingerprint=installed["capability_fingerprint"],
+    )
+    server = AgentHost(
+        allow_echo=True,
+        config_home=tmp_path / "home",
+        workspace=workspace,
+        settings_backend=backend,
+    )
+    frames = await _capture_server(server)
+    server._build_skill_registry()  # noqa: SLF001
+    server._refresh_settings_snapshot()  # noqa: SLF001
+    binding = server._settings_bindings[0]  # noqa: SLF001
+    server._settings_user_store.set(  # noqa: SLF001
+        scope="user",
+        plugin_id=binding.plugin_id,
+        package_digest=binding.package_digest,
+        declaration_digest=binding.declaration_digest,
+        setting_key=binding.setting_key,
+        env_var=binding.env_var,
+        value="reinstall-must-not-restore",
+        expected_store_revision=0,
+        name=binding.declaration.name,
+        description=binding.declaration.description,
+        sensitive=binding.declaration.sensitive,
+    )
+    assert backend.accounts
+
+    # Settings cleanup 必须按当前安装 record 处理，不能因插件随后被停用而
+    # 依赖 enabled+trusted runtime catalog 丢掉已有 credential。
+    manager.set_enabled(installed["id"], enabled=False)
+
+    await server.dispatch(
+        _request(
+            "plugins.remove",
+            {"id": installed["id"], "purge_data": purge_data},
+            "remove-settings",
+        )
+    )
+    result = frames[-1]["result"]
+    assert result["removed"] is True
+    assert result["settings_cleanup"]["operation"] == "uninstall"
+    assert result["data_retained"] is (not purge_data)
+    assert result["data_purged"] is purge_data
+    assert backend.accounts == ()
+    await server.close()
+
+    reinstalled = manager.install(source)["plugin"]
+    assert reinstalled["id"] == installed["id"]
+    manager.set_enabled(
+        reinstalled["id"],
+        enabled=True,
+        capability_fingerprint=reinstalled["capability_fingerprint"],
+    )
+    next_server = AgentHost(
+        allow_echo=True,
+        config_home=tmp_path / "home",
+        workspace=workspace,
+        settings_backend=backend,
+    )
+    await _capture_server(next_server)
+    next_server._build_skill_registry()  # noqa: SLF001
+    next_server._refresh_settings_snapshot()  # noqa: SLF001
+    assert backend.accounts == ()
+    assert next_server._settings_bindings  # noqa: SLF001
+    assert next_server._settings_snapshot._values == {}  # noqa: SLF001
+    user_index = next_server._settings_user_store._read_index(  # noqa: SLF001
+        "user", next_server._settings_user_store.user_binding_digest
+    )
+    assert user_index is not None
+    assert any(item.plugin_id == str(reinstalled["id"]) for item in user_index.tombstones)
+    await next_server.close()
 
 
 async def test_host_startup_uses_one_enabled_plugin_snapshot_for_skill_and_mcp(

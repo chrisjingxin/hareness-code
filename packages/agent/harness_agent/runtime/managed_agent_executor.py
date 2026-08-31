@@ -685,10 +685,15 @@ class _PooledAgentRuntime:
     run_context: object | None
     graph_config: Callable[[str], Mapping[str, object]]
     _release: Callable[[], Awaitable[None]]
+    _on_release: Callable[[], None] | None = None
 
     async def release(self) -> None:
         """按 run lease、engine lease、draining 检查顺序释放资源。"""
-        await self._release()
+        try:
+            await self._release()
+        finally:
+            if self._on_release is not None:
+                self._on_release()
 
 
 async def acquire_pooled_agent_runtime(
@@ -697,11 +702,14 @@ async def acquire_pooled_agent_runtime(
     profile: Any,
     run_context: object | None,
     graph_config: Callable[[str], Mapping[str, object]],
+    on_release: Callable[[], None] | None = None,
 ) -> ManagedAgentRuntime:
     """从 AgentEnginePool 获取一次运行时，并封装所有 lease 清理。
 
     Plugin/Compose adapter 只能把这个 function 作为 request 的 runtime provider
     交给 ``ManagedAgentExecutor`` 调用；只有本 module 读取 ``engine.graph``。
+    ``on_release`` 只负责通知调用方清理与本 execution 绑定的进程内反馈，不能
+    释放 sibling 或 root 的资源。
     """
     profile_key = getattr(profile, "profile_key", None)
     if not isinstance(profile_key, str) or not profile_key:
@@ -724,6 +732,7 @@ async def acquire_pooled_agent_runtime(
             run_context=run_context,
             graph_config=graph_config,
             _release=release,
+            _on_release=on_release,
         )
     except BaseException:
         try:

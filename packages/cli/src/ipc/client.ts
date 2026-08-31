@@ -22,6 +22,8 @@ import {
   type ConfigCommitResult,
   type ConfigDetailsResult,
   type ConfigPreviewResult,
+  type CommandBindingsParams,
+  type CommandBindingsResult,
   type HostAttachmentCreateResult,
   type HostAttachmentRevokeResult,
   type InteractionRequestEnvelope,
@@ -60,6 +62,12 @@ import {
   type TeamsListResult,
   type TeamsRunParams,
   type TeamsRunResult,
+  type SettingsListParams,
+  type SettingsListResult,
+  type SettingsSetParams,
+  type SettingsSetResult,
+  type SettingsRemoveParams,
+  type SettingsRemoveResult,
 } from "@za38/protocol"
 import { ensureDiagnosticLog, type DiagnosticLog } from "../diagnostic-log/runtime"
 import { AsyncQueue, type RpcTransport } from "./transport"
@@ -177,6 +185,11 @@ export class AgentClient {
     const result = await this.request(Method.INITIALIZE, params)
     this.initializedInfo = result
     return result
+  }
+
+  /** 登记 CLI 对当前 Host Skill snapshot 解析出的 immutable command binding。 */
+  async bindCommandRegistry(params: CommandBindingsParams): Promise<CommandBindingsResult> {
+    return this.request(Method.COMMANDS_BIND, params)
   }
 
   /** `handleInteractions` 是表现层使用的语义名称。 */
@@ -417,6 +430,31 @@ export class AgentClient {
   /** 删除 Plugin 安装记录；持久数据默认保留。 */
   removePlugin(id: string, purgeData = false): Promise<PluginsRemoveResult> {
     return this.request(Method.PLUGINS_REMOVE, { id, purge_data: purgeData })
+  }
+
+  /** 读取当前 user/workspace Settings 的脱敏摘要。 */
+  listSettings(scope: SettingsListParams["scope"]): Promise<SettingsListResult> {
+    this.ensureSettingsProtocolMinor()
+    return this.request(Method.SETTINGS_LIST, { scope })
+  }
+
+  /** 写入一个已由 Host 校验 identity 的 Settings value。 */
+  setSetting(params: SettingsSetParams): Promise<SettingsSetResult> {
+    this.ensureSettingsProtocolMinor()
+    return this.request(Method.SETTINGS_SET, params)
+  }
+
+  /** 删除一个已由 Host 校验 identity 的 Settings value。 */
+  removeSetting(params: SettingsRemoveParams): Promise<SettingsRemoveResult> {
+    this.ensureSettingsProtocolMinor()
+    return this.request(Method.SETTINGS_REMOVE, params)
+  }
+
+  /** 旧 Agent 不识别 v3.7 Settings RPC 时，在发送未知 method 前 fail closed。 */
+  private ensureSettingsProtocolMinor(): void {
+    if (this.initializedInfo && this.initializedInfo.protocol.minor < 7) {
+      throw new Error("SETTINGS_PROTOCOL_MINOR_REQUIRED")
+    }
   }
 
   /** 列出启动期固定的可派发 Agent 摘要（内置 + Plugin）。 */

@@ -11,6 +11,7 @@ import {
 
 import type { InteractiveAgentPort, InteractiveAgentRun, InteractiveRunCompletion } from "../../src/interactive/agent-port"
 import { createInteractiveController } from "../../src/interactive/controller"
+import type { CommandRegistry } from "../../src/interactive/commands"
 import type { InteractiveController, InteractiveScheduler, InteractiveSnapshot } from "../../src/interactive/types"
 import type { InteractiveRuntime } from "../../src/interactive/runtime"
 
@@ -422,12 +423,17 @@ export function makeHarness(options: {
   holdConfigDetails?: boolean
   scheduler?: InteractiveScheduler
   capabilities?: Capability[]
+  agentCommands?: InteractiveRuntime["agentCommands"]
+  commandRegistry?: CommandRegistry
   compactContextImpl?: InteractiveAgentPort["compactContext"]
 } = {}) {
   const portState = createPort({ compactContextImpl: options.compactContextImpl })
-  const runtimeOverride: InteractiveRuntime = options.capabilities
-    ? { ...runtime, capabilities: options.capabilities }
-    : runtime
+  const runtimeOverride: InteractiveRuntime = {
+    ...runtime,
+    ...(options.agentCommands ? { agentCommands: options.agentCommands } : {}),
+    ...(options.commandRegistry ? { commandRegistry: options.commandRegistry } : {}),
+    ...(options.capabilities ? { capabilities: options.capabilities } : {}),
+  }
   const controller = createInteractiveController({
     agent: portState.port,
     runtime: runtimeOverride,

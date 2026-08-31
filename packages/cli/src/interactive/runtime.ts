@@ -1,6 +1,7 @@
 /** Interactive Core 的脱敏运行环境：握手摘要、终端降级与 /status 语义。 */
 
 import type { AgentCommand, InitializeResult } from "@za38/protocol"
+import type { CommandRegistry } from "./commands"
 
 export const CLI_VERSION = "0.1.0"
 
@@ -43,6 +44,8 @@ export type InteractiveRuntime = {
   capabilities?: readonly string[]
   /** Host 启动快照中的 Plugin Command；只含展示信息和 requested Skill ID。 */
   agentCommands?: readonly AgentCommand[]
+  /** 启动握手后由 CLI 唯一构造、同时用于 bind 与 UI 的 Command Registry。 */
+  commandRegistry?: CommandRegistry
   mcpSummary?: string
   /** 是否在侧栏展示 Prefix Cache 命中率（由 config.toml [ui] 驱动）。 */
   showCacheHitRate?: boolean
@@ -52,7 +55,11 @@ export type InteractiveRuntime = {
 export function createInteractiveRuntime(
   result: InitializeResult,
   cwd: string,
-  options: { gitWorkspace?: GitWorkspaceState; cliVersion?: string } = {},
+  options: {
+    gitWorkspace?: GitWorkspaceState
+    cliVersion?: string
+    commandRegistry?: CommandRegistry
+  } = {},
 ): InteractiveRuntime {
   const config = isRecord(result.config_summary) ? result.config_summary : undefined
   const model = config && isRecord(config.model) ? config.model : undefined
@@ -72,6 +79,7 @@ export function createInteractiveRuntime(
     approvalModeWarning: optionalString(security?.approval_mode_warning),
     capabilities: [...new Set(result.capabilities.enabled)],
     agentCommands: [...result.agent_commands],
+    commandRegistry: options.commandRegistry,
     mcpSummary: mcpServers && mcpServers.length > 0 ? `${mcpServers.length} 个服务器` : undefined,
     showCacheHitRate: ui?.show_cache_hit_rate === true,
   }

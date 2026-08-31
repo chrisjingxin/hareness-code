@@ -69,6 +69,7 @@ export class RunFeature {
       mode: InteractionMode
       requestedModelProfileId: string | null
       armedSkill: SkillSummary | undefined
+      requestedSkill?: RequestedSkill
       onEvent: (event: any) => void
       onRunFinish: (actualModel?: ModelProfile) => void
       onAbandonInteraction: () => void
@@ -80,7 +81,9 @@ export class RunFeature {
 
     const currentThreadId = ctx.getState().currentThreadId
     let requestedSkill: RequestedSkill | undefined
-    if (options.armedSkill) {
+    if (options.requestedSkill) {
+      requestedSkill = options.requestedSkill
+    } else if (options.armedSkill) {
       requestedSkill = { id: options.armedSkill.id, args: value }
     }
 

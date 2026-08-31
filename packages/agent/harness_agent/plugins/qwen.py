@@ -8,16 +8,20 @@ from typing import Mapping
 
 import yaml
 
+from harness_agent.config.settings import (
+    SettingsError,
+    parse_qwen_setting,
+)
 from harness_agent.plugins.common import (
     validate_command_hook_handler,
     validate_hook_matcher,
     VERSION_RE,
     list_regular_files,
+    parse_qwen_markdown,
     read_json_object,
     relative_sources,
     safe_package_path,
     validate_skill_manifest_file,
-    validate_skill_manifests,
 )
 from harness_agent.plugins.model import (
     PluginComponentReport,
@@ -25,6 +29,8 @@ from harness_agent.plugins.model import (
     PluginError,
     capability_fingerprint,
 )
+from harness_agent.plugins.mcp_schema import validate_qwen_mcp_document
+from harness_agent.plugins.qwen_lsp import validate_qwen_lsp_document
 from harness_agent.runtime.agent_catalog import AgentCatalogError, validate_qwen_agent_file
 
 
@@ -39,6 +45,8 @@ _KNOWN_FIELDS = {
     "skills",
     "agents",
     "mcpServers",
+    "lspServers",
+    "monitors",
     "hooks",
     "settings",
     "channels",
@@ -85,16 +93,7 @@ def load_qwen_plugin(root: Path, *, package_digest: str) -> PluginDescriptor:
     description = _optional_qwen_string(manifest, "description")
 
     components: list[PluginComponentReport] = []
-    components.extend(
-        _path_component(
-            root,
-            manifest,
-            manifest_name,
-            "commands",
-            (".md",),
-            "prompt:command",
-        )
-    )
+    components.extend(_command_component(root, manifest, manifest_name))
     components.extend(_skill_component(root, manifest, manifest_name))
     components.extend(
         _path_component(
@@ -107,7 +106,9 @@ def load_qwen_plugin(root: Path, *, package_digest: str) -> PluginDescriptor:
         )
     )
     components.extend(_context_component(root, manifest, manifest_name))
-    components.extend(_mcp_component(manifest))
+    components.extend(_mcp_component(root, manifest))
+    components.extend(_lsp_component(root, manifest))
+    components.extend(_unsupported_runtime_components(manifest))
     components.extend(_hook_component(root, manifest))
     components.extend(_settings_component(manifest))
 
@@ -230,6 +231,62 @@ def _path_component(
     return [_static_component(root, field, unique_files, capability)]
 
 
+def _command_component(
+    root: Path,
+    manifest: Mapping[str, object],
+    manifest_name: str,
+) -> list[PluginComponentReport]:
+    """逐个校验 Qwen Command；坏 Markdown 只隔离当前条目。"""
+    paths = _component_paths(root, manifest, manifest_name, "commands")
+    if not paths:
+        return []
+    unique_files, path_errors = _qwen_component_files(root, paths, suffixes=(".md",))
+    valid: list[Path] = []
+    errors: list[str] = list(path_errors)
+    for path in unique_files:
+        relative = path.relative_to(root).as_posix()
+        try:
+            parse_qwen_markdown(
+                path,
+                name_hint=_qwen_command_name(root, path),
+                kind="command",
+            )
+        except ValueError as exc:
+            errors.append(f"PLUGIN_COMPONENT_INVALID: {relative}: {exc}")
+        else:
+            valid.append(path)
+    if valid:
+        report = _effective_component(
+            root,
+            "commands",
+            tuple(valid),
+            "prompt:command",
+            diagnostic="Qwen Markdown Command 已转换为 canonical SkillRegistry command",
+        )
+        if errors:
+            report = PluginComponentReport(
+                kind=report.kind,
+                status=report.status,
+                count=report.count,
+                sources=report.sources,
+                capabilities=report.capabilities,
+                diagnostics=tuple(errors),
+                effective=True,
+            )
+        return [report]
+    return [
+        PluginComponentReport(
+            kind="commands",
+            status="invalid",
+            count=0,
+            sources=(),
+            capabilities=("prompt:command",),
+            diagnostics=tuple(errors) or ("PLUGIN_COMPONENT_INVALID: commands 没有有效 Markdown",),
+            effective=False,
+        )
+    ]
+
+
 def _skill_component(
     root: Path,
     manifest: Mapping[str, object],
@@ -239,40 +296,68 @@ def _skill_component(
     paths = _component_paths(root, manifest, manifest_name, "skills")
     if not paths:
         return []
-    manifests: list[Path] = []
-    errors: list[str] = []
-    for relative in paths:
-        path = safe_package_path(root, relative, require_exists=True)
-        if path.is_file():
-            if path.name != "SKILL.md":
-                errors.append(f"{relative}: Skill 文件必须命名为 SKILL.md")
-            else:
-                error = validate_skill_manifest_file(
-                    root,
-                    path,
-                    require_name=False,
-                    expected_directory_name=(
-                        path.parent.name if path.parent != root else None
-                    ),
-                )
-                if error is None:
-                    manifests.append(path)
-                else:
-                    errors.append(f"{relative}: {error}")
+    manifests, errors = _qwen_skill_files(root, paths)
+    valid_manifests: list[Path] = []
+    for path in manifests:
+        relative = path.relative_to(root).as_posix()
+        error = validate_skill_manifest_file(
+            root,
+            path,
+            require_name=False,
+            expected_directory_name=(
+                path.parent.name if path.parent != root else None
+            ),
+        )
+        if error is not None:
+            errors.append(f"{relative}: {error}")
             continue
-        found, found_errors = validate_skill_manifests(root, path, require_name=False)
-        manifests.extend(found)
-        errors.extend(found_errors)
-    report = _static_component(root, "skills", tuple(sorted(set(manifests))), "prompt:skill")
+        try:
+            parse_qwen_markdown(
+                path,
+                name_hint=path.parent.name,
+                kind="skill",
+            )
+        except ValueError as exc:
+            errors.append(f"{relative}: {exc}")
+        else:
+            valid_manifests.append(path)
+    unique_manifests = tuple(sorted(set(valid_manifests)))
+    if unique_manifests:
+        report = _effective_component(
+            root,
+            "skills",
+            unique_manifests,
+            "prompt:skill",
+            diagnostic="Qwen Markdown Skill 已转换为 canonical SkillRegistry Skill",
+        )
+    else:
+        report = PluginComponentReport(
+            kind="skills",
+            status="invalid",
+            count=0,
+            sources=(),
+            capabilities=("prompt:skill",),
+            diagnostics=tuple(
+                f"PLUGIN_COMPONENT_INVALID: {error}"
+                for error in (errors or ["skills 没有有效 SKILL.md"])
+            ),
+            effective=False,
+        )
+        return [report]
     if errors:
         report = PluginComponentReport(
             kind=report.kind,
-            status="invalid",
+            status=report.status,
             count=report.count,
             sources=report.sources,
             capabilities=report.capabilities,
-            diagnostics=tuple(f"PLUGIN_COMPONENT_INVALID: {error}" for error in errors),
-            effective=False,
+            diagnostics=tuple(
+                [*report.diagnostics, *(
+                    f"PLUGIN_COMPONENT_INVALID: {error}"
+                    for error in errors
+                )]
+            ),
+            effective=True,
         )
     return [report]
 
@@ -369,67 +454,104 @@ def _qwen_default_context_paths(root: Path, manifest_name: str) -> tuple[str, ..
     return ()
 
 
-def _mcp_component(manifest: Mapping[str, object]) -> list[PluginComponentReport]:
-    """静态检查 Qwen mcpServers 条目，不读取路径、不构造运行配置。"""
+def _mcp_component(
+    root: Path,
+    manifest: Mapping[str, object],
+) -> list[PluginComponentReport]:
+    """校验 Qwen stdio MCP；只有 canonical adapter 可构造的条目才 effective。"""
     if "mcpServers" not in manifest:
         return []
     raw_servers = manifest["mcpServers"]
     if not isinstance(raw_servers, Mapping):
-        raise PluginError("PLUGIN_MANIFEST_FIELD_INVALID", "mcpServers 必须是 object", field="mcpServers")
-    valid = 0
-    transports: set[str] = set()
-    errors: list[str] = []
-    for server_name, raw_server in raw_servers.items():
-        if not isinstance(server_name, str) or not server_name.strip():
-            errors.append("MCP server name 必须是非空字符串")
-            continue
-        if not isinstance(raw_server, Mapping):
-            errors.append(f"MCP server {server_name} 必须是 object")
-            continue
-        server_transports: set[str] = set()
-        server_errors: list[str] = []
-        if "command" in raw_server:
-            if _nonempty_string(raw_server["command"]):
-                server_transports.add("stdio")
-            else:
-                server_errors.append(f"MCP server {server_name} command 必须是非空字符串")
-        for field in ("url", "httpUrl"):
-            if field in raw_server:
-                if _nonempty_string(raw_server[field]):
-                    server_transports.add("network")
-                else:
-                    server_errors.append(
-                        f"MCP server {server_name} {field} 必须是非空字符串"
-                    )
-        if "type" in raw_server and not _nonempty_string(raw_server["type"]):
-            server_errors.append(f"MCP server {server_name} type 必须是非空字符串")
-        if not server_transports:
-            server_errors.append(f"MCP server {server_name} 缺少有效静态传输字段")
-        if server_errors:
-            errors.extend(server_errors)
-            continue
-        valid += 1
-        transports.update(server_transports)
-    capabilities = tuple(
-        capability
-        for transport, capability in (
-            ("stdio", "process:mcp"),
-            ("network", "network:mcp"),
+        raise PluginError(
+            "PLUGIN_MANIFEST_FIELD_INVALID",
+            "mcpServers 必须是 object",
+            field="mcpServers",
         )
-        if transport in transports
-    )
-    status = "invalid" if errors else "unsupported"
-    diagnostics = tuple(f"PLUGIN_COMPONENT_INVALID: {error}" for error in errors)
-    if not diagnostics:
-        diagnostics = (_STATIC_DIAGNOSTIC,)
+    # 安装阶段以 staging 根校验 extensionPath 目标；workspacePath 直到 Host
+    # 运行快照才解析，但同一校验函数会在 adapter 侧再次执行。
+    validation = validate_qwen_mcp_document(manifest, root=root)
+    valid = len(validation.servers)
+    diagnostics = (*validation.invalid, *validation.unsupported)
+    if valid:
+        return [
+            PluginComponentReport(
+                kind="mcp",
+                status="adapted",
+                count=valid,
+                sources=("mcpServers",),
+                capabilities=("process:mcp",),
+                diagnostics=diagnostics
+                or ("Qwen stdio MCP 已转换为 canonical McpServerConfig",),
+                effective=True,
+            )
+        ]
+    status = "invalid" if validation.invalid else "unsupported"
     return [
         PluginComponentReport(
             kind="mcp",
             status=status,
-            count=valid,
+            count=0,
             sources=("mcpServers",),
-            capabilities=capabilities,
-            diagnostics=diagnostics,
+            capabilities=(),
+            diagnostics=diagnostics or (_STATIC_DIAGNOSTIC,),
+            effective=False,
+        )
+    ]
+
+
+def _unsupported_runtime_components(
+    manifest: Mapping[str, object],
+) -> list[PluginComponentReport]:
+    """显式报告当前仍没有 canonical consumer 的 Qwen Monitor。"""
+    reports: list[PluginComponentReport] = []
+    if "monitors" in manifest:
+        reports.append(
+            _unsupported_component(
+                "monitors",
+                "monitors",
+                diagnostics=("Qwen Monitor 当前不支持，不会执行",),
+            )
+        )
+    return reports
+
+
+def _lsp_component(
+    root: Path,
+    manifest: Mapping[str, object],
+) -> list[PluginComponentReport]:
+    """报告可由现有 PluginLspManager 构造的 Qwen stdio LSP 条目。"""
+    if "lspServers" not in manifest and not (root / ".lsp.json").is_file():
+        return []
+    source_name = "lspServers"
+    document = manifest
+    if "lspServers" not in document:
+        document = {**manifest, "lspServers": ".lsp.json"}
+        source_name = ".lsp.json"
+    validation = validate_qwen_lsp_document(document, root=root)
+    diagnostics = (*validation.invalid, *validation.unsupported)
+    if validation.servers:
+        return [
+            PluginComponentReport(
+                kind="lsp",
+                status="adapted",
+                count=len(validation.servers),
+                sources=(source_name,),
+                capabilities=("process:lsp",),
+                diagnostics=diagnostics
+                or ("Qwen stdio LSP 已转换为 canonical PluginLspManager",),
+                effective=True,
+            )
+        ]
+    status = "invalid" if validation.invalid else "unsupported"
+    return [
+        PluginComponentReport(
+            kind="lsp",
+            status=status,
+            count=0,
+            sources=(source_name,),
+            capabilities=(),
+            diagnostics=diagnostics or (_STATIC_DIAGNOSTIC,),
             effective=False,
         )
     ]
@@ -439,20 +561,27 @@ def _hook_component(
     root: Path,
     manifest: Mapping[str, object],
 ) -> list[PluginComponentReport]:
-    """校验并报告 Qwen SubagentStop；执行仍由 canonical HookRunner 持有。"""
+    """按事件逐项报告 Qwen Hook；执行仍由 canonical HookRunner 持有。"""
     if "hooks" not in manifest:
         return []
     raw_hooks = manifest["hooks"]
     if not isinstance(raw_hooks, Mapping):
         raise PluginError("PLUGIN_MANIFEST_FIELD_INVALID", "hooks 必须是 object", field="hooks")
-    count = 0
+    supported_count = 0
     errors: list[str] = []
+    unsupported: list[str] = []
+    supported_events = {
+        "PreToolUse",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "SubagentStop",
+    }
     for event, definitions in raw_hooks.items():
         if not isinstance(event, str) or not isinstance(definitions, list):
             errors.append(f"Hook event {event!r} 必须对应数组")
             continue
-        if event != "SubagentStop":
-            errors.append(f"Hook event {event} 当前阶段不支持")
+        if event not in supported_events:
+            unsupported.append(f"PLUGIN_COMPONENT_UNSUPPORTED: Hook event {event}")
             continue
         for definition in definitions:
             if not isinstance(definition, Mapping):
@@ -462,39 +591,55 @@ def _hook_component(
             matcher_error = validate_hook_matcher(matcher)
             if matcher_error is not None:
                 errors.append(f"Hook event {event} {matcher_error}")
+                continue
             nested = definition.get("hooks")
             if isinstance(nested, list):
                 if not nested:
                     errors.append(f"Hook event {event} hooks 不能为空")
                 for hook in nested:
-                    valid, error = _valid_hook_handler(hook)
+                    valid, error = _valid_hook_handler(hook, event=event)
                     if valid:
-                        count += 1
+                        supported_count += 1
                     else:
                         errors.append(f"Hook event {event} {error}")
             elif "hooks" in definition:
                 errors.append(f"Hook event {event} hooks 必须是数组")
             else:
-                valid, error = _valid_hook_handler(definition)
+                valid, error = _valid_hook_handler(definition, event=event)
                 if valid:
-                    count += 1
+                    supported_count += 1
                 else:
                     errors.append(f"Hook event {event} {error}")
+    diagnostics = tuple(
+        [f"PLUGIN_COMPONENT_INVALID: {error}" for error in errors]
+        + unsupported
+    )
+    if supported_count:
+        return [
+            PluginComponentReport(
+                kind="hooks",
+                status="adapted",
+                count=supported_count,
+                sources=("hooks",),
+                capabilities=("process:hook",),
+                diagnostics=diagnostics
+                or ("Qwen Tool Hook 与 SubagentStop 已接入 canonical HookRunner",),
+                effective=True,
+            )
+        ]
     if errors:
         return [
             PluginComponentReport(
                 kind="hooks",
                 status="invalid",
-                count=count,
+                count=0,
                 sources=("hooks",),
-                capabilities=("process:hook",) if count else (),
-                diagnostics=tuple(
-                    f"PLUGIN_COMPONENT_INVALID: {error}" for error in errors
-                ),
+                capabilities=(),
+                diagnostics=diagnostics,
                 effective=False,
             )
         ]
-    if count == 0:
+    if unsupported:
         return [
             PluginComponentReport(
                 kind="hooks",
@@ -502,33 +647,55 @@ def _hook_component(
                 count=0,
                 sources=("hooks",),
                 capabilities=(),
-                diagnostics=(_STATIC_DIAGNOSTIC,),
+                diagnostics=diagnostics or (_STATIC_DIAGNOSTIC,),
                 effective=False,
             )
         ]
-    return [
-        PluginComponentReport(
-            kind="hooks",
-            status="adapted",
-            count=count,
-            sources=("hooks",),
-            capabilities=("process:hook",),
-            diagnostics=("Qwen SubagentStop 已接入 canonical HookRunner 与 child gate",),
-            effective=True,
-        )
-    ]
+    return []
 
 
 def _settings_component(manifest: Mapping[str, object]) -> list[PluginComponentReport]:
-    """允许空 settings；非空配置进入明确 unsupported 报告。"""
+    """把 Qwen ExtensionSetting 逐项校验为可管理的 adapted 报告。"""
     if "settings" not in manifest:
         return []
     settings = manifest["settings"]
     if not isinstance(settings, list):
-        raise PluginError("PLUGIN_MANIFEST_FIELD_INVALID", "settings 必须是数组", field="settings")
+        return [
+            PluginComponentReport(
+                kind="settings",
+                status="invalid",
+                count=0,
+                sources=("settings",),
+                diagnostics=("SETTINGS_DECLARATION_INVALID: field=settings",),
+                effective=False,
+            )
+        ]
     if not settings:
         return []
-    return [_unsupported_component("settings", "settings", count=1)]
+    valid_env_vars: list[str] = []
+    diagnostics: list[str] = []
+    for index, item in enumerate(settings):
+        try:
+            declaration = parse_qwen_setting(item)
+        except SettingsError as exc:
+            # index 是 manifest 内稳定位置，不把原文或任何潜在值放入诊断。
+            diagnostics.append(f"{exc.code}: index={index}")
+            continue
+        valid_env_vars.append(declaration.env_var)
+    if len(valid_env_vars) != len(set(valid_env_vars)):
+        diagnostics.append("SETTINGS_DECLARATION_AMBIGUOUS: duplicate envVar")
+    effective = bool(valid_env_vars) and not diagnostics
+    return [
+        PluginComponentReport(
+            kind="settings",
+            status="adapted" if valid_env_vars else "invalid",
+            count=len(settings),
+            sources=tuple(valid_env_vars),
+            capabilities=(),
+            diagnostics=tuple(diagnostics),
+            effective=effective,
+        )
+    ]
 
 
 def _path_values(value: object, field: str) -> tuple[str, ...]:
@@ -553,11 +720,113 @@ def _component_paths(
     """解析显式路径；标准 Qwen 清单缺省时使用已有默认目录。"""
     if field in manifest:
         return _path_values(manifest[field], field)
-    if manifest_name == "qwen-extension.json":
+    if manifest_name == "qwen-extension.json" or (
+        manifest_name in QWEN_MANIFEST_NAMES and field in {"commands", "skills"}
+    ):
         default_path = root / field
         if default_path.exists() or default_path.is_symlink():
             return (field,)
     return ()
+
+
+def _qwen_command_name(root: Path, path: Path) -> str:
+    """把 commands 下的相对 Markdown 路径映射为稳定的 ``:`` 名称。"""
+    relative = path.relative_to(root).with_suffix("").as_posix()
+    parts = relative.split("/")
+    if "commands" in parts:
+        parts = parts[parts.index("commands") + 1 :]
+    return ":".join(part for part in parts if part)
+
+
+def _qwen_component_files(
+    root: Path,
+    paths: tuple[str, ...],
+    *,
+    suffixes: tuple[str, ...],
+) -> tuple[tuple[Path, ...], tuple[str, ...]]:
+    """递归发现普通文件；单个越界或 symlink 只隔离当前来源。"""
+    files: list[Path] = []
+    diagnostics: list[str] = []
+
+    def walk(path: Path, relative: str) -> None:
+        if path.is_symlink():
+            diagnostics.append(f"PLUGIN_SYMLINK_REJECTED: {relative}")
+            return
+        if path.is_file():
+            if not suffixes or path.suffix.lower() in suffixes:
+                files.append(path)
+            return
+        if not path.is_dir():
+            diagnostics.append(f"PLUGIN_COMPONENT_PATH_INVALID: {relative}")
+            return
+        try:
+            entries = sorted(path.iterdir(), key=lambda item: item.name)
+        except OSError:
+            diagnostics.append(f"PLUGIN_COMPONENT_READ_FAILED: {relative}")
+            return
+        for entry in entries:
+            walk(entry, entry.relative_to(root).as_posix())
+
+    for relative in paths:
+        try:
+            walk(safe_package_path(root, relative, require_exists=True), relative)
+        except PluginError as exc:
+            diagnostics.append(f"{relative}: {exc.code}")
+    return tuple(sorted(set(files))), tuple(diagnostics)
+
+
+def _qwen_skill_files(
+    root: Path,
+    paths: tuple[str, ...],
+) -> tuple[list[Path], list[str]]:
+    """发现 Qwen Skill.md，目录 symlink 不得跟随进入运行快照。"""
+    manifests: list[Path] = []
+    diagnostics: list[str] = []
+
+    def walk(path: Path, relative: str) -> None:
+        if path.is_symlink():
+            diagnostics.append(f"PLUGIN_SYMLINK_REJECTED: {relative}")
+            return
+        if path.is_file():
+            if path.name == "SKILL.md":
+                manifests.append(path)
+            else:
+                diagnostics.append(f"{relative}: Skill 文件必须命名为 SKILL.md")
+            return
+        if not path.is_dir():
+            diagnostics.append(f"PLUGIN_COMPONENT_PATH_INVALID: {relative}")
+            return
+        try:
+            entries = sorted(path.iterdir(), key=lambda item: item.name)
+        except OSError:
+            diagnostics.append(f"PLUGIN_COMPONENT_READ_FAILED: {relative}")
+            return
+        found_child = False
+        for entry in entries:
+            if entry.is_symlink():
+                diagnostics.append(
+                    f"PLUGIN_SYMLINK_REJECTED: {entry.relative_to(root).as_posix()}"
+                )
+                continue
+            if entry.is_dir():
+                manifest = entry / "SKILL.md"
+                if manifest.exists() or manifest.is_symlink():
+                    found_child = True
+                    walk(manifest, manifest.relative_to(root).as_posix())
+                else:
+                    walk(entry, entry.relative_to(root).as_posix())
+            elif entry.is_file() and entry.name == "SKILL.md":
+                found_child = True
+                manifests.append(entry)
+        if not found_child and path.name not in {"skills", "skill"}:
+            diagnostics.append(f"{relative}: Skill 目录缺少 SKILL.md")
+
+    for relative in paths:
+        try:
+            walk(safe_package_path(root, relative, require_exists=True), relative)
+        except PluginError as exc:
+            diagnostics.append(f"{relative}: {exc.code}")
+    return manifests, diagnostics
 
 
 def _nonempty_string(value: object) -> bool:
@@ -565,11 +834,11 @@ def _nonempty_string(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
-def _valid_hook_handler(value: object) -> tuple[bool, str]:
-    """校验不会执行的 Hook handler 最小形状，拒绝空对象假阳性。"""
+def _valid_hook_handler(value: object, *, event: str) -> tuple[bool, str]:
+    """校验 Hook handler 最小形状，保持事件级 async 语义一致。"""
     error = validate_command_hook_handler(
         value,
-        event="SubagentStop",
+        event=event,
         qwen=True,
     )
     return error is None, error or ""

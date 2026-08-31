@@ -96,6 +96,121 @@ test("parses Plugin validation, install, trust and removal commands", () => {
   })
 })
 
+test("parses Plugin Settings management without accepting a value in argv", () => {
+  expect(parseArgs(["plugins", "settings", "list", "--scope", "workspace"], "/work")).toEqual({
+    kind: "plugins.settings.list",
+    cwd: "/work",
+    configPath: undefined,
+    params: { scope: "workspace" },
+  })
+  expect(parseArgs([
+    "plugins",
+    "settings",
+    "set",
+    "plugin/local/za38",
+    "ZA38_TOKEN",
+    "--scope",
+    "user",
+    "--package-digest",
+    "a".repeat(64),
+    "--declaration-digest",
+    "b".repeat(64),
+    "--expected-store-revision",
+    "0",
+    "--secret-stdin",
+  ], "/work")).toEqual({
+    kind: "plugins.settings.set",
+    cwd: "/work",
+    configPath: undefined,
+    params: {
+      scope: "user",
+      plugin_id: "plugin/local/za38",
+      setting_key: "ZA38_TOKEN",
+      env_var: "ZA38_TOKEN",
+      package_digest: "a".repeat(64),
+      declaration_digest: "b".repeat(64),
+      expected_store_revision: 0,
+    },
+    secretStdin: true,
+  })
+  expect(() => parseArgs([
+    "plugins", "settings", "set", "plugin/local/za38", "ZA38_TOKEN", "fake-secret",
+    "--package-digest", "a".repeat(64), "--declaration-digest", "b".repeat(64),
+    "--expected-store-revision", "0", "--secret-stdin",
+  ], "/work")).toThrow("does not accept a value")
+})
+
+test("Plugin Settings 按动作严格拒绝未知 option、缺值和重复 identity", () => {
+  const digest = "a".repeat(64)
+  const declaration = "b".repeat(64)
+  const revision = ["--expected-store-revision", "0"]
+  const identity = ["plugin/local/za38", "ZA38_TOKEN"]
+  const required = [
+    "--package-digest", digest,
+    "--declaration-digest", declaration,
+    ...revision,
+  ]
+
+  expect(() => parseArgs([
+    "plugins", "settings", "set", ...identity,
+    "--totally-unknown", "plugin/x", "--also-unknown", "TOKEN",
+    ...required, "--secret-stdin",
+  ], "/work")).toThrow("does not support --totally-unknown")
+  expect(() => parseArgs([
+    "plugins", "settings", "list", "--totally-unknown",
+  ], "/work")).toThrow("does not support --totally-unknown")
+  expect(() => parseArgs([
+    "plugins", "settings", "remove", ...identity,
+    ...required, "--secret-stdin",
+  ], "/work")).toThrow("does not support --secret-stdin")
+  expect(() => parseArgs([
+    "plugins", "settings", "list", "--secret-stdin",
+  ], "/work")).toThrow("does not support --secret-stdin")
+  expect(() => parseArgs([
+    "plugins", "settings", "set", ...identity,
+    "--package-digest", digest,
+    "--package-digest", digest,
+    "--declaration-digest", declaration,
+    ...revision, "--secret-stdin",
+  ], "/work")).toThrow("may only be specified once")
+  expect(() => parseArgs([
+    "plugins", "settings", "set", ...identity,
+    "--package-digest", digest,
+    "--declaration-digest",
+    ...revision, "--secret-stdin",
+  ], "/work")).toThrow("--declaration-digest requires a value")
+  expect(() => parseArgs([
+    "plugins", "settings", "set", ...identity,
+    "--plugin-id", "other/plugin",
+    ...required, "--secret-stdin",
+  ], "/work")).toThrow("does not support --plugin-id")
+})
+
+test("Plugin Settings 拒绝同时选择 --workspace 与 --cwd", () => {
+  const digest = "a".repeat(64)
+  const declaration = "b".repeat(64)
+  const mutation = [
+    "plugin/local/za38",
+    "ZA38_TOKEN",
+    "--package-digest",
+    digest,
+    "--declaration-digest",
+    declaration,
+    "--expected-store-revision",
+    "0",
+  ]
+
+  for (const action of ["list", "set", "remove"] as const) {
+    const args = ["plugins", "settings", action, "--workspace", "/a", "--cwd", "/b"]
+    if (action === "list") {
+      expect(() => parseArgs(args, "/fallback")).toThrow("--workspace and --cwd are mutually exclusive")
+    } else {
+      expect(() => parseArgs([...args, ...mutation, ...(action === "set" ? ["--secret-stdin"] : [])], "/fallback"))
+        .toThrow("--workspace and --cwd are mutually exclusive")
+    }
+  }
+})
+
 test("requires a prompt for non-interactive mode", () => {
   expect(() => parseArgs(["--non-interactive"])).toThrow("requires a value")
 })

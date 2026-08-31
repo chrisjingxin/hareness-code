@@ -23,8 +23,16 @@ export class CommandFeature {
   /** Host 已校验的 Plugin Command 与内置命令合一的不可变 Registry。 */
   private readonly registry: CommandRegistry
 
-  constructor(agentCommands: readonly AgentCommand[] = []) {
-    this.registry = createCommandRegistry(agentCommands)
+  constructor(
+    agentCommands: readonly AgentCommand[] = [],
+    registry?: CommandRegistry,
+  ) {
+    this.registry = registry ?? createCommandRegistry(agentCommands)
+  }
+
+  /** 暴露当前握手绑定的不可变 Registry，供 Controller 的手输路径复用。 */
+  get commandRegistry(): CommandRegistry {
+    return this.registry
   }
 
   commandDispatchContext(ctx: FeatureContext, hasPendingInteraction: boolean): CommandDispatchContext {

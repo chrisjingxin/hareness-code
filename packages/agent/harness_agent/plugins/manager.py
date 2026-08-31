@@ -6,14 +6,22 @@ import time
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable, Mapping
 
+from harness_agent.config.settings import (
+    SettingBinding,
+    SettingsError,
+    parse_qwen_settings,
+)
 from harness_agent.plugins.adapters import RequestedPluginFormat, load_plugin_descriptor
+from harness_agent.plugins.common import read_json_object
 from harness_agent.plugins.mcp_adapter import PluginMcpLoadResult, load_plugin_mcp_servers
 from harness_agent.plugins.model import (
     ExtensionCatalogSnapshot,
     InstalledPlugin,
     PluginError,
     catalog_snapshot_id,
+    runtime_component_eligibility,
 )
 from harness_agent.plugins.resources import (
     PluginResourceSnapshot,
@@ -44,6 +52,51 @@ class PluginTeamLoadResult:
 
     teams: tuple["TeamDefinition", ...]
     diagnostics: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PluginSettingsLoadResult:
+    """从同一 enabled catalog 解析出的 Qwen Settings identity。"""
+
+    bindings: tuple[SettingBinding, ...]
+    diagnostics: tuple[str, ...]
+    blocked_plugin_ids: tuple[str, ...] = ()
+
+
+class _SettingsCleanupPartial(Exception):
+    """内部控制流：Settings cleanup partial 时不提交 registry mutation。"""
+
+    def __init__(self, result: dict[str, object]) -> None:
+        """保存已脱敏的 cleanup 摘要，交给 remove 返回稳定 partial 结果。"""
+        self.result = result
+
+
+def _qwen_command_name(relative: str) -> str:
+    """把 Qwen commands 相对来源转换为自然的嵌套命令名。"""
+    parts = relative.replace("\\", "/").split("/")
+    if "commands" in parts:
+        parts = parts[parts.index("commands") + 1 :]
+    if parts and parts[-1].lower().endswith(".md"):
+        parts[-1] = parts[-1][:-3]
+    return ":".join(part for part in parts if part)
+
+
+def _qwen_skill_resource_files(package_root: Path) -> tuple[tuple[Path, str], ...]:
+    """只列出 Qwen Skill 顶层 references Markdown，不递归开发素材目录。"""
+    references = package_root / "references"
+    if references.is_symlink() or not references.is_dir():
+        return ()
+    try:
+        entries = sorted(references.iterdir(), key=lambda path: path.name)
+    except OSError:
+        return ()
+    return tuple(
+        (path, f"references/{path.name}")
+        for path in entries
+        if not path.is_symlink()
+        and path.is_file()
+        and path.suffix.lower() == ".md"
+    )
 
 
 class PluginManager:
@@ -195,15 +248,34 @@ class PluginManager:
                 plugin.enabled
                 and plugin.trusted_capability_fingerprint == plugin.capability_fingerprint
             )
-            effective_kinds = (
-                {component.kind for component in plugin.components if component.effective}
-                if trusted_enabled
-                else set()
-            )
+            effective_sources: dict[str, set[str]] = {
+                "commands": set(),
+                "skills": set(),
+                "agents": set(),
+                "mcp": set(),
+            }
+            effective_mcp = False
+            if trusted_enabled:
+                for component in plugin.components:
+                    eligibility = runtime_component_eligibility(
+                        plugin,
+                        kind=component.kind,
+                    )
+                    if eligibility.eligible and component.kind in effective_sources:
+                        effective_sources[component.kind].update(component.sources)
+                        if component.kind == "mcp":
+                            effective_mcp = True
             for kind in preview:
-                if kind in effective_kinds:
-                    continue
-                preview[kind].extend(snapshot_preview[kind])
+                preview[kind].extend(
+                    item
+                    for item in snapshot_preview[kind]
+                    if str(item.get("source", "")) not in effective_sources[kind]
+                    and not (
+                        kind == "mcp"
+                        and effective_mcp
+                        and "diagnostic" not in item
+                    )
+                )
         for items in preview.values():
             items.sort(key=lambda item: str(item["id"]))
         return preview
@@ -270,19 +342,58 @@ class PluginManager:
             "catalog": self._catalog_from_state(state).to_dict(),
         }
 
-    def remove(self, plugin_id: str, *, purge_data: bool = False) -> dict[str, object]:
-        """移除 registry 记录；store 留作不可变孤儿，data 默认保留。"""
+    def remove(
+        self,
+        plugin_id: str,
+        *,
+        purge_data: bool = False,
+        settings_cleanup: Callable[[InstalledPlugin, int], dict[str, object]] | None = None,
+    ) -> dict[str, object]:
+        """按 registry revision 绑定卸载 Settings，再移除记录；默认保留 data。"""
         removed: InstalledPlugin | None = None
+        before = self.store.read_registry()
+        removed = _find_plugin(before, plugin_id)
+        settings_result: dict[str, object] | None = None
+        current_state: PluginRegistryState | None = None
+        data_purged = False
 
         def _remove(current: PluginRegistryState) -> tuple[InstalledPlugin, ...]:
-            nonlocal removed
-            removed = _find_plugin(current, plugin_id)
+            nonlocal current_state, data_purged, removed, settings_result
+            current_state = current
+            if current.revision != before.revision:
+                raise PluginError("PLUGIN_REGISTRY_REVISION_CONFLICT", "Plugin registry 已变化")
+            current_plugin = _find_plugin(current, plugin_id)
+            if current_plugin.package_digest != removed.package_digest:
+                raise PluginError("PLUGIN_REGISTRY_REVISION_CONFLICT", "Plugin identity 已变化")
+            removed = current_plugin
+            # Settings credential 属于成功卸载的固定清理步骤；purge_data 只
+            # 决定是否额外删除 Plugin data，二者不能共用条件。
+            if settings_cleanup is not None:
+                settings_result = settings_cleanup(current_plugin, current.revision)
+                if settings_result.get("partial"):
+                    raise _SettingsCleanupPartial(settings_result)
+            # 在同一 registry lock 内完成破坏性 data cleanup；若 revision 已漂移，
+            # 上面的检查会先失败，避免先清理后返回 conflict。
+            if purge_data:
+                data_purged = self.store.purge_data(current_plugin)
             return tuple(plugin for plugin in current.plugins if plugin.plugin_id != plugin_id)
 
-        state = self.store.mutate_registry(_remove)
+        try:
+            state = self.store.mutate_registry(_remove)
+        except _SettingsCleanupPartial as exc:
+            stable_state = current_state or before
+            return {
+                "revision": stable_state.revision,
+                "id": plugin_id,
+                "removed": False,
+                "data_retained": True,
+                "data_purged": False,
+                "settings_cleanup": exc.result,
+                "diagnostics": ["SETTINGS_UNINSTALL_PARTIAL"],
+                "catalog": self._catalog_from_state(stable_state).to_dict(),
+            }
         assert removed is not None
-        data_purged = self.store.purge_data(removed) if purge_data else False
-        return {
+        result: dict[str, object] = {
             "revision": state.revision,
             "id": plugin_id,
             "removed": True,
@@ -290,10 +401,97 @@ class PluginManager:
             "data_purged": data_purged,
             "catalog": self._catalog_from_state(state).to_dict(),
         }
+        if settings_result is not None:
+            result["settings_cleanup"] = settings_result
+        return result
 
     def catalog(self) -> ExtensionCatalogSnapshot:
         """发布只包含已启用且 trust 未失效记录的不可变 catalog。"""
         return self._catalog_from_state(self.store.read_registry())
+
+    def setting_bindings(
+        self,
+        catalog: ExtensionCatalogSnapshot | None = None,
+    ) -> PluginSettingsLoadResult:
+        """从已启用 Qwen catalog 读取严格 ExtensionSetting，不读取 setting value。"""
+        return self._load_setting_bindings(
+            tuple((catalog or self.catalog()).plugins),
+            require_runtime=True,
+        )
+
+    def setting_bindings_for_uninstall(
+        self,
+        plugin: InstalledPlugin,
+    ) -> PluginSettingsLoadResult:
+        """按已安装记录解析卸载 identity，不受 enabled/trusted runtime 过滤。"""
+        return self._load_setting_bindings((plugin,), require_runtime=False)
+
+    def _load_setting_bindings(
+        self,
+        plugins: tuple[InstalledPlugin, ...],
+        *,
+        require_runtime: bool,
+    ) -> PluginSettingsLoadResult:
+        """从指定安装记录解析 Settings；runtime 与 uninstall 共享唯一声明解析。"""
+        bindings: list[SettingBinding] = []
+        diagnostics: list[str] = []
+        blocked_plugin_ids: set[str] = set()
+        for plugin in plugins:
+            if plugin.format != "qwen-code" or plugin.manifest is None:
+                continue
+            try:
+                self.store.verify_installed(plugin)
+                root = self.store.package_path(plugin)
+                manifest = read_json_object(root, plugin.manifest)
+                raw_settings = manifest.get("settings")
+                if raw_settings is None:
+                    continue
+                declarations = parse_qwen_settings(raw_settings)
+                if not declarations:
+                    continue
+                if require_runtime:
+                    component = next(
+                        (item for item in plugin.components if item.kind == "settings"),
+                        None,
+                    )
+                    eligibility = runtime_component_eligibility(plugin, kind="settings")
+                    if not eligibility.eligible:
+                        blocked_plugin_ids.add(plugin.plugin_id)
+                        if eligibility.diagnostic is not None:
+                            diagnostics.append(
+                                f"plugin:{plugin.plugin_id}: {eligibility.diagnostic}"
+                            )
+                        continue
+                    if component is None or not component.effective:
+                        blocked_plugin_ids.add(plugin.plugin_id)
+                        diagnostics.append(
+                            f"plugin:{plugin.plugin_id}: SETTINGS_DECLARATION_INVALID"
+                        )
+                        continue
+                    if tuple(component.sources) != tuple(item.env_var for item in declarations):
+                        blocked_plugin_ids.add(plugin.plugin_id)
+                        diagnostics.append(
+                            f"plugin:{plugin.plugin_id}: SETTINGS_DECLARATION_STALE"
+                        )
+                        continue
+                bindings.extend(
+                    SettingBinding(
+                        plugin_id=plugin.plugin_id,
+                        package_digest=plugin.package_digest,
+                        declaration_digest=declaration.declaration_digest,
+                        declaration=declaration,
+                    )
+                    for declaration in declarations
+                )
+            except (PluginError, SettingsError) as exc:
+                code = exc.code if isinstance(exc, (PluginError, SettingsError)) else "SETTINGS_DECLARATION_INVALID"
+                blocked_plugin_ids.add(plugin.plugin_id)
+                diagnostics.append(f"plugin:{plugin.plugin_id}: {code}")
+        return PluginSettingsLoadResult(
+            tuple(bindings),
+            tuple(diagnostics),
+            tuple(sorted(blocked_plugin_ids)),
+        )
 
     def skill_sources(
         self,
@@ -308,26 +506,68 @@ class PluginManager:
             try:
                 self.store.verify_installed(plugin)
                 package_root = self.store.package_path(plugin)
-                for component in plugin.components:
-                    if (
-                        component.kind not in {"skills", "commands"}
-                        or component.status not in {"supported", "adapted"}
-                    ):
+                for kind in ("skills", "commands"):
+                    component = next(
+                        (item for item in plugin.components if item.kind == kind),
+                        None,
+                    )
+                    if component is None:
+                        if _plugin_component_declared_for_skill_runtime(
+                            plugin,
+                            package_root,
+                            kind,
+                        ):
+                            eligibility = runtime_component_eligibility(
+                                plugin,
+                                kind=kind,
+                            )
+                            if eligibility.diagnostic is not None:
+                                diagnostics.append(
+                                    f"plugin:{plugin.plugin_id}: {eligibility.diagnostic}"
+                                )
+                        continue
+                    eligibility = runtime_component_eligibility(
+                        plugin,
+                        kind=kind,
+                    )
+                    if not eligibility.eligible:
+                        if eligibility.diagnostic is not None:
+                            diagnostics.append(
+                                f"plugin:{plugin.plugin_id}: {eligibility.diagnostic}"
+                            )
                         continue
                     for relative in component.sources:
                         manifest = package_root / relative
-                        if component.kind == "skills":
+                        if kind == "skills":
                             name = plugin.name if relative == "SKILL.md" else manifest.parent.name
-                            dialect = "claude" if plugin.format == "claude-code" else "portable"
+                            dialect = (
+                                "qwen-skill"
+                                if plugin.format == "qwen-code"
+                                else ("claude" if plugin.format == "claude-code" else "portable")
+                            )
                             canonical_suffix = None
                             force_user_invocable = None
                             force_model_invocable = None
+                            resource_files = (
+                                _qwen_skill_resource_files(package_root)
+                                if plugin.format == "qwen-code"
+                                else ()
+                            )
                         else:
-                            name = manifest.stem
-                            dialect = "claude-command"
+                            name = (
+                                _qwen_command_name(relative)
+                                if plugin.format == "qwen-code"
+                                else manifest.stem
+                            )
+                            dialect = (
+                                "qwen-command"
+                                if plugin.format == "qwen-code"
+                                else "claude-command"
+                            )
                             canonical_suffix = f"command/{name}"
                             force_user_invocable = True
                             force_model_invocable = False
+                            resource_files = ()
                         sources.append(
                             PluginSkillSource(
                                 plugin_id=plugin.plugin_id,
@@ -339,12 +579,13 @@ class PluginManager:
                                 package_digest=plugin.package_digest,
                                 kind=(
                                     "command"
-                                    if component.kind == "commands"
+                                    if kind == "commands"
                                     else "skill"
                                 ),
                                 canonical_suffix=canonical_suffix,
                                 force_user_invocable=force_user_invocable,
                                 force_model_invocable=force_model_invocable,
+                                resource_files=resource_files,
                             )
                         )
             except PluginError as exc:
@@ -353,18 +594,19 @@ class PluginManager:
             sources=tuple(sources),
             diagnostics=tuple(diagnostics),
         )
-
     def mcp_servers(
         self,
         catalog: ExtensionCatalogSnapshot,
         *,
         workspace: Path,
+        blocked_plugin_ids: tuple[str, ...] = (),
     ) -> PluginMcpLoadResult:
         """从指定 catalog 转换 MCP，避免运行装配重新读取 registry。"""
         return load_plugin_mcp_servers(
             catalog,
             store=self.store,
             workspace=workspace,
+            blocked_plugin_ids=blocked_plugin_ids,
         )
 
     def agent_sources(
@@ -383,7 +625,17 @@ class PluginManager:
                 agent_files: list[Path] = []
                 policy_files: list[Path] = []
                 for component in plugin.components:
-                    if component.status not in {"supported", "adapted"}:
+                    if component.kind not in {"agents", "policies"}:
+                        continue
+                    eligibility = runtime_component_eligibility(
+                        plugin,
+                        kind=component.kind,
+                    )
+                    if not eligibility.eligible:
+                        if eligibility.diagnostic is not None:
+                            diagnostics.append(
+                                f"plugin:{plugin.plugin_id}: {eligibility.diagnostic}"
+                            )
                         continue
                     if component.kind == "agents":
                         agent_files.extend(root / relative for relative in component.sources)
@@ -426,6 +678,9 @@ class PluginManager:
         result: dict[str, tuple[ContextBlock, ...]] = {}
         for plugin in (catalog or self.catalog()).plugins:
             if plugin.format != "qwen-code":
+                continue
+            context_gate = runtime_component_eligibility(plugin, kind="contexts")
+            if not context_gate.eligible:
                 continue
             self.store.verify_installed(plugin)
             snapshot = build_plugin_resource_snapshot(plugin, store=self.store)
@@ -470,16 +725,24 @@ class PluginManager:
             try:
                 self.store.verify_installed(plugin)
                 root = self.store.package_path(plugin)
-                sources = tuple(
-                    root / relative
-                    for component in plugin.components
-                    if component.kind == "teams"
-                    and component.status in {"supported", "adapted"}
-                    for relative in component.sources
-                )
+                sources: list[Path] = []
+                for component in plugin.components:
+                    if component.kind != "teams":
+                        continue
+                    eligibility = runtime_component_eligibility(
+                        plugin,
+                        kind="teams",
+                    )
+                    if not eligibility.eligible:
+                        if eligibility.diagnostic is not None:
+                            diagnostics.append(
+                                f"plugin:{plugin.plugin_id}: {eligibility.diagnostic}"
+                            )
+                        continue
+                    sources.extend(root / relative for relative in component.sources)
                 result = load_plugin_teams(
                     root,
-                    sources=sources,
+                    sources=tuple(sources),
                     plugin_id=plugin.plugin_id,
                 )
                 teams.extend(result.teams)
@@ -496,6 +759,7 @@ class PluginManager:
         catalog: ExtensionCatalogSnapshot,
         *,
         workspace: Path,
+        blocked_plugin_ids: tuple[str, ...] = (),
     ) -> "PluginRuntimeCatalog":
         """从同一启动快照构造 Claude/Qwen Hook 与 LSP/Monitor 运行目录。"""
         from harness_agent.plugins.runtime import load_plugin_runtime_catalog
@@ -504,6 +768,7 @@ class PluginManager:
             catalog,
             store=self.store,
             workspace=workspace,
+            blocked_plugin_ids=blocked_plugin_ids,
         )
 
     def package_root(self, plugin_id: str) -> Path:
@@ -531,6 +796,70 @@ class PluginManager:
             registry_revision=state.revision,
             plugins=plugins,
         )
+
+
+def _plugin_component_declared_for_skill_runtime(
+    plugin: InstalledPlugin,
+    root: Path,
+    kind: str,
+) -> bool:
+    """判断包内是否声明了 Command/Skill，避免干净包产生缺报告噪声。"""
+    qwen_manifest_present = any(
+        (root / manifest_name).is_file()
+        for manifest_name in ("qwen-extension.json", "devagent-extension.json")
+    )
+    if kind == "skills" and (
+        plugin.format in {"agent-plugins-1.0", "claude-code", "hybrid"}
+        and ((root / "skills").exists() or (root / "skills").is_symlink())
+    ):
+        return True
+    if kind == "skills" and plugin.format == "qwen-code" and (
+        qwen_manifest_present
+        and ((root / "skills").exists() or (root / "skills").is_symlink())
+    ):
+        return True
+    if kind == "skills" and plugin.format in {"claude-code", "hybrid"} and (
+        (root / "SKILL.md").exists() or (root / "SKILL.md").is_symlink()
+    ):
+        return True
+    if kind == "commands" and plugin.format in {"claude-code", "hybrid"} and (
+        (root / "commands").exists() or (root / "commands").is_symlink()
+    ):
+        return True
+    if kind == "commands" and plugin.format == "qwen-code" and (
+        qwen_manifest_present
+        and ((root / "commands").exists() or (root / "commands").is_symlink())
+    ):
+        return True
+
+    manifest_paths: list[str] = []
+    if plugin.format in {"agent-plugins-1.0", "hybrid"}:
+        manifest_paths.append("plugin.json")
+    if plugin.format in {"claude-code", "hybrid"}:
+        manifest_paths.append(".claude-plugin/plugin.json")
+    if plugin.format == "qwen-code":
+        manifest_paths.extend(("qwen-extension.json", "devagent-extension.json"))
+
+    for relative in manifest_paths:
+        path = root / relative
+        if not path.is_file():
+            continue
+        manifest = read_json_object(root, relative)
+        if relative == "plugin.json" and plugin.format in {
+            "agent-plugins-1.0",
+            "hybrid",
+        }:
+            extensions = manifest.get("extensions")
+            harness = (
+                extensions.get("com.za38.harness")
+                if isinstance(extensions, Mapping)
+                else None
+            )
+            if isinstance(harness, Mapping) and kind in harness:
+                return True
+        if kind in manifest:
+            return True
+    return False
 
 
 def _find_plugin(state: PluginRegistryState, plugin_id: str) -> InstalledPlugin:

@@ -203,11 +203,16 @@ class BuildRunAdapter:
     """
 
     async def execute(self, run: RunState, port: RunLifecyclePort) -> None:
+        loaded = run.preparation.requested_skill
+        if loaded is not None and loaded.snapshot_id != run.preparation.skill_snapshot_id:
+            raise _run_error("RUN_PREPARATION_REQUESTED_SKILL_SNAPSHOT_MISMATCH")
         started_payload: dict[str, object] = {
             "resumed": False,
             "mode": run.start.mode,
             "skills_snapshot_id": run.preparation.skill_snapshot_id,
         }
+        if loaded is not None and loaded.record.kind == "command":
+            started_payload["command_provenance"] = loaded.provenance()
         binding = run.preparation.execution_binding
         if binding is not None:
             started_payload["primary_model"] = binding.protocol_primary_model()
@@ -216,25 +221,30 @@ class BuildRunAdapter:
         port.mark_running(run)
         port.emit(run, RUN_PROGRESS, _run_progress_payload(run, "preparing"))
 
-        loaded = run.preparation.requested_skill
         if loaded is not None:
-            if loaded.snapshot_id != run.preparation.skill_snapshot_id:
-                raise _run_error("RUN_PREPARATION_REQUESTED_SKILL_SNAPSHOT_MISMATCH")
+            skill_loaded_payload: dict[str, object] = {
+                "skill_id": loaded.record.skill_id,
+                "source": loaded.record.source,
+                "version": loaded.record.version,
+                "snapshot_id": loaded.snapshot_id,
+            }
+            # provenance 只适用于有 immutable package identity 的 Plugin。内置、项目和
+            # 用户 Skill 没有 package digest，继续发送既有旧 payload，避免伪造来源摘要。
+            if loaded.record.source.startswith("plugin:") and loaded.record.package_digest:
+                skill_loaded_payload["provenance"] = loaded.provenance()
             port.emit(
                 run,
                 SKILL_LOADED,
-                {
-                    "skill_id": loaded.record.skill_id,
-                    "source": loaded.record.source,
-                    "version": loaded.record.version,
-                    "snapshot_id": loaded.snapshot_id,
-                },
+                skill_loaded_payload,
             )
-            run.message = (
-                f"The user explicitly selected Skill `{loaded.record.skill_id}`. "
-                f"Read `/.harness/skills/{loaded.record.skill_id}/SKILL.md` with read_file before using it.\n\n"
-                f"User request:\n{run.message}"
-            )
+            if loaded.record.kind == "command":
+                run.message = loaded.rendered_body()
+            else:
+                run.message = (
+                    f"The user explicitly selected Skill `{loaded.record.skill_id}`. "
+                    f"Read `/.harness/skills/{loaded.record.skill_id}/SKILL.md` with read_file before using it.\n\n"
+                    f"User request:\n{run.message}"
+                )
 
         async def acquire_runtime():
             """将 Host runtime provider 收敛到 Managed executor 的唯一入口。"""

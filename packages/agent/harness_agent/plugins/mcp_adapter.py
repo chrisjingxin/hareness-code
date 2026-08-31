@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 from dataclasses import dataclass
+from collections.abc import Collection
 from pathlib import Path
 from typing import Mapping
 
@@ -13,13 +15,20 @@ from harness_agent.plugins.common import read_json_object, safe_package_path
 from harness_agent.plugins.mcp_schema import (
     replace_plugin_placeholders,
     resolve_portable_cwd,
+    resolve_qwen_mcp_value,
     validate_http_headers,
     validate_http_url,
     validate_mcp_document,
     validate_mcp_server,
+    validate_qwen_mcp_document,
     validate_stdio_command,
 )
-from harness_agent.plugins.model import ExtensionCatalogSnapshot, InstalledPlugin, PluginError
+from harness_agent.plugins.model import (
+    ExtensionCatalogSnapshot,
+    InstalledPlugin,
+    PluginError,
+    runtime_component_eligibility,
+)
 from harness_agent.plugins.store import PluginStore
 
 
@@ -39,18 +48,35 @@ def load_plugin_mcp_servers(
     *,
     store: PluginStore,
     workspace: Path,
+    blocked_plugin_ids: Collection[str] = (),
 ) -> PluginMcpLoadResult:
     """从一个不可变 catalog 读取并转换所有有效 MCP 组件。"""
     servers: list[McpServerConfig] = []
     diagnostics: list[str] = []
     seen: set[str] = set()
+    blocked = frozenset(blocked_plugin_ids)
     for plugin in catalog.plugins:
-        component = next((item for item in plugin.components if item.kind == "mcp"), None)
-        if component is None or component.status not in {"supported", "adapted"}:
-            continue
         try:
             store.verify_installed(plugin)
             root = store.package_path(plugin)
+            component = next(
+                (item for item in plugin.components if item.kind == "mcp"),
+                None,
+            )
+            if component is None and not _mcp_component_declared(plugin, root):
+                continue
+            if plugin.plugin_id in blocked:
+                diagnostics.append(
+                    f"plugin:{plugin.plugin_id}: SETTINGS_CONSUMER_BLOCKED"
+                )
+                continue
+            eligibility = runtime_component_eligibility(plugin, kind="mcp")
+            if not eligibility.eligible:
+                if eligibility.diagnostic is not None:
+                    diagnostics.append(
+                        f"plugin:{plugin.plugin_id}: {eligibility.diagnostic}"
+                    )
+                continue
             data = store.data_path(plugin)
             _prepare_data_path(data)
             loaded = _load_plugin_mcp(plugin, root, data, workspace)
@@ -58,6 +84,11 @@ def load_plugin_mcp_servers(
                 f"plugin:{plugin.plugin_id}: {diagnostic}"
                 for diagnostic in loaded.diagnostics
             )
+            if not loaded.servers:
+                diagnostics.append(
+                    f"plugin:{plugin.plugin_id}: "
+                    "PLUGIN_RUNTIME_COMPONENT_CONVERSION_EMPTY: kind=mcp"
+                )
             for server in loaded.servers:
                 if server.name in seen:
                     diagnostics.append(
@@ -75,6 +106,24 @@ def load_plugin_mcp_servers(
     )
 
 
+def _mcp_component_declared(plugin: InstalledPlugin, root: Path) -> bool:
+    """判断 MCP 是否由包内入口声明，避免干净 Claude manifest 产生缺报告噪声。"""
+    if plugin.format == "agent-plugins-1.0" and (root / "mcp.json").is_file():
+        return True
+    if (root / ".mcp.json").is_file():
+        return True
+    manifest_paths = {
+        "claude-code": (".claude-plugin/plugin.json",),
+        "hybrid": (".claude-plugin/plugin.json", "plugin.json"),
+        "qwen-code": ("qwen-extension.json", "devagent-extension.json"),
+    }.get(plugin.format, ())
+    for relative in manifest_paths:
+        path = root / relative
+        if path.is_file() and "mcpServers" in read_json_object(root, relative):
+            return True
+    return False
+
+
 def _load_plugin_mcp(
     plugin: InstalledPlugin,
     root: Path,
@@ -86,6 +135,8 @@ def _load_plugin_mcp(
         return _load_portable(plugin, root, data)
     if plugin.format == "claude-code":
         return _load_claude(plugin, root, data, workspace)
+    if plugin.format == "qwen-code":
+        return _load_qwen(plugin, root, data, workspace)
 
     # Hybrid 的两个 manifest 共享身份和 catalog，但各自保留配置语义：
     # portable mcp.json 走 1.0 closed schema，Claude `.mcp.json` 仍支持既有字段。
@@ -117,6 +168,134 @@ def _load_plugin_mcp(
     return PluginMcpLoadResult(
         servers=tuple(server for result in loaded for server in result.servers),
         diagnostics=tuple(diagnostic for result in loaded for diagnostic in result.diagnostics),
+    )
+
+
+def _load_qwen(
+    plugin: InstalledPlugin,
+    root: Path,
+    data: Path,
+    workspace: Path,
+) -> PluginMcpLoadResult:
+    """把 Qwen stdio 子集转换到 canonical McpServerConfig。"""
+    manifest_name = plugin.manifest or "devagent-extension.json"
+    document = read_json_object(root, manifest_name)
+    raw_servers = document.get("mcpServers")
+    if not isinstance(raw_servers, Mapping):
+        raise PluginError("PLUGIN_MCP_INVALID", "mcpServers 必须是 object")
+    validation = validate_qwen_mcp_document(
+        document,
+        root=root,
+        workspace=workspace,
+    )
+    valid_names = {server.name for server in validation.servers}
+    diagnostics: list[str] = [*validation.invalid, *validation.unsupported]
+    servers: list[McpServerConfig] = []
+    for name, raw in sorted(raw_servers.items(), key=lambda item: str(item[0])):
+        if name not in valid_names or not isinstance(name, str) or not isinstance(raw, Mapping):
+            continue
+        try:
+            servers.append(
+                _qwen_server_config(
+                    plugin,
+                    name,
+                    raw,
+                    root=root,
+                    data=data,
+                    workspace=workspace,
+                )
+            )
+        except PluginError as exc:
+            diagnostics.append(f"{name}: {exc.code}: {exc}")
+    return PluginMcpLoadResult(tuple(servers), tuple(diagnostics))
+
+
+def _qwen_server_config(
+    plugin: InstalledPlugin,
+    server_name: str,
+    raw: Mapping[str, object],
+    *,
+    root: Path,
+    data: Path,
+    workspace: Path,
+) -> McpServerConfig:
+    """构造一个已通过 Qwen 字段校验的 stdio server。"""
+    command_value = raw["command"]
+    if not isinstance(command_value, str):
+        raise PluginError("PLUGIN_MCP_FIELD_INVALID", f"MCP server {server_name}.command 无效")
+    command = resolve_qwen_mcp_value(
+        command_value,
+        root=root,
+        workspace=workspace,
+        field=f"{server_name}.command",
+        require_package_file=True,
+        require_executable=True,
+    )
+    # Qwen 不把宿主 PATH 带进 child；在 catalog 阶段把 bare executable 冻结为
+    # 已解析路径，包内命令仍必须来自 immutable store。
+    command = _freeze_qwen_command(command)
+    args_value = raw.get("args", [])
+    if not isinstance(args_value, list):
+        raise PluginError("PLUGIN_MCP_FIELD_INVALID", f"MCP server {server_name}.args 无效")
+    args = tuple(
+        resolve_qwen_mcp_value(
+            value,
+            root=root,
+            workspace=workspace,
+            field=f"{server_name}.args[{index}]",
+            require_package_file=True,
+        )
+        for index, value in enumerate(args_value)
+        if isinstance(value, str)
+    )
+    env_value = raw.get("env", {})
+    if not isinstance(env_value, Mapping):
+        raise PluginError("PLUGIN_MCP_FIELD_INVALID", f"MCP server {server_name}.env 无效")
+    env = {
+        key: resolve_qwen_mcp_value(
+            value,
+            root=root,
+            workspace=workspace,
+            field=f"{server_name}.env.{key}",
+        )
+        for key, value in env_value.items()
+        if isinstance(key, str) and isinstance(value, str)
+    }
+    cwd_value = raw.get("cwd")
+    if isinstance(cwd_value, str):
+        if "${" in cwd_value:
+            cwd = str(
+                Path(
+                    resolve_qwen_mcp_value(
+                        cwd_value,
+                        root=root,
+                        workspace=workspace,
+                        field=f"{server_name}.cwd",
+                        require_directory=True,
+                    )
+                ).resolve()
+            )
+        else:
+            cwd = str(safe_package_path(root, cwd_value, require_exists=True).resolve())
+    else:
+        cwd = str(root.resolve())
+    timeout_value = raw.get("timeout", DEFAULT_CONNECT_TIMEOUT_SECONDS)
+    if not isinstance(timeout_value, (int, float)) or isinstance(timeout_value, bool):
+        raise PluginError("PLUGIN_MCP_TIMEOUT_INVALID", f"MCP server {server_name}.timeout 无效")
+    return McpServerConfig(
+        name=_namespaced_server_name(plugin, server_name),
+        transport="stdio",
+        command=command,
+        args=args,
+        env=env,
+        timeout_seconds=float(timeout_value),
+        cwd=cwd,
+        source=f"plugin:{plugin.plugin_id}",
+        source_fingerprint=plugin.package_digest,
+        inherit_environment=False,
+        inherit_path=False,
+        plugin_root=str(root.resolve()),
+        plugin_data=str(data.resolve()),
     )
 
 
@@ -443,6 +622,28 @@ def _checked_executable(path: Path) -> str:
     if os.name != "nt" and not os.access(path, os.X_OK):
         raise PluginError("PLUGIN_MCP_COMMAND_INVALID", "Plugin MCP command 不可执行")
     return str(path)
+
+
+def _freeze_qwen_command(command: str) -> str:
+    """把 Qwen command 固定成可由 exec 直接启动的绝对 executable。"""
+    candidate = command.strip()
+    if not candidate or any(char in candidate for char in "\x00\r\n\t"):
+        raise PluginError("PLUGIN_MCP_COMMAND_INVALID", "Qwen MCP command 无效")
+    path = Path(candidate)
+    if path.is_absolute() or "/" in candidate or "\\" in candidate:
+        try:
+            resolved = path.resolve(strict=True)
+        except (FileNotFoundError, OSError) as exc:
+            raise PluginError("PLUGIN_MCP_TARGET_MISSING", "Qwen MCP executable 不存在") from exc
+        return _checked_executable(resolved)
+    resolved_text = shutil.which(candidate, path=os.environ.get("PATH") or os.defpath)
+    if resolved_text is None:
+        raise PluginError("PLUGIN_MCP_COMMAND_INVALID", "Qwen MCP executable 无法解析")
+    try:
+        resolved = Path(resolved_text).resolve(strict=True)
+    except (FileNotFoundError, OSError) as exc:
+        raise PluginError("PLUGIN_MCP_COMMAND_INVALID", "Qwen MCP executable 无法解析") from exc
+    return _checked_executable(resolved)
 
 
 def _is_within(path: Path, root: Path) -> bool:

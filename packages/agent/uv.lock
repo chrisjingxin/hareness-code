@@ -482,6 +482,11 @@ wheels = [
 ]
 
 [[package]]
+name = "jeepney"
+version = "0.9.0"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
+
+[[package]]
 name = "jiter"
 version = "0.16.0"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
@@ -1575,6 +1580,15 @@ wheels = [
 ]
 
 [[package]]
+name = "secretstorage"
+version = "3.3.3"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
+dependencies = [
+    { name = "cryptography" },
+    { name = "jeepney" },
+]
+
+[[package]]
 name = "sqlite-vec"
 version = "0.1.9"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
@@ -2090,6 +2104,7 @@ dependencies = [
     { name = "langgraph-checkpoint-sqlite" },
     { name = "pydantic" },
     { name = "pyyaml" },
+    { name = "secretstorage", marker = "sys_platform == 'linux'" },
     { name = "tomli-w" },
     { name = "tree-sitter" },
     { name = "tree-sitter-bash" },
@@ -2116,6 +2131,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'test'", specifier = "==9.0.3" },
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = "==1.4.0" },
     { name = "pyyaml", specifier = "==6.0.3" },
+    { name = "secretstorage", marker = "sys_platform == 'linux'", specifier = "==3.3.3" },
     { name = "tomli-w", specifier = ">=1.1.0" },
     { name = "tree-sitter", specifier = ">=0.24.0,<0.27.0" },
     { name = "tree-sitter-bash", specifier = ">=0.25.0,<0.26.0" },

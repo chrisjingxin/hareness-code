@@ -56,6 +56,67 @@ test("Peer 在 run.start 中携带显式 requested_skill", async () => {
   })
 })
 
+test("Peer 登记 CLI Registry 对 immutable Skill snapshot 的 exact command binding", async () => {
+  const { client, stdin, stdout } = peer()
+  const requests: any[] = []
+  stdin.on("data", data => {
+    const message = JSON.parse(data.toString())
+    requests.push(message)
+    stdout.write(JSON.stringify({
+      jsonrpc: "2.0",
+      id: message.id,
+      result: { snapshot_id: message.params.snapshot_id, accepted: true },
+    }) + "\n")
+  })
+  await client.bindCommandRegistry({
+    snapshot_id: "snapshot-1",
+    bindings: [{ id: "plugin/local/bad/command/help", name: "bad.help" }],
+  })
+  expect(requests[0]).toMatchObject({
+    method: "commands.bind",
+    params: {
+      snapshot_id: "snapshot-1",
+      bindings: [{ id: "plugin/local/bad/command/help", name: "bad.help" }],
+    },
+  })
+})
+
+test("Peer 在 Plugin Command run.start 中携带 raw invocation 与 canonical identity", async () => {
+  const { client, stdin, stdout } = peer()
+  const requests: any[] = []
+  stdin.on("data", data => {
+    const message = JSON.parse(data.toString())
+    requests.push(message)
+    stdout.write(JSON.stringify({
+      jsonrpc: "2.0",
+      id: message.id,
+      result: { thread_id: message.params.thread_id, run_id: message.params.run_id, accepted: true },
+    }) + "\n")
+  })
+  const rawInvocation = "/ZA38-SDD   创建登录功能  "
+  const run = client.startRun({
+    message: rawInvocation,
+    mode: "build",
+    threadId: "t",
+    requestedSkill: {
+      id: "plugin/local/za38/command/za38-sdd",
+      args: "创建登录功能",
+      raw_invocation: rawInvocation,
+      command_name: "za38-sdd",
+    },
+  })
+  await run.accepted
+  expect(requests[0].params).toMatchObject({
+    message: rawInvocation,
+    requested_skill: {
+      id: "plugin/local/za38/command/za38-sdd",
+      args: "创建登录功能",
+      raw_invocation: rawInvocation,
+      command_name: "za38-sdd",
+    },
+  })
+})
+
 test("Peer 在 run.start 中携带冻结的工作模式", async () => {
   const { client, stdin, stdout } = peer()
   const requests: JsonRpcRequest[] = []
@@ -178,6 +239,71 @@ test("Peer 通过类型化 Plugin 接口传递来源、trust 指纹和 data 删�
   ])
 })
 
+test("Peer 通过类型化 Settings 接口传递摘要与 CAS，而不隐藏 value", async () => {
+  const { client, stdin, stdout } = peer()
+  const requests: any[] = []
+  stdin.on("data", data => {
+    const message = JSON.parse(data.toString())
+    requests.push(message)
+    stdout.write(JSON.stringify({
+      jsonrpc: "2.0",
+      id: message.id,
+      error: { code: -32010, message: "SETTINGS_BACKEND_UNAVAILABLE", data: { code: "SETTINGS_BACKEND_UNAVAILABLE", retryable: true } },
+    }) + "\n")
+  })
+  await client.listSettings("workspace").catch(() => undefined)
+  await client.setSetting({
+    scope: "user",
+    plugin_id: "plugin/local/za38",
+    package_digest: "a".repeat(64),
+    declaration_digest: "b".repeat(64),
+    setting_key: "ZA38_TOKEN",
+    env_var: "ZA38_TOKEN",
+    value: "transient-fake-value",
+    expected_store_revision: 0,
+  }).catch(() => undefined)
+  await client.removeSetting({
+    scope: "user",
+    plugin_id: "plugin/local/za38",
+    package_digest: "a".repeat(64),
+    declaration_digest: "b".repeat(64),
+    setting_key: "ZA38_TOKEN",
+    env_var: "ZA38_TOKEN",
+    expected_store_revision: 0,
+  }).catch(() => undefined)
+  expect(requests.map(request => [request.method, request.params])).toEqual([
+    ["settings.list", { scope: "workspace" }],
+    ["settings.set", {
+      scope: "user",
+      plugin_id: "plugin/local/za38",
+      package_digest: "a".repeat(64),
+      declaration_digest: "b".repeat(64),
+      setting_key: "ZA38_TOKEN",
+      env_var: "ZA38_TOKEN",
+      value: "transient-fake-value",
+      expected_store_revision: 0,
+    }],
+    ["settings.remove", {
+      scope: "user",
+      plugin_id: "plugin/local/za38",
+      package_digest: "a".repeat(64),
+      declaration_digest: "b".repeat(64),
+      setting_key: "ZA38_TOKEN",
+      env_var: "ZA38_TOKEN",
+      expected_store_revision: 0,
+    }],
+  ])
+})
+
+test("Peer 在 v3.6 协商结果下不会发送未知 Settings RPC", async () => {
+  const { client, stdin } = peer()
+  const requests: any[] = []
+  stdin.on("data", data => requests.push(JSON.parse(data.toString())))
+  ;(client as any).initializedInfo = { protocol: { major: 3, minor: 6 } }
+  expect(() => client.listSettings("user")).toThrow("SETTINGS_PROTOCOL_MINOR_REQUIRED")
+  expect(requests).toEqual([])
+})
+
 test("Peer 通过类型化 Agent 与 Team 接口传递受控目录和运行参数", async () => {
   const { client, stdin, stdout } = peer()
   const requests: any[] = []
@@ -266,6 +392,75 @@ test("Peer 处理半帧、多帧和统一 event", async () => {
   stdout.write(bytes.subarray(23))
   await Bun.sleep(10)
   expect(events.map(item => item.type)).toEqual(["content.delta", "run.completed"])
+})
+
+test("Peer 接受 Python BuildRunAdapter 的 Plugin Command provenance 并保持序列连续", async () => {
+  const { client, stdin, stdout } = peer()
+  const errors: Error[] = []
+  const events: any[] = []
+  const requests: any[] = []
+  client.on("protocolError", error => errors.push(error))
+  client.on("event", event => events.push(event))
+  stdin.on("data", data => {
+    const request = JSON.parse(data.toString())
+    requests.push(request)
+    if (request.method !== "run.start") return
+    stdout.write(JSON.stringify({
+      jsonrpc: "2.0",
+      id: request.id,
+      result: { thread_id: request.params.thread_id, run_id: request.params.run_id, accepted: true },
+    }) + "\n")
+    const provenance = {
+      plugin_id: "local/ZA38",
+      package_digest: "a".repeat(64),
+      command_id: "plugin/local/ZA38/command/za38-sdd",
+      snapshot_id: "snapshot-1",
+    }
+    const eventFrames = [
+      envelope("run.started", 1, {
+        mode: "build",
+        resumed: false,
+        skills_snapshot_id: "snapshot-1",
+        command_provenance: provenance,
+      }),
+      envelope("skill.loaded", 2, {
+        skill_id: "plugin/local/ZA38/command/za38-sdd",
+        source: "plugin:local/ZA38",
+        version: "0.2.0",
+        snapshot_id: "snapshot-1",
+        provenance,
+      }),
+      envelope("content.delta", 3, { text: "done" }),
+      envelope("run.completed", 4, {
+        usage: { input_tokens: 1, output_tokens: 1 },
+        duration_ms: 1,
+        finish_reason: "stop",
+        context: {},
+      }),
+    ]
+    for (const event of eventFrames) {
+      stdout.write(JSON.stringify({ jsonrpc: "2.0", method: "event", params: { ...event, thread_id: request.params.thread_id, run_id: request.params.run_id } }) + "\n")
+    }
+  })
+
+  const rawInvocation = "/ZA38-SDD   创建登录功能  "
+  const run = client.startRun({
+    message: rawInvocation,
+    mode: "build",
+    threadId: "t",
+    requestedSkill: {
+      id: "plugin/local/ZA38/command/za38-sdd",
+      args: "创建登录功能",
+      raw_invocation: rawInvocation,
+      command_name: "za38-sdd",
+    },
+  })
+  await run.accepted
+  await run.completion
+  expect(requests[0].method).toBe("run.start")
+  expect(requests[0].params.message).toBe(rawInvocation)
+  expect(events.map(event => event.sequence)).toEqual([1, 2, 3, 4])
+  expect(errors).toEqual([])
 })
 
 test("Peer 响应 Agent 发起的审批 request", async () => {

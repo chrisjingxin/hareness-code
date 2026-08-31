@@ -5,15 +5,23 @@ import { readFileSync } from "node:fs"
 import { mkdtemp, readFile, realpath, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 import { tmpdir } from "node:os"
+import { Readable } from "node:stream"
 
 import {
   clientCapabilities,
   clientInteractionHandles,
+  dispatchClientCommand,
+  execute,
+  readSettingValue,
   resolveAgentRuntimeLocations,
   validateInteractiveTerminal,
   validateWorkspace,
   workspaceFingerprint,
 } from "../src/index"
+import {
+  bindPluginCommands,
+  COMMANDS_BIND_MIN_MINOR,
+} from "../src/ipc/command-binding"
 import { parseArgs } from "../src/args"
 
 test("CLI shutdown 顺序：runTui 返回后 gateway → coordinator → controller.close，agent.stop 最后", () => {
@@ -124,7 +132,7 @@ test("harness logs 命令路由在 startAgent 之前，不创建 sidecar、不�
 
   // 源码证据：execute 中 logs 处理在 startAgent 调用之前，保证 spawn=0
   const src = readFileSync(resolve(import.meta.dir, "../src/index.ts"), "utf8")
-  const startAgentIdx = src.indexOf("const agent = await startAgent(")
+  const startAgentIdx = src.indexOf("const agent = await (dependencies.startAgent ?? startAgent)(command)")
   const logsCheckIdx = src.indexOf('command.kind === "logs"')
   expect(logsCheckIdx).toBeGreaterThan(-1)
   expect(logsCheckIdx).toBeLessThan(startAgentIdx)
@@ -134,4 +142,173 @@ test("harness logs 命令路由在 startAgent 之前，不创建 sidecar、不�
   expect(querySource).not.toContain("Bun.spawn")
   expect(querySource).not.toContain("Database")
   expect(querySource).not.toContain("sqlite")
+})
+
+test("Plugin Settings commands negotiate settings capabilities", () => {
+  const list = parseArgs(["plugins", "settings", "list"], "/work")
+  const set = parseArgs([
+    "plugins", "settings", "set", "plugin/local/za38", "ZA38_TOKEN",
+    "--package-digest", "a".repeat(64),
+    "--declaration-digest", "b".repeat(64),
+    "--expected-store-revision", "0",
+    "--secret-stdin",
+  ], "/work")
+  expect(clientCapabilities(list)).toContain("settings.read")
+  expect(clientCapabilities(list)).not.toContain("settings.manage")
+  expect(clientCapabilities(set)).toContain("settings.read")
+  expect(clientCapabilities(set)).toContain("settings.manage")
+})
+
+test("Plugin Settings CLI 经过 parse→dispatch 向 Agent 发出 canonical RPC", async () => {
+  const calls: Array<{ method: string; params: Record<string, unknown> }> = []
+  const request = async (method: string, params: Record<string, unknown>) => {
+    calls.push({ method, params })
+    return { ok: true }
+  }
+  const readValue = async (_secretStdin: boolean) => "generated-fake-secret"
+
+  await dispatchClientCommand(
+    parseArgs(["plugins", "settings", "list"], "/work"),
+    request,
+    readValue,
+  )
+  await dispatchClientCommand(
+    parseArgs([
+      "plugins", "settings", "set", "plugin/local/za38", "ZA38_TOKEN",
+      "--package-digest", "a".repeat(64),
+      "--declaration-digest", "b".repeat(64),
+      "--expected-store-revision", "0",
+      "--secret-stdin",
+    ], "/work"),
+    request,
+    readValue,
+  )
+  await dispatchClientCommand(
+    parseArgs([
+      "plugins", "settings", "remove", "plugin/local/za38", "ZA38_TOKEN",
+      "--package-digest", "a".repeat(64),
+      "--declaration-digest", "b".repeat(64),
+      "--expected-store-revision", "1",
+    ], "/work"),
+    request,
+    readValue,
+  )
+
+  expect(calls.map(call => call.method)).toEqual([
+    "settings.list",
+    "settings.set",
+    "settings.remove",
+  ])
+  expect(calls[1]?.params.value).toBe("generated-fake-secret")
+  expect(calls[0]?.params).toEqual({ scope: "user" })
+})
+
+test("Plugin Settings/Plugin removal CLI 经过 parse→execute→fake Agent request 完成管理命令", async () => {
+  const calls: Array<{ method: string; params: Record<string, unknown> }> = []
+  const startAgent = async () => ({
+    client: {
+      request: async (method: string, params: Record<string, unknown>) => {
+        calls.push({ method, params })
+        return { method }
+      },
+    } as never,
+    runtime: undefined as never,
+    stop: async () => {},
+  })
+
+  await execute(parseArgs(["plugins", "settings", "list"], "/work"), { startAgent })
+  await execute(
+    parseArgs(
+      [
+        "plugins", "settings", "set", "plugin/local/za38", "ZA38_TOKEN",
+        "--package-digest", "a".repeat(64),
+        "--declaration-digest", "b".repeat(64),
+        "--expected-store-revision", "0", "--secret-stdin",
+      ],
+      "/work",
+    ),
+    { startAgent, readSettingValue: async () => "generated-fake-secret" },
+  )
+  await execute(
+    parseArgs(
+      [
+        "plugins", "settings", "remove", "plugin/local/za38", "ZA38_TOKEN",
+        "--package-digest", "a".repeat(64),
+        "--declaration-digest", "b".repeat(64),
+        "--expected-store-revision", "1",
+      ],
+      "/work",
+    ),
+    { startAgent },
+  )
+  await execute(
+    parseArgs(["plugins", "remove", "plugin/local/za38", "--purge-data"], "/work"),
+    { startAgent },
+  )
+
+  expect(calls.map(call => call.method)).toEqual([
+    "settings.list",
+    "settings.set",
+    "settings.remove",
+    "plugins.remove",
+  ])
+  expect(calls.at(-1)?.params).toEqual({
+    id: "plugin/local/za38",
+    purge_data: true,
+  })
+})
+
+test("CLI stdin validator accepts one framing newline after the maximum value", async () => {
+  const original = Object.getOwnPropertyDescriptor(process, "stdin")
+  Object.defineProperty(process, "stdin", {
+    configurable: true,
+    value: Readable.from([Buffer.from("x".repeat(65_536) + "\n")]),
+  })
+  try {
+    await expect(readSettingValue(true)).resolves.toBe("x".repeat(65_536))
+  } finally {
+    if (original) Object.defineProperty(process, "stdin", original)
+  }
+})
+
+test("CLI stdin validator accepts maximum value followed by CRLF", async () => {
+  const original = Object.getOwnPropertyDescriptor(process, "stdin")
+  Object.defineProperty(process, "stdin", {
+    configurable: true,
+    value: Readable.from([Buffer.from("x".repeat(65_536) + "\r\n")]),
+  })
+  try {
+    await expect(readSettingValue(true)).resolves.toBe("x".repeat(65_536))
+  } finally {
+    if (original) Object.defineProperty(process, "stdin", original)
+  }
+})
+
+test("Plugin Command binding 遵守协商 minor，不向 v5 Agent 调用未知方法", async () => {
+  expect(COMMANDS_BIND_MIN_MINOR).toBe(6)
+  const calls: unknown[] = []
+  const client = {
+    bindCommandRegistry: async (params: unknown) => {
+      calls.push(params)
+      return { snapshot_id: "snapshot-v6", accepted: true as const }
+    },
+  }
+
+  await bindPluginCommands(client, 6, "snapshot-v6", [
+    { id: "plugin/za38/command/sdd", name: "za38-sdd" },
+  ])
+  expect(calls).toEqual([{
+    snapshot_id: "snapshot-v6",
+    bindings: [{ id: "plugin/za38/command/sdd", name: "za38-sdd" }],
+  }])
+
+  await expect(
+    bindPluginCommands(client, 5, "snapshot-v5", [
+      { id: "plugin/za38/command/sdd", name: "za38-sdd" },
+    ]),
+  ).rejects.toThrow("COMMANDS_BIND_PROTOCOL_MINOR_REQUIRED")
+  expect(calls).toHaveLength(1)
+
+  await bindPluginCommands(client, 5, "snapshot-v5", [])
+  expect(calls).toHaveLength(1)
 })

@@ -6,16 +6,19 @@ import { once } from "node:events"
 import { existsSync, statSync } from "node:fs"
 import { realpath } from "node:fs/promises"
 import { delimiter, resolve } from "node:path"
-import { Capability, EventType, PROTOCOL_VERSION, isClientMethod } from "@za38/protocol"
+import { TextDecoder } from "node:util"
+import { Capability, EventType, PROTOCOL_VERSION, isClientMethod, type OperationName } from "@za38/protocol"
 
 import { parseArgs, type Command } from "./args"
 import { createDiagnosticLog, defaultProcessFields, type DiagnosticLog } from "./diagnostic-log/runtime"
 import { SidecarStderrDrain } from "./diagnostic-log/runtime/stderr-drain"
 import { runLogsQuery } from "./diagnostic-log/query"
 import { AgentClient, JsonRpcRemoteError } from "./ipc/client"
+import { bindPluginCommands } from "./ipc/command-binding"
 import { StdioRpcTransport } from "./ipc/stdio-transport"
 import { runTui } from "./tui/app"
 import { CLI_VERSION, createInteractiveRuntime, type InteractiveRuntime } from "./interactive/runtime"
+import { createCommandRegistry } from "./interactive/commands"
 import { createInteractiveController } from "./interactive/controller"
 import type { InteractiveController } from "./interactive/types"
 import { AgentClientGateway } from "./infrastructure/agent-client-gateway"
@@ -40,6 +43,11 @@ type RunningAgent = {
   stop: () => Promise<void>
 }
 
+type ExecuteDependencies = {
+  startAgent?: (command: Command) => Promise<RunningAgent>
+  readSettingValue?: (secretStdin: boolean) => Promise<string>
+}
+
 /** 根据命令实际是否存在反向交互处理器，声明最小协议能力集合。 */
 export function clientCapabilities(command: Command): string[] {
   const capabilities: string[] = [Capability.RUN_CANCEL, Capability.RUN_MULTITHREAD, Capability.CONFIG_READ]
@@ -62,6 +70,12 @@ export function clientCapabilities(command: Command): string[] {
   if (command.kind.startsWith("plugins.")) capabilities.push(Capability.PLUGINS_READ)
   if (command.kind === "plugins.install" || command.kind === "plugins.set_enabled" || command.kind === "plugins.remove") {
     capabilities.push(Capability.PLUGINS_MANAGE)
+  }
+  if (command.kind === "plugins.settings.list" || command.kind === "plugins.settings.set" || command.kind === "plugins.settings.remove") {
+    capabilities.push(Capability.SETTINGS_READ)
+  }
+  if (command.kind === "plugins.settings.set" || command.kind === "plugins.settings.remove") {
+    capabilities.push(Capability.SETTINGS_MANAGE)
   }
   return capabilities
 }
@@ -144,9 +158,22 @@ async function startAgent(command: Exclude<Command, { kind: "logs" }>): Promise<
       maxTotalBytes: initialized.diagnostics.max_total_mib * 1024 * 1024,
       maxFileBytes: initialized.diagnostics.max_file_mib * 1024 * 1024,
     })
+    // Registry 只在 CLI 构造一次：同一份 resolved name 同时登记给 Host 和交给 UI。
+    const commandRegistry = createCommandRegistry(initialized.agent_commands)
+    if (command.kind === "run") {
+      await bindPluginCommands(
+        client,
+        initialized.protocol.minor,
+        initialized.skills_snapshot.id,
+        commandRegistry.definitions
+          .filter(definition => definition.source.type === "plugin")
+          .map(definition => ({ id: definition.id, name: definition.name })),
+      )
+    }
     const runtime = createInteractiveRuntime(initialized, command.cwd, {
       gitWorkspace: await detectGitWorkspace(command.cwd),
       cliVersion: CLI_VERSION,
+      commandRegistry,
     })
     let stopped = false
     return {
@@ -232,6 +259,97 @@ export function validateInteractiveTerminal(stdinIsTty: boolean | undefined, std
   }
 }
 
+const MAX_SETTING_VALUE_BYTES = 65_536
+
+/** 读取 Settings value；非 TTY 只能用显式 stdin，TTY 输入关闭回显。 */
+export async function readSettingValue(secretStdin: boolean): Promise<string> {
+  if (secretStdin) return readSettingStdin(process.stdin)
+  if (!process.stdin.isTTY || !process.stdin.setRawMode) {
+    throw new Error("SETTINGS_INPUT_NONINTERACTIVE")
+  }
+  const input = process.stdin
+  const output = process.stdout
+  output.write("Settings value: ")
+  input.setRawMode(true)
+  input.setEncoding("utf8")
+  input.resume()
+  return new Promise<string>((resolveValue, reject) => {
+    let value = ""
+    const cleanup = () => {
+      input.setRawMode?.(false)
+      input.removeListener("data", onData)
+      output.write("\n")
+    }
+    const fail = (error: Error) => {
+      cleanup()
+      reject(error)
+    }
+    const finish = () => {
+      cleanup()
+      try {
+        resolveValue(validateSettingValue(value))
+      } catch (error) {
+        reject(error instanceof Error ? error : new Error(String(error)))
+      }
+    }
+    const onData = (chunk: string) => {
+      for (const character of chunk) {
+        if (character === "\r" || character === "\n") {
+          finish()
+          return
+        }
+        if (character === "\u0003") {
+          fail(new Error("SETTINGS_INPUT_CANCELLED"))
+          return
+        }
+        if (character === "\u007f" || character === "\b") {
+          value = value.slice(0, -1)
+          continue
+        }
+        value += character
+        if (Buffer.byteLength(value, "utf8") > MAX_SETTING_VALUE_BYTES) {
+          fail(new Error("SETTINGS_VALUE_TOO_LARGE"))
+          return
+        }
+      }
+    }
+    input.on("data", onData)
+  })
+}
+
+/** 读取单条有界 UTF-8 stdin record；不允许多行/NUL/隐式 trim。 */
+async function readSettingStdin(stream: NodeJS.ReadableStream): Promise<string> {
+  const chunks: Buffer[] = []
+  let size = 0
+  for await (const chunk of stream as AsyncIterable<Buffer | string>) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8")
+    size += bytes.length
+    // 允许一个 framing newline；去除 newline 后的 value 仍由同一 validator
+    // 检查 65536-byte 上限。多余字节继续 fail closed。
+    if (size > MAX_SETTING_VALUE_BYTES + 2) throw new Error("SETTINGS_VALUE_TOO_LARGE")
+    chunks.push(bytes)
+  }
+  let value: string
+  try {
+    value = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks))
+  } catch {
+    throw new Error("SETTINGS_VALUE_INVALID")
+  }
+  if (value.endsWith("\n")) {
+    value = value.slice(0, -1)
+    if (value.endsWith("\r")) value = value.slice(0, -1)
+  }
+  if (value.includes("\n") || value.includes("\r")) throw new Error("SETTINGS_VALUE_INVALID")
+  return validateSettingValue(value)
+}
+
+/** 与 Agent Settings validator 同步的 CLI value 校验。 */
+function validateSettingValue(value: string): string {
+  if (value.includes("\u0000")) throw new Error("SETTINGS_VALUE_INVALID")
+  if (Buffer.byteLength(value, "utf8") > MAX_SETTING_VALUE_BYTES) throw new Error("SETTINGS_VALUE_TOO_LARGE")
+  return value
+}
+
 /** 无头模式下收集单次流式输出，并等待对应运行的终态事件。 */
 async function runTurn(client: AgentClient, message: string, threadId?: string): Promise<{ text: string; threadId: string; runId: string; usage: unknown }> {
   let text = ""
@@ -254,8 +372,37 @@ async function runTurn(client: AgentClient, message: string, threadId?: string):
   }
 }
 
+/** 将 CLI 语法映射到唯一的 canonical RPC；Settings 的长命名只存在于表现层。 */
+export function clientMethodForCommand(command: Command): OperationName | undefined {
+  if (command.kind === "plugins.settings.list") return "settings.list"
+  if (command.kind === "plugins.settings.set") return "settings.set"
+  if (command.kind === "plugins.settings.remove") return "settings.remove"
+  return isClientMethod(command.kind) ? command.kind : undefined
+}
+
+/** 执行一个非 run CLI 管理命令；request 是唯一的 Agent dispatch seam。 */
+export async function dispatchClientCommand(
+  command: Exclude<Command, { kind: "run" } | { kind: "logs" }>,
+  request: (method: OperationName, params: Record<string, unknown>) => Promise<unknown>,
+  readValue: (secretStdin: boolean) => Promise<string> = readSettingValue,
+): Promise<unknown> {
+  const method = clientMethodForCommand(command)
+  if (method === undefined) throw new Error(`Unsupported command operation: ${command.kind}`)
+  const params = command.params ?? {}
+  if (command.kind === "plugins.settings.set") {
+    return request(method, {
+      ...params,
+      value: await readValue(command.secretStdin === true),
+    })
+  }
+  return request(method, params)
+}
+
 /** 根据解析后的命令选择配置查询、无头执行或交互式 TUI。 */
-async function execute(command: Command): Promise<void> {
+export async function execute(
+  command: Command,
+  dependencies: ExecuteDependencies = {},
+): Promise<void> {
   if (command.kind === "logs") {
     // 完全离线短路：不创建 logger、不启动 sidecar、不打开 SQLite
     await runLogsQuery(command)
@@ -264,11 +411,14 @@ async function execute(command: Command): Promise<void> {
   if (command.kind === "run" && !command.nonInteractive) {
     validateInteractiveTerminal(process.stdin.isTTY, process.stdout.isTTY)
   }
-  const agent = await startAgent(command)
+  const agent = await (dependencies.startAgent ?? startAgent)(command)
   try {
     if (command.kind !== "run") {
-      if (!isClientMethod(command.kind)) throw new Error(`Unsupported command operation: ${command.kind}`)
-      const result = await agent.client.request(command.kind, command.params ?? {})
+      const result = await dispatchClientCommand(
+        command,
+        (method, params) => agent.client.request(method, params),
+        dependencies.readSettingValue,
+      )
       console.log(JSON.stringify(result, null, 2))
       return
     }

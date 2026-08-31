@@ -74,6 +74,8 @@ class McpServerConfig:
     inherit_environment: bool = True
     plugin_root: str | None = None
     plugin_data: str | None = None
+    # Qwen 已冻结 executable 后不需要宿主 PATH；Claude/portable 保持默认兼容。
+    inherit_path: bool = True
 
     def __post_init__(self) -> None:
         """冻结嵌套映射，避免快照建立后仍被调用方修改。"""
@@ -340,6 +342,7 @@ def _engine_identity_for_server(config: McpServerConfig) -> dict[str, object]:
         "source": config.source,
         "source_fingerprint": config.source_fingerprint,
         "inherit_environment": config.inherit_environment,
+        "inherit_path": config.inherit_path,
     }
     if config.transport == "stdio":
         identity["command"] = config.command
@@ -941,7 +944,8 @@ class McpConnectionManager:
                 process_env = {
                     key: value
                     for key in ("PATH", "TMPDIR", "TEMP", "TMP", "SYSTEMROOT", "COMSPEC")
-                    if (value := os.environ.get(key))
+                    if (config.inherit_path or key != "PATH")
+                    and (value := os.environ.get(key))
                 }
                 process_env.update(env)
             if is_portable_plugin and config.plugin_root and config.plugin_data:

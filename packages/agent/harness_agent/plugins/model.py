@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from typing import Literal
 
@@ -50,6 +51,124 @@ class PluginComponentReport:
             "diagnostics": list(self.diagnostics),
             "effective": self.effective,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeComponentEligibility:
+    """一个组件是否可以从已安装 Plugin 进入 canonical runtime。"""
+
+    kind: str
+    eligible: bool
+    component: PluginComponentReport | None = None
+    reason: str | None = None
+
+    @property
+    def diagnostic(self) -> str | None:
+        """返回不含路径、正文和凭据的稳定 gate 诊断。"""
+        if self.eligible or self.reason is None:
+            return None
+        return (
+            "PLUGIN_RUNTIME_COMPONENT_BLOCKED: "
+            f"kind={self.kind}; reason={self.reason}"
+        )
+
+
+_RUNTIME_COMPONENT_FORMATS: dict[PluginFormat, frozenset[str]] = {
+    "agent-plugins-1.0": frozenset({"commands", "skills", "mcp", "agents", "policies", "teams"}),
+    "claude-code": frozenset(
+        {"hooks", "lsp", "monitors", "mcp", "commands", "skills", "agents", "policies", "teams"}
+    ),
+    "hybrid": frozenset(
+        {"hooks", "lsp", "monitors", "mcp", "commands", "skills", "agents", "policies", "teams"}
+    ),
+    # Qwen LSP/Hook/MCP 都只能经过各自 Adapter 产生的 canonical 定义；
+    # Monitor 仍没有 consumer，不能借用 Claude loader 的字段读取。
+    "qwen-code": frozenset({"hooks", "lsp", "commands", "skills", "agents", "contexts", "mcp", "settings"}),
+}
+
+
+def runtime_component_eligibility(
+    plugin: "InstalledPlugin",
+    *,
+    kind: str,
+) -> RuntimeComponentEligibility:
+    """统一判断 Plugin 组件能否进入 runtime，所有 consumer 必须复用此门禁。"""
+    allowed_kinds = _RUNTIME_COMPONENT_FORMATS.get(plugin.format)
+    if allowed_kinds is None:
+        return RuntimeComponentEligibility(
+            kind=kind,
+            eligible=False,
+            reason="FORMAT_UNSUPPORTED",
+        )
+    if kind not in allowed_kinds:
+        return RuntimeComponentEligibility(
+            kind=kind,
+            eligible=False,
+            reason="FORMAT_COMPONENT_UNSUPPORTED",
+        )
+    if not plugin.enabled:
+        return RuntimeComponentEligibility(
+            kind=kind,
+            eligible=False,
+            reason="PLUGIN_DISABLED",
+        )
+    if plugin.trusted_capability_fingerprint != plugin.capability_fingerprint:
+        return RuntimeComponentEligibility(
+            kind=kind,
+            eligible=False,
+            reason="PLUGIN_UNTRUSTED",
+        )
+    if (
+        not isinstance(plugin.package_digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", plugin.package_digest) is None
+        or not isinstance(plugin.capability_fingerprint, str)
+        or re.fullmatch(r"[0-9a-f]{64}", plugin.capability_fingerprint) is None
+    ):
+        return RuntimeComponentEligibility(
+            kind=kind,
+            eligible=False,
+            reason="PLUGIN_IDENTITY_INVALID",
+        )
+    reports = tuple(component for component in plugin.components if component.kind == kind)
+    if not reports:
+        return RuntimeComponentEligibility(
+            kind=kind,
+            eligible=False,
+            reason="COMPONENT_REPORT_MISSING",
+        )
+    if len(reports) != 1:
+        return RuntimeComponentEligibility(
+            kind=kind,
+            eligible=False,
+            reason="COMPONENT_REPORT_AMBIGUOUS",
+        )
+    if capability_fingerprint(plugin.components) != plugin.capability_fingerprint:
+        return RuntimeComponentEligibility(
+            kind=kind,
+            eligible=False,
+            component=reports[0],
+            reason="COMPONENT_FINGERPRINT_DRIFT",
+        )
+    component = reports[0]
+    if component.status not in {"supported", "adapted"}:
+        return RuntimeComponentEligibility(
+            kind=kind,
+            eligible=False,
+            component=component,
+            reason=f"COMPONENT_STATUS_{component.status.upper()}",
+        )
+    if not component.effective:
+        return RuntimeComponentEligibility(
+            kind=kind,
+            eligible=False,
+            component=component,
+            reason="COMPONENT_NOT_EFFECTIVE",
+        )
+    return RuntimeComponentEligibility(
+        kind=kind,
+        eligible=True,
+        component=component,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,12 +315,13 @@ class ExtensionCatalogSnapshot:
 
 
 def capability_fingerprint(components: tuple[PluginComponentReport, ...]) -> str:
-    """仅按能力库存计算 trust 指纹，文档和普通资源变化不会伪造新增权限。"""
+    """按能力库存和执行来源绑定计算 trust 指纹，排除诊断文案等非执行字段。"""
     payload = [
         {
             "kind": component.kind,
             "status": component.status,
             "count": component.count,
+            "sources": list(component.sources),
             "capabilities": list(component.capabilities),
             "effective": component.effective,
         }

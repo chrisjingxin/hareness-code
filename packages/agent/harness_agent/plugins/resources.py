@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -12,10 +13,12 @@ from typing import Mapping
 
 from harness_agent.plugins.common import (
     list_regular_files,
+    parse_qwen_markdown,
     read_json_object,
     safe_package_path,
 )
 from harness_agent.plugins.model import InstalledPlugin, PluginError
+from harness_agent.plugins.mcp_schema import validate_qwen_mcp_server
 from harness_agent.plugins.store import PluginStore
 
 
@@ -27,7 +30,8 @@ _MAX_RESOURCE_TOTAL_BYTES = 32 * 1024 * 1024
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _PLACEHOLDER_RE = re.compile(
     r"\$\{extensionPath\}\$\{/\}|<extensionPath>|"
-    r"\$\{extensionPath\}|\$\{CLAUDE_PLUGIN_ROOT\}"
+    r"\$\{extensionPath\}|\$\{workspacePath\}|"
+    r"\$\{pathSeparator\}|\$\{/\}|\$\{CLAUDE_PLUGIN_ROOT\}"
 )
 _UNKNOWN_PLACEHOLDER_RE = re.compile(r"\$\{[^}]+\}|<[^>\r\n]+>")
 _FRONTMATTER_DESCRIPTION_RE = re.compile(
@@ -206,6 +210,7 @@ class PluginResourceSnapshot:
                 "cwd",
                 "target_paths",
                 "placeholder_targets",
+                "diagnostic",
                 "events",
             ):
                 if key in asset.metadata:
@@ -260,12 +265,23 @@ def build_plugin_resource_snapshot(
     if plugin.format == "qwen-code":
         for dependency_root in sorted(_SAFE_DEPENDENCY_ROOTS):
             dependency_path = root / dependency_root
-            for file in _safe_dependency_files(dependency_path, root):
+            files = (
+                _safe_reference_files(dependency_path, root)
+                if dependency_root == "references"
+                else _safe_dependency_files(dependency_path, root)
+            )
+            for file in files:
                 capture_file(
                     "resources",
                     file.relative_to(root).as_posix(),
                     file,
                 )
+        for field, suffixes in (("commands", (".md",)), ("skills", (".md",))):
+            for path in _qwen_component_paths(root, field):
+                for file in _safe_qwen_files(path, suffixes=suffixes):
+                    if field == "skills" and file.name != "SKILL.md":
+                        continue
+                    capture_file(field, file.relative_to(root).as_posix(), file)
 
     for component in plugin.components:
         if component.kind not in _RESOURCE_KINDS or component.count <= 0:
@@ -348,11 +364,18 @@ def _file_asset(
     if kind == "commands" and package_root is not None:
         try:
             text = content.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise PluginError(
-                "PLUGIN_RESOURCE_ENCODING_INVALID",
-                "Command 静态资源不是有效 UTF-8",
-            ) from exc
+        except UnicodeDecodeError:
+            metadata["diagnostic"] = "PLUGIN_COMPONENT_INVALID: QWEN_MARKDOWN_ENCODING_INVALID"
+            text = ""
+        if strict and text:
+            try:
+                parse_qwen_markdown(
+                    path,
+                    name_hint=_qwen_command_name(relative),
+                    kind="command",
+                )
+            except ValueError as exc:
+                metadata["diagnostic"] = f"PLUGIN_COMPONENT_INVALID: {exc}"
         resolved = _resolve_known_placeholder(
             text,
             virtual_root,
@@ -388,6 +411,86 @@ def _safe_dependency_files(path: Path, root: Path) -> tuple[Path, ...]:
         for file in files
         if _safe_dependency_relative(file.relative_to(root).as_posix())
     )
+
+
+def _safe_reference_files(path: Path, root: Path) -> tuple[Path, ...]:
+    """只列出 Qwen Skill 顶层 references Markdown，不递归 origin 素材。"""
+    if path.is_symlink() or not path.is_dir():
+        return ()
+    try:
+        entries = sorted(path.iterdir(), key=lambda item: item.name)
+    except OSError:
+        return ()
+    return tuple(
+        item
+        for item in entries
+        if not item.is_symlink()
+        and item.is_file()
+        and item.suffix.lower() == ".md"
+        and _safe_dependency_relative(item.relative_to(root).as_posix())
+    )
+
+
+def _qwen_component_paths(root: Path, field: str) -> tuple[Path, ...]:
+    """按 Qwen/DevAgent 清单解析 commands/skills 的候选根。"""
+    manifest_paths = [
+        root / name
+        for name in ("qwen-extension.json", "devagent-extension.json")
+        if (root / name).is_file()
+    ]
+    if len(manifest_paths) != 1:
+        return ()
+    try:
+        manifest = read_json_object(root, manifest_paths[0].name)
+        value = manifest.get(field)
+        if value is None:
+            values = (field,) if (root / field).exists() else ()
+        elif isinstance(value, str):
+            values = (value,)
+        elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+            values = tuple(value)
+        else:
+            return ()
+        paths: list[Path] = []
+        for relative in values:
+            try:
+                paths.append(safe_package_path(root, relative, require_exists=True))
+            except PluginError:
+                continue
+        return tuple(paths)
+    except PluginError:
+        return ()
+
+
+def _qwen_command_name(relative: str) -> str:
+    """把静态 Qwen Command 来源转换为 front matter 校验名。"""
+    parts = relative.replace("\\", "/").split("/")
+    if "commands" in parts:
+        parts = parts[parts.index("commands") + 1 :]
+    if parts and parts[-1].lower().endswith(".md"):
+        parts[-1] = parts[-1][:-3]
+    return ":".join(part for part in parts if part)
+
+
+def _safe_qwen_files(path: Path, *, suffixes: tuple[str, ...]) -> tuple[Path, ...]:
+    """静态预览扫描不跟随 Qwen 包内 symlink，并保留其他条目。"""
+    if path.is_symlink() or not path.exists():
+        return ()
+    if path.is_file():
+        return (path,) if path.suffix.lower() in suffixes else ()
+    if not path.is_dir():
+        return ()
+    files: list[Path] = []
+    for directory, dir_names, file_names in os.walk(path, followlinks=False):
+        directory_path = Path(directory)
+        dir_names[:] = [
+            name for name in dir_names if not (directory_path / name).is_symlink()
+        ]
+        for name in sorted(file_names):
+            file = directory_path / name
+            if not file.is_symlink() and file.suffix.lower() in suffixes:
+                files.append(file)
+    return tuple(files)
 
 
 def _safe_dependency_relative(relative: str) -> bool:
@@ -465,14 +568,30 @@ def _mcp_assets(
         for raw_name, raw_server in sorted(raw_servers.items(), key=lambda item: str(item[0])):
             if not isinstance(raw_name, str) or not raw_name.strip() or not isinstance(raw_server, Mapping):
                 continue
-            metadata = _mcp_metadata(
-                raw_name,
-                raw_server,
-                virtual_root,
-                package_root=root,
-                strict=plugin.format == "qwen-code",
-                available_relatives=available_relatives,
-            )
+            try:
+                if plugin.format == "qwen-code":
+                    validate_qwen_mcp_server(raw_name, raw_server, root=root)
+                metadata = _mcp_metadata(
+                    raw_name,
+                    raw_server,
+                    virtual_root,
+                    package_root=root,
+                    strict=plugin.format == "qwen-code",
+                    available_relatives=available_relatives,
+                )
+            except PluginError as exc:
+                # 静态资源快照不能让一个坏 MCP server 阻断同包其他条目；
+                # 只保留稳定 code 供 disabled/invalid preview 展示。
+                metadata = {
+                    "server": raw_name,
+                    "transport": (
+                        raw_server.get("type", "stdio")
+                        if isinstance(raw_server, Mapping)
+                        else "unknown"
+                    ),
+                    "runnable": False,
+                    "diagnostic": exc.code,
+                }
             if metadata is None:
                 continue
             content = _json_bytes(metadata)
@@ -695,6 +814,10 @@ def _resolve_known_placeholder(
     targets: list[str] = []
     cursor = 0
     for match in matches:
+        if match.start() < cursor:
+            # 上一个 root token 已经消费了其后的 `${/}`/`${pathSeparator}`
+            # 和同一路径后缀；不要再次处理被消费的嵌套 match。
+            continue
         prefix = value[cursor : match.start()]
         if strict and _prefix_contains_host_path(prefix):
             raise PluginError(
@@ -707,19 +830,37 @@ def _resolve_known_placeholder(
                 f"{field} 的 token 不是独立路径片段",
             )
         output.append(prefix)
+        if match.group() in {"${/}", "${pathSeparator}"}:
+            output.append("/")
+            cursor = match.end()
+            continue
         suffix_end = _placeholder_suffix_end(value, match.end())
         raw_suffix = value[match.end() : suffix_end]
-        normalized_suffix = raw_suffix.replace("${/}", "/").replace("\\", "/")
-        target = _placeholder_target(
-            normalized_suffix,
-            package_root=package_root,
-            strict=strict,
-            available_relatives=available_relatives,
-            field=field,
+        normalized_suffix = (
+            raw_suffix
+            .replace("${/}", "/")
+            .replace("${pathSeparator}", "/")
+            .replace("\\", "/")
+        )
+        target = (
+            _placeholder_target(
+                normalized_suffix,
+                package_root=package_root,
+                strict=strict,
+                available_relatives=available_relatives,
+                field=field,
+            )
+            if match.group() not in {"${workspacePath}", "<workspacePath>"}
+            else None
         )
         if target is not None:
             targets.append(target)
-        replacement = virtual_root + (
+        replacement_root = (
+            "/.harness/workspace"
+            if match.group() in {"${workspacePath}", "<workspacePath>"}
+            else virtual_root
+        )
+        replacement = replacement_root + (
             "/" if match.group().endswith("${/}") else ""
         )
         output.append(replacement + normalized_suffix)
@@ -732,7 +873,7 @@ def _unknown_root_placeholder(
     value: str,
     known_matches: list[re.Match[str]],
 ) -> str | None:
-    """只把路径形状的未知 token 视为根 token，避免误伤普通命令文案。"""
+    """只把路径形状的未知根 token 视为资源 token，保留 Markdown 文案占位符。"""
     known_ranges = [(match.start(), match.end()) for match in known_matches]
     for match in _UNKNOWN_PLACEHOLDER_RE.finditer(value):
         if any(
@@ -743,6 +884,13 @@ def _unknown_root_placeholder(
         token = match.group(0)
         after = value[match.end() : match.end() + 1]
         name = token.lower()
+        # `<模板目录名>` 这类人类可读占位符可以出现在命令正文的工作区
+        # 示例中；它不是 Plugin root token，也不会被本阶段执行或替换。
+        # `${UNKNOWN_ROOT}` 等 shell/配置风格 token 仍按路径规则拒绝。
+        if token.startswith("<") and not any(
+            marker in name for marker in ("root", "extension", "plugin")
+        ):
+            continue
         if after in {"/", "\\"} or any(
             marker in name for marker in ("root", "extension", "plugin")
         ):
@@ -756,6 +904,9 @@ def _placeholder_suffix_end(value: str, start: int) -> int:
     while index < len(value):
         if value.startswith("${/}", index):
             index += len("${/}")
+            continue
+        if value.startswith("${pathSeparator}", index):
+            index += len("${pathSeparator}")
             continue
         if value.startswith("${", index) or value.startswith("<", index):
             break

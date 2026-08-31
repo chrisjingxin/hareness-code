@@ -5,6 +5,8 @@ import { readFile } from "node:fs/promises"
 import { resolve } from "node:path"
 import {
   assertEventEnvelope,
+  OPERATION_MIN_MINOR,
+  PROTOCOL_VERSION,
   validateInteractionParams,
   validateInteractionResult,
   validateOperationParams,
@@ -23,6 +25,11 @@ type Fixture = {
 const fixtures = JSON.parse(
   await readFile(resolve(import.meta.dir, "../../../protocol/fixtures/v3-contract.json"), "utf8"),
 ) as { valid: Fixture[]; invalid: Fixture[] }
+
+test("Settings RPC 在 canonical v3 contract 中要求 minor 7", () => {
+  expect(PROTOCOL_VERSION).toEqual({ major: 3, minor: 7 })
+  expect(OPERATION_MIN_MINOR["commands.bind"]).toBe(6)
+})
 
 test("TypeScript 接受全部共享有效 fixture", () => {
   for (const fixture of fixtures.valid) expect(() => validate(fixture)).not.toThrow()
@@ -67,6 +74,65 @@ test("run.started 回传实际工作模式", () => {
   })
   expect(() => assertEventEnvelope(envelope({ resumed: false }))).toThrow()
   expect(() => assertEventEnvelope(envelope({ resumed: false, mode: "compose" }))).not.toThrow()
+})
+
+test("Plugin Command provenance 只接受稳定四字段，普通事件 shape 不变", () => {
+  const provenance = {
+    plugin_id: "local/ZA38",
+    package_digest: "a".repeat(64),
+    command_id: "plugin/local/ZA38/command/za38-sdd",
+    snapshot_id: "snapshot-1",
+  }
+  const base = {
+    event_id: "e-provenance",
+    thread_id: "t",
+    run_id: "r",
+    sequence: 1,
+    timestamp_ms: 1,
+  }
+  expect(() => assertEventEnvelope({
+    ...base,
+    type: "run.started",
+    payload: { mode: "build", resumed: false, command_provenance: provenance },
+  })).not.toThrow()
+  expect(() => assertEventEnvelope({
+    ...base,
+    type: "skill.loaded",
+    payload: {
+      skill_id: "plugin/local/ZA38/command/za38-sdd",
+      source: "plugin:local/ZA38",
+      version: "0.2.0",
+      snapshot_id: "snapshot-1",
+      provenance,
+    },
+  })).not.toThrow()
+  expect(() => assertEventEnvelope({
+    ...base,
+    type: "skill.loaded",
+    payload: {
+      skill_id: "plugin/local/ZA38/skill/za38-framework",
+      source: "plugin:local/ZA38",
+      version: "0.2.0",
+      snapshot_id: "snapshot-1",
+      provenance: { ...provenance, command_id: null },
+    },
+  })).not.toThrow()
+  // Non-plugin/non-command 的旧 payload 仍不需要伪造 provenance。
+  expect(() => assertEventEnvelope({
+    ...base,
+    type: "run.started",
+    payload: { mode: "build", resumed: false },
+  })).not.toThrow()
+  expect(() => assertEventEnvelope({
+    ...base,
+    type: "skill.loaded",
+    payload: { skill_id: "builtin/review", source: "builtin", version: null, snapshot_id: "snapshot-1" },
+  })).not.toThrow()
+  expect(() => assertEventEnvelope({
+    ...base,
+    type: "run.started",
+    payload: { mode: "build", resumed: false, command_provenance: { ...provenance, body: "secret" } },
+  })).toThrow()
 })
 
 test("compose_scope 与 compose.summary 合法；非法 scope 与越界摘要被拒绝", () => {

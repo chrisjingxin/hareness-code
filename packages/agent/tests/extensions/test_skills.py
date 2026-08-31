@@ -733,6 +733,7 @@ async def test_marketplace_install_extraction_failure_keeps_existing_skill(
 async def test_explicit_skill_run_emits_loaded_event_before_content(tmp_path: Path):
     """显式 requested_skill 在正文输出前发出独立 skill.loaded 事件。"""
     from harness_agent.host.agent_host import AgentHost
+    from harness_agent.protocol.generated import EventEnvelope
 
     workspace = tmp_path / "workspace"
     _write_skill(workspace / ".harness" / "skills", "review", "先检查代码。")
@@ -778,6 +779,8 @@ async def test_explicit_skill_run_emits_loaded_event_before_content(tmp_path: Pa
             break
         await asyncio.sleep(0.01)
     events = [frame["params"] for frame in frames if frame.get("method") == "event"]
+    for event in events:
+        EventEnvelope.model_validate(event)
     assert [event["type"] for event in events] == [
         "run.started",
         "run.progress",
@@ -786,6 +789,7 @@ async def test_explicit_skill_run_emits_loaded_event_before_content(tmp_path: Pa
         "run.completed",
     ]
     assert events[2]["payload"]["skill_id"] == "project/review"
+    assert "provenance" not in events[2]["payload"]
     assert "/.harness/skills/project/review/SKILL.md" in events[3]["payload"]["text"]
 
 
@@ -971,4 +975,3 @@ def test_registry_list_filters_builtin_by_default(tmp_path: Path):
     # 3. resolve 依然能直接定位 builtin 项
     resolved = registry.resolve("builtin/spec-driven-development")
     assert resolved.skill_id == "builtin/spec-driven-development"
-

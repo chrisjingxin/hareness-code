@@ -64,6 +64,7 @@ from harness_agent.runtime.execution_binding import (
 from harness_agent.runtime.run_context import RunCancellationToken, RunContext
 from harness_agent.runtime.approval_presentation import ApprovalPresentationStore
 from harness_agent.extensions.skills import LoadedSkill
+from harness_agent.protocol.generated import PROTOCOL_MINOR
 from harness_agent.threads.thread_persistence import (
     AcceptRun,
     ThreadPersistenceError,
@@ -231,10 +232,12 @@ class ConnectionRef:
 
 @dataclass(frozen=True, slots=True)
 class RequestedSkill:
-    """用户在 run.start 中显式选择的 Skill。"""
+    """用户在 run.start 中显式选择的 Skill 或 Plugin Command。"""
 
     skill_id: str
     args: str = ""
+    raw_invocation: str | None = None
+    command_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,6 +249,16 @@ class StartRun:
     message: str
     mode: InteractionMode
     requested_skill: RequestedSkill | None = None
+    # Preparation 在 Coordinator 的异步任务中执行，不能依赖当前 ContextVar；
+    # 只携带 Connection 身份以读取 Host 已登记的 command binding。
+    connection_id: str | None = None
+    # run.start 受理时复制本连接的 immutable binding，避免准备期间的连接状态变化
+    # 影响已经提交的 Run。
+    command_binding_snapshot_id: str | None = None
+    command_bindings: Mapping[str, str] | None = None
+    # Plugin Command 的 provenance 属于当前未发布 v3.7 契约；旧 minor
+    # 连接不能在已协商成功后收到它，因此在准备阶段先 fail closed。
+    protocol_minor: int = PROTOCOL_MINOR
     requested_primary_profile: str | None = None
     requested_approval_mode: ApprovalMode | None = None
 
@@ -264,6 +277,13 @@ class StartRun:
             self.mode,
             skill.skill_id if skill else None,
             skill.args if skill else None,
+            skill.raw_invocation if skill else None,
+            skill.command_name if skill else None,
+            self.command_binding_snapshot_id,
+            self.command_bindings.get(skill.skill_id)
+            if skill is not None and self.command_bindings is not None
+            else None,
+            self.protocol_minor,
             self.requested_primary_profile,
             self.requested_approval_mode,
         )

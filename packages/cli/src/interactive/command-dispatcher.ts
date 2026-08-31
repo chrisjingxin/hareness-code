@@ -88,10 +88,16 @@ export function dispatchSlashCommand(
 
   if (definition.source.type === "plugin" && definition.requestedSkillId) {
     const args = command.argument?.trim() ?? ""
+    const rawInvocation = command.rawInvocation ?? `/${definition.name}${args ? ` ${args}` : ""}`
     return {
       type: "submit-prompt",
-      prompt: args || `执行 Plugin Command /${definition.name}`,
-      requestedSkill: { id: definition.requestedSkillId, args },
+      prompt: rawInvocation,
+      requestedSkill: {
+        id: definition.requestedSkillId,
+        args,
+        raw_invocation: rawInvocation,
+        command_name: definition.name,
+      },
     }
   }
   const handler = builtinHandlers[definition.id]

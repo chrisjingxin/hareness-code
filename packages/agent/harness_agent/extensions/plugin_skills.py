@@ -18,6 +18,11 @@ from typing import Any, Protocol
 
 import yaml
 
+from harness_agent.plugins.common import (
+    QWEN_COMMAND_ARGUMENT_MAX_BYTES,
+    parse_qwen_markdown,
+)
+
 from harness_agent.skills.builtin_catalog import (
     BuiltinSkillBundle,
     BuiltinSkillBundleError,
@@ -137,6 +142,8 @@ class PluginSkillSource:
     canonical_suffix: str | None = None
     force_user_invocable: bool | None = None
     force_model_invocable: bool | None = None
+    resource_roots: tuple[tuple[Path, str], ...] = ()
+    resource_files: tuple[tuple[Path, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +167,28 @@ class LoadedSkill:
             "resource_hint": "Read supporting files through the /.harness/skills virtual path.",
         }
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    def rendered_body(self) -> str:
+        """只为 Command 展开一次 args；不再次解释 Markdown 或占位符。"""
+        if self.record.kind != "command":
+            return self.body
+        rendered = (
+            self.body.replace("{{args}}", self.args)
+            if "{{args}}" in self.body
+            else (f"{self.body}\n\n{self.args}" if self.args else self.body)
+        )
+        if len(rendered.encode("utf-8")) > MAX_SKILL_FILE_BYTES:
+            raise SkillError("COMMAND_RENDERED_BODY_TOO_LARGE")
+        return rendered
+
+    def provenance(self) -> dict[str, object]:
+        """返回可进入 Run 事件的稳定来源摘要，不泄露 store 路径。"""
+        return {
+            "plugin_id": self.record.source.removeprefix("plugin:"),
+            "package_digest": self.record.package_digest,
+            "command_id": self.record.skill_id if self.record.kind == "command" else None,
+            "snapshot_id": self.snapshot_id,
+        }
 
 
 class SkillRegistry:
@@ -336,6 +365,8 @@ class SkillRegistry:
         body = _manifest_body(content, record.dialect)
         if not body:
             raise SkillError(f'Skill "{record.skill_id}" has an empty body')
+        if record.kind == "command" and len(args.encode("utf-8")) > QWEN_COMMAND_ARGUMENT_MAX_BYTES:
+            raise SkillError("COMMAND_ARGUMENT_TOO_LARGE")
         return LoadedSkill(
             record=record,
             body=body,
@@ -346,14 +377,19 @@ class SkillRegistry:
     def agent_commands(self) -> list[dict[str, object]]:
         """把 command record 转为不含正文和路径的 Host 命令快照。"""
         commands: list[dict[str, object]] = []
-        for record in self.records:
+        for record in sorted(self.records, key=lambda item: item.skill_id):
             if record.kind != "command" or not record.enabled:
                 continue
             plugin_id = record.source.removeprefix("plugin:")
+            name = (
+                record.name
+                if record.dialect == "qwen-command"
+                else f"plugin:{plugin_id.replace('/', ':')}:{record.name}"
+            )
             commands.append(
                 {
                     "id": record.skill_id,
-                    "name": f"plugin:{plugin_id.replace('/', ':')}:{record.name}",
+                    "name": name,
                     "description": record.description,
                     "argument_hint": record.argument_hint,
                     "requested_skill_id": record.skill_id,
@@ -680,11 +716,23 @@ class SkillRegistry:
                 diagnostics.append(f"duplicate Skill ignored: {skill_id}")
             else:
                 records[skill_id] = record
-                self._capture_snapshot(record, diagnostics)
+                self._capture_snapshot(
+                    record,
+                    diagnostics,
+                    resource_roots=source.resource_roots,
+                    resource_files=source.resource_files,
+                )
         except (OSError, SkillError, yaml.YAMLError) as exc:
             diagnostics.append(f"plugin:{source.plugin_id}/{source.name}: {exc}")
 
-    def _capture_snapshot(self, record: SkillRecord, diagnostics: list[str]) -> None:
+    def _capture_snapshot(
+        self,
+        record: SkillRecord,
+        diagnostics: list[str],
+        *,
+        resource_roots: tuple[tuple[Path, str], ...] = (),
+        resource_files: tuple[tuple[Path, str], ...] = (),
+    ) -> None:
         """在 catalog 建立时捕获 manifest 与普通资源，保证 Run 读到 immutable 内容。"""
         try:
             manifest = record.manifest.read_bytes()
@@ -723,9 +771,118 @@ class SkillRegistry:
                         break
                     resources[relative] = path.read_bytes()
                     total_bytes += size
+            for extra_root, prefix in resource_roots:
+                total_bytes = self._capture_extra_resources(
+                    resources,
+                    diagnostics,
+                    record,
+                    extra_root,
+                    prefix,
+                    total_bytes,
+                )
+            for resource_file, relative in resource_files:
+                total_bytes = self._capture_extra_file(
+                    resources,
+                    diagnostics,
+                    record,
+                    resource_file,
+                    relative,
+                    total_bytes,
+                )
             self._snapshot_resources[record.skill_id] = resources
         except (OSError, SkillError) as exc:
             diagnostics.append(f"{record.skill_id}: snapshot capture failed: {exc}")
+
+    def _capture_extra_resources(
+        self,
+        resources: dict[str, bytes],
+        diagnostics: list[str],
+        record: SkillRecord,
+        root: Path,
+        prefix: str,
+        total_bytes: int,
+    ) -> int:
+        """捕获 Adapter 已声明的包级只读资源，并拒绝链接/秘密文件。"""
+        if root.is_symlink() or not root.is_dir():
+            if root.exists() or root.is_symlink():
+                diagnostics.append(f"{record.skill_id}: resource root {prefix} is invalid")
+            return total_bytes
+        for directory, dir_names, file_names in os.walk(root, followlinks=False):
+            directory_path = Path(directory)
+            dir_names[:] = [
+                name
+                for name in dir_names
+                if not (directory_path / name).is_symlink()
+                and _safe_resource_relative(f"{prefix}/{name}")
+            ]
+            for name in sorted(file_names):
+                path = directory_path / name
+                relative = f"{prefix}/{path.relative_to(root).as_posix()}"
+                if path.is_symlink() or not _safe_resource_relative(relative):
+                    continue
+                if relative in resources:
+                    continue
+                if len(resources) >= MAX_SNAPSHOT_RESOURCE_FILES:
+                    diagnostics.append(
+                        f"{record.skill_id}: skill resource file limit reached"
+                    )
+                    return total_bytes
+                try:
+                    size = path.stat().st_size
+                    if size > MAX_RESOURCE_BYTES:
+                        diagnostics.append(
+                            f"{record.skill_id}: resource {relative} exceeds size limit"
+                        )
+                        continue
+                    if total_bytes + size > MAX_SNAPSHOT_RESOURCE_TOTAL_BYTES:
+                        diagnostics.append(
+                            f"{record.skill_id}: skill resource byte limit reached"
+                        )
+                        return total_bytes
+                    resources[relative] = path.read_bytes()
+                    total_bytes += size
+                except OSError as exc:
+                    diagnostics.append(
+                        f"{record.skill_id}: resource {relative} capture failed: {exc}"
+                    )
+        return total_bytes
+
+    def _capture_extra_file(
+        self,
+        resources: dict[str, bytes],
+        diagnostics: list[str],
+        record: SkillRecord,
+        path: Path,
+        relative: str,
+        total_bytes: int,
+    ) -> int:
+        """捕获 Adapter 精确列出的资源文件，不递归其父目录。"""
+        if path.is_symlink() or not path.is_file() or not _safe_resource_relative(relative):
+            if path.exists() or path.is_symlink():
+                diagnostics.append(f"{record.skill_id}: resource {relative} is invalid")
+            return total_bytes
+        if relative in resources:
+            return total_bytes
+        if len(resources) >= MAX_SNAPSHOT_RESOURCE_FILES:
+            diagnostics.append(f"{record.skill_id}: skill resource file limit reached")
+            return total_bytes
+        try:
+            size = path.stat().st_size
+            if size > MAX_RESOURCE_BYTES:
+                diagnostics.append(
+                    f"{record.skill_id}: resource {relative} exceeds size limit"
+                )
+                return total_bytes
+            if total_bytes + size > MAX_SNAPSHOT_RESOURCE_TOTAL_BYTES:
+                diagnostics.append(f"{record.skill_id}: skill resource byte limit reached")
+                return total_bytes
+            resources[relative] = path.read_bytes()
+            return total_bytes + size
+        except OSError as exc:
+            diagnostics.append(
+                f"{record.skill_id}: resource {relative} capture failed: {exc}"
+            )
+            return total_bytes
 
     def _read_state(self) -> dict[str, object]:
         """读取版本化启停状态；损坏状态按空状态处理并保持 fail-closed。"""
@@ -799,6 +956,24 @@ def _parse_manifest(
 ) -> dict[str, Any]:
     """解析并限制 SKILL.md 的 front matter。"""
     content = _read_limited_text(path, MAX_SKILL_FILE_BYTES)
+    if dialect in {"qwen-command", "qwen-skill"}:
+        try:
+            parsed = parse_qwen_markdown(
+                path,
+                name_hint=name_hint,
+                kind="command" if dialect == "qwen-command" else "skill",
+            )
+        except ValueError as exc:
+            raise SkillError(str(exc)) from exc
+        return {
+            "name": parsed["name"],
+            "description": parsed["description"],
+            "version": parsed["version"],
+            "user_invocable": bool(parsed["user_invocable"]),
+            "model_invocable": bool(parsed["model_invocable"]),
+            "argument_hint": parsed["argument_hint"],
+            "requested_tools": tuple(parsed.get("requested_tools", ())),
+        }
     match = _FRONTMATTER_RE.match(content)
     if match is None:
         if dialect != "claude-command":
@@ -900,7 +1075,7 @@ def _manifest_body(content: str, dialect: str) -> str:
     match = _FRONTMATTER_RE.match(content)
     if match is not None:
         return match.group("body").strip()
-    if dialect == "claude-command":
+    if dialect in {"claude-command", "qwen-command", "qwen-skill"}:
         return content.strip()
     raise SkillError("Skill manifest is no longer valid")
 
@@ -939,6 +1114,21 @@ def _regular_dirs(root: Path) -> list[Path]:
         return [entry for entry in root.iterdir() if entry.is_dir() and not entry.is_symlink()]
     except OSError:
         return []
+
+
+def _safe_resource_relative(relative: str) -> bool:
+    """拒绝快照中的隐藏、凭据和越界资源名称。"""
+    parts = Path(relative.replace("\\", "/")).parts
+    if not parts or ".." in parts or any(part.startswith(".") for part in parts):
+        return False
+    filename = parts[-1].lower()
+    if filename == ".env" or filename.startswith(".env."):
+        return False
+    if filename in {"credentials", "credentials.json", "secrets.json"}:
+        return False
+    if filename.endswith((".pem", ".key", ".p12", ".pfx")):
+        return False
+    return True
 
 
 def _marketplace_providers() -> dict[str, SkillMarketplaceProvider]:

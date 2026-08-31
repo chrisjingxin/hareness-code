@@ -3,7 +3,7 @@
 export type Command =
   | { kind: "run"; message?: string; nonInteractive: boolean; json: boolean; cwd: string; configPath?: string; resume: boolean; sandbox?: "remote" | false }
   | { kind: "config.show" | "config.path"; cwd: string; configPath?: string; params?: Record<string, unknown> }
-  | { kind: SkillCommandKind | PluginCommandKind; cwd: string; configPath?: string; params: Record<string, unknown> }
+  | { kind: SkillCommandKind | PluginCommandKind; cwd: string; configPath?: string; params: Record<string, unknown>; secretStdin?: boolean }
   | {
       kind: "logs"
       cwd: string
@@ -34,6 +34,9 @@ export type PluginCommandKind =
   | "plugins.install"
   | "plugins.set_enabled"
   | "plugins.remove"
+  | "plugins.settings.list"
+  | "plugins.settings.set"
+  | "plugins.settings.remove"
 
 /** 解析交互、无头执行和配置管理命令，并保留工作区与配置路径。 */
 export function parseArgs(argv: string[], cwd = process.cwd()): Command {
@@ -120,6 +123,7 @@ function parsePluginsCommand(args: string[], cwd: string): Command {
   const action = args[0] ?? "list"
   const workspace = optionValue(args, "--workspace") ?? optionValue(args, "--cwd") ?? cwd
   const configPath = optionValue(args, "--config")
+  if (action === "settings") return parsePluginSettingsCommand(args.slice(1), workspace, configPath)
   if (action === "list") {
     return {
       kind: "plugins.list",
@@ -174,7 +178,139 @@ function parsePluginsCommand(args: string[], cwd: string): Command {
       },
     }
   }
-  throw new Error("Usage: harness plugins <list|inspect|validate|install|enable|disable|remove>")
+  throw new Error("Usage: harness plugins <list|inspect|validate|install|enable|disable|remove|settings>")
+}
+
+/** 解析 Settings 管理命令；值只从受控 stdin/TTY 读取，不进入 argv 或解析结果。 */
+function parsePluginSettingsCommand(
+  args: string[],
+  cwd: string,
+  configPath: string | undefined,
+): Command {
+  const action = args[0] ?? "list"
+  if (action !== "list" && action !== "set" && action !== "remove") {
+    throw new Error("Usage: harness plugins settings <list|set|remove>")
+  }
+  validateSettingOptions(args, action)
+  const scope = settingsScope(args)
+  if (action === "list") {
+    rejectUnexpectedSettingPositionals(args, 0)
+    return { kind: "plugins.settings.list", cwd, configPath, params: { scope } }
+  }
+  const positionals = settingPositionals(args)
+  if (positionals.length < 2) {
+    throw new Error(`harness plugins settings ${action} requires a Plugin id and setting key`)
+  }
+  if (positionals.length > 2) {
+    throw new Error("Plugin Settings does not accept a value in argv; use --secret-stdin")
+  }
+  const pluginId = positionals[0]!
+  const settingKey = positionals[1]!
+  const packageDigest = requiredOption(args, "--package-digest")
+  const declarationDigest = requiredOption(args, "--declaration-digest")
+  const expectedRevision = requiredNonNegativeInteger(args, "--expected-store-revision")
+  return {
+    kind: `plugins.settings.${action}`,
+    cwd,
+    configPath,
+    params: {
+      scope,
+      plugin_id: pluginId,
+      setting_key: settingKey,
+      env_var: settingKey,
+      package_digest: packageDigest,
+      declaration_digest: declarationDigest,
+      expected_store_revision: expectedRevision,
+    },
+    secretStdin: action === "set" && hasOption(args, "--secret-stdin"),
+  }
+}
+
+/** 读取并校验 Settings 作用域；workspace 通过当前 --workspace/cwd 绑定。 */
+function settingsScope(args: string[]): "user" | "workspace" {
+  const value = optionValue(args, "--scope") ?? "user"
+  if (value !== "user" && value !== "workspace") throw new Error("--scope only supports user or workspace")
+  return value
+}
+
+type PluginSettingsAction = "list" | "set" | "remove"
+
+const SETTING_COMMON_VALUE_OPTIONS = ["--scope", "--workspace", "--cwd", "--config"] as const
+const SETTING_MUTATION_VALUE_OPTIONS = [
+  "--package-digest",
+  "--declaration-digest",
+  "--expected-store-revision",
+] as const
+
+/** 按 Settings action 建立唯一 option 白名单，未知/重复/缺值一律在解析期失败。 */
+function validateSettingOptions(args: string[], action: PluginSettingsAction): void {
+  const valueOptions = new Set<string>([
+    ...SETTING_COMMON_VALUE_OPTIONS,
+    ...(action === "list" ? [] : SETTING_MUTATION_VALUE_OPTIONS),
+  ])
+  const flagOptions = action === "set" ? new Set(["--secret-stdin"]) : new Set<string>()
+  const allowed = new Set<string>([...valueOptions, ...flagOptions])
+  const seen = new Set<string>()
+  for (let index = 1; index < args.length; index += 1) {
+    const token = args[index]!
+    if (!token.startsWith("-")) continue
+    if (!allowed.has(token)) {
+      throw new Error(`harness plugins settings ${action} does not support ${token}`)
+    }
+    if (seen.has(token)) {
+      throw new Error(`${token} may only be specified once`)
+    }
+    seen.add(token)
+    if (!valueOptions.has(token)) continue
+    const value = args[index + 1]
+    if (!value || value.startsWith("-")) throw new Error(`${token} requires a value`)
+    index += 1
+  }
+  if (seen.has("--workspace") && seen.has("--cwd")) {
+    throw new Error("--workspace and --cwd are mutually exclusive")
+  }
+}
+
+/** 获取 Settings 命令的两个非选项身份字段。 */
+function settingPositionals(args: string[]): string[] {
+  const valueOptions = new Set([
+    "--scope", "--workspace", "--cwd", "--config", "--package-digest",
+    "--declaration-digest", "--expected-store-revision",
+  ])
+  const values: string[] = []
+  for (let index = 1; index < args.length; index += 1) {
+    const value = args[index]
+    if (valueOptions.has(value!)) {
+      index += 1
+      continue
+    }
+    if (value === "--secret-stdin") continue
+    if (value && !value.startsWith("-")) values.push(value)
+  }
+  return values
+}
+
+/** 拒绝只读 Settings 命令携带的多余身份或潜在秘密。 */
+function rejectUnexpectedSettingPositionals(args: string[], expected: number): void {
+  if (settingPositionals(args).length !== expected) {
+    throw new Error("harness plugins settings list accepts only --scope")
+  }
+}
+
+/** 读取必需的非秘密 option。 */
+function requiredOption(args: string[], name: string): string {
+  const value = optionValue(args, name)
+  if (!value) throw new Error(`harness plugins settings requires ${name}`)
+  return value
+}
+
+/** 读取 CAS revision，拒绝负数、浮点数和隐式转换。 */
+function requiredNonNegativeInteger(args: string[], name: string): number {
+  const value = requiredOption(args, name)
+  if (!/^\d+$/.test(value)) throw new Error(`${name} requires a non-negative integer`)
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed)) throw new Error(`${name} is too large`)
+  return parsed
 }
 
 /** 读取指定位置的非开关参数，避免把选项值误当成资源名称。 */
@@ -187,6 +323,10 @@ function positionalValue(args: string[], message: string): string {
     "--version",
     "--format",
     "--capability-fingerprint",
+    "--scope",
+    "--package-digest",
+    "--declaration-digest",
+    "--expected-store-revision",
   ])
   for (let index = 1; index < args.length; index += 1) {
     const value = args[index]

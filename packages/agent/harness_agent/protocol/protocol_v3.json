@@ -9,6 +9,7 @@
     "max_tool_payload_bytes": 1048576,
     "operations": {
       "initialize": { "params": "#/$defs/initializeParams", "result": "#/$defs/initializeResult" },
+      "commands.bind": { "params": "#/$defs/commandBindingsParams", "result": "#/$defs/commandBindingsResult", "min_minor": 6 },
       "run.start": { "params": "#/$defs/runStartParams", "result": "#/$defs/runStartResult", "controlled": true },
       "run.cancel": { "params": "#/$defs/runCancelParams", "result": "#/$defs/runCancelResult", "capability": "run.cancel", "controlled": true },
       "context.compact": { "params": "#/$defs/contextCompactParams", "result": "#/$defs/contextCompactResult", "capability": "context.manage", "controlled": true },
@@ -17,6 +18,9 @@
       "config.details": { "params": "#/$defs/emptyParams", "result": "#/$defs/configDetailsResult", "capability": "config.write" },
       "config.preview": { "params": "#/$defs/configPreviewParams", "result": "#/$defs/configPreviewResult", "capability": "config.write", "controlled": true },
       "config.commit": { "params": "#/$defs/configCommitParams", "result": "#/$defs/configCommitResult", "capability": "config.write", "controlled": true },
+      "settings.list": { "params": "#/$defs/settingsListParams", "result": "#/$defs/settingsListResult", "capability": "settings.read", "min_minor": 7 },
+      "settings.set": { "params": "#/$defs/settingsSetParams", "result": "#/$defs/settingsMutationResult", "capability": "settings.manage", "controlled": true, "min_minor": 7 },
+      "settings.remove": { "params": "#/$defs/settingsRemoveParams", "result": "#/$defs/settingsMutationResult", "capability": "settings.manage", "controlled": true, "min_minor": 7 },
       "threads.list": { "params": "#/$defs/threadsListParams", "result": "#/$defs/threadsListResult", "capability": "threads.read" },
       "threads.open": { "params": "#/$defs/threadsOpenParams", "result": "#/$defs/threadsOpenResult", "capability": "threads.read" },
       "threads.watch": { "params": "#/$defs/threadsOpenParams", "result": "#/$defs/threadsOpenResult", "capability": "threads.read" },
@@ -80,7 +84,7 @@
       "run.cancel", "run.multithread", "host.control", "config.read", "config.write", "threads.read",
       "context.manage", "skills.read", "skills.manage", "mcp.read", "mcp.manage",
       "plugins.read", "plugins.manage", "agents.read", "teams.read", "teams.manage",
-      "models.read", "models.select", "host.attach"
+      "models.read", "models.select", "host.attach", "settings.read", "settings.manage"
     ],
     "error_codes": {
       "CONTROL_NOT_HOLDER": { "jsonrpc_code": -32008, "retryable": true },
@@ -91,7 +95,28 @@
       "CONNECTION_RUN_BUSY": { "jsonrpc_code": -32000, "retryable": true },
       "COMPOSE_NOTHING_TO_ABANDON": { "jsonrpc_code": -32004, "retryable": false },
       "COMPOSE_NEW_WORK_GOAL_REQUIRED": { "jsonrpc_code": -32004, "retryable": false },
-      "COMPOSE_ABANDON_TAKES_NO_GOAL": { "jsonrpc_code": -32004, "retryable": false }
+      "COMPOSE_ABANDON_TAKES_NO_GOAL": { "jsonrpc_code": -32004, "retryable": false },
+      "PROTOCOL_MINOR_REQUIRED": { "jsonrpc_code": -32003, "retryable": false },
+      "SETTINGS_PROTOCOL_MINOR_REQUIRED": { "jsonrpc_code": -32003, "retryable": false },
+      "SETTINGS_CAPABILITY_REQUIRED": { "jsonrpc_code": -32002, "retryable": false },
+      "SETTINGS_SCOPE_INVALID": { "jsonrpc_code": -32602, "retryable": false },
+      "SETTINGS_WORKSPACE_SCOPE_REQUIRED": { "jsonrpc_code": -32602, "retryable": false },
+      "SETTINGS_INPUT_NONINTERACTIVE": { "jsonrpc_code": -32602, "retryable": false },
+      "SETTINGS_STORAGE_UNAVAILABLE": { "jsonrpc_code": -32010, "retryable": true },
+      "SETTINGS_BACKEND_UNAVAILABLE": { "jsonrpc_code": -32010, "retryable": true },
+      "SETTINGS_RECORD_NOT_FOUND": { "jsonrpc_code": -32602, "retryable": false },
+      "SETTINGS_RECORD_STALE": { "jsonrpc_code": -32602, "retryable": false },
+      "SETTINGS_DECLARATION_STALE": { "jsonrpc_code": -32602, "retryable": false },
+      "SETTINGS_DECLARATION_INVALID": { "jsonrpc_code": -32602, "retryable": false },
+      "SETTINGS_DECLARATION_AMBIGUOUS": { "jsonrpc_code": -32602, "retryable": false },
+      "SETTINGS_ENV_FORBIDDEN": { "jsonrpc_code": -32602, "retryable": false },
+      "SETTINGS_VALUE_INVALID": { "jsonrpc_code": -32602, "retryable": false },
+      "SETTINGS_VALUE_TOO_LARGE": { "jsonrpc_code": -32602, "retryable": false },
+      "SETTINGS_STORE_REVISION_CONFLICT": { "jsonrpc_code": -32000, "retryable": true },
+      "SETTINGS_OPERATION_IN_PROGRESS": { "jsonrpc_code": -32000, "retryable": true },
+      "SETTINGS_CLEANUP_PENDING": { "jsonrpc_code": -32010, "retryable": true },
+      "SETTINGS_UNINSTALL_PARTIAL": { "jsonrpc_code": -32010, "retryable": true },
+      "SETTINGS_UNINSTALL_CONFLICT": { "jsonrpc_code": -32000, "retryable": true }
     }
   },
   "$defs": {
@@ -109,11 +134,41 @@
       "required": ["id", "name", "description", "argument_hint", "requested_skill_id", "plugin_id"],
       "properties": {
         "id": { "type": "string", "minLength": 1 },
-        "name": { "type": "string", "pattern": "^plugin:[a-z0-9-]+:[a-z0-9-]+:[a-z0-9-]+$" },
+        "name": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$" },
         "description": { "type": "string", "minLength": 1 },
         "argument_hint": { "type": ["string", "null"] },
         "requested_skill_id": { "type": "string", "minLength": 1 },
         "plugin_id": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "commandBinding": {
+      "type": "object",
+      "required": ["id", "name"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$" }
+      },
+      "additionalProperties": false
+    },
+    "commandBindingsParams": {
+      "type": "object",
+      "required": ["snapshot_id", "bindings"],
+      "properties": {
+        "snapshot_id": { "type": "string", "minLength": 1 },
+        "bindings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/commandBinding" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "commandBindingsResult": {
+      "type": "object",
+      "required": ["snapshot_id", "accepted"],
+      "properties": {
+        "snapshot_id": { "type": "string", "minLength": 1 },
+        "accepted": { "const": true }
       },
       "additionalProperties": false
     },
@@ -237,7 +292,12 @@
     },
     "requestedSkill": {
       "type": "object", "required": ["id"],
-      "properties": { "id": { "type": "string", "minLength": 1 }, "args": { "type": "string", "default": "" } },
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "args": { "type": "string", "default": "" },
+        "raw_invocation": { "type": "string", "minLength": 1 },
+        "command_name": { "type": "string", "minLength": 1 }
+      },
       "additionalProperties": false
     },
     "threadModelSelection": {
@@ -378,6 +438,128 @@
       "additionalProperties": false
     },
     "configCommitResult": { "$ref": "#/$defs/configPreviewResult" },
+    "settingsScope": { "enum": ["user", "workspace"] },
+    "settingsRuntimeSnapshot": {
+      "type": "object",
+      "required": ["state", "revision", "generation"],
+      "properties": {
+        "state": { "enum": ["loaded", "not_loaded"] },
+        "revision": { "type": ["integer", "null"], "minimum": 0 },
+        "generation": { "type": ["string", "null"], "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "settingsPendingSummary": {
+      "type": "object",
+      "required": ["operation", "state", "retryable"],
+      "properties": {
+        "operation": { "enum": ["set", "remove", "uninstall", "migrate"] },
+        "state": { "enum": ["pending", "cleanup_pending", "tombstoned", "partial_retryable", "migrating"] },
+        "retryable": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "settingsSummary": {
+      "type": "object",
+      "required": [
+        "setting_id", "plugin_id", "package_digest", "declaration_digest", "scope",
+        "scope_binding_digest", "source", "name", "description", "env_var", "sensitive",
+        "required", "consumer_scope", "store_state", "runtime_state", "pending_operation", "diagnostic"
+      ],
+      "properties": {
+        "setting_id": { "type": "string", "minLength": 1 },
+        "plugin_id": { "type": "string", "minLength": 1 },
+        "package_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "declaration_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "scope": { "$ref": "#/$defs/settingsScope" },
+        "scope_binding_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "source": { "const": "qwen-extension" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "env_var": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$" },
+        "sensitive": { "type": "boolean" },
+        "required": { "const": false },
+        "consumer_scope": { "const": "extension-wide" },
+        "store_state": { "enum": ["configured", "absent", "stale", "pending", "tombstoned", "partial", "blocked"] },
+        "runtime_state": { "enum": ["loaded", "not_loaded", "pending_restart", "absent", "stale"] },
+        "pending_operation": { "oneOf": [{ "$ref": "#/$defs/settingsPendingSummary" }, { "type": "null" }] },
+        "diagnostic": { "type": ["string", "null"], "maxLength": 128 }
+      },
+      "additionalProperties": false
+    },
+    "settingsListParams": {
+      "type": "object",
+      "required": ["scope"],
+      "properties": { "scope": { "$ref": "#/$defs/settingsScope" } },
+      "additionalProperties": false
+    },
+    "settingsListResult": {
+      "type": "object",
+      "required": ["scope", "store_revision", "runtime_snapshot", "settings"],
+      "properties": {
+        "scope": { "$ref": "#/$defs/settingsScope" },
+        "store_revision": { "type": "integer", "minimum": 0 },
+        "runtime_snapshot": { "$ref": "#/$defs/settingsRuntimeSnapshot" },
+        "settings": { "type": "array", "items": { "$ref": "#/$defs/settingsSummary" } }
+      },
+      "additionalProperties": false
+    },
+    "settingsIdentity": {
+      "type": "object",
+      "required": ["scope", "plugin_id", "package_digest", "declaration_digest", "setting_key", "env_var"],
+      "properties": {
+        "scope": { "$ref": "#/$defs/settingsScope" },
+        "plugin_id": { "type": "string", "minLength": 1 },
+        "package_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "declaration_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "setting_key": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$" },
+        "env_var": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$" }
+      },
+      "additionalProperties": false
+    },
+    "settingsSetParams": {
+      "type": "object",
+      "required": ["scope", "plugin_id", "package_digest", "declaration_digest", "setting_key", "env_var", "value", "expected_store_revision"],
+      "properties": {
+        "scope": { "$ref": "#/$defs/settingsScope" },
+        "plugin_id": { "type": "string", "minLength": 1 },
+        "package_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "declaration_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "setting_key": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$" },
+        "env_var": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$" },
+        "value": { "type": "string", "maxLength": 65536, "pattern": "^[^\\u0000]*$" },
+        "expected_store_revision": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "settingsRemoveParams": {
+      "type": "object",
+      "required": ["scope", "plugin_id", "package_digest", "declaration_digest", "setting_key", "env_var", "expected_store_revision"],
+      "properties": {
+        "scope": { "$ref": "#/$defs/settingsScope" },
+        "plugin_id": { "type": "string", "minLength": 1 },
+        "package_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "declaration_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "setting_key": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$" },
+        "env_var": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$" },
+        "expected_store_revision": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "settingsMutationResult": {
+      "type": "object",
+      "required": ["operation", "scope", "store_revision", "runtime_snapshot", "summary", "applies_to", "diagnostics"],
+      "properties": {
+        "operation": { "enum": ["set", "remove"] },
+        "scope": { "$ref": "#/$defs/settingsScope" },
+        "store_revision": { "type": "integer", "minimum": 0 },
+        "runtime_snapshot": { "$ref": "#/$defs/settingsRuntimeSnapshot" },
+        "summary": { "$ref": "#/$defs/settingsSummary" },
+        "applies_to": { "const": "next_host" },
+        "diagnostics": { "type": "array", "items": { "type": "string", "maxLength": 128 } }
+      },
+      "additionalProperties": false
+    },
     "configPathResult": {
       "type": "object", "required": ["workspace", "paths", "explicit_path"],
       "properties": {
@@ -731,7 +913,8 @@
       "properties": {
         "servers": { "type": "array", "items": { "$ref": "#/$defs/mcpServerStatus" } },
         "static_preview": { "$ref": "#/$defs/jsonObjectArray" },
-        "total_tools": { "type": "integer", "minimum": 0 }
+        "total_tools": { "type": "integer", "minimum": 0 },
+        "diagnostics": { "type": "array", "items": { "type": "string" } }
       },
       "additionalProperties": false
     },
@@ -845,12 +1028,35 @@
       },
       "additionalProperties": false
     },
+    "commandProvenance": {
+      "type": "object",
+      "required": ["plugin_id", "package_digest", "command_id", "snapshot_id"],
+      "properties": {
+        "plugin_id": { "type": "string", "minLength": 1 },
+        "package_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "command_id": { "type": "string", "minLength": 1 },
+        "snapshot_id": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "skillProvenance": {
+      "type": "object",
+      "required": ["plugin_id", "package_digest", "command_id", "snapshot_id"],
+      "properties": {
+        "plugin_id": { "type": "string", "minLength": 1 },
+        "package_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "command_id": { "type": ["string", "null"] },
+        "snapshot_id": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
     "runStartedPayload": {
       "type": "object", "required": ["mode", "resumed"],
       "properties": {
         "mode": { "$ref": "#/$defs/interactionMode" },
         "resumed": { "type": "boolean" }, "skills_snapshot_id": { "type": ["string", "null"] },
-        "primary_model": { "$ref": "#/$defs/runPrimaryModelBinding" }, "runtime_profile_id": { "type": ["string", "null"] }
+        "primary_model": { "$ref": "#/$defs/runPrimaryModelBinding" }, "runtime_profile_id": { "type": ["string", "null"] },
+        "command_provenance": { "$ref": "#/$defs/commandProvenance" }
       },
       "additionalProperties": false
     },
@@ -865,7 +1071,8 @@
     "skillLoadedPayload": {
       "type": "object", "required": ["skill_id", "source", "version", "snapshot_id"],
       "properties": {
-        "skill_id": { "type": "string" }, "source": { "type": "string" }, "version": { "type": ["string", "null"] }, "snapshot_id": { "type": "string" }
+        "skill_id": { "type": "string" }, "source": { "type": "string" }, "version": { "type": ["string", "null"] }, "snapshot_id": { "type": "string" },
+        "provenance": { "$ref": "#/$defs/skillProvenance" }
       },
       "additionalProperties": false
     },

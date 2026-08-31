@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from jsonschema.exceptions import ValidationError
@@ -62,6 +63,12 @@ class ProtocolConnection:
     watched_threads: set[str] = field(default_factory=set)
     pending_requests: dict[str, asyncio.Future[object]] = field(default_factory=dict)
     interaction_specs: dict[str, InteractionRequest] = field(default_factory=dict)
+    # CLI 在 initialize 返回的 Skill snapshot 上计算一次最终 Registry 后，把
+    # command id -> resolved slash name 绑定到本连接；Run 只读取这份不可变映射。
+    command_binding_snapshot_id: str | None = None
+    command_bindings: Mapping[str, str] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
     closed: bool = False
 
 

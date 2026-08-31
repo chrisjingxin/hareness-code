@@ -33,6 +33,45 @@ MAX_ZIP_COMPRESSION_RATIO = 200
 REGISTRY_VERSION = 2
 _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
+# 目录安装可以来自用户的 Git checkout；这些名称只依据目录项本身判断，
+# 不读取内容，避免把凭据、VCS 元数据或操作系统临时文件带入不可变 store。
+_EXCLUDED_DIRECTORY_NAMES = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        ".bzr",
+        "cvs",
+        "rcs",
+        "sccs",
+        "__macosx",
+        ".spotlight-v100",
+        ".trashes",
+        ".fseventsd",
+    }
+)
+_EXCLUDED_FILE_NAMES = frozenset(
+    {
+        ".git",
+        ".gitignore",
+        ".gitattributes",
+        ".gitmodules",
+        ".hgignore",
+        ".hgsub",
+        ".svnignore",
+        ".env",
+        ".npmrc",
+        ".yarnrc",
+        ".yarnrc.yml",
+        ".pypirc",
+        ".netrc",
+        ".ds_store",
+        "thumbs.db",
+        "desktop.ini",
+    }
+)
+_EXCLUDED_FILE_PREFIXES = (".env.", "._")
+
 
 @dataclass(frozen=True, slots=True)
 class StagedPlugin:
@@ -357,6 +396,29 @@ def package_digest(root: Path) -> str:
     return digest.hexdigest()
 
 
+def _is_staging_excluded_name(name: str, *, directory: bool) -> bool:
+    """按 basename 判断本地安装时可以安全忽略的元数据项。"""
+    normalized = name.casefold()
+    if directory:
+        return (
+            normalized in _EXCLUDED_DIRECTORY_NAMES
+            or normalized in {".env", ".npmrc"}
+            or normalized.startswith(".env.")
+            or normalized.startswith("._")
+        )
+    return normalized in _EXCLUDED_FILE_NAMES or normalized.startswith(_EXCLUDED_FILE_PREFIXES)
+
+
+def _is_staging_excluded_path(relative: Path | PurePosixPath) -> bool:
+    """判断 ZIP 相对路径是否落在不应进入 staged package 的元数据范围。"""
+    parts = PurePosixPath(relative).parts
+    if not parts:
+        return False
+    return any(_is_staging_excluded_name(part, directory=True) for part in parts) or (
+        _is_staging_excluded_name(parts[-1], directory=False)
+    )
+
+
 def _copy_directory_secure(source: Path, destination: Path) -> None:
     """不跟随链接复制本地目录，并拒绝 hardlink 与特殊文件。"""
     count = 0
@@ -366,6 +428,18 @@ def _copy_directory_secure(source: Path, destination: Path) -> None:
         relative_root = current.relative_to(source)
         if len(relative_root.parts) > MAX_PACKAGE_DEPTH:
             raise PluginError("PLUGIN_PATH_TOO_DEEP", "Plugin 目录层级超过上限")
+        # 先按名称剪枝，再对其他项做 lstat；这样 .git socket、.env 和
+        # .npmrc 既不会被读取，也不会改变净化包的 count/digest。
+        directories[:] = [
+            name
+            for name in directories
+            if not _is_staging_excluded_name(name, directory=True)
+        ]
+        files[:] = [
+            name
+            for name in files
+            if not _is_staging_excluded_name(name, directory=False)
+        ]
         for name in list(directories):
             entry = current / name
             mode = entry.lstat().st_mode
@@ -413,6 +487,10 @@ def _extract_zip_secure(source: Path, destination: Path) -> tuple[Path, str]:
         for member in members:
             relative = _safe_zip_path(member.filename)
             if relative is None:
+                continue
+            # ZIP 元数据同样在读取 external_attr 和正文前剪枝；被排除项
+            # 不会静默写入 store，其他特殊项仍走原有拒绝分支。
+            if _is_staging_excluded_path(relative):
                 continue
             mode = (member.external_attr >> 16) & 0o177777
             file_type = stat.S_IFMT(mode)

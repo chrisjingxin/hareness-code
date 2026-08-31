@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import ipaddress
+import math
+import os
 import re
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal, Mapping
 from urllib.parse import urlsplit
 
+from harness_agent.extensions.mcp import DEFAULT_CONNECT_TIMEOUT_SECONDS
 from harness_agent.plugins.common import safe_package_path
 from harness_agent.plugins.model import PluginError
 
@@ -28,6 +31,32 @@ _PLACEHOLDER_SYNTAX_RE = re.compile(r"\$\{[^}]*\}")
 _HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _HEADER_CONTROL_RE = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
 _COMMAND_CONTROL_RE = re.compile(r"[\x00\r\n\t\f\v]")
+_QWEN_MCP_FIELDS = frozenset({"type", "command", "args", "cwd", "env", "timeout"})
+_QWEN_MCP_PLACEHOLDER_RE = re.compile(
+    r"\$\{(?:extensionPath|workspacePath|/|pathSeparator)\}"
+)
+_QWEN_MCP_ANY_PLACEHOLDER_RE = re.compile(r"\$\{[^}]+\}")
+_QWEN_MCP_UNSUPPORTED_ANGLE_TOKEN_RE = re.compile(
+    r"<(?:extensionPath|workspacePath|pathSeparator)>"
+)
+_QWEN_MCP_MAX_COMMAND_BYTES = 4 * 1024
+_QWEN_MCP_MAX_ARG_COUNT = 64
+_QWEN_MCP_MAX_ARG_BYTES = 16 * 1024
+_QWEN_MCP_MAX_ENV_COUNT = 64
+_QWEN_MCP_MAX_ENV_KEY_BYTES = 256
+_QWEN_MCP_MAX_ENV_VALUE_BYTES = 16 * 1024
+_QWEN_MCP_MAX_TIMEOUT_SECONDS = 120
+_QWEN_MCP_RESERVED_ENV_KEYS = frozenset(
+    {
+        "PATH",
+        "NODE_OPTIONS",
+        "PYTHONPATH",
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_LIBRARY_PATH",
+    }
+)
 
 McpServerStatus = Literal["valid", "unsupported", "invalid"]
 
@@ -47,6 +76,331 @@ class McpDocumentValidation:
     servers: tuple[ValidatedMcpServer, ...]
     invalid: tuple[str, ...] = ()
     unsupported: tuple[str, ...] = ()
+
+
+def validate_qwen_mcp_document(
+    document: Mapping[str, object],
+    *,
+    root: Path,
+    workspace: Path | None = None,
+) -> McpDocumentValidation:
+    """逐 server 校验 Qwen stdio MCP，并隔离不支持或损坏条目。"""
+    raw_servers = document.get("mcpServers")
+    if not isinstance(raw_servers, Mapping):
+        raise PluginError("PLUGIN_MCP_INVALID", "mcpServers 必须是 object")
+    valid: list[ValidatedMcpServer] = []
+    invalid: list[str] = []
+    unsupported: list[str] = []
+    for name, raw in raw_servers.items():
+        label = name if isinstance(name, str) else repr(name)
+        try:
+            valid.append(
+                validate_qwen_mcp_server(
+                    name,
+                    raw,
+                    root=root,
+                    workspace=workspace,
+                )
+            )
+        except PluginError as exc:
+            message = f"{label}: {exc.code}: {exc}"
+            if exc.code == "PLUGIN_MCP_TRANSPORT_UNSUPPORTED":
+                unsupported.append(message)
+            else:
+                invalid.append(message)
+    return McpDocumentValidation(
+        servers=tuple(valid),
+        invalid=tuple(invalid),
+        unsupported=tuple(unsupported),
+    )
+
+
+def validate_qwen_mcp_server(
+    name: object,
+    raw: object,
+    *,
+    root: Path,
+    workspace: Path | None = None,
+) -> ValidatedMcpServer:
+    """校验 Phase 2 支持的 Qwen stdio server 字段和路径边界。"""
+    if not isinstance(name, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", name
+    ):
+        raise PluginError("PLUGIN_MCP_INVALID", "MCP server name 必须是安全字符串")
+    if not isinstance(raw, Mapping):
+        raise PluginError("PLUGIN_MCP_INVALID", f"MCP server {name} 必须是 object")
+    unknown = set(raw) - _QWEN_MCP_FIELDS
+    if unknown:
+        fields = ", ".join(sorted(str(field) for field in unknown))
+        raise PluginError("PLUGIN_MCP_FIELD_INVALID", f"MCP server {name} 包含未知字段：{fields}")
+
+    transport = raw.get("type", "stdio")
+    if transport != "stdio":
+        raise PluginError(
+            "PLUGIN_MCP_TRANSPORT_UNSUPPORTED",
+            f"Qwen MCP server {name} 只支持 stdio transport",
+        )
+
+    command = raw.get("command")
+    if not isinstance(command, str) or not command or command != command.strip():
+        raise PluginError("PLUGIN_MCP_FIELD_INVALID", f"MCP server {name}.command 无效")
+    _validate_qwen_text(command, f"{name}.command", _QWEN_MCP_MAX_COMMAND_BYTES)
+    if not _has_qwen_placeholder(command) and (
+        any(char.isspace() for char in command)
+        or "/" in command
+        or "\\" in command
+        or command in {".", ".."}
+    ):
+        raise PluginError(
+            "PLUGIN_MCP_PATH_INVALID",
+            f"MCP server {name}.command 必须是 bare executable 或安全包内路径",
+        )
+    _validate_qwen_path_tokens(
+        command,
+        root=root,
+        workspace=workspace,
+        field=f"{name}.command",
+        require_package_file=True,
+        require_executable=True,
+    )
+
+    args = raw.get("args", [])
+    if not isinstance(args, list) or len(args) > _QWEN_MCP_MAX_ARG_COUNT:
+        raise PluginError("PLUGIN_MCP_FIELD_INVALID", f"MCP server {name}.args 超出限制")
+    for index, value in enumerate(args):
+        if not isinstance(value, str):
+            raise PluginError(
+                "PLUGIN_MCP_FIELD_INVALID",
+                f"MCP server {name}.args[{index}] 必须是字符串",
+            )
+        _validate_qwen_text(value, f"{name}.args[{index}]", _QWEN_MCP_MAX_ARG_BYTES)
+        _validate_qwen_path_tokens(
+            value,
+            root=root,
+            workspace=workspace,
+            field=f"{name}.args[{index}]",
+            require_package_file=True,
+        )
+
+    env = raw.get("env", {})
+    if not isinstance(env, Mapping) or len(env) > _QWEN_MCP_MAX_ENV_COUNT:
+        raise PluginError("PLUGIN_MCP_FIELD_INVALID", f"MCP server {name}.env 超出限制")
+    for key, value in env.items():
+        if (
+            not isinstance(key, str)
+            or not key
+            or len(key.encode("utf-8")) > _QWEN_MCP_MAX_ENV_KEY_BYTES
+            or key.upper() in _QWEN_MCP_RESERVED_ENV_KEYS
+        ):
+            raise PluginError("PLUGIN_MCP_FIELD_INVALID", f"MCP server {name}.env key 无效")
+        if not isinstance(value, str):
+            raise PluginError("PLUGIN_MCP_FIELD_INVALID", f"MCP server {name}.env value 无效")
+        _validate_qwen_text(value, f"{name}.env.{key}", _QWEN_MCP_MAX_ENV_VALUE_BYTES)
+        _validate_qwen_path_tokens(
+            value,
+            root=root,
+            workspace=workspace,
+            field=f"{name}.env.{key}",
+        )
+
+    cwd = raw.get("cwd")
+    if cwd is not None:
+        if not isinstance(cwd, str) or not cwd:
+            raise PluginError("PLUGIN_MCP_FIELD_INVALID", f"MCP server {name}.cwd 无效")
+        _validate_qwen_text(cwd, f"{name}.cwd", _QWEN_MCP_MAX_ARG_BYTES)
+        _validate_qwen_path_tokens(
+            cwd,
+            root=root,
+            workspace=workspace,
+            field=f"{name}.cwd",
+            require_directory=True,
+        )
+        if not _has_qwen_placeholder(cwd):
+            try:
+                cwd_path = safe_package_path(root, cwd, require_exists=True)
+            except PluginError as exc:
+                raise PluginError("PLUGIN_MCP_TARGET_MISSING", f"MCP server {name}.cwd 目录不存在") from exc
+            if not cwd_path.is_dir() or cwd_path.is_symlink():
+                raise PluginError("PLUGIN_MCP_PATH_INVALID", f"MCP server {name}.cwd 必须是包内目录")
+
+    timeout = raw.get("timeout", DEFAULT_CONNECT_TIMEOUT_SECONDS)
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or not math.isfinite(float(timeout))
+        or not 0 < float(timeout) <= _QWEN_MCP_MAX_TIMEOUT_SECONDS
+    ):
+        raise PluginError("PLUGIN_MCP_TIMEOUT_INVALID", f"MCP server {name}.timeout 无效")
+    return ValidatedMcpServer(name=name, transport="stdio")
+
+
+def resolve_qwen_mcp_value(
+    value: str,
+    *,
+    root: Path,
+    workspace: Path,
+    field: str,
+    require_package_file: bool = False,
+    require_directory: bool = False,
+    require_executable: bool = False,
+) -> str:
+    """一次性展开 Qwen 四类路径 token，并复核运行时边界。"""
+    _validate_qwen_path_tokens(
+        value,
+        root=root,
+        workspace=workspace,
+        field=field,
+        require_package_file=require_package_file,
+        require_directory=require_directory,
+        require_executable=require_executable,
+    )
+    return _replace_qwen_tokens(value, root=root, workspace=workspace)
+
+
+def _validate_qwen_text(value: str, field: str, max_bytes: int) -> None:
+    """限制 Qwen MCP 文本的编码、控制字符和字节大小。"""
+    if "\x00" in value or _COMMAND_CONTROL_RE.search(value):
+        raise PluginError("PLUGIN_MCP_FIELD_INVALID", f"MCP {field} 含有控制字符")
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise PluginError("PLUGIN_MCP_FIELD_INVALID", f"MCP {field} 编码无效") from exc
+    if size > max_bytes:
+        raise PluginError("PLUGIN_MCP_FIELD_TOO_LARGE", f"MCP {field} 超过大小限制")
+
+
+def _has_qwen_placeholder(value: str) -> bool:
+    """判断值是否含有 Qwen 运行时保留 token。"""
+    return bool(_QWEN_MCP_PLACEHOLDER_RE.search(value))
+
+
+def _validate_qwen_path_tokens(
+    value: str,
+    *,
+    root: Path,
+    workspace: Path | None,
+    field: str,
+    require_package_file: bool = False,
+    require_directory: bool = False,
+    require_executable: bool = False,
+) -> None:
+    """验证 token 只能作为安全路径片段，且 extensionPath 目标存在。"""
+    unknown = [
+        match.group(0)
+        for match in _QWEN_MCP_ANY_PLACEHOLDER_RE.finditer(value)
+        if not _QWEN_MCP_PLACEHOLDER_RE.fullmatch(match.group(0))
+    ]
+    if unknown:
+        raise PluginError(
+            "PLUGIN_MCP_PLACEHOLDER_INVALID",
+            f"MCP {field} 使用未知 placeholder：{unknown[0]}",
+        )
+    if _QWEN_MCP_UNSUPPORTED_ANGLE_TOKEN_RE.search(value):
+        raise PluginError(
+            "PLUGIN_MCP_PLACEHOLDER_INVALID",
+            f"MCP {field} 使用未支持的 placeholder",
+        )
+    normalized = value.replace("\\", "/")
+    if _qwen_looks_like_host_path(normalized):
+        raise PluginError("PLUGIN_MCP_PATH_INVALID", f"MCP {field} 不能使用宿主绝对路径")
+    if any(part == ".." for part in PurePosixPath(normalized).parts):
+        raise PluginError("PLUGIN_MCP_PATH_INVALID", f"MCP {field} 不能包含 parent path")
+
+    for match in _QWEN_MCP_PLACEHOLDER_RE.finditer(value):
+        token = match.group(0)
+        if token in {"${/}", "${pathSeparator}"}:
+            continue
+        prefix = value[: match.start()]
+        if prefix and prefix[-1] not in {
+            "=", ":", " ", "\t", "\n", "\r", '"', "'", "`", "(", "[", "{"
+        }:
+            raise PluginError("PLUGIN_MCP_PATH_INVALID", f"MCP {field} token 不是独立路径片段")
+        suffix_end = _qwen_placeholder_suffix_end(value, match.end())
+        suffix = value[match.end() : suffix_end]
+        suffix = suffix.replace("${/}", "/").replace("${pathSeparator}", "/")
+        if not suffix:
+            continue
+        relative = suffix.lstrip("/")
+        path = PurePosixPath(relative)
+        if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+            raise PluginError("PLUGIN_MCP_PATH_INVALID", f"MCP {field} token 目标越过根目录")
+        if token == "${extensionPath}":
+            try:
+                target = safe_package_path(root, relative, require_exists=True)
+            except PluginError as exc:
+                if exc.code in {"PLUGIN_COMPONENT_MISSING", "PLUGIN_COMPONENT_PATH_INVALID"}:
+                    raise PluginError(
+                        "PLUGIN_MCP_TARGET_MISSING",
+                        f"MCP {field} token 目标不存在",
+                    ) from exc
+                raise
+            if require_directory:
+                if not target.is_dir() or target.is_symlink():
+                    raise PluginError("PLUGIN_MCP_PATH_INVALID", f"MCP {field} 必须指向包内目录")
+            elif require_package_file and (not target.is_file() or target.is_symlink()):
+                raise PluginError("PLUGIN_MCP_TARGET_MISSING", f"MCP {field} 必须指向包内普通文件")
+            elif require_executable and (not target.is_file() or not os.access(target, os.X_OK)):
+                raise PluginError("PLUGIN_MCP_TARGET_MISSING", f"MCP {field} 必须指向可执行文件")
+            elif not target.is_file() and not target.is_dir():
+                raise PluginError("PLUGIN_MCP_TARGET_MISSING", f"MCP {field} token 目标无效")
+        else:
+            if workspace is None:
+                continue
+            target = _safe_workspace_path(workspace, relative, field)
+            if require_directory:
+                if not target.is_dir() or target.is_symlink():
+                    raise PluginError("PLUGIN_MCP_TARGET_MISSING", f"MCP {field} workspace 目录不存在")
+            elif require_package_file and (not target.is_file() or target.is_symlink()):
+                raise PluginError("PLUGIN_MCP_TARGET_MISSING", f"MCP {field} workspace 文件不存在")
+
+
+def _replace_qwen_tokens(value: str, *, root: Path, workspace: Path) -> str:
+    """替换 Qwen token，不解释 shell、环境变量或其他 placeholder。"""
+    replacements = {
+        "${extensionPath}": str(root.resolve()),
+        "${workspacePath}": str(workspace.resolve()),
+        "${/}": os.sep,
+        "${pathSeparator}": os.sep,
+    }
+    return re.sub(
+        r"\$\{(?:extensionPath|workspacePath|/|pathSeparator)\}",
+        lambda match: replacements[match.group(0)],
+        value,
+    )
+
+
+def _qwen_placeholder_suffix_end(value: str, start: int) -> int:
+    """读取 token 后的单一路径片段，避免把后续参数当成资源路径。"""
+    index = start
+    while index < len(value):
+        if value.startswith("${/}", index) or value.startswith("${pathSeparator}", index):
+            index += len("${/}") if value.startswith("${/}", index) else len("${pathSeparator}")
+            continue
+        if value.startswith("${", index) or value[index].isspace() or value[index] in {'"', "'", "`", ";", ")", ","}:
+            break
+        index += 1
+    return index
+
+
+def _qwen_looks_like_host_path(value: str) -> bool:
+    """识别 `/tmp`、`--file=/tmp` 和 Windows drive 形式的宿主路径。"""
+    stripped = value.strip().strip('"\'')
+    return bool(
+        stripped.startswith("/")
+        or re.search(r"(?:^|[=\s])/[A-Za-z0-9._-]+", stripped)
+        or re.match(r"^[A-Za-z]:[\\/]", stripped) is not None
+    )
+
+
+def _safe_workspace_path(workspace: Path, relative: str, field: str) -> Path:
+    """将 workspacePath 后缀限制在当前 workspace，且不跟随越界链接。"""
+    candidate = workspace.joinpath(*PurePosixPath(relative).parts)
+    try:
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(workspace.resolve())
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        raise PluginError("PLUGIN_MCP_TARGET_MISSING", f"MCP {field} workspace 目标不存在") from exc
+    return resolved
 
 
 def validate_mcp_document(

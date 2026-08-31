@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import zipfile
 from dataclasses import replace
 from pathlib import Path
@@ -12,7 +13,14 @@ import pytest
 
 from harness_agent.plugins.manager import PluginManager
 from harness_agent.plugins.claude import _merge_reports
-from harness_agent.plugins.model import PluginComponentReport, PluginDescriptor, PluginError
+from harness_agent.plugins.model import (
+    InstalledPlugin,
+    PluginComponentReport,
+    PluginDescriptor,
+    PluginError,
+    capability_fingerprint,
+    runtime_component_eligibility,
+)
 from harness_agent.plugins.store import package_digest
 
 
@@ -98,6 +106,316 @@ def _component(
         diagnostics=diagnostics,
         effective=effective,
     )
+
+
+def _runtime_plugin(
+    *,
+    kind: str = "skills",
+    status: str = "supported",
+    effective: bool = True,
+    enabled: bool = True,
+    trusted: bool = True,
+    format: str = "claude-code",
+) -> InstalledPlugin:
+    """构造不接触文件系统的 runtime gate fixture。"""
+    component = PluginComponentReport(
+        kind=kind,
+        status=status,  # type: ignore[arg-type]
+        count=1,
+        effective=effective,
+    )
+    fingerprint = capability_fingerprint((component,))
+    return InstalledPlugin(
+        plugin_id="fixture/runtime-gate",
+        source_id="fixture",
+        source_label="runtime-gate",
+        name="runtime-gate",
+        version="1.0.0",
+        description=None,
+        format=format,  # type: ignore[arg-type]
+        manifest="plugin.json",
+        package_digest="d" * 64,
+        capability_fingerprint=fingerprint,
+        components=(component,),
+        diagnostics=(),
+        enabled=enabled,
+        trusted_capability_fingerprint=fingerprint if trusted else None,
+        installed_at_ms=0,
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "effective", "expected_reason"),
+    (
+        ("unsupported", False, "COMPONENT_STATUS_UNSUPPORTED"),
+        ("invalid", False, "COMPONENT_STATUS_INVALID"),
+        ("supported", False, "COMPONENT_NOT_EFFECTIVE"),
+        ("supported", True, None),
+        ("adapted", True, None),
+    ),
+)
+def test_runtime_component_gate_requires_supported_effective_report(
+    status: str,
+    effective: bool,
+    expected_reason: str | None,
+) -> None:
+    """统一 gate 同时约束 status 与 effective，不能只看字段或数量。"""
+    result = runtime_component_eligibility(
+        _runtime_plugin(status=status, effective=effective),
+        kind="skills",
+    )
+
+    assert result.eligible is (expected_reason is None)
+    if expected_reason is None:
+        assert result.diagnostic is None
+    else:
+        assert result.diagnostic == (
+            "PLUGIN_RUNTIME_COMPONENT_BLOCKED: "
+            f"kind=skills; reason={expected_reason}"
+        )
+
+
+def test_runtime_component_gate_rejects_plugin_state_and_format_mismatch() -> None:
+    """disabled、untrusted 和未开放格式的组件均不能构造 runtime。"""
+    disabled = runtime_component_eligibility(
+        _runtime_plugin(enabled=False),
+        kind="skills",
+    )
+    untrusted = runtime_component_eligibility(
+        _runtime_plugin(trusted=False),
+        kind="skills",
+    )
+    qwen_lsp = runtime_component_eligibility(
+        _runtime_plugin(kind="lsp", format="qwen-code"),
+        kind="lsp",
+    )
+
+    assert disabled.diagnostic == (
+        "PLUGIN_RUNTIME_COMPONENT_BLOCKED: kind=skills; reason=PLUGIN_DISABLED"
+    )
+    assert untrusted.diagnostic == (
+        "PLUGIN_RUNTIME_COMPONENT_BLOCKED: kind=skills; reason=PLUGIN_UNTRUSTED"
+    )
+    assert qwen_lsp.eligible is True
+    assert qwen_lsp.diagnostic is None
+
+
+def test_runtime_component_gate_rejects_component_report_fingerprint_drift() -> None:
+    """组件报告被替换但未重新授权时，gate 必须稳定阻断。"""
+    plugin = _runtime_plugin()
+    component = replace(plugin.components[0], capabilities=("prompt:changed",))
+    drifted = replace(plugin, components=(component,))
+
+    result = runtime_component_eligibility(drifted, kind="skills")
+
+    assert result.eligible is False
+    assert result.diagnostic == (
+        "PLUGIN_RUNTIME_COMPONENT_BLOCKED: "
+        "kind=skills; reason=COMPONENT_FINGERPRINT_DRIFT"
+    )
+
+
+def test_runtime_component_gate_excludes_diagnostics_from_execution_binding() -> None:
+    """诊断文案变化不改变已授权的执行来源绑定。"""
+    plugin = _runtime_plugin()
+    changed = replace(
+        plugin.components[0],
+        diagnostics=("diagnostic wording changed",),
+    )
+
+    result = runtime_component_eligibility(
+        replace(plugin, components=(changed,)),
+        kind="skills",
+    )
+
+    assert result.eligible is True
+    assert result.diagnostic is None
+
+
+def test_declared_component_report_missing_has_stable_diagnostics(
+    tmp_path: Path,
+) -> None:
+    """已声明的 portable Command/Skill/MCP 缺报告时不能静默跳过。"""
+    source = tmp_path / "missing-report"
+    source.mkdir()
+    _portable_plugin(source)
+    manifest_path = source / "plugin.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    extension = manifest["extensions"]["com.za38.harness"]
+    extension["commands"] = "commands"
+    _write_skill(source / "commands" / "review.md")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    manager = PluginManager(home=tmp_path / "home")
+    installed = manager.install(source)["plugin"]
+    assert isinstance(installed, dict)
+    plugin_id = str(installed["id"])
+    plugin = manager.store.read_registry().plugins[0]
+    reports = tuple(
+        component
+        for component in plugin.components
+        if component.kind not in {"commands", "skills", "mcp"}
+    )
+    fingerprint = capability_fingerprint(reports)
+    manager.store.mutate_registry(
+        lambda current: tuple(
+            replace(
+                item,
+                components=reports,
+                capability_fingerprint=fingerprint,
+                trusted_capability_fingerprint=fingerprint,
+                enabled=True,
+            )
+            if item.plugin_id == plugin_id
+            else item
+            for item in current.plugins
+        )
+    )
+
+    catalog = manager.catalog()
+    skill_result = manager.skill_sources(catalog)
+    mcp_result = manager.mcp_servers(catalog, workspace=tmp_path / "workspace")
+
+    assert skill_result.sources == ()
+    assert mcp_result.servers == ()
+    for kind in ("commands", "skills"):
+        assert any(
+            f"kind={kind}; reason=COMPONENT_REPORT_MISSING" in diagnostic
+            for diagnostic in skill_result.diagnostics
+        )
+    assert any(
+        "kind=mcp; reason=COMPONENT_REPORT_MISSING" in diagnostic
+        for diagnostic in mcp_result.diagnostics
+    )
+
+
+def test_component_report_fingerprint_drift_blocks_portable_consumers(
+    tmp_path: Path,
+) -> None:
+    """portable 的 Command/Skill/MCP report 漂移时均不可进入 runtime。"""
+    source = tmp_path / "portable-drift"
+    source.mkdir()
+    _portable_plugin(source)
+    manifest_path = source / "plugin.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    extension = manifest["extensions"]["com.za38.harness"]
+    extension["commands"] = "commands"
+    _write_skill(source / "commands" / "review.md")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    manager = PluginManager(home=tmp_path / "home")
+    installed = manager.install(source)["plugin"]
+    assert isinstance(installed, dict)
+    plugin_id = str(installed["id"])
+    manager.set_enabled(
+        plugin_id,
+        enabled=True,
+        capability_fingerprint=str(installed["capability_fingerprint"]),
+    )
+    plugin = manager.store.read_registry().plugins[0]
+    drifted = tuple(
+        replace(component, capabilities=(*component.capabilities, "report:drift"))
+        if component.kind in {"commands", "skills", "mcp"}
+        else component
+        for component in plugin.components
+    )
+    manager.store.mutate_registry(
+        lambda current: tuple(
+            replace(item, components=drifted, enabled=True)
+            if item.plugin_id == plugin_id
+            else item
+            for item in current.plugins
+        )
+    )
+
+    catalog = manager.catalog()
+    assert {component.kind for component in catalog.plugins[0].components} >= {
+        "commands",
+        "skills",
+        "mcp",
+    }
+    assert runtime_component_eligibility(
+        catalog.plugins[0],
+        kind="skills",
+    ).diagnostic is not None
+    skill_result = manager.skill_sources(catalog)
+    mcp_result = manager.mcp_servers(catalog, workspace=tmp_path / "workspace")
+
+    assert skill_result.sources == ()
+    assert mcp_result.servers == ()
+    for kind in ("commands", "skills"):
+        assert any(
+            f"kind={kind}; reason=COMPONENT_FINGERPRINT_DRIFT" in diagnostic
+            for diagnostic in skill_result.diagnostics
+        ), skill_result.diagnostics
+    assert any(
+        "kind=mcp; reason=COMPONENT_FINGERPRINT_DRIFT" in diagnostic
+        for diagnostic in mcp_result.diagnostics
+    ), mcp_result.diagnostics
+
+
+def test_component_source_drift_blocks_portable_source_consumers(
+    tmp_path: Path,
+) -> None:
+    """只替换 Command/Skill/Agent source 时，所有 source consumer 都必须停下。"""
+    source = tmp_path / "portable-source-drift"
+    source.mkdir()
+    _portable_plugin(source)
+    manifest_path = source / "plugin.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    extension = manifest["extensions"]["com.za38.harness"]
+    extension["commands"] = "commands"
+    _write_json(manifest_path, manifest)
+    (source / "commands").mkdir()
+    (source / "commands" / "safe.md").write_text("# safe\n", encoding="utf-8")
+    (source / "commands" / "other.md").write_text("# other\n", encoding="utf-8")
+    _write_skill(source / "skills" / "other" / "SKILL.md")
+    (source / "com.za38.harness" / "agents" / "other.yaml").write_text(
+        "id: other\n",
+        encoding="utf-8",
+    )
+
+    manager = PluginManager(home=tmp_path / "home")
+    installed = manager.install(source)["plugin"]
+    assert isinstance(installed, dict)
+    plugin_id = str(installed["id"])
+    manager.set_enabled(
+        plugin_id,
+        enabled=True,
+        capability_fingerprint=str(installed["capability_fingerprint"]),
+    )
+    plugin = manager.store.read_registry().plugins[0]
+    replacements = {
+        "commands": ("commands/other.md",),
+        "skills": ("skills/other/SKILL.md",),
+        "agents": ("com.za38.harness/agents/other.yaml",),
+    }
+    drifted = tuple(
+        replace(component, sources=replacements[component.kind])
+        if component.kind in replacements
+        else component
+        for component in plugin.components
+    )
+    manager.store.mutate_registry(
+        lambda current: tuple(
+            replace(item, components=drifted, enabled=True)
+            if item.plugin_id == plugin_id
+            else item
+            for item in current.plugins
+        )
+    )
+
+    catalog = manager.catalog()
+    skill_result = manager.skill_sources(catalog)
+    agent_result = manager.agent_sources(catalog)
+
+    assert skill_result.sources == ()
+    assert agent_result.sources == ()
+    for kind in ("commands", "skills", "agents"):
+        assert any(
+            f"kind={kind}; reason=COMPONENT_FINGERPRINT_DRIFT" in diagnostic
+            for diagnostic in (*skill_result.diagnostics, *agent_result.diagnostics)
+        )
 
 
 @pytest.mark.parametrize(
@@ -435,6 +753,7 @@ def test_static_preview_hides_qwen_when_an_effective_component_exists(
         )
         for component in plugin.components
     )
+    effective_fingerprint = capability_fingerprint(effective_components)
     assert all(
         isinstance(component, PluginComponentReport)
         for component in effective_components
@@ -445,7 +764,8 @@ def test_static_preview_hides_qwen_when_an_effective_component_exists(
                 item,
                 components=effective_components,
                 enabled=True,
-                trusted_capability_fingerprint=item.capability_fingerprint,
+                capability_fingerprint=effective_fingerprint,
+                trusted_capability_fingerprint=effective_fingerprint,
             )
             if item.plugin_id == plugin.plugin_id
             else item
@@ -540,6 +860,39 @@ def test_remove_retains_data_unless_purge_is_explicit(tmp_path: Path) -> None:
     assert purged["data_retained"] is False
     assert purged["data_purged"] is True
     assert not data_path.exists()
+
+
+def test_remove_does_not_cleanup_settings_after_registry_revision_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """registry revision 变化时必须先拒绝，不能清完 Settings 再留下 Plugin。"""
+    source = tmp_path / "plugin"
+    source.mkdir()
+    _portable_plugin(source)
+    manager = PluginManager(home=tmp_path / "home")
+    installed = manager.install(source)
+    plugin_id = str(installed["plugin"]["id"])  # type: ignore[index]
+    calls: list[tuple[str, int]] = []
+
+    def mutate_with_revision_drift(operation):
+        current = manager.store.read_registry()
+        drifted = replace(current, revision=current.revision + 1)
+        return operation(drifted)
+
+    monkeypatch.setattr(manager.store, "mutate_registry", mutate_with_revision_drift)
+
+    with pytest.raises(PluginError) as error:
+        manager.remove(
+            plugin_id,
+            purge_data=True,
+            settings_cleanup=lambda plugin, revision: calls.append(
+                (plugin.plugin_id, revision)
+            ) or {"partial": []},
+        )
+
+    assert error.value.code == "PLUGIN_REGISTRY_REVISION_CONFLICT"
+    assert calls == []
 
 
 def test_claude_current_components_are_never_silently_ignored(tmp_path: Path) -> None:
@@ -888,6 +1241,60 @@ def test_enabled_portable_skill_and_mcp_enter_one_runtime_catalog(tmp_path: Path
     assert connection is not None
     assert str(manager.store.data_path(catalog.plugins[0])) == connection["cwd"]
     assert "HOME" not in connection["env"]
+
+
+def test_skill_and_mcp_consumers_require_effective_component_report(
+    tmp_path: Path,
+) -> None:
+    """Command/Skill 与 MCP 不能仅凭 supported 或字段存在进入 runtime。"""
+    source = tmp_path / "effective-gate"
+    source.mkdir()
+    _portable_plugin(source)
+    executable = source / "bin" / "check"
+    executable.parent.mkdir()
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+
+    manager = PluginManager(home=tmp_path / "home")
+    installed = manager.install(source)["plugin"]
+    assert isinstance(installed, dict)
+    plugin_id = str(installed["id"])
+    plugin = manager.store.read_registry().plugins[0]
+    reports = tuple(
+        replace(
+            component,
+            status="supported",
+            effective=False,
+            count=component.count,
+        )
+        if component.kind in {"skills", "mcp"}
+        else component
+        for component in plugin.components
+    )
+    fingerprint = capability_fingerprint(reports)
+    manager.store.mutate_registry(
+        lambda current: tuple(
+            replace(
+                item,
+                components=reports,
+                capability_fingerprint=fingerprint,
+                trusted_capability_fingerprint=fingerprint,
+                enabled=True,
+            )
+            if item.plugin_id == plugin_id
+            else item
+            for item in current.plugins
+        )
+    )
+
+    catalog = manager.catalog()
+    skill_result = manager.skill_sources(catalog)
+    mcp_result = manager.mcp_servers(catalog, workspace=tmp_path / "workspace")
+
+    assert skill_result.sources == ()
+    assert mcp_result.servers == ()
+    assert any("kind=skills" in diagnostic for diagnostic in skill_result.diagnostics)
+    assert any("kind=mcp" in diagnostic for diagnostic in mcp_result.diagnostics)
 
 
 def test_invalid_plugin_items_are_isolated_from_valid_skill_and_mcp(
@@ -1325,6 +1732,132 @@ def test_directory_symlink_and_hardlink_are_rejected(tmp_path: Path) -> None:
     with pytest.raises(PluginError) as hardlink_error:
         PluginManager(home=tmp_path / "home-b").validate(hardlink_plugin)
     assert hardlink_error.value.code == "PLUGIN_HARDLINK_REJECTED"
+
+
+def test_directory_staging_excludes_local_metadata_without_copying_sentinel_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """本地 checkout 的 VCS、OS 元数据和凭据文件不会进入 staged package。"""
+    source = tmp_path / "checkout"
+    source.mkdir()
+    _portable_plugin(source)
+    metadata = source / ".git"
+    metadata.mkdir()
+    (metadata / "HEAD").write_text("VCS_SENTINEL", encoding="utf-8")
+    (source / ".env").write_text("ENV_ROOT_SENTINEL", encoding="utf-8")
+    (source / ".env.dev").write_text("ENV_SENTINEL", encoding="utf-8")
+    (source / ".npmrc").write_text("NPMRC_SENTINEL", encoding="utf-8")
+    (source / ".DS_Store").write_text("OS_SENTINEL", encoding="utf-8")
+    socket_path = metadata / "fsmonitor--daemon.ipc"
+
+    # Codex sandbox 不允许创建 Unix socket inode；通过 os.walk/lstat 注入
+    # 等价的 socket 目录项，仍能证明“先按 .git 剪枝、再 lstat”这一安全边界。
+    real_walk = os.walk
+    real_lstat = Path.lstat
+
+    def fake_walk(*args: object, **kwargs: object):
+        for root, directories, files in real_walk(*args, **kwargs):  # type: ignore[arg-type]
+            if Path(root) == metadata:
+                files = [*files, socket_path.name]
+            yield root, directories, files
+
+    def fake_lstat(path: Path):
+        if path == socket_path:
+            return os.stat_result((stat.S_IFSOCK, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+        return real_lstat(path)
+
+    monkeypatch.setattr(os, "walk", fake_walk)
+    monkeypatch.setattr(Path, "lstat", fake_lstat)
+    manager = PluginManager(home=tmp_path / "home")
+    installed = manager.install(source)["plugin"]
+
+    assert isinstance(installed, dict)
+    record = manager.store.read_registry().plugins[0]
+    package = manager.store.package_path(record)
+    assert not any(
+        part in {".git", ".env", ".env.dev", ".npmrc", ".DS_Store"}
+        for path in package.rglob("*")
+        for part in path.relative_to(package).parts
+    )
+    public_outputs = json.dumps(
+        {
+            "install": installed,
+            "list": manager.list(),
+            "snapshot": manager.resource_snapshot(record.plugin_id).to_dict(),
+            "preview": manager.static_preview(),
+        },
+        ensure_ascii=False,
+    )
+    assert "VCS_SENTINEL" not in public_outputs
+    assert "ENV_SENTINEL" not in public_outputs
+    assert "ENV_ROOT_SENTINEL" not in public_outputs
+    assert "NPMRC_SENTINEL" not in public_outputs
+    assert "OS_SENTINEL" not in public_outputs
+
+
+def test_directory_staging_still_rejects_special_file_outside_exclusions(
+    tmp_path: Path,
+) -> None:
+    """排除目录之外的 FIFO 仍按原有 fail-closed 规则拒绝。"""
+    source = tmp_path / "special-plugin"
+    source.mkdir()
+    _portable_plugin(source)
+    special = source / "unexpected.fifo"
+    try:
+        os.mkfifo(special)
+    except (AttributeError, OSError):
+        pytest.skip("当前宿主不支持创建 FIFO fixture")
+
+    with pytest.raises(PluginError) as rejected:
+        PluginManager(home=tmp_path / "home").validate(source)
+    assert rejected.value.code == "PLUGIN_SPECIAL_FILE_REJECTED"
+
+
+def test_zip_staging_excludes_metadata_but_rejects_other_special_entries(
+    tmp_path: Path,
+) -> None:
+    """ZIP 中的本地元数据安全忽略，非排除特殊条目保持稳定拒绝。"""
+    source = tmp_path / "zip-source"
+    source.mkdir()
+    _portable_plugin(source)
+    archive = tmp_path / "metadata.zip"
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as package:
+        for path in sorted(source.rglob("*")):
+            if path.is_file():
+                package.write(path, path.relative_to(source).as_posix())
+        package.writestr(".git/HEAD", "ZIP_VCS_SENTINEL")
+        package.writestr(".env", "ZIP_ENV_ROOT_SENTINEL")
+        package.writestr(".env.dev", "ZIP_ENV_SENTINEL")
+        package.writestr(".npmrc", "ZIP_NPMRC_SENTINEL")
+        package.writestr(".DS_Store", "ZIP_OS_SENTINEL")
+
+    manager = PluginManager(home=tmp_path / "home")
+    installed = manager.install(archive)["plugin"]
+    assert isinstance(installed, dict)
+    record = manager.store.read_registry().plugins[0]
+    package = manager.store.package_path(record)
+    assert not any(
+        part in {".git", ".env", ".env.dev", ".npmrc", ".DS_Store"}
+        for path in package.rglob("*")
+        for part in path.relative_to(package).parts
+    )
+    assert "ZIP_VCS_SENTINEL" not in json.dumps(manager.list(), ensure_ascii=False)
+    assert "ZIP_ENV_SENTINEL" not in json.dumps(manager.list(), ensure_ascii=False)
+    assert "ZIP_ENV_ROOT_SENTINEL" not in json.dumps(manager.list(), ensure_ascii=False)
+
+    special_archive = tmp_path / "special.zip"
+    special_info = zipfile.ZipInfo("unexpected.fifo")
+    special_info.external_attr = stat.S_IFIFO << 16
+    with zipfile.ZipFile(special_archive, "w") as package:
+        package.writestr(
+            "plugin.json",
+            json.dumps({"name": "special-plugin", "version": "1.0.0"}),
+        )
+        package.writestr(special_info, "not-a-real-fifo")
+    with pytest.raises(PluginError) as rejected:
+        manager.validate(special_archive)
+    assert rejected.value.code == "PLUGIN_SPECIAL_FILE_REJECTED"
 
 
 def test_package_digest_is_deterministic_and_includes_executable_bit(tmp_path: Path) -> None:

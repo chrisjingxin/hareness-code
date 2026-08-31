@@ -33,7 +33,7 @@ export type InteractionResponse =
   | ({ request_id: string; type: "question" } & QuestionResponse)
   | ({ request_id: string; type: "directory_trust" } & DirectoryTrustResponse)
 
-type ContractEntry = { params?: string; result?: string; payload?: string }
+type ContractEntry = { params?: string; result?: string; payload?: string; min_minor?: number }
 type ContractMetadata = {
   operations: Record<string, ContractEntry>
   events: Record<string, ContractEntry>
