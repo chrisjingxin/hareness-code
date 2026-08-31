@@ -444,6 +444,30 @@ def test_controlled_inline_subagents_have_boundaries_and_guards(tmp_path):
     assert middleware is not None
 
 
+def test_managed_delegation_output_becomes_compiled_subagent_message_state():
+    """Managed final 必须适配为 DeepAgents CompiledSubAgent 的 messages 状态。"""
+    from harness_agent.runtime.agent import _compiled_subagent_state
+    from harness_agent.runtime.agent_delegation import AgentResult
+    from harness_agent.runtime.execution_binding import (
+        ExecutionMode,
+        ExecutionRef,
+        ExecutionStatus,
+    )
+
+    state = _compiled_subagent_state(
+        AgentResult(
+            ref=ExecutionRef.root("thread-managed", "run-managed"),
+            agent_id="za38-frontend-executor",
+            mode=ExecutionMode.MANAGED,
+            status=ExecutionStatus.COMPLETED,
+            output={"final": "PLUGIN_AGENT_OK", "warning": "private-warning"},
+        )
+    )
+
+    assert tuple(state) == ("messages",)
+    assert state["messages"] == [AIMessage(content="PLUGIN_AGENT_OK")]
+
+
 async def test_agent_streams_events():
     agent = _create_agent()
     events = [
@@ -918,4 +942,3 @@ async def test_defer_tools_isolated_across_multiple_threads():
     assert "server_b_tool" not in thread_b_binding
     assert "lsp" not in thread_b_binding
     assert "tool_search" in thread_b_binding
-

@@ -25,7 +25,7 @@ from langchain.agents.middleware.types import AgentMiddleware, ModelRequest, Mod
 from langchain.tools.tool_node import ToolCallRequest
 from langchain_core.messages import SystemMessage, ToolMessage
 
-from harness_agent.diagnostic_log.runtime import ensure_log
+from harness_agent.diagnostic_log.runtime import ensure_log, safe_context_value
 from harness_agent.plugins.common import (
     HOOK_DEFAULT_TIMEOUT_SECONDS,
     HOOK_MAX_COMMAND_LENGTH,
@@ -69,6 +69,21 @@ _ANY_PLACEHOLDER_RE = re.compile(r"\$\{([^}]+)\}")
 _USER_CONFIG_RE = re.compile(r"\$\{user_config\.[^}]+\}")
 _SUPPORTED_HOOK_EVENTS = frozenset(
     {"PreToolUse", "PostToolUse", "PostToolUseFailure", "SubagentStop"}
+)
+# Qwen DefaultHookOutput 的公共字段。未知字段仍视为 malformed，避免把任意
+# 非协议对象静默当成 no-decision；已知字段没有 decision 时则是合法 no-decision。
+_QWEN_HOOK_OUTPUT_FIELDS = frozenset(
+    {
+        "continue",
+        "stopReason",
+        "suppressOutput",
+        "systemMessage",
+        "terminalSequence",
+        "decision",
+        "reason",
+        "additionalContext",
+        "hookSpecificOutput",
+    }
 )
 _HARNESS_TO_CLAUDE_TOOL = {
     "execute": "Bash",
@@ -985,6 +1000,7 @@ class HookResult:
     document: Mapping[str, object] = field(default_factory=dict)
     timed_out: bool = False
     truncated: bool = False
+    malformed: bool = False
 
     @property
     def blocks_pre_tool(self) -> tuple[bool, str]:
@@ -1010,7 +1026,7 @@ class HookResult:
         return False, ""
 
     def subagent_stop_decision(self) -> "SubagentStopHookDecision":
-        """解析 SubagentStop 的最小结果；异常永远返回 fail-closed。"""
+        """解析 SubagentStop 的最小结果；Qwen Hook 级异常交给 controller 告警放行。"""
         if self.timed_out:
             return SubagentStopHookDecision(
                 decision="block",
@@ -1023,14 +1039,26 @@ class HookResult:
                 reason="Plugin SubagentStop Hook output exceeded the limit",
                 error_code="SUBAGENT_STOP_HOOK_OUTPUT_TOO_LARGE",
             )
-        if self.exit_code != 0:
+        if self.malformed:
             return SubagentStopHookDecision(
                 decision="block",
-                reason="Plugin SubagentStop Hook failed",
-                error_code="SUBAGENT_STOP_HOOK_FAILED",
+                reason="Plugin SubagentStop Hook returned invalid output",
+                error_code="SUBAGENT_STOP_HOOK_INVALID",
             )
-        # Qwen 的 hook 在没有待处理门禁时可以返回空 stdout 或合法的空 JSON 对象，
-        # 两者都等价于 allow；只有无法解析的非空 stdout 才是畸形输出。
+        if self.exit_code != 0:
+            return SubagentStopHookDecision(
+                decision="allow",
+                reason="Plugin SubagentStop Hook failed",
+                error_code="SUBAGENT_STOP_HOOK_NONZERO",
+            )
+        # Qwen HookSystem 会把空 finalOutput 视为没有阻断；空结果是正常的
+        # no-decision，而不是 Hook failure，不能给已完成 child 增加伪 warning。
+        if not isinstance(self.document, Mapping):
+            return SubagentStopHookDecision(
+                decision="block",
+                reason="Plugin SubagentStop Hook returned invalid output",
+                error_code="SUBAGENT_STOP_HOOK_INVALID",
+            )
         document: Mapping[str, object] = self.document
         if self.stdout.strip() and not document:
             try:
@@ -1046,6 +1074,12 @@ class HookResult:
             document = dict(parsed)
         if not document:
             return SubagentStopHookDecision(decision="allow")
+        if set(document) - _QWEN_HOOK_OUTPUT_FIELDS:
+            return SubagentStopHookDecision(
+                decision="block",
+                reason="Plugin SubagentStop Hook returned invalid output",
+                error_code="SUBAGENT_STOP_HOOK_INVALID",
+            )
         raw_decision = document.get("decision")
         specific = document.get("hookSpecificOutput")
         if specific is not None and not isinstance(specific, Mapping):
@@ -1055,15 +1089,60 @@ class HookResult:
                 error_code="SUBAGENT_STOP_HOOK_INVALID",
             )
         specific_map = specific if isinstance(specific, Mapping) else {}
-        if raw_decision is None and specific_map.get("decision") in {"allow", "block"}:
+        for field_name in ("continue", "suppressOutput"):
+            if field_name in document and not isinstance(document[field_name], bool):
+                return SubagentStopHookDecision(
+                    decision="block",
+                    reason="Plugin SubagentStop Hook returned invalid output",
+                    error_code="SUBAGENT_STOP_HOOK_INVALID",
+                )
+        for field_name in (
+            "stopReason",
+            "systemMessage",
+            "terminalSequence",
+            "decision",
+            "reason",
+            "additionalContext",
+        ):
+            if field_name in document and not isinstance(document[field_name], str):
+                return SubagentStopHookDecision(
+                    decision="block",
+                    reason="Plugin SubagentStop Hook returned invalid output",
+                    error_code="SUBAGENT_STOP_HOOK_INVALID",
+                )
+        for field_name in ("decision", "additionalContext"):
+            if field_name in specific_map and not isinstance(specific_map[field_name], str):
+                return SubagentStopHookDecision(
+                    decision="block",
+                    reason="Plugin SubagentStop Hook returned invalid output",
+                    error_code="SUBAGENT_STOP_HOOK_INVALID",
+                )
+        if raw_decision is None and specific_map.get("decision") in {
+            "allow",
+            "block",
+            "approve",
+            "deny",
+        }:
             raw_decision = specific_map.get("decision")
-        if raw_decision not in {"allow", "block"}:
+        if raw_decision is None and document.get("continue") is False:
+            raw_decision = "block"
+        if raw_decision is None:
+            # Qwen allows output such as {"reason": ...}, {"continue": true},
+            # or {"hookSpecificOutput": {"additionalContext": ...}} without a
+            # decision. It contributes no block and must not be reported failed.
+            raw_decision = "allow"
+        if raw_decision in {"deny", "block"}:
+            normalized_decision: Literal["allow", "block"] = "block"
+        elif raw_decision in {"allow", "approve"}:
+            normalized_decision = "allow"
+        else:
             return SubagentStopHookDecision(
                 decision="block",
                 reason="Plugin SubagentStop Hook returned an unsupported decision",
                 error_code="SUBAGENT_STOP_HOOK_INVALID",
             )
-        reason = document.get("reason", "")
+        stop_reason = document.get("stopReason")
+        reason = stop_reason or document.get("reason", "")
         additional = document.get(
             "additionalContext",
             specific_map.get("additionalContext", ""),
@@ -1081,7 +1160,7 @@ class HookResult:
                 error_code="SUBAGENT_STOP_HOOK_INVALID",
             )
         return SubagentStopHookDecision(
-            decision=raw_decision,
+            decision=normalized_decision,
             reason=_bounded_stop_text(str(reason or "")),
             additional_context=_bounded_stop_text(str(additional or "")),
         )
@@ -1121,6 +1200,7 @@ class SubagentStopRequest:
     checkpoint_namespace: str
     enabled: bool = True
     trusted: bool = True
+    is_cancelled: Callable[[], bool] | None = None
 
     def __post_init__(self) -> None:
         """拒绝空身份和非 Harness 虚拟工作区，避免把 store 路径送入 Hook。"""
@@ -1141,6 +1221,8 @@ class SubagentStopRequest:
             raise ValueError("SUBAGENT_STOP_REQUEST_INVALID")
         if not self.workspace.startswith("/.harness/"):
             raise ValueError("SUBAGENT_STOP_WORKSPACE_INVALID")
+        if self.is_cancelled is not None and not callable(self.is_cancelled):
+            raise ValueError("SUBAGENT_STOP_REQUEST_INVALID")
 
     def payload(self) -> dict[str, object]:
         """返回不含 secrets、transcript 和宿主绝对路径的 Hook JSON。"""
@@ -1165,11 +1247,14 @@ class SubagentStopController:
         hook_runner: Callable[..., Awaitable[tuple[HookResult, ...]]],
         interaction_port: Callable[[InteractionRequest], Awaitable[InteractionResult]],
         failure_code: str | None = None,
+        diagnostic_log: Any | None = None,
     ) -> None:
-        """注入既有 HookRunner、InteractionPort 和可观察的构造失败。"""
+        """注入既有 HookRunner、InteractionPort 和可观察的失败诊断。"""
         self._hook_runner = hook_runner
         self._interaction_port = interaction_port
         self._failure_code = failure_code
+        self._diagnostic_log_provided = diagnostic_log is not None
+        self._diagnostic_log = ensure_log(diagnostic_log)
         self._execution_id: str | None = None
         self._block_count = 0
 
@@ -1182,8 +1267,10 @@ class SubagentStopController:
         self,
         request: SubagentStopRequest,
     ) -> FinalOutputGateDecision:
-        """返回 allow/continue；任何异常、坏响应和无客户端均失败关闭。"""
+        """返回 allow/continue；Qwen Hook 级失败告警放行，取消与策略失败仍传播。"""
         self._reset_for_execution(request.execution_id)
+        self._raise_if_cancelled(request)
+        started_at = time.monotonic()
         if not request.enabled or not request.trusted:
             return FinalOutputGateDecision(action="allow")
         if self._failure_code is not None:
@@ -1191,42 +1278,149 @@ class SubagentStopController:
             # 构造；这不是 matcher miss，不能让 child 静默拿到成功输出。
             raise SubagentStopError(self._failure_code)
         try:
+            hook_kwargs: dict[str, object] = {
+                "tool_name": request.agent_id,
+                "plugin_id": request.plugin_id,
+                "payload": request.payload(),
+            }
+            # 旧的离线 fake runner 只实现基础参数；生产 HookRunner 接收
+            # diagnostic_log，并将同一个 child logger 绑定到 Hook 事件。
+            if self._diagnostic_log_provided:
+                hook_kwargs["diagnostic_log"] = self._diagnostic_log
             results = await self._hook_runner(
                 "SubagentStop",
-                tool_name=request.agent_id,
-                plugin_id=request.plugin_id,
-                payload=request.payload(),
+                **hook_kwargs,
             )
-        except asyncio.CancelledError as exc:
-            raise SubagentStopError("SUBAGENT_STOP_CANCELLED") from exc
-        except Exception as exc:  # noqa: BLE001 - 外部 Hook seam 必须收敛
-            raise SubagentStopError("SUBAGENT_STOP_HOOK_FAILED") from exc
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # 某些 runner 会以普通异常报告取消；先检查 canonical cancellation
+            # callback，不能把已取消的 Run 伪装成 Hook warning 后成功返回。
+            self._raise_if_cancelled(request)
+            return self._allow_hook_failure(
+                request,
+                "SUBAGENT_STOP_HOOK_FAILED",
+                started_at=started_at,
+            )
 
+        self._raise_if_cancelled(request)
         if not isinstance(results, (tuple, list)):
-            raise SubagentStopError("SUBAGENT_STOP_HOOK_INVALID")
+            return self._allow_hook_failure(
+                request,
+                "SUBAGENT_STOP_HOOK_INVALID",
+                started_at=started_at,
+            )
         if not results:
-            # Host 只会为已精确匹配的 gate 构造 controller；此处的空结果
-            # 只能表示 runner 已关闭、async Hook 被错误带入或同步裁决丢失，
-            # 不能与“没有匹配 Hook”混为正常 allow。
-            raise SubagentStopError("SUBAGENT_STOP_HOOK_NO_RESULT")
-        decision: SubagentStopHookDecision | None = None
+            # Host 只会为已精确匹配的 gate 构造 controller；空结果在 Qwen
+            # 终态等价于 runner 关闭/没有可观察 output，记录后释放 child。
+            return self._allow_hook_failure(
+                request,
+                "SUBAGENT_STOP_HOOK_RUNNER_CLOSED",
+                started_at=started_at,
+            )
+        failure_codes: list[str] = []
+        block_decisions: list[SubagentStopHookDecision] = []
         for result in results:
             if not isinstance(result, HookResult):
-                raise SubagentStopError("SUBAGENT_STOP_HOOK_INVALID")
+                failure_codes.append("SUBAGENT_STOP_HOOK_INVALID")
+                continue
             current = result.subagent_stop_decision()
             if current.error_code is not None:
-                raise SubagentStopError(current.error_code)
+                failure_codes.append(current.error_code)
+                continue
             if current.decision == "block":
-                decision = current
-                break
-        if decision is None:
+                block_decisions.append(current)
+
+        if failure_codes:
+            self._record_hook_failures(
+                request,
+                failure_codes,
+                started_at=started_at,
+            )
+        if not block_decisions:
             self._block_count = 0
+            if failure_codes:
+                return self._allow_hook_failures(failure_codes)
             return FinalOutputGateDecision(action="allow")
+
+        decision = _merge_subagent_stop_decisions(block_decisions)
 
         self._block_count += 1
         if self._block_count > self._MAX_CONSECUTIVE_BLOCKS:
-            raise SubagentStopError("SUBAGENT_STOP_BLOCK_LIMIT")
+            warning = (
+                "SubagentStop hook blocked continuation "
+                f"{self._MAX_CONSECUTIVE_BLOCKS} consecutive times; "
+                "overriding and ending the turn."
+            )
+            self._record_hook_failures(
+                request,
+                ("SUBAGENT_STOP_BLOCK_LIMIT",),
+                started_at=started_at,
+                failure_stage="blocking_cap",
+                error_type="HookBlockingCap",
+            )
+            return FinalOutputGateDecision(action="allow", warning=warning)
         return await self._request_user_decision(request, decision)
+
+    @staticmethod
+    def _raise_if_cancelled(request: SubagentStopRequest) -> None:
+        """把 Run/parent cancellation 保持为 asyncio canonical cancellation。"""
+        if request.is_cancelled is not None and request.is_cancelled():
+            raise asyncio.CancelledError
+
+    def _record_hook_failures(
+        self,
+        request: SubagentStopRequest,
+        codes: Collection[str],
+        *,
+        started_at: float,
+        failure_stage: str = "result_validation",
+        error_type: str = "SubagentStopHookFailure",
+    ) -> tuple[str, ...]:
+        """写入符合 Diagnostic Log v1 的稳定 failure code，不记录 Hook 正文。"""
+        unique_codes = tuple(sorted(set(codes)))
+        plugin_id = safe_context_value(request.plugin_id) or "unknown"
+        tool_name = safe_context_value(request.agent_id) or "unknown"
+        for code in unique_codes:
+            self._diagnostic_log.warn(
+                "hook.failed",
+                {
+                    "plugin_id": plugin_id,
+                    "hook_event": "SubagentStop",
+                    "tool_name": tool_name,
+                    "duration_ms": self._duration_ms(started_at),
+                    "failure_stage": failure_stage,
+                    "error_type": error_type,
+                    "retryable": False,
+                    "summary_code": code,
+                },
+            )
+        return unique_codes
+
+    def _allow_hook_failures(self, codes: Collection[str]) -> FinalOutputGateDecision:
+        """没有有效 block 时按 Qwen 语义告警并释放已完成 child。"""
+        unique_codes = tuple(sorted(set(codes)))
+        summary = ",".join(unique_codes)
+        return FinalOutputGateDecision(
+            action="allow",
+            warning=f"SubagentStop Hook warning: {summary}; child result returned.",
+        )
+
+    def _allow_hook_failure(
+        self,
+        request: SubagentStopRequest,
+        code: str,
+        *,
+        started_at: float,
+    ) -> FinalOutputGateDecision:
+        """记录单个 runner/result failure，并按 Qwen 语义释放 child。"""
+        self._record_hook_failures(request, (code,), started_at=started_at)
+        return self._allow_hook_failures((code,))
+
+    @staticmethod
+    def _duration_ms(started_at: float) -> int:
+        """返回本次 SubagentStop Hook gate 的非负耗时。"""
+        return max(0, int((time.monotonic() - started_at) * 1000))
 
     def _reset_for_execution(self, execution_id: str) -> None:
         """同一 controller 被复用到新 child 时不继承旧阻断计数。"""
@@ -1281,9 +1475,10 @@ class SubagentStopController:
             agent_id=request.agent_id,
         )
         try:
+            self._raise_if_cancelled(request)
             result = await self._interaction_port(interaction)
-        except asyncio.CancelledError as exc:
-            raise SubagentStopError("SUBAGENT_STOP_INTERACTION_CANCELLED") from exc
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:  # noqa: BLE001 - Interaction seam 失败关闭
             raise SubagentStopError("SUBAGENT_STOP_INTERACTION_FAILED") from exc
         if not isinstance(result, InteractionResult):
@@ -1316,6 +1511,31 @@ class SubagentStopController:
                 continuation_prompt=prompt,
             )
         raise SubagentStopError("SUBAGENT_STOP_INTERACTION_INVALID")
+
+
+def _merge_subagent_stop_decisions(
+    decisions: Collection[SubagentStopHookDecision],
+) -> SubagentStopHookDecision:
+    """按 Qwen OR 语义合并全部有效 block，并限制反馈总长度。"""
+    reasons: list[str] = []
+    contexts: list[str] = []
+    seen_reasons: set[str] = set()
+    seen_contexts: set[str] = set()
+    for decision in decisions:
+        if decision.reason and decision.reason not in seen_reasons:
+            seen_reasons.add(decision.reason)
+            reasons.append(decision.reason)
+        if (
+            decision.additional_context
+            and decision.additional_context not in seen_contexts
+        ):
+            seen_contexts.add(decision.additional_context)
+            contexts.append(decision.additional_context)
+    return SubagentStopHookDecision(
+        decision="block",
+        reason=_bounded_stop_text("\n".join(reasons)),
+        additional_context=_bounded_stop_text("\n".join(contexts)),
+    )
 
 
 def _interaction_choice(value: object) -> str | None:
@@ -1354,7 +1574,9 @@ def _bounded_stop_text(value: str, limit: int = 16 * 1024) -> str:
     encoded = value.encode("utf-8")
     if len(encoded) <= limit:
         return value
-    return encoded[:limit].decode("utf-8", errors="ignore") + "...[truncated]"
+    suffix = "...[truncated]"
+    content_limit = max(0, limit - len(suffix.encode("utf-8")))
+    return encoded[:content_limit].decode("utf-8", errors="ignore") + suffix
 
 
 class HookRunner:
@@ -1430,7 +1652,17 @@ class HookRunner:
                 self._background.add(task)
                 task.add_done_callback(self._background.discard)
             else:
-                results.append(await task)
+                try:
+                    results.append(await task)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # Qwen SubagentStop 的 OR 聚合必须收集后续匹配 Hook；单个
+                    # Hook 的意外执行异常先降成一个稳定 failure result。其他
+                    # 事件继续沿原有异常路径交给 fail-closed consumer。
+                    if event != "SubagentStop":
+                        raise
+                    results.append(HookResult(1))
         return tuple(results)
 
     async def _invoke(
@@ -1566,6 +1798,7 @@ class HookRunner:
                     stdout=stdout_text,
                     stderr="Hook returned invalid JSON",
                     truncated=truncated,
+                    malformed=True,
                 )
                 self._log_hook_failed(
                     diagnostic_log,
@@ -2288,6 +2521,7 @@ class PluginRuntimeMiddleware(AgentMiddleware):
         *,
         tool_name: str,
         payload: Mapping[str, object],
+        diagnostic_log: Any | None = None,
     ) -> tuple[HookResult, ...]:
         """运行 Post Hook；Hook 自身异常不得覆盖真实工具结果。"""
         try:
@@ -2295,6 +2529,7 @@ class PluginRuntimeMiddleware(AgentMiddleware):
                 event,
                 tool_name=tool_name,
                 payload=payload,
+                diagnostic_log=diagnostic_log,
             )
         except Exception:
             logger.warning("Plugin %s observation Hook failed", event, exc_info=True)

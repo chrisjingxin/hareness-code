@@ -12,6 +12,11 @@ from typing import Literal
 PluginFormat = Literal["agent-plugins-1.0", "claude-code", "qwen-code", "hybrid"]
 PluginComponentStatus = Literal["supported", "adapted", "unsupported", "invalid"]
 
+# Adapter 的报告语义属于 registry identity 的一部分。升级 Adapter 后，Host
+# 通过这个 revision 识别旧报告并重新从已校验 package 解析，而不是继续相信安装时
+# 的 component report。
+PLUGIN_ADAPTER_REPORT_REVISION = "plugin-adapter-report-v2"
+
 # 组件报告没有单独增加 issue 字段；这些前缀只用于从现有 diagnostics
 # 区分“有可运行条目但同类存在坏条目/不支持条目”的局部降级。
 _COMPONENT_INVALID_DIAGNOSTIC_PREFIX = "PLUGIN_COMPONENT_INVALID:"
@@ -184,6 +189,7 @@ class PluginDescriptor:
     capability_fingerprint: str
     components: tuple[PluginComponentReport, ...]
     diagnostics: tuple[str, ...] = ()
+    adapter_revision: str | None = PLUGIN_ADAPTER_REPORT_REVISION
 
     @property
     def can_enable(self) -> bool:
@@ -211,6 +217,7 @@ class PluginDescriptor:
             "can_enable": self.can_enable,
             "components": [component.to_dict() for component in self.components],
             "diagnostics": list(self.diagnostics),
+            "adapter_revision": self.adapter_revision,
         }
 
 
@@ -233,6 +240,7 @@ class InstalledPlugin:
     enabled: bool
     trusted_capability_fingerprint: str | None
     installed_at_ms: int
+    adapter_revision: str | None = None
 
     @property
     def can_enable(self) -> bool:
@@ -243,6 +251,17 @@ class InstalledPlugin:
     def compatibility(self) -> str:
         """返回与 PluginDescriptor 相同的兼容汇总。"""
         return self.descriptor().compatibility
+
+    @property
+    def authorization_state(self) -> str:
+        """返回运行前可操作的授权状态，不把旧 trust 静默升级为新能力。"""
+        if not self.enabled:
+            return "disabled"
+        if self.trusted_capability_fingerprint is None:
+            return "authorization-required"
+        if self.trusted_capability_fingerprint == self.capability_fingerprint:
+            return "authorized"
+        return "reauthorization-required"
 
     def descriptor(self) -> PluginDescriptor:
         """重建无来源信息的不可变校验摘要。"""
@@ -256,6 +275,7 @@ class InstalledPlugin:
             capability_fingerprint=self.capability_fingerprint,
             components=self.components,
             diagnostics=self.diagnostics,
+            adapter_revision=self.adapter_revision,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -270,6 +290,7 @@ class InstalledPlugin:
                     self.enabled
                     and self.trusted_capability_fingerprint == self.capability_fingerprint
                 ),
+                "authorization_state": self.authorization_state,
                 "installed_at_ms": self.installed_at_ms,
             }
         )
@@ -293,6 +314,7 @@ class InstalledPlugin:
             "enabled": self.enabled,
             "trusted_capability_fingerprint": self.trusted_capability_fingerprint,
             "installed_at_ms": self.installed_at_ms,
+            "adapter_revision": self.adapter_revision,
         }
 
 

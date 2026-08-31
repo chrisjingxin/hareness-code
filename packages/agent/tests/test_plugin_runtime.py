@@ -652,6 +652,90 @@ async def test_plugin_runtime_middleware_uses_catalog_workspace_for_run_context(
     await manager.aclose()
 
 
+async def test_plugin_runtime_middleware_passes_diagnostic_log_to_observation_hook(
+    tmp_path: Path,
+) -> None:
+    """真实 middleware 的 Post Hook 使用 RunContext Diagnostic Log，且不记录 payload。"""
+    from types import SimpleNamespace
+
+    from harness_agent.plugins.runtime import (
+        HookDefinition,
+        MonitorManager,
+        PluginRuntimeMiddleware,
+    )
+    from harness_agent.runtime.run_context import RunContext
+    from harness_agent.threads.context_lifecycle import prepare_embedded_context_snapshot
+
+    script = tmp_path / "post-hook.py"
+    script.write_text(
+        "import json, sys\n"
+        "json.load(sys.stdin)\n"
+        "print(json.dumps({'additionalContext': 'fixture feedback'}))\n",
+        encoding="utf-8",
+    )
+    log = _RecordingDiagnosticLog()
+    runner = HookRunner(
+        (
+            HookDefinition(
+                plugin_id="fixture",
+                event="PostToolUse",
+                matcher="Read",
+                command=sys.executable,
+                args=(str(script),),
+                timeout_seconds=5,
+                asynchronous=False,
+                shell=None,
+                root=tmp_path,
+                data=tmp_path,
+                workspace=tmp_path,
+            ),
+        )
+    )
+    middleware = PluginRuntimeMiddleware(runner, MonitorManager(()), workspace=tmp_path)
+    context = RunContext(
+        thread_id="observation-thread",
+        run_id="observation-run",
+        context_snapshot=prepare_embedded_context_snapshot(
+            thread_id="observation-thread",
+            system_prompt="test",
+            workspace=str(tmp_path),
+            sandboxed=False,
+            provider=None,
+            approval_mode="yolo",
+            skill_registry=None,
+            enable_memory=False,
+            enable_skills=False,
+            enable_ask_user=False,
+        ),
+        approval_mode="yolo",
+        diagnostic_log=log,
+    )
+
+    async def handler(_request: object) -> str:
+        return "fixture response"
+
+    response = await middleware.awrap_tool_call(
+        SimpleNamespace(
+            tool_call={
+                "id": "tool-observation",
+                "name": "read_file",
+                "args": {"file_path": "/.harness/workspace/example.txt"},
+            },
+            runtime=SimpleNamespace(context=context),
+        ),
+        handler,
+    )
+
+    assert response == "fixture response"
+    assert [record[1] for record in log.records] == [
+        "hook.started",
+        "hook.completed",
+    ]
+    assert all("fixture feedback" not in repr(record) for record in log.records)
+    assert all("example.txt" not in repr(record) for record in log.records)
+    await runner.aclose()
+
+
 @pytest.mark.asyncio
 async def test_qwen_settings_overlay_is_scoped_to_plugin_runtime_children(
     tmp_path: Path,

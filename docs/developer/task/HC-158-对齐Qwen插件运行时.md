@@ -11,7 +11,7 @@ branch: -
 reviewed_at: 2026-08-25
 review_due: 2026-09-08
 scope: 在 HC-157 的 Qwen/DevAgent 安装、信任和不可变快照基础上，按独立停点接入 Commands、Skills、MCP、可映射 Hook、LSP 与 Settings；所有组件只进入 Harness canonical runtime，不建立 Qwen 私有执行循环。当前 ZA38 插件未声明 Channels，2026-08-28 用户决定本 Task 不实现 Channel runtime，未来出现真实需求时另立安全架构任务。
-acceptance: 首先关闭 unsupported Qwen LSP/Monitor 误入通用 runtime 的门禁缺口；trusted+enabled ZA38 插件的三个 Markdown Commands 以自然短名进入 Slash Command Registry，冲突时稳定命名空间化，命令正文从 Host 不可变快照展开且正确处理 {{args}}；za38-framework 进入 canonical SkillRegistry 并可由命令和模型按权限读取；za38.03_code_index 经 canonical MCP lifecycle 受控启动、命名空间化并可观察失败；Qwen Hook/LSP/Settings 只有在各自 component 报告 adapted/effective 且存在 canonical consumer 时才运行；Channels 保持明确 unsupported/effective=false，且不阻塞本 Task 收口；每阶段具备离线恶意输入、Protocol/Host/CLI 回归和独立回滚证据。
+acceptance: 首先关闭 unsupported Qwen LSP/Monitor 误入通用 runtime 的门禁缺口；trusted+enabled ZA38 插件的三个 Markdown Commands 以自然短名进入 Slash Command Registry，冲突时稳定命名空间化，命令正文从 Host 不可变快照展开且正确处理 {{args}}；za38-framework 进入 canonical SkillRegistry 并可由命令和模型按权限读取；za38.03_code_index 经 canonical MCP lifecycle 受控启动、命名空间化并可观察失败；Qwen Hook/LSP/Settings 只有在各自 component 报告 adapted/effective 且存在 canonical consumer 时才运行；Adapter report revision 变化时已安装 package 必须由当前 Adapter 重解析，能力指纹变化保留旧 trust 并仅在实际请求 stale Plugin 能力时要求显式 reauthorization，普通 Run/内置能力/其他已授权 Plugin 继续可用；Qwen SubagentStop Hook 的执行级失败只告警并返回已完成 child，正常 blocking 继续同一 child，blocking cap 返回结果和 warning，取消及 PreToolUse/Policy/MCP/非 Qwen 安全边界保持既有语义；Channels 保持明确 unsupported/effective=false，且不阻塞本 Task 收口；每阶段具备离线恶意输入、Protocol/Host/CLI 回归和独立回滚证据。
 user_docs: docs/user/插件管理.md
 developer_docs: docs/developer/spec/HC-158-对齐Qwen插件运行时.md、docs/developer/plan/HC-158-对齐Qwen插件运行时.md、docs/developer/todo/HC-158-对齐Qwen插件运行时.md、docs/developer/architecture/扩展与插件机制设计方案.md
 test_evidence: "Phase 2/3 联合返修：tests/test_qwen_phase3.py 12 passed；tests/test_qwen_mcp_phase2.py 14 passed；两者合计 26 passed；tests/test_qwen_plugins.py + tests/test_plugin_runtime.py 合计 98 passed；canonical MCP 72 passed；HC-157 SubagentStop 16 passed；Run cancellation 39 passed；三个主文件 150 passed；portable/Claude/Hybrid runtime 31 passed、29 deselected；full-demo 1 passed；Host Plugin/Skill/Run 12 passed、44 deselected；CLI/Protocol focused 62 pass；Python Protocol contract 12 passed；protocol:check、typecheck、git diff --check 通过。新增真实 fake stdio MCP 子进程闭环覆盖 initialize/tools-list/tools-call/cancel/close；新增 Host root/Managed child feedback lifecycle、取消不调用模型、Qwen executable+argv 跨平台解析、Claude PATH 保持和 LSP EOF/header/body/JSON 归一化回归。真实 ZA38 checkout 只读临时 home 安装+enable 得到 Commands 3、Skill 1、MCP config 1，MCP conversion diagnostics 为空，static preview 三类均为 0；净化 store 有 122 个 references/origin 条目，runtime snapshot 无 origin。Phase 4B Settings/Host focused 61 passed，Plugin runtime/MCP/LSP focused 35 passed，portable/Claude/Hybrid 与 Plugin 主集合 155 passed，Phase 0-4B Python 集合 322 passed，canonical MCP/Host/Run/SubagentStop 185 passed，CLI/Protocol focused 80 pass；v3.7 protocol:check、typecheck、uv lock --check --offline、diff-check 通过。新增真实 CLI parse→execute→fake Agent Settings/Plugin removal dispatch、registry revision drift fail-closed、Host retained MCP snapshot overlay release、Windows atomic ACL 前后校验、macOS/Linux/Windows API mock 与 CRLF 边界回归。未启动真实 MCP/Hook/LSP/Monitor、模型或网络，未读取 `.env*`/`.npmrc`/凭据；docs/tasks/project 检查与 HC-130 既有复核日期阻塞见 tmp/handoff.md。"
@@ -51,7 +51,7 @@ canonical seam。当前 ZA38 清单没有 Channels；本 Task 已决定不接入
 - [x] Phase 4A：Settings 架构设计、威胁模型、v3.7 wire shape、最小环境注入和离线验收矩阵已设计并通过主任务评审。
 - [x] Phase 4B：Settings 已实现用户/工作区作用域、敏感值保护和最小环境注入；旧 fingerprint、声明漂移或缺值按契约失败关闭；主任务代码验收已通过，待用户手工验证。
 - [x] Phase 5 决策：当前 ZA38 未声明 Channels，本 Task 不实现 Channel runtime；组件继续报告 unsupported/effective=false。未来若有真实需求，必须另立任务完成 canonical Channel Host、安全评审和 threat model，禁止用动态 import 绕过。
-- [ ] 全阶段：Agent Plugins 1.0、Claude、Hybrid、HC-157 Context/Agent/SubagentStop 回归不变。
+- [x] 全阶段：Agent Plugins 1.0、Claude、Hybrid、HC-157 Context/Agent/SubagentStop 回归不变；用户已完成真实 ZA38 CLI/TUI 与 Managed 子代理调用验收。
 
 ## Phase 0 实施证据（已验收）
 
@@ -59,7 +59,7 @@ canonical seam。当前 ZA38 清单没有 Channels；本 Task 已决定不接入
 
 - 代码：`plugins.model.runtime_component_eligibility` 统一检查 format、kind、enabled/trusted、安装身份、status、count、sources、capabilities、effective；Hook、LSP、Monitor、MCP、Command、Skill，以及 HC-157 Agent/Context/Team consumer 均通过同一语义或其对应 canonical gate。
 - Qwen：`lspServers` 与 `monitors` 只生成明确的 `kind=lsp/monitors`、`status=unsupported`、`effective=false` 报告；Qwen LSP/Monitor/MCP 在 Phase 0 没有可运行格式入口，不能借 Claude loader 读取或构造 runtime。
-- 失败关闭：disabled、untrusted、invalid、unsupported、effective=false、组件报告缺失/歧义和安装校验失败均不产生可执行 runtime；阻断原因使用稳定 `PLUGIN_RUNTIME_COMPONENT_BLOCKED` diagnostics。Qwen Hook 门禁阻断时保留 SubagentStop fail-closed failure。
+- 失败关闭：disabled、untrusted、invalid、unsupported、effective=false、组件报告缺失/歧义和安装校验失败均不产生可执行 runtime；阻断原因使用稳定 `PLUGIN_RUNTIME_COMPONENT_BLOCKED` diagnostics。Qwen `SubagentStop` 仅对命中 matcher 后的 Hook 执行级失败按 warning + allow 处理；runtime 构造、身份、报告和取消仍失败关闭。
 - 测试：离线 fixture/mock 覆盖恶意 Qwen LSP/Monitor、混合 effective Agent/Context/Hook、各 status/effective 组合、disabled/untrusted、安装 package digest 漂移、execution-relevant component report binding 漂移/缺失、diagnostics 文案变化、Claude Hook/LSP/Monitor 与 portable Command/Skill/MCP。三个主文件集合 `tests/test_plugins.py tests/test_plugin_runtime.py tests/test_qwen_plugins.py` 实际为 `129 passed`；Phase 0 显式集合为 `12 passed`；HC-157 回归为 `13 passed, 59 deselected`；portable/Claude/Hybrid 为 `31 passed, 27 deselected`；跨格式 Agent/Context/SubagentStop 为 `7 passed`；Host Plugin 为 `6 passed, 47 deselected`。Qwen fake spawn counter 为 `0`；未启动真实 ZA38 Hook/MCP/LSP/Monitor，未联网，未读取 `.env` 或凭据。
 - 停点：Phase 0 已经由主任务验收；本工作树不提交、不推送，Phase 1 与 Phase 2 证据见下节。
 
@@ -248,3 +248,68 @@ validator。本轮只在 `packages/protocol/schema/v3.json` 增加严格闭集�
   `test_plugins.py + test_plugin_runtime.py + test_qwen_plugins.py` `165 passed`；扩展 Skill/Host
   `test_skills.py + test_server.py` `79 passed`；MCP/Phase3/Settings/Protocol 合集 `100 passed`；
   CLI/Protocol 六文件集合 `82 pass`（`762 expect()`）。
+
+### 用户真实 Subagent 返修（2026-08-31，待主任务验收）
+
+用户用真实 ZA38 Agent 调用 `za38-frontend-executor` 时，Agent 已正确注册、`task` 审批也已解决，
+但 child Engine 在构建阶段因空 MCP 过滤视图尝试 acquire 不存在的 MCP snapshot，最终界面只显示
+笼统的 `RuntimeError`。本轮修复将空 `spec.tools` 定义为无 MCP 资源需求；有 MCP 权限的 child
+只借用当前 Host 完整 MCP resource，并按 immutable `spec.tools` 精确投影，选定 server/tool
+缺失时保持 fail closed，不向 child 暴露其他 server 的工具。未知异常仍只显示类型，受控
+`MCP_`/`RUNTIME_`/`PLUGIN_` 等稳定码可安全透传，禁止把路径或秘密放进 Tool 输出。
+
+离线回归通过真实 `AgentEnginePool` + Host builder seam 验证空 MCP child 可构建、非空视图只注入
+授权工具、缺失工具 fail closed，以及稳定错误码/未知异常脱敏；未调用真实模型、网络 MCP、Hook
+或凭据。完整 Host 集合中的既有 `agents.list` schema 漏项（builtin agent 缺少 `color` 等字段）
+与本轮变更无关，单独记录在 handoff。
+
+### 用户真实 Hook observation 返修（2026-08-31，待主任务验收）
+
+真实 ZA38 Agent 已越过 MCP/Engine 构建后，成功执行 Tool 时仍因
+`PluginRuntimeMiddleware._run_observation_hook()` 未接受 `diagnostic_log` 关键字而失败。
+本轮将 RunContext 的诊断日志沿 `PluginRuntimeMiddleware → HookRunner → HookRunner._invoke`
+继续传递；Hook 日志只记录稳定的 start/completed/failed 摘要，不复制 payload、stdout、stderr、
+宿主路径或秘密。新增真实 middleware + 本地离线 Hook fixture 回归，覆盖 PostToolUse 成功路径和
+诊断日志脱敏；不执行真实插件 Hook、MCP、模型、网络或凭据。
+
+### Phase 4C：Qwen Adapter 重解析与 SubagentStop 终态兼容（2026-08-31，已验收）
+
+本停点纠正 HC-158 原先把 Qwen `SubagentStop` Hook 执行失败一律失败关闭的语义，并补齐
+“Adapter 升级后不能继续相信安装时报告”的运行前边界。当前 ZA38 插件源码不需要重新复制；只有
+package digest 变化才继续沿用显式 update/install 安全边界。
+
+- `PluginManager.refresh_catalog()` 在 Host 启动、控制面刷新和 Run preparation 前读取
+  registry 中的已安装记录，复核 package digest，并用当前 Adapter 重建 descriptor/component
+  report。`adapter_revision` 与 package/plugin identity 一起绑定；刷新结果在同一 registry lock
+  内原子提交，报告和 registry revision 不变时不重复写入。
+- 能力指纹不变时自动更新 report/metadata 并保留 `enabled` 与 trust；能力指纹改变时保留旧
+  `trusted_capability_fingerprint`，返回 `reauthorization-required`，从 runtime catalog 排除，
+  并建立按 plugin/component stable identity 索引的不可执行 blocked view。普通消息、内置能力和
+  其他已授权 Plugin 不受影响；只有请求实际解析到 stale Plugin Command/Skill/Agent/Team，或已有
+  明确 Plugin provenance 的其他 executable entry 时，才返回包含 plugin_id、authorization_state、
+  当前 fingerprint 及 inspect/enable 操作的 `PLUGIN_REAUTHORIZATION_REQUIRED`。用户用新 fingerprint
+  显式确认后才恢复 enabled/trusted；重复启动和并发 refresh 不重复扩大授权。
+- 对格式为 `qwen-code` 且 matcher 命中的 `SubagentStop`，先聚合全部匹配结果；Hook exception、
+  timeout、非零退出、非空畸形输出和 runner 关闭都写入脱敏稳定 warning/diagnostic。任意有效
+  block 优先于失败或 allow，只有无有效 block 时才附 warning 并返回已完成 child 的最终结果；
+  空 stdout、空 `{}` 和合法无 decision 输出不产生 failure warning。
+  合法 blocking 继续同一 child checkpoint；达到 Qwen blocking cap 时释放最新结果并附 warning。
+  matcher miss 不执行 Hook；Run/parent/user cancellation 继续传播 Harness canonical cancellation。
+  PreToolUse、Policy、权限、MCP、非 Qwen 和 Hook runtime 构造失败仍保持 fail-closed。
+- Qwen command Hook `timeout: 10000` 继续按毫秒解释为 10 秒。当前实现不接入 Channels。
+
+本停点离线证据：`tests/runtime/test_subagent_stop.py` 与
+`tests/test_plugin_refresh.py` focused 合计 `43 passed`；另有
+`tests/test_agent_delegation.py` `13 passed`，合计 `56 passed`。覆盖 Host pre-dispatch
+reauthorization、trust 保留、report revision、幂等/并发与 SubagentStop exception/timeout/
+nonzero/malformed/type-error/empty/closed runner、blocking cap、matcher miss、cancellation、
+warning 传播和多 Hook 聚合。相关集合本轮实际为 `242 passed, 12 failed`：11 项既有 Host
+测试使用真实用户级 PluginStore 锁，1 项既有裸 `node` shebang fixture 受带空格 venv 路径影响；
+未修改或清理真实用户 home。未使用真实 Hook、MCP、LSP、模型、网络或凭据。
+
+可演示方式：在临时 home 安装并启用 ZA38 fixture，制造旧 `adapter_revision` 后运行
+`harness plugins inspect <plugin-id>`，应看到当前 report 和 `authorization_state`；若 report
+能力指纹改变，先看到 `reauthorization-required`，直接 Run 在 dispatch 前被拒绝；用 inspect
+得到的新 fingerprint 显式确认后再 Run，child 即使 SubagentStop Hook 自身失败也返回最终结果和
+warning。2026-08-31 用户已在真实 ZA38 工作区完成插件重新授权、Slash Command 与 Managed
+子代理调用验收；期间发现的 CompiledSubAgent `messages` 结果适配缺口已补回归并修复，用户复测通过。

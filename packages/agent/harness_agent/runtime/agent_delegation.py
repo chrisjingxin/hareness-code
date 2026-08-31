@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 from collections.abc import Awaitable, Callable, Mapping
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
@@ -173,6 +174,30 @@ class DelegationContextMiddleware(AgentMiddleware):
 MAX_PARENT_CHILD_PARALLELISM: int = 4
 """每个父 execution 同时运行的子代理最大硬上限。"""
 
+_STABLE_ERROR_CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
+_STABLE_ERROR_CODE_PREFIXES = (
+    "DELEGATION_",
+    "MANAGED_AGENT_",
+    "MCP_",
+    "PLUGIN_",
+    "PROVIDER_",
+    "RUNTIME_",
+    "RUN_",
+)
+
+
+def _stable_exception_code(error: BaseException) -> str | None:
+    """只透传受控稳定码，不把异常正文中的路径或秘密带到 Tool 输出。"""
+    candidate = getattr(error, "code", None)
+    if not isinstance(candidate, str) or not candidate:
+        candidate = str(error).strip()
+    if (
+        _STABLE_ERROR_CODE_RE.fullmatch(candidate) is not None
+        and candidate.startswith(_STABLE_ERROR_CODE_PREFIXES)
+    ):
+        return candidate
+    return None
+
 
 class AgentDelegator:
     """验证 delegation envelope 并执行已注册 Inline/Managed target。"""
@@ -182,12 +207,14 @@ class AgentDelegator:
         registry: AgentExecutionRegistry,
         *,
         targets: tuple[DelegationTarget, ...],
+        blocked_target_messages: Mapping[str, str] | None = None,
     ) -> None:
-        """冻结 target 目录并初始化父 execution 并发与排队状态。"""
+        """冻结 target 目录与不可执行门禁，并初始化并发与排队状态。"""
         if len({target.agent_id for target in targets}) != len(targets):
             raise AgentDelegationError("DELEGATION_TARGET_DUPLICATE")
         self._registry = registry
         self._targets = {target.agent_id: target for target in targets}
+        self._blocked_target_messages = dict(blocked_target_messages or {})
         self._active_by_parent: dict[str, int] = {}
         self._waiters_by_parent: dict[str, list[asyncio.Future[None]]] = {}
         self._completed: dict[str, tuple[tuple[object, ...], AgentResult]] = {}
@@ -197,6 +224,12 @@ class AgentDelegator:
         """执行一次派发；所有成功和失败路径都收敛 child execution。"""
         target = self._targets.get(command.target_agent_id)
         if target is None:
+            blocked_message = self._blocked_target_messages.get(command.target_agent_id)
+            if blocked_message is not None:
+                raise AgentDelegationError(
+                    "PLUGIN_REAUTHORIZATION_REQUIRED",
+                    blocked_message,
+                )
             raise AgentDelegationError("DELEGATION_TARGET_NOT_FOUND")
         parent = await self._registry.get(command.parent_ref)
         if parent is None:
@@ -278,6 +311,9 @@ class AgentDelegator:
             raise
         except Exception as exc:
             await self._finalize_if_running(ref, ExecutionStatus.FAILED)
+            stable_code = _stable_exception_code(exc)
+            if stable_code is not None:
+                raise AgentDelegationError(stable_code) from exc
             raise AgentDelegationError(
                 "DELEGATION_EXECUTION_FAILED",
                 type(exc).__name__,

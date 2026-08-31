@@ -561,16 +561,26 @@ base_url = "https://gateway.example/v1"
     result = frames[-1].get("result")
     assert isinstance(result, dict), frames[-1]
     assert [agent["id"] for agent in result["agents"]] == [
+        "general-purpose",
+        "explore",
         "za38-backend-executor",
         "za38-frontend-executor",
         "za38-java-executor",
     ]
-    assert {agent["color"] for agent in result["agents"]} == {
+    assert [agent["color"] for agent in result["agents"]] == [
+        None,
+        None,
         "green",
         "cyan",
         "orange",
-    }
-    assert {agent["approval_mode"] for agent in result["agents"]} == {"auto-edit"}
+    ]
+    assert [agent["approval_mode"] for agent in result["agents"]] == [
+        None,
+        None,
+        "auto-edit",
+        "auto-edit",
+        "auto-edit",
+    ]
     assert all(agent["permission_mode"] is None for agent in result["agents"])
 
 
@@ -1902,6 +1912,287 @@ async def test_default_engine_builder_passes_one_host_lock_to_each_profile(
     assert captured_settings[0][0] is captured_settings[1][0]
     await first.aclose()
     await second.aclose()
+
+
+async def test_agent_engine_pool_builds_empty_mcp_plugin_profile_without_manager(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """无 MCP 权限的 Plugin Agent 不应因不存在子 snapshot 资源而启动失败。"""
+    from types import SimpleNamespace
+
+    import harness_agent.runtime.agent as agent_module
+    import harness_agent.threads.context_window as context_window_module
+    import harness_agent.extensions.providers.harness_gateway as gateway_module
+    from harness_agent.config.config import ExecutionSettings, ModelSettings, ToolSearchSettings
+    from harness_agent.extensions.mcp import build_mcp_snapshot
+    from harness_agent.host.agent_host import AgentHost
+    from harness_agent.runtime.agent_engine import AgentEnginePool
+    from harness_agent.runtime.agent_spec import skill_catalog_fingerprint
+    from harness_agent.runtime.agent_engine_profile import (
+        AgentEngineProfile,
+        ModelRoleBinding,
+        component_fingerprint,
+    )
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        agent_module,
+        "create_harness_agent",
+        lambda *_args, **kwargs: captured.update(kwargs) or object(),
+    )
+    monkeypatch.setattr(
+        context_window_module,
+        "ContextWindowMiddleware",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        gateway_module,
+        "create_openai_compatible_model",
+        lambda *_args, **_kwargs: object(),
+    )
+
+    class ProviderLease:
+        value = object()
+
+        async def release(self) -> None:
+            return None
+
+    class ProviderPool:
+        async def acquire(self, _settings: object) -> ProviderLease:
+            return ProviderLease()
+
+        async def aclose(self) -> None:
+            return None
+
+    class WorkspaceLease:
+        value = SimpleNamespace(backend=object())
+
+        async def release(self) -> None:
+            return None
+
+    class WorkspacePool:
+        async def acquire(
+            self, _key: str, _settings: object, _workspace: Path
+        ) -> WorkspaceLease:
+            return WorkspaceLease()
+
+    project_fingerprint = component_fingerprint({"test": "empty-plugin-mcp"})
+    snapshot = build_mcp_snapshot([], revision="empty")
+    skill_registry = SimpleNamespace(snapshot_id="skills-empty")
+    view_fingerprint = component_fingerprint({"view": "empty-plugin-mcp"})
+    profile = AgentEngineProfile(
+        project_fingerprint=project_fingerprint,
+        topology_id="agent",
+        topology_version=1,
+        model_roles=(ModelRoleBinding(role="delegate", model_config_fingerprint=project_fingerprint),),
+        tool_catalog_fingerprint=component_fingerprint({"tools": "empty"}),
+        skill_catalog_fingerprint=skill_catalog_fingerprint(
+            skill_registry,
+            view_fingerprint=view_fingerprint,
+        ),
+        mcp_config_fingerprint=snapshot.digest,
+        sandbox_config_fingerprint=component_fingerprint({"sandbox": "empty"}),
+        policy_fingerprint=component_fingerprint({"policy": "empty"}),
+        middleware_fingerprint=component_fingerprint({"middleware": "empty"}),
+        prompt_template_fingerprint=component_fingerprint({"prompt": "empty"}),
+        agent_id="za38-frontend-executor",
+        definition_fingerprint=component_fingerprint({"definition": "empty"}),
+    )
+    spec = SimpleNamespace(
+        runtime_profile=profile,
+        mcp_snapshot=snapshot,
+        execution=ExecutionSettings(),
+        workspace=tmp_path,
+        model_settings=ModelSettings("offline-model", "https://example.test"),
+        model_view=None,
+        tools=(),
+        interactive=False,
+        enable_ask_user=False,
+        enable_memory=False,
+        enable_skills=False,
+        effective_policy=SimpleNamespace(approval_mode=None),
+        capability_view=SimpleNamespace(mcp_tool_names=()),
+        skill_registry=skill_registry,
+        skill_view_fingerprint=view_fingerprint,
+        pinned=False,
+    )
+    server = AgentHost(allow_echo=True, workspace=tmp_path)
+    server._config = SimpleNamespace(
+        tools=ToolSearchSettings(defer="off"),
+        model_catalog=None,
+    )
+    server._provider_client_pool = ProviderPool()  # type: ignore[assignment]
+    server._ensure_workspace_execution_resources = lambda: WorkspacePool()  # type: ignore[method-assign]
+    async def persistence() -> object:
+        return SimpleNamespace(checkpointer=object())
+
+    server._ensure_thread_persistence = persistence  # type: ignore[method-assign]
+    server._resolved_agent_specs[profile.profile_key] = spec
+    pool = AgentEnginePool(server._build_default_agent_engine)
+    server._agent_engine_pool = pool
+
+    try:
+        lease = await pool.acquire(profile)
+        assert captured["tools"] is None
+        assert captured["mcp_server_info"] is None
+        await lease.release()
+    finally:
+        await server.close()
+
+
+async def test_agent_engine_pool_filters_plugin_mcp_tools_to_resolved_view(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """有 MCP 权限的 Plugin Agent 借用 Host 资源时不能看到未授权工具。"""
+    from types import SimpleNamespace
+
+    import harness_agent.runtime.agent as agent_module
+    import harness_agent.threads.context_window as context_window_module
+    import harness_agent.extensions.providers.harness_gateway as gateway_module
+    from harness_agent.config.config import ExecutionSettings, ModelSettings, ToolSearchSettings
+    from harness_agent.extensions.mcp import (
+        McpConnectionManager,
+        McpServerConfig,
+        build_mcp_snapshot,
+    )
+    from harness_agent.host.agent_host import AgentHost
+    from harness_agent.runtime.agent_engine import AgentEnginePool
+    from harness_agent.runtime.agent_spec import skill_catalog_fingerprint
+    from harness_agent.runtime.agent_engine_profile import (
+        AgentEngineProfile,
+        ModelRoleBinding,
+        component_fingerprint,
+    )
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        agent_module,
+        "create_harness_agent",
+        lambda *_args, **kwargs: captured.update(kwargs) or object(),
+    )
+    monkeypatch.setattr(
+        context_window_module,
+        "ContextWindowMiddleware",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        gateway_module,
+        "create_openai_compatible_model",
+        lambda *_args, **_kwargs: object(),
+    )
+
+    class ProviderLease:
+        value = object()
+
+        async def release(self) -> None:
+            return None
+
+    class ProviderPool:
+        async def acquire(self, _settings: object) -> ProviderLease:
+            return ProviderLease()
+
+        async def aclose(self) -> None:
+            return None
+
+    class WorkspaceLease:
+        value = SimpleNamespace(backend=object())
+
+        async def release(self) -> None:
+            return None
+
+    class WorkspacePool:
+        async def acquire(
+            self, _key: str, _settings: object, _workspace: Path
+        ) -> WorkspaceLease:
+            return WorkspaceLease()
+
+    allowed_server = McpServerConfig(
+        name="allowed",
+        transport="stdio",
+        command="allowed-server",
+    )
+    hidden_server = McpServerConfig(
+        name="hidden",
+        transport="stdio",
+        command="hidden-server",
+    )
+    full_snapshot = build_mcp_snapshot(
+        [allowed_server, hidden_server],
+        revision="full",
+    )
+    child_snapshot = build_mcp_snapshot([allowed_server], revision="child")
+    manager = McpConnectionManager(full_snapshot)
+    allowed_tool = SimpleNamespace(name="allowed_read")
+    hidden_tool = SimpleNamespace(name="hidden_secret")
+    manager._current_resource.value.tools = [allowed_tool, hidden_tool]  # noqa: SLF001
+
+    project_fingerprint = component_fingerprint({"test": "filtered-plugin-mcp"})
+    skill_registry = SimpleNamespace(snapshot_id="skills-filtered")
+    view_fingerprint = component_fingerprint({"view": "filtered-plugin-mcp"})
+    profile = AgentEngineProfile(
+        project_fingerprint=project_fingerprint,
+        topology_id="agent",
+        topology_version=1,
+        model_roles=(ModelRoleBinding(role="delegate", model_config_fingerprint=project_fingerprint),),
+        tool_catalog_fingerprint=component_fingerprint({"tools": "filtered"}),
+        skill_catalog_fingerprint=skill_catalog_fingerprint(
+            skill_registry,
+            view_fingerprint=view_fingerprint,
+        ),
+        mcp_config_fingerprint=child_snapshot.digest,
+        sandbox_config_fingerprint=component_fingerprint({"sandbox": "filtered"}),
+        policy_fingerprint=component_fingerprint({"policy": "filtered"}),
+        middleware_fingerprint=component_fingerprint({"middleware": "filtered"}),
+        prompt_template_fingerprint=component_fingerprint({"prompt": "filtered"}),
+        agent_id="za38-frontend-executor",
+        definition_fingerprint=component_fingerprint({"definition": "filtered"}),
+    )
+    spec = SimpleNamespace(
+        runtime_profile=profile,
+        mcp_snapshot=child_snapshot,
+        execution=ExecutionSettings(),
+        workspace=tmp_path,
+        model_settings=ModelSettings("offline-model", "https://example.test"),
+        model_view=None,
+        tools=(allowed_tool,),
+        interactive=False,
+        enable_ask_user=False,
+        enable_memory=False,
+        enable_skills=False,
+        effective_policy=SimpleNamespace(approval_mode=None),
+        capability_view=SimpleNamespace(mcp_tool_names=("allowed_read",)),
+        skill_registry=skill_registry,
+        skill_view_fingerprint=view_fingerprint,
+        pinned=False,
+    )
+    server = AgentHost(allow_echo=True, workspace=tmp_path)
+    server._config = SimpleNamespace(
+        tools=ToolSearchSettings(defer="off"),
+        model_catalog=None,
+    )
+    server._provider_client_pool = ProviderPool()  # type: ignore[assignment]
+    server._ensure_workspace_execution_resources = lambda: WorkspacePool()  # type: ignore[method-assign]
+
+    async def persistence() -> object:
+        return SimpleNamespace(checkpointer=object())
+
+    server._ensure_thread_persistence = persistence  # type: ignore[method-assign]
+    server._mcp_manager = manager
+    server._resolved_agent_specs[profile.profile_key] = spec
+    pool = AgentEnginePool(server._build_default_agent_engine)
+    server._agent_engine_pool = pool
+
+    try:
+        lease = await pool.acquire(profile)
+        assert [tool.name for tool in captured["tools"]] == ["allowed_read"]  # type: ignore[index]
+        assert captured["tools"] != [hidden_tool]
+        await lease.release()
+
+        manager._current_resource.value.tools = [hidden_tool]  # noqa: SLF001
+        with pytest.raises(RuntimeError, match="RUNTIME_MCP_TOOL_VIEW_UNAVAILABLE"):
+            await server._build_default_agent_engine(profile)
+    finally:
+        await server.close()
 
 
 async def test_default_context_compact_acquires_and_releases_profile_engine(tmp_path: Path):

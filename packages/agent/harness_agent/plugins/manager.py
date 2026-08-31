@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Mapping
 
@@ -19,6 +19,7 @@ from harness_agent.plugins.mcp_adapter import PluginMcpLoadResult, load_plugin_m
 from harness_agent.plugins.model import (
     ExtensionCatalogSnapshot,
     InstalledPlugin,
+    PLUGIN_ADAPTER_REPORT_REVISION,
     PluginError,
     catalog_snapshot_id,
     runtime_component_eligibility,
@@ -63,6 +64,30 @@ class PluginSettingsLoadResult:
     blocked_plugin_ids: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class PluginReauthorizationSummary:
+    """陈旧 Plugin 的只读门禁索引；不属于可执行 runtime catalog。"""
+
+    plugin_id: str
+    authorization_state: str
+    capability_fingerprint: str
+    package_digest: str
+    component_sources: tuple[tuple[str, str], ...] = ()
+    component_ids: tuple[str, ...] = ()
+    agent_ids: tuple[str, ...] = ()
+    team_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PluginCatalogRefreshResult:
+    """一次 Adapter 重解析后的不可变 catalog 与授权变化摘要。"""
+
+    catalog: ExtensionCatalogSnapshot
+    changed_plugin_ids: tuple[str, ...] = ()
+    reauthorization_required: tuple[str, ...] = ()
+    reauthorization: tuple[PluginReauthorizationSummary, ...] = ()
+
+
 class _SettingsCleanupPartial(Exception):
     """内部控制流：Settings cleanup partial 时不提交 registry mutation。"""
 
@@ -79,6 +104,69 @@ def _qwen_command_name(relative: str) -> str:
     if parts and parts[-1].lower().endswith(".md"):
         parts[-1] = parts[-1][:-3]
     return ":".join(part for part in parts if part)
+
+
+def _component_source_name(relative: str) -> str:
+    """把报告内相对 source 转成稳定、无宿主路径的 basename。"""
+    normalized = relative.replace("\\", "/").rstrip("/")
+    name = normalized.rsplit("/", 1)[-1]
+    if name.lower().endswith(".md"):
+        name = name[:-3]
+    return name or "component"
+
+
+def _reauthorization_summary(plugin: InstalledPlugin) -> PluginReauthorizationSummary:
+    """从已校验安装报告构造 blocked component/source identity。"""
+    component_sources: list[tuple[str, str]] = []
+    component_ids: list[str] = []
+    agent_ids: list[str] = []
+    team_ids: list[str] = []
+    for component in plugin.components:
+        sources = component.sources or (component.kind,)
+        for relative in sources:
+            normalized = relative.replace("\\", "/")
+            component_sources.append((component.kind, normalized))
+            source_name = _component_source_name(normalized)
+            if component.kind == "commands":
+                command_name = (
+                    _qwen_command_name(normalized)
+                    if plugin.format == "qwen-code"
+                    else source_name
+                )
+                component_ids.append(
+                    f"plugin/{plugin.plugin_id}/command/{command_name}"
+                )
+            elif component.kind == "skills":
+                if normalized == "SKILL.md":
+                    skill_name = plugin.name
+                else:
+                    parts = normalized.split("/")
+                    skill_name = parts[-2] if len(parts) > 1 else source_name
+                component_ids.append(f"plugin/{plugin.plugin_id}/{skill_name}")
+            elif component.kind == "agents":
+                agent_ids.append(source_name)
+                component_ids.append(
+                    f"plugin/{plugin.plugin_id}/agent/{source_name}"
+                )
+            elif component.kind == "teams":
+                team_ids.append(source_name)
+                component_ids.append(
+                    f"plugin/{plugin.plugin_id}/team/{source_name}"
+                )
+            else:
+                component_ids.append(
+                    f"plugin/{plugin.plugin_id}/{component.kind}/{source_name}"
+                )
+    return PluginReauthorizationSummary(
+        plugin_id=plugin.plugin_id,
+        authorization_state=plugin.authorization_state,
+        capability_fingerprint=plugin.capability_fingerprint,
+        package_digest=plugin.package_digest,
+        component_sources=tuple(component_sources),
+        component_ids=tuple(sorted(set(component_ids))),
+        agent_ids=tuple(sorted(set(agent_ids))),
+        team_ids=tuple(sorted(set(team_ids))),
+    )
 
 
 def _qwen_skill_resource_files(package_root: Path) -> tuple[tuple[Path, str], ...]:
@@ -159,6 +247,7 @@ class PluginManager:
                 enabled=False,
                 trusted_capability_fingerprint=None,
                 installed_at_ms=int(time.time() * 1000),
+                adapter_revision=descriptor.adapter_revision,
             )
             resource_snapshot = build_plugin_resource_snapshot(
                 installed,
@@ -288,6 +377,12 @@ class PluginManager:
         capability_fingerprint: str | None = None,
     ) -> dict[str, object]:
         """启用时要求用户确认当前 capability fingerprint；停用立即撤销 trust。"""
+        if enabled:
+            current = _find_plugin(self.store.read_registry(), plugin_id)
+            if current.adapter_revision != PLUGIN_ADAPTER_REPORT_REVISION:
+                # 旧 report 不能作为用户确认的事实来源；先在 registry lock 内用当前
+                # Adapter 重建，再校验调用方传入的 fingerprint。
+                self.refresh_catalog()
         updated: InstalledPlugin | None = None
 
         def _update(current: PluginRegistryState) -> tuple[InstalledPlugin, ...]:
@@ -328,6 +423,7 @@ class PluginManager:
                     plugin.capability_fingerprint if enabled else None
                 ),
                 installed_at_ms=plugin.installed_at_ms,
+                adapter_revision=plugin.adapter_revision,
             )
             return tuple(
                 updated if item.plugin_id == plugin_id else item for item in current.plugins
@@ -408,6 +504,78 @@ class PluginManager:
     def catalog(self) -> ExtensionCatalogSnapshot:
         """发布只包含已启用且 trust 未失效记录的不可变 catalog。"""
         return self._catalog_from_state(self.store.read_registry())
+
+    def refresh_catalog(self) -> PluginCatalogRefreshResult:
+        """用当前 Adapter 重解析已校验 package，再发布可运行 catalog。
+
+        解析发生在 registry 文件锁内，package digest、Plugin identity 和原有 trust
+        均不会被重解析过程替换。能力指纹变化只保留旧 trust，交由显式 enable 重新确认。
+        """
+        changed_plugin_ids: set[str] = set()
+        initial = self.store.read_registry()
+        if (
+            initial.revision == 0
+            and not initial.plugins
+            and not self.store.registry_path.exists()
+        ):
+            # 空的默认 Host 不应因为探测 Plugin 而创建 user-scope lock；有
+            # registry 或已安装记录时才进入跨进程刷新事务。
+            return PluginCatalogRefreshResult(catalog=self._catalog_from_state(initial))
+
+        def _refresh(current: PluginRegistryState) -> tuple[InstalledPlugin, ...]:
+            refreshed: list[InstalledPlugin] = []
+            for plugin in current.plugins:
+                self.store.verify_installed(plugin)
+                descriptor = load_plugin_descriptor(
+                    self.store.package_path(plugin),
+                    package_digest=plugin.package_digest,
+                    name_hint=plugin.name,
+                    requested_format=_adapter_requested_format(plugin),
+                )
+                if (
+                    descriptor.name != plugin.name
+                    or descriptor.format != plugin.format
+                    or descriptor.package_digest != plugin.package_digest
+                    or descriptor.adapter_revision
+                    != PLUGIN_ADAPTER_REPORT_REVISION
+                ):
+                    raise PluginError(
+                        "PLUGIN_ADAPTER_IDENTITY_MISMATCH",
+                        "当前 Adapter 返回的 Plugin identity 无法绑定已安装 package",
+                    )
+                next_plugin = replace(
+                    plugin,
+                    version=descriptor.version,
+                    description=descriptor.description,
+                    manifest=descriptor.manifest,
+                    capability_fingerprint=descriptor.capability_fingerprint,
+                    components=descriptor.components,
+                    diagnostics=descriptor.diagnostics,
+                    adapter_revision=descriptor.adapter_revision,
+                )
+                if next_plugin != plugin:
+                    changed_plugin_ids.add(plugin.plugin_id)
+                refreshed.append(next_plugin)
+            return tuple(refreshed)
+
+        state = self.store.mutate_registry_if_changed(_refresh)
+        reauthorization_required = tuple(
+            plugin.plugin_id
+            for plugin in state.plugins
+            if plugin.enabled
+            and plugin.trusted_capability_fingerprint != plugin.capability_fingerprint
+        )
+        reauthorization = tuple(
+            _reauthorization_summary(plugin)
+            for plugin in state.plugins
+            if plugin.plugin_id in reauthorization_required
+        )
+        return PluginCatalogRefreshResult(
+            catalog=self._catalog_from_state(state),
+            changed_plugin_ids=tuple(sorted(changed_plugin_ids)),
+            reauthorization_required=reauthorization_required,
+            reauthorization=reauthorization,
+        )
 
     def setting_bindings(
         self,
@@ -860,6 +1028,13 @@ def _plugin_component_declared_for_skill_runtime(
         if kind in manifest:
             return True
     return False
+
+
+def _adapter_requested_format(plugin: InstalledPlugin) -> RequestedPluginFormat:
+    """按已安装格式固定 Adapter，hybrid 保留自动合并语义。"""
+    if plugin.format == "hybrid":
+        return "auto"
+    return plugin.format  # type: ignore[return-value]
 
 
 def _find_plugin(state: PluginRegistryState, plugin_id: str) -> InstalledPlugin:

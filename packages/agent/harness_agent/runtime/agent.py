@@ -178,6 +178,23 @@ def default_prompt_template_fingerprint() -> str:
     return sha256_text(_load_system_prompt())
 
 
+def _compiled_subagent_state(result: Any) -> dict[str, Any]:
+    """把受控 delegation 结果收敛为 DeepAgents CompiledSubAgent 状态。"""
+    from langchain_core.messages import AIMessage
+
+    from harness_agent.runtime.agent_delegation import AgentDelegationError
+
+    output = dict(result.output)
+    if "messages" in output:
+        return output
+    final = output.get("final")
+    if isinstance(final, str):
+        # Managed Agent 的 warning 等私有执行元数据不得写回父图状态；父 Agent
+        # 只接收最终 assistant 消息，与 DeepAgents 内建子代理保持同一契约。
+        return {"messages": [AIMessage(content=final)]}
+    raise AgentDelegationError("DELEGATION_RESULT_INVALID")
+
+
 def _create_controlled_inline_subagents(
     *,
     model: BaseChatModel,
@@ -189,6 +206,7 @@ def _create_controlled_inline_subagents(
     execution_registry: AgentExecutionRegistry,
     model_view: SafeModelProfile | None,
     managed_targets: Sequence[Any] = (),
+    blocked_target_messages: Mapping[str, str] | None = None,
     concurrency_lock: AsyncRWLock | None = None,
     plugin_middleware: Any | None = None,
     file_tool_contract: Any | None = None,
@@ -358,6 +376,7 @@ def _create_controlled_inline_subagents(
     delegator = AgentDelegator(
         execution_registry,
         targets=targets,
+        blocked_target_messages=blocked_target_messages,
     )
 
     def controlled_runnable(target_agent_id: str) -> RunnableLambda:
@@ -394,7 +413,7 @@ def _create_controlled_inline_subagents(
                     cancellation_token=context.cancellation_token,
                 )
             )
-            return dict(result.output)
+            return _compiled_subagent_state(result)
 
         def invoke_sync(_state: dict[str, Any]) -> dict[str, Any]:
             """生产图只允许异步 delegation，防止同步入口绕过取消和资源清理。"""
@@ -693,6 +712,7 @@ def create_harness_agent(
     execution_registry: AgentExecutionRegistry | None = None,
     delegation_model: SafeModelProfile | None = None,
     delegation_targets: Sequence[Any] = (),
+    blocked_target_messages: Mapping[str, str] | None = None,
     plugin_runtime: Any | None = None,
     defer_tools: str | bool | None = None,
     file_tool_contract: Any | None = None,
@@ -732,6 +752,8 @@ def create_harness_agent(
         execution_registry: Host 的 AgentExecutionRegistry；传入后 `task` 走受控 delegation。
         delegation_model: 写入 Inline child execution 的脱敏模型事实。
         delegation_targets: Host 从可信 Plugin catalog 注册的 Managed target。
+        blocked_target_messages: stale Plugin Agent 的不可执行门禁摘要；不加入 subagent
+            runtime catalog，仅在显式目标缺失时返回 reauthorization。
         plugin_runtime: Host 持有的 PluginRuntimeManager；提供 Hook middleware 与 LSP。
         defer_tools: tool_search 延迟加载开关（对应 ``[tools].tool_search_defer``）。
             True/``"on"`` 启用延迟（D8 低频内置与 MCP 工具不绑定模型，搜索命中
@@ -1030,6 +1052,7 @@ def create_harness_agent(
             execution_registry=execution_registry,
             model_view=delegation_model,
             managed_targets=delegation_targets,
+            blocked_target_messages=blocked_target_messages,
             concurrency_lock=concurrency_lock,
             plugin_middleware=getattr(plugin_runtime, "middleware", None),
             file_tool_contract=file_tool_contract,

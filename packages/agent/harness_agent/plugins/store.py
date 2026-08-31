@@ -248,6 +248,23 @@ class PluginStore:
             self._write_registry_atomic(state)
             return state
 
+    def mutate_registry_if_changed(
+        self,
+        operation: Callable[[PluginRegistryState], tuple[InstalledPlugin, ...]],
+    ) -> PluginRegistryState:
+        """在同一跨进程锁内只提交真正变化的 registry。"""
+        with self._exclusive_lock():
+            current = self._read_registry_unlocked()
+            plugins = tuple(sorted(operation(current), key=lambda item: item.plugin_id))
+            ids = [plugin.plugin_id for plugin in plugins]
+            if len(ids) != len(set(ids)):
+                raise PluginError("PLUGIN_REGISTRY_INVALID", "Plugin registry 包含重复 ID")
+            if plugins == current.plugins:
+                return current
+            state = PluginRegistryState(revision=current.revision + 1, plugins=plugins)
+            self._write_registry_atomic(state)
+            return state
+
     def _read_registry_unlocked(self) -> PluginRegistryState:
         """不加锁读取；写事务必须通过 mutate_registry 调用。"""
         content = self._read_registry_bytes_unlocked()
@@ -638,6 +655,7 @@ def _installed_from_record(value: object) -> InstalledPlugin:
             value.get("trusted_capability_fingerprint")
         ),
         installed_at_ms=_required_int(value, "installed_at_ms"),
+        adapter_revision=_optional_record_string(value.get("adapter_revision")),
     )
     if plugin.format not in {"agent-plugins-1.0", "claude-code", "qwen-code", "hybrid"}:
         raise ValueError("invalid format")

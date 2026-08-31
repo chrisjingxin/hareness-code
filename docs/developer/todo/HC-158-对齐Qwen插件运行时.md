@@ -197,6 +197,64 @@ generation replacement、EOF 和畸形消息后 client 清理。Prompt、Session
 - [x] 验证命令、实际计数、平台 backend 未验证边界和 Channels 延期条件记录于
   `tmp/handoff.md`；Channel runtime 未实现。
 
+### 用户真实 Subagent 返修（2026-08-31）
+
+- [x] 为无 MCP 声明的 Plugin Agent 增加真实 AgentEnginePool + Host builder 离线回归，确认空
+  视图不依赖 MCP Manager。
+- [x] 为有 MCP 声明的 Plugin Agent 增加共享 generation 精确工具视图回归：只注入授权工具，
+  server/tool 漂移或缺失按稳定码失败关闭。
+- [x] 增加 Managed delegation 稳定错误码透传与未知异常类型级脱敏回归。
+- [x] 运行本轮 focused tests、`git diff --check`；完整 Host 集合仍有既有 agents.list schema
+  color/approval 字段漏项，已与本轮结果分开记录。
+
+### 用户真实 Hook observation 返修（2026-08-31）
+
+- [x] 修复 observation Hook 的 `diagnostic_log` 关键字从真实 middleware 到 canonical HookRunner
+  的传递。
+- [x] 新增真实 `PluginRuntimeMiddleware → HookRunner → 本地 fixture Hook` 离线回归，确认成功
+  PostToolUse 不再触发 TypeError，日志不包含 payload、路径或秘密。
+- [x] 通过 Plugin runtime、Qwen、Delegation、Managed Agent focused tests、typecheck 和
+  `git diff --check`；Qwen Phase 3 与 SubagentStop 中的既有失败保持独立记录。
+
+### Phase 4C：Adapter report 重解析与 Qwen SubagentStop 终态对齐
+
+- [x] 给已安装记录写入稳定 `adapter_revision`；refresh 在 registry lock 内复核 package
+  digest，并用当前 Adapter 重建 descriptor/component report；未变化不重复递增 revision，
+  package/plugin identity/source binding 保持不变。
+- [x] 实现 unchanged fingerprint 自动更新并保留 enabled/trusted；changed fingerprint
+  原子更新 report 但保留旧 trust，runtime catalog 排除该 Plugin，并建立按 plugin/component
+  stable identity 索引的 `reauthorization-required` blocked view；普通 Run 不因全局 stale 状态
+  被阻断，只有实际依赖 stale Plugin 能力时才在 dispatch、child、model 或 runtime 前返回包含
+  plugin_id/fingerprint/inspect-enable 提示的 `PLUGIN_REAUTHORIZATION_REQUIRED`，显式确认后恢复。
+- [x] 覆盖重复启动、并发 refresh、digest 校验、旧 report、trust 保留、fingerprint 变化、
+  运行前阻断与 reauthorization 恢复；仅使用临时 home 和离线 Qwen fixture。
+- [x] 将 Qwen matched `SubagentStop` 的全部 Hook results 先聚合：failure 与 valid output 分离，
+  任一合法 block 按 OR/最严格语义优先，多个 block 的 reason/additionalContext 有界合并；只有无
+  block 且有 exception/timeout/nonzero/malformed/closed failure 时才 warning/diagnostic + child
+  final result。空 stdout/空 JSON/无 decision 合法 no-decision 不告警；正常 block/continue 继续
+  同一 checkpoint，blocking cap 返回最新结果+warning，matcher miss 不执行 Hook。
+- [x] 保持 Run/parent/user cancellation 传播；PreToolUse、Policy、权限、MCP、非 Qwen 与
+  Hook runtime construction/identity/report 失败继续 fail-closed；Qwen `timeout: 10000`
+  仍转换为 10 秒；Channels 不实现。
+- [x] 以 fake runner/process/Managed executor/Host 做 red→green，覆盖 warning 传递、日志脱敏、
+  取消和跨格式回归；不运行真实 Hook/MCP/LSP、模型、网络或凭据。
+
+### Phase 4C 可演示停点
+
+- [x] 临时 home 中旧 Adapter report 启动后自动重解析；`plugins.inspect` 可观察当前
+  `adapter_revision`、fingerprint 和 `authorization_state`。
+- [x] unchanged 保留 trust；changed 建立不可执行 blocked index，只有实际请求 stale component
+  时在 Run/Agent/child 前明确提示 reauthorization，普通 Run 不被全局状态阻断；确认新 fingerprint
+  后恢复；重复/并发 refresh 不重复写入或扩大授权。
+- [x] Qwen SubagentStop Hook 级失败只显示稳定 warning 并返回 child 结果；正常 blocking 继续
+  child，达到 cap 仍返回结果；取消保持 cancellation。
+- [x] 验证：focused `test_subagent_stop.py + test_plugin_refresh.py` 为 `43 passed`，加上
+  `test_agent_delegation.py` 为 `56 passed`；本轮相关集合为 `242 passed, 12 failed`，其中
+  11 项为既有 Host 用户级 PluginStore 锁环境限制，1 项为带空格 venv 路径导致的既有裸
+  node shebang fixture 限制；详情写入 `tmp/handoff.md`。
+- [x] 用户已手工执行真实 CLI/TUI 的 `plugins.inspect → reauthorize → Run`，并完成 Slash
+  Command 与 Managed 子代理调用复测；CompiledSubAgent `messages` 适配返修后运行正常。
+
 ## Phase 5：Channels 延期决策（已完成）
 
 - [x] 核对当前 ZA38 插件无 `channels` 声明，并按 2026-08-28 用户决定从 HC-158 实现范围移出。
@@ -205,6 +263,6 @@ generation replacement、EOF 和畸形消息后 client 清理。Prompt、Session
 
 ## 最终收口
 
-- [ ] 更新用户兼容矩阵、架构文档、Task 证据和目录/ZIP 验收。
-- [ ] 完整 review 和全量验证；用户实测前保持待验收，不归档、不推送。
-- [ ] 将 Channels，以及安装源、link/update/hot reload/workspace scope，在出现真实需求时拆为独立后续 Task。
+- [x] 更新用户兼容矩阵、架构文档、Task 证据和目录/ZIP 验收。
+- [x] 完成 review、全量验证与用户真实 ZA38 CLI/TUI 复测；既有基线失败单独记录。
+- [x] 将 Channels，以及安装源、link/update/hot reload/workspace scope，在出现真实需求时拆为独立后续 Task。

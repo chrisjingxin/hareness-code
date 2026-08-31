@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 from langchain_core.messages import AIMessageChunk
 
+from harness_agent.diagnostic_log.runtime import DiagnosticSettings, create_diagnostic_log
 from harness_agent.plugins.runtime import (
     HookDefinition,
     HookResult,
@@ -57,6 +58,16 @@ class _FakeHookRunner:
         return (HookResult(0, document={"decision": "allow"}),)
 
 
+class _RecordingDiagnosticLog:
+    """记录 SubagentStop 的稳定诊断字段，不接收 Hook 正文。"""
+
+    def __init__(self) -> None:
+        self.records: list[tuple[str, str, dict[str, object]]] = []
+
+    def warn(self, event: str, fields: Mapping[str, object]) -> None:
+        self.records.append(("warn", event, dict(fields)))
+
+
 def _request(*, stop_hook_active: bool = False) -> SubagentStopRequest:
     return SubagentStopRequest(
         plugin_id="plugin-za38",
@@ -99,7 +110,7 @@ async def test_subagent_stop_allow_uses_bounded_virtual_input() -> None:
 
 @pytest.mark.asyncio
 async def test_subagent_stop_empty_json_is_allow() -> None:
-    """合法的空 JSON Hook 输出与空 stdout 一样表示没有阻断。"""
+    """Qwen 空 JSON 不阻断 child，也不应被当成 Hook 失败。"""
     runner = _FakeHookRunner([HookResult(0, stdout="{}")])
     controller = SubagentStopController(
         hook_runner=runner.run,
@@ -109,6 +120,93 @@ async def test_subagent_stop_empty_json_is_allow() -> None:
     result = await controller.evaluate(_request())
 
     assert result.action == "allow"
+    assert result.warning == ""
+
+
+@pytest.mark.asyncio
+async def test_subagent_stop_empty_or_no_decision_is_normal_allow() -> None:
+    """空 stdout、空对象和合法 no-decision 都是 Qwen no-decision。"""
+    for hook_result in (
+        HookResult(0, stdout=""),
+        HookResult(0, stdout="{}"),
+        HookResult(0, document={}),
+        HookResult(0, document={"reason": "informational"}),
+    ):
+        runner = _FakeHookRunner([hook_result])
+        controller = SubagentStopController(
+            hook_runner=runner.run,
+            interaction_port=lambda _request: asyncio.sleep(0),
+        )
+
+        result = await controller.evaluate(_request())
+
+        assert result.action == "allow"
+        assert result.warning == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "document",
+    (
+        {"continue": "false"},
+        {"stopReason": 123},
+        {"suppressOutput": 1},
+        {"hookSpecificOutput": {"decision": 123}},
+        {"hookSpecificOutput": {"additionalContext": 123}},
+    ),
+)
+async def test_subagent_stop_nonempty_type_errors_are_malformed(
+    document: dict[str, object],
+) -> None:
+    """非空输出中的类型错误不能伪装成合法 no-decision。"""
+    runner = _FakeHookRunner([HookResult(0, document=document)])
+    controller = SubagentStopController(
+        hook_runner=runner.run,
+        interaction_port=lambda _request: asyncio.sleep(0),
+    )
+
+    result = await controller.evaluate(_request())
+
+    assert result.action == "allow"
+    assert result.warning == (
+        "SubagentStop Hook warning: SUBAGENT_STOP_HOOK_INVALID; child result returned."
+    )
+
+
+@pytest.mark.asyncio
+async def test_subagent_stop_runner_marks_nonzero_malformed_output_as_invalid() -> None:
+    """Runner 已确认非空输出解析失败时，controller 仍返回 malformed 稳定码。"""
+    runner = _FakeHookRunner(
+        [HookResult(2, stderr="Hook returned invalid JSON", malformed=True)]
+    )
+    controller = SubagentStopController(
+        hook_runner=runner.run,
+        interaction_port=lambda _request: asyncio.sleep(0),
+    )
+
+    result = await controller.evaluate(_request())
+
+    assert result.action == "allow"
+    assert result.warning == (
+        "SubagentStop Hook warning: SUBAGENT_STOP_HOOK_INVALID; child result returned."
+    )
+
+
+@pytest.mark.asyncio
+async def test_subagent_stop_non_mapping_document_is_malformed() -> None:
+    """假的 runner 不能用非对象 document 绕过 SubagentStop 输出校验。"""
+    runner = _FakeHookRunner([HookResult(0, document=[])])  # type: ignore[arg-type]
+    controller = SubagentStopController(
+        hook_runner=runner.run,
+        interaction_port=lambda _request: asyncio.sleep(0),
+    )
+
+    result = await controller.evaluate(_request())
+
+    assert result.action == "allow"
+    assert result.warning == (
+        "SubagentStop Hook warning: SUBAGENT_STOP_HOOK_INVALID; child result returned."
+    )
 
 
 @pytest.mark.asyncio
@@ -183,8 +281,8 @@ async def test_subagent_stop_submit_continues_but_skip_only_releases_gate() -> N
 
 
 @pytest.mark.asyncio
-async def test_subagent_stop_rejects_malformed_hook_and_expired_interaction() -> None:
-    """坏输出、无交互客户端均不能把 child 放行。"""
+async def test_subagent_stop_hook_failures_allow_completed_child_with_warning() -> None:
+    """Qwen Hook 级失败只告警并释放已完成 child，不能丢弃 child 结果。"""
     for hook_result in (
         HookResult(0, document={"unexpected": True}),
         HookResult(0, stdout="not-json"),
@@ -193,25 +291,279 @@ async def test_subagent_stop_rejects_malformed_hook_and_expired_interaction() ->
     ):
         runner = _FakeHookRunner([hook_result])
 
-        async def no_interaction(_request: InteractionRequest) -> InteractionResult:
-            return InteractionResult({"answers": {}}, expired=True)
-
         controller = SubagentStopController(
             hook_runner=runner.run,
-            interaction_port=no_interaction,
+            interaction_port=lambda _request: asyncio.sleep(0),
         )
-        with pytest.raises(SubagentStopError) as error:
-            await controller.evaluate(_request())
-        assert error.value.code in {
-            "SUBAGENT_STOP_HOOK_INVALID",
-            "SUBAGENT_STOP_HOOK_FAILED",
-            "SUBAGENT_STOP_HOOK_TIMEOUT",
-        }
+        result = await controller.evaluate(_request())
+        assert result.action == "allow"
+        assert "SUBAGENT_STOP_HOOK_" in result.warning
 
 
 @pytest.mark.asyncio
-async def test_subagent_stop_matched_empty_and_closed_runner_fail_closed() -> None:
-    """已确认命中的 gate 没有同步裁决时不能伪装成无匹配并放行。"""
+@pytest.mark.parametrize(
+    "results",
+    (
+        (
+            HookResult(1, stderr="offline hook failed"),
+            HookResult(
+                0,
+                document={
+                    "decision": "block",
+                    "reason": "先检查生成物",
+                    "hookSpecificOutput": {"additionalContext": "补充门禁上下文"},
+                },
+            ),
+        ),
+        (
+            HookResult(
+                0,
+                document={
+                    "decision": "block",
+                    "reason": "先检查生成物",
+                    "hookSpecificOutput": {"additionalContext": "补充门禁上下文"},
+                },
+            ),
+            HookResult(1, stderr="offline hook failed"),
+        ),
+    ),
+)
+async def test_subagent_stop_aggregates_failure_and_block_regardless_of_order(
+    results: tuple[HookResult, HookResult],
+) -> None:
+    """失败 Hook 不能短路，任意顺序的有效 block 都必须进入 interaction。"""
+    calls = 0
+    interactions: list[InteractionRequest] = []
+    log = _RecordingDiagnosticLog()
+
+    async def runner(_event: str, **_kwargs: object) -> tuple[HookResult, ...]:
+        nonlocal calls
+        calls += 1
+        return results
+
+    async def interaction(request: InteractionRequest) -> InteractionResult:
+        interactions.append(request)
+        return InteractionResult({"answers": {"question-1": ["continue"]}})
+
+    controller = SubagentStopController(
+        hook_runner=runner,
+        interaction_port=interaction,
+        diagnostic_log=log,
+    )
+    result = await controller.evaluate(_request())
+
+    assert calls == 1
+    assert result.action == "continue"
+    assert result.warning == ""
+    assert len(interactions) == 1
+    assert "先检查生成物" in interactions[0].serial_context["reason"]  # type: ignore[index]
+    assert "补充门禁上下文" in interactions[0].serial_context["additional_context"]  # type: ignore[index]
+    assert [record[2]["summary_code"] for record in log.records] == [
+        "SUBAGENT_STOP_HOOK_NONZERO"
+    ]
+    assert all("outcome" not in record[2] for record in log.records)
+
+
+@pytest.mark.asyncio
+async def test_subagent_stop_hook_runner_continues_after_one_hook_exception(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """真实 HookRunner 收集一个异常后仍须让后续匹配 Hook 参与聚合。"""
+    definitions = tuple(
+        HookDefinition(
+            plugin_id="plugin-za38",
+            event="SubagentStop",
+            matcher="*",
+            command=command,
+            args=(),
+            timeout_seconds=1.0,
+            asynchronous=False,
+            shell=None,
+            root=tmp_path,
+            data=tmp_path,
+            workspace=tmp_path,
+        )
+        for command in ("raise", "block")
+    )
+    runner = HookRunner(definitions)
+
+    async def invoke(
+        definition: HookDefinition,
+        _payload: Mapping[str, object],
+        *,
+        tool_name: str,
+        diagnostic_log: Any,
+    ) -> HookResult:
+        assert tool_name == "za38-frontend-executor"
+        assert diagnostic_log is not None
+        if definition.command == "raise":
+            raise RuntimeError("must not escape")
+        return HookResult(0, document={"decision": "block", "reason": "后续门禁"})
+
+    monkeypatch.setattr(runner, "_invoke", invoke)
+
+    results = await runner.run(
+        "SubagentStop",
+        tool_name="za38-frontend-executor",
+        plugin_id="plugin-za38",
+        payload={},
+    )
+
+    assert len(results) == 2
+    assert results[0].exit_code != 0
+    assert results[1].document == {"decision": "block", "reason": "后续门禁"}
+
+
+@pytest.mark.asyncio
+async def test_subagent_stop_merges_multiple_blocks_with_bounded_feedback() -> None:
+    """多个 block 按 Qwen OR 语义有界合并 reason 与 additionalContext。"""
+    first_reason = "A" * 9000
+    second_reason = "B" * 9000
+    first_context = "C" * 9000
+    second_context = "D" * 9000
+    results = (
+        HookResult(
+            0,
+            document={
+                "decision": "block",
+                "reason": first_reason,
+                "additionalContext": first_context,
+            },
+        ),
+        HookResult(
+            0,
+            document={
+                "decision": "block",
+                "reason": second_reason,
+                "additionalContext": second_context,
+            },
+        ),
+    )
+    interactions: list[InteractionRequest] = []
+
+    async def runner(_event: str, **_kwargs: object) -> tuple[HookResult, ...]:
+        return results
+
+    async def interaction(request: InteractionRequest) -> InteractionResult:
+        interactions.append(request)
+        return InteractionResult({"answers": {"question-1": ["continue"]}})
+
+    controller = SubagentStopController(
+        hook_runner=runner,
+        interaction_port=interaction,
+    )
+    result = await controller.evaluate(_request())
+
+    assert result.action == "continue"
+    assert len(interactions) == 1
+    serial_context = interactions[0].serial_context
+    assert serial_context is not None
+    assert len(str(serial_context["reason"]).encode()) <= 16 * 1024
+    assert len(str(serial_context["additional_context"]).encode()) <= 16 * 1024
+    assert first_reason in str(serial_context["reason"])
+    assert second_reason not in str(serial_context["reason"])
+
+
+@pytest.mark.asyncio
+async def test_subagent_stop_failure_and_allow_warn_only_when_no_block() -> None:
+    """失败与合法 allow 聚合时释放 child，并保留稳定 warning。"""
+    log = _RecordingDiagnosticLog()
+
+    async def runner(_event: str, **_kwargs: object) -> tuple[HookResult, ...]:
+        return (
+            HookResult(1, stderr="offline hook failed"),
+            HookResult(0, document={"decision": "allow"}),
+        )
+
+    controller = SubagentStopController(
+        hook_runner=runner,
+        interaction_port=lambda _request: asyncio.sleep(0),
+        diagnostic_log=log,
+    )
+    result = await controller.evaluate(_request())
+
+    assert result.action == "allow"
+    assert result.warning == (
+        "SubagentStop Hook warning: SUBAGENT_STOP_HOOK_NONZERO; child result returned."
+    )
+    assert [record[2]["summary_code"] for record in log.records] == [
+        "SUBAGENT_STOP_HOOK_NONZERO"
+    ]
+    assert all("outcome" not in record[2] for record in log.records)
+
+
+@pytest.mark.asyncio
+async def test_subagent_stop_failure_diagnostic_matches_v1_hook_contract(
+    tmp_path: Path,
+) -> None:
+    """SubagentStop failure diagnostic 必须能通过共享 v1 schema。"""
+    diagnostic_log, lifecycle = create_diagnostic_log(
+        component="agent",
+        project_fingerprint="a" * 64,
+        root=tmp_path,
+        settings=DiagnosticSettings(level="debug"),
+    )
+    async def runner(_event: str, **_kwargs: object) -> tuple[HookResult, ...]:
+        return (HookResult(1, stderr="redacted"),)
+
+    controller = SubagentStopController(
+        hook_runner=runner,
+        interaction_port=lambda _request: asyncio.sleep(0),
+        diagnostic_log=diagnostic_log,
+    )
+
+    result = await controller.evaluate(_request())
+
+    assert result.action == "allow"
+    assert "SUBAGENT_STOP_HOOK_NONZERO" in result.warning
+    assert lifecycle.snapshot()["contract_violations"] == 0
+    await lifecycle.close()
+
+
+@pytest.mark.asyncio
+async def test_subagent_stop_hook_exception_is_redacted_and_allows_stop() -> None:
+    """Hook runner 异常不泄露异常正文，也不改变 child 的成功终态。"""
+    async def broken_runner(_event: str, **_kwargs: object) -> tuple[HookResult, ...]:
+        raise RuntimeError("secret host path and credential")
+
+    controller = SubagentStopController(
+        hook_runner=broken_runner,
+        interaction_port=lambda _request: asyncio.sleep(0),
+    )
+
+    result = await controller.evaluate(_request())
+
+    assert result.action == "allow"
+    assert result.warning == (
+        "SubagentStop Hook warning: SUBAGENT_STOP_HOOK_FAILED; child result returned."
+    )
+    assert "secret" not in result.warning
+
+
+@pytest.mark.asyncio
+async def test_subagent_stop_hook_failure_does_not_swallow_cancellation() -> None:
+    """Hook 普通异常与 Run cancellation 同时发生时仍传播 canonical cancellation。"""
+    cancelled = False
+
+    async def failing_runner(_event: str, **_kwargs: object) -> tuple[HookResult, ...]:
+        nonlocal cancelled
+        cancelled = True
+        raise RuntimeError("hook failed while the run was cancelled")
+
+    controller = SubagentStopController(
+        hook_runner=failing_runner,
+        interaction_port=lambda _request: asyncio.sleep(0),
+    )
+    request = replace(_request(), is_cancelled=lambda: cancelled)
+
+    with pytest.raises(asyncio.CancelledError):
+        await controller.evaluate(request)
+
+
+@pytest.mark.asyncio
+async def test_subagent_stop_matched_empty_and_closed_runner_allow_with_warning() -> None:
+    """命中的 Qwen gate 若 runner 关闭，只告警并放行已完成 child。"""
     closed_runner = HookRunner(())
     await closed_runner.aclose()
     try:
@@ -226,9 +578,9 @@ async def test_subagent_stop_matched_empty_and_closed_runner_fail_closed() -> No
                 hook_runner=hook_runner,
                 interaction_port=lambda _request: asyncio.sleep(0),
             )
-            with pytest.raises(SubagentStopError) as error:
-                await controller.evaluate(_request())
-            assert error.value.code == "SUBAGENT_STOP_HOOK_NO_RESULT"
+            result = await controller.evaluate(_request())
+            assert result.action == "allow"
+            assert "SUBAGENT_STOP_HOOK_RUNNER_CLOSED" in result.warning
     finally:
         await closed_runner.aclose()
 
@@ -255,7 +607,11 @@ async def test_subagent_stop_matcher_filters_before_hook_invocation() -> None:
     runner = HookRunner((matching, non_matching))
     invoked: list[str] = []
 
-    async def fake_invoke(definition: HookDefinition, _payload: Mapping[str, object]) -> HookResult:
+    async def fake_invoke(
+        definition: HookDefinition,
+        _payload: Mapping[str, object],
+        **_kwargs: object,
+    ) -> HookResult:
         invoked.append(definition.matcher)
         return HookResult(0, document={"decision": "allow"})
 
@@ -285,8 +641,8 @@ async def test_subagent_stop_matcher_filters_before_hook_invocation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_subagent_stop_rejects_invalid_and_cancelled_interaction() -> None:
-    """无效答案和取消不能把 SubagentStop 门禁默认放行。"""
+async def test_subagent_stop_rejects_invalid_interaction_but_propagates_cancellation() -> None:
+    """用户门禁答案仍 fail closed，但取消必须保留 canonical cancellation。"""
     runner = _FakeHookRunner(
         [HookResult(0, document={"decision": "block", "reason": "需要复核"})]
     )
@@ -339,9 +695,8 @@ async def test_subagent_stop_rejects_invalid_and_cancelled_interaction() -> None
         ).run,
         interaction_port=cancelled_interaction,
     )
-    with pytest.raises(SubagentStopError) as cancelled:
+    with pytest.raises(asyncio.CancelledError):
         await controller.evaluate(_request())
-    assert cancelled.value.code == "SUBAGENT_STOP_INTERACTION_CANCELLED"
 
 
 @pytest.mark.asyncio
@@ -366,8 +721,8 @@ async def test_subagent_stop_disabled_or_untrusted_never_calls_hook() -> None:
 
 
 @pytest.mark.asyncio
-async def test_subagent_stop_allows_eight_retries_but_ninth_block_fails_closed() -> None:
-    """连续八次阻断可继续同一 child，第九次阻断稳定失败关闭。"""
+async def test_subagent_stop_block_cap_returns_latest_child_with_warning() -> None:
+    """达到 Qwen blocking cap 后结束当前 child，并附稳定 warning。"""
     runner = _FakeHookRunner(
         [HookResult(0, document={"decision": "block", "reason": "仍未提交"})] * 9
     )
@@ -382,9 +737,27 @@ async def test_subagent_stop_allows_eight_retries_but_ninth_block_fails_closed()
     for _ in range(8):
         result = await controller.evaluate(_request())
         assert result.action == "continue"
-    with pytest.raises(SubagentStopError) as error:
+    result = await controller.evaluate(_request())
+    assert result.action == "allow"
+    assert result.warning == (
+        "SubagentStop hook blocked continuation 8 consecutive times; "
+        "overriding and ending the turn."
+    )
+
+
+@pytest.mark.asyncio
+async def test_subagent_stop_hook_cancellation_is_not_treated_as_hook_success() -> None:
+    """Hook task 被取消时不走 Hook fail-open，直接传播 Run cancellation。"""
+    async def cancelled_runner(_event: str, **_kwargs: object) -> tuple[HookResult, ...]:
+        raise asyncio.CancelledError
+
+    controller = SubagentStopController(
+        hook_runner=cancelled_runner,
+        interaction_port=lambda _request: asyncio.sleep(0),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
         await controller.evaluate(_request())
-    assert error.value.code == "SUBAGENT_STOP_BLOCK_LIMIT"
 
 
 def test_child_interaction_registry_is_run_scoped_and_cleanup_is_idempotent() -> None:
@@ -486,6 +859,40 @@ async def test_managed_executor_retries_same_child_checkpoint_after_gate_continu
     assert result.final_content == "final output"
     assert len(agent.calls) == 2
     assert seen == ["child-1", "child-1"]
+    assert runtime.released == 1
+
+
+@pytest.mark.asyncio
+async def test_managed_executor_keeps_child_result_when_gate_returns_warning() -> None:
+    """终态 Hook warning 随已完成 child 结果返回，不把 delegation 改成失败。"""
+    runtime = _Runtime(_FakeAgent())
+
+    async def gate(_final: ManagedFinalOutput) -> FinalOutputGateDecision:
+        return FinalOutputGateDecision(
+            action="allow",
+            warning=(
+                "SubagentStop Hook warning: SUBAGENT_STOP_HOOK_FAILED; "
+                "child result returned."
+            ),
+        )
+
+    request = ManagedAgentRequest(
+        execution_ref="child-1",
+        parent_execution_ref="root-1",
+        run_id="run-1",
+        input="执行只读任务",
+        checkpoint_namespace="fp:thread:run:child-1",
+        output_policy="capture_only",
+        runtime_provider=lambda: _ready(runtime),
+        is_cancelled=lambda: False,
+        idempotency_key="delegate-warning-1",
+        final_output_gate=gate,
+    )
+
+    result = await ManagedAgentExecutor().execute(request, _Observer())
+
+    assert result.final_content == "first output"
+    assert "SUBAGENT_STOP_HOOK_FAILED" in result.warning
     assert runtime.released == 1
 
 
@@ -592,18 +999,23 @@ async def test_run_coordinator_routes_child_question_through_owner_and_cleans_re
         interaction_port=_Port(),
     )
     coordinator._emit = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
-    run = type(
+    coordinator._runs["thread-1"] = type(
         "ActiveRun",
         (),
         {
             "ref": RunRef("thread-1", "run-1"),
             "owner": ConnectionRef("owner"),
             "completion": None,
-            "cancel_requested": False,
-            "status": "running",
+                "cancel_requested": False,
+                "status": "running",
+                "timing": None,
+                "diagnostic_log": type(
+                "Log",
+                (),
+                {"info": lambda *_args: None, "warn": lambda *_args: None, "error": lambda *_args: None},
+            )(),
         },
     )()
-    coordinator._runs["thread-1"] = run
     interaction = InteractionRequest(
         request_id="stop-1",
         type="question",

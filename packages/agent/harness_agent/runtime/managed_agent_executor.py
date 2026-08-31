@@ -162,6 +162,7 @@ class FinalOutputGateDecision:
     action: Literal["allow", "continue"]
     continuation_prompt: str = ""
     skip_once: bool = False
+    warning: str = ""
 
     def __post_init__(self) -> None:
         """只接受 allow/continue，且继续动作必须提供下一回合输入。"""
@@ -169,6 +170,8 @@ class FinalOutputGateDecision:
             raise ValueError("MANAGED_FINAL_GATE_ACTION_INVALID")
         if not isinstance(self.skip_once, bool):
             raise ValueError("MANAGED_FINAL_GATE_SKIP_INVALID")
+        if not isinstance(self.warning, str):
+            raise ValueError("MANAGED_FINAL_GATE_WARNING_INVALID")
         if self.action == "continue" and not self.continuation_prompt.strip():
             raise ValueError("MANAGED_FINAL_GATE_PROMPT_REQUIRED")
         if self.action == "continue" and self.skip_once:
@@ -258,6 +261,7 @@ class ManagedAgentResult:
     usage: Mapping[str, int]
     output_policy: ManagedOutputPolicy
     used_agent: bool
+    warning: str = ""
 
 
 class ManagedAgentExecutor:
@@ -385,6 +389,7 @@ class ManagedAgentExecutor:
         resume: object | None = None
         model_round = 0
         stream_input: object = _initial_stream_input(request.input)
+        warning = ""
         while True:
             model_round += 1
             observer.on_model_round()
@@ -400,6 +405,8 @@ class ManagedAgentExecutor:
                 model_round,
             )
             if stream_result.resume is None:
+                if request.is_cancelled():
+                    raise ManagedAgentExecutionError("RUN_CANCELLED", "Run was cancelled")
                 if request.final_output_gate is not None:
                     gate_decision = await request.final_output_gate(
                         ManagedFinalOutput(
@@ -413,6 +420,9 @@ class ManagedAgentExecutor:
                         raise ManagedAgentExecutionError(
                             "MANAGED_AGENT_FINAL_GATE_INVALID"
                         )
+                    warning = gate_decision.warning or warning
+                    if request.is_cancelled():
+                        raise ManagedAgentExecutionError("RUN_CANCELLED", "Run was cancelled")
                     if gate_decision.action == "continue":
                         # execution_stream 会在下一回合开始时清理本回合正文；
                         # 这里先清理，防止 fake/无正文模型把上一轮结果带回父端。
@@ -427,6 +437,7 @@ class ManagedAgentExecutor:
                     usage=dict(stream_result.usage),
                     output_policy=request.output_policy,
                     used_agent=True,
+                    warning=warning,
                 )
                 # Transcript/checkpoint observer 可能仍需使用 runtime 关联的
                 # middleware；必须在 finally 释放 lease 前完成最终投影。

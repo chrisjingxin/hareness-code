@@ -29,9 +29,16 @@ from harness_agent.runtime.run_context import RunCancellationToken
 class TeamError(RuntimeError):
     """Team 定义、状态或执行无法安全继续时抛出的稳定错误。"""
 
-    def __init__(self, code: str, message: str | None = None) -> None:
-        """保留稳定错误码，避免把成员 Prompt 或结果写入诊断。"""
+    def __init__(
+        self,
+        code: str,
+        message: str | None = None,
+        *,
+        details: object | None = None,
+    ) -> None:
+        """保留稳定错误码和可选脱敏详情，避免携带成员 Prompt 或路径。"""
         self.code = code
+        self.details = details
         super().__init__(message or code)
 
 

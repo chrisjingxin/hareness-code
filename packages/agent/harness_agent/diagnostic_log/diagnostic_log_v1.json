@@ -245,17 +245,17 @@
     "hookStartedFields": {
       "type": "object", "additionalProperties": false,
       "required": ["plugin_id", "hook_event", "tool_name"],
-      "properties": { "plugin_id": { "$ref": "#/$defs/safeName" }, "hook_event": { "enum": ["PreToolUse", "PostToolUse", "PostToolUseFailure"] }, "tool_name": { "$ref": "#/$defs/safeName" }, "model_round": { "type": "integer", "minimum": 1 } }
+      "properties": { "plugin_id": { "$ref": "#/$defs/safeName" }, "hook_event": { "enum": ["PreToolUse", "PostToolUse", "PostToolUseFailure", "SubagentStop"] }, "tool_name": { "$ref": "#/$defs/safeName" }, "model_round": { "type": "integer", "minimum": 1 } }
     },
     "hookCompletedFields": {
       "type": "object", "additionalProperties": false,
       "required": ["plugin_id", "hook_event", "tool_name", "outcome", "duration_ms"],
-      "properties": { "plugin_id": { "$ref": "#/$defs/safeName" }, "hook_event": { "enum": ["PreToolUse", "PostToolUse", "PostToolUseFailure"] }, "tool_name": { "$ref": "#/$defs/safeName" }, "outcome": { "enum": ["allow", "deny", "ok"] }, "duration_ms": { "$ref": "#/$defs/nonNegativeInt" }, "model_round": { "type": "integer", "minimum": 1 } }
+      "properties": { "plugin_id": { "$ref": "#/$defs/safeName" }, "hook_event": { "enum": ["PreToolUse", "PostToolUse", "PostToolUseFailure", "SubagentStop"] }, "tool_name": { "$ref": "#/$defs/safeName" }, "outcome": { "enum": ["allow", "deny", "ok"] }, "duration_ms": { "$ref": "#/$defs/nonNegativeInt" }, "model_round": { "type": "integer", "minimum": 1 } }
     },
     "hookFailedFields": {
       "type": "object", "additionalProperties": false,
       "required": ["plugin_id", "hook_event", "tool_name", "duration_ms", "failure_stage", "error_type", "summary_code"],
-      "properties": { "plugin_id": { "$ref": "#/$defs/safeName" }, "hook_event": { "enum": ["PreToolUse", "PostToolUse", "PostToolUseFailure"] }, "tool_name": { "$ref": "#/$defs/safeName" }, "duration_ms": { "$ref": "#/$defs/nonNegativeInt" }, "failure_stage": { "$ref": "#/$defs/safeName" }, "error_code": { "$ref": "#/$defs/safeName" }, "error_type": { "$ref": "#/$defs/safeName" }, "retryable": { "type": "boolean" }, "summary_code": { "$ref": "#/$defs/safeName" }, "model_round": { "type": "integer", "minimum": 1 } }
+      "properties": { "plugin_id": { "$ref": "#/$defs/safeName" }, "hook_event": { "enum": ["PreToolUse", "PostToolUse", "PostToolUseFailure", "SubagentStop"] }, "tool_name": { "$ref": "#/$defs/safeName" }, "duration_ms": { "$ref": "#/$defs/nonNegativeInt" }, "failure_stage": { "$ref": "#/$defs/safeName" }, "error_code": { "$ref": "#/$defs/safeName" }, "error_type": { "$ref": "#/$defs/safeName" }, "retryable": { "type": "boolean" }, "summary_code": { "$ref": "#/$defs/safeName" }, "model_round": { "type": "integer", "minimum": 1 } }
     },
     "executionStartedFields": {
       "type": "object", "additionalProperties": false,

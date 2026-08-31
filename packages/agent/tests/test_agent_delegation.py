@@ -104,6 +104,30 @@ def _command(
     )
 
 
+@pytest.mark.asyncio
+async def test_stale_plugin_agent_is_reauthorized_before_child_creation() -> None:
+    """blocked Agent identity 只返回 reauthorization，不创建 child execution。"""
+    registry, root = await _registry()
+    message = (
+        "PLUGIN_REAUTHORIZATION_REQUIRED: plugin_id=plugin-za38; "
+        "authorization_state=reauthorization-required; "
+        "capability_fingerprint=abc123; action=inspect-enable"
+    )
+    delegator = AgentDelegator(
+        registry,
+        targets=(),
+        blocked_target_messages={"za38-frontend-executor": message},
+    )
+
+    with pytest.raises(AgentDelegationError) as caught:
+        await delegator.execute(_command(root, target="za38-frontend-executor"))
+
+    assert caught.value.code == "PLUGIN_REAUTHORIZATION_REQUIRED"
+    assert str(caught.value) == message
+    children = await registry.list(root)
+    assert tuple(item.ref.execution_id for item in children) == (root.execution_id,)
+
+
 async def test_system_selects_inline_and_records_child_execution() -> None:
     """模型只选 Agent ID；Inline 模式由可信 target 固定且不创建 Engine lease。"""
     registry, root = await _registry()
@@ -144,7 +168,7 @@ async def test_managed_runner_releases_lease_on_failure() -> None:
 
     async def managed(_command: DelegateAgent):
         try:
-            raise RuntimeError("managed failed")
+            raise RuntimeError("/private/secret-token")
         finally:
             released.set()
 
@@ -163,9 +187,35 @@ async def test_managed_runner_releases_lease_on_failure() -> None:
     with pytest.raises(AgentDelegationError, match="RuntimeError") as caught:
         await delegator.execute(_command(root, target="reviewer"))
     assert caught.value.code == "DELEGATION_EXECUTION_FAILED"
+    assert str(caught.value) == "RuntimeError"
     assert released.is_set()
     children = await registry.list(root)
     assert children[-1].status is ExecutionStatus.FAILED
+
+
+async def test_managed_runner_preserves_stable_runtime_error_code() -> None:
+    """已知 runtime 错误码应透传，未知异常正文仍保持类型级脱敏。"""
+    registry, root = await _registry()
+
+    async def managed(_command: DelegateAgent):
+        raise RuntimeError("MCP_RESOURCE_SNAPSHOT_UNAVAILABLE")
+
+    delegator = AgentDelegator(
+        registry,
+        targets=(
+            DelegationTarget(
+                agent_id="reviewer",
+                mode=ExecutionMode.MANAGED,
+                runner=managed,
+                engine_profile_key="b" * 64,
+                policy_fingerprint="c" * 64,
+            ),
+        ),
+    )
+    with pytest.raises(AgentDelegationError) as caught:
+        await delegator.execute(_command(root, target="reviewer"))
+    assert caught.value.code == "MCP_RESOURCE_SNAPSHOT_UNAVAILABLE"
+    assert str(caught.value) == "MCP_RESOURCE_SNAPSHOT_UNAVAILABLE"
 
 
 async def test_managed_adapter_reuses_profile_engine_and_releases_each_run() -> None:
@@ -829,4 +879,3 @@ async def test_delegation_hard_limit_of_four_enforced_even_if_policy_higher() ->
     results = await asyncio.gather(*tasks)
     assert len(results) == 6
     assert all(r.status is ExecutionStatus.COMPLETED for r in results)
-

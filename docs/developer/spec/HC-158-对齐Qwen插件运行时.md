@@ -188,7 +188,7 @@ Qwen Hook 只在 Harness 已有同语义生命周期 seam 时适配：
 | `PreToolUse` | 复用 HookRunner，可阻断；保持 tool policy/approval 优先 |
 | `PostToolUse` | 复用 HookRunner，输出作为低可信数据 |
 | `PostToolUseFailure` | 复用 HookRunner，不能掩盖原始工具失败 |
-| `SubagentStop` | 保持 HC-157 行为 |
+| `SubagentStop` | 复用 HC-157 final gate；Qwen Hook 执行级失败告警放行，构造/身份/取消仍失败关闭 |
 | Prompt、Session、Compact、Permission、Todo、Message 等 | 没有等价 Host seam 前继续 unsupported |
 
 每个新事件都要先定义输入字段、输出决策、超时、取消和异常语义，再把 component 子项标记 effective；不能把
@@ -451,6 +451,64 @@ Run/Skill 事件仍可通过，provenance 额外字段、路径和正文均拒�
 Settings/Protocol 合集 `100 passed`，CLI 六文件集合 `82 pass`。`protocol:generate`、`protocol:check`、
 `typecheck`、未暂存和已暂存 `git diff --check` 均通过。
 
+### Phase 4C：Adapter report 重解析与 Qwen SubagentStop 终态规格（2026-08-31）
+
+本节是对早期 Phase 3 “SubagentStop Hook 执行失败失败关闭”描述的修订。这里的 fail-open 只
+适用于 Qwen `SubagentStop` 已命中 matcher 后的 Hook 执行级故障；它不改变组件进入 runtime 前的
+安全门禁，也不改变其他 Hook/Policy/权限/MCP/格式的失败关闭。
+
+#### 输入 → 判断 → 输出
+
+1. Host 启动、控制面暴露 runtime 或 Run preparation 时，`PluginManager` 从 PluginStore 读取
+   已安装记录，先验证 package digest，再以当前 Adapter 解析 package。不能使用安装时冻结的旧
+   component report；Adapter revision、package digest、plugin identity 和 source binding 必须
+   一起校验。
+2. 若能力指纹未变，原子替换 report/metadata，保留 `enabled` 与相同 trust；仅诊断或 report
+   revision 变化也不得扩大 capability。若能力指纹改变，原子替换新 report 和 fingerprint，
+   保留旧 trust 作为待确认事实，catalog 排除该 Plugin，并建立只读
+   `reauthorization-required` blocked index。
+3. stale Plugin 不得阻断无关的普通 Run。Host 用安装记录中稳定的 component source/ID 建立 blocked
+   index：普通消息、内置 Command/Skill/Agent、其他已授权 Plugin 可以继续；只有 requested
+   Plugin Command/Skill、明确选中的 Plugin Agent/Team，或已有明确 Plugin provenance 的
+   Hook/MCP/LSP/Settings 入口，才在创建 child、调用模型或启动相应 runtime 前返回可操作的
+   `PLUGIN_REAUTHORIZATION_REQUIRED`（包含 plugin_id、authorization_state、当前 fingerprint 和
+   inspect/enable 提示）。若现有请求没有足够 provenance，不复制 Command 冲突规则、不扩大协议，
+   保持 stale Plugin 不可执行。用户以当前 fingerprint 显式重新确认后，才恢复 `enabled/trusted`；
+   同一 package 的刷新不复制源码，并发刷新以 registry lock 串行化，未发生变化不递增 revision，
+   重复启动幂等。
+4. 对 qwen-code 且 matcher 命中的 `SubagentStop`：
+   - 收集全部 Hook 结果；失败 codes 与有效 outputs 分开。任一合法 `block` 按 OR/最严格语义
+     优先于 `allow`，多个 block 的 reason/additionalContext 只做有界、去重合并；顺序不影响结果。
+   - Hook 正常 `block/continue`：回到同一个 child execution/checkpoint；`allow`：释放结果。
+   - exception、Hook timeout、非零退出、非空畸形输出和 runner closed：写入稳定、脱敏
+     warning/diagnostic；只有没有任何有效 block 时才 warning + allow child。失败不能覆盖其他
+     Hook 的有效 block。
+   - exit 0 的空 stdout、空 `{}` 或没有 decision 的合法空输出等价于 no-decision，不产生失败
+     warning；非空解析失败、非法 decision、类型错误仍是 malformed，并在无 block 时 warning + allow。
+   - 连续 blocking 达到 cap：覆盖 blocking，返回最新 child result 并附 Qwen 风格 warning。
+   - matcher miss：不调用 Hook；Run/parent/user cancellation：传播 Harness canonical cancellation，
+     不转换成 Hook warning 后成功返回。
+5. Qwen command Hook `timeout` 仍是毫秒；`10000` 在 canonical HookDefinition 中为 `10` 秒。
+   PreToolUse、权限、Policy、MCP、非 Qwen Hook，以及 Qwen Hook runtime 构造/identity/report
+   失败继续 fail-closed；Channels 继续不实现。
+
+#### 不变量与可观察验收
+
+- `adapter_revision` 与 `package_digest`、plugin identity、component report 一起绑定；旧 registry
+  只能被当前 Adapter 重解析，不能静默复用旧 capability。
+- `authorization_state` 必须能区分 disabled、首次授权、已授权和
+  `reauthorization-required`；旧 trust 不能覆盖新 capability，重新确认前 runtime catalog 不含
+  该 Plugin。
+- report 更新、fingerprint 更新和 registry revision 是同一原子事务；两个并发 refresh 至多一次
+  写入，第二次观察同一结果；package digest 变化仍需显式 install/update 边界。
+- Hook failure diagnostic 仅含事件、阶段、稳定 summary code、error type、retryable；
+  不含异常正文、Hook payload、stdout/stderr、命令参数、宿主路径或 secret。聚合必须先完成
+  全部结果收集再裁决，最终 child result 的 warning 可由 Managed delegation 传回，但不改变成功结果。
+- 离线 fixture 必须覆盖旧 report 自动重解析、fingerprint unchanged trust 保留、changed
+  reauthorization、幂等/并发/运行前阻断/确认后恢复；SubagentStop exception/timeout/nonzero/
+  malformed/empty/closed、blocking cap、matcher miss、Run cancellation，以及 PreToolUse/非 Qwen
+  失败关闭回归。不得启动真实 Hook/MCP/LSP、模型、网络或读取凭据。
+
 ## 7. Channels
 
 Qwen Channels 会动态加载 JavaScript 模块并接管外部消息入口，Harness 当前没有等价 canonical Channel Host。
@@ -473,3 +531,24 @@ Git/npm/Marketplace/URL 安装、`link`、auto-update、user/workspace install s
 - 每阶段只把实际接入的 component 或子项从 static preview 移出；未接入项仍可见且 non-runnable。
 - 每阶段可以通过关闭对应 component gate 回滚，不修改 PluginStore 已安装内容，不需要数据迁移。
 - Settings 若引入持久化，必须有独立 schema version、备份和删除路径；不得和 Plugin registry 同表混存秘密。
+
+### 6.2.3 Managed Plugin Agent 的 MCP 资源视图与错误透传（2026-08-31）
+
+Plugin Agent 的 `ResolvedAgentSpec.tools` 是父 Policy、Agent 声明和当前 MCP 工具交集后的
+只读视图，不是 Host 完整工具表。视图为空时，构图不得要求 MCP Manager 存在或 acquire 一个
+过滤 snapshot；图只注册内置工具。视图非空时，Host 必须验证 spec server identity 仍是当前
+MCP generation 的子集，借用完整 Host resource 后仅按 spec 工具名注入；任何 server identity
+漂移、授权工具缺失、重复或视图不一致都以稳定错误码失败关闭。这样既支持有 MCP 权限的 Plugin
+Agent，也不会因为借用共享连接而把未授权工具暴露给 child。
+
+Managed delegation 的未知异常只保留异常类型；只有格式严格且带受控前缀的稳定错误码（如
+`MCP_*`、`RUNTIME_*`、`PLUGIN_*`、`MANAGED_AGENT_*`、`DELEGATION_*`、`PROVIDER_*`、`RUN_*`）
+才允许透传。错误正文、宿主路径、命令参数和凭据永远不进入 Tool 输出或协议错误。
+
+### 6.2.4 Observation Hook 的诊断日志传递（2026-08-31）
+
+`PluginRuntimeMiddleware.awrap_tool_call` 在 `PostToolUse` 和 `PostToolUseFailure` 路径取得当前
+`RunContext.diagnostic_log` 后，必须把它传给 `_run_observation_hook`，再原样交给 canonical
+`HookRunner.run`。观察 Hook 失败不得覆盖原始 Tool 结果；日志只能由 `HookRunner` 记录稳定事件、
+工具名和错误分类，不记录 Hook payload、stdout、stderr、宿主绝对路径或秘密。该路径必须由真实
+middleware 与离线 fixture Hook 验证，不能只用伪造 Hook runner 的参数断言。

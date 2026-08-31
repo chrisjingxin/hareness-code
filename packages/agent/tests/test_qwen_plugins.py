@@ -2803,6 +2803,7 @@ async def test_host_injects_qwen_context_once_and_gates_same_child_for_plugin_ag
         tool_name: str,
         payload: object,
         plugin_id: str | None = None,
+        diagnostic_log: object | None = None,
     ) -> tuple[HookResult, ...]:
         """Host 集成使用离线 fake Hook，验证终态门禁不启动用户脚本。"""
         nonlocal hook_calls
