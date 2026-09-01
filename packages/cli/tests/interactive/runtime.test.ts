@@ -98,6 +98,7 @@ test("/status 汇总真实的本机后端和英文审批模式", () => {
 
   expect(summary).toBe([
     "工作区  /work/za38-cli",
+    "版本    za38-cli 0.1.0",
     "模型    deepseek-v4-flash",
     "执行    本机执行 · 未隔离",
     "审批    default",

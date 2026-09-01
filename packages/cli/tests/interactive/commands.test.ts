@@ -20,10 +20,10 @@ test("Registry 以 canonical ID 解析核心 Slash Command 与别名", () => {
   expect(parseSlashCommand("/q")).toEqual({ id: "system.quit", name: "quit", argument: undefined })
   expect(parseSlashCommand("/new")).toEqual({ id: "thread.new", name: "new", argument: undefined })
   expect(parseSlashCommand("/clear")).toEqual({ id: "thread.new", name: "new", argument: undefined })
-  expect(parseSlashCommand("/force-clear")).toEqual({ id: "thread.force-clear", name: "force-clear", argument: undefined })
+  expect(parseSlashCommand("/force-clear")).toBeNull()
   expect(parseSlashCommand("/compact")).toEqual({ id: "context.compact", name: "compact", argument: undefined })
   expect(parseSlashCommand("/status")).toEqual({ id: "system.status", name: "status", argument: undefined })
-  expect(parseSlashCommand("/version")).toEqual({ id: "system.version", name: "version", argument: undefined })
+  expect(parseSlashCommand("/version")).toBeNull()
   expect(parseSlashCommand("/resume")).toEqual({ id: "thread.resume", name: "resume", argument: undefined })
   expect(parseSlashCommand("/continue")).toEqual({ id: "thread.resume", name: "resume", argument: undefined })
   expect(parseSlashCommand("/threads")).toEqual({ id: "thread.resume", name: "resume", argument: undefined })
@@ -46,23 +46,17 @@ test("Dispatcher 仅按稳定 ID 返回 semantic operation，并统一处理兼�
     commandContext: defaultCommandContext({ capabilities: ["threads.read", "context.manage", "skills.read"], hasThread: true }),
     threadId: "thread-1",
     runtimeStatus: "运行摘要",
-    versionSummary: "za38-cli 0.1.0 · JSON-RPC v3",
   }
   const clear = parseSlashCommand("/clear")
   const help = parseSlashCommand("/help")
   const resume = parseSlashCommand("/continue")
-  const forceClear = parseSlashCommand("/force-clear")
   const compact = parseSlashCommand("/compact")
   const model = parseSlashCommand("/model pro")
-  if (!clear || !help || !resume || !forceClear || !compact || !model) throw new Error("expected built-in commands")
+  if (!clear || !help || !resume || !compact || !model) throw new Error("expected built-in commands")
 
   expect(dispatchSlashCommand(clear, base)).toEqual({ type: "clear-thread" })
   expect(dispatchSlashCommand(help, base)).toMatchObject({ type: "notice", message: expect.stringContaining("/new, /clear") })
   expect(dispatchSlashCommand(resume, base)).toEqual({ type: "present", target: "threads" })
-  expect(dispatchSlashCommand(forceClear, base)).toEqual({
-    type: "notice",
-    message: "/force-clear 已废弃，请使用 /new；当前任务执行时会先请求确认。",
-  })
   expect(dispatchSlashCommand(model, {
     ...base,
     commandContext: defaultCommandContext({ capabilities: ["models.read"] }),
@@ -75,7 +69,6 @@ test("Compose /new-work 与 /abandon 按目标有无返回 submit 或确认", ()
     commandContext: defaultCommandContext({ workMode: "compose", hasThread: true, hasActiveWorkItem: true }),
     threadId: "thread-1",
     runtimeStatus: "运行摘要",
-    versionSummary: "za38-cli 0.1.0 · JSON-RPC v3",
   }
   const newWork = parseSlashCommand("/new-work 写 HTTP 服务")
   const emptyNewWork = parseSlashCommand("/new-work")
@@ -108,7 +101,6 @@ test("Agent 与 Team 命令只生成受控目录和固定参数 RPC", () => {
     }),
     threadId: "thread-1",
     runtimeStatus: "运行摘要",
-    versionSummary: "version",
     idGenerator: { uuid: () => "00000000-0000-4000-8000-000000000000" },
   }
   const agents = parseSlashCommand("/agents")
@@ -153,7 +145,6 @@ test("活动任务下 /new 返回确认 semantic operation，而不是旧分支"
     commandContext: defaultCommandContext({ activeRun: true }),
     threadId: null,
     runtimeStatus: "运行摘要",
-    versionSummary: "version",
   })
   expect(result).toEqual({
     type: "request-confirmation",
@@ -171,7 +162,6 @@ test("/web 无需 Host 能力（ZC-114 共享 Core），空闲即可用；运行
   const base = {
     threadId: "thread-1" as string | null,
     runtimeStatus: "运行摘要",
-    versionSummary: "version",
   }
 
   // 不声明任何 Host 能力也可用：内置 Web 只消费 CLI 进程内共享 Core。
@@ -270,8 +260,19 @@ test("菜单按 capability 隐藏命令，并以稳定原因展示运行态禁�
 })
 
 test("已废弃命令不出现在空 Slash 菜单，但仍可按名称搜索以显示迁移说明", () => {
-  expect(findSlashCommands("/").map(item => item.name)).not.toContain("force-clear")
-  expect(findSlashCommands("/force").map(item => item.name)).toEqual(["force-clear"])
+  const customRegistry = new CommandRegistry([
+    ...builtinCommandDefinitions,
+    {
+      id: "test.legacy",
+      name: "legacy-op",
+      description: "已废弃操作",
+      source: { type: "builtin" },
+      presentation: "action",
+      deprecated: { replacement: "/new" },
+    },
+  ])
+  expect(findSlashCommands("/", defaultCommandContext(), customRegistry).map(item => item.name)).not.toContain("legacy-op")
+  expect(findSlashCommands("/legacy", defaultCommandContext(), customRegistry).map(item => item.name)).toEqual(["legacy-op"])
 })
 
 test("Slash 菜单将可调用 Skill 渲染为 skill:<canonical-id>", () => {
@@ -311,7 +312,6 @@ test("Host Plugin Command 合并进同一 Registry，并提交 requested Skill �
   expect(dispatchSlashCommand(command, {
     commandContext: defaultCommandContext({ capabilities: ["skills.read"] }),
     runtimeStatus: "status",
-    versionSummary: "version",
   }, registry)).toEqual({
     type: "submit-prompt",
     prompt: "/plugin:local:review-tools:audit src/auth.ts  --strict",
@@ -327,7 +327,6 @@ test("Host Plugin Command 合并进同一 Registry，并提交 requested Skill �
   expect(dispatchSlashCommand(help, {
     commandContext: defaultCommandContext({ capabilities: ["skills.read"] }),
     runtimeStatus: "status",
-    versionSummary: "version",
   }, registry)).toMatchObject({
     type: "notice",
     message: expect.stringContaining("/plugin:local:review-tools:audit"),
@@ -358,7 +357,6 @@ test("Plugin Slash Command 保留精确 raw invocation，并单独规范化 args
   expect(dispatchSlashCommand(command.command, {
     commandContext: defaultCommandContext({ capabilities: ["skills.read"] }),
     runtimeStatus: "status",
-    versionSummary: "version",
   }, registry)).toEqual({
     type: "submit-prompt",
     prompt: rawInvocation,
@@ -532,7 +530,6 @@ test("/plan 仅 Build 可见，Compose 手输给出仅 Build 提示", () => {
     commandContext: defaultCommandContext({ workMode: "compose" }),
     threadId: "thread-1",
     runtimeStatus: "idle",
-    versionSummary: "0.1.0",
     approvalMode: "default" as const,
   }
   expect(dispatchSlashCommand({ id: "approval.plan", name: "plan" }, composeDispatch)).toEqual({
@@ -546,7 +543,6 @@ test("/plan 按空参、exit、目标返回切档或提交", () => {
     commandContext: defaultCommandContext({ workMode: "build" }),
     threadId: "thread-1",
     runtimeStatus: "idle",
-    versionSummary: "0.1.0",
     approvalMode: "yolo" as const,
   }
 
@@ -610,7 +606,6 @@ test("/plan-view 仅 Build 当前 thread 可用；挂起审批复用原交互，
     commandContext: defaultCommandContext({ workMode: "build", hasThread: true }),
     threadId: "thread-1",
     runtimeStatus: "idle",
-    versionSummary: "0.1.0",
     approvalMode: "default" as const,
   }
   expect(dispatchSlashCommand({ id: "approval.plan-view", name: "plan-view" }, {
@@ -648,7 +643,6 @@ test("/btw 命令分发：无参返回用法提示，有参返回 side-question 
     commandContext: defaultCommandContext({ workMode: "build" }),
     threadId: "thread-btw-1",
     runtimeStatus: "idle",
-    versionSummary: "0.1.0",
     idGenerator: { generate: () => "id-1" },
   }
 
@@ -675,7 +669,6 @@ test("/btw 命令分发：无参返回用法提示，有参返回 side-question 
     commandContext: defaultCommandContext({ workMode: "compose" }),
     threadId: "thread-compose-1",
     runtimeStatus: "idle",
-    versionSummary: "0.1.0",
     idGenerator: { generate: () => "id-1" },
   }
   expect(dispatchSlashCommand(btwWithQuestion, composeBase)).toEqual({

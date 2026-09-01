@@ -328,7 +328,7 @@ export class InteractionFeature {
     ctx.publish()
   }
 
-  /** 关闭 /view-plan 的本地预览；挂起审批不能用该入口关闭。 */
+  /** 关闭 /plan-view 的本地预览；挂起审批不能用该入口关闭。 */
   closePlanViewer(ctx: FeatureContext): IntentOutcome {
     if (!this.planViewer) {
       return { status: "rejected", code: "not-found", message: "No plan viewer is open" }

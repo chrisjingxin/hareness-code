@@ -232,7 +232,7 @@ cd packages/agent && .venv/bin/python -m pytest -q
 
 ## 8. 当前实现边界与阅读建议
 
-已经实现的主线是单 Agent、企业 OpenAI-compatible 模型、本机工具与可选企业远端 sandbox、JSON-RPC v2、Thread 恢复、模型 Profile、Skill catalog 和上下文管理。文档明确标记为尚未接入或待企业实现的能力包括：通用跨平台安装器/自动更新、Docker/Podman 本机容器 backend、项目级可信配置、多 Agent topology、可信 MCP 配置，以及 `/mcp`、`/tools`、`/agents`、`/remember` 等 TUI 命令。
+已经实现的主线是单 Agent 与 Agent Team、企业 OpenAI-compatible 模型、本机工具与可选企业远端 sandbox、JSON-RPC v3、Thread 恢复、模型 Profile、Skill catalog、MCP 管理与上下文管理。文档明确标记为尚未接入或待企业实现的能力包括：通用跨平台安装器/自动更新、Docker/Podman 本机容器 backend、项目级可信配置，以及可视化设置/权限管理界面。
 
 若要继续开发，建议按下面的顺序阅读：
 

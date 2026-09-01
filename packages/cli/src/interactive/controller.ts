@@ -532,7 +532,7 @@ function publicCatalog<T>(catalog: { status: any; items: readonly T[]; message?:
 function blocksPendingOperation(intent: InteractiveIntent): boolean {
   if (intent.type === "catalog.refresh" || intent.type === "run.cancel" || intent.type === "interaction.respond") return false
   if (intent.type === "command.execute") {
-    return !["system.help", "system.status", "system.version", "system.quit"].includes(intent.commandId)
+    return !["system.help", "system.status", "system.quit"].includes(intent.commandId)
   }
   return true
 }

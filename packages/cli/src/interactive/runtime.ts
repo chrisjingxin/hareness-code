@@ -115,6 +115,7 @@ export function approvalModeLabel(runtime: InteractiveRuntime): string {
 export function runtimeStatusSummary(runtime: InteractiveRuntime): string {
   const lines = [
     `工作区  ${runtime.workspace}`,
+    `版本    za38-cli ${runtime.cliVersion ?? "0.1.0"}`,
     `模型    ${modelLabel(runtime)}`,
     `执行    ${executionStatusLabel(runtime)}`,
     `审批    ${approvalModeLabel(runtime)}`,

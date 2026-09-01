@@ -104,7 +104,7 @@ export type InteractiveInteraction =
       decisions: readonly PlanDecision[]
       deadlineAtMs: number
       agentId?: string
-      /** true 表示 /view-plan 打开的只读预览，不对应 Host Interaction。 */
+      /** true 表示 /plan-view 打开的只读预览，不对应 Host Interaction。 */
       readOnly?: boolean
     }
 

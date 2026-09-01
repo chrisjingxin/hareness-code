@@ -39,7 +39,7 @@ test("/agents 查询失败时 catalog 进入 error，浮层仍可打开", async 
 })
 
 
-test("compact/status/version/help/web 命令语义确定", async () => {
+test("compact/status/help/web 命令语义确定", async () => {
   const harness = makeHarness()
   try {
     const exitResult = await harness.controller.dispatch({ type: "command.execute", commandId: "system.quit" })

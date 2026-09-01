@@ -63,12 +63,11 @@ export type CommandDispatchContext = {
   commandContext: CommandContext
   threadId: string | null
   runtimeStatus: string
-  versionSummary: string
   /** 唯一 ID 生成器（Port 注入），供需要本地生成 run_id 的命令使用。 */
   idGenerator: IdGenerator
   /** 当前会话审批档位，供 /plan 判断是否已在 plan。 */
   approvalMode?: InteractiveApprovalMode
-  /** 当前是否正挂起计划审批；/view-plan 复用该视图，不重复读取或创建审批。 */
+  /** 当前是否正挂起计划审批；/plan-view 复用该视图，不重复读取或创建审批。 */
   pendingPlanInteraction?: boolean
 }
 
@@ -129,14 +128,12 @@ const builtinHandlers: Readonly<Record<string, CommandHandler>> = {
         cancelLabel: "保留当前 Thread",
       }
     : { type: "clear-thread" },
-  "thread.force-clear": () => notice("/force-clear 已废弃，请使用 /new；当前任务执行时会先请求确认。"),
   "context.compact": context => {
     if (context.command.argument) return notice("/compact 不接受参数。")
     if (!context.threadId) return notice("当前没有可压缩的 thread。")
     return { type: "compact", threadId: context.threadId }
   },
   "system.status": context => notice(context.runtimeStatus),
-  "system.version": context => notice(context.versionSummary),
   "thread.resume": context => context.command.argument
     ? notice("/resume 不接受 thread_id；请在选择器中选择要恢复的 thread。")
     : { type: "present", target: "threads" },

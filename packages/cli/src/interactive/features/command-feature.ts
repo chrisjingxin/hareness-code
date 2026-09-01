@@ -53,7 +53,6 @@ export class CommandFeature {
       },
       threadId: ctx.getState().currentThreadId,
       runtimeStatus: runtimeStatusSummary(ctx.baseRuntime),
-      versionSummary: `za38-cli ${ctx.baseRuntime.cliVersion ?? "0.1.0"} · JSON-RPC v3`,
       idGenerator: ctx.idGenerator,
       approvalMode,
       pendingPlanInteraction,
