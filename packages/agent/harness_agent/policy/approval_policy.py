@@ -82,7 +82,6 @@ _PLAN_ALLOWED_TOOLS = frozenset(
         "glob",
         "grep",
         "ask_user",
-        "write_todos",
         "web_search",
         "web_fetch",
         "lsp",
@@ -210,16 +209,21 @@ def interrupt_on_for_approval_mode(
 def approval_mode_prompt(approval_mode: ApprovalMode) -> str:
     """生成追加到系统提示词的模式事实，不让项目指令改变实际策略。"""
     if approval_mode == "plan":
-        return """
+        return f"""
 
-## 审批模式：计划
+## 审批模式：计划（Plan Mode）
 
-当前是严格计划模式。只能调查工作区、提出问题和维护任务清单；不要尝试
-修改项目文件、调用子 Agent 或会写入的 MCP。明确只读 Shell 可以执行；
-明确会写或破坏状态的命令会被拒绝，无法判断的命令只询问本次且不会解除计划约束。
-必须先用 `write_file` 把完整计划覆盖写入 `/.harness/plan.md`，写完再调用
-`exit_plan_mode`。不要只更新任务清单或把计划只写在对话里。有歧义用
-`ask_user`。服务端会拒绝未允许的工具调用，不能通过审批绕过。
+当前处于严格的计划模式。用户要求你先制定方案，不要执行修改。你必须遵守以下规划工作流：
+
+1. **只读调研**：使用只读工具（`ls`、`read_file`、`glob`、`grep`、`lsp`、只读 Shell 命令）充分调查代码库，理解现有架构，主动寻找可复用的现有函数与模块，不要重复发明轮子。
+2. **主动澄清**：遇到需求歧义、边界情况或技术选型权衡时，使用 `ask_user` 提问，不要自行盲目假设。
+3. **规划期无需维护 Todo**：在此阶段不要调用 `write_todos` 创建任务清单（任务清单将在用户批准计划后的实现阶段使用）。规划阶段你的唯一产物是计划文件。
+4. **撰写方案**：使用 `write_file` 将完整方案覆盖写入 `{PLAN_VIRTUAL_PATH}`（包含：改动背景、影响文件列表、可复用的现有代码、具体实现步骤及端到端验证方案）。
+5. **提交审阅**：计划写完后，调用 `exit_plan_mode` 弹出审阅窗口等待用户批准。
+
+【工具拦截原则】：
+- 项目文件写入、修改系统的 Shell、子 Agent 与会写的 MCP 会被服务端直接拒绝。
+- 若工具被拦截，不要重试或尝试绕过，直接把该操作作为执行步骤写进 `{PLAN_VIRTUAL_PATH}`。
 """
     if approval_mode == "auto-edit":
         return """
@@ -282,7 +286,9 @@ class PlanModeMiddleware(AgentMiddleware[dict[str, Any], ContextT, ResponseT]):
         tool_call = request.tool_call
         tool_name = str(tool_call.get("name", "unknown"))
         extra = ""
-        if tool_name in {"write_file", "edit_file", "delete_file"}:
+        if tool_name == "write_todos":
+            extra = "计划模式下无需维护任务清单。"
+        elif tool_name in {"write_file", "edit_file", "delete_file"}:
             extra = f"唯一可写路径是 `{PLAN_VIRTUAL_PATH}`。"
         return ToolMessage(
             content=(

@@ -41,7 +41,7 @@ function stringValue(value: unknown, fallback: string): string {
 }
 
 /** 批准计划后自动开实现轮的固定用户消息。 */
-export const PLAN_IMPLEMENT_PROMPT = "用户已批准计划。请读取 `/.harness/plan.md` 并开始实现。先更新任务清单。"
+export const PLAN_IMPLEMENT_PROMPT = "用户已批准计划，Plan 模式约束已解除。请读取 `/.harness/plan.md` 中的设计方案并开始实现。"
 
 export class RunFeature {
   approvalModeOverride: InteractiveApprovalMode | undefined

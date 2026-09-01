@@ -63,7 +63,7 @@ def test_hitl_mapping_keeps_compaction_outside_all_approval_modes():
 
 @pytest.mark.parametrize(
     "tool_name",
-    ["ls", "read_file", "glob", "grep", "ask_user", "write_todos", "web_fetch"],
+    ["ls", "read_file", "glob", "grep", "ask_user", "web_fetch"],
 )
 def test_plan_mode_allows_only_explicit_read_and_thread_tools(tool_name: str):
     """计划模式对白名单内工具放行，避免妨碍调查和上下文维护。"""
@@ -82,7 +82,7 @@ def test_plan_mode_allows_only_explicit_read_and_thread_tools(tool_name: str):
 
 @pytest.mark.parametrize(
     "tool_name",
-    ["write_file", "edit_file", "delete_file", "task", "mcp_future_tool"],
+    ["write_file", "edit_file", "delete_file", "task", "write_todos", "mcp_future_tool"],
 )
 async def test_plan_mode_rejects_mutation_and_unknown_future_tools(tool_name: str):
     """计划模式必须在执行前短路写入、子 Agent 和未来 MCP。"""
@@ -321,10 +321,11 @@ def test_hitl_configuration_preserves_file_mutation_dynamic_description():
 def test_approval_mode_prompts_state_the_actual_enforced_policy():
     """提示词只解释已由中间件执行的事实，不能成为唯一安全机制。"""
     plan_prompt = approval_mode_prompt("plan")
-    assert "严格计划模式" in plan_prompt
+    assert "严格的计划模式" in plan_prompt
     assert "write_file" in plan_prompt
     assert "/.harness/plan.md" in plan_prompt
     assert "只读 Shell" in plan_prompt
+    assert "write_todos" in plan_prompt
     assert "自动执行" in approval_mode_prompt("auto-edit")
     assert "不会为工具调用请求人工审批" in approval_mode_prompt("yolo")
     assert "需要用户确认" in approval_mode_prompt("default")
