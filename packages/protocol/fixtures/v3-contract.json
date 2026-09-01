@@ -476,6 +476,60 @@
     },
     {
       "kind": "operation.params",
+      "name": "threads.list_turns",
+      "case": "valid",
+      "value": {
+        "thread_id": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.list_turns",
+      "case": "valid",
+      "value": {
+        "turns": [],
+        "active_turn_id": "x"
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.undo",
+      "case": "valid",
+      "value": {
+        "thread_id": "x",
+        "target_turn_id": "x",
+        "mode": "both"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.undo",
+      "case": "valid",
+      "value": {
+        "success": false,
+        "reverted_turn_id": "x",
+        "restored_files_count": 1
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.redo",
+      "case": "valid",
+      "value": {
+        "thread_id": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.redo",
+      "case": "valid",
+      "value": {
+        "success": false,
+        "restored_to_turn_id": "x"
+      }
+    },
+    {
+      "kind": "operation.params",
       "name": "models.list",
       "case": "valid",
       "value": {}
@@ -2838,6 +2892,148 @@
       "name": "threads.side_question",
       "case": "missing_field",
       "value": {}
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.list_turns",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.list_turns",
+      "case": "extra_field",
+      "value": {
+        "thread_id": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.list_turns",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.list_turns",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.list_turns",
+      "case": "extra_field",
+      "value": {
+        "turns": [],
+        "active_turn_id": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.list_turns",
+      "case": "missing_field",
+      "value": {
+        "active_turn_id": "x"
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.undo",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.undo",
+      "case": "extra_field",
+      "value": {
+        "thread_id": "x",
+        "target_turn_id": "x",
+        "mode": "both",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.undo",
+      "case": "missing_field",
+      "value": {
+        "target_turn_id": "x",
+        "mode": "both"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.undo",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.undo",
+      "case": "extra_field",
+      "value": {
+        "success": false,
+        "reverted_turn_id": "x",
+        "restored_files_count": 1,
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.undo",
+      "case": "missing_field",
+      "value": {
+        "reverted_turn_id": "x",
+        "restored_files_count": 1
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.redo",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.redo",
+      "case": "extra_field",
+      "value": {
+        "thread_id": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "threads.redo",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.redo",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.redo",
+      "case": "extra_field",
+      "value": {
+        "success": false,
+        "restored_to_turn_id": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "threads.redo",
+      "case": "missing_field",
+      "value": {
+        "restored_to_turn_id": "x"
+      }
     },
     {
       "kind": "operation.params",

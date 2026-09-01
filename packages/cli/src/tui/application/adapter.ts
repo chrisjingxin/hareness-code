@@ -1,6 +1,4 @@
-/** TUI Interactive Adapter：只拥有终端表现状态，把用户动作映射为 InteractiveIntent。 */
-
-import type { AgentSummary, ModelProfile } from "@za38/protocol"
+import type { AgentSummary, ModelProfile, ThreadSummary, TurnSummary } from "@za38/protocol"
 
 import type { InteractiveController, InteractiveIntent, InteractiveResult, InteractiveSnapshot, IntentOutcome, PresentationEffect } from "../../interactive/types"
 import { selectWorkItemView, type WorkItemView } from "../../interactive/selectors"
@@ -8,7 +6,6 @@ import { filterAgents } from "../../presentation-shared/agent-catalog"
 import { filterCommandMenuItems } from "../../presentation-shared/command-menu-policy"
 import { answersByQuestionId } from "../../presentation-shared/interaction-policy"
 import { parseSlashCommand, resolveSlashCommand, type CommandMenuItem, type SkillMenuItem } from "../../interactive/commands"
-import type { ThreadSummary } from "@za38/protocol"
 import { createFallbackNoopGateway, type AgentGateway } from "../../interactive/ports"
 import { copyToClipboard } from "../platform/clipboard"
 import {
@@ -19,6 +16,8 @@ import {
   type PromptHistoryCursor,
 } from "./prompt-history"
 import type { ShortcutAction } from "./shortcuts"
+
+export type UndoMode = "both" | "conversation" | "code"
 
 /** BTW 临时问答状态。 */
 export type BtwState = {
@@ -50,8 +49,15 @@ export type ThreadPickerItem = {
   messageCount: number
 }
 
-/** 四类业务选择器共用的稳定标识。Agent 浮层只浏览，不切换当前 Agent。 */
-export type PickerKind = "skills" | "threads" | "models" | "agents"
+/** 五类业务选择器共用的稳定标识。Agent 浮层只浏览，不切换当前 Agent。 */
+export type PickerKind = "skills" | "threads" | "models" | "agents" | "undo"
+
+export type UndoDialogState = {
+  readonly visible: boolean
+  readonly targetTurn: TurnSummary
+  readonly selectedMode: UndoMode
+  readonly isGit: boolean
+}
 
 /** 选择器向 React 暴露的只读快照；items 已按 query 过滤。 */
 export type PickerSnapshot<T> = {
@@ -120,6 +126,8 @@ export type TuiAdapterSnapshot = {
   readonly threads: PickerSnapshot<ThreadPickerItem>
   readonly models: PickerSnapshot<ModelProfile>
   readonly agents: PickerSnapshot<AgentSummary>
+  readonly undo: PickerSnapshot<TurnSummary>
+  readonly undoDialog?: UndoDialogState
   readonly sidebar: SidebarState
   readonly commandDialog?: {
     readonly kind: "confirm-new-thread"
@@ -137,6 +145,7 @@ export type TuiAdapterSnapshot = {
   readonly showToolDetails: boolean
   readonly expandedTools: ReadonlySet<string>
   readonly btw: BtwState
+  readonly statusModal: { readonly visible: boolean }
   readonly toasts: readonly ToastItem[]
   readonly inputMode: "chat" | "shell"
   /** 递增后由 React adapter 滚动到最新内容。 */
@@ -158,7 +167,11 @@ export type TuiIntent =
   | { type: "picker-select-skill"; skill: SkillMenuItem }
   | { type: "picker-select-thread"; thread: ThreadPickerItem }
   | { type: "picker-select-model"; model: ModelProfile }
+  | { type: "picker-select-undo-turn"; turn: TurnSummary }
   | { type: "picker-close"; picker: PickerKind }
+  | { type: "undo-select-mode"; mode: UndoMode }
+  | { type: "undo-confirm" }
+  | { type: "undo-cancel" }
   | { type: "dialog-resolve"; kind: "command" | "model-binding"; confirmed: boolean }
   | { type: "clear-selected-skill" }
   | { type: "approval"; decision: ApprovalDecision }
@@ -169,6 +182,7 @@ export type TuiIntent =
   | { type: "tool-toggle"; toolId: string }
   | { type: "btw-close" }
   | { type: "btw-copy" }
+  | { type: "status-close" }
   | { type: "sidebar-toggle"; target?: "show" | "hide" }
   | { type: "sidebar-focus-switch" }
   | { type: "sidebar-tab-switch"; tab?: SidebarTab }
@@ -218,6 +232,7 @@ type InternalPicker<T> = {
   selectedIndex: number
   error?: string
   syncingDefault?: boolean
+  items?: readonly T[]
 }
 
 /** TUI Adapter 的具体实现；所有可变表现状态都集中在这个 module 内。 */
@@ -244,7 +259,10 @@ class TuiAdapterImpl implements TuiAdapter {
   private threadPicker: InternalPicker<ThreadPickerItem> = emptyPicker()
   private modelPicker: InternalPicker<ModelProfile> = emptyPicker()
   private agentPicker: InternalPicker<AgentSummary> = emptyPicker()
+  private undoPicker: InternalPicker<TurnSummary> = emptyPicker()
+  private undoDialogState: UndoDialogState | null = null
   private btwState: BtwState = { visible: false, question: "", status: "loading" }
+  private statusModalState = { visible: false }
   private toasts: ToastItem[] = []
   private toastTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private sidebarState: SidebarState = {
@@ -401,6 +419,18 @@ class TuiAdapterImpl implements TuiAdapter {
       case "picker-select-model":
         await this.selectModel(intent.model)
         return
+      case "picker-select-undo-turn":
+        this.selectUndoTurn(intent.turn)
+        return
+      case "undo-select-mode":
+        this.setUndoMode(intent.mode)
+        return
+      case "undo-confirm":
+        await this.confirmUndo()
+        return
+      case "undo-cancel":
+        this.closeUndoDialog()
+        return
       case "picker-close":
         this.closePicker(intent.picker)
         return
@@ -433,6 +463,9 @@ class TuiAdapterImpl implements TuiAdapter {
         return
       case "btw-copy":
         await this.copyBtwAnswer()
+        return
+      case "status-close":
+        this.closeStatusModal()
         return
       case "sidebar-toggle":
         this.toggleSidebar(intent.target)
@@ -644,8 +677,11 @@ class TuiAdapterImpl implements TuiAdapter {
       threads: this.pickerSnapshot(this.threadPicker, filterThreads(threadItems(threads.items), this.threadPicker.query), threads.status === "loading", threads.status === "error" ? threads.message : undefined),
       models: this.pickerSnapshot(this.modelPicker, filterModels(models.items, this.modelPicker.query), models.status === "loading", models.status === "error" ? models.message : undefined),
       agents: this.pickerSnapshot(this.agentPicker, filterAgents(interactive.catalogs.agents.items, this.agentPicker.query), interactive.catalogs.agents.status === "loading", interactive.catalogs.agents.status === "error" ? interactive.catalogs.agents.message : undefined),
+      undo: this.pickerSnapshot(this.undoPicker, filterTurns(this.undoPicker.items ?? [], this.undoPicker.query), this.undoPicker.loading, this.undoPicker.error),
+      undoDialog: this.undoDialogState ?? undefined,
       sidebar: { ...this.sidebarState },
       btw: { ...this.btwState },
+      statusModal: { ...this.statusModalState },
       toasts: [...this.toasts],
       inputMode: this.inputMode,
       commandDialog: this.commandDialog(interactive),
@@ -793,7 +829,12 @@ class TuiAdapterImpl implements TuiAdapter {
           if (effect.target === "threads") this.openThreadPicker()
           else if (effect.target === "models") this.openModelPicker(effect.initialQuery)
           else if (effect.target === "agents") this.openAgentPicker()
+          else if (effect.target === "status") this.openStatusModal()
+          else if (effect.target === "undo") await this.openUndoPicker()
           else this.openSkillPicker()
+          break
+        case "request-redo":
+          await this.executeRedo(effect.threadId)
           break
         case "request-handoff":
           if (!this.openWeb) {
@@ -862,6 +903,19 @@ class TuiAdapterImpl implements TuiAdapter {
   /** 关闭 BTW 临时问答浮层。 */
   private closeBtw(): void {
     this.btwState = { visible: false, question: "", status: "loading", copied: false }
+    this.publish()
+  }
+
+  /** 打开运行状态仪表盘浮层。 */
+  private openStatusModal(): void {
+    this.statusModalState = { visible: true }
+    this.publish()
+    void this.refreshWorkspaceChanges()
+  }
+
+  /** 关闭运行状态仪表盘浮层。 */
+  private closeStatusModal(): void {
+    this.statusModalState = { visible: false }
     this.publish()
   }
 
@@ -941,6 +995,9 @@ class TuiAdapterImpl implements TuiAdapter {
         return
       case "close-btw-modal":
         this.closeBtw()
+        return
+      case "close-status-modal":
+        this.closeStatusModal()
         return
       case "copy-btw-answer":
         await this.copyBtwAnswer()
@@ -1059,6 +1116,41 @@ class TuiAdapterImpl implements TuiAdapter {
       case "agent-select":
         this.closePicker("agents")
         return
+      case "close-undo-picker":
+        this.closePicker("undo")
+        return
+      case "undo-previous":
+        this.movePicker("undo", -1)
+        return
+      case "undo-next":
+        this.movePicker("undo", 1)
+        return
+      case "undo-select":
+        this.selectVisibleUndoTurn()
+        return
+      case "undo-block":
+        return
+      case "close-undo-dialog":
+        this.closeUndoDialog()
+        return
+      case "undo-mode-prev":
+        this.cycleUndoMode(-1)
+        return
+      case "undo-mode-next":
+        this.cycleUndoMode(1)
+        return
+      case "undo-mode-1":
+        this.setUndoMode("both")
+        return
+      case "undo-mode-2":
+        this.setUndoMode("conversation")
+        return
+      case "undo-mode-3":
+        this.setUndoMode("code")
+        return
+      case "confirm-undo":
+        await this.confirmUndo()
+        return
     }
   }
 
@@ -1162,6 +1254,7 @@ class TuiAdapterImpl implements TuiAdapter {
     if (picker === "threads") this.threadPicker = { ...this.threadPicker, visible: false, loading: false, error: undefined }
     if (picker === "models") this.modelPicker = { ...this.modelPicker, visible: false, loading: false, error: undefined, syncingDefault: undefined }
     if (picker === "agents") this.agentPicker = { ...this.agentPicker, visible: false, loading: false, error: undefined }
+    if (picker === "undo") this.undoPicker = { ...this.undoPicker, visible: false, loading: false, error: undefined }
     this.publish()
   }
 
@@ -1172,6 +1265,7 @@ class TuiAdapterImpl implements TuiAdapter {
     if (picker === "threads") this.threadPicker = { ...this.threadPicker, ...value }
     if (picker === "models") this.modelPicker = { ...this.modelPicker, ...value }
     if (picker === "agents") this.agentPicker = { ...this.agentPicker, ...value }
+    if (picker === "undo") this.undoPicker = { ...this.undoPicker, ...value }
     this.publish()
   }
 
@@ -1181,6 +1275,7 @@ class TuiAdapterImpl implements TuiAdapter {
     if (picker === "threads") this.threadPicker = { ...this.threadPicker, selectedIndex }
     if (picker === "models") this.modelPicker = { ...this.modelPicker, selectedIndex }
     if (picker === "agents") this.agentPicker = { ...this.agentPicker, selectedIndex }
+    if (picker === "undo") this.undoPicker = { ...this.undoPicker, selectedIndex }
     this.publish()
   }
 
@@ -1193,15 +1288,124 @@ class TuiAdapterImpl implements TuiAdapter {
         ? filterThreads(threadItems(interactive.catalogs.threads.items), this.threadPicker.query)
         : picker === "models"
           ? filterModels(interactive.catalogs.models.items, this.modelPicker.query)
-          : filterAgents(interactive.catalogs.agents.items, this.agentPicker.query)
+          : picker === "agents"
+            ? filterAgents(interactive.catalogs.agents.items, this.agentPicker.query)
+            : filterTurns(this.undoPicker.items ?? [], this.undoPicker.query)
     const current = picker === "skills"
       ? this.skillPicker
       : picker === "threads"
         ? this.threadPicker
         : picker === "models"
           ? this.modelPicker
-          : this.agentPicker
+          : picker === "agents"
+            ? this.agentPicker
+            : this.undoPicker
     this.updatePickerIndex(picker, items.length ? (current.selectedIndex + direction + items.length) % items.length : 0)
+  }
+
+  /** 打开 Undo Picker；异步从 sidecar 拉取历史回合快照。 */
+  private async openUndoPicker(): Promise<void> {
+    const currentThreadId = this.controller.getSnapshot().currentThreadId
+    if (!currentThreadId) {
+      this.showToast("当前没有打开的 Thread，无法撤销", "warning")
+      return
+    }
+    this.undoPicker = { ...this.undoPicker, visible: true, loading: true, query: "", selectedIndex: 0, error: undefined, items: [] }
+    this.publish()
+    try {
+      const res = await this.controller.getGateway?.().listTurns(currentThreadId)
+      if (res) {
+        this.undoPicker = { ...this.undoPicker, loading: false, items: res.turns }
+      } else {
+        this.undoPicker = { ...this.undoPicker, loading: false, items: [] }
+      }
+    } catch (error) {
+      this.undoPicker = { ...this.undoPicker, loading: false, error: errorMessage(error), items: [] }
+    }
+    this.publish()
+  }
+
+  /** 选中指定的回合进入二次确认对话框。 */
+  private selectUndoTurn(turn: TurnSummary): void {
+    this.undoPicker = { ...this.undoPicker, visible: false }
+    this.undoDialogState = {
+      visible: true,
+      targetTurn: turn,
+      selectedMode: turn.has_git_checkpoint ? "both" : "conversation",
+      isGit: turn.has_git_checkpoint,
+    }
+    this.publish()
+  }
+
+  /** 在 UndoPicker 当前可见项中选中。 */
+  private selectVisibleUndoTurn(): void {
+    const items = filterTurns(this.undoPicker.items ?? [], this.undoPicker.query)
+    const selected = items[this.undoPicker.selectedIndex]
+    if (selected) this.selectUndoTurn(selected)
+  }
+
+  /** 设置回退选项。 */
+  private setUndoMode(mode: UndoMode): void {
+    if (!this.undoDialogState) return
+    if ((mode === "both" || mode === "code") && !this.undoDialogState.isGit) return
+    this.undoDialogState = { ...this.undoDialogState, selectedMode: mode }
+    this.publish()
+  }
+
+  /** 循环切换回退选项。 */
+  private cycleUndoMode(direction: number): void {
+    if (!this.undoDialogState) return
+    const availableModes: UndoMode[] = this.undoDialogState.isGit
+      ? ["both", "conversation", "code"]
+      : ["conversation"]
+    const currentIndex = availableModes.indexOf(this.undoDialogState.selectedMode)
+    const nextIndex = (currentIndex + direction + availableModes.length) % availableModes.length
+    this.undoDialogState = { ...this.undoDialogState, selectedMode: availableModes[nextIndex]! }
+    this.publish()
+  }
+
+  /** 确认执行回退。 */
+  private async confirmUndo(): Promise<void> {
+    if (!this.undoDialogState) return
+    const { targetTurn, selectedMode } = this.undoDialogState
+    const currentThreadId = this.controller.getSnapshot().currentThreadId
+    this.undoDialogState = null
+    this.publish()
+    if (!currentThreadId) return
+    const outcome = await this.routeDispatch({
+      type: "thread.undo",
+      threadId: currentThreadId,
+      targetTurnId: targetTurn.turn_id,
+      mode: selectedMode,
+    })
+    if (outcome.status === "accepted") {
+      this.showToast(`已回退至第 ${targetTurn.turn_index} 轮`, "success")
+    } else {
+      this.showToast(outcome.message, "error")
+    }
+  }
+
+  /** 关闭回退对话框。 */
+  private closeUndoDialog(): void {
+    this.undoDialogState = null
+    this.publish()
+  }
+
+  /** 执行重做。 */
+  private async executeRedo(threadId: string | null): Promise<void> {
+    if (!threadId) {
+      this.showToast("当前没有打开的 Thread，无法重做", "warning")
+      return
+    }
+    const outcome = await this.routeDispatch({
+      type: "thread.redo",
+      threadId,
+    })
+    if (outcome.status === "accepted") {
+      this.showToast("已成功重做并恢复撤销操作", "success")
+    } else {
+      this.showToast(outcome.message, "error")
+    }
   }
 
   /** 选择当前 Skill，并把它附着到下一次真实消息。 */
@@ -1389,4 +1593,10 @@ function filterModels(models: readonly ModelProfile[], query: string): readonly 
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+export function filterTurns(turns: readonly TurnSummary[], query: string): readonly TurnSummary[] {
+  const needle = query.trim().toLowerCase()
+  if (!needle) return turns
+  return turns.filter(turn => [turn.user_prompt, String(turn.turn_index)].some(value => value.toLowerCase().includes(needle)))
 }

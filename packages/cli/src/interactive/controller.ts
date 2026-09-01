@@ -144,6 +144,12 @@ export class InteractiveControllerImpl implements InteractiveController {
           },
         })
 
+      case "thread.undo":
+        return this.threadFeature.undo(intent.threadId, intent.targetTurnId, intent.mode ?? "both", this.featureContext)
+
+      case "thread.redo":
+        return this.threadFeature.redo(intent.threadId, this.featureContext)
+
       case "model.select":
         if (this.state.activeRun || this.hasPendingInteraction) {
           return { status: "rejected", code: "busy", message: "任务运行中或存在待处理交互，暂不能切换模型" }
@@ -318,7 +324,9 @@ export class InteractiveControllerImpl implements InteractiveController {
             return { status: "accepted" }
           }
         }
-        await this.catalogFeature.refreshCatalog(result.target, this.featureContext, id => this.adoptThreadSelection(id))
+        if (result.target !== "status" && result.target !== "undo") {
+          await this.catalogFeature.refreshCatalog(result.target, this.featureContext, id => this.adoptThreadSelection(id))
+        }
         return { status: "accepted", effects: [{ type: "present", target: result.target, initialQuery: result.initialQuery }] }
       case "compact":
         if (this.compactInFlight) {
@@ -341,6 +349,9 @@ export class InteractiveControllerImpl implements InteractiveController {
         return { status: "accepted" }
       case "request-handoff":
         return { status: "accepted", effects: [{ type: "request-handoff", threadId: result.threadId }] }
+      case "request-redo":
+        if (!result.threadId) return { status: "rejected", code: "invalid-argument", message: "No active thread for redo" }
+        return this.dispatch({ type: "thread.redo", threadId: result.threadId })
       case "side-question":
         return { status: "accepted", effects: [{ type: "side-question", question: result.question, threadId: result.threadId }] }
       case "set-approval-mode": {
@@ -516,6 +527,8 @@ export class InteractiveControllerImpl implements InteractiveController {
       composeState: this.state.composeState,
       workItem: this.state.workItem,
       threadMode: this.state.threadMode,
+      isReverted: this.state.isReverted ?? false,
+      revertedTurnId: this.state.revertedTurnId ?? null,
     }
   }
 }

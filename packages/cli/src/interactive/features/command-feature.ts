@@ -50,6 +50,7 @@ export class CommandFeature {
         hasPendingInteraction,
         workMode: ctx.getState().workMode,
         hasActiveWorkItem: hasActiveComposeSession(ctx.getState().composeState),
+        isReverted: Boolean(ctx.getState().isReverted),
       },
       threadId: ctx.getState().currentThreadId,
       runtimeStatus: runtimeStatusSummary(ctx.baseRuntime),

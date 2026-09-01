@@ -12,6 +12,7 @@ type KeyLike = {
 export type ShortcutContext = {
   commandDialogVisible?: boolean
   btwModalVisible?: boolean
+  statusModalVisible?: boolean
   skillPickerVisible?: boolean
   skillOptionCount?: number
   threadPickerVisible?: boolean
@@ -20,6 +21,9 @@ export type ShortcutContext = {
   modelOptionCount?: number
   agentPickerVisible?: boolean
   agentOptionCount?: number
+  undoPickerVisible?: boolean
+  undoOptionCount?: number
+  undoDialogVisible?: boolean
   commandMenuVisible: boolean
   commandOptionCount: number
   activeRun: boolean
@@ -35,8 +39,21 @@ export type ShortcutAction =
   | "confirm-command-dialog"
   | "cancel-command-dialog"
   | "close-btw-modal"
+  | "close-status-modal"
   | "copy-btw-answer"
   | "leave-child-timeline"
+  | "close-undo-dialog"
+  | "undo-mode-prev"
+  | "undo-mode-next"
+  | "undo-mode-1"
+  | "undo-mode-2"
+  | "undo-mode-3"
+  | "confirm-undo"
+  | "close-undo-picker"
+  | "undo-previous"
+  | "undo-next"
+  | "undo-select"
+  | "undo-block"
   | "close-command-menu"
   | "command-previous"
   | "command-next"
@@ -97,6 +114,10 @@ function resolveScrollShortcut(key: KeyLike): ShortcutAction {
 
 /** 快捷键先处理临时菜单，再处理运行态，避免输入控件吞掉 Ctrl+C 与 Esc。 */
 export function resolveShortcut(key: KeyLike, context: ShortcutContext): ShortcutAction {
+  if (context.statusModalVisible) {
+    if (key.name === "escape" || key.name === "return" || key.name === "kpenter" || key.name === "q") return "close-status-modal"
+    return "none"
+  }
   if (context.btwModalVisible) {
     if (key.name === "escape" || key.name === "return" || key.name === "kpenter") return "close-btw-modal"
     if (key.name === "c" && !key.ctrl) return "copy-btw-answer"
@@ -106,6 +127,24 @@ export function resolveShortcut(key: KeyLike, context: ShortcutContext): Shortcu
     if (key.name === "escape") return "cancel-command-dialog"
     if (key.name === "return" || key.name === "kpenter") return "confirm-command-dialog"
     return "none"
+  }
+  if (context.undoDialogVisible) {
+    if (key.name === "escape") return "close-undo-dialog"
+    if (key.name === "return" || key.name === "kpenter") return "confirm-undo"
+    if (key.name === "up" || (key.ctrl && key.name === "p")) return "undo-mode-prev"
+    if (key.name === "down" || (key.ctrl && key.name === "n")) return "undo-mode-next"
+    if (key.name === "1" && !key.ctrl) return "undo-mode-1"
+    if (key.name === "2" && !key.ctrl) return "undo-mode-2"
+    if (key.name === "3" && !key.ctrl) return "undo-mode-3"
+    return "none"
+  }
+  if (context.undoPickerVisible) {
+    if (key.name === "escape") return "close-undo-picker"
+    if (key.name === "up" || (key.ctrl && key.name === "p")) return "undo-previous"
+    if (key.name === "down" || (key.ctrl && key.name === "n")) return "undo-next"
+    if (key.name === "return" || key.name === "kpenter" || key.name === "tab") {
+      return (context.undoOptionCount ?? 0) > 0 ? "undo-select" : "undo-block"
+    }
   }
   if (context.threadPickerVisible) {
     if (key.name === "escape") return "close-thread-picker"
@@ -150,7 +189,7 @@ export function resolveShortcut(key: KeyLike, context: ShortcutContext): Shortcu
 
   // 滚动键全局生效（含正在输入或运行中），与 opencode 的 session.global 对齐；
   // 浮层打开时让位给选择器，避免在背后滚动历史。
-  if (!context.commandMenuVisible && !context.skillPickerVisible && !context.threadPickerVisible && !context.modelPickerVisible && !context.agentPickerVisible) {
+  if (!context.commandMenuVisible && !context.skillPickerVisible && !context.threadPickerVisible && !context.modelPickerVisible && !context.agentPickerVisible && !context.undoPickerVisible && !context.undoDialogVisible) {
     const scrollAction = resolveScrollShortcut(key)
     if (scrollAction !== "none") return scrollAction
   }

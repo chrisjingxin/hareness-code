@@ -8,8 +8,8 @@ priority: P1
 status: 进行中
 owner: Antigravity
 branch: feat/hc-150-sidebar-tabs
-reviewed_at: 2026-08-16
-review_due: 2026-08-30
+reviewed_at: 2026-09-01
+review_due: 2026-09-15
 scope: 将 TUI 侧边栏拆分为「文件树」与「运行状态」双 Tab 布局，优化文件夹与文件折叠图标为优雅彩色轻量字符，支持鼠标与快捷键切换 Tab。
 acceptance: 侧边栏顶部支持 [ 📁 文件树 ] 与 [ ⚡ 状态 ] 胶囊切换；文件树 Tab 独占全高空间展示文件列表与滚动；状态 Tab 展示 CWD、Context、MCP 与变更文件；文件夹采用 ▾ / ▸ 搭配琥珀金高亮，文件采用色彩区分。
 user_docs: 不涉及

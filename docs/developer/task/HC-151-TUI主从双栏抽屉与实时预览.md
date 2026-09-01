@@ -8,8 +8,8 @@ priority: P1
 status: 进行中
 owner: Antigravity
 branch: feat/hc-151-drawer-preview
-reviewed_at: 2026-08-16
-review_due: 2026-08-30
+reviewed_at: 2026-09-01
+review_due: 2026-09-15
 scope: 将 TUI 侧边栏升级为非侵入式右侧浮层遮罩抽屉，实现「左侧文件树 + 右侧代码实时预览」的一体化主从双栏联动浏览，移除居中弹框。
 acceptance: 打开侧边栏不再改变主聊天视口宽度；文件树光标上下移动时右侧代码视口实时同步高亮刷新；支持按 @ 引用路径、按 Esc / 点击遮罩平滑关闭；小屏自适应降级。
 user_docs: 不涉及

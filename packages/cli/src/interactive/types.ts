@@ -129,10 +129,11 @@ export type InteractiveMcpInput = McpAddParams
 
 /** 表现层必须由宿主完成的依赖副作用。 */
 export type PresentationEffect =
-  | { type: "present"; target: "threads" | "models" | "skills" | "agents"; initialQuery?: string }
+  | { type: "present"; target: "threads" | "models" | "skills" | "agents" | "status" | "undo"; initialQuery?: string }
   | { type: "request-handoff"; threadId: string | null }
   | { type: "side-question"; question: string; threadId: string | null }
   | { type: "request-exit" }
+  | { type: "request-redo"; threadId: string | null }
 
 /** 拒绝原因分类：涵盖从繁忙、缺少能力到通信与校验错误的稳定错误码。 */
 export type RejectionCode =
@@ -159,6 +160,8 @@ export type InteractiveIntent =
   | { type: "run.cancel" }
   | { type: "catalog.refresh"; catalog: "threads" | "models" | "skills" | "mcp" | "agents" }
   | { type: "thread.open"; threadId: string }
+  | { type: "thread.undo"; threadId: string; targetTurnId: string; mode?: "both" | "conversation" | "code" }
+  | { type: "thread.redo"; threadId: string }
   | { type: "model.select"; profileId: string }
   | { type: "skill.arm"; skillId: string }
   | { type: "skill.clear" }
@@ -209,6 +212,9 @@ export type InteractiveSnapshot = {
   readonly threadMode: WorkMode | null
   /** 正在查看的 child execution；null 表示父时间线。 */
   readonly childTimelineExecutionId: string | null
+  /** 当前 Thread 是否处于暂存回退态（已执行 /undo 且尚未提交新 Prompt）。 */
+  readonly isReverted: boolean
+  readonly revertedTurnId: string | null
 }
 
 /** Interactive Core 的唯一业务入口；实现细节不泄漏 React、DOM 或 transport。 */

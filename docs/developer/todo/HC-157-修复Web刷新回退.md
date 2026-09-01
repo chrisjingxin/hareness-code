@@ -1,6 +1,6 @@
 # HC-157 修复 Web 刷新回退 Todo
 
-关联 [Task](../task/HC-157-修复Web刷新回退.md)、[Spec](../spec/HC-157-修复Web刷新回退.md) 与 [Plan](../plan/HC-157-修复Web刷新回退.md)。
+关联 [Task](../task/archive/HC-157-legacy-修复Web刷新回退.md)、[Spec](../spec/HC-157-修复Web刷新回退.md) 与 [Plan](../plan/HC-157-修复Web刷新回退.md)。
 
 ## 可演示停点：长时间停留后刷新仍在 Web
 

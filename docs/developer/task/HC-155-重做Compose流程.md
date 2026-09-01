@@ -8,8 +8,8 @@ priority: P1
 status: 待验收
 owner: Grok
 branch: feat/hc-155-compose-session
-reviewed_at: 2026-08-18
-review_due: 2026-08-31
+reviewed_at: 2026-09-01
+review_due: 2026-09-15
 scope: 按已确认意图重做 Compose：删除 Work Item 引擎，保留 Tab 独立 Mode 与 Grill→Task→Spec→Plan→实现→检视主路径；测试不是进度格，由实现内部 Runtime 推断并最多跑一次；检视用内置 code-review-and-quality 看本套 Compose 改过的代码并写出 review.md。主对话流式可见，Grill 用 ask_user；进度只靠 docs/compose 文档与确认；Implement / 检视用同一 Thread 的 fresh execution。不为 HC-138/140 内部实现保留兼容层。
 acceptance: jsondiff 类需求几秒内开始 Grill 且不先跑意图分类器；TUI 只读进度为需求→规格→计划→实现→检视；简单需求不审 Spec、确认 Plan 后同一轮自动实现；不问用户写 verify_command；实现后进入检视 Skill；用户确认检视后结束；退出再进按文档和确认续上；中途普通输入跟当前走；/abandon 只废弃并空闲、/new-work 必须带新目标才开新需求；不再出现 compose-task-interview 类协议报错与数分钟 0 token；Build 无回归。
 user_docs: docs/user/交互使用.md、docs/user/安全与沙箱.md

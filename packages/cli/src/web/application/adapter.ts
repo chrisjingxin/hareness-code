@@ -679,6 +679,8 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
       workItem: view.workItem.workItem,
       threadMode: view.workItem.threadMode,
       childTimelineExecutionId: view.conversation.childTimelineExecutionId,
+      isReverted: false,
+      revertedTurnId: null,
     }
   }
 
@@ -1113,6 +1115,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
           if (effect.target === "models") this.dockOpen("models")
           else if (effect.target === "skills") this.dockOpen("skills")
           else if (effect.target === "agents") this.dockOpen("agents")
+          else if (effect.target === "status") this.dockOpen("status")
           // threads：Thread 常驻左侧栏，无对应 Dock 面板可开。
           break
         case "request-handoff":

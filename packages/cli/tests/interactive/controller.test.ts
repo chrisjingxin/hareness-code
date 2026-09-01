@@ -133,3 +133,50 @@ test("close 幂等；关闭后 dispatch no-op 且不再发布 snapshot", async (
     await harness.controller.close()
   }
 })
+
+test("Controller thread.undo 与 thread.redo 状态机与通知", async () => {
+  const harness = makeHarness({ initialThreadId: "thread-1" })
+  try {
+    await flush()
+    expect(harness.controller.getSnapshot().isReverted).toBe(false)
+
+    // 1. 执行 /undo
+    const undoRes = await harness.controller.dispatch({
+      type: "thread.undo",
+      threadId: "thread-1",
+      targetTurnId: "turn-1",
+      mode: "both",
+    })
+    expect(undoRes.status).toBe("accepted")
+    expect(harness.calls).toContain("threads.undo")
+    expect(harness.controller.getSnapshot().isReverted).toBe(true)
+    expect(harness.controller.getSnapshot().revertedTurnId).toBe("turn-1")
+    expect(notices(harness.controller.getSnapshot())).toContain("已撤销至历史回合（还原了 2 个文件）。")
+
+    // 2. 执行 /redo
+    const redoRes = await harness.controller.dispatch({
+      type: "thread.redo",
+      threadId: "thread-1",
+    })
+    expect(redoRes.status).toBe("accepted")
+    expect(harness.calls).toContain("threads.redo")
+    expect(harness.controller.getSnapshot().isReverted).toBe(false)
+    expect(harness.controller.getSnapshot().revertedTurnId).toBeNull()
+    expect(notices(harness.controller.getSnapshot())).toContain("已重做并恢复撤销操作（还原了 2 个文件）。")
+
+    // 3. 再次 undo 后发送新 prompt，isReverted 自动重置为 false
+    await harness.controller.dispatch({
+      type: "thread.undo",
+      threadId: "thread-1",
+      targetTurnId: "turn-1",
+      mode: "both",
+    })
+    expect(harness.controller.getSnapshot().isReverted).toBe(true)
+
+    await harness.controller.dispatch({ type: "input.submit", value: "新一轮提问" })
+    expect(harness.controller.getSnapshot().isReverted).toBe(false)
+    expect(harness.controller.getSnapshot().revertedTurnId).toBeNull()
+  } finally {
+    await harness.controller.close()
+  }
+})

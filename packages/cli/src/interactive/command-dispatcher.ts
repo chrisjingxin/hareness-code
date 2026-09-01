@@ -19,7 +19,7 @@ import type { IdGenerator } from "./ports/id-generator"
 import type { InteractiveApprovalMode } from "./runtime"
 
 /** 命令选择器目标；与 InteractiveResult.present 的 target 保持一致。 */
-export type CommandPickerTarget = "skills" | "threads" | "models" | "agents"
+export type CommandPickerTarget = "skills" | "threads" | "models" | "agents" | "status" | "undo"
 
 /** Handler 的唯一输出协议。它不返回 RPC method 字符串、success/error closure、
  * React callback 或 TUI local action；Controller 解释这些语义并完成所有 Agent effect。 */
@@ -50,6 +50,7 @@ export type CommandResult =
   | { type: "compact"; threadId: string }
   | { type: "mcp"; argument?: string }
   | { type: "request-handoff"; threadId: string | null }
+  | { type: "request-redo"; threadId: string | null }
   | { type: "submit-prompt"; prompt: string; requestedSkill?: RequestedSkill }
   | { type: "side-question"; question: string; threadId: string | null }
   | { type: "set-approval-mode"; mode: "plan"; prompt?: string; notice?: string }
@@ -133,7 +134,9 @@ const builtinHandlers: Readonly<Record<string, CommandHandler>> = {
     if (!context.threadId) return notice("当前没有可压缩的 thread。")
     return { type: "compact", threadId: context.threadId }
   },
-  "system.status": context => notice(context.runtimeStatus),
+  "system.status": context => context.command.argument
+    ? notice("/status 不接受参数。")
+    : ({ type: "present", target: "status" }),
   "thread.resume": context => context.command.argument
     ? notice("/resume 不接受 thread_id；请在选择器中选择要恢复的 thread。")
     : { type: "present", target: "threads" },
@@ -173,6 +176,14 @@ const builtinHandlers: Readonly<Record<string, CommandHandler>> = {
   },
   "approval.plan": handlePlanCommand,
   "approval.plan-view": handlePlanViewCommand,
+  "thread.undo": context => {
+    if (!context.threadId) return notice("当前没有可撤销的 thread。")
+    return { type: "present", target: "undo" }
+  },
+  "thread.redo": context => {
+    if (!context.threadId) return notice("当前没有可重做的 thread。")
+    return { type: "request-redo", threadId: context.threadId }
+  },
 }
 
 const ALREADY_IN_PLAN_NOTICE = "已在计划模式。改计划请直接发消息；离开请用 `/plan exit`。"

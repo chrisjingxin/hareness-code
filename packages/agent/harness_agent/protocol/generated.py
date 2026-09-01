@@ -7,19 +7,19 @@ from harness_agent.protocol.runtime import event_model, schema_model
 
 PROTOCOL_MAJOR = 3
 PROTOCOL_MINOR = 7
-PROTOCOL_SCHEMA_SHA256 = "1b402f275bca801c231a399afcf279d869988da3fc3a8c4410971d63a1141698"
+PROTOCOL_SCHEMA_SHA256 = "d1fea2bac72043e7d580fa9379676451c864a3b806fece2bdb9b934c5504af7b"
 MAX_FRAME_BYTES = 8388608
 MAX_TOOL_PAYLOAD_BYTES = 1048576
-CLIENT_METHODS = ["initialize","commands.bind","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","settings.list","settings.set","settings.remove","threads.list","threads.open","threads.watch","threads.unwatch","threads.side_question","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","plugins.list","plugins.inspect","plugins.validate","plugins.install","plugins.set_enabled","plugins.remove","agents.list","agents.inspect","teams.list","teams.inspect","teams.generate","teams.run","teams.cancel","mcp.status","mcp.add","mcp.remove","host.attachment.create","host.attachment.revoke","host.control.acquire","host.control.release","host.control.status","compose.inspect","compose.abandon"]
+CLIENT_METHODS = ["initialize","commands.bind","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","settings.list","settings.set","settings.remove","threads.list","threads.open","threads.watch","threads.unwatch","threads.side_question","threads.list_turns","threads.undo","threads.redo","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","plugins.list","plugins.inspect","plugins.validate","plugins.install","plugins.set_enabled","plugins.remove","agents.list","agents.inspect","teams.list","teams.inspect","teams.generate","teams.run","teams.cancel","mcp.status","mcp.add","mcp.remove","host.attachment.create","host.attachment.revoke","host.control.acquire","host.control.release","host.control.status","compose.inspect","compose.abandon"]
 EVENT_TYPES = ["run.started","run.progress","skill.loaded","content.delta","reasoning.delta","tool.started","tool.delta","tool.completed","context.updated","compose.progress","compose.summary","interaction.resolved","run.completed","run.cancelled","run.failed"]
 INTERACTION_METHODS = ["interaction.approval","interaction.question","interaction.directory_trust","interaction.plan"]
 SERVER_CAPABILITIES = ["run.cancel","run.multithread","host.control","config.read","config.write","threads.read","context.manage","skills.read","skills.manage","mcp.read","mcp.manage","plugins.read","plugins.manage","agents.read","teams.read","teams.manage","models.read","models.select","host.attach","settings.read","settings.manage"]
-OPERATION_CAPABILITIES = {"initialize":None,"commands.bind":None,"run.start":None,"run.cancel":"run.cancel","context.compact":"context.manage","config.show":"config.read","config.path":"config.read","config.details":"config.write","config.preview":"config.write","config.commit":"config.write","settings.list":"settings.read","settings.set":"settings.manage","settings.remove":"settings.manage","threads.list":"threads.read","threads.open":"threads.read","threads.watch":"threads.read","threads.unwatch":"threads.read","threads.side_question":"threads.read","models.list":"models.read","skills.list":"skills.read","skills.inspect":"skills.read","skills.set_enabled":"skills.manage","skills.install":"skills.manage","skills.update":"skills.manage","skills.remove":"skills.manage","skills.market.list":"skills.read","plugins.list":"plugins.read","plugins.inspect":"plugins.read","plugins.validate":"plugins.read","plugins.install":"plugins.manage","plugins.set_enabled":"plugins.manage","plugins.remove":"plugins.manage","agents.list":"agents.read","agents.inspect":"agents.read","teams.list":"teams.read","teams.inspect":"teams.read","teams.generate":"teams.manage","teams.run":"teams.manage","teams.cancel":"teams.manage","mcp.status":"mcp.read","mcp.add":"mcp.manage","mcp.remove":"mcp.manage","host.attachment.create":"host.attach","host.attachment.revoke":"host.attach","host.control.acquire":"host.control","host.control.release":"host.control","host.control.status":"host.control","compose.inspect":"threads.read","compose.abandon":"threads.read"}
+OPERATION_CAPABILITIES = {"initialize":None,"commands.bind":None,"run.start":None,"run.cancel":"run.cancel","context.compact":"context.manage","config.show":"config.read","config.path":"config.read","config.details":"config.write","config.preview":"config.write","config.commit":"config.write","settings.list":"settings.read","settings.set":"settings.manage","settings.remove":"settings.manage","threads.list":"threads.read","threads.open":"threads.read","threads.watch":"threads.read","threads.unwatch":"threads.read","threads.side_question":"threads.read","threads.list_turns":"threads.read","threads.undo":"threads.read","threads.redo":"threads.read","models.list":"models.read","skills.list":"skills.read","skills.inspect":"skills.read","skills.set_enabled":"skills.manage","skills.install":"skills.manage","skills.update":"skills.manage","skills.remove":"skills.manage","skills.market.list":"skills.read","plugins.list":"plugins.read","plugins.inspect":"plugins.read","plugins.validate":"plugins.read","plugins.install":"plugins.manage","plugins.set_enabled":"plugins.manage","plugins.remove":"plugins.manage","agents.list":"agents.read","agents.inspect":"agents.read","teams.list":"teams.read","teams.inspect":"teams.read","teams.generate":"teams.manage","teams.run":"teams.manage","teams.cancel":"teams.manage","mcp.status":"mcp.read","mcp.add":"mcp.manage","mcp.remove":"mcp.manage","host.attachment.create":"host.attach","host.attachment.revoke":"host.attach","host.control.acquire":"host.control","host.control.release":"host.control","host.control.status":"host.control","compose.inspect":"threads.read","compose.abandon":"threads.read"}
 OPERATION_MIN_MINOR = {"commands.bind":6,"settings.list":7,"settings.set":7,"settings.remove":7}
-CONTROLLED_OPERATIONS = ["run.start","run.cancel","context.compact","config.preview","config.commit","settings.set","settings.remove","skills.set_enabled","skills.install","skills.update","skills.remove","mcp.add","mcp.remove"]
+CONTROLLED_OPERATIONS = ["run.start","run.cancel","context.compact","config.preview","config.commit","settings.set","settings.remove","threads.undo","threads.redo","skills.set_enabled","skills.install","skills.update","skills.remove","mcp.add","mcp.remove"]
 INTERACTION_HANDLES = {"interaction.approval":"approval","interaction.question":"question","interaction.directory_trust":"directory_trust","interaction.plan":"plan"}
 ERROR_CODES = {"CONTROL_NOT_HOLDER":{"jsonrpc_code":-32008,"retryable":True},"CONTROL_BUSY":{"jsonrpc_code":-32008,"retryable":True},"CONTROL_RELEASE_BLOCKED":{"jsonrpc_code":-32008,"retryable":True},"ATTACHMENT_NOT_FOUND":{"jsonrpc_code":-32009,"retryable":False},"ATTACHMENT_NOT_ACTIVE":{"jsonrpc_code":-32009,"retryable":False},"CONNECTION_RUN_BUSY":{"jsonrpc_code":-32000,"retryable":True},"COMPOSE_NOTHING_TO_ABANDON":{"jsonrpc_code":-32004,"retryable":False},"COMPOSE_NEW_WORK_GOAL_REQUIRED":{"jsonrpc_code":-32004,"retryable":False},"COMPOSE_ABANDON_TAKES_NO_GOAL":{"jsonrpc_code":-32004,"retryable":False},"PROTOCOL_MINOR_REQUIRED":{"jsonrpc_code":-32003,"retryable":False},"SETTINGS_PROTOCOL_MINOR_REQUIRED":{"jsonrpc_code":-32003,"retryable":False},"SETTINGS_CAPABILITY_REQUIRED":{"jsonrpc_code":-32002,"retryable":False},"SETTINGS_SCOPE_INVALID":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_WORKSPACE_SCOPE_REQUIRED":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_INPUT_NONINTERACTIVE":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_STORAGE_UNAVAILABLE":{"jsonrpc_code":-32010,"retryable":True},"SETTINGS_BACKEND_UNAVAILABLE":{"jsonrpc_code":-32010,"retryable":True},"SETTINGS_RECORD_NOT_FOUND":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_RECORD_STALE":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_DECLARATION_STALE":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_DECLARATION_INVALID":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_DECLARATION_AMBIGUOUS":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_ENV_FORBIDDEN":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_VALUE_INVALID":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_VALUE_TOO_LARGE":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_STORE_REVISION_CONFLICT":{"jsonrpc_code":-32000,"retryable":True},"SETTINGS_OPERATION_IN_PROGRESS":{"jsonrpc_code":-32000,"retryable":True},"SETTINGS_CLEANUP_PENDING":{"jsonrpc_code":-32010,"retryable":True},"SETTINGS_UNINSTALL_PARTIAL":{"jsonrpc_code":-32010,"retryable":True},"SETTINGS_UNINSTALL_CONFLICT":{"jsonrpc_code":-32000,"retryable":True}}
-METHOD = {"INITIALIZE":"initialize","COMMANDS_BIND":"commands.bind","RUN_START":"run.start","RUN_CANCEL":"run.cancel","CONTEXT_COMPACT":"context.compact","CONFIG_SHOW":"config.show","CONFIG_PATH":"config.path","CONFIG_DETAILS":"config.details","CONFIG_PREVIEW":"config.preview","CONFIG_COMMIT":"config.commit","SETTINGS_LIST":"settings.list","SETTINGS_SET":"settings.set","SETTINGS_REMOVE":"settings.remove","THREADS_LIST":"threads.list","THREADS_OPEN":"threads.open","THREADS_WATCH":"threads.watch","THREADS_UNWATCH":"threads.unwatch","THREADS_SIDE_QUESTION":"threads.side_question","MODELS_LIST":"models.list","SKILLS_LIST":"skills.list","SKILLS_INSPECT":"skills.inspect","SKILLS_SET_ENABLED":"skills.set_enabled","SKILLS_INSTALL":"skills.install","SKILLS_UPDATE":"skills.update","SKILLS_REMOVE":"skills.remove","SKILLS_MARKET_LIST":"skills.market.list","PLUGINS_LIST":"plugins.list","PLUGINS_INSPECT":"plugins.inspect","PLUGINS_VALIDATE":"plugins.validate","PLUGINS_INSTALL":"plugins.install","PLUGINS_SET_ENABLED":"plugins.set_enabled","PLUGINS_REMOVE":"plugins.remove","AGENTS_LIST":"agents.list","AGENTS_INSPECT":"agents.inspect","TEAMS_LIST":"teams.list","TEAMS_INSPECT":"teams.inspect","TEAMS_GENERATE":"teams.generate","TEAMS_RUN":"teams.run","TEAMS_CANCEL":"teams.cancel","MCP_STATUS":"mcp.status","MCP_ADD":"mcp.add","MCP_REMOVE":"mcp.remove","HOST_ATTACHMENT_CREATE":"host.attachment.create","HOST_ATTACHMENT_REVOKE":"host.attachment.revoke","HOST_CONTROL_ACQUIRE":"host.control.acquire","HOST_CONTROL_RELEASE":"host.control.release","HOST_CONTROL_STATUS":"host.control.status","COMPOSE_INSPECT":"compose.inspect","COMPOSE_ABANDON":"compose.abandon","EVENT":"event","INTERACTION_APPROVAL":"interaction.approval","INTERACTION_QUESTION":"interaction.question","INTERACTION_DIRECTORY_TRUST":"interaction.directory_trust","INTERACTION_PLAN":"interaction.plan"}
+METHOD = {"INITIALIZE":"initialize","COMMANDS_BIND":"commands.bind","RUN_START":"run.start","RUN_CANCEL":"run.cancel","CONTEXT_COMPACT":"context.compact","CONFIG_SHOW":"config.show","CONFIG_PATH":"config.path","CONFIG_DETAILS":"config.details","CONFIG_PREVIEW":"config.preview","CONFIG_COMMIT":"config.commit","SETTINGS_LIST":"settings.list","SETTINGS_SET":"settings.set","SETTINGS_REMOVE":"settings.remove","THREADS_LIST":"threads.list","THREADS_OPEN":"threads.open","THREADS_WATCH":"threads.watch","THREADS_UNWATCH":"threads.unwatch","THREADS_SIDE_QUESTION":"threads.side_question","THREADS_LIST_TURNS":"threads.list_turns","THREADS_UNDO":"threads.undo","THREADS_REDO":"threads.redo","MODELS_LIST":"models.list","SKILLS_LIST":"skills.list","SKILLS_INSPECT":"skills.inspect","SKILLS_SET_ENABLED":"skills.set_enabled","SKILLS_INSTALL":"skills.install","SKILLS_UPDATE":"skills.update","SKILLS_REMOVE":"skills.remove","SKILLS_MARKET_LIST":"skills.market.list","PLUGINS_LIST":"plugins.list","PLUGINS_INSPECT":"plugins.inspect","PLUGINS_VALIDATE":"plugins.validate","PLUGINS_INSTALL":"plugins.install","PLUGINS_SET_ENABLED":"plugins.set_enabled","PLUGINS_REMOVE":"plugins.remove","AGENTS_LIST":"agents.list","AGENTS_INSPECT":"agents.inspect","TEAMS_LIST":"teams.list","TEAMS_INSPECT":"teams.inspect","TEAMS_GENERATE":"teams.generate","TEAMS_RUN":"teams.run","TEAMS_CANCEL":"teams.cancel","MCP_STATUS":"mcp.status","MCP_ADD":"mcp.add","MCP_REMOVE":"mcp.remove","HOST_ATTACHMENT_CREATE":"host.attachment.create","HOST_ATTACHMENT_REVOKE":"host.attachment.revoke","HOST_CONTROL_ACQUIRE":"host.control.acquire","HOST_CONTROL_RELEASE":"host.control.release","HOST_CONTROL_STATUS":"host.control.status","COMPOSE_INSPECT":"compose.inspect","COMPOSE_ABANDON":"compose.abandon","EVENT":"event","INTERACTION_APPROVAL":"interaction.approval","INTERACTION_QUESTION":"interaction.question","INTERACTION_DIRECTORY_TRUST":"interaction.directory_trust","INTERACTION_PLAN":"interaction.plan"}
 CAPABILITY = {"RUN_CANCEL":"run.cancel","RUN_MULTITHREAD":"run.multithread","HOST_CONTROL":"host.control","CONFIG_READ":"config.read","CONFIG_WRITE":"config.write","THREADS_READ":"threads.read","CONTEXT_MANAGE":"context.manage","SKILLS_READ":"skills.read","SKILLS_MANAGE":"skills.manage","MCP_READ":"mcp.read","MCP_MANAGE":"mcp.manage","PLUGINS_READ":"plugins.read","PLUGINS_MANAGE":"plugins.manage","AGENTS_READ":"agents.read","TEAMS_READ":"teams.read","TEAMS_MANAGE":"teams.manage","MODELS_READ":"models.read","MODELS_SELECT":"models.select","HOST_ATTACH":"host.attach","SETTINGS_READ":"settings.read","SETTINGS_MANAGE":"settings.manage"}
 EVENT_TYPE = {"RUN_STARTED":"run.started","RUN_PROGRESS":"run.progress","SKILL_LOADED":"skill.loaded","CONTENT_DELTA":"content.delta","REASONING_DELTA":"reasoning.delta","TOOL_STARTED":"tool.started","TOOL_DELTA":"tool.delta","TOOL_COMPLETED":"tool.completed","CONTEXT_UPDATED":"context.updated","COMPOSE_PROGRESS":"compose.progress","COMPOSE_SUMMARY":"compose.summary","INTERACTION_RESOLVED":"interaction.resolved","RUN_COMPLETED":"run.completed","RUN_CANCELLED":"run.cancelled","RUN_FAILED":"run.failed"}
 
@@ -329,6 +329,48 @@ class ThreadsSideQuestionParamsWire(TypedDict):
 class ThreadsSideQuestionResultWire(TypedDict):
     reply_text: str
     model_profile_id: NotRequired[str]
+
+class ThreadsListTurnsParamsWire(TypedDict):
+    thread_id: str
+
+class TurnDiffStatsWire(TypedDict):
+    files: list[str]
+    insertions: int
+    deletions: int
+
+class TurnSummaryWire(TypedDict):
+    turn_id: str
+    turn_index: int
+    user_prompt: str
+    created_at: float
+    files_changed_count: int
+    has_git_checkpoint: bool
+    diff_stats: NotRequired[TurnDiffStatsWire]
+
+class ThreadsListTurnsResultWire(TypedDict):
+    turns: list[TurnSummaryWire]
+    active_turn_id: str
+    reverted_turn_id: NotRequired[str]
+
+class ThreadsUndoParamsWire(TypedDict):
+    thread_id: str
+    target_turn_id: str
+    mode: Literal["both", "conversation", "code"]
+
+class ThreadsUndoResultWire(TypedDict):
+    success: bool
+    reverted_turn_id: str
+    restored_files_count: int
+    message: NotRequired[str]
+
+class ThreadsRedoParamsWire(TypedDict):
+    thread_id: str
+
+class ThreadsRedoResultWire(TypedDict):
+    success: bool
+    restored_to_turn_id: str
+    restored_files_count: NotRequired[int]
+    message: NotRequired[str]
 
 class ThreadModelBindingWire(TypedDict):
     state: Literal["bound", "legacy", "unbound"]
@@ -840,6 +882,12 @@ ThreadsUnwatchParams = schema_model("#/$defs/threadsOpenParams", name="ThreadsUn
 ThreadsUnwatchResult = schema_model("#/$defs/threadsUnwatchResult", name="ThreadsUnwatchResult")
 ThreadsSideQuestionParams = schema_model("#/$defs/threadsSideQuestionParams", name="ThreadsSideQuestionParams")
 ThreadsSideQuestionResult = schema_model("#/$defs/threadsSideQuestionResult", name="ThreadsSideQuestionResult")
+ThreadsListTurnsParams = schema_model("#/$defs/threadsListTurnsParams", name="ThreadsListTurnsParams")
+ThreadsListTurnsResult = schema_model("#/$defs/threadsListTurnsResult", name="ThreadsListTurnsResult")
+ThreadsUndoParams = schema_model("#/$defs/threadsUndoParams", name="ThreadsUndoParams")
+ThreadsUndoResult = schema_model("#/$defs/threadsUndoResult", name="ThreadsUndoResult")
+ThreadsRedoParams = schema_model("#/$defs/threadsRedoParams", name="ThreadsRedoParams")
+ThreadsRedoResult = schema_model("#/$defs/threadsRedoResult", name="ThreadsRedoResult")
 ModelsListParams = schema_model("#/$defs/modelsListParams", name="ModelsListParams")
 ModelsListResult = schema_model("#/$defs/modelsListResult", name="ModelsListResult")
 SkillsListParams = schema_model("#/$defs/skillsListParams", name="SkillsListParams")

@@ -8,8 +8,8 @@ priority: P1
 status: 待验收
 owner: chrisjingxin
 branch: feat/hc-148-tui-toast
-reviewed_at: 2026-08-15
-review_due: 2026-08-29
+reviewed_at: 2026-09-01
+review_due: 2026-09-15
 scope: 设计并实现 TUI 统一右上角气泡通知系统（Toast System）：在 TUI Adapter 建立多条目队列（最多 3 条）与定时自动淡出（默认 3 秒）状态模型；在 OpenTUI 表现层实现高层级（zIndex: 120）右上角气泡浮层组件 ToastContainer，支持 success / info / warning / error 四种语义样式与图标；将 /btw 复制等轻量操作迁移至气泡通知，同时保留 Timeline 末尾长系统日志。
 acceptance: 1. 在 TUI 任何界面（包括 Home、Thread 以及打开 Modal 弹窗时）触发轻量提示（如 /btw 复制成功），右上角以气泡浮层形式展示提示文本与语义图标；2. 气泡支持 success（绿色 ✓）、info（蓝色 ℹ）、warning（黄色 ⚠）、error（红色 ✗）四种变体；3. 气泡支持队列展示（最多同时展示 3 条），每条各自在持续时间（默认 3000ms）后自动淡出消失；4. 气泡层级位于顶层（zIndex: 120），不被 Modal 遮挡，不破坏键盘焦点，不向 Timeline 追加多余系统消息；5. 编写完备的自动化测试并验证通过。
 user_docs: docs/user/交互使用.md

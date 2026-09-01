@@ -26,6 +26,9 @@
       "threads.watch": { "params": "#/$defs/threadsOpenParams", "result": "#/$defs/threadsOpenResult", "capability": "threads.read" },
       "threads.unwatch": { "params": "#/$defs/threadsOpenParams", "result": "#/$defs/threadsUnwatchResult", "capability": "threads.read" },
       "threads.side_question": { "params": "#/$defs/threadsSideQuestionParams", "result": "#/$defs/threadsSideQuestionResult", "capability": "threads.read" },
+      "threads.list_turns": { "params": "#/$defs/threadsListTurnsParams", "result": "#/$defs/threadsListTurnsResult", "capability": "threads.read" },
+      "threads.undo": { "params": "#/$defs/threadsUndoParams", "result": "#/$defs/threadsUndoResult", "capability": "threads.read", "controlled": true },
+      "threads.redo": { "params": "#/$defs/threadsRedoParams", "result": "#/$defs/threadsRedoResult", "capability": "threads.read", "controlled": true },
       "models.list": { "params": "#/$defs/modelsListParams", "result": "#/$defs/modelsListResult", "capability": "models.read" },
       "skills.list": { "params": "#/$defs/skillsListParams", "result": "#/$defs/skillsListResult", "capability": "skills.read" },
       "skills.inspect": { "params": "#/$defs/skillsInspectParams", "result": "#/$defs/jsonObject", "capability": "skills.read" },
@@ -663,6 +666,88 @@
       "properties": {
         "reply_text": { "type": "string" },
         "model_profile_id": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "threadsListTurnsParams": {
+      "type": "object",
+      "required": ["thread_id"],
+      "properties": {
+        "thread_id": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "turnDiffStats": {
+      "type": "object",
+      "required": ["files", "insertions", "deletions"],
+      "properties": {
+        "files": { "type": "array", "items": { "type": "string" } },
+        "insertions": { "type": "integer", "minimum": 0 },
+        "deletions": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "turnSummary": {
+      "type": "object",
+      "required": ["turn_id", "turn_index", "user_prompt", "created_at", "files_changed_count", "has_git_checkpoint"],
+      "properties": {
+        "turn_id": { "type": "string" },
+        "turn_index": { "type": "integer", "minimum": 0 },
+        "user_prompt": { "type": "string" },
+        "created_at": { "type": "number" },
+        "files_changed_count": { "type": "integer", "minimum": 0 },
+        "has_git_checkpoint": { "type": "boolean" },
+        "diff_stats": { "$ref": "#/$defs/turnDiffStats" }
+      },
+      "additionalProperties": false
+    },
+    "threadsListTurnsResult": {
+      "type": "object",
+      "required": ["turns", "active_turn_id"],
+      "properties": {
+        "turns": { "type": "array", "items": { "$ref": "#/$defs/turnSummary" } },
+        "active_turn_id": { "type": "string" },
+        "reverted_turn_id": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "threadsUndoParams": {
+      "type": "object",
+      "required": ["thread_id", "target_turn_id", "mode"],
+      "properties": {
+        "thread_id": { "type": "string", "minLength": 1 },
+        "target_turn_id": { "type": "string", "minLength": 1 },
+        "mode": { "enum": ["both", "conversation", "code"] }
+      },
+      "additionalProperties": false
+    },
+    "threadsUndoResult": {
+      "type": "object",
+      "required": ["success", "reverted_turn_id", "restored_files_count"],
+      "properties": {
+        "success": { "type": "boolean" },
+        "reverted_turn_id": { "type": "string" },
+        "restored_files_count": { "type": "integer", "minimum": 0 },
+        "message": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "threadsRedoParams": {
+      "type": "object",
+      "required": ["thread_id"],
+      "properties": {
+        "thread_id": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "threadsRedoResult": {
+      "type": "object",
+      "required": ["success", "restored_to_turn_id"],
+      "properties": {
+        "success": { "type": "boolean" },
+        "restored_to_turn_id": { "type": "string" },
+        "restored_files_count": { "type": "integer", "minimum": 0 },
+        "message": { "type": "string" }
       },
       "additionalProperties": false
     },

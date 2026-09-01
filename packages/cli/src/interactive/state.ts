@@ -222,6 +222,9 @@ export type InteractiveState = {
   workMode: WorkMode
   /** 正在查看的 child execution；null 表示父时间线。 */
   childTimelineExecutionId: string | null
+  /** 当前 Thread 是否处于暂存回退态（已执行 /undo 且尚未提交新 Prompt）。 */
+  isReverted?: boolean
+  revertedTurnId?: string | null
 }
 
 /** 创建无 thread 内容的初始状态；显式 null 进入空首页。 */
@@ -239,6 +242,8 @@ export function createInitialState(threadId: string | null = null, workMode: Wor
     workItem: null,
     threadMode: null,
     childTimelineExecutionId: null,
+    isReverted: false,
+    revertedTurnId: null,
   }
 }
 
@@ -410,6 +415,8 @@ export function startRun(state: InteractiveState, run: ActiveRun, prompt: string
     lastRun: undefined,
     activity: { kind: "starting" },
     runProgress: { phase: "preparing", elapsedMs: 0 },
+    isReverted: false,
+    revertedTurnId: null,
     timeline: [
       ...state.timeline,
       { type: "message", message: { ...userMessage, workMode: state.workMode } },

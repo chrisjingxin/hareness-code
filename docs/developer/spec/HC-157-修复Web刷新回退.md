@@ -1,6 +1,6 @@
 # HC-157 修复 Web 刷新回退规格
 
-关联 Task：[HC-157](../task/HC-157-修复Web刷新回退.md)。
+关联 Task：[HC-157](../task/archive/HC-157-legacy-修复Web刷新回退.md)。
 
 ## 通俗流程
 

@@ -52,11 +52,15 @@ test("Dispatcher 仅按稳定 ID 返回 semantic operation，并统一处理兼�
   const resume = parseSlashCommand("/continue")
   const compact = parseSlashCommand("/compact")
   const model = parseSlashCommand("/model pro")
-  if (!clear || !help || !resume || !compact || !model) throw new Error("expected built-in commands")
+  const status = parseSlashCommand("/status")
+  const statusWithArg = parseSlashCommand("/status extra")
+  if (!clear || !help || !resume || !compact || !model || !status || !statusWithArg) throw new Error("expected built-in commands")
 
   expect(dispatchSlashCommand(clear, base)).toEqual({ type: "clear-thread" })
   expect(dispatchSlashCommand(help, base)).toMatchObject({ type: "notice", message: expect.stringContaining("/new, /clear") })
   expect(dispatchSlashCommand(resume, base)).toEqual({ type: "present", target: "threads" })
+  expect(dispatchSlashCommand(status, base)).toEqual({ type: "present", target: "status" })
+  expect(dispatchSlashCommand(statusWithArg, base)).toEqual({ type: "notice", message: "/status 不接受参数。" })
   expect(dispatchSlashCommand(model, {
     ...base,
     commandContext: defaultCommandContext({ capabilities: ["models.read"] }),
@@ -677,3 +681,55 @@ test("/btw 命令分发：无参返回用法提示，有参返回 side-question 
     threadId: "thread-compose-1",
   })
 })
+
+test("/undo 与 /redo 的命令解析与可用性状态机", () => {
+  expect(parseSlashCommand("/undo")).toEqual({ id: "thread.undo", name: "undo", argument: undefined })
+  expect(parseSlashCommand("/rewind")).toEqual({ id: "thread.undo", name: "undo", argument: undefined })
+  expect(parseSlashCommand("/rollback")).toEqual({ id: "thread.undo", name: "undo", argument: undefined })
+  expect(parseSlashCommand("/redo")).toEqual({ id: "thread.redo", name: "redo", argument: undefined })
+
+  const normalContext = defaultCommandContext({
+    capabilities: ["threads.read", "context.manage"],
+    hasThread: true,
+    isReverted: false,
+  })
+  const revertedContext = defaultCommandContext({
+    capabilities: ["threads.read", "context.manage"],
+    hasThread: true,
+    isReverted: true,
+  })
+  const noThreadContext = defaultCommandContext({
+    capabilities: ["threads.read", "context.manage"],
+    hasThread: false,
+  })
+
+  const undoDef = commandRegistry.get("thread.undo")
+  const redoDef = commandRegistry.get("thread.redo")
+  if (!undoDef || !redoDef) throw new Error("expected thread.undo and thread.redo definitions")
+
+  // /undo 在有 thread 时可用，无 thread 时 disabled
+  expect(commandRegistry.availability(undoDef, normalContext)).toEqual({ state: "available" })
+  expect(commandRegistry.availability(undoDef, noThreadContext)).toEqual({ state: "disabled", reason: "当前没有可用 thread" })
+
+  // /redo 在非暂存态时 disabled，暂存态时 available
+  expect(commandRegistry.availability(redoDef, normalContext)).toEqual({ state: "disabled", reason: "当前没有可重做的撤销操作" })
+  expect(commandRegistry.availability(redoDef, revertedContext)).toEqual({ state: "available" })
+})
+
+test("/undo 与 /redo 的 dispatch 映射", () => {
+  const base: CommandDispatchContext = {
+    commandContext: defaultCommandContext({ hasThread: true, isReverted: true }),
+    threadId: "thread-1",
+    runtimeStatus: "normal",
+    idGenerator: { uuid: () => "id-1" },
+  }
+  expect(dispatchSlashCommand({ id: "thread.undo", name: "undo" }, base)).toEqual({
+    type: "present",
+    target: "undo",
+  })
+  expect(dispatchSlashCommand({ id: "thread.redo", name: "redo" }, base)).toEqual({
+    type: "request-redo",
+    threadId: "thread-1",
+  })
+})
+

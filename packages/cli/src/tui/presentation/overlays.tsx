@@ -234,7 +234,7 @@ export function OverlayShell(props: {
   const paddingTop = compact
     ? 1
     : props.placement === "dialog"
-      ? Math.max(2, Math.floor(props.terminalHeight / 3))
+      ? Math.max(1, Math.floor(props.terminalHeight / 8))
       : Math.max(2, Math.floor(props.terminalHeight / 4))
 
   return (

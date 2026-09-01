@@ -8,8 +8,8 @@ priority: P1
 status: 进行中
 owner: DeepSeek
 branch: master
-reviewed_at: 2026-08-17
-review_due: 2026-08-31
+reviewed_at: 2026-09-01
+review_due: 2026-09-15
 scope: 将当前视觉收敛为暖中性色画布加绿色交互强调的扁平专业工作台风（2026-08-17 与用户确认，以参考设计稿的绿色主题为准），统一 light/dark token、控件尺寸、Topbar、Sidebar 与 Context Dock chrome；清理 d56baad 追加的样式覆盖层，使 styles.css 回到单一 token 来源，消除硬编码色、大圆角与卡片阴影堆叠，补齐 dark 主题覆盖；并消除新建 Thread 和外围面板抢占当前 Run 注意力的问题。
 acceptance: styles.css 不存在多套互相覆盖的视觉层，组件颜色只经 semantic token 表达（白名单除外）；light/dark token 与 HC-124 设计表一致且 dark 主题无未覆盖的浅色硬编码；必要 12～14px 文字达到 WCAG AA；新建 Thread 为次级动作；Run 状态是 Topbar 最高状态层级；Context Dock 维持单 tab 单层 header；阴影只用于 overlay/menu/dialog；现有 Web 工作流和 intent 不变；focused DOM/CSS 测试、build、typecheck 通过。
 user_docs: docs/user/Web界面.md

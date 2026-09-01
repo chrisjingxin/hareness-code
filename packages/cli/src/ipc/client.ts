@@ -47,13 +47,18 @@ import {
   type OperationName,
   type InitializeParams,
   type InitializeResult,
-  type RunCancelResult,
   type RequestedSkill,
+  type RunCancelResult,
   type ThreadModelSelection,
   type ThreadsListResult,
+  type ThreadsListTurnsResult,
   type ThreadsOpenResult,
+  type ThreadsRedoParams,
+  type ThreadsRedoResult,
   type ThreadsSideQuestionParams,
   type ThreadsSideQuestionResult,
+  type ThreadsUndoParams,
+  type ThreadsUndoResult,
   type TeamDefinition,
   type TeamsCancelResult,
   type TeamsGenerateParams,
@@ -366,6 +371,21 @@ export class AgentClient {
   /** 打开当前 project 的既有 thread，并返回可以重新构造时间线的消息。 */
   openThread(threadId: string): Promise<ThreadsOpenResult> {
     return this.request(Method.THREADS_OPEN, { thread_id: threadId })
+  }
+
+  /** 读取当前 thread 的所有回合快照及 diff 统计。 */
+  listTurns(threadId: string): Promise<ThreadsListTurnsResult> {
+    return this.request(Method.THREADS_LIST_TURNS, { thread_id: threadId })
+  }
+
+  /** 执行会话与代码撤销。 */
+  undo(params: ThreadsUndoParams): Promise<ThreadsUndoResult> {
+    return this.request(Method.THREADS_UNDO, params)
+  }
+
+  /** 执行会话与代码重做。 */
+  redo(params: ThreadsRedoParams): Promise<ThreadsRedoResult> {
+    return this.request(Method.THREADS_REDO, params)
   }
 
   /** 执行临时只读单轮问答（/btw），0 工具，不写存储。 */

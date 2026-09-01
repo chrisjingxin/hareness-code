@@ -45,7 +45,7 @@ from harness_agent.threads.context_projection import (
 )
 from harness_agent.threads.runtime_state import RuntimeStateError, RuntimeStateSnapshot
 
-_SCHEMA_VERSION = 17
+_SCHEMA_VERSION = 18
 _MAX_PREVIEW_CHARS = 160
 _MAX_INLINE_TOOL_BYTES = 64 * 1024
 _TRANSCRIPT_KINDS = ("user", "assistant", "tool", "context")
@@ -832,6 +832,9 @@ def _migration_validate_legacy_source_schema_sync(
     allowed_tables.add("harness_compose_activities")
     # Compose 会话表由 v17 迁移创建；同属 Compose 扩展对象，随版本升级持续保留。
     allowed_tables.add("harness_compose_sessions")
+    # Git 快照表由 v18 迁移创建；随版本升级持续保留。
+    allowed_tables.add("harness_git_checkpoints")
+    allowed_tables.add("harness_thread_revert_state")
     allowed_tables.update(
         {
             "harness_thread_modes",
@@ -5796,6 +5799,9 @@ class ThreadPersistence:
             if version < 17:
                 await self._add_compose_session_table()
                 version = 17
+            if version < 18:
+                await self._add_git_checkpoint_tables()
+                version = 18
             await self._connection.execute(f"PRAGMA user_version={version}")
             final_fingerprint = await self._database_fingerprint_async()
             await self._validate_final_database_async(final_fingerprint)
@@ -6121,6 +6127,9 @@ class ThreadPersistence:
         allowed_tables.add("harness_compose_activities")
         # Compose 会话表由 v17 迁移创建；同属 Compose 扩展对象，随版本升级持续保留。
         allowed_tables.add("harness_compose_sessions")
+        # Git 快照表由 v18 迁移创建；随版本升级持续保留。
+        allowed_tables.add("harness_git_checkpoints")
+        allowed_tables.add("harness_thread_revert_state")
         allowed_tables.update(
             {
                 "harness_thread_modes",
@@ -6452,6 +6461,33 @@ class ThreadPersistence:
                         "updated_at_ms",
                     ),
                 )
+            )
+        if version >= 18:
+            required.extend(
+                [
+                    (
+                        "harness_git_checkpoints",
+                        (
+                            "project_fingerprint",
+                            "thread_id",
+                            "turn_id",
+                            "run_id",
+                            "tree_oid",
+                            "created_at_ms",
+                        ),
+                    ),
+                    (
+                        "harness_thread_revert_state",
+                        (
+                            "project_fingerprint",
+                            "thread_id",
+                            "reverted_turn_id",
+                            "undo_mode",
+                            "redo_tree_oid",
+                            "created_at_ms",
+                        ),
+                    ),
+                ]
             )
         if version >= 14:
             required.extend(
@@ -8171,6 +8207,216 @@ class ThreadPersistence:
             )
             """
         )
+
+    async def _add_git_checkpoint_tables(self) -> None:
+        """v18：Git 树隐式快照与暂存回退状态表。"""
+        await self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS harness_git_checkpoints
+            (
+                project_fingerprint TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                turn_id TEXT NOT NULL,
+                run_id TEXT,
+                tree_oid TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (project_fingerprint, thread_id, turn_id)
+            )
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS harness_thread_revert_state
+            (
+                project_fingerprint TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                reverted_turn_id TEXT NOT NULL,
+                undo_mode TEXT NOT NULL,
+                redo_tree_oid TEXT,
+                created_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (project_fingerprint, thread_id)
+            )
+            """
+        )
+
+    async def record_git_checkpoint(
+        self, thread_id: str, turn_id: str, run_id: str | None, tree_oid: str
+    ) -> None:
+        """记录指定 Thread/Turn 的 Git 树快照 OID。"""
+        self._ensure_open()
+        now_ms = _now_ms()
+        async with self._lock:
+            await self._connection.execute(
+                """
+                INSERT OR REPLACE INTO harness_git_checkpoints
+                (project_fingerprint, thread_id, turn_id, run_id, tree_oid, created_at_ms)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (self._project_fingerprint, thread_id, turn_id, run_id, tree_oid, now_ms),
+            )
+            await self._connection.commit()
+
+    async def get_git_checkpoints(self, thread_id: str) -> dict[str, str]:
+        """获取指定 Thread 的所有 Turn -> Tree OID 快照字典。"""
+        self._ensure_open()
+        async with self._lock:
+            cursor = await self._connection.execute(
+                """
+                SELECT turn_id, tree_oid
+                FROM harness_git_checkpoints
+                WHERE project_fingerprint = ? AND thread_id = ?
+                ORDER BY created_at_ms ASC
+                """,
+                (self._project_fingerprint, thread_id),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+        return {row[0]: row[1] for row in rows}
+
+    async def get_git_checkpoint(self, thread_id: str, turn_id: str) -> str | None:
+        """获取指定 Turn 的 Git 快照 Tree OID。"""
+        self._ensure_open()
+        async with self._lock:
+            cursor = await self._connection.execute(
+                """
+                SELECT tree_oid
+                FROM harness_git_checkpoints
+                WHERE project_fingerprint = ? AND thread_id = ? AND turn_id = ?
+                """,
+                (self._project_fingerprint, thread_id, turn_id),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+        return row[0] if row else None
+
+    async def set_thread_reverted_turn(
+        self,
+        thread_id: str,
+        reverted_turn_id: str | None,
+        *,
+        undo_mode: str = "both",
+        redo_tree_oid: str | None = None,
+    ) -> None:
+        """设置或清除当前 Thread 的暂存回退点。"""
+        self._ensure_open()
+        async with self._lock:
+            if reverted_turn_id is None:
+                await self._connection.execute(
+                    """
+                    DELETE FROM harness_thread_revert_state
+                    WHERE project_fingerprint = ? AND thread_id = ?
+                    """,
+                    (self._project_fingerprint, thread_id),
+                )
+            else:
+                now_ms = _now_ms()
+                await self._connection.execute(
+                    """
+                    INSERT OR REPLACE INTO harness_thread_revert_state
+                    (project_fingerprint, thread_id, reverted_turn_id, undo_mode, redo_tree_oid, created_at_ms)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        self._project_fingerprint,
+                        thread_id,
+                        reverted_turn_id,
+                        undo_mode,
+                        redo_tree_oid,
+                        now_ms,
+                    ),
+                )
+            await self._connection.commit()
+
+    async def get_thread_reverted_turn(self, thread_id: str) -> str | None:
+        """读取当前 Thread 的暂存回退点（若未回退则返回 None）。"""
+        state = await self.get_thread_revert_state(thread_id)
+        return None if state is None else state[0]
+
+    async def get_thread_revert_state(
+        self, thread_id: str
+    ) -> tuple[str, str, str | None] | None:
+        """返回 (reverted_turn_id, undo_mode, redo_tree_oid)；未回退时为 None。"""
+        self._ensure_open()
+        async with self._lock:
+            cursor = await self._connection.execute(
+                """
+                SELECT reverted_turn_id, undo_mode, redo_tree_oid
+                FROM harness_thread_revert_state
+                WHERE project_fingerprint = ? AND thread_id = ?
+                """,
+                (self._project_fingerprint, thread_id),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+        if row is None:
+            return None
+        return (str(row[0]), str(row[1]), None if row[2] is None else str(row[2]))
+
+    async def cleanup_thread_history_after_turn(self, thread_id: str, target_turn_id: str) -> None:
+        """在提交新 Prompt 时触发物理截断：保留目标 Turn 所在 Run，删除其后历史与快照。"""
+        self._ensure_open()
+        async with self._lock:
+            cursor = await self._connection.execute(
+                """
+                SELECT sequence, run_id
+                FROM harness_thread_transcript
+                WHERE project_fingerprint = ? AND thread_id = ? AND record_id = ?
+                """,
+                (self._project_fingerprint, thread_id, target_turn_id),
+            )
+            target_row = await cursor.fetchone()
+            await cursor.close()
+
+            if target_row is not None:
+                target_sequence = int(target_row[0])
+                target_run_id = target_row[1]
+                if target_run_id is not None:
+                    cursor = await self._connection.execute(
+                        """
+                        SELECT COALESCE(MAX(sequence), ?)
+                        FROM harness_thread_transcript
+                        WHERE project_fingerprint = ? AND thread_id = ? AND run_id = ?
+                        """,
+                        (target_sequence, self._project_fingerprint, thread_id, target_run_id),
+                    )
+                    max_row = await cursor.fetchone()
+                    await cursor.close()
+                    cutoff = int(max_row[0]) if max_row is not None else target_sequence
+                else:
+                    cutoff = target_sequence
+                await self._connection.execute(
+                    """
+                    DELETE FROM harness_thread_transcript
+                    WHERE project_fingerprint = ? AND thread_id = ? AND sequence > ?
+                    """,
+                    (self._project_fingerprint, thread_id, cutoff),
+                )
+
+            await self._connection.execute(
+                """
+                DELETE FROM harness_git_checkpoints
+                WHERE project_fingerprint = ? AND thread_id = ?
+                  AND turn_id NOT IN (
+                    SELECT record_id
+                    FROM harness_thread_transcript
+                    WHERE project_fingerprint = ? AND thread_id = ? AND kind = 'user'
+                  )
+                """,
+                (
+                    self._project_fingerprint,
+                    thread_id,
+                    self._project_fingerprint,
+                    thread_id,
+                ),
+            )
+            await self._connection.execute(
+                """
+                DELETE FROM harness_thread_revert_state
+                WHERE project_fingerprint = ? AND thread_id = ?
+                """,
+                (self._project_fingerprint, thread_id),
+            )
+            await self._connection.commit()
 
     async def _add_context_snapshot_column(self) -> None:
         """为旧 Run binding 增加可为空的 snapshot 引用，兼容降级库。"""

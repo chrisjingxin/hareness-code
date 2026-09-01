@@ -23,9 +23,14 @@ import type {
   TeamsRunParams,
   TeamsRunResult,
   ThreadsListResult,
+  ThreadsListTurnsResult,
   ThreadsOpenResult,
+  ThreadsRedoParams,
+  ThreadsRedoResult,
   ThreadsSideQuestionParams,
   ThreadsSideQuestionResult,
+  ThreadsUndoParams,
+  ThreadsUndoResult,
 } from "@za38/protocol"
 
 import { AgentClient, JsonRpcRemoteError } from "../ipc/client"
@@ -128,6 +133,30 @@ export class AgentClientGateway implements AgentGateway {
   async openThread(threadId: string): Promise<ThreadsOpenResult> {
     try {
       return await this.client.openThread(threadId)
+    } catch (error) {
+      throw this.wrapError(error)
+    }
+  }
+
+  async listTurns(threadId: string): Promise<ThreadsListTurnsResult> {
+    try {
+      return await this.client.listTurns(threadId)
+    } catch (error) {
+      throw this.wrapError(error)
+    }
+  }
+
+  async undo(params: ThreadsUndoParams): Promise<ThreadsUndoResult> {
+    try {
+      return await this.client.undo(params)
+    } catch (error) {
+      throw this.wrapError(error)
+    }
+  }
+
+  async redo(params: ThreadsRedoParams): Promise<ThreadsRedoResult> {
+    try {
+      return await this.client.redo(params)
     } catch (error) {
       throw this.wrapError(error)
     }

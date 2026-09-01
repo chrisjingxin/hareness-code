@@ -24,7 +24,9 @@ import { TuiErrorBoundary } from "./presentation/error-boundary"
 import { HomeView } from "./presentation/home"
 import { DialogShell, SearchPicker, type SearchPickerRenderContext } from "./presentation/overlays"
 import { AgentPicker, SkillPicker, ThreadPicker } from "./presentation/pickers"
+import { UndoPicker, UndoDialog } from "./presentation/undo-modal"
 import { BtwModal } from "./presentation/btw-modal"
+import { StatusModal } from "./presentation/status-modal"
 import { copyCurrentSelection, shouldAttemptSelectionCopy } from "./presentation/selection-copy"
 import { Sidebar, computeSidebarVisibility } from "./presentation/sidebar"
 import { ToastContainer } from "./presentation/toast"
@@ -109,6 +111,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
   const threadSearchRef = useRef<TextareaRenderable | null>(null)
   const modelSearchRef = useRef<TextareaRenderable | null>(null)
   const agentSearchRef = useRef<TextareaRenderable | null>(null)
+  const undoSearchRef = useRef<TextareaRenderable | null>(null)
   const renderer = useRenderer()
   const terminal = useTerminalDimensions()
   const lastScrollRequestRef = useRef(snapshot.scrollRequest)
@@ -186,6 +189,9 @@ export function Za38Tui(options: RenderedTuiOptions) {
       || snapshot.skills.visible
       || snapshot.threads.visible
       || snapshot.models.visible
+      || snapshot.agents.visible
+      || snapshot.undo.visible
+      || Boolean(snapshot.undoDialog)
     ) return
     const input = inputRef.current
     if (!input) return
@@ -252,7 +258,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
       const scrollAction = key.name === "up" ? "line-up" : key.name === "down" ? "line-down" : undefined
       if (scrollAction && scrollConversation(scrollAction)) key.preventDefault()
     }
-  }, [adapter, snapshot.commandDialog, snapshot.commandMenu.visible, snapshot.modelBindingDialog, snapshot.models.visible, snapshot.skills.visible, snapshot.agents.visible, interactive, snapshot.threads.visible, syncInputBuffer, snapshot.btw.visible])
+  }, [adapter, snapshot.commandDialog, snapshot.commandMenu.visible, snapshot.modelBindingDialog, snapshot.models.visible, snapshot.skills.visible, snapshot.agents.visible, snapshot.undo.visible, snapshot.undoDialog, interactive, snapshot.threads.visible, syncInputBuffer, snapshot.btw.visible])
 
   /** 通过 ref 滚动当前时间线；不把终端尺寸或 OpenTUI 对象带入 Adapter。 */
   function scrollConversation(intent: ScrollIntent): boolean {
@@ -371,6 +377,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
     const action = resolveShortcut(key, {
       commandDialogVisible: Boolean(snapshot.commandDialog || snapshot.modelBindingDialog),
       btwModalVisible: snapshot.btw.visible,
+      statusModalVisible: snapshot.statusModal.visible,
       skillPickerVisible: snapshot.skills.visible,
       skillOptionCount: snapshot.skills.items.length,
       threadPickerVisible: snapshot.threads.visible,
@@ -379,6 +386,9 @@ export function Za38Tui(options: RenderedTuiOptions) {
       modelOptionCount: snapshot.models.items.length,
       agentPickerVisible: snapshot.agents.visible,
       agentOptionCount: snapshot.agents.items.length,
+      undoPickerVisible: snapshot.undo.visible,
+      undoOptionCount: snapshot.undo.items.length,
+      undoDialogVisible: Boolean(snapshot.undoDialog?.visible),
       commandMenuVisible: snapshot.commandMenu.visible,
       commandOptionCount: snapshot.commandOptions.length,
       activeRun: Boolean(interactive.activeRun),
@@ -426,7 +436,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
     onSelectCommand: (item: CommandMenuItem) => { void adapter.dispatch({ type: "command-menu-select", item }) },
     onHoverCommand: (selectedIndex: number) => { void adapter.dispatch({ type: "command-menu-hover", selectedIndex }) },
     selectedSkill: snapshot.selectedSkill,
-    pickerVisible: Boolean(snapshot.commandDialog || snapshot.modelBindingDialog) || snapshot.skills.visible || snapshot.threads.visible || snapshot.models.visible || snapshot.agents.visible || snapshot.btw.visible,
+    pickerVisible: Boolean(snapshot.commandDialog || snapshot.modelBindingDialog) || snapshot.skills.visible || snapshot.threads.visible || snapshot.models.visible || snapshot.agents.visible || snapshot.btw.visible || snapshot.statusModal.visible || snapshot.undo.visible || Boolean(snapshot.undoDialog?.visible),
     onClearSelectedSkill: () => { void adapter.dispatch({ type: "clear-selected-skill" }) },
     showToolDetails: snapshot.showToolDetails,
     expandedTools: snapshot.expandedTools,
@@ -550,6 +560,39 @@ export function Za38Tui(options: RenderedTuiOptions) {
         onClose={() => { void adapter.dispatch({ type: "picker-close", picker: "agents" }) }}
         workMode={interactive.workMode}
       />
+      <UndoPicker
+        visible={snapshot.undo.visible}
+        loading={snapshot.undo.loading}
+        error={snapshot.undo.error}
+        turns={snapshot.undo.items}
+        query={snapshot.undo.query}
+        selectedIndex={snapshot.undo.selectedIndex}
+        terminalWidth={terminal.width}
+        terminalHeight={terminal.height}
+        searchRef={undoSearchRef}
+        restoreFocusRef={inputRef}
+        shouldRestoreFocus={!interactive.activeRun && interactive.activity.kind !== "compacting"}
+        onSearch={query => { void adapter.dispatch({ type: "picker-search", picker: "undo", query }) }}
+        onSelect={turn => { void adapter.dispatch({ type: "picker-select-undo-turn", turn }) }}
+        onHover={selectedIndex => { void adapter.dispatch({ type: "picker-hover", picker: "undo", selectedIndex }) }}
+        onClose={() => { void adapter.dispatch({ type: "picker-close", picker: "undo" }) }}
+        workMode={interactive.workMode}
+      />
+      {snapshot.undoDialog?.visible ? (
+        <UndoDialog
+          visible={snapshot.undoDialog.visible}
+          targetTurn={snapshot.undoDialog.targetTurn}
+          selectedMode={snapshot.undoDialog.selectedMode}
+          isGit={snapshot.undoDialog.isGit}
+          terminalWidth={terminal.width}
+          terminalHeight={terminal.height}
+          restoreFocusRef={inputRef}
+          shouldRestoreFocus={!interactive.activeRun && interactive.activity.kind !== "compacting"}
+          onSelectMode={mode => { void adapter.dispatch({ type: "undo-select-mode", mode }) }}
+          onConfirm={() => { void adapter.dispatch({ type: "undo-confirm" }) }}
+          onCancel={() => { void adapter.dispatch({ type: "undo-cancel" }) }}
+        />
+      ) : null}
       <DialogShell
         visible={snapshot.commandDialog?.kind === "confirm-new-thread"}
         title={snapshot.commandDialog?.title ?? ""}
@@ -585,6 +628,14 @@ export function Za38Tui(options: RenderedTuiOptions) {
         terminalHeight={terminal.height}
         onClose={() => { void adapter.dispatch({ type: "btw-close" }) }}
         onCopy={() => { void adapter.dispatch({ type: "btw-copy" }) }}
+      />
+      <StatusModal
+        visible={snapshot.statusModal.visible}
+        interactive={interactive}
+        sidebar={snapshot.sidebar}
+        terminalWidth={terminal.width}
+        terminalHeight={terminal.height}
+        onClose={() => { void adapter.dispatch({ type: "status-close" }) }}
       />
       <ToastContainer toasts={snapshot.toasts} terminalWidth={terminal.width} />
     </box>

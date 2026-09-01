@@ -8,8 +8,8 @@ priority: P1
 status: 待验收
 owner: Antigravity
 branch: feat/hc-152-file-icons
-reviewed_at: 2026-08-16
-review_due: 2026-08-30
+reviewed_at: 2026-09-01
+review_due: 2026-09-15
 scope: 在 TUI 表现层引入针对编程语言与配置文件的专色图标体系（Nerd Fonts + 品牌专色映射），支持文件夹展开/收起精准识别与数十种主流编程语言图标。
 acceptance: 文件夹展开与收起呈现精致的专用图标与琥珀金色彩；Python、TS/JS、Rust、Go、C/C++、JSON、Markdown、Docker、Git 等根据文件类型呈现专属图标与品牌色彩；字符宽度严格对齐无抖动。
 user_docs: 不涉及

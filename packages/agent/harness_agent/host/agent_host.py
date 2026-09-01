@@ -125,9 +125,13 @@ from harness_agent.protocol.generated import (
     TeamsInspectParams,
     TeamsRunParams,
     ThreadsListParams,
+    ThreadsListTurnsParams,
     ThreadsOpenParams,
+    ThreadsRedoParams,
     ThreadsSideQuestionParams,
+    ThreadsUndoParams,
 )
+from harness_agent.threads.git_checkpoints import GitCheckpointService
 from harness_agent.threads.thread_persistence import workspace_fingerprint
 from harness_agent.tools.plan_file import (
     PLAN_VIRTUAL_PATH,
@@ -184,7 +188,11 @@ from harness_agent.threads.context_lifecycle import (
 )
 from harness_agent.threads.deferred_store import ThreadDeferredToolStore
 from harness_agent.threads.snapshots import ThreadSnapshotStore
-from harness_agent.threads.thread_persistence import ThreadPersistence, ThreadPersistenceError
+from harness_agent.threads.thread_persistence import (
+    ThreadPersistence,
+    ThreadPersistenceError,
+    _user_record_id,
+)
 from harness_agent.tools.file_tool_metrics import FileToolMetrics
 from harness_agent.compose.stage_agents import ManagedStageAgentPort
 from harness_agent.compose.document_store import ComposeDocumentStore
@@ -475,6 +483,7 @@ class AgentHost:
         self._deferred_tool_store = ThreadDeferredToolStore()
         # 文件工具指标同样只保留在 Host；它不携带任何源码、路径或 Snapshot 句柄。
         self._file_tool_metrics = FileToolMetrics()
+        self._git_checkpoints = GitCheckpointService()
         self._agent_engine_pool: AgentEnginePool | None = None
         self._mcp_manager: McpConnectionManager | None = None
         self._mcp_owner: SharedResourceOwner[McpConnectionManager] | None = None
@@ -538,6 +547,9 @@ class AgentHost:
             METHOD["THREADS_WATCH"]: self._handle_threads_watch,
             METHOD["THREADS_UNWATCH"]: self._handle_threads_unwatch,
             METHOD["THREADS_SIDE_QUESTION"]: self._handle_threads_side_question,
+            METHOD["THREADS_LIST_TURNS"]: self._handle_threads_list_turns,
+            METHOD["THREADS_UNDO"]: self._handle_threads_undo,
+            METHOD["THREADS_REDO"]: self._handle_threads_redo,
             METHOD["SKILLS_LIST"]: self._handle_skills_list,
             METHOD["SKILLS_INSPECT"]: self._handle_skills_inspect,
             METHOD["SKILLS_SET_ENABLED"]: self._handle_skills_set_enabled,
@@ -1350,6 +1362,20 @@ class AgentHost:
             ),
             requested_approval_mode=parsed.approval_mode,
         )
+        if self._thread_persistence_enabled():
+            persistence = await self._ensure_thread_persistence()
+            revert_state = await persistence.get_thread_revert_state(parsed.thread_id)
+            if revert_state is not None:
+                reverted_turn_id, undo_mode, _redo_tree_oid = revert_state
+                if undo_mode == "code":
+                    await persistence.set_thread_reverted_turn(parsed.thread_id, None)
+                else:
+                    await persistence.cleanup_thread_history_after_turn(
+                        parsed.thread_id, reverted_turn_id
+                    )
+
+            await self._record_workspace_git_checkpoint(parsed.thread_id, parsed.run_id)
+
         try:
             execution = await self._run_coordinator.start(
                 command,
@@ -1578,8 +1604,24 @@ class AgentHost:
 
     async def _fanout_run_execution(self, execution: RunExecution) -> None:
         """把领域事件广播给 owner 和已 watch 该 Thread 的连接。"""
-        async for event in execution.events:
-            await self._fanout_agent_event(execution.owner, event)
+        try:
+            async for event in execution.events:
+                await self._fanout_agent_event(execution.owner, event)
+        finally:
+            await self._record_workspace_git_checkpoint(execution.ref.thread_id, execution.ref.run_id)
+
+    async def _record_workspace_git_checkpoint(self, thread_id: str, run_id: str) -> None:
+        """将当前工作区树快照记到该 Run 对应的 User Turn。非 Git 仓库直接跳过。"""
+        if not self._thread_persistence_enabled() or not self._git_checkpoints.is_git_repository(self._workspace):
+            return
+        try:
+            persistence = await self._ensure_thread_persistence()
+            tree_oid = self._git_checkpoints.create_tree_snapshot(self._workspace)
+            await persistence.record_git_checkpoint(
+                thread_id, _user_record_id(run_id), run_id, tree_oid
+            )
+        except Exception:
+            logger.warning("Failed to record git checkpoint for thread %s turn %s", thread_id, run_id, exc_info=True)
 
     async def _fanout_agent_event(self, owner: ConnectionRef, event: AgentEvent) -> None:
         """将不携带 transport 的 AgentEvent 映射成现有 event notification。"""
@@ -2095,6 +2137,140 @@ class AgentHost:
             "reply_text": reply_text.strip(),
             "model_profile_id": model_profile_id or "default",
         }
+
+    async def _handle_threads_list_turns(self, params: dict[str, Any], _id: str) -> dict[str, object]:
+        """返回当前 Thread 的所有 User 回合列表及 Git 快照信息。"""
+        self._require_threads_capability()
+        parsed = ThreadsListTurnsParams.model_validate(params)
+        persistence = await self._ensure_thread_persistence()
+        try:
+            transcript = await persistence.load_transcript(parsed.thread_id)
+        except ThreadPersistenceError as exc:
+            if str(exc) in {"THREAD_NOT_FOUND", "THREAD_NOT_RECOVERABLE"}:
+                raise RpcError(-32004, str(exc)) from exc
+            raise
+
+        checkpoints = await persistence.get_git_checkpoints(parsed.thread_id)
+        reverted_turn_id = await persistence.get_thread_reverted_turn(parsed.thread_id)
+        is_git = self._git_checkpoints.is_git_repository(self._workspace)
+        current_tree = self._git_checkpoints.create_tree_snapshot(self._workspace) if is_git else None
+
+        user_records = [rec for rec in transcript if rec.kind == "user"]
+        turns: list[dict[str, object]] = []
+
+        for idx, rec in enumerate(user_records):
+            turn_id = rec.record_id
+            tree_oid = checkpoints.get(turn_id)
+            has_checkpoint = bool(is_git and tree_oid)
+            files_changed_count = 0
+            diff_stats = None
+            if has_checkpoint and tree_oid and current_tree:
+                diff_stats = self._git_checkpoints.compute_diff_stats(
+                    self._workspace, tree_oid, current_tree
+                )
+                files_changed_count = len(diff_stats["files"])
+
+            payload = rec.payload
+            user_prompt = payload.get("content", "") if isinstance(payload, Mapping) else str(payload)
+            if not isinstance(user_prompt, str):
+                user_prompt = str(user_prompt)
+
+            turn: dict[str, object] = {
+                "turn_id": turn_id,
+                "turn_index": idx + 1,
+                "user_prompt": user_prompt,
+                "created_at": rec.created_at_ms,
+                "files_changed_count": files_changed_count,
+                "has_git_checkpoint": has_checkpoint,
+            }
+            if diff_stats is not None:
+                turn["diff_stats"] = diff_stats
+            turns.append(turn)
+
+        result: dict[str, object] = {
+            "turns": turns,
+            "active_turn_id": user_records[-1].record_id if user_records else "",
+        }
+        if reverted_turn_id:
+            result["reverted_turn_id"] = reverted_turn_id
+        return result
+
+    async def _handle_threads_undo(self, params: dict[str, Any], _id: str) -> dict[str, object]:
+        """将当前 Thread 回退到指定历史回合，可选择还原代码、对话或两者。"""
+        self._require_threads_capability()
+        parsed = ThreadsUndoParams.model_validate(params)
+        persistence = await self._ensure_thread_persistence()
+
+        try:
+            async with self._run_coordinator.idle_thread(parsed.thread_id):
+                transcript = await persistence.load_transcript(parsed.thread_id)
+                user_ids = {rec.record_id for rec in transcript if rec.kind == "user"}
+                if parsed.target_turn_id not in user_ids:
+                    raise RpcError(-32602, "TURN_NOT_FOUND")
+
+                is_git = self._git_checkpoints.is_git_repository(self._workspace)
+                redo_tree_oid = (
+                    self._git_checkpoints.create_tree_snapshot(self._workspace) if is_git else None
+                )
+                restored_files_count = 0
+                if parsed.mode in ("both", "code"):
+                    if not is_git:
+                        if parsed.mode == "code":
+                            raise RpcError(-32602, "WORKSPACE_NOT_GIT_REPOSITORY")
+                    else:
+                        target_tree = await persistence.get_git_checkpoint(
+                            parsed.thread_id, parsed.target_turn_id
+                        )
+                        if target_tree is not None:
+                            restored_files_count = self._git_checkpoints.restore_tree_snapshot(
+                                self._workspace, target_tree
+                            )
+
+                await persistence.set_thread_reverted_turn(
+                    parsed.thread_id,
+                    parsed.target_turn_id,
+                    undo_mode=parsed.mode,
+                    redo_tree_oid=redo_tree_oid,
+                )
+                return {
+                    "success": True,
+                    "reverted_turn_id": parsed.target_turn_id,
+                    "restored_files_count": restored_files_count,
+                }
+        except RunError as exc:
+            raise self._run_rpc_error(exc) from exc
+
+    async def _handle_threads_redo(self, params: dict[str, Any], _id: str) -> dict[str, object]:
+        """重做并恢复刚才撤销的历史与代码。"""
+        self._require_threads_capability()
+        parsed = ThreadsRedoParams.model_validate(params)
+        persistence = await self._ensure_thread_persistence()
+
+        try:
+            async with self._run_coordinator.idle_thread(parsed.thread_id):
+                revert_state = await persistence.get_thread_revert_state(parsed.thread_id)
+                if revert_state is None:
+                    raise RpcError(-32602, "THREAD_NOT_IN_REVERTED_STATE")
+                _reverted_turn_id, _undo_mode, redo_tree_oid = revert_state
+
+                transcript = await persistence.load_transcript(parsed.thread_id)
+                user_records = [rec for rec in transcript if rec.kind == "user"]
+                restored_to_turn_id = user_records[-1].record_id if user_records else ""
+
+                restored_files_count = 0
+                if redo_tree_oid and self._git_checkpoints.is_git_repository(self._workspace):
+                    restored_files_count = self._git_checkpoints.restore_tree_snapshot(
+                        self._workspace, redo_tree_oid
+                    )
+
+                await persistence.set_thread_reverted_turn(parsed.thread_id, None)
+                return {
+                    "success": True,
+                    "restored_to_turn_id": restored_to_turn_id,
+                    "restored_files_count": restored_files_count,
+                }
+        except RunError as exc:
+            raise self._run_rpc_error(exc) from exc
 
     async def _handle_compose_inspect(self, params: dict[str, Any], _id: str) -> dict[str, object]:
         """只读投影 Compose Thread 的当前 Work Item；不触发分类或 typed 交互。"""

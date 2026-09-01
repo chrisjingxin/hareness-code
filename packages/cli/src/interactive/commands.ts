@@ -26,6 +26,8 @@ export type CommandRequirements = {
   unavailableNotice?: string
   /** 命令要求当前是否存在进行中的 Work Item；与状态不符时禁用。 */
   requiresActiveWorkItem?: boolean
+  /** 命令要求当前是否处于 Reverted 暂存态（如 /redo）；与状态不符时禁用。 */
+  requiresReverted?: boolean
 }
 
 /** 后续 Dispatcher 复用的最小安全元数据，不能由表现层自行扩大权限。 */
@@ -64,6 +66,7 @@ export type CommandContext = {
   hasPendingInteraction: boolean
   workMode: WorkMode
   hasActiveWorkItem: boolean
+  isReverted?: boolean
 }
 
 export type CommandAvailability =
@@ -165,6 +168,9 @@ export class CommandRegistry {
           : "当前已有进行中的 Compose 需求",
       }
     }
+    if (definition.requirements?.requiresReverted && !context.isReverted) {
+      return { state: "disabled", reason: "当前没有可重做的撤销操作" }
+    }
     if (definition.requirements?.requiresIdle && (context.activeRun || context.pendingOperation || context.hasPendingInteraction)) {
       return { state: "disabled", reason: "当前任务结束或交互完成后可用" }
     }
@@ -206,6 +212,8 @@ export const builtinCommandDefinitions: readonly CommandDefinition[] = [
   { id: "context.compact", name: "compact", description: "压缩当前 thread 上下文", source: { type: "builtin" }, presentation: "dialog", suggested: true, requirements: { capabilities: [Capability.CONTEXT_MANAGE], requiresThread: true, requiresIdle: true } },
   { id: "system.status", name: "status", description: "显示运行状态", source: { type: "builtin" }, presentation: "viewer", suggested: true },
   { id: "thread.resume", name: "resume", aliases: ["continue", "threads"], description: "打开 thread 恢复选择器", source: { type: "builtin" }, presentation: "picker", suggested: true, requirements: { capabilities: [Capability.THREADS_READ], requiresIdle: true } },
+  { id: "thread.undo", name: "undo", aliases: ["rewind", "rollback"], description: "回退会话与代码到历史指定回合", source: { type: "builtin" }, presentation: "picker", suggested: true, requirements: { capabilities: [Capability.THREADS_READ, Capability.CONTEXT_MANAGE], requiresThread: true, requiresIdle: true } },
+  { id: "thread.redo", name: "redo", description: "重做并恢复刚才撤销的历史与代码", source: { type: "builtin" }, presentation: "action", suggested: true, requirements: { capabilities: [Capability.THREADS_READ, Capability.CONTEXT_MANAGE], requiresThread: true, requiresIdle: true, requiresReverted: true } },
   { id: "model.select", name: "model", aliases: ["models"], description: "选择当前 thread 下一次运行的模型 Profile", source: { type: "builtin" }, presentation: "picker", suggested: true, argumentHint: "[query]", requirements: { capabilities: [Capability.MODELS_READ], requiresIdle: true } },
   { id: "skills.open", name: "skills", description: "打开 Skill 选择器", source: { type: "builtin" }, presentation: "picker", suggested: true, requirements: { capabilities: [Capability.SKILLS_READ] } },
   { id: "agents.list", name: "agents", description: "查看可派发的 Agent（内置 + Plugin）", source: { type: "builtin" }, presentation: "picker", suggested: true, requirements: { capabilities: [Capability.AGENTS_READ] } },
@@ -289,6 +297,7 @@ export function defaultCommandContext(overrides: Partial<Omit<CommandContext, "c
     hasPendingInteraction: overrides.hasPendingInteraction ?? false,
     workMode: overrides.workMode ?? "build",
     hasActiveWorkItem: overrides.hasActiveWorkItem ?? false,
+    isReverted: overrides.isReverted ?? false,
   }
 }
 

@@ -2,6 +2,7 @@
 
 import type { IntentOutcome } from "../ports"
 import {
+  appendNotice,
   applyThreadMode,
   applyWorkItem,
   clearThread,
@@ -174,6 +175,58 @@ export class ThreadFeature {
         this.openingThread = false
         ctx.commit(current => clearThread(current))
       }
+    }
+  }
+
+  async undo(
+    threadId: string,
+    targetTurnId: string,
+    mode: "both" | "conversation" | "code",
+    ctx: FeatureContext,
+  ): Promise<IntentOutcome> {
+    if (ctx.getState().activeRun) {
+      return { status: "rejected", code: "busy", message: "Cannot undo while run is active" }
+    }
+    try {
+      const res = await ctx.gateway.undo({
+        thread_id: threadId,
+        target_turn_id: targetTurnId,
+        mode,
+      })
+      if (mode !== "code") {
+        await this.openThread(threadId, ctx, {})
+        ctx.commit(current => ({
+          ...current,
+          isReverted: true,
+          revertedTurnId: targetTurnId,
+        }))
+      }
+      ctx.commit(current => appendNotice(current, `已撤销至历史回合（还原了 ${res.restored_files_count} 个文件）。`))
+      return { status: "accepted" }
+    } catch (error) {
+      return { status: "rejected", code: "agent-error", message: `撤销失败：${errorMessage(error)}` }
+    }
+  }
+
+  async redo(
+    threadId: string,
+    ctx: FeatureContext,
+  ): Promise<IntentOutcome> {
+    if (ctx.getState().activeRun) {
+      return { status: "rejected", code: "busy", message: "Cannot redo while run is active" }
+    }
+    try {
+      const res = await ctx.gateway.redo({ thread_id: threadId })
+      await this.openThread(threadId, ctx, {})
+      ctx.commit(current => ({
+        ...current,
+        isReverted: false,
+        revertedTurnId: null,
+      }))
+      ctx.commit(current => appendNotice(current, `已重做并恢复撤销操作（还原了 ${res.restored_files_count} 个文件）。`))
+      return { status: "accepted" }
+    } catch (error) {
+      return { status: "rejected", code: "agent-error", message: `重做失败：${errorMessage(error)}` }
     }
   }
 }

@@ -55,8 +55,9 @@ test("compact/status/help/web 命令语义确定", async () => {
     await harness.controller.dispatch({ type: "command.execute", commandId: "context.compact" })
     expect(notices(harness.controller.getSnapshot())).toContain("上下文已压缩")
 
-    await harness.controller.dispatch({ type: "command.execute", commandId: "system.status" })
-    expect(notices(harness.controller.getSnapshot())).toContain("工作区")
+    const statusResult = await harness.controller.dispatch({ type: "command.execute", commandId: "system.status" })
+    expect(statusResult).toEqual({ status: "accepted", effects: [{ type: "present", target: "status" }] })
+    expect(notices(harness.controller.getSnapshot())).not.toContain("工作区")
   } finally {
     await harness.controller.close()
   }

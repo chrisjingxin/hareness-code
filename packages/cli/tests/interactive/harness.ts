@@ -204,6 +204,42 @@ function createPort(options: {
       calls.push("threads.open")
       return openThreadImpl(threadId)
     },
+    async listTurns(threadId) {
+      calls.push("threads.list_turns")
+      return {
+        turns: [
+          {
+            turn_id: "turn-1",
+            turn_index: 1,
+            user_prompt: "第 1 轮提问",
+            created_at: 1000,
+            files_changed_count: 2,
+            has_git_checkpoint: true,
+            diff_stats: { files: ["a.ts", "b.ts"], insertions: 5, deletions: 1 },
+          },
+        ],
+        active_turn_id: "turn-1",
+        reverted_turn_id: null,
+      }
+    },
+    async undo(params) {
+      calls.push("threads.undo")
+      return {
+        success: true,
+        reverted_turn_id: params.target_turn_id,
+        restored_files_count: 2,
+        message: "Successfully reverted",
+      }
+    },
+    async redo() {
+      calls.push("threads.redo")
+      return {
+        success: true,
+        restored_to_turn_id: "turn-1",
+        restored_files_count: 2,
+        message: "Successfully redone",
+      }
+    },
     async mcpStatus() {
       calls.push("mcp.status")
       return { servers: [{ name: "filesystem", transport: "stdio", status: "connected", tool_names: ["read"] }], total_tools: 1 }

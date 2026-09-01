@@ -1,11 +1,11 @@
 ---
-id: HC-157
+id: HC-157-legacy
 title: 修复Web刷新回退
 feature_area: Web UI 工作台体验升级
 parent_task: -
 decomposed_by: 历史未记录
 priority: P0
-status: 待验收
+status: 已完成
 owner: Codex
 branch: master
 reviewed_at: 2026-08-19
@@ -16,7 +16,7 @@ user_docs: docs/user/故障排查.md
 developer_docs: docs/developer/spec/HC-157-修复Web刷新回退.md、docs/developer/architecture/架构总览.md、docs/developer/architecture/adr/0002-project-host-multi-connection.md
 test_evidence: "修复前真实 Browser 回归 1 pass/1 fail（TTL 后刷新超时）；修复后 Coordinator/契约/Gateway/TUI 50 pass，真实 Browser/loopback 6 pass，真实 CLI+Playwright 刷新 1 pass；完整 lifecycle E2E 中第二窗口与刷新 2 pass，退出收敛 1 fail，退出用例隔离复跑仍在 20 秒超时。typecheck、build、project:check、git diff --check 通过。CLI 项目脚本 829 pass/1 skip/2 fail，两项均为无代码交集的 Compose TUI 既有文案断言，隔离复跑 36 pass/2 fail。"
 references: docs/developer/task/HC-105-建立WebBrowserE2E.md、docs/developer/task/archive/HC-114-WebUiGateway与Pr.md
-completed_at: -
+completed_at: 2026-08-19
 ---
 
 ## 问题

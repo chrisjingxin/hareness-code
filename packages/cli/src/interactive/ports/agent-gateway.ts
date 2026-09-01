@@ -29,9 +29,14 @@ import {
   type TeamsRunResult,
   type ThreadModelSelection,
   type ThreadsListResult,
+  type ThreadsListTurnsResult,
   type ThreadsOpenResult,
+  type ThreadsRedoParams,
+  type ThreadsRedoResult,
   type ThreadsSideQuestionParams,
   type ThreadsSideQuestionResult,
+  type ThreadsUndoParams,
+  type ThreadsUndoResult,
 } from "@za38/protocol"
 
 /** AgentGateway 稳定错误：将底层的网络/RPC 远程异常收敛为 Core 统一可识别的错误。 */
@@ -56,6 +61,7 @@ export type AgentGatewayStartRunInput = {
   readonly message: string
   readonly mode: InteractionMode
   readonly threadId?: string
+  readonly runId?: string
   readonly requestedSkill?: RequestedSkill
   readonly modelSelection?: ThreadModelSelection
   readonly approvalMode?: ApprovalMode
@@ -69,7 +75,7 @@ export type PendingInteraction = {
 }
 
 /** Run handle：事件队列、受理和唯一终态都由 Gateway 拥有，Controller 只消费。 */
-export type InteractiveAgentRun = {
+export interface InteractiveAgentRun {
   readonly ref: { threadId: string; runId: string }
   readonly accepted: Promise<void>
   readonly events: AsyncIterable<EventEnvelope>
@@ -99,6 +105,9 @@ export interface AgentGateway {
   commitConfig(expectedRevision: string, changes: ConfigChange[]): Promise<{ revision: string; changes: readonly unknown[]; applies_to: readonly string[] }>
   listThreads(): Promise<ThreadsListResult>
   openThread(threadId: string): Promise<ThreadsOpenResult>
+  listTurns(threadId: string): Promise<ThreadsListTurnsResult>
+  undo(params: ThreadsUndoParams): Promise<ThreadsUndoResult>
+  redo(params: ThreadsRedoParams): Promise<ThreadsRedoResult>
   mcpStatus(): Promise<McpStatusResult>
   mcpAdd(params: McpAddParams): Promise<McpAddResult>
   mcpRemove(name: string): Promise<McpRemoveResult>
@@ -145,6 +154,9 @@ export function createFallbackNoopGateway(): AgentGateway {
         plan: { has_plan: false, plan_markdown: "", plan_virtual_path: "/.harness/plan.md" as const, plan_display_path: `~/.harness/plans/${id}.md` },
       }
     },
+    async listTurns() { return { turns: [], active_turn_id: "", reverted_turn_id: undefined } },
+    async undo(params) { return { success: true, reverted_turn_id: params.target_turn_id, restored_files_count: 0, message: "" } },
+    async redo() { return { success: true, restored_to_turn_id: "", restored_files_count: 0, message: "" } },
     async listModels() { return { profiles: [] } },
     async listSkills() { return { snapshot: { id: "empty", count: 0 }, skills: [], diagnostics: [] } },
     async setSkillEnabled() { return {} },
