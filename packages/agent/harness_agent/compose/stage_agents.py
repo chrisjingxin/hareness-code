@@ -16,7 +16,7 @@ import hashlib
 import json
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -45,6 +45,7 @@ from harness_agent.runtime.managed_agent_executor import (
     acquire_pooled_agent_runtime,
 )
 from harness_agent.runtime.run_context import RunCancellationToken, RunContext
+from harness_agent.threads.deferred_store import ThreadDeferredToolStore
 
 if TYPE_CHECKING:
     from harness_agent.runtime.agent_engine import AgentEnginePool
@@ -326,13 +327,15 @@ class ManagedStageAgentPort:
         resolve_spec: Any,
         config_home: Path,
         workspace: Path,
+        checkpoint_cleanup: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
-        """注入 registry/pool 与按 profile key 解析 spec 的回调。"""
+        """注入 registry/pool、spec 解析和可选的 execution checkpoint 清理。"""
         self._registry = registry
         self._pool = pool
         self._resolve_spec = resolve_spec
         self._config_home = config_home
         self._workspace = workspace
+        self._checkpoint_cleanup = checkpoint_cleanup
         self._role_bindings = RoleBindingRegistry()
 
     async def run(
@@ -394,6 +397,10 @@ class ManagedStageAgentPort:
                     or spec.execution.approval_mode
                 ),
                 profile_key=profile.profile_key,
+                checkpoint_thread_id=child_ref.checkpoint_thread_id(
+                    spec.project_fingerprint
+                ),
+                deferred_tool_store=ThreadDeferredToolStore(),
                 execution_id=child_ref.execution_id,
                 parent_execution_id=child_ref.parent_execution_id,
                 agent_id=spec.agent_id,
@@ -408,8 +415,8 @@ class ManagedStageAgentPort:
             # LangGraph 根图可能把 checkpoint_ns 归一化为空；仅靠 namespace
             # 不能保证 fresh stage 隔离。把 child execution 身份同时编码进
             # checkpoint thread_id，使 retry/相邻 stage 不会继承旧模型消息。
-            checkpoint_thread_id = ":".join(
-                (child_ref.thread_id, child_ref.run_id, child_ref.execution_id)
+            checkpoint_thread_id = child_ref.checkpoint_thread_id(
+                spec.project_fingerprint
             )
 
             async def acquire_runtime():
@@ -424,6 +431,13 @@ class ManagedStageAgentPort:
                             "checkpoint_ns": namespace,
                         }
                     },
+                    checkpoint_cleanup=(
+                        (
+                            lambda: self._checkpoint_cleanup(checkpoint_thread_id)
+                        )
+                        if self._checkpoint_cleanup is not None
+                        else None
+                    ),
                 )
 
             snapshot_id = getattr(spec.skill_registry, "snapshot_id", None)

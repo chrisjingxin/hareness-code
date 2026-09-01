@@ -25,6 +25,7 @@ from harness_agent.diagnostic_log.runtime import ensure_log, safe_context_value
 from harness_agent.runtime.execution_binding import (
     ExecutionBindingError,
     LegacyModelBindings,
+    MANAGED_EXECUTION_CHECKPOINT_PREFIX,
     PersistedBindingState,
     RunExecutionBinding,
 )
@@ -3146,6 +3147,26 @@ class ThreadPersistence:
                 "checkpoint_ns": self._project_fingerprint,
             }
         }
+
+    async def delete_execution_checkpoint(self, checkpoint_thread_id: str) -> None:
+        """删除一个已结束 Managed execution 的内部 checkpoint 与 writes。"""
+        self._ensure_open()
+        if not isinstance(checkpoint_thread_id, str) or not checkpoint_thread_id:
+            raise ThreadPersistenceError("CHECKPOINT_EXECUTION_ID_INVALID")
+        if not checkpoint_thread_id.startswith(MANAGED_EXECUTION_CHECKPOINT_PREFIX):
+            raise ThreadPersistenceError("CHECKPOINT_EXECUTION_ID_INVALID")
+        started = time.monotonic()
+        try:
+            # ProjectScopedAsyncSqliteSaver 自己持有同一 operation lock；这里
+            # 不能再套一层，否则 asyncio.Lock 会在 child release 时自锁。
+            await self._checkpointer.adelete_thread(checkpoint_thread_id)
+        except (aiosqlite.Error, TypeError, ValueError) as exc:
+            self._log_operation("checkpoint.execution.delete", started, None, exc)
+            raise ThreadPersistenceError(
+                f"CHECKPOINT_EXECUTION_DELETE_FAILED: {exc}"
+            ) from exc
+        # Saver 的公开删除接口不返回实际删除行数；不要把未知值伪装成零。
+        self._log_operation("checkpoint.execution.delete", started, None)
 
     async def load_thread_mode(self, thread_id: str) -> ThreadMode | None:
         """读取指定 Thread 的冻结工作模式，未冻结或不存在返回 None。"""

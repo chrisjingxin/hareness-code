@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from types import MappingProxyType
@@ -13,6 +14,8 @@ from harness_agent.config.config import (
     ModelProfile,
     Za38Config,
 )
+
+MANAGED_EXECUTION_CHECKPOINT_PREFIX = "managed-execution-"
 
 
 class ExecutionBindingError(ValueError):
@@ -327,6 +330,28 @@ class ExecutionRef:
         return ":".join(
             (project_fingerprint, self.thread_id, self.run_id, self.execution_id)
         )
+
+    def checkpoint_thread_id(self, project_fingerprint: str) -> str:
+        """生成只供根图 checkpoint 使用的 execution-scoped thread ID。
+
+        LangGraph 顶层图会把 ``checkpoint_ns`` 归一化为空 namespace，因此
+        Managed child 不能只依赖 namespace 隔离。这里把已验证的 project、
+        Thread、Run 和 execution 身份做稳定摘要；公开的 ``thread_id`` 仍由
+        ``RunContext`` 保留给 Transcript、诊断日志和 UI provenance。
+        """
+        if not isinstance(project_fingerprint, str) or not project_fingerprint:
+            raise ExecutionBindingError("AGENT_EXECUTION_PROJECT_INVALID")
+        material = "\0".join(
+            (
+                "harness-managed-execution-checkpoint-v1",
+                project_fingerprint,
+                self.thread_id,
+                self.run_id,
+                self.execution_id,
+            )
+        )
+        digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
+        return f"{MANAGED_EXECUTION_CHECKPOINT_PREFIX}{digest}"
 
 
 @dataclass(frozen=True, slots=True)

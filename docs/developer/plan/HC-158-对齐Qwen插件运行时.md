@@ -333,6 +333,26 @@ backend 失败均不 spawn。实现证据、`protocol:generate/check`、回滚�
   `test_agent_delegation.py` 为 `56 passed`；本轮相关集合实际为 `242 passed, 12 failed`。
   失败项是既有 Host 用户级 PluginStore 锁环境限制（11 项）和带空格 venv 路径导致的既有
   裸 node shebang fixture 限制（1 项），详见 `tmp/handoff.md`，不得据此宣称相关全集通过。
+
+## 返修：Managed Plugin child execution-scoped checkpoint（2026-09-01）
+
+本返修处理真实 CLI/TUI 证据暴露的根图身份错误。LangGraph 顶层图会丢弃非空
+`checkpoint_ns`，因此 child 必须拥有与公开 provenance 分离的内部 checkpoint `thread_id`。
+
+- [x] 用真实 `ThreadPersistence` / `ProjectScopedAsyncSqliteSaver` 预先写入父 Thread checkpoint，
+  新增 Managed child 集成红测，确认旧实现把父历史带入第一次模型调用。
+- [x] 在 `ExecutionRef` 生成稳定 execution-scoped 内部 ID；Host Plugin 与 Compose Stage 将其绑定
+  到 graph config 和 `RunContext`，保持公开 Thread/Run/execution provenance 不变。
+- [x] 使同一 child 的 continue/submit/resume 复用同一根图身份；terminal、失败、取消和 acquire
+  失败均清理该 execution 的 checkpoint/writes，Plugin/Stage 进程内 Snapshot/feedback 也按 execution
+  scope 清理。
+- [x] 禁止 child virtual history、文件 Snapshot 和 deferred reveal 继承父 Thread；保留父 Transcript
+  只接收最终 CompiledSubAgent message 的契约。
+- [x] 完成 focused red→green、Managed/Delegation/SubagentStop/Host/Qwen 相关回归、typecheck、
+  diagnostic protocol generate/check 和 diff-check；sandbox/用户级 PluginStore 锁造成的既有失败
+  保留为环境限制。
+- [ ] 用户在主仓库重新启动真实 ZA38 CLI/TUI，确认修复后的 Managed Plugin Agent 首次 context 与
+  SubagentStop continue 行为；确认前不得把本返修视为 Task 完成。
 - [ ] 用户手工验证真实 CLI/TUI 的 `plugins.inspect → reauthorize → Run` 提示和 warning 展示；
   完成前不归档 Task、不提交、不推送。
 

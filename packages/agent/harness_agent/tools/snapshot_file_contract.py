@@ -736,9 +736,12 @@ class SnapshotFileToolContract:
 
     @staticmethod
     def _thread_id(request: ToolCallRequest) -> str:
-        """从当前 RunContext 取得 Thread；缺失时拒绝共享 Snapshot scope。"""
+        """从当前 RunContext 取得 execution scope；缺失时拒绝共享 Snapshot。"""
         runtime = getattr(request, "runtime", None)
         context = getattr(runtime, "context", None)
+        checkpoint_thread_id = getattr(context, "checkpoint_thread_id", None)
+        if isinstance(checkpoint_thread_id, str) and checkpoint_thread_id:
+            return checkpoint_thread_id
         thread_id = getattr(context, "thread_id", None)
         if not isinstance(thread_id, str) or not thread_id:
             config = getattr(runtime, "config", None)

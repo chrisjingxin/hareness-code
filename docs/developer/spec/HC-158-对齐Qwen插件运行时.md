@@ -552,3 +552,32 @@ Managed delegation 的未知异常只保留异常类型；只有格式严格且�
 `HookRunner.run`。观察 Hook 失败不得覆盖原始 Tool 结果；日志只能由 `HookRunner` 记录稳定事件、
 工具名和错误分类，不记录 Hook payload、stdout、stderr、宿主绝对路径或秘密。该路径必须由真实
 middleware 与离线 fixture Hook 验证，不能只用伪造 Hook runner 的参数断言。
+
+### 6.2.5 Managed Plugin child 的 execution-scoped checkpoint（2026-09-01）
+
+Managed Plugin child 的“公开来源”和“根图私有状态”是两个不同的身份边界。公开
+`thread_id`、`run_id`、`execution_id` 和 `parent_execution_id` 必须继续用于 provenance、诊断日志、
+父 UI 时间线和最终 ToolMessage；它们不能因为 checkpoint 隔离而被伪造或替换。
+
+执行流程固定为：
+
+```text
+child ExecutionRef + project fingerprint
+  → 稳定 execution-scoped checkpoint_thread_id
+  → 根图 config(thread_id=内部ID, checkpoint_ns=logical child namespace)
+  → 首次输入只追加本次 task
+  → 同一 runtime 的 continue/submit/resume 重用同一内部ID
+  → completed / failed / cancelled / acquire failed 后删除该内部ID的 checkpoints+writes
+```
+
+关键不变量：
+
+- 根 LangGraph 的 `checkpoint_ns` 不是顶层 graph 的可靠隔离键；内部 ID 必须同时包含 project、
+  Thread、Run 和 execution 的稳定摘要，且不把公开身份原文写入内部路由值。
+- 同一 child execution 的每个模型回合使用同一内部 ID；sibling、不同 Run 和 terminal 后再次使用
+  同一逻辑 ID 都不得读到旧 child state。子 context 的 virtual history、文件 Snapshot 和 deferred
+  reveal 也不得从公开父 Thread 继承。
+- cleanup 必须在 pool/engine release 失败或取消时仍被尝试，并保留最先发生的终态异常；清理失败只
+  记录稳定诊断，不把已确定的 child 结果改写成另一种业务结果。
+- child 私有 checkpoint、tool/history 和中间消息不进入父 Transcript；父图只按既有
+  CompiledSubAgent 契约收到最终 `AIMessage`。本规格不新增 Protocol 字段或 SQLite schema。

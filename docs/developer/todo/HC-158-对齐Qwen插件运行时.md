@@ -255,6 +255,25 @@ generation replacement、EOF 和畸形消息后 client 清理。Prompt、Session
 - [x] 用户已手工执行真实 CLI/TUI 的 `plugins.inspect → reauthorize → Run`，并完成 Slash
   Command 与 Managed 子代理调用复测；CompiledSubAgent `messages` 适配返修后运行正常。
 
+## 返修：Managed Plugin child 上下文与 checkpoint 隔离（2026-09-01）
+
+- [x] 以真实 SQLite/ProjectScopedAsyncSqliteSaver 预先写入可识别父历史；红测在旧实现中观察到
+  child 模型实际收到父 Human/AI 消息，固定“首次只含 task”的失败边界。
+- [x] 为每个 project + Thread + Run + execution 生成稳定内部 checkpoint `thread_id`；不修改公开
+  provenance，不新增 Protocol 或 SQLite schema。
+- [x] Host Plugin 与 Compose Stage 将内部 ID 同时传入 `RunContext` 和 LangGraph 根图；同 child
+  continue/submit/resume 保持相同 ID，sibling、不同 Run 与 terminal 后重用不共享历史。
+- [x] 终态、失败、取消和 acquire 失败清理 checkpoints/writes；virtual history、文件 Snapshot、
+  deferred reveal 与 Hook feedback 不继承父/sibling scope。
+- [x] `test_managed_plugin_checkpoint.py` red→green `7 passed`；Managed/Compose/Delegation/
+  SubagentStop/virtual history/Snapshot focused 合计 `108 passed`。
+- [x] 已运行 `typecheck`、`protocol:generate`、`protocol:check` 和 `git diff --check HEAD`；较大
+  回归中 sandbox loopback、用户级 PluginStore lock 与裸 node/带空格 venv fixture 的既有环境失败
+  已单独记录于 `tmp/handoff.md`。
+- [ ] **用户验收停点**：以主仓库 cwd 重新启动真实 ZA38 CLI/TUI，确认 child 首次模型 context 只有
+  本次 task + 自身 system/Context/Skill，并确认 SubagentStop continue 保留 child 自身历史；完成
+  前不得归档 HC-158 或进入下一阶段。
+
 ## Phase 5：Channels 延期决策（已完成）
 
 - [x] 核对当前 ZA38 插件无 `channels` 声明，并按 2026-08-28 用户决定从 HC-158 实现范围移出。

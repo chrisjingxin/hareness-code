@@ -313,3 +313,38 @@ warning 传播和多 Hook 聚合。相关集合本轮实际为 `242 passed, 12 f
 得到的新 fingerprint 显式确认后再 Run，child 即使 SubagentStop Hook 自身失败也返回最终结果和
 warning。2026-08-31 用户已在真实 ZA38 工作区完成插件重新授权、Slash Command 与 Managed
 子代理调用验收；期间发现的 CompiledSubAgent `messages` 结果适配缺口已补回归并修复，用户复测通过。
+
+### 用户真实 Managed Plugin 上下文隔离返修（2026-09-01，待主任务验收）
+
+用户在真实 ZA38 CLI/TUI 中复现了 Managed Plugin Agent 继承父 Thread 上下文的问题：child
+第一次模型调用的 `message_count` 为 8，而本次 task 之外还包含父 Thread 消息；child 随后错误地
+自述“上一轮 task 被取消”。SQLite 检查同时确认顶层 checkpoint 没有形成预期的 execution-scoped
+child namespace。根因不是提示词或结果过滤，而是 LangGraph 顶层图会把非空 `checkpoint_ns` 归一化为
+空 namespace；旧实现仍把父 `thread_id` 传给根图，所以父 checkpoint 被重新读出。
+
+- `ExecutionRef.checkpoint_thread_id(project_fingerprint)` 对 project、公开 Thread、Run 和
+  execution 做稳定 SHA-256 摘要，生成只供根图 checkpoint 使用的内部 ID；公开
+  `RunContext.thread_id`、run/execution provenance、诊断日志和 UI 绑定保持原值。
+- Host 的 Managed Plugin 与 Compose Stage 都把该内部 ID 同时写入 `RunContext` 和 graph config；
+  `thread_id_for_runtime` 只校验内部 graph identity，但继续返回公开 Thread 给 canonical 业务边界。
+  Plugin child 的虚拟历史、文件 Snapshot 和 deferred reveal 也使用 execution scope，不继承父私有状态。
+- `ManagedAgentExecutor` 在正常完成、continue/submit/resume、失败、取消和 acquire 失败路径释放
+  本 execution 的 checkpoint/writes；Plugin/Stage 的进程内 feedback、Snapshot scope 也按同一内部
+  identity 清理。父 Transcript 不写 child 私有 tool/history，`_compiled_subagent_state` 继续只返回
+  最终 `AIMessage`。
+- 本返修没有改变公开 Protocol、SQLite schema、真实 thread_id 或审计字段，也没有运行真实 Hook、MCP、
+  LSP、模型、网络或凭据。
+
+TDD 证据：新增真实 `ThreadPersistence`/`ProjectScopedAsyncSqliteSaver`、共享 compiled graph、
+`AgentEnginePool` 和 `ManagedAgentExecutor` 集成红测；旧实现第一次模型输入包含
+`PARENT_HISTORY_MARKER` 与 `CHILD_TASK_MARKER`，断言只允许 child task 因此失败。修复后
+`tests/runtime/test_managed_plugin_checkpoint.py` 为 `7 passed`，覆盖首次隔离、同 child continue
+保留自身消息、终态重用/sibling/新 Run 隔离、失败/取消清理、父 Transcript 不变及 compiled state
+契约。包含 Stage、虚拟历史、Snapshot、Managed executor、SubagentStop、Delegation 的 focused
+集合为 `108 passed`；`typecheck`、`protocol:generate`、`protocol:check`、`git diff --check HEAD`
+通过。更大回归集合为 `363 passed, 1 skipped, 21 failed`：既有 Host 测试受 sandbox 禁止 loopback
+监听或用户级 PluginStore 锁影响，另有既有裸 `node` fixture 在带空格 venv 路径下未生成文件；失败
+未归因于本返修，详情写入 `tmp/handoff.md`。
+
+此前 Phase 4C 的用户真实 Managed 子代理验收记录由本次真实缺陷复现覆盖，必须在本返修后的主仓库
+重新执行用户验收；Task 仍保持“待验收”，不归档、不进入下一阶段。

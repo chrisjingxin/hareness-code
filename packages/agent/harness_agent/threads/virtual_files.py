@@ -262,13 +262,17 @@ def run_scoped_virtual_backend_factory(
     """
 
     def backend_for_run(runtime: Any) -> CompositeBackend:
-        """在工具执行边界创建仅绑定当前 thread 的虚拟挂载。"""
+        """在工具执行边界创建仅绑定当前 execution 的虚拟挂载。"""
         context = require_run_context(runtime)
         snapshot = context.context_snapshot
+        # Managed child 的公开 thread_id 仍用于 provenance，但其私有历史
+        # scope 必须跟根图 checkpoint 使用同一个 execution identity；否则
+        # child 可以通过 /.harness/history 读取父 Thread 的 artifact。
+        virtual_thread_id = context.checkpoint_thread_id or context.thread_id
         return mount_harness_virtual_files(
             default_backend,
             registry=context.skill_registry,
-            thread_id=context.thread_id,
+            thread_id=virtual_thread_id,
             thread_persistence=thread_persistence,
             expected_snapshot_id=(
                 snapshot.skill_snapshot_id if snapshot is not None else None

@@ -87,6 +87,22 @@ def test_file_contract_rejects_missing_thread_context(tmp_path: Path) -> None:
     assert result["error"]["code"] == "RUN_CONTEXT_REQUIRED"
 
 
+def test_file_contract_uses_execution_scope_for_managed_child_snapshots() -> None:
+    """Managed child 文件 Snapshot 不复用公开父 Thread 的内存句柄。"""
+    from harness_agent.tools.snapshot_file_contract import SnapshotFileToolContract
+
+    request = SimpleNamespace(
+        runtime=SimpleNamespace(
+            context=SimpleNamespace(
+                thread_id="parent-thread",
+                checkpoint_thread_id="managed-execution-child",
+            )
+        )
+    )
+
+    assert SnapshotFileToolContract._thread_id(request) == "managed-execution-child"
+
+
 def test_read_returns_short_snapshot_and_edit_requires_seen_unique_text(tmp_path: Path) -> None:
     """局部 read 只授权看过的行；读取同版本第二窗口后才允许唯一替换。"""
     target = tmp_path / "sample.py"

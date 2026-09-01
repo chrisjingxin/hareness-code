@@ -3627,6 +3627,13 @@ class AgentHost:
             persisted["session"] = self._run_coordinator.session_rules
             return merge_rules(persisted)
 
+        async def cleanup_stage_execution(checkpoint_thread_id: str) -> None:
+            """同时清理 stage 的 SQLite checkpoint 与进程内 Snapshot scope。"""
+            try:
+                await persistence.delete_execution_checkpoint(checkpoint_thread_id)
+            finally:
+                self._snapshot_store.close_thread(checkpoint_thread_id)
+
         return EngineDriverServices(
             stage_agent=ManagedStageAgentPort(
                 registry=self._run_coordinator.execution_registry,
@@ -3634,6 +3641,7 @@ class AgentHost:
                 resolve_spec=self._resolve_compose_stage_spec,
                 config_home=self._config_home,
                 workspace=self._workspace,
+                checkpoint_cleanup=cleanup_stage_execution,
             ),
             parent_ref=run.root_execution_ref,
             workspace_root=str(self._workspace),
@@ -3783,6 +3791,9 @@ class AgentHost:
                 )
 
                 child_ref = child_execution_ref(command)
+                checkpoint_thread_id = child_ref.checkpoint_thread_id(
+                    resolved.project_fingerprint
+                )
                 parent_log = None
                 try:
                     parent_log = getattr(
@@ -3819,6 +3830,7 @@ class AgentHost:
                         or resolved.execution.approval_mode
                     ),
                     profile_key=resolved.runtime_profile.profile_key,
+                    checkpoint_thread_id=checkpoint_thread_id,
                     execution_id=child_ref.execution_id,
                     parent_execution_id=child_ref.parent_execution_id,
                     agent_id=resolved.agent_id,
@@ -3830,12 +3842,22 @@ class AgentHost:
                         if self._workspace_root_registry is not None
                         else None
                     ),
+                    snapshot_store=self._snapshot_store,
+                    # Deferred reveal 属于本次 child execution；不能用父
+                    # Thread 的 Host store，否则 sibling 会继承已 reveal 工具。
+                    deferred_tool_store=ThreadDeferredToolStore(),
                     diagnostic_log=child_log,
                 )
                 checkpoint_namespace = child_ref.checkpoint_namespace(
                     resolved.project_fingerprint
                 )
                 hook_runtime = self._plugin_runtime_manager
+
+                def clear_child_process_state() -> None:
+                    """释放 child 的 Hook feedback 与进程内 Snapshot scope。"""
+                    if hook_runtime is not None:
+                        hook_runtime.clear_execution_context(context)
+                    self._snapshot_store.close_thread(checkpoint_thread_id)
 
                 async def acquire_runtime():
                     """把 Plugin Profile 的 pool lease 收敛到 Managed executor。"""
@@ -3845,17 +3867,16 @@ class AgentHost:
                         run_context=context,
                         graph_config=lambda namespace: {
                             "configurable": {
-                                "thread_id": child_ref.thread_id,
+                                "thread_id": checkpoint_thread_id,
                                 "checkpoint_ns": namespace,
                             }
                         },
-                        on_release=(
-                            (
-                                lambda: hook_runtime.clear_execution_context(context)
+                        checkpoint_cleanup=(
+                            lambda: persistence.delete_execution_checkpoint(
+                                checkpoint_thread_id
                             )
-                            if hook_runtime is not None
-                            else None
                         ),
+                        on_release=clear_child_process_state,
                     )
 
                 snapshot_id = getattr(resolved.skill_registry, "snapshot_id", None)

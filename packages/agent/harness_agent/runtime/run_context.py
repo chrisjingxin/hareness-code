@@ -60,6 +60,9 @@ class RunContext:
     thread_id: str
     run_id: str
     approval_mode: ApprovalMode
+    # 根图 checkpoint 的内部身份；公开 thread_id 仍绑定 Transcript、Skill、
+    # 诊断日志和 UI provenance，不能用内部摘要伪造对外执行来源。
+    checkpoint_thread_id: str | None = None
     context_snapshot: RunContextSnapshot | None = None
     profile_key: str | None = None
     execution_id: str = "root"
@@ -101,6 +104,11 @@ class RunContext:
         """在执行前验证 thread 与 snapshot 的绑定，阻止跨 project 注入。"""
         if not self.thread_id or not self.run_id:
             raise RunContextError("RUN_CONTEXT_ID_INVALID")
+        if self.checkpoint_thread_id is not None and (
+            not isinstance(self.checkpoint_thread_id, str)
+            or not self.checkpoint_thread_id
+        ):
+            raise RunContextError("RUN_CONTEXT_CHECKPOINT_ID_INVALID")
         if self.context_snapshot is None:
             raise RunContextError("RUN_CONTEXT_SNAPSHOT_REQUIRED")
         if self.context_snapshot.thread_id != self.thread_id:
@@ -130,7 +138,8 @@ def thread_id_for_runtime(runtime: object) -> str | None:
         config = getattr(runtime, "config", {})
         configurable = config.get("configurable", {}) if isinstance(config, Mapping) else {}
         configured_thread = configurable.get("thread_id") if isinstance(configurable, Mapping) else None
-        if configured_thread is not None and str(configured_thread) != context.thread_id:
+        expected_thread = context.checkpoint_thread_id or context.thread_id
+        if configured_thread is not None and str(configured_thread) != expected_thread:
             raise RunContextError("RUN_CONTEXT_CONFIG_THREAD_MISMATCH")
         return context.thread_id
     return None

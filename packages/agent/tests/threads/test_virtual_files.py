@@ -188,7 +188,10 @@ async def test_run_scoped_virtual_backend_isolates_shared_graph_history(tmp_path
         )
     ).artifacts[0]
 
-    def context_for(thread_id: str) -> RunContext:
+    def context_for(
+        thread_id: str,
+        checkpoint_thread_id: str | None = None,
+    ) -> RunContext:
         return RunContext(
             thread_id=thread_id,
             run_id=f"run-{thread_id}",
@@ -205,6 +208,7 @@ async def test_run_scoped_virtual_backend_isolates_shared_graph_history(tmp_path
                 enable_ask_user=False,
             ),
             approval_mode="yolo",
+            checkpoint_thread_id=checkpoint_thread_id,
             skill_registry=registry,
         )
 
@@ -214,9 +218,18 @@ async def test_run_scoped_virtual_backend_isolates_shared_graph_history(tmp_path
     )
     first = factory(SimpleNamespace(context=context_for("thread-a")))
     second = factory(SimpleNamespace(context=context_for("thread-b")))
+    child = factory(
+        SimpleNamespace(
+            context=context_for(
+                "thread-a",
+                checkpoint_thread_id="managed-execution-child",
+            )
+        )
+    )
 
     assert (await first.aread(f"/.harness/history/{artifact.artifact_id}.md")).file_data["content"] == "only thread a"
     assert (await second.aread(f"/.harness/history/{artifact.artifact_id}.md")).error
+    assert (await child.aread(f"/.harness/history/{artifact.artifact_id}.md")).error
     await store.close()
 
 

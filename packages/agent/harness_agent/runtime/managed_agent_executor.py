@@ -696,15 +696,30 @@ class _PooledAgentRuntime:
     run_context: object | None
     graph_config: Callable[[str], Mapping[str, object]]
     _release: Callable[[], Awaitable[None]]
+    _checkpoint_cleanup: Callable[[], Awaitable[None]] | None = None
     _on_release: Callable[[], None] | None = None
 
     async def release(self) -> None:
         """按 run lease、engine lease、draining 检查顺序释放资源。"""
+        first_error: BaseException | None = None
         try:
             await self._release()
-        finally:
+        except BaseException as exc:
+            first_error = exc
+        try:
+            if self._checkpoint_cleanup is not None:
+                await self._checkpoint_cleanup()
+        except BaseException as exc:
+            if first_error is None:
+                first_error = exc
+        try:
             if self._on_release is not None:
                 self._on_release()
+        except BaseException as exc:
+            if first_error is None:
+                first_error = exc
+        if first_error is not None:
+            raise first_error
 
 
 async def acquire_pooled_agent_runtime(
@@ -713,14 +728,16 @@ async def acquire_pooled_agent_runtime(
     profile: Any,
     run_context: object | None,
     graph_config: Callable[[str], Mapping[str, object]],
+    checkpoint_cleanup: Callable[[], Awaitable[None]] | None = None,
     on_release: Callable[[], None] | None = None,
 ) -> ManagedAgentRuntime:
     """从 AgentEnginePool 获取一次运行时，并封装所有 lease 清理。
 
     Plugin/Compose adapter 只能把这个 function 作为 request 的 runtime provider
     交给 ``ManagedAgentExecutor`` 调用；只有本 module 读取 ``engine.graph``。
-    ``on_release`` 只负责通知调用方清理与本 execution 绑定的进程内反馈，不能
-    释放 sibling 或 root 的资源。
+    ``checkpoint_cleanup`` 只清理本 execution 的内部 checkpoint；``on_release``
+    只负责通知调用方清理与本 execution 绑定的进程内反馈，二者都不能释放
+    sibling 或 root 的资源。
     """
     profile_key = getattr(profile, "profile_key", None)
     if not isinstance(profile_key, str) or not profile_key:
@@ -743,16 +760,25 @@ async def acquire_pooled_agent_runtime(
             run_context=run_context,
             graph_config=graph_config,
             _release=release,
+            _checkpoint_cleanup=checkpoint_cleanup,
             _on_release=on_release,
         )
     except BaseException:
         try:
             await _release_pooled_leases(pool, profile_key, lease, run_lease)
-        except Exception:
+        except BaseException:
             logger.exception(
                 "Unable to clean up pooled runtime after acquire failure profile=%s",
                 profile_key,
             )
+        if checkpoint_cleanup is not None:
+            try:
+                await checkpoint_cleanup()
+            except BaseException:
+                logger.exception(
+                    "Unable to clean up execution checkpoint after acquire failure profile=%s",
+                    profile_key,
+                )
         raise
 
 

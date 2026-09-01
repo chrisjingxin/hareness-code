@@ -273,7 +273,7 @@ async def test_managed_stage_port_schema_retry_gets_fresh_execution() -> None:
     ]
     assert checkpoint_threads[0] != checkpoint_threads[1]
     assert all(
-        thread_id.startswith("thread-1:run-1:child-")
+        thread_id.startswith("managed-execution-")
         for thread_id in checkpoint_threads
     )
 
