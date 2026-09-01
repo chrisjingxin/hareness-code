@@ -73,7 +73,8 @@ from harness_agent.threads.thread_persistence import (
 
 logger = logging.getLogger(__name__)
 
-INTERACTION_TIMEOUT_MS = 300_000
+# 默认不设交互超时时间（无限等待用户决策与批注）；为 None 时不启动超时定时器。
+INTERACTION_TIMEOUT_MS: int | None = None
 _VISIBLE_RUN_EVENTS = frozenset(
     {
         "content.delta",
@@ -1651,7 +1652,8 @@ class RunCoordinator:
 
             # 规则已明确裁决的排队工具不弹窗：
             # deny（PolicyDeny）继续处理后续工具；allow 自动批准
-            effect = self._evaluate_queued_rule(tool_name, tool_args)
+            plan_entry = tool_name == "enter_plan_mode"
+            effect = None if plan_entry else self._evaluate_queued_rule(tool_name, tool_args)
             if effect == "deny":
                 decisions[index] = {
                     "type": "reject",
@@ -1731,13 +1733,17 @@ class RunCoordinator:
                 "interrupt_id": interrupt_id,
                 "description": description,
                 "requests": _bounded_json({"action_requests": [dict(action_map)]}),
-                "decisions": [
-                    "approve_once",
-                    "approve_thread",
-                    "approve_project",
-                    "reject",
-                    "reject_with_feedback",
-                ],
+                "decisions": (
+                    ["approve_once", "reject"]
+                    if plan_entry
+                    else [
+                        "approve_once",
+                        "approve_thread",
+                        "approve_project",
+                        "reject",
+                        "reject_with_feedback",
+                    ]
+                ),
             }
             if presentation is not None:
                 payload["presentation"] = presentation
@@ -1763,9 +1769,12 @@ class RunCoordinator:
             response = result.value if isinstance(result.value, Mapping) else {}
             decision = str(response.get("decision") or "")
             feedback = str(response.get("feedback") or "")
-            self._record_approval_rule(tool_name, tool_args, decision)
+            if not plan_entry:
+                self._record_approval_rule(tool_name, tool_args, decision)
 
-            if decision in {"approve_once", "approve_thread", "approve_project"}:
+            if plan_entry and decision == "approve_once":
+                decisions[index] = {"type": "approve"}
+            elif not plan_entry and decision in {"approve_once", "approve_thread", "approve_project"}:
                 decisions[index] = {"type": "approve"}
             elif decision == "reject_with_feedback" and feedback:
                 # LangChain HITL 的 RejectDecision 使用顶层 message；嵌套在

@@ -16,6 +16,7 @@ import {
   type SlashCommand,
 } from "./commands"
 import type { IdGenerator } from "./ports/id-generator"
+import type { InteractiveApprovalMode } from "./runtime"
 
 /** 命令选择器目标；与 InteractiveResult.present 的 target 保持一致。 */
 export type CommandPickerTarget = "skills" | "threads" | "models" | "agents"
@@ -23,6 +24,7 @@ export type CommandPickerTarget = "skills" | "threads" | "models" | "agents"
 /** Handler 的唯一输出协议。它不返回 RPC method 字符串、success/error closure、
  * React callback 或 TUI local action；Controller 解释这些语义并完成所有 Agent effect。 */
 export type CommandRpcMethod =
+  | "threads.open"
   | "agents.list"
   | "teams.list"
   | "teams.inspect"
@@ -50,6 +52,10 @@ export type CommandResult =
   | { type: "request-handoff"; threadId: string | null }
   | { type: "submit-prompt"; prompt: string; requestedSkill?: RequestedSkill }
   | { type: "side-question"; question: string; threadId: string | null }
+  | { type: "set-approval-mode"; mode: "plan"; prompt?: string; notice?: string }
+  | { type: "restore-approval-mode" }
+  | { type: "focus-plan" }
+  | { type: "view-plan"; threadId: string; markdown: string; virtualPath: string; displayPath: string }
   | CommandRpcResult
 
 /** Dispatcher 所需的最小状态快照；展示文案由调用方在进入 Handler 前生成。 */
@@ -60,6 +66,10 @@ export type CommandDispatchContext = {
   versionSummary: string
   /** 唯一 ID 生成器（Port 注入），供需要本地生成 run_id 的命令使用。 */
   idGenerator: IdGenerator
+  /** 当前会话审批档位，供 /plan 判断是否已在 plan。 */
+  approvalMode?: InteractiveApprovalMode
+  /** 当前是否正挂起计划审批；/view-plan 复用该视图，不重复读取或创建审批。 */
+  pendingPlanInteraction?: boolean
 }
 
 type CommandHandlerContext = CommandDispatchContext & {
@@ -164,6 +174,73 @@ const builtinHandlers: Readonly<Record<string, CommandHandler>> = {
       cancelLabel: "继续当前需求",
     }
   },
+  "approval.plan": handlePlanCommand,
+  "approval.plan-view": handlePlanViewCommand,
+}
+
+const ALREADY_IN_PLAN_NOTICE = "已在计划模式。改计划请直接发消息；离开请用 `/plan exit`。"
+
+/** `/plan`：空参切档、整段 exit 恢复、其它参数当规划目标提交。 */
+function handlePlanCommand(context: CommandHandlerContext): CommandResult {
+  const argument = context.command.argument?.trim() ?? ""
+  const current = context.approvalMode ?? "default"
+  const inPlan = current === "plan"
+  const running = context.commandContext.activeRun
+
+  if (argument.toLowerCase() === "exit") {
+    return inPlan ? { type: "restore-approval-mode" } : notice("当前不在计划模式。")
+  }
+
+  if (!argument) {
+    if (inPlan) return notice(ALREADY_IN_PLAN_NOTICE)
+    return {
+      type: "set-approval-mode",
+      mode: "plan",
+      notice: "已进入计划模式。发送消息开始规划；离开请用 `/plan exit`。",
+    }
+  }
+
+  if (inPlan) {
+    if (running) return notice(ALREADY_IN_PLAN_NOTICE)
+    return { type: "submit-prompt", prompt: argument }
+  }
+  if (running) {
+    return {
+      type: "set-approval-mode",
+      mode: "plan",
+      notice: "已切换到计划模式；当前任务继续，空闲后再发送规划目标。",
+    }
+  }
+  return { type: "set-approval-mode", mode: "plan", prompt: argument }
+}
+
+/** `/plan-view`：挂起审批直接聚焦；空闲时通过 canonical threads.open 读取计划。 */
+function handlePlanViewCommand(context: CommandHandlerContext): CommandResult {
+  if (context.command.argument?.trim()) return notice("/plan-view 不接受参数。")
+  if (context.pendingPlanInteraction) return { type: "focus-plan" }
+  if (!context.threadId) return notice("当前没有可查看计划的 thread。")
+  return {
+    type: "rpc",
+    method: "threads.open",
+    params: { thread_id: context.threadId },
+    onSuccess: value => {
+      const opened = value as { plan?: Record<string, unknown> }
+      const plan = opened.plan
+      if (!plan || typeof plan.has_plan !== "boolean" || typeof plan.plan_markdown !== "string"
+        || plan.plan_virtual_path !== "/.harness/plan.md" || typeof plan.plan_display_path !== "string") {
+        return notice("读取计划失败：Agent 返回的计划结构无效。")
+      }
+      if (!plan.has_plan) return notice("还没有计划。")
+      return {
+        type: "view-plan",
+        threadId: context.threadId!,
+        markdown: plan.plan_markdown,
+        virtualPath: plan.plan_virtual_path,
+        displayPath: plan.plan_display_path,
+      }
+    },
+    onError: error => notice(`读取计划失败：${error instanceof Error ? error.message : String(error)}`),
+  }
 }
 
 /** 把 `/teams` 子命令映射成类型化 RPC；客户端不能提交任意 TeamDefinition。 */

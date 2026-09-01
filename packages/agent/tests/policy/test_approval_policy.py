@@ -20,6 +20,7 @@ from harness_agent.policy.approval_policy import (
 )
 from harness_agent.policy.classifier import SafetyClassifier
 from harness_agent.policy.permission_rules import PermissionRule
+from harness_agent.runtime.run_context import RunPlanConstraint
 
 _ALL_HITL_TOOLS = {
     "execute",
@@ -52,9 +53,9 @@ def test_hitl_mapping_keeps_compaction_outside_all_approval_modes():
     assert auto is not None
     # auto 模式集合与 default 相同：编辑类工具需要经过四层过滤器判断。
     assert set(auto) == _ALL_HITL_TOOLS
-    # plan 仅为目录信任开启只读 HITL；写入仍由 PlanModeMiddleware 硬拒绝。
+    # plan 为未知 Shell、目录信任和 exit_plan_mode 开启 HITL；写入仍由中间件硬拒绝。
     assert plan is not None
-    assert set(plan) == _PLAN_DIRECTORY_TRUST_TOOLS
+    assert set(plan) == _PLAN_DIRECTORY_TRUST_TOOLS | {"execute", "exit_plan_mode"}
     assert interrupt_on_for_approval_mode("yolo") is None
     assert "compact_conversation" not in default
     assert "compact_conversation" not in auto_edit
@@ -81,10 +82,10 @@ def test_plan_mode_allows_only_explicit_read_and_thread_tools(tool_name: str):
 
 @pytest.mark.parametrize(
     "tool_name",
-    ["write_file", "edit_file", "execute", "delete_file", "task", "mcp_future_tool"],
+    ["write_file", "edit_file", "delete_file", "task", "mcp_future_tool"],
 )
 async def test_plan_mode_rejects_mutation_and_unknown_future_tools(tool_name: str):
-    """计划模式必须在执行前短路写入、shell、子 Agent 和未来 MCP。"""
+    """计划模式必须在执行前短路写入、子 Agent 和未来 MCP。"""
     middleware = PlanModeMiddleware()
     request = SimpleNamespace(tool_call={"name": tool_name, "id": f"call-{tool_name}", "args": {}})
     called = False
@@ -99,6 +100,165 @@ async def test_plan_mode_rejects_mutation_and_unknown_future_tools(tool_name: st
     assert called is False
     assert result.status == "error"
     assert f"计划模式拒绝 {tool_name}" in str(result.content)
+    if tool_name in {"write_file", "edit_file", "delete_file"}:
+        assert "/.harness/plan.md" in str(result.content)
+
+
+def test_plan_mode_allows_read_only_shell_command():
+    """计划模式允许复用只读 Shell 白名单调查工作区。"""
+    middleware = PlanModeMiddleware()
+    request = _make_request("execute", {"command": "git status"})
+    called = False
+
+    def handler(_request: object) -> object:
+        nonlocal called
+        called = True
+        return object()
+
+    assert middleware.wrap_tool_call(request, handler) is not None
+    assert called is True
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["rm project.txt", "touch project.txt", "env MODE=plan rm project.txt"],
+)
+def test_plan_mode_rejects_mutating_shell_command(command: str):
+    """计划模式对明确会写项目的 Shell 命令硬拒绝，不调用执行后端。"""
+    middleware = PlanModeMiddleware()
+    request = _make_request("execute", {"command": command})
+    called = False
+
+    def handler(_request: object) -> object:
+        nonlocal called
+        called = True
+        return object()
+
+    result = middleware.wrap_tool_call(request, handler)
+
+    assert called is False
+    assert result.status == "error"
+    assert "计划模式拒绝 execute" in str(result.content)
+
+
+def test_plan_mode_approved_unknown_shell_does_not_lift_constraint():
+    """未知命令单次批准后可执行，但下一次项目写入仍受 Plan 约束。"""
+    middleware = PlanModeMiddleware()
+    execute = _make_request("execute", {"command": "python inspect_project.py"})
+    calls = 0
+
+    def handler(_request: object) -> object:
+        nonlocal calls
+        calls += 1
+        return object()
+
+    # HITL 批准后才会抵达工具执行边界；这里模拟该次已批准调用。
+    assert middleware.wrap_tool_call(execute, handler) is not None
+    assert calls == 1
+
+    write = _make_request(
+        "write_file", {"file_path": "/src/app.ts", "content": "no"}
+    )
+    result = middleware.wrap_tool_call(write, handler)
+
+    assert calls == 1
+    assert result.status == "error"
+    assert "计划模式拒绝 write_file" in str(result.content)
+
+
+def test_plan_mode_allows_writing_the_session_plan_file():
+    """计划模式下写虚拟计划文件应放行，项目文件仍拒绝。"""
+    middleware = PlanModeMiddleware()
+    called = False
+
+    def handler(_request: object) -> object:
+        nonlocal called
+        called = True
+        return object()
+
+    allowed = SimpleNamespace(
+        tool_call={"name": "write_file", "id": "call-plan", "args": {"file_path": "/.harness/plan.md", "content": "# 计划"}},
+    )
+    assert middleware.wrap_tool_call(allowed, handler) is not None
+    assert called is True
+
+    called = False
+    denied = SimpleNamespace(
+        tool_call={"name": "write_file", "id": "call-src", "args": {"file_path": "/src/app.ts", "content": "no"}},
+    )
+    result = middleware.wrap_tool_call(denied, handler)
+    assert called is False
+    assert result.status == "error"
+    assert "/.harness/plan.md" in str(result.content)
+
+
+def test_plan_mode_allows_declared_read_only_mcp_and_rejects_unmarked():
+    """MCP 声明只读则放行；未声明按会写硬拒。"""
+    middleware = PlanModeMiddleware()
+    called = False
+
+    def handler(_request: object) -> object:
+        nonlocal called
+        called = True
+        return object()
+
+    readonly = SimpleNamespace(
+        name="mcp_docs_search",
+        metadata={"readOnlyHint": True},
+    )
+    allowed = SimpleNamespace(
+        tool_call={"name": "mcp_docs_search", "id": "call-ro", "args": {}},
+        tool=readonly,
+    )
+    assert middleware.wrap_tool_call(allowed, handler) is not None
+    assert called is True
+
+    called = False
+    writable = SimpleNamespace(name="mcp_github_create_issue", metadata={})
+    denied = SimpleNamespace(
+        tool_call={"name": "mcp_github_create_issue", "id": "call-w", "args": {}},
+        tool=writable,
+    )
+    result = middleware.wrap_tool_call(denied, handler)
+    assert called is False
+    assert result.status == "error"
+
+
+def test_runtime_plan_constraint_reuses_the_same_middleware_instance(monkeypatch):
+    """default Run 点头后，同一 middleware 立即从放行切到计划约束。"""
+    middleware = PlanModeMiddleware("default")
+    constraint = RunPlanConstraint()
+    runtime = SimpleNamespace(
+        context=SimpleNamespace(approval_mode="default", plan_constraint=constraint)
+    )
+    monkeypatch.setattr(
+        "harness_agent.runtime.run_context.require_run_context",
+        lambda _runtime: runtime.context,
+    )
+    request = SimpleNamespace(
+        tool_call={
+            "name": "write_file",
+            "id": "call-runtime-plan",
+            "args": {"file_path": "/src/app.ts", "content": "x"},
+        },
+        runtime=runtime,
+    )
+    calls = 0
+
+    def handler(_request: object) -> object:
+        nonlocal calls
+        calls += 1
+        return object()
+
+    assert middleware.wrap_tool_call(request, handler) is not None
+    assert calls == 1
+
+    constraint.activate()
+    result = middleware.wrap_tool_call(request, handler)
+
+    assert calls == 1
+    assert result.status == "error"
+    assert "计划模式拒绝 write_file" in str(result.content)
 
 
 def test_extra_interrupt_tools_merged_in_default_and_auto_edit():
@@ -117,10 +277,11 @@ def test_extra_interrupt_tools_merged_in_default_and_auto_edit():
     assert auto is not None
     assert set(auto) == _ALL_HITL_TOOLS | mcp_tools
 
-    # plan 忽略额外工具，仍只保留目录信任只读集合；yolo 不创建 HITL
+    # plan 不把 MCP 写入工具纳入审批（硬拒，不弹卡），但要停住未知 Shell 和提交计划。
     plan = interrupt_on_for_approval_mode("plan", extra_interrupt_tools=mcp_tools)
     assert plan is not None
-    assert set(plan) == _PLAN_DIRECTORY_TRUST_TOOLS
+    assert set(plan) == _PLAN_DIRECTORY_TRUST_TOOLS | {"execute", "exit_plan_mode"}
+    assert mcp_tools.isdisjoint(set(plan))
     assert interrupt_on_for_approval_mode("yolo", extra_interrupt_tools=mcp_tools) is None
 
 
@@ -129,6 +290,17 @@ def test_extra_interrupt_tools_none_keeps_original_set():
     default = interrupt_on_for_approval_mode("default", extra_interrupt_tools=None)
     assert default is not None
     assert set(default) == _ALL_HITL_TOOLS
+
+
+def test_yolo_graph_keeps_dormant_execute_preflight_for_runtime_plan():
+    """YOLO 图保留休眠 execute 拦截器，供同一 Run 进入 Plan 后启用。"""
+    preflight = lambda _request: False
+
+    configured = interrupt_on_for_approval_mode("yolo", preflight=preflight)
+
+    assert configured is not None
+    assert set(configured) == {"execute"}
+    assert configured["execute"]["when"] is preflight
 
 
 def test_hitl_configuration_preserves_file_mutation_dynamic_description():
@@ -148,7 +320,11 @@ def test_hitl_configuration_preserves_file_mutation_dynamic_description():
 
 def test_approval_mode_prompts_state_the_actual_enforced_policy():
     """提示词只解释已由中间件执行的事实，不能成为唯一安全机制。"""
-    assert "严格计划模式" in approval_mode_prompt("plan")
+    plan_prompt = approval_mode_prompt("plan")
+    assert "严格计划模式" in plan_prompt
+    assert "write_file" in plan_prompt
+    assert "/.harness/plan.md" in plan_prompt
+    assert "只读 Shell" in plan_prompt
     assert "自动执行" in approval_mode_prompt("auto-edit")
     assert "不会为工具调用请求人工审批" in approval_mode_prompt("yolo")
     assert "需要用户确认" in approval_mode_prompt("default")
@@ -374,6 +550,48 @@ class TestApprovalPreflight:
             tmp_path, "plan", original=allows, directory_trust_check=trust_check
         )
         request = _make_request("read_file", {"file_path": str(outside / "file.md")})
+        assert preflight(request) is True
+
+    @pytest.mark.parametrize(
+        ("command", "should_ask"),
+        [
+            ("git status", False),
+            ("rm project.txt", False),
+            ("python inspect_project.py", True),
+        ],
+    )
+    def test_plan_shell_uses_read_write_unknown_triage(
+        self, tmp_path: Path, command: str, should_ask: bool
+    ):
+        """Plan Shell 只读自动、明确写入硬拒，未知才弹单次审批。"""
+        preflight = _make_preflight(tmp_path, "plan")
+
+        assert preflight(_make_request("execute", {"command": command})) is should_ask
+
+    def test_runtime_plan_constraint_uses_the_same_shell_triage(self, tmp_path: Path):
+        """default 图同一 Run 进入 Plan 后也使用同一套 Shell 三态判断。"""
+        preflight = _make_preflight(tmp_path, "default")
+        constraint = RunPlanConstraint()
+        constraint.activate()
+        request = _make_request("execute", {"command": "python inspect_project.py"})
+        request.runtime = SimpleNamespace(
+            context=SimpleNamespace(approval_mode="default", plan_constraint=constraint)
+        )
+
+        assert preflight(request) is True
+
+    def test_yolo_shell_only_asks_after_runtime_plan_is_active(self, tmp_path: Path):
+        """YOLO 普通调用不询问；同一 Run 进入 Plan 后未知命令才询问。"""
+        preflight = _make_preflight(tmp_path, "yolo")
+        request = _make_request("execute", {"command": "python inspect_project.py"})
+        assert preflight(request) is False
+
+        constraint = RunPlanConstraint()
+        constraint.activate()
+        request.runtime = SimpleNamespace(
+            context=SimpleNamespace(approval_mode="yolo", plan_constraint=constraint)
+        )
+
         assert preflight(request) is True
 
     def test_illegal_system_path_skips_dialog(self, tmp_path: Path):

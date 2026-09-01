@@ -1,13 +1,13 @@
-"""``/.harness`` 只读虚拟文件后端。
+"""``/.harness`` 虚拟文件后端。
 
 虚拟路径是模型可见的逻辑命名空间，Skill 根目录和 SQLite 文件从不暴露给
-模型。该模块只实现读取；写入、搜索和列举统一返回拒绝结果。
+模型。Skill 与历史只读；会话计划文件 ``/.harness/plan.md`` 在计划约束下可写。
 """
 
 from __future__ import annotations
 
 import re
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Callable
 
 from deepagents.backends import CompositeBackend
@@ -23,7 +23,14 @@ from deepagents.backends.protocol import (
 
 from harness_agent.extensions.skills import SkillError, SkillRegistry
 from harness_agent.diagnostic_log.runtime import ensure_log
-from harness_agent.runtime.run_context import require_run_context
+from harness_agent.runtime.run_context import plan_constraint_active, require_run_context
+from harness_agent.tools.plan_file import (
+    PLAN_VIRTUAL_NAME,
+    PLAN_VIRTUAL_PATH,
+    is_plan_virtual_path,
+    plan_disk_path,
+    write_plan_markdown,
+)
 
 if TYPE_CHECKING:
     from deepagents.backends.protocol import BackendProtocol
@@ -35,7 +42,7 @@ _ARTIFACT_ID = re.compile(r"^[a-z0-9][a-z0-9-]{8,80}$")
 
 
 class HarnessVirtualBackend:
-    """为一个固定 thread 提供 Skill 正文与历史归档的受限只读视图。"""
+    """为一个固定 thread 提供 Skill 正文、历史归档与会话计划文件。"""
 
     def __init__(
         self,
@@ -46,14 +53,18 @@ class HarnessVirtualBackend:
         expected_snapshot_id: str | None = None,
         require_snapshot_id: bool = False,
         diagnostic_log: Any | None = None,
+        home: Path | None = None,
+        plan_writable: bool = False,
     ) -> None:
-        """绑定一个 Run 的 Skill snapshot 和当前 project/thread 的归档读取器。"""
+        """绑定一个 Run 的 Skill snapshot、归档读取器和计划文件落盘位置。"""
         self._registry = registry
         self._thread_id = thread_id
         self._thread_persistence = thread_persistence
         self._expected_snapshot_id = expected_snapshot_id
         self._require_snapshot_id = require_snapshot_id
         self._diagnostic_log = ensure_log(diagnostic_log)
+        self._home = home
+        self._plan_writable = plan_writable
         self._history_cache: dict[str, str] = {}
 
     def read(self, file_path: str, offset: int = 0, limit: int = 2_000) -> ReadResult:
@@ -61,7 +72,9 @@ class HarnessVirtualBackend:
         try:
             path = self._validated_path(file_path)
             skill_identity: tuple[str, str] | None = None
-            if path.parts[0] == "skills":
+            if self._is_plan_path(path):
+                content = self._read_plan()
+            elif path.parts[0] == "skills":
                 content, skill_id, kind = self._read_skill(path)
                 skill_identity = (skill_id, kind)
             else:
@@ -80,7 +93,9 @@ class HarnessVirtualBackend:
         try:
             path = self._validated_path(file_path)
             skill_identity: tuple[str, str] | None = None
-            if path.parts[0] == "skills":
+            if self._is_plan_path(path):
+                content = self._read_plan()
+            elif path.parts[0] == "skills":
                 content, skill_id, kind = self._read_skill(path)
                 skill_identity = (skill_id, kind)
             else:
@@ -132,20 +147,52 @@ class HarnessVirtualBackend:
         """异步全文检索入口保持与同步行为一致。"""
         return self.grep(pattern, path, glob)
 
-    def write(self, _file_path: str, _content: str) -> WriteResult:
-        """拒绝任何虚拟文件写入。"""
-        return WriteResult(error="/.harness is read-only")
+    def write(self, file_path: str, content: str) -> WriteResult:
+        """计划约束下允许覆盖写会话计划文件；其它虚拟路径仍只读。"""
+        try:
+            path = self._validated_path(file_path)
+        except ValueError as exc:
+            return WriteResult(error=str(exc))
+        if not self._is_plan_path(path):
+            return WriteResult(error="/.harness is read-only")
+        if not self._plan_writable:
+            return WriteResult(error="计划约束未开启，不能写入计划文件")
+        try:
+            write_plan_markdown(self._thread_id, content, self._home)
+        except (OSError, ValueError) as exc:
+            return WriteResult(error=str(exc))
+        return WriteResult(path=PLAN_VIRTUAL_PATH)
 
     async def awrite(self, file_path: str, content: str) -> WriteResult:
-        """异步写入入口保持与同步拒绝一致。"""
+        """异步写入入口保持与同步行为一致。"""
         return self.write(file_path, content)
 
-    def edit(self, _file_path: str, _old_string: str, _new_string: str, replace_all: bool = False) -> EditResult:
-        """拒绝任何虚拟文件编辑。"""
-        return EditResult(error="/.harness is read-only")
+    def edit(self, file_path: str, old_string: str, new_string: str, replace_all: bool = False) -> EditResult:
+        """计划约束下按 Snapshot 语义改写会话计划文件。"""
+        try:
+            path = self._validated_path(file_path)
+        except ValueError as exc:
+            return EditResult(error=str(exc))
+        if not self._is_plan_path(path):
+            return EditResult(error="/.harness is read-only")
+        if not self._plan_writable:
+            return EditResult(error="计划约束未开启，不能写入计划文件")
+        disk = plan_disk_path(self._thread_id, self._home)
+        if not disk.is_file():
+            return EditResult(error="plan file does not exist")
+        current = disk.read_text(encoding="utf-8")
+        if old_string not in current:
+            return EditResult(error="old_string not found")
+        occurrences = current.count(old_string) if replace_all else 1
+        updated = current.replace(old_string, new_string) if replace_all else current.replace(old_string, new_string, 1)
+        try:
+            write_plan_markdown(self._thread_id, updated, self._home)
+        except (OSError, ValueError) as exc:
+            return EditResult(error=str(exc))
+        return EditResult(path=PLAN_VIRTUAL_PATH, occurrences=occurrences)
 
     async def aedit(self, file_path: str, old_string: str, new_string: str, replace_all: bool = False) -> EditResult:
-        """异步编辑入口保持与同步拒绝一致。"""
+        """异步编辑入口保持与同步行为一致。"""
         return self.edit(file_path, old_string, new_string, replace_all)
 
     def execute(self, _command: str, *, timeout: int | None = None) -> ExecuteResponse:
@@ -168,6 +215,8 @@ class HarnessVirtualBackend:
         path = PurePosixPath(normalized)
         if not normalized or ".." in path.parts or "." in path.parts:
             raise ValueError("virtual path must not contain traversal segments")
+        if self._is_plan_path(path):
+            return path
         if not path.parts or path.parts[0] not in {"skills", "history"}:
             raise ValueError("unknown /.harness virtual path")
         if path.parts[0] == "history":
@@ -205,6 +254,18 @@ class HarnessVirtualBackend:
             return self._registry.read_resource(virtual_id, relative), virtual_id, "resource"
         raise ValueError("unknown canonical Skill ID")
 
+    @staticmethod
+    def _is_plan_path(path: PurePosixPath) -> bool:
+        """会话计划文件是 ``/.harness/plan.md`` 这一条路径。"""
+        return is_plan_virtual_path(str(path)) or path.as_posix() == PLAN_VIRTUAL_NAME
+
+    def _read_plan(self) -> str:
+        """读取本 thread 的计划文件；不存在则失败，空文件返回空串。"""
+        disk = plan_disk_path(self._thread_id, self._home)
+        if not disk.is_file():
+            raise ValueError("plan file does not exist")
+        return disk.read_text(encoding="utf-8")
+
     def _log_skill_read(self, skill_id: str, kind: str) -> None:
         """成功完成分页后只记录 Skill 身份与读取类型，不记录正文或路径。"""
         self._diagnostic_log.info(
@@ -232,8 +293,10 @@ def mount_harness_virtual_files(
     expected_snapshot_id: str | None = None,
     require_snapshot_id: bool = False,
     diagnostic_log: Any | None = None,
+    home: Path | None = None,
+    plan_writable: bool = False,
 ) -> CompositeBackend:
-    """把虚拟只读后端挂在真实 backend 之前，文件工具仍使用统一 ``read_file``。"""
+    """把虚拟后端挂在真实 backend 之前，文件工具仍使用统一 ``read_file``。"""
     return CompositeBackend(
         default=default_backend,
         routes={
@@ -244,6 +307,8 @@ def mount_harness_virtual_files(
                 expected_snapshot_id=expected_snapshot_id,
                 require_snapshot_id=require_snapshot_id,
                 diagnostic_log=diagnostic_log,
+                home=home,
+                plan_writable=plan_writable,
             )
         },
     )
@@ -277,6 +342,7 @@ def run_scoped_virtual_backend_factory(
             expected_snapshot_id=(
                 snapshot.skill_snapshot_id if snapshot is not None else None
             ),
+            plan_writable=plan_constraint_active(context),
             require_snapshot_id=True,
             diagnostic_log=context.diagnostic_log,
         )

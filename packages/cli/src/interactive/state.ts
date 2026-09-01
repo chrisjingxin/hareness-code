@@ -82,7 +82,7 @@ export type ToolCard = {
 export type InteractionCard = {
   id: string
   runId: string
-  type: "approval" | "question" | "directory_trust"
+  type: "approval" | "question" | "directory_trust" | "plan"
   status: "pending" | "approved" | "rejected" | "answered" | "resolved" | "cancelled"
   description?: string
   requests?: unknown
@@ -580,6 +580,26 @@ export function applyInteractionRequest(state: InteractiveState, envelope: Inter
       type: "directory_trust",
       status: "pending",
       description: directory ? `是否将此目录加入白名单？${directory}` : "是否将此目录加入白名单？",
+      requests: req,
+    }
+    const timeline = existingIndex >= 0
+      ? state.timeline.map((item, index) => index === existingIndex ? { type: "interaction" as const, interaction: card } : item)
+      : [...state.timeline, { type: "interaction" as const, interaction: card }]
+    return {
+      ...state,
+      activity: { kind: "waiting-interaction" },
+      timeline,
+    }
+  }
+
+  if (kind === "plan") {
+    const payload = req.payload && typeof req.payload === "object" ? req.payload as Record<string, unknown> : {}
+    const card: InteractionCard = {
+      id: envelope.request_id,
+      runId: envelope.run_id,
+      type: "plan",
+      status: "pending",
+      description: payload.has_plan === true ? "审阅计划" : "还没有写出计划",
       requests: req,
     }
     const timeline = existingIndex >= 0

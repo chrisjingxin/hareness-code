@@ -68,6 +68,54 @@ async def test_virtual_files_read_skills_and_thread_scoped_history(tmp_path: Pat
     await store.close()
 
 
+def test_plan_file_writes_to_home_not_workspace(tmp_path: Path):
+    """计划约束开启时写 ``/.harness/plan.md`` 落到 home，不污染工作区。"""
+    from harness_agent.threads.virtual_files import HarnessVirtualBackend
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    backend = HarnessVirtualBackend(
+        registry=None,
+        thread_id="thread-plan",
+        home=home,
+        plan_writable=True,
+    )
+    written = backend.write("/.harness/plan.md", "# 登录方案\n")
+    assert not written.error
+    disk = home / ".harness" / "plans" / "thread-plan.md"
+    assert disk.read_text(encoding="utf-8") == "# 登录方案\n"
+    assert not (workspace / ".harness" / "plans").exists()
+    assert list(workspace.iterdir()) == []
+
+    read_back = backend.read("/.harness/plan.md")
+    assert read_back.file_data and "# 登录方案" in read_back.file_data["content"]
+
+    closed = HarnessVirtualBackend(
+        registry=None,
+        thread_id="thread-plan",
+        home=home,
+        plan_writable=False,
+    )
+    denied = closed.write("/.harness/plan.md", "no")
+    assert denied.error
+    assert disk.read_text(encoding="utf-8") == "# 登录方案\n"
+
+
+def test_ensure_plan_file_never_truncates_existing_draft(tmp_path: Path) -> None:
+    """点头进入计划只种子缺失文件，已有计划正文必须原样保留。"""
+    from harness_agent.tools.plan_file import ensure_plan_file
+
+    home = tmp_path / "home"
+    path = ensure_plan_file("thread-existing", home)
+    path.write_text("# 已有计划\n", encoding="utf-8")
+
+    ensured = ensure_plan_file("thread-existing", home)
+
+    assert ensured == path
+    assert path.read_text(encoding="utf-8") == "# 已有计划\n"
+
+
 async def test_virtual_skill_success_logs_identity_without_content(tmp_path: Path) -> None:
     """正文与资源成功分页后记 identity；失败读取不伪造成功事件。"""
     from harness_agent.extensions.skills import SkillRegistry
@@ -300,6 +348,57 @@ async def test_run_scoped_virtual_backend_requires_the_run_skill_snapshot(tmp_pa
         )
 
 
+def test_run_scoped_virtual_backend_observes_runtime_plan_activation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """同一 Run 的运行时 flag 打开后，新解析的虚拟后端允许写计划文件。"""
+    from deepagents.backends import LocalShellBackend
+
+    from harness_agent.extensions.skills import SkillRegistry
+    from harness_agent.runtime.run_context import RunContext
+    from harness_agent.threads.context_lifecycle import prepare_embedded_context_snapshot
+    from harness_agent.threads.virtual_files import run_scoped_virtual_backend_factory
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = SkillRegistry(workspace, home=tmp_path / "home")
+    context = RunContext(
+        thread_id="thread-runtime-plan",
+        run_id="run-runtime-plan",
+        context_snapshot=prepare_embedded_context_snapshot(
+            thread_id="thread-runtime-plan",
+            system_prompt="test prompt",
+            workspace=str(workspace),
+            sandboxed=False,
+            provider=None,
+            approval_mode="default",
+            skill_registry=registry,
+            enable_memory=False,
+            enable_skills=False,
+            enable_ask_user=False,
+        ),
+        approval_mode="default",
+        skill_registry=registry,
+    )
+    written: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "harness_agent.threads.virtual_files.write_plan_markdown",
+        lambda thread_id, content, _home=None: written.append((thread_id, content)),
+    )
+    factory = run_scoped_virtual_backend_factory(
+        LocalShellBackend(root_dir=workspace, virtual_mode=True)
+    )
+    runtime = SimpleNamespace(context=context)
+
+    before = factory(runtime).write("/.harness/plan.md", "# before")
+    context.plan_constraint.activate()
+    after = factory(runtime).write("/.harness/plan.md", "# after")
+
+    assert before.error == "计划约束未开启，不能写入计划文件"
+    assert after.error is None
+    assert written == [("thread-runtime-plan", "# after")]
+
+
 def test_workspace_boundary_allows_only_virtual_read_file(tmp_path: Path):
     """逻辑根不应交给宿主路径解析，写入、列举和搜索仍在中间件处失败。"""
     from types import SimpleNamespace
@@ -314,3 +413,38 @@ def test_workspace_boundary_allows_only_virtual_read_file(tmp_path: Path):
     assert middleware.allows_approval(read)
     assert not middleware.allows_approval(write)
     assert not middleware.allows_approval(shell)
+
+
+def test_workspace_boundary_allows_plan_file_write_and_edit(tmp_path: Path):
+    """会话计划文件是 /.harness 下唯一允许 write/edit 的路径；删除和其它虚拟写仍拒绝。"""
+    from types import SimpleNamespace
+
+    from harness_agent.policy.workspace_boundary import WorkspaceBoundaryMiddleware
+
+    middleware = WorkspaceBoundaryMiddleware(tmp_path)
+    write_plan = SimpleNamespace(
+        tool_call={"name": "write_file", "id": "write-plan", "args": {"file_path": "/.harness/plan.md", "content": "# 计划"}},
+    )
+    edit_plan = SimpleNamespace(
+        tool_call={"name": "edit_file", "id": "edit-plan", "args": {"file_path": "/.harness/plan.md", "old_string": "a", "new_string": "b"}},
+    )
+    delete_plan = SimpleNamespace(
+        tool_call={"name": "delete_file", "id": "delete-plan", "args": {"file_path": "/.harness/plan.md"}},
+    )
+    called = False
+
+    def handler(_request: object) -> str:
+        nonlocal called
+        called = True
+        return "ok"
+
+    assert middleware.allows_approval(write_plan)
+    assert middleware.wrap_tool_call(write_plan, handler) == "ok"
+    assert called is True
+    called = False
+    assert middleware.allows_approval(edit_plan)
+    assert middleware.wrap_tool_call(edit_plan, handler) == "ok"
+    assert called is True
+    assert not middleware.allows_approval(delete_plan)
+    denied = middleware.wrap_tool_call(delete_plan, handler)
+    assert getattr(denied, "status", None) == "error"

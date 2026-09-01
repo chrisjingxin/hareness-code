@@ -3,7 +3,7 @@
 import type { Capability, ModelProfile } from "@za38/protocol"
 import { contextCompactNotice, type CommandResult, type CommandRpcMethod, dispatchSlashCommand } from "./command-dispatcher"
 import { builtinCommandCapabilities } from "./commands"
-import { CatalogFeature, CommandFeature, InteractionFeature, McpFeature, ModelFeature, RunFeature, SkillFeature, ThreadFeature, TimelineFeature, type FeatureContext } from "./features"
+import { CatalogFeature, CommandFeature, InteractionFeature, McpFeature, ModelFeature, PLAN_IMPLEMENT_PROMPT, RunFeature, SkillFeature, ThreadFeature, TimelineFeature, type FeatureContext } from "./features"
 import type { AgentGateway, Clock, IdGenerator, IntentOutcome, InteractiveConfirmation, InteractiveConnectionState, InteractiveController, InteractiveControllerOptions, InteractiveIntent, InteractiveSnapshot, LoadableCatalog, Scheduler } from "./ports"
 import { createFallbackNoopGateway } from "./ports"
 import { cryptoIdGenerator, systemClock, systemScheduler } from "../infrastructure"
@@ -84,9 +84,10 @@ export class InteractiveControllerImpl implements InteractiveController {
       this.commit(current => appendNotice(finishContextCompaction(current), `connection-closed: ${error.message}`))
     }) ?? (() => {})
 
-    this.clearInteractionHandler = this.gateway.setInteractionHandler?.(request =>
-      this.interactionFeature.handleInteractionRequest(request, this.featureContext)
-    ) ?? (() => {})
+    this.clearInteractionHandler = this.gateway.setInteractionHandler?.(request => {
+      if (request.type === "plan") this.runFeature.notePlanInteraction()
+      return this.interactionFeature.handleInteractionRequest(request, this.featureContext)
+    }) ?? (() => {})
 
     void this.catalogFeature.refreshSkillCatalog(this.featureContext)
     if (options.initialThreadId !== undefined) {
@@ -126,8 +127,14 @@ export class InteractiveControllerImpl implements InteractiveController {
 
       case "command.execute":
         return this.commandFeature.executeSlashCommand({ id: intent.commandId, name: intent.commandId, argument: intent.argument }, this.featureContext, {
-          hasPendingInteraction: this.hasPendingInteraction, applyResult: res => this.applyCommandResult(res),
+          hasPendingInteraction: this.hasPendingInteraction,
+          applyResult: res => this.applyCommandResult(res),
+          approvalMode: this.runFeature.currentApprovalMode(this.baseRuntime.approvalMode),
+          pendingPlanInteraction: this.interactionFeature.pendingInteraction?.request.type === "plan",
         })
+
+      case "plan-view.close":
+        return this.interactionFeature.closePlanViewer(this.featureContext)
 
       case "thread.open":
         return this.threadFeature.openThread(intent.threadId, this.featureContext, {
@@ -174,15 +181,20 @@ export class InteractiveControllerImpl implements InteractiveController {
         await this.catalogFeature.refreshCatalog(intent.catalog, this.featureContext, id => this.adoptThreadSelection(id))
         return { status: "accepted" }
 
-      case "interaction.respond":
-        return this.interactionFeature.respondInteraction(intent.requestId, { request_id: intent.requestId, ...intent.response } as any, this.featureContext)
+      case "interaction.respond": {
+        const outcome = this.interactionFeature.respondInteraction(intent.requestId, { request_id: intent.requestId, ...intent.response } as any, this.featureContext)
+        if (outcome.status === "accepted" && intent.response.kind === "plan") {
+          this.runFeature.recordPlanDecision(intent.response.decision, intent.response.feedback)
+        }
+        return outcome
+      }
 
       case "confirmation.resolve":
         return this.resolveConfirmation(intent.confirmationId, intent.confirmed)
 
       case "approval-mode.cycle":
-        if (this.state.activeRun || this.hasPendingInteraction) {
-          return { status: "rejected", code: "busy", message: "任务运行中或存在待处理交互，暂不能切换审批模式" }
+        if (this.hasPendingInteraction) {
+          return { status: "rejected", code: "busy", message: "存在待处理交互，暂不能切换审批模式" }
         }
         return this.runFeature.cycleApprovalMode(this.featureContext)
       case "work-mode.cycle":
@@ -192,8 +204,8 @@ export class InteractiveControllerImpl implements InteractiveController {
         this.commit(current => setWorkMode(current, current.workMode === "build" ? "compose" : "build"))
         return { status: "accepted" }
       case "approval-mode.set":
-        if (this.state.activeRun || this.hasPendingInteraction) {
-          return { status: "rejected", code: "busy", message: "任务运行中或存在待处理交互，暂不能切换审批模式" }
+        if (this.hasPendingInteraction) {
+          return { status: "rejected", code: "busy", message: "存在待处理交互，暂不能切换审批模式" }
         }
         return this.runFeature.setApprovalMode(intent.mode, this.featureContext)
       case "run.cancel":
@@ -221,7 +233,12 @@ export class InteractiveControllerImpl implements InteractiveController {
     if (resolution.kind === "command") {
       const result = dispatchSlashCommand(
         resolution.command,
-        this.commandFeature.commandDispatchContext(this.featureContext, Boolean(this.interactionFeature.pendingInteraction)),
+        this.commandFeature.commandDispatchContext(
+          this.featureContext,
+          Boolean(this.interactionFeature.pendingInteraction),
+          this.runFeature.currentApprovalMode(this.baseRuntime.approvalMode),
+          this.interactionFeature.pendingInteraction?.request.type === "plan",
+        ),
         this.commandFeature.commandRegistry,
       )
       return this.applyCommandResult(result)
@@ -238,12 +255,40 @@ export class InteractiveControllerImpl implements InteractiveController {
       requestedModelProfileId: this.modelFeature.requestedModelProfileId,
       armedSkill: this.skillFeature.armedSkill,
       onEvent: event => this.timelineFeature.processAgentEvent(event, this.featureContext),
-      onRunFinish: (actualModel?: ModelProfile) => {
-        // 实际绑定优先于显式选择：Run 真的用了哪个模型就显示哪个。
-        if (actualModel) this.modelFeature.actualModelProfile = actualModel
-        this.refreshModelSelection()
-        void this.catalogFeature.refreshThreadCatalog(this.featureContext)
-      },
+      onRunFinish: (actualModel?: ModelProfile) => this.finishRun(actualModel),
+      onAbandonInteraction: () => this.interactionFeature.abandonPendingInteraction(this.featureContext),
+    })
+  }
+  private finishRun(actualModel?: ModelProfile): void {
+    if (actualModel) this.modelFeature.actualModelProfile = actualModel
+    this.refreshModelSelection()
+    void this.catalogFeature.refreshThreadCatalog(this.featureContext)
+    this.continueAfterPlanRun()
+  }
+  /** 计划 Run 终态后：批准则恢复档位并自动开实现轮；放弃只恢复；打回不动。 */
+  private continueAfterPlanRun(): void {
+    const decision = this.runFeature.consumePlanContinue()
+    if (!decision) return
+    // 等到终态事件清掉 activeRun 后再开实现轮，避免和刚结束的 plan Run 抢跑。
+    this.scheduler.setTimeout(() => this.applyPlanContinue(decision), 0)
+  }
+  private applyPlanContinue(continuation: { decision: "approved" | "abandoned"; feedback?: string }): void {
+    if (this.state.activeRun) {
+      this.runFeature.restoreApprovalMode(this.featureContext)
+      this.commit(current => appendNotice(current, "已恢复进入计划前的审批档位；当前仍有任务在运行，未自动开始实现。"))
+      return
+    }
+    this.runFeature.restoreApprovalMode(this.featureContext)
+    if (continuation.decision !== "approved") return
+    const prompt = continuation.feedback
+      ? `${PLAN_IMPLEMENT_PROMPT}\n\n批准时的审阅意见：\n${continuation.feedback}`
+      : PLAN_IMPLEMENT_PROMPT
+    void this.runFeature.startRun(prompt, this.featureContext, {
+      mode: this.state.workMode,
+      requestedModelProfileId: this.modelFeature.requestedModelProfileId,
+      armedSkill: this.skillFeature.armedSkill,
+      onEvent: event => this.timelineFeature.processAgentEvent(event, this.featureContext),
+      onRunFinish: (actualModel?: ModelProfile) => this.finishRun(actualModel),
       onAbandonInteraction: () => this.interactionFeature.abandonPendingInteraction(this.featureContext),
     })
   }
@@ -298,6 +343,25 @@ export class InteractiveControllerImpl implements InteractiveController {
         return { status: "accepted", effects: [{ type: "request-handoff", threadId: result.threadId }] }
       case "side-question":
         return { status: "accepted", effects: [{ type: "side-question", question: result.question, threadId: result.threadId }] }
+      case "set-approval-mode": {
+        this.runFeature.setApprovalMode(result.mode, this.featureContext)
+        const noticeMessage = result.notice
+        if (noticeMessage) this.commit(current => appendNotice(current, noticeMessage))
+        if (result.prompt) return this.applyCommandResult({ type: "submit-prompt", prompt: result.prompt })
+        return { status: "accepted" }
+      }
+      case "restore-approval-mode": {
+        this.runFeature.restoreApprovalMode(this.featureContext)
+        const restored = this.runFeature.currentApprovalMode(this.baseRuntime.approvalMode)
+        this.commit(current => appendNotice(current, `已退出计划模式，审批恢复为 ${restored}。`))
+        return { status: "accepted" }
+      }
+      case "focus-plan":
+        this.publish()
+        return { status: "accepted" }
+      case "view-plan":
+        this.interactionFeature.openPlanViewer(result, this.featureContext)
+        return { status: "accepted" }
       case "submit-prompt":
         return this.runFeature.startRun(result.prompt, this.featureContext, {
           mode: this.state.workMode,
@@ -305,11 +369,7 @@ export class InteractiveControllerImpl implements InteractiveController {
           armedSkill: this.skillFeature.armedSkill,
           requestedSkill: result.requestedSkill,
           onEvent: event => this.timelineFeature.processAgentEvent(event, this.featureContext),
-          onRunFinish: (actualModel?: ModelProfile) => {
-            if (actualModel) this.modelFeature.actualModelProfile = actualModel
-            this.refreshModelSelection()
-            void this.catalogFeature.refreshThreadCatalog(this.featureContext)
-          },
+          onRunFinish: (actualModel?: ModelProfile) => this.finishRun(actualModel),
           onAbandonInteraction: () => this.interactionFeature.abandonPendingInteraction(this.featureContext),
         })
       case "rpc":
@@ -326,6 +386,11 @@ export class InteractiveControllerImpl implements InteractiveController {
   /** 把 Slash 命令产出的 RPC 方法名映射到 Gateway 的类型化调用。 */
   private invokeCommandRpc(method: CommandRpcMethod, params: Record<string, unknown>): Promise<unknown> {
     switch (method) {
+      case "threads.open":
+        if (typeof params.thread_id !== "string" || !params.thread_id) {
+          return Promise.reject(new Error("Thread 参数无效"))
+        }
+        return this.gateway.openThread(params.thread_id)
       case "agents.list":
         return this.gateway.listAgents()
       case "teams.list":

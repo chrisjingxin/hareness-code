@@ -129,6 +129,11 @@ from harness_agent.protocol.generated import (
     ThreadsSideQuestionParams,
 )
 from harness_agent.threads.thread_persistence import workspace_fingerprint
+from harness_agent.tools.plan_file import (
+    PLAN_VIRTUAL_PATH,
+    plan_display_path,
+    read_plan_markdown,
+)
 from harness_agent.protocol.runtime import (
     validate_interaction_result,
     validate_operation_params,
@@ -1980,9 +1985,19 @@ class AgentHost:
             progress = await self._compose_session(persistence).inspect(
                 thread_id=parsed.thread_id
             )
+        plan_markdown, has_plan = read_plan_markdown(
+            parsed.thread_id,
+            home=self._config_home,
+        )
         return {
             "thread": _thread_summary_payload(opened.summary),
             "messages": [_thread_message_payload(message) for message in opened.messages],
+            "plan": {
+                "has_plan": has_plan,
+                "plan_markdown": plan_markdown,
+                "plan_virtual_path": PLAN_VIRTUAL_PATH,
+                "plan_display_path": plan_display_path(parsed.thread_id),
+            },
             "thread_mode": thread_mode.value if thread_mode is not None else None,
             "compose_progress": progress,
         }

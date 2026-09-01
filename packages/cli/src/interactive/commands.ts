@@ -22,6 +22,8 @@ export type CommandRequirements = {
   requiresIdle?: boolean
   /** 命令仅在这些 Work Mode 下可见；不包含当前 mode 时隐藏。 */
   workModes?: readonly WorkMode[]
+  /** 因 workModes 隐藏时，手输该命令给出的本地提示。 */
+  unavailableNotice?: string
   /** 命令要求当前是否存在进行中的 Work Item；与状态不符时禁用。 */
   requiresActiveWorkItem?: boolean
 }
@@ -150,7 +152,7 @@ export class CommandRegistry {
     const missing = definition.requirements?.capabilities?.find(capability => !context.capabilities.has(capability))
     if (missing) return { state: "hidden", reason: `当前客户端未协商 ${missing}` }
     if (definition.requirements?.workModes && !definition.requirements.workModes.includes(context.workMode)) {
-      return { state: "hidden", reason: "当前模式不可用（COMMAND_MODE_UNAVAILABLE）" }
+      return { state: "hidden", reason: definition.requirements.unavailableNotice ?? "当前模式不可用（COMMAND_MODE_UNAVAILABLE）" }
     }
     if (definition.requirements?.requiresThread && !context.hasThread) {
       return { state: "disabled", reason: "当前没有可用 thread" }
@@ -215,6 +217,8 @@ export const builtinCommandDefinitions: readonly CommandDefinition[] = [
   { id: "compose.new-work", name: "new-work", description: "放下当前 Compose 需求并立刻访谈新目标", source: { type: "builtin" }, presentation: "action", argumentHint: "<目标>", requirements: { workModes: ["compose"], requiresThread: true } },
   { id: "compose.abandon", name: "abandon", description: "废弃当前 Compose 需求并回到空闲", source: { type: "builtin" }, presentation: "action", requirements: { workModes: ["compose"], requiresThread: true, requiresActiveWorkItem: true }, safety: { confirmation: "always" } },
   { id: "assist.btw", name: "btw", description: "向 Agent 提出一个与当前任务无关的问题", source: { type: "builtin" }, presentation: "action", argumentHint: "[question]", requirements: { workModes: ["build", "compose"] } },
+  { id: "approval.plan", name: "plan", description: "进入计划模式，只调查并写计划，不改项目文件", source: { type: "builtin" }, presentation: "action", argumentHint: "[exit | <目标>]", suggested: true, requirements: { workModes: ["build"], unavailableNotice: "`/plan` 仅在 Build 工作模式可用。" } },
+  { id: "approval.plan-view", name: "plan-view", description: "查看当前 thread 的计划", source: { type: "builtin" }, presentation: "viewer", suggested: true, requirements: { capabilities: [Capability.THREADS_READ], workModes: ["build"], requiresThread: true, unavailableNotice: "`/plan-view` 仅在 Build 工作模式可用。" } },
 ]
 
 export const commandRegistry = new CommandRegistry(builtinCommandDefinitions)

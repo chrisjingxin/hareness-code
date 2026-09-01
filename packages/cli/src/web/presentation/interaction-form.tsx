@@ -1,10 +1,10 @@
 /** Interaction 表单：approval 按钮、directory_trust 信任选项与 question 全量答案。 */
 /** @jsxImportSource react */
 
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Check, Loader2 } from "lucide-react"
 
-import type { ApprovalDecision, DirectoryTrustDecision, InteractiveInteraction, InteractiveQuestion } from "../../interactive/types"
+import type { ApprovalDecision, DirectoryTrustDecision, InteractiveInteraction, InteractiveQuestion, PlanDecision } from "../../interactive/types"
 import {
   QUESTION_OTHER_VALUE,
   approvalDecisionLabel,
@@ -12,10 +12,18 @@ import {
   directoryTrustDecisionLabel,
   isApprovalDecision,
   isDirectoryTrustDecision,
+  isPlanDecision,
+  isPlanFeedbackSubmitKey,
+  createPlanAnnotation,
+  formatPlanReviewFeedback,
+  planDecisionDescription,
+  planDecisionLabel,
+  type PlanAnnotation,
 } from "../../presentation-shared/interaction-policy"
 import type { WebAdapterSnapshot, WebIntent } from "../application/adapter"
 import { DirectoryTrustApproval } from "./directory-trust-approval"
 import { FileDiffApproval } from "./file-diff-approval"
+import { Markdown } from "./markdown"
 
 /** 把 approval 的 requests（unknown 载荷）安全收敛为 mono 预览 JSON；空或不可序列化时返回 null。 */
 function requestPreview(requests: unknown): string | null {
@@ -51,6 +59,8 @@ export function InteractionForm(props: {
         ? <ApprovalForm interaction={interaction} snapshot={props.snapshot} dispatch={props.dispatch} disabled={props.disabled === true} />
         : interaction.type === "directory_trust"
           ? <DirectoryTrustForm interaction={interaction} dispatch={props.dispatch} disabled={props.disabled === true} />
+          : interaction.type === "plan"
+            ? <PlanForm interaction={interaction} dispatch={props.dispatch} disabled={props.disabled === true} />
           : <QuestionForm interaction={interaction} snapshot={props.snapshot} dispatch={props.dispatch} disabled={props.disabled === true} />}
     </section>
   )
@@ -235,6 +245,302 @@ function DirectoryTrustForm(props: {
   )
 }
 
+/** 计划审批卡：内联交互式审阅 + 就地行批注卡片 + 三个动作。 */
+function PlanForm(props: {
+  interaction: Extract<InteractiveInteraction, { type: "plan" }>
+  dispatch: (intent: WebIntent) => void | Promise<void>
+  disabled: boolean
+}): React.ReactElement {
+  const { interaction, dispatch, disabled } = props
+  const [submitting, setSubmitting] = useState(false)
+  const [feedback, setFeedback] = useState("")
+  const [annotations, setAnnotations] = useState<PlanAnnotation[]>([])
+  const [annotating, setAnnotating] = useState(false)
+  const [selection, setSelection] = useState<{ startLine: number; endLine: number } | null>(null)
+  const [editingRange, setEditingRange] = useState<{ startLine: number; endLine: number } | null>(null)
+  const [annotationText, setAnnotationText] = useState("")
+  const annotationTextRef = useRef<HTMLTextAreaElement | null>(null)
+  const expired = isExpired(interaction.deadlineAtMs)
+  const buttonsDisabled = submitting || disabled || (!interaction.readOnly && expired)
+  const decisions = interaction.decisions.filter(isPlanDecision)
+  const lines = interaction.planMarkdown ? interaction.planMarkdown.split("\n") : []
+
+  const submit = async (decision: PlanDecision) => {
+    if (buttonsDisabled) return
+    setSubmitting(true)
+    const reviewFeedback = formatPlanReviewFeedback(annotations, feedback)
+    try {
+      await dispatch({
+        type: "interaction-submit",
+        requestId: interaction.requestId,
+        response: {
+          kind: "plan",
+          decision,
+          feedback: decision === "abandoned" || !reviewFeedback ? undefined : reviewFeedback,
+        },
+      })
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  const handleLineClick = (lineNumber: number) => {
+    if (interaction.readOnly) return
+    setSelection(current => {
+      const next = current
+        ? {
+            startLine: Math.min(current.startLine, lineNumber),
+            endLine: Math.max(current.endLine, lineNumber + 1),
+          }
+        : { startLine: lineNumber, endLine: lineNumber + 1 }
+      setEditingRange(next)
+      return next
+    })
+  }
+
+  const startAnnotatingForLine = (lineNumber: number, event?: React.MouseEvent) => {
+    event?.stopPropagation()
+    setSelection({ startLine: lineNumber, endLine: lineNumber + 1 })
+    setEditingRange({ startLine: lineNumber, endLine: lineNumber + 1 })
+    setAnnotationText("")
+  }
+
+  const startAnnotating = () => {
+    setAnnotating(true)
+    setSelection(null)
+    setEditingRange(null)
+    setAnnotationText("")
+  }
+
+  const saveAnnotation = () => {
+    const range = editingRange ?? selection
+    if (!range) return
+    const text = annotationTextRef.current?.value ?? annotationText
+    const annotation = createPlanAnnotation(
+      interaction.planMarkdown,
+      range.startLine,
+      range.endLine,
+      text,
+    )
+    if (!annotation) return
+    setAnnotations(current => [...current, annotation])
+    setSelection(null)
+    setEditingRange(null)
+    setAnnotationText("")
+    setAnnotating(false)
+  }
+
+  const cancelAnnotation = () => {
+    setSelection(null)
+    setEditingRange(null)
+    setAnnotationText("")
+    setAnnotating(false)
+  }
+
+  const removeAnnotation = (id: string) => {
+    setAnnotations(current => current.filter(item => item.id !== id))
+  }
+
+  const activeRange = editingRange ?? selection
+
+  return (
+    <div className="approval-form plan-form">
+      <header className="interaction-header">
+        <h3 className="interaction-title">{interaction.readOnly ? "当前计划" : "审阅计划"}</h3>
+        {interaction.readOnly ? null : <Deadline deadlineAtMs={interaction.deadlineAtMs} />}
+      </header>
+      <div className="plan-meta-row">
+        <p className="interaction-description">{interaction.planDisplayPath}</p>
+        {!interaction.readOnly && interaction.hasPlan ? (
+          <div className="plan-annotation-status-bar">
+            {annotations.length > 0 ? (
+              <span className="plan-annotation-count-badge">{annotations.length} 条批注</span>
+            ) : null}
+            {!activeRange ? (
+              <button
+                type="button"
+                className="plan-add-annotation-btn"
+                onClick={startAnnotating}
+              >
+                + 添加批注
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+
+      <div className="plan-preview" aria-label="计划正文">
+        {interaction.hasPlan ? (
+          <div className="plan-line-container">
+            {lines.map((line, index) => {
+              const lineNumber = index + 1
+              const isSelected = Boolean(activeRange && lineNumber >= activeRange.startLine && lineNumber < activeRange.endLine)
+              const lineAnnotations = annotations.filter(a => a.endLine - 1 === lineNumber)
+              const isEditorLine = Boolean(activeRange && activeRange.endLine - 1 === lineNumber)
+
+              return (
+                <div key={lineNumber} className="plan-line-wrapper">
+                  <div
+                    className={`plan-line-row plan-annotation-line${isSelected ? " is-selected" : ""}`}
+                    role="button"
+                    tabIndex={0}
+                    aria-pressed={isSelected}
+                    onClick={() => handleLineClick(lineNumber)}
+                    onKeyDown={event => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault()
+                        handleLineClick(lineNumber)
+                      }
+                    }}
+                  >
+                    <div className="plan-line-gutter">
+                      <span className="plan-line-number">{lineNumber}</span>
+                      {!interaction.readOnly ? (
+                        <button
+                          type="button"
+                          className="plan-line-add-btn"
+                          title={`为第 ${lineNumber} 行添加批注`}
+                          aria-label={`为第 ${lineNumber} 行添加批注`}
+                          onClick={event => startAnnotatingForLine(lineNumber, event)}
+                        >
+                          + 批注
+                        </button>
+                      ) : null}
+                    </div>
+                    <div className="plan-line-content">
+                      {line.trim().length > 0 ? (
+                        <Markdown text={line} />
+                      ) : (
+                        <span className="plan-line-blank">&nbsp;</span>
+                      )}
+                    </div>
+                  </div>
+
+                  {isEditorLine && activeRange && !interaction.readOnly ? (
+                    <div className="plan-inline-editor">
+                      <div className="plan-inline-editor-header">
+                        <span>批注 (第 {activeRange.startLine === activeRange.endLine - 1 ? activeRange.startLine : `${activeRange.startLine}-${activeRange.endLine - 1}`} 行)</span>
+                      </div>
+                      <textarea
+                        ref={annotationTextRef}
+                        rows={2}
+                        value={annotationText}
+                        onInput={event => setAnnotationText(event.currentTarget.value)}
+                        onKeyDown={event => {
+                          if (isPlanFeedbackSubmitKey(event)) {
+                            event.preventDefault()
+                            saveAnnotation()
+                          } else if (event.key === "Escape") {
+                            event.preventDefault()
+                            cancelAnnotation()
+                          }
+                        }}
+                        placeholder="说明所选原始 Markdown 行需要怎样调整 (Enter 保存，Shift+Enter 换行，Esc 取消)"
+                        aria-label="行批注意见"
+                        autoFocus
+                      />
+                      <div className="plan-inline-editor-actions">
+                        <button type="button" className="plan-btn-cancel" onClick={cancelAnnotation}>取消</button>
+                        <button type="button" className="plan-btn-save" onClick={saveAnnotation}>保存批注</button>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {lineAnnotations.map(ann => (
+                    <div key={ann.id} className="plan-inline-annotation-card">
+                      <div className="plan-annotation-card-header">
+                        <span>批注 (第 {ann.startLine === ann.endLine - 1 ? ann.startLine : `${ann.startLine}-${ann.endLine - 1}`} 行)</span>
+                        {!interaction.readOnly ? (
+                          <button
+                            type="button"
+                            className="plan-annotation-card-delete"
+                            title="删除批注"
+                            onClick={event => {
+                              event.stopPropagation()
+                              removeAnnotation(ann.id)
+                            }}
+                          >
+                            ✕
+                          </button>
+                        ) : null}
+                      </div>
+                      <blockquote className="plan-annotation-card-excerpt">{ann.excerpt}</blockquote>
+                      <div className="plan-annotation-card-text">{ann.text}</div>
+                    </div>
+                  ))}
+                </div>
+              )
+            })}
+          </div>
+        ) : (
+          <div className="plan-empty-placeholder">还没有写出计划。仍可批准、继续打磨或放弃。</div>
+        )}
+      </div>
+
+      {interaction.readOnly ? (
+        <div className="interaction-actions">
+          <button type="button" className="interaction-submit" onClick={() => { void dispatch({ type: "plan-view-close" }) }}>关闭</button>
+        </div>
+      ) : (
+        <>
+          {annotations.length === 0 ? (
+            <label className="interaction-feedback">
+              <span className="interaction-feedback-label">整体意见（选择「继续打磨」时可选）</span>
+              <textarea
+                className="interaction-feedback-input"
+                rows={2}
+                value={feedback}
+                disabled={buttonsDisabled}
+                onInput={event => setFeedback(event.currentTarget.value)}
+                onKeyDown={event => {
+                  if (!isPlanFeedbackSubmitKey(event)) return
+                  event.preventDefault()
+                  void submit("revise")
+                }}
+                placeholder="选择「继续打磨」时可写下意见；Enter 提交，Shift+Enter 换行"
+                aria-label="计划打回意见"
+              />
+            </label>
+          ) : null}
+          <div className="approval-buttons" role="group" aria-label="计划审批选项">
+            {(annotations.length > 0
+              ? [
+                  {
+                    decision: "revise" as PlanDecision,
+                    label: `提交批注并继续打磨 (${annotations.length} 条批注)`,
+                    description: "按所选行批注意见调整计划后再提交审阅",
+                  },
+                  {
+                    decision: "abandoned" as PlanDecision,
+                    label: "放弃计划",
+                    description: "放弃本次规划，退出计划模式",
+                  },
+                ]
+              : decisions.map(item => ({
+                  decision: item,
+                  label: planDecisionLabel(item),
+                  description: planDecisionDescription(item),
+                }))
+            ).filter(item => decisions.includes(item.decision)).map(item => (
+              <button
+                type="button"
+                key={item.decision}
+                className={item.decision === "abandoned" ? "approval-button approval-button-negative" : "approval-button approval-button-positive"}
+                disabled={buttonsDisabled}
+                onClick={() => { void submit(item.decision) }}
+              >
+                {submitting ? <Loader2 aria-hidden="true" className="interaction-submit-spinner" /> : null}
+                <span>{item.label}</span>
+                <span className="approval-button-description">{item.description}</span>
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
 /** question 表单：所有问题一次性渲染，单选/多选/其他。 */
 function QuestionForm(props: {
   interaction: Extract<InteractiveInteraction, { type: "question" }>
@@ -399,13 +705,15 @@ function QuestionGroup(props: {
   )
 }
 
-/** 倒计时展示：本地 setInterval 节流；过期时显示“已超时”。 */
-function Deadline(props: { deadlineAtMs: number }): React.ReactElement {
+/** 倒计时展示：本地 setInterval 节流；无超时或无限时返回 null。 */
+function Deadline(props: { deadlineAtMs: number }): React.ReactElement | null {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
+    if (!Number.isFinite(props.deadlineAtMs)) return
     const timer = setInterval(() => setNow(Date.now()), DEADLINE_TICK_MS)
     return () => clearInterval(timer)
   }, [props.deadlineAtMs])
+  if (!Number.isFinite(props.deadlineAtMs)) return null
   const remaining = props.deadlineAtMs - now
   if (remaining <= 0) {
     return <span className="interaction-deadline interaction-deadline-expired">已超时</span>

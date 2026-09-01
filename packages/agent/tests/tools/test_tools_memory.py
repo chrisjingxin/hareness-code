@@ -3,42 +3,133 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from harness_agent.tools.tools_mode import PlanModeState
+from harness_agent.tools.tools_mode import (
+    enter_plan_mode,
+    exit_plan_mode,
+    format_plan_decision,
+    plan_decision_tool_message,
+    request_plan_entry,
+)
+from harness_agent.runtime.run_context import RunPlanConstraint
 from harness_agent.tools.tools_memory import _sanitize_key, memory_save, memory_search
 
 
-# ---------- PlanModeState ----------
+# ---------- plan mode tools ----------
 
 
-def test_plan_mode_enter_exit():
-    state = PlanModeState(initial_mode="default")
-    result = state.enter("auto_approve")
-    assert result["success"] is True
-    assert state.active is True
-    assert state.previous_mode == "auto_approve"
-
-    result = state.exit()
-    assert result["success"] is True
-    assert result["restored_mode"] == "auto_approve"
-    assert state.active is False
-
-
-def test_plan_mode_double_enter():
-    state = PlanModeState()
-    state.enter("default")
-    result = state.enter("default")
+def test_enter_plan_mode_directs_user_to_slash_command():
+    result = enter_plan_mode()
     assert result["success"] is False
-    assert "已处于计划模式中" in result["error"]
+    assert "/plan" in result["error"]
+    assert "Shift+Tab" in result["error"]
 
 
-def test_plan_mode_exit_without_enter():
-    state = PlanModeState()
-    result = state.exit()
+def test_exit_plan_mode_directs_user_to_slash_command():
+    result = exit_plan_mode()
     assert result["success"] is False
-    assert "当前不在计划模式中" in result["error"]
+    assert "当前不在计划模式" in result["error"]
+
+
+def test_format_plan_decision_terminal_and_revise():
+    assert format_plan_decision("approved") == {"message": "已批准", "terminal": True}
+    assert format_plan_decision("abandoned") == {"message": "已放弃", "terminal": True}
+    assert format_plan_decision("revise", "")["message"] == "用户要求继续打磨计划"
+    assert format_plan_decision("revise", "")["terminal"] is False
+    assert format_plan_decision("revise", "这段不要动")["message"] == "这段不要动"
+    expired = format_plan_decision("abandoned", expired=True)
+    assert expired["terminal"] is False
+    assert expired.get("error") is True
+
+
+def test_plan_decision_tool_message_status_is_success_or_error():
+    """打回/批准/放弃必须写出合法 ToolMessage status，不能是 None。"""
+    revise = plan_decision_tool_message("exit_plan_mode", "call-1", format_plan_decision("revise", "使用ts实现"))
+    assert revise.status == "success"
+    assert revise.content == "使用ts实现"
+    approved = plan_decision_tool_message("exit_plan_mode", "call-2", format_plan_decision("approved"))
+    assert approved.status == "success"
+    expired = plan_decision_tool_message("exit_plan_mode", "call-3", format_plan_decision("abandoned", expired=True))
+    assert expired.status == "error"
+
+
+def test_request_plan_entry_approves_and_activates_same_run(monkeypatch):
+    """用户本次允许后先种子计划文件，再打开同一 Run 的计划约束。"""
+    constraint = RunPlanConstraint()
+    context = SimpleNamespace(
+        thread_id="thread-plan-entry",
+        approval_mode="default",
+        plan_constraint=constraint,
+    )
+    request = SimpleNamespace(
+        tool_call={"name": "enter_plan_mode", "id": "call-enter", "args": {}},
+        runtime=SimpleNamespace(context=context),
+    )
+    seeded: list[str] = []
+    monkeypatch.setattr(
+        "harness_agent.tools.tools_mode.require_run_context", lambda _runtime: context
+    )
+    monkeypatch.setattr(
+        "harness_agent.tools.tools_mode.ensure_plan_file", lambda thread_id: seeded.append(thread_id)
+    )
+    monkeypatch.setattr(
+        "langgraph.types.interrupt",
+        lambda _payload: {"decisions": [{"type": "approve"}]},
+    )
+
+    result = request_plan_entry(request)
+
+    assert result.status == "success"
+    assert constraint.active is True
+    assert seeded == ["thread-plan-entry"]
+    assert "/.harness/plan.md" in str(result.content)
+
+
+def test_request_plan_entry_rejection_keeps_run_unconstrained(monkeypatch):
+    """用户拒绝时不种子文件、不改变当前 Run 权限。"""
+    constraint = RunPlanConstraint()
+    context = SimpleNamespace(
+        thread_id="thread-plan-reject",
+        approval_mode="default",
+        plan_constraint=constraint,
+    )
+    request = SimpleNamespace(
+        tool_call={"name": "enter_plan_mode", "id": "call-enter", "args": {}},
+        runtime=SimpleNamespace(context=context),
+    )
+    seeded: list[str] = []
+    monkeypatch.setattr(
+        "harness_agent.tools.tools_mode.require_run_context", lambda _runtime: context
+    )
+    monkeypatch.setattr(
+        "harness_agent.tools.tools_mode.ensure_plan_file", lambda thread_id: seeded.append(thread_id)
+    )
+    monkeypatch.setattr(
+        "langgraph.types.interrupt",
+        lambda _payload: {"decisions": [{"type": "reject"}]},
+    )
+
+    result = request_plan_entry(request)
+
+    assert result.status == "error"
+    assert constraint.active is False
+    assert seeded == []
+
+
+def test_request_plan_entry_without_run_context_fails_closed():
+    """无交互 Run Context 时不能靠模型调用静默进入计划约束。"""
+    request = SimpleNamespace(
+        tool_call={"name": "enter_plan_mode", "id": "call-enter", "args": {}},
+        runtime=None,
+    )
+
+    result = request_plan_entry(request)
+
+    assert result.status == "error"
+    assert "不能请求进入计划模式" in str(result.content)
 
 
 # ---------- memory ----------

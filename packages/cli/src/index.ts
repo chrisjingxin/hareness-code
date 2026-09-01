@@ -81,8 +81,8 @@ export function clientCapabilities(command: Command): string[] {
 }
 
 /** 声明当前表现层能够处理的反向 Interaction。 */
-export function clientInteractionHandles(command: Command): Array<"approval" | "question" | "directory_trust"> {
-  return command.kind === "run" && !command.nonInteractive ? ["approval", "question", "directory_trust"] : []
+export function clientInteractionHandles(command: Command): Array<"approval" | "question" | "directory_trust" | "plan"> {
+  return command.kind === "run" && !command.nonInteractive ? ["approval", "question", "directory_trust", "plan"] : []
 }
 
 /** 启动 Python sidecar、完成 initialize 握手，并返回可关闭的运行句柄。 */

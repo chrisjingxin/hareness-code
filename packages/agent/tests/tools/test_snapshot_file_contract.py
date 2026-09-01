@@ -1359,3 +1359,103 @@ def test_evicted_prepared_plan_is_marked_consumed_and_cannot_be_reprepared(tmp_p
         tool_call_id="call-a",
         fingerprint="fingerprint-a",
     ) is True
+
+
+def test_write_file_plan_virtual_path_lands_in_home_not_workspace(tmp_path: Path) -> None:
+    """计划约束下 write_file ``/.harness/plan.md`` 必须走虚拟后端落到 home。"""
+    from harness_agent.threads.snapshots import ThreadSnapshotStore
+    from harness_agent.threads.text_backend import LocalTextMutationBackend
+    from harness_agent.threads.virtual_files import mount_harness_virtual_files
+    from harness_agent.tools.snapshot_file_contract import create_snapshot_file_tool_contract
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    backend = mount_harness_virtual_files(
+        object(),
+        registry=None,
+        thread_id="thread-plan",
+        home=home,
+        plan_writable=True,
+    )
+    contract = create_snapshot_file_tool_contract(
+        backend,
+        snapshot_store=ThreadSnapshotStore(),
+        text_backend=LocalTextMutationBackend(workspace),
+    )
+
+    written = _payload(
+        contract.dispatch(
+            _request(
+                "write_file",
+                {"file_path": "/.harness/plan.md", "content": "# 登录方案\n"},
+                thread_id="thread-plan",
+            )
+        )
+    )
+    disk = home / ".harness" / "plans" / "thread-plan.md"
+    assert written["ok"] is True
+    assert disk.read_text(encoding="utf-8") == "# 登录方案\n"
+    assert list(workspace.iterdir()) == []
+
+    overwritten = _payload(
+        contract.dispatch(
+            _request(
+                "write_file",
+                {"file_path": "/.harness/plan.md", "content": "# 修订\n"},
+                thread_id="thread-plan",
+                call_id="write-plan-2",
+            )
+        )
+    )
+    assert overwritten["ok"] is True
+    assert disk.read_text(encoding="utf-8") == "# 修订\n"
+
+    history = _payload(
+        contract.dispatch(
+            _request(
+                "write_file",
+                {"file_path": "/.harness/history/x.md", "content": "no"},
+                thread_id="thread-plan",
+                call_id="write-history",
+            )
+        )
+    )
+    assert history["ok"] is False
+    assert history["error"]["code"] == "VIRTUAL_READONLY"
+
+
+def test_write_file_plan_virtual_path_rejects_when_plan_constraint_closed(tmp_path: Path) -> None:
+    """计划约束关闭时 write_file 计划文件仍应失败，不能落到磁盘。"""
+    from harness_agent.threads.snapshots import ThreadSnapshotStore
+    from harness_agent.threads.text_backend import LocalTextMutationBackend
+    from harness_agent.threads.virtual_files import mount_harness_virtual_files
+    from harness_agent.tools.snapshot_file_contract import create_snapshot_file_tool_contract
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    backend = mount_harness_virtual_files(
+        object(),
+        registry=None,
+        thread_id="thread-plan",
+        home=home,
+        plan_writable=False,
+    )
+    contract = create_snapshot_file_tool_contract(
+        backend,
+        snapshot_store=ThreadSnapshotStore(),
+        text_backend=LocalTextMutationBackend(workspace),
+    )
+    denied = _payload(
+        contract.dispatch(
+            _request(
+                "write_file",
+                {"file_path": "/.harness/plan.md", "content": "# 不该写入\n"},
+                thread_id="thread-plan",
+            )
+        )
+    )
+    assert denied["ok"] is False
+    assert denied["error"]["code"] == "VIRTUAL_READONLY"
+    assert not (home / ".harness" / "plans" / "thread-plan.md").exists()

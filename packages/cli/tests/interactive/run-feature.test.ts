@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test"
 import { EventType } from "@za38/protocol"
-import { makeHarness, flush, notices, terminalEvent, approvalRequest } from "./harness"
+import { makeHarness, flush, notices, terminalEvent, approvalRequest, planRequest } from "./harness"
+import { PLAN_IMPLEMENT_PROMPT } from "../../src/interactive/features/run-feature"
 
 test("approval-mode.cycle 循环切换审批模式，并传递给下一次 Run", async () => {
   const harness = makeHarness()
@@ -32,6 +33,203 @@ test("approval-mode.set 直接选择审批模式，并传递给下一次 Run", a
 
     await harness.controller.dispatch({ type: "input.submit", value: "使用指定模式" })
     expect(harness.port.lastRunSelection()).toMatchObject({ message: "使用指定模式", approvalMode: "yolo" })
+  } finally {
+    await harness.controller.close()
+  }
+})
+
+test("/plan 记下进入前档位，exit 恢复；Shift+Tab 离开 plan 走到 default", async () => {
+  const harness = makeHarness()
+  try {
+    await harness.controller.dispatch({ type: "approval-mode.set", mode: "yolo" })
+    await harness.controller.dispatch({ type: "input.submit", value: "/plan" })
+    expect(harness.controller.getSnapshot().runtime.approvalMode).toBe("plan")
+    expect(harness.calls).not.toContain("run.start")
+
+    await harness.controller.dispatch({ type: "input.submit", value: "/plan exit" })
+    expect(harness.controller.getSnapshot().runtime.approvalMode).toBe("yolo")
+
+    await harness.controller.dispatch({ type: "input.submit", value: "/plan" })
+    expect(harness.controller.getSnapshot().runtime.approvalMode).toBe("plan")
+    await harness.controller.dispatch({ type: "approval-mode.cycle" })
+    expect(harness.controller.getSnapshot().runtime.approvalMode).toBe("default")
+  } finally {
+    await harness.controller.close()
+  }
+})
+
+test("/plan 带目标先切到 plan 再提交该句", async () => {
+  const harness = makeHarness()
+  try {
+    const outcome = await harness.controller.dispatch({ type: "input.submit", value: "/plan 给登录做个方案" })
+    expect(outcome).toEqual({ status: "accepted" })
+    expect(harness.controller.getSnapshot().runtime.approvalMode).toBe("plan")
+    expect(harness.port.lastRunSelection()).toMatchObject({
+      message: "给登录做个方案",
+      approvalMode: "plan",
+    })
+  } finally {
+    await harness.controller.close()
+  }
+})
+
+test("批准计划后恢复进入前档位并自动开实现轮", async () => {
+  const harness = makeHarness()
+  try {
+    await harness.controller.dispatch({ type: "approval-mode.set", mode: "yolo" })
+    await harness.controller.dispatch({ type: "input.submit", value: "/plan 给登录做个方案" })
+    const planRun = harness.runHandles.at(-1)!
+    const responsePromise = harness.port.sendInteraction(planRequest(planRun.threadId, planRun.runId))
+    await flush()
+    expect(harness.controller.getSnapshot().interaction?.type).toBe("plan")
+    expect(harness.controller.getSnapshot().interaction).toMatchObject({ hasPlan: true })
+
+    await harness.controller.dispatch({
+      type: "interaction.respond",
+      requestId: "plan-1",
+      response: { kind: "plan", decision: "approved" },
+    })
+    expect(await responsePromise).toMatchObject({ type: "plan", decision: "approved" })
+
+    harness.port.completeRun(planRun.threadId, planRun.runId)
+    await flush()
+    expect(harness.controller.getSnapshot().runtime.approvalMode).toBe("yolo")
+    expect(harness.port.lastRunSelection()).toMatchObject({
+      message: PLAN_IMPLEMENT_PROMPT,
+      approvalMode: "yolo",
+    })
+  } finally {
+    await harness.controller.close()
+  }
+})
+
+test("批准计划时的行批注附在自动实现轮提示中", async () => {
+  const harness = makeHarness()
+  try {
+    await harness.controller.dispatch({ type: "input.submit", value: "/plan 给登录做个方案" })
+    const planRun = harness.runHandles.at(-1)!
+    const responsePromise = harness.port.sendInteraction(planRequest(planRun.threadId, planRun.runId))
+    await flush()
+    const review = "Proposed plan line 2:\n> 保留协议\nComment: 不要改公开接口"
+    await harness.controller.dispatch({
+      type: "interaction.respond",
+      requestId: "plan-1",
+      response: { kind: "plan", decision: "approved", feedback: review },
+    })
+    expect(await responsePromise).toMatchObject({ type: "plan", decision: "approved", feedback: review })
+
+    harness.port.completeRun(planRun.threadId, planRun.runId)
+    await flush()
+    expect(harness.port.lastRunSelection()?.message).toBe(
+      `${PLAN_IMPLEMENT_PROMPT}\n\n批准时的审阅意见：\n${review}`,
+    )
+  } finally {
+    await harness.controller.close()
+  }
+})
+
+test("Default、AutoEdit、Auto、YOLO 进入计划后都恢复原档位并开始实现", async () => {
+  for (const mode of ["default", "auto-edit", "auto", "yolo"] as const) {
+    const harness = makeHarness()
+    try {
+      await harness.controller.dispatch({ type: "approval-mode.set", mode })
+      await harness.controller.dispatch({ type: "input.submit", value: `/plan 为 ${mode} 规划` })
+      const planRun = harness.runHandles.at(-1)!
+      const responsePromise = harness.port.sendInteraction(planRequest(planRun.threadId, planRun.runId))
+      await flush()
+      await harness.controller.dispatch({
+        type: "interaction.respond",
+        requestId: "plan-1",
+        response: { kind: "plan", decision: "approved" },
+      })
+      await responsePromise
+      harness.port.completeRun(planRun.threadId, planRun.runId)
+      await flush()
+      expect(harness.controller.getSnapshot().runtime.approvalMode).toBe(mode)
+      expect(harness.port.lastRunSelection()).toMatchObject({
+        message: PLAN_IMPLEMENT_PROMPT,
+        approvalMode: mode,
+      })
+    } finally {
+      await harness.controller.close()
+    }
+  }
+})
+
+test("/plan-view 读取当前 thread 计划为只读预览，关闭后不产生审批", async () => {
+  const harness = makeHarness({
+    initialThreadId: "thread-plan-view",
+    openThreadImpl: async threadId => ({
+      thread: { thread_id: threadId, created_at_ms: 1, updated_at_ms: 2, first_message: "规划", latest_message: "规划", message_count: 1 },
+      messages: [{ kind: "user", content: "规划" }],
+      plan: {
+        has_plan: true,
+        plan_markdown: "# 当前计划\n\n完成停点 4。",
+        plan_virtual_path: "/.harness/plan.md",
+        plan_display_path: `~/.harness/plans/${threadId}.md`,
+      },
+    }),
+  })
+  try {
+    await flush()
+    const outcome = await harness.controller.dispatch({ type: "input.submit", value: "/plan-view" })
+    expect(outcome).toEqual({ status: "accepted" })
+    expect(harness.controller.getSnapshot().interaction).toMatchObject({
+      type: "plan",
+      readOnly: true,
+      planMarkdown: "# 当前计划\n\n完成停点 4。",
+      decisions: [],
+    })
+    expect(harness.abandoned).toEqual([])
+
+    expect(await harness.controller.dispatch({ type: "plan-view.close" })).toEqual({ status: "accepted" })
+    expect(harness.controller.getSnapshot().interaction).toBeNull()
+  } finally {
+    await harness.controller.close()
+  }
+})
+
+test("放弃计划只恢复档位，不自动开跑", async () => {
+  const harness = makeHarness()
+  try {
+    await harness.controller.dispatch({ type: "approval-mode.set", mode: "yolo" })
+    await harness.controller.dispatch({ type: "input.submit", value: "/plan 给登录做个方案" })
+    const planRun = harness.runHandles.at(-1)!
+    const starts = harness.calls.filter(call => call === "run.start").length
+    const responsePromise = harness.port.sendInteraction(planRequest(planRun.threadId, planRun.runId, { has_plan: false, plan_markdown: "" }))
+    await flush()
+    await harness.controller.dispatch({
+      type: "interaction.respond",
+      requestId: "plan-1",
+      response: { kind: "plan", decision: "abandoned" },
+    })
+    expect(await responsePromise).toMatchObject({ decision: "abandoned" })
+    harness.port.completeRun(planRun.threadId, planRun.runId)
+    await flush()
+    expect(harness.controller.getSnapshot().runtime.approvalMode).toBe("yolo")
+    expect(harness.calls.filter(call => call === "run.start").length).toBe(starts)
+  } finally {
+    await harness.controller.close()
+  }
+})
+
+test("active Run 时 /plan 与 Shift+Tab 只改下一轮档位，不取消当前 Run", async () => {
+  const harness = makeHarness()
+  try {
+    await harness.controller.dispatch({ type: "input.submit", value: "第一次" })
+    const run = harness.runHandles.at(-1)!
+    const before = harness.calls.filter(call => call === "run.start").length
+
+    const planOutcome = await harness.controller.dispatch({ type: "input.submit", value: "/plan" })
+    expect(planOutcome).toEqual({ status: "accepted" })
+    expect(harness.controller.getSnapshot().runtime.approvalMode).toBe("plan")
+    expect(harness.controller.getSnapshot().activeRun?.runId).toBe(run.runId)
+    expect(harness.calls.filter(call => call === "run.start").length).toBe(before)
+
+    harness.port.completeRun(run.threadId, run.runId)
+    await flush()
+    await harness.controller.dispatch({ type: "input.submit", value: "规划问题" })
+    expect(harness.port.lastRunSelection()).toMatchObject({ message: "规划问题", approvalMode: "plan" })
   } finally {
     await harness.controller.close()
   }

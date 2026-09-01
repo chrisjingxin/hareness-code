@@ -7,6 +7,7 @@ import type {
   McpAddParams,
   McpServerStatus,
   ModelProfile,
+  PlanDecision,
   ThreadSummary,
 } from "@za38/protocol"
 
@@ -24,6 +25,9 @@ export type ApprovalDecision = "approve_once" | "approve_thread" | "approve_proj
 
 /** 目录信任决定类型，与协议 DirectoryTrustResponse.decision 保持一致。 */
 export type { DirectoryTrustDecision }
+
+/** 计划审批决定，与协议 PlanResponse.decision 保持一致。 */
+export type { PlanDecision }
 
 /** Skill catalog 项：与 Slash 菜单共用的最小领域视图。 */
 export type SkillSummary = SkillMenuItem
@@ -89,12 +93,27 @@ export type InteractiveInteraction =
       deadlineAtMs: number
       agentId?: string
     }
+  | {
+      type: "plan"
+      requestId: string
+      revision: number
+      hasPlan: boolean
+      planMarkdown: string
+      planVirtualPath: string
+      planDisplayPath: string
+      decisions: readonly PlanDecision[]
+      deadlineAtMs: number
+      agentId?: string
+      /** true 表示 /view-plan 打开的只读预览，不对应 Host Interaction。 */
+      readOnly?: boolean
+    }
 
 /** adapter 提交的答案；request_id 由 Controller 用当前 request 组装。 */
 export type InteractiveResponse =
   | { kind: "approval"; decision: ApprovalDecision; feedback?: string }
   | { kind: "question"; answers: Record<string, string[]> }
   | { kind: "directory_trust"; decision: DirectoryTrustDecision }
+  | { kind: "plan"; decision: PlanDecision; feedback?: string }
 
 /** 破坏性操作的稳定确认；adapter 通过 confirmation.resolve 回写。 */
 export type InteractiveConfirmation = {
@@ -147,6 +166,7 @@ export type InteractiveIntent =
   | { type: "mcp.add"; input: InteractiveMcpInput }
   | { type: "mcp.remove"; name: string }
   | { type: "interaction.respond"; requestId: string; response: InteractiveResponse }
+  | { type: "plan-view.close" }
   | { type: "confirmation.resolve"; confirmationId: string; confirmed: boolean }
   | { type: "approval-mode.cycle" }
   | { type: "work-mode.cycle" }

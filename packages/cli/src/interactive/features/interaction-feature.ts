@@ -1,6 +1,6 @@
 /** Interaction Feature：管理审批/问答 Interaction 卡片、定时超时与响应校验。 */
 
-import type { ApprovalResponse, DirectoryTrustResponse, InteractionRequestEnvelope, InteractionResponse } from "@za38/protocol"
+import type { ApprovalResponse, DirectoryTrustResponse, InteractionRequestEnvelope, InteractionResponse, PlanResponse } from "@za38/protocol"
 import type { Clock, IntentOutcome, InteractiveInteraction } from "../ports"
 import { appendNotice, applyInteractionRequest, markInteractionResponded, markInteractionTimeout } from "../state"
 import type { FeatureContext } from "./types"
@@ -16,10 +16,12 @@ export type ClientInteractionResponse =
   | { request_id: string; kind: "approval"; decision: ApprovalResponse["decision"]; feedback?: string }
   | { request_id: string; kind: "question"; answers: Record<string, string[]> }
   | { request_id: string; kind: "directory_trust"; decision: DirectoryTrustResponse["decision"] }
+  | { request_id: string; kind: "plan"; decision: PlanResponse["decision"]; feedback?: string }
 
 export class InteractionFeature {
   pendingInteraction: PendingInteraction | null = null
   private readonly queuedInteractions: PendingInteraction[] = []
+  private planViewer: Extract<InteractiveInteraction, { type: "plan" }> | null = null
 
   close(ctx: FeatureContext): void {
     this.settlePendingInteraction(ctx)
@@ -31,6 +33,7 @@ export class InteractionFeature {
       (item): item is PendingInteraction => item !== null,
     )
     this.pendingInteraction = null
+    this.planViewer = null
     this.queuedInteractions.length = 0
     for (const item of pending) {
       item.timerId?.()
@@ -52,10 +55,11 @@ export class InteractionFeature {
 
     return new Promise<InteractionResponse>(resolve => {
       let timerId: (() => void) | undefined
-      const timeoutMs = request.timeout_ms ?? 300_000
+      // Plan 审阅与未明确指定有限超时的交互不设倒计时超时，允许用户从容阅读与批注
+      const timeoutMs = request.type === "plan" ? undefined : request.timeout_ms
       const item: PendingInteraction = { request, resolve, timerId }
 
-      if (timeoutMs > 0 && Number.isFinite(timeoutMs)) {
+      if (typeof timeoutMs === "number" && timeoutMs > 0 && Number.isFinite(timeoutMs)) {
         timerId = ctx.scheduler.setTimeout(() => {
           this.expireInteraction(request.request_id, ctx)
         }, timeoutMs)
@@ -75,6 +79,7 @@ export class InteractionFeature {
   }
 
   private activateInteraction(item: PendingInteraction, ctx: FeatureContext): void {
+    this.planViewer = null
     this.pendingInteraction = item
     ctx.commit(current => applyInteractionRequest(current, item.request))
     ctx.publish()
@@ -144,6 +149,24 @@ export class InteractionFeature {
       return { status: "accepted" }
     }
 
+    if (pending.request.type === "plan") {
+      if (response.kind !== "plan") {
+        return { status: "rejected", code: "invalid-argument", message: "响应类型与请求不匹配" }
+      }
+      if (!pending.request.payload.decisions.includes(response.decision)) {
+        ctx.commit(current => appendNotice(current, "不支持的计划决定，已忽略。"))
+        return { status: "rejected", code: "invalid-argument", message: "Unsupported plan decision" }
+      }
+      this.resolvePending(pending, {
+        request_id: requestId,
+        type: "plan",
+        decision: response.decision,
+        feedback: response.decision === "abandoned" ? undefined : (response.feedback ?? ""),
+      }, ctx)
+      this.promoteQueuedInteraction(ctx)
+      return { status: "accepted" }
+    }
+
     if (response.kind !== "question") {
       return { status: "rejected", code: "invalid-argument", message: "响应类型与请求不匹配" }
     }
@@ -185,6 +208,8 @@ export class InteractionFeature {
     pending.resolve(response)
     const status = response.type === "question"
       ? "answered"
+      : response.type === "plan"
+        ? response.decision === "approved" ? "approved" : response.decision === "abandoned" ? "rejected" : "answered"
       : response.decision === "reject" || response.decision === "reject_with_feedback"
         ? "rejected"
         : "approved"
@@ -199,15 +224,20 @@ export class InteractionFeature {
     if (request.type === "directory_trust") {
       return { request_id: request.request_id, type: "directory_trust", decision: "deny" }
     }
+    if (request.type === "plan") {
+      return { request_id: request.request_id, type: "plan", decision: "abandoned" }
+    }
     return { request_id: request.request_id, type: "question", answers: {} }
   }
 
   /** 把 pending Interaction 转成共享 DTO；deadline 由注入 clock 计算。 */
   interactionDto(pending: PendingInteraction | null, clock: Clock): InteractiveInteraction | null {
-    if (!pending) return null
+    if (!pending) return this.planViewer
     const request = pending.request
-    const timeoutMs = request.timeout_ms ?? 300_000
-    const deadlineAtMs = clock.now() + timeoutMs
+    const timeoutMs = request.type === "plan" ? undefined : request.timeout_ms
+    const deadlineAtMs = typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0
+      ? clock.now() + timeoutMs
+      : Number.POSITIVE_INFINITY
 
     const agentId = typeof request.agent_id === "string" && request.agent_id ? request.agent_id : undefined
     if (request.type === "approval") {
@@ -239,6 +269,22 @@ export class InteractionFeature {
       }
     }
 
+    if (request.type === "plan") {
+      const payload = request.payload
+      return {
+        type: "plan",
+        requestId: request.request_id,
+        revision: payload.revision,
+        hasPlan: payload.has_plan,
+        planMarkdown: payload.plan_markdown,
+        planVirtualPath: payload.plan_virtual_path,
+        planDisplayPath: payload.plan_display_path,
+        decisions: payload.decisions,
+        deadlineAtMs,
+        ...(agentId ? { agentId } : {}),
+      }
+    }
+
     return {
       type: "question",
       requestId: request.request_id,
@@ -258,5 +304,37 @@ export class InteractionFeature {
       deadlineAtMs,
       ...(agentId ? { agentId } : {}),
     }
+  }
+
+  /** 打开当前 thread 的只读计划预览；它不是审批，不进入 pendingInteraction。 */
+  openPlanViewer(input: {
+    threadId: string
+    markdown: string
+    virtualPath: string
+    displayPath: string
+  }, ctx: FeatureContext): void {
+    this.planViewer = {
+      type: "plan",
+      requestId: `view-plan:${input.threadId}`,
+      revision: 0,
+      hasPlan: true,
+      planMarkdown: input.markdown,
+      planVirtualPath: input.virtualPath,
+      planDisplayPath: input.displayPath,
+      decisions: [],
+      deadlineAtMs: Number.POSITIVE_INFINITY,
+      readOnly: true,
+    }
+    ctx.publish()
+  }
+
+  /** 关闭 /view-plan 的本地预览；挂起审批不能用该入口关闭。 */
+  closePlanViewer(ctx: FeatureContext): IntentOutcome {
+    if (!this.planViewer) {
+      return { status: "rejected", code: "not-found", message: "No plan viewer is open" }
+    }
+    this.planViewer = null
+    ctx.publish()
+    return { status: "accepted" }
   }
 }

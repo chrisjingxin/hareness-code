@@ -18,7 +18,7 @@ import {
 } from "./application/adapter"
 import type { CommandMenuItem } from "../interactive/commands"
 import { isHomeState } from "../interactive/state"
-import type { InteractiveSnapshot } from "../interactive/types"
+import type { InteractiveSnapshot, PlanDecision } from "../interactive/types"
 import { resolveShortcut, type ScrollIntent } from "./application/shortcuts"
 import { TuiErrorBoundary } from "./presentation/error-boundary"
 import { HomeView } from "./presentation/home"
@@ -277,6 +277,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
 
   /** 全局快捷键只负责识别动作；具体状态转换由 Adapter 处理。 */
   useKeyboard(key => {
+    if (key.defaultPrevented) return
     if (shouldAttemptSelectionCopy(process.platform, { type: "key-down", name: key.name, ctrl: key.ctrl })) {
       const copying = copySelectedText()
       if (copying) {
@@ -381,6 +382,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
       commandMenuVisible: snapshot.commandMenu.visible,
       commandOptionCount: snapshot.commandOptions.length,
       activeRun: Boolean(interactive.activeRun),
+      interactionActive: Boolean(interactive.interaction),
       hasDraft: Boolean(snapshot.draft),
       inputMode: snapshot.inputMode,
       childTimelineActive: Boolean(interactive.childTimelineExecutionId),
@@ -431,6 +433,8 @@ export function Za38Tui(options: RenderedTuiOptions) {
     onToggleTool: (toolId: string) => { void adapter.dispatch({ type: "tool-toggle", toolId }) },
     onApproval: (decision: ApprovalDecision) => { void adapter.dispatch({ type: "approval", decision }) },
     onDirectoryTrust: (decision: DirectoryTrustDecision) => { void adapter.dispatch({ type: "directory-trust", decision }) },
+    onPlan: (decision: PlanDecision, feedback?: string) => { void adapter.dispatch({ type: "plan", decision, feedback }) },
+    onPlanViewClose: () => { void adapter.dispatch({ type: "plan-view-close" }) },
     onQuestion: (answers: Record<string, string[]>) => { void adapter.dispatch({ type: "question", answers }) },
     onOpenChildTimeline: (executionId: string) => { void adapter.dispatch({ type: "child-timeline-open", executionId }) },
     sidebarVisible: sidebarVisibility.visible,

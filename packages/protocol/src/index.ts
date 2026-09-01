@@ -19,6 +19,8 @@ import {
   type JsonRpcMessage,
   type OperationMap,
   type OperationName,
+  type PlanRequest,
+  type PlanResponse,
   type QuestionRequest,
   type QuestionResponse,
 } from "./generated"
@@ -27,11 +29,13 @@ export type InteractionRequestEnvelope =
   | ({ request_id: string; type: "approval" } & ApprovalRequest)
   | ({ request_id: string; type: "question" } & QuestionRequest)
   | ({ request_id: string; type: "directory_trust" } & DirectoryTrustRequest)
+  | ({ request_id: string; type: "plan" } & PlanRequest)
 
 export type InteractionResponse =
   | ({ request_id: string; type: "approval" } & ApprovalResponse)
   | ({ request_id: string; type: "question" } & QuestionResponse)
   | ({ request_id: string; type: "directory_trust" } & DirectoryTrustResponse)
+  | ({ request_id: string; type: "plan" } & PlanResponse)
 
 type ContractEntry = { params?: string; result?: string; payload?: string; min_minor?: number }
 type ContractMetadata = {

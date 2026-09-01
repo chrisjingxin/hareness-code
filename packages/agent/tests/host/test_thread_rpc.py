@@ -43,6 +43,13 @@ async def test_thread_rpc_requires_capability_and_only_lists_current_project(tmp
     )
     store = await server._ensure_thread_persistence()
     await accept_thread(store, "thread-1", "恢复这个 thread")
+    from harness_agent.tools.plan_file import write_plan_markdown
+
+    write_plan_markdown(
+        "thread-1",
+        "# 当前计划\n\n先完成停点 4。",
+        home=tmp_path / "home",
+    )
 
     await server.dispatch(_request("threads.list", {}, "list"))
     listed = frames[-1]["result"]["threads"]
@@ -61,6 +68,12 @@ async def test_thread_rpc_requires_capability_and_only_lists_current_project(tmp
     assert messages[0]["kind"] == "user"
     assert messages[0]["content"] == "恢复这个 thread"
     assert isinstance(messages[0]["created_at_ms"], int)
+    assert frames[-1]["result"]["plan"] == {
+        "has_plan": True,
+        "plan_markdown": "# 当前计划\n\n先完成停点 4。",
+        "plan_virtual_path": "/.harness/plan.md",
+        "plan_display_path": "~/.harness/plans/thread-1.md",
+    }
     await server.close()
 
 

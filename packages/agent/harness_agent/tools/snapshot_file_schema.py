@@ -10,6 +10,7 @@ from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, ConfigDict, Field
 
 from harness_agent.tools.file_tools import FileToolContractError
+from harness_agent.tools.plan_file import is_plan_virtual_path
 
 DEFAULT_READ_LIMIT = 100
 """与既有 read_file 相同的默认读取行数。"""
@@ -127,7 +128,7 @@ def _placeholder_tool(*, name: str, description: str, args_schema: type[BaseMode
 
 
 def path_argument(args: dict[str, Any], field: str, name: str) -> str:
-    """验证 DeepAgents virtual path，并保护 /.harness 只读命名空间。"""
+    """验证 DeepAgents virtual path；/.harness 默认只读，会话计划文件允许 write/edit。"""
     value = args.get(field)
     if not isinstance(value, str) or not value:
         raise FileToolContractError("FILE_TOOL_PATH_INVALID")
@@ -136,6 +137,8 @@ def path_argument(args: dict[str, Any], field: str, name: str) -> str:
     except ValueError as exc:
         raise FileToolContractError("FILE_TOOL_PATH_INVALID") from exc
     if is_harness_virtual_path(path) and name != "read_file":
+        if name in {"write_file", "edit_file"} and is_plan_virtual_path(path):
+            return path
         raise FileToolContractError("VIRTUAL_READONLY")
     return path
 

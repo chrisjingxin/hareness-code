@@ -402,7 +402,13 @@
           "latest_message": "x",
           "message_count": 1
         },
-        "messages": []
+        "messages": [],
+        "plan": {
+          "has_plan": false,
+          "plan_markdown": "x",
+          "plan_virtual_path": "/.harness/plan.md",
+          "plan_display_path": "x"
+        }
       }
     },
     {
@@ -426,7 +432,13 @@
           "latest_message": "x",
           "message_count": 1
         },
-        "messages": []
+        "messages": [],
+        "plan": {
+          "has_plan": false,
+          "plan_markdown": "x",
+          "plan_virtual_path": "/.harness/plan.md",
+          "plan_display_path": "x"
+        }
       }
     },
     {
@@ -1435,6 +1447,34 @@
       "case": "valid",
       "value": {
         "decision": "allow_session"
+      }
+    },
+    {
+      "kind": "interaction.params",
+      "name": "interaction.plan",
+      "case": "valid",
+      "value": {
+        "thread_id": "x",
+        "run_id": "x",
+        "timeout_ms": 1,
+        "payload": {
+          "interrupt_id": "x",
+          "tool_call_id": "x",
+          "revision": 1,
+          "has_plan": false,
+          "plan_markdown": "x",
+          "plan_virtual_path": "/.harness/plan.md",
+          "plan_display_path": "x",
+          "decisions": []
+        }
+      }
+    },
+    {
+      "kind": "interaction.result",
+      "name": "interaction.plan",
+      "case": "valid",
+      "value": {
+        "decision": "approved"
       }
     },
     {
@@ -2625,6 +2665,12 @@
           "message_count": 1
         },
         "messages": [],
+        "plan": {
+          "has_plan": false,
+          "plan_markdown": "x",
+          "plan_virtual_path": "/.harness/plan.md",
+          "plan_display_path": "x"
+        },
         "__extra": true
       }
     },
@@ -2633,7 +2679,13 @@
       "name": "threads.open",
       "case": "missing_field",
       "value": {
-        "messages": []
+        "messages": [],
+        "plan": {
+          "has_plan": false,
+          "plan_markdown": "x",
+          "plan_virtual_path": "/.harness/plan.md",
+          "plan_display_path": "x"
+        }
       }
     },
     {
@@ -2677,6 +2729,12 @@
           "message_count": 1
         },
         "messages": [],
+        "plan": {
+          "has_plan": false,
+          "plan_markdown": "x",
+          "plan_virtual_path": "/.harness/plan.md",
+          "plan_display_path": "x"
+        },
         "__extra": true
       }
     },
@@ -2685,7 +2743,13 @@
       "name": "threads.watch",
       "case": "missing_field",
       "value": {
-        "messages": []
+        "messages": [],
+        "plan": {
+          "has_plan": false,
+          "plan_markdown": "x",
+          "plan_virtual_path": "/.harness/plan.md",
+          "plan_display_path": "x"
+        }
       }
     },
     {
@@ -4859,6 +4923,73 @@
     {
       "kind": "interaction.result",
       "name": "interaction.directory_trust",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
+      "kind": "interaction.params",
+      "name": "interaction.plan",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "interaction.params",
+      "name": "interaction.plan",
+      "case": "extra_field",
+      "value": {
+        "thread_id": "x",
+        "run_id": "x",
+        "timeout_ms": 1,
+        "payload": {
+          "interrupt_id": "x",
+          "tool_call_id": "x",
+          "revision": 1,
+          "has_plan": false,
+          "plan_markdown": "x",
+          "plan_virtual_path": "/.harness/plan.md",
+          "plan_display_path": "x",
+          "decisions": []
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "interaction.params",
+      "name": "interaction.plan",
+      "case": "missing_field",
+      "value": {
+        "run_id": "x",
+        "timeout_ms": 1,
+        "payload": {
+          "interrupt_id": "x",
+          "tool_call_id": "x",
+          "revision": 1,
+          "has_plan": false,
+          "plan_markdown": "x",
+          "plan_virtual_path": "/.harness/plan.md",
+          "plan_display_path": "x",
+          "decisions": []
+        }
+      }
+    },
+    {
+      "kind": "interaction.result",
+      "name": "interaction.plan",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "interaction.result",
+      "name": "interaction.plan",
+      "case": "extra_field",
+      "value": {
+        "decision": "approved",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "interaction.result",
+      "name": "interaction.plan",
       "case": "missing_field",
       "value": {}
     },

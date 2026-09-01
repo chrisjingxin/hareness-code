@@ -102,7 +102,7 @@ export function InputBar(props: Pick<SharedViewProps, "interactive" | "terminalW
                 cursorColor={accent}
                 minHeight={2}
                 maxHeight={6}
-                keyBindings={INPUT_BAR_KEY_BINDINGS}
+                keyBindings={SUBMIT_ON_ENTER_KEY_BINDINGS}
                 focused={(!busy || awaitingQuestion) && !props.pickerVisible}
                 onContentChange={() => props.onInput(props.inputRef.current?.plainText ?? "")}
                 onKeyDown={props.onInputBarKeyDown}
@@ -121,7 +121,7 @@ export function InputBar(props: Pick<SharedViewProps, "interactive" | "terminalW
               cursorColor={accent}
               minHeight={1}
               maxHeight={6}
-              keyBindings={INPUT_BAR_KEY_BINDINGS}
+              keyBindings={SUBMIT_ON_ENTER_KEY_BINDINGS}
               focused={(!busy || awaitingQuestion) && !props.pickerVisible}
               onContentChange={() => props.onInput(props.inputRef.current?.plainText ?? "")}
               onKeyDown={props.onInputBarKeyDown}
@@ -389,7 +389,7 @@ const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", 
  * Textarea 默认把 Enter 绑定为换行，和 Coding Agent 的终端习惯不符。
  * 覆盖同一按键后 Enter 用于发送，仍为需要多行提示词的用户保留 Shift+Enter。
  */
-const INPUT_BAR_KEY_BINDINGS: Array<{ name: string; shift?: boolean; action: "submit" | "newline" }> = [
+export const SUBMIT_ON_ENTER_KEY_BINDINGS: Array<{ name: string; shift?: boolean; action: "submit" | "newline" }> = [
   { name: "return", action: "submit" },
   { name: "kpenter", action: "submit" },
   { name: "linefeed", action: "submit" },

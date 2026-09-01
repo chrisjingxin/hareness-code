@@ -21,7 +21,8 @@ from harness_agent.tools.tools_intelligence import lsp as _lsp_impl
 from harness_agent.tools.tools_intelligence import tool_search as _tool_search_impl
 from harness_agent.tools.tools_memory import memory_save as _memory_save_impl
 from harness_agent.tools.tools_memory import memory_search as _memory_search_impl
-from harness_agent.tools.tools_mode import PlanModeState
+from harness_agent.tools.tools_mode import enter_plan_mode as enter_plan_mode_impl
+from harness_agent.tools.tools_mode import exit_plan_mode as exit_plan_mode_impl
 
 logger = logging.getLogger(__name__)
 
@@ -67,8 +68,6 @@ def create_harness_tools(
     Returns:
         可直接传入 create_deep_agent(tools=...) 的工具列表。
     """
-    # 共享状态实例（每次构图创建新的）
-    plan_state = PlanModeState()
     tools: list[StructuredTool] = []
 
     # --- web_search ---
@@ -205,26 +204,27 @@ def create_harness_tools(
 
     # --- enter_plan_mode ---
     def _enter_plan_mode() -> str:
-        """进入计划模式，后续仅允许只读工具。"""
-        result = plan_state.enter("default")
-        return json.dumps(result, ensure_ascii=False)
+        """非图执行入口返回手动切换提示；图内由常驻权限门接管。"""
+        return json.dumps(enter_plan_mode_impl(), ensure_ascii=False)
 
     tools.append(StructuredTool.from_function(
         func=_enter_plan_mode,
         name="enter_plan_mode",
-        description="进入计划模式。进入后仅允许只读工具（读取、搜索、提问），不能修改文件或执行命令。",
+        description=(
+            "当用户明确要求先规划时，提议在当前 Run 进入计划模式。"
+            "调用后必须等待用户批准；不得替用户决定。"
+        ),
     ))
 
     # --- exit_plan_mode ---
     def _exit_plan_mode() -> str:
-        """退出计划模式，恢复到之前的审批模式。"""
-        result = plan_state.exit()
-        return json.dumps(result, ensure_ascii=False)
+        """读取会话计划文件并交给用户审批；非计划模式立即错误。"""
+        return json.dumps(exit_plan_mode_impl(), ensure_ascii=False)
 
     tools.append(StructuredTool.from_function(
         func=_exit_plan_mode,
         name="exit_plan_mode",
-        description="退出计划模式，恢复到进入前的审批模式。",
+        description="把已写入的 `/.harness/plan.md` 交给用户审批。调用前必须先用 write_file 写好计划；无参数。",
     ))
     # 延迟加载模式（Phase 2）：按名单收集内置低频工具作为搜索候选。
     deferred_builtin: list[StructuredTool] = []

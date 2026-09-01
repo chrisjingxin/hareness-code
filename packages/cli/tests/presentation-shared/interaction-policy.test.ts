@@ -14,6 +14,14 @@ import {
   directoryTrustDecisionDescription,
   directoryTrustDecisionLabel,
   isDirectoryTrustDecision,
+  PLAN_DECISION_ORDER,
+  isPlanDecision,
+  planDecisionDescription,
+  planDecisionLabel,
+  planPreviewHeight,
+  isPlanFeedbackSubmitKey,
+  createPlanAnnotation,
+  formatPlanReviewFeedback,
 } from "../../src/presentation-shared/interaction-policy"
 
 test("approval 选项顺序稳定：先批准类、再拒绝类", () => {
@@ -42,6 +50,61 @@ test("directory_trust 使用独立决策枚举与专用文案", () => {
   expect(directoryTrustDecisionDescription("deny")).toBe("不信任该目录并告知 Agent")
   expect(isDirectoryTrustDecision("allow_session")).toBe(true)
   expect(isDirectoryTrustDecision("approve_thread")).toBe(false)
+})
+
+test("计划审批三个中文动作，不含审批档位选项", () => {
+  expect(PLAN_DECISION_ORDER).toEqual(["approved", "revise", "abandoned"])
+  expect(planDecisionLabel("approved")).toBe("批准并开始实现")
+  expect(planDecisionLabel("revise")).toBe("继续打磨")
+  expect(planDecisionLabel("abandoned")).toBe("放弃计划")
+  expect(planDecisionDescription("approved")).toContain("进入前权限")
+  expect(isPlanDecision("approved")).toBe(true)
+  expect(isPlanDecision("auto-edit")).toBe(false)
+  expect(isPlanDecision("approve_once")).toBe(false)
+})
+
+test("计划预览占满终端减去标题和动作栏", () => {
+  expect(planPreviewHeight(24)).toBe(10)
+  expect(planPreviewHeight(40)).toBe(26)
+  expect(planPreviewHeight(80)).toBe(66)
+})
+
+test("打回意见 Enter 提交、Shift+Enter 换行", () => {
+  expect(isPlanFeedbackSubmitKey({ key: "Enter" })).toBe(true)
+  expect(isPlanFeedbackSubmitKey({ key: "Enter", shiftKey: true })).toBe(false)
+  expect(isPlanFeedbackSubmitKey({ key: "Enter", nativeEvent: { isComposing: true } })).toBe(false)
+  expect(isPlanFeedbackSubmitKey({ key: "a" })).toBe(false)
+})
+
+test("计划批注锚定原始 Markdown 的 1-based 行范围，并保留摘录", () => {
+  expect(createPlanAnnotation(
+    "# 方案\n第一步：保留协议\n第二步：替换界面\n验证测试",
+    2,
+    4,
+    "这两步不要拆开",
+  )).toEqual({
+    id: expect.any(String),
+    startLine: 2,
+    endLine: 4,
+    text: "这两步不要拆开",
+    excerpt: "第一步：保留协议\n第二步：替换界面",
+  })
+  expect(createPlanAnnotation("只有一行", 0, 1, "越界")).toBeNull()
+  expect(createPlanAnnotation("只有一行", 1, 2, "   ")).toBeNull()
+})
+
+test("计划批注与整体意见统一编成模型可读 feedback", () => {
+  const annotation = createPlanAnnotation(
+    "# 方案\n先改协议\n再改界面",
+    2,
+    3,
+    "不要修改协议",
+  )!
+  const feedback = formatPlanReviewFeedback([annotation], "请先补风险说明")
+  expect(feedback).toContain("Proposed plan line 2:")
+  expect(feedback).toContain("> 先改协议")
+  expect(feedback).toContain("Comment: 不要修改协议")
+  expect(feedback).toContain("Additional feedback:\n请先补风险说明")
 })
 
 test("presentation kind 读取对畸形结构安全降级", () => {

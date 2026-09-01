@@ -265,7 +265,7 @@ _CONCURRENCY_SAFE_TOOLS = frozenset({
     "ls", "read_file", "glob", "grep", "web_search",
     "lsp", "tool_search", "memory_search",
     "ask_user", "write_todos", "memory_save",
-    "enter_plan_mode", "exit_plan_mode",
+    "exit_plan_mode",
 })
 
 
@@ -305,6 +305,26 @@ def extract_interaction(
     interrupt = (interrupts if isinstance(interrupts, (list, tuple)) else [interrupts])[0]
     value = getattr(interrupt, "value", interrupt)
     interrupt_id = str(getattr(interrupt, "id", uuid.uuid4()))
+    if isinstance(value, Mapping) and value.get("type") == "plan":
+        markdown = str(value.get("plan_markdown") or "")
+        return (
+            StreamInteractionRequest(
+                request_id=interrupt_id,
+                type="plan",
+                payload={
+                    "interrupt_id": interrupt_id,
+                    "tool_call_id": str(value.get("tool_call_id") or ""),
+                    "revision": int(value.get("revision") or 0),
+                    "has_plan": bool(value.get("has_plan")),
+                    "plan_markdown": markdown,
+                    "plan_virtual_path": str(value.get("plan_virtual_path") or "/.harness/plan.md"),
+                    "plan_display_path": str(value.get("plan_display_path") or ""),
+                    "decisions": ["approved", "revise", "abandoned"],
+                },
+                interrupt_id=interrupt_id,
+            ),
+            None,
+        )
     if isinstance(value, Mapping) and value.get("type") == "ask_user":
         raw_questions = value.get("questions")
         questions = tuple(q for q in raw_questions or [] if isinstance(q, Mapping))
@@ -413,6 +433,14 @@ def resume_value(spec: StreamInteractionRequest, response: object) -> dict[str, 
     """将语言无关的提问结果映射回 LangGraph interrupt resume 契约。"""
     if not isinstance(response, dict):
         response = {}
+    if spec.type == "plan":
+        return {
+            spec.interrupt_id: {
+                "decision": str(response.get("decision") or "abandoned"),
+                "feedback": str(response.get("feedback") or ""),
+                "expired": bool(response.get("expired")),
+            }
+        }
     answers_by_id = response.get("answers", {})
     answers: list[str] = []
     if isinstance(answers_by_id, Mapping):

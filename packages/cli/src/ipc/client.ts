@@ -616,7 +616,9 @@ export class AgentClient {
         ? "approval" as const
         : method === Method.INTERACTION_DIRECTORY_TRUST
           ? "directory_trust" as const
-          : "question" as const
+          : method === Method.INTERACTION_PLAN
+            ? "plan" as const
+            : "question" as const
       const request = {
         ...validated,
         request_id: id,
@@ -630,7 +632,9 @@ export class AgentClient {
         ? { decision: result.decision, feedback: result.feedback }
         : result.type === "directory_trust"
           ? { decision: result.decision }
-          : { answers: result.answers }
+          : result.type === "plan"
+            ? { decision: result.decision, feedback: result.feedback }
+            : { answers: result.answers }
       validateInteractionResult(method as InteractionMethod, wireResult)
       this.inboundRequests.delete(id)
       await this.send({ jsonrpc: "2.0", id, result: wireResult })

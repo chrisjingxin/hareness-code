@@ -59,12 +59,17 @@ test("active Run 时 model.select 被拒绝（busy）", async () => {
   }
 })
 
-test("active Run 时 approval-mode.cycle 被拒绝（busy）", async () => {
+test("active Run 时 approval-mode.cycle 只改下一轮档位，不取消当前 Run", async () => {
   const harness = makeHarness()
   try {
     await harness.controller.dispatch({ type: "input.submit", value: "运行中" })
+    const run = harness.runHandles.at(-1)!
+    const before = harness.calls.filter(call => call === "run.start").length
     const outcome = await harness.controller.dispatch({ type: "approval-mode.cycle" })
-    expect(outcome).toMatchObject({ status: "rejected", code: "busy" })
+    expect(outcome).toEqual({ status: "accepted" })
+    expect(harness.controller.getSnapshot().runtime.approvalMode).toBe("auto-edit")
+    expect(harness.controller.getSnapshot().activeRun?.runId).toBe(run.runId)
+    expect(harness.calls.filter(call => call === "run.start").length).toBe(before)
   } finally {
     await harness.controller.close()
   }

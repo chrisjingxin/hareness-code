@@ -236,6 +236,105 @@ async def test_default_hitl_registers_prepared_file_diff_for_host_approval(tmp_p
     assert "+approved" in presentation["unified_diff"]
 
 
+async def test_runtime_plan_entry_rejects_project_write_in_same_graph_run(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """用户点头恢复同一 Run 后，项目写入直接硬拒，不再弹普通 mutation 审批。"""
+    from langchain_core.messages import ToolMessage
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.types import Command
+
+    from harness_agent.runtime.agent import create_harness_agent
+    from harness_agent.runtime.run_context import RunContext
+    from harness_agent.threads.context_lifecycle import prepare_embedded_context_snapshot
+
+    enter = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "enter_plan_mode",
+                "args": {},
+                "id": "call-enter-plan",
+                "type": "tool_call",
+            }
+        ],
+    )
+    forbidden_write = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "write_file",
+                "args": {"file_path": "/blocked.txt", "content": "no"},
+                "id": "call-blocked-write",
+                "type": "tool_call",
+            }
+        ],
+    )
+    model = ToolCallingFakeChatModel(
+        messages=iter([enter, forbidden_write, AIMessage(content="done")])
+    )
+    model.profile = {"max_input_tokens": 200_000}
+    agent = create_harness_agent(
+        model,
+        cwd=str(tmp_path),
+        checkpointer=MemorySaver(),
+        approval_mode="default",
+        enable_skills=False,
+        enable_memory=False,
+        enable_ask_user=False,
+        shared_engine=True,
+    )
+    context = RunContext(
+        thread_id="runtime-plan-entry",
+        run_id="run-runtime-plan-entry",
+        context_snapshot=prepare_embedded_context_snapshot(
+            thread_id="runtime-plan-entry",
+            system_prompt="test",
+            workspace=str(tmp_path),
+            sandboxed=False,
+            provider=None,
+            approval_mode="default",
+            skill_registry=None,
+            enable_memory=False,
+            enable_skills=False,
+            enable_ask_user=False,
+        ),
+        approval_mode="default",
+    )
+    monkeypatch.setattr(
+        "harness_agent.tools.tools_mode.ensure_plan_file", lambda _thread_id: None
+    )
+    config = {"configurable": {"thread_id": "runtime-plan-entry"}}
+
+    first = await agent.ainvoke(
+        {"messages": [HumanMessage(content="先做计划")]},
+        config=config,
+        context=context,
+    )
+    entry_interrupt = first["__interrupt__"][0]
+    resumed = await agent.ainvoke(
+        Command(
+            resume={
+                entry_interrupt.id: {"decisions": [{"type": "approve"}]}
+            }
+        ),
+        config=config,
+        context=context,
+    )
+
+    assert "__interrupt__" not in resumed
+    rejection = next(
+        message
+        for message in resumed["messages"]
+        if isinstance(message, ToolMessage)
+        and message.tool_call_id == "call-blocked-write"
+    )
+    assert rejection.status == "error"
+    assert "计划模式拒绝 write_file" in str(rejection.content)
+    assert context.plan_constraint.active is True
+    assert not (tmp_path / "blocked.txt").exists()
+
+
 async def test_production_toolnode_attaches_bounded_lsp_diagnostics_after_write(tmp_path: Path):
     """真实 ToolNode 的异步文件入口在提交后追加 LSP 摘要，而不会回显诊断正文。"""
     import json
@@ -400,6 +499,13 @@ def test_context_snapshot_middleware_appends_current_run_mode_fact():
     asyncio.run(RunContextSnapshotMiddleware().awrap_model_call(request, handler))
 
     assert "审批模式：YOLO" in captured["system"]
+    assert captured["system"].count("## 审批模式：") == 1
+
+    context.plan_constraint.activate()
+    asyncio.run(RunContextSnapshotMiddleware().awrap_model_call(request, handler))
+
+    assert "审批模式：计划" in captured["system"]
+    assert "审批模式：YOLO" not in captured["system"]
     assert captured["system"].count("## 审批模式：") == 1
 
 

@@ -38,6 +38,8 @@ export type SharedViewProps = {
   onToggleTool: (toolId: string) => void
   onApproval: (decision: ApprovalDecision) => void
   onDirectoryTrust: (decision: DirectoryTrustDecision) => void
+  onPlan: (decision: import("../../interactive/types").PlanDecision, feedback?: string) => void
+  onPlanViewClose: () => void
   onQuestion: (answers: Record<string, string[]>) => void
   onOpenChildTimeline?: (executionId: string) => void
   sidebarVisible?: boolean

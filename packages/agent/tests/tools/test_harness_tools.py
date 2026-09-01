@@ -134,3 +134,32 @@ def test_tools_exclude_removed_background_tools():
     tools = create_harness_tools("/tmp")
     names = {tool.name for tool in tools}
     assert names.isdisjoint({"monitor", "task_output", "task_stop"})
+
+
+def test_enter_plan_mode_tool_directs_user_to_slash_command():
+    """enter_plan_mode 不再维护假开关，只提示用户使用 /plan。"""
+    tools = create_harness_tools("/tmp")
+    enter = next(tool for tool in tools if tool.name == "enter_plan_mode")
+    result = json.loads(enter.invoke({}))
+    assert result["success"] is False
+    assert "/plan" in result["error"]
+    assert "Shift+Tab" in result["error"]
+
+
+def test_exit_plan_mode_tool_without_plan_constraint_errors():
+    """非计划图调用 exit_plan_mode 立即错误，不停交互。"""
+    tools = create_harness_tools("/tmp")
+    exit_tool = next(tool for tool in tools if tool.name == "exit_plan_mode")
+    result = json.loads(exit_tool.invoke({}))
+    assert result["success"] is False
+    assert "当前不在计划模式" in result["error"]
+
+
+def test_exit_plan_mode_description_submits_written_plan():
+    """模型可见描述必须是提交计划，而不是提示用户 /plan exit。"""
+    tools = create_harness_tools("/tmp")
+    exit_tool = next(tool for tool in tools if tool.name == "exit_plan_mode")
+    description = str(exit_tool.description)
+    assert "/.harness/plan.md" in description
+    assert "write_file" in description
+    assert "/plan exit" not in description

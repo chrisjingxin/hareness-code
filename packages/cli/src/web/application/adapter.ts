@@ -152,6 +152,7 @@ export type WebIntent =
   | { type: "workspace-preview-refresh"; path: string }
   | { type: "interaction-draft-change"; requestId: string; patch: WebInteractionDraftPatch }
   | { type: "interaction-submit"; requestId: string; response: InteractiveResponse }
+  | { type: "plan-view-close" }
   | { type: "confirmation-resolve"; confirmationId: string; confirmed: boolean }
   | { type: "tool-toggle"; runId: string; toolId: string }
   | { type: "approval-mode-cycle" }
@@ -445,6 +446,9 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
         return
       case "interaction-submit":
         await this.submitInteraction(intent.requestId, intent.response)
+        return
+      case "plan-view-close":
+        await this.executeCoreIntent({ type: "plan-view.close" })
         return
       case "confirmation-resolve":
         await this.executeCoreIntent({ type: "confirmation.resolve", confirmationId: intent.confirmationId, confirmed: intent.confirmed })

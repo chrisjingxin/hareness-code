@@ -78,7 +78,8 @@
     "interactions": {
       "interaction.approval": { "params": "#/$defs/approvalRequest", "result": "#/$defs/approvalResponse", "handle": "approval" },
       "interaction.question": { "params": "#/$defs/questionRequest", "result": "#/$defs/questionResponse", "handle": "question" },
-      "interaction.directory_trust": { "params": "#/$defs/directoryTrustRequest", "result": "#/$defs/directoryTrustResponse", "handle": "directory_trust" }
+      "interaction.directory_trust": { "params": "#/$defs/directoryTrustRequest", "result": "#/$defs/directoryTrustResponse", "handle": "directory_trust" },
+      "interaction.plan": { "params": "#/$defs/planRequest", "result": "#/$defs/planResponse", "handle": "plan" }
     },
     "capabilities": [
       "run.cancel", "run.multithread", "host.control", "config.read", "config.write", "threads.read",
@@ -198,7 +199,7 @@
       "required": ["requests", "handles"],
       "properties": {
         "requests": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
-        "handles": { "type": "array", "items": { "enum": ["approval", "question", "directory_trust"] }, "uniqueItems": true }
+        "handles": { "type": "array", "items": { "enum": ["approval", "question", "directory_trust", "plan"] }, "uniqueItems": true }
       },
       "additionalProperties": false
     },
@@ -244,7 +245,7 @@
           "properties": {
             "available": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
             "enabled": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
-            "handles": { "type": "array", "items": { "enum": ["approval", "question", "directory_trust"] }, "uniqueItems": true }
+            "handles": { "type": "array", "items": { "enum": ["approval", "question", "directory_trust", "plan"] }, "uniqueItems": true }
           },
           "additionalProperties": false
         },
@@ -622,12 +623,24 @@
       "additionalProperties": false
     },
     "threadsOpenResult": {
-      "type": "object", "required": ["thread", "messages"],
+      "type": "object", "required": ["thread", "messages", "plan"],
       "properties": {
         "thread": { "$ref": "#/$defs/threadSummary" },
         "messages": { "type": "array", "items": { "$ref": "#/$defs/threadMessage" } },
+        "plan": { "$ref": "#/$defs/threadPlan" },
         "thread_mode": { "oneOf": [{ "$ref": "#/$defs/interactionMode" }, { "type": "null" }] },
         "compose_progress": { "oneOf": [{ "$ref": "#/$defs/composeProgress" }, { "type": "null" }] }
+      },
+      "additionalProperties": false
+    },
+    "threadPlan": {
+      "type": "object",
+      "required": ["has_plan", "plan_markdown", "plan_virtual_path", "plan_display_path"],
+      "properties": {
+        "has_plan": { "type": "boolean" },
+        "plan_markdown": { "type": "string" },
+        "plan_virtual_path": { "const": "/.harness/plan.md" },
+        "plan_display_path": { "type": "string" }
       },
       "additionalProperties": false
     },
@@ -1221,7 +1234,7 @@
     },
     "interactionResolvedPayload": {
       "type": "object", "required": ["request_id", "type"],
-      "properties": { "request_id": { "type": "string" }, "type": { "enum": ["approval", "question", "directory_trust"] } },
+      "properties": { "request_id": { "type": "string" }, "type": { "enum": ["approval", "question", "directory_trust", "plan"] } },
       "additionalProperties": false
     },
     "usage": {
@@ -1307,6 +1320,44 @@
       "type": "object", "required": ["decision"],
       "properties": {
         "decision": { "$ref": "#/$defs/directoryTrustDecision" }
+      },
+      "additionalProperties": false
+    },
+    "planDecision": {
+      "type": "string",
+      "enum": ["approved", "revise", "abandoned"]
+    },
+    "planRequest": {
+      "type": "object", "required": ["thread_id", "run_id", "timeout_ms", "payload"],
+      "properties": {
+        "thread_id": { "type": "string" }, "run_id": { "type": "string" }, "timeout_ms": { "type": "integer", "minimum": 1 },
+        "execution_id": { "type": "string", "minLength": 1 },
+        "parent_execution_id": { "type": ["string", "null"], "minLength": 1 },
+        "agent_id": { "type": "string", "minLength": 1 },
+        "compose_scope": { "$ref": "#/$defs/composeActivityScope" },
+        "payload": {
+          "type": "object",
+          "required": ["interrupt_id", "tool_call_id", "revision", "has_plan", "plan_markdown", "plan_virtual_path", "plan_display_path", "decisions"],
+          "properties": {
+            "interrupt_id": { "type": "string" },
+            "tool_call_id": { "type": "string" },
+            "revision": { "type": "integer" },
+            "has_plan": { "type": "boolean" },
+            "plan_markdown": { "type": "string" },
+            "plan_virtual_path": { "const": "/.harness/plan.md" },
+            "plan_display_path": { "type": "string" },
+            "decisions": { "type": "array", "items": { "$ref": "#/$defs/planDecision" } }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "planResponse": {
+      "type": "object", "required": ["decision"],
+      "properties": {
+        "decision": { "$ref": "#/$defs/planDecision" },
+        "feedback": { "type": "string", "default": "" }
       },
       "additionalProperties": false
     },

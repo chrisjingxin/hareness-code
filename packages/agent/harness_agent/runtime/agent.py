@@ -23,22 +23,27 @@ from harness_agent.policy.approval_policy import (
     DenyRulesMiddleware,
     PlanModeMiddleware,
     approval_mode_prompt,
+    classify_plan_shell_command,
     interrupt_on_for_approval_mode,
 )
 from harness_agent.policy.auto_mode import evaluate_auto_mode
-from harness_agent.policy.bash_matcher import allow_remainder_triggers_floor
-from harness_agent.policy.permission_rules import PermissionRule, evaluate_tool_rules
-from harness_agent.policy.sensitive_paths import requires_safety_check
-from harness_agent.policy.safe_commands import is_safe_command
 from harness_agent.policy.bash_floors import evaluate_safety_floors
+from harness_agent.policy.bash_matcher import allow_remainder_triggers_floor
 from harness_agent.policy.bash_parser import extract_segments
+from harness_agent.policy.permission_rules import PermissionRule, evaluate_tool_rules
+from harness_agent.policy.safe_commands import is_safe_command
+from harness_agent.policy.sensitive_paths import requires_safety_check
 from harness_agent.policy.tool_risk import ToolKind, get_tool_kind
 from harness_agent.threads.context_lifecycle import (
     RunContextSnapshot,
     prepare_embedded_context_snapshot,
 )
 from harness_agent.threads.prompting import sha256_text, tool_schema_fingerprint
-from harness_agent.runtime.run_context import RunContext, RunContextSnapshotMiddleware
+from harness_agent.runtime.run_context import (
+    RunContext,
+    RunContextSnapshotMiddleware,
+    plan_constraint_active,
+)
 from harness_agent.tools.file_tool_catalog import FILE_TOOL_SCHEMA_SHAPES
 
 if TYPE_CHECKING:
@@ -68,8 +73,9 @@ _LOCAL_SUBAGENT_BOUNDARY_PROMPT = """
 或操作系统绝对路径。不要尝试访问工作目录外的路径，也不要通过符号链接或
 `..` 绕过此限制。`glob` 和 `grep` 可省略 `path` 参数，默认从 `/` 搜索。
 
-`/.harness/` 是只读虚拟命名空间；只允许通过 `read_file` 按路径读取，不能
-列举、搜索、写入、编辑或在 shell 命令中访问。
+`/.harness/` 是虚拟命名空间。Skill 与历史只允许通过 `read_file` 按路径读取，
+不能列举、搜索、写入或在 shell 命令中访问。会话计划文件 `/.harness/plan.md`
+在计划模式下可以用 `write_file` / `edit_file` 覆盖写入，不能删除。
 
 修改已有文件前，必须先 `read_file` 并在 `edit_file` 中提交该次返回的
 `snapshot_id` 和唯一 `old_string`；不支持 `replace_all`、行号 range 或批量 edits。
@@ -568,6 +574,30 @@ def _make_approval_preflight(
         if not isinstance(tool_args, dict):
             tool_args = {}
 
+        # default/auto 等图可在同一 Run 内经 enter_plan_mode 动态收紧。
+        # execute 在静态 plan 和动态约束下共用三态判定；未知才弹一次审批。
+        runtime_context = getattr(getattr(request, "runtime", None), "context", None)
+        runtime_plan_active = plan_constraint_active(runtime_context)
+        if (approval_mode == "plan" or runtime_plan_active) and tool_name == "execute":
+            rules = rules_provider() if rules_provider is not None else []
+            if rules and evaluate_tool_rules(tool_name, tool_args, rules) == "deny":
+                return False
+            return classify_plan_shell_command(tool_args.get("command")) == "ask"
+        if approval_mode == "yolo":
+            # YOLO 图的 execute HITL 平时休眠，只为同一 Run 动态进入 Plan 预留。
+            return False
+
+        # 动态 Plan 下其它非只读工具跳过普通审批，由执行边界硬拒绝。
+        # 工作区外只读访问仍保留目录信任卡片，与初始 plan 图一致。
+        if runtime_plan_active and tool_name not in {
+            "ls",
+            "read_file",
+            "glob",
+            "grep",
+            "lsp",
+        }:
+            return False
+
         if tool_name == "task":
             target = str(tool_args.get("subagent_type") or tool_args.get("agent") or "")
             if target == "explore":
@@ -857,9 +887,9 @@ def create_harness_agent(
         agent_middleware.append(
             CapabilityPolicyMiddleware(capability_view)
         )
-    if approval_mode == "plan":
-        # 必须早于文件边界和 HITL 执行：计划模式不应先创建审批再自动拒绝。
-        agent_middleware.append(PlanModeMiddleware())
+    # 常驻以承接同一 Run 内用户点头进入计划；未受计划约束时透明放行。
+    # 必须早于文件边界和 HITL 执行，避免先创建 mutation 审批再自动拒绝。
+    agent_middleware.append(PlanModeMiddleware(approval_mode))
     if approval_mode == "auto":
         # F3 破坏性命令守卫：预检对 F3 deny 决策不弹窗，执行层必须兜底硬拒绝。
         # 注入分类器后守卫优先复用其决策缓存（F4 deny 同样在此强制执行）。
@@ -907,6 +937,7 @@ def create_harness_agent(
                 registry=registry,
                 thread_id=embedded_context_snapshot.thread_id,
                 thread_persistence=thread_persistence,
+                plan_writable=approval_mode == "plan",
             )
     elif enable_skills:
         logger.info("Skills middleware is disabled in remote sandbox mode")
@@ -1060,8 +1091,9 @@ def create_harness_agent(
         )
         agent_middleware.append(delegation_middleware)
 
-    # 5. HITL（interrupt_on）。计划模式和 YOLO 不创建 HITL；前者由白名单
-    # 中间件硬拒绝，后者仅关闭 Harness 人工确认而不影响其他硬性策略。
+    # 5. HITL（interrupt_on）。计划模式只为目录信任、未知 Shell 和提交计划
+    # 创建中断；明确写入由 PlanModeMiddleware 硬拒绝。YOLO 的 execute 中断
+    # 平时休眠，只在同一 Run 动态进入 Plan 后启用，不改变正常 YOLO 语义。
     # MCP 等外部工具与 execute 同等对待，在 default/auto-edit 下需要审批。
     # 组合预检：按审批模式整合边界短路、规则评估、敏感路径与 AUTO 过滤器。
     contract_mutation_preflight = getattr(file_tool_contract, "approval_preflight", None)

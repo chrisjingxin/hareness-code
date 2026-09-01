@@ -808,6 +808,224 @@ pre, code { font-family: "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Co
 .approval-button-negative { color: var(--danger-text); }
 .approval-button-selected { outline: 2px solid var(--accent); outline-offset: 1px; }
 .approval-button-description { color: var(--muted); font-size: 12px; }
+.plan-meta-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0; }
+.plan-annotation-status-bar { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.plan-annotation-count-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: var(--radius-control);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 550;
+  font-size: 12px;
+}
+.plan-add-annotation-btn {
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--text-soft);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.plan-add-annotation-btn:hover {
+  background: var(--surface-hover);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.plan-preview {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow: auto;
+  margin: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+}
+.plan-line-container { display: flex; flex-direction: column; gap: 1px; }
+.plan-line-wrapper { display: flex; flex-direction: column; }
+.plan-line-row {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  align-items: baseline;
+  padding: 2px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+.plan-line-row:hover { background: var(--surface-hover); }
+.plan-line-row.is-selected { background: var(--accent-soft); }
+.plan-line-gutter {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  padding-right: 10px;
+  user-select: none;
+}
+.plan-line-number {
+  font-size: 11px;
+  font-family: var(--font-mono, monospace);
+  color: var(--muted);
+}
+.plan-line-add-btn {
+  opacity: 0;
+  padding: 0 4px;
+  height: 18px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface-elevated);
+  color: var(--text-soft);
+  font-size: 10px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+.plan-line-row:hover .plan-line-add-btn,
+.plan-line-add-btn:focus-visible {
+  opacity: 1;
+}
+.plan-line-add-btn:hover {
+  background: var(--accent);
+  color: var(--action-text);
+  border-color: var(--accent);
+}
+.plan-line-content {
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.55;
+}
+.plan-line-content .markdown { font-size: 13px; margin: 0; padding: 0; }
+.plan-line-content .markdown p,
+.plan-line-content .markdown h1,
+.plan-line-content .markdown h2,
+.plan-line-content .markdown h3,
+.plan-line-content .markdown h4,
+.plan-line-content .markdown ul,
+.plan-line-content .markdown ol {
+  margin: 0;
+  padding: 0;
+}
+.plan-line-blank { display: block; height: 1.2em; }
+.plan-inline-editor {
+  margin: 4px 6px 8px 56px;
+  padding: 8px 10px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-control);
+  background: var(--surface-elevated);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.plan-inline-editor-header { font-size: 12px; font-weight: 600; color: var(--accent); }
+.plan-inline-editor textarea {
+  width: 100%;
+  min-height: 48px;
+  resize: vertical;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+}
+.plan-inline-editor-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.plan-btn-cancel, .plan-btn-save {
+  padding: 3px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.plan-btn-cancel {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text-soft);
+}
+.plan-btn-save {
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--action-text);
+  font-weight: 500;
+}
+.plan-inline-annotation-card {
+  margin: 4px 6px 8px 56px;
+  padding: 8px 10px;
+  border: 1px solid var(--accent-border-strong);
+  border-radius: var(--radius-control);
+  background: var(--interaction-bg);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.plan-annotation-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent-hover);
+}
+.plan-annotation-card-delete {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 0 4px;
+  border-radius: 4px;
+}
+.plan-annotation-card-delete:hover {
+  color: var(--danger-text);
+  background: var(--danger-soft, rgba(239, 68, 68, 0.1));
+}
+.plan-annotation-card-excerpt {
+  margin: 0;
+  padding: 2px 6px;
+  border-left: 2px solid var(--line-strong);
+  color: var(--muted);
+  font-size: 12px;
+  font-family: var(--font-mono, monospace);
+  background: var(--command-bg, rgba(0, 0, 0, 0.15));
+  border-radius: 4px;
+  white-space: pre-wrap;
+}
+.plan-annotation-card-text { font-size: 13px; color: var(--text); white-space: pre-wrap; }
+.plan-empty-placeholder { padding: 12px; color: var(--muted); font-size: 13px; }
+.plan-form {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  gap: 10px;
+  padding: 12px 14px 14px;
+}
+.conversation-column:has(.plan-form) .timeline-scroll,
+.conversation-column:has(.plan-form) .composer-bar {
+  display: none;
+}
+.conversation-column:has(.plan-form) .interaction-dock {
+  flex: 1 1 auto;
+  max-height: none;
+  overflow: hidden;
+  display: flex;
+  padding-bottom: 0;
+}
+.conversation-column:has(.plan-form) .interaction-card {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
 .interaction-feedback { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
 .interaction-feedback-input {
   min-height: 44px;

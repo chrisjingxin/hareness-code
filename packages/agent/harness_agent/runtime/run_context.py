@@ -34,6 +34,22 @@ class RunContextError(ValueError):
 
 
 @dataclass(slots=True)
+class RunPlanConstraint:
+    """同一 Run 内可单向开启的计划约束；不进入 checkpoint 或持久化。"""
+
+    _active: bool = field(default=False, repr=False)
+
+    @property
+    def active(self) -> bool:
+        """返回本 Run 是否已由用户点头进入计划约束。"""
+        return self._active
+
+    def activate(self) -> None:
+        """幂等开启计划约束；当前 Run 内不提供模型侧关闭入口。"""
+        self._active = True
+
+
+@dataclass(slots=True)
 class RunCancellationToken:
     """一次 run 的协作式取消标记，供后续 scheduler 或 worker 安全观察。"""
 
@@ -71,6 +87,8 @@ class RunContext:
     execution_mode: ExecutionMode = ExecutionMode.MANAGED
     cancellation_token: RunCancellationToken = field(default_factory=RunCancellationToken)
     model_call_lifecycle: ModelCallLifecycle = field(default_factory=ModelCallLifecycle)
+    # 用户可在同一 Run 内批准 enter_plan_mode；该 flag 只会从 False 变 True。
+    plan_constraint: RunPlanConstraint = field(default_factory=RunPlanConstraint, repr=False)
     # 共享图只能从当前 Run 取得对应的 immutable Skill snapshot；不写入持久化记录。
     skill_registry: Any | None = field(default=None, repr=False)
     delegation_policy: DelegationPolicy | None = None
@@ -131,6 +149,14 @@ def require_run_context(runtime: object) -> RunContext:
     return context
 
 
+def plan_constraint_active(context: object) -> bool:
+    """统一判定当前 Run 的计划约束：初始 plan 档位或运行时已点头。"""
+    if getattr(context, "approval_mode", None) == "plan":
+        return True
+    constraint = getattr(context, "plan_constraint", None)
+    return bool(getattr(constraint, "active", False))
+
+
 def thread_id_for_runtime(runtime: object) -> str | None:
     """从显式 Context 优先取 thread ID，并校验 configurable 不会串线。"""
     context = getattr(runtime, "context", None)
@@ -161,7 +187,10 @@ class RunContextSnapshotMiddleware(AgentMiddleware):
         context = require_run_context(request.runtime)
         base_prompt = _system_message_text(request.system_message)
         prompt = _without_legacy_approval_mode_section(context.context_snapshot.system_prompt)
-        prompt = f"{prompt}{approval_mode_prompt(context.approval_mode)}"
+        effective_mode: ApprovalMode = (
+            "plan" if plan_constraint_active(context) else context.approval_mode
+        )
+        prompt = f"{prompt}{approval_mode_prompt(effective_mode)}"
         # 已信任额外根是会话内可变事实，必须在模型调用边界动态追加。
         extra_roots = _extra_roots_prompt(request.runtime)
         if extra_roots:

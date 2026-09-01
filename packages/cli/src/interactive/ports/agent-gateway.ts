@@ -138,7 +138,13 @@ export function createFallbackNoopGateway(): AgentGateway {
     },
     async cancel() { return { run_id: "", cancelled: false } },
     async listThreads() { return { threads: [] } },
-    async openThread(id) { return { thread: { thread_id: id, created_at_ms: 0, updated_at_ms: 0, first_message: "", latest_message: "", message_count: 0 }, messages: [] } },
+    async openThread(id) {
+      return {
+        thread: { thread_id: id, created_at_ms: 0, updated_at_ms: 0, first_message: "", latest_message: "", message_count: 0 },
+        messages: [],
+        plan: { has_plan: false, plan_markdown: "", plan_virtual_path: "/.harness/plan.md" as const, plan_display_path: `~/.harness/plans/${id}.md` },
+      }
+    },
     async listModels() { return { profiles: [] } },
     async listSkills() { return { snapshot: { id: "empty", count: 0 }, skills: [], diagnostics: [] } },
     async setSkillEnabled() { return {} },

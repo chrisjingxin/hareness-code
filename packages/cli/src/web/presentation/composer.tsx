@@ -48,11 +48,11 @@ export function Composer(props: {
   const displayedWorkMode = workModeLocked ? interactive.threadMode : interactive.workMode
   const workModeLabel = displayedWorkMode === "compose" ? "Compose" : "Build"
 
-  // Rail 下拉：审批模式（运行时/交互中锁定，与原顶栏语义一致）与模型（目录与 Dock Models 面板同源）。
+  // Rail 下拉：审批模式在待处理交互或压缩中锁定；运行中仍可改下一轮档位。
   const { availability } = selectNavigationView(interactive)
   const modelsCatalog = interactive.catalogs.models
   const modelSelectedId = interactive.selection.requestedModelProfileId ?? interactive.selection.actualModel?.id ?? null
-  const approvalDisabled = composedDisabled || activeRun || Boolean(interactive.interaction)
+  const approvalDisabled = composedDisabled || Boolean(interactive.interaction)
   const [approvalMenuOpen, setApprovalMenuOpen] = useState(false)
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
   const approvalControlRef = useRef<HTMLDivElement | null>(null)

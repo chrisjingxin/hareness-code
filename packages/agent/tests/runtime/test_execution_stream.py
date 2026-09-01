@@ -306,6 +306,60 @@ def test_translate_does_not_leak_private_reasoning_fields() -> None:
     assert "vendor_private" not in str(signals)
 
 
+def test_extract_interaction_plan_submit_payload() -> None:
+    """exit_plan_mode 的 interrupt 应投影为 plan 交互，而不是工具审批。"""
+    interrupt = type(
+        "Interrupt",
+        (),
+        {
+            "id": "plan-int",
+            "value": {
+                "type": "plan",
+                "tool_call_id": "call-1",
+                "has_plan": True,
+                "plan_markdown": "# 方案",
+                "plan_virtual_path": "/.harness/plan.md",
+                "plan_display_path": "~/.harness/plans/t.md",
+                "revision": 2,
+            },
+        },
+    )()
+    request, auto = extract_interaction(("updates", {"__interrupt__": [interrupt]}))
+    assert auto is None
+    assert request is not None
+    assert request.type == "plan"
+    assert request.payload["decisions"] == ["approved", "revise", "abandoned"]
+    assert request.payload["plan_markdown"] == "# 方案"
+    assert request.payload["has_plan"] is True
+
+
+def test_enter_plan_mode_interrupt_requires_user_approval() -> None:
+    """运行时进入计划不能被并发安全规则静默批准。"""
+    interrupt = type(
+        "Interrupt",
+        (),
+        {
+            "id": "enter-plan-int",
+            "value": {
+                "action_requests": [
+                    {
+                        "name": "enter_plan_mode",
+                        "args": {},
+                        "description": "Agent 建议进入计划模式",
+                    }
+                ]
+            },
+        },
+    )()
+
+    request, auto = extract_interaction(("updates", {"__interrupt__": [interrupt]}))
+
+    assert auto is None
+    assert request is not None
+    assert request.type == "approval"
+    assert request.serial_context["unsafe_indices"] == [0]
+
+
 def test_child_namespace_interrupt_is_ignored_at_root() -> None:
     """非空 namespace 的 child interrupt 不得投影为 root Interaction。"""
     interrupt = type(

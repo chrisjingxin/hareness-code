@@ -11,6 +11,8 @@ import asyncio
 import re
 import shlex
 
+from harness_agent.policy.bash_parser import strip_wrappers
+
 # ---------------------------------------------------------------------------
 # 工具分类常量
 # ---------------------------------------------------------------------------
@@ -63,6 +65,15 @@ _PIPE_WRITE_COMMANDS = frozenset({
     "chmod", "chown", "ln", "truncate",
 })
 
+_SHELL_MUTATING_COMMANDS = _PIPE_WRITE_COMMANDS | frozenset({
+    "rmdir", "unlink", "patch",
+    # Windows cmd / PowerShell 的常见文件 mutation 命令，统一按小写比较。
+    "del", "erase", "move", "copy", "ren", "rename", "md", "rd",
+    "set-content", "add-content", "clear-content", "remove-item",
+    "move-item", "copy-item", "new-item", "rename-item", "out-file",
+})
+"""可静态确认会修改文件系统或 Git 状态的命令根。"""
+
 # 复合命令分隔符
 _COMPOUND_SEPARATORS = re.compile(r"\s*(?:&&|\|\||;)\s*")
 
@@ -104,6 +115,60 @@ def is_shell_command_read_only(command: str) -> bool:
         )
 
     return _is_single_command_read_only(command)
+
+
+def is_shell_command_mutating(command: str) -> bool:
+    """判断 Shell 命令是否可静态确认会写入或破坏状态。
+
+    本函数与 :func:`is_shell_command_read_only` 刻意不构成二值互补：两者都为
+    ``False`` 表示命令效果未知，应交给上层审批，而不是误判为写入或只读。
+    """
+    if not command or not command.strip():
+        return False
+
+    command = command.strip()
+    unwrapped = strip_wrappers(command)
+    if unwrapped != command:
+        return is_shell_command_mutating(unwrapped)
+    if _REDIRECT_PATTERN.search(command):
+        return True
+    if _COMPOUND_SEPARATORS.search(command):
+        return any(
+            is_shell_command_mutating(sub)
+            for sub in _COMPOUND_SEPARATORS.split(command)
+            if sub.strip()
+        )
+    if "|" in command:
+        return any(
+            _is_single_command_mutating(segment.strip())
+            for segment in command.split("|")
+            if segment.strip()
+        )
+    return _is_single_command_mutating(command)
+
+
+def _is_single_command_mutating(command: str) -> bool:
+    """识别单段命令中的明确写入根、Git mutation 与危险参数。"""
+    if not command:
+        return False
+    if any(pattern.search(command) for pattern in _BLOCK_PATTERNS):
+        return True
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+    if not tokens:
+        return False
+
+    root = tokens[0].rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
+    if root in _SHELL_MUTATING_COMMANDS:
+        return True
+    if root == "git":
+        idx = 1
+        while idx < len(tokens) and tokens[idx].startswith("-"):
+            idx += 1
+        return idx < len(tokens) and tokens[idx].lower() in _GIT_WRITE_SUBCOMMANDS
+    return False
 
 
 def _is_single_command_read_only(command: str) -> bool:

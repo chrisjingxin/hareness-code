@@ -163,6 +163,8 @@ export type TuiIntent =
   | { type: "clear-selected-skill" }
   | { type: "approval"; decision: ApprovalDecision }
   | { type: "directory-trust"; decision: DirectoryTrustDecision }
+  | { type: "plan"; decision: import("../../interactive/types").PlanDecision; feedback?: string }
+  | { type: "plan-view-close" }
   | { type: "question"; answers: Record<string, string[]> }
   | { type: "tool-toggle"; toolId: string }
   | { type: "btw-close" }
@@ -413,6 +415,12 @@ class TuiAdapterImpl implements TuiAdapter {
         return
       case "directory-trust":
         await this.respondDirectoryTrust(intent.decision)
+        return
+      case "plan":
+        await this.respondPlan(intent.decision, intent.feedback)
+        return
+      case "plan-view-close":
+        await this.routeDispatch({ type: "plan-view.close" })
         return
       case "question":
         await this.respondQuestion(intent.answers)
@@ -1270,6 +1278,18 @@ class TuiAdapterImpl implements TuiAdapter {
       type: "interaction.respond",
       requestId: approval.requestId,
       response: { kind: "approval", decision },
+    })
+  }
+
+  /** 回写计划审批决定。 */
+  private async respondPlan(decision: import("../../interactive/types").PlanDecision, feedback?: string): Promise<void> {
+    const interactive = this.controller.getSnapshot()
+    const plan = interactive.interaction
+    if (!plan || plan.type !== "plan") return
+    await this.routeDispatch({
+      type: "interaction.respond",
+      requestId: plan.requestId,
+      response: { kind: "plan", decision, feedback },
     })
   }
 

@@ -80,6 +80,39 @@ test("Compose-only 命令在 Build 模式手输返回本地错误且不进入模
   }
 })
 
+test("Compose 下手输 /plan 本地提示仅 Build，不进入模型", async () => {
+  const harness = makeHarness()
+  try {
+    await harness.controller.dispatch({ type: "work-mode.cycle" })
+    const outcome = await harness.controller.dispatch({ type: "input.submit", value: "/plan 给登录做个方案" })
+    expect(outcome).toEqual({ status: "accepted" })
+    expect(notices(harness.controller.getSnapshot())).toContain("`/plan` 仅在 Build 工作模式可用。")
+    expect(harness.calls).not.toContain("run.start")
+    expect(harness.controller.getSnapshot().runtime.approvalMode).toBe("default")
+  } finally {
+    await harness.controller.close()
+  }
+})
+
+test("已在 plan 时空 /plan 只提示，带目标仍提交", async () => {
+  const harness = makeHarness()
+  try {
+    await harness.controller.dispatch({ type: "input.submit", value: "/plan" })
+    const empty = await harness.controller.dispatch({ type: "input.submit", value: "/plan" })
+    expect(empty).toEqual({ status: "accepted" })
+    expect(notices(harness.controller.getSnapshot())).toContain("已在计划模式")
+    expect(harness.calls).not.toContain("run.start")
+
+    await harness.controller.dispatch({ type: "input.submit", value: "/plan 继续改方案" })
+    expect(harness.port.lastRunSelection()).toMatchObject({
+      message: "继续改方案",
+      approvalMode: "plan",
+    })
+  } finally {
+    await harness.controller.close()
+  }
+})
+
 test("/compact pending 期间发布忙状态并拒绝新输入和重复压缩", async () => {
   const harness = makeHarness()
   let releaseCompact = () => undefined

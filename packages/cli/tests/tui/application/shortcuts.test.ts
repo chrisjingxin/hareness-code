@@ -64,6 +64,7 @@ test("模型选择器复用 Picker 导航，并优先于其他浮层和滚动", 
 
 test("Esc、Ctrl+P、Ctrl+O 和 Ctrl+D 保留真实 TUI 行为", () => {
   expect(resolveShortcut({ name: "escape", ctrl: false }, { ...idle, activeRun: true })).toBe("cancel-run")
+  expect(resolveShortcut({ name: "escape", ctrl: false }, { ...idle, activeRun: true, interactionActive: true })).toBe("none")
   expect(resolveShortcut({ name: "p", ctrl: true }, idle)).toBe("command-open")
   expect(resolveShortcut({ name: "o", ctrl: true }, idle)).toBe("toggle-tool-details")
   expect(resolveShortcut({ name: "d", ctrl: true }, idle)).toBe("exit")

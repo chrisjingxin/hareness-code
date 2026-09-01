@@ -16,7 +16,7 @@ import {
 } from "../commands"
 import type { IntentOutcome } from "../ports"
 import { appendNotice, type ComposeProjection } from "../state"
-import { runtimeStatusSummary } from "../runtime"
+import { runtimeStatusSummary, type InteractiveApprovalMode } from "../runtime"
 import type { FeatureContext } from "./types"
 
 export class CommandFeature {
@@ -35,7 +35,12 @@ export class CommandFeature {
     return this.registry
   }
 
-  commandDispatchContext(ctx: FeatureContext, hasPendingInteraction: boolean): CommandDispatchContext {
+  commandDispatchContext(
+    ctx: FeatureContext,
+    hasPendingInteraction: boolean,
+    approvalMode?: InteractiveApprovalMode,
+    pendingPlanInteraction = false,
+  ): CommandDispatchContext {
     return {
       commandContext: {
         capabilities: new Set(ctx.baseRuntime.capabilities ?? builtinCommandCapabilities),
@@ -50,6 +55,8 @@ export class CommandFeature {
       runtimeStatus: runtimeStatusSummary(ctx.baseRuntime),
       versionSummary: `za38-cli ${ctx.baseRuntime.cliVersion ?? "0.1.0"} · JSON-RPC v3`,
       idGenerator: ctx.idGenerator,
+      approvalMode,
+      pendingPlanInteraction,
     }
   }
 
@@ -73,6 +80,8 @@ export class CommandFeature {
     options: {
       hasPendingInteraction: boolean
       applyResult: (result: CommandResult) => Promise<IntentOutcome>
+      approvalMode?: InteractiveApprovalMode
+      pendingPlanInteraction?: boolean
     },
   ): Promise<IntentOutcome> {
     const definition = this.registry.get(command.id)
@@ -82,7 +91,7 @@ export class CommandFeature {
     }
     const result = dispatchSlashCommand(
       { id: command.id, name: definition.name, argument: command.argument },
-      this.commandDispatchContext(ctx, options.hasPendingInteraction),
+      this.commandDispatchContext(ctx, options.hasPendingInteraction, options.approvalMode, options.pendingPlanInteraction),
       this.registry,
     )
     return options.applyResult(result)

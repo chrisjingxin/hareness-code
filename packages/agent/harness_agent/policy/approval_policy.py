@@ -22,7 +22,9 @@ from harness_agent.policy.sensitive_paths import requires_safety_check
 from harness_agent.policy.safe_commands import is_safe_command
 from harness_agent.policy.bash_floors import evaluate_safety_floors
 from harness_agent.policy.bash_parser import extract_segments
+from harness_agent.policy.concurrency import is_shell_command_mutating
 from harness_agent.tools.file_tool_catalog import FILESYSTEM_WRITE_TOOL_NAMES
+from harness_agent.tools.plan_file import PLAN_VIRTUAL_PATH, is_plan_virtual_path
 
 if TYPE_CHECKING:
     from langchain.agents.middleware.types import ModelRequest, ModelResponse
@@ -91,6 +93,35 @@ _PLAN_ALLOWED_TOOLS = frozenset(
     }
 )
 
+PlanShellDecision = Literal["allow", "ask", "deny"]
+"""Plan 约束下 Shell 命令的三态处置结果。"""
+
+
+def classify_plan_shell_command(command: object) -> PlanShellDecision:
+    """把 Plan Shell 命令分为只读、明确写入和未知三类。
+
+    只读判定复用审批系统现有的跨平台白名单与安全底线；明确文件/Git mutation
+    复用并发安全模块的静态写入识别；高危但不属于普通文件写入的命令继续复用
+    AUTO 的确定性破坏性规则。无法静态确认的命令保守交给单次人工审批。
+    """
+    if not isinstance(command, str) or not command.strip():
+        return "ask"
+    normalized = command.strip()
+    segments = extract_segments(normalized)
+    floors = evaluate_safety_floors(normalized)
+    if (
+        segments
+        and all(is_safe_command(segment) for segment in segments)
+        and not floors["any_floor_triggered"]
+    ):
+        return "allow"
+    if is_shell_command_mutating(normalized):
+        return "deny"
+    auto_decision, _reason = evaluate_auto_mode("execute", {"command": normalized})
+    if auto_decision == "deny":
+        return "deny"
+    return "ask"
+
 
 # ---------------------------------------------------------------------------
 # Extension 权限钩子接口（预留，当前为空列表）
@@ -132,19 +163,23 @@ def interrupt_on_for_approval_mode(
 ) -> dict[str, Any] | None:
     """返回应由 HumanInTheLoopMiddleware 拦截的工具集合。
 
-    计划模式仅为只读工具开启目录信任审批通道，写入仍由 ``PlanModeMiddleware``
-    硬拒绝。YOLO 不创建 HITL，外部路径由边界中间件自动授予 session 根。
+    计划模式为目录信任、未知 Shell 和提交计划开启审批通道，明确写入仍由
+    ``PlanModeMiddleware`` 硬拒绝。YOLO 图仅在提供预检时保留休眠的 Shell
+    通道，供同一 Run 动态进入 Plan 后启用；外部路径仍由边界中间件自动授予
+    session 根。
 
     Args:
         extra_interrupt_tools: 需要一并纳入审批的额外工具名（如 MCP 工具）。
-            在 default、auto-edit、auto 和 plan（只读）模式下生效；yolo 忽略。
+            在 default、auto-edit 和 auto 模式下生效；plan 与 yolo 忽略。
         approval_descriptions: 每个工具可选的动态审批描述。文件 mutation 使用它展示
             prepare 阶段生成的有界 diff 预览；完整拟议内容仍由一次性计划固定，其他工具
             继续使用框架默认描述。
     """
-    if approval_mode == "yolo":
+    if approval_mode == "yolo" and preflight is None:
         return None
-    if approval_mode == "plan":
+    if approval_mode == "yolo":
+        tool_names = frozenset({"execute"})
+    elif approval_mode == "plan":
         tool_names = _PLAN_DIRECTORY_TRUST_TOOLS
     elif approval_mode == "default":
         tool_names = _DEFAULT_HITL_TOOLS
@@ -152,8 +187,10 @@ def interrupt_on_for_approval_mode(
         tool_names = _AUTO_EDIT_HITL_TOOLS
     else:  # auto 模式
         tool_names = _AUTO_HITL_TOOLS
-    if extra_interrupt_tools and approval_mode != "plan":
+    if extra_interrupt_tools and approval_mode in {"default", "auto-edit", "auto"}:
         tool_names = tool_names | extra_interrupt_tools
+    if approval_mode == "plan":
+        tool_names = tool_names | {"execute", "exit_plan_mode"}
     from langchain.agents.middleware.human_in_the_loop import InterruptOnConfig
 
     interrupt_on: dict[str, InterruptOnConfig] = {}
@@ -178,8 +215,11 @@ def approval_mode_prompt(approval_mode: ApprovalMode) -> str:
 ## 审批模式：计划
 
 当前是严格计划模式。只能调查工作区、提出问题和维护任务清单；不要尝试
-修改文件、执行命令、运行解释器、调用子 Agent 或 MCP。请基于已读取的证据
-输出可实施的计划。服务端会拒绝未允许的工具调用，不能通过审批绕过。
+修改项目文件、调用子 Agent 或会写入的 MCP。明确只读 Shell 可以执行；
+明确会写或破坏状态的命令会被拒绝，无法判断的命令只询问本次且不会解除计划约束。
+必须先用 `write_file` 把完整计划覆盖写入 `/.harness/plan.md`，写完再调用
+`exit_plan_mode`。不要只更新任务清单或把计划只写在对话里。有歧义用
+`ask_user`。服务端会拒绝未允许的工具调用，不能通过审批绕过。
 """
     if approval_mode == "auto-edit":
         return """
@@ -216,29 +256,76 @@ Harness 不会为工具调用请求人工审批。工作区边界、Shell 白名
 
 
 class PlanModeMiddleware(AgentMiddleware[dict[str, Any], ContextT, ResponseT]):
-    """以工具白名单强制计划模式只读，未知的未来工具也默认拒绝。"""
+    """按初始档位或同一 Run 的运行时 flag 强制计划模式只读。"""
+
+    def __init__(self, approval_mode: ApprovalMode = "plan") -> None:
+        """保存非共享图的构图期档位；共享图优先读取 RunContext。"""
+        super().__init__()
+        self._approval_mode = approval_mode
+
+    def _constraint_active(self, request: ToolCallRequest) -> bool:
+        """统一读取 Run 计划约束；无 RunContext 时只接受构图期 plan。"""
+        from harness_agent.runtime.run_context import (
+            RunContextError,
+            plan_constraint_active,
+            require_run_context,
+        )
+
+        try:
+            context = require_run_context(getattr(request, "runtime", None))
+        except RunContextError:
+            return self._approval_mode == "plan"
+        return plan_constraint_active(context)
 
     def _rejection(self, request: ToolCallRequest) -> ToolMessage:
-        """返回可指导模型继续调研和输出计划的错误结果。"""
+        """返回可指导模型继续调研并把动作写进计划的错误结果。"""
         tool_call = request.tool_call
         tool_name = str(tool_call.get("name", "unknown"))
+        extra = ""
+        if tool_name in {"write_file", "edit_file", "delete_file"}:
+            extra = f"唯一可写路径是 `{PLAN_VIRTUAL_PATH}`。"
         return ToolMessage(
             content=(
-                f"计划模式拒绝 {tool_name}：当前模式不执行此工具。"
-                "请使用读取或搜索工具收集证据，并向用户输出实施计划。"
+                f"计划模式拒绝 {tool_name}：当前是计划模式，不能执行此操作。"
+                f"{extra}请使用只读调查，或把动作写进 `{PLAN_VIRTUAL_PATH}` 后调用 exit_plan_mode。"
             ),
             name=tool_name,
             tool_call_id=str(tool_call.get("id") or "plan-mode"),
             status="error",
         )
 
+    def _is_allowed(self, request: ToolCallRequest) -> bool:
+        """白名单、会话计划文件写入、以及声明只读的 MCP 可以放行。"""
+        tool_name = str(request.tool_call.get("name", ""))
+        if tool_name in _PLAN_ALLOWED_TOOLS:
+            return True
+        if tool_name == "execute":
+            args = request.tool_call.get("args") or {}
+            command = args.get("command") if isinstance(args, dict) else None
+            # ask 已经由 HITL 完成单次批准；这里只硬拒明确 mutation。
+            return classify_plan_shell_command(command) != "deny"
+        if tool_name in {"write_file", "edit_file"} and is_plan_virtual_path(_tool_file_path(request)):
+            return True
+        return _declared_read_only_tool(request, tool_name)
+
     def wrap_tool_call(
         self,
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Any],
     ) -> Any:
-        """同步调用只放行明确声明为只读或 thread 维护的工具。"""
-        if request.tool_call.get("name") not in _PLAN_ALLOWED_TOOLS:
+        """同步调用：处理进入/提交计划，未受约束时透明放行。"""
+        tool_name = request.tool_call.get("name")
+        if tool_name == "enter_plan_mode":
+            from harness_agent.tools.tools_mode import request_plan_entry
+
+            return request_plan_entry(request)
+        if not self._constraint_active(request):
+            return handler(request)
+        if tool_name == "exit_plan_mode":
+            from harness_agent.tools.tools_mode import submit_plan
+
+            return submit_plan(request)
+        if not self._is_allowed(request):
             return self._rejection(request)
         return handler(request)
 
@@ -247,10 +334,58 @@ class PlanModeMiddleware(AgentMiddleware[dict[str, Any], ContextT, ResponseT]):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[Any]],
     ) -> Any:
-        """异步调用沿用相同白名单，避免执行路径产生策略漂移。"""
-        if request.tool_call.get("name") not in _PLAN_ALLOWED_TOOLS:
+        """异步调用沿用相同运行时判定。"""
+        tool_name = request.tool_call.get("name")
+        if tool_name == "enter_plan_mode":
+            from harness_agent.tools.tools_mode import request_plan_entry
+
+            return request_plan_entry(request)
+        if not self._constraint_active(request):
+            return await handler(request)
+        if tool_name == "exit_plan_mode":
+            from harness_agent.tools.tools_mode import submit_plan
+
+            return submit_plan(request)
+        if not self._is_allowed(request):
             return self._rejection(request)
         return await handler(request)
+
+
+def _tool_file_path(request: ToolCallRequest) -> str:
+    """从文件工具参数取出目标路径。"""
+    args = request.tool_call.get("args") or {}
+    if not isinstance(args, dict):
+        return ""
+    for key in ("file_path", "path", "target_path"):
+        value = args.get(key)
+        if isinstance(value, str):
+            return value
+    return ""
+
+
+def _declared_read_only_tool(request: ToolCallRequest, tool_name: str) -> bool:
+    """MCP 等外部工具只有显式声明只读才放行；未声明 fail-closed。"""
+    candidates: list[object] = []
+    tool = getattr(request, "tool", None)
+    if tool is not None:
+        candidates.append(tool)
+    runtime = getattr(request, "runtime", None)
+    for item in getattr(runtime, "tools", None) or ():
+        candidates.append(item)
+    for candidate in candidates:
+        if getattr(candidate, "name", None) != tool_name:
+            continue
+        if getattr(candidate, "is_read_only", False) is True:
+            return True
+        metadata = getattr(candidate, "metadata", None) or {}
+        if isinstance(metadata, dict) and metadata.get("readOnlyHint") is True:
+            return True
+        annotations = getattr(candidate, "annotations", None)
+        if annotations is not None and getattr(annotations, "read_only_hint", None) is True:
+            return True
+        if isinstance(annotations, dict) and annotations.get("readOnlyHint") is True:
+            return True
+    return False
 
 
 class DenyRulesMiddleware(AgentMiddleware[dict[str, Any], ContextT, ResponseT]):

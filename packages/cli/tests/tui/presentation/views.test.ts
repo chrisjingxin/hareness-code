@@ -832,6 +832,39 @@ test("审批决定后 Dock 消失、结果行存在、焦点回输入栏", async
   }
 })
 
+test("计划审阅 Dock 展示原始行号批注入口，批准与打回共享批注", async () => {
+  const run = { threadId: "thread-plan", runId: "run-plan" }
+  const started = startRun(createInitialState(), run, "规划停点 4")
+  const snapshot = {
+    ...snapshotOf(started),
+    interaction: {
+      type: "plan" as const,
+      requestId: "plan-1",
+      revision: 1,
+      hasPlan: true,
+      planMarkdown: "# 方案\n保留协议\n替换界面\n补充测试",
+      planVirtualPath: "/.harness/plan.md",
+      planDisplayPath: "~/.harness/plans/thread-plan.md",
+      decisions: ["approved" as const, "revise" as const, "abandoned" as const],
+      deadlineAtMs: Date.now() + 5_000,
+    },
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(ThreadView, viewProps(snapshot, 100, 32)), { width: 100, height: 32 })
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("审阅计划")
+    expect(frame).toContain("添加批注")
+    expect(frame).toContain("批准并开始实现")
+    expect(frame).toContain("继续打磨")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
 test("带选项的问答 pending 时底部是 QuestionDock，输入栏不出现", async () => {
   const run = { threadId: "thread-1", runId: "run-1" }
   const started = startRun(createInitialState(), run, "选格式")
@@ -1408,6 +1441,9 @@ function viewProps(interactive: InteractiveSnapshot, terminalWidth: number, term
     expandedTools: new Set<string>(),
     onToggleTool: () => undefined,
     onApproval: () => undefined,
+    onDirectoryTrust: () => undefined,
+    onPlan: () => undefined,
+    onPlanViewClose: () => undefined,
     onQuestion: () => undefined,
   }
 }

@@ -478,6 +478,123 @@ describe("InteractionForm", () => {
     }
   })
 
+  test("plan 有正文时按 markdown 渲染标题，而不是原样展示 #", () => {
+    const intents: WebIntent[] = []
+    const interactive = makeInteractive({
+      interaction: {
+        type: "plan",
+        requestId: "plan-md",
+        revision: 1,
+        hasPlan: true,
+        planMarkdown: "# 简化版 wc\n\n**目标**是统计行数。",
+        planVirtualPath: "/.harness/plan.md",
+        planDisplayPath: "~/.harness/plans/thread-1.md",
+        decisions: ["approved", "revise", "abandoned"],
+        deadlineAtMs: Date.now() + 60_000,
+      },
+    })
+    const handle = mountForm(makeSnapshot({ interactive }), intents)
+    try {
+      const preview = handle.container.querySelector(".plan-preview")
+      expect(preview?.querySelector(".markdown")).not.toBeNull()
+      expect(preview?.querySelector("h2")?.textContent).toBe("简化版 wc")
+      expect(preview?.querySelector("strong")?.textContent).toBe("目标")
+      expect(preview?.textContent).not.toContain("# 简化版 wc")
+    } finally {
+      handle.unmount()
+    }
+  })
+
+  test("plan 可选原始 Markdown 行范围写批注，打回时编入 feedback", () => {
+    const intents: WebIntent[] = []
+    const interactive = makeInteractive({
+      interaction: {
+        type: "plan",
+        requestId: "plan-annotation",
+        revision: 1,
+        hasPlan: true,
+        planMarkdown: "# 方案\n保留协议\n替换界面\n补充测试",
+        planVirtualPath: "/.harness/plan.md",
+        planDisplayPath: "~/.harness/plans/thread-1.md",
+        decisions: ["approved", "revise", "abandoned"],
+        deadlineAtMs: Date.now() + 60_000,
+      },
+    })
+    const handle = mountForm(makeSnapshot({ interactive }), intents)
+    try {
+      const annotate = [...handle.container.querySelectorAll<HTMLButtonElement>("button")]
+        .find(button => button.textContent?.includes("添加批注"))
+      act(() => { annotate?.click() })
+      const lines = handle.container.querySelectorAll<HTMLButtonElement>(".plan-annotation-line")
+      act(() => {
+        lines[1]?.click()
+        lines[2]?.click()
+      })
+      const comment = handle.container.querySelector<HTMLTextAreaElement>("textarea[aria-label='行批注意见']")
+      act(() => { setControlledValue(comment!, "这两步保持原子交付") })
+      const save = [...handle.container.querySelectorAll<HTMLButtonElement>("button")]
+        .find(button => button.textContent?.includes("保存批注"))
+      act(() => { save?.click() })
+      expect(handle.container.textContent).toContain("1 条批注")
+
+      const revise = [...handle.container.querySelectorAll<HTMLButtonElement>(".approval-button")]
+        .find(button => button.textContent?.includes("继续打磨"))
+      act(() => { revise?.click() })
+      const submitted = intents.find(intent => intent.type === "interaction-submit")
+      expect(submitted).toMatchObject({
+        type: "interaction-submit",
+        requestId: "plan-annotation",
+        response: {
+          kind: "plan",
+          decision: "revise",
+        },
+      })
+      if (submitted?.type === "interaction-submit" && submitted.response.kind === "plan") {
+        expect(submitted.response.feedback).toContain("Proposed plan lines 2-3:")
+        expect(submitted.response.feedback).toContain("> 保留协议\n> 替换界面")
+        expect(submitted.response.feedback).toContain("Comment: 这两步保持原子交付")
+      }
+    } finally {
+      handle.unmount()
+    }
+  })
+
+  test("plan 交互卡显示三个中文动作和空计划占位，批准会提交", () => {
+    const intents: WebIntent[] = []
+    const interactive = makeInteractive({
+      interaction: {
+        type: "plan",
+        requestId: "plan-1",
+        revision: 1,
+        hasPlan: false,
+        planMarkdown: "",
+        planVirtualPath: "/.harness/plan.md",
+        planDisplayPath: "~/.harness/plans/thread-1.md",
+        decisions: ["approved", "revise", "abandoned"],
+        deadlineAtMs: Date.now() + 60_000,
+      },
+    })
+    const handle = mountForm(makeSnapshot({ interactive }), intents)
+    try {
+      expect(handle.container.textContent).toContain("还没有写出计划")
+      const labels = [...handle.container.querySelectorAll(".approval-button span")].map(node => node.textContent)
+      expect(labels).toContain("批准并开始实现")
+      expect(labels).toContain("继续打磨")
+      expect(labels).toContain("放弃计划")
+      expect(labels.some(label => label?.includes("auto-edit"))).toBe(false)
+      const approve = [...handle.container.querySelectorAll<HTMLButtonElement>(".approval-button")]
+        .find(button => button.textContent?.includes("批准并开始实现"))
+      act(() => { approve?.click() })
+      expect(intents).toContainEqual({
+        type: "interaction-submit",
+        requestId: "plan-1",
+        response: { kind: "plan", decision: "approved", feedback: undefined },
+      })
+    } finally {
+      handle.unmount()
+    }
+  })
+
   test("无 interaction 时 InteractionForm 渲染空占位", () => {
     const intents: WebIntent[] = []
     const handle = mountForm(makeSnapshot(), intents)

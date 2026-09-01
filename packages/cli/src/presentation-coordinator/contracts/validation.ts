@@ -235,6 +235,12 @@ function isInteractionResponse(value: unknown): boolean {
       && typeof value.decision === "string"
       && value.decision.length <= 64
   }
+  if (value.kind === "plan") {
+    if (!exactFields(value, ["kind", "decision", "feedback"]) && !exactFields(value, ["kind", "decision"])) return false
+    if (typeof value.decision !== "string" || value.decision.length > 64) return false
+    if (value.feedback !== undefined && !isString(value.feedback, 64 * 1024)) return false
+    return true
+  }
   return false
 }
 

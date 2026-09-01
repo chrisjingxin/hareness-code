@@ -40,8 +40,17 @@ function stringValue(value: unknown, fallback: string): string {
   return typeof value === "string" && value ? value : fallback
 }
 
+/** 批准计划后自动开实现轮的固定用户消息。 */
+export const PLAN_IMPLEMENT_PROMPT = "用户已批准计划。请读取 `/.harness/plan.md` 并开始实现。先更新任务清单。"
+
 export class RunFeature {
   approvalModeOverride: InteractiveApprovalMode | undefined
+  /** 进入 plan 之前的审批档位；不在 plan 时为空。 */
+  prePlanMode: InteractiveApprovalMode | undefined
+  /** 进入/离开 plan 时递增，供后续计划审批校验过期切档。 */
+  planRevision = 0
+  private planInteractionRevision: number | undefined
+  private planContinue: { decision: "approved" | "abandoned"; feedback?: string } | undefined
   private activeRunHandle: InteractiveAgentRun | null = null
 
   /** 当前审批模式：覆盖值优先，否则回落到底层 runtime 的握手值。 */
@@ -49,17 +58,68 @@ export class RunFeature {
     return (this.approvalModeOverride ?? fallback) as unknown as ApprovalMode
   }
 
+  /** Shift+Tab 循环：进入 plan 时记下上一档，离开 plan 时丢掉并走到 default。 */
   cycleApprovalMode(ctx: FeatureContext): IntentOutcome {
     const current = this.approvalModeOverride ?? ctx.baseRuntime.approvalMode
-    this.approvalModeOverride = nextApprovalMode(current)
+    this.applyApprovalModeChange(current, nextApprovalMode(current))
     ctx.publish()
     return { status: "accepted" }
   }
 
+  /** 直接选择审批档位；进入/离开 plan 时维护 prePlanMode 与 revision。 */
   setApprovalMode(mode: InteractiveApprovalMode, ctx: FeatureContext): IntentOutcome {
-    this.approvalModeOverride = mode
+    const current = this.approvalModeOverride ?? ctx.baseRuntime.approvalMode
+    this.applyApprovalModeChange(current, mode)
     ctx.publish()
     return { status: "accepted" }
+  }
+
+  /** 计划交互弹出时记下当时的 revision，供批准时校验是否中途换档。 */
+  notePlanInteraction(): void {
+    this.planInteractionRevision = this.planRevision
+  }
+
+  /** 用户做出计划决定；超时/断开不调用。revision 过期则不切档、不开实现轮。 */
+  recordPlanDecision(decision: "approved" | "revise" | "abandoned", feedback?: string): void {
+    if (this.planInteractionRevision !== undefined && this.planInteractionRevision !== this.planRevision) {
+      this.planContinue = undefined
+      this.planInteractionRevision = undefined
+      return
+    }
+    this.planContinue = decision === "approved" || decision === "abandoned"
+      ? { decision, ...(feedback?.trim() ? { feedback: feedback.trim() } : {}) }
+      : undefined
+    this.planInteractionRevision = undefined
+  }
+
+  /** 取出并清空计划 Run 终态后的续跑决策。 */
+  consumePlanContinue(): { decision: "approved" | "abandoned"; feedback?: string } | undefined {
+    const decision = this.planContinue
+    this.planContinue = undefined
+    return decision
+  }
+
+  /** `/plan exit`：恢复进入 plan 前的档位；缺失时回退 default。 */
+  restoreApprovalMode(ctx: FeatureContext): IntentOutcome {
+    const current = this.approvalModeOverride ?? ctx.baseRuntime.approvalMode
+    if (current === "plan") {
+      this.applyApprovalModeChange(current, this.prePlanMode ?? "default")
+    }
+    ctx.publish()
+    return { status: "accepted" }
+  }
+
+  /** 进出 plan 时递增 revision；从 plan 用非 restore 路径离开则丢掉 prePlanMode。 */
+  private applyApprovalModeChange(current: InteractiveApprovalMode, next: InteractiveApprovalMode): void {
+    if (next === current) return
+    if (next === "plan") {
+      this.prePlanMode = current
+      this.planRevision += 1
+    } else if (current === "plan") {
+      this.prePlanMode = undefined
+      this.planRevision += 1
+    }
+    this.approvalModeOverride = next
   }
 
   async startRun(

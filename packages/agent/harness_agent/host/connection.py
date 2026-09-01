@@ -32,6 +32,8 @@ def interaction_method(interaction_type: str) -> str:
         return METHOD["INTERACTION_QUESTION"]
     if interaction_type == "directory_trust":
         return METHOD["INTERACTION_DIRECTORY_TRUST"]
+    if interaction_type == "plan":
+        return METHOD["INTERACTION_PLAN"]
     return METHOD["INTERACTION_APPROVAL"]
 
 
@@ -103,7 +105,7 @@ class ProtocolInteractionAdapter:
             params: dict[str, object] = {
                 "thread_id": run.thread_id,
                 "run_id": run.run_id,
-                "timeout_ms": INTERACTION_TIMEOUT_MS,
+                "timeout_ms": INTERACTION_TIMEOUT_MS if INTERACTION_TIMEOUT_MS is not None else 86_400_000,
                 "payload": dict(interaction.payload),
             }
             # Compose child activity 归属：与 Event envelope 相同的可选 provenance 与
@@ -125,9 +127,11 @@ class ProtocolInteractionAdapter:
                     "params": params,
                 },
             )
-            return InteractionResult(
-                await asyncio.wait_for(future, timeout=INTERACTION_TIMEOUT_MS / 1000)
-            )
+            if INTERACTION_TIMEOUT_MS is not None:
+                response = await asyncio.wait_for(future, timeout=INTERACTION_TIMEOUT_MS / 1000)
+            else:
+                response = await future
+            return InteractionResult(response)
         except (TimeoutError, RpcError, ValidationError) as exc:
             logger.warning("Interaction %s failed closed: %s", interaction.request_id, exc)
             return InteractionResult(self._default_value(interaction), expired=True)
@@ -142,4 +146,6 @@ class ProtocolInteractionAdapter:
             return {"decision": "reject"}
         if interaction.type == "directory_trust":
             return {"decision": "deny"}
+        if interaction.type == "plan":
+            return {"decision": "abandoned", "expired": True}
         return {"answers": {}}

@@ -473,7 +473,7 @@ class _BuildStreamPorts:
         if request.type == "approval":
             return await self._port.collect_serial_approvals(self._run, host_spec)
         result = await self._port.request_interaction(self._run, host_spec)
-        return result.value
+        return _interaction_resume_value(result)
 
     async def observe_message(self, chunk: object, session: StreamSession) -> bool:
         return _capture_transcript_on_session(self._run, session, chunk)
@@ -531,7 +531,15 @@ class _ComposeStageObserver:
         if request.type == "approval":
             return await self._port.collect_serial_approvals(self._run, host_spec)
         result = await self._port.request_interaction(self._run, host_spec)
-        return result.value
+        return _interaction_resume_value(result)
+
+def _interaction_resume_value(result: object) -> object:
+    """把 InteractionResult 编成 interrupt resume；过期决策带 expired 标记。"""
+    value = getattr(result, "value", result)
+    if getattr(result, "expired", False) and isinstance(value, dict):
+        return {**value, "expired": True}
+    return value
+
 
 def _stream_session_for(run: RunState) -> StreamSession:
     """为 Build Run 取得跨 resume 复用的 stream session。

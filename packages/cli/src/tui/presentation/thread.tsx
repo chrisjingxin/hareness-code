@@ -1,6 +1,6 @@
 /** Harness Code 的 Thread 主视图。 */
 
-import { ApprovalDock, DirectoryTrustDock, QuestionDock, bottomAreaKind } from "./bottom-area"
+import { ApprovalDock, DirectoryTrustDock, PlanDock, QuestionDock, bottomAreaKind } from "./bottom-area"
 import { ComposeProgressBar } from "./compose-progress-bar"
 import { InputBar, FooterRail, ThreadRuntimeLine } from "./input-bar"
 import { ConversationTimeline } from "./timeline"
@@ -15,7 +15,7 @@ export function ThreadView(props: SharedViewProps & { modelName?: string }) {
 
   return (
     <box flexDirection="column" flexGrow={1} minHeight={0} backgroundColor={tuiTheme.background}>
-      {isChild ? (
+      {slot === "plan" ? null : isChild ? (
         <box
           paddingLeft={2}
           paddingRight={2}
@@ -31,17 +31,19 @@ export function ThreadView(props: SharedViewProps & { modelName?: string }) {
       ) : (
         <ComposeProgressBar interactive={props.interactive} />
       )}
-      <ConversationTimeline
-        interactive={props.interactive}
-        scrollRef={props.conversationScrollRef}
-        showToolDetails={props.showToolDetails}
-        expandedTools={props.expandedTools}
-        onToggleTool={props.onToggleTool}
-        onOpenChildTimeline={props.onOpenChildTimeline}
-        modelName={props.modelName}
-        transientNotice={props.transientNotice}
-        terminalWidth={props.terminalWidth}
-      />
+      {slot === "plan" ? null : (
+        <ConversationTimeline
+          interactive={props.interactive}
+          scrollRef={props.conversationScrollRef}
+          showToolDetails={props.showToolDetails}
+          expandedTools={props.expandedTools}
+          onToggleTool={props.onToggleTool}
+          onOpenChildTimeline={props.onOpenChildTimeline}
+          modelName={props.modelName}
+          transientNotice={props.transientNotice}
+          terminalWidth={props.terminalWidth}
+        />
+      )}
       {slot === "approval" && interaction?.type === "approval" ? (
         <ApprovalDock
           interaction={interaction}
@@ -55,6 +57,15 @@ export function ThreadView(props: SharedViewProps & { modelName?: string }) {
           interaction={interaction}
           workMode={props.interactive.workMode}
           onDirectoryTrust={props.onDirectoryTrust}
+        />
+      ) : null}
+      {slot === "plan" && interaction?.type === "plan" ? (
+        <PlanDock
+          interaction={interaction}
+          workMode={props.interactive.workMode}
+          terminalHeight={props.terminalHeight}
+          onPlan={props.onPlan}
+          onClose={props.onPlanViewClose}
         />
       ) : null}
       {slot === "question" && interaction?.type === "question" ? (

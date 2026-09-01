@@ -178,6 +178,29 @@ def _serial_run() -> RunState:
 class TestSerialApprovals:
     """多工具逐个串行审批：单次 interrupt，本地收集决策后一次性 resume。"""
 
+    def test_enter_plan_mode_only_allows_once_and_never_records_rule(self) -> None:
+        """进入计划是一次性点头，不允许产生 thread/project 永久授权。"""
+        port = _ScriptedInteractionPort([{"decision": "approve_once"}])
+        coordinator = _coordinator_with_port(port)
+        run = _serial_run()
+        spec = _serial_spec(
+            [
+                {
+                    "name": "enter_plan_mode",
+                    "args": {},
+                    "description": "Agent 建议进入计划模式",
+                }
+            ],
+            safe_indices=[],
+            unsafe_indices=[0],
+        )
+
+        resume = self._collect(coordinator, run, spec)
+
+        assert resume == {"int-serial": {"decisions": [{"type": "approve"}]}}
+        assert port.requests[0].payload["decisions"] == ["approve_once", "reject"]
+        assert coordinator.session_rules == []
+
     @staticmethod
     def _collect(coordinator: RunCoordinator, run: RunState, spec: InteractionRequest):
         return asyncio.run(coordinator._collect_serial_approvals(run, spec))

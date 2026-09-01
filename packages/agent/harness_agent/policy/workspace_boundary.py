@@ -23,6 +23,7 @@ from harness_agent.policy.workspace_roots import (
     WorkspaceRootRegistry,
 )
 from harness_agent.tools.file_tool_catalog import DIRECT_FILE_TOOL_PATH_ARGUMENTS
+from harness_agent.tools.plan_file import is_plan_virtual_path
 
 _DIRECT_PATH_ARGUMENTS = DIRECT_FILE_TOOL_PATH_ARGUMENTS
 _SEARCH_TOOLS = frozenset({"glob", "grep"})
@@ -157,9 +158,15 @@ class WorkspaceBoundaryMiddleware(AgentMiddleware[dict[str, Any], ContextT, Resp
                 field = _DIRECT_PATH_ARGUMENTS[tool_name]
                 value = args.get(field)
                 if _is_virtual_path(value):
-                    if tool_name != "read_file":
-                        raise ValueError("/.harness 仅允许通过 read_file 只读分页访问")
-                    _validate_virtual_read_path(value)
+                    if tool_name == "read_file":
+                        _validate_virtual_read_path(value)
+                    elif tool_name in {"write_file", "edit_file"} and is_plan_virtual_path(str(value)):
+                        _validate_virtual_read_path(value)
+                    else:
+                        raise ValueError(
+                            "/.harness 仅允许通过 read_file 只读分页访问；"
+                            "计划模式下还可写入 /.harness/plan.md"
+                        )
                 elif tool_name != "ls" and value == "/":
                     raise ValueError("文件路径不能是根目录")
                 else:

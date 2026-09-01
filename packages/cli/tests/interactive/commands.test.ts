@@ -33,6 +33,12 @@ test("Registry 以 canonical ID 解析核心 Slash Command 与别名", () => {
   expect(parseSlashCommand("/models")).toEqual({ id: "model.select", name: "model", argument: undefined })
   expect(parseSlashCommand("/mcp")).toEqual({ id: "mcp.manage", name: "mcp", argument: undefined })
   expect(parseSlashCommand("/web")).toEqual({ id: "host.web", name: "web", argument: undefined })
+  expect(parseSlashCommand("/plan")).toEqual({ id: "approval.plan", name: "plan", argument: undefined })
+  expect(parseSlashCommand("/plan 给登录做个方案")).toEqual({ id: "approval.plan", name: "plan", argument: "给登录做个方案" })
+  expect(parseSlashCommand("/plan exit")).toEqual({ id: "approval.plan", name: "plan", argument: "exit" })
+  expect(parseSlashCommand("/plan-view")).toEqual({ id: "approval.plan-view", name: "plan-view", argument: undefined })
+  expect(parseSlashCommand("/view-plan")).toBeNull()
+  expect(parseSlashCommand("/show-plan")).toBeNull()
 })
 
 test("Dispatcher 仅按稳定 ID 返回 semantic operation，并统一处理兼容命令", () => {
@@ -499,6 +505,142 @@ test("Compose-only 命令不出现在 Build 模式 Slash 菜单，Compose 模式
   expect(findSlashCommands("/abandon", composeContext).map(item => item.name)).toEqual(["abandon"])
   expect(findSlashCommands("/btw", buildContext).map(item => item.name)).toEqual(["btw"])
   expect(findSlashCommands("/btw", composeContext).map(item => item.name)).toEqual(["btw"])
+})
+
+test("/plan 仅 Build 可见，Compose 手输给出仅 Build 提示", () => {
+  const plan = commandRegistry.get("approval.plan")!
+  expect(plan).toMatchObject({
+    id: "approval.plan",
+    name: "plan",
+    presentation: "action",
+    argumentHint: "[exit | <目标>]",
+  })
+  expect(plan.requirements?.workModes).toEqual(["build"])
+  expect(plan.requirements?.requiresIdle).toBeUndefined()
+
+  expect(commandRegistry.availability(plan, defaultCommandContext({ workMode: "build" }))).toEqual({ state: "available" })
+  expect(commandRegistry.availability(plan, defaultCommandContext({ workMode: "build", activeRun: true }))).toEqual({ state: "available" })
+  expect(commandRegistry.availability(plan, defaultCommandContext({ workMode: "compose" }))).toMatchObject({
+    state: "hidden",
+    reason: "`/plan` 仅在 Build 工作模式可用。",
+  })
+
+  expect(findSlashCommands("/plan", defaultCommandContext({ workMode: "build" })).map(item => item.name)).toEqual(["plan", "plan-view"])
+  expect(findSlashCommands("/plan", defaultCommandContext({ workMode: "compose" })).map(item => item.name)).toEqual([])
+
+  const composeDispatch = {
+    commandContext: defaultCommandContext({ workMode: "compose" }),
+    threadId: "thread-1",
+    runtimeStatus: "idle",
+    versionSummary: "0.1.0",
+    approvalMode: "default" as const,
+  }
+  expect(dispatchSlashCommand({ id: "approval.plan", name: "plan" }, composeDispatch)).toEqual({
+    type: "notice",
+    message: "`/plan` 仅在 Build 工作模式可用。",
+  })
+})
+
+test("/plan 按空参、exit、目标返回切档或提交", () => {
+  const base = {
+    commandContext: defaultCommandContext({ workMode: "build" }),
+    threadId: "thread-1",
+    runtimeStatus: "idle",
+    versionSummary: "0.1.0",
+    approvalMode: "yolo" as const,
+  }
+
+  expect(dispatchSlashCommand({ id: "approval.plan", name: "plan" }, base)).toMatchObject({
+    type: "set-approval-mode",
+    mode: "plan",
+  })
+  expect(dispatchSlashCommand({ id: "approval.plan", name: "plan", argument: "exit" }, base)).toMatchObject({
+    type: "notice",
+    message: expect.stringContaining("当前不在计划模式"),
+  })
+  expect(dispatchSlashCommand({ id: "approval.plan", name: "plan", argument: "给登录做个方案" }, base)).toEqual({
+    type: "set-approval-mode",
+    mode: "plan",
+    prompt: "给登录做个方案",
+  })
+  expect(dispatchSlashCommand({ id: "approval.plan", name: "plan", argument: "exit the login" }, base)).toEqual({
+    type: "set-approval-mode",
+    mode: "plan",
+    prompt: "exit the login",
+  })
+
+  const alreadyInPlan = { ...base, approvalMode: "plan" as const }
+  expect(dispatchSlashCommand({ id: "approval.plan", name: "plan" }, alreadyInPlan)).toMatchObject({
+    type: "notice",
+    message: expect.stringContaining("已在计划模式"),
+  })
+  expect(dispatchSlashCommand({ id: "approval.plan", name: "plan", argument: "exit" }, alreadyInPlan)).toEqual({
+    type: "restore-approval-mode",
+  })
+  expect(dispatchSlashCommand({ id: "approval.plan", name: "plan", argument: "EXIT" }, alreadyInPlan)).toEqual({
+    type: "restore-approval-mode",
+  })
+  expect(dispatchSlashCommand({ id: "approval.plan", name: "plan", argument: "继续改方案" }, alreadyInPlan)).toEqual({
+    type: "submit-prompt",
+    prompt: "继续改方案",
+  })
+
+  const runningInPlan = {
+    ...alreadyInPlan,
+    commandContext: defaultCommandContext({ workMode: "build", activeRun: true }),
+  }
+  expect(dispatchSlashCommand({ id: "approval.plan", name: "plan", argument: "悄悄提交" }, runningInPlan)).toMatchObject({
+    type: "notice",
+    message: expect.stringContaining("已在计划模式"),
+  })
+})
+
+test("/plan-view 仅 Build 当前 thread 可用；挂起审批复用原交互，否则读取计划", () => {
+  const definition = commandRegistry.get("approval.plan-view")!
+  expect(definition).toMatchObject({
+    id: "approval.plan-view",
+    name: "plan-view",
+    requirements: { workModes: ["build"], requiresThread: true },
+  })
+  expect(definition.aliases).toBeUndefined()
+  expect(commandRegistry.availability(definition, defaultCommandContext({ workMode: "compose", hasThread: true }))).toMatchObject({ state: "hidden" })
+  expect(commandRegistry.availability(definition, defaultCommandContext({ workMode: "build", hasThread: false }))).toMatchObject({ state: "disabled" })
+
+  const base = {
+    commandContext: defaultCommandContext({ workMode: "build", hasThread: true }),
+    threadId: "thread-1",
+    runtimeStatus: "idle",
+    versionSummary: "0.1.0",
+    approvalMode: "default" as const,
+  }
+  expect(dispatchSlashCommand({ id: "approval.plan-view", name: "plan-view" }, {
+    ...base,
+    pendingPlanInteraction: true,
+  })).toEqual({ type: "focus-plan" })
+
+  const result = dispatchSlashCommand({ id: "approval.plan-view", name: "plan-view" }, base)
+  expect(result).toMatchObject({ type: "rpc", method: "threads.open", params: { thread_id: "thread-1" } })
+  if (result.type !== "rpc") throw new Error("expected threads.open rpc")
+  expect(result.onSuccess({
+    thread: { thread_id: "thread-1" },
+    messages: [],
+    plan: {
+      has_plan: true,
+      plan_markdown: "# 方案",
+      plan_virtual_path: "/.harness/plan.md",
+      plan_display_path: "~/.harness/plans/thread-1.md",
+    },
+  })).toEqual({
+    type: "view-plan",
+    threadId: "thread-1",
+    markdown: "# 方案",
+    virtualPath: "/.harness/plan.md",
+    displayPath: "~/.harness/plans/thread-1.md",
+  })
+  expect(result.onSuccess({ thread: { thread_id: "thread-1" }, messages: [], plan: { has_plan: false, plan_markdown: "", plan_virtual_path: "/.harness/plan.md", plan_display_path: "~/.harness/plans/thread-1.md" } })).toEqual({
+    type: "notice",
+    message: "还没有计划。",
+  })
 })
 
 test("/btw 命令分发：无参返回用法提示，有参返回 side-question 语义结构", () => {

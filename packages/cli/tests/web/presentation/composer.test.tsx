@@ -126,7 +126,7 @@ describe("Composer", () => {
     }
   })
 
-  test("审批模式下拉：列出全部模式、选择派发 approval-mode-select，忙碌时禁用", () => {
+  test("审批模式下拉：列出全部模式、选择派发 approval-mode-select，运行中仍可切下一轮", () => {
     const intents: WebIntent[] = []
     const handle = mountComposer(makeSnapshot(), intents)
     try {
@@ -150,12 +150,22 @@ describe("Composer", () => {
       handle.unmount()
     }
 
-    const busy = makeInteractive({ activeRun: { threadId: "t1", runId: "r1" } })
-    const busyHandle = mountComposer(makeSnapshot({ interactive: busy }), [])
+    const running = makeInteractive({ activeRun: { threadId: "t1", runId: "r1" } })
+    const runningHandle = mountComposer(makeSnapshot({ interactive: running }), [])
     try {
-      expect(busyHandle.container.querySelector<HTMLButtonElement>(".composer-approval")?.disabled).toBe(true)
+      expect(runningHandle.container.querySelector<HTMLButtonElement>(".composer-approval")?.disabled).toBe(false)
     } finally {
-      busyHandle.unmount()
+      runningHandle.unmount()
+    }
+
+    const interacting = makeInteractive({
+      interaction: { type: "approval", requestId: "a-1", description: "", requests: null, presentation: null, decisions: ["reject"], deadlineAtMs: 1 },
+    })
+    const interactingHandle = mountComposer(makeSnapshot({ interactive: interacting }), [])
+    try {
+      expect(interactingHandle.container.querySelector<HTMLButtonElement>(".composer-approval")?.disabled).toBe(true)
+    } finally {
+      interactingHandle.unmount()
     }
   })
 

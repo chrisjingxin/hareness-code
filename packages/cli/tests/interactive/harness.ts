@@ -75,6 +75,7 @@ export function manualScheduler() {
 /** 内存 port：记录调用、可注入 Run 事件与 Interaction。 */
 function createPort(options: {
   compactContextImpl?: InteractiveAgentPort["compactContext"]
+  openThreadImpl?: InteractiveAgentPort["openThread"]
 } = {}) {
   const calls: string[] = []
   const runHandles: Array<{ threadId: string; runId: string }> = []
@@ -97,6 +98,11 @@ function createPort(options: {
   let setSkillEnabledImpl: (skillId: string, enabled: boolean) => Promise<Record<string, never>> = async () => ({})
   let compactContextImpl: InteractiveAgentPort["compactContext"] = options.compactContextImpl
     ?? (async () => ({ compacted: true, context: { action: "manual_summary" } }))
+  const openThreadImpl: InteractiveAgentPort["openThread"] = options.openThreadImpl ?? (async threadId => ({
+    thread: threadSummary(threadId, "恢复的请求"),
+    messages: [{ kind: "user", content: "恢复的请求" }, { kind: "tool", tool_name: "execute", content: "恢复的工具结果" }],
+    plan: { has_plan: false, plan_markdown: "", plan_virtual_path: "/.harness/plan.md", plan_display_path: `~/.harness/plans/${threadId}.md` },
+  }))
   let listAgentsImpl: InteractiveAgentPort["listAgents"] = async () => ({
     snapshot_id: "snap-builtin-1",
     agents: [
@@ -196,7 +202,7 @@ function createPort(options: {
     },
     async openThread(threadId) {
       calls.push("threads.open")
-      return { thread: threadSummary(threadId, "恢复的请求"), messages: [{ kind: "user", content: "恢复的请求" }, { kind: "tool", tool_name: "execute", content: "恢复的工具结果" }] }
+      return openThreadImpl(threadId)
     },
     async mcpStatus() {
       calls.push("mcp.status")
@@ -426,8 +432,12 @@ export function makeHarness(options: {
   agentCommands?: InteractiveRuntime["agentCommands"]
   commandRegistry?: CommandRegistry
   compactContextImpl?: InteractiveAgentPort["compactContext"]
+  openThreadImpl?: InteractiveAgentPort["openThread"]
 } = {}) {
-  const portState = createPort({ compactContextImpl: options.compactContextImpl })
+  const portState = createPort({
+    compactContextImpl: options.compactContextImpl,
+    openThreadImpl: options.openThreadImpl,
+  })
   const runtimeOverride: InteractiveRuntime = {
     ...runtime,
     ...(options.agentCommands ? { agentCommands: options.agentCommands } : {}),
@@ -505,6 +515,26 @@ export function approvalRequest(threadId: string, runId: string, decisions = ["a
     run_id: runId,
     timeout_ms: 5_000,
     payload: { description: "需要执行工具", requests: [], decisions },
+  } as InteractionRequestEnvelope
+}
+
+export function planRequest(threadId: string, runId: string, overrides: { has_plan?: boolean; plan_markdown?: string; revision?: number } = {}): InteractionRequestEnvelope {
+  return {
+    type: "plan",
+    request_id: "plan-1",
+    thread_id: threadId,
+    run_id: runId,
+    timeout_ms: 5_000,
+    payload: {
+      interrupt_id: "plan-int",
+      tool_call_id: "call-exit",
+      revision: overrides.revision ?? 0,
+      has_plan: overrides.has_plan ?? true,
+      plan_markdown: overrides.plan_markdown ?? "# 方案",
+      plan_virtual_path: "/.harness/plan.md",
+      plan_display_path: `~/.harness/plans/${threadId}.md`,
+      decisions: ["approved", "revise", "abandoned"],
+    },
   } as InteractionRequestEnvelope
 }
 

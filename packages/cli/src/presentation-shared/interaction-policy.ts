@@ -1,6 +1,6 @@
 /** 跨端共享 Interaction 展示策略：approval 选项顺序/文案、目录信任选项与 question 占位值。 */
 
-import type { ApprovalDecision, DirectoryTrustDecision } from "../interactive/types"
+import type { ApprovalDecision, DirectoryTrustDecision, PlanDecision } from "../interactive/types"
 
 /** question “其他”选项在答案数组中的占位值；与 agent 端约定。 */
 export const QUESTION_OTHER_VALUE = "__other__"
@@ -53,6 +53,102 @@ export function directoryTrustDecisionDescription(decision: DirectoryTrustDecisi
   return DIRECTORY_TRUST_DECISION_META[decision]?.description ?? ""
 }
 
+/** 计划审批三个动作，禁止出现 auto-edit 等档位选项。 */
+export const PLAN_DECISION_ORDER: readonly PlanDecision[] = [
+  "approved",
+  "revise",
+  "abandoned",
+]
+
+const PLAN_DECISION_META: Readonly<Record<PlanDecision, { label: string; description: string }>> = {
+  approved: { label: "批准并开始实现", description: "退出计划模式，按进入前权限开始改代码" },
+  revise: { label: "继续打磨", description: "留下意见，Agent 继续改计划" },
+  abandoned: { label: "放弃计划", description: "退出计划模式，不开始写代码" },
+}
+
+export function planDecisionLabel(decision: PlanDecision): string {
+  return PLAN_DECISION_META[decision]?.label ?? decision
+}
+
+export function planDecisionDescription(decision: PlanDecision): string {
+  return PLAN_DECISION_META[decision]?.description ?? ""
+}
+
+export function isPlanDecision(value: unknown): value is PlanDecision {
+  return typeof value === "string" && (PLAN_DECISION_ORDER as readonly string[]).includes(value)
+}
+
+/** 全屏审阅：预览吃掉标题、动作栏和底栏之外的全部行。 */
+export function planPreviewHeight(terminalHeight: number): number {
+  const chrome = 14
+  return Math.max(8, terminalHeight - chrome)
+}
+
+/** 打回意见：Enter 提交，Shift+Enter 换行；输入法合成中不提交。 */
+export function isPlanFeedbackSubmitKey(event: {
+  key: string
+  shiftKey?: boolean
+  nativeEvent?: { isComposing?: boolean }
+}): boolean {
+  return event.key === "Enter" && event.shiftKey !== true && event.nativeEvent?.isComposing !== true
+}
+
+/** 计划正文的行级批注；endLine 使用半开区间，便于直接映射 String.split 后的 slice。 */
+export type PlanAnnotation = {
+  id: string
+  startLine: number
+  endLine: number
+  text: string
+  excerpt: string
+}
+
+let planAnnotationSequence = 0
+
+/** 从原始 Markdown 创建 1-based 半开行范围批注；非法范围或空意见直接拒绝。 */
+export function createPlanAnnotation(
+  markdown: string,
+  startLine: number,
+  endLine: number,
+  text: string,
+): PlanAnnotation | null {
+  const lines = markdown.split("\n")
+  const normalized = text.trim()
+  if (
+    !Number.isInteger(startLine)
+    || !Number.isInteger(endLine)
+    || startLine < 1
+    || endLine <= startLine
+    || endLine > lines.length + 1
+    || !normalized
+  ) return null
+  planAnnotationSequence += 1
+  return {
+    id: `plan-annotation-${planAnnotationSequence}`,
+    startLine,
+    endLine,
+    text: normalized,
+    excerpt: lines.slice(startLine - 1, endLine - 1).join("\n"),
+  }
+}
+
+/** 把批准/打回使用的行批注与整体意见编成同一段稳定、可读的模型反馈。 */
+export function formatPlanReviewFeedback(
+  annotations: readonly PlanAnnotation[],
+  overallFeedback = "",
+): string {
+  const blocks = annotations.map(annotation => {
+    const lastLine = annotation.endLine - 1
+    const range = annotation.startLine === lastLine
+      ? `line ${annotation.startLine}`
+      : `lines ${annotation.startLine}-${lastLine}`
+    const quoted = annotation.excerpt.split("\n").map(line => `> ${line}`).join("\n")
+    return `Proposed plan ${range}:\n${quoted}\nComment: ${annotation.text}`
+  })
+  const normalized = overallFeedback.trim()
+  if (normalized) blocks.push(`Additional feedback:\n${normalized}`)
+  return blocks.join("\n\n")
+}
+
 /** 仅接受规范 decision 集合内的值；未知/畸形服务端数据在渲染层丢弃。 */
 export function isApprovalDecision(value: unknown): value is ApprovalDecision {
   return typeof value === "string" && (APPROVAL_DECISION_ORDER as readonly string[]).includes(value)
@@ -96,4 +192,3 @@ export function approvalPresentationKind(presentation: unknown): ApprovalPresent
   const kind = (presentation as { kind?: unknown }).kind
   return typeof kind === "string" ? kind : undefined
 }
-

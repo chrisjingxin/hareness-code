@@ -26,6 +26,7 @@ export type ShortcutContext = {
   hasDraft: boolean
   inputMode?: "chat" | "shell"
   childTimelineActive?: boolean
+  interactionActive?: boolean
 }
 
 export type ShortcutAction =
@@ -166,6 +167,7 @@ export function resolveShortcut(key: KeyLike, context: ShortcutContext): Shortcu
   if ((key.name === "escape" || key.name === "backspace" || key.name === "delete") && context.childTimelineActive) {
     return "leave-child-timeline"
   }
+  if (key.name === "escape" && context.interactionActive) return "none"
   if (key.name === "escape" && context.inputMode === "shell") return "exit-shell-mode"
   if (key.name === "escape" && context.activeRun) return "cancel-run"
   if (key.name === "escape" && !context.hasDraft) return "clear-selected-skill"

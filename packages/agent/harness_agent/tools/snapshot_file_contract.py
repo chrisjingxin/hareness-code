@@ -58,6 +58,7 @@ from harness_agent.tools.file_tools import (
     HARNESS_FILE_TOOL_NAMES,
     FileToolContractError,
 )
+from harness_agent.tools.plan_file import is_plan_virtual_path
 from harness_agent.tools.snapshot_file_schema import (
     CanonicalDeleteFileSchema,
     CanonicalEditFileSchema,
@@ -180,6 +181,10 @@ class SnapshotFileToolContract:
         """在 HITL 前准备 mutation；前置条件失败时不产生无法执行的审批。"""
         name = str(request.tool_call.get("name", ""))
         if name not in {"write_file", "edit_file", "delete_file"}:
+            return True
+        args = request.tool_call.get("args") or {}
+        path = args.get("file_path") if isinstance(args, dict) else None
+        if name in {"write_file", "edit_file"} and isinstance(path, str) and is_plan_virtual_path(path):
             return True
         try:
             self._prepare_mutation(request)
@@ -314,10 +319,67 @@ class SnapshotFileToolContract:
         }
         return _message("read_file", tool_call_id, payload)
 
+    def _write_plan_file(
+        self, request: ToolCallRequest, args: dict[str, Any], tool_call_id: str
+    ) -> ToolMessage:
+        """覆盖写入会话计划文件；不走工作区 Snapshot / CAS。"""
+        path = _path(args, "file_path", "write_file")
+        content = _string_arg(args, "content")
+        _require_mutation_text_size(content)
+        result = self._resolve_backend(request).write(path, content)
+        if getattr(result, "error", None):
+            raise FileToolContractError("VIRTUAL_READONLY")
+        return _message(
+            "write_file",
+            tool_call_id,
+            {
+                "ok": True,
+                "path": path,
+                "created": True,
+                "snapshot_id": None,
+                "content": content,
+                "truncated": False,
+                "diagnostics": _diagnostics_unavailable(),
+            },
+        )
+
+    def _edit_plan_file(
+        self, request: ToolCallRequest, args: dict[str, Any], tool_call_id: str
+    ) -> ToolMessage:
+        """按 exact replacement 改会话计划文件；不签发工作区 Snapshot。"""
+        path = _path(args, "file_path", "edit_file")
+        old_string = _string_arg(args, "old_string")
+        new_string = _string_arg(args, "new_string")
+        _require_text_size(old_string)
+        _require_text_size(new_string)
+        result = self._resolve_backend(request).edit(path, old_string, new_string)
+        error = getattr(result, "error", None)
+        if error:
+            text = str(error)
+            if "does not exist" in text:
+                raise FileToolContractError("FILE_NOT_FOUND")
+            if "old_string not found" in text:
+                raise FileToolContractError("EXACT_MATCH_NOT_FOUND")
+            raise FileToolContractError("VIRTUAL_READONLY")
+        return _message(
+            "edit_file",
+            tool_call_id,
+            {
+                "ok": True,
+                "path": path,
+                "replaced": getattr(result, "occurrences", 1) or 1,
+                "snapshot_id": None,
+                "diagnostics": _diagnostics_unavailable(),
+            },
+        )
+
     def _write_file(
         self, request: ToolCallRequest, args: dict[str, Any], tool_call_id: str
     ) -> ToolMessage:
         """提交 create-if-absent，并返回实际版本的首个可编辑局部窗口。"""
+        path = _path(args, "file_path", "write_file")
+        if is_plan_virtual_path(path):
+            return self._write_plan_file(request, args, tool_call_id)
         plan = self._prepare_mutation(request)
         committed = self._mutation_service.commit(plan)
         document = _require_actual_document(committed.actual)
@@ -352,6 +414,9 @@ class SnapshotFileToolContract:
         self, request: ToolCallRequest, args: dict[str, Any], tool_call_id: str
     ) -> ToolMessage:
         """提交 exact replacement，并返回实际重读的变更范围与局部上下文。"""
+        path = _path(args, "file_path", "edit_file")
+        if is_plan_virtual_path(path):
+            return self._edit_plan_file(request, args, tool_call_id)
         plan = self._prepare_mutation(request)
         committed = self._mutation_service.commit(plan)
         actual = _require_actual_document(committed.actual)
