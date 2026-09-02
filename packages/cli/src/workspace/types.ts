@@ -27,6 +27,8 @@ export type WorkspaceTreeRow = {
 export type WorkspaceTreeState = {
   readonly status: "idle" | "loading" | "ready" | "error"
   readonly rows: readonly WorkspaceTreeRow[]
+  /** 工作区全部已知条目（用于 @ 提及搜索与目录浏览，包含折叠目录内的深层条目）。 */
+  readonly allEntries?: readonly WorkspaceTreeRow[]
   /** 左侧文件树当前高亮行；null 表示无选中。 */
   readonly selectedPath: string | null
   /** 文件过多被截断时为 true，界面展示"仅展示部分内容"。 */

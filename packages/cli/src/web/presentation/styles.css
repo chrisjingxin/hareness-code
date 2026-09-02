@@ -1137,6 +1137,44 @@ pre, code { font-family: "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Co
   scrollbar-color: var(--line-strong) transparent;
 }
 .command-menu-empty { margin: 8px; color: var(--muted); font-size: 13px; }
+.mention-menu {
+  position: absolute;
+  inset-inline: 0;
+  bottom: calc(100% - 6px);
+  z-index: 6;
+  margin: 0;
+  padding: 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-surface);
+  background: var(--drawer-bg);
+  box-shadow: var(--shadow);
+}
+.mention-menu-items { display: grid; gap: 1px; }
+.mention-item {
+  width: 100%;
+  min-height: 30px;
+  display: block;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text);
+  text-align: start;
+  cursor: pointer;
+}
+.mention-item[data-selected="true"] { background: var(--accent-soft-2); color: var(--action); }
+.mention-path { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mention-path mark { padding: 0; background: transparent; color: var(--action); font-weight: 700; }
+.mention-menu-empty { margin: 8px; color: var(--muted); font-size: 13px; }
+.mention-menu-footer {
+  overflow: hidden;
+  padding: 5px 8px 2px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .command-item {
   width: 100%;
   min-height: var(--control-standard);

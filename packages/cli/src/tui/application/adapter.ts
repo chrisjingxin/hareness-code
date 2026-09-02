@@ -5,6 +5,16 @@ import { selectWorkItemView, type WorkItemView } from "../../interactive/selecto
 import { filterAgents } from "../../presentation-shared/agent-catalog"
 import { filterCommandMenuItems } from "../../presentation-shared/command-menu-policy"
 import { answersByQuestionId } from "../../presentation-shared/interaction-policy"
+import {
+  EMPTY_MENTION_SEARCH_RESULT,
+  ensureMentionWindow,
+  extractMentionQuery,
+  mentionOptionsForQuery,
+  moveMentionSelection,
+  parentMentionDirectory,
+  type MentionOption,
+  type MentionSearchResult,
+} from "../../presentation-shared"
 import { parseSlashCommand, resolveSlashCommand, type CommandMenuItem, type SkillMenuItem } from "../../interactive/commands"
 import { createFallbackNoopGateway, type AgentGateway } from "../../interactive/ports"
 import { copyToClipboard } from "../platform/clipboard"
@@ -37,6 +47,35 @@ export type DirectoryTrustDecision = "allow_session" | "deny"
 export type CommandMenuState = {
   visible: boolean
   selectedIndex: number
+}
+
+export type MentionMenuState = {
+  visible: boolean
+  selectedIndex: number
+  windowStart: number
+  browsePath: string
+  query: string
+  start: number
+  end: number
+  isQuoted: boolean
+  workspaceStatus: "idle" | "loading" | "ready" | "error"
+  workspaceLimited: boolean
+  workspaceMessage?: string
+}
+
+function emptyMentionMenu(): MentionMenuState {
+  return {
+    visible: false,
+    selectedIndex: 0,
+    windowStart: 0,
+    browsePath: "",
+    query: "",
+    start: 0,
+    end: 0,
+    isQuoted: false,
+    workspaceStatus: "idle",
+    workspaceLimited: false,
+  }
 }
 
 /** 恢复选择器使用的 thread 摘要；内部 thread_id 绝不直接渲染。 */
@@ -121,6 +160,8 @@ export type TuiAdapterSnapshot = {
   readonly draftCursor?: "start" | "end"
   readonly commandMenu: CommandMenuState
   readonly commandOptions: readonly CommandMenuItem[]
+  readonly mentionMenu: MentionMenuState
+  readonly mentionSearch: MentionSearchResult
   readonly selectedSkill?: SkillMenuItem
   readonly skills: PickerSnapshot<SkillMenuItem>
   readonly threads: PickerSnapshot<ThreadPickerItem>
@@ -154,7 +195,8 @@ export type TuiAdapterSnapshot = {
 
 /** React、快捷键和鼠标只能通过这些语义意图驱动 Adapter。 */
 export type TuiIntent =
-  | { type: "draft-input"; value: string }
+  | { type: "draft-input"; value: string; cursorOffset?: number }
+  | { type: "draft-cursor"; cursorOffset: number }
   | { type: "input-mode-change"; mode: "chat" | "shell" }
   | { type: "submit"; value: string }
   | { type: "history"; direction: "previous" | "next" }
@@ -162,6 +204,9 @@ export type TuiIntent =
   | { type: "shortcut"; action: ShortcutAction }
   | { type: "command-menu-select"; item: CommandMenuItem }
   | { type: "command-menu-hover"; selectedIndex: number }
+  | { type: "mention-menu-select"; item: MentionOption }
+  | { type: "mention-menu-hover"; selectedIndex: number }
+  | { type: "mention-menu-page"; direction: "previous" | "next"; pageSize: number }
   | { type: "picker-search"; picker: PickerKind; query: string }
   | { type: "picker-hover"; picker: PickerKind; selectedIndex: number }
   | { type: "picker-select-skill"; skill: SkillMenuItem }
@@ -251,10 +296,13 @@ class TuiAdapterImpl implements TuiAdapter {
 
   private snapshot: TuiAdapterSnapshot
   private draft = ""
+  private draftInputCursorOffset = 0
   private draftCursor: "start" | "end" | undefined
   private inputMode: "chat" | "shell" = "chat"
   private commandMenu: CommandMenuState = { visible: false, selectedIndex: 0 }
   private commandMenuDismissedValue: string | undefined
+  private mentionMenu: MentionMenuState = emptyMentionMenu()
+  private mentionMenuDismissal: { draft: string; start: number; end: number } | undefined
   private skillPicker: InternalPicker<SkillMenuItem> = emptyPicker()
   private threadPicker: InternalPicker<ThreadPickerItem> = emptyPicker()
   private modelPicker: InternalPicker<ModelProfile> = emptyPicker()
@@ -332,6 +380,31 @@ class TuiAdapterImpl implements TuiAdapter {
           },
           preview: snapshot.preview.status !== "idle" ? snapshot.preview : null,
         }
+
+        // 文件树刷新后，若当前处于 @ 提及输入状态，立即以最新文件快照重算候选菜单
+        if (this.mentionMenu.visible || this.draft.includes("@")) {
+          const mentionMatch = extractMentionQuery(this.draft, this.draftInputCursorOffset)
+          if (mentionMatch.active && !this.isMentionMenuDismissed(mentionMatch)) {
+            const rows = snapshot.tree.allEntries ?? snapshot.tree.rows
+            const result = mentionOptionsForQuery(rows, mentionMatch.query, this.mentionMenu.browsePath)
+            const selectedIndex = moveMentionSelection(this.mentionMenu.selectedIndex, 0, result.items.length)
+            const window = ensureMentionWindow(selectedIndex, this.mentionMenu.windowStart, result.items.length, 8)
+            this.mentionMenu = {
+              visible: true,
+              selectedIndex,
+              windowStart: window.start,
+              browsePath: this.mentionMenu.browsePath,
+              query: mentionMatch.query,
+              start: mentionMatch.start,
+              end: mentionMatch.end,
+              isQuoted: mentionMatch.isQuoted,
+              workspaceStatus: snapshot.tree.status,
+              workspaceLimited: snapshot.tree.limited,
+              workspaceMessage: snapshot.tree.message,
+            }
+          }
+        }
+
         this.publish()
       })
     }
@@ -379,7 +452,10 @@ class TuiAdapterImpl implements TuiAdapter {
     switch (intent.type) {
       case "draft-input":
         if (this.controller.getSnapshot().activity.kind === "compacting") return
-        this.updateDraft(intent.value)
+        this.updateDraft(intent.value, intent.cursorOffset)
+        return
+      case "draft-cursor":
+        this.updateDraftCursor(intent.cursorOffset)
         return
       case "input-mode-change":
         this.inputMode = intent.mode
@@ -403,6 +479,16 @@ class TuiAdapterImpl implements TuiAdapter {
       case "command-menu-hover":
         this.commandMenu = { ...this.commandMenu, selectedIndex: intent.selectedIndex }
         this.publish()
+        return
+      case "mention-menu-select":
+        this.selectMentionMenuItem(intent.item)
+        return
+      case "mention-menu-hover":
+        this.mentionMenu = { ...this.mentionMenu, selectedIndex: intent.selectedIndex }
+        this.publish()
+        return
+      case "mention-menu-page":
+        this.moveMentionMenu(intent.direction === "next" ? intent.pageSize : -intent.pageSize, intent.pageSize)
         return
       case "picker-search":
         this.updatePickerQuery(intent.picker, intent.query)
@@ -672,6 +758,10 @@ class TuiAdapterImpl implements TuiAdapter {
       draftCursor: this.draftCursor,
       commandMenu: { ...this.commandMenu },
       commandOptions: this.filterCommandOptions(interactive.commands),
+      mentionMenu: { ...this.mentionMenu },
+      mentionSearch: this.mentionMenu.visible
+        ? this.mentionOptions(this.mentionMenu.query)
+        : EMPTY_MENTION_SEARCH_RESULT,
       selectedSkill: interactive.selection.armedSkill ?? undefined,
       skills: this.pickerSnapshot(this.skillPicker, filterSkills(skills.items, this.skillPicker.query), skills.status === "loading", skills.status === "error" ? skills.message : undefined),
       threads: this.pickerSnapshot(this.threadPicker, filterThreads(threadItems(threads.items), this.threadPicker.query), threads.status === "loading", threads.status === "error" ? threads.message : undefined),
@@ -711,12 +801,20 @@ class TuiAdapterImpl implements TuiAdapter {
     return filterCommandMenuItems(items, this.draft)
   }
 
-  /** 更新 draft 并按同一规则控制 Slash 菜单。 */
-  private updateDraft(value: string): void {
+  /** 提及菜单候选基于工作区全量文件快照过滤。 */
+  private mentionOptions(query: string): MentionSearchResult {
+    const explorerSnapshot = this.workspaceExplorer?.getSnapshot()
+    const rows = explorerSnapshot?.tree.allEntries ?? explorerSnapshot?.tree.rows ?? []
+    return mentionOptionsForQuery(rows, query, this.mentionMenu.browsePath)
+  }
+
+  /** 更新 draft 并按同一规则控制 Slash 菜单与 @ 提及菜单。 */
+  private updateDraft(value: string, cursorOffset = value.length): void {
     if (this.historyApplyValue === value) this.historyApplyValue = undefined
     else this.promptHistoryCursor = undefined
     this.draftCursor = undefined
     this.draft = value
+    this.draftInputCursorOffset = Math.max(0, Math.min(cursorOffset, value.length))
     const query = value.trimStart()
     const shouldShowMenu = query.startsWith("/")
       && !query.startsWith("//")
@@ -727,7 +825,52 @@ class TuiAdapterImpl implements TuiAdapter {
       if (!shouldShowMenu) this.commandMenuDismissedValue = undefined
       this.commandMenu = this.commandMenu.visible ? { ...this.commandMenu, visible: false } : this.commandMenu
     }
+
+    this.syncMentionMenu()
     this.publish()
+  }
+
+  /** 光标移动不改变草稿内容，只重算光标所在的 @ 提及项。 */
+  private updateDraftCursor(cursorOffset: number): void {
+    this.draftInputCursorOffset = Math.max(0, Math.min(cursorOffset, this.draft.length))
+    this.syncMentionMenu()
+    this.publish()
+  }
+
+  /** 以当前草稿和真实光标位置同步 @ 提及菜单。 */
+  private syncMentionMenu(): void {
+    // @ 提及菜单检测（仅在 Slash 菜单未展示时触发）
+    if (!this.commandMenu.visible) {
+      const mentionMatch = extractMentionQuery(this.draft, this.draftInputCursorOffset)
+      if (mentionMatch.active && !this.isMentionMenuDismissed(mentionMatch)) {
+        const tree = this.workspaceExplorer?.getSnapshot().tree
+        this.mentionMenu = {
+          visible: true,
+          selectedIndex: 0,
+          windowStart: 0,
+          browsePath: this.mentionMenu.start === mentionMatch.start ? this.mentionMenu.browsePath : "",
+          query: mentionMatch.query,
+          start: mentionMatch.start,
+          end: mentionMatch.end,
+          isQuoted: mentionMatch.isQuoted,
+          workspaceStatus: tree?.status ?? "idle",
+          workspaceLimited: tree?.limited ?? false,
+          workspaceMessage: tree?.message,
+        }
+      } else {
+        if (!mentionMatch.active) this.mentionMenuDismissal = undefined
+        this.mentionMenu = this.mentionMenu.visible ? { ...this.mentionMenu, visible: false } : this.mentionMenu
+      }
+    } else {
+      this.mentionMenu = { ...this.mentionMenu, visible: false }
+    }
+  }
+
+  /** Esc 只压制当时关闭的具体 token，不影响同一草稿内的其他 @ 提及。 */
+  private isMentionMenuDismissed(match: { start: number; end: number }): boolean {
+    return this.mentionMenuDismissal?.draft === this.draft
+      && this.mentionMenuDismissal.start === match.start
+      && this.mentionMenuDismissal.end === match.end
   }
 
   /** 清空输入和命令菜单；不撤销已经选中的一次性 Skill。 */
@@ -739,11 +882,14 @@ class TuiAdapterImpl implements TuiAdapter {
   /** 清除输入和命令菜单状态；操作进入等待态时也复用此路径。 */
   private resetDraftState(): void {
     this.commandMenuDismissedValue = undefined
+    this.mentionMenuDismissal = undefined
     this.promptHistoryCursor = undefined
     this.historyApplyValue = undefined
     this.draftCursor = undefined
     this.draft = ""
+    this.draftInputCursorOffset = 0
     this.commandMenu = { visible: false, selectedIndex: 0 }
+    this.mentionMenu = emptyMentionMenu()
   }
 
   /** 将历史项写入 snapshot，实际 textarea 文本由 React adapter 同步到 ref。 */
@@ -754,8 +900,11 @@ class TuiAdapterImpl implements TuiAdapter {
     this.historyApplyValue = move.value
     this.draftCursor = direction === "previous" ? "start" : "end"
     this.commandMenuDismissedValue = undefined
+    this.mentionMenuDismissal = undefined
     this.draft = move.value
+    this.draftInputCursorOffset = direction === "previous" ? 0 : move.value.length
     this.commandMenu = { visible: false, selectedIndex: 0 }
+    this.mentionMenu = emptyMentionMenu()
     this.publish()
   }
 
@@ -1034,6 +1183,32 @@ class TuiAdapterImpl implements TuiAdapter {
         }
         return
       }
+      case "close-mention-menu":
+        this.mentionMenuDismissal = {
+          draft: this.draft,
+          start: this.mentionMenu.start,
+          end: this.mentionMenu.end,
+        }
+        this.mentionMenu = { ...this.mentionMenu, visible: false }
+        this.publish()
+        return
+      case "mention-previous":
+        this.moveMentionMenu(-1)
+        return
+      case "mention-next":
+        this.moveMentionMenu(1)
+        return
+      case "mention-enter":
+        this.enterSelectedMentionDirectory()
+        return
+      case "mention-parent":
+        this.leaveMentionDirectory()
+        return
+      case "mention-select":
+        this.selectMentionMenu()
+        return
+      case "mention-block":
+        return
       case "command-open":
         this.openCommandMenu()
         return
@@ -1213,9 +1388,69 @@ class TuiAdapterImpl implements TuiAdapter {
     }
     const value = `/${item.command.name}`
     this.commandMenuDismissedValue = value
-    this.draft = value
-    this.draftCursor = "end"
     this.commandMenu = { visible: false, selectedIndex: 0 }
+    this.publish()
+  }
+
+  /** 在可见提及选项中移动选中索引。 */
+  private moveMentionMenu(direction: number, visibleRows = 8): void {
+    const result = this.mentionOptions(this.mentionMenu.query)
+    if (result.items.length === 0) return
+    const selectedIndex = moveMentionSelection(this.mentionMenu.selectedIndex, direction, result.items.length)
+    const window = ensureMentionWindow(selectedIndex, this.mentionMenu.windowStart, result.items.length, visibleRows)
+    this.mentionMenu = { ...this.mentionMenu, selectedIndex, windowStart: window.start }
+    this.publish()
+  }
+
+  /** 选中当前高亮的提及候选。 */
+  private selectMentionMenu(): void {
+    const options = this.mentionOptions(this.mentionMenu.query).items
+    const selected = options[this.mentionMenu.selectedIndex] ?? options[0]
+    if (selected) {
+      this.selectMentionMenuItem(selected)
+    }
+  }
+
+  /** 处理鼠标或键盘选中的提及文件项，将路径插入当前 draft 并追加空格。 */
+  private selectMentionMenuItem(item: MentionOption): void {
+    if (item.kind === "directory") {
+      this.enterMentionDirectory(item.path)
+      return
+    }
+    const before = this.draft.slice(0, this.mentionMenu.start)
+    const after = this.draft.slice(this.mentionMenu.end)
+    const formatted = (this.mentionMenu.isQuoted || item.path.includes(" "))
+      ? `@"${item.path}"`
+      : `@${item.path}`
+    this.draft = `${before}${formatted} ${after.trimStart()}`
+    this.draftInputCursorOffset = this.draft.length
+    this.draftCursor = "end"
+    this.mentionMenu = emptyMentionMenu()
+    this.mentionMenuDismissal = undefined
+    this.publish()
+  }
+
+  /** Right 只进入目录；文件仍由 Tab/Enter 明确选中。 */
+  private enterSelectedMentionDirectory(): void {
+    const selected = this.mentionOptions(this.mentionMenu.query).items[this.mentionMenu.selectedIndex]
+    if (selected?.kind === "directory") this.enterMentionDirectory(selected.path)
+  }
+
+  private enterMentionDirectory(path: string): void {
+    this.mentionMenu = { ...this.mentionMenu, browsePath: path, selectedIndex: 0, windowStart: 0 }
+    this.publish()
+  }
+
+  /** 返回上级后重新选中刚离开的目录，避免用户丢失位置。 */
+  private leaveMentionDirectory(): void {
+    const previousPath = this.mentionMenu.browsePath
+    if (!previousPath) return
+    const browsePath = parentMentionDirectory(previousPath)
+    this.mentionMenu = { ...this.mentionMenu, browsePath, selectedIndex: 0, windowStart: 0 }
+    const options = this.mentionOptions("").items
+    const selectedIndex = Math.max(0, options.findIndex(item => item.path === previousPath))
+    const window = ensureMentionWindow(selectedIndex, 0, options.length, 8)
+    this.mentionMenu = { ...this.mentionMenu, selectedIndex, windowStart: window.start }
     this.publish()
   }
 

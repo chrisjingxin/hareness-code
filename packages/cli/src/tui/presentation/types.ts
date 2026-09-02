@@ -23,13 +23,18 @@ export type SharedViewProps = {
   inputRef: RefObject<TextareaRenderable | null>
   conversationScrollRef: RefObject<ScrollBoxRenderable | null>
   value: string
-  onInput: (value: string) => void
+  onInput: (value: string, cursorOffset?: number) => void
+  onInputCursorChange?: (cursorOffset: number) => void
   onInputBarKeyDown: (event: KeyEvent) => void
   onSubmit: () => void
   commandMenu: CommandMenuState
   commandOptions: readonly CommandMenuItem[]
   onSelectCommand: (command: CommandMenuItem) => void
   onHoverCommand: (index: number) => void
+  mentionMenu?: import("../application/adapter").MentionMenuState
+  mentionSearch?: import("../../presentation-shared/mention-filter-policy").MentionSearchResult
+  onSelectMention?: (option: import("../../presentation-shared/mention-filter-policy").MentionOption) => void
+  onHoverMention?: (index: number) => void
   selectedSkill?: SkillMenuItem
   pickerVisible: boolean
   onClearSelectedSkill: () => void

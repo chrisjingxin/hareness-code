@@ -3,7 +3,17 @@
 import type { ApprovalDecision, InteractiveApprovalMode, InteractiveIntent, InteractiveMcpInput, IntentOutcome, InteractiveSnapshot, InteractiveResponse } from "../../interactive/types"
 import type { CommandMenuItem } from "../../interactive/commands"
 import type { PresentationState, WorkspacePreviewView, WorkspaceTreeView } from "../../presentation-coordinator"
-import { filterCommandMenuItems } from "../../presentation-shared"
+import {
+  EMPTY_MENTION_SEARCH_RESULT,
+  ensureMentionWindow,
+  extractMentionQuery,
+  filterCommandMenuItems,
+  mentionOptionsForQuery,
+  moveMentionSelection,
+  parentMentionDirectory,
+  type MentionOption,
+  type MentionSearchResult,
+} from "../../presentation-shared"
 import { fileLanguageId } from "../../workspace/file-language"
 import type { WebUiClient } from "../ui-client"
 
@@ -34,6 +44,18 @@ export type WebPanelSearchState = {
   readonly error: string | null
 }
 
+/** Web Composer 的 @ 菜单状态；候选内容由 mentionSearch 单独发布。 */
+export type WebMentionMenuState = {
+  readonly visible: boolean
+  readonly selectedIndex: number
+  readonly windowStart: number
+  readonly browsePath: string
+  readonly query: string
+  readonly start: number
+  readonly end: number
+  readonly isQuoted: boolean
+}
+
 /** 单一请求的 Interaction 草稿：approval 反馈与 question 全量答案都按 requestId 隔离。 */
 export type WebInteractionDraft = {
   /** 与 InteractiveInteraction.requestId 一一对应；变化时整组重置。 */
@@ -57,6 +79,8 @@ export type WebAdapterSnapshot = {
   readonly interactive: InteractiveSnapshot
   /** 当前输入草稿；提交后由 Adapter 自行清空。 */
   readonly draft: string
+  /** textarea 的真实光标位置；@token 解析与选中后的焦点恢复共用。 */
+  readonly draftCursorOffset: number
   /** Composer 正在提交中。 */
   readonly composerSubmitting: boolean
   /** Composer 提交或输入错误提示。 */
@@ -67,6 +91,8 @@ export type WebAdapterSnapshot = {
   readonly commandMenuIndex: number
   /** 命令菜单项；只通过共享 filterCommandMenuItems 计算，availability 不重算。 */
   readonly commandOptions: readonly CommandMenuItem[]
+  readonly mentionMenu: WebMentionMenuState
+  readonly mentionSearch: MentionSearchResult
   /** Context Dock：右侧常驻面板，Code 承载文件预览；关闭时保留面板与 Tab 状态。 */
   readonly contextDock: {
     readonly open: boolean
@@ -120,13 +146,20 @@ export type WebAdapterSnapshot = {
 
 /** React / DOM 事件通过这些语义意图驱动 Adapter；不允许携带 DOM event。 */
 export type WebIntent =
-  | { type: "draft-change"; value: string }
+  | { type: "draft-change"; value: string; cursorOffset?: number }
+  | { type: "draft-cursor"; cursorOffset: number }
   | { type: "submit" }
   | { type: "composer-error-dismiss" }
   | { type: "command-menu-open" }
   | { type: "command-menu-close" }
   | { type: "command-menu-select"; item: CommandMenuItem }
   | { type: "command-menu-hover"; selectedIndex: number }
+  | { type: "mention-menu-close" }
+  | { type: "mention-menu-select"; item: MentionOption }
+  | { type: "mention-menu-hover"; selectedIndex: number }
+  | { type: "mention-menu-move"; direction: "previous" | "next" }
+  | { type: "mention-menu-page"; direction: "previous" | "next" }
+  | { type: "mention-menu-parent" }
   | { type: "dock-open"; panel: ContextDockPanel }
   | { type: "dock-panel-select"; panel: ContextDockPanel }
   | { type: "dock-close" }
@@ -250,10 +283,13 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
 
   private snapshot: WebAdapterSnapshot
   private draft = ""
+  private draftCursorOffset = 0
   private composerSubmittingFlag = false
   private composerErrorStr: string | null = null
   private commandMenuOpenFlag = false
   private commandMenuIndex = 0
+  private mentionMenu: WebMentionMenuState = emptyMentionMenu()
+  private mentionMenuDismissal: { draft: string; start: number; end: number } | null = null
   private readonly panelState: Record<ContextDockPanel, PanelState> = createEmptyPanelState()
   private contextDock: ContextDockState = {
     open: false,
@@ -335,7 +371,10 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     if (this.closed) return
     switch (intent.type) {
       case "draft-change":
-        this.updateDraft(intent.value)
+        this.updateDraft(intent.value, intent.cursorOffset ?? intent.value.length)
+        return
+      case "draft-cursor":
+        this.updateDraftCursor(intent.cursorOffset)
         return
       case "submit":
         await this.submit()
@@ -356,6 +395,26 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
       case "command-menu-hover":
         this.commandMenuIndex = intent.selectedIndex
         this.schedulePublish()
+        return
+      case "mention-menu-close":
+        this.mentionMenuDismissal = { draft: this.draft, start: this.mentionMenu.start, end: this.mentionMenu.end }
+        this.mentionMenu = { ...this.mentionMenu, visible: false }
+        this.publishNow()
+        return
+      case "mention-menu-select":
+        this.selectMentionMenuItem(intent.item)
+        return
+      case "mention-menu-hover":
+        this.setMentionSelection(intent.selectedIndex)
+        return
+      case "mention-menu-move":
+        this.moveMentionMenu(intent.direction === "next" ? 1 : -1)
+        return
+      case "mention-menu-page":
+        this.moveMentionMenu(intent.direction === "next" ? 8 : -8)
+        return
+      case "mention-menu-parent":
+        this.leaveMentionDirectory()
         return
       case "dock-open":
         this.dockOpen(intent.panel)
@@ -538,6 +597,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
       this.publishNow()
       return
     }
+    this.syncMentionMenu()
     this.schedulePublish()
   }
 
@@ -625,11 +685,16 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     return {
       interactive,
       draft: this.draft,
+      draftCursorOffset: this.draftCursorOffset,
       composerSubmitting: this.composerSubmittingFlag,
       composerError: this.composerErrorStr,
       commandMenuOpen: this.commandMenuOpenFlag,
       commandMenuIndex: this.commandMenuIndex,
       commandOptions: filterCommandMenuItems(webRenderableCommands(interactive.commands), this.draft),
+      mentionMenu: { ...this.mentionMenu },
+      mentionSearch: this.mentionMenu.visible
+        ? this.searchMentionOptions()
+        : EMPTY_MENTION_SEARCH_RESULT,
       contextDock: {
         open: this.contextDock.open,
         activePanel: this.contextDock.activePanel,
@@ -685,22 +750,121 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
   }
 
   /** draft 变化：只有 `/` 前缀且未进入参数区、未转义时才打开命令菜单。 */
-  private updateDraft(value: string): void {
+  private updateDraft(value: string, cursorOffset: number): void {
     if (this.getInteractive().activity.kind === "compacting") return
     this.draft = value
+    this.draftCursorOffset = Math.max(0, Math.min(cursorOffset, value.length))
     this.composerErrorStr = null
     const query = value.trimStart()
     const shouldShowMenu = query.startsWith("/") && !query.startsWith("//") && !query.slice(1).match(/\s/)
     this.commandMenuOpenFlag = shouldShowMenu
     if (shouldShowMenu) this.commandMenuIndex = 0
+    this.syncMentionMenu()
+    this.publishNow()
+  }
+
+  private updateDraftCursor(cursorOffset: number): void {
+    this.draftCursorOffset = Math.max(0, Math.min(cursorOffset, this.draft.length))
+    this.syncMentionMenu()
+    this.publishNow()
+  }
+
+  /** 以 Web 视图中的完整文件快照生成候选池，不触发额外文件系统遍历。 */
+  private searchMentionOptions(): MentionSearchResult {
+    const tree = this.client.getState().workspaceTree
+    return mentionOptionsForQuery(tree.allEntries ?? tree.rows, this.mentionMenu.query, this.mentionMenu.browsePath)
+  }
+
+  /** Slash 菜单优先；有效 @token 即使无匹配也保持可见以展示明确空态。 */
+  private syncMentionMenu(): void {
+    if (this.commandMenuOpenFlag) {
+      this.mentionMenu = { ...this.mentionMenu, visible: false }
+      return
+    }
+    const match = extractMentionQuery(this.draft, this.draftCursorOffset)
+    if (!match.active) {
+      this.mentionMenuDismissal = null
+      this.mentionMenu = { ...this.mentionMenu, visible: false }
+      return
+    }
+    if (this.mentionMenuDismissal?.draft === this.draft
+      && this.mentionMenuDismissal.start === match.start
+      && this.mentionMenuDismissal.end === match.end) {
+      this.mentionMenu = { ...this.mentionMenu, visible: false }
+      return
+    }
+    const sameToken = match.start === this.mentionMenu.start
+    const queryChanged = match.query !== this.mentionMenu.query || !sameToken || match.end !== this.mentionMenu.end
+    this.mentionMenu = {
+      visible: true,
+      selectedIndex: queryChanged ? 0 : this.mentionMenu.selectedIndex,
+      windowStart: queryChanged ? 0 : this.mentionMenu.windowStart,
+      browsePath: sameToken ? this.mentionMenu.browsePath : "",
+      query: match.query,
+      start: match.start,
+      end: match.end,
+      isQuoted: match.isQuoted,
+    }
+    const result = this.searchMentionOptions()
+    const selectedIndex = moveMentionSelection(this.mentionMenu.selectedIndex, 0, result.items.length)
+    const window = ensureMentionWindow(selectedIndex, this.mentionMenu.windowStart, result.items.length, 8)
+    this.mentionMenu = { ...this.mentionMenu, selectedIndex, windowStart: window.start }
+  }
+
+  private setMentionSelection(selectedIndex: number): void {
+    const result = this.searchMentionOptions()
+    const next = moveMentionSelection(selectedIndex, 0, result.items.length)
+    const window = ensureMentionWindow(next, this.mentionMenu.windowStart, result.items.length, 8)
+    this.mentionMenu = { ...this.mentionMenu, selectedIndex: next, windowStart: window.start }
+    this.schedulePublish()
+  }
+
+  private moveMentionMenu(delta: number): void {
+    const result = this.searchMentionOptions()
+    const selectedIndex = moveMentionSelection(this.mentionMenu.selectedIndex, delta, result.items.length)
+    const window = ensureMentionWindow(selectedIndex, this.mentionMenu.windowStart, result.items.length, 8)
+    this.mentionMenu = { ...this.mentionMenu, selectedIndex, windowStart: window.start }
+    this.schedulePublish()
+  }
+
+  private selectMentionMenuItem(item: MentionOption): void {
+    if (item.kind === "directory") {
+      this.mentionMenu = { ...this.mentionMenu, browsePath: item.path, selectedIndex: 0, windowStart: 0 }
+      this.publishNow()
+      return
+    }
+    const before = this.draft.slice(0, this.mentionMenu.start)
+    const after = this.draft.slice(this.mentionMenu.end)
+    const formatted = this.mentionMenu.isQuoted || item.path.includes(" ") ? `@"${item.path}"` : `@${item.path}`
+    const replacement = `${formatted} `
+    this.draft = `${before}${replacement}${after.trimStart()}`
+    this.draftCursorOffset = before.length + replacement.length
+    this.mentionMenu = emptyMentionMenu()
+    this.mentionMenuDismissal = null
+    this.publishNow()
+  }
+
+  /** 返回上级后重新选中刚离开的目录，保证鼠标和键盘路径一致。 */
+  private leaveMentionDirectory(): void {
+    const previousPath = this.mentionMenu.browsePath
+    if (!previousPath) return
+    const browsePath = parentMentionDirectory(previousPath)
+    this.mentionMenu = { ...this.mentionMenu, browsePath, selectedIndex: 0, windowStart: 0 }
+    const result = this.searchMentionOptions()
+    const selectedIndex = Math.max(0, result.items.findIndex(item => item.path === previousPath))
+    const window = ensureMentionWindow(selectedIndex, 0, result.items.length, 8)
+    this.mentionMenu = { ...this.mentionMenu, selectedIndex, windowStart: window.start }
     this.publishNow()
   }
 
   /** 操作进入等待态时清除旧输入，避免已提交的 Slash 命令继续停留在 Composer。 */
   private resetDraftState(): void {
     this.draft = ""
+    this.draftCursorOffset = 0
     this.commandMenuOpenFlag = false
     this.commandMenuIndex = 0
+    this.mentionMenu = emptyMentionMenu()
+    this.mentionMenuDismissal = null
     this.composerErrorStr = null
   }
 
@@ -723,6 +887,9 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
       if (outcome.status === "accepted") {
         if (this.draft === submittedDraft) {
           this.draft = ""
+          this.draftCursorOffset = 0
+          this.mentionMenu = emptyMentionMenu()
+          this.mentionMenuDismissal = null
         }
         this.commandMenuOpenFlag = false
         this.commandMenuIndex = 0
@@ -745,8 +912,9 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
   private openCommandMenu(): void {
     if (this.getInteractive().activity.kind === "compacting") return
     const value = this.draft.trimStart()
-    if (!value.startsWith("/") || value.slice(1).match(/\s/)) this.updateDraft("/")
+    if (!value.startsWith("/") || value.slice(1).match(/\s/)) this.updateDraft("/", 1)
     this.commandMenuOpenFlag = true
+    this.mentionMenu = { ...this.mentionMenu, visible: false }
     this.commandMenuIndex = 0
     this.schedulePublish()
   }
@@ -1288,6 +1456,10 @@ function cloneInteractionDraft(draft: WebInteractionDraft): WebInteractionDraft 
 function webRenderableCommands(items: readonly CommandMenuItem[]): readonly CommandMenuItem[] {
   // host.web 是 TUI 入口；共享 Core 下 Web 页面不能嵌套接管，从命令菜单隐藏。
   return items.filter(item => item.kind !== "command" || item.command.id !== "host.web")
+}
+
+function emptyMentionMenu(): WebMentionMenuState {
+  return { visible: false, selectedIndex: 0, windowStart: 0, browsePath: "", query: "", start: 0, end: 0, isQuoted: false }
 }
 
 function errorMessage(error: unknown): string {

@@ -10,6 +10,7 @@ import { cryptoIdGenerator, systemClock, systemScheduler } from "../infrastructu
 import type { InteractiveRuntime } from "./runtime"
 import { appendNotice, clearThread, createInitialState, finishContextCompaction, leaveChildTimeline, openChildTimeline, setWorkMode, startContextCompaction, type InteractiveState } from "./state"
 import { scopeTimeline } from "../presentation-shared/timeline-scope"
+import { resolveMentions } from "../workspace/mention-resolver"
 export class InteractiveControllerImpl implements InteractiveController {
   private readonly gateway: AgentGateway
   private readonly clock: Clock
@@ -255,11 +256,13 @@ export class InteractiveControllerImpl implements InteractiveController {
     }
 
     const message = resolution.kind === "escaped" ? resolution.message : value
-    return this.runFeature.startRun(message, this.featureContext, {
+    const resolvedMention = await resolveMentions(this.baseRuntime.workspace, message)
+    return this.runFeature.startRun(resolvedMention.prompt, this.featureContext, {
       // 下一次 Run 的工作模式由共享状态或 direct_shell 显式指定决定，受理后冻结。
       mode: modeOverride ?? this.state.workMode,
       requestedModelProfileId: this.modelFeature.requestedModelProfileId,
       armedSkill: this.skillFeature.armedSkill,
+      displayPrompt: message,
       onEvent: event => this.timelineFeature.processAgentEvent(event, this.featureContext),
       onRunFinish: (actualModel?: ModelProfile) => this.finishRun(actualModel),
       onAbandonInteraction: () => this.interactionFeature.abandonPendingInteraction(this.featureContext),
@@ -373,16 +376,19 @@ export class InteractiveControllerImpl implements InteractiveController {
       case "view-plan":
         this.interactionFeature.openPlanViewer(result, this.featureContext)
         return { status: "accepted" }
-      case "submit-prompt":
-        return this.runFeature.startRun(result.prompt, this.featureContext, {
+      case "submit-prompt": {
+        const resolved = await resolveMentions(this.baseRuntime.workspace, result.prompt)
+        return this.runFeature.startRun(resolved.prompt, this.featureContext, {
           mode: this.state.workMode,
           requestedModelProfileId: this.modelFeature.requestedModelProfileId,
           armedSkill: this.skillFeature.armedSkill,
           requestedSkill: result.requestedSkill,
+          displayPrompt: result.prompt,
           onEvent: event => this.timelineFeature.processAgentEvent(event, this.featureContext),
           onRunFinish: (actualModel?: ModelProfile) => this.finishRun(actualModel),
           onAbandonInteraction: () => this.interactionFeature.abandonPendingInteraction(this.featureContext),
         })
+      }
       case "rpc":
         try {
           const value = await this.invokeCommandRpc(result.method, result.params)

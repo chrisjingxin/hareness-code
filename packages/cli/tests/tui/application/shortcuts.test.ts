@@ -24,6 +24,20 @@ test("命令菜单优先消费导航、选择与关闭快捷键", () => {
   expect(resolveShortcut({ name: "return", ctrl: false }, { ...menu, commandOptionCount: 0 })).toBe("command-block")
 })
 
+test("提及菜单消费方向键、翻页、选择与关闭快捷键", () => {
+  const menu = { ...idle, mentionMenuVisible: true, mentionOptionCount: 20, mentionBrowsePath: "packages", mentionQuery: "", mentionSelectedKind: "directory" as const, hasDraft: true }
+  expect(resolveShortcut({ name: "up", ctrl: false }, menu)).toBe("mention-previous")
+  expect(resolveShortcut({ name: "down", ctrl: false }, menu)).toBe("mention-next")
+  expect(resolveShortcut({ name: "pageup", ctrl: false }, menu)).toBe("mention-page-previous")
+  expect(resolveShortcut({ name: "pagedown", ctrl: false }, menu)).toBe("mention-page-next")
+  expect(resolveShortcut({ name: "right", ctrl: false }, menu)).toBe("mention-enter")
+  expect(resolveShortcut({ name: "left", ctrl: false }, menu)).toBe("mention-parent")
+  expect(resolveShortcut({ name: "tab", ctrl: false }, menu)).toBe("mention-select")
+  expect(resolveShortcut({ name: "escape", ctrl: false }, menu)).toBe("close-mention-menu")
+  expect(resolveShortcut({ name: "left", ctrl: false }, { ...menu, mentionQuery: "app" })).toBe("none")
+  expect(resolveShortcut({ name: "right", ctrl: false }, { ...menu, mentionSelectedKind: "file" })).toBe("none")
+})
+
 test("命令确认框优先消费确认和取消快捷键", () => {
   const dialog = { ...idle, commandDialogVisible: true, commandMenuVisible: true, commandOptionCount: 2 }
   expect(resolveShortcut({ name: "return", ctrl: false }, dialog)).toBe("confirm-command-dialog")

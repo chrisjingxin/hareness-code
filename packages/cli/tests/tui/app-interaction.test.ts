@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { PassThrough } from "node:stream"
@@ -12,11 +12,13 @@ import { AgentClient } from "../../src/ipc/client"
 import { StdioRpcTransport } from "../../src/ipc/stdio-transport"
 import { runTui, TUI_RENDERER_OPTIONS, Za38Tui, type RenderedTuiOptions } from "../../src/tui/app"
 import { createInteractiveController } from "../../src/interactive/controller"
+import { createFallbackNoopGateway } from "../../src/interactive/ports"
 import { AgentClientGateway } from "../../src/infrastructure/agent-client-gateway"
 import { createTuiAdapter, type TuiAdapter } from "../../src/tui/application/adapter"
 import type { InteractiveRuntime } from "../../src/interactive/runtime"
 import * as clipboard from "../../src/tui/platform/clipboard"
 import * as selectionCopy from "../../src/tui/presentation/selection-copy"
+import { createWorkspaceExplorer } from "../../src/workspace/explorer"
 
 const runtime: InteractiveRuntime = {
   workspace: "/workspace/harness-code",
@@ -117,6 +119,53 @@ test("根 TUI 在 mouse-up 时复制 renderer 的非空选区并显示 Toast", a
     client.destroy()
     await adapter.close()
     await controller.close()
+  }
+})
+
+test("首页输入 @ 前自动加载真实工作区文件并展示候选", async () => {
+  const root = await mkdtemp(join(tmpdir(), "za38-tui-mention-"))
+  await writeFile(join(root, "source.ts"), "export const value = 1")
+  const gateway = createFallbackNoopGateway()
+  const controller = createInteractiveController({ gateway })
+  const explorer = await createWorkspaceExplorer(root)
+  const adapter = createTuiAdapter({
+    controller,
+    gateway,
+    workspaceExplorer: explorer,
+    promptHistoryStore: { load: async () => [], save: async () => {} },
+    onRequestExit: () => undefined,
+  })
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        controller,
+        adapter,
+        workspaceExplorer: explorer,
+        onRequestExit: () => undefined,
+      }), { width: 100, height: 28 })
+      await setup.flush()
+      for (let attempt = 0; attempt < 20 && explorer.getSnapshot().tree.status !== "ready"; attempt += 1) {
+        await Bun.sleep(5)
+        await setup.flush()
+      }
+    })
+    expect(explorer.getSnapshot().tree.status).toBe("ready")
+    expect(explorer.getSnapshot().tree.allEntries?.map(row => row.path)).toContain("source.ts")
+
+    await act(async () => {
+      await setup.mockInput.typeText("@")
+      await setup.flush()
+    })
+    expect(adapter.getSnapshot().draft).toBe("@")
+    expect(adapter.getSnapshot().mentionMenu.visible).toBe(true)
+    expect(setup.captureCharFrame()).toContain("source.ts")
+  } finally {
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    await adapter.close()
+    await explorer.close()
+    await controller.close()
+    await rm(root, { recursive: true, force: true })
   }
 })
 

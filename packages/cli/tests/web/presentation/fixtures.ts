@@ -97,9 +97,12 @@ export function makeSnapshot(overrides: Partial<WebAdapterSnapshot> = {}): WebAd
   return {
     interactive: makeInteractive(),
     draft: "",
+    draftCursorOffset: 0,
     commandMenuOpen: false,
     commandMenuIndex: 0,
     commandOptions: [],
+    mentionMenu: { visible: false, selectedIndex: 0, windowStart: 0, browsePath: "", query: "", start: 0, end: 0, isQuoted: false },
+    mentionSearch: { items: [], totalMatches: 0, truncated: false },
     contextDock: {
       open: false,
       activePanel: "code",

@@ -26,6 +26,11 @@ export type ShortcutContext = {
   undoDialogVisible?: boolean
   commandMenuVisible: boolean
   commandOptionCount: number
+  mentionMenuVisible?: boolean
+  mentionOptionCount?: number
+  mentionBrowsePath?: string
+  mentionQuery?: string
+  mentionSelectedKind?: "directory" | "file" | "symlink"
   activeRun: boolean
   hasDraft: boolean
   inputMode?: "chat" | "shell"
@@ -59,6 +64,15 @@ export type ShortcutAction =
   | "command-next"
   | "command-select"
   | "command-block"
+  | "close-mention-menu"
+  | "mention-previous"
+  | "mention-next"
+  | "mention-page-previous"
+  | "mention-page-next"
+  | "mention-enter"
+  | "mention-parent"
+  | "mention-select"
+  | "mention-block"
   | "close-skill-picker"
   | "skill-previous"
   | "skill-next"
@@ -186,10 +200,22 @@ export function resolveShortcut(key: KeyLike, context: ShortcutContext): Shortcu
       return context.commandOptionCount > 0 ? "command-select" : "command-block"
     }
   }
+  if (context.mentionMenuVisible) {
+    if (key.name === "escape") return "close-mention-menu"
+    if (key.name === "up" || (key.ctrl && key.name === "p")) return "mention-previous"
+    if (key.name === "down" || (key.ctrl && key.name === "n")) return "mention-next"
+    if (key.name === "pageup") return "mention-page-previous"
+    if (key.name === "pagedown") return "mention-page-next"
+    if (key.name === "right" && !context.mentionQuery && context.mentionSelectedKind === "directory") return "mention-enter"
+    if (key.name === "left" && !context.mentionQuery && context.mentionBrowsePath) return "mention-parent"
+    if (key.name === "return" || key.name === "kpenter" || key.name === "tab") {
+      return (context.mentionOptionCount ?? 0) > 0 ? "mention-select" : "mention-block"
+    }
+  }
 
   // 滚动键全局生效（含正在输入或运行中），与 opencode 的 session.global 对齐；
   // 浮层打开时让位给选择器，避免在背后滚动历史。
-  if (!context.commandMenuVisible && !context.skillPickerVisible && !context.threadPickerVisible && !context.modelPickerVisible && !context.agentPickerVisible && !context.undoPickerVisible && !context.undoDialogVisible) {
+  if (!context.commandMenuVisible && !context.mentionMenuVisible && !context.skillPickerVisible && !context.threadPickerVisible && !context.modelPickerVisible && !context.agentPickerVisible && !context.undoPickerVisible && !context.undoDialogVisible) {
     const scrollAction = resolveScrollShortcut(key)
     if (scrollAction !== "none") return scrollAction
   }

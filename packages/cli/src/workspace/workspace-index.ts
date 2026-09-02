@@ -118,6 +118,43 @@ export async function listDirectory(root: string, relativePath: string): Promise
   return trimToLimit(sortRows(rows), MAX_DIR_NODES)
 }
 
+/**
+ * 非 Git 工作区的有界全量条目索引；沿用目录忽略策略，但不改变侧边栏的懒加载可见树。
+ */
+export async function loadWorkspaceFileIndex(root: string): Promise<TreeLoadResult> {
+  const pendingDirectories = [""]
+  let directoryIndex = 0
+  const indexedRows: WorkspaceTreeRow[] = []
+  let limited = false
+
+  while (directoryIndex < pendingDirectories.length && indexedRows.length < MAX_TREE_FILES) {
+    const relativePath = pendingDirectories[directoryIndex++]!
+    let result: TreeLoadResult
+    try {
+      result = await listDirectory(root, relativePath)
+    } catch {
+      if (relativePath === "") throw new Error("工作区根目录不可读取")
+      limited = true
+      continue
+    }
+    limited ||= result.limited
+    for (const row of result.rows) {
+      indexedRows.push(row)
+      if (row.kind === "directory") pendingDirectories.push(row.path)
+      if (indexedRows.length >= MAX_TREE_FILES) {
+        limited = true
+        break
+      }
+    }
+  }
+
+  if (directoryIndex < pendingDirectories.length) limited = true
+  return {
+    rows: sortRows(indexedRows),
+    limited,
+  }
+}
+
 /** 按目录层级做树序（parent 先于其全部后代），同一层级内目录 → 文件 → symlink，再按 zh 数字感知字典序。 */
 export function sortRows(rows: readonly WorkspaceTreeRow[]): WorkspaceTreeRow[] {
   const byParent = new Map<string, WorkspaceTreeRow[]>()

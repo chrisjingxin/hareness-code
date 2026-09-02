@@ -459,6 +459,7 @@ function createPort(options: {
 }
 
 export function makeHarness(options: {
+  workspace?: string
   initialThreadId?: string | null
   configError?: boolean
   failOpenThread?: boolean
@@ -476,6 +477,7 @@ export function makeHarness(options: {
   })
   const runtimeOverride: InteractiveRuntime = {
     ...runtime,
+    ...(options.workspace ? { workspace: options.workspace } : {}),
     ...(options.agentCommands ? { agentCommands: options.agentCommands } : {}),
     ...(options.commandRegistry ? { commandRegistry: options.commandRegistry } : {}),
     ...(options.capabilities ? { capabilities: options.capabilities } : {}),

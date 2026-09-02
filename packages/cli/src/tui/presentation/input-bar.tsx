@@ -13,7 +13,9 @@ import {
   workspaceLabel,
 } from "../../interactive/runtime"
 import { activityLabel, gitWorkspaceLabel, modelSelectionLabel } from "../../presentation-shared"
+import { mentionRowsForTerminal } from "../../presentation-shared/mention-window-policy"
 import { modeAccent, tuiTheme } from "./theme"
+import { MentionMenu } from "./mention-menu"
 import type { SharedViewProps } from "./types"
 
 /** thread 输入栏上方的实时模型和运行状态行。 */
@@ -38,7 +40,7 @@ export function ThreadRuntimeLine(props: { interactive: SharedViewProps["interac
 }
 
 /** 渲染底部输入栏、命令菜单和运行时元信息。 */
-export function InputBar(props: Pick<SharedViewProps, "interactive" | "terminalWidth" | "inputRef" | "value" | "onInput" | "onInputBarKeyDown" | "onSubmit" | "commandMenu" | "commandOptions" | "onSelectCommand" | "onHoverCommand" | "selectedSkill" | "pickerVisible" | "onClearSelectedSkill" | "inputMode"> & {
+export function InputBar(props: Pick<SharedViewProps, "interactive" | "terminalWidth" | "terminalHeight" | "inputRef" | "value" | "onInput" | "onInputCursorChange" | "onInputBarKeyDown" | "onSubmit" | "commandMenu" | "commandOptions" | "onSelectCommand" | "onHoverCommand" | "mentionMenu" | "mentionSearch" | "onSelectMention" | "onHoverMention" | "selectedSkill" | "pickerVisible" | "onClearSelectedSkill" | "inputMode"> & {
   variant: "home" | "thread"
   commandMenuPlacement: "above" | "inline-below"
 }) {
@@ -70,6 +72,26 @@ export function InputBar(props: Pick<SharedViewProps, "interactive" | "terminalW
     />
   ) : null
 
+  const mentionMenu = props.mentionMenu?.visible ? (
+    <MentionMenu
+      options={props.mentionSearch?.items ?? []}
+      totalMatches={props.mentionSearch?.totalMatches ?? 0}
+      truncated={props.mentionSearch?.truncated ?? false}
+      selectedIndex={Math.min(props.mentionMenu.selectedIndex, Math.max(0, (props.mentionSearch?.items.length ?? 1) - 1))}
+      windowStart={props.mentionMenu.windowStart}
+      visibleRows={mentionRowsForTerminal(props.terminalHeight)}
+      terminalWidth={props.terminalWidth}
+      browsePath={props.mentionMenu.browsePath}
+      workspaceStatus={props.mentionMenu.workspaceStatus}
+      workspaceLimited={props.mentionMenu.workspaceLimited}
+      workspaceMessage={props.mentionMenu.workspaceMessage}
+      onSelect={props.onSelectMention ?? (() => {})}
+      onHover={props.onHoverMention ?? (() => {})}
+      placement={props.commandMenuPlacement}
+      accent={accent}
+    />
+  ) : null
+
   const isHome = props.variant === "home"
   const workModeLabel = props.interactive.workMode === "compose" ? "Compose" : "Build"
   const modeBadgeLabel = isShell ? "Shell" : workModeLabel
@@ -80,6 +102,11 @@ export function InputBar(props: Pick<SharedViewProps, "interactive" | "terminalW
       {commandMenu && props.commandMenuPlacement === "above" ? (
         <box position="absolute" left={0} bottom="100%" width="100%" zIndex={10}>
           {commandMenu}
+        </box>
+      ) : null}
+      {mentionMenu && props.commandMenuPlacement === "above" ? (
+        <box position="absolute" left={0} bottom="100%" width="100%" zIndex={10}>
+          {mentionMenu}
         </box>
       ) : null}
       <box
@@ -105,6 +132,7 @@ export function InputBar(props: Pick<SharedViewProps, "interactive" | "terminalW
                 keyBindings={SUBMIT_ON_ENTER_KEY_BINDINGS}
                 focused={(!busy || awaitingQuestion) && !props.pickerVisible}
                 onContentChange={() => props.onInput(props.inputRef.current?.plainText ?? "")}
+                onCursorChange={() => props.onInputCursorChange?.(props.inputRef.current?.cursorOffset ?? 0)}
                 onKeyDown={props.onInputBarKeyDown}
                 onSubmit={props.onSubmit}
               />
@@ -124,6 +152,7 @@ export function InputBar(props: Pick<SharedViewProps, "interactive" | "terminalW
               keyBindings={SUBMIT_ON_ENTER_KEY_BINDINGS}
               focused={(!busy || awaitingQuestion) && !props.pickerVisible}
               onContentChange={() => props.onInput(props.inputRef.current?.plainText ?? "")}
+              onCursorChange={() => props.onInputCursorChange?.(props.inputRef.current?.cursorOffset ?? 0)}
               onKeyDown={props.onInputBarKeyDown}
               onSubmit={props.onSubmit}
             />
@@ -140,6 +169,7 @@ export function InputBar(props: Pick<SharedViewProps, "interactive" | "terminalW
         </box>
       </box>
       {commandMenu && props.commandMenuPlacement === "inline-below" ? commandMenu : null}
+      {mentionMenu && props.commandMenuPlacement === "inline-below" ? mentionMenu : null}
     </box>
   )
 }

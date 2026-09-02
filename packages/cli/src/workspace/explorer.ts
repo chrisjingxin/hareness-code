@@ -8,7 +8,7 @@
  */
 
 import { resolveWorkspaceRoot, workspaceError, WorkspaceError } from "./path-policy"
-import { insertChildren, listDirectory, loadGitTree, toggleRow, type TreeLoadResult } from "./workspace-index"
+import { insertChildren, listDirectory, loadGitTree, loadWorkspaceFileIndex, toggleRow, type TreeLoadResult } from "./workspace-index"
 import { readPreview, PreviewCache } from "./file-preview"
 import type {
   WorkspaceExplorer,
@@ -135,11 +135,12 @@ class WorkspaceExplorerImpl implements WorkspaceExplorer {
     if (this.closed || generation !== this.treeGeneration) return
     if (git !== null) {
       this.gitTree = true
+      const allEntries = git.rows
       let rows: readonly WorkspaceTreeRow[] = [...git.rows]
       for (const dirPath of expandedPaths) {
         rows = toggleRow(rows, dirPath, true)
       }
-      this.tree = { status: "ready", rows, selectedPath: this.tree.selectedPath, limited: git.limited }
+      this.tree = { status: "ready", rows, allEntries, selectedPath: this.tree.selectedPath, limited: git.limited }
       this.publish()
       return
     }
@@ -149,6 +150,8 @@ class WorkspaceExplorerImpl implements WorkspaceExplorer {
     try {
       const { rows: topLevel, limited } = await listDirectory(this.root, "")
       if (this.closed || generation !== this.treeGeneration) return
+      const fileIndex = await loadWorkspaceFileIndex(this.root)
+      if (this.closed || generation !== this.treeGeneration) return
       let rows: readonly WorkspaceTreeRow[] = [...topLevel]
       let currentPaths = new Set(rows.map(row => row.path))
       for (const dirPath of expandedPaths) {
@@ -157,7 +160,7 @@ class WorkspaceExplorerImpl implements WorkspaceExplorer {
         currentPaths = new Set(rows.map(row => row.path))
       }
       if (this.closed || generation !== this.treeGeneration) return
-      this.tree = { status: "ready", rows, selectedPath: this.tree.selectedPath, limited }
+      this.tree = { status: "ready", rows, allEntries: fileIndex.rows, selectedPath: this.tree.selectedPath, limited: limited || fileIndex.limited }
       this.publish()
     } catch (error) {
       if (this.closed || generation !== this.treeGeneration) return

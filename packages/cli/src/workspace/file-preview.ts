@@ -12,19 +12,13 @@ import path from "node:path"
 import type { WorkspaceFilePreview } from "./types"
 import { WorkspaceError, mapFsError, resolveWithinRoot, workspaceError } from "./path-policy"
 import { fileLanguageId } from "./file-language"
+import { decodeWorkspaceText, WorkspaceTextError } from "./text-file-policy"
 
 export const MAX_PREVIEW_BYTES = 256 * 1024
 export const MAX_PREVIEW_LINES = 2_000
 export const MAX_LINE_CHARS = 20_000
 export const PREVIEW_CACHE_LIMIT = 16
 export const PREVIEW_CACHE_BYTES = 2 * 1024 * 1024
-
-/** 二进制探测窗口：前 8 KiB。 */
-const BINARY_PROBE_BYTES = 8 * 1024
-/** UTF-8 多字节序列最长 4 字节；截断读取最多需要丢 3 个尾字节。 */
-const MAX_TRAILING_DROP = 3
-
-const decoder = new TextDecoder("utf-8", { fatal: true })
 
 /**
  * 读取单个文件的预览。目录返回 not-file；二进制/非 UTF-8 返回 unsupported；
@@ -74,14 +68,13 @@ async function readPreviewOnce(target: string, relativePath: string, fileStat: S
     // 只处理实际读到的字节：stat 与 read 之间文件缩小时尾部零填充不得进入探测窗口。
     const effective = buffer.subarray(0, bytesRead)
 
-    const probe = effective.subarray(0, Math.min(BINARY_PROBE_BYTES, effective.length))
-    if (probe.includes(0)) {
-      throw unsupportedFileError(sizeBytes)
-    }
     let text: string
     try {
-      text = decodeUtf8(effective, truncatedByBytes)
-    } catch {
+      text = decodeWorkspaceText(effective, truncatedByBytes)
+    } catch (error) {
+      if (error instanceof WorkspaceTextError && error.reason === "binary") {
+        throw unsupportedFileError(sizeBytes)
+      }
       throw workspaceError("unsupported-encoding", "非 UTF-8 文本暂不支持预览")
     }
 
@@ -126,22 +119,6 @@ function countLines(content: string): number {
   if (content === "") return 0
   const lines = content.split("\n")
   return content.endsWith("\n") ? lines.length - 1 : lines.length
-}
-
-/**
- * UTF-8 严格解码；截断读取时允许丢失最多 3 个尾字节（多字节序列被切段），
- * 仍失败才判定为非法编码。
- */
-function decodeUtf8(buffer: Buffer, truncated: boolean): string {
-  if (!truncated) return decoder.decode(buffer)
-  for (let drop = 0; drop <= MAX_TRAILING_DROP; drop++) {
-    try {
-      return decoder.decode(buffer.subarray(0, buffer.length - drop))
-    } catch {
-      // 继续尝试更短的尾段。
-    }
-  }
-  throw new TypeError("invalid utf-8")
 }
 
 /** unsupported-file 需要携带 sizeBytes 供界面展示元信息；挂在错误上透传给 explorer。 */

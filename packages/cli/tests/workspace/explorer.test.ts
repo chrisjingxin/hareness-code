@@ -117,6 +117,30 @@ test("非 Git 树：toggle 懒加载子行，收起移除后代", async () => {
   }
 })
 
+test("非 Git 树：allEntries 包含未展开目录及其深层文件", async () => {
+  const dir = nonGitRoot()
+  try {
+    mkdirSync(join(dir, "src", "nested"), { recursive: true })
+    writeFileSync(join(dir, "src", "nested", "deep.ts"), "deep")
+    writeFileSync(join(dir, "top.txt"), "top")
+    const explorer = await createWorkspaceExplorer(dir)
+    try {
+      await explorer.dispatch({ type: "workspace.load" })
+      expect(explorer.getSnapshot().tree.rows.map(row => row.path)).toEqual(["src", "top.txt"])
+      expect(explorer.getSnapshot().tree.allEntries?.map(row => row.path)).toEqual([
+        "src",
+        "src/nested",
+        "src/nested/deep.ts",
+        "top.txt",
+      ])
+    } finally {
+      await explorer.close()
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test("toggle 非目录：rejected not-directory", async () => {
   const dir = nonGitRoot()
   try {

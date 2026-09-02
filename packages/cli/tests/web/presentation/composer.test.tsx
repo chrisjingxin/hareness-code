@@ -84,6 +84,58 @@ describe("Composer", () => {
     }
   })
 
+  test("@ 菜单固定渲染 8 行、匹配高亮并展示真实总数", () => {
+    const items = Array.from({ length: 12 }, (_, index) => ({
+      path: `src/file-${index}.ts`,
+      name: `file-${index}.ts`,
+      kind: "file" as const,
+      language: "typescript",
+      matchRanges: [{ start: 4, end: 8 }],
+    }))
+    const handle = mountComposer(makeSnapshot({
+      draft: "@file",
+      mentionMenu: { visible: true, selectedIndex: 8, windowStart: 1, browsePath: "", query: "file", start: 0, end: 5, isQuoted: false },
+      mentionSearch: { items, totalMatches: 1_205, truncated: true },
+      workspaceTree: { status: "ready", rows: [], selectedPath: null, limited: true },
+    }), [])
+    try {
+      const menu = handle.container.querySelector('[aria-label="文件提及菜单"]')
+      expect(menu).not.toBeNull()
+      expect(menu?.querySelectorAll('[role="option"]')).toHaveLength(8)
+      expect(menu?.textContent).not.toContain("src/file-0.ts")
+      expect(menu?.textContent).toContain("src/file-8.ts")
+      expect(menu?.querySelector("mark")?.textContent).toBe("file")
+      expect(menu?.textContent).toContain("9/1205")
+      expect(menu?.textContent).toContain("前 1000 项")
+      expect(menu?.textContent).toContain("扫描受限")
+    } finally {
+      handle.unmount()
+    }
+  })
+
+  test("目录候选以末尾斜杠区分并展示浏览路径", () => {
+    const intents: WebIntent[] = []
+    const handle = mountComposer(makeSnapshot({
+      draft: "@",
+      mentionMenu: { visible: true, selectedIndex: 0, windowStart: 0, browsePath: "packages", query: "", start: 0, end: 1, isQuoted: false },
+      mentionSearch: {
+        items: [{ path: "packages/cli", name: "cli", kind: "directory", language: null, matchRanges: [] }],
+        totalMatches: 1,
+        truncated: false,
+      },
+      workspaceTree: { status: "ready", rows: [], selectedPath: null, limited: false },
+    }), intents)
+    try {
+      const menu = handle.container.querySelector('[aria-label="文件提及菜单"]')
+      expect(menu?.textContent).toContain("packages/cli/")
+      expect(menu?.textContent).toContain("@ / packages")
+      act(() => { menu?.querySelector<HTMLButtonElement>('[role="option"]')?.click() })
+      expect(intents[0]).toMatchObject({ type: "mention-menu-select", item: { path: "packages/cli", kind: "directory" } })
+    } finally {
+      handle.unmount()
+    }
+  })
+
   test("工作模式 chip 是 rail 中唯一模式展示：未锁定提示 Tab 切换，锁定显示锁图标", () => {
     const unlocked = mountComposer(makeSnapshot({ interactive: makeInteractive({ workMode: "build", threadMode: null }) }), [])
     try {
@@ -256,6 +308,60 @@ describe("Composer", () => {
       .toEqual({ preventDefault: true, intent: { type: "command-menu-select", item: SAMPLE_COMMAND } })
     expect(resolveComposerKeyboardIntent({ ...base, key: "Enter", menuVisible: true, items: [DISABLED_COMMAND] }))
       .toEqual({ preventDefault: true, intent: null })
+  })
+
+  test("@ 菜单键盘状态机支持夹取移动、翻页、选中与关闭", () => {
+    const item = {
+      path: "src/app.ts",
+      name: "app.ts",
+      kind: "file" as const,
+      language: "typescript",
+      matchRanges: [{ start: 4, end: 7 }],
+    }
+    const base = {
+      key: "ArrowUp",
+      shiftKey: false,
+      ctrlKey: false,
+      metaKey: false,
+      isComposing: false,
+      menuVisible: false,
+      items: [] as readonly CommandMenuItem[],
+      selectedIndex: 0,
+      mentionMenuVisible: true,
+      mentionItems: [item],
+      mentionSelectedIndex: 0,
+      mentionBrowsePath: "packages",
+      mentionQuery: "",
+      draft: "@app",
+      composedDisabled: false,
+      activeRun: false,
+    }
+    expect(resolveComposerKeyboardIntent(base)).toEqual({
+      preventDefault: true,
+      intent: { type: "mention-menu-hover", selectedIndex: 0 },
+    })
+    expect(resolveComposerKeyboardIntent({ ...base, key: "PageDown" })).toEqual({
+      preventDefault: true,
+      intent: { type: "mention-menu-page", direction: "next" },
+    })
+    expect(resolveComposerKeyboardIntent({ ...base, key: "Tab" })).toEqual({
+      preventDefault: true,
+      intent: { type: "mention-menu-select", item },
+    })
+    expect(resolveComposerKeyboardIntent({ ...base, key: "Escape" })).toEqual({
+      preventDefault: true,
+      intent: { type: "mention-menu-close" },
+    })
+    expect(resolveComposerKeyboardIntent({ ...base, key: "ArrowLeft" })).toEqual({
+      preventDefault: true,
+      intent: { type: "mention-menu-parent" },
+    })
+    const directory = { ...item, path: "src", name: "src", kind: "directory" as const }
+    expect(resolveComposerKeyboardIntent({ ...base, key: "ArrowRight", mentionItems: [directory] })).toEqual({
+      preventDefault: true,
+      intent: { type: "mention-menu-select", item: directory },
+    })
+    expect(resolveComposerKeyboardIntent({ ...base, key: "ArrowLeft", mentionQuery: "app" })).toEqual({ preventDefault: false, intent: null })
   })
 
   test("activeRun 时显示取消按钮且 dispatch cancel-run；idle 时显示发送按钮", () => {

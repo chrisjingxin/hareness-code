@@ -11,7 +11,7 @@ import {
 } from "../../interactive/commands"
 import { APPROVAL_MODE_CYCLE, approvalModeLabel } from "../../interactive/runtime"
 import { selectNavigationView } from "../../interactive/selectors"
-import { modelSelectionLabel } from "../../presentation-shared"
+import { ensureMentionWindow, modelSelectionLabel, moveMentionSelection, type MentionOption } from "../../presentation-shared"
 import type { WebAdapterSnapshot, WebIntent } from "../application/adapter"
 
 /** Composer 自动增长行数上限；超过后由 CSS 控制内部滚动。 */
@@ -137,11 +137,13 @@ export function Composer(props: {
   const draft = snapshot.draft
   const armedSkill = interactive.selection.armedSkill
   const menuVisible = snapshot.commandMenuOpen && draft.length > 0
+  const mentionMenuVisible = snapshot.mentionMenu.visible && !menuVisible
   const items = snapshot.commandOptions
   const selectedIndex = clampIndex(snapshot.commandMenuIndex, items.length)
 
   const isComposingRef = useRef(false)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const previousMentionMenuVisibleRef = useRef(mentionMenuVisible)
   const [rows, setRows] = useState(COMPOSER_MIN_ROWS)
 
   useEffect(() => {
@@ -153,8 +155,17 @@ export function Composer(props: {
     if (snapshot.composerFocusRequest > 0) textareaRef.current?.focus()
   }, [snapshot.composerFocusRequest])
 
+  useEffect(() => {
+    const textarea = textareaRef.current
+    const shouldRestoreFocus = previousMentionMenuVisibleRef.current && !mentionMenuVisible
+    previousMentionMenuVisibleRef.current = mentionMenuVisible
+    if (!textarea || (document.activeElement !== textarea && !shouldRestoreFocus)) return
+    if (shouldRestoreFocus) textarea.focus()
+    textarea.setSelectionRange(snapshot.draftCursorOffset, snapshot.draftCursorOffset)
+  }, [mentionMenuVisible, snapshot.draft, snapshot.draftCursorOffset])
+
   const handleChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
-    dispatch({ type: "draft-change", value: event.target.value })
+    dispatch({ type: "draft-change", value: event.target.value, cursorOffset: event.target.selectionStart })
   }
 
   const handleCompositionStart = () => {
@@ -179,6 +190,11 @@ export function Composer(props: {
       draft,
       composedDisabled,
       activeRun,
+      mentionMenuVisible,
+      mentionItems: snapshot.mentionSearch.items,
+      mentionSelectedIndex: snapshot.mentionMenu.selectedIndex,
+      mentionBrowsePath: snapshot.mentionMenu.browsePath,
+      mentionQuery: snapshot.mentionMenu.query,
     })
     if (resolved.preventDefault) {
       event.preventDefault()
@@ -203,6 +219,12 @@ export function Composer(props: {
             dispatch={dispatch}
           />
         ) : null}
+        {mentionMenuVisible ? (
+          <MentionMenu
+            snapshot={snapshot}
+            dispatch={dispatch}
+          />
+        ) : null}
         <div className="composer-box">
           <div className="composer-tabs" aria-hidden="true">
             <span className="composer-tab is-active">聊天</span>
@@ -216,6 +238,7 @@ export function Composer(props: {
             onCompositionStart={handleCompositionStart}
             onCompositionEnd={handleCompositionEnd}
             onKeyDown={handleKeyDown}
+            onSelect={event => dispatch({ type: "draft-cursor", cursorOffset: event.currentTarget.selectionStart })}
             disabled={composedDisabled && !activeRun}
             placeholder={placeholderFor(snapshot, activeRun)}
             aria-label="消息，Enter 发送，Shift+Enter 换行"
@@ -458,6 +481,79 @@ function CommandMenu(props: {
   )
 }
 
+/** 固定 8 行的 Web @ 文件候选菜单；全局索引由 Adapter 保存。 */
+function MentionMenu(props: {
+  snapshot: WebAdapterSnapshot
+  dispatch: (intent: WebIntent) => void
+}): React.ReactElement {
+  const { snapshot, dispatch } = props
+  const result = snapshot.mentionSearch
+  const state = snapshot.mentionMenu
+  const window = ensureMentionWindow(state.selectedIndex, state.windowStart, result.items.length, 8)
+  const items = result.items.slice(window.start, window.end)
+  const tree = snapshot.workspaceTree
+  const emptyText = tree.status === "idle" || tree.status === "loading"
+    ? "正在扫描工作区…"
+    : tree.status === "error"
+      ? tree.message || "工作区读取失败"
+      : "没有匹配的文件"
+  const footer = [
+    `@ /${state.browsePath ? ` ${state.browsePath}` : ""}`,
+    result.totalMatches > 0 ? `${Math.min(state.selectedIndex + 1, result.totalMatches)}/${result.totalMatches}` : null,
+    result.truncated ? "仅载入前 1000 项" : null,
+    tree.limited ? "工作区扫描受限" : null,
+  ].filter(Boolean).join(" · ") || "输入路径以筛选"
+
+  return (
+    <div
+      className="mention-menu"
+      role="listbox"
+      aria-label="文件提及菜单"
+      onWheel={event => {
+        event.preventDefault()
+        dispatch({ type: "mention-menu-move", direction: event.deltaY >= 0 ? "next" : "previous" })
+      }}
+    >
+      <div className="mention-menu-items">
+        {items.length > 0 ? items.map((item, localIndex) => {
+          const index = window.start + localIndex
+          const selected = index === state.selectedIndex
+          return (
+            <button
+              type="button"
+              role="option"
+              aria-selected={selected}
+              data-selected={selected}
+              className="mention-item"
+              key={item.path}
+              title={item.path}
+              onMouseEnter={() => dispatch({ type: "mention-menu-hover", selectedIndex: index })}
+              onClick={() => dispatch({ type: "mention-menu-select", item })}
+            >
+              <HighlightedMentionPath item={item} />
+            </button>
+          )
+        }) : <p className="mention-menu-empty">{emptyText}</p>}
+      </div>
+      <div className="mention-menu-footer">{footer}</div>
+    </div>
+  )
+}
+
+function HighlightedMentionPath(props: { item: MentionOption }): React.ReactElement {
+  const suffix = props.item.kind === "directory" ? "/" : ""
+  const range = props.item.matchRanges[0]
+  if (!range) return <span className="mention-path">{props.item.path}{suffix}</span>
+  return (
+    <span className="mention-path">
+      {props.item.path.slice(0, range.start)}
+      <mark>{props.item.path.slice(range.start, range.end)}</mark>
+      {props.item.path.slice(range.end)}
+      {suffix}
+    </span>
+  )
+}
+
 function clampIndex(index: number, length: number): number {
   if (length === 0) return 0
   if (index < 0) return 0
@@ -488,9 +584,24 @@ export function resolveComposerKeyboardIntent(
     draft: string
     composedDisabled: boolean
     activeRun: boolean
+    mentionMenuVisible?: boolean
+    mentionItems?: readonly MentionOption[]
+    mentionSelectedIndex?: number
+    mentionBrowsePath?: string
+    mentionQuery?: string
   },
 ): { preventDefault: boolean; intent: WebIntent | null } {
   if (input.isComposing) return { preventDefault: false, intent: null }
+  if (input.mentionMenuVisible) {
+    const mentionResolution = resolveMentionKeyboardIntent(
+      input.key,
+      input.mentionItems ?? [],
+      input.mentionSelectedIndex ?? 0,
+      input.mentionBrowsePath ?? "",
+      input.mentionQuery ?? "",
+    )
+    if (mentionResolution.handled) return { preventDefault: true, intent: mentionResolution.intent }
+  }
   if (input.menuVisible) {
     const menuResolution = resolveMenuKeyboardIntent(
       input.key,
@@ -516,6 +627,37 @@ export function resolveComposerKeyboardIntent(
     return { preventDefault: true, intent: { type: "work-mode-cycle" } }
   }
   return { preventDefault: false, intent: null }
+}
+
+function resolveMentionKeyboardIntent(
+  key: string,
+  items: readonly MentionOption[],
+  selectedIndex: number,
+  browsePath: string,
+  query: string,
+): { handled: boolean; intent: WebIntent | null } {
+  if (key === "Escape") return { handled: true, intent: { type: "mention-menu-close" } }
+  if (key === "PageUp" || key === "PageDown") {
+    return { handled: true, intent: { type: "mention-menu-page", direction: key === "PageDown" ? "next" : "previous" } }
+  }
+  if (key === "ArrowLeft" && browsePath && !query) return { handled: true, intent: { type: "mention-menu-parent" } }
+  if (items.length === 0) return { handled: key === "Enter" || key === "Tab", intent: null }
+  if (key === "ArrowRight") {
+    const item = items[selectedIndex]
+    return item?.kind === "directory"
+      ? { handled: true, intent: { type: "mention-menu-select", item } }
+      : { handled: false, intent: null }
+  }
+  if (key === "ArrowDown") {
+    return { handled: true, intent: { type: "mention-menu-hover", selectedIndex: moveMentionSelection(selectedIndex, 1, items.length) } }
+  }
+  if (key === "ArrowUp") {
+    return { handled: true, intent: { type: "mention-menu-hover", selectedIndex: moveMentionSelection(selectedIndex, -1, items.length) } }
+  }
+  if (key === "Enter" || key === "Tab") {
+    return { handled: true, intent: items[selectedIndex] ? { type: "mention-menu-select", item: items[selectedIndex]! } : null }
+  }
+  return { handled: false, intent: null }
 }
 
 /** 命令菜单已打开时的键盘解析；无候选项则交还给 textarea 默认行为。 */

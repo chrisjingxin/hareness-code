@@ -304,12 +304,18 @@ function isWebUiPatch(value: unknown): WebUiPatch | undefined {
 function isWorkspaceTreeView(value: unknown): boolean {
   if (!isRecord(value)) return false
   const keys = Object.keys(value)
-  const allowed = new Set(["status", "rows", "selectedPath", "limited", "message"])
+  const allowed = new Set(["status", "rows", "allEntries", "selectedPath", "limited", "message"])
   if (!keys.every(key => allowed.has(key))) return false
   if (value.status !== "idle" && value.status !== "loading" && value.status !== "ready" && value.status !== "error") return false
   if (!Array.isArray(value.rows)) return false
   for (const row of value.rows) {
     if (!isWorkspaceTreeRow(row)) return false
+  }
+  if (value.allEntries !== undefined) {
+    if (!Array.isArray(value.allEntries)) return false
+    for (const row of value.allEntries) {
+      if (!isWorkspaceTreeRow(row)) return false
+    }
   }
   if (value.selectedPath !== null && typeof value.selectedPath !== "string") return false
   if (typeof value.limited !== "boolean") return false

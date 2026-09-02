@@ -304,6 +304,8 @@ test("workspaceTree 分片：status 联合、行形状、message 可选", () => 
   expect(parseServerFrame(wrap({ status: "idle", rows: [], selectedPath: null, limited: false }))).toBeDefined()
   expect(parseServerFrame(wrap({ status: "loading", rows: [], selectedPath: null, limited: false }))).toBeDefined()
   expect(parseServerFrame(wrap({ status: "error", rows: [], selectedPath: null, limited: false, message: "加载失败" }))).toBeDefined()
+  expect(parseServerFrame(wrap({ status: "ready", rows: [], allEntries: workspaceTree.rows, selectedPath: null, limited: false }))).toBeDefined()
+  expect(parseServerFrame(wrap({ status: "ready", rows: [], allEntries: [{ ...workspaceTree.rows[0], depth: "x" }], selectedPath: null, limited: false }))).toBeUndefined()
   // 行内字段类型错误
   const badRow = { ...workspaceTree.rows[0], depth: "x" }
   expect(parseServerFrame(wrap({ status: "ready", rows: [badRow], selectedPath: null, limited: false }))).toBeUndefined()

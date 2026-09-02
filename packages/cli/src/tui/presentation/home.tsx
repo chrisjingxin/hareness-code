@@ -1,6 +1,7 @@
 /** Harness Code 的沉浸式首页视图。 */
 
 import { supportsHomeDecoration } from "../../interactive/runtime"
+import { mentionRowsForTerminal } from "../../presentation-shared"
 import { InputBar, FooterRail } from "./input-bar"
 import { HarnessCodeLogo } from "./harness-logo"
 import { StarryBackground } from "./starry-background"
@@ -11,9 +12,16 @@ import type { SharedViewProps } from "./types"
 export function HomeView(props: SharedViewProps) {
   const decorate = supportsHomeDecoration(props.terminalWidth, props.terminalHeight) && process.env.TERM !== "dumb"
   const compact = !decorate || props.terminalWidth < 76
-  const showSupplemental = !props.commandMenu.visible || compact
-  const commandRows = props.commandMenu.visible && !compact
-    ? Math.min(5, Math.max(1, props.commandOptions.length)) + 2
+  const menuVisible = props.commandMenu.visible || Boolean(props.mentionMenu?.visible)
+  const showSupplemental = !menuVisible || compact
+  const menuOptionsLength = props.commandMenu.visible
+    ? props.commandOptions.length
+    : (props.mentionSearch?.items.length ?? 0)
+  const commandRows = menuVisible && !compact
+    ? Math.min(
+        props.commandMenu.visible ? 5 : mentionRowsForTerminal(props.terminalHeight),
+        Math.max(1, menuOptionsLength),
+      ) + (props.commandMenu.visible ? 2 : 3)
     : 0
 
   return (

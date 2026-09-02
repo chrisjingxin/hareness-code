@@ -130,6 +130,7 @@ export class RunFeature {
       requestedModelProfileId: string | null
       armedSkill: SkillSummary | undefined
       requestedSkill?: RequestedSkill
+      displayPrompt?: string
       onEvent: (event: any) => void
       onRunFinish: (actualModel?: ModelProfile) => void
       onAbandonInteraction: () => void
@@ -159,7 +160,7 @@ export class RunFeature {
       })
 
       this.activeRunHandle = run
-      ctx.commit(current => startRunState(current, run.ref, value, startedAtMs))
+      ctx.commit(current => startRunState(current, run.ref, options.displayPrompt ?? value, startedAtMs))
 
       // accepted 被拒绝：当前 Run 立即收敛为 failed，不残留 activeRun。
       void run.accepted.catch(error => {

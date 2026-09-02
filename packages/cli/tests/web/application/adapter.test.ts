@@ -297,6 +297,92 @@ test("Web 命令菜单隐藏 host.web（TUI 入口，共享 Core 不能嵌套接
   expect(ids).toEqual(["system.help"])
 })
 
+test("Web @ 菜单使用 allEntries 搜索大文件集、保留总数并完成回填", async () => {
+  const client = createFakeClient()
+  const { adapter, scheduler } = makeAdapter(client)
+  const allEntries = Array.from({ length: 1_205 }, (_, index) => ({
+    path: `src/file_${String(index).padStart(4, "0")}.ts`,
+    name: `file_${String(index).padStart(4, "0")}.ts`,
+    kind: "file" as const,
+    depth: 1,
+    expanded: false,
+    loading: false,
+    hasChildren: false,
+  }))
+  allEntries.push({
+    path: "README.md",
+    name: "README.md",
+    kind: "file",
+    depth: 0,
+    expanded: false,
+    loading: false,
+    hasChildren: false,
+  })
+  client.pushWorkspace(workspace => ({
+    ...workspace,
+    tree: { status: "ready", rows: [], allEntries, selectedPath: null, limited: false },
+  }))
+  scheduler.runScheduled()
+  expect(adapter.getSnapshot().mentionSearch).toEqual({ items: [], totalMatches: 0, truncated: false })
+
+  await adapter.dispatch({ type: "draft-change", value: "请看 @file", cursorOffset: 8 })
+  expect(adapter.getSnapshot().mentionMenu).toMatchObject({ visible: true, query: "file", selectedIndex: 0 })
+  expect(adapter.getSnapshot().mentionSearch).toMatchObject({ totalMatches: 1_205, truncated: true })
+  expect(adapter.getSnapshot().mentionSearch.items).toHaveLength(1_000)
+
+  await adapter.dispatch({ type: "mention-menu-page", direction: "next" })
+  expect(adapter.getSnapshot().mentionMenu).toMatchObject({ selectedIndex: 8, windowStart: 1 })
+  const selected = adapter.getSnapshot().mentionSearch.items[8]!
+  await adapter.dispatch({ type: "mention-menu-select", item: selected })
+  expect(adapter.getSnapshot().draft).toBe(`请看 @${selected.path} `)
+  expect(adapter.getSnapshot().mentionMenu.visible).toBe(false)
+})
+
+test("Web @ 菜单无匹配时保持可见，以便 Composer 展示空状态", async () => {
+  const client = createFakeClient()
+  const { adapter } = makeAdapter(client)
+  client.pushWorkspace(workspace => ({
+    ...workspace,
+    tree: { status: "ready", rows: [], allEntries: [], selectedPath: null, limited: false },
+  }))
+
+  await adapter.dispatch({ type: "draft-change", value: "@missing", cursorOffset: 8 })
+  expect(adapter.getSnapshot().mentionMenu.visible).toBe(true)
+  expect(adapter.getSnapshot().mentionSearch.items).toHaveLength(0)
+})
+
+test("Web 空查询逐层进入目录、返回上级，最终只回填文件", async () => {
+  const client = createFakeClient()
+  const { adapter } = makeAdapter(client)
+  const allEntries = [
+    { path: "packages", name: "packages", kind: "directory" as const, depth: 0, expanded: false, loading: false, hasChildren: true },
+    { path: "packages/cli", name: "cli", kind: "directory" as const, depth: 1, expanded: false, loading: false, hasChildren: true },
+    { path: "packages/cli/index.ts", name: "index.ts", kind: "file" as const, depth: 2, expanded: false, loading: false, hasChildren: false },
+    { path: "README.md", name: "README.md", kind: "file" as const, depth: 0, expanded: false, loading: false, hasChildren: false },
+  ]
+  client.pushWorkspace(workspace => ({
+    ...workspace,
+    tree: { status: "ready", rows: [], allEntries, selectedPath: null, limited: false },
+  }))
+
+  await adapter.dispatch({ type: "draft-change", value: "@", cursorOffset: 1 })
+  expect(adapter.getSnapshot().mentionSearch.items.map(item => item.path)).toEqual(["packages", "README.md"])
+  await adapter.dispatch({ type: "mention-menu-select", item: adapter.getSnapshot().mentionSearch.items[0]! })
+  expect(adapter.getSnapshot().draft).toBe("@")
+  expect(adapter.getSnapshot().mentionMenu.browsePath).toBe("packages")
+  expect(adapter.getSnapshot().mentionSearch.items.map(item => item.path)).toEqual(["packages/cli"])
+
+  await adapter.dispatch({ type: "mention-menu-select", item: adapter.getSnapshot().mentionSearch.items[0]! })
+  expect(adapter.getSnapshot().mentionMenu.browsePath).toBe("packages/cli")
+  await adapter.dispatch({ type: "mention-menu-parent" })
+  expect(adapter.getSnapshot().mentionMenu.browsePath).toBe("packages")
+
+  await adapter.dispatch({ type: "mention-menu-select", item: adapter.getSnapshot().mentionSearch.items[0]! })
+  await adapter.dispatch({ type: "mention-menu-select", item: adapter.getSnapshot().mentionSearch.items[0]! })
+  expect(adapter.getSnapshot().draft).toBe("@packages/cli/index.ts ")
+  expect(adapter.getSnapshot().mentionMenu.visible).toBe(false)
+})
+
 // ---- Context Dock 基础 ------------------------------------------------------
 
 test("dock-open：打开并切到指定面板；models 触发 catalog.refresh", async () => {

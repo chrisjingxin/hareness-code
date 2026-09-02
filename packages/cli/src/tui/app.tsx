@@ -155,14 +155,19 @@ export function Za38Tui(options: RenderedTuiOptions) {
     }
   }, [interactive, options.controller])
 
-  const fileTreeRefreshedRef = useRef(false)
   useEffect(() => {
-    // 首次进入聊天会话且侧边栏显示时，确保工作区文件树触发刷新
-    if (!isHomeState(interactive) && !fileTreeRefreshedRef.current) {
-      fileTreeRefreshedRef.current = true
+    // 首页的 @ 补全也依赖文件索引；load 幂等，不重复刷新已加载的树。
+    void options.workspaceExplorer?.dispatch({ type: "workspace.load" })
+  }, [options.workspaceExplorer])
+
+  const prevActiveRunRef = useRef(interactive.activeRun)
+  useEffect(() => {
+    // 任务运行结束（activeRun 非空 → null/undefined）时，可能产生/修改文件，自动触发工作区文件树刷新
+    if (prevActiveRunRef.current && !interactive.activeRun) {
       void options.workspaceExplorer?.dispatch({ type: "workspace.refresh" })
     }
-  }, [interactive, options.workspaceExplorer])
+    prevActiveRunRef.current = interactive.activeRun
+  }, [interactive.activeRun, options.workspaceExplorer])
 
   /** 将 renderer 内部选区收敛为纯复制 module，避免渲染状态进入 Adapter 或 IPC。 */
   const copySelectedText = useCallback(() => copyCurrentSelection({
@@ -391,6 +396,11 @@ export function Za38Tui(options: RenderedTuiOptions) {
       undoDialogVisible: Boolean(snapshot.undoDialog?.visible),
       commandMenuVisible: snapshot.commandMenu.visible,
       commandOptionCount: snapshot.commandOptions.length,
+      mentionMenuVisible: snapshot.mentionMenu.visible,
+      mentionOptionCount: snapshot.mentionSearch.items.length,
+      mentionBrowsePath: snapshot.mentionMenu.browsePath,
+      mentionQuery: snapshot.mentionMenu.query,
+      mentionSelectedKind: snapshot.mentionSearch.items[snapshot.mentionMenu.selectedIndex]?.kind,
       activeRun: Boolean(interactive.activeRun),
       interactionActive: Boolean(interactive.interaction),
       hasDraft: Boolean(snapshot.draft),
@@ -415,6 +425,14 @@ export function Za38Tui(options: RenderedTuiOptions) {
       scrollConversation(scrollIntent)
       return
     }
+    if (action === "mention-page-previous" || action === "mention-page-next") {
+      void adapter.dispatch({
+        type: "mention-menu-page",
+        direction: action === "mention-page-next" ? "next" : "previous",
+        pageSize: terminal.height < 19 ? 5 : 8,
+      })
+      return
+    }
     void adapter.dispatch({ type: "shortcut", action })
   })
 
@@ -429,12 +447,17 @@ export function Za38Tui(options: RenderedTuiOptions) {
     conversationScrollRef,
     value: snapshot.draft,
     onInput: (value: string) => { void adapter.dispatch({ type: "draft-input", value }) },
+    onInputCursorChange: (cursorOffset: number) => { void adapter.dispatch({ type: "draft-cursor", cursorOffset }) },
     onInputBarKeyDown: handleInputBarKeyDown,
     onSubmit: () => { void adapter.dispatch({ type: "submit", value: inputRef.current?.plainText ?? snapshot.draft }) },
     commandMenu: snapshot.commandMenu,
     commandOptions: snapshot.commandOptions,
     onSelectCommand: (item: CommandMenuItem) => { void adapter.dispatch({ type: "command-menu-select", item }) },
     onHoverCommand: (selectedIndex: number) => { void adapter.dispatch({ type: "command-menu-hover", selectedIndex }) },
+    mentionMenu: snapshot.mentionMenu,
+    mentionSearch: snapshot.mentionSearch,
+    onSelectMention: (item: import("../presentation-shared").MentionOption) => { void adapter.dispatch({ type: "mention-menu-select", item }) },
+    onHoverMention: (selectedIndex: number) => { void adapter.dispatch({ type: "mention-menu-hover", selectedIndex }) },
     selectedSkill: snapshot.selectedSkill,
     pickerVisible: Boolean(snapshot.commandDialog || snapshot.modelBindingDialog) || snapshot.skills.visible || snapshot.threads.visible || snapshot.models.visible || snapshot.agents.visible || snapshot.btw.visible || snapshot.statusModal.visible || snapshot.undo.visible || Boolean(snapshot.undoDialog?.visible),
     onClearSelectedSkill: () => { void adapter.dispatch({ type: "clear-selected-skill" }) },
