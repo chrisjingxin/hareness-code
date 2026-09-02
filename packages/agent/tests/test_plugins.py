@@ -18,7 +18,6 @@ from harness_agent.plugins.model import (
     PluginComponentReport,
     PluginDescriptor,
     PluginError,
-    capability_fingerprint,
     runtime_component_eligibility,
 )
 from harness_agent.plugins.store import package_digest
@@ -87,7 +86,6 @@ def _descriptor_with_components(
         format="agent-plugins-1.0",
         manifest="plugin.json",
         package_digest="d" * 64,
-        capability_fingerprint="f" * 64,
         components=components,
     )
 
@@ -113,8 +111,6 @@ def _runtime_plugin(
     kind: str = "skills",
     status: str = "supported",
     effective: bool = True,
-    enabled: bool = True,
-    trusted: bool = True,
     format: str = "claude-code",
 ) -> InstalledPlugin:
     """构造不接触文件系统的 runtime gate fixture。"""
@@ -124,7 +120,6 @@ def _runtime_plugin(
         count=1,
         effective=effective,
     )
-    fingerprint = capability_fingerprint((component,))
     return InstalledPlugin(
         plugin_id="fixture/runtime-gate",
         source_id="fixture",
@@ -135,11 +130,10 @@ def _runtime_plugin(
         format=format,  # type: ignore[arg-type]
         manifest="plugin.json",
         package_digest="d" * 64,
-        capability_fingerprint=fingerprint,
         components=(component,),
         diagnostics=(),
-        enabled=enabled,
-        trusted_capability_fingerprint=fingerprint if trusted else None,
+        activation_user="enabled",
+        activation_workspaces=(),
         installed_at_ms=0,
     )
 
@@ -175,14 +169,10 @@ def test_runtime_component_gate_requires_supported_effective_report(
         )
 
 
-def test_runtime_component_gate_rejects_plugin_state_and_format_mismatch() -> None:
-    """disabled、untrusted 和未开放格式的组件均不能构造 runtime。"""
-    disabled = runtime_component_eligibility(
-        _runtime_plugin(enabled=False),
-        kind="skills",
-    )
-    untrusted = runtime_component_eligibility(
-        _runtime_plugin(trusted=False),
+def test_runtime_component_gate_leaves_activation_to_catalog_and_checks_format() -> None:
+    """组件 gate 不再重复授权，只检查组件报告和格式边界。"""
+    enabled = runtime_component_eligibility(
+        _runtime_plugin(),
         kind="skills",
     )
     qwen_lsp = runtime_component_eligibility(
@@ -190,29 +180,22 @@ def test_runtime_component_gate_rejects_plugin_state_and_format_mismatch() -> No
         kind="lsp",
     )
 
-    assert disabled.diagnostic == (
-        "PLUGIN_RUNTIME_COMPONENT_BLOCKED: kind=skills; reason=PLUGIN_DISABLED"
-    )
-    assert untrusted.diagnostic == (
-        "PLUGIN_RUNTIME_COMPONENT_BLOCKED: kind=skills; reason=PLUGIN_UNTRUSTED"
-    )
+    assert enabled.eligible is True
+    assert enabled.diagnostic is None
     assert qwen_lsp.eligible is True
     assert qwen_lsp.diagnostic is None
 
 
-def test_runtime_component_gate_rejects_component_report_fingerprint_drift() -> None:
-    """组件报告被替换但未重新授权时，gate 必须稳定阻断。"""
+def test_runtime_component_gate_does_not_use_plugin_capability_fingerprint() -> None:
+    """组件报告本身没有 Plugin 专用授权哈希，effective 报告仍可进入 gate。"""
     plugin = _runtime_plugin()
     component = replace(plugin.components[0], capabilities=("prompt:changed",))
     drifted = replace(plugin, components=(component,))
 
     result = runtime_component_eligibility(drifted, kind="skills")
 
-    assert result.eligible is False
-    assert result.diagnostic == (
-        "PLUGIN_RUNTIME_COMPONENT_BLOCKED: "
-        "kind=skills; reason=COMPONENT_FINGERPRINT_DRIFT"
-    )
+    assert result.eligible is True
+    assert result.diagnostic is None
 
 
 def test_runtime_component_gate_excludes_diagnostics_from_execution_binding() -> None:
@@ -249,22 +232,18 @@ def test_declared_component_report_missing_has_stable_diagnostics(
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    plugin_id = str(installed["id"])
+    plugin_id = manager.store.read_registry().plugins[0].plugin_id
     plugin = manager.store.read_registry().plugins[0]
     reports = tuple(
         component
         for component in plugin.components
         if component.kind not in {"commands", "skills", "mcp"}
     )
-    fingerprint = capability_fingerprint(reports)
     manager.store.mutate_registry(
         lambda current: tuple(
             replace(
                 item,
                 components=reports,
-                capability_fingerprint=fingerprint,
-                trusted_capability_fingerprint=fingerprint,
-                enabled=True,
             )
             if item.plugin_id == plugin_id
             else item
@@ -272,6 +251,7 @@ def test_declared_component_report_missing_has_stable_diagnostics(
         )
     )
 
+    (tmp_path / "workspace").mkdir()
     catalog = manager.catalog()
     skill_result = manager.skill_sources(catalog)
     mcp_result = manager.mcp_servers(catalog, workspace=tmp_path / "workspace")
@@ -292,7 +272,7 @@ def test_declared_component_report_missing_has_stable_diagnostics(
 def test_component_report_fingerprint_drift_blocks_portable_consumers(
     tmp_path: Path,
 ) -> None:
-    """portable 的 Command/Skill/MCP report 漂移时均不可进入 runtime。"""
+    """Plugin 没有 capability fingerprint，effective report 仍按正常路径消费。"""
     source = tmp_path / "portable-drift"
     source.mkdir()
     _portable_plugin(source)
@@ -306,12 +286,8 @@ def test_component_report_fingerprint_drift_blocks_portable_consumers(
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    plugin_id = str(installed["id"])
-    manager.set_enabled(
-        plugin_id,
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
+    plugin_id = manager.store.read_registry().plugins[0].plugin_id
+    manager.set_enabled(str(installed["name"]), enabled=True)
     plugin = manager.store.read_registry().plugins[0]
     drifted = tuple(
         replace(component, capabilities=(*component.capabilities, "report:drift"))
@@ -321,13 +297,14 @@ def test_component_report_fingerprint_drift_blocks_portable_consumers(
     )
     manager.store.mutate_registry(
         lambda current: tuple(
-            replace(item, components=drifted, enabled=True)
+            replace(item, components=drifted)
             if item.plugin_id == plugin_id
             else item
             for item in current.plugins
         )
     )
 
+    (tmp_path / "workspace").mkdir()
     catalog = manager.catalog()
     assert {component.kind for component in catalog.plugins[0].components} >= {
         "commands",
@@ -337,27 +314,20 @@ def test_component_report_fingerprint_drift_blocks_portable_consumers(
     assert runtime_component_eligibility(
         catalog.plugins[0],
         kind="skills",
-    ).diagnostic is not None
+    ).diagnostic is None
     skill_result = manager.skill_sources(catalog)
     mcp_result = manager.mcp_servers(catalog, workspace=tmp_path / "workspace")
 
-    assert skill_result.sources == ()
-    assert mcp_result.servers == ()
-    for kind in ("commands", "skills"):
-        assert any(
-            f"kind={kind}; reason=COMPONENT_FINGERPRINT_DRIFT" in diagnostic
-            for diagnostic in skill_result.diagnostics
-        ), skill_result.diagnostics
-    assert any(
-        "kind=mcp; reason=COMPONENT_FINGERPRINT_DRIFT" in diagnostic
-        for diagnostic in mcp_result.diagnostics
-    ), mcp_result.diagnostics
+    assert skill_result.sources
+    assert not mcp_result.servers
+    assert all("FINGERPRINT" not in diagnostic for diagnostic in skill_result.diagnostics)
+    assert all("FINGERPRINT" not in diagnostic for diagnostic in mcp_result.diagnostics)
 
 
 def test_component_source_drift_blocks_portable_source_consumers(
     tmp_path: Path,
 ) -> None:
-    """只替换 Command/Skill/Agent source 时，所有 source consumer 都必须停下。"""
+    """组件来源由受管 package 提供，报告变化不再触发旧授权哈希门禁。"""
     source = tmp_path / "portable-source-drift"
     source.mkdir()
     _portable_plugin(source)
@@ -378,12 +348,8 @@ def test_component_source_drift_blocks_portable_source_consumers(
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    plugin_id = str(installed["id"])
-    manager.set_enabled(
-        plugin_id,
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
+    plugin_id = manager.store.read_registry().plugins[0].plugin_id
+    manager.set_enabled(str(installed["name"]), enabled=True)
     plugin = manager.store.read_registry().plugins[0]
     replacements = {
         "commands": ("commands/other.md",),
@@ -398,7 +364,7 @@ def test_component_source_drift_blocks_portable_source_consumers(
     )
     manager.store.mutate_registry(
         lambda current: tuple(
-            replace(item, components=drifted, enabled=True)
+            replace(item, components=drifted)
             if item.plugin_id == plugin_id
             else item
             for item in current.plugins
@@ -409,13 +375,10 @@ def test_component_source_drift_blocks_portable_source_consumers(
     skill_result = manager.skill_sources(catalog)
     agent_result = manager.agent_sources(catalog)
 
-    assert skill_result.sources == ()
-    assert agent_result.sources == ()
-    for kind in ("commands", "skills", "agents"):
-        assert any(
-            f"kind={kind}; reason=COMPONENT_FINGERPRINT_DRIFT" in diagnostic
-            for diagnostic in (*skill_result.diagnostics, *agent_result.diagnostics)
-        )
+    assert skill_result.sources
+    assert agent_result.sources
+    assert all("FINGERPRINT" not in diagnostic for diagnostic in skill_result.diagnostics)
+    assert all("FINGERPRINT" not in diagnostic for diagnostic in agent_result.diagnostics)
 
 
 @pytest.mark.parametrize(
@@ -516,18 +479,21 @@ def test_installed_plugin_reuses_descriptor_semantics(tmp_path: Path) -> None:
 
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    assert installed["compatibility"] == "partial"
-    assert installed["can_enable"] is True
+    assert installed["status"] == "warning"
+    assert set(installed) == {
+        "name", "version", "description", "format", "source", "activation",
+        "scope", "status", "components", "warnings",
+    }
 
     record = manager.store.read_registry().plugins[0]
     assert record.compatibility == "partial"
     assert record.can_enable is True
 
 
-def test_zero_effective_plugin_install_is_disabled_and_enable_has_stable_error(
+def test_zero_effective_plugin_install_is_enabled_but_failed(
     tmp_path: Path,
 ) -> None:
-    """空 portable 包可以安装，但没有 effective 组件时启用失败关闭。"""
+    """空 portable 包安装后保留 enabled activation，但产品状态为 failed。"""
     source = tmp_path / "empty-plugin"
     source.mkdir()
     _write_json(
@@ -542,62 +508,37 @@ def test_zero_effective_plugin_install_is_disabled_and_enable_has_stable_error(
 
     validation = manager.validate(source)["plugin"]
     assert isinstance(validation, dict)
-    assert validation["compatibility"] == "recognized"
-    assert validation["can_enable"] is False
+    assert validation["components"] == []
 
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    with pytest.raises(PluginError) as rejected:
-        manager.set_enabled(
-            str(installed["id"]),
-            enabled=True,
-            capability_fingerprint=str(installed["capability_fingerprint"]),
-        )
-    assert rejected.value.code == "PLUGIN_NO_EFFECTIVE_COMPONENT"
+    assert installed["activation"] == "enabled"
+    assert installed["status"] == "failed"
 
 
-def test_portable_install_is_disabled_and_enable_requires_current_fingerprint(
+def test_portable_install_is_enabled_without_plugin_authorization_fingerprint(
     tmp_path: Path,
 ) -> None:
-    """安装默认停用，启用必须显式确认精确能力指纹。"""
+    """确认安装后直接 enabled，管理面不再要求 Plugin 授权哈希。"""
     source = tmp_path / "secure-review"
     source.mkdir()
     _portable_plugin(source)
     manager = PluginManager(home=tmp_path / "home")
 
     validation = manager.validate(source)
-    assert validation["will_install_enabled"] is False
     plugin_summary = validation["plugin"]
     assert isinstance(plugin_summary, dict)
     assert plugin_summary["format"] == "agent-plugins-1.0"
-    assert plugin_summary["compatibility"] == "ready"
-    assert {item["kind"] for item in plugin_summary["components"]} == {
-        "agents",
-        "mcp",
-        "skills",
-    }
+    assert {item["kind"] for item in plugin_summary["components"]} == {"agents", "mcp", "skills"}
+    assert all(set(item) == {"kind", "count", "sources"} for item in plugin_summary["components"])
 
     installed = manager.install(source)
     plugin = installed["plugin"]
     assert isinstance(plugin, dict)
-    assert plugin["enabled"] is False
-    plugin_id = str(plugin["id"])
-    fingerprint = str(plugin["capability_fingerprint"])
-
-    with pytest.raises(PluginError, match="capability_fingerprint") as rejected:
-        manager.set_enabled(plugin_id, enabled=True, capability_fingerprint="0" * 64)
-    assert rejected.value.code == "PLUGIN_CAPABILITY_CONFIRMATION_REQUIRED"
-
-    enabled = manager.set_enabled(
-        plugin_id,
-        enabled=True,
-        capability_fingerprint=fingerprint,
-    )
-    enabled_plugin = enabled["plugin"]
-    assert isinstance(enabled_plugin, dict)
-    assert enabled_plugin["enabled"] is True
-    assert enabled_plugin["trusted"] is True
-    assert manager.catalog().plugins[0].plugin_id == plugin_id
+    assert plugin["activation"] == "enabled"
+    assert plugin["status"] == "loaded"
+    assert "internal" not in plugin
+    assert "capability_fingerprint" not in json.dumps(installed)
 
 
 @pytest.mark.parametrize("source_kind", ("directory", "zip"))
@@ -624,181 +565,41 @@ def test_plugin_management_lifecycle_covers_directory_and_zip_sources(
 
     manager = PluginManager(home=tmp_path / f"home-{source_kind}")
     validated = manager.validate(package)
-    assert validated["will_install_enabled"] is False
     assert manager.list()["plugins"] == []
 
     installed = manager.install(package)["plugin"]
     assert isinstance(installed, dict)
-    plugin_id = str(installed["id"])
-    fingerprint = str(installed["capability_fingerprint"])
-    assert installed["enabled"] is False
-    assert manager.inspect(plugin_id)["plugin"]["id"] == plugin_id  # type: ignore[index]
-    assert manager.list()["catalog"]["count"] == 0  # type: ignore[index]
+    plugin_name = str(installed["name"])
+    assert installed["activation"] == "enabled"
+    assert manager.inspect(plugin_name)["plugin"]["name"] == plugin_name  # type: ignore[index]
+    assert manager.list()["plugins"]
 
-    with pytest.raises(PluginError) as wrong_fingerprint:
-        manager.set_enabled(
-            plugin_id,
-            enabled=True,
-            capability_fingerprint="0" * 64,
-        )
-    assert wrong_fingerprint.value.code == "PLUGIN_CAPABILITY_CONFIRMATION_REQUIRED"
-
-    enabled = manager.set_enabled(
-        plugin_id,
-        enabled=True,
-        capability_fingerprint=fingerprint,
-    )
-    assert enabled["effective_on"] == "next_host"
-    assert enabled["catalog"]["count"] == 1  # type: ignore[index]
-    assert manager.list(include_disabled=False)["plugins"]  # type: ignore[index]
-
-    disabled = manager.set_enabled(plugin_id, enabled=False)
-    assert disabled["effective_on"] == "next_host"
-    assert disabled["catalog"]["count"] == 0  # type: ignore[index]
+    disabled = manager.set_enabled(plugin_name, enabled=False)
+    assert disabled["plugin"]["status"] == "disabled"
     assert manager.list(include_disabled=False)["plugins"] == []
 
-    removed = manager.remove(plugin_id)
+    removed = manager.remove(plugin_name)
     assert removed["removed"] is True
     assert manager.list()["plugins"] == []
 
 
-def test_static_preview_only_projects_non_effective_qwen_resources(
-    tmp_path: Path,
-) -> None:
-    """静态 preview 只展示尚未接入运行时的 Qwen 资源，不复制既有格式。"""
-    manager = PluginManager(home=tmp_path / "home")
-
-    portable = tmp_path / "portable-preview"
-    portable.mkdir()
-    _portable_plugin(portable)
-    portable_installed = manager.install(portable)["plugin"]
-    assert isinstance(portable_installed, dict)
-    assert manager.static_preview() == {
-        "commands": [],
-        "skills": [],
-        "agents": [],
-        "mcp": [],
-    }
-
-    manager.set_enabled(
-        str(portable_installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(portable_installed["capability_fingerprint"]),
-    )
-    assert manager.catalog().plugins[0].plugin_id == portable_installed["id"]
-    assert manager.static_preview() == {
-        "commands": [],
-        "skills": [],
-        "agents": [],
-        "mcp": [],
-    }
-
-    claude = tmp_path / "claude-preview"
-    claude.mkdir()
-    _write_json(
-        claude / ".claude-plugin" / "plugin.json",
-        {"name": "claude-preview", "version": "1.0.0"},
-    )
-    _write_skill(claude / "skills" / "review" / "SKILL.md", include_name=False)
-    claude_installed = manager.install(claude)["plugin"]
-    assert isinstance(claude_installed, dict)
-    assert claude_installed["format"] == "claude-code"
-
-    hybrid = tmp_path / "hybrid-preview"
-    hybrid.mkdir()
-    _portable_plugin(hybrid)
-    _write_json(
-        hybrid / ".claude-plugin" / "plugin.json",
-        {"name": "secure-review", "version": "1.0.0"},
-    )
-    hybrid_installed = manager.install(hybrid)["plugin"]
-    assert isinstance(hybrid_installed, dict)
-    assert hybrid_installed["format"] == "hybrid"
-
-    assert manager.static_preview() == {
-        "commands": [],
-        "skills": [],
-        "agents": [],
-        "mcp": [],
-    }
-
-
-def test_static_preview_hides_qwen_when_an_effective_component_exists(
-    tmp_path: Path,
-) -> None:
-    """未来 Qwen 组件接入运行时后不应再与 static preview 重复。"""
-    from dataclasses import replace
-
-    qwen = tmp_path / "qwen-effective"
-    qwen.mkdir()
-    _write_json(qwen / "qwen-extension.json", {"name": "qwen-effective"})
-    (qwen / "commands").mkdir()
-    (qwen / "commands" / "review.md").write_text(
-        "---\ndescription: Review\n---\nReview the change.\n",
-        encoding="utf-8",
-    )
-    manager = PluginManager(home=tmp_path / "home")
-    installed = manager.install(qwen)["plugin"]
-    assert isinstance(installed, dict)
-    assert manager.static_preview()["commands"]
-
-    state = manager.store.read_registry()
-    plugin = state.plugins[0]
-    effective_components = tuple(
-        replace(
-            component,
-            status="supported",
-            effective=True,
-            count=max(component.count, 1),
-        )
-        for component in plugin.components
-    )
-    effective_fingerprint = capability_fingerprint(effective_components)
-    assert all(
-        isinstance(component, PluginComponentReport)
-        for component in effective_components
-    )
-    manager.store.mutate_registry(
-        lambda current: tuple(
-            replace(
-                item,
-                components=effective_components,
-                enabled=True,
-                capability_fingerprint=effective_fingerprint,
-                trusted_capability_fingerprint=effective_fingerprint,
-            )
-            if item.plugin_id == plugin.plugin_id
-            else item
-            for item in current.plugins
-        )
-    )
-
-    assert manager.catalog().plugins[0].plugin_id == plugin.plugin_id
-    assert manager.static_preview() == {
-        "commands": [],
-        "skills": [],
-        "agents": [],
-        "mcp": [],
-    }
+def test_static_preview_is_removed_from_management_and_runtime_surfaces() -> None:
+    """没有独立 static preview；只暴露真实 summary 和 catalog consumer。"""
+    assert not hasattr(PluginManager, "static_preview")
 
 
 def test_catalog_excludes_legacy_enabled_plugin_without_effective_components(
     tmp_path: Path,
 ) -> None:
-    """旧记录即使仍标记 enabled/trusted，也不能绕过当前运行目录门禁。"""
+    """enabled artifact 没有可消费组件时不进入 runtime catalog。"""
     source = tmp_path / "legacy-enabled"
     source.mkdir()
     _portable_plugin(source)
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    plugin_id = str(installed["id"])
-    fingerprint = str(installed["capability_fingerprint"])
-    manager.set_enabled(
-        plugin_id,
-        enabled=True,
-        capability_fingerprint=fingerprint,
-    )
+    plugin_id = manager.store.read_registry().plugins[0].plugin_id
+    manager.set_enabled(str(installed["name"]), enabled=True)
     assert [plugin.plugin_id for plugin in manager.catalog().plugins] == [plugin_id]
 
     manager.store.mutate_registry(
@@ -808,9 +609,8 @@ def test_catalog_excludes_legacy_enabled_plugin_without_effective_components(
         )
     )
     legacy = manager.store.read_registry().plugins[0]
-    assert legacy.enabled is True
-    assert legacy.trusted_capability_fingerprint == fingerprint
-    assert legacy.can_enable is False
+    assert legacy.activation_user == "enabled"
+    assert legacy.components == ()
     assert manager.catalog().plugins == ()
 
 
@@ -822,13 +622,13 @@ def test_plugin_summaries_do_not_expose_source_or_store_paths(tmp_path: Path) ->
     home = tmp_path / "private-home"
     manager = PluginManager(home=home)
     installed = manager.install(source)
-    plugin_id = str(installed["plugin"]["id"])  # type: ignore[index]
+    plugin_name = str(installed["plugin"]["name"])  # type: ignore[index]
 
     serialized = json.dumps(
         {
             "validation": manager.validate(source),
             "list": manager.list(),
-            "inspect": manager.inspect(plugin_id),
+            "inspect": manager.inspect(plugin_name),
         },
         ensure_ascii=False,
     )
@@ -844,19 +644,19 @@ def test_remove_retains_data_unless_purge_is_explicit(tmp_path: Path) -> None:
     _portable_plugin(source)
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(source)
-    plugin_id = str(installed["plugin"]["id"])  # type: ignore[index]
+    plugin_name = str(installed["plugin"]["name"])  # type: ignore[index]
     record = manager.store.read_registry().plugins[0]
     data_path = manager.store.data_path(record)
     data_path.mkdir(parents=True)
     (data_path / "cache.txt").write_text("keep", encoding="utf-8")
 
-    removed = manager.remove(plugin_id)
+    removed = manager.remove(plugin_name)
     assert removed["data_retained"] is True
     assert data_path.is_dir()
     assert manager.list()["plugins"] == []
 
     manager.install(source)
-    purged = manager.remove(plugin_id, purge_data=True)
+    purged = manager.remove(plugin_name, purge_data=True)
     assert purged["data_retained"] is False
     assert purged["data_purged"] is True
     assert not data_path.exists()
@@ -872,7 +672,7 @@ def test_remove_does_not_cleanup_settings_after_registry_revision_drift(
     _portable_plugin(source)
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(source)
-    plugin_id = str(installed["plugin"]["id"])  # type: ignore[index]
+    plugin_name = str(installed["plugin"]["name"])  # type: ignore[index]
     calls: list[tuple[str, int]] = []
 
     def mutate_with_revision_drift(operation):
@@ -884,19 +684,19 @@ def test_remove_does_not_cleanup_settings_after_registry_revision_drift(
 
     with pytest.raises(PluginError) as error:
         manager.remove(
-            plugin_id,
+            plugin_name,
             purge_data=True,
             settings_cleanup=lambda plugin, revision: calls.append(
                 (plugin.plugin_id, revision)
             ) or {"partial": []},
         )
 
-    assert error.value.code == "PLUGIN_REGISTRY_REVISION_CONFLICT"
+    assert error.value.code == "PLUGIN_OPERATION_CONFLICT"
     assert calls == []
 
 
 def test_claude_current_components_are_never_silently_ignored(tmp_path: Path) -> None:
-    """Claude 新组件进入 compatibility report，尚未实现的能力明确为 unsupported。"""
+    """Claude 真实可加载组件进入摘要，其他组件只通过 warning 呈现。"""
     source = tmp_path / "claude-plugin"
     source.mkdir()
     _write_json(
@@ -955,30 +755,13 @@ def test_claude_current_components_are_never_silently_ignored(tmp_path: Path) ->
     assert isinstance(summary, dict)
     assert summary["format"] == "claude-code"
     components = {item["kind"]: item for item in summary["components"]}
-    assert components["skills"]["status"] == "supported"
-    assert components["skills"]["effective"] is True
-    assert components["mcp"]["status"] == "supported"
-    assert components["mcp"]["effective"] is True
-    assert components["agents"]["status"] == "supported"
-    assert components["agents"]["effective"] is True
-    for kind in ("hooks", "lsp", "monitors"):
-        assert components[kind]["status"] == "adapted"
-        assert components[kind]["effective"] is True
-    for kind in (
-        "workflows",
-        "themes",
-        "user-config",
-        "channels",
-        "dependencies",
-        "bin",
-        "settings",
-    ):
-        assert components[kind]["status"] == "unsupported"
-        assert components[kind]["effective"] is False
+    assert set(components) >= {"skills", "mcp", "agents", "hooks", "lsp", "monitors"}
+    assert all(set(item) == {"kind", "count", "sources"} for item in components.values())
+    assert summary["warnings"]
 
 
 def test_claude_unsupported_hook_and_socket_lsp_are_reported(tmp_path: Path) -> None:
-    """未接入的 Hook handler 与 socket LSP 必须明确报告为 unsupported。"""
+    """未接入的 Hook handler 与 socket LSP 不进入真实组件摘要而保留 warning。"""
     source = tmp_path / "claude-unsupported-runtime"
     source.mkdir()
     _write_json(
@@ -1011,14 +794,9 @@ def test_claude_unsupported_hook_and_socket_lsp_are_reported(tmp_path: Path) -> 
     summary = PluginManager(home=tmp_path / "home").validate(source)["plugin"]
     assert isinstance(summary, dict)
     components = {item["kind"]: item for item in summary["components"]}
-    assert components["hooks"]["status"] == "unsupported"
-    assert components["hooks"]["effective"] is False
-    assert components["hooks"]["count"] == 0
-    assert components["hooks"]["diagnostics"]
-    assert components["lsp"]["status"] == "unsupported"
-    assert components["lsp"]["effective"] is False
-    assert components["lsp"]["count"] == 0
-    assert components["lsp"]["diagnostics"]
+    assert components == {}
+    assert len(summary["warnings"]) >= 2
+    assert all("unsupported" in warning.lower() for warning in summary["warnings"])
 
 
 def test_enabled_claude_agent_enters_canonical_agent_catalog(tmp_path: Path) -> None:
@@ -1052,11 +830,7 @@ def test_enabled_claude_agent_enters_canonical_agent_catalog(tmp_path: Path) -> 
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
+    manager.set_enabled(str(installed["name"]), enabled=True)
     loaded = manager.agent_sources(manager.catalog())
     assert loaded.diagnostics == ()
     catalog = AgentCatalog(
@@ -1125,11 +899,7 @@ def test_portable_team_file_becomes_fixed_dag_definition(tmp_path: Path) -> None
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
+    manager.set_enabled(str(installed["name"]), enabled=True)
     result = manager.team_definitions(manager.catalog())
 
     assert result.diagnostics == ()
@@ -1156,7 +926,7 @@ def test_manifestless_claude_requires_unambiguous_component_or_explicit_format(
     result = manager.validate(source, format="claude-code")["plugin"]
     assert isinstance(result, dict)
     assert result["name"] == "my-skills"
-    assert result["manifest"] is None
+    assert "manifest" not in result
 
 
 def test_enabled_portable_skill_and_mcp_enter_one_runtime_catalog(tmp_path: Path) -> None:
@@ -1196,12 +966,7 @@ def test_enabled_portable_skill_and_mcp_enter_one_runtime_catalog(tmp_path: Path
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    enabled = manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
-    assert enabled["effective_on"] == "next_host"
+    enabled = manager.set_enabled(str(installed["name"]), enabled=True)
     catalog = manager.catalog()
 
     skill_result = manager.skill_sources(catalog)
@@ -1258,7 +1023,7 @@ def test_skill_and_mcp_consumers_require_effective_component_report(
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    plugin_id = str(installed["id"])
+    plugin_id = manager.store.read_registry().plugins[0].plugin_id
     plugin = manager.store.read_registry().plugins[0]
     reports = tuple(
         replace(
@@ -1271,15 +1036,11 @@ def test_skill_and_mcp_consumers_require_effective_component_report(
         else component
         for component in plugin.components
     )
-    fingerprint = capability_fingerprint(reports)
     manager.store.mutate_registry(
         lambda current: tuple(
             replace(
                 item,
                 components=reports,
-                capability_fingerprint=fingerprint,
-                trusted_capability_fingerprint=fingerprint,
-                enabled=True,
             )
             if item.plugin_id == plugin_id
             else item
@@ -1322,15 +1083,10 @@ def test_invalid_plugin_items_are_isolated_from_valid_skill_and_mcp(
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
     components = {item["kind"]: item for item in installed["components"]}
-    assert components["skills"]["status"] == "supported"
     assert components["skills"]["count"] == 1
-    assert components["mcp"]["status"] == "supported"
     assert components["mcp"]["count"] == 1
-    manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
+    assert installed["status"] == "warning"
+    manager.set_enabled(str(installed["name"]), enabled=True)
     catalog = manager.catalog()
     skills = manager.skill_sources(catalog)
     mcp = manager.mcp_servers(catalog, workspace=tmp_path / "workspace")
@@ -1372,11 +1128,7 @@ def test_enabled_claude_skill_and_inline_mcp_are_adapted_without_repacking(
     manager = PluginManager(home=home)
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
+    manager.set_enabled(str(installed["name"]), enabled=True)
     catalog = manager.catalog()
     skill_result = manager.skill_sources(catalog)
     registry = SkillRegistry(
@@ -1443,11 +1195,7 @@ def test_hybrid_keeps_portable_and_claude_mcp_semantics_separate(
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
+    manager.set_enabled(str(installed["name"]), enabled=True)
 
     result = manager.mcp_servers(manager.catalog(), workspace=tmp_path / "workspace")
     assert result.diagnostics == ()
@@ -1498,11 +1246,7 @@ def test_hybrid_fatal_portable_mcp_isolated_from_claude_servers(
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
+    manager.set_enabled(str(installed["name"]), enabled=True)
 
     result = manager.mcp_servers(manager.catalog(), workspace=tmp_path / "workspace")
     assert {server.name.rsplit("__", 1)[-1] for server in result.servers} == {"claude"}
@@ -1547,11 +1291,7 @@ def test_hybrid_fatal_claude_mcp_isolated_from_portable_servers(
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
+    manager.set_enabled(str(installed["name"]), enabled=True)
 
     result = manager.mcp_servers(manager.catalog(), workspace=tmp_path / "workspace")
     assert {server.name.rsplit("__", 1)[-1] for server in result.servers} == {"portable"}
@@ -1613,13 +1353,8 @@ def test_claude_and_portable_commands_become_user_only_command_records(
         installed = manager.install(source)["plugin"]
         assert isinstance(installed, dict)
         components = {item["kind"]: item for item in installed["components"]}
-        assert components["commands"]["status"] == "supported"
-        assert components["commands"]["effective"] is True
-        manager.set_enabled(
-            str(installed["id"]),
-            enabled=True,
-            capability_fingerprint=str(installed["capability_fingerprint"]),
-        )
+        assert set(components["commands"]) == {"kind", "count", "sources"}
+        manager.set_enabled(str(installed["name"]), enabled=True)
     catalog = manager.catalog()
     result = manager.skill_sources(catalog)
     registry = SkillRegistry(
@@ -1664,13 +1399,13 @@ def test_plugin_package_update_changes_skill_and_mcp_snapshots(tmp_path: Path) -
     manager = PluginManager(home=tmp_path / "home")
 
     def runtime_ids() -> tuple[str, str, str]:
-        installed = manager.install(source)["plugin"]
+        if manager.store.read_registry().plugins:
+            installed = manager.update("secure-review", source=source)
+        else:
+            installed = manager.install(source)
+        installed = installed["plugin"]
         assert isinstance(installed, dict)
-        manager.set_enabled(
-            str(installed["id"]),
-            enabled=True,
-            capability_fingerprint=str(installed["capability_fingerprint"]),
-        )
+        manager.set_enabled(str(installed["name"]), enabled=True)
         catalog = manager.catalog()
         skill_result = manager.skill_sources(catalog)
         registry = SkillRegistry(
@@ -1785,7 +1520,6 @@ def test_directory_staging_excludes_local_metadata_without_copying_sentinel_cont
             "install": installed,
             "list": manager.list(),
             "snapshot": manager.resource_snapshot(record.plugin_id).to_dict(),
-            "preview": manager.static_preview(),
         },
         ensure_ascii=False,
     )

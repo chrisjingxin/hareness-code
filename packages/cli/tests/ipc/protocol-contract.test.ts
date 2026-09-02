@@ -26,8 +26,8 @@ const fixtures = JSON.parse(
   await readFile(resolve(import.meta.dir, "../../../protocol/fixtures/v3-contract.json"), "utf8"),
 ) as { valid: Fixture[]; invalid: Fixture[] }
 
-test("Settings RPC 在 canonical v3 contract 中要求 minor 7", () => {
-  expect(PROTOCOL_VERSION).toEqual({ major: 3, minor: 7 })
+test("Settings 与 Plugin RPC 在 canonical v3 contract 中要求 minor 8", () => {
+  expect(PROTOCOL_VERSION).toEqual({ major: 3, minor: 8 })
   expect(OPERATION_MIN_MINOR["commands.bind"]).toBe(6)
 })
 

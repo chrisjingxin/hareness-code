@@ -34,6 +34,8 @@ def interaction_method(interaction_type: str) -> str:
         return METHOD["INTERACTION_DIRECTORY_TRUST"]
     if interaction_type == "plan":
         return METHOD["INTERACTION_PLAN"]
+    if interaction_type == "plugin_consent":
+        return METHOD["INTERACTION_PLUGIN_CONSENT"]
     return METHOD["INTERACTION_APPROVAL"]
 
 
@@ -148,4 +150,6 @@ class ProtocolInteractionAdapter:
             return {"decision": "deny"}
         if interaction.type == "plan":
             return {"decision": "abandoned", "expired": True}
+        if interaction.type == "plugin_consent":
+            return {"decision": "cancel"}
         return {"answers": {}}

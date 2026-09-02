@@ -49,6 +49,13 @@ def _mcp_component(summary: dict[str, object]) -> dict[str, object]:
     return component
 
 
+def _stored_mcp_component(manager: PluginManager):
+    """从本地 registry 取内部报告，避免把 Adapter 状态泄漏到 public summary。"""
+    state = manager.store.read_registry()
+    assert len(state.plugins) == 1
+    return next(component for component in state.plugins[0].components if component.kind == "mcp")
+
+
 def test_qwen_stdio_mcp_is_adapted_and_binds_to_installed_store(
     tmp_path: Path,
 ) -> None:
@@ -59,15 +66,9 @@ def test_qwen_stdio_mcp_is_adapted_and_binds_to_installed_store(
     assert isinstance(installed, dict)
 
     component = _mcp_component(installed)
-    assert component["status"] == "adapted"
-    assert component["effective"] is True
+    assert component["count"] == 1
+    assert set(component) == {"kind", "count", "sources"}
 
-    plugin_id = str(installed["id"])
-    manager.set_enabled(
-        plugin_id,
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
     catalog = manager.catalog()
     result = manager.mcp_servers(catalog, workspace=tmp_path / "workspace")
 
@@ -114,11 +115,6 @@ def test_qwen_mcp_accepts_only_the_four_declared_path_tokens(
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
     catalog = manager.catalog()
     result = manager.mcp_servers(catalog, workspace=workspace)
 
@@ -154,18 +150,15 @@ def test_qwen_mcp_bad_server_is_isolated_from_valid_server(
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
     component = _mcp_component(installed)
-    assert component["status"] == "adapted"
-    assert component["effective"] is True
+    assert component["count"] == 1
+    assert set(component) == {"kind", "count", "sources"}
+    internal_component = _stored_mcp_component(manager)
     assert any(
         "PLUGIN_MCP_PLACEHOLDER_INVALID" in diagnostic
-        for diagnostic in component["diagnostics"]
+        for diagnostic in internal_component.diagnostics
     )
+    assert any("PLUGIN_MCP_PLACEHOLDER_INVALID" in item for item in installed["warnings"])
 
-    manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
     result = manager.mcp_servers(
         manager.catalog(),
         workspace=tmp_path / "workspace",
@@ -203,28 +196,21 @@ def test_qwen_mcp_invalid_fields_are_reported_without_becoming_effective(
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    component = _mcp_component(installed)
-    assert component["effective"] is False
-    assert component["status"] == "invalid"
-    assert any(error_code in diagnostic for diagnostic in component["diagnostics"])
+    component = _stored_mcp_component(manager)
+    assert component.effective is False
+    assert component.status == "invalid"
+    assert any(error_code in diagnostic for diagnostic in component.diagnostics)
 
 
 @pytest.mark.asyncio
-async def test_qwen_mcp_effective_items_leave_static_preview_and_fake_client_is_used(
+async def test_qwen_mcp_effective_items_use_canonical_manager_and_fake_client(
     tmp_path: Path,
 ) -> None:
-    """effective Qwen MCP 只经 canonical manager 连接，静态 preview 不重复显示。"""
+    """effective Qwen MCP 只经 canonical manager 连接。"""
     source = _copy_fixture(tmp_path)
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
-
-    assert manager.static_preview()["mcp"] == []
     result = manager.mcp_servers(
         manager.catalog(),
         workspace=tmp_path / "workspace",
@@ -353,11 +339,6 @@ while True:
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
     result = manager.mcp_servers(manager.catalog(), workspace=workspace)
     assert result.diagnostics == ()
     assert len(result.servers) == 1
@@ -414,11 +395,6 @@ async def test_qwen_mcp_generation_replacement_drains_old_fake_client(
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
     result = manager.mcp_servers(
         manager.catalog(),
         workspace=tmp_path / "workspace",
@@ -520,11 +496,6 @@ async def test_qwen_mcp_host_status_and_close_use_fake_stdio_generation(
     )
     installed = server._plugin_manager.install(_copy_fixture(tmp_path))["plugin"]
     assert isinstance(installed, dict)
-    server._plugin_manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
 
     with patch(
         "langchain_mcp_adapters.client.MultiServerMCPClient",
@@ -542,7 +513,7 @@ async def test_qwen_mcp_host_status_and_close_use_fake_stdio_generation(
         assert len(status["servers"]) == 1
         assert status["servers"][0]["status"] == "connected"
         assert status["servers"][0]["tool_names"]
-        assert status["static_preview"] == []
+        assert "static_preview" not in status
 
         fake_client = FakeClient.instances[-1]
         connection = next(iter(fake_client.connections.values()))
@@ -592,11 +563,6 @@ async def test_qwen_mcp_status_exposes_isolated_server_diagnostics(
     )
     installed = host._plugin_manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    host._plugin_manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
 
     with patch(
         "langchain_mcp_adapters.client.MultiServerMCPClient",
@@ -622,7 +588,7 @@ async def test_qwen_mcp_status_exposes_isolated_server_diagnostics(
 async def test_qwen_mcp_disabled_plugin_never_constructs_client(
     tmp_path: Path,
 ) -> None:
-    """disabled/untrusted Qwen MCP 只保留 preview，不能触发 canonical client。"""
+    """disabled Qwen MCP 不进入 canonical client，也不产生静态 preview。"""
     from harness_agent.host.agent_host import AgentHost
 
     host = AgentHost(
@@ -632,6 +598,7 @@ async def test_qwen_mcp_disabled_plugin_never_constructs_client(
     )
     installed = host._plugin_manager.install(_copy_fixture(tmp_path))["plugin"]
     assert isinstance(installed, dict)
+    host._plugin_manager.set_enabled(str(installed["name"]), enabled=False)
 
     with patch(
         "langchain_mcp_adapters.client.MultiServerMCPClient",
@@ -647,6 +614,6 @@ async def test_qwen_mcp_disabled_plugin_never_constructs_client(
         status = await host._handle_mcp_status({}, "mcp-status")
 
     assert status["servers"] == []
-    assert status["static_preview"]
+    assert "static_preview" not in status
     client_class.assert_not_called()
     await host.close()

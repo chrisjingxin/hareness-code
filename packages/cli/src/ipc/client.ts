@@ -37,12 +37,18 @@ import {
   type McpStatusResult,
   type ModelsListResult,
   type PluginsInspectResult,
+  type PluginsInspectParams,
   type PluginsInstallResult,
+  type PluginsInstallParams,
+  type PluginsListParams,
   type PluginsListResult,
   type PluginsRemoveResult,
+  type PluginsSetEnabledParams,
   type PluginsSetEnabledResult,
   type PluginsSourceParams,
   type PluginsValidateResult,
+  type PluginsUpdateParams,
+  type PluginsMutationResult,
   type OperationMap,
   type OperationName,
   type InitializeParams,
@@ -408,14 +414,19 @@ export class AgentClient {
     return this.request(Method.MCP_REMOVE, { name })
   }
 
-  /** 列出 Plugin registry 与当前已启用 catalog。 */
-  listPlugins(includeDisabled = true): Promise<PluginsListResult> {
-    return this.request(Method.PLUGINS_LIST, { include_disabled: includeDisabled })
+  /** 列出指定 scope 的 Plugin registry 与当前 activation 摘要。 */
+  listPlugins(
+    scope: PluginsListParams["scope"] = "user",
+    includeDisabled = true,
+  ): Promise<PluginsListResult> {
+    this.ensurePluginProtocolMinor()
+    return this.request(Method.PLUGINS_LIST, { scope, include_disabled: includeDisabled })
   }
 
-  /** 查看一个 Plugin 的组件兼容性和 trust 摘要。 */
-  inspectPlugin(id: string): Promise<PluginsInspectResult> {
-    return this.request(Method.PLUGINS_INSPECT, { id })
+  /** 按 manifest name 查看一个 Plugin 的公开状态摘要。 */
+  inspectPlugin(name: string, scope: PluginsInspectParams["scope"] = "user"): Promise<PluginsInspectResult> {
+    this.ensurePluginProtocolMinor()
+    return this.request(Method.PLUGINS_INSPECT, { name, scope })
   }
 
   /** 离线校验本地目录或 zip，不修改 PluginStore。 */
@@ -423,39 +434,52 @@ export class AgentClient {
     source: string,
     format: PluginsSourceParams["format"] = "auto",
   ): Promise<PluginsValidateResult> {
+    this.ensurePluginProtocolMinor()
     return this.request(Method.PLUGINS_VALIDATE, { source, format })
   }
 
-  /** copy-on-install 本地 Plugin；安装结果始终为 disabled。 */
+  /** copy-on-install 本地 Plugin；安装在选定 scope 直接启用。 */
   installPlugin(
     source: string,
-    format: PluginsSourceParams["format"] = "auto",
+    scope: PluginsInstallParams["scope"] = "user",
   ): Promise<PluginsInstallResult> {
-    return this.request(Method.PLUGINS_INSTALL, { source, format })
+    this.ensurePluginProtocolMinor()
+    return this.request(Method.PLUGINS_INSTALL, { source, scope })
   }
 
-  /** 使用当前 capability fingerprint 显式启用或停用 Plugin。 */
+  /** 更新同名 Plugin artifact，可选提供新的本地 source。 */
+  updatePlugin(name: string, source?: string): Promise<PluginsMutationResult> {
+    this.ensurePluginProtocolMinor()
+    return this.request(Method.PLUGINS_UPDATE, {
+      name,
+      ...(source === undefined ? {} : { source }),
+    })
+  }
+
+  /** 按名称和 scope 修改 Plugin activation。 */
   setPluginEnabled(
-    id: string,
+    name: string,
     enabled: boolean,
-    capabilityFingerprint?: string,
+    scope: PluginsSetEnabledParams["scope"] = "user",
   ): Promise<PluginsSetEnabledResult> {
+    this.ensurePluginProtocolMinor()
     return this.request(Method.PLUGINS_SET_ENABLED, {
-      id,
+      name,
       enabled,
-      capability_fingerprint: capabilityFingerprint,
+      scope,
     })
   }
 
   /** 删除 Plugin 安装记录；持久数据默认保留。 */
-  removePlugin(id: string, purgeData = false): Promise<PluginsRemoveResult> {
-    return this.request(Method.PLUGINS_REMOVE, { id, purge_data: purgeData })
+  removePlugin(name: string, purgeData = false): Promise<PluginsRemoveResult> {
+    this.ensurePluginProtocolMinor()
+    return this.request(Method.PLUGINS_REMOVE, { name, purge_data: purgeData })
   }
 
   /** 读取当前 user/workspace Settings 的脱敏摘要。 */
-  listSettings(scope: SettingsListParams["scope"]): Promise<SettingsListResult> {
+  listSettings(params: SettingsListParams = {}): Promise<SettingsListResult> {
     this.ensureSettingsProtocolMinor()
-    return this.request(Method.SETTINGS_LIST, { scope })
+    return this.request(Method.SETTINGS_LIST, params)
   }
 
   /** 写入一个已由 Host 校验 identity 的 Settings value。 */
@@ -470,10 +494,17 @@ export class AgentClient {
     return this.request(Method.SETTINGS_REMOVE, params)
   }
 
-  /** 旧 Agent 不识别 v3.7 Settings RPC 时，在发送未知 method 前 fail closed。 */
+  /** 旧 Agent 不识别 v3.8 Settings/Plugin RPC 时，在发送未知 method 前 fail closed。 */
   private ensureSettingsProtocolMinor(): void {
-    if (this.initializedInfo && this.initializedInfo.protocol.minor < 7) {
+    if (this.initializedInfo && this.initializedInfo.protocol.minor < 8) {
       throw new Error("SETTINGS_PROTOCOL_MINOR_REQUIRED")
+    }
+  }
+
+  /** 旧 Agent 不识别 v3.8 Plugin RPC 时，在发送未知 method 前 fail closed。 */
+  private ensurePluginProtocolMinor(): void {
+    if (this.initializedInfo && this.initializedInfo.protocol.minor < 8) {
+      throw new Error("PLUGIN_PROTOCOL_MINOR_REQUIRED")
     }
   }
 
@@ -638,7 +669,9 @@ export class AgentClient {
           ? "directory_trust" as const
           : method === Method.INTERACTION_PLAN
             ? "plan" as const
-            : "question" as const
+            : method === Method.INTERACTION_PLUGIN_CONSENT
+              ? "plugin_consent" as const
+              : "question" as const
       const request = {
         ...validated,
         request_id: id,
@@ -654,7 +687,9 @@ export class AgentClient {
           ? { decision: result.decision }
           : result.type === "plan"
             ? { decision: result.decision, feedback: result.feedback }
-            : { answers: result.answers }
+            : result.type === "plugin_consent"
+              ? { decision: result.decision }
+              : { answers: result.answers }
       validateInteractionResult(method as InteractionMethod, wireResult)
       this.inboundRequests.delete(id)
       await this.send({ jsonrpc: "2.0", id, result: wireResult })

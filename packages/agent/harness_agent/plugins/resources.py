@@ -23,7 +23,6 @@ from harness_agent.plugins.store import PluginStore
 
 
 _RESOURCE_KINDS = frozenset({"commands", "skills", "agents", "mcp", "contexts", "hooks"})
-_STATIC_PREVIEW_KINDS = ("commands", "skills", "agents", "mcp")
 _SAFE_DEPENDENCY_ROOTS = frozenset({"references", "scripts", "mcp"})
 _MAX_RESOURCE_FILE_BYTES = 8 * 1024 * 1024
 _MAX_RESOURCE_TOTAL_BYTES = 32 * 1024 * 1024
@@ -34,9 +33,6 @@ _PLACEHOLDER_RE = re.compile(
     r"\$\{pathSeparator\}|\$\{/\}|\$\{CLAUDE_PLUGIN_ROOT\}"
 )
 _UNKNOWN_PLACEHOLDER_RE = re.compile(r"\$\{[^}]+\}|<[^>\r\n]+>")
-_FRONTMATTER_DESCRIPTION_RE = re.compile(
-    r"(?m)^description:\s*(?P<value>[^\r\n]+)\s*$"
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,50 +172,6 @@ class PluginResourceSnapshot:
     def read_relative_text(self, base_virtual_path: str, relative_path: str) -> str:
         """以 UTF-8 读取相对于快照文件的包内资源正文。"""
         return self.read_text(self.resolve_relative(base_virtual_path, relative_path))
-
-    def static_preview(self) -> dict[str, list[dict[str, object]]]:
-        """按既有列表分类返回 disabled/static/non-runnable 资源预览。"""
-        preview = {kind: [] for kind in _STATIC_PREVIEW_KINDS}
-        for asset in self.resources:
-            if asset.kind not in preview:
-                continue
-            if asset.kind == "skills" and not asset.source.endswith("/SKILL.md"):
-                continue
-            name = _preview_name(asset)
-            item: dict[str, object] = {
-                "id": f"{self.plugin_id}:{asset.kind}:{name}",
-                "plugin_id": self.plugin_id,
-                "kind": asset.kind,
-                "name": name,
-                "source": asset.source,
-                "virtual_path": asset.virtual_path,
-                "enabled": False,
-                "disabled": True,
-                "static": True,
-                "runnable": False,
-                "read_only": True,
-            }
-            description = _preview_description(asset.content)
-            if description:
-                item["description"] = description
-            for key in (
-                "transport",
-                "command",
-                "args",
-                "url",
-                "cwd",
-                "target_paths",
-                "placeholder_targets",
-                "diagnostic",
-                "events",
-            ):
-                if key in asset.metadata:
-                    item[key] = _thaw_metadata(asset.metadata[key])
-            preview[asset.kind].append(item)
-        for items in preview.values():
-            items.sort(key=lambda item: str(item["name"]))
-        return preview
-
 
 def build_plugin_resource_snapshot(
     plugin: InstalledPlugin,
@@ -514,31 +466,6 @@ def _safe_snapshot_relative(relative: str) -> bool:
     if filename.endswith((".pem", ".key", ".p12", ".pfx")):
         return False
     return bool(path.parts)
-
-
-def _preview_name(asset: PluginResourceAsset) -> str:
-    """从包内相对来源生成列表展示名，不解析 Agent 权限字段。"""
-    if asset.kind == "mcp":
-        server = asset.metadata.get("server")
-        if isinstance(server, str) and server:
-            return server
-    path = PurePosixPath(asset.source)
-    if asset.kind == "skills" and path.name == "SKILL.md":
-        return path.parent.name
-    return path.stem
-
-
-def _preview_description(content: bytes) -> str | None:
-    """只读取静态 frontmatter 的 description，不解释工具或权限声明。"""
-    try:
-        text = content.decode("utf-8")
-    except UnicodeDecodeError:
-        return None
-    match = _FRONTMATTER_DESCRIPTION_RE.search(text[:16 * 1024])
-    if match is None:
-        return None
-    value = match.group("value").strip().strip('"\'')
-    return value or None
 
 
 def _mcp_assets(

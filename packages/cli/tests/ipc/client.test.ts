@@ -209,33 +209,78 @@ test("Peer 通过受控配置接口传递详情、预览和 CAS 提交参数", a
   ])
 })
 
-test("Peer 通过类型化 Plugin 接口传递来源、trust 指纹和 data 删除选择", async () => {
+test("Peer 通过类型化 Plugin 接口传递名称、scope 和 data 删除选择", async () => {
   const { client, stdin, stdout } = peer()
   const requests: any[] = []
+  const summary = {
+    name: "Review-Tools",
+    version: "1.0.0",
+    description: "offline fixture",
+    format: "agent-plugins-1.0",
+    source: { label: "review", kind: "local" },
+    activation: "enabled",
+    status: "loaded",
+    components: [],
+    warnings: [],
+  }
+  const mutation = (operation: string, scope?: string) => ({
+    operation,
+    name: "Review-Tools",
+    ...(scope === undefined ? {} : { scope }),
+    status: operation === "remove" ? "disabled" : "loaded",
+    components: [],
+    warnings: [],
+  })
   stdin.on("data", data => {
     const message = JSON.parse(data.toString())
     requests.push(message)
-    stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {} }) + "\n")
+    const result = message.method === "plugins.list"
+      ? { scope: "user", plugins: [summary] }
+      : message.method === "plugins.inspect"
+        ? { scope: "user", plugin: { ...summary, internal: { id: "internal-only" } } }
+        : message.method === "plugins.validate"
+          ? {
+              operation: "validate",
+              source: { label: "review.zip", kind: "local" },
+              plugin: {
+                name: "Review-Tools",
+                version: "1.0.0",
+                description: "offline fixture",
+                format: "agent-plugins-1.0",
+                components: [],
+                warnings: [],
+              },
+            }
+          : message.method === "plugins.install"
+            ? { ...mutation("install", "user"), plugin: summary }
+            : message.method === "plugins.update"
+              ? { ...mutation("update"), plugin: summary }
+              : message.method === "plugins.set_enabled"
+                ? { ...mutation("enable", "workspace"), plugin: { ...summary, scope: "workspace" } }
+                : mutation("remove")
+    stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }) + "\n")
   })
 
   await client.listPlugins()
-  await client.inspectPlugin("local-source/review")
+  await client.inspectPlugin("Review-Tools")
   await client.validatePlugin("./review.zip", "claude-code")
   await client.installPlugin("./review.zip")
-  await client.setPluginEnabled("local-source/review", true, "a".repeat(64))
-  await client.removePlugin("local-source/review", true)
+  await client.updatePlugin("Review-Tools", "./review-v2")
+  await client.setPluginEnabled("Review-Tools", true, "workspace")
+  await client.removePlugin("Review-Tools", true)
 
   expect(requests.map(request => [request.method, request.params])).toEqual([
-    ["plugins.list", { include_disabled: true }],
-    ["plugins.inspect", { id: "local-source/review" }],
+    ["plugins.list", { scope: "user", include_disabled: true }],
+    ["plugins.inspect", { name: "Review-Tools", scope: "user" }],
     ["plugins.validate", { source: "./review.zip", format: "claude-code" }],
-    ["plugins.install", { source: "./review.zip", format: "auto" }],
+    ["plugins.install", { source: "./review.zip", scope: "user" }],
+    ["plugins.update", { name: "Review-Tools", source: "./review-v2" }],
     ["plugins.set_enabled", {
-      id: "local-source/review",
+      name: "Review-Tools",
       enabled: true,
-      capability_fingerprint: "a".repeat(64),
+      scope: "workspace",
     }],
-    ["plugins.remove", { id: "local-source/review", purge_data: true }],
+    ["plugins.remove", { name: "Review-Tools", purge_data: true }],
   ])
 })
 
@@ -251,46 +296,30 @@ test("Peer 通过类型化 Settings 接口传递摘要与 CAS，而不隐藏 val
       error: { code: -32010, message: "SETTINGS_BACKEND_UNAVAILABLE", data: { code: "SETTINGS_BACKEND_UNAVAILABLE", retryable: true } },
     }) + "\n")
   })
-  await client.listSettings("workspace").catch(() => undefined)
+  await client.listSettings({ scope: "workspace" }).catch(() => undefined)
   await client.setSetting({
     scope: "user",
-    plugin_id: "plugin/local/za38",
-    package_digest: "a".repeat(64),
-    declaration_digest: "b".repeat(64),
-    setting_key: "ZA38_TOKEN",
-    env_var: "ZA38_TOKEN",
+    name: "Review-Tools",
+    setting: "ZA38_TOKEN",
     value: "transient-fake-value",
-    expected_store_revision: 0,
   }).catch(() => undefined)
   await client.removeSetting({
     scope: "user",
-    plugin_id: "plugin/local/za38",
-    package_digest: "a".repeat(64),
-    declaration_digest: "b".repeat(64),
-    setting_key: "ZA38_TOKEN",
-    env_var: "ZA38_TOKEN",
-    expected_store_revision: 0,
+    name: "Review-Tools",
+    setting: "ZA38_TOKEN",
   }).catch(() => undefined)
   expect(requests.map(request => [request.method, request.params])).toEqual([
     ["settings.list", { scope: "workspace" }],
     ["settings.set", {
       scope: "user",
-      plugin_id: "plugin/local/za38",
-      package_digest: "a".repeat(64),
-      declaration_digest: "b".repeat(64),
-      setting_key: "ZA38_TOKEN",
-      env_var: "ZA38_TOKEN",
+      name: "Review-Tools",
+      setting: "ZA38_TOKEN",
       value: "transient-fake-value",
-      expected_store_revision: 0,
     }],
     ["settings.remove", {
       scope: "user",
-      plugin_id: "plugin/local/za38",
-      package_digest: "a".repeat(64),
-      declaration_digest: "b".repeat(64),
-      setting_key: "ZA38_TOKEN",
-      env_var: "ZA38_TOKEN",
-      expected_store_revision: 0,
+      name: "Review-Tools",
+      setting: "ZA38_TOKEN",
     }],
   ])
 })
@@ -300,7 +329,16 @@ test("Peer 在 v3.6 协商结果下不会发送未知 Settings RPC", async () =>
   const requests: any[] = []
   stdin.on("data", data => requests.push(JSON.parse(data.toString())))
   ;(client as any).initializedInfo = { protocol: { major: 3, minor: 6 } }
-  expect(() => client.listSettings("user")).toThrow("SETTINGS_PROTOCOL_MINOR_REQUIRED")
+  expect(() => client.listSettings({ scope: "user" })).toThrow("SETTINGS_PROTOCOL_MINOR_REQUIRED")
+  expect(requests).toEqual([])
+})
+
+test("Peer 在 v3.7 协商结果下不会发送未知 Plugin RPC", async () => {
+  const { client, stdin } = peer()
+  const requests: any[] = []
+  stdin.on("data", data => requests.push(JSON.parse(data.toString())))
+  ;(client as any).initializedInfo = { protocol: { major: 3, minor: 7 } }
+  expect(() => client.listPlugins()).toThrow("PLUGIN_PROTOCOL_MINOR_REQUIRED")
   expect(requests).toEqual([])
 })
 

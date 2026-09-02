@@ -27,7 +27,6 @@ from harness_agent.plugins.model import (
     PluginComponentReport,
     PluginDescriptor,
     PluginError,
-    capability_fingerprint,
 )
 from harness_agent.plugins.mcp_schema import validate_qwen_mcp_document
 from harness_agent.plugins.qwen_lsp import validate_qwen_lsp_document
@@ -149,7 +148,6 @@ def load_qwen_plugin(root: Path, *, package_digest: str) -> PluginDescriptor:
         format="qwen-code",
         manifest=manifest_name,
         package_digest=package_digest,
-        capability_fingerprint=capability_fingerprint(components_tuple),
         components=components_tuple,
         diagnostics=tuple(diagnostics),
     )

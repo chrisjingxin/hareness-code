@@ -4,7 +4,7 @@
   "title": "Harness Agent Protocol v3",
   "x-harness": {
     "major": 3,
-    "minor": 7,
+    "minor": 8,
     "max_frame_bytes": 8388608,
     "max_tool_payload_bytes": 1048576,
     "operations": {
@@ -18,9 +18,9 @@
       "config.details": { "params": "#/$defs/emptyParams", "result": "#/$defs/configDetailsResult", "capability": "config.write" },
       "config.preview": { "params": "#/$defs/configPreviewParams", "result": "#/$defs/configPreviewResult", "capability": "config.write", "controlled": true },
       "config.commit": { "params": "#/$defs/configCommitParams", "result": "#/$defs/configCommitResult", "capability": "config.write", "controlled": true },
-      "settings.list": { "params": "#/$defs/settingsListParams", "result": "#/$defs/settingsListResult", "capability": "settings.read", "min_minor": 7 },
-      "settings.set": { "params": "#/$defs/settingsSetParams", "result": "#/$defs/settingsMutationResult", "capability": "settings.manage", "controlled": true, "min_minor": 7 },
-      "settings.remove": { "params": "#/$defs/settingsRemoveParams", "result": "#/$defs/settingsMutationResult", "capability": "settings.manage", "controlled": true, "min_minor": 7 },
+      "settings.list": { "params": "#/$defs/settingsListParams", "result": "#/$defs/settingsListResult", "capability": "settings.read", "min_minor": 8 },
+      "settings.set": { "params": "#/$defs/settingsSetParams", "result": "#/$defs/settingsMutationResult", "capability": "settings.manage", "controlled": true, "min_minor": 8 },
+      "settings.remove": { "params": "#/$defs/settingsRemoveParams", "result": "#/$defs/settingsMutationResult", "capability": "settings.manage", "controlled": true, "min_minor": 8 },
       "threads.list": { "params": "#/$defs/threadsListParams", "result": "#/$defs/threadsListResult", "capability": "threads.read" },
       "threads.open": { "params": "#/$defs/threadsOpenParams", "result": "#/$defs/threadsOpenResult", "capability": "threads.read" },
       "threads.watch": { "params": "#/$defs/threadsOpenParams", "result": "#/$defs/threadsOpenResult", "capability": "threads.read" },
@@ -30,27 +30,28 @@
       "threads.undo": { "params": "#/$defs/threadsUndoParams", "result": "#/$defs/threadsUndoResult", "capability": "threads.read", "controlled": true },
       "threads.redo": { "params": "#/$defs/threadsRedoParams", "result": "#/$defs/threadsRedoResult", "capability": "threads.read", "controlled": true },
       "models.list": { "params": "#/$defs/modelsListParams", "result": "#/$defs/modelsListResult", "capability": "models.read" },
-      "skills.list": { "params": "#/$defs/skillsListParams", "result": "#/$defs/skillsListResult", "capability": "skills.read" },
+      "skills.list": { "params": "#/$defs/skillsListParams", "result": "#/$defs/skillsListResult", "capability": "skills.read", "min_minor": 8 },
       "skills.inspect": { "params": "#/$defs/skillsInspectParams", "result": "#/$defs/jsonObject", "capability": "skills.read" },
       "skills.set_enabled": { "params": "#/$defs/skillsSetEnabledParams", "result": "#/$defs/jsonObject", "capability": "skills.manage", "controlled": true },
       "skills.install": { "params": "#/$defs/skillsInstallParams", "result": "#/$defs/jsonObject", "capability": "skills.manage", "controlled": true },
       "skills.update": { "params": "#/$defs/skillsInstallParams", "result": "#/$defs/jsonObject", "capability": "skills.manage", "controlled": true },
       "skills.remove": { "params": "#/$defs/skillsInspectParams", "result": "#/$defs/jsonObject", "capability": "skills.manage", "controlled": true },
       "skills.market.list": { "params": "#/$defs/skillsMarketListParams", "result": "#/$defs/jsonObjectArray", "capability": "skills.read" },
-      "plugins.list": { "params": "#/$defs/pluginsListParams", "result": "#/$defs/jsonObject", "capability": "plugins.read" },
-      "plugins.inspect": { "params": "#/$defs/pluginsInspectParams", "result": "#/$defs/jsonObject", "capability": "plugins.read" },
-      "plugins.validate": { "params": "#/$defs/pluginsSourceParams", "result": "#/$defs/jsonObject", "capability": "plugins.read" },
-      "plugins.install": { "params": "#/$defs/pluginsSourceParams", "result": "#/$defs/jsonObject", "capability": "plugins.manage" },
-      "plugins.set_enabled": { "params": "#/$defs/pluginsSetEnabledParams", "result": "#/$defs/jsonObject", "capability": "plugins.manage" },
-      "plugins.remove": { "params": "#/$defs/pluginsRemoveParams", "result": "#/$defs/jsonObject", "capability": "plugins.manage" },
-      "agents.list": { "params": "#/$defs/emptyParams", "result": "#/$defs/agentsListResult", "capability": "agents.read" },
+      "plugins.list": { "params": "#/$defs/pluginsListParams", "result": "#/$defs/pluginsListResult", "capability": "plugins.read", "min_minor": 8 },
+      "plugins.inspect": { "params": "#/$defs/pluginsInspectParams", "result": "#/$defs/pluginsInspectResult", "capability": "plugins.read", "min_minor": 8 },
+      "plugins.validate": { "params": "#/$defs/pluginsValidateParams", "result": "#/$defs/pluginsValidateResult", "capability": "plugins.read", "min_minor": 8 },
+      "plugins.install": { "params": "#/$defs/pluginsInstallParams", "result": "#/$defs/pluginsMutationResult", "capability": "plugins.manage", "controlled": true, "min_minor": 8 },
+      "plugins.update": { "params": "#/$defs/pluginsUpdateParams", "result": "#/$defs/pluginsMutationResult", "capability": "plugins.manage", "controlled": true, "min_minor": 8 },
+      "plugins.set_enabled": { "params": "#/$defs/pluginsSetEnabledParams", "result": "#/$defs/pluginsMutationResult", "capability": "plugins.manage", "controlled": true, "min_minor": 8 },
+      "plugins.remove": { "params": "#/$defs/pluginsRemoveParams", "result": "#/$defs/pluginsMutationResult", "capability": "plugins.manage", "controlled": true, "min_minor": 8 },
+      "agents.list": { "params": "#/$defs/emptyParams", "result": "#/$defs/agentsListResult", "capability": "agents.read", "min_minor": 8 },
       "agents.inspect": { "params": "#/$defs/agentsInspectParams", "result": "#/$defs/agentSummary", "capability": "agents.read" },
       "teams.list": { "params": "#/$defs/emptyParams", "result": "#/$defs/teamsListResult", "capability": "teams.read" },
       "teams.inspect": { "params": "#/$defs/teamsInspectParams", "result": "#/$defs/jsonObject", "capability": "teams.read" },
       "teams.generate": { "params": "#/$defs/teamsGenerateParams", "result": "#/$defs/teamDefinition", "capability": "teams.manage" },
       "teams.run": { "params": "#/$defs/teamsRunParams", "result": "#/$defs/teamsRunResult", "capability": "teams.manage" },
       "teams.cancel": { "params": "#/$defs/teamsCancelParams", "result": "#/$defs/teamsCancelResult", "capability": "teams.manage" },
-      "mcp.status": { "params": "#/$defs/emptyParams", "result": "#/$defs/mcpStatusResult", "capability": "mcp.read" },
+      "mcp.status": { "params": "#/$defs/emptyParams", "result": "#/$defs/mcpStatusResult", "capability": "mcp.read", "min_minor": 8 },
       "mcp.add": { "params": "#/$defs/mcpAddParams", "result": "#/$defs/mcpAddResult", "capability": "mcp.manage", "controlled": true },
       "mcp.remove": { "params": "#/$defs/mcpRemoveParams", "result": "#/$defs/mcpRemoveResult", "capability": "mcp.manage", "controlled": true },
       "host.attachment.create": { "params": "#/$defs/hostAttachmentCreateParams", "result": "#/$defs/hostAttachmentCreateResult", "capability": "host.attach" },
@@ -82,7 +83,8 @@
       "interaction.approval": { "params": "#/$defs/approvalRequest", "result": "#/$defs/approvalResponse", "handle": "approval" },
       "interaction.question": { "params": "#/$defs/questionRequest", "result": "#/$defs/questionResponse", "handle": "question" },
       "interaction.directory_trust": { "params": "#/$defs/directoryTrustRequest", "result": "#/$defs/directoryTrustResponse", "handle": "directory_trust" },
-      "interaction.plan": { "params": "#/$defs/planRequest", "result": "#/$defs/planResponse", "handle": "plan" }
+      "interaction.plan": { "params": "#/$defs/planRequest", "result": "#/$defs/planResponse", "handle": "plan" },
+      "interaction.plugin_consent": { "params": "#/$defs/pluginConsentRequest", "result": "#/$defs/pluginConsentResponse", "handle": "plugin_consent" }
     },
     "capabilities": [
       "run.cancel", "run.multithread", "host.control", "config.read", "config.write", "threads.read",
@@ -120,7 +122,23 @@
       "SETTINGS_OPERATION_IN_PROGRESS": { "jsonrpc_code": -32000, "retryable": true },
       "SETTINGS_CLEANUP_PENDING": { "jsonrpc_code": -32010, "retryable": true },
       "SETTINGS_UNINSTALL_PARTIAL": { "jsonrpc_code": -32010, "retryable": true },
-      "SETTINGS_UNINSTALL_CONFLICT": { "jsonrpc_code": -32000, "retryable": true }
+      "SETTINGS_UNINSTALL_CONFLICT": { "jsonrpc_code": -32000, "retryable": true },
+      "PLUGIN_ALREADY_INSTALLED": { "jsonrpc_code": -32602, "retryable": false },
+      "PLUGIN_NOT_FOUND": { "jsonrpc_code": -32602, "retryable": false },
+      "PLUGIN_NAME_CONFLICT": { "jsonrpc_code": -32602, "retryable": false },
+      "PLUGIN_SCOPE_INVALID": { "jsonrpc_code": -32602, "retryable": false },
+      "PLUGIN_FORMAT_AMBIGUOUS": { "jsonrpc_code": -32602, "retryable": false },
+      "PLUGIN_FORMAT_UNSUPPORTED": { "jsonrpc_code": -32602, "retryable": false },
+      "PLUGIN_CONSENT_REQUIRED": { "jsonrpc_code": -32602, "retryable": false },
+      "PLUGIN_OPERATION_CANCELLED": { "jsonrpc_code": -32602, "retryable": false },
+      "PLUGIN_SOURCE_UNAVAILABLE": { "jsonrpc_code": -32602, "retryable": false },
+      "PLUGIN_OPERATION_CONFLICT": { "jsonrpc_code": -32000, "retryable": true },
+      "PLUGIN_LOAD_FAILED": { "jsonrpc_code": -32040, "retryable": false },
+      "PLUGIN_SETTING_RECONFIGURE_REQUIRED": { "jsonrpc_code": -32602, "retryable": false },
+      "PLUGIN_REGISTRY_MIGRATION_BACKUP_FAILED": { "jsonrpc_code": -32010, "retryable": true },
+      "PLUGIN_REGISTRY_MIGRATION_BACKUP_CONFLICT": { "jsonrpc_code": -32602, "retryable": false },
+      "PLUGIN_REGISTRY_WRITE_FAILED": { "jsonrpc_code": -32010, "retryable": true },
+      "PLUGIN_REGISTRY_COMMIT_UNCERTAIN": { "jsonrpc_code": -32010, "retryable": true }
     }
   },
   "$defs": {
@@ -202,7 +220,7 @@
       "required": ["requests", "handles"],
       "properties": {
         "requests": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
-        "handles": { "type": "array", "items": { "enum": ["approval", "question", "directory_trust", "plan"] }, "uniqueItems": true }
+        "handles": { "type": "array", "items": { "enum": ["approval", "question", "directory_trust", "plan", "plugin_consent"] }, "uniqueItems": true }
       },
       "additionalProperties": false
     },
@@ -248,12 +266,11 @@
           "properties": {
             "available": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
             "enabled": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
-            "handles": { "type": "array", "items": { "enum": ["approval", "question", "directory_trust", "plan"] }, "uniqueItems": true }
+            "handles": { "type": "array", "items": { "enum": ["approval", "question", "directory_trust", "plan", "plugin_consent"] }, "uniqueItems": true }
           },
           "additionalProperties": false
         },
         "agent_commands": { "type": "array", "items": { "$ref": "#/$defs/agentCommand" } },
-        "static_command_preview": { "$ref": "#/$defs/jsonObjectArray" },
         "skills_snapshot": {
           "type": "object", "required": ["id", "count"],
           "properties": { "id": { "type": "string" }, "count": { "type": "integer", "minimum": 0 } },
@@ -466,24 +483,16 @@
     "settingsSummary": {
       "type": "object",
       "required": [
-        "setting_id", "plugin_id", "package_digest", "declaration_digest", "scope",
-        "scope_binding_digest", "source", "name", "description", "env_var", "sensitive",
-        "required", "consumer_scope", "store_state", "runtime_state", "pending_operation", "diagnostic"
+        "name", "setting", "scope", "description", "sensitive",
+        "required", "store_state", "runtime_state", "pending_operation", "diagnostic"
       ],
       "properties": {
-        "setting_id": { "type": "string", "minLength": 1 },
-        "plugin_id": { "type": "string", "minLength": 1 },
-        "package_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "declaration_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "scope": { "$ref": "#/$defs/settingsScope" },
-        "scope_binding_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "source": { "const": "qwen-extension" },
         "name": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "setting": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$" },
+        "scope": { "$ref": "#/$defs/settingsScope" },
         "description": { "type": "string", "minLength": 1, "maxLength": 4096 },
-        "env_var": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$" },
         "sensitive": { "type": "boolean" },
         "required": { "const": false },
-        "consumer_scope": { "const": "extension-wide" },
         "store_state": { "enum": ["configured", "absent", "stale", "pending", "tombstoned", "partial", "blocked"] },
         "runtime_state": { "enum": ["loaded", "not_loaded", "pending_restart", "absent", "stale"] },
         "pending_operation": { "oneOf": [{ "$ref": "#/$defs/settingsPendingSummary" }, { "type": "null" }] },
@@ -493,73 +502,56 @@
     },
     "settingsListParams": {
       "type": "object",
-      "required": ["scope"],
-      "properties": { "scope": { "$ref": "#/$defs/settingsScope" } },
+      "properties": { "name": { "type": "string", "minLength": 1 }, "scope": { "$ref": "#/$defs/settingsScope", "default": "user" } },
       "additionalProperties": false
     },
     "settingsListResult": {
       "type": "object",
-      "required": ["scope", "store_revision", "runtime_snapshot", "settings"],
+      "required": ["scope", "settings"],
       "properties": {
         "scope": { "$ref": "#/$defs/settingsScope" },
-        "store_revision": { "type": "integer", "minimum": 0 },
-        "runtime_snapshot": { "$ref": "#/$defs/settingsRuntimeSnapshot" },
         "settings": { "type": "array", "items": { "$ref": "#/$defs/settingsSummary" } }
       },
       "additionalProperties": false
     },
     "settingsIdentity": {
       "type": "object",
-      "required": ["scope", "plugin_id", "package_digest", "declaration_digest", "setting_key", "env_var"],
+      "required": ["scope", "name", "setting"],
       "properties": {
         "scope": { "$ref": "#/$defs/settingsScope" },
-        "plugin_id": { "type": "string", "minLength": 1 },
-        "package_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "declaration_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "setting_key": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$" },
-        "env_var": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$" }
+        "name": { "type": "string", "minLength": 1 },
+        "setting": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$" }
       },
       "additionalProperties": false
     },
     "settingsSetParams": {
       "type": "object",
-      "required": ["scope", "plugin_id", "package_digest", "declaration_digest", "setting_key", "env_var", "value", "expected_store_revision"],
+      "required": ["name", "setting", "value"],
       "properties": {
-        "scope": { "$ref": "#/$defs/settingsScope" },
-        "plugin_id": { "type": "string", "minLength": 1 },
-        "package_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "declaration_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "setting_key": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$" },
-        "env_var": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$" },
-        "value": { "type": "string", "maxLength": 65536, "pattern": "^[^\\u0000]*$" },
-        "expected_store_revision": { "type": "integer", "minimum": 0 }
+        "name": { "type": "string", "minLength": 1 },
+        "setting": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$" },
+        "scope": { "$ref": "#/$defs/settingsScope", "default": "user" },
+        "value": { "type": "string", "maxLength": 65536, "pattern": "^[^\\u0000]*$" }
       },
       "additionalProperties": false
     },
     "settingsRemoveParams": {
       "type": "object",
-      "required": ["scope", "plugin_id", "package_digest", "declaration_digest", "setting_key", "env_var", "expected_store_revision"],
+      "required": ["name", "setting"],
       "properties": {
-        "scope": { "$ref": "#/$defs/settingsScope" },
-        "plugin_id": { "type": "string", "minLength": 1 },
-        "package_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "declaration_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "setting_key": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$" },
-        "env_var": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$" },
-        "expected_store_revision": { "type": "integer", "minimum": 0 }
+        "name": { "type": "string", "minLength": 1 },
+        "setting": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$" },
+        "scope": { "$ref": "#/$defs/settingsScope", "default": "user" }
       },
       "additionalProperties": false
     },
     "settingsMutationResult": {
       "type": "object",
-      "required": ["operation", "scope", "store_revision", "runtime_snapshot", "summary", "applies_to", "diagnostics"],
+      "required": ["operation", "scope", "summary", "diagnostics"],
       "properties": {
         "operation": { "enum": ["set", "remove"] },
         "scope": { "$ref": "#/$defs/settingsScope" },
-        "store_revision": { "type": "integer", "minimum": 0 },
-        "runtime_snapshot": { "$ref": "#/$defs/settingsRuntimeSnapshot" },
         "summary": { "$ref": "#/$defs/settingsSummary" },
-        "applies_to": { "const": "next_host" },
         "diagnostics": { "type": "array", "items": { "type": "string", "maxLength": 128 } }
       },
       "additionalProperties": false
@@ -798,20 +790,153 @@
       "properties": {
         "snapshot": { "$ref": "#/$defs/jsonObject" },
         "skills": { "$ref": "#/$defs/jsonObjectArray" },
-        "static_preview": { "$ref": "#/$defs/jsonObjectArray" },
         "diagnostics": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+    "pluginScope": { "enum": ["user", "workspace"] },
+    "pluginSourceSummary": {
+      "type": "object",
+      "required": ["label", "kind"],
+      "properties": {
+        "label": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "kind": { "const": "local" }
+      },
+      "additionalProperties": false
+    },
+    "pluginComponentSummary": {
+      "type": "object",
+      "required": ["kind", "count", "sources"],
+      "properties": {
+        "kind": { "type": "string", "minLength": 1 },
+        "count": { "type": "integer", "minimum": 1 },
+        "sources": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      },
+      "additionalProperties": false
+    },
+    "pluginSummary": {
+      "type": "object",
+      "required": ["name", "version", "description", "format", "source", "activation", "status", "components", "warnings"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": ["string", "null"] },
+        "description": { "type": ["string", "null"] },
+        "format": { "enum": ["agent-plugins-1.0", "claude-code", "qwen-code", "hybrid"] },
+        "source": { "$ref": "#/$defs/pluginSourceSummary" },
+        "activation": { "enum": ["enabled", "disabled"] },
+        "scope": { "$ref": "#/$defs/pluginScope" },
+        "status": { "enum": ["loaded", "disabled", "warning", "failed"] },
+        "components": { "type": "array", "items": { "$ref": "#/$defs/pluginComponentSummary" } },
+        "warnings": { "type": "array", "items": { "type": "string", "maxLength": 256 } },
+        "internal": {
+          "type": "object",
+          "required": ["id"],
+          "properties": { "id": { "type": "string", "minLength": 1 } },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "pluginMutationPreview": {
+      "type": "object",
+      "required": ["operation", "name", "new_version", "source_label", "components", "settings", "warnings"],
+      "properties": {
+        "operation": { "enum": ["install", "update"] },
+        "name": { "type": "string", "minLength": 1 },
+        "old_version": { "type": ["string", "null"] },
+        "new_version": { "type": ["string", "null"] },
+        "source_label": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "activation_scope": { "$ref": "#/$defs/pluginScope" },
+        "components": { "type": "array", "items": { "$ref": "#/$defs/pluginComponentSummary" } },
+        "settings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "description", "required", "configured_at_scope"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "description": { "type": "string", "minLength": 1 },
+              "required": { "const": false },
+              "configured_at_scope": { "type": ["string", "null"] }
+            },
+            "additionalProperties": false
+          }
+        },
+        "warnings": { "type": "array", "items": { "type": "string", "maxLength": 256 } }
+      },
+      "additionalProperties": false
+    },
+    "pluginsListResult": {
+      "type": "object",
+      "required": ["scope", "plugins"],
+      "properties": {
+        "scope": { "$ref": "#/$defs/pluginScope" },
+        "plugins": { "type": "array", "items": { "$ref": "#/$defs/pluginSummary" } }
+      },
+      "additionalProperties": false
+    },
+    "pluginsInspectResult": {
+      "type": "object",
+      "required": ["scope", "plugin"],
+      "properties": {
+        "scope": { "$ref": "#/$defs/pluginScope" },
+        "plugin": { "$ref": "#/$defs/pluginSummary" }
+      },
+      "additionalProperties": false
+    },
+    "pluginValidationSummary": {
+      "type": "object",
+      "required": ["name", "version", "description", "format", "components", "warnings"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": ["string", "null"] },
+        "description": { "type": ["string", "null"] },
+        "format": { "enum": ["agent-plugins-1.0", "claude-code", "qwen-code", "hybrid"] },
+        "components": { "type": "array", "items": { "$ref": "#/$defs/pluginComponentSummary" } },
+        "warnings": { "type": "array", "items": { "type": "string", "maxLength": 256 } }
+      },
+      "additionalProperties": false
+    },
+    "pluginsValidateResult": {
+      "type": "object",
+      "required": ["operation", "source", "plugin"],
+      "properties": {
+        "operation": { "const": "validate" },
+        "source": { "$ref": "#/$defs/pluginSourceSummary" },
+        "plugin": { "$ref": "#/$defs/pluginValidationSummary" }
+      },
+      "additionalProperties": false
+    },
+    "pluginsMutationResult": {
+      "type": "object",
+      "required": ["operation", "name", "status", "components", "warnings"],
+      "properties": {
+        "operation": { "enum": ["install", "update", "enable", "disable", "remove"] },
+        "name": { "type": "string", "minLength": 1 },
+        "scope": { "$ref": "#/$defs/pluginScope" },
+        "status": { "enum": ["loaded", "disabled", "warning", "failed"] },
+        "components": { "type": "array", "items": { "$ref": "#/$defs/pluginComponentSummary" } },
+        "warnings": { "type": "array", "items": { "type": "string", "maxLength": 256 } },
+        "plugin": { "$ref": "#/$defs/pluginSummary" },
+        "removed": { "type": "boolean" },
+        "data_retained": { "type": "boolean" },
+        "data_purged": { "type": "boolean" },
+        "settings_cleanup": { "$ref": "#/$defs/jsonObject" }
       },
       "additionalProperties": false
     },
     "pluginsListParams": {
       "type": "object",
-      "properties": { "include_disabled": { "type": "boolean", "default": true } },
+      "properties": {
+        "scope": { "$ref": "#/$defs/pluginScope", "default": "user" },
+        "include_disabled": { "type": "boolean", "default": true }
+      },
       "additionalProperties": false
     },
     "pluginsInspectParams": {
       "type": "object",
-      "required": ["id"],
-      "properties": { "id": { "type": "string", "minLength": 1 } },
+      "required": ["name"],
+      "properties": { "name": { "type": "string", "minLength": 1 }, "scope": { "$ref": "#/$defs/pluginScope", "default": "user" } },
       "additionalProperties": false
     },
     "pluginsSourceParams": {
@@ -823,21 +948,40 @@
       },
       "additionalProperties": false
     },
+    "pluginsValidateParams": { "$ref": "#/$defs/pluginsSourceParams" },
+    "pluginsInstallParams": {
+      "type": "object",
+      "required": ["source"],
+      "properties": {
+        "source": { "type": "string", "minLength": 1 },
+        "scope": { "$ref": "#/$defs/pluginScope", "default": "user" }
+      },
+      "additionalProperties": false
+    },
+    "pluginsUpdateParams": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "source": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
     "pluginsSetEnabledParams": {
       "type": "object",
-      "required": ["id", "enabled"],
+      "required": ["name", "enabled"],
       "properties": {
-        "id": { "type": "string", "minLength": 1 },
-        "enabled": { "type": "boolean" },
-        "capability_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        "name": { "type": "string", "minLength": 1 },
+        "scope": { "$ref": "#/$defs/pluginScope", "default": "user" },
+        "enabled": { "type": "boolean" }
       },
       "additionalProperties": false
     },
     "pluginsRemoveParams": {
       "type": "object",
-      "required": ["id"],
+      "required": ["name"],
       "properties": {
-        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
         "purge_data": { "type": "boolean", "default": false }
       },
       "additionalProperties": false
@@ -870,7 +1014,6 @@
       "properties": {
         "snapshot_id": { "type": "string", "minLength": 1 },
         "agents": { "type": "array", "items": { "$ref": "#/$defs/agentSummary" } },
-        "static_preview": { "$ref": "#/$defs/jsonObjectArray" },
         "diagnostics": { "type": "array", "items": { "type": "string" } }
       },
       "additionalProperties": false
@@ -1010,7 +1153,6 @@
       "type": "object", "required": ["servers", "total_tools"],
       "properties": {
         "servers": { "type": "array", "items": { "$ref": "#/$defs/mcpServerStatus" } },
-        "static_preview": { "$ref": "#/$defs/jsonObjectArray" },
         "total_tools": { "type": "integer", "minimum": 0 },
         "diagnostics": { "type": "array", "items": { "type": "string" } }
       },
@@ -1444,6 +1586,31 @@
         "decision": { "$ref": "#/$defs/planDecision" },
         "feedback": { "type": "string", "default": "" }
       },
+      "additionalProperties": false
+    },
+    "pluginConsentRequest": {
+      "type": "object",
+      "required": ["thread_id", "run_id", "timeout_ms", "payload"],
+      "properties": {
+        "thread_id": { "type": "string", "minLength": 1 },
+        "run_id": { "type": "string", "minLength": 1 },
+        "timeout_ms": { "type": "integer", "minimum": 1 },
+        "payload": {
+          "type": "object",
+          "required": ["operation", "preview"],
+          "properties": {
+            "operation": { "enum": ["install", "update"] },
+            "preview": { "$ref": "#/$defs/pluginMutationPreview" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "pluginConsentResponse": {
+      "type": "object",
+      "required": ["decision"],
+      "properties": { "decision": { "enum": ["accept", "cancel"] } },
       "additionalProperties": false
     },
     "approvalRequest": {

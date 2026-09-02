@@ -1,4 +1,4 @@
-"""Plugin 领域值对象；协议摘要不会暴露宿主绝对路径或扩展正文。"""
+"""Plugin 领域值对象；管理面只暴露名称、作用域和加载结果。"""
 
 from __future__ import annotations
 
@@ -11,16 +11,28 @@ from typing import Literal
 
 PluginFormat = Literal["agent-plugins-1.0", "claude-code", "qwen-code", "hybrid"]
 PluginComponentStatus = Literal["supported", "adapted", "unsupported", "invalid"]
+PluginActivation = Literal["enabled", "disabled"]
+PluginProductStatus = Literal["loaded", "disabled", "warning", "failed"]
 
-# Adapter 的报告语义属于 registry identity 的一部分。升级 Adapter 后，Host
-# 通过这个 revision 识别旧报告并重新从已校验 package 解析，而不是继续相信安装时
-# 的 component report。
+# Adapter 报告 revision 仍是内部缓存失效标记；它不代表用户授权状态。
 PLUGIN_ADAPTER_REPORT_REVISION = "plugin-adapter-report-v2"
 
-# 组件报告没有单独增加 issue 字段；这些前缀只用于从现有 diagnostics
-# 区分“有可运行条目但同类存在坏条目/不支持条目”的局部降级。
 _COMPONENT_INVALID_DIAGNOSTIC_PREFIX = "PLUGIN_COMPONENT_INVALID:"
 _COMPONENT_UNSUPPORTED_DIAGNOSTIC_PREFIX = "PLUGIN_COMPONENT_UNSUPPORTED:"
+_COMPONENT_ERROR_CODE_RE = re.compile(r"\b(?:PLUGIN|SETTINGS)_[A-Z0-9_]+\b")
+
+
+def component_warning_diagnostics(
+    component: PluginComponentReport,
+) -> tuple[str, ...]:
+    """保留组件中可观察的错误诊断，过滤 Adapter 的成功提示。"""
+    if not component.effective or component.status not in {"supported", "adapted"}:
+        return component.diagnostics
+    return tuple(
+        diagnostic
+        for diagnostic in component.diagnostics
+        if _COMPONENT_ERROR_CODE_RE.search(diagnostic)
+    )
 
 
 class PluginError(ValueError):
@@ -35,7 +47,7 @@ class PluginError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class PluginComponentReport:
-    """一个组件类型的发现数量、兼容状态和安全能力请求。"""
+    """Adapter 内部组件报告；status/effective 不能直接成为产品状态。"""
 
     kind: str
     status: PluginComponentStatus
@@ -46,7 +58,7 @@ class PluginComponentReport:
     effective: bool = False
 
     def to_dict(self) -> dict[str, object]:
-        """返回适合 JSON-RPC 的组件报告。"""
+        """返回 registry 内部报告，供受信任的本地存储重建。"""
         return {
             "kind": self.kind,
             "status": self.status,
@@ -57,10 +69,18 @@ class PluginComponentReport:
             "effective": self.effective,
         }
 
+    def to_public_dict(self) -> dict[str, object]:
+        """返回真实 consumer 组件摘要，不泄漏 Adapter 状态机字段。"""
+        return {
+            "kind": self.kind,
+            "count": self.count,
+            "sources": list(self.sources),
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class RuntimeComponentEligibility:
-    """一个组件是否可以从已安装 Plugin 进入 canonical runtime。"""
+    """一个组件是否可以从 Adapter 报告进入 canonical runtime。"""
 
     kind: str
     eligible: bool
@@ -72,23 +92,51 @@ class RuntimeComponentEligibility:
         """返回不含路径、正文和凭据的稳定 gate 诊断。"""
         if self.eligible or self.reason is None:
             return None
-        return (
-            "PLUGIN_RUNTIME_COMPONENT_BLOCKED: "
-            f"kind={self.kind}; reason={self.reason}"
-        )
+        return f"PLUGIN_RUNTIME_COMPONENT_BLOCKED: kind={self.kind}; reason={self.reason}"
 
 
 _RUNTIME_COMPONENT_FORMATS: dict[PluginFormat, frozenset[str]] = {
-    "agent-plugins-1.0": frozenset({"commands", "skills", "mcp", "agents", "policies", "teams"}),
+    "agent-plugins-1.0": frozenset(
+        {"commands", "skills", "mcp", "agents", "policies", "teams"}
+    ),
     "claude-code": frozenset(
-        {"hooks", "lsp", "monitors", "mcp", "commands", "skills", "agents", "policies", "teams"}
+        {
+            "hooks",
+            "lsp",
+            "monitors",
+            "mcp",
+            "commands",
+            "skills",
+            "agents",
+            "policies",
+            "teams",
+        }
     ),
     "hybrid": frozenset(
-        {"hooks", "lsp", "monitors", "mcp", "commands", "skills", "agents", "policies", "teams"}
+        {
+            "hooks",
+            "lsp",
+            "monitors",
+            "mcp",
+            "commands",
+            "skills",
+            "agents",
+            "policies",
+            "teams",
+        }
     ),
-    # Qwen LSP/Hook/MCP 都只能经过各自 Adapter 产生的 canonical 定义；
-    # Monitor 仍没有 consumer，不能借用 Claude loader 的字段读取。
-    "qwen-code": frozenset({"hooks", "lsp", "commands", "skills", "agents", "contexts", "mcp", "settings"}),
+    "qwen-code": frozenset(
+        {
+            "hooks",
+            "lsp",
+            "commands",
+            "skills",
+            "agents",
+            "contexts",
+            "mcp",
+            "settings",
+        }
+    ),
 }
 
 
@@ -97,37 +145,23 @@ def runtime_component_eligibility(
     *,
     kind: str,
 ) -> RuntimeComponentEligibility:
-    """统一判断 Plugin 组件能否进入 runtime，所有 consumer 必须复用此门禁。"""
+    """统一判断 Adapter 组件能否进入 runtime。
+
+    activation 已由 PluginManager 在构造 ``ExtensionCatalogSnapshot`` 时解析；
+    这里只负责组件报告和格式门禁，避免把用户产品状态重新拆成 trust 状态机。
+    """
     allowed_kinds = _RUNTIME_COMPONENT_FORMATS.get(plugin.format)
     if allowed_kinds is None:
-        return RuntimeComponentEligibility(
-            kind=kind,
-            eligible=False,
-            reason="FORMAT_UNSUPPORTED",
-        )
+        return RuntimeComponentEligibility(kind=kind, eligible=False, reason="FORMAT_UNSUPPORTED")
     if kind not in allowed_kinds:
         return RuntimeComponentEligibility(
             kind=kind,
             eligible=False,
             reason="FORMAT_COMPONENT_UNSUPPORTED",
         )
-    if not plugin.enabled:
-        return RuntimeComponentEligibility(
-            kind=kind,
-            eligible=False,
-            reason="PLUGIN_DISABLED",
-        )
-    if plugin.trusted_capability_fingerprint != plugin.capability_fingerprint:
-        return RuntimeComponentEligibility(
-            kind=kind,
-            eligible=False,
-            reason="PLUGIN_UNTRUSTED",
-        )
     if (
         not isinstance(plugin.package_digest, str)
         or re.fullmatch(r"[0-9a-f]{64}", plugin.package_digest) is None
-        or not isinstance(plugin.capability_fingerprint, str)
-        or re.fullmatch(r"[0-9a-f]{64}", plugin.capability_fingerprint) is None
     ):
         return RuntimeComponentEligibility(
             kind=kind,
@@ -147,13 +181,6 @@ def runtime_component_eligibility(
             eligible=False,
             reason="COMPONENT_REPORT_AMBIGUOUS",
         )
-    if capability_fingerprint(plugin.components) != plugin.capability_fingerprint:
-        return RuntimeComponentEligibility(
-            kind=kind,
-            eligible=False,
-            component=reports[0],
-            reason="COMPONENT_FINGERPRINT_DRIFT",
-        )
     component = reports[0]
     if component.status not in {"supported", "adapted"}:
         return RuntimeComponentEligibility(
@@ -169,11 +196,7 @@ def runtime_component_eligibility(
             component=component,
             reason="COMPONENT_NOT_EFFECTIVE",
         )
-    return RuntimeComponentEligibility(
-        kind=kind,
-        eligible=True,
-        component=component,
-    )
+    return RuntimeComponentEligibility(kind=kind, eligible=True, component=component)
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,44 +209,42 @@ class PluginDescriptor:
     format: PluginFormat
     manifest: str | None
     package_digest: str
-    capability_fingerprint: str
     components: tuple[PluginComponentReport, ...]
     diagnostics: tuple[str, ...] = ()
     adapter_revision: str | None = PLUGIN_ADAPTER_REPORT_REVISION
 
     @property
     def can_enable(self) -> bool:
-        """只有存在 effective 组件且聚合状态不是 invalid 时才允许启用。"""
+        """内部判断是否至少有一个组件可交给 canonical consumer。"""
         return any(component.effective for component in self.components) and (
             self.compatibility != "invalid"
         )
 
     @property
     def compatibility(self) -> str:
-        """按 effective 能力和局部诊断汇总 Plugin 兼容状态。"""
+        """保留 Adapter 内部兼容汇总，管理面改用四种产品状态。"""
         return _aggregate_compatibility(self.components)
 
     def to_dict(self) -> dict[str, object]:
-        """返回不含来源根目录的校验摘要。"""
+        """返回 validate 可用的公开摘要，不包含 digest 或 Adapter 状态字段。"""
         return {
             "name": self.name,
             "version": self.version,
             "description": self.description,
             "format": self.format,
             "manifest": self.manifest,
-            "package_digest": self.package_digest,
-            "capability_fingerprint": self.capability_fingerprint,
-            "compatibility": self.compatibility,
-            "can_enable": self.can_enable,
-            "components": [component.to_dict() for component in self.components],
+            "components": [
+                component.to_public_dict()
+                for component in self.components
+                if component.effective
+            ],
             "diagnostics": list(self.diagnostics),
-            "adapter_revision": self.adapter_revision,
         }
 
 
 @dataclass(frozen=True, slots=True)
 class InstalledPlugin:
-    """Plugin registry 中的安装记录；store 相对位置由字段确定，不单独持久化。"""
+    """registry 中的 artifact 与 activation 记录。"""
 
     plugin_id: str
     source_id: str
@@ -234,34 +255,31 @@ class InstalledPlugin:
     format: PluginFormat
     manifest: str | None
     package_digest: str
-    capability_fingerprint: str
     components: tuple[PluginComponentReport, ...]
     diagnostics: tuple[str, ...]
-    enabled: bool
-    trusted_capability_fingerprint: str | None
+    activation_user: PluginActivation
+    activation_workspaces: tuple[tuple[str, PluginActivation], ...]
     installed_at_ms: int
     adapter_revision: str | None = None
+    origin: str | None = None
 
     @property
     def can_enable(self) -> bool:
-        """复用校验结果判断记录是否允许启用。"""
+        """内部判断是否存在可运行组件；不是用户操作前置条件。"""
         return self.descriptor().can_enable
 
     @property
     def compatibility(self) -> str:
-        """返回与 PluginDescriptor 相同的兼容汇总。"""
+        """返回内部 Adapter 汇总；不进入正常 response。"""
         return self.descriptor().compatibility
 
-    @property
-    def authorization_state(self) -> str:
-        """返回运行前可操作的授权状态，不把旧 trust 静默升级为新能力。"""
-        if not self.enabled:
-            return "disabled"
-        if self.trusted_capability_fingerprint is None:
-            return "authorization-required"
-        if self.trusted_capability_fingerprint == self.capability_fingerprint:
-            return "authorized"
-        return "reauthorization-required"
+    def activation_for(self, workspace_binding_digest: str | None = None) -> PluginActivation:
+        """按 workspace override 优先规则计算有效 activation。"""
+        if workspace_binding_digest is not None:
+            for binding, activation in self.activation_workspaces:
+                if binding == workspace_binding_digest:
+                    return activation
+        return self.activation_user
 
     def descriptor(self) -> PluginDescriptor:
         """重建无来源信息的不可变校验摘要。"""
@@ -272,32 +290,41 @@ class InstalledPlugin:
             format=self.format,
             manifest=self.manifest,
             package_digest=self.package_digest,
-            capability_fingerprint=self.capability_fingerprint,
             components=self.components,
             diagnostics=self.diagnostics,
             adapter_revision=self.adapter_revision,
         )
 
     def to_dict(self) -> dict[str, object]:
-        """返回不含 store、data 和原始来源绝对路径的安装摘要。"""
-        result = self.descriptor().to_dict()
-        result.update(
-            {
-                "id": self.plugin_id,
-                "source": {"id": self.source_id, "label": self.source_label, "kind": "local"},
-                "enabled": self.enabled,
-                "trusted": (
-                    self.enabled
-                    and self.trusted_capability_fingerprint == self.capability_fingerprint
-                ),
-                "authorization_state": self.authorization_state,
-                "installed_at_ms": self.installed_at_ms,
-            }
-        )
-        return result
+        """返回脱敏安装摘要；动态 status 由 Manager 按 workspace 投影。"""
+        return {
+            "name": self.name,
+            "version": self.version,
+            "description": self.description,
+            "format": self.format,
+            "manifest": self.manifest,
+            "source": {"label": self.source_label, "kind": "local"},
+            "activation": {
+                "user": self.activation_user,
+                "workspaces": {
+                    binding: activation
+                    for binding, activation in self.activation_workspaces
+                },
+            },
+            "installed_at_ms": self.installed_at_ms,
+            "components": [
+                component.to_public_dict()
+                for component in self.components
+                if component.effective
+            ],
+            "diagnostics": list(self.diagnostics),
+        }
 
     def to_record(self) -> dict[str, object]:
-        """转换为 registry 的版本化 JSON 记录。"""
+        """转换为 registry v3 JSON 记录。"""
+        origin: dict[str, object] | None = None
+        if self.origin is not None:
+            origin = {"kind": "local", "path": self.origin}
         return {
             "id": self.plugin_id,
             "source_id": self.source_id,
@@ -308,26 +335,31 @@ class InstalledPlugin:
             "format": self.format,
             "manifest": self.manifest,
             "package_digest": self.package_digest,
-            "capability_fingerprint": self.capability_fingerprint,
             "components": [component.to_dict() for component in self.components],
             "diagnostics": list(self.diagnostics),
-            "enabled": self.enabled,
-            "trusted_capability_fingerprint": self.trusted_capability_fingerprint,
+            "activation": {
+                "user": self.activation_user,
+                "workspaces": {
+                    binding: activation
+                    for binding, activation in self.activation_workspaces
+                },
+            },
             "installed_at_ms": self.installed_at_ms,
             "adapter_revision": self.adapter_revision,
+            "origin": origin,
         }
 
 
 @dataclass(frozen=True, slots=True)
 class ExtensionCatalogSnapshot:
-    """由已启用 Plugin 记录组成的不可变启动期目录摘要。"""
+    """由当前 workspace 有效 activation 组成的不可变启动期目录摘要。"""
 
     snapshot_id: str
     registry_revision: int
     plugins: tuple[InstalledPlugin, ...]
 
     def to_dict(self) -> dict[str, object]:
-        """返回轻量 snapshot 摘要。"""
+        """返回内部 catalog 摘要，不带宿主 store 路径。"""
         return {
             "id": self.snapshot_id,
             "registry_revision": self.registry_revision,
@@ -336,75 +368,49 @@ class ExtensionCatalogSnapshot:
         }
 
 
-def capability_fingerprint(components: tuple[PluginComponentReport, ...]) -> str:
-    """按能力库存和执行来源绑定计算 trust 指纹，排除诊断文案等非执行字段。"""
-    payload = [
-        {
-            "kind": component.kind,
-            "status": component.status,
-            "count": component.count,
-            "sources": list(component.sources),
-            "capabilities": list(component.capabilities),
-            "effective": component.effective,
-        }
-        for component in sorted(components, key=lambda item: item.kind)
-    ]
-    return _sha256(payload)
-
-
 def catalog_snapshot_id(revision: int, plugins: tuple[InstalledPlugin, ...]) -> str:
-    """计算 enabled catalog 的稳定快照 ID。"""
+    """计算 enabled catalog 的稳定内部快照 ID。"""
     return _sha256(
         {
             "revision": revision,
             "plugins": [
-                {
-                    "id": plugin.plugin_id,
-                    "digest": plugin.package_digest,
-                    "capabilities": plugin.capability_fingerprint,
-                }
+                {"id": plugin.plugin_id, "digest": plugin.package_digest}
                 for plugin in plugins
             ],
         }
     )[:16]
 
 
-def _sha256(value: object) -> str:
-    """对 canonical JSON 计算 SHA-256。"""
-    content = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
-
-
-def _aggregate_compatibility(
-    components: tuple[PluginComponentReport, ...],
-) -> str:
-    """统一 Descriptor/InstalledPlugin 的 compatibility 聚合。"""
-    has_effective = any(component.effective for component in components)
-    has_invalid = any(
-        component.status == "invalid"
-        or _has_component_diagnostic(component, _COMPONENT_INVALID_DIAGNOSTIC_PREFIX)
-        for component in components
+def product_status(
+    plugin: InstalledPlugin,
+    *,
+    activation: PluginActivation,
+) -> PluginProductStatus:
+    """把 activation 与 Adapter 结果投影为唯一用户产品状态。"""
+    if activation == "disabled":
+        return "disabled"
+    effective = [component for component in plugin.components if component.effective]
+    warnings = bool(plugin.diagnostics) or any(
+        component.status in {"unsupported", "invalid"}
+        or bool(component_warning_diagnostics(component))
+        for component in plugin.components
     )
-    has_unsupported = any(
-        component.status == "unsupported"
-        or _has_component_diagnostic(component, _COMPONENT_UNSUPPORTED_DIAGNOSTIC_PREFIX)
-        for component in components
-    )
-
-    if not has_effective:
-        # 没有 Harness 可运行能力时，纯识别/不支持仍是 recognized；
-        # 组件格式已明确损坏才汇总为 invalid。两者都不能启用。
-        return "invalid" if has_invalid else "recognized"
-    if has_invalid or has_unsupported:
-        return "partial"
-    if any(component.status == "adapted" for component in components):
-        return "recognized"
-    return "ready"
+    if not effective:
+        return "failed"
+    return "warning" if warnings else "loaded"
 
 
-def _has_component_diagnostic(component: PluginComponentReport, prefix: str) -> bool:
-    """判断现有 diagnostics 是否记录了局部组件问题。"""
-    return any(diagnostic.startswith(prefix) for diagnostic in component.diagnostics)
+def plugin_warnings(plugin: InstalledPlugin) -> tuple[str, ...]:
+    """收集有界加载 warning；过滤 Adapter 的成功提示和内部状态名。"""
+    warnings = list(plugin.diagnostics)
+    for component in plugin.components:
+        if not component.effective or component.status not in {"supported", "adapted"}:
+            warnings.extend(component.diagnostics)
+            continue
+        # 一个组件可以同时包含成功条目和被隔离的坏条目；这种 partial
+        # report 仍是有效 runtime component，但坏条目必须出现在 Plugin warning。
+        warnings.extend(component_warning_diagnostics(component))
+    return tuple(dict.fromkeys(item for item in warnings if item))
 
 
 def merge_component_reports(
@@ -453,3 +459,36 @@ def merge_component_reports(
         diagnostics=tuple(diagnostics),
         effective=effective,
     )
+
+
+def _aggregate_compatibility(components: tuple[PluginComponentReport, ...]) -> str:
+    """保留给 Adapter 内部测试的兼容汇总。"""
+    has_effective = any(component.effective for component in components)
+    has_invalid = any(
+        component.status == "invalid"
+        or _has_component_diagnostic(component, _COMPONENT_INVALID_DIAGNOSTIC_PREFIX)
+        for component in components
+    )
+    has_unsupported = any(
+        component.status == "unsupported"
+        or _has_component_diagnostic(component, _COMPONENT_UNSUPPORTED_DIAGNOSTIC_PREFIX)
+        for component in components
+    )
+    if not has_effective:
+        return "invalid" if has_invalid else "recognized"
+    if has_invalid or has_unsupported:
+        return "partial"
+    if any(component.status == "adapted" for component in components):
+        return "recognized"
+    return "ready"
+
+
+def _has_component_diagnostic(component: PluginComponentReport, prefix: str) -> bool:
+    """判断内部组件报告是否包含局部 invalid/unsupported 诊断。"""
+    return any(diagnostic.startswith(prefix) for diagnostic in component.diagnostics)
+
+
+def _sha256(value: object) -> str:
+    """对 canonical JSON 计算 SHA-256。"""
+    content = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()

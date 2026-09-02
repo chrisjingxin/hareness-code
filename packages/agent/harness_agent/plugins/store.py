@@ -12,7 +12,7 @@ import tempfile
 import zipfile
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -20,6 +20,7 @@ from harness_agent.plugins.model import (
     InstalledPlugin,
     PluginComponentReport,
     PluginError,
+    PluginActivation,
 )
 
 
@@ -30,7 +31,7 @@ MAX_PACKAGE_FILES = 2_048
 MAX_PACKAGE_DEPTH = 24
 MAX_RELATIVE_PATH_BYTES = 512
 MAX_ZIP_COMPRESSION_RATIO = 200
-REGISTRY_VERSION = 2
+REGISTRY_VERSION = 3
 _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 # 目录安装可以来自用户的 Git checkout；这些名称只依据目录项本身判断，
@@ -82,6 +83,7 @@ class StagedPlugin:
     source_label: str
     name_hint: str
     package_digest: str
+    origin: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +92,7 @@ class PluginRegistryState:
 
     revision: int
     plugins: tuple[InstalledPlugin, ...]
+    name_conflicts: tuple[str, ...] = ()
 
 
 class PluginStore:
@@ -141,6 +144,7 @@ class PluginStore:
                 source_label=source_path.name,
                 name_hint=name_hint,
                 package_digest=digest,
+                origin=str(source_path),
             )
 
     def install_package(
@@ -230,8 +234,21 @@ class PluginStore:
         return True
 
     def read_registry(self) -> PluginRegistryState:
-        """读取 registry；损坏文件 fail closed，不回退为空目录。"""
-        return self._read_registry_unlocked()
+        """读取 registry；v2 首次读取在同一锁内原子迁移到 v3。"""
+        content = self._read_registry_bytes_unlocked()
+        if content is None:
+            return PluginRegistryState(revision=0, plugins=())
+        document = _decode_json_document(content)
+        if isinstance(document, dict) and document.get("version") == 2:
+            with self._exclusive_lock():
+                current = self._read_registry_bytes_unlocked()
+                if current is None:
+                    return PluginRegistryState(revision=0, plugins=())
+                latest = _decode_json_document(current)
+                if isinstance(latest, dict) and latest.get("version") == 2:
+                    return self._migrate_v2_locked(current, latest)
+                return self._registry_state_from_document(latest)
+        return self._registry_state_from_document(document)
 
     def mutate_registry(
         self,
@@ -244,7 +261,11 @@ class PluginStore:
             ids = [plugin.plugin_id for plugin in plugins]
             if len(ids) != len(set(ids)):
                 raise PluginError("PLUGIN_REGISTRY_INVALID", "Plugin registry 包含重复 ID")
-            state = PluginRegistryState(revision=current.revision + 1, plugins=plugins)
+            state = PluginRegistryState(
+                revision=current.revision + 1,
+                plugins=plugins,
+                name_conflicts=_name_conflicts(plugins),
+            )
             self._write_registry_atomic(state)
             return state
 
@@ -261,23 +282,135 @@ class PluginStore:
                 raise PluginError("PLUGIN_REGISTRY_INVALID", "Plugin registry 包含重复 ID")
             if plugins == current.plugins:
                 return current
-            state = PluginRegistryState(revision=current.revision + 1, plugins=plugins)
+            state = PluginRegistryState(
+                revision=current.revision + 1,
+                plugins=plugins,
+                name_conflicts=_name_conflicts(plugins),
+            )
             self._write_registry_atomic(state)
             return state
 
     def _read_registry_unlocked(self) -> PluginRegistryState:
-        """不加锁读取；写事务必须通过 mutate_registry 调用。"""
+        """锁内读取；v2 迁移只由本方法的持锁调用路径触发。"""
         content = self._read_registry_bytes_unlocked()
         if content is None:
             return PluginRegistryState(revision=0, plugins=())
-        try:
-            document = json.loads(content)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise PluginError("PLUGIN_REGISTRY_INVALID", "Plugin registry 不是有效 JSON") from exc
+        document = _decode_json_document(content)
+        if isinstance(document, dict) and document.get("version") == 2:
+            return self._migrate_v2_locked(content, document)
+        return self._registry_state_from_document(document)
+
+    def _registry_state_from_document(self, document: object) -> PluginRegistryState:
+        """解码当前 v3 文档。"""
         try:
             return _registry_state_from_document(document, expected_version=REGISTRY_VERSION)
-        except (KeyError, TypeError, ValueError) as exc:
+        except (KeyError, TypeError, ValueError, PluginError) as exc:
+            if isinstance(exc, PluginError):
+                raise
             raise PluginError("PLUGIN_REGISTRY_INVALID", "Plugin registry 版本或结构无效") from exc
+
+    def _migrate_v2_locked(
+        self,
+        content: bytes,
+        document: dict[str, Any],
+    ) -> PluginRegistryState:
+        """在 registry lock 内完成 v2 严格解码、备份和 v3 原子替换。"""
+        legacy = _registry_state_from_document(document, expected_version=2)
+        for plugin in legacy.plugins:
+            self.verify_installed(plugin)
+        migrated_plugins = tuple(
+            _migrate_v2_plugin(plugin)
+            for plugin in legacy.plugins
+        )
+        name_conflicts = _name_conflicts(migrated_plugins)
+        self._write_v2_backup_atomic(content)
+        if name_conflicts:
+            # 冲突数据必须保留在 v2 原文中，等待用户通过高级诊断修复；
+            # backup 已先落盘，故重试不会丢失任何 artifact 记录。
+            raise PluginError(
+                "PLUGIN_NAME_CONFLICT",
+                "Plugin 名称大小写不敏感地发生冲突",
+            )
+        reparsed_plugins = tuple(
+            self._reparse_migrated_plugin(plugin)
+            for plugin in migrated_plugins
+        )
+        migrated = PluginRegistryState(
+            revision=legacy.revision,
+            plugins=tuple(sorted(reparsed_plugins, key=lambda item: item.plugin_id)),
+            name_conflicts=(),
+        )
+        self._write_registry_atomic(migrated, rollback_content=content)
+        return migrated
+
+    def _reparse_migrated_plugin(self, plugin: InstalledPlugin) -> InstalledPlugin:
+        """用当前 Adapter 重建 v2 记录的组件事实，不恢复旧授权状态。"""
+        # 延迟导入避免 Store 与 Adapter 在模块初始化时形成循环依赖。
+        from harness_agent.plugins.adapters import load_plugin_descriptor
+
+        requested_format = (
+            plugin.format
+            if plugin.format in {"agent-plugins-1.0", "claude-code", "qwen-code"}
+            else "auto"
+        )
+        descriptor = load_plugin_descriptor(
+            self.package_path(plugin),
+            package_digest=plugin.package_digest,
+            name_hint=plugin.name,
+            requested_format=requested_format,  # type: ignore[arg-type]
+        )
+        if (
+            descriptor.name.casefold() != plugin.name.casefold()
+            or descriptor.format != plugin.format
+            or descriptor.package_digest != plugin.package_digest
+        ):
+            raise PluginError(
+                "PLUGIN_ADAPTER_IDENTITY_MISMATCH",
+                "当前 Adapter 返回的 Plugin identity 无法绑定已安装 package",
+            )
+        return replace(
+            plugin,
+            version=descriptor.version,
+            description=descriptor.description,
+            manifest=descriptor.manifest,
+            components=descriptor.components,
+            diagnostics=descriptor.diagnostics,
+            adapter_revision=descriptor.adapter_revision,
+        )
+
+    def _write_v2_backup_atomic(self, content: bytes) -> None:
+        """持久化一次性 v2 原文备份；已有相同备份时保持幂等。"""
+        backup = self.root / "registry.v2.backup.json"
+        try:
+            self.root.mkdir(parents=True, mode=0o700, exist_ok=True)
+            if backup.exists():
+                if backup.read_bytes() != content:
+                    raise PluginError(
+                        "PLUGIN_REGISTRY_MIGRATION_BACKUP_CONFLICT",
+                        "Plugin registry v2 backup 与当前来源不一致",
+                    )
+                return
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=".registry-v2-backup.", suffix=".tmp", dir=self.root
+            )
+            temporary = Path(temporary_name)
+            try:
+                with os.fdopen(descriptor, "wb") as handle:
+                    os.fchmod(handle.fileno(), 0o600)
+                    handle.write(content)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, backup)
+                _fsync_directory(self.root)
+            finally:
+                temporary.unlink(missing_ok=True)
+        except PluginError:
+            raise
+        except OSError as exc:
+            raise PluginError(
+                "PLUGIN_REGISTRY_MIGRATION_BACKUP_FAILED",
+                "无法写入 Plugin registry v2 backup",
+            ) from exc
 
     def _read_registry_bytes_unlocked(self) -> bytes | None:
         """读取 registry 原始字节；不存在时返回 None，其他错误 fail closed。"""
@@ -311,31 +444,137 @@ class PluginStore:
             finally:
                 os.close(descriptor)
 
-    def _write_registry_atomic(self, state: PluginRegistryState) -> None:
-        """fsync 临时文件后同目录替换，并将 registry 权限收紧为 0600。"""
-        self.root.mkdir(parents=True, mode=0o700, exist_ok=True)
+    def _write_registry_atomic(
+        self,
+        state: PluginRegistryState,
+        *,
+        rollback_content: bytes | None = None,
+    ) -> None:
+        """fsync 临时文件后替换 registry，并显式区分提交不确定状态。
+
+        replace 之前的失败不会触碰旧文件；replace 成功后目录 fsync 失败时，
+        POSIX 无法证明 rename 是否已持久化，因此先尽力恢复旧 bytes，再返回
+        ``PLUGIN_REGISTRY_COMMIT_UNCERTAIN``，不能伪装成普通写失败。
+        """
+        try:
+            self.root.mkdir(parents=True, mode=0o700, exist_ok=True)
+        except OSError as exc:
+            raise PluginError("PLUGIN_REGISTRY_WRITE_FAILED", "无法创建 Plugin registry 目录") from exc
         document = {
             "version": REGISTRY_VERSION,
             "revision": state.revision,
             "plugins": [plugin.to_record() for plugin in state.plugins],
         }
-        content = json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix=".registry.", suffix=".tmp", dir=self.root
-        )
-        temporary = Path(temporary_name)
+        serialized = json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        content = serialized.encode("utf-8")
+        previous_content = rollback_content
+        if previous_content is None:
+            try:
+                previous_content = self.registry_path.read_bytes()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                # 后续 replace/fsync 仍会给出 commit-uncertain；这里不让一次
+                # best-effort 读取把真实写路径改成另一个异常语义。
+                previous_content = None
+        descriptor: int | None = None
+        temporary: Path | None = None
         try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=".registry.", suffix=".tmp", dir=self.root
+            )
+            temporary = Path(temporary_name)
+            handle = os.fdopen(descriptor, "w", encoding="utf-8")
+            descriptor = None
+            with handle:
+                os.fchmod(handle.fileno(), 0o600)
+                handle.write(serialized)
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                os.replace(temporary, self.registry_path)
+            except OSError as exc:
+                try:
+                    current_content = self.registry_path.read_bytes()
+                except FileNotFoundError:
+                    current_content = None
+                except OSError as read_exc:
+                    raise PluginError(
+                        "PLUGIN_REGISTRY_COMMIT_UNCERTAIN",
+                        "Plugin registry replace 状态无法确认",
+                    ) from read_exc
+                if current_content == content:
+                    self._restore_registry_bytes(previous_content)
+                    raise PluginError(
+                        "PLUGIN_REGISTRY_COMMIT_UNCERTAIN",
+                        "Plugin registry replace 已发生但提交状态不确定",
+                    ) from exc
+                if current_content is None and previous_content is None:
+                    raise
+                if previous_content is not None and current_content == previous_content:
+                    raise
+                self._restore_registry_bytes(previous_content)
+                raise PluginError(
+                    "PLUGIN_REGISTRY_COMMIT_UNCERTAIN",
+                    "Plugin registry replace 状态无法确认",
+                ) from exc
+            try:
+                _fsync_directory(self.root)
+            except OSError as exc:
+                self._restore_registry_bytes(previous_content)
+                raise PluginError(
+                    "PLUGIN_REGISTRY_COMMIT_UNCERTAIN",
+                    "Plugin registry 已替换但目录 fsync 失败，提交状态不确定",
+                ) from exc
+        except OSError as exc:
+            raise PluginError("PLUGIN_REGISTRY_WRITE_FAILED", "无法原子写入 Plugin registry") from exc
+        except PluginError:
+            raise
+        finally:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
+    def _restore_registry_bytes(self, content: bytes | None) -> bool:
+        """在 commit-uncertain 后尽力恢复旧文件；返回路径恢复是否成功。"""
+        if content is None:
+            return False
+        descriptor: int | None = None
+        temporary: Path | None = None
+        try:
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=".registry-restore.", suffix=".tmp", dir=self.root
+            )
+            temporary = Path(temporary_name)
+            handle = os.fdopen(descriptor, "wb")
+            descriptor = None
+            with handle:
                 os.fchmod(handle.fileno(), 0o600)
                 handle.write(content)
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, self.registry_path)
-            _fsync_directory(self.root)
-        except OSError as exc:
-            raise PluginError("PLUGIN_REGISTRY_WRITE_FAILED", "无法原子写入 Plugin registry") from exc
+            try:
+                _fsync_directory(self.root)
+            except OSError:
+                # 路径内容已恢复，但目录持久化仍不确定；上层必须继续返回
+                # commit-uncertain，不能把这个 best-effort 当成 durability 保证。
+                pass
+            return True
+        except OSError:
+            return False
         finally:
-            temporary.unlink(missing_ok=True)
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
 
 def _fsync_directory(directory: Path) -> None:
@@ -364,9 +603,14 @@ def _registry_state_from_document(
         or not isinstance(document.get("plugins"), list)
     ):
         raise ValueError("registry version or structure is invalid")
-    plugins = tuple(_installed_from_record(item) for item in document["plugins"])
+    decoder = _installed_from_record_v2 if expected_version == 2 else _installed_from_record
+    plugins = tuple(decoder(item) for item in document["plugins"])
     _ensure_unique_plugin_ids(plugins)
-    return PluginRegistryState(revision=document["revision"], plugins=plugins)
+    return PluginRegistryState(
+        revision=document["revision"],
+        plugins=plugins,
+        name_conflicts=_name_conflicts(plugins),
+    )
 
 
 def _ensure_unique_plugin_ids(plugins: tuple[InstalledPlugin, ...]) -> None:
@@ -411,6 +655,21 @@ def package_digest(root: Path) -> str:
             for block in iter(lambda: handle.read(64 * 1024), b""):
                 digest.update(block)
     return digest.hexdigest()
+
+
+def plugin_workspace_binding_digest(workspace: Path | str, *, strict: bool = False) -> str:
+    """按 Plugin 专用 domain 对 canonical workspace identity 做本地 hash。
+
+    ``strict`` 只用于显式 workspace 管理 mutation；Host 的启动 catalog 可以
+    在 workspace 尚未创建时使用 lexical canonical path，避免扩大 AgentHost
+    构造契约，而 CLI 仍在启动 sidecar 前通过 validateWorkspace 拒绝该路径。
+    """
+    try:
+        canonical = Path(workspace).expanduser().resolve(strict=strict)
+    except OSError as exc:
+        raise PluginError("PLUGIN_SCOPE_INVALID", "workspace 不存在或无法解析") from exc
+    value = b"harness-plugin-workspace-v1\0" + str(canonical).encode("utf-8")
+    return hashlib.sha256(value).hexdigest()
 
 
 def _is_staging_excluded_name(name: str, *, directory: bool) -> bool:
@@ -630,13 +889,34 @@ def _require_digest(value: str) -> None:
 
 
 def _installed_from_record(value: object) -> InstalledPlugin:
-    """严格解码 registry 中的单条安装记录。"""
+    """严格解码 registry v3 中的单条安装记录。"""
     if not isinstance(value, dict):
         raise TypeError("record must be object")
+    expected_fields = {
+        "id",
+        "source_id",
+        "source_label",
+        "name",
+        "version",
+        "description",
+        "format",
+        "manifest",
+        "package_digest",
+        "components",
+        "diagnostics",
+        "activation",
+        "installed_at_ms",
+        "adapter_revision",
+        "origin",
+    }
+    if set(value) != expected_fields:
+        raise ValueError("invalid v3 record fields")
     components_raw = value["components"]
     if not isinstance(components_raw, list):
         raise TypeError("components must be list")
     components = tuple(_component_from_record(item) for item in components_raw)
+    activation_user, activation_workspaces = _activation_from_record(value["activation"])
+    origin = _origin_from_record(value["origin"])
     plugin = InstalledPlugin(
         plugin_id=_required_string(value, "id"),
         source_id=_required_string(value, "source_id"),
@@ -647,30 +927,136 @@ def _installed_from_record(value: object) -> InstalledPlugin:
         format=_required_string(value, "format"),  # type: ignore[arg-type]
         manifest=_optional_record_string(value.get("manifest")),
         package_digest=_required_string(value, "package_digest"),
-        capability_fingerprint=_required_string(value, "capability_fingerprint"),
         components=components,
         diagnostics=_string_tuple(value.get("diagnostics", [])),
-        enabled=_required_bool(value, "enabled"),
-        trusted_capability_fingerprint=_optional_record_string(
-            value.get("trusted_capability_fingerprint")
-        ),
+        activation_user=activation_user,
+        activation_workspaces=activation_workspaces,
         installed_at_ms=_required_int(value, "installed_at_ms"),
         adapter_revision=_optional_record_string(value.get("adapter_revision")),
+        origin=origin,
     )
     if plugin.format not in {"agent-plugins-1.0", "claude-code", "qwen-code", "hybrid"}:
         raise ValueError("invalid format")
     _require_safe_segment(plugin.source_id, "source_id")
     _require_safe_segment(plugin.name, "name")
     _require_digest(plugin.package_digest)
-    _require_digest(plugin.capability_fingerprint)
-    if (
-        plugin.trusted_capability_fingerprint is not None
-        and not re.fullmatch(r"[0-9a-f]{64}", plugin.trusted_capability_fingerprint)
-    ):
-        raise ValueError("invalid trust fingerprint")
     if plugin.plugin_id != f"{plugin.source_id}/{plugin.name}":
+        # Update 保留内部 ID，但来源目录变化时 source_id 可能更新；因此 v3
+        # 只要求 ID 仍是安全 locator，而不把它当作正常名称入口。
+        _require_safe_segment(plugin.plugin_id.replace("/", "-"), "id")
+    return plugin
+
+
+def _installed_from_record_v2(value: object) -> InstalledPlugin:
+    """严格读取 v2 输入，仅用于一次性迁移，不作为 v3 兼容路径。"""
+    if not isinstance(value, dict):
+        raise TypeError("record must be object")
+    expected_fields = {
+        "id",
+        "source_id",
+        "source_label",
+        "name",
+        "version",
+        "description",
+        "format",
+        "manifest",
+        "package_digest",
+        "capability_fingerprint",
+        "components",
+        "diagnostics",
+        "enabled",
+        "trusted_capability_fingerprint",
+        "installed_at_ms",
+        "adapter_revision",
+    }
+    if set(value) != expected_fields:
+        raise ValueError("invalid v2 record fields")
+    components_raw = value["components"]
+    if not isinstance(components_raw, list):
+        raise TypeError("components must be list")
+    components = tuple(_component_from_record(item) for item in components_raw)
+    _require_digest(_required_string(value, "capability_fingerprint"))
+    trusted = _optional_record_string(value.get("trusted_capability_fingerprint"))
+    if trusted is not None:
+        _require_digest(trusted)
+    plugin = InstalledPlugin(
+        plugin_id=_required_string(value, "id"),
+        source_id=_required_string(value, "source_id"),
+        source_label=_required_string(value, "source_label"),
+        name=_required_string(value, "name"),
+        version=_optional_record_string(value.get("version")),
+        description=_optional_record_string(value.get("description")),
+        format=_required_string(value, "format"),  # type: ignore[arg-type]
+        manifest=_optional_record_string(value.get("manifest")),
+        package_digest=_required_string(value, "package_digest"),
+        components=components,
+        diagnostics=_string_tuple(value.get("diagnostics", [])),
+        activation_user="enabled" if _required_bool(value, "enabled") else "disabled",
+        activation_workspaces=(),
+        installed_at_ms=_required_int(value, "installed_at_ms"),
+        adapter_revision=_optional_record_string(value.get("adapter_revision")),
+        origin=None,
+    )
+    if plugin.format not in {"agent-plugins-1.0", "claude-code", "qwen-code", "hybrid"}:
+        raise ValueError("invalid format")
+    _require_safe_segment(plugin.source_id, "source_id")
+    _require_safe_segment(plugin.name, "name")
+    _require_digest(plugin.package_digest)
+    if not plugin.plugin_id:
         raise ValueError("invalid plugin id")
     return plugin
+
+
+def _activation_from_record(value: object) -> tuple[PluginActivation, tuple[tuple[str, PluginActivation], ...]]:
+    """严格读取 v3 activation，并拒绝绝对路径形式的 workspace key。"""
+    if not isinstance(value, dict) or set(value) != {"user", "workspaces"}:
+        raise TypeError("activation must contain user and workspaces")
+    user = value["user"]
+    workspaces = value["workspaces"]
+    if user not in {"enabled", "disabled"} or not isinstance(workspaces, dict):
+        raise TypeError("invalid activation")
+    entries: list[tuple[str, PluginActivation]] = []
+    for binding, activation in workspaces.items():
+        if (
+            not isinstance(binding, str)
+            or re.fullmatch(r"[0-9a-f]{64}", binding) is None
+            or activation not in {"enabled", "disabled"}
+        ):
+            raise TypeError("invalid workspace activation")
+        entries.append((binding, activation))  # type: ignore[arg-type]
+    return user, tuple(sorted(entries))  # type: ignore[return-value]
+
+
+def _origin_from_record(value: object) -> str | None:
+    """读取本地 update origin；origin 不进入正常 Protocol response。"""
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {"kind", "path"}:
+        raise TypeError("invalid origin")
+    if value.get("kind") != "local" or not isinstance(value.get("path"), str):
+        raise TypeError("invalid origin")
+    return str(value["path"])
+
+
+def _migrate_v2_plugin(plugin: InstalledPlugin) -> InstalledPlugin:
+    """将 v2 enabled 映射为 v3 user activation，并丢弃 trust 字段。"""
+    return plugin
+
+
+def _decode_json_document(content: bytes) -> object:
+    """将 registry 原始 bytes 解码为 JSON，统一报告损坏错误。"""
+    try:
+        return json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PluginError("PLUGIN_REGISTRY_INVALID", "Plugin registry 不是有效 JSON") from exc
+
+
+def _name_conflicts(plugins: tuple[InstalledPlugin, ...]) -> tuple[str, ...]:
+    """返回大小写不敏感的冲突名称，供 Manager fail closed。"""
+    names: dict[str, list[str]] = {}
+    for plugin in plugins:
+        names.setdefault(plugin.name.casefold(), []).append(plugin.name)
+    return tuple(sorted(key for key, values in names.items() if len(values) > 1))
 
 
 def _component_from_record(value: object) -> PluginComponentReport:

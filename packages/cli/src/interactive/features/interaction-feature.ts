@@ -48,6 +48,10 @@ export class InteractionFeature {
   }
 
   async handleInteractionRequest(request: InteractionRequestEnvelope, ctx: FeatureContext): Promise<InteractionResponse> {
+    if (request.type === "plugin_consent") {
+      // Plugin 管理只在独立 Shell CLI 里声明此 handle；TUI/Web 不创建管理卡片。
+      throw new Error("Plugin consent is not handled by Interactive Core")
+    }
     const active = ctx.getState().activeRun
     if (!active || active.threadId !== request.thread_id || active.runId !== request.run_id) {
       throw new Error("Interaction 请求不在当前 active run 内")
@@ -227,6 +231,9 @@ export class InteractionFeature {
     if (request.type === "plan") {
       return { request_id: request.request_id, type: "plan", decision: "abandoned" }
     }
+    if (request.type === "plugin_consent") {
+      return { request_id: request.request_id, type: "plugin_consent", decision: "cancel" }
+    }
     return { request_id: request.request_id, type: "question", answers: {} }
   }
 
@@ -234,6 +241,7 @@ export class InteractionFeature {
   interactionDto(pending: PendingInteraction | null, clock: Clock): InteractiveInteraction | null {
     if (!pending) return this.planViewer
     const request = pending.request
+    if (request.type === "plugin_consent") return null
     const timeoutMs = request.type === "plan" ? undefined : request.timeout_ms
     const deadlineAtMs = typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0
       ? clock.now() + timeoutMs

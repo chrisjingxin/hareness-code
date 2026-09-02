@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from harness_agent.plugins.manager import PluginManager
-from harness_agent.plugins.model import PluginComponentReport, capability_fingerprint
+from harness_agent.plugins.model import PluginComponentReport
 from harness_agent.plugins.runtime import (
     HookDefinition,
     HookRunner,
@@ -175,13 +175,6 @@ async def test_runtime_catalog_executes_hook_lsp_monitor_and_closes(
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    plugin_id = str(installed["id"])
-    fingerprint = str(installed["capability_fingerprint"])
-    manager.set_enabled(
-        plugin_id,
-        enabled=True,
-        capability_fingerprint=fingerprint,
-    )
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     target = workspace / "sample.toy"
@@ -242,12 +235,7 @@ def test_runtime_catalog_requires_effective_report_for_each_component(
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    plugin_id = str(installed["id"])
-    manager.set_enabled(
-        plugin_id,
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
+    plugin_id = manager.store.read_registry().plugins[0].plugin_id
     plugin = manager.store.read_registry().plugins[0]
     reports = tuple(
         replace(
@@ -267,15 +255,12 @@ def test_runtime_catalog_requires_effective_report_for_each_component(
             effective=True,
         ),
     )
-    fingerprint = capability_fingerprint(reports)
     manager.store.mutate_registry(
         lambda current: tuple(
             replace(
                 item,
                 components=reports,
-                capability_fingerprint=fingerprint,
-                trusted_capability_fingerprint=fingerprint,
-                enabled=True,
+                activation_user="enabled",
             )
             if item.plugin_id == plugin_id
             else item
@@ -309,7 +294,7 @@ def test_declared_runtime_component_report_missing_has_stable_diagnostics(
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    plugin_id = str(installed["id"])
+    plugin_id = manager.store.read_registry().plugins[0].plugin_id
     plugin = manager.store.read_registry().plugins[0]
     reports = tuple(
         component
@@ -323,15 +308,12 @@ def test_declared_runtime_component_report_missing_has_stable_diagnostics(
             effective=True,
         ),
     )
-    fingerprint = capability_fingerprint(reports)
     manager.store.mutate_registry(
         lambda current: tuple(
             replace(
                 item,
                 components=reports,
-                capability_fingerprint=fingerprint,
-                trusted_capability_fingerprint=fingerprint,
-                enabled=True,
+                activation_user="enabled",
             )
             if item.plugin_id == plugin_id
             else item
@@ -354,22 +336,17 @@ def test_declared_runtime_component_report_missing_has_stable_diagnostics(
         )
 
 
-def test_component_report_fingerprint_drift_blocks_claude_runtime_consumers(
+def test_component_report_drift_does_not_require_plugin_authorization(
     tmp_path: Path,
 ) -> None:
-    """Claude Hook/LSP/Monitor report 漂移时均不可构造 runtime 定义。"""
+    """组件报告变化不再触发 Plugin 专用授权门禁。"""
     source = tmp_path / "runtime-drift"
     source.mkdir()
     _runtime_plugin(source)
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    plugin_id = str(installed["id"])
-    manager.set_enabled(
-        plugin_id,
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
+    plugin_id = manager.store.read_registry().plugins[0].plugin_id
     plugin = manager.store.read_registry().plugins[0]
     drifted = tuple(
         replace(component, capabilities=(*component.capabilities, "report:drift"))
@@ -379,7 +356,7 @@ def test_component_report_fingerprint_drift_blocks_claude_runtime_consumers(
     )
     manager.store.mutate_registry(
         lambda current: tuple(
-            replace(item, components=drifted, enabled=True)
+            replace(item, components=drifted, activation_user="enabled")
             if item.plugin_id == plugin_id
             else item
             for item in current.plugins
@@ -391,14 +368,10 @@ def test_component_report_fingerprint_drift_blocks_claude_runtime_consumers(
         workspace=tmp_path / "workspace",
     )
 
-    assert runtime_catalog.hooks == ()
-    assert runtime_catalog.lsp_servers == ()
-    assert runtime_catalog.monitors == ()
-    for kind in ("hooks", "lsp", "monitors"):
-        assert any(
-            f"kind={kind}; reason=COMPONENT_FINGERPRINT_DRIFT" in diagnostic
-            for diagnostic in runtime_catalog.diagnostics
-        ), runtime_catalog.diagnostics
+    assert len(runtime_catalog.hooks) == 1
+    assert len(runtime_catalog.lsp_servers) == 1
+    assert len(runtime_catalog.monitors) == 1
+    assert not any("FINGERPRINT" in diagnostic for diagnostic in runtime_catalog.diagnostics)
 
 
 def test_runtime_catalog_rejects_installed_package_digest_drift(
@@ -411,13 +384,6 @@ def test_runtime_catalog_rejects_installed_package_digest_drift(
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    plugin_id = str(installed["id"])
-    manager.set_enabled(
-        plugin_id,
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
-
     plugin = manager.store.read_registry().plugins[0]
     manifest = manager.store.package_path(plugin) / ".claude-plugin" / "plugin.json"
     manifest.chmod(0o644)

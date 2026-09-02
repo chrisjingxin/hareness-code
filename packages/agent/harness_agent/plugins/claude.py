@@ -22,7 +22,6 @@ from harness_agent.plugins.model import (
     PluginComponentReport,
     PluginDescriptor,
     PluginError,
-    capability_fingerprint,
     merge_component_reports,
 )
 
@@ -143,7 +142,6 @@ def load_claude_plugin(
         format="claude-code",
         manifest=manifest_path,
         package_digest=package_digest,
-        capability_fingerprint=capability_fingerprint(components_tuple),
         components=components_tuple,
         diagnostics=tuple(diagnostics),
     )

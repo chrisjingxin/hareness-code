@@ -30,7 +30,7 @@ def _request(method: str, params: dict[str, Any], request_id: str) -> dict[str, 
 
 def _initialize_params(
     *,
-    max_minor: int = 7,
+    max_minor: int = 8,
     capabilities: list[str] | None = None,
 ) -> dict[str, Any]:
     """请求 Settings 管理所需能力，同时保持完全离线。"""
@@ -45,7 +45,7 @@ def _initialize_params(
 
 
 def _install_settings_plugin(home: Path, source: Path) -> dict[str, object]:
-    """安装并显式信任一个只含 Qwen Setting 的 fake package。"""
+    """安装一个只含 Qwen Setting 的 fake package。"""
     source.mkdir()
     (source / "qwen-extension.json").write_text(
         json.dumps(
@@ -67,11 +67,6 @@ def _install_settings_plugin(home: Path, source: Path) -> dict[str, object]:
     manager = PluginManager(home=home)
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
     return installed
 
 
@@ -98,29 +93,28 @@ async def test_host_settings_list_set_and_next_host_snapshot_are_redacted(tmp_pa
     await host.dispatch(_request("initialize", _initialize_params(), "init"))
     assert next(frame["result"]["protocol"] for frame in frames if frame.get("id") == "init") == {
         "major": 3,
-        "minor": 7,
+        "minor": 8,
     }
     await host.dispatch(_request("settings.list", {"scope": "user"}, "list-1"))
     listing = next(frame["result"] for frame in frames if frame.get("id") == "list-1")
-    assert listing["store_revision"] == 0
+    assert listing["scope"] == "user"
     summary = listing["settings"][0]
-    assert summary["env_var"] == "DEMO_TOKEN"
+    assert summary["name"] == "settings-demo"
+    assert summary["setting"] == "DEMO_TOKEN"
     assert summary["store_state"] == "absent"
+    assert "env_var" not in summary
+    assert "plugin_id" not in summary
     assert "value" not in str(listing)
 
     set_params = {
         "scope": "user",
-        "plugin_id": str(installed["id"]),
-        "package_digest": str(installed["package_digest"]),
-        "declaration_digest": str(summary["declaration_digest"]),
-        "setting_key": "DEMO_TOKEN",
-        "env_var": "DEMO_TOKEN",
+        "name": "settings-demo",
+        "setting": "DEMO_TOKEN",
         "value": "generated-fake-secret",
-        "expected_store_revision": 0,
     }
     await host.dispatch(_request("settings.set", set_params, "set-1"))
     mutation = next(frame["result"] for frame in frames if frame.get("id") == "set-1")
-    assert mutation["applies_to"] == "next_host"
+    assert "applies_to" not in mutation
     assert "generated-fake-secret" not in str(mutation)
     await host.close()
 
@@ -139,6 +133,8 @@ async def test_host_settings_list_set_and_next_host_snapshot_are_redacted(tmp_pa
     await next_host.dispatch(_request("initialize", _initialize_params(), "init-next"))
     await next_host.dispatch(_request("settings.list", {"scope": "user"}, "list-next"))
     next_listing = next(frame["result"] for frame in next_frames if frame.get("id") == "list-next")
+    assert next_listing["settings"][0]["name"] == "settings-demo"
+    assert next_listing["settings"][0]["setting"] == "DEMO_TOKEN"
     assert next_listing["settings"][0]["store_state"] == "configured"
     assert next_listing["settings"][0]["runtime_state"] == "loaded"
     assert "generated-fake-secret" not in str(next_listing)
@@ -222,12 +218,8 @@ async def test_settings_rpc_maps_value_schema_failures_to_stable_settings_errors
     await host.dispatch(_request("initialize", _initialize_params(), "init"))
     common = {
         "scope": "user",
-        "plugin_id": "plugin/local/demo",
-        "package_digest": "a" * 64,
-        "declaration_digest": "b" * 64,
-        "setting_key": "DEMO_TOKEN",
-        "env_var": "DEMO_TOKEN",
-        "expected_store_revision": 0,
+        "name": "demo",
+        "setting": "DEMO_TOKEN",
     }
     await host.dispatch(_request("settings.set", {**common, "value": "bad\x00value"}, "nul"))
     await host.dispatch(
@@ -277,11 +269,6 @@ async def test_host_applies_qwen_settings_only_to_runtime_child_configs(tmp_path
     manager = PluginManager(home=home)
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
     backend = FakeCredentialBackend()
 
     host = AgentHost(
@@ -365,11 +352,6 @@ def test_settings_backend_failure_keeps_declaration_and_blocks_executable_consum
     manager = PluginManager(home=home)
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
 
     host = AgentHost(
         config_home=home,

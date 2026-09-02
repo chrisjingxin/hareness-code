@@ -56,8 +56,12 @@ def _initialize_params(**overrides: Any) -> dict[str, Any]:
         ]
     else:
         handles = []
+    protocol = overrides.pop(
+        "protocol",
+        {"major": 3, "min_minor": 0, "max_minor": 0},
+    )
     params: dict[str, Any] = {
-        "protocol": {"major": 3, "min_minor": 0, "max_minor": 0},
+        "protocol": protocol,
         "client": {"name": "test", "version": "0.1.0", "kind": "test"},
         "capabilities": {"requests": requested, "handles": handles},
     }
@@ -65,15 +69,65 @@ def _initialize_params(**overrides: Any) -> dict[str, Any]:
     return params
 
 
-async def _capture_server(server: Any) -> list[dict[str, Any]]:
+async def _capture_server(
+    server: Any,
+    *,
+    max_minor: int = 8,
+    plugin_consent: bool = False,
+) -> list[dict[str, Any]]:
     frames: list[dict[str, Any]] = []
 
     async def capture(message: dict[str, Any]) -> None:
         frames.append(message)
 
     server.send = capture
-    await server.dispatch(_request("initialize", _initialize_params(), "init-1"))
+    initialize = _initialize_params(
+        protocol={"major": 3, "min_minor": 0, "max_minor": max_minor},
+    )
+    if plugin_consent:
+        initialize["capabilities"]["handles"].append("plugin_consent")
+    await server.dispatch(_request("initialize", initialize, "init-1"))
     return frames
+
+
+async def test_capture_server_places_max_minor_inside_protocol(tmp_path: Path) -> None:
+    """测试握手 helper 必须按 Protocol v3 grammar 传递 max_minor。"""
+    from harness_agent.host.agent_host import AgentHost
+
+    server = AgentHost(
+        allow_echo=True,
+        config_home=tmp_path / "home",
+        workspace=tmp_path / "workspace-not-created",
+    )
+    frames = await _capture_server(server, max_minor=8)
+    assert frames[0]["result"]["protocol"] == {"major": 3, "minor": 8}
+    await server.close()
+
+
+async def _dispatch_plugin_request(
+    server: Any,
+    frames: list[dict[str, Any]],
+    request: dict[str, Any],
+    *,
+    decision: str = "accept",
+) -> dict[str, Any]:
+    """在 fake owner 上完成一次 Plugin consent，不启动真实外部进程。"""
+    seen = sum(frame.get("method") == "interaction.plugin_consent" for frame in frames)
+    task = asyncio.create_task(server.dispatch(request))
+    interaction = await _wait_for(
+        frames,
+        lambda frame: frame.get("method") == "interaction.plugin_consent",
+        skip=seen,
+    )
+    await server.dispatch(
+        {
+            "jsonrpc": "2.0",
+            "id": interaction["id"],
+            "result": {"decision": decision},
+        }
+    )
+    await task
+    return next(frame for frame in frames if frame.get("id") == request["id"])
 
 
 def test_host_startup_without_plugins_does_not_create_default_registry_lock(
@@ -90,6 +144,96 @@ def test_host_startup_without_plugins_does_not_create_default_registry_lock(
     plugin_root = home / ".harness" / "plugins"
     assert plugin_root.exists() is False
     assert (plugin_root / "registry.lock").exists() is False
+
+
+@pytest.mark.parametrize("workspace_exists", [False, True], ids=["missing-workspace", "existing-workspace"])
+async def test_new_host_loads_user_plugin_with_or_without_workspace_directory(
+    tmp_path: Path,
+    workspace_exists: bool,
+) -> None:
+    """user activation 不把 workspace 目录存在性扩大为 Host 构造前置条件。"""
+    from harness_agent.host.agent_host import AgentHost
+    from harness_agent.plugins.manager import PluginManager
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "plugin.json").write_text(
+        json.dumps(
+            {
+                "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+                "name": "host-user-plugin",
+                "version": "1.0.0",
+            }
+        ),
+        encoding="utf-8",
+    )
+    skill = source / "skills" / "review" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\nname: review\ndescription: Offline host skill\n---\nReview.\n",
+        encoding="utf-8",
+    )
+    home = tmp_path / "home"
+    manager = PluginManager(home=home)
+    manager.install(source, scope="user")
+    plugin_id = manager.store.read_registry().plugins[0].plugin_id
+    workspace = tmp_path / "workspace"
+    if workspace_exists:
+        workspace.mkdir()
+
+    server = AgentHost(allow_echo=True, config_home=home, workspace=workspace)
+    frames = await _capture_server(server, max_minor=8)
+    assert frames[0]["result"]["skills_snapshot"]["count"] >= 1
+    assert server._skill_registry is not None  # noqa: SLF001
+    assert server._skill_registry.resolve(f"plugin/{plugin_id}/review") is not None  # noqa: SLF001
+    await server.close()
+
+
+async def test_new_hosts_isolate_explicit_workspace_plugin_activation(tmp_path: Path) -> None:
+    """workspace activation 只进入绑定 workspace 的新 Host。"""
+    from harness_agent.extensions.plugin_skills import SkillError
+    from harness_agent.host.agent_host import AgentHost
+    from harness_agent.plugins.manager import PluginManager
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "plugin.json").write_text(
+        json.dumps(
+            {
+                "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+                "name": "host-workspace-plugin",
+                "version": "1.0.0",
+            }
+        ),
+        encoding="utf-8",
+    )
+    skill = source / "skills" / "review" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\nname: review\ndescription: Offline workspace skill\n---\nReview.\n",
+        encoding="utf-8",
+    )
+    workspace_a = tmp_path / "workspace-a"
+    workspace_b = tmp_path / "workspace-b"
+    workspace_a.mkdir()
+    workspace_b.mkdir()
+    home = tmp_path / "home"
+    manager = PluginManager(home=home)
+    manager.install(source, scope="workspace", workspace=workspace_a)
+    plugin_id = manager.store.read_registry().plugins[0].plugin_id
+
+    host_a = AgentHost(allow_echo=True, config_home=home, workspace=workspace_a)
+    host_b = AgentHost(allow_echo=True, config_home=home, workspace=workspace_b)
+    frames_a = await _capture_server(host_a, max_minor=8)
+    frames_b = await _capture_server(host_b, max_minor=8)
+    assert frames_a[0]["result"]["skills_snapshot"]["count"] >= 1
+    assert host_a._skill_registry is not None  # noqa: SLF001
+    assert host_b._skill_registry is not None  # noqa: SLF001
+    assert host_a._skill_registry.resolve(f"plugin/{plugin_id}/review") is not None  # noqa: SLF001
+    with pytest.raises(SkillError):
+        host_b._skill_registry.resolve(f"plugin/{plugin_id}/review")  # noqa: SLF001
+    await host_a.close()
+    await host_b.close()
 
 
 async def _wait_for(frames: list[dict[str, Any]], predicate: Any, *, skip: int = 0) -> dict[str, Any]:
@@ -117,7 +261,7 @@ async def test_initialize_negotiates_v3_and_capabilities(tmp_path: Path):
     from harness_agent.host.agent_host import AgentHost
 
     server = AgentHost(allow_echo=True, config_home=tmp_path / "home")
-    frames = await _capture_server(server)
+    frames = await _capture_server(server, max_minor=0)
     result = frames[0]["result"]
     assert result["protocol"] == {"major": 3, "minor": 0}
     assert "run.multithread" in result["capabilities"]["enabled"]
@@ -541,11 +685,6 @@ base_url = "https://gateway.example/v1"
     )
     installed = server._plugin_manager.install(fixture)["plugin"]
     assert isinstance(installed, dict)
-    server._plugin_manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
     frames: list[dict[str, Any]] = []
 
     async def capture(message: dict[str, Any]) -> None:
@@ -553,7 +692,13 @@ base_url = "https://gateway.example/v1"
 
     server.send = capture
     try:
-        await server.dispatch(_request("initialize", _initialize_params(), "qwen-init"))
+        await server.dispatch(
+            _request(
+                "initialize",
+                _initialize_params(protocol={"major": 3, "min_minor": 0, "max_minor": 8}),
+                "qwen-init",
+            )
+        )
         await server.dispatch(_request("agents.list", {}, "qwen-agents-list"))
     finally:
         await server.close()
@@ -3287,10 +3432,10 @@ async def test_agent_host_closes_engines_before_shared_resource_owners(tmp_path:
     assert order == ["run", "engine", "mcp", "workspace", "provider", "persistence"]
 
 
-async def test_plugin_rpc_validates_installs_trusts_and_removes_local_package(
+async def test_plugin_rpc_validates_installs_consents_and_removes_local_package(
     tmp_path: Path,
 ) -> None:
-    """Plugin RPC 贯通安全校验、disabled 安装、指纹启用和默认保留 data 的删除。"""
+    """Plugin RPC 贯通校验、一次 consent、直接启用和默认保留 data 的删除。"""
     from harness_agent.host.agent_host import AgentHost
 
     workspace = tmp_path / "workspace"
@@ -3317,7 +3462,7 @@ async def test_plugin_rpc_validates_installs_trusts_and_removes_local_package(
         config_home=tmp_path / "home",
         workspace=workspace,
     )
-    frames = await _capture_server(server)
+    frames = await _capture_server(server, max_minor=8, plugin_consent=True)
 
     await server.dispatch(
         _request(
@@ -3328,43 +3473,22 @@ async def test_plugin_rpc_validates_installs_trusts_and_removes_local_package(
     )
     assert frames[-1]["result"]["plugin"]["name"] == "rpc-plugin"
 
-    await server.dispatch(
-        _request("plugins.install", {"source": "plugin"}, "plugin-install")
+    install_response = await _dispatch_plugin_request(
+        server,
+        frames,
+        _request("plugins.install", {"source": "plugin"}, "plugin-install"),
     )
-    installed = frames[-1]["result"]["plugin"]
-    assert installed["enabled"] is False
-    plugin_id = installed["id"]
-    fingerprint = installed["capability_fingerprint"]
-
-    await server.dispatch(
-        _request(
-            "plugins.set_enabled",
-            {
-                "id": plugin_id,
-                "enabled": True,
-                "capability_fingerprint": "0" * 64,
-            },
-            "plugin-enable-bad",
-        )
-    )
-    assert frames[-1]["error"]["code"] == -32040
-    assert (
-        frames[-1]["error"]["data"]["code"]
-        == "PLUGIN_CAPABILITY_CONFIRMATION_REQUIRED"
-    )
-
-    await server.dispatch(
-        _request(
-            "plugins.set_enabled",
-            {
-                "id": plugin_id,
-                "enabled": True,
-                "capability_fingerprint": fingerprint,
-            },
-            "plugin-enable",
-        )
-    )
-    assert frames[-1]["result"]["plugin"]["trusted"] is True
+    assert "result" in install_response, install_response
+    installed = install_response["result"]["plugin"]
+    assert installed["activation"] == "enabled"
+    assert installed["status"] in {"loaded", "warning"}
+    assert not {
+        "id",
+        "capability_fingerprint",
+        "trusted_capability_fingerprint",
+        "authorization_state",
+        "effective_on",
+    } & set(installed)
 
     await server.dispatch(
         _request("plugins.list", {}, "plugin-list")
@@ -3372,13 +3496,59 @@ async def test_plugin_rpc_validates_installs_trusts_and_removes_local_package(
     serialized = json.dumps(frames[-1]["result"])
     assert str(workspace) not in serialized
     assert str(tmp_path / "home") not in serialized
-    assert frames[-1]["result"]["catalog"]["count"] == 1
+    assert frames[-1]["result"]["scope"] == "user"
+    assert len(frames[-1]["result"]["plugins"]) == 1
 
     await server.dispatch(
-        _request("plugins.remove", {"id": plugin_id}, "plugin-remove")
+        _request("plugins.inspect", {"name": "RPC-PLUGIN"}, "plugin-inspect")
+    )
+    assert frames[-1]["result"]["scope"] == "user"
+    assert frames[-1]["result"]["plugin"]["status"] in {"loaded", "warning"}
+
+    await server.dispatch(
+        _request("plugins.remove", {"name": "RPC-PLUGIN"}, "plugin-remove")
     )
     assert frames[-1]["result"]["removed"] is True
     assert frames[-1]["result"]["data_retained"] is True
+
+
+async def test_plugin_install_without_consent_handle_returns_required(
+    tmp_path: Path,
+) -> None:
+    """没有真实交互 handler 时，install 必须 fail closed 而不是读取 pipe。"""
+    from harness_agent.host.agent_host import AgentHost
+
+    workspace = tmp_path / "workspace"
+    source = workspace / "plugin"
+    source.mkdir(parents=True)
+    (source / "plugin.json").write_text(
+        json.dumps(
+            {
+                "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+                "name": "noninteractive-plugin",
+                "version": "1.0.0",
+            }
+        ),
+        encoding="utf-8",
+    )
+    server = AgentHost(
+        allow_echo=True,
+        config_home=tmp_path / "home",
+        workspace=workspace,
+    )
+    frames = await _capture_server(server, max_minor=8, plugin_consent=False)
+
+    await server.dispatch(
+        _request(
+            "plugins.install",
+            {"source": "plugin"},
+            "plugin-install-noninteractive",
+        )
+    )
+
+    assert frames[-1]["error"]["data"]["code"] == "PLUGIN_CONSENT_REQUIRED"
+    assert not (tmp_path / "home" / ".harness" / "plugins" / "registry.json").exists()
+    await server.close()
 
 
 @pytest.mark.parametrize("purge_data", [False, True], ids=["retain-plugin-data", "purge-plugin-data"])
@@ -3414,11 +3584,6 @@ async def test_plugins_remove_always_uninstalls_settings_before_registry_remove(
     backend = FakeCredentialBackend()
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(source)["plugin"]
-    manager.set_enabled(
-        installed["id"],
-        enabled=True,
-        capability_fingerprint=installed["capability_fingerprint"],
-    )
     server = AgentHost(
         allow_echo=True,
         config_home=tmp_path / "home",
@@ -3445,13 +3610,13 @@ async def test_plugins_remove_always_uninstalls_settings_before_registry_remove(
     assert backend.accounts
 
     # Settings cleanup 必须按当前安装 record 处理，不能因插件随后被停用而
-    # 依赖 enabled+trusted runtime catalog 丢掉已有 credential。
-    manager.set_enabled(installed["id"], enabled=False)
+    # 依赖 runtime catalog 丢掉已有 credential。
+    manager.set_enabled(installed["name"], enabled=False)
 
     await server.dispatch(
         _request(
             "plugins.remove",
-            {"id": installed["id"], "purge_data": purge_data},
+            {"name": installed["name"], "purge_data": purge_data},
             "remove-settings",
         )
     )
@@ -3464,12 +3629,7 @@ async def test_plugins_remove_always_uninstalls_settings_before_registry_remove(
     await server.close()
 
     reinstalled = manager.install(source)["plugin"]
-    assert reinstalled["id"] == installed["id"]
-    manager.set_enabled(
-        reinstalled["id"],
-        enabled=True,
-        capability_fingerprint=reinstalled["capability_fingerprint"],
-    )
+    assert reinstalled["name"] == installed["name"]
     next_server = AgentHost(
         allow_echo=True,
         config_home=tmp_path / "home",
@@ -3486,7 +3646,8 @@ async def test_plugins_remove_always_uninstalls_settings_before_registry_remove(
         "user", next_server._settings_user_store.user_binding_digest
     )
     assert user_index is not None
-    assert any(item.plugin_id == str(reinstalled["id"]) for item in user_index.tombstones)
+    assert any(item.plugin_id == str(manager.store.read_registry().plugins[0].plugin_id)
+               for item in user_index.tombstones)
     await next_server.close()
 
 
@@ -3560,11 +3721,6 @@ async def test_host_startup_uses_one_enabled_plugin_snapshot_for_skill_and_mcp(
     manager = PluginManager(home=home)
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
 
     server = AgentHost(allow_echo=True, config_home=home, workspace=workspace)
     frames = await _capture_server(server)
@@ -3610,7 +3766,10 @@ async def test_plugin_manage_rpc_requires_negotiated_capability(tmp_path: Path) 
     await server.dispatch(
         _request(
             "initialize",
-            _initialize_params(capabilities=["plugins.read"]),
+            _initialize_params(
+                protocol={"major": 3, "min_minor": 0, "max_minor": 8},
+                capabilities=["plugins.read"],
+            ),
             "init-plugin-read",
         )
     )
@@ -3631,7 +3790,6 @@ async def test_mcp_status_no_config(tmp_path: Path):
     assert frames[-1]["result"] == {
         "servers": [],
         "total_tools": 0,
-        "static_preview": [],
     }
 
 
@@ -3685,7 +3843,6 @@ async def test_invalid_handler_result_returns_error_without_closing_dispatch_loo
     assert frames[-1]["result"] == {
         "servers": [],
         "total_tools": 0,
-        "static_preview": [],
     }
 
 

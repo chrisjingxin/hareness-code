@@ -6,20 +6,20 @@ from typing import Any, Literal, NotRequired, TypeAlias, TypedDict
 from harness_agent.protocol.runtime import event_model, schema_model
 
 PROTOCOL_MAJOR = 3
-PROTOCOL_MINOR = 7
-PROTOCOL_SCHEMA_SHA256 = "d1fea2bac72043e7d580fa9379676451c864a3b806fece2bdb9b934c5504af7b"
+PROTOCOL_MINOR = 8
+PROTOCOL_SCHEMA_SHA256 = "96415f121dce2b1585ebfe4e2f9da08522191146a3d68c8df249102a3ad51144"
 MAX_FRAME_BYTES = 8388608
 MAX_TOOL_PAYLOAD_BYTES = 1048576
-CLIENT_METHODS = ["initialize","commands.bind","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","settings.list","settings.set","settings.remove","threads.list","threads.open","threads.watch","threads.unwatch","threads.side_question","threads.list_turns","threads.undo","threads.redo","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","plugins.list","plugins.inspect","plugins.validate","plugins.install","plugins.set_enabled","plugins.remove","agents.list","agents.inspect","teams.list","teams.inspect","teams.generate","teams.run","teams.cancel","mcp.status","mcp.add","mcp.remove","host.attachment.create","host.attachment.revoke","host.control.acquire","host.control.release","host.control.status","compose.inspect","compose.abandon"]
+CLIENT_METHODS = ["initialize","commands.bind","run.start","run.cancel","context.compact","config.show","config.path","config.details","config.preview","config.commit","settings.list","settings.set","settings.remove","threads.list","threads.open","threads.watch","threads.unwatch","threads.side_question","threads.list_turns","threads.undo","threads.redo","models.list","skills.list","skills.inspect","skills.set_enabled","skills.install","skills.update","skills.remove","skills.market.list","plugins.list","plugins.inspect","plugins.validate","plugins.install","plugins.update","plugins.set_enabled","plugins.remove","agents.list","agents.inspect","teams.list","teams.inspect","teams.generate","teams.run","teams.cancel","mcp.status","mcp.add","mcp.remove","host.attachment.create","host.attachment.revoke","host.control.acquire","host.control.release","host.control.status","compose.inspect","compose.abandon"]
 EVENT_TYPES = ["run.started","run.progress","skill.loaded","content.delta","reasoning.delta","tool.started","tool.delta","tool.completed","context.updated","compose.progress","compose.summary","interaction.resolved","run.completed","run.cancelled","run.failed"]
-INTERACTION_METHODS = ["interaction.approval","interaction.question","interaction.directory_trust","interaction.plan"]
+INTERACTION_METHODS = ["interaction.approval","interaction.question","interaction.directory_trust","interaction.plan","interaction.plugin_consent"]
 SERVER_CAPABILITIES = ["run.cancel","run.multithread","host.control","config.read","config.write","threads.read","context.manage","skills.read","skills.manage","mcp.read","mcp.manage","plugins.read","plugins.manage","agents.read","teams.read","teams.manage","models.read","models.select","host.attach","settings.read","settings.manage"]
-OPERATION_CAPABILITIES = {"initialize":None,"commands.bind":None,"run.start":None,"run.cancel":"run.cancel","context.compact":"context.manage","config.show":"config.read","config.path":"config.read","config.details":"config.write","config.preview":"config.write","config.commit":"config.write","settings.list":"settings.read","settings.set":"settings.manage","settings.remove":"settings.manage","threads.list":"threads.read","threads.open":"threads.read","threads.watch":"threads.read","threads.unwatch":"threads.read","threads.side_question":"threads.read","threads.list_turns":"threads.read","threads.undo":"threads.read","threads.redo":"threads.read","models.list":"models.read","skills.list":"skills.read","skills.inspect":"skills.read","skills.set_enabled":"skills.manage","skills.install":"skills.manage","skills.update":"skills.manage","skills.remove":"skills.manage","skills.market.list":"skills.read","plugins.list":"plugins.read","plugins.inspect":"plugins.read","plugins.validate":"plugins.read","plugins.install":"plugins.manage","plugins.set_enabled":"plugins.manage","plugins.remove":"plugins.manage","agents.list":"agents.read","agents.inspect":"agents.read","teams.list":"teams.read","teams.inspect":"teams.read","teams.generate":"teams.manage","teams.run":"teams.manage","teams.cancel":"teams.manage","mcp.status":"mcp.read","mcp.add":"mcp.manage","mcp.remove":"mcp.manage","host.attachment.create":"host.attach","host.attachment.revoke":"host.attach","host.control.acquire":"host.control","host.control.release":"host.control","host.control.status":"host.control","compose.inspect":"threads.read","compose.abandon":"threads.read"}
-OPERATION_MIN_MINOR = {"commands.bind":6,"settings.list":7,"settings.set":7,"settings.remove":7}
-CONTROLLED_OPERATIONS = ["run.start","run.cancel","context.compact","config.preview","config.commit","settings.set","settings.remove","threads.undo","threads.redo","skills.set_enabled","skills.install","skills.update","skills.remove","mcp.add","mcp.remove"]
-INTERACTION_HANDLES = {"interaction.approval":"approval","interaction.question":"question","interaction.directory_trust":"directory_trust","interaction.plan":"plan"}
-ERROR_CODES = {"CONTROL_NOT_HOLDER":{"jsonrpc_code":-32008,"retryable":True},"CONTROL_BUSY":{"jsonrpc_code":-32008,"retryable":True},"CONTROL_RELEASE_BLOCKED":{"jsonrpc_code":-32008,"retryable":True},"ATTACHMENT_NOT_FOUND":{"jsonrpc_code":-32009,"retryable":False},"ATTACHMENT_NOT_ACTIVE":{"jsonrpc_code":-32009,"retryable":False},"CONNECTION_RUN_BUSY":{"jsonrpc_code":-32000,"retryable":True},"COMPOSE_NOTHING_TO_ABANDON":{"jsonrpc_code":-32004,"retryable":False},"COMPOSE_NEW_WORK_GOAL_REQUIRED":{"jsonrpc_code":-32004,"retryable":False},"COMPOSE_ABANDON_TAKES_NO_GOAL":{"jsonrpc_code":-32004,"retryable":False},"PROTOCOL_MINOR_REQUIRED":{"jsonrpc_code":-32003,"retryable":False},"SETTINGS_PROTOCOL_MINOR_REQUIRED":{"jsonrpc_code":-32003,"retryable":False},"SETTINGS_CAPABILITY_REQUIRED":{"jsonrpc_code":-32002,"retryable":False},"SETTINGS_SCOPE_INVALID":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_WORKSPACE_SCOPE_REQUIRED":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_INPUT_NONINTERACTIVE":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_STORAGE_UNAVAILABLE":{"jsonrpc_code":-32010,"retryable":True},"SETTINGS_BACKEND_UNAVAILABLE":{"jsonrpc_code":-32010,"retryable":True},"SETTINGS_RECORD_NOT_FOUND":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_RECORD_STALE":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_DECLARATION_STALE":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_DECLARATION_INVALID":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_DECLARATION_AMBIGUOUS":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_ENV_FORBIDDEN":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_VALUE_INVALID":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_VALUE_TOO_LARGE":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_STORE_REVISION_CONFLICT":{"jsonrpc_code":-32000,"retryable":True},"SETTINGS_OPERATION_IN_PROGRESS":{"jsonrpc_code":-32000,"retryable":True},"SETTINGS_CLEANUP_PENDING":{"jsonrpc_code":-32010,"retryable":True},"SETTINGS_UNINSTALL_PARTIAL":{"jsonrpc_code":-32010,"retryable":True},"SETTINGS_UNINSTALL_CONFLICT":{"jsonrpc_code":-32000,"retryable":True}}
-METHOD = {"INITIALIZE":"initialize","COMMANDS_BIND":"commands.bind","RUN_START":"run.start","RUN_CANCEL":"run.cancel","CONTEXT_COMPACT":"context.compact","CONFIG_SHOW":"config.show","CONFIG_PATH":"config.path","CONFIG_DETAILS":"config.details","CONFIG_PREVIEW":"config.preview","CONFIG_COMMIT":"config.commit","SETTINGS_LIST":"settings.list","SETTINGS_SET":"settings.set","SETTINGS_REMOVE":"settings.remove","THREADS_LIST":"threads.list","THREADS_OPEN":"threads.open","THREADS_WATCH":"threads.watch","THREADS_UNWATCH":"threads.unwatch","THREADS_SIDE_QUESTION":"threads.side_question","THREADS_LIST_TURNS":"threads.list_turns","THREADS_UNDO":"threads.undo","THREADS_REDO":"threads.redo","MODELS_LIST":"models.list","SKILLS_LIST":"skills.list","SKILLS_INSPECT":"skills.inspect","SKILLS_SET_ENABLED":"skills.set_enabled","SKILLS_INSTALL":"skills.install","SKILLS_UPDATE":"skills.update","SKILLS_REMOVE":"skills.remove","SKILLS_MARKET_LIST":"skills.market.list","PLUGINS_LIST":"plugins.list","PLUGINS_INSPECT":"plugins.inspect","PLUGINS_VALIDATE":"plugins.validate","PLUGINS_INSTALL":"plugins.install","PLUGINS_SET_ENABLED":"plugins.set_enabled","PLUGINS_REMOVE":"plugins.remove","AGENTS_LIST":"agents.list","AGENTS_INSPECT":"agents.inspect","TEAMS_LIST":"teams.list","TEAMS_INSPECT":"teams.inspect","TEAMS_GENERATE":"teams.generate","TEAMS_RUN":"teams.run","TEAMS_CANCEL":"teams.cancel","MCP_STATUS":"mcp.status","MCP_ADD":"mcp.add","MCP_REMOVE":"mcp.remove","HOST_ATTACHMENT_CREATE":"host.attachment.create","HOST_ATTACHMENT_REVOKE":"host.attachment.revoke","HOST_CONTROL_ACQUIRE":"host.control.acquire","HOST_CONTROL_RELEASE":"host.control.release","HOST_CONTROL_STATUS":"host.control.status","COMPOSE_INSPECT":"compose.inspect","COMPOSE_ABANDON":"compose.abandon","EVENT":"event","INTERACTION_APPROVAL":"interaction.approval","INTERACTION_QUESTION":"interaction.question","INTERACTION_DIRECTORY_TRUST":"interaction.directory_trust","INTERACTION_PLAN":"interaction.plan"}
+OPERATION_CAPABILITIES = {"initialize":None,"commands.bind":None,"run.start":None,"run.cancel":"run.cancel","context.compact":"context.manage","config.show":"config.read","config.path":"config.read","config.details":"config.write","config.preview":"config.write","config.commit":"config.write","settings.list":"settings.read","settings.set":"settings.manage","settings.remove":"settings.manage","threads.list":"threads.read","threads.open":"threads.read","threads.watch":"threads.read","threads.unwatch":"threads.read","threads.side_question":"threads.read","threads.list_turns":"threads.read","threads.undo":"threads.read","threads.redo":"threads.read","models.list":"models.read","skills.list":"skills.read","skills.inspect":"skills.read","skills.set_enabled":"skills.manage","skills.install":"skills.manage","skills.update":"skills.manage","skills.remove":"skills.manage","skills.market.list":"skills.read","plugins.list":"plugins.read","plugins.inspect":"plugins.read","plugins.validate":"plugins.read","plugins.install":"plugins.manage","plugins.update":"plugins.manage","plugins.set_enabled":"plugins.manage","plugins.remove":"plugins.manage","agents.list":"agents.read","agents.inspect":"agents.read","teams.list":"teams.read","teams.inspect":"teams.read","teams.generate":"teams.manage","teams.run":"teams.manage","teams.cancel":"teams.manage","mcp.status":"mcp.read","mcp.add":"mcp.manage","mcp.remove":"mcp.manage","host.attachment.create":"host.attach","host.attachment.revoke":"host.attach","host.control.acquire":"host.control","host.control.release":"host.control","host.control.status":"host.control","compose.inspect":"threads.read","compose.abandon":"threads.read"}
+OPERATION_MIN_MINOR = {"commands.bind":6,"settings.list":8,"settings.set":8,"settings.remove":8,"skills.list":8,"plugins.list":8,"plugins.inspect":8,"plugins.validate":8,"plugins.install":8,"plugins.update":8,"plugins.set_enabled":8,"plugins.remove":8,"agents.list":8,"mcp.status":8}
+CONTROLLED_OPERATIONS = ["run.start","run.cancel","context.compact","config.preview","config.commit","settings.set","settings.remove","threads.undo","threads.redo","skills.set_enabled","skills.install","skills.update","skills.remove","plugins.install","plugins.update","plugins.set_enabled","plugins.remove","mcp.add","mcp.remove"]
+INTERACTION_HANDLES = {"interaction.approval":"approval","interaction.question":"question","interaction.directory_trust":"directory_trust","interaction.plan":"plan","interaction.plugin_consent":"plugin_consent"}
+ERROR_CODES = {"CONTROL_NOT_HOLDER":{"jsonrpc_code":-32008,"retryable":True},"CONTROL_BUSY":{"jsonrpc_code":-32008,"retryable":True},"CONTROL_RELEASE_BLOCKED":{"jsonrpc_code":-32008,"retryable":True},"ATTACHMENT_NOT_FOUND":{"jsonrpc_code":-32009,"retryable":False},"ATTACHMENT_NOT_ACTIVE":{"jsonrpc_code":-32009,"retryable":False},"CONNECTION_RUN_BUSY":{"jsonrpc_code":-32000,"retryable":True},"COMPOSE_NOTHING_TO_ABANDON":{"jsonrpc_code":-32004,"retryable":False},"COMPOSE_NEW_WORK_GOAL_REQUIRED":{"jsonrpc_code":-32004,"retryable":False},"COMPOSE_ABANDON_TAKES_NO_GOAL":{"jsonrpc_code":-32004,"retryable":False},"PROTOCOL_MINOR_REQUIRED":{"jsonrpc_code":-32003,"retryable":False},"SETTINGS_PROTOCOL_MINOR_REQUIRED":{"jsonrpc_code":-32003,"retryable":False},"SETTINGS_CAPABILITY_REQUIRED":{"jsonrpc_code":-32002,"retryable":False},"SETTINGS_SCOPE_INVALID":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_WORKSPACE_SCOPE_REQUIRED":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_INPUT_NONINTERACTIVE":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_STORAGE_UNAVAILABLE":{"jsonrpc_code":-32010,"retryable":True},"SETTINGS_BACKEND_UNAVAILABLE":{"jsonrpc_code":-32010,"retryable":True},"SETTINGS_RECORD_NOT_FOUND":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_RECORD_STALE":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_DECLARATION_STALE":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_DECLARATION_INVALID":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_DECLARATION_AMBIGUOUS":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_ENV_FORBIDDEN":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_VALUE_INVALID":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_VALUE_TOO_LARGE":{"jsonrpc_code":-32602,"retryable":False},"SETTINGS_STORE_REVISION_CONFLICT":{"jsonrpc_code":-32000,"retryable":True},"SETTINGS_OPERATION_IN_PROGRESS":{"jsonrpc_code":-32000,"retryable":True},"SETTINGS_CLEANUP_PENDING":{"jsonrpc_code":-32010,"retryable":True},"SETTINGS_UNINSTALL_PARTIAL":{"jsonrpc_code":-32010,"retryable":True},"SETTINGS_UNINSTALL_CONFLICT":{"jsonrpc_code":-32000,"retryable":True},"PLUGIN_ALREADY_INSTALLED":{"jsonrpc_code":-32602,"retryable":False},"PLUGIN_NOT_FOUND":{"jsonrpc_code":-32602,"retryable":False},"PLUGIN_NAME_CONFLICT":{"jsonrpc_code":-32602,"retryable":False},"PLUGIN_SCOPE_INVALID":{"jsonrpc_code":-32602,"retryable":False},"PLUGIN_FORMAT_AMBIGUOUS":{"jsonrpc_code":-32602,"retryable":False},"PLUGIN_FORMAT_UNSUPPORTED":{"jsonrpc_code":-32602,"retryable":False},"PLUGIN_CONSENT_REQUIRED":{"jsonrpc_code":-32602,"retryable":False},"PLUGIN_OPERATION_CANCELLED":{"jsonrpc_code":-32602,"retryable":False},"PLUGIN_SOURCE_UNAVAILABLE":{"jsonrpc_code":-32602,"retryable":False},"PLUGIN_OPERATION_CONFLICT":{"jsonrpc_code":-32000,"retryable":True},"PLUGIN_LOAD_FAILED":{"jsonrpc_code":-32040,"retryable":False},"PLUGIN_SETTING_RECONFIGURE_REQUIRED":{"jsonrpc_code":-32602,"retryable":False},"PLUGIN_REGISTRY_MIGRATION_BACKUP_FAILED":{"jsonrpc_code":-32010,"retryable":True},"PLUGIN_REGISTRY_MIGRATION_BACKUP_CONFLICT":{"jsonrpc_code":-32602,"retryable":False},"PLUGIN_REGISTRY_WRITE_FAILED":{"jsonrpc_code":-32010,"retryable":True},"PLUGIN_REGISTRY_COMMIT_UNCERTAIN":{"jsonrpc_code":-32010,"retryable":True}}
+METHOD = {"INITIALIZE":"initialize","COMMANDS_BIND":"commands.bind","RUN_START":"run.start","RUN_CANCEL":"run.cancel","CONTEXT_COMPACT":"context.compact","CONFIG_SHOW":"config.show","CONFIG_PATH":"config.path","CONFIG_DETAILS":"config.details","CONFIG_PREVIEW":"config.preview","CONFIG_COMMIT":"config.commit","SETTINGS_LIST":"settings.list","SETTINGS_SET":"settings.set","SETTINGS_REMOVE":"settings.remove","THREADS_LIST":"threads.list","THREADS_OPEN":"threads.open","THREADS_WATCH":"threads.watch","THREADS_UNWATCH":"threads.unwatch","THREADS_SIDE_QUESTION":"threads.side_question","THREADS_LIST_TURNS":"threads.list_turns","THREADS_UNDO":"threads.undo","THREADS_REDO":"threads.redo","MODELS_LIST":"models.list","SKILLS_LIST":"skills.list","SKILLS_INSPECT":"skills.inspect","SKILLS_SET_ENABLED":"skills.set_enabled","SKILLS_INSTALL":"skills.install","SKILLS_UPDATE":"skills.update","SKILLS_REMOVE":"skills.remove","SKILLS_MARKET_LIST":"skills.market.list","PLUGINS_LIST":"plugins.list","PLUGINS_INSPECT":"plugins.inspect","PLUGINS_VALIDATE":"plugins.validate","PLUGINS_INSTALL":"plugins.install","PLUGINS_UPDATE":"plugins.update","PLUGINS_SET_ENABLED":"plugins.set_enabled","PLUGINS_REMOVE":"plugins.remove","AGENTS_LIST":"agents.list","AGENTS_INSPECT":"agents.inspect","TEAMS_LIST":"teams.list","TEAMS_INSPECT":"teams.inspect","TEAMS_GENERATE":"teams.generate","TEAMS_RUN":"teams.run","TEAMS_CANCEL":"teams.cancel","MCP_STATUS":"mcp.status","MCP_ADD":"mcp.add","MCP_REMOVE":"mcp.remove","HOST_ATTACHMENT_CREATE":"host.attachment.create","HOST_ATTACHMENT_REVOKE":"host.attachment.revoke","HOST_CONTROL_ACQUIRE":"host.control.acquire","HOST_CONTROL_RELEASE":"host.control.release","HOST_CONTROL_STATUS":"host.control.status","COMPOSE_INSPECT":"compose.inspect","COMPOSE_ABANDON":"compose.abandon","EVENT":"event","INTERACTION_APPROVAL":"interaction.approval","INTERACTION_QUESTION":"interaction.question","INTERACTION_DIRECTORY_TRUST":"interaction.directory_trust","INTERACTION_PLAN":"interaction.plan","INTERACTION_PLUGIN_CONSENT":"interaction.plugin_consent"}
 CAPABILITY = {"RUN_CANCEL":"run.cancel","RUN_MULTITHREAD":"run.multithread","HOST_CONTROL":"host.control","CONFIG_READ":"config.read","CONFIG_WRITE":"config.write","THREADS_READ":"threads.read","CONTEXT_MANAGE":"context.manage","SKILLS_READ":"skills.read","SKILLS_MANAGE":"skills.manage","MCP_READ":"mcp.read","MCP_MANAGE":"mcp.manage","PLUGINS_READ":"plugins.read","PLUGINS_MANAGE":"plugins.manage","AGENTS_READ":"agents.read","TEAMS_READ":"teams.read","TEAMS_MANAGE":"teams.manage","MODELS_READ":"models.read","MODELS_SELECT":"models.select","HOST_ATTACH":"host.attach","SETTINGS_READ":"settings.read","SETTINGS_MANAGE":"settings.manage"}
 EVENT_TYPE = {"RUN_STARTED":"run.started","RUN_PROGRESS":"run.progress","SKILL_LOADED":"skill.loaded","CONTENT_DELTA":"content.delta","REASONING_DELTA":"reasoning.delta","TOOL_STARTED":"tool.started","TOOL_DELTA":"tool.delta","TOOL_COMPLETED":"tool.completed","CONTEXT_UPDATED":"context.updated","COMPOSE_PROGRESS":"compose.progress","COMPOSE_SUMMARY":"compose.summary","INTERACTION_RESOLVED":"interaction.resolved","RUN_COMPLETED":"run.completed","RUN_CANCELLED":"run.cancelled","RUN_FAILED":"run.failed"}
 
@@ -64,7 +64,7 @@ class ClientInfoWire(TypedDict):
 
 class ClientCapabilitiesWire(TypedDict):
     requests: list[str]
-    handles: list[Literal["approval", "question", "directory_trust", "plan"]]
+    handles: list[Literal["approval", "question", "directory_trust", "plan", "plugin_consent"]]
 
 class InitializeParamsWire(TypedDict):
     protocol: ProtocolRangeWire
@@ -77,7 +77,6 @@ class InitializeResultWire(TypedDict):
     connection: dict[str, Any]
     capabilities: dict[str, Any]
     agent_commands: list[AgentCommandWire]
-    static_command_preview: NotRequired[JsonObjectArrayWire]
     skills_snapshot: dict[str, Any]
     skill_diagnostics: list[str]
     limits: dict[str, Any]
@@ -198,67 +197,45 @@ class SettingsPendingSummaryWire(TypedDict):
     retryable: bool
 
 class SettingsSummaryWire(TypedDict):
-    setting_id: str
-    plugin_id: str
-    package_digest: str
-    declaration_digest: str
-    scope: SettingsScopeWire
-    scope_binding_digest: str
-    source: Literal["qwen-extension"]
     name: str
+    setting: str
+    scope: SettingsScopeWire
     description: str
-    env_var: str
     sensitive: bool
     required: Literal[False]
-    consumer_scope: Literal["extension-wide"]
     store_state: Literal["configured", "absent", "stale", "pending", "tombstoned", "partial", "blocked"]
     runtime_state: Literal["loaded", "not_loaded", "pending_restart", "absent", "stale"]
     pending_operation: SettingsPendingSummaryWire | None
     diagnostic: str | None
 
 class SettingsListParamsWire(TypedDict):
-    scope: SettingsScopeWire
+    name: NotRequired[str]
+    scope: NotRequired[SettingsScopeWire]
 
 class SettingsListResultWire(TypedDict):
     scope: SettingsScopeWire
-    store_revision: int
-    runtime_snapshot: SettingsRuntimeSnapshotWire
     settings: list[SettingsSummaryWire]
 
 class SettingsIdentityWire(TypedDict):
     scope: SettingsScopeWire
-    plugin_id: str
-    package_digest: str
-    declaration_digest: str
-    setting_key: str
-    env_var: str
+    name: str
+    setting: str
 
 class SettingsSetParamsWire(TypedDict):
-    scope: SettingsScopeWire
-    plugin_id: str
-    package_digest: str
-    declaration_digest: str
-    setting_key: str
-    env_var: str
+    name: str
+    setting: str
+    scope: NotRequired[SettingsScopeWire]
     value: str
-    expected_store_revision: int
 
 class SettingsRemoveParamsWire(TypedDict):
-    scope: SettingsScopeWire
-    plugin_id: str
-    package_digest: str
-    declaration_digest: str
-    setting_key: str
-    env_var: str
-    expected_store_revision: int
+    name: str
+    setting: str
+    scope: NotRequired[SettingsScopeWire]
 
 class SettingsMutationResultWire(TypedDict):
     operation: Literal["set", "remove"]
     scope: SettingsScopeWire
-    store_revision: int
-    runtime_snapshot: SettingsRuntimeSnapshotWire
     summary: SettingsSummaryWire
-    applies_to: Literal["next_host"]
     diagnostics: list[str]
 
 class ConfigPathResultWire(TypedDict):
@@ -406,26 +383,106 @@ class SkillsMarketListParamsWire(TypedDict):
 class SkillsListResultWire(TypedDict):
     snapshot: JsonObjectWire
     skills: JsonObjectArrayWire
-    static_preview: NotRequired[JsonObjectArrayWire]
     diagnostics: list[str]
 
+PluginScopeWire: TypeAlias = Literal["user", "workspace"]
+
+class PluginSourceSummaryWire(TypedDict):
+    label: str
+    kind: Literal["local"]
+
+class PluginComponentSummaryWire(TypedDict):
+    kind: str
+    count: int
+    sources: list[str]
+
+class PluginSummaryWire(TypedDict):
+    name: str
+    version: str | None
+    description: str | None
+    format: Literal["agent-plugins-1.0", "claude-code", "qwen-code", "hybrid"]
+    source: PluginSourceSummaryWire
+    activation: Literal["enabled", "disabled"]
+    scope: NotRequired[PluginScopeWire]
+    status: Literal["loaded", "disabled", "warning", "failed"]
+    components: list[PluginComponentSummaryWire]
+    warnings: list[str]
+    internal: NotRequired[dict[str, Any]]
+
+class PluginMutationPreviewWire(TypedDict):
+    operation: Literal["install", "update"]
+    name: str
+    old_version: NotRequired[str | None]
+    new_version: str | None
+    source_label: str
+    activation_scope: NotRequired[PluginScopeWire]
+    components: list[PluginComponentSummaryWire]
+    settings: list[dict[str, Any]]
+    warnings: list[str]
+
+class PluginsListResultWire(TypedDict):
+    scope: PluginScopeWire
+    plugins: list[PluginSummaryWire]
+
+class PluginsInspectResultWire(TypedDict):
+    scope: PluginScopeWire
+    plugin: PluginSummaryWire
+
+class PluginValidationSummaryWire(TypedDict):
+    name: str
+    version: str | None
+    description: str | None
+    format: Literal["agent-plugins-1.0", "claude-code", "qwen-code", "hybrid"]
+    components: list[PluginComponentSummaryWire]
+    warnings: list[str]
+
+class PluginsValidateResultWire(TypedDict):
+    operation: Literal["validate"]
+    source: PluginSourceSummaryWire
+    plugin: PluginValidationSummaryWire
+
+class PluginsMutationResultWire(TypedDict):
+    operation: Literal["install", "update", "enable", "disable", "remove"]
+    name: str
+    scope: NotRequired[PluginScopeWire]
+    status: Literal["loaded", "disabled", "warning", "failed"]
+    components: list[PluginComponentSummaryWire]
+    warnings: list[str]
+    plugin: NotRequired[PluginSummaryWire]
+    removed: NotRequired[bool]
+    data_retained: NotRequired[bool]
+    data_purged: NotRequired[bool]
+    settings_cleanup: NotRequired[JsonObjectWire]
+
 class PluginsListParamsWire(TypedDict):
+    scope: NotRequired[PluginScopeWire]
     include_disabled: NotRequired[bool]
 
 class PluginsInspectParamsWire(TypedDict):
-    id: str
+    name: str
+    scope: NotRequired[PluginScopeWire]
 
 class PluginsSourceParamsWire(TypedDict):
     source: str
     format: NotRequired[Literal["auto", "agent-plugins-1.0", "claude-code", "qwen-code"]]
 
+PluginsValidateParamsWire: TypeAlias = PluginsSourceParamsWire
+
+class PluginsInstallParamsWire(TypedDict):
+    source: str
+    scope: NotRequired[PluginScopeWire]
+
+class PluginsUpdateParamsWire(TypedDict):
+    name: str
+    source: NotRequired[str]
+
 class PluginsSetEnabledParamsWire(TypedDict):
-    id: str
+    name: str
+    scope: NotRequired[PluginScopeWire]
     enabled: bool
-    capability_fingerprint: NotRequired[str]
 
 class PluginsRemoveParamsWire(TypedDict):
-    id: str
+    name: str
     purge_data: NotRequired[bool]
 
 class AgentSummaryWire(TypedDict):
@@ -448,7 +505,6 @@ class AgentSummaryWire(TypedDict):
 class AgentsListResultWire(TypedDict):
     snapshot_id: str
     agents: list[AgentSummaryWire]
-    static_preview: NotRequired[JsonObjectArrayWire]
     diagnostics: list[str]
 
 class AgentsInspectParamsWire(TypedDict):
@@ -526,7 +582,6 @@ class McpServerStatusWire(TypedDict):
 
 class McpStatusResultWire(TypedDict):
     servers: list[McpServerStatusWire]
-    static_preview: NotRequired[JsonObjectArrayWire]
     total_tools: int
     diagnostics: NotRequired[list[str]]
 
@@ -764,6 +819,15 @@ class PlanResponseWire(TypedDict):
     decision: PlanDecisionWire
     feedback: NotRequired[str]
 
+class PluginConsentRequestWire(TypedDict):
+    thread_id: str
+    run_id: str
+    timeout_ms: int
+    payload: dict[str, Any]
+
+class PluginConsentResponseWire(TypedDict):
+    decision: Literal["accept", "cancel"]
+
 class ApprovalRequestWire(TypedDict):
     thread_id: str
     run_id: str
@@ -825,14 +889,10 @@ SkillsUpdateResultWire = JsonObjectWire
 SkillsRemoveParamsWire = SkillsInspectParamsWire
 SkillsRemoveResultWire = JsonObjectWire
 SkillsMarketListResultWire = JsonObjectArrayWire
-PluginsListResultWire = JsonObjectWire
-PluginsInspectResultWire = JsonObjectWire
-PluginsValidateParamsWire = PluginsSourceParamsWire
-PluginsValidateResultWire = JsonObjectWire
-PluginsInstallParamsWire = PluginsSourceParamsWire
-PluginsInstallResultWire = JsonObjectWire
-PluginsSetEnabledResultWire = JsonObjectWire
-PluginsRemoveResultWire = JsonObjectWire
+PluginsInstallResultWire = PluginsMutationResultWire
+PluginsUpdateResultWire = PluginsMutationResultWire
+PluginsSetEnabledResultWire = PluginsMutationResultWire
+PluginsRemoveResultWire = PluginsMutationResultWire
 AgentsListParamsWire = EmptyParamsWire
 AgentsInspectResultWire = AgentSummaryWire
 TeamsListParamsWire = EmptyParamsWire
@@ -905,17 +965,19 @@ SkillsRemoveResult = schema_model("#/$defs/jsonObject", name="SkillsRemoveResult
 SkillsMarketListParams = schema_model("#/$defs/skillsMarketListParams", name="SkillsMarketListParams")
 SkillsMarketListResult = schema_model("#/$defs/jsonObjectArray", name="SkillsMarketListResult")
 PluginsListParams = schema_model("#/$defs/pluginsListParams", name="PluginsListParams")
-PluginsListResult = schema_model("#/$defs/jsonObject", name="PluginsListResult")
+PluginsListResult = schema_model("#/$defs/pluginsListResult", name="PluginsListResult")
 PluginsInspectParams = schema_model("#/$defs/pluginsInspectParams", name="PluginsInspectParams")
-PluginsInspectResult = schema_model("#/$defs/jsonObject", name="PluginsInspectResult")
-PluginsValidateParams = schema_model("#/$defs/pluginsSourceParams", name="PluginsValidateParams")
-PluginsValidateResult = schema_model("#/$defs/jsonObject", name="PluginsValidateResult")
-PluginsInstallParams = schema_model("#/$defs/pluginsSourceParams", name="PluginsInstallParams")
-PluginsInstallResult = schema_model("#/$defs/jsonObject", name="PluginsInstallResult")
+PluginsInspectResult = schema_model("#/$defs/pluginsInspectResult", name="PluginsInspectResult")
+PluginsValidateParams = schema_model("#/$defs/pluginsValidateParams", name="PluginsValidateParams")
+PluginsValidateResult = schema_model("#/$defs/pluginsValidateResult", name="PluginsValidateResult")
+PluginsInstallParams = schema_model("#/$defs/pluginsInstallParams", name="PluginsInstallParams")
+PluginsInstallResult = schema_model("#/$defs/pluginsMutationResult", name="PluginsInstallResult")
+PluginsUpdateParams = schema_model("#/$defs/pluginsUpdateParams", name="PluginsUpdateParams")
+PluginsUpdateResult = schema_model("#/$defs/pluginsMutationResult", name="PluginsUpdateResult")
 PluginsSetEnabledParams = schema_model("#/$defs/pluginsSetEnabledParams", name="PluginsSetEnabledParams")
-PluginsSetEnabledResult = schema_model("#/$defs/jsonObject", name="PluginsSetEnabledResult")
+PluginsSetEnabledResult = schema_model("#/$defs/pluginsMutationResult", name="PluginsSetEnabledResult")
 PluginsRemoveParams = schema_model("#/$defs/pluginsRemoveParams", name="PluginsRemoveParams")
-PluginsRemoveResult = schema_model("#/$defs/jsonObject", name="PluginsRemoveResult")
+PluginsRemoveResult = schema_model("#/$defs/pluginsMutationResult", name="PluginsRemoveResult")
 AgentsListParams = schema_model("#/$defs/emptyParams", name="AgentsListParams")
 AgentsListResult = schema_model("#/$defs/agentsListResult", name="AgentsListResult")
 AgentsInspectParams = schema_model("#/$defs/agentsInspectParams", name="AgentsInspectParams")

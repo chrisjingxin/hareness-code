@@ -47,15 +47,10 @@ def _enabled_manager(
     tmp_path: Path,
     source: Path,
 ) -> tuple[PluginManager, Path]:
-    """安装并显式信任 fixture，返回固定 workspace。"""
+    """安装后返回默认已启用的 fixture 与固定 workspace。"""
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     return manager, workspace
@@ -211,10 +206,9 @@ def test_qwen_hook_events_are_effective_per_event_and_unsupported_events_stay_st
     summary = manager.validate(source)["plugin"]
     assert isinstance(summary, dict)
     hooks = next(item for item in summary["components"] if item["kind"] == "hooks")
-    assert hooks["status"] == "adapted"
-    assert hooks["effective"] is True
+    assert set(hooks) == {"kind", "count", "sources"}
     assert hooks["count"] == 4
-    assert any("Prompt" in item for item in hooks["diagnostics"])
+    assert any("Prompt" in item for item in summary["warnings"])
 
     manager, workspace = _enabled_manager(tmp_path, source)
     catalog = manager.runtime_catalog(manager.catalog(), workspace=workspace)

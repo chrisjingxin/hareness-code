@@ -16,6 +16,8 @@ import {
   type InitializeParams,
   type InteractionMap,
   type InteractionMethod,
+  type PluginConsentRequest,
+  type PluginConsentResponse,
   type JsonRpcMessage,
   type OperationMap,
   type OperationName,
@@ -30,12 +32,14 @@ export type InteractionRequestEnvelope =
   | ({ request_id: string; type: "question" } & QuestionRequest)
   | ({ request_id: string; type: "directory_trust" } & DirectoryTrustRequest)
   | ({ request_id: string; type: "plan" } & PlanRequest)
+  | ({ request_id: string; type: "plugin_consent" } & PluginConsentRequest)
 
 export type InteractionResponse =
   | ({ request_id: string; type: "approval" } & ApprovalResponse)
   | ({ request_id: string; type: "question" } & QuestionResponse)
   | ({ request_id: string; type: "directory_trust" } & DirectoryTrustResponse)
   | ({ request_id: string; type: "plan" } & PlanResponse)
+  | ({ request_id: string; type: "plugin_consent" } & PluginConsentResponse)
 
 type ContractEntry = { params?: string; result?: string; payload?: string; min_minor?: number }
 type ContractMetadata = {

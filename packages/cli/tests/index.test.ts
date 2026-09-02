@@ -147,10 +147,7 @@ test("harness logs 命令路由在 startAgent 之前，不创建 sidecar、不�
 test("Plugin Settings commands negotiate settings capabilities", () => {
   const list = parseArgs(["plugins", "settings", "list"], "/work")
   const set = parseArgs([
-    "plugins", "settings", "set", "plugin/local/za38", "ZA38_TOKEN",
-    "--package-digest", "a".repeat(64),
-    "--declaration-digest", "b".repeat(64),
-    "--expected-store-revision", "0",
+    "plugins", "settings", "set", "Review-Tools", "ZA38_TOKEN",
     "--secret-stdin",
   ], "/work")
   expect(clientCapabilities(list)).toContain("settings.read")
@@ -174,10 +171,7 @@ test("Plugin Settings CLI 经过 parse→dispatch 向 Agent 发出 canonical RPC
   )
   await dispatchClientCommand(
     parseArgs([
-      "plugins", "settings", "set", "plugin/local/za38", "ZA38_TOKEN",
-      "--package-digest", "a".repeat(64),
-      "--declaration-digest", "b".repeat(64),
-      "--expected-store-revision", "0",
+      "plugins", "settings", "set", "Review-Tools", "ZA38_TOKEN",
       "--secret-stdin",
     ], "/work"),
     request,
@@ -185,10 +179,7 @@ test("Plugin Settings CLI 经过 parse→dispatch 向 Agent 发出 canonical RPC
   )
   await dispatchClientCommand(
     parseArgs([
-      "plugins", "settings", "remove", "plugin/local/za38", "ZA38_TOKEN",
-      "--package-digest", "a".repeat(64),
-      "--declaration-digest", "b".repeat(64),
-      "--expected-store-revision", "1",
+      "plugins", "settings", "remove", "Review-Tools", "ZA38_TOKEN",
     ], "/work"),
     request,
     readValue,
@@ -220,10 +211,7 @@ test("Plugin Settings/Plugin removal CLI 经过 parse→execute→fake Agent req
   await execute(
     parseArgs(
       [
-        "plugins", "settings", "set", "plugin/local/za38", "ZA38_TOKEN",
-        "--package-digest", "a".repeat(64),
-        "--declaration-digest", "b".repeat(64),
-        "--expected-store-revision", "0", "--secret-stdin",
+        "plugins", "settings", "set", "Review-Tools", "ZA38_TOKEN", "--secret-stdin",
       ],
       "/work",
     ),
@@ -232,17 +220,14 @@ test("Plugin Settings/Plugin removal CLI 经过 parse→execute→fake Agent req
   await execute(
     parseArgs(
       [
-        "plugins", "settings", "remove", "plugin/local/za38", "ZA38_TOKEN",
-        "--package-digest", "a".repeat(64),
-        "--declaration-digest", "b".repeat(64),
-        "--expected-store-revision", "1",
+        "plugins", "settings", "remove", "Review-Tools", "ZA38_TOKEN",
       ],
       "/work",
     ),
     { startAgent },
   )
   await execute(
-    parseArgs(["plugins", "remove", "plugin/local/za38", "--purge-data"], "/work"),
+    parseArgs(["plugins", "remove", "Review-Tools", "--purge-data"], "/work"),
     { startAgent },
   )
 
@@ -253,7 +238,7 @@ test("Plugin Settings/Plugin removal CLI 经过 parse→execute→fake Agent req
     "plugins.remove",
   ])
   expect(calls.at(-1)?.params).toEqual({
-    id: "plugin/local/za38",
+    name: "Review-Tools",
     purge_data: true,
   })
 })

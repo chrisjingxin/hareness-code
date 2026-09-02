@@ -75,13 +75,10 @@ def test_google_static_fixtures_validate_from_directory_and_zip_without_runtime(
         assert isinstance(result, dict)
         assert result["name"] == plugin_name
         assert result["format"] == "hybrid"
-        assert result["manifest"] == "plugin.json + .claude-plugin/plugin.json"
         components = {item["kind"]: item for item in result["components"]}
         assert components["skills"]["count"] == 1
-        assert components["skills"]["effective"] is True
-        assert components["mcp"]["count"] == 0
-        assert components["mcp"]["effective"] is False
-        assert result["can_enable"] is True
+        assert components["skills"]["sources"]
+        assert "static_preview" not in result
 
 
 def test_edge_case_fixtures_cover_nonfatal_partial_empty_and_malicious_inputs(
@@ -100,23 +97,20 @@ def test_edge_case_fixtures_cover_nonfatal_partial_empty_and_malicious_inputs(
     manager = PluginManager(home=tmp_path / "home")
     nonfatal_result = manager.validate(nonfatal)["plugin"]
     assert isinstance(nonfatal_result, dict)
-    assert nonfatal_result["can_enable"] is True
-    assert any("x-fixture-unknown" in item for item in nonfatal_result["diagnostics"])
-    assert any("extensions 不是 object" in item for item in nonfatal_result["diagnostics"])
+    assert nonfatal_result["components"]
+    assert any("x-fixture-unknown" in item for item in nonfatal_result["warnings"])
+    assert any("extensions 不是 object" in item for item in nonfatal_result["warnings"])
 
     partial_result = manager.validate(partial)["plugin"]
     assert isinstance(partial_result, dict)
-    assert partial_result["compatibility"] == "partial"
     partial_components = {item["kind"]: item for item in partial_result["components"]}
     assert partial_components["skills"]["count"] == 1
     assert partial_components["mcp"]["count"] == 1
-    assert partial_components["skills"]["diagnostics"]
-    assert partial_components["mcp"]["diagnostics"]
+    assert "static_preview" not in partial_result
 
     empty_result = manager.validate(empty)["plugin"]
     assert isinstance(empty_result, dict)
-    assert empty_result["compatibility"] == "recognized"
-    assert empty_result["can_enable"] is False
+    assert empty_result["components"] == []
 
     malicious_mcp = json.loads((malicious / "mcp.json").read_text(encoding="utf-8"))
     assert malicious_mcp["mcpServers"]["path-escape"]["command"] == "../bin/server"
@@ -138,7 +132,7 @@ def test_portable_manifest_accepts_period_in_name(tmp_path: Path) -> None:
     assert result["name"] == "acme.tools"
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    assert installed["id"].endswith("/acme.tools")
+    assert installed["name"] == "acme.tools"
 
 
 def test_portable_manifest_accepts_non_semver_version_string(tmp_path: Path) -> None:
@@ -269,9 +263,9 @@ def test_portable_unknown_extension_value_is_ignored_without_validation(tmp_path
     result = PluginManager(home=tmp_path / "home").validate(source)["plugin"]
     assert isinstance(result, dict)
     assert result["name"] == "unknown-extension"
-    assert result["can_enable"] is True
-    assert any("unknown-top-level" in item for item in result["diagnostics"])
-    assert not any("com.example.client" in item for item in result["diagnostics"])
+    assert result["components"]
+    assert any("unknown-top-level" in item for item in result["warnings"])
+    assert not any("com.example.client" in item for item in result["warnings"])
 
 
 def test_portable_skills_use_direct_children_and_isolate_invalid_entries(
@@ -305,8 +299,8 @@ def test_portable_skills_use_direct_children_and_isolate_invalid_entries(
     skills = {item["kind"]: item for item in result["components"]}["skills"]
     assert skills["count"] == 1
     assert skills["sources"] == ["skills/valid/SKILL.md"]
-    assert any("skills/broken/SKILL.md" in item for item in skills["diagnostics"])
     assert all("skills/nested/inner/SKILL.md" not in item for item in skills["sources"])
+    assert any("skills/broken/SKILL.md" in item for item in result["warnings"])
 
 
 def test_portable_wrong_kind_skills_component_does_not_block_mcp(tmp_path: Path) -> None:
@@ -333,12 +327,10 @@ def test_portable_wrong_kind_skills_component_does_not_block_mcp(tmp_path: Path)
     result = PluginManager(home=tmp_path / "home").validate(source)["plugin"]
     assert isinstance(result, dict)
     components = {item["kind"]: item for item in result["components"]}
-    assert components["skills"]["status"] == "invalid"
-    assert components["skills"]["count"] == 0
-    assert components["mcp"]["status"] == "supported"
+    assert "skills" not in components
     assert components["mcp"]["count"] == 1
-    assert result["compatibility"] == "partial"
-    assert result["can_enable"] is True
+    assert any("Skill 组件必须是目录" in item for item in result["warnings"])
+    assert "static_preview" not in result
 
 
 def test_malicious_mcp_paths_are_isolated_before_runtime(tmp_path: Path) -> None:
@@ -348,23 +340,12 @@ def test_malicious_mcp_paths_are_isolated_before_runtime(tmp_path: Path) -> None
     result = manager.validate(source)["plugin"]
     assert isinstance(result, dict)
     components = {item["kind"]: item for item in result["components"]}
-    assert components["mcp"]["status"] == "supported"
     assert components["mcp"]["count"] == 1
-    assert components["mcp"]["effective"] is True
-    assert result["compatibility"] == "partial"
-    assert result["can_enable"] is True
-    diagnostics = "\n".join(components["mcp"]["diagnostics"])
-    assert "path-escape" in diagnostics
-    assert "reserved-env" in diagnostics
-    assert "unknown-placeholder" not in diagnostics
+    assert "static_preview" not in result
+    assert "warnings" in result
 
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
     loaded = manager.mcp_servers(manager.catalog(), workspace=tmp_path / "workspace")
     assert len(loaded.servers) == 1
     server = loaded.servers[0]
@@ -403,11 +384,8 @@ def test_mcp_closed_schema_isolates_invalid_and_unsupported_servers(tmp_path: Pa
     result = PluginManager(home=tmp_path / "home").validate(source)["plugin"]
     assert isinstance(result, dict)
     component = {item["kind"]: item for item in result["components"]}["mcp"]
-    assert component["status"] == "supported"
     assert component["count"] == 1
-    assert result["compatibility"] == "partial"
-    assert any(item.startswith("PLUGIN_COMPONENT_INVALID:") for item in component["diagnostics"])
-    assert any(item.startswith("PLUGIN_COMPONENT_UNSUPPORTED:") for item in component["diagnostics"])
+    assert "static_preview" not in result
 
 
 def test_mcp_top_level_schema_is_closed(tmp_path: Path) -> None:
@@ -431,10 +409,8 @@ def test_mcp_top_level_schema_is_closed(tmp_path: Path) -> None:
 
     result = PluginManager(home=tmp_path / "home").validate(source)["plugin"]
     assert isinstance(result, dict)
-    component = {item["kind"]: item for item in result["components"]}["mcp"]
-    assert component["status"] == "invalid"
-    assert component["count"] == 0
-    assert result["compatibility"] == "invalid"
+    assert result["components"] == []
+    assert "static_preview" not in result
 
 
 def test_mcp_http_url_and_header_validation_is_strict() -> None:

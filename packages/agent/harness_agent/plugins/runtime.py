@@ -1198,8 +1198,6 @@ class SubagentStopRequest:
     execution_id: str
     parent_execution_id: str | None
     checkpoint_namespace: str
-    enabled: bool = True
-    trusted: bool = True
     is_cancelled: Callable[[], bool] | None = None
 
     def __post_init__(self) -> None:
@@ -1271,8 +1269,6 @@ class SubagentStopController:
         self._reset_for_execution(request.execution_id)
         self._raise_if_cancelled(request)
         started_at = time.monotonic()
-        if not request.enabled or not request.trusted:
-            return FinalOutputGateDecision(action="allow")
         if self._failure_code is not None:
             # runtime 目录已经确认存在匹配的 Qwen Hook，但定义无法安全
             # 构造；这不是 matcher miss，不能让 child 静默拿到成功输出。

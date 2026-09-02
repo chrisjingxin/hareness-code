@@ -18,7 +18,6 @@ from harness_agent.plugins.model import (
     PluginComponentReport,
     PluginDescriptor,
     PluginError,
-    capability_fingerprint,
 )
 
 
@@ -123,7 +122,6 @@ def load_portable_plugin(root: Path, *, package_digest: str) -> PluginDescriptor
         format="agent-plugins-1.0",
         manifest="plugin.json",
         package_digest=package_digest,
-        capability_fingerprint=capability_fingerprint(components_tuple),
         components=components_tuple,
         diagnostics=diagnostics,
     )

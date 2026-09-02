@@ -6,8 +6,17 @@ import { once } from "node:events"
 import { existsSync, statSync } from "node:fs"
 import { realpath } from "node:fs/promises"
 import { delimiter, resolve } from "node:path"
+import { createInterface } from "node:readline"
 import { TextDecoder } from "node:util"
-import { Capability, EventType, PROTOCOL_VERSION, isClientMethod, type OperationName } from "@za38/protocol"
+import {
+  Capability,
+  EventType,
+  PROTOCOL_VERSION,
+  isClientMethod,
+  type InteractionRequestEnvelope,
+  type InteractionResponse,
+  type OperationName,
+} from "@za38/protocol"
 
 import { parseArgs, type Command } from "./args"
 import { createDiagnosticLog, defaultProcessFields, type DiagnosticLog } from "./diagnostic-log/runtime"
@@ -48,6 +57,39 @@ type ExecuteDependencies = {
   readSettingValue?: (secretStdin: boolean) => Promise<string>
 }
 
+type TerminalStream = { isTTY?: boolean }
+
+/** Plugin consent 所需的三条真实终端流；任何一条被重定向都不能确认安装。 */
+export type PluginConsentTerminalState = {
+  stdin: TerminalStream
+  stdout: TerminalStream
+  stderr: TerminalStream
+}
+
+/** 供 consent 读取器使用的可读/可写终端流。 */
+export type PluginConsentTerminal = {
+  stdin: NodeJS.ReadableStream & TerminalStream
+  stdout: NodeJS.WritableStream & TerminalStream
+  stderr: NodeJS.WritableStream & TerminalStream
+}
+
+function processPluginConsentTerminal(): PluginConsentTerminal {
+  return {
+    stdin: process.stdin,
+    stdout: process.stdout,
+    stderr: process.stderr,
+  }
+}
+
+/** 只有 stdin/stdout/stderr 同时为 TTY 才允许执行一次性 Plugin consent。 */
+export function hasPluginConsentTerminal(
+  terminal: PluginConsentTerminalState = processPluginConsentTerminal(),
+): boolean {
+  return terminal.stdin.isTTY === true
+    && terminal.stdout.isTTY === true
+    && terminal.stderr.isTTY === true
+}
+
 /** 根据命令实际是否存在反向交互处理器，声明最小协议能力集合。 */
 export function clientCapabilities(command: Command): string[] {
   const capabilities: string[] = [Capability.RUN_CANCEL, Capability.RUN_MULTITHREAD, Capability.CONFIG_READ]
@@ -68,7 +110,7 @@ export function clientCapabilities(command: Command): string[] {
     capabilities.push(Capability.SKILLS_MANAGE)
   }
   if (command.kind.startsWith("plugins.")) capabilities.push(Capability.PLUGINS_READ)
-  if (command.kind === "plugins.install" || command.kind === "plugins.set_enabled" || command.kind === "plugins.remove") {
+  if (command.kind === "plugins.install" || command.kind === "plugins.update" || command.kind === "plugins.set_enabled" || command.kind === "plugins.remove") {
     capabilities.push(Capability.PLUGINS_MANAGE)
   }
   if (command.kind === "plugins.settings.list" || command.kind === "plugins.settings.set" || command.kind === "plugins.settings.remove") {
@@ -81,8 +123,54 @@ export function clientCapabilities(command: Command): string[] {
 }
 
 /** 声明当前表现层能够处理的反向 Interaction。 */
-export function clientInteractionHandles(command: Command): Array<"approval" | "question" | "directory_trust" | "plan"> {
+export function clientInteractionHandles(
+  command: Command,
+  terminal: PluginConsentTerminalState = processPluginConsentTerminal(),
+): Array<"approval" | "question" | "directory_trust" | "plan" | "plugin_consent"> {
+  if (
+    (command.kind === "plugins.install" || command.kind === "plugins.update")
+    && hasPluginConsentTerminal(terminal)
+  ) return ["plugin_consent"]
   return command.kind === "run" && !command.nonInteractive ? ["approval", "question", "directory_trust", "plan"] : []
+}
+
+/** 读取 install/update 的一次性结构化 consent；取消、EOF 和非明确确认均拒绝。 */
+export async function readPluginConsent(
+  request: Extract<InteractionRequestEnvelope, { type: "plugin_consent" }>,
+  terminal: PluginConsentTerminal = processPluginConsentTerminal(),
+): Promise<InteractionResponse> {
+  if (!hasPluginConsentTerminal(terminal)) {
+    throw new Error("PLUGIN_CONSENT_REQUIRED")
+  }
+  const operation = request.payload.operation
+  terminal.stderr.write(`Plugin ${operation} preview:\n${JSON.stringify(request.payload.preview, null, 2)}\n`)
+  const input = createInterface({ input: terminal.stdin, output: terminal.stderr })
+  try {
+    const answer = await new Promise<string>((resolveAnswer, rejectAnswer) => {
+      let settled = false
+      const rejectAtEof = () => {
+        if (settled) return
+        settled = true
+        rejectAnswer(new Error("PLUGIN_CONSENT_REQUIRED"))
+      }
+      input.once("close", rejectAtEof)
+      input.question("Continue? [y/N] ", answerLine => {
+        if (settled) return
+        settled = true
+        resolveAnswer(answerLine)
+      })
+    })
+    return {
+      request_id: request.request_id,
+      type: "plugin_consent",
+      decision: ["y", "yes"].includes(answer.trim().toLowerCase()) ? "accept" : "cancel",
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message === "PLUGIN_CONSENT_REQUIRED") throw error
+    return { request_id: request.request_id, type: "plugin_consent", decision: "cancel" }
+  } finally {
+    input.close()
+  }
 }
 
 /** 启动 Python sidecar、完成 initialize 握手，并返回可关闭的运行句柄。 */
@@ -139,14 +227,26 @@ async function startAgent(command: Exclude<Command, { kind: "logs" }>): Promise<
   })
   try {
     const requested = clientCapabilities(command)
+    const consentTerminal = processPluginConsentTerminal()
     const initialized = await client.initialize({
       protocol: { major: PROTOCOL_VERSION.major, min_minor: 0, max_minor: PROTOCOL_VERSION.minor },
       client: { name: "harness-cli", version: CLI_VERSION, kind: command.kind === "run" && !command.nonInteractive ? "tui" : "cli" },
       capabilities: {
         requests: requested,
-        handles: clientInteractionHandles(command),
+        handles: clientInteractionHandles(command, consentTerminal),
       },
     })
+    if (
+      (command.kind === "plugins.install" || command.kind === "plugins.update")
+      && hasPluginConsentTerminal(consentTerminal)
+    ) {
+      client.handleInteractions(request => {
+        if (request.type !== "plugin_consent") {
+          throw new Error("Plugin management client received an unsupported interaction")
+        }
+        return readPluginConsent(request, consentTerminal)
+      })
+    }
     log.info("ipc.initialize.completed", {
       side: "client",
       duration_ms: Math.max(0, Math.round(performance.now() - startedAt)),

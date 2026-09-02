@@ -114,6 +114,7 @@ from harness_agent.protocol.generated import (
     PluginsRemoveParams,
     PluginsSetEnabledParams,
     PluginsValidateParams,
+    PluginsUpdateParams,
     QuestionResponse,
     RunCancelParams,
     RunStartParams,
@@ -156,7 +157,6 @@ from harness_agent.plugins import (
     PluginRuntimeCatalog,
     PluginRuntimeManager,
 )
-from harness_agent.plugins.manager import PluginReauthorizationSummary
 from harness_agent.plugins.model import ExtensionCatalogSnapshot, catalog_snapshot_id
 from harness_agent.plugins.runtime import HookRuntimeFailure
 from harness_agent.runtime.agent_spec import (
@@ -175,6 +175,7 @@ from harness_agent.extensions.mcp import (
 )
 
 from harness_agent.runtime.run_context import RunCancellationToken, RunContext
+from harness_agent.runtime.interactions import InteractionRequest
 from harness_agent.runtime.agent_engine_profile import AgentEngineProfile
 from harness_agent.runtime.resource_ownership import (
     ResourceScope,
@@ -206,6 +207,7 @@ from harness_agent.extensions.providers.harness_gateway import ProviderClientPoo
 from harness_agent.host.run_coordinator import (
     AgentEvent,
     ConnectionRef,
+    INTERACTION_TIMEOUT_MS,
     RunCoordinator,
     RunError,
     RunExecution,
@@ -231,15 +233,6 @@ if TYPE_CHECKING:
     from harness_agent.threads.runtime_state import RuntimeExecutionPolicy
 
 logger = logging.getLogger(__name__)
-
-
-class PluginReauthorizationRequired(ConfigError):
-    """明确请求 stale Plugin 能力时返回的可操作门禁错误。"""
-
-    def __init__(self, summary: PluginReauthorizationSummary) -> None:
-        """保存只含 Plugin 身份与 capability fingerprint 的脱敏事实。"""
-        self.summary = summary
-        super().__init__(_plugin_reauthorization_message(summary))
 
 
 STABLE_ERROR_CODES = {
@@ -388,6 +381,7 @@ class AgentHost:
         self._agent_build_lock = asyncio.Lock()
         self._agent_engine_snapshot_lock = asyncio.Lock()
         self._run_event_tasks: set[asyncio.Task[None]] = set()
+        self._dispatch_tasks: set[asyncio.Task[None]] = set()
         # 运行工具继续使用 canonical realpath；Settings binding 另外保留用户
         # 选择的 lexical workspace path，以便 symlink 切换不能复用旧 credential。
         self._settings_workspace = (workspace or Path.cwd()).expanduser().absolute()
@@ -427,10 +421,8 @@ class AgentHost:
         )
         self._skill_registry: SkillRegistry | None = None
         self._skill_registry_source_signature: tuple[str, str] | None = None
-        self._plugin_manager = PluginManager(home=self._config_home)
+        self._plugin_manager = PluginManager(home=self._config_home, workspace=self._workspace)
         self._plugin_catalog_snapshot: ExtensionCatalogSnapshot | None = None
-        self._plugin_reauthorization_required: tuple[str, ...] = ()
-        self._plugin_reauthorization_index: dict[str, PluginReauthorizationSummary] = {}
         self._plugin_skill_sources: tuple[PluginSkillSource, ...] = ()
         self._plugin_agent_sources: tuple[PluginAgentSource, ...] = ()
         self._plugin_context_blocks_by_source: dict[str, tuple[ContextBlock, ...]] = {}
@@ -561,6 +553,7 @@ class AgentHost:
             METHOD["PLUGINS_INSPECT"]: self._handle_plugins_inspect,
             METHOD["PLUGINS_VALIDATE"]: self._handle_plugins_validate,
             METHOD["PLUGINS_INSTALL"]: self._handle_plugins_install,
+            METHOD["PLUGINS_UPDATE"]: self._handle_plugins_update,
             METHOD["PLUGINS_SET_ENABLED"]: self._handle_plugins_set_enabled,
             METHOD["PLUGINS_REMOVE"]: self._handle_plugins_remove,
             METHOD["AGENTS_LIST"]: self._handle_agents_list,
@@ -635,7 +628,17 @@ class AgentHost:
                 if not isinstance(message, dict):
                     await self.send_error(None, -32600, "Invalid Request")
                     continue
-                await self.dispatch(message)
+                # Plugin consent 是 sidecar 主动发给当前 CLI 的反向请求；管理
+                # handler 必须在后台等待 response，stdio 读取循环才能继续收帧。
+                if message.get("method") in {
+                    METHOD["PLUGINS_INSTALL"],
+                    METHOD["PLUGINS_UPDATE"],
+                }:
+                    task = asyncio.create_task(self.dispatch(message))
+                    self._dispatch_tasks.add(task)
+                    task.add_done_callback(self._dispatch_tasks.discard)
+                else:
+                    await self.dispatch(message)
         finally:
             await self.close()
 
@@ -659,6 +662,8 @@ class AgentHost:
         self._active_team_tokens.clear()
         if self._run_event_tasks:
             await asyncio.gather(*tuple(self._run_event_tasks), return_exceptions=True)
+        if self._dispatch_tasks:
+            await asyncio.gather(*tuple(self._dispatch_tasks), return_exceptions=True)
         pending_requests = sum(
             len(connection.pending_requests) for connection in self._connections.values()
         )
@@ -906,11 +911,14 @@ class AgentHost:
             await self.send_error(request_id, -32602, message, data)
         except PluginError as exc:
             details = {"field": exc.field} if exc.field is not None else None
+            entry = ERROR_CODES.get(exc.code)
+            rpc_code = int(entry["jsonrpc_code"]) if entry is not None else -32040
+            retryable = bool(entry["retryable"]) if entry is not None else False
             await self.send_error(
                 request_id,
-                -32040,
+                rpc_code,
                 exc.code,
-                {"code": exc.code, "retryable": False, "details": details},
+                {"code": exc.code, "retryable": retryable, "details": details},
             )
         except TeamError as exc:
             data: dict[str, object] = {
@@ -964,13 +972,6 @@ class AgentHost:
             )
         except RpcError as exc:
             await self.send_error(request_id, exc.code, exc.message, exc.data)
-        except PluginReauthorizationRequired as exc:
-            await self.send_error(
-                request_id,
-                -32004,
-                "PLUGIN_REAUTHORIZATION_REQUIRED",
-                _plugin_reauthorization_error_data(exc.summary),
-            )
         except Exception as exc:  # pragma: no cover - 最后的协议隔离层。
             logger.exception("Unhandled JSON-RPC handler error for %s", method)
             await self.send_error(request_id, -32603, f"{type(exc).__name__}: {exc}")
@@ -1153,7 +1154,6 @@ class AgentHost:
                 "handles": sorted(handles),
             },
             "agent_commands": registry.agent_commands(),
-            "static_command_preview": self._plugin_manager.static_preview()["commands"],
             "skills_snapshot": registry.snapshot(),
             "skill_diagnostics": registry.diagnostics[:20],
             "limits": {
@@ -1384,12 +1384,6 @@ class AgentHost:
                     CAPABILITY["RUN_MULTITHREAD"] in self._connection_capabilities()
                 ),
             )
-        except PluginReauthorizationRequired as exc:
-            raise RpcError(
-                -32004,
-                "PLUGIN_REAUTHORIZATION_REQUIRED",
-                _plugin_reauthorization_error_data(exc.summary),
-            ) from exc
         except (
             ConfigError,
             ContextRefreshError,
@@ -1438,7 +1432,6 @@ class AgentHost:
             reservation = await self._reserve_agent_engine_snapshot()
             try:
                 registry = await self._refresh_skill_catalog_locked()
-                self._raise_if_stale_plugin_request(command)
                 return RunPreparation(
                     skill_snapshot_id=registry.snapshot_id,
                     skill_registry=registry,
@@ -1450,7 +1443,6 @@ class AgentHost:
         reservation = await self._reserve_agent_engine_snapshot()
         try:
             registry = await self._refresh_skill_catalog_locked()
-            self._raise_if_stale_plugin_request(command)
             requested_skill = self._prepare_requested_skill(command, registry)
             self._load_config()
             if self._config is None:
@@ -1790,7 +1782,6 @@ class AgentHost:
                 result = {
                     "servers": [],
                     "total_tools": 0,
-                    "static_preview": self._plugin_manager.static_preview()["mcp"],
                 }
                 if self._mcp_diagnostics:
                     result["diagnostics"] = list(self._mcp_diagnostics)
@@ -1800,7 +1791,6 @@ class AgentHost:
         result = {
             "servers": statuses,
             "total_tools": total_tools,
-            "static_preview": self._plugin_manager.static_preview()["mcp"],
         }
         if self._mcp_diagnostics:
             result["diagnostics"] = list(self._mcp_diagnostics)
@@ -2357,35 +2347,6 @@ class AgentHost:
             )
         return registry.load(record.skill_id, requested.args)
 
-    def _raise_if_stale_plugin_request(self, command: StartRun) -> None:
-        """只拦截明确请求 stale Plugin 能力的 Run，不把 blocked index 当全局开关。"""
-        requested = command.requested_skill
-        if requested is None:
-            return
-        summary = self._reauthorization_for_identity(requested.skill_id)
-        if summary is not None:
-            raise PluginReauthorizationRequired(summary)
-
-    def _reauthorization_for_identity(
-        self,
-        identity: str,
-    ) -> PluginReauthorizationSummary | None:
-        """按稳定 component ID 查找门禁事实；不读取包路径或运行时目录。"""
-        for summary in self._plugin_reauthorization_index.values():
-            if identity in summary.component_ids or identity.startswith(
-                f"plugin/{summary.plugin_id}/"
-            ):
-                return summary
-        return None
-
-    def _blocked_plugin_agent_messages(self) -> dict[str, str]:
-        """返回 stale Agent 的不可执行提示，不把它们加入 Agent catalog。"""
-        return {
-            agent_id: _plugin_reauthorization_message(summary)
-            for summary in self._plugin_reauthorization_index.values()
-            for agent_id in summary.agent_ids
-        }
-
     def _resolved_command_name_for_run(self, command: StartRun, skill_id: str) -> str:
         """读取 run.start 时冻结的本连接、当前 snapshot CLI exact 名称。"""
         if not command.command_binding_snapshot_id or command.command_bindings is None:
@@ -2406,17 +2367,12 @@ class AgentHost:
         # registry 还要合并同一 Plugin catalog 的 Skill 来源。
         self._skill_catalog_manager.refresh()
         previous = self._skill_registry
-        plugin_refresh = self._plugin_manager.refresh_catalog()
-        self._plugin_reauthorization_required = plugin_refresh.reauthorization_required
-        self._plugin_reauthorization_index = {
-            summary.plugin_id: summary for summary in plugin_refresh.reauthorization
-        }
-        previous_plugin = self._plugin_catalog_snapshot
-        if (
-            previous_plugin is None
-            or previous_plugin.snapshot_id != plugin_refresh.catalog.snapshot_id
-            or bool(plugin_refresh.changed_plugin_ids)
-        ):
+        # Plugin activation 是 Host 的启动输入，不是普通 Skill 的热刷新源。
+        # 第一次进入这里（通常由 initialize）才从 registry 重解析 Adapter；
+        # 之后即使另一个 Shell 改写 registry，当前 Host 仍持有原始 catalog、
+        # Settings、MCP、Hook/LSP 和 Context generation，变化只留给下一 Host。
+        if self._plugin_catalog_snapshot is None:
+            plugin_refresh = self._plugin_manager.refresh_catalog()
             previous_mcp_digest = (
                 self._mcp_snapshot.digest if self._mcp_snapshot is not None else None
             )
@@ -2634,7 +2590,6 @@ class AgentHost:
         return {
             "snapshot": registry.snapshot(),
             "skills": registry.list(include_disabled=include_disabled),
-            "static_preview": self._plugin_manager.static_preview()["skills"],
             "diagnostics": registry.diagnostics[:20],
         }
 
@@ -2850,20 +2805,168 @@ class AgentHost:
             )
 
     def _settings_binding_for_params(self, parsed: Any) -> SettingBinding:
-        """按完整 immutable identity 选择当前 catalog 的唯一 declaration。"""
-        summary = self._plugin_reauthorization_index.get(parsed.plugin_id)
-        if summary is not None:
-            raise PluginReauthorizationRequired(summary)
-        for binding in self._settings_bindings:
-            if (
-                binding.plugin_id == parsed.plugin_id
-                and binding.package_digest == parsed.package_digest
-                and binding.declaration_digest == parsed.declaration_digest
-                and binding.setting_key == parsed.setting_key
-                and binding.env_var == parsed.env_var
-            ):
-                return binding
-        raise SettingsError("SETTINGS_DECLARATION_STALE", field="declaration_digest")
+        """按用户提供的 Plugin name 与 setting name 解析当前 declaration。"""
+        try:
+            result = self._plugin_manager.setting_bindings_for_management(parsed.name)
+        except PluginError as exc:
+            # Settings 的公开入口只接受 name；不要把内部 Plugin 异常直接
+            # 变成通用 Host 错误，也不要在错误数据中回显 registry locator。
+            if exc.code in {"PLUGIN_NOT_FOUND", "PLUGIN_NAME_CONFLICT"}:
+                raise SettingsError("SETTINGS_RECORD_NOT_FOUND", field="name") from exc
+            raise
+        matches = [
+            binding
+            for binding in result.bindings
+            if binding.setting_key == parsed.setting
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise SettingsError("SETTINGS_DECLARATION_AMBIGUOUS", field="setting")
+        raise SettingsError("SETTINGS_RECORD_NOT_FOUND", field="setting")
+
+    def _settings_public_summary(
+        self,
+        value: Mapping[str, object],
+        *,
+        plugin_names: Mapping[str, str] | None = None,
+    ) -> dict[str, object]:
+        """从内部 summary 生成不含 binding/digest/account 的用户摘要。"""
+        plugin_id = value.get("plugin_id")
+        plugin_name = (
+            plugin_names.get(plugin_id, "")
+            if plugin_names is not None and isinstance(plugin_id, str)
+            else ""
+        )
+        if not plugin_name:
+            fallback = value.get("name")
+            plugin_name = fallback if isinstance(fallback, str) and fallback else "unknown"
+        setting = value.get("env_var")
+        if not isinstance(setting, str) or not setting:
+            setting = "UNKNOWN_SETTING"
+        return {
+            "name": plugin_name,
+            "setting": setting,
+            "scope": value.get("scope", "user"),
+            "description": value.get("description", "Plugin setting"),
+            "sensitive": bool(value.get("sensitive", False)),
+            "required": False,
+            "store_state": value.get("store_state", "absent"),
+            "runtime_state": value.get("runtime_state", "not_loaded"),
+            "pending_operation": value.get("pending_operation"),
+            "diagnostic": _public_settings_diagnostic(value.get("diagnostic")),
+        }
+
+    def _settings_public_diagnostics(self, values: Iterable[object]) -> list[str]:
+        """把内部带 plugin id 的诊断裁剪为稳定错误码。"""
+        return list(
+            dict.fromkeys(
+                diagnostic
+                for diagnostic in (_public_settings_diagnostic(item) for item in values)
+                if diagnostic is not None
+            )
+        )
+
+    def _settings_bindings_for_listing(
+        self,
+        name: str | None,
+    ) -> tuple[tuple[SettingBinding, ...], str | None]:
+        """解析 Settings list 的 declarations 与可选目标内部 ID。"""
+        try:
+            target_id = (
+                self._plugin_manager.plugin_id_for_name(name)
+                if name is not None
+                else None
+            )
+            result = self._plugin_manager.setting_bindings_for_management(name)
+        except PluginError as exc:
+            if exc.code in {"PLUGIN_NOT_FOUND", "PLUGIN_NAME_CONFLICT"}:
+                raise SettingsError("SETTINGS_RECORD_NOT_FOUND", field="name") from exc
+            raise
+        return result.bindings, target_id
+
+    @staticmethod
+    def _settings_summary_for_id(
+        listing: Mapping[str, object],
+        setting_id: str,
+    ) -> Mapping[str, object]:
+        """从 mutation 后的 listing 取回安全 summary，缺失时返回稳定错误。"""
+        raw_settings = listing.get("settings")
+        if not isinstance(raw_settings, list):
+            raise SettingsError("SETTINGS_STORAGE_UNAVAILABLE", field="settings")
+        for item in raw_settings:
+            if isinstance(item, dict) and item.get("setting_id") == setting_id:
+                return item
+        raise SettingsError("SETTINGS_RECORD_NOT_FOUND", field="setting")
+
+    def _settings_public_listing(
+        self,
+        listing: Mapping[str, object],
+        *,
+        name: str | None,
+        target_id: str | None,
+    ) -> dict[str, object]:
+        """将 SettingsStore 的内部 listing 映射为公开用户契约。"""
+        plugin_names = self._plugin_manager.plugin_names_by_id()
+        raw_settings = listing.get("settings", [])
+        settings = [
+            self._settings_public_summary(item, plugin_names=plugin_names)
+            for item in raw_settings
+            if isinstance(item, dict)
+            and (target_id is None or item.get("plugin_id") == target_id)
+        ]
+        return {
+            "scope": listing.get("scope", "user"),
+            "settings": settings,
+        }
+
+    def _settings_public_mutation(
+        self,
+        operation: str,
+        scope: str,
+        summary: Mapping[str, object],
+        diagnostics: Iterable[object] = (),
+    ) -> dict[str, object]:
+        """生成 Settings set/remove 的公开响应，不带 store revision。"""
+        return {
+            "operation": operation,
+            "scope": scope,
+            "summary": self._settings_public_summary(
+                summary,
+                plugin_names=self._plugin_manager.plugin_names_by_id(),
+            ),
+            "diagnostics": self._settings_public_diagnostics(diagnostics),
+        }
+
+    def _rebind_plugin_settings(self, old: Any, new: Any) -> dict[str, object]:
+        """更新 Plugin 时迁移相同 name/env 的内部 credential binding。"""
+        old_result = self._plugin_manager.setting_bindings_for_uninstall(old)
+        new_result = self._plugin_manager.setting_bindings_for_uninstall(new)
+        new_by_key = {
+            (binding.declaration.name, binding.env_var): binding
+            for binding in new_result.bindings
+        }
+        warnings: list[str] = []
+        for old_binding in old_result.bindings:
+            new_binding = new_by_key.get(
+                (old_binding.declaration.name, old_binding.env_var)
+            )
+            if new_binding is None:
+                warnings.append("PLUGIN_SETTING_RECONFIGURE_REQUIRED")
+                continue
+            for store in (self._settings_user_store, self._settings_workspace_store):
+                warnings.extend(
+                    store.rebind_plugin_setting(
+                        old_binding=old_binding,
+                        new_binding=new_binding,
+                    )
+                )
+        warnings.extend(
+            diagnostic
+            for diagnostic in new_result.diagnostics
+            if diagnostic.endswith("PLUGIN_SETTING_RECONFIGURE_REQUIRED")
+        )
+        return {"warnings": list(dict.fromkeys(warnings))}
 
     def _settings_store_for_scope(self, scope: str) -> SettingsStore:
         """选择当前 Host 已绑定的 user/workspace metadata store。"""
@@ -2884,18 +2987,20 @@ class AgentHost:
         params: dict[str, Any],
         _id: str,
     ) -> dict[str, object]:
-        """返回 live store 与当前 Host snapshot 的脱敏 Settings summary。"""
+        """返回指定 scope 的脱敏 Settings summary。"""
         try:
             parsed = SettingsListParams.model_validate(params)
-            self._require_skills()
-            # 管理读取沿用 initialize 时冻结的 catalog/generation binding；不在
-            # list 中重新扫描插件，避免 list 与当前运行 snapshot 发生串线。
+            declarations, target_id = self._settings_bindings_for_listing(parsed.name)
             result = self._settings_store_for_scope(parsed.scope).list(
                 scope=parsed.scope,
-                declarations=self._settings_bindings,
+                declarations=declarations,
                 snapshot=self._settings_snapshot,
             )
-            return result
+            return self._settings_public_listing(
+                result,
+                name=parsed.name,
+                target_id=target_id,
+            )
         except SettingsError as exc:
             raise self._settings_rpc_error(exc) from exc
 
@@ -2907,10 +3012,17 @@ class AgentHost:
         """以 Host 校验的 declaration 写入 credential，结果只对 next Host 生效。"""
         try:
             parsed = SettingsSetParams.model_validate(params)
-            self._require_skills()
             binding = self._settings_binding_for_params(parsed)
             store = self._settings_store_for_scope(parsed.scope)
-            mutation = store.set(
+            current = store.list(
+                scope=parsed.scope,
+                declarations=(),
+                snapshot=self._settings_snapshot,
+            )
+            expected_revision = current.get("store_revision")
+            if not isinstance(expected_revision, int):
+                raise SettingsError("SETTINGS_STORAGE_UNAVAILABLE", field="store_revision")
+            store.set(
                 scope=parsed.scope,
                 plugin_id=binding.plugin_id,
                 package_digest=binding.package_digest,
@@ -2918,7 +3030,7 @@ class AgentHost:
                 setting_key=binding.setting_key,
                 env_var=binding.env_var,
                 value=parsed.value,
-                expected_store_revision=parsed.expected_store_revision,
+                expected_store_revision=expected_revision,
                 name=binding.declaration.name,
                 description=binding.declaration.description,
                 sensitive=binding.declaration.sensitive,
@@ -2927,18 +3039,21 @@ class AgentHost:
             )
             listing = store.list(
                 scope=parsed.scope,
-                declarations=self._settings_bindings,
+                declarations=self._plugin_manager.setting_bindings_for_management(
+                    parsed.name
+                ).bindings,
                 snapshot=self._settings_snapshot,
             )
-            summary = next(
-                item for item in listing["settings"]
-                if isinstance(item, dict) and item.get("setting_id") == binding.setting_id
+            summary = self._settings_summary_for_id(
+                listing,
+                binding.setting_id,
             )
-            mutation["store_revision"] = listing["store_revision"]
-            mutation["runtime_snapshot"] = listing["runtime_snapshot"]
-            mutation["summary"] = summary
-            mutation["diagnostics"] = list(self._settings_diagnostics)
-            return mutation
+            return self._settings_public_mutation(
+                "set",
+                parsed.scope,
+                summary,
+                self._settings_diagnostics,
+            )
         except SettingsError as exc:
             raise self._settings_rpc_error(exc) from exc
 
@@ -2950,35 +3065,45 @@ class AgentHost:
         """按 exact identity 写 tombstone 并删除精确 credential account。"""
         try:
             parsed = SettingsRemoveParams.model_validate(params)
-            self._require_skills()
             binding = self._settings_binding_for_params(parsed)
             store = self._settings_store_for_scope(parsed.scope)
-            mutation = store.remove(
+            current = store.list(
+                scope=parsed.scope,
+                declarations=(),
+                snapshot=self._settings_snapshot,
+            )
+            expected_revision = current.get("store_revision")
+            if not isinstance(expected_revision, int):
+                raise SettingsError("SETTINGS_STORAGE_UNAVAILABLE", field="store_revision")
+            store.remove(
                 scope=parsed.scope,
                 plugin_id=binding.plugin_id,
                 package_digest=binding.package_digest,
                 declaration_digest=binding.declaration_digest,
                 setting_key=binding.setting_key,
                 env_var=binding.env_var,
-                expected_store_revision=parsed.expected_store_revision,
+                expected_store_revision=expected_revision,
                 name=binding.declaration.name,
                 description=binding.declaration.description,
                 sensitive=binding.declaration.sensitive,
             )
             listing = store.list(
                 scope=parsed.scope,
-                declarations=self._settings_bindings,
+                declarations=self._plugin_manager.setting_bindings_for_management(
+                    parsed.name
+                ).bindings,
                 snapshot=self._settings_snapshot,
             )
-            summary = next(
-                item for item in listing["settings"]
-                if isinstance(item, dict) and item.get("setting_id") == binding.setting_id
+            summary = self._settings_summary_for_id(
+                listing,
+                binding.setting_id,
             )
-            mutation["store_revision"] = listing["store_revision"]
-            mutation["runtime_snapshot"] = listing["runtime_snapshot"]
-            mutation["summary"] = summary
-            mutation["diagnostics"] = list(self._settings_diagnostics)
-            return mutation
+            return self._settings_public_mutation(
+                "remove",
+                parsed.scope,
+                summary,
+                self._settings_diagnostics,
+            )
         except SettingsError as exc:
             raise self._settings_rpc_error(exc) from exc
 
@@ -3046,20 +3171,28 @@ class AgentHost:
         params: dict[str, Any],
         _id: str,
     ) -> dict[str, object]:
-        """列出 Plugin registry 与 enabled catalog，不返回宿主文件路径。"""
+        """列出 Plugin registry 与当前 scope 的产品状态，不返回宿主文件路径。"""
         parsed = PluginsListParams.model_validate(params)
         await self._refresh_control_plane_catalog()
-        return self._plugin_manager.list(include_disabled=parsed.include_disabled)
+        return self._plugin_manager.list(
+            scope=parsed.scope,
+            workspace=self._workspace,
+            include_disabled=parsed.include_disabled,
+        )
 
     async def _handle_plugins_inspect(
         self,
         params: dict[str, Any],
         _id: str,
     ) -> dict[str, object]:
-        """返回一个安装 Plugin 的兼容性和 trust 摘要。"""
+        """返回一个安装 Plugin 的公开状态摘要。"""
         parsed = PluginsInspectParams.model_validate(params)
         await self._refresh_control_plane_catalog()
-        return self._plugin_manager.inspect(parsed.id)
+        return self._plugin_manager.inspect(
+            parsed.name,
+            scope=parsed.scope,
+            workspace=self._workspace,
+        )
 
     async def _handle_plugins_validate(
         self,
@@ -3078,24 +3211,111 @@ class AgentHost:
         params: dict[str, Any],
         _id: str,
     ) -> dict[str, object]:
-        """copy-on-install 本地 Plugin，新记录始终为 disabled。"""
+        """预览并经 Shell consent 后 copy-on-install 本地 Plugin。"""
         parsed = PluginsInstallParams.model_validate(params)
-        return self._plugin_manager.install(
-            self._plugin_source_path(parsed.source),
-            format=parsed.format,
+        source = self._plugin_source_path(parsed.source)
+        preview, package_digest = self._plugin_manager._preview_install_with_identity(  # noqa: SLF001
+            source,
+            scope=parsed.scope,
+            workspace=self._workspace,
         )
+        await self._request_plugin_consent("install", preview)
+        return self._plugin_manager.install(
+            source,
+            scope=parsed.scope,
+            workspace=self._workspace,
+            expected_package_digest=package_digest,
+        )
+
+    async def _handle_plugins_update(
+        self,
+        params: dict[str, Any],
+        _id: str,
+    ) -> dict[str, object]:
+        """预览并经 Shell consent 后更新同名 Plugin artifact。"""
+        parsed = PluginsUpdateParams.model_validate(params)
+        source = self._plugin_source_path(parsed.source) if parsed.source is not None else None
+        preview, old_package_digest, package_digest = (
+            self._plugin_manager._preview_update_with_identity(  # noqa: SLF001
+                parsed.name,
+                source=source,
+            )
+        )
+        await self._request_plugin_consent("update", preview)
+        return self._plugin_manager.update(
+            parsed.name,
+            source=source,
+            settings_rebind=self._rebind_plugin_settings,
+            expected_old_package_digest=old_package_digest,
+            expected_package_digest=package_digest,
+        )
+
+    async def _request_plugin_consent(
+        self,
+        operation: str,
+        preview: Mapping[str, object],
+    ) -> None:
+        """在同一受控 mutation 中等待 Shell 的结构化 Plugin consent。"""
+        # Plan 审阅可以无限期等待，但独立 CLI 的插件确认必须保持有界。
+        consent_timeout_ms = INTERACTION_TIMEOUT_MS or 300_000
+        connection = self._current_connection()
+        if "plugin_consent" not in self._connection_handles(connection):
+            raise PluginError("PLUGIN_CONSENT_REQUIRED", "Plugin install/update 需要交互确认")
+        request_id = f"plugin-consent-{uuid.uuid4().hex}"
+        future: asyncio.Future[object] = asyncio.get_running_loop().create_future()
+        interaction = InteractionRequest(
+            request_id=request_id,
+            type="plugin_consent",
+            payload={"operation": operation, "preview": dict(preview)},
+            interrupt_id=request_id,
+        )
+        connection.pending_requests[request_id] = future
+        connection.interaction_specs[request_id] = interaction
+        try:
+            await self._send_to(
+                connection,
+                {
+                    "jsonrpc": "2.0",
+                    "method": interaction_method("plugin_consent"),
+                    "id": request_id,
+                    "params": {
+                        "thread_id": "plugin-management",
+                        "run_id": request_id,
+                        "timeout_ms": consent_timeout_ms,
+                        "payload": dict(interaction.payload),
+                    },
+                },
+            )
+            result = await asyncio.wait_for(
+                future,
+                timeout=consent_timeout_ms / 1000,
+            )
+        except asyncio.TimeoutError as exc:
+            raise PluginError("PLUGIN_OPERATION_CANCELLED", "Plugin 操作已取消") from exc
+        except RpcError as exc:
+            # CLI 在 pipe/EOF 下即使曾注册过 handler，也必须把“无法确认”
+            # 与用户主动取消区分开；前者不能被降级成一个可重试的 cancel。
+            if exc.message == "PLUGIN_CONSENT_REQUIRED":
+                raise PluginError("PLUGIN_CONSENT_REQUIRED", "Plugin install/update 需要交互确认") from exc
+            raise PluginError("PLUGIN_OPERATION_CANCELLED", "Plugin 操作已取消") from exc
+        finally:
+            connection.pending_requests.pop(request_id, None)
+            connection.interaction_specs.pop(request_id, None)
+        if not isinstance(result, dict) or result.get("decision") != "accept":
+            raise PluginError("PLUGIN_OPERATION_CANCELLED", "Plugin 操作已取消")
 
     async def _handle_plugins_set_enabled(
         self,
         params: dict[str, Any],
         _id: str,
     ) -> dict[str, object]:
-        """按 capability fingerprint 显式启用或停用 Plugin。"""
+        """按名称写入 user 或 workspace activation。"""
         parsed = PluginsSetEnabledParams.model_validate(params)
         return self._plugin_manager.set_enabled(
-            parsed.id,
+            parsed.name,
             enabled=parsed.enabled,
-            capability_fingerprint=parsed.capability_fingerprint,
+            scope=parsed.scope,
+            workspace=self._workspace,
         )
 
     async def _handle_plugins_remove(
@@ -3103,11 +3323,11 @@ class AgentHost:
         params: dict[str, Any],
         _id: str,
     ) -> dict[str, object]:
-        """先按当前 Plugin identity 清理 Settings，再移除安装记录。"""
+        """先清理 Plugin 全部 Settings，再移除安装记录。"""
         parsed = PluginsRemoveParams.model_validate(params)
         try:
             return self._plugin_manager.remove(
-                parsed.id,
+                parsed.name,
                 purge_data=parsed.purge_data,
                 settings_cleanup=self._uninstall_plugin_settings,
             )
@@ -3121,43 +3341,21 @@ class AgentHost:
     ) -> dict[str, object]:
         """以 Plugin registry revision/package identity 绑定 Settings uninstall。"""
         # 卸载是管理面动作，必须按 registry 中的安装记录解析声明；停用或
-        # trust 失效只应阻止 runtime，不能让已有 credential 逃过 purge。
+        # activation 只影响 runtime，不能让已有 credential 逃过 purge。
         settings_result = self._plugin_manager.setting_bindings_for_uninstall(plugin)
-        bindings = tuple(
-            binding
-            for binding in settings_result.bindings
-            if binding.plugin_id == plugin.plugin_id
-        )
-        if not bindings and not settings_result.diagnostics:
-            return {
-                "operation": "uninstall",
-                "plugin_id": plugin.plugin_id,
-                "package_digest": plugin.package_digest,
-                "plugin_registry_revision": plugin_registry_revision,
-                "store_revision": self._settings_user_store.list(scope="user")["store_revision"],
-                "removed": [],
-                "partial": [],
-                "diagnostics": list(settings_result.diagnostics),
-            }
-        if not self._settings_user_store._backend_is_available():  # noqa: SLF001 - same domain boundary
-            raise SettingsError("SETTINGS_BACKEND_UNAVAILABLE", field="backend")
         user_binding = self._settings_user_store.user_binding_digest
         user_index = self._settings_user_store._read_index("user", user_binding)  # noqa: SLF001
         if user_index is None:
             return {
                 "operation": "uninstall",
-                "plugin_id": plugin.plugin_id,
-                "package_digest": plugin.package_digest,
-                "plugin_registry_revision": plugin_registry_revision,
-                "store_revision": 0,
-                "removed": [],
-                "partial": [],
-                "diagnostics": [],
+                "removed_count": 0,
+                "partial_count": 0,
+                "diagnostics": self._settings_public_diagnostics(settings_result.diagnostics),
             }
         try:
             result = self._settings_user_store.uninstall_plugin(
                 plugin_id=plugin.plugin_id,
-                package_digest=plugin.package_digest,
+                package_digest=None,
                 expected_store_revision=user_index.revision,
                 workspace_stores={
                     self._settings_workspace_store.workspace_binding_digest:
@@ -3168,28 +3366,20 @@ class AgentHost:
             if exc.code == "SETTINGS_RECORD_NOT_FOUND":
                 return {
                     "operation": "uninstall",
-                    "plugin_id": plugin.plugin_id,
-                    "package_digest": plugin.package_digest,
-                    "plugin_registry_revision": plugin_registry_revision,
-                    "store_revision": user_index.revision,
-                    "removed": [],
-                    "partial": [],
+                    "removed_count": 0,
+                    "partial_count": 0,
                     "diagnostics": [],
                 }
             raise
-        result["plugin_id"] = plugin.plugin_id
-        result["package_digest"] = plugin.package_digest
-        result["plugin_registry_revision"] = plugin_registry_revision
-        if settings_result.diagnostics:
-            result["diagnostics"] = list(
-                dict.fromkeys(
-                    (
-                        *result.get("diagnostics", []),
-                        *settings_result.diagnostics,
-                    )
-                )
-            )
-        return result
+        return {
+            "operation": "uninstall",
+            "removed_count": len(result.get("removed", [])),
+            "partial_count": len(result.get("partial", [])),
+            "diagnostics": self._settings_public_diagnostics(
+                (*result.get("diagnostics", []), *settings_result.diagnostics)
+            ),
+            "partial": bool(result.get("partial")),
+        }
 
     async def _handle_agents_list(
         self,
@@ -3203,7 +3393,6 @@ class AgentHost:
         return {
             "snapshot_id": catalog.snapshot_id,
             "agents": catalog.list_agents(),
-            "static_preview": self._plugin_manager.static_preview()["agents"],
             "diagnostics": [*self._plugin_diagnostics, *catalog.diagnostics],
         }
 
@@ -3368,7 +3557,6 @@ class AgentHost:
             AgentDelegator(
                 registry,
                 targets=targets,
-                blocked_target_messages=self._blocked_plugin_agent_messages(),
             ),
             store=store,
         )
@@ -3436,22 +3624,6 @@ class AgentHost:
 
     def _require_team_definition(self, team_id: str) -> TeamDefinition:
         """按稳定 ID 读取 TeamDefinition。"""
-        summary = self._reauthorization_for_identity(team_id)
-        if summary is None:
-            summary = next(
-                (
-                    candidate
-                    for candidate in self._plugin_reauthorization_index.values()
-                    if team_id in candidate.team_ids
-                ),
-                None,
-            )
-        if summary is not None:
-            raise TeamError(
-                "PLUGIN_REAUTHORIZATION_REQUIRED",
-                _plugin_reauthorization_message(summary),
-                details=_plugin_reauthorization_error_data(summary)["details"],
-            )
         for definition in self._all_team_definitions():
             if definition.team_id == team_id:
                 return definition
@@ -4361,7 +4533,6 @@ class AgentHost:
                 execution_registry=self._run_coordinator.execution_registry,
                 delegation_model=spec.model_view,
                 delegation_targets=delegation_targets,
-                blocked_target_messages=self._blocked_plugin_agent_messages(),
                 plugin_runtime=self._plugin_runtime_manager,
                 workspace_root_registry=self._workspace_root_registry,
                 rules_provider=_get_current_rules,
@@ -4820,41 +4991,6 @@ def _team_run_payload(run: TeamRun) -> dict[str, object]:
     }
 
 
-def _plugin_reauthorization_message(summary: PluginReauthorizationSummary) -> str:
-    """生成可操作且脱敏的 stale Plugin 门禁错误。"""
-    return (
-        "PLUGIN_REAUTHORIZATION_REQUIRED: "
-        f"plugin_id={summary.plugin_id}; "
-        f"authorization_state={summary.authorization_state}; "
-        f"capability_fingerprint={summary.capability_fingerprint}; "
-        "action=run `harness plugins inspect "
-        f"{summary.plugin_id}`, then `harness plugins enable {summary.plugin_id} "
-        f"--capability-fingerprint {summary.capability_fingerprint}`"
-    )
-
-
-def _plugin_reauthorization_error_data(
-    summary: PluginReauthorizationSummary,
-) -> dict[str, object]:
-    """返回 Protocol 已支持的 error.details 结构，不暴露安装路径或秘密。"""
-    return {
-        "code": "PLUGIN_REAUTHORIZATION_REQUIRED",
-        "retryable": False,
-        "details": {
-            "plugin_id": summary.plugin_id,
-            "authorization_state": summary.authorization_state,
-            "capability_fingerprint": summary.capability_fingerprint,
-            "action": {
-                "inspect": f"harness plugins inspect {summary.plugin_id}",
-                "enable": (
-                    f"harness plugins enable {summary.plugin_id} "
-                    f"--capability-fingerprint {summary.capability_fingerprint}"
-                ),
-            },
-        },
-    }
-
-
 def _protocol_error_data(message: str, data: object | None) -> dict[str, object]:
     """把既有领域异常收敛为 v3 稳定错误枚举。"""
     raw = data if isinstance(data, Mapping) else {}
@@ -4888,6 +5024,17 @@ def _protocol_error_data(message: str, data: object | None) -> dict[str, object]
     if details is not None:
         result["details"] = _bounded_json(details)
     return result
+
+
+def _public_settings_diagnostic(value: object) -> str | None:
+    """只把 Settings 内部诊断压缩为稳定错误码，避免泄露 plugin id 或路径。"""
+    if not isinstance(value, str) or not value:
+        return None
+    for candidate in reversed(value.split(":")):
+        candidate = candidate.strip()
+        if re.fullmatch(r"(?:SETTINGS|PLUGIN)_[A-Z0-9_]+", candidate):
+            return candidate
+    return "SETTINGS_DIAGNOSTIC"
 
 
 def _settings_value_schema_error(

@@ -36,8 +36,7 @@ async def test_full_demo_plugin_installs_and_runs_all_supported_components(
     validation = manager.validate(DEMO_ROOT)["plugin"]
     assert isinstance(validation, dict)
     assert validation["format"] == "hybrid"
-    assert validation["can_enable"] is True
-    assert validation["diagnostics"] == []
+    assert validation["warnings"] == []
     components = {item["kind"]: item for item in validation["components"]}
     assert {
         "agents",
@@ -50,15 +49,10 @@ async def test_full_demo_plugin_installs_and_runs_all_supported_components(
         "skills",
         "teams",
     } == set(components)
-    assert all(item["effective"] is True for item in components.values())
+    assert all(item["count"] > 0 for item in components.values())
 
     installed = manager.install(DEMO_ROOT)["plugin"]
     assert isinstance(installed, dict)
-    manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
     catalog = manager.catalog()
 
     skill_result = manager.skill_sources(catalog)

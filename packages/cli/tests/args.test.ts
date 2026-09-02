@@ -59,7 +59,7 @@ test("parses Skill catalog and management commands", () => {
   })
 })
 
-test("parses Plugin validation, install, trust and removal commands", () => {
+test("parses Plugin validation, installation, name/scope management and removal commands", () => {
   expect(parseArgs(["plugins", "validate", "./review.zip", "--format", "claude-code"], "/work")).toEqual({
     kind: "plugins.validate",
     cwd: "/work",
@@ -68,35 +68,43 @@ test("parses Plugin validation, install, trust and removal commands", () => {
   })
   expect(parseArgs(["plugins", "install", "./review"], "/work")).toMatchObject({
     kind: "plugins.install",
-    params: { source: "./review", format: "auto" },
+    params: { source: "./review", scope: "user" },
   })
   expect(parseArgs([
     "plugins",
     "enable",
-    "local-source/review",
-    "--capability-fingerprint",
-    "a".repeat(64),
+    "Review-Tools",
+    "--scope",
+    "workspace",
   ], "/work")).toMatchObject({
     kind: "plugins.set_enabled",
     params: {
-      id: "local-source/review",
+      name: "Review-Tools",
       enabled: true,
-      capability_fingerprint: "a".repeat(64),
+      scope: "workspace",
     },
   })
-  expect(parseArgs(["plugins", "remove", "local-source/review", "--purge-data"], "/work")).toMatchObject({
-    kind: "plugins.remove",
-    params: { id: "local-source/review", purge_data: true },
+  expect(parseArgs(["plugins", "update", "Review-Tools", "--source", "./review-v2"], "/work")).toMatchObject({
+    kind: "plugins.update",
+    params: { name: "Review-Tools", source: "./review-v2" },
   })
-  expect(() => parseArgs(["plugins", "enable", "local-source/review"], "/work")).toThrow("capability-fingerprint")
-  expect(() => parseArgs(["plugins", "install", "./review", "--format", "gemini"], "/work")).toThrow("only supports")
+  expect(parseArgs(["plugins", "remove", "Review-Tools", "--purge-data"], "/work")).toMatchObject({
+    kind: "plugins.remove",
+    params: { name: "Review-Tools", purge_data: true },
+  })
+  expect(() => parseArgs(["plugins", "enable", "Review-Tools", "--capability-fingerprint", "a".repeat(64)], "/work")).toThrow()
+  expect(() => parseArgs(["plugins", "install", "./review", "--format", "qwen-code"], "/work")).toThrow()
   expect(parseArgs(["plugins", "validate", "./za38-extension", "--format", "qwen-code"], "/work")).toMatchObject({
     kind: "plugins.validate",
     params: { source: "./za38-extension", format: "qwen-code" },
   })
 })
 
-test("parses Plugin Settings management without accepting a value in argv", () => {
+test("parses Plugin Settings management without exposing internal identity in argv", () => {
+  expect(parseArgs(["plugins", "settings", "list"], "/work")).toMatchObject({
+    kind: "plugins.settings.list",
+    params: { scope: "user" },
+  })
   expect(parseArgs(["plugins", "settings", "list", "--scope", "workspace"], "/work")).toEqual({
     kind: "plugins.settings.list",
     cwd: "/work",
@@ -107,98 +115,59 @@ test("parses Plugin Settings management without accepting a value in argv", () =
     "plugins",
     "settings",
     "set",
-    "plugin/local/za38",
+    "Review-Tools",
     "ZA38_TOKEN",
     "--scope",
     "user",
-    "--package-digest",
-    "a".repeat(64),
-    "--declaration-digest",
-    "b".repeat(64),
-    "--expected-store-revision",
-    "0",
     "--secret-stdin",
   ], "/work")).toEqual({
     kind: "plugins.settings.set",
     cwd: "/work",
     configPath: undefined,
     params: {
+      name: "Review-Tools",
+      setting: "ZA38_TOKEN",
       scope: "user",
-      plugin_id: "plugin/local/za38",
-      setting_key: "ZA38_TOKEN",
-      env_var: "ZA38_TOKEN",
-      package_digest: "a".repeat(64),
-      declaration_digest: "b".repeat(64),
-      expected_store_revision: 0,
     },
     secretStdin: true,
   })
   expect(() => parseArgs([
-    "plugins", "settings", "set", "plugin/local/za38", "ZA38_TOKEN", "fake-secret",
-    "--package-digest", "a".repeat(64), "--declaration-digest", "b".repeat(64),
-    "--expected-store-revision", "0", "--secret-stdin",
+    "plugins", "settings", "set", "Review-Tools", "ZA38_TOKEN", "fake-secret", "--secret-stdin",
   ], "/work")).toThrow("does not accept a value")
 })
 
-test("Plugin Settings 按动作严格拒绝未知 option、缺值和重复 identity", () => {
-  const digest = "a".repeat(64)
-  const declaration = "b".repeat(64)
-  const revision = ["--expected-store-revision", "0"]
-  const identity = ["plugin/local/za38", "ZA38_TOKEN"]
-  const required = [
-    "--package-digest", digest,
-    "--declaration-digest", declaration,
-    ...revision,
-  ]
+test("Plugin Settings 按动作严格拒绝未知 option、缺值和重复 scope", () => {
 
   expect(() => parseArgs([
-    "plugins", "settings", "set", ...identity,
+    "plugins", "settings", "set", "Review-Tools", "ZA38_TOKEN",
     "--totally-unknown", "plugin/x", "--also-unknown", "TOKEN",
-    ...required, "--secret-stdin",
-  ], "/work")).toThrow("does not support --totally-unknown")
+    "--secret-stdin",
+  ], "/work")).toThrow("unsupported option")
   expect(() => parseArgs([
     "plugins", "settings", "list", "--totally-unknown",
-  ], "/work")).toThrow("does not support --totally-unknown")
+  ], "/work")).toThrow("unsupported option")
   expect(() => parseArgs([
-    "plugins", "settings", "remove", ...identity,
-    ...required, "--secret-stdin",
-  ], "/work")).toThrow("does not support --secret-stdin")
+    "plugins", "settings", "remove", "Review-Tools", "ZA38_TOKEN", "--secret-stdin",
+  ], "/work")).toThrow("unsupported option")
   expect(() => parseArgs([
     "plugins", "settings", "list", "--secret-stdin",
-  ], "/work")).toThrow("does not support --secret-stdin")
+  ], "/work")).toThrow("unsupported option")
   expect(() => parseArgs([
-    "plugins", "settings", "set", ...identity,
-    "--package-digest", digest,
-    "--package-digest", digest,
-    "--declaration-digest", declaration,
-    ...revision, "--secret-stdin",
+    "plugins", "settings", "set", "Review-Tools", "ZA38_TOKEN",
+    "--scope", "user", "--scope", "workspace", "--secret-stdin",
   ], "/work")).toThrow("may only be specified once")
   expect(() => parseArgs([
-    "plugins", "settings", "set", ...identity,
-    "--package-digest", digest,
-    "--declaration-digest",
-    ...revision, "--secret-stdin",
-  ], "/work")).toThrow("--declaration-digest requires a value")
+    "plugins", "settings", "set", "Review-Tools", "ZA38_TOKEN",
+    "--scope", "--secret-stdin",
+  ], "/work")).toThrow("--scope requires a value")
   expect(() => parseArgs([
-    "plugins", "settings", "set", ...identity,
-    "--plugin-id", "other/plugin",
-    ...required, "--secret-stdin",
-  ], "/work")).toThrow("does not support --plugin-id")
+    "plugins", "settings", "set", "Review-Tools", "ZA38_TOKEN",
+    "--package-digest", "a".repeat(64), "--secret-stdin",
+  ], "/work")).toThrow("unsupported option")
 })
 
 test("Plugin Settings 拒绝同时选择 --workspace 与 --cwd", () => {
-  const digest = "a".repeat(64)
-  const declaration = "b".repeat(64)
-  const mutation = [
-    "plugin/local/za38",
-    "ZA38_TOKEN",
-    "--package-digest",
-    digest,
-    "--declaration-digest",
-    declaration,
-    "--expected-store-revision",
-    "0",
-  ]
+  const mutation = ["Review-Tools", "ZA38_TOKEN"]
 
   for (const action of ["list", "set", "remove"] as const) {
     const args = ["plugins", "settings", action, "--workspace", "/a", "--cwd", "/b"]

@@ -14,7 +14,6 @@ from harness_agent.plugins.model import (
     PluginComponentReport,
     PluginDescriptor,
     PluginError,
-    capability_fingerprint,
     merge_component_reports,
 )
 from harness_agent.plugins.portable import is_portable_plugin, load_portable_plugin
@@ -128,7 +127,6 @@ def _merge_hybrid(
         format="hybrid",
         manifest="plugin.json + .claude-plugin/plugin.json",
         package_digest=portable.package_digest,
-        capability_fingerprint=capability_fingerprint(components),
         components=components,
         diagnostics=tuple(dict.fromkeys((*portable.diagnostics, *claude.diagnostics))),
     )

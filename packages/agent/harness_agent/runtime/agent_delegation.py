@@ -226,10 +226,10 @@ class AgentDelegator:
         if target is None:
             blocked_message = self._blocked_target_messages.get(command.target_agent_id)
             if blocked_message is not None:
-                raise AgentDelegationError(
-                    "PLUGIN_REAUTHORIZATION_REQUIRED",
-                    blocked_message,
-                )
+                # Plugin 的加载诊断只决定 target 是否进入可信目录；它不是
+                # 用户需要复制的授权凭据。不要把旧诊断正文（可能含 digest、
+                # fingerprint 或宿主路径）回传给模型或 CLI。
+                raise AgentDelegationError("PLUGIN_LOAD_FAILED")
             raise AgentDelegationError("DELEGATION_TARGET_NOT_FOUND")
         parent = await self._registry.get(command.parent_ref)
         if parent is None:

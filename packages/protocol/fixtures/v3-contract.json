@@ -239,9 +239,7 @@
       "kind": "operation.params",
       "name": "settings.list",
       "case": "valid",
-      "value": {
-        "scope": "user"
-      }
+      "value": {}
     },
     {
       "kind": "operation.result",
@@ -249,12 +247,6 @@
       "case": "valid",
       "value": {
         "scope": "user",
-        "store_revision": 1,
-        "runtime_snapshot": {
-          "state": "loaded",
-          "revision": 1,
-          "generation": "x"
-        },
         "settings": []
       }
     },
@@ -263,14 +255,9 @@
       "name": "settings.set",
       "case": "valid",
       "value": {
-        "scope": "user",
-        "plugin_id": "x",
-        "package_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "declaration_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "setting_key": "x",
-        "env_var": "x",
-        "value": "x",
-        "expected_store_revision": 1
+        "name": "x",
+        "setting": "x",
+        "value": "x"
       }
     },
     {
@@ -280,26 +267,13 @@
       "value": {
         "operation": "set",
         "scope": "user",
-        "store_revision": 1,
-        "runtime_snapshot": {
-          "state": "loaded",
-          "revision": 1,
-          "generation": "x"
-        },
         "summary": {
-          "setting_id": "x",
-          "plugin_id": "x",
-          "package_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "declaration_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "scope": "user",
-          "scope_binding_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "source": "qwen-extension",
           "name": "x",
+          "setting": "x",
+          "scope": "user",
           "description": "x",
-          "env_var": "x",
           "sensitive": false,
           "required": false,
-          "consumer_scope": "extension-wide",
           "store_state": "configured",
           "runtime_state": "loaded",
           "pending_operation": {
@@ -309,7 +283,6 @@
           },
           "diagnostic": "x"
         },
-        "applies_to": "next_host",
         "diagnostics": []
       }
     },
@@ -318,13 +291,8 @@
       "name": "settings.remove",
       "case": "valid",
       "value": {
-        "scope": "user",
-        "plugin_id": "x",
-        "package_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "declaration_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "setting_key": "x",
-        "env_var": "x",
-        "expected_store_revision": 1
+        "name": "x",
+        "setting": "x"
       }
     },
     {
@@ -334,26 +302,13 @@
       "value": {
         "operation": "set",
         "scope": "user",
-        "store_revision": 1,
-        "runtime_snapshot": {
-          "state": "loaded",
-          "revision": 1,
-          "generation": "x"
-        },
         "summary": {
-          "setting_id": "x",
-          "plugin_id": "x",
-          "package_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "declaration_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "scope": "user",
-          "scope_binding_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "source": "qwen-extension",
           "name": "x",
+          "setting": "x",
+          "scope": "user",
           "description": "x",
-          "env_var": "x",
           "sensitive": false,
           "required": false,
-          "consumer_scope": "extension-wide",
           "store_state": "configured",
           "runtime_state": "loaded",
           "pending_operation": {
@@ -363,7 +318,6 @@
           },
           "diagnostic": "x"
         },
-        "applies_to": "next_host",
         "diagnostics": []
       }
     },
@@ -653,21 +607,40 @@
       "kind": "operation.result",
       "name": "plugins.list",
       "case": "valid",
-      "value": {}
+      "value": {
+        "scope": "user",
+        "plugins": []
+      }
     },
     {
       "kind": "operation.params",
       "name": "plugins.inspect",
       "case": "valid",
       "value": {
-        "id": "x"
+        "name": "x"
       }
     },
     {
       "kind": "operation.result",
       "name": "plugins.inspect",
       "case": "valid",
-      "value": {}
+      "value": {
+        "scope": "user",
+        "plugin": {
+          "name": "x",
+          "version": "x",
+          "description": "x",
+          "format": "agent-plugins-1.0",
+          "source": {
+            "label": "x",
+            "kind": "local"
+          },
+          "activation": "enabled",
+          "status": "loaded",
+          "components": [],
+          "warnings": []
+        }
+      }
     },
     {
       "kind": "operation.params",
@@ -681,7 +654,21 @@
       "kind": "operation.result",
       "name": "plugins.validate",
       "case": "valid",
-      "value": {}
+      "value": {
+        "operation": "validate",
+        "source": {
+          "label": "x",
+          "kind": "local"
+        },
+        "plugin": {
+          "name": "x",
+          "version": "x",
+          "description": "x",
+          "format": "agent-plugins-1.0",
+          "components": [],
+          "warnings": []
+        }
+      }
     },
     {
       "kind": "operation.params",
@@ -695,14 +682,40 @@
       "kind": "operation.result",
       "name": "plugins.install",
       "case": "valid",
-      "value": {}
+      "value": {
+        "operation": "install",
+        "name": "x",
+        "status": "loaded",
+        "components": [],
+        "warnings": []
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "plugins.update",
+      "case": "valid",
+      "value": {
+        "name": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "plugins.update",
+      "case": "valid",
+      "value": {
+        "operation": "install",
+        "name": "x",
+        "status": "loaded",
+        "components": [],
+        "warnings": []
+      }
     },
     {
       "kind": "operation.params",
       "name": "plugins.set_enabled",
       "case": "valid",
       "value": {
-        "id": "x",
+        "name": "x",
         "enabled": false
       }
     },
@@ -710,21 +723,33 @@
       "kind": "operation.result",
       "name": "plugins.set_enabled",
       "case": "valid",
-      "value": {}
+      "value": {
+        "operation": "install",
+        "name": "x",
+        "status": "loaded",
+        "components": [],
+        "warnings": []
+      }
     },
     {
       "kind": "operation.params",
       "name": "plugins.remove",
       "case": "valid",
       "value": {
-        "id": "x"
+        "name": "x"
       }
     },
     {
       "kind": "operation.result",
       "name": "plugins.remove",
       "case": "valid",
-      "value": {}
+      "value": {
+        "operation": "install",
+        "name": "x",
+        "status": "loaded",
+        "components": [],
+        "warnings": []
+      }
     },
     {
       "kind": "operation.params",
@@ -1532,6 +1557,36 @@
       }
     },
     {
+      "kind": "interaction.params",
+      "name": "interaction.plugin_consent",
+      "case": "valid",
+      "value": {
+        "thread_id": "x",
+        "run_id": "x",
+        "timeout_ms": 1,
+        "payload": {
+          "operation": "install",
+          "preview": {
+            "operation": "install",
+            "name": "x",
+            "new_version": "x",
+            "source_label": "x",
+            "components": [],
+            "settings": [],
+            "warnings": []
+          }
+        }
+      }
+    },
+    {
+      "kind": "interaction.result",
+      "name": "interaction.plugin_consent",
+      "case": "valid",
+      "value": {
+        "decision": "accept"
+      }
+    },
+    {
       "kind": "error",
       "name": "ProtocolErrorData",
       "case": "valid",
@@ -1807,6 +1862,150 @@
       "case": "valid",
       "value": {
         "code": "SETTINGS_UNINSTALL_CONFLICT",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "name": "PLUGIN_ALREADY_INSTALLED",
+      "case": "valid",
+      "value": {
+        "code": "PLUGIN_ALREADY_INSTALLED",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "PLUGIN_NOT_FOUND",
+      "case": "valid",
+      "value": {
+        "code": "PLUGIN_NOT_FOUND",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "PLUGIN_NAME_CONFLICT",
+      "case": "valid",
+      "value": {
+        "code": "PLUGIN_NAME_CONFLICT",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "PLUGIN_SCOPE_INVALID",
+      "case": "valid",
+      "value": {
+        "code": "PLUGIN_SCOPE_INVALID",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "PLUGIN_FORMAT_AMBIGUOUS",
+      "case": "valid",
+      "value": {
+        "code": "PLUGIN_FORMAT_AMBIGUOUS",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "PLUGIN_FORMAT_UNSUPPORTED",
+      "case": "valid",
+      "value": {
+        "code": "PLUGIN_FORMAT_UNSUPPORTED",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "PLUGIN_CONSENT_REQUIRED",
+      "case": "valid",
+      "value": {
+        "code": "PLUGIN_CONSENT_REQUIRED",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "PLUGIN_OPERATION_CANCELLED",
+      "case": "valid",
+      "value": {
+        "code": "PLUGIN_OPERATION_CANCELLED",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "PLUGIN_SOURCE_UNAVAILABLE",
+      "case": "valid",
+      "value": {
+        "code": "PLUGIN_SOURCE_UNAVAILABLE",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "PLUGIN_OPERATION_CONFLICT",
+      "case": "valid",
+      "value": {
+        "code": "PLUGIN_OPERATION_CONFLICT",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "name": "PLUGIN_LOAD_FAILED",
+      "case": "valid",
+      "value": {
+        "code": "PLUGIN_LOAD_FAILED",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "PLUGIN_SETTING_RECONFIGURE_REQUIRED",
+      "case": "valid",
+      "value": {
+        "code": "PLUGIN_SETTING_RECONFIGURE_REQUIRED",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "PLUGIN_REGISTRY_MIGRATION_BACKUP_FAILED",
+      "case": "valid",
+      "value": {
+        "code": "PLUGIN_REGISTRY_MIGRATION_BACKUP_FAILED",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "name": "PLUGIN_REGISTRY_MIGRATION_BACKUP_CONFLICT",
+      "case": "valid",
+      "value": {
+        "code": "PLUGIN_REGISTRY_MIGRATION_BACKUP_CONFLICT",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "PLUGIN_REGISTRY_WRITE_FAILED",
+      "case": "valid",
+      "value": {
+        "code": "PLUGIN_REGISTRY_WRITE_FAILED",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "name": "PLUGIN_REGISTRY_COMMIT_UNCERTAIN",
+      "case": "valid",
+      "value": {
+        "code": "PLUGIN_REGISTRY_COMMIT_UNCERTAIN",
         "retryable": true
       }
     }
@@ -2355,15 +2554,8 @@
       "name": "settings.list",
       "case": "extra_field",
       "value": {
-        "scope": "user",
         "__extra": true
       }
-    },
-    {
-      "kind": "operation.params",
-      "name": "settings.list",
-      "case": "missing_field",
-      "value": {}
     },
     {
       "kind": "operation.result",
@@ -2377,12 +2569,6 @@
       "case": "extra_field",
       "value": {
         "scope": "user",
-        "store_revision": 1,
-        "runtime_snapshot": {
-          "state": "loaded",
-          "revision": 1,
-          "generation": "x"
-        },
         "settings": [],
         "__extra": true
       }
@@ -2392,12 +2578,6 @@
       "name": "settings.list",
       "case": "missing_field",
       "value": {
-        "store_revision": 1,
-        "runtime_snapshot": {
-          "state": "loaded",
-          "revision": 1,
-          "generation": "x"
-        },
         "settings": []
       }
     },
@@ -2412,14 +2592,9 @@
       "name": "settings.set",
       "case": "extra_field",
       "value": {
-        "scope": "user",
-        "plugin_id": "x",
-        "package_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "declaration_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "setting_key": "x",
-        "env_var": "x",
+        "name": "x",
+        "setting": "x",
         "value": "x",
-        "expected_store_revision": 1,
         "__extra": true
       }
     },
@@ -2428,13 +2603,8 @@
       "name": "settings.set",
       "case": "missing_field",
       "value": {
-        "plugin_id": "x",
-        "package_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "declaration_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "setting_key": "x",
-        "env_var": "x",
-        "value": "x",
-        "expected_store_revision": 1
+        "setting": "x",
+        "value": "x"
       }
     },
     {
@@ -2450,26 +2620,13 @@
       "value": {
         "operation": "set",
         "scope": "user",
-        "store_revision": 1,
-        "runtime_snapshot": {
-          "state": "loaded",
-          "revision": 1,
-          "generation": "x"
-        },
         "summary": {
-          "setting_id": "x",
-          "plugin_id": "x",
-          "package_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "declaration_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "scope": "user",
-          "scope_binding_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "source": "qwen-extension",
           "name": "x",
+          "setting": "x",
+          "scope": "user",
           "description": "x",
-          "env_var": "x",
           "sensitive": false,
           "required": false,
-          "consumer_scope": "extension-wide",
           "store_state": "configured",
           "runtime_state": "loaded",
           "pending_operation": {
@@ -2479,7 +2636,6 @@
           },
           "diagnostic": "x"
         },
-        "applies_to": "next_host",
         "diagnostics": [],
         "__extra": true
       }
@@ -2490,26 +2646,13 @@
       "case": "missing_field",
       "value": {
         "scope": "user",
-        "store_revision": 1,
-        "runtime_snapshot": {
-          "state": "loaded",
-          "revision": 1,
-          "generation": "x"
-        },
         "summary": {
-          "setting_id": "x",
-          "plugin_id": "x",
-          "package_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "declaration_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "scope": "user",
-          "scope_binding_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "source": "qwen-extension",
           "name": "x",
+          "setting": "x",
+          "scope": "user",
           "description": "x",
-          "env_var": "x",
           "sensitive": false,
           "required": false,
-          "consumer_scope": "extension-wide",
           "store_state": "configured",
           "runtime_state": "loaded",
           "pending_operation": {
@@ -2519,7 +2662,6 @@
           },
           "diagnostic": "x"
         },
-        "applies_to": "next_host",
         "diagnostics": []
       }
     },
@@ -2534,13 +2676,8 @@
       "name": "settings.remove",
       "case": "extra_field",
       "value": {
-        "scope": "user",
-        "plugin_id": "x",
-        "package_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "declaration_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "setting_key": "x",
-        "env_var": "x",
-        "expected_store_revision": 1,
+        "name": "x",
+        "setting": "x",
         "__extra": true
       }
     },
@@ -2549,12 +2686,7 @@
       "name": "settings.remove",
       "case": "missing_field",
       "value": {
-        "plugin_id": "x",
-        "package_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "declaration_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "setting_key": "x",
-        "env_var": "x",
-        "expected_store_revision": 1
+        "setting": "x"
       }
     },
     {
@@ -2570,26 +2702,13 @@
       "value": {
         "operation": "set",
         "scope": "user",
-        "store_revision": 1,
-        "runtime_snapshot": {
-          "state": "loaded",
-          "revision": 1,
-          "generation": "x"
-        },
         "summary": {
-          "setting_id": "x",
-          "plugin_id": "x",
-          "package_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "declaration_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "scope": "user",
-          "scope_binding_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "source": "qwen-extension",
           "name": "x",
+          "setting": "x",
+          "scope": "user",
           "description": "x",
-          "env_var": "x",
           "sensitive": false,
           "required": false,
-          "consumer_scope": "extension-wide",
           "store_state": "configured",
           "runtime_state": "loaded",
           "pending_operation": {
@@ -2599,7 +2718,6 @@
           },
           "diagnostic": "x"
         },
-        "applies_to": "next_host",
         "diagnostics": [],
         "__extra": true
       }
@@ -2610,26 +2728,13 @@
       "case": "missing_field",
       "value": {
         "scope": "user",
-        "store_revision": 1,
-        "runtime_snapshot": {
-          "state": "loaded",
-          "revision": 1,
-          "generation": "x"
-        },
         "summary": {
-          "setting_id": "x",
-          "plugin_id": "x",
-          "package_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "declaration_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "scope": "user",
-          "scope_binding_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "source": "qwen-extension",
           "name": "x",
+          "setting": "x",
+          "scope": "user",
           "description": "x",
-          "env_var": "x",
           "sensitive": false,
           "required": false,
-          "consumer_scope": "extension-wide",
           "store_state": "configured",
           "runtime_state": "loaded",
           "pending_operation": {
@@ -2639,7 +2744,6 @@
           },
           "diagnostic": "x"
         },
-        "applies_to": "next_host",
         "diagnostics": []
       }
     },
@@ -3295,6 +3399,24 @@
       "value": null
     },
     {
+      "kind": "operation.result",
+      "name": "plugins.list",
+      "case": "extra_field",
+      "value": {
+        "scope": "user",
+        "plugins": [],
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "plugins.list",
+      "case": "missing_field",
+      "value": {
+        "plugins": []
+      }
+    },
+    {
       "kind": "operation.params",
       "name": "plugins.inspect",
       "case": "wrong_type",
@@ -3305,7 +3427,7 @@
       "name": "plugins.inspect",
       "case": "extra_field",
       "value": {
-        "id": "x",
+        "name": "x",
         "__extra": true
       }
     },
@@ -3322,14 +3444,110 @@
       "value": null
     },
     {
+      "kind": "operation.result",
+      "name": "plugins.inspect",
+      "case": "extra_field",
+      "value": {
+        "scope": "user",
+        "plugin": {
+          "name": "x",
+          "version": "x",
+          "description": "x",
+          "format": "agent-plugins-1.0",
+          "source": {
+            "label": "x",
+            "kind": "local"
+          },
+          "activation": "enabled",
+          "status": "loaded",
+          "components": [],
+          "warnings": []
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "plugins.inspect",
+      "case": "missing_field",
+      "value": {
+        "plugin": {
+          "name": "x",
+          "version": "x",
+          "description": "x",
+          "format": "agent-plugins-1.0",
+          "source": {
+            "label": "x",
+            "kind": "local"
+          },
+          "activation": "enabled",
+          "status": "loaded",
+          "components": [],
+          "warnings": []
+        }
+      }
+    },
+    {
       "kind": "operation.params",
       "name": "plugins.validate",
       "case": "wrong_type",
       "value": null
     },
     {
-      "kind": "operation.params",
+      "kind": "operation.result",
       "name": "plugins.validate",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "plugins.validate",
+      "case": "extra_field",
+      "value": {
+        "operation": "validate",
+        "source": {
+          "label": "x",
+          "kind": "local"
+        },
+        "plugin": {
+          "name": "x",
+          "version": "x",
+          "description": "x",
+          "format": "agent-plugins-1.0",
+          "components": [],
+          "warnings": []
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "plugins.validate",
+      "case": "missing_field",
+      "value": {
+        "source": {
+          "label": "x",
+          "kind": "local"
+        },
+        "plugin": {
+          "name": "x",
+          "version": "x",
+          "description": "x",
+          "format": "agent-plugins-1.0",
+          "components": [],
+          "warnings": []
+        }
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "plugins.install",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "plugins.install",
       "case": "extra_field",
       "value": {
         "source": "x",
@@ -3338,42 +3556,90 @@
     },
     {
       "kind": "operation.params",
-      "name": "plugins.validate",
+      "name": "plugins.install",
       "case": "missing_field",
       "value": {}
     },
     {
       "kind": "operation.result",
-      "name": "plugins.validate",
-      "case": "wrong_type",
-      "value": null
-    },
-    {
-      "kind": "operation.params",
       "name": "plugins.install",
       "case": "wrong_type",
       "value": null
     },
     {
-      "kind": "operation.params",
+      "kind": "operation.result",
       "name": "plugins.install",
       "case": "extra_field",
       "value": {
-        "source": "x",
+        "operation": "install",
+        "name": "x",
+        "status": "loaded",
+        "components": [],
+        "warnings": [],
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "plugins.install",
+      "case": "missing_field",
+      "value": {
+        "name": "x",
+        "status": "loaded",
+        "components": [],
+        "warnings": []
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "plugins.update",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "plugins.update",
+      "case": "extra_field",
+      "value": {
+        "name": "x",
         "__extra": true
       }
     },
     {
       "kind": "operation.params",
-      "name": "plugins.install",
+      "name": "plugins.update",
       "case": "missing_field",
       "value": {}
     },
     {
       "kind": "operation.result",
-      "name": "plugins.install",
+      "name": "plugins.update",
       "case": "wrong_type",
       "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "plugins.update",
+      "case": "extra_field",
+      "value": {
+        "operation": "install",
+        "name": "x",
+        "status": "loaded",
+        "components": [],
+        "warnings": [],
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "plugins.update",
+      "case": "missing_field",
+      "value": {
+        "name": "x",
+        "status": "loaded",
+        "components": [],
+        "warnings": []
+      }
     },
     {
       "kind": "operation.params",
@@ -3386,7 +3652,7 @@
       "name": "plugins.set_enabled",
       "case": "extra_field",
       "value": {
-        "id": "x",
+        "name": "x",
         "enabled": false,
         "__extra": true
       }
@@ -3406,6 +3672,30 @@
       "value": null
     },
     {
+      "kind": "operation.result",
+      "name": "plugins.set_enabled",
+      "case": "extra_field",
+      "value": {
+        "operation": "install",
+        "name": "x",
+        "status": "loaded",
+        "components": [],
+        "warnings": [],
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "plugins.set_enabled",
+      "case": "missing_field",
+      "value": {
+        "name": "x",
+        "status": "loaded",
+        "components": [],
+        "warnings": []
+      }
+    },
+    {
       "kind": "operation.params",
       "name": "plugins.remove",
       "case": "wrong_type",
@@ -3416,7 +3706,7 @@
       "name": "plugins.remove",
       "case": "extra_field",
       "value": {
-        "id": "x",
+        "name": "x",
         "__extra": true
       }
     },
@@ -3431,6 +3721,30 @@
       "name": "plugins.remove",
       "case": "wrong_type",
       "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "plugins.remove",
+      "case": "extra_field",
+      "value": {
+        "operation": "install",
+        "name": "x",
+        "status": "loaded",
+        "components": [],
+        "warnings": [],
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "plugins.remove",
+      "case": "missing_field",
+      "value": {
+        "name": "x",
+        "status": "loaded",
+        "components": [],
+        "warnings": []
+      }
     },
     {
       "kind": "operation.params",
@@ -5190,6 +5504,77 @@
       "value": {}
     },
     {
+      "kind": "interaction.params",
+      "name": "interaction.plugin_consent",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "interaction.params",
+      "name": "interaction.plugin_consent",
+      "case": "extra_field",
+      "value": {
+        "thread_id": "x",
+        "run_id": "x",
+        "timeout_ms": 1,
+        "payload": {
+          "operation": "install",
+          "preview": {
+            "operation": "install",
+            "name": "x",
+            "new_version": "x",
+            "source_label": "x",
+            "components": [],
+            "settings": [],
+            "warnings": []
+          }
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "interaction.params",
+      "name": "interaction.plugin_consent",
+      "case": "missing_field",
+      "value": {
+        "run_id": "x",
+        "timeout_ms": 1,
+        "payload": {
+          "operation": "install",
+          "preview": {
+            "operation": "install",
+            "name": "x",
+            "new_version": "x",
+            "source_label": "x",
+            "components": [],
+            "settings": [],
+            "warnings": []
+          }
+        }
+      }
+    },
+    {
+      "kind": "interaction.result",
+      "name": "interaction.plugin_consent",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "interaction.result",
+      "name": "interaction.plugin_consent",
+      "case": "extra_field",
+      "value": {
+        "decision": "accept",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "interaction.result",
+      "name": "interaction.plugin_consent",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
       "kind": "error",
       "name": "ProtocolErrorData",
       "case": "wrong_type",
@@ -5390,6 +5775,102 @@
     {
       "kind": "error",
       "name": "SETTINGS_UNINSTALL_CONFLICT",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "PLUGIN_ALREADY_INSTALLED",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "PLUGIN_NOT_FOUND",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "PLUGIN_NAME_CONFLICT",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "PLUGIN_SCOPE_INVALID",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "PLUGIN_FORMAT_AMBIGUOUS",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "PLUGIN_FORMAT_UNSUPPORTED",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "PLUGIN_CONSENT_REQUIRED",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "PLUGIN_OPERATION_CANCELLED",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "PLUGIN_SOURCE_UNAVAILABLE",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "PLUGIN_OPERATION_CONFLICT",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "PLUGIN_LOAD_FAILED",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "PLUGIN_SETTING_RECONFIGURE_REQUIRED",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "PLUGIN_REGISTRY_MIGRATION_BACKUP_FAILED",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "PLUGIN_REGISTRY_MIGRATION_BACKUP_CONFLICT",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "PLUGIN_REGISTRY_WRITE_FAILED",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "PLUGIN_REGISTRY_COMMIT_UNCERTAIN",
       "case": "wrong_type",
       "value": null
     }

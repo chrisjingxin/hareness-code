@@ -700,24 +700,20 @@ async def test_subagent_stop_rejects_invalid_interaction_but_propagates_cancella
 
 
 @pytest.mark.asyncio
-async def test_subagent_stop_disabled_or_untrusted_never_calls_hook() -> None:
-    """disabled/untrusted Plugin 不执行 Hook，且保持 fail-closed 目录行为。"""
-    runner = _FakeHookRunner([HookResult(0, document={"decision": "block"})])
+async def test_subagent_stop_does_not_use_plugin_authorization_state() -> None:
+    """Hook gate 不再读取已删除的 Plugin enabled/trusted 授权字段。"""
+    runner = _FakeHookRunner([HookResult(0, document={"decision": "allow"})])
 
     async def interaction(_request: InteractionRequest) -> InteractionResult:
-        raise AssertionError("未启用 Hook 不应请求交互")
+        raise AssertionError("allow Hook 不应请求交互")
 
     controller = SubagentStopController(
         hook_runner=runner.run,
         interaction_port=interaction,
     )
-    for request in (
-        replace(_request(), enabled=False, trusted=False),
-        replace(_request(), enabled=True, trusted=False),
-    ):
-        result = await controller.evaluate(request)
-        assert result.action == "allow"
-    assert runner.payloads == []
+    result = await controller.evaluate(_request())
+    assert result.action == "allow"
+    assert len(runner.payloads) == 1
 
 
 @pytest.mark.asyncio

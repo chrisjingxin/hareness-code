@@ -247,7 +247,7 @@ def test_set_uses_bootstrap_revision_and_metadata_never_contains_secret(tmp_path
     result = store.set(scope="user", value="offline-secret", expected_store_revision=0, **_setting_args())
 
     assert result["operation"] == "set"
-    assert result["applies_to"] == "next_host"
+    assert "applies_to" not in result
     listed = store.list(scope="user")
     assert listed["store_revision"] > 0
     assert listed["settings"][0]["store_state"] == "configured"
@@ -410,17 +410,16 @@ def test_qwen_settings_are_adapted_and_invalid_entries_do_not_authorize_componen
     )
     summary = PluginManager(home=tmp_path / "home").validate(source)["plugin"]
     component = next(item for item in summary["components"] if item["kind"] == "settings")
-    assert component["status"] == "adapted"
-    assert component["effective"] is True
+    assert set(component) == {"kind", "count", "sources"}
+    assert component["count"] == 1
     assert component["sources"] == ["DEMO_TOKEN"]
 
     (source / "qwen-extension.json").write_text(
         '{"name":"settings-demo","settings":[{"name":"Token","description":"token","envVar":"DEMO_TOKEN"},{"name":"Bad","description":"bad","envVar":"PATH"}]}'
     )
     summary = PluginManager(home=tmp_path / "home").validate(source)["plugin"]
-    component = next(item for item in summary["components"] if item["kind"] == "settings")
-    assert component["effective"] is False
-    assert any("SETTINGS_ENV_FORBIDDEN" in item for item in component["diagnostics"])
+    assert not any(item["kind"] == "settings" for item in summary["components"])
+    assert any("SETTINGS_ENV_FORBIDDEN" in item for item in summary["warnings"])
 
 
 def test_set_and_remove_recover_from_each_durable_crash_window(tmp_path) -> None:

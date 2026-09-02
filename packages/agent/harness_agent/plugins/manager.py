@@ -1,4 +1,4 @@
-"""Plugin 管理服务：校验、安装、显式信任启停、查询和删除。"""
+"""Plugin 管理服务：本地安装、名称/作用域 activation 与状态投影。"""
 
 from __future__ import annotations
 
@@ -22,13 +22,20 @@ from harness_agent.plugins.model import (
     PLUGIN_ADAPTER_REPORT_REVISION,
     PluginError,
     catalog_snapshot_id,
+    component_warning_diagnostics,
+    plugin_warnings,
+    product_status,
     runtime_component_eligibility,
 )
 from harness_agent.plugins.resources import (
     PluginResourceSnapshot,
     build_plugin_resource_snapshot,
 )
-from harness_agent.plugins.store import PluginRegistryState, PluginStore
+from harness_agent.plugins.store import (
+    PluginRegistryState,
+    PluginStore,
+    plugin_workspace_binding_digest,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,35 +72,11 @@ class PluginSettingsLoadResult:
 
 
 @dataclass(frozen=True, slots=True)
-class PluginReauthorizationSummary:
-    """陈旧 Plugin 的只读门禁索引；不属于可执行 runtime catalog。"""
-
-    plugin_id: str
-    authorization_state: str
-    capability_fingerprint: str
-    package_digest: str
-    component_sources: tuple[tuple[str, str], ...] = ()
-    component_ids: tuple[str, ...] = ()
-    agent_ids: tuple[str, ...] = ()
-    team_ids: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
 class PluginCatalogRefreshResult:
-    """一次 Adapter 重解析后的不可变 catalog 与授权变化摘要。"""
+    """一次 Adapter 重解析后的不可变 catalog 与变化摘要。"""
 
     catalog: ExtensionCatalogSnapshot
     changed_plugin_ids: tuple[str, ...] = ()
-    reauthorization_required: tuple[str, ...] = ()
-    reauthorization: tuple[PluginReauthorizationSummary, ...] = ()
-
-
-class _SettingsCleanupPartial(Exception):
-    """内部控制流：Settings cleanup partial 时不提交 registry mutation。"""
-
-    def __init__(self, result: dict[str, object]) -> None:
-        """保存已脱敏的 cleanup 摘要，交给 remove 返回稳定 partial 结果。"""
-        self.result = result
 
 
 def _qwen_command_name(relative: str) -> str:
@@ -115,60 +98,6 @@ def _component_source_name(relative: str) -> str:
     return name or "component"
 
 
-def _reauthorization_summary(plugin: InstalledPlugin) -> PluginReauthorizationSummary:
-    """从已校验安装报告构造 blocked component/source identity。"""
-    component_sources: list[tuple[str, str]] = []
-    component_ids: list[str] = []
-    agent_ids: list[str] = []
-    team_ids: list[str] = []
-    for component in plugin.components:
-        sources = component.sources or (component.kind,)
-        for relative in sources:
-            normalized = relative.replace("\\", "/")
-            component_sources.append((component.kind, normalized))
-            source_name = _component_source_name(normalized)
-            if component.kind == "commands":
-                command_name = (
-                    _qwen_command_name(normalized)
-                    if plugin.format == "qwen-code"
-                    else source_name
-                )
-                component_ids.append(
-                    f"plugin/{plugin.plugin_id}/command/{command_name}"
-                )
-            elif component.kind == "skills":
-                if normalized == "SKILL.md":
-                    skill_name = plugin.name
-                else:
-                    parts = normalized.split("/")
-                    skill_name = parts[-2] if len(parts) > 1 else source_name
-                component_ids.append(f"plugin/{plugin.plugin_id}/{skill_name}")
-            elif component.kind == "agents":
-                agent_ids.append(source_name)
-                component_ids.append(
-                    f"plugin/{plugin.plugin_id}/agent/{source_name}"
-                )
-            elif component.kind == "teams":
-                team_ids.append(source_name)
-                component_ids.append(
-                    f"plugin/{plugin.plugin_id}/team/{source_name}"
-                )
-            else:
-                component_ids.append(
-                    f"plugin/{plugin.plugin_id}/{component.kind}/{source_name}"
-                )
-    return PluginReauthorizationSummary(
-        plugin_id=plugin.plugin_id,
-        authorization_state=plugin.authorization_state,
-        capability_fingerprint=plugin.capability_fingerprint,
-        package_digest=plugin.package_digest,
-        component_sources=tuple(component_sources),
-        component_ids=tuple(sorted(set(component_ids))),
-        agent_ids=tuple(sorted(set(agent_ids))),
-        team_ids=tuple(sorted(set(team_ids))),
-    )
-
-
 def _qwen_skill_resource_files(package_root: Path) -> tuple[tuple[Path, str], ...]:
     """只列出 Qwen Skill 顶层 references Markdown，不递归开发素材目录。"""
     references = package_root / "references"
@@ -188,11 +117,175 @@ def _qwen_skill_resource_files(package_root: Path) -> tuple[tuple[Path, str], ..
 
 
 class PluginManager:
-    """向 Server 提供与外部格式无关的 user-scope Plugin 管理 API。"""
+    """向 Host 提供与外部格式无关的本地 Plugin 管理 API。"""
 
-    def __init__(self, *, home: Path | None = None) -> None:
-        """绑定用户级 PluginStore。"""
+    def __init__(self, *, home: Path | None = None, workspace: Path | None = None) -> None:
+        """绑定用户级 PluginStore 与默认 workspace。"""
         self.store = PluginStore(home=home)
+        self.workspace = workspace.expanduser().resolve() if workspace is not None else None
+
+    def _workspace_digest(
+        self,
+        workspace: Path | None,
+        *,
+        strict: bool = False,
+    ) -> str | None:
+        """把可选 workspace 转成 activation digest；显式 workspace 才严格要求存在。"""
+        selected = workspace or self.workspace
+        if selected is None:
+            return None
+        return plugin_workspace_binding_digest(selected, strict=strict)
+
+    @staticmethod
+    def _scope(scope: str | None) -> str:
+        """校验 Plugin 管理作用域。"""
+        selected = scope or "user"
+        if selected not in {"user", "workspace"}:
+            raise PluginError("PLUGIN_SCOPE_INVALID", "Plugin scope 只能是 user 或 workspace")
+        return selected
+
+    def _activation_digest_for_scope(
+        self,
+        scope: str,
+        workspace: Path | None,
+    ) -> str | None:
+        """解析 scope 所需 workspace；workspace scope 缺失时 fail closed。"""
+        selected = self._scope(scope)
+        if selected == "user":
+            return None
+        digest = self._workspace_digest(workspace, strict=True)
+        if digest is None:
+            raise PluginError("PLUGIN_SCOPE_INVALID", "workspace scope 需要当前 workspace")
+        return digest
+
+    def _state(self) -> PluginRegistryState:
+        """读取 registry，并在 Adapter revision 过期时重解析当前 package。"""
+        state = self.store.read_registry()
+        if any(
+            plugin.adapter_revision != PLUGIN_ADAPTER_REPORT_REVISION
+            for plugin in state.plugins
+        ):
+            self.refresh_catalog()
+            state = self.store.read_registry()
+        return state
+
+    @staticmethod
+    def _assert_no_name_conflict(state: PluginRegistryState) -> None:
+        """名称索引有歧义时禁止猜测目标。"""
+        if state.name_conflicts:
+            raise PluginError("PLUGIN_NAME_CONFLICT", "Plugin 名称大小写不敏感地发生冲突")
+
+    @staticmethod
+    def _plugin_summary(
+        plugin: InstalledPlugin,
+        *,
+        activation: str,
+        scope: str | None = None,
+        include_internal: bool = False,
+    ) -> dict[str, object]:
+        """构造唯一的公开 Plugin summary；internal locator 只供高级 inspect。"""
+        components = [
+            component.to_public_dict()
+            for component in plugin.components
+            if component.effective
+        ]
+        result: dict[str, object] = {
+            "name": plugin.name,
+            "version": plugin.version,
+            "description": plugin.description,
+            "format": plugin.format,
+            "source": {"label": plugin.source_label, "kind": "local"},
+            "activation": activation,
+            "status": product_status(plugin, activation=activation),
+            "components": components,
+            "warnings": list(plugin_warnings(plugin)),
+        }
+        if scope is not None:
+            result["scope"] = scope
+        if include_internal:
+            result["internal"] = {"id": plugin.plugin_id}
+        return result
+
+    @staticmethod
+    def _validation_summary(descriptor: object) -> dict[str, object]:
+        """把离线 Adapter 结果裁剪为 validate 专用公开摘要。"""
+        components = [
+            component.to_public_dict()
+            for component in descriptor.components
+            if component.effective
+        ]
+        warnings = list(descriptor.diagnostics)
+        for component in descriptor.components:
+            if not component.effective or component.status not in {"supported", "adapted"}:
+                warnings.extend(component.diagnostics)
+            else:
+                warnings.extend(component_warning_diagnostics(component))
+        return {
+            "name": descriptor.name,
+            "version": descriptor.version,
+            "description": descriptor.description,
+            "format": descriptor.format,
+            "components": components,
+            "warnings": list(dict.fromkeys(warnings)),
+        }
+
+    def _find_by_name(
+        self,
+        state: PluginRegistryState,
+        name: str,
+    ) -> InstalledPlugin:
+        """通过大小写不敏感名称查找唯一 artifact。"""
+        self._assert_no_name_conflict(state)
+        if not isinstance(name, str) or not name.strip():
+            raise PluginError("PLUGIN_NAME_INVALID", "Plugin name 无效")
+        matches = [plugin for plugin in state.plugins if plugin.name.casefold() == name.casefold()]
+        if not matches:
+            raise PluginError("PLUGIN_NOT_FOUND", f'Plugin "{name}" 不存在')
+        if len(matches) != 1:
+            raise PluginError("PLUGIN_NAME_CONFLICT", "Plugin 名称大小写不敏感地发生冲突")
+        return matches[0]
+
+    @staticmethod
+    def _public_components(plugin: InstalledPlugin) -> list[dict[str, object]]:
+        """只返回实际进入 canonical consumer 的组件。"""
+        return [
+            component.to_public_dict()
+            for component in plugin.components
+            if component.effective
+        ]
+
+    def _mutation_result(
+        self,
+        *,
+        state: PluginRegistryState,
+        plugin: InstalledPlugin,
+        operation: str,
+        scope: str | None = None,
+        workspace: Path | None = None,
+        include_internal: bool = False,
+    ) -> dict[str, object]:
+        """统一生成 mutation response，避免重新暴露 digest/revision 身份。"""
+        if scope is None:
+            # update 是 artifact-level 操作；结果仍可展示当前 Host 的有效 activation，
+            # 但不存在的 workspace 不能阻塞这个不带 scope 的管理动作。
+            activation_digest = self._workspace_digest(workspace)
+        else:
+            activation_digest = self._activation_digest_for_scope(scope, workspace)
+        activation = plugin.activation_for(activation_digest)
+        summary = self._plugin_summary(
+            plugin,
+            activation=activation,
+            scope=scope,
+            include_internal=include_internal,
+        )
+        return {
+            "operation": operation,
+            "name": plugin.name,
+            "status": summary["status"],
+            "components": summary["components"],
+            "warnings": summary["warnings"],
+            "plugin": summary,
+        }
 
 
     def validate(
@@ -211,26 +304,54 @@ class PluginManager:
             )
             return {
                 "source": {"label": staged.source_label, "kind": "local"},
-                "plugin": descriptor.to_dict(),
-                "will_install_enabled": False,
+                "plugin": self._validation_summary(descriptor),
+                "operation": "validate",
             }
 
     def install(
         self,
         source: Path | str,
         *,
-        format: RequestedPluginFormat = "auto",
+        scope: str = "user",
+        workspace: Path | None = None,
+        expected_package_digest: str | None = None,
     ) -> dict[str, object]:
-        """校验并 copy-on-install；新版本始终以 disabled 状态进入 registry。"""
+        """校验并 copy-on-install；安装一次即启用所选 scope。"""
+        selected_scope = self._scope(scope)
+        workspace_digest = self._activation_digest_for_scope(selected_scope, workspace)
         with self.store.stage(source) as staged:
+            if (
+                expected_package_digest is not None
+                and staged.package_digest != expected_package_digest
+            ):
+                raise PluginError(
+                    "PLUGIN_OPERATION_CONFLICT",
+                    "Plugin 来源已在 consent 后改变，请重试",
+                )
             descriptor = load_plugin_descriptor(
                 staged.root,
                 package_digest=staged.package_digest,
                 name_hint=staged.name_hint,
-                requested_format=format,
+                requested_format="auto",
             )
+            current = self._state()
+            self._assert_no_name_conflict(current)
+            if any(
+                plugin.name.casefold() == descriptor.name.casefold()
+                for plugin in current.plugins
+            ):
+                raise PluginError(
+                    "PLUGIN_ALREADY_INSTALLED",
+                    f'Plugin "{descriptor.name}" 已安装，请使用 update',
+                )
             self.store.install_package(staged, plugin_name=descriptor.name)
             plugin_id = f"{staged.source_id}/{descriptor.name}"
+            activation_user = "disabled" if selected_scope == "workspace" else "enabled"
+            activation_workspaces = (
+                ((workspace_digest, "enabled"),)
+                if workspace_digest is not None
+                else ()
+            )
             installed = InstalledPlugin(
                 plugin_id=plugin_id,
                 source_id=staged.source_id,
@@ -241,63 +362,109 @@ class PluginManager:
                 format=descriptor.format,
                 manifest=descriptor.manifest,
                 package_digest=descriptor.package_digest,
-                capability_fingerprint=descriptor.capability_fingerprint,
                 components=descriptor.components,
                 diagnostics=descriptor.diagnostics,
-                enabled=False,
-                trusted_capability_fingerprint=None,
+                activation_user=activation_user,  # type: ignore[arg-type]
+                activation_workspaces=activation_workspaces,  # type: ignore[arg-type]
                 installed_at_ms=int(time.time() * 1000),
                 adapter_revision=descriptor.adapter_revision,
-            )
-            resource_snapshot = build_plugin_resource_snapshot(
-                installed,
-                store=self.store,
+                origin=staged.origin,
             )
 
             def _replace(current: PluginRegistryState) -> tuple[InstalledPlugin, ...]:
+                self._assert_no_name_conflict(current)
+                if any(
+                    plugin.name.casefold() == installed.name.casefold()
+                    for plugin in current.plugins
+                ):
+                    raise PluginError(
+                        "PLUGIN_ALREADY_INSTALLED",
+                        f'Plugin "{installed.name}" 已安装，请使用 update',
+                    )
                 return (
-                    *(plugin for plugin in current.plugins if plugin.plugin_id != plugin_id),
+                    *current.plugins,
                     installed,
                 )
 
             state = self.store.mutate_registry(_replace)
-            return {
-                "revision": state.revision,
-                "plugin": installed.to_dict(),
-                "resource_snapshot": resource_snapshot.to_dict(),
-                "effective_on": "next_host_after_enable",
-            }
+            return self._mutation_result(
+                state=state,
+                plugin=installed,
+                operation="install",
+                scope=selected_scope,
+                workspace=workspace,
+            )
 
-    def list(self, *, include_disabled: bool = True) -> dict[str, object]:
-        """列出安装记录和当前 enabled catalog 摘要。"""
-        state = self.store.read_registry()
+    def list(
+        self,
+        *,
+        scope: str = "user",
+        workspace: Path | None = None,
+        include_disabled: bool = True,
+    ) -> dict[str, object]:
+        """按 user 或显式 workspace scope 列出唯一的产品状态。"""
+        selected_scope = self._scope(scope)
+        workspace_digest = (
+            self._workspace_digest(workspace, strict=True)
+            if selected_scope == "workspace"
+            else None
+        )
+        state = self._state()
+        self._assert_no_name_conflict(state)
         plugins = tuple(
-            plugin for plugin in state.plugins if include_disabled or plugin.enabled
+            plugin
+            for plugin in state.plugins
+            if include_disabled
+            or plugin.activation_for(workspace_digest)
+            == "enabled"
         )
         return {
-            "revision": state.revision,
-            "plugins": [plugin.to_dict() for plugin in plugins],
-            "catalog": self._catalog_from_state(state).to_dict(),
-            "resource_snapshots": [
-                snapshot.to_dict()
-                for snapshot in self.resource_snapshots(include_disabled=include_disabled)
+            "scope": selected_scope,
+            "plugins": [
+                self._plugin_summary(
+                    plugin,
+                    activation=plugin.activation_for(workspace_digest),
+                    scope=selected_scope,
+                )
+                for plugin in plugins
             ],
-            "static_preview": self.static_preview(include_disabled=include_disabled),
         }
 
-    def inspect(self, plugin_id: str) -> dict[str, object]:
-        """查看单个 Plugin 的兼容性与 trust 状态。"""
-        state = self.store.read_registry()
-        plugin = _find_plugin(state, plugin_id)
+    def inspect(
+        self,
+        name: str,
+        *,
+        scope: str = "user",
+        workspace: Path | None = None,
+    ) -> dict[str, object]:
+        """按名称查看 user 或显式 workspace scope 的状态与 warning。"""
+        selected_scope = self._scope(scope)
+        workspace_digest = (
+            self._workspace_digest(workspace, strict=True)
+            if selected_scope == "workspace"
+            else None
+        )
+        state = self._state()
+        plugin = self._find_by_name(state, name)
+        activation = plugin.activation_for(workspace_digest)
         return {
-            "revision": state.revision,
-            "plugin": plugin.to_dict(),
-            "resource_snapshot": self.resource_snapshot(plugin_id).to_dict(),
+            "scope": selected_scope,
+            "plugin": self._plugin_summary(
+                plugin,
+                activation=activation,
+                scope=selected_scope,
+                include_internal=True,
+            ),
         }
 
     def resource_snapshot(self, plugin_id: str) -> PluginResourceSnapshot:
         """读取已安装 Plugin 的静态资源快照，不要求启用且不进入运行时。"""
-        plugin = _find_plugin(self.store.read_registry(), plugin_id)
+        plugin = next(
+            (item for item in self._state().plugins if item.plugin_id == plugin_id),
+            None,
+        )
+        if plugin is None:
+            raise PluginError("PLUGIN_NOT_FOUND", f'Plugin "{plugin_id}" 不存在')
         return build_plugin_resource_snapshot(plugin, store=self.store)
 
     def resource_snapshots(
@@ -306,105 +473,284 @@ class PluginManager:
         include_disabled: bool = True,
     ) -> tuple[PluginResourceSnapshot, ...]:
         """按 registry 顺序返回已安装 Plugin 的脱敏资源快照。"""
-        state = self.store.read_registry()
+        state = self._state()
         return tuple(
             self.resource_snapshot(plugin.plugin_id)
             for plugin in state.plugins
-            if include_disabled or plugin.enabled
+            if include_disabled or plugin.activation_user == "enabled"
         )
 
-    def static_preview(
+    def preview_install(
         self,
+        source: Path | str,
         *,
-        include_disabled: bool = True,
-    ) -> dict[str, list[dict[str, object]]]:
-        """为尚未接入运行时的 Qwen 组件提供 disabled/static/non-runnable 预览。"""
-        preview: dict[str, list[dict[str, object]]] = {
-            "commands": [],
-            "skills": [],
-            "agents": [],
-            "mcp": [],
-        }
-        state = self.store.read_registry()
-        for plugin in state.plugins:
-            if not include_disabled and not plugin.enabled:
-                continue
-            if plugin.format != "qwen-code":
-                continue
-            snapshot = self.resource_snapshot(plugin.plugin_id)
-            snapshot_preview = snapshot.static_preview()
-            trusted_enabled = (
-                plugin.enabled
-                and plugin.trusted_capability_fingerprint == plugin.capability_fingerprint
+        scope: str = "user",
+        workspace: Path | None = None,
+    ) -> dict[str, object]:
+        """生成 install consent 所需的有界预览，不写入 registry。"""
+        preview, _package_digest = self._preview_install_with_identity(
+            source,
+            scope=scope,
+            workspace=workspace,
+        )
+        return preview
+
+    def _preview_install_with_identity(
+        self,
+        source: Path | str,
+        *,
+        scope: str = "user",
+        workspace: Path | None = None,
+    ) -> tuple[dict[str, object], str]:
+        """生成预览及内部 package identity，供 Host 绑定 consent。"""
+        selected_scope = self._scope(scope)
+        self._activation_digest_for_scope(selected_scope, workspace)
+        with self.store.stage(source) as staged:
+            descriptor = load_plugin_descriptor(
+                staged.root,
+                package_digest=staged.package_digest,
+                name_hint=staged.name_hint,
+                requested_format="auto",
             )
-            effective_sources: dict[str, set[str]] = {
-                "commands": set(),
-                "skills": set(),
-                "agents": set(),
-                "mcp": set(),
-            }
-            effective_mcp = False
-            if trusted_enabled:
-                for component in plugin.components:
-                    eligibility = runtime_component_eligibility(
-                        plugin,
-                        kind=component.kind,
-                    )
-                    if eligibility.eligible and component.kind in effective_sources:
-                        effective_sources[component.kind].update(component.sources)
-                        if component.kind == "mcp":
-                            effective_mcp = True
-            for kind in preview:
-                preview[kind].extend(
-                    item
-                    for item in snapshot_preview[kind]
-                    if str(item.get("source", "")) not in effective_sources[kind]
-                    and not (
-                        kind == "mcp"
-                        and effective_mcp
-                        and "diagnostic" not in item
+            preview = self._build_mutation_preview(
+                operation="install",
+                descriptor=descriptor,
+                source_label=staged.source_label,
+                scope=selected_scope,
+                root=staged.root,
+            )
+            return preview, staged.package_digest
+
+    def preview_update(
+        self,
+        name: str,
+        *,
+        source: Path | str | None = None,
+    ) -> dict[str, object]:
+        """生成 update consent 预览；缺省时读取已保存的本地 origin。"""
+        preview, _old_digest, _package_digest = self._preview_update_with_identity(
+            name,
+            source=source,
+        )
+        return preview
+
+    def _preview_update_with_identity(
+        self,
+        name: str,
+        *,
+        source: Path | str | None = None,
+    ) -> tuple[dict[str, object], str, str]:
+        """生成预览及新旧 artifact identity，供 Host 绑定 consent。"""
+        current = self._find_by_name(self._state(), name)
+        selected_source = self._update_source(current, source)
+        with self.store.stage(selected_source) as staged:
+            descriptor = load_plugin_descriptor(
+                staged.root,
+                package_digest=staged.package_digest,
+                name_hint=staged.name_hint,
+                requested_format="auto",
+            )
+            self._assert_update_name(current, descriptor.name)
+            preview = self._build_mutation_preview(
+                operation="update",
+                descriptor=descriptor,
+                source_label=staged.source_label,
+                old_version=current.version,
+                root=staged.root,
+            )
+            return preview, current.package_digest, staged.package_digest
+
+    def update(
+        self,
+        name: str,
+        *,
+        source: Path | str | None = None,
+        settings_rebind: Callable[[InstalledPlugin, InstalledPlugin], dict[str, object]] | None = None,
+        expected_old_package_digest: str | None = None,
+        expected_package_digest: str | None = None,
+    ) -> dict[str, object]:
+        """替换同名 artifact，保留全部 activation；正常入口固定 auto Adapter。"""
+        before = self._state()
+        old = self._find_by_name(before, name)
+        if (
+            expected_old_package_digest is not None
+            and old.package_digest != expected_old_package_digest
+        ):
+            raise PluginError(
+                "PLUGIN_OPERATION_CONFLICT",
+                "Plugin artifact 已在 consent 后改变，请重试",
+            )
+        selected_source = self._update_source(old, source)
+        with self.store.stage(selected_source) as staged:
+            if (
+                expected_package_digest is not None
+                and staged.package_digest != expected_package_digest
+            ):
+                raise PluginError(
+                    "PLUGIN_OPERATION_CONFLICT",
+                    "Plugin 来源已在 consent 后改变，请重试",
+                )
+            descriptor = load_plugin_descriptor(
+                staged.root,
+                package_digest=staged.package_digest,
+                name_hint=staged.name_hint,
+                requested_format="auto",
+            )
+            self._assert_update_name(old, descriptor.name)
+            self.store.install_package(staged, plugin_name=descriptor.name)
+            updated = InstalledPlugin(
+                plugin_id=old.plugin_id,
+                source_id=staged.source_id,
+                source_label=staged.source_label,
+                name=old.name,
+                version=descriptor.version,
+                description=descriptor.description,
+                format=descriptor.format,
+                manifest=descriptor.manifest,
+                package_digest=descriptor.package_digest,
+                components=descriptor.components,
+                diagnostics=descriptor.diagnostics,
+                activation_user=old.activation_user,
+                activation_workspaces=old.activation_workspaces,
+                installed_at_ms=old.installed_at_ms,
+                adapter_revision=descriptor.adapter_revision,
+                origin=staged.origin,
+            )
+            rebind_result: dict[str, object] | None = None
+
+            def _replace(current: PluginRegistryState) -> tuple[InstalledPlugin, ...]:
+                current_plugin = self._find_by_name(current, old.name)
+                if current.revision != before.revision or current_plugin.plugin_id != old.plugin_id:
+                    raise PluginError("PLUGIN_OPERATION_CONFLICT", "Plugin registry 已变化，请重试")
+                if settings_rebind is not None:
+                    # 先在 registry lock 内复核 artifact identity，再重绑内部
+                    # Settings；并发 update 不应在失败前污染 credential binding。
+                    nonlocal rebind_result
+                    rebind_result = settings_rebind(current_plugin, updated)
+                return tuple(
+                    updated if item.plugin_id == old.plugin_id else item
+                    for item in current.plugins
+                )
+
+            state = self.store.mutate_registry(_replace)
+            result = self._mutation_result(
+                state=state,
+                plugin=updated,
+                operation="update",
+                workspace=self.workspace,
+            )
+            if rebind_result is not None:
+                result["warnings"] = list(
+                    dict.fromkeys(
+                        (
+                            *result["warnings"],
+                            *rebind_result.get("warnings", []),
+                        )
                     )
                 )
-        for items in preview.values():
-            items.sort(key=lambda item: str(item["id"]))
+            return result
+
+    def _update_source(
+        self,
+        plugin: InstalledPlugin,
+        source: Path | str | None,
+    ) -> Path | str:
+        """解析 update 的显式 source 或已保存 local origin。"""
+        if source is not None:
+            return source
+        if plugin.origin is None or not Path(plugin.origin).exists():
+            raise PluginError("PLUGIN_SOURCE_UNAVAILABLE", "Plugin 本地 update 来源不可用")
+        return plugin.origin
+
+    @staticmethod
+    def _assert_update_name(old: InstalledPlugin, new_name: str) -> None:
+        """update 不得把现有 artifact 变成另一个名称。"""
+        if old.name.casefold() != new_name.casefold():
+            raise PluginError("PLUGIN_NAME_CONFLICT", "update 不能改变 Plugin name")
+
+    @staticmethod
+    def _build_mutation_preview(
+        *,
+        operation: str,
+        descriptor: object,
+        source_label: str,
+        scope: str | None = None,
+        old_version: str | None = None,
+        root: Path,
+    ) -> dict[str, object]:
+        """把 Adapter 事实裁剪成 consent 可展示的摘要。"""
+        assert hasattr(descriptor, "name")
+        plugin_descriptor = descriptor
+        components = [
+            component.to_public_dict()
+            for component in plugin_descriptor.components
+            if component.effective
+        ]
+        warnings = list(plugin_descriptor.diagnostics)
+        for component in plugin_descriptor.components:
+            if not component.effective or component.status not in {"supported", "adapted"}:
+                warnings.extend(component.diagnostics)
+            else:
+                warnings.extend(component_warning_diagnostics(component))
+        settings: list[dict[str, object]] = []
+        if plugin_descriptor.format == "qwen-code" and plugin_descriptor.manifest:
+            try:
+                manifest = read_json_object(root, plugin_descriptor.manifest)
+                raw = manifest.get("settings")
+                if raw is not None:
+                    settings = [
+                        {
+                            "name": declaration.name,
+                            "description": declaration.description,
+                            "required": False,
+                            "configured_at_scope": scope,
+                        }
+                        for declaration in parse_qwen_settings(raw)
+                    ]
+            except (PluginError, SettingsError) as exc:
+                warnings.append(exc.code)
+        preview: dict[str, object] = {
+            "operation": operation,
+            "name": plugin_descriptor.name,
+            "new_version": plugin_descriptor.version,
+            "source_label": source_label,
+            "components": components,
+            "settings": settings,
+            "warnings": list(dict.fromkeys(warnings)),
+        }
+        if old_version is not None:
+            preview["old_version"] = old_version
+        if scope is not None:
+            preview["activation_scope"] = scope
         return preview
 
     def set_enabled(
         self,
-        plugin_id: str,
+        name: str,
         *,
         enabled: bool,
-        capability_fingerprint: str | None = None,
+        scope: str = "user",
+        workspace: Path | None = None,
     ) -> dict[str, object]:
-        """启用时要求用户确认当前 capability fingerprint；停用立即撤销 trust。"""
-        if enabled:
-            current = _find_plugin(self.store.read_registry(), plugin_id)
-            if current.adapter_revision != PLUGIN_ADAPTER_REPORT_REVISION:
-                # 旧 report 不能作为用户确认的事实来源；先在 registry lock 内用当前
-                # Adapter 重建，再校验调用方传入的 fingerprint。
-                self.refresh_catalog()
+        """按名称写入 user 或 workspace activation，不修改 artifact。"""
+        if not isinstance(enabled, bool):
+            raise PluginError("PLUGIN_STATE_INVALID", "enabled 必须是 boolean")
+        selected_scope = self._scope(scope)
+        workspace_digest = self._activation_digest_for_scope(selected_scope, workspace)
         updated: InstalledPlugin | None = None
 
         def _update(current: PluginRegistryState) -> tuple[InstalledPlugin, ...]:
             nonlocal updated
-            plugin = _find_plugin(current, plugin_id)
-            if enabled:
-                if not any(component.effective for component in plugin.components):
-                    raise PluginError(
-                        "PLUGIN_NO_EFFECTIVE_COMPONENT",
-                        "Plugin 没有可生效的 Harness 组件，无法启用",
-                    )
-                if capability_fingerprint != plugin.capability_fingerprint:
-                    raise PluginError(
-                        "PLUGIN_CAPABILITY_CONFIRMATION_REQUIRED",
-                        "启用 Plugin 必须确认当前 capability_fingerprint",
-                    )
-                if not plugin.can_enable:
-                    raise PluginError(
-                        "PLUGIN_COMPONENT_INVALID",
-                        "Plugin 包含无效组件，修复或更新后才能启用",
-                    )
-                self.store.verify_installed(plugin)
+            plugin = self._find_by_name(current, name)
+            self.store.verify_installed(plugin)
+            activation_value = "enabled" if enabled else "disabled"
+            user_activation = (
+                activation_value if selected_scope == "user" else plugin.activation_user
+            )
+            workspace_entries = dict(plugin.activation_workspaces)
+            if selected_scope == "workspace":
+                assert workspace_digest is not None
+                workspace_entries[workspace_digest] = activation_value  # type: ignore[assignment]
             updated = InstalledPlugin(
                 plugin_id=plugin.plugin_id,
                 source_id=plugin.source_id,
@@ -415,102 +761,83 @@ class PluginManager:
                 format=plugin.format,
                 manifest=plugin.manifest,
                 package_digest=plugin.package_digest,
-                capability_fingerprint=plugin.capability_fingerprint,
                 components=plugin.components,
                 diagnostics=plugin.diagnostics,
-                enabled=enabled,
-                trusted_capability_fingerprint=(
-                    plugin.capability_fingerprint if enabled else None
-                ),
+                activation_user=user_activation,  # type: ignore[arg-type]
+                activation_workspaces=tuple(sorted(workspace_entries.items())),  # type: ignore[arg-type]
                 installed_at_ms=plugin.installed_at_ms,
                 adapter_revision=plugin.adapter_revision,
+                origin=plugin.origin,
             )
             return tuple(
-                updated if item.plugin_id == plugin_id else item for item in current.plugins
+                updated if item.plugin_id == plugin.plugin_id else item
+                for item in current.plugins
             )
 
         state = self.store.mutate_registry(_update)
         assert updated is not None
-        return {
-            "revision": state.revision,
-            "plugin": updated.to_dict(),
-            "effective_on": "next_host",
-            "catalog": self._catalog_from_state(state).to_dict(),
-        }
+        return self._mutation_result(
+            state=state,
+            plugin=updated,
+            operation="enable" if enabled else "disable",
+            scope=selected_scope,
+            workspace=workspace,
+        )
 
     def remove(
         self,
-        plugin_id: str,
+        name: str,
         *,
         purge_data: bool = False,
         settings_cleanup: Callable[[InstalledPlugin, int], dict[str, object]] | None = None,
     ) -> dict[str, object]:
-        """按 registry revision 绑定卸载 Settings，再移除记录；默认保留 data。"""
-        removed: InstalledPlugin | None = None
-        before = self.store.read_registry()
-        removed = _find_plugin(before, plugin_id)
+        """按名称卸载 artifact；清理失败时保留 registry 记录。"""
+        before = self._state()
+        removed = self._find_by_name(before, name)
         settings_result: dict[str, object] | None = None
-        current_state: PluginRegistryState | None = None
         data_purged = False
 
         def _remove(current: PluginRegistryState) -> tuple[InstalledPlugin, ...]:
-            nonlocal current_state, data_purged, removed, settings_result
-            current_state = current
+            nonlocal data_purged, removed, settings_result
             if current.revision != before.revision:
-                raise PluginError("PLUGIN_REGISTRY_REVISION_CONFLICT", "Plugin registry 已变化")
-            current_plugin = _find_plugin(current, plugin_id)
+                raise PluginError("PLUGIN_OPERATION_CONFLICT", "Plugin registry 已变化，请重试")
+            current_plugin = self._find_by_name(current, name)
             if current_plugin.package_digest != removed.package_digest:
-                raise PluginError("PLUGIN_REGISTRY_REVISION_CONFLICT", "Plugin identity 已变化")
+                raise PluginError("PLUGIN_OPERATION_CONFLICT", "Plugin identity 已变化，请重试")
             removed = current_plugin
-            # Settings credential 属于成功卸载的固定清理步骤；purge_data 只
-            # 决定是否额外删除 Plugin data，二者不能共用条件。
             if settings_cleanup is not None:
                 settings_result = settings_cleanup(current_plugin, current.revision)
                 if settings_result.get("partial"):
-                    raise _SettingsCleanupPartial(settings_result)
-            # 在同一 registry lock 内完成破坏性 data cleanup；若 revision 已漂移，
-            # 上面的检查会先失败，避免先清理后返回 conflict。
+                    raise PluginError("SETTINGS_UNINSTALL_PARTIAL", "Plugin Settings 清理未完成")
             if purge_data:
                 data_purged = self.store.purge_data(current_plugin)
-            return tuple(plugin for plugin in current.plugins if plugin.plugin_id != plugin_id)
+            return tuple(
+                plugin
+                for plugin in current.plugins
+                if plugin.plugin_id != current_plugin.plugin_id
+            )
 
-        try:
-            state = self.store.mutate_registry(_remove)
-        except _SettingsCleanupPartial as exc:
-            stable_state = current_state or before
-            return {
-                "revision": stable_state.revision,
-                "id": plugin_id,
-                "removed": False,
-                "data_retained": True,
-                "data_purged": False,
-                "settings_cleanup": exc.result,
-                "diagnostics": ["SETTINGS_UNINSTALL_PARTIAL"],
-                "catalog": self._catalog_from_state(stable_state).to_dict(),
-            }
-        assert removed is not None
+        state = self.store.mutate_registry(_remove)
         result: dict[str, object] = {
-            "revision": state.revision,
-            "id": plugin_id,
+            "operation": "remove",
+            "name": removed.name,
             "removed": True,
             "data_retained": not purge_data,
             "data_purged": data_purged,
-            "catalog": self._catalog_from_state(state).to_dict(),
+            "status": "disabled",
+            "components": [],
+            "warnings": [],
         }
         if settings_result is not None:
             result["settings_cleanup"] = settings_result
         return result
 
-    def catalog(self) -> ExtensionCatalogSnapshot:
-        """发布只包含已启用且 trust 未失效记录的不可变 catalog。"""
-        return self._catalog_from_state(self.store.read_registry())
+    def catalog(self, *, workspace: Path | None = None) -> ExtensionCatalogSnapshot:
+        """发布当前 workspace 的不可变 runtime catalog。"""
+        return self._catalog_from_state(self._state(), workspace=workspace)
 
     def refresh_catalog(self) -> PluginCatalogRefreshResult:
-        """用当前 Adapter 重解析已校验 package，再发布可运行 catalog。
-
-        解析发生在 registry 文件锁内，package digest、Plugin identity 和原有 trust
-        均不会被重解析过程替换。能力指纹变化只保留旧 trust，交由显式 enable 重新确认。
-        """
+        """用当前 Adapter 重解析已校验 package，保留 activation 不变。"""
         changed_plugin_ids: set[str] = set()
         initial = self.store.read_registry()
         if (
@@ -520,7 +847,9 @@ class PluginManager:
         ):
             # 空的默认 Host 不应因为探测 Plugin 而创建 user-scope lock；有
             # registry 或已安装记录时才进入跨进程刷新事务。
-            return PluginCatalogRefreshResult(catalog=self._catalog_from_state(initial))
+            return PluginCatalogRefreshResult(
+                catalog=self._catalog_from_state(initial, workspace=self.workspace)
+            )
 
         def _refresh(current: PluginRegistryState) -> tuple[InstalledPlugin, ...]:
             refreshed: list[InstalledPlugin] = []
@@ -548,7 +877,6 @@ class PluginManager:
                     version=descriptor.version,
                     description=descriptor.description,
                     manifest=descriptor.manifest,
-                    capability_fingerprint=descriptor.capability_fingerprint,
                     components=descriptor.components,
                     diagnostics=descriptor.diagnostics,
                     adapter_revision=descriptor.adapter_revision,
@@ -559,22 +887,9 @@ class PluginManager:
             return tuple(refreshed)
 
         state = self.store.mutate_registry_if_changed(_refresh)
-        reauthorization_required = tuple(
-            plugin.plugin_id
-            for plugin in state.plugins
-            if plugin.enabled
-            and plugin.trusted_capability_fingerprint != plugin.capability_fingerprint
-        )
-        reauthorization = tuple(
-            _reauthorization_summary(plugin)
-            for plugin in state.plugins
-            if plugin.plugin_id in reauthorization_required
-        )
         return PluginCatalogRefreshResult(
-            catalog=self._catalog_from_state(state),
+            catalog=self._catalog_from_state(state, workspace=self.workspace),
             changed_plugin_ids=tuple(sorted(changed_plugin_ids)),
-            reauthorization_required=reauthorization_required,
-            reauthorization=reauthorization,
         )
 
     def setting_bindings(
@@ -591,8 +906,30 @@ class PluginManager:
         self,
         plugin: InstalledPlugin,
     ) -> PluginSettingsLoadResult:
-        """按已安装记录解析卸载 identity，不受 enabled/trusted runtime 过滤。"""
+        """按已安装记录解析卸载 identity，不受 activation runtime 过滤。"""
         return self._load_setting_bindings((plugin,), require_runtime=False)
+
+    def setting_bindings_for_management(
+        self,
+        name: str | None = None,
+    ) -> PluginSettingsLoadResult:
+        """读取管理面可见的当前声明；disabled Plugin 也能被设置或清理。"""
+        state = self._state()
+        self._assert_no_name_conflict(state)
+        plugins = (
+            (self._find_by_name(state, name),)
+            if name is not None
+            else state.plugins
+        )
+        return self._load_setting_bindings(tuple(plugins), require_runtime=False)
+
+    def plugin_names_by_id(self) -> dict[str, str]:
+        """返回 Host 内部用于脱敏 Settings summary 的 id 到 name 映射。"""
+        return {plugin.plugin_id: plugin.name for plugin in self._state().plugins}
+
+    def plugin_id_for_name(self, name: str) -> str:
+        """按名称返回 Host 内部使用的安装 ID，不作为用户输入契约。"""
+        return self._find_by_name(self._state(), name).plugin_id
 
     def _load_setting_bindings(
         self,
@@ -836,7 +1173,7 @@ class PluginManager:
         self,
         catalog: ExtensionCatalogSnapshot | None = None,
     ) -> dict[str, tuple["ContextBlock", ...]]:
-        """从 enabled+trusted Qwen 资源快照读取 canonical 稳定参考块。"""
+        """从 enabled Qwen 资源快照读取 canonical 稳定参考块。"""
         from harness_agent.threads.context_lifecycle import (
             ContextAuthority,
             ContextBlock,
@@ -876,7 +1213,7 @@ class PluginManager:
         self,
         catalog: ExtensionCatalogSnapshot | None = None,
     ) -> tuple["ContextBlock", ...]:
-        """返回当前 trusted Plugin 的稳定参考块，供主 Agent 快照使用。"""
+        """返回当前 enabled Plugin 的稳定参考块，供主 Agent 快照使用。"""
         by_source = self.context_blocks_by_source(catalog)
         return tuple(block for blocks in by_source.values() for block in blocks)
 
@@ -941,23 +1278,29 @@ class PluginManager:
 
     def package_root(self, plugin_id: str) -> Path:
         """仅供后续生产装配按 catalog ID 获取已校验 store 根目录。"""
-        state = self.store.read_registry()
+        state = self._state()
         plugin = _find_plugin(state, plugin_id)
-        if not plugin.enabled or (
-            plugin.trusted_capability_fingerprint != plugin.capability_fingerprint
-        ):
-            raise PluginError("PLUGIN_NOT_ENABLED", "Plugin 尚未启用或 trust 已失效")
+        if plugin.activation_for(self._workspace_digest(None)) != "enabled":
+            raise PluginError("PLUGIN_NOT_ENABLED", "Plugin 尚未在当前 workspace 启用")
         self.store.verify_installed(plugin)
         return self.store.package_path(plugin)
 
-    def _catalog_from_state(self, state: PluginRegistryState) -> ExtensionCatalogSnapshot:
-        """过滤 enabled + trusted 记录并计算 snapshot ID。"""
+    def _catalog_from_state(
+        self,
+        state: PluginRegistryState,
+        *,
+        workspace: Path | None = None,
+    ) -> ExtensionCatalogSnapshot:
+        """过滤当前 workspace enabled 且有实际 consumer 的记录。"""
+        self._assert_no_name_conflict(state)
+        # 启动 Host 可能先构造一个尚未 mkdir 的 workspace；user activation
+        # 不依赖该路径，workspace override 则在可用时按同一 identity 解析。
+        workspace_digest = self._workspace_digest(workspace)
         plugins = tuple(
             plugin
             for plugin in state.plugins
-            if plugin.enabled
-            and plugin.can_enable
-            and plugin.trusted_capability_fingerprint == plugin.capability_fingerprint
+            if plugin.activation_for(workspace_digest) == "enabled"
+            and any(component.effective for component in plugin.components)
         )
         return ExtensionCatalogSnapshot(
             snapshot_id=catalog_snapshot_id(state.revision, plugins),

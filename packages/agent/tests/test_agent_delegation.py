@@ -105,25 +105,20 @@ def _command(
 
 
 @pytest.mark.asyncio
-async def test_stale_plugin_agent_is_reauthorized_before_child_creation() -> None:
-    """blocked Agent identity 只返回 reauthorization，不创建 child execution。"""
+async def test_failed_plugin_agent_is_blocked_before_child_creation() -> None:
+    """无法进入可信 Agent catalog 时只返回加载失败，不创建 child execution。"""
     registry, root = await _registry()
-    message = (
-        "PLUGIN_REAUTHORIZATION_REQUIRED: plugin_id=plugin-za38; "
-        "authorization_state=reauthorization-required; "
-        "capability_fingerprint=abc123; action=inspect-enable"
-    )
     delegator = AgentDelegator(
         registry,
         targets=(),
-        blocked_target_messages={"za38-frontend-executor": message},
+        blocked_target_messages={"za38-frontend-executor": "private diagnostic"},
     )
 
     with pytest.raises(AgentDelegationError) as caught:
         await delegator.execute(_command(root, target="za38-frontend-executor"))
 
-    assert caught.value.code == "PLUGIN_REAUTHORIZATION_REQUIRED"
-    assert str(caught.value) == message
+    assert caught.value.code == "PLUGIN_LOAD_FAILED"
+    assert str(caught.value) == "PLUGIN_LOAD_FAILED"
     children = await registry.list(root)
     assert tuple(item.ref.execution_id for item in children) == (root.execution_id,)
 

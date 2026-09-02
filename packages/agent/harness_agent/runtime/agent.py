@@ -782,8 +782,8 @@ def create_harness_agent(
         execution_registry: Host 的 AgentExecutionRegistry；传入后 `task` 走受控 delegation。
         delegation_model: 写入 Inline child execution 的脱敏模型事实。
         delegation_targets: Host 从可信 Plugin catalog 注册的 Managed target。
-        blocked_target_messages: stale Plugin Agent 的不可执行门禁摘要；不加入 subagent
-            runtime catalog，仅在显式目标缺失时返回 reauthorization。
+        blocked_target_messages: Plugin Agent 的不可执行加载摘要；不加入 subagent
+            runtime catalog，仅在显式目标缺失时返回稳定加载错误。
         plugin_runtime: Host 持有的 PluginRuntimeManager；提供 Hook middleware 与 LSP。
         defer_tools: tool_search 延迟加载开关（对应 ``[tools].tool_search_defer``）。
             True/``"on"`` 启用延迟（D8 低频内置与 MCP 工具不绑定模型，搜索命中

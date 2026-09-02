@@ -5,7 +5,7 @@ import { Capability, type AgentCommand } from "@za38/protocol"
 /** 命令打开的交互入口类型；由 Result Adapter 映射为具体副作用。 */
 export type CommandPresentation = "action" | "picker" | "viewer" | "dialog"
 
-/** Command 来源预留给后续 Skill、MCP 与 Plugin Loader；当前只注册内置命令。 */
+/** Command 来源由内置定义与 Host 启动快照合并，交给同一份 InteractiveRuntime 消费。 */
 export type CommandSource =
   | { type: "builtin" }
   | { type: "skill"; id: string }

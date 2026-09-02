@@ -22,7 +22,7 @@ from harness_agent.extensions.plugin_skills import (
 )
 from harness_agent.extensions.skills import SkillRegistry
 from harness_agent.plugins.manager import PluginManager
-from harness_agent.plugins.model import PluginError, capability_fingerprint
+from harness_agent.plugins.model import PluginError
 from harness_agent.protocol.generated import EventEnvelope
 from harness_agent.runtime.agent_catalog import (
     AgentCatalog,
@@ -87,20 +87,18 @@ def _model_catalog() -> ModelCatalog:
     )
 
 
-def test_clean_za38_fixture_is_detected_as_qwen_with_static_inventory(
+def test_clean_za38_fixture_is_detected_as_qwen_with_loaded_inventory(
     tmp_path: Path,
 ) -> None:
-    """DevAgent 清洁包应报告真实字段和组件数量，Agent 可进入 canonical 运行时。"""
+    """DevAgent 清洁包应报告真实组件数量并进入 canonical 运行时。"""
     source = _copy_fixture(tmp_path)
     manager = PluginManager(home=tmp_path / "home")
     summary = manager.validate(source)["plugin"]
 
     assert isinstance(summary, dict)
     assert summary["format"] == "qwen-code"
-    assert summary["manifest"] == "devagent-extension.json"
     assert summary["name"] == "ZA38.03_CLI_EXTENSION"
     assert summary["version"] == "0.2.0"
-    assert summary["can_enable"] is True
 
     components = _components(summary)
     assert {kind: components[kind]["count"] for kind in components} == {
@@ -111,38 +109,17 @@ def test_clean_za38_fixture_is_detected_as_qwen_with_static_inventory(
         "mcp": 1,
         "skills": 1,
     }
-    assert components["agents"]["status"] == "adapted"
-    assert components["agents"]["effective"] is True
-    assert components["contexts"]["status"] == "adapted"
-    assert components["contexts"]["effective"] is True
-    assert components["hooks"]["status"] == "adapted"
-    assert components["hooks"]["effective"] is True
-    assert components["commands"]["status"] == "adapted"
-    assert components["commands"]["effective"] is True
-    assert components["skills"]["status"] == "adapted"
-    assert components["skills"]["effective"] is True
-    assert components["mcp"]["status"] == "adapted"
-    assert components["mcp"]["effective"] is True
     assert components["contexts"]["sources"] == ["DEVAGENT.md"]
-    assert components["hooks"]["capabilities"] == ["process:hook"]
-    assert isinstance(summary["capability_fingerprint"], str)
-    assert len(summary["capability_fingerprint"]) == 64
+    assert "static_preview" not in summary
 
 
-def test_trusted_qwen_subagent_stop_enters_canonical_runtime_catalog(
+def test_qwen_subagent_stop_enters_canonical_runtime_catalog(
     tmp_path: Path,
 ) -> None:
-    """trust+enable 后 Qwen Hook 进入统一 runtime catalog，但不启动进程。"""
+    """安装后 Qwen Hook 进入统一 runtime catalog，但不启动进程。"""
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(_copy_fixture(tmp_path))["plugin"]
     assert isinstance(installed, dict)
-    plugin_id = str(installed["id"])
-    manager.set_enabled(
-        plugin_id,
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
-
     runtime_catalog = manager.runtime_catalog(
         manager.catalog(),
         workspace=tmp_path / "workspace",
@@ -200,12 +177,6 @@ async def test_qwen_unsupported_lsp_and_monitor_reports_cannot_enter_runtime(
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
-
     catalog = manager.catalog()
     qwen = catalog.plugins[0]
     assert any(
@@ -334,38 +305,17 @@ def test_qwen_invalid_or_out_of_scope_hooks_never_enter_runtime(
     manager = PluginManager(home=tmp_path / "home")
     summary = manager.validate(source)["plugin"]
     assert isinstance(summary, dict)
-    component = _components(summary)["hooks"]
-    if "PostToolUse" in hooks:
-        assert component["status"] == "adapted"
-        assert component["effective"] is True
-    elif any(
-        isinstance(group, dict)
-        and any(
-            isinstance(handler, dict) and handler.get("command") == 123
-            for handler in group.get("hooks", [])
-        )
-        for group in hooks["SubagentStop"]
-    ):
-        assert component["status"] == "adapted"
-        assert component["effective"] is True
-    else:
-        assert component["status"] == "invalid"
-        assert component["effective"] is False
+    component = _components(summary).get("hooks")
+    component_is_effective = component is not None
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    assert installed["can_enable"] is True
-    manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
 
     runtime_catalog = manager.runtime_catalog(
         manager.catalog(),
         workspace=tmp_path / "workspace",
     )
 
-    if component["effective"] is True:
+    if component_is_effective:
         assert len(runtime_catalog.hooks) == 1
         if "PostToolUse" in hooks:
             assert runtime_catalog.hooks[0].event == "PostToolUse"
@@ -454,24 +404,14 @@ def test_qwen_hook_report_matches_canonical_runtime_validation(
     manager = PluginManager(home=tmp_path / "home")
     summary = manager.validate(source)["plugin"]
     assert isinstance(summary, dict)
-    component = _components(summary)["hooks"]
-    assert component["status"] == "invalid"
-    assert component["effective"] is False
-    assert any(
-        diagnostic.lower() in str(item).lower()
-        for item in component["diagnostics"]
-    )
+    assert "hooks" not in _components(summary)
+    assert any(diagnostic.lower() in str(item).lower() for item in summary["warnings"])
 
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    plugin_id = str(installed["id"])
-    manager.set_enabled(
-        plugin_id,
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
+    plugin_id = manager.store.read_registry().plugins[0].plugin_id
 
-    def reauthorized_hook_report(current: object) -> tuple[object, ...]:
+    def updated_hook_report(current: object) -> tuple[object, ...]:
         assert hasattr(current, "plugins")
         updated: list[object] = []
         for plugin in current.plugins:  # type: ignore[attr-defined]
@@ -484,24 +424,21 @@ def test_qwen_hook_report_matches_canonical_runtime_validation(
                     status="adapted",
                     effective=True,
                     capabilities=("process:hook",),
-                    diagnostics=("re-authorized report",),
+                    diagnostics=("updated report",),
                 )
                 if item.kind == "hooks"
                 else item
                 for item in plugin.components
             )
-            fingerprint = capability_fingerprint(components)
             updated.append(
                 replace(
                     plugin,
                     components=components,
-                    capability_fingerprint=fingerprint,
-                    trusted_capability_fingerprint=fingerprint,
                 )
             )
         return tuple(updated)
 
-    manager.store.mutate_registry(reauthorized_hook_report)  # type: ignore[arg-type]
+    manager.store.mutate_registry(updated_hook_report)  # type: ignore[arg-type]
     runtime_catalog = manager.runtime_catalog(
         manager.catalog(),
         workspace=tmp_path / "workspace",
@@ -555,20 +492,13 @@ def test_qwen_hook_timeout_is_milliseconds_at_adapter_and_runtime_boundary(
     manager = PluginManager(home=tmp_path / "home")
     summary = manager.validate(source)["plugin"]
     assert isinstance(summary, dict)
-    component = _components(summary)["hooks"]
-    assert component["status"] == expected_status
-    assert component["effective"] is (expected_status == "adapted")
+    assert ("hooks" in _components(summary)) is (expected_status == "adapted")
 
     if expected_seconds is None:
         return
 
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
     runtime_catalog = manager.runtime_catalog(
         manager.catalog(),
         workspace=tmp_path / "workspace",
@@ -630,12 +560,7 @@ def test_qwen_stale_adapted_hook_runtime_failure_is_observable_and_fail_closed(
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    plugin_id = str(installed["id"])
-    manager.set_enabled(
-        plugin_id,
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
+    plugin_id = manager.store.read_registry().plugins[0].plugin_id
 
     def corrupt_report(current: object) -> tuple[object, ...]:
         assert hasattr(current, "plugins")
@@ -668,10 +593,8 @@ def test_qwen_stale_adapted_hook_runtime_failure_is_observable_and_fail_closed(
     assert isinstance(runtime_catalog, PluginRuntimeCatalog)
     assert runtime_catalog.hooks == ()
     assert runtime_catalog.hook_failures
-    assert any(
-        "COMPONENT_FINGERPRINT_DRIFT" in diagnostic
-        for diagnostic in runtime_catalog.diagnostics
-    ), runtime_catalog.diagnostics
+    assert runtime_catalog.hook_failures
+    assert not any("FINGERPRINT" in diagnostic for diagnostic in runtime_catalog.diagnostics)
 
 
 def test_qwen_context_uses_default_qwen_md_for_missing_or_empty_array(
@@ -770,18 +693,16 @@ def test_devagent_context_keeps_explicit_string_contract(tmp_path: Path) -> None
     assert rejected.value.code == "PLUGIN_MANIFEST_FIELD_INVALID"
 
 
-def test_qwen_install_exposes_static_resource_snapshot_with_virtual_paths(
+def test_qwen_install_keeps_resource_snapshot_internal_with_virtual_paths(
     tmp_path: Path,
 ) -> None:
     """安装后的 ZA38 资产进入只读快照，摘要只使用虚拟路径。"""
     source = _copy_fixture(tmp_path)
     manager = PluginManager(home=tmp_path / "home")
 
-    installed = manager.install(source)
-    assert isinstance(installed, dict)
-    snapshot = installed["resource_snapshot"]
-    assert isinstance(snapshot, dict)
-    plugin_id = str(installed["plugin"]["id"])
+    manager.install(source)
+    plugin_id = manager.store.read_registry().plugins[0].plugin_id
+    snapshot = manager.resource_snapshot(plugin_id).to_dict()
     assert snapshot["plugin_id"] == plugin_id
     assert snapshot["virtual_root"] == f"/.harness/plugins/{plugin_id}"
     assert snapshot["read_only"] is True
@@ -859,8 +780,8 @@ def test_qwen_install_exposes_static_resource_snapshot_with_virtual_paths(
         f"{snapshot['virtual_root']}/scripts/za38-index.mjs"
         in manager.resource_snapshot(plugin_id).read_text(command["virtual_path"])
     )
-    listed = manager.list()["resource_snapshots"]
-    assert listed == [snapshot]
+    assert "resource_snapshots" not in manager.list()
+    assert manager.resource_snapshots()[0].to_dict() == snapshot
 
 
 def test_qwen_snapshot_excludes_hidden_and_credential_named_assets(
@@ -872,7 +793,10 @@ def test_qwen_snapshot_excludes_hidden_and_credential_named_assets(
     (source / "scripts" / "credentials.json").write_text("{}\n", encoding="utf-8")
     (source / "references" / ".dev-note.md").write_text("dev-only\n", encoding="utf-8")
 
-    snapshot = PluginManager(home=tmp_path / "home").install(source)["resource_snapshot"]
+    manager = PluginManager(home=tmp_path / "home")
+    manager.install(source)
+    plugin_id = manager.store.read_registry().plugins[0].plugin_id
+    snapshot = manager.resource_snapshot(plugin_id).to_dict()
     assert all(
         not any(
             part.startswith(".")
@@ -889,9 +813,9 @@ def test_qwen_resource_snapshot_reads_skill_references_and_rejects_escape(
     """Skill 的相对 references 进入快照，越界路径仍被拒绝。"""
     source = _copy_fixture(tmp_path)
     manager = PluginManager(home=tmp_path / "home")
-    installed = manager.install(source)["plugin"]
-    assert isinstance(installed, dict)
-    snapshot = manager.resource_snapshot(str(installed["id"]))
+    manager.install(source)
+    plugin_id = manager.store.read_registry().plugins[0].plugin_id
+    snapshot = manager.resource_snapshot(plugin_id)
 
     skill = next(
         asset
@@ -927,9 +851,8 @@ def test_qwen_resource_snapshot_resolves_known_placeholders_only(
     )
 
     manager = PluginManager(home=tmp_path / "home")
-    installed = manager.install(source)["plugin"]
-    assert isinstance(installed, dict)
-    plugin_id = str(installed["id"])
+    manager.install(source)
+    plugin_id = manager.store.read_registry().plugins[0].plugin_id
     mcp = [
         asset
         for asset in manager.resource_snapshot(plugin_id).resources
@@ -945,18 +868,14 @@ def test_qwen_resource_snapshot_resolves_known_placeholders_only(
     assert str(tmp_path) not in json.dumps(mcp[0].to_dict(), ensure_ascii=False)
 
 
-def test_qwen_untrusted_process_assets_are_static_only(tmp_path: Path) -> None:
-    """未 trust 的安装记录不进入 enabled catalog，也不会产生可启动 MCP。"""
+def test_qwen_installed_process_assets_are_enabled_without_static_preview(tmp_path: Path) -> None:
+    """安装记录直接 enabled，运行目录不再附带静态 preview。"""
     source = _copy_fixture(tmp_path)
     manager = PluginManager(home=tmp_path / "home")
-    installed = manager.install(source)["plugin"]
-    assert isinstance(installed, dict)
-    assert installed["enabled"] is False
-    assert manager.catalog().plugins == ()
-    assert manager.mcp_servers(
-        manager.catalog(), workspace=tmp_path / "workspace"
-    ).servers == ()
-    snapshot = manager.resource_snapshot(str(installed["id"]))
+    manager.install(source)
+    assert len(manager.catalog().plugins) == 1
+    plugin_id = manager.store.read_registry().plugins[0].plugin_id
+    snapshot = manager.resource_snapshot(plugin_id)
     assert all(
         not asset.metadata.get("runnable", False)
         for asset in snapshot.resources
@@ -989,71 +908,33 @@ def test_qwen_embedded_placeholder_paths_fail_closed(
         encoding="utf-8",
     )
 
-    summary = PluginManager(home=tmp_path / "home").install(source)["plugin"]
+    summary = PluginManager(home=tmp_path / "home").install(source)
     assert isinstance(summary, dict)
-    component = _components(summary)["mcp"]
-    assert component["effective"] is False
-    assert component["status"] == "invalid"
-    assert any(error_code in diagnostic for diagnostic in component["diagnostics"])
+    assert "mcp" not in _components(summary["plugin"])
+    assert any(error_code in warning for warning in summary["warnings"])
 
 
-def test_qwen_static_preview_lists_are_disabled_and_non_runnable(
+def test_qwen_plugin_lists_do_not_expose_static_preview(
     tmp_path: Path,
 ) -> None:
     """现有 Plugin 列表链路分别暴露四类静态 preview，不进入可执行 catalog。"""
     source = _copy_fixture(tmp_path)
     manager = PluginManager(home=tmp_path / "home")
-    installed = manager.install(source)["plugin"]
-    assert isinstance(installed, dict)
-
-    preview = manager.static_preview()
-    assert {kind: len(items) for kind, items in preview.items()} == {
-        "commands": 3,
-        "skills": 1,
-        "agents": 3,
-        "mcp": 1,
-    }
-    for kind, items in preview.items():
-        assert all(
-            item["kind"] == kind
-            and item["enabled"] is False
-            and item["static"] is True
-            and item["runnable"] is False
-            and item["read_only"] is True
-            and str(item["virtual_path"]).startswith("/.harness/plugins/")
-            for item in items
-        )
-    assert {item["name"] for item in preview["commands"]} == {
-        "za38-index",
-        "za38-init",
-        "za38-sdd",
-    }
-    assert {item["name"] for item in preview["skills"]} == {"za38-framework"}
-    assert {item["name"] for item in preview["agents"]} == {
-        "za38-backend-executor",
-        "za38-frontend-executor",
-        "za38-java-executor",
-    }
-    assert {item["name"] for item in preview["mcp"]} == {"za38.03_code_index"}
+    manager.install(source)
     listed = manager.list()
-    assert listed["static_preview"] == preview
+    assert "static_preview" not in listed
+    assert listed["plugins"][0]["status"] == "loaded"
     assert str(tmp_path) not in json.dumps(listed, ensure_ascii=False)
 
 
-def test_qwen_commands_and_skills_use_canonical_dialects_and_dedupe_preview(
+def test_qwen_commands_and_skills_use_canonical_dialects(
     tmp_path: Path,
 ) -> None:
-    """trusted Qwen Commands/Skills 进入 canonical registry，effective 条目从 preview 去重。"""
+    """安装后的 Qwen Commands/Skills 进入 canonical registry。"""
     source = _copy_fixture(tmp_path)
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
-
     catalog = manager.catalog()
     result = manager.skill_sources(catalog)
     assert result.diagnostics == ()
@@ -1083,9 +964,7 @@ def test_qwen_commands_and_skills_use_canonical_dialects_and_dedupe_preview(
         "ZA38 offline root reference"
     )
 
-    preview = manager.static_preview()
-    assert preview["commands"] == []
-    assert preview["skills"] == []
+    assert "static_preview" not in manager.list()
 
 
 def test_qwen_skill_resource_closure_excludes_origin_material_without_diagnostics(
@@ -1101,11 +980,6 @@ def test_qwen_skill_resource_closure_excludes_origin_material_without_diagnostic
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
 
     installed_record = manager.store.read_registry().plugins[0]
     package = manager.store.package_path(installed_record)
@@ -1130,7 +1004,9 @@ def test_qwen_skill_resource_closure_excludes_origin_material_without_diagnostic
     with pytest.raises(PluginSkillError, match="not captured"):
         registry.read_resource(skill.skill_id, "references/origin/sentinel.png")
 
-    snapshot = manager.resource_snapshot(str(installed["id"]))
+    snapshot = manager.resource_snapshot(
+        manager.store.read_registry().plugins[0].plugin_id
+    )
     serialized = json.dumps(snapshot.to_dict(), ensure_ascii=False)
     assert "ORIGIN_SENTINEL" not in serialized
     assert "ORIGIN_OVERSIZED_SENTINEL" not in serialized
@@ -1149,14 +1025,7 @@ def test_real_za38_extension_install_ignores_checkout_metadata_and_exposes_four_
     installed = manager.install(REAL_ZA38_EXTENSION)["plugin"]
     assert isinstance(installed, dict)
     installed_components = _components(installed)
-    assert installed_components["hooks"]["status"] == "adapted"
-    assert installed_components["hooks"]["effective"] is True
-    assert installed.get("compatibility") == "recognized"
-    manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
+    assert "hooks" in installed_components
 
     catalog = manager.catalog()
     result = manager.skill_sources(catalog)
@@ -1179,8 +1048,7 @@ def test_real_za38_extension_install_ignores_checkout_metadata_and_exposes_four_
     } == {
         "za38-framework"
     }
-    assert manager.static_preview()["commands"] == []
-    assert manager.static_preview()["skills"] == []
+    assert "static_preview" not in manager.list()
 
     record = manager.store.read_registry().plugins[0]
     package = manager.store.package_path(record)
@@ -1281,14 +1149,10 @@ api_key_env = "HARNESS_PHASE1_FAKE_KEY"
     server.send = capture
     installed = server._plugin_manager.install(_copy_fixture(tmp_path))["plugin"]
     assert isinstance(installed, dict)
-    server._plugin_manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
+    installed_record = server._plugin_manager.store.read_registry().plugins[0]
     try:
         initialize_params = {
-                "protocol": {"major": 3, "min_minor": 0, "max_minor": 7},
+                "protocol": {"major": 3, "min_minor": 0, "max_minor": 8},
             "client": {"name": "test", "version": "0.1.0", "kind": "test"},
             "capabilities": {
                 "requests": ["run.multithread", "skills.read", "threads.read"],
@@ -1379,8 +1243,8 @@ api_key_env = "HARNESS_PHASE1_FAKE_KEY"
             and frame["params"]["type"] == "run.started"
         )
         expected_provenance = {
-            "plugin_id": str(installed["id"]),
-            "package_digest": installed["package_digest"],
+            "plugin_id": installed_record.plugin_id,
+            "package_digest": installed_record.package_digest,
             "command_id": command["id"],
             "snapshot_id": initialized["skills_snapshot"]["id"],
         }
@@ -1405,7 +1269,7 @@ api_key_env = "HARNESS_PHASE1_FAKE_KEY"
         assert str(home) not in serialized_events
         assert str(workspace) not in serialized_events
         assert "SDD fixture." not in json.dumps(expected_provenance)
-        assert loaded["payload"]["provenance"]["package_digest"] == installed["package_digest"]
+        assert loaded["payload"]["provenance"]["package_digest"] == installed_record.package_digest
         assert loaded["payload"]["provenance"]["command_id"] == command["id"]
         records = await server._thread_persistence.load_transcript("phase1-thread")
         assert records[0].kind == "user"
@@ -1468,11 +1332,6 @@ async def test_old_minor_rejects_plugin_command_before_emitting_v37_provenance(
     server.send = capture
     installed = server._plugin_manager.install(_copy_fixture(tmp_path))["plugin"]
     assert isinstance(installed, dict)
-    server._plugin_manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
     try:
         await server.dispatch(
             {
@@ -1778,7 +1637,7 @@ async def test_host_uses_immutable_cli_fallback_binding_for_plugin_help() -> Non
         await server.close()
 
 
-def test_qwen_bad_markdown_entries_are_isolated_and_remain_non_runnable_preview(
+def test_qwen_bad_markdown_entries_are_isolated_from_effective_inventory(
     tmp_path: Path,
 ) -> None:
     """坏 UTF-8、unsupported expansion 和坏 front matter 不扩大有效条目。"""
@@ -1799,23 +1658,12 @@ def test_qwen_bad_markdown_entries_are_isolated_and_remain_non_runnable_preview(
     summary = manager.validate(source)["plugin"]
     assert isinstance(summary, dict)
     components = _components(summary)
-    assert components["commands"]["status"] == "adapted"
-    assert components["commands"]["effective"] is True
     assert components["commands"]["count"] == 3
-    assert components["skills"]["status"] == "adapted"
-    assert components["skills"]["effective"] is True
     assert components["skills"]["count"] == 1
-    assert any("bad-encoding.md" in item for item in components["commands"]["diagnostics"])
-    assert any("bad-expansion.md" in item for item in components["commands"]["diagnostics"])
-    assert any("bad-skill/SKILL.md" in item for item in components["skills"]["diagnostics"])
+    assert "static_preview" not in summary
 
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
     result = manager.skill_sources(manager.catalog())
     registry = PluginSkillRegistry(
         tmp_path / "workspace",
@@ -1828,14 +1676,7 @@ def test_qwen_bad_markdown_entries_are_isolated_and_remain_non_runnable_preview(
         "za38-init",
         "za38-sdd",
     }
-    preview = manager.static_preview()
-    assert {item["name"] for item in preview["commands"]} == {
-        "bad-encoding",
-        "bad-expansion",
-    }
-    assert all(item["runnable"] is False for item in preview["commands"])
-    assert [item["name"] for item in preview["skills"]] == ["bad-skill"]
-    assert preview["skills"][0]["runnable"] is False
+    assert "static_preview" not in manager.list()
 
 
 def test_qwen_markdown_path_symlink_and_size_boundaries_fail_closed_per_entry(
@@ -1867,20 +1708,11 @@ def test_qwen_markdown_path_symlink_and_size_boundaries_fail_closed_per_entry(
     summary = manager.validate(source)["plugin"]
     assert isinstance(summary, dict)
     commands = _components(summary)["commands"]
-    assert commands["status"] == "adapted"
-    assert commands["effective"] is True
     assert commands["count"] == 3
-    diagnostics = "\n".join(commands["diagnostics"])
-    assert "QWEN_MARKDOWN_TOO_LARGE" in diagnostics
-    assert "PLUGIN_COMPONENT_PATH_INVALID" in diagnostics
+    assert "static_preview" not in summary
 
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
     result = manager.skill_sources(manager.catalog())
     registry = PluginSkillRegistry(
         tmp_path / "workspace",
@@ -1906,11 +1738,6 @@ def test_qwen_command_expands_args_once_from_immutable_skill_snapshot(
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
     result = manager.skill_sources(manager.catalog())
     registry = PluginSkillRegistry(
         tmp_path / "workspace",
@@ -1920,6 +1747,7 @@ def test_qwen_command_expands_args_once_from_immutable_skill_snapshot(
     command = registry.resolve("za38-sdd")
     loaded = registry.load(command.skill_id, "创建登录功能")
     assert loaded.rendered_body() == "Create: 创建登录功能"
+    before_record = manager.store.read_registry().plugins[0]
 
     # 模拟运行期间重新安装：旧 Registry 仍只读本次 Run 已捕获的正文，
     # 下一次 Registry 才能看到新的 package digest 和正文。
@@ -1927,9 +1755,10 @@ def test_qwen_command_expands_args_once_from_immutable_skill_snapshot(
         "---\ndescription: replaced\nargument-hint: <goal>\n---\n\nReplaced: {{args}}\n",
         encoding="utf-8",
     )
-    replacement = manager.install(source)["plugin"]
+    replacement = manager.update("ZA38.03_CLI_EXTENSION", source=source)["plugin"]
     assert isinstance(replacement, dict)
-    assert replacement["package_digest"] != installed["package_digest"]
+    updated_record = manager.store.read_registry().plugins[0]
+    assert updated_record.package_digest != before_record.package_digest
     assert registry.load(command.skill_id, "创建登录功能").rendered_body() == (
         "Create: 创建登录功能"
     )
@@ -1958,16 +1787,14 @@ def test_qwen_default_commands_and_skills_are_effective_for_both_manifest_dialec
     summary = PluginManager(home=tmp_path / "home").validate(source)["plugin"]
     assert isinstance(summary, dict)
     components = _components(summary)
-    assert components["commands"]["status"] == "adapted"
     assert components["commands"]["count"] == 3
-    assert components["skills"]["status"] == "adapted"
     assert components["skills"]["count"] == 1
 
 
-async def test_qwen_static_preview_is_exposed_by_host_component_lists(
+async def test_qwen_host_component_lists_omit_static_preview(
     tmp_path: Path,
 ) -> None:
-    """Host 的 Skills/Agents/MCP 列表分别暴露静态预览而不改变运行列表。"""
+    """Host 的 Skills/Agents/MCP 列表不再附带静态 preview 分区。"""
     from types import SimpleNamespace
     from harness_agent.host.agent_host import AgentHost
 
@@ -1997,33 +1824,16 @@ async def test_qwen_static_preview_is_exposed_by_host_component_lists(
     agents = await server._handle_agents_list({}, "agents")
     mcp = await server._handle_mcp_status({}, "mcp")
 
-    assert len(initialized["static_command_preview"]) == 3
-    assert len(skills["skills"]) == 0
-    assert len(skills["static_preview"]) == 1
-    assert skills["static_preview"][0]["name"] == "za38-framework"
-    assert len(agents["agents"]) == 0
-    assert {item["name"] for item in agents["static_preview"]} == {
-        "za38-backend-executor",
-        "za38-frontend-executor",
-        "za38-java-executor",
-    }
-    assert len(mcp["servers"]) == 0
-    assert [item["name"] for item in mcp["static_preview"]] == [
-        "za38.03_code_index"
-    ]
-    assert all(
-        item["disabled"] is True
-        and item["static"] is True
-        and item["runnable"] is False
-        for result in (skills, agents, mcp)
-        for item in result["static_preview"]
-    )
+    assert "static_command_preview" not in initialized
+    assert "static_preview" not in skills
+    assert "static_preview" not in agents
+    assert "static_preview" not in mcp
 
 
-async def test_enabled_qwen_host_lists_effective_agents_and_keeps_other_previews(
+async def test_enabled_qwen_host_lists_effective_agents_without_previews(
     tmp_path: Path,
 ) -> None:
-    """启用后 Host 四条列表按组件去重，且测试不连接 fixture MCP。"""
+    """安装后 Host 使用有效 Agent，且测试不连接 fixture MCP。"""
     from harness_agent.host.agent_host import AgentHost
 
     server = AgentHost(
@@ -2033,11 +1843,6 @@ async def test_enabled_qwen_host_lists_effective_agents_and_keeps_other_previews
     )
     installed = server._plugin_manager.install(_copy_fixture(tmp_path))["plugin"]
     assert isinstance(installed, dict)
-    server._plugin_manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
     source_result = server._plugin_manager.agent_sources(server._plugin_manager.catalog())
     server._agent_catalog_for_control_plane = lambda: AgentCatalog(
         model_catalog=_model_catalog(),
@@ -2062,8 +1867,8 @@ async def test_enabled_qwen_host_lists_effective_agents_and_keeps_other_previews
     agents = await server._handle_agents_list({}, "agents")
     mcp = await server._handle_mcp_status({}, "mcp")
 
-    assert len(initialized["static_command_preview"]) == 0
-    assert len(skills["static_preview"]) == 0
+    assert "static_command_preview" not in initialized
+    assert "static_preview" not in skills
     assert {
         agent["id"]
         for agent in agents["agents"]
@@ -2073,22 +1878,15 @@ async def test_enabled_qwen_host_lists_effective_agents_and_keeps_other_previews
         "za38-frontend-executor",
         "za38-java-executor",
     }
-    assert agents["static_preview"] == []
+    assert "static_preview" not in agents
     assert mcp["servers"] == []
-    assert len(mcp["static_preview"]) == 0
-    assert all(
-        item["disabled"] is True
-        and item["static"] is True
-        and item["runnable"] is False
-        for result in (initialized, skills, mcp)
-        for item in result.get("static_command_preview", result.get("static_preview", []))
-    )
+    assert "static_preview" not in mcp
 
 
-async def test_host_static_preview_filters_non_qwen_plugins_from_all_lists(
+async def test_host_component_lists_do_not_expose_static_preview(
     tmp_path: Path,
 ) -> None:
-    """Host 四个 preview 分区只保留未接入运行时的 Qwen 资源。"""
+    """Host 不对未接入运行时的资源创建静态 preview 分区。"""
     from types import SimpleNamespace
 
     from harness_agent.host.agent_host import AgentHost
@@ -2120,29 +1918,10 @@ async def test_host_static_preview_filters_non_qwen_plugins_from_all_lists(
     agents = await server._handle_agents_list({}, "agents")
     mcp = await server._handle_mcp_status({}, "mcp")
 
-    assert {item["name"] for item in initialized["static_command_preview"]} == {
-        "za38-index",
-        "za38-init",
-        "za38-sdd",
-    }
-    assert [item["name"] for item in skills["static_preview"]] == [
-        "za38-framework"
-    ]
-    assert {item["name"] for item in agents["static_preview"]} == {
-        "za38-backend-executor",
-        "za38-frontend-executor",
-        "za38-java-executor",
-    }
-    assert [item["name"] for item in mcp["static_preview"]] == [
-        "za38.03_code_index"
-    ]
-    assert all(
-        item["disabled"] is True
-        and item["static"] is True
-        and item["runnable"] is False
-        for result in (skills, agents, mcp)
-        for item in result["static_preview"]
-    )
+    assert "static_command_preview" not in initialized
+    assert "static_preview" not in skills
+    assert "static_preview" not in agents
+    assert "static_preview" not in mcp
 
 
 def test_qwen_installed_snapshot_is_independent_from_source_changes(
@@ -2153,7 +1932,7 @@ def test_qwen_installed_snapshot_is_independent_from_source_changes(
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    plugin_id = str(installed["id"])
+    plugin_id = manager.store.read_registry().plugins[0].plugin_id
     snapshot = manager.resource_snapshot(plugin_id)
     reference = next(
         asset
@@ -2192,8 +1971,10 @@ def test_qwen_directory_and_zip_share_resource_snapshot_chain(
     ) -> tuple[dict[str, object], list[dict[str, object]]]:
         manager = PluginManager(home=tmp_path / home_name)
         installation = manager.install(package)
-        snapshot = installation["resource_snapshot"]
-        assert isinstance(snapshot, dict)
+        installed = installation["plugin"]
+        assert isinstance(installed, dict)
+        plugin_id = manager.store.read_registry().plugins[0].plugin_id
+        snapshot = manager.resource_snapshot(plugin_id).to_dict()
         assert snapshot["counts"] == {
             "agents": 3,
             "commands": 3,
@@ -2308,24 +2089,21 @@ def test_qwen_default_component_report_missing_has_stable_diagnostics(
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     manager = PluginManager(home=tmp_path / "home")
-    installed = manager.install(source, format="qwen-code")["plugin"]
+    installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    plugin_id = str(installed["id"])
+    plugin_id = manager.store.read_registry().plugins[0].plugin_id
     plugin = manager.store.read_registry().plugins[0]
     reports = tuple(
         component
         for component in plugin.components
         if component.kind not in {"commands", "skills"}
     )
-    fingerprint = capability_fingerprint(reports)
     manager.store.mutate_registry(
         lambda current: tuple(
             replace(
                 item,
                 components=reports,
-                capability_fingerprint=fingerprint,
-                trusted_capability_fingerprint=fingerprint,
-                enabled=True,
+                activation_user="enabled",
             )
             if item.plugin_id == plugin_id
             else item
@@ -2343,24 +2121,20 @@ def test_qwen_default_component_report_missing_has_stable_diagnostics(
         ), result.diagnostics
 
 
-def test_qwen_install_persists_record_and_requires_explicit_runtime_enable(
+def test_qwen_install_persists_record_as_enabled(
     tmp_path: Path,
 ) -> None:
-    """显式 install 可保存大写/下划线身份，启用仍需确认当前 capability。"""
+    """install 保存大写/下划线身份并直接启用，不要求额外授权哈希。"""
     source = _copy_fixture(tmp_path)
     manager = PluginManager(home=tmp_path / "home")
-    installed = manager.install(source, format="qwen-code")["plugin"]
+    installed = manager.install(source)["plugin"]
 
     assert isinstance(installed, dict)
     assert installed["format"] == "qwen-code"
     assert installed["name"] == "ZA38.03_CLI_EXTENSION"
-    assert installed["enabled"] is False
-    enabled = manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
-    assert enabled["plugin"]["enabled"] is True
+    assert installed["activation"] == "enabled"
+    assert installed["status"] == "loaded"
+    assert "id" not in installed
 
 
 @pytest.mark.parametrize("manifest_name", ("qwen-extension.json", "devagent-extension.json"))
@@ -2376,7 +2150,7 @@ def test_both_qwen_manifest_names_use_one_adapter(
 
     assert isinstance(summary, dict)
     assert summary["format"] == "qwen-code"
-    assert summary["manifest"] == manifest_name
+    assert "manifest" not in summary
 
 
 def test_explicit_qwen_requires_one_manifest_and_reports_conflicts(tmp_path: Path) -> None:
@@ -2489,14 +2263,10 @@ def test_qwen_static_validation_rejects_malformed_mcp_and_hooks(
 
     assert isinstance(summary, dict)
     components = _components(summary)
-    assert components["mcp"]["status"] == "invalid"
-    assert components["mcp"]["count"] == 0
-    assert components["mcp"]["capabilities"] == []
-    assert any("command" in item for item in components["mcp"]["diagnostics"])
-    assert components["hooks"]["status"] == "invalid"
-    assert components["hooks"]["count"] == 0
-    assert components["hooks"]["capabilities"] == []
-    assert any("Hook" in item for item in components["hooks"]["diagnostics"])
+    assert "mcp" not in components
+    assert "hooks" not in components
+    assert any("command" in item for item in summary["warnings"])
+    assert any("Hook" in item for item in summary["warnings"])
 
 
 def test_qwen_direct_skill_file_uses_frontmatter_validation(tmp_path: Path) -> None:
@@ -2513,10 +2283,8 @@ def test_qwen_direct_skill_file_uses_frontmatter_validation(tmp_path: Path) -> N
     summary = PluginManager(home=tmp_path / "home").validate(source)["plugin"]
 
     assert isinstance(summary, dict)
-    component = _components(summary)["skills"]
-    assert component["status"] == "invalid"
-    assert component["count"] == 0
-    assert any("front matter" in item for item in component["diagnostics"])
+    assert "skills" not in _components(summary)
+    assert any("front matter" in item for item in summary["warnings"])
 
 
 def test_qwen_invalid_settings_and_out_of_scope_fields_are_reported(
@@ -2539,12 +2307,9 @@ def test_qwen_invalid_settings_and_out_of_scope_fields_are_reported(
     summary = PluginManager(home=tmp_path / "home").validate(source)["plugin"]
     assert isinstance(summary, dict)
     components = _components(summary)
-    assert components["settings"]["status"] == "invalid"
-    assert components["settings"]["effective"] is False
-    assert any("SETTINGS_DECLARATION_INVALID" in item for item in components["settings"]["diagnostics"])
-    for field in ("channels", "themes", "workflows", "unsupported"):
-        assert components[field]["status"] == "unsupported"
-    assert any("futureField" in item for item in summary["diagnostics"])
+    assert "settings" not in components
+    assert any("SETTINGS_DECLARATION_INVALID" in item for item in summary["warnings"])
+    assert any("futureField" in item for item in summary["warnings"])
 
 
 def test_za38_fixture_preserves_agent_modes_hook_matcher_and_mcp_placeholder() -> None:
@@ -2570,23 +2335,15 @@ def test_za38_fixture_preserves_agent_modes_hook_matcher_and_mcp_placeholder() -
         assert "approvalMode: auto-edit" in content
 
 
-def test_qwen_agents_enter_canonical_catalog_after_trust_and_enable(
+def test_qwen_agents_enter_canonical_catalog_after_install(
     tmp_path: Path,
 ) -> None:
-    """信任后 Qwen Agent 进入 canonical catalog，静态 preview 只保留未接入组件。"""
+    """安装后 Qwen Agent 进入 canonical catalog。"""
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(_copy_fixture(tmp_path))["plugin"]
     assert isinstance(installed, dict)
 
     agent_component = _components(installed)["agents"]
-    assert agent_component["status"] == "adapted"
-    assert agent_component["effective"] is True
-    plugin_id = str(installed["id"])
-    manager.set_enabled(
-        plugin_id,
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
 
     source_result = manager.agent_sources(manager.catalog())
     assert len(source_result.sources) == 1
@@ -2605,13 +2362,7 @@ def test_qwen_agents_enter_canonical_catalog_after_trust_and_enable(
         assert agent.approval_mode == "auto-edit"
         assert agent.permission_mode is None
 
-    preview = manager.static_preview()
-    assert {kind: len(items) for kind, items in preview.items()} == {
-        "commands": 0,
-        "skills": 0,
-        "agents": 0,
-        "mcp": 0,
-    }
+    assert "static_preview" not in manager.list()
 
 
 def test_qwen_context_is_a_canonical_stable_reference_block(tmp_path: Path) -> None:
@@ -2619,12 +2370,7 @@ def test_qwen_context_is_a_canonical_stable_reference_block(tmp_path: Path) -> N
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(_copy_fixture(tmp_path))["plugin"]
     assert isinstance(installed, dict)
-    plugin_id = str(installed["id"])
-    manager.set_enabled(
-        plugin_id,
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
+    plugin_id = manager.store.read_registry().plugins[0].plugin_id
     blocks_by_source = manager.context_blocks_by_source(manager.catalog())
     blocks = tuple(block for values in blocks_by_source.values() for block in values)
     assert len(blocks) == 1
@@ -2658,8 +2404,8 @@ def test_qwen_context_is_a_canonical_stable_reference_block(tmp_path: Path) -> N
     assert "EffectivePolicy" not in snapshot.system_prompt or "不能改变 EffectivePolicy" in snapshot.system_prompt
 
 
-def test_qwen_context_only_plugin_is_effective_and_trust_gated(tmp_path: Path) -> None:
-    """只有 Context 的合法 Qwen 包也能启用，未 trust/disabled 时不进入 catalog。"""
+def test_qwen_context_only_plugin_is_effective_and_activation_gated(tmp_path: Path) -> None:
+    """只有 Context 的合法 Qwen 包安装即启用，显式 disabled 后不进入 catalog。"""
     source = tmp_path / "qwen-context-only"
     source.mkdir()
     (source / "QWEN.md").write_text(
@@ -2675,27 +2421,18 @@ def test_qwen_context_only_plugin_is_effective_and_trust_gated(tmp_path: Path) -
     manager = PluginManager(home=tmp_path / "home")
     validated = manager.validate(source)["plugin"]
     assert isinstance(validated, dict)
-    assert validated["can_enable"] is True
     context = _components(validated)["contexts"]
-    assert context["status"] == "adapted"
-    assert context["effective"] is True
+    assert context["count"] == 1
 
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    plugin_id = str(installed["id"])
-    assert manager.context_blocks(manager.catalog()) == ()
-
-    manager.set_enabled(
-        plugin_id,
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
+    plugin_id = manager.store.read_registry().plugins[0].plugin_id
     enabled_blocks = manager.context_blocks(manager.catalog())
     assert len(enabled_blocks) == 1
     assert enabled_blocks[0].authority is ContextAuthority.REFERENCE
     assert enabled_blocks[0].stability is ContextStability.STABLE
 
-    manager.set_enabled(plugin_id, enabled=False)
+    manager.set_enabled("context-only", enabled=False)
     assert manager.context_blocks(manager.catalog()) == ()
 
 
@@ -2740,15 +2477,9 @@ async def test_host_injects_qwen_context_once_and_gates_same_child_for_plugin_ag
         )
     installed = server._plugin_manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    server._plugin_manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
+    plugin_id = server._plugin_manager.store.read_registry().plugins[0].plugin_id
     if runtime_failure:
-        plugin_id = str(installed["id"])
-
-        def reauthorized_hook_report(current: object) -> tuple[object, ...]:
+        def updated_hook_report(current: object) -> tuple[object, ...]:
             assert hasattr(current, "plugins")
             updated: list[object] = []
             for plugin in current.plugins:  # type: ignore[attr-defined]
@@ -2767,18 +2498,15 @@ async def test_host_injects_qwen_context_once_and_gates_same_child_for_plugin_ag
                     else component
                     for component in plugin.components
                 )
-                fingerprint = capability_fingerprint(components)
                 updated.append(
                     replace(
                         plugin,
                         components=components,
-                        capability_fingerprint=fingerprint,
-                        trusted_capability_fingerprint=fingerprint,
                     )
                 )
             return tuple(updated)
 
-        server._plugin_manager.store.mutate_registry(reauthorized_hook_report)  # type: ignore[arg-type]
+        server._plugin_manager.store.mutate_registry(updated_hook_report)  # type: ignore[arg-type]
     registry = server._build_skill_registry()
     from harness_agent.plugins.runtime import HookResult
     from harness_agent.runtime.interactions import InteractionResult
@@ -3034,11 +2762,6 @@ def test_qwen_context_bad_utf8_fails_closed_after_enable(tmp_path: Path) -> None
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(source)["plugin"]
     assert isinstance(installed, dict)
-    manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
 
     with pytest.raises(PluginError) as rejected:
         manager.context_blocks(manager.catalog())
@@ -3126,11 +2849,8 @@ def test_qwen_permission_and_approval_modes_fail_closed_before_enable(
 
     summary = PluginManager(home=tmp_path / "home").validate(source)["plugin"]
     assert isinstance(summary, dict)
-    assert summary["can_enable"] is False
-    component = _components(summary)["agents"]
-    assert component["status"] == "invalid"
-    assert component["effective"] is False
-    assert any(item.startswith("PLUGIN_COMPONENT_INVALID:") for item in component["diagnostics"])
+    assert "agents" not in _components(summary)
+    assert any("PLUGIN_COMPONENT_INVALID:" in item for item in summary["warnings"])
 
 
 def test_qwen_approval_and_permission_mode_conflict_fails_closed(
@@ -3157,11 +2877,8 @@ def test_qwen_approval_and_permission_mode_conflict_fails_closed(
 
     summary = PluginManager(home=tmp_path / "home").validate(source)["plugin"]
     assert isinstance(summary, dict)
-    assert summary["can_enable"] is False
-    component = _components(summary)["agents"]
-    assert component["status"] == "invalid"
-    assert component["effective"] is False
-    assert any("approvalMode and permissionMode conflict" in item for item in component["diagnostics"])
+    assert "agents" not in _components(summary)
+    assert any("approvalMode and permissionMode conflict" in item for item in summary["warnings"])
 
 
 @pytest.mark.parametrize("field", ("approvalMode", "permissionMode"))
@@ -3178,10 +2895,8 @@ def test_qwen_agent_unknown_permission_modes_fail_before_enable(
 
     summary = PluginManager(home=tmp_path / "home").validate(source)["plugin"]
     assert isinstance(summary, dict)
-    component = _components(summary)["agents"]
-    assert component["status"] == "invalid"
-    assert component["effective"] is False
-    assert any("approval" in item.lower() or "permission" in item.lower() for item in component["diagnostics"])
+    assert "agents" not in _components(summary)
+    assert any("approval" in item.lower() or "permission" in item.lower() for item in summary["warnings"])
 
 
 def test_qwen_auto_edit_is_only_a_request_under_parent_and_host_policy(
@@ -3191,11 +2906,6 @@ def test_qwen_auto_edit_is_only_a_request_under_parent_and_host_policy(
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(_copy_fixture(tmp_path))["plugin"]
     assert isinstance(installed, dict)
-    manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
     sources = manager.agent_sources(manager.catalog()).sources
     catalog = AgentCatalog(model_catalog=_model_catalog(), sources=sources)
     parent = ExecutionPolicyDefinition(
@@ -3226,11 +2936,6 @@ def test_qwen_executors_are_selectable_by_an_offline_resolved_spec(
     manager = PluginManager(home=tmp_path / "home")
     installed = manager.install(_copy_fixture(tmp_path))["plugin"]
     assert isinstance(installed, dict)
-    manager.set_enabled(
-        str(installed["id"]),
-        enabled=True,
-        capability_fingerprint=str(installed["capability_fingerprint"]),
-    )
     catalog = AgentCatalog(
         model_catalog=_model_catalog(),
         sources=manager.agent_sources(manager.catalog()).sources,

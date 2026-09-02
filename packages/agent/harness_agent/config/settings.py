@@ -1873,6 +1873,70 @@ class SettingsStore:
             self._delete_journal(scope, operation_id)
             return self._mutation_result("remove", scope, finished, record, snapshot=None)
 
+    def rebind_plugin_setting(
+        self,
+        *,
+        old_binding: SettingBinding,
+        new_binding: SettingBinding,
+    ) -> tuple[str, ...]:
+        """在同一 scope 内迁移 update 后仍相同的 setting credential identity。
+
+        value 只在 backend 内部短暂经过，不进入返回值、日志或 metadata。声明
+        改变时保持旧记录并返回 warning，避免把旧 secret 猜测注入新声明。
+        """
+        scope: Scope = "workspace" if self.workspace is not None else "user"
+        binding_digest = self._binding_for_scope(scope)
+        index = self._read_or_recover(scope, binding_digest)
+        if index is None:
+            return ()
+        record = next(
+            (
+                item
+                for item in index.records
+                if item.plugin_id == old_binding.plugin_id
+                and item.env_var == old_binding.env_var
+            ),
+            None,
+        )
+        if record is None:
+            return ()
+        if record.package_digest == new_binding.package_digest:
+            return ()
+        if (
+            old_binding.env_var != new_binding.env_var
+            or old_binding.declaration.name != new_binding.declaration.name
+            or old_binding.declaration_digest != new_binding.declaration_digest
+        ):
+            return ("PLUGIN_SETTING_RECONFIGURE_REQUIRED",)
+        try:
+            value = self.backend.get(self._account_for(record))
+        except SettingsError:
+            raise
+        except Exception as exc:  # pragma: no cover - backend adapter contract
+            raise SettingsError(
+                "SETTINGS_BACKEND_UNAVAILABLE",
+                field="backend",
+                retryable=True,
+            ) from exc
+        if value is None:
+            return ("SETTINGS_RECORD_STALE",)
+        self.set(
+            scope=scope,
+            plugin_id=new_binding.plugin_id,
+            package_digest=new_binding.package_digest,
+            declaration_digest=new_binding.declaration_digest,
+            setting_key=new_binding.setting_key,
+            env_var=new_binding.env_var,
+            value=value,
+            expected_store_revision=index.revision,
+            name=new_binding.declaration.name,
+            description=new_binding.declaration.description,
+            sensitive=new_binding.declaration.sensitive,
+            required=False,
+            consumer_scope="extension-wide",
+        )
+        return ()
+
     def uninstall_plugin(
         self,
         *,
@@ -2460,7 +2524,6 @@ class SettingsStore:
             "store_revision": index.revision,
             "runtime_snapshot": (snapshot or SettingsSnapshot.not_loaded()).to_dict(),
             "summary": summary.to_dict(),
-            "applies_to": "next_host",
             "diagnostics": [],
         }
 
