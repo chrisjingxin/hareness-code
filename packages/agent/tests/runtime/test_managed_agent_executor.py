@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from typing import Any
 
 import pytest
@@ -13,7 +14,9 @@ from harness_agent.runtime.managed_agent_executor import (
     FailClosedManagedObserver,
     ManagedAgentExecutionError,
     ManagedAgentExecutor,
+    ManagedAgentResult,
     ManagedAgentRequest,
+    ManagedChildObserver,
     acquire_pooled_agent_runtime,
 )
 
@@ -379,6 +382,148 @@ async def test_fail_closed_observer_rejects_unbound_interaction() -> None:
         await observer.interact(object())
 
     assert error.value.code == "MANAGED_AGENT_INTERACTION_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "plugin_format",
+    ["qwen-code", "claude-code", "agent-plugins-1.0"],
+)
+async def test_managed_child_observer_shares_identity_and_signal_contract(
+    plugin_format: str,
+) -> None:
+    """Qwen/Claude/portable Managed adapter 共用同一 child observer 契约。"""
+    events: list[tuple[str, dict[str, object], str | None, str | None, str | None]] = []
+    execution_id = f"child-{plugin_format}"
+    parent_execution_id = "root-parent"
+    agent_id = f"{plugin_format}-agent"
+
+    def event_port(
+        event_type: str,
+        payload: Mapping[str, object],
+        child_id: str | None,
+        parent_id: str | None,
+        emitted_agent_id: str | None,
+    ) -> None:
+        events.append((event_type, payload, child_id, parent_id, emitted_agent_id))
+
+    observer = ManagedChildObserver(
+        event_port=event_port,
+        execution_ref=execution_id,
+        parent_execution_ref=parent_execution_id,
+        agent_id=agent_id,
+    )
+    observer.emit(ExecutionSignal("content.delta", {"text": "private stream content"}))
+    observer.emit(ExecutionSignal("reasoning.delta", {"text": "reasoning"}))
+    observer.emit(ExecutionSignal("tool.started", {"tool_call_id": "tool-1", "name": "glob"}))
+    observer.emit(ExecutionSignal("tool.delta", {"tool_call_id": "tool-1", "arguments_delta": "{}"}))
+    observer.emit(ExecutionSignal("tool.completed", {"tool_call_id": "tool-1", "result": {}}))
+    await observer.on_execution_complete(
+        ManagedAgentResult(
+            final_content="PLUGIN_FINAL",
+            usage={},
+            output_policy="capture_only",
+            used_agent=True,
+        )
+    )
+    await observer.on_execution_complete(
+        ManagedAgentResult(
+            final_content="DUPLICATE",
+            usage={},
+            output_policy="capture_only",
+            used_agent=True,
+        )
+    )
+
+    assert [event[0] for event in events] == [
+        "reasoning.delta",
+        "tool.started",
+        "tool.delta",
+        "tool.completed",
+        "content.delta",
+    ]
+    assert all(event[2:] == (execution_id, parent_execution_id, agent_id) for event in events)
+    assert events[-1][1] == {"text": "PLUGIN_FINAL"}
+    assert await observer.observe_message(object(), StreamSession(run_id="child-run")) is False
+    with pytest.raises(ManagedAgentExecutionError) as error:
+        await observer.interact(object())
+    assert error.value.code == "MANAGED_AGENT_INTERACTION_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("final_content", ["", "   "])
+async def test_managed_child_observer_does_not_fake_empty_final_content(
+    final_content: str,
+) -> None:
+    """Managed child 空正文不生成假的 content.delta。"""
+    events: list[str] = []
+
+    def event_port(
+        event_type: str,
+        _payload: Mapping[str, object],
+        _execution_id: str | None,
+        _parent_execution_id: str | None,
+        _agent_id: str | None,
+    ) -> None:
+        events.append(event_type)
+
+    observer = ManagedChildObserver(
+        event_port=event_port,
+        execution_ref="child-empty",
+        parent_execution_ref="root-parent",
+        agent_id="portable-agent",
+    )
+    await observer.on_execution_complete(
+        ManagedAgentResult(
+            final_content=final_content,
+            usage={},
+            output_policy="capture_only",
+            used_agent=True,
+        )
+    )
+
+    assert events == []
+
+
+def test_managed_child_observers_keep_sibling_event_ports_isolated() -> None:
+    """并发 sibling 各自冻结 event port，不能按 agent id 抢占彼此通道。"""
+    destinations: dict[str, list[tuple[str, str | None, str | None, str | None]]] = {
+        "a": [],
+        "b": [],
+    }
+
+    def make_port(destination: str):
+        def event_port(
+            event_type: str,
+            _payload: Mapping[str, object],
+            execution_id: str | None,
+            parent_execution_id: str | None,
+            agent_id: str | None,
+        ) -> None:
+            destinations[destination].append(
+                (event_type, execution_id, parent_execution_id, agent_id)
+            )
+
+        return event_port
+
+    observer_a = ManagedChildObserver(
+        event_port=make_port("a"),
+        execution_ref="child-a",
+        parent_execution_ref="root-parent",
+        agent_id="same-agent-id",
+    )
+    observer_b = ManagedChildObserver(
+        event_port=make_port("b"),
+        execution_ref="child-b",
+        parent_execution_ref="root-parent",
+        agent_id="same-agent-id",
+    )
+
+    observer_a.emit(ExecutionSignal("tool.started", {"name": "glob"}))
+    observer_b.emit(ExecutionSignal("tool.started", {"name": "grep"}))
+
+    assert destinations["a"] == [("tool.started", "child-a", "root-parent", "same-agent-id")]
+    assert destinations["b"] == [("tool.started", "child-b", "root-parent", "same-agent-id")]
 
 
 @pytest.mark.asyncio

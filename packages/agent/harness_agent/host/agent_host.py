@@ -4094,10 +4094,10 @@ class AgentHost:
             current_delegation_call,
         )
         from harness_agent.runtime.managed_agent_executor import (
-            FailClosedManagedObserver,
             ManagedAgentExecutionError,
             ManagedAgentExecutor,
             ManagedAgentRequest,
+            ManagedChildObserver,
             acquire_pooled_agent_runtime,
         )
 
@@ -4157,13 +4157,16 @@ class AgentHost:
                 checkpoint_thread_id = child_ref.checkpoint_thread_id(
                     resolved.project_fingerprint
                 )
-                parent_log = None
+                delegation_call = None
                 try:
-                    parent_log = getattr(
-                        current_delegation_call().run_context, "diagnostic_log", None
-                    )
+                    delegation_call = current_delegation_call()
                 except AgentDelegationError:
-                    parent_log = None
+                    delegation_call = None
+                parent_context = (
+                    delegation_call.run_context if delegation_call is not None else None
+                )
+                parent_event_port = getattr(parent_context, "event_port", None)
+                parent_log = getattr(parent_context, "diagnostic_log", None)
                 child_log = bind_execution_log(
                     parent_log,
                     thread_id=child_ref.thread_id,
@@ -4344,7 +4347,16 @@ class AgentHost:
                 try:
                     result = await ManagedAgentExecutor().execute(
                         managed_request,
-                        FailClosedManagedObserver(),
+                        ManagedChildObserver(
+                            event_port=(
+                                parent_event_port
+                                if callable(parent_event_port)
+                                else None
+                            ),
+                            execution_ref=child_ref.execution_id,
+                            parent_execution_ref=child_ref.parent_execution_id,
+                            agent_id=resolved.agent_id,
+                        ),
                     )
                 except ManagedAgentExecutionError as exc:
                     if exc.code == "RUN_CANCELLED":

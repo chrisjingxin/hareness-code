@@ -38,6 +38,7 @@ import {
 } from "react"
 import { activityLabel, interactionStatusLabel, toolStatusLabel } from "../../presentation-shared/timeline-presenter"
 import { progressPhaseLabel } from "../../presentation-shared/timeline-presenter"
+import { childTimelineEmptyMessage } from "../../presentation-shared/child-timeline-empty"
 import { formatElapsed } from "../../presentation-shared/formatters"
 import {
   hasTaskDispatchView,
@@ -196,6 +197,11 @@ export function Timeline({
     }
     return true
   })
+  const childEmptyMessage = childTimelineEmptyMessage(
+    snapshot.interactive.childTimelineExecutionId,
+    visibleItems.length > 0,
+    activeRun,
+  )
   const segments = segmentTimeline(visibleItems)
   /** 流式光标只挂在最后一项（生成位置）；运行中历史文本段后面已有工具/新段时不再闪烁。 */
   const lastVisible = visibleItems[visibleItems.length - 1]
@@ -310,8 +316,8 @@ export function Timeline({
         <div className="timeline-header">THREAD · {timeline.length} 项记录</div>
       ) : null}
       {visibleItems.length === 0 ? (
-        <div className="timeline-empty" role="status">
-          发送第一条消息后，这里会显示 Agent 的回答、工具调用与审批记录。
+        <div className={childEmptyMessage ? "timeline-empty child-timeline-empty" : "timeline-empty"} role="status">
+          {childEmptyMessage ?? "发送第一条消息后，这里会显示 Agent 的回答、工具调用与审批记录。"}
         </div>
       ) : (
         renderedSegments

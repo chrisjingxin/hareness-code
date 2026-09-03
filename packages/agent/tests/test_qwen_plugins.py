@@ -7,6 +7,7 @@ import json
 import shutil
 import sys
 import zipfile
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -2751,6 +2752,277 @@ async def test_host_injects_qwen_context_once_and_gates_same_child_for_plugin_ag
             assert server._agent_engine_pool.engine.graph.calls == 2
             assert "用户已选择" in repr(server._agent_engine_pool.engine.graph.inputs[1])
             assert hook_results == []
+    finally:
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_qwen_managed_plugin_delegation_projects_child_stream_to_parent_event_port(
+    tmp_path: Path,
+) -> None:
+    """Managed Plugin 真正经 task 派发时，child stream 必须投影到父 event port。"""
+    from langchain.tools.tool_node import ToolCallRequest
+    from langchain_core.messages import AIMessageChunk, ToolMessage
+
+    from harness_agent.host.agent_host import AgentHost
+    from harness_agent.plugins import PluginRuntimeCatalog
+    from harness_agent.runtime.agent_delegation import (
+        AgentDelegator,
+        DelegateAgent,
+        DelegationContextMiddleware,
+    )
+    from harness_agent.runtime.agent_execution import AgentExecutionRegistry
+    from harness_agent.runtime.execution_binding import (
+        AgentExecutionBinding,
+        ExecutionMode,
+        ExecutionRef,
+    )
+    from harness_agent.runtime.run_context import RunCancellationToken, RunContext
+    from harness_agent.threads.context_lifecycle import prepare_embedded_context_snapshot
+
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    server = AgentHost(config_home=home, workspace=workspace)
+    source = _copy_fixture(tmp_path)
+    manifest = _manifest(source)
+    manifest.pop("hooks", None)
+    (source / "devagent-extension.json").write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+    installed = server._plugin_manager.install(source)["plugin"]
+    assert isinstance(installed, dict)
+    server._build_skill_registry()
+    # 本测试只验证 Managed stream；SubagentStop 的 fail-closed 回归由专门
+    # 的 Qwen hook 测试覆盖，避免把真实 Hook runner 引入此纵向 fixture。
+    server._plugin_runtime_catalog = PluginRuntimeCatalog()
+
+    class Store:
+        """提供离线 Host target 构造所需的最小持久化 seam。"""
+
+        project_fingerprint = "a" * 64
+
+        async def persist_agent_engine_profile(self, _profile: object) -> None:
+            return None
+
+        async def delete_execution_checkpoint(self, _thread_id: str) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    class FakeGraph:
+        """用 LangGraph stream 形状产生 reasoning、tool 和 final 事件。"""
+
+        def __init__(self) -> None:
+            self.contexts: list[object] = []
+
+        async def astream(self, _stream_input: object, *, context: object, **_kwargs: object):
+            self.contexts.append(context)
+            execution_id = getattr(context, "execution_id")
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(
+                        content="",
+                        additional_kwargs={"reasoning_content": "检查文件"},
+                    ),
+                    {"harness_execution_id": execution_id},
+                ),
+            )
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(
+                        content="",
+                        tool_call_chunks=[
+                            {
+                                "name": "glob",
+                                "args": '{"pattern":"*.py"}',
+                                "id": "glob-call-1",
+                                "index": 0,
+                            }
+                        ],
+                    ),
+                    {"harness_execution_id": execution_id},
+                ),
+            )
+            yield (
+                "updates",
+                {
+                    "tools": {
+                        "messages": [
+                            ToolMessage(
+                                content="找到文件",
+                                tool_call_id="glob-call-1",
+                            )
+                        ]
+                    }
+                },
+            )
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(content="PLUGIN_FINAL"),
+                    {"harness_execution_id": execution_id},
+                ),
+            )
+
+    class FakeRunLease:
+        async def release(self) -> None:
+            return None
+
+    class FakeLease:
+        def __init__(self, graph: FakeGraph) -> None:
+            self.engine = SimpleNamespace(graph=graph)
+
+        async def run(self) -> FakeRunLease:
+            return FakeRunLease()
+
+        async def release(self) -> None:
+            return None
+
+    class FakePool:
+        def __init__(self, graph: FakeGraph) -> None:
+            self.graph = graph
+
+        async def acquire(self, _profile: object) -> FakeLease:
+            return FakeLease(self.graph)
+
+        async def finalize_draining(self, _profile_key: str) -> None:
+            return None
+
+        async def aclose(self) -> tuple[object, ...]:
+            return ()
+
+    events: list[tuple[str, Mapping[str, object], str | None, str | None, str | None]] = []
+
+    def parent_event_port(
+        event_type: str,
+        payload: Mapping[str, object],
+        execution_id: str | None,
+        parent_execution_id: str | None,
+        agent_id: str | None,
+    ) -> None:
+        events.append((event_type, payload, execution_id, parent_execution_id, agent_id))
+
+    server._thread_persistence = Store()  # type: ignore[assignment]
+    server._config = SimpleNamespace(
+        model_catalog=_model_catalog(),
+        execution=ExecutionSettings(),
+        agent_engine_pool=SimpleNamespace(
+            max_profiles=2,
+            idle_ttl_seconds=600,
+            close_timeout_seconds=15,
+        ),
+    )
+    server._load_config = lambda: None  # type: ignore[method-assign]
+    graph = FakeGraph()
+    server._agent_engine_pool = FakePool(graph)
+
+    parent_policy = EffectiveExecutionPolicy(
+        policy_ids=("parent",),
+        delegation=DelegationPolicy(
+            enabled=True,
+            allowed_agents=None,
+            max_depth=1,
+            max_parallelism=1,
+        ),
+    )
+    parent_spec = SimpleNamespace(
+        agent_id="main",
+        effective_policy=parent_policy,
+        model_profile_id="fast",
+    )
+    registry = AgentExecutionRegistry()
+    parent_ref = ExecutionRef.root("managed-stream-thread", "managed-stream-run")
+    await registry.accept(
+        AgentExecutionBinding(
+            ref=parent_ref,
+            agent_id="main",
+            mode=ExecutionMode.MANAGED,
+            depth=0,
+        )
+    )
+    await registry.start(parent_ref)
+    parent_context = RunContext(
+        thread_id=parent_ref.thread_id,
+        run_id=parent_ref.run_id,
+        approval_mode="yolo",
+        context_snapshot=prepare_embedded_context_snapshot(
+            thread_id=parent_ref.thread_id,
+            system_prompt="parent",
+            workspace=str(workspace),
+            sandboxed=False,
+            provider=None,
+            approval_mode="yolo",
+            skill_registry=None,
+            enable_memory=False,
+            enable_skills=False,
+            enable_ask_user=False,
+        ),
+        execution_id=parent_ref.execution_id,
+        agent_id="main",
+        cancellation_token=RunCancellationToken(),
+        delegation_policy=parent_policy.delegation,
+        event_port=parent_event_port,
+    )
+
+    try:
+        targets = await server._plugin_delegation_targets(parent_spec)
+        assert targets
+        target = targets[0]
+        command = DelegateAgent(
+            parent_ref=parent_ref,
+            target_agent_id=target.agent_id,
+            task="检查并返回结果",
+            idempotency_key="managed-stream-once",
+            delegation_policy=DelegationPolicy(
+                enabled=True,
+                allowed_agents=(target.agent_id,),
+                max_depth=1,
+                max_parallelism=1,
+            ),
+            cancellation_token=RunCancellationToken(),
+        )
+        delegator = AgentDelegator(registry, targets=targets)
+        request = ToolCallRequest(
+            tool_call={"name": "task", "args": {}, "id": "parent-task-1"},
+            tool=SimpleNamespace(name="task"),
+            runtime=SimpleNamespace(context=parent_context),
+            state={},
+        )
+
+        async def run_task(_request: ToolCallRequest) -> object:
+            return await delegator.execute(command)
+
+        result = await DelegationContextMiddleware().awrap_tool_call(request, run_task)
+
+        assert result.output["final"] == "PLUGIN_FINAL"
+        child_execution_id = result.ref.execution_id
+        bindings = [
+            event
+            for event in events
+            if event[0] == "tool.delta"
+            and event[1].get("child_execution_id") == child_execution_id
+        ]
+        assert len(bindings) == 1
+        assert bindings[0][1]["tool_call_id"] == "parent-task-1"
+        child_events = [event for event in events if event[2] == child_execution_id]
+        assert [event[0] for event in child_events] == [
+            "reasoning.delta",
+            "tool.started",
+            "tool.delta",
+            "tool.completed",
+            "content.delta",
+        ]
+        assert all(event[3] == parent_ref.execution_id for event in child_events)
+        assert all(event[4] == target.agent_id for event in child_events)
+        assert child_events[-1][1] == {"text": "PLUGIN_FINAL"}
+        assert graph.contexts
+        assert getattr(graph.contexts[0], "execution_id") == child_execution_id
+        assert getattr(graph.contexts[0], "parent_execution_id") == parent_ref.execution_id
+        assert getattr(graph.contexts[0], "agent_id") == target.agent_id
     finally:
         await server.close()
 

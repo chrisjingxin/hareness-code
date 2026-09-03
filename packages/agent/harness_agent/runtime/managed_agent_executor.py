@@ -18,10 +18,16 @@ from langchain_core.messages import HumanMessage
 from langgraph.types import Command
 
 from harness_agent.runtime.execution_stream import (
+    CONTENT_DELTA,
     ExecutionStreamError,
     ExecutionStreamPorts,
     ExecutionStreamRequest,
+    ExecutionSignal,
+    REASONING_DELTA,
     StreamSession,
+    TOOL_COMPLETED,
+    TOOL_DELTA,
+    TOOL_STARTED,
     execute as execute_stream,
 )
 from harness_agent.diagnostic_log.runtime import DiagnosticLog, ensure_log
@@ -139,6 +145,66 @@ class FailClosedManagedObserver:
     def on_stream_event(self) -> None:
         """Plugin child 没有额外 context projection。"""
         return None
+
+
+class ManagedChildObserver(FailClosedManagedObserver):
+    """把 Managed Plugin child 的过程投影到父 Run event port。
+
+    Plugin child 仍使用 capture_only，所以正文不会在 stream 阶段进入父
+    Transcript 或下一轮主模型上下文。这里仅转发已经由 shared execution
+    stream 截断和关联过的 reasoning/tool signal；最终正文在执行完成 seam
+    只投影一次。Observer 捕获创建时的身份，不从事件里的 agent 名称推断
+    parent-child 归属。
+    """
+
+    _PROJECTED_SIGNAL_TYPES = frozenset(
+        {REASONING_DELTA, TOOL_STARTED, TOOL_DELTA, TOOL_COMPLETED}
+    )
+
+    def __init__(
+        self,
+        *,
+        event_port: Callable[
+            [str, Mapping[str, object], str | None, str | None, str | None], None
+        ]
+        | None,
+        execution_ref: str,
+        parent_execution_ref: str | None,
+        agent_id: str,
+    ) -> None:
+        """冻结父事件通道和 child 身份，防止 sibling 或后续调用串线。"""
+        self._event_port = event_port if callable(event_port) else None
+        self._execution_ref = execution_ref
+        self._parent_execution_ref = parent_execution_ref
+        self._agent_id = agent_id
+        self._final_content_projected = False
+
+    def emit(self, signal: ExecutionSignal) -> None:
+        """只转发允许公开的 reasoning/tool signal，过滤 child 正文。"""
+        if signal.type not in self._PROJECTED_SIGNAL_TYPES:
+            return
+        self._emit(signal.type, signal.payload)
+
+    async def on_execution_complete(self, result: "ManagedAgentResult") -> None:
+        """成功终态只把非空 final content 投影为一条 child 正文事件。"""
+        if self._final_content_projected:
+            return
+        self._final_content_projected = True
+        final_content = result.final_content
+        if isinstance(final_content, str) and final_content.strip():
+            self._emit(CONTENT_DELTA, {"text": final_content})
+
+    def _emit(self, event_type: str, payload: Mapping[str, object]) -> None:
+        """使用冻结身份调用父 port；无绑定通道时维持 headless fail-closed。"""
+        if self._event_port is None:
+            return
+        self._event_port(
+            event_type,
+            dict(payload),
+            self._execution_ref,
+            self._parent_execution_ref,
+            self._agent_id,
+        )
 
 
 RuntimeProvider = Callable[[], Awaitable[ManagedAgentRuntime]]

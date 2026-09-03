@@ -6,6 +6,7 @@ import { type ReactNode, type RefObject, useMemo, useState } from "react"
 import type { ComposeSummaryCard, ConversationMessage, InteractionCard, ReasoningCard, TimelineItem } from "../../interactive/state"
 import type { InteractiveSnapshot } from "../../interactive/types"
 import { formatContext, formatDuration, formatElapsed, formatUsage } from "../../presentation-shared/formatters"
+import { childTimelineEmptyMessage } from "../../presentation-shared/child-timeline-empty"
 import { diffTextForRenderer, parseFileDiff } from "../../presentation-shared/file-diff"
 import {
   COMPOSE_STAGE_LABELS,
@@ -39,6 +40,11 @@ export function ConversationTimeline(props: {
   const segments = useMemo(
     () => segmentTimeline(props.interactive.timeline),
     [props.interactive.timeline],
+  )
+  const childEmptyMessage = childTimelineEmptyMessage(
+    props.interactive.childTimelineExecutionId,
+    segments.length > 0,
+    props.interactive.activeRun,
   )
   const pendingRequestId = props.interactive.interaction?.requestId ?? null
   const pinTodos = shouldPinTodos(props.interactive.timeline, Boolean(props.interactive.activeRun))
@@ -75,6 +81,11 @@ export function ConversationTimeline(props: {
   return (
     <scrollbox ref={props.scrollRef} stickyScroll stickyStart="bottom" flexGrow={1} minHeight={0} scrollAcceleration={createScrollAcceleration()} viewportOptions={{ paddingRight: 1 }}>
       <box height={1} />
+      {childEmptyMessage ? (
+        <box marginTop={2} paddingLeft={3} paddingRight={3}>
+          <text content={childEmptyMessage} fg={tuiTheme.muted} />
+        </box>
+      ) : null}
       {segments.map(segment => {
         if (segment.kind === "flat") {
           if (isPendingLiveInteraction(segment.item, pendingRequestId)) return null

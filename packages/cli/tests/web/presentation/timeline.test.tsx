@@ -1093,6 +1093,45 @@ test("子时间线模式渲染只读顶栏与返回主对话按钮", () => {
   }
 })
 
+test("子时间线无事件且运行中显示专用空态并保留返回入口", () => {
+  const interactive = makeInteractive({
+    currentThreadId: "thread-1",
+    childTimelineExecutionId: "child-not-started",
+    activeRun: { threadId: "thread-1", runId: "run-1" },
+    activity: { kind: "running", label: "正在运行" },
+    timeline: [],
+  })
+  const handle = render(
+    <Timeline snapshot={makeSnapshot({ interactive })} dispatch={() => {}} />,
+  )
+  try {
+    expect(handle.container.textContent).toContain("子代理刚开始，暂无过程")
+    expect(handle.container.textContent).not.toContain("发送第一条消息")
+    expect(handle.container.querySelector(".child-timeline-back-btn")).not.toBeNull()
+  } finally {
+    handle.unmount()
+  }
+})
+
+test("子时间线终结且无事件显示诊断空态并保留返回入口", () => {
+  const interactive = makeInteractive({
+    currentThreadId: "thread-1",
+    childTimelineExecutionId: "child-missing-events",
+    activity: { kind: "completed", label: "已完成" },
+    timeline: [],
+  })
+  const handle = render(
+    <Timeline snapshot={makeSnapshot({ interactive })} dispatch={() => {}} />,
+  )
+  try {
+    expect(handle.container.textContent).toContain("未收到该子代理的过程事件")
+    expect(handle.container.textContent).not.toContain("发送第一条消息")
+    expect(handle.container.querySelector(".child-timeline-back-btn")).not.toBeNull()
+  } finally {
+    handle.unmount()
+  }
+})
+
 test("task 派出卡展开后展示进入子时间线按钮并可点击", () => {
   const interactive = makeInteractive({
     timeline: [

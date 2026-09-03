@@ -1898,6 +1898,50 @@ test("子视图只渲染该 execution，头部有返回提示，composer 关闭"
   }
 })
 
+test("子视图刚绑定且暂无事件时显示运行中专用空态", async () => {
+  const state = childTimelineState()
+  const interactive: InteractiveSnapshot = {
+    ...snapshotOf(state),
+    activeRun: { threadId: "thread-child", runId: "run-child" },
+    activity: { kind: "running", label: "正在运行" },
+    childTimelineExecutionId: "child-not-started",
+    timeline: [],
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(ThreadView, viewProps(interactive, 120, 40)), { width: 120, height: 40 })
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("子代理刚开始，暂无过程")
+    expect(frame).toContain("Esc")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("子视图终结但没有过程事件时显示诊断空态", async () => {
+  const state = childTimelineState()
+  const interactive: InteractiveSnapshot = {
+    ...snapshotOf(state),
+    childTimelineExecutionId: "child-missing-events",
+    timeline: [],
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(ThreadView, viewProps(interactive, 120, 40)), { width: 120, height: 40 })
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("未收到该子代理的过程事件")
+    expect(frame).toContain("Esc")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
 test("点派出卡进入对应子时间线", async () => {
   const state = childTimelineState()
   const interactive: InteractiveSnapshot = {
