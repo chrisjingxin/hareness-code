@@ -26,9 +26,10 @@ const fixtures = JSON.parse(
   await readFile(resolve(import.meta.dir, "../../../protocol/fixtures/v3-contract.json"), "utf8"),
 ) as { valid: Fixture[]; invalid: Fixture[] }
 
-test("Settings 与 Plugin RPC 在 canonical v3 contract 中要求 minor 8", () => {
+test("Settings、Plugin 与 Goal RPC 在 canonical v3 contract 中要求 minor 8", () => {
   expect(PROTOCOL_VERSION).toEqual({ major: 3, minor: 8 })
   expect(OPERATION_MIN_MINOR["commands.bind"]).toBe(6)
+  expect(OPERATION_MIN_MINOR["goal.inspect"]).toBe(8)
 })
 
 test("TypeScript 接受全部共享有效 fixture", () => {
@@ -55,11 +56,93 @@ test("Browser CSP 禁止动态代码时仍可校验 initialize", () => {
   }
 })
 
-test("run.start 必填工作模式且拒绝未知模式", () => {
-  const base = { message: "检查", thread_id: "thread-1", run_id: "run-1" }
+test("run.start 使用严格 tagged input，并拒绝旧 message 与混合形状", () => {
+  const base = { input: { kind: "user", message: "检查" }, thread_id: "thread-1", run_id: "run-1" }
   expect(() => validateOperationParams("run.start", base)).toThrow()
   expect(() => validateOperationParams("run.start", { ...base, mode: "yolo" })).toThrow()
   expect(() => validateOperationParams("run.start", { ...base, mode: "compose" })).not.toThrow()
+  expect(() => validateOperationParams("run.start", {
+    ...base,
+    mode: "build",
+    message: "旧入口",
+  })).toThrow()
+  expect(() => validateOperationParams("run.start", {
+    ...base,
+    mode: "build",
+    input: { kind: "goal_proposal", request_id: "request-1", requested_skill: "review" },
+  })).toThrow()
+  expect(() => validateOperationParams("run.start", {
+    ...base,
+    mode: "build",
+    input: { kind: "goal_continuation", goal_id: "goal-1", goal_revision: 2, reason: "accepted" },
+  })).not.toThrow()
+})
+
+test("Goal RPC、评审交互与事件共享严格 v3.8 契约", () => {
+  const goal = {
+    goal_id: "goal-1",
+    revision: 1,
+    status: "active",
+    objective: "让 focused tests 通过",
+    assumptions: [],
+    criteria: [{ criterion_id: "criterion-1", text: "协议契约测试通过" }],
+    note: null,
+    prior_blocker: null,
+    grader: { selection: "inherit", configured_profile_id: null, actual_profile_id: null },
+    max_iterations: 5,
+    created_at_ms: 1,
+    updated_at_ms: 1,
+    completed_at_ms: null,
+  }
+  expect(() => validateOperationParams("goal.inspect", { thread_id: "thread-1" })).not.toThrow()
+  expect(() => validateOperationResult("goal.inspect", {
+    goal,
+    pending: null,
+    latest_evaluation: null,
+  })).not.toThrow()
+  expect(() => validateOperationParams("goal.request", {
+    thread_id: "thread-1",
+    request_id: "request-1",
+    kind: "create",
+    input_text: "完成协议升级",
+    expected_goal_id: null,
+    expected_revision: null,
+  })).not.toThrow()
+  expect(() => validateInteractionParams("interaction.goal", {
+    thread_id: "thread-1",
+    run_id: "run-1",
+    timeout_ms: 30_000,
+    payload: {
+      interrupt_id: "interrupt-1",
+      request_id: "request-1",
+      proposal_kind: "create",
+      base_goal_id: null,
+      base_revision: null,
+      objective: goal.objective,
+      assumptions: [],
+      criteria: ["协议契约测试通过"],
+      decisions: ["accepted", "edited", "rejected", "cancelled"],
+    },
+  })).not.toThrow()
+  expect(() => validateInteractionResult("interaction.goal", {
+    decision: "edited",
+    criteria: ["协议和两端类型检查通过"],
+    feedback: "补充类型检查",
+  })).not.toThrow()
+  expect(() => assertEventEnvelope({
+    event_id: "goal-event-1",
+    type: "goal.changed",
+    thread_id: "thread-1",
+    run_id: "run-1",
+    sequence: 1,
+    timestamp_ms: 1,
+    payload: { goal, reason: "proposal_applied" },
+  })).not.toThrow()
+  expect(() => validateOperationResult("goal.inspect", {
+    goal: { ...goal, unknown: true },
+    pending: null,
+    latest_evaluation: null,
+  })).toThrow()
 })
 
 test("run.started 回传实际工作模式", () => {

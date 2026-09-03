@@ -1,9 +1,9 @@
 /** Interactive Core 薄协调器：只做 intent 路由、listener 管理、snapshot 组装与 Feature 生命周期编排；具体业务逻辑在 features/ 下按 Feature 拆分。 */
 
-import type { Capability, ModelProfile } from "@za38/protocol"
+import { Capability, type ModelProfile } from "@za38/protocol"
 import { contextCompactNotice, type CommandResult, type CommandRpcMethod, dispatchSlashCommand } from "./command-dispatcher"
 import { builtinCommandCapabilities } from "./commands"
-import { CatalogFeature, CommandFeature, InteractionFeature, McpFeature, ModelFeature, PLAN_IMPLEMENT_PROMPT, RunFeature, SkillFeature, ThreadFeature, TimelineFeature, type FeatureContext } from "./features"
+import { CatalogFeature, CommandFeature, GoalFeature, InteractionFeature, McpFeature, ModelFeature, PLAN_IMPLEMENT_PROMPT, RunFeature, SkillFeature, ThreadFeature, TimelineFeature, type FeatureContext } from "./features"
 import type { AgentGateway, Clock, IdGenerator, IntentOutcome, InteractiveConfirmation, InteractiveConnectionState, InteractiveController, InteractiveControllerOptions, InteractiveIntent, InteractiveSnapshot, LoadableCatalog, Scheduler } from "./ports"
 import { createFallbackNoopGateway } from "./ports"
 import { cryptoIdGenerator, systemClock, systemScheduler } from "../infrastructure"
@@ -38,6 +38,7 @@ export class InteractiveControllerImpl implements InteractiveController {
   private readonly interactionFeature = new InteractionFeature()
   private readonly timelineFeature = new TimelineFeature()
   private readonly runFeature = new RunFeature()
+  private readonly goalFeature = new GoalFeature()
   private get featureContext(): FeatureContext {
     return { gateway: this.gateway, clock: this.clock, scheduler: this.scheduler, idGenerator: this.idGenerator, baseRuntime: this.baseRuntime, getState: () => this.state, commit: u => this.commit(u), publish: () => this.publish() }
   }
@@ -93,7 +94,10 @@ export class InteractiveControllerImpl implements InteractiveController {
     void this.catalogFeature.refreshSkillCatalog(this.featureContext)
     if (options.initialThreadId !== undefined) {
       void this.threadFeature.restoreInitialThread(options.initialThreadId, this.featureContext, {
-        onSuccess: () => this.refreshModelSelection(),
+        onSuccess: () => {
+          void this.refreshModelSelection()
+          void this.goalFeature.resumePending(this.featureContext, this.goalRunCallbacks())
+        },
       })
     }
   }
@@ -136,12 +140,15 @@ export class InteractiveControllerImpl implements InteractiveController {
 
       case "plan-view.close":
         return this.interactionFeature.closePlanViewer(this.featureContext)
+      case "goal-view.close":
+        return this.interactionFeature.closeGoalViewer(this.featureContext)
 
       case "thread.open":
         return this.threadFeature.openThread(intent.threadId, this.featureContext, {
           hasPendingInteraction: this.hasPendingInteraction, onBeforeOpen: () => this.resetThreadState(), onSuccess: () => {
-            this.refreshModelSelection()
+            void this.refreshModelSelection()
             void this.catalogFeature.refreshThreadCatalog(this.featureContext)
+            void this.goalFeature.resumePending(this.featureContext, this.goalRunCallbacks())
           },
         })
 
@@ -264,15 +271,89 @@ export class InteractiveControllerImpl implements InteractiveController {
       armedSkill: this.skillFeature.armedSkill,
       displayPrompt: message,
       onEvent: event => this.timelineFeature.processAgentEvent(event, this.featureContext),
-      onRunFinish: (actualModel?: ModelProfile) => this.finishRun(actualModel),
+      onRunFinish: (actualModel?: ModelProfile, context?: Record<string, unknown>) => this.finishRun(actualModel, context),
       onAbandonInteraction: () => this.interactionFeature.abandonPendingInteraction(this.featureContext),
     })
   }
-  private finishRun(actualModel?: ModelProfile): void {
+  private finishRun(
+    actualModel?: ModelProfile,
+    context?: Record<string, unknown>,
+    resumeReadyProposal = true,
+  ): void {
     if (actualModel) this.modelFeature.actualModelProfile = actualModel
-    this.refreshModelSelection()
+    void this.refreshModelSelection()
     void this.catalogFeature.refreshThreadCatalog(this.featureContext)
-    this.continueAfterPlanRun()
+    const threadId = this.state.currentThreadId
+    const goalEnabled = (this.baseRuntime.capabilities ?? []).includes(Capability.GOAL_READ)
+    const hasGoalTerminalWork = Boolean(
+      this.state.goal
+      || this.state.goalPending
+      || context?.goal
+      || context?.goal_pending
+      || context?.goal_proposal_ready
+      || context?.goal_continuation,
+    )
+    if (!goalEnabled || !threadId || !hasGoalTerminalWork) {
+      this.continueAfterPlanRun()
+      return
+    }
+    this.scheduler.setTimeout(() => {
+      void (async () => {
+        const handledGoal = await this.goalFeature.finishRun(
+          threadId,
+          context,
+          this.featureContext,
+          this.goalRunCallbacks(),
+          resumeReadyProposal,
+        )
+        if (!handledGoal) this.continueAfterPlanRun()
+      })()
+    }, 0)
+  }
+
+  /** 启动 Goal proposal；原始命令只进入本地时间线，不写模型 Transcript。 */
+  private startGoalProposal(requestId: string, displayPrompt?: string): Promise<IntentOutcome> {
+    const threadId = this.state.currentThreadId
+    if (!threadId) return Promise.resolve({ status: "rejected", code: "invalid-argument", message: "Goal thread is missing" })
+    return this.runFeature.startTypedRun({ kind: "goal_proposal", request_id: requestId }, this.featureContext, {
+      mode: "build",
+      requestedModelProfileId: this.modelFeature.requestedModelProfileId,
+      displayPrompt,
+      onEvent: event => this.timelineFeature.processAgentEvent(event, this.featureContext),
+      onRunFinish: (actualModel, context, outcome) => this.finishRun(
+        actualModel,
+        context,
+        outcome === "completed",
+      ),
+      onAbandonInteraction: () => this.interactionFeature.abandonPendingInteraction(this.featureContext),
+    })
+  }
+
+  /** Goal 接受后的内部续跑仍沿用当前 Build 审批与模型选择。 */
+  private startGoalContinuation(continuation: { continuation_id: string; goal_id: string; goal_revision: number; reason: "accepted" | "amended" | "resumed" }): Promise<IntentOutcome> {
+    return this.runFeature.startTypedRun({
+      kind: "goal_continuation",
+      goal_id: continuation.goal_id,
+      goal_revision: continuation.goal_revision,
+      reason: continuation.reason,
+    }, this.featureContext, {
+      mode: "build",
+      // continuation token 直接作为持久 Run ID；Controller 重建后重放同一 token，
+      // ThreadPersistence 只会复用既有 binding，不会再次执行。
+      runId: continuation.continuation_id,
+      requestedModelProfileId: this.modelFeature.requestedModelProfileId,
+      onEvent: event => this.timelineFeature.processAgentEvent(event, this.featureContext),
+      onRunFinish: (actualModel, context) => this.finishRun(actualModel, context),
+      onAbandonInteraction: () => this.interactionFeature.abandonPendingInteraction(this.featureContext),
+    })
+  }
+
+  private goalRunCallbacks() {
+    return {
+      startProposal: (requestId: string, displayPrompt?: string) => this.startGoalProposal(requestId, displayPrompt),
+      startContinuation: (continuation: { continuation_id: string; goal_id: string; goal_revision: number; reason: "accepted" | "amended" | "resumed" }) => this.startGoalContinuation(continuation),
+      openViewer: (snapshot: import("@za38/protocol").GoalInspectResult, threadId: string) => this.interactionFeature.openGoalViewer(snapshot, threadId, this.featureContext),
+    }
   }
   /** 计划 Run 终态后：批准则恢复档位并自动开实现轮；放弃只恢复；打回不动。 */
   private continueAfterPlanRun(): void {
@@ -297,7 +378,7 @@ export class InteractiveControllerImpl implements InteractiveController {
       requestedModelProfileId: this.modelFeature.requestedModelProfileId,
       armedSkill: this.skillFeature.armedSkill,
       onEvent: event => this.timelineFeature.processAgentEvent(event, this.featureContext),
-      onRunFinish: (actualModel?: ModelProfile) => this.finishRun(actualModel),
+      onRunFinish: (actualModel?: ModelProfile, context?: Record<string, unknown>) => this.finishRun(actualModel, context),
       onAbandonInteraction: () => this.interactionFeature.abandonPendingInteraction(this.featureContext),
     })
   }
@@ -376,6 +457,8 @@ export class InteractiveControllerImpl implements InteractiveController {
       case "view-plan":
         this.interactionFeature.openPlanViewer(result, this.featureContext)
         return { status: "accepted" }
+      case "goal":
+        return this.goalFeature.execute(result.argument, this.featureContext, this.goalRunCallbacks())
       case "submit-prompt": {
         const resolved = await resolveMentions(this.baseRuntime.workspace, result.prompt)
         return this.runFeature.startRun(resolved.prompt, this.featureContext, {
@@ -385,7 +468,7 @@ export class InteractiveControllerImpl implements InteractiveController {
           requestedSkill: result.requestedSkill,
           displayPrompt: result.prompt,
           onEvent: event => this.timelineFeature.processAgentEvent(event, this.featureContext),
-          onRunFinish: (actualModel?: ModelProfile) => this.finishRun(actualModel),
+          onRunFinish: (actualModel?: ModelProfile, context?: Record<string, unknown>) => this.finishRun(actualModel, context),
           onAbandonInteraction: () => this.interactionFeature.abandonPendingInteraction(this.featureContext),
         })
       }
@@ -532,6 +615,10 @@ export class InteractiveControllerImpl implements InteractiveController {
       workMode: this.state.workMode,
       composeState: this.state.composeState,
       workItem: this.state.workItem,
+      goal: this.state.goal,
+      goalPending: this.state.goalPending,
+      goalEvaluation: this.state.goalEvaluation,
+      goalActivities: [...this.state.goalActivities],
       threadMode: this.state.threadMode,
       isReverted: this.state.isReverted ?? false,
       revertedTurnId: this.state.revertedTurnId ?? null,

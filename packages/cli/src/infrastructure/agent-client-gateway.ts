@@ -4,6 +4,11 @@ import type {
   AgentsListResult,
   ConfigChange,
   ContextCompactResult,
+  GoalInspectResult,
+  GoalMutateParams,
+  GoalMutateResult,
+  GoalRequestParams,
+  GoalRequestResult,
   InteractionRequestEnvelope,
   InteractionResponse,
   McpAddParams,
@@ -133,6 +138,30 @@ export class AgentClientGateway implements AgentGateway {
   async openThread(threadId: string): Promise<ThreadsOpenResult> {
     try {
       return await this.client.openThread(threadId)
+    } catch (error) {
+      throw this.wrapError(error)
+    }
+  }
+
+  async inspectGoal(threadId: string): Promise<GoalInspectResult> {
+    try {
+      return await this.client.inspectGoal(threadId)
+    } catch (error) {
+      throw this.wrapError(error)
+    }
+  }
+
+  async requestGoal(params: GoalRequestParams): Promise<GoalRequestResult> {
+    try {
+      return await this.client.requestGoal(params)
+    } catch (error) {
+      throw this.wrapError(error)
+    }
+  }
+
+  async mutateGoal(params: GoalMutateParams): Promise<GoalMutateResult> {
+    try {
+      return await this.client.mutateGoal(params)
     } catch (error) {
       throw this.wrapError(error)
     }

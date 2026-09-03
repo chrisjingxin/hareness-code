@@ -50,6 +50,50 @@ def test_python_rejects_non_finite_sensitive_and_oversized_records() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("level", "event", "fields"),
+    [
+        (
+            "info",
+            "goal.proposal.model.completed",
+            {
+                "response_mode": "forced_tool_schema",
+                "readiness": "needs_clarification",
+                "assumption_count": 0,
+                "criterion_count": 0,
+                "question_count": 1,
+                "repository_calls": 2,
+                "repository_result_chars": 318,
+                "repository_limited_results": 1,
+                "last_repository_tool": "glob",
+                "last_repository_result_chars": 51_827,
+            },
+        ),
+        (
+            "warn",
+            "goal.proposal.model.invalid",
+            {
+                "response_mode": "forced_tool_schema",
+                "error_code": "GOAL_OBJECTIVE_INVALID",
+                "repository_calls": 1,
+                "repository_result_chars": 16,
+                "repository_limited_results": 0,
+                "last_repository_tool": "read_file",
+                "last_repository_result_chars": 16,
+            },
+        ),
+    ],
+)
+def test_goal_proposal_events_accept_only_safe_repository_statistics(
+    level: str,
+    event: str,
+    fields: dict[str, object],
+) -> None:
+    record = _minimal_record()
+
+    validate_record({**record, "level": level, "event": event, "fields": fields})
+
+
 def _minimal_record() -> dict[str, object]:
     return {
         "schema_version": 1,

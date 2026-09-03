@@ -30,7 +30,13 @@ from harness_agent.threads.prompting import (
     sha256_text,
     tool_schema_fingerprint,
 )
-from harness_agent.host.run_coordinator import ConnectionRef, RunCoordinator, RunPreparation, StartRun
+from harness_agent.host.run_coordinator import (
+    ConnectionRef,
+    RunCoordinator,
+    RunPreparation,
+    StartRun,
+    UserRunInput,
+)
 from harness_agent.runtime.run_context import RunContext, RunContextSnapshotMiddleware
 from harness_agent.threads.thread_persistence import AcceptRun, ThreadPersistence, ThreadPersistenceError
 from tests.support.thread_fixtures import (
@@ -681,15 +687,13 @@ async def test_accept_run_persists_and_reuses_snapshot_atomically(tmp_path: Path
             context_snapshot_id=snapshot.snapshot_id,
         )
         accepted = await store.accept_run(
-            AcceptRun(
-                message="受理带 snapshot 的 Run",
+            AcceptRun(message="受理带 snapshot 的 Run",
                 binding=binding,
                 context_snapshot=snapshot,
             )
         )
         retried = await store.accept_run(
-            AcceptRun(
-                message="受理带 snapshot 的 Run",
+            AcceptRun(message="受理带 snapshot 的 Run",
                 binding=binding,
                 context_snapshot=replace(snapshot, created_at_ms=401),
             )
@@ -704,8 +708,7 @@ async def test_accept_run_persists_and_reuses_snapshot_atomically(tmp_path: Path
 
         with pytest.raises(ThreadPersistenceError, match="RUN_CONTEXT_SNAPSHOT_BINDING_MISMATCH"):
             await store.accept_run(
-                AcceptRun(
-                    message="不能写入半套 Run",
+                AcceptRun(message="不能写入半套 Run",
                     binding=make_test_binding("thread-snapshot", "run-half"),
                     context_snapshot=snapshot,
                 )
@@ -754,8 +757,7 @@ async def test_verified_legacy_prompt_epoch_migrates_once_to_readable_snapshot(
         "created_at_ms": legacy_created_at_ms,
     }
     await initial.accept_run(
-        AcceptRun(
-            message="旧 Run",
+        AcceptRun(message="旧 Run",
             binding=make_test_binding(legacy_thread_id, "legacy-run"),
         )
     )
@@ -911,7 +913,7 @@ async def test_context_refresh_failure_happens_before_accept_run() -> None:
     )
     with pytest.raises(ContextRefreshError, match="CONTEXT_REFERENCE_CHANGED_DURING_READ"):
         await coordinator.start(
-            StartRun(mode="build", thread_id="thread-refresh-failure", run_id="run-1", message="刷新"),
+            StartRun(mode="build", thread_id="thread-refresh-failure", run_id="run-1", input=UserRunInput(message="刷新")),
             ConnectionRef("owner"),
         )
     assert persistence.accept_calls == 0

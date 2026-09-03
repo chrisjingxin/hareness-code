@@ -4,6 +4,11 @@ import type {
   AgentSummary,
   DirectoryTrustDecision,
   FileDiffPresentation,
+  GoalActivityProjection,
+  GoalEvaluationProjection,
+  GoalPendingProjection,
+  GoalProjection,
+  GoalInteractionResponse,
   McpAddParams,
   McpServerStatus,
   ModelProfile,
@@ -28,6 +33,9 @@ export type { DirectoryTrustDecision }
 
 /** 计划审批决定，与协议 PlanResponse.decision 保持一致。 */
 export type { PlanDecision }
+
+/** Goal 审核决定；驳回必须由调用方携带反馈。 */
+export type GoalReviewResponse = GoalInteractionResponse
 
 /** Skill catalog 项：与 Slash 菜单共用的最小领域视图。 */
 export type SkillSummary = SkillMenuItem
@@ -107,6 +115,28 @@ export type InteractiveInteraction =
       /** true 表示 /plan-view 打开的只读预览，不对应 Host Interaction。 */
       readOnly?: boolean
     }
+  | {
+      type: "goal"
+      requestId: string
+      proposalKind?: "create" | "replace" | "amend"
+      objective: string
+      assumptions: readonly string[]
+      criteria: readonly string[]
+      decisions: readonly ("accepted" | "edited" | "rejected" | "cancelled")[]
+      deadlineAtMs: number
+      agentId?: string
+      /** true 表示 /goal show 打开的只读状态查看器。 */
+      readOnly?: boolean
+      status?: "active" | "paused" | "blocked" | "complete"
+      revision?: number
+      graderLabel?: string
+      maxIterations?: number
+      pendingStatus?: string
+      pendingInput?: string
+      note?: string
+      priorBlocker?: string
+      activities?: readonly GoalActivityProjection[]
+    }
 
 /** adapter 提交的答案；request_id 由 Controller 用当前 request 组装。 */
 export type InteractiveResponse =
@@ -114,6 +144,7 @@ export type InteractiveResponse =
   | { kind: "question"; answers: Record<string, string[]> }
   | { kind: "directory_trust"; decision: DirectoryTrustDecision }
   | { kind: "plan"; decision: PlanDecision; feedback?: string }
+  | ({ kind: "goal" } & GoalInteractionResponse)
 
 /** 破坏性操作的稳定确认；adapter 通过 confirmation.resolve 回写。 */
 export type InteractiveConfirmation = {
@@ -170,6 +201,7 @@ export type InteractiveIntent =
   | { type: "mcp.remove"; name: string }
   | { type: "interaction.respond"; requestId: string; response: InteractiveResponse }
   | { type: "plan-view.close" }
+  | { type: "goal-view.close" }
   | { type: "confirmation.resolve"; confirmationId: string; confirmed: boolean }
   | { type: "approval-mode.cycle" }
   | { type: "work-mode.cycle" }
@@ -208,6 +240,10 @@ export type InteractiveSnapshot = {
   readonly composeState: ComposeProjection | null
   /** 当前 Thread 的持久 Work Item 投影；null 表示无未终结项或 Build Thread。 */
   readonly workItem: WorkItemProjection | null
+  readonly goal: GoalProjection | null
+  readonly goalPending: GoalPendingProjection | null
+  readonly goalEvaluation: GoalEvaluationProjection | null
+  readonly goalActivities: readonly GoalActivityProjection[]
   /** Thread 首条有效消息后冻结的持久工作模式；未冻结为 null。 */
   readonly threadMode: WorkMode | null
   /** 正在查看的 child execution；null 表示父时间线。 */

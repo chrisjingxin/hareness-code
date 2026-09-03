@@ -104,6 +104,8 @@ export function clientCapabilities(command: Command): string[] {
     Capability.AGENTS_READ,
     Capability.TEAMS_READ,
     Capability.TEAMS_MANAGE,
+    Capability.GOAL_READ,
+    Capability.GOAL_MANAGE,
   )
   if (command.kind.startsWith("skills.") || (command.kind === "run" && !command.nonInteractive)) capabilities.push(Capability.SKILLS_READ)
   if (command.kind === "skills.set_enabled" || command.kind === "skills.install" || command.kind === "skills.update" || command.kind === "skills.remove") {
@@ -126,12 +128,12 @@ export function clientCapabilities(command: Command): string[] {
 export function clientInteractionHandles(
   command: Command,
   terminal: PluginConsentTerminalState = processPluginConsentTerminal(),
-): Array<"approval" | "question" | "directory_trust" | "plan" | "plugin_consent"> {
+): Array<"approval" | "question" | "directory_trust" | "plan" | "plugin_consent" | "goal"> {
   if (
     (command.kind === "plugins.install" || command.kind === "plugins.update")
     && hasPluginConsentTerminal(terminal)
   ) return ["plugin_consent"]
-  return command.kind === "run" && !command.nonInteractive ? ["approval", "question", "directory_trust", "plan"] : []
+  return command.kind === "run" && !command.nonInteractive ? ["approval", "question", "directory_trust", "plan", "goal"] : []
 }
 
 /** 读取 install/update 的一次性结构化 consent；取消、EOF 和非明确确认均拒绝。 */
@@ -453,7 +455,7 @@ function validateSettingValue(value: string): string {
 /** 无头模式下收集单次流式输出，并等待对应运行的终态事件。 */
 async function runTurn(client: AgentClient, message: string, threadId?: string): Promise<{ text: string; threadId: string; runId: string; usage: unknown }> {
   let text = ""
-  const run = client.startRun({ message, mode: "build", threadId })
+  const run = client.startRun({ input: { kind: "user", message }, mode: "build", threadId })
   await run.accepted
   for await (const event of run.events) {
     if (event.type === EventType.CONTENT_DELTA) text += event.payload.text

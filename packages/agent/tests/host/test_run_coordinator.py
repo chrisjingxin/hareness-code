@@ -19,6 +19,7 @@ from harness_agent.host.run_coordinator import (
     RunState,
     RunTimingLedger,
     StartRun,
+    UserRunInput,
 )
 from harness_agent.runtime.interactions import InteractionRequest
 
@@ -177,7 +178,7 @@ async def test_run_coordinator_emits_one_diagnostic_terminal_with_timing() -> No
         clock=clock,
     )
     execution = await coordinator.start(
-        StartRun(mode="build", thread_id="thread", run_id="run-1", message="hello"),
+        StartRun(mode="build", thread_id="thread", run_id="run-1", input=UserRunInput(message="hello")),
         ConnectionRef("owner"),
     )
 
@@ -223,7 +224,7 @@ async def test_run_acceptance_logs_bounded_catalog_projection() -> None:
         diagnostic_log=log,
     )
     execution = await coordinator.start(
-        StartRun(mode="build", thread_id="thread", run_id="run-catalog", message="hello"),
+        StartRun(mode="build", thread_id="thread", run_id="run-catalog", input=UserRunInput(message="hello")),
         ConnectionRef("owner"),
     )
     await _events(execution)
@@ -272,7 +273,7 @@ async def test_run_duration_starts_after_preparation_when_run_is_accepted() -> N
     )
 
     execution = await coordinator.start(
-        StartRun(mode="build", thread_id="thread", run_id="run-prepared", message="hello"),
+        StartRun(mode="build", thread_id="thread", run_id="run-prepared", input=UserRunInput(message="hello")),
         ConnectionRef("owner"),
     )
     await _events(execution)
@@ -300,7 +301,7 @@ async def test_run_diagnostic_failure_does_not_change_terminal() -> None:
         diagnostic_log=_FailingLog(),
     )
     execution = await coordinator.start(
-        StartRun(mode="build", thread_id="thread", run_id="run-log-fail", message="hello"),
+        StartRun(mode="build", thread_id="thread", run_id="run-log-fail", input=UserRunInput(message="hello")),
         ConnectionRef("owner"),
     )
 
@@ -329,7 +330,7 @@ async def test_request_interaction_logs_wait_and_omits_payload() -> None:
         clock=clock,
     )
     run = RunState(
-        start=StartRun(mode="build", thread_id="thread", run_id="run-int", message="hello"),
+        start=StartRun(mode="build", thread_id="thread", run_id="run-int", input=UserRunInput(message="hello")),
         owner=ConnectionRef("owner"),
         persistence=None,
         preparation=RunPreparation(),
@@ -373,12 +374,12 @@ async def test_run_coordinator_enforces_owner_busy_and_single_terminal_event() -
     other = ConnectionRef("other")
 
     execution = await coordinator.start(
-        StartRun(mode="build", thread_id="thread", run_id="run-1", message="hello"),
+        StartRun(mode="build", thread_id="thread", run_id="run-1", input=UserRunInput(message="hello")),
         owner,
     )
     with pytest.raises(RunError, match="THREAD_BUSY") as busy:
         await coordinator.start(
-            StartRun(mode="build", thread_id="thread", run_id="run-2", message="busy"),
+            StartRun(mode="build", thread_id="thread", run_id="run-2", input=UserRunInput(message="busy")),
             owner,
         )
     assert busy.value.code == "THREAD_BUSY"
@@ -402,7 +403,7 @@ async def test_run_coordinator_releases_runtime_and_completes_once() -> None:
     releases: list[str] = []
     coordinator = _coordinator(releases)
     execution = await coordinator.start(
-        StartRun(mode="build", thread_id="thread", run_id="run-1", message="hello"),
+        StartRun(mode="build", thread_id="thread", run_id="run-1", input=UserRunInput(message="hello")),
         ConnectionRef("owner"),
     )
 
@@ -430,7 +431,7 @@ async def test_lifecycle_port_assigns_shared_sequence_for_scoped_child_activity(
 
     coordinator = _coordinator([])
     run = RunState(
-        start=StartRun(mode="compose", thread_id="thread-scope", run_id="run-scope", message="组合"),
+        start=StartRun(mode="compose", thread_id="thread-scope", run_id="run-scope", input=UserRunInput(message="组合")),
         owner=ConnectionRef("owner"),
         persistence=None,
         preparation=RunPreparation(
@@ -495,14 +496,14 @@ async def test_run_coordinator_limits_second_connection_run_without_multithread(
     owner = ConnectionRef("owner")
     start_task = asyncio.create_task(
         coordinator.start(
-            StartRun(mode="build", thread_id="thread-1", run_id="run-1", message="first"),
+            StartRun(mode="build", thread_id="thread-1", run_id="run-1", input=UserRunInput(message="first")),
             owner,
         )
     )
     await asyncio.sleep(0)
     with pytest.raises(RunError) as busy:
         await coordinator.start(
-            StartRun(mode="build", thread_id="thread-2", run_id="run-2", message="second"),
+            StartRun(mode="build", thread_id="thread-2", run_id="run-2", input=UserRunInput(message="second")),
             owner,
         )
     assert busy.value.code == "CONNECTION_RUN_BUSY"
@@ -511,7 +512,7 @@ async def test_run_coordinator_limits_second_connection_run_without_multithread(
     # 其他 Connection 不受限制。
     other_task = asyncio.create_task(
         coordinator.start(
-            StartRun(mode="build", thread_id="thread-2", run_id="run-2", message="second"),
+            StartRun(mode="build", thread_id="thread-2", run_id="run-2", input=UserRunInput(message="second")),
             ConnectionRef("other"),
         )
     )
@@ -556,18 +557,18 @@ async def test_same_run_different_work_mode_conflicts() -> None:
     )
     owner = ConnectionRef("owner")
     first = await coordinator.start(
-        StartRun(thread_id="thread", run_id="run-1", message="hello", mode="build"),
+        StartRun(thread_id="thread", run_id="run-1", input=UserRunInput(message="hello"), mode="build"),
         owner,
     )
     # 相同 mode 的幂等重试仍被受理，不产生事件。
     retried = await coordinator.start(
-        StartRun(thread_id="thread", run_id="run-1", message="hello", mode="build"),
+        StartRun(thread_id="thread", run_id="run-1", input=UserRunInput(message="hello"), mode="build"),
         owner,
     )
     assert retried.accepted is True
     with pytest.raises(RunError) as conflict:
         await coordinator.start(
-            StartRun(thread_id="thread", run_id="run-1", message="hello", mode="compose"),
+            StartRun(thread_id="thread", run_id="run-1", input=UserRunInput(message="hello"), mode="compose"),
             owner,
         )
     assert conflict.value.code == "RUN_ID_CONFLICT"
@@ -596,7 +597,7 @@ async def test_adapter_terminal_signal_rejected_by_coordinator() -> None:
     )
     coordinator._execution_adapters["build"] = _MalformedAdapter()
     execution = await coordinator.start(
-        StartRun(thread_id="thread", run_id="run-1", message="hello", mode="build"),
+        StartRun(thread_id="thread", run_id="run-1", input=UserRunInput(message="hello"), mode="build"),
         ConnectionRef("owner"),
     )
     events = await _events(execution)
@@ -610,7 +611,7 @@ async def test_compose_adapter_stub_has_single_terminal() -> None:
     """Compose 空壳在完整实现前只以稳定错误收敛，不产生第二套生命周期。"""
     coordinator = _coordinator([])
     execution = await coordinator.start(
-        StartRun(thread_id="thread", run_id="run-1", message="hello", mode="compose"),
+        StartRun(thread_id="thread", run_id="run-1", input=UserRunInput(message="hello"), mode="compose"),
         ConnectionRef("owner"),
     )
     events = await _events(execution)
@@ -647,7 +648,7 @@ async def test_coordinator_persists_start_mode_as_thread_mode(tmp_path) -> None:
                 mode="build",
                 thread_id="thread-mode",
                 run_id="run-build",
-                message="先以 Build 开始",
+                input=UserRunInput(message="先以 Build 开始"),
             ),
             ConnectionRef("owner"),
         )
@@ -662,7 +663,7 @@ async def test_coordinator_persists_start_mode_as_thread_mode(tmp_path) -> None:
                     mode="compose",
                     thread_id="thread-mode",
                     run_id="run-compose",
-                    message="不能切换模式",
+                    input=UserRunInput(message="不能切换模式"),
                 ),
                 ConnectionRef("owner"),
             )
@@ -686,7 +687,7 @@ async def test_cancellation_propagates_through_adapter_boundary() -> None:
     coordinator = _coordinator([])
     coordinator._execution_adapters["build"] = _BlockingAdapter()
     execution = await coordinator.start(
-        StartRun(thread_id="thread", run_id="run-1", message="hello", mode="build"),
+        StartRun(thread_id="thread", run_id="run-1", input=UserRunInput(message="hello"), mode="build"),
         ConnectionRef("owner"),
     )
     await asyncio.sleep(0)
@@ -715,7 +716,7 @@ async def test_run_coordinator_allows_multithread_connection_runs() -> None:
     owner = ConnectionRef("owner")
     first = asyncio.create_task(
         coordinator.start(
-            StartRun(mode="build", thread_id="thread-1", run_id="run-1", message="first"),
+            StartRun(mode="build", thread_id="thread-1", run_id="run-1", input=UserRunInput(message="first")),
             owner,
             allow_multithread=True,
         )
@@ -723,7 +724,7 @@ async def test_run_coordinator_allows_multithread_connection_runs() -> None:
     await asyncio.sleep(0)
     second_task = asyncio.create_task(
         coordinator.start(
-            StartRun(mode="build", thread_id="thread-2", run_id="run-2", message="second"),
+            StartRun(mode="build", thread_id="thread-2", run_id="run-2", input=UserRunInput(message="second")),
             owner,
             allow_multithread=True,
         )
@@ -779,7 +780,7 @@ async def test_idle_thread_reserves_only_target_thread_and_releases_after_error(
                     StartRun(mode="build", 
                         thread_id="thread-maintenance",
                         run_id="run-blocked",
-                        message="must wait",
+                        input=UserRunInput(message="must wait"),
                     ),
                     owner,
                 )
@@ -788,7 +789,7 @@ async def test_idle_thread_reserves_only_target_thread_and_releases_after_error(
                 StartRun(mode="build", 
                     thread_id="thread-other",
                     run_id="run-other",
-                    message="may proceed",
+                    input=UserRunInput(message="may proceed"),
                 ),
                 owner,
             )
@@ -805,7 +806,7 @@ async def test_idle_thread_reserves_only_target_thread_and_releases_after_error(
         StartRun(mode="build", 
             thread_id="thread-maintenance",
             run_id="run-recovered",
-            message="continue",
+            input=UserRunInput(message="continue"),
         ),
         owner,
     )
@@ -850,7 +851,7 @@ async def test_close_before_run_task_starts_releases_snapshot_reservation_once()
     )
 
     await coordinator.start(
-        StartRun(mode="build", thread_id="thread-not-started", run_id="run-1", message="hello"),
+        StartRun(mode="build", thread_id="thread-not-started", run_id="run-1", input=UserRunInput(message="hello")),
         ConnectionRef("owner"),
     )
     await coordinator.close()
@@ -865,7 +866,7 @@ async def test_close_before_run_task_starts_releases_snapshot_reservation_once()
 async def test_transcript_capture_keeps_full_tool_text_before_wire_truncation() -> None:
     """语义层先捕获完整 ToolMessage，wire 仍可独立按 1 MiB 截断。"""
     run = RunState(
-        start=StartRun(mode="build", thread_id="thread-transcript", run_id="run-raw", message="读取"),
+        start=StartRun(mode="build", thread_id="thread-transcript", run_id="run-raw", input=UserRunInput(message="读取")),
         owner=ConnectionRef("owner"),
         persistence=None,
         preparation=RunPreparation(),
@@ -901,7 +902,7 @@ async def test_transcript_capture_keeps_full_tool_text_before_wire_truncation() 
 def test_reasoning_content_is_not_captured_as_transcript_content() -> None:
     """Chat Completions reasoning 内容不能进入助手正文或 Transcript。"""
     run = RunState(
-        start=StartRun(mode="build", thread_id="thread-summary-transcript", run_id="run-summary-transcript", message="检查"),
+        start=StartRun(mode="build", thread_id="thread-summary-transcript", run_id="run-summary-transcript", input=UserRunInput(message="检查")),
         owner=ConnectionRef("owner"),
         persistence=None,
         preparation=RunPreparation(),
@@ -922,7 +923,7 @@ def test_reasoning_content_is_not_captured_as_transcript_content() -> None:
 def test_reasoning_only_chunk_emits_reasoning_delta_without_content() -> None:
     """reasoning-only chunk 产生 reasoning.delta，原始思维不进入正文。"""
     run = RunState(
-        start=StartRun(mode="build", thread_id="thread-reasoning", run_id="run-reasoning", message="检查"),
+        start=StartRun(mode="build", thread_id="thread-reasoning", run_id="run-reasoning", input=UserRunInput(message="检查")),
         owner=ConnectionRef("owner"),
         persistence=None,
         preparation=RunPreparation(),
@@ -939,7 +940,7 @@ def test_reasoning_only_chunk_emits_reasoning_delta_without_content() -> None:
 def test_chat_completions_reasoning_content_emits_reasoning_delta() -> None:
     """Chat Completions 的 reasoning_content 产生独立 reasoning.delta。"""
     run = RunState(
-        start=StartRun(mode="build", thread_id="thread-completions-reasoning", run_id="run-completions-reasoning", message="检查"),
+        start=StartRun(mode="build", thread_id="thread-completions-reasoning", run_id="run-completions-reasoning", input=UserRunInput(message="检查")),
         owner=ConnectionRef("owner"),
         persistence=None,
         preparation=RunPreparation(),
@@ -959,7 +960,7 @@ def test_chat_completions_reasoning_content_emits_reasoning_delta() -> None:
 def test_reasoning_block_and_text_emit_separate_deltas() -> None:
     """reasoning 与正文分别投影为独立增量事件，互不污染。"""
     run = RunState(
-        start=StartRun(mode="build", thread_id="thread-summary", run_id="run-summary", message="检查"),
+        start=StartRun(mode="build", thread_id="thread-summary", run_id="run-summary", input=UserRunInput(message="检查")),
         owner=ConnectionRef("owner"),
         persistence=None,
         preparation=RunPreparation(),
@@ -986,7 +987,7 @@ def test_reasoning_text_is_shown_but_private_fields_never_leak() -> None:
         ([{"type": "reasoning", "reasoning": "公开", "vendor_private": "私有"}], "公开"),
     ):
         run = RunState(
-            start=StartRun(mode="build", thread_id="thread-safe", run_id="run-safe", message="检查"),
+            start=StartRun(mode="build", thread_id="thread-safe", run_id="run-safe", input=UserRunInput(message="检查")),
             owner=ConnectionRef("owner"),
             persistence=None,
             preparation=RunPreparation(),
@@ -1002,7 +1003,7 @@ def test_reasoning_text_is_shown_but_private_fields_never_leak() -> None:
 def test_non_string_text_block_is_not_promoted_to_assistant_text() -> None:
     """不符合标准 text block 的对象不能经字符串化泄露到正文事件。"""
     run = RunState(
-        start=StartRun(mode="build", thread_id="thread-text-shape", run_id="run-text-shape", message="检查"),
+        start=StartRun(mode="build", thread_id="thread-text-shape", run_id="run-text-shape", input=UserRunInput(message="检查")),
         owner=ConnectionRef("owner"),
         persistence=None,
         preparation=RunPreparation(),
@@ -1019,7 +1020,7 @@ def test_non_string_text_block_is_not_promoted_to_assistant_text() -> None:
 async def test_transcript_capture_groups_chunks_without_stable_ids_into_one_assistant() -> None:
     """无 ID 或变 ID 的 assistant delta 仍属于同一完整助手消息。"""
     run = RunState(
-        start=StartRun(mode="build", thread_id="thread-chunks", run_id="run-chunks", message="分片"),
+        start=StartRun(mode="build", thread_id="thread-chunks", run_id="run-chunks", input=UserRunInput(message="分片")),
         owner=ConnectionRef("owner"),
         persistence=None,
         preparation=RunPreparation(),
@@ -1049,7 +1050,7 @@ async def test_transcript_capture_groups_chunks_without_stable_ids_into_one_assi
 def test_idless_tool_call_index_is_reset_between_model_rounds() -> None:
     """同一 index 的无 ID 工具调用跨回合必须使用不同的 Run ordinal。"""
     run = RunState(
-        start=StartRun(mode="build", thread_id="thread-rounds", run_id="run-rounds", message="连续执行"),
+        start=StartRun(mode="build", thread_id="thread-rounds", run_id="run-rounds", input=UserRunInput(message="连续执行")),
         owner=ConnectionRef("owner"),
         persistence=None,
         preparation=RunPreparation(),
@@ -1107,7 +1108,7 @@ def test_idless_tool_call_index_is_reset_between_model_rounds() -> None:
 def test_parallel_idless_tool_results_fail_closed() -> None:
     """并行无 ID 结果无法可靠归属时不能静默合并到一个记录。"""
     run = RunState(
-        start=StartRun(mode="build", thread_id="thread-parallel", run_id="run-parallel", message="并行执行"),
+        start=StartRun(mode="build", thread_id="thread-parallel", run_id="run-parallel", input=UserRunInput(message="并行执行")),
         owner=ConnectionRef("owner"),
         persistence=None,
         preparation=RunPreparation(),
@@ -1146,7 +1147,7 @@ def test_parallel_idless_tool_results_fail_closed() -> None:
 def test_tool_result_provider_id_mismatch_does_not_guess_unique_stable_call() -> None:
     """已有 provider ID=A 时，结果 ID=B 不能借唯一候选猜配。"""
     run = RunState(
-        start=StartRun(mode="build", thread_id="thread-id-mismatch", run_id="run-id-mismatch", message="执行"),
+        start=StartRun(mode="build", thread_id="thread-id-mismatch", run_id="run-id-mismatch", input=UserRunInput(message="执行")),
         owner=ConnectionRef("owner"),
         persistence=None,
         preparation=RunPreparation(),
@@ -1170,7 +1171,7 @@ def test_tool_result_provider_id_mismatch_does_not_guess_unique_stable_call() ->
 def test_orphan_tool_result_does_not_create_transcript_call() -> None:
     """没有前置 assistant tool call 时，结果不能凭空生成孤儿 ID。"""
     run = RunState(
-        start=StartRun(mode="build", thread_id="thread-orphan-result", run_id="run-orphan-result", message="执行"),
+        start=StartRun(mode="build", thread_id="thread-orphan-result", run_id="run-orphan-result", input=UserRunInput(message="执行")),
         owner=ConnectionRef("owner"),
         persistence=None,
         preparation=RunPreparation(),
@@ -1186,7 +1187,7 @@ def test_orphan_tool_result_does_not_create_transcript_call() -> None:
 def test_idless_assistant_allows_late_provider_result_id_binding() -> None:
     """无 provider ID 的唯一 assistant 候选允许结果 ID 到达时绑定内部 ID。"""
     run = RunState(
-        start=StartRun(mode="build", thread_id="thread-late-id", run_id="run-late-id", message="执行"),
+        start=StartRun(mode="build", thread_id="thread-late-id", run_id="run-late-id", input=UserRunInput(message="执行")),
         owner=ConnectionRef("owner"),
         persistence=None,
         preparation=RunPreparation(),
@@ -1213,7 +1214,7 @@ def test_idless_assistant_allows_late_provider_result_id_binding() -> None:
 def test_idless_unindexed_second_named_call_fails_closed() -> None:
     """无 ID、无 index 的第二个明确 call start 不能静默并入 current。"""
     run = RunState(
-        start=StartRun(mode="build", thread_id="thread-unindexed-calls", run_id="run-unindexed-calls", message="执行"),
+        start=StartRun(mode="build", thread_id="thread-unindexed-calls", run_id="run-unindexed-calls", input=UserRunInput(message="执行")),
         owner=ConnectionRef("owner"),
         persistence=None,
         preparation=RunPreparation(),
@@ -1235,7 +1236,7 @@ def test_idless_unindexed_second_named_call_fails_closed() -> None:
 def test_tool_chunk_id_change_with_same_index_stays_one_call() -> None:
     """同一回合的 provider ID 变化不能把一个 index 拆成两次工具调用。"""
     run = RunState(
-        start=StartRun(mode="build", thread_id="thread-id-change", run_id="run-id-change", message="执行"),
+        start=StartRun(mode="build", thread_id="thread-id-change", run_id="run-id-change", input=UserRunInput(message="执行")),
         owner=ConnectionRef("owner"),
         persistence=None,
         preparation=RunPreparation(),
@@ -1285,7 +1286,7 @@ def test_tool_chunk_id_change_with_same_index_stays_one_call() -> None:
 def test_tool_call_chunks_round_trip_json_arguments_and_invalid_raw() -> None:
     """AIMessageChunk 参数分片聚合后可恢复，半条 JSON 保留 raw/status。"""
     complete = RunState(
-        start=StartRun(mode="build", thread_id="thread-chunk-args", run_id="run-chunk-args", message="执行"),
+        start=StartRun(mode="build", thread_id="thread-chunk-args", run_id="run-chunk-args", input=UserRunInput(message="执行")),
         owner=ConnectionRef("owner"),
         persistence=None,
         preparation=RunPreparation(),
@@ -1314,7 +1315,7 @@ def test_tool_call_chunks_round_trip_json_arguments_and_invalid_raw() -> None:
     assert complete.pending_transcript[0].tool_calls[0]["arguments_raw"] == '{"cmd":"pwd"}'
 
     invalid = RunState(
-        start=StartRun(mode="build", thread_id="thread-chunk-invalid", run_id="run-chunk-invalid", message="执行"),
+        start=StartRun(mode="build", thread_id="thread-chunk-invalid", run_id="run-chunk-invalid", input=UserRunInput(message="执行")),
         owner=ConnectionRef("owner"),
         persistence=None,
         preparation=RunPreparation(),
@@ -1342,7 +1343,7 @@ def test_non_json_provider_chunk_arguments_are_invalid_not_stringified_valid(
 ) -> None:
     """非 JSON/非有限 provider 参数不能由字符串化伪装成 valid。"""
     run = RunState(
-        start=StartRun(mode="build", thread_id="thread-non-json", run_id="run-non-json", message="执行"),
+        start=StartRun(mode="build", thread_id="thread-non-json", run_id="run-non-json", input=UserRunInput(message="执行")),
         owner=ConnectionRef("owner"),
         persistence=None,
         preparation=RunPreparation(),
@@ -1424,7 +1425,7 @@ async def test_tool_call_only_assistant_round_trips_arguments_and_conflicts_on_c
     await accept_thread(store, "thread-tool-calls", "读取 README", run_id="run-tool-calls")
     try:
         run = RunState(
-            start=StartRun(mode="build", thread_id="thread-tool-calls", run_id="run-tool-calls", message="读取 README"),
+            start=StartRun(mode="build", thread_id="thread-tool-calls", run_id="run-tool-calls", input=UserRunInput(message="读取 README")),
             owner=ConnectionRef("owner"),
             persistence=store,
             preparation=RunPreparation(),
@@ -1503,7 +1504,7 @@ async def test_parallel_stable_tool_calls_keep_result_pairing(tmp_path) -> None:
             start=StartRun(mode="build", 
                 thread_id="thread-parallel-calls",
                 run_id="run-parallel-calls",
-                message="并行读取",
+                input=UserRunInput(message="并行读取"),
             ),
             owner=ConnectionRef("owner"),
             persistence=store,
@@ -1623,7 +1624,7 @@ async def test_subgraph_messages_are_not_flattened_into_root_transcript(tmp_path
                 )
 
         run = RunState(
-            start=StartRun(mode="build", thread_id="thread-root", run_id="run-root", message="根请求"),
+            start=StartRun(mode="build", thread_id="thread-root", run_id="run-root", input=UserRunInput(message="根请求")),
             owner=ConnectionRef("owner"),
             persistence=store,
             preparation=RunPreparation(),
@@ -1726,7 +1727,7 @@ async def test_completed_tool_batch_is_readable_while_run_waits_for_next_model_s
             )
 
     run = RunState(
-        start=StartRun(mode="build", thread_id="thread-durable", run_id="run-durable", message="读取文件"),
+        start=StartRun(mode="build", thread_id="thread-durable", run_id="run-durable", input=UserRunInput(message="读取文件")),
         owner=ConnectionRef("owner"),
         persistence=store,
         preparation=RunPreparation(execution_binding=make_test_binding("thread-durable", "run-durable")),
@@ -1848,7 +1849,7 @@ async def test_failed_run_flushes_completed_semantics_but_discards_partial_assis
         interaction_port=_NoopInteraction(),
     )
     execution = await coordinator.start(
-        StartRun(mode="build", thread_id="thread-failed", run_id="run-failed", message="失败测试"),
+        StartRun(mode="build", thread_id="thread-failed", run_id="run-failed", input=UserRunInput(message="失败测试")),
         ConnectionRef("owner"),
     )
     events = await _events(execution)

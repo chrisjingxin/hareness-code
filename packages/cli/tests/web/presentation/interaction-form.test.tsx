@@ -82,6 +82,130 @@ const MULTI_QUESTION: InteractiveQuestion = {
 }
 
 describe("InteractionForm", () => {
+  test("goal 显示草案，并支持接受、编辑验收标准、驳回反馈与取消", async () => {
+    const interaction = makeInteractive({
+      interaction: {
+        type: "goal",
+        requestId: "goal-review-1",
+        objective: "为项目加入可恢复的目标闭环",
+        criteria: ["目标可持久化", "重启后可查看"],
+        assumptions: ["仅在 Build 模式工作"],
+      },
+    })
+
+    const accepted: WebIntent[] = []
+    const acceptHandle = mountForm(makeSnapshot({ interactive: interaction }), accepted)
+    try {
+      expect(acceptHandle.container.querySelector(".interaction-title")?.textContent).toBe("审核目标")
+      expect(acceptHandle.container.textContent).toContain("为项目加入可恢复的目标闭环")
+      expect(acceptHandle.container.querySelector('[aria-label="目标验收标准"]')?.textContent).toContain("目标可持久化")
+      const accept = [...acceptHandle.container.querySelectorAll<HTMLButtonElement>("button")]
+        .find(button => button.textContent?.includes("接受并开始"))
+      await act(async () => {
+        accept?.click()
+        await Promise.resolve()
+      })
+      expect(accepted).toContainEqual({
+        type: "interaction-submit",
+        requestId: "goal-review-1",
+        response: { kind: "goal", decision: "accepted" },
+      })
+    } finally {
+      acceptHandle.unmount()
+    }
+
+    const edited: WebIntent[] = []
+    const editHandle = mountForm(makeSnapshot({ interactive: interaction }), edited)
+    try {
+      const edit = [...editHandle.container.querySelectorAll<HTMLButtonElement>("button")]
+        .find(button => button.textContent === "编辑标准")
+      act(() => { edit?.click() })
+      const textarea = editHandle.container.querySelector<HTMLTextAreaElement>('textarea[aria-label="目标验收标准"]')
+      expect(textarea).not.toBeNull()
+      act(() => { if (textarea) setControlledValue(textarea, "协议测试通过\n重启后保持活动目标") })
+      const save = [...editHandle.container.querySelectorAll<HTMLButtonElement>("button")]
+        .find(button => button.textContent?.includes("保存并接受"))
+      await act(async () => {
+        save?.click()
+        await Promise.resolve()
+      })
+      expect(edited).toContainEqual({
+        type: "interaction-submit",
+        requestId: "goal-review-1",
+        response: { kind: "goal", decision: "edited", criteria: ["协议测试通过", "重启后保持活动目标"] },
+      })
+
+      const cancel = [...editHandle.container.querySelectorAll<HTMLButtonElement>("button")]
+        .find(button => button.textContent === "取消")
+      await act(async () => {
+        cancel?.click()
+        await Promise.resolve()
+      })
+      expect(edited).toContainEqual({
+        type: "interaction-submit",
+        requestId: "goal-review-1",
+        response: { kind: "goal", decision: "cancelled" },
+      })
+    } finally {
+      editHandle.unmount()
+    }
+
+    const rejected: WebIntent[] = []
+    const rejectHandle = mountForm(makeSnapshot({ interactive: interaction }), rejected)
+    try {
+      const reject = [...rejectHandle.container.querySelectorAll<HTMLButtonElement>("button")]
+        .find(button => button.textContent === "驳回并反馈")
+      act(() => { reject?.click() })
+      const feedback = rejectHandle.container.querySelector<HTMLTextAreaElement>('textarea[aria-label="目标修改反馈"]')
+      expect(feedback).not.toBeNull()
+      const submitFeedback = [...rejectHandle.container.querySelectorAll<HTMLButtonElement>("button")]
+        .find(button => button.textContent === "提交反馈并重拟")
+      expect(submitFeedback?.disabled).toBe(true)
+      act(() => { if (feedback) setControlledValue(feedback, "补充失败路径") })
+      await act(async () => {
+        submitFeedback?.click()
+        await Promise.resolve()
+      })
+      expect(rejected).toContainEqual({
+        type: "interaction-submit",
+        requestId: "goal-review-1",
+        response: { kind: "goal", decision: "rejected", feedback: "补充失败路径" },
+      })
+    } finally {
+      rejectHandle.unmount()
+    }
+
+    const viewerIntents: WebIntent[] = []
+    const viewer = mountForm(makeSnapshot({ interactive: makeInteractive({ interaction: {
+      type: "goal",
+      requestId: "view-goal:thread-1",
+      objective: "完成登录闭环",
+      assumptions: [],
+      criteria: ["登录成功", "错误提示可见"],
+      decisions: [],
+      deadlineAtMs: Number.POSITIVE_INFINITY,
+      readOnly: true,
+      status: "active",
+      revision: 2,
+      graderLabel: "继承主模型",
+      maxIterations: 3,
+    } }) }), viewerIntents)
+    try {
+      expect(viewer.container.querySelector(".interaction-title")?.textContent).toBe("目标详情")
+      expect(viewer.container.textContent).toContain("active · r2")
+      expect(viewer.container.textContent).toContain("验收模型：继承主模型 · 最多 3 次")
+      const close = [...viewer.container.querySelectorAll<HTMLButtonElement>("button")]
+        .find(button => button.textContent === "关闭")
+      await act(async () => {
+        close?.click()
+        await Promise.resolve()
+      })
+      expect(viewerIntents).toContainEqual({ type: "goal-view-close" })
+    } finally {
+      viewer.unmount()
+    }
+  })
+
   test("file_diff 显示路径、统计、行号和截断警告，并可切换左右/行内", () => {
     const intents: WebIntent[] = []
     const interactive = makeInteractive({

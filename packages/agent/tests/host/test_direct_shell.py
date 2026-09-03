@@ -13,6 +13,7 @@ from harness_agent.host.run_coordinator import (
     RunPreparation,
     RunState,
     StartRun,
+    UserRunInput,
 )
 from harness_agent.host.run_execution import (
     CONTENT_DELTA,
@@ -57,7 +58,7 @@ async def test_direct_shell_executes_echo_command(tmp_path: Path) -> None:
 
     start_run = StartRun(
         mode="direct_shell",
-        message="echo hello_direct_shell",
+        input=UserRunInput(message="echo hello_direct_shell"),
         thread_id="thread-1",
         run_id="run-1",
     )
@@ -91,7 +92,7 @@ async def test_direct_shell_handles_empty_command(tmp_path: Path) -> None:
 
     start_run = StartRun(
         mode="direct_shell",
-        message="   ",
+        input=UserRunInput(message="   "),
         thread_id="thread-1",
         run_id="run-1",
     )
@@ -148,8 +149,7 @@ async def test_direct_shell_with_persistence_resume(tmp_path: Path) -> None:
         created_at_ms=1000,
     )
     await store.accept_run(
-        AcceptRun(
-            message="initial history run",
+        AcceptRun(message="initial history run",
             binding=binding,
             context_snapshot=None,
             mode=ThreadMode.BUILD,
@@ -189,7 +189,7 @@ async def test_direct_shell_with_persistence_resume(tmp_path: Path) -> None:
     # 历史会话恢复后发起 direct_shell
     command = StartRun(
         mode="direct_shell",
-        message="echo from_history_thread",
+        input=UserRunInput(message="echo from_history_thread"),
         thread_id="thread-hist",
         run_id="run-direct-1",
     )

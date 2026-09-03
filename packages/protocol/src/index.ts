@@ -13,6 +13,8 @@ import {
   type ApprovalResponse,
   type DirectoryTrustRequest,
   type DirectoryTrustResponse,
+  type GoalInteractionRequest,
+  type GoalInteractionResponse,
   type InitializeParams,
   type InteractionMap,
   type InteractionMethod,
@@ -33,6 +35,7 @@ export type InteractionRequestEnvelope =
   | ({ request_id: string; type: "directory_trust" } & DirectoryTrustRequest)
   | ({ request_id: string; type: "plan" } & PlanRequest)
   | ({ request_id: string; type: "plugin_consent" } & PluginConsentRequest)
+  | ({ request_id: string; type: "goal" } & GoalInteractionRequest)
 
 export type InteractionResponse =
   | ({ request_id: string; type: "approval" } & ApprovalResponse)
@@ -40,6 +43,7 @@ export type InteractionResponse =
   | ({ request_id: string; type: "directory_trust" } & DirectoryTrustResponse)
   | ({ request_id: string; type: "plan" } & PlanResponse)
   | ({ request_id: string; type: "plugin_consent" } & PluginConsentResponse)
+  | ({ request_id: string; type: "goal" } & GoalInteractionResponse)
 
 type ContractEntry = { params?: string; result?: string; payload?: string; min_minor?: number }
 type ContractMetadata = {

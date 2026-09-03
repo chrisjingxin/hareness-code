@@ -1,6 +1,6 @@
 /** Interactive Core 的纯 reducer：把 sidecar 流事件折叠为稳定领域状态。 */
 
-import { EventType, type EventEnvelope, type InteractionRequestEnvelope } from "@za38/protocol"
+import { EventType, type EventEnvelope, type GoalActivityProjection, type GoalEvaluationProjection, type GoalPendingProjection, type GoalProjection, type InteractionRequestEnvelope } from "@za38/protocol"
 import type { IdGenerator } from "./ports/id-generator"
 
 export type MessageRole = "user" | "assistant" | "system"
@@ -82,7 +82,7 @@ export type ToolCard = {
 export type InteractionCard = {
   id: string
   runId: string
-  type: "approval" | "question" | "directory_trust" | "plan"
+  type: "approval" | "question" | "directory_trust" | "plan" | "goal"
   status: "pending" | "approved" | "rejected" | "answered" | "resolved" | "cancelled"
   description?: string
   requests?: unknown
@@ -216,6 +216,11 @@ export type InteractiveState = {
   composeState: ComposeProjection | null
   /** 当前 Thread 持久化的 Work Item 投影；无未终结项或 Build Thread 为 null。 */
   workItem: WorkItemProjection | null
+  /** 当前 Thread 的持久 Goal 与独立审计投影。 */
+  goal: GoalProjection | null
+  goalPending: GoalPendingProjection | null
+  goalEvaluation: GoalEvaluationProjection | null
+  goalActivities: GoalActivityProjection[]
   /** Thread 首条有效消息后冻结的持久工作模式；未冻结为 null。 */
   threadMode: WorkMode | null
   /** 当前 Thread 下一次 Run 的工作模式；Run 受理后冻结。 */
@@ -240,6 +245,10 @@ export function createInitialState(threadId: string | null = null, workMode: Wor
     workMode,
     composeState: null,
     workItem: null,
+    goal: null,
+    goalPending: null,
+    goalEvaluation: null,
+    goalActivities: [],
     threadMode: null,
     childTimelineExecutionId: null,
     isReverted: false,
@@ -282,6 +291,25 @@ export function applyThreadMode(state: InteractiveState, mode: unknown): Interac
   const next: InteractiveState = { ...state, threadMode: mode }
   if (next.workMode !== mode) return { ...next, workMode: mode }
   return next
+}
+
+/** 原子替换当前 Thread 的 Goal 投影；恢复本身永远不启动 Run。 */
+export function applyGoalSnapshot(
+  state: InteractiveState,
+  snapshot: {
+    goal: GoalProjection | null
+    pending: GoalPendingProjection | null
+    latestEvaluation?: GoalEvaluationProjection | null
+    activities?: readonly GoalActivityProjection[]
+  },
+): InteractiveState {
+  return {
+    ...state,
+    goal: snapshot.goal,
+    goalPending: snapshot.pending,
+    goalEvaluation: snapshot.latestEvaluation ?? null,
+    goalActivities: [...(snapshot.activities ?? state.goalActivities)],
+  }
 }
 
 const WORK_ITEM_STATUSES: Record<string, true> = {
@@ -424,6 +452,20 @@ export function startRun(state: InteractiveState, run: ActiveRun, prompt: string
   }
 }
 
+/** 启动 proposal/continuation 等内部 Run，不伪造用户 Timeline 消息。 */
+export function startInternalRun(state: InteractiveState, run: ActiveRun): InteractiveState {
+  return {
+    ...state,
+    currentThreadId: run.threadId,
+    activeRun: run,
+    lastRun: undefined,
+    activity: { kind: "starting" },
+    runProgress: { phase: "preparing", elapsedMs: 0 },
+    isReverted: false,
+    revertedTurnId: null,
+  }
+}
+
 /** 将协议或本地系统通知追加到统一时间线。 */
 export function appendNotice(state: InteractiveState, message: string, idGenerator: IdGenerator = defaultIdGenerator): InteractiveState {
   return {
@@ -538,6 +580,10 @@ export function restoreThread(
     workMode,
     composeState: null,
     workItem: null,
+    goal: null,
+    goalPending: null,
+    goalEvaluation: null,
+    goalActivities: [],
     threadMode,
     childTimelineExecutionId: null,
   }
@@ -617,6 +663,22 @@ export function applyInteractionRequest(state: InteractiveState, envelope: Inter
       activity: { kind: "waiting-interaction" },
       timeline,
     }
+  }
+
+  if (kind === "goal") {
+    const payload = req.payload && typeof req.payload === "object" ? req.payload as Record<string, unknown> : {}
+    const card: InteractionCard = {
+      id: envelope.request_id,
+      runId: envelope.run_id,
+      type: "goal",
+      status: "pending",
+      description: typeof payload.objective === "string" ? payload.objective : "审阅目标",
+      requests: req,
+    }
+    const timeline = existingIndex >= 0
+      ? state.timeline.map((item, index) => index === existingIndex ? { type: "interaction" as const, interaction: card } : item)
+      : [...state.timeline, { type: "interaction" as const, interaction: card }]
+    return { ...state, activity: { kind: "waiting-interaction" }, timeline }
   }
 
   if (kind === "question") {
@@ -706,7 +768,7 @@ export function markInteractionTimeout(state: InteractiveState, requestId: strin
 export function markInteractionResponded(
   state: InteractiveState,
   requestId: string,
-  status: "approved" | "rejected" | "answered",
+  status: "approved" | "rejected" | "answered" | "cancelled",
 ): InteractiveState {
   return resolveInteractionState(state, requestId, status)
 }
@@ -843,6 +905,9 @@ export function applyAgentEvent(state: InteractiveState, event: EventEnvelope, i
     }
     case EventType.COMPOSE_PROGRESS: {
       return applyComposeState(next, event.payload)
+    }
+    case EventType.GOAL_CHANGED: {
+      return { ...next, goal: event.payload.goal }
     }
     case EventType.COMPOSE_SUMMARY: {
       const payload = event.payload

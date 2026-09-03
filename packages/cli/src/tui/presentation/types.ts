@@ -4,7 +4,7 @@ import type { KeyEvent, ScrollBoxRenderable, TextareaRenderable } from "@opentui
 import type { RefObject } from "react"
 
 import type { CommandMenuItem, SkillMenuItem } from "../../interactive/commands"
-import type { InteractiveSnapshot } from "../../interactive/types"
+import type { GoalReviewResponse, InteractiveSnapshot } from "../../interactive/types"
 import type { ApprovalDecision, CommandMenuState, DirectoryTrustDecision } from "../application/adapter"
 
 export type {
@@ -45,6 +45,8 @@ export type SharedViewProps = {
   onDirectoryTrust: (decision: DirectoryTrustDecision) => void
   onPlan: (decision: import("../../interactive/types").PlanDecision, feedback?: string) => void
   onPlanViewClose: () => void
+  onGoal: (response: GoalReviewResponse) => void
+  onGoalViewClose: () => void
   onQuestion: (answers: Record<string, string[]>) => void
   onOpenChildTimeline?: (executionId: string) => void
   sidebarVisible?: boolean

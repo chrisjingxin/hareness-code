@@ -12,10 +12,11 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Literal, Protocol
+from typing import Any, ClassVar, Literal, Protocol
 
 from harness_agent.compose.models import ThreadMode
 from harness_agent.diagnostic_log.runtime import DiagnosticLog, ensure_log, safe_context_value
+from harness_agent.goals.context import GoalRunBinding
 from harness_agent.host.run_execution import (
     AdapterOutcome,
     BuildRunAdapter,
@@ -243,14 +244,43 @@ class RequestedSkill:
 
 
 @dataclass(frozen=True, slots=True)
+class UserRunInput:
+    """普通用户输入；只有它会进入 Transcript。"""
+
+    kind: ClassVar[Literal["user"]] = "user"
+    message: str
+    requested_skill: RequestedSkill | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class GoalProposalRunInput:
+    """消费已持久化 Goal request 的内部 Run 输入。"""
+
+    kind: ClassVar[Literal["goal_proposal"]] = "goal_proposal"
+    request_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class GoalContinuationRunInput:
+    """接受/修订/恢复 Goal 后的内部续跑输入。"""
+
+    kind: ClassVar[Literal["goal_continuation"]] = "goal_continuation"
+    goal_id: str
+    goal_revision: int
+    reason: Literal["accepted", "amended", "resumed"]
+
+
+RunInput = UserRunInput | GoalProposalRunInput | GoalContinuationRunInput
+
+
+@dataclass(frozen=True, slots=True)
 class StartRun:
     """RunCoordinator 受理所需的类型化输入。"""
 
     thread_id: str
     run_id: str
-    message: str
     mode: InteractionMode
-    requested_skill: RequestedSkill | None = None
+    input: RunInput
     # Preparation 在 Coordinator 的异步任务中执行，不能依赖当前 ContextVar；
     # 只携带 Connection 身份以读取 Host 已登记的 command binding。
     connection_id: str | None = None
@@ -269,13 +299,41 @@ class StartRun:
         """返回本次 Run 的稳定身份。"""
         return RunRef(self.thread_id, self.run_id)
 
+    @property
+    def message(self) -> str:
+        """返回执行器输入；内部 Goal input 不伪装成用户 Transcript。"""
+        if isinstance(self.input, UserRunInput):
+            return self.input.message
+        if isinstance(self.input, GoalProposalRunInput):
+            return f"Prepare goal proposal for request {self.input.request_id}"
+        return (
+            "Continue working toward the accepted goal "
+            f"{self.input.goal_id} revision {self.input.goal_revision}."
+        )
+
+    @property
+    def requested_skill(self) -> RequestedSkill | None:
+        """只有普通用户 input 可以显式请求 Skill。"""
+        return self.input.requested_skill if isinstance(self.input, UserRunInput) else None
+
     def fingerprint(self) -> tuple[object, ...]:
         """返回幂等判断所需的请求指纹；工作模式冻结在 Run 身份内。"""
         skill = self.requested_skill
+        if isinstance(self.input, UserRunInput):
+            input_fingerprint: tuple[object, ...] = ("user", self.input.message)
+        elif isinstance(self.input, GoalProposalRunInput):
+            input_fingerprint = ("goal_proposal", self.input.request_id)
+        else:
+            input_fingerprint = (
+                "goal_continuation",
+                self.input.goal_id,
+                self.input.goal_revision,
+                self.input.reason,
+            )
         return (
             self.thread_id,
             self.run_id,
-            self.message,
+            *input_fingerprint,
             self.mode,
             skill.skill_id if skill else None,
             skill.args if skill else None,
@@ -302,6 +360,7 @@ class RunPreparation:
     skill_registry: Any | None = None
     requested_skill: LoadedSkill | None = None
     context_snapshot: RunContextSnapshot | None = None
+    goal_binding: GoalRunBinding | None = None
     idle_duration_ms: int | None = None
     # 仅携带当前 Run 实际绑定的安全目录身份；受理日志由 Coordinator 统一投影。
     catalog_skill_ids: tuple[str, ...] = ()
@@ -444,6 +503,7 @@ class RunState:
     root_execution: AgentExecutionBinding | None = None
     message: str = ""
     status: str = "accepted"
+    goal_terminal_reconciled: bool = False
     sequence: int = 0
     usage: dict[str, int] = field(
         default_factory=lambda: {"input_tokens": 0, "output_tokens": 0}
@@ -551,7 +611,8 @@ class _CoordinatorLifecyclePort:
     """把 RunCoordinator 的受控能力暴露给 execution adapter 的最小 port。
 
     adapter 只能发非终态事件、请求 Interaction、刷新 Transcript、读取取消
-    状态与解析 Runtime；sequence 分配、终态和资源释放仍只属于 coordinator。
+    状态与解析 Runtime；无 Runtime 的内部 Run 可请求提前释放 preparation
+    snapshot，sequence、终态和实际资源释放仍只属于 coordinator。
     """
 
     _TERMINAL_EVENTS = frozenset({RUN_COMPLETED, RUN_CANCELLED, RUN_FAILED})
@@ -611,6 +672,10 @@ class _CoordinatorLifecyclePort:
             if self.is_cancelled(run):
                 raise asyncio.CancelledError from exc
             raise RunError("EXECUTION_START_FAILED", str(exc)) from exc
+
+    async def release_preparation_snapshot(self, run: RunState) -> None:
+        """让不获取 AgentEngine 的内部 Run 结束 snapshot 临界区。"""
+        await self._coordinator._release_snapshot_reservation(run.preparation)
 
     def append_transcript(self, run: RunState, record: TranscriptAppend) -> None:
         """校验归属后把可见记录加入 Coordinator 管理的待写队列。"""
@@ -751,6 +816,10 @@ class RunCoordinator:
         compose_services_provider: (
             Callable[[RunState], Awaitable[Any | None]] | None
         ) = None,
+        goal_services_provider: Callable[[RunState], Awaitable[Any]] | None = None,
+        goal_terminal_reconciler: (
+            Callable[[RunState, RunLifecyclePort], Awaitable[None]] | None
+        ) = None,
         diagnostic_log: DiagnosticLog | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -771,6 +840,8 @@ class RunCoordinator:
             "build": BuildRunAdapter(),
         }
         self._compose_services_provider = compose_services_provider
+        self._goal_services_provider = goal_services_provider
+        self._goal_terminal_reconciler = goal_terminal_reconciler
         self._diagnostic_log = ensure_log(diagnostic_log)
         self._clock = clock
         self._lifecycle_port = _CoordinatorLifecyclePort(self)
@@ -966,6 +1037,7 @@ class RunCoordinator:
                             binding=binding,
                             context_snapshot=preparation.context_snapshot,
                             mode=run_thread_mode,
+                            record_user_message=isinstance(command.input, UserRunInput),
                         )
                     )
                 except ThreadPersistenceError as exc:
@@ -1196,7 +1268,9 @@ class RunCoordinator:
         self._child_interactions.cancel_run(run.ref.run_id)
         self._discard_staged_approval_rules(run)
         if run.completion is None:
-            self._finish(run, "cancelled", {"reason": "Cancelled by client"})
+            await self._finish_after_goal_reconcile(
+                run, "cancelled", {"reason": "Cancelled by client"}
+            )
         await self._settle_root_execution(run)
         await self._release_runtime(run)
         async with self._lock:
@@ -1206,6 +1280,12 @@ class RunCoordinator:
 
     async def _adapter_for(self, run: RunState) -> RunExecutionAdapter:
         """返回 Run 对应的执行 adapter；Compose 依赖按 Run 上下文组装。"""
+        if isinstance(run.start.input, GoalProposalRunInput):
+            if self._goal_services_provider is None:
+                raise RunError("GOAL_STORE_UNAVAILABLE")
+            from harness_agent.host.goal_proposal import GoalProposalRunAdapter
+
+            return GoalProposalRunAdapter(self._goal_services_provider)
         if run.start.mode == "direct_shell":
             existing = self._execution_adapters.get(run.start.mode)
             if existing is not None:
@@ -1227,7 +1307,9 @@ class RunCoordinator:
     async def _execute(self, run: RunState) -> None:
         try:
             if run.cancel_requested or run.cancellation_token.cancelled:
-                self._finish(run, "cancelled", {"reason": "Cancelled by client"})
+                await self._finish_after_goal_reconcile(
+                    run, "cancelled", {"reason": "Cancelled by client"}
+                )
                 return
 
             # Build / Compose 的 root running 迁移属于 ManagedAgentExecutor。
@@ -1238,7 +1320,9 @@ class RunCoordinator:
                     await self._execution_registry.start(run.root_execution_ref)
                 except ExecutionRegistryError:
                     if run.cancel_requested or run.cancellation_token.cancelled:
-                        self._finish(run, "cancelled", {"reason": "Cancelled by client"})
+                        await self._finish_after_goal_reconcile(
+                            run, "cancelled", {"reason": "Cancelled by client"}
+                        )
                         return
                     raise
 
@@ -1253,7 +1337,7 @@ class RunCoordinator:
             else:
                 outcome = await adapter.execute(run, self._lifecycle_port)
             if outcome is None or outcome.status == "completed":
-                self._finish(
+                await self._finish_after_goal_reconcile(
                     run,
                     "completed",
                     {
@@ -1264,13 +1348,13 @@ class RunCoordinator:
                     },
                 )
             elif outcome.status == "cancelled":
-                self._finish(
+                await self._finish_after_goal_reconcile(
                     run,
                     "cancelled",
                     {"reason": outcome.message or "Cancelled"},
                 )
             else:
-                self._finish(
+                await self._finish_after_goal_reconcile(
                     run,
                     "failed",
                     {
@@ -1282,9 +1366,11 @@ class RunCoordinator:
                     },
                 )
         except asyncio.CancelledError:
-            self._finish(run, "cancelled", {"reason": "Cancelled by client"})
+            await self._finish_after_goal_reconcile(
+                run, "cancelled", {"reason": "Cancelled by client"}
+            )
         except AgentEnginePoolCapacityError as exc:
-            self._finish(
+            await self._finish_after_goal_reconcile(
                 run,
                 "failed",
                 {
@@ -1297,7 +1383,7 @@ class RunCoordinator:
             )
         except RunError as exc:
             # 执行路径的领域错误使用稳定错误码收敛，不让模型文本充当终态码。
-            self._finish(
+            await self._finish_after_goal_reconcile(
                 run,
                 "failed",
                 {
@@ -1310,7 +1396,7 @@ class RunCoordinator:
             )
         except Exception as exc:
             logger.exception("Agent run failed: %s", run.ref.run_id)
-            self._finish(
+            await self._finish_after_goal_reconcile(
                 run,
                 "failed",
                 {
@@ -1349,6 +1435,25 @@ class RunCoordinator:
                 if self._runs.get(run.ref.thread_id) is run:
                     self._runs.pop(run.ref.thread_id, None)
             run.events.put_nowait(None)
+
+    async def _finish_after_goal_reconcile(
+        self,
+        run: RunState,
+        status: str,
+        payload: dict[str, object],
+    ) -> None:
+        """在唯一终态事件前应用一个 queued Goal write。"""
+        if run.completion is not None:
+            return
+        if self._goal_terminal_reconciler is not None and not run.goal_terminal_reconciled:
+            run.goal_terminal_reconciled = True
+            await self._goal_terminal_reconciler(run, self._lifecycle_port)
+        if status == "completed":
+            payload = {
+                **payload,
+                "context": dict(run.context_summary),
+            }
+        self._finish(run, status, payload)
 
     async def _release_runtime(self, run: RunState) -> None:
         runtime, run.runtime = run.runtime, None

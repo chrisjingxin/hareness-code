@@ -766,10 +766,13 @@ async def test_explicit_skill_run_emits_loaded_event_before_content(tmp_path: Pa
             "method": "run.start",
             "params": {
                 "mode": "build",
-                "message": "检查变更",
+                "input": {
+                    "kind": "user",
+                    "message": "检查变更",
+                    "requested_skill": {"id": "project/review", "args": "检查变更"},
+                },
                 "thread_id": "thread",
                 "run_id": "run",
-                "requested_skill": {"id": "project/review", "args": "检查变更"},
             },
             "id": "start",
         }
@@ -798,7 +801,7 @@ async def test_next_run_preparation_uses_new_skill_snapshot_without_crossing_act
     tmp_path: Path,
 ):
     """同一 Thread 的活动准备保留旧正文，后续顶层 Run 取得新 catalog。"""
-    from harness_agent.host.run_coordinator import RequestedSkill, StartRun
+    from harness_agent.host.run_coordinator import RequestedSkill, StartRun, UserRunInput
     from harness_agent.host.agent_host import AgentHost
 
     workspace = tmp_path / "workspace"
@@ -812,8 +815,7 @@ async def test_next_run_preparation_uses_new_skill_snapshot_without_crossing_act
         StartRun(mode="build", 
             thread_id="same-thread",
             run_id="run-old",
-            message="检查",
-            requested_skill=RequestedSkill("project/review", "旧参数"),
+            input=UserRunInput(message="检查", requested_skill=RequestedSkill("project/review", "旧参数")),
         ),
         None,
     )
@@ -822,8 +824,7 @@ async def test_next_run_preparation_uses_new_skill_snapshot_without_crossing_act
         StartRun(mode="build", 
             thread_id="same-thread",
             run_id="run-new",
-            message="检查",
-            requested_skill=RequestedSkill("project/review", "新参数"),
+            input=UserRunInput(message="检查", requested_skill=RequestedSkill("project/review", "新参数")),
         ),
         None,
     )
@@ -852,6 +853,7 @@ async def test_active_run_keeps_old_skill_preparation_until_next_same_thread_run
         RequestedSkill,
         RunRuntime,
         StartRun,
+        UserRunInput,
     )
     from harness_agent.host.agent_host import AgentHost
 
@@ -894,8 +896,7 @@ async def test_active_run_keeps_old_skill_preparation_until_next_same_thread_run
         StartRun(mode="build", 
             thread_id="active-thread",
             run_id="run-old",
-            message="旧请求",
-            requested_skill=RequestedSkill("project/review"),
+            input=UserRunInput(message="旧请求", requested_skill=RequestedSkill("project/review")),
         ),
         ConnectionRef("test-owner"),
     )
@@ -914,8 +915,7 @@ async def test_active_run_keeps_old_skill_preparation_until_next_same_thread_run
         StartRun(mode="build", 
             thread_id="active-thread",
             run_id="run-new",
-            message="新请求",
-            requested_skill=RequestedSkill("project/review"),
+            input=UserRunInput(message="新请求", requested_skill=RequestedSkill("project/review")),
         ),
         ConnectionRef("test-owner"),
     )

@@ -1003,10 +1003,11 @@ function createMockClient() {
         continue
       }
       if (request.method !== "run.start") continue
-      const message = typeof request.params?.message === "string" ? request.params.message : ""
+      const input = request.params?.input
+      const message = input && typeof input === "object" && input.kind === "user" && typeof input.message === "string" ? input.message : ""
       const threadId = typeof request.params?.thread_id === "string" ? request.params.thread_id : "thread-1"
       const runId = typeof request.params?.run_id === "string" ? request.params.run_id : "run-1"
-      const requestedSkill = request.params?.requested_skill
+      const requestedSkill = input && typeof input === "object" ? input.requested_skill : undefined
       requests.push({
         message,
         threadId,

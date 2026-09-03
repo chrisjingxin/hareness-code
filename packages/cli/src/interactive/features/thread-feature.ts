@@ -3,6 +3,7 @@
 import type { IntentOutcome } from "../ports"
 import {
   appendNotice,
+  applyGoalSnapshot,
   applyThreadMode,
   applyWorkItem,
   clearThread,
@@ -26,6 +27,9 @@ function threadOpenResult(value: unknown): {
   composeActivities: RestoredComposeActivity[]
   threadMode: unknown
   workItem: unknown
+  goal: unknown
+  goalPending: unknown
+  goalActivities: unknown
 } {
   const record = value as Record<string, unknown>
   const thread = record.thread
@@ -89,6 +93,9 @@ function threadOpenResult(value: unknown): {
     composeActivities,
     threadMode: record.thread_mode ?? null,
     workItem: null,
+    goal: record.goal ?? null,
+    goalPending: record.goal_pending ?? null,
+    goalActivities: Array.isArray(record.goal_activities) ? record.goal_activities : [],
   }
 }
 
@@ -131,7 +138,12 @@ export class ThreadFeature {
           opened.threadMode === "build" || opened.threadMode === "compose" ? opened.threadMode : null,
         )
         const withMode = applyThreadMode(restored, opened.threadMode)
-        return opened.workItem != null ? applyWorkItem(withMode, opened.workItem) : withMode
+        const withWorkItem = opened.workItem != null ? applyWorkItem(withMode, opened.workItem) : withMode
+        return applyGoalSnapshot(withWorkItem, {
+          goal: opened.goal as any,
+          pending: opened.goalPending as any,
+          activities: opened.goalActivities as any,
+        })
       })
       options.onSuccess?.()
       return { status: "accepted" }
@@ -162,13 +174,17 @@ export class ThreadFeature {
       const opened = threadOpenResult(await ctx.gateway.openThread(initialThreadId))
       if (currentEpoch !== this.threadEpoch) return
       this.openingThread = false
-      ctx.commit(current => restoreThread(
+      ctx.commit(current => applyGoalSnapshot(restoreThread(
         opened.threadId,
         opened.messages,
         current.workMode,
         opened.composeActivities,
         opened.threadMode === "build" || opened.threadMode === "compose" ? opened.threadMode : null,
-      ))
+      ), {
+        goal: opened.goal as any,
+        pending: opened.goalPending as any,
+        activities: opened.goalActivities as any,
+      }))
       options.onSuccess?.()
     } catch {
       if (currentEpoch === this.threadEpoch) {

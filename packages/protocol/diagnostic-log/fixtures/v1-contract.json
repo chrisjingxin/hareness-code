@@ -3341,6 +3341,202 @@
       "schema_version": 1,
       "timestamp_ms": 1,
       "level": "info",
+      "event": "goal.proposal.model.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "response_mode": "forced_tool_schema",
+        "readiness": "ready",
+        "assumption_count": 1,
+        "criterion_count": 1,
+        "question_count": 1,
+        "repository_calls": 1,
+        "repository_result_chars": 1,
+        "repository_limited_results": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "goal.proposal.model.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "response_mode": "forced_tool_schema",
+        "readiness": "ready",
+        "assumption_count": 1,
+        "criterion_count": 1,
+        "question_count": 1,
+        "repository_calls": 1,
+        "repository_result_chars": 1,
+        "repository_limited_results": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "goal.proposal.model.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "response_mode": "forced_tool_schema",
+        "readiness": "ready",
+        "assumption_count": 1,
+        "criterion_count": 1,
+        "question_count": 1,
+        "repository_calls": 1,
+        "repository_result_chars": 1,
+        "repository_limited_results": 1,
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
+      "event": "goal.proposal.model.completed",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "readiness": "ready",
+        "assumption_count": 1,
+        "criterion_count": 1,
+        "question_count": 1,
+        "repository_calls": 1,
+        "repository_result_chars": 1,
+        "repository_limited_results": 1
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "goal.proposal.model.invalid",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "response_mode": "forced_tool_schema",
+        "error_code": "x",
+        "repository_calls": 1,
+        "repository_result_chars": 1,
+        "repository_limited_results": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "debug",
+      "event": "goal.proposal.model.invalid",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "response_mode": "forced_tool_schema",
+        "error_code": "x",
+        "repository_calls": 1,
+        "repository_result_chars": 1,
+        "repository_limited_results": 1
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "goal.proposal.model.invalid",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "response_mode": "forced_tool_schema",
+        "error_code": "x",
+        "repository_calls": 1,
+        "repository_result_chars": 1,
+        "repository_limited_results": 1,
+        "__extra": true
+      }
+    }
+  },
+  {
+    "valid": false,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "warn",
+      "event": "goal.proposal.model.invalid",
+      "component": "cli",
+      "process": {
+        "pid": 1,
+        "started_at_ms": 1,
+        "record_sequence": 1
+      },
+      "project_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fields": {
+        "error_code": "x",
+        "repository_calls": 1,
+        "repository_result_chars": 1,
+        "repository_limited_results": 1
+      }
+    }
+  },
+  {
+    "valid": true,
+    "value": {
+      "schema_version": 1,
+      "timestamp_ms": 1,
+      "level": "info",
       "event": "interaction.started",
       "component": "cli",
       "process": {

@@ -7,6 +7,11 @@ import {
   type ConfigChange,
   type ContextCompactResult,
   type EventEnvelope,
+  type GoalInspectResult,
+  type GoalMutateParams,
+  type GoalMutateResult,
+  type GoalRequestParams,
+  type GoalRequestResult,
   type InteractionMode,
   type InteractionRequestEnvelope,
   type InteractionResponse,
@@ -15,7 +20,7 @@ import {
   type McpRemoveResult,
   type McpStatusResult,
   type ModelsListResult,
-  type RequestedSkill,
+  type RunInput,
   type RunCancelResult,
   type SkillsListResult,
   type SkillsSetEnabledResult,
@@ -58,11 +63,10 @@ export type InteractiveRunCompletion =
 
 /** 启动一次 Run 的输入参数类型；纯 TypeScript 描述，不依赖特定 IPC client。 */
 export type AgentGatewayStartRunInput = {
-  readonly message: string
+  readonly input: RunInput
   readonly mode: InteractionMode
   readonly threadId?: string
   readonly runId?: string
-  readonly requestedSkill?: RequestedSkill
   readonly modelSelection?: ThreadModelSelection
   readonly approvalMode?: ApprovalMode
 }
@@ -105,6 +109,9 @@ export interface AgentGateway {
   commitConfig(expectedRevision: string, changes: ConfigChange[]): Promise<{ revision: string; changes: readonly unknown[]; applies_to: readonly string[] }>
   listThreads(): Promise<ThreadsListResult>
   openThread(threadId: string): Promise<ThreadsOpenResult>
+  inspectGoal(threadId: string): Promise<GoalInspectResult>
+  requestGoal(params: GoalRequestParams): Promise<GoalRequestResult>
+  mutateGoal(params: GoalMutateParams): Promise<GoalMutateResult>
   listTurns(threadId: string): Promise<ThreadsListTurnsResult>
   undo(params: ThreadsUndoParams): Promise<ThreadsUndoResult>
   redo(params: ThreadsRedoParams): Promise<ThreadsRedoResult>
@@ -152,8 +159,32 @@ export function createFallbackNoopGateway(): AgentGateway {
         thread: { thread_id: id, created_at_ms: 0, updated_at_ms: 0, first_message: "", latest_message: "", message_count: 0 },
         messages: [],
         plan: { has_plan: false, plan_markdown: "", plan_virtual_path: "/.harness/plan.md" as const, plan_display_path: `~/.harness/plans/${id}.md` },
+        goal: null,
+        goal_pending: null,
+        goal_activities: [],
       }
     },
+    async inspectGoal() { return { goal: null, pending: null, latest_evaluation: null } },
+    async requestGoal(params) {
+      return {
+        disposition: "ready",
+        pending: {
+          request_id: params.request_id,
+          kind: params.kind,
+          status: "ready",
+          base_goal_id: params.expected_goal_id,
+          base_revision: params.expected_revision,
+          input_text: params.input_text,
+          proposed_objective: null,
+          proposed_assumptions: [],
+          proposed_criteria: [],
+          created_at_ms: 0,
+          updated_at_ms: 0,
+          error_code: null,
+        },
+      }
+    },
+    async mutateGoal() { return { disposition: "applied", goal: null, pending: null, continuation: null } },
     async listTurns() { return { turns: [], active_turn_id: "", reverted_turn_id: undefined } },
     async undo(params) { return { success: true, reverted_turn_id: params.target_turn_id, restored_files_count: 0, message: "" } },
     async redo() { return { success: true, restored_to_turn_id: "", restored_files_count: 0, message: "" } },

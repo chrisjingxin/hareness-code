@@ -61,8 +61,79 @@ export function InteractionForm(props: {
           ? <DirectoryTrustForm interaction={interaction} dispatch={props.dispatch} disabled={props.disabled === true} />
           : interaction.type === "plan"
             ? <PlanForm interaction={interaction} dispatch={props.dispatch} disabled={props.disabled === true} />
-          : <QuestionForm interaction={interaction} snapshot={props.snapshot} dispatch={props.dispatch} disabled={props.disabled === true} />}
+          : interaction.type === "goal"
+            ? <GoalForm interaction={interaction} dispatch={props.dispatch} disabled={props.disabled === true} />
+            : <QuestionForm interaction={interaction} snapshot={props.snapshot} dispatch={props.dispatch} disabled={props.disabled === true} />}
     </section>
+  )
+}
+
+/** Goal 审核表单：验收标准可编辑，也可携带反馈驳回并在同一 Run 重拟。 */
+function GoalForm(props: {
+  interaction: Extract<InteractiveInteraction, { type: "goal" }>
+  dispatch: (intent: WebIntent) => void | Promise<void>
+  disabled: boolean
+}): React.ReactElement {
+  const { interaction, dispatch, disabled } = props
+  const [mode, setMode] = useState<"idle" | "criteria" | "feedback">("idle")
+  const [criteriaText, setCriteriaText] = useState(interaction.criteria.join("\n"))
+  const [feedback, setFeedback] = useState("")
+  const [submitting, setSubmitting] = useState(false)
+  const criteria = criteriaText.split("\n").map(item => item.trim()).filter(Boolean)
+  const decisions = interaction.decisions ?? ["accepted", "edited", "rejected", "cancelled"]
+  const submit = async (response: import("../../interactive/types").InteractiveResponse) => {
+    setSubmitting(true)
+    try {
+      await dispatch({ type: "interaction-submit", requestId: interaction.requestId, response })
+    } finally {
+      setSubmitting(false)
+    }
+  }
+  if (interaction.readOnly) {
+    return (
+      <div className="approval-form goal-form">
+        <header className="interaction-header"><h3 className="interaction-title">目标详情</h3></header>
+        <p className="interaction-description">{interaction.objective}</p>
+        <p>{interaction.status ?? "准备中"}{interaction.revision ? ` · r${interaction.revision}` : ""}</p>
+        {interaction.assumptions.length > 0 ? <p>假设：{interaction.assumptions.join("；")}</p> : null}
+        <ul aria-label="目标验收标准">{interaction.criteria.map(item => <li key={item}>{item}</li>)}</ul>
+        {interaction.graderLabel ? <p>验收模型：{interaction.graderLabel} · 最多 {interaction.maxIterations} 次</p> : null}
+        {interaction.pendingStatus ? <p>待处理：{interaction.pendingStatus}</p> : null}
+        <div className="interaction-actions">
+          <button type="button" className="interaction-submit" onClick={() => { void dispatch({ type: "goal-view-close" }) }}>关闭</button>
+        </div>
+      </div>
+    )
+  }
+  return (
+    <div className="approval-form goal-form">
+      <header className="interaction-header"><h3 className="interaction-title">审核目标</h3></header>
+      <p className="interaction-description">{interaction.objective}</p>
+      {interaction.assumptions.length > 0 ? <p>假设：{interaction.assumptions.join("；")}</p> : null}
+      {mode === "criteria" ? (
+        <label className="interaction-feedback">
+          <span className="interaction-feedback-label">验收标准（每行一条）</span>
+          <textarea aria-label="目标验收标准" rows={Math.max(3, criteria.length)} value={criteriaText} disabled={disabled || submitting} onInput={event => setCriteriaText(event.currentTarget.value)} />
+        </label>
+      ) : mode === "feedback" ? (
+        <label className="interaction-feedback">
+          <span className="interaction-feedback-label">目标修改反馈</span>
+          <textarea aria-label="目标修改反馈" rows={3} value={feedback} disabled={disabled || submitting} onInput={event => setFeedback(event.currentTarget.value)} />
+        </label>
+      ) : <ul aria-label="目标验收标准">{interaction.criteria.map(item => <li key={item}>{item}</li>)}</ul>}
+      <div className="interaction-actions">
+        {decisions.includes("cancelled") ? <button type="button" disabled={disabled || submitting} onClick={() => { void submit({ kind: "goal", decision: "cancelled" }) }}>取消</button> : null}
+        {mode !== "feedback" && decisions.includes("edited") ? <button type="button" disabled={disabled || submitting} onClick={() => setMode(value => value === "criteria" ? "idle" : "criteria")}>{mode === "criteria" ? "恢复原稿" : "编辑标准"}</button> : null}
+        {mode !== "criteria" && decisions.includes("rejected") ? <button type="button" disabled={disabled || submitting} onClick={() => setMode(value => value === "feedback" ? "idle" : "feedback")}>{mode === "feedback" ? "返回审核" : "驳回并反馈"}</button> : null}
+        {mode === "feedback" ? (
+          <button type="button" className="interaction-submit" disabled={disabled || submitting || !feedback.trim()} onClick={() => { void submit({ kind: "goal", decision: "rejected", feedback: feedback.trim() }) }}>提交反馈并重拟</button>
+        ) : decisions.includes("accepted") ? (
+          <button type="button" className="interaction-submit" disabled={disabled || submitting || (mode === "criteria" && criteria.length === 0)} onClick={() => { void submit(mode === "criteria" ? { kind: "goal", decision: "edited", criteria } : { kind: "goal", decision: "accepted" }) }}>
+            <Check size={16} aria-hidden="true" />{mode === "criteria" ? "保存并接受" : "接受并开始"}
+          </button>
+        ) : null}
+      </div>
+    </div>
   )
 }
 

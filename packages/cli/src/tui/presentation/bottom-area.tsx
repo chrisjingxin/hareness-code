@@ -2,7 +2,7 @@
 
 import type { TextareaRenderable } from "@opentui/core"
 import { useKeyboard } from "@opentui/react"
-import { useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 
 import type { InteractiveSnapshot } from "../../interactive/types"
 import {
@@ -31,7 +31,7 @@ import { resolveLanguageForPath } from "../../presentation-shared/language-catal
 import { getCommonSyntaxClient } from "../platform/syntax-parsers"
 import { SUBMIT_ON_ENTER_KEY_BINDINGS } from "./input-bar"
 import { modeAccent, markdownSyntax, tuiTheme } from "./theme"
-import type { ApprovalDecision, DirectoryTrustDecision, PlanDecision } from "../../interactive/types"
+import type { ApprovalDecision, DirectoryTrustDecision, GoalReviewResponse, PlanDecision } from "../../interactive/types"
 
 function tuiDiffViewForWidth(contentWidth: number): "split" | "unified" {
   return contentWidth >= 120 ? "split" : "unified"
@@ -49,15 +49,110 @@ function directoryTrustDockTitle(interaction: Extract<InteractiveSnapshot["inter
     : "目录信任"
 }
 
-export type BottomAreaKind = "input" | "approval" | "directory_trust" | "question" | "plan"
+export type BottomAreaKind = "input" | "approval" | "directory_trust" | "question" | "plan" | "goal"
 
 /** 底部同时只出现一个可聚焦面。所有 ask_user 提问都走问答 Dock，不再把文本题藏进输入栏。 */
 export function bottomAreaKind(interaction: InteractiveSnapshot["interaction"]): BottomAreaKind {
   if (interaction?.type === "approval") return "approval"
   if (interaction?.type === "directory_trust") return "directory_trust"
   if (interaction?.type === "plan") return "plan"
+  if (interaction?.type === "goal") return "goal"
   if (interaction?.type === "question") return "question"
   return "input"
+}
+
+/** Goal 审核的 Esc 语义：先退出编辑，再取消整张草案。 */
+export function goalEscapeAction(editing: boolean): "exit-edit" | "cancel" {
+  return editing ? "exit-edit" : "cancel"
+}
+
+/** Goal 只读面板的稳定文本投影，供 TUI 渲染与测试共用。 */
+export function goalDetailLines(interaction: Extract<InteractiveSnapshot["interaction"], { type: "goal" }>): string[] {
+  const lines = [`${interaction.status ?? "准备中"}${interaction.revision ? ` · r${interaction.revision}` : ""}`]
+  if (interaction.note) lines.push(`备注：${interaction.note}`)
+  if (interaction.priorBlocker) lines.push(`上一阻塞：${interaction.priorBlocker}`)
+  if (interaction.pendingStatus) {
+    lines.push(`待处理：${interaction.pendingStatus}${interaction.pendingInput ? ` · ${interaction.pendingInput}` : ""}`)
+  }
+  for (const activity of interaction.activities ?? []) lines.push(`最近活动：${activity.summary}`)
+  return lines
+}
+
+/** Goal 审核 Dock：接受、逐行编辑验收标准、带反馈驳回或取消。 */
+export function GoalDock(props: {
+  interaction: Extract<InteractiveSnapshot["interaction"], { type: "goal" }>
+  workMode: InteractiveSnapshot["workMode"]
+  onGoal: (response: GoalReviewResponse) => void
+  onClose: () => void
+}) {
+  const accent = modeAccent(props.workMode)
+  const [editMode, setEditMode] = useState<"criteria" | "feedback" | null>(null)
+  const editorRef = useRef<TextareaRenderable | null>(null)
+  useEffect(() => {
+    if (editMode === "criteria") editorRef.current?.setText(props.interaction.criteria.join("\n"))
+    if (editMode === "feedback") editorRef.current?.setText("")
+  }, [editMode, props.interaction.criteria])
+  useKeyboard(key => {
+    if (key.name !== "escape") return
+    key.preventDefault()
+    if (props.interaction.readOnly) {
+      props.onClose()
+      return
+    }
+    if (goalEscapeAction(editMode !== null) === "exit-edit") setEditMode(null)
+    else props.onGoal({ decision: "cancelled" })
+  })
+  const options = [
+    { name: "接受并开始", description: "保存目标并自动开始工作", value: "accepted" },
+    { name: "编辑验收标准", description: "每行一条，确认后保存并开始", value: "edited" },
+    { name: "驳回并反馈", description: "填写修改意见后在本次运行中重新生成", value: "rejected" },
+    { name: "取消", description: "放弃这次目标草案", value: "cancelled" },
+  ].filter(option => props.interaction.decisions.includes(option.value as "accepted" | "edited" | "rejected" | "cancelled"))
+  return (
+    <box flexShrink={0} marginLeft={2} marginRight={2} marginBottom={1} backgroundColor={tuiTheme.surfaceElevated} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1} flexDirection="column">
+      <text fg={accent}>{props.interaction.readOnly ? "目标详情" : "审核目标"}</text>
+      <text content={props.interaction.objective} fg={tuiTheme.text} />
+      {props.interaction.assumptions.length ? <text content={`假设：${props.interaction.assumptions.join("；")}`} fg={tuiTheme.muted} /> : null}
+      {props.interaction.readOnly ? (
+        <>
+          {goalDetailLines(props.interaction).map((line, index) => <text key={`${index}-${line}`} content={line} fg={tuiTheme.muted} />)}
+          {props.interaction.criteria.map((criterion, index) => <text key={`${index}-${criterion}`} content={`${index + 1}. ${criterion}`} fg={tuiTheme.muted} />)}
+          {props.interaction.graderLabel ? <text content={`验收模型：${props.interaction.graderLabel} · 最多 ${props.interaction.maxIterations} 次`} fg={tuiTheme.muted} /> : null}
+          <select focused height={2} options={[{ name: "关闭", description: "返回对话", value: "close" }]} onSelect={() => props.onClose()} />
+        </>
+      ) : editMode ? (
+        <>
+          <textarea
+            ref={editorRef}
+            focused
+            placeholder={editMode === "criteria" ? "每行一条验收标准" : "说明需要怎样修改目标"}
+            minHeight={3}
+            maxHeight={8}
+            keyBindings={SUBMIT_ON_ENTER_KEY_BINDINGS}
+            onSubmit={() => {
+              const value = editorRef.current?.plainText.trim() ?? ""
+              if (!value) return
+              if (editMode === "criteria") {
+                props.onGoal({ decision: "edited", criteria: value.split("\n").map(item => item.trim()).filter(Boolean) })
+              } else {
+                props.onGoal({ decision: "rejected", feedback: value })
+              }
+            }}
+          />
+          <text fg={tuiTheme.muted}>{editMode === "criteria" ? "每行一条 · Enter 保存并开始" : "Enter 提交反馈并重拟"}</text>
+        </>
+      ) : (
+        <>
+          {props.interaction.criteria.map((criterion, index) => <text key={`${index}-${criterion}`} content={`${index + 1}. ${criterion}`} fg={tuiTheme.muted} />)}
+          <select focused height={Math.max(2, options.length * 2)} showDescription options={options} onSelect={(_, option) => {
+            if (option?.value === "edited") setEditMode("criteria")
+            else if (option?.value === "rejected") setEditMode("feedback")
+            else if (option?.value === "accepted" || option?.value === "cancelled") props.onGoal({ decision: option.value })
+          }} />
+        </>
+      )}
+    </box>
+  )
 }
 
 /** 审批 Dock：选项与文件 Diff 预览，焦点在底部。 */

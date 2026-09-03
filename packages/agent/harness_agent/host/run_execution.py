@@ -110,7 +110,8 @@ class RunLifecyclePort(Protocol):
 
     adapter 只能：发非终态 typed signal、请求 Interaction、刷新 Transcript、
     读取取消状态、解析 Runtime，并把 root execution start 交给 Managed
-    executor 的 callback。终态、sequence 和资源释放不在 adapter 接口内。
+    executor 的 callback。无 Runtime 的内部 Run 可请求提前释放 preparation
+    snapshot；终态、sequence 和实际资源释放仍由 Coordinator 执行。
     """
 
     def emit(
@@ -130,6 +131,8 @@ class RunLifecyclePort(Protocol):
     def mark_running(self, run: RunState) -> None: ...
 
     async def start_execution(self, run: RunState) -> None: ...
+
+    async def release_preparation_snapshot(self, run: RunState) -> None: ...
 
     def append_transcript(self, run: RunState, record: TranscriptAppend) -> None: ...
 

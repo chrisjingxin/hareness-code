@@ -1,8 +1,8 @@
 /** Run Feature：管理 Run 的启动、取消、底层 Agent 订阅句柄与终态清理。 */
 
-import { EventType, type ApprovalMode, type InteractionMode, type ModelProfile, type RequestedSkill } from "@za38/protocol"
+import { EventType, type ApprovalMode, type InteractionMode, type ModelProfile, type RequestedSkill, type RunInput } from "@za38/protocol"
 import type { IntentOutcome, InteractiveAgentRun, SkillSummary } from "../ports"
-import { markCancelling, markRunFailed, startRun as startRunState } from "../state"
+import { markCancelling, markRunFailed, startInternalRun, startRun as startRunState } from "../state"
 import { nextApprovalMode, type InteractiveApprovalMode } from "../runtime"
 import type { FeatureContext } from "./types"
 
@@ -132,8 +132,33 @@ export class RunFeature {
       requestedSkill?: RequestedSkill
       displayPrompt?: string
       onEvent: (event: any) => void
-      onRunFinish: (actualModel?: ModelProfile) => void
+      onRunFinish: (actualModel?: ModelProfile, context?: Record<string, unknown>, outcome?: "completed" | "cancelled" | "failed") => void
       onAbandonInteraction: () => void
+    },
+  ): Promise<IntentOutcome> {
+    let requestedSkill: RequestedSkill | undefined
+    if (options.requestedSkill) requestedSkill = options.requestedSkill
+    else if (options.armedSkill) requestedSkill = { id: options.armedSkill.id, args: value }
+    return this.startTypedRun(
+      { kind: "user", message: value, requested_skill: requestedSkill },
+      ctx,
+      options,
+    )
+  }
+
+  async startTypedRun(
+    input: RunInput,
+    ctx: FeatureContext,
+    options: {
+      mode: InteractionMode
+      requestedModelProfileId: string | null
+      runId?: string
+      displayPrompt?: string
+      onEvent: (event: any) => void
+      onRunFinish: (actualModel?: ModelProfile, context?: Record<string, unknown>, outcome?: "completed" | "cancelled" | "failed") => void
+      onAbandonInteraction: () => void
+      armedSkill?: SkillSummary
+      requestedSkill?: RequestedSkill
     },
   ): Promise<IntentOutcome> {
     if (ctx.getState().activeRun) {
@@ -141,33 +166,30 @@ export class RunFeature {
     }
 
     const currentThreadId = ctx.getState().currentThreadId
-    let requestedSkill: RequestedSkill | undefined
-    if (options.requestedSkill) {
-      requestedSkill = options.requestedSkill
-    } else if (options.armedSkill) {
-      requestedSkill = { id: options.armedSkill.id, args: value }
-    }
 
     try {
       const startedAtMs = ctx.clock.now()
       const run = ctx.gateway.startRun({
-        message: value,
+        input,
         mode: options.mode,
         threadId: currentThreadId ?? undefined,
-        requestedSkill,
+        runId: options.runId,
         modelSelection: options.requestedModelProfileId ? { primary_profile: options.requestedModelProfileId } : undefined,
         approvalMode: this.currentApprovalMode(ctx.baseRuntime.approvalMode),
       })
 
       this.activeRunHandle = run
-      ctx.commit(current => startRunState(current, run.ref, options.displayPrompt ?? value, startedAtMs))
+      const localDisplayPrompt = options.displayPrompt ?? (input.kind === "user" ? input.message : undefined)
+      ctx.commit(current => localDisplayPrompt !== undefined
+        ? startRunState(current, run.ref, localDisplayPrompt, startedAtMs)
+        : startInternalRun(current, run.ref))
 
       // accepted 被拒绝：当前 Run 立即收敛为 failed，不残留 activeRun。
       void run.accepted.catch(error => {
         if (this.activeRunHandle?.ref.runId !== run.ref.runId) return
         this.activeRunHandle = null
         ctx.commit(current => markRunFailed(current, run.ref.runId, errorMessage(error)))
-        options.onRunFinish()
+        options.onRunFinish(undefined, undefined, "failed")
       })
 
       // 消费事件流；终态事件经 applyAgentEvent 收敛 activeRun，事件流随之自然结束。
@@ -189,21 +211,25 @@ export class RunFeature {
           if (active?.runId === run.ref.runId) {
             this.activeRunHandle = null
             ctx.commit(current => markRunFailed(current, run.ref.runId, errorMessage(error)))
-            options.onRunFinish(actualModel)
+            options.onRunFinish(actualModel, undefined, "failed")
           }
         }
       })()
 
-      void run.completion.then(() => {
+      void run.completion.then(completion => {
         if (this.activeRunHandle?.ref.runId !== run.ref.runId) return
         this.activeRunHandle = null
         options.onAbandonInteraction()
-        options.onRunFinish(actualModel)
+        options.onRunFinish(
+          actualModel,
+          completion.outcome === "completed" ? completion.event.payload.context : undefined,
+          completion.outcome,
+        )
       }).catch(() => {
         // completion 拒绝（非事件流路径的失败）也要收敛 Thread catalog 与选择。
         if (this.activeRunHandle?.ref.runId !== run.ref.runId) return
         this.activeRunHandle = null
-        options.onRunFinish(actualModel)
+        options.onRunFinish(actualModel, undefined, "failed")
       })
 
       return { status: "accepted" }

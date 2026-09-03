@@ -186,6 +186,7 @@ export type WebIntent =
   | { type: "interaction-draft-change"; requestId: string; patch: WebInteractionDraftPatch }
   | { type: "interaction-submit"; requestId: string; response: InteractiveResponse }
   | { type: "plan-view-close" }
+  | { type: "goal-view-close" }
   | { type: "confirmation-resolve"; confirmationId: string; confirmed: boolean }
   | { type: "tool-toggle"; runId: string; toolId: string }
   | { type: "approval-mode-cycle" }
@@ -509,6 +510,9 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
       case "plan-view-close":
         await this.executeCoreIntent({ type: "plan-view.close" })
         return
+      case "goal-view-close":
+        await this.executeCoreIntent({ type: "goal-view.close" })
+        return
       case "confirmation-resolve":
         await this.executeCoreIntent({ type: "confirmation.resolve", confirmationId: intent.confirmationId, confirmed: intent.confirmed })
         return
@@ -742,6 +746,10 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
       workMode: view.runtime.workMode,
       composeState: view.runtime.composeState,
       workItem: view.workItem.workItem,
+      goal: view.conversation.goal,
+      goalPending: view.conversation.goalPending,
+      goalEvaluation: view.conversation.goalEvaluation,
+      goalActivities: view.conversation.goalActivities,
       threadMode: view.workItem.threadMode,
       childTimelineExecutionId: view.conversation.childTimelineExecutionId,
       isReverted: false,

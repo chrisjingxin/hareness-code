@@ -20,6 +20,7 @@ from harness_agent.host.run_coordinator import (
     RunPreparation,
     RunRuntime,
     StartRun,
+    UserRunInput,
 )
 from harness_agent.extensions.skills import SkillCatalogManager
 from harness_agent.threads.prompting import HISTORY_REWRITE_VERSION
@@ -122,7 +123,7 @@ async def test_run_start_uses_one_preparation_acceptance_and_projection_order() 
         interaction_port=_NoopInteraction(),
     )
     execution = await coordinator.start(
-        StartRun(mode="build", thread_id="ordered", run_id="run-ordered", message="按固定顺序执行"),
+        StartRun(mode="build", thread_id="ordered", run_id="run-ordered", input=UserRunInput(message="按固定顺序执行")),
         ConnectionRef("owner"),
     )
     _ = [event async for event in execution.events]
@@ -269,10 +270,13 @@ capabilities = ["tool-calling", "streaming"]
         request(
             "run.start",
             {"mode": "build", 
-                "message": "第一轮请求",
+                "input": {
+                    "kind": "user",
+                    "message": "第一轮请求",
+                    "requested_skill": {"id": "project/review", "args": ""},
+                },
                 "thread_id": "continuity-host",
                 "run_id": "run-1",
-                "requested_skill": {"id": "project/review", "args": ""},
             },
             "start-1",
         )
@@ -299,10 +303,13 @@ capabilities = ["tool-calling", "streaming"]
         request(
             "run.start",
             {"mode": "build", 
-                "message": "第二轮请求",
+                "input": {
+                    "kind": "user",
+                    "message": "第二轮请求",
+                    "requested_skill": {"id": "project/review", "args": ""},
+                },
                 "thread_id": "continuity-host",
                 "run_id": "run-2",
-                "requested_skill": {"id": "project/review", "args": ""},
             },
             "start-2",
         )
@@ -367,10 +374,13 @@ capabilities = ["tool-calling", "streaming"]
         request(
             "run.start",
             {"mode": "build", 
-                "message": "重启后请求",
+                "input": {
+                    "kind": "user",
+                    "message": "重启后请求",
+                    "requested_skill": {"id": "project/review", "args": ""},
+                },
                 "thread_id": "continuity-host",
                 "run_id": "run-3",
-                "requested_skill": {"id": "project/review", "args": ""},
             },
             "start-restart",
         )
@@ -428,8 +438,7 @@ async def test_run_boundary_refreshes_agents_and_skills_but_keeps_old_audit_snap
             context_snapshot_id=first_snapshot.snapshot_id,
         )
         await store.accept_run(
-            AcceptRun(
-                message="重复消息",
+            AcceptRun(message="重复消息",
                 binding=first_binding,
                 context_snapshot=first_snapshot,
             )
@@ -472,8 +481,7 @@ async def test_run_boundary_refreshes_agents_and_skills_but_keeps_old_audit_snap
             context_snapshot_id=second_snapshot.snapshot_id,
         )
         await store.accept_run(
-            AcceptRun(
-                message="重复消息",
+            AcceptRun(message="重复消息",
                 binding=second_binding,
                 context_snapshot=second_snapshot,
             )
@@ -527,8 +535,7 @@ async def test_projector_restarts_from_latest_checkpoint_plus_tail_and_runtime_s
     store = await ThreadPersistence.open(project=workspace, home=tmp_path / "home")
     try:
         await store.accept_run(
-            AcceptRun(
-                message="原始请求",
+            AcceptRun(message="原始请求",
                 binding=make_test_binding("projection", "run-1"),
             )
         )

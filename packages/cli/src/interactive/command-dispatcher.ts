@@ -57,6 +57,7 @@ export type CommandResult =
   | { type: "restore-approval-mode" }
   | { type: "focus-plan" }
   | { type: "view-plan"; threadId: string; markdown: string; virtualPath: string; displayPath: string }
+  | { type: "goal"; argument?: string }
   | CommandRpcResult
 
 /** Dispatcher 所需的最小状态快照；展示文案由调用方在进入 Handler 前生成。 */
@@ -176,6 +177,7 @@ const builtinHandlers: Readonly<Record<string, CommandHandler>> = {
   },
   "approval.plan": handlePlanCommand,
   "approval.plan-view": handlePlanViewCommand,
+  "goal.manage": context => ({ type: "goal", argument: context.command.argument }),
   "thread.undo": context => {
     if (!context.threadId) return notice("当前没有可撤销的 thread。")
     return { type: "present", target: "undo" }

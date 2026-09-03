@@ -40,6 +40,10 @@ export function selectConversationView(snapshot: InteractiveSnapshot): Conversat
     runProgress: snapshot.runProgress,
     lastRun: snapshot.lastRun,
     childTimelineExecutionId: snapshot.childTimelineExecutionId,
+    goal: snapshot.goal,
+    goalPending: snapshot.goalPending,
+    goalEvaluation: snapshot.goalEvaluation,
+    goalActivities: snapshot.goalActivities,
   }
 }
 

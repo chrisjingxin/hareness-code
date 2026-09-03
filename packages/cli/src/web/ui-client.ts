@@ -284,7 +284,7 @@ function mergePatch(state: WebUiState, patch: WebUiPatch): WebUiState {
 
 function emptyState(): WebUiState {
   return {
-    conversation: { currentThreadId: null, activity: { kind: "idle" }, activeRun: null, timeline: [], runProgress: null, lastRun: null, childTimelineExecutionId: null },
+    conversation: { currentThreadId: null, activity: { kind: "idle" }, activeRun: null, timeline: [], runProgress: null, lastRun: null, childTimelineExecutionId: null, goal: null, goalPending: null, goalEvaluation: null, goalActivities: [] },
     interaction: { interaction: null, confirmation: null },
     navigation: { catalogs: { threads: { status: "idle", items: [] }, models: { status: "idle", items: [] }, skills: { status: "idle", items: [] }, mcp: { status: "idle", items: [] }, agents: { status: "idle", items: [] } }, availability: { canOpenThread: false, canOpenModelsPanel: false, canOpenSkillsPanel: false, canOpenMcpPanel: false, canOpenAgentsPanel: false, hasSkillManage: false, hasMcpManage: false } },
     command: { commands: [], availability: { canSubmit: false } },

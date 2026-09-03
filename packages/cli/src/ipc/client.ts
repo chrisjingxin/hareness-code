@@ -26,6 +26,11 @@ import {
   type CommandBindingsResult,
   type HostAttachmentCreateResult,
   type HostAttachmentRevokeResult,
+  type GoalInspectResult,
+  type GoalMutateParams,
+  type GoalMutateResult,
+  type GoalRequestParams,
+  type GoalRequestResult,
   type InteractionRequestEnvelope,
   type InteractionResponse,
   type InteractionMethod,
@@ -53,7 +58,7 @@ import {
   type OperationName,
   type InitializeParams,
   type InitializeResult,
-  type RequestedSkill,
+  type RunInput,
   type RunCancelResult,
   type ThreadModelSelection,
   type ThreadsListResult,
@@ -96,10 +101,9 @@ export type PeerRequestHandler = (params: InteractionRequestEnvelope) => Promise
 export type InteractionHandler = PeerRequestHandler
 
 export type StartRunInput = {
-  message: string
+  input: RunInput
   mode: InteractionMode
   threadId?: string
-  requestedSkill?: RequestedSkill
   modelSelection?: ThreadModelSelection
   approvalMode?: ApprovalMode
 }
@@ -242,11 +246,10 @@ export class AgentClient {
     this.on("event", listener)
     this.on("close", closeListener)
     const accepted = this.request(Method.RUN_START, {
-      message: input.message,
+      input: input.input,
       mode: input.mode,
       thread_id: threadId,
       run_id: runId,
-      requested_skill: input.requestedSkill,
       model_selection: input.modelSelection,
       approval_mode: input.approvalMode,
     }, 0).then(result => {
@@ -377,6 +380,21 @@ export class AgentClient {
   /** 打开当前 project 的既有 thread，并返回可以重新构造时间线的消息。 */
   openThread(threadId: string): Promise<ThreadsOpenResult> {
     return this.request(Method.THREADS_OPEN, { thread_id: threadId })
+  }
+
+  /** 读取当前 Thread 的 Goal projection。 */
+  inspectGoal(threadId: string): Promise<GoalInspectResult> {
+    return this.request(Method.GOAL_INSPECT, { thread_id: threadId })
+  }
+
+  /** 保存 Goal 创建/替换/修订意图。 */
+  requestGoal(params: GoalRequestParams): Promise<GoalRequestResult> {
+    return this.request(Method.GOAL_REQUEST, params)
+  }
+
+  /** 修改 Goal 生命周期或配置。 */
+  mutateGoal(params: GoalMutateParams): Promise<GoalMutateResult> {
+    return this.request(Method.GOAL_MUTATE, params)
   }
 
   /** 读取当前 thread 的所有回合快照及 diff 统计。 */
@@ -671,7 +689,9 @@ export class AgentClient {
             ? "plan" as const
             : method === Method.INTERACTION_PLUGIN_CONSENT
               ? "plugin_consent" as const
-              : "question" as const
+              : method === Method.INTERACTION_GOAL
+                ? "goal" as const
+                : "question" as const
       const request = {
         ...validated,
         request_id: id,
@@ -689,7 +709,13 @@ export class AgentClient {
             ? { decision: result.decision, feedback: result.feedback }
             : result.type === "plugin_consent"
               ? { decision: result.decision }
-              : { answers: result.answers }
+              : result.type === "goal"
+                ? {
+                    decision: result.decision,
+                    ...(result.decision === "edited" ? { criteria: result.criteria } : {}),
+                    feedback: result.feedback,
+                  }
+                : { answers: result.answers }
       validateInteractionResult(method as InteractionMethod, wireResult)
       this.inboundRequests.delete(id)
       await this.send({ jsonrpc: "2.0", id, result: wireResult })

@@ -63,7 +63,7 @@ def test_python_validates_thread_model_selection() -> None:
     parsed = RunStartParams.model_validate(
         {
             "mode": "build",
-            "message": "使用 pro",
+            "input": {"kind": "user", "message": "使用 pro"},
             "thread_id": "thread-1",
             "run_id": "run-1",
             "model_selection": {"primary_profile": "pro"},
@@ -74,7 +74,7 @@ def test_python_validates_thread_model_selection() -> None:
         RunStartParams.model_validate(
             {
                 "mode": "build",
-                "message": "x",
+                "input": {"kind": "user", "message": "x"},
                 "thread_id": "thread-1",
                 "run_id": "run-1",
                 "model_selection": {"primary_profile": "", "unknown": True},
@@ -116,13 +116,128 @@ def test_python_accepts_run_progress_event() -> None:
 
 def test_python_requires_run_start_work_mode() -> None:
     """run.start 必填 build|compose 工作模式，未知模式被拒绝。"""
-    base = {"message": "检查", "thread_id": "thread-1", "run_id": "run-1"}
+    base = {
+        "input": {"kind": "user", "message": "检查"},
+        "thread_id": "thread-1",
+        "run_id": "run-1",
+    }
     with pytest.raises(ValidationError):
         RunStartParams.model_validate(base)
     with pytest.raises(ValidationError):
         RunStartParams.model_validate({**base, "mode": "yolo"})
     assert RunStartParams.model_validate({**base, "mode": "build"}).mode == "build"
     assert RunStartParams.model_validate({**base, "mode": "compose"}).mode == "compose"
+
+
+def test_python_requires_strict_tagged_run_input() -> None:
+    """旧 message、混合 shape 与 Goal 上的 requested_skill 都必须被拒绝。"""
+    common = {"mode": "build", "thread_id": "thread-1", "run_id": "run-1"}
+    with pytest.raises(ValidationError):
+        RunStartParams.model_validate({**common, "message": "旧入口"})
+    with pytest.raises(ValidationError):
+        RunStartParams.model_validate(
+            {
+                **common,
+                "input": {
+                    "kind": "goal_proposal",
+                    "request_id": "request-1",
+                    "requested_skill": "review",
+                },
+            }
+        )
+    parsed = RunStartParams.model_validate(
+        {
+            **common,
+            "input": {
+                "kind": "goal_continuation",
+                "goal_id": "goal-1",
+                "goal_revision": 2,
+                "reason": "accepted",
+            },
+        }
+    )
+    assert parsed.input.kind == "goal_continuation"
+
+
+def test_python_validates_goal_rpc_interaction_and_event() -> None:
+    """Goal 的 RPC、评审交互和事件使用同一份严格投影。"""
+    goal = {
+        "goal_id": "goal-1",
+        "revision": 1,
+        "status": "active",
+        "objective": "让 focused tests 通过",
+        "assumptions": [],
+        "criteria": [{"criterion_id": "criterion-1", "text": "协议契约测试通过"}],
+        "note": None,
+        "prior_blocker": None,
+        "grader": {
+            "selection": "inherit",
+            "configured_profile_id": None,
+            "actual_profile_id": None,
+        },
+        "max_iterations": 5,
+        "created_at_ms": 1,
+        "updated_at_ms": 1,
+        "completed_at_ms": None,
+    }
+    validate_operation_params("goal.inspect", {"thread_id": "thread-1"})
+    validate_operation_result(
+        "goal.inspect", {"goal": goal, "pending": None, "latest_evaluation": None}
+    )
+    validate_operation_params(
+        "goal.request",
+        {
+            "thread_id": "thread-1",
+            "request_id": "request-1",
+            "kind": "create",
+            "input_text": "完成协议升级",
+            "expected_goal_id": None,
+            "expected_revision": None,
+        },
+    )
+    validate_interaction_params(
+        "interaction.goal",
+        {
+            "thread_id": "thread-1",
+            "run_id": "run-1",
+            "timeout_ms": 30_000,
+            "payload": {
+                "interrupt_id": "interrupt-1",
+                "request_id": "request-1",
+                "proposal_kind": "create",
+                "base_goal_id": None,
+                "base_revision": None,
+                "objective": goal["objective"],
+                "assumptions": [],
+                "criteria": ["协议契约测试通过"],
+                "decisions": ["accepted", "edited", "rejected", "cancelled"],
+            },
+        },
+    )
+    validate_interaction_result(
+        "interaction.goal",
+        {
+            "decision": "edited",
+            "criteria": ["协议和两端类型检查通过"],
+            "feedback": "补充类型检查",
+        },
+    )
+    EventEnvelope.model_validate(
+        {
+            "event_id": "goal-event-1",
+            "type": "goal.changed",
+            "thread_id": "thread-1",
+            "run_id": "run-1",
+            "sequence": 1,
+            "timestamp_ms": 1,
+            "payload": {"goal": goal, "reason": "proposal_applied"},
+        }
+    )
+    with pytest.raises(ValidationError):
+        validate_operation_result(
+            "goal.inspect",
+            {"goal": {**goal, "unknown": True}, "pending": None, "latest_evaluation": None},
+        )
 
 
 def test_python_requires_run_started_work_mode() -> None:

@@ -91,7 +91,7 @@ from harness_agent.threads.thread_records import (
     workspace_fingerprint,
 )
 
-_SCHEMA_VERSION = 18
+_SCHEMA_VERSION = 19
 _MIGRATION_STATE_VERSION = 2
 _MIGRATION_STATE_VERSION_LEGACY = 1
 _MIGRATION_LOCK_SUFFIX = ".migration.lock"
@@ -878,6 +878,16 @@ def _migration_validate_legacy_source_schema_sync(
     # Git 快照表由 v18 迁移创建；随版本升级持续保留。
     allowed_tables.add("harness_git_checkpoints")
     allowed_tables.add("harness_thread_revert_state")
+    allowed_tables.update(
+        {
+            "harness_goals",
+            "harness_goal_current",
+            "harness_goal_pending",
+            "harness_goal_evaluations",
+            "harness_goal_activities",
+            "harness_goal_operations",
+        }
+    )
     allowed_tables.update(
         {
             "harness_thread_modes",
@@ -2990,6 +3000,17 @@ class ThreadPersistence:
             lock=self._lock,
         )
 
+    def goal_store(self) -> "GoalStore":
+        """返回借用同一连接和事务锁的 project-scoped GoalStore。"""
+        self._ensure_open()
+        from harness_agent.goals.store import GoalStore
+
+        return GoalStore(
+            self._connection,
+            project_fingerprint=self._project_fingerprint,
+            lock=self._lock,
+        )
+
     async def append_compose_activity(self, record: "ComposeActivityRecord") -> None:
         """追加一条 Compose activity；失败抛 ThreadPersistenceError 供上层 fail closed。"""
         self._ensure_open()
@@ -3067,6 +3088,7 @@ class ThreadPersistence:
                     command.binding,
                     command.context_snapshot,
                     command.mode,
+                    command.record_user_message,
                 ),
                 binding=command.binding,
             )
@@ -3082,6 +3104,7 @@ class ThreadPersistence:
             binding: RunExecutionBinding,
             context_snapshot: RunContextSnapshot | None = None,
             mode: ThreadMode = ThreadMode.BUILD,
+            record_user_message: bool = True,
     ) -> bool:
         """原子登记 snapshot、binding、Thread 索引和用户记录。"""
         self._ensure_open()
@@ -3133,7 +3156,50 @@ class ThreadPersistence:
                     ):
                         if context_snapshot is not None:
                             await self._insert_context_snapshot_in_transaction(context_snapshot)
-                        user_command = TranscriptAppend(
+                        if record_user_message:
+                            user_command = TranscriptAppend(
+                                thread_id=thread_id,
+                                record_id=_user_record_id(run_id),
+                                kind="user",
+                                content=message,
+                                run_id=run_id,
+                                execution_id=_root_execution_id(run_id),
+                            )
+                            if not await self._has_legacy_user_record_in_transaction(
+                                    thread_id, run_id, message
+                            ):
+                                await self._append_transcript_in_transaction(user_command)
+                        await self._refresh_thread_index_in_transaction(thread_id, now)
+                        await self._connection.commit()
+                        return False
+                    raise ThreadPersistenceError("RUN_EXECUTION_BINDING_CONFLICT")
+                if context_snapshot is not None:
+                    await self._insert_context_snapshot_in_transaction(context_snapshot)
+                if record_user_message:
+                    await self._connection.execute(
+                        """
+                        INSERT INTO harness_threads (project_fingerprint, thread_id, created_at_ms, updated_at_ms,
+                                                     first_message, latest_message, message_count)
+                        VALUES (?, ?, ?, ?, ?, ?, 0) ON CONFLICT(project_fingerprint, thread_id) DO
+                        UPDATE SET updated_at_ms = excluded.updated_at_ms,
+                                   latest_message = excluded.latest_message
+                        """,
+                        (self._project_fingerprint, thread_id, now, now, preview, preview),
+                    )
+                else:
+                    await self._connection.execute(
+                        """
+                        INSERT INTO harness_threads (project_fingerprint, thread_id, created_at_ms, updated_at_ms,
+                                                     first_message, latest_message, message_count)
+                        VALUES (?, ?, ?, ?, '', '', 0)
+                        ON CONFLICT(project_fingerprint, thread_id) DO NOTHING
+                        """,
+                        (self._project_fingerprint, thread_id, now, now),
+                    )
+                await self._freeze_thread_mode_in_transaction(thread_id, mode, now)
+                if record_user_message:
+                    await self._append_transcript_in_transaction(
+                        TranscriptAppend(
                             thread_id=thread_id,
                             record_id=_user_record_id(run_id),
                             kind="user",
@@ -3141,45 +3207,7 @@ class ThreadPersistence:
                             run_id=run_id,
                             execution_id=_root_execution_id(run_id),
                         )
-                        if not await self._has_legacy_user_record_in_transaction(
-                                thread_id, run_id, message
-                        ):
-                            await self._append_transcript_in_transaction(user_command)
-                        await self._refresh_thread_index_in_transaction(thread_id, now)
-                        await self._connection.commit()
-                        return False
-                    raise ThreadPersistenceError("RUN_EXECUTION_BINDING_CONFLICT")
-                if context_snapshot is not None:
-                    await self._insert_context_snapshot_in_transaction(context_snapshot)
-                await self._connection.execute(
-                    """
-                    INSERT INTO harness_threads (project_fingerprint, thread_id, created_at_ms, updated_at_ms,
-                                                 first_message, latest_message, message_count)
-                    VALUES (?, ?, ?, ?, ?, ?, 0) ON CONFLICT(project_fingerprint, thread_id) DO
-                    UPDATE SET
-                        updated_at_ms = excluded.updated_at_ms,
-                        latest_message = excluded.latest_message
-                    """,
-                    (
-                        self._project_fingerprint,
-                        thread_id,
-                        now,
-                        now,
-                        preview,
-                        preview,
-                    ),
-                )
-                await self._freeze_thread_mode_in_transaction(thread_id, mode, now)
-                await self._append_transcript_in_transaction(
-                    TranscriptAppend(
-                        thread_id=thread_id,
-                        record_id=_user_record_id(run_id),
-                        kind="user",
-                        content=message,
-                        run_id=run_id,
-                        execution_id=_root_execution_id(run_id),
                     )
-                )
                 await self._connection.execute(
                     """
                     INSERT INTO harness_run_execution_bindings (project_fingerprint, thread_id, run_id,
@@ -5667,6 +5695,9 @@ class ThreadPersistence:
             if version < 18:
                 await self._add_git_checkpoint_tables()
                 version = 18
+            if version < 19:
+                await self._add_goal_tables()
+                version = 19
             await self._connection.execute(f"PRAGMA user_version={version}")
             final_fingerprint = await self._database_fingerprint_async()
             await self._validate_final_database_async(final_fingerprint)
@@ -5995,6 +6026,18 @@ class ThreadPersistence:
         # Git 快照表由 v18 迁移创建；随版本升级持续保留。
         allowed_tables.add("harness_git_checkpoints")
         allowed_tables.add("harness_thread_revert_state")
+        # Goal 表由 v19 创建；legacy migration 测试会从当前库降标构造源库，
+        # 已知扩展表必须保留并由后续 migration 做最终结构校验。
+        allowed_tables.update(
+            {
+                "harness_goals",
+                "harness_goal_current",
+                "harness_goal_pending",
+                "harness_goal_evaluations",
+                "harness_goal_activities",
+                "harness_goal_operations",
+            }
+        )
         allowed_tables.update(
             {
                 "harness_thread_modes",
@@ -6354,6 +6397,57 @@ class ThreadPersistence:
                     ),
                 ]
             )
+        if version >= 19:
+            required.extend(
+                [
+                    (
+                        "harness_goals",
+                        (
+                            "project_fingerprint", "thread_id", "goal_id", "revision",
+                            "status", "objective", "assumptions_json", "criteria_json",
+                            "note", "prior_blocker", "grader_selection",
+                            "configured_profile_id", "actual_profile_id", "max_iterations",
+                            "created_at_ms", "updated_at_ms", "completed_at_ms",
+                        ),
+                    ),
+                    (
+                        "harness_goal_current",
+                        ("project_fingerprint", "thread_id", "goal_id", "revision"),
+                    ),
+                    (
+                        "harness_goal_pending",
+                        (
+                            "project_fingerprint", "thread_id", "request_id", "kind",
+                            "status", "base_goal_id", "base_revision", "input_text",
+                            "proposed_objective", "proposed_assumptions_json",
+                            "proposed_criteria_json", "created_at_ms", "updated_at_ms",
+                            "error_code",
+                        ),
+                    ),
+                    (
+                        "harness_goal_evaluations",
+                        (
+                            "project_fingerprint", "thread_id", "evaluation_id", "goal_id",
+                            "goal_revision", "run_id", "grading_run_id", "iteration",
+                            "result", "projection_json", "created_at_ms",
+                        ),
+                    ),
+                    (
+                        "harness_goal_activities",
+                        (
+                            "project_fingerprint", "thread_id", "activity_id", "kind",
+                            "summary", "created_at_ms",
+                        ),
+                    ),
+                    (
+                        "harness_goal_operations",
+                        (
+                            "project_fingerprint", "operation_id", "thread_id",
+                            "operation_kind", "params_digest", "result_json", "created_at_ms",
+                        ),
+                    ),
+                ]
+            )
         if version >= 14:
             required.extend(
                 [
@@ -6512,6 +6606,14 @@ class ThreadPersistence:
             )
         if version >= 16:
             required_indexes.append("harness_compose_work_item_confirmations_gate")
+        if version >= 19:
+            required_indexes.extend(
+                [
+                    "harness_goals_thread_updated",
+                    "harness_goal_evaluations_thread_created",
+                    "harness_goal_activities_thread_created",
+                ]
+            )
         for index_name in required_indexes:
             cursor = await self._connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
@@ -8104,6 +8206,134 @@ class ThreadPersistence:
             """
         )
 
+    async def _add_goal_tables(self) -> None:
+        """v19：Goal 事实、current/pending、验收审计与幂等结果。"""
+        await self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS harness_goals
+            (
+                project_fingerprint TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                goal_id TEXT NOT NULL,
+                revision INTEGER NOT NULL CHECK (revision >= 1),
+                status TEXT NOT NULL CHECK (status IN ('active', 'paused', 'blocked', 'complete')),
+                objective TEXT NOT NULL,
+                assumptions_json TEXT NOT NULL,
+                criteria_json TEXT NOT NULL,
+                note TEXT,
+                prior_blocker TEXT,
+                grader_selection TEXT NOT NULL CHECK (grader_selection IN ('inherit', 'profile')),
+                configured_profile_id TEXT,
+                actual_profile_id TEXT,
+                max_iterations INTEGER NOT NULL CHECK (max_iterations BETWEEN 1 AND 20),
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                completed_at_ms INTEGER,
+                PRIMARY KEY (project_fingerprint, goal_id, revision)
+            )
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS harness_goals_thread_updated
+                ON harness_goals(project_fingerprint, thread_id, updated_at_ms DESC)
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS harness_goal_current
+            (
+                project_fingerprint TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                goal_id TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                PRIMARY KEY (project_fingerprint, thread_id)
+            )
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS harness_goal_pending
+            (
+                project_fingerprint TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                request_id TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK (kind IN ('create', 'replace', 'amend')),
+                status TEXT NOT NULL CHECK (status IN ('queued', 'drafting', 'clarifying', 'reviewing', 'ready', 'failed')),
+                base_goal_id TEXT,
+                base_revision INTEGER,
+                input_text TEXT NOT NULL,
+                proposed_objective TEXT,
+                proposed_assumptions_json TEXT NOT NULL DEFAULT '[]',
+                proposed_criteria_json TEXT NOT NULL DEFAULT '[]',
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                error_code TEXT,
+                PRIMARY KEY (project_fingerprint, thread_id),
+                UNIQUE (project_fingerprint, request_id)
+            )
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS harness_goal_evaluations
+            (
+                project_fingerprint TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                evaluation_id TEXT NOT NULL,
+                goal_id TEXT NOT NULL,
+                goal_revision INTEGER NOT NULL,
+                run_id TEXT NOT NULL,
+                grading_run_id TEXT NOT NULL,
+                iteration INTEGER NOT NULL,
+                result TEXT NOT NULL,
+                projection_json TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (project_fingerprint, evaluation_id)
+            )
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS harness_goal_evaluations_thread_created
+                ON harness_goal_evaluations(project_fingerprint, thread_id, created_at_ms DESC)
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS harness_goal_activities
+            (
+                project_fingerprint TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                activity_id TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK (kind IN ('proposal', 'lifecycle', 'evaluation')),
+                summary TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (project_fingerprint, thread_id, activity_id, kind)
+            )
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS harness_goal_activities_thread_created
+                ON harness_goal_activities(project_fingerprint, thread_id, created_at_ms)
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS harness_goal_operations
+            (
+                project_fingerprint TEXT NOT NULL,
+                operation_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                operation_kind TEXT NOT NULL,
+                params_digest TEXT NOT NULL,
+                result_json TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (project_fingerprint, operation_id)
+            )
+            """
+        )
     async def record_git_checkpoint(
         self, thread_id: str, turn_id: str, run_id: str | None, tree_oid: str
     ) -> None:

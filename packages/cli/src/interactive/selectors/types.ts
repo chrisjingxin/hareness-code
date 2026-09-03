@@ -51,6 +51,10 @@ export type ConversationView = {
   readonly runProgress: InteractiveSnapshot["runProgress"]
   readonly lastRun: RunSummary | null
   readonly childTimelineExecutionId: string | null
+  readonly goal: InteractiveSnapshot["goal"]
+  readonly goalPending: InteractiveSnapshot["goalPending"]
+  readonly goalEvaluation: InteractiveSnapshot["goalEvaluation"]
+  readonly goalActivities: InteractiveSnapshot["goalActivities"]
 }
 
 /** 交互视图：挂起 Interaction 与破坏性确认；UI 契约 interaction 分片。 */

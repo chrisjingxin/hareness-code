@@ -56,6 +56,10 @@ function snapshotOf(state: InteractiveState): InteractiveSnapshot {
     composeState: state.composeState,
     workItem: state.workItem ?? null,
     threadMode: state.threadMode ?? null,
+    goal: state.goal,
+    goalPending: state.goalPending,
+    goalEvaluation: state.goalEvaluation,
+    goalActivities: state.goalActivities,
     childTimelineExecutionId: state.childTimelineExecutionId ?? null,
     selection: {
       requestedModelProfileId: null,
@@ -845,6 +849,94 @@ test("审批 pending 时底部是 Dock，输入栏失焦且时间线没有审批
   }
 })
 
+test("目标审核在窄终端显示摘要、验收标准与四个用户动作", async () => {
+  const state = createInitialState("thread-goal-review")
+  const interactive: InteractiveSnapshot = {
+    ...snapshotOf(state),
+    goal: {
+      goal_id: "goal-1",
+      revision: 1,
+      status: "active",
+      objective: "在较窄终端里持续完成登录功能并保留可恢复的目标状态",
+      assumptions: [],
+      criteria: [{ criterion_id: "criterion-1", text: "测试通过" }],
+      note: null,
+      prior_blocker: null,
+      grader: { selection: "inherit", configured_profile_id: null, actual_profile_id: null },
+      max_iterations: 3,
+      created_at_ms: 1,
+      updated_at_ms: 2,
+      completed_at_ms: null,
+    },
+    interaction: {
+      type: "goal",
+      requestId: "goal-review-1",
+      objective: "在较窄终端里持续完成登录功能并保留可恢复的目标状态",
+      assumptions: ["沿用现有权限与审批"],
+      criteria: ["成功登录后进入首页", "错误密码显示可观察提示"],
+      decisions: ["accepted", "edited", "rejected", "cancelled"],
+      deadlineAtMs: Number.POSITIVE_INFINITY,
+    },
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(ThreadView, viewProps(interactive, 70, 28)), { width: 70, height: 28 })
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("审核目标")
+    expect(frame).toContain("成功登录后进入首页")
+    expect(frame).toContain("接受并开始")
+    expect(frame).toContain("编辑验收标准")
+    expect(frame).toContain("驳回并反馈")
+    expect(frame).toContain("取消")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test("目标只读 viewer 显示 revision、验收模型和关闭入口", async () => {
+  const interactive: InteractiveSnapshot = {
+    ...snapshotOf(createInitialState("thread-goal-view")),
+    interaction: {
+      type: "goal",
+      requestId: "view-goal:thread-goal-view",
+      objective: "完成登录闭环",
+      assumptions: [],
+      criteria: ["登录成功", "错误提示可见"],
+      decisions: [],
+      deadlineAtMs: Number.POSITIVE_INFINITY,
+      readOnly: true,
+      status: "active",
+      revision: 2,
+      graderLabel: "继承主模型",
+      maxIterations: 3,
+      note: "优先失败路径",
+      pendingStatus: "reviewing",
+      pendingInput: "补充错误态",
+      activities: [{ activity_id: "activity-1", kind: "proposal", summary: "目标修订等待审核", created_at_ms: 3 }],
+    },
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(ThreadView, viewProps(interactive, 70, 24)), { width: 70, height: 24 })
+  })
+  try {
+    await act(async () => { await setup.flush() })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("目标详情")
+    expect(frame).toContain("active · r2")
+    expect(frame).toContain("验收模型：继承主模型 · 最多 3 次")
+    expect(frame).toContain("备注：优先失败路径")
+    expect(frame).toContain("待处理：reviewing · 补充错误态")
+    expect(frame).toContain("最近活动：目标修订等待审核")
+    expect(frame).toContain("关闭")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
 test("审批决定后 Dock 消失、结果行存在、焦点回输入栏", async () => {
   const run = { threadId: "thread-1", runId: "run-1" }
   const started = startRun(createInitialState(), run, "写入文件")
@@ -1496,6 +1588,8 @@ function viewProps(interactive: InteractiveSnapshot, terminalWidth: number, term
     onDirectoryTrust: () => undefined,
     onPlan: () => undefined,
     onPlanViewClose: () => undefined,
+    onGoal: () => undefined,
+    onGoalViewClose: () => undefined,
     onQuestion: () => undefined,
   }
 }

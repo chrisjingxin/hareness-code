@@ -33,6 +33,7 @@ from harness_agent.host.run_coordinator import (
     RunPreparation,
     RunRuntime,
     StartRun,
+    UserRunInput,
 )
 from harness_agent.threads.thread_persistence import ThreadPersistence
 from tests.support.thread_fixtures import test_binding as make_test_binding
@@ -183,7 +184,7 @@ async def _run_compose(
         StartRun(
             thread_id="thread-1",
             run_id="run-1",
-            message="实现搜索功能",
+            input=UserRunInput(message="实现搜索功能"),
             mode="compose",
         ),
         ConnectionRef("owner"),

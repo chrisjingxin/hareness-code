@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 
-import { bottomAreaKind } from "../../../src/tui/presentation/bottom-area"
+import { bottomAreaKind, goalDetailLines, goalEscapeAction } from "../../../src/tui/presentation/bottom-area"
 
 test("无 Interaction 时底部是输入栏", () => {
   expect(bottomAreaKind(null)).toBe("input")
@@ -95,6 +95,45 @@ test("多题相关问答走 QuestionDock，即使第一题是文本", () => {
     ],
     deadlineAtMs: 1,
   })).toBe("question")
+})
+
+test("目标草案走 GoalDock，避免与普通输入栏争夺焦点", () => {
+  expect(bottomAreaKind({
+    type: "goal",
+    requestId: "goal-review-1",
+    objective: "为项目加入可恢复的目标闭环",
+    criteria: ["目标可持久化", "重启后可查看"],
+    assumptions: ["仅在 Build 模式工作"],
+  })).toBe("goal")
+})
+
+test("GoalDock 的 Esc 先退出编辑，再取消审核", () => {
+  expect(goalEscapeAction(true)).toBe("exit-edit")
+  expect(goalEscapeAction(false)).toBe("cancel")
+})
+
+test("Goal 详情包含 revision、note、pending 与活动记录", () => {
+  expect(goalDetailLines({
+    type: "goal",
+    requestId: "view-goal:thread-1",
+    objective: "完成登录闭环",
+    assumptions: [],
+    criteria: ["登录成功"],
+    decisions: [],
+    deadlineAtMs: Number.POSITIVE_INFINITY,
+    readOnly: true,
+    status: "active",
+    revision: 2,
+    note: "优先失败路径",
+    pendingStatus: "reviewing",
+    pendingInput: "补充错误态",
+    activities: [{ activity_id: "activity-1", kind: "proposal", summary: "目标修订等待审核", created_at_ms: 4 }],
+  })).toEqual([
+    "active · r2",
+    "备注：优先失败路径",
+    "待处理：reviewing · 补充错误态",
+    "最近活动：目标修订等待审核",
+  ])
 })
 
 test("ask_user 式单选即使允许其他项也走 QuestionDock", () => {

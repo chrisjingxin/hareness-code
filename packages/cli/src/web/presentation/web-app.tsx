@@ -14,6 +14,7 @@ import { InteractionForm } from "./interaction-form"
 import { WorkspaceSidebar } from "./workspace-sidebar/workspace-sidebar"
 import { Timeline } from "./timeline"
 import { WorkItemBanner } from "./work-item-view"
+import { GoalBanner } from "./goal-view"
 
 /** 订阅 WebAdapterSnapshot 并转发 dispatch；页面唯一的状态来源。 */
 export function WebApp(props: {
@@ -171,6 +172,7 @@ export function WebApp(props: {
         <WorkspaceSidebar snapshot={snapshot} dispatch={onIntent} disabled={readOnly} />
         <main className="conversation-column">
           <WorkItemBanner view={workItemView} />
+          <GoalBanner interactive={interactive} />
           <div className="timeline-scroll">
             <Timeline snapshot={snapshot} dispatch={onIntent} />
           </div>

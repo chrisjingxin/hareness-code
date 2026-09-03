@@ -1,6 +1,6 @@
 /** Harness Code 的 Thread 主视图。 */
 
-import { ApprovalDock, DirectoryTrustDock, PlanDock, QuestionDock, bottomAreaKind } from "./bottom-area"
+import { ApprovalDock, DirectoryTrustDock, GoalDock, PlanDock, QuestionDock, bottomAreaKind } from "./bottom-area"
 import { ComposeProgressBar } from "./compose-progress-bar"
 import { InputBar, FooterRail, ThreadRuntimeLine } from "./input-bar"
 import { ConversationTimeline } from "./timeline"
@@ -31,6 +31,22 @@ export function ThreadView(props: SharedViewProps & { modelName?: string }) {
       ) : (
         <ComposeProgressBar interactive={props.interactive} />
       )}
+      {props.interactive.goal || props.interactive.goalPending ? (
+        <box paddingLeft={2} paddingRight={2} backgroundColor={tuiTheme.surface} flexDirection="column">
+          <box flexDirection="row" gap={1}>
+            <text fg={tuiTheme.primary}>目标</text>
+            <text
+              content={props.interactive.goal
+                ? `${props.interactive.goal.status} · r${props.interactive.goal.revision} · ${props.interactive.goal.objective}`
+                : `准备中 · ${props.interactive.goalPending?.input_text ?? ""}`}
+              fg={tuiTheme.muted}
+            />
+          </box>
+          {props.interactive.goal?.note ? <text content={`备注：${props.interactive.goal.note}`} fg={tuiTheme.muted} /> : null}
+          {props.interactive.goalPending ? <text content={`待处理：${props.interactive.goalPending.status} · ${props.interactive.goalPending.input_text}`} fg={tuiTheme.muted} /> : null}
+          {props.interactive.goalActivities.length ? <text content={`最近活动：${props.interactive.goalActivities.at(-1)?.summary ?? ""}`} fg={tuiTheme.muted} /> : null}
+        </box>
+      ) : null}
       {slot === "plan" ? null : (
         <ConversationTimeline
           interactive={props.interactive}
@@ -75,6 +91,9 @@ export function ThreadView(props: SharedViewProps & { modelName?: string }) {
           workMode={props.interactive.workMode}
           onQuestion={props.onQuestion}
         />
+      ) : null}
+      {slot === "goal" && interaction?.type === "goal" ? (
+        <GoalDock interaction={interaction} workMode={props.interactive.workMode} onGoal={props.onGoal} onClose={props.onGoalViewClose} />
       ) : null}
       {slot === "input" && !isChild ? (
         <box flexShrink={0} paddingLeft={2} paddingRight={2}>

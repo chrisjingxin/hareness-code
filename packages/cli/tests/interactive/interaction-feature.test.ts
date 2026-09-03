@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test"
+import type { GoalInteractionRequest } from "@za38/protocol"
 import { makeHarness, flush, notices, manualScheduler, approvalRequest, questionRequest } from "./harness"
 
 test("approval 校验 decisions allowlist，reject_with_feedback 携带反馈", async () => {
@@ -24,6 +25,38 @@ test("approval 校验 decisions allowlist，reject_with_feedback 携带反馈", 
       response: { kind: "approval", decision: "reject_with_feedback", feedback: "理由不足" },
     })
     expect(await responsePromise).toMatchObject({ type: "approval", request_id: "approval-1", decision: "reject_with_feedback", feedback: "理由不足" })
+    expect(harness.controller.getSnapshot().timeline.find(item => item.type === "interaction")?.interaction.status).toBe("rejected")
+  } finally {
+    await harness.controller.close()
+  }
+})
+
+test("Goal 驳回必须携带非空反馈，并标记为 rejected", async () => {
+  const harness = makeHarness()
+  try {
+    await harness.controller.dispatch({ type: "input.submit", value: "审核目标" })
+    const run = harness.runHandles.at(-1)!
+    const responsePromise = harness.port.sendInteraction(goalRequest(run.threadId, run.runId))
+
+    const empty = await harness.controller.dispatch({
+      type: "interaction.respond",
+      requestId: "goal-review-1",
+      response: { kind: "goal", decision: "rejected" },
+    })
+    expect(empty).toMatchObject({ status: "rejected", code: "invalid-argument" })
+    expect(harness.controller.getSnapshot().interaction?.requestId).toBe("goal-review-1")
+
+    await harness.controller.dispatch({
+      type: "interaction.respond",
+      requestId: "goal-review-1",
+      response: { kind: "goal", decision: "rejected", feedback: "补充失败路径" },
+    })
+    expect(await responsePromise).toEqual({
+      request_id: "goal-review-1",
+      type: "goal",
+      decision: "rejected",
+      feedback: "补充失败路径",
+    })
     expect(harness.controller.getSnapshot().timeline.find(item => item.type === "interaction")?.interaction.status).toBe("rejected")
   } finally {
     await harness.controller.close()
@@ -198,3 +231,24 @@ test("timeout_ms=0 的 Interaction 立即收敛，不残留 pending 状态", asy
     await harness.controller.close()
   }
 })
+
+function goalRequest(threadId: string, runId: string): GoalInteractionRequest & { type: "goal" } {
+  return {
+    type: "goal",
+    request_id: "goal-review-1",
+    thread_id: threadId,
+    run_id: runId,
+    timeout_ms: 0,
+    payload: {
+      interrupt_id: "goal-interrupt-1",
+      request_id: "request-1",
+      proposal_kind: "create",
+      base_goal_id: null,
+      base_revision: null,
+      objective: "完成登录",
+      assumptions: [],
+      criteria: ["登录成功"],
+      decisions: ["accepted", "edited", "rejected", "cancelled"],
+    },
+  }
+}

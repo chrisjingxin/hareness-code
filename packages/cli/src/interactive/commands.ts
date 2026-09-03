@@ -116,6 +116,8 @@ export const builtinCommandCapabilities = [
   Capability.TEAMS_READ,
   Capability.TEAMS_MANAGE,
   Capability.HOST_ATTACH,
+  Capability.GOAL_READ,
+  Capability.GOAL_MANAGE,
 ] as const
 
 /** 所有动态来源必须通过同一不可变 Registry 构造，避免覆盖内置命令或产生不确定别名。 */
@@ -225,6 +227,7 @@ export const builtinCommandDefinitions: readonly CommandDefinition[] = [
   { id: "assist.btw", name: "btw", description: "向 Agent 提出一个与当前任务无关的问题", source: { type: "builtin" }, presentation: "action", argumentHint: "[question]", requirements: { workModes: ["build", "compose"] } },
   { id: "approval.plan", name: "plan", description: "进入计划模式，只调查并写计划，不改项目文件", source: { type: "builtin" }, presentation: "action", argumentHint: "[exit | <目标>]", suggested: true, requirements: { workModes: ["build"], unavailableNotice: "`/plan` 仅在 Build 工作模式可用。" } },
   { id: "approval.plan-view", name: "plan-view", description: "查看当前 thread 的计划", source: { type: "builtin" }, presentation: "viewer", suggested: true, requirements: { capabilities: [Capability.THREADS_READ], workModes: ["build"], requiresThread: true, unavailableNotice: "`/plan-view` 仅在 Build 工作模式可用。" } },
+  { id: "goal.manage", name: "goal", description: "设置并验收当前 Build 目标", source: { type: "builtin" }, presentation: "viewer", argumentHint: "[show|status|amend|pause|resume|clear|model|max-iterations|<目标>]", suggested: true, requirements: { capabilities: [Capability.GOAL_READ], workModes: ["build"], unavailableNotice: "`/goal` 仅在 Build 工作模式可用。" } },
 ]
 
 export const commandRegistry = new CommandRegistry(builtinCommandDefinitions)

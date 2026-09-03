@@ -94,7 +94,10 @@
       "case": "valid",
       "value": {
         "mode": "build",
-        "message": "x",
+        "input": {
+          "kind": "user",
+          "message": "x"
+        },
         "thread_id": "x",
         "run_id": "x"
       }
@@ -362,7 +365,46 @@
           "plan_markdown": "x",
           "plan_virtual_path": "/.harness/plan.md",
           "plan_display_path": "x"
-        }
+        },
+        "goal": {
+          "goal_id": "x",
+          "revision": 1,
+          "status": "active",
+          "objective": "x",
+          "assumptions": [],
+          "criteria": [
+            {
+              "criterion_id": "x",
+              "text": "x"
+            }
+          ],
+          "note": "x",
+          "prior_blocker": "x",
+          "grader": {
+            "selection": "inherit",
+            "configured_profile_id": "x",
+            "actual_profile_id": "x"
+          },
+          "max_iterations": 1,
+          "created_at_ms": 1,
+          "updated_at_ms": 1,
+          "completed_at_ms": 1
+        },
+        "goal_pending": {
+          "request_id": "x",
+          "kind": "create",
+          "status": "queued",
+          "base_goal_id": "x",
+          "base_revision": 1,
+          "input_text": "x",
+          "proposed_objective": "x",
+          "proposed_assumptions": [],
+          "proposed_criteria": [],
+          "created_at_ms": 1,
+          "updated_at_ms": 1,
+          "error_code": "x"
+        },
+        "goal_activities": []
       }
     },
     {
@@ -392,7 +434,46 @@
           "plan_markdown": "x",
           "plan_virtual_path": "/.harness/plan.md",
           "plan_display_path": "x"
-        }
+        },
+        "goal": {
+          "goal_id": "x",
+          "revision": 1,
+          "status": "active",
+          "objective": "x",
+          "assumptions": [],
+          "criteria": [
+            {
+              "criterion_id": "x",
+              "text": "x"
+            }
+          ],
+          "note": "x",
+          "prior_blocker": "x",
+          "grader": {
+            "selection": "inherit",
+            "configured_profile_id": "x",
+            "actual_profile_id": "x"
+          },
+          "max_iterations": 1,
+          "created_at_ms": 1,
+          "updated_at_ms": 1,
+          "completed_at_ms": 1
+        },
+        "goal_pending": {
+          "request_id": "x",
+          "kind": "create",
+          "status": "queued",
+          "base_goal_id": "x",
+          "base_revision": 1,
+          "input_text": "x",
+          "proposed_objective": "x",
+          "proposed_assumptions": [],
+          "proposed_criteria": [],
+          "created_at_ms": 1,
+          "updated_at_ms": 1,
+          "error_code": "x"
+        },
+        "goal_activities": []
       }
     },
     {
@@ -1182,6 +1263,173 @@
       }
     },
     {
+      "kind": "operation.params",
+      "name": "goal.inspect",
+      "case": "valid",
+      "value": {
+        "thread_id": "x"
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "goal.inspect",
+      "case": "valid",
+      "value": {
+        "goal": {
+          "goal_id": "x",
+          "revision": 1,
+          "status": "active",
+          "objective": "x",
+          "assumptions": [],
+          "criteria": [
+            {
+              "criterion_id": "x",
+              "text": "x"
+            }
+          ],
+          "note": "x",
+          "prior_blocker": "x",
+          "grader": {
+            "selection": "inherit",
+            "configured_profile_id": "x",
+            "actual_profile_id": "x"
+          },
+          "max_iterations": 1,
+          "created_at_ms": 1,
+          "updated_at_ms": 1,
+          "completed_at_ms": 1
+        },
+        "pending": {
+          "request_id": "x",
+          "kind": "create",
+          "status": "queued",
+          "base_goal_id": "x",
+          "base_revision": 1,
+          "input_text": "x",
+          "proposed_objective": "x",
+          "proposed_assumptions": [],
+          "proposed_criteria": [],
+          "created_at_ms": 1,
+          "updated_at_ms": 1,
+          "error_code": "x"
+        },
+        "latest_evaluation": {
+          "evaluation_id": "x",
+          "goal_id": "x",
+          "goal_revision": 1,
+          "run_id": "x",
+          "grading_run_id": "x",
+          "iteration": 1,
+          "result": "needs_revision",
+          "explanation": "x",
+          "criteria": [],
+          "grader_profile_id": "x",
+          "created_at_ms": 1
+        }
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "goal.request",
+      "case": "valid",
+      "value": {
+        "thread_id": "x",
+        "request_id": "x",
+        "kind": "create",
+        "input_text": "x",
+        "expected_goal_id": "x",
+        "expected_revision": 1
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "goal.request",
+      "case": "valid",
+      "value": {
+        "disposition": "ready",
+        "pending": {
+          "request_id": "x",
+          "kind": "create",
+          "status": "queued",
+          "base_goal_id": "x",
+          "base_revision": 1,
+          "input_text": "x",
+          "proposed_objective": "x",
+          "proposed_assumptions": [],
+          "proposed_criteria": [],
+          "created_at_ms": 1,
+          "updated_at_ms": 1,
+          "error_code": "x"
+        }
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "goal.mutate",
+      "case": "valid",
+      "value": {
+        "thread_id": "x",
+        "operation_id": "x",
+        "expected_goal_id": "x",
+        "expected_revision": 1,
+        "action": {
+          "kind": "pause"
+        }
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "goal.mutate",
+      "case": "valid",
+      "value": {
+        "disposition": "applied",
+        "goal": {
+          "goal_id": "x",
+          "revision": 1,
+          "status": "active",
+          "objective": "x",
+          "assumptions": [],
+          "criteria": [
+            {
+              "criterion_id": "x",
+              "text": "x"
+            }
+          ],
+          "note": "x",
+          "prior_blocker": "x",
+          "grader": {
+            "selection": "inherit",
+            "configured_profile_id": "x",
+            "actual_profile_id": "x"
+          },
+          "max_iterations": 1,
+          "created_at_ms": 1,
+          "updated_at_ms": 1,
+          "completed_at_ms": 1
+        },
+        "pending": {
+          "request_id": "x",
+          "kind": "create",
+          "status": "queued",
+          "base_goal_id": "x",
+          "base_revision": 1,
+          "input_text": "x",
+          "proposed_objective": "x",
+          "proposed_assumptions": [],
+          "proposed_criteria": [],
+          "created_at_ms": 1,
+          "updated_at_ms": 1,
+          "error_code": "x"
+        },
+        "continuation": {
+          "continuation_id": "x",
+          "goal_id": "x",
+          "goal_revision": 1,
+          "reason": "accepted"
+        }
+      }
+    },
+    {
       "kind": "event",
       "name": "run.started",
       "case": "valid",
@@ -1456,6 +1704,67 @@
       }
     },
     {
+      "kind": "event",
+      "name": "goal.evaluation",
+      "case": "valid",
+      "value": {
+        "event_id": "x",
+        "type": "goal.evaluation",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "goal_id": "x",
+          "goal_revision": 1,
+          "grading_run_id": "x",
+          "iteration": 1,
+          "phase": "checking",
+          "grader_profile_id": "x"
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "goal.changed",
+      "case": "valid",
+      "value": {
+        "event_id": "x",
+        "type": "goal.changed",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "reason": "blocked",
+          "goal": {
+            "goal_id": "x",
+            "revision": 1,
+            "status": "active",
+            "objective": "x",
+            "assumptions": [],
+            "criteria": [
+              {
+                "criterion_id": "x",
+                "text": "x"
+              }
+            ],
+            "note": "x",
+            "prior_blocker": "x",
+            "grader": {
+              "selection": "inherit",
+              "configured_profile_id": "x",
+              "actual_profile_id": "x"
+            },
+            "max_iterations": 1,
+            "created_at_ms": 1,
+            "updated_at_ms": 1,
+            "completed_at_ms": 1
+          }
+        }
+      }
+    },
+    {
       "kind": "interaction.params",
       "name": "interaction.approval",
       "case": "valid",
@@ -1584,6 +1893,37 @@
       "case": "valid",
       "value": {
         "decision": "accept"
+      }
+    },
+    {
+      "kind": "interaction.params",
+      "name": "interaction.goal",
+      "case": "valid",
+      "value": {
+        "thread_id": "x",
+        "run_id": "x",
+        "timeout_ms": 1,
+        "payload": {
+          "interrupt_id": "x",
+          "request_id": "x",
+          "proposal_kind": "create",
+          "base_goal_id": "x",
+          "base_revision": 1,
+          "objective": "x",
+          "assumptions": [],
+          "criteria": [
+            "x"
+          ],
+          "decisions": []
+        }
+      }
+    },
+    {
+      "kind": "interaction.result",
+      "name": "interaction.goal",
+      "case": "valid",
+      "value": {
+        "decision": "accepted"
       }
     },
     {
@@ -2008,6 +2348,150 @@
         "code": "PLUGIN_REGISTRY_COMMIT_UNCERTAIN",
         "retryable": true
       }
+    },
+    {
+      "kind": "error",
+      "name": "GOAL_MODE_UNAVAILABLE",
+      "case": "valid",
+      "value": {
+        "code": "GOAL_MODE_UNAVAILABLE",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "GOAL_NOT_FOUND",
+      "case": "valid",
+      "value": {
+        "code": "GOAL_NOT_FOUND",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "GOAL_NOT_ACTIVE",
+      "case": "valid",
+      "value": {
+        "code": "GOAL_NOT_ACTIVE",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "GOAL_ALREADY_COMPLETE",
+      "case": "valid",
+      "value": {
+        "code": "GOAL_ALREADY_COMPLETE",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "GOAL_OBJECTIVE_INVALID",
+      "case": "valid",
+      "value": {
+        "code": "GOAL_OBJECTIVE_INVALID",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "GOAL_OBJECTIVE_UNCLEAR",
+      "case": "valid",
+      "value": {
+        "code": "GOAL_OBJECTIVE_UNCLEAR",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "GOAL_CRITERIA_INVALID",
+      "case": "valid",
+      "value": {
+        "code": "GOAL_CRITERIA_INVALID",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "GOAL_MAX_ITERATIONS_INVALID",
+      "case": "valid",
+      "value": {
+        "code": "GOAL_MAX_ITERATIONS_INVALID",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "GOAL_MODEL_INVALID",
+      "case": "valid",
+      "value": {
+        "code": "GOAL_MODEL_INVALID",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "GOAL_GRADER_MODEL_UNAVAILABLE",
+      "case": "valid",
+      "value": {
+        "code": "GOAL_GRADER_MODEL_UNAVAILABLE",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "name": "GOAL_REQUEST_ID_CONFLICT",
+      "case": "valid",
+      "value": {
+        "code": "GOAL_REQUEST_ID_CONFLICT",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "GOAL_REVISION_CONFLICT",
+      "case": "valid",
+      "value": {
+        "code": "GOAL_REVISION_CONFLICT",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "name": "GOAL_OPERATION_IN_PROGRESS",
+      "case": "valid",
+      "value": {
+        "code": "GOAL_OPERATION_IN_PROGRESS",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "name": "GOAL_CONTINUATION_STALE",
+      "case": "valid",
+      "value": {
+        "code": "GOAL_CONTINUATION_STALE",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "name": "GOAL_INTERACTION_UNSUPPORTED",
+      "case": "valid",
+      "value": {
+        "code": "GOAL_INTERACTION_UNSUPPORTED",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "name": "GOAL_STORE_UNAVAILABLE",
+      "case": "valid",
+      "value": {
+        "code": "GOAL_STORE_UNAVAILABLE",
+        "retryable": true
+      }
     }
   ],
   "invalid": [
@@ -2216,7 +2700,10 @@
       "case": "extra_field",
       "value": {
         "mode": "build",
-        "message": "x",
+        "input": {
+          "kind": "user",
+          "message": "x"
+        },
         "thread_id": "x",
         "run_id": "x",
         "__extra": true
@@ -2227,7 +2714,10 @@
       "name": "run.start",
       "case": "missing_field",
       "value": {
-        "message": "x",
+        "input": {
+          "kind": "user",
+          "message": "x"
+        },
         "thread_id": "x",
         "run_id": "x"
       }
@@ -2829,6 +3319,45 @@
           "plan_virtual_path": "/.harness/plan.md",
           "plan_display_path": "x"
         },
+        "goal": {
+          "goal_id": "x",
+          "revision": 1,
+          "status": "active",
+          "objective": "x",
+          "assumptions": [],
+          "criteria": [
+            {
+              "criterion_id": "x",
+              "text": "x"
+            }
+          ],
+          "note": "x",
+          "prior_blocker": "x",
+          "grader": {
+            "selection": "inherit",
+            "configured_profile_id": "x",
+            "actual_profile_id": "x"
+          },
+          "max_iterations": 1,
+          "created_at_ms": 1,
+          "updated_at_ms": 1,
+          "completed_at_ms": 1
+        },
+        "goal_pending": {
+          "request_id": "x",
+          "kind": "create",
+          "status": "queued",
+          "base_goal_id": "x",
+          "base_revision": 1,
+          "input_text": "x",
+          "proposed_objective": "x",
+          "proposed_assumptions": [],
+          "proposed_criteria": [],
+          "created_at_ms": 1,
+          "updated_at_ms": 1,
+          "error_code": "x"
+        },
+        "goal_activities": [],
         "__extra": true
       }
     },
@@ -2843,7 +3372,46 @@
           "plan_markdown": "x",
           "plan_virtual_path": "/.harness/plan.md",
           "plan_display_path": "x"
-        }
+        },
+        "goal": {
+          "goal_id": "x",
+          "revision": 1,
+          "status": "active",
+          "objective": "x",
+          "assumptions": [],
+          "criteria": [
+            {
+              "criterion_id": "x",
+              "text": "x"
+            }
+          ],
+          "note": "x",
+          "prior_blocker": "x",
+          "grader": {
+            "selection": "inherit",
+            "configured_profile_id": "x",
+            "actual_profile_id": "x"
+          },
+          "max_iterations": 1,
+          "created_at_ms": 1,
+          "updated_at_ms": 1,
+          "completed_at_ms": 1
+        },
+        "goal_pending": {
+          "request_id": "x",
+          "kind": "create",
+          "status": "queued",
+          "base_goal_id": "x",
+          "base_revision": 1,
+          "input_text": "x",
+          "proposed_objective": "x",
+          "proposed_assumptions": [],
+          "proposed_criteria": [],
+          "created_at_ms": 1,
+          "updated_at_ms": 1,
+          "error_code": "x"
+        },
+        "goal_activities": []
       }
     },
     {
@@ -2893,6 +3461,45 @@
           "plan_virtual_path": "/.harness/plan.md",
           "plan_display_path": "x"
         },
+        "goal": {
+          "goal_id": "x",
+          "revision": 1,
+          "status": "active",
+          "objective": "x",
+          "assumptions": [],
+          "criteria": [
+            {
+              "criterion_id": "x",
+              "text": "x"
+            }
+          ],
+          "note": "x",
+          "prior_blocker": "x",
+          "grader": {
+            "selection": "inherit",
+            "configured_profile_id": "x",
+            "actual_profile_id": "x"
+          },
+          "max_iterations": 1,
+          "created_at_ms": 1,
+          "updated_at_ms": 1,
+          "completed_at_ms": 1
+        },
+        "goal_pending": {
+          "request_id": "x",
+          "kind": "create",
+          "status": "queued",
+          "base_goal_id": "x",
+          "base_revision": 1,
+          "input_text": "x",
+          "proposed_objective": "x",
+          "proposed_assumptions": [],
+          "proposed_criteria": [],
+          "created_at_ms": 1,
+          "updated_at_ms": 1,
+          "error_code": "x"
+        },
+        "goal_activities": [],
         "__extra": true
       }
     },
@@ -2907,7 +3514,46 @@
           "plan_markdown": "x",
           "plan_virtual_path": "/.harness/plan.md",
           "plan_display_path": "x"
-        }
+        },
+        "goal": {
+          "goal_id": "x",
+          "revision": 1,
+          "status": "active",
+          "objective": "x",
+          "assumptions": [],
+          "criteria": [
+            {
+              "criterion_id": "x",
+              "text": "x"
+            }
+          ],
+          "note": "x",
+          "prior_blocker": "x",
+          "grader": {
+            "selection": "inherit",
+            "configured_profile_id": "x",
+            "actual_profile_id": "x"
+          },
+          "max_iterations": 1,
+          "created_at_ms": 1,
+          "updated_at_ms": 1,
+          "completed_at_ms": 1
+        },
+        "goal_pending": {
+          "request_id": "x",
+          "kind": "create",
+          "status": "queued",
+          "base_goal_id": "x",
+          "base_revision": 1,
+          "input_text": "x",
+          "proposed_objective": "x",
+          "proposed_assumptions": [],
+          "proposed_criteria": [],
+          "created_at_ms": 1,
+          "updated_at_ms": 1,
+          "error_code": "x"
+        },
+        "goal_activities": []
       }
     },
     {
@@ -4603,6 +5249,352 @@
       "value": {}
     },
     {
+      "kind": "operation.params",
+      "name": "goal.inspect",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "goal.inspect",
+      "case": "extra_field",
+      "value": {
+        "thread_id": "x",
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "goal.inspect",
+      "case": "missing_field",
+      "value": {}
+    },
+    {
+      "kind": "operation.result",
+      "name": "goal.inspect",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "goal.inspect",
+      "case": "extra_field",
+      "value": {
+        "goal": {
+          "goal_id": "x",
+          "revision": 1,
+          "status": "active",
+          "objective": "x",
+          "assumptions": [],
+          "criteria": [
+            {
+              "criterion_id": "x",
+              "text": "x"
+            }
+          ],
+          "note": "x",
+          "prior_blocker": "x",
+          "grader": {
+            "selection": "inherit",
+            "configured_profile_id": "x",
+            "actual_profile_id": "x"
+          },
+          "max_iterations": 1,
+          "created_at_ms": 1,
+          "updated_at_ms": 1,
+          "completed_at_ms": 1
+        },
+        "pending": {
+          "request_id": "x",
+          "kind": "create",
+          "status": "queued",
+          "base_goal_id": "x",
+          "base_revision": 1,
+          "input_text": "x",
+          "proposed_objective": "x",
+          "proposed_assumptions": [],
+          "proposed_criteria": [],
+          "created_at_ms": 1,
+          "updated_at_ms": 1,
+          "error_code": "x"
+        },
+        "latest_evaluation": {
+          "evaluation_id": "x",
+          "goal_id": "x",
+          "goal_revision": 1,
+          "run_id": "x",
+          "grading_run_id": "x",
+          "iteration": 1,
+          "result": "needs_revision",
+          "explanation": "x",
+          "criteria": [],
+          "grader_profile_id": "x",
+          "created_at_ms": 1
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "goal.inspect",
+      "case": "missing_field",
+      "value": {
+        "pending": {
+          "request_id": "x",
+          "kind": "create",
+          "status": "queued",
+          "base_goal_id": "x",
+          "base_revision": 1,
+          "input_text": "x",
+          "proposed_objective": "x",
+          "proposed_assumptions": [],
+          "proposed_criteria": [],
+          "created_at_ms": 1,
+          "updated_at_ms": 1,
+          "error_code": "x"
+        },
+        "latest_evaluation": {
+          "evaluation_id": "x",
+          "goal_id": "x",
+          "goal_revision": 1,
+          "run_id": "x",
+          "grading_run_id": "x",
+          "iteration": 1,
+          "result": "needs_revision",
+          "explanation": "x",
+          "criteria": [],
+          "grader_profile_id": "x",
+          "created_at_ms": 1
+        }
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "goal.request",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "goal.request",
+      "case": "extra_field",
+      "value": {
+        "thread_id": "x",
+        "request_id": "x",
+        "kind": "create",
+        "input_text": "x",
+        "expected_goal_id": "x",
+        "expected_revision": 1,
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "goal.request",
+      "case": "missing_field",
+      "value": {
+        "request_id": "x",
+        "kind": "create",
+        "input_text": "x",
+        "expected_goal_id": "x",
+        "expected_revision": 1
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "goal.request",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "goal.request",
+      "case": "extra_field",
+      "value": {
+        "disposition": "ready",
+        "pending": {
+          "request_id": "x",
+          "kind": "create",
+          "status": "queued",
+          "base_goal_id": "x",
+          "base_revision": 1,
+          "input_text": "x",
+          "proposed_objective": "x",
+          "proposed_assumptions": [],
+          "proposed_criteria": [],
+          "created_at_ms": 1,
+          "updated_at_ms": 1,
+          "error_code": "x"
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "goal.request",
+      "case": "missing_field",
+      "value": {
+        "pending": {
+          "request_id": "x",
+          "kind": "create",
+          "status": "queued",
+          "base_goal_id": "x",
+          "base_revision": 1,
+          "input_text": "x",
+          "proposed_objective": "x",
+          "proposed_assumptions": [],
+          "proposed_criteria": [],
+          "created_at_ms": 1,
+          "updated_at_ms": 1,
+          "error_code": "x"
+        }
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "goal.mutate",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.params",
+      "name": "goal.mutate",
+      "case": "extra_field",
+      "value": {
+        "thread_id": "x",
+        "operation_id": "x",
+        "expected_goal_id": "x",
+        "expected_revision": 1,
+        "action": {
+          "kind": "pause"
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.params",
+      "name": "goal.mutate",
+      "case": "missing_field",
+      "value": {
+        "operation_id": "x",
+        "expected_goal_id": "x",
+        "expected_revision": 1,
+        "action": {
+          "kind": "pause"
+        }
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "goal.mutate",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "operation.result",
+      "name": "goal.mutate",
+      "case": "extra_field",
+      "value": {
+        "disposition": "applied",
+        "goal": {
+          "goal_id": "x",
+          "revision": 1,
+          "status": "active",
+          "objective": "x",
+          "assumptions": [],
+          "criteria": [
+            {
+              "criterion_id": "x",
+              "text": "x"
+            }
+          ],
+          "note": "x",
+          "prior_blocker": "x",
+          "grader": {
+            "selection": "inherit",
+            "configured_profile_id": "x",
+            "actual_profile_id": "x"
+          },
+          "max_iterations": 1,
+          "created_at_ms": 1,
+          "updated_at_ms": 1,
+          "completed_at_ms": 1
+        },
+        "pending": {
+          "request_id": "x",
+          "kind": "create",
+          "status": "queued",
+          "base_goal_id": "x",
+          "base_revision": 1,
+          "input_text": "x",
+          "proposed_objective": "x",
+          "proposed_assumptions": [],
+          "proposed_criteria": [],
+          "created_at_ms": 1,
+          "updated_at_ms": 1,
+          "error_code": "x"
+        },
+        "continuation": {
+          "continuation_id": "x",
+          "goal_id": "x",
+          "goal_revision": 1,
+          "reason": "accepted"
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "operation.result",
+      "name": "goal.mutate",
+      "case": "missing_field",
+      "value": {
+        "goal": {
+          "goal_id": "x",
+          "revision": 1,
+          "status": "active",
+          "objective": "x",
+          "assumptions": [],
+          "criteria": [
+            {
+              "criterion_id": "x",
+              "text": "x"
+            }
+          ],
+          "note": "x",
+          "prior_blocker": "x",
+          "grader": {
+            "selection": "inherit",
+            "configured_profile_id": "x",
+            "actual_profile_id": "x"
+          },
+          "max_iterations": 1,
+          "created_at_ms": 1,
+          "updated_at_ms": 1,
+          "completed_at_ms": 1
+        },
+        "pending": {
+          "request_id": "x",
+          "kind": "create",
+          "status": "queued",
+          "base_goal_id": "x",
+          "base_revision": 1,
+          "input_text": "x",
+          "proposed_objective": "x",
+          "proposed_assumptions": [],
+          "proposed_criteria": [],
+          "created_at_ms": 1,
+          "updated_at_ms": 1,
+          "error_code": "x"
+        },
+        "continuation": {
+          "continuation_id": "x",
+          "goal_id": "x",
+          "goal_revision": 1,
+          "reason": "accepted"
+        }
+      }
+    },
+    {
       "kind": "event",
       "name": "run.started",
       "case": "wrong_type",
@@ -5236,6 +6228,140 @@
             "code": "x",
             "message": "x",
             "retryable": false
+          }
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "goal.evaluation",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "event",
+      "name": "goal.evaluation",
+      "case": "extra_field",
+      "value": {
+        "event_id": "x",
+        "type": "goal.evaluation",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "goal_id": "x",
+          "goal_revision": 1,
+          "grading_run_id": "x",
+          "iteration": 1,
+          "phase": "checking",
+          "grader_profile_id": "x"
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "event",
+      "name": "goal.evaluation",
+      "case": "missing_field",
+      "value": {
+        "type": "goal.evaluation",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "goal_id": "x",
+          "goal_revision": 1,
+          "grading_run_id": "x",
+          "iteration": 1,
+          "phase": "checking",
+          "grader_profile_id": "x"
+        }
+      }
+    },
+    {
+      "kind": "event",
+      "name": "goal.changed",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "event",
+      "name": "goal.changed",
+      "case": "extra_field",
+      "value": {
+        "event_id": "x",
+        "type": "goal.changed",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "reason": "blocked",
+          "goal": {
+            "goal_id": "x",
+            "revision": 1,
+            "status": "active",
+            "objective": "x",
+            "assumptions": [],
+            "criteria": [
+              {
+                "criterion_id": "x",
+                "text": "x"
+              }
+            ],
+            "note": "x",
+            "prior_blocker": "x",
+            "grader": {
+              "selection": "inherit",
+              "configured_profile_id": "x",
+              "actual_profile_id": "x"
+            },
+            "max_iterations": 1,
+            "created_at_ms": 1,
+            "updated_at_ms": 1,
+            "completed_at_ms": 1
+          }
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "event",
+      "name": "goal.changed",
+      "case": "missing_field",
+      "value": {
+        "type": "goal.changed",
+        "thread_id": "x",
+        "run_id": "x",
+        "sequence": 1,
+        "timestamp_ms": 1,
+        "payload": {
+          "reason": "blocked",
+          "goal": {
+            "goal_id": "x",
+            "revision": 1,
+            "status": "active",
+            "objective": "x",
+            "assumptions": [],
+            "criteria": [
+              {
+                "criterion_id": "x",
+                "text": "x"
+              }
+            ],
+            "note": "x",
+            "prior_blocker": "x",
+            "grader": {
+              "selection": "inherit",
+              "configured_profile_id": "x",
+              "actual_profile_id": "x"
+            },
+            "max_iterations": 1,
+            "created_at_ms": 1,
+            "updated_at_ms": 1,
+            "completed_at_ms": 1
           }
         }
       }
@@ -5575,6 +6701,64 @@
       "value": {}
     },
     {
+      "kind": "interaction.params",
+      "name": "interaction.goal",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "interaction.params",
+      "name": "interaction.goal",
+      "case": "extra_field",
+      "value": {
+        "thread_id": "x",
+        "run_id": "x",
+        "timeout_ms": 1,
+        "payload": {
+          "interrupt_id": "x",
+          "request_id": "x",
+          "proposal_kind": "create",
+          "base_goal_id": "x",
+          "base_revision": 1,
+          "objective": "x",
+          "assumptions": [],
+          "criteria": [
+            "x"
+          ],
+          "decisions": []
+        },
+        "__extra": true
+      }
+    },
+    {
+      "kind": "interaction.params",
+      "name": "interaction.goal",
+      "case": "missing_field",
+      "value": {
+        "run_id": "x",
+        "timeout_ms": 1,
+        "payload": {
+          "interrupt_id": "x",
+          "request_id": "x",
+          "proposal_kind": "create",
+          "base_goal_id": "x",
+          "base_revision": 1,
+          "objective": "x",
+          "assumptions": [],
+          "criteria": [
+            "x"
+          ],
+          "decisions": []
+        }
+      }
+    },
+    {
+      "kind": "interaction.result",
+      "name": "interaction.goal",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
       "kind": "error",
       "name": "ProtocolErrorData",
       "case": "wrong_type",
@@ -5871,6 +7055,102 @@
     {
       "kind": "error",
       "name": "PLUGIN_REGISTRY_COMMIT_UNCERTAIN",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "GOAL_MODE_UNAVAILABLE",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "GOAL_NOT_FOUND",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "GOAL_NOT_ACTIVE",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "GOAL_ALREADY_COMPLETE",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "GOAL_OBJECTIVE_INVALID",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "GOAL_OBJECTIVE_UNCLEAR",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "GOAL_CRITERIA_INVALID",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "GOAL_MAX_ITERATIONS_INVALID",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "GOAL_MODEL_INVALID",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "GOAL_GRADER_MODEL_UNAVAILABLE",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "GOAL_REQUEST_ID_CONFLICT",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "GOAL_REVISION_CONFLICT",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "GOAL_OPERATION_IN_PROGRESS",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "GOAL_CONTINUATION_STALE",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "GOAL_INTERACTION_UNSUPPORTED",
+      "case": "wrong_type",
+      "value": null
+    },
+    {
+      "kind": "error",
+      "name": "GOAL_STORE_UNAVAILABLE",
       "case": "wrong_type",
       "value": null
     }

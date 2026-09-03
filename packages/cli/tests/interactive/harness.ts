@@ -7,6 +7,7 @@ import {
   type InteractionRequestEnvelope,
   type InteractionResponse,
   type ModelProfile,
+  type RunInput,
 } from "@za38/protocol"
 
 import type { InteractiveAgentPort, InteractiveAgentRun, InteractiveRunCompletion } from "../../src/interactive/agent-port"
@@ -33,6 +34,8 @@ export const runtime: InteractiveRuntime = {
     Capability.AGENTS_READ,
     Capability.TEAMS_READ,
     Capability.TEAMS_MANAGE,
+    Capability.GOAL_READ,
+    Capability.GOAL_MANAGE,
   ],
 }
 
@@ -102,6 +105,9 @@ function createPort(options: {
     thread: threadSummary(threadId, "恢复的请求"),
     messages: [{ kind: "user", content: "恢复的请求" }, { kind: "tool", tool_name: "execute", content: "恢复的工具结果" }],
     plan: { has_plan: false, plan_markdown: "", plan_virtual_path: "/.harness/plan.md", plan_display_path: `~/.harness/plans/${threadId}.md` },
+    goal: null,
+    goal_pending: null,
+    goal_activities: [],
   }))
   let listAgentsImpl: InteractiveAgentPort["listAgents"] = async () => ({
     snapshot_id: "snap-builtin-1",
@@ -128,6 +134,7 @@ function createPort(options: {
     emitEvent: (event: EventEnvelope) => void
     failRun: (threadId: string, runId: string, error: Error) => void
     completeRun: (threadId: string, runId: string) => void
+    completeRunWithContext: (threadId: string, runId: string, context: Record<string, unknown>) => void
     cancelRun: (threadId: string, runId: string) => void
     failRunWithEvent: (threadId: string, runId: string) => void
     sendInteraction: (request: InteractionRequestEnvelope) => Promise<InteractionResponse>
@@ -159,7 +166,8 @@ function createPort(options: {
     startRun(input) {
       calls.push("run.start")
       const threadId = input.threadId ?? `thread-${runNumber + 1}`
-      const runId = `run-${++runNumber}`
+      const sequence = ++runNumber
+      const runId = input.runId ?? `run-${sequence}`
       runHandles.push({ threadId, runId })
       return makeRunHandle({
         threadId,
@@ -203,6 +211,34 @@ function createPort(options: {
     async openThread(threadId) {
       calls.push("threads.open")
       return openThreadImpl(threadId)
+    },
+    async inspectGoal() {
+      calls.push("goal.inspect")
+      return { goal: null, pending: null, latest_evaluation: null }
+    },
+    async requestGoal(params) {
+      calls.push("goal.request")
+      return {
+        disposition: "ready" as const,
+        pending: {
+          request_id: params.request_id,
+          kind: params.kind,
+          status: "ready" as const,
+          base_goal_id: params.expected_goal_id,
+          base_revision: params.expected_revision,
+          input_text: params.input_text,
+          proposed_objective: null,
+          proposed_assumptions: [],
+          proposed_criteria: [],
+          created_at_ms: 1,
+          updated_at_ms: 1,
+          error_code: null,
+        },
+      }
+    },
+    async mutateGoal() {
+      calls.push("goal.mutate")
+      return { disposition: "applied" as const, goal: null, pending: null, continuation: null }
     },
     async listTurns(threadId) {
       calls.push("threads.list_turns")
@@ -311,6 +347,10 @@ function createPort(options: {
       const run = runHandles.find(value => value.threadId === threadId && value.runId === runId)
       if (run) runEnd(run, { outcome: "completed", event: terminalEvent(EventType.RUN_COMPLETED, threadId, runId, 100, { duration_ms: 1, usage: { input_tokens: 1, output_tokens: 1 } }) })
     },
+    completeRunWithContext(threadId, runId, context) {
+      const run = runHandles.find(value => value.threadId === threadId && value.runId === runId)
+      if (run) runEnd(run, { outcome: "completed", event: terminalEvent(EventType.RUN_COMPLETED, threadId, runId, 100, { duration_ms: 1, usage: { input_tokens: 1, output_tokens: 1 }, finish_reason: "stop", context }) })
+    },
     cancelRun(threadId, runId) {
       const run = runHandles.find(value => value.threadId === threadId && value.runId === runId)
       if (run) runEnd(run, { outcome: "cancelled", event: terminalEvent(EventType.RUN_CANCELLED, threadId, runId, 100, { reason: "用户取消" }) })
@@ -351,7 +391,9 @@ function createPort(options: {
       const run = runHandles.at(-1)
       if (!run) return undefined
       return {
-        message: runStates.get(keyOf(run))?.input.message ?? "",
+        message: runStates.get(keyOf(run))?.input.input.kind === "user"
+          ? runStates.get(keyOf(run))?.input.input.message ?? ""
+          : "",
         threadId: run.threadId,
         runId: run.runId,
         mode: runStates.get(keyOf(run))?.input.mode ?? "build",
@@ -371,7 +413,7 @@ function createPort(options: {
     failCompletion: (error: Error) => void
     endCalled: boolean
     cancelled: boolean
-    input: { message: string; modelSelection?: { primary_profile: string }; requestedSkill?: { id: string; args?: string }; approvalMode?: string }
+    input: { input: RunInput; modelSelection?: { primary_profile: string }; approvalMode?: string }
   }
   const runStates = new Map<string, RunState>()
   const keyOf = (run: { threadId: string; runId: string }) => `${run.threadId}:${run.runId}`
@@ -452,7 +494,8 @@ function createPort(options: {
   }
 
   function runSkill(run: { threadId: string; runId: string }): { id: string; args?: string } | undefined {
-    return runStates.get(keyOf(run))?.input.requestedSkill
+    const input = runStates.get(keyOf(run))?.input.input
+    return input?.kind === "user" ? input.requested_skill : undefined
   }
 
   return { port, calls, abandoned, runHandles, runStates }

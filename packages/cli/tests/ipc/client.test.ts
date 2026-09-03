@@ -41,18 +41,16 @@ test("Peer 在 run.start 中携带显式 requested_skill", async () => {
     }) + "\n")
   })
   const run = client.startRun({
-    message: "检查",
+    input: { kind: "user", message: "检查", requested_skill: { id: "project/review", args: "快速" } },
     mode: "build",
     threadId: "t",
-    requestedSkill: { id: "project/review", args: "快速" },
   })
   await run.accepted
   expect(requests[0].params).toEqual({
-    message: "检查",
+    input: { kind: "user", message: "检查", requested_skill: { id: "project/review", args: "快速" } },
     mode: "build",
     thread_id: "t",
     run_id: run.ref.runId,
-    requested_skill: { id: "project/review", args: "快速" },
   })
 })
 
@@ -95,24 +93,30 @@ test("Peer 在 Plugin Command run.start 中携带 raw invocation 与 canonical i
   })
   const rawInvocation = "/ZA38-SDD   创建登录功能  "
   const run = client.startRun({
-    message: rawInvocation,
+    input: {
+      kind: "user",
+      message: rawInvocation,
+      requested_skill: {
+        id: "plugin/local/za38/command/za38-sdd",
+        args: "创建登录功能",
+        raw_invocation: rawInvocation,
+        command_name: "za38-sdd",
+      },
+    },
     mode: "build",
     threadId: "t",
-    requestedSkill: {
-      id: "plugin/local/za38/command/za38-sdd",
-      args: "创建登录功能",
-      raw_invocation: rawInvocation,
-      command_name: "za38-sdd",
-    },
   })
   await run.accepted
   expect(requests[0].params).toMatchObject({
-    message: rawInvocation,
-    requested_skill: {
-      id: "plugin/local/za38/command/za38-sdd",
-      args: "创建登录功能",
-      raw_invocation: rawInvocation,
-      command_name: "za38-sdd",
+    input: {
+      kind: "user",
+      message: rawInvocation,
+      requested_skill: {
+        id: "plugin/local/za38/command/za38-sdd",
+        args: "创建登录功能",
+        raw_invocation: rawInvocation,
+        command_name: "za38-sdd",
+      },
     },
   })
 })
@@ -130,10 +134,10 @@ test("Peer 在 run.start 中携带冻结的工作模式", async () => {
       result: { thread_id: params["thread_id"], run_id: params["run_id"], accepted: true },
     }) + "\n")
   })
-  const run = client.startRun({ message: "检查", threadId: "t", mode: "compose" })
+  const run = client.startRun({ input: { kind: "user", message: "检查" }, threadId: "t", mode: "compose" })
   await run.accepted
   expect(requests[0].params).toEqual({
-    message: "检查",
+    input: { kind: "user", message: "检查" },
     thread_id: "t",
     run_id: run.ref.runId,
     mode: "compose",
@@ -153,7 +157,7 @@ test("AgentRun 使用原生 UUID 并携带 Thread 模型选择", async () => {
     }) + "\n")
   })
   const run = client.startRun({
-    message: "使用 pro",
+    input: { kind: "user", message: "使用 pro" },
     mode: "build",
     threadId: "t",
     modelSelection: { primary_profile: "pro" },
@@ -161,7 +165,7 @@ test("AgentRun 使用原生 UUID 并携带 Thread 模型选择", async () => {
   await run.accepted
   expect(run.ref.runId).toMatch(/^[0-9a-f-]{36}$/)
   expect(requests[0].params).toEqual({
-    message: "使用 pro",
+    input: { kind: "user", message: "使用 pro" },
     mode: "build",
     thread_id: "t",
     run_id: run.ref.runId,
@@ -174,7 +178,7 @@ test("run.start 受理不设置会产生幽灵 Run 的本地超时", async () =>
   let request: any
   stdin.on("data", data => { request = JSON.parse(data.toString()) })
 
-  const run = client.startRun({ message: "等待受理", mode: "build", threadId: "thread-slow-start" })
+  const run = client.startRun({ input: { kind: "user", message: "等待受理" }, mode: "build", threadId: "thread-slow-start" })
   await Bun.sleep(0)
   expect((client as any).pending.get(request.id).timeout).toBeUndefined()
 
@@ -483,20 +487,23 @@ test("Peer 接受 Python BuildRunAdapter 的 Plugin Command provenance 并保持
 
   const rawInvocation = "/ZA38-SDD   创建登录功能  "
   const run = client.startRun({
-    message: rawInvocation,
+    input: {
+      kind: "user",
+      message: rawInvocation,
+      requested_skill: {
+        id: "plugin/local/ZA38/command/za38-sdd",
+        args: "创建登录功能",
+        raw_invocation: rawInvocation,
+        command_name: "za38-sdd",
+      },
+    },
     mode: "build",
     threadId: "t",
-    requestedSkill: {
-      id: "plugin/local/ZA38/command/za38-sdd",
-      args: "创建登录功能",
-      raw_invocation: rawInvocation,
-      command_name: "za38-sdd",
-    },
   })
   await run.accepted
   await run.completion
   expect(requests[0].method).toBe("run.start")
-  expect(requests[0].params.message).toBe(rawInvocation)
+  expect(requests[0].params.input.message).toBe(rawInvocation)
   expect(events.map(event => event.sequence)).toEqual([1, 2, 3, 4])
   expect(errors).toEqual([])
 })

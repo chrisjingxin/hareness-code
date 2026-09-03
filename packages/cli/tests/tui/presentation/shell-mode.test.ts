@@ -137,7 +137,7 @@ test("Shell 模式下 submit 以 direct_shell 模式向 Gateway 启动 Run", asy
     // 验证以 direct_shell 模式下发给 gateway
     expect(startedRunParams).not.toBeNull()
     expect(startedRunParams.mode).toBe("direct_shell")
-    expect(startedRunParams.message).toBe("git status")
+    expect(startedRunParams.input).toEqual({ kind: "user", message: "git status" })
 
     // 验证提交后模式重置回 chat
     expect(adapter.getSnapshot().inputMode).toBe("chat")

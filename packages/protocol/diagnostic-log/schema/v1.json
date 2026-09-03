@@ -43,6 +43,8 @@
       "model.completed": { "levels": ["info"], "fields": "#/$defs/modelCompletedFields" },
       "model.retry_scheduled": { "levels": ["debug", "warn"], "fields": "#/$defs/modelRetryFields" },
       "model.failed": { "levels": ["warn", "error"], "fields": "#/$defs/modelFailedFields" },
+      "goal.proposal.model.completed": { "levels": ["info"], "fields": "#/$defs/goalProposalCompletedFields" },
+      "goal.proposal.model.invalid": { "levels": ["warn"], "fields": "#/$defs/goalProposalInvalidFields" },
       "interaction.started": { "levels": ["info"], "fields": "#/$defs/interactionStartedFields" },
       "interaction.completed": { "levels": ["info", "warn"], "fields": "#/$defs/interactionCompletedFields" },
       "tool.started": { "levels": ["debug", "info"], "fields": "#/$defs/toolStartedFields" },
@@ -291,6 +293,16 @@
       "type": "object", "additionalProperties": false,
       "required": ["model_round", "provider_attempt", "duration_ms", "failure_stage", "error_type", "summary_code"],
       "properties": { "model_round": { "type": "integer", "minimum": 1 }, "provider_attempt": { "type": "integer", "minimum": 1 }, "duration_ms": { "$ref": "#/$defs/nonNegativeInt" }, "failure_stage": { "$ref": "#/$defs/safeName" }, "error_code": { "$ref": "#/$defs/safeName" }, "error_type": { "$ref": "#/$defs/safeName" }, "retryable": { "type": "boolean" }, "summary_code": { "$ref": "#/$defs/safeName" } }
+    },
+    "goalProposalCompletedFields": {
+      "type": "object", "additionalProperties": false,
+      "required": ["response_mode", "readiness", "assumption_count", "criterion_count", "question_count", "repository_calls", "repository_result_chars", "repository_limited_results"],
+      "properties": { "response_mode": { "const": "forced_tool_schema" }, "readiness": { "enum": ["ready", "needs_clarification"] }, "assumption_count": { "$ref": "#/$defs/nonNegativeInt" }, "criterion_count": { "$ref": "#/$defs/nonNegativeInt" }, "question_count": { "$ref": "#/$defs/nonNegativeInt" }, "repository_calls": { "$ref": "#/$defs/nonNegativeInt" }, "repository_result_chars": { "$ref": "#/$defs/nonNegativeInt" }, "repository_limited_results": { "$ref": "#/$defs/nonNegativeInt" }, "last_repository_tool": { "enum": ["ls", "read_file", "glob", "grep"] }, "last_repository_result_chars": { "$ref": "#/$defs/nonNegativeInt" } }
+    },
+    "goalProposalInvalidFields": {
+      "type": "object", "additionalProperties": false,
+      "required": ["response_mode", "error_code", "repository_calls", "repository_result_chars", "repository_limited_results"],
+      "properties": { "response_mode": { "const": "forced_tool_schema" }, "error_code": { "$ref": "#/$defs/safeName" }, "repository_calls": { "$ref": "#/$defs/nonNegativeInt" }, "repository_result_chars": { "$ref": "#/$defs/nonNegativeInt" }, "repository_limited_results": { "$ref": "#/$defs/nonNegativeInt" }, "last_repository_tool": { "enum": ["ls", "read_file", "glob", "grep"] }, "last_repository_result_chars": { "$ref": "#/$defs/nonNegativeInt" } }
     },
     "interactionStartedFields": {
       "type": "object", "additionalProperties": false,

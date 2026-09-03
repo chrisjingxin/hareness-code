@@ -105,6 +105,9 @@ from harness_agent.protocol.generated import (
     HostAttachmentRevokeParams,
     HostAttachmentCreateParams,
     InitializeParams,
+    GoalInspectParams,
+    GoalMutateParams,
+    GoalRequestParams,
     ModelsListParams,
     McpAddParams,
     McpRemoveParams,
@@ -205,6 +208,8 @@ from harness_agent.compose.session import (
 )
 from harness_agent.extensions.providers.harness_gateway import ProviderClientPool
 from harness_agent.host.run_coordinator import (
+    GoalContinuationRunInput,
+    GoalProposalRunInput,
     AgentEvent,
     ConnectionRef,
     INTERACTION_TIMEOUT_MS,
@@ -217,6 +222,7 @@ from harness_agent.host.run_coordinator import (
     RunRef,
     RequestedSkill,
     StartRun,
+    UserRunInput,
 )
 from harness_agent.host.run_execution import _bounded_json
 from harness_agent.runtime.team_coordinator import (
@@ -517,6 +523,8 @@ class AgentHost:
             project_dir=self._workspace,
             workspace_root_registry=self._workspace_root_registry,
             compose_services_provider=self._provide_compose_services,
+            goal_services_provider=self._provide_goal_services,
+            goal_terminal_reconciler=self._reconcile_goal_terminal,
             diagnostic_log=diagnostic_log,
         )
         self._handlers = {
@@ -542,6 +550,9 @@ class AgentHost:
             METHOD["THREADS_LIST_TURNS"]: self._handle_threads_list_turns,
             METHOD["THREADS_UNDO"]: self._handle_threads_undo,
             METHOD["THREADS_REDO"]: self._handle_threads_redo,
+            METHOD["GOAL_INSPECT"]: self._handle_goal_inspect,
+            METHOD["GOAL_REQUEST"]: self._handle_goal_request,
+            METHOD["GOAL_MUTATE"]: self._handle_goal_mutate,
             METHOD["SKILLS_LIST"]: self._handle_skills_list,
             METHOD["SKILLS_INSPECT"]: self._handle_skills_inspect,
             METHOD["SKILLS_SET_ENABLED"]: self._handle_skills_set_enabled,
@@ -1325,32 +1336,52 @@ class AgentHost:
     async def _handle_run_start(self, params: dict[str, Any], request_id: str) -> None:
         """把协议输入转换成 StartRun，并让 Coordinator 先完成受理再启动事件流。"""
         parsed = RunStartParams.model_validate(params)
-        message = parsed.message
-        if not message.strip():
-            raise RpcError(-32602, "message must be non-empty")
+        run_input = parsed.input
+        if run_input.kind == "user":
+            if not run_input.message.strip():
+                raise RpcError(-32602, "message must be non-empty")
+            requested_skill = (
+                RequestedSkill(
+                    run_input.requested_skill.id,
+                    run_input.requested_skill.args or "",
+                    run_input.requested_skill.raw_invocation,
+                    run_input.requested_skill.command_name,
+                )
+                if run_input.requested_skill is not None
+                else None
+            )
+            typed_input = UserRunInput(run_input.message, requested_skill)
+        elif run_input.kind == "goal_proposal":
+            self._require_goal_run_capabilities(parsed.mode)
+            typed_input = GoalProposalRunInput(run_input.request_id)
+        else:
+            self._require_goal_run_capabilities(parsed.mode)
+            persistence = await self._ensure_thread_persistence()
+            goal = (await persistence.goal_store().inspect(parsed.thread_id)).goal
+            if (
+                goal is None
+                or goal.status != "active"
+                or goal.goal_id != run_input.goal_id
+                or goal.revision != run_input.goal_revision
+            ):
+                raise RpcError(-32000, "GOAL_CONTINUATION_STALE")
+            typed_input = GoalContinuationRunInput(
+                run_input.goal_id,
+                run_input.goal_revision,
+                run_input.reason,
+            )
         if (
             parsed.model_selection is not None
             and CAPABILITY["MODELS_SELECT"] not in self._connection_capabilities()
         ):
             raise RpcError(-32002, "MODELS_SELECT_CAPABILITY_REQUIRED")
 
-        requested_skill = (
-            RequestedSkill(
-                parsed.requested_skill.id,
-                parsed.requested_skill.args or "",
-                parsed.requested_skill.raw_invocation,
-                parsed.requested_skill.command_name,
-            )
-            if parsed.requested_skill is not None
-            else None
-        )
         connection = self._current_connection()
         command = StartRun(
             thread_id=parsed.thread_id,
             run_id=parsed.run_id,
-            message=message,
             mode=parsed.mode,
-            requested_skill=requested_skill,
+            input=typed_input,
             connection_id=connection.connection_id,
             command_binding_snapshot_id=connection.command_binding_snapshot_id,
             command_bindings=connection.command_bindings,
@@ -1374,7 +1405,8 @@ class AgentHost:
                         parsed.thread_id, reverted_turn_id
                     )
 
-            await self._record_workspace_git_checkpoint(parsed.thread_id, parsed.run_id)
+            if isinstance(typed_input, UserRunInput):
+                await self._record_workspace_git_checkpoint(parsed.thread_id, parsed.run_id)
 
         try:
             execution = await self._run_coordinator.start(
@@ -1473,6 +1505,20 @@ class AgentHost:
                     effective_registry,
                 )
             profile = spec.runtime_profile
+            dynamic_blocks = []
+            active_goal = None
+            goal_store_factory = getattr(persistence, "goal_store", None)
+            if (
+                command.mode == "build"
+                and command.input.kind != "goal_proposal"
+                and goal_store_factory is not None
+            ):
+                inspection = await goal_store_factory().inspect(command.thread_id)
+                if inspection.goal is not None and inspection.goal.status == "active":
+                    from harness_agent.goals.context import goal_context_block
+
+                    active_goal = inspection.goal
+                    dynamic_blocks.append(goal_context_block(inspection.goal))
             context_snapshot = ContextLifecycle(
                 self._workspace,
                 home=self._config_home,
@@ -1484,6 +1530,7 @@ class AgentHost:
                     for blocks in self._plugin_context_blocks_by_source.values()
                     for block in blocks
                 ),
+                dynamic_blocks=tuple(dynamic_blocks),
             )
             idle_duration_ms = await self._top_level_idle_duration_ms(
                 persistence, command.thread_id
@@ -1495,6 +1542,14 @@ class AgentHost:
                 created_at_ms=int(time.time() * 1000),
                 context_snapshot_id=context_snapshot.snapshot_id,
             )
+            goal_binding = None
+            if active_goal is not None:
+                from harness_agent.goals.context import goal_run_binding
+
+                goal_binding = goal_run_binding(
+                    active_goal,
+                    actual_primary_profile_id=binding.actual_primary.profile_id,
+                )
             return RunPreparation(
                 resolved_execution_binding=resolved,
                 execution_binding=binding,
@@ -1503,6 +1558,7 @@ class AgentHost:
                 skill_registry=effective_registry,
                 requested_skill=requested_skill,
                 context_snapshot=context_snapshot,
+                goal_binding=goal_binding,
                 idle_duration_ms=idle_duration_ms,
                 catalog_skill_ids=tuple(
                     record.skill_id for record in effective_registry.records
@@ -2000,7 +2056,13 @@ class AgentHost:
         threads = await (await self._ensure_thread_persistence()).list_threads(parsed.limit)
         return {"threads": [_thread_summary_payload(thread) for thread in threads]}
 
-    async def _handle_threads_open(self, params: dict[str, Any], _id: str) -> dict[str, object]:
+    async def _handle_threads_open(
+        self,
+        params: dict[str, Any],
+        _id: str,
+        *,
+        assume_idle: bool = False,
+    ) -> dict[str, object]:
         """读取当前 project 的一个 thread Transcript 历史，不以 checkpoint 兜底。"""
         self._require_threads_capability()
         parsed = ThreadsOpenParams.model_validate(params)
@@ -2021,6 +2083,17 @@ class AgentHost:
             parsed.thread_id,
             home=self._config_home,
         )
+        from harness_agent.goals.models import activity_to_wire, goal_to_wire, pending_to_wire
+
+        goal_store = persistence.goal_store()
+        if assume_idle or not await self._run_coordinator.is_active(parsed.thread_id):
+            # Host 重启后不会再有旧 Run 负责终态收敛；打开空闲 Thread 时先把
+            # 中断中的 proposal/排队 mutation 恢复成可安全继续的 canonical 状态。
+            await goal_store.reconcile(
+                thread_id=parsed.thread_id,
+                now_ms=int(time.time() * 1000),
+            )
+        goal_snapshot = await goal_store.inspect(parsed.thread_id)
         return {
             "thread": _thread_summary_payload(opened.summary),
             "messages": [_thread_message_payload(message) for message in opened.messages],
@@ -2032,13 +2105,16 @@ class AgentHost:
             },
             "thread_mode": thread_mode.value if thread_mode is not None else None,
             "compose_progress": progress,
+            "goal": goal_to_wire(goal_snapshot.goal),
+            "goal_pending": pending_to_wire(goal_snapshot.pending),
+            "goal_activities": [activity_to_wire(item) for item in goal_snapshot.activities],
         }
 
     async def _handle_threads_watch(self, params: dict[str, Any], _id: str) -> dict[str, object]:
         """仅在 Thread 空闲时原子读取历史并登记当前 Connection 的观察关系。"""
         parsed = ThreadsOpenParams.model_validate(params)
         async with self._run_coordinator.idle_thread(parsed.thread_id):
-            result = await self._handle_threads_open(params, _id)
+            result = await self._handle_threads_open(params, _id, assume_idle=True)
             self._connection_watches().add(parsed.thread_id)
             return result
 
@@ -2261,6 +2337,95 @@ class AgentHost:
                 }
         except RunError as exc:
             raise self._run_rpc_error(exc) from exc
+
+    async def _handle_goal_inspect(self, params: dict[str, Any], _id: str) -> dict[str, object]:
+        """返回 current/pending/latest evaluation；读取不取得 Thread maintenance 锁。"""
+        from harness_agent.goals.models import goal_to_wire, pending_to_wire
+
+        parsed = GoalInspectParams.model_validate(params)
+        persistence = await self._ensure_thread_persistence()
+        try:
+            await persistence.open_thread(parsed.thread_id)
+            snapshot = await persistence.goal_store().inspect(parsed.thread_id)
+        except ThreadPersistenceError as exc:
+            if str(exc) == "THREAD_NOT_FOUND":
+                raise RpcError(-32004, "THREAD_NOT_FOUND") from exc
+            raise
+        return {
+            "goal": goal_to_wire(snapshot.goal),
+            "pending": pending_to_wire(snapshot.pending),
+            "latest_evaluation": snapshot.latest_evaluation,
+        }
+
+    async def _handle_goal_request(self, params: dict[str, Any], _id: str) -> dict[str, object]:
+        """持久化 Goal 意图；空闲返回 ready，运行中保持 queued。"""
+        from harness_agent.goals.models import GoalStoreError, pending_to_wire
+
+        parsed = GoalRequestParams.model_validate(params)
+        persistence = await self._ensure_thread_persistence()
+        try:
+            result = await persistence.goal_store().request(
+                thread_id=parsed.thread_id,
+                request_id=parsed.request_id,
+                kind=parsed.kind,
+                input_text=parsed.input_text,
+                expected_goal_id=parsed.expected_goal_id,
+                expected_revision=parsed.expected_revision,
+                ready=not await self._run_coordinator.is_active(parsed.thread_id),
+                now_ms=int(time.time() * 1000),
+            )
+        except GoalStoreError as exc:
+            raise self._goal_rpc_error(exc.code) from exc
+        return {
+            "disposition": result.disposition,
+            "pending": pending_to_wire(result.pending),
+        }
+
+    async def _handle_goal_mutate(self, params: dict[str, Any], _id: str) -> dict[str, object]:
+        """应用或排队 Goal lifecycle mutation，返回持久权威投影。"""
+        from harness_agent.goals.models import GoalStoreError, goal_to_wire, pending_to_wire
+
+        parsed = GoalMutateParams.model_validate(params)
+        persistence = await self._ensure_thread_persistence()
+        action = parsed.action.kind
+        if action not in {"pause", "resume", "clear", "cancel_pending"}:
+            raise self._goal_rpc_error("GOAL_NOT_ACTIVE")
+        try:
+            result = await persistence.goal_store().mutate(
+                thread_id=parsed.thread_id,
+                operation_id=parsed.operation_id,
+                expected_goal_id=parsed.expected_goal_id,
+                expected_revision=parsed.expected_revision,
+                action=action,
+                apply_now=not await self._run_coordinator.is_active(parsed.thread_id),
+                now_ms=int(time.time() * 1000),
+            )
+        except GoalStoreError as exc:
+            raise self._goal_rpc_error(exc.code) from exc
+        continuation = None
+        if result.continuation is not None:
+            continuation = {
+                "continuation_id": result.continuation.continuation_id,
+                "goal_id": result.continuation.goal_id,
+                "goal_revision": result.continuation.goal_revision,
+                "reason": result.continuation.reason,
+            }
+        return {
+            "disposition": result.disposition,
+            "goal": goal_to_wire(result.goal),
+            "pending": pending_to_wire(result.pending),
+            "continuation": continuation,
+        }
+
+    @staticmethod
+    def _goal_rpc_error(code: str) -> RpcError:
+        """把稳定 Goal 错误码映射为 canonical JSON-RPC data。"""
+        contract = ERROR_CODES.get(code, {"jsonrpc_code": -32010, "retryable": False})
+        return RpcError(
+            int(contract["jsonrpc_code"]),
+            code,
+            {"code": code, "retryable": bool(contract["retryable"])},
+        )
 
     async def _handle_compose_inspect(self, params: dict[str, Any], _id: str) -> dict[str, object]:
         """只读投影 Compose Thread 的当前 Work Item；不触发分类或 typed 交互。"""
@@ -3970,6 +4135,138 @@ class AgentHost:
             self._workspace_execution_resources = WorkspaceExecutionResourcePool()
         return self._workspace_execution_resources
 
+    async def _reconcile_goal_terminal(self, run: RunState, _port: Any) -> None:
+        """在 Run 终态事件前应用一个 queued Goal write，并把后续动作写入 context。"""
+        from harness_agent.goals.models import goal_to_wire, pending_to_wire
+
+        if run.persistence is None and not self._thread_persistence_enabled():
+            return
+        persistence = run.persistence or await self._ensure_thread_persistence()
+        store = persistence.goal_store()
+        run_input = getattr(getattr(run, "start", None), "input", None)
+        if (
+            getattr(run, "cancel_requested", False)
+            and getattr(run_input, "kind", None) == "goal_proposal"
+        ):
+            inspected = await store.inspect(run.thread_id)
+            pending = inspected.pending
+            if (
+                pending is not None
+                and pending.request_id == getattr(run_input, "request_id", None)
+            ):
+                await store.cancel_proposal(
+                    pending.request_id,
+                    now_ms=int(time.time() * 1000),
+                )
+                inspected = await store.inspect(run.thread_id)
+            run.context_summary["goal"] = goal_to_wire(inspected.goal)
+            run.context_summary["goal_pending"] = pending_to_wire(inspected.pending)
+            run.context_summary["goal_reconcile"] = {"reason": "cancel_pending"}
+            return
+
+        reconciled = await store.reconcile(
+            run.thread_id,
+            now_ms=int(time.time() * 1000),
+        )
+        if not reconciled.changed:
+            return
+        run.context_summary["goal"] = goal_to_wire(reconciled.goal)
+        run.context_summary["goal_pending"] = pending_to_wire(reconciled.pending)
+        run.context_summary["goal_reconcile"] = {"reason": reconciled.reason}
+        if reconciled.proposal_ready and reconciled.pending is not None:
+            run.context_summary["goal_proposal_ready"] = {
+                "request_id": reconciled.pending.request_id,
+            }
+        if reconciled.continuation is not None:
+            run.context_summary["goal_continuation"] = {
+                "continuation_id": reconciled.continuation.continuation_id,
+                "goal_id": reconciled.continuation.goal_id,
+                "goal_revision": reconciled.continuation.goal_revision,
+                "reason": reconciled.continuation.reason,
+            }
+
+    async def _provide_goal_services(self, run: RunState) -> Any:
+        """组装 Goal proposal 的有界只读模型调用；复用该 Run 的实际 primary profile。"""
+        from harness_agent.extensions.providers.harness_gateway import (
+            create_openai_compatible_model,
+        )
+        from harness_agent.goals.models import GoalStoreError
+        from harness_agent.goals.proposal import (
+            GoalClarification,
+            GoalProposalContext,
+            GoalProposalServices,
+            generate_goal_draft,
+        )
+        from harness_agent.goals.repository import (
+            GoalRepositoryBudget,
+            create_goal_repository_tools,
+        )
+
+        config = self._config
+        binding = run.preparation.execution_binding
+        if config is None or binding is None:
+            raise ConfigError("MODEL_CONFIGURATION_REQUIRED")
+        model_settings = config.require_model(binding.actual_primary.profile_id)
+        repository_budget = GoalRepositoryBudget()
+        repository_tools = create_goal_repository_tools(self._workspace, repository_budget)
+
+        async def draft(context: GoalProposalContext) -> Any:
+            """调用 primary chat model，只暴露绑定工作区的四个只读工具。"""
+            provider_lease = await self._provider_client_pool.acquire(model_settings)
+            try:
+                model = create_openai_compatible_model(
+                    model_settings,
+                    async_client=provider_lease.value,
+                )
+                try:
+                    proposal = await generate_goal_draft(
+                        model,
+                        context,
+                        repository_tools=repository_tools,
+                        repository_budget=repository_budget,
+                    )
+                except GoalStoreError as exc:
+                    run.diagnostic_log.warn(
+                        "goal.proposal.model.invalid",
+                        {
+                            "response_mode": "forced_tool_schema",
+                            "error_code": exc.code,
+                            **repository_budget.diagnostic_fields(),
+                        },
+                    )
+                    raise
+                run.diagnostic_log.info(
+                    "goal.proposal.model.completed",
+                    {
+                        "response_mode": "forced_tool_schema",
+                        "readiness": (
+                            "needs_clarification"
+                            if isinstance(proposal, GoalClarification)
+                            else "ready"
+                        ),
+                        "assumption_count": len(getattr(proposal, "assumptions", ())),
+                        "criterion_count": len(getattr(proposal, "criteria", ())),
+                        "question_count": len(getattr(proposal, "questions", ())),
+                        **repository_budget.diagnostic_fields(),
+                    },
+                )
+                return proposal
+            finally:
+                await provider_lease.release()
+
+        persistence = run.persistence or await self._ensure_thread_persistence()
+        opened = await persistence.open_thread(run.thread_id)
+        recent_messages = tuple(
+            f"{message.kind}：{message.content}"
+            for message in opened.messages[-8:]
+        )
+        return GoalProposalServices(
+            store=persistence.goal_store(),
+            draft=draft,
+            now_ms=lambda: int(time.time() * 1000),
+            recent_messages=recent_messages,
+        )
+
     async def _provide_compose_services(self, run: Any) -> EngineDriverServices | None:
         """按 Run 上下文组装 Work Item engine 依赖；配置缺失时返回 None。"""
         config = self._config
@@ -4931,6 +5228,15 @@ class AgentHost:
             raise RpcError(-32002, "CONTEXT_CAPABILITY_REQUIRED")
         if not self._thread_persistence_enabled():
             raise RpcError(-32002, "CONTEXT_COMPACTION_UNAVAILABLE")
+
+    def _require_goal_run_capabilities(self, mode: str) -> None:
+        """Goal 内部 Run 只允许 Build，且 owner 必须能管理并处理 review。"""
+        if mode != "build":
+            raise RpcError(-32602, "GOAL_MODE_UNAVAILABLE")
+        if CAPABILITY["GOAL_MANAGE"] not in self._connection_capabilities():
+            raise RpcError(-32002, "CAPABILITY_REQUIRED")
+        if "goal" not in self._connection_handles():
+            raise RpcError(-32602, "GOAL_INTERACTION_UNSUPPORTED")
 
     async def _ensure_thread_persistence(self) -> ThreadPersistence:
         """延迟打开用户级数据库；配置读取不应因为存储创建而被阻塞。"""

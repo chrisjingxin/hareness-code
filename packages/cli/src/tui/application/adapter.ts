@@ -276,7 +276,9 @@ export type TuiIntent =
   | { type: "approval"; decision: ApprovalDecision }
   | { type: "directory-trust"; decision: DirectoryTrustDecision }
   | { type: "plan"; decision: import("../../interactive/types").PlanDecision; feedback?: string }
+  | { type: "goal"; response: import("../../interactive/types").GoalReviewResponse }
   | { type: "plan-view-close" }
+  | { type: "goal-view-close" }
   | { type: "question"; answers: Record<string, string[]> }
   | { type: "tool-toggle"; toolId: string }
   | { type: "btw-close" }
@@ -601,8 +603,14 @@ class TuiAdapterImpl implements TuiAdapter {
       case "plan":
         await this.respondPlan(intent.decision, intent.feedback)
         return
+      case "goal":
+        await this.respondGoal(intent.response)
+        return
       case "plan-view-close":
         await this.routeDispatch({ type: "plan-view.close" })
+        return
+      case "goal-view-close":
+        await this.routeDispatch({ type: "goal-view.close" })
         return
       case "question":
         await this.respondQuestion(intent.answers)
@@ -1865,6 +1873,17 @@ class TuiAdapterImpl implements TuiAdapter {
       type: "interaction.respond",
       requestId: plan.requestId,
       response: { kind: "plan", decision, feedback },
+    })
+  }
+
+  /** 回写 Goal 人工审核决定。 */
+  private async respondGoal(response: import("../../interactive/types").GoalReviewResponse): Promise<void> {
+    const goal = this.controller.getSnapshot().interaction
+    if (!goal || goal.type !== "goal") return
+    await this.routeDispatch({
+      type: "interaction.respond",
+      requestId: goal.requestId,
+      response: { kind: "goal", ...response },
     })
   }
 

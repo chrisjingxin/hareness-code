@@ -459,6 +459,8 @@ export function Za38Tui(options: RenderedTuiOptions) {
     onDirectoryTrust: (decision: DirectoryTrustDecision) => { void adapter.dispatch({ type: "directory-trust", decision }) },
     onPlan: (decision: PlanDecision, feedback?: string) => { void adapter.dispatch({ type: "plan", decision, feedback }) },
     onPlanViewClose: () => { void adapter.dispatch({ type: "plan-view-close" }) },
+    onGoal: (response: import("../interactive/types").GoalReviewResponse) => { void adapter.dispatch({ type: "goal", response }) },
+    onGoalViewClose: () => { void adapter.dispatch({ type: "goal-view-close" }) },
     onQuestion: (answers: Record<string, string[]>) => { void adapter.dispatch({ type: "question", answers }) },
     onOpenChildTimeline: (executionId: string) => { void adapter.dispatch({ type: "child-timeline-open", executionId }) },
     sidebarVisible: sidebarVisibility.visible,

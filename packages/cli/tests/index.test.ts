@@ -104,7 +104,7 @@ test("无头 CLI 不声明 Interaction handler", () => {
     "config.read",
   ])
   expect(clientInteractionHandles(headless)).toEqual([])
-  expect(clientInteractionHandles(interactive)).toEqual(["approval", "question", "directory_trust", "plan"])
+  expect(clientInteractionHandles(interactive)).toEqual(["approval", "question", "directory_trust", "plan", "goal"])
   expect(clientCapabilities(interactive)).toContain("threads.read")
   expect(clientCapabilities(interactive)).toContain("context.manage")
   // ZC-114：内置 Web 不再直连 Host，CLI 不声明 attachment/control 能力。

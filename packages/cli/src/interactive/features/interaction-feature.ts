@@ -1,6 +1,6 @@
 /** Interaction Feature：管理审批/问答 Interaction 卡片、定时超时与响应校验。 */
 
-import type { ApprovalResponse, DirectoryTrustResponse, InteractionRequestEnvelope, InteractionResponse, PlanResponse } from "@za38/protocol"
+import type { ApprovalResponse, DirectoryTrustResponse, GoalInteractionResponse, InteractionRequestEnvelope, InteractionResponse, PlanResponse } from "@za38/protocol"
 import type { Clock, IntentOutcome, InteractiveInteraction } from "../ports"
 import { appendNotice, applyInteractionRequest, markInteractionResponded, markInteractionTimeout } from "../state"
 import type { FeatureContext } from "./types"
@@ -17,11 +17,13 @@ export type ClientInteractionResponse =
   | { request_id: string; kind: "question"; answers: Record<string, string[]> }
   | { request_id: string; kind: "directory_trust"; decision: DirectoryTrustResponse["decision"] }
   | { request_id: string; kind: "plan"; decision: PlanResponse["decision"]; feedback?: string }
+  | ({ request_id: string; kind: "goal" } & GoalInteractionResponse)
 
 export class InteractionFeature {
   pendingInteraction: PendingInteraction | null = null
   private readonly queuedInteractions: PendingInteraction[] = []
   private planViewer: Extract<InteractiveInteraction, { type: "plan" }> | null = null
+  private goalViewer: Extract<InteractiveInteraction, { type: "goal" }> | null = null
 
   close(ctx: FeatureContext): void {
     this.settlePendingInteraction(ctx)
@@ -34,6 +36,7 @@ export class InteractionFeature {
     )
     this.pendingInteraction = null
     this.planViewer = null
+    this.goalViewer = null
     this.queuedInteractions.length = 0
     for (const item of pending) {
       item.timerId?.()
@@ -60,7 +63,7 @@ export class InteractionFeature {
     return new Promise<InteractionResponse>(resolve => {
       let timerId: (() => void) | undefined
       // Plan 审阅与未明确指定有限超时的交互不设倒计时超时，允许用户从容阅读与批注
-      const timeoutMs = request.type === "plan" ? undefined : request.timeout_ms
+      const timeoutMs = request.type === "plan" || request.type === "goal" ? undefined : request.timeout_ms
       const item: PendingInteraction = { request, resolve, timerId }
 
       if (typeof timeoutMs === "number" && timeoutMs > 0 && Number.isFinite(timeoutMs)) {
@@ -84,6 +87,7 @@ export class InteractionFeature {
 
   private activateInteraction(item: PendingInteraction, ctx: FeatureContext): void {
     this.planViewer = null
+    this.goalViewer = null
     this.pendingInteraction = item
     ctx.commit(current => applyInteractionRequest(current, item.request))
     ctx.publish()
@@ -171,6 +175,34 @@ export class InteractionFeature {
       return { status: "accepted" }
     }
 
+    if (pending.request.type === "goal") {
+      if (response.kind !== "goal") {
+        return { status: "rejected", code: "invalid-argument", message: "响应类型与请求不匹配" }
+      }
+      if (!pending.request.payload.decisions.includes(response.decision)) {
+        ctx.commit(current => appendNotice(current, "不支持的目标审核决定，已忽略。"))
+        return { status: "rejected", code: "invalid-argument", message: "Unsupported goal decision" }
+      }
+      if (response.decision === "edited" && (!response.criteria.length || response.criteria.some(item => !item.trim()))) {
+        ctx.commit(current => appendNotice(current, "编辑后的验收标准不能为空。"))
+        return { status: "rejected", code: "invalid-argument", message: "Edited goal criteria are required" }
+      }
+      if (response.decision === "rejected" && !response.feedback?.trim()) {
+        ctx.commit(current => appendNotice(current, "驳回目标时必须填写修改反馈。"))
+        return { status: "rejected", code: "invalid-argument", message: "Rejected goal feedback is required" }
+      }
+      const resolved: InteractionResponse = {
+        request_id: requestId,
+        type: "goal",
+        decision: response.decision,
+        ...(response.decision === "edited" ? { criteria: response.criteria.map(item => item.trim()) } : {}),
+        ...(response.feedback?.trim() ? { feedback: response.feedback.trim() } : {}),
+      } as InteractionResponse
+      this.resolvePending(pending, resolved, ctx)
+      this.promoteQueuedInteraction(ctx)
+      return { status: "accepted" }
+    }
+
     if (response.kind !== "question") {
       return { status: "rejected", code: "invalid-argument", message: "响应类型与请求不匹配" }
     }
@@ -214,6 +246,8 @@ export class InteractionFeature {
       ? "answered"
       : response.type === "plan"
         ? response.decision === "approved" ? "approved" : response.decision === "abandoned" ? "rejected" : "answered"
+      : response.type === "goal"
+        ? response.decision === "rejected" ? "rejected" : response.decision === "cancelled" ? "cancelled" : "approved"
       : response.decision === "reject" || response.decision === "reject_with_feedback"
         ? "rejected"
         : "approved"
@@ -234,15 +268,18 @@ export class InteractionFeature {
     if (request.type === "plugin_consent") {
       return { request_id: request.request_id, type: "plugin_consent", decision: "cancel" }
     }
+    if (request.type === "goal") {
+      return { request_id: request.request_id, type: "goal", decision: "cancelled" }
+    }
     return { request_id: request.request_id, type: "question", answers: {} }
   }
 
   /** 把 pending Interaction 转成共享 DTO；deadline 由注入 clock 计算。 */
   interactionDto(pending: PendingInteraction | null, clock: Clock): InteractiveInteraction | null {
-    if (!pending) return this.planViewer
+    if (!pending) return this.goalViewer ?? this.planViewer
     const request = pending.request
     if (request.type === "plugin_consent") return null
-    const timeoutMs = request.type === "plan" ? undefined : request.timeout_ms
+    const timeoutMs = request.type === "plan" || request.type === "goal" ? undefined : request.timeout_ms
     const deadlineAtMs = typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0
       ? clock.now() + timeoutMs
       : Number.POSITIVE_INFINITY
@@ -293,6 +330,21 @@ export class InteractionFeature {
       }
     }
 
+    if (request.type === "goal") {
+      const payload = request.payload
+      return {
+        type: "goal",
+        requestId: request.request_id,
+        proposalKind: payload.proposal_kind,
+        objective: payload.objective,
+        assumptions: payload.assumptions,
+        criteria: payload.criteria,
+        decisions: payload.decisions,
+        deadlineAtMs,
+        ...(agentId ? { agentId } : {}),
+      }
+    }
+
     return {
       type: "question",
       requestId: request.request_id,
@@ -321,6 +373,7 @@ export class InteractionFeature {
     virtualPath: string
     displayPath: string
   }, ctx: FeatureContext): void {
+    this.goalViewer = null
     this.planViewer = {
       type: "plan",
       requestId: `view-plan:${input.threadId}`,
@@ -342,6 +395,46 @@ export class InteractionFeature {
       return { status: "rejected", code: "not-found", message: "No plan viewer is open" }
     }
     this.planViewer = null
+    ctx.publish()
+    return { status: "accepted" }
+  }
+
+  /** 打开 `/goal show` 的本地只读投影，不创建 Host Interaction。 */
+  openGoalViewer(snapshot: import("@za38/protocol").GoalInspectResult, threadId: string, ctx: FeatureContext): void {
+    const goal = snapshot.goal
+    const pending = snapshot.pending
+    this.planViewer = null
+    this.goalViewer = {
+      type: "goal",
+      requestId: `view-goal:${threadId}`,
+      objective: goal?.objective ?? pending?.proposed_objective ?? pending?.input_text ?? "尚未设置目标",
+      assumptions: goal?.assumptions ?? pending?.proposed_assumptions ?? [],
+      criteria: goal?.criteria.map(item => item.text) ?? pending?.proposed_criteria ?? [],
+      decisions: [],
+      deadlineAtMs: Number.POSITIVE_INFINITY,
+      readOnly: true,
+      ...(goal ? {
+        status: goal.status,
+        revision: goal.revision,
+        ...(goal.note ? { note: goal.note } : {}),
+        ...(goal.prior_blocker ? { priorBlocker: goal.prior_blocker } : {}),
+        graderLabel: goal.grader.selection === "inherit"
+          ? "继承主模型"
+          : goal.grader.actual_profile_id ?? goal.grader.configured_profile_id ?? "独立模型",
+        maxIterations: goal.max_iterations,
+      } : {}),
+      ...(pending ? { pendingStatus: pending.status, pendingInput: pending.input_text } : {}),
+      activities: ctx.getState().goalActivities,
+    }
+    ctx.publish()
+  }
+
+  /** 关闭 `/goal show` 的本地查看器。 */
+  closeGoalViewer(ctx: FeatureContext): IntentOutcome {
+    if (!this.goalViewer) {
+      return { status: "rejected", code: "not-found", message: "No goal viewer is open" }
+    }
+    this.goalViewer = null
     ctx.publish()
     return { status: "accepted" }
   }

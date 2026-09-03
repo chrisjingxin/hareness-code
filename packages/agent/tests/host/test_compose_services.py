@@ -105,7 +105,7 @@ async def test_compose_services_resolve_stage_spec_from_prepared_profile(
             "run.start",
             {
                 "mode": "compose",
-                "message": "实现站内搜索",
+                "input": {"kind": "user", "message": "实现站内搜索"},
                 "thread_id": thread_id,
                 "run_id": "run-services",
             },

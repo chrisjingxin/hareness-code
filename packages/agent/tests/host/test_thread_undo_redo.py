@@ -224,7 +224,7 @@ async def test_new_run_after_conversation_undo_physically_truncates(tmp_path: Pa
     await server.dispatch(
         _request(
             "run.start",
-            {"mode": "build", "message": "Turn 3: 新分支", "thread_id": thread_id, "run_id": "run-3"},
+            {"mode": "build", "input": {"kind": "user", "message": "Turn 3: 新分支"}, "thread_id": thread_id, "run_id": "run-3"},
             "run-3",
         )
     )
@@ -251,7 +251,7 @@ async def test_run_start_records_checkpoint_under_user_turn_id(tmp_path: Path) -
     await server.dispatch(
         _request(
             "run.start",
-            {"mode": "build", "message": "hello checkpoint", "thread_id": thread_id, "run_id": "run-a"},
+            {"mode": "build", "input": {"kind": "user", "message": "hello checkpoint"}, "thread_id": thread_id, "run_id": "run-a"},
             "run-a",
         )
     )
