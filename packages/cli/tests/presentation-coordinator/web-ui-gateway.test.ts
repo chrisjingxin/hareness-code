@@ -93,12 +93,13 @@ function createFakeExplorer(): FakeExplorer {
 
 /** 包装真实 controller 并对 dispatch 计数；用于重放/并发去重断言。 */
 function createCountingController(controller: InteractiveController) {
-  const counting = { dispatchCalls: 0 }
+  const counting = { dispatchCalls: 0, intents: [] as InteractiveIntent[] }
   const wrapped: InteractiveController = {
     getSnapshot: () => controller.getSnapshot(),
     subscribe: listener => controller.subscribe(listener),
     dispatch: async (intent: InteractiveIntent) => {
       counting.dispatchCalls += 1
+      counting.intents.push(intent)
       return controller.dispatch(intent)
     },
     close: () => controller.close(),
@@ -268,6 +269,56 @@ test("command.execute 无 argument（Web adapter 真实发射形状）受理且�
   expect(system.controller.getSnapshot().currentThreadId).toBeNull()
   // 新建只清 conversation scope，全局 Thread catalog 保留（侧栏历史立即可切回）。
   expect(system.controller.getSnapshot().catalogs.threads.items).toEqual(before)
+})
+
+test("child-timeline.open/leave：真实 Browser 帧路由到 Controller 且不触发 Web fail-closed", async () => {
+  const harness = makeHarness({ initialThreadId: "thread-1" })
+  const { wrapped, counting } = createCountingController(harness.controller)
+  const system = createSystem({ controller: wrapped })
+  await flush()
+  const { ch } = await connectAndReady(system)
+
+  sendClient(ch, {
+    type: "interactive.intent",
+    requestId: "child-open",
+    revision: 1,
+    intent: { type: "child-timeline.open", executionId: "child-abc123" },
+  })
+  await waitFor(() => ch.sent.some(message => message.type === "intent.outcome" && message.requestId === "child-open"))
+  expect(ch.sent.find(message => message.type === "intent.outcome" && message.requestId === "child-open")).toEqual({
+    type: "intent.outcome",
+    requestId: "child-open",
+    domain: "interactive",
+    outcome: { status: "accepted" },
+  })
+  expect(counting.intents).toEqual([{ type: "child-timeline.open", executionId: "child-abc123" }])
+  expect(system.controller.getSnapshot().childTimelineExecutionId).toBe("child-abc123")
+  expect(ch.closed).toEqual([])
+  expect(system.coordinator.getSnapshot().phase).toBe("web-active")
+
+  sendClient(ch, {
+    type: "interactive.intent",
+    requestId: "child-leave",
+    revision: 1,
+    intent: { type: "child-timeline.leave" },
+  })
+  await waitFor(() => ch.sent.some(message => message.type === "intent.outcome" && message.requestId === "child-leave"))
+  expect(ch.sent.find(message => message.type === "intent.outcome" && message.requestId === "child-leave")).toEqual({
+    type: "intent.outcome",
+    requestId: "child-leave",
+    domain: "interactive",
+    outcome: { status: "accepted" },
+  })
+  expect(counting.intents).toEqual([
+    { type: "child-timeline.open", executionId: "child-abc123" },
+    { type: "child-timeline.leave" },
+  ])
+  expect(system.controller.getSnapshot().childTimelineExecutionId).toBeNull()
+  expect(ch.closed).toEqual([])
+  expect(system.coordinator.getSnapshot().phase).toBe("web-active")
+
+  await system.gateway.close()
+  await harness.controller.close()
 })
 
 test("interactive.intent 受理：intent.outcome 带 domain=interactive 且与 requestId 一一对应", async () => {

@@ -146,7 +146,12 @@ const INTENT_TYPES = new Set([
   "confirmation.resolve",
   "approval-mode.cycle",
   "approval-mode.set",
+  "child-timeline.open",
+  "child-timeline.leave",
 ])
+
+// executionId 与 threadId 都是运行资源标识，沿用 thread.open 的 256 字符上限。
+const MAX_EXECUTION_ID_LENGTH = 256
 
 function isInteractiveIntent(value: unknown): value is InteractiveIntent {
   if (!isRecord(value)) return false
@@ -198,6 +203,11 @@ function isInteractiveIntent(value: unknown): value is InteractiveIntent {
       return exactFields(value, ["type"])
     case "approval-mode.set":
       return exactFields(value, ["type", "mode"]) && APPROVAL_MODE_CYCLE.some(mode => mode === value.mode)
+    case "child-timeline.open":
+      return exactFields(value, ["type", "executionId"])
+        && isNonEmptyString(value.executionId, MAX_EXECUTION_ID_LENGTH)
+    case "child-timeline.leave":
+      return exactFields(value, ["type"])
     default:
       return false
   }

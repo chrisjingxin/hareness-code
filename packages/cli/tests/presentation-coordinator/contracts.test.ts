@@ -103,6 +103,8 @@ const clientMessages: WebUiClientMessage[] = [
   { type: "interactive.intent", requestId: "r-14", revision: 1, intent: { type: "confirmation.resolve", confirmationId: "clear-thread", confirmed: false } },
   { type: "interactive.intent", requestId: "r-15", revision: 1, intent: { type: "approval-mode.cycle" } },
   { type: "interactive.intent", requestId: "r-16", revision: 1, intent: { type: "approval-mode.set", mode: "auto-edit" } },
+  { type: "interactive.intent", requestId: "r-17", revision: 1, intent: { type: "child-timeline.open", executionId: "child-abc123" } },
+  { type: "interactive.intent", requestId: "r-18", revision: 1, intent: { type: "child-timeline.leave" } },
   { type: "workspace.intent", requestId: "w-1", revision: 1, intent: { type: "workspace.load" } },
   { type: "workspace.intent", requestId: "w-2", revision: 1, intent: { type: "workspace.refresh" } },
   { type: "workspace.intent", requestId: "w-3", revision: 1, intent: { type: "workspace.toggle-directory", path: "src" } },
@@ -252,6 +254,13 @@ test("interactive.intent：各 type 的最小字段校验", () => {
   expect(parseClientFrame(frame({ type: "approval-mode.set", mode: "auto", extra: 1 }))).toBeUndefined()
   expect(parseClientFrame(frame({ type: "approval-mode.set", mode: "unsupported" }))).toBeUndefined()
   expect(parseClientFrame(frame({ type: "skill.clear", extra: 1 }))).toBeUndefined()
+  // child-timeline.open：executionId 与 thread.open 同为资源标识，采用 256 字符上限
+  expect(parseClientFrame(frame({ type: "child-timeline.open" }))).toBeUndefined()
+  expect(parseClientFrame(frame({ type: "child-timeline.open", executionId: "" }))).toBeUndefined()
+  expect(parseClientFrame(frame({ type: "child-timeline.open", executionId: "x".repeat(257) }))).toBeUndefined()
+  expect(parseClientFrame(frame({ type: "child-timeline.open", executionId: "x".repeat(256) }))).not.toBeUndefined()
+  expect(parseClientFrame(frame({ type: "child-timeline.open", executionId: "child-abc123", extra: 1 }))).toBeUndefined()
+  expect(parseClientFrame(frame({ type: "child-timeline.leave", extra: 1 }))).toBeUndefined()
 })
 
 test("workspace.intent：5 个 intent 白名单与路径字段校验", () => {
