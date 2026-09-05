@@ -16,6 +16,7 @@ from typing import Any
 
 from langchain.agents.middleware.types import AgentMiddleware
 from langchain.tools.tool_node import ToolCallRequest
+from langchain_core.messages import ToolMessage
 
 from harness_agent.runtime.agent_catalog import DelegationPolicy
 from harness_agent.runtime.agent_execution import AgentExecutionRegistry, ExecutionRegistryError
@@ -110,6 +111,12 @@ _CURRENT_DELEGATION_CALL: ContextVar[DelegationCallContext | None] = ContextVar(
     default=None,
 )
 
+_DELEGATION_TIMEOUT_TOOL_MESSAGE = """子代理未在执行时限内完成，已终止。
+
+- status: timed_out
+- error_code: DELEGATION_TIMEOUT
+- 主对话仍可继续；请根据已有信息决定是否缩小任务后重试。"""
+
 
 def current_delegation_call() -> DelegationCallContext:
     """返回受控 task handler 绑定的调用上下文，缺失时 fail closed。"""
@@ -141,12 +148,20 @@ class DelegationContextMiddleware(AgentMiddleware):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[Any]],
     ) -> Any:
-        """异步 task 调用在整个子图执行期间保留父上下文。"""
+        """异步 task 调用保留父上下文，并隔离预期的 child timeout。"""
         token = self._bind(request)
         if token is None:
             return await handler(request)
         try:
             return await handler(request)
+        except AgentDelegationError as exc:
+            if exc.code != "DELEGATION_TIMEOUT":
+                raise
+            return ToolMessage(
+                content=_DELEGATION_TIMEOUT_TOOL_MESSAGE,
+                tool_call_id=str(request.tool_call["id"]),
+                status="error",
+            )
         finally:
             _CURRENT_DELEGATION_CALL.reset(token)
 

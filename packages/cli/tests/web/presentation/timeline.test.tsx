@@ -244,6 +244,48 @@ describe("Timeline", () => {
     }
   })
 
+  test("task timeout 派出卡显示失败与稳定错误码", () => {
+    const interactive = makeInteractive({
+      timeline: [
+        toolItem({
+          id: "t-task-timeout",
+          name: "task",
+          arguments: JSON.stringify({
+            description: "执行一个会超时的子任务",
+            subagent_type: "general-purpose",
+          }),
+          output: "子代理未在执行时限内完成，已终止。\n\n- status: timed_out\n- error_code: DELEGATION_TIMEOUT",
+          status: "failed",
+        }),
+      ],
+    })
+    const Harness = (): ReactElement => {
+      const [snapshot, setSnapshot] = useState<WebAdapterSnapshot>(() => makeSnapshot({ interactive }))
+      const dispatch = (intent: WebIntent): void => {
+        if (intent.type === "tool-toggle") {
+          setSnapshot(prev => ({
+            ...prev,
+            expandedTools: new Set(prev.expandedTools).add(toolKey(intent.runId, intent.toolId)),
+          }))
+        }
+      }
+      return <Timeline snapshot={snapshot} dispatch={dispatch} />
+    }
+    const handle = render(<Harness />)
+    try {
+      const row = handle.container.querySelector<HTMLDivElement>(".tool-row")
+      expect(row?.classList.contains("tool-row-failed")).toBe(true)
+      expect(row?.querySelector(".tool-row-label")?.textContent).toBe("派出 general-purpose")
+      expect(row?.querySelector(".tool-row-status")?.getAttribute("aria-label")).toBe("失败")
+      act(() => { row?.querySelector<HTMLButtonElement>(".tool-row-header")?.click() })
+      const dispatchCard = handle.container.querySelector(".tool-detail-card[data-section=\"dispatch\"]")
+      expect(dispatchCard?.textContent).toContain("timed_out")
+      expect(dispatchCard?.textContent).toContain("DELEGATION_TIMEOUT")
+    } finally {
+      handle.unmount()
+    }
+  })
+
   test("Tool 行展示动词标签、主参数与副作用基调；原始工具名挂 tooltip", () => {
     const interactive = makeInteractive({
       timeline: [

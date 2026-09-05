@@ -2803,6 +2803,92 @@ async def test_real_hitl_rejection_prevents_file_write():
         assert not destination.exists()
 
 
+async def test_task_timeout_tool_error_allows_host_run_to_complete(tmp_path: Path) -> None:
+    """Host 将 timeout ToolMessage 投影为失败工具卡，但继续发出 run.completed。"""
+    from langchain_core.messages import AIMessageChunk, ToolMessage
+    from harness_agent.host.agent_host import AgentHost
+
+    class TimeoutTaskAgent:
+        """离线复现 task timeout 后主模型继续生成的最小 graph。"""
+
+        async def astream(self, _stream_input: object, **_kwargs: Any):
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(
+                        content="",
+                        tool_call_chunks=[
+                            {
+                                "name": "task",
+                                "args": '{"description":"执行超时任务","subagent_type":"general-purpose"}',
+                                "id": "timeout-task-1",
+                                "index": 0,
+                            }
+                        ],
+                    ),
+                    {},
+                ),
+            )
+            yield (
+                "updates",
+                {
+                    "tools": {
+                        "messages": [
+                            ToolMessage(
+                                content=(
+                                    "子代理未在执行时限内完成，已终止。\n\n"
+                                    "- status: timed_out\n"
+                                    "- error_code: DELEGATION_TIMEOUT"
+                                ),
+                                tool_call_id="timeout-task-1",
+                                status="error",
+                            )
+                        ]
+                    }
+                },
+            )
+            yield (
+                "messages",
+                (AIMessageChunk(content="主 Agent 已继续处理"), {}),
+            )
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    server = AgentHost(
+        agent=TimeoutTaskAgent(),
+        config_home=tmp_path / "home",
+        workspace=workspace,
+    )
+    frames = await _capture_server(server)
+    await server.dispatch(
+        _request(
+            "run.start",
+            {
+                "mode": "build",
+                "message": "委派超时任务",
+                "thread_id": "timeout-thread",
+                "run_id": "timeout-run",
+            },
+            "timeout-start",
+        )
+    )
+    await _wait_for(
+        frames,
+        lambda frame: frame.get("params", {}).get("type") == "run.completed",
+    )
+
+    events = [frame["params"] for frame in frames if frame.get("method") == "event"]
+    event_types = [event["type"] for event in events]
+    assert "tool.completed" in event_types
+    assert "content.delta" in event_types
+    assert event_types[-1] == "run.completed"
+    assert "run.failed" not in event_types
+    tool_completed = next(event for event in events if event["type"] == "tool.completed")
+    assert tool_completed["payload"]["result"]["is_error"] is True
+    assert "DELEGATION_TIMEOUT" in tool_completed["payload"]["result"]["content"]
+    await server.close()
+
+
 async def test_approve_thread_delete_rule_skips_later_deletions_in_same_thread():
     """delete_file 选择“本线程允许”后，同线程后续删除不再弹审批。
 

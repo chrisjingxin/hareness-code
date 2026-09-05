@@ -561,6 +561,57 @@ test("task 结论按 Markdown 渲染，任务与结论分区", async () => {
   }
 })
 
+test("task timeout 显示失败码但不把主 Run 渲染为失败", async () => {
+  registerCommonSyntaxParsers()
+  const run = { threadId: "thread-task-timeout", runId: "run-task-timeout" }
+  const started = startRun(createInitialState(), run, "委派超时任务")
+  const timeoutOutput = "子代理未在执行时限内完成，已终止。\n\n- status: timed_out\n- error_code: DELEGATION_TIMEOUT"
+  const state: InteractiveState = {
+    ...started,
+    activeRun: null,
+    activity: { kind: "completed", label: "已完成" },
+    timeline: [
+      started.timeline[0]!,
+      {
+        type: "tool",
+        tool: {
+          id: "t-task-timeout",
+          runId: run.runId,
+          name: "task",
+          arguments: JSON.stringify({
+            description: "执行一个会超时的子任务",
+            subagent_type: "general-purpose",
+          }),
+          output: timeoutOutput,
+          status: "failed",
+        },
+      },
+    ],
+  }
+  let setup: Awaited<ReturnType<typeof testRender>>
+  await act(async () => {
+    setup = await testRender(createElement(ThreadView, viewProps(snapshotOf(state), 120, 40)), { width: 120, height: 40 })
+  })
+  try {
+    let frame = setup.captureCharFrame()
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (frame.includes("DELEGATION_TIMEOUT")) break
+      await act(async () => {
+        await Bun.sleep(25)
+        await setup.flush()
+      })
+      frame = setup.captureCharFrame()
+    }
+    expect(frame).toContain("派出 general-purpose")
+    expect(frame).toContain("×")
+    expect(frame).toContain("timed_out")
+    expect(frame).toContain("DELEGATION_TIMEOUT")
+    expect(frame).not.toContain("运行失败")
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
 test("task 长结论默认折叠，点击展开后显示剩余行", async () => {
   registerCommonSyntaxParsers()
   const run = { threadId: "thread-task-expand", runId: "run-task-expand" }

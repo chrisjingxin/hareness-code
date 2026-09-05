@@ -99,6 +99,33 @@ test("v3 事件按 sequence 更新消息、工具和终态", () => {
   expect(state.lastRun).toMatchObject({ outcome: "completed", durationMs: 1340, usage: { inputTokens: 1200, outputTokens: 35 } })
 })
 
+test("task timeout 作为失败工具结果后仍归约为已完成 Run", () => {
+  let state = startRun(createInitialState(), run, "委派超时任务")
+  state = applyAgentEvent(state, event("tool.started", 1, { tool_call_id: "task-1", name: "task" }))
+  state = applyAgentEvent(state, event("tool.delta", 2, {
+    tool_call_id: "task-1",
+    arguments_delta: JSON.stringify({ description: "执行超时任务", subagent_type: "general-purpose" }),
+  }))
+  state = applyAgentEvent(state, event("tool.completed", 3, {
+    tool_call_id: "task-1",
+    result: {
+      content: "子代理未在执行时限内完成，已终止。\n\n- status: timed_out\n- error_code: DELEGATION_TIMEOUT",
+      is_error: true,
+    },
+  }))
+  state = applyAgentEvent(state, event("content.delta", 4, { text: "主 Agent 已继续处理" }))
+  state = applyAgentEvent(state, event("run.completed", 5, { duration_ms: 320, usage: { input_tokens: 1, output_tokens: 2 } }))
+
+  expect(tools(state)[0]).toMatchObject({
+    name: "task",
+    status: "failed",
+    output: expect.stringContaining("DELEGATION_TIMEOUT"),
+  })
+  expect(messages(state).at(-1)?.content).toBe("主 Agent 已继续处理")
+  expect(state.lastRun).toMatchObject({ outcome: "completed" })
+  expect(state.activity.kind).toBe("completed")
+})
+
 test("运行进度只存在于当前 Run，并在终态清理", () => {
   let state = startRun(createInitialState(), run, "检查代码")
   expect(state.runProgress).toEqual({ phase: "preparing", elapsedMs: 0 })

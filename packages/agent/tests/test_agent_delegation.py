@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
+from langchain.tools.tool_node import ToolCallRequest
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGenerationChunk
@@ -17,6 +20,7 @@ from harness_agent.runtime.agent_delegation import (
     AgentDelegationError,
     AgentDelegator,
     DelegateAgent,
+    DelegationContextMiddleware,
     DelegationTarget,
     child_execution_ref,
 )
@@ -27,7 +31,7 @@ from harness_agent.runtime.execution_binding import (
     ExecutionRef,
     ExecutionStatus,
 )
-from harness_agent.runtime.run_context import RunCancellationToken
+from harness_agent.runtime.run_context import RunCancellationToken, RunContext
 from harness_agent.runtime.managed_agent_executor import (
     FailClosedManagedObserver,
     ManagedAgentExecutor,
@@ -102,6 +106,78 @@ def _command(
         cancellation_token=token or RunCancellationToken(),
         timeout_seconds=timeout,
     )
+
+
+def _task_request(tool_call_id: str = "task-call-timeout") -> ToolCallRequest:
+    """构造带可信 RunContext 的生产 task middleware 请求。"""
+    from harness_agent.threads.context_lifecycle import prepare_embedded_context_snapshot
+
+    return ToolCallRequest(
+        tool_call={"name": "task", "args": {}, "id": tool_call_id},
+        tool=None,
+        state={},
+        runtime=SimpleNamespace(
+            context=RunContext(
+                thread_id="thread-1",
+                run_id="run-1",
+                approval_mode="yolo",
+                context_snapshot=prepare_embedded_context_snapshot(
+                    thread_id="thread-1",
+                    system_prompt="test",
+                    workspace="/tmp",
+                    sandboxed=False,
+                    provider=None,
+                    approval_mode="yolo",
+                    skill_registry=None,
+                    enable_memory=False,
+                    enable_skills=False,
+                    enable_ask_user=False,
+                ),
+            )
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_task_middleware_converts_only_delegation_timeout_to_error_tool_message() -> None:
+    """主 task 边界将精确 timeout 转成有界 error ToolMessage。"""
+    request = _task_request()
+
+    async def handler(_request: ToolCallRequest) -> ToolMessage:
+        raise AgentDelegationError("DELEGATION_TIMEOUT")
+
+    result = await DelegationContextMiddleware().awrap_tool_call(request, handler)
+
+    assert isinstance(result, ToolMessage)
+    assert result.tool_call_id == "task-call-timeout"
+    assert result.status == "error"
+    assert "timed_out" in str(result.content)
+    assert "DELEGATION_TIMEOUT" in str(result.content)
+
+
+@pytest.mark.asyncio
+async def test_task_middleware_does_not_convert_other_delegation_errors() -> None:
+    """权限、目标和其它 delegation 错误仍保持 fail closed。"""
+    request = _task_request("task-call-target")
+
+    async def handler(_request: ToolCallRequest) -> ToolMessage:
+        raise AgentDelegationError("DELEGATION_TARGET_NOT_FOUND")
+
+    with pytest.raises(AgentDelegationError) as caught:
+        await DelegationContextMiddleware().awrap_tool_call(request, handler)
+    assert caught.value.code == "DELEGATION_TARGET_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_task_middleware_does_not_convert_parent_cancellation() -> None:
+    """父 Run 的 CancelledError 不得被伪装成可恢复 timeout。"""
+    request = _task_request("task-call-cancelled")
+
+    async def handler(_request: ToolCallRequest) -> ToolMessage:
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await DelegationContextMiddleware().awrap_tool_call(request, handler)
 
 
 @pytest.mark.asyncio
@@ -338,6 +414,53 @@ async def test_parent_cancellation_cancels_child_and_runner() -> None:
     assert children[-1].status is ExecutionStatus.CANCELLED
 
 
+async def test_delegation_timeout_cancels_runner_fails_child_and_releases_slot() -> None:
+    """执行中硬超时取消 runner、失败 child，并允许同父 execution 复用槽位。"""
+    registry, root = await _registry()
+    runner_started = asyncio.Event()
+    runner_cancelled = asyncio.Event()
+    calls = 0
+
+    async def worker(_command: DelegateAgent):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            runner_started.set()
+            try:
+                await asyncio.Future()
+            finally:
+                runner_cancelled.set()
+        return {"final": "SLOT_REUSED"}
+
+    delegator = AgentDelegator(
+        registry,
+        targets=(
+            DelegationTarget(
+                agent_id="general-purpose",
+                mode=ExecutionMode.INLINE,
+                runner=worker,
+            ),
+        ),
+    )
+    first = _command(root, timeout=0.02)
+    first_task = asyncio.create_task(delegator.execute(first))
+    await runner_started.wait()
+    with pytest.raises(AgentDelegationError) as caught:
+        await first_task
+
+    assert caught.value.code == "DELEGATION_TIMEOUT"
+    assert runner_cancelled.is_set()
+    failed_child = await registry.get(child_execution_ref(first))
+    assert failed_child is not None
+    assert failed_child.status is ExecutionStatus.FAILED
+
+    second = replace(first, idempotency_key="call-general-purpose-2", timeout_seconds=1)
+    result = await delegator.execute(second)
+    assert result.status is ExecutionStatus.COMPLETED
+    assert result.output == {"final": "SLOT_REUSED"}
+    assert calls == 2
+
+
 async def test_delegation_policy_rejects_target_and_depth_before_runner() -> None:
     """allowedAgents 与 maxDepth 不能被 target 或 Prompt 放宽。"""
     registry, root = await _registry()
@@ -500,6 +623,125 @@ async def test_production_task_tool_routes_through_execution_registry(tmp_path) 
     )
     snapshot_id = json.loads(str(read_message.content))["snapshot_id"]
     snapshots.resolve(snapshot_id, root.thread_id, "/child.txt", f"local:{tmp_path.resolve()}")
+
+
+async def test_production_task_timeout_returns_error_and_parent_continues(tmp_path) -> None:
+    """生产 task timeout 作为 ToolMessage 回到主模型，根图继续下一轮。"""
+    from harness_agent.policy.capability_policy import (
+        BUILTIN_TOOL_NAMES,
+        resolve_effective_capability_view,
+    )
+    from harness_agent.runtime.agent import create_harness_agent
+    from harness_agent.runtime.agent_catalog import EffectiveExecutionPolicy
+    from harness_agent.runtime.run_context import RunContext
+    from harness_agent.threads.context_lifecycle import prepare_embedded_context_snapshot
+
+    registry, root = await _registry()
+    policy = EffectiveExecutionPolicy(
+        policy_ids=("main",),
+        tools=None,
+        mcp_tools=None,
+        skills=None,
+        filesystem_read=None,
+        filesystem_write=None,
+        shell=None,
+        network=None,
+        isolation="local",
+        approval_mode="yolo",
+        delegation=DelegationPolicy(
+            enabled=True,
+            allowed_agents=("reviewer",),
+            max_depth=1,
+            max_parallelism=1,
+        ),
+    )
+    view = resolve_effective_capability_view(
+        policy,
+        available_tools=BUILTIN_TOOL_NAMES,
+    )
+
+    async def timed_out(_command: DelegateAgent):
+        raise AgentDelegationError("DELEGATION_TIMEOUT")
+
+    model = _ToolCallingModel(
+        messages=iter(
+            [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "task",
+                            "args": {
+                                "description": "执行一个会超时的子任务",
+                                "subagent_type": "reviewer",
+                            },
+                            "id": "timeout-task-1",
+                        }
+                    ],
+                ),
+                AIMessage(content="主 Agent 已继续处理"),
+            ]
+        )
+    )
+    model.profile = {"max_input_tokens": 200_000}
+    graph = create_harness_agent(
+        model,
+        cwd=str(tmp_path),
+        approval_mode="yolo",
+        enable_skills=False,
+        enable_memory=False,
+        enable_ask_user=False,
+        shared_engine=True,
+        capability_view=view,
+        execution_registry=registry,
+        delegation_targets=(
+            DelegationTarget(
+                agent_id="reviewer",
+                mode=ExecutionMode.MANAGED,
+                runner=timed_out,
+                engine_profile_key="t" * 64,
+            ),
+        ),
+    )
+    context = RunContext(
+        thread_id=root.thread_id,
+        run_id=root.run_id,
+        context_snapshot=prepare_embedded_context_snapshot(
+            thread_id=root.thread_id,
+            system_prompt="test",
+            workspace=str(tmp_path),
+            sandboxed=False,
+            provider=None,
+            approval_mode="yolo",
+            skill_registry=None,
+            enable_memory=False,
+            enable_skills=False,
+            enable_ask_user=False,
+        ),
+        approval_mode="yolo",
+        execution_id=root.execution_id,
+        agent_id="main",
+        cancellation_token=RunCancellationToken(),
+        delegation_policy=policy.delegation,
+    )
+
+    result = await graph.ainvoke(
+        {"messages": [HumanMessage(content="委派并继续")]},
+        config={"configurable": {"thread_id": root.thread_id}},
+        context=context,
+    )
+
+    timeout_message = next(
+        message
+        for message in result["messages"]
+        if isinstance(message, ToolMessage) and message.tool_call_id == "timeout-task-1"
+    )
+    assert timeout_message.status == "error"
+    assert "timed_out" in str(timeout_message.content)
+    assert "DELEGATION_TIMEOUT" in str(timeout_message.content)
+    assert result["messages"][-1].content == "主 Agent 已继续处理"
+    child = next(item for item in await registry.list(root) if item.agent_id == "reviewer")
+    assert child.status is ExecutionStatus.FAILED
 
 
 async def test_production_task_exposes_host_registered_plugin_target(tmp_path) -> None:
@@ -817,6 +1059,57 @@ async def test_delegation_timeout_while_queued_raises_timeout_error() -> None:
 
     block_first.set()
     await t1
+
+
+async def test_queued_timeout_through_task_middleware_returns_error_without_child() -> None:
+    """排队 timeout 经生产 task 边界可恢复，且不伪造 child execution。"""
+    registry, root = await _registry()
+    started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def runner(command: DelegateAgent):
+        if command.idempotency_key == "call-general-purpose":
+            started.set()
+            await release_first.wait()
+        return {"final": command.idempotency_key}
+
+    delegator = AgentDelegator(
+        registry,
+        targets=(
+            DelegationTarget(
+                agent_id="general-purpose",
+                mode=ExecutionMode.INLINE,
+                runner=runner,
+            ),
+        ),
+    )
+    first = _command(root, timeout=5)
+    second = replace(
+        first,
+        idempotency_key="call-general-purpose-queued",
+        timeout_seconds=0.02,
+    )
+    first_task = asyncio.create_task(delegator.execute(first))
+    await started.wait()
+
+    request = _task_request("task-call-queued-timeout")
+
+    async def handler(_request: ToolCallRequest) -> object:
+        return await delegator.execute(second)
+
+    result = await DelegationContextMiddleware().awrap_tool_call(request, handler)
+    assert isinstance(result, ToolMessage)
+    assert result.status == "error"
+    assert "timed_out" in str(result.content)
+    assert "DELEGATION_TIMEOUT" in str(result.content)
+    children = await registry.list(root)
+    assert tuple(item.ref.execution_id for item in children) == (
+        root.execution_id,
+        child_execution_ref(first).execution_id,
+    )
+
+    release_first.set()
+    await first_task
 
 
 async def test_delegation_hard_limit_of_four_enforced_even_if_policy_higher() -> None:
