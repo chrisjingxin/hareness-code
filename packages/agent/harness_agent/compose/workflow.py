@@ -1667,3 +1667,7 @@ class _HostStageObserver:
             return await self._port.collect_serial_approvals(self._run, host_spec)
         result = await self._port.request_interaction(self._run, host_spec)
         return result.value
+
+    async def on_resume_consumed(self) -> None:
+        """stage 恢复成功后提交父 Run 的暂存审批规则。"""
+        await self._port.commit_staged_approval_rules(self._run)

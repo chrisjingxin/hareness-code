@@ -133,6 +133,9 @@ class StageObserver(Protocol):
     async def interact(self, request: StreamInteractionRequest) -> object:
         """处理 Tool Approval / Question；返回 resume 值或 answers。"""
 
+    async def on_resume_consumed(self) -> None:
+        """在 stage resumed stream 成功返回后提交父 Run 的暂存状态。"""
+
 
 class StageAgentPort(Protocol):
     """执行一个 fresh Managed stage execution 的 seam。"""
@@ -441,6 +444,7 @@ class ManagedStageAgentPort:
                 )
 
             snapshot_id = getattr(spec.skill_registry, "snapshot_id", None)
+            stage_ports = _StageStreamPorts(observer, started_at=started_at)
             managed_request = ManagedAgentRequest(
                 execution_ref=child_ref.execution_id,
                 parent_execution_ref=child_ref.parent_execution_id,
@@ -459,11 +463,12 @@ class ManagedStageAgentPort:
                 else (),
                 started_at=started_at,
                 diagnostic_log=stage_log,
+                on_resume_consumed=stage_ports.on_resume_consumed,
             )
             try:
                 result = await ManagedAgentExecutor().execute(
                     managed_request,
-                    _StageStreamPorts(observer, started_at=started_at),
+                    stage_ports,
                 )
             except ManagedAgentExecutionError as exc:
                 if exc.code == "RUN_CANCELLED":
@@ -660,6 +665,14 @@ class _StageStreamPorts:
                 "Stage Interaction requires a StageObserver",
             )
         return await self._observer.interact(request)
+
+    async def on_resume_consumed(self) -> None:
+        """把 stage 恢复成功边界转交给可选的 Host stage observer。"""
+        if self._observer is None:
+            return
+        callback = getattr(self._observer, "on_resume_consumed", None)
+        if callable(callback):
+            await callback()
 
     async def observe_message(self, chunk: object, session: StreamSession) -> bool:
         return False

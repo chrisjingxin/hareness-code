@@ -167,6 +167,8 @@ class RunLifecyclePort(Protocol):
         self, run: RunState, spec: InteractionRequest
     ) -> dict[str, object]: ...
 
+    async def commit_staged_approval_rules(self, run: RunState) -> None: ...
+
     def drain_context_updates(self, run: RunState) -> None: ...
 
     async def flush_transcript(self, run: RunState) -> None: ...
@@ -264,6 +266,10 @@ class BuildRunAdapter:
             presentation = run.approval_presentations.lookup(tool_name, tool_args)
             return bool(presentation and presentation.get("kind") == "directory_trust")
 
+        async def on_resume_consumed() -> None:
+            """恢复 stream 正常返回后，提交当前 Run 的审批规则意图。"""
+            await port.commit_staged_approval_rules(run)
+
         request = ManagedAgentRequest(
             execution_ref=run.root_execution_ref.execution_id,
             parent_execution_ref=None,
@@ -284,6 +290,7 @@ class BuildRunAdapter:
             needs_user_decision=needs_user_decision,
             diagnostic_log=getattr(run, "diagnostic_log", None),
             timing=getattr(run, "timing", None),
+            on_resume_consumed=on_resume_consumed,
             model_profile_id=(
                 run.execution_binding.actual_primary.profile_id
                 if getattr(run, "execution_binding", None) is not None
@@ -532,6 +539,11 @@ class _ComposeStageObserver:
             return await self._port.collect_serial_approvals(self._run, host_spec)
         result = await self._port.request_interaction(self._run, host_spec)
         return _interaction_resume_value(result)
+
+    async def on_resume_consumed(self) -> None:
+        """stage 恢复成功后提交父 Run 的暂存审批规则。"""
+        await self._port.commit_staged_approval_rules(self._run)
+
 
 def _interaction_resume_value(result: object) -> object:
     """把 InteractionResult 编成 interrupt resume；过期决策带 expired 标记。"""
@@ -800,6 +812,10 @@ class ComposeRunAdapter:
             presentation = run.approval_presentations.lookup(tool_name, tool_args)
             return bool(presentation and presentation.get("kind") == "directory_trust")
 
+        async def on_resume_consumed() -> None:
+            """恢复 stream 正常返回后，提交当前 Run 的审批规则意图。"""
+            await port.commit_staged_approval_rules(run)
+
         request = ManagedAgentRequest(
             execution_ref=run.root_execution_ref.execution_id,
             parent_execution_ref=None,
@@ -820,6 +836,7 @@ class ComposeRunAdapter:
             needs_user_decision=needs_user_decision,
             diagnostic_log=getattr(run, "diagnostic_log", None),
             timing=getattr(run, "timing", None),
+            on_resume_consumed=on_resume_consumed,
             model_profile_id=(
                 run.execution_binding.actual_primary.profile_id
                 if getattr(run, "execution_binding", None) is not None

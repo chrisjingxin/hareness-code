@@ -3163,6 +3163,286 @@ async def test_batch_write_thread_approval_auto_approves_same_batch_siblings():
             assert target.exists()
 
 
+@pytest.mark.parametrize(
+    ("write_decision", "expected_scope"),
+    [("approve_thread", "session"), ("approve_project", "project")],
+)
+async def test_mixed_batch_approval_keeps_hanging_calls_stable_until_resume(
+    tmp_path: Path,
+    write_decision: str,
+    expected_scope: str,
+):
+    """混合批次恢复时，规则提交不能改变原始 HITL hanging call 集合。"""
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+    from langchain_core.runnables import Runnable
+    from langchain_core.tools import tool
+    from harness_agent.host.agent_host import AgentHost
+    from harness_agent.policy.permission_rules import (
+        PermissionRule,
+        load_rules,
+        merge_rules,
+    )
+    from harness_agent.runtime.agent import create_harness_agent
+
+    class ToolModel(FakeMessagesListChatModel):
+        def bind_tools(self, *_args: Any, **_kwargs: Any) -> Runnable:
+            return self
+
+    executed_tasks: list[dict[str, str]] = []
+
+    @tool("task")
+    def task_tool(description: str, subagent_type: str) -> str:
+        """测试用 task 工具，验证混合批次恢复后工具仍实际执行。"""
+        executed_tasks.append(
+            {"description": description, "subagent_type": subagent_type}
+        )
+        return "child completed"
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    model = ToolModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "write_file",
+                        "args": {
+                            "file_path": "/package.json",
+                            "content": "{}",
+                        },
+                        "id": "wf-package",
+                    },
+                    {
+                        "name": "write_file",
+                        "args": {
+                            "file_path": "/tsconfig.json",
+                            "content": "{}",
+                        },
+                        "id": "wf-tsconfig",
+                    },
+                    {
+                        "name": "task",
+                        "args": {
+                            "description": "检查生成的配置",
+                            "subagent_type": "general-purpose",
+                        },
+                        "id": "task-general-purpose",
+                    },
+                ],
+            ),
+            AIMessage(content="混合批次已完成"),
+        ]
+    )
+    model.profile = {"max_input_tokens": 200_000}
+    server_ref: dict[str, AgentHost] = {}
+
+    def rules_provider() -> list[PermissionRule]:
+        """让测试图读取与生产 Host 相同的动态审批规则。"""
+        server = server_ref.get("server")
+        if server is None:
+            return []
+        scoped = load_rules(project_dir=workspace)
+        scoped["session"] = server._run_coordinator.session_rules
+        return merge_rules(scoped)
+
+    agent = create_harness_agent(
+        model,
+        tools=[task_tool],
+        cwd=str(workspace),
+        approval_mode="default",
+        enable_skills=False,
+        enable_memory=False,
+        enable_ask_user=False,
+        rules_provider=rules_provider,
+    )
+    server = AgentHost(
+        agent=agent,
+        config_home=tmp_path / "home",
+        workspace=workspace,
+    )
+    server_ref["server"] = server
+    frames = await _capture_server(server)
+
+    await server.dispatch(
+        _request(
+            "run.start",
+            {
+                "mode": "build",
+                "message": "更新配置并委派检查",
+                "thread_id": "mixed-batch",
+                "run_id": "mixed-batch-run",
+            },
+            "mixed-batch-start",
+        )
+    )
+
+    first_interaction = await _wait_for(
+        frames, lambda frame: frame.get("method") == "interaction.approval"
+    )
+    first_actions = first_interaction["params"]["payload"]["requests"]["action_requests"]
+    assert [action["name"] for action in first_actions] == ["write_file"]
+    await server.dispatch(
+        {
+            "jsonrpc": "2.0",
+            "id": first_interaction["id"],
+            "result": {"decision": write_decision},
+        }
+    )
+
+    second_interaction = await _wait_for(
+        frames,
+        lambda frame: frame.get("method") == "interaction.approval",
+        skip=1,
+    )
+    second_actions = second_interaction["params"]["payload"]["requests"]["action_requests"]
+    assert [action["name"] for action in second_actions] == ["task"]
+    assert server._run_coordinator.session_rules == []
+    assert len(next(iter(server._run_coordinator._runs.values())).staged_approval_rules) == 1
+    await server.dispatch(
+        {
+            "jsonrpc": "2.0",
+            "id": second_interaction["id"],
+            "result": {"decision": "approve_once"},
+        }
+    )
+
+    completed = await _wait_for(
+        frames,
+        lambda frame: frame.get("params", {}).get("type") == "run.completed",
+    )
+    assert completed["params"]["payload"]["finish_reason"] == "completed"
+    assert (workspace / "package.json").read_text(encoding="utf-8") == "{}"
+    assert (workspace / "tsconfig.json").read_text(encoding="utf-8") == "{}"
+    assert executed_tasks == [
+        {"description": "检查生成的配置", "subagent_type": "general-purpose"}
+    ]
+
+    rules = load_rules(project_dir=workspace)
+    write_rule = PermissionRule(
+        tool="write_file",
+        resource="*",
+        effect="allow",
+        scope=expected_scope,  # type: ignore[arg-type]
+    )
+    if expected_scope == "session":
+        assert write_rule in server._run_coordinator.session_rules
+        assert rules["project"] == []
+    else:
+        assert server._run_coordinator.session_rules == []
+        assert write_rule in rules["project"]
+    assert all(rule.tool != "task" for scoped in rules.values() for rule in scoped)
+    await server.close()
+
+
+@pytest.mark.parametrize(
+    ("decision", "abort_mode"),
+    [("approve_thread", "failure"), ("approve_project", "cancel")],
+)
+async def test_unconsumed_approval_rule_is_discarded_on_resume_abort(
+    tmp_path: Path,
+    decision: str,
+    abort_mode: str,
+):
+    """恢复 stream 未成功返回时，暂存规则不能落入 session 或 project。"""
+    from harness_agent.host.agent_host import AgentHost
+    from harness_agent.policy.permission_rules import load_rules
+
+    resume_started = asyncio.Event()
+
+    class AbortOnResumeAgent:
+        """首轮产生审批，恢复轮按场景失败或等待取消。"""
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def astream(self, _stream_input: object, **_kwargs: object):
+            self.calls += 1
+            if self.calls == 1:
+                interrupt = type(
+                    "Interrupt",
+                    (),
+                    {
+                        "id": "abort-approval",
+                        "value": {
+                            "action_requests": [
+                                {
+                                    "name": "write_file",
+                                    "args": {
+                                        "file_path": "/not-written.txt",
+                                        "content": "never committed",
+                                    },
+                                    "description": "写入测试文件",
+                                }
+                            ]
+                        },
+                    },
+                )()
+                yield ("updates", {"__interrupt__": [interrupt]})
+                return
+            resume_started.set()
+            if abort_mode == "failure":
+                raise RuntimeError("resume failed")
+            await asyncio.Future()
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    server = AgentHost(
+        agent=AbortOnResumeAgent(),
+        config_home=tmp_path / "home",
+        workspace=workspace,
+    )
+    frames = await _capture_server(server)
+    await server.dispatch(
+        _request(
+            "run.start",
+            {
+                "mode": "build",
+                "message": "测试恢复中止",
+                "thread_id": "abort-run",
+                "run_id": "abort-run",
+            },
+            "abort-start",
+        )
+    )
+    interaction = await _wait_for(
+        frames, lambda frame: frame.get("method") == "interaction.approval"
+    )
+    await server.dispatch(
+        {
+            "jsonrpc": "2.0",
+            "id": interaction["id"],
+            "result": {"decision": decision},
+        }
+    )
+    await resume_started.wait()
+
+    if abort_mode == "cancel":
+        await server.dispatch(
+            _request(
+                "run.cancel",
+                {"thread_id": "abort-run", "run_id": "abort-run"},
+                "abort-cancel",
+            )
+        )
+        terminal = await _wait_for(
+            frames,
+            lambda frame: frame.get("params", {}).get("type") == "run.cancelled",
+        )
+    else:
+        terminal = await _wait_for(
+            frames,
+            lambda frame: frame.get("params", {}).get("type") == "run.failed",
+        )
+    assert terminal["params"]["payload"]
+    assert server._run_coordinator.session_rules == []
+    rules = load_rules(project_dir=workspace)
+    assert rules["project"] == []
+    assert not (workspace / ".harness" / "settings.json").exists()
+    await server.close()
+
+
 async def test_plan_mode_returns_tool_message_without_writing_or_requesting_approval():
     """计划模式写工具调用必须由内核硬拒绝，不能先交给 TUI 或落盘。"""
     from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel

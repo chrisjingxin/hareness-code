@@ -628,37 +628,75 @@ def _coordinator_with_port(
 
 
 def test_approve_thread_stores_session_rule_in_memory() -> None:
-    """approve_thread 生成规则并保存到会话内存列表，不写文件。"""
+    """approve_thread 先暂存，恢复成功后才保存到会话内存列表。"""
     coordinator = _coordinator()
-    coordinator._record_approval_rule(
-        "execute", {"command": "git status"}, "approve_thread"
+    run = _serial_run()
+    coordinator._stage_approval_rule(
+        run, "execute", {"command": "git status"}, "approve_thread"
     )
+    assert coordinator.session_rules == []
+    assert len(run.staged_approval_rules) == 1
+    coordinator._commit_staged_approval_rules(run)
+    coordinator._commit_staged_approval_rules(run)
     assert coordinator.session_rules == [
         PermissionRule(tool="execute", resource="git status", effect="allow")
     ]
+    assert run.staged_approval_rules == []
 
 
 def test_approve_project_persists_rule_to_project_layer(tmp_path: Path) -> None:
-    """approve_project 生成规则并通过 save_rule 持久化到 project 层。"""
+    """approve_project 只在恢复成功后通过 save_rule 持久化到 project 层。"""
     coordinator = _coordinator(project_dir=tmp_path)
-    coordinator._record_approval_rule(
-        "execute", {"command": "git status"}, "approve_project"
+    run = _serial_run()
+    coordinator._stage_approval_rule(
+        run, "execute", {"command": "git status"}, "approve_project"
     )
     assert coordinator.session_rules == []
+    assert not (tmp_path / ".harness" / "settings.json").exists()
+    coordinator._commit_staged_approval_rules(run)
+    coordinator._commit_staged_approval_rules(run)
     saved = json.loads(
         (tmp_path / ".harness" / "settings.json").read_text(encoding="utf-8")
     )
     assert saved["permissions"] == ["Bash(git status)"]
+    assert run.staged_approval_rules == []
+
+
+def test_project_rule_commit_failure_propagates_and_clears_staged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """project 持久化失败继续报错，且不会把失败意图留给下一次恢复。"""
+    from harness_agent.host import run_coordinator as coordinator_module
+
+    coordinator = _coordinator(project_dir=tmp_path)
+    run = _serial_run()
+    coordinator._stage_approval_rule(
+        run, "execute", {"command": "git status"}, "approve_project"
+    )
+
+    def fail_save(*_args: object, **_kwargs: object) -> None:
+        raise OSError("settings unavailable")
+
+    monkeypatch.setattr(coordinator_module, "save_rule", fail_save)
+    with pytest.raises(OSError, match="settings unavailable"):
+        coordinator._commit_staged_approval_rules(run)
+
+    assert run.staged_approval_rules == []
+    assert coordinator.session_rules == []
+    assert not (tmp_path / ".harness" / "settings.json").exists()
 
 
 def test_other_decisions_do_not_record_rules() -> None:
     """approve_once 与 reject 类决策不产生权限规则。"""
     coordinator = _coordinator()
+    run = _serial_run()
     for decision in ("approve_once", "reject", "reject_with_feedback"):
-        coordinator._record_approval_rule(
-            "execute", {"command": "git status"}, decision
+        coordinator._stage_approval_rule(
+            run, "execute", {"command": "git status"}, decision
         )
+    coordinator._commit_staged_approval_rules(run)
     assert coordinator.session_rules == []
+    assert run.staged_approval_rules == []
 
 
 def test_directory_trust_allow_session_registers_session_root(tmp_path: Path) -> None:
@@ -758,11 +796,14 @@ class TestDeleteFileThreadApprovalRegression:
     def test_thread_approval_covers_later_deletes(self, tmp_path: Path) -> None:
         """本线程允许一次删除后，工作区内其他文件的删除也自动放行。"""
         coordinator = _coordinator()
-        coordinator._record_approval_rule(
+        run = _serial_run()
+        coordinator._stage_approval_rule(
+            run,
             "delete_file",
             {"file_path": str(tmp_path / "a.txt")},
             "approve_thread",
         )
+        coordinator._commit_staged_approval_rules(run)
 
         preflight = self._preflight(coordinator, tmp_path)
         # 项目级通配规则：同路径和工作区内其他路径都不再弹窗；真实越界
@@ -776,9 +817,12 @@ class TestDeleteFileThreadApprovalRegression:
     ) -> None:
         """allow 规则命中敏感路径删除时仍强制弹窗确认。"""
         coordinator = _coordinator()
-        coordinator._record_approval_rule(
+        run = _serial_run()
+        coordinator._stage_approval_rule(
+            run,
             "delete_file", {"file_path": "/tmp/a.txt"}, "approve_thread"
         )
+        coordinator._commit_staged_approval_rules(run)
 
         preflight = self._preflight(coordinator, tmp_path)
         assert preflight(self._delete_request("/.git/index")) is True

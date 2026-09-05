@@ -4686,8 +4686,10 @@ class AgentHost:
             )
 
         def record_approval(tool_name: str, tool_args: dict[str, Any], decision: str) -> None:
-            """把 child 审批决定记入父 Run 同一套 session/project 规则。"""
-            self._run_coordinator._record_approval_rule(tool_name, tool_args, decision)
+            """把 child 审批决定暂存到父 Run 的规则提交边界。"""
+            self._run_coordinator._stage_approval_rule(
+                run, tool_name, tool_args, decision
+            )
 
         return RunContext(
             thread_id=run.thread_id,

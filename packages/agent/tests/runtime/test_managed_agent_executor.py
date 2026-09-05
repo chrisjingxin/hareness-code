@@ -174,6 +174,7 @@ def _request(
     usage: dict[str, int] | None = None,
     timeout_seconds: float | None = None,
     execution_starter=None,
+    on_resume_consumed=None,
     diagnostic_log=None,
     timing=None,
 ) -> ManagedAgentRequest:
@@ -197,6 +198,7 @@ def _request(
         usage=usage,
         timeout_seconds=timeout_seconds,
         execution_starter=execution_starter,
+        on_resume_consumed=on_resume_consumed,
         diagnostic_log=diagnostic_log,
         timing=timing,
         model_profile_id="profile-main",
@@ -606,6 +608,63 @@ async def test_executor_resumes_interaction_in_same_runtime_and_marks_context_li
     assert len(observer.interactions) == 1
     assert lifecycle.scheduled == ["interaction_resume"]
     assert type(agent.calls[1]["input"]).__name__ == "Command"
+
+
+@pytest.mark.asyncio
+async def test_executor_commits_only_after_resumed_stream_returns() -> None:
+    """resume 回合成功返回后才触发提交；恢复异常不能提前提交。"""
+    interrupt = type(
+        "Interrupt",
+        (),
+        {
+            "id": "approval-1",
+            "value": {
+                "action_requests": [
+                    {"name": "write_file", "args": {"file_path": "/a.txt"}}
+                ]
+            },
+        },
+    )()
+    successful_agent = _FakeAgent(
+        [
+            [("updates", {"__interrupt__": [interrupt]})],
+            [("messages", (AIMessageChunk(content="完成"), {}))],
+        ]
+    )
+    successful_calls: list[int] = []
+
+    async def on_success() -> None:
+        successful_calls.append(len(successful_agent.calls))
+
+    await ManagedAgentExecutor().execute(
+        _request(
+            _Runtime(successful_agent),
+            on_resume_consumed=on_success,
+        ),
+        _Observer(),
+    )
+    assert successful_calls == [2]
+
+    failing_agent = _FakeAgent(
+        [
+            [("updates", {"__interrupt__": [interrupt]})],
+            RuntimeError("resume failed"),
+        ]
+    )
+    failed_calls: list[int] = []
+
+    async def on_failure() -> None:
+        failed_calls.append(len(failing_agent.calls))
+
+    with pytest.raises(RuntimeError, match="resume failed"):
+        await ManagedAgentExecutor().execute(
+            _request(
+                _Runtime(failing_agent),
+                on_resume_consumed=on_failure,
+            ),
+            _Observer(),
+        )
+    assert failed_calls == []
 
 
 @pytest.mark.asyncio

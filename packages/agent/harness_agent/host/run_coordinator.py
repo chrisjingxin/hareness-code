@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Literal, Protocol
 
 from harness_agent.compose.models import ThreadMode
@@ -419,6 +420,19 @@ class RunRuntime:
     release: Callable[[], Awaitable[None]]
 
 
+ApprovalRuleDecision = Literal["approve_thread", "approve_project"]
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalRuleIntent:
+    """当前 Run 尚未提交的权限规则意图。"""
+
+    tool_name: str
+    tool_args: Mapping[str, object]
+    decision: ApprovalRuleDecision
+    rules: tuple[PermissionRule, ...]
+
+
 @dataclass(slots=True)
 class RunState:
     """Coordinator 内部保存的单次 Run 状态；不属于 ProtocolConnection。"""
@@ -469,6 +483,9 @@ class RunState:
     events: asyncio.Queue[AgentEvent | None] = field(default_factory=asyncio.Queue)
     # 多工具逐个串行审批队列：存储待审批的工具调用
     pending_approvals: list[dict[str, object]] = field(default_factory=list)
+    # approve_thread/project 在 resumed stream 成功消费前只保存在当前 Run；
+    # 不能提前进入共享 Agent 图可见的规则来源。
+    staged_approval_rules: list[ApprovalRuleIntent] = field(default_factory=list)
     # 标记是否因用户拒绝而终止同批后续工具
     batch_rejected: bool = False
     # Build 共享 execution stream 的关联状态；跨 Interaction resume 复用。
@@ -703,6 +720,10 @@ class _CoordinatorLifecyclePort:
     ) -> dict[str, object]:
         """把串行工具审批收集委托回 coordinator（规则状态属于 coordinator）。"""
         return await self._coordinator._collect_serial_approvals(run, spec)
+
+    async def commit_staged_approval_rules(self, run: RunState) -> None:
+        """在 resumed stream 成功返回后提交当前 Run 的规则意图。"""
+        self._coordinator._commit_staged_approval_rules(run)
 
     def drain_context_updates(self, run: RunState) -> None:
         """把当前已到达的上下文压缩事实发布为 context.updated。"""
@@ -1173,6 +1194,7 @@ class RunCoordinator:
     async def _force_cancel(self, run: RunState) -> None:
         """补偿任务尚未取得首个时间片时的取消，避免 Run 永久悬挂。"""
         self._child_interactions.cancel_run(run.ref.run_id)
+        self._discard_staged_approval_rules(run)
         if run.completion is None:
             self._finish(run, "cancelled", {"reason": "Cancelled by client"})
         await self._settle_root_execution(run)
@@ -1301,6 +1323,7 @@ class RunCoordinator:
             )
         finally:
             self._child_interactions.cancel_run(run.ref.run_id)
+            self._discard_staged_approval_rules(run)
             # 已收到终态的 ToolMessage 或已经结束的助手消息属于规范事实；
             # 取消/失败只丢弃仍停留在 assistant_buffer 中的半条流。
             if run.persistence is not None and run.status != "completed":
@@ -1360,6 +1383,7 @@ class RunCoordinator:
     def _finish(self, run: RunState, status: str, payload: dict[str, object]) -> None:
         if run.completion is not None:
             return
+        self._discard_staged_approval_rules(run)
         run.status = status
         assert run.timing is not None
         duration_ms = int(run.timing.snapshot()["duration_ms"] or 0)
@@ -1503,30 +1527,68 @@ class RunCoordinator:
             run.context_summary = payload
             self._emit(run, CONTEXT_UPDATED, payload)
 
-    def _record_approval_rule(
+    def _stage_approval_rule(
         self,
+        run: RunState,
         tool_name: str,
         tool_args: Mapping[str, object],
         decision: str,
     ) -> None:
-        """单个工具调用审批通过后按决策范围记录规则。
+        """把单个工具调用的持久授权意图暂存到当前 Run。
 
-        approve_thread 写入会话内存规则，approve_project 持久化到 project 层
-        settings.json；目录信任由独立交互类型处理，不经过这里。
+        在 LangGraph 尚未消费 resume 前不能改写 session/project 正式规则；否则
+        HITL middleware 重放原始 action_requests 时会重新计算出不同的 hanging
+        tool calls。目录信任由独立交互类型处理，不经过这里。
         """
-        if decision not in {"approve_thread", "approve_project"} or not tool_name:
+        if not tool_name:
             return
-        rules = _generate_permission_rule(tool_name, tool_args)
-        for rule in rules:
-            if decision == "approve_thread":
-                if rule not in self._session_rules:
-                    self._session_rules.append(rule)
-            else:
-                save_rule(
-                    replace(rule, scope="project"),
-                    scope="project",
-                    project_dir=self._project_dir,
-                )
+        if decision == "approve_thread":
+            staged_decision: ApprovalRuleDecision = "approve_thread"
+        elif decision == "approve_project":
+            staged_decision = "approve_project"
+        else:
+            return
+        rules = tuple(_generate_permission_rule(tool_name, tool_args))
+        if not rules:
+            return
+        intent = ApprovalRuleIntent(
+            tool_name=tool_name,
+            tool_args=MappingProxyType(dict(tool_args)),
+            decision=staged_decision,
+            rules=rules,
+        )
+        if intent not in run.staged_approval_rules:
+            run.staged_approval_rules.append(intent)
+
+    def _commit_staged_approval_rules(self, run: RunState) -> None:
+        """提交已被 resumed stream 消费的规则意图，并保持提交幂等。"""
+        intents = tuple(run.staged_approval_rules)
+        if not intents:
+            return
+        try:
+            for intent in intents:
+                if intent.decision == "approve_thread":
+                    for rule in intent.rules:
+                        if rule not in self._session_rules:
+                            self._session_rules.append(rule)
+                    continue
+                for rule in intent.rules:
+                    # save_rule 本身按序列化规则去重；异常必须继续向 Run
+                    # 失败路径传播，不能把 project 授权降级成 session allow。
+                    save_rule(
+                        replace(rule, scope="project"),
+                        scope="project",
+                        project_dir=self._project_dir,
+                    )
+        finally:
+            # 一次恢复边界只消费一批意图；成功、重复调用以及提交异常都不能
+            # 让旧 intent 留在 Run 中影响后续 interaction 或其它 Run。
+            run.staged_approval_rules.clear()
+
+    @staticmethod
+    def _discard_staged_approval_rules(run: RunState) -> None:
+        """幂等清理尚未提交的 Run 私有规则意图。"""
+        run.staged_approval_rules.clear()
 
     def _record_directory_trust(
         self,
@@ -1576,16 +1638,26 @@ class RunCoordinator:
             return False
         return resolved.root.scope != "once"
 
-    def _evaluate_queued_rule(self, tool_name: str, tool_args: dict[str, object]) -> str | None:
+    def _evaluate_queued_rule(
+        self, run: RunState, tool_name: str, tool_args: dict[str, object]
+    ) -> str | None:
         """合并会话与持久化规则评估排队中的工具调用。
 
-        approve_thread/approve_project 产生的新规则应立即作用于同批后续请求；
-        但敏感路径即使命中 allow 规则也不自动放行（保持弹窗）。
+        approve_thread/approve_project 产生的新规则只作为当前 Run 的本地
+        overlay 作用于同批后续请求；正式规则要等 resumed stream 成功返回后
+        才提交。敏感路径即使命中 allow 规则也不自动放行（保持弹窗）。
         """
         if not tool_name:
             return None
         scoped = load_rules(project_dir=self._project_dir)
         scoped["session"] = list(self._session_rules)
+        for intent in run.staged_approval_rules:
+            if intent.decision == "approve_thread":
+                scoped["session"].extend(intent.rules)
+            else:
+                scoped["project"].extend(
+                    replace(rule, scope="project") for rule in intent.rules
+                )
         rules = merge_rules(scoped)
         if not rules:
             return None
@@ -1653,7 +1725,11 @@ class RunCoordinator:
             # 规则已明确裁决的排队工具不弹窗：
             # deny（PolicyDeny）继续处理后续工具；allow 自动批准
             plan_entry = tool_name == "enter_plan_mode"
-            effect = None if plan_entry else self._evaluate_queued_rule(tool_name, tool_args)
+            effect = (
+                None
+                if plan_entry
+                else self._evaluate_queued_rule(run, tool_name, tool_args)
+            )
             if effect == "deny":
                 decisions[index] = {
                     "type": "reject",
@@ -1770,7 +1846,7 @@ class RunCoordinator:
             decision = str(response.get("decision") or "")
             feedback = str(response.get("feedback") or "")
             if not plan_entry:
-                self._record_approval_rule(tool_name, tool_args, decision)
+                self._stage_approval_rule(run, tool_name, tool_args, decision)
 
             if plan_entry and decision == "approve_once":
                 decisions[index] = {"type": "approve"}

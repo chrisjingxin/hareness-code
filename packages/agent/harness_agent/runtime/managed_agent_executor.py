@@ -209,6 +209,7 @@ class ManagedChildObserver(FailClosedManagedObserver):
 
 RuntimeProvider = Callable[[], Awaitable[ManagedAgentRuntime]]
 ExecutionStarter = Callable[[str], Awaitable[None]]
+ResumeConsumed = Callable[[], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,6 +284,8 @@ class ManagedAgentRequest:
     model_profile_id: str = "default"
     # 目录信任等必须用户决策的中断判定钩子；透传给 shared execution stream。
     needs_user_decision: Callable[[str, Mapping[str, object]], bool] | None = None
+    # resumed stream 正常返回后触发一次；规则等 Run 状态只能在此成功边界提交。
+    on_resume_consumed: ResumeConsumed | None = None
     # Managed child 的最终输出提交前门禁；continue 只在同一 runtime/checkpoint
     # 内开始下一模型回合，不创建新的 DelegationTarget 或 execution。
     final_output_gate: FinalOutputGate | None = None
@@ -309,6 +312,8 @@ class ManagedAgentRequest:
             raise ValueError("MANAGED_AGENT_EXECUTION_STARTER_INVALID")
         if self.final_output_gate is not None and not callable(self.final_output_gate):
             raise ValueError("MANAGED_AGENT_FINAL_GATE_INVALID")
+        if self.on_resume_consumed is not None and not callable(self.on_resume_consumed):
+            raise ValueError("MANAGED_AGENT_RESUME_CALLBACK_INVALID")
         if not all(
             isinstance(snapshot_id, str) and snapshot_id
             for snapshot_id in self.required_skill_snapshot_ids
@@ -459,7 +464,8 @@ class ManagedAgentExecutor:
         while True:
             model_round += 1
             observer.on_model_round()
-            if resume is not None:
+            is_resume_round = resume is not None
+            if is_resume_round:
                 _schedule_interaction_resume(runtime.run_context)
                 stream_input = Command(resume=resume)
             stream_result = await self._execute_round_with_retry(
@@ -470,6 +476,11 @@ class ManagedAgentExecutor:
                 stream_input,
                 model_round,
             )
+            if is_resume_round:
+                if request.is_cancelled():
+                    raise ManagedAgentExecutionError("RUN_CANCELLED", "Run was cancelled")
+                if request.on_resume_consumed is not None:
+                    await request.on_resume_consumed()
             if stream_result.resume is None:
                 if request.is_cancelled():
                     raise ManagedAgentExecutionError("RUN_CANCELLED", "Run was cancelled")
