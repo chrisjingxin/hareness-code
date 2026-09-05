@@ -1,6 +1,7 @@
 import type { AgentSummary, ModelProfile, ThreadSummary, TurnSummary } from "@za38/protocol"
 
 import type { InteractiveController, InteractiveIntent, InteractiveResult, InteractiveSnapshot, IntentOutcome, PresentationEffect } from "../../interactive/types"
+import type { ToolCard } from "../../interactive/state"
 import { selectWorkItemView, type WorkItemView } from "../../interactive/selectors"
 import { filterAgents } from "../../presentation-shared/agent-catalog"
 import { filterCommandMenuItems } from "../../presentation-shared/command-menu-policy"
@@ -123,6 +124,7 @@ export type ToastItem = {
 
 import type {
   WorkspaceExplorer,
+  WorkspaceIntent,
   WorkspaceTreeRow,
   WorkspaceTreeState,
   WorkspacePreviewState,
@@ -149,6 +151,58 @@ export type SidebarState = {
   workspaceChangedFiles?: readonly GitChangedFile[]
   fileTree: SidebarFileTreeState
   preview: WorkspacePreviewState | null
+}
+
+/** 直接修改工作区的内置工具；别名与 TUI 工具目录保持一致。 */
+const DIRECT_WORKSPACE_MUTATION_TOOLS = new Set(["write_file", "write", "edit_file", "edit", "delete_file", "delete"])
+
+/** 工具名仅去掉末尾装饰字符，不改变 write_file 等内部下划线。 */
+function normalizedWorkspaceToolName(name: string): string {
+  return name.trim().toLowerCase().replace(/[^a-z]+$/g, "")
+}
+
+/** 只识别能确定修改文件的内置工具；未知工具统一由 Run 结束刷新兜底。 */
+function isDirectWorkspaceMutationTool(name: string): boolean {
+  return DIRECT_WORKSPACE_MUTATION_TOOLS.has(normalizedWorkspaceToolName(name))
+}
+
+/** 工具身份包含 run 与 child provenance，避免不同 execution 的同名 call 被合并。 */
+function workspaceToolKey(tool: ToolCard): string {
+  return [tool.runId, tool.executionId ?? "root", tool.activityId ?? "root", tool.agentId ?? "", tool.id].join("\u0000")
+}
+
+/** 成功终态的工具不会因 scope 切换或重复 snapshot 被再次视为新变更。 */
+function mergeWorkspaceToolStatus(previous: ToolCard["status"] | undefined, current: ToolCard["status"]): ToolCard["status"] {
+  if (previous === "completed") return "completed"
+  if (previous === "failed" && current === "running") return "failed"
+  return current
+}
+
+/** 从当前可见时间线中找出新到达的成功工具；失败终态永不返回。 */
+function observeWorkspaceToolTimeline(
+  timeline: InteractiveSnapshot["timeline"],
+  activeRun: InteractiveSnapshot["activeRun"] | undefined,
+  states: Map<string, ToolCard["status"]>,
+): readonly ToolCard[] {
+  const direct: ToolCard[] = []
+  for (const item of timeline) {
+    if (item.type !== "tool") continue
+    if (!isDirectWorkspaceMutationTool(item.tool.name)) continue
+    const key = workspaceToolKey(item.tool)
+    const previous = states.get(key)
+    const belongsToActiveRun = activeRun?.runId === item.tool.runId
+    if (belongsToActiveRun && item.tool.status === "completed" && previous !== "completed") {
+      direct.push(item.tool)
+    }
+    states.set(key, mergeWorkspaceToolStatus(previous, item.tool.status))
+  }
+  return direct
+}
+
+/** 当前预览无论处于 loading、ready 还是 error，都保留其打开路径供强制重读。 */
+function currentPreviewPath(preview: WorkspacePreviewState | null): string | undefined {
+  if (!preview || preview.status === "idle") return undefined
+  return preview.status === "ready" ? preview.file.path : preview.path
 }
 
 /** TUI Adapter 发布的完整表现快照；领域事实来自 interactive。 */
@@ -334,6 +388,13 @@ class TuiAdapterImpl implements TuiAdapter {
   private expandedTools: ReadonlySet<string> = new Set()
   private scrollRequest = 0
   private workspaceChangeGeneration = 0
+  /** 已观测工具的终态；跨 child scope 保留，避免离开/返回子时间线重复刷新。 */
+  private readonly workspaceToolStates = new Map<string, ToolCard["status"]>()
+  private workspaceToolThreadId: string | null = null
+  /** 工作区刷新串行化；连续工具完成只保留一个 pending 刷新。 */
+  private workspaceRefreshInFlight = false
+  private workspaceRefreshPending = false
+  private workspaceRefreshGeneration = 0
   private transientNotice: TuiAdapterSnapshot["transientNotice"]
   private closed = false
 
@@ -410,6 +471,8 @@ class TuiAdapterImpl implements TuiAdapter {
     }
 
     this.snapshot = this.buildSnapshot()
+    this.workspaceToolThreadId = this.snapshot.interactive.currentThreadId
+    this.seedWorkspaceToolStates(this.snapshot.interactive.timeline)
     void this.refreshWorkspaceChanges()
     if (this.workspaceExplorer) {
       // 首次加载必须在 snapshot 初始化之后触发：Explorer 的 refreshTree 会在首个 await
@@ -422,11 +485,14 @@ class TuiAdapterImpl implements TuiAdapter {
       const previousActiveRun = this.snapshot.interactive.activeRun
       const previousRequestId = this.snapshot.interactive.interaction?.requestId
       const nextRequestId = interactive.interaction?.requestId
+      const directWorkspaceTools = this.observeWorkspaceTools(interactive, previousActiveRun)
+      const runEnded = Boolean(previousActiveRun && !interactive.activeRun)
       // 反向问答/审批会在 Run 进行中插入时间线；必须主动滚动，否则卡片落在
       // 当前视口下方，用户只能看到旧的 spinner，直到 Interaction 超时。
       if (nextRequestId && nextRequestId !== previousRequestId) this.scrollRequest += 1
       this.publish()
-      if (previousActiveRun && !interactive.activeRun) void this.refreshWorkspaceChanges()
+      // 直接文件工具成功完成即可刷新；Run 结束仍保留未知工具与外部修改的完整兜底。
+      if (directWorkspaceTools.length > 0 || runEnded) this.requestWorkspaceRefresh()
     })
 
     void this.historyStore.load().then(history => {
@@ -723,6 +789,74 @@ class TuiAdapterImpl implements TuiAdapter {
     this.publish()
   }
 
+  /** 为 Adapter 当前已知时间线建立基线，不把恢复历史误判为本次 Run 的新变更。 */
+  private seedWorkspaceToolStates(timeline: InteractiveSnapshot["timeline"]): void {
+    for (const item of timeline) {
+      if (item.type !== "tool") continue
+      if (!isDirectWorkspaceMutationTool(item.tool.name)) continue
+      const key = workspaceToolKey(item.tool)
+      this.workspaceToolStates.set(key, mergeWorkspaceToolStatus(this.workspaceToolStates.get(key), item.tool.status))
+    }
+  }
+
+  /** 线程切换时重建基线；同一线程切换 child scope 时保留去重状态。 */
+  private observeWorkspaceTools(interactive: InteractiveSnapshot, previousActiveRun?: InteractiveSnapshot["activeRun"]): readonly ToolCard[] {
+    if (this.workspaceToolThreadId !== interactive.currentThreadId) {
+      this.workspaceToolStates.clear()
+      this.workspaceToolThreadId = interactive.currentThreadId
+      this.seedWorkspaceToolStates(interactive.timeline)
+      return []
+    }
+    // 正常事件流在 tool.completed 时仍有 activeRun；previousActiveRun 兼容终态快照
+    // 被宿主一次性合并的实现，同时不会把 idle Thread 历史当成当前变更。
+    return observeWorkspaceToolTimeline(interactive.timeline, interactive.activeRun ?? previousActiveRun, this.workspaceToolStates)
+  }
+
+  /** 请求一次集中工作区刷新；在前一轮进行时只排队一次，避免连续工具制造刷新风暴。 */
+  private requestWorkspaceRefresh(): void {
+    if (this.closed || (!this.workspaceExplorer && !this.workspaceChangeProbe)) return
+    if (this.workspaceRefreshInFlight) {
+      this.workspaceRefreshPending = true
+      return
+    }
+    this.workspaceRefreshInFlight = true
+    const generation = ++this.workspaceRefreshGeneration
+    void this.performWorkspaceRefresh(generation)
+  }
+
+  /** 并行更新树、Git 和当前预览；各下游自身 generation 负责丢弃过期结果。 */
+  private async performWorkspaceRefresh(generation: number): Promise<void> {
+    const refreshes: Promise<void>[] = []
+    if (this.workspaceExplorer) {
+      refreshes.push(this.dispatchWorkspaceIntent({ type: "workspace.refresh" }))
+      const previewPath = currentPreviewPath(this.sidebarState.preview)
+      if (previewPath) {
+        refreshes.push(this.dispatchWorkspaceIntent({ type: "workspace.refresh-preview", path: previewPath }))
+      }
+    }
+    if (this.workspaceChangeProbe) refreshes.push(this.refreshWorkspaceChanges())
+
+    try {
+      await Promise.all(refreshes)
+    } finally {
+      if (this.closed || generation !== this.workspaceRefreshGeneration) return
+      this.workspaceRefreshInFlight = false
+      if (this.workspaceRefreshPending) {
+        this.workspaceRefreshPending = false
+        this.requestWorkspaceRefresh()
+      }
+    }
+  }
+
+  /** WorkspaceExplorer 的拒绝/异常只影响本次刷新，不阻断 Git 或预览刷新。 */
+  private async dispatchWorkspaceIntent(intent: WorkspaceIntent): Promise<void> {
+    try {
+      await this.workspaceExplorer?.dispatch(intent)
+    } catch {
+      // Explorer 已将正常 I/O 错误投影到 snapshot；异常实现也不能形成未处理拒绝。
+    }
+  }
+
   /** 关闭 Adapter 自己的订阅与所有未完成的定时器；共享 Controller 由宿主负责关闭。 */
   async close(): Promise<void> {
     if (this.closed) return
@@ -731,6 +865,8 @@ class TuiAdapterImpl implements TuiAdapter {
       clearTimeout(timer)
     }
     this.toastTimers.clear()
+    this.workspaceRefreshPending = false
+    this.workspaceRefreshGeneration += 1
     this.unsubscribeInteractive()
     this.unsubscribeWorkspaceExplorer?.()
   }

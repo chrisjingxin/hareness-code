@@ -160,15 +160,6 @@ export function Za38Tui(options: RenderedTuiOptions) {
     void options.workspaceExplorer?.dispatch({ type: "workspace.load" })
   }, [options.workspaceExplorer])
 
-  const prevActiveRunRef = useRef(interactive.activeRun)
-  useEffect(() => {
-    // 任务运行结束（activeRun 非空 → null/undefined）时，可能产生/修改文件，自动触发工作区文件树刷新
-    if (prevActiveRunRef.current && !interactive.activeRun) {
-      void options.workspaceExplorer?.dispatch({ type: "workspace.refresh" })
-    }
-    prevActiveRunRef.current = interactive.activeRun
-  }, [interactive.activeRun, options.workspaceExplorer])
-
   /** 将 renderer 内部选区收敛为纯复制 module，避免渲染状态进入 Adapter 或 IPC。 */
   const copySelectedText = useCallback(() => copyCurrentSelection({
     getSelectedText: () => renderer.getSelection()?.getSelectedText(),
