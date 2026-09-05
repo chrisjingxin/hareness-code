@@ -122,6 +122,109 @@ test("根 TUI 在 mouse-up 时复制 renderer 的非空选区并显示 Toast", a
   }
 })
 
+test("完整 TUI 中 task 从运行转为长结果后仍可点击进入子时间线", async () => {
+  const { client, requests, controller, adapter } = createSession()
+  const reactErrors: string[] = []
+  const consoleError = spyOn(console, "error").mockImplementation((...args) => {
+    reactErrors.push(args.map(value => String(value)).join(" "))
+  })
+  let setup: Awaited<ReturnType<typeof testRender>>
+  try {
+    await act(async () => {
+      setup = await testRender(createElement(Za38Tui, {
+        controller,
+        adapter,
+        onRequestExit: () => undefined,
+      }), { width: 94, height: 32, useMouse: true, screenMode: "alternate-screen" })
+      await setup.flush()
+      await adapter.dispatch({ type: "submit", value: "先调查工作区" })
+      await setup.flush()
+    })
+    expect(reactErrors).toEqual([])
+    const run = requests.at(-1)!
+    const emit = async (type: string, sequence: number, payload: Record<string, unknown>) => {
+      await act(async () => {
+        client.emit("event", {
+          event_id: crypto.randomUUID(),
+          type,
+          thread_id: run.threadId,
+          run_id: run.runId,
+          sequence,
+          timestamp_ms: Date.now(),
+          payload,
+        })
+        await setup.flush()
+      })
+    }
+    await emit("run.started", 1, {})
+    expect(reactErrors).toEqual([])
+    await emit("tool.started", 2, { tool_call_id: "task-1", name: "task" })
+    expect(reactErrors).toEqual([])
+    await emit("tool.delta", 3, {
+      tool_call_id: "task-1",
+      arguments_delta: JSON.stringify({ description: "探索当前工作区根目录，确认仓库状态和已有文件。列出所有文件和目录，确认这是一个空仓库或近似空仓库。返回：1）根目录完整 ls 输出；2）是否存在 package.json / tsconfig.json / bun.lockb 等配置；3）推荐的最小文件结构（用于一个基于 Bun.serve 的极简任务看板，包含 server.ts、public/index.html、tests/api.test.ts）。", subagent_type: "explore" }),
+    })
+    expect(reactErrors).toEqual([])
+    await emit("tool.delta", 4, {
+      tool_call_id: "task-1",
+      child_execution_id: "child-live-to-completed",
+      child_agent_id: "explore",
+    })
+    expect(reactErrors).toEqual([])
+
+    const runningLines = setup.captureCharFrame().split("\n")
+    const runningHintY = runningLines.findIndex(line => line.includes("进入子时间线"))
+    if (runningHintY < 0) throw new Error("运行中 task 未显示进入子时间线入口")
+    const runningSpans = setup.captureSpans().lines[runningHintY]!.spans
+    const runningSpanIndex = runningSpans.findIndex(span => span.text.includes("进入子时间线"))
+    const runningHintX = runningSpans.slice(0, runningSpanIndex).reduce((offset, span) => offset + span.width, 0)
+    await act(async () => {
+      // 真实用户点击会跨过 80ms spinner 刷新，不能只验证 10ms 的理想点击。
+      await setup.mockMouse.click(runningHintX + 4, runningHintY, 0, { delayMs: 120 })
+      await setup.flush()
+    })
+    expect(adapter.getSnapshot().interactive.childTimelineExecutionId).toBe("child-live-to-completed")
+    await act(async () => {
+      await adapter.dispatch({ type: "child-timeline-leave" })
+      await setup.flush()
+    })
+
+    await emit("tool.completed", 5, {
+      tool_call_id: "task-1",
+      result: {
+        content: Array.from({ length: 36 }, (_, index) => `## 调查结果 ${index + 1}\n长结果正文`).join("\n"),
+        is_error: false,
+      },
+    })
+    expect(reactErrors).toEqual([])
+
+    for (let attempt = 0; attempt < 16 && !setup.captureCharFrame().includes("进入子时间线"); attempt += 1) {
+      await act(async () => {
+        await setup.mockMouse.scroll(40, 10, "up")
+        await setup.flush()
+      })
+    }
+    const lines = setup.captureCharFrame().split("\n")
+    const hintY = lines.findIndex(line => line.includes("进入子时间线"))
+    if (hintY < 0) throw new Error("完整 TUI 未显示进入子时间线入口")
+    const spans = setup.captureSpans().lines[hintY]!.spans
+    const spanIndex = spans.findIndex(span => span.text.includes("进入子时间线"))
+    const hintX = spans.slice(0, spanIndex).reduce((offset, span) => offset + span.width, 0)
+    await act(async () => {
+      await setup.mockMouse.click(hintX, hintY)
+      await setup.flush()
+    })
+    expect(adapter.getSnapshot().interactive.childTimelineExecutionId).toBe("child-live-to-completed")
+    expect(reactErrors.join("\n")).not.toContain("Expected static flag was missing")
+  } finally {
+    consoleError.mockRestore()
+    if (setup!) await act(async () => { setup.renderer.destroy() })
+    client.destroy()
+    await adapter.close()
+    await controller.close()
+  }
+})
+
 test("首页输入 @ 前自动加载真实工作区文件并展示候选", async () => {
   const root = await mkdtemp(join(tmpdir(), "za38-tui-mention-"))
   await writeFile(join(root, "source.ts"), "export const value = 1")

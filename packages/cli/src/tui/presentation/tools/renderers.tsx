@@ -1,5 +1,6 @@
 /** 四种工具 Renderer：inline / block / diff / generic。 */
 
+import { useRenderer } from "@opentui/react"
 import { useState } from "react"
 
 import type { TimelineItem, ToolCard } from "../../../interactive/state"
@@ -382,13 +383,14 @@ export function TodoPanel(props: { items: readonly TodoItem[] }) {
 
 /** task：标题是派出对象；任务与结论分区用正文色；结论可点开展开剩余行。 */
 function TaskTool(props: { tool: ToolCard; onOpenChildTimeline?: (executionId: string) => void }) {
-  const view = parseTaskDispatch(props.tool.arguments)
-  if (!hasTaskDispatchView(view)) return <GenericTool tool={props.tool} />
+  const renderer = useRenderer()
   const running = props.tool.status === "running"
   const failed = props.tool.status === "failed"
   const frame = useSpinner(running, 80)
   const tone = failed ? tuiTheme.danger : running ? tuiTheme.thinking : tuiTheme.success
   const [expanded, setExpanded] = useState(false)
+  const view = parseTaskDispatch(props.tool.arguments)
+  if (!hasTaskDispatchView(view)) return <GenericTool tool={props.tool} />
   const output = boundVisibleText(
     props.tool.output,
     expanded ? WRITE_FILE_EXPANDED_BUDGET : TOOL_PREVIEW_BUDGET,
@@ -398,6 +400,8 @@ function TaskTool(props: { tool: ToolCard; onOpenChildTimeline?: (executionId: s
   const childId = props.tool.childExecutionId
   return (
     <box
+      // 卡片按内容高度进入滚动区；压缩会令标题高度归零，留下可见文字却没有命中区域。
+      flexShrink={0}
       marginTop={1}
       marginLeft={3}
       marginRight={3}
@@ -408,14 +412,25 @@ function TaskTool(props: { tool: ToolCard; onOpenChildTimeline?: (executionId: s
       paddingBottom={1}
       flexDirection="column"
     >
-      <box flexDirection="row" gap={1}>
+      <box
+        flexDirection="row"
+        flexShrink={0}
+        minHeight={1}
+        gap={1}
+        onMouseDown={childId ? event => {
+          if (event.button !== 0) return
+          event.stopPropagation()
+          // 按下时立即触发，避免 spinner/拖选自动滚动后 mouse-up 落到其他 Renderable。
+          renderer.clearSelection()
+          props.onOpenChildTimeline?.(childId)
+        } : undefined}
+        onMouseUp={childId ? event => {
+          if (event.button === 0) event.stopPropagation()
+        } : undefined}
+      >
         <text fg={tone}>{running ? frame : failed ? "×" : "→"}</text>
         <text fg={tuiTheme.text}>{taskDispatchLabel(view)}</text>
-        {childId ? (
-          <text fg={tuiTheme.primary} onMouseUp={() => props.onOpenChildTimeline?.(childId)}>
-            进入子时间线
-          </text>
-        ) : null}
+        {childId ? <text fg={tuiTheme.primary}>进入子时间线</text> : null}
       </box>
       {view.description ? (
         <>

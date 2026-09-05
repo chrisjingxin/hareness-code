@@ -311,10 +311,7 @@ export function FooterRail(props: {
       {props.interactive.activity.kind === "compacting" ? (
         <BusyContextOperationHint />
       ) : props.interactive.childTimelineExecutionId ? (
-        <box flexDirection="row" gap={1}>
-          {props.interactive.activeRun ? <text fg={tuiTheme.warning}>{useSpinner(true, 80)}</text> : null}
-          <text fg={tuiTheme.muted}>PgUp/PgDn 滚动 · Backspace/Esc 返回主对话</text>
-        </box>
+        <ChildTimelineHint active={Boolean(props.interactive.activeRun)} />
       ) : props.interactive.activeRun ? (
         <BusyRunHint />
       ) : props.thread ? (
@@ -330,6 +327,17 @@ export function FooterRail(props: {
         ) : null}
         <text fg={tuiTheme.subtle}>v{runtime.cliVersion}</text>
       </box>
+    </box>
+  )
+}
+
+/** 子时间线独立持有 spinner Hook，避免 FooterRail 按路由状态条件调用 Hook。 */
+function ChildTimelineHint(props: { active: boolean }) {
+  const frame = useSpinner(props.active, 80)
+  return (
+    <box flexDirection="row" gap={1}>
+      {props.active ? <text fg={tuiTheme.warning}>{frame}</text> : null}
+      <text fg={tuiTheme.muted}>PgUp/PgDn 滚动 · Backspace/Esc 返回主对话</text>
     </box>
   )
 }

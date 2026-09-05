@@ -13,6 +13,7 @@ import { SkillPicker, ThreadPicker } from "../../../src/tui/presentation/pickers
 import { tuiTheme, userMessageAccent } from "../../../src/tui/presentation/theme"
 import { ThreadView } from "../../../src/tui/presentation/thread"
 import { tuiDiffViewForWidth } from "../../../src/tui/presentation/timeline"
+import { ToolRenderer } from "../../../src/tui/presentation/tools/renderers"
 
 const runtime = createInteractiveRuntime({
   protocol: { major: 3, minor: 0 },
@@ -1942,32 +1943,108 @@ test("子视图终结但没有过程事件时显示诊断空态", async () => {
   }
 })
 
-test("点派出卡进入对应子时间线", async () => {
+test("任务卡在受限高度下保留标题及其鼠标命中区域", async () => {
+  const opened: string[] = []
+  const setup = await testRender(createElement("box", { width: 94, height: 8 },
+    createElement(ToolRenderer, {
+      tool: { id: "constrained-task", runId: "run", name: "task", status: "completed", output: "", childExecutionId: "child",
+        arguments: JSON.stringify({ subagent_type: "explore", description: "探索当前工作区根目录，确认仓库状态和已有文件。".repeat(12) }) },
+      terminalWidth: 94,
+      onOpenChildTimeline: id => opened.push(id),
+    }),
+  ), { width: 94, height: 32, useMouse: true, screenMode: "alternate-screen" })
+  try {
+    await act(async () => { await setup.flush() })
+    const lines = setup.captureCharFrame().split("\n")
+    const y = lines.findIndex(line => line.includes("进入子时间线"))
+    expect(y).toBeGreaterThanOrEqual(0)
+    expect(lines[y]).toContain("派出 explore")
+    expect(lines[y + 1]).toContain("任务")
+    const spans = setup.captureSpans().lines[y]!.spans
+    const index = spans.findIndex(span => span.text.includes("进入子时间线"))
+    const x = spans.slice(0, index).reduce((sum, span) => sum + span.width, 0)
+    await act(async () => { await setup.mockMouse.click(x + 2, y); await setup.flush() })
+    expect(opened).toEqual(["child"])
+  } finally {
+    await act(async () => { setup.renderer.destroy() })
+  }
+})
+
+test.each([false, true])("长任务描述派出卡可进入子时间线 hasOutput=%s", async (hasOutput) => {
+  const taskOutput = hasOutput ? Array.from({ length: 36 }, (_, index) => `## 调查结果 ${index + 1}\n长结果正文`).join("\n") : ""
   const state = childTimelineState()
   const interactive: InteractiveSnapshot = {
     ...snapshotOf(state),
     childTimelineExecutionId: null,
-    timeline: [...scopeTimeline(state.timeline, "root")],
+    timeline: scopeTimeline(state.timeline, "root").map(item => (
+      item.type === "tool" && item.tool.name === "task"
+        ? {
+            ...item,
+            tool: {
+              ...item.tool,
+              arguments: JSON.stringify({ subagent_type: "explore", description: "探索当前工作区根目录，确认仓库状态和已有文件。列出所有文件和目录，确认这是一个空仓库或近似空仓库。返回：1）根目录完整 ls 输出；2）是否存在 package.json / tsconfig.json / bun.lockb 等配置；3）推荐的最小文件结构（用于一个基于 Bun.serve 的极简任务看板，包含 server.ts、public/index.html、tests/api.test.ts）。" }),
+              output: taskOutput,
+            },
+          }
+        : item
+    )),
   }
   const opened: string[] = []
+  const bubbledMouseUps: string[] = []
   let setup: Awaited<ReturnType<typeof testRender>>
   await act(async () => {
     setup = await testRender(
-      createElement(ThreadView, { ...viewProps(interactive, 120, 40), onOpenChildTimeline: id => { opened.push(id) } }),
-      { width: 120, height: 40, useMouse: true },
+      createElement(
+        "box",
+        { width: "100%", height: "100%", onMouseUp: () => { bubbledMouseUps.push("root") } },
+        createElement(ThreadView, { ...viewProps(interactive, 94, 32), onOpenChildTimeline: id => { opened.push(id) } }),
+      ),
+      { width: 94, height: 32, useMouse: true, screenMode: "alternate-screen" },
     )
   })
   try {
     await act(async () => { await setup.flush() })
+    for (let attempt = 0; attempt < 16 && !setup.captureCharFrame().includes("进入子时间线"); attempt += 1) {
+      await act(async () => {
+        await setup.mockMouse.scroll(40, 10, "up")
+        await setup.flush()
+      })
+    }
     const frame = setup.captureCharFrame()
     const lines = frame.split("\n")
     const hintY = lines.findIndex(line => line.includes("进入子时间线"))
+    expect(lines[hintY]).toContain("派出 explore")
     if (hintY < 0) throw new Error("派出卡未显示进入子时间线入口")
     const spans = setup.captureSpans().lines[hintY]!.spans
     const spanIndex = spans.findIndex(span => span.text.includes("进入子时间线"))
     const hintX = spans.slice(0, spanIndex).reduce((offset, span) => offset + span.width, 0)
     await act(async () => {
-      await setup.mockMouse.click(hintX, hintY)
+      // 长内容重排后 OpenTUI 可能把标题行点击命中到外层卡片，外层也必须是入口。
+      await setup.mockMouse.click(84, hintY)
+      await setup.flush()
+    })
+    expect(opened).toEqual(["child-abc"])
+    expect(bubbledMouseUps).toEqual([])
+
+    opened.length = 0
+    bubbledMouseUps.length = 0
+    await act(async () => {
+      await setup.mockMouse.click(hintX + 4, hintY)
+      await setup.flush()
+    })
+    expect(opened).toEqual(["child-abc"])
+    expect(bubbledMouseUps).toEqual([])
+
+    opened.length = 0
+    bubbledMouseUps.length = 0
+    await act(async () => {
+      await setup.mockMouse.pressDown(hintX, hintY)
+      await setup.flush()
+    })
+    expect(opened).toEqual(["child-abc"])
+    await act(async () => {
+      await setup.mockMouse.moveTo(hintX + 1, hintY)
+      await setup.mockMouse.release(hintX + 1, hintY)
       await setup.flush()
     })
     expect(opened).toEqual(["child-abc"])
