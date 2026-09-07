@@ -117,6 +117,7 @@ class AcceptRun:
     binding: RunExecutionBinding
     context_snapshot: RunContextSnapshot | None = None
     mode: ThreadMode = ThreadMode.BUILD
+    record_user_message: bool = True
 
 
 @dataclass(frozen=True, slots=True)
