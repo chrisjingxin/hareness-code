@@ -442,6 +442,8 @@ function timelineItemKey(item: TimelineItem): string {
       return `interaction:${item.interaction.runId}:${item.interaction.id}`
     case "compose-summary":
       return `compose-summary:${item.summary.id}`
+    case "goal-evaluation":
+      return `goal-evaluation:${item.evaluation.id}`
   }
 }
 
@@ -610,6 +612,26 @@ function TimelineRowImpl({
   }
   if (item.type === "reasoning") {
     return <ReasoningRow reasoning={item.reasoning} />
+  }
+  if (item.type === "goal-evaluation") {
+    const title = item.evaluation.phase === "checking"
+      ? `验收中 · 第 ${item.evaluation.iteration} 轮`
+      : `验收 · ${item.evaluation.result ?? ""} · 第 ${item.evaluation.iteration} 轮`
+    return (
+      <div className="timeline-goal-evaluation" role="status">
+        <div className="goal-evaluation-header">{title}</div>
+        {item.evaluation.explanation ? <div className="goal-evaluation-text">{item.evaluation.explanation}</div> : null}
+        {(item.evaluation.criteria ?? []).map((criterion, index) => {
+          const label = criterion.text ? `${index + 1}. ${criterion.text}` : criterion.criterion_id
+          return (
+            <div key={criterion.criterion_id} className="goal-evaluation-criterion">
+              {criterion.passed ? "✓" : "✗"} {label}
+              {criterion.gap ? `：${criterion.gap}` : ""}
+            </div>
+          )
+        })}
+      </div>
+    )
   }
   if (item.type === "compose-summary") {
     const stageKey = item.summary.composeScope?.stage

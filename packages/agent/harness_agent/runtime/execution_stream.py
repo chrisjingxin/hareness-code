@@ -155,6 +155,10 @@ class ExecutionStreamPorts(Protocol):
     def on_stream_event(self) -> None:
         """每个 LangGraph 事件后的可选钩子（例如 drain context updates）。"""
 
+    async def on_custom(self, payload: Mapping[str, object]) -> ExecutionSignal | None:
+        """翻译 SDK custom stream；默认忽略。"""
+        return None
+
 
 @dataclass(slots=True)
 class _NullObserverPorts:
@@ -180,6 +184,9 @@ class _NullObserverPorts:
     def on_stream_event(self) -> None:
         return None
 
+    async def on_custom(self, payload: Mapping[str, object]) -> ExecutionSignal | None:
+        return None
+
 
 async def execute(
     request: ExecutionStreamRequest,
@@ -199,7 +206,7 @@ async def execute(
         stream_config["metadata"] = metadata
     stream_kwargs: dict[str, Any] = {
         "config": stream_config,
-        "stream_mode": ["messages", "updates"],
+        "stream_mode": ["messages", "updates", "custom"],
         "subgraphs": True,
     }
     if request.context is not None:
@@ -233,6 +240,15 @@ async def execute(
                 usage=dict(session.usage),
                 resume=resume,
             )
+
+        custom_payload = extract_custom_payload(event)
+        if custom_payload is not None:
+            on_custom = getattr(ports, "on_custom", None)
+            if callable(on_custom):
+                signal = await on_custom(custom_payload)
+                if signal is not None:
+                    ports.emit(signal)
+            continue
 
         chunk = message_stream_chunk(event, execution_id=expected_execution_id)
         if chunk is not None and not _tool_result_was_emitted(session, chunk):
@@ -272,6 +288,21 @@ _CONCURRENCY_SAFE_TOOLS = frozenset({
 def is_concurrency_safe(tool_name: str) -> bool:
     """并发安全工具无需审批，可直接并行执行。"""
     return tool_name in _CONCURRENCY_SAFE_TOOLS
+
+
+def extract_custom_payload(event: tuple[Any, ...]) -> Mapping[str, object] | None:
+    """提取 root custom stream payload；child namespace 忽略。"""
+    if len(event) == 3:
+        namespace, stream_mode, data = event
+        if namespace:
+            return None
+    elif len(event) == 2:
+        stream_mode, data = event
+    else:
+        return None
+    if stream_mode != "custom" or not isinstance(data, Mapping):
+        return None
+    return data
 
 
 def extract_interaction(

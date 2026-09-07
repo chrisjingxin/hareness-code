@@ -252,6 +252,9 @@ class ResolvedAgentSpec:
     enable_memory: bool = True
     enable_skills: bool = True
     enable_ask_user: bool = True
+    goal_backed: bool = False
+    max_iterations: int = 3
+    grader_model_fingerprint: str | None = None
 
     def __post_init__(self) -> None:
         """冻结工具快照并验证会进入 Profile 的身份字段。"""
@@ -279,26 +282,14 @@ class ResolvedAgentSpec:
     @property
     def runtime_profile(self) -> Any:
         """从本 spec 计算唯一 AgentEngineProfile，禁止调用方另行拼装。"""
-        from harness_agent.runtime.agent_engine_profile import (
-            AgentEngineProfile,
-            ModelRoleBinding,
-            model_settings_fingerprint,
-        )
+        from harness_agent.runtime.agent_engine_profile import AgentEngineProfile
         from harness_agent.runtime.agent import default_tool_catalog_fingerprint
 
         return AgentEngineProfile(
             project_fingerprint=self.project_fingerprint,
             topology_id="agent",
             topology_version=1,
-            model_roles=(
-                ModelRoleBinding(
-                    role=self.role,
-                    model_config_fingerprint=model_settings_fingerprint(
-                        profile_name=self.model_profile_id,
-                        model=self.model_settings,
-                    ),
-                ),
-            ),
+            model_roles=_model_roles_for_spec(self),
             tool_catalog_fingerprint=component_fingerprint(
                 {
                     "view": self.tool_view_fingerprint,
@@ -326,6 +317,11 @@ class ResolvedAgentSpec:
                     "enable_memory": self.enable_memory,
                     "enable_skills": self.enable_skills,
                     "enable_ask_user": self.enable_ask_user,
+                    "goal_backed": self.goal_backed,
+                    "max_iterations": self.max_iterations if self.goal_backed else None,
+                    "grader_model_fingerprint": (
+                        self.grader_model_fingerprint if self.goal_backed else None
+                    ),
                 }
             ),
             prompt_template_fingerprint=component_fingerprint(
@@ -337,6 +333,26 @@ class ResolvedAgentSpec:
             agent_id=self.agent_id,
             definition_fingerprint=self.definition_fingerprint,
         )
+
+
+def _model_roles_for_spec(spec: ResolvedAgentSpec) -> tuple[Any, ...]:
+    """goal-backed 图把 grader 角色纳入不可变身份，避免复用旧引擎。"""
+    from harness_agent.runtime.agent_engine_profile import ModelRoleBinding, model_settings_fingerprint
+
+    primary = ModelRoleBinding(
+        role=spec.role,
+        model_config_fingerprint=model_settings_fingerprint(
+            profile_name=spec.model_profile_id,
+            model=spec.model_settings,
+        ),
+    )
+    if not spec.goal_backed:
+        return (primary,)
+    grader_fingerprint = spec.grader_model_fingerprint or primary.model_config_fingerprint
+    return (
+        primary,
+        ModelRoleBinding(role="grader", model_config_fingerprint=grader_fingerprint),
+    )
 
 
 def _execution_identity(settings: ExecutionSettings) -> dict[str, object]:
@@ -363,6 +379,9 @@ def resolve_builtin_main_agent_spec(
     interactive: bool,
     pinned: bool,
     delegation_agent_ids: tuple[str, ...] = (),
+    goal_backed: bool = False,
+    max_iterations: int = 3,
+    grader_model_fingerprint: str | None = None,
 ) -> ResolvedAgentSpec:
     """解析当前内置 main；不读取 Plugin catalog，也不携带 Thread/Run 状态。"""
     from harness_agent.runtime.agent import (
@@ -464,6 +483,9 @@ def resolve_builtin_main_agent_spec(
         ),
         pinned=pinned,
         enable_ask_user=interactive,
+        goal_backed=goal_backed,
+        max_iterations=max_iterations,
+        grader_model_fingerprint=grader_model_fingerprint,
     )
 
 

@@ -76,6 +76,41 @@ def _spec(tmp_path: Path, *, model_name: str = "fast-model", tools: tuple[object
     )
 
 
+def test_goal_backed_spec_does_not_reuse_plain_engine_profile(tmp_path: Path) -> None:
+    """grader 角色和迭代上限必须进入 Profile Key，避免复用无验收图。"""
+    plain = _spec(tmp_path)
+    backed = resolve_builtin_main_agent_spec(
+        project_fingerprint=component_fingerprint({"project": "test"}),
+        workspace=plain.workspace,
+        binding=_binding(),
+        execution=ExecutionSettings(approval_mode=DEFAULT_APPROVAL_MODE),
+        skill_registry=plain.skill_registry,
+        mcp_snapshot=plain.mcp_snapshot,
+        mcp_tools=(),
+        interactive=True,
+        pinned=False,
+        goal_backed=True,
+        max_iterations=3,
+    )
+    other = resolve_builtin_main_agent_spec(
+        project_fingerprint=component_fingerprint({"project": "test"}),
+        workspace=plain.workspace,
+        binding=_binding(),
+        execution=ExecutionSettings(approval_mode=DEFAULT_APPROVAL_MODE),
+        skill_registry=plain.skill_registry,
+        mcp_snapshot=plain.mcp_snapshot,
+        mcp_tools=(),
+        interactive=True,
+        pinned=False,
+        goal_backed=True,
+        max_iterations=1,
+    )
+    assert "grader" not in {role.role for role in plain.runtime_profile.model_roles}
+    assert "grader" in {role.role for role in backed.runtime_profile.model_roles}
+    assert backed.runtime_profile.profile_key != plain.runtime_profile.profile_key
+    assert other.runtime_profile.profile_key != backed.runtime_profile.profile_key
+
+
 def test_compose_planning_stage_is_read_only_and_bounded(tmp_path: Path) -> None:
     """规划类 stage 只转换 ContextPack，不能转入任何工具循环。"""
     main = _spec(tmp_path)

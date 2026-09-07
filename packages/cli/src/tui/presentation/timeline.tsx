@@ -183,6 +183,14 @@ function TimelineRow(props: {
   if (props.item.type === "compose-summary") {
     return <ComposeSummaryRow summary={props.item.summary} />
   }
+  if (props.item.type === "goal-evaluation") {
+    return (
+      <GoalEvaluationRow
+        evaluation={props.item.evaluation}
+        goalCriteria={props.interactive.goal?.criteria}
+      />
+    )
+  }
   return (
     <ToolRenderer
       tool={props.item.tool}
@@ -191,6 +199,48 @@ function TimelineRow(props: {
       onOpenChildTimeline={props.onOpenChildTimeline}
     />
   )
+}
+
+/** 独立验收过程：不伪装成 assistant 或普通工具。 */
+function GoalEvaluationRow(props: {
+  evaluation: {
+    phase: string
+    result?: string
+    explanation?: string
+    iteration: number
+    criteria?: Array<{ criterion_id: string; text?: string; passed: boolean; gap: string | null }>
+    graderProfileId: string
+  }
+  goalCriteria?: readonly { criterion_id: string; text: string }[]
+}) {
+  const title = props.evaluation.phase === "checking"
+    ? `验收中 · 第 ${props.evaluation.iteration} 轮`
+    : `验收${goalResultLabel(props.evaluation.result)} · 第 ${props.evaluation.iteration} 轮`
+  const textMap = new Map((props.goalCriteria ?? []).map(c => [c.criterion_id, c.text]))
+  const details = [
+    props.evaluation.explanation,
+    ...(props.evaluation.criteria ?? []).map((item, index) => {
+      const text = item.text ?? textMap.get(item.criterion_id)
+      const label = text ? `${index + 1}. ${text}` : item.criterion_id
+      return item.passed ? `✓ ${label}` : `✗ ${label}${item.gap ? `：${item.gap}` : ""}`
+    }),
+    props.evaluation.graderProfileId ? `grader: ${props.evaluation.graderProfileId}` : "",
+  ].filter(Boolean).join("\n")
+  return (
+    <box marginTop={1} marginLeft={2} marginRight={2}>
+      <text fg={tuiTheme.muted}>{title}</text>
+      {details ? <text content={details} fg={tuiTheme.text} /> : null}
+    </box>
+  )
+}
+
+function goalResultLabel(result?: string): string {
+  if (result === "satisfied") return "通过"
+  if (result === "needs_revision") return "未通过"
+  if (result === "max_iterations_reached") return "已达次数上限"
+  if (result === "grader_error") return "执行失败"
+  if (result === "failed") return "失败"
+  return ""
 }
 
 /** 阶段 Runtime 摘要：非 assistant 文本，仅展示有界结果。 */
@@ -390,6 +440,7 @@ function timelineItemKey(item: TimelineItem): string {
   }
   if (item.type === "reasoning") return ["reasoning", item.reasoning.id].join(":")
   if (item.type === "compose-summary") return ["compose-summary", item.summary.id].join(":")
+  if (item.type === "goal-evaluation") return ["goal-evaluation", item.evaluation.id].join(":")
   return ["interaction", item.interaction.runId, item.interaction.id].join(":")
 }
 

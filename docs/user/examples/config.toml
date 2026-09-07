@@ -84,6 +84,12 @@ max_total_mib = 200
 # 单个日志文件分片容量上限（单位 MiB，默认 16，不得大于 max_total_mib）
 max_file_mib = 16
 
+# Build `/goal` 的独立验收。省略 grader_model 时继承该次 Run 的实际主模型。
+# 环境变量 HARNESS_GOAL_GRADER_MODEL / HARNESS_GOAL_MAX_ITERATIONS 可覆盖。
+[goal]
+# grader_model = "pro"
+max_iterations = 3
+
 
 # 未实现：企业远端 Sandbox Provider。
 # 将 backend 改为 "remote" 前，必须先由企业提供并验证 factory。

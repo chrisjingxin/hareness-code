@@ -46,6 +46,82 @@ def test_goal_draft_output_forbids_unknown_fields() -> None:
         )
 
 
+def test_goal_draft_output_accepts_ready_draft_with_unused_clarification_fields() -> None:
+    parsed = GoalDraftOutput.model_validate(
+        {
+            "readiness": "ready",
+            "objective": "从0到1构建 TaskPulse 看板服务",
+            "assumptions": ["沿用 Bun.serve"],
+            "criteria": ["静态单页可打开", "REST API 可创建完成与标签过滤", "附带单元测试"],
+            "understood_objective": "",
+            "missing_information": [],
+            "questions": [],
+        }
+    )
+
+    assert parsed.readiness == "ready"
+    assert parsed.objective == "从0到1构建 TaskPulse 看板服务"
+    assert parsed.criteria == (
+        "静态单页可打开",
+        "REST API 可创建完成与标签过滤",
+        "附带单元测试",
+    )
+    assert parsed.understood_objective is None
+    assert parsed.missing_information == ()
+    assert parsed.questions == ()
+
+
+def test_goal_draft_output_accepts_ready_draft_when_understood_objective_is_copied() -> None:
+    parsed = GoalDraftOutput.model_validate(
+        {
+            "readiness": "ready",
+            "objective": "完成计时器",
+            "assumptions": [],
+            "criteria": ["页面显示 60 秒"],
+            "understood_objective": "完成计时器",
+            "missing_information": [],
+            "questions": [],
+        }
+    )
+
+    assert parsed.readiness == "ready"
+    assert parsed.objective == "完成计时器"
+    assert parsed.understood_objective is None
+
+
+def test_goal_draft_output_accepts_clarification_draft_with_unused_ready_fields() -> None:
+    parsed = GoalDraftOutput.model_validate(
+        {
+            "readiness": "needs_clarification",
+            "objective": "",
+            "assumptions": [],
+            "criteria": [],
+            "understood_objective": "改进登录",
+            "missing_information": ["交付物不明确"],
+            "questions": ["需要交付哪些登录行为？"],
+        }
+    )
+
+    assert parsed.readiness == "needs_clarification"
+    assert parsed.understood_objective == "改进登录"
+    assert parsed.objective is None
+    assert parsed.criteria == ()
+
+
+def test_goal_draft_output_rejects_ready_draft_without_criteria() -> None:
+    with pytest.raises(ValidationError, match="incomplete"):
+        GoalDraftOutput.model_validate(
+            {
+                "readiness": "ready",
+                "objective": "完成计时器",
+                "assumptions": [],
+                "criteria": [],
+                "understood_objective": "",
+                "missing_information": [],
+            }
+        )
+
+
 @pytest.mark.asyncio
 async def test_generate_goal_draft_forces_structured_output() -> None:
     structured = _StructuredModel()
@@ -125,6 +201,107 @@ async def test_generate_goal_draft_uses_forced_schema_on_openai_compatible_wire(
         "type": "function",
         "function": {"name": "GoalDraftOutput"},
     }
+
+
+@pytest.mark.asyncio
+async def test_generate_goal_draft_accepts_ready_tool_payload_with_unused_fields() -> None:
+    async def respond(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            json={
+                "id": "completion-1",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "mock",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "GoalDraftOutput",
+                                        "arguments": json.dumps(
+                                            {
+                                                "readiness": "ready",
+                                                "objective": "从0到1构建 TaskPulse 看板服务",
+                                                "assumptions": [],
+                                                "criteria": [
+                                                    "静态单页可打开",
+                                                    "REST API 可创建完成与标签过滤",
+                                                    "附带单元测试",
+                                                ],
+                                                "understood_objective": "",
+                                                "missing_information": [],
+                                                "questions": [],
+                                            },
+                                            ensure_ascii=False,
+                                        ),
+                                    },
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    try:
+        model = create_openai_compatible_model(
+            ModelSettings(
+                name="mock",
+                base_url="https://example.invalid/v1",
+                api_key="test",
+            ),
+            async_client=client,
+        )
+        draft = await generate_goal_draft(
+            model,
+            GoalProposalContext(input_text="从0到1构建 TaskPulse 看板服务"),
+        )
+    finally:
+        await client.aclose()
+
+    assert draft.objective == "从0到1构建 TaskPulse 看板服务"
+    assert draft.criteria == (
+        "静态单页可打开",
+        "REST API 可创建完成与标签过滤",
+        "附带单元测试",
+    )
+
+
+@pytest.mark.asyncio
+async def test_generate_goal_draft_maps_structured_output_validation_error() -> None:
+    from langchain.agents.structured_output import StructuredOutputValidationError
+    from langchain_core.messages import AIMessage
+
+    class _Factory:
+        def __call__(self, _model, _tools, **_kwargs):
+            class _Agent:
+                async def ainvoke(self, _input, **_kwargs):
+                    raise StructuredOutputValidationError(
+                        "GoalDraftOutput",
+                        ValueError("ready goal draft is incomplete or mixed"),
+                        AIMessage(content=""),
+                    )
+
+            return _Agent()
+
+    with pytest.raises(GoalStoreError, match="GOAL_OBJECTIVE_INVALID"):
+        await generate_goal_draft(
+            object(),
+            GoalProposalContext(input_text="完成计时器"),
+            repository_tools=(object(),),
+            agent_factory=_Factory(),
+        )
 
 
 class _StructuredModel:

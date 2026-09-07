@@ -399,7 +399,7 @@ export class InteractionFeature {
     return { status: "accepted" }
   }
 
-  /** 打开 `/goal show` 的本地只读投影，不创建 Host Interaction。 */
+  /** 打开裸 `/goal` 的本地只读投影，不创建 Host Interaction。 */
   openGoalViewer(snapshot: import("@za38/protocol").GoalInspectResult, threadId: string, ctx: FeatureContext): void {
     const goal = snapshot.goal
     const pending = snapshot.pending
@@ -429,7 +429,7 @@ export class InteractionFeature {
     ctx.publish()
   }
 
-  /** 关闭 `/goal show` 的本地查看器。 */
+  /** 关闭 `/goal` 的本地查看器或编辑弹窗。 */
   closeGoalViewer(ctx: FeatureContext): IntentOutcome {
     if (!this.goalViewer) {
       return { status: "rejected", code: "not-found", message: "No goal viewer is open" }
@@ -437,5 +437,24 @@ export class InteractionFeature {
     this.goalViewer = null
     ctx.publish()
     return { status: "accepted" }
+  }
+
+  /** 打开类似 Codex 的 `/goal edit` 本地编辑输入弹窗。 */
+  openGoalEditPrompt(goal: import("@za38/protocol").GoalProjection, threadId: string, ctx: FeatureContext): void {
+    this.planViewer = null
+    this.goalViewer = {
+      type: "goal",
+      requestId: `edit-goal:${threadId}`,
+      objective: goal.objective,
+      assumptions: goal.assumptions,
+      criteria: goal.criteria.map(item => item.text),
+      decisions: ["edited", "cancelled"],
+      deadlineAtMs: Number.POSITIVE_INFINITY,
+      readOnly: false,
+      isEditPrompt: true,
+      status: goal.status,
+      revision: goal.revision,
+    }
+    ctx.publish()
   }
 }

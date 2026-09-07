@@ -214,6 +214,51 @@ async def test_threads_open_reconciles_interrupted_proposal_when_idle(tmp_path: 
         await host.close()
 
 
+@pytest.mark.asyncio
+async def test_terminal_reconcile_clears_prior_blocker_without_revision_bump(
+    tmp_path: Path,
+) -> None:
+    from harness_agent.goals.context import goal_run_binding
+
+    host = AgentHost(allow_echo=False, config_home=tmp_path / "home", workspace=tmp_path)
+    try:
+        persistence = await host._ensure_thread_persistence()
+        store = persistence.goal_store()
+        goal = await _create_goal(store)
+        blocked = await store.block_goal(
+            thread_id="thread-1",
+            goal_id=goal.goal_id,
+            goal_revision=goal.revision,
+            note="缺少凭据",
+            now_ms=10,
+        )
+        activated = await store.activate_from_blocked(
+            thread_id="thread-1",
+            goal_id=blocked.goal_id,
+            goal_revision=blocked.revision,
+            now_ms=11,
+        )
+        run = SimpleNamespace(
+            persistence=persistence,
+            thread_id="thread-1",
+            run_id="run-1",
+            context_summary={},
+            preparation=SimpleNamespace(
+                goal_binding=goal_run_binding(activated, actual_primary_profile_id="fast")
+            ),
+        )
+
+        await host._reconcile_goal_terminal(run, _Port())
+
+        snapshot = await store.inspect("thread-1")
+        assert snapshot.goal is not None
+        assert snapshot.goal.status == "active"
+        assert snapshot.goal.prior_blocker is None
+        assert snapshot.goal.revision == activated.revision
+    finally:
+        await host.close()
+
+
 class _Port:
     def __init__(self) -> None:
         self.events: list[tuple[str, dict[str, object]]] = []

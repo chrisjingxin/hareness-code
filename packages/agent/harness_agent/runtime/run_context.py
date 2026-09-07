@@ -117,6 +117,10 @@ class RunContext:
     record_approval: Callable[[str, dict[str, Any], str], None] | None = field(default=None, repr=False)
     # 当前 Run 的 Diagnostic Log；共享图在调用时读取，不在构图期捕获。
     diagnostic_log: Any | None = field(default=None, repr=False)
+    # Goal-backed Run 冻结的目标身份与独立验收依赖；普通 Run 为 None。
+    goal_binding: Any | None = field(default=None, repr=False)
+    goal_store: Any | None = field(default=None, repr=False)
+    verification_registry: Any | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         """在执行前验证 thread 与 snapshot 的绑定，阻止跨 project 注入。"""

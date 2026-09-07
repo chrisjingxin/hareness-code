@@ -62,6 +62,7 @@ class ConfigManifest:
         "agents": ConfigSection("agents", "planned", frozenset()),
         "mcp": ConfigSection("mcp", "implemented", ACTIVE_TOML_SOURCES),
         "tools": ConfigSection("tools", "implemented", ACTIVE_TOML_SOURCES),
+        "goal": ConfigSection("goal", "implemented", ACTIVE_TOML_SOURCES),
         "telemetry": ConfigSection("telemetry", "planned", frozenset()),
         "updates": ConfigSection("updates", "planned", frozenset()),
         "hooks": ConfigSection("hooks", "planned", frozenset()),

@@ -103,8 +103,41 @@ test("明确目标创建空 Thread、启动内部 proposal，接受后 exactly o
     goal_revision: 1,
     reason: "accepted",
   })
+  expect([...harness.runStates.values()].at(-1)?.input.approvalMode).toBe("default")
   await flush()
   expect(harness.runHandles).toHaveLength(2)
+})
+
+test("Goal continuation 沿用当前审批模式，不会自行选择更宽档位", async () => {
+  const harness = makeHarness({
+    capabilities: [Capability.GOAL_READ, Capability.GOAL_MANAGE],
+    initialThreadId: "thread-goal",
+    openThreadImpl: async threadId => ({
+      thread: { thread_id: threadId, created_at_ms: 1, updated_at_ms: 2, first_message: "", latest_message: "", message_count: 0 },
+      messages: [],
+      plan: { has_plan: false, plan_markdown: "", plan_virtual_path: "/.harness/plan.md", plan_display_path: `~/.harness/plans/${threadId}.md` },
+      goal: { ...goalProjection(), status: "paused" },
+      goal_pending: null,
+      goal_activities: [],
+    }),
+  })
+  try {
+    await flush()
+    await harness.controller.dispatch({ type: "approval-mode.set", mode: "auto-edit" })
+    expect(harness.controller.getSnapshot().runtime.approvalMode).toBe("auto-edit")
+    harness.port.mutateGoal = async () => ({
+      disposition: "applied",
+      goal: { ...goalProjection(), revision: 2, status: "active" },
+      pending: null,
+      continuation: { continuation_id: "resume-auto-edit", goal_id: "goal-1", goal_revision: 2, reason: "resumed" },
+    })
+    expect((await harness.controller.dispatch({ type: "input.submit", value: "/goal resume" })).status).toBe("accepted")
+    await flush()
+    expect(harness.runHandles.at(-1)?.runId).toBe("resume-auto-edit")
+    expect([...harness.runStates.values()].at(-1)?.input.approvalMode).toBe("auto-edit")
+  } finally {
+    await harness.controller.close()
+  }
 })
 
 test("用户取消 goal proposal 后保持停止，不把恢复为 ready 的请求立即重新启动", async () => {
@@ -176,7 +209,7 @@ test("Thread 恢复 ready/reviewing proposal 时续接审核 Run，不重复显�
   }
 })
 
-test("/goal amend 发起同目标修订，pause/resume/clear 走 mutation 且恢复只续跑一次", async () => {
+test("/goal edit 发起同目标修订，支持弹窗修改，pause/resume/clear 走 mutation 且恢复只续跑一次", async () => {
   const harness = makeHarness({
     capabilities: [Capability.GOAL_READ, Capability.GOAL_MANAGE],
     initialThreadId: "thread-goal",
@@ -197,12 +230,31 @@ test("/goal amend 发起同目标修订，pause/resume/clear 走 mutation 且恢
     return { disposition: "ready", pending: pendingProjection("ready", "amend") }
   }
 
-  expect((await harness.controller.dispatch({ type: "input.submit", value: "/goal amend 补充错误态验收" })).status).toBe("accepted")
+  expect((await harness.controller.dispatch({ type: "input.submit", value: "/goal edit 补充错误态验收" })).status).toBe("accepted")
   expect(requested).toMatchObject({
     kind: "amend",
     input_text: "补充错误态验收",
     expected_goal_id: "goal-1",
     expected_revision: 1,
+  })
+
+  // 验证裸 /goal edit 唤起编辑弹窗，并通过弹窗响应提交修订
+  const editPromptOutcome = await harness.controller.dispatch({ type: "input.submit", value: "/goal edit" })
+  expect(editPromptOutcome.status).toBe("accepted")
+  const editInteraction = harness.controller.getSnapshot().interaction
+  expect(editInteraction).toMatchObject({
+    type: "goal",
+    isEditPrompt: true,
+    objective: "完成登录功能",
+  })
+  await harness.controller.dispatch({
+    type: "interaction.respond",
+    requestId: editInteraction!.requestId,
+    response: { kind: "goal", decision: "edited", feedback: "来自编辑弹窗的修改" },
+  })
+  expect(requested).toMatchObject({
+    kind: "amend",
+    input_text: "来自编辑弹窗的修改",
   })
 
   harness.port.completeRun("thread-goal", harness.runHandles.at(-1)!.runId)
@@ -265,7 +317,7 @@ test("只读能力可打开 Goal viewer，但不能创建目标", async () => {
   })
   await flush()
 
-  expect((await harness.controller.dispatch({ type: "input.submit", value: "/goal show" })).status).toBe("accepted")
+  expect((await harness.controller.dispatch({ type: "input.submit", value: "/goal" })).status).toBe("accepted")
   expect(harness.controller.getSnapshot().interaction).toMatchObject({
     type: "goal",
     readOnly: true,
@@ -294,10 +346,9 @@ test("Compose 手输 /goal 返回稳定本地提示", async () => {
 
 test("Goal 保留前缀非法参数不会退化成 objective，普通生命周期前缀仍可作为目标", async () => {
   const harness = makeHarness({ capabilities: [Capability.GOAL_READ, Capability.GOAL_MANAGE] })
-  for (const value of ["/goal amend", "/goal model unknown", "/goal max-iterations nope"]) {
-    const result = await harness.controller.dispatch({ type: "input.submit", value })
-    expect(result).toMatchObject({ status: "rejected", code: "invalid-argument" })
-  }
+  // 无目标时，/goal edit 必须明确拒绝，不能退化为创建名为 "edit" 的目标
+  const result = await harness.controller.dispatch({ type: "input.submit", value: "/goal edit" })
+  expect(result).toMatchObject({ status: "rejected", code: "invalid-argument" })
   expect(harness.calls).not.toContain("goal.request")
 
   let inputText = ""

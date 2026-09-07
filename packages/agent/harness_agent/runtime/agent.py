@@ -749,6 +749,8 @@ def create_harness_agent(
     snapshot_store: Any | None = None,
     file_tool_metrics: FileToolMetrics | None = None,
     workspace_root_registry: Any | None = None,
+    extra_root_tools: Sequence[BaseTool | Any] = (),
+    rubric_middleware: Any | None = None,
 ) -> Any:
     """创建 za38 编码 agent。
 
@@ -1055,6 +1057,8 @@ def create_harness_agent(
         all_tools = [
             tool for tool in all_tools if capability_view.allows_tool(tool.name)
         ]
+    if extra_root_tools:
+        all_tools.extend(extra_root_tools)
 
     subagents: list[dict[str, Any]] | None = None
     workspace_guard: WorkspaceBoundaryMiddleware | None = None
@@ -1267,6 +1271,8 @@ def create_harness_agent(
         # 该中间件仅读取本轮 context，不保存 thread 私有 Context snapshot。
         agent_middleware.append(RunContextSnapshotMiddleware())
     agent_middleware.append(context_middleware)
+    if rubric_middleware is not None:
+        agent_middleware.append(rubric_middleware)
 
     # DeepAgents 的内建压缩会抢先改写历史，且与本机归档语义不兼容。构图时
     # 临时排除它，确保 ContextWindowMiddleware 是唯一的历史重写入口。

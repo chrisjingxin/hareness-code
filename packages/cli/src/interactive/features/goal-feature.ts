@@ -9,6 +9,7 @@ type GoalRunCallbacks = {
   startProposal(requestId: string, displayPrompt?: string): Promise<IntentOutcome>
   startContinuation(continuation: GoalContinuation): Promise<IntentOutcome>
   openViewer(snapshot: GoalInspectResult, threadId: string): void
+  openEditPrompt?(goal: import("@za38/protocol").GoalProjection, threadId: string): void
 }
 
 export class GoalFeature {
@@ -17,7 +18,7 @@ export class GoalFeature {
   /** `/goal`：提供只读、提案与生命周期 mutation 的单一命令入口。 */
   async execute(argument: string | undefined, ctx: FeatureContext, callbacks: GoalRunCallbacks): Promise<IntentOutcome> {
     const value = argument?.trim() ?? ""
-    if (!value || value === "show" || value === "status") {
+    if (!value) {
       const threadId = ctx.getState().currentThreadId
       if (!threadId) {
         ctx.commit(current => appendNotice(current, "当前 thread 还没有目标。用 `/goal <目标>` 创建。"))
@@ -33,19 +34,21 @@ export class GoalFeature {
     if (value === "pause" || value === "resume" || value === "clear") {
       return this.mutate({ kind: value }, ctx, callbacks)
     }
-    const amendMatch = /^amend(?:\s+([\s\S]+))?$/.exec(value)
-    if (amendMatch) {
-      const feedback = amendMatch[1]?.trim() ?? ""
-      if (!feedback) {
-        return { status: "rejected", code: "invalid-argument", message: "用法：/goal amend <修改说明>" }
-      }
+    const editMatch = /^edit(?:\s+([\s\S]+))?$/.exec(value)
+    if (editMatch) {
       if (!current.goal) {
-        return { status: "rejected", code: "invalid-argument", message: "当前没有可修订的目标。" }
+        return { status: "rejected", code: "invalid-argument", message: "当前没有可编辑的目标。" }
+      }
+      const feedback = editMatch[1]?.trim() ?? ""
+      if (!feedback) {
+        const threadId = current.currentThreadId ?? ctx.idGenerator.uuid()
+        if (callbacks.openEditPrompt) {
+          callbacks.openEditPrompt(current.goal, threadId)
+          return { status: "accepted" }
+        }
+        return { status: "rejected", code: "invalid-argument", message: "用法：/goal edit <修改说明>" }
       }
       return this.request(feedback, "amend", ctx, callbacks)
-    }
-    if (/^(?:model|max-iterations)(?:\s|$)/.test(value)) {
-      return { status: "rejected", code: "invalid-argument", message: "目标验收配置尚不可用，请使用目标生命周期命令。" }
     }
     return this.request(value, current.goal ? "replace" : "create", ctx, callbacks)
   }
@@ -85,7 +88,7 @@ export class GoalFeature {
     }
   }
 
-  private async request(
+  async request(
     inputText: string,
     kind: "create" | "replace" | "amend",
     ctx: FeatureContext,
@@ -115,7 +118,7 @@ export class GoalFeature {
         ctx.commit(state => appendNotice(state, "目标请求已排队，将在当前任务结束后继续。"))
         return { status: "accepted" }
       }
-      const displayPrompt = kind === "amend" ? `/goal amend ${inputText}` : `/goal ${inputText}`
+      const displayPrompt = kind === "amend" ? `/goal edit ${inputText}` : `/goal ${inputText}`
       return callbacks.startProposal(requested.pending.request_id, displayPrompt)
     } catch (error) {
       return { status: "rejected", code: "agent-error", message: `目标请求失败：${errorMessage(error)}` }

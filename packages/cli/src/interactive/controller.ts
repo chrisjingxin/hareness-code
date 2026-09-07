@@ -196,6 +196,16 @@ export class InteractiveControllerImpl implements InteractiveController {
         return { status: "accepted" }
 
       case "interaction.respond": {
+        if (intent.requestId.startsWith("edit-goal:")) {
+          this.interactionFeature.closeGoalViewer(this.featureContext)
+          if (intent.response.kind === "goal" && (intent.response.decision === "edited" || intent.response.decision === "rejected")) {
+            const feedback = (intent.response as any).feedback?.trim() || (intent.response as any).objective?.trim()
+            if (feedback) {
+              return this.goalFeature.request(feedback, "amend", this.featureContext, this.goalRunCallbacks())
+            }
+          }
+          return { status: "accepted" }
+        }
         const outcome = this.interactionFeature.respondInteraction(intent.requestId, { request_id: intent.requestId, ...intent.response } as any, this.featureContext)
         if (outcome.status === "accepted" && intent.response.kind === "plan") {
           this.runFeature.recordPlanDecision(intent.response.decision, intent.response.feedback)
@@ -353,6 +363,7 @@ export class InteractiveControllerImpl implements InteractiveController {
       startProposal: (requestId: string, displayPrompt?: string) => this.startGoalProposal(requestId, displayPrompt),
       startContinuation: (continuation: { continuation_id: string; goal_id: string; goal_revision: number; reason: "accepted" | "amended" | "resumed" }) => this.startGoalContinuation(continuation),
       openViewer: (snapshot: import("@za38/protocol").GoalInspectResult, threadId: string) => this.interactionFeature.openGoalViewer(snapshot, threadId, this.featureContext),
+      openEditPrompt: (goal: import("@za38/protocol").GoalProjection, threadId: string) => this.interactionFeature.openGoalEditPrompt(goal, threadId, this.featureContext),
     }
   }
   /** 计划 Run 终态后：批准则恢复档位并自动开实现轮；放弃只恢复；打回不动。 */

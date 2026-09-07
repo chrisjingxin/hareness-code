@@ -125,8 +125,10 @@ export type InteractiveInteraction =
       decisions: readonly ("accepted" | "edited" | "rejected" | "cancelled")[]
       deadlineAtMs: number
       agentId?: string
-      /** true 表示 /goal show 打开的只读状态查看器。 */
+      /** true 表示裸 /goal 打开的只读状态查看器。 */
       readOnly?: boolean
+      /** true 表示 /goal edit 打开的类似 Codex 的编辑输入弹窗。 */
+      isEditPrompt?: boolean
       status?: "active" | "paused" | "blocked" | "complete"
       revision?: number
       graderLabel?: string

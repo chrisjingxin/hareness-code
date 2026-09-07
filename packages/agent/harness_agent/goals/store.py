@@ -7,6 +7,7 @@ import hashlib
 import json
 import uuid
 from dataclasses import asdict, replace
+from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
 from harness_agent.goals.models import (
@@ -352,6 +353,420 @@ class GoalStore:
                         )
                     await self._connection.commit()
                     return GoalReconcileResult(goal=current, pending=pending)
+                except BaseException:
+                    await self._connection.rollback()
+                    raise
+        except GoalStoreError:
+            raise
+        except Exception as exc:
+            raise GoalStoreError("GOAL_STORE_UNAVAILABLE") from exc
+
+    async def record_evaluation(
+        self,
+        *,
+        thread_id: str,
+        evaluation_id: str,
+        goal_id: str,
+        goal_revision: int,
+        run_id: str,
+        grading_run_id: str,
+        iteration: int,
+        result: str,
+        explanation: str,
+        criteria: tuple[dict[str, object], ...] | Sequence[Mapping[str, object]],
+        grader_profile_id: str,
+        criteria_digest: str,
+        now_ms: int,
+    ) -> dict[str, object]:
+        """先持久化 evaluation，再允许 Host fanout。重复事件幂等。"""
+        projection = {
+            "evaluation_id": evaluation_id,
+            "goal_id": goal_id,
+            "goal_revision": goal_revision,
+            "run_id": run_id,
+            "grading_run_id": grading_run_id,
+            "iteration": iteration,
+            "result": result,
+            "explanation": explanation,
+            "criteria": [dict(item) for item in criteria],
+            "grader_profile_id": grader_profile_id,
+            "created_at_ms": now_ms,
+            "criteria_digest": criteria_digest,
+            "stale": False,
+        }
+        try:
+            async with self._lock:
+                await self._connection.execute("BEGIN IMMEDIATE")
+                try:
+                    existing = await self._load_evaluation(evaluation_id)
+                    if existing is not None:
+                        await self._connection.commit()
+                        return existing
+                    await self._connection.execute(
+                        """
+                        INSERT INTO harness_goal_evaluations
+                            (project_fingerprint, thread_id, evaluation_id, goal_id, goal_revision,
+                             run_id, grading_run_id, iteration, result, projection_json, created_at_ms)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            self._project_fingerprint,
+                            thread_id,
+                            evaluation_id,
+                            goal_id,
+                            goal_revision,
+                            run_id,
+                            grading_run_id,
+                            iteration,
+                            result,
+                            _json(projection),
+                            now_ms,
+                        ),
+                    )
+                    await self._insert_activity(
+                        thread_id,
+                        GoalActivity(
+                            evaluation_id,
+                            "evaluation",
+                            _evaluation_summary(result, explanation),
+                            now_ms,
+                        ),
+                    )
+                    await self._connection.commit()
+                    return projection
+                except BaseException:
+                    await self._connection.rollback()
+                    raise
+        except GoalStoreError:
+            raise
+        except Exception as exc:
+            raise GoalStoreError("GOAL_STORE_UNAVAILABLE") from exc
+
+    async def request_completion(
+        self,
+        *,
+        thread_id: str,
+        run_id: str,
+        goal_id: str,
+        goal_revision: int,
+        note: str,
+        now_ms: int,
+    ) -> None:
+        """保存 complete 申请，不改变 Goal 状态。"""
+        note = validate_goal_text(note)
+        try:
+            async with self._lock:
+                await self._connection.execute("BEGIN IMMEDIATE")
+                try:
+                    current = await self._load_current(thread_id)
+                    if current is None or current.status != "active":
+                        raise GoalStoreError("GOAL_NOT_ACTIVE")
+                    if current.goal_id != goal_id or current.revision != goal_revision:
+                        raise GoalStoreError("GOAL_REVISION_CONFLICT")
+                    await self._insert_operation(
+                        operation_id=f"complete-{run_id}-{goal_revision}",
+                        thread_id=thread_id,
+                        operation_kind="completion_request",
+                        params_digest=_digest({"run_id": run_id, "goal_id": goal_id, "revision": goal_revision}),
+                        result={
+                            "run_id": run_id,
+                            "goal_id": goal_id,
+                            "goal_revision": goal_revision,
+                            "note": note,
+                        },
+                        now_ms=now_ms,
+                    )
+                    await self._connection.commit()
+                except BaseException:
+                    await self._connection.rollback()
+                    raise
+        except GoalStoreError:
+            raise
+        except Exception as exc:
+            raise GoalStoreError("GOAL_STORE_UNAVAILABLE") from exc
+
+    async def block_goal(
+        self,
+        *,
+        thread_id: str,
+        goal_id: str,
+        goal_revision: int,
+        note: str,
+        now_ms: int,
+    ) -> Goal:
+        """立即 CAS 把 active goal 标为 blocked。"""
+        note = validate_goal_text(note)
+        try:
+            async with self._lock:
+                await self._connection.execute("BEGIN IMMEDIATE")
+                try:
+                    current = await self._load_current(thread_id)
+                    if current is None or current.status != "active":
+                        raise GoalStoreError("GOAL_NOT_ACTIVE")
+                    if current.goal_id != goal_id or current.revision != goal_revision:
+                        raise GoalStoreError("GOAL_REVISION_CONFLICT")
+                    updated = replace(
+                        current,
+                        revision=current.revision + 1,
+                        status="blocked",
+                        note=note,
+                        updated_at_ms=now_ms,
+                    )
+                    await self._insert_goal(thread_id, updated)
+                    await self._connection.execute(
+                        """
+                        UPDATE harness_goal_current
+                        SET goal_id = ?, revision = ?
+                        WHERE project_fingerprint = ? AND thread_id = ?
+                        """,
+                        (updated.goal_id, updated.revision, self._project_fingerprint, thread_id),
+                    )
+                    await self._insert_activity(
+                        thread_id,
+                        GoalActivity(f"block-{updated.revision}", "lifecycle", "目标已阻塞", now_ms),
+                    )
+                    await self._connection.commit()
+                    return updated
+                except BaseException:
+                    await self._connection.rollback()
+                    raise
+        except GoalStoreError:
+            raise
+        except Exception as exc:
+            raise GoalStoreError("GOAL_STORE_UNAVAILABLE") from exc
+
+    async def activate_from_blocked(
+        self,
+        *,
+        thread_id: str,
+        goal_id: str,
+        goal_revision: int,
+        now_ms: int,
+    ) -> Goal:
+        """普通 Build 消息把 blocked 恢复为 active，并把原因移到 prior_blocker。"""
+        try:
+            async with self._lock:
+                await self._connection.execute("BEGIN IMMEDIATE")
+                try:
+                    current = await self._load_current(thread_id)
+                    if current is None or current.status != "blocked":
+                        raise GoalStoreError("GOAL_NOT_ACTIVE")
+                    if current.goal_id != goal_id or current.revision != goal_revision:
+                        raise GoalStoreError("GOAL_REVISION_CONFLICT")
+                    updated = replace(
+                        current,
+                        revision=current.revision + 1,
+                        status="active",
+                        prior_blocker=current.note,
+                        note=None,
+                        updated_at_ms=now_ms,
+                    )
+                    await self._insert_goal(thread_id, updated)
+                    await self._connection.execute(
+                        """
+                        UPDATE harness_goal_current
+                        SET goal_id = ?, revision = ?
+                        WHERE project_fingerprint = ? AND thread_id = ?
+                        """,
+                        (updated.goal_id, updated.revision, self._project_fingerprint, thread_id),
+                    )
+                    await self._insert_activity(
+                        thread_id,
+                        GoalActivity(f"unblock-{updated.revision}", "lifecycle", "阻塞已解除，继续目标", now_ms),
+                    )
+                    await self._connection.commit()
+                    return updated
+                except BaseException:
+                    await self._connection.rollback()
+                    raise
+        except GoalStoreError:
+            raise
+        except Exception as exc:
+            raise GoalStoreError("GOAL_STORE_UNAVAILABLE") from exc
+
+    async def clear_prior_blocker(
+        self,
+        *,
+        thread_id: str,
+        goal_id: str,
+        goal_revision: int,
+        now_ms: int,
+    ) -> Goal:
+        """Run 终态后清除只投影一轮的 prior_blocker，不增加 revision。"""
+        try:
+            async with self._lock:
+                await self._connection.execute("BEGIN IMMEDIATE")
+                try:
+                    current = await self._load_current(thread_id)
+                    if (
+                        current is None
+                        or current.goal_id != goal_id
+                        or current.revision != goal_revision
+                    ):
+                        raise GoalStoreError("GOAL_REVISION_CONFLICT")
+                    if current.prior_blocker is None:
+                        await self._connection.commit()
+                        return current
+                    await self._connection.execute(
+                        """
+                        UPDATE harness_goals
+                        SET prior_blocker = NULL, updated_at_ms = ?
+                        WHERE project_fingerprint = ? AND goal_id = ? AND revision = ?
+                        """,
+                        (now_ms, self._project_fingerprint, goal_id, goal_revision),
+                    )
+                    await self._connection.commit()
+                    return replace(current, prior_blocker=None, updated_at_ms=now_ms)
+                except BaseException:
+                    await self._connection.rollback()
+                    raise
+        except GoalStoreError:
+            raise
+        except Exception as exc:
+            raise GoalStoreError("GOAL_STORE_UNAVAILABLE") from exc
+
+    async def invalidate_for_undo(self, *, thread_id: str, after_ms: int, now_ms: int) -> None:
+        """撤销点之后的 evaluation 标 stale；complete 保守恢复 active。"""
+        try:
+            async with self._lock:
+                await self._connection.execute("BEGIN IMMEDIATE")
+                try:
+                    await self._invalidate_for_undo_unlocked(thread_id, after_ms, now_ms)
+                    await self._connection.commit()
+                except BaseException:
+                    await self._connection.rollback()
+                    raise
+        except GoalStoreError:
+            raise
+        except Exception as exc:
+            raise GoalStoreError("GOAL_STORE_UNAVAILABLE") from exc
+
+    async def _invalidate_for_undo_unlocked(self, thread_id: str, after_ms: int, now_ms: int) -> None:
+        """持有事务锁时执行 undo 失效。"""
+        cursor = await self._connection.execute(
+            """
+            SELECT evaluation_id, projection_json FROM harness_goal_evaluations
+            WHERE project_fingerprint = ? AND thread_id = ? AND created_at_ms > ?
+            """,
+            (self._project_fingerprint, thread_id, after_ms),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        for row in rows:
+            projection = json.loads(str(row["projection_json"]))
+            if not isinstance(projection, dict):
+                continue
+            projection["stale"] = True
+            await self._connection.execute(
+                """
+                UPDATE harness_goal_evaluations
+                SET projection_json = ?
+                WHERE project_fingerprint = ? AND evaluation_id = ?
+                """,
+                (_json(projection), self._project_fingerprint, str(row["evaluation_id"])),
+            )
+        current = await self._load_current(thread_id)
+        if current is not None and current.status == "complete":
+            await self._connection.execute(
+                """
+                UPDATE harness_goals
+                SET status = 'active', note = NULL, completed_at_ms = NULL, updated_at_ms = ?
+                WHERE project_fingerprint = ? AND goal_id = ? AND revision = ?
+                """,
+                (now_ms, self._project_fingerprint, current.goal_id, current.revision),
+            )
+            await self._insert_activity(
+                thread_id,
+                GoalActivity(f"undo-reopen-{current.revision}", "lifecycle", "完成证据已失效，目标恢复进行中", now_ms),
+            )
+
+    async def commit_completion(
+        self,
+        *,
+        thread_id: str,
+        run_id: str,
+        grading_run_id: str,
+        evaluation_id: str,
+        goal_id: str,
+        goal_revision: int,
+        criteria_digest: str,
+        run_completed: bool,
+        goal_backed: bool,
+        now_ms: int,
+    ) -> Goal | None:
+        """唯一 Completion Guard：全部 AND 条件满足才把 active 标 complete。"""
+        try:
+            async with self._lock:
+                await self._connection.execute("BEGIN IMMEDIATE")
+                try:
+                    current = await self._load_current(thread_id)
+                    pending = await self._load_pending(thread_id)
+                    queued = await self._load_queued_mutation(thread_id)
+                    evaluation = await self._load_evaluation(evaluation_id)
+                    invalidating = pending is not None or (
+                        queued is not None and queued[2].get("params", {}).get("action") in {
+                            "pause",
+                            "clear",
+                            "cancel_pending",
+                        }
+                    )
+                    if (
+                        not run_completed
+                        or not goal_backed
+                        or current is None
+                        or current.status != "active"
+                        or current.goal_id != goal_id
+                        or current.revision != goal_revision
+                        or evaluation is None
+                        or evaluation.get("stale") is True
+                        or evaluation.get("run_id") != run_id
+                        or evaluation.get("grading_run_id") != grading_run_id
+                        or evaluation.get("result") != "satisfied"
+                        or evaluation.get("criteria_digest") != criteria_digest
+                        or evaluation.get("goal_id") != goal_id
+                        or evaluation.get("goal_revision") != goal_revision
+                        or invalidating
+                    ):
+                        await self._insert_activity(
+                            thread_id,
+                            GoalActivity(
+                                f"complete-rejected-{evaluation_id}",
+                                "evaluation",
+                                "完成申请已拒绝",
+                                now_ms,
+                            ),
+                        )
+                        await self._connection.commit()
+                        return None
+                    note = await self._completion_note(run_id, goal_id, goal_revision)
+                    updated = replace(
+                        current,
+                        status="complete",
+                        note=note,
+                        updated_at_ms=now_ms,
+                        completed_at_ms=now_ms,
+                    )
+                    await self._connection.execute(
+                        """
+                        UPDATE harness_goals
+                        SET status = 'complete', note = ?, updated_at_ms = ?, completed_at_ms = ?
+                        WHERE project_fingerprint = ? AND goal_id = ? AND revision = ?
+                        """,
+                        (
+                            updated.note,
+                            now_ms,
+                            now_ms,
+                            self._project_fingerprint,
+                            updated.goal_id,
+                            updated.revision,
+                        ),
+                    )
+                    await self._insert_activity(
+                        thread_id,
+                        GoalActivity(f"complete-{updated.revision}", "lifecycle", "目标已完成", now_ms),
+                    )
+                    await self._connection.commit()
+                    return updated
                 except BaseException:
                     await self._connection.rollback()
                     raise
@@ -850,6 +1265,34 @@ class GoalStore:
             raise GoalStoreError("GOAL_STORE_UNAVAILABLE")
         return str(row["operation_id"]), str(row["params_digest"]), value
 
+    async def _load_evaluation(self, evaluation_id: str) -> dict[str, object] | None:
+        cursor = await self._connection.execute(
+            """
+            SELECT projection_json FROM harness_goal_evaluations
+            WHERE project_fingerprint = ? AND evaluation_id = ?
+            """,
+            (self._project_fingerprint, evaluation_id),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return json.loads(str(row["projection_json"])) if row else None
+
+    async def _completion_note(self, run_id: str, goal_id: str, goal_revision: int) -> str:
+        cursor = await self._connection.execute(
+            """
+            SELECT result_json FROM harness_goal_operations
+            WHERE project_fingerprint = ? AND operation_id = ?
+            """,
+            (self._project_fingerprint, f"complete-{run_id}-{goal_revision}"),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None:
+            return "全部验收条件已通过"
+        value = json.loads(str(row["result_json"]))
+        note = value.get("note") if isinstance(value, dict) else None
+        return note if isinstance(note, str) and note.strip() else "全部验收条件已通过"
+
     async def _load_latest_evaluation(self, thread_id: str) -> dict[str, object] | None:
         cursor = await self._connection.execute(
             """
@@ -882,6 +1325,21 @@ class GoalStore:
             GoalActivity(str(row["activity_id"]), str(row["kind"]), str(row["summary"]), int(row["created_at_ms"]))
             for row in rows
         )
+
+
+def _evaluation_summary(result: str, explanation: str) -> str:
+    labels = {
+        "needs_revision": "验收未通过",
+        "satisfied": "验收通过",
+        "failed": "验收失败",
+        "grader_error": "验收执行失败",
+        "max_iterations_reached": "已达验收次数上限",
+    }
+    label = labels.get(result, "验收结果")
+    text = explanation.strip()
+    if text:
+        return f"{label}：{text[:120]}"
+    return label
 
 
 def _json(value: object) -> str:

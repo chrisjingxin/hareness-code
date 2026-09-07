@@ -387,6 +387,85 @@ test("scoped Interaction 保留 child provenance 与 activity", () => {
   expect(interactions(state)[0]?.status).toBe("resolved")
 })
 
+test("goal.evaluation 进入独立 Timeline 项且不伪装 assistant", () => {
+  let state = startRun(createInitialState(), run, "/goal 完成任务")
+  state = applyAgentEvent(state, event("goal.evaluation", 1, {
+    goal_id: "goal-1",
+    goal_revision: 1,
+    grading_run_id: "grade-1",
+    iteration: 1,
+    phase: "checking",
+    grader_profile_id: "fast",
+  }))
+  state = applyAgentEvent(state, event("goal.evaluation", 2, {
+    goal_id: "goal-1",
+    goal_revision: 1,
+    grading_run_id: "grade-1",
+    iteration: 1,
+    phase: "result",
+    result: "needs_revision",
+    explanation: "缺少测试",
+    criteria: [{ criterion_id: "criterion-1", passed: false, gap: "没有测试文件" }],
+    grader_profile_id: "fast",
+  }))
+  const items = state.timeline.filter(item => item.type === "goal-evaluation")
+  expect(items).toHaveLength(2)
+  if (items[0]?.type === "goal-evaluation") {
+    expect(items[0].evaluation.phase).toBe("checking")
+  }
+  if (items[1]?.type === "goal-evaluation") {
+    expect(items[1].evaluation.result).toBe("needs_revision")
+    expect(items[1].evaluation.explanation).toBe("缺少测试")
+  }
+  expect(state.timeline.some(item => item.type === "message" && item.message.role === "assistant")).toBeFalse()
+})
+
+test("goal.evaluation 映射当前目标 criteria 的中文 text 文本", () => {
+  let state = createInitialState()
+  state = {
+    ...state,
+    goal: {
+      goal_id: "goal-1",
+      revision: 1,
+      status: "active",
+      objective: "实现缓存",
+      assumptions: [],
+      criteria: [
+        { criterion_id: "criterion-1", text: "实现 LRUCache 核心类" },
+        { criterion_id: "criterion-2", text: "编写单元测试" },
+      ],
+      note: null,
+      prior_blocker: null,
+      grader: { mode: "inherit", effective_profile_id: "fast" },
+      max_iterations: 3,
+      created_at_ms: 1,
+      updated_at_ms: 1,
+      completed_at_ms: null,
+    },
+  }
+  state = startRun(state, run, "实现缓存")
+  state = applyAgentEvent(state, event("goal.evaluation", 1, {
+    goal_id: "goal-1",
+    goal_revision: 1,
+    grading_run_id: "grade-1",
+    iteration: 1,
+    phase: "result",
+    result: "satisfied",
+    explanation: "全部通过",
+    criteria: [
+      { criterion_id: "criterion-1", passed: true, gap: null },
+      { criterion_id: "criterion-2", passed: true, gap: null },
+    ],
+    grader_profile_id: "fast",
+  }))
+  const evalItem = state.timeline.find(item => item.type === "goal-evaluation")
+  expect(evalItem).toBeDefined()
+  if (evalItem?.type === "goal-evaluation") {
+    expect(evalItem.evaluation.criteria?.[0]?.text).toBe("实现 LRUCache 核心类")
+    expect(evalItem.evaluation.criteria?.[1]?.text).toBe("编写单元测试")
+  }
+})
+
 test("Build 无 scope 快照形状保持兼容", () => {
   let state = startRun(createInitialState(), run, "检查目录")
   state = applyAgentEvent(state, event("tool.started", 1, { tool_call_id: "call-1", name: "execute" }))

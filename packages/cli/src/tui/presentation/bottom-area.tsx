@@ -86,16 +86,19 @@ export function GoalDock(props: {
   onClose: () => void
 }) {
   const accent = modeAccent(props.workMode)
-  const [editMode, setEditMode] = useState<"criteria" | "feedback" | null>(null)
+  const [editMode, setEditMode] = useState<"criteria" | "feedback" | "prompt" | null>(
+    props.interaction.isEditPrompt ? "prompt" : null,
+  )
   const editorRef = useRef<TextareaRenderable | null>(null)
   useEffect(() => {
-    if (editMode === "criteria") editorRef.current?.setText(props.interaction.criteria.join("\n"))
-    if (editMode === "feedback") editorRef.current?.setText("")
-  }, [editMode, props.interaction.criteria])
+    if (props.interaction.isEditPrompt) editorRef.current?.setText(props.interaction.objective)
+    else if (editMode === "criteria") editorRef.current?.setText(props.interaction.criteria.join("\n"))
+    else if (editMode === "feedback") editorRef.current?.setText("")
+  }, [editMode, props.interaction.criteria, props.interaction.isEditPrompt, props.interaction.objective])
   useKeyboard(key => {
     if (key.name !== "escape") return
     key.preventDefault()
-    if (props.interaction.readOnly) {
+    if (props.interaction.readOnly || props.interaction.isEditPrompt) {
       props.onClose()
       return
     }
@@ -110,10 +113,28 @@ export function GoalDock(props: {
   ].filter(option => props.interaction.decisions.includes(option.value as "accepted" | "edited" | "rejected" | "cancelled"))
   return (
     <box flexShrink={0} marginLeft={2} marginRight={2} marginBottom={1} backgroundColor={tuiTheme.surfaceElevated} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1} flexDirection="column">
-      <text fg={accent}>{props.interaction.readOnly ? "目标详情" : "审核目标"}</text>
+      <text fg={accent}>{props.interaction.isEditPrompt ? "编辑目标" : props.interaction.readOnly ? "目标详情" : "审核目标"}</text>
       <text content={props.interaction.objective} fg={tuiTheme.text} />
       {props.interaction.assumptions.length ? <text content={`假设：${props.interaction.assumptions.join("；")}`} fg={tuiTheme.muted} /> : null}
-      {props.interaction.readOnly ? (
+      {props.interaction.isEditPrompt ? (
+        <>
+          <text content="修改目标描述或补充要求，按 Enter 提交修订，按 Esc 取消：" fg={tuiTheme.muted} />
+          <textarea
+            ref={editorRef}
+            focused
+            placeholder="输入修改要求..."
+            minHeight={3}
+            maxHeight={8}
+            keyBindings={SUBMIT_ON_ENTER_KEY_BINDINGS}
+            onSubmit={() => {
+              const value = editorRef.current?.plainText.trim() ?? ""
+              if (!value) return
+              props.onGoal({ decision: "edited", feedback: value } as any)
+            }}
+          />
+          <text fg={tuiTheme.muted}>Enter 提交修改 · Esc 取消</text>
+        </>
+      ) : props.interaction.readOnly ? (
         <>
           {goalDetailLines(props.interaction).map((line, index) => <text key={`${index}-${line}`} content={line} fg={tuiTheme.muted} />)}
           {props.interaction.criteria.map((criterion, index) => <text key={`${index}-${criterion}`} content={`${index + 1}. ${criterion}`} fg={tuiTheme.muted} />)}

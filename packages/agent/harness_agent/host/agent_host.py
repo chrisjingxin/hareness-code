@@ -1485,6 +1485,52 @@ class AgentHost:
                 persistence=persistence,
                 requested_primary_profile=command.requested_primary_profile,
             )
+            from harness_agent.goals.context import (
+                goal_context_block,
+                goal_run_binding,
+                is_goal_backed_run,
+            )
+            from harness_agent.goals.models import GoalStoreError
+
+            active_goal = None
+            goal_store_factory = getattr(persistence, "goal_store", None)
+            if (
+                command.mode == "build"
+                and getattr(command.input, "kind", "user") != "goal_proposal"
+                and goal_store_factory is not None
+            ):
+                store = goal_store_factory()
+                try:
+                    inspection = await store.inspect(command.thread_id)
+                    active_goal = inspection.goal
+                    if (
+                        getattr(command.input, "kind", "user") == "user"
+                        and active_goal is not None
+                        and active_goal.status == "blocked"
+                    ):
+                        active_goal = await store.activate_from_blocked(
+                            thread_id=command.thread_id,
+                            goal_id=active_goal.goal_id,
+                            goal_revision=active_goal.revision,
+                            now_ms=int(time.time() * 1000),
+                        )
+                except GoalStoreError as exc:
+                    raise ConfigError(exc.code) from exc
+            plan_constrained = command.requested_approval_mode == "plan"
+            goal_backed = is_goal_backed_run(
+                mode=command.mode,
+                input_kind=getattr(command.input, "kind", "user"),
+                goal_status=None if active_goal is None else active_goal.status,
+                plan_constrained=bool(plan_constrained),
+            )
+            grader_profile_id = resolved.safe_primary.profile_id
+            grader_fingerprint = None
+            if goal_backed:
+                grader_profile_id, grader_fingerprint = self._resolve_goal_grader_identity(
+                    self._config,
+                    actual_primary_profile_id=resolved.safe_primary.profile_id,
+                    actual_primary_settings=resolved.primary_profile.settings,
+                )
             spec = await self._resolve_agent_engine_spec(
                 command.thread_id,
                 self._config,
@@ -1492,6 +1538,9 @@ class AgentHost:
                 persistence=persistence,
                 skill_registry=registry,
                 approval_mode=command.requested_approval_mode,
+                goal_backed=goal_backed,
+                max_iterations=self._config.goal.max_iterations if goal_backed else 3,
+                grader_model_fingerprint=grader_fingerprint,
             )
             # Policy resolution may narrow the source catalog to a role-level
             # immutable view.  The Run must carry that exact view into the
@@ -1506,19 +1555,8 @@ class AgentHost:
                 )
             profile = spec.runtime_profile
             dynamic_blocks = []
-            active_goal = None
-            goal_store_factory = getattr(persistence, "goal_store", None)
-            if (
-                command.mode == "build"
-                and command.input.kind != "goal_proposal"
-                and goal_store_factory is not None
-            ):
-                inspection = await goal_store_factory().inspect(command.thread_id)
-                if inspection.goal is not None and inspection.goal.status == "active":
-                    from harness_agent.goals.context import goal_context_block
-
-                    active_goal = inspection.goal
-                    dynamic_blocks.append(goal_context_block(inspection.goal))
+            if active_goal is not None:
+                dynamic_blocks.append(goal_context_block(active_goal))
             context_snapshot = ContextLifecycle(
                 self._workspace,
                 home=self._config_home,
@@ -1544,11 +1582,13 @@ class AgentHost:
             )
             goal_binding = None
             if active_goal is not None:
-                from harness_agent.goals.context import goal_run_binding
-
                 goal_binding = goal_run_binding(
                     active_goal,
                     actual_primary_profile_id=binding.actual_primary.profile_id,
+                    settings=self._config.goal,
+                    actual_grader_profile_id=grader_profile_id,
+                    grader_fingerprint=grader_fingerprint,
+                    goal_backed=goal_backed,
                 )
             return RunPreparation(
                 resolved_execution_binding=resolved,
@@ -2292,11 +2332,16 @@ class AgentHost:
                                 self._workspace, target_tree
                             )
 
+                target = next(
+                    rec for rec in transcript if rec.record_id == parsed.target_turn_id
+                )
                 await persistence.set_thread_reverted_turn(
                     parsed.thread_id,
                     parsed.target_turn_id,
                     undo_mode=parsed.mode,
                     redo_tree_oid=redo_tree_oid,
+                    goal_invalidate_after_ms=target.created_at_ms,
+                    now_ms=int(time.time() * 1000),
                 )
                 return {
                     "success": True,
@@ -2305,6 +2350,12 @@ class AgentHost:
                 }
         except RunError as exc:
             raise self._run_rpc_error(exc) from exc
+        except Exception as exc:
+            from harness_agent.goals.models import GoalStoreError
+
+            if isinstance(exc, GoalStoreError):
+                raise RpcError(-32004, exc.code) from exc
+            raise
 
     async def _handle_threads_redo(self, params: dict[str, Any], _id: str) -> dict[str, object]:
         """重做并恢复刚才撤销的历史与代码。"""
@@ -2340,7 +2391,7 @@ class AgentHost:
 
     async def _handle_goal_inspect(self, params: dict[str, Any], _id: str) -> dict[str, object]:
         """返回 current/pending/latest evaluation；读取不取得 Thread maintenance 锁。"""
-        from harness_agent.goals.models import goal_to_wire, pending_to_wire
+        from harness_agent.goals.models import evaluation_to_wire, goal_to_wire, pending_to_wire
 
         parsed = GoalInspectParams.model_validate(params)
         persistence = await self._ensure_thread_persistence()
@@ -2354,7 +2405,7 @@ class AgentHost:
         return {
             "goal": goal_to_wire(snapshot.goal),
             "pending": pending_to_wire(snapshot.pending),
-            "latest_evaluation": snapshot.latest_evaluation,
+            "latest_evaluation": evaluation_to_wire(snapshot.latest_evaluation),
         }
 
     async def _handle_goal_request(self, params: dict[str, Any], _id: str) -> dict[str, object]:
@@ -4006,6 +4057,28 @@ class AgentHost:
         lease = await pool.acquire(profile)
         return lease, lease.engine
 
+    def _resolve_goal_grader_identity(
+        self,
+        config: Za38Config,
+        *,
+        actual_primary_profile_id: str,
+        actual_primary_settings: Any,
+    ) -> tuple[str, str]:
+        """解析 grader profile 与不含秘密的指纹；不可用时不回退主模型。"""
+        from harness_agent.goals.context import resolve_goal_grader_identity
+        from harness_agent.runtime.agent_engine_profile import model_settings_fingerprint
+
+        primary_fingerprint = model_settings_fingerprint(
+            profile_name=actual_primary_profile_id,
+            model=actual_primary_settings,
+        )
+        _selection, profile_id, fingerprint = resolve_goal_grader_identity(
+            config,
+            actual_primary_profile_id=actual_primary_profile_id,
+            actual_primary_fingerprint=primary_fingerprint,
+        )
+        return profile_id, fingerprint
+
     async def _resolve_agent_engine_spec(
         self,
         thread_id: str,
@@ -4015,6 +4088,9 @@ class AgentHost:
         persistence: ThreadPersistence | None = None,
         skill_registry: SkillRegistry,
         approval_mode: ApprovalMode | None = None,
+        goal_backed: bool = False,
+        max_iterations: int = 3,
+        grader_model_fingerprint: str | None = None,
     ) -> ResolvedAgentSpec:
         """截取一次角色解析快照，Profile、审批策略和 builder 都从它派生。"""
         persistence = persistence or await self._ensure_thread_persistence()
@@ -4048,6 +4124,9 @@ class AgentHost:
                 if agent_catalog is not None
                 else ()
             ),
+            goal_backed=goal_backed,
+            max_iterations=max_iterations,
+            grader_model_fingerprint=grader_model_fingerprint,
         )
         profile = spec.runtime_profile
         if mcp_owner is not None:
@@ -4135,14 +4214,52 @@ class AgentHost:
             self._workspace_execution_resources = WorkspaceExecutionResourcePool()
         return self._workspace_execution_resources
 
-    async def _reconcile_goal_terminal(self, run: RunState, _port: Any) -> None:
-        """在 Run 终态事件前应用一个 queued Goal write，并把后续动作写入 context。"""
+    async def _reconcile_goal_terminal(self, run: RunState, _port: Any, status: str = "completed") -> None:
+        """在 Run 终态事件前先尝试 Completion Guard，再应用 queued Goal write。"""
         from harness_agent.goals.models import goal_to_wire, pending_to_wire
 
         if run.persistence is None and not self._thread_persistence_enabled():
             return
         persistence = run.persistence or await self._ensure_thread_persistence()
         store = persistence.goal_store()
+        binding = getattr(getattr(run, "preparation", None), "goal_binding", None)
+        if (
+            status == "completed"
+            and binding is not None
+            and binding.goal_backed
+            and str(run.context_summary.get("goal_latest_result") or "") == "satisfied"
+        ):
+            completed = await store.commit_completion(
+                thread_id=run.thread_id,
+                run_id=run.run_id,
+                grading_run_id=str(run.context_summary.get("goal_latest_grading_run_id") or ""),
+                evaluation_id=str(run.context_summary.get("goal_latest_evaluation_id") or ""),
+                goal_id=binding.goal_id,
+                goal_revision=binding.goal_revision,
+                criteria_digest=binding.criteria_digest,
+                run_completed=True,
+                goal_backed=True,
+                now_ms=int(time.time() * 1000),
+            )
+            if completed is not None:
+                run.context_summary["goal"] = goal_to_wire(completed)
+                _port.emit(
+                    run,
+                    "goal.changed",
+                    {"reason": "completed", "goal": goal_to_wire(completed)},
+                )
+        if binding is not None and binding.prior_blocker:
+            from harness_agent.goals.models import GoalStoreError
+
+            try:
+                await store.clear_prior_blocker(
+                    thread_id=run.thread_id,
+                    goal_id=binding.goal_id,
+                    goal_revision=binding.goal_revision,
+                    now_ms=int(time.time() * 1000),
+                )
+            except GoalStoreError:
+                pass
         run_input = getattr(getattr(run, "start", None), "input", None)
         if (
             getattr(run, "cancel_requested", False)
@@ -4816,6 +4933,21 @@ class AgentHost:
                 model,
             )
 
+            extra_root_tools = ()
+            rubric_middleware = None
+            if getattr(spec, "goal_backed", False):
+                from harness_agent.goals.rubric_adapter import create_rubric_middleware
+                from harness_agent.goals.tools import create_grader_tools, create_update_goal_tool
+
+                extra_root_tools = (create_update_goal_tool(),)
+                rubric_middleware = create_rubric_middleware(
+                    model,
+                    tools=create_grader_tools(
+                        spec.workspace,
+                        spec.capability_view.tool_names,
+                    ),
+                    max_iterations=getattr(spec, "max_iterations", 3),
+                )
             graph = create_harness_agent(
                 model,
                 tools=mcp_tools or None,
@@ -4850,6 +4982,8 @@ class AgentHost:
                 ),
                 snapshot_store=self._snapshot_store,
                 file_tool_metrics=self._file_tool_metrics,
+                extra_root_tools=extra_root_tools,
+                rubric_middleware=rubric_middleware,
             )
             self._agent_engine_artifacts[profile.profile_key] = _AgentEngineArtifacts(
                 execution_context=execution_context,
@@ -4988,6 +5122,10 @@ class AgentHost:
                 run, tool_name, tool_args, decision
             )
 
+        if run.verification_registry is None:
+            from harness_agent.goals.verification import VerificationEvidenceRegistry
+
+            run.verification_registry = VerificationEvidenceRegistry()
         return RunContext(
             thread_id=run.thread_id,
             run_id=run.run_id,
@@ -5017,6 +5155,13 @@ class AgentHost:
             event_port=event_port,
             record_approval=record_approval,
             diagnostic_log=run.diagnostic_log,
+            goal_binding=run.preparation.goal_binding,
+            goal_store=(
+                run.persistence.goal_store()
+                if run.persistence is not None and hasattr(run.persistence, "goal_store")
+                else None
+            ),
+            verification_registry=run.verification_registry,
         )
 
     async def _handle_peer_response(self, message: dict[str, Any]) -> None:

@@ -13,7 +13,7 @@ const indexPath = resolve(cliRoot, "index.ts")
 
 test("TUI 根目录只保留组合入口", () => {
   const rootFiles = readdirSync(tuiRoot, { withFileTypes: true })
-    .filter(entry => entry.isFile())
+    .filter(entry => entry.isFile() && !entry.name.startsWith("."))
     .map(entry => entry.name)
     .sort()
 

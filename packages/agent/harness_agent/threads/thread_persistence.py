@@ -8391,36 +8391,49 @@ class ThreadPersistence:
         *,
         undo_mode: str = "both",
         redo_tree_oid: str | None = None,
+        goal_invalidate_after_ms: int | None = None,
+        now_ms: int | None = None,
     ) -> None:
-        """设置或清除当前 Thread 的暂存回退点。"""
+        """设置或清除当前 Thread 的暂存回退点；undo 时同一事务失效 Goal 完成证据。"""
         self._ensure_open()
         async with self._lock:
-            if reverted_turn_id is None:
-                await self._connection.execute(
-                    """
-                    DELETE FROM harness_thread_revert_state
-                    WHERE project_fingerprint = ? AND thread_id = ?
-                    """,
-                    (self._project_fingerprint, thread_id),
-                )
-            else:
-                now_ms = _now_ms()
-                await self._connection.execute(
-                    """
-                    INSERT OR REPLACE INTO harness_thread_revert_state
-                    (project_fingerprint, thread_id, reverted_turn_id, undo_mode, redo_tree_oid, created_at_ms)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        self._project_fingerprint,
-                        thread_id,
-                        reverted_turn_id,
-                        undo_mode,
-                        redo_tree_oid,
-                        now_ms,
-                    ),
-                )
-            await self._connection.commit()
+            await self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                if reverted_turn_id is None:
+                    await self._connection.execute(
+                        """
+                        DELETE FROM harness_thread_revert_state
+                        WHERE project_fingerprint = ? AND thread_id = ?
+                        """,
+                        (self._project_fingerprint, thread_id),
+                    )
+                else:
+                    stamp = now_ms if now_ms is not None else _now_ms()
+                    await self._connection.execute(
+                        """
+                        INSERT OR REPLACE INTO harness_thread_revert_state
+                        (project_fingerprint, thread_id, reverted_turn_id, undo_mode, redo_tree_oid, created_at_ms)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            self._project_fingerprint,
+                            thread_id,
+                            reverted_turn_id,
+                            undo_mode,
+                            redo_tree_oid,
+                            stamp,
+                        ),
+                    )
+                    if goal_invalidate_after_ms is not None:
+                        await self.goal_store()._invalidate_for_undo_unlocked(
+                            thread_id,
+                            goal_invalidate_after_ms,
+                            stamp,
+                        )
+                await self._connection.commit()
+            except BaseException:
+                await self._connection.rollback()
+                raise
 
     async def get_thread_reverted_turn(self, thread_id: str) -> str | None:
         """读取当前 Thread 的暂存回退点（若未回退则返回 None）。"""

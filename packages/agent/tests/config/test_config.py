@@ -465,6 +465,7 @@ def test_execution_defaults_to_local_and_redacts_security_summary(tmp_path: Path
         "compose": "default",
         "ui": "default",
         "diagnostics": "default",
+        "goal": "default",
     }
 
 
@@ -842,3 +843,87 @@ def test_tools_section_in_redacted_summary(tmp_path: Path):
 
     assert summary["tools"] == {"tool_search_defer": "off"}
     assert "tools" in summary["sources"]
+
+
+def _load_with_goal(tmp_path: Path, goal_table: str, environ: dict[str, str] | None = None) -> "config_module.Za38Config":
+    """在最小 v1 配置上附加 [goal] 表并加载。"""
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    _write_config(home / ".harness" / "config.toml")
+    config_path = home / ".harness" / "config.toml"
+    with open(config_path, "a", encoding="utf-8") as handle:
+        handle.write(goal_table)
+    return load_config(workspace=workspace, config_path=config_path, home=home, environ=environ)
+
+
+def test_goal_section_defaults(tmp_path: Path):
+    """未配置 [goal] 时采用默认值 (grader_model=None, max_iterations=3)。"""
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    _write_config(home / ".harness" / "config.toml")
+    config = load_config(
+        workspace=workspace,
+        config_path=home / ".harness" / "config.toml",
+        home=home,
+        environ={},
+    )
+    assert config.goal.grader_model is None
+    assert config.goal.max_iterations == 3
+
+
+def test_goal_section_parsed_from_toml(tmp_path: Path):
+    """[goal] 表能够正确解析 grader_model 和 max_iterations。"""
+    config = _load_with_goal(
+        tmp_path,
+        "\n[goal]\ngrader_model = \"qwen-max\"\nmax_iterations = 5\n",
+        environ={},
+    )
+    assert config.goal.grader_model == "qwen-max"
+    assert config.goal.max_iterations == 5
+    summary = config.redacted()
+    assert summary["goal"] == {
+        "grader_model": "qwen-max",
+        "max_iterations": 5,
+    }
+    assert summary["sources"]["goal"] == "explicit"
+
+
+def test_goal_section_environment_overrides(tmp_path: Path):
+    """环境变量覆盖 [goal] 配置。"""
+    environ = {
+        "HARNESS_GOAL_GRADER_MODEL": "gpt-4o",
+        "HARNESS_GOAL_MAX_ITERATIONS": "8",
+    }
+    config = _load_with_goal(
+        tmp_path,
+        "\n[goal]\ngrader_model = \"qwen-max\"\nmax_iterations = 5\n",
+        environ=environ,
+    )
+    assert config.goal.grader_model == "gpt-4o"
+    assert config.goal.max_iterations == 8
+    assert config.redacted()["sources"]["goal"] == "environment"
+
+
+def test_goal_section_rejects_invalid_values(tmp_path: Path):
+    """max_iterations 越界与未知字段必须报错。"""
+    with pytest.raises(ConfigError, match="max_iterations"):
+        _load_with_goal(tmp_path, "\n[goal]\nmax_iterations = 0\n", environ={})
+
+    with pytest.raises(ConfigError, match="max_iterations"):
+        _load_with_goal(tmp_path, "\n[goal]\nmax_iterations = -1\n", environ={})
+
+    with pytest.raises(ConfigError, match="max_iterations"):
+        _load_with_goal(tmp_path, "\n[goal]\nmax_iterations = true\n", environ={})
+
+    with pytest.raises(ConfigError, match="max_iterations"):
+        _load_with_goal(tmp_path, "\n[goal]\nmax_iterations = 25\n", environ={})
+
+    with pytest.raises(ConfigError, match="max_iterations"):
+        _load_with_goal(tmp_path, "\n[goal]\nmax_iterations = \"invalid\"\n", environ={})
+
+    with pytest.raises(ConfigError, match="grader_model"):
+        _load_with_goal(tmp_path, "\n[goal]\ngrader_model = 123\n", environ={})
+
+    with pytest.raises(ConfigError, match="unsupported fields"):
+        _load_with_goal(tmp_path, "\n[goal]\nunknown_field = true\n", environ={})
+

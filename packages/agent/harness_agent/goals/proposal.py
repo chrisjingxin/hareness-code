@@ -8,8 +8,8 @@ from typing import Any, Literal
 
 from langchain_core.messages import HumanMessage
 from langchain.agents import create_agent
-from langchain.agents.structured_output import ToolStrategy
-from pydantic import BaseModel, ConfigDict, model_validator
+from langchain.agents.structured_output import StructuredOutputValidationError, ToolStrategy
+from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 from harness_agent.goals.models import (
     GOAL_MAX_ASSUMPTIONS,
@@ -69,28 +69,44 @@ class GoalDraftOutput(BaseModel):
     missing_information: tuple[str, ...] = ()
     questions: tuple[str, ...] = ()
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_variant(cls, data: Any) -> Any:
+        """以 readiness 为唯一判别；模型常填另一支的空字段或复述文本，不得当成混合结构。"""
+        if not isinstance(data, Mapping):
+            return data
+        readiness = data.get("readiness")
+        normalized = dict(data)
+        if readiness == "ready":
+            normalized["understood_objective"] = None
+            normalized["missing_information"] = ()
+            normalized["questions"] = ()
+            objective = normalized.get("objective")
+            if isinstance(objective, str):
+                normalized["objective"] = _blank_text(objective)
+            return normalized
+        if readiness == "needs_clarification":
+            normalized["objective"] = None
+            normalized["assumptions"] = ()
+            normalized["criteria"] = ()
+            understood = normalized.get("understood_objective")
+            if isinstance(understood, str):
+                normalized["understood_objective"] = _blank_text(understood)
+        return normalized
+
     @model_validator(mode="after")
     def validate_variant(self) -> "GoalDraftOutput":
-        """拒绝混合或残缺 variant，避免由自由字段猜测 readiness。"""
+        """按 readiness 校验本 variant 必填项；未知字段仍由 extra=forbid 拒绝。"""
         if self.readiness == "ready":
-            if (
-                self.objective is None
-                or not self.criteria
-                or self.understood_objective is not None
-                or self.missing_information
-                or self.questions
-            ):
-                raise ValueError("ready goal draft is incomplete or mixed")
+            if self.objective is None or not self.criteria:
+                raise ValueError("ready goal draft is incomplete")
             return self
         if (
-            self.objective is not None
-            or self.assumptions
-            or self.criteria
-            or self.understood_objective is None
+            self.understood_objective is None
             or not self.missing_information
             or not 1 <= len(self.questions) <= GOAL_MAX_QUESTIONS_PER_ROUND
         ):
-            raise ValueError("clarification goal draft is incomplete or mixed")
+            raise ValueError("clarification goal draft is incomplete")
         return self
 
 
@@ -150,33 +166,36 @@ async def generate_goal_draft(
     agent_factory: Callable[..., Any] = create_agent,
 ) -> GoalDraft | GoalClarification:
     """通过 forced tool schema 生成草案，不解析供应商自由文本。"""
-    if repository_tools:
-        criteria_agent = agent_factory(
-            model,
-            tuple(repository_tools),
-            system_prompt=goal_proposal_prompt(context, repository_enabled=True),
-            response_format=ToolStrategy(GoalDraftOutput, handle_errors=False),
-            name="goal_criteria",
-        )
-        try:
-            result = await criteria_agent.ainvoke(
-                {"messages": [HumanMessage(content="读取必要上下文后生成目标草案。")]},
-                config={"recursion_limit": 60},
+    try:
+        if repository_tools:
+            criteria_agent = agent_factory(
+                model,
+                tuple(repository_tools),
+                system_prompt=goal_proposal_prompt(context, repository_enabled=True),
+                response_format=ToolStrategy(GoalDraftOutput, handle_errors=False),
+                name="goal_criteria",
             )
-        finally:
-            if repository_budget is not None:
-                repository_budget.validate()
-        parsed = result.get("structured_response") if isinstance(result, Mapping) else None
-    else:
-        structured_model = model.with_structured_output(
-            GoalDraftOutput,
-            method="function_calling",
-            include_raw=True,
-        )
-        result = await structured_model.ainvoke(
-            [HumanMessage(content=goal_proposal_prompt(context))]
-        )
-        parsed = result.get("parsed") if isinstance(result, Mapping) else None
+            try:
+                result = await criteria_agent.ainvoke(
+                    {"messages": [HumanMessage(content="读取必要上下文后生成目标草案。")]},
+                    config={"recursion_limit": 60},
+                )
+            finally:
+                if repository_budget is not None:
+                    repository_budget.validate()
+            parsed = result.get("structured_response") if isinstance(result, Mapping) else None
+        else:
+            structured_model = model.with_structured_output(
+                GoalDraftOutput,
+                method="function_calling",
+                include_raw=True,
+            )
+            result = await structured_model.ainvoke(
+                [HumanMessage(content=goal_proposal_prompt(context))]
+            )
+            parsed = result.get("parsed") if isinstance(result, Mapping) else None
+    except (ValidationError, StructuredOutputValidationError) as exc:
+        raise GoalStoreError("GOAL_OBJECTIVE_INVALID") from exc
     if not isinstance(parsed, GoalDraftOutput):
         raise GoalStoreError("GOAL_OBJECTIVE_INVALID")
     if parsed.readiness == "needs_clarification":
@@ -214,6 +233,12 @@ def _bounded_recent_messages(messages: tuple[str, ...]) -> tuple[str, ...]:
         remaining -= len(item)
     kept.reverse()
     return tuple(kept)
+
+
+def _blank_text(value: str) -> str | None:
+    """把空白字符串当成缺省，避免模型填空串后被当成有效字段。"""
+    stripped = value.strip()
+    return stripped or None
 
 
 def _escape(value: str, tag: str) -> str:

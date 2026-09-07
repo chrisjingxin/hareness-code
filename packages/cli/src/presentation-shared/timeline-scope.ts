@@ -20,6 +20,7 @@ export function timelineItemExecutionId(item: TimelineItem): string {
   else if (item.type === "reasoning") executionId = item.reasoning.executionId
   else if (item.type === "interaction") executionId = item.interaction.executionId
   else if (item.type === "compose-summary") executionId = item.summary.executionId
+  else if (item.type === "goal-evaluation") executionId = undefined
 
   if (isRootExecutionId(executionId)) return ROOT_EXECUTION_ID
   return executionId ?? ROOT_EXECUTION_ID

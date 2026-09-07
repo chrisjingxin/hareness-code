@@ -213,3 +213,24 @@ def pending_to_wire(pending: GoalPending | None) -> dict[str, object] | None:
 def activity_to_wire(activity: GoalActivity) -> dict[str, object]:
     """将 activity 转成 Protocol projection。"""
     return asdict(activity)
+
+
+def evaluation_to_wire(evaluation: Mapping[str, object] | None) -> dict[str, object] | None:
+    """将 evaluation 转成 Protocol goalEvaluationProjection（剔除内部字段如 criteria_digest）。"""
+    if evaluation is None:
+        return None
+    allowed_keys = (
+        "evaluation_id",
+        "goal_id",
+        "goal_revision",
+        "run_id",
+        "grading_run_id",
+        "iteration",
+        "result",
+        "explanation",
+        "criteria",
+        "grader_profile_id",
+        "created_at_ms",
+    )
+    return {k: evaluation[k] for k in allowed_keys if k in evaluation}
+

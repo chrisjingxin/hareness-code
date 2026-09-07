@@ -16,12 +16,15 @@ from __future__ import annotations
 import hashlib
 import asyncio
 import json
+import logging
 import os
 import signal
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol
+
+logger = logging.getLogger(__name__)
 
 from harness_agent.compose.engine_services import EngineDriverServices
 from harness_agent.runtime.execution_stream import (
@@ -273,11 +276,22 @@ class BuildRunAdapter:
             """恢复 stream 正常返回后，提交当前 Run 的审批规则意图。"""
             await port.commit_staged_approval_rules(run)
 
+        stream_input: object = run.message
+        goal_binding = run.preparation.goal_binding
+        if goal_binding is not None and goal_binding.goal_backed:
+            from langchain_core.messages import HumanMessage
+
+            from harness_agent.goals.rubric_adapter import canonical_rubric
+
+            stream_input = {
+                "messages": [HumanMessage(content=run.message)],
+                "rubric": canonical_rubric(goal_binding.criteria),
+            }
         request = ManagedAgentRequest(
             execution_ref=run.root_execution_ref.execution_id,
             parent_execution_ref=None,
             run_id=run.ref.run_id,
-            input=run.message,
+            input=stream_input,
             checkpoint_namespace=run.ref.thread_id,
             output_policy="passthrough",
             runtime_provider=acquire_runtime,
@@ -493,6 +507,66 @@ class _BuildStreamPorts:
 
     def on_stream_event(self) -> None:
         self._port.drain_context_updates(self._run)
+
+    async def on_custom(self, payload: Mapping[str, object]) -> ExecutionSignal | None:
+        """把 RubricMiddleware 私有事件写成 GoalStore 再 fanout Protocol event。"""
+        from harness_agent.goals.rubric_adapter import normalize_rubric_event
+        from harness_agent.runtime.execution_stream import ExecutionSignal
+
+        binding = self._run.preparation.goal_binding
+        store = getattr(self._run.persistence, "goal_store", None) if self._run.persistence else None
+        if binding is None or not binding.goal_backed or store is None:
+            return None
+        try:
+            normalized = normalize_rubric_event(
+                payload,
+                goal_id=binding.goal_id,
+                goal_revision=binding.goal_revision,
+                max_iterations=binding.max_iterations,
+                expected_ids=tuple(item.criterion_id for item in binding.criteria),
+                expected_criteria=binding.criteria,
+            )
+        except Exception as exc:
+            logger.exception("Failed to normalize rubric event from payload: %r", payload)
+            normalized = {
+                "goal_id": binding.goal_id,
+                "goal_revision": binding.goal_revision,
+                "grading_run_id": str(payload.get("grading_run_id") or "unknown"),
+                "iteration": 1,
+                "phase": "result",
+                "result": "grader_error",
+                "explanation": "独立验收执行失败",
+                "criteria": [],
+            }
+        if normalized is None:
+            return None
+        event_payload = {
+            **normalized,
+            "grader_profile_id": binding.actual_grader_profile_id,
+        }
+        if normalized.get("phase") == "result":
+            evaluation_id = (
+                f"{self._run.ref.run_id}-{normalized['grading_run_id']}-{normalized['iteration']}"
+            )
+            await store().record_evaluation(
+                thread_id=self._run.ref.thread_id,
+                evaluation_id=evaluation_id,
+                goal_id=binding.goal_id,
+                goal_revision=binding.goal_revision,
+                run_id=self._run.ref.run_id,
+                grading_run_id=str(normalized["grading_run_id"]),
+                iteration=int(normalized["iteration"]),
+                result=str(normalized["result"]),
+                explanation=str(normalized.get("explanation") or ""),
+                criteria=tuple(normalized.get("criteria") or ()),
+                grader_profile_id=binding.actual_grader_profile_id,
+                criteria_digest=binding.criteria_digest,
+                now_ms=int(time.time() * 1000),
+            )
+            self._run.context_summary["goal_latest_evaluation_id"] = evaluation_id
+            self._run.context_summary["goal_latest_grading_run_id"] = str(normalized["grading_run_id"])
+            self._run.context_summary["goal_latest_result"] = str(normalized["result"])
+        return ExecutionSignal("goal.evaluation", event_payload)
 
 
 

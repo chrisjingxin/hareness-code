@@ -87,6 +87,9 @@ export function itemScopeFields(item: TimelineItem): ScopedFields {
       composeScope: item.interaction.composeScope,
     }
   }
+  if (item.type === "goal-evaluation") {
+    return { runId: item.evaluation.runId }
+  }
   return {
     runId: item.summary.runId,
     executionId: item.summary.executionId,

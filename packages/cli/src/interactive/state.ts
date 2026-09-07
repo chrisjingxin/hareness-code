@@ -109,12 +109,25 @@ export type ComposeSummaryCard = {
 /**
  * JSON-RPC 的 sequence 是唯一可靠的时间顺序。
  */
+export type GoalEvaluationCard = {
+  id: string
+  runId: string
+  phase: "checking" | "result"
+  iteration: number
+  result?: "needs_revision" | "satisfied" | "failed" | "grader_error" | "max_iterations_reached"
+  explanation?: string
+  criteria?: Array<{ criterion_id: string; text?: string; passed: boolean; gap: string | null }>
+  graderProfileId: string
+  expanded?: boolean
+}
+
 export type TimelineItem =
   | { type: "message"; message: ConversationMessage }
   | { type: "tool"; tool: ToolCard }
   | { type: "reasoning"; reasoning: ReasoningCard }
   | { type: "interaction"; interaction: InteractionCard }
   | { type: "compose-summary"; summary: ComposeSummaryCard }
+  | { type: "goal-evaluation"; evaluation: GoalEvaluationCard }
 
 export type ActiveRun = {
   threadId: string
@@ -908,6 +921,48 @@ export function applyAgentEvent(state: InteractiveState, event: EventEnvelope, i
     }
     case EventType.GOAL_CHANGED: {
       return { ...next, goal: event.payload.goal }
+    }
+    case EventType.GOAL_EVALUATION: {
+      const payload = event.payload
+      const evaluation: GoalEvaluationCard = {
+        id: `goal-eval-${runId}-${event.sequence}`,
+        runId,
+        phase: payload.phase,
+        iteration: payload.iteration,
+        graderProfileId: payload.grader_profile_id,
+      }
+      if (payload.result) evaluation.result = payload.result
+      if (typeof payload.explanation === "string") evaluation.explanation = payload.explanation
+      if (Array.isArray(payload.criteria)) {
+        const criteriaTextMap = new Map(
+          (next.goal?.criteria ?? []).map(c => [c.criterion_id, c.text])
+        )
+        evaluation.criteria = payload.criteria.map((item: any) => ({
+          criterion_id: item.criterion_id,
+          text: criteriaTextMap.get(item.criterion_id) ?? item.text,
+          passed: item.passed,
+          gap: item.gap,
+        }))
+      }
+      return {
+        ...next,
+        goalEvaluation: payload.phase === "result" && payload.result
+          ? {
+              evaluation_id: evaluation.id,
+              goal_id: payload.goal_id,
+              goal_revision: payload.goal_revision,
+              run_id: runId,
+              grading_run_id: payload.grading_run_id,
+              iteration: payload.iteration,
+              result: payload.result,
+              explanation: payload.explanation ?? "",
+              criteria: payload.criteria ?? [],
+              grader_profile_id: payload.grader_profile_id,
+              created_at_ms: event.timestamp_ms ?? 0,
+            }
+          : next.goalEvaluation,
+        timeline: [...next.timeline, { type: "goal-evaluation", evaluation }],
+      }
     }
     case EventType.COMPOSE_SUMMARY: {
       const payload = event.payload

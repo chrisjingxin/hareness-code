@@ -504,6 +504,7 @@ class RunState:
     message: str = ""
     status: str = "accepted"
     goal_terminal_reconciled: bool = False
+    verification_registry: Any = None
     sequence: int = 0
     usage: dict[str, int] = field(
         default_factory=lambda: {"input_tokens": 0, "output_tokens": 0}
@@ -818,7 +819,7 @@ class RunCoordinator:
         ) = None,
         goal_services_provider: Callable[[RunState], Awaitable[Any]] | None = None,
         goal_terminal_reconciler: (
-            Callable[[RunState, RunLifecyclePort], Awaitable[None]] | None
+            Callable[[RunState, RunLifecyclePort, str], Awaitable[None]] | None
         ) = None,
         diagnostic_log: DiagnosticLog | None = None,
         clock: Callable[[], float] = time.monotonic,
@@ -1447,7 +1448,7 @@ class RunCoordinator:
             return
         if self._goal_terminal_reconciler is not None and not run.goal_terminal_reconciled:
             run.goal_terminal_reconciled = True
-            await self._goal_terminal_reconciler(run, self._lifecycle_port)
+            await self._goal_terminal_reconciler(run, self._lifecycle_port, status)
         if status == "completed":
             payload = {
                 **payload,

@@ -338,6 +338,26 @@ class DiagnosticsSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class GoalSettings:
+    """Build 目标验收与 Grader 配置。"""
+
+    grader_model: str | None = None
+    max_iterations: int = 3
+
+    def __post_init__(self) -> None:
+        """限制迭代上限在 1 到 20 次之间。"""
+        if self.max_iterations < 1 or self.max_iterations > 20:
+            raise ConfigError("goal.max_iterations must be between 1 and 20")
+
+    def redacted(self) -> dict[str, object]:
+        """返回不含敏感信息的 Goal 配置摘要。"""
+        return {
+            "grader_model": self.grader_model,
+            "max_iterations": self.max_iterations,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class Za38Config:
     """最终生效的 Harness v1 配置、来源路径和运行时摘要。"""
 
@@ -354,6 +374,7 @@ class Za38Config:
     compose: ComposeSettings = field(default_factory=ComposeSettings)
     ui: UiSettings = field(default_factory=UiSettings)
     diagnostics: DiagnosticsSettings = field(default_factory=DiagnosticsSettings)
+    goal: GoalSettings = field(default_factory=GoalSettings)
 
     def require_model(self, profile_id: str | None = None) -> ModelSettings:
         """返回指定或默认模型；保留单 Profile 调用方的兼容入口。"""
@@ -397,6 +418,7 @@ class Za38Config:
             "compose": self.compose.redacted(),
             "ui": self.ui.redacted(),
             "diagnostics": self.diagnostics.redacted(),
+            "goal": self.goal.redacted(),
         }
 
 
@@ -438,6 +460,7 @@ def load_config(
         compose_values,
         ui_values,
         diagnostics_values,
+        goal_values,
         sources,
     ) = _merge_documents(documents)
     _apply_environment_overrides(
@@ -445,6 +468,7 @@ def load_config(
         approval_values,
         execution_values,
         diagnostics_values,
+        goal_values,
         environment,
         sources,
     )
@@ -468,6 +492,7 @@ def load_config(
         compose=_parse_compose(compose_values),
         ui=_parse_ui(ui_values),
         diagnostics=_parse_diagnostics(diagnostics_values),
+        goal=_parse_goal(goal_values),
     )
 
 
@@ -557,6 +582,8 @@ def _merge_documents(
     dict[str, object],
     dict[str, object],
     dict[str, object],
+    dict[str, object],
+    dict[str, object],
     dict[str, str],
 ]:
     """按用户到显式配置的顺序合并已验证字段，并记录最后贡献来源。"""
@@ -569,6 +596,7 @@ def _merge_documents(
     compose_values: dict[str, object] = {}
     ui_values: dict[str, object] = {}
     diagnostics_values: dict[str, object] = {}
+    goal_values: dict[str, object] = {}
     sources = {
         "models": "default",
         "approval": "default",
@@ -579,6 +607,7 @@ def _merge_documents(
         "compose": "default",
         "ui": "default",
         "diagnostics": "default",
+        "goal": "default",
     }
     for _, source, document in documents:
         if "models" in document:
@@ -608,6 +637,9 @@ def _merge_documents(
         if "diagnostics" in document:
             diagnostics_values = _merge_flat_values(diagnostics_values, document["diagnostics"])
             sources["diagnostics"] = source.value
+        if "goal" in document:
+            goal_values = _merge_flat_values(goal_values, document["goal"])
+            sources["goal"] = source.value
     return (
         models,
         approval_values,
@@ -618,6 +650,7 @@ def _merge_documents(
         compose_values,
         ui_values,
         diagnostics_values,
+        goal_values,
         sources,
     )
 
@@ -727,6 +760,7 @@ def _apply_environment_overrides(
     approval_values: dict[str, object],
     execution_values: dict[str, object],
     diagnostics_values: dict[str, object],
+    goal_values: dict[str, object],
     environ: Mapping[str, str],
     sources: dict[str, str],
 ) -> None:
@@ -763,6 +797,17 @@ def _apply_environment_overrides(
     if "HARNESS_SANDBOX" in environ:
         execution_values["backend"] = _sandbox_backend(environ["HARNESS_SANDBOX"])
         sources["execution"] = ConfigSource.ENVIRONMENT.value
+    if "HARNESS_GOAL_GRADER_MODEL" in environ:
+        raw_grader = environ["HARNESS_GOAL_GRADER_MODEL"].strip()
+        goal_values["grader_model"] = raw_grader or None
+        sources["goal"] = ConfigSource.ENVIRONMENT.value
+    if "HARNESS_GOAL_MAX_ITERATIONS" in environ:
+        raw_iterations = environ["HARNESS_GOAL_MAX_ITERATIONS"].strip()
+        try:
+            goal_values["max_iterations"] = int(raw_iterations)
+        except ValueError as exc:
+            raise ConfigError(f"HARNESS_GOAL_MAX_ITERATIONS must be an integer: {raw_iterations}") from exc
+        sources["goal"] = ConfigSource.ENVIRONMENT.value
 
 
 def _apply_cli_overrides(
@@ -1106,3 +1151,27 @@ def _integer(value: object, path: str, *, minimum: int, maximum: int | None = No
     if maximum is not None and number > maximum:
         raise ConfigError(f"{path} must be <= {maximum}")
     return number
+
+
+def _parse_goal(values: Mapping[str, object]) -> GoalSettings:
+    """解析 ``[goal]`` 配置：包含独立 grader 模型和迭代轮数上限。"""
+    unknown = set(values) - {"grader_model", "max_iterations"}
+    if unknown:
+        raise ConfigError(f"[goal] contains unsupported fields: {', '.join(sorted(unknown))}")
+    raw_grader_model = values.get("grader_model")
+    grader_model: str | None = None
+    if raw_grader_model is not None:
+        if not isinstance(raw_grader_model, str) or not raw_grader_model.strip():
+            raise ConfigError("goal.grader_model must be a non-empty string or omitted")
+        grader_model = raw_grader_model.strip()
+    max_iterations = _integer(
+        values.get("max_iterations", 3),
+        "goal.max_iterations",
+        minimum=1,
+        maximum=20,
+    )
+    return GoalSettings(
+        grader_model=grader_model,
+        max_iterations=max_iterations,
+    )
+
