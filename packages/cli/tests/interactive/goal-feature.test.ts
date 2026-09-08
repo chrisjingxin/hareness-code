@@ -336,6 +336,79 @@ test("只读能力可打开 Goal viewer，但不能创建目标", async () => {
   expect(harness.calls).not.toContain("goal.request")
 })
 
+test("执行中空参 /goal 返回 inspect-overlay，不进入 GoalDock", async () => {
+  const harness = makeHarness({
+    capabilities: [Capability.GOAL_READ, Capability.GOAL_MANAGE],
+    initialThreadId: "thread-goal",
+    openThreadImpl: async threadId => ({
+      thread: { thread_id: threadId, created_at_ms: 1, updated_at_ms: 2, first_message: "", latest_message: "", message_count: 0 },
+      messages: [],
+      plan: { has_plan: false, plan_markdown: "", plan_virtual_path: "/.harness/plan.md", plan_display_path: `~/.harness/plans/${threadId}.md` },
+      goal: goalProjection(),
+      goal_pending: null,
+      goal_activities: [],
+    }),
+  })
+  try {
+    await flush()
+    harness.port.inspectGoal = async () => ({ goal: goalProjection(), pending: null, latest_evaluation: null })
+    expect((await harness.controller.dispatch({ type: "input.submit", value: "先做当前任务" })).status).toBe("accepted")
+    expect(harness.controller.getSnapshot().activeRun).not.toBeNull()
+
+    const outcome = await harness.controller.dispatch({ type: "input.submit", value: "/goal" })
+    expect(outcome.status).toBe("accepted")
+    expect(outcome.status === "accepted" ? outcome.effects : undefined).toEqual([
+      expect.objectContaining({
+        type: "inspect-overlay",
+        kind: "goal",
+        title: "当前目标",
+        body: expect.stringContaining("完成登录功能"),
+      }),
+    ])
+    expect(harness.controller.getSnapshot().interaction).toBeNull()
+    expect(harness.controller.getSnapshot().activeRun).not.toBeNull()
+    expect(harness.runHandles).toHaveLength(1)
+  } finally {
+    await harness.controller.close()
+  }
+})
+
+test("执行中 /goal pause 排队，不启动第二 Run、不取消当前 Run", async () => {
+  const harness = makeHarness({
+    capabilities: [Capability.GOAL_READ, Capability.GOAL_MANAGE],
+    initialThreadId: "thread-goal",
+    openThreadImpl: async threadId => ({
+      thread: { thread_id: threadId, created_at_ms: 1, updated_at_ms: 2, first_message: "", latest_message: "", message_count: 0 },
+      messages: [],
+      plan: { has_plan: false, plan_markdown: "", plan_virtual_path: "/.harness/plan.md", plan_display_path: `~/.harness/plans/${threadId}.md` },
+      goal: goalProjection(),
+      goal_pending: null,
+      goal_activities: [],
+    }),
+  })
+  try {
+    await flush()
+    expect((await harness.controller.dispatch({ type: "input.submit", value: "先做当前任务" })).status).toBe("accepted")
+    const runId = harness.runHandles.at(-1)?.runId
+    expect(runId).toBeTruthy()
+    harness.port.mutateGoal = async () => ({
+      disposition: "queued",
+      goal: goalProjection(),
+      pending: null,
+      continuation: null,
+    })
+
+    const outcome = await harness.controller.dispatch({ type: "input.submit", value: "/goal pause" })
+    expect(outcome.status).toBe("accepted")
+    expect(notices(harness.controller.getSnapshot())).toContain("已排队")
+    expect(harness.runHandles).toHaveLength(1)
+    expect(harness.runHandles.at(-1)?.runId).toBe(runId)
+    expect(harness.controller.getSnapshot().activeRun?.runId).toBe(runId)
+  } finally {
+    await harness.controller.close()
+  }
+})
+
 test("Compose 手输 /goal 返回稳定本地提示", async () => {
   const harness = makeHarness()
   await harness.controller.dispatch({ type: "work-mode.cycle" })

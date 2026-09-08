@@ -846,7 +846,7 @@ describe("Timeline", () => {
       expect(progress?.getAttribute("role")).toBe("status")
       expect(progress?.getAttribute("aria-live")).toBe("polite")
       expect(progress?.textContent).toContain("1.2s")
-      expect(progress?.textContent).toContain("Esc 取消")
+      expect(progress?.textContent).toContain("点停止取消")
     } finally {
       handle.unmount()
     }
@@ -989,7 +989,7 @@ test("Compose 运行状态出现在 run-status-live 并带阶段信息", () => {
     const live = handle.container.querySelector(".run-status-live")
     expect(live?.textContent).toContain("Compose")
     expect(live?.textContent).toContain("实现")
-    expect(live?.textContent).toContain("Esc 取消")
+    expect(live?.textContent).toContain("点停止取消")
     // 五阶段条仍在，但位于 live status 附近（同容器内）
     expect(handle.container.querySelector(".compose-progress")).not.toBeNull()
   } finally {

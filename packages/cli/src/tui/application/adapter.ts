@@ -10,6 +10,7 @@ import {
   EMPTY_MENTION_SEARCH_RESULT,
   ensureMentionWindow,
   extractMentionQuery,
+  isExclusiveInteraction,
   mentionOptionsForQuery,
   moveMentionSelection,
   parentMentionDirectory,
@@ -39,6 +40,14 @@ export type BtwState = {
   status: "loading" | "ready" | "error"
   error?: string
   copied?: boolean
+}
+
+/** 执行中 Goal/Plan 只读查看浮层。 */
+export type InspectOverlayState = {
+  visible: boolean
+  kind: "goal" | "plan" | "mcp"
+  title: string
+  body: string
 }
 
 export type ApprovalDecision = "approve_once" | "approve_thread" | "approve_project" | "reject" | "reject_with_feedback"
@@ -232,9 +241,11 @@ export type TuiAdapterSnapshot = {
   readonly undoDialog?: UndoDialogState
   readonly sidebar: SidebarState
   readonly commandDialog?: {
-    readonly kind: "confirm-new-thread"
+    readonly kind: "confirm-new-thread" | "confirm-quit"
     readonly title: string
     readonly message: string
+    readonly confirmLabel?: string
+    readonly cancelLabel?: string
   }
   readonly modelBindingDialog?: {
     readonly title: string
@@ -248,6 +259,7 @@ export type TuiAdapterSnapshot = {
   readonly expandedTools: ReadonlySet<string>
   readonly btw: BtwState
   readonly statusModal: { readonly visible: boolean }
+  readonly inspectOverlay: InspectOverlayState
   readonly toasts: readonly ToastItem[]
   readonly inputMode: "chat" | "shell"
   /** 递增后由 React adapter 滚动到最新内容。 */
@@ -291,6 +303,7 @@ export type TuiIntent =
   | { type: "btw-close" }
   | { type: "btw-copy" }
   | { type: "status-close" }
+  | { type: "inspect-overlay-close" }
   | { type: "sidebar-toggle"; target?: "show" | "hide" }
   | { type: "sidebar-focus-switch" }
   | { type: "sidebar-tab-switch"; tab?: SidebarTab }
@@ -374,6 +387,7 @@ class TuiAdapterImpl implements TuiAdapter {
   private undoDialogState: UndoDialogState | null = null
   private btwState: BtwState = { visible: false, question: "", status: "loading" }
   private statusModalState = { visible: false }
+  private inspectOverlayState: InspectOverlayState = { visible: false, kind: "goal", title: "", body: "" }
   private toasts: ToastItem[] = []
   private toastTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private sidebarState: SidebarState = {
@@ -492,13 +506,18 @@ class TuiAdapterImpl implements TuiAdapter {
     }
     this.unsubscribeInteractive = this.controller.subscribe(interactive => {
       const previousActiveRun = this.snapshot.interactive.activeRun
-      const previousRequestId = this.snapshot.interactive.interaction?.requestId
+      const previousInteraction = this.snapshot.interactive.interaction
+      const previousRequestId = previousInteraction?.requestId
       const nextRequestId = interactive.interaction?.requestId
       const directWorkspaceTools = this.observeWorkspaceTools(interactive, previousActiveRun)
       const runEnded = Boolean(previousActiveRun && !interactive.activeRun)
       // 反向问答/审批会在 Run 进行中插入时间线；必须主动滚动，否则卡片落在
       // 当前视口下方，用户只能看到旧的 spinner，直到 Interaction 超时。
       if (nextRequestId && nextRequestId !== previousRequestId) this.scrollRequest += 1
+      if (isExclusiveInteraction(interactive.interaction)
+        && (nextRequestId !== previousRequestId || !isExclusiveInteraction(previousInteraction))) {
+        this.clearRuntimeOverlays()
+      }
       this.publish()
       // 直接文件工具成功完成即可刷新；Run 结束仍保留未知工具与外部修改的完整兜底。
       if (directWorkspaceTools.length > 0 || runEnded) this.requestWorkspaceRefresh()
@@ -636,6 +655,9 @@ class TuiAdapterImpl implements TuiAdapter {
         return
       case "status-close":
         this.closeStatusModal()
+        return
+      case "inspect-overlay-close":
+        this.closeInspectOverlay()
         return
       case "sidebar-toggle":
         this.toggleSidebar(intent.target)
@@ -926,6 +948,7 @@ class TuiAdapterImpl implements TuiAdapter {
       sidebar: { ...this.sidebarState },
       btw: { ...this.btwState },
       statusModal: { ...this.statusModalState },
+      inspectOverlay: { ...this.inspectOverlayState },
       toasts: [...this.toasts],
       inputMode: this.inputMode,
       commandDialog: this.commandDialog(interactive),
@@ -1157,6 +1180,9 @@ class TuiAdapterImpl implements TuiAdapter {
         case "side-question":
           this.openBtw(effect.question, effect.threadId)
           break
+        case "inspect-overlay":
+          this.openInspectOverlay(effect.kind, effect.title, effect.body)
+          break
       }
     }
   }
@@ -1220,6 +1246,25 @@ class TuiAdapterImpl implements TuiAdapter {
   private closeStatusModal(): void {
     this.statusModalState = { visible: false }
     this.publish()
+  }
+
+  /** 打开执行中 Goal/Plan 只读查看浮层。 */
+  private openInspectOverlay(kind: InspectOverlayState["kind"], title: string, body: string): void {
+    this.inspectOverlayState = { visible: true, kind, title, body }
+    this.publish()
+  }
+
+  /** 关闭执行中 Goal/Plan 查看浮层。 */
+  private closeInspectOverlay(): void {
+    this.inspectOverlayState = { visible: false, kind: "goal", title: "", body: "" }
+    this.publish()
+  }
+
+  /** 审批等独占 Interaction 到来时关闭查看类浮层，不发布（由调用方 publish）。 */
+  private clearRuntimeOverlays(): void {
+    this.btwState = { visible: false, question: "", status: "loading", copied: false }
+    this.statusModalState = { visible: false }
+    this.inspectOverlayState = { visible: false, kind: "goal", title: "", body: "" }
   }
 
   /** 将 BTW 回答复制到系统剪贴板并在右上角展示气泡通知。 */
@@ -1302,6 +1347,9 @@ class TuiAdapterImpl implements TuiAdapter {
       case "close-status-modal":
         this.closeStatusModal()
         return
+      case "close-inspect-overlay":
+        this.closeInspectOverlay()
+        return
       case "copy-btw-answer":
         await this.copyBtwAnswer()
         return
@@ -1374,6 +1422,9 @@ class TuiAdapterImpl implements TuiAdapter {
         return
       case "cancel-run":
         await this.routeDispatch({ type: "run.cancel" })
+        return
+      case "hint-interrupt":
+        this.showToast("中断请用 Ctrl+C", "info")
         return
       case "toggle-tool-details":
         this.showToolDetails = !this.showToolDetails
@@ -1574,8 +1625,15 @@ class TuiAdapterImpl implements TuiAdapter {
     }
     const interactive = this.controller.getSnapshot()
     if (interactive.activeRun) {
-      this.clearDraft()
-      await this.dispatchInteractive({ type: "command.execute", commandId: item.command.id })
+      const outcome = await this.routeDispatch({ type: "command.execute", commandId: item.command.id })
+      this.commandMenu = emptyCommandMenu()
+      if (outcome.status === "accepted") {
+        this.clearDraft()
+        await this.applyPresentationEffects(outcome.effects)
+      } else {
+        this.showTransientNotice(outcome.message)
+        this.publish()
+      }
       return
     }
     this.fillCommandMenuDraft(`/${item.command.name}`)
@@ -1969,12 +2027,23 @@ class TuiAdapterImpl implements TuiAdapter {
   /** 从共享 confirmation 派生命令确认 Dialog。 */
   private commandDialog(snapshot: InteractiveSnapshot): TuiAdapterSnapshot["commandDialog"] {
     const confirmation = snapshot.confirmation
-    if (confirmation?.confirmationId !== "clear-thread") return undefined
-    return {
-      kind: "confirm-new-thread",
-      title: confirmation.title,
-      message: confirmation.message,
+    if (confirmation?.confirmationId === "clear-thread") {
+      return {
+        kind: "confirm-new-thread",
+        title: confirmation.title,
+        message: confirmation.message,
+      }
     }
+    if (confirmation?.confirmationId === "quit-while-running") {
+      return {
+        kind: "confirm-quit",
+        title: confirmation.title,
+        message: confirmation.message,
+        confirmLabel: confirmation.confirmLabel,
+        cancelLabel: confirmation.cancelLabel,
+      }
+    }
+    return undefined
   }
 
   /** 从共享 confirmation 派生模型绑定 Dialog。 */

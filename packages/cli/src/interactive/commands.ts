@@ -30,9 +30,12 @@ export type CommandRequirements = {
   requiresReverted?: boolean
 }
 
+/** 命令在主 Run 进行中的策略；缺省视为 blocked（失败关闭）。 */
+export type CommandRuntimePolicy = "allowed" | "blocked"
+
 /** 后续 Dispatcher 复用的最小安全元数据，不能由表现层自行扩大权限。 */
 export type CommandSafety = {
-  allowedDuringRun?: boolean
+  runtime?: CommandRuntimePolicy
   confirmation?: "never" | "when-running" | "always"
 }
 
@@ -174,7 +177,10 @@ export class CommandRegistry {
       return { state: "disabled", reason: "当前没有可重做的撤销操作" }
     }
     if (definition.requirements?.requiresIdle && (context.activeRun || context.pendingOperation || context.hasPendingInteraction)) {
-      return { state: "disabled", reason: "当前任务结束或交互完成后可用" }
+      return { state: "disabled", reason: RUNNING_UNAVAILABLE_REASON }
+    }
+    if (context.activeRun && definition.safety?.runtime !== "allowed") {
+      return { state: "disabled", reason: RUNNING_UNAVAILABLE_REASON }
     }
     return { state: "available" }
   }
@@ -207,27 +213,30 @@ export class CommandRegistry {
 }
 
 /** 当前已交付命令的唯一注册来源；未来 Loader 只能构造新的 Registry 快照。 */
+/** 执行中禁用命令的稳定原因；requiresIdle 与未标 runtime allowed 共用。 */
+const RUNNING_UNAVAILABLE_REASON = "当前任务结束后可用"
+
 export const builtinCommandDefinitions: readonly CommandDefinition[] = [
-  { id: "system.help", name: "help", description: "显示可用命令", source: { type: "builtin" }, presentation: "viewer", suggested: true },
-  { id: "system.quit", name: "quit", aliases: ["q"], description: "退出 za38", source: { type: "builtin" }, presentation: "action", suggested: true },
-  { id: "thread.new", name: "new", aliases: ["clear"], description: "开启新的 thread", source: { type: "builtin" }, presentation: "dialog", suggested: true, safety: { confirmation: "when-running" } },
+  { id: "system.help", name: "help", description: "显示可用命令", source: { type: "builtin" }, presentation: "viewer", suggested: true, safety: { runtime: "allowed" } },
+  { id: "system.quit", name: "quit", aliases: ["q"], description: "退出 za38", source: { type: "builtin" }, presentation: "action", suggested: true, safety: { confirmation: "when-running", runtime: "allowed" } },
+  { id: "thread.new", name: "new", aliases: ["clear"], description: "开启新的 thread", source: { type: "builtin" }, presentation: "dialog", suggested: true, safety: { confirmation: "when-running", runtime: "allowed" } },
   { id: "context.compact", name: "compact", description: "压缩当前 thread 上下文", source: { type: "builtin" }, presentation: "dialog", suggested: true, requirements: { capabilities: [Capability.CONTEXT_MANAGE], requiresThread: true, requiresIdle: true } },
-  { id: "system.status", name: "status", description: "显示运行状态", source: { type: "builtin" }, presentation: "viewer", suggested: true },
+  { id: "system.status", name: "status", description: "显示运行状态", source: { type: "builtin" }, presentation: "viewer", suggested: true, safety: { runtime: "allowed" } },
   { id: "thread.resume", name: "resume", aliases: ["continue", "threads"], description: "打开 thread 恢复选择器", source: { type: "builtin" }, presentation: "picker", suggested: true, requirements: { capabilities: [Capability.THREADS_READ], requiresIdle: true } },
   { id: "thread.undo", name: "undo", aliases: ["rewind", "rollback"], description: "回退会话与代码到历史指定回合", source: { type: "builtin" }, presentation: "picker", suggested: true, requirements: { capabilities: [Capability.THREADS_READ, Capability.CONTEXT_MANAGE], requiresThread: true, requiresIdle: true } },
   { id: "thread.redo", name: "redo", description: "重做并恢复刚才撤销的历史与代码", source: { type: "builtin" }, presentation: "action", suggested: true, requirements: { capabilities: [Capability.THREADS_READ, Capability.CONTEXT_MANAGE], requiresThread: true, requiresIdle: true, requiresReverted: true } },
   { id: "model.select", name: "model", aliases: ["models"], description: "选择当前 thread 下一次运行的模型 Profile", source: { type: "builtin" }, presentation: "picker", suggested: true, argumentHint: "[query]", requirements: { capabilities: [Capability.MODELS_READ], requiresIdle: true } },
   { id: "skills.open", name: "skills", description: "打开 Skill 选择器", source: { type: "builtin" }, presentation: "picker", suggested: true, requirements: { capabilities: [Capability.SKILLS_READ] } },
-  { id: "agents.list", name: "agents", description: "查看可派发的 Agent（内置 + Plugin）", source: { type: "builtin" }, presentation: "picker", suggested: true, requirements: { capabilities: [Capability.AGENTS_READ] } },
-  { id: "teams.manage", name: "teams", description: "查看或控制 Agent Team", source: { type: "builtin" }, presentation: "viewer", argumentHint: "[show|status|generate|run|cancel] ...", suggested: true, requirements: { capabilities: [Capability.TEAMS_READ] } },
-  { id: "mcp.manage", name: "mcp", description: "查看 MCP 服务器状态", source: { type: "builtin" }, presentation: "viewer", suggested: true },
+  { id: "agents.list", name: "agents", description: "查看可派发的 Agent（内置 + Plugin）", source: { type: "builtin" }, presentation: "picker", suggested: true, requirements: { capabilities: [Capability.AGENTS_READ] }, safety: { runtime: "allowed" } },
+  { id: "teams.manage", name: "teams", description: "查看或控制 Agent Team", source: { type: "builtin" }, presentation: "viewer", argumentHint: "[show|status|generate|run|cancel] ...", suggested: true, requirements: { capabilities: [Capability.TEAMS_READ] }, safety: { runtime: "allowed" } },
+  { id: "mcp.manage", name: "mcp", description: "查看 MCP 服务器状态", source: { type: "builtin" }, presentation: "viewer", argumentHint: "[add|remove] ...", suggested: true, safety: { runtime: "allowed" } },
   { id: "host.web", name: "web", description: "在浏览器中接管当前会话，可从空首页或当前 thread 启动", source: { type: "builtin" }, presentation: "action", suggested: true, requirements: { requiresIdle: true } },
   { id: "compose.new-work", name: "new-work", description: "放下当前 Compose 需求并立刻访谈新目标", source: { type: "builtin" }, presentation: "action", argumentHint: "<目标>", requirements: { workModes: ["compose"], requiresThread: true } },
   { id: "compose.abandon", name: "abandon", description: "废弃当前 Compose 需求并回到空闲", source: { type: "builtin" }, presentation: "action", requirements: { workModes: ["compose"], requiresThread: true, requiresActiveWorkItem: true }, safety: { confirmation: "always" } },
-  { id: "assist.btw", name: "btw", description: "向 Agent 提出一个与当前任务无关的问题", source: { type: "builtin" }, presentation: "action", argumentHint: "[question]", requirements: { workModes: ["build", "compose"] } },
-  { id: "approval.plan", name: "plan", description: "进入计划模式，只调查并写计划，不改项目文件", source: { type: "builtin" }, presentation: "action", argumentHint: "[exit | <目标>]", suggested: true, requirements: { workModes: ["build"], unavailableNotice: "`/plan` 仅在 Build 工作模式可用。" } },
-  { id: "approval.plan-view", name: "plan-view", description: "查看当前 thread 的计划", source: { type: "builtin" }, presentation: "viewer", suggested: true, requirements: { capabilities: [Capability.THREADS_READ], workModes: ["build"], requiresThread: true, unavailableNotice: "`/plan-view` 仅在 Build 工作模式可用。" } },
-  { id: "goal.manage", name: "goal", description: "设置并验收当前 Build 目标", source: { type: "builtin" }, presentation: "viewer", argumentHint: "[<目标>|edit|pause|resume|clear]", suggested: true, requirements: { capabilities: [Capability.GOAL_READ], workModes: ["build"], unavailableNotice: "`/goal` 仅在 Build 工作模式可用。" } },
+  { id: "assist.btw", name: "btw", description: "向 Agent 提出一个与当前任务无关的问题", source: { type: "builtin" }, presentation: "action", argumentHint: "[question]", requirements: { workModes: ["build", "compose"] }, safety: { runtime: "allowed" } },
+  { id: "approval.plan", name: "plan", description: "进入计划模式，只调查并写计划，不改项目文件", source: { type: "builtin" }, presentation: "action", argumentHint: "[exit | <目标>]", suggested: true, requirements: { workModes: ["build"], unavailableNotice: "`/plan` 仅在 Build 工作模式可用。" }, safety: { runtime: "allowed" } },
+  { id: "approval.plan-view", name: "plan-view", description: "查看当前 thread 的计划", source: { type: "builtin" }, presentation: "viewer", suggested: true, requirements: { capabilities: [Capability.THREADS_READ], workModes: ["build"], requiresThread: true, unavailableNotice: "`/plan-view` 仅在 Build 工作模式可用。" }, safety: { runtime: "allowed" } },
+  { id: "goal.manage", name: "goal", description: "设置并验收当前 Build 目标", source: { type: "builtin" }, presentation: "viewer", argumentHint: "[<目标>|edit|pause|resume|clear]", suggested: true, requirements: { capabilities: [Capability.GOAL_READ], workModes: ["build"], unavailableNotice: "`/goal` 仅在 Build 工作模式可用。" }, safety: { runtime: "allowed" } },
 ]
 
 export const commandRegistry = new CommandRegistry(builtinCommandDefinitions)

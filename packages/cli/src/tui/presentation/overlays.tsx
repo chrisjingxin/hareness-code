@@ -216,7 +216,7 @@ export function DialogShell(props: DialogShellProps) {
 export function OverlayShell(props: {
   terminalWidth: number
   terminalHeight: number
-  placement: "picker" | "dialog"
+  placement: "picker" | "dialog" | "viewer"
   zIndex?: number
   children: (metrics: { compact: boolean; width: number; maxRows: number }) => ReactNode
 }) {
@@ -227,18 +227,23 @@ export function OverlayShell(props: {
       : Math.max(54, Math.min(76, Math.floor(props.terminalWidth * 0.62)))
     : compact
       ? Math.max(36, props.terminalWidth - 4)
-      : Math.max(60, Math.min(108, Math.floor(props.terminalWidth * 0.76)))
+      : Math.max(60, Math.min(100, Math.floor(props.terminalWidth * (props.placement === "viewer" ? 0.7 : 0.76))))
   const maxRows = compact
     ? Math.max(3, Math.min(6, props.terminalHeight - 10))
-    : Math.max(5, Math.min(12, props.terminalHeight - 14))
+    : props.placement === "viewer"
+      ? Math.max(8, Math.min(18, Math.floor(props.terminalHeight * 0.55)))
+      : Math.max(5, Math.min(12, props.terminalHeight - 14))
+  const centered = props.placement === "viewer"
   const paddingTop = compact
     ? 1
-    : props.placement === "dialog"
-      ? Math.max(1, Math.floor(props.terminalHeight / 8))
-      : Math.max(2, Math.floor(props.terminalHeight / 4))
+    : centered
+      ? 0
+      : props.placement === "dialog"
+        ? Math.max(1, Math.floor(props.terminalHeight / 8))
+        : Math.max(2, Math.floor(props.terminalHeight / 4))
 
   return (
-    <box position="absolute" top={0} left={0} width="100%" height="100%" zIndex={props.zIndex ?? 100} alignItems="center" justifyContent="flex-start" paddingTop={paddingTop} paddingLeft={2} paddingRight={2}>
+    <box position="absolute" top={0} left={0} width="100%" height="100%" zIndex={props.zIndex ?? 100} alignItems="center" justifyContent={centered ? "center" : "flex-start"} paddingTop={paddingTop} paddingLeft={2} paddingRight={2}>
       <OverlayBackdrop />
       {props.children({ compact, width, maxRows })}
     </box>

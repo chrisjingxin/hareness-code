@@ -263,6 +263,81 @@ test("视图进入上下文压缩状态时清空已存在草稿和命令菜单",
   expect(adapter.getSnapshot().commandMenuOpen).toBe(false)
 })
 
+test("执行中 submit 仍把 draft 交给 Core，不因 activeRun 丢弃", async () => {
+  const { adapter, client } = makeAdapter(createFakeClient(makeInteractive({
+    activeRun: { threadId: "t", runId: "run-1" },
+  })))
+  await adapter.dispatch({ type: "draft-change", value: "/status" })
+  await adapter.dispatch({ type: "submit" })
+  expect(client.intents).toEqual([{ type: "input.submit", value: "/status" }])
+})
+
+test("interrupt-hint 提示点停止，不发送 cancel-run", async () => {
+  const { adapter, client } = makeAdapter(createFakeClient(makeInteractive({
+    activeRun: { threadId: "t", runId: "run-1" },
+  })))
+  await adapter.dispatch({ type: "interrupt-hint" })
+  expect(adapter.getSnapshot().transientNotice).toBe("中断请点停止")
+  expect(client.intents).toEqual([])
+})
+
+test("side-question 打开 BTW 面板，不把问答写入主时间线", async () => {
+  const client = createFakeClient(makeInteractive({
+    activeRun: { threadId: "t", runId: "run-1" },
+    timeline: [{ type: "message", message: { role: "user", content: "先做当前任务" } }],
+  }))
+  const { adapter } = makeAdapter(client)
+  client.nextOutcome = {
+    status: "accepted",
+    effects: [{ type: "side-question", question: "这个报错是什么意思", replyText: "这是权限错误。", modelProfileId: "fast" }],
+  }
+  await adapter.dispatch({ type: "draft-change", value: "/btw 这个报错是什么意思" })
+  await adapter.dispatch({ type: "submit" })
+  expect(adapter.getSnapshot().btw.visible).toBe(true)
+  expect(adapter.getSnapshot().btw.status).toBe("ready")
+  expect(adapter.getSnapshot().btw.question).toBe("这个报错是什么意思")
+  expect(adapter.getSnapshot().btw.answer).toBe("这是权限错误。")
+  expect(adapter.getSnapshot().interactive.timeline).toEqual([
+    { type: "message", message: { role: "user", content: "先做当前任务" } },
+  ])
+
+  await adapter.dispatch({ type: "btw-close" })
+  expect(adapter.getSnapshot().btw.visible).toBe(false)
+})
+
+test("inspect-overlay 打开查看浮层；审批到来时关闭 BTW/查看/Status Dock", async () => {
+  const client = createFakeClient(makeInteractive({
+    activeRun: { threadId: "t", runId: "run-1" },
+  }))
+  const { adapter } = makeAdapter(client)
+  client.nextOutcome = {
+    status: "accepted",
+    effects: [{ type: "inspect-overlay", kind: "goal", title: "当前目标", body: "完成登录功能" }],
+  }
+  await adapter.dispatch({ type: "draft-change", value: "/goal" })
+  await adapter.dispatch({ type: "submit" })
+  expect(adapter.getSnapshot().inspectOverlay.visible).toBe(true)
+  expect(adapter.getSnapshot().inspectOverlay.body).toContain("完成登录功能")
+
+  client.nextOutcome = {
+    status: "accepted",
+    effects: [{ type: "side-question", question: "旁路", error: "超时" }],
+  }
+  await adapter.dispatch({ type: "draft-change", value: "/btw 旁路" })
+  await adapter.dispatch({ type: "submit" })
+  expect(adapter.getSnapshot().btw.status).toBe("error")
+  await adapter.dispatch({ type: "dock-open", panel: "status" })
+  expect(adapter.getSnapshot().contextDock.open).toBe(true)
+
+  client.pushInteractive(snapshot => ({
+    ...snapshot,
+    interaction: makeApproval("approval-1"),
+  }))
+  expect(adapter.getSnapshot().inspectOverlay.visible).toBe(false)
+  expect(adapter.getSnapshot().btw.visible).toBe(false)
+  expect(adapter.getSnapshot().contextDock.open).toBe(false)
+})
+
 test("slash input、`//`、未知命令都只转交 client，不在 adapter 解释", async () => {
   const { adapter, client } = makeAdapter()
   await adapter.dispatch({ type: "draft-change", value: "/help" })

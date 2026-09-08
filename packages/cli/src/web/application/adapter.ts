@@ -1,6 +1,6 @@
 /** Web Interactive Adapter：只拥有浏览器表现状态，通过 WebUiClient 消费共享 Core 视图并提交 intent。 */
 
-import type { ApprovalDecision, InteractiveApprovalMode, InteractiveIntent, InteractiveMcpInput, IntentOutcome, InteractiveSnapshot, InteractiveResponse } from "../../interactive/types"
+import type { ApprovalDecision, InteractiveApprovalMode, InteractiveIntent, InteractiveMcpInput, IntentOutcome, InteractiveSnapshot, InteractiveResponse, PresentationEffect } from "../../interactive/types"
 import type { CommandMenuItem } from "../../interactive/commands"
 import type { PresentationState, WorkspacePreviewView, WorkspaceTreeView } from "../../presentation-coordinator"
 import {
@@ -8,6 +8,7 @@ import {
   ensureMentionWindow,
   extractMentionQuery,
   filterCommandMenuItems,
+  isExclusiveInteraction,
   mentionOptionsForQuery,
   moveMentionSelection,
   parentMentionDirectory,
@@ -36,6 +37,25 @@ export type WorkspaceFileTab = {
 
 /** Web 页面主题：纯表现状态，只属于当前 Web 接管，不持久化、不跟随系统主题。 */
 export type WebTheme = "light" | "dark"
+
+/** Web BTW 临时问答面板；与 TUI BtwState 同构。 */
+export type WebBtwState = {
+  visible: boolean
+  question: string
+  answer?: string
+  modelProfileId?: string
+  status: "loading" | "ready" | "error"
+  error?: string
+  copied?: boolean
+}
+
+/** 执行中 Goal/Plan 只读查看浮层。 */
+export type WebInspectOverlayState = {
+  visible: boolean
+  kind: "goal" | "plan" | "mcp"
+  title: string
+  body: string
+}
 
 /** 面板共用的提交/搜索状态：搜索词、提交中、局部错误都属于表现层。 */
 export type WebPanelSearchState = {
@@ -142,6 +162,10 @@ export type WebAdapterSnapshot = {
   readonly theme: WebTheme
   /** 顶栏 overflow menu 是否打开；主题/帮助/返回/退出动作都从这里发起。 */
   readonly headerMenuOpen: boolean
+  /** Web BTW 旁路面板；不写入主时间线。 */
+  readonly btw: WebBtwState
+  /** 执行中 Goal/Plan 查看浮层。 */
+  readonly inspectOverlay: WebInspectOverlayState
 }
 
 /** React / DOM 事件通过这些语义意图驱动 Adapter；不允许携带 DOM event。 */
@@ -193,6 +217,10 @@ export type WebIntent =
   | { type: "work-mode-cycle" }
   | { type: "approval-mode-select"; mode: InteractiveApprovalMode }
   | { type: "cancel-run" }
+  | { type: "interrupt-hint" }
+  | { type: "btw-close" }
+  | { type: "btw-copy" }
+  | { type: "inspect-overlay-close" }
   | { type: "notice-dismiss" }
   | { type: "theme-set"; theme: WebTheme }
   | { type: "header-menu-toggle"; open: boolean }
@@ -304,6 +332,8 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
   private workspaceSelectedPath: string | null = null
   private theme: WebTheme = "light"
   private headerMenuOpenFlag = false
+  private btwState: WebBtwState = { visible: false, question: "", status: "loading" }
+  private inspectOverlayState: WebInspectOverlayState = { visible: false, kind: "goal", title: "", body: "" }
   private expandedTools: Set<string> = new Set()
   private interactionDraft: WebInteractionDraft | null = null
   private leavingFlag = false
@@ -531,6 +561,18 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
       case "cancel-run":
         await this.executeCoreIntent({ type: "run.cancel" })
         return
+      case "interrupt-hint":
+        this.showTransientNotice("中断请点停止")
+        return
+      case "btw-close":
+        this.closeBtw()
+        return
+      case "btw-copy":
+        await this.copyBtwAnswer()
+        return
+      case "inspect-overlay-close":
+        this.closeInspectOverlay()
+        return
       case "notice-dismiss":
         this.transientNotice = null
         this.schedulePublish()
@@ -593,6 +635,12 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     // Interaction 变化（包含 requestId 变化）必须立即 flush：草稿原子重置与表单状态都依赖该通知。
     if (previous.interaction?.requestId !== next.interaction?.requestId) {
       this.interactionDraft = null
+      if (isExclusiveInteraction(next.interaction)) {
+        this.clearRuntimeOverlays()
+        if (this.contextDock.open && this.contextDock.activePanel === "status") {
+          this.contextDock = { ...this.contextDock, open: false }
+        }
+      }
       this.publishNow()
       return
     }
@@ -723,6 +771,8 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
       confirmationId: interactive.confirmation?.confirmationId ?? null,
       theme: this.theme,
       headerMenuOpen: this.headerMenuOpenFlag,
+      btw: { ...this.btwState },
+      inspectOverlay: { ...this.inspectOverlayState },
     }
   }
 
@@ -881,7 +931,7 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
     const submittedDraft = this.draft
     const value = submittedDraft.trim()
     const interactive = this.getInteractive()
-    if (!value || this.composerSubmittingFlag || this.leavingFlag || interactive.connection.status !== "open" || Boolean(interactive.activeRun) || interactive.activity.kind === "compacting") {
+    if (!value || this.composerSubmittingFlag || this.leavingFlag || interactive.connection.status !== "open" || interactive.activity.kind === "compacting") {
       return
     }
     this.composerSubmittingFlag = true
@@ -1300,8 +1350,64 @@ class WebInteractiveAdapterImpl implements WebInteractiveAdapter {
         case "request-exit":
           await this.exitHarness()
           break
+        case "side-question":
+          this.openBtw(effect)
+          break
+        case "inspect-overlay":
+          this.inspectOverlayState = {
+            visible: true,
+            kind: effect.kind,
+            title: effect.title,
+            body: effect.body,
+          }
+          this.publishNow()
+          break
       }
     }
+  }
+
+  /** 打开 BTW 面板；回答由网关补全后随 effect 到达，未补全时保持 loading。 */
+  private openBtw(effect: Extract<PresentationEffect, { type: "side-question" }>): void {
+    this.btwState = {
+      visible: true,
+      question: effect.question,
+      answer: effect.replyText,
+      modelProfileId: effect.modelProfileId,
+      status: effect.error ? "error" : effect.replyText !== undefined ? "ready" : "loading",
+      error: effect.error,
+      copied: false,
+    }
+    this.publishNow()
+  }
+
+  /** 关闭 BTW 面板；进行中的回答会被丢弃。 */
+  private closeBtw(): void {
+    this.btwState = { visible: false, question: "", status: "loading", copied: false }
+    this.publishNow()
+  }
+
+  /** 复制 BTW 回答；失败不关面板。 */
+  private async copyBtwAnswer(): Promise<void> {
+    if (!this.btwState.visible || !this.btwState.answer) return
+    try {
+      await globalThis.navigator?.clipboard?.writeText(this.btwState.answer)
+    } catch {
+      // 复制失败不关面板
+    }
+    this.btwState = { ...this.btwState, copied: true }
+    this.publishNow()
+  }
+
+  /** 关闭执行中 Goal/Plan 查看浮层。 */
+  private closeInspectOverlay(): void {
+    this.inspectOverlayState = { visible: false, kind: "goal", title: "", body: "" }
+    this.publishNow()
+  }
+
+  /** 审批等独占 Interaction 到来时关闭 BTW 与查看浮层。 */
+  private clearRuntimeOverlays(): void {
+    this.btwState = { visible: false, question: "", status: "loading", copied: false }
+    this.inspectOverlayState = { visible: false, kind: "goal", title: "", body: "" }
   }
 
   /** 派发 InteractiveIntent 并按 outcome 决定是否再触发本地副作用。 */

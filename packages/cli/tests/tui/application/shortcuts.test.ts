@@ -12,6 +12,7 @@ const idle = {
 test("Ctrl+C 按输入与运行状态分层处理", () => {
   expect(resolveShortcut({ name: "c", ctrl: true }, { ...idle, hasDraft: true })).toBe("clear-draft")
   expect(resolveShortcut({ name: "c", ctrl: true }, { ...idle, activeRun: true })).toBe("cancel-run")
+  expect(resolveShortcut({ name: "c", ctrl: true }, { ...idle, activeRun: true, hasDraft: true })).toBe("cancel-run")
   expect(resolveShortcut({ name: "c", ctrl: true }, idle)).toBe("exit")
 })
 
@@ -77,8 +78,16 @@ test("模型选择器复用 Picker 导航，并优先于其他浮层和滚动", 
   expect(resolveShortcut({ name: "return", ctrl: false }, { ...picker, modelOptionCount: 0 })).toBe("model-block")
 })
 
+test("执行中 Goal/Plan 查看浮层优先消费 Esc/Enter/q", () => {
+  const overlay = { ...idle, inspectOverlayVisible: true, activeRun: true }
+  expect(resolveShortcut({ name: "escape", ctrl: false }, overlay)).toBe("close-inspect-overlay")
+  expect(resolveShortcut({ name: "return", ctrl: false }, overlay)).toBe("close-inspect-overlay")
+  expect(resolveShortcut({ name: "q", ctrl: false }, overlay)).toBe("close-inspect-overlay")
+  expect(resolveShortcut({ name: "c", ctrl: true }, overlay)).toBe("cancel-run")
+})
+
 test("Esc、Ctrl+P、Ctrl+O 和 Ctrl+D 保留真实 TUI 行为", () => {
-  expect(resolveShortcut({ name: "escape", ctrl: false }, { ...idle, activeRun: true })).toBe("cancel-run")
+  expect(resolveShortcut({ name: "escape", ctrl: false }, { ...idle, activeRun: true })).toBe("hint-interrupt")
   expect(resolveShortcut({ name: "escape", ctrl: false }, { ...idle, activeRun: true, interactionActive: true })).toBe("none")
   expect(resolveShortcut({ name: "p", ctrl: true }, idle)).toBe("command-open")
   expect(resolveShortcut({ name: "o", ctrl: true }, idle)).toBe("toggle-tool-details")

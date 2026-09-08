@@ -10,6 +10,7 @@ import { HarnessBrandLogo } from "./brand-logo"
 import { Composer } from "./composer"
 import { ContextDock } from "./context-dock/context-dock"
 import { DialogHost } from "./dialog"
+import { RuntimeOverlays } from "./runtime-overlays"
 import { InteractionForm } from "./interaction-form"
 import { WorkspaceSidebar } from "./workspace-sidebar/workspace-sidebar"
 import { Timeline } from "./timeline"
@@ -88,10 +89,16 @@ export function WebApp(props: {
       if (event.key !== "Escape") return
       // Composer rail 下拉等内层浮层已 preventDefault 并自行关闭，这里不重复处理。
       if (event.defaultPrevented) return
-      // Escape 关闭顺序固定：确认 Dialog → 命令菜单 → header overflow 菜单 → Context Dock → 取消 Run。
+      // Escape 关闭顺序：确认 Dialog → BTW/查看浮层 → 命令菜单 → header overflow 菜单 → Context Dock → 执行中提示中断。
       if (interactive.confirmation) {
         // DialogHost 自己注册了 Escape handler；这里不再重复派发一次 resolve。
         return
+      } else if (snapshot.btw.visible) {
+        event.preventDefault()
+        onIntent({ type: "btw-close" })
+      } else if (snapshot.inspectOverlay.visible) {
+        event.preventDefault()
+        onIntent({ type: "inspect-overlay-close" })
       } else if (snapshot.commandMenuOpen) {
         event.preventDefault()
         onIntent({ type: "command-menu-close" })
@@ -103,12 +110,12 @@ export function WebApp(props: {
         onIntent({ type: "dock-close" })
       } else if (!readOnly && interactive.activeRun) {
         event.preventDefault()
-        onIntent({ type: "cancel-run" })
+        onIntent({ type: "interrupt-hint" })
       }
     }
     window.addEventListener("keydown", onKeyDown)
     return () => window.removeEventListener("keydown", onKeyDown)
-  }, [interactive.activeRun, interactive.confirmation, onIntent, readOnly, snapshot.commandMenuOpen, snapshot.contextDock.open, snapshot.headerMenuOpen])
+  }, [interactive.activeRun, interactive.confirmation, onIntent, readOnly, snapshot.btw.visible, snapshot.commandMenuOpen, snapshot.contextDock.open, snapshot.headerMenuOpen, snapshot.inspectOverlay.visible])
 
   return (
     <div
@@ -187,6 +194,7 @@ export function WebApp(props: {
       </div>
 
       <DialogHost snapshot={snapshot} dispatch={onIntent} disabled={readOnly} />
+      <RuntimeOverlays snapshot={snapshot} dispatch={onIntent} />
     </div>
   )
 }

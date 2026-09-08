@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 
 import {
   CommandRegistry,
+  builtinCommandCapabilities,
   builtinCommandDefinitions,
   commandMenuItemDescription,
   commandMenuItemLabel,
@@ -66,6 +67,51 @@ test("Dispatcher 仅按稳定 ID 返回 semantic operation，并统一处理兼�
     commandContext: defaultCommandContext({ capabilities: ["models.read"] }),
   })).toEqual({ type: "present", target: "models", initialQuery: "pro" })
   expect(dispatchSlashCommand(compact, base)).toEqual({ type: "compact", threadId: "thread-1" })
+})
+
+test("/mcp 空参查询状态，add/remove 解析为语义操作", () => {
+  const base = {
+    commandContext: defaultCommandContext({ capabilities: ["mcp.read", "mcp.manage"], hasThread: true }),
+    threadId: "thread-1",
+    runtimeStatus: "运行摘要",
+  }
+  const status = parseSlashCommand("/mcp")
+  const addStdio = parseSlashCommand("/mcp add filesystem npx -y @mcp/server /tmp")
+  const addHttp = parseSlashCommand("/mcp add docs --url https://example.com/mcp")
+  const addSse = parseSlashCommand("/mcp add docs --url https://example.com/mcp --sse")
+  const remove = parseSlashCommand("/mcp remove filesystem")
+  const unknown = parseSlashCommand("/mcp foo")
+  if (!status || !addStdio || !addHttp || !addSse || !remove || !unknown) throw new Error("expected /mcp commands")
+
+  expect(dispatchSlashCommand(status, base)).toEqual({ type: "mcp" })
+  expect(dispatchSlashCommand(addStdio, base)).toEqual({
+    type: "mcp-add",
+    input: { name: "filesystem", transport: "stdio", command: "npx", args: ["-y", "@mcp/server", "/tmp"] },
+  })
+  expect(dispatchSlashCommand(addHttp, base)).toEqual({
+    type: "mcp-add",
+    input: { name: "docs", transport: "http", url: "https://example.com/mcp" },
+  })
+  expect(dispatchSlashCommand(addSse, base)).toEqual({
+    type: "mcp-add",
+    input: { name: "docs", transport: "sse", url: "https://example.com/mcp" },
+  })
+  expect(dispatchSlashCommand(remove, base)).toEqual({ type: "mcp-remove", name: "filesystem" })
+  expect(dispatchSlashCommand(unknown, base)).toMatchObject({ type: "notice", message: expect.stringContaining("/mcp add") })
+
+  const running = {
+    ...base,
+    commandContext: defaultCommandContext({ capabilities: ["mcp.read", "mcp.manage"], hasThread: true, activeRun: true }),
+  }
+  expect(dispatchSlashCommand(status, running)).toEqual({ type: "mcp" })
+  expect(dispatchSlashCommand(addStdio, running)).toEqual({
+    type: "unavailable",
+    message: "/mcp 暂不可用：当前任务结束后可用。",
+  })
+  expect(dispatchSlashCommand(remove, running)).toEqual({
+    type: "unavailable",
+    message: "/mcp 暂不可用：当前任务结束后可用。",
+  })
 })
 
 test("Compose /new-work 与 /abandon 按目标有无返回 submit 或确认", () => {
@@ -140,6 +186,57 @@ test("Agent 与 Team 命令只生成受控目录和固定参数 RPC", () => {
     method: "teams.inspect",
     params: { kind: "run", id: "team-run-1" },
   })
+
+  const running = {
+    ...base,
+    commandContext: defaultCommandContext({
+      capabilities: ["agents.read", "teams.read", "teams.manage"],
+      hasThread: true,
+      activeRun: true,
+    }),
+  }
+  const list = parseSlashCommand("/teams list")
+  const cancel = parseSlashCommand("/teams cancel team-run-1")
+  if (!list || !cancel) throw new Error("expected Team list/cancel")
+  expect(dispatchSlashCommand(list, running)).toMatchObject({ type: "rpc", method: "teams.list" })
+  expect(dispatchSlashCommand(status, running)).toMatchObject({ type: "rpc", method: "teams.inspect" })
+  expect(dispatchSlashCommand(cancel, running)).toMatchObject({ type: "rpc", method: "teams.cancel" })
+  expect(dispatchSlashCommand(generate, running)).toEqual({
+    type: "unavailable",
+    message: "/teams 暂不可用：当前任务结束后可用。",
+  })
+  expect(dispatchSlashCommand(run, running)).toEqual({
+    type: "unavailable",
+    message: "/teams 暂不可用：当前任务结束后可用。",
+  })
+})
+
+test("活动任务下 /quit 先确认；空闲直接退出；压缩中不走确认", () => {
+  const quit = parseSlashCommand("/quit")
+  const alias = parseSlashCommand("/q")
+  if (!quit || !alias) throw new Error("expected quit command")
+  expect(commandRegistry.get("system.quit")).toMatchObject({
+    safety: { runtime: "allowed", confirmation: "when-running" },
+  })
+  expect(dispatchSlashCommand(quit, {
+    commandContext: defaultCommandContext(),
+    threadId: null,
+    runtimeStatus: "idle",
+  })).toEqual({ type: "request-exit" })
+  expect(dispatchSlashCommand(alias, {
+    commandContext: defaultCommandContext({ activeRun: true }),
+    threadId: "thread-1",
+    runtimeStatus: "running",
+  })).toMatchObject({
+    type: "request-confirmation",
+    confirmationId: "quit-while-running",
+    message: expect.stringContaining("当前任务将被中止"),
+  })
+  expect(dispatchSlashCommand(quit, {
+    commandContext: defaultCommandContext({ pendingOperation: true }),
+    threadId: "thread-1",
+    runtimeStatus: "compacting",
+  })).toEqual({ type: "request-exit" })
 })
 
 test("活动任务下 /new 返回确认 semantic operation，而不是旧分支", () => {
@@ -194,8 +291,8 @@ test("/web 无需 Host 能力（ZC-114 共享 Core），空闲即可用；运行
       activeRun: true,
     }),
   })).toEqual({
-    type: "notice",
-    message: "/web 暂不可用：当前任务结束或交互完成后可用。",
+    type: "unavailable",
+    message: "/web 暂不可用：当前任务结束后可用。",
   })
 })
 
@@ -260,7 +357,54 @@ test("菜单按 capability 隐藏命令，并以稳定原因展示运行态禁�
   expect(modelMenu).toHaveLength(1)
   const model = modelMenu[0]
   if (!model || model.kind !== "command") throw new Error("expected model command")
-  expect(model.availability).toEqual({ state: "disabled", reason: "当前任务结束或交互完成后可用" })
+  expect(model.availability).toEqual({ state: "disabled", reason: "当前任务结束后可用" })
+})
+
+test("执行中只放行显式 runtime allowed 的命令，其余失败关闭", () => {
+  const runningBuild = defaultCommandContext({
+    capabilities: builtinCommandCapabilities,
+    hasThread: true,
+    activeRun: true,
+  })
+  const runningCompose = defaultCommandContext({
+    capabilities: builtinCommandCapabilities,
+    hasThread: true,
+    activeRun: true,
+    workMode: "compose",
+    hasActiveWorkItem: true,
+  })
+  const status = commandRegistry.get("system.status")!
+  const help = commandRegistry.get("system.help")!
+  const btw = commandRegistry.get("assist.btw")!
+  const goal = commandRegistry.get("goal.manage")!
+  const compact = commandRegistry.get("context.compact")!
+  const skills = commandRegistry.get("skills.open")!
+  const newWork = commandRegistry.get("compose.new-work")!
+  expect(commandRegistry.availability(status, runningBuild)).toEqual({ state: "available" })
+  expect(commandRegistry.availability(help, runningBuild)).toEqual({ state: "available" })
+  expect(commandRegistry.availability(btw, runningBuild)).toEqual({ state: "available" })
+  expect(commandRegistry.availability(goal, runningBuild)).toEqual({ state: "available" })
+  expect(commandRegistry.availability(compact, runningBuild)).toEqual({ state: "disabled", reason: "当前任务结束后可用" })
+  expect(commandRegistry.availability(skills, runningBuild)).toEqual({ state: "disabled", reason: "当前任务结束后可用" })
+  expect(commandRegistry.availability(newWork, runningCompose)).toEqual({ state: "disabled", reason: "当前任务结束后可用" })
+
+  const pluginRegistry = createCommandRegistry([{
+    id: "plugin/local/ZA38/command/za38-sdd",
+    name: "za38-sdd",
+    description: "生成软件设计文档",
+    argument_hint: "<goal>",
+    requested_skill_id: "plugin/local/ZA38/command/za38-sdd",
+    plugin_id: "local/ZA38",
+  }])
+  const plugin = pluginRegistry.get("plugin/local/ZA38/command/za38-sdd")!
+  expect(pluginRegistry.availability(plugin, defaultCommandContext({
+    capabilities: ["skills.read"],
+    hasThread: true,
+    activeRun: true,
+  }))).toEqual({
+    state: "disabled",
+    reason: "当前任务结束后可用",
+  })
 })
 
 test("已废弃命令不出现在空 Slash 菜单，但仍可按名称搜索以显示迁移说明", () => {
@@ -593,6 +737,24 @@ test("/plan 按空参、exit、目标返回切档或提交", () => {
     type: "notice",
     message: expect.stringContaining("已在计划模式"),
   })
+
+  const running = {
+    ...base,
+    commandContext: defaultCommandContext({ workMode: "build", activeRun: true }),
+  }
+  expect(dispatchSlashCommand({ id: "approval.plan", name: "plan", argument: "给登录做个方案" }, running)).toEqual({
+    type: "set-approval-mode",
+    mode: "plan",
+    notice: "已切换到计划模式；当前任务继续，空闲后再发送规划目标。",
+  })
+  expect(dispatchSlashCommand({ id: "approval.plan", name: "plan" }, running)).toMatchObject({
+    type: "set-approval-mode",
+    mode: "plan",
+  })
+  expect(dispatchSlashCommand({ id: "approval.plan", name: "plan", argument: "exit" }, {
+    ...running,
+    approvalMode: "plan" as const,
+  })).toEqual({ type: "restore-approval-mode" })
 })
 
 test("/plan-view 仅 Build 当前 thread 可用；挂起审批复用原交互，否则读取计划", () => {

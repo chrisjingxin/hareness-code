@@ -3,8 +3,10 @@
 import type { MouseEvent } from "@opentui/core"
 import { useRenderer } from "@opentui/react"
 import type { ReactNode } from "react"
-import { modeAccent, tuiTheme } from "./theme"
+import { getCommonSyntaxClient } from "../platform/syntax-parsers"
+import { modeAccent, markdownSyntax, tuiTheme } from "./theme"
 import { OverlayShell } from "./overlays"
+import { createScrollAcceleration } from "./scroll.js"
 import type { BtwState } from "../application/adapter"
 
 export type { BtwState }
@@ -80,7 +82,7 @@ export function BtwModal(props: BtwModalProps): ReactNode {
             paddingRight={2}
             paddingTop={1}
             paddingBottom={1}
-            maxHeight={16}
+            height={Math.max(8, Math.min(16, Math.floor(props.terminalHeight * 0.4)))}
             flexDirection="column"
           >
             {props.status === "loading" ? (
@@ -88,9 +90,21 @@ export function BtwModal(props: BtwModalProps): ReactNode {
             ) : props.status === "error" ? (
               <text fg={tuiTheme.danger}>问答失败：{props.error ?? "未知错误"}</text>
             ) : (
-              <text fg={tuiTheme.text} wrapMode="word">
-                {props.answer ?? "（无回答内容）"}
-              </text>
+              <scrollbox flexGrow={1} minHeight={0} stickyScroll={false} scrollAcceleration={createScrollAcceleration()}>
+                <box width="100%" flexDirection="column">
+                  <markdown
+                    content={props.answer ?? "（无回答内容）"}
+                    syntaxStyle={markdownSyntax}
+                    treeSitterClient={getCommonSyntaxClient()}
+                    streaming={false}
+                    fg={tuiTheme.text}
+                    bg={tuiTheme.panel}
+                    conceal
+                    concealCode={false}
+                    internalBlockMode="top-level"
+                  />
+                </box>
+              </scrollbox>
             )}
           </box>
 

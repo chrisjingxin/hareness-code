@@ -187,6 +187,9 @@ export class GoalFeature {
       }))
       if (announce) {
         ctx.commit(current => appendNotice(current, goalSummary(snapshot)))
+        if (ctx.getState().activeRun) {
+          return { status: "accepted", effects: [goalInspectOverlay(snapshot)] }
+        }
         callbacks?.openViewer(snapshot, threadId)
       }
       return { status: "accepted" }
@@ -223,6 +226,23 @@ function goalSummary(snapshot: GoalInspectResult): string {
   if (snapshot.pending) return `目标正在处理中：${snapshot.pending.input_text}`
   if (!snapshot.goal) return "当前 thread 还没有目标。用 `/goal <目标>` 创建。"
   return `当前目标（${snapshot.goal.status} · r${snapshot.goal.revision}）：${snapshot.goal.objective}`
+}
+
+/** 执行中查看浮层正文：与只读 GoalDock 同一份投影，不写入 interaction。 */
+function goalInspectOverlay(snapshot: GoalInspectResult): {
+  type: "inspect-overlay"
+  kind: "goal"
+  title: string
+  body: string
+} {
+  const lines = [goalSummary(snapshot)]
+  const criteria = snapshot.goal?.criteria.map(item => item.text)
+    ?? snapshot.pending?.proposed_criteria
+    ?? []
+  if (criteria.length) {
+    lines.push("", "验收：", ...criteria.map(item => `- ${item}`))
+  }
+  return { type: "inspect-overlay", kind: "goal", title: "当前目标", body: lines.join("\n") }
 }
 
 function mutationNotice(kind: GoalMutateAction["kind"]): string {

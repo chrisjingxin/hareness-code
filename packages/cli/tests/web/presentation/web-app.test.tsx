@@ -251,6 +251,37 @@ describe("WebApp", () => {
     }
   })
 
+  test("执行中无浮层 Escape 只提示中断，不 cancel-run", () => {
+    const adapter = createFakeAdapter(makeSnapshot({
+      interactive: makeInteractive({ activeRun: { threadId: "t", runId: "r" } }),
+    }))
+    const handle = render(<WebApp adapter={adapter} active={true} />)
+    try {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }))
+      expect(adapter.intentLog).toContainEqual({ type: "interrupt-hint" })
+      expect(adapter.intentLog.find(intent => intent.type === "cancel-run")).toBeUndefined()
+    } finally {
+      handle.unmount()
+    }
+  })
+
+  test("Escape 先关 BTW/查看浮层，不提示中断也不 cancel-run", () => {
+    const adapter = createFakeAdapter(makeSnapshot({
+      interactive: makeInteractive({ activeRun: { threadId: "t", runId: "r" } }),
+      btw: { visible: true, question: "这个报错是什么意思", status: "ready", answer: "权限错误" },
+    }))
+    const handle = render(<WebApp adapter={adapter} active={true} />)
+    try {
+      expect(handle.container.textContent).toContain("这个报错是什么意思")
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }))
+      expect(adapter.intentLog).toContainEqual({ type: "btw-close" })
+      expect(adapter.intentLog.find(intent => intent.type === "interrupt-hint")).toBeUndefined()
+      expect(adapter.intentLog.find(intent => intent.type === "cancel-run")).toBeUndefined()
+    } finally {
+      handle.unmount()
+    }
+  })
+
   test("Escape 优先级：header menu 打开时先关闭菜单而非关闭 Dock", () => {
     const adapter = createFakeAdapter(makeSnapshot({
       headerMenuOpen: true,

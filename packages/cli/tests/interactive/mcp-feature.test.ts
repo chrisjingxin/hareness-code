@@ -89,6 +89,30 @@ test("mcp.remove：RPC 失败返回脱敏 agent-error", async () => {
   }
 })
 
+test("/mcp 刷新 catalog 并在时间线展示服务器状态", async () => {
+  const harness = makeHarness()
+  try {
+    await flush()
+    const outcome = await harness.controller.dispatch({ type: "input.submit", value: "/mcp" })
+    expect(outcome.status).toBe("accepted")
+    expect(outcome.status === "accepted" ? outcome.effects : undefined).toEqual([
+      expect.objectContaining({
+        type: "inspect-overlay",
+        kind: "mcp",
+        title: "MCP 状态",
+        body: expect.stringContaining("filesystem"),
+      }),
+    ])
+    expect(harness.calls).toContain("mcp.status")
+    const notices = harness.controller.getSnapshot().timeline
+      .filter((item): item is Extract<typeof item, { type: "message" }> => item.type === "message")
+      .map(item => item.message.content)
+    expect(notices.some(text => text.includes("filesystem") && text.includes("已连接") && text.includes("read"))).toBe(true)
+  } finally {
+    await harness.controller.close()
+  }
+})
+
 test("mcp 变更：active Run 期间拒绝，不发 RPC", async () => {
   const harness = makeHarness()
   try {

@@ -240,6 +240,10 @@ function createPort(options: {
       calls.push("goal.mutate")
       return { disposition: "applied" as const, goal: null, pending: null, continuation: null }
     },
+    async sideQuestion(params) {
+      calls.push("threads.side_question")
+      return { reply_text: `echo: ${params.question}`, model_profile_id: params.model_profile_id ?? "echo" }
+    },
     async listTurns(threadId) {
       calls.push("threads.list_turns")
       return {

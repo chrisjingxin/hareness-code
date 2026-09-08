@@ -13,6 +13,7 @@ export type ShortcutContext = {
   commandDialogVisible?: boolean
   btwModalVisible?: boolean
   statusModalVisible?: boolean
+  inspectOverlayVisible?: boolean
   skillPickerVisible?: boolean
   skillOptionCount?: number
   threadPickerVisible?: boolean
@@ -45,6 +46,7 @@ export type ShortcutAction =
   | "cancel-command-dialog"
   | "close-btw-modal"
   | "close-status-modal"
+  | "close-inspect-overlay"
   | "copy-btw-answer"
   | "leave-child-timeline"
   | "close-undo-dialog"
@@ -97,6 +99,7 @@ export type ShortcutAction =
   | "command-open"
   | "clear-draft"
   | "cancel-run"
+  | "hint-interrupt"
   | "exit"
   | "clear-selected-skill"
   | "toggle-tool-details"
@@ -135,6 +138,11 @@ export function resolveShortcut(key: KeyLike, context: ShortcutContext): Shortcu
   if (context.btwModalVisible) {
     if (key.name === "escape" || key.name === "return" || key.name === "kpenter") return "close-btw-modal"
     if (key.name === "c" && !key.ctrl) return "copy-btw-answer"
+    return "none"
+  }
+  if (context.inspectOverlayVisible) {
+    if (key.ctrl && key.name === "c" && context.activeRun) return "cancel-run"
+    if (key.name === "escape" || key.name === "return" || key.name === "kpenter" || key.name === "q") return "close-inspect-overlay"
     return "none"
   }
   if (context.commandDialogVisible) {
@@ -226,15 +234,16 @@ export function resolveShortcut(key: KeyLike, context: ShortcutContext): Shortcu
   if (key.ctrl && key.name === "p") return "command-open"
   // 方向键必须留给 textarea：它需要依据真实光标边界决定回填历史还是滚动 thread。
   if (key.ctrl && key.name === "c") {
+    if (context.activeRun) return "cancel-run"
     if (context.hasDraft) return "clear-draft"
-    return context.activeRun ? "cancel-run" : "exit"
+    return "exit"
   }
   if ((key.name === "escape" || key.name === "backspace" || key.name === "delete") && context.childTimelineActive) {
     return "leave-child-timeline"
   }
   if (key.name === "escape" && context.interactionActive) return "none"
   if (key.name === "escape" && context.inputMode === "shell") return "exit-shell-mode"
-  if (key.name === "escape" && context.activeRun) return "cancel-run"
+  if (key.name === "escape" && context.activeRun) return "hint-interrupt"
   if (key.name === "escape" && !context.hasDraft) return "clear-selected-skill"
   if (key.ctrl && key.name === "o") return "toggle-tool-details"
   // Shift+Tab 循环切换审批模式；浮层打开时让位，避免选择器焦点下误切换。

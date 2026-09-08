@@ -122,6 +122,10 @@ export function makeSnapshot(overrides: Partial<WebAdapterSnapshot> = {}): WebAd
     confirmationId: null,
     theme: "light",
     headerMenuOpen: false,
+    composerSubmitting: false,
+    composerError: null,
+    btw: { visible: false, question: "", status: "loading" },
+    inspectOverlay: { visible: false, kind: "goal", title: "", body: "" },
     ...overrides,
   }
 }

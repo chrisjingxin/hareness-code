@@ -39,6 +39,29 @@ export function ThreadRuntimeLine(props: { interactive: SharedViewProps["interac
   )
 }
 
+/** 执行中仍可聚焦；只有压缩中（非问答）或 picker 打开才失焦。 */
+export function inputBarShouldFocus(input: {
+  compacting: boolean
+  awaitingQuestion: boolean
+  pickerVisible: boolean
+}): boolean {
+  return (!input.compacting || input.awaitingQuestion) && !input.pickerVisible
+}
+
+/** 输入栏占位文案；执行中提示 Ctrl+C 中断。 */
+export function inputBarPlaceholder(input: {
+  awaitingQuestion: boolean
+  compacting: boolean
+  activeRun: boolean
+  isShell: boolean
+}): string {
+  if (input.awaitingQuestion) return "输入你的回答后按 Enter"
+  if (input.compacting) return "正在压缩上下文…"
+  if (input.activeRun) return "正在执行；Ctrl+C 中断"
+  if (input.isShell) return "输入 Shell 指令（如 git status, ls -la）..."
+  return "输入消息..（输入 / 唤起命令，输入 ! 进入 Shell 模式）"
+}
+
 /** 渲染底部输入栏、命令菜单和运行时元信息。 */
 export function InputBar(props: Pick<SharedViewProps, "interactive" | "terminalWidth" | "terminalHeight" | "inputRef" | "value" | "onInput" | "onInputCursorChange" | "onInputBarKeyDown" | "onSubmit" | "commandMenu" | "commandOptions" | "onSelectCommand" | "onHoverCommand" | "mentionMenu" | "mentionSearch" | "onSelectMention" | "onHoverMention" | "selectedSkill" | "pickerVisible" | "onClearSelectedSkill" | "inputMode"> & {
   variant: "home" | "thread"
@@ -51,15 +74,13 @@ export function InputBar(props: Pick<SharedViewProps, "interactive" | "terminalW
   const options = props.commandOptions
   const isShell = props.inputMode === "shell"
   const accent = modeAccent(props.interactive.workMode)
-  const placeholder = awaitingQuestion
-    ? "输入你的回答后按 Enter"
-    : compacting
-      ? "正在压缩上下文…"
-      : active
-        ? "正在执行；Esc 中断"
-        : isShell
-          ? "输入 Shell 指令（如 git status, ls -la）..."
-          : "输入消息..（输入 / 唤起命令，输入 ! 进入 Shell 模式）"
+  const placeholder = inputBarPlaceholder({
+    awaitingQuestion,
+    compacting,
+    activeRun: active,
+    isShell,
+  })
+  const focused = inputBarShouldFocus({ compacting, awaitingQuestion, pickerVisible: props.pickerVisible })
 
   const commandMenu = props.commandMenu.visible ? (
     <CommandMenu
@@ -132,7 +153,7 @@ export function InputBar(props: Pick<SharedViewProps, "interactive" | "terminalW
                 minHeight={2}
                 maxHeight={6}
                 keyBindings={SUBMIT_ON_ENTER_KEY_BINDINGS}
-                focused={(!busy || awaitingQuestion) && !props.pickerVisible}
+                focused={focused}
                 onContentChange={() => props.onInput(props.inputRef.current?.plainText ?? "")}
                 onCursorChange={() => props.onInputCursorChange?.(props.inputRef.current?.cursorOffset ?? 0)}
                 onKeyDown={props.onInputBarKeyDown}
@@ -152,7 +173,7 @@ export function InputBar(props: Pick<SharedViewProps, "interactive" | "terminalW
               minHeight={1}
               maxHeight={6}
               keyBindings={SUBMIT_ON_ENTER_KEY_BINDINGS}
-              focused={(!busy || awaitingQuestion) && !props.pickerVisible}
+              focused={focused}
               onContentChange={() => props.onInput(props.inputRef.current?.plainText ?? "")}
               onCursorChange={() => props.onInputCursorChange?.(props.inputRef.current?.cursorOffset ?? 0)}
               onKeyDown={props.onInputBarKeyDown}
@@ -367,7 +388,7 @@ function BusyRunHint() {
   return (
     <box flexDirection="row" gap={1}>
       <text fg={tuiTheme.warning}>{frame}</text>
-      <text fg={tuiTheme.muted}>PgUp/PgDn 滚动 · Esc 中断</text>
+      <text fg={tuiTheme.muted}>PgUp/PgDn 滚动 · Ctrl+C 中断</text>
     </box>
   )
 }

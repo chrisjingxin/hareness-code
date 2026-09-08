@@ -246,6 +246,40 @@ test("explorer publish → state.patch 只含 workspaceTree，且不混入 inter
 
 // ---- interactive 意图受理 ---------------------------------------------------
 
+test("/btw 在网关补全 side-question 回答后再回传 outcome", async () => {
+  const harness = makeHarness({ initialThreadId: "thread-1" })
+  harness.port.sideQuestion = async params => ({
+    reply_text: `解答：${params.question}`,
+    model_profile_id: "web-model",
+  })
+  const system = createSystem({ controller: harness.controller })
+  await flush()
+  const { ch } = await connectAndReady(system)
+
+  sendClient(ch, {
+    type: "interactive.intent",
+    requestId: "btw-1",
+    revision: 1,
+    intent: { type: "input.submit", value: "/btw 这个报错是什么意思" },
+  })
+  await waitFor(() => ch.sent.some(message => message.type === "intent.outcome" && message.requestId === "btw-1"))
+
+  expect(ch.sent.find(message => message.type === "intent.outcome" && message.requestId === "btw-1")).toMatchObject({
+    type: "intent.outcome",
+    requestId: "btw-1",
+    domain: "interactive",
+    outcome: {
+      status: "accepted",
+      effects: [{
+        type: "side-question",
+        question: "这个报错是什么意思",
+        replyText: "解答：这个报错是什么意思",
+        modelProfileId: "web-model",
+      }],
+    },
+  })
+})
+
 test("command.execute 无 argument（Web adapter 真实发射形状）受理且不触发会话收敛", async () => {
   const system = createSystem()
   await flush()

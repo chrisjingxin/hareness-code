@@ -1,6 +1,6 @@
 /** 跨端共享 Interaction 展示策略：approval 选项顺序/文案、目录信任选项与 question 占位值。 */
 
-import type { ApprovalDecision, DirectoryTrustDecision, PlanDecision } from "../interactive/types"
+import type { ApprovalDecision, DirectoryTrustDecision, InteractiveInteraction, PlanDecision } from "../interactive/types"
 
 /** question “其他”选项在答案数组中的占位值；与 agent 端约定。 */
 export const QUESTION_OTHER_VALUE = "__other__"
@@ -76,6 +76,13 @@ export function planDecisionDescription(decision: PlanDecision): string {
 
 export function isPlanDecision(value: unknown): value is PlanDecision {
   return typeof value === "string" && (PLAN_DECISION_ORDER as readonly string[]).includes(value)
+}
+
+/** 独占底部槽：审批/目录信任/问答/计划审批/Goal 审核。只读 Goal/Plan 查看器不算。 */
+export function isExclusiveInteraction(interaction: InteractiveInteraction | null | undefined): boolean {
+  if (!interaction) return false
+  if ((interaction.type === "goal" || interaction.type === "plan") && interaction.readOnly) return false
+  return true
 }
 
 /** 全屏审阅：预览吃掉标题、动作栏和底栏之外的全部行。 */

@@ -2,6 +2,7 @@
 
 import {
   Capability,
+  type McpAddParams,
   type RequestedSkill,
   type TeamDefinition,
   type TeamsListResult,
@@ -43,12 +44,15 @@ export type CommandRpcResult = {
 
 export type CommandResult =
   | { type: "notice"; message: string }
+  | { type: "unavailable"; message: string }
   | { type: "request-exit" }
   | { type: "clear-thread" }
   | { type: "request-confirmation"; confirmationId: string; title: string; message: string; confirmLabel?: string; cancelLabel?: string }
   | { type: "present"; target: CommandPickerTarget; initialQuery?: string }
   | { type: "compact"; threadId: string }
-  | { type: "mcp"; argument?: string }
+  | { type: "mcp" }
+  | { type: "mcp-add"; input: McpAddParams }
+  | { type: "mcp-remove"; name: string }
   | { type: "request-handoff"; threadId: string | null }
   | { type: "request-redo"; threadId: string | null }
   | { type: "submit-prompt"; prompt: string; requestedSkill?: RequestedSkill }
@@ -95,7 +99,9 @@ export function dispatchSlashCommand(
 
   const availability = registry.availability(definition, context.commandContext)
   if (availability.state === "hidden") return notice(availability.reason)
-  if (availability.state === "disabled") return notice(`/${definition.name} 暂不可用：${availability.reason}。`)
+  if (availability.state === "disabled") {
+    return { type: "unavailable", message: `/${definition.name} 暂不可用：${availability.reason}。` }
+  }
 
   if (definition.source.type === "plugin" && definition.requestedSkillId) {
     const args = command.argument?.trim() ?? ""
@@ -119,7 +125,16 @@ export function dispatchSlashCommand(
 /** 所有现有 Builtin Handler 的稳定 ID 映射；禁止回退为按 name 的 switch。 */
 const builtinHandlers: Readonly<Record<string, CommandHandler>> = {
   "system.help": context => notice(commandHelp(context.registry).map(item => `${item.command}  ${item.description}`).join("\n")),
-  "system.quit": () => ({ type: "request-exit" }),
+  "system.quit": context => context.commandContext.activeRun
+    ? {
+        type: "request-confirmation",
+        confirmationId: "quit-while-running",
+        title: "退出 Harness？",
+        message: "当前任务将被中止。确认后退出。",
+        confirmLabel: "中止并退出",
+        cancelLabel: "继续当前任务",
+      }
+    : { type: "request-exit" },
   "thread.new": context => context.commandContext.activeRun
     ? {
         type: "request-confirmation",
@@ -147,7 +162,7 @@ const builtinHandlers: Readonly<Record<string, CommandHandler>> = {
     ? notice("/agents 不接受参数。")
     : { type: "present", target: "agents" },
   "teams.manage": handleTeamsCommand,
-  "mcp.manage": context => ({ type: "mcp", argument: context.command.argument }),
+  "mcp.manage": handleMcpCommand,
   "host.web": context => context.command.argument
     ? notice("/web 不接受参数。")
     : { type: "request-handoff", threadId: context.threadId },
@@ -253,6 +268,56 @@ function handlePlanViewCommand(context: CommandHandlerContext): CommandResult {
   }
 }
 
+const MCP_USAGE = "用法：/mcp、/mcp add <name> <command> [args...]、/mcp add <name> --url <url> [--sse]、/mcp remove <name>"
+
+/** `/mcp`：空参查询状态；add/remove 解析为后续由 Controller 执行的语义操作。 */
+function handleMcpCommand(context: CommandHandlerContext): CommandResult {
+  const argument = context.command.argument?.trim() ?? ""
+  if (!argument) return { type: "mcp" }
+  const [action, remainder = ""] = splitFirst(argument)
+  if (action === "add" || action === "remove") {
+    if (context.commandContext.activeRun) return runningUnavailable("mcp")
+  }
+  if (action === "add") {
+    if (!context.commandContext.capabilities.has(Capability.MCP_MANAGE)) {
+      return notice("当前客户端未协商 mcp.manage。")
+    }
+    return parseMcpAdd(remainder)
+  }
+  if (action === "remove") {
+    if (!context.commandContext.capabilities.has(Capability.MCP_MANAGE)) {
+      return notice("当前客户端未协商 mcp.manage。")
+    }
+    const name = remainder.trim()
+    if (!name) return notice("/mcp remove 需要服务器名称。")
+    return { type: "mcp-remove", name }
+  }
+  return notice(MCP_USAGE)
+}
+
+/** 解析 `/mcp add` 的 stdio 命令或 --url/--sse HTTP 传输。 */
+function parseMcpAdd(remainder: string): CommandResult {
+  const tokens = remainder.trim().split(/\s+/).filter(Boolean)
+  if (tokens.length < 2) return notice(MCP_USAGE)
+  const name = tokens[0]!
+  const urlIndex = tokens.indexOf("--url")
+  if (urlIndex >= 0) {
+    const url = tokens[urlIndex + 1]
+    if (!url) return notice("/mcp add --url 需要 URL。")
+    if (!/^https?:\/\//i.test(url)) return notice("URL 必须以 http:// 或 https:// 开头。")
+    return {
+      type: "mcp-add",
+      input: { name, transport: tokens.includes("--sse") ? "sse" : "http", url },
+    }
+  }
+  const [command, ...args] = tokens.slice(1)
+  if (!command) return notice(MCP_USAGE)
+  return {
+    type: "mcp-add",
+    input: { name, transport: "stdio", command, ...(args.length ? { args } : {}) },
+  }
+}
+
 /** 把 `/teams` 子命令映射成类型化 RPC；客户端不能提交任意 TeamDefinition。 */
 function handleTeamsCommand(context: CommandHandlerContext): CommandResult {
   const argument = context.command.argument?.trim() ?? ""
@@ -294,6 +359,7 @@ function handleTeamsCommand(context: CommandHandlerContext): CommandResult {
     )
   }
   if (action === "generate") {
+    if (context.commandContext.activeRun) return runningUnavailable("teams")
     const parts = remainder.trim().split(/\s+/)
     if (parts.length < 3) {
       return notice("/teams generate 用法：/teams generate <team-id> <lead-agent> <worker1,worker2> [max-parallelism]")
@@ -317,6 +383,7 @@ function handleTeamsCommand(context: CommandHandlerContext): CommandResult {
     )
   }
   if (action === "run") {
+    if (context.commandContext.activeRun) return runningUnavailable("teams")
     const [teamId, request] = splitFirst(remainder.trim())
     if (!teamId || !request.trim()) {
       return notice("/teams run 用法：/teams run <team-id> <任务描述>")
@@ -397,6 +464,11 @@ function splitFirst(value: string): [string, string] {
 /** 生成统一 notice，减少 Handler 中重复的结构字面量。 */
 function notice(message: string): CommandResult {
   return { type: "notice", message }
+}
+
+/** 执行中禁用子命令：与 Registry disabled 同一句，草稿由 unavailable → rejected 保留。 */
+function runningUnavailable(name: string): CommandResult {
+  return { type: "unavailable", message: `/${name} 暂不可用：当前任务结束后可用。` }
 }
 
 /** 将 context.compact 结果压缩为不暴露归档正文的本地通知。 */

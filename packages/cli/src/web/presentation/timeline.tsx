@@ -242,8 +242,8 @@ export function Timeline({
       taskTitle: null,
       phaseLabel,
       elapsedLabel: formatElapsed(elapsedMs),
-    })} · Esc 取消`
-    : `${phaseLabel} · 已运行 ${formatElapsed(elapsedMs)} · Esc 取消`
+    })} · 点停止取消`
+    : `${phaseLabel} · 已运行 ${formatElapsed(elapsedMs)} · 点停止取消`
 
   // Compose 分段器会把无 scope 的 Build 条目拆成多个 flat segment；先恢复连续 flat 条目，
   // 再交给 Agent 分组渲染，保证 Build 与 Compose 两条路径都能共享同一套气泡结构。

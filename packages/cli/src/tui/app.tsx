@@ -26,6 +26,7 @@ import { DialogShell, SearchPicker, type SearchPickerRenderContext } from "./pre
 import { AgentPicker, SkillPicker, ThreadPicker } from "./presentation/pickers"
 import { UndoPicker, UndoDialog } from "./presentation/undo-modal"
 import { BtwModal } from "./presentation/btw-modal"
+import { InspectOverlay } from "./presentation/inspect-overlay"
 import { StatusModal } from "./presentation/status-modal"
 import { copyCurrentSelection, shouldAttemptSelectionCopy } from "./presentation/selection-copy"
 import { Sidebar, computeSidebarVisibility } from "./presentation/sidebar"
@@ -304,6 +305,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
       || Boolean(snapshot.undoDialog)
       || snapshot.btw.visible
       || snapshot.statusModal.visible
+      || snapshot.inspectOverlay.visible
 
     if (sidebarVisibility.visible && !overlayCapturesKeys) {
       if (key.sequence === "[" || key.sequence === "1") {
@@ -382,6 +384,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
       commandDialogVisible: Boolean(snapshot.commandDialog || snapshot.modelBindingDialog),
       btwModalVisible: snapshot.btw.visible,
       statusModalVisible: snapshot.statusModal.visible,
+      inspectOverlayVisible: snapshot.inspectOverlay.visible,
       skillPickerVisible: snapshot.skills.visible,
       skillOptionCount: snapshot.skills.items.length,
       threadPickerVisible: snapshot.threads.visible,
@@ -458,7 +461,7 @@ export function Za38Tui(options: RenderedTuiOptions) {
     onSelectMention: (item: import("../presentation-shared").MentionOption) => { void adapter.dispatch({ type: "mention-menu-select", item }) },
     onHoverMention: (selectedIndex: number) => { void adapter.dispatch({ type: "mention-menu-hover", selectedIndex }) },
     selectedSkill: snapshot.selectedSkill,
-    pickerVisible: Boolean(snapshot.commandDialog || snapshot.modelBindingDialog) || snapshot.skills.visible || snapshot.threads.visible || snapshot.models.visible || snapshot.agents.visible || snapshot.btw.visible || snapshot.statusModal.visible || snapshot.undo.visible || Boolean(snapshot.undoDialog?.visible),
+    pickerVisible: Boolean(snapshot.commandDialog || snapshot.modelBindingDialog) || snapshot.skills.visible || snapshot.threads.visible || snapshot.models.visible || snapshot.agents.visible || snapshot.btw.visible || snapshot.statusModal.visible || snapshot.inspectOverlay.visible || snapshot.undo.visible || Boolean(snapshot.undoDialog?.visible),
     onClearSelectedSkill: () => { void adapter.dispatch({ type: "clear-selected-skill" }) },
     showToolDetails: snapshot.showToolDetails,
     expandedTools: snapshot.expandedTools,
@@ -618,13 +621,15 @@ export function Za38Tui(options: RenderedTuiOptions) {
         />
       ) : null}
       <DialogShell
-        visible={snapshot.commandDialog?.kind === "confirm-new-thread"}
+        visible={Boolean(snapshot.commandDialog)}
         title={snapshot.commandDialog?.title ?? ""}
         message={snapshot.commandDialog?.message ?? ""}
         terminalWidth={terminal.width}
         terminalHeight={terminal.height}
         restoreFocusRef={inputRef}
         shouldRestoreFocus={!interactive.activeRun && interactive.activity.kind !== "compacting"}
+        confirmLabel={snapshot.commandDialog?.confirmLabel}
+        cancelLabel={snapshot.commandDialog?.cancelLabel}
         onConfirm={() => { void adapter.dispatch({ type: "dialog-resolve", kind: "command", confirmed: true }) }}
         onCancel={() => { void adapter.dispatch({ type: "dialog-resolve", kind: "command", confirmed: false }) }}      />
       <DialogShell
@@ -660,6 +665,14 @@ export function Za38Tui(options: RenderedTuiOptions) {
         terminalWidth={terminal.width}
         terminalHeight={terminal.height}
         onClose={() => { void adapter.dispatch({ type: "status-close" }) }}
+      />
+      <InspectOverlay
+        visible={snapshot.inspectOverlay.visible}
+        title={snapshot.inspectOverlay.title}
+        body={snapshot.inspectOverlay.body}
+        terminalWidth={terminal.width}
+        terminalHeight={terminal.height}
+        onClose={() => { void adapter.dispatch({ type: "inspect-overlay-close" }) }}
       />
       <ToastContainer toasts={snapshot.toasts} terminalWidth={terminal.width} />
     </box>

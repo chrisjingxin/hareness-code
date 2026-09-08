@@ -60,7 +60,7 @@ const DISABLED_COMMAND: CommandMenuItem = {
     source: { type: "builtin" },
     presentation: "picker",
   },
-  availability: { state: "disabled", reason: "当前任务结束或交互完成后可用" },
+  availability: { state: "disabled", reason: "当前任务结束后可用" },
 }
 
 describe("Composer", () => {
@@ -308,6 +308,8 @@ describe("Composer", () => {
       .toEqual({ preventDefault: true, intent: { type: "command-menu-select", item: SAMPLE_COMMAND } })
     expect(resolveComposerKeyboardIntent({ ...base, key: "Enter", menuVisible: true, items: [DISABLED_COMMAND] }))
       .toEqual({ preventDefault: true, intent: null })
+    expect(resolveComposerKeyboardIntent({ ...base, key: "Escape", activeRun: true }))
+      .toEqual({ preventDefault: true, intent: { type: "interrupt-hint" } })
   })
 
   test("@ 菜单键盘状态机支持夹取移动、翻页、选中与关闭", () => {
@@ -375,6 +377,9 @@ describe("Composer", () => {
       expect(cancel).not.toBeNull()
       const send = handle.container.querySelector<HTMLButtonElement>(".send-button")
       expect(send).toBeNull()
+      const textarea = handle.container.querySelector<HTMLTextAreaElement>(".composer-textarea")
+      expect(textarea?.placeholder).toBe("正在执行；点停止中断")
+      expect(textarea?.disabled).toBe(false)
       act(() => { cancel?.click() })
       expect(intents).toContainEqual({ type: "cancel-run" })
     } finally {
@@ -462,7 +467,7 @@ describe("Composer", () => {
       const items = menu?.querySelectorAll(".command-item")
       expect(items?.length).toBe(2)
       const disabled = menu?.querySelector<HTMLElement>('[data-disabled="true"]')
-      expect(disabled?.textContent).toContain("当前任务结束或交互完成后可用")
+      expect(disabled?.textContent).toContain("当前任务结束后可用")
     } finally {
       handle.unmount()
     }

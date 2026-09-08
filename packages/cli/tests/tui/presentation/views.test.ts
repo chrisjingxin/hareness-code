@@ -1378,7 +1378,7 @@ test("TUI 运行期间显示事实阶段、活动时长和取消提示", async (
     const frame = setup.captureCharFrame()
     expect(frame).toContain("等待模型响应")
     expect(frame).toContain("已运行")
-    expect(frame).toContain("Esc 取消")
+    expect(frame).toContain("Ctrl+C 取消")
   } finally {
     await act(async () => { setup.renderer.destroy() })
   }

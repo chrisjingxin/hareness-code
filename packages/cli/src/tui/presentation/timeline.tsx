@@ -287,7 +287,7 @@ function SystemEvent(props: { content: string }) {
   return (
     <box marginTop={1} paddingLeft={3} paddingRight={3} flexDirection="row" gap={1}>
       <text fg={tuiTheme.subtle}>·</text>
-      <text content={text} fg={tuiTheme.muted} />
+      <text content={text} fg={tuiTheme.muted} wrapMode="word" />
     </box>
   )
 }
@@ -365,8 +365,8 @@ function TimelineActivity(props: { interactive: InteractiveSnapshot }) {
         taskTitle: null,
         phaseLabel: phase,
         elapsedLabel: formatElapsed(elapsed),
-      })} · Esc 取消`
-      : `${phase} · 已运行 ${formatElapsed(elapsed)} · Esc 取消`
+      })} · Ctrl+C 取消`
+      : `${phase} · 已运行 ${formatElapsed(elapsed)} · Ctrl+C 取消`
   return (
     <box marginTop={1} paddingLeft={3} flexDirection="row" gap={1}>
       <text fg={tuiTheme.warning}>{frame}</text>

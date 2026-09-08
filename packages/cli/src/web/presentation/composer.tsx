@@ -617,7 +617,7 @@ export function resolveComposerKeyboardIntent(
     }
   }
   if (input.key === "Escape" && input.activeRun) {
-    return { preventDefault: true, intent: { type: "cancel-run" } }
+    return { preventDefault: true, intent: { type: "interrupt-hint" } }
   }
   if ((input.metaKey || input.ctrlKey) && (input.key === "k" || input.key === "K")) {
     return { preventDefault: true, intent: { type: "command-menu-open" } }
@@ -702,7 +702,7 @@ function placeholderFor(snapshot: WebAdapterSnapshot, activeRun: boolean): strin
   if (snapshot.leaving) return "正在归还或退出，输入已锁定"
   if (snapshot.interactive.connection.status !== "open") return "等待连接…"
   if (snapshot.interactive.activity.kind === "compacting") return "正在压缩上下文…"
-  if (activeRun) return "正在执行；Esc 可中断"
+  if (activeRun) return "正在执行；点停止中断"
   return "输入消息…（输入 / 唤起命令）"
 }
 

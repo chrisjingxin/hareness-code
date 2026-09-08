@@ -1344,6 +1344,14 @@ pre, code { font-family: "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Co
 .dialog-cancel { border-color: var(--line-strong); background: var(--surface); color: var(--text-soft); }
 .dialog-confirm { border-color: var(--action); background: var(--action); color: var(--action-text); }
 .dialog-confirm:hover:not(:disabled) { background: var(--action-hover); border-color: var(--action-hover); }
+.runtime-overlay { z-index: 45; }
+.runtime-overlay-panel { width: min(720px, 100%); max-height: min(80vh, 720px); display: flex; flex-direction: column; }
+.runtime-overlay-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; flex-shrink: 0; }
+.runtime-overlay-header .dialog-title { margin: 0; }
+.runtime-overlay-question { margin: 0 0 8px; font-size: 13px; font-weight: 600; flex-shrink: 0; }
+.runtime-overlay-body { margin: 0; color: var(--text-soft); font-size: 13px; white-space: pre-wrap; font-family: inherit; }
+.runtime-overlay-body-scroll { overflow-y: auto; min-height: 0; flex: 1; max-height: min(60vh, 480px); }
+.runtime-overlay-panel .dialog-actions { align-items: center; flex-shrink: 0; }
 
 /* ---------- Markdown ---------- */
 .markdown { min-width: 0; overflow-wrap: anywhere; font-size: 14px; line-height: 1.7; }

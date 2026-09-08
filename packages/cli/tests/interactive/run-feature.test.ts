@@ -189,6 +189,41 @@ test("/plan-view 读取当前 thread 计划为只读预览，关闭后不产生�
   }
 })
 
+test("执行中 /plan-view 无挂起审批时返回 inspect-overlay，不进入 PlanDock", async () => {
+  const harness = makeHarness({
+    initialThreadId: "thread-plan-view",
+    openThreadImpl: async threadId => ({
+      thread: { thread_id: threadId, created_at_ms: 1, updated_at_ms: 2, first_message: "规划", latest_message: "规划", message_count: 1 },
+      messages: [{ kind: "user", content: "规划" }],
+      plan: {
+        has_plan: true,
+        plan_markdown: "# 当前计划\n\n完成停点 4。",
+        plan_virtual_path: "/.harness/plan.md",
+        plan_display_path: `~/.harness/plans/${threadId}.md`,
+      },
+    }),
+  })
+  try {
+    await flush()
+    expect((await harness.controller.dispatch({ type: "input.submit", value: "先做当前任务" })).status).toBe("accepted")
+    expect(harness.controller.getSnapshot().activeRun).not.toBeNull()
+
+    const outcome = await harness.controller.dispatch({ type: "input.submit", value: "/plan-view" })
+    expect(outcome.status).toBe("accepted")
+    expect(outcome.status === "accepted" ? outcome.effects : undefined).toEqual([
+      expect.objectContaining({
+        type: "inspect-overlay",
+        kind: "plan",
+        body: expect.stringContaining("完成停点 4。"),
+      }),
+    ])
+    expect(harness.controller.getSnapshot().interaction).toBeNull()
+    expect(harness.controller.getSnapshot().activeRun).not.toBeNull()
+  } finally {
+    await harness.controller.close()
+  }
+})
+
 test("放弃计划只恢复档位，不自动开跑", async () => {
   const harness = makeHarness()
   try {

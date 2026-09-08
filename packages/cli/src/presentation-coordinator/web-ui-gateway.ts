@@ -153,6 +153,7 @@ class WebUiGatewayImpl implements WebUiGateway {
     let outcome: IntentOutcome
     try {
       outcome = await this.controller.dispatch(intent)
+      outcome = await this.fulfillSideQuestion(outcome)
     } catch (error) {
       // dispatch 设计上返回 IntentOutcome，但远端异常仍需收敛为可回传的 rejected。
       outcome = {
@@ -163,6 +164,37 @@ class WebUiGatewayImpl implements WebUiGateway {
     }
     this.cacheOutcome(requestId, "interactive", outcome)
     await this.sendOutcome(requestId, "interactive", outcome)
+  }
+
+  /** Browser 不能直连 sidecar；在 CLI 侧补全 /btw 回答后再回传 outcome。 */
+  private async fulfillSideQuestion(outcome: IntentOutcome): Promise<IntentOutcome> {
+    if (outcome.status !== "accepted" || !outcome.effects?.length) return outcome
+    const gateway = this.controller.getGateway?.()
+    if (!gateway) return outcome
+    const effects = []
+    for (const effect of outcome.effects) {
+      if (effect.type !== "side-question" || effect.replyText !== undefined || effect.error !== undefined) {
+        effects.push(effect)
+        continue
+      }
+      try {
+        const result = await gateway.sideQuestion({
+          thread_id: effect.threadId ?? "default",
+          question: effect.question,
+        })
+        effects.push({
+          ...effect,
+          replyText: result.reply_text,
+          modelProfileId: result.model_profile_id,
+        })
+      } catch (error) {
+        effects.push({
+          ...effect,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+    return { ...outcome, effects }
   }
 
   /** workspace intent 受理：与 interactive 共用 web-active 检查、revision 门禁与重放去重。 */

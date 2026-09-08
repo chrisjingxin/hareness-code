@@ -3,7 +3,7 @@
 import { Capability, type ModelProfile } from "@za38/protocol"
 import { contextCompactNotice, type CommandResult, type CommandRpcMethod, dispatchSlashCommand } from "./command-dispatcher"
 import { builtinCommandCapabilities } from "./commands"
-import { CatalogFeature, CommandFeature, GoalFeature, InteractionFeature, McpFeature, ModelFeature, PLAN_IMPLEMENT_PROMPT, RunFeature, SkillFeature, ThreadFeature, TimelineFeature, type FeatureContext } from "./features"
+import { CatalogFeature, CommandFeature, formatMcpStatusNotice, GoalFeature, InteractionFeature, McpFeature, ModelFeature, PLAN_IMPLEMENT_PROMPT, RunFeature, SkillFeature, ThreadFeature, TimelineFeature, type FeatureContext } from "./features"
 import type { AgentGateway, Clock, IdGenerator, IntentOutcome, InteractiveConfirmation, InteractiveConnectionState, InteractiveController, InteractiveControllerOptions, InteractiveIntent, InteractiveSnapshot, LoadableCatalog, Scheduler } from "./ports"
 import { createFallbackNoopGateway } from "./ports"
 import { cryptoIdGenerator, systemClock, systemScheduler } from "../infrastructure"
@@ -273,6 +273,13 @@ export class InteractiveControllerImpl implements InteractiveController {
     }
 
     const message = resolution.kind === "escaped" ? resolution.message : value
+    if (this.state.activeRun) {
+      return {
+        status: "rejected",
+        code: "busy",
+        message: "当前任务进行中，完成后发送，或用 Ctrl+C 中断后再发送。",
+      }
+    }
     const resolvedMention = await resolveMentions(this.baseRuntime.workspace, message)
     return this.runFeature.startRun(resolvedMention.prompt, this.featureContext, {
       // 下一次 Run 的工作模式由共享状态或 direct_shell 显式指定决定，受理后冻结。
@@ -398,6 +405,8 @@ export class InteractiveControllerImpl implements InteractiveController {
       case "notice":
         this.commit(current => appendNotice(current, result.message))
         return { status: "accepted" }
+      case "unavailable":
+        return { status: "rejected", code: "busy", message: result.message }
       case "request-exit":
         return { status: "accepted", effects: [{ type: "request-exit" }] }
       case "clear-thread":
@@ -408,7 +417,10 @@ export class InteractiveControllerImpl implements InteractiveController {
         this.publish()
         return { status: "accepted" }
       case "present":
-        if (this.state.activeRun || this.interactionFeature.pendingInteraction) {
+        if (this.interactionFeature.pendingInteraction) {
+          return { status: "rejected", code: "busy", message: "Active run or pending interaction in progress" }
+        }
+        if (this.state.activeRun && result.target !== "status" && result.target !== "agents") {
           return { status: "rejected", code: "busy", message: "Active run or pending interaction in progress" }
         }
         if (result.target === "models") {
@@ -439,9 +451,32 @@ export class InteractiveControllerImpl implements InteractiveController {
           this.commit(finishContextCompaction)
         }
         return { status: "accepted" }
-      case "mcp":
+      case "mcp": {
         await this.catalogFeature.refreshMcpCatalog(this.featureContext)
-        return { status: "accepted" }
+        const body = formatMcpStatusNotice(this.catalogFeature.state.mcp)
+        this.commit(current => appendNotice(current, body))
+        return { status: "accepted", effects: [{ type: "inspect-overlay", kind: "mcp", title: "MCP 状态", body }] }
+      }
+      case "mcp-add": {
+        const outcome = await this.mcpFeature.addMcpServer(result.input, this.featureContext, {
+          hasCapability: this.hasCapability("mcp.manage"),
+          onSuccess: () => this.catalogFeature.refreshMcpCatalog(this.featureContext),
+        })
+        if (outcome.status === "accepted") {
+          this.commit(current => appendNotice(current, `已添加 MCP 服务器 ${result.input.name}。`))
+        }
+        return outcome
+      }
+      case "mcp-remove": {
+        const outcome = await this.mcpFeature.removeMcpServer(result.name, this.featureContext, {
+          hasCapability: this.hasCapability("mcp.manage"),
+          onSuccess: () => this.catalogFeature.refreshMcpCatalog(this.featureContext),
+        })
+        if (outcome.status === "accepted") {
+          this.commit(current => appendNotice(current, `已删除 MCP 服务器 ${result.name}。`))
+        }
+        return outcome
+      }
       case "request-handoff":
         return { status: "accepted", effects: [{ type: "request-handoff", threadId: result.threadId }] }
       case "request-redo":
@@ -466,6 +501,17 @@ export class InteractiveControllerImpl implements InteractiveController {
         this.publish()
         return { status: "accepted" }
       case "view-plan":
+        if (this.state.activeRun) {
+          return {
+            status: "accepted",
+            effects: [{
+              type: "inspect-overlay",
+              kind: "plan",
+              title: result.displayPath,
+              body: result.markdown,
+            }],
+          }
+        }
         this.interactionFeature.openPlanViewer(result, this.featureContext)
         return { status: "accepted" }
       case "goal":
@@ -550,6 +596,9 @@ export class InteractiveControllerImpl implements InteractiveController {
         this.commit(current => appendNotice(current, "未能取消当前任务，已保留当前 thread。请等待任务结束后重试。"))
         return { status: "accepted" }
       }
+    }
+    if (confirmationId === "quit-while-running") {
+      return { status: "accepted", effects: [{ type: "request-exit" }] }
     }
     if (confirmationId === "clear-thread") {
       this.beginNewThread()

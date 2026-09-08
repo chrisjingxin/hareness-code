@@ -164,7 +164,8 @@ export type InteractiveMcpInput = McpAddParams
 export type PresentationEffect =
   | { type: "present"; target: "threads" | "models" | "skills" | "agents" | "status" | "undo"; initialQuery?: string }
   | { type: "request-handoff"; threadId: string | null }
-  | { type: "side-question"; question: string; threadId: string | null }
+  | { type: "side-question"; question: string; threadId: string | null; replyText?: string; modelProfileId?: string; error?: string }
+  | { type: "inspect-overlay"; kind: "goal" | "plan" | "mcp"; title: string; body: string }
   | { type: "request-exit" }
   | { type: "request-redo"; threadId: string | null }
 
