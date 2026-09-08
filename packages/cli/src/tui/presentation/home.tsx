@@ -19,9 +19,9 @@ export function HomeView(props: SharedViewProps) {
     : (props.mentionSearch?.items.length ?? 0)
   const commandRows = menuVisible && !compact
     ? Math.min(
-        props.commandMenu.visible ? 5 : mentionRowsForTerminal(props.terminalHeight),
+        mentionRowsForTerminal(props.terminalHeight),
         Math.max(1, menuOptionsLength),
-      ) + (props.commandMenu.visible ? 2 : 3)
+      ) + 3
     : 0
 
   return (

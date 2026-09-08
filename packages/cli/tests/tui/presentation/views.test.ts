@@ -1575,7 +1575,7 @@ function viewProps(interactive: InteractiveSnapshot, terminalWidth: number, term
     onInput: () => undefined,
     onInputBarKeyDown: () => undefined,
     onSubmit: () => undefined,
-    commandMenu: { visible: false, selectedIndex: 0 },
+    commandMenu: { visible: false, selectedIndex: 0, windowStart: 0 },
     commandOptions: [],
     onSelectCommand: () => undefined,
     onHoverCommand: () => undefined,

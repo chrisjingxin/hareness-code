@@ -88,6 +88,13 @@ class ExtRootBackendRouter:
         backend, key = self._backend_for(file_path)
         return backend.write(key, content)
 
+    def delete(self, path: str) -> Any:
+        """删除文件或目录。"""
+        backend, key = self._backend_for(path)
+        if hasattr(backend, "delete"):
+            return backend.delete(key)
+        raise NotImplementedError("Backend does not support delete")
+
     def edit(self, file_path: str, old_string: str, new_string: str, replace_all: bool = False) -> Any:
         """编辑文件。"""
         backend, key = self._backend_for(file_path)

@@ -48,6 +48,8 @@ export type DirectoryTrustDecision = "allow_session" | "deny"
 export type CommandMenuState = {
   visible: boolean
   selectedIndex: number
+  /** 当前可见窗口的起始下标；上下键移动选中项时跟随滚动。 */
+  windowStart: number
 }
 
 export type MentionMenuState = {
@@ -77,6 +79,11 @@ function emptyMentionMenu(): MentionMenuState {
     workspaceStatus: "idle",
     workspaceLimited: false,
   }
+}
+
+/** 关闭后的命令菜单状态；选中项与窗口都回到起点。 */
+function emptyCommandMenu(): CommandMenuState {
+  return { visible: false, selectedIndex: 0, windowStart: 0 }
 }
 
 /** 恢复选择器使用的 thread 摘要；内部 thread_id 绝不直接渲染。 */
@@ -355,7 +362,7 @@ class TuiAdapterImpl implements TuiAdapter {
   private draftInputCursorOffset = 0
   private draftCursor: "start" | "end" | undefined
   private inputMode: "chat" | "shell" = "chat"
-  private commandMenu: CommandMenuState = { visible: false, selectedIndex: 0 }
+  private commandMenu: CommandMenuState = emptyCommandMenu()
   private commandMenuDismissedValue: string | undefined
   private mentionMenu: MentionMenuState = emptyMentionMenu()
   private mentionMenuDismissal: { draft: string; start: number; end: number } | undefined
@@ -544,10 +551,13 @@ class TuiAdapterImpl implements TuiAdapter {
       case "command-menu-select":
         await this.selectCommandMenuItem(intent.item)
         return
-      case "command-menu-hover":
-        this.commandMenu = { ...this.commandMenu, selectedIndex: intent.selectedIndex }
+      case "command-menu-hover": {
+        const selectedIndex = intent.selectedIndex
+        const window = ensureMentionWindow(selectedIndex, this.commandMenu.windowStart, this.snapshot.commandOptions.length, 8)
+        this.commandMenu = { ...this.commandMenu, selectedIndex, windowStart: window.start }
         this.publish()
         return
+      }
       case "mention-menu-select":
         this.selectMentionMenuItem(intent.item)
         return
@@ -964,7 +974,7 @@ class TuiAdapterImpl implements TuiAdapter {
       && !query.startsWith("//")
       && !query.slice(1).match(/\s/)
     if (shouldShowMenu && this.commandMenuDismissedValue !== value) {
-      this.commandMenu = { visible: true, selectedIndex: 0 }
+      this.commandMenu = { visible: true, selectedIndex: 0, windowStart: 0 }
     } else {
       if (!shouldShowMenu) this.commandMenuDismissedValue = undefined
       this.commandMenu = this.commandMenu.visible ? { ...this.commandMenu, visible: false } : this.commandMenu
@@ -1032,7 +1042,7 @@ class TuiAdapterImpl implements TuiAdapter {
     this.draftCursor = undefined
     this.draft = ""
     this.draftInputCursorOffset = 0
-    this.commandMenu = { visible: false, selectedIndex: 0 }
+    this.commandMenu = emptyCommandMenu()
     this.mentionMenu = emptyMentionMenu()
   }
 
@@ -1047,7 +1057,7 @@ class TuiAdapterImpl implements TuiAdapter {
     this.mentionMenuDismissal = undefined
     this.draft = move.value
     this.draftInputCursorOffset = direction === "previous" ? 0 : move.value.length
-    this.commandMenu = { visible: false, selectedIndex: 0 }
+    this.commandMenu = emptyCommandMenu()
     this.mentionMenu = emptyMentionMenu()
     this.publish()
   }
@@ -1318,6 +1328,9 @@ class TuiAdapterImpl implements TuiAdapter {
       case "command-select":
         await this.selectCommandMenu()
         return
+      case "command-complete":
+        await this.completeCommandMenu()
+        return
       case "command-block": {
         const resolution = resolveSlashCommand(this.draft)
         const value = this.draft
@@ -1478,41 +1491,76 @@ class TuiAdapterImpl implements TuiAdapter {
     const value = this.draft.trimStart()
     if (!value.startsWith("/") || value.slice(1).match(/\s/)) this.updateDraft("/")
     this.commandMenuDismissedValue = undefined
-    this.commandMenu = { visible: true, selectedIndex: 0 }
+    this.commandMenu = { visible: true, selectedIndex: 0, windowStart: 0 }
     this.publish()
   }
 
-  /** 移动命令菜单选中项。 */
-  private moveCommandMenu(direction: number): void {
+  /** 循环移动命令菜单选中项，并让可见窗口跟随。 */
+  private moveCommandMenu(direction: number, visibleRows = 8): void {
     const options = this.snapshot.commandOptions
-    this.commandMenu = {
-      ...this.commandMenu,
-      selectedIndex: options.length ? (this.commandMenu.selectedIndex + direction + options.length) % options.length : 0,
+    if (!options.length) {
+      this.commandMenu = { ...this.commandMenu, selectedIndex: 0, windowStart: 0 }
+      this.publish()
+      return
     }
+    const selectedIndex = (this.commandMenu.selectedIndex + direction + options.length) % options.length
+    const window = ensureMentionWindow(selectedIndex, this.commandMenu.windowStart, options.length, visibleRows)
+    this.commandMenu = { ...this.commandMenu, selectedIndex, windowStart: window.start }
     this.publish()
   }
 
-  /** 处理当前命令菜单选中项；领域命令仍按 canonical ID 执行。 */
-  private async selectCommandMenu(): Promise<void> {
+  /** Tab 只把当前高亮项补全进输入框，即使该项暂不可执行。 */
+  private async completeCommandMenu(): Promise<void> {
     if (this.controller.getSnapshot().activity.kind === "compacting") {
-      this.commandMenu = { visible: false, selectedIndex: 0 }
+      this.commandMenu = emptyCommandMenu()
       this.showTransientNotice("上下文正在压缩；完成前不能选择新命令或 Skill。")
       return
     }
+    const item = this.snapshot.commandOptions[this.commandMenu.selectedIndex]
+    if (!item) return
+    if (item.kind === "skill") {
+      await this.selectCommandMenuItem(item)
+      return
+    }
+    this.fillCommandMenuDraft(`/${item.command.name}`)
+  }
+
+  /** 将命令名写回输入框并关闭菜单，光标落到末尾方便继续补参数。 */
+  private fillCommandMenuDraft(value: string): void {
+    this.commandMenuDismissedValue = value
+    this.draft = value
+    this.draftCursor = "end"
+    this.commandMenu = emptyCommandMenu()
+    this.publish()
+  }
+
+  /** Enter 在高亮项与当前草稿是同一条命令时执行；否则先补全高亮项。 */
+  private async selectCommandMenu(): Promise<void> {
+    if (this.controller.getSnapshot().activity.kind === "compacting") {
+      this.commandMenu = emptyCommandMenu()
+      this.showTransientNotice("上下文正在压缩；完成前不能选择新命令或 Skill。")
+      return
+    }
+    const item = this.snapshot.commandOptions[this.commandMenu.selectedIndex]
+    if (!item) return
     const directCommand = parseSlashCommand(this.draft)
-    if (directCommand && !directCommand.argument) {
+    if (
+      item.kind === "command"
+      && directCommand
+      && !directCommand.argument
+      && directCommand.id === item.command.id
+    ) {
       this.clearDraft()
       await this.executeCommand(directCommand.id, directCommand.argument)
       return
     }
-    const item = this.snapshot.commandOptions[this.commandMenu.selectedIndex]
-    if (item) await this.selectCommandMenuItem(item)
+    await this.selectCommandMenuItem(item)
   }
 
   /** 处理鼠标或键盘选中的命令/Skill。 */
   private async selectCommandMenuItem(item: CommandMenuItem): Promise<void> {
     if (this.controller.getSnapshot().activity.kind === "compacting") {
-      this.commandMenu = { visible: false, selectedIndex: 0 }
+      this.commandMenu = emptyCommandMenu()
       this.showTransientNotice("上下文正在压缩；完成前不能选择新命令或 Skill。")
       return
     }
@@ -1530,10 +1578,7 @@ class TuiAdapterImpl implements TuiAdapter {
       await this.dispatchInteractive({ type: "command.execute", commandId: item.command.id })
       return
     }
-    const value = `/${item.command.name}`
-    this.commandMenuDismissedValue = value
-    this.commandMenu = { visible: false, selectedIndex: 0 }
-    this.publish()
+    this.fillCommandMenuDraft(`/${item.command.name}`)
   }
 
   /** 在可见提及选项中移动选中索引。 */

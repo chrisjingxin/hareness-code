@@ -13,7 +13,7 @@ import {
   workspaceLabel,
 } from "../../interactive/runtime"
 import { activityLabel, gitWorkspaceLabel, modelSelectionLabel } from "../../presentation-shared"
-import { mentionRowsForTerminal } from "../../presentation-shared/mention-window-policy"
+import { ensureMentionWindow, mentionRowsForTerminal } from "../../presentation-shared/mention-window-policy"
 import { modeAccent, tuiTheme } from "./theme"
 import { MentionMenu } from "./mention-menu"
 import type { SharedViewProps } from "./types"
@@ -65,6 +65,8 @@ export function InputBar(props: Pick<SharedViewProps, "interactive" | "terminalW
     <CommandMenu
       options={options}
       selectedIndex={Math.min(props.commandMenu.selectedIndex, Math.max(0, options.length - 1))}
+      windowStart={props.commandMenu.windowStart}
+      visibleRows={mentionRowsForTerminal(props.terminalHeight)}
       onSelect={props.onSelectCommand}
       onHover={props.onHoverCommand}
       placement={props.commandMenuPlacement}
@@ -174,15 +176,24 @@ export function InputBar(props: Pick<SharedViewProps, "interactive" | "terminalW
   )
 }
 
-/** 渲染可筛选的 Slash 命令候选列表，并共享键盘与鼠标选择回调。 */
-function CommandMenu(props: {
+/** 渲染可筛选的 Slash 命令候选列表；候选项很多时只展示当前窗口。 */
+export function CommandMenu(props: {
   options: readonly CommandMenuItem[]
   selectedIndex: number
+  windowStart: number
+  visibleRows: number
   onSelect: (command: CommandMenuItem) => void
   onHover: (index: number) => void
   placement: "above" | "inline-below"
   accent: string
 }) {
+  const window = ensureMentionWindow(
+    props.selectedIndex,
+    props.windowStart,
+    props.options.length,
+    props.visibleRows,
+  )
+  const visibleOptions = props.options.slice(window.start, window.end)
   return (
     <box
       marginTop={props.placement === "inline-below" ? 1 : 0}
@@ -192,7 +203,8 @@ function CommandMenu(props: {
       customBorderChars={PROMPT_BORDER}
     >
       <box backgroundColor={tuiTheme.menu} paddingTop={1} paddingBottom={1}>
-        {props.options.length ? props.options.map((item, index) => {
+        {visibleOptions.length ? visibleOptions.map((item, localIndex) => {
+          const index = window.start + localIndex
           const selected = index === props.selectedIndex
           const disabled = item.kind === "command" && item.availability.state === "disabled"
           return (
@@ -215,6 +227,13 @@ function CommandMenu(props: {
             <text fg={tuiTheme.muted}>没有匹配的命令</text>
           </box>
         )}
+        {props.options.length ? (
+          <box paddingLeft={2} paddingRight={2} paddingTop={1}>
+            <text fg={tuiTheme.muted} wrapMode="none" overflow="hidden">
+              {Math.min(props.selectedIndex + 1, props.options.length)}/{props.options.length}
+            </text>
+          </box>
+        ) : null}
       </box>
     </box>
   )

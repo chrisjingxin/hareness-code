@@ -291,13 +291,21 @@ export function Za38Tui(options: RenderedTuiOptions) {
 
     const isHome = isHomeState(interactive)
     const sidebarVisibility = computeSidebarVisibility(snapshot.sidebar, terminal.width, isHome)
+    // 浮层打开时文件树导航键让位，避免抢走命令补全和选择器。
+    const overlayCapturesKeys = snapshot.commandMenu.visible
+      || snapshot.mentionMenu.visible
+      || Boolean(snapshot.commandDialog)
+      || Boolean(snapshot.modelBindingDialog)
+      || snapshot.skills.visible
+      || snapshot.threads.visible
+      || snapshot.models.visible
+      || snapshot.agents.visible
+      || snapshot.undo.visible
+      || Boolean(snapshot.undoDialog)
+      || snapshot.btw.visible
+      || snapshot.statusModal.visible
 
-    if (sidebarVisibility.visible) {
-      if (key.name === "escape" || key.name === "tab") {
-        key.preventDefault()
-        void adapter.dispatch({ type: "sidebar-toggle", target: "hide" })
-        return
-      }
+    if (sidebarVisibility.visible && !overlayCapturesKeys) {
       if (key.sequence === "[" || key.sequence === "1") {
         key.preventDefault()
         void adapter.dispatch({ type: "sidebar-tab-switch", tab: "files" })

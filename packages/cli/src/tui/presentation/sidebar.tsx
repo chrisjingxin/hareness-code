@@ -215,7 +215,7 @@ export function CodePreviewPane(props: CodePreviewPaneProps) {
           {showFullMeta ? (
             <text fg={tuiTheme.subtle}>↑/↓ 切换 · ←/→ 折叠</text>
           ) : null}
-          <text fg={tuiTheme.muted}>@ 引用 · Esc 关闭侧栏</text>
+          <text fg={tuiTheme.muted}>@ 引用</text>
         </box>
       ) : null}
     </box>

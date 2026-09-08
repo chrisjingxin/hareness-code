@@ -63,6 +63,7 @@ export type ShortcutAction =
   | "command-previous"
   | "command-next"
   | "command-select"
+  | "command-complete"
   | "command-block"
   | "close-mention-menu"
   | "mention-previous"
@@ -99,7 +100,6 @@ export type ShortcutAction =
   | "exit"
   | "clear-selected-skill"
   | "toggle-tool-details"
-  | "toggle-sidebar"
   | "cycle-approval-mode"
   | "cycle-work-mode"
   | "scroll-line-up"
@@ -196,7 +196,10 @@ export function resolveShortcut(key: KeyLike, context: ShortcutContext): Shortcu
     if (key.name === "escape") return "close-command-menu"
     if (key.name === "up" || (key.ctrl && key.name === "p")) return "command-previous"
     if (key.name === "down" || (key.ctrl && key.name === "n")) return "command-next"
-    if (key.name === "return" || key.name === "kpenter" || key.name === "tab") {
+    if (key.name === "tab") {
+      return context.commandOptionCount > 0 ? "command-complete" : "command-block"
+    }
+    if (key.name === "return" || key.name === "kpenter") {
       return context.commandOptionCount > 0 ? "command-select" : "command-block"
     }
   }
@@ -219,9 +222,6 @@ export function resolveShortcut(key: KeyLike, context: ShortcutContext): Shortcu
     const scrollAction = resolveScrollShortcut(key)
     if (scrollAction !== "none") return scrollAction
   }
-
-  // Ctrl+B 或 F2 切换侧边栏开/关或呼出抽屉
-  if ((key.ctrl && key.name === "b") || key.name === "f2") return "toggle-sidebar"
 
   if (key.ctrl && key.name === "p") return "command-open"
   // 方向键必须留给 textarea：它需要依据真实光标边界决定回填历史还是滚动 thread。

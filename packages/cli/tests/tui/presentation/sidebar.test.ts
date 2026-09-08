@@ -76,9 +76,9 @@ function ResponsiveOverlayFixture() {
   }))
 }
 
-test("Ctrl+B 和 F2 解析为 toggle-sidebar 动作", () => {
-  expect(resolveShortcut({ name: "b", ctrl: true }, idle)).toBe("toggle-sidebar")
-  expect(resolveShortcut({ name: "f2", ctrl: false }, idle)).toBe("toggle-sidebar")
+test("Ctrl+B 和 F2 不再开关侧栏", () => {
+  expect(resolveShortcut({ name: "b", ctrl: true }, idle)).toBe("none")
+  expect(resolveShortcut({ name: "f2", ctrl: false }, idle)).toBe("none")
 })
 
 test("computeSidebarLayout: 宽屏停靠、中屏覆盖、窄屏全宽", () => {

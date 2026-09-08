@@ -19,7 +19,8 @@ test("命令菜单优先消费导航、选择与关闭快捷键", () => {
   const menu = { ...idle, commandMenuVisible: true, commandOptionCount: 2, hasDraft: true }
   expect(resolveShortcut({ name: "down", ctrl: false }, menu)).toBe("command-next")
   expect(resolveShortcut({ name: "p", ctrl: true }, menu)).toBe("command-previous")
-  expect(resolveShortcut({ name: "tab", ctrl: false }, menu)).toBe("command-select")
+  expect(resolveShortcut({ name: "tab", ctrl: false }, menu)).toBe("command-complete")
+  expect(resolveShortcut({ name: "return", ctrl: false }, menu)).toBe("command-select")
   expect(resolveShortcut({ name: "escape", ctrl: false }, menu)).toBe("close-command-menu")
   expect(resolveShortcut({ name: "return", ctrl: false }, { ...menu, commandOptionCount: 0 })).toBe("command-block")
 })
@@ -118,7 +119,7 @@ test("Tab 空闲切换 Work Mode；Shift+Tab 仍只切 Approval", () => {
 
 test("浮层打开时 Tab 保留选择语义，不切换 Work Mode", () => {
   const menu = { ...idle, commandMenuVisible: true, commandOptionCount: 2, hasDraft: true }
-  expect(resolveShortcut({ name: "tab", ctrl: false }, menu)).toBe("command-select")
+  expect(resolveShortcut({ name: "tab", ctrl: false }, menu)).toBe("command-complete")
   const picker = { ...idle, skillPickerVisible: true, skillOptionCount: 2, commandMenuVisible: true }
   expect(resolveShortcut({ name: "tab", ctrl: false }, picker)).toBe("skill-select")
 })
